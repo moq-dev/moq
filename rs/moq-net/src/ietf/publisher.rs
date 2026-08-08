@@ -194,9 +194,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	/// Pick what to advertise to this peer for one broadcast.
 	///
-	/// A same-path source can splice in or detach without an origin-level (un)announce,
-	/// and demand can re-price the serving route in place, so the announce loops watch
-	/// every announced broadcast (see [`Watched`]) and re-run this when either moves.
+	/// A route can change and demand can re-price it in place, so the announce
+	/// loops watch every announced broadcast (see [`Watched`]) and re-run this
+	/// when either moves.
 	fn select(&self, watch: &Watched, peer: &cluster::Peer) -> Advert {
 		let routes = watch.broadcast.routes();
 		let exclude = self.exclude(peer);
@@ -1281,10 +1281,8 @@ mod tests {
 		assert_eq!(Publisher::<SinkSession>::linger_deadline(&watched), None);
 	}
 
-	/// A same-path source can splice into (or detach from) an existing broadcast
-	/// without an origin-level (un)announce, silently flipping `advertisable`.
-	/// Namespace forwarding must follow: advertise when a clean route appears,
-	/// withdraw when the last one detaches.
+	/// Namespace forwarding follows source replacement: advertise when a clean
+	/// route appears and withdraw when the last one detaches.
 	#[tokio::test]
 	async fn namespace_follows_route_eligibility_changes() {
 		let assigned = crate::Origin::new(777).unwrap();
@@ -1328,8 +1326,7 @@ mod tests {
 		assert!(futures::poll!(run.as_mut()).is_pending());
 		assert_eq!(occurrences(&log, b"route-flip-cam"), 0);
 
-		// A clean source splices in: no origin announce fires, only the route table
-		// changes. The namespace must now be advertised.
+		// A clean source replaces the filtered selection and must now be advertised.
 		let mut clean_hops = crate::OriginList::new();
 		clean_hops.push(clean_publisher).unwrap();
 		let clean = origin

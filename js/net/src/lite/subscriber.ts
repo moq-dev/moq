@@ -206,11 +206,9 @@ export class Subscriber {
 			let nextAnnounceId = 0n;
 			const announcedById = new Map<bigint, Path.Valid>();
 
-			// The publisher behind each path we currently advertise, so a restart can tell a
-			// route change (same publisher, subscriptions resume) from a replacement (a new
-			// generation took the path, nothing carries over). At most one advertisement per
-			// path is current, and every announce on this stream shares `prefix`, so the
-			// suffix is the key.
+			// The publisher behind each path we currently advertise, so a restart can tell an
+			// in-place route update from a replacement. At most one advertisement per path is
+			// current, and every announce on this stream shares `prefix`, so the suffix is the key.
 			const advertised = new Map<Path.Valid, Origin | undefined>();
 
 			// Receive announce updates (for Draft03, this includes initial state)
@@ -294,8 +292,8 @@ export class Subscriber {
 					// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.
 					if (advertised.has(suffix)) {
 						if (advertised.get(suffix) === publisher) {
-							// Same publisher, new route. In-flight subscriptions resume across it,
-							// so there is nothing for a consumer to react to.
+							// An in-place update of the selected source does not replace it, so there is
+							// nothing for a consumer to react to.
 							console.debug(`announced: broadcast=${path} rerouted`);
 							continue;
 						}
@@ -305,9 +303,8 @@ export class Subscriber {
 						retract();
 					}
 
-					// After `retract()`, which clears the entry: the path is advertised again, by
-					// whoever just took it over. Recording it before would leave nothing behind, so
-					// the *next* takeover would read as a first announcement and skip its own end.
+					// After `retract()`, which clears the entry, record the new advertisement so
+					// the next replacement emits its own end before start.
 					advertised.set(suffix, publisher);
 				} else {
 					retract();

@@ -1,4 +1,4 @@
-use crate::{SessionError, announce, frame, group, origin, track};
+use crate::{SessionError, frame, group, origin, track};
 use std::{sync::Arc, task::Poll, time::Duration};
 
 use bytes::Buf;
@@ -285,12 +285,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.origin
 			.scope(&[prefix.as_path()])
 			.unwrap_or_else(|| self.origin.empty());
-		let mut announced = origin.announced();
-
 		if let Err(err) = Self::run_announce(
 			&mut stream,
 			&origin,
-			&mut announced,
 			&prefix,
 			self.self_origin,
 			exclude_hop,
@@ -317,7 +314,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	async fn run_announce(
 		stream: &mut Stream<S, Version>,
 		origin: &origin::Consumer,
-		announced: &mut announce::Consumer,
 		prefix: impl AsPath,
 		self_origin: Origin,
 		// Peer's session-level origin id, sent in ANNOUNCE_REQUEST on lite-04/05.
@@ -329,6 +325,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		version: Version,
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
+		let origin = match Origin::new(exclude_hop) {
+			Ok(exclude) => origin.clone().excluding(exclude),
+			Err(_) => origin.clone(),
+		};
+		let mut announced = origin.announced();
 
 		// Lite06+: announce ids. Every `active` we send implicitly assigns the next
 		// per-stream ordinal, and `ended` references the id instead of repeating the
@@ -1298,6 +1299,8 @@ mod announce_test {
 		origin: origin::Producer,
 		/// The publishing side: route changes go in here.
 		source: crate::broadcast::Producer,
+		/// Published tracks kept alive for demand-only announce tests.
+		tracks: Vec<track::Producer>,
 		/// A downstream viewer: its `track()` handles are the broadcast's demand.
 		downstream: crate::broadcast::Consumer,
 		wire: Wire,
@@ -1317,7 +1320,7 @@ mod announce_test {
 		/// viewer attached so it advertises warm. Returns the producer (kept
 		/// alive by the caller) and the viewer handle whose drop drains demand.
 		async fn announce(&mut self, name: &str) -> (crate::broadcast::Producer, track::Consumer) {
-			let source = self
+			let mut source = self
 				.origin
 				.create_broadcast(
 					name,
@@ -1327,6 +1330,8 @@ mod announce_test {
 						.with_announce(true),
 				)
 				.unwrap();
+			let published = source.create_track("video", None).unwrap();
+			self.tracks.push(published);
 			let downstream = self.origin.consume().announced_broadcast(name).await.unwrap();
 			let track = downstream.track("video").unwrap();
 			settle().await;
@@ -1358,7 +1363,7 @@ mod announce_test {
 	/// announce goes out warm, at cost zero).
 	async fn harness(demand: bool) -> (Harness, Option<track::Consumer>) {
 		let origin = Origin::new(1).unwrap().produce();
-		let source = origin
+		let mut source = origin
 			.create_broadcast(
 				"cam",
 				crate::broadcast::Route::new()
@@ -1367,6 +1372,7 @@ mod announce_test {
 					.with_announce(true),
 			)
 			.unwrap();
+		let published = source.create_track("video", None).unwrap();
 		let downstream = origin.consume().announced_broadcast("cam").await.unwrap();
 		let track = demand.then(|| downstream.track("video").unwrap());
 
@@ -1378,10 +1384,8 @@ mod announce_test {
 			reader: Reader::new(PendingRecv, VERSION),
 		};
 		let task = tokio::spawn(async move {
-			let mut announced = consumer.announced();
 			let self_origin = *consumer;
-			Publisher::<SinkSession>::run_announce(&mut stream, &consumer, &mut announced, "", self_origin, 0, VERSION)
-				.await
+			Publisher::<SinkSession>::run_announce(&mut stream, &consumer, "", self_origin, 0, VERSION).await
 		});
 		settle().await;
 
@@ -1397,6 +1401,7 @@ mod announce_test {
 			Harness {
 				origin,
 				source,
+				tracks: vec![published],
 				downstream,
 				wire,
 				task,
@@ -1578,18 +1583,8 @@ mod announce_test {
 			reader: Reader::new(PendingRecv, VERSION),
 		};
 		let task = tokio::spawn(async move {
-			let mut announced = consumer.announced();
 			let self_origin = *consumer;
-			Publisher::<SinkSession>::run_announce(
-				&mut stream,
-				&consumer,
-				&mut announced,
-				"",
-				self_origin,
-				exclude_hop,
-				VERSION,
-			)
-			.await
+			Publisher::<SinkSession>::run_announce(&mut stream, &consumer, "", self_origin, exclude_hop, VERSION).await
 		});
 		(Wire { writes, cursor: 0 }, task)
 	}
@@ -1606,7 +1601,7 @@ mod announce_test {
 		// Active: free, but its chain flows through the peer. Standby: the same
 		// publisher reached directly, at its cold cost.
 		let tainted = OriginList::try_from(vec![Origin::new(9).unwrap(), peer]).unwrap();
-		let _a = origin
+		let mut source_a = origin
 			.create_broadcast(
 				"cam",
 				crate::broadcast::Route::new()
@@ -1614,6 +1609,7 @@ mod announce_test {
 					.with_announce(true),
 			)
 			.unwrap();
+		let _published = source_a.create_track("video", None).unwrap();
 		settle().await;
 		let _b = origin
 			.create_broadcast(
@@ -2690,11 +2686,9 @@ mod tests {
 		let mut stream = Stream::open(&session, Version::Lite01).await.unwrap();
 
 		let consumer = origin.consume();
-		let mut announced = consumer.announced();
 		let mut run = std::pin::pin!(Publisher::<SinkSession>::run_announce(
 			&mut stream,
 			&consumer,
-			&mut announced,
 			crate::Path::new(""),
 			self_origin,
 			assigned.id(),

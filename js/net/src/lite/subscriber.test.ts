@@ -74,7 +74,7 @@ const PUBLISHER_B = OriginSchema.parse(8n);
 const PUBLISHER_C = OriginSchema.parse(9n);
 const PEER = OriginSchema.parse(2n);
 
-test("a restart from the same publisher is a route change, not a republish", async () => {
+test("a restart from the same publisher is an in-place route update", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
 	const announced = subscriber.announced(Path.empty());
 	await settle();
@@ -89,12 +89,12 @@ test("a restart from the same publisher is a route change, not a republish", asy
 	);
 	expect(await announced.next()).toEqual({ path: Path.from("room"), active: true });
 
-	// Same publisher over a new route. In-flight subscriptions resume across it, so the
-	// subscriber must not surface anything that would make a consumer re-subscribe.
+	// Same publisher on ANNOUNCE_UPDATE means the selected source itself changed route
+	// metadata, so the subscriber must not surface a replacement.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_A] }, Version.DRAFT_06));
 
 	// A different publisher took the path: nothing carries over, so this one does surface,
-	// as an end before the start. Reaching it proves the reroute above emitted nothing.
+	// as an end before the start. Reaching it proves the update above emitted nothing.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_B] }, Version.DRAFT_06));
 	expect(await announced.next()).toEqual({ path: Path.from("room"), active: false });
 	expect(await announced.next()).toEqual({ path: Path.from("room"), active: true });
@@ -105,7 +105,7 @@ test("a restart from the same publisher is a route change, not a republish", asy
 	expect(await announced.next()).toEqual({ path: Path.from("room"), active: false });
 	expect(await announced.next()).toEqual({ path: Path.from("room"), active: true });
 
-	// And the new owner's own reroute is still transparent.
+	// And the new owner's own in-place route update is still transparent.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_C] }, Version.DRAFT_06));
 	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_06));
 	expect(await announced.next()).toEqual({ path: Path.from("room"), active: false });

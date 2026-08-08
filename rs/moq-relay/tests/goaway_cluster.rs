@@ -2,9 +2,9 @@
 //!
 //! Two "sibling" upstream servers share one origin (the same live broadcast is
 //! reachable through either). The relay's cluster dials sibling A; A sends a
-//! GOAWAY redirecting to sibling B; the cluster reconnects to B and the origin
-//! hands the live subscription over at a group boundary. A downstream consumer
-//! of the cluster origin observes contiguous groups and no unannounce.
+//! GOAWAY redirecting to sibling B; the cluster reconnects to B and exposes the
+//! selected-source change as an unannounce followed by an announce. Existing
+//! subscriptions remain on A, while new subscriptions use B.
 
 use std::net::TcpListener;
 use std::time::Duration;
@@ -76,8 +76,8 @@ fn cluster_migrates_on_upstream_goaway() {
 }
 
 #[test]
-fn cluster_diamond_goaway_seamless_failover() {
-	run_cluster_test(cluster_diamond_goaway_seamless_failover_inner());
+fn cluster_diamond_goaway_replaces_source() {
+	run_cluster_test(cluster_diamond_goaway_replaces_source_inner());
 }
 
 #[test]
@@ -358,13 +358,13 @@ async fn spawn_relay_with_upstream(
 ///   SUBSCRIBER
 /// ```
 ///
-/// Proves that with the route/resume machinery:
+/// Proves the selected-source replacement behavior:
 /// 1. Content flows TOP -> MID-A -> BOTTOM -> subscriber.
 /// 2. On MID-A's GOAWAY naming MID-B, BOTTOM reconnects there (positively
 ///    gated: MID-B's first inbound connection can only be that reconnect).
-/// 3. The subscriber sees contiguous, duplicate-free groups across the swap.
+/// 3. The subscriber sees one unannounce/announce pair and can subscribe to MID-B.
 /// 4. No GOAWAY leaks to the subscriber's own session.
-async fn cluster_diamond_goaway_seamless_failover_inner() {
+async fn cluster_diamond_goaway_replaces_source_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	// ── TOP: origin server serving the same broadcast to both mids ──────
@@ -433,20 +433,13 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	.await
 	.expect("subscriber connect");
 
-	// Watch announcements for the whole test: a seamless failover must never
-	// unannounce the broadcast under the subscriber.
+	// Watch announcements for the whole test so the route replacement is observable.
 	let mut announcements = sub_origin.consume().announced();
 	let first = within("broadcast announced through the MID-A leg", announcements.next())
 		.await
 		.expect("origin closed before the announce");
 	assert_eq!(first.path.as_str(), "diamond");
-
-	let bc = within(
-		"broadcast resolves on the subscriber origin",
-		sub_origin.consume().announced_broadcast("diamond"),
-	)
-	.await
-	.expect("broadcast announced");
+	let bc = first.broadcast.expect("initial broadcast");
 	let mut sub = within(
 		"subscribe to the video track",
 		bc.track("video").expect("track handle").subscribe(None),
@@ -466,25 +459,6 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	verify_group(&mut sub, 0, FRAMES_PER_GROUP, "pre-failover (via MID-A)").await;
 
-	// ── continuous publishing THROUGH the failover window ────────────────
-	// Groups 1..=LAST_GROUP stream at a steady cadence, with multiple frames
-	// per group, while the GOAWAY, reconnect, and handover happen mid-stream.
-	const LAST_GROUP: u64 = 20;
-	let publisher = tokio::spawn(async move {
-		for seq in 1..=LAST_GROUP {
-			let mut g = track.append_group().expect("append group");
-			for f in 0..FRAMES_PER_GROUP {
-				let payload = format!("diamond_g{seq}_f{f}");
-				g.write_frame(moq_net::Timestamp::ZERO, payload.as_bytes())
-					.expect("write frame");
-			}
-			g.finish().expect("finish");
-			tokio::time::sleep(Duration::from_millis(50)).await;
-		}
-		// Hand the track back so the post-drain phase can keep publishing.
-		track
-	});
-
 	// ── TRIGGER: MID-A drains BOTTOM with a redirect to MID-B ───────────
 	session_bottom_on_a
 		.drain()
@@ -499,25 +473,38 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		.await
 		.expect("MID-B accept notify dropped");
 
-	// ── completeness across the swap: every group exactly once, in order,
-	// every frame intact, exact frame count (no loss, no duplicates) ──────
-	for seq in 1..=LAST_GROUP {
-		verify_group(&mut sub, seq, FRAMES_PER_GROUP, "across the failover window").await;
-	}
-
-	let mut track = within("publisher task finishes", publisher)
+	// A newly preferred source is a visible replacement even though it has the same
+	// publisher identity. Existing subscriptions stay on MID-A; this new one uses MID-B.
+	let ended = within("MID-A route unannounced", announcements.next())
 		.await
-		.expect("publisher task");
+		.expect("origin closed before unannounce");
+	assert_eq!(ended.path.as_str(), "diamond");
+	assert!(ended.broadcast.is_none(), "expected replacement unannounce");
+	let started = within("MID-B route announced", announcements.next())
+		.await
+		.expect("origin closed before replacement announce");
+	assert_eq!(started.path.as_str(), "diamond");
+	let replacement = started.broadcast.expect("expected replacement announce");
+	let mut replacement_sub = within(
+		"subscribe to MID-B from group 1",
+		replacement
+			.track("video")
+			.expect("replacement track handle")
+			.subscribe(moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(1))),
+	)
+	.await
+	.expect("replacement subscribe");
 
 	// ── the old MID-A leg drains away, then is severed entirely ─────────
 	within("old session drains after the swap", session_bottom_on_a.closed()).await;
+	drop(sub);
 	// Cut MID-A off from TOP so it can never receive (let alone forward) new
 	// groups. Anything delivered from here on MUST have flowed TOP -> MID-B ->
 	// BOTTOM, positively proving the new leg carries the subscription.
 	drop(mid_a_upstream);
 
-	const POST_DRAIN_LAST: u64 = LAST_GROUP + 3;
-	for seq in (LAST_GROUP + 1)..=POST_DRAIN_LAST {
+	const POST_DRAIN_LAST: u64 = 4;
+	for seq in 1..=POST_DRAIN_LAST {
 		let mut g = track.append_group().expect("append group");
 		for f in 0..FRAMES_PER_GROUP {
 			let payload = format!("diamond_g{seq}_f{f}");
@@ -526,8 +513,14 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		}
 		g.finish().expect("finish");
 	}
-	for seq in (LAST_GROUP + 1)..=POST_DRAIN_LAST {
-		verify_group(&mut sub, seq, FRAMES_PER_GROUP, "post-drain (MID-B leg only)").await;
+	for seq in 1..=POST_DRAIN_LAST {
+		verify_group(
+			&mut replacement_sub,
+			seq,
+			FRAMES_PER_GROUP,
+			"post-drain (MID-B leg only)",
+		)
+		.await;
 	}
 
 	// ── no GOAWAY cascade to the downstream subscriber ───────────────────
@@ -547,9 +540,9 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		"downstream subscriber received a GOAWAY (the relay should absorb it): {leaked:?}"
 	);
 
-	// ── announcement stability: the path never churned under the swap ────
+	// ── exactly one replacement: no further announcement churn ───────────
 	let churn = tokio::time::timeout(Duration::from_millis(500), announcements.next()).await;
-	assert!(churn.is_err(), "failover must not churn announces under the subscriber");
+	assert!(churn.is_err(), "replacement emitted extra announcement churn");
 }
 
 /// Receive the next group and assert its sequence, every frame's payload, and
@@ -585,8 +578,7 @@ async fn verify_group(sub: &mut moq_net::track::Subscriber, expected_seq: u64, f
 }
 
 /// An empty-URI GOAWAY ("reconnect to me") makes the cluster redial the same
-/// endpoint. The upstream keeps its origin across the restart, so the rejoined
-/// route resumes delivery.
+/// endpoint. The rejoined route is announced as a replacement source.
 async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -616,12 +608,11 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 		.expect("accept channel closed");
 
 	// Downstream consumer sees group 0 through the first session.
-	let bc = within(
-		"broadcast announced",
-		cluster.origin.consume().announced_broadcast("cam"),
-	)
-	.await
-	.expect("broadcast announced");
+	let mut announcements = cluster.origin.consume().announced();
+	let initial = within("broadcast announced", announcements.next())
+		.await
+		.expect("origin closed before announce");
+	let bc = initial.broadcast.expect("broadcast announced");
 	let mut sub = within("subscribe", async {
 		bc.track("video").expect("track handle").subscribe(None).await
 	})
@@ -654,19 +645,36 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 		.await
 		.expect("accept channel closed");
 
+	let ended = within("old route unannounced", announcements.next())
+		.await
+		.expect("origin closed before unannounce");
+	assert!(ended.broadcast.is_none(), "expected replacement unannounce");
+	let started = within("redialed route announced", announcements.next())
+		.await
+		.expect("origin closed before replacement announce");
+	let replacement = started.broadcast.expect("expected replacement announce");
+	let mut replacement_sub = within(
+		"subscribe to the replacement",
+		replacement
+			.track("video")
+			.expect("replacement track")
+			.subscribe(moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(1))),
+	)
+	.await
+	.expect("replacement subscribe");
+
 	within("old session drains", first_dial.closed()).await;
 
-	// Delivery continues on the redialed session (same origin, same publisher
-	// identity, so the rejoined route resumes at the boundary).
+	// A new subscription receives delivery from the redialed session.
 	let mut g = track.append_group().expect("append group");
 	g.write_frame(moq_net::Timestamp::ZERO, b"empty_g1".as_ref())
 		.expect("write frame");
 	g.finish().expect("finish");
-	let mut g1 = within("recv g1 after the redial", sub.recv_group())
+	let mut g1 = within("recv g1 after the redial", replacement_sub.recv_group())
 		.await
 		.expect("recv")
 		.expect("track ended early");
-	assert_eq!(g1.sequence, 1, "delivery must resume contiguously after the redial");
+	assert_eq!(g1.sequence, 1, "replacement subscription must start at group 1");
 	assert_eq!(
 		g1.read_frame().await.expect("read").expect("frame").payload[..],
 		b"empty_g1"[..]

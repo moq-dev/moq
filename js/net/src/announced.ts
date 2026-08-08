@@ -158,10 +158,9 @@ export interface BroadcastProps {
  * Subscribing to a path nobody publishes gets the stream reset, so a consumer that races the
  * publisher stays silent forever unless it retries; this waits for the announcement instead.
  *
- * A same-name republish re-consumes, so the handle attaches to the new instance rather than
- * clinging to the dead one. A relay failover that keeps the same publisher does *not*: the
- * subscription resumes across the new route, so `active` holds the same consumer throughout and
- * never goes offline. Only a change of publisher produces an offline/online transition.
+ * A same-name republish or route replacement re-consumes, so the handle attaches to the newly
+ * selected source rather than clinging to the old one. `active` briefly becomes `undefined`
+ * between the unannounce and announce, including when both routes have the same publisher.
  *
  * Built from a reconnecting `Connection.Reload`, the handle also spans reconnects: the broadcast
  * drops to `undefined` while disconnected and resolves again once the new connection announces it.

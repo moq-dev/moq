@@ -105,13 +105,12 @@ impl Client {
 	/// extension, and moq-transport peers that don't negotiate the MoQ Cluster
 	/// extension (or predate it, on `moqt-16` and earlier).
 	/// Broadcasts received from such a peer are normally attributed to the reserved
-	/// origin 0 ("unknown"), which identifies nothing: it never proves continuity,
-	/// so their advertisements neither splice nor survive a restart in place. This
-	/// knob pins a real identity instead, exactly as if the peer had declared it:
+	/// origin 0 ("unknown"), which cannot identify the peer for loop prevention.
+	/// This knob pins a real identity instead, exactly as if the peer had declared it:
 	///
 	/// - broadcasts received from the peer carry `origin` in their hop chains, so
-	///   every session dialing the same relay (with the same id) resolves to one
-	///   route and loop checks can recognize it;
+	///   every session dialing the same relay (with the same id) produces a
+	///   recognizable route and loop checks can recognize it;
 	/// - broadcasts whose hop chain already contains `origin` are neither announced
 	///   nor served back to the peer, preventing an echo through a relay that does
 	///   no loop detection of its own.

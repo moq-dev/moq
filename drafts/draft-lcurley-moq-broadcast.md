@@ -85,7 +85,7 @@ EPOCH Parameter {
 
 **Epoch**:
 The generation of content at this namespace, chosen by the original publisher and forwarded unchanged by relays.
-Each new generation MUST use a non-zero Epoch greater than every Epoch still observable at the namespace (the incumbent advertisement and any generation the publisher retains), and MUST NOT equal another publisher's Epoch except by deliberate agreement: equal Epochs declare interchangeable content.
+Each new generation MUST use a non-zero Epoch greater than every Epoch still observable at the namespace (the incumbent advertisement and any generation the publisher retains), and MUST NOT equal another publisher's Epoch except by deliberate agreement: equal Epochs declare the same content generation, but do not authorize subscription migration.
 RECOMMENDED construction: wall-clock milliseconds shifted left 16 bits with the low 16 bits random, clamped to at least one more than the highest observable Epoch; the timestamp preserves ordering across restarts without persisted state, the random bits make accidental collisions improbable, and the clamp covers same-millisecond generations, clock rollback, and skew.
 A violation is not fatal: receivers keep no high-water mark, so an erroneously high Epoch suppresses newer generations only while its advertisement remains available.
 A value of 0 is equivalent to omitting the parameter.
@@ -94,15 +94,15 @@ A value of 0 is equivalent to omitting the parameter.
 A receiver holding advertisements for the same namespace MUST prefer the highest Epoch (a specified Epoch outranks an unspecified one): a lower Epoch is a stale generation, never an alternate path, regardless of arrival order or path length.
 A relay SHOULD end its advertisement of a lower generation once it holds a higher one, rather than wait for it to end on its own, which would hold the namespace for however long the transport takes to notice a publisher is gone.
 
-Advertisements with the same non-zero Epoch carry interchangeable content: a receiver MAY hold them as redundant paths and switch between them, including failing an active subscription over when the serving path ends.
-Cooperating redundant publishers opt in by minting the same Epoch, e.g. derived from the event rather than from each process.
+Advertisements with the same non-zero Epoch may be held as redundant route candidates, but a receiver MUST NOT move an existing subscription between their sources.
+When selection changes, including because a newly received route is shorter or tied, the receiver exposes a visible namespace replacement and uses the new source only for subsequent subscriptions.
 Any other pair is two generations: cached immutable track properties MUST be discarded on replacement, and existing subscriptions do not carry over.
 
 When combined with {{cluster}}, Epoch comparison happens first; its path-length tie-break and origin-identity rules apply only among advertisements with the same Epoch.
 
 ## Unspecified Epochs
 An advertisement without EPOCH carries no generation: the publisher predates this extension, or the parameter was stripped crossing a non-supporting session.
-Unspecified advertisements are never interchangeable with specified ones; among themselves, the identity rules otherwise in effect apply ({{cluster}} origin identity, or plain {{moqt}} semantics).
+Unspecified advertisements never share a generation with specified ones; among themselves, the identity rules otherwise in effect apply ({{cluster}} origin identity, or plain {{moqt}} semantics).
 
 ## Pinning Subscriptions, Fetches, and Publishes
 On a session that negotiated this extension, a subscriber MAY include EPOCH in SUBSCRIBE or FETCH; the request then targets exactly that generation, and the publisher MUST reject it rather than serve a different one.

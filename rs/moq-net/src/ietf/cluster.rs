@@ -170,12 +170,10 @@ impl Advert {
 	/// The addition saturates rather than wraps, so an absurd upstream value ranks last
 	/// instead of overflowing to best.
 	pub fn route(&self, link_cost: u64) -> crate::broadcast::Route {
-		let mut route = crate::broadcast::Route::new()
+		crate::broadcast::Route::new()
 			.with_hops(self.hops.hops().clone())
 			.with_cost(self.cost.saturating_add(link_cost))
-			.with_announce(true);
-		route.advertised = self.cost;
-		route
+			.with_announce(true)
 	}
 }
 

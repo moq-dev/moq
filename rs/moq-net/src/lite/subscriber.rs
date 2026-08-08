@@ -606,8 +606,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			.with_hops(hops)
 			.with_cost(cost.charged(link_cost).0)
 			.with_announce(true);
-		route.advertised = cost.0;
-
 		if self.going_away.is_set() {
 			route.cost = crate::broadcast::DRAIN_COST;
 		}
@@ -792,8 +790,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			// written, through the tagged `track::Producer`.
 			let mut group = entry.producer.create_group(group_info)?;
 			// The stream may carry only the tail of the group; number the frames from
-			// where the publisher said they start so a reader splicing across routes
-			// lines them up.
+			// where the publisher said they start.
 			group.start_at(hdr.frame_start)?;
 			(group, entry.producer.clone(), entry.timescale)
 		};
@@ -1042,7 +1039,7 @@ mod tests {
 		}
 	}
 
-	/// The `(group, frame)` bounds `resume::slice` produces after a mid-group takeover.
+	/// Representative frame-precise subscription bounds.
 	fn mid_group_demand() -> Subscription {
 		Subscription::default()
 			.with_start(Position { group: 5, frame: 3 })
@@ -1053,9 +1050,7 @@ mod tests {
 	/// the whole group rather than refused.
 	///
 	/// The codec rejects a frame bound such a peer cannot carry, so passing the demand
-	/// through unchanged fails the SUBSCRIBE and hands the track back. The origin then
-	/// re-splices the same route indefinitely, since the splice itself keeps succeeding
-	/// and the retry budget never trips.
+	/// through unchanged fails the SUBSCRIBE instead of serving the wider group.
 	#[tokio::test]
 	async fn frame_bounds_widen_for_an_older_peer() {
 		let mut h = Harness::new(Version::Lite05);
@@ -1438,7 +1433,7 @@ mod tests {
 	/// An UNKNOWN (0) first hop identifies nothing, so a restart advertising
 	/// UNKNOWN again may be a different publisher entirely: the old broadcast must
 	/// be replaced, not updated in place. Regression: plain `==` on the publisher
-	/// id treated 0 == 0 as content-continuous and spliced unrelated broadcasts.
+	/// id treated 0 == 0 as content-continuous and reused unrelated broadcasts.
 	#[tokio::test]
 	async fn unknown_publisher_restart_replaces() {
 		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
@@ -1671,9 +1666,8 @@ impl AnnouncedRoute {
 enum Teardown {
 	/// The upstream FIN'd: the track is over for good.
 	Finished,
-	/// The route or session failed: abort the track so the origin re-splices it
-	/// from another source.
-	GiveBack(Error),
+	/// The route or session failed: abort this source's track.
+	Failed(Error),
 	/// The origin released this copy: nobody is reading it, so drop it (and the
 	/// `TRACK_INFO` behind it) rather than holding the state for a reader that
 	/// may never come back.
@@ -1700,7 +1694,7 @@ enum Event {
 }
 
 /// Serves one requested track for a relay: owns this session's copy of the
-/// track (spliced into the origin's logical track), driving the single upstream
+/// track, driving the single upstream
 /// subscription (opened lazily on the first downstream subscriber, canceled when
 /// the last one leaves) concurrently with any number of one-shot fetches.
 #[derive(Clone)]
@@ -1731,8 +1725,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				}
 				Err(err) => {
 					tracing::warn!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, %err, "track info failed");
-					// Rejecting the request lets the origin retry (bounded) on another
-					// source; waiting subscribers stall rather than error meanwhile.
+					// Rejecting the request reports the source's error to its waiting subscribers.
 					request.reject(err);
 					return;
 				}
@@ -1744,10 +1737,8 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			(info, None)
 		};
 
-		// Accept with the resolved info. The origin splices this session's copy
-		// into the logical track; demand from the logical subscribers arrives
-		// through the producer's aggregate, sliced to this segment's bounds
-		// (including the resume floor after a source change).
+		// Accept with the resolved info. Downstream demand arrives through the
+		// producer's aggregate.
 		let mut serving = request.accept(info);
 
 		// Serve on-demand fetches of uncached groups from this session.
@@ -1834,9 +1825,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						.handle_subscription(&mut serving, &mut sub, pref, supports_update, timescale)
 						.await
 					{
-						// Opening or updating the upstream failed (usually the session
-						// dying): hand the track back for another route to resume.
-						break Teardown::GiveBack(err);
+						// Opening or updating the upstream failed, usually because the session
+						// is dying. This source-bound track cannot migrate to another route.
+						break Teardown::Failed(err);
 					}
 				}
 				Event::FetchDone => {}
@@ -1857,8 +1848,8 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					}
 					// SUBSCRIBE_START names the first group this feed serves: the publisher
 					// skipped everything below it (e.g. it could not serve the requested
-					// frame). Record it as a drop signal, so a spliced reader waiting on a
-					// skipped group fails over instead of stalling on a live route.
+					// frame). Record it as a drop signal so readers do not stall on a group
+					// this source skipped.
 					lite::SubscribeResponse::Start(start) => {
 						// A START describes the demand the SUBSCRIBE carried. It applies
 						// only while the current start still matches that demand (updates
@@ -1884,14 +1875,14 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				}
 				Event::SubClosed(Err(err)) => {
 					tracing::warn!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, %err, "subscribe error");
-					break Teardown::GiveBack(err);
+					break Teardown::Failed(err);
 				}
 				Event::Unused => {
 					tracing::debug!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "track released (idle)");
 					break Teardown::Released;
 				}
 				Event::SessionClosed => {
-					break Teardown::GiveBack(Error::Dropped);
+					break Teardown::Failed(Error::Dropped);
 				}
 			}
 		};
@@ -1902,20 +1893,17 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		}
 
 		match teardown {
-			// The upstream ended the track for good; the origin observes the
-			// completed copy and finishes the logical track.
+			// The upstream ended this source's track for good.
 			Teardown::Finished => {
 				let _ = serving.finish();
 			}
-			Teardown::GiveBack(err) => {
-				// Mark this copy dead: subscribers stall while the origin
-				// re-splices the track from the next source.
+			Teardown::Failed(err) => {
+				// Mark this source's track dead so its subscribers observe the failure.
 				let _ = serving.abort(err);
 			}
 			Teardown::Released => {
 				// A deliberate end with no reader to observe it, which also drops the
-				// cached groups. The origin re-requests the track from this session if
-				// one comes back.
+				// cached groups. A later subscriber can request the track again.
 				let _ = serving.abort(Error::Cancel);
 			}
 		}
@@ -1966,13 +1954,10 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 	/// The codec refuses to encode a frame bound an older peer cannot carry, since
 	/// widening at the message layer would hand the *caller* frames it excluded. Here we
 	/// are the caller, and we want the wider range: every group is positioned and capped
-	/// again on the read side ([`group::Consumer::start_at`] / `end_at`, driven by
-	/// [`crate::model::resume`]), so the extra frames are filtered locally and never
+	/// again on the read side ([`group::Consumer::start_at`] / `end_at`), so the extra frames are filtered locally and never
 	/// reach a subscriber. The only cost is transferring frames we already hold.
 	///
-	/// Passing the request through unchanged instead would fail the SUBSCRIBE, hand the
-	/// track back, and leave the origin re-splicing the same route indefinitely: the
-	/// splice itself keeps succeeding, so the retry budget never trips.
+	/// Passing the request through unchanged instead would fail the SUBSCRIBE.
 	fn widen_frame_bounds(&self, subscription: &mut Subscription) {
 		if self.subscriber.version.has_frame_bounds() {
 			return;
@@ -2074,10 +2059,8 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 
 	/// Open the upstream SUBSCRIBE and start routing groups into the producer.
 	///
-	/// The subscription's bounds come straight from the demand aggregate: when this
-	/// segment resumes a track after a route change, the origin's slice already
-	/// carries the boundary as `group_start`, so the upstream delivers exactly the
-	/// missing range.
+	/// The subscription's bounds come straight from the demand aggregate, so the
+	/// upstream delivers exactly the requested range.
 	async fn establish(
 		&self,
 		producer: &mut track::Producer,
