@@ -391,6 +391,14 @@ fn scale() -> moq_net::Timescale {
 	moq_net::Timescale::new(1_000_000).unwrap()
 }
 
+fn info(track_id: u32, timescale: moq_net::Timescale, sequence_number: u32) -> super::FragmentInfo {
+	super::FragmentInfo {
+		track_id,
+		timescale,
+		sequence_number,
+	}
+}
+
 fn sample(timestamp_us: u64, keyframe: bool, duration_us: Option<u64>) -> crate::container::Frame {
 	crate::container::Frame {
 		timestamp: moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
@@ -405,7 +413,7 @@ fn sample(timestamp_us: u64, keyframe: bool, duration_us: Option<u64>) -> crate:
 #[test]
 fn decode_rejects_durationless_multisample() {
 	let frames = vec![sample(0, true, None), sample(33_000, false, None)];
-	let frag = super::encode_fragment(1, scale(), 0, &frames).unwrap();
+	let frag = super::encode_fragment(info(1, scale(), 0), &frames).unwrap();
 	let err = super::decode(frag, scale()).unwrap_err();
 	assert!(matches!(err, super::Error::MissingSampleDuration), "got {err:?}");
 }
@@ -413,7 +421,7 @@ fn decode_rejects_durationless_multisample() {
 /// A single-sample fragment needs no duration (nothing follows it), so it still decodes.
 #[test]
 fn decode_single_sample_no_duration_ok() {
-	let frag = super::encode_fragment(1, scale(), 0, &[sample(0, true, None)]).unwrap();
+	let frag = super::encode_fragment(info(1, scale(), 0), &[sample(0, true, None)]).unwrap();
 	let out = super::decode(frag, scale()).unwrap();
 	assert_eq!(out.len(), 1);
 	assert_eq!(out[0].timestamp.as_micros(), 0);
@@ -424,7 +432,7 @@ fn decode_single_sample_no_duration_ok() {
 #[test]
 fn decode_multisample_with_durations_roundtrips() {
 	let frames = vec![sample(0, true, Some(33_000)), sample(33_000, false, Some(33_000))];
-	let frag = super::encode_fragment(1, scale(), 0, &frames).unwrap();
+	let frag = super::encode_fragment(info(1, scale(), 0), &frames).unwrap();
 	let out = super::decode(frag, scale()).unwrap();
 	assert_eq!(out.len(), 2);
 	assert_eq!(out[0].timestamp.as_micros(), 0);

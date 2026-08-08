@@ -6,8 +6,8 @@ description: Command-line tools for MoQ media
 # FFmpeg / moq-cli
 
 `moq-cli` is a media router: it wires one endpoint onto a shared MoQ Origin. It
-moves media into MoQ from a source, or out of MoQ to a sink, bridging stdin/stdout
-(via FFmpeg), HLS, RTMP, SRT, and WebRTC.
+moves media into MoQ from a source, out of MoQ to a sink, or plays a broadcast
+locally, bridging stdin/stdout (via FFmpeg), HLS, RTMP, SRT, and WebRTC.
 
 ## Installation
 
@@ -74,6 +74,7 @@ Each signal writes a numbered `/tmp/moq.heap.*.heap` profile for analysis with
 
 ```
 moq <MoQ side>  <import|export>  <endpoint> [endpoint options]
+moq <MoQ side>  play [playback options]
 ```
 
 - **MoQ side** attaches the Origin to the network, and comes before the verb. At
@@ -90,6 +91,7 @@ moq <MoQ side>  <import|export>  <endpoint> [endpoint options]
   run); see [Redundant Publishers](#redundant-publishers-11).
 - **`import`** routes media INTO MoQ (a source fills the Origin); **`export`**
   routes it OUT (a sink drains the Origin). The verb fixes the data direction.
+- **`play`** subscribes to a broadcast and plays its audio and video locally.
 - **endpoint** is one subcommand: a container format (`avc3`, `fmp4`, `ts`, `flv`
   read from stdin on import; `fmp4`, `mkv`, `ts`, `flv` written to stdout on
   export), or a gateway (`hls`, `rtmp`, `srt`, `rtc`). For the bidirectional
@@ -108,6 +110,69 @@ side and reject one if given.
 
 `moq <MoQ side> import <format>` reads a container from stdin;
 `moq <MoQ side> export <format>` writes one to stdout.
+
+### Play a Broadcast
+
+Native playback is gated behind the `play` feature, which adds the platform
+window, graphics, decoder, and speaker dependencies:
+
+```bash
+cargo install moq-cli --no-default-features --features "iroh,quinn,websocket,play"
+# or build from a checkout:
+cargo build --release -p moq-cli --no-default-features --features "iroh,quinn,websocket,play"
+# or run straight from that checkout:
+cargo run -p moq-cli --no-default-features --features "iroh,quinn,websocket,play" -- \
+    --client-connect https://relay.example.com/anon --broadcast my-stream.hang play
+```
+
+Drop the defaults on Linux, as above: the default `pipewire` feature links
+libpipewire-0.3 at build time to give `import capture` a display source that
+playback never uses.
+
+A Linux build still needs three system packages, whichever features are picked.
+The speaker goes through cpal, which links ALSA, and `play` pulls in moq-video,
+whose V4L2 camera capture is not behind a feature and whose bindgen wants
+libclang. On Debian and Ubuntu:
+
+```bash
+sudo apt install libasound2-dev libclang-dev libv4l-dev
+```
+
+macOS and Windows need nothing extra, so plain `--features play` is enough
+there.
+
+Once built, play a broadcast with:
+
+```bash
+moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang play
+```
+
+`play` starts each media role as soon as the catalog offers a rendition it can
+decode, independently of the other, and keeps following catalog updates until
+both have started. Audio-only and video-only broadcasts play fine; playback ends
+once every track it started has ended. It doesn't switch renditions afterwards,
+so a publisher that replaces the one being played ends that role.
+
+Within a role it takes the first rendition it can decode, in track-name order,
+which is arbitrary as a quality choice. Pass `--video-name` / `--audio-name` to
+pick a specific rung of a ladder. Audio drives the video clock when both are
+present. The window preserves the video's aspect ratio and can be closed with
+Escape, the close button, or Ctrl-C.
+
+Playback decodes h264, h265, and av1 video, and opus and pcm audio, so
+`--video-codec` / `--audio-codec` are rejected up front for anything else.
+`--latency-max` controls how far a stalled media group may lag before it is
+skipped and defaults to `500ms`. These flags all follow the `play` verb:
+
+```bash
+moq --client-connect https://relay.example.com/anon --broadcast conference.hang \
+    play --video-name hd --audio-name en --latency-max 250ms
+```
+
+Video decoding prefers the platform hardware backend and falls back to the
+built-in software H.264 decoder. Rendering picks the best graphics API the
+machine offers: Metal on macOS, and Vulkan ahead of D3D12 or OpenGL elsewhere.
+Audio uses the system default output device through CoreAudio, WASAPI, or ALSA.
 
 ### Publish a Video File
 
@@ -389,8 +454,9 @@ discovery. When omitted, it's auto-detected from the broadcast name suffix
 - `hangz` - the DEFLATE-compressed `catalog.json.z` catalog (opt-in; shares the `.hang` suffix and is never auto-detected)
 - `msf` - the MSF `catalog` track
 
-Stdout exports can also select one rendition per media role before the sink
-subcommand:
+Stdout exports can also select one rendition per media role. The flags go before
+the sink subcommand here; `play` takes the same four after its own verb (see
+[Play a Broadcast](#play-a-broadcast)):
 
 ```bash
 moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
@@ -400,7 +466,7 @@ moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
 - `--video-name <name>` picks the video rendition with that exact catalog name.
 - `--video-codec <h264|h265|vp8|vp9|av1>` keeps only matching video renditions.
 - `--audio-name <name>` picks the audio rendition with that exact catalog name.
-- `--audio-codec <aac|opus>` keeps only matching audio renditions.
+- `--audio-codec <aac|opus|pcm>` keeps only matching audio renditions.
 
 With no selection flags, every matching rendition is kept. The `h264` and `h265`
 export sinks force the matching video codec, so use `export h264` / `export h265`

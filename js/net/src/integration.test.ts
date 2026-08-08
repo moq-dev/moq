@@ -9,6 +9,7 @@ import { createMockTransportPair } from "./mock.ts";
 import * as Path from "./path.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Producer as TrackProducer } from "./track.ts";
+import { withTimeout } from "./util/timeout.ts";
 
 const url = new URL("https://localhost:4443/test");
 
@@ -95,6 +96,104 @@ test("integration: lite draft-05", async () => {
 	// Exercises AnnounceOk: the announce flow only completes if the subscriber
 	// reads the publisher's AnnounceOk before the initial Announce messages.
 	await runPublishSubscribeFlow(Lite.ALPN_05);
+});
+
+test("integration: lite subscription options and updates reach the publisher", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_05);
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	server.publish(Path.from("test"), broadcast);
+
+	let resolveProducer: ((producer: TrackProducer) => void) | undefined;
+	const accepted = new Promise<TrackProducer>((resolve) => {
+		resolveProducer = resolve;
+	});
+	const serving = (async () => {
+		for (;;) {
+			const request = await broadcast.requested();
+			if (!request) return;
+			const producer = request.accept();
+			if (request.subscription.startGroup === 0) resolveProducer?.(producer);
+		}
+	})();
+
+	const remote = client.consume(Path.from("test"));
+	const subscriber = remote.track("video").subscribe({
+		priority: 3,
+		ordered: true,
+		latencyMax: 250,
+		startGroup: 0,
+		endGroup: 9,
+	});
+	const producer = await accepted;
+	expect(producer.subscription.peek()).toEqual({
+		priority: 3,
+		ordered: true,
+		latencyMax: 250,
+		startGroup: 0,
+		endGroup: 9,
+	});
+
+	const updated = producer.subscription.changed();
+	subscriber.update({ priority: 8, ordered: false, latencyMax: 500, startGroup: 2, endGroup: 12 });
+	expect(await updated).toEqual({
+		priority: 8,
+		ordered: false,
+		latencyMax: 500,
+		startGroup: 2,
+		endGroup: 12,
+	});
+
+	subscriber.close();
+	remote.close();
+	broadcast.close();
+	await serving;
+	client.close();
+	server.close();
+});
+
+test("integration: lite applies initial and updated group bounds", async () => {
+	const GROUP_COUNT = 6;
+	const INITIAL_START_GROUP = 1;
+	const INITIAL_END_GROUP = 2;
+	const UPDATED_GROUP = 4;
+	const PENDING_ASSERT_MS = 20;
+	const UPDATE_TIMEOUT_MS = 1000;
+
+	const pair = createMockTransportPair(Lite.ALPN_05);
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	const producer = broadcast.createTrack("video");
+	for (let sequence = 0; sequence < GROUP_COUNT; sequence++) producer.appendGroup().close();
+	server.publish(Path.from("test"), broadcast);
+
+	const remote = client.consume(Path.from("test"));
+	const subscriber = remote
+		.track("video")
+		.subscribe({ startGroup: INITIAL_START_GROUP, endGroup: INITIAL_END_GROUP });
+	try {
+		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_START_GROUP);
+		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_END_GROUP);
+
+		const pending = subscriber.nextGroup();
+		expect(await Promise.race([pending, sleep(PENDING_ASSERT_MS).then(() => "pending")])).toBe("pending");
+
+		subscriber.update({ startGroup: UPDATED_GROUP, endGroup: UPDATED_GROUP });
+		expect((await withTimeout(pending, UPDATE_TIMEOUT_MS, "updated group bound timed out"))?.sequence).toBe(
+			UPDATED_GROUP,
+		);
+
+		const capped = subscriber.nextGroup();
+		expect(await Promise.race([capped, sleep(PENDING_ASSERT_MS).then(() => "pending")])).toBe("pending");
+	} finally {
+		subscriber.close();
+		remote.close();
+		broadcast.close();
+		client.close();
+		server.close();
+	}
 });
 
 test("integration: lite draft-06", async () => {

@@ -18,6 +18,12 @@ class BroadcastState {
 	consumers = 0;
 }
 
+function dequeueRequest(state: BroadcastState): track.Request | undefined {
+	const requested = state.requested.peek();
+	requested.sort((a, b) => a.priority - b.priority);
+	return requested.pop();
+}
+
 // Close the broadcast and reject any requests still pending in the queue, so a
 // subscriber blocked on the track's info() or group reads is unblocked rather
 // than left waiting on a producer that will never be served.
@@ -52,12 +58,12 @@ function subscribe(
 
 	const existing = state.tracks.get(name);
 	if (existing) {
-		if (existing.closed.peek() === undefined) return existing.subscribe();
+		if (existing.closed.peek() === undefined) return existing.subscribe(options);
 		state.tracks.delete(name);
 	}
 
 	const producer = new track.Producer(name);
-	const subscriber = producer.subscribe();
+	const subscriber = producer.subscribe(options);
 
 	if (register) {
 		state.tracks.set(name, producer);
@@ -69,8 +75,7 @@ function subscribe(
 	}
 
 	state.requested.mutate((requested) => {
-		requested.push(hooks.makeRequest(name, producer, options.priority ?? 0));
-		requested.sort((a, b) => a.priority - b.priority);
+		requested.push(hooks.makeRequest(name, producer));
 	});
 
 	return subscriber;
@@ -88,8 +93,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string): Promise<tr
 
 	const producer = new track.Producer(name);
 	state.requested.mutate((requested) => {
-		requested.push(hooks.makeRequest(name, producer, 0));
-		requested.sort((a, b) => a.priority - b.priority);
+		requested.push(hooks.makeRequest(name, producer));
 	});
 
 	try {
@@ -154,7 +158,7 @@ export class Producer implements track.Broadcast {
 	/** Return the next track requested by a peer. */
 	async requested(): Promise<track.Request | undefined> {
 		for (;;) {
-			const request = this.#state.requested.peek().pop();
+			const request = dequeueRequest(this.#state);
 			if (request) return request;
 
 			const closed = this.#state.closed.peek();
@@ -293,7 +297,7 @@ export class Consumer implements track.Broadcast {
 	/** Return the next track requested by the local consumer. Used by the subscribing wire layer. */
 	async requested(): Promise<track.Request | undefined> {
 		for (;;) {
-			const request = this.#state.requested.peek().pop();
+			const request = dequeueRequest(this.#state);
 			if (request) return request;
 
 			const closed = this.#state.closed.peek();

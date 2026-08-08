@@ -79,7 +79,7 @@ kio = { version = "0.5", path = "rs/kio" }
 # Permutation testing for the kio primitives (and everything built on them).
 # Only compiled under `--cfg loom`; see `just rs loom`.
 loom = { version = "0.7.2", features = ["futures"] }
-moq-audio = { version = "0.0.16", path = "rs/moq-audio" }
+moq-audio = { version = "0.0.17", path = "rs/moq-audio" }
 moq-flate = { version = "0.1.1", path = "rs/moq-flate" }
 moq-hls = { version = "0.4.6", path = "rs/moq-hls", default-features = false }
 moq-json = { version = "0.3.3", path = "rs/moq-json" }
@@ -103,11 +103,11 @@ moq-token-cli = { version = "0.5", path = "rs/moq-token-cli" }
 # can leave them off to drop the CUDA dependencies. Both crates still default
 # them on when depended on directly. VAAPI is opt-in everywhere, since that
 # backend has never been validated on real hardware.
-moq-transcode = { version = "0.0.8", path = "rs/moq-transcode", default-features = false }
+moq-transcode = { version = "0.0.9", path = "rs/moq-transcode", default-features = false }
 # Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
 # dlopen's libva at runtime (no libva-dev at build, no NEEDED libva in the binary).
 moq-vaapi = "0.0.3"
-moq-video = { version = "0.0.14", path = "rs/moq-video", default-features = false }
+moq-video = { version = "0.0.15", path = "rs/moq-video", default-features = false }
 percent-encoding = "2"
 qmux = { version = "0.4.0", default-features = false }
 serde = { version = "1", features = ["derive"] }

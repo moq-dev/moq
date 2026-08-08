@@ -258,6 +258,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.origin
 			.scope(&[prefix.as_path()])
 			.unwrap_or_else(|| self.origin.empty());
+		// Register the split-horizon peer on the announce cursor too. The origin
+		// model uses this exposure to park a reflected copy before it can replace
+		// the source we are currently advertising to that peer.
+		let origin = match Origin::new(exclude_hop) {
+			Ok(peer) => origin.excluding(peer),
+			Err(_) => origin,
+		};
 		let mut announced = origin.announced();
 
 		if let Err(err) = Self::run_announce(
@@ -315,6 +322,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// peer keeping a stale hop chain. Keyed by suffix; filtered announces are
 		// watched too, since an update can cross the forwarding filter either way.
 		let mut watched: std::collections::HashMap<crate::PathOwned, WatchedRoute> = std::collections::HashMap::new();
+		// Pre-restart versions (Lite01-04) never populate `watched`, but the
+		// broadcast consumer handed out by an excluding cursor carries the
+		// ExclusionGuard that keeps the front marked as exposed to this peer. Hold
+		// it for as long as the peer holds the advertisement, or the guard releases
+		// right after the Active is written and a reflected UNKNOWN route can
+		// replace the incumbent after all.
+		let mut held: std::collections::HashMap<crate::PathOwned, crate::broadcast::Consumer> =
+			std::collections::HashMap::new();
 
 		match version {
 			Version::Lite01 | Version::Lite02 => {
@@ -582,6 +597,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							if let Some(entry) = watched.get_mut(&suffix) {
 								entry.sent = Some(route.clone());
 							}
+							if !lite::restart_supported(version) {
+								held.insert(suffix.clone(), active.clone());
+							}
 							stream
 								.writer
 								.encode(&lite::AnnounceBroadcast::Active {
@@ -599,6 +617,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							// versions never populate `watched`, so they keep sending the
 							// Ended even for announces filtered above.
 							let retracted = watched.remove(&suffix).is_some_and(|entry| entry.sent.is_none());
+							held.remove(&suffix);
 							if version.has_announce_id() {
 								// Retract by id; nothing to send if the announce was filtered and
 								// the peer never saw it (an unknown id is a protocol violation).

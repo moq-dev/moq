@@ -52,32 +52,20 @@ if [[ -z "$TARGET" ]]; then
     echo "Detected target: $TARGET"
 fi
 
-# Native builds use the bare flake output. The one supported cross is the
-# Intel mac release built on an Apple Silicon runner (the Determinate Nix
-# installer dropped Intel macOS): a dedicated plugin output links the x86_64
-# GStreamer, and Apple's clang cross-compiles natively. The smoke test is
-# skipped for the cross plugin (an arm gst-inspect can't load an x86_64
-# plugin); scrub.sh and its no-/nix assertion still run.
+# Release builds must match the host. A mismatch would silently mislabel the
+# plugin archive, so reject it before building.
 HOST_TARGET=$(rustc -vV | grep host | cut -d' ' -f2)
-NIX_ATTR="moq-gst"
-CROSS=false
 if [[ "$TARGET" != "$HOST_TARGET" ]]; then
-    if [[ "$HOST_TARGET" == "aarch64-apple-darwin" && "$TARGET" == "x86_64-apple-darwin" ]]; then
-        NIX_ATTR="moq-gst-plugin-$TARGET"
-        CROSS=true
-    else
-        echo "Error: unsupported cross ($HOST_TARGET -> $TARGET)." >&2
-        echo "Only aarch64-apple-darwin -> x86_64-apple-darwin is wired up." >&2
-        exit 1
-    fi
+    echo "Error: unsupported cross ($HOST_TARGET -> $TARGET); refusing to mislabel the archive." >&2
+    exit 1
 fi
 
-echo "Building moq-gst for $TARGET via nix (output: $NIX_ATTR)..."
+echo "Building moq-gst for $TARGET via nix..."
 
 BUILD_TMP="$(mktemp -d)"
 trap 'rm -rf "$BUILD_TMP"' EXIT
 RESULT_LINK="$BUILD_TMP/result"
-nix build "$WORKSPACE_DIR#$NIX_ATTR" --out-link "$RESULT_LINK"
+nix build "$WORKSPACE_DIR#moq-gst" --out-link "$RESULT_LINK"
 
 # Locate the produced shared library (extension differs by platform).
 # The flake places it in lib/gstreamer-1.0/ so gst_all_1.gstreamer's
@@ -114,11 +102,7 @@ cp "$WORKSPACE_DIR/LICENSE-MIT" "$PACKAGE_DIR/"
 cp "$WORKSPACE_DIR/LICENSE-APACHE" "$PACKAGE_DIR/"
 
 "$SCRIPT_DIR/scrub.sh" "$PACKAGE_DIR/lib/gstreamer-1.0/$LIB_FILE"
-if [[ "$CROSS" == true ]]; then
-    echo "Skipping smoke test for cross build ($TARGET): host gst-inspect can't load it."
-else
-    "$SCRIPT_DIR/smoke.sh" "$PACKAGE_DIR/lib/gstreamer-1.0"
-fi
+"$SCRIPT_DIR/smoke.sh" "$PACKAGE_DIR/lib/gstreamer-1.0"
 
 cd "$OUTPUT_DIR"
 ARCHIVE="$NAME.tar.gz"

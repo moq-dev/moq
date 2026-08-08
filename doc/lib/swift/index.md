@@ -20,8 +20,8 @@ The package you want. A Swift-native wrapper: de-prefixed types (`Client`, `Sess
 **Features:**
 
 - iOS 15+, iPadOS 15+, macOS 12.3+
-- Universal binary for Apple Silicon and Intel Macs
-- iOS device + iOS Simulator slices (arm64 and x86\_64)
+- Apple Silicon binary for macOS and the iOS Simulator
+- iOS device + iOS Simulator slices (arm64)
 - Cancellation through Swift `Task` propagates to native consumers
 - Versioned independently of the Rust crates; floats to the latest compatible `MoqFFI` patch
 

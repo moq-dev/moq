@@ -61,7 +61,7 @@ If you're using Nix, GStreamer is included in the dev shell automatically. Other
 
 ## Quick start with Nix
 
-If you have Nix installed, you don't need to build anything or set any environment variables. The `moq-gst` flake output bundles the plugin with wrappers around `gst-inspect-1.0` / `gst-launch-1.0` that preload moq alongside `gst-plugins-{base,good,bad}`, so the standard tools find `moqsink` / `moqsrc` automatically.
+On Linux or Apple Silicon macOS, Nix avoids a manual build and environment variables. The `moq-gst` flake output bundles the plugin with wrappers around `gst-inspect-1.0` / `gst-launch-1.0` that preload moq alongside `gst-plugins-{base,good,bad}`, so the standard tools find `moqsink` / `moqsrc` automatically.
 
 ### Inspect the plugin
 

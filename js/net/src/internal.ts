@@ -10,7 +10,7 @@ import type { Producer, Request } from "./track.ts";
 /** Hooks assigned in static blocks by the owning class. */
 export const hooks: {
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
-	makeRequest: (name: string, producer: Producer, priority: number) => Request;
+	makeRequest: (name: string, producer: Producer) => Request;
 } = {
 	makeRequest: () => {
 		throw new Error("track.ts not loaded");

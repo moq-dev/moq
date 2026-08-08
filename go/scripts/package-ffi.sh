@@ -18,7 +18,6 @@ set -euo pipefail
 # Expected $LIB_DIR layout (per cargo target):
 #   $LIB_DIR/x86_64-unknown-linux-gnu/libmoq_ffi.a
 #   $LIB_DIR/aarch64-unknown-linux-gnu/libmoq_ffi.a
-#   $LIB_DIR/x86_64-apple-darwin/libmoq_ffi.a
 #   $LIB_DIR/aarch64-apple-darwin/libmoq_ffi.a
 #   $LIB_DIR/x86_64-pc-windows-msvc/moq_ffi.lib
 
@@ -138,7 +137,6 @@ cp "$GENERATED_H" "$PKG_STAGE/moq/moq.h"
 GO_LIBS=(
     "x86_64-unknown-linux-gnu:linux_amd64:libmoq_ffi.a"
     "aarch64-unknown-linux-gnu:linux_arm64:libmoq_ffi.a"
-    "x86_64-apple-darwin:darwin_amd64:libmoq_ffi.a"
     "aarch64-apple-darwin:darwin_arm64:libmoq_ffi.a"
     "x86_64-pc-windows-msvc:windows_amd64:moq_ffi.lib"
 )
@@ -196,7 +194,7 @@ Source, issues, and pull requests live in [moq-dev/moq](https://github.com/moq-d
 go get github.com/moq-dev/moq-go-ffi@v${VERSION}
 \`\`\`
 
-The module bundles prebuilt native libraries for \`linux/amd64\`, \`linux/arm64\`, \`darwin/amd64\`, \`darwin/arm64\` (\`libmoq_ffi.a\`), and \`windows/amd64\` (\`moq_ffi.lib\`); cgo selects the right one automatically.
+The module bundles prebuilt native libraries for \`linux/amd64\`, \`linux/arm64\`, \`darwin/arm64\` (\`libmoq_ffi.a\`), and \`windows/amd64\` (\`moq_ffi.lib\`); cgo selects the right one automatically.
 
 See [moq-dev/moq/go/ffi/README.md](https://github.com/moq-dev/moq/blob/main/go/ffi/README.md) for usage and the release process.
 

@@ -122,15 +122,51 @@ test("appendDatagram rejects a payload over the QUIC datagram frame ceiling", ()
 	expect(() => producer.appendDatagram(Timestamp.fromMillis(0), new Uint8Array(65536))).toThrow();
 });
 
-test("a subscriber update is forwarded to the producer's update signal", async () => {
+test("subscriber options and updates are forwarded to the producer's aggregate", async () => {
 	const producer = new TrackProducer("test");
-	const track = producer.subscribe();
+	const track = producer.subscribe({ startGroup: 0 });
+
+	// The initial options are available before the request is accepted or put on the wire.
+	expect(producer.subscription.peek()).toEqual({
+		priority: 0,
+		ordered: false,
+		latencyMax: 0,
+		startGroup: 0,
+		endGroup: undefined,
+	});
 
 	// The wire layer watches the producer's signal to emit SUBSCRIBE_UPDATE.
-	expect(producer.subscription.peek()).toBeUndefined();
 	const next = producer.subscription.changed();
-	track.update({ priority: 7 });
-	expect((await next)?.priority).toBe(7);
+	track.update({ priority: 7, ordered: true, latencyMax: 250, startGroup: 2, endGroup: 9 });
+	expect(await next).toEqual({ priority: 7, ordered: true, latencyMax: 250, startGroup: 2, endGroup: 9 });
+});
+
+test("multiple subscriber options aggregate like Rust", async () => {
+	const producer = new TrackProducer("test");
+	const bounded = producer.subscribe({ priority: 2, ordered: true, latencyMax: 100, startGroup: 10, endGroup: 20 });
+	const live = producer.subscribe({ priority: 7, ordered: false, latencyMax: 250, startGroup: 5 });
+
+	expect(producer.subscription.peek()).toEqual({
+		priority: 7,
+		ordered: false,
+		latencyMax: 250,
+		startGroup: 5,
+		endGroup: undefined,
+	});
+
+	const narrowed = producer.subscription.changed();
+	live.close();
+	expect(await narrowed).toEqual({
+		priority: 2,
+		ordered: true,
+		latencyMax: 100,
+		startGroup: 10,
+		endGroup: 20,
+	});
+
+	const none = producer.subscription.changed();
+	bounded.close();
+	expect(await none).toBeUndefined();
 });
 
 test("nextGroup skips late arrivals", async () => {
@@ -160,6 +196,26 @@ test("nextGroup returns buffered groups in sequence", async () => {
 
 	expect((await track.nextGroup())?.sequence).toBe(3);
 	expect((await track.nextGroup())?.sequence).toBe(5);
+});
+
+test("local cursor bounds can skip, pause, and release buffered groups", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+
+	for (let sequence = 0; sequence < 5; sequence++) producer.writeGroup(new GroupProducer(sequence));
+
+	expect(track.latest()).toBe(4);
+	track.startAt(1);
+	track.endAt(2);
+	expect((await track.nextGroup())?.sequence).toBe(1);
+	expect((await track.nextGroup())?.sequence).toBe(2);
+
+	const pending = track.nextGroup();
+	expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
+
+	track.startAt(4);
+	track.endAt(4);
+	expect((await pending)?.sequence).toBe(4);
 });
 
 test("recvGroup after nextGroup still returns late arrivals", async () => {

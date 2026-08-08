@@ -66,7 +66,7 @@ esac
 # Reject unsupported hosts up front; package-ffi.sh derives the cgo
 # subdir name from the cargo target via its own mapping.
 case "$HOST_TARGET" in
-    x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu | x86_64-apple-darwin | aarch64-apple-darwin | x86_64-pc-windows-msvc) ;;
+    x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu | aarch64-apple-darwin | x86_64-pc-windows-msvc) ;;
     *)
         echo "go check: unsupported host target $HOST_TARGET" >&2
         exit 1

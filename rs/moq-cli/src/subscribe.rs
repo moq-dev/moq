@@ -70,6 +70,7 @@ impl From<VideoCodecArg> for VideoCodecKind {
 pub enum AudioCodecArg {
 	Aac,
 	Opus,
+	Pcm,
 }
 
 impl From<AudioCodecArg> for AudioCodecKind {
@@ -77,12 +78,13 @@ impl From<AudioCodecArg> for AudioCodecKind {
 		match value {
 			AudioCodecArg::Aac => Self::AAC,
 			AudioCodecArg::Opus => Self::Opus,
+			AudioCodecArg::Pcm => Self::Pcm,
 		}
 	}
 }
 
-/// Rendition selection flags for the stdout container sinks. With no flags set,
-/// every rendition is kept.
+/// Rendition selection flags for stdout container sinks and native playback.
+/// With no flags set, every rendition is kept.
 #[derive(clap::Args, Clone, Default)]
 pub struct SelectArgs {
 	/// Pick the video rendition with this exact name.
@@ -100,6 +102,32 @@ pub struct SelectArgs {
 	/// Keep only audio renditions whose codec family matches.
 	#[arg(long)]
 	pub audio_codec: Option<AudioCodecArg>,
+}
+
+impl SelectArgs {
+	/// Build the rendition selection shared by stdout exports and native playback.
+	///
+	/// `force` takes the place of `--video-codec`, for a sink whose format implies
+	/// one. Pass `None` to use the flag as given.
+	pub(crate) fn selection(&self, force: Option<VideoCodecKind>) -> select::Broadcast {
+		let mut video = select::Video::default();
+		if let Some(name) = &self.video_name {
+			video = video.name(name);
+		}
+		if let Some(codec) = force.or_else(|| self.video_codec.map(Into::into)) {
+			video = video.codec(codec);
+		}
+
+		let mut audio = select::Audio::default();
+		if let Some(name) = &self.audio_name {
+			audio = audio.name(name);
+		}
+		if let Some(codec) = self.audio_codec {
+			audio = audio.codec(codec.into());
+		}
+
+		select::Broadcast::default().video(video).audio(audio)
+	}
 }
 
 /// The resolved stdout export settings (built from the `export` flags + format).
@@ -159,24 +187,7 @@ impl SubscribeArgs {
 			(None, user) => user,
 		};
 
-		// Both roles stay opted in; criteria-free roles keep every rendition.
-		let mut video = select::Video::default();
-		if let Some(name) = &self.select.video_name {
-			video = video.name(name);
-		}
-		if let Some(codec) = codec {
-			video = video.codec(codec);
-		}
-
-		let mut audio = select::Audio::default();
-		if let Some(name) = &self.select.audio_name {
-			audio = audio.name(name);
-		}
-		if let Some(codec) = self.select.audio_codec {
-			audio = audio.codec(codec.into());
-		}
-
-		Ok(select::Broadcast::default().video(video).audio(audio))
+		Ok(self.select.selection(codec))
 	}
 }
 

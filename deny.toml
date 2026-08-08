@@ -26,6 +26,13 @@ ignore = [
     # needs Rust 1.92, above the 1.91 workspace MSRV. Build-time only.
     "RUSTSEC-2024-0436",
 
+    # ttf-parser is unmaintained, with no upgrade available. Reachable only via
+    # winit -> sctk-adwaita -> ab_glyph, which parses the system font used to
+    # draw Wayland client-side decorations for `moq play`. Dropping winit's
+    # `wayland-csd-adwaita` feature would remove it, at the cost of a titlebar
+    # on GNOME. Awaits sctk-adwaita migrating to skrifa.
+    "RUSTSEC-2026-0192",
+
 ]
 
 [licenses]
