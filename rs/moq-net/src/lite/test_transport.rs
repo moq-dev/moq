@@ -131,23 +131,47 @@ impl web_transport_trait::RecvStream for PendingRecv {
 	}
 }
 
-/// A stream that died before delivering a single byte: every read fails, the
-/// wire equivalent of RESET_STREAM arriving ahead of any payload. QUIC does not
-/// order a reset behind the data, so this reaches an accept loop in normal
-/// operation, not just from a misbehaving peer.
+/// What a reset stream's reads report: RESET_STREAM with application code 0,
+/// the code a routine group drop carries. `Error::from_transport` decodes it
+/// back to `Error::Cancel`.
+#[derive(Debug, Clone, Default)]
+pub struct ResetError;
+
+impl std::fmt::Display for ResetError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "stream reset by peer (code 0)")
+	}
+}
+
+impl std::error::Error for ResetError {}
+
+impl web_transport_trait::Error for ResetError {
+	fn session_error(&self) -> Option<(u32, String)> {
+		None
+	}
+
+	fn stream_error(&self) -> Option<u32> {
+		Some(0)
+	}
+}
+
+/// A stream that died before delivering a single byte: every read reports a
+/// code-0 RESET_STREAM ([`ResetError`]), the wire shape of a reset arriving
+/// ahead of any payload. QUIC does not order a reset behind the data, so this
+/// reaches an accept loop in normal operation, not just from a misbehaving peer.
 pub struct DeadRecv;
 
 impl web_transport_trait::RecvStream for DeadRecv {
-	type Error = SinkError;
+	type Error = ResetError;
 
 	async fn read(&mut self, _dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
-		Err(SinkError)
+		Err(ResetError)
 	}
 
 	fn stop(&mut self, _code: u32) {}
 
 	async fn closed(&mut self) -> Result<(), Self::Error> {
-		Err(SinkError)
+		Err(ResetError)
 	}
 }
 
@@ -156,6 +180,7 @@ impl web_transport_trait::RecvStream for DeadRecv {
 /// peer with nothing more to say. Sends record to [`Log`] like [`SinkSession`].
 #[derive(Clone)]
 pub struct DeadStreamSession {
+	/// What the session's send streams recorded, for test assertions.
 	pub log: Log,
 	unis: Arc<Mutex<usize>>,
 	bis: Arc<Mutex<usize>>,
