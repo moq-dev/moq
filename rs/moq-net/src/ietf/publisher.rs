@@ -1168,6 +1168,48 @@ struct NamespaceRequest<S: web_transport_trait::Session> {
 }
 
 #[cfg(test)]
+mod group_priority_test {
+	use super::*;
+	use crate::lite::test_transport::SinkSession;
+
+	/// The model's `Subscription::priority` is higher-first ("higher values preempt
+	/// lower ones"), matching the transport trait's send order, so a group stream must
+	/// receive the model value unchanged. An inversion here would transmit the
+	/// LOWEST-priority track first under contention.
+	#[tokio::test]
+	async fn group_stream_preserves_model_priority() {
+		let log = crate::lite::test_transport::Log::default();
+		let session = SinkSession::new(log.clone());
+
+		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
+			.unwrap();
+		let consumer = group.consume();
+		group.finish().unwrap();
+
+		let msg = ietf::GroupHeader {
+			track_alias: 0,
+			group_id: 0,
+			sub_group_id: 0,
+			publisher_priority: 0,
+			flags: Default::default(),
+		};
+
+		Publisher::<SinkSession>::run_group(session, msg, 200, consumer, Timescale::default(), Version::Draft14)
+			.await
+			.unwrap();
+
+		assert_eq!(
+			log.priorities(),
+			vec![200],
+			"model priority must pass through unchanged"
+		);
+	}
+}
+
+#[cfg(test)]
 mod tests {
 	use super::*;
 	use crate::lite::test_transport::SinkSession;
