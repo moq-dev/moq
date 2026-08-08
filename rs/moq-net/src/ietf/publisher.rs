@@ -665,10 +665,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		}
 
-		stream.finish()?;
-
-		// Wait until everything is acknowledged by the peer so we can still cancel the stream.
-		stream.closed().await?;
+		// Consume the writer: close() waits for the peer to acknowledge everything,
+		// and taking ownership disarms the Drop fallback that would otherwise reset
+		// the finished stream with a spurious Cancel.
+		stream.close().await?;
 
 		tracing::debug!(sequence = %msg.group_id, "finished group");
 

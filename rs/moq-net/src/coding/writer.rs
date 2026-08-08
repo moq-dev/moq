@@ -159,8 +159,8 @@ mod tests {
 	/// the convention of the lite priority queue and IETF subscriber priority), but
 	/// the transport trait sends HIGHER values first (W3C sendOrder / quinn). The
 	/// most urgent stream must therefore receive the largest send order, strictly
-	/// decreasing as urgency drops. Without the conversion the transport drains the
-	/// stalest stream first.
+	/// decreasing as urgency increases. Without the conversion the transport drains
+	/// the stalest stream first.
 	#[test]
 	fn set_priority_inverts_urgency_to_send_order() {
 		let log = Log::default();
@@ -175,7 +175,7 @@ mod tests {
 		assert_eq!(sent.last(), Some(&0), "urgency 255 must map to the lowest send order");
 		assert!(
 			sent.windows(2).all(|w| w[0] > w[1]),
-			"send order must strictly decrease as urgency drops: {sent:?}",
+			"send order must strictly decrease as urgency increases: {sent:?}",
 		);
 	}
 }

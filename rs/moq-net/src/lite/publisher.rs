@@ -1992,8 +1992,10 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 			return Err(err);
 		}
 
-		stream.finish()?;
-		stream.closed().await?;
+		// Consume the writer: close() waits for the peer to acknowledge everything,
+		// and taking ownership disarms the Drop fallback that would otherwise reset
+		// the finished stream with a spurious Cancel.
+		stream.close().await?;
 
 		tracing::debug!(sequence, "finished group");
 
@@ -2237,6 +2239,41 @@ mod serve_group_test {
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 		assert_eq!(log.resets(), vec![Error::Old.to_code()]);
+	}
+
+	/// A group that completes cleanly must not reset at all. The completion path
+	/// consumes the writer via `close()`; leaving the writer to drop after `finish()`
+	/// would fire the Drop fallback and tack a spurious Cancel reset onto a stream
+	/// the peer already acknowledged.
+	#[tokio::test]
+	async fn completed_group_does_not_reset() {
+		let log = Log::default();
+		let session = SinkSession::new(log.clone());
+
+		let track_priority = kio::Producer::new(0u8);
+		let subscription = Subscription {
+			session,
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			version: Version::Lite06Wip,
+			timescale: Some(crate::Timescale::default()),
+		};
+
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
+			.unwrap();
+		let consumer = group.consume();
+		group.finish().unwrap();
+
+		let handle = subscription.priority.insert(Priority::new(0, 0));
+		subscription.serve_group(0, handle, consumer).await.unwrap();
+
+		assert_eq!(log.resets(), Vec::<u32>::new(), "clean completion must not reset");
 	}
 }
 
