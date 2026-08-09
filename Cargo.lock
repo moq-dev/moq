@@ -863,9 +863,9 @@ dependencies = [
 
 [[package]]
 name = "boytacean"
-version = "0.12.1"
+version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "333afc1e8f6a0bbba0a916346a2fca124c153b6ec42f5c8d795c05126503ee0b"
+checksum = "2dee2faf771f06e3778a7e3124f74621509f45b9e39df3136596de2855138450"
 dependencies = [
  "boytacean-common",
  "boytacean-encoding",
@@ -877,15 +877,15 @@ dependencies = [
 
 [[package]]
 name = "boytacean-common"
-version = "0.12.1"
+version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9fe79b9ef2249700e02747de11cbc048870767705b8c31615a820bda6d94f81f"
+checksum = "526241f5379c3ed6897c3aeba9b37ce50f7d6949b677df66cd48b36c6a7733b9"
 
 [[package]]
 name = "boytacean-encoding"
-version = "0.12.1"
+version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7edc2850784c0e2b0a55e7d4e7823ef60c4493be021c13f6010fca19d75edfa"
+checksum = "6b9e29af7289c6624c1d84458200424207a87e74605ec4c7b7881022b8254865"
 dependencies = [
  "boytacean-common",
  "boytacean-hashing",
@@ -893,9 +893,9 @@ dependencies = [
 
 [[package]]
 name = "boytacean-hashing"
-version = "0.12.1"
+version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "221540d0cb3bc7222b46c061e330ce05622ed739ed2f7247864ab7ec5f63dfa3"
+checksum = "5c968396691deea5ea45003a3278bf6a40609b8d3505dea4421d54aa1d1335c5"
 dependencies = [
  "boytacean-common",
 ]
@@ -5080,9 +5080,9 @@ dependencies = [
 
 [[package]]
 name = "mp4-atom"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3144b10c48a9707a4e8526a0371eebf4a46e2cb703748b0d83bbdc77421bc16f"
+checksum = "f3d7433df407a636db7047600422af07145adf6ee25e0622745b0131516dbc3c"
 dependencies = [
  "bytes",
  "derive_more 2.1.1",
