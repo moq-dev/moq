@@ -2201,7 +2201,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 /// A group that fails mid-stream must reset with its own error code. The subscriber uses
 /// that code to tell a truncated group (Old, Lagged, Evicted) from a routine cancel, so a
 /// blanket [`Error::Cancel`] from the writer's drop fallback loses the reason.
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod serve_group_test {
 	use super::*;
 	use crate::lite::test_transport::*;

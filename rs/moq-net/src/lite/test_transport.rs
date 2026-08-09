@@ -44,7 +44,7 @@ impl Log {
 
 	/// Every value handed to the transport's `set_priority`, in call order. These are
 	/// trait-contract send orders (higher = transmitted first), recorded so tests can
-	/// verify the urgency-to-send-order conversion.
+	/// verify priority conversions at their protocol boundaries.
 	pub fn priorities(&self) -> Vec<u8> {
 		self.priorities.lock().unwrap().clone()
 	}

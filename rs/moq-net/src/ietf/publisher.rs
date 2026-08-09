@@ -403,7 +403,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		let subscription = Subscription {
-			priority: msg.subscriber_priority,
+			priority: super::priority::from_wire(msg.subscriber_priority),
 			..Default::default()
 		};
 
@@ -600,8 +600,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let stream = session.open_uni().await.map_err(Error::from_transport)?;
 
 		let mut stream = Writer::new(stream, version);
-		// Set through the Writer so the IETF subscriber priority (lower = more urgent)
-		// is converted to the transport's send order (higher = sent first).
 		stream.set_priority(priority);
 
 		stream.encode(&msg).await?;

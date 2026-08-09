@@ -149,3 +149,21 @@ impl<S: web_transport_trait::SendStream, V> Drop for Writer<S, V> {
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::lite::test_transport::{Log, SinkSend};
+
+	#[test]
+	fn set_priority_forwards_send_order() {
+		let log = Log::default();
+		let mut writer = Writer::new(SinkSend::new(log.clone()), crate::lite::Version::Lite05);
+
+		for send_order in 0u8..=255 {
+			writer.set_priority(send_order);
+		}
+
+		assert_eq!(log.priorities(), (0u8..=255).collect::<Vec<_>>());
+	}
+}
