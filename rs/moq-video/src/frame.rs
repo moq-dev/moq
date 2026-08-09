@@ -419,7 +419,6 @@ impl I420 {
 	/// strides, which a decoder may pad wider than the visible width. Used by the
 	/// software H.264 decode backend, whose `DecodedYUV` exposes strided planes.
 	/// Width and height must be even (4:2:0 chroma).
-	#[cfg(not(target_env = "sim"))]
 	pub(crate) fn from_planes(
 		y: &[u8],
 		u: &[u8],

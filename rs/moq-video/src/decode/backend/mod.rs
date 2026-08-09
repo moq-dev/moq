@@ -9,10 +9,9 @@
 //! [`open`] picks the best backend for a [`Codec`] and [`Config`], trying
 //! hardware candidates (platform-gated: VideoToolbox on macOS, Media Foundation
 //! / DXVA on Windows, NVDEC on Linux) before the openh264 software fallback,
-//! exactly like the encode side. Apple simulators omit openh264 until its native
-//! build supports `target_env="sim"`. Only backends that support the requested
-//! codec are considered: there is no software H.265 or AV1 decoder, so those
-//! tracks have no fallback below the hardware path.
+//! exactly like the encode side. Only backends that support the requested codec
+//! are considered: there is no software H.265 or AV1 decoder, so those tracks
+//! have no fallback below the hardware path.
 
 use bytes::Bytes;
 use moq_net::Timestamp;
@@ -20,7 +19,6 @@ use moq_net::Timestamp;
 use super::decoder::{Config, Kind};
 use crate::{Error, Frame};
 
-#[cfg(not(target_env = "sim"))]
 mod openh264;
 
 #[cfg(test)]
@@ -103,16 +101,11 @@ const HARDWARE: &[Candidate] = &[
 	},
 ];
 
-/// Software fallbacks. Apple simulators omit openh264 until its native build
-/// supports their target environment.
-const SOFTWARE: &[Candidate] = &[
-	#[cfg(not(target_env = "sim"))]
-	Candidate {
-		name: openh264::NAME,
-		supports: |c| matches!(c, Codec::H264),
-		open: openh264::Openh264::open,
-	},
-];
+const SOFTWARE: Candidate = Candidate {
+	name: openh264::NAME,
+	supports: |c| matches!(c, Codec::H264),
+	open: openh264::Openh264::open,
+};
 
 /// Test-only backends. Deliberately in neither list above, so `Auto` /
 /// `Hardware` / `Software` can never select one: they exist to be asked for by
@@ -132,11 +125,14 @@ const NAMED_ONLY: &[Candidate] = &[];
 /// codec are skipped before they're even tried.
 pub(crate) fn open(codec: Codec, config: &Config) -> Result<Box<dyn Backend>, Error> {
 	let candidates: Vec<&Candidate> = match &config.kind {
-		Kind::Auto => HARDWARE.iter().chain(SOFTWARE.iter()).collect(),
+		Kind::Auto => HARDWARE.iter().chain(std::iter::once(&SOFTWARE)).collect(),
 		Kind::Hardware => HARDWARE.iter().collect(),
-		Kind::Software => SOFTWARE.iter().collect(),
+		Kind::Software => vec![&SOFTWARE],
 		Kind::Named(name) => {
-			let all = HARDWARE.iter().chain(SOFTWARE.iter()).chain(NAMED_ONLY.iter());
+			let all = HARDWARE
+				.iter()
+				.chain(std::iter::once(&SOFTWARE))
+				.chain(NAMED_ONLY.iter());
 			all.filter(|c| c.name == name).collect()
 		}
 	};

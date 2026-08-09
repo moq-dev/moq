@@ -33,12 +33,12 @@ pub enum Codec {
 #[non_exhaustive]
 pub enum Kind {
 	/// Prefer a platform hardware encoder, falling back to the openh264 software
-	/// encoder when none is available. Apple simulators currently have neither.
+	/// encoder when none is available.
 	#[default]
 	Auto,
 	/// Hardware only; error if none is available.
 	Hardware,
-	/// Software only (openh264 for H.264). Unavailable on Apple simulators.
+	/// Software only (openh264 for H.264).
 	Software,
 	/// A specific backend by name, e.g. `"videotoolbox"`, `"nvenc"`, `"vaapi"`,
 	/// or `"openh264"`.
@@ -336,7 +336,7 @@ mod tests {
 			kind: Kind::Software,
 			..Config::new(320, 240, 30)
 		};
-		let mut encoder = Encoder::new(&config).expect("openh264 is available on this target");
+		let mut encoder = Encoder::new(&config).expect("openh264 is vendored, always available");
 		assert_eq!(encoder.name(), "openh264");
 
 		let mut frames = Vec::new();

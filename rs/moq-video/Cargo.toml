@@ -15,8 +15,8 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 [features]
 # NVIDIA hardware codecs are enabled by default. Disable them (e.g.
 # `--no-default-features`) for a slimmer self-compiled Linux build that drops the
-# CUDA dependencies. Openh264 stays as the software fallback except on Apple
-# simulators, and V4L2 capture is unaffected. The defaults are no-ops off Linux.
+# CUDA dependencies. Openh264 stays as the always-compiled software fallback and
+# V4L2 capture is unaffected. The default features are no-ops off Linux.
 default = ["nvenc", "nvdec"]
 # NVIDIA NVENC hardware encoder (Linux). dlopen'd at runtime (cudarc + moq-nvenc,
 # which loads libnvidia-encode), with a libloading probe for the driver libs, so
@@ -66,6 +66,17 @@ fast_image_resize = "6"
 hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
+# Vendored, statically-linked software H.264 fallback (no system dependency).
+# Always compiled in: hardware encoders (VideoToolbox / Media Foundation /
+# NVENC / VAAPI) are preferred, but openh264 is the fallback when none is usable
+# (GPU-less box, or a resolution a hardware encoder rejects).
+openh264 = "0.9.8"
+# For the raw `ENCODER_OPTION_BITRATE` set_option: openh264 takes a bitrate only
+# at construction and re-exports none of the sys types needed to retune a live
+# encoder. `default-features = false` because openh264 already turns on the
+# features it needs; cargo unifies this on the same version it depends on, so the
+# raw API types stay identical.
+openh264-sys2 = { version = "0.9.8", default-features = false }
 thiserror = "2"
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing = "0.1"
@@ -75,19 +86,6 @@ tracing = "0.1"
 wgpu = { version = "30", optional = true }
 # RGBA -> I420 color conversion (replaces ffmpeg swscale).
 yuv = "0.8.14"
-
-[target.'cfg(not(target_env = "sim"))'.dependencies]
-# Vendored, statically-linked software H.264 fallback (no system dependency).
-# Apple simulator targets are excluded because openh264-sys2 0.9.7 does not
-# recognize their `target_env="sim"`; physical Apple devices and every other
-# target keep the fallback. Remove this gate once upstream releases the fix.
-openh264 = "0.9.3"
-# For the raw `ENCODER_OPTION_BITRATE` set_option: openh264 takes a bitrate only
-# at construction and re-exports none of the sys types needed to retune a live
-# encoder. `default-features = false` because openh264 already turns on the
-# features it needs; cargo unifies this on the same version it depends on, so the
-# raw API types stay identical.
-openh264-sys2 = { version = "0.9.6", default-features = false }
 
 [target.'cfg(target_os="linux")'.dependencies]
 # xdg-desktop-portal ScreenCast negotiation for the `pipewire` feature (pure Rust,

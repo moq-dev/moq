@@ -34,8 +34,7 @@
 //!     [`encode::Producer`] publishes the results.
 //! - [`decode`] subscribes to an H.264, H.265, or AV1 track and decodes it to
 //!   raw frames with a native backend (VideoToolbox on macOS, Media Foundation /
-//!   DXVA on Windows, NVDEC on Linux, openh264 software fallback for H.264
-//!   except on Apple simulators).
+//!   DXVA on Windows, NVDEC on Linux, openh264 software fallback for H.264).
 //!   [`decode::Consumer`] is the mirror of `moq_audio::decode::Consumer`. An
 //!   NVDEC frame stays in CUDA memory and feeds [`encode::Encoder::encode`]
 //!   zero-copy (the transcode path), scaled in hardware via

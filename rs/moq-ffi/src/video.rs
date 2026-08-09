@@ -4,8 +4,7 @@
 //! [`producer::MoqMediaProducer`](crate::producer::MoqMediaProducer): that one
 //! takes already-encoded frames, this one takes raw pictures and runs the H.264
 //! / H.265 encode inside the FFI boundary (VideoToolbox on macOS, Media
-//! Foundation on Windows, openh264 as the software fallback except on Apple
-//! simulators; no ffmpeg).
+//! Foundation on Windows, openh264 as the software fallback; no ffmpeg).
 //!
 //! Pixel format, resolution, and framerate are fixed at publish time via
 //! [`MoqVideoEncoderInput`], so each [`MoqVideoFrame`] carries only pixels and a
@@ -50,22 +49,19 @@ impl From<MoqVideoCodec> for moq_video::encode::Codec {
 /// Which encoder implementation to use.
 ///
 /// These bindings compile VideoToolbox (macOS), Media Foundation (Windows), and
-/// openh264 (software, except on Apple simulators). NVENC/NVDEC are a
-/// libmoq-only build option and VAAPI is opt-in everywhere, so Linux here is
-/// software-only. Apple simulators currently have no encoder backend.
+/// openh264 (software, everywhere). NVENC/NVDEC are a libmoq-only build option
+/// and VAAPI is opt-in everywhere, so Linux here is software-only.
 #[derive(Clone, uniffi::Enum)]
 pub enum MoqVideoEncoderKind {
 	/// Prefer a platform hardware encoder, falling back to software. On Linux
-	/// that fallback is the only option these bindings have. Apple simulators
-	/// have neither and return a no-encoder error.
+	/// that fallback is the only option these bindings have.
 	Auto,
 	/// Hardware only; fails if none is available, which on Linux is always.
 	Hardware,
-	/// Software only (openh264, H.264 only). Unavailable on Apple simulators.
+	/// Software only (openh264, H.264 only).
 	Software,
 	/// A specific backend that moq-ffi compiles: `"videotoolbox"` (macOS),
-	/// `"mediafoundation"` (Windows), or `"openh264"` (software, except on Apple
-	/// simulators).
+	/// `"mediafoundation"` (Windows), or `"openh264"` (software, everywhere).
 	/// Naming one this build lacks fails with a no-encoder error, so reach for
 	/// this only when [`Auto`](Self::Auto) picks the wrong one.
 	Named { name: String },

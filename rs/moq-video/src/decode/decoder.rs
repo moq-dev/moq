@@ -23,13 +23,12 @@ use crate::{Error, Frame, Size};
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Kind {
-	/// Prefer a platform hardware decoder, fall back to software. Apple
-	/// simulators currently have neither.
+	/// Prefer a platform hardware decoder, fall back to software.
 	#[default]
 	Auto,
 	/// Hardware only; error if none is available.
 	Hardware,
-	/// Software (openh264) only. Unavailable on Apple simulators.
+	/// Software (openh264) only.
 	Software,
 	/// A specific backend by name, e.g. `"videotoolbox"`, `"nvdec"`,
 	/// `"openh264"`.
