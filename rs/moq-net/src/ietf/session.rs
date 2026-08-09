@@ -458,18 +458,6 @@ async fn run_setup<S: web_transport_trait::Session>(
 	Ok(())
 }
 
-/// Whether reading a just-accepted stream failed because the stream died (a
-/// reset, or an end before the first message was complete) rather than
-/// delivering bytes that do not parse. Death is that stream's failure and the
-/// accept loops drop the one stream; garbage is the peer breaking the protocol
-/// and stays session-fatal, per [`is_protocol_violation`].
-fn stream_died(err: &Error) -> bool {
-	matches!(
-		err,
-		Error::Cancel | Error::Remote(_) | Error::Decode(DecodeError::Short)
-	)
-}
-
 /// Accept incoming uni streams and dispatch each to a handler.
 ///
 /// For v17, this also handles the SETUP stream (0x2F00) and GOAWAY.
@@ -501,7 +489,7 @@ async fn run_unis<S: web_transport_trait::Session>(
 		// tolerated: bytes that arrive and do not parse stay session-fatal.
 		let kind: u64 = match tasks.drive(reader.decode_peek()).await {
 			Ok(kind) => kind,
-			Err(err) if stream_died(&err) => {
+			Err(err @ Error::Cancel) | Err(err @ Error::Remote(_)) | Err(err @ Error::Decode(DecodeError::Short)) => {
 				tracing::debug!(%err, "dropping uni stream that died before its type");
 				continue;
 			}
@@ -619,7 +607,7 @@ async fn run_dispatch<S: web_transport_trait::Session>(
 		// header that does not parse included, still fails the session.
 		let (id, data) = match header {
 			Ok(header) => header,
-			Err(err) if stream_died(&err) => {
+			Err(err @ Error::Cancel) | Err(err @ Error::Remote(_)) | Err(err @ Error::Decode(DecodeError::Short)) => {
 				tracing::debug!(%err, "dropping bidi stream that died before its header");
 				continue;
 			}
