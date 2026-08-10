@@ -12,6 +12,7 @@ on:
       - "swift/**"
       - "rs/moq-ffi/**"
       - "rs/moq-video/**"
+      - "Cargo.lock"
       - ".github/workflows/swift.yml"
 
 concurrency:
