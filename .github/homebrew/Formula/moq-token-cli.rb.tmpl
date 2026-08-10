@@ -23,10 +23,10 @@ class MoqTokenCli < Formula
   end
 
   def install
-    bin.install "bin/moq-token-cli"
+    bin.install "bin/moq-token"
   end
 
   test do
-    system bin/"moq-token-cli", "--help"
+    system bin/"moq-token", "--help"
   end
 end

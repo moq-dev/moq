@@ -35,7 +35,7 @@ websocket = ["moq-native/websocket"]
 # needs ALSA/libasound), plus binary size. macOS/Windows use OS frameworks, no
 # extra install. H.264 is vendored static (openh264), so no system ffmpeg/libav.
 # Enable with `cargo build -p moq-cli --features capture`.
-capture = ["dep:moq-video", "dep:moq-audio", "moq-audio/capture"]
+capture = ["dep:moq-video", "dep:moq-audio", "moq-video/capture", "moq-audio/capture"]
 # Just-in-time transcoding (`moq ... transcode`). Off by default because it pulls
 # in moq-video and its codec dependencies. Enable with
 # `cargo build -p moq-cli --features transcode`.

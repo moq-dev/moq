@@ -129,14 +129,16 @@ Drop the defaults on Linux, as above: the default `pipewire` feature links
 libpipewire-0.3 at build time to give `import capture` a display source that
 playback never uses.
 
-A Linux build still needs three system packages, whichever features are picked.
-The speaker goes through cpal, which links ALSA, and `play` pulls in moq-video,
-whose V4L2 camera capture is not behind a feature and whose bindgen wants
-libclang. On Debian and Ubuntu:
+A Linux playback-only build needs ALSA because the speaker goes through cpal.
+It does not compile moq-video's capture feature, so it no longer needs V4L2
+headers or libclang. On Debian and Ubuntu:
 
 ```bash
-sudo apt install libasound2-dev libclang-dev libv4l-dev
+sudo apt install libasound2-dev
 ```
+
+A build with the `capture` feature additionally needs `libclang-dev` and
+`libv4l-dev` for V4L2 camera capture.
 
 macOS and Windows need nothing extra, so plain `--features play` is enough
 there.

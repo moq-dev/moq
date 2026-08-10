@@ -15,9 +15,13 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 [features]
 # NVIDIA hardware codecs are enabled by default. Disable them (e.g.
 # `--no-default-features`) for a slimmer self-compiled Linux build that drops the
-# CUDA dependencies. Openh264 stays as the always-compiled software fallback and
-# V4L2 capture is unaffected. The default features are no-ops off Linux.
-default = ["nvenc", "nvdec"]
+# CUDA dependencies. Openh264 stays as the always-compiled software fallback;
+# disable only `capture` to omit the device stack while retaining codecs.
+default = ["capture", "nvenc", "nvdec"]
+# Native camera and screen capture. Enabled by default for direct consumers,
+# but workspace consumers opt in so codec-only bindings avoid device build
+# dependencies such as V4L2 and libclang.
+capture = ["dep:v4l", "dep:zune-jpeg"]
 # NVIDIA NVENC hardware encoder (Linux). dlopen'd at runtime (cudarc + moq-nvenc,
 # which loads libnvidia-encode), with a libloading probe for the driver libs, so
 # an nvenc build still links GPU-less and starts driverless, falling back to the
@@ -51,7 +55,7 @@ render = [
 # Off by default because the `pipewire` crate links libpipewire-0.3 via pkg-config
 # at build time (and its bindgen needs libclang), so it only belongs in builds
 # that actually capture displays. Camera capture (V4L2) needs nothing extra.
-pipewire = ["dep:pipewire", "dep:ashpd"]
+pipewire = ["capture", "dep:pipewire", "dep:ashpd"]
 
 [dependencies]
 anyhow = "1"
@@ -118,8 +122,8 @@ moq-vaapi = { workspace = true, optional = true }
 pipewire = { version = "0.10", optional = true }
 # Native V4L2 webcam capture (replaces nokhwa). `v4l` streams MMAP buffers;
 # MJPEG cameras are decoded with the pure-Rust `zune-jpeg` (no libjpeg/IJG).
-v4l = "0.14"
-zune-jpeg = "0.5"
+v4l = { version = "0.14", optional = true }
+zune-jpeg = { version = "0.5", optional = true }
 
 [target.'cfg(target_os="macos")'.dependencies]
 block2 = "0.6.2"

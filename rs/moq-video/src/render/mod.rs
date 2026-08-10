@@ -1,7 +1,7 @@
 //! Draw decoded frames on the GPU, handing back a texture you present.
 //!
 //! The egress half of the zero-copy story, and the fourth role module alongside
-//! [`capture`](crate::capture), [`encode`](crate::encode) and
+//! capture, [`encode`](crate::encode) and
 //! [`decode`](crate::decode). [`decode`](crate::decode) keeps a hardware-decoded
 //! frame on the GPU; this draws it there too, converting YUV to RGB in a shader
 //! instead of downloading pixels to convert them on the CPU.

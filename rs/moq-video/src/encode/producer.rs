@@ -1,4 +1,4 @@
-//! Encode decoded video frames and publish them as a moq video track.
+//! Publish encoded video frames as a moq video track, with optional capture.
 //!
 //! Encoding is strictly on demand: the track and catalog entry are advertised
 //! immediately, but the camera stays closed (LED off, no CPU) until a subscriber
@@ -6,20 +6,30 @@
 //! mirrors `moq-boy`, which pauses its emulator on `track::Producer::used()` /
 //! `unused()`.
 
+#[cfg(feature = "capture")]
 use std::time::Instant;
 
 use moq_mux::catalog::hang::CatalogExt;
+#[cfg(any(feature = "capture", test))]
 use moq_net::Timestamp;
 
+use crate::Error;
+#[cfg(any(feature = "capture", test))]
+use crate::Frame;
+#[cfg(feature = "capture")]
 use crate::capture;
-use crate::{Error, Frame};
 
 use super::Encoded;
+#[cfg(feature = "capture")]
 use super::Sink;
-use super::encoder::{self, Codec};
+#[cfg(any(feature = "capture", test))]
+use super::encoder;
+use super::encoder::Codec;
+#[cfg(feature = "capture")]
 use super::rate::{Control, Policy};
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
+#[cfg(feature = "capture")]
 const DEFAULT_FRAMERATE: u32 = 30;
 
 /// Per-codec splitter + importer pair. Each codec frames its packets and resolves
@@ -157,6 +167,7 @@ impl<E: CatalogExt> Producer<E> {
 /// new knobs can be added without breaking callers.
 #[derive(Clone, Default)]
 #[non_exhaustive]
+#[cfg(feature = "capture")]
 pub struct Options {
 	/// Target bitrate in bits per second; `None` derives from resolution.
 	///
@@ -183,6 +194,7 @@ pub struct Options {
 
 // Hand-written: `bandwidth::Consumer` isn't `Debug`, but its presence is the
 // only part worth printing anyway.
+#[cfg(feature = "capture")]
 impl std::fmt::Debug for Options {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("Options")
@@ -201,6 +213,7 @@ impl std::fmt::Debug for Options {
 /// subscriber is watching; frames are stamped from `clock`, so passing the
 /// same [`Clock`](moq_mux::Clock) to a concurrent audio publish keeps the two
 /// tracks aligned.
+#[cfg(feature = "capture")]
 pub async fn publish_capture<E: CatalogExt>(
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer<E>,
@@ -240,7 +253,7 @@ pub async fn publish_capture<E: CatalogExt>(
 /// is `Send` there. This is never called; it exists only to fail compilation if
 /// the future ever regains a `!Send` component. macOS is exempt (the objc
 /// capture session is `!Send`).
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(feature = "capture", not(target_os = "macos")))]
 #[allow(dead_code)]
 fn assert_publish_capture_send(
 	broadcast: moq_net::broadcast::Producer,
@@ -256,12 +269,14 @@ fn assert_publish_capture_send(
 /// The live rate control state: the estimate source paired with the policy
 /// tracking it. `None` once there's nothing left to track, which is what stops
 /// the `select!` arm from spinning on a channel that is permanently ready.
+#[cfg(feature = "capture")]
 type Rate = Option<(moq_net::bandwidth::Consumer, Control)>;
 
 /// Wait for the next bandwidth estimate, or forever when rate control is off or
 /// finished. Cancel-safe: [`Consumer::changed`](moq_net::bandwidth::Consumer::changed)
 /// only reads shared state, so losing this race to a frame drops no estimate,
 /// it just re-reads the latest one next time round.
+#[cfg(feature = "capture")]
 async fn next_estimate(rate: &mut Rate) -> Option<Option<u64>> {
 	match rate {
 		Some((bandwidth, _)) => bandwidth.changed().await.ok(),
@@ -275,6 +290,7 @@ async fn next_estimate(rate: &mut Rate) -> Option<Option<u64>> {
 /// `None` means the producer is gone (the session ended for good), so rate
 /// control retires; a `Some(None)` estimate means the value is merely
 /// unavailable right now, which the policy holds through.
+#[cfg(feature = "capture")]
 async fn apply_estimate(encoder: &mut Sink, rate: &mut Rate, estimate: Option<Option<u64>>) {
 	let Some((_, control)) = rate.as_mut() else { return };
 
@@ -307,6 +323,7 @@ async fn apply_estimate(encoder: &mut Sink, rate: &mut Rate, estimate: Option<Op
 /// A dropped or closed track is the normal end of a publish; any other cause is
 /// a real abort (e.g. a transport reset) worth surfacing rather than treating as
 /// a clean exit.
+#[cfg(feature = "capture")]
 fn log_track_ended(err: moq_net::Error) {
 	if matches!(err, moq_net::Error::Dropped | moq_net::Error::Closed) {
 		tracing::debug!("video track no longer announced; stopping capture");
@@ -326,6 +343,7 @@ fn log_track_ended(err: moq_net::Error) {
 /// encode thread. Both the capture and encode threads sit idle between frames,
 /// so their joins return promptly unless the underlying device or encoder is
 /// itself wedged.
+#[cfg(feature = "capture")]
 async fn capture_loop<E: CatalogExt>(
 	producer: &mut Producer<E>,
 	demand: &moq_net::track::Demand,
