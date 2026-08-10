@@ -55,6 +55,12 @@ export class Stream {
 		}
 	}
 
+	/**
+	 * Open an outgoing bidirectional stream.
+	 * @param quic - The session to open it on
+	 * @param options - The version its varints encode with, and the send order ranking it
+	 *   against the session's other streams
+	 */
 	static async open(quic: WebTransport, options?: OpenOptions): Promise<Stream> {
 		const { readable, writable } = await quic.createBidirectionalStream({ sendOrder: options?.sendOrder });
 		return new Stream({ readable, writable, version: options?.version });
@@ -394,6 +400,12 @@ export class Writer {
 		this.#writer.abort(reason).catch(() => void 0);
 	}
 
+	/**
+	 * Open an outgoing unidirectional stream.
+	 * @param quic - The session to open it on
+	 * @param options - The version its varints encode with, and the send order ranking it
+	 *   against the session's other streams
+	 */
 	static async open(quic: WebTransport, options?: OpenOptions): Promise<Writer> {
 		const writable = (await quic.createUnidirectionalStream({
 			sendOrder: options?.sendOrder,
