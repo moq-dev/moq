@@ -101,7 +101,7 @@ Each group contains a single frame with UTF-8 JSON.
 
 A publisher MUST NOT write multiple frames to a group until a future specification includes a delta-encoding mechanism (via JSON Patch most likely).
 
-A publisher SHOULD also serve the catalog as a `catalog.json.z` track: the identical JSON, compressed ({{compression}}).
+A publisher SHOULD also serve the catalog as a `catalog.json.z` track: the identical JSON under the same group and frame rules, differing only by compression ({{compression}}).
 A consumer reads whichever of the two tracks it prefers.
 
 ## Root
@@ -347,7 +347,7 @@ A publisher MUST omit this trailing marker from each frame and a consumer MUST a
 
 
 # Timeline {#timeline}
-A media track MAY have a companion timeline track: an ordered log mapping each of the media track's groups to its start timestamp.
+A media track MAY have a companion timeline track: an ordered log mapping the media track's groups to their start timestamps.
 On the wire a group carries only a sequence number; the timestamps live inside the media frames.
 The timeline republishes that mapping as metadata, so a consumer can determine which group covers a given time, and where the live edge is, without downloading the media itself.
 This is the primitive used to seek, or to serve HLS/DASH playlists.
@@ -362,16 +362,20 @@ type Timeline = {
 }
 ~~~
 
-The `track` field names the timeline track, published in the same broadcast as the catalog.
+The `track` field names the timeline track, published in the same broadcast as the media track it indexes: the rendition's `broadcast` field ({{field-broadcast}}), when present, relocates the timeline along with the media.
 The conventional name is the media track's name with a `.timeline.z` suffix, but a consumer MUST use the name from the catalog rather than deriving it.
 Renditions MAY share a timeline track when their group boundaries are aligned, for example a transcode ladder mirroring the source's groups.
 Audio and video groups have different durations, so each declares its own timeline.
 
-The `timescale` field is the number of timestamp units per second, defaulting to 1000 (milliseconds).
+The `timescale` field is the number of timestamp units per second, a positive integer defaulting to 1000 (milliseconds).
+A value of 0 is invalid; a consumer MUST reject a timeline that declares it.
 
 The `wall` field anchors the timeline to the wall clock, if known: the wall-clock time of timestamp 0, in `timescale` units since the moq epoch, 2020-01-01T00:00:00Z (1577836800 Unix seconds).
-Measuring from 2020 rather than 1970 keeps the value safely within a 53-bit JSON integer even at fine timescales.
+Measuring from 2020 rather than 1970 keeps the values small.
 A consumer derives the wall-clock time of any group as `wall + pts`.
+
+Timeline integers (`timescale`, `wall`, and each record's `pts`) MUST NOT exceed 2^53 - 1, so they survive JSON consumers that parse numbers as IEEE 754 doubles.
+A publisher chooses a `timescale` coarse enough to honor this bound.
 
 ## Timeline Track
 The timeline track is a single compressed ({{compression}}) group that is never rolled.
@@ -386,14 +390,16 @@ type Record = {
 ~~~
 
 The `group` field is the sequence number of the media track's group, as used by subscriptions and fetches.
-The `pts` field is the group's start, its first frame's presentation timestamp, in the timeline's `timescale`.
+The `pts` field is the group's start, its first frame's presentation timestamp, re-expressed in the timeline's `timescale` (rounding down when the media clock is finer).
 Additional fields MAY be added based on the application; a consumer MUST ignore fields it does not recognize.
 
-A record is appended when the media group opens, so the live edge of the timeline is the live edge of the media.
-A group's duration is implicit: the gap to the next record.
+A record is appended when its group opens, so the live edge of the timeline is the live edge of the media.
+A publisher MAY throttle records to a granularity, emitting at most one record per some amount of media time; video keyframes are usually at least that far apart, while short audio groups are thinned out.
 
-A publisher MAY throttle records to a granularity, emitting at most one record per some amount of media time.
-Group sequence numbers are contiguous, so a consumer that lands between two records can extrapolate the group number or inspect the media to fill the gap.
+A record therefore spans from its `pts` until the next record's `pts`: the named group plus any unrecorded groups that opened in between.
+The last record's span extends to the live edge, its duration unknown until the next record arrives.
+A consumer looks up a time by finding the record whose span covers it, which names the group to fetch first.
+To locate an individual unrecorded group within a span, a consumer MAY extrapolate from the surrounding records when the media track's group sequence numbers are contiguous, or inspect the fetched media itself.
 
 
 # Security Considerations
