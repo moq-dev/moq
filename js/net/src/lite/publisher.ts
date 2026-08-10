@@ -546,28 +546,32 @@ export class Publisher {
 	 */
 	async #runGroup(sub: bigint, group: group.Consumer, timescale: Timescale, track: track.Subscriber) {
 		const msg = new GroupMessage(sub, group.sequence);
+		const rank = () => sendOrder(track.subscription.peek()?.priority ?? 0, group.sequence);
+
 		try {
 			// The transport drains streams by send order, so this is what makes a high-priority
 			// track (and a newer group within it) win the link when there isn't room for both.
-			const stream = await Writer.open(this.#quic, {
-				sendOrder: sendOrder(track.subscription.peek()?.priority ?? 0, group.sequence),
-			});
+			const stream = await Writer.open(this.#quic, { sendOrder: rank() });
 
 			// A SUBSCRIBE_UPDATE re-ranks the subscription, so a group already on the wire has to
 			// follow it too. Otherwise a long group keeps its stale rank until it finishes.
-			const reranked = track.subscription.subscribe((update) =>
-				stream.setPriority(sendOrder(update?.priority ?? 0, group.sequence)),
-			);
+			const reranked = track.subscription.subscribe(() => stream.setPriority(rank()));
 
-			await stream.u53(0); // stream type
-			await msg.encode(stream);
-
-			// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
-			// advertised timescale; older drafts omit it.
-			const timestamps = supportsTrackStream(this.version);
-			let prevTs = 0n;
-
+			// Everything past this point runs inside the cleanup scope, so a failure never
+			// strands the listener on a subscription that outlives this group.
 			try {
+				// Opening the stream can block on transport capacity, so an update that landed
+				// while it did predates the listener above.
+				stream.setPriority(rank());
+
+				await stream.u53(0); // stream type
+				await msg.encode(stream);
+
+				// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
+				// advertised timescale; older drafts omit it.
+				const timestamps = supportsTrackStream(this.version);
+				let prevTs = 0n;
+
 				for (;;) {
 					const frame = await Promise.race([group.readFrame(), stream.closed]);
 					if (!frame) break;

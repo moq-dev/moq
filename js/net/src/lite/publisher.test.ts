@@ -160,6 +160,60 @@ test("lite draft-05: a subscribe update re-ranks a group already on the wire", a
 	}
 });
 
+// Opening a stream can block on transport capacity, and a subscription listener only sees
+// later changes, so an update landing in that window would otherwise be lost until the next one.
+test("lite draft-05: a subscribe update during the stream open still ranks the group", async () => {
+	const pair = createMockTransportPair(ALPN_05);
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video");
+	publisher.publish(Path.from("test"), broadcast);
+
+	// Hold the group's stream open call until the test releases it.
+	let release: () => void = () => {};
+	const opening = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const open = pair.server.createUnidirectionalStream.bind(pair.server);
+	pair.server.createUnidirectionalStream = async (options) => {
+		await opening;
+		return open(options);
+	};
+
+	const client = await Stream.open(pair.client);
+	const server = await Stream.accept(pair.server);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	const msg = new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 1 });
+	void publisher.runSubscribe(msg, server);
+
+	const group = new GroupProducer(4);
+	group.writeString("hello");
+	track.writeGroup(group);
+
+	try {
+		// The publisher is now parked inside the open, having already read priority 1.
+		await new SubscribeUpdate({ priority: 9 }).encode(client.writer, Version.DRAFT_05);
+		while (track.subscription.peek()?.priority !== 9) await track.subscription.changed();
+
+		release();
+		const opened = pair.client.incomingUnidirectionalStreams.getReader();
+		if ((await opened.read()).done) throw new Error("publisher never opened the group stream");
+		opened.releaseLock();
+
+		for (let i = 0; i < 200 && pair.server.sendStreams.uni[0]?.sendOrder !== sendOrder(9, 4); i++) {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+
+		expect(pair.server.sendStreams.uni[0]?.sendOrder).toBe(sendOrder(9, 4));
+	} finally {
+		group.close();
+		publisher.close();
+		client.close();
+	}
+});
+
 // A send order only schedules the local end, so the subscriber's FETCH stream ranks its own
 // request; without this the response competes with the group streams at the default order.
 test("lite draft-05: the fetch response ranks the publisher's own writes", async () => {
