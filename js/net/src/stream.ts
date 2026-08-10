@@ -307,6 +307,17 @@ export class Writer {
 		this.version = version;
 	}
 
+	/**
+	 * Rank this stream against the session's others, where HIGHER values are sent first.
+	 *
+	 * A send order only schedules the local end, so a stream the peer opened has to be ranked
+	 * here rather than at the peer's {@link open}. Setting it on anything but a WebTransport
+	 * send stream (a mock, a polyfill) is inert.
+	 */
+	setPriority(sendOrder: number) {
+		(this.#stream as WritableStream<Uint8Array> & { sendOrder?: number }).sendOrder = sendOrder;
+	}
+
 	async bool(v: boolean) {
 		await this.write(setUint8(this.#scratch, v ? 1 : 0));
 	}

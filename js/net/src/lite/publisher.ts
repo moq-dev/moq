@@ -355,6 +355,10 @@ export class Publisher {
 			return;
 		}
 
+		// The subscriber opened this stream, so its send order only ranked the request. Rank the
+		// response here, on the same scale as the group streams it competes with.
+		stream.writer.setPriority(sendOrder(msg.priority, msg.group));
+
 		let group: group.Consumer | undefined;
 		try {
 			// The timescale is immutable, so serve exactly what TRACK_INFO advertised.

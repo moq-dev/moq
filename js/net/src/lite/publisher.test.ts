@@ -4,6 +4,7 @@ import { Producer as GroupProducer } from "../group.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
+import { Fetch } from "./fetch.ts";
 import { randomOrigin } from "./origin.ts";
 import { sendOrder } from "./priority.ts";
 import { Publisher } from "./publisher.ts";
@@ -109,6 +110,40 @@ test("lite draft-05: group streams carry the subscription's send order", async (
 test("lite draft-05: a subscribe update re-ranks later groups", async () => {
 	const orders = await groupSendOrders(1, [0, 1], 9);
 	expect(orders).toEqual([sendOrder(1, 0), sendOrder(9, 1)]);
+});
+
+// A send order only schedules the local end, so the subscriber's FETCH stream ranks its own
+// request; without this the response competes with the group streams at the default order.
+test("lite draft-05: the fetch response ranks the publisher's own writes", async () => {
+	const pair = createMockTransportPair(ALPN_05);
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video");
+	publisher.publish(Path.from("test"), broadcast);
+
+	const group = new GroupProducer(7);
+	group.writeString("hello");
+	group.close();
+	track.writeGroup(group);
+
+	const client = await Stream.open(pair.client);
+
+	// Accept by hand rather than via Stream.accept, so the test keeps the writable the
+	// publisher ranks (a real WebTransportSendStream takes the same assignment).
+	const incoming = pair.server.incomingBidirectionalStreams.getReader();
+	const accepted = await incoming.read();
+	incoming.releaseLock();
+	if (accepted.done) throw new Error("publisher never saw the fetch stream");
+	const server = new Stream(accepted.value);
+
+	const msg = new Fetch(Path.from("test"), "video", 3, 7);
+	await publisher.runFetch(msg, server);
+
+	expect((accepted.value.writable as { sendOrder?: number }).sendOrder).toBe(sendOrder(3, 7));
+
+	broadcast.close();
+	client.close();
 });
 
 // A Rust subscriber feeds this value straight into `track::Producer::finish_at`, which is
