@@ -37,7 +37,8 @@ async function subscribeEnd(sequences: number[]): Promise<number> {
 		track.writeGroup(group);
 
 		// Let the publisher drain this group before the next, so arrival order is the
-		// order given rather than whatever the cache hands over in one batch.
+		// order given rather than whatever the cache hands over in one batch. A group that
+		// arrives late opens no stream at all, so there is nothing firmer to wait on.
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
 	track.close();
@@ -48,7 +49,7 @@ async function subscribeEnd(sequences: number[]): Promise<number> {
 			if ("end" in resp) return resp.end.group;
 		}
 	} finally {
-		broadcast.close();
+		publisher.close();
 		client.close();
 	}
 }
@@ -70,12 +71,15 @@ async function groupSendOrders(priority: number, sequences: number[], update?: n
 	const msg = new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority });
 	void publisher.runSubscribe(msg, server);
 
+	// The peer end of each group stream, which arrives as the publisher opens it.
+	const opened = pair.client.incomingUnidirectionalStreams.getReader();
+
 	try {
 		for (const [index, sequence] of sequences.entries()) {
 			if (index === 1 && update !== undefined) {
 				await new SubscribeUpdate({ priority: update }).encode(client.writer, Version.DRAFT_05);
-				// Let the publisher apply it, otherwise the next group races the update on the wire.
-				await new Promise((resolve) => setTimeout(resolve, 5));
+				// Wait for the publisher to apply it, rather than assuming it beat the next group.
+				while (track.subscription.peek()?.priority !== update) await track.subscription.changed();
 			}
 
 			const group = new GroupProducer(sequence);
@@ -83,19 +87,15 @@ async function groupSendOrders(priority: number, sequences: number[], update?: n
 			group.close();
 			track.writeGroup(group);
 
-			// One group per turn, so the send orders come back in the order given.
-			await new Promise((resolve) => setTimeout(resolve, 5));
+			// One stream per group, in the order given: wait for this one before queuing the next.
+			if ((await opened.read()).done) throw new Error("publisher never opened the group stream");
 		}
 		track.close();
 
-		// The last group's stream opens asynchronously, so wait for it rather than racing it.
-		for (let i = 0; i < 200 && pair.server.sendStreams.uni.length < sequences.length; i++) {
-			await new Promise((resolve) => setTimeout(resolve, 5));
-		}
-
 		return pair.server.sendStreams.uni.map((stream) => stream.sendOrder);
 	} finally {
-		broadcast.close();
+		opened.releaseLock();
+		publisher.close();
 		client.close();
 	}
 }
@@ -134,23 +134,30 @@ test("lite draft-05: a subscribe update re-ranks a group already on the wire", a
 	group.writeString("hello");
 	track.writeGroup(group);
 
-	for (let i = 0; i < 200 && pair.server.sendStreams.uni.length < 1; i++) {
-		await new Promise((resolve) => setTimeout(resolve, 5));
-	}
+	// The peer end arrives as the publisher opens the stream, so this needs no polling.
+	const opened = pair.client.incomingUnidirectionalStreams.getReader();
+	if ((await opened.read()).done) throw new Error("publisher never opened the group stream");
+	opened.releaseLock();
+
 	const stream = pair.server.sendStreams.uni[0];
 	expect(stream.sendOrder).toBe(sendOrder(1, 4));
 
-	await new SubscribeUpdate({ priority: 9 }).encode(client.writer, Version.DRAFT_05);
-	for (let i = 0; i < 200 && stream.sendOrder === sendOrder(1, 4); i++) {
-		await new Promise((resolve) => setTimeout(resolve, 5));
+	try {
+		await new SubscribeUpdate({ priority: 9 }).encode(client.writer, Version.DRAFT_05);
+		while (track.subscription.peek()?.priority !== 9) await track.subscription.changed();
+
+		// The publisher re-ranks from that same signal, so wait on the send order itself rather
+		// than on the dispatch order between its subscriber and this one.
+		for (let i = 0; i < 200 && stream.sendOrder === sendOrder(1, 4); i++) {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+
+		expect(stream.sendOrder).toBe(sendOrder(9, 4));
+	} finally {
+		group.close();
+		publisher.close();
+		client.close();
 	}
-
-	expect(stream.sendOrder).toBe(sendOrder(9, 4));
-
-	group.close();
-	track.close();
-	broadcast.close();
-	client.close();
 });
 
 // A send order only schedules the local end, so the subscriber's FETCH stream ranks its own
@@ -179,12 +186,14 @@ test("lite draft-05: the fetch response ranks the publisher's own writes", async
 	const server = new Stream(accepted.value);
 
 	const msg = new Fetch(Path.from("test"), "video", 3, 7);
-	await publisher.runFetch(msg, server);
+	try {
+		await publisher.runFetch(msg, server);
 
-	expect((accepted.value.writable as { sendOrder?: number }).sendOrder).toBe(sendOrder(3, 7));
-
-	broadcast.close();
-	client.close();
+		expect((accepted.value.writable as { sendOrder?: number }).sendOrder).toBe(sendOrder(3, 7));
+	} finally {
+		publisher.close();
+		client.close();
+	}
 });
 
 // A Rust subscriber feeds this value straight into `track::Producer::finish_at`, which is

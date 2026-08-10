@@ -191,13 +191,17 @@ export class MockTransport implements WebTransport {
 
 		const c2s = newStream();
 
+		// Record before handing the peer its end, so a peer that waits for the stream to arrive
+		// always finds it here.
+		const stream = this.#sendStream(c2s.writable, this.sendStreams.uni, options);
+
 		try {
 			peer.#uniController.enqueue(c2s.readable);
 		} catch {
 			// Peer closed
 		}
 
-		return this.#sendStream(c2s.writable, this.sendStreams.uni, options);
+		return stream;
 	}
 
 	// Give a writable the send order it opened with and record it, so a test sees both that
