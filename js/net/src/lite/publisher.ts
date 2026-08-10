@@ -12,7 +12,7 @@ import * as DatagramStream from "./datagram_stream.ts";
 import type { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
-import { sendOrder } from "./priority.ts";
+import { Priority, sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
@@ -398,6 +398,9 @@ export class Publisher {
 		// the encoding for a track that produced no groups.
 		let end = 0;
 
+		// One ranking for the whole subscription, shared by every group it serves.
+		const priority = new Priority(track);
+
 		try {
 			for (;;) {
 				const next = track.nextGroup();
@@ -413,7 +416,7 @@ export class Publisher {
 				}
 				end = Math.max(end, group.sequence + 1);
 
-				void this.#runGroup(sub, group, timescale, track);
+				void this.#runGroup(sub, group, timescale, priority);
 			}
 
 			if (emitRange) {
@@ -428,6 +431,8 @@ export class Publisher {
 			console.warn(`publish error: broadcast=${broadcast} track=${track.name} error=${reason(e)}`);
 			track.close(e);
 			stream.reset(e);
+		} finally {
+			priority.close();
 		}
 	}
 
@@ -540,29 +545,23 @@ export class Publisher {
 	 * @param sub - The subscription ID
 	 * @param group - The group to run
 	 * @param timescale - The track's advertised timescale, applied to every frame timestamp
-	 * @param track - The subscription being served, whose priority ranks this stream against the others
+	 * @param priority - The subscription's ranking, which this stream joins for as long as it runs
 	 *
 	 * @internal
 	 */
-	async #runGroup(sub: bigint, group: group.Consumer, timescale: Timescale, track: track.Subscriber) {
+	async #runGroup(sub: bigint, group: group.Consumer, timescale: Timescale, priority: Priority) {
 		const msg = new GroupMessage(sub, group.sequence);
-		const rank = () => sendOrder(track.subscription.peek()?.priority ?? 0, group.sequence);
-
 		try {
 			// The transport drains streams by send order, so this is what makes a high-priority
 			// track (and a newer group within it) win the link when there isn't room for both.
-			const stream = await Writer.open(this.#quic, { sendOrder: rank() });
+			const stream = await Writer.open(this.#quic, { sendOrder: priority.rank(group.sequence) });
 
-			// A SUBSCRIBE_UPDATE re-ranks the subscription, so a group already on the wire has to
-			// follow it too. Otherwise a long group keeps its stale rank until it finishes.
-			const reranked = track.subscription.subscribe(() => stream.setPriority(rank()));
-
-			// Everything past this point runs inside the cleanup scope, so a failure never
-			// strands the listener on a subscription that outlives this group.
+			// Everything past this point runs inside the cleanup scope, so a failure never leaves
+			// a finished group's stream being ranked.
 			try {
-				// Opening the stream can block on transport capacity, so an update that landed
-				// while it did predates the listener above.
-				stream.setPriority(rank());
+				// A SUBSCRIBE_UPDATE re-ranks the subscription, so a group already on the wire
+				// follows it too rather than keeping a stale rank until it finishes.
+				priority.add(stream, group.sequence);
 
 				await stream.u53(0); // stream type
 				await msg.encode(stream);
@@ -594,7 +593,7 @@ export class Publisher {
 				stream.reset(e);
 				group.close(e);
 			} finally {
-				reranked();
+				priority.remove(stream);
 			}
 		} catch (err: unknown) {
 			const e = error(err);

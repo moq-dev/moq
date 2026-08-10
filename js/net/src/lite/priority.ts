@@ -4,6 +4,10 @@
  * @module
  */
 
+import type { Dispose } from "@moq/signals";
+import type { Writer } from "../stream.ts";
+import type * as track from "../track.ts";
+
 // The transport compares send orders as a single number, so the two ranks are packed into
 // disjoint ranges: the track priority takes the high bits so it always dominates, and the
 // group sequence breaks ties below it. The priority is a u8, so 45 bits are left for the
@@ -39,4 +43,58 @@ function clamp(value: number, max: number): number {
 // equally. Wrapping instead keeps the ordering of any two groups that can coexist.
 function wrap(value: number, span: number): number {
 	return Math.max(Math.trunc(value), 0) % span;
+}
+
+/**
+ * Ranks one subscription's group streams, re-ranking them whenever it is updated.
+ *
+ * A SUBSCRIBE_UPDATE changes the priority of every group in flight, so this holds a single
+ * listener for the subscription and fans each change out to the streams. A listener per group
+ * would instead pile up on the subscription, and a track that stalls with many groups open
+ * would trip the signals leak guard.
+ */
+export class Priority {
+	#track: track.Subscriber;
+	#streams = new Map<Writer, number>();
+	#dispose: Dispose;
+
+	/** Follow `track`'s subscription until {@link close}. */
+	constructor(track: track.Subscriber) {
+		this.#track = track;
+		this.#dispose = track.subscription.subscribe(() => {
+			for (const [stream, sequence] of this.#streams) {
+				stream.setPriority(this.rank(sequence));
+			}
+		});
+	}
+
+	/** The send order for a group at `sequence`, given the subscription's current priority. */
+	rank(sequence: number): number {
+		return sendOrder(this.#track.subscription.peek()?.priority ?? 0, sequence);
+	}
+
+	/** Rank a group's stream now, and on every later update until {@link remove}. */
+	add(stream: Writer, sequence: number) {
+		this.#streams.set(stream, sequence);
+
+		// Opening a stream can block on transport capacity, so an update that landed while it
+		// did predates this registration.
+		stream.setPriority(this.rank(sequence));
+	}
+
+	/** Stop ranking a finished group's stream. */
+	remove(stream: Writer) {
+		this.#streams.delete(stream);
+	}
+
+	/**
+	 * Release the subscription listener.
+	 *
+	 * Any group still draining keeps the rank it last had, which is what a subscription on its
+	 * way out wants anyway.
+	 */
+	close() {
+		this.#dispose();
+		this.#streams.clear();
+	}
 }
