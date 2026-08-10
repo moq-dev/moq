@@ -25,6 +25,12 @@ function newStream(): TransformStream<Uint8Array, Uint8Array> {
 	);
 }
 
+/**
+ * An outgoing stream, carrying the send order a real `WebTransportSendStream` would.
+ * A plain `WritableStream` has no such attribute, so the mock supplies it.
+ */
+export type SendStream = WritableStream<Uint8Array> & { sendOrder?: number };
+
 /** A fake {@link WebTransport} backed by TransformStreams, paired with a peer. */
 export class MockTransport implements WebTransport {
 	readonly protocol: string;
@@ -39,11 +45,12 @@ export class MockTransport implements WebTransport {
 	readonly reliability: string;
 
 	/**
-	 * Every `sendOrder` requested when opening an outgoing stream, in call order, split by
-	 * stream kind. The mock delivers streams in creation order regardless; these let a test
-	 * assert how the wire layer ranked them (`undefined` when it asked for no order).
+	 * Every outgoing stream this transport opened, in call order, split by stream kind. Each
+	 * carries a live {@link SendStream.sendOrder} (set when it opened, and by any later
+	 * re-rank), so a test can assert how the wire layer prioritized it. The mock always
+	 * delivers in creation order, so nothing else observes it.
 	 */
-	readonly sendOrders: { uni: (number | undefined)[]; bidi: (number | undefined)[] } = { uni: [], bidi: [] };
+	readonly sendStreams: { uni: SendStream[]; bidi: SendStream[] } = { uni: [], bidi: [] };
 
 	#closeResolve!: (info: WebTransportCloseInfo) => void;
 	#bidiController!: ReadableStreamDefaultController<WebTransportBidirectionalStream>;
@@ -150,8 +157,6 @@ export class MockTransport implements WebTransport {
 	}
 
 	async createBidirectionalStream(options?: WebTransportSendStreamOptions): Promise<WebTransportBidirectionalStream> {
-		this.sendOrders.bidi.push(options?.sendOrder);
-
 		const peer = this.#peer;
 		if (!peer) throw new Error("no peer");
 
@@ -162,7 +167,7 @@ export class MockTransport implements WebTransport {
 		// Local side: writes to c2s, reads from s2c
 		const local = {
 			readable: s2c.readable,
-			writable: c2s.writable,
+			writable: this.#sendStream(c2s.writable, this.sendStreams.bidi, options),
 		} as WebTransportBidirectionalStream;
 
 		// Peer side: writes to s2c, reads from c2s
@@ -181,8 +186,6 @@ export class MockTransport implements WebTransport {
 	}
 
 	async createUnidirectionalStream(options?: WebTransportSendStreamOptions): Promise<WritableStream<Uint8Array>> {
-		this.sendOrders.uni.push(options?.sendOrder);
-
 		const peer = this.#peer;
 		if (!peer) throw new Error("no peer");
 
@@ -194,7 +197,20 @@ export class MockTransport implements WebTransport {
 			// Peer closed
 		}
 
-		return c2s.writable;
+		return this.#sendStream(c2s.writable, this.sendStreams.uni, options);
+	}
+
+	// Give a writable the send order it opened with and record it, so a test sees both that
+	// order and any later re-rank (which assigns the same property, as on a real send stream).
+	#sendStream(
+		writable: WritableStream<Uint8Array>,
+		log: SendStream[],
+		options?: WebTransportSendStreamOptions,
+	): SendStream {
+		const stream = writable as SendStream;
+		stream.sendOrder = options?.sendOrder;
+		log.push(stream);
+		return stream;
 	}
 
 	close(_closeInfo?: WebTransportCloseInfo): void {

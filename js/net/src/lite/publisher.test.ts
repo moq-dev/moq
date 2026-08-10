@@ -89,11 +89,11 @@ async function groupSendOrders(priority: number, sequences: number[], update?: n
 		track.close();
 
 		// The last group's stream opens asynchronously, so wait for it rather than racing it.
-		for (let i = 0; i < 200 && pair.server.sendOrders.uni.length < sequences.length; i++) {
+		for (let i = 0; i < 200 && pair.server.sendStreams.uni.length < sequences.length; i++) {
 			await new Promise((resolve) => setTimeout(resolve, 5));
 		}
 
-		return pair.server.sendOrders.uni;
+		return pair.server.sendStreams.uni.map((stream) => stream.sendOrder);
 	} finally {
 		broadcast.close();
 		client.close();
@@ -110,6 +110,47 @@ test("lite draft-05: group streams carry the subscription's send order", async (
 test("lite draft-05: a subscribe update re-ranks later groups", async () => {
 	const orders = await groupSendOrders(1, [0, 1], 9);
 	expect(orders).toEqual([sendOrder(1, 0), sendOrder(9, 1)]);
+});
+
+// A group can outlive the priority it opened with, so an update has to reach the stream that
+// is already on the wire. Otherwise (say) an active-speaker change waits for the next group.
+test("lite draft-05: a subscribe update re-ranks a group already on the wire", async () => {
+	const pair = createMockTransportPair(ALPN_05);
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video");
+	publisher.publish(Path.from("test"), broadcast);
+
+	const client = await Stream.open(pair.client);
+	const server = await Stream.accept(pair.server);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	const msg = new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 1 });
+	void publisher.runSubscribe(msg, server);
+
+	// Leave the group open, so its stream is still being served when the update lands.
+	const group = new GroupProducer(4);
+	group.writeString("hello");
+	track.writeGroup(group);
+
+	for (let i = 0; i < 200 && pair.server.sendStreams.uni.length < 1; i++) {
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	const stream = pair.server.sendStreams.uni[0];
+	expect(stream.sendOrder).toBe(sendOrder(1, 4));
+
+	await new SubscribeUpdate({ priority: 9 }).encode(client.writer, Version.DRAFT_05);
+	for (let i = 0; i < 200 && stream.sendOrder === sendOrder(1, 4); i++) {
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+
+	expect(stream.sendOrder).toBe(sendOrder(9, 4));
+
+	group.close();
+	track.close();
+	broadcast.close();
+	client.close();
 });
 
 // A send order only schedules the local end, so the subscriber's FETCH stream ranks its own

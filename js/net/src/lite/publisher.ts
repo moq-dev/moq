@@ -413,8 +413,7 @@ export class Publisher {
 				}
 				end = Math.max(end, group.sequence + 1);
 
-				// Read the priority per group so a SUBSCRIBE_UPDATE applies to everything after it.
-				void this.#runGroup(sub, group, timescale, track.subscription.peek()?.priority ?? 0);
+				void this.#runGroup(sub, group, timescale, track);
 			}
 
 			if (emitRange) {
@@ -541,16 +540,25 @@ export class Publisher {
 	 * @param sub - The subscription ID
 	 * @param group - The group to run
 	 * @param timescale - The track's advertised timescale, applied to every frame timestamp
-	 * @param priority - The subscriber's current track priority, ranking this stream against the others
+	 * @param track - The subscription being served, whose priority ranks this stream against the others
 	 *
 	 * @internal
 	 */
-	async #runGroup(sub: bigint, group: group.Consumer, timescale: Timescale, priority: number) {
+	async #runGroup(sub: bigint, group: group.Consumer, timescale: Timescale, track: track.Subscriber) {
 		const msg = new GroupMessage(sub, group.sequence);
 		try {
 			// The transport drains streams by send order, so this is what makes a high-priority
 			// track (and a newer group within it) win the link when there isn't room for both.
-			const stream = await Writer.open(this.#quic, { sendOrder: sendOrder(priority, group.sequence) });
+			const stream = await Writer.open(this.#quic, {
+				sendOrder: sendOrder(track.subscription.peek()?.priority ?? 0, group.sequence),
+			});
+
+			// A SUBSCRIBE_UPDATE re-ranks the subscription, so a group already on the wire has to
+			// follow it too. Otherwise a long group keeps its stale rank until it finishes.
+			const reranked = track.subscription.subscribe((update) =>
+				stream.setPriority(sendOrder(update?.priority ?? 0, group.sequence)),
+			);
+
 			await stream.u53(0); // stream type
 			await msg.encode(stream);
 
@@ -581,6 +589,8 @@ export class Publisher {
 				const e = error(err);
 				stream.reset(e);
 				group.close(e);
+			} finally {
+				reranked();
 			}
 		} catch (err: unknown) {
 			const e = error(err);
