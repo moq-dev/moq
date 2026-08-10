@@ -273,16 +273,16 @@ impl Protocol {
 /// The draft makes the deadline the sender's promise, not the peer's, so the
 /// driver arms this after the message hits the wire rather than making the
 /// caller hold a handle and await it.
-pub(crate) async fn enforce<S: web_transport_trait::Session>(session: &S, timeout: Option<Duration>) {
+pub(crate) async fn enforce<S: crate::transport::poll::Session>(session: &mut S, timeout: Option<Duration>) {
 	let Some(timeout) = timeout else {
 		return;
 	};
 
-	let mut closed = std::pin::pin!(session.closed());
 	let mut deadline = std::pin::pin!(web_async::time::sleep(timeout));
 
 	let expired = kio::wait(|waiter| {
-		if waiter.poll_future(closed.as_mut()).is_ready() {
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		if session.poll_closed(&mut cx).is_ready() {
 			return Poll::Ready(false);
 		}
 		waiter.poll_future(deadline.as_mut()).map(|_| true)

@@ -133,7 +133,7 @@ struct Advertised {
 }
 
 #[derive(Clone)]
-pub(super) struct Subscriber<S: web_transport_trait::Session> {
+pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	session: S,
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Producer,
@@ -185,7 +185,7 @@ async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, al
 	.await
 }
 
-impl<S: web_transport_trait::Session> Subscriber<S> {
+impl<S: crate::transport::poll::Session> Subscriber<S> {
 	#[allow(clippy::too_many_arguments)]
 	pub fn new(
 		session: S,
@@ -326,7 +326,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// A failure here is per-prefix, so the caller decides what it means for the
 	/// session: [`is_protocol_violation`] separates the peer's fault (fatal) from a
 	/// stream of ours that simply died (survivable).
-	pub async fn run_subscribe_namespace<T: web_transport_trait::Session>(
+	pub async fn run_subscribe_namespace<T: crate::transport::poll::Session>(
 		&mut self,
 		mut stream: Stream<T, Version>,
 		prefix: PathOwned,
@@ -419,7 +419,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// `live` tracks the suffixes this stream has advertised, so a repeat is recognized
 	/// as an update rather than a second advertisement, and the caller can release
 	/// whatever is still held when the stream ends.
-	async fn run_namespace_entries<T: web_transport_trait::Session>(
+	async fn run_namespace_entries<T: crate::transport::poll::Session>(
 		&mut self,
 		stream: &mut Stream<T, Version>,
 		prefix: &PathOwned,
@@ -973,12 +973,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: broadcast::Dynamic) -> Result<(), Error> {
 		let mut subscribes = TaskSet::owned();
+		let mut closed_session = self.session.clone();
 		loop {
 			let next = subscribes
 				.drive(async {
-					let mut closed = std::pin::pin!(self.session.closed());
 					kio::wait(|waiter| {
-						if waiter.poll_future(closed.as_mut()).is_ready() {
+						let mut cx = std::task::Context::from_waker(waiter.waker());
+						if closed_session.poll_closed(&mut cx).is_ready() {
 							return Poll::Ready(None);
 						}
 						// A draining peer usually stops publishing namespaces, so react to
@@ -1052,7 +1053,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
-		let mut stream = match Stream::open(&self.session, self.version).await {
+		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
 			Ok(s) => s,
 			Err(err) => {
 				tracing::debug!(%err, "failed to open subscribe stream");
@@ -1421,7 +1422,7 @@ mod tests {
 			"one SUBSCRIBE_NAMESPACE per permitted prefix, relative to the root",
 		);
 
-		let stream = Stream::open(&session, Version::Draft16).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), Version::Draft16).await.unwrap();
 		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("cam").to_owned()));
 		// Parks awaiting the peer's response; the request is already on the wire.
 		assert!(futures::poll!(run.as_mut()).is_pending());
@@ -1489,7 +1490,7 @@ mod tests {
 		);
 
 		let prefix = subscriber.subscribe_prefixes().pop().expect("one prefix");
-		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		// Parks on the read after the scripted NAMESPACE is consumed.
 		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix));
 		for _ in 0..100 {
@@ -1837,7 +1838,7 @@ mod tests {
 			Default::default(),
 		);
 
-		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		subscriber
 			.run_subscribe_namespace(stream, crate::Path::new("").to_owned())
 			.await
@@ -1907,7 +1908,7 @@ mod tests {
 			Default::default(),
 		);
 
-		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		let msg = ietf::PublishNamespace {
 			request_id: RequestId(0),
 			track_namespace: path.borrow(),
@@ -1962,7 +1963,7 @@ mod tests {
 		);
 
 		let path = crate::Path::new("room/host").to_owned();
-		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		let msg = ietf::PublishNamespace {
 			request_id: RequestId(0),
 			track_namespace: path.borrow(),
@@ -2276,7 +2277,7 @@ mod tests {
 		settle().await;
 		assert!(consumer.get_broadcast("room/host").is_some(), "attached to start with");
 
-		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		(subscriber, consumer, stream)
 	}
 
@@ -2449,7 +2450,7 @@ mod tests {
 			Default::default(),
 		);
 
-		let stream = Stream::open(&session, Version::Draft19).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), Version::Draft19).await.unwrap();
 		let msg = ietf::Publish {
 			request_id: RequestId(1),
 			track_namespace: crate::Path::new("room/host"),

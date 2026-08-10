@@ -236,8 +236,9 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 	/// Varints under 64 encode as a single byte, so the frame is hand-rolled.
 	/// Returns the recv half so the caller can wait for the peer to fully
 	/// process (and drop) the stream.
-	async fn send_goaway_raw<S: web_transport_trait::Session>(session: &S, uri: &str) -> S::RecvStream {
-		use web_transport_trait::SendStream as _;
+	async fn send_goaway_raw<S: moq_net::transport::poll::Session>(session: &mut S, uri: &str) -> S::RecvStream {
+		use moq_net::transport::poll::SendStream as _;
+		use moq_net::web_transport_trait::poll::SendStream as _;
 		assert!(uri.len() < 63, "helper only encodes single-byte varints");
 		// Message body = [uri length varint][uri bytes]; the size prefix covers it.
 		let mut frame = vec![0x05u8, uri.len() as u8 + 1, uri.len() as u8];
@@ -252,7 +253,7 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 
 	/// Block until the peer closes its half of the stream, i.e. it finished
 	/// processing the control message and dropped the stream.
-	async fn wait_processed<R: web_transport_trait::RecvStream>(mut recv: R) {
+	async fn wait_processed<R: moq_net::transport::poll::RecvStream>(mut recv: R) {
 		let mut buf = [0u8; 16];
 		while let Ok(Some(_)) = recv.read(&mut buf).await {}
 	}
@@ -274,7 +275,8 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 
 		// First GOAWAY: observed with its URI. Waiting for the peer to close the
 		// stream guarantees the control message was fully processed.
-		let recv_a = send_goaway_raw(&server_raw, "a").await;
+		let mut server_raw = server_raw;
+		let recv_a = send_goaway_raw(&mut server_raw, "a").await;
 		wait_processed(recv_a).await;
 		let goaway = client_session
 			.draining()
@@ -286,7 +288,7 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 
 		// Second GOAWAY: once the client has fully processed the stream, the
 		// observed payload must still carry the FIRST URI.
-		let recv_b = send_goaway_raw(&server_raw, "bb").await;
+		let recv_b = send_goaway_raw(&mut server_raw, "bb").await;
 		wait_processed(recv_b).await;
 
 		let goaway = client_session

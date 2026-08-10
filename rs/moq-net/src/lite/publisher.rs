@@ -49,7 +49,7 @@ struct SentRoute {
 	serving: bool,
 }
 
-pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
+pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
 	pub session: S,
 	/// The origin we read local broadcasts from. Traffic stats are attributed
 	/// through this handle: tag it with [`origin::Consumer::with_stats`] first.
@@ -65,7 +65,7 @@ pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	pub peer_origin: Option<Origin>,
 }
 
-pub(super) struct Publisher<S: web_transport_trait::Session> {
+pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	session: S,
 	origin: origin::Consumer,
 	self_origin: Origin,
@@ -86,7 +86,7 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	goaway: crate::goaway::Protocol,
 }
 
-impl<S: web_transport_trait::Session> Publisher<S> {
+impl<S: crate::transport::poll::Session> Publisher<S> {
 	pub fn new(config: PublisherConfig<S>) -> Self {
 		// Identity stamped onto outbound announce hops. Derived from the
 		// origin we're consuming so it matches the local relay identity
@@ -135,8 +135,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let this = Arc::new(self);
 		let mut tasks = TaskSet::owned();
 
+		// A dedicated accept handle: the poll interface takes `&mut self`, and the
+		// shared `this` stays behind the Arc for the per-stream children.
+		let mut accept = this.session.clone();
 		loop {
-			let stream = tasks.drive(Stream::accept(&this.session, this.version)).await?;
+			let stream = tasks.drive(Stream::accept(&mut accept, this.version)).await?;
 
 			let this = this.clone();
 			tasks.push(async move {
@@ -184,7 +187,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			// logs per-stream errors, so close the session here rather than letting a
 			// peer silently replace a redirect an observer may already be acting on.
 			tracing::warn!(%uri, "duplicate GOAWAY received; closing session");
-			self.session.close(SessionError::from(&err).to_code(), &err.to_string());
+			self.session
+				.clone()
+				.close(SessionError::from(&err).to_code(), &err.to_string());
 			return Err(err);
 		}
 		Ok(())
@@ -1920,7 +1925,7 @@ mod announce_test {
 /// model layer (`group::Producer::create_frame`) already converted the timestamp
 /// into the track timescale, so its raw value goes straight onto the wire. Mirrors
 /// the decode in the subscriber's `run_group`.
-async fn encode_frame_timing<W: web_transport_trait::SendStream>(
+async fn encode_frame_timing<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
 	frame: &frame::Consumer,
 	timescale: Option<crate::Timescale>,
@@ -1938,7 +1943,7 @@ async fn encode_frame_timing<W: web_transport_trait::SendStream>(
 
 /// Encode `curr` as a zigzag-mapped varint delta against `*prev`, then advance
 /// `*prev` to `curr`.
-async fn encode_zigzag_delta<W: web_transport_trait::SendStream>(
+async fn encode_zigzag_delta<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
 	curr: u64,
 	prev: &mut u64,
@@ -1957,7 +1962,7 @@ async fn encode_zigzag_delta<W: web_transport_trait::SendStream>(
 /// per-frame encoding in [`Subscription::serve_frame`] without the priority
 /// machinery, since a one-shot fetch carries a single static priority set on the
 /// stream up front.
-async fn write_fetch_frame<W: web_transport_trait::SendStream>(
+async fn write_fetch_frame<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
 	frame: &mut frame::Consumer,
 	timescale: Option<crate::Timescale>,
@@ -2147,7 +2152,7 @@ impl From<&lite::SubscribeUpdate> for Bounds {
 /// so each in-flight group reads the latest SUBSCRIBE_UPDATE priority via its own
 /// consumer cursor.
 #[derive(Clone)]
-struct Subscription<S: web_transport_trait::Session> {
+struct Subscription<S: crate::transport::poll::Session> {
 	session: S,
 	id: u64,
 	track_name: Arc<str>,
@@ -2165,7 +2170,7 @@ struct Subscription<S: web_transport_trait::Session> {
 	timescale: Option<crate::Timescale>,
 }
 
-impl<S: web_transport_trait::Session> Subscription<S> {
+impl<S: crate::transport::poll::Session> Subscription<S> {
 	async fn run_track(
 		mut self,
 		mut track: track::Subscriber,
@@ -2404,7 +2409,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 	///
 	/// The datagram is dropped (there is no group fallback) if the encoded body doesn't fit the
 	/// transport's datagram limit or the send fails (congestion / no capacity right now).
-	fn serve_datagram(&self, datagram: crate::Datagram) {
+	fn serve_datagram(&mut self, datagram: crate::Datagram) {
 		let body = lite::Datagram {
 			subscribe: self.id,
 			sequence: datagram.sequence,
@@ -2428,7 +2433,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 			return;
 		}
 
-		let _ = self.session.send_datagram(body);
+		let _ = self.session.send_datagram(&body);
 	}
 
 	/// Send one frame: the size, then the payload streamed chunk-by-chunk so we
@@ -2814,7 +2819,7 @@ mod tests {
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
-		let mut stream = Stream::open(&session, Version::Lite01).await.unwrap();
+		let mut stream = Stream::open(&mut session.clone(), Version::Lite01).await.unwrap();
 
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();

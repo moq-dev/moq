@@ -2,14 +2,14 @@ use crate::Error;
 use crate::coding::{Reader, Writer};
 
 /// A [Writer] and [Reader] pair for a single stream.
-pub struct Stream<S: web_transport_trait::Session, V> {
+pub struct Stream<S: crate::transport::poll::Session, V> {
 	pub writer: Writer<S::SendStream, V>,
 	pub reader: Reader<S::RecvStream, V>,
 }
 
-impl<S: web_transport_trait::Session, V> Stream<S, V> {
+impl<S: crate::transport::poll::Session, V> Stream<S, V> {
 	/// Open a new stream with the given version.
-	pub async fn open(session: &S, version: V) -> Result<Self, Error>
+	pub async fn open(session: &mut S, version: V) -> Result<Self, Error>
 	where
 		V: Clone,
 	{
@@ -22,7 +22,7 @@ impl<S: web_transport_trait::Session, V> Stream<S, V> {
 	}
 
 	/// Accept a new stream with the given version.
-	pub async fn accept(session: &S, version: V) -> Result<Self, Error>
+	pub async fn accept(session: &mut S, version: V) -> Result<Self, Error>
 	where
 		V: Clone,
 	{

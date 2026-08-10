@@ -34,6 +34,7 @@ mod server;
 #[cfg(feature = "tcp")]
 pub mod tcp;
 pub mod tls;
+pub mod transport;
 #[cfg(all(feature = "uds", unix))]
 pub mod unix;
 // Resolving a `host:port` bind string is a QUIC-listener concern; the stream

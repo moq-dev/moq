@@ -42,6 +42,7 @@ ring = ["rustls/ring", "rcgen?/ring", "quinn?/rustls-ring", "web-transport-noq?/
 android-logcat = ["dep:tracing-android"]
 
 [dependencies]
+bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3"
 hex = "0.4"

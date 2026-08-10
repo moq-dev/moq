@@ -13,7 +13,7 @@ use super::{
 };
 
 /// Everything one moq-transport session needs to start.
-pub struct Config<S: web_transport_trait::Session> {
+pub struct Config<S: crate::transport::poll::Session> {
 	pub session: S,
 
 	/// The bidi SETUP stream (draft-14 through draft-16 only). Draft-17+ passes `None`
@@ -61,11 +61,11 @@ pub struct Config<S: web_transport_trait::Session> {
 	pub peer_cluster: Option<cluster::Peer>,
 }
 
-pub fn start<S: web_transport_trait::Session>(
+pub fn start<S: crate::transport::poll::Session>(
 	config: Config<S>,
 ) -> Result<(MaybeSendBox<'static, Result<(), Error>>, crate::goaway::Handle), Error> {
 	let Config {
-		session,
+		mut session,
 		setup,
 		request_id_max,
 		client,
@@ -146,15 +146,15 @@ pub fn start<S: web_transport_trait::Session>(
 				// stream. Parked on the drain trigger; races the transport close so
 				// a parked trigger never blocks the task set draining.
 				{
-					let session = session.clone();
+					let mut session = session.clone();
 					let adapter = adapter.clone();
 					let goaway = goaway.clone();
 					tasks.push(async move {
 						let payload = {
-							let mut closed = std::pin::pin!(async { session.closed().await });
 							let mut triggered = std::pin::pin!(goaway.triggered());
 							kio::wait(|waiter| {
-								if waiter.poll_future(closed.as_mut()).is_ready() {
+								let mut cx = std::task::Context::from_waker(waiter.waker());
+								if session.poll_closed(&mut cx).is_ready() {
 									return std::task::Poll::Ready(None);
 								}
 								waiter.poll_future(triggered.as_mut())
@@ -166,7 +166,7 @@ pub fn start<S: web_transport_trait::Session>(
 						};
 						let timeout_ms = payload.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
 						adapter.send_goaway(&payload.uri, timeout_ms, version);
-						crate::goaway::enforce(&session, payload.timeout).await;
+						crate::goaway::enforce(&mut session, payload.timeout).await;
 					});
 				}
 				drop(tasks);
@@ -202,13 +202,14 @@ pub fn start<S: web_transport_trait::Session>(
 						prefixes.push(async move {
 							let stream = match version {
 								Version::Draft16 => {
+									let mut sub_ns_adapter = sub_ns_adapter;
 									let (send, recv) = sub_ns_adapter.open_native_bi().await?;
 									Stream {
 										writer: crate::coding::Writer::new(send, version),
 										reader: crate::coding::Reader::new(recv, version),
 									}
 								}
-								_ => Stream::open(&sub_ns_adapter, version).await?,
+								_ => Stream::open(&mut sub_ns_adapter.clone(), version).await?,
 							};
 							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
 								// The peer breaking the protocol is fatal, and the driver
@@ -326,7 +327,8 @@ pub fn start<S: web_transport_trait::Session>(
 						let mut sub_ns = sub_ns.clone();
 						let sub_ns_session = sub_ns_session.clone();
 						prefixes.push(async move {
-							let stream = Stream::open(&sub_ns_session, version).await?;
+							let mut sub_ns_session = sub_ns_session;
+							let stream = Stream::open(&mut sub_ns_session, version).await?;
 							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
 								// The peer breaking the protocol is fatal, and the driver
 								// below turns this into the session close the draft wants.
@@ -393,7 +395,7 @@ pub fn start<S: web_transport_trait::Session>(
 }
 
 /// What a peer's SETUP told us, beyond the stream it arrived on.
-pub struct PeerSetup<S: web_transport_trait::Session> {
+pub struct PeerSetup<S: crate::transport::poll::Session> {
 	/// The SETUP stream, which becomes the GOAWAY channel.
 	pub stream: Reader<S::RecvStream, crate::Version>,
 
@@ -423,8 +425,8 @@ fn self_origin(publish: Option<&origin::Consumer>, subscribe: Option<&origin::Pr
 /// `STOP_SENDING`-ed and skipped (group data needs a prior subscribe, so nothing
 /// legitimate precedes the SETUP at connect). Pass the returned reader to [`start`]
 /// as its `peer_setup_stream` so GOAWAY monitoring continues without re-reading it.
-pub async fn accept_setup<S: web_transport_trait::Session>(
-	session: &S,
+pub async fn accept_setup<S: crate::transport::poll::Session>(
+	session: &mut S,
 	version: Version,
 ) -> Result<PeerSetup<S>, Error> {
 	let outer_version = crate::Version::Ietf(version);
@@ -473,8 +475,8 @@ fn decode_peer_cluster(parameters: bytes::Bytes, version: Version) -> Result<clu
 /// `path` is the request path we advertise (clients on URL-less transports); a
 /// server passes `None`. `self_origin` and `cost` are the MoQ Cluster options, which
 /// declare our identity and (client-only) what this link costs to cross.
-async fn run_setup<S: web_transport_trait::Session>(
-	session: S,
+async fn run_setup<S: crate::transport::poll::Session>(
+	mut session: S,
 	version: Version,
 	path: Option<String>,
 	self_origin: Origin,
@@ -533,7 +535,7 @@ async fn run_setup<S: web_transport_trait::Session>(
 		writer.encode(&size).await?;
 		writer.write_all(&mut std::io::Cursor::new(body)).await?;
 
-		crate::goaway::enforce(&session, payload.timeout).await;
+		crate::goaway::enforce(&mut session, payload.timeout).await;
 		session.closed().await;
 		writer.finish().ok();
 	} else {
@@ -547,8 +549,8 @@ async fn run_setup<S: web_transport_trait::Session>(
 ///
 /// For v17, this also handles the SETUP stream (0x2F00) and GOAWAY.
 /// For v14-16, all uni streams are group data.
-async fn run_unis<S: web_transport_trait::Session>(
-	session: S,
+async fn run_unis<S: crate::transport::poll::Session>(
+	mut session: S,
 	subscriber: Subscriber<S>,
 	// Where to record the peer's MoQ Cluster options once its SETUP arrives. `None`
 	// for draft-14..16, whose SETUP rides the control stream instead.
@@ -595,7 +597,7 @@ async fn run_unis<S: web_transport_trait::Session>(
 			}
 
 			let peer_setup = peer_setup.clone();
-			let session = session.clone();
+			let mut session = session.clone();
 			let goaway = goaway.clone();
 			tasks.push(async move {
 				// The negotiation gates the announce and dispatch loops, so a SETUP we
@@ -643,7 +645,7 @@ async fn run_unis<S: web_transport_trait::Session>(
 	}
 }
 
-async fn run_uni_group<S: web_transport_trait::Session>(
+async fn run_uni_group<S: crate::transport::poll::Session>(
 	subscriber: &mut Subscriber<S>,
 	stream: &mut Reader<S::RecvStream, Version>,
 ) -> Result<(), Error> {
@@ -665,7 +667,7 @@ async fn run_uni_group<S: web_transport_trait::Session>(
 }
 
 /// Accept incoming bidi streams and dispatch to the correct handler based on message type.
-async fn run_dispatch<S: web_transport_trait::Session>(
+async fn run_dispatch<S: crate::transport::poll::Session>(
 	session: S,
 	publisher: Publisher<S>,
 	mut subscriber: Subscriber<S>,
@@ -678,8 +680,9 @@ async fn run_dispatch<S: web_transport_trait::Session>(
 	let peer = subscriber.peer().await;
 
 	let mut tasks = TaskSet::owned();
+	let mut accept = session.clone();
 	loop {
-		let mut stream = tasks.drive(Stream::accept(&session, version)).await?;
+		let mut stream = tasks.drive(Stream::accept(&mut accept, version)).await?;
 
 		let header = tasks
 			.drive(async {
@@ -725,7 +728,7 @@ async fn run_dispatch<S: web_transport_trait::Session>(
 
 /// Monitor the peer's SETUP stream for a GOAWAY, surfacing it through
 /// [`crate::Session::goaway`], then hold the stream until it FINs.
-async fn run_goaway<R: web_transport_trait::RecvStream>(
+async fn run_goaway<R: crate::transport::poll::RecvStream>(
 	mut reader: Reader<R, Version>,
 	version: Version,
 	goaway: crate::goaway::Protocol,

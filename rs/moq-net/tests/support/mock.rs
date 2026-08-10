@@ -1,17 +1,22 @@
 //! In-memory mock WebTransport session for deterministic testing.
 //!
 //! Two `MockSession` instances form a bidirectional pair: streams opened on one
-//! side appear as accepted streams on the other. Backed by tokio channels so
-//! delivery is ordered per-stream and deterministic (no real network jitter).
+//! side appear as accepted streams on the other. Backed by kio queues so
+//! delivery is ordered per-stream and deterministic (no real network jitter),
+//! and so the mock implements the poll interface directly, which is what
+//! moq-net requires.
 //!
 //! The mock guarantees that data written and FIN'd on a stream before `close()`
 //! is readable by the peer, eliminating the Quinn CONNECTION_CLOSE race that
 //! plagues real-transport tests.
 
-use std::sync::{Arc, Mutex};
+use std::{
+	sync::{Arc, Mutex},
+	task::{Context, Poll},
+};
 
 use bytes::Bytes;
-use tokio::sync::mpsc;
+use web_transport_trait::poll;
 
 // ── Error ───────────────────────────────────────────────────────────
 
@@ -68,76 +73,112 @@ enum StreamChunk {
 /// Shared closed-signal state between a paired SendStream and RecvStream.
 ///
 /// Models QUIC STOP_SENDING: the recv side (or its Drop) flips the flag and
-/// notifies; the send side's `closed()` polls this without consuming state.
+/// wakes; the send side's `poll_closed` reads this without consuming state.
+#[derive(Default)]
 struct ClosedSignal {
 	/// Set once the peer signals stop or drops.
 	result: Mutex<Option<Result<(), MockError>>>,
-	/// Wakes pending `closed()` futures.
-	notify: tokio::sync::Notify,
+	/// Wakes pending `poll_closed` watches.
+	waiters: kio::Fan,
 }
 
-/// A mock send stream backed by an mpsc channel to the peer's reader.
+impl ClosedSignal {
+	fn set(&self, result: Result<(), MockError>) {
+		let mut slot = self.result.lock().unwrap();
+		if slot.is_none() {
+			*slot = Some(result);
+			self.waiters.wake();
+		}
+	}
+}
+
+/// A mock send stream backed by a queue to the peer's reader.
 pub struct MockSendStream {
-	tx: Option<mpsc::UnboundedSender<StreamChunk>>,
+	tx: Option<kio::Queue<StreamChunk>>,
 	closed: Arc<ClosedSignal>,
+	park: kio::Park,
 }
 
-impl web_transport_trait::SendStream for MockSendStream {
+impl poll::SendStream for MockSendStream {
 	type Error = MockError;
 
-	async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-		let tx = self.tx.as_ref().ok_or_else(MockError::closed)?;
-		tx.send(StreamChunk::Data(Bytes::copy_from_slice(buf)))
-			.map_err(|_| MockError::closed())?;
-		Ok(buf.len())
+	fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		let Some(tx) = self.tx.as_ref() else {
+			return Poll::Ready(Err(MockError::closed()));
+		};
+		match tx.try_push(StreamChunk::Data(Bytes::copy_from_slice(buf))) {
+			Ok(()) => Poll::Ready(Ok(buf.len())),
+			Err(_) => Poll::Ready(Err(MockError::closed())),
+		}
 	}
 
 	fn set_priority(&mut self, _order: u8) {}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		if let Some(tx) = self.tx.take() {
-			let _ = tx.send(StreamChunk::Fin);
+			let _ = tx.try_push(StreamChunk::Fin);
 		}
 		Ok(())
 	}
 
 	fn reset(&mut self, code: u32) {
 		if let Some(tx) = self.tx.take() {
-			let _ = tx.send(StreamChunk::Reset(code));
+			let _ = tx.try_push(StreamChunk::Reset(code));
 		}
 	}
 
-	async fn closed(&mut self) -> Result<(), Self::Error> {
-		loop {
-			// Check if already signaled (idempotent: never consumes state).
-			let notified = self.closed.notify.notified();
-			if let Some(result) = self.closed.result.lock().unwrap().clone() {
-				return result;
-			}
-			notified.await;
+	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		// Register before checking so a signal racing this poll still wakes it.
+		self.closed.waiters.register(self.park.hold(cx));
+		match self.closed.result.lock().unwrap().clone() {
+			Some(result) => Poll::Ready(result),
+			None => Poll::Pending,
+		}
+	}
+}
+
+impl Drop for MockSendStream {
+	fn drop(&mut self) {
+		// Dropped without an explicit FIN: deliver an implicit one, matching a
+		// sender that went away cleanly.
+		if let Some(tx) = self.tx.take() {
+			let _ = tx.try_push(StreamChunk::Fin);
 		}
 	}
 }
 
 // ── RecvStream ──────────────────────────────────────────────────────
 
-/// A mock receive stream backed by an mpsc channel from the peer's writer.
+/// A mock receive stream backed by a queue from the peer's writer.
 pub struct MockRecvStream {
-	rx: mpsc::UnboundedReceiver<StreamChunk>,
+	rx: kio::Queue<StreamChunk>,
 	/// Buffered bytes from a chunk that was partially consumed.
 	buf: Bytes,
 	/// Whether we hit FIN or reset.
 	done: bool,
-	/// Shared signal to notify the peer's SendStream::closed().
+	/// Shared signal to notify the peer's send-side `poll_closed`.
 	closed: Arc<ClosedSignal>,
+	park: kio::Park,
 }
 
-impl web_transport_trait::RecvStream for MockRecvStream {
+impl MockRecvStream {
+	/// Pop the next chunk, mapping queue closure to an implicit FIN.
+	fn poll_chunk(&mut self, cx: &mut Context<'_>) -> Poll<Option<StreamChunk>> {
+		let waiter = self.park.hold(cx);
+		match self.rx.poll_pop(waiter) {
+			Poll::Ready(Ok(chunk)) => Poll::Ready(Some(chunk)),
+			Poll::Ready(Err(_)) => Poll::Ready(None),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+}
+
+impl poll::RecvStream for MockRecvStream {
 	type Error = MockError;
 
-	async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
 		if self.done {
-			return Ok(None);
+			return Poll::Ready(Ok(None));
 		}
 
 		// Drain buffered bytes first.
@@ -145,59 +186,49 @@ impl web_transport_trait::RecvStream for MockRecvStream {
 			let n = dst.len().min(self.buf.len());
 			dst[..n].copy_from_slice(&self.buf[..n]);
 			self.buf = self.buf.slice(n..);
-			return Ok(Some(n));
+			return Poll::Ready(Ok(Some(n)));
 		}
 
-		// Wait for next chunk from peer.
-		match self.rx.recv().await {
+		match std::task::ready!(self.poll_chunk(cx)) {
 			Some(StreamChunk::Data(data)) => {
 				let n = dst.len().min(data.len());
 				dst[..n].copy_from_slice(&data[..n]);
 				if n < data.len() {
 					self.buf = data.slice(n..);
 				}
-				Ok(Some(n))
+				Poll::Ready(Ok(Some(n)))
 			}
-			Some(StreamChunk::Fin) => {
+			Some(StreamChunk::Fin) | None => {
 				self.done = true;
-				Ok(None)
+				Poll::Ready(Ok(None))
 			}
 			Some(StreamChunk::Reset(code)) => {
 				self.done = true;
-				Err(MockError::stream_reset(code))
-			}
-			None => {
-				// Sender dropped without explicit FIN: treat as implicit FIN.
-				self.done = true;
-				Ok(None)
+				Poll::Ready(Err(MockError::stream_reset(code)))
 			}
 		}
 	}
 
 	fn stop(&mut self, _code: u32) {
-		let mut result = self.closed.result.lock().unwrap();
-		if result.is_none() {
-			*result = Some(Ok(()));
-			self.closed.notify.notify_waiters();
-		}
+		self.closed.set(Ok(()));
 		self.done = true;
 	}
 
-	async fn closed(&mut self) -> Result<(), Self::Error> {
+	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		if self.done {
-			return Ok(());
+			return Poll::Ready(Ok(()));
 		}
 		// Drain until done.
 		loop {
-			match self.rx.recv().await {
-				Some(StreamChunk::Data(_)) => continue,
+			match std::task::ready!(self.poll_chunk(cx)) {
+				Some(StreamChunk::Data(_)) => {}
 				Some(StreamChunk::Fin) | None => {
 					self.done = true;
-					return Ok(());
+					return Poll::Ready(Ok(()));
 				}
 				Some(StreamChunk::Reset(code)) => {
 					self.done = true;
-					return Err(MockError::stream_reset(code));
+					return Poll::Ready(Err(MockError::stream_reset(code)));
 				}
 			}
 		}
@@ -206,12 +237,10 @@ impl web_transport_trait::RecvStream for MockRecvStream {
 
 impl Drop for MockRecvStream {
 	fn drop(&mut self) {
-		// Signal the paired SendStream that the receiver is gone (implicit STOP).
-		let mut result = self.closed.result.lock().unwrap();
-		if result.is_none() {
-			*result = Some(Ok(()));
-			self.closed.notify.notify_waiters();
-		}
+		// Signal the paired SendStream that the receiver is gone (implicit STOP),
+		// and fail its future writes.
+		self.closed.set(Ok(()));
+		self.rx.close();
 	}
 }
 
@@ -219,22 +248,20 @@ impl Drop for MockRecvStream {
 
 /// Create a linked (send, recv) stream pair.
 fn new_stream_pair() -> (MockSendStream, MockRecvStream) {
-	let (data_tx, data_rx) = mpsc::unbounded_channel();
-
-	let closed = Arc::new(ClosedSignal {
-		result: Mutex::new(None),
-		notify: tokio::sync::Notify::new(),
-	});
+	let queue = kio::Queue::new();
+	let closed = Arc::new(ClosedSignal::default());
 
 	let send = MockSendStream {
-		tx: Some(data_tx),
+		tx: Some(queue.clone()),
 		closed: closed.clone(),
+		park: kio::Park::default(),
 	};
 	let recv = MockRecvStream {
-		rx: data_rx,
+		rx: queue,
 		buf: Bytes::new(),
 		done: false,
 		closed,
+		park: kio::Park::default(),
 	};
 	(send, recv)
 }
@@ -245,23 +272,24 @@ fn new_stream_pair() -> (MockSendStream, MockRecvStream) {
 ///
 /// A real QUIC CONNECTION_CLOSE tears down the entire connection for both peers.
 /// This struct models that: a close on either side is visible to both.
+#[derive(Default)]
 struct ConnectionState {
 	/// Set once by whichever side closes first.
 	close_state: Mutex<Option<(u32, String)>>,
 	/// Wakes both sides when close_state is populated.
-	close_notify: tokio::sync::Notify,
+	waiters: kio::Fan,
 }
 
-/// Per-side state: stream channels and a reference to the shared connection.
+/// Per-side state: stream queues and a reference to the shared connection.
 struct SessionSide {
-	/// Bidi streams opened by the peer, available via accept_bi.
-	bidi_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<(MockSendStream, MockRecvStream)>>,
-	/// Uni streams opened by the peer, available via accept_uni.
-	uni_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<MockRecvStream>>,
-	/// Channel to send bidi streams TO the peer (peer's accept_bi picks them up).
-	peer_bidi_tx: mpsc::UnboundedSender<(MockSendStream, MockRecvStream)>,
-	/// Channel to send uni streams TO the peer (peer's accept_uni picks them up).
-	peer_uni_tx: mpsc::UnboundedSender<MockRecvStream>,
+	/// Bidi streams opened by the peer, popped by accept_bi.
+	bidi: kio::Queue<(MockSendStream, MockRecvStream)>,
+	/// Uni streams opened by the peer, popped by accept_uni.
+	uni: kio::Queue<MockRecvStream>,
+	/// Queue to deliver bidi streams TO the peer (its accept_bi pops them).
+	peer_bidi: kio::Queue<(MockSendStream, MockRecvStream)>,
+	/// Queue to deliver uni streams TO the peer (its accept_uni pops them).
+	peer_uni: kio::Queue<MockRecvStream>,
 	/// The ALPN protocol string for this side.
 	protocol: Option<&'static str>,
 	/// Connection-level close state shared with the peer.
@@ -270,73 +298,92 @@ struct SessionSide {
 
 /// An in-memory mock WebTransport session.
 ///
-/// Implements [`web_transport_trait::Session`]. Created in pairs via
+/// Implements [`web_transport_trait::poll::Session`]. Created in pairs via
 /// [`create_mock_session_pair`]. Streams opened on one side are delivered to
-/// the peer's accept methods deterministically via unbounded channels.
+/// the peer's accept methods deterministically via unbounded queues.
 #[derive(Clone)]
 pub struct MockSession {
 	side: Arc<SessionSide>,
+	// One park per pending-operation class: a park holds a single waiter, and a
+	// clone polling two classes at once must not clobber its own registration.
+	accept_uni: kio::Park,
+	accept_bi: kio::Park,
+	closed: kio::Park,
 }
 
-impl web_transport_trait::Session for MockSession {
+impl poll::Session for MockSession {
 	type SendStream = MockSendStream;
 	type RecvStream = MockRecvStream;
 	type Error = MockError;
 
-	async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
-		let mut rx = self.side.uni_rx.lock().await;
-		match rx.recv().await {
-			Some(stream) => Ok(stream),
-			None => {
-				// Channel closed: session is shutting down. Wait for the close signal.
-				self.await_close().await;
-				Err(self.close_error())
-			}
+	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+		// Register on the close signal too, so a close with no incoming streams
+		// still fails the accept instead of parking it forever.
+		let waiter = self.accept_uni.hold(cx);
+		self.side.conn.waiters.register(waiter);
+		if let Poll::Ready(res) = self.side.uni.poll_pop(waiter) {
+			return Poll::Ready(res.map_err(|_| self.close_error()));
+		}
+		// Bind the flag: a guard living through the match would deadlock against
+		// close_error taking the same lock.
+		let closed = self.side.conn.close_state.lock().unwrap().is_some();
+		match closed {
+			true => Poll::Ready(Err(self.close_error())),
+			false => Poll::Pending,
 		}
 	}
 
-	async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-		let mut rx = self.side.bidi_rx.lock().await;
-		match rx.recv().await {
-			Some(pair) => Ok(pair),
-			None => {
-				self.await_close().await;
-				Err(self.close_error())
-			}
+	fn poll_accept_bi(
+		&mut self,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
+		let waiter = self.accept_bi.hold(cx);
+		self.side.conn.waiters.register(waiter);
+		if let Poll::Ready(res) = self.side.bidi.poll_pop(waiter) {
+			return Poll::Ready(res.map_err(|_| self.close_error()));
+		}
+		// Bind the flag: a guard living through the match would deadlock against
+		// close_error taking the same lock.
+		let closed = self.side.conn.close_state.lock().unwrap().is_some();
+		match closed {
+			true => Poll::Ready(Err(self.close_error())),
+			false => Poll::Pending,
 		}
 	}
 
-	async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+	fn poll_open_bi(
+		&mut self,
+		_cx: &mut Context<'_>,
+	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		// Create two stream pairs: one for each direction.
 		let (our_send, peer_recv) = new_stream_pair();
 		let (peer_send, our_recv) = new_stream_pair();
 
 		// Deliver (peer_send, peer_recv) to the peer's accept_bi.
-		self.side
-			.peer_bidi_tx
-			.send((peer_send, peer_recv))
-			.map_err(|_| self.close_error())?;
-
-		Ok((our_send, our_recv))
+		match self.side.peer_bidi.try_push((peer_send, peer_recv)) {
+			Ok(()) => Poll::Ready(Ok((our_send, our_recv))),
+			Err(_) => Poll::Ready(Err(self.close_error())),
+		}
 	}
 
-	async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
+	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
 		let (our_send, peer_recv) = new_stream_pair();
 
 		// Deliver peer_recv to the peer's accept_uni.
-		self.side.peer_uni_tx.send(peer_recv).map_err(|_| self.close_error())?;
-
-		Ok(our_send)
+		match self.side.peer_uni.try_push(peer_recv) {
+			Ok(()) => Poll::Ready(Ok(our_send)),
+			Err(_) => Poll::Ready(Err(self.close_error())),
+		}
 	}
 
-	fn send_datagram(&self, _payload: Bytes) -> Result<(), Self::Error> {
+	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
 		// Datagrams are best-effort; silently succeed in mock.
-		Ok(())
+		Poll::Ready(Ok(()))
 	}
 
-	async fn recv_datagram(&self) -> Result<Bytes, Self::Error> {
+	fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
 		// No datagram support in mock; pend forever.
-		std::future::pending().await
+		Poll::Pending
 	}
 
 	fn max_datagram_size(&self) -> usize {
@@ -347,47 +394,38 @@ impl web_transport_trait::Session for MockSession {
 		self.side.protocol
 	}
 
-	fn close(&self, code: u32, reason: &str) {
+	fn close(&mut self, code: u32, reason: &str) {
 		// Set-once: a real QUIC CONNECTION_CLOSE keeps the first reason, and the
 		// GOAWAY-timeout tests rely on the server's force-close reason surviving
 		// a later local teardown close from the peer's own driver.
 		let mut state = self.side.conn.close_state.lock().unwrap();
 		if state.is_none() {
 			*state = Some((code, reason.to_string()));
-			self.side.conn.close_notify.notify_waiters();
+			// Wake outside the lock: a woken task may poll straight back into it.
+			drop(state);
+			self.side.conn.waiters.wake();
 		}
 	}
 
-	async fn closed(&self) -> Self::Error {
-		loop {
-			let notified = self.side.conn.close_notify.notified();
-			if let Some((code, reason)) = self.side.conn.close_state.lock().unwrap().clone() {
-				return MockError {
-					code: Some(code),
-					reason,
-				};
-			}
-			notified.await;
+	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
+		// Register before checking so a close racing this poll still wakes it.
+		self.side.conn.waiters.register(self.closed.hold(cx));
+		let state = self.side.conn.close_state.lock().unwrap().clone();
+		match state {
+			Some((code, reason)) => Poll::Ready(MockError {
+				code: Some(code),
+				reason,
+			}),
+			None => Poll::Pending,
 		}
+	}
+
+	fn stats(&self) -> impl web_transport_trait::Stats {
+		web_transport_trait::StatsUnavailable
 	}
 }
 
 impl MockSession {
-	/// Wait until the connection is closed.
-	///
-	/// `notify_waiters` stores no permit, so registering after the close already
-	/// fired would park forever. Register before checking the state, the same
-	/// dance as `closed()`.
-	async fn await_close(&self) {
-		loop {
-			let notified = self.side.conn.close_notify.notified();
-			if self.side.conn.close_state.lock().unwrap().is_some() {
-				return;
-			}
-			notified.await;
-		}
-	}
-
 	fn close_error(&self) -> MockError {
 		self.side
 			.conn
@@ -408,42 +446,42 @@ impl MockSession {
 /// Create a pair of connected mock sessions.
 ///
 /// Streams opened on `client` appear in `server.accept_*()` and vice versa.
-/// Both sides report the given `protocol` from [`web_transport_trait::Session::protocol`],
-/// matching ALPN negotiation behavior.
+/// Both sides report the given `protocol` from
+/// [`web_transport_trait::poll::Session::protocol`], matching ALPN negotiation
+/// behavior.
 pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession, MockSession) {
-	let conn = Arc::new(ConnectionState {
-		close_state: Mutex::new(None),
-		close_notify: tokio::sync::Notify::new(),
-	});
+	let conn = Arc::new(ConnectionState::default());
 
-	// Channels for client -> server stream delivery.
-	let (c2s_bidi_tx, c2s_bidi_rx) = mpsc::unbounded_channel();
-	let (c2s_uni_tx, c2s_uni_rx) = mpsc::unbounded_channel();
-
-	// Channels for server -> client stream delivery.
-	let (s2c_bidi_tx, s2c_bidi_rx) = mpsc::unbounded_channel();
-	let (s2c_uni_tx, s2c_uni_rx) = mpsc::unbounded_channel();
+	// Queues for client -> server and server -> client stream delivery.
+	let c2s_bidi = kio::Queue::new();
+	let c2s_uni = kio::Queue::new();
+	let s2c_bidi = kio::Queue::new();
+	let s2c_uni = kio::Queue::new();
 
 	let client_side = Arc::new(SessionSide {
-		bidi_rx: tokio::sync::Mutex::new(s2c_bidi_rx),
-		uni_rx: tokio::sync::Mutex::new(s2c_uni_rx),
-		peer_bidi_tx: c2s_bidi_tx,
-		peer_uni_tx: c2s_uni_tx,
+		bidi: s2c_bidi.clone(),
+		uni: s2c_uni.clone(),
+		peer_bidi: c2s_bidi.clone(),
+		peer_uni: c2s_uni.clone(),
 		protocol,
 		conn: conn.clone(),
 	});
 
 	let server_side = Arc::new(SessionSide {
-		bidi_rx: tokio::sync::Mutex::new(c2s_bidi_rx),
-		uni_rx: tokio::sync::Mutex::new(c2s_uni_rx),
-		peer_bidi_tx: s2c_bidi_tx,
-		peer_uni_tx: s2c_uni_tx,
+		bidi: c2s_bidi,
+		uni: c2s_uni,
+		peer_bidi: s2c_bidi,
+		peer_uni: s2c_uni,
 		protocol,
 		conn,
 	});
 
-	let client = MockSession { side: client_side };
-	let server = MockSession { side: server_side };
+	let new = |side| MockSession {
+		side,
+		accept_uni: kio::Park::default(),
+		accept_bi: kio::Park::default(),
+		closed: kio::Park::default(),
+	};
 
-	(client, server)
+	(new(client_side), new(server_side))
 }

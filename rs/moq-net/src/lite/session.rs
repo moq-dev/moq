@@ -32,7 +32,10 @@ pub(crate) struct SessionStart {
 ///
 /// Pass the returned [`Setup`] to [`start`] as its `peer_setup` so PROBE gating still
 /// resolves without re-reading the (consumed) stream.
-pub async fn accept_setup<S: web_transport_trait::Session>(session: &S, version: Version) -> Result<Setup, Error> {
+pub async fn accept_setup<S: crate::transport::poll::Session>(
+	session: &mut S,
+	version: Version,
+) -> Result<Setup, Error> {
 	loop {
 		let stream = session.accept_uni().await.map_err(Error::from_transport)?;
 		let mut reader = Reader::new(stream, version);
@@ -47,7 +50,7 @@ pub async fn accept_setup<S: web_transport_trait::Session>(session: &S, version:
 }
 
 /// Everything one moq-lite session needs to start.
-pub struct Config<S: web_transport_trait::Session> {
+pub struct Config<S: crate::transport::poll::Session> {
 	/// The transport carrying the session. Cloned into every loop that outlives
 	/// [`start`], so the connection closes when the last of them drops.
 	pub session: S,
@@ -88,9 +91,9 @@ pub struct Config<S: web_transport_trait::Session> {
 /// becomes ready once the initial announce set has been inserted into the subscribe
 /// origin, letting `connect()` block past the startup race. It is ready immediately
 /// when there is nothing to wait on (a version without an initial-set boundary).
-pub fn start<S: web_transport_trait::Session>(config: Config<S>) -> Result<SessionStart, Error> {
+pub fn start<S: crate::transport::poll::Session>(config: Config<S>) -> Result<SessionStart, Error> {
 	let Config {
-		session,
+		mut session,
 		setup_stream,
 		publish,
 		subscribe,
@@ -174,9 +177,9 @@ pub fn start<S: web_transport_trait::Session>(config: Config<S>) -> Result<Sessi
 	// Advertise our own capabilities on a uni Setup Stream, then FIN. Best-effort:
 	// a failure here just means the peer falls back to "no capabilities" for us.
 	if version.has_setup_stream() {
-		let session = session.clone();
+		let mut session = session.clone();
 		tasks.push(async move {
-			if let Err(err) = send_setup(&session, our_setup, version).await {
+			if let Err(err) = send_setup(&mut session, our_setup, version).await {
 				tracing::debug!(%err, "failed to send setup");
 			}
 		});
@@ -190,14 +193,14 @@ pub fn start<S: web_transport_trait::Session>(config: Config<S>) -> Result<Sessi
 	// deadline is the sender's own timer, so a caller draining a lite-03 peer still
 	// gets the session closed on schedule; the peer just never learns why.
 	{
-		let session = session.clone();
+		let mut session = session.clone();
 		let goaway = goaway.clone();
 		tasks.push(async move {
 			let payload = {
-				let mut closed = std::pin::pin!(session.closed());
 				let mut triggered = std::pin::pin!(goaway.triggered());
 				kio::wait(|waiter| {
-					if waiter.poll_future(closed.as_mut()).is_ready() {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					if session.poll_closed(&mut cx).is_ready() {
 						return std::task::Poll::Ready(None);
 					}
 					waiter.poll_future(triggered.as_mut())
@@ -210,13 +213,13 @@ pub fn start<S: web_transport_trait::Session>(config: Config<S>) -> Result<Sessi
 			// moq-lite has no timeout field on the wire; only the URI is sent. The
 			// deadline is still ours to honor, enforced locally below.
 			if version.has_goaway()
-				&& let Err(err) = send_goaway(&session, &payload.uri, version).await
+				&& let Err(err) = send_goaway(&mut session, &payload.uri, version).await
 			{
 				// Still enforce the deadline: the drain was requested, and failing to
 				// explain it to the peer is no reason to hold the session open.
 				tracing::warn!(%err, "failed to send goaway");
 			}
-			crate::goaway::enforce(&session, payload.timeout).await;
+			crate::goaway::enforce(&mut session, payload.timeout).await;
 		});
 	}
 
@@ -293,7 +296,11 @@ pub fn start<S: web_transport_trait::Session>(config: Config<S>) -> Result<Sessi
 }
 
 /// Open a unidirectional Setup Stream, send our single SETUP message, and FIN.
-async fn send_setup<S: web_transport_trait::Session>(session: &S, setup: Setup, version: Version) -> Result<(), Error> {
+async fn send_setup<S: crate::transport::poll::Session>(
+	session: &mut S,
+	setup: Setup,
+	version: Version,
+) -> Result<(), Error> {
 	let stream = session.open_uni().await.map_err(Error::from_transport)?;
 	let mut writer = Writer::new(stream, version);
 	writer.encode(&super::DataType::Setup).await?;
@@ -304,7 +311,11 @@ async fn send_setup<S: web_transport_trait::Session>(session: &S, setup: Setup, 
 
 /// Open a Goaway control stream (0x5), send the single GOAWAY message, and FIN.
 /// Lite04+ only; the version gate is the caller's.
-async fn send_goaway<S: web_transport_trait::Session>(session: &S, uri: &str, version: Version) -> Result<(), Error> {
+async fn send_goaway<S: crate::transport::poll::Session>(
+	session: &mut S,
+	uri: &str,
+	version: Version,
+) -> Result<(), Error> {
 	let mut stream = Stream::open(session, version).await?;
 	stream.writer.encode(&super::ControlType::Goaway).await?;
 	stream
@@ -321,7 +332,7 @@ async fn send_goaway<S: web_transport_trait::Session>(session: &S, uri: &str, ve
 }
 
 // TODO do something useful with this
-async fn run_session<S: web_transport_trait::Session>(stream: Option<Stream<S, Version>>) -> Result<(), Error> {
+async fn run_session<S: crate::transport::poll::Session>(stream: Option<Stream<S, Version>>) -> Result<(), Error> {
 	if let Some(mut stream) = stream {
 		while let Some(_info) = stream.reader.decode_maybe::<SessionInfo>().await? {}
 		return Err(Error::Cancel);

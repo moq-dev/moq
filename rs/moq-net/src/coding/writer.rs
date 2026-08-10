@@ -2,14 +2,14 @@ use std::fmt::Debug;
 
 use crate::{Error, StreamError, coding::*, ietf};
 
-/// A wrapper around a [web_transport_trait::SendStream] that will reset on Drop.
-pub struct Writer<S: web_transport_trait::SendStream, V> {
+/// A wrapper around a [crate::transport::poll::SendStream] that will reset on Drop.
+pub struct Writer<S: crate::transport::poll::SendStream, V> {
 	stream: Option<S>,
 	buffer: bytes::BytesMut,
 	version: V,
 }
 
-impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
+impl<S: crate::transport::poll::SendStream, V> Writer<S, V> {
 	/// Create a new writer for the given stream and version.
 	pub fn new(stream: S, version: V) -> Self {
 		Self {
@@ -133,7 +133,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 	}
 }
 
-impl<S: web_transport_trait::SendStream> Writer<S, ietf::Version> {
+impl<S: crate::transport::poll::SendStream> Writer<S, ietf::Version> {
 	/// Encode an IETF `Message` to the stream, writing `[type_id][size][body]`.
 	pub async fn encode_message<T: ietf::Message>(&mut self, msg: &T) -> Result<(), Error> {
 		self.encode(&T::ID).await?;
@@ -141,7 +141,7 @@ impl<S: web_transport_trait::SendStream> Writer<S, ietf::Version> {
 	}
 }
 
-impl<S: web_transport_trait::SendStream, V> Drop for Writer<S, V> {
+impl<S: crate::transport::poll::SendStream, V> Drop for Writer<S, V> {
 	fn drop(&mut self) {
 		if let Some(mut stream) = self.stream.take() {
 			// Unlike the Quinn default, we abort the stream on drop.

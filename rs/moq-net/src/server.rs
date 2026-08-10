@@ -64,7 +64,7 @@ impl Server {
 	/// Convenience wrapper over [`accept_request`](Self::accept_request) that
 	/// completes the handshake immediately. Use `accept_request` when you need to
 	/// inspect the client's advertised path before deciding what to serve.
-	pub async fn accept<S: web_transport_trait::Session>(&self, session: S) -> Result<(Session, Driver), Error> {
+	pub async fn accept<S: crate::transport::poll::Session>(&self, session: S) -> Result<(Session, Driver), Error> {
 		self.accept_request(session).await?.ok().await
 	}
 
@@ -78,7 +78,10 @@ impl Server {
 	///
 	/// The path is surfaced for moq-lite-05 and every moq-transport draft we speak;
 	/// it's empty on versions with no in-band request path (e.g. lite 01-04).
-	pub async fn accept_request<S: web_transport_trait::Session>(&self, session: S) -> Result<Request<S>, Error> {
+	pub async fn accept_request<S: crate::transport::poll::Session>(
+		&self,
+		mut session: S,
+	) -> Result<Request<S>, Error> {
 		// Regimes without a path to read defer to `ok()` without surfacing one, and
 		// carry no role or origin hint, so authorization is unchanged for them.
 		let deferred = |handshake| Request {
@@ -141,7 +144,7 @@ impl Server {
 				// Gate on the client's SETUP: read it before serving so the caller can
 				// scope by the advertised path. Seeded back into `start` on `ok()` so
 				// PROBE gating resolves without re-reading the (consumed) Setup Stream.
-				let client_setup = lite::accept_setup(&session, version).await?;
+				let client_setup = lite::accept_setup(&mut session, version).await?;
 				return Ok(Request {
 					path: client_setup.path.clone(),
 					role: client_setup.role,
@@ -183,7 +186,7 @@ impl Server {
 
 		// Legacy bidi SETUP exchange (IETF 14-16, lite 01/02). Read the client's
 		// SETUP to choose the version; `ok()` sends the server SETUP and starts.
-		let mut stream = Stream::accept(&session, encoding).await?;
+		let mut stream = Stream::accept(&mut session, encoding).await?;
 		let mut client: setup::Client = stream.reader.decode().await?;
 
 		let version = client
@@ -233,12 +236,12 @@ impl Server {
 
 	/// Read a draft-17/18 client's SETUP (with its request path) off its uni stream,
 	/// then pause. `ok()` starts the session and hands the stream back for GOAWAY.
-	async fn accept_ietf_modern<S: web_transport_trait::Session>(
+	async fn accept_ietf_modern<S: crate::transport::poll::Session>(
 		&self,
-		session: S,
+		mut session: S,
 		version: ietf::Version,
 	) -> Result<Request<S>, Error> {
-		let peer_setup = ietf::accept_setup(&session, version).await?;
+		let peer_setup = ietf::accept_setup(&mut session, version).await?;
 		Ok(Request {
 			path: peer_setup.path.clone(),
 			role: None,
@@ -264,7 +267,7 @@ impl Server {
 /// the origins to serve, then call [`ok`](Self::ok) to complete the handshake, or
 /// [`close`](Self::close) to reject it. Modeled on the WebTransport `Request` in
 /// moq-native.
-pub struct Request<S: web_transport_trait::Session> {
+pub struct Request<S: crate::transport::poll::Session> {
 	path: Option<String>,
 	role: Option<Role>,
 	origin: Option<crate::Origin>,
@@ -273,14 +276,14 @@ pub struct Request<S: web_transport_trait::Session> {
 }
 
 /// The parts of a [`Request`] consumed by [`Request::ok`] / [`Request::close`].
-struct RequestInner<S: web_transport_trait::Session> {
+struct RequestInner<S: crate::transport::poll::Session> {
 	server: Server,
 	handshake: Handshake<S>,
 }
 
 /// The handshake state captured at the pause point. Every variant defers its
 /// session start to [`Request::ok`] so origins set on the Request still apply.
-enum Handshake<S: web_transport_trait::Session> {
+enum Handshake<S: crate::transport::poll::Session> {
 	/// Modern IETF (17/18): the client's SETUP (with its request path) has been read
 	/// off its uni stream; `ok()` starts the session, handing that stream back for
 	/// GOAWAY monitoring.
@@ -309,7 +312,7 @@ enum Handshake<S: web_transport_trait::Session> {
 	},
 }
 
-impl<S: web_transport_trait::Session> Request<S> {
+impl<S: crate::transport::poll::Session> Request<S> {
 	/// The request path the client advertised in its SETUP.
 	///
 	/// Empty when the client advertised none: either it sent an empty path, or the
@@ -529,9 +532,9 @@ impl<S: web_transport_trait::Session> Request<S> {
 	}
 }
 
-impl<S: web_transport_trait::Session> RequestInner<S> {
+impl<S: crate::transport::poll::Session> RequestInner<S> {
 	fn close(self, err: Error) {
-		let session = match self.handshake {
+		let mut session = match self.handshake {
 			Handshake::IetfModern { session, .. } => session,
 			Handshake::LiteBare { session, .. } => session,
 			Handshake::Legacy { session, .. } => session,
@@ -541,7 +544,7 @@ impl<S: web_transport_trait::Session> RequestInner<S> {
 	}
 }
 
-impl<S: web_transport_trait::Session> Drop for Request<S> {
+impl<S: crate::transport::poll::Session> Drop for Request<S> {
 	// A dropped request would otherwise leave the client hanging until its idle
 	// timeout: it already sent SETUP and is waiting on a response. Reject loudly.
 	fn drop(&mut self) {
@@ -595,33 +598,50 @@ mod tests {
 		}
 	}
 
-	impl web_transport_trait::Session for FakeSession {
+	impl web_transport_trait::poll::Session for FakeSession {
 		type SendStream = FakeSend;
 		type RecvStream = FakeRecv;
 		type Error = FakeError;
 
-		async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
-			// Drop the guard before any await so the future stays Send.
-			let data = self.uni.lock().unwrap().pop_front();
-			match data {
-				Some(data) => Ok(FakeRecv { data: data.into() }),
-				None => std::future::pending().await,
+		fn poll_accept_uni(
+			&mut self,
+			_cx: &mut std::task::Context<'_>,
+		) -> std::task::Poll<Result<Self::RecvStream, Self::Error>> {
+			match self.uni.lock().unwrap().pop_front() {
+				Some(data) => std::task::Poll::Ready(Ok(FakeRecv { data: data.into() })),
+				None => std::task::Poll::Pending,
 			}
 		}
-		async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-			std::future::pending().await
+		fn poll_accept_bi(
+			&mut self,
+			_cx: &mut std::task::Context<'_>,
+		) -> std::task::Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
+			std::task::Poll::Pending
 		}
-		async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-			std::future::pending().await
+		fn poll_open_bi(
+			&mut self,
+			_cx: &mut std::task::Context<'_>,
+		) -> std::task::Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
+			std::task::Poll::Pending
 		}
-		async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
-			std::future::pending().await
+		fn poll_open_uni(
+			&mut self,
+			_cx: &mut std::task::Context<'_>,
+		) -> std::task::Poll<Result<Self::SendStream, Self::Error>> {
+			std::task::Poll::Pending
 		}
-		fn send_datagram(&self, _payload: Bytes) -> Result<(), Self::Error> {
-			Ok(())
+		fn poll_send_datagram(
+			&mut self,
+			_cx: &mut std::task::Context<'_>,
+			_payload: &[u8],
+		) -> std::task::Poll<Result<(), Self::Error>> {
+			std::task::Poll::Ready(Ok(()))
 		}
-		async fn recv_datagram(&self) -> Result<Bytes, Self::Error> {
-			std::future::pending().await
+		fn poll_recv_datagram(
+			&mut self,
+			_cx: &mut std::task::Context<'_>,
+		) -> std::task::Poll<Result<Bytes, Self::Error>> {
+			std::task::Poll::Pending
 		}
 		fn max_datagram_size(&self) -> usize {
 			1200
@@ -629,47 +649,58 @@ mod tests {
 		fn protocol(&self) -> Option<&str> {
 			self.protocol
 		}
-		fn close(&self, _code: u32, _reason: &str) {}
-		async fn closed(&self) -> Self::Error {
-			std::future::pending().await
+		fn close(&mut self, _code: u32, _reason: &str) {}
+		fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Error> {
+			std::task::Poll::Pending
+		}
+		fn stats(&self) -> impl web_transport_trait::Stats {
+			web_transport_trait::StatsUnavailable
 		}
 	}
 
 	#[derive(Clone, Default)]
 	struct FakeSend;
-	impl web_transport_trait::SendStream for FakeSend {
+	impl web_transport_trait::poll::SendStream for FakeSend {
 		type Error = FakeError;
-		async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-			Ok(buf.len())
+		fn poll_write(
+			&mut self,
+			_cx: &mut std::task::Context<'_>,
+			buf: &[u8],
+		) -> std::task::Poll<Result<usize, Self::Error>> {
+			std::task::Poll::Ready(Ok(buf.len()))
 		}
 		fn set_priority(&mut self, _order: u8) {}
 		fn finish(&mut self) -> Result<(), Self::Error> {
 			Ok(())
 		}
 		fn reset(&mut self, _code: u32) {}
-		async fn closed(&mut self) -> Result<(), Self::Error> {
-			Ok(())
+		fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+			std::task::Poll::Ready(Ok(()))
 		}
 	}
 
 	struct FakeRecv {
 		data: VecDeque<u8>,
 	}
-	impl web_transport_trait::RecvStream for FakeRecv {
+	impl web_transport_trait::poll::RecvStream for FakeRecv {
 		type Error = FakeError;
-		async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+		fn poll_read(
+			&mut self,
+			_cx: &mut std::task::Context<'_>,
+			dst: &mut [u8],
+		) -> std::task::Poll<Result<Option<usize>, Self::Error>> {
 			if self.data.is_empty() {
-				return Ok(None);
+				return std::task::Poll::Ready(Ok(None));
 			}
 			let size = dst.len().min(self.data.len());
 			for slot in dst.iter_mut().take(size) {
 				*slot = self.data.pop_front().unwrap();
 			}
-			Ok(Some(size))
+			std::task::Poll::Ready(Ok(Some(size)))
 		}
 		fn stop(&mut self, _code: u32) {}
-		async fn closed(&mut self) -> Result<(), Self::Error> {
-			Ok(())
+		fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+			std::task::Poll::Ready(Ok(()))
 		}
 	}
 

@@ -5,13 +5,13 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crate::{Error, StreamError, coding::*};
 
 /// A reader for decoding messages from a stream.
-pub struct Reader<S: web_transport_trait::RecvStream, V> {
+pub struct Reader<S: crate::transport::poll::RecvStream, V> {
 	stream: S,
 	buffer: BytesMut,
 	version: V,
 }
 
-impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
+impl<S: crate::transport::poll::RecvStream, V> Reader<S, V> {
 	pub fn new(stream: S, version: V) -> Self {
 		Self {
 			stream,
@@ -175,19 +175,23 @@ mod tests {
 		stops: Vec<u32>,
 	}
 
-	impl web_transport_trait::RecvStream for StopLog {
+	impl web_transport_trait::poll::RecvStream for StopLog {
 		type Error = crate::lite::test_transport::SinkError;
 
-		async fn read(&mut self, _dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
-			Ok(None)
+		fn poll_read(
+			&mut self,
+			_cx: &mut std::task::Context<'_>,
+			_dst: &mut [u8],
+		) -> std::task::Poll<Result<Option<usize>, Self::Error>> {
+			std::task::Poll::Ready(Ok(None))
 		}
 
 		fn stop(&mut self, code: u32) {
 			self.stops.push(code);
 		}
 
-		async fn closed(&mut self) -> Result<(), Self::Error> {
-			Ok(())
+		fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+			std::task::Poll::Ready(Ok(()))
 		}
 	}
 

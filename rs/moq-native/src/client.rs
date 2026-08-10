@@ -535,7 +535,7 @@ impl Client {
 		#[cfg(feature = "tcp")]
 		if url.scheme() == "tcp" {
 			let session = crate::tcp::connect(url, &self.versions.alpns(), self.failover_delay).await?;
-			return Ok(moq.connect(session).await?);
+			return Ok(moq.connect(crate::transport::Async::new(session)).await?);
 		}
 
 		// Unix domain socket (qmux, no TLS). Same-host only; the server can
@@ -543,7 +543,7 @@ impl Client {
 		#[cfg(all(feature = "uds", unix))]
 		if url.scheme() == "unix" {
 			let session = crate::unix::connect(url, &self.versions.alpns()).await?;
-			return Ok(moq.connect(session).await?);
+			return Ok(moq.connect(crate::transport::Async::new(session)).await?);
 		}
 
 		// iroh offers the moq ALPNs ahead of H3, so two moq endpoints normally land on raw
@@ -561,14 +561,19 @@ impl Client {
 				crate::iroh::Binding::H3 => self.moq.clone(),
 			};
 
-			return Ok(moq.connect(session).await?);
+			return Ok(moq.connect(crate::transport::Async::new(session)).await?);
 		}
 
 		#[cfg(feature = "noq")]
 		if let Some(noq) = self.noq.as_ref() {
 			let tls = self.tls.clone();
 			let quic_url = url.clone();
-			let quic_handle = async { noq.connect(&tls, quic_url, &self.versions).await.map_err(Error::from) };
+			let quic_handle = async {
+				noq.connect(&tls, quic_url, &self.versions)
+					.await
+					.map(crate::transport::Async::new)
+					.map_err(Error::from)
+			};
 
 			#[cfg(feature = "websocket")]
 			{
@@ -621,7 +626,7 @@ impl Client {
 		{
 			let alpns = self.versions.alpns();
 			let session = crate::websocket::connect(&self.websocket, &self.tls, url, &alpns).await?;
-			return Ok(moq.connect(session).await?);
+			return Ok(moq.connect(crate::transport::Async::new(session)).await?);
 		}
 
 		#[cfg(not(feature = "websocket"))]
@@ -645,7 +650,7 @@ impl Client {
 	) -> crate::Result<(moq_net::Session, moq_net::Driver)>
 	where
 		Q: Future<Output = crate::Result<S>>,
-		S: web_transport_trait::Session,
+		S: moq_net::transport::poll::Session,
 	{
 		let alpns = self.versions.alpns();
 		let ws_config = self.websocket.clone();
@@ -658,7 +663,9 @@ impl Client {
 
 		match race_transport_connect(quic, websocket).await? {
 			TransportRace::Quic(quic) => Ok(moq.connect(quic).await?),
-			TransportRace::WebSocket(websocket) => Ok(self.moq.connect(websocket).await?),
+			TransportRace::WebSocket(websocket) => {
+				Ok(self.moq.connect(crate::transport::Async::new(websocket)).await?)
+			}
 		}
 	}
 }

@@ -2,6 +2,7 @@ use crate::{group, origin, track};
 use std::{collections::HashMap, task::Poll};
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
+use web_transport_trait::poll::SendStream as _;
 
 use crate::{
 	AsPath, Error, Timescale,
@@ -115,7 +116,7 @@ enum NamespaceEvent {
 }
 
 #[derive(Clone)]
-pub(super) struct Publisher<S: web_transport_trait::Session> {
+pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	session: S,
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Consumer,
@@ -133,7 +134,7 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	version: Version,
 }
 
-impl<S: web_transport_trait::Session> Publisher<S> {
+impl<S: crate::transport::poll::Session> Publisher<S> {
 	pub fn new(
 		session: S,
 		origin: origin::Consumer,
@@ -436,15 +437,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Run the track, cancelling on reader close (Unsubscribe or stream close)
 		let res = {
+			let mut closed_session = self.session.clone();
 			let mut serve = std::pin::pin!(self.run_track(track, request_id));
 			let mut reader_closed = std::pin::pin!(stream.reader.closed());
-			let mut session_closed = std::pin::pin!(self.session.closed());
 			kio::wait(|waiter| {
 				if let Poll::Ready(res) = waiter.poll_future(serve.as_mut()) {
 					return Poll::Ready(res);
 				}
+				let mut cx = std::task::Context::from_waker(waiter.waker());
 				if waiter.poll_future(reader_closed.as_mut()).is_ready()
-					|| waiter.poll_future(session_closed.as_mut()).is_ready()
+					|| closed_session.poll_closed(&mut cx).is_ready()
 				{
 					return Poll::Ready(Ok(()));
 				}
@@ -590,7 +592,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	async fn run_group(
-		session: S,
+		mut session: S,
 		msg: ietf::GroupHeader,
 		priority: u8,
 		mut group: group::Consumer,
@@ -674,7 +676,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	/// Handle a FETCH on its bidi stream.
-	async fn run_fetch_stream(self, mut stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
+	async fn run_fetch_stream(mut self, mut stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
 		let _subscribe_id = match msg.fetch_type {
 			FetchType::Standalone { .. } => {
 				return self.reject_fetch(stream, msg.request_id, 500, "not supported").await;
@@ -913,7 +915,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		cluster: Option<cluster::Advert>,
 	) -> Result<(), Error> {
 		let request_id = self.control.next_request_id().await?;
-		let mut request = Stream::open(&self.session, self.version).await?;
+		let mut request = Stream::open(&mut self.session.clone(), self.version).await?;
 
 		request.writer.encode(&ietf::PublishNamespace::ID).await?;
 		request
@@ -1166,7 +1168,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 /// One draft-14/15 advertisement: the PUBLISH_NAMESPACE request it rode on and
 /// what closes it out with PUBLISH_NAMESPACE_DONE.
-struct NamespaceRequest<S: web_transport_trait::Session> {
+struct NamespaceRequest<S: crate::transport::poll::Session> {
 	path: crate::PathOwned,
 	request_id: RequestId,
 	stream: Stream<S, Version>,
@@ -1364,7 +1366,7 @@ mod tests {
 			.unwrap();
 		settle().await;
 
-		let stream = Stream::open(&session, Version::Draft16).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), Version::Draft16).await.unwrap();
 		let msg = ietf::SubscribeNamespace {
 			request_id: RequestId(1),
 			namespace: crate::Path::new(""),
@@ -1469,7 +1471,7 @@ mod tests {
 			VERSION,
 		);
 
-		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		let msg = ietf::SubscribeNamespace {
 			request_id: RequestId(1),
 			namespace: crate::Path::new(""),
@@ -1567,7 +1569,7 @@ mod tests {
 	async fn subscribe_missing(version: Version) -> (Vec<u8>, Vec<u32>) {
 		let h = harness(version);
 
-		let stream = Stream::open(&h.session, version).await.unwrap();
+		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
 		h.publisher
 			.clone()
 			.run_subscribe_stream(
@@ -1592,7 +1594,7 @@ mod tests {
 	async fn fetch_unsupported(version: Version, fetch_type: FetchType<'_>) -> (Vec<u8>, Vec<u32>) {
 		let h = harness(version);
 
-		let stream = Stream::open(&h.session, version).await.unwrap();
+		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
 		h.publisher
 			.clone()
 			.run_fetch_stream(

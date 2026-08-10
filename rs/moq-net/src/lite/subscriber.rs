@@ -21,7 +21,7 @@ use super::{ConnectingProducer, RouteCost, Version};
 
 use web_async::Lock;
 
-pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
+pub(super) struct SubscriberConfig<S: crate::transport::poll::Session> {
 	pub session: S,
 	/// The origin into which remote broadcasts are inserted. Traffic stats are
 	/// attributed through this handle: tag it with [`origin::Producer::with_stats`]
@@ -48,7 +48,7 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 }
 
 #[derive(Clone)]
-pub(super) struct Subscriber<S: web_transport_trait::Session> {
+pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	session: S,
 
 	origin: origin::Producer,
@@ -92,7 +92,7 @@ struct TrackEntry {
 	timescale: Option<Timescale>,
 }
 
-impl<S: web_transport_trait::Session> Subscriber<S> {
+impl<S: crate::transport::poll::Session> Subscriber<S> {
 	pub fn new(config: SubscriberConfig<S>) -> Self {
 		// Identity for incoming-hop loop detection. Derived from the local
 		// origin we publish into so it matches the relay identity across
@@ -185,7 +185,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		.await
 	}
 
-	async fn run_uni(self) -> Result<(), Error> {
+	async fn run_uni(mut self) -> Result<(), Error> {
 		let mut tasks = TaskSet::owned();
 		loop {
 			let stream = tasks
@@ -258,7 +258,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	) -> Result<(), Error> {
 		// A peer that sent GOAWAY told us to stop opening streams on this session.
 		self.check_going_away()?;
-		let mut stream = Stream::open(&self.session, self.version).await?;
+		let mut stream = Stream::open(&mut self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Announce).await?;
 
 		// Lite04/05: ask the peer to filter out announces that already passed through
@@ -494,7 +494,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		if self.going_away.is_set() {
 			return Ok(());
 		}
-		let mut stream = Stream::open(&self.session, self.version).await?;
+		let mut session = self.session.clone();
+		let mut stream = Stream::open(&mut session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Probe).await?;
 
 		while let Some(probe) = stream.reader.decode_maybe::<lite::Probe>().await? {
@@ -691,12 +692,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// unannounces (the source is finished) or the session dies.
 	async fn run_source(self, path: PathOwned, mut dynamic: crate::broadcast::Dynamic) {
 		let mut tracks = TaskSet::owned();
+		let mut closed_session = self.session.clone();
 		loop {
 			let next = tracks
 				.drive(async {
-					let mut closed = std::pin::pin!(self.session.closed());
 					kio::wait(|waiter| {
-						if waiter.poll_future(closed.as_mut()).is_ready() {
+						let mut cx = std::task::Context::from_waker(waiter.waker());
+						if closed_session.poll_closed(&mut cx).is_ready() {
 							return Poll::Ready(None);
 						}
 						// A draining peer usually stops announcing, so react to the signal
@@ -743,7 +745,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// `select!` matches only on the error case and lets the other arms drive the session. A
 	/// decode error or an unknown subscribe id drops that datagram without tearing down the
 	/// session (best-effort); only a transport-level failure ends the loop.
-	async fn run_datagrams(self) -> Result<(), Error> {
+	async fn run_datagrams(mut self) -> Result<(), Error> {
 		if !self.version.has_datagrams() || self.session.max_datagram_size() == 0 {
 			return Ok(());
 		}
@@ -1700,7 +1702,7 @@ impl WireBounds {
 
 /// The at-most-one live upstream subscription: its control stream plus the params
 /// echoed in every SUBSCRIBE_UPDATE.
-struct SubStream<S: web_transport_trait::Session> {
+struct SubStream<S: crate::transport::poll::Session> {
 	stream: Stream<S, Version>,
 	id: u64,
 	/// Original SUBSCRIBE params, echoed in every SUBSCRIBE_UPDATE; refreshed as the
@@ -1717,7 +1719,7 @@ struct SubStream<S: web_transport_trait::Session> {
 	requested: Option<Position>,
 }
 
-enum Sub<S: web_transport_trait::Session> {
+enum Sub<S: crate::transport::poll::Session> {
 	None,
 	Active(SubStream<S>),
 }
@@ -1788,13 +1790,13 @@ enum Event {
 /// subscription (opened lazily on the first downstream subscriber, canceled when
 /// the last one leaves) concurrently with any number of one-shot fetches.
 #[derive(Clone)]
-struct TrackServe<S: web_transport_trait::Session> {
+struct TrackServe<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	path: PathOwned,
 	name: String,
 }
 
-impl<S: web_transport_trait::Session> TrackServe<S> {
+impl<S: crate::transport::poll::Session> TrackServe<S> {
 	async fn run(self, request: track::Request) {
 		// SUBSCRIBE_UPDATE only exists on Lite03+, so older peers can't carry a
 		// preference change to an established subscription.
@@ -1849,7 +1851,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						Sub::None => std::future::pending().await,
 					}
 				});
-				let mut session_closed = std::pin::pin!(self.subscriber.session.closed());
+				let mut closed_session = self.subscriber.session.clone();
 				// Biased: demand first, then completions, then closures.
 				kio::wait(|waiter| {
 					// (1) Track demand: a fetch, a subscription change, or the origin
@@ -1896,7 +1898,8 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					}
 
 					// (5) The session died: hand the track back for another route.
-					if waiter.poll_future(session_closed.as_mut()).is_ready() {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					if closed_session.poll_closed(&mut cx).is_ready() {
 						return Poll::Ready(Event::SessionClosed);
 					}
 
@@ -2009,7 +2012,8 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 	/// [`track::Info`]. Lite05+ only. Bails if the broadcast dies meanwhile.
 	async fn track_info(&self) -> Result<track::Info, Error> {
 		self.subscriber.check_going_away()?;
-		let mut stream = Stream::open(&self.subscriber.session, self.subscriber.version).await?;
+		let mut session = self.subscriber.session.clone();
+		let mut stream = Stream::open(&mut session, self.subscriber.version).await?;
 		stream.writer.encode(&lite::ControlType::Track).await?;
 		stream
 			.writer
@@ -2020,10 +2024,10 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			.await?;
 
 		let info = {
-			let mut closed = std::pin::pin!(self.subscriber.session.closed());
 			let mut decode = std::pin::pin!(stream.reader.decode::<lite::TrackInfo>());
 			kio::wait(|waiter| {
-				if waiter.poll_future(closed.as_mut()).is_ready() {
+				let mut cx = std::task::Context::from_waker(waiter.waker());
+				if session.poll_closed(&mut cx).is_ready() {
 					return Poll::Ready(Err(Error::Dropped));
 				}
 				waiter.poll_future(decode.as_mut())
@@ -2156,7 +2160,8 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 	/// Open the SUBSCRIBE control stream and send the request.
 	async fn open_subscribe(&self, msg: &lite::Subscribe<'_>) -> Result<Stream<S, Version>, Error> {
 		self.subscriber.check_going_away()?;
-		let mut stream = Stream::open(&self.subscriber.session, self.subscriber.version).await?;
+		let mut session = self.subscriber.session.clone();
+		let mut stream = Stream::open(&mut session, self.subscriber.version).await?;
 		stream.writer.encode(&lite::ControlType::Subscribe).await?;
 		stream.writer.encode(msg).await?;
 		Ok(stream)
@@ -2226,10 +2231,11 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			// dies meanwhile; a dying route hands the assignment back through the
 			// serve loop's teardown instead.
 			let resp = {
-				let mut closed = std::pin::pin!(self.subscriber.session.closed());
+				let mut session = self.subscriber.session.clone();
 				let mut decode = std::pin::pin!(stream.reader.decode::<lite::SubscribeResponse>());
 				kio::wait(|waiter| {
-					if waiter.poll_future(closed.as_mut()).is_ready() {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					if session.poll_closed(&mut cx).is_ready() {
 						return Poll::Ready(Err(Error::Dropped));
 					}
 					waiter.poll_future(decode.as_mut())
@@ -2300,7 +2306,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			return;
 		}
 
-		let mut stream = match Stream::open(&subscriber.session, subscriber.version).await {
+		let mut stream = match Stream::open(&mut subscriber.session, subscriber.version).await {
 			Ok(stream) => stream,
 			Err(err) => {
 				tracing::warn!(track = %name, %err, "fetch stream open failed");

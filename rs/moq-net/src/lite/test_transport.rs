@@ -1,14 +1,21 @@
 //! Transport doubles shared by the lite tests: a session whose streams record
 //! everything written and every reset code, peers that never speak, and peers
 //! whose incoming streams die before their first byte.
+//!
+//! These implement the poll traits directly, since that is what the crate's
+//! transport bound requires. A pending fake simply returns `Poll::Pending`
+//! without registering a waker: it models a peer that never answers, so nothing
+//! should ever wake it.
 
 use std::{
 	sync::{
 		Arc, Mutex,
 		atomic::{AtomicUsize, Ordering},
 	},
-	task::Poll,
+	task::{Context, Poll},
 };
+
+use web_transport_trait::poll;
 
 #[derive(Debug, Clone, Default)]
 pub struct SinkError;
@@ -68,8 +75,10 @@ pub struct SinkSend {
 	/// Writes park until this flips to true; `None` writes immediately. See
 	/// [`SinkSession::gated_bi`].
 	gate: Option<kio::Consumer<bool>>,
-	/// Set by [`finish`](web_transport_trait::SendStream::finish). A finished stream is what
-	/// [`closed`](web_transport_trait::SendStream::closed) waits on, mirroring a peer that
+	/// Bridges the gate's kio wakeups onto the caller's `Context`.
+	park: kio::Park,
+	/// Set by [`finish`](poll::SendStream::finish). A finished stream is what
+	/// [`poll_closed`](poll::SendStream::poll_closed) waits on, mirroring a peer that
 	/// acknowledges the FIN; an unfinished one parks like a peer that never answers.
 	finished: bool,
 }
@@ -79,24 +88,27 @@ impl SinkSend {
 		Self {
 			log,
 			gate: None,
+			park: kio::Park::default(),
 			finished: false,
 		}
 	}
 }
 
-impl web_transport_trait::SendStream for SinkSend {
+impl poll::SendStream for SinkSend {
 	type Error = SinkError;
 
-	async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		if let Some(gate) = &self.gate {
 			// A closed gate parks forever, which surfaces as a hung test rather than a
 			// write that silently skipped the gate.
-			let _ = gate
-				.wait(|open| if **open { Poll::Ready(()) } else { Poll::Pending })
-				.await;
+			let waiter = self.park.hold(cx);
+			match gate.poll(waiter, |open| if **open { Poll::Ready(()) } else { Poll::Pending }) {
+				Poll::Ready(Ok(())) => {}
+				Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
+			}
 		}
 		self.log.writes.lock().unwrap().extend_from_slice(buf);
-		Ok(buf.len())
+		Poll::Ready(Ok(buf.len()))
 	}
 
 	fn set_priority(&mut self, order: u8) {
@@ -114,11 +126,11 @@ impl web_transport_trait::SendStream for SinkSend {
 		self.log.resets.lock().unwrap().push(code);
 	}
 
-	async fn closed(&mut self) -> Result<(), Self::Error> {
+	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		match self.finished {
-			true => Ok(()),
+			true => Poll::Ready(Ok(())),
 			// Nothing to acknowledge yet, so park like a peer that never answers.
-			false => std::future::pending().await,
+			false => Poll::Pending,
 		}
 	}
 }
@@ -127,17 +139,17 @@ impl web_transport_trait::SendStream for SinkSend {
 /// model-side events.
 pub struct PendingRecv;
 
-impl web_transport_trait::RecvStream for PendingRecv {
+impl poll::RecvStream for PendingRecv {
 	type Error = SinkError;
 
-	async fn read(&mut self, _dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
-		std::future::pending().await
+	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+		Poll::Pending
 	}
 
 	fn stop(&mut self, _code: u32) {}
 
-	async fn closed(&mut self) -> Result<(), Self::Error> {
-		std::future::pending().await
+	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		Poll::Pending
 	}
 }
 
@@ -311,43 +323,44 @@ impl SinkSession {
 	}
 }
 
-impl web_transport_trait::Session for SinkSession {
+impl poll::Session for SinkSession {
 	type SendStream = SinkSend;
 	type RecvStream = PendingRecv;
 	type Error = SinkError;
 
-	async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
-		std::future::pending().await
+	fn poll_accept_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+		Poll::Pending
 	}
 
-	async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-		std::future::pending().await
+	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+		Poll::Pending
 	}
 
-	async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+	fn poll_open_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		let Some(gate) = self.bi_gate.clone() else {
-			return std::future::pending().await;
+			return Poll::Pending;
 		};
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
 
 		let send = SinkSend {
 			log: self.log.clone(),
 			gate: Some(gate),
+			park: kio::Park::default(),
 			finished: false,
 		};
-		Ok((send, PendingRecv))
+		Poll::Ready(Ok((send, PendingRecv)))
 	}
 
-	async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
-		Ok(SinkSend::new(self.log.clone()))
+	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+		Poll::Ready(Ok(SinkSend::new(self.log.clone())))
 	}
 
-	fn send_datagram(&self, _payload: bytes::Bytes) -> Result<(), Self::Error> {
-		Ok(())
+	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		Poll::Ready(Ok(()))
 	}
 
-	async fn recv_datagram(&self) -> Result<bytes::Bytes, Self::Error> {
-		std::future::pending().await
+	fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<bytes::Bytes, Self::Error>> {
+		Poll::Pending
 	}
 
 	fn max_datagram_size(&self) -> usize {
@@ -358,12 +371,12 @@ impl web_transport_trait::Session for SinkSession {
 		None
 	}
 
-	fn close(&self, code: u32, reason: &str) {
+	fn close(&mut self, code: u32, reason: &str) {
 		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
 	}
 
-	async fn closed(&self) -> Self::Error {
-		std::future::pending().await
+	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {
+		Poll::Pending
 	}
 
 	fn stats(&self) -> impl web_transport_trait::Stats {
@@ -391,10 +404,10 @@ pub struct ScriptedRecv {
 	eof: bool,
 }
 
-impl web_transport_trait::RecvStream for ScriptedRecv {
+impl poll::RecvStream for ScriptedRecv {
 	type Error = SinkError;
 
-	async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+	fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
 		let take = {
 			let mut script = self.script.lock().unwrap();
 			if script.is_empty() {
@@ -408,16 +421,16 @@ impl web_transport_trait::RecvStream for ScriptedRecv {
 		};
 
 		match take {
-			0 if self.eof => Ok(None),
-			0 => std::future::pending().await,
-			take => Ok(Some(take)),
+			0 if self.eof => Poll::Ready(Ok(None)),
+			0 => Poll::Pending,
+			take => Poll::Ready(Ok(Some(take))),
 		}
 	}
 
 	fn stop(&mut self, _code: u32) {}
 
-	async fn closed(&mut self) -> Result<(), Self::Error> {
-		std::future::pending().await
+	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		Poll::Pending
 	}
 }
 
@@ -471,38 +484,41 @@ impl ScriptedSession {
 	}
 }
 
-impl web_transport_trait::Session for ScriptedSession {
+impl poll::Session for ScriptedSession {
 	type SendStream = SinkSend;
 	type RecvStream = ScriptedRecv;
 	type Error = SinkError;
 
-	async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
-		std::future::pending().await
+	fn poll_accept_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+		Poll::Pending
 	}
 
-	async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-		std::future::pending().await
+	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+		Poll::Pending
 	}
 
-	async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+	fn poll_open_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
 		let script = match &self.queue {
 			Some(queue) => Arc::new(Mutex::new(queue.lock().unwrap().pop_front().unwrap_or_default())),
 			None => self.script.clone(),
 		};
-		Ok((SinkSend::new(self.log.clone()), ScriptedRecv { script, eof: self.eof }))
+		Poll::Ready(Ok((
+			SinkSend::new(self.log.clone()),
+			ScriptedRecv { script, eof: self.eof },
+		)))
 	}
 
-	async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
-		Ok(SinkSend::new(self.log.clone()))
+	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+		Poll::Ready(Ok(SinkSend::new(self.log.clone())))
 	}
 
-	fn send_datagram(&self, _payload: bytes::Bytes) -> Result<(), Self::Error> {
-		Ok(())
+	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		Poll::Ready(Ok(()))
 	}
 
-	async fn recv_datagram(&self) -> Result<bytes::Bytes, Self::Error> {
-		std::future::pending().await
+	fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<bytes::Bytes, Self::Error>> {
+		Poll::Pending
 	}
 
 	fn max_datagram_size(&self) -> usize {
@@ -513,12 +529,12 @@ impl web_transport_trait::Session for ScriptedSession {
 		None
 	}
 
-	fn close(&self, code: u32, reason: &str) {
+	fn close(&mut self, code: u32, reason: &str) {
 		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
 	}
 
-	async fn closed(&self) -> Self::Error {
-		std::future::pending().await
+	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {
+		Poll::Pending
 	}
 
 	fn stats(&self) -> impl web_transport_trait::Stats {

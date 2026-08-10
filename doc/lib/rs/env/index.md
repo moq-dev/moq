@@ -7,7 +7,8 @@ description: Where Rust MoQ clients run, native and WebAssembly
 
 The same Rust crates ([`moq-net`](/lib/rs/crate/moq-net), [`hang`](/lib/rs/crate/hang))
 target two very different environments. `moq-net` is transport-agnostic: it runs
-over anything that implements [`web_transport_trait::Session`](https://docs.rs/web-transport-trait),
+over anything that implements the poll interface
+([`web_transport_trait::poll::Session`](https://docs.rs/web-transport-trait)),
 so the only thing that changes between environments is which transport you hand it.
 
 ## [Native](/lib/rs/env/native) <Badge type="tip" text="server, desktop, mobile" />

@@ -17,7 +17,10 @@ browser implementation.
 
 ## How it fits together
 
-`moq-net` talks to anything that implements [`web_transport_trait::Session`](https://docs.rs/web-transport-trait).
+`moq-net` talks to anything that implements
+[`web_transport_trait::poll::Session`](https://docs.rs/web-transport-trait);
+`moq-wasm` adapts the browser's promise-based transport to that interface
+internally.
 The [`web-transport`](https://crates.io/crates/web-transport) meta-crate picks
 the backend by target automatically:
 

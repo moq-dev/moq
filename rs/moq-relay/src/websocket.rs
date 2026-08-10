@@ -118,7 +118,7 @@ where
 		server = server.with_subscriber(publish);
 	}
 	// Hold the session so it doesn't close early; the driver serves it in place.
-	let (session, mut driver) = server.accept(ws).await?;
+	let (session, mut driver) = server.accept(moq_native::transport::Async::new(ws)).await?;
 
 	tokio::select! {
 		res = &mut driver => res.map_err(Into::into),

@@ -1,24 +1,77 @@
-//! Adapt `web-transport-wasm` (the browser WebTransport API) to the
-//! `web-transport-trait` abstraction that `moq-net` is generic over.
+//! Adapt `web-transport-wasm` (the browser WebTransport API) to the poll
+//! interface (`web_transport_trait::poll`) that `moq-net` requires.
 //!
-//! Both the trait and the wasm types are foreign, so the orphan rule forces
-//! newtype wrappers. The shapes line up closely; the only real impedance
-//! mismatches are documented inline (sync-vs-async datagrams, byte-count vs
-//! write-all, string-vs-code stream resets).
+//! The browser API is promise-based, so each pending operation is stored as a
+//! boxed local future: session operations clone the underlying handle, stream
+//! operations move the stream into the future and take it back when the
+//! operation settles. Stream closed-watches are emulated (reads report the FIN
+//! for receive streams; send streams only start the real watch after
+//! `finish`/`reset`), since the underlying `closed()` future would own the
+//! stream and deadlock any later read or write. This mirrors what a native
+//! poll implementation inside `web-transport-wasm` would do better; migrate
+//! there once it grows one.
+
+use std::task::{Context, Poll, ready};
 
 use bytes::Bytes;
+use futures::{FutureExt, future::LocalBoxFuture};
 use url::Url;
 use web_transport_trait as wtt;
 
+/// A stored in-flight operation: `None` when idle. The browser is single
+/// threaded, so the plain local flavor suffices.
+type OpSlot<T> = Option<LocalBoxFuture<'static, T>>;
+
+/// Lazily start and poll the operation in `slot`, clearing it when it resolves.
+fn poll_op<T>(
+	slot: &mut OpSlot<T>,
+	cx: &mut Context<'_>,
+	start: impl FnOnce() -> LocalBoxFuture<'static, T>,
+) -> Poll<T> {
+	let fut = slot.get_or_insert_with(start);
+	let output = ready!(fut.as_mut().poll(cx));
+	*slot = None;
+	Poll::Ready(output)
+}
+
 /// A connected browser WebTransport session, usable by `moq-net`.
-#[derive(Clone)]
-pub struct Session(web_transport_wasm::Session);
+pub struct Session {
+	inner: web_transport_wasm::Session,
+	accept_uni: OpSlot<Result<RecvStream, Error>>,
+	accept_bi: OpSlot<Result<(SendStream, RecvStream), Error>>,
+	open_uni: OpSlot<Result<SendStream, Error>>,
+	open_bi: OpSlot<Result<(SendStream, RecvStream), Error>>,
+	recv_datagram: OpSlot<Result<Bytes, Error>>,
+	closed: OpSlot<Error>,
+}
+
+impl Session {
+	fn new(inner: web_transport_wasm::Session) -> Self {
+		Self {
+			inner,
+			accept_uni: None,
+			accept_bi: None,
+			open_uni: None,
+			open_bi: None,
+			recv_datagram: None,
+			closed: None,
+		}
+	}
+}
+
+// Manual impl: a clone starts with no in-flight operations, since each handle
+// owns its own progress under the poll contract.
+impl Clone for Session {
+	fn clone(&self) -> Self {
+		Self::new(self.inner.clone())
+	}
+}
 
 /// Open a browser WebTransport connection to `url`.
 pub async fn connect(url: Url) -> Result<Session, Error> {
 	let client = web_transport_wasm::ClientBuilder::new().with_system_roots();
 	let session = client.connect(url).await.map_err(Error)?;
-	Ok(Session(session))
+	Ok(Session::new(session))
 }
 
 /// Connect, trusting only the given sha-256 certificate hashes (serverless dev,
@@ -26,11 +79,8 @@ pub async fn connect(url: Url) -> Result<Session, Error> {
 pub async fn connect_with_hashes(url: Url, hashes: Vec<Vec<u8>>) -> Result<Session, Error> {
 	let client = web_transport_wasm::ClientBuilder::new().with_server_certificate_hashes(hashes);
 	let session = client.connect(url).await.map_err(Error)?;
-	Ok(Session(session))
+	Ok(Session::new(session))
 }
-
-pub struct SendStream(web_transport_wasm::SendStream);
-pub struct RecvStream(web_transport_wasm::RecvStream);
 
 /// Wraps `web_transport_wasm::Error` so we can implement the foreign error trait.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -56,41 +106,68 @@ impl wtt::Error for Error {
 	}
 }
 
-impl wtt::Session for Session {
+impl wtt::poll::Session for Session {
 	type SendStream = SendStream;
 	type RecvStream = RecvStream;
 	type Error = Error;
 
-	async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
-		Ok(RecvStream(self.0.accept_uni().await.map_err(Error)?))
+	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+		let inner = &self.inner;
+		poll_op(&mut self.accept_uni, cx, || {
+			let session = inner.clone();
+			async move { Ok(RecvStream::new(session.accept_uni().await.map_err(Error)?)) }.boxed_local()
+		})
 	}
 
-	async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-		let (s, r) = self.0.accept_bi().await.map_err(Error)?;
-		Ok((SendStream(s), RecvStream(r)))
+	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<(SendStream, RecvStream), Self::Error>> {
+		let inner = &self.inner;
+		poll_op(&mut self.accept_bi, cx, || {
+			let session = inner.clone();
+			async move {
+				let (s, r) = session.accept_bi().await.map_err(Error)?;
+				Ok((SendStream::new(s), RecvStream::new(r)))
+			}
+			.boxed_local()
+		})
 	}
 
-	async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-		let (s, r) = self.0.open_bi().await.map_err(Error)?;
-		Ok((SendStream(s), RecvStream(r)))
+	fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<(SendStream, RecvStream), Self::Error>> {
+		let inner = &self.inner;
+		poll_op(&mut self.open_bi, cx, || {
+			let session = inner.clone();
+			async move {
+				let (s, r) = session.open_bi().await.map_err(Error)?;
+				Ok((SendStream::new(s), RecvStream::new(r)))
+			}
+			.boxed_local()
+		})
 	}
 
-	async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
-		Ok(SendStream(self.0.open_uni().await.map_err(Error)?))
+	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+		let inner = &self.inner;
+		poll_op(&mut self.open_uni, cx, || {
+			let session = inner.clone();
+			async move { Ok(SendStream::new(session.open_uni().await.map_err(Error)?)) }.boxed_local()
+		})
 	}
 
-	fn send_datagram(&self, payload: Bytes) -> Result<(), Self::Error> {
-		// The browser datagram API is async; the trait is sync. moq drives all
-		// control/media over streams, so fire-and-forget is acceptable here.
-		let session = self.0.clone();
+	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		// The browser datagram API is async. moq drives all control/media over
+		// streams, so fire-and-forget is acceptable here.
+		let session = self.inner.clone();
+		let payload = Bytes::copy_from_slice(payload);
 		web_async::spawn(async move {
 			let _ = session.send_datagram(payload).await;
 		});
-		Ok(())
+		Poll::Ready(Ok(()))
 	}
 
-	async fn recv_datagram(&self) -> Result<Bytes, Self::Error> {
-		self.0.recv_datagram().await.map_err(Error)
+	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
+		let inner = &self.inner;
+		poll_op(&mut self.recv_datagram, cx, || {
+			let session = inner.clone();
+			async move { session.recv_datagram().await.map_err(Error) }.boxed_local()
+		})
 	}
 
 	fn max_datagram_size(&self) -> usize {
@@ -99,63 +176,322 @@ impl wtt::Session for Session {
 	}
 
 	fn protocol(&self) -> Option<&str> {
-		self.0.protocol()
+		self.inner.protocol()
 	}
 
-	fn close(&self, code: u32, reason: &str) {
-		self.0.close(code, reason);
+	fn close(&mut self, code: u32, reason: &str) {
+		self.inner.close(code, reason);
 	}
 
-	async fn closed(&self) -> Self::Error {
-		Error(self.0.closed().await)
+	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
+		let inner = &self.inner;
+		poll_op(&mut self.closed, cx, || {
+			let session = inner.clone();
+			async move { Error(session.closed().await) }.boxed_local()
+		})
+	}
+
+	fn stats(&self) -> impl wtt::Stats {
+		wtt::StatsUnavailable
 	}
 }
 
-impl wtt::SendStream for SendStream {
+/// The send half of a browser stream, adapted to the poll interface.
+pub struct SendStream {
+	state: Option<SendState>,
+	// Deferred actions, applied when the in-flight operation settles.
+	priority: Option<i32>,
+	finish: bool,
+	reset: Option<u32>,
+	/// Whether `finish` or `reset` has been observed, so no further writes can
+	/// come and the closed() watch may safely take ownership of the stream.
+	terminal: bool,
+}
+
+enum SendState {
+	Idle(web_transport_wasm::SendStream),
+	/// A write in flight; `len` is what to report when it resolves.
+	Writing {
+		fut: LocalBoxFuture<'static, (web_transport_wasm::SendStream, Result<(), Error>)>,
+		len: usize,
+	},
+	Closing(LocalBoxFuture<'static, (web_transport_wasm::SendStream, Result<(), Error>)>),
+}
+
+impl SendStream {
+	fn new(stream: web_transport_wasm::SendStream) -> Self {
+		Self {
+			state: Some(SendState::Idle(stream)),
+			priority: None,
+			finish: false,
+			reset: None,
+			terminal: false,
+		}
+	}
+
+	/// Apply actions deferred while an operation was in flight.
+	fn settle(&mut self, stream: &mut web_transport_wasm::SendStream) {
+		if let Some(order) = self.priority.take() {
+			stream.set_priority(order);
+		}
+		if let Some(code) = self.reset.take() {
+			self.finish = false;
+			stream.reset(&code.to_string());
+		}
+		if std::mem::take(&mut self.finish) {
+			// A deferred finish has nowhere to report to; its failure surfaces
+			// through closed() like any other terminal state.
+			let _ = stream.finish();
+		}
+	}
+}
+
+impl wtt::poll::SendStream for SendStream {
 	type Error = Error;
 
-	async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-		// The wasm writer writes the whole slice or errors.
-		self.0.write(buf).await.map_err(Error)?;
-		Ok(buf.len())
+	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		loop {
+			match self.state.take().expect("in-flight") {
+				SendState::Idle(mut stream) => {
+					if buf.is_empty() {
+						self.state = Some(SendState::Idle(stream));
+						return Poll::Ready(Ok(0));
+					}
+					// The wasm writer writes the whole slice or errors, so the
+					// reported count is exact. The caller retries with the same
+					// bytes until this resolves.
+					let chunk = buf.to_vec();
+					let len = chunk.len();
+					let fut = async move {
+						let res = stream.write(&chunk).await.map_err(Error);
+						(stream, res)
+					}
+					.boxed_local();
+					self.state = Some(SendState::Writing { fut, len });
+				}
+				SendState::Writing { mut fut, len } => match fut.as_mut().poll(cx) {
+					Poll::Pending => {
+						self.state = Some(SendState::Writing { fut, len });
+						return Poll::Pending;
+					}
+					Poll::Ready((mut stream, res)) => {
+						self.settle(&mut stream);
+						self.state = Some(SendState::Idle(stream));
+						res?;
+						return Poll::Ready(Ok(len));
+					}
+				},
+				SendState::Closing(mut fut) => match fut.as_mut().poll(cx) {
+					Poll::Pending => {
+						self.state = Some(SendState::Closing(fut));
+						return Poll::Pending;
+					}
+					Poll::Ready((mut stream, _res)) => {
+						self.settle(&mut stream);
+						self.state = Some(SendState::Idle(stream));
+					}
+				},
+			}
+		}
 	}
 
 	fn set_priority(&mut self, order: u8) {
-		self.0.set_priority(order as i32);
+		match self.state.as_mut() {
+			Some(SendState::Idle(stream)) => stream.set_priority(order as i32),
+			_ => self.priority = Some(order as i32),
+		}
 	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
-		self.0.finish().map_err(Error)
+		self.terminal = true;
+		match self.state.as_mut() {
+			Some(SendState::Idle(stream)) => stream.finish().map_err(Error),
+			_ => {
+				self.finish = true;
+				Ok(())
+			}
+		}
 	}
 
 	fn reset(&mut self, code: u32) {
-		self.0.reset(&code.to_string());
+		self.terminal = true;
+		match self.state.as_mut() {
+			Some(SendState::Idle(stream)) => stream.reset(&code.to_string()),
+			_ => self.reset = Some(code),
+		}
 	}
 
-	async fn closed(&mut self) -> Result<(), Self::Error> {
-		self.0.closed().await.map(|_| ()).map_err(Error)
+	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		loop {
+			match self.state.take().expect("in-flight") {
+				SendState::Idle(mut stream) => {
+					self.settle(&mut stream);
+					// Only a finished (or reset) stream starts the real closed()
+					// watch: that future owns the stream, and a stream the caller
+					// may still write to must stay reclaimable. Before that,
+					// closure surfaces as an error on the next operation instead.
+					if !self.terminal {
+						self.state = Some(SendState::Idle(stream));
+						return Poll::Pending;
+					}
+					let fut = async move {
+						let res = stream.closed().await.map(|_| ()).map_err(Error);
+						(stream, res)
+					}
+					.boxed_local();
+					self.state = Some(SendState::Closing(fut));
+				}
+				SendState::Writing { mut fut, len } => match fut.as_mut().poll(cx) {
+					Poll::Pending => {
+						self.state = Some(SendState::Writing { fut, len });
+						return Poll::Pending;
+					}
+					Poll::Ready((mut stream, res)) => {
+						self.settle(&mut stream);
+						self.state = Some(SendState::Idle(stream));
+						// A failed write is a closed stream; report it here.
+						if let Err(err) = res {
+							return Poll::Ready(Err(err));
+						}
+					}
+				},
+				SendState::Closing(mut fut) => match fut.as_mut().poll(cx) {
+					Poll::Pending => {
+						self.state = Some(SendState::Closing(fut));
+						return Poll::Pending;
+					}
+					Poll::Ready((mut stream, res)) => {
+						self.settle(&mut stream);
+						self.state = Some(SendState::Idle(stream));
+						return Poll::Ready(res);
+					}
+				},
+			}
+		}
 	}
 }
 
-impl wtt::RecvStream for RecvStream {
+/// The receive half of a browser stream, adapted to the poll interface.
+pub struct RecvStream {
+	state: Option<RecvState>,
+	/// Bytes already read from the transport but not yet handed to the caller.
+	buffer: Bytes,
+	/// The peer finished the stream.
+	fin: bool,
+	/// A deferred STOP_SENDING, applied when the in-flight operation settles.
+	stop: Option<u32>,
+}
+
+enum RecvState {
+	Idle(web_transport_wasm::RecvStream),
+	Reading(LocalBoxFuture<'static, (web_transport_wasm::RecvStream, Result<Option<Bytes>, Error>)>),
+}
+
+impl RecvStream {
+	fn new(stream: web_transport_wasm::RecvStream) -> Self {
+		Self {
+			state: Some(RecvState::Idle(stream)),
+			buffer: Bytes::new(),
+			fin: false,
+			stop: None,
+		}
+	}
+
+	/// Fill `self.buffer` (or set `self.fin`) with the next chunk of data.
+	fn poll_fill(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<(), Error>> {
+		loop {
+			match self.state.take().expect("in-flight") {
+				RecvState::Idle(mut stream) => {
+					if let Some(code) = self.stop.take() {
+						stream.stop(&code.to_string());
+					}
+					let fut = async move {
+						let res = stream.read(max).await.map_err(Error);
+						(stream, res)
+					}
+					.boxed_local();
+					self.state = Some(RecvState::Reading(fut));
+				}
+				RecvState::Reading(mut fut) => match fut.as_mut().poll(cx) {
+					Poll::Pending => {
+						self.state = Some(RecvState::Reading(fut));
+						return Poll::Pending;
+					}
+					Poll::Ready((stream, res)) => {
+						self.state = Some(RecvState::Idle(stream));
+						match res {
+							Ok(Some(bytes)) => self.buffer = bytes,
+							Ok(None) => self.fin = true,
+							Err(err) => return Poll::Ready(Err(err)),
+						}
+						return Poll::Ready(Ok(()));
+					}
+				},
+			}
+		}
+	}
+}
+
+impl wtt::poll::RecvStream for RecvStream {
 	type Error = Error;
 
-	async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
-		match self.0.read(dst.len()).await.map_err(Error)? {
-			Some(chunk) => {
-				let n = chunk.len();
-				dst[..n].copy_from_slice(&chunk);
-				Ok(Some(n))
+	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+		if dst.is_empty() {
+			return Poll::Ready(Ok(Some(0)));
+		}
+
+		loop {
+			if !self.buffer.is_empty() {
+				let n = dst.len().min(self.buffer.len());
+				dst[..n].copy_from_slice(&self.buffer.split_to(n));
+				return Poll::Ready(Ok(Some(n)));
 			}
-			None => Ok(None),
+			if self.fin {
+				return Poll::Ready(Ok(None));
+			}
+			ready!(self.poll_fill(cx, dst.len()))?;
+		}
+	}
+
+	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+		if max == 0 {
+			return Poll::Ready(Ok(Some(Bytes::new())));
+		}
+
+		loop {
+			if !self.buffer.is_empty() {
+				let n = max.min(self.buffer.len());
+				return Poll::Ready(Ok(Some(self.buffer.split_to(n))));
+			}
+			if self.fin {
+				return Poll::Ready(Ok(None));
+			}
+			ready!(self.poll_fill(cx, max))?;
 		}
 	}
 
 	fn stop(&mut self, code: u32) {
-		self.0.stop(&code.to_string());
+		match self.state.as_mut() {
+			Some(RecvState::Idle(stream)) => stream.stop(&code.to_string()),
+			_ => self.stop = Some(code),
+		}
 	}
 
-	async fn closed(&mut self) -> Result<(), Self::Error> {
-		self.0.closed().await.map(|_| ()).map_err(Error)
+	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		// Emulated with reads: a FIN or reset surfaces through poll_fill, and
+		// undelivered data parks the watch until the caller drains it.
+		loop {
+			if self.fin {
+				return Poll::Ready(Ok(()));
+			}
+			if !self.buffer.is_empty() {
+				return Poll::Pending;
+			}
+			match ready!(self.poll_fill(cx, 8 * 1024)) {
+				Ok(()) => {}
+				// A read error is also a closed stream.
+				Err(err) => return Poll::Ready(Err(err)),
+			}
+		}
 	}
 }

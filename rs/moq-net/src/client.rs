@@ -125,7 +125,10 @@ impl Client {
 	/// Perform the MoQ handshake, returning the [`Session`] and the [`Driver`] that
 	/// runs its protocol work. The driver must be polled (spawned or awaited) for
 	/// the session to make progress.
-	pub async fn connect<S: web_transport_trait::Session>(&self, session: S) -> Result<(Session, Driver), Error> {
+	pub async fn connect<S: crate::transport::poll::Session>(
+		&self,
+		mut session: S,
+	) -> Result<(Session, Driver), Error> {
 		if self.publish.is_none() && self.subscribe.is_none() {
 			tracing::warn!("not publishing or consuming anything");
 		}
@@ -359,7 +362,7 @@ impl Client {
 			Some(p) => return Err(Error::UnknownAlpn(p.to_string())),
 		};
 
-		let mut stream = Stream::open(&session, encoding).await?;
+		let mut stream = Stream::open(&mut session, encoding).await?;
 
 		// The encoding is always an IETF version for SETUP negotiation.
 		let ietf_encoding = ietf::Version::try_from(encoding).map_err(|_| Error::Version)?;
@@ -452,6 +455,8 @@ mod tests {
 		sync::{Arc, Mutex},
 	};
 
+	use std::task::{Context, Poll};
+
 	use crate::SessionError;
 	use crate::coding::{Decode, Encode};
 	use bytes::{BufMut, Bytes};
@@ -476,6 +481,8 @@ mod tests {
 	#[derive(Clone, Default)]
 	struct FakeSession {
 		state: Arc<FakeSessionState>,
+		// Per-clone, so each pending poll_closed keeps its own registration live.
+		park: kio::Park,
 	}
 
 	#[derive(Default)]
@@ -483,7 +490,7 @@ mod tests {
 		protocol: Option<&'static str>,
 		control_stream: Mutex<Option<(FakeSendStream, FakeRecvStream)>>,
 		close_events: Mutex<Vec<(u32, String)>>,
-		close_notify: tokio::sync::Notify,
+		closed: kio::Fan,
 		control_writes: Arc<Mutex<Vec<u8>>>,
 		send_rate: Mutex<Option<u64>>,
 	}
@@ -499,11 +506,14 @@ mod tests {
 				protocol,
 				control_stream: Mutex::new(Some((send, recv))),
 				close_events: Mutex::new(Vec::new()),
-				close_notify: tokio::sync::Notify::new(),
+				closed: kio::Fan::default(),
 				control_writes: writes,
 				send_rate: Mutex::new(None),
 			};
-			Self { state: Arc::new(state) }
+			Self {
+				state: Arc::new(state),
+				park: kio::Park::default(),
+			}
 		}
 
 		fn set_send_rate(&self, rate: Option<u64>) {
@@ -515,43 +525,50 @@ mod tests {
 		}
 
 		async fn wait_for_first_close(&self) -> (u32, String) {
-			loop {
-				let notified = self.state.close_notify.notified();
-				if let Some(close) = self.state.close_events.lock().unwrap().first().cloned() {
-					return close;
+			kio::wait(|waiter| {
+				self.state.closed.register(waiter);
+				match self.state.close_events.lock().unwrap().first().cloned() {
+					Some(close) => std::task::Poll::Ready(close),
+					None => std::task::Poll::Pending,
 				}
-				notified.await;
-			}
+			})
+			.await
 		}
 	}
 
-	impl web_transport_trait::Session for FakeSession {
+	impl web_transport_trait::poll::Session for FakeSession {
 		type SendStream = FakeSendStream;
 		type RecvStream = FakeRecvStream;
 		type Error = FakeError;
 
-		async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
-			std::future::pending().await
+		fn poll_accept_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+			Poll::Pending
 		}
 
-		async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-			std::future::pending().await
+		fn poll_accept_bi(
+			&mut self,
+			_cx: &mut Context<'_>,
+		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
+			Poll::Pending
 		}
 
-		async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-			self.state.control_stream.lock().unwrap().take().ok_or(FakeError)
+		fn poll_open_bi(
+			&mut self,
+			_cx: &mut Context<'_>,
+		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
+			Poll::Ready(self.state.control_stream.lock().unwrap().take().ok_or(FakeError))
 		}
 
-		async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
-			std::future::pending().await
+		fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+			Poll::Pending
 		}
 
-		fn send_datagram(&self, _payload: Bytes) -> Result<(), Self::Error> {
-			Ok(())
+		fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Ok(()))
 		}
 
-		async fn recv_datagram(&self) -> Result<Bytes, Self::Error> {
-			std::future::pending().await
+		fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
+			Poll::Pending
 		}
 
 		fn max_datagram_size(&self) -> usize {
@@ -562,18 +579,17 @@ mod tests {
 			self.state.protocol
 		}
 
-		fn close(&self, code: u32, reason: &str) {
+		fn close(&mut self, code: u32, reason: &str) {
 			self.state.close_events.lock().unwrap().push((code, reason.to_string()));
-			self.state.close_notify.notify_waiters();
+			self.state.closed.wake();
 		}
 
-		async fn closed(&self) -> Self::Error {
-			loop {
-				let notified = self.state.close_notify.notified();
-				if !self.state.close_events.lock().unwrap().is_empty() {
-					return FakeError;
-				}
-				notified.await;
+		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
+			// Register before checking so a close racing this poll still wakes it.
+			self.state.closed.register(self.park.hold(cx));
+			match self.state.close_events.lock().unwrap().is_empty() {
+				false => Poll::Ready(FakeError),
+				true => Poll::Pending,
 			}
 		}
 
@@ -599,12 +615,12 @@ mod tests {
 		writes: Arc<Mutex<Vec<u8>>>,
 	}
 
-	impl web_transport_trait::SendStream for FakeSendStream {
+	impl web_transport_trait::poll::SendStream for FakeSendStream {
 		type Error = FakeError;
 
-		async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+		fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 			self.writes.lock().unwrap().put_slice(buf);
-			Ok(buf.len())
+			Poll::Ready(Ok(buf.len()))
 		}
 
 		fn set_priority(&mut self, _order: u8) {}
@@ -615,8 +631,8 @@ mod tests {
 
 		fn reset(&mut self, _code: u32) {}
 
-		async fn closed(&mut self) -> Result<(), Self::Error> {
-			Ok(())
+		fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Ok(()))
 		}
 	}
 
@@ -624,25 +640,25 @@ mod tests {
 		data: VecDeque<u8>,
 	}
 
-	impl web_transport_trait::RecvStream for FakeRecvStream {
+	impl web_transport_trait::poll::RecvStream for FakeRecvStream {
 		type Error = FakeError;
 
-		async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+		fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
 			if self.data.is_empty() {
-				return Ok(None);
+				return Poll::Ready(Ok(None));
 			}
 
 			let size = dst.len().min(self.data.len());
 			for slot in dst.iter_mut().take(size) {
 				*slot = self.data.pop_front().unwrap();
 			}
-			Ok(Some(size))
+			Poll::Ready(Ok(Some(size)))
 		}
 
 		fn stop(&mut self, _code: u32) {}
 
-		async fn closed(&mut self) -> Result<(), Self::Error> {
-			Ok(())
+		fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Ok(()))
 		}
 	}
 
