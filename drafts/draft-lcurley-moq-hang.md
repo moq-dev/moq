@@ -101,6 +101,9 @@ Each group contains a single frame with UTF-8 JSON.
 
 A publisher MUST NOT write multiple frames to a group until a future specification includes a delta-encoding mechanism (via JSON Patch most likely).
 
+A publisher SHOULD also serve the catalog as a `catalog.json.z` track: the identical JSON, compressed ({{compression}}).
+A consumer reads whichever of the two tracks it prefers.
+
 ## Root
 The root of the catalog is a JSON document with the following schema:
 
@@ -258,6 +261,7 @@ type CommonExtensions = {
   "broadcast": string | undefined,
   "container": Container,
   "jitter": number | undefined,
+  "timeline": Timeline | undefined,
 }
 ~~~
 
@@ -291,6 +295,9 @@ For example:
 
 An audio frame's duration is codec dependent.
 AAC often uses 1024 samples per frame, so at 44100Hz an immediately-flushed track's `jitter` is 23.
+
+### timeline {#field-timeline}
+The companion timeline track indexing this rendition's groups ({{timeline}}), if the publisher offers one.
 
 # Container {#container}
 Audio and video tracks use a container to encapsulate the media payload.
@@ -326,6 +333,67 @@ A consumer MUST feed `init` to the decoder before the first frame.
 
 ## loc
 Each frame is a Low Overhead Container frame {{!I-D.ietf-moq-loc}}: a property block, carrying the timestamp among other properties, followed by the codec payload.
+
+
+# Compression {#compression}
+Some metadata tracks are compressed, conventionally marked with a `.z` suffix on the track name.
+
+Each group is one raw DEFLATE stream ({{!RFC1951}}), sync-flushed at each frame boundary.
+Each frame is therefore a self-delimited, byte-aligned slice, while later frames compress against the earlier ones in the same group.
+A consumer MUST decompress a group's frames in order, starting from the first.
+
+A sync flush ends with the empty-block marker `0x00 0x00 0xff 0xff`.
+A publisher MUST omit this trailing marker from each frame and a consumer MUST append it before decompressing, the same trick as permessage-deflate ({{!RFC7692, Section 7.2.1}}).
+
+
+# Timeline {#timeline}
+A media track MAY have a companion timeline track: an ordered log mapping each of the media track's groups to its start timestamp.
+On the wire a group carries only a sequence number; the timestamps live inside the media frames.
+The timeline republishes that mapping as metadata, so a consumer can determine which group covers a given time, and where the live edge is, without downloading the media itself.
+This is the primitive used to seek, or to serve HLS/DASH playlists.
+
+A rendition advertises its timeline via the `timeline` field ({{common}}):
+
+~~~
+type Timeline = {
+  "track": string,
+  "timescale": number | undefined,
+  "wall": number | undefined,
+}
+~~~
+
+The `track` field names the timeline track, published in the same broadcast as the catalog.
+The conventional name is the media track's name with a `.timeline.z` suffix, but a consumer MUST use the name from the catalog rather than deriving it.
+Renditions MAY share a timeline track when their group boundaries are aligned, for example a transcode ladder mirroring the source's groups.
+Audio and video groups have different durations, so each declares its own timeline.
+
+The `timescale` field is the number of timestamp units per second, defaulting to 1000 (milliseconds).
+
+The `wall` field anchors the timeline to the wall clock, if known: the wall-clock time of timestamp 0, in `timescale` units since the moq epoch, 2020-01-01T00:00:00Z (1577836800 Unix seconds).
+Measuring from 2020 rather than 1970 keeps the value safely within a 53-bit JSON integer even at fine timescales.
+A consumer derives the wall-clock time of any group as `wall + pts`.
+
+## Timeline Track
+The timeline track is a single compressed ({{compression}}) group that is never rolled.
+Each frame is one UTF-8 JSON record:
+
+~~~
+type Record = {
+  "group": number,
+  "pts": number,
+  // ... any custom fields ...
+}
+~~~
+
+The `group` field is the sequence number of the media track's group, as used by subscriptions and fetches.
+The `pts` field is the group's start, its first frame's presentation timestamp, in the timeline's `timescale`.
+Additional fields MAY be added based on the application; a consumer MUST ignore fields it does not recognize.
+
+A record is appended when the media group opens, so the live edge of the timeline is the live edge of the media.
+A group's duration is implicit: the gap to the next record.
+
+A publisher MAY throttle records to a granularity, emitting at most one record per some amount of media time.
+Group sequence numbers are contiguous, so a consumer that lands between two records can extrapolate the group number or inspect the media to fill the gap.
 
 
 # Security Considerations
