@@ -15,6 +15,18 @@ function isLeadingOnes(version?: IetfVersion): boolean {
 	);
 }
 
+/** Options for opening an outgoing stream. */
+export interface OpenOptions {
+	/** The negotiated IETF version, which selects the varint encoding. */
+	version?: IetfVersion;
+
+	/**
+	 * The transport send order, where HIGHER values are transmitted first.
+	 * Left to the transport's default when unset.
+	 */
+	sendOrder?: number;
+}
+
 export class Stream {
 	reader: Reader;
 	writer: Writer;
@@ -43,9 +55,9 @@ export class Stream {
 		}
 	}
 
-	static async open(quic: WebTransport, version?: IetfVersion, priority?: number): Promise<Stream> {
-		const { readable, writable } = await quic.createBidirectionalStream({ sendOrder: priority });
-		return new Stream({ readable, writable, version });
+	static async open(quic: WebTransport, options?: OpenOptions): Promise<Stream> {
+		const { readable, writable } = await quic.createBidirectionalStream({ sendOrder: options?.sendOrder });
+		return new Stream({ readable, writable, version: options?.version });
 	}
 
 	close() {
@@ -371,9 +383,11 @@ export class Writer {
 		this.#writer.abort(reason).catch(() => void 0);
 	}
 
-	static async open(quic: WebTransport, version?: IetfVersion): Promise<Writer> {
-		const writable = (await quic.createUnidirectionalStream()) as WritableStream<Uint8Array>;
-		return new Writer(writable, version);
+	static async open(quic: WebTransport, options?: OpenOptions): Promise<Writer> {
+		const writable = (await quic.createUnidirectionalStream({
+			sendOrder: options?.sendOrder,
+		})) as WritableStream<Uint8Array>;
+		return new Writer(writable, options?.version);
 	}
 }
 

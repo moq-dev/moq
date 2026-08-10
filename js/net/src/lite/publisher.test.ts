@@ -5,8 +5,9 @@ import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
 import { randomOrigin } from "./origin.ts";
+import { sendOrder } from "./priority.ts";
 import { Publisher } from "./publisher.ts";
-import { decodeSubscribeResponse, Subscribe } from "./subscribe.ts";
+import { decodeSubscribeResponse, Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { ALPN_05, Version } from "./version.ts";
 
 // Delivers `sequences` in the given order, finishes the track, and returns the
@@ -50,6 +51,65 @@ async function subscribeEnd(sequences: number[]): Promise<number> {
 		client.close();
 	}
 }
+
+// Serves `sequences` at the subscribed priority, optionally raising it via SUBSCRIBE_UPDATE
+// after the first group, and returns the send order of each group stream in open order.
+async function groupSendOrders(priority: number, sequences: number[], update?: number) {
+	const pair = createMockTransportPair(ALPN_05);
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video");
+	publisher.publish(Path.from("test"), broadcast);
+
+	const client = await Stream.open(pair.client);
+	const server = await Stream.accept(pair.server);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	const msg = new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority });
+	void publisher.runSubscribe(msg, server);
+
+	try {
+		for (const [index, sequence] of sequences.entries()) {
+			if (index === 1 && update !== undefined) {
+				await new SubscribeUpdate({ priority: update }).encode(client.writer, Version.DRAFT_05);
+				// Let the publisher apply it, otherwise the next group races the update on the wire.
+				await new Promise((resolve) => setTimeout(resolve, 5));
+			}
+
+			const group = new GroupProducer(sequence);
+			group.writeString("hello");
+			group.close();
+			track.writeGroup(group);
+
+			// One group per turn, so the send orders come back in the order given.
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+		track.close();
+
+		// The last group's stream opens asynchronously, so wait for it rather than racing it.
+		for (let i = 0; i < 200 && pair.server.sendOrders.uni.length < sequences.length; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+
+		return pair.server.sendOrders.uni;
+	} finally {
+		broadcast.close();
+		client.close();
+	}
+}
+
+// Without a send order every group stream ranks the same, so the transport round-robins them
+// and a stalled low-priority track steals bandwidth from the one the subscriber asked for.
+test("lite draft-05: group streams carry the subscription's send order", async () => {
+	expect(await groupSendOrders(7, [0, 1, 2])).toEqual([sendOrder(7, 0), sendOrder(7, 1), sendOrder(7, 2)]);
+});
+
+// SUBSCRIBE_UPDATE re-ranks the subscription, so groups opened after it use the new priority.
+test("lite draft-05: a subscribe update re-ranks later groups", async () => {
+	const orders = await groupSendOrders(1, [0, 1], 9);
+	expect(orders).toEqual([sendOrder(1, 0), sendOrder(9, 1)]);
+});
 
 // A Rust subscriber feeds this value straight into `track::Producer::finish_at`, which is
 // exclusive, so an inclusive bound here silently truncates the final group across languages.

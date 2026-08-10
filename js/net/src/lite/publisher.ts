@@ -12,6 +12,7 @@ import * as DatagramStream from "./datagram_stream.ts";
 import type { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
+import { sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
@@ -408,7 +409,8 @@ export class Publisher {
 				}
 				end = Math.max(end, group.sequence + 1);
 
-				void this.#runGroup(sub, group, timescale);
+				// Read the priority per group so a SUBSCRIBE_UPDATE applies to everything after it.
+				void this.#runGroup(sub, group, timescale, track.subscription.peek()?.priority ?? 0);
 			}
 
 			if (emitRange) {
@@ -513,13 +515,6 @@ export class Publisher {
 		}
 	}
 
-	/**
-	 * Runs a group and sends its frames to the stream.
-	 * @param sub - The subscription ID
-	 * @param group - The group to run
-	 *
-	 * @internal
-	 */
 	// Serialize a fetched group's frames onto the FETCH stream as bare records: each a
 	// zigzag-delta timestamp (at the track's advertised timescale) followed by size + bytes.
 	async #runFetchGroup(group: group.Consumer, stream: Writer, timescale: Timescale) {
@@ -537,10 +532,21 @@ export class Publisher {
 		}
 	}
 
-	async #runGroup(sub: bigint, group: group.Consumer, timescale: Timescale) {
+	/**
+	 * Serves one group on its own unidirectional stream.
+	 * @param sub - The subscription ID
+	 * @param group - The group to run
+	 * @param timescale - The track's advertised timescale, applied to every frame timestamp
+	 * @param priority - The subscriber's current track priority, ranking this stream against the others
+	 *
+	 * @internal
+	 */
+	async #runGroup(sub: bigint, group: group.Consumer, timescale: Timescale, priority: number) {
 		const msg = new GroupMessage(sub, group.sequence);
 		try {
-			const stream = await Writer.open(this.#quic);
+			// The transport drains streams by send order, so this is what makes a high-priority
+			// track (and a newer group within it) win the link when there isn't room for both.
+			const stream = await Writer.open(this.#quic, { sendOrder: sendOrder(priority, group.sequence) });
 			await stream.u53(0); // stream type
 			await msg.encode(stream);
 

@@ -16,6 +16,7 @@ import * as DatagramStream from "./datagram_stream.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
+import { sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
@@ -576,7 +577,7 @@ export class Subscriber {
 
 			const info = await this.#trackInfo(broadcast, track);
 			const priority = options.priority ?? 0;
-			const stream = await Stream.open(this.#quic, undefined, priority);
+			const stream = await Stream.open(this.#quic, { sendOrder: sendOrder(priority, sequence) });
 
 			try {
 				await stream.writer.u53(StreamId.Fetch);

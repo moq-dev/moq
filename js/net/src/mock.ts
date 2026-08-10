@@ -38,6 +38,13 @@ export class MockTransport implements WebTransport {
 	readonly congestionControl: WebTransportCongestionControl;
 	readonly reliability: string;
 
+	/**
+	 * Every `sendOrder` requested when opening an outgoing stream, in call order, split by
+	 * stream kind. The mock delivers streams in creation order regardless; these let a test
+	 * assert how the wire layer ranked them (`undefined` when it asked for no order).
+	 */
+	readonly sendOrders: { uni: (number | undefined)[]; bidi: (number | undefined)[] } = { uni: [], bidi: [] };
+
 	#closeResolve!: (info: WebTransportCloseInfo) => void;
 	#bidiController!: ReadableStreamDefaultController<WebTransportBidirectionalStream>;
 	#uniController!: ReadableStreamDefaultController<ReadableStream<Uint8Array>>;
@@ -142,9 +149,9 @@ export class MockTransport implements WebTransport {
 		this.#peer = peer;
 	}
 
-	async createBidirectionalStream(
-		_options?: WebTransportSendStreamOptions,
-	): Promise<WebTransportBidirectionalStream> {
+	async createBidirectionalStream(options?: WebTransportSendStreamOptions): Promise<WebTransportBidirectionalStream> {
+		this.sendOrders.bidi.push(options?.sendOrder);
+
 		const peer = this.#peer;
 		if (!peer) throw new Error("no peer");
 
@@ -173,7 +180,9 @@ export class MockTransport implements WebTransport {
 		return local;
 	}
 
-	async createUnidirectionalStream(_options?: WebTransportSendStreamOptions): Promise<WritableStream<Uint8Array>> {
+	async createUnidirectionalStream(options?: WebTransportSendStreamOptions): Promise<WritableStream<Uint8Array>> {
+		this.sendOrders.uni.push(options?.sendOrder);
+
 		const peer = this.#peer;
 		if (!peer) throw new Error("no peer");
 
