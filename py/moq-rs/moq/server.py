@@ -36,8 +36,13 @@ class Request:
 
     @property
     def path(self) -> str:
-        """The request path, or an empty string for the root/missing path."""
+        """The query-free request path, or an empty string for root/missing."""
         return self._inner.path()
+
+    @property
+    def query(self) -> str | None:
+        """The encoded request query without `?`; it may contain credentials."""
+        return self._inner.query()
 
     @property
     def transport(self) -> Transport:

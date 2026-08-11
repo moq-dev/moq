@@ -1730,6 +1730,7 @@ async fn broadcast_websocket_fallback() {
 		let request = server.accept().await.expect("no incoming connection");
 		assert_eq!(request.transport(), moq_native::Transport::WebSocket);
 		assert_eq!(request.path(), "/admin");
+		assert_eq!(request.query(), Some("jwt=test"));
 		assert_eq!(request.url().and_then(url::Url::query), Some("jwt=test"));
 		let session = request.with_publisher(&pub_origin).ok().await?;
 

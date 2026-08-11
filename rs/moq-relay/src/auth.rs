@@ -73,20 +73,14 @@ impl AuthParams {
 		}
 	}
 
-	/// Extract `(path, jwt)` from a moq SETUP request path of the form
-	/// `/broadcast?jwt=<token>`.
+	/// Extract authentication parameters from an already-separated path and query.
 	///
 	/// URL-less transports (a qmux Unix socket, raw QUIC) carry the request path
 	/// in the moq-lite-05 SETUP rather than a real request URI, so there is no
 	/// host and no subdomain->path routing to apply; the caller (a gateway) has
-	/// already prepended any vanity prefix. The path is used verbatim; only the
-	/// `jwt` query parameter is split off and URL-decoded.
-	pub(crate) fn from_path(raw: &str) -> Self {
-		let (path, query) = match raw.split_once('?') {
-			Some((path, query)) => (path, Some(query)),
-			None => (raw, None),
-		};
-
+	/// already prepended any vanity prefix. Only the `jwt` query parameter is
+	/// URL-decoded.
+	pub(crate) fn from_path_query(path: &str, query: Option<&str>) -> Self {
 		let jwt = query.and_then(|query| {
 			url::form_urlencoded::parse(query.as_bytes())
 				.find(|(k, v)| k == "jwt" && !v.is_empty())
@@ -1169,26 +1163,26 @@ mod tests {
 	#[test]
 	fn auth_params_from_path() {
 		// Path + JWT (the gateway media uplink shape).
-		let p = AuthParams::from_path("/customer/foo/bar?jwt=xd");
+		let p = AuthParams::from_path_query("/customer/foo/bar", Some("jwt=xd"));
 		assert_eq!(p.path, "/customer/foo/bar");
 		assert_eq!(p.jwt.as_deref(), Some("xd"));
 
 		// Path only (tokenless public playback).
-		let p = AuthParams::from_path("/customer/foo/bar");
+		let p = AuthParams::from_path_query("/customer/foo/bar", None);
 		assert_eq!(p.path, "/customer/foo/bar");
 		assert_eq!(p.jwt, None);
 
 		// Empty (a no-path, no-JWT stream connection: resolved via public auth).
-		let p = AuthParams::from_path("");
+		let p = AuthParams::from_path_query("", None);
 		assert_eq!(p.path, "");
 		assert_eq!(p.jwt, None);
 
 		// An empty jwt value counts as absent.
-		let p = AuthParams::from_path("/foo?jwt=");
+		let p = AuthParams::from_path_query("/foo", Some("jwt="));
 		assert_eq!(p.jwt, None);
 
 		// The jwt may sit among other query params and be URL-encoded.
-		let p = AuthParams::from_path("/foo?a=1&jwt=ab%20cd");
+		let p = AuthParams::from_path_query("/foo", Some("a=1&jwt=ab%20cd"));
 		assert_eq!(p.path, "/foo");
 		assert_eq!(p.jwt.as_deref(), Some("ab cd"));
 	}

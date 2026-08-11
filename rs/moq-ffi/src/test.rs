@@ -1400,7 +1400,7 @@ async fn server_client_roundtrip() {
 		.await
 		.expect("listen timed out")
 		.expect("listen failed");
-	let url = format!("https://{addr}/test");
+	let url = format!("https://{addr}/test?foo=bar");
 
 	let accept_server = server.clone();
 	let accept = tokio::spawn(async move {
@@ -1410,6 +1410,7 @@ async fn server_client_roundtrip() {
 			.expect("accept errored")
 			.expect("accept returned None");
 		assert_eq!(request.path(), "/test");
+		assert_eq!(request.query().as_deref(), Some("foo=bar"));
 		request.accept().await.expect("handshake failed")
 	});
 

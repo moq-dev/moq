@@ -58,7 +58,7 @@ When you're done, signal graceful shutdown to the peer:
 session.shutdown()  // alias for cancel(code: 0)
 ```
 
-Inspect an incoming request's logical endpoint before accepting it with `request.path`. It is consistent across transports and returns `""` for the root or missing path:
+Inspect an incoming request's logical endpoint before accepting it with the query-free `request.path`. It is consistent across transports and returns `""` for the root or missing path. `request.query` returns the encoded query and may contain credentials:
 
 ```swift
 let server = Server()
@@ -72,6 +72,7 @@ while let request = try await server.accept() {
         continue
     }
     let session = try await request.accept()
+    Task { try? await session.closed() }
 }
 ```
 

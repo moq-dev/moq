@@ -82,7 +82,9 @@ async def main():
 
         sessions = []
         async for request in server:
-            print(f"  + {request.transport} {request.path} from {request.url}")
+            safe_path = request.path.split("?", 1)[0]
+            safe_url = request.url.split("?", 1)[0] if request.url else None
+            print(f"  + {request.transport} {safe_path} from {safe_url}")
             sessions.append(await request.accept())
 
 
@@ -122,7 +124,7 @@ client = moq.Client(
   - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
   - `.create_broadcast(path) → BroadcastProducer`. Create a live broadcast served to incoming sessions; `finish()` unpublishes it.
 - **`Request`**. An incoming session, yielded by `async for request in server`.
-  - `.url`, `.path`, `.transport`. The path is uniform across transports; the root or missing path is `""`.
+  - `.url`, `.path`, `.query`, `.transport`. The query-free path is uniform across transports; the root or missing path is `""`. The encoded query may contain credentials.
   - `.set_publish(origin)`, `.set_consume(origin)`. Per-request overrides.
   - `await .accept() → Session`. Complete the handshake (hold the result to keep the connection alive).
   - `await .reject(code)`. Reject with an HTTP status code.

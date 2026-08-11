@@ -191,7 +191,7 @@ Server.listen("127.0.0.1:4443", tlsGenerate = listOf("localhost")).use { server 
 }
 ```
 
-`request.path()` returns the client-advertised request path consistently across transports. The root or missing path is an empty string.
+`request.path()` returns the query-free request path consistently across transports. The root or missing path is an empty string. `request.query()` returns the encoded query and may contain credentials.
 
 `server.certFingerprints()` returns the hex SHA-256 fingerprints of the configured certificates, for pinning a generated self-signed certificate in a browser via `serverCertificateHashes`. Advanced callers can pass their own `publish` / `subscribe` origins to `listen`, or drive `uniffi.moq.MoqServer` directly.
 

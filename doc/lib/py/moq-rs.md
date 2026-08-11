@@ -41,15 +41,23 @@ async with moq.Client("https://relay.example.com") as client:
 
 `Client(url, *, tls_verify=True, tls_roots=None, tls_system_roots=None, tls_fingerprints=None, tls_cert=None, tls_key=None, bind=None, publish=None, subscribe=None)`. Use `tls_cert` and `tls_key` for mutual TLS. Without `publish` / `subscribe` an internal origin is created automatically. Pass an `OriginProducer` to share state across multiple clients.
 
-Inspect a server request's logical endpoint before accepting it with `request.path`. It is consistent across transports and returns `""` for the root or missing path:
+Inspect a server request's logical endpoint before accepting it with the query-free `request.path`. It is consistent across transports and returns `""` for the root or missing path. `request.query` returns the encoded query and may contain credentials:
 
 ```python
+import asyncio
+
+active = set()
 async with moq.Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
     async for request in server:
         if request.path == "/admin":
             await request.reject(403)
             continue
         session = await request.accept()
+        closed = asyncio.create_task(session.closed())
+        active.add(closed)
+        closed.add_done_callback(active.discard)
+
+await asyncio.gather(*active, return_exceptions=True)
 ```
 
 A server can reject the connection on auth grounds: `moq.Error.Unauthorized` (HTTP 401) or `moq.Error.Forbidden` (HTTP 403). These are terminal, so handle them separately from a transient transport failure rather than reconnecting. `moq.is_auth(err)` catches both:

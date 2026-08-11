@@ -33,9 +33,14 @@ func (r *Request) URL() *string {
 	return r.inner.Url()
 }
 
-// Path is the request path, or an empty string for the root/missing path.
+// Path is the query-free request path, or an empty string for the root/missing path.
 func (r *Request) Path() string {
 	return r.inner.Path()
+}
+
+// Query is the encoded request query without "?"; it may contain credentials.
+func (r *Request) Query() *string {
+	return r.inner.Query()
 }
 
 // Transport is the wire transport the request arrived over, e.g. TransportQUIC.

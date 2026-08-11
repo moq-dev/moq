@@ -1102,9 +1102,21 @@ impl Request {
 		let path = if setup.is_empty() {
 			self.url.as_ref().map(Url::path).unwrap_or("")
 		} else {
-			setup
+			setup.split_once('?').map_or(setup, |(path, _)| path)
 		};
 		if path == "/" { "" } else { path }
+	}
+
+	/// The encoded request query without the leading `?`, if one was advertised.
+	///
+	/// Query values can contain credentials. Avoid logging this value.
+	pub fn query(&self) -> Option<&str> {
+		let setup = request_ref!(self, r => r.path());
+		if setup.is_empty() {
+			self.url.as_ref().and_then(Url::query)
+		} else {
+			setup.split_once('?').map(|(_, query)| query)
+		}
 	}
 
 	/// The single direction the client advertised in its SETUP, or `None` for a

@@ -84,7 +84,7 @@ not report that metric yet.
 
 ## Accept connections
 
-Inspect an incoming request's logical endpoint before accepting it with `Path()`. It is consistent across transports and returns `""` for the root or missing path:
+Inspect an incoming request's logical endpoint before accepting it with the query-free `Path()`. It is consistent across transports and returns `""` for the root or missing path. `Query()` returns the encoded query and may contain credentials:
 
 ```go
 server, err := moq.Listen(ctx, "127.0.0.1:4443", moq.WithTLSGenerate("localhost"))
@@ -105,7 +105,7 @@ for request, err := range server.Requests(ctx) {
     if err != nil {
         log.Fatal(err)
     }
-    _ = session
+    go func() { _ = session.Closed(ctx) }()
 }
 ```
 
