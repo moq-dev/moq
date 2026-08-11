@@ -1,6 +1,7 @@
 import { fromTransport } from "./error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
+import { TimeoutError, withTimeout } from "./util/timeout.ts";
 import * as Varint from "./varint.ts";
 
 const MAX_U31 = 2 ** 31 - 1;
@@ -20,6 +21,21 @@ type SendStreamOptions = WebTransportSendStreamOptions & { waitUntilAvailable?: 
  */
 export function sendOptions(priority?: number): SendStreamOptions {
 	return { sendOrder: priority, waitUntilAvailable: true };
+}
+
+// How long an open may wait for the peer to free a stream slot. waitUntilAvailable makes
+// it wait forever otherwise, so a peer that withholds stream credit while keeping the
+// subscription open would queue work without limit. Matches the subscribe budget.
+const OPEN_TIMEOUT_MS = 10_000;
+
+/** Options for {@link Writer.tryOpen}. */
+export interface TryOpenOptions {
+	/** Give up once this settles, however it settles. */
+	cancel: Promise<unknown>;
+	/** Protocol version the writer encodes for. */
+	version?: IetfVersion;
+	/** How long to wait for a stream slot, in milliseconds. Defaults to 10s. */
+	timeout?: number;
 }
 
 function isLeadingOnes(version?: IetfVersion): boolean {
@@ -390,6 +406,38 @@ export class Writer {
 	static async open(quic: WebTransport, version?: IetfVersion): Promise<Writer> {
 		const writable = (await quic.createUnidirectionalStream(sendOptions())) as WritableStream<Uint8Array>;
 		return new Writer(writable, version);
+	}
+
+	/**
+	 * Like {@link Writer.open}, but gives up when `cancel` settles or `timeout` elapses,
+	 * returning undefined so the caller can drop whatever it meant to send. A stream that
+	 * opens after that is reset rather than leaked. A real transport failure still throws.
+	 */
+	static async tryOpen(quic: WebTransport, opts: TryOpenOptions): Promise<Writer | undefined> {
+		const open = Writer.open(quic, opts.version);
+		const timeout = opts.timeout ?? OPEN_TIMEOUT_MS;
+
+		// A rejected `cancel` (STOP_SENDING) means the peer is gone too, so both settle
+		// paths mean "give up" and neither is left unhandled.
+		const cancelled = opts.cancel.then(
+			() => undefined,
+			() => undefined,
+		);
+
+		try {
+			const stream = await withTimeout(
+				Promise.race([open, cancelled]),
+				timeout,
+				`stream open timed out after ${timeout}ms waiting for a slot`,
+			);
+			if (stream) return stream;
+		} catch (err: unknown) {
+			if (!(err instanceof TimeoutError)) throw err;
+		}
+
+		const abandoned = new Error("abandoned waiting for a stream slot");
+		open.then((w) => w.reset(abandoned)).catch(() => void 0);
+		return undefined;
 	}
 }
 

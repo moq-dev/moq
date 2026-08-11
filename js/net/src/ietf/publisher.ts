@@ -164,20 +164,13 @@ export class Publisher {
 	async #runGroup(requestId: bigint, group: group.Consumer, timescale: Timescale, unsubscribed: Promise<void>) {
 		try {
 			// The open waits for the peer to free a stream slot, which can outlast the
-			// subscription. Give up when the subscriber leaves instead of parking here
-			// forever holding the group's frames. A rejected `closed` is STOP_SENDING,
-			// which also means they left, so both settle paths resolve to "gone".
-			const open = Writer.open(this.#quic, this.#session.version);
-			const gone = unsubscribed.then(
-				() => undefined,
-				() => undefined,
-			);
-			const stream = await Promise.race([open, gone]);
+			// subscription. Drop the group rather than parking here holding its frames.
+			const stream = await Writer.tryOpen(this.#quic, {
+				cancel: unsubscribed,
+				version: this.#session.version,
+			});
 			if (!stream) {
-				const e = new Error("unsubscribed");
-				// The slot may free up later, so reset the stream we no longer want.
-				open.then((w) => w.reset(e)).catch(() => {});
-				group.close(e);
+				group.close(new Error("no stream slot"));
 				return;
 			}
 

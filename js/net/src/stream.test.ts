@@ -338,6 +338,70 @@ test("closed is stable, so racing it per frame does not allocate", async () => {
 	expect(reader.closed).toBe(reader.closed);
 });
 
+// Builds a transport whose uni opens complete only once `freeSlot` is called, standing in
+// for a peer that has granted no stream credit.
+function stalledTransport() {
+	let freeSlot!: () => void;
+	const slot = new Promise<void>((resolve) => {
+		freeSlot = resolve;
+	});
+
+	let aborted: unknown;
+	const stream = new WritableStream<Uint8Array>({
+		abort: (reason) => {
+			aborted = reason;
+		},
+	});
+
+	const quic = {
+		createUnidirectionalStream: async () => {
+			await slot;
+			return stream;
+		},
+	} as unknown as WebTransport;
+
+	return { quic, freeSlot, aborted: () => aborted };
+}
+
+test("tryOpen gives up when cancelled, resetting a stream that opens afterwards", async () => {
+	const { quic, freeSlot, aborted } = stalledTransport();
+
+	let cancel!: () => void;
+	const cancelled = new Promise<void>((resolve) => {
+		cancel = resolve;
+	});
+
+	const opening = Writer.tryOpen(quic, { cancel: cancelled });
+	cancel();
+	expect(await opening).toBeUndefined();
+
+	freeSlot();
+	await new Promise((resolve) => setTimeout(resolve, 5));
+	expect(aborted()).toBeDefined();
+});
+
+// Without a deadline a peer that withholds stream credit while keeping the subscription
+// open queues work forever, since waitUntilAvailable never rejects.
+test("tryOpen gives up when the peer never frees a slot", async () => {
+	const { quic, freeSlot, aborted } = stalledTransport();
+
+	expect(await Writer.tryOpen(quic, { cancel: new Promise(() => {}), timeout: 10 })).toBeUndefined();
+
+	freeSlot();
+	await new Promise((resolve) => setTimeout(resolve, 5));
+	expect(aborted()).toBeDefined();
+});
+
+test("tryOpen returns the stream when a slot is available", async () => {
+	const { quic, freeSlot, aborted } = stalledTransport();
+
+	const opening = Writer.tryOpen(quic, { cancel: new Promise(() => {}), timeout: 1000 });
+	freeSlot();
+
+	expect(await opening).toBeInstanceOf(Writer);
+	expect(aborted()).toBeUndefined();
+});
+
 test("open waits for a stream slot instead of rejecting once the peer's limit is full", async () => {
 	const options: unknown[] = [];
 	const quic = {
