@@ -600,6 +600,9 @@ struct UniServe<S: crate::transport::poll::Session> {
 	state: UniState<S>,
 }
 
+// A state machine's enum is its storage: one transient instance per stream, so the
+// big variant is the working state, not padding held in bulk.
+#[allow(clippy::large_enum_variant)]
 enum UniState<S: crate::transport::poll::Session> {
 	/// Reading the stream's type.
 	Start {
@@ -689,6 +692,9 @@ struct GroupRecv<S: crate::transport::poll::Session> {
 	state: GroupRecvState,
 }
 
+// A state machine's enum is its storage: one transient instance per stream, so the
+// big variant is the working state, not padding held in bulk.
+#[allow(clippy::large_enum_variant)]
 enum GroupRecvState {
 	/// Reading the GROUP header.
 	Header,
@@ -939,6 +945,9 @@ struct RecvBandwidth<S: crate::transport::poll::Session> {
 	state: BandwidthState<S>,
 }
 
+// A state machine's enum is its storage: one transient instance per stream, so the
+// big variant is the working state, not padding held in bulk.
+#[allow(clippy::large_enum_variant)]
 enum BandwidthState<S: crate::transport::poll::Session> {
 	/// lite-05+ negotiates probing: only open a PROBE stream if the peer
 	/// advertised it (Report or higher) in its SETUP. Older versions have no
@@ -2398,6 +2407,9 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 }
 
 /// What a demand change asks the serve loop to do next.
+// A state machine's enum is its storage: one transient instance per stream, so the
+// big variant is the working state, not padding held in bulk.
+#[allow(clippy::large_enum_variant)]
 enum Begin<S: crate::transport::poll::Session> {
 	/// Nothing further: the update (if any) sits in the active stream's write
 	/// buffer, flushed by the loop.
@@ -2531,6 +2543,9 @@ struct TrackServeRun<S: crate::transport::poll::Session> {
 	state: TrackRunState<S>,
 }
 
+// A state machine's enum is its storage: one transient instance per stream, so the
+// big variant is the working state, not padding held in bulk.
+#[allow(clippy::large_enum_variant)]
 enum TrackRunState<S: crate::transport::poll::Session> {
 	/// Lite05+ learns the track's immutable properties once, up front, via a
 	/// TRACK stream. The timescale then flows into every SUBSCRIBE and FETCH
@@ -2720,6 +2735,9 @@ struct ServeLoop<S: crate::transport::poll::Session> {
 	mode: ServeMode<S>,
 }
 
+// A state machine's enum is its storage: one transient instance per stream, so the
+// big variant is the working state, not padding held in bulk.
+#[allow(clippy::large_enum_variant)]
 enum ServeMode<S: crate::transport::poll::Session> {
 	/// Selecting the next event.
 	Select,

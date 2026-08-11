@@ -94,6 +94,7 @@ impl<T: Machine> PollSet<T> {
 	}
 
 	/// The number of live children.
+	#[cfg(test)]
 	pub fn len(&self) -> usize {
 		self.len
 	}

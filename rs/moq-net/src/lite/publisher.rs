@@ -194,6 +194,9 @@ struct Control<S: crate::transport::poll::Session> {
 	state: ControlState<S>,
 }
 
+// A state machine's enum is its storage: one transient instance per stream, so the
+// big variant is the working state, not padding held in bulk.
+#[allow(clippy::large_enum_variant)]
 enum ControlState<S: crate::transport::poll::Session> {
 	/// Reading the stream's type.
 	Start {
@@ -367,6 +370,9 @@ struct AnnounceServe<S: crate::transport::poll::Session> {
 	state: AnnounceState,
 }
 
+// A state machine's enum is its storage: one transient instance per stream, so the
+// big variant is the working state, not padding held in bulk.
+#[allow(clippy::large_enum_variant)]
 enum AnnounceState {
 	/// Reading the ANNOUNCE_REQUEST.
 	Decode,
@@ -1380,6 +1386,9 @@ struct FetchServe<S: crate::transport::poll::Session> {
 	group: u64,
 }
 
+// A state machine's enum is its storage: one transient instance per stream, so the
+// big variant is the working state, not padding held in bulk.
+#[allow(clippy::large_enum_variant)]
 enum FetchState {
 	Decode,
 	/// Resolving the split-horizon origin (waits on the peer's SETUP).
