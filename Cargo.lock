@@ -524,9 +524,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.17.3"
+version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00bdb5da18dac48ca2cc7cd4a98e533e8635a58e2361d13a1a4ee3888e0d72f1"
+checksum = "ce2b2dcc879c3bae0d371e77c99f2238400ef24ec001394befa67b6e543add9e"
 dependencies = [
  "aws-lc-sys",
  "untrusted 0.7.1",
@@ -535,9 +535,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.43.0"
+version = "0.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43103168cc76fe62678a375e722fc9cb3a0146159ac5828bc4f0dfd755c2224c"
+checksum = "f09fae7be8bb3174e05c6afdb34199e6dc0c7c04ba9fa237b1967adfbde27483"
 dependencies = [
  "cc",
  "cmake",
@@ -935,13 +935,13 @@ dependencies = [
 
 [[package]]
 name = "bytemuck_derive"
-version = "1.11.0"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f65693059b6b9c588b9f62fed1cedbf0a8b805631457ea162d68f0de186f3de5"
+checksum = "fc0e56a716f1e132ff6bf4bdac1c944a3fcdc1cae65f70a4a2a1ac3b401d2d1f"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -1071,9 +1071,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.4.0"
+version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9"
+checksum = "9066c49992464636f92905fa096ec58baaa4d57ec19a5c096c68d3e25ef3d136"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -1233,9 +1233,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.5"
+version = "4.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "301b56658598e48f3648647ac6fc887be7e7108eddfa4e9b63fcf3ec58c0cadf"
+checksum = "473c7e07f409a8d772161724aa8db6a765a2532a70f9667eeb7b49d3d02fbdca"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -1243,9 +1243,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.6.5"
+version = "4.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94a65403d1a1bd28f7dc68eb8506e8874808ee5eecb59298de588e2e1407a078"
+checksum = "7b48fea5a88e9ae728a2dcbedbfc0e730f7d60da42e1cb049a83c9fb8b789889"
 dependencies = [
  "anstream",
  "anstyle",
@@ -2438,9 +2438,9 @@ checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+checksum = "26b73573e6edcd2af0cdf47bd6cb58f0b3839491263c314eaad1ccf24430e1de"
 
 [[package]]
 name = "fixed-resample"
@@ -4249,7 +4249,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4520,7 +4520,7 @@ dependencies = [
 
 [[package]]
 name = "moq-audio"
-version = "0.0.16"
+version = "0.0.17"
 dependencies = [
  "block2 0.6.2",
  "bytes",
@@ -4566,7 +4566,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -4586,7 +4586,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.9.8"
+version = "0.9.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -4617,7 +4617,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "bytes",
  "hang",
@@ -4647,7 +4647,7 @@ dependencies = [
 
 [[package]]
 name = "moq-gst"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4723,7 +4723,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4754,7 +4754,7 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.19.8"
+version = "0.19.9"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4806,7 +4806,7 @@ dependencies = [
 
 [[package]]
 name = "moq-net"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "bytes",
  "criterion",
@@ -4837,7 +4837,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.14.8"
+version = "0.14.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -4974,7 +4974,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token-cli"
-version = "0.5.42"
+version = "0.5.43"
 dependencies = [
  "anyhow",
  "clap",
@@ -4984,7 +4984,7 @@ dependencies = [
 
 [[package]]
 name = "moq-transcode"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5017,7 +5017,7 @@ dependencies = [
 
 [[package]]
 name = "moq-video"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -6289,9 +6289,9 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openh264"
-version = "0.9.7"
+version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6b2b561d2103303e233779545da757ecd35bad82188d619a6d8901f3007e1ff"
+checksum = "fcc9071a0b5f9c501ddd01066c2600d922cc799dc450a52975222bcda7755a08"
 dependencies = [
  "openh264-sys2",
  "wide",
@@ -6299,9 +6299,9 @@ dependencies = [
 
 [[package]]
 name = "openh264-sys2"
-version = "0.9.7"
+version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75a8867e48183bbd9147380227448c065fe456eb30b0ebc68929809c36c30985"
+checksum = "6ada29a4cadc13d4d326737af87c13e224210d7d99fe47594e9f3f9b0102fd70"
 dependencies = [
  "cc",
  "nasm-rs",
@@ -7851,9 +7851,9 @@ dependencies = [
 
 [[package]]
 name = "sctp-proto"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "801033d212d17c3ad6b523c3fb3a41de323707b10b75cb437d05d5eff3b15204"
+checksum = "f895c3c33ae20283f9129bd09db2ca69138798b372ef2b98bd2946d23ea4819b"
 dependencies = [
  "bytes",
  "crc",
@@ -10591,9 +10591,9 @@ dependencies = [
 
 [[package]]
 name = "wide"
-version = "1.5.0"
+version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfdfe6a32973f2d1b268b8895845a8a96cac2f0191e72c27cc929036060dbf89"
+checksum = "de2aaf408e58689c2096682331b1f42bb2d9f2ed6b11560407d023cd0a6c634e"
 dependencies = [
  "bytemuck",
  "safe_arch",
@@ -11236,9 +11236,9 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xml-rs"
-version = "0.8.28"
+version = "0.8.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
+checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xmltree"
@@ -11370,18 +11370,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.55"
+version = "0.8.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5a105cd7b140f6eeec8acff2ea38135d3cab283ada58540f629fe51e46696eb"
+checksum = "556764e583adb45a9f8d413c2a147fa7e8d821e48e12b14fd560b607998b75eb"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.55"
+version = "0.8.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fe976fb70c78cd64cccfe3a6fc142244e8a77b70959b30faf9d0ac37ee228eb"
+checksum = "f2ab42fc20575779bd240faa45f94a74256f755c0fa9e89f0ede20d91d0cdfc1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -11498,9 +11498,9 @@ dependencies = [
 
 [[package]]
 name = "zune-core"
-version = "0.5.1"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb8a0807f7c01457d0379ba880ba6322660448ddebc890ce29bb64da71fb40f9"
+checksum = "d56377fd46368984a170bc5aac5567e52ca5da874caa60bea39fcbca78fb658b"
 
 [[package]]
 name = "zune-jpeg"

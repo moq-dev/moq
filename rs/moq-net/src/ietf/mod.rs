@@ -15,6 +15,7 @@ mod group;
 mod location;
 pub mod message;
 mod namespace;
+mod priority;
 mod properties;
 mod publish;
 mod publish_namespace;

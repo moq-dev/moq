@@ -11,6 +11,8 @@ on:
     paths:
       - "swift/**"
       - "rs/moq-ffi/**"
+      - "rs/moq-video/**"
+      - "Cargo.lock"
       - ".github/workflows/swift.yml"
 
 concurrency:
@@ -32,11 +34,25 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: aarch64-apple-ios-sim,x86_64-apple-ios
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-on-failure: true
+
+      - name: Rust simulator check
+        shell: bash
+        run: |
+          for target in aarch64-apple-ios-sim x86_64-apple-ios; do
+            rustup target add "$target"
+            if ! cargo tree --locked --package moq-ffi --target "$target" | grep -q "openh264-sys2 v"; then
+              echo "::error::openh264 must stay enabled for Apple simulator builds"
+              exit 1
+            fi
+            cargo check --locked --package moq-ffi --target "$target"
+          done
 
       - name: Swift check
         run: ./swift/scripts/check.sh

@@ -2,7 +2,6 @@ use crate::{group, origin, track};
 use std::{collections::HashMap, task::Poll};
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
-use web_transport_trait::SendStream;
 
 use crate::{
 	AsPath, Error, Timescale,
@@ -404,7 +403,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		let subscription = Subscription {
-			priority: msg.subscriber_priority,
+			priority: super::priority::from_wire(msg.subscriber_priority),
 			..Default::default()
 		};
 
@@ -598,10 +597,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		timescale: Timescale,
 		version: Version,
 	) -> Result<(), Error> {
-		let mut stream = session.open_uni().await.map_err(Error::from_transport)?;
-		stream.set_priority(priority);
+		let stream = session.open_uni().await.map_err(Error::from_transport)?;
 
 		let mut stream = Writer::new(stream, version);
+		stream.set_priority(priority);
 
 		stream.encode(&msg).await?;
 
@@ -664,10 +663,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		}
 
-		stream.finish()?;
-
-		// Wait until everything is acknowledged by the peer so we can still cancel the stream.
-		stream.closed().await?;
+		// Consume the writer: close() waits for the peer to acknowledge everything,
+		// and taking ownership disarms the Drop fallback that would otherwise reset
+		// the finished stream with a spurious Cancel.
+		stream.close().await?;
 
 		tracing::debug!(sequence = %msg.group_id, "finished group");
 
@@ -1064,15 +1063,22 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		}
 
+		// The extension changes what an advertisement carries, so nothing can be
+		// sent until the peer's SETUP says whether it speaks it.
+		let peer = self.peer().await;
+		// Register the split-horizon peer on the announce cursor too. The origin
+		// model uses this exposure to park a reflected copy before it can replace
+		// the source we are currently advertising to that peer.
+		let origin = match self.exclude(&peer) {
+			crate::Origin::UNKNOWN => origin,
+			exclude => origin.excluding(exclude),
+		};
 		let mut announced = origin.announced();
 		let mut watched: HashMap<crate::PathOwned, Watched> = HashMap::new();
 		// Draft-14/15: the open PUBLISH_NAMESPACE request carrying each advertised
 		// namespace. Empty on later drafts, whose entries ride `stream` inline.
 		let mut requests: HashMap<crate::PathOwned, NamespaceRequest<S>> = HashMap::new();
 
-		// The extension changes what an advertisement carries, so nothing can be
-		// sent until the peer's SETUP says whether it speaks it.
-		let peer = self.peer().await;
 		let mut linger = kio::time::Deadline::new();
 
 		// Stream updates (origin (un)announces plus watched route and demand
@@ -1164,6 +1170,48 @@ struct NamespaceRequest<S: web_transport_trait::Session> {
 	path: crate::PathOwned,
 	request_id: RequestId,
 	stream: Stream<S, Version>,
+}
+
+#[cfg(test)]
+mod group_priority_test {
+	use super::*;
+	use crate::lite::test_transport::SinkSession;
+
+	/// The model's `Subscription::priority` is higher-first ("higher values preempt
+	/// lower ones"), matching the transport trait's send order, so a group stream must
+	/// receive the model value unchanged. An inversion here would transmit the
+	/// LOWEST-priority track first under contention.
+	#[tokio::test]
+	async fn group_stream_preserves_model_priority() {
+		let log = crate::lite::test_transport::Log::default();
+		let session = SinkSession::new(log.clone());
+
+		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
+			.unwrap();
+		let consumer = group.consume();
+		group.finish().unwrap();
+
+		let msg = ietf::GroupHeader {
+			track_alias: 0,
+			group_id: 0,
+			sub_group_id: 0,
+			publisher_priority: 0,
+			flags: Default::default(),
+		};
+
+		Publisher::<SinkSession>::run_group(session, msg, 200, consumer, Timescale::default(), Version::Draft14)
+			.await
+			.unwrap();
+
+		assert_eq!(
+			log.priorities(),
+			vec![200],
+			"model priority must pass through unchanged"
+		);
+	}
 }
 
 #[cfg(test)]

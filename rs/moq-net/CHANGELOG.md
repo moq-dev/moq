@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.10](https://github.com/moq-dev/moq/compare/moq-net-v0.2.9...moq-net-v0.2.10) - 2026-08-07
+
+### Fixed
+
+- *(net)* keep UNKNOWN publishers announced across relay loops ([#2718](https://github.com/moq-dev/moq/pull/2718))
+
 ## [0.2.9](https://github.com/moq-dev/moq/compare/moq-net-v0.2.8...moq-net-v0.2.9) - 2026-08-06
 
 ### Fixed

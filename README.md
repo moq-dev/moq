@@ -114,6 +114,8 @@ Read the specifications:
 
 ## Development
 
+Contributions are welcome, including AI-assisted issues, pull requests, reviews, and comments. See [CONTRIBUTING.md](CONTRIBUTING.md#ai-contributions) for the attribution policy and guidance on when to open an issue before writing code.
+
 ```sh
 # See all available commands
 just
