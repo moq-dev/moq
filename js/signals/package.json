@@ -27,7 +27,7 @@
 		"solid-js": "^1.9.14"
 	},
 	"peerDependencies": {
-		"@types/react": "^19.2.18",
+		"@types/react": "^19.2.17",
 		"react": "^19.2.8",
 		"solid-js": "^1.9.14"
 	},

@@ -107,6 +107,7 @@
         "@moq/net": "workspace:^",
         "@moq/signals": "workspace:^",
         "@svta/cml-iso-bmff": "^1.0.4",
+        "@svta/cml-utils": "1.6.0",
         "zod": "^4.4.3",
       },
       "devDependencies": {
@@ -229,7 +230,7 @@
         "typescript": "7.0.2",
       },
       "peerDependencies": {
-        "@types/react": "^19.2.18",
+        "@types/react": "^19.2.17",
         "react": "^19.2.8",
         "solid-js": "^1.9.14",
       },
@@ -747,7 +748,7 @@
 
     "@svta/cml-iso-bmff": ["@svta/cml-iso-bmff@1.0.4", "", { "peerDependencies": { "@svta/cml-utils": "1.6.0" } }, "sha512-ZrDOQ5Wlh6vy9RF7dzlJVP3U43DDKCitovb8Ytf6KM40UcHW2bRMgcmx1TUT4nJ7OcigEsWqrgI78hOSuzI7Hw=="],
 
-    "@svta/cml-utils": ["@svta/cml-utils@1.5.0", "", {}, "sha512-JMqclD7Akd+GSJiuaYNUHOP2wNtf/nauKeszlYeivSHfi0Lp3pmSW5PXDvJ2dO4aPmmSOQbF0ztTsW9Vcs2Whw=="],
+    "@svta/cml-utils": ["@svta/cml-utils@1.6.0", "", {}, "sha512-h8jd5Y0nrr8wHWkI7XB03Denxy6QR7dgROxchZ2S0VQ4PFINrIu6J0k9N1IGHmtJnJjG3ttszsJd4LS5V/DqcA=="],
 
     "@tailwindcss/node": ["@tailwindcss/node@4.3.3", "", { "dependencies": { "@jridgewell/remapping": "^2.3.5", "enhanced-resolve": "^5.24.1", "jiti": "^2.7.0", "lightningcss": "1.32.0", "magic-string": "^0.30.21", "source-map-js": "^1.2.1", "tailwindcss": "4.3.3" } }, "sha512-/T8IKEsf9VTU6tLjgC7+sv2mOPtQxzE2jMw7u4Tt40Tx+QSZxpzh95/H6cMKoja9XuW7iMdLJYBB0o9G1CaAgg=="],
 

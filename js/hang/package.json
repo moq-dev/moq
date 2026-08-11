@@ -25,6 +25,7 @@
 		"@moq/net": "workspace:^",
 		"@moq/signals": "workspace:^",
 		"@svta/cml-iso-bmff": "^1.0.4",
+		"@svta/cml-utils": "1.6.0",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
