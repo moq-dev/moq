@@ -33,6 +33,11 @@ func (r *Request) URL() *string {
 	return r.inner.Url()
 }
 
+// Path is the request path advertised by the client, uniform across transports.
+func (r *Request) Path() string {
+	return r.inner.Path()
+}
+
 // Transport is the wire transport the request arrived over, e.g. TransportQUIC.
 func (r *Request) Transport() Transport {
 	return Transport(r.inner.Transport())
@@ -247,7 +252,7 @@ func (s *Server) Requests(ctx context.Context) iter.Seq2[*Request, error] {
 //	    if err != nil {
 //	        return err
 //	    }
-//	    if url := req.URL(); url != nil && strings.Contains(*url, "/admin") {
+//	    if req.Path() == "/admin" {
 //	        _ = req.Reject(ctx, 403)
 //	        continue
 //	    }

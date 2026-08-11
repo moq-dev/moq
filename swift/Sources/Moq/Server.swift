@@ -78,6 +78,11 @@ public final class Request: Sendable {
         ffi.url()
     }
 
+    /// The request path advertised by the client, uniform across transports.
+    public var path: String {
+        ffi.path()
+    }
+
     /// The transport type, e.g. `"quic"`, `"iroh"`, or `"websocket"`.
     public var transport: String {
         ffi.transport()

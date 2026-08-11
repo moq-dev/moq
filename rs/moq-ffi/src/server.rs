@@ -174,6 +174,7 @@ pub struct MoqRequest {
 	task: Task<RequestState>,
 	transport: String,
 	url: Option<String>,
+	path: String,
 }
 
 impl MoqRequest {
@@ -184,6 +185,7 @@ impl MoqRequest {
 	) -> Arc<Self> {
 		let transport = request.transport().to_string();
 		let url = request.url().map(|u| u.to_string());
+		let path = request.path().to_string();
 		Arc::new(Self {
 			task: Task::new(RequestState {
 				request: Some(request),
@@ -192,6 +194,7 @@ impl MoqRequest {
 			}),
 			transport,
 			url,
+			path,
 		})
 	}
 }
@@ -201,6 +204,11 @@ impl MoqRequest {
 	/// The URL provided by the client, if any.
 	pub fn url(&self) -> Option<String> {
 		self.url.clone()
+	}
+
+	/// The request path advertised by the client, uniform across transports.
+	pub fn path(&self) -> String {
+		self.path.clone()
 	}
 
 	/// The transport type, e.g. `"quic"`, `"iroh"`, or `"websocket"`.
