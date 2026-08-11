@@ -364,6 +364,55 @@ function stalledTransport() {
 	return { quic, freeSlot, aborted };
 }
 
+// The bidirectional counterpart, whose `discarded` settles when a stream handed over after
+// the deadline is thrown away.
+function stalledBidiTransport() {
+	let freeSlot!: () => void;
+	const slot = new Promise<void>((resolve) => {
+		freeSlot = resolve;
+	});
+
+	let discard!: (reason: unknown) => void;
+	const discarded = new Promise<unknown>((resolve) => {
+		discard = resolve;
+	});
+
+	const stream = {
+		readable: new ReadableStream<Uint8Array>({ cancel: discard }),
+		writable: new WritableStream<Uint8Array>({ abort: discard }),
+	};
+
+	const quic = {
+		createBidirectionalStream: async () => {
+			await slot;
+			return stream;
+		},
+	} as unknown as WebTransport;
+
+	return { quic, freeSlot, discarded };
+}
+
+// Bidi opens have no group to drop, so they fail the way they did before
+// waitUntilAvailable rather than parking for as long as the peer withholds credit.
+test("open gives up on a peer that never frees a bidi slot", async () => {
+	const { quic, freeSlot, discarded } = stalledBidiTransport();
+
+	await expect(Stream.open(quic, { timeout: 10 })).rejects.toThrow(/timed out/);
+
+	freeSlot();
+	await discarded;
+});
+
+test("open waits for a bidi slot when the caller opts out of the deadline", async () => {
+	const { quic, freeSlot } = stalledBidiTransport();
+
+	const opening = Stream.open(quic, { timeout: false });
+	expect(await Promise.race([opening.then(() => "opened"), Promise.resolve("waiting")])).toBe("waiting");
+
+	freeSlot();
+	expect(await opening).toBeInstanceOf(Stream);
+});
+
 // A cancel that already settled has to win even when a slot is free, or a group whose
 // subscriber is long gone still goes out.
 test("tryOpen gives up on a cancel that settled before the open", async () => {

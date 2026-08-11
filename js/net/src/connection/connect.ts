@@ -223,7 +223,9 @@ async function connectTransport(url: URL, session: WebTransport, discovery: bool
 		throw new Error(`unsupported WebTransport protocol: ${protocol}`);
 	}
 
-	const stream = await Stream.open(session);
+	// The session stream is the first one on a fresh session, so there is no slot to wait
+	// for and nothing to fall back to: wait it out rather than failing the connect.
+	const stream = await Stream.open(session, { timeout: false });
 	await stream.writer.u53(Lite.StreamId.ClientCompat);
 
 	const encoder = new TextEncoder();

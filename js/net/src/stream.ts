@@ -20,9 +20,23 @@ export function sendOptions(sendOrder?: number): WebTransportSendStreamOptions &
 }
 
 // How long an open may wait for the peer to free a stream slot. waitUntilAvailable makes
-// it wait forever otherwise, so a peer that withholds stream credit while keeping the
-// subscription open would queue work without limit. Matches the subscribe budget.
+// it wait forever otherwise, so a peer that withholds stream credit would queue work
+// without limit. Matches the subscribe budget.
 const OPEN_TIMEOUT_MS = 10_000;
+
+/**
+ * Bound an open that would otherwise park until the peer grants stream credit, restoring
+ * the pre-waitUntilAvailable failure after a grace period. A stream arriving after the
+ * deadline is discarded, since nobody is waiting for it any more.
+ */
+async function openWithin<T>(opening: Promise<T>, timeout: number, discard: (stream: T) => void): Promise<T> {
+	try {
+		return await withTimeout(opening, timeout, `stream open timed out after ${timeout}ms waiting for a slot`);
+	} catch (err: unknown) {
+		opening.then(discard).catch(() => void 0);
+		throw err;
+	}
+}
 
 function isLeadingOnes(version?: IetfVersion): boolean {
 	return (
@@ -55,15 +69,19 @@ export interface OpenOptions {
 	 * Left to the transport's default when unset.
 	 */
 	sendOrder?: number;
+
+	/**
+	 * Reject if the peer hasn't freed a stream slot within this many milliseconds, or
+	 * `false` to wait indefinitely. Defaults to 10s, since the open otherwise parks for
+	 * as long as the peer withholds stream credit.
+	 */
+	timeout?: number | false;
 }
 
 /** Options for {@link Writer.tryOpen}. */
 export interface TryOpenOptions extends OpenOptions {
 	/** Give up once this settles, however it settles. */
 	cancel: Promise<unknown>;
-
-	/** How long to wait for a stream slot, in milliseconds. Defaults to 10s. */
-	timeout?: number;
 }
 
 export class Stream {
@@ -101,7 +119,17 @@ export class Stream {
 	 *   against the session's other streams
 	 */
 	static async open(quic: WebTransport, options?: OpenOptions): Promise<Stream> {
-		const { readable, writable } = await quic.createBidirectionalStream(sendOptions(options?.sendOrder));
+		let opening = quic.createBidirectionalStream(sendOptions(options?.sendOrder));
+
+		const timeout = options?.timeout ?? OPEN_TIMEOUT_MS;
+		if (timeout !== false) {
+			opening = openWithin(opening, timeout, (stream) => {
+				void stream.writable.abort().catch(() => void 0);
+				void stream.readable.cancel().catch(() => void 0);
+			});
+		}
+
+		const { readable, writable } = await opening;
 		return new Stream({ readable, writable, version: options?.version });
 	}
 
@@ -449,10 +477,16 @@ export class Writer {
 	 *   against the session's other streams
 	 */
 	static async open(quic: WebTransport, options?: OpenOptions): Promise<Writer> {
-		const writable = (await quic.createUnidirectionalStream(
-			sendOptions(options?.sendOrder),
-		)) as WritableStream<Uint8Array>;
-		return new Writer(writable, options?.version);
+		let opening = quic.createUnidirectionalStream(sendOptions(options?.sendOrder)) as Promise<
+			WritableStream<Uint8Array>
+		>;
+
+		const timeout = options?.timeout ?? OPEN_TIMEOUT_MS;
+		if (timeout !== false) {
+			opening = openWithin(opening, timeout, (stream) => void stream.abort().catch(() => void 0));
+		}
+
+		return new Writer(await opening, options?.version);
 	}
 
 	/**
@@ -461,8 +495,6 @@ export class Writer {
 	 * opens after that is reset rather than leaked. A real transport failure still throws.
 	 */
 	static async tryOpen(quic: WebTransport, options: TryOpenOptions): Promise<Writer | undefined> {
-		const timeout = options.timeout ?? OPEN_TIMEOUT_MS;
-
 		// A rejected `cancel` (STOP_SENDING) means the peer is gone too, so both settle
 		// paths mean "give up" and neither is left unhandled. Built before the open, and
 		// raced ahead of it, so an already-cancelled caller wins even against a slot that
@@ -474,14 +506,12 @@ export class Writer {
 		const open = Writer.open(quic, options);
 
 		try {
-			const stream = await withTimeout(
-				Promise.race([cancelled, open]),
-				timeout,
-				`stream open timed out after ${timeout}ms waiting for a slot`,
-			);
+			const stream = await Promise.race([cancelled, open]);
 			if (stream) return stream;
 		} catch (err: unknown) {
+			// open already discarded the late stream on its way out.
 			if (!(err instanceof TimeoutError)) throw err;
+			return undefined;
 		}
 
 		const abandoned = new Error("abandoned waiting for a stream slot");
