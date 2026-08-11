@@ -98,6 +98,9 @@ pub(crate) struct Descriptor {
 	pub codec: hang::catalog::AudioCodec,
 	/// Bytes needed to attempt a header parse.
 	pub min_header_len: usize,
+	/// First byte of the frame sync word, so a demuxer that lost sync can scan for the
+	/// next candidate instead of parsing at every offset.
+	pub sync_byte: u8,
 	/// Parse one frame header at the start of the slice.
 	pub parse: fn(&[u8]) -> Result<Header>,
 }

@@ -10,6 +10,7 @@ use super::legacy;
 pub(crate) static DESCRIPTOR: legacy::Descriptor = legacy::Descriptor {
 	track_suffix: ".mp2",
 	codec: hang::catalog::AudioCodec::Mp2,
+	sync_byte: 0xFF,
 	min_header_len: 4,
 	parse: parse_header,
 };
