@@ -85,8 +85,9 @@ jobs:
 
           TAG="moq-ffi-v${FFI_VERSION}"
           if ! git rev-parse --verify --quiet "refs/tags/${TAG}" >/dev/null; then
-            echo "::error::missing local tag ${TAG}"
-            exit 1
+            echo "::warning::missing local tag ${TAG}; deferring to the Release Py FFI chain."
+            echo "unreleased=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           if ! git diff --quiet "$TAG" HEAD -- rs/moq-ffi; then
             echo "::warning::moq-ffi has unreleased changes; deferring to the Release Py FFI chain."

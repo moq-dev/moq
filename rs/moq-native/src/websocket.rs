@@ -297,7 +297,7 @@ impl Listener {
 		let (stream, addr) = self.accept_socket().await;
 		tracing::debug!(%addr, "accepted WebSocket TCP connection");
 
-		let accepted = Arc::new(Mutex::new(None::<(String, Url)>));
+		let accepted = Arc::new(Mutex::new(None::<(Option<String>, Url)>));
 		let accepted_callback = accepted.clone();
 		let protocols = self.protocols.clone();
 		#[allow(clippy::result_large_err)]
@@ -313,7 +313,7 @@ impl Listener {
 				.map(str::trim)
 				.filter(|value| !value.is_empty())
 				.collect();
-			let Some(protocol) = protocols.iter().find(|protocol| offered.contains(&protocol.as_str())) else {
+			let Ok(protocol) = select_subprotocol(&offered, &protocols) else {
 				return Err(http::Response::builder()
 					.status(http::StatusCode::BAD_REQUEST)
 					.body(Some("no supported protocol".to_string()))
@@ -326,11 +326,13 @@ impl Listener {
 					.expect("valid rejection response"));
 			};
 
-			response.headers_mut().insert(
-				http::header::SEC_WEBSOCKET_PROTOCOL,
-				http::HeaderValue::from_str(protocol).expect("protocol validated at bind"),
-			);
-			*accepted_callback.lock().unwrap() = Some((protocol.clone(), url));
+			if let Some(protocol) = protocol {
+				response.headers_mut().insert(
+					http::header::SEC_WEBSOCKET_PROTOCOL,
+					http::HeaderValue::from_str(protocol).expect("protocol validated at bind"),
+				);
+			}
+			*accepted_callback.lock().unwrap() = Some((protocol.map(str::to_string), url));
 			Ok(response)
 		};
 
@@ -344,10 +346,11 @@ impl Listener {
 				.unwrap()
 				.take()
 				.expect("successful upgrade selected a protocol");
-			let session = qmux::ws::Upgraded::new(websocket)
-				.with_alpn(&protocol)
-				.with_keep_alive(qmux::KeepAlive::default())
-				.accept();
+			let upgraded = qmux::ws::Upgraded::new(websocket).with_keep_alive(qmux::KeepAlive::default());
+			let session = match protocol {
+				Some(protocol) => upgraded.with_alpn(&protocol).accept(),
+				None => upgraded.accept(),
+			};
 			(session, url)
 		}))
 	}
@@ -368,6 +371,19 @@ impl Listener {
 			}
 		}
 	}
+}
+
+/// Select a supported subprotocol, while preserving legacy clients that offer none.
+fn select_subprotocol<'a>(offered: &[&str], supported: &'a [String]) -> std::result::Result<Option<&'a str>, ()> {
+	if offered.is_empty() {
+		return Ok(None);
+	}
+
+	supported
+		.iter()
+		.find(|protocol| offered.contains(&protocol.as_str()))
+		.map(|protocol| Some(protocol.as_str()))
+		.ok_or(())
 }
 
 /// Reconstruct the client request URL from an absolute URI or the HTTP Host header.
@@ -406,6 +422,35 @@ fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn subprotocol_selection_preserves_legacy_clients() {
+		let supported = vec!["qmux-01.moq-lite-05".to_string()];
+		assert_eq!(select_subprotocol(&[], &supported), Ok(None));
+		assert_eq!(
+			select_subprotocol(&["qmux-01.moq-lite-05"], &supported),
+			Ok(Some("qmux-01.moq-lite-05"))
+		);
+		assert_eq!(select_subprotocol(&["unsupported"], &supported), Err(()));
+	}
+
+	#[tokio::test]
+	async fn listener_accepts_legacy_client_without_subprotocol() {
+		let listener = Listener::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		let accepted = tokio::spawn(async move { listener.accept_with_url().await.unwrap().unwrap() });
+
+		let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+		let request_url = format!("ws://{addr}/room?jwt=test");
+		let (websocket, response) = tokio_tungstenite::client_async(request_url, stream).await.unwrap();
+		assert!(!response.headers().contains_key(http::header::SEC_WEBSOCKET_PROTOCOL));
+
+		let (session, url) = accepted.await.unwrap();
+		assert_eq!(url.path(), "/room");
+		assert_eq!(url.query(), Some("jwt=test"));
+		drop(session);
+		drop(websocket);
+	}
 
 	#[test]
 	fn moqt_18_and_19_pin_to_qmux01() {
