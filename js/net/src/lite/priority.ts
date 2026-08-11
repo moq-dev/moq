@@ -10,9 +10,10 @@ import type * as track from "../track.ts";
 
 // The transport compares send orders as a single number, so the two ranks are packed into
 // disjoint ranges: the track priority takes the high bits so it always dominates, and the
-// position below it. The priority is a u8, so 45 bits are left before the pack stops being an
-// exact integer (255 * 2^45 + 2^45 - 1 is exactly Number.MAX_SAFE_INTEGER).
-const GROUP_SPAN = 2 ** 45;
+// position below it. Group data stays negative so protocol streams at the transport's default
+// order of 0 always make progress. A u8 priority and 44-bit position fill the negative half of
+// the safe integer range exactly.
+const GROUP_SPAN = 2 ** 44;
 
 /** The highest track priority the wire carries (a u8). */
 const MAX_PRIORITY = 0xff;
@@ -45,7 +46,7 @@ export interface Rank {
  * @internal
  */
 export function sendOrder({ priority, position = 0 }: Rank): number {
-	return clamp(priority, MAX_PRIORITY) * GROUP_SPAN + (GROUP_SPAN - 1 - clamp(position, GROUP_SPAN - 1));
+	return -((MAX_PRIORITY - clamp(priority, MAX_PRIORITY)) * GROUP_SPAN + clamp(position, GROUP_SPAN - 1) + 1);
 }
 
 // Both ranks are bounded: the priority by its wire type, the position by the space left below

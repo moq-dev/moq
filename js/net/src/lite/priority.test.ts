@@ -5,7 +5,7 @@ import { type SendStream, Writer } from "../stream.ts";
 import { Priority, sendOrder } from "./priority.ts";
 
 // The last position that still fits below the track priority.
-const MAX_POSITION = 2 ** 45 - 1;
+const MAX_POSITION = 2 ** 44 - 1;
 
 // The transport sends higher values first, so a track the subscriber cares about more has to
 // outrank one it cares about less, wherever their groups sit in their own queues.
@@ -29,11 +29,17 @@ test("equal priorities tie at the same position", () => {
 	expect(sendOrder({ priority: 3 })).toBe(sendOrder({ priority: 3, position: 0 }));
 });
 
-// Every send order stays an exact integer, so two distinct ranks never collapse into one.
-// The top of the range lands exactly on the largest integer a double can represent.
-test("send orders stay exact integers", () => {
-	expect(sendOrder({ priority: 255, position: 0 })).toBe(Number.MAX_SAFE_INTEGER);
-	expect(sendOrder({ priority: 0, position: MAX_POSITION })).toBe(0);
+// Every send order stays a safe integer, so two distinct ranks never collapse into one.
+test("send orders stay safe integers", () => {
+	expect(sendOrder({ priority: 255, position: 0 })).toBe(-1);
+	expect(sendOrder({ priority: 0, position: MAX_POSITION })).toBe(-(2 ** 52));
+	expect(Number.isSafeInteger(sendOrder({ priority: 0, position: MAX_POSITION }))).toBe(true);
+});
+
+// Protocol streams use the transport's default order of 0. Keeping every group below it
+// prevents a continuous supply of media from starving subscriptions, announcements, or probes.
+test("protocol streams outrank group data", () => {
+	expect(sendOrder({ priority: 255, position: 0 })).toBeLessThan(0);
 });
 
 // A position past the space left for it must never carry into the track's bits and outrank a
