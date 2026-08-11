@@ -15,6 +15,10 @@ describe("renditionJitter", () => {
 		expect(renditionJitter(config({ jitter: 2000, framerate: 30 }))).toBe(ms(2000));
 	});
 
+	it("keeps a declared zero rather than falling back", () => {
+		expect(renditionJitter(config({ jitter: 0, framerate: 30 }))).toBe(ms(0));
+	});
+
 	it("falls back to a frame interval", () => {
 		expect(renditionJitter(config({ framerate: 30 }))).toBe(ms(34));
 	});
@@ -27,6 +31,11 @@ describe("renditionJitter", () => {
 describe("caughtUp", () => {
 	it("promotes immediately when nothing is rendering", () => {
 		expect(caughtUp({ playhead: ms(1000), live: ms(10_000) })).toBe(true);
+	});
+
+	it("falls back to the outgoing playhead before the clock has an anchor", () => {
+		expect(caughtUp({ playhead: ms(9800), active: ms(10_000) })).toBe(false);
+		expect(caughtUp({ playhead: ms(9950), active: ms(10_000) })).toBe(true);
 	});
 
 	it("holds off while the new rendition trails both playheads", () => {
