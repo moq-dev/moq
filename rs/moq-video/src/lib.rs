@@ -13,22 +13,19 @@
 //! [`encode::Config::gop`], and [`encode::Encoder::keyframe`] is there for the
 //! rarer case where a caller needs one at a specific frame.
 //!
-//! - [`capture`] describes a frame source ([`capture::Config`]) and grabs
-//!   frames per platform: AVFoundation/ScreenCaptureKit on macOS, native V4L2
-//!   on Linux, native Media Foundation (camera) and DXGI Desktop Duplication
-//!   (screen) on Windows. [`capture::Source`] picks a camera, a display, or
-//!   (macOS only) a single window or every window of an application;
-//!   [`capture::cameras`], [`capture::displays`], [`capture::windows`], and
-//!   [`capture::apps`] list what's available and hand back the ids it takes.
+//! - `capture` describes a frame source and grabs frames per platform:
+//!   AVFoundation/ScreenCaptureKit on macOS, native V4L2 on Linux, native Media
+//!   Foundation (camera) and DXGI Desktop Duplication (screen) on Windows. It
+//!   requires the default-on `capture` feature.
 //! - [`encode`] encodes frames with a native backend and publishes them through
 //!   the matching `moq_mux::codec` importer, which handles catalog registration
 //!   and framing. The codec is chosen via [`encode::Codec`]: H.264 (openh264 /
 //!   VideoToolbox / Media Foundation / NVENC / VAAPI) or H.265 (VideoToolbox /
 //!   Media Foundation / NVENC). Two entry points:
-//!   - [`encode::publish_capture`] captures a webcam and publishes it (turnkey).
+//!   - `encode::publish_capture` captures a webcam and publishes it (turnkey).
 //!     It encodes strictly on demand: the track and catalog are advertised up
 //!     front, but the camera opens only while a subscriber is watching and is
-//!     released when the last one leaves.
+//!     released when the last one leaves. It requires the `capture` feature.
 //!   - [`encode::Encoder`] encodes [`Frame`]s you supply (from capture, a
 //!     decoder, or your own pixels via [`Surface::rgba`]) and
 //!     [`encode::Producer`] publishes the results.
@@ -63,6 +60,7 @@
 //! fallback in [`Surface::into_i420`], so matching on it stays portable: take the
 //! fast path you recognize and let the `_` arm handle the rest.
 
+#[cfg(feature = "capture")]
 pub mod capture;
 pub mod decode;
 pub mod encode;
