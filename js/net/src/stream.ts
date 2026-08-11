@@ -8,15 +8,14 @@ const MAX_U31 = 2 ** 31 - 1;
 const MAX_READ_SIZE = 1024 * 1024 * 64; // don't allocate more than 64MB for a message
 
 /**
- * Options handed to the transport for every send stream we open.
+ * Options handed to the transport for one outgoing stream.
  *
- * `waitUntilAvailable` waits for the peer's concurrent stream limit to free up a slot
- * instead of rejecting with a `QuotaExceededError`. We open a stream per group, so
- * bursting past the limit is routine and a rejection would drop media the peer is about
- * to have room for. `@types/web` doesn't declare it yet, hence the intersection.
+ * `waitUntilAvailable` waits for the peer's concurrent stream limit to free a slot instead
+ * of rejecting with a `QuotaExceededError`, which is what we want for the streams a session
+ * opens occasionally. `@types/web` doesn't declare it yet, hence the intersection.
  */
-export function sendOptions(sendOrder?: number): WebTransportSendStreamOptions & { waitUntilAvailable?: boolean } {
-	return { sendOrder, waitUntilAvailable: true };
+export function sendOptions(options?: OpenOptions): WebTransportSendStreamOptions & { waitUntilAvailable?: boolean } {
+	return { sendOrder: options?.sendOrder, waitUntilAvailable: options?.waitUntilAvailable ?? true };
 }
 
 // How long an open may wait for the peer to free a stream slot. waitUntilAvailable makes
@@ -76,6 +75,17 @@ export interface OpenOptions {
 	 * as long as the peer withholds stream credit.
 	 */
 	timeout?: number | false;
+
+	/**
+	 * Ask the transport to wait for a stream slot rather than failing when the peer's
+	 * concurrent stream limit is exhausted. Defaults to true.
+	 *
+	 * Set it false on a path that opens streams faster than the peer can retire them. The
+	 * transport queues the opens it can't satisfy and serves them in order, with no way to
+	 * cancel one, so waiting there spends returning credit on whatever was requested first
+	 * rather than on what matters now.
+	 */
+	waitUntilAvailable?: boolean;
 }
 
 /** Options for {@link Writer.tryOpen}. */
@@ -119,7 +129,7 @@ export class Stream {
 	 *   against the session's other streams
 	 */
 	static async open(quic: WebTransport, options?: OpenOptions): Promise<Stream> {
-		let opening = quic.createBidirectionalStream(sendOptions(options?.sendOrder));
+		let opening = quic.createBidirectionalStream(sendOptions(options));
 
 		const timeout = options?.timeout ?? OPEN_TIMEOUT_MS;
 		if (timeout !== false) {
@@ -477,9 +487,7 @@ export class Writer {
 	 *   against the session's other streams
 	 */
 	static async open(quic: WebTransport, options?: OpenOptions): Promise<Writer> {
-		let opening = quic.createUnidirectionalStream(sendOptions(options?.sendOrder)) as Promise<
-			WritableStream<Uint8Array>
-		>;
+		let opening = quic.createUnidirectionalStream(sendOptions(options)) as Promise<WritableStream<Uint8Array>>;
 
 		const timeout = options?.timeout ?? OPEN_TIMEOUT_MS;
 		if (timeout !== false) {
@@ -493,6 +501,9 @@ export class Writer {
 	 * Like {@link Writer.open}, but gives up when `cancel` settles or `timeout` elapses,
 	 * returning undefined so the caller can drop whatever it meant to send. A stream that
 	 * opens after that is reset rather than leaked. A real transport failure still throws.
+	 *
+	 * Worth using even with `waitUntilAvailable: false`, since an implementation may park
+	 * an over-limit open instead of rejecting it.
 	 */
 	static async tryOpen(quic: WebTransport, options: TryOpenOptions): Promise<Writer | undefined> {
 		// A rejected `cancel` (STOP_SENDING) means the peer is gone too, so both settle

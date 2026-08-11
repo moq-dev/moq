@@ -474,9 +474,12 @@ test("open waits for a stream slot instead of rejecting once the peer's limit is
 
 	await Stream.open(quic, { sendOrder: 7 });
 	await Writer.open(quic);
+	// The one path that opens faster than a peer can retire streams opts out.
+	await Writer.open(quic, { waitUntilAvailable: false });
 
 	expect(options).toEqual([
 		{ sendOrder: 7, waitUntilAvailable: true },
 		{ sendOrder: undefined, waitUntilAvailable: true },
+		{ sendOrder: undefined, waitUntilAvailable: false },
 	]);
 });

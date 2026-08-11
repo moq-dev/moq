@@ -404,8 +404,11 @@ async function saturatedGroup() {
 
 	const groupStream = new WritableStream<Uint8Array>({ write: () => wrote(), abort: () => reset() });
 
-	// Stand in for a transport at its stream cap: the open completes only once a slot frees.
-	pair.server.createUnidirectionalStream = async () => {
+	// Stand in for a transport at its stream cap, which parks the open the way a browser does
+	// rather than rejecting it, whatever we asked for.
+	const requested: unknown[] = [];
+	pair.server.createUnidirectionalStream = async (options?: unknown) => {
+		requested.push(options);
 		opening();
 		await slot;
 		return groupStream;
@@ -437,12 +440,25 @@ async function saturatedGroup() {
 		track,
 		freeSlot,
 		outcome,
+		requested,
 		close: () => {
 			publisher.close();
 			broadcast.close();
 		},
 	};
 }
+
+// Group streams are the one path that must not queue behind the peer's stream limit: the
+// transport serves queued opens oldest-first, which is backwards for live media, and an
+// open already handed to it can't be taken back.
+test("lite draft-05: group streams do not ask the transport to wait for a slot", async () => {
+	const { requested, freeSlot, close } = await saturatedGroup();
+
+	expect(requested).toEqual([{ sendOrder: expect.any(Number), waitUntilAvailable: false }]);
+
+	freeSlot();
+	close();
+});
 
 test("lite draft-05: a group waiting for a stream slot is dropped when the subscriber leaves", async () => {
 	const { client, track, freeSlot, outcome, close } = await saturatedGroup();

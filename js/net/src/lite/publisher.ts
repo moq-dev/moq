@@ -587,11 +587,15 @@ export class Publisher {
 		try {
 			// The transport drains streams by send order, so this is what makes a high-priority
 			// track (and a newer group within it) win the link when there isn't room for both.
-			// The open waits for the peer to free a slot, which can outlast the subscription,
-			// so drop the group rather than parking here holding its frames.
+			//
+			// One stream per group is faster than a peer at its limit can retire them, so this
+			// is the one path that doesn't wait for a slot: the transport would serve the opens
+			// in the order we asked, which is oldest-first, exactly backwards for live media.
+			// Failing here drops the group and lets the next one compete for the next slot.
 			const stream = await Writer.tryOpen(this.#quic, {
 				sendOrder: priority.rank(group.sequence),
 				cancel: unsubscribed,
+				waitUntilAvailable: false,
 			});
 			if (!stream) {
 				group.close(new Error("no stream slot"));

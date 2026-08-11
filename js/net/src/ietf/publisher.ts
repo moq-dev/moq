@@ -196,11 +196,14 @@ export class Publisher {
 	async #runGroup(options: RunGroup) {
 		const { requestId, group, timescale, unsubscribed } = options;
 		try {
-			// The open waits for the peer to free a stream slot, which can outlast the
-			// subscription. Drop the group rather than parking here holding its frames.
+			// One stream per group is faster than a peer at its limit can retire them, so this
+			// is the one path that doesn't wait for a slot: the transport would serve the opens
+			// in the order we asked, which is oldest-first, exactly backwards for live media.
+			// Failing here drops the group and lets the next one compete for the next slot.
 			const stream = await Writer.tryOpen(this.#quic, {
 				cancel: unsubscribed,
 				version: this.#session.version,
+				waitUntilAvailable: false,
 			});
 			if (!stream) {
 				group.close(new Error("no stream slot"));
