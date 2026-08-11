@@ -222,6 +222,13 @@ impl crate::failover::Aggregate for Error {
 	fn aggregate(failures: Vec<crate::failover::Failure<Self>>) -> Self {
 		Self::Failover(failures)
 	}
+
+	fn resolve(error: Option<std::io::Error>) -> Self {
+		match error {
+			Some(error) => Self::DnsLookup(error),
+			None => Self::NoDnsEntries,
+		}
+	}
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -238,6 +245,9 @@ pub(crate) struct NoqClient {
 	pub host_name: Option<String>,
 	/// Stagger between Happy Eyeballs connection attempts (see [`crate::failover`]).
 	pub failover_delay: Duration,
+	/// How long the first candidate waits for the full DNS answer, RFC 8305's
+	/// Resolution Delay (see [`crate::ClientConfig::resolution_delay`]).
+	pub resolution_delay: Duration,
 	/// Whether the bound socket really came back dual-stack, which decides
 	/// whether an IPv4 destination is reachable at all. Captured here because the
 	/// endpoint owns the socket from here on and `local_addr` can't tell us.
@@ -268,6 +278,7 @@ impl NoqClient {
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			host_name: config.tls.host_name.clone(),
 			failover_delay: config.resolved_failover_delay(),
+			resolution_delay: config.resolved_resolution_delay(),
 			dual_stack,
 		})
 	}
@@ -281,20 +292,16 @@ impl NoqClient {
 		let mut url = url;
 		let mut config = tls.clone();
 
-		let host = url.host().ok_or(Error::InvalidDnsName)?.to_string();
+		let target = url.host().ok_or(Error::InvalidDnsName)?;
+		let host = target.to_string();
 		let port = url.port().unwrap_or(443);
 
-		// Resolve every DNS entry, adapted to the local socket's family; the dial
-		// below races them Happy Eyeballs style so one broken family can't stall
-		// the connect.
+		// Resolve, adapted to the local socket's family; the dial below races the
+		// answers Happy Eyeballs style as they land, so neither a broken family nor a
+		// lookup still waiting on its AAAA record can stall the connect.
 		let local = self.quic.local_addr().map_err(Error::LocalAddr)?;
-		let addrs = tokio::net::lookup_host((host.clone(), port))
-			.await
-			.map_err(Error::DnsLookup)?;
-		let candidates = crate::failover::match_local(addrs, local, self.dual_stack);
-		if candidates.is_empty() {
-			return Err(Error::NoDnsEntries);
-		}
+		let candidates =
+			crate::resolve::Candidates::resolve(target, port, self.resolution_delay).with_local(local, self.dual_stack);
 
 		if url.scheme() == "http" {
 			// Insecure per-connection bootstrap: only honored when no stronger
@@ -342,7 +349,7 @@ impl NoqClient {
 		let mut config = noq::ClientConfig::new(Arc::new(config));
 		config.transport_config(self.transport.clone());
 
-		tracing::debug!(%url, ?candidates, "connecting");
+		tracing::debug!(%url, "connecting");
 
 		// Use the configured host_name override for SNI + cert verification, else the URL host.
 		let host_name = self.host_name.clone().unwrap_or(host);

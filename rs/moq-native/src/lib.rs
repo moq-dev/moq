@@ -29,6 +29,8 @@ pub mod quic;
 #[cfg(feature = "quinn")]
 pub mod quinn;
 mod reconnect;
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "tcp"))]
+mod resolve;
 mod server;
 #[cfg(feature = "tcp")]
 pub mod tcp;

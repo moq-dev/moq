@@ -63,6 +63,22 @@ pub struct ClientConfig {
 	)]
 	pub failover_delay: Option<std::time::Duration>,
 
+	/// Delay before dialing an IPv4 address while the full DNS answer is outstanding.
+	///
+	/// A dial runs the usual all-families lookup alongside an IPv4-only one that
+	/// answers without waiting for the AAAA record, and starts on the first answer.
+	/// The full answer is authoritative, including which family to try first, so
+	/// this is how long the IPv4-only one waits for it before going ahead alone.
+	/// Defaults to 50ms; `0s` dials as soon as any address resolves.
+	#[serde(default, skip_serializing_if = "Option::is_none", with = "humantime_serde::option")]
+	#[arg(
+		id = "client-resolution-delay",
+		long = "client-resolution-delay",
+		env = "MOQ_CLIENT_RESOLUTION_DELAY",
+		value_parser = humantime::parse_duration,
+	)]
+	pub resolution_delay: Option<std::time::Duration>,
+
 	/// Maximum time for one [`Client::connect`], covering the dial and the MoQ
 	/// handshake. Defaults to 30 seconds; set to 0 to wait forever.
 	///
@@ -143,6 +159,13 @@ impl ClientConfig {
 		self.failover_delay.unwrap_or(DEFAULT_FAILOVER_DELAY)
 	}
 
+	/// The Resolution Delay a dial will actually use, resolving the default from
+	/// the [`resolution_delay`](Self::resolution_delay) override. Read by every
+	/// backend, like [`resolved_failover_delay`](Self::resolved_failover_delay).
+	pub fn resolved_resolution_delay(&self) -> std::time::Duration {
+		self.resolution_delay.unwrap_or(crate::resolve::DEFAULT_DELAY)
+	}
+
 	/// The deadline one connection attempt will actually get, dial and handshake
 	/// together, resolving the default from the [`timeout`](Self::timeout) override.
 	pub fn resolved_connect_timeout(&self) -> std::time::Duration {
@@ -157,6 +180,7 @@ impl Default for ClientConfig {
 			bind: "[::]:0".parse().unwrap(),
 			backend: None,
 			failover_delay: None,
+			resolution_delay: None,
 			timeout: None,
 			quic: crate::quic::Client::default(),
 			version: Vec::new(),
@@ -193,10 +217,12 @@ pub struct Client {
 	/// Deadline for one [`Client::connect`], from [`ClientConfig::timeout`]. Zero waits forever.
 	timeout: std::time::Duration,
 	backoff: Backoff,
-	/// The resolved Happy Eyeballs stagger, used by the `tcp://` dial here; the
+	/// The resolved Happy Eyeballs timings, used by the `tcp://` dial here; the
 	/// QUIC backends capture their own copy from the config.
 	#[cfg(feature = "tcp")]
 	failover_delay: std::time::Duration,
+	#[cfg(feature = "tcp")]
+	resolution_delay: std::time::Duration,
 	#[cfg(feature = "websocket")]
 	websocket: crate::websocket::Client,
 	/// Only the rustls-based dials read this. quiche builds its own TLS stack, and the
@@ -281,6 +307,8 @@ impl Client {
 		// Read before the struct literal below moves fields out of `config`.
 		#[cfg(feature = "tcp")]
 		let failover_delay = config.resolved_failover_delay();
+		#[cfg(feature = "tcp")]
+		let resolution_delay = config.resolved_resolution_delay();
 		let timeout = config.resolved_connect_timeout();
 
 		Ok(Self {
@@ -299,6 +327,8 @@ impl Client {
 			backoff: config.backoff,
 			#[cfg(feature = "tcp")]
 			failover_delay,
+			#[cfg(feature = "tcp")]
+			resolution_delay,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
 			#[cfg(any(feature = "noq", feature = "quinn", feature = "websocket"))]
@@ -494,7 +524,8 @@ impl Client {
 		// QUIC, which can't speak it. Use only on a trusted network.
 		#[cfg(feature = "tcp")]
 		if url.scheme() == "tcp" {
-			let session = crate::tcp::connect(url, &self.versions.alpns(), self.failover_delay).await?;
+			let session =
+				crate::tcp::connect(url, &self.versions.alpns(), self.failover_delay, self.resolution_delay).await?;
 			return Ok(moq.connect(session).await?);
 		}
 
@@ -920,6 +951,34 @@ mod tests {
 	fn test_cli_failover_delay() {
 		let config = ClientConfig::parse_from(["test", "--client-failover-delay", "50ms"]);
 		assert_eq!(config.failover_delay, Some(std::time::Duration::from_millis(50)));
+	}
+
+	#[test]
+	fn test_toml_resolution_delay_survives_update_from() {
+		let toml = r#"
+			resolution_delay = "10ms"
+		"#;
+
+		let mut config: ClientConfig = toml::from_str(toml).unwrap();
+		assert_eq!(config.resolution_delay, Some(std::time::Duration::from_millis(10)));
+
+		// Simulate: TOML loaded, then CLI args re-applied (no --client-resolution-delay flag).
+		config.update_from(["test"]);
+		assert_eq!(config.resolution_delay, Some(std::time::Duration::from_millis(10)));
+	}
+
+	#[test]
+	fn test_cli_resolution_delay() {
+		let config = ClientConfig::parse_from(["test", "--client-resolution-delay", "0s"]);
+		assert_eq!(config.resolution_delay, Some(std::time::Duration::ZERO));
+		assert_eq!(config.resolved_resolution_delay(), std::time::Duration::ZERO);
+	}
+
+	#[test]
+	fn resolution_delay_defaults_to_the_rfc_value() {
+		let config = ClientConfig::parse_from(["test"]);
+		assert_eq!(config.resolution_delay, None);
+		assert_eq!(config.resolved_resolution_delay(), std::time::Duration::from_millis(50));
 	}
 
 	#[test]

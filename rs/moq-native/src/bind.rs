@@ -5,7 +5,8 @@
 //! `IPV6_V6ONLY` to on, so an IPv6 socket silently drops every IPv4 packet. The
 //! helpers here clear that before binding, so a relay on `[::]` is reachable
 //! over IPv4 and a dual-stack client can dial IPv4 servers (via IPv4-mapped
-//! addresses; the client's address-family matching lives in `failover::match_local`).
+//! addresses; the client's address-family matching lives in
+//! `resolve::Candidates::with_local`).
 //! See <https://github.com/moq-dev/moq/issues/1375>.
 
 use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};

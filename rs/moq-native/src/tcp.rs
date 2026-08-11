@@ -37,8 +37,9 @@ pub struct Config {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-	/// The TCP socket failed to bind or connect. Not accept: a failed `accept(2)` is
-	/// the listener's own to classify and retry (see [`crate::accept`]).
+	/// The TCP socket failed to bind or connect, or the host failed to resolve. Not
+	/// accept: a failed `accept(2)` is the listener's own to classify and retry
+	/// (see [`crate::accept`]).
 	#[error(transparent)]
 	Io(#[from] std::io::Error),
 
@@ -75,6 +76,13 @@ impl crate::failover::Aggregate for Error {
 	fn aggregate(failures: Vec<crate::failover::Failure<Self>>) -> Self {
 		Self::Failover(failures)
 	}
+
+	fn resolve(error: Option<std::io::Error>) -> Self {
+		match error {
+			Some(error) => Self::Io(error),
+			None => Self::NoAddresses,
+		}
+	}
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -82,34 +90,32 @@ type Result<T> = std::result::Result<T, Error>;
 /// Dial a `tcp://host:port` URL, advertising `protocols` for in-band ALPN
 /// negotiation. Returns a qmux session over plain TCP.
 ///
-/// When DNS returns multiple addresses they are raced Happy Eyeballs style,
-/// staggered by `failover_delay` (see [`crate::failover`]).
+/// The host is resolved alongside an IPv4-only lookup that answers without
+/// waiting for its AAAA record, `resolution_delay` apart, and the answers raced
+/// Happy Eyeballs style, staggered by `failover_delay` (see [`crate::failover`]).
 ///
 /// The port is required; there is no default for the `tcp` scheme.
 pub(crate) async fn connect(
 	url: Url,
 	protocols: &[&str],
 	failover_delay: std::time::Duration,
+	resolution_delay: std::time::Duration,
 ) -> Result<qmux::Session> {
-	let host = url.host_str().ok_or(Error::MissingHostname)?;
+	let host = url.host().ok_or(Error::MissingHostname)?;
 	let port = url.port().ok_or(Error::MissingPort)?;
 
 	tracing::debug!(%url, "connecting via TCP");
-	let addrs = tokio::net::lookup_host((host, port)).await?;
-	connect_addrs(crate::failover::interleave(addrs), protocols, failover_delay).await
+	let candidates = crate::resolve::Candidates::resolve(host, port, resolution_delay);
+	connect_addrs(candidates, protocols, failover_delay).await
 }
 
-/// Dial the already-resolved `candidates` in Happy Eyeballs order, performing the
-/// qmux handshake on each attempt; the first session to complete wins.
+/// Dial `candidates` in Happy Eyeballs order, performing the qmux handshake on
+/// each attempt; the first session to complete wins.
 async fn connect_addrs(
-	candidates: Vec<net::SocketAddr>,
+	candidates: crate::resolve::Candidates,
 	protocols: &[&str],
 	failover_delay: std::time::Duration,
 ) -> Result<qmux::Session> {
-	if candidates.is_empty() {
-		return Err(Error::NoAddresses);
-	}
-
 	crate::failover::race(candidates, failover_delay, |addr| {
 		let protocols: Vec<String> = protocols.iter().map(|&p| p.to_owned()).collect();
 		async move {
@@ -232,9 +238,10 @@ mod tests {
 		let accept = tokio::spawn(async move { listener.accept().await.expect("listener gone").expect("accept") });
 
 		let blackhole: net::SocketAddr = "192.0.2.1:9".parse().unwrap();
+		let candidates = crate::resolve::Candidates::fixed([blackhole, addr]);
 		let session = tokio::time::timeout(
 			Duration::from_secs(5),
-			connect_addrs(vec![blackhole, addr], &["moq-test"], Duration::from_millis(50)),
+			connect_addrs(candidates, &["moq-test"], Duration::from_millis(50)),
 		)
 		.await
 		.expect("failover timed out")
@@ -246,7 +253,8 @@ mod tests {
 
 	#[tokio::test]
 	async fn connect_addrs_rejects_empty() {
-		let res = connect_addrs(Vec::new(), &["moq-test"], Duration::ZERO).await;
+		let candidates = crate::resolve::Candidates::fixed([]);
+		let res = connect_addrs(candidates, &["moq-test"], Duration::ZERO).await;
 		assert!(matches!(res, Err(Error::NoAddresses)));
 	}
 }

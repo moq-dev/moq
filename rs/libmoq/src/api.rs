@@ -631,6 +631,25 @@ pub extern "C" fn moq_client_set_failover_delay(client: u32, delay_ms: u64) -> i
 	})
 }
 
+/// Delay before dialing an IPv4 address while the full DNS answer is outstanding, in
+/// milliseconds.
+///
+/// A dial runs the usual all-families lookup alongside an IPv4-only one that answers
+/// without waiting for the AAAA record, and starts on the first answer. The full answer
+/// is authoritative, including which family to try first, so this is how long the
+/// IPv4-only one waits for it before going ahead alone. Defaults to 50ms; zero dials as
+/// soon as any address resolves.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_set_resolution_delay(client: u32, delay_ms: u64) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.resolution_delay = Some(std::time::Duration::from_millis(delay_ms));
+		Ok(())
+	})
+}
+
 /// Delay before racing a WebSocket fallback against the QUIC dial, in milliseconds.
 ///
 /// Defaults to 200ms, and drops to zero for a server WebSocket already won against.
@@ -1013,6 +1032,23 @@ pub unsafe extern "C" fn moq_client_get_failover_delay(client: u32, out: *mut u6
 		let out = unsafe { out.as_mut() }.ok_or(Error::InvalidPointer)?;
 		let client = ffi::parse_id(client)?;
 		*out = millis(State::lock().client.get_mut(client)?.resolved_failover_delay());
+		Ok(())
+	})
+}
+
+/// Read the Resolution Delay, in milliseconds. See [moq_client_set_resolution_delay]
+/// and [moq_client_get_connect_timeout] for what an unset knob reports.
+///
+/// Returns zero on success, or a negative code if the handle is unknown or `out` is NULL.
+///
+/// # Safety
+/// - The caller must ensure that `out` points to a writable `uint64_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_get_resolution_delay(client: u32, out: *mut u64) -> i32 {
+	ffi::enter(move || {
+		let out = unsafe { out.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let client = ffi::parse_id(client)?;
+		*out = millis(State::lock().client.get_mut(client)?.resolved_resolution_delay());
 		Ok(())
 	})
 }
