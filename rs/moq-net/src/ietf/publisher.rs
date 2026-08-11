@@ -11,7 +11,7 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
-use super::{Message, Version, cluster};
+use super::{Message, Version, cluster, peer, solicit};
 
 /// A broadcast whose route table is watched for changes in what we advertise: the
 /// namespace becoming (un)advertisable, or its path or cost moving.
@@ -99,6 +99,61 @@ enum Watch {
 	Idle(crate::PathOwned),
 }
 
+/// Where one announce loop's advertisements go.
+enum Target<S: web_transport_trait::Session> {
+	/// Inline NAMESPACE entries on the SUBSCRIBE_NAMESPACE stream that asked for them
+	/// (draft-16+).
+	Inline(Stream<S, Version>),
+	/// Each advertisement on its own PUBLISH_NAMESPACE request. Unsolicited when there
+	/// is no stream; draft-14/15 answer a SUBSCRIBE_NAMESPACE this way, since they
+	/// predate NAMESPACE, and hold onto its stream to end with the subscription.
+	Requests(Option<Stream<S, Version>>),
+}
+
+impl<S: web_transport_trait::Session> Target<S> {
+	/// The SUBSCRIBE_NAMESPACE stream this loop answers, if any.
+	fn stream(&mut self) -> Option<&mut Stream<S, Version>> {
+		match self {
+			Self::Inline(stream) | Self::Requests(Some(stream)) => Some(stream),
+			Self::Requests(None) => None,
+		}
+	}
+
+	/// Resolves when the peer ends this loop by closing the stream it asked on.
+	///
+	/// An unsolicited loop has no stream of its own to watch and parks here: the
+	/// session driver polling it is what drops it when the session ends.
+	async fn closed(&mut self) -> Result<(), Error> {
+		match self.stream() {
+			Some(stream) => stream.reader.closed().await,
+			None => std::future::pending().await,
+		}
+	}
+}
+
+/// One announce loop's state: where its advertisements go, and what the peer holds.
+struct Namespaces<S: web_transport_trait::Session> {
+	/// What the peer declared in its SETUP, which decides what an advertisement carries.
+	peer: cluster::Peer,
+	target: Target<S>,
+	/// Every announced broadcast under this loop's prefix.
+	watched: HashMap<crate::PathOwned, Watched>,
+	/// The open PUBLISH_NAMESPACE request carrying each advertised namespace. Empty when
+	/// the entries ride a SUBSCRIBE_NAMESPACE stream inline.
+	requests: HashMap<crate::PathOwned, NamespaceRequest<S>>,
+}
+
+impl<S: web_transport_trait::Session> Namespaces<S> {
+	fn new(peer: cluster::Peer, target: Target<S>) -> Self {
+		Self {
+			peer,
+			target,
+			watched: HashMap::new(),
+			requests: HashMap::new(),
+		}
+	}
+}
+
 /// What woke an announce-forwarding loop.
 enum NamespaceEvent {
 	/// The session or stream ended, with the result to surface.
@@ -129,7 +184,7 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	// declares its own, which wins.
 	peer_origin: Option<crate::Origin>,
 	// What the peer declared in its SETUP, filled when that stream is read.
-	peer_setup: cluster::PeerSetup,
+	peer_setup: peer::PeerSetup,
 	version: Version,
 }
 
@@ -139,7 +194,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		origin: origin::Consumer,
 		control: Control,
 		peer_origin: Option<crate::Origin>,
-		peer_setup: cluster::PeerSetup,
+		peer_setup: peer::PeerSetup,
 		version: Version,
 	) -> Self {
 		Self {
@@ -160,9 +215,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	/// encoding: nothing can be advertised until we know whether the peer speaks it.
 	async fn peer(&self) -> cluster::Peer {
 		match cluster::supported(self.version) {
-			true => self.peer_setup.get().await,
+			true => self.peer_setup.get().await.cluster,
 			false => cluster::Peer::default(),
 		}
+	}
+
+	/// What the peer requires to be solicited, from the same SETUP.
+	///
+	/// Blocks on it for the same reason [`Self::peer`] does: this decides whether the
+	/// first advertisement is sent unasked, so it cannot be guessed and corrected later.
+	async fn solicit(&self) -> solicit::Solicit {
+		self.peer_setup.get().await.solicit
 	}
 
 	/// The origin to serve this peer's subscriptions from: sources whose hop chain flows
@@ -805,21 +868,25 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	/// Bring the peer's view of one namespace in line with the current selection.
 	///
-	/// Draft-16+ re-sends NAMESPACE on the SUBSCRIBE_NAMESPACE stream (the receiver
-	/// treats a repeat as a replacement) and retracts with NAMESPACE_DONE.
-	/// Draft-14/15 carry each advertisement on its own PUBLISH_NAMESPACE request:
-	/// an update re-sends PUBLISH_NAMESPACE **on the stream that already carries
-	/// it**, since a second stream would leave two claiming one namespace, and a
-	/// withdrawal closes the request with PUBLISH_NAMESPACE_DONE.
+	/// A loop writing inline (draft-16+ answering a SUBSCRIBE_NAMESPACE) re-sends
+	/// NAMESPACE on that stream, which the receiver treats as a replacement, and
+	/// retracts with NAMESPACE_DONE. Otherwise each advertisement rides its own
+	/// PUBLISH_NAMESPACE request: an update re-sends PUBLISH_NAMESPACE **on the stream
+	/// that already carries it**, since a second stream would leave two claiming one
+	/// namespace, and a withdrawal closes the request with PUBLISH_NAMESPACE_DONE.
 	async fn sync_namespace(
 		&self,
+		ns: &mut Namespaces<S>,
 		suffix: &crate::PathOwned,
 		path: &crate::PathOwned,
-		peer: &cluster::Peer,
-		watched: &mut HashMap<crate::PathOwned, Watched>,
-		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
-		stream: &mut Stream<S, Version>,
 	) -> Result<(), Error> {
+		let Namespaces {
+			peer,
+			target,
+			watched,
+			requests,
+		} = ns;
+
 		let Some(watch) = watched.get(suffix) else {
 			return Ok(());
 		};
@@ -830,14 +897,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let held = watch.sent.wanted();
 
 		let absolute = self.origin.absolute(path).to_owned();
-		let sent = match self.version {
-			Version::Draft14 | Version::Draft15 => {
+		let sent = match target {
+			Target::Requests(_) => {
 				match (advert.wanted(), requests.get_mut(suffix)) {
 					(false, _) => {
 						if held {
 							tracing::debug!(broadcast = %absolute, "namespace_done");
 						}
-						self.withdraw_namespace(stream, requests, suffix.clone()).await?;
+						self.withdraw_namespace(target, requests, suffix.clone()).await?;
 					}
 					(true, Some(request)) => {
 						tracing::debug!(broadcast = %absolute, "announce update");
@@ -853,7 +920,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							.await?;
 					}
 					(true, None) => {
-						tracing::debug!(broadcast = %absolute, "namespace");
+						tracing::debug!(broadcast = %absolute, "publish_namespace");
 						self.advertise_namespace(requests, path, suffix.clone(), advert.params())
 							.await?;
 					}
@@ -866,7 +933,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					false => Advert::None,
 				}
 			}
-			_ => {
+			Target::Inline(stream) => {
 				match (advert.wanted(), held) {
 					(true, _) => {
 						tracing::debug!(broadcast = %absolute, "namespace");
@@ -902,9 +969,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
-	/// Open a PUBLISH_NAMESPACE request for one namespace (draft-14/15, which have
-	/// no NAMESPACE message), recording it in `requests` so an update or withdrawal
-	/// reuses the same stream. A declined request records nothing.
+	/// Open a PUBLISH_NAMESPACE request for one namespace, recording it in `requests`
+	/// so an update or withdrawal reuses the same stream. A declined request records
+	/// nothing: a peer that wants none of this rejects each one and stays connected.
 	async fn advertise_namespace(
 		&self,
 		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
@@ -962,16 +1029,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
-	/// Withdraw an advertised namespace: NAMESPACE_DONE inline on draft-16+, or
-	/// PUBLISH_NAMESPACE_DONE closing its own request on draft-14/15.
+	/// Withdraw an advertised namespace: NAMESPACE_DONE inline, or PUBLISH_NAMESPACE_DONE
+	/// closing the request that carried it.
 	async fn withdraw_namespace(
 		&self,
-		stream: &mut Stream<S, Version>,
+		target: &mut Target<S>,
 		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
 		suffix: crate::PathOwned,
 	) -> Result<(), Error> {
-		match self.version {
-			Version::Draft14 | Version::Draft15 => {
+		match target {
+			Target::Requests(_) => {
 				if let Some(mut request) = requests.remove(&suffix) {
 					// Best effort: the peer may already be gone.
 					let _ = request
@@ -988,7 +1055,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					let _ = request.stream.writer.close().await;
 				}
 			}
-			_ => {
+			Target::Inline(stream) => {
 				stream.writer.encode(&ietf::NamespaceDone::ID).await?;
 				stream
 					.writer
@@ -1001,25 +1068,55 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
-	/// Close out every open draft-14/15 PUBLISH_NAMESPACE request. A no-op on
-	/// later drafts, whose entries ride the SUBSCRIBE_NAMESPACE stream itself.
+	/// Close out every open PUBLISH_NAMESPACE request. A no-op for a loop whose entries
+	/// ride the SUBSCRIBE_NAMESPACE stream itself, which retracts them by ending.
 	async fn withdraw_requests(
 		&self,
-		stream: &mut Stream<S, Version>,
+		target: &mut Target<S>,
 		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
 	) {
 		let suffixes: Vec<crate::PathOwned> = requests.keys().cloned().collect();
 		for suffix in suffixes {
-			let _ = self.withdraw_namespace(stream, requests, suffix).await;
+			let _ = self.withdraw_namespace(target, requests, suffix).await;
 		}
+	}
+
+	/// Advertise every namespace we can, without waiting to be asked.
+	///
+	/// moq-transport itself says nothing about which of the two discovery messages a peer
+	/// expects, and the peers that never send SUBSCRIBE_NAMESPACE are exactly the ones
+	/// expecting a publisher to announce itself, so the default has to be to announce. A
+	/// peer that would rather ask says so with the MoQ Solicit extension ([`solicit`]),
+	/// and then this loop does nothing and
+	/// [`Self::run_subscribe_namespace_stream`] carries the advertisements instead.
+	/// Exactly one of the two is live, which is what keeps the peer from hearing a
+	/// namespace twice.
+	pub async fn run_publish_namespaces(self) -> Result<(), Error> {
+		if self.solicit().await.announce {
+			return Ok(());
+		}
+
+		// The cluster extension changes what an advertisement carries, so nothing can be
+		// sent until the peer's SETUP says whether it speaks it.
+		let peer = self.peer().await;
+
+		// Split horizon, as the solicited loop applies it: never advertise a route back
+		// to the peer it came from.
+		let origin = match self.exclude(&peer) {
+			crate::Origin::UNKNOWN => self.origin.clone(),
+			exclude => self.origin.clone().excluding(exclude),
+		};
+
+		let ns = Namespaces::new(peer, Target::Requests(None));
+		self.run_namespaces(origin, crate::Path::empty().to_owned(), ns).await
 	}
 
 	/// Handle a SUBSCRIBE_NAMESPACE on its bidi stream.
 	///
-	/// Namespaces are only advertised in response to one of these, and all the
-	/// announce state is local to this task (mirroring `lite::Publisher`'s
+	/// All the announce state is local to this task (mirroring `lite::Publisher`'s
 	/// announce handling): whatever this subscription advertised is withdrawn
-	/// when its stream ends.
+	/// when its stream ends. It only advertises anything when the peer asked to be told
+	/// on request; otherwise [`Self::run_publish_namespaces`] has already said it all.
 	async fn run_subscribe_namespace_stream(
 		self,
 		mut stream: Stream<S, Version>,
@@ -1073,21 +1170,50 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			crate::Origin::UNKNOWN => origin,
 			exclude => origin.excluding(exclude),
 		};
+
+		// Draft-14/15 predate NAMESPACE, so they answer with their own PUBLISH_NAMESPACE
+		// requests and keep this stream open for the subscription's lifetime.
+		let target = match self.version {
+			Version::Draft14 | Version::Draft15 => Target::Requests(Some(stream)),
+			_ => Target::Inline(stream),
+		};
+
+		// Unless the peer asked to be told only on request, it has already heard all of
+		// this as unsolicited PUBLISH_NAMESPACE. Repeating it here would leave it holding
+		// two sources for one namespace, so this stream carries nothing and simply stays
+		// open until the peer is done with it.
+		let origin = match self.solicit().await.announce {
+			true => origin,
+			false => origin.empty(),
+		};
+
+		let ns = Namespaces::new(peer, target);
+		self.run_namespaces(origin, prefix, ns).await
+	}
+
+	/// Forward origin (un)announces to the peer until the loop ends.
+	///
+	/// Shared by both announce paths: they differ in where the advertisements go
+	/// ([`Target`]) and where the origin is rooted (`prefix`, empty when nothing asked
+	/// for a subset).
+	async fn run_namespaces(
+		&self,
+		origin: origin::Consumer,
+		prefix: crate::PathOwned,
+		mut ns: Namespaces<S>,
+	) -> Result<(), Error> {
 		let mut announced = origin.announced();
-		let mut watched: HashMap<crate::PathOwned, Watched> = HashMap::new();
-		// Draft-14/15: the open PUBLISH_NAMESPACE request carrying each advertised
-		// namespace. Empty on later drafts, whose entries ride `stream` inline.
-		let mut requests: HashMap<crate::PathOwned, NamespaceRequest<S>> = HashMap::new();
 
 		let mut linger = kio::time::Deadline::new();
 
 		// Stream updates (origin (un)announces plus watched route and demand
 		// changes), bailing if the peer closes its side first.
 		let res = loop {
-			linger.set(Self::linger_deadline(&watched));
+			linger.set(Self::linger_deadline(&ns.watched));
 
 			let event = {
-				let mut closed = std::pin::pin!(stream.reader.closed());
+				let mut closed = std::pin::pin!(ns.target.closed());
+				let watched = &mut ns.watched;
 				kio::wait(|waiter| {
 					if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
 						return Poll::Ready(NamespaceEvent::Closed(res));
@@ -1098,7 +1224,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					// Stamped per poll rather than kept: the turn always ends in a
 					// `Ready` below once it fires, so it never has to survive.
 					let fired = linger.poll(waiter).is_ready().then(web_async::time::Instant::now);
-					match Self::poll_watched(&mut watched, fired, waiter) {
+					match Self::poll_watched(watched, fired, waiter) {
 						Poll::Ready(Watch::Changed(path)) => return Poll::Ready(NamespaceEvent::Routes(path)),
 						Poll::Ready(Watch::Idle(path)) => return Poll::Ready(NamespaceEvent::Idle(path)),
 						Poll::Pending => {}
@@ -1117,7 +1243,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				NamespaceEvent::Update(None) => {
 					// The origin is gone: withdraw everything, then finish the
 					// stream and wait for delivery.
-					self.withdraw_requests(&mut stream, &mut requests).await;
+					self.withdraw_requests(&mut ns.target, &mut ns.requests).await;
+					let Some(stream) = ns.target.stream() else {
+						return Ok(());
+					};
 					stream.writer.finish()?;
 					return stream.writer.closed().await;
 				}
@@ -1130,35 +1259,34 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 					match broadcast {
 						Some(broadcast) => {
-							watched.insert(suffix.clone(), Watched::new(broadcast));
-							self.sync_namespace(&suffix, &path, &peer, &mut watched, &mut requests, &mut stream)
-								.await?;
+							ns.watched.insert(suffix.clone(), Watched::new(broadcast));
+							self.sync_namespace(&mut ns, &suffix, &path).await?;
 						}
 						None => {
 							// Only close out namespaces the peer actually saw.
-							let held = watched.remove(&suffix).is_some_and(|watch| watch.sent.wanted());
+							let held = ns.watched.remove(&suffix).is_some_and(|watch| watch.sent.wanted());
 							if held {
 								tracing::debug!(broadcast = %self.origin.absolute(&path), "namespace_done");
-								self.withdraw_namespace(&mut stream, &mut requests, suffix).await?;
+								self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix)
+									.await?;
 							}
 						}
 					}
 				}
 				NamespaceEvent::Routes(suffix) => {
 					let path = prefix.join(&suffix);
-					self.sync_namespace(&suffix, &path, &peer, &mut watched, &mut requests, &mut stream)
-						.await?;
+					self.sync_namespace(&mut ns, &suffix, &path).await?;
 				}
 				NamespaceEvent::Idle(suffix) => {
-					if let Some(watch) = watched.get_mut(&suffix) {
+					if let Some(watch) = ns.watched.get_mut(&suffix) {
 						watch.idle_at = Some(web_async::time::Instant::now());
 					}
 				}
 			}
 		};
 
-		// This subscription's advertisements die with it.
-		self.withdraw_requests(&mut stream, &mut requests).await;
+		// This loop's advertisements die with it.
+		self.withdraw_requests(&mut ns.target, &mut ns.requests).await;
 
 		res
 	}
@@ -1228,6 +1356,26 @@ mod tests {
 		writes.windows(needle.len()).filter(|window| *window == needle).count()
 	}
 
+	/// A SETUP slot already filled with what the peer declared. The announce loops block
+	/// on it, so a test that leaves it empty is a test that never advertises.
+	fn declared(solicit: solicit::Solicit) -> peer::PeerSetup {
+		let slot = peer::PeerSetup::default();
+		slot.set(peer::Peer {
+			solicit,
+			..Default::default()
+		});
+		slot
+	}
+
+	/// A peer that requires solicitation, which is what hands the advertisements to the
+	/// SUBSCRIBE_NAMESPACE stream.
+	fn requires_solicitation() -> peer::PeerSetup {
+		declared(solicit::Solicit {
+			announce: true,
+			interest: false,
+		})
+	}
+
 	/// A broadcast whose every route flows through the peer's assigned identity
 	/// (`Client::with_peer_origin`) is never advertised to that peer; it would only
 	/// echo the peer's own content back at it. A broadcast with an independent
@@ -1246,7 +1394,7 @@ mod tests {
 			origin.consume(),
 			Control::new(None, false),
 			Some(assigned),
-			cluster::PeerSetup::default(),
+			peer::PeerSetup::default(),
 			Version::Draft16,
 		);
 
@@ -1347,7 +1495,7 @@ mod tests {
 			origin.consume(),
 			Control::new(None, false),
 			Some(assigned),
-			cluster::PeerSetup::default(),
+			requires_solicitation(),
 			Version::Draft16,
 		);
 
@@ -1422,7 +1570,7 @@ mod tests {
 					.await
 					.unwrap();
 			}
-			_ => {
+			Version::Draft15 | Version::Draft16 => {
 				writer.encode(&ietf::RequestOk::ID).await.unwrap();
 				writer
 					.encode(&ietf::RequestOk {
@@ -1430,6 +1578,11 @@ mod tests {
 					})
 					.await
 					.unwrap();
+			}
+			// Draft-17+ dropped the request id: the response rides the request's stream.
+			_ => {
+				writer.encode(&ietf::RequestOk::ID).await.unwrap();
+				writer.encode(&ietf::RequestOk { request_id: None }).await.unwrap();
 			}
 		}
 
@@ -1450,7 +1603,7 @@ mod tests {
 
 		// Announced before the peer subscribes: it must only hit the wire after.
 		let early = origin
-			.create_broadcast("early-cam", crate::broadcast::Route::new().with_announce(true))
+			.create_broadcast("early-cam", crate::broadcast::Route::announced())
 			.unwrap();
 		settle().await;
 
@@ -1465,7 +1618,7 @@ mod tests {
 			consumer,
 			Control::new(None, false),
 			None,
-			cluster::PeerSetup::default(),
+			requires_solicitation(),
 			VERSION,
 		);
 
@@ -1492,7 +1645,7 @@ mod tests {
 
 		// A later announce reaches the same subscription.
 		let _late = origin
-			.create_broadcast("late-cam", crate::broadcast::Route::new().with_announce(true))
+			.create_broadcast("late-cam", crate::broadcast::Route::announced())
 			.unwrap();
 		for _ in 0..100 {
 			assert!(futures::poll!(run.as_mut()).is_pending());
@@ -1527,6 +1680,127 @@ mod tests {
 		assert_eq!(log.bi_opens(), 3, "no extra stream for the withdrawal");
 	}
 
+	/// A peer that declared nothing is told without being asked. Relays that never send
+	/// SUBSCRIBE_NAMESPACE hear nothing otherwise, and every third-party one behaves
+	/// that way: a publisher is expected to announce itself.
+	#[tokio::test]
+	async fn a_peer_that_declared_nothing_is_told_unsolicited() {
+		const VERSION: Version = Version::Draft17;
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let _local = origin
+			.create_broadcast("local-cam", crate::broadcast::Route::announced())
+			.unwrap();
+		settle().await;
+
+		// The only stream is the PUBLISH_NAMESPACE request we open ourselves.
+		let session =
+			crate::lite::test_transport::ScriptedSession::per_stream(vec![publish_namespace_ok(VERSION).await]);
+		let log = session.log.clone();
+
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+
+		let publisher = Publisher::new(
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			VERSION,
+		);
+
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"local-cam") >= 1 {
+				break;
+			}
+			settle().await;
+		}
+
+		assert_eq!(
+			occurrences(&log, b"local-cam"),
+			1,
+			"PUBLISH_NAMESPACE without a SUBSCRIBE_NAMESPACE"
+		);
+		assert_eq!(log.bi_opens(), 1, "one request stream");
+	}
+
+	/// Drive both announce loops at once against a peer that declared `solicit`,
+	/// returning how many times the namespace hit the wire and how many bidi streams
+	/// were opened. One stream means the entry rode the subscription inline; two means
+	/// it went out as its own PUBLISH_NAMESPACE request.
+	async fn advertise_both_ways(solicit: solicit::Solicit) -> (usize, usize) {
+		const VERSION: Version = Version::Draft17;
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let _cam = origin
+			.create_broadcast("cam", crate::broadcast::Route::announced())
+			.unwrap();
+		settle().await;
+
+		// Stream 1 is the peer's SUBSCRIBE_NAMESPACE; stream 2, if opened at all, is our
+		// PUBLISH_NAMESPACE request.
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![
+			Vec::new(),
+			publish_namespace_ok(VERSION).await,
+		]);
+		let log = session.log.clone();
+
+		let publisher = Publisher::new(
+			session.clone(),
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			declared(solicit),
+			VERSION,
+		);
+
+		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let msg = ietf::SubscribeNamespace {
+			request_id: RequestId(1),
+			namespace: crate::Path::new(""),
+		};
+		let mut solicited = std::pin::pin!(publisher.clone().run_subscribe_namespace_stream(stream, msg));
+		let mut unsolicited = std::pin::pin!(publisher.run_publish_namespaces());
+
+		// Poll well past the first advertisement, so a second one from the other loop
+		// would show up rather than being missed by an early break. The unsolicited loop
+		// finishes immediately when the peer requires solicitation, and a completed
+		// future must not be polled again.
+		let mut quiet = false;
+		for _ in 0..100 {
+			assert!(futures::poll!(solicited.as_mut()).is_pending());
+			if !quiet {
+				quiet = futures::poll!(unsolicited.as_mut()).is_ready();
+			}
+			settle().await;
+		}
+
+		(occurrences(&log, b"cam"), log.bi_opens())
+	}
+
+	/// The regression that made announces solicited in the first place: a namespace sent
+	/// as both PUBLISH_NAMESPACE and NAMESPACE leaves the peer holding two sources for
+	/// one broadcast, and whichever arrives second replaces the one the first attached.
+	/// The peer's SETUP picks which loop carries it, so the other stays quiet and the
+	/// namespace goes out exactly once either way.
+	#[tokio::test]
+	async fn each_namespace_is_advertised_exactly_once() {
+		let (unsolicited, streams) = advertise_both_ways(solicit::Solicit::default()).await;
+		assert_eq!(unsolicited, 1, "a peer that required nothing is told once");
+		assert_eq!(streams, 2, "on its own PUBLISH_NAMESPACE request");
+
+		let (solicited, streams) = advertise_both_ways(solicit::Solicit {
+			announce: true,
+			interest: false,
+		})
+		.await;
+		assert_eq!(solicited, 1, "a peer that asked to be told on request is told once");
+		assert_eq!(streams, 1, "inline on the SUBSCRIBE_NAMESPACE stream it asked on");
+	}
+
 	/// A publisher talking to a scripted peer that never answers, over one bidi stream.
 	struct Harness {
 		publisher: Publisher<crate::lite::test_transport::ScriptedSession>,
@@ -1542,8 +1816,8 @@ mod tests {
 		let log = session.log.clone();
 
 		// Serving a request blocks on the peer's SETUP, which no scripted peer sends here.
-		let peer_setup = cluster::PeerSetup::default();
-		peer_setup.set(cluster::Peer::default());
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
 
 		let publisher = Publisher::new(
 			session.clone(),

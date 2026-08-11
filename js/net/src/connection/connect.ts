@@ -268,6 +268,7 @@ async function connectTransport(url: URL, session: WebTransport, discovery: bool
 			control: stream,
 			maxRequestId,
 			version: server.version as Ietf.IetfVersion,
+			solicit: Ietf.solicitFromSetup(server.parameters),
 		});
 	} else {
 		throw new Error(`unsupported server version: ${server.version.toString()}`);
@@ -284,14 +285,15 @@ async function handshakeAlpn(
 	version: Ietf.IetfVersion,
 	discovery: boolean,
 ): Promise<Established> {
-	const controlStream = await exchangeSetup(session, version, "moq-lite-js");
+	const { control, solicit } = await exchangeSetup(session, version, "moq-lite-js");
 
 	return new Ietf.Connection({
 		discovery,
 		client: true,
 		url,
 		quic: session,
-		control: controlStream,
+		control,
+		solicit,
 		// v17+ uses NativeSession which manages its own request IDs; maxRequestId is unused.
 		maxRequestId: 0n,
 		version,

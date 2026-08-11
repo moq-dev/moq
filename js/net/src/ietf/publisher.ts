@@ -11,6 +11,7 @@ import { fromWire } from "./priority.ts";
 import { PublishDone } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceDone, PublishNamespaceOk } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
+import type { Solicit } from "./solicit.ts";
 import { type Subscribe, SubscribeError, SubscribeOk } from "./subscribe.ts";
 import {
 	type SubscribeNamespace,
@@ -45,6 +46,7 @@ interface RunGroup {
 export class Publisher {
 	#quic: WebTransport;
 	#session: Session;
+	#solicit: Solicit;
 
 	// Our published broadcasts.
 	// It's a signal so we can live update any subscribe_namespace streams.
@@ -54,18 +56,20 @@ export class Publisher {
 	 * Creates a new Publisher instance.
 	 * @param quic - The WebTransport session (for uni streams)
 	 * @param session - The session abstraction for bidi streams and request IDs
+	 * @param solicit - What the peer's SETUP requires to be solicited
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, session: Session) {
+	constructor(quic: WebTransport, session: Session, solicit: Solicit) {
 		this.#quic = quic;
 		this.#session = session;
+		this.#solicit = solicit;
 	}
 
 	/**
 	 * Publishes a broadcast with any associated tracks.
-	 * The namespace is only advertised in response to a SUBSCRIBE_NAMESPACE
-	 * (see {@link runSubscribeNamespace}), mirroring the moq-lite publisher.
+	 * The namespace is advertised with an unsolicited PUBLISH_NAMESPACE, or on request
+	 * if the peer asked for that (see {@link runPublishNamespaces}).
 	 */
 	publish(path: Path.Valid, broadcast: broadcast.Producer) {
 		this.#broadcasts.mutate((broadcasts) => {
@@ -250,11 +254,11 @@ export class Publisher {
 	/**
 	 * Handles an incoming SUBSCRIBE_NAMESPACE on a bidi stream.
 	 *
-	 * Namespaces are only advertised in response to one of these, and the state
-	 * is local to this stream's task, mirroring the moq-lite publisher. Draft-16+
-	 * streams Namespace/NamespaceDone entries inline; draft-14/15 predate those
-	 * messages, so each advertisement is a PUBLISH_NAMESPACE request of its own
-	 * over the control stream, closed out with PUBLISH_NAMESPACE_DONE.
+	 * This carries the advertisements only when the peer asked to be told on request
+	 * (MoQ Solicit); otherwise {@link runPublishNamespaces} has already announced
+	 * everything and repeating it here would leave the peer holding two sources for one
+	 * broadcast. Draft-16+ streams Namespace entries inline; draft-14/15 predate those
+	 * messages, so each advertisement is a PUBLISH_NAMESPACE request of its own.
 	 *
 	 * @internal
 	 */
@@ -280,9 +284,16 @@ export class Publisher {
 				await ok.encode(stream.writer, version);
 			}
 
+			if (!this.#solicit.announce) {
+				// Already announced, unasked. Hold the stream open until the peer is done.
+				await stream.reader.closed;
+				stream.close();
+				return;
+			}
+
 			const advertise = async (suffix: Path.Valid) => {
 				if (legacy) {
-					await this.#advertise(prefix, suffix, requests);
+					await this.#advertise(Path.join(prefix, suffix), requests);
 				} else {
 					await stream.writer.u53(SubscribeNamespaceEntry.id);
 					await new SubscribeNamespaceEntry({ suffix }).encode(stream.writer, version);
@@ -290,7 +301,7 @@ export class Publisher {
 			};
 			const withdraw = async (suffix: Path.Valid) => {
 				if (legacy) {
-					await this.#withdraw(suffix, requests);
+					await this.#withdraw(Path.join(prefix, suffix), requests);
 				} else {
 					await stream.writer.u53(SubscribeNamespaceEntryDone.id);
 					await new SubscribeNamespaceEntryDone({ suffix }).encode(stream.writer, version);
@@ -321,21 +332,21 @@ export class Publisher {
 				dispose();
 				if (!broadcasts) break;
 
-				const newActive = new Set<Path.Valid>();
+				const updated = new Set<Path.Valid>();
 				for (const name of broadcasts.keys()) {
 					const suffix = Path.stripPrefix(prefix, name);
 					if (suffix === null) continue;
-					newActive.add(suffix);
+					updated.add(suffix);
 				}
 
-				for (const added of newActive.difference(active)) {
+				for (const added of updated.difference(active)) {
 					await advertise(added);
 				}
-				for (const removed of active.difference(newActive)) {
+				for (const removed of active.difference(updated)) {
 					await withdraw(removed);
 				}
 
-				active = newActive;
+				active = updated;
 			}
 
 			stream.close();
@@ -344,26 +355,81 @@ export class Publisher {
 			console.debug(`subscribe_namespace stream error: ${reason(e)}`);
 			stream.abort(e);
 		} finally {
-			// This subscription's advertisements die with it: close out every open
-			// draft-14/15 PUBLISH_NAMESPACE request.
-			for (const suffix of [...requests.keys()]) {
-				await this.#withdraw(suffix, requests);
+			// This subscription's advertisements die with it.
+			for (const path of [...requests.keys()]) {
+				await this.#withdraw(path, requests);
 			}
 		}
 	}
 
 	/**
-	 * Advertise one namespace on its own PUBLISH_NAMESPACE request (draft-14/15,
-	 * which have no NAMESPACE entry message). A declined request is logged and
-	 * skipped rather than failing the subscription.
+	 * Advertise every published broadcast with an unsolicited PUBLISH_NAMESPACE, until
+	 * the publisher is closed.
+	 *
+	 * The peers that never send SUBSCRIBE_NAMESPACE are exactly the ones expecting a
+	 * publisher to announce itself, so announcing is the default. A peer that would
+	 * rather ask says so in its SETUP (MoQ Solicit) and this does nothing, leaving
+	 * {@link runSubscribeNamespace} to carry the advertisements instead. Exactly one of
+	 * the two is live, so the peer never hears a namespace twice.
+	 *
+	 * @internal
+	 */
+	async runPublishNamespaces() {
+		if (this.#solicit.announce) {
+			// The peer asked to be told on request; runSubscribeNamespace answers it.
+			return;
+		}
+
+		// The open PUBLISH_NAMESPACE request per advertised path.
+		const requests = new Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream }>();
+
+		try {
+			let active = new Set<Path.Valid>(this.#broadcasts.peek()?.keys() ?? []);
+			for (const path of active) {
+				await this.#advertise(path, requests);
+			}
+
+			for (;;) {
+				// TODO Make a better helper within Signals.
+				let dispose!: Dispose;
+				const changed = new Promise<Map<Path.Valid, broadcast.Producer> | undefined>((resolve) => {
+					dispose = this.#broadcasts.changed(resolve);
+				});
+
+				// Wait until the map of broadcasts changes, or the publisher closes.
+				const broadcasts = await changed;
+				dispose();
+				if (!broadcasts) break;
+
+				const updated = new Set<Path.Valid>(broadcasts.keys());
+				for (const added of updated.difference(active)) {
+					await this.#advertise(added, requests);
+				}
+				for (const removed of active.difference(updated)) {
+					await this.#withdraw(removed, requests);
+				}
+
+				active = updated;
+			}
+		} catch (err: unknown) {
+			console.debug(`publish_namespace error: ${reason(error(err))}`);
+		} finally {
+			// Close out every open PUBLISH_NAMESPACE request.
+			for (const path of [...requests.keys()]) {
+				await this.#withdraw(path, requests);
+			}
+		}
+	}
+
+	/**
+	 * Advertise one namespace on its own PUBLISH_NAMESPACE request. A declined request
+	 * is logged and skipped: a peer that wants none of this rejects each one and stays
+	 * connected.
 	 */
 	async #advertise(
-		prefix: Path.Valid,
-		suffix: Path.Valid,
+		path: Path.Valid,
 		requests: Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream }>,
 	) {
-		const path = Path.join(prefix, suffix);
-
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) return;
 
@@ -385,7 +451,7 @@ export class Publisher {
 				await RequestOk.decode(request.reader, this.#session.version);
 			}
 
-			requests.set(suffix, { path, requestId, stream: request });
+			requests.set(path, { path, requestId, stream: request });
 		} catch (err: unknown) {
 			const e = error(err);
 			console.warn(`announce failed: broadcast=${path} error=${reason(e)}`);
@@ -394,16 +460,15 @@ export class Publisher {
 	}
 
 	/**
-	 * Close out a namespace's PUBLISH_NAMESPACE request with PUBLISH_NAMESPACE_DONE
-	 * (draft-14/15).
+	 * Close out a namespace's PUBLISH_NAMESPACE request with PUBLISH_NAMESPACE_DONE.
 	 */
 	async #withdraw(
-		suffix: Path.Valid,
+		path: Path.Valid,
 		requests: Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream }>,
 	) {
-		const request = requests.get(suffix);
+		const request = requests.get(path);
 		if (!request) return;
-		requests.delete(suffix);
+		requests.delete(path);
 
 		try {
 			await request.stream.writer.u53(PublishNamespaceDone.id);

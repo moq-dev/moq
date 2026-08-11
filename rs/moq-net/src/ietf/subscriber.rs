@@ -13,7 +13,7 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
-use super::{Message, Version, cluster};
+use super::{Message, Version, cluster, peer};
 
 use web_async::Lock;
 
@@ -156,7 +156,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	// looped back through us.
 	self_origin: crate::Origin,
 	// What the peer declared in its SETUP.
-	peer_setup: cluster::PeerSetup,
+	peer_setup: peer::PeerSetup,
 	// Local policy for what pulling from this peer costs, overriding whatever it
 	// declared. See `cluster::link_cost`.
 	cost: Option<u64>,
@@ -190,7 +190,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		origin: origin::Producer,
 		control: Control,
 		peer_origin: Option<crate::Origin>,
-		peer_setup: cluster::PeerSetup,
+		peer_setup: peer::PeerSetup,
 		self_origin: crate::Origin,
 		cost: Option<u64>,
 		version: Version,
@@ -214,7 +214,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// that cannot negotiate it. See [`super::Publisher::peer`].
 	pub(super) async fn peer(&self) -> cluster::Peer {
 		match cluster::supported(self.version) {
-			true => self.peer_setup.get().await,
+			true => self.peer_setup.get().await.cluster,
 			false => cluster::Peer::default(),
 		}
 	}
@@ -311,8 +311,23 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// MOUNTS locally. Those are independent, and only coincide when the peer shares
 	/// our namespace -- a peer outside it has never heard of our root, so a rooted
 	/// subscriber asks for its scope and mounts the replies under the root.
+	///
+	/// Empty when the peer said it advertises nothing (MoQ Solicit). That is read
+	/// without waiting for its SETUP: asking costs one stream and one empty answer,
+	/// which is cheaper than delaying discovery by a round trip to find out. A server
+	/// has already read the client's SETUP by now, and that is the direction where a
+	/// pointless question actually gets asked.
 	pub fn subscribe_prefixes(&self) -> Vec<PathOwned> {
+		if self.peer_advertises_nothing() {
+			return Vec::new();
+		}
+
 		self.origin.allowed().map(|p| p.to_owned()).collect()
+	}
+
+	/// Whether the peer has already told us that soliciting it returns nothing.
+	fn peer_advertises_nothing(&self) -> bool {
+		self.peer_setup.peek().is_some_and(|declared| declared.solicit.interest)
 	}
 
 	/// Send SUBSCRIBE_NAMESPACE for one prefix on a bidi stream.
@@ -1356,6 +1371,41 @@ mod tests {
 		writes.windows(needle.len()).filter(|window| *window == needle).count()
 	}
 
+	/// A peer that declared it advertises nothing is never asked, which is the whole
+	/// point of the flag: a publish-only client should not have to field a question it
+	/// can only answer with an empty set.
+	#[tokio::test]
+	async fn a_peer_that_advertises_nothing_is_not_asked() {
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let peer_setup = peer::PeerSetup::default();
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+
+		let subscriber = Subscriber::new(
+			session,
+			origin,
+			Control::new(None, false),
+			None,
+			peer_setup.clone(),
+			crate::Origin::new(1).unwrap(),
+			None,
+			Version::Draft17,
+			tasks,
+		);
+
+		// Nothing declared yet: ask, rather than spend a round trip finding out.
+		assert_eq!(subscriber.subscribe_prefixes().len(), 1);
+
+		peer_setup.set(peer::Peer {
+			solicit: crate::ietf::solicit::Solicit {
+				announce: false,
+				interest: true,
+			},
+			..Default::default()
+		});
+		assert!(subscriber.subscribe_prefixes().is_empty());
+	}
+
 	/// A rooted subscriber asks the peer for its permitted SCOPE. The root names where
 	/// replies mount on our side, which is meaningless to a peer outside our namespace,
 	/// so sending it asks for a prefix that matches nothing there.
@@ -1376,7 +1426,7 @@ mod tests {
 			scoped,
 			Control::new(None, false),
 			None,
-			cluster::PeerSetup::default(),
+			peer::PeerSetup::default(),
 			crate::Origin::new(1).unwrap(),
 			None,
 			Version::Draft16,
@@ -1441,8 +1491,8 @@ mod tests {
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		// Draft-18 can negotiate the cluster extension, so the subscriber waits for
 		// the peer's SETUP before resolving advertisements; settle it as extension-off.
-		let peer_setup = cluster::PeerSetup::default();
-		peer_setup.set(cluster::Peer::default());
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
 		let mut subscriber = Subscriber::new(
 			session.clone(),
 			scoped,
@@ -1507,7 +1557,7 @@ mod tests {
 			origin,
 			Control::new(None, false),
 			Some(assigned),
-			cluster::PeerSetup::default(),
+			peer::PeerSetup::default(),
 			crate::Origin::new(1).unwrap(),
 			None,
 			Version::Draft14,
@@ -1572,7 +1622,7 @@ mod tests {
 			origin,
 			Control::new(None, false),
 			Some(peer),
-			cluster::PeerSetup::default(),
+			peer::PeerSetup::default(),
 			self_origin,
 			None,
 			Version::Draft14,
@@ -1615,7 +1665,7 @@ mod tests {
 				origin.clone(),
 				Control::new(None, false),
 				Some(peer),
-				cluster::PeerSetup::default(),
+				peer::PeerSetup::default(),
 				self_origin,
 				None,
 				Version::Draft14,
@@ -1671,7 +1721,7 @@ mod tests {
 			origin.clone(),
 			Control::new(None, false),
 			None,
-			cluster::PeerSetup::default(),
+			peer::PeerSetup::default(),
 			self_origin,
 			None,
 			Version::Draft19,
@@ -1802,8 +1852,8 @@ mod tests {
 		std::mem::forget(task_set);
 		// Draft-18 can negotiate the extension, so the read loop waits for the peer's
 		// SETUP before parsing a NAMESPACE; settle it as extension-off.
-		let peer_setup = cluster::PeerSetup::default();
-		peer_setup.set(cluster::Peer::default());
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
 		let mut subscriber = Subscriber::new(
 			session.clone(),
 			origin,
@@ -1883,7 +1933,7 @@ mod tests {
 			origin,
 			Control::new(None, false),
 			None,
-			cluster::PeerSetup::default(),
+			peer::PeerSetup::default(),
 			crate::Origin::new(1).unwrap(),
 			None,
 			VERSION,
@@ -1939,7 +1989,7 @@ mod tests {
 			origin,
 			Control::new(None, false),
 			None,
-			cluster::PeerSetup::default(),
+			peer::PeerSetup::default(),
 			crate::Origin::new(1).unwrap(),
 			None,
 			VERSION,
@@ -2255,7 +2305,7 @@ mod tests {
 			origin,
 			Control::new(None, false),
 			None,
-			cluster::PeerSetup::default(),
+			peer::PeerSetup::default(),
 			self_origin,
 			None,
 			VERSION,
@@ -2433,7 +2483,7 @@ mod tests {
 			origin,
 			Control::new(None, false),
 			None,
-			cluster::PeerSetup::default(),
+			peer::PeerSetup::default(),
 			crate::Origin::new(1).unwrap(),
 			None,
 			Version::Draft19,

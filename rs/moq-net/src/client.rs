@@ -171,7 +171,7 @@ impl Client {
 					version: ietf::Version::Draft19,
 					path: self.setup_path.clone(),
 					peer_setup_stream: None,
-					peer_cluster: None,
+					peer_declared: None,
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -197,7 +197,7 @@ impl Client {
 					version: ietf::Version::Draft18,
 					path: self.setup_path.clone(),
 					peer_setup_stream: None,
-					peer_cluster: None,
+					peer_declared: None,
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -223,7 +223,7 @@ impl Client {
 					version: ietf::Version::Draft17,
 					path: self.setup_path.clone(),
 					peer_setup_stream: None,
-					peer_cluster: None,
+					peer_declared: None,
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -356,6 +356,8 @@ impl Client {
 		// The encoding is always an IETF version for SETUP negotiation.
 		let ietf_encoding = ietf::Version::try_from(encoding).map_err(|_| Error::Version)?;
 
+		let solicit = ietf::solicit::from_origins(publish.as_ref(), subscribe.as_ref());
+
 		let mut parameters = ietf::Parameters::default();
 		parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
 		parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
@@ -363,6 +365,7 @@ impl Client {
 		if let Some(path) = &self.setup_path {
 			parameters.set_bytes(ietf::ParameterBytes::Path, path.clone().into_bytes());
 		}
+		ietf::solicit::into_setup(&mut parameters, solicit, ietf_encoding);
 		let parameters = parameters.encode_bytes(ietf_encoding)?;
 
 		let client = setup::Client {
@@ -399,11 +402,16 @@ impl Client {
 				(start.recv_bandwidth, start.driver, Some(start.connecting))
 			}
 			Version::Ietf(v) => {
-				// Decode the parameters to get the initial request ID.
+				// Decode the parameters to get the initial request ID and what the server
+				// requires of us.
 				let parameters = ietf::Parameters::decode(&mut server.parameters, v)?;
 				let request_id_max = parameters
 					.get_varint(ietf::ParameterVarInt::MaxRequestId)
 					.map(ietf::RequestId);
+				let peer_declared = ietf::peer::Peer {
+					solicit: ietf::solicit::from_setup(&parameters, v)?,
+					..Default::default()
+				};
 
 				let stream = stream.with_version(v);
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
@@ -419,7 +427,7 @@ impl Client {
 					version: v,
 					path: None,
 					peer_setup_stream: None,
-					peer_cluster: None,
+					peer_declared: Some(peer_declared),
 				})?;
 				(None, protocol, None)
 			}

@@ -65,14 +65,15 @@ async function acceptAlpn(
 	version: Ietf.IetfVersion,
 	discovery: boolean,
 ): Promise<Established> {
-	const controlStream = await exchangeSetup(transport, version, "moq-lite-js");
+	const { control, solicit } = await exchangeSetup(transport, version, "moq-lite-js");
 
 	return new Ietf.Connection({
 		discovery,
 		client: false,
 		url,
 		quic: transport,
-		control: controlStream,
+		control,
+		solicit,
 		// v17+ uses NativeSession which manages its own request IDs; maxRequestId is unused.
 		maxRequestId: 0n,
 		version,
@@ -98,7 +99,7 @@ async function acceptSetup(
 		throw new Error(`unexpected client message type: 0x${clientCompat.toString(16)}`);
 	}
 
-	await Ietf.ClientSetup.decode(stream.reader, version);
+	const client = await Ietf.ClientSetup.decode(stream.reader, version);
 
 	await stream.writer.u53(Lite.StreamId.ServerCompat);
 
@@ -120,6 +121,7 @@ async function acceptSetup(
 		control: stream,
 		maxRequestId,
 		version,
+		solicit: Ietf.solicitFromSetup(client.parameters),
 	});
 }
 
@@ -180,6 +182,7 @@ async function acceptNegotiated(transport: WebTransport, url: URL, props?: Accep
 			control: stream,
 			maxRequestId,
 			version: selectedVersion as Ietf.IetfVersion,
+			solicit: Ietf.solicitFromSetup(client.parameters),
 		});
 	} else {
 		throw new Error(`unsupported version: ${selectedVersion.toString(16)}`);

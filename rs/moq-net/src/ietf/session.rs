@@ -8,7 +8,7 @@ use crate::{
 };
 
 use super::{
-	Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter, cluster,
+	Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter, cluster, peer, solicit,
 	subscriber::is_protocol_violation,
 };
 
@@ -58,7 +58,7 @@ pub struct Config<S: web_transport_trait::Session> {
 
 	/// What that pre-read SETUP declared, so the session does not have to parse it
 	/// twice. `None` when [`Self::peer_setup_stream`] is.
-	pub peer_cluster: Option<cluster::Peer>,
+	pub peer_declared: Option<peer::Peer>,
 }
 
 pub fn start<S: web_transport_trait::Session>(
@@ -76,7 +76,7 @@ pub fn start<S: web_transport_trait::Session>(
 		version,
 		path,
 		peer_setup_stream,
-		peer_cluster,
+		peer_declared,
 	} = config;
 
 	let driver = async move {
@@ -87,20 +87,27 @@ pub fn start<S: web_transport_trait::Session>(
 		// identity no other session shares.
 		let self_origin = self_origin(publish.as_ref(), subscribe.as_ref());
 
+		// What we require of the peer. Read here for the same reason as above, since the
+		// placeholders below make both halves look present.
+		let solicit = solicit::from_origins(publish.as_ref(), subscribe.as_ref());
+
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
 		let publish = publish.unwrap_or_else(|| origin::Producer::empty(Origin::random()).consume());
 		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Origin::random()));
 
-		// The peer's cluster options. Seeded now when its SETUP was already read
-		// (a gated server accept), and filled by the uni loop otherwise. A version that
-		// cannot negotiate the extension is settled immediately so nothing blocks on it.
-		let peer_setup = cluster::PeerSetup::default();
-		let setup_read = peer_cluster.is_some();
-		match peer_cluster {
-			Some(peer) => peer_setup.set(peer),
-			None if !cluster::supported(version) => peer_setup.set(cluster::Peer::default()),
+		// What the peer declared in its SETUP. Seeded now when that stream was already
+		// read (the legacy handshake, or a gated server accept), and filled by the uni
+		// loop otherwise.
+		let peer_setup = peer::PeerSetup::default();
+		let setup_read = peer_declared.is_some();
+		match peer_declared {
+			Some(declared) => peer_setup.set(declared),
+			// A legacy caller that passed nothing (our own tests, and the lite paths):
+			// settle the slot rather than leave the announce loops waiting on a value
+			// that is never coming.
+			None if !cluster::supported(version) => peer_setup.set(peer::Peer::default()),
 			None => {}
 		}
 
@@ -155,6 +162,9 @@ pub fn start<S: web_transport_trait::Session>(
 					subscriber.clone(),
 					version
 				)));
+				// Unsolicited PUBLISH_NAMESPACE unless the peer requires solicitation;
+				// see `Publisher::run_publish_namespaces`.
+				let mut pub_ns_run = std::pin::pin!(err_only(publisher.clone().run_publish_namespaces()));
 				// One SUBSCRIBE_NAMESPACE per permitted prefix, like `lite::Subscriber`:
 				// the scope is what we may ask for, and it is not the origin's root.
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
@@ -207,6 +217,9 @@ pub fn start<S: web_transport_trait::Session>(
 					if let Poll::Ready(err) = waiter.poll_future(sub_ns_run.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
+					if let Poll::Ready(err) = waiter.poll_future(pub_ns_run.as_mut()) {
+						return Poll::Ready(Err(err));
+					}
 					Poll::Pending
 				})
 				.await
@@ -216,7 +229,7 @@ pub fn start<S: web_transport_trait::Session>(
 				let setup = {
 					let session = session.clone();
 					async move {
-						if let Err(err) = run_setup(session, version, path, self_origin, cost).await {
+						if let Err(err) = run_setup(session, version, path, self_origin, cost, solicit).await {
 							tracing::warn!(%err, "setup send error");
 						}
 						std::future::pending::<()>().await;
@@ -276,6 +289,9 @@ pub fn start<S: web_transport_trait::Session>(
 				)));
 				let mut goaway = std::pin::pin!(err_only(goaway));
 				let mut setup = std::pin::pin!(setup);
+				// Unsolicited PUBLISH_NAMESPACE unless the peer requires solicitation;
+				// see `Publisher::run_publish_namespaces`.
+				let mut pub_ns_run = std::pin::pin!(err_only(publisher.clone().run_publish_namespaces()));
 				// One SUBSCRIBE_NAMESPACE per permitted prefix; see the draft-16 arm.
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
 					let mut prefixes = futures::stream::FuturesUnordered::new();
@@ -321,6 +337,9 @@ pub fn start<S: web_transport_trait::Session>(
 					if let Poll::Ready(err) = waiter.poll_future(sub_ns_run.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
+					if let Poll::Ready(err) = waiter.poll_future(pub_ns_run.as_mut()) {
+						return Poll::Ready(Err(err));
+					}
 					Poll::Pending
 				})
 				.await
@@ -357,8 +376,8 @@ pub struct PeerSetup<S: web_transport_trait::Session> {
 	/// The request path the peer advertised, for URL-less transports.
 	pub path: Option<String>,
 
-	/// The MoQ Cluster options it declared (see [`cluster`]).
-	pub cluster: cluster::Peer,
+	/// The Setup Options it declared (see [`cluster`] and [`solicit`]).
+	pub declared: peer::Peer,
 }
 
 /// The Hop ID this session declares and detects loops against.
@@ -407,34 +426,43 @@ pub async fn accept_setup<S: web_transport_trait::Session>(
 			),
 			None => None,
 		};
-		let cluster = cluster::peer_from_setup(&params, version)?;
+		let declared = peer::Peer {
+			cluster: cluster::peer_from_setup(&params, version)?,
+			solicit: solicit::from_setup(&params, version)?,
+		};
 
 		return Ok(PeerSetup {
 			stream: reader,
 			path,
-			cluster,
+			declared,
 		});
 	}
 }
 
-/// Parse the MoQ Cluster options out of a raw SETUP parameter block.
-fn decode_peer_cluster(parameters: bytes::Bytes, version: Version) -> Result<cluster::Peer, crate::DecodeError> {
+/// Parse the Setup Options we act on out of a raw SETUP parameter block.
+fn decode_peer_setup(parameters: bytes::Bytes, version: Version) -> Result<peer::Peer, crate::DecodeError> {
 	let mut bytes = parameters;
 	let params = ietf::Parameters::decode(&mut bytes, version)?;
-	cluster::peer_from_setup(&params, version)
+
+	Ok(peer::Peer {
+		cluster: cluster::peer_from_setup(&params, version)?,
+		solicit: solicit::from_setup(&params, version)?,
+	})
 }
 
 /// Send our SETUP on a uni stream and keep it alive for potential GOAWAY.
 ///
 /// `path` is the request path we advertise (clients on URL-less transports); a
 /// server passes `None`. `self_origin` and `cost` are the MoQ Cluster options, which
-/// declare our identity and (client-only) what this link costs to cross.
+/// declare our identity and (client-only) what this link costs to cross. `solicit` is
+/// what we require of the peer.
 async fn run_setup<S: web_transport_trait::Session>(
 	session: S,
 	version: Version,
 	path: Option<String>,
 	self_origin: Origin,
 	cost: Option<u64>,
+	solicit: solicit::Solicit,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 
@@ -447,6 +475,7 @@ async fn run_setup<S: web_transport_trait::Session>(
 		parameters.set_bytes(ietf::ParameterBytes::Path, path.into_bytes());
 	}
 	cluster::peer_into_setup(&mut parameters, self_origin, cost, version);
+	solicit::into_setup(&mut parameters, solicit, version);
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer.encode(&setup::Setup { parameters }).await?;
@@ -467,7 +496,7 @@ async fn run_unis<S: web_transport_trait::Session>(
 	subscriber: Subscriber<S>,
 	// Where to record the peer's MoQ Cluster options once its SETUP arrives. `None`
 	// for draft-14..16, whose SETUP rides the control stream instead.
-	peer_setup: Option<cluster::PeerSetup>,
+	peer_setup: Option<peer::PeerSetup>,
 	// Whether the peer's SETUP was already consumed before this loop started.
 	setup_read: bool,
 	version: Version,
@@ -524,7 +553,7 @@ async fn run_unis<S: web_transport_trait::Session>(
 				};
 
 				if let Some(peer_setup) = peer_setup {
-					let peer = match decode_peer_cluster(msg.parameters, version) {
+					let peer = match decode_peer_setup(msg.parameters, version) {
 						Ok(peer) => peer,
 						Err(err) => {
 							tracing::warn!(%err, "setup parameter decode error");
@@ -721,9 +750,12 @@ mod tests {
 			peer_setup_stream: None,
 			// A peer that declared its Hop ID negotiated the extension, which is what
 			// makes the cluster parameters mandatory in both directions.
-			peer_cluster: Some(cluster::Peer {
-				origin: Some(crate::Origin::new(2).unwrap()),
-				cost: None,
+			peer_declared: Some(peer::Peer {
+				cluster: cluster::Peer {
+					origin: Some(crate::Origin::new(2).unwrap()),
+					cost: None,
+				},
+				..Default::default()
 			}),
 		})
 		.expect("start the session");
@@ -766,7 +798,7 @@ mod tests {
 			version: Version::Draft18,
 			path: None,
 			peer_setup_stream: None,
-			peer_cluster: None,
+			peer_declared: None,
 		})
 		.expect("start the session");
 		let _driver = tokio::spawn(driver);
@@ -810,7 +842,7 @@ mod tests {
 			version: Version::Draft18,
 			path: None,
 			peer_setup_stream: None,
-			peer_cluster: None,
+			peer_declared: None,
 		})
 		.expect("start the session");
 		let _driver = tokio::spawn(driver);
@@ -877,7 +909,7 @@ mod tests {
 			peer_setup_stream: None,
 			// Pre-settled, so nothing waits on a SETUP the dead stream will never
 			// carry and the dispatch loop actually runs.
-			peer_cluster: Some(cluster::Peer::default()),
+			peer_declared: Some(peer::Peer::default()),
 		})
 		.expect("start the session");
 

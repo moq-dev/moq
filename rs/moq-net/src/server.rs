@@ -196,7 +196,7 @@ impl Server {
 		// Pull the request path and max request ID out now (IETF only) so `ok()`
 		// doesn't re-decode the consumed parameters. moq-transport carries the path
 		// in its SETUP just like lite-05.
-		let (path, request_id_max) = match version {
+		let (path, request_id_max, peer_declared) = match version {
 			Version::Ietf(v) => {
 				let params = ietf::Parameters::decode(&mut client.parameters, v)?;
 				let path = match params.get_bytes(ietf::ParameterBytes::Path) {
@@ -210,9 +210,13 @@ impl Server {
 				let request_id_max = params
 					.get_varint(ietf::ParameterVarInt::MaxRequestId)
 					.map(ietf::RequestId);
-				(path, request_id_max)
+				let peer_declared = ietf::peer::Peer {
+					solicit: ietf::solicit::from_setup(&params, v)?,
+					..Default::default()
+				};
+				(path, request_id_max, peer_declared)
 			}
-			Version::Lite(_) => (None, None),
+			Version::Lite(_) => (None, None, ietf::peer::Peer::default()),
 		};
 
 		Ok(Request {
@@ -226,6 +230,7 @@ impl Server {
 					stream,
 					version,
 					request_id_max,
+					peer_declared,
 				},
 			}),
 		})
@@ -244,7 +249,11 @@ impl Server {
 			role: None,
 			// A moq-transport peer only has an identity if it negotiated the MoQ
 			// Cluster extension and declared a non-zero Hop ID.
-			origin: peer_setup.cluster.origin.filter(|o| *o != crate::Origin::UNKNOWN),
+			origin: peer_setup
+				.declared
+				.cluster
+				.origin
+				.filter(|o| *o != crate::Origin::UNKNOWN),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				handshake: Handshake::IetfModern {
@@ -299,6 +308,8 @@ enum Handshake<S: web_transport_trait::Session> {
 		stream: Stream<S, Version>,
 		version: Version,
 		request_id_max: Option<ietf::RequestId>,
+		/// What the client's SETUP declared, for the options `ok()` acts on.
+		peer_declared: ietf::peer::Peer,
 	},
 	/// moq-lite 05+: the client's Setup Stream has been read. `ok()` starts the
 	/// session, seeding the SETUP back so PROBE gating resolves.
@@ -379,7 +390,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 		let publish = server.publish.map(|origin| origin.with_stats(server.stats.clone()));
 		let subscribe = server.subscribe.map(|origin| origin.with_stats(server.stats.clone()));
 
-		let (session, mut stream, version, request_id_max) = match handshake {
+		let (session, mut stream, version, request_id_max, peer_declared) = match handshake {
 			Handshake::IetfModern {
 				session,
 				version,
@@ -400,7 +411,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					version,
 					path: None,
 					peer_setup_stream: Some(peer_setup.stream),
-					peer_cluster: Some(peer_setup.cluster),
+					peer_declared: Some(peer_setup.declared),
 				})?;
 				tracing::debug!(?version, "connected");
 				return Ok(Session::new(session, version.into(), None, protocol));
@@ -460,7 +471,8 @@ impl<S: web_transport_trait::Session> Request<S> {
 				stream,
 				version,
 				request_id_max,
-			} => (session, stream, version, request_id_max),
+				peer_declared,
+			} => (session, stream, version, request_id_max, peer_declared),
 		};
 
 		// Encode parameters using the version-appropriate type.
@@ -469,6 +481,8 @@ impl<S: web_transport_trait::Session> Request<S> {
 				let mut parameters = ietf::Parameters::default();
 				parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
 				parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
+				let solicit = ietf::solicit::from_origins(publish.as_ref(), subscribe.as_ref());
+				ietf::solicit::into_setup(&mut parameters, solicit, v);
 				parameters.encode_bytes(v)?
 			}
 			Version::Lite(v) => lite::Parameters::default().encode_bytes(v)?,
@@ -511,7 +525,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					version: v,
 					path: None,
 					peer_setup_stream: None,
-					peer_cluster: None,
+					peer_declared: Some(peer_declared),
 				})?;
 				(None, protocol)
 			}

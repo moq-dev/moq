@@ -40,10 +40,21 @@ If it plays, you interop. That's the whole test.
 
 ## Notes
 
-- **`SUBSCRIBE_NAMESPACE` is required.** The subscriber discovers broadcasts by
-  sending `SUBSCRIBE_NAMESPACE` and waiting for a matching announce, so your
-  relay must support it. The publisher announces with `PUBLISH_NAMESPACE`, and
-  only in response to a `SUBSCRIBE_NAMESPACE` covering the namespace.
+- **We announce without being asked, and we ask.** Every namespace we can offer
+  goes out as an unsolicited `PUBLISH_NAMESPACE`, and we send
+  `SUBSCRIBE_NAMESPACE` for every prefix we're allowed to discover. Nothing in
+  moq-transport says which one a peer expects, and the peers that never ask are
+  the ones expecting to be told, so we do both by default.
+- **Tell us to stop and we will.** The [MoQ Solicit
+  extension](/draft/moq-solicit) is a `SETUP` option declaring what you require
+  to be solicited: bit `0x1` says advertisements must be asked for and you'll
+  send `SUBSCRIBE_NAMESPACE`, bit `0x2` says asking you is pointless because you
+  advertise nothing. Declaring `0x1` gets you the relay behavior the IETF draft
+  describes. Unknown options are ignored, so an implementation that doesn't know
+  it loses nothing.
+- **One namespace, one message.** We never advertise the same namespace as both
+  `PUBLISH_NAMESPACE` and `NAMESPACE` on one session; your declaration picks
+  which. Rejecting a `PUBLISH_NAMESPACE` is fine and keeps the session up.
 - **`PUBLISH` is declined.** Content is routed per namespace and tracks are
   resolved on demand via `SUBSCRIBE`, so a single-track `PUBLISH` offer is
   answered with a request error. Announce with `PUBLISH_NAMESPACE` and serve

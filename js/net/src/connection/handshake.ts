@@ -6,23 +6,31 @@ import { Reader, Stream, Writer } from "../stream.ts";
  * message, and reads the peer's Setup off an incoming uni stream. The two
  * halves run in parallel and the protocol is symmetric, so both `connect`
  * (client) and `accept` (server) use this same function.
+ *
+ * Returns the control stream plus what the peer declared, which decides whether we
+ * announce namespaces unprompted (see the MoQ Solicit extension). We declare nothing
+ * ourselves: this connection can publish and subscribe at any time, so there is nothing
+ * we could rule out honestly.
  */
 export async function exchangeSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
 	implementation: string,
-): Promise<Stream> {
+): Promise<{ control: Stream; solicit: Ietf.Solicit }> {
 	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode(implementation));
 	const setupMsg = new Ietf.Setup({ parameters: params });
 
-	const [writer, reader] = await Promise.all([
+	const [writer, received] = await Promise.all([
 		sendSetup(transport, version, setupMsg),
 		receiveSetup(transport, version),
 	]);
 
-	return new Stream({ writer, reader });
+	return {
+		control: new Stream({ writer, reader: received.reader }),
+		solicit: received.solicit,
+	};
 }
 
 async function sendSetup(transport: WebTransport, version: Ietf.IetfVersion, setupMsg: Ietf.Setup): Promise<Writer> {
@@ -34,7 +42,10 @@ async function sendSetup(transport: WebTransport, version: Ietf.IetfVersion, set
 	return writer;
 }
 
-async function receiveSetup(transport: WebTransport, version: Ietf.IetfVersion): Promise<Reader> {
+async function receiveSetup(
+	transport: WebTransport,
+	version: Ietf.IetfVersion,
+): Promise<{ reader: Reader; solicit: Ietf.Solicit }> {
 	const uniReader = transport.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
 	>;
@@ -48,7 +59,7 @@ async function receiveSetup(transport: WebTransport, version: Ietf.IetfVersion):
 	if (streamType !== Ietf.Setup.id) {
 		throw new Error(`unexpected stream type on setup uni: 0x${streamType.toString(16)}`);
 	}
-	await Ietf.Setup.decode(reader, version);
+	const setup = await Ietf.Setup.decode(reader, version);
 
-	return reader;
+	return { reader, solicit: Ietf.solicitFromSetup(setup.parameters) };
 }
