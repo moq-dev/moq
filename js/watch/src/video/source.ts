@@ -2,7 +2,7 @@ import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { renditionJitter } from "./jitter";
+import { renditionJitter } from "./playhead";
 
 /**
  * A function that checks if a video configuration can be played.
