@@ -246,10 +246,10 @@ impl PeerSetup {
 		self.poll_get(waiter, |setup| setup.probe)
 	}
 
-	/// Await the link cost the peer (the dialing side) declared in its SETUP.
+	/// Poll for the link cost the peer (the dialing side) declared in its SETUP.
 	/// `None` when it declared none, meaning the default cost of 1.
-	pub async fn cost(&self) -> Option<u64> {
-		kio::wait(|waiter| self.poll_get(waiter, |setup| setup.cost)).await
+	pub fn poll_cost(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<u64>> {
+		self.poll_get(waiter, |setup| setup.cost)
 	}
 
 	/// Poll for the origin (hop) id the peer declared in its SETUP. `None` when it

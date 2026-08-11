@@ -3,7 +3,7 @@ use crate::{
 	Error, Origin, SessionError, bandwidth,
 	coding::{Reader, Stream, Writer},
 	lite::SessionInfo,
-	util::{MaybeBoxedExt, MaybeSendBox, TaskSet},
+	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
 use std::task::{Context, Poll, ready};
@@ -165,7 +165,6 @@ pub fn start<S: crate::transport::poll::Session>(config: Config<S>) -> Result<Se
 		peer_setup_slot.set(setup);
 	}
 	let peer_setup = peer_setup_slot;
-	let (tasks, task_set) = TaskSet::new();
 
 	// GOAWAY wiring: the public Session holds one half (send trigger, received
 	// signal), the protocol tasks below hold the other. moq-lite lets either side
@@ -194,7 +193,6 @@ pub fn start<S: crate::transport::poll::Session>(config: Config<S>) -> Result<Se
 		// configured a price; otherwise the subscriber charges what the peer declared
 		// for its own egress.
 		cost: our_cost,
-		tasks,
 		going_away: goaway.going_away.clone(),
 	});
 
@@ -205,7 +203,7 @@ pub fn start<S: crate::transport::poll::Session>(config: Config<S>) -> Result<Se
 		goaway: Some(SendGoaway::new(session.clone(), goaway, version)),
 		session_stream: setup_stream,
 		publisher,
-		subscriber: SubscriberDriver::new(subscriber, sub_connecting, task_set),
+		subscriber: SubscriberDriver::new(subscriber, sub_connecting),
 	};
 
 	// The async block only owns the state; all the logic is in `Driver::poll`.
