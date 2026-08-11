@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { RemoteError } from "./error.ts";
-import { Reader, Writer } from "./stream.ts";
+import { Reader, Stream, Writer } from "./stream.ts";
 
 // Helper to create a writable stream that captures written data
 function createTestWritableStream(): { stream: WritableStream<Uint8Array>; written: Uint8Array[] } {
@@ -336,4 +336,155 @@ test("Writer closed rejects with the decoded reset code", async () => {
 test("closed is stable, so racing it per frame does not allocate", async () => {
 	const reader = new Reader(new ReadableStream<Uint8Array>());
 	expect(reader.closed).toBe(reader.closed);
+});
+
+// Deadlines for the stalled fixtures below: one they always blow through, and one they
+// never reach because the slot frees first. Neither is a delay any test waits out.
+const EXPIRES_MS = 10;
+const OUTLASTS_TEST_MS = 1000;
+
+// Builds a transport whose uni opens complete only once `freeSlot` is called, standing in
+// for a peer that has granted no stream credit. `aborted` settles when the stream it
+// eventually hands over is reset, so a test can await that rather than guess at a delay.
+function stalledTransport() {
+	let freeSlot!: () => void;
+	const slot = new Promise<void>((resolve) => {
+		freeSlot = resolve;
+	});
+
+	let abort!: (reason: unknown) => void;
+	const aborted = new Promise<unknown>((resolve) => {
+		abort = resolve;
+	});
+
+	const stream = new WritableStream<Uint8Array>({ abort });
+
+	const quic = {
+		createUnidirectionalStream: async () => {
+			await slot;
+			return stream;
+		},
+	} as unknown as WebTransport;
+
+	return { quic, freeSlot, aborted };
+}
+
+// The bidirectional counterpart, whose `discarded` settles when a stream handed over after
+// the deadline is thrown away.
+function stalledBidiTransport() {
+	let freeSlot!: () => void;
+	const slot = new Promise<void>((resolve) => {
+		freeSlot = resolve;
+	});
+
+	let discard!: (reason: unknown) => void;
+	const discarded = new Promise<unknown>((resolve) => {
+		discard = resolve;
+	});
+
+	const stream = {
+		readable: new ReadableStream<Uint8Array>({ cancel: discard }),
+		writable: new WritableStream<Uint8Array>({ abort: discard }),
+	};
+
+	const quic = {
+		createBidirectionalStream: async () => {
+			await slot;
+			return stream;
+		},
+	} as unknown as WebTransport;
+
+	return { quic, freeSlot, discarded };
+}
+
+// Bidi opens have no group to drop, so they fail the way they did before
+// waitUntilAvailable rather than parking for as long as the peer withholds credit.
+test("open gives up on a peer that never frees a bidi slot", async () => {
+	const { quic, freeSlot, discarded } = stalledBidiTransport();
+
+	await expect(Stream.open(quic, { timeout: EXPIRES_MS })).rejects.toThrow(/timed out/);
+
+	freeSlot();
+	await discarded;
+});
+
+test("open waits for a bidi slot rather than failing on a busy session", async () => {
+	const { quic, freeSlot } = stalledBidiTransport();
+
+	const opening = Stream.open(quic, { timeout: OUTLASTS_TEST_MS });
+	expect(await Promise.race([opening.then(() => "opened"), Promise.resolve("waiting")])).toBe("waiting");
+
+	freeSlot();
+	expect(await opening).toBeInstanceOf(Stream);
+});
+
+// A cancel that already settled has to win even when a slot is free, or a group whose
+// subscriber is long gone still goes out.
+test("tryOpen gives up on a cancel that settled before the open", async () => {
+	const { quic, freeSlot, aborted } = stalledTransport();
+	freeSlot();
+
+	expect(await Writer.tryOpen(quic, { cancel: Promise.resolve() })).toBeUndefined();
+	await aborted;
+});
+
+test("tryOpen gives up when cancelled, resetting a stream that opens afterwards", async () => {
+	const { quic, freeSlot, aborted } = stalledTransport();
+
+	let cancel!: () => void;
+	const cancelled = new Promise<void>((resolve) => {
+		cancel = resolve;
+	});
+
+	const opening = Writer.tryOpen(quic, { cancel: cancelled });
+	cancel();
+	expect(await opening).toBeUndefined();
+
+	freeSlot();
+	await aborted;
+});
+
+// Without a deadline a peer that withholds stream credit while keeping the subscription
+// open queues work forever, since waitUntilAvailable never rejects.
+test("tryOpen gives up when the peer never frees a slot", async () => {
+	const { quic, freeSlot, aborted } = stalledTransport();
+
+	expect(await Writer.tryOpen(quic, { cancel: new Promise(() => {}), timeout: EXPIRES_MS })).toBeUndefined();
+
+	freeSlot();
+	await aborted;
+});
+
+test("tryOpen returns the stream when a slot is available", async () => {
+	const { quic, freeSlot } = stalledTransport();
+
+	const opening = Writer.tryOpen(quic, { cancel: new Promise(() => {}), timeout: OUTLASTS_TEST_MS });
+	freeSlot();
+
+	expect(await opening).toBeInstanceOf(Writer);
+});
+
+test("open waits for a stream slot instead of rejecting once the peer's limit is full", async () => {
+	const options: unknown[] = [];
+	const quic = {
+		createBidirectionalStream: async (opts?: unknown) => {
+			options.push(opts);
+			return { readable: new ReadableStream<Uint8Array>(), writable: new WritableStream<Uint8Array>() };
+		},
+		createUnidirectionalStream: async (opts?: unknown) => {
+			options.push(opts);
+			return new WritableStream<Uint8Array>();
+		},
+	} as unknown as WebTransport;
+
+	await Stream.open(quic, { sendOrder: 7 });
+	await Writer.open(quic);
+	// The one path that opens faster than a peer can retire streams opts out.
+	await Writer.open(quic, { waitUntilAvailable: false });
+
+	expect(options).toEqual([
+		{ sendOrder: 7, waitUntilAvailable: true },
+		{ sendOrder: undefined, waitUntilAvailable: true },
+		{ sendOrder: undefined, waitUntilAvailable: false },
+	]);
 });

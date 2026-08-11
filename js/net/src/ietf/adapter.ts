@@ -35,7 +35,7 @@ export class NativeSession implements Session {
 	}
 
 	async openBi(): Promise<Stream> {
-		return Stream.open(this.#quic, this.version);
+		return Stream.open(this.#quic, { version: this.version });
 	}
 
 	async acceptBi(): Promise<Stream | undefined> {
@@ -215,7 +215,7 @@ export class ControlStreamAdapter implements Session {
 	 * Open a real WebTransport bidi stream (for v16 SubscribeNamespace).
 	 */
 	async openNativeBi(): Promise<Stream> {
-		return Stream.open(this.#quic, this.version);
+		return Stream.open(this.#quic, { version: this.version });
 	}
 
 	/**

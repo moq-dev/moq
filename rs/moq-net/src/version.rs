@@ -47,6 +47,21 @@ pub(crate) const ALPN_17: &str = "moqt-17";
 pub(crate) const ALPN_18: &str = "moqt-18";
 pub(crate) const ALPN_19: &str = "moqt-19";
 
+const ALL: [Version; 12] = [
+	Version::Lite(lite::Version::Lite06Wip),
+	Version::Lite(lite::Version::Lite05),
+	Version::Lite(lite::Version::Lite04),
+	Version::Lite(lite::Version::Lite03),
+	Version::Lite(lite::Version::Lite02),
+	Version::Lite(lite::Version::Lite01),
+	Version::Ietf(ietf::Version::Draft19),
+	Version::Ietf(ietf::Version::Draft18),
+	Version::Ietf(ietf::Version::Draft17),
+	Version::Ietf(ietf::Version::Draft16),
+	Version::Ietf(ietf::Version::Draft15),
+	Version::Ietf(ietf::Version::Draft14),
+];
+
 /// A MoQ protocol version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -58,6 +73,28 @@ pub enum Version {
 }
 
 impl Version {
+	/// Iterate the names accepted by [`FromStr`].
+	pub fn names() -> impl Iterator<Item = &'static str> {
+		ALL.iter().map(Self::name)
+	}
+
+	fn name(&self) -> &'static str {
+		match self {
+			Self::Lite(lite::Version::Lite01) => "moq-lite-01",
+			Self::Lite(lite::Version::Lite02) => "moq-lite-02",
+			Self::Lite(lite::Version::Lite03) => "moq-lite-03",
+			Self::Lite(lite::Version::Lite04) => "moq-lite-04",
+			Self::Lite(lite::Version::Lite05) => "moq-lite-05",
+			Self::Lite(lite::Version::Lite06Wip) => "moq-lite-06-wip",
+			Self::Ietf(ietf::Version::Draft14) => "moq-transport-14",
+			Self::Ietf(ietf::Version::Draft15) => "moq-transport-15",
+			Self::Ietf(ietf::Version::Draft16) => "moq-transport-16",
+			Self::Ietf(ietf::Version::Draft17) => "moq-transport-17",
+			Self::Ietf(ietf::Version::Draft18) => "moq-transport-18",
+			Self::Ietf(ietf::Version::Draft19) => "moq-transport-19",
+		}
+	}
+
 	/// Parse from wire version code (used during SETUP negotiation).
 	pub fn from_code(code: u64) -> Option<Self> {
 		match code {
@@ -161,10 +198,7 @@ impl Version {
 
 impl fmt::Display for Version {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::Lite(v) => v.fmt(f),
-			Self::Ietf(v) => v.fmt(f),
-		}
+		f.write_str(self.name())
 	}
 }
 
@@ -172,21 +206,10 @@ impl FromStr for Version {
 	type Err = String;
 
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
-		match s {
-			"moq-lite-01" => Ok(Self::Lite(lite::Version::Lite01)),
-			"moq-lite-02" => Ok(Self::Lite(lite::Version::Lite02)),
-			"moq-lite-03" => Ok(Self::Lite(lite::Version::Lite03)),
-			"moq-lite-04" => Ok(Self::Lite(lite::Version::Lite04)),
-			"moq-lite-05" => Ok(Self::Lite(lite::Version::Lite05)),
-			"moq-lite-06-wip" => Ok(Self::Lite(lite::Version::Lite06Wip)),
-			"moq-transport-14" => Ok(Self::Ietf(ietf::Version::Draft14)),
-			"moq-transport-15" => Ok(Self::Ietf(ietf::Version::Draft15)),
-			"moq-transport-16" => Ok(Self::Ietf(ietf::Version::Draft16)),
-			"moq-transport-17" => Ok(Self::Ietf(ietf::Version::Draft17)),
-			"moq-transport-18" => Ok(Self::Ietf(ietf::Version::Draft18)),
-			"moq-transport-19" => Ok(Self::Ietf(ietf::Version::Draft19)),
-			_ => Err(format!("unknown version: {s}")),
-		}
+		ALL.iter()
+			.find(|version| version.name() == s)
+			.copied()
+			.ok_or_else(|| format!("unknown version: {s}"))
 	}
 }
 
@@ -248,19 +271,12 @@ impl Versions {
 	/// `version = ["moq-lite-06-wip"]`). It is otherwise a fully-defined version, so an
 	/// opt-in set that includes it negotiates normally.
 	pub fn all() -> Self {
-		Self(vec![
-			Version::Lite(lite::Version::Lite05),
-			Version::Lite(lite::Version::Lite04),
-			Version::Lite(lite::Version::Lite03),
-			Version::Lite(lite::Version::Lite02),
-			Version::Lite(lite::Version::Lite01),
-			Version::Ietf(ietf::Version::Draft19),
-			Version::Ietf(ietf::Version::Draft18),
-			Version::Ietf(ietf::Version::Draft17),
-			Version::Ietf(ietf::Version::Draft16),
-			Version::Ietf(ietf::Version::Draft15),
-			Version::Ietf(ietf::Version::Draft14),
-		])
+		Self(
+			ALL.iter()
+				.filter(|version| !matches!(version, Version::Lite(lite::Version::Lite06Wip)))
+				.copied()
+				.collect(),
+		)
 	}
 
 	/// Compute the unique ALPN strings needed for these versions.

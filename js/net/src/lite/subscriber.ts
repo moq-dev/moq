@@ -16,6 +16,7 @@ import * as DatagramStream from "./datagram_stream.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
+import { sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
@@ -24,9 +25,9 @@ import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasExcludeHop, Version } from "./version.ts";
 
 // Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
-// drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC
-// streams (Chrome ~100); past the cap createBidirectionalStream silently blocks.
-// The timeout turns that into a clear error.
+// drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC streams
+// (Chrome ~100) and we open with waitUntilAvailable, so past the cap the open blocks
+// until the peer frees a slot. The timeout turns a stall into a clear error.
 const SUBSCRIBE_SETUP_TIMEOUT_MS = 10_000;
 
 /** Decode an unsigned zigzag varint back to a signed delta (mirrors Rust `VarInt::to_zigzag`). */
@@ -576,7 +577,7 @@ export class Subscriber {
 
 			const info = await this.#trackInfo(broadcast, track);
 			const priority = options.priority ?? 0;
-			const stream = await Stream.open(this.#quic, undefined, priority);
+			const stream = await Stream.open(this.#quic, { sendOrder: sendOrder({ priority }) });
 
 			try {
 				await stream.writer.u53(StreamId.Fetch);

@@ -12,6 +12,7 @@ import * as DatagramStream from "./datagram_stream.ts";
 import type { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
+import { Priority, sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
@@ -31,6 +32,24 @@ const PROBE_MAX_DELTA = 0.25;
 /** Map a signed delta to an unsigned zigzag varint value (mirrors Rust `VarInt::from_zigzag`). */
 function zigzag(delta: bigint): bigint {
 	return delta >= 0n ? delta << 1n : (-delta << 1n) - 1n;
+}
+
+/** What {@link Publisher.runGroup} needs to serve one group. */
+interface RunGroup {
+	/** The subscription ID. */
+	sub: bigint;
+
+	/** The group to serve. */
+	group: group.Consumer;
+
+	/** The track's advertised timescale, applied to every frame timestamp. */
+	timescale: Timescale;
+
+	/** The subscription's ranking, which this stream joins for as long as it runs. */
+	priority: Priority;
+
+	/** Settles when the subscriber leaves, dropping a group still queued for a stream slot. */
+	unsubscribed: Promise<void>;
 }
 
 // The TRACK stream, implicit SUBSCRIBE acceptance, and SUBSCRIBE_START/END are
@@ -263,7 +282,7 @@ export class Publisher {
 		// The best-effort datagram loop, started once serving begins. It parks when the
 		// track finishes (recvDatagram returns undefined), so #runTrack alone ends the
 		// subscription; awaited during teardown so it doesn't outlive the subscription.
-		let datagrams: Promise<void> | undefined;
+		let datagrams = Promise.resolve();
 
 		try {
 			let timescale: Timescale = Timescale.MILLI;
@@ -354,6 +373,10 @@ export class Publisher {
 			return;
 		}
 
+		// The subscriber opened this stream, so its send order only ranked the request. Rank the
+		// response here, on the same scale as the group streams it competes with.
+		stream.writer.setPriority(sendOrder({ priority: msg.priority }));
+
 		let group: group.Consumer | undefined;
 		try {
 			// The timescale is immutable, so serve exactly what TRACK_INFO advertised.
@@ -393,6 +416,25 @@ export class Publisher {
 		// the encoding for a track that produced no groups.
 		let end = 0;
 
+		// One ranking for the whole subscription, shared by every group it serves.
+		const priority = new Priority(track);
+
+		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
+		// a track that ran out of groups still has to flush the ones already queued, and we
+		// FIN the subscribe stream ourselves below to say so.
+		let finished = false;
+		let unsubscribe!: () => void;
+		const unsubscribed = new Promise<void>((resolve) => {
+			unsubscribe = resolve;
+		});
+		void stream.closed.then(
+			() => {
+				if (!finished) unsubscribe();
+			},
+			// A reset is always the peer.
+			() => unsubscribe(),
+		);
+
 		try {
 			for (;;) {
 				const next = track.nextGroup();
@@ -408,7 +450,7 @@ export class Publisher {
 				}
 				end = Math.max(end, group.sequence + 1);
 
-				void this.#runGroup(sub, group, timescale);
+				void this.#runGroup({ sub, group, timescale, priority, unsubscribed });
 			}
 
 			if (emitRange) {
@@ -416,13 +458,17 @@ export class Publisher {
 			}
 
 			console.debug(`publish close: broadcast=${broadcast} track=${track.name}`);
+			finished = true;
 			track.close();
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
 			console.warn(`publish error: broadcast=${broadcast} track=${track.name} error=${reason(e)}`);
+			unsubscribe();
 			track.close(e);
 			stream.reset(e);
+		} finally {
+			priority.close();
 		}
 	}
 
@@ -513,13 +559,6 @@ export class Publisher {
 		}
 	}
 
-	/**
-	 * Runs a group and sends its frames to the stream.
-	 * @param sub - The subscription ID
-	 * @param group - The group to run
-	 *
-	 * @internal
-	 */
 	// Serialize a fetched group's frames onto the FETCH stream as bare records: each a
 	// zigzag-delta timestamp (at the track's advertised timescale) followed by size + bytes.
 	async #runFetchGroup(group: group.Consumer, stream: Writer, timescale: Timescale) {
@@ -537,19 +576,47 @@ export class Publisher {
 		}
 	}
 
-	async #runGroup(sub: bigint, group: group.Consumer, timescale: Timescale) {
+	/**
+	 * Serves one group on its own unidirectional stream.
+	 *
+	 * @internal
+	 */
+	async #runGroup(options: RunGroup) {
+		const { sub, group, timescale, priority, unsubscribed } = options;
 		const msg = new GroupMessage(sub, group.sequence);
 		try {
-			const stream = await Writer.open(this.#quic);
-			await stream.u53(0); // stream type
-			await msg.encode(stream);
+			// The transport drains streams by send order, so this is what makes a high-priority
+			// track (and a newer group within it) win the link when there isn't room for both.
+			//
+			// One stream per group is faster than a peer at its limit can retire them, so this
+			// is the one path that doesn't wait for a slot: the transport would serve the opens
+			// in the order we asked, which is oldest-first, exactly backwards for live media.
+			// Failing here drops the group and lets the next one compete for the next slot.
+			const stream = await Writer.tryOpen(this.#quic, {
+				sendOrder: priority.rank(group.sequence),
+				cancel: unsubscribed,
+				waitUntilAvailable: false,
+			});
+			if (!stream) {
+				group.close(new Error("no stream slot"));
+				return;
+			}
 
-			// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
-			// advertised timescale; older drafts omit it.
-			const timestamps = supportsTrackStream(this.version);
-			let prevTs = 0n;
-
+			// Everything past this point runs inside the cleanup scope, so a failure never leaves
+			// a finished group's stream being ranked.
 			try {
+				// A SUBSCRIBE_UPDATE re-ranks the subscription, so a group already on the wire
+				// follows it too rather than keeping a stale rank until it finishes.
+				priority.add(stream, group.sequence);
+
+				await stream.u53(0); // stream type
+				await msg.encode(stream);
+
+				// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
+				// advertised timescale; older drafts omit it.
+				const timestamps = supportsTrackStream(this.version);
+				let prevTs = 0n;
+
 				for (;;) {
 					const frame = await Promise.race([group.readFrame(), stream.closed]);
 					if (!frame) break;
@@ -571,6 +638,8 @@ export class Publisher {
 				const e = error(err);
 				stream.reset(e);
 				group.close(e);
+			} finally {
+				priority.remove(stream);
 			}
 		} catch (err: unknown) {
 			const e = error(err);

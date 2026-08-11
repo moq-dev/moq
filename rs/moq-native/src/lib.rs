@@ -65,6 +65,13 @@ pub(crate) fn spawn_session((session, driver): (moq_net::Session, moq_net::Drive
 pub use moq_net;
 pub use rustls;
 
+fn version_parser() -> impl clap::builder::TypedValueParser<Value = moq_net::Version> {
+	use clap::builder::TypedValueParser;
+
+	clap::builder::PossibleValuesParser::new(moq_net::Version::names())
+		.map(|name| name.parse().expect("possible version names must parse"))
+}
+
 /// Re-exported because [`watch::FileWatcher`] surfaces `notify::Result`/`notify::Error`
 /// in its API; a major `notify` bump is therefore a breaking change for this crate.
 #[cfg(feature = "watch")]
