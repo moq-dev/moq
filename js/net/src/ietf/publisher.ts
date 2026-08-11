@@ -161,7 +161,6 @@ export class Publisher {
 			})();
 
 			await Promise.race([serving, stream.reader.closed]);
-			finished = true;
 
 			console.debug(`publish done: broadcast=${name} track=${track.name}`);
 
@@ -180,6 +179,10 @@ export class Publisher {
 				}
 			}
 
+			// Only now is the close below ours. Claiming it any earlier would read a peer FIN
+			// that lands while PublishDone is still going out as our own completion, leaving
+			// queued groups to open for a subscriber that has already left.
+			finished = true;
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
