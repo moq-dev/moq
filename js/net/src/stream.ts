@@ -70,11 +70,11 @@ export interface OpenOptions {
 	sendOrder?: number;
 
 	/**
-	 * Reject if the peer hasn't freed a stream slot within this many milliseconds, or
-	 * `false` to wait indefinitely. Defaults to 10s, since the open otherwise parks for
-	 * as long as the peer withholds stream credit.
+	 * Reject if the peer hasn't freed a stream slot within this many milliseconds. Defaults
+	 * to 10s. There is no way to wait indefinitely: a peer can advertise a stream limit of
+	 * zero and never raise it, so every open needs a way out.
 	 */
-	timeout?: number | false;
+	timeout?: number;
 
 	/**
 	 * Ask the transport to wait for a stream slot rather than failing when the peer's
@@ -98,15 +98,27 @@ export class Stream {
 	reader: Reader;
 	writer: Writer;
 
+	/** Wrap the two halves of a transport stream. */
 	constructor(props: {
 		writable: WritableStream<Uint8Array>;
 		readable: ReadableStream<Uint8Array>;
+		version?: IetfVersion;
+	});
+	/** Pair halves that were opened separately, as the SETUP exchange does. */
+	constructor(props: { writer: Writer; reader: Reader });
+	constructor(props: {
+		writable?: WritableStream<Uint8Array>;
+		readable?: ReadableStream<Uint8Array>;
 		writer?: Writer;
 		reader?: Reader;
 		version?: IetfVersion;
 	}) {
-		this.writer = props.writer ?? new Writer(props.writable, props.version);
-		this.reader = props.reader ?? new Reader(props.readable, undefined, props.version);
+		const writer = props.writer ?? (props.writable && new Writer(props.writable, props.version));
+		const reader = props.reader ?? (props.readable && new Reader(props.readable, undefined, props.version));
+		if (!writer || !reader) throw new Error("stream needs both halves");
+
+		this.writer = writer;
+		this.reader = reader;
 	}
 
 	static async accept(quic: WebTransport, version?: IetfVersion): Promise<Stream | undefined> {
@@ -129,17 +141,14 @@ export class Stream {
 	 *   against the session's other streams
 	 */
 	static async open(quic: WebTransport, options?: OpenOptions): Promise<Stream> {
-		let opening = quic.createBidirectionalStream(sendOptions(options));
-
-		const timeout = options?.timeout ?? OPEN_TIMEOUT_MS;
-		if (timeout !== false) {
-			opening = openWithin(opening, timeout, (stream) => {
+		const { readable, writable } = await openWithin(
+			quic.createBidirectionalStream(sendOptions(options)),
+			options?.timeout ?? OPEN_TIMEOUT_MS,
+			(stream) => {
 				void stream.writable.abort().catch(() => void 0);
 				void stream.readable.cancel().catch(() => void 0);
-			});
-		}
-
-		const { readable, writable } = await opening;
+			},
+		);
 		return new Stream({ readable, writable, version: options?.version });
 	}
 
@@ -487,14 +496,13 @@ export class Writer {
 	 *   against the session's other streams
 	 */
 	static async open(quic: WebTransport, options?: OpenOptions): Promise<Writer> {
-		let opening = quic.createUnidirectionalStream(sendOptions(options)) as Promise<WritableStream<Uint8Array>>;
+		const writable = await openWithin(
+			quic.createUnidirectionalStream(sendOptions(options)) as Promise<WritableStream<Uint8Array>>,
+			options?.timeout ?? OPEN_TIMEOUT_MS,
+			(stream) => void stream.abort().catch(() => void 0),
+		);
 
-		const timeout = options?.timeout ?? OPEN_TIMEOUT_MS;
-		if (timeout !== false) {
-			opening = openWithin(opening, timeout, (stream) => void stream.abort().catch(() => void 0));
-		}
-
-		return new Writer(await opening, options?.version);
+		return new Writer(writable, options?.version);
 	}
 
 	/**

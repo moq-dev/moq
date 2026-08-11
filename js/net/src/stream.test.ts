@@ -408,10 +408,10 @@ test("open gives up on a peer that never frees a bidi slot", async () => {
 	await discarded;
 });
 
-test("open waits for a bidi slot when the caller opts out of the deadline", async () => {
+test("open waits for a bidi slot rather than failing on a busy session", async () => {
 	const { quic, freeSlot } = stalledBidiTransport();
 
-	const opening = Stream.open(quic, { timeout: false });
+	const opening = Stream.open(quic, { timeout: OUTLASTS_TEST_MS });
 	expect(await Promise.race([opening.then(() => "opened"), Promise.resolve("waiting")])).toBe("waiting");
 
 	freeSlot();
