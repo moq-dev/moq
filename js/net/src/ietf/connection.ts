@@ -109,7 +109,7 @@ export class Connection implements Established {
 		}
 
 		this.#publisher = new Publisher(this.#quic, this.#session, solicit);
-		this.#subscriber = new Subscriber(this.#session);
+		this.#subscriber = new Subscriber(this.#session, solicit);
 
 		void this.#run();
 	}

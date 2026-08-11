@@ -15,6 +15,7 @@ import { toWire } from "./priority.ts";
 import { type Publish, PublishError } from "./publish.ts";
 import { type PublishNamespace, PublishNamespaceError, PublishNamespaceOk } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
+import type { Solicit } from "./solicit.ts";
 import { Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
 	PublishBlocked,
@@ -61,6 +62,7 @@ export class Subscriber {
 	#consumes = new BroadcastCache();
 
 	// Any currently active announcements.
+	#solicit: Solicit;
 	#announced = new Set<Path.Valid>();
 
 	// Any consumers that want each new announcement.
@@ -69,18 +71,30 @@ export class Subscriber {
 	/**
 	 * Creates a new Subscriber instance.
 	 * @param session - The session abstraction for bidi streams and request IDs
+	 * @param solicit - What the peer's SETUP declared about being solicited
 	 *
 	 * @internal
 	 */
-	constructor(session: Session) {
+	constructor(session: Session, solicit: Solicit = { announce: false, interest: false }) {
 		this.#session = session;
+		this.#solicit = solicit;
 	}
 
 	/**
 	 * Gets an announced reader for the specified prefix.
+	 *
+	 * Stays empty when the peer declared that soliciting it returns nothing (MoQ
+	 * Solicit): a SUBSCRIBE_NAMESPACE would buy one stream and an empty answer. Unlike
+	 * the Rust side, this never has to guess, since the SETUP is exchanged before the
+	 * connection exists.
 	 */
 	announced(prefix = Path.empty()): announce.Consumer {
 		const announced = new announce.Producer(prefix);
+		if (this.#solicit.interest) {
+			announced.close();
+			return announced.consume();
+		}
+
 		for (const active of this.#announced) {
 			const suffix = Path.stripPrefix(prefix, active);
 			if (suffix === null) continue;

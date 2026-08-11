@@ -291,13 +291,16 @@ export class Publisher {
 				return;
 			}
 
-			const advertise = async (suffix: Path.Valid) => {
+			// Reports whether the peer now holds the namespace: an inline entry always
+			// lands, but a PUBLISH_NAMESPACE request can be declined.
+			const advertise = async (suffix: Path.Valid): Promise<boolean> => {
 				if (legacy) {
-					await this.#advertise(Path.join(prefix, suffix), requests);
-				} else {
-					await stream.writer.u53(SubscribeNamespaceEntry.id);
-					await new SubscribeNamespaceEntry({ suffix }).encode(stream.writer, version);
+					return await this.#advertise(Path.join(prefix, suffix), requests);
 				}
+
+				await stream.writer.u53(SubscribeNamespaceEntry.id);
+				await new SubscribeNamespaceEntry({ suffix }).encode(stream.writer, version);
+				return true;
 			};
 			const withdraw = async (suffix: Path.Valid) => {
 				if (legacy) {
@@ -333,14 +336,19 @@ export class Publisher {
 					updated.add(suffix);
 				}
 
+				// Track what the peer holds rather than what we attempted: a declined
+				// advertisement stays out of `held`, so the next turn retries it instead of
+				// believing the namespace is already up.
+				const held = new Set<Path.Valid>(active);
 				for (const added of updated.difference(active)) {
-					await advertise(added);
+					if (await advertise(added)) held.add(added);
 				}
 				for (const removed of active.difference(updated)) {
 					await withdraw(removed);
+					held.delete(removed);
 				}
 
-				active = updated;
+				active = held;
 
 				// Wait for the next change, or for the peer to unsubscribe.
 				const next = await Promise.race([changed, stream.reader.closed]);
@@ -411,7 +419,10 @@ export class Publisher {
 					await this.#withdraw(removed, requests);
 				}
 
-				active = updated;
+				// What the peer holds, not what we attempted: a declined PUBLISH_NAMESPACE
+				// leaves no request behind, so the next turn retries it instead of believing
+				// the namespace is already up.
+				active = new Set<Path.Valid>(requests.keys());
 
 				// Wait for the next change, which has already fired if one landed above.
 				const next = await changed;
@@ -436,9 +447,9 @@ export class Publisher {
 	async #advertise(
 		path: Path.Valid,
 		requests: Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream }>,
-	) {
+	): Promise<boolean> {
 		const requestId = await this.#session.nextRequestId();
-		if (requestId === undefined) return;
+		if (requestId === undefined) return false;
 
 		const request = await this.#session.openBi();
 		try {
@@ -459,10 +470,12 @@ export class Publisher {
 			}
 
 			requests.set(path, { path, requestId, stream: request });
+			return true;
 		} catch (err: unknown) {
 			const e = error(err);
 			console.warn(`announce failed: broadcast=${path} error=${reason(e)}`);
 			request.abort(e);
+			return false;
 		}
 	}
 

@@ -426,10 +426,7 @@ pub async fn accept_setup<S: web_transport_trait::Session>(
 			),
 			None => None,
 		};
-		let declared = peer::Peer {
-			cluster: cluster::peer_from_setup(&params, version)?,
-			solicit: solicit::from_setup(&params, version)?,
-		};
+		let declared = peer_from_params(&params, version)?;
 
 		return Ok(PeerSetup {
 			stream: reader,
@@ -443,10 +440,15 @@ pub async fn accept_setup<S: web_transport_trait::Session>(
 fn decode_peer_setup(parameters: bytes::Bytes, version: Version) -> Result<peer::Peer, crate::DecodeError> {
 	let mut bytes = parameters;
 	let params = ietf::Parameters::decode(&mut bytes, version)?;
+	peer_from_params(&params, version)
+}
 
+/// The Setup Options we act on, out of an already-decoded parameter block. One place, so
+/// a future option reaches both the pre-read accept path and the uni loop.
+fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer::Peer, crate::DecodeError> {
 	Ok(peer::Peer {
-		cluster: cluster::peer_from_setup(&params, version)?,
-		solicit: solicit::from_setup(&params, version)?,
+		cluster: cluster::peer_from_setup(params, version)?,
+		solicit: solicit::from_setup(params, version)?,
 	})
 }
 
@@ -816,16 +818,18 @@ mod tests {
 		assert_eq!(occurrences(&log, b"rootns"), 0, "asked the peer for our local root");
 	}
 
-	/// A namespace is only advertised in response to a SUBSCRIBE_NAMESPACE. A peer
-	/// that never subscribes hears nothing, no matter what we announce locally.
-	#[tokio::test]
-	async fn announces_wait_for_a_subscribe_namespace() {
+	/// Run a publish-only session against a peer that declared `peer_declared`, returning
+	/// how many times the namespace reached the wire.
+	///
+	/// The scripted peer answers nothing, so an advertisement parks after writing. That is
+	/// enough: the question is only whether the bytes went out unasked.
+	async fn announce_occurrences(peer_declared: Option<peer::Peer>) -> usize {
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let _cam = origin
 			.create_broadcast("solo-cam", crate::broadcast::Route::new().with_announce(true))
 			.unwrap();
 
-		// An open gate: an unsolicited PUBLISH_NAMESPACE would reach the wire.
+		// An open gate: an unsolicited PUBLISH_NAMESPACE can reach the wire.
 		let gate = kio::Producer::new(true);
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
@@ -842,17 +846,55 @@ mod tests {
 			version: Version::Draft18,
 			path: None,
 			peer_setup_stream: None,
-			peer_declared: None,
+			peer_declared,
 		})
 		.expect("start the session");
 		let _driver = tokio::spawn(driver);
 
-		// Give an unsolicited announce every chance to land before asserting silence.
+		// Give an announce every chance to land before counting.
 		tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+		occurrences(&log, b"solo-cam")
+	}
+
+	/// The peer's SETUP decides whether an advertisement may go out unasked, so nothing
+	/// can be sent before it arrives.
+	#[tokio::test]
+	async fn no_announce_before_the_peer_setup() {
 		assert_eq!(
-			occurrences(&log, b"solo-cam"),
+			announce_occurrences(None).await,
 			0,
-			"PUBLISH_NAMESPACE must wait for a SUBSCRIBE_NAMESPACE"
+			"advertised before knowing what the peer wants"
+		);
+	}
+
+	/// A peer that requires solicitation hears nothing until it asks, which is the
+	/// behavior the IETF draft describes for a relay.
+	#[tokio::test]
+	async fn a_peer_requiring_solicitation_is_not_told_unasked() {
+		let declared = peer::Peer {
+			solicit: solicit::Solicit {
+				announce: true,
+				interest: false,
+			},
+			..Default::default()
+		};
+
+		assert_eq!(
+			announce_occurrences(Some(declared)).await,
+			0,
+			"PUBLISH_NAMESPACE despite the peer asking to be told on request"
+		);
+	}
+
+	/// A peer that declared nothing is told without being asked. Every relay that never
+	/// sends SUBSCRIBE_NAMESPACE depends on this, and the session is what wires the
+	/// unsolicited loop up at all.
+	#[tokio::test]
+	async fn a_peer_declaring_nothing_is_told_unasked() {
+		assert_eq!(
+			announce_occurrences(Some(peer::Peer::default())).await,
+			1,
+			"no unsolicited PUBLISH_NAMESPACE"
 		);
 	}
 
