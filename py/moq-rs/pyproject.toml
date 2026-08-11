@@ -14,7 +14,7 @@ name = "moq-rs"
 # isn't already there (no tag needed; the registry is the gate).
 # Starts at 0.3.0 to open a new line above the old lockstep 0.2.x releases that
 # bundled the bindings.
-version = "0.4.2"
+version = "0.4.3"
 description = "Media over QUIC: real-time pub/sub with built-in caching, fan-out, and prioritization, with a Pythonic API. Import as `moq`."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
@@ -30,9 +30,9 @@ classifiers = [
 ]
 # Compatible-release pin: floats to the latest 0.3.x moq-ffi patch without a
 # wrapper re-release. A moq-ffi minor bump (0.4) is the only thing that forces
-# bumping this constraint. Floor is 0.3.0, the release that renamed the FFI
-# publish -> announce and required accepting a TrackRequest before writing.
-dependencies = ["moq-ffi ~= 0.3.0"]
+# bumping this constraint. Version 0.3.7 provides the raw video producer that
+# the wrapper imports.
+dependencies = ["moq-ffi ~= 0.3.7"]
 
 [project.urls]
 Homepage = "https://github.com/moq-dev/moq"
