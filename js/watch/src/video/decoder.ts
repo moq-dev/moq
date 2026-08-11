@@ -7,12 +7,12 @@ import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Si
 import { base64ToBytes } from "../base64";
 
 import type { Sync } from "../sync";
+import { caughtUp, renditionJitter } from "./jitter";
 import { rotateVideoDimensions } from "./presentation";
 import type { Source } from "./source";
 
 // The amount of time to wait before considering the video to be buffering.
 const BUFFERING = Time.Milli(500);
-const SWITCH = Time.Milli(100);
 
 export type DecoderInput = {
 	// Whether to download the video track. Wired from the renderer's output by the parent.
@@ -136,11 +136,18 @@ export class Decoder {
 			const current = effect.get(this.#active);
 			if (current) {
 				const pendingTimestamp = effect.get(pending.timestamp);
-				const activeTimestamp = effect.get(current.timestamp);
-
-				// Switch to the new track if it's ready and we've caught up enough.
 				if (!pendingTimestamp) return;
-				if (activeTimestamp && activeTimestamp > pendingTimestamp + SWITCH) return;
+
+				// Switch once the new rendition has caught up to live, judged against its own
+				// jitter. Live comes from the shared clock rather than the outgoing track's
+				// playhead: that playhead trails live by its own jitter, so comparing the two
+				// directly reads a coarse rendition as caught up early (whenever the outgoing
+				// one is between groups) and a fine one as never caught up. Before the clock
+				// has an anchor there is no live edge, so fall back to the outgoing playhead.
+				const live = this.sync.now() ?? effect.get(current.timestamp);
+				if (live !== undefined && !caughtUp({ playhead: pendingTimestamp, live, jitter: pending.jitter })) {
+					return;
+				}
 			}
 
 			// Upgrade the pending track to active.
@@ -238,6 +245,9 @@ class DecoderTrack {
 	config: RequiredDecoderConfig;
 	stats: Signal<Stats | undefined>;
 
+	// How far behind live this rendition's playhead can sit while still being at its live edge.
+	jitter: Time.Milli;
+
 	timestamp = new Signal<Time.Milli | undefined>(undefined);
 	frame = new Signal<VideoFrame | undefined>(undefined);
 
@@ -262,6 +272,7 @@ class DecoderTrack {
 		this.track = props.track;
 		this.config = requiredConfig;
 		this.stats = props.stats;
+		this.jitter = renditionJitter(props.config) ?? Time.Milli.zero;
 
 		this.#signals.run(this.#run.bind(this));
 	}
