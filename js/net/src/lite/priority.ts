@@ -17,7 +17,11 @@ const GROUP_SPAN = 2 ** 45;
 /** The highest track priority the wire carries (a u8). */
 const MAX_PRIORITY = 0xff;
 
-/** What to rank a group stream by. */
+/**
+ * What to rank a group stream by.
+ *
+ * @internal
+ */
 export interface Rank {
 	/** The subscriber's track priority, which outweighs everything below it. */
 	priority: number;
@@ -37,6 +41,8 @@ export interface Rank {
  * each one's next group ties with the other's, whatever their group numbering. Comparing
  * sequences instead would let a track that had been running longer, or that numbered its
  * groups from a clock, starve one that started later.
+ *
+ * @internal
  */
 export function sendOrder({ priority, position = 0 }: Rank): number {
 	return clamp(priority, MAX_PRIORITY) * GROUP_SPAN + (GROUP_SPAN - 1 - clamp(position, GROUP_SPAN - 1));
@@ -59,6 +65,8 @@ function clamp(value: number, max: number): number {
  *
  * One listener covers the whole subscription. A listener per group would instead pile up on
  * it, and a track that stalls with many groups open would trip the signals leak guard.
+ *
+ * @internal
  */
 export class Priority {
 	#track: track.Subscriber;

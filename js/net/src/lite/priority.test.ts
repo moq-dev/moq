@@ -1,11 +1,14 @@
 import { expect, test } from "bun:test";
 import { sendOrder } from "./priority.ts";
 
+// The last position that still fits below the track priority.
+const MAX_POSITION = 2 ** 45 - 1;
+
 // The transport sends higher values first, so a track the subscriber cares about more has to
 // outrank one it cares about less, wherever their groups sit in their own queues.
 test("track priority dominates the position", () => {
 	expect(sendOrder({ priority: 2, position: 1_000_000 })).toBeGreaterThan(sendOrder({ priority: 1, position: 0 }));
-	expect(sendOrder({ priority: 255, position: 2 ** 45 - 1 })).toBeGreaterThan(
+	expect(sendOrder({ priority: 255, position: MAX_POSITION })).toBeGreaterThan(
 		sendOrder({ priority: 254, position: 0 }),
 	);
 });
@@ -27,7 +30,7 @@ test("equal priorities tie at the same position", () => {
 // The top of the range lands exactly on the largest integer a double can represent.
 test("send orders stay exact integers", () => {
 	expect(sendOrder({ priority: 255, position: 0 })).toBe(Number.MAX_SAFE_INTEGER);
-	expect(sendOrder({ priority: 0, position: 2 ** 45 - 1 })).toBe(0);
+	expect(sendOrder({ priority: 0, position: MAX_POSITION })).toBe(0);
 });
 
 // A position past the space left for it must never carry into the track's bits and outrank a
