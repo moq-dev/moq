@@ -79,16 +79,18 @@ impl AuthParams {
 	/// in the moq-lite-05 SETUP rather than a real request URI, so there is no
 	/// host and no subdomain->path routing to apply; the caller (a gateway) has
 	/// already prepended any vanity prefix. Only the `jwt` query parameter is
-	/// URL-decoded.
+	/// URL-decoded. The public request API represents a missing or root path as
+	/// empty, so authentication canonicalizes it back to `/` like a URL does.
 	pub(crate) fn from_path_query(path: &str, query: Option<&str>) -> Self {
 		let jwt = query.and_then(|query| {
 			url::form_urlencoded::parse(query.as_bytes())
-				.find(|(k, v)| k == "jwt" && !v.is_empty())
+				.filter(|(k, v)| k == "jwt" && !v.is_empty())
 				.map(|(_, v)| v.into_owned())
+				.last()
 		});
 
 		Self {
-			path: path.to_string(),
+			path: if path.is_empty() { "/" } else { path }.to_string(),
 			jwt,
 			..Default::default()
 		}
@@ -1172,9 +1174,10 @@ mod tests {
 		assert_eq!(p.path, "/customer/foo/bar");
 		assert_eq!(p.jwt, None);
 
-		// Empty (a no-path, no-JWT stream connection: resolved via public auth).
+		// Missing and root paths share the public empty representation, then use the
+		// canonical URL root for authentication.
 		let p = AuthParams::from_path_query("", None);
-		assert_eq!(p.path, "");
+		assert_eq!(p.path, "/");
 		assert_eq!(p.jwt, None);
 
 		// An empty jwt value counts as absent.
@@ -1185,6 +1188,12 @@ mod tests {
 		let p = AuthParams::from_path_query("/foo", Some("a=1&jwt=ab%20cd"));
 		assert_eq!(p.path, "/foo");
 		assert_eq!(p.jwt.as_deref(), Some("ab cd"));
+
+		// Match URL query parsing when a client supplies duplicate credentials.
+		let p = AuthParams::from_path_query("/foo", Some("jwt=first&jwt=second"));
+		assert_eq!(p.jwt.as_deref(), Some("second"));
+		let p = parse("https://example.com/foo?jwt=first&jwt=second", &[]);
+		assert_eq!(p.jwt.as_deref(), Some("second"));
 	}
 
 	fn create_test_key_with_kid(kid: &str) -> Key {
