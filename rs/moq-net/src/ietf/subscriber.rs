@@ -976,22 +976,19 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		let mut closed_session = self.session.clone();
 		loop {
 			let next = subscribes
-				.drive(async {
-					kio::wait(|waiter| {
-						let mut cx = std::task::Context::from_waker(waiter.waker());
-						if closed_session.poll_closed(&mut cx).is_ready() {
-							return Poll::Ready(None);
-						}
-						// A draining peer usually stops publishing namespaces, so react to
-						// the signal itself; waiting for another message would leave the
-						// route primary until the session finally closed. Idempotent, since
-						// the signal stays set and this task wakes for other reasons too.
-						if self.going_away.poll(waiter).is_ready() {
-							broadcast.drain();
-						}
-						broadcast.poll_requested_track(waiter).map(Some)
-					})
-					.await
+				.drive(|waiter| {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					if closed_session.poll_closed(&mut cx).is_ready() {
+						return Poll::Ready(None);
+					}
+					// A draining peer usually stops publishing namespaces, so react to
+					// the signal itself; waiting for another message would leave the
+					// route primary until the session finally closed. Idempotent, since
+					// the signal stays set and this task wakes for other reasons too.
+					if self.going_away.poll(waiter).is_ready() {
+						broadcast.drain();
+					}
+					broadcast.poll_requested_track(waiter).map(Some)
 				})
 				.await;
 
@@ -1123,19 +1120,17 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			StreamClosed(Result<(), Error>),
 		}
 
-		let end = {
-			let mut closed = std::pin::pin!(stream.reader.closed());
-			kio::wait(|waiter| {
-				if track.poll_unused(waiter).is_ready() {
-					return Poll::Ready(End::Unused);
-				}
-				if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
-					return Poll::Ready(End::BroadcastClosed(err));
-				}
-				waiter.poll_future(closed.as_mut()).map(End::StreamClosed)
-			})
-			.await
-		};
+		let end = kio::wait(|waiter| {
+			if track.poll_unused(waiter).is_ready() {
+				return Poll::Ready(End::Unused);
+			}
+			if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
+				return Poll::Ready(End::BroadcastClosed(err));
+			}
+			let mut cx = std::task::Context::from_waker(waiter.waker());
+			stream.reader.poll_closed(&mut cx).map(End::StreamClosed)
+		})
+		.await;
 
 		match end {
 			End::Unused => {

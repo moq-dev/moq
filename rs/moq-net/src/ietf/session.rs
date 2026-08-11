@@ -150,17 +150,14 @@ pub fn start<S: crate::transport::poll::Session>(
 					let adapter = adapter.clone();
 					let goaway = goaway.clone();
 					tasks.push(async move {
-						let payload = {
-							let mut triggered = std::pin::pin!(goaway.triggered());
-							kio::wait(|waiter| {
-								let mut cx = std::task::Context::from_waker(waiter.waker());
-								if session.poll_closed(&mut cx).is_ready() {
-									return std::task::Poll::Ready(None);
-								}
-								waiter.poll_future(triggered.as_mut())
-							})
-							.await
-						};
+						let payload = kio::wait(|waiter| {
+							let mut cx = std::task::Context::from_waker(waiter.waker());
+							if session.poll_closed(&mut cx).is_ready() {
+								return std::task::Poll::Ready(None);
+							}
+							goaway.poll_triggered(waiter)
+						})
+						.await;
 						let Some(payload) = payload else {
 							return;
 						};
@@ -502,17 +499,14 @@ async fn run_setup<S: crate::transport::poll::Session>(
 	// drain trigger fires meanwhile. The trigger resolves `None` when the session
 	// drops without draining; keep holding either way (closing this stream
 	// mid-session is a protocol violation on strict peers).
-	let payload = {
-		let mut closed = std::pin::pin!(session.closed());
-		let mut triggered = std::pin::pin!(goaway.triggered());
-		kio::wait(|waiter| {
-			if waiter.poll_future(closed.as_mut()).is_ready() {
-				return std::task::Poll::Ready(None);
-			}
-			waiter.poll_future(triggered.as_mut())
-		})
-		.await
-	};
+	let payload = kio::wait(|waiter| {
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		if session.poll_closed(&mut cx).is_ready() {
+			return std::task::Poll::Ready(None);
+		}
+		goaway.poll_triggered(waiter)
+	})
+	.await;
 
 	if let Some(payload) = payload {
 		let timeout_ms = payload.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
@@ -567,7 +561,13 @@ async fn run_unis<S: crate::transport::poll::Session>(
 	let mut seen_setup = setup_read;
 
 	loop {
-		let recv = tasks.drive(session.accept_uni()).await.map_err(Error::from_transport)?;
+		let recv = tasks
+			.drive(|waiter| {
+				let mut cx = std::task::Context::from_waker(waiter.waker());
+				session.poll_accept_uni(&mut cx)
+			})
+			.await
+			.map_err(Error::from_transport)?;
 		let mut reader: Reader<S::RecvStream, crate::Version> = Reader::new(recv, outer_version);
 		// A stream that dies before its type varint is that stream's failure, not the
 		// session's. RESET_STREAM is how a peer drops a group, and QUIC does not order
@@ -575,7 +575,13 @@ async fn run_unis<S: crate::transport::poll::Session>(
 		// the peer wrote to. Failing the loop here would tear down the whole session
 		// over a single stream the peer had already given up on. Only death is
 		// tolerated: bytes that arrive and do not parse stay session-fatal.
-		let kind: u64 = match tasks.drive(reader.decode_peek()).await {
+		let kind: u64 = match tasks
+			.drive(|waiter| {
+				let mut cx = std::task::Context::from_waker(waiter.waker());
+				reader.poll_decode_peek(&mut cx)
+			})
+			.await
+		{
 			Ok(kind) => kind,
 			Err(err @ Error::Cancel) | Err(err @ Error::Remote(_)) | Err(err @ Error::Decode(DecodeError::Short)) => {
 				tracing::debug!(%err, "dropping uni stream that died before its type");
@@ -682,14 +688,30 @@ async fn run_dispatch<S: crate::transport::poll::Session>(
 	let mut tasks = TaskSet::owned();
 	let mut accept = session.clone();
 	loop {
-		let mut stream = tasks.drive(Stream::accept(&mut accept, version)).await?;
+		let mut stream = tasks
+			.drive(|waiter| {
+				let mut cx = std::task::Context::from_waker(waiter.waker());
+				Stream::poll_accept(&mut accept, version, &mut cx)
+			})
+			.await?;
 
+		// The intermediate results live outside the poll closure, so a Pending
+		// mid-header resumes where it left off.
+		let mut hdr_id: Option<u64> = None;
+		let mut hdr_size: Option<u16> = None;
 		let header = tasks
-			.drive(async {
-				let id: u64 = stream.reader.decode().await?;
-				let size: u16 = stream.reader.decode().await?;
-				let data = stream.reader.read_exact(size as usize).await?;
-				Ok::<_, Error>((id, data))
+			.drive(|waiter| {
+				let mut cx = std::task::Context::from_waker(waiter.waker());
+				let id = match hdr_id {
+					Some(id) => id,
+					None => *hdr_id.insert(std::task::ready!(stream.reader.poll_decode(&mut cx))?),
+				};
+				let size = match hdr_size {
+					Some(size) => size,
+					None => *hdr_size.insert(std::task::ready!(stream.reader.poll_decode(&mut cx))?),
+				};
+				let data = std::task::ready!(stream.reader.poll_read_exact(&mut cx, size as usize))?;
+				std::task::Poll::Ready(Ok::<_, Error>((id, data)))
 			})
 			.await;
 		// Same tolerance as `run_unis`: a request stream that dies before its header

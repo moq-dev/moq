@@ -439,15 +439,12 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		let res = {
 			let mut closed_session = self.session.clone();
 			let mut serve = std::pin::pin!(self.run_track(track, request_id));
-			let mut reader_closed = std::pin::pin!(stream.reader.closed());
 			kio::wait(|waiter| {
 				if let Poll::Ready(res) = waiter.poll_future(serve.as_mut()) {
 					return Poll::Ready(res);
 				}
 				let mut cx = std::task::Context::from_waker(waiter.waker());
-				if waiter.poll_future(reader_closed.as_mut()).is_ready()
-					|| closed_session.poll_closed(&mut cx).is_ready()
-				{
+				if stream.reader.poll_closed(&mut cx).is_ready() || closed_session.poll_closed(&mut cx).is_ready() {
 					return Poll::Ready(Ok(()));
 				}
 				Poll::Pending
@@ -608,16 +605,14 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 
 		loop {
 			// Wait for the next frame, bailing if the peer closes the stream first.
-			let frame = {
-				let mut closed = std::pin::pin!(stream.closed());
-				kio::wait(|waiter| {
-					if waiter.poll_future(closed.as_mut()).is_ready() {
-						return Poll::Ready(Err(Error::Cancel));
-					}
-					group.poll_next_frame(waiter)
-				})
-				.await
-			};
+			let frame = kio::wait(|waiter| {
+				let mut cx = std::task::Context::from_waker(waiter.waker());
+				if stream.poll_closed(&mut cx).is_ready() {
+					return Poll::Ready(Err(Error::Cancel));
+				}
+				group.poll_next_frame(waiter)
+			})
+			.await;
 
 			let mut frame = match frame? {
 				Some(frame) => frame,
@@ -644,16 +639,14 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 			} else {
 				// Stream each chunk of the frame.
 				loop {
-					let chunk = {
-						let mut closed = std::pin::pin!(stream.closed());
-						kio::wait(|waiter| {
-							if waiter.poll_future(closed.as_mut()).is_ready() {
-								return Poll::Ready(Err(Error::Cancel));
-							}
-							frame.poll_read_chunk(waiter)
-						})
-						.await
-					};
+					let chunk = kio::wait(|waiter| {
+						let mut cx = std::task::Context::from_waker(waiter.waker());
+						if stream.poll_closed(&mut cx).is_ready() {
+							return Poll::Ready(Err(Error::Cancel));
+						}
+						frame.poll_read_chunk(waiter)
+					})
+					.await;
 
 					match chunk? {
 						Some(chunk) => {
@@ -1089,9 +1082,9 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 			linger.set(Self::linger_deadline(&watched));
 
 			let event = {
-				let mut closed = std::pin::pin!(stream.reader.closed());
 				kio::wait(|waiter| {
-					if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
 						return Poll::Ready(NamespaceEvent::Closed(res));
 					}
 					if let Poll::Ready(update) = announced.poll_next(waiter) {

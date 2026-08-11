@@ -124,15 +124,14 @@ impl TaskSet {
 		}
 	}
 
-	/// Poll every child while awaiting `future`, returning its output.
+	/// Poll every child while polling `f`, returning its output.
 	///
-	/// `future` is polled in place rather than cancelled and rebuilt each time a
-	/// child finishes, so an accept loop can serve its children without assuming the
-	/// transport's `accept_*` is cancel-safe (`web_transport_trait` promises nothing).
-	pub async fn drive<F: Future>(&mut self, future: F) -> F::Output {
-		let mut future = std::pin::pin!(future);
+	/// `f` is a poll function rather than a future, so an accept loop polls the
+	/// transport directly and there is no accept future to cancel or rebuild when
+	/// a child finishes.
+	pub async fn drive<T>(&mut self, mut f: impl FnMut(&kio::Waiter) -> Poll<T> + Unpin) -> T {
 		kio::wait(|waiter| {
-			if let Poll::Ready(output) = waiter.poll_future(future.as_mut()) {
+			if let Poll::Ready(output) = f(waiter) {
 				return Poll::Ready(output);
 			}
 			// The children never end the drive; a `Ready` here just means they're
@@ -192,17 +191,17 @@ mod tests {
 			child_completed.fetch_add(1, Ordering::SeqCst);
 		});
 
-		// The driven future only resolves after the child ran, proving drive()
+		// The driven poll only resolves after the child ran, proving drive()
 		// interleaves both without an executor.
 		let gate = completed.clone();
-		let output = futures::executor::block_on(set.drive(std::future::poll_fn(move |cx| {
+		let output = futures::executor::block_on(set.drive(move |waiter| {
 			if gate.load(Ordering::SeqCst) == 1 {
 				std::task::Poll::Ready(42)
 			} else {
-				cx.waker().wake_by_ref();
+				waiter.waker().wake_by_ref();
 				std::task::Poll::Pending
 			}
-		})));
+		}));
 
 		assert_eq!(output, 42);
 	}

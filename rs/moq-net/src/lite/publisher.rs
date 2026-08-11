@@ -139,7 +139,12 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		// shared `this` stays behind the Arc for the per-stream children.
 		let mut accept = this.session.clone();
 		loop {
-			let stream = tasks.drive(Stream::accept(&mut accept, this.version)).await?;
+			let stream = tasks
+				.drive(|waiter| {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					Stream::poll_accept(&mut accept, this.version, &mut cx)
+				})
+				.await?;
 
 			let this = this.clone();
 			tasks.push(async move {
@@ -217,17 +222,14 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 
 		loop {
 			// Tick the probe interval, bailing as soon as the peer closes its side.
-			let closed = {
-				let mut closed = std::pin::pin!(stream.reader.closed());
-				kio::wait(|waiter| {
-					if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
-						return Poll::Ready(Some(res));
-					}
-					let mut cx = std::task::Context::from_waker(waiter.waker());
-					interval.poll_tick(&mut cx).map(|_| None)
-				})
-				.await
-			};
+			let closed = kio::wait(|waiter| {
+				let mut cx = std::task::Context::from_waker(waiter.waker());
+				if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
+					return Poll::Ready(Some(res));
+				}
+				interval.poll_tick(&mut cx).map(|_| None)
+			})
+			.await;
 			if let Some(res) = closed {
 				return res;
 			}
@@ -516,9 +518,9 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 					.map(|at| at + COST_LINGER),
 			);
 			let op = {
-				let mut closed = std::pin::pin!(stream.reader.closed());
 				kio::wait(|waiter| {
-					if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
 						return Poll::Ready(Err(res));
 					}
 					if let Poll::Ready(next) = announced.poll_next(waiter) {
@@ -2216,10 +2218,6 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 		loop {
 			let event = {
 				let emit_boundary = emit_range && !end_sent;
-				// SUBSCRIBE_UPDATE messages share this hot loop; safe because
-				// decode_maybe is cancel-safe given quinn/qmux's cancel-safe
-				// read primitives (see Reader::decode_maybe doc).
-				let mut update = std::pin::pin!(reader.decode_maybe::<lite::SubscribeUpdate>());
 				kio::wait(|waiter| {
 					// Drive in-flight group futures; completions just drop.
 					let mut cx = std::task::Context::from_waker(waiter.waker());
@@ -2227,8 +2225,9 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 
 					// Control first: SUBSCRIBE_UPDATE/FIN messages are rare, so they can't
 					// starve the data path, while a deep group backlog polled first could
-					// defer an unsubscribe or priority change indefinitely.
-					if let Poll::Ready(upd) = waiter.poll_future(update.as_mut()) {
+					// defer an unsubscribe or priority change indefinitely. Partial
+					// message bytes persist in the reader's buffer across turns.
+					if let Poll::Ready(upd) = reader.poll_decode_maybe::<lite::SubscribeUpdate>(&mut cx) {
 						return Poll::Ready(Event::Update(upd));
 					}
 					// One cursor drives the whole subscription: poll the cap-aware arrival-order
@@ -2511,10 +2510,10 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 
 		loop {
 			let event = {
-				let mut closed = std::pin::pin!(stream.closed());
 				let seen = *track_priority_seen;
 				kio::wait(|waiter| {
-					if waiter.poll_future(closed.as_mut()).is_ready() {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					if stream.poll_closed(&mut cx).is_ready() {
 						return Poll::Ready(Event::Closed);
 					}
 					if let Poll::Ready(res) = work(waiter) {

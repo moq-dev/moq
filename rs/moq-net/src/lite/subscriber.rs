@@ -185,11 +185,15 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		.await
 	}
 
-	async fn run_uni(mut self) -> Result<(), Error> {
+	async fn run_uni(self) -> Result<(), Error> {
 		let mut tasks = TaskSet::owned();
+		let mut accept = self.session.clone();
 		loop {
 			let stream = tasks
-				.drive(self.session.accept_uni())
+				.drive(|waiter| {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					accept.poll_accept_uni(&mut cx)
+				})
 				.await
 				.map_err(Error::from_transport)?;
 
@@ -695,22 +699,19 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		let mut closed_session = self.session.clone();
 		loop {
 			let next = tracks
-				.drive(async {
-					kio::wait(|waiter| {
-						let mut cx = std::task::Context::from_waker(waiter.waker());
-						if closed_session.poll_closed(&mut cx).is_ready() {
-							return Poll::Ready(None);
-						}
-						// A draining peer usually stops announcing, so react to the signal
-						// itself; waiting for another message would leave the route primary
-						// until the session finally closed. Idempotent, since the signal
-						// stays set and this task wakes for other reasons too.
-						if self.going_away.poll(waiter).is_ready() {
-							dynamic.drain();
-						}
-						dynamic.poll_requested_track(waiter).map(Some)
-					})
-					.await
+				.drive(|waiter| {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					if closed_session.poll_closed(&mut cx).is_ready() {
+						return Poll::Ready(None);
+					}
+					// A draining peer usually stops announcing, so react to the signal
+					// itself; waiting for another message would leave the route primary
+					// until the session finally closed. Idempotent, since the signal
+					// stays set and this task wakes for other reasons too.
+					if self.going_away.poll(waiter).is_ready() {
+						dynamic.drain();
+					}
+					dynamic.poll_requested_track(waiter).map(Some)
 				})
 				.await;
 
@@ -1844,13 +1845,6 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 
 		let teardown = loop {
 			let event = {
-				// The upstream subscribe stream closed, or carried a START/END/DROP.
-				let mut sub_msg = std::pin::pin!(async {
-					match &mut sub {
-						Sub::Active(active) => active.stream.reader.decode_maybe::<lite::SubscribeResponse>().await,
-						Sub::None => std::future::pending().await,
-					}
-				});
 				let mut closed_session = self.subscriber.session.clone();
 				// Biased: demand first, then completions, then closures.
 				kio::wait(|waiter| {
@@ -1889,7 +1883,14 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 					}
 
 					// (4) The upstream subscribe stream closed, or carried a START/END/DROP.
-					if let Poll::Ready(res) = waiter.poll_future(sub_msg.as_mut()) {
+					// Partial message bytes persist in the reader's buffer across turns.
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					if let Sub::Active(active) = &mut sub
+						&& let Poll::Ready(res) = active
+							.stream
+							.reader
+							.poll_decode_maybe::<lite::SubscribeResponse>(&mut cx)
+					{
 						return Poll::Ready(match res {
 							Ok(Some(msg)) => Event::SubResponse(msg),
 							Ok(None) => Event::SubClosed(Ok(())),
@@ -1898,7 +1899,6 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 					}
 
 					// (5) The session died: hand the track back for another route.
-					let mut cx = std::task::Context::from_waker(waiter.waker());
 					if closed_session.poll_closed(&mut cx).is_ready() {
 						return Poll::Ready(Event::SessionClosed);
 					}
@@ -2023,17 +2023,14 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			})
 			.await?;
 
-		let info = {
-			let mut decode = std::pin::pin!(stream.reader.decode::<lite::TrackInfo>());
-			kio::wait(|waiter| {
-				let mut cx = std::task::Context::from_waker(waiter.waker());
-				if session.poll_closed(&mut cx).is_ready() {
-					return Poll::Ready(Err(Error::Dropped));
-				}
-				waiter.poll_future(decode.as_mut())
-			})
-			.await?
-		};
+		let info = kio::wait(|waiter| {
+			let mut cx = std::task::Context::from_waker(waiter.waker());
+			if session.poll_closed(&mut cx).is_ready() {
+				return Poll::Ready(Err(Error::Dropped));
+			}
+			stream.reader.poll_decode::<lite::TrackInfo>(&mut cx)
+		})
+		.await?;
 		// The publisher FINs after TRACK_INFO; FIN our side too and let the stream drop.
 		let _ = stream.writer.finish();
 
@@ -2232,13 +2229,12 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			// serve loop's teardown instead.
 			let resp = {
 				let mut session = self.subscriber.session.clone();
-				let mut decode = std::pin::pin!(stream.reader.decode::<lite::SubscribeResponse>());
 				kio::wait(|waiter| {
 					let mut cx = std::task::Context::from_waker(waiter.waker());
 					if session.poll_closed(&mut cx).is_ready() {
 						return Poll::Ready(Err(Error::Dropped));
 					}
-					waiter.poll_future(decode.as_mut())
+					stream.reader.poll_decode::<lite::SubscribeResponse>(&mut cx)
 				})
 				.await
 			};

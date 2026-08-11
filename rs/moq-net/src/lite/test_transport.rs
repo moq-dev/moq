@@ -92,6 +92,16 @@ impl SinkSend {
 			finished: false,
 		}
 	}
+
+	/// A send stream whose writes park until `gate` flips to true.
+	pub fn gated(log: Log, gate: kio::Consumer<bool>) -> Self {
+		Self {
+			log,
+			gate: Some(gate),
+			park: kio::Park::default(),
+			finished: false,
+		}
+	}
 }
 
 impl poll::SendStream for SinkSend {

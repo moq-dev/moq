@@ -3,10 +3,10 @@ use crate::{
 	Error, Origin, SessionError, bandwidth,
 	coding::{Reader, Stream, Writer},
 	lite::SessionInfo,
-	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, err_only},
+	util::{MaybeBoxedExt, MaybeSendBox, TaskSet},
 };
 
-use std::task::Poll;
+use std::task::{Context, Poll, ready};
 
 use super::{
 	Connecting, DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, Version,
@@ -171,57 +171,8 @@ pub fn start<S: crate::transport::poll::Session>(config: Config<S>) -> Result<Se
 	// name a redirect URI, unlike moq-transport.
 	let (goaway_handle, goaway) = crate::goaway::Handle::new(true);
 
-	// Read out before the setup task takes ownership below.
+	// Read out before the setup machine takes ownership below.
 	let our_cost = our_setup.cost;
-
-	// Advertise our own capabilities on a uni Setup Stream, then FIN. Best-effort:
-	// a failure here just means the peer falls back to "no capabilities" for us.
-	if version.has_setup_stream() {
-		let mut session = session.clone();
-		tasks.push(async move {
-			if let Err(err) = send_setup(&mut session, our_setup, version).await {
-				tracing::debug!(%err, "failed to send setup");
-			}
-		});
-	}
-
-	// GOAWAY send task: parked on the send trigger; fires at most once (the trigger
-	// only accepts one payload). Races the transport close so a parked trigger
-	// never blocks the task set draining.
-	//
-	// Spawned on every version, including those with no GOAWAY message. The
-	// deadline is the sender's own timer, so a caller draining a lite-03 peer still
-	// gets the session closed on schedule; the peer just never learns why.
-	{
-		let mut session = session.clone();
-		let goaway = goaway.clone();
-		tasks.push(async move {
-			let payload = {
-				let mut triggered = std::pin::pin!(goaway.triggered());
-				kio::wait(|waiter| {
-					let mut cx = std::task::Context::from_waker(waiter.waker());
-					if session.poll_closed(&mut cx).is_ready() {
-						return std::task::Poll::Ready(None);
-					}
-					waiter.poll_future(triggered.as_mut())
-				})
-				.await
-			};
-			let Some(payload) = payload else {
-				return;
-			};
-			// moq-lite has no timeout field on the wire; only the URI is sent. The
-			// deadline is still ours to honor, enforced locally below.
-			if version.has_goaway()
-				&& let Err(err) = send_goaway(&mut session, &payload.uri, version).await
-			{
-				// Still enforce the deadline: the drain was requested, and failing to
-				// explain it to the peer is no reason to hold the session open.
-				tracing::warn!(%err, "failed to send goaway");
-			}
-			crate::goaway::enforce(&mut session, payload.timeout).await;
-		});
-	}
 
 	let publisher = Publisher::new(PublisherConfig {
 		session: session.clone(),
@@ -243,30 +194,23 @@ pub fn start<S: crate::transport::poll::Session>(config: Config<S>) -> Result<Se
 		// for its own egress.
 		cost: our_cost,
 		tasks,
-		going_away: goaway.going_away,
+		going_away: goaway.going_away.clone(),
 	});
 
+	let mut driver = Driver {
+		setup: version
+			.has_setup_stream()
+			.then(|| SendSetup::new(session.clone(), our_setup, version)),
+		goaway: Some(SendGoaway::new(session.clone(), goaway, version)),
+		session_stream: setup_stream,
+		publisher: publisher.run().maybe_boxed(),
+		subscriber: subscriber.run(sub_connecting, task_set).maybe_boxed(),
+	};
+
+	// The async block only owns the state; all the logic is in `Driver::poll`.
+	// (The closure borrows `driver` so it stays `Unpin` for any transport.)
 	let driver = async move {
-		let res = {
-			// Only a session-stream error ends the race; its clean completion (no
-			// stream) parks so the publisher and subscriber keep running.
-			let mut session = std::pin::pin!(err_only(run_session(setup_stream)));
-			let mut publisher = std::pin::pin!(publisher.run());
-			let mut subscriber = std::pin::pin!(subscriber.run(sub_connecting, task_set));
-			kio::wait(|waiter| {
-				if let Poll::Ready(err) = waiter.poll_future(session.as_mut()) {
-					return Poll::Ready(Err(err));
-				}
-				if let Poll::Ready(res) = waiter.poll_future(publisher.as_mut()) {
-					return Poll::Ready(res);
-				}
-				if let Poll::Ready(res) = waiter.poll_future(subscriber.as_mut()) {
-					return Poll::Ready(res);
-				}
-				Poll::Pending
-			})
-			.await
-		};
+		let res = kio::wait(|waiter| driver.poll(waiter)).await;
 
 		match &res {
 			Err(Error::Transport(_)) => {
@@ -295,48 +239,269 @@ pub fn start<S: crate::transport::poll::Session>(config: Config<S>) -> Result<Se
 	})
 }
 
-/// Open a unidirectional Setup Stream, send our single SETUP message, and FIN.
-async fn send_setup<S: crate::transport::poll::Session>(
-	session: &mut S,
-	setup: Setup,
-	version: Version,
-) -> Result<(), Error> {
-	let stream = session.open_uni().await.map_err(Error::from_transport)?;
-	let mut writer = Writer::new(stream, version);
-	writer.encode(&super::DataType::Setup).await?;
-	writer.encode(&setup).await?;
-	writer.finish()?;
-	writer.closed().await
+/// The lite session driver: one poll function racing every protocol arm, in
+/// place of a task set of boxed futures.
+struct Driver<S: crate::transport::poll::Session> {
+	/// Advertising our capabilities, or `None` once sent (or on a version with no
+	/// Setup Stream).
+	setup: Option<SendSetup<S>>,
+	/// Sending our single GOAWAY if the drain trigger fires, or `None` once done.
+	goaway: Option<SendGoaway<S>>,
+	/// The legacy session stream (pre-lite-03). Only its *error* ends the race, so
+	/// the publisher and subscriber keep running while it sits idle.
+	session_stream: Option<Stream<S, Version>>,
+	publisher: MaybeSendBox<'static, Result<(), Error>>,
+	subscriber: MaybeSendBox<'static, Result<(), Error>>,
 }
 
-/// Open a Goaway control stream (0x5), send the single GOAWAY message, and FIN.
-/// Lite04+ only; the version gate is the caller's.
-async fn send_goaway<S: crate::transport::poll::Session>(
-	session: &mut S,
-	uri: &str,
-	version: Version,
-) -> Result<(), Error> {
-	let mut stream = Stream::open(session, version).await?;
-	stream.writer.encode(&super::ControlType::Goaway).await?;
-	stream
-		.writer
-		.encode(&super::Goaway {
-			uri: std::borrow::Cow::Borrowed(uri),
-		})
-		.await?;
-	stream.writer.finish()?;
-	// Wait for the FIN to be acknowledged before dropping: Writer's Drop resets
-	// the stream, and on real QUIC a reset racing the FIN discards the unacked
-	// GOAWAY frame (the same dance as send_setup).
-	stream.writer.closed().await
+impl<S: crate::transport::poll::Session> Driver<S> {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let mut cx = Context::from_waker(waiter.waker());
+
+		// The send-side machines never end the session; completion just retires them.
+		if let Some(setup) = &mut self.setup
+			&& setup.poll(&mut cx).is_ready()
+		{
+			self.setup = None;
+		}
+		if let Some(goaway) = &mut self.goaway
+			&& goaway.poll(waiter).is_ready()
+		{
+			self.goaway = None;
+		}
+
+		if let Some(stream) = &mut self.session_stream
+			&& let Poll::Ready(err) = poll_session_stream(stream, &mut cx)
+		{
+			return Poll::Ready(Err(err));
+		}
+		if let Poll::Ready(res) = waiter.poll_future(self.publisher.as_mut()) {
+			return Poll::Ready(res);
+		}
+		if let Poll::Ready(res) = waiter.poll_future(self.subscriber.as_mut()) {
+			return Poll::Ready(res);
+		}
+		Poll::Pending
+	}
 }
 
-// TODO do something useful with this
-async fn run_session<S: crate::transport::poll::Session>(stream: Option<Stream<S, Version>>) -> Result<(), Error> {
-	if let Some(mut stream) = stream {
-		while let Some(_info) = stream.reader.decode_maybe::<SessionInfo>().await? {}
-		return Err(Error::Cancel);
+/// Drain SessionInfo updates off the legacy session stream, resolving only when
+/// the stream dies (a FIN counts: the peer abandoned the session).
+// TODO do something useful with the updates
+fn poll_session_stream<S: crate::transport::poll::Session>(
+	stream: &mut Stream<S, Version>,
+	cx: &mut Context<'_>,
+) -> Poll<Error> {
+	loop {
+		match ready!(stream.reader.poll_decode_maybe::<SessionInfo>(cx)) {
+			Ok(Some(_info)) => {}
+			Ok(None) => return Poll::Ready(Error::Cancel),
+			Err(err) => return Poll::Ready(err),
+		}
+	}
+}
+
+/// Advertise our capabilities on a uni Setup Stream, then FIN. Best-effort: an
+/// error is logged and the machine finishes; the peer falls back to "no
+/// capabilities" for us.
+struct SendSetup<S: crate::transport::poll::Session> {
+	version: Version,
+	state: SendSetupState<S>,
+}
+
+enum SendSetupState<S: crate::transport::poll::Session> {
+	/// Waiting for stream credit on our own session handle.
+	Open {
+		session: S,
+		setup: Box<Setup>,
+	},
+	/// Flushing the buffered SETUP, then FIN and wait for the acknowledgement (a
+	/// reset racing the FIN would discard the unacked message).
+	Send {
+		writer: Writer<S::SendStream, Version>,
+		finished: bool,
+	},
+	Done,
+}
+
+impl<S: crate::transport::poll::Session> SendSetup<S> {
+	fn new(session: S, setup: Setup, version: Version) -> Self {
+		Self {
+			version,
+			state: SendSetupState::Open {
+				session,
+				setup: Box::new(setup),
+			},
+		}
 	}
 
-	Ok(())
+	fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+		match ready!(self.poll_send(cx)) {
+			Ok(()) => {}
+			Err(err) => tracing::debug!(%err, "failed to send setup"),
+		}
+		self.state = SendSetupState::Done;
+		Poll::Ready(())
+	}
+
+	fn poll_send(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+		loop {
+			match &mut self.state {
+				SendSetupState::Open { session, setup } => {
+					let stream = ready!(session.poll_open_uni(cx)).map_err(Error::from_transport)?;
+					let mut writer = Writer::new(stream, self.version);
+					writer.buffer(&super::DataType::Setup)?;
+					writer.buffer(&**setup)?;
+					self.state = SendSetupState::Send {
+						writer,
+						finished: false,
+					};
+				}
+				SendSetupState::Send { writer, finished } => {
+					if !*finished {
+						ready!(writer.poll_flush(cx))?;
+						writer.finish()?;
+						*finished = true;
+					}
+					return writer.poll_closed(cx);
+				}
+				SendSetupState::Done => return Poll::Ready(Ok(())),
+			}
+		}
+	}
+}
+
+/// Send our single GOAWAY when the drain trigger fires, then enforce its local
+/// deadline.
+///
+/// Runs on every version, including those with no GOAWAY message: the deadline is
+/// the sender's own timer, so a caller draining a lite-03 peer still gets the
+/// session closed on schedule; the peer just never learns why.
+struct SendGoaway<S: crate::transport::poll::Session> {
+	version: Version,
+	goaway: crate::goaway::Protocol,
+	/// A dedicated handle for the trigger-phase close watch, since `session` opens
+	/// the Goaway stream and each pending operation needs its own handle.
+	closed: S,
+	session: S,
+	state: SendGoawayState<S>,
+}
+
+enum SendGoawayState<S: crate::transport::poll::Session> {
+	/// Parked on the send trigger, racing the transport close so a parked trigger
+	/// never blocks the driver. The trigger fires at most once.
+	Waiting,
+	/// Opening the Goaway control stream (0x5). Lite04+ only; earlier versions
+	/// jump straight to enforcement.
+	Open { payload: crate::goaway::Goaway },
+	/// Flushing the single GOAWAY message, then FIN and wait for the
+	/// acknowledgement before dropping: Writer's Drop resets the stream, and on
+	/// real QUIC a reset racing the FIN discards the unacked GOAWAY frame.
+	Send {
+		stream: Stream<S, Version>,
+		timeout: Option<std::time::Duration>,
+		finished: bool,
+	},
+	/// The message is on the wire (or failed); enforce the local deadline.
+	Enforce(crate::goaway::Enforce<S>),
+}
+
+impl<S: crate::transport::poll::Session> SendGoaway<S> {
+	fn new(session: S, goaway: crate::goaway::Protocol, version: Version) -> Self {
+		Self {
+			version,
+			goaway,
+			closed: session.clone(),
+			session,
+			state: SendGoawayState::Waiting,
+		}
+	}
+
+	/// Move to enforcement, logging why the message never (fully) hit the wire.
+	///
+	/// Still enforce the deadline: the drain was requested, and failing to explain
+	/// it to the peer is no reason to hold the session open.
+	fn enforce_after(&mut self, err: Error, timeout: Option<std::time::Duration>) {
+		tracing::warn!(%err, "failed to send goaway");
+		self.state = SendGoawayState::Enforce(crate::goaway::Enforce::new(self.session.clone(), timeout));
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let mut cx = Context::from_waker(waiter.waker());
+		loop {
+			match &mut self.state {
+				SendGoawayState::Waiting => {
+					if self.closed.poll_closed(&mut cx).is_ready() {
+						return Poll::Ready(());
+					}
+					let Some(payload) = ready!(self.goaway.poll_triggered(waiter)) else {
+						return Poll::Ready(());
+					};
+					// moq-lite has no timeout field on the wire; only the URI is sent.
+					// The deadline is still ours to honor, enforced locally below.
+					self.state = if self.version.has_goaway() {
+						SendGoawayState::Open { payload }
+					} else {
+						SendGoawayState::Enforce(crate::goaway::Enforce::new(self.session.clone(), payload.timeout))
+					};
+				}
+				SendGoawayState::Open { payload } => {
+					let timeout = payload.timeout;
+					let mut stream = match ready!(Stream::poll_open(&mut self.session, self.version, &mut cx)) {
+						Ok(stream) => stream,
+						Err(err) => {
+							self.enforce_after(err, timeout);
+							continue;
+						}
+					};
+					let msg = super::Goaway {
+						uri: std::borrow::Cow::Borrowed(payload.uri.as_str()),
+					};
+					if let Err(err) = stream
+						.writer
+						.buffer(&super::ControlType::Goaway)
+						.and_then(|()| stream.writer.buffer(&msg))
+					{
+						self.enforce_after(err, timeout);
+						continue;
+					}
+					self.state = SendGoawayState::Send {
+						stream,
+						timeout,
+						finished: false,
+					};
+				}
+				SendGoawayState::Send {
+					stream,
+					timeout,
+					finished,
+				} => {
+					let timeout = *timeout;
+					let res = if !*finished {
+						match ready!(stream.writer.poll_flush(&mut cx)) {
+							Ok(()) => {
+								*finished = true;
+								stream.writer.finish()
+							}
+							Err(err) => Err(err),
+						}
+					} else {
+						Ok(())
+					};
+					let res = match res {
+						Ok(()) => ready!(stream.writer.poll_closed(&mut cx)),
+						Err(err) => Err(err),
+					};
+					match res {
+						Ok(()) => {
+							self.state =
+								SendGoawayState::Enforce(crate::goaway::Enforce::new(self.session.clone(), timeout));
+						}
+						Err(err) => self.enforce_after(err, timeout),
+					}
+				}
+				SendGoawayState::Enforce(enforce) => return enforce.poll(&mut cx),
+			}
+		}
+	}
 }
