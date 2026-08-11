@@ -10,9 +10,8 @@ import type * as track from "../track.ts";
 
 // The transport compares send orders as a single number, so the two ranks are packed into
 // disjoint ranges: the track priority takes the high bits so it always dominates, and the
-// group sequence breaks ties below it. The priority is a u8, so 45 bits are left for the
-// sequence before the pack stops being an exact integer (255 * 2^45 + 2^45 - 1 is exactly
-// Number.MAX_SAFE_INTEGER).
+// position below it. The priority is a u8, so 45 bits are left before the pack stops being an
+// exact integer (255 * 2^45 + 2^45 - 1 is exactly Number.MAX_SAFE_INTEGER).
 const GROUP_SPAN = 2 ** 45;
 
 /** The highest track priority the wire carries (a u8). */
@@ -24,101 +23,74 @@ export interface Rank {
 	priority: number;
 
 	/**
-	 * The group's sequence, breaking ties within a track. Prefer a sequence relative to the
-	 * subscription's first group over an absolute one: only the spread between the groups in
-	 * flight has to fit the space left below the priority (see the note on `GROUP_SPAN`).
+	 * Where the group sits in the queue its own subscription wants sent, 0 being the one to
+	 * send next. Defaults to 0, which is right for a stream that is the only one of its kind.
 	 */
-	sequence: number;
-
-	/**
-	 * Whether the subscriber wants groups in sequence order, oldest first (the `ordered`
-	 * subscription option). Defaults to newest-first, which is what live playback wants.
-	 */
-	ordered?: boolean;
+	position?: number;
 }
 
 /**
  * The transport send order for a group, where HIGHER values are transmitted first.
  *
- * A higher `priority` always wins. Within a track, a higher `sequence` normally wins, so a
- * newer group preempts one that is falling behind. An `ordered` subscription inverts that:
- * the oldest group in flight goes first, since it is the one playback needs next.
- *
- * The sequence is a u53 on the wire and only 45 bits are left for it, so it enters modulo
- * that span. Two groups that far apart are never in flight together, so any monotonic
- * numbering keeps its order.
+ * A higher `priority` always wins. Below it, a group is ranked by its `position` in its own
+ * subscription rather than by its sequence, so two tracks at the same priority interleave:
+ * each one's next group ties with the other's, whatever their group numbering. Comparing
+ * sequences instead would let a track that had been running longer, or that numbered its
+ * groups from a clock, starve one that started later.
  */
-export function sendOrder({ priority, sequence, ordered }: Rank): number {
-	const group = wrap(sequence, GROUP_SPAN);
-	return clamp(priority, MAX_PRIORITY) * GROUP_SPAN + (ordered ? GROUP_SPAN - 1 - group : group);
+export function sendOrder({ priority, position = 0 }: Rank): number {
+	return clamp(priority, MAX_PRIORITY) * GROUP_SPAN + (GROUP_SPAN - 1 - clamp(position, GROUP_SPAN - 1));
 }
 
-// The priority is bounded by its wire type, so anything outside it is a caller bug rather
-// than a value to preserve.
+// Both ranks are bounded: the priority by its wire type, the position by the space left below
+// it. Anything outside is a caller bug rather than a value worth preserving.
 function clamp(value: number, max: number): number {
 	return Math.min(Math.max(Math.trunc(value), 0), max);
 }
 
-// The sequence has no such bound, and truncating it would rank every group above the cutoff
-// equally. Wrapping instead keeps the ordering of any two groups that can coexist.
-function wrap(value: number, span: number): number {
-	return Math.max(Math.trunc(value), 0) % span;
-}
-
 /**
- * Ranks one subscription's group streams, re-ranking them whenever it is updated.
+ * Ranks one subscription's group streams against each other, and re-ranks them whenever the
+ * set changes or the subscription is updated.
  *
- * A SUBSCRIBE_UPDATE changes the priority of every group in flight, so this holds a single
- * listener for the subscription and fans each change out to the streams. A listener per group
- * would instead pile up on the subscription, and a track that stalls with many groups open
- * would trip the signals leak guard.
+ * A group's rank is its position among the groups in flight, so which group goes first is
+ * decided here rather than by arithmetic on sequence numbers. Newest-first by default, since
+ * that is what live playback wants; an `ordered` subscription is playing through in sequence,
+ * so it gets the oldest group first instead.
+ *
+ * One listener covers the whole subscription. A listener per group would instead pile up on
+ * it, and a track that stalls with many groups open would trip the signals leak guard.
  */
 export class Priority {
 	#track: track.Subscriber;
 	#streams = new Map<Writer, number>();
 	#dispose: Dispose;
 
-	// The first sequence this subscription served, so ranks are a distance from it rather than
-	// an absolute position. A publisher may number groups from a clock, and a relay preserves
-	// whatever its upstream used, but the spread between the groups in flight is always small.
-	#base?: number;
-
 	/** Follow `track`'s subscription until {@link close}. */
 	constructor(track: track.Subscriber) {
 		this.#track = track;
-		this.#dispose = track.subscription.subscribe(() => {
-			for (const [stream, sequence] of this.#streams) {
-				stream.setPriority(this.rank(sequence));
-			}
-		});
+		this.#dispose = track.subscription.subscribe(() => this.#rerank());
 	}
 
-	/** The send order for a group at `sequence`, given the subscription's current options. */
+	/** The send order for a group at `sequence`, whether or not it has a stream yet. */
 	rank(sequence: number): number {
-		const subscription = this.#track.subscription.peek();
-		this.#base ??= sequence;
-
 		return sendOrder({
-			priority: subscription?.priority ?? 0,
-			// Groups are served in sequence order, so this only goes backwards if the publisher
-			// renumbered, which leaves the group at the bottom of its priority.
-			sequence: Math.max(0, sequence - this.#base),
-			ordered: subscription?.ordered ?? false,
+			priority: this.#track.subscription.peek()?.priority ?? 0,
+			position: this.#position(sequence),
 		});
 	}
 
-	/** Rank a group's stream now, and on every later update until {@link remove}. */
+	/** Rank a group's stream now, and again whenever the ranking changes, until {@link remove}. */
 	add(stream: Writer, sequence: number) {
 		this.#streams.set(stream, sequence);
 
-		// Opening a stream can block on transport capacity, so an update that landed while it
-		// did predates this registration.
-		stream.setPriority(this.rank(sequence));
+		// Also covers the stream itself: opening one can block on transport capacity, so an
+		// update that landed while it did predates this registration.
+		this.#rerank();
 	}
 
-	/** Stop ranking a finished group's stream. */
+	/** Stop ranking a finished group's stream, promoting whatever was queued behind it. */
 	remove(stream: Writer) {
-		this.#streams.delete(stream);
+		if (this.#streams.delete(stream)) this.#rerank();
 	}
 
 	/**
@@ -130,5 +102,25 @@ export class Priority {
 	close() {
 		this.#dispose();
 		this.#streams.clear();
+	}
+
+	// How many of this subscription's groups in flight should be sent before `sequence`.
+	// Sequences are unique within a subscription, so a group already registered never counts
+	// itself.
+	#position(sequence: number): number {
+		const ordered = this.#track.subscription.peek()?.ordered ?? false;
+
+		let ahead = 0;
+		for (const other of this.#streams.values()) {
+			if (ordered ? other < sequence : other > sequence) ahead++;
+		}
+		return ahead;
+	}
+
+	#rerank() {
+		const priority = this.#track.subscription.peek()?.priority ?? 0;
+		for (const [stream, sequence] of this.#streams) {
+			stream.setPriority(sendOrder({ priority, position: this.#position(sequence) }));
+		}
 	}
 }

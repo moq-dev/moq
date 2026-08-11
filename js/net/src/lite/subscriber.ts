@@ -577,7 +577,7 @@ export class Subscriber {
 
 			const info = await this.#trackInfo(broadcast, track);
 			const priority = options.priority ?? 0;
-			const stream = await Stream.open(this.#quic, { sendOrder: sendOrder({ priority, sequence }) });
+			const stream = await Stream.open(this.#quic, { sendOrder: sendOrder({ priority }) });
 
 			try {
 				await stream.writer.u53(StreamId.Fetch);

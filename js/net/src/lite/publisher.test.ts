@@ -54,11 +54,29 @@ async function subscribeEnd(sequences: number[]): Promise<number> {
 	}
 }
 
+// Wait for the publisher to start serving the next group.
+//
+// The peer end of the stream arrives while the publisher is still opening it, so that alone
+// says nothing about the ranking. Its first byte does: the header is written only after the
+// group has joined the subscription's ranking.
+async function servingNextGroup(opened: ReadableStreamDefaultReader<ReadableStream<Uint8Array>>) {
+	const next = await opened.read();
+	if (next.done) throw new Error("publisher never opened the group stream");
+
+	const reader = next.value.getReader();
+	if ((await reader.read()).done) throw new Error("publisher never wrote the group header");
+	reader.releaseLock();
+}
+
 // Serves `sequences` under the given subscription, optionally raising its priority via
 // SUBSCRIBE_UPDATE after the first group, and returns the send order of each group stream in
 // the order the publisher opened them.
+//
+// Every group is left open, so all of their streams are in flight and ranked against each
+// other. A group that finished would leave the ranking, which is the point of it.
 async function groupSendOrders(options: { priority: number; sequences: number[]; update?: number; ordered?: boolean }) {
 	const { priority, sequences, update, ordered } = options;
+	const groups = sequences.map((sequence) => new GroupProducer(sequence));
 	const pair = createMockTransportPair(ALPN_05);
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
 
@@ -77,22 +95,19 @@ async function groupSendOrders(options: { priority: number; sequences: number[];
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
 
 	try {
-		for (const [index, sequence] of sequences.entries()) {
+		for (const [index, group] of groups.entries()) {
 			if (index === 1 && update !== undefined) {
 				await new SubscribeUpdate({ priority: update, ordered }).encode(client.writer, Version.DRAFT_05);
 				// Wait for the publisher to apply it, rather than assuming it beat the next group.
 				while (track.subscription.peek()?.priority !== update) await track.subscription.changed();
 			}
 
-			const group = new GroupProducer(sequence);
 			group.writeString("hello");
-			group.close();
 			track.writeGroup(group);
 
 			// One stream per group, in the order given: wait for this one before queuing the next.
-			if ((await opened.read()).done) throw new Error("publisher never opened the group stream");
+			await servingNextGroup(opened);
 		}
-		track.close();
 
 		return pair.server.sendStreams.uni.map((stream) => {
 			if (stream.sendOrder === undefined) throw new Error("group stream opened without a send order");
@@ -100,6 +115,7 @@ async function groupSendOrders(options: { priority: number; sequences: number[];
 		});
 	} finally {
 		opened.releaseLock();
+		for (const group of groups) group.close();
 		publisher.close();
 		client.close();
 	}
@@ -107,35 +123,47 @@ async function groupSendOrders(options: { priority: number; sequences: number[];
 
 // Without a send order every group stream ranks the same, so the transport round-robins them
 // and a stalled low-priority track steals bandwidth from the one the subscriber asked for.
-test("lite draft-05: group streams carry the subscription's send order", async () => {
+// Live playback wants the newest group, so it is the one at position 0.
+test("lite draft-05: group streams are ranked newest-first", async () => {
 	const orders = await groupSendOrders({ priority: 7, sequences: [0, 1, 2] });
 	expect(orders).toEqual([
-		sendOrder({ priority: 7, sequence: 0 }),
-		sendOrder({ priority: 7, sequence: 1 }),
-		sendOrder({ priority: 7, sequence: 2 }),
+		sendOrder({ priority: 7, position: 2 }),
+		sendOrder({ priority: 7, position: 1 }),
+		sendOrder({ priority: 7, position: 0 }),
 	]);
 
-	// The point of the ranking: the newest group is the one the transport drains first.
 	expect(orders[2]).toBeGreaterThan(orders[1]);
 });
 
-// An ordered subscriber is playing through in sequence, so it wants the oldest group in flight
-// rather than the newest.
-test("lite draft-05: an ordered subscription sends the oldest group first", async () => {
+// An ordered subscriber is playing through in sequence, so the oldest group in flight is the
+// one it needs next.
+test("lite draft-05: an ordered subscription is ranked oldest-first", async () => {
 	const orders = await groupSendOrders({ priority: 7, sequences: [0, 1, 2], ordered: true });
 	expect(orders).toEqual([
-		sendOrder({ priority: 7, sequence: 0, ordered: true }),
-		sendOrder({ priority: 7, sequence: 1, ordered: true }),
-		sendOrder({ priority: 7, sequence: 2, ordered: true }),
+		sendOrder({ priority: 7, position: 0 }),
+		sendOrder({ priority: 7, position: 1 }),
+		sendOrder({ priority: 7, position: 2 }),
 	]);
 
 	expect(orders[2]).toBeLessThan(orders[1]);
 });
 
-// SUBSCRIBE_UPDATE re-ranks the subscription, so groups opened after it use the new priority.
-test("lite draft-05: a subscribe update re-ranks later groups", async () => {
+// Two tracks the subscriber values equally each get their next group out, whatever their group
+// numbering: ranking by sequence would let the one with larger numbers starve the other.
+test("lite draft-05: equal priorities tie regardless of group numbering", async () => {
+	const [fresh, ongoing] = await Promise.all([
+		groupSendOrders({ priority: 7, sequences: [0, 1] }),
+		groupSendOrders({ priority: 7, sequences: [900_000, 900_001] }),
+	]);
+
+	expect(fresh).toEqual(ongoing);
+});
+
+// SUBSCRIBE_UPDATE re-ranks the subscription, so every group it is serving picks up the new
+// priority, including one opened after the update landed.
+test("lite draft-05: a subscribe update re-ranks the whole subscription", async () => {
 	const orders = await groupSendOrders({ priority: 1, sequences: [0, 1], update: 9 });
-	expect(orders).toEqual([sendOrder({ priority: 1, sequence: 0 }), sendOrder({ priority: 9, sequence: 1 })]);
+	expect(orders).toEqual([sendOrder({ priority: 9, position: 1 }), sendOrder({ priority: 9, position: 0 })]);
 });
 
 // A group can outlive the priority it opened with, so an update has to reach the stream that
@@ -160,14 +188,13 @@ test("lite draft-05: a subscribe update re-ranks a group already on the wire", a
 	group.writeString("hello");
 	track.writeGroup(group);
 
-	// The peer end arrives as the publisher opens the stream, so this needs no polling.
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
-	if ((await opened.read()).done) throw new Error("publisher never opened the group stream");
+	await servingNextGroup(opened);
 	opened.releaseLock();
 
-	// Ranks are relative to the subscription's first group, so this one sits at distance 0.
+	// The only group in flight, so it is the one to send next.
 	const stream = pair.server.sendStreams.uni[0];
-	expect(stream.sendOrder).toBe(sendOrder({ priority: 1, sequence: 0 }));
+	expect(stream.sendOrder).toBe(sendOrder({ priority: 1 }));
 
 	try {
 		await new SubscribeUpdate({ priority: 9 }).encode(client.writer, Version.DRAFT_05);
@@ -175,11 +202,11 @@ test("lite draft-05: a subscribe update re-ranks a group already on the wire", a
 
 		// The publisher re-ranks from that same signal, so wait on the send order itself rather
 		// than on the dispatch order between its subscriber and this one.
-		for (let i = 0; i < 200 && stream.sendOrder === sendOrder({ priority: 1, sequence: 0 }); i++) {
+		for (let i = 0; i < 200 && stream.sendOrder === sendOrder({ priority: 1 }); i++) {
 			await new Promise((resolve) => setTimeout(resolve, 5));
 		}
 
-		expect(stream.sendOrder).toBe(sendOrder({ priority: 9, sequence: 0 }));
+		expect(stream.sendOrder).toBe(sendOrder({ priority: 9 }));
 	} finally {
 		group.close();
 		publisher.close();
@@ -229,15 +256,11 @@ test("lite draft-05: a subscribe update during the stream open still ranks the g
 		if ((await opened.read()).done) throw new Error("publisher never opened the group stream");
 		opened.releaseLock();
 
-		for (
-			let i = 0;
-			i < 200 && pair.server.sendStreams.uni[0]?.sendOrder !== sendOrder({ priority: 9, sequence: 0 });
-			i++
-		) {
+		for (let i = 0; i < 200 && pair.server.sendStreams.uni[0]?.sendOrder !== sendOrder({ priority: 9 }); i++) {
 			await new Promise((resolve) => setTimeout(resolve, 5));
 		}
 
-		expect(pair.server.sendStreams.uni[0]?.sendOrder).toBe(sendOrder({ priority: 9, sequence: 0 }));
+		expect(pair.server.sendStreams.uni[0]?.sendOrder).toBe(sendOrder({ priority: 9 }));
 	} finally {
 		group.close();
 		publisher.close();
@@ -271,7 +294,7 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 		for (const group of groups) {
 			group.writeString("hello");
 			track.writeGroup(group);
-			if ((await opened.read()).done) throw new Error("publisher never opened the group stream");
+			await servingNextGroup(opened);
 		}
 		opened.releaseLock();
 
@@ -280,7 +303,8 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 		await new SubscribeUpdate({ priority: 9 }).encode(client.writer, Version.DRAFT_05);
 		while (track.subscription.peek()?.priority !== 9) await track.subscription.changed();
 
-		const expected = groups.map((group) => sendOrder({ priority: 9, sequence: group.sequence }));
+		// Newest-first, so the last group opened is at position 0 and the first is at the back.
+		const expected = groups.map((group) => sendOrder({ priority: 9, position: count - 1 - group.sequence }));
 		for (let i = 0; i < 200; i++) {
 			if (pair.server.sendStreams.uni.every((stream, at) => stream.sendOrder === expected[at])) break;
 			await new Promise((resolve) => setTimeout(resolve, 5));
@@ -323,9 +347,7 @@ test("lite draft-05: the fetch response ranks the publisher's own writes", async
 	try {
 		await publisher.runFetch(msg, server);
 
-		expect((accepted.value.writable as { sendOrder?: number }).sendOrder).toBe(
-			sendOrder({ priority: 3, sequence: 7 }),
-		);
+		expect((accepted.value.writable as { sendOrder?: number }).sendOrder).toBe(sendOrder({ priority: 3 }));
 	} finally {
 		publisher.close();
 		client.close();

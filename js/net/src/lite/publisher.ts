@@ -357,7 +357,7 @@ export class Publisher {
 
 		// The subscriber opened this stream, so its send order only ranked the request. Rank the
 		// response here, on the same scale as the group streams it competes with.
-		stream.writer.setPriority(sendOrder({ priority: msg.priority, sequence: msg.group }));
+		stream.writer.setPriority(sendOrder({ priority: msg.priority }));
 
 		let group: group.Consumer | undefined;
 		try {
