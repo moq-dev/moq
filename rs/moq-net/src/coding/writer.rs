@@ -112,9 +112,14 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 		Ok(())
 	}
 
-	/// Set the priority of the stream.
-	pub fn set_priority(&mut self, priority: u8) {
-		self.stream.as_mut().unwrap().set_priority(priority);
+	/// Set the stream's send order: streams with HIGHER values are transmitted first.
+	///
+	/// This is the transport trait's convention (matching W3C `sendOrder` and quinn's
+	/// scheduler) and the model's [`Subscription::priority`](crate::track::Subscription),
+	/// where higher values preempt lower ones. The lite priority queue's rank is the
+	/// opposite (0 = most urgent); rank holders convert via `PriorityHandle::send_order`.
+	pub fn set_priority(&mut self, send_order: u8) {
+		self.stream.as_mut().unwrap().set_priority(send_order);
 	}
 
 	/// Cast the writer to a different version, used during version negotiation.
@@ -142,5 +147,23 @@ impl<S: web_transport_trait::SendStream, V> Drop for Writer<S, V> {
 			// Unlike the Quinn default, we abort the stream on drop.
 			stream.reset(Error::Cancel.to_code());
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::lite::test_transport::{Log, SinkSend};
+
+	#[test]
+	fn set_priority_forwards_send_order() {
+		let log = Log::default();
+		let mut writer = Writer::new(SinkSend::new(log.clone()), crate::lite::Version::Lite05);
+
+		for send_order in 0u8..=255 {
+			writer.set_priority(send_order);
+		}
+
+		assert_eq!(log.priorities(), (0u8..=255).collect::<Vec<_>>());
 	}
 }

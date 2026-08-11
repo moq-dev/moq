@@ -35,11 +35,19 @@ pub struct Log {
 	pub resets: Arc<Mutex<Vec<u32>>>,
 	closes: Arc<Mutex<Vec<(u32, String)>>>,
 	bi_opens: Arc<AtomicUsize>,
+	priorities: Arc<Mutex<Vec<u8>>>,
 }
 
 impl Log {
 	pub fn resets(&self) -> Vec<u32> {
 		self.resets.lock().unwrap().clone()
+	}
+
+	/// Every value handed to the transport's `set_priority`, in call order. These are
+	/// trait-contract send orders (higher = transmitted first), recorded so tests can
+	/// verify priority conversions at their protocol boundaries.
+	pub fn priorities(&self) -> Vec<u8> {
+		self.priorities.lock().unwrap().clone()
 	}
 
 	/// The session-level closes, as (code, reason). A list rather than a last-value so
@@ -91,7 +99,9 @@ impl web_transport_trait::SendStream for SinkSend {
 		Ok(buf.len())
 	}
 
-	fn set_priority(&mut self, _order: u8) {}
+	fn set_priority(&mut self, order: u8) {
+		self.log.priorities.lock().unwrap().push(order);
+	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		self.finished = true;

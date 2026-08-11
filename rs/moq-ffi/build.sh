@@ -111,22 +111,19 @@ build_target() {
     local target="$1"
     echo "Building moq-ffi for $target..."
 
+    # Ensure the target's std is installed for the pinned toolchain Cargo
+    # resolves here. Release workflows may add it to floating stable instead,
+    # which leaves this toolchain without std and fails with E0463. No-op once
+    # present, and skipped when rustup is not the toolchain manager.
+    if command -v rustup >/dev/null 2>&1; then
+        rustup target add "$target"
+    fi
+
     if is_android "$target"; then
         # Android targets use cargo-ndk
         cargo ndk --target "$target" --platform 24 -- \
             build --release --package moq-ffi --manifest-path "$WORKSPACE_DIR/Cargo.toml"
     else
-        # Ensure the target's std is installed for the toolchain cargo actually
-        # resolves here. The release workflow's rust-toolchain action adds the
-        # target to `stable`, but the repo's channel-less rust-toolchain.toml
-        # makes cargo pick a different toolchain for this build, which then lacks
-        # the cross target's std -- cross builds die with E0463 "can't find crate
-        # for `std`" (e.g. building serde_core for aarch64). No-op once present,
-        # and for a host target; skipped when rustup isn't the toolchain manager.
-        if command -v rustup >/dev/null 2>&1; then
-            rustup target add "$target"
-        fi
-
         # Set up cross-compilation for Linux ARM64
         if [[ "$target" == "aarch64-unknown-linux-gnu" ]]; then
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc

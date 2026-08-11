@@ -15,6 +15,7 @@ cargo build --release --package moq-ffi
 ```bash
 cargo build --release --package moq-ffi --target aarch64-apple-ios
 cargo build --release --package moq-ffi --target aarch64-apple-ios-sim
+cargo build --release --package moq-ffi --target x86_64-apple-ios
 ```
 
 ### Android
