@@ -203,7 +203,7 @@ pub fn start<S: crate::transport::poll::Session>(config: Config<S>) -> Result<Se
 			.then(|| SendSetup::new(session.clone(), our_setup, version)),
 		goaway: Some(SendGoaway::new(session.clone(), goaway, version)),
 		session_stream: setup_stream,
-		publisher: publisher.run().maybe_boxed(),
+		publisher,
 		subscriber: subscriber.run(sub_connecting, task_set).maybe_boxed(),
 	};
 
@@ -250,7 +250,7 @@ struct Driver<S: crate::transport::poll::Session> {
 	/// The legacy session stream (pre-lite-03). Only its *error* ends the race, so
 	/// the publisher and subscriber keep running while it sits idle.
 	session_stream: Option<Stream<S, Version>>,
-	publisher: MaybeSendBox<'static, Result<(), Error>>,
+	publisher: Publisher<S>,
 	subscriber: MaybeSendBox<'static, Result<(), Error>>,
 }
 
@@ -275,7 +275,7 @@ impl<S: crate::transport::poll::Session> Driver<S> {
 		{
 			return Poll::Ready(Err(err));
 		}
-		if let Poll::Ready(res) = waiter.poll_future(self.publisher.as_mut()) {
+		if let Poll::Ready(res) = self.publisher.poll(waiter) {
 			return Poll::Ready(res);
 		}
 		if let Poll::Ready(res) = waiter.poll_future(self.subscriber.as_mut()) {
