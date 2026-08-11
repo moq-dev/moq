@@ -415,7 +415,7 @@ test("open waits for a stream slot instead of rejecting once the peer's limit is
 		},
 	} as unknown as WebTransport;
 
-	await Stream.open(quic, undefined, 7);
+	await Stream.open(quic, { sendOrder: 7 });
 	await Writer.open(quic);
 
 	expect(options).toEqual([

@@ -1,8 +1,8 @@
 import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
+import { renditionJitter } from "./playhead";
 
 /**
  * A function that checks if a video configuration can be played.
@@ -296,7 +296,7 @@ export class Source {
 			const config = available[target.name];
 			effect.set(this.#out.track, target.name);
 			effect.set(this.#out.config, config);
-			effect.set(this.#out.jitter, config.jitter !== undefined ? Time.Milli(config.jitter) : undefined);
+			effect.set(this.#out.jitter, renditionJitter(config));
 			return;
 		}
 
@@ -320,10 +320,7 @@ export class Source {
 
 		effect.set(this.#out.track, selected);
 		effect.set(this.#out.config, config);
-
-		// Use catalog jitter if available, otherwise estimate from framerate.
-		const jitter = config.jitter ?? (config.framerate ? Math.ceil(1000 / config.framerate) : undefined);
-		effect.set(this.#out.jitter, jitter !== undefined ? Time.Milli(jitter) : undefined);
+		effect.set(this.#out.jitter, renditionJitter(config));
 	}
 
 	/**

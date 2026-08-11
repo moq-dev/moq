@@ -7,36 +7,22 @@ import * as Varint from "./varint.ts";
 const MAX_U31 = 2 ** 31 - 1;
 const MAX_READ_SIZE = 1024 * 1024 * 64; // don't allocate more than 64MB for a message
 
-// @types/web doesn't know about waitUntilAvailable yet, even though it's been in the
-// WebTransport spec (and Chrome) for years.
-type SendStreamOptions = WebTransportSendStreamOptions & { waitUntilAvailable?: boolean };
-
 /**
- * Options for every send stream we open.
+ * Options handed to the transport for every send stream we open.
  *
  * `waitUntilAvailable` waits for the peer's concurrent stream limit to free up a slot
  * instead of rejecting with a `QuotaExceededError`. We open a stream per group, so
  * bursting past the limit is routine and a rejection would drop media the peer is about
- * to have room for.
+ * to have room for. `@types/web` doesn't declare it yet, hence the intersection.
  */
-export function sendOptions(priority?: number): SendStreamOptions {
-	return { sendOrder: priority, waitUntilAvailable: true };
+export function sendOptions(sendOrder?: number): WebTransportSendStreamOptions & { waitUntilAvailable?: boolean } {
+	return { sendOrder, waitUntilAvailable: true };
 }
 
 // How long an open may wait for the peer to free a stream slot. waitUntilAvailable makes
 // it wait forever otherwise, so a peer that withholds stream credit while keeping the
 // subscription open would queue work without limit. Matches the subscribe budget.
 const OPEN_TIMEOUT_MS = 10_000;
-
-/** Options for {@link Writer.tryOpen}. */
-export interface TryOpenOptions {
-	/** Give up once this settles, however it settles. */
-	cancel: Promise<unknown>;
-	/** Protocol version the writer encodes for. */
-	version?: IetfVersion;
-	/** How long to wait for a stream slot, in milliseconds. Defaults to 10s. */
-	timeout?: number;
-}
 
 function isLeadingOnes(version?: IetfVersion): boolean {
 	return (
@@ -45,6 +31,39 @@ function isLeadingOnes(version?: IetfVersion): boolean {
 		version !== Version.DRAFT_15 &&
 		version !== Version.DRAFT_16
 	);
+}
+
+/**
+ * The `WebTransportSendStream` that every outgoing stream is, narrowed to the one attribute
+ * this package uses. The DOM types available here still describe them as plain
+ * `WritableStream`s, so the interface has to be named structurally.
+ *
+ * `sendOrder` is optional because it is absent until set, and stays absent on an
+ * implementation that doesn't carry the interface at all.
+ *
+ * @see https://www.w3.org/TR/webtransport/#webtransportsendstream
+ */
+export type SendStream = WritableStream<Uint8Array> & { sendOrder?: number };
+
+/** Options for opening an outgoing stream. */
+export interface OpenOptions {
+	/** The negotiated IETF version, which selects the varint encoding. */
+	version?: IetfVersion;
+
+	/**
+	 * The transport send order, where HIGHER values are transmitted first.
+	 * Left to the transport's default when unset.
+	 */
+	sendOrder?: number;
+}
+
+/** Options for {@link Writer.tryOpen}. */
+export interface TryOpenOptions extends OpenOptions {
+	/** Give up once this settles, however it settles. */
+	cancel: Promise<unknown>;
+
+	/** How long to wait for a stream slot, in milliseconds. Defaults to 10s. */
+	timeout?: number;
 }
 
 export class Stream {
@@ -75,9 +94,15 @@ export class Stream {
 		}
 	}
 
-	static async open(quic: WebTransport, version?: IetfVersion, priority?: number): Promise<Stream> {
-		const { readable, writable } = await quic.createBidirectionalStream(sendOptions(priority));
-		return new Stream({ readable, writable, version });
+	/**
+	 * Open an outgoing bidirectional stream.
+	 * @param quic - The session to open it on
+	 * @param options - The version its varints encode with, and the send order ranking it
+	 *   against the session's other streams
+	 */
+	static async open(quic: WebTransport, options?: OpenOptions): Promise<Stream> {
+		const { readable, writable } = await quic.createBidirectionalStream(sendOptions(options?.sendOrder));
+		return new Stream({ readable, writable, version: options?.version });
 	}
 
 	close() {
@@ -327,6 +352,20 @@ export class Writer {
 		this.version = version;
 	}
 
+	/**
+	 * Rank this stream against the session's others, where HIGHER values are sent first.
+	 *
+	 * A send order only schedules the local end, so a stream the peer opened has to be ranked
+	 * here rather than at the peer's {@link open}.
+	 *
+	 * The spec makes `sendOrder` a settable attribute on every {@link SendStream}. Where the
+	 * interface isn't implemented (Chrome as of writing, a mock, a polyfill) this just sets an
+	 * ignored property, the same way an ignored `sendOrder` option does at {@link open}.
+	 */
+	setPriority(sendOrder: number) {
+		(this.#stream as SendStream).sendOrder = sendOrder;
+	}
+
 	async bool(v: boolean) {
 		await this.write(setUint8(this.#scratch, v ? 1 : 0));
 	}
@@ -403,9 +442,17 @@ export class Writer {
 		this.#writer.abort(reason).catch(() => void 0);
 	}
 
-	static async open(quic: WebTransport, version?: IetfVersion): Promise<Writer> {
-		const writable = (await quic.createUnidirectionalStream(sendOptions())) as WritableStream<Uint8Array>;
-		return new Writer(writable, version);
+	/**
+	 * Open an outgoing unidirectional stream.
+	 * @param quic - The session to open it on
+	 * @param options - The version its varints encode with, and the send order ranking it
+	 *   against the session's other streams
+	 */
+	static async open(quic: WebTransport, options?: OpenOptions): Promise<Writer> {
+		const writable = (await quic.createUnidirectionalStream(
+			sendOptions(options?.sendOrder),
+		)) as WritableStream<Uint8Array>;
+		return new Writer(writable, options?.version);
 	}
 
 	/**
@@ -413,13 +460,13 @@ export class Writer {
 	 * returning undefined so the caller can drop whatever it meant to send. A stream that
 	 * opens after that is reset rather than leaked. A real transport failure still throws.
 	 */
-	static async tryOpen(quic: WebTransport, opts: TryOpenOptions): Promise<Writer | undefined> {
-		const open = Writer.open(quic, opts.version);
-		const timeout = opts.timeout ?? OPEN_TIMEOUT_MS;
+	static async tryOpen(quic: WebTransport, options: TryOpenOptions): Promise<Writer | undefined> {
+		const open = Writer.open(quic, options);
+		const timeout = options.timeout ?? OPEN_TIMEOUT_MS;
 
 		// A rejected `cancel` (STOP_SENDING) means the peer is gone too, so both settle
 		// paths mean "give up" and neither is left unhandled.
-		const cancelled = opts.cancel.then(
+		const cancelled = options.cancel.then(
 			() => undefined,
 			() => undefined,
 		);
