@@ -1566,10 +1566,11 @@ async fn run_source(
 	// closing below) bumps `announced_closed` + `announced_bytes`. Empty scope =
 	// no-op.
 	let mut announce = route.announce.then(|| ingress.announce());
-	// Every route observation earns one attempt to replace different content at
-	// this path. Once displaced, the same unchanged route is a standby until the
-	// winner leaves; otherwise the two live sources would evict each other forever.
-	// Whether the route is announced is a separate gate, owned by `attach_source`.
+	// Whether this source still has content the live front has not already beaten.
+	// Cleared when a rival displaces it, so it stands by instead of evicting the
+	// winner straight back; only a new publisher re-arms it, since a repricing is
+	// the same content losing the same argument twice. Whether the route is
+	// announced is a separate gate, owned by `attach_source`.
 	let mut may_take_over = true;
 
 	'attach: loop {
@@ -1609,7 +1610,13 @@ async fn run_source(
 					// Our route moved; recompute the guard and retry with it.
 					Some(Ok(update)) => {
 						sync_announce(&mut announce, update.announce, &ingress);
-						may_take_over = true;
+						// Only a new publisher is content the winner has not beaten.
+						// Plain equality, matching the detach check below: an
+						// UNKNOWN-to-UNKNOWN repricing from a legacy peer proves no
+						// new identity, so it must not re-arm either.
+						if update.hops.iter().next().copied() != route.hops.iter().next().copied() {
+							may_take_over = true;
+						}
 						route = update;
 					}
 					// The source closed while parked; it was never visible.
@@ -1660,9 +1667,9 @@ async fn run_source(
 					if update.hops.iter().next().copied() != publisher {
 						detach_source(&state, &broadcast, &leaf, id, true);
 						sync_announce(&mut announce, announced, &ingress);
-						// A route observation, so it earns a takeover attempt like any
-						// other. A sibling source may still hold the front open, making
-						// the re-attach a replacement rather than a create.
+						// A new publisher, so this is content no front has beaten yet. A
+						// sibling source may still hold the old front open, making the
+						// re-attach a replacement rather than a create.
 						may_take_over = true;
 						route = update;
 						continue 'attach;
@@ -1756,7 +1763,8 @@ fn same_publisher(a: Option<Origin>, b: Option<Origin>) -> bool {
 ///
 /// `may_take_over` is the caller's third gate: [`run_source`] clears it once this
 /// source has been displaced, so a route that already lost the path stands by
-/// instead of winning it straight back. A fresh route observation re-arms it.
+/// instead of winning it straight back. Only a new publisher re-arms it, since a
+/// repricing carries no content the winner has not already beaten.
 fn attach_source(
 	ctx: &AttachContext,
 	leaf: &Lock<OriginNode>,
@@ -4987,6 +4995,53 @@ mod tests {
 
 		source_a1.finish();
 		source_a2.finish();
+	}
+
+	/// A repricing is not new content: a standby source must not use a cost-only
+	/// route update to evict the live front it already lost to.
+	#[tokio::test]
+	async fn test_repricing_does_not_earn_a_takeover() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops_b = OriginList::try_from(vec![Origin::new(2).unwrap()]).unwrap();
+
+		let mut source_a = origin
+			.create_broadcast("test", announce().with_hops(hops_a.clone()).with_cost(5))
+			.unwrap();
+		settle().await;
+		announced.assert_next_some("test");
+
+		// B displaces A; A stands by.
+		let mut source_b = origin
+			.create_broadcast("test", announce().with_hops(hops_b.clone()))
+			.unwrap();
+		settle().await;
+		settle().await;
+		announced.assert_next_none("test");
+		announced.assert_next_some("test");
+		announced.assert_next_wait();
+
+		// A's peer re-announces it at a new cost. Same publisher, same content:
+		// nothing about this says A should own the path again.
+		source_a
+			.set_route(announce().with_hops(hops_a.clone()).with_cost(9))
+			.unwrap();
+		settle().await;
+		settle().await;
+		assert_eq!(
+			consumer.get_broadcast("test").unwrap().route().hops,
+			hops_b,
+			"a repricing must not take the path back from the live front"
+		);
+		announced.assert_next_wait();
+
+		source_a.finish();
+		source_b.finish();
 	}
 
 	/// A publisher reconnecting under the same identity attaches as a second
