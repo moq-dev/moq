@@ -135,13 +135,12 @@ export class Decoder {
 
 			const current = effect.get(this.#active);
 			if (current) {
+				// A zero timestamp is a rendered frame, not a missing one.
 				const pendingTimestamp = effect.get(pending.timestamp);
-				if (!pendingTimestamp) return;
+				if (pendingTimestamp === undefined) return;
 
 				// Hold off until the new rendition has caught up to the picture it's replacing.
-				const active = effect.get(current.timestamp);
-				const live = this.sync.now();
-				if (!caughtUp({ playhead: pendingTimestamp, active, live })) return;
+				if (!caughtUp({ playhead: pendingTimestamp, active: effect.get(current.timestamp) })) return;
 			}
 
 			// Upgrade the pending track to active.

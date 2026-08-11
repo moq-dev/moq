@@ -30,36 +30,23 @@ describe("renditionJitter", () => {
 
 describe("caughtUp", () => {
 	it("promotes immediately when nothing is rendering", () => {
-		expect(caughtUp({ playhead: ms(1000), live: ms(10_000) })).toBe(true);
+		expect(caughtUp({ playhead: ms(1000) })).toBe(true);
 	});
 
-	it("falls back to the outgoing playhead before the clock has an anchor", () => {
+	it("holds off while the new rendition trails the picture it replaces", () => {
+		expect(caughtUp({ playhead: ms(8000), active: ms(10_000) })).toBe(false);
 		expect(caughtUp({ playhead: ms(9800), active: ms(10_000) })).toBe(false);
-		expect(caughtUp({ playhead: ms(9950), active: ms(10_000) })).toBe(true);
 	});
 
-	it("holds off while the new rendition trails both playheads", () => {
-		expect(caughtUp({ playhead: ms(8000), active: ms(10_000), live: ms(10_000) })).toBe(false);
+	it("promotes once the new rendition is within slack of it", () => {
+		expect(caughtUp({ playhead: ms(9900), active: ms(10_000) })).toBe(true);
+		expect(caughtUp({ playhead: ms(10_500), active: ms(10_000) })).toBe(true);
 	});
 
-	it("promotes once the new rendition reaches the outgoing playhead", () => {
-		expect(caughtUp({ playhead: ms(9950), active: ms(10_000), live: ms(10_000) })).toBe(true);
-	});
-
-	it("promotes when playback runs behind live", () => {
-		// Delivery is late, so both playheads sit behind live and neither can reach it. The sync
-		// reference only ever moves down, so waiting for live would stall the switch outright.
-		expect(caughtUp({ playhead: ms(8000), active: ms(8000), live: ms(10_000) })).toBe(true);
-	});
-
-	it("promotes when the outgoing playhead sits ahead of live", () => {
-		// Switching to a coarser rendition grows the sync buffer, so live drops back. Playheads
-		// never rewind, so the outgoing one is stranded ahead of it: waiting for the new
-		// rendition to reach it would freeze the picture until wall-clock time caught up.
-		expect(caughtUp({ playhead: ms(8000), active: ms(10_000), live: ms(8000) })).toBe(true);
-	});
-
-	it("still holds off against a live edge below a stranded outgoing playhead", () => {
-		expect(caughtUp({ playhead: ms(6000), active: ms(10_000), live: ms(8000) })).toBe(false);
+	it("never lets a switch replay more than the slack", () => {
+		// Selecting a coarser rendition grows the sync buffer, which drops the live edge below the
+		// outgoing playhead. Promoting at the live edge would replay everything in between, so the
+		// bar stays the outgoing playhead however far live falls behind it.
+		expect(caughtUp({ playhead: ms(8000), active: ms(10_000) })).toBe(false);
 	});
 });

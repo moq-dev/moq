@@ -1,9 +1,9 @@
 import type * as Catalog from "@moq/hang/catalog";
 import { Time } from "@moq/net";
 
-// How far the incoming rendition may still trail when we promote it, absorbing scheduling noise
-// so the switch doesn't hinge on landing inside a single frame interval. This is also the largest
-// step backwards the picture can take on a switch.
+// How far the incoming rendition may still trail the picture it replaces when we promote it,
+// absorbing scheduling noise so the switch doesn't hinge on landing inside a single frame
+// interval. This is also the largest step backwards a switch can make visible.
 const SLACK = Time.Milli(100);
 
 /**
@@ -27,25 +27,22 @@ export interface CaughtUp {
 
 	/** The outgoing rendition's playhead, or undefined when it has rendered nothing. */
 	active?: Time.Milli;
-
-	/** Where playback should be right now, or undefined before the sync clock has an anchor. */
-	live?: Time.Milli;
 }
 
 /**
  * Whether the incoming rendition has caught up enough to take over the picture.
  *
- * The bar is whichever is lower: where playback should be right now, or where the outgoing
- * rendition actually is. Neither works alone. Live alone stalls the switch whenever delivery
- * runs late, because the sync reference only ever moves down: both playheads sit behind live and
- * neither can reach it. The outgoing playhead alone stalls it once the buffer grows for a coarser
- * rendition, because playheads never rewind, so it sits ahead of live until wall-clock time makes
- * up the difference, freezing the picture for that whole interval.
+ * The bar is the outgoing playhead rather than the live edge, which is a moving target: the sync
+ * buffer grows the moment a coarser rendition is selected, dropping live below the outgoing
+ * playhead, and it runs ahead of both playheads whenever delivery is late, because the sync
+ * reference only ever moves down. Barring on live would promote in the first case (replaying
+ * everything between the two playheads) and stall the switch outright in the second. Waiting on
+ * the outgoing playhead always terminates: live recovers at wall-clock rate, and the incoming
+ * rendition fills its buffer meanwhile.
  */
 export function caughtUp(props: CaughtUp): boolean {
 	// Nothing is rendering from the outgoing rendition, so there's no picture to step back from.
 	if (props.active === undefined) return true;
 
-	const bar = props.live !== undefined ? Time.Milli.min(props.active, props.live) : props.active;
-	return Time.Milli.add(props.playhead, SLACK) >= bar;
+	return Time.Milli.add(props.playhead, SLACK) >= props.active;
 }
