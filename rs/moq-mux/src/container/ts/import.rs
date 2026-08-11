@@ -1240,6 +1240,9 @@ impl Resync {
 	/// there and comes back here if that fails too. That mirrors how the TS layer
 	/// reacquires packet alignment, where a lone sync byte is a guess until the next
 	/// packet confirms it.
+	///
+	/// `offset` must leave room for a header, which is the loop condition at both call
+	/// sites; the scan starts one byte past it, since a header just failed to parse there.
 	fn recover(&mut self, data: &[u8], offset: usize, codec: &SyncWord) -> Recover {
 		if let Some(rel) = memchr::memchr(codec.sync_byte, &data[offset + 1..]) {
 			let found = offset + 1 + rel;
@@ -2428,6 +2431,57 @@ mod test {
 			frames.push(frame);
 		}
 		frames
+	}
+
+	// The production shape from #2729, on a real capture: a looping publisher plays part of
+	// a file and wraps to the top, so the audio PES open at the cut leaves a tail that
+	// splices onto the file's first frames. Every wrap used to end the session with
+	// "missing AC-3 sync word", which is what accumulated 216 restarts on the reporter's
+	// feed. AC-3 also exercises a different sync word and parser than the synthetic MP2
+	// and ADTS tests above.
+	#[tokio::test(start_paused = true)]
+	async fn legacy_survives_a_looping_file_wrap() {
+		let data = include_bytes!("test_data/ac3.ts");
+
+		// Wrap mid-file on a packet boundary, so the TS layer stays aligned and the
+		// discontinuity lands squarely on the audio frame the last PES left open.
+		let cut = (data.len() / 2) / 188 * 188;
+		let mut looped = data[..cut].to_vec();
+		looped.extend_from_slice(data);
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&bytes::BytesMut::from(&looped[..]))
+			.expect("a loop wrap must not end the session");
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		// Every frame published is still a whole AC-3 frame: resync lands on sync words,
+		// never mid-frame.
+		assert!(
+			frames.iter().all(|f| f.payload[0] == 0x0B && f.payload[1] == 0x77),
+			"resync published a frame that doesn't start at an AC-3 sync word"
+		);
+		// The wrap costs at most the frame it interrupted, not the rest of the stream.
+		let pristine = {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+			let mut import = super::Import::new(broadcast, catalog.reserve());
+			import.decode(&bytes::BytesMut::from(&data[..])).unwrap();
+			import.finish().unwrap();
+			read_audio_frames(&consumer, &catalog).await.len()
+		};
+		// The wrap costs nothing after it: the whole second copy is published, on top of
+		// the frames the truncated first pass already delivered.
+		assert!(
+			frames.len() > pristine,
+			"the wrap swallowed frames: {} looped vs {pristine} pristine",
+			frames.len()
+		);
 	}
 
 	/// One whole ADTS frame carrying `raw_len` bytes of `fill`. `fill` must not be 0xFF,
