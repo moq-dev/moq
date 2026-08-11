@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { RemoteError } from "./error.ts";
-import { Reader, Writer } from "./stream.ts";
+import { Reader, Stream, Writer } from "./stream.ts";
 
 // Helper to create a writable stream that captures written data
 function createTestWritableStream(): { stream: WritableStream<Uint8Array>; written: Uint8Array[] } {
@@ -336,4 +336,26 @@ test("Writer closed rejects with the decoded reset code", async () => {
 test("closed is stable, so racing it per frame does not allocate", async () => {
 	const reader = new Reader(new ReadableStream<Uint8Array>());
 	expect(reader.closed).toBe(reader.closed);
+});
+
+test("open waits for a stream slot instead of rejecting once the peer's limit is full", async () => {
+	const options: unknown[] = [];
+	const quic = {
+		createBidirectionalStream: async (opts?: unknown) => {
+			options.push(opts);
+			return { readable: new ReadableStream<Uint8Array>(), writable: new WritableStream<Uint8Array>() };
+		},
+		createUnidirectionalStream: async (opts?: unknown) => {
+			options.push(opts);
+			return new WritableStream<Uint8Array>();
+		},
+	} as unknown as WebTransport;
+
+	await Stream.open(quic, undefined, 7);
+	await Writer.open(quic);
+
+	expect(options).toEqual([
+		{ sendOrder: 7, waitUntilAvailable: true },
+		{ sendOrder: undefined, waitUntilAvailable: true },
+	]);
 });
