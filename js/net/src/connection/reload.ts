@@ -260,8 +260,15 @@ export class Reload {
 	 */
 	#retry(effect: Effect, connected: DOMHighResTimeStamp | undefined, cause?: unknown): void {
 		// Resolved per sequence rather than at construction, so an edit to `delay` (including
-		// one that drops a field back to its default) applies to the next retry.
-		const { initial, multiplier, max, timeout } = { ...DEFAULT_DELAY, ...this.delay };
+		// one that drops a field back to its default) applies to the next retry. Field by
+		// field rather than by spread: a caller building `{ initial: maybeInitial }` from an
+		// optional value passes an explicit undefined, which a spread would take as the
+		// answer, turning the backoff into NaN or the window into forever.
+		const delay = this.delay ?? {};
+		const initial = delay.initial ?? DEFAULT_DELAY.initial;
+		const multiplier = delay.multiplier ?? DEFAULT_DELAY.multiplier;
+		const max = delay.max ?? DEFAULT_DELAY.max;
+		const timeout = delay.timeout ?? DEFAULT_DELAY.timeout;
 
 		// Any session is dead now: report disconnected during the backoff rather than
 		// when the retry reruns the effect.

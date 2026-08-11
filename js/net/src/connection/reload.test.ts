@@ -129,6 +129,38 @@ test("a peer that severs immediately keeps escalating the backoff", async () => 
 	}
 });
 
+test("an explicitly undefined delay field falls back to its default", async () => {
+	const original = globalThis.WebTransport;
+	const url = new URL("https://example.com/");
+	let dials = 0;
+	const stub = function StubWebTransport() {
+		dials += 1;
+		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+		void accept(pair.server, url).then((server) => server.close());
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	// What a caller building options from optional values produces. Spreading this over the
+	// defaults would take the undefined as the answer, and a NaN backoff redials as fast as
+	// the event loop allows.
+	const reload = new Reload({
+		enabled: true,
+		url,
+		websocket: { enabled: false },
+		delay: { initial: undefined, multiplier: undefined, max: undefined, timeout: 0 },
+	});
+	try {
+		await waitUntil(() => dials > 0);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		// The default initial delay is 1000ms, so the first retry is still pending.
+		expect(dials).toBe(1);
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
 // Polls until `pred` holds, so a regression fails the test instead of hanging it.
 async function waitUntil(pred: () => boolean): Promise<void> {
 	for (let i = 0; i < 500; i++) {
