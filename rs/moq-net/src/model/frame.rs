@@ -208,18 +208,10 @@ impl AsRef<[u8]> for FrameBuf {
 	}
 }
 
-/// Writes the payload of the single in-flight frame in one or more chunks.
-///
-/// Borrows the parent [`group::Producer`] exclusively, so no other frame can be
-/// opened while this one is live. The total bytes written must exactly match
-/// [`Info::size`]; call [`Self::finish`] to commit the frame (or [`Self::abort`] to
-/// fail it). Dropping without either aborts the group, since an unfinished frame
-/// leaves the group's stream broken.
-///
-/// A single whole-frame [`write`](Self::write) keeps the caller's allocation
-/// (zero-copy); chunked writes copy into one buffer sized to the declared frame.
-pub struct Producer<'a> {
-	group: &'a mut group::Producer,
+/// The writer behind [`Producer`] and [`ProducerOwned`], generic over how it
+/// reaches the parent group (an exclusive borrow, or an owned clone).
+struct Raw<G: std::borrow::BorrowMut<group::Producer>> {
+	group: G,
 	buf: FrameBuf,
 	info: Info,
 	// Set once the frame is committed (finished) or aborted, so Drop is a no-op.
@@ -229,45 +221,12 @@ pub struct Producer<'a> {
 	stats: stats::Meter,
 }
 
-impl std::ops::Deref for Producer<'_> {
-	type Target = Info;
-
-	fn deref(&self) -> &Self::Target {
-		&self.info
-	}
-}
-
-impl<'a> Producer<'a> {
-	pub(crate) fn new(group: &'a mut group::Producer, buf: FrameBuf, info: Info) -> Self {
-		Self {
-			group,
-			buf,
-			info,
-			done: false,
-			stats: stats::Meter::default(),
-		}
-	}
-
-	/// Attach the parent group's ingress meter, so written chunks bump `bytes`.
-	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
-		self.stats = meter;
-		self
-	}
-
-	/// The parent group this frame belongs to.
-	pub fn group(&self) -> group::Info {
-		self.group.info()
-	}
-
-	/// Bytes still needed to complete the frame.
-	pub fn remaining(&self) -> usize {
+impl<G: std::borrow::BorrowMut<group::Producer>> Raw<G> {
+	fn remaining(&self) -> usize {
 		self.buf.capacity() - self.buf.written(Ordering::Acquire)
 	}
 
-	/// Write a chunk of data to the frame.
-	///
-	/// Returns [`Error::WrongSize`] if the chunk would exceed the remaining bytes.
-	pub fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
+	fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
 		let len = chunk.as_ref().len();
 		if len > self.remaining() {
 			return Err(Error::WrongSize);
@@ -288,19 +247,16 @@ impl<'a> Producer<'a> {
 		} else {
 			self.buf.append(chunk.as_ref());
 		}
-		self.group.frame_notify();
+		self.group.borrow_mut().frame_notify();
 		Ok(())
 	}
 
-	/// Commit the frame, verifying that all bytes were written.
-	///
-	/// Returns [`Error::WrongSize`] if the bytes written don't match [`Info::size`].
-	pub fn finish(mut self) -> Result<()> {
+	fn finish(&mut self) -> Result<()> {
 		if self.buf.written(Ordering::Acquire) != self.buf.capacity() {
 			return Err(Error::WrongSize);
 		}
 		let payload = self.buf.freeze(self.buf.capacity());
-		self.group.frame_commit(Frame {
+		self.group.borrow_mut().frame_commit(Frame {
 			timestamp: self.info.timestamp,
 			payload,
 		})?;
@@ -308,25 +264,145 @@ impl<'a> Producer<'a> {
 		Ok(())
 	}
 
-	/// Abort the frame (and its group) with the given error.
-	pub fn abort(mut self, err: Error) -> Result<()> {
-		self.group.frame_abort(err);
+	fn abort(&mut self, err: Error) -> Result<()> {
+		self.group.borrow_mut().frame_abort(err);
 		self.done = true;
 		Ok(())
 	}
 }
 
-impl Drop for Producer<'_> {
+impl<G: std::borrow::BorrowMut<group::Producer>> Drop for Raw<G> {
 	fn drop(&mut self) {
 		if !self.done {
 			// An unfinished frame leaves the group stream broken; fail the group so
 			// consumers surface an error instead of hanging on the partial forever.
 			tracing::warn!(
-				group = self.group.info().sequence,
+				group = self.group.borrow_mut().info().sequence,
 				"frame::Producer dropped before writing all bytes"
 			);
-			self.group.frame_abort(Error::Dropped);
+			self.group.borrow_mut().frame_abort(Error::Dropped);
 		}
+	}
+}
+
+/// Writes the payload of the single in-flight frame in one or more chunks.
+///
+/// Borrows the parent [`group::Producer`] exclusively, so no other frame can be
+/// opened while this one is live. The total bytes written must exactly match
+/// [`Info::size`]; call [`Self::finish`] to commit the frame (or [`Self::abort`] to
+/// fail it). Dropping without either aborts the group, since an unfinished frame
+/// leaves the group's stream broken.
+///
+/// A single whole-frame [`write`](Self::write) keeps the caller's allocation
+/// (zero-copy); chunked writes copy into one buffer sized to the declared frame.
+pub struct Producer<'a>(Raw<&'a mut group::Producer>);
+
+impl std::ops::Deref for Producer<'_> {
+	type Target = Info;
+
+	fn deref(&self) -> &Self::Target {
+		&self.0.info
+	}
+}
+
+impl<'a> Producer<'a> {
+	pub(crate) fn new(group: &'a mut group::Producer, buf: FrameBuf, info: Info) -> Self {
+		Self(Raw {
+			group,
+			buf,
+			info,
+			done: false,
+			stats: stats::Meter::default(),
+		})
+	}
+
+	/// Attach the parent group's ingress meter, so written chunks bump `bytes`.
+	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
+		self.0.stats = meter;
+		self
+	}
+
+	/// The parent group this frame belongs to.
+	pub fn group(&self) -> group::Info {
+		self.0.group.info()
+	}
+
+	/// Bytes still needed to complete the frame.
+	pub fn remaining(&self) -> usize {
+		self.0.remaining()
+	}
+
+	/// Write a chunk of data to the frame.
+	///
+	/// Returns [`Error::WrongSize`] if the chunk would exceed the remaining bytes.
+	pub fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
+		self.0.write(chunk)
+	}
+
+	/// Commit the frame, verifying that all bytes were written.
+	///
+	/// Returns [`Error::WrongSize`] if the bytes written don't match [`Info::size`].
+	pub fn finish(mut self) -> Result<()> {
+		self.0.finish()
+	}
+
+	/// Abort the frame (and its group) with the given error.
+	pub fn abort(mut self, err: Error) -> Result<()> {
+		self.0.abort(err)
+	}
+}
+
+/// The owned counterpart of [`Producer`], for the wire drivers that stream a
+/// frame across polls and cannot hold the group borrowed inside their state.
+///
+/// Crate-private on purpose: the exclusivity the public borrow enforces (one
+/// live frame per group) becomes the holder's promise here. Do not open another
+/// frame on the group until this one is finished or aborted.
+pub(crate) struct ProducerOwned(Raw<group::Producer>);
+
+impl std::ops::Deref for ProducerOwned {
+	type Target = Info;
+
+	fn deref(&self) -> &Self::Target {
+		&self.0.info
+	}
+}
+
+impl ProducerOwned {
+	pub(crate) fn new(group: group::Producer, buf: FrameBuf, info: Info) -> Self {
+		Self(Raw {
+			group,
+			buf,
+			info,
+			done: false,
+			stats: stats::Meter::default(),
+		})
+	}
+
+	/// Attach the parent group's ingress meter, so written chunks bump `bytes`.
+	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
+		self.0.stats = meter;
+		self
+	}
+
+	/// Bytes still needed to complete the frame.
+	pub fn remaining(&self) -> usize {
+		self.0.remaining()
+	}
+
+	/// Write a chunk of data to the frame.
+	pub fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
+		self.0.write(chunk)
+	}
+
+	/// Commit the frame, verifying that all bytes were written.
+	pub fn finish(mut self) -> Result<()> {
+		self.0.finish()
+	}
+
+	/// Abort the frame (and its group) with the given error.
+	pub fn abort(mut self, err: Error) -> Result<()> {
+		self.0.abort(err)
 	}
 }
 

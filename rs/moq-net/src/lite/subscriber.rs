@@ -2,13 +2,14 @@ use crate::{frame, group, origin, track};
 use std::{
 	collections::HashMap,
 	sync::{Arc, atomic},
-	task::Poll,
+	task::{Poll, ready},
 	time::Duration,
 };
 
 use futures::{StreamExt, stream::FuturesUnordered};
 
-use crate::util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks, err_only};
+use crate::poll_set::{Machine, PollSet};
+use crate::util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks};
 
 use crate::{
 	AsPath, Error, Path, PathOwned, Timescale, Timestamp, bandwidth,
@@ -148,91 +149,6 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			Some(cost) => cost,
 			None => self.peer_setup.cost().await.unwrap_or(super::DEFAULT_COST),
 		}
-	}
-
-	/// `connecting` is the connection-progress producer for this session (None for
-	/// versions with no initial-set boundary). It is threaded through the announce path
-	/// rather than stored on `Subscriber`: the struct is cloned for several long-lived
-	/// tasks (`bw`, `run_uni`), and any clone retaining a producer would keep the channel
-	/// open and hang `connect()`.
-	pub async fn run(self, connecting: Option<ConnectingProducer>, mut tasks: TaskSet) -> Result<(), Error> {
-		let bw = self.clone();
-		let dg = self.clone();
-		// The watchdog halves (announce/bandwidth/datagrams) only end the session on
-		// error; their clean completion parks and the other futures keep running.
-		let mut announce = std::pin::pin!(err_only(self.clone().run_announce(connecting)));
-		let mut uni = std::pin::pin!(self.run_uni());
-		let mut bandwidth = std::pin::pin!(err_only(bw.run_recv_bandwidth()));
-		let mut datagrams = std::pin::pin!(err_only(dg.run_datagrams()));
-		kio::wait(|waiter| {
-			if let Poll::Ready(err) = waiter.poll_future(announce.as_mut()) {
-				return Poll::Ready(Err(err));
-			}
-			if let Poll::Ready(res) = waiter.poll_future(uni.as_mut()) {
-				return Poll::Ready(res);
-			}
-			if let Poll::Ready(err) = waiter.poll_future(bandwidth.as_mut()) {
-				return Poll::Ready(Err(err));
-			}
-			if let Poll::Ready(err) = waiter.poll_future(datagrams.as_mut()) {
-				return Poll::Ready(Err(err));
-			}
-			if tasks.poll(waiter).is_ready() {
-				return Poll::Ready(Ok(()));
-			}
-			Poll::Pending
-		})
-		.await
-	}
-
-	async fn run_uni(self) -> Result<(), Error> {
-		let mut tasks = TaskSet::owned();
-		let mut accept = self.session.clone();
-		loop {
-			let stream = tasks
-				.drive(|waiter| {
-					let mut cx = std::task::Context::from_waker(waiter.waker());
-					accept.poll_accept_uni(&mut cx)
-				})
-				.await
-				.map_err(Error::from_transport)?;
-
-			let stream = Reader::new(stream, self.version);
-			let this = self.clone();
-
-			tasks.push(async move {
-				if let Err(err) = this.run_uni_stream(stream).await {
-					tracing::debug!(%err, "error running uni stream");
-				}
-			});
-		}
-	}
-
-	async fn run_uni_stream(mut self, mut stream: Reader<S::RecvStream, Version>) -> Result<(), Error> {
-		let kind = stream.decode().await?;
-
-		let res = match kind {
-			lite::DataType::Group => self.recv_group(&mut stream).await,
-			lite::DataType::Setup => self.recv_setup(&mut stream).await,
-		};
-
-		if let Err(err) = res {
-			stream.abort(&err);
-		}
-
-		Ok(())
-	}
-
-	/// Read the peer's single SETUP message off its Setup Stream and record it, so
-	/// capability-gated streams (PROBE) can consult it. lite-05+ only.
-	async fn recv_setup(&self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
-		if !self.version.has_setup_stream() {
-			return Err(Error::UnexpectedStream);
-		}
-		let setup = stream.decode::<lite::Setup>().await?;
-		tracing::debug!(?setup, "received peer setup");
-		self.peer_setup.set(setup);
-		Ok(())
 	}
 
 	async fn run_announce(self, connecting: Option<ConnectingProducer>) -> Result<(), Error> {
@@ -437,75 +353,6 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// down only the announce stream is correct since no further progress can be made,
 		// but we must not propagate an error that would kill the whole connection.
 		stream.writer.finish().ok();
-		Ok(())
-	}
-
-	/// Opens a PROBE stream on demand while a consumer is interested.
-	///
-	/// Loops forever: wait for a consumer, race the probe stream against
-	/// the consumer leaving, then loop back. Probe is best-effort, so stream
-	/// errors are logged but never tear down the session.
-	async fn run_recv_bandwidth(self) -> Result<(), Error> {
-		let Some(bandwidth) = &self.recv_bandwidth else {
-			return Ok(());
-		};
-
-		// lite-05+ negotiates probing: only open a PROBE stream if the peer advertised it
-		// (Report or higher) in its SETUP. Older versions have no SETUP, so probe is always
-		// available there.
-		if self.version.has_setup_stream() && self.peer_setup.probe_level().await < lite::ProbeLevel::Report {
-			tracing::debug!("peer does not support probing; skipping probe stream");
-			return Ok(());
-		}
-
-		loop {
-			// Wait until at least one consumer is interested in the estimate.
-			if bandwidth.used().await.is_err() {
-				return Ok(());
-			}
-
-			// Race the last consumer leaving against the probe stream ending.
-			let unused = {
-				let mut probe = std::pin::pin!(self.run_probe_stream(bandwidth));
-				kio::wait(|waiter| {
-					if let Poll::Ready(res) = bandwidth.poll_unused(waiter) {
-						return Poll::Ready(Some(res));
-					}
-					if let Poll::Ready(res) = waiter.poll_future(probe.as_mut()) {
-						match res {
-							Ok(()) => tracing::debug!("probe stream closed"),
-							Err(err) => tracing::warn!(%err, "probe stream error"),
-						}
-						return Poll::Ready(None);
-					}
-					Poll::Pending
-				})
-				.await
-			};
-			match unused {
-				// Loop back: a new consumer may arrive later.
-				Some(Ok(())) => {}
-				// The channel closed, or the stream ended (peer FIN'd or errored).
-				// Don't hammer an uncooperative peer; give up for the rest of the session.
-				Some(Err(_)) | None => return Ok(()),
-			}
-		}
-	}
-
-	async fn run_probe_stream(&self, bandwidth: &bandwidth::Producer) -> Result<(), Error> {
-		// After a GOAWAY the peer must not see new streams. Probe is best-effort;
-		// skip it rather than erroring.
-		if self.going_away.is_set() {
-			return Ok(());
-		}
-		let mut session = self.session.clone();
-		let mut stream = Stream::open(&mut session, self.version).await?;
-		stream.writer.encode(&lite::ControlType::Probe).await?;
-
-		while let Some(probe) = stream.reader.decode_maybe::<lite::Probe>().await? {
-			bandwidth.set(Some(probe.bitrate))?;
-		}
-
 		Ok(())
 	}
 
@@ -740,25 +587,6 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		}
 	}
 
-	/// Receive QUIC datagrams and route each to its subscription's track producer (lite-05 §6.4).
-	///
-	/// Returns `Ok(())` on a non-datagram transport or pre-lite-05 version, so the caller's
-	/// `select!` matches only on the error case and lets the other arms drive the session. A
-	/// decode error or an unknown subscribe id drops that datagram without tearing down the
-	/// session (best-effort); only a transport-level failure ends the loop.
-	async fn run_datagrams(mut self) -> Result<(), Error> {
-		if !self.version.has_datagrams() || self.session.max_datagram_size() == 0 {
-			return Ok(());
-		}
-
-		loop {
-			let payload = self.session.recv_datagram().await.map_err(Error::from_transport)?;
-			if let Err(err) = self.route_datagram(payload) {
-				tracing::debug!(%err, "dropping datagram");
-			}
-		}
-	}
-
 	/// Decode one datagram body and hand it to the matching subscription's producer.
 	fn route_datagram(&self, payload: bytes::Bytes) -> Result<(), Error> {
 		let mut buf = payload;
@@ -783,123 +611,6 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
-		let hdr: lite::Group = stream.decode().await?;
-
-		let (mut group, track, timescale) = {
-			let mut subs = self.subscribes.lock();
-			let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
-
-			let group_info = group::Info { sequence: hdr.sequence };
-			// Stats (groups/frames/bytes) are counted in the model as the group is
-			// written, through the tagged `track::Producer`.
-			let mut group = entry.producer.create_group(group_info)?;
-			// The stream may carry only the tail of the group; number the frames from
-			// where the publisher said they start so a reader splicing across routes
-			// lines them up.
-			group.start_at(hdr.frame_start)?;
-			(group, entry.producer.clone(), entry.timescale)
-		};
-
-		// The timescale came from TRACK_INFO (read before this subscription was even
-		// registered), so frames decode immediately. No SUBSCRIBE_OK to wait on.
-
-		let res = {
-			let mut serve = std::pin::pin!(self.run_group(stream, group.clone(), timescale));
-			kio::wait(|waiter| {
-				if let Poll::Ready(err) = track.poll_closed(waiter) {
-					return Poll::Ready(Err(err));
-				}
-				if let Poll::Ready(err) = group.poll_closed(waiter) {
-					return Poll::Ready(Err(err));
-				}
-				waiter.poll_future(serve.as_mut())
-			})
-			.await
-		};
-
-		match res {
-			Err(Error::Cancel) => {
-				let _ = group.abort(Error::Cancel);
-			}
-			Err(err) => {
-				tracing::debug!(%err, group = %group.sequence, "group error");
-				let _ = group.abort(err);
-			}
-			_ => {
-				let _ = group.finish();
-			}
-		}
-
-		Ok(())
-	}
-
-	async fn run_group(
-		&mut self,
-		stream: &mut Reader<S::RecvStream, Version>,
-		mut group: group::Producer,
-		timescale: Option<Timescale>,
-	) -> Result<(), Error> {
-		// Previous frame's raw timestamp value (in `timescale` units), for the
-		// zigzag-delta decode when timestamps are negotiated. The first frame's
-		// delta is absolute (prev = 0 implicitly).
-		let mut prev_ts: u64 = 0;
-
-		loop {
-			let timestamp = if let Some(scale) = timescale {
-				// Publisher advertised a timescale, so every frame on this stream is
-				// prefixed with a zigzag-delta timestamp. The timestamp delta doubles
-				// as the per-frame sentinel: stream end here means the group has no
-				// more frames.
-				let Some(zz) = stream.decode_maybe::<crate::coding::VarInt>().await? else {
-					break;
-				};
-				let next: u64 = (prev_ts as i128 + zz.to_zigzag() as i128)
-					.try_into()
-					.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-				prev_ts = next;
-				Some(Timestamp::new(next, scale).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?)
-			} else {
-				None
-			};
-
-			let Some(size) = stream.decode_maybe::<u64>().await? else {
-				break;
-			};
-
-			// `create_frame` is the allocation chokepoint and rejects an oversized
-			// `size` before allocating, so no pre-check is needed. No wire timestamp
-			// (pre-lite-05) means local receive time.
-			let timestamp = timestamp.unwrap_or_else(Timestamp::now);
-			let mut frame = group.create_frame(frame::Info { size, timestamp })?;
-
-			if let Err(err) = self.run_frame(stream, &mut frame).await {
-				let _ = frame.abort(err.clone());
-				return Err(err);
-			}
-
-			frame.finish()?;
-		}
-
-		Ok(())
-	}
-
-	async fn run_frame(
-		&mut self,
-		stream: &mut Reader<S::RecvStream, Version>,
-		frame: &mut frame::Producer<'_>,
-	) -> Result<(), Error> {
-		while frame.remaining() > 0 {
-			match stream.read_chunk(frame.remaining()).await? {
-				Some(chunk) if !chunk.is_empty() => {
-					frame.write(chunk)?;
-				}
-				_ => return Err(Error::WrongSize),
-			}
-		}
-		Ok(())
-	}
-
 	fn log_path(&self, path: impl AsPath) -> Path<'_> {
 		self.origin.root().join(path)
 	}
@@ -908,6 +619,582 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// received chain is empty (Lite01/02) or anonymous placeholders (Lite03).
 	fn version_lacks_hops(&self) -> bool {
 		matches!(self.version, Version::Lite01 | Version::Lite02 | Version::Lite03)
+	}
+}
+
+/// The subscriber half's driver: the uni-stream accept loop, the announce
+/// half, PROBE feedback, datagrams, and the per-source serve tasks, raced the
+/// way the old `select!` did. Only an error (or the task set draining) ends it.
+pub(super) struct SubscriberDriver<S: crate::transport::poll::Session> {
+	/// The announce half, still async. Its clean completion parks (a publish-only
+	/// peer has nothing to announce); only its error ends the session.
+	announce: Option<MaybeSendBox<'static, Result<(), Error>>>,
+	uni: UniAccept<S>,
+	/// PROBE feedback; finishes quietly when unsupported or given up on.
+	bandwidth: Option<RecvBandwidth<S>>,
+	/// Datagram receive; inert on a version or transport without datagrams.
+	datagrams: Option<DatagramRecv<S>>,
+	/// Driver-owned scope for broadcast and track handlers.
+	tasks: TaskSet,
+}
+
+impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
+	/// `connecting` is the connection-progress producer for this session (None for
+	/// versions with no initial-set boundary). It is threaded through the announce path
+	/// rather than stored on `Subscriber`: the struct is cloned for several long-lived
+	/// tasks, and any clone retaining a producer would keep the channel open and hang
+	/// `connect()`.
+	pub fn new(subscriber: Subscriber<S>, connecting: Option<ConnectingProducer>, tasks: TaskSet) -> Self {
+		Self {
+			announce: Some(subscriber.clone().run_announce(connecting).maybe_boxed()),
+			uni: UniAccept::new(subscriber.clone()),
+			bandwidth: Some(RecvBandwidth::new(subscriber.clone())),
+			datagrams: Some(DatagramRecv::new(subscriber)),
+			tasks,
+		}
+	}
+
+	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if let Some(announce) = &mut self.announce {
+			match waiter.poll_future(announce.as_mut()) {
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Ready(Ok(())) => self.announce = None,
+				Poll::Pending => {}
+			}
+		}
+		if let Poll::Ready(res) = self.uni.poll(waiter) {
+			return Poll::Ready(res);
+		}
+		if let Some(bandwidth) = &mut self.bandwidth {
+			match bandwidth.poll(waiter) {
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Ready(Ok(())) => self.bandwidth = None,
+				Poll::Pending => {}
+			}
+		}
+		if let Some(datagrams) = &mut self.datagrams {
+			match datagrams.poll(waiter) {
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Ready(Ok(())) => self.datagrams = None,
+				Poll::Pending => {}
+			}
+		}
+		if self.tasks.poll(waiter).is_ready() {
+			return Poll::Ready(Ok(()));
+		}
+		Poll::Pending
+	}
+}
+
+/// Accepts incoming uni streams (GROUP data plus the peer's SETUP) and drives
+/// each as a child machine. Resolves only on a transport error.
+struct UniAccept<S: crate::transport::poll::Session> {
+	subscriber: Subscriber<S>,
+	// A dedicated accept handle: the poll interface takes `&mut self`.
+	accept: S,
+	children: PollSet<UniServe<S>>,
+}
+
+impl<S: crate::transport::poll::Session> UniAccept<S> {
+	fn new(subscriber: Subscriber<S>) -> Self {
+		let accept = subscriber.session.clone();
+		Self {
+			subscriber,
+			accept,
+			children: PollSet::new(),
+		}
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let _ = self.children.poll(waiter);
+
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		loop {
+			match self.accept.poll_accept_uni(&mut cx) {
+				Poll::Ready(Ok(stream)) => self.children.push(UniServe {
+					subscriber: self.subscriber.clone(),
+					state: UniState::Start {
+						reader: Reader::new(stream, self.subscriber.version),
+					},
+				}),
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(Error::from_transport(err))),
+				Poll::Pending => break,
+			}
+		}
+
+		// Newly accepted children start now rather than on the next wake.
+		let _ = self.children.poll(waiter);
+		Poll::Pending
+	}
+}
+
+/// One accepted uni stream, dispatched on its first varint.
+struct UniServe<S: crate::transport::poll::Session> {
+	subscriber: Subscriber<S>,
+	state: UniState<S>,
+}
+
+enum UniState<S: crate::transport::poll::Session> {
+	/// Reading the stream's type.
+	Start {
+		reader: Reader<S::RecvStream, Version>,
+	},
+	/// Reading the peer's single SETUP message, recorded so capability-gated
+	/// streams (PROBE) can consult it. lite-05+ only.
+	Setup {
+		reader: Reader<S::RecvStream, Version>,
+	},
+	Group(GroupRecv<S>),
+	Done,
+}
+
+impl<S: crate::transport::poll::Session> Machine for UniServe<S> {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if let Err(err) = ready!(self.poll_serve(waiter)) {
+			tracing::debug!(%err, "error running uni stream");
+		}
+		Poll::Ready(())
+	}
+}
+
+impl<S: crate::transport::poll::Session> UniServe<S> {
+	/// Abort the stream with the given error, wherever the reader currently lives.
+	fn abort(&mut self, err: &Error) {
+		match &mut self.state {
+			UniState::Start { reader } | UniState::Setup { reader } => reader.abort(err),
+			UniState::Group(recv) => recv.reader.abort(err),
+			UniState::Done => {}
+		}
+	}
+
+	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		loop {
+			match &mut self.state {
+				UniState::Start { reader } => {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					// A decode error here is only logged; the peer hung up or spoke garbage
+					// before the stream had a type.
+					let kind = ready!(reader.poll_decode::<lite::DataType>(&mut cx))?;
+					let UniState::Start { reader } = std::mem::replace(&mut self.state, UniState::Done) else {
+						unreachable!()
+					};
+					self.state = match kind {
+						lite::DataType::Group => UniState::Group(GroupRecv::new(self.subscriber.clone(), reader)),
+						lite::DataType::Setup => UniState::Setup { reader },
+					};
+				}
+				UniState::Setup { reader } => {
+					if !self.subscriber.version.has_setup_stream() {
+						let err = Error::UnexpectedStream;
+						self.abort(&err);
+						return Poll::Ready(Ok(()));
+					}
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					let res = ready!(reader.poll_decode::<lite::Setup>(&mut cx));
+					match res {
+						Ok(setup) => {
+							tracing::debug!(?setup, "received peer setup");
+							self.subscriber.peer_setup.set(setup);
+							return Poll::Ready(Ok(()));
+						}
+						Err(err) => {
+							self.abort(&err);
+							return Poll::Ready(Ok(()));
+						}
+					}
+				}
+				UniState::Group(recv) => {
+					let res = ready!(recv.poll_serve(waiter));
+					if let Err(err) = res {
+						self.abort(&err);
+					}
+					return Poll::Ready(Ok(()));
+				}
+				UniState::Done => return Poll::Ready(Ok(())),
+			}
+		}
+	}
+}
+
+/// Receives one GROUP stream into its subscription's track producer.
+struct GroupRecv<S: crate::transport::poll::Session> {
+	subscriber: Subscriber<S>,
+	reader: Reader<S::RecvStream, Version>,
+	state: GroupRecvState,
+}
+
+enum GroupRecvState {
+	/// Reading the GROUP header.
+	Header,
+	/// Filling the group, bailing if the track or group dies first.
+	Serve {
+		group: group::Producer,
+		track: track::Producer,
+		ingest: FrameIngest,
+	},
+	Done,
+}
+
+impl<S: crate::transport::poll::Session> GroupRecv<S> {
+	fn new(subscriber: Subscriber<S>, reader: Reader<S::RecvStream, Version>) -> Self {
+		Self {
+			subscriber,
+			reader,
+			state: GroupRecvState::Header,
+		}
+	}
+
+	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		loop {
+			match &mut self.state {
+				GroupRecvState::Header => {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					let hdr = ready!(self.reader.poll_decode::<lite::Group>(&mut cx))?;
+
+					let (group, track, timescale) = {
+						let mut subs = self.subscriber.subscribes.lock();
+						let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
+
+						let group_info = group::Info { sequence: hdr.sequence };
+						// Stats (groups/frames/bytes) are counted in the model as the group
+						// is written, through the tagged `track::Producer`.
+						let mut group = entry.producer.create_group(group_info)?;
+						// The stream may carry only the tail of the group; number the frames
+						// from where the publisher said they start so a reader splicing
+						// across routes lines them up.
+						group.start_at(hdr.frame_start)?;
+						(group, entry.producer.clone(), entry.timescale)
+					};
+
+					// The timescale came from TRACK_INFO (read before this subscription was
+					// even registered), so frames decode immediately. No SUBSCRIBE_OK to
+					// wait on.
+					self.state = GroupRecvState::Serve {
+						group,
+						track,
+						ingest: FrameIngest::new(timescale),
+					};
+				}
+				GroupRecvState::Serve { group, track, ingest } => {
+					// The track or group dying cancels the stream; the peer's own close
+					// arrives through the ingest's reads.
+					let res = 'serve: {
+						if let Poll::Ready(err) = track.poll_closed(waiter) {
+							break 'serve Err(err);
+						}
+						if let Poll::Ready(err) = group.poll_closed(waiter) {
+							break 'serve Err(err);
+						}
+						match ingest.poll(&mut self.reader, group, waiter) {
+							Poll::Ready(res) => break 'serve res,
+							Poll::Pending => return Poll::Pending,
+						}
+					};
+
+					let GroupRecvState::Serve { group, .. } = std::mem::replace(&mut self.state, GroupRecvState::Done)
+					else {
+						unreachable!()
+					};
+					match res {
+						Ok(()) => {
+							let mut group = group;
+							let _ = group.finish();
+						}
+						Err(Error::Cancel) => {
+							let _ = group.abort(Error::Cancel);
+						}
+						Err(err) => {
+							tracing::debug!(%err, group = %group.sequence, "group error");
+							let _ = group.abort(err.clone());
+							return Poll::Ready(Err(err));
+						}
+					}
+					return Poll::Ready(Ok(()));
+				}
+				GroupRecvState::Done => return Poll::Ready(Ok(())),
+			}
+		}
+	}
+}
+
+/// Pumps bare FRAME messages from a reader into a group producer: the wire
+/// format shared by GROUP streams and FETCH responses.
+struct FrameIngest {
+	/// `Some` decodes the lite-05 zigzag-delta timestamp prefix; `None` stamps
+	/// local receive time (pre-lite-05).
+	timescale: Option<Timescale>,
+	/// Previous frame's raw timestamp value (in `timescale` units), for the
+	/// zigzag-delta decode. The first frame's delta is absolute (prev = 0).
+	prev_ts: u64,
+	phase: IngestPhase,
+}
+
+enum IngestPhase {
+	/// Reading the timestamp delta (skipped without a timescale). Stream end here
+	/// means the group has no more frames.
+	Timing,
+	/// Reading the frame size. Stream end here also ends the group (pre-lite-05,
+	/// where there is no timing prefix to act as the sentinel).
+	Size { timestamp: Option<Timestamp> },
+	/// Streaming the frame payload.
+	Payload { frame: frame::ProducerOwned },
+}
+
+impl FrameIngest {
+	fn new(timescale: Option<Timescale>) -> Self {
+		Self {
+			timescale,
+			prev_ts: 0,
+			phase: IngestPhase::Timing,
+		}
+	}
+
+	/// `Ready(Ok(()))` once the stream FINs on a frame boundary. The caller
+	/// finishes or aborts the group; a frame cut short mid-payload was already
+	/// aborted here with the reason.
+	fn poll<R: crate::transport::poll::RecvStream>(
+		&mut self,
+		reader: &mut Reader<R, Version>,
+		group: &mut group::Producer,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<(), Error>> {
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		loop {
+			match &mut self.phase {
+				IngestPhase::Timing => {
+					let Some(scale) = self.timescale else {
+						self.phase = IngestPhase::Size { timestamp: None };
+						continue;
+					};
+					// The timestamp delta doubles as the per-frame sentinel.
+					let Some(zz) = ready!(reader.poll_decode_maybe::<crate::coding::VarInt>(&mut cx))? else {
+						return Poll::Ready(Ok(()));
+					};
+					let next: u64 = (self.prev_ts as i128 + zz.to_zigzag() as i128)
+						.try_into()
+						.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+					self.prev_ts = next;
+					let timestamp = Timestamp::new(next, scale)
+						.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+					self.phase = IngestPhase::Size {
+						timestamp: Some(timestamp),
+					};
+				}
+				IngestPhase::Size { timestamp } => {
+					let Some(size) = ready!(reader.poll_decode_maybe::<u64>(&mut cx))? else {
+						return Poll::Ready(Ok(()));
+					};
+					// `create_frame_owned` is the allocation chokepoint and rejects an
+					// oversized `size` before allocating, so no pre-check is needed. No
+					// wire timestamp (pre-lite-05) means local receive time.
+					let timestamp = timestamp.unwrap_or_else(Timestamp::now);
+					let frame = group.create_frame_owned(frame::Info { size, timestamp })?;
+					self.phase = IngestPhase::Payload { frame };
+				}
+				IngestPhase::Payload { frame } => {
+					let failed = loop {
+						if frame.remaining() == 0 {
+							break None;
+						}
+						match reader.poll_read_chunk(&mut cx, frame.remaining()) {
+							Poll::Pending => return Poll::Pending,
+							Poll::Ready(Ok(Some(chunk))) if !chunk.is_empty() => {
+								if let Err(err) = frame.write(chunk) {
+									break Some(err);
+								}
+							}
+							Poll::Ready(Ok(_)) => break Some(Error::WrongSize),
+							Poll::Ready(Err(err)) => break Some(err),
+						}
+					};
+
+					let IngestPhase::Payload { frame } = std::mem::replace(&mut self.phase, IngestPhase::Timing) else {
+						unreachable!()
+					};
+					match failed {
+						None => frame.finish()?,
+						Some(err) => {
+							// Fail the group with the reason, not the Drop fallback's
+							// generic `Dropped`.
+							let _ = frame.abort(err.clone());
+							return Poll::Ready(Err(err));
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+/// Receives QUIC datagrams and routes each to its subscription's track producer
+/// (lite-05 §6.4).
+///
+/// A decode error or an unknown subscribe id drops that datagram without tearing
+/// down the session (best-effort); only a transport-level failure ends the loop.
+struct DatagramRecv<S: crate::transport::poll::Session> {
+	subscriber: Subscriber<S>,
+	// A dedicated receive handle: the poll interface takes `&mut self`.
+	recv: S,
+	enabled: bool,
+}
+
+impl<S: crate::transport::poll::Session> DatagramRecv<S> {
+	fn new(subscriber: Subscriber<S>) -> Self {
+		let recv = subscriber.session.clone();
+		let enabled = subscriber.version.has_datagrams() && recv.max_datagram_size() > 0;
+		Self {
+			subscriber,
+			recv,
+			enabled,
+		}
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if !self.enabled {
+			return Poll::Ready(Ok(()));
+		}
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		loop {
+			let payload = ready!(self.recv.poll_recv_datagram(&mut cx)).map_err(Error::from_transport)?;
+			if let Err(err) = self.subscriber.route_datagram(payload) {
+				tracing::debug!(%err, "dropping datagram");
+			}
+		}
+	}
+}
+
+/// Opens a PROBE stream on demand while a consumer is interested.
+///
+/// Loops forever: wait for a consumer, race the probe stream against the
+/// consumer leaving, then loop back. Probe is best-effort, so stream errors are
+/// logged but never tear down the session.
+struct RecvBandwidth<S: crate::transport::poll::Session> {
+	subscriber: Subscriber<S>,
+	state: BandwidthState<S>,
+}
+
+enum BandwidthState<S: crate::transport::poll::Session> {
+	/// lite-05+ negotiates probing: only open a PROBE stream if the peer
+	/// advertised it (Report or higher) in its SETUP. Older versions have no
+	/// SETUP, so probe is always available there.
+	Gate,
+	/// Wait until at least one consumer is interested in the estimate.
+	WaitUsed,
+	/// Race the last consumer leaving against the probe stream ending.
+	Probing(ProbeStream<S>),
+}
+
+impl<S: crate::transport::poll::Session> RecvBandwidth<S> {
+	fn new(subscriber: Subscriber<S>) -> Self {
+		Self {
+			subscriber,
+			state: BandwidthState::Gate,
+		}
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		loop {
+			match &mut self.state {
+				BandwidthState::Gate => {
+					if self.subscriber.recv_bandwidth.is_none() {
+						return Poll::Ready(Ok(()));
+					}
+					if self.subscriber.version.has_setup_stream()
+						&& ready!(self.subscriber.peer_setup.poll_probe_level(waiter)) < lite::ProbeLevel::Report
+					{
+						tracing::debug!("peer does not support probing; skipping probe stream");
+						return Poll::Ready(Ok(()));
+					}
+					self.state = BandwidthState::WaitUsed;
+				}
+				BandwidthState::WaitUsed => {
+					let bandwidth = self.subscriber.recv_bandwidth.as_ref().expect("gated above");
+					match ready!(bandwidth.poll_used(waiter)) {
+						Ok(()) => self.state = BandwidthState::Probing(ProbeStream::new(&self.subscriber)),
+						Err(_) => return Poll::Ready(Ok(())),
+					}
+				}
+				BandwidthState::Probing(probe) => {
+					let bandwidth = self.subscriber.recv_bandwidth.as_ref().expect("gated above");
+					match bandwidth.poll_unused(waiter) {
+						// Loop back: a new consumer may arrive later. Dropping the probe
+						// machine resets its stream.
+						Poll::Ready(Ok(())) => {
+							self.state = BandwidthState::WaitUsed;
+							continue;
+						}
+						// The channel closed: give up for the rest of the session.
+						Poll::Ready(Err(_)) => return Poll::Ready(Ok(())),
+						Poll::Pending => {}
+					}
+					match ready!(probe.poll(waiter)) {
+						Ok(()) => tracing::debug!("probe stream closed"),
+						Err(err) => tracing::warn!(%err, "probe stream error"),
+					}
+					// The stream ended (peer FIN'd or errored). Don't hammer an
+					// uncooperative peer; give up for the rest of the session.
+					return Poll::Ready(Ok(()));
+				}
+			}
+		}
+	}
+}
+
+/// One PROBE stream: send the type, then feed the peer's estimates into the
+/// bandwidth producer until it FINs.
+struct ProbeStream<S: crate::transport::poll::Session> {
+	subscriber: Subscriber<S>,
+	session: S,
+	state: ProbeState<S>,
+}
+
+enum ProbeState<S: crate::transport::poll::Session> {
+	Open,
+	Send { stream: Stream<S, Version> },
+	Read { stream: Stream<S, Version> },
+}
+
+impl<S: crate::transport::poll::Session> ProbeStream<S> {
+	fn new(subscriber: &Subscriber<S>) -> Self {
+		Self {
+			subscriber: subscriber.clone(),
+			session: subscriber.session.clone(),
+			state: ProbeState::Open,
+		}
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		loop {
+			match &mut self.state {
+				ProbeState::Open => {
+					// After a GOAWAY the peer must not see new streams. Probe is
+					// best-effort; skip it rather than erroring.
+					if self.subscriber.going_away.is_set() {
+						return Poll::Ready(Ok(()));
+					}
+					let mut stream = ready!(Stream::poll_open(&mut self.session, self.subscriber.version, &mut cx))?;
+					stream.writer.buffer(&lite::ControlType::Probe)?;
+					self.state = ProbeState::Send { stream };
+				}
+				ProbeState::Send { stream } => {
+					ready!(stream.writer.poll_flush(&mut cx))?;
+					let ProbeState::Send { stream } = std::mem::replace(&mut self.state, ProbeState::Open) else {
+						unreachable!()
+					};
+					self.state = ProbeState::Read { stream };
+				}
+				ProbeState::Read { stream } => {
+					let bandwidth = self.subscriber.recv_bandwidth.as_ref().expect("gated by RecvBandwidth");
+					loop {
+						let Some(probe) = ready!(stream.reader.poll_decode_maybe::<lite::Probe>(&mut cx))? else {
+							return Poll::Ready(Ok(()));
+						};
+						bandwidth.set(Some(probe.bitrate))?;
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -2368,9 +2655,9 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			return;
 		}
 
-		let res = subscriber
-			.run_group(&mut stream.reader, producer.clone(), timescale)
-			.await;
+		let mut ingest = FrameIngest::new(timescale);
+		let mut group = producer.clone();
+		let res = kio::wait(|waiter| ingest.poll(&mut stream.reader, &mut group, waiter)).await;
 		match res {
 			Ok(()) => {
 				let _ = producer.finish();

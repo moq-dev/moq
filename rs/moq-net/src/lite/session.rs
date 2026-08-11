@@ -9,7 +9,8 @@ use crate::{
 use std::task::{Context, Poll, ready};
 
 use super::{
-	Connecting, DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, Version,
+	Connecting, DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, SubscriberDriver,
+	Version,
 };
 
 pub(crate) struct SessionStart {
@@ -204,7 +205,7 @@ pub fn start<S: crate::transport::poll::Session>(config: Config<S>) -> Result<Se
 		goaway: Some(SendGoaway::new(session.clone(), goaway, version)),
 		session_stream: setup_stream,
 		publisher,
-		subscriber: subscriber.run(sub_connecting, task_set).maybe_boxed(),
+		subscriber: SubscriberDriver::new(subscriber, sub_connecting, task_set),
 	};
 
 	// The async block only owns the state; all the logic is in `Driver::poll`.
@@ -251,7 +252,7 @@ struct Driver<S: crate::transport::poll::Session> {
 	/// the publisher and subscriber keep running while it sits idle.
 	session_stream: Option<Stream<S, Version>>,
 	publisher: Publisher<S>,
-	subscriber: MaybeSendBox<'static, Result<(), Error>>,
+	subscriber: SubscriberDriver<S>,
 }
 
 impl<S: crate::transport::poll::Session> Driver<S> {
@@ -278,7 +279,7 @@ impl<S: crate::transport::poll::Session> Driver<S> {
 		if let Poll::Ready(res) = self.publisher.poll(waiter) {
 			return Poll::Ready(res);
 		}
-		if let Poll::Ready(res) = waiter.poll_future(self.subscriber.as_mut()) {
+		if let Poll::Ready(res) = self.subscriber.poll(waiter) {
 			return Poll::Ready(res);
 		}
 		Poll::Pending

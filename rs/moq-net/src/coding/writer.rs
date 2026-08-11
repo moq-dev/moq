@@ -72,10 +72,6 @@ impl<S: crate::transport::poll::SendStream, V> Writer<S, V> {
 			.map_err(Error::from_transport)
 	}
 
-	pub(crate) async fn write<Buf: bytes::Buf + Send>(&mut self, buf: &mut Buf) -> Result<usize, Error> {
-		std::future::poll_fn(|cx| self.poll_write(cx, buf)).await
-	}
-
 	/// Poll until the entire `Buf` has been written to the stream.
 	///
 	/// NOTE: This can avoid performing a copy when using `Bytes`.

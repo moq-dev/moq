@@ -471,6 +471,55 @@ impl Producer {
 		Ok(frame::Producer::new(self, buf, info).with_meter(meter))
 	}
 
+	/// The owned counterpart of [`Self::create_frame`], for the wire drivers that
+	/// stream a frame across polls and cannot hold the group borrowed inside their
+	/// state. The one-live-frame rule the borrow normally enforces becomes the
+	/// caller's promise; see [`frame::ProducerOwned`].
+	pub(crate) fn create_frame_owned(&mut self, frame: frame::Info) -> Result<frame::ProducerOwned> {
+		let timestamp = frame
+			.timestamp
+			.convert(self.track.timescale)
+			.map_err(|_| Error::TimestampMismatch)?;
+		if frame.size > MAX_GROUP_CACHE {
+			return Err(Error::FrameTooLarge);
+		}
+		let buf = FrameBuf::new(frame.size as usize);
+
+		let mut state = modify(&self.state)?;
+		if state.fin.is_some() {
+			return Err(Error::Closed);
+		}
+		let next_index = state
+			.next_index
+			.checked_add(1)
+			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		debug_assert!(state.partial.is_none(), "a frame is already open");
+		state.cache += frame.size;
+		state.charge.add(frame.size);
+		state.partial = Some(Partial {
+			timestamp,
+			buf: buf.clone(),
+		});
+		state.next_index = next_index;
+		state.evict();
+		drop(state);
+
+		// With the group lock released (lock order is track then group), settle
+		// eviction debt if enough has been written since the track last paid.
+		self.cache.settle();
+
+		// Ingress payload: one frame opened; its bytes are counted per chunk as the
+		// producer writes them.
+		self.stats.frames(1);
+		let meter = self.stats.clone();
+
+		let info = frame::Info {
+			size: frame.size,
+			timestamp,
+		};
+		Ok(frame::ProducerOwned::new(self.clone(), buf, info).with_meter(meter))
+	}
+
 	/// Wake consumers parked on the group channel (called after a partial write).
 	pub(crate) fn frame_notify(&self) {
 		// Taking the write lock and dropping it triggers kio's notify.

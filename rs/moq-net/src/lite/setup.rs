@@ -241,9 +241,9 @@ impl PeerSetup {
 		*self.0.lock() = Some(setup);
 	}
 
-	/// Await the peer's advertised probe level, blocking until its SETUP arrives.
-	pub async fn probe_level(&self) -> ProbeLevel {
-		kio::wait(|waiter| self.poll_get(waiter, |setup| setup.probe)).await
+	/// Poll for the peer's advertised probe level, waiting until its SETUP arrives.
+	pub fn poll_probe_level(&self, waiter: &kio::Waiter) -> std::task::Poll<ProbeLevel> {
+		self.poll_get(waiter, |setup| setup.probe)
 	}
 
 	/// Await the link cost the peer (the dialing side) declared in its SETUP.
