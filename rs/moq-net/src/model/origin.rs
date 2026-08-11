@@ -1566,9 +1566,10 @@ async fn run_source(
 	// closing below) bumps `announced_closed` + `announced_bytes`. Empty scope =
 	// no-op.
 	let mut announce = route.announce.then(|| ingress.announce());
-	// A source's initial or updated route may replace different content at this
-	// path. Once displaced, the same unchanged route is a standby until the winner
-	// leaves; otherwise the two live sources would evict each other forever.
+	// Every route observation earns one attempt to replace different content at
+	// this path. Once displaced, the same unchanged route is a standby until the
+	// winner leaves; otherwise the two live sources would evict each other forever.
+	// Whether the route is announced is a separate gate, owned by `attach_source`.
 	let mut may_take_over = true;
 
 	'attach: loop {
@@ -1608,7 +1609,7 @@ async fn run_source(
 					// Our route moved; recompute the guard and retry with it.
 					Some(Ok(update)) => {
 						sync_announce(&mut announce, update.announce, &ingress);
-						may_take_over = update.announce;
+						may_take_over = true;
 						route = update;
 					}
 					// The source closed while parked; it was never visible.
@@ -1624,10 +1625,12 @@ async fn run_source(
 		loop {
 			let update = kio::wait(|waiter| {
 				// A takeover closes this front without touching its still-live source.
-				// Observe that first so a simultaneous route update is never applied to
-				// a stale front that no longer owns the leaf.
+				// Observe that first, ahead of any simultaneous route update: a new
+				// first hop would otherwise re-arm `may_take_over` and win the path
+				// straight back, which is the eviction loop the flag exists to stop.
+				// `Err` here is the state channel dying, which also means displaced.
 				if state
-					.poll(waiter, |s| if s.closed { Poll::Ready(()) } else { Poll::Pending })
+					.poll_ref(waiter, |s| if s.closed { Poll::Ready(()) } else { Poll::Pending })
 					.is_ready()
 				{
 					return Poll::Ready(None);
@@ -1637,9 +1640,8 @@ async fn run_source(
 			.await;
 			match update {
 				None => {
-					// The winner owns the path now. Keep this source parked behind it,
-					// retaining the source's announcement so it can reclaim the path
-					// after the winner leaves.
+					// The winner owns the path now. Stand by behind it, holding the
+					// ingress announce guard, until it leaves or our route moves again.
 					may_take_over = false;
 					continue 'attach;
 				}
@@ -1658,6 +1660,10 @@ async fn run_source(
 					if update.hops.iter().next().copied() != publisher {
 						detach_source(&state, &broadcast, &leaf, id, true);
 						sync_announce(&mut announce, announced, &ingress);
+						// A route observation, so it earns a takeover attempt like any
+						// other. A sibling source may still hold the front open, making
+						// the re-attach a replacement rather than a create.
+						may_take_over = true;
 						route = update;
 						continue 'attach;
 					}
@@ -1695,10 +1701,10 @@ enum Attach {
 	Ready(kio::Producer<FrontState>, broadcast::Producer, u64),
 	/// The path's live front belongs to a different original publisher and this
 	/// source may not take it: either the source is offline (so it would rank below
-	/// every route the front holds), was already displaced by this content, or its
-	/// chain leads back through a peer the front is already exposed to, making it a
-	/// reflection rather than rival content. The caller parks on the returned table
-	/// until the front closes.
+	/// every route the front holds), it already spent its takeover attempt on this
+	/// route and lost, or its chain leads back through a peer the front is already
+	/// exposed to, making it a reflection rather than rival content. The caller
+	/// parks on the returned table until the front closes.
 	Parked(kio::Producer<FrontState>),
 }
 
@@ -1739,14 +1745,18 @@ fn same_publisher(a: Option<Origin>, b: Option<Origin>) -> bool {
 /// keeps a reconnect from waiting on the transport to retire the session it
 /// replaced.
 ///
-/// Taking over requires an initial or updated route that has not already been
-/// displaced, which keeps the rule consistent with [`route_order`]: an offline
-/// or previously displaced source waits ([`Attach::Parked`]) rather than
-/// unannouncing a newer live broadcast. It also requires a chain that does not
-/// lead back through a peer this front is already exposed to (see
-/// [`FrontState::taints_a_reader`]): such a source is our own broadcast reflected
-/// by a peer that cannot detect the loop itself, and letting it evict the front is
-/// how a publish direction ends up withdrawing its own announce.
+/// Taking over requires announcing, which keeps the rule consistent with
+/// [`route_order`]: an offline source ranks below every announced route, so it
+/// waits ([`Attach::Parked`]) rather than unannouncing a live broadcast and
+/// cutting its subscribers for content nobody has advertised. It also requires a
+/// chain that does not lead back through a peer this front is already exposed to
+/// (see [`FrontState::taints_a_reader`]): such a source is our own broadcast
+/// reflected by a peer that cannot detect the loop itself, and letting it evict the
+/// front is how a publish direction ends up withdrawing its own announce.
+///
+/// `may_take_over` is the caller's third gate: [`run_source`] clears it once this
+/// source has been displaced, so a route that already lost the path stands by
+/// instead of winning it straight back. A fresh route observation re-arms it.
 fn attach_source(
 	ctx: &AttachContext,
 	leaf: &Lock<OriginNode>,
@@ -4877,9 +4887,10 @@ mod tests {
 		assert_eq!(consumer.get_broadcast("test").unwrap().route().hops, hops_b);
 	}
 
-	/// A displaced live publisher reclaims the path after its replacement leaves.
+	/// A displaced live publisher stands by rather than fighting for the path back,
+	/// then reclaims it once its replacement leaves.
 	#[tokio::test]
-	async fn test_evicted_publisher_reclaims_path_when_evictor_leaves() {
+	async fn test_displaced_publisher_reclaims_path_when_replacement_leaves() {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
@@ -4896,13 +4907,16 @@ mod tests {
 		settle().await;
 		announced.assert_next_some("test");
 
-		// A different publisher announces the same path, evicting A even though
+		// A different publisher announces the same path, displacing A even though
 		// A's session is still open.
 		let mut source_b = origin.create_broadcast("test", announce().with_hops(hops_b)).unwrap();
 		settle().await;
 		settle().await;
 		announced.assert_next_none("test");
 		announced.assert_next_some("test");
+		// Exactly one handover: A stands by on its unchanged route instead of
+		// taking the path straight back, which would trade announces forever.
+		announced.assert_next_wait();
 
 		// B disconnects. A is still an open, live broadcast producer.
 		source_b.finish();
@@ -4911,12 +4925,68 @@ mod tests {
 
 		assert!(
 			consumer.get_broadcast("test").is_some(),
-			"the still-live publisher A should reclaim the path once its evictor leaves"
+			"the still-live publisher A should reclaim the path once its replacement leaves"
 		);
 		let recovered = consumer.request_broadcast("test").await.unwrap();
 		assert_eq!(recovered.route().hops, hops_a);
 
+		announced.assert_next_none("test");
+		announced.assert_next_some("test");
+		announced.assert_next_wait();
+
 		source_a.finish();
+	}
+
+	/// A source that was displaced and later reclaimed the path must still be able
+	/// to take the path over when its own route moves to a new publisher, even
+	/// though a sibling source keeps the old front alive.
+	#[tokio::test]
+	async fn test_reclaimed_publisher_can_still_replace_itself() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+
+		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops_b = OriginList::try_from(vec![Origin::new(2).unwrap()]).unwrap();
+		let hops_c = OriginList::try_from(vec![Origin::new(3).unwrap()]).unwrap();
+
+		// Two sources sharing a publisher splice into one front.
+		let mut source_a1 = origin
+			.create_broadcast("test", announce().with_hops(hops_a.clone()))
+			.unwrap();
+		let mut source_a2 = origin
+			.create_broadcast("test", announce().with_hops(hops_a.clone()))
+			.unwrap();
+		settle().await;
+		settle().await;
+		assert_eq!(consumer.get_broadcast("test").unwrap().route().hops, hops_a);
+
+		// A different publisher takes the path; both A sources stand by behind it.
+		let mut source_b = origin.create_broadcast("test", announce().with_hops(hops_b)).unwrap();
+		settle().await;
+		settle().await;
+
+		// B leaves and the A sources reclaim the path, having spent their attempt.
+		source_b.finish();
+		settle().await;
+		settle().await;
+		assert_eq!(consumer.get_broadcast("test").unwrap().route().hops, hops_a);
+
+		// A1 now moves to a new publisher, which is a fresh route observation. Its
+		// sibling A2 keeps the old front open, so this attach is a replacement, and
+		// a publisher swap is always a replacement rather than a standby.
+		source_a1.set_route(announce().with_hops(hops_c.clone())).unwrap();
+		settle().await;
+		settle().await;
+		assert_eq!(
+			consumer.get_broadcast("test").unwrap().route().hops,
+			hops_c,
+			"the new publisher must take the path over, not stand by behind the old front"
+		);
+
+		source_a1.finish();
+		source_a2.finish();
 	}
 
 	/// A publisher reconnecting under the same identity attaches as a second
