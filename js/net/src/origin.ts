@@ -8,7 +8,7 @@
  *
  * @module
  */
-import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import { Derived, type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import * as Path from "./path.ts";
@@ -95,6 +95,11 @@ export interface Table {
  */
 export class Producer implements Table {
 	#state = new OriginState();
+
+	// The reader backing the passthroughs, so holding a Producer never requires the
+	// consume().x() stutter for everyday reads. One instance, so `discovery` keeps its
+	// identity across reads.
+	#reader = makeConsumer(this.#state);
 
 	/**
 	 * Settles once the origin closes: `null` on a clean close, or the abort {@link Error}.
@@ -272,12 +277,6 @@ export class Producer implements Table {
 		return this.#reader.announced(prefix);
 	}
 
-	// The reader backing the passthroughs, so holding a Producer never requires the
-	// consume().x() stutter for everyday reads.
-	get #reader(): Consumer {
-		return makeConsumer(this.#state);
-	}
-
 	/** Close the origin, every broadcast it still routes, and its announcement streams. Idempotent. */
 	close(abort?: Error) {
 		if (this.#state.closed.peek() !== undefined) return;
@@ -305,6 +304,15 @@ export class Producer implements Table {
 	}
 }
 
+// Constructs a Consumer from within this module without exposing a public constructor
+// that would leak the unexported OriginState. Assigned in the class's static block.
+let makeConsumer: (state: OriginState) => Consumer;
+
+// Same for Request: a public constructor would let a caller forge a handle that no origin
+// ever registered, whose lifecycle guarantees are then false. `@internal` alone would not
+// stop it, since the declaration emit keeps the constructor.
+let makeRequest: (path: Path.Valid, active: Getter<broadcast.Consumer | undefined>, dispose: Dispose) => Request;
+
 /**
  * An open request for a path nothing announced; see {@link Consumer.request}.
  *
@@ -330,11 +338,14 @@ export class Request {
 	#dispose: Dispose;
 	#closed = false;
 
-	/** @internal Created by {@link Consumer.request}. */
-	constructor(path: Path.Valid, active: Getter<broadcast.Consumer | undefined>, dispose: Dispose) {
+	private constructor(path: Path.Valid, active: Getter<broadcast.Consumer | undefined>, dispose: Dispose) {
 		this.path = path;
 		this.active = active;
 		this.#dispose = dispose;
+	}
+
+	static {
+		makeRequest = (path, active, dispose) => new Request(path, active, dispose);
 	}
 
 	/** Withdraw the request. The path stays routed for any other open request. Idempotent. */
@@ -344,10 +355,6 @@ export class Request {
 		this.#dispose();
 	}
 }
-
-// Constructs a Consumer from within this module without exposing a public constructor
-// that would leak the unexported OriginState. Assigned in the class's static block.
-let makeConsumer: (state: OriginState) => Consumer;
 
 /**
  * The read side of an origin: resolve broadcasts by path and watch what is available.
@@ -363,6 +370,9 @@ export class Consumer {
 
 	private constructor(state: OriginState) {
 		this.#state = state;
+		this.#discovery = new Derived([state.sessions], ({ total, discovery }) =>
+			total === 0 ? undefined : discovery > 0,
+		);
 	}
 
 	static {
@@ -388,20 +398,7 @@ export class Consumer {
 
 	// Derived per access rather than cached: a lightweight mapped view over the session
 	// counts, avoiding a Computed's lifecycle.
-	readonly #discovery: Getter<boolean | undefined> = {
-		peek: () => {
-			const { total, discovery } = this.#state.sessions.peek();
-			return total === 0 ? undefined : discovery > 0;
-		},
-		subscribe: (fn) =>
-			this.#state.sessions.subscribe(({ total, discovery }) => fn(total === 0 ? undefined : discovery > 0)),
-		changed: ((fn?: (value: boolean | undefined) => void) => {
-			const map = ({ total, discovery }: { total: number; discovery: number }) =>
-				total === 0 ? undefined : discovery > 0;
-			if (fn) return this.#state.sessions.changed((value) => fn(map(value)));
-			return this.#state.sessions.changed().then(map);
-		}) as Getter<boolean | undefined>["changed"],
-	};
+	readonly #discovery: Getter<boolean | undefined>;
 
 	/**
 	 * Whether the table routes `path` itself, by a local publish or a session's announcement.
@@ -430,7 +427,7 @@ export class Consumer {
 		const requests = this.#state.requests.peek();
 		if (!requests) {
 			// Closed origin: a request that can never resolve.
-			return new Request(path, new Signal<broadcast.Consumer | undefined>(undefined), () => {});
+			return makeRequest(path, new Signal<broadcast.Consumer | undefined>(undefined), () => {});
 		}
 
 		let slot = requests.get(path);
@@ -444,7 +441,7 @@ export class Consumer {
 		slot.count += 1;
 
 		const taken = slot;
-		return new Request(path, this.#resolved(path, taken), () => {
+		return makeRequest(path, this.#resolved(path, taken), () => {
 			taken.count -= 1;
 			if (taken.count > 0) return;
 
@@ -466,41 +463,10 @@ export class Consumer {
 	// one (knowledge beats assumption), else the slot's blind answer. Derived per access
 	// over the backing signals, so a routed path resolves synchronously.
 	#resolved(path: Path.Valid, slot: RequestSlot): Getter<broadcast.Consumer | undefined> {
-		const resolve = () => {
-			const local = this.#state.local.peek()?.get(path);
-			if (local) return local;
-			return this.#state.remote.peek()?.get(path)?.[0] ?? slot.front.peek();
-		};
-		const sources = [this.#state.local, this.#state.remote, slot.front] as const;
-
-		return {
-			peek: resolve,
-			subscribe: (fn) => {
-				const notify = () => fn(resolve());
-				const disposes = sources.map((source) => source.subscribe(notify));
-				return () => {
-					for (const dispose of disposes) dispose();
-				};
-			},
-			changed: ((fn?: (value: broadcast.Consumer | undefined) => void) => {
-				if (fn) {
-					const notify = () => fn(resolve());
-					// Spelled out: mapping over the tuple trips overload resolution on the
-					// union of signal types.
-					const disposes = [
-						sources[0].changed(notify),
-						sources[1].changed(notify),
-						sources[2].changed(notify),
-					];
-					return () => {
-						for (const dispose of disposes) dispose();
-					};
-				}
-				// Spelled out: mapping `.changed()` over the tuple trips overload resolution
-				// on the union of signal types.
-				return Promise.race([sources[0].changed(), sources[1].changed(), sources[2].changed()]).then(resolve);
-			}) as Getter<broadcast.Consumer | undefined>["changed"],
-		};
+		return new Derived(
+			[this.#state.local, this.#state.remote, slot.front],
+			(local, remote, front) => local?.get(path) ?? remote?.get(path)?.[0] ?? front,
+		);
 	}
 
 	/**
