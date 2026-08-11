@@ -401,6 +401,22 @@ export class Publisher {
 		// One ranking for the whole subscription, shared by every group it serves.
 		const priority = new Priority(track);
 
+		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
+		// a track that ran out of groups still has to flush the ones already queued, and we
+		// FIN the subscribe stream ourselves below to say so.
+		let finished = false;
+		let unsubscribe!: () => void;
+		const unsubscribed = new Promise<void>((resolve) => {
+			unsubscribe = resolve;
+		});
+		void stream.closed.then(
+			() => {
+				if (!finished) unsubscribe();
+			},
+			// A reset is always the peer.
+			() => unsubscribe(),
+		);
+
 		try {
 			for (;;) {
 				const next = track.nextGroup();
@@ -416,7 +432,7 @@ export class Publisher {
 				}
 				end = Math.max(end, group.sequence + 1);
 
-				void this.#runGroup(sub, group, timescale, priority, stream.closed);
+				void this.#runGroup(sub, group, timescale, priority, unsubscribed);
 			}
 
 			if (emitRange) {
@@ -424,11 +440,13 @@ export class Publisher {
 			}
 
 			console.debug(`publish close: broadcast=${broadcast} track=${track.name}`);
+			finished = true;
 			track.close();
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
 			console.warn(`publish error: broadcast=${broadcast} track=${track.name} error=${reason(e)}`);
+			unsubscribe();
 			track.close(e);
 			stream.reset(e);
 		} finally {

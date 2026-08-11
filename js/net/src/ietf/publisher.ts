@@ -120,16 +120,33 @@ export class Publisher {
 			await ok.encode(stream.writer, version);
 			console.debug(`publish ok: broadcast=${name} track=${track.name}`);
 
+			// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
+			// a track that ran out of groups still has to flush the ones already queued, and we
+			// close the stream ourselves below to say so.
+			let finished = false;
+			let unsubscribe!: () => void;
+			const unsubscribed = new Promise<void>((resolve) => {
+				unsubscribe = resolve;
+			});
+			void stream.reader.closed.then(
+				() => {
+					if (!finished) unsubscribe();
+				},
+				// A reset is always the peer.
+				() => unsubscribe(),
+			);
+
 			// Serve track groups, racing with stream close (= Unsubscribe)
 			const serving = (async () => {
 				for (;;) {
 					const group = await track.recvGroup();
 					if (!group) return;
-					void this.#runGroup(msg.requestId, group, timescale, stream.reader.closed);
+					void this.#runGroup(msg.requestId, group, timescale, unsubscribed);
 				}
 			})();
 
 			await Promise.race([serving, stream.reader.closed]);
+			finished = true;
 
 			console.debug(`publish done: broadcast=${name} track=${track.name}`);
 

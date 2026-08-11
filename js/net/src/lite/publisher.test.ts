@@ -375,7 +375,12 @@ test("lite draft-05: subscribe end is 0 when no groups were produced", async () 
 // Group streams open with waitUntilAvailable, so a browser at its concurrent stream cap
 // parks the open until the peer frees a slot. That can outlast the subscription, and the
 // queued group holds its frames the whole time.
-test("lite draft-05: a group waiting for a stream slot is dropped when the subscriber leaves", async () => {
+const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+// Serves one finished group to a subscriber over a transport that has no stream slot free,
+// so the group sits queued inside the open until `freeSlot` is called. Returns the handles
+// needed to end the subscription one way or the other and see what became of the group.
+async function saturatedGroup() {
 	const pair = createMockTransportPair(ALPN_05);
 
 	let freeSlot!: () => void;
@@ -384,7 +389,9 @@ test("lite draft-05: a group waiting for a stream slot is dropped when the subsc
 	});
 
 	let aborted: unknown;
+	const written: Uint8Array[] = [];
 	const groupStream = new WritableStream<Uint8Array>({
+		write: (chunk) => void written.push(new Uint8Array(chunk)),
 		abort: (reason) => {
 			aborted = reason;
 		},
@@ -408,23 +415,56 @@ test("lite draft-05: a group waiting for a stream slot is dropped when the subsc
 	const msg = new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 });
 	void publisher.runSubscribe(msg, server);
 
-	// A finished group still has frames to send, so it must survive its own close and be
-	// dropped only by the unsubscribe below.
+	// A finished group still has frames to send, so its own close must not drop it.
 	const group = new GroupProducer(0);
 	group.writeString("hello");
 	group.close();
 	track.writeGroup(group);
-	await new Promise((resolve) => setTimeout(resolve, 5));
+	await settle();
+
+	return {
+		client,
+		track,
+		freeSlot,
+		aborted: () => aborted,
+		written: () => written,
+		close: () => {
+			publisher.close();
+			broadcast.close();
+		},
+	};
+}
+
+test("lite draft-05: a group waiting for a stream slot is dropped when the subscriber leaves", async () => {
+	const { client, freeSlot, aborted, written, close } = await saturatedGroup();
 
 	client.close();
-	await new Promise((resolve) => setTimeout(resolve, 5));
+	await settle();
 
 	// The slot frees up after the subscriber left: the stream must be reset, not written to.
 	freeSlot();
-	await new Promise((resolve) => setTimeout(resolve, 5));
+	await settle();
 
-	expect(aborted).toBeDefined();
+	expect(aborted()).toBeDefined();
+	expect(written()).toBeEmpty();
 
-	publisher.close();
-	broadcast.close();
+	close();
+});
+
+// The publisher FINs the subscribe stream itself once a track ends, which must not be
+// mistaken for the subscriber leaving: SUBSCRIBE_END counts those queued groups as
+// delivered, so dropping them here would strand the tail of every finite track.
+test("lite draft-05: a group waiting for a stream slot survives the track finishing", async () => {
+	const { track, freeSlot, aborted, written, close } = await saturatedGroup();
+
+	track.close();
+	await settle();
+
+	freeSlot();
+	await settle();
+
+	expect(aborted()).toBeUndefined();
+	expect(written()).not.toBeEmpty();
+
+	close();
 });
