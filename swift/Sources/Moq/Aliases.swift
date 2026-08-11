@@ -69,6 +69,10 @@ public typealias Route = MoqFFI.MoqRoute
 public typealias Subscription = MoqFFI.MoqSubscription
 /// Options for fetching one complete group by sequence.
 public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions
+/// A media track's companion timestamp-to-group index.
+public typealias Timeline = MoqFFI.MoqTimeline
+/// One timestamp-to-group mapping read from a media timeline track.
+public typealias TimelineEntry = MoqFFI.MoqTimelineEntry
 /// Publisher-side track properties: priority, group ordering, latency budget,
 /// and timescale.
 public typealias TrackInfo = MoqFFI.MoqTrackInfo

@@ -94,6 +94,35 @@ public final class MediaGroupConsumer: AsyncSequence, Sendable {
     }
 }
 
+/// A media track's timestamp-to-group timeline subscription.
+public final class TimelineConsumer: AsyncSequence, Sendable {
+    /// The indexed group boundary emitted by this sequence.
+    public typealias Element = TimelineEntry
+
+    let ffi: MoqTimelineConsumer
+
+    init(_ ffi: MoqTimelineConsumer) {
+        self.ffi = ffi
+    }
+
+    /// The next indexed group boundary, or `nil` once the timeline ends.
+    public func next() async throws -> TimelineEntry? {
+        try await ffi.next()
+    }
+
+    /// Cancel all current and future reads.
+    public func cancel() {
+        ffi.cancel()
+    }
+
+    /// Create an iterator that cancels native reads when iteration ends.
+    public func makeAsyncIterator() -> AsyncThrowingStream<TimelineEntry, Swift.Error>.Iterator {
+        moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
+            try await ffi.next()
+        }.makeAsyncIterator()
+    }
+}
+
 /// Write side of a media track fed pre-framed payloads.
 public final class MediaProducer: Sendable {
     let ffi: MoqMediaProducer
