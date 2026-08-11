@@ -12,6 +12,9 @@ const SAMPLE_RATES: [u32; 13] = [
 	96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
 ];
 
+/// Bytes needed to attempt a header parse: the fixed header without a CRC.
+pub(super) const MIN_HEADER_LEN: usize = 7;
+
 /// Fields decoded from an ADTS fixed+variable header.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Header {
@@ -28,7 +31,7 @@ pub(super) struct Header {
 impl Header {
 	/// Parse the ADTS header at the start of `data`.
 	pub fn parse(data: &[u8]) -> anyhow::Result<Self> {
-		anyhow::ensure!(data.len() >= 7, "ADTS header truncated");
+		anyhow::ensure!(data.len() >= MIN_HEADER_LEN, "ADTS header truncated");
 		anyhow::ensure!(data[0] == 0xFF && (data[1] & 0xF0) == 0xF0, "missing ADTS syncword");
 
 		let protection_absent = data[1] & 0x01;

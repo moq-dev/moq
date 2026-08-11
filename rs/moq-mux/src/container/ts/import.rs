@@ -356,6 +356,9 @@ impl<E: catalog::Catalog> Import<E> {
 				reserved: Some(self.catalog.reserve()),
 				unwrap: PtsUnwrap::default(),
 				jitter: None,
+				tail: Vec::new(),
+				tail_pts: None,
+				resync: Resync::default(),
 			})),
 			// Legacy broadcast audio, carried verbatim. Both MP2 stream types
 			// (0x03 MPEG-1, 0x04 MPEG-2 half rate) share one parser; sample rate and
@@ -1230,21 +1233,24 @@ impl Resync {
 	/// that never parses fails while its capture is still on screen.
 	const BUDGET: usize = 64 * 1024;
 
-	/// Offset of the next sync-word candidate at or after `from`, having discarded
-	/// everything up to it. `None` when the buffer holds no further candidate.
+	/// Where to resume after the header at `offset` failed to parse, discarding what is
+	/// skipped.
 	///
-	/// Only a candidate: the caller confirms it by parsing a header there, and calls back
-	/// in on failure. That mirrors how the TS layer reacquires packet alignment, where a
-	/// lone sync byte is a guess until the next packet confirms it.
-	fn scan(&mut self, data: &[u8], from: usize, sync_byte: u8) -> Option<usize> {
-		let found = from + memchr::memchr(sync_byte, &data[from..])?;
-		self.discard(found - from);
-		Some(found)
-	}
-
-	/// Charge `bytes` of unparseable input against the budget.
-	fn discard(&mut self, bytes: usize) {
-		self.discarded += bytes;
+	/// The offset it picks is only a candidate: the caller confirms it by parsing a header
+	/// there and comes back here if that fails too. That mirrors how the TS layer
+	/// reacquires packet alignment, where a lone sync byte is a guess until the next
+	/// packet confirms it.
+	fn recover(&mut self, data: &[u8], offset: usize, codec: &SyncWord) -> Recover {
+		if let Some(rel) = memchr::memchr(codec.sync_byte, &data[offset + 1..]) {
+			let found = offset + 1 + rel;
+			self.discarded += found - offset;
+			return Recover::At(found);
+		}
+		// No candidate left, so only a partial sync word can remain: keep that much for
+		// the next PES (the word can straddle the boundary) and discard the rest.
+		let keep = data.len().saturating_sub(codec.min_header_len - 1).max(offset);
+		self.discarded += keep - offset;
+		Recover::Carry(keep)
 	}
 
 	/// Give up once a stream has scanned further than [`BUDGET`](Self::BUDGET) without
@@ -1256,6 +1262,40 @@ impl Resync {
 	/// A frame parsed, so the stream is back in sync and the budget resets.
 	fn recovered(&mut self) {
 		self.discarded = 0;
+	}
+}
+
+/// Where a stream picks up after losing frame sync. See [`Resync::recover`].
+enum Recover {
+	/// Try to parse a frame header at this offset.
+	At(usize),
+	/// Nothing else in this buffer can start a frame; carry from this offset into the
+	/// next PES.
+	Carry(usize),
+}
+
+/// What a resync needs to know about the codec it is scanning for.
+struct SyncWord {
+	/// Bytes needed to attempt a header parse.
+	min_header_len: usize,
+	/// First byte of the frame sync word.
+	sync_byte: u8,
+}
+
+impl SyncWord {
+	/// ADTS: an 11-bit sync of all ones, then at least 7 bytes of header.
+	const ADTS: Self = Self {
+		min_header_len: adts::MIN_HEADER_LEN,
+		sync_byte: 0xFF,
+	};
+}
+
+impl From<&legacy::Descriptor> for SyncWord {
+	fn from(descriptor: &legacy::Descriptor) -> Self {
+		Self {
+			min_header_len: descriptor.min_header_len,
+			sync_byte: descriptor.sync_byte,
+		}
 	}
 }
 
@@ -1272,21 +1312,77 @@ struct AacStream<E: CatalogExt = ()> {
 	unwrap: PtsUnwrap,
 	/// Largest audio burst span seen, published as the catalog jitter.
 	jitter: Option<Timestamp>,
+	/// Partial frame left at the end of the previous PES. ISO 13818-1 doesn't require
+	/// audio frames to align with PES boundaries, so a legitimate mux can split one.
+	tail: Vec<u8>,
+	/// PTS for the frame the tail begins, computed when it was cut. The PES PTS only
+	/// covers frames that begin in that PES.
+	tail_pts: Option<Timestamp>,
+	resync: Resync,
 }
 
 impl<E: CatalogExt> AacStream<E> {
 	fn write(&mut self, pending: Pending, run_start: Option<u64>) -> anyhow::Result<()> {
-		let base = unwrap_pts(&mut self.unwrap, pending.pts)?;
+		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts)?;
+
+		// Prepend the partial frame left by the previous PES, if any.
+		let carried = self.tail.len();
+		let joined;
+		let data: &[u8] = if carried == 0 {
+			&pending.data
+		} else {
+			let mut j = std::mem::take(&mut self.tail);
+			j.extend_from_slice(&pending.data);
+			joined = j;
+			&joined
+		};
+
+		// PTS for the next frame to emit. The tail frame keeps the PTS computed at its cut;
+		// the first frame that BEGINS in this PES takes the PES PTS (per ISO 13818-1).
+		let mut pts = if carried > 0 { self.tail_pts.take() } else { pes_base };
+		let mut in_tail = carried > 0;
 
 		// A single PES can carry several ADTS frames; split and feed each raw frame.
-		let data = &pending.data;
 		let mut offset = 0;
 		let mut index = 0u64;
 		let mut sample_rate = None;
-		while offset + 7 <= data.len() {
-			let header = adts::Header::parse(&data[offset..])?;
+		while offset + adts::MIN_HEADER_LEN <= data.len() {
+			if in_tail && offset >= carried {
+				pts = pes_base;
+				in_tail = false;
+			}
+
+			let header = match adts::Header::parse(&data[offset..]) {
+				Ok(header) => header,
+				Err(err) => {
+					// Sync is lost; scan to the next candidate. See `Resync`.
+					if self.resync.exhausted() {
+						return Err(err.context(format!(
+							"AAC stream never regained sync after {} bytes",
+							self.resync.discarded
+						)));
+					}
+					if in_tail {
+						pts = pes_base;
+						in_tail = false;
+					}
+					match self.resync.recover(data, offset, &SyncWord::ADTS) {
+						Recover::At(next) => {
+							offset = next;
+							continue;
+						}
+						Recover::Carry(next) => {
+							offset = next;
+							break;
+						}
+					}
+				}
+			};
 			let end = offset + header.frame_len;
-			anyhow::ensure!(end <= data.len(), "ADTS frame exceeds PES payload");
+			if end > data.len() {
+				// The frame continues in the next PES; finish it there.
+				break;
+			}
 			sample_rate = Some(header.sample_rate);
 
 			let import = match &mut self.import {
@@ -1308,24 +1404,26 @@ impl<E: CatalogExt> AacStream<E> {
 				}
 			};
 
-			// Each frame after the first in this PES advances by 1024 samples.
-			let pts = match base {
-				Some(base) if index > 0 => {
-					let advance = Timestamp::from_scale(index * 1024, header.sample_rate as u64)?;
-					// `base` is a 90 kHz PTS; rescale the sample-rate advance to match
-					// before adding (the scale-aware Timestamp rejects mixed scales).
-					Some(base.checked_add(advance.convert(base.scale())?)?)
-				}
-				other => other,
-			};
-
 			import.decode(&data[offset + header.header_len..end], pts)?;
 			// The importer accumulates; cut each ADTS frame into its own group (one QUIC stream)
 			// so the relay forwards it without waiting for the next.
 			import.cut(None)?;
+			self.resync.recovered();
 
+			// Every ADTS frame is 1024 samples.
+			pts = advance_pts(pts, 1024, header.sample_rate)?;
 			offset = end;
 			index += 1;
+		}
+
+		// Keep any partial frame (cut mid-frame, or even mid-header) for the next PES,
+		// with the PTS it should carry.
+		if offset < data.len() {
+			if in_tail && offset >= carried {
+				pts = pes_base;
+			}
+			self.tail = data[offset..].to_vec();
+			self.tail_pts = pts;
 		}
 
 		self.update_jitter(run_start, pending.pts, index, sample_rate)
@@ -1371,6 +1469,9 @@ impl<E: CatalogExt> AacStream<E> {
 	}
 
 	fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
+		// A seek is a discontinuity; the partial frame will never see its end.
+		self.tail.clear();
+		self.tail_pts = None;
 		if let Some(import) = &mut self.import {
 			import.seek(sequence)?;
 		}
@@ -1378,6 +1479,11 @@ impl<E: CatalogExt> AacStream<E> {
 	}
 
 	fn finish(&mut self) -> anyhow::Result<()> {
+		// A partial frame at end of stream isn't emissible; drop it, but leave a trace for
+		// diagnosing truncated captures.
+		if !self.tail.is_empty() {
+			tracing::debug!(bytes = self.tail.len(), "dropping partial ADTS frame at end of stream");
+		}
 		if let Some(import) = &mut self.import {
 			import.finish()?;
 		}
@@ -1587,27 +1693,21 @@ impl<E: CatalogExt> LegacyStream<E> {
 							self.descriptor.track_suffix, self.resync.discarded
 						)));
 					}
-					match self.resync.scan(data, offset + 1, self.descriptor.sync_byte) {
-						Some(next) => {
-							// The tail's frame boundary is what we just lost, so its PTS no longer
-							// describes anything. Re-anchor on the PES, whose PTS covers the first
-							// frame starting in it: wrong by less than one PES, where a stale tail
-							// (a loop wrap carries the PTS from before it) can be wrong by hours.
-							if in_tail {
-								pts = pes_base;
-								in_tail = false;
-							}
+					// The tail's frame boundary is what we just lost, so its PTS no longer
+					// describes anything. Re-anchor on the PES, whose PTS covers the first
+					// frame starting in it: wrong by less than one PES, where a stale tail
+					// (a loop wrap carries the PTS from before it) can be wrong by hours.
+					if in_tail {
+						pts = pes_base;
+						in_tail = false;
+					}
+					match self.resync.recover(data, offset, &self.descriptor.into()) {
+						Recover::At(next) => {
 							offset = next;
 							continue;
 						}
-						// Only a partial sync word could remain; keep that much for the next PES
-						// (the word can straddle the boundary) and discard the rest.
-						None => {
-							let keep = data.len().saturating_sub(self.descriptor.min_header_len - 1);
-							self.resync.discard(keep - offset);
-							offset = keep;
-							pts = pes_base;
-							in_tail = false;
+						Recover::Carry(next) => {
+							offset = next;
 							break;
 						}
 					}
@@ -1643,15 +1743,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 			import.cut(None)?;
 			self.resync.recovered();
 
-			pts = match pts {
-				// `pts` is a 90 kHz PES PTS; rescale the sample-rate advance to match
-				// before adding (the scale-aware Timestamp rejects mixed scales).
-				Some(pts) => {
-					let advance = Timestamp::from_scale(header.samples, header.sample_rate as u64)?;
-					Some(pts.checked_add(advance.convert(pts.scale())?)?)
-				}
-				None => None,
-			};
+			pts = advance_pts(pts, header.samples, header.sample_rate)?;
 			offset = end;
 		}
 
@@ -1720,6 +1812,20 @@ fn skip_missing_keyframe(result: crate::Result<()>) -> anyhow::Result<()> {
 		Ok(()) | Err(crate::Error::MissingKeyframe(_)) => Ok(()),
 		Err(e) => Err(e.into()),
 	}
+}
+
+/// Advance a PES-derived PTS past one frame of `samples` at `sample_rate`.
+///
+/// Per frame rather than `index * constant`: E-AC-3 varies the samples per frame, and a
+/// resync means the frames in a PES are no longer a contiguous run to index into.
+fn advance_pts(pts: Option<Timestamp>, samples: u64, sample_rate: u32) -> anyhow::Result<Option<Timestamp>> {
+	let Some(pts) = pts else {
+		return Ok(None);
+	};
+	// `pts` is a 90 kHz PES PTS; rescale the sample-rate advance to match before adding
+	// (the scale-aware Timestamp rejects mixed scales).
+	let advance = Timestamp::from_scale(samples, sample_rate as u64)?;
+	Ok(Some(pts.checked_add(advance.convert(pts.scale())?)?))
 }
 
 /// Convert a raw 90 kHz PTS to a microsecond [`Timestamp`], unwrapping the
@@ -2322,6 +2428,81 @@ mod test {
 			frames.push(frame);
 		}
 		frames
+	}
+
+	/// One whole ADTS frame carrying `raw_len` bytes of `fill`. `fill` must not be 0xFF,
+	/// which a resync would mistake for a frame sync.
+	fn adts_frame(raw_len: usize, fill: u8) -> Vec<u8> {
+		let mut f = super::adts::write_header(2, 48_000, 2, raw_len).unwrap().to_vec();
+		f.resize(raw_len + 7, fill);
+		f
+	}
+
+	// ISO 13818-1 doesn't require AAC frames to align with PES boundaries any more than it
+	// does the legacy codecs, but only the legacy path reassembled a split frame: AAC
+	// rejected the PES outright, so a mux that split one killed the broadcast on well-formed
+	// input, with no corruption or discontinuity involved.
+	#[tokio::test(start_paused = true)]
+	async fn aac_frame_split_across_pes_reassembles() {
+		const AAC_PID: u16 = 0x0060;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		let frame = adts_frame(40, 0x5A);
+		import
+			.decode(audio_pes_packet(AAC_PID, 0, 90_000, &frame[..25]).as_slice())
+			.expect("a split ADTS frame is not fatal");
+		import
+			.decode(audio_pes_packet(AAC_PID, 1, 270_000, &frame[25..]).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(frames.len(), 1, "the split frame is reassembled, not dropped");
+		// The ADTS header is stripped: the track carries raw AAC.
+		assert_eq!(frames[0].payload.as_ref(), &frame[7..], "reassembled byte-exact");
+		// It began in PES 1 (90000 ticks = 1 s), so PES 2's PTS must not apply to it.
+		assert_eq!(frames[0].timestamp, Timestamp::from_micros(1_000_000).unwrap());
+	}
+
+	// AAC resyncs past a damaged header for the same reason the legacy codecs do.
+	#[tokio::test(start_paused = true)]
+	async fn aac_resyncs_past_damaged_header() {
+		const AAC_PID: u16 = 0x0060;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		let good = adts_frame(40, 0xAA);
+		let mut damaged = adts_frame(40, 0xBB);
+		damaged[0] = 0xFE; // one bit flipped in the syncword
+		let mut payload = good.clone();
+		payload.extend_from_slice(&damaged);
+		payload.extend_from_slice(&adts_frame(40, 0xCC));
+		import
+			.decode(audio_pes_packet(AAC_PID, 0, 90_000, &payload).as_slice())
+			.expect("a damaged ADTS header is not fatal");
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(frames.len(), 2, "the undamaged frames either side survive");
+		assert_eq!(frames[0].payload.as_ref(), &good[7..]);
+		assert_eq!(
+			frames[1].payload.as_ref(),
+			&adts_frame(40, 0xCC)[7..],
+			"resynced onto the next good frame"
+		);
 	}
 
 	/// One whole MPEG-2 Layer II frame (8 kbps, 16 kHz, mono = 72 bytes), filled with
