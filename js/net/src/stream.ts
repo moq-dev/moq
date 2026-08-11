@@ -15,6 +15,30 @@ function isLeadingOnes(version?: IetfVersion): boolean {
 	);
 }
 
+/**
+ * The `WebTransportSendStream` that every outgoing stream is, narrowed to the one attribute
+ * this package uses. The DOM types available here still describe them as plain
+ * `WritableStream`s, so the interface has to be named structurally.
+ *
+ * `sendOrder` is optional because it is absent until set, and stays absent on an
+ * implementation that doesn't carry the interface at all.
+ *
+ * @see https://www.w3.org/TR/webtransport/#webtransportsendstream
+ */
+export type SendStream = WritableStream<Uint8Array> & { sendOrder?: number };
+
+/** Options for opening an outgoing stream. */
+export interface OpenOptions {
+	/** The negotiated IETF version, which selects the varint encoding. */
+	version?: IetfVersion;
+
+	/**
+	 * The transport send order, where HIGHER values are transmitted first.
+	 * Left to the transport's default when unset.
+	 */
+	sendOrder?: number;
+}
+
 export class Stream {
 	reader: Reader;
 	writer: Writer;
@@ -43,9 +67,15 @@ export class Stream {
 		}
 	}
 
-	static async open(quic: WebTransport, version?: IetfVersion, priority?: number): Promise<Stream> {
-		const { readable, writable } = await quic.createBidirectionalStream({ sendOrder: priority });
-		return new Stream({ readable, writable, version });
+	/**
+	 * Open an outgoing bidirectional stream.
+	 * @param quic - The session to open it on
+	 * @param options - The version its varints encode with, and the send order ranking it
+	 *   against the session's other streams
+	 */
+	static async open(quic: WebTransport, options?: OpenOptions): Promise<Stream> {
+		const { readable, writable } = await quic.createBidirectionalStream({ sendOrder: options?.sendOrder });
+		return new Stream({ readable, writable, version: options?.version });
 	}
 
 	close() {
@@ -295,6 +325,20 @@ export class Writer {
 		this.version = version;
 	}
 
+	/**
+	 * Rank this stream against the session's others, where HIGHER values are sent first.
+	 *
+	 * A send order only schedules the local end, so a stream the peer opened has to be ranked
+	 * here rather than at the peer's {@link open}.
+	 *
+	 * The spec makes `sendOrder` a settable attribute on every {@link SendStream}. Where the
+	 * interface isn't implemented (Chrome as of writing, a mock, a polyfill) this just sets an
+	 * ignored property, the same way an ignored `sendOrder` option does at {@link open}.
+	 */
+	setPriority(sendOrder: number) {
+		(this.#stream as SendStream).sendOrder = sendOrder;
+	}
+
 	async bool(v: boolean) {
 		await this.write(setUint8(this.#scratch, v ? 1 : 0));
 	}
@@ -371,9 +415,17 @@ export class Writer {
 		this.#writer.abort(reason).catch(() => void 0);
 	}
 
-	static async open(quic: WebTransport, version?: IetfVersion): Promise<Writer> {
-		const writable = (await quic.createUnidirectionalStream()) as WritableStream<Uint8Array>;
-		return new Writer(writable, version);
+	/**
+	 * Open an outgoing unidirectional stream.
+	 * @param quic - The session to open it on
+	 * @param options - The version its varints encode with, and the send order ranking it
+	 *   against the session's other streams
+	 */
+	static async open(quic: WebTransport, options?: OpenOptions): Promise<Writer> {
+		const writable = (await quic.createUnidirectionalStream({
+			sendOrder: options?.sendOrder,
+		})) as WritableStream<Uint8Array>;
+		return new Writer(writable, options?.version);
 	}
 }
 
