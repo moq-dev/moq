@@ -34,13 +34,10 @@ function installFakeWebAudio() {
 		}
 	}
 
-	class FakeMediaStream {
-		constructor(_tracks?: unknown) {}
-	}
+	class FakeMediaStream {}
 
 	class FakeGraphNode {
 		channelCount = 2;
-		constructor(_context?: unknown, _options?: unknown) {}
 		connect(): void {}
 		disconnect(): void {}
 	}

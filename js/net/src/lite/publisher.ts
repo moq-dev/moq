@@ -264,7 +264,7 @@ export class Publisher {
 		// The best-effort datagram loop, started once serving begins. It parks when the
 		// track finishes (recvDatagram returns undefined), so #runTrack alone ends the
 		// subscription; awaited during teardown so it doesn't outlive the subscription.
-		let datagrams: Promise<void> | undefined;
+		let datagrams = Promise.resolve();
 
 		try {
 			let timescale: Timescale = Timescale.MILLI;
