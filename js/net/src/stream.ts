@@ -18,9 +18,10 @@ export function sendOptions(options?: OpenOptions): WebTransportSendStreamOption
 	return { sendOrder: options?.sendOrder, waitUntilAvailable: options?.waitUntilAvailable ?? true };
 }
 
-// How long an open may wait for the peer to free a stream slot. waitUntilAvailable makes
-// it wait forever otherwise, so a peer that withholds stream credit would queue work
-// without limit. Matches the subscribe budget.
+// How long any open may wait for the peer to free a stream slot. Every open needs this,
+// whether or not it asked to wait: an implementation may park an over-limit open rather
+// than rejecting it, and a peer can advertise a stream limit of zero and never raise it.
+// Matches the subscribe budget.
 const OPEN_TIMEOUT_MS = 10_000;
 
 /**
