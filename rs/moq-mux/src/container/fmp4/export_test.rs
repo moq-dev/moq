@@ -110,7 +110,7 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 	assert_eq!(dec_config.object_type_indication, 0x40, "MPEG-4 AAC");
 	assert_eq!(dec_config.stream_type, 0x05, "audio stream");
 
-	let dec_specific = &dec_config.dec_specific;
+	let dec_specific = dec_config.dec_specific.as_ref().expect("AAC DecoderSpecificInfo");
 	assert_eq!(dec_specific.profile, 2, "AAC-LC");
 	assert_eq!(dec_specific.freq_index, 4, "44100 Hz");
 	assert_eq!(dec_specific.chan_conf, 2, "stereo");

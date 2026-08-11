@@ -449,7 +449,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				// The descriptor's bitrate is optional: a 0 means "unknown", so leave the field unset
 				// and let the frame-size detector fill it instead of publishing a bogus 0.
 				let bitrate = desc.avg_bitrate.max(desc.max_bitrate);
-				let profile = desc.dec_specific.profile;
+				let profile = desc.dec_specific.as_ref().ok_or(Error::MissingDecoderSpecific)?.profile;
 				let sample_rate = mp4a.audio.sample_rate.integer() as u32;
 				let channel_count = mp4a.audio.channel_count as u32;
 
