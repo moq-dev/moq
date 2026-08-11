@@ -461,7 +461,7 @@ impl Server {
 			#[cfg(feature = "websocket")]
 			let ws_accept = async {
 				match ws_ref {
-					Some(ws) => ws.accept_with_path().await,
+					Some(ws) => ws.accept_with_url().await,
 					None => std::future::pending().await,
 				}
 			};
@@ -493,7 +493,7 @@ impl Server {
 							// (like the stream bindings).
 							let (session, url, identity) = super::noq::accept(_conn, alpns).await?;
 							let request = server.accept_request(session).await?;
-							Ok(Request { transport: Transport::Quic, url, transport_path: None, identity, kind: RequestKind::Noq(Box::new(request)) })
+							Ok(Request { transport: Transport::Quic, url, identity, kind: RequestKind::Noq(Box::new(request)) })
 						}.boxed());
 					}
 				}
@@ -504,7 +504,7 @@ impl Server {
 						self.accept.push(async move {
 							let (session, url, identity) = super::quinn::accept(_conn, alpns).await?;
 							let request = server.accept_request(session).await?;
-							Ok(Request { transport: Transport::Quic, url, transport_path: None, identity, kind: RequestKind::Quinn(Box::new(request)) })
+							Ok(Request { transport: Transport::Quic, url, identity, kind: RequestKind::Quinn(Box::new(request)) })
 						}.boxed());
 					}
 				}
@@ -515,7 +515,7 @@ impl Server {
 						self.accept.push(async move {
 							let (session, url, identity) = super::quiche::accept(_conn, alpns).await?;
 							let request = server.accept_request(session).await?;
-							Ok(Request { transport: Transport::Quic, url, transport_path: None, identity, kind: RequestKind::Quiche(Box::new(request)) })
+							Ok(Request { transport: Transport::Quic, url, identity, kind: RequestKind::Quiche(Box::new(request)) })
 						}.boxed());
 					}
 				}
@@ -524,18 +524,18 @@ impl Server {
 					self.accept.push(async move {
 						let (session, url, identity) = super::iroh::accept(_conn).await?;
 						let request = server.accept_request(session).await?;
-						Ok(Request { transport: Transport::Iroh, url, transport_path: None, identity, kind: RequestKind::Iroh(Box::new(request)) })
+						Ok(Request { transport: Transport::Iroh, url, identity, kind: RequestKind::Iroh(Box::new(request)) })
 					}.boxed());
 				}
 				Some(_res) = ws_accept => {
 					#[cfg(feature = "websocket")]
 					match _res {
-						Ok((session, path)) => {
+						Ok((session, url)) => {
 							// Read the SETUP off the qmux session before handing it over, so a
 							// slow peer doesn't stall the accept loop (spawned like the others).
 							self.accept.push(async move {
 								let request = server.accept_request(session).await?;
-								Ok(Request { transport: Transport::WebSocket, url: None, transport_path: Some(path), identity: None, kind: RequestKind::Qmux(Box::new(request)) })
+								Ok(Request { transport: Transport::WebSocket, url: Some(url), identity: None, kind: RequestKind::Qmux(Box::new(request)) })
 							}.boxed());
 						}
 						// One connection's upgrade, not the listener's: a failed
@@ -868,7 +868,6 @@ fn spawn_stream_request(
 				let request = Request {
 					transport,
 					url: None,
-					transport_path: None,
 					identity: None,
 					kind: RequestKind::Qmux(Box::new(request)),
 				};
@@ -943,11 +942,9 @@ impl std::fmt::Display for Transport {
 /// session, or [Self::close] to reject it (which closes the just-established session).
 pub struct Request {
 	transport: Transport,
-	/// The dial URL, for transports that carry one (QUIC/WebTransport). `None` for the
+	/// The request URL, for transports that carry one (QUIC/WebTransport/WebSocket). `None` for the
 	/// URL-less stream bindings, whose request path rides the SETUP instead.
 	url: Option<Url>,
-	/// The request path carried by a transport whose complete dial URL is unavailable.
-	transport_path: Option<String>,
 	/// The peer's validated mTLS identity, captured at the transport handshake (before
 	/// the MoQ SETUP), when the backend supports it.
 	identity: Option<crate::tls::PeerIdentity>,
@@ -1026,7 +1023,6 @@ impl Request {
 		let Request {
 			transport,
 			url,
-			transport_path,
 			identity,
 			kind,
 		} = self;
@@ -1034,7 +1030,6 @@ impl Request {
 		Request {
 			transport,
 			url,
-			transport_path,
 			identity,
 			kind,
 		}
@@ -1045,7 +1040,6 @@ impl Request {
 		let Request {
 			transport,
 			url,
-			transport_path,
 			identity,
 			kind,
 		} = self;
@@ -1053,7 +1047,6 @@ impl Request {
 		Request {
 			transport,
 			url,
-			transport_path,
 			identity,
 			kind,
 		}
@@ -1064,7 +1057,6 @@ impl Request {
 		let Request {
 			transport,
 			url,
-			transport_path,
 			identity,
 			kind,
 		} = self;
@@ -1072,7 +1064,6 @@ impl Request {
 		Request {
 			transport,
 			url,
-			transport_path,
 			identity,
 			kind,
 		}
@@ -1089,7 +1080,7 @@ impl Request {
 		self.transport
 	}
 
-	/// Returns the URL the client dialed, for transports that carry one (QUIC/WebTransport).
+	/// Returns the request URL for transports that carry one (QUIC/WebTransport/WebSocket).
 	///
 	/// `None` for the URL-less stream bindings (`tcp`/`unix`); use [`Self::path`] for their
 	/// in-band request path.
@@ -1100,19 +1091,16 @@ impl Request {
 	/// The request path the client advertised, uniform across transports.
 	///
 	/// Taken from the SETUP for the URL-less stream bindings (and moq-transport, which
-	/// carries it in-band), the WebSocket request URI, or the dial [`url`](Self::url)
-	/// for WebTransport/QUIC.
+	/// carries it in-band), or the request [`url`](Self::url) for
+	/// WebTransport/QUIC/WebSocket.
 	/// The missing or root path is returned as an empty string.
 	pub fn path(&self) -> &str {
 		// An empty SETUP path means the client advertised none, so fall back to the
-		// transport request URI. URI-carrying bindings are the ones that must not send
-		// a path at all, so this never discards a path the client meant us to use.
+		// request URL. URL-carrying bindings are the ones that must not send a path at
+		// all, so this never discards a path the client meant us to use.
 		let setup = request_ref!(self, r => r.path());
 		let path = if setup.is_empty() {
-			self.transport_path
-				.as_deref()
-				.or_else(|| self.url.as_ref().map(Url::path))
-				.unwrap_or("")
+			self.url.as_ref().map(Url::path).unwrap_or("")
 		} else {
 			setup
 		};

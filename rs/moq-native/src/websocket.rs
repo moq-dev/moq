@@ -287,17 +287,17 @@ impl Listener {
 	///
 	/// As in [`crate::tcp`], the `Option` has no `None` case left to report.
 	pub async fn accept(&self) -> Option<Result<qmux::Session>> {
-		self.accept_with_path()
+		self.accept_with_url()
 			.await
 			.map(|result| result.map(|(session, _)| session))
 	}
 
-	/// Accept the next connection and retain the WebSocket request path.
-	pub(crate) async fn accept_with_path(&self) -> Option<Result<(qmux::Session, String)>> {
+	/// Accept the next connection and retain the WebSocket request URL.
+	pub(crate) async fn accept_with_url(&self) -> Option<Result<(qmux::Session, Url)>> {
 		let (stream, addr) = self.accept_socket().await;
 		tracing::debug!(%addr, "accepted WebSocket TCP connection");
 
-		let accepted = Arc::new(Mutex::new(None::<(String, String)>));
+		let accepted = Arc::new(Mutex::new(None::<(String, Url)>));
 		let accepted_callback = accepted.clone();
 		let protocols = self.protocols.clone();
 		#[allow(clippy::result_large_err)]
@@ -319,12 +319,18 @@ impl Listener {
 					.body(Some("no supported protocol".to_string()))
 					.expect("valid rejection response"));
 			};
+			let Some(url) = websocket_request_url(request) else {
+				return Err(http::Response::builder()
+					.status(http::StatusCode::BAD_REQUEST)
+					.body(Some("invalid request URL".to_string()))
+					.expect("valid rejection response"));
+			};
 
 			response.headers_mut().insert(
 				http::header::SEC_WEBSOCKET_PROTOCOL,
 				http::HeaderValue::from_str(protocol).expect("protocol validated at bind"),
 			);
-			*accepted_callback.lock().unwrap() = Some((protocol.clone(), request.uri().path().to_string()));
+			*accepted_callback.lock().unwrap() = Some((protocol.clone(), url));
 			Ok(response)
 		};
 
@@ -333,7 +339,7 @@ impl Listener {
 			.map_err(qmux::Error::from)
 			.map_err(Error::Accept);
 		Some(websocket.map(|websocket| {
-			let (protocol, path) = accepted
+			let (protocol, url) = accepted
 				.lock()
 				.unwrap()
 				.take()
@@ -342,7 +348,7 @@ impl Listener {
 				.with_alpn(&protocol)
 				.with_keep_alive(qmux::KeepAlive::default())
 				.accept();
-			(session, path)
+			(session, url)
 		}))
 	}
 
@@ -362,6 +368,17 @@ impl Listener {
 			}
 		}
 	}
+}
+
+/// Reconstruct the client request URL from an absolute URI or the HTTP Host header.
+fn websocket_request_url(request: &tungstenite::handshake::server::Request) -> Option<Url> {
+	let uri = request.uri();
+	if uri.scheme().is_some() && uri.authority().is_some() {
+		return Url::parse(&uri.to_string()).ok();
+	}
+
+	let host = request.headers().get(http::header::HOST)?.to_str().ok()?;
+	Url::parse(&format!("ws://{host}{uri}")).ok()
 }
 
 /// WebSocket subprotocols accepted for the given MoQ ALPNs, in preference order.

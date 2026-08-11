@@ -1721,13 +1721,16 @@ async fn broadcast_websocket_fallback() {
 
 	// Connect via http:// to the WebSocket port.
 	// QUIC will try UDP on this port and fail; WebSocket will try ws:// and succeed.
-	let url: url::Url = format!("http://localhost:{}/admin", ws_addr.port()).parse().unwrap();
+	let url: url::Url = format!("http://localhost:{}/admin?jwt=test", ws_addr.port())
+		.parse()
+		.unwrap();
 
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
 		assert_eq!(request.transport(), moq_native::Transport::WebSocket);
 		assert_eq!(request.path(), "/admin");
+		assert_eq!(request.url().and_then(url::Url::query), Some("jwt=test"));
 		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;
