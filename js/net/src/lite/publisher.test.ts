@@ -68,3 +68,59 @@ test("lite draft-05: subscribe end clears the max sequence when groups arrive ou
 test("lite draft-05: subscribe end is 0 when no groups were produced", async () => {
 	expect(await subscribeEnd([])).toBe(0);
 });
+
+// Group streams open with waitUntilAvailable, so a browser at its concurrent stream cap
+// parks the open until the peer frees a slot. That can outlast the subscription, and the
+// queued group holds its frames the whole time.
+test("lite draft-05: a group waiting for a stream slot is dropped when the subscriber leaves", async () => {
+	const pair = createMockTransportPair(ALPN_05);
+
+	let freeSlot!: () => void;
+	const slot = new Promise<void>((resolve) => {
+		freeSlot = resolve;
+	});
+
+	let aborted: unknown;
+	const groupStream = new WritableStream<Uint8Array>({
+		abort: (reason) => {
+			aborted = reason;
+		},
+	});
+
+	// Stand in for a transport at its stream cap: the open completes only once a slot frees.
+	pair.server.createUnidirectionalStream = async () => {
+		await slot;
+		return groupStream;
+	};
+
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video");
+	publisher.publish(Path.from("test"), broadcast);
+
+	const client = await Stream.open(pair.client);
+	const server = await Stream.accept(pair.server);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	const msg = new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 });
+	void publisher.runSubscribe(msg, server);
+
+	// A finished group still has frames to send, so it must survive its own close and be
+	// dropped only by the unsubscribe below.
+	const group = new GroupProducer(0);
+	group.writeString("hello");
+	group.close();
+	track.writeGroup(group);
+	await new Promise((resolve) => setTimeout(resolve, 5));
+
+	client.close();
+	await new Promise((resolve) => setTimeout(resolve, 5));
+
+	// The slot frees up after the subscriber left: the stream must be reset, not written to.
+	freeSlot();
+	await new Promise((resolve) => setTimeout(resolve, 5));
+
+	expect(aborted).toBeDefined();
+
+	broadcast.close();
+});

@@ -408,7 +408,7 @@ export class Publisher {
 				}
 				end = Math.max(end, group.sequence + 1);
 
-				void this.#runGroup(sub, group, timescale);
+				void this.#runGroup(sub, group, timescale, stream.closed);
 			}
 
 			if (emitRange) {
@@ -537,10 +537,28 @@ export class Publisher {
 		}
 	}
 
-	async #runGroup(sub: bigint, group: group.Consumer, timescale: Timescale) {
+	async #runGroup(sub: bigint, group: group.Consumer, timescale: Timescale, unsubscribed: Promise<void>) {
 		const msg = new GroupMessage(sub, group.sequence);
 		try {
-			const stream = await Writer.open(this.#quic);
+			// The open waits for the peer to free a stream slot, which can outlast the
+			// subscription. Give up when the subscriber leaves instead of parking here
+			// forever holding the group's frames.
+			const open = Writer.open(this.#quic);
+			// A rejected `closed` is STOP_SENDING, which also means the subscriber left,
+			// so both settle paths resolve to "gone" and neither is left unhandled.
+			const gone = unsubscribed.then(
+				() => undefined,
+				() => undefined,
+			);
+			const stream = await Promise.race([open, gone]);
+			if (!stream) {
+				const e = new Error("unsubscribed");
+				// The slot may free up later, so reset the stream we no longer want.
+				open.then((w) => w.reset(e)).catch(() => {});
+				group.close(e);
+				return;
+			}
+
 			await stream.u53(0); // stream type
 			await msg.encode(stream);
 
