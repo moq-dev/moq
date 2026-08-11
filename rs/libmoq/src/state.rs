@@ -1,6 +1,6 @@
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
-use crate::{Client, Consume, Origin, Publish, Session, audio::Audio, video::Video};
+use crate::{Client, Consume, Origin, Publish, Session, audio::Audio, cmaf::Cmaf, video::Video};
 
 pub struct State {
 	pub session: Session,
@@ -9,6 +9,7 @@ pub struct State {
 	pub publish: Publish,
 	pub consume: Consume,
 	pub audio: Audio,
+	pub(crate) cmaf: Cmaf,
 	pub video: Video,
 }
 
@@ -21,6 +22,7 @@ impl State {
 			publish: Publish::default(),
 			consume: Consume::default(),
 			audio: Audio::default(),
+			cmaf: Cmaf::default(),
 			video: Video::default(),
 		}
 	}

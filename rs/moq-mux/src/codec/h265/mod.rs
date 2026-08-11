@@ -222,6 +222,7 @@ pub(crate) fn config_from_hvcc(hvcc: &[u8]) -> Result<hang::catalog::VideoConfig
 /// The active VPS/SPS/PPS set is scoped to the latest keyframe: a frame that
 /// carries parameter sets redefines them, so a mid-stream reconfiguration drops
 /// the superseded ones instead of accumulating them forever.
+#[derive(Clone)]
 pub struct Hvc1 {
 	hvcc: Option<Bytes>,
 	/// The active VPS NALs (from the most recent keyframe that carried them).

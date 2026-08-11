@@ -160,6 +160,20 @@ video.finish()
 
 The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition appears once the first keyframe is encoded, so subscribers discover it through the catalog rather than a name you pick. `cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group.
 
+### Packaging fetched media as CMAF
+
+`CmafMuxer` packages application-selected encoded frames. Give audio and video muxers the same origin so independently fetched fragments share one zero-based timeline:
+
+```kotlin
+CmafMuxer(catalog.video.getValue(videoName), originUs = intervalStartUs).use { muxer ->
+    val output = muxer.mux(sequence, frames)
+    output.initialization?.let(::storeInit)
+    output.fragment?.let(::storeFragment)
+}
+```
+
+Inline H.264/H.265 metadata is resolved from the supplied frames, so `initialization` is null until parameter sets arrive. A batch with no usable samples can return no `fragment`. Keep each batch within one codec configuration; split at the frame index reported by an error when a rendition is reconfigured. `MediaFrame.durationUs` carries an exact sample duration when the source container provides one.
+
 ## Serve
 
 `Server.listen(bind)` binds a listener, wires an internal origin for both directions, and returns an `AutoCloseable` `Server`. `serve()` accepts every session and holds it alive until it closes:

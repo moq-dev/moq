@@ -341,6 +341,7 @@ fn read_param_set_array(buf: &[u8], mut pos: usize, count: usize, params: &mut V
 /// The active set is scoped to the latest keyframe: a frame that carries
 /// parameter sets redefines them, so a mid-stream reconfiguration drops the
 /// superseded SPS/PPS instead of accumulating them forever.
+#[derive(Clone)]
 pub struct Avc1 {
 	avcc: Option<Bytes>,
 	/// The active SPS NALs (from the most recent keyframe that carried them).

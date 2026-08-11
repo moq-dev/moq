@@ -124,6 +124,55 @@ fn opus_head() -> Vec<u8> {
 	head
 }
 
+#[test]
+fn cmaf_muxer_constructs_and_rebases_frames() {
+	let codec = b"vp09.00.10.08";
+	let config = moq_cmaf_video_config {
+		codec: codec.as_ptr().cast(),
+		codec_len: codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: 0,
+		coded_height: 0,
+		framerate: 30.0,
+		container: 0,
+		container_init: std::ptr::null(),
+		container_init_len: 0,
+		origin_us: 10_000_000,
+	};
+	let muxer = unsafe { moq_cmaf_video(&config) };
+	assert!(
+		muxer > 0,
+		"{}",
+		unsafe { std::ffi::CStr::from_ptr(moq_error()) }.to_string_lossy()
+	);
+
+	let mut output = moq_cmaf_output {
+		initialization: std::ptr::null(),
+		initialization_size: 0,
+		fragment: std::ptr::null(),
+		fragment_size: 0,
+	};
+	assert_eq!(unsafe { moq_cmaf_init(muxer as u32, &mut output) }, 0);
+	assert!(!output.initialization.is_null());
+	assert!(output.initialization_size > 0);
+
+	let payload = b"keyframe";
+	let frame = moq_cmaf_frame {
+		payload: payload.as_ptr(),
+		payload_size: payload.len(),
+		timestamp_us: 10_000_000,
+		keyframe: true,
+		duration_us: 17_000,
+		has_duration: true,
+	};
+	assert_eq!(unsafe { moq_cmaf_mux(muxer as u32, 12, &frame, 1, &mut output) }, 0);
+	assert!(!output.initialization.is_null());
+	assert!(!output.fragment.is_null());
+	assert!(output.fragment_size > 0);
+	assert_eq!(moq_cmaf_close(muxer as u32), 0);
+}
+
 /// H.264 Annex B init with SPS + PPS extracted from Big Buck Bunny (1280x720, High profile, Level 3.1).
 fn h264_init() -> Vec<u8> {
 	let mut init = Vec::new();

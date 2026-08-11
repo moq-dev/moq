@@ -1,4 +1,4 @@
-//! One-shot CMAF muxing for individually fetched groups.
+//! One-shot CMAF muxing for application-selected media frames.
 
 use std::time::Duration;
 
@@ -26,12 +26,21 @@ enum Kind {
 	Audio(AudioConfig),
 }
 
-/// Muxes one rendition's fetched groups into standalone CMAF, without a live subscription.
+/// CMAF data produced from one batch of encoded media frames.
+#[derive(Clone, Debug)]
+pub struct Output {
+	/// The current initialization segment, once codec configuration is available.
+	pub initialization: Option<Bytes>,
+	/// The media fragment, or `None` when the batch produced no usable samples.
+	pub fragment: Option<Bytes>,
+}
+
+/// Muxes one encoded rendition into standalone CMAF, without owning a subscription.
 ///
 /// The pull-based [`Export`](super::Export) subscribes to a whole broadcast and interleaves
-/// its tracks; `Muxer` is the building block for a fetch-on-demand consumer (an HLS/DASH
-/// origin) that retrieves one group at a time via
-/// [`track::Consumer::fetch_group`](moq_net::track::Consumer::fetch_group):
+/// its tracks. `Muxer` instead packages frames selected independently by an application.
+/// [`mux`](Self::mux) is the high-level transport-independent entry point: it normalizes a
+/// frame batch, rebases its timestamps, and returns matching initialization and fragment bytes.
 ///
 /// 1. [`read`](Self::read) decodes a fetched group into media [`Frame`]s, normalizing the
 ///    codec shape (Annex-B H.264/H.265 becomes length-prefixed, with the config record
@@ -136,27 +145,50 @@ impl Muxer {
 
 		let mut out: Vec<Frame> = Vec::new();
 		while let Some(frames) = self.container.read(group).await? {
-			for frame in frames {
-				let Some(transform) = self.transform.as_mut() else {
-					out.push(frame);
-					continue;
-				};
-				let payload = transform.transform(frame.payload.clone())?;
-				// Track the transform's record even after it is first set: a mid-stream
-				// reconfiguration rebuilds the avcC/hvcC with new parameter sets.
-				if let Some(d) = transform.codec_private()
-					&& self.description.as_ref() != Some(d)
-				{
-					self.description = Some(d.clone());
-				}
-				if let Some(payload) = payload {
-					out.push(Frame { payload, ..frame });
-				}
-			}
+			out.extend(self.normalize(frames)?);
 		}
 		if let Some(first) = out.first_mut() {
 			first.keyframe = true;
 		}
+		Ok(out)
+	}
+
+	fn normalize(&mut self, frames: Vec<Frame>) -> crate::Result<Vec<Frame>> {
+		let Some(mut transform) = self.transform.clone() else {
+			return Ok(frames);
+		};
+		let mut description = self.description.clone();
+		let mut out = Vec::with_capacity(frames.len());
+		for (index, frame) in frames.into_iter().enumerate() {
+			let Frame {
+				timestamp,
+				payload,
+				keyframe,
+				duration,
+			} = frame;
+			let payload = transform.transform(payload)?;
+			let next_description = transform.codec_private().cloned();
+			if description != next_description {
+				if !out.is_empty() {
+					return Err(Error::CodecConfigChanged { index }.into());
+				}
+				description = next_description;
+			}
+			// A length-prefixed sample without its config record is not independently usable.
+			// Match the streaming exporter and discard pre-config slices.
+			if let Some(payload) = payload
+				&& description.is_some()
+			{
+				out.push(Frame {
+					timestamp,
+					payload,
+					keyframe,
+					duration,
+				});
+			}
+		}
+		self.transform = Some(transform);
+		self.description = description;
 		Ok(out)
 	}
 
@@ -184,9 +216,13 @@ impl Muxer {
 			}
 			CatalogContainer::Legacy | CatalogContainer::Loc => {
 				let trak = match &self.kind {
-					Kind::Video(config) => {
-						synthesize_video_trak(TRACK_ID, self.timescale.as_u64(), config, self.description.as_deref())?
-					}
+					Kind::Video(config) => synthesize_video_trak(
+						TRACK_ID,
+						self.timescale.as_u64(),
+						config,
+						self.description.as_deref(),
+						self.transform.is_some(),
+					)?,
 					Kind::Audio(config) => synthesize_audio_trak(TRACK_ID, self.timescale.as_u64(), config)?,
 				};
 				trexs.push(mp4_atom::Trex {
@@ -217,8 +253,7 @@ impl Muxer {
 	/// To make each frame separately addressable instead, use
 	/// [`fragmenter`](Self::fragmenter).
 	pub fn fragment(&self, sequence: u32, frames: &[Frame]) -> crate::Result<Bytes> {
-		let frames = self.resolve_durations(frames)?;
-		Ok(super::encode_fragment(self.fragment_info(sequence), &frames)?)
+		self.fragment_owned(sequence, frames.to_vec())
 	}
 
 	/// A [`Fragmenter`] cutting this rendition into one fragment per frame.
@@ -256,6 +291,11 @@ impl Muxer {
 		Ok(frames)
 	}
 
+	fn fragment_owned(&self, sequence: u32, frames: Vec<Frame>) -> crate::Result<Bytes> {
+		let frames = self.resolve_durations(&frames)?;
+		Ok(super::encode_fragment(self.fragment_info(sequence), &frames)?)
+	}
+
 	/// Where a fragment sits: this muxer's single track, at its resolved timescale.
 	fn fragment_info(&self, sequence: u32) -> super::FragmentInfo {
 		super::FragmentInfo {
@@ -263,6 +303,44 @@ impl Muxer {
 			timescale: self.timescale,
 			sequence_number: sequence,
 		}
+	}
+
+	/// Encode a fragment after subtracting an application-selected presentation origin.
+	///
+	/// This is useful whenever independently requested fragments must share a zero-based timeline.
+	/// The origin must not be later than any supplied frame timestamp.
+	pub fn fragment_rebased(&self, sequence: u32, origin: Duration, frames: &[Frame]) -> crate::Result<Bytes> {
+		let mut rebased = Vec::with_capacity(frames.len());
+		for frame in frames {
+			let track_origin = moq_net::Timestamp::try_from(origin)?.convert(frame.timestamp.scale())?;
+			let timestamp = frame.timestamp.checked_sub(track_origin)?;
+			rebased.push(Frame {
+				timestamp,
+				..frame.clone()
+			});
+		}
+		self.fragment_owned(sequence, rebased)
+	}
+
+	/// Normalize encoded frames and package them with the matching CMAF initialization.
+	///
+	/// Inline H.264/H.265 parameter sets are absorbed and used to build the init segment before
+	/// the media fragment is encoded. Timestamps in the media fragment are relative to `origin`.
+	/// Pre-config samples are discarded. A batch that crosses a codec configuration boundary is
+	/// rejected so one init segment always describes every emitted sample. The origin must not be
+	/// later than any emitted frame timestamp.
+	pub fn mux(&mut self, sequence: u32, origin: Duration, frames: Vec<Frame>) -> crate::Result<Output> {
+		let frames = self.normalize(frames)?;
+		let initialization = self.init()?;
+		let fragment = if frames.is_empty() {
+			None
+		} else {
+			Some(self.fragment_rebased(sequence, origin, &frames)?)
+		};
+		Ok(Output {
+			initialization,
+			fragment,
+		})
 	}
 }
 
@@ -279,6 +357,211 @@ mod tests {
 			keyframe,
 			duration: None,
 		}
+	}
+
+	#[test]
+	fn muxer_rebases_fragment_to_explicit_origin() {
+		let mut video = VideoConfig::new(VideoCodec::VP8);
+		video.framerate = Some(30.0);
+		let muxer = Muxer::video(&video).unwrap();
+		let video_frames = vec![frame(10_000_000, true), frame(10_033_000, false)];
+		let video_fragment = muxer
+			.fragment_rebased(12, Duration::from_secs(10), &video_frames)
+			.unwrap();
+		let decoded_video = super::super::decode(video_fragment, moq_net::Timescale::new(30_000).unwrap()).unwrap();
+		assert!(decoded_video[0].timestamp.is_zero());
+		assert_eq!(decoded_video[1].timestamp.as_micros(), 33_000);
+	}
+
+	#[test]
+	fn muxer_resolves_inline_h264_before_emitting_cmaf() {
+		use hang::catalog::H264;
+
+		let mut video = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		video.coded_width = Some(320);
+		video.coded_height = Some(240);
+		video.framerate = Some(30.0);
+
+		let mut muxer = Muxer::video(&video).unwrap();
+		assert!(muxer.init().unwrap().is_none());
+
+		let output = muxer
+			.mux(
+				7,
+				Duration::from_secs(10),
+				vec![crate::container::test_util::video_frame(10_000_000, true)],
+			)
+			.unwrap();
+		assert_eq!(&output.initialization.unwrap()[4..8], b"ftyp");
+		assert_eq!(&output.fragment.unwrap()[4..8], b"moof");
+	}
+
+	#[test]
+	fn muxer_uses_cmaf_init_without_duplicate_codec_description() {
+		use hang::catalog::H264;
+
+		let mut video = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		video.coded_width = Some(320);
+		video.coded_height = Some(240);
+		video.framerate = Some(30.0);
+
+		let mut source = Muxer::video(&video).unwrap();
+		let output = source
+			.mux(
+				0,
+				Duration::ZERO,
+				vec![crate::container::test_util::video_frame(0, true)],
+			)
+			.unwrap();
+		video.container = CatalogContainer::Cmaf {
+			init: output.initialization.unwrap(),
+		};
+		video.description = None;
+
+		let remuxer = Muxer::video(&video).unwrap();
+		assert!(remuxer.init().unwrap().is_some());
+	}
+
+	#[test]
+	fn muxer_does_not_emit_inline_samples_before_configuration() {
+		use hang::catalog::H264;
+
+		let video = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		let mut muxer = Muxer::video(&video).unwrap();
+		let output = muxer
+			.mux(
+				0,
+				Duration::ZERO,
+				vec![crate::container::test_util::video_frame(0, false)],
+			)
+			.unwrap();
+		assert!(output.initialization.is_none());
+		assert!(output.fragment.is_none());
+	}
+
+	#[test]
+	fn muxer_rejects_a_codec_change_after_emitting_a_sample() {
+		use hang::catalog::H264;
+
+		let video = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		let first = crate::container::test_util::video_frame(0, true);
+		let mut changed_sps = crate::container::test_util::SPS.to_vec();
+		changed_sps[3] ^= 1;
+		let mut changed_payload = Vec::new();
+		for nal in [
+			changed_sps.as_slice(),
+			crate::container::test_util::PPS,
+			crate::container::test_util::IDR,
+		] {
+			changed_payload.extend_from_slice(&[0, 0, 0, 1]);
+			changed_payload.extend_from_slice(nal);
+		}
+		let changed = Frame {
+			timestamp: Timestamp::from_micros(33_000).unwrap(),
+			payload: Bytes::from(changed_payload),
+			keyframe: true,
+			duration: None,
+		};
+
+		let mut muxer = Muxer::video(&video).unwrap();
+		let error = muxer.mux(0, Duration::ZERO, vec![first.clone(), changed]).unwrap_err();
+		assert!(matches!(
+			error,
+			crate::Error::Cmaf(Error::CodecConfigChanged { index: 1 })
+		));
+		// Normalization is transactional, so the caller can split and retry the prefix.
+		assert!(muxer.mux(0, Duration::ZERO, vec![first]).is_ok());
+	}
+
+	#[test]
+	fn muxer_advertises_normalized_inline_h265_as_hvc1() {
+		use hang::catalog::{H265, VideoCodec};
+		use mp4_atom::DecodeMaybe;
+
+		let mut video = crate::codec::h265::config_from_hvcc(&crate::codec::h265::fixtures::hvcc()).unwrap();
+		let VideoCodec::H265(h265) = &video.codec else {
+			panic!("fixture must describe H.265");
+		};
+		video.codec = VideoCodec::H265(H265 {
+			in_band: true,
+			..h265.clone()
+		});
+		video.description = None;
+
+		let mut payload = Vec::new();
+		for nal in [
+			crate::codec::h265::fixtures::VPS,
+			crate::codec::h265::fixtures::SPS,
+			crate::codec::h265::fixtures::PPS,
+			&[0x26, 0x01, 0x80, 0xaa],
+		] {
+			payload.extend_from_slice(&[0, 0, 0, 1]);
+			payload.extend_from_slice(nal);
+		}
+
+		let mut muxer = Muxer::video(&video).unwrap();
+		let output = muxer
+			.mux(
+				0,
+				Duration::ZERO,
+				vec![Frame {
+					payload: Bytes::from(payload),
+					..frame(0, true)
+				}],
+			)
+			.unwrap();
+
+		let mut cursor = std::io::Cursor::new(output.initialization.unwrap());
+		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+			if let mp4_atom::Any::Moov(moov) = atom {
+				assert!(matches!(
+					moov.trak[0].mdia.minf.stbl.stsd.codecs[0],
+					mp4_atom::Codec::Hvc1(_)
+				));
+				return;
+			}
+		}
+		panic!("initialization missing moov");
+	}
+
+	#[test]
+	fn muxer_preserves_explicit_sample_duration() {
+		let mut video = VideoConfig::new(VideoCodec::VP8);
+		video.framerate = Some(30.0);
+		let mut muxer = Muxer::video(&video).unwrap();
+		let exact = Timestamp::from_micros(17_000).unwrap();
+		let output = muxer
+			.mux(
+				0,
+				Duration::ZERO,
+				vec![Frame {
+					duration: Some(exact),
+					..frame(0, true)
+				}],
+			)
+			.unwrap();
+		let decoded = super::super::decode(output.fragment.unwrap(), moq_net::Timescale::new(30_000).unwrap()).unwrap();
+		assert_eq!(decoded[0].duration.unwrap().as_micros(), 17_000);
 	}
 
 	// A fetched Legacy group round-trips through the muxer into a self-contained fragment:
@@ -517,7 +800,7 @@ mod tests {
 		assert!(muxer.with_timescale(moq_net::Timescale::new(90_000).unwrap()).is_err());
 	}
 
-	// The HLS origin accumulates every group of a (multi-group) audio segment into ONE fragment,
+	// A consumer may accumulate every group of a multi-group audio interval into ONE fragment,
 	// and for audio those groups are often one packet each -- so every sample sits at a group
 	// boundary and none of them may borrow the next packet's timestamp (consecutive sequence
 	// numbers don't rule out a publisher pausing across the boundary). Opus stating its own

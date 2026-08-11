@@ -175,6 +175,31 @@ err := broadcast.SetVideoProperties(moq.VideoProperties{
 })
 ```
 
+## Packaging fetched media as CMAF
+
+`CMAFMuxer` packages application-selected encoded frames. Give audio and video muxers the same origin so independently fetched fragments share one zero-based timeline:
+
+```go
+muxer, err := moq.NewVideoCMAFMuxer(catalog.Video[videoName], intervalStartUS)
+if err != nil {
+    log.Fatal(err)
+}
+defer muxer.Close()
+
+output, err := muxer.Mux(sequence, frames)
+if err != nil {
+    log.Fatal(err)
+}
+if output.Initialization != nil {
+    storeInit(output.Initialization)
+}
+if output.Fragment != nil {
+    storeFragment(output.Fragment)
+}
+```
+
+Inline H.264/H.265 metadata is resolved from the supplied frames, so `Initialization` is nil until parameter sets arrive. A batch with no usable samples can return no `Fragment`. Keep each batch within one codec configuration; split at the frame index reported by an error when a rendition is reconfigured. `MediaFrame.DurationUs` carries an exact sample duration when the source container provides one.
+
 ## Error handling
 
 A server can reject the connection on auth grounds: `ErrMoqErrorUnauthorized` (HTTP 401) or `ErrMoqErrorForbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. The `moq.IsAuthError` helper catches both:

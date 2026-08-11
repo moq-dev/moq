@@ -168,15 +168,17 @@ impl Media {
 			return Ok(None);
 		};
 
-		let timestamp_us = timestamp_us(frame.timestamp)?;
+		let presentation_us = timestamp_us(frame.timestamp)?;
+		let duration_us = frame.duration.map(timestamp_us).transpose()?;
 
 		let mut buf = frame.payload;
 		let payload = buf.copy_to_bytes(buf.remaining()).to_vec();
 
 		Ok(Some(MoqMediaFrame {
 			payload,
-			timestamp_us,
+			timestamp_us: presentation_us,
 			keyframe: frame.keyframe,
+			duration_us,
 		}))
 	}
 }

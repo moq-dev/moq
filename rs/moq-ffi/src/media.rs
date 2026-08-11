@@ -112,7 +112,7 @@ pub struct MoqFrame {
 	pub timestamp_us: u64,
 }
 
-/// A [`MoqFrame`] plus the codec metadata a media track carries.
+/// An encoded media sample with keyframe and optional container-derived duration metadata.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqMediaFrame {
 	/// The frame payload.
@@ -121,6 +121,9 @@ pub struct MoqMediaFrame {
 	pub timestamp_us: u64,
 	/// Whether this frame can be decoded without any earlier frame.
 	pub keyframe: bool,
+	/// Exact sample duration in microseconds, when carried by the media container or codec.
+	#[uniffi(default = None)]
+	pub duration_us: Option<u64>,
 }
 
 /// A best-effort raw track datagram, as received.

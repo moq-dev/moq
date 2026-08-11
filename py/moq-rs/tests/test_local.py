@@ -99,6 +99,34 @@ def test_unknown_format():
         broadcast.publish_media("nope", b"")
 
 
+def test_cmaf_muxer_constructs_and_rebases_frames():
+    video = moq.Video(
+        codec="vp09.00.10.08",
+        description=None,
+        coded=None,
+        display_aspect=None,
+        bitrate=None,
+        framerate=30.0,
+        container=cast(moq.Container, moq.Container.LEGACY()),
+    )
+    muxer = moq.CmafMuxer(video, origin_us=10_000_000)
+    assert muxer.initialization is not None
+
+    output = muxer.mux(
+        12,
+        [
+            moq.MediaFrame(
+                payload=b"keyframe",
+                timestamp_us=10_000_000,
+                keyframe=True,
+                duration_us=17_000,
+            )
+        ],
+    )
+    assert output.initialization is not None
+    assert output.fragment is not None
+
+
 async def test_local_publish_consume_audio():
     origin = moq.OriginProducer()
     broadcast = origin.create_broadcast("live")
