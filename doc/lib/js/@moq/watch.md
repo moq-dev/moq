@@ -94,9 +94,14 @@ from the broadcast name extension by default. `room/alice.hang` uses hang,
 
 ```typescript
 import * as Watch from "@moq/watch";
+import * as Moq from "@moq/net";
+
+// A connection shared with every other component pointed at the same URL. Its `origin` is
+// where the broadcasts live, so the handle spans reconnects.
+const connection = new Moq.Connection.Shared({ url: new URL("https://relay.example.com/anon") });
 
 const broadcast = new Watch.Broadcast({
-    connection,
+    origin: connection.origin,
     enabled: true,
     name: "alice.hang",
     catalogFormat: "msf",
@@ -109,7 +114,7 @@ broadcast.catalogFormat.set("msf");
 ### Manual catalogs
 
 Use `catalog-format="manual"` (or `catalogFormat: "manual"`) to skip the catalog
-track entirely and supply a `Catalog.Root` directly. The connection and
+track entirely and supply a `Catalog.Root` directly. The origin and
 broadcast name are still required, since they're used to subscribe to the media
 tracks named by the catalog. Update the catalog at any time by writing to
 the signal:
@@ -118,7 +123,7 @@ the signal:
 import * as Watch from "@moq/watch";
 
 const broadcast = new Watch.Broadcast({
-    connection,
+    origin: connection.origin,
     enabled: true,
     name: "alice.hang",
     catalogFormat: "manual",
@@ -268,13 +273,16 @@ The `<moq-watch-ui>` element automatically discovers the nested `<moq-watch>` an
 
 ```typescript
 import * as Watch from "@moq/watch";
+import * as Moq from "@moq/net";
 import { Signal } from "@moq/signals";
+
+const connection = new Moq.Connection.Shared({ url: new URL("https://relay.example.com/anon") });
 
 // Inputs are read-only on the component, so keep a handle to anything you want to change later.
 const reload = new Signal(true);
 
 const broadcast = new Watch.Broadcast({
-    connection,
+    origin: connection.origin,
     enabled: true,
     name: "alice.hang",
     reload,

@@ -116,9 +116,14 @@ The overlay has no `simulcast` control; enable it via the attribute on the neste
 
 ```typescript
 import * as Publish from "@moq/publish";
+import * as Moq from "@moq/net";
+
+// A connection shared with every other component pointed at the same URL. Its `origin` is
+// where the broadcasts live, so they survive a reconnect.
+const connection = new Moq.Connection.Shared({ url: new URL("https://relay.example.com/anon") });
 
 const broadcast = new Publish.Broadcast({
-    connection,
+    origin: connection.origin,
     enabled: true,
     name: "alice.hang",
     // Publish two video renditions: video/hd plus a lower-resolution video/sd.
