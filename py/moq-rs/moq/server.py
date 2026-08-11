@@ -36,7 +36,7 @@ class Request:
 
     @property
     def path(self) -> str:
-        """The request path advertised by the client, uniform across transports."""
+        """The request path, or an empty string for the root/missing path."""
         return self._inner.path()
 
     @property

@@ -33,7 +33,7 @@ func (r *Request) URL() *string {
 	return r.inner.Url()
 }
 
-// Path is the request path advertised by the client, uniform across transports.
+// Path is the request path, or an empty string for the root/missing path.
 func (r *Request) Path() string {
 	return r.inner.Path()
 }

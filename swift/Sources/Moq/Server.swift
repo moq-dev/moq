@@ -78,7 +78,7 @@ public final class Request: Sendable {
         ffi.url()
     }
 
-    /// The request path advertised by the client, uniform across transports.
+    /// The request path, or an empty string for the root/missing path.
     public var path: String {
         ffi.path()
     }

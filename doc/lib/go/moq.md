@@ -82,6 +82,33 @@ fmt.Printf("rtt: %v\n", stats.RttUs)
 `Stats()` returns a snapshot. Individual fields are nil when the transport does
 not report that metric yet.
 
+## Accept connections
+
+Inspect an incoming request's logical endpoint before accepting it with `Path()`. It is consistent across transports and returns `""` for the root or missing path:
+
+```go
+server, err := moq.Listen(ctx, "127.0.0.1:4443", moq.WithTLSGenerate("localhost"))
+if err != nil {
+    log.Fatal(err)
+}
+defer server.Close()
+
+for request, err := range server.Requests(ctx) {
+    if err != nil {
+        log.Fatal(err)
+    }
+    if request.Path() == "/admin" {
+        _ = request.Reject(ctx, 403)
+        continue
+    }
+    session, err := request.Accept(ctx)
+    if err != nil {
+        log.Fatal(err)
+    }
+    _ = session
+}
+```
+
 ## Dynamic tracks
 
 `BroadcastProducer.Dynamic()` lets a publisher accept tracks that subscribers

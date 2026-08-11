@@ -461,7 +461,7 @@ impl Server {
 			#[cfg(feature = "websocket")]
 			let ws_accept = async {
 				match ws_ref {
-					Some(ws) => ws.accept().await,
+					Some(ws) => ws.accept_with_path().await,
 					None => std::future::pending().await,
 				}
 			};
@@ -493,7 +493,7 @@ impl Server {
 							// (like the stream bindings).
 							let (session, url, identity) = super::noq::accept(_conn, alpns).await?;
 							let request = server.accept_request(session).await?;
-							Ok(Request { transport: Transport::Quic, url, identity, kind: RequestKind::Noq(Box::new(request)) })
+							Ok(Request { transport: Transport::Quic, url, transport_path: None, identity, kind: RequestKind::Noq(Box::new(request)) })
 						}.boxed());
 					}
 				}
@@ -504,7 +504,7 @@ impl Server {
 						self.accept.push(async move {
 							let (session, url, identity) = super::quinn::accept(_conn, alpns).await?;
 							let request = server.accept_request(session).await?;
-							Ok(Request { transport: Transport::Quic, url, identity, kind: RequestKind::Quinn(Box::new(request)) })
+							Ok(Request { transport: Transport::Quic, url, transport_path: None, identity, kind: RequestKind::Quinn(Box::new(request)) })
 						}.boxed());
 					}
 				}
@@ -515,7 +515,7 @@ impl Server {
 						self.accept.push(async move {
 							let (session, url, identity) = super::quiche::accept(_conn, alpns).await?;
 							let request = server.accept_request(session).await?;
-							Ok(Request { transport: Transport::Quic, url, identity, kind: RequestKind::Quiche(Box::new(request)) })
+							Ok(Request { transport: Transport::Quic, url, transport_path: None, identity, kind: RequestKind::Quiche(Box::new(request)) })
 						}.boxed());
 					}
 				}
@@ -524,18 +524,18 @@ impl Server {
 					self.accept.push(async move {
 						let (session, url, identity) = super::iroh::accept(_conn).await?;
 						let request = server.accept_request(session).await?;
-						Ok(Request { transport: Transport::Iroh, url, identity, kind: RequestKind::Iroh(Box::new(request)) })
+						Ok(Request { transport: Transport::Iroh, url, transport_path: None, identity, kind: RequestKind::Iroh(Box::new(request)) })
 					}.boxed());
 				}
 				Some(_res) = ws_accept => {
 					#[cfg(feature = "websocket")]
 					match _res {
-						Ok(session) => {
+						Ok((session, path)) => {
 							// Read the SETUP off the qmux session before handing it over, so a
 							// slow peer doesn't stall the accept loop (spawned like the others).
 							self.accept.push(async move {
 								let request = server.accept_request(session).await?;
-								Ok(Request { transport: Transport::WebSocket, url: None, identity: None, kind: RequestKind::Qmux(Box::new(request)) })
+								Ok(Request { transport: Transport::WebSocket, url: None, transport_path: Some(path), identity: None, kind: RequestKind::Qmux(Box::new(request)) })
 							}.boxed());
 						}
 						// One connection's upgrade, not the listener's: a failed
@@ -868,6 +868,7 @@ fn spawn_stream_request(
 				let request = Request {
 					transport,
 					url: None,
+					transport_path: None,
 					identity: None,
 					kind: RequestKind::Qmux(Box::new(request)),
 				};
@@ -945,6 +946,8 @@ pub struct Request {
 	/// The dial URL, for transports that carry one (QUIC/WebTransport). `None` for the
 	/// URL-less stream bindings, whose request path rides the SETUP instead.
 	url: Option<Url>,
+	/// The request path carried by a transport whose complete dial URL is unavailable.
+	transport_path: Option<String>,
 	/// The peer's validated mTLS identity, captured at the transport handshake (before
 	/// the MoQ SETUP), when the backend supports it.
 	identity: Option<crate::tls::PeerIdentity>,
@@ -1023,6 +1026,7 @@ impl Request {
 		let Request {
 			transport,
 			url,
+			transport_path,
 			identity,
 			kind,
 		} = self;
@@ -1030,6 +1034,7 @@ impl Request {
 		Request {
 			transport,
 			url,
+			transport_path,
 			identity,
 			kind,
 		}
@@ -1040,6 +1045,7 @@ impl Request {
 		let Request {
 			transport,
 			url,
+			transport_path,
 			identity,
 			kind,
 		} = self;
@@ -1047,6 +1053,7 @@ impl Request {
 		Request {
 			transport,
 			url,
+			transport_path,
 			identity,
 			kind,
 		}
@@ -1057,6 +1064,7 @@ impl Request {
 		let Request {
 			transport,
 			url,
+			transport_path,
 			identity,
 			kind,
 		} = self;
@@ -1064,6 +1072,7 @@ impl Request {
 		Request {
 			transport,
 			url,
+			transport_path,
 			identity,
 			kind,
 		}
@@ -1091,18 +1100,23 @@ impl Request {
 	/// The request path the client advertised, uniform across transports.
 	///
 	/// Taken from the SETUP for the URL-less stream bindings (and moq-transport, which
-	/// carries it in-band), and from the dial [`url`](Self::url) for WebTransport/QUIC.
-	/// Empty only when neither carries one.
+	/// carries it in-band), the WebSocket request URI, or the dial [`url`](Self::url)
+	/// for WebTransport/QUIC.
+	/// The missing or root path is returned as an empty string.
 	pub fn path(&self) -> &str {
 		// An empty SETUP path means the client advertised none, so fall back to the
-		// dial URL. URI-carrying bindings are the ones that must not send a path at
-		// all, so this never discards a path the client meant us to use.
+		// transport request URI. URI-carrying bindings are the ones that must not send
+		// a path at all, so this never discards a path the client meant us to use.
 		let setup = request_ref!(self, r => r.path());
-		if setup.is_empty() {
-			self.url.as_ref().map(Url::path).unwrap_or("")
+		let path = if setup.is_empty() {
+			self.transport_path
+				.as_deref()
+				.or_else(|| self.url.as_ref().map(Url::path))
+				.unwrap_or("")
 		} else {
 			setup
-		}
+		};
+		if path == "/" { "" } else { path }
 	}
 
 	/// The single direction the client advertised in its SETUP, or `None` for a

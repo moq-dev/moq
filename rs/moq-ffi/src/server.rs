@@ -206,7 +206,7 @@ impl MoqRequest {
 		self.url.clone()
 	}
 
-	/// The request path advertised by the client, uniform across transports.
+	/// The request path advertised by the client, or empty for the root/missing path.
 	pub fn path(&self) -> String {
 		self.path.clone()
 	}

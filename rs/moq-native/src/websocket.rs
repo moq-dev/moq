@@ -243,7 +243,7 @@ impl Error {
 /// alongside QUIC connections on a separate port.
 pub struct Listener {
 	listener: tokio::net::TcpListener,
-	server: qmux::Server,
+	protocols: Vec<String>,
 	health: crate::accept::Health,
 }
 
@@ -256,13 +256,13 @@ impl Listener {
 	/// Bind a listener that only accepts the given moq ALPNs, in preference order.
 	pub async fn bind_with_alpns(addr: net::SocketAddr, alpns: &[&str]) -> Result<Self> {
 		let listener = tokio::net::TcpListener::bind(addr).await?;
-		// `qmux_versions_for` returns `&[]` (every QMux draft) for ALPNs the spec
-		// doesn't restrict; qmux by default also accepts legacy clients that
-		// only offer a bare wire-format ALPN (today's moq-net clients still do).
-		let server = qmux::Server::new().with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))));
+		let protocols = supported_subprotocols(alpns);
+		for protocol in &protocols {
+			http::HeaderValue::from_str(protocol).map_err(Error::ProtocolHeader)?;
+		}
 		Ok(Self {
 			listener,
-			server,
+			protocols,
 			health: crate::accept::Health::new("websocket"),
 		})
 	}
@@ -287,10 +287,63 @@ impl Listener {
 	///
 	/// As in [`crate::tcp`], the `Option` has no `None` case left to report.
 	pub async fn accept(&self) -> Option<Result<qmux::Session>> {
+		self.accept_with_path()
+			.await
+			.map(|result| result.map(|(session, _)| session))
+	}
+
+	/// Accept the next connection and retain the WebSocket request path.
+	pub(crate) async fn accept_with_path(&self) -> Option<Result<(qmux::Session, String)>> {
 		let (stream, addr) = self.accept_socket().await;
 		tracing::debug!(%addr, "accepted WebSocket TCP connection");
-		let server = self.server.clone();
-		Some(server.accept(stream).await.map_err(Error::Accept))
+
+		let accepted = Arc::new(Mutex::new(None::<(String, String)>));
+		let accepted_callback = accepted.clone();
+		let protocols = self.protocols.clone();
+		#[allow(clippy::result_large_err)]
+		let callback = move |request: &tungstenite::handshake::server::Request,
+		               mut response: tungstenite::handshake::server::Response|
+		      -> std::result::Result<_, tungstenite::handshake::server::ErrorResponse> {
+			let offered: Vec<_> = request
+				.headers()
+				.get_all(http::header::SEC_WEBSOCKET_PROTOCOL)
+				.iter()
+				.filter_map(|value| value.to_str().ok())
+				.flat_map(|value| value.split(','))
+				.map(str::trim)
+				.filter(|value| !value.is_empty())
+				.collect();
+			let Some(protocol) = protocols.iter().find(|protocol| offered.contains(&protocol.as_str())) else {
+				return Err(http::Response::builder()
+					.status(http::StatusCode::BAD_REQUEST)
+					.body(Some("no supported protocol".to_string()))
+					.expect("valid rejection response"));
+			};
+
+			response.headers_mut().insert(
+				http::header::SEC_WEBSOCKET_PROTOCOL,
+				http::HeaderValue::from_str(protocol).expect("protocol validated at bind"),
+			);
+			*accepted_callback.lock().unwrap() = Some((protocol.clone(), request.uri().path().to_string()));
+			Ok(response)
+		};
+
+		let websocket = tokio_tungstenite::accept_hdr_async_with_config(stream, callback, None)
+			.await
+			.map_err(qmux::Error::from)
+			.map_err(Error::Accept);
+		Some(websocket.map(|websocket| {
+			let (protocol, path) = accepted
+				.lock()
+				.unwrap()
+				.take()
+				.expect("successful upgrade selected a protocol");
+			let session = qmux::ws::Upgraded::new(websocket)
+				.with_alpn(&protocol)
+				.with_keep_alive(qmux::KeepAlive::default())
+				.accept();
+			(session, path)
+		}))
 	}
 
 	/// The `accept(2)` half: keep asking until a connection comes back.
@@ -309,6 +362,28 @@ impl Listener {
 			}
 		}
 	}
+}
+
+/// WebSocket subprotocols accepted for the given MoQ ALPNs, in preference order.
+fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
+	let mut protocols = Vec::new();
+	for &alpn in alpns {
+		let versions = qmux_versions_for(alpn);
+		let versions = if versions.is_empty() {
+			qmux::Version::ALL
+		} else {
+			versions
+		};
+		protocols.extend(
+			versions
+				.iter()
+				.copied()
+				.filter(|version| version.is_qmux())
+				.map(|version| format!("{}{alpn}", version.prefix())),
+		);
+	}
+	protocols.extend(qmux::ALPNS.iter().map(|protocol| (*protocol).to_string()));
+	protocols
 }
 
 #[cfg(test)]

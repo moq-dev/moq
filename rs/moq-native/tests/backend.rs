@@ -42,7 +42,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 		client_bind: None,
 		authority: "localhost",
 		path: "",
-		expect_path: None,
+		expect_path: Some(""),
 		backend,
 		qlog: None,
 	})
@@ -89,7 +89,7 @@ async fn no_sni_test(scheme: &str, backend: moq_native::QuicBackend) {
 		client_bind: None,
 		authority: "127.0.0.1",
 		path: "",
-		expect_path: None,
+		expect_path: Some(""),
 		backend,
 		qlog: None,
 	})
