@@ -11,11 +11,17 @@ import { ALPN, Version } from "./version.ts";
 
 const VERSION = Version.DRAFT_19;
 
+/** How long to wait for a stream before calling it absent, which is how a regression reports. */
+const STREAM_WAIT = 1000;
+
+/** Long enough for the publish to reach the announce loop's signal. */
+const SETTLE = 5;
+
 /** Accept the next stream the publisher opens, or give up rather than hang forever. */
 async function nextStream(transport: WebTransport): Promise<Stream | undefined> {
 	return Promise.race([
 		Stream.accept(transport, VERSION),
-		new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 1000)),
+		new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), STREAM_WAIT)),
 	]);
 }
 
@@ -81,7 +87,7 @@ test("a broadcast published mid-advertisement is still announced", async () => {
 	// Publish while the loop is parked on that reply.
 	const second = new BroadcastProducer();
 	pub.publish(Path.from("second"), second);
-	await new Promise((resolve) => setTimeout(resolve, 5));
+	await new Promise((resolve) => setTimeout(resolve, SETTLE));
 
 	await acceptPublishNamespace(one);
 

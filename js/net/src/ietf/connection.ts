@@ -128,6 +128,7 @@ export class Connection implements Established {
 		this.#closed = true;
 
 		this.#publisher.close();
+		this.#subscriber.close();
 		this.#session.close();
 
 		try {

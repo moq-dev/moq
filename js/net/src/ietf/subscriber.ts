@@ -81,26 +81,43 @@ export class Subscriber {
 	}
 
 	/**
+	 * Ends every announced feed, including one that never opened a stream of its own.
+	 *
+	 * @internal
+	 */
+	close() {
+		for (const announced of this.#announcedConsumers) {
+			announced.close();
+		}
+		this.#announcedConsumers.clear();
+	}
+
+	/**
 	 * Gets an announced reader for the specified prefix.
 	 *
-	 * Stays empty when the peer declared that soliciting it returns nothing (MoQ
-	 * Solicit): a SUBSCRIBE_NAMESPACE would buy one stream and an empty answer. Unlike
-	 * the Rust side, this never has to guess, since the SETUP is exchanged before the
-	 * connection exists.
+	 * Sends no SUBSCRIBE_NAMESPACE when the peer declared that soliciting it returns
+	 * nothing (MoQ Solicit): the question would buy one stream and an empty answer.
+	 * Unlike the Rust side this never has to guess, since the SETUP is exchanged before
+	 * the connection exists.
+	 *
+	 * The feed stays live either way. That declaration is advisory, so a peer is free to
+	 * send an unsolicited PUBLISH_NAMESPACE anyway, and one that arrives is delivered
+	 * here exactly as it would be without the declaration.
 	 */
 	announced(prefix = Path.empty()): announce.Consumer {
 		const announced = new announce.Producer(prefix);
-		if (this.#solicit.interest) {
-			announced.close();
-			return announced.consume();
-		}
-
 		for (const active of this.#announced) {
 			const suffix = Path.stripPrefix(prefix, active);
 			if (suffix === null) continue;
 			announced.append({ path: suffix, active: true });
 		}
 		this.#announcedConsumers.add(announced);
+
+		if (this.#solicit.interest) {
+			// No SUBSCRIBE_NAMESPACE to run, so nothing here ends the feed; {@link close}
+			// does it when the session goes away.
+			return announced.consume();
+		}
 
 		void this.#runAnnounced(announced, prefix).finally(() => {
 			this.#announcedConsumers.delete(announced);

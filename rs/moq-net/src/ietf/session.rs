@@ -818,6 +818,11 @@ mod tests {
 		assert_eq!(occurrences(&log, b"rootns"), 0, "asked the peer for our local root");
 	}
 
+	/// How many scheduling turns an advertisement gets before the count is taken. Time is
+	/// paused in these tests, so each turn costs nothing and only runs the driver until it
+	/// parks again; a busy machine cannot turn a slow announce into a passing silence.
+	const ANNOUNCE_TURNS: usize = 100;
+
 	/// Run a publish-only session against a peer that declared `peer_declared`, returning
 	/// how many times the namespace reached the wire.
 	///
@@ -851,14 +856,20 @@ mod tests {
 		.expect("start the session");
 		let _driver = tokio::spawn(driver);
 
-		// Give an announce every chance to land before counting.
-		tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+		// Drive until the announce lands, rather than betting on one fixed window.
+		for _ in 0..ANNOUNCE_TURNS {
+			if occurrences(&log, b"solo-cam") > 0 {
+				break;
+			}
+			tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		}
+
 		occurrences(&log, b"solo-cam")
 	}
 
 	/// The peer's SETUP decides whether an advertisement may go out unasked, so nothing
 	/// can be sent before it arrives.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn no_announce_before_the_peer_setup() {
 		assert_eq!(
 			announce_occurrences(None).await,
@@ -869,7 +880,7 @@ mod tests {
 
 	/// A peer that requires solicitation hears nothing until it asks, which is the
 	/// behavior the IETF draft describes for a relay.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_peer_requiring_solicitation_is_not_told_unasked() {
 		let declared = peer::Peer {
 			solicit: solicit::Solicit {
@@ -889,7 +900,7 @@ mod tests {
 	/// A peer that declared nothing is told without being asked. Every relay that never
 	/// sends SUBSCRIBE_NAMESPACE depends on this, and the session is what wires the
 	/// unsolicited loop up at all.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_peer_declaring_nothing_is_told_unasked() {
 		assert_eq!(
 			announce_occurrences(Some(peer::Peer::default())).await,
