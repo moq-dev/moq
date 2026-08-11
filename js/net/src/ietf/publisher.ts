@@ -308,29 +308,23 @@ export class Publisher {
 				}
 			};
 
-			// Advertise the currently published broadcasts under the prefix.
 			let active = new Set<Path.Valid>();
-			for (const name of this.#broadcasts.peek()?.keys() ?? []) {
-				const suffix = Path.stripPrefix(prefix, name);
-				if (suffix === null) continue;
-				active.add(suffix);
-			}
-			for (const suffix of active) {
-				await advertise(suffix);
-			}
 
-			// Wait for updates to the broadcasts.
 			for (;;) {
+				// Subscribe BEFORE reconciling, for the same reason as
+				// {@link runPublishNamespaces}: a publish landing while an advertisement
+				// waits for its reply only notifies listeners already registered.
 				// TODO Make a better helper within Signals.
 				let dispose!: Dispose;
 				const changed = new Promise<Map<Path.Valid, broadcast.Producer> | undefined>((resolve) => {
 					dispose = this.#broadcasts.changed(resolve);
 				});
 
-				// Wait until the map of broadcasts changes or the peer unsubscribes.
-				const broadcasts = await Promise.race([changed, stream.reader.closed]);
-				dispose();
-				if (!broadcasts) break;
+				const broadcasts = this.#broadcasts.peek();
+				if (!broadcasts) {
+					dispose();
+					break;
+				}
 
 				const updated = new Set<Path.Valid>();
 				for (const name of broadcasts.keys()) {
@@ -347,6 +341,11 @@ export class Publisher {
 				}
 
 				active = updated;
+
+				// Wait for the next change, or for the peer to unsubscribe.
+				const next = await Promise.race([changed, stream.reader.closed]);
+				dispose();
+				if (!next) break;
 			}
 
 			stream.close();
@@ -384,22 +383,25 @@ export class Publisher {
 		const requests = new Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream }>();
 
 		try {
-			let active = new Set<Path.Valid>(this.#broadcasts.peek()?.keys() ?? []);
-			for (const path of active) {
-				await this.#advertise(path, requests);
-			}
+			let active = new Set<Path.Valid>();
 
 			for (;;) {
+				// Subscribe BEFORE reconciling. Each advertisement below waits a round trip
+				// for the peer's reply, and a publish that lands in that window notifies
+				// only the listeners already registered; one created afterwards would sleep
+				// through it and leave the namespace unadvertised until something unrelated
+				// changed.
 				// TODO Make a better helper within Signals.
 				let dispose!: Dispose;
 				const changed = new Promise<Map<Path.Valid, broadcast.Producer> | undefined>((resolve) => {
 					dispose = this.#broadcasts.changed(resolve);
 				});
 
-				// Wait until the map of broadcasts changes, or the publisher closes.
-				const broadcasts = await changed;
-				dispose();
-				if (!broadcasts) break;
+				const broadcasts = this.#broadcasts.peek();
+				if (!broadcasts) {
+					dispose();
+					break;
+				}
 
 				const updated = new Set<Path.Valid>(broadcasts.keys());
 				for (const added of updated.difference(active)) {
@@ -410,6 +412,11 @@ export class Publisher {
 				}
 
 				active = updated;
+
+				// Wait for the next change, which has already fired if one landed above.
+				const next = await changed;
+				dispose();
+				if (!next) break;
 			}
 		} catch (err: unknown) {
 			console.debug(`publish_namespace error: ${reason(error(err))}`);
