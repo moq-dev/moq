@@ -149,7 +149,7 @@
     },
     "js/moq-boy": {
       "name": "@moq/boy",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "dependencies": {
         "@moq/json": "workspace:^",
         "@moq/net": "workspace:^",
@@ -265,7 +265,7 @@
     },
     "js/watch": {
       "name": "@moq/watch",
-      "version": "0.4.4",
+      "version": "0.5.0",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/msf": "workspace:^",

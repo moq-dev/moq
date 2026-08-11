@@ -6,8 +6,9 @@ import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import { base64ToBytes } from "../base64";
 
-import { type Bound, latencyBounds, type Sync } from "../sync";
+import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
+import { reanchorFloor } from "./latency";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
@@ -99,7 +100,7 @@ export class Decoder {
 
 	// The latency floor as of the last settled change, to detect a floor *increase* (needs a deeper
 	// cushion) versus a decrease or a real-time RTT wiggle. See #runLatencyReanchor.
-	#prevFloor?: Bound;
+	#prevFloor?: Time.Milli;
 
 	#signals = new Effect();
 
@@ -230,11 +231,15 @@ export class Decoder {
 	// longer), but the audio ring keeps draining at its old depth -- resize() (via setLatency) only
 	// re-stalls an *empty* ring, so a mid-playback ring never refills to the new floor and audio runs
 	// ahead of video (the "raise latency, only video re-buffers" desync). reset() re-stalls the ring
-	// so it refills to the new floor. Watch the latency *target* (not the derived buffer) so real-time
-	// RTT jitter never triggers this, and debounce so a slider drag coalesces into one re-anchor.
-	// Decreases are left to natural catch-up.
+	// so it refills to the new floor. Watch the latency target and media delay, excluding adaptive
+	// RTT jitter, and debounce so a slider drag coalesces into one re-anchor. Decreases are left to
+	// natural catch-up.
 	#runLatencyReanchor(effect: Effect): void {
-		const floor = latencyBounds(effect.get(this.sync.in.latency)).min;
+		const floor = reanchorFloor({
+			latency: effect.get(this.sync.in.latency),
+			audio: effect.get(this.sync.in.audio),
+			video: effect.get(this.sync.in.video),
+		});
 		if (this.#prevFloor === undefined) {
 			// Startup: the initial fill already builds the cushion; just record the baseline.
 			this.#prevFloor = floor;
@@ -244,8 +249,7 @@ export class Decoder {
 		// this effect (tearing down the timer), so compare it against the pre-change baseline directly.
 		const baseline = this.#prevFloor;
 		effect.timer(() => {
-			const toMs = (b: Bound): number => (b === "real-time" ? 0 : b);
-			if (toMs(floor) > toMs(baseline)) this.reset();
+			if (floor > baseline) this.reset();
 			this.#prevFloor = floor;
 		}, LATENCY_REANCHOR_DEBOUNCE_MS);
 	}

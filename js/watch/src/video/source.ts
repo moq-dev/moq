@@ -1,6 +1,4 @@
 import type * as Catalog from "@moq/hang/catalog";
-import type * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 
@@ -50,9 +48,6 @@ type SourceOutput = {
 	// The name of the active rendition.
 	track: Signal<string | undefined>;
 	config: Signal<Catalog.VideoConfig | undefined>;
-
-	// The per-rendition jitter (ms) to add to the sync buffer. Wired into Sync by the parent.
-	jitter: Signal<Moq.Time.Milli | undefined>;
 };
 
 /**
@@ -220,7 +215,6 @@ export class Source {
 		error: new Signal<SourceError | undefined>(undefined),
 		track: new Signal<string | undefined>(undefined),
 		config: new Signal<Catalog.VideoConfig | undefined>(undefined),
-		jitter: new Signal<Moq.Time.Milli | undefined>(undefined),
 	};
 	readonly out = readonlys(this.#out);
 
@@ -296,7 +290,6 @@ export class Source {
 			const config = available[target.name];
 			effect.set(this.#out.track, target.name);
 			effect.set(this.#out.config, config);
-			effect.set(this.#out.jitter, config.jitter !== undefined ? Time.Milli(config.jitter) : undefined);
 			return;
 		}
 
@@ -320,10 +313,6 @@ export class Source {
 
 		effect.set(this.#out.track, selected);
 		effect.set(this.#out.config, config);
-
-		// Use catalog jitter if available, otherwise estimate from framerate.
-		const jitter = config.jitter ?? (config.framerate ? Math.ceil(1000 / config.framerate) : undefined);
-		effect.set(this.#out.jitter, jitter !== undefined ? Time.Milli(jitter) : undefined);
 	}
 
 	/**

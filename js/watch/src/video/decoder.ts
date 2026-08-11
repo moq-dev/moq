@@ -7,12 +7,12 @@ import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Si
 import { base64ToBytes } from "../base64";
 
 import type { Sync } from "../sync";
+import { caughtUp, renditionJitter, switchJitter } from "./playhead";
 import { rotateVideoDimensions } from "./presentation";
 import type { Source } from "./source";
 
 // The amount of time to wait before considering the video to be buffering.
 const BUFFERING = Time.Milli(500);
-const SWITCH = Time.Milli(100);
 
 export type DecoderInput = {
 	// Whether to download the video track. Wired from the renderer's output by the parent.
@@ -41,6 +41,9 @@ type DecoderOutput = {
 	stalled: Signal<boolean>;
 	stats: Signal<Stats | undefined>;
 
+	// The rendition delay Sync must cover while switching tracks.
+	jitter: Signal<Time.Milli | undefined>;
+
 	// Combined buffered ranges (network jitter + decode buffer)
 	buffered: Signal<Container.BufferedRanges>;
 };
@@ -62,12 +65,14 @@ export class Decoder {
 		display: new Signal<{ width: number; height: number } | undefined>(undefined),
 		stalled: new Signal<boolean>(false),
 		stats: new Signal<Stats | undefined>(undefined),
+		jitter: new Signal<Time.Milli | undefined>(undefined),
 		buffered: new Signal<Container.BufferedRanges>([]),
 	};
 	readonly out = readonlys(this.#out);
 
 	// The current track running, held so we can cancel it when the new track is ready.
 	#active = new Signal<DecoderTrack | undefined>(undefined);
+	#pendingJitter = new Signal<Time.Milli | undefined>(undefined);
 
 	#signals = new Effect();
 
@@ -87,10 +92,17 @@ export class Decoder {
 		this.source = source;
 		this.sync = sync;
 
+		this.#signals.run(this.#runJitter.bind(this));
 		this.#signals.run(this.#runPending.bind(this));
 		this.#signals.run(this.#runActive.bind(this));
 		this.#signals.run(this.#runDisplay.bind(this));
 		this.#signals.run(this.#runBuffering.bind(this));
+	}
+
+	#runJitter(effect: Effect): void {
+		const active = effect.get(this.#active)?.jitter;
+		const pending = effect.get(this.#pendingJitter);
+		effect.set(this.#out.jitter, switchJitter({ active, pending }));
 	}
 
 	#runPending(effect: Effect): void {
@@ -127,6 +139,7 @@ export class Decoder {
 			config,
 			stats: this.#out.stats,
 		});
+		effect.set(this.#pendingJitter, pending.jitter);
 
 		effect.cleanup(() => pending?.close());
 
@@ -135,17 +148,18 @@ export class Decoder {
 
 			const current = effect.get(this.#active);
 			if (current) {
+				// A zero timestamp is a rendered frame, not a missing one.
 				const pendingTimestamp = effect.get(pending.timestamp);
-				const activeTimestamp = effect.get(current.timestamp);
+				if (pendingTimestamp === undefined) return;
 
-				// Switch to the new track if it's ready and we've caught up enough.
-				if (!pendingTimestamp) return;
-				if (activeTimestamp && activeTimestamp > pendingTimestamp + SWITCH) return;
+				// Hold off until the new rendition has caught up to the picture it's replacing.
+				if (!caughtUp({ playhead: pendingTimestamp, active: effect.get(current.timestamp) })) return;
 			}
 
 			// Upgrade the pending track to active.
 			// #runActive will be in charge of it now.
 			this.#active.set(pending);
+			this.#pendingJitter.set(undefined);
 			pending = undefined;
 
 			// This effect is done; close it to avoid a useless re-run.
@@ -237,6 +251,7 @@ class DecoderTrack {
 	track: string;
 	config: RequiredDecoderConfig;
 	stats: Signal<Stats | undefined>;
+	jitter: Time.Milli | undefined;
 
 	timestamp = new Signal<Time.Milli | undefined>(undefined);
 	frame = new Signal<VideoFrame | undefined>(undefined);
@@ -262,6 +277,7 @@ class DecoderTrack {
 		this.track = props.track;
 		this.config = requiredConfig;
 		this.stats = props.stats;
+		this.jitter = renditionJitter(props.config);
 
 		this.#signals.run(this.#run.bind(this));
 	}
