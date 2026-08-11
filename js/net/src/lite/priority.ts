@@ -72,6 +72,7 @@ export class Priority {
 	#track: track.Subscriber;
 	#streams = new Map<Writer, number>();
 	#dispose: Dispose;
+	#closed = false;
 
 	/** Follow `track`'s subscription until {@link close}. */
 	constructor(track: track.Subscriber) {
@@ -98,18 +99,25 @@ export class Priority {
 
 	/** Stop ranking a finished group's stream, promoting whatever was queued behind it. */
 	remove(stream: Writer) {
-		if (this.#streams.delete(stream)) this.#rerank();
+		if (!this.#streams.delete(stream)) return;
+
+		if (this.#closed && this.#streams.size === 0) {
+			this.#dispose();
+		} else {
+			this.#rerank();
+		}
 	}
 
 	/**
-	 * Release the subscription listener.
+	 * Stop taking new groups, and release the subscription listener once the last one leaves.
 	 *
-	 * Any group still draining keeps the rank it last had, which is what a subscription on its
-	 * way out wants anyway.
+	 * The track can finish while several groups are still draining, and those are the ones the
+	 * subscriber is still waiting on. They keep being promoted as the groups ahead of them
+	 * finish, rather than being stranded at whatever position they held when the track ended.
 	 */
 	close() {
-		this.#dispose();
-		this.#streams.clear();
+		this.#closed = true;
+		if (this.#streams.size === 0) this.#dispose();
 	}
 
 	// How many of this subscription's groups in flight should be sent before `sequence`.

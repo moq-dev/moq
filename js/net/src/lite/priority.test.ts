@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { sendOrder } from "./priority.ts";
+import { Producer as BroadcastProducer } from "../broadcast.ts";
+import type { SendStream } from "../mock.ts";
+import { Writer } from "../stream.ts";
+import { Priority, sendOrder } from "./priority.ts";
 
 // The last position that still fits below the track priority.
 const MAX_POSITION = 2 ** 45 - 1;
@@ -41,4 +44,46 @@ test("out of range ranks stay inside their own bits", () => {
 	);
 	expect(sendOrder({ priority: 300, position: 0 })).toBe(sendOrder({ priority: 255, position: 0 }));
 	expect(sendOrder({ priority: -1, position: -1 })).toBe(sendOrder({ priority: 0, position: 0 }));
+});
+
+// The ranking itself, driven directly: a subscription outlives its own serving loop, since a
+// group already on the wire keeps writing after the track stops handing out new ones.
+function ranking(options: { priority?: number; ordered?: boolean } = {}) {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video");
+	const subscriber = track.subscribe(options);
+
+	// The send order lands on the underlying stream, exactly as it would on a real one.
+	const streams: SendStream[] = [];
+	const open = () => {
+		const stream = new WritableStream<Uint8Array>() as SendStream;
+		streams.push(stream);
+		return new Writer(stream);
+	};
+
+	return { priority: new Priority(subscriber), open, streams, broadcast };
+}
+
+// A track that finishes while several groups are still draining leaves them as the only data
+// the subscriber is still waiting on. Stranding them at the position they held when the track
+// ended would let an equal-priority live subscription preempt them until they complete.
+test("groups still draining are promoted after the subscription closes", () => {
+	const { priority, open, streams, broadcast } = ranking({ priority: 7 });
+
+	const older = open();
+	const newer = open();
+	priority.add(older, 0);
+	priority.add(newer, 1);
+	expect(streams[0].sendOrder).toBe(sendOrder({ priority: 7, position: 1 }));
+
+	// The serving loop is done, but both groups are still on the wire.
+	priority.close();
+	expect(streams[0].sendOrder).toBe(sendOrder({ priority: 7, position: 1 }));
+
+	// The newer group finishes, so the older one is now the one to send next.
+	priority.remove(newer);
+	expect(streams[0].sendOrder).toBe(sendOrder({ priority: 7, position: 0 }));
+
+	priority.remove(older);
+	broadcast.close();
 });
