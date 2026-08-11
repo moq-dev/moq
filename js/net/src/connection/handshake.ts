@@ -1,5 +1,5 @@
 import * as Ietf from "../ietf/index.ts";
-import { Reader, Stream, Writer } from "../stream.ts";
+import { Reader, Stream, sendOptions, Writer } from "../stream.ts";
 
 /**
  * Draft-17+ SETUP exchange. Each side opens a uni stream, writes its Setup
@@ -35,7 +35,7 @@ async function sendSetup(
 	version: Ietf.IetfVersion,
 	setupMsg: Ietf.Setup,
 ): Promise<{ writable: WritableStream<Uint8Array>; writer: Writer }> {
-	const writable = (await transport.createUnidirectionalStream()) as WritableStream<Uint8Array>;
+	const writable = (await transport.createUnidirectionalStream(sendOptions())) as WritableStream<Uint8Array>;
 	const writer = new Writer(writable, version);
 	await writer.u53(Ietf.Setup.id); // 0x2F00 stream type
 	await setupMsg.encode(writer, version);

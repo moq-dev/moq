@@ -6,6 +6,22 @@ import * as Varint from "./varint.ts";
 const MAX_U31 = 2 ** 31 - 1;
 const MAX_READ_SIZE = 1024 * 1024 * 64; // don't allocate more than 64MB for a message
 
+// @types/web doesn't know about waitUntilAvailable yet, even though it's been in the
+// WebTransport spec (and Chrome) for years.
+type SendStreamOptions = WebTransportSendStreamOptions & { waitUntilAvailable?: boolean };
+
+/**
+ * Options for every send stream we open.
+ *
+ * `waitUntilAvailable` waits for the peer's concurrent stream limit to free up a slot
+ * instead of rejecting with a `QuotaExceededError`. We open a stream per group, so
+ * bursting past the limit is routine and a rejection would drop media the peer is about
+ * to have room for.
+ */
+export function sendOptions(priority?: number): SendStreamOptions {
+	return { sendOrder: priority, waitUntilAvailable: true };
+}
+
 function isLeadingOnes(version?: IetfVersion): boolean {
 	return (
 		version !== undefined &&
@@ -44,7 +60,7 @@ export class Stream {
 	}
 
 	static async open(quic: WebTransport, version?: IetfVersion, priority?: number): Promise<Stream> {
-		const { readable, writable } = await quic.createBidirectionalStream({ sendOrder: priority });
+		const { readable, writable } = await quic.createBidirectionalStream(sendOptions(priority));
 		return new Stream({ readable, writable, version });
 	}
 
@@ -372,7 +388,7 @@ export class Writer {
 	}
 
 	static async open(quic: WebTransport, version?: IetfVersion): Promise<Writer> {
-		const writable = (await quic.createUnidirectionalStream()) as WritableStream<Uint8Array>;
+		const writable = (await quic.createUnidirectionalStream(sendOptions())) as WritableStream<Uint8Array>;
 		return new Writer(writable, version);
 	}
 }
