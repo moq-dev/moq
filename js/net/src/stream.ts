@@ -15,6 +15,18 @@ function isLeadingOnes(version?: IetfVersion): boolean {
 	);
 }
 
+/**
+ * The `WebTransportSendStream` that every outgoing stream is, narrowed to the one attribute
+ * this package uses. The DOM types available here still describe them as plain
+ * `WritableStream`s, so the interface has to be named structurally.
+ *
+ * `sendOrder` is optional because it is absent until set, and stays absent on an
+ * implementation that doesn't carry the interface at all.
+ *
+ * @see https://www.w3.org/TR/webtransport/#webtransportsendstream
+ */
+export type SendStream = WritableStream<Uint8Array> & { sendOrder?: number };
+
 /** Options for opening an outgoing stream. */
 export interface OpenOptions {
 	/** The negotiated IETF version, which selects the varint encoding. */
@@ -317,11 +329,14 @@ export class Writer {
 	 * Rank this stream against the session's others, where HIGHER values are sent first.
 	 *
 	 * A send order only schedules the local end, so a stream the peer opened has to be ranked
-	 * here rather than at the peer's {@link open}. Setting it on anything but a WebTransport
-	 * send stream (a mock, a polyfill) is inert.
+	 * here rather than at the peer's {@link open}.
+	 *
+	 * The spec makes `sendOrder` a settable attribute on every {@link SendStream}. Where the
+	 * interface isn't implemented (Chrome as of writing, a mock, a polyfill) this just sets an
+	 * ignored property, the same way an ignored `sendOrder` option does at {@link open}.
 	 */
 	setPriority(sendOrder: number) {
-		(this.#stream as WritableStream<Uint8Array> & { sendOrder?: number }).sendOrder = sendOrder;
+		(this.#stream as SendStream).sendOrder = sendOrder;
 	}
 
 	async bool(v: boolean) {

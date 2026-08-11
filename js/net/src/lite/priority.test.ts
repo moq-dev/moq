@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
-import type { SendStream } from "../mock.ts";
-import { Writer } from "../stream.ts";
+import { type SendStream, Writer } from "../stream.ts";
+
 import { Priority, sendOrder } from "./priority.ts";
 
 // The last position that still fits below the track priority.

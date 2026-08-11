@@ -5,6 +5,7 @@
  */
 
 import type { TransportStats } from "./connection/stats.ts";
+import type { SendStream } from "./stream.ts";
 
 // High watermark to prevent writes from blocking on backpressure.
 // Real WebTransport has kernel buffers; we simulate this with a large queue.
@@ -24,12 +25,6 @@ function newStream(): TransformStream<Uint8Array, Uint8Array> {
 		READABLE_STRATEGY,
 	);
 }
-
-/**
- * An outgoing stream, carrying the send order a real `WebTransportSendStream` would.
- * A plain `WritableStream` has no such attribute, so the mock supplies it.
- */
-export type SendStream = WritableStream<Uint8Array> & { sendOrder?: number };
 
 /** A fake {@link WebTransport} backed by TransformStreams, paired with a peer. */
 export class MockTransport implements WebTransport {
