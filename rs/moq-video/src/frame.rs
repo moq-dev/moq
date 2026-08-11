@@ -31,7 +31,7 @@ use crate::{Color, Error, Size};
 
 /// One raw (uncompressed) video frame: the pixels plus when they are shown.
 ///
-/// The currency of the crate's raw side: [`capture`](crate::capture) and
+/// The currency of the crate's raw side: capture sources and
 /// [`decode`](crate::decode) produce these, and
 /// [`encode::Encoder::encode`](crate::encode::Encoder::encode) consumes them,
 /// handing back the compressed [`encode::Encoded`](crate::encode::Encoded).

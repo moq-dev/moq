@@ -1566,6 +1566,10 @@ async fn run_source(
 	// closing below) bumps `announced_closed` + `announced_bytes`. Empty scope =
 	// no-op.
 	let mut announce = route.announce.then(|| ingress.announce());
+	// A source's initial or updated route may replace different content at this
+	// path. Once displaced, the same unchanged route is a standby until the winner
+	// leaves; otherwise the two live sources would evict each other forever.
+	let mut may_take_over = true;
 
 	'attach: loop {
 		// Re-resolved every attempt: between attaches the previous front's
@@ -1578,7 +1582,7 @@ async fn run_source(
 			node.lock().leaf(&rest)
 		};
 
-		let (state, broadcast, id) = match attach_source(&ctx, &leaf, &source, route.clone()) {
+		let (state, broadcast, id) = match attach_source(&ctx, &leaf, &source, route.clone(), may_take_over) {
 			Attach::Ready(state, broadcast, id) => (state, broadcast, id),
 			Attach::Parked(incumbent) => {
 				tracing::debug!(
@@ -1586,8 +1590,8 @@ async fn run_source(
 					"path already live with a different publisher; parking this source until it ends",
 				);
 				// Wait for the incumbent front to close, or for our own route to
-				// change: announcing ourselves is what earns the takeover, and our
-				// source closing means giving up.
+				// change: a new route observation earns another takeover attempt, and
+				// our source closing means giving up.
 				let update = kio::wait(|waiter| {
 					if let Poll::Ready(update) = source.poll_route_changed(waiter) {
 						return Poll::Ready(Some(update));
@@ -1604,6 +1608,7 @@ async fn run_source(
 					// Our route moved; recompute the guard and retry with it.
 					Some(Ok(update)) => {
 						sync_announce(&mut announce, update.announce, &ingress);
+						may_take_over = update.announce;
 						route = update;
 					}
 					// The source closed while parked; it was never visible.
@@ -1617,8 +1622,28 @@ async fn run_source(
 		let publisher = route.hops.iter().next().copied();
 
 		loop {
-			match source.route_changed().await {
-				Ok(update) => {
+			let update = kio::wait(|waiter| {
+				// A takeover closes this front without touching its still-live source.
+				// Observe that first so a simultaneous route update is never applied to
+				// a stale front that no longer owns the leaf.
+				if state
+					.poll(waiter, |s| if s.closed { Poll::Ready(()) } else { Poll::Pending })
+					.is_ready()
+				{
+					return Poll::Ready(None);
+				}
+				source.poll_route_changed(waiter).map(Some)
+			})
+			.await;
+			match update {
+				None => {
+					// The winner owns the path now. Keep this source parked behind it,
+					// retaining the source's announcement so it can reclaim the path
+					// after the winner leaves.
+					may_take_over = false;
+					continue 'attach;
+				}
+				Some(Ok(update)) => {
 					let announced = update.announce;
 					// A different first hop is new content: this source can no
 					// longer feed the front it attached to. Detach deliberately
@@ -1652,7 +1677,7 @@ async fn run_source(
 					sync_announce(&mut announce, announced, &ingress);
 					sync_front(&state, &broadcast, &leaf);
 				}
-				Err(_) => {
+				Some(Err(_)) => {
 					// A deliberate finish closes the front immediately; an abrupt loss
 					// (dropped producer, dead session) may linger for a replacement.
 					detach_source(&state, &broadcast, &leaf, id, source.is_finished());
@@ -1670,9 +1695,10 @@ enum Attach {
 	Ready(kio::Producer<FrontState>, broadcast::Producer, u64),
 	/// The path's live front belongs to a different original publisher and this
 	/// source may not take it: either the source is offline (so it would rank below
-	/// every route the front holds) or its chain leads back through a peer the front
-	/// is already exposed to, making it a reflection rather than rival content. The
-	/// caller parks on the returned table until the front closes.
+	/// every route the front holds), was already displaced by this content, or its
+	/// chain leads back through a peer the front is already exposed to, making it a
+	/// reflection rather than rival content. The caller parks on the returned table
+	/// until the front closes.
 	Parked(kio::Producer<FrontState>),
 }
 
@@ -1713,19 +1739,20 @@ fn same_publisher(a: Option<Origin>, b: Option<Origin>) -> bool {
 /// keeps a reconnect from waiting on the transport to retire the session it
 /// replaced.
 ///
-/// Taking over requires announcing, which keeps the rule consistent with
-/// [`route_order`]: an offline source ranks below every announced route, so it
-/// waits ([`Attach::Parked`]) rather than unannouncing a live broadcast and
-/// cutting its subscribers for content nobody has advertised. It also requires a
-/// chain that does not lead back through a peer this front is already exposed to
-/// (see [`FrontState::taints_a_reader`]): such a source is our own broadcast
-/// reflected by a peer that cannot detect the loop itself, and letting it evict the
-/// front is how a publish direction ends up withdrawing its own announce.
+/// Taking over requires an initial or updated route that has not already been
+/// displaced, which keeps the rule consistent with [`route_order`]: an offline
+/// or previously displaced source waits ([`Attach::Parked`]) rather than
+/// unannouncing a newer live broadcast. It also requires a chain that does not
+/// lead back through a peer this front is already exposed to (see
+/// [`FrontState::taints_a_reader`]): such a source is our own broadcast reflected
+/// by a peer that cannot detect the loop itself, and letting it evict the front is
+/// how a publish direction ends up withdrawing its own announce.
 fn attach_source(
 	ctx: &AttachContext,
 	leaf: &Lock<OriginNode>,
 	source: &broadcast::Consumer,
 	route: broadcast::Route,
+	may_take_over: bool,
 ) -> Attach {
 	let publisher = route.hops.iter().next().copied();
 	let mut leaf_guard = leaf.lock();
@@ -1748,7 +1775,7 @@ fn attach_source(
 				});
 				s.reselect(carrying);
 				joined = Some(id);
-			} else if !route.announce || s.taints_a_reader(&route) {
+			} else if !may_take_over || !route.announce || s.taints_a_reader(&route) {
 				return Attach::Parked(existing.state.clone());
 			} else {
 				// New content at a live path: the newest publisher wins it. Closing
@@ -4848,6 +4875,48 @@ mod tests {
 		settle().await;
 		announced.assert_next_wait();
 		assert_eq!(consumer.get_broadcast("test").unwrap().route().hops, hops_b);
+	}
+
+	/// A displaced live publisher reclaims the path after its replacement leaves.
+	#[tokio::test]
+	async fn test_evicted_publisher_reclaims_path_when_evictor_leaves() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops_b = OriginList::try_from(vec![Origin::new(2).unwrap()]).unwrap();
+
+		// A announces and is live.
+		let mut source_a = origin
+			.create_broadcast("test", announce().with_hops(hops_a.clone()))
+			.unwrap();
+		settle().await;
+		announced.assert_next_some("test");
+
+		// A different publisher announces the same path, evicting A even though
+		// A's session is still open.
+		let mut source_b = origin.create_broadcast("test", announce().with_hops(hops_b)).unwrap();
+		settle().await;
+		settle().await;
+		announced.assert_next_none("test");
+		announced.assert_next_some("test");
+
+		// B disconnects. A is still an open, live broadcast producer.
+		source_b.finish();
+		settle().await;
+		settle().await;
+
+		assert!(
+			consumer.get_broadcast("test").is_some(),
+			"the still-live publisher A should reclaim the path once its evictor leaves"
+		);
+		let recovered = consumer.request_broadcast("test").await.unwrap();
+		assert_eq!(recovered.route().hops, hops_a);
+
+		source_a.finish();
 	}
 
 	/// A publisher reconnecting under the same identity attaches as a second

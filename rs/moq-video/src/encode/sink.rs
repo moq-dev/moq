@@ -1,8 +1,8 @@
 //! An [`Encoder`](super::Encoder) that owns the thread it runs on, so any
 //! thread (or task) can drive it.
 //!
-//! Off macOS the encoder runs on a dedicated OS thread (mirroring
-//! [`capture::pump`](crate::capture)): the Windows hardware encoder is a Media
+//! Off macOS the encoder runs on a dedicated OS thread (mirroring the capture
+//! pump): the Windows hardware encoder is a Media
 //! Foundation MFT whose COM handles must be created, driven, and dropped all on
 //! one thread (COM apartments are per-thread), and whose encode call blocks on
 //! MFT events. Driving it inline on a tokio worker would unbalance the

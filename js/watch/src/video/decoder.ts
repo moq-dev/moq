@@ -7,12 +7,12 @@ import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Si
 import { base64ToBytes } from "../base64";
 
 import type { Sync } from "../sync";
+import { caughtUp } from "./playhead";
 import { rotateVideoDimensions } from "./presentation";
 import type { Source } from "./source";
 
 // The amount of time to wait before considering the video to be buffering.
 const BUFFERING = Time.Milli(500);
-const SWITCH = Time.Milli(100);
 
 export type DecoderInput = {
 	// Whether to download the video track. Wired from the renderer's output by the parent.
@@ -135,12 +135,12 @@ export class Decoder {
 
 			const current = effect.get(this.#active);
 			if (current) {
+				// A zero timestamp is a rendered frame, not a missing one.
 				const pendingTimestamp = effect.get(pending.timestamp);
-				const activeTimestamp = effect.get(current.timestamp);
+				if (pendingTimestamp === undefined) return;
 
-				// Switch to the new track if it's ready and we've caught up enough.
-				if (!pendingTimestamp) return;
-				if (activeTimestamp && activeTimestamp > pendingTimestamp + SWITCH) return;
+				// Hold off until the new rendition has caught up to the picture it's replacing.
+				if (!caughtUp({ playhead: pendingTimestamp, active: effect.get(current.timestamp) })) return;
 			}
 
 			// Upgrade the pending track to active.
