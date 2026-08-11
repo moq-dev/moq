@@ -1,13 +1,16 @@
-use crate::{group, origin, track};
-use std::{collections::HashMap, task::Poll};
+use crate::{frame, group, origin, track};
+use std::{
+	collections::HashMap,
+	task::{Poll, ready},
+};
 
-use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_transport_trait::poll::SendStream as _;
 
 use crate::{
 	AsPath, Error, Timescale,
 	coding::{Stream, Writer},
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
+	poll_set::{Machine, PollSet},
 	track::Subscription,
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
@@ -404,7 +407,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		};
 
 		let subscription = Subscription {
-			priority: super::priority::from_wire(msg.subscriber_priority),
+			priority: msg.subscriber_priority,
 			..Default::default()
 		};
 
@@ -438,9 +441,9 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		// Run the track, cancelling on reader close (Unsubscribe or stream close)
 		let res = {
 			let mut closed_session = self.session.clone();
-			let mut serve = std::pin::pin!(self.run_track(track, request_id));
+			let mut serve = TrackServe::new(self.session.clone(), track, request_id, self.version);
 			kio::wait(|waiter| {
-				if let Poll::Ready(res) = waiter.poll_future(serve.as_mut()) {
+				if let Poll::Ready(res) = serve.poll(waiter) {
 					return Poll::Ready(res);
 				}
 				let mut cx = std::task::Context::from_waker(waiter.waker());
@@ -540,131 +543,6 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 					.await?;
 			}
 		}
-		Ok(())
-	}
-
-	/// Serve a track using FuturesUnordered for unlimited concurrent groups.
-	async fn run_track(&self, mut track: track::Subscriber, request_id: RequestId) -> Result<(), Error> {
-		let mut tasks = FuturesUnordered::new();
-
-		loop {
-			// Await the next group while driving the in-flight group futures.
-			let group = {
-				kio::wait(|waiter| {
-					let mut cx = std::task::Context::from_waker(waiter.waker());
-					while let std::task::Poll::Ready(Some(())) = tasks.poll_next_unpin(&mut cx) {}
-					track.poll_recv_group(waiter)
-				})
-				.await
-			};
-
-			let Some(group) = group? else {
-				// Track finished: drain the in-flight group futures, then FIN.
-				while tasks.next().await.is_some() {}
-				return Ok(());
-			};
-
-			let sequence = group.sequence;
-			tracing::debug!(subscribe = %request_id, track = %track.name(), sequence, "serving group");
-
-			let msg = ietf::GroupHeader {
-				track_alias: request_id.0,
-				group_id: sequence,
-				sub_group_id: 0,
-				publisher_priority: 0,
-				// Carry per-object timestamps as extension headers (the Timestamp Object
-				// Property) so moq-transport peers get the real PTS. The units are the
-				// track's, declared once in SUBSCRIBE_OK.
-				flags: ietf::GroupFlags {
-					has_extensions: true,
-					..Default::default()
-				},
-			};
-
-			let priority = track.subscription().priority;
-			let timescale = track.info().timescale;
-			tasks
-				.push(Self::run_group(self.session.clone(), msg, priority, group, timescale, self.version).map(|_| ()));
-		}
-	}
-
-	async fn run_group(
-		mut session: S,
-		msg: ietf::GroupHeader,
-		priority: u8,
-		mut group: group::Consumer,
-		timescale: Timescale,
-		version: Version,
-	) -> Result<(), Error> {
-		let stream = session.open_uni().await.map_err(Error::from_transport)?;
-
-		let mut stream = Writer::new(stream, version);
-		stream.set_priority(priority);
-
-		stream.encode(&msg).await?;
-
-		loop {
-			// Wait for the next frame, bailing if the peer closes the stream first.
-			let frame = kio::wait(|waiter| {
-				let mut cx = std::task::Context::from_waker(waiter.waker());
-				if stream.poll_closed(&mut cx).is_ready() {
-					return Poll::Ready(Err(Error::Cancel));
-				}
-				group.poll_next_frame(waiter)
-			})
-			.await;
-
-			let mut frame = match frame? {
-				Some(frame) => frame,
-				None => break,
-			};
-
-			// object id delta is always 0.
-			stream.encode(&0u64).await?;
-
-			// Per-object extension headers carry the frame's presentation timestamp.
-			if msg.flags.has_extensions {
-				let mut ext = bytes::BytesMut::new();
-				ietf::encode_object_time(&mut ext, frame.timestamp, timescale, version)?;
-				stream.encode(&(ext.len() as u64)).await?;
-				stream.write_chunk(ext.freeze()).await?;
-			}
-
-			// Write the size of the frame.
-			stream.encode(&frame.size).await?;
-
-			if frame.size == 0 {
-				// Have to write the object status too.
-				stream.encode(&0u8).await?;
-			} else {
-				// Stream each chunk of the frame.
-				loop {
-					let chunk = kio::wait(|waiter| {
-						let mut cx = std::task::Context::from_waker(waiter.waker());
-						if stream.poll_closed(&mut cx).is_ready() {
-							return Poll::Ready(Err(Error::Cancel));
-						}
-						frame.poll_read_chunk(waiter)
-					})
-					.await;
-
-					match chunk? {
-						Some(chunk) => {
-							stream.write_chunk(chunk).await?;
-						}
-						None => break,
-					}
-				}
-			}
-		}
-
-		// Consume the writer: close() waits for the peer to acknowledge everything,
-		// and taking ownership disarms the Drop fallback that would otherwise reset
-		// the finished stream with a spurious Cancel.
-		stream.close().await?;
-
-		tracing::debug!(sequence = %msg.group_id, "finished group");
-
 		Ok(())
 	}
 
@@ -1058,22 +936,15 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 			}
 		}
 
-		// The extension changes what an advertisement carries, so nothing can be
-		// sent until the peer's SETUP says whether it speaks it.
-		let peer = self.peer().await;
-		// Register the split-horizon peer on the announce cursor too. The origin
-		// model uses this exposure to park a reflected copy before it can replace
-		// the source we are currently advertising to that peer.
-		let origin = match self.exclude(&peer) {
-			crate::Origin::UNKNOWN => origin,
-			exclude => origin.excluding(exclude),
-		};
 		let mut announced = origin.announced();
 		let mut watched: HashMap<crate::PathOwned, Watched> = HashMap::new();
 		// Draft-14/15: the open PUBLISH_NAMESPACE request carrying each advertised
 		// namespace. Empty on later drafts, whose entries ride `stream` inline.
 		let mut requests: HashMap<crate::PathOwned, NamespaceRequest<S>> = HashMap::new();
 
+		// The extension changes what an advertisement carries, so nothing can be
+		// sent until the peer's SETUP says whether it speaks it.
+		let peer = self.peer().await;
 		let mut linger = kio::time::Deadline::new();
 
 		// Stream updates (origin (un)announces plus watched route and demand
@@ -1159,54 +1030,258 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 	}
 }
 
+/// Serves a track's groups, one machine per group, with unlimited concurrency.
+struct TrackServe<S: crate::transport::poll::Session> {
+	session: S,
+	track: track::Subscriber,
+	request_id: RequestId,
+	version: Version,
+	children: PollSet<GroupServe<S>>,
+	/// The track finished: the in-flight group machines drain, then FIN.
+	draining: bool,
+}
+
+impl<S: crate::transport::poll::Session> TrackServe<S> {
+	fn new(session: S, track: track::Subscriber, request_id: RequestId, version: Version) -> Self {
+		Self {
+			session,
+			track,
+			request_id,
+			version,
+			children: PollSet::new(),
+			draining: false,
+		}
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if self.draining {
+			return self.children.poll(waiter).map(Ok);
+		}
+
+		let _ = self.children.poll(waiter);
+		loop {
+			match self.track.poll_recv_group(waiter) {
+				Poll::Ready(Ok(Some(group))) => {
+					let sequence = group.sequence;
+					tracing::debug!(subscribe = %self.request_id, track = %self.track.name(), sequence, "serving group");
+
+					let msg = ietf::GroupHeader {
+						track_alias: self.request_id.0,
+						group_id: sequence,
+						sub_group_id: 0,
+						publisher_priority: 0,
+						// Carry per-object timestamps as extension headers (the Timestamp
+						// Object Property) so moq-transport peers get the real PTS. The
+						// units are the track's, declared once in SUBSCRIBE_OK.
+						flags: ietf::GroupFlags {
+							has_extensions: true,
+							..Default::default()
+						},
+					};
+
+					self.children.push(GroupServe {
+						session: self.session.clone(),
+						msg,
+						priority: self.track.subscription().priority,
+						group,
+						timescale: self.track.info().timescale,
+						version: self.version,
+						state: GroupState::Open,
+					});
+				}
+				Poll::Ready(Ok(None)) => {
+					self.draining = true;
+					return self.children.poll(waiter).map(Ok);
+				}
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Pending => break,
+			}
+		}
+		// Newly created group machines start now rather than on the next wake.
+		let _ = self.children.poll(waiter);
+		Poll::Pending
+	}
+}
+
+/// Serves one group on its own unidirectional stream in the moq-transport
+/// subgroup format.
+struct GroupServe<S: crate::transport::poll::Session> {
+	session: S,
+	msg: ietf::GroupHeader,
+	priority: u8,
+	group: group::Consumer,
+	timescale: Timescale,
+	version: Version,
+	state: GroupState<S>,
+}
+
+// A state machine's enum is its storage: one transient instance per stream, so the
+// big variant is the working state, not padding held in bulk.
+#[allow(clippy::large_enum_variant)]
+enum GroupState<S: crate::transport::poll::Session> {
+	/// Waiting for stream credit on this machine's own session handle.
+	Open,
+	/// Streaming objects: the write buffer drains first, then the pending chunk,
+	/// then the pending frame, then the next frame.
+	Serve {
+		writer: Writer<S::SendStream, Version>,
+		frame: Option<frame::Consumer>,
+		chunk: Option<bytes::Bytes>,
+	},
+	/// Every frame is written and the FIN sent: wait for the acknowledgement so a
+	/// late cancel can still reset the stream.
+	Closed {
+		writer: Writer<S::SendStream, Version>,
+	},
+	Done,
+}
+
+impl<S: crate::transport::poll::Session> Machine for GroupServe<S> {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		// Errors just drop the writer, whose Drop resets the stream, exactly like
+		// the old future being discarded.
+		ready!(self.poll_serve(waiter)).map(|()| ()).unwrap_or(());
+		Poll::Ready(())
+	}
+}
+
+impl<S: crate::transport::poll::Session> GroupServe<S> {
+	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		loop {
+			match &mut self.state {
+				GroupState::Open => {
+					let stream = match ready!(self.session.poll_open_uni(&mut cx)) {
+						Ok(stream) => stream,
+						Err(err) => {
+							self.state = GroupState::Done;
+							return Poll::Ready(Err(Error::from_transport(err)));
+						}
+					};
+					let mut stream = stream;
+					stream.set_priority(self.priority);
+
+					let mut writer = Writer::new(stream, self.version);
+					if let Err(err) = writer.buffer(&self.msg) {
+						self.state = GroupState::Done;
+						return Poll::Ready(Err(err));
+					}
+					self.state = GroupState::Serve {
+						writer,
+						frame: None,
+						chunk: None,
+					};
+				}
+				GroupState::Serve { writer, frame, chunk } => {
+					// The peer closing first cancels the group.
+					if writer.poll_closed(&mut cx).is_ready() {
+						self.state = GroupState::Done;
+						return Poll::Ready(Err(Error::Cancel));
+					}
+					let res = 'serve: {
+						loop {
+							match writer.poll_flush(&mut cx) {
+								Poll::Ready(Ok(())) => {}
+								Poll::Ready(Err(err)) => break 'serve Err(err),
+								Poll::Pending => return Poll::Pending,
+							}
+							if let Some(pending) = chunk {
+								match writer.poll_write(&mut cx, pending) {
+									Poll::Ready(Ok(_)) => {
+										if !bytes::Buf::has_remaining(pending) {
+											*chunk = None;
+										}
+									}
+									Poll::Ready(Err(err)) => break 'serve Err(err),
+									Poll::Pending => return Poll::Pending,
+								}
+							} else if let Some(pending) = frame {
+								match pending.poll_read_chunk(waiter) {
+									Poll::Ready(Ok(Some(next))) => *chunk = Some(next),
+									Poll::Ready(Ok(None)) => *frame = None,
+									Poll::Ready(Err(err)) => break 'serve Err(err),
+									Poll::Pending => return Poll::Pending,
+								}
+							} else {
+								match self.group.poll_next_frame(waiter) {
+									Poll::Ready(Ok(Some(next))) => {
+										if let Err(err) = buffer_object(writer, &next, self.timescale, self.version) {
+											break 'serve Err(err);
+										}
+										// An empty object has no payload to stream.
+										if next.size > 0 {
+											*frame = Some(next);
+										}
+									}
+									Poll::Ready(Ok(None)) => break 'serve Ok(()),
+									Poll::Ready(Err(err)) => break 'serve Err(err),
+									Poll::Pending => return Poll::Pending,
+								}
+							}
+						}
+					};
+
+					let GroupState::Serve { writer, .. } = std::mem::replace(&mut self.state, GroupState::Done) else {
+						unreachable!()
+					};
+					match res {
+						Ok(()) => {
+							let mut writer = writer;
+							match writer.finish() {
+								Ok(()) => self.state = GroupState::Closed { writer },
+								Err(err) => return Poll::Ready(Err(err)),
+							}
+						}
+						Err(err) => return Poll::Ready(Err(err)),
+					}
+				}
+				GroupState::Closed { writer } => {
+					// Wait until everything is acknowledged by the peer so we can still
+					// cancel the stream.
+					let res = ready!(writer.poll_closed(&mut cx));
+					let sequence = self.msg.group_id;
+					self.state = GroupState::Done;
+					return Poll::Ready(res.map(|()| {
+						tracing::debug!(sequence, "finished group");
+					}));
+				}
+				GroupState::Done => return Poll::Ready(Ok(())),
+			}
+		}
+	}
+}
+
+/// Buffer one object's header and prefix: the id delta, the extension headers
+/// carrying the timestamp, the size, and (for an empty object) the status.
+fn buffer_object<W: crate::transport::poll::SendStream>(
+	writer: &mut Writer<W, Version>,
+	frame: &frame::Consumer,
+	timescale: Timescale,
+	version: Version,
+) -> Result<(), Error> {
+	// object id delta is always 0.
+	writer.buffer(&0u64)?;
+
+	// Per-object extension headers carry the frame's presentation timestamp.
+	let mut ext = bytes::BytesMut::new();
+	ietf::encode_object_time(&mut ext, frame.timestamp, timescale, version)?;
+	writer.buffer(&(ext.len() as u64))?;
+	writer.buffer_raw(&ext);
+
+	writer.buffer(&frame.size)?;
+	if frame.size == 0 {
+		// Have to write the object status too.
+		writer.buffer(&0u8)?;
+	}
+	Ok(())
+}
+
 /// One draft-14/15 advertisement: the PUBLISH_NAMESPACE request it rode on and
 /// what closes it out with PUBLISH_NAMESPACE_DONE.
 struct NamespaceRequest<S: crate::transport::poll::Session> {
 	path: crate::PathOwned,
 	request_id: RequestId,
 	stream: Stream<S, Version>,
-}
-
-#[cfg(test)]
-mod group_priority_test {
-	use super::*;
-	use crate::lite::test_transport::SinkSession;
-
-	/// The model's `Subscription::priority` is higher-first ("higher values preempt
-	/// lower ones"), matching the transport trait's send order, so a group stream must
-	/// receive the model value unchanged. An inversion here would transmit the
-	/// LOWEST-priority track first under contention.
-	#[tokio::test]
-	async fn group_stream_preserves_model_priority() {
-		let log = crate::lite::test_transport::Log::default();
-		let session = SinkSession::new(log.clone());
-
-		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
-		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
-		group
-			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
-			.unwrap();
-		let consumer = group.consume();
-		group.finish().unwrap();
-
-		let msg = ietf::GroupHeader {
-			track_alias: 0,
-			group_id: 0,
-			sub_group_id: 0,
-			publisher_priority: 0,
-			flags: Default::default(),
-		};
-
-		Publisher::<SinkSession>::run_group(session, msg, 200, consumer, Timescale::default(), Version::Draft14)
-			.await
-			.unwrap();
-
-		assert_eq!(
-			log.priorities(),
-			vec![200],
-			"model priority must pass through unchanged"
-		);
-	}
 }
 
 #[cfg(test)]

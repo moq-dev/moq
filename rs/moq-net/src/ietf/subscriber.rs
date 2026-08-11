@@ -1,6 +1,6 @@
 use std::{
 	collections::{HashMap, hash_map::Entry},
-	task::Poll,
+	task::{Poll, ready},
 	time::Duration,
 };
 
@@ -1239,7 +1239,8 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		};
 
 		let res = {
-			let mut serve = std::pin::pin!(self.run_group(group, stream, producer.clone(), timescale));
+			let mut ingest = GroupIngest::new(&group, timescale, self.version);
+			let mut writing = producer.clone();
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
@@ -1247,7 +1248,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 				if let Poll::Ready(err) = producer.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
 				}
-				waiter.poll_future(serve.as_mut())
+				ingest.poll(stream, &mut writing, waiter)
 			})
 			.await
 		};
@@ -1267,82 +1268,147 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 
 		Ok(())
 	}
+}
 
-	async fn run_group(
-		&mut self,
-		group: ietf::GroupHeader,
-		stream: &mut Reader<S::RecvStream, Version>,
-		mut producer: group::Producer,
-		timescale: Option<Timescale>,
-	) -> Result<(), Error> {
-		while let Some(id_delta) = stream.decode_maybe::<u64>().await? {
-			if id_delta != 0 {
-				tracing::warn!(id_delta = %id_delta, "object ID delta is not supported, dropping stream");
-				return Err(Error::Unsupported);
-			}
+/// Pumps moq-transport subgroup objects from a reader into a group producer:
+/// the id delta, the extension headers (carrying the timestamp), the size, the
+/// status for empty objects, and the streamed payload.
+struct GroupIngest {
+	has_extensions: bool,
+	has_end: bool,
+	timescale: Option<Timescale>,
+	version: Version,
+	phase: IngestPhase,
+}
 
-			// Per-object extension headers may carry the frame's presentation timestamp
-			// (the Timestamp Object Property), in the units the track declared. A track
-			// that declared no timescale opted out, so its objects are stamped on arrival
-			// even if one carries a Timestamp we could not interpret.
-			let timestamp = match (group.flags.has_extensions, timescale) {
-				(true, Some(timescale)) => {
-					let size: usize = stream.decode().await?;
-					let mut ext = stream.read_exact(size).await?;
-					ietf::decode_object_time(&mut ext, timescale, self.version)?
-				}
-				(true, None) => {
-					let size: usize = stream.decode().await?;
-					stream.read_exact(size).await?;
-					None
-				}
-				(false, _) => None,
-			};
+enum IngestPhase {
+	/// Reading the object id delta. Stream end here ends the group.
+	Delta,
+	/// Reading the extension block's size.
+	ExtSize,
+	/// Reading (and decoding or discarding) the extension block.
+	ExtBytes { size: usize },
+	/// Reading the object size.
+	Size { timestamp: Option<crate::Timestamp> },
+	/// Reading the status of an empty object.
+	Status { timestamp: Option<crate::Timestamp> },
+	/// Streaming the object payload.
+	Payload { frame: frame::ProducerOwned },
+	/// An explicit end-of-group status arrived.
+	Finished,
+}
 
-			let size: u64 = stream.decode().await?;
-			if size == 0 {
-				let status: u64 = stream.decode().await?;
-				if status == 0 {
-					let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-					let frame = producer.create_frame(frame::Info { size: 0, timestamp })?;
-					frame.finish()?;
-				} else if status == 3 && !group.flags.has_end {
-					break;
-				} else {
-					return Err(Error::Unsupported);
-				}
-			} else {
-				// `create_frame` is the allocation chokepoint and rejects an oversized
-				// `size` before allocating, so no pre-check is needed.
-				let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-				let mut frame = producer.create_frame(frame::Info { size, timestamp })?;
-
-				if let Err(err) = self.run_frame(stream, &mut frame).await {
-					let _ = frame.abort(err.clone());
-					return Err(err);
-				}
-
-				frame.finish()?;
-			}
+impl GroupIngest {
+	fn new(group: &ietf::GroupHeader, timescale: Option<Timescale>, version: Version) -> Self {
+		Self {
+			has_extensions: group.flags.has_extensions,
+			has_end: group.flags.has_end,
+			timescale,
+			version,
+			phase: IngestPhase::Delta,
 		}
-
-		Ok(())
 	}
 
-	async fn run_frame(
+	/// `Ready(Ok(()))` once the stream FINs on an object boundary (or an explicit
+	/// end-of-group status arrives). The caller finishes or aborts the group; an
+	/// object cut short mid-payload was already aborted here with the reason.
+	fn poll<R: crate::transport::poll::RecvStream>(
 		&mut self,
-		stream: &mut Reader<S::RecvStream, Version>,
-		frame: &mut frame::Producer<'_>,
-	) -> Result<(), Error> {
-		while frame.remaining() > 0 {
-			match stream.read_chunk(frame.remaining()).await? {
-				Some(chunk) if !chunk.is_empty() => {
-					frame.write(chunk)?;
+		reader: &mut Reader<R, Version>,
+		group: &mut group::Producer,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<(), Error>> {
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		loop {
+			match &mut self.phase {
+				IngestPhase::Delta => {
+					let Some(id_delta) = ready!(reader.poll_decode_maybe::<u64>(&mut cx))? else {
+						return Poll::Ready(Ok(()));
+					};
+					if id_delta != 0 {
+						tracing::warn!(id_delta = %id_delta, "object ID delta is not supported, dropping stream");
+						return Poll::Ready(Err(Error::Unsupported));
+					}
+					self.phase = match self.has_extensions {
+						true => IngestPhase::ExtSize,
+						false => IngestPhase::Size { timestamp: None },
+					};
 				}
-				_ => return Err(Error::WrongSize),
+				IngestPhase::ExtSize => {
+					let size: usize = ready!(reader.poll_decode(&mut cx))?;
+					self.phase = IngestPhase::ExtBytes { size };
+				}
+				IngestPhase::ExtBytes { size } => {
+					// Per-object extension headers may carry the frame's presentation
+					// timestamp (the Timestamp Object Property), in the units the track
+					// declared. A track that declared no timescale opted out, so its
+					// objects are stamped on arrival even if one carries a Timestamp we
+					// could not interpret.
+					let mut ext = ready!(reader.poll_read_exact(&mut cx, *size))?;
+					let timestamp = match self.timescale {
+						Some(timescale) => ietf::decode_object_time(&mut ext, timescale, self.version)?,
+						None => None,
+					};
+					self.phase = IngestPhase::Size { timestamp };
+				}
+				IngestPhase::Size { timestamp } => {
+					let size: u64 = ready!(reader.poll_decode(&mut cx))?;
+					if size == 0 {
+						self.phase = IngestPhase::Status { timestamp: *timestamp };
+						continue;
+					}
+					// `create_frame_owned` is the allocation chokepoint and rejects an
+					// oversized `size` before allocating, so no pre-check is needed.
+					let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
+					let frame = group.create_frame_owned(frame::Info { size, timestamp })?;
+					self.phase = IngestPhase::Payload { frame };
+				}
+				IngestPhase::Status { timestamp } => {
+					let status: u64 = ready!(reader.poll_decode(&mut cx))?;
+					if status == 0 {
+						let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
+						let frame = group.create_frame_owned(frame::Info { size: 0, timestamp })?;
+						frame.finish()?;
+						self.phase = IngestPhase::Delta;
+					} else if status == 3 && !self.has_end {
+						self.phase = IngestPhase::Finished;
+					} else {
+						return Poll::Ready(Err(Error::Unsupported));
+					}
+				}
+				IngestPhase::Payload { frame } => {
+					let failed = loop {
+						if frame.remaining() == 0 {
+							break None;
+						}
+						match reader.poll_read_chunk(&mut cx, frame.remaining()) {
+							Poll::Pending => return Poll::Pending,
+							Poll::Ready(Ok(Some(chunk))) if !chunk.is_empty() => {
+								if let Err(err) = frame.write(chunk) {
+									break Some(err);
+								}
+							}
+							Poll::Ready(Ok(_)) => break Some(Error::WrongSize),
+							Poll::Ready(Err(err)) => break Some(err),
+						}
+					};
+
+					let IngestPhase::Payload { frame } = std::mem::replace(&mut self.phase, IngestPhase::Delta) else {
+						unreachable!()
+					};
+					match failed {
+						None => frame.finish()?,
+						Some(err) => {
+							// Fail the group with the reason, not the Drop fallback's
+							// generic `Dropped`.
+							let _ = frame.abort(err.clone());
+							return Poll::Ready(Err(err));
+						}
+					}
+				}
+				IngestPhase::Finished => return Poll::Ready(Ok(())),
 			}
 		}
-		Ok(())
 	}
 }
 

@@ -115,11 +115,6 @@ impl<S: crate::transport::poll::RecvStream, V> Reader<S, V> {
 		self.stream.poll_read_chunk(cx, max).map_err(Error::from_transport)
 	}
 
-	/// Read the next chunk, draining the reader's internal buffer first.
-	pub async fn read_chunk(&mut self, max: usize) -> Result<Option<Bytes>, Error> {
-		std::future::poll_fn(|cx| self.poll_read_chunk(cx, max)).await
-	}
-
 	/// Poll for exactly `size` bytes, accumulating partial reads in the buffer.
 	pub fn poll_read_exact(&mut self, cx: &mut Context<'_>, size: usize) -> Poll<Result<Bytes, Error>> {
 		while self.buffer.len() < size {

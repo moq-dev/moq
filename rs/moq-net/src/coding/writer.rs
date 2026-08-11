@@ -43,6 +43,12 @@ impl<S: crate::transport::poll::SendStream, V> Writer<S, V> {
 		Ok(())
 	}
 
+	/// Append raw pre-encoded bytes to the write buffer, to be sent by
+	/// [`Self::poll_flush`].
+	pub fn buffer_raw(&mut self, bytes: &[u8]) {
+		self.buffer.extend_from_slice(bytes);
+	}
+
 	/// Poll until the write buffer has fully hit the stream.
 	pub fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
 		while !self.buffer.is_empty() {
@@ -87,11 +93,6 @@ impl<S: crate::transport::poll::SendStream, V> Writer<S, V> {
 	/// NOTE: This can avoid performing a copy when using `Bytes`.
 	pub async fn write_all<Buf: bytes::Buf + Send>(&mut self, buf: &mut Buf) -> Result<(), Error> {
 		std::future::poll_fn(|cx| self.poll_write_all(cx, buf)).await
-	}
-
-	/// Write the entire [`bytes::Bytes`] chunk to the stream.
-	pub async fn write_chunk(&mut self, mut chunk: bytes::Bytes) -> Result<(), Error> {
-		self.write_all(&mut chunk).await
 	}
 
 	/// Mark the stream as finished.
