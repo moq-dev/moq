@@ -461,19 +461,21 @@ export class Writer {
 	 * opens after that is reset rather than leaked. A real transport failure still throws.
 	 */
 	static async tryOpen(quic: WebTransport, options: TryOpenOptions): Promise<Writer | undefined> {
-		const open = Writer.open(quic, options);
 		const timeout = options.timeout ?? OPEN_TIMEOUT_MS;
 
 		// A rejected `cancel` (STOP_SENDING) means the peer is gone too, so both settle
-		// paths mean "give up" and neither is left unhandled.
+		// paths mean "give up" and neither is left unhandled. Built before the open, and
+		// raced ahead of it, so an already-cancelled caller wins even against a slot that
+		// is free right now.
 		const cancelled = options.cancel.then(
 			() => undefined,
 			() => undefined,
 		);
+		const open = Writer.open(quic, options);
 
 		try {
 			const stream = await withTimeout(
-				Promise.race([open, cancelled]),
+				Promise.race([cancelled, open]),
 				timeout,
 				`stream open timed out after ${timeout}ms waiting for a slot`,
 			);

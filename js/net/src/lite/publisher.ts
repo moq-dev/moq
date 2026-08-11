@@ -34,6 +34,24 @@ function zigzag(delta: bigint): bigint {
 	return delta >= 0n ? delta << 1n : (-delta << 1n) - 1n;
 }
 
+/** What {@link Publisher.runGroup} needs to serve one group. */
+interface RunGroup {
+	/** The subscription ID. */
+	sub: bigint;
+
+	/** The group to serve. */
+	group: group.Consumer;
+
+	/** The track's advertised timescale, applied to every frame timestamp. */
+	timescale: Timescale;
+
+	/** The subscription's ranking, which this stream joins for as long as it runs. */
+	priority: Priority;
+
+	/** Settles when the subscriber leaves, dropping a group still queued for a stream slot. */
+	unsubscribed: Promise<void>;
+}
+
 // The TRACK stream, implicit SUBSCRIBE acceptance, and SUBSCRIBE_START/END are
 // all lite-05+.
 function supportsTrackStream(version: Version): boolean {
@@ -432,7 +450,7 @@ export class Publisher {
 				}
 				end = Math.max(end, group.sequence + 1);
 
-				void this.#runGroup(sub, group, timescale, priority, unsubscribed);
+				void this.#runGroup({ sub, group, timescale, priority, unsubscribed });
 			}
 
 			if (emitRange) {
@@ -560,22 +578,11 @@ export class Publisher {
 
 	/**
 	 * Serves one group on its own unidirectional stream.
-	 * @param sub - The subscription ID
-	 * @param group - The group to run
-	 * @param timescale - The track's advertised timescale, applied to every frame timestamp
-	 * @param priority - The subscription's ranking, which this stream joins for as long as it runs
-	 * @param unsubscribed - Settles when the subscriber leaves, dropping a group still queued
-	 *   for a stream slot
 	 *
 	 * @internal
 	 */
-	async #runGroup(
-		sub: bigint,
-		group: group.Consumer,
-		timescale: Timescale,
-		priority: Priority,
-		unsubscribed: Promise<void>,
-	) {
+	async #runGroup(options: RunGroup) {
+		const { sub, group, timescale, priority, unsubscribed } = options;
 		const msg = new GroupMessage(sub, group.sequence);
 		try {
 			// The transport drains streams by send order, so this is what makes a high-priority

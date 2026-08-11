@@ -339,19 +339,20 @@ test("closed is stable, so racing it per frame does not allocate", async () => {
 });
 
 // Builds a transport whose uni opens complete only once `freeSlot` is called, standing in
-// for a peer that has granted no stream credit.
+// for a peer that has granted no stream credit. `aborted` settles when the stream it
+// eventually hands over is reset, so a test can await that rather than guess at a delay.
 function stalledTransport() {
 	let freeSlot!: () => void;
 	const slot = new Promise<void>((resolve) => {
 		freeSlot = resolve;
 	});
 
-	let aborted: unknown;
-	const stream = new WritableStream<Uint8Array>({
-		abort: (reason) => {
-			aborted = reason;
-		},
+	let abort!: (reason: unknown) => void;
+	const aborted = new Promise<unknown>((resolve) => {
+		abort = resolve;
 	});
+
+	const stream = new WritableStream<Uint8Array>({ abort });
 
 	const quic = {
 		createUnidirectionalStream: async () => {
@@ -360,8 +361,18 @@ function stalledTransport() {
 		},
 	} as unknown as WebTransport;
 
-	return { quic, freeSlot, aborted: () => aborted };
+	return { quic, freeSlot, aborted };
 }
+
+// A cancel that already settled has to win even when a slot is free, or a group whose
+// subscriber is long gone still goes out.
+test("tryOpen gives up on a cancel that settled before the open", async () => {
+	const { quic, freeSlot, aborted } = stalledTransport();
+	freeSlot();
+
+	expect(await Writer.tryOpen(quic, { cancel: Promise.resolve() })).toBeUndefined();
+	await aborted;
+});
 
 test("tryOpen gives up when cancelled, resetting a stream that opens afterwards", async () => {
 	const { quic, freeSlot, aborted } = stalledTransport();
@@ -376,8 +387,7 @@ test("tryOpen gives up when cancelled, resetting a stream that opens afterwards"
 	expect(await opening).toBeUndefined();
 
 	freeSlot();
-	await new Promise((resolve) => setTimeout(resolve, 5));
-	expect(aborted()).toBeDefined();
+	await aborted;
 });
 
 // Without a deadline a peer that withholds stream credit while keeping the subscription
@@ -388,18 +398,16 @@ test("tryOpen gives up when the peer never frees a slot", async () => {
 	expect(await Writer.tryOpen(quic, { cancel: new Promise(() => {}), timeout: 10 })).toBeUndefined();
 
 	freeSlot();
-	await new Promise((resolve) => setTimeout(resolve, 5));
-	expect(aborted()).toBeDefined();
+	await aborted;
 });
 
 test("tryOpen returns the stream when a slot is available", async () => {
-	const { quic, freeSlot, aborted } = stalledTransport();
+	const { quic, freeSlot } = stalledTransport();
 
 	const opening = Writer.tryOpen(quic, { cancel: new Promise(() => {}), timeout: 1000 });
 	freeSlot();
 
 	expect(await opening).toBeInstanceOf(Writer);
-	expect(aborted()).toBeUndefined();
 });
 
 test("open waits for a stream slot instead of rejecting once the peer's limit is full", async () => {

@@ -375,11 +375,9 @@ test("lite draft-05: subscribe end is 0 when no groups were produced", async () 
 // Group streams open with waitUntilAvailable, so a browser at its concurrent stream cap
 // parks the open until the peer frees a slot. That can outlast the subscription, and the
 // queued group holds its frames the whole time.
-const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
-
 // Serves one finished group to a subscriber over a transport that has no stream slot free,
-// so the group sits queued inside the open until `freeSlot` is called. Returns the handles
-// needed to end the subscription one way or the other and see what became of the group.
+// so the group sits queued inside the open until `freeSlot` is called. `outcome` settles
+// with what became of the group once the slot frees, so no test has to guess at a delay.
 async function saturatedGroup() {
 	const pair = createMockTransportPair(ALPN_05);
 
@@ -388,17 +386,27 @@ async function saturatedGroup() {
 		freeSlot = resolve;
 	});
 
-	let aborted: unknown;
-	const written: Uint8Array[] = [];
-	const groupStream = new WritableStream<Uint8Array>({
-		write: (chunk) => void written.push(new Uint8Array(chunk)),
-		abort: (reason) => {
-			aborted = reason;
-		},
+	let opening!: () => void;
+	const opened = new Promise<void>((resolve) => {
+		opening = resolve;
 	});
+
+	let reset!: () => void;
+	let wrote!: () => void;
+	const outcome = Promise.race([
+		new Promise<"reset">((resolve) => {
+			reset = () => resolve("reset");
+		}),
+		new Promise<"sent">((resolve) => {
+			wrote = () => resolve("sent");
+		}),
+	]);
+
+	const groupStream = new WritableStream<Uint8Array>({ write: () => wrote(), abort: () => reset() });
 
 	// Stand in for a transport at its stream cap: the open completes only once a slot frees.
 	pair.server.createUnidirectionalStream = async () => {
+		opening();
 		await slot;
 		return groupStream;
 	};
@@ -420,14 +428,15 @@ async function saturatedGroup() {
 	group.writeString("hello");
 	group.close();
 	track.writeGroup(group);
-	await settle();
+
+	// The group is queued inside the open from here on.
+	await opened;
 
 	return {
 		client,
 		track,
 		freeSlot,
-		aborted: () => aborted,
-		written: () => written,
+		outcome,
 		close: () => {
 			publisher.close();
 			broadcast.close();
@@ -436,17 +445,16 @@ async function saturatedGroup() {
 }
 
 test("lite draft-05: a group waiting for a stream slot is dropped when the subscriber leaves", async () => {
-	const { client, freeSlot, aborted, written, close } = await saturatedGroup();
+	const { client, track, freeSlot, outcome, close } = await saturatedGroup();
 
 	client.close();
-	await settle();
 
-	// The slot frees up after the subscriber left: the stream must be reset, not written to.
+	// Seeing the close is what cancels the queued open, so wait for the publisher to drop
+	// the subscription rather than racing it against the slot below.
+	while (track.subscription.peek() !== undefined) await track.subscription.changed();
+
 	freeSlot();
-	await settle();
-
-	expect(aborted()).toBeDefined();
-	expect(written()).toBeEmpty();
+	expect(await outcome).toBe("reset");
 
 	close();
 });
@@ -455,16 +463,20 @@ test("lite draft-05: a group waiting for a stream slot is dropped when the subsc
 // mistaken for the subscriber leaving: SUBSCRIBE_END counts those queued groups as
 // delivered, so dropping them here would strand the tail of every finite track.
 test("lite draft-05: a group waiting for a stream slot survives the track finishing", async () => {
-	const { track, freeSlot, aborted, written, close } = await saturatedGroup();
+	const { client, track, freeSlot, outcome, close } = await saturatedGroup();
 
 	track.close();
-	await settle();
+
+	// Read to the FIN the publisher sends after SUBSCRIBE_END. That FIN is the moment a
+	// cancel keyed on our own close would fire, so the slot must not free up before it.
+	for (;;) {
+		const resp = await decodeSubscribeResponse(client.reader, Version.DRAFT_05);
+		if ("end" in resp) break;
+	}
+	await client.reader.closed;
 
 	freeSlot();
-	await settle();
-
-	expect(aborted()).toBeUndefined();
-	expect(written()).not.toBeEmpty();
+	expect(await outcome).toBe("sent");
 
 	close();
 });

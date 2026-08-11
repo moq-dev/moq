@@ -21,6 +21,21 @@ import {
 import { TrackStatus, type TrackStatusRequest } from "./track.ts";
 import { Version } from "./version.ts";
 
+/** What {@link Publisher.runGroup} needs to serve one group. */
+interface RunGroup {
+	/** The subscription's request ID, doubling as the track alias. */
+	requestId: bigint;
+
+	/** The group to serve. */
+	group: group.Consumer;
+
+	/** The track's advertised timescale, applied to every frame timestamp. */
+	timescale: Timescale;
+
+	/** Settles when the subscriber leaves, dropping a group still queued for a stream slot. */
+	unsubscribed: Promise<void>;
+}
+
 /**
  * Handles publishing broadcasts using moq-transport protocol.
  * Uses the stream-per-request pattern (real bidi streams for v17, virtual for v14-v16).
@@ -141,7 +156,7 @@ export class Publisher {
 				for (;;) {
 					const group = await track.recvGroup();
 					if (!group) return;
-					void this.#runGroup(msg.requestId, group, timescale, unsubscribed);
+					void this.#runGroup({ requestId: msg.requestId, group, timescale, unsubscribed });
 				}
 			})();
 
@@ -178,7 +193,8 @@ export class Publisher {
 	/**
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
-	async #runGroup(requestId: bigint, group: group.Consumer, timescale: Timescale, unsubscribed: Promise<void>) {
+	async #runGroup(options: RunGroup) {
+		const { requestId, group, timescale, unsubscribed } = options;
 		try {
 			// The open waits for the peer to free a stream slot, which can outlast the
 			// subscription. Drop the group rather than parking here holding its frames.
