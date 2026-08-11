@@ -338,6 +338,11 @@ test("closed is stable, so racing it per frame does not allocate", async () => {
 	expect(reader.closed).toBe(reader.closed);
 });
 
+// Deadlines for the stalled fixtures below: one they always blow through, and one they
+// never reach because the slot frees first. Neither is a delay any test waits out.
+const EXPIRES_MS = 10;
+const OUTLASTS_TEST_MS = 1000;
+
 // Builds a transport whose uni opens complete only once `freeSlot` is called, standing in
 // for a peer that has granted no stream credit. `aborted` settles when the stream it
 // eventually hands over is reset, so a test can await that rather than guess at a delay.
@@ -397,7 +402,7 @@ function stalledBidiTransport() {
 test("open gives up on a peer that never frees a bidi slot", async () => {
 	const { quic, freeSlot, discarded } = stalledBidiTransport();
 
-	await expect(Stream.open(quic, { timeout: 10 })).rejects.toThrow(/timed out/);
+	await expect(Stream.open(quic, { timeout: EXPIRES_MS })).rejects.toThrow(/timed out/);
 
 	freeSlot();
 	await discarded;
@@ -444,7 +449,7 @@ test("tryOpen gives up when cancelled, resetting a stream that opens afterwards"
 test("tryOpen gives up when the peer never frees a slot", async () => {
 	const { quic, freeSlot, aborted } = stalledTransport();
 
-	expect(await Writer.tryOpen(quic, { cancel: new Promise(() => {}), timeout: 10 })).toBeUndefined();
+	expect(await Writer.tryOpen(quic, { cancel: new Promise(() => {}), timeout: EXPIRES_MS })).toBeUndefined();
 
 	freeSlot();
 	await aborted;
@@ -453,7 +458,7 @@ test("tryOpen gives up when the peer never frees a slot", async () => {
 test("tryOpen returns the stream when a slot is available", async () => {
 	const { quic, freeSlot } = stalledTransport();
 
-	const opening = Writer.tryOpen(quic, { cancel: new Promise(() => {}), timeout: 1000 });
+	const opening = Writer.tryOpen(quic, { cancel: new Promise(() => {}), timeout: OUTLASTS_TEST_MS });
 	freeSlot();
 
 	expect(await opening).toBeInstanceOf(Writer);
