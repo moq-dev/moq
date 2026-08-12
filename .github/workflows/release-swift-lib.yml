@@ -49,7 +49,7 @@ permissions:
 # Separate PR builds from mainline publishes so a PR run can't queue ahead of
 # (and delay) a release on main.
 concurrency:
-  group: release-swift-lib-${{ github.event_name }}-${{ github.ref }}
+  group: release-swift-lib-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'publish' }}
   cancel-in-progress: false
 
 jobs:
