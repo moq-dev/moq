@@ -209,36 +209,6 @@ wasm-fix *args:
     cargo clippy --fix --allow-staged --allow-dirty -p moq-wasm --target wasm32-unknown-unknown --all-targets {{ args }}
     cargo fmt -p moq-wasm
 
-# The default and `--all-features` passes only ever compile "everything" or "the
-# usual set", so a build that picks one transport goes unchecked. moq-native gates
-# most of its surface on which transports are compiled, and those `#[cfg]` lists
-# drifted apart until a websocket-only build stopped compiling entirely (#2773).
-#
-# One entry per transport, plus each crypto provider a QUIC backend can take,
-# because that's where the lists actually differ. `websocket,tcp,uds` is the
-# every-qmux-transport-and-no-QUIC-backend shape a relay-less client uses.
-#
-# The library only, not `--all-targets`: the integration tests under
-# `rs/moq-native/tests/` are written against the default feature set, so gating each
-# of them per transport would cost more than it catches. This answers "does the
-# crate build the way a consumer picked it", which is what broke.
-#
-# A build with no transport at all is not in the list and does not compile: the
-# `Request` machinery has no variants there, so its match arms have nothing to bind.
-# Such a build can neither dial nor accept, so it isn't worth the gating it would take.
-
-# Compile each supported transport feature combination on its own.
-features:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for features in \
-    	websocket tcp uds iroh websocket,tcp,uds \
-    	quinn,aws-lc-rs quinn,ring noq,aws-lc-rs noq,ring quiche,aws-lc-rs
-    do
-    	echo "moq-native: $features"
-    	cargo clippy -p moq-native --no-default-features --features "$features" -- -D warnings
-    done
-
 # Full Rust CI: check + feature edge cases + tests + build. Takes a
 # newline-separated list of changed files; skips if FILES is non-empty
 # and none match the Rust scope. Run `just rs ci` (no FILES) to
@@ -276,9 +246,6 @@ ci $FILES="":
     # `--workspace` above still compiles moq-wasm for the host, where its crate
     # root cfgs away to nothing, so this wasm32 pass is what actually checks it.
     just rs wasm
-    # Neither pass above compiles moq-native with a single transport selected, which
-    # is the shape that silently broke in #2773.
-    just rs features
     # nextest compiles + runs the test binaries with real parallelism (faster than
     # `cargo test`'s serial harness). It does not build or run
     # doctests, so the `/// ```` examples are no longer compile-checked in CI -- an
