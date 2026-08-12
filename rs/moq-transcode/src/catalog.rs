@@ -1,7 +1,7 @@
 //! Derivative catalog construction: pick the source rendition, size the ladder
 //! against it, and fill the output catalog with rung + passthrough entries.
 
-use hang::catalog::{AV1, Video, VideoCodec, VideoConfig};
+use hang::catalog::{AV1, H264, Video, VideoCodec, VideoConfig};
 use moq_net::PathRelativeOwned;
 
 use crate::{Error, Rung};
@@ -95,16 +95,25 @@ pub(crate) fn resolve_rungs(rungs: &[Rung], source_name: &str, source: &VideoCon
 
 /// The catalog entry for a resolved rung.
 ///
-/// Built from the ladder rather than the bitstream, via the same
-/// [`Hint`](moq_video::encode::Hint) a `moq-video` publisher advertises its own track with, so the
-/// catalog can be published before any encoder exists and stays deterministic.
+/// The codec string is computed from the ladder, not the bitstream, so the catalog can be published
+/// before any encoder exists and stays deterministic: avc3 (in-band parameter sets, matching what
+/// every `moq-video` backend emits), and the level from the shared Table A-1 lookup.
+///
+/// High profile, unlike the Constrained Baseline a `moq-video` publisher advertises before its
+/// first keyframe. That one is provisional and the SPS replaces it within a keyframe, so it claims
+/// the least any backend emits; nothing ever refines a rung entry, so this one has to claim the
+/// most, or a decoder that accepted it could still choke on the stream.
 pub(crate) fn rung_entry(rung: &Resolved, source: &VideoConfig) -> VideoConfig {
-	let mut hint = moq_video::encode::Hint::new(moq_video::encode::Codec::H264);
-	hint.size = Some(rung.size);
-	hint.framerate = Some(rung.framerate);
-	hint.bitrate = Some(rung.bitrate);
-
-	let mut config = VideoConfig::from(&hint);
+	let mut config = VideoConfig::new(H264 {
+		inline: true,
+		profile: 0x64,
+		constraints: 0,
+		level: moq_video::encode::h264_level(rung.size, rung.framerate, rung.bitrate),
+	});
+	config.coded_width = Some(rung.size.width);
+	config.coded_height = Some(rung.size.height);
+	config.bitrate = Some(rung.bitrate);
+	config.framerate = Some(rung.framerate as f64);
 	config.optimize_for_latency = source.optimize_for_latency;
 	config
 }
@@ -164,8 +173,6 @@ pub(crate) fn populate(
 
 #[cfg(test)]
 mod tests {
-	use hang::catalog::H264;
-
 	use super::*;
 
 	fn source(width: u32, height: u32, bitrate: Option<u64>) -> VideoConfig {

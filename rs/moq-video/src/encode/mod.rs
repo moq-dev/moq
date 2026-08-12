@@ -36,7 +36,7 @@ pub mod rate;
 
 pub use encoded::Encoded;
 pub use encoder::{Codec, Config, Encoder, Kind};
-pub use hint::Hint;
+pub use hint::{Hint, h264_level, h265_level};
 pub use producer::Producer;
 #[cfg(feature = "capture")]
 pub use producer::{Options, publish_capture};

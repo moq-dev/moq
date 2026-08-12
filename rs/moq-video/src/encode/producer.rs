@@ -464,16 +464,22 @@ mod tests {
 	/// `kind` is explicit so the test picks a deterministic encoder rather than
 	/// `Auto`, which on Linux CI would try the NVENC backend and panic in cudarc
 	/// on a GPU-less runner.
+	///
+	/// Also checks the invariant the advertised profile rests on: it must never exceed the one this
+	/// machine's encoder actually emits. See [`profile_idc`].
 	async fn roundtrip_rendition(codec: Codec, kind: encoder::Kind) -> (String, hang::catalog::VideoConfig) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut producer = Producer::new(broadcast, catalog.clone(), codec).unwrap();
+
+		let advertised = rendition(&catalog).expect("the rendition publishes before any frame").1;
 
 		let mut config = Config::new(320, 240, 30);
 		config.codec = codec;
 		config.kind = kind;
 		let mut encoder = Encoder::new(&config).unwrap();
 		assert_eq!(encoder.codec(), codec);
+		let backend = encoder.name().to_string();
 
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		for i in 0..10u64 {
@@ -483,14 +489,34 @@ mod tests {
 		}
 		producer.publish(&encoder.finish().unwrap()).unwrap();
 
+		let (name, refined) = rendition(&catalog).expect("the importer should have registered a video rendition");
+		assert!(
+			profile_idc(&advertised.codec) <= profile_idc(&refined.codec),
+			"advertised {} claims more than {} emits: a decoder that can play the stream would fail \
+			 the capability probe, and one that never subscribes never receives the keyframe that \
+			 would correct the claim",
+			advertised.codec,
+			backend,
+		);
+		(name, refined)
+	}
+
+	/// The catalog's single video rendition, if it has one yet.
+	fn rendition(catalog: &moq_mux::catalog::Producer) -> Option<(String, hang::catalog::VideoConfig)> {
 		let snapshot = catalog.snapshot();
-		snapshot
-			.video
-			.renditions
-			.iter()
-			.next()
-			.map(|(name, config)| (name.clone(), config.clone()))
-			.expect("the importer should have registered a video rendition")
+		let (name, config) = snapshot.video.renditions.iter().next()?;
+		Some((name.clone(), config.clone()))
+	}
+
+	/// The codec's profile as a comparable number, low to high. Exact for the profiles our backends
+	/// emit (H.264 Constrained Baseline 66 / Main 77 / High 100, HEVC Main 1), which is all this
+	/// needs to order; H.264's numbering is not a capability ladder in general (Extended is 88).
+	fn profile_idc(codec: &hang::catalog::VideoCodec) -> u8 {
+		match codec {
+			hang::catalog::VideoCodec::H264(h264) => h264.profile,
+			hang::catalog::VideoCodec::H265(h265) => h265.profile_idc,
+			other => panic!("unexpected codec {other}"),
+		}
 	}
 
 	/// Regression: the rendition has to reach the wire before anything is encoded.
@@ -523,8 +549,9 @@ mod tests {
 			.next()
 			.expect("the track must be discoverable before it has encoded anything");
 		assert!(name.ends_with(".avc3"));
-		// High profile at level 4.0, the level 1080p30 at 6 Mbps resolves to.
-		assert_eq!(rendition.codec.to_string(), "avc3.640028");
+		// Constrained Baseline (the least any backend emits, so no decoder probe rejects it) at
+		// level 4.0, the level 1080p30 at 6 Mbps resolves to.
+		assert_eq!(rendition.codec.to_string(), "avc3.42e028");
 		assert_eq!(rendition.coded_width, Some(1920));
 		assert_eq!(rendition.coded_height, Some(1080));
 		assert_eq!(rendition.framerate, Some(30.0));
