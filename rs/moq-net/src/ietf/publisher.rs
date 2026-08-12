@@ -55,6 +55,27 @@ enum Refused {
 	Never,
 }
 
+impl Refused {
+	/// Whether a fresh offer may go out now.
+	///
+	/// The single gate, consulted on every reconciliation rather than only on the retry
+	/// sweep: a route change re-prices an advertisement but does not excuse us from a
+	/// wait the peer asked for, nor make a refused namespace a different one.
+	fn offerable(&self, now: web_async::time::Instant) -> bool {
+		match self {
+			Self::No => true,
+			Self::Until(at) => now >= *at,
+			Self::Never => false,
+		}
+	}
+
+	/// Whether the loop should keep coming back at all. Only a refusal that forbids
+	/// retrying ends it; a wait still has to arm the timer that counts it out.
+	fn pending(&self) -> bool {
+		*self != Self::Never
+	}
+}
+
 impl Watched {
 	fn new(broadcast: crate::broadcast::Consumer) -> Self {
 		Self {
@@ -939,17 +960,24 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			return Ok(());
 		};
 		let advert = self.select(watch, peer);
-		if advert == watch.sent {
-			return Ok(());
-		}
+		let refused = watch.refused;
 		let wanted = advert.wanted();
 		let held = watch.sent.wanted();
+		let unchanged = advert == watch.sent;
 
-		// A peer that asked never to be offered this again means it, whatever brought us
-		// back: a route change re-prices the advertisement but does not make it a
-		// different namespace. Only withdrawing and re-announcing clears this, since that
-		// builds a fresh entry.
-		if watch.refused == Refused::Never && wanted && !held {
+		if unchanged {
+			// Nothing to send. A namespace that is no longer advertisable is no longer
+			// pending either, and leaving that set would keep the retry timer armed
+			// forever for a wire message that can never happen.
+			if !wanted && let Some(watch) = watched.get_mut(suffix) {
+				watch.deferred = false;
+			}
+			return Ok(());
+		}
+
+		// A fresh offer waits for what the refusal asked for, whatever brought us back.
+		// Only withdrawing and re-announcing clears it, since that builds a fresh entry.
+		if wanted && !held && !refused.offerable(web_async::time::Instant::now()) {
 			return Ok(());
 		}
 
@@ -1028,7 +1056,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			// A peer that asked not to be offered this again outranks the retry timer;
 			// anything else it should hold and does not comes back on one.
 			watch.refused = refused;
-			watch.deferred = wanted && !sent.wanted() && refused != Refused::Never;
+			watch.deferred = wanted && !sent.wanted() && refused.pending();
 			watch.set_sent(sent);
 		}
 		Ok(())
@@ -1416,18 +1444,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					retry_at = None;
 					retry_delay = (retry_delay * 2).min(RETRY_MAX);
 
-					// A peer that named a minimum wait gets it, even when our own backoff
-					// comes round sooner. The next sweep is at most RETRY_MAX away, so a
-					// long wait costs a few skipped turns rather than a timer of its own.
-					let now = web_async::time::Instant::now();
+					// A minimum wait the peer named is enforced by `sync_namespace`, which
+					// every path goes through, so a namespace still inside one simply
+					// makes no offer this turn. The next sweep is at most RETRY_MAX away.
 					let deferred: Vec<crate::PathOwned> = ns
 						.watched
 						.iter()
 						.filter(|(_, watch)| watch.deferred)
-						.filter(|(_, watch)| match watch.refused {
-							Refused::Until(at) => now >= at,
-							_ => true,
-						})
 						.map(|(suffix, _)| suffix.clone())
 						.collect();
 
@@ -2146,6 +2169,114 @@ mod tests {
 			1,
 			"never retried once credit returned"
 		);
+	}
+
+	/// A namespace nobody can advertise any more is not pending, whatever happened before.
+	/// `deferred` outliving the want would arm the retry timer forever for a wire message
+	/// that can never happen: not a spin, but a session that never sleeps.
+	#[tokio::test(start_paused = true)]
+	async fn a_namespace_that_stops_being_advertisable_stops_being_deferred() {
+		let assigned = crate::Origin::new(777).unwrap();
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+
+		// Every route flows through the peer's own identity, so split horizon says this
+		// must never be advertised back to it: `select` wants nothing, which is what the
+		// peer already holds.
+		let mut hops = crate::OriginList::new();
+		hops.push(assigned).unwrap();
+		let _echoed = origin
+			.create_broadcast(
+				"from/peer",
+				crate::broadcast::Route::new().with_hops(hops).with_announce(true),
+			)
+			.unwrap();
+		settle().await;
+
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let publisher = Publisher::new(
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			Some(assigned),
+			declared(Some(false)),
+			Version::Draft17,
+		);
+
+		// The state a refused or failed offer leaves behind: the peer holds nothing, and
+		// the loop is coming back to it on a timer.
+		let suffix: crate::PathOwned = crate::Path::new("from/peer").to_owned();
+		let broadcast = origin.consume().get_broadcast("from/peer").unwrap();
+		let mut watch = Watched::new(broadcast);
+		watch.deferred = true;
+
+		let mut ns = Namespaces::new(cluster::Peer::default(), Target::Requests(None));
+		ns.watched.insert(suffix.clone(), watch);
+
+		publisher.sync_namespace(&mut ns, &suffix, &suffix).await.unwrap();
+
+		assert!(
+			!ns.watched[&suffix].deferred,
+			"the retry timer stays armed for a namespace that can never be advertised"
+		);
+	}
+
+	/// A minimum wait binds every path back to the namespace, not just the retry sweep.
+	/// A route change re-prices the advertisement; it does not excuse us from the wait the
+	/// peer asked for.
+	#[tokio::test(start_paused = true)]
+	async fn a_route_change_still_waits_out_a_refusal() {
+		const VERSION: Version = Version::Draft17;
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let cam = origin
+			.create_broadcast("solo-cam", crate::broadcast::Route::announced())
+			.unwrap();
+		settle().await;
+
+		// Refused with a wait far longer than any backoff the loop would take on its own.
+		let refusal = publish_namespace_error(VERSION, 600_000).await;
+		let session =
+			crate::lite::test_transport::ScriptedSession::per_stream(vec![refusal.clone(), refusal.clone(), refusal]);
+		let log = session.log.clone();
+
+		let publisher = Publisher::new(
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			declared(Some(false)),
+			VERSION,
+		);
+
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"solo-cam") > 0 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, b"solo-cam"), 1, "the advertisement never went out");
+
+		// A second route makes the advertisement worth re-pricing, which is a path back
+		// into the reconciliation that does not go through the retry timer.
+		let _standby = origin
+			.create_broadcast("solo-cam", crate::broadcast::Route::announced())
+			.unwrap();
+
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			tick().await;
+		}
+
+		assert_eq!(
+			occurrences(&log, b"solo-cam"),
+			1,
+			"re-offered inside the wait the peer asked for"
+		);
+
+		drop(cam);
 	}
 
 	/// Draft-17+ has no PUBLISH_NAMESPACE_DONE, so a withdrawal there is the FIN and

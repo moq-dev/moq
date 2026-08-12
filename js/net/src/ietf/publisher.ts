@@ -367,6 +367,13 @@ export class Publisher {
 					updated.add(suffix);
 				}
 
+				// A namespace that is gone takes its refusal with it, so re-announcing the
+				// path offers it again.
+				const live = new Set<Path.Valid>([...updated].map((suffix) => Path.join(prefix, suffix)));
+				for (const path of [...refused.keys()]) {
+					if (!live.has(path)) refused.delete(path);
+				}
+
 				// Track what the peer holds rather than what we attempted: a declined
 				// advertisement stays out of `held`, so the next turn retries it instead of
 				// believing the namespace is already up.
@@ -458,6 +465,13 @@ export class Publisher {
 				}
 
 				const updated = new Set<Path.Valid>(broadcasts.keys());
+
+				// A namespace that is gone takes its refusal with it, so re-announcing the
+				// path offers it again. Rust gets this by rebuilding the watched entry.
+				for (const path of [...refused.keys()]) {
+					if (!updated.has(path)) refused.delete(path);
+				}
+
 				for (const added of updated.difference(active)) {
 					if (this.#offerable(added, refused)) {
 						await this.#advertise(added, requests, refused);

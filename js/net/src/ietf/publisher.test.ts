@@ -304,3 +304,36 @@ test("a refusal that forbids retrying is not retried", async () => {
 
 	pub.close();
 });
+
+/**
+ * A refusal belongs to the namespace, not the path forever. Unannouncing takes it with
+ * it, so a fresh broadcast at the same path is offered again; keeping it would strand
+ * that path for the life of the session with no timer able to recover it. Rust gets this
+ * by rebuilding the watched entry on re-announce.
+ */
+test("re-announcing a path clears a refusal that forbade retrying", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pub = publisher(pair.server);
+
+	const first = new BroadcastProducer();
+	pub.publish(Path.from("recycled"), first);
+
+	void pub.runPublishNamespaces();
+
+	const declined = await nextStream(pair.client);
+	if (!declined) throw new Error("the namespace was never advertised");
+	expect(await readPublishNamespace(declined)).toBe(Path.from("recycled"));
+	await declinePublishNamespace(declined, 0n);
+
+	// The broadcast goes away, taking the refusal with it, and a new one takes its place.
+	first.close();
+	await new Promise((resolve) => setTimeout(resolve, SETTLE));
+	pub.publish(Path.from("recycled"), new BroadcastProducer());
+
+	const retried = await nextStream(pair.client);
+	if (!retried) throw new Error("a re-announced path was never offered again");
+	expect(await readPublishNamespace(retried)).toBe(Path.from("recycled"));
+	await acceptPublishNamespace(retried);
+
+	pub.close();
+});
