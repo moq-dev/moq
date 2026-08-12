@@ -268,24 +268,24 @@ describe("Effect", () => {
 		}
 	});
 
-	test("cleanup from a spawn past the 5s cutoff lands on the next run", async () => {
-		// The immediate teardown above is bounded: a rerun waits at most 5s for outstanding
-		// spawns, then opens the next run anyway. A task resuming after that no longer sees a
-		// dead run, so its cleanup is queued against the run that has since started.
+	test("the 5s warning does not open the next run while a spawn is in flight", async () => {
+		// The 5s timer is a diagnostic, not a cutoff. It used to win a Promise.race and open the
+		// next run while the task was still in flight, which reset #stale and swapped in a fresh
+		// AbortController: the task's cleanup then landed on a run it never belonged to, and its
+		// `abort` guard read that run's un-aborted signal and silently passed.
 		const tick = new Signal(0);
 		const gate = Promise.withResolvers<void>();
 		const closed: string[] = [];
 		let runs = 0;
-		let capturedAbort: boolean | undefined;
 		let lateAbort: boolean | undefined;
 		let immediate: boolean | undefined;
 
-		// Fire the cutoff by hand instead of waiting five real seconds for it.
-		let cutoff: (() => void) | undefined;
+		// Fire the 5s timer by hand instead of waiting five real seconds for it.
+		let elapsed5s: (() => void) | undefined;
 		const realSetTimeout = globalThis.setTimeout;
 		const timer = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
 			if (ms === 5000) {
-				cutoff = fn;
+				elapsed5s = fn;
 				return 0 as unknown as ReturnType<typeof setTimeout>;
 			}
 			return realSetTimeout(fn, ms);
@@ -297,11 +297,11 @@ describe("Effect", () => {
 			const run = ++runs;
 			if (run > 1) return;
 
-			const abort = e.abort; // captured during the run, so it stays this run's controller
 			e.spawn(async () => {
 				await gate.promise;
 
-				capturedAbort = abort.aborted;
+				// Read off the effect, not off a signal captured during the run: the point is
+				// that the effect still exposes this run's scope while the task is in flight.
 				lateAbort = e.abort.aborted;
 
 				let ran = false;
@@ -319,29 +319,80 @@ describe("Effect", () => {
 			await settle();
 			expect(runs).toBe(1); // parked awaiting the task
 
-			// The rerun gives up waiting and run 2 opens while the task is still in flight.
-			cutoff?.();
+			// Five seconds pass. The warning fires, but the next run must stay shut.
+			expect(elapsed5s).toBeDefined();
+			elapsed5s?.();
 			await settle();
-			expect(runs).toBe(2);
+			expect(runs).toBe(1);
+			expect(warn).toHaveBeenCalled();
 
 			gate.resolve();
 			await settle();
 
-			// Run 1 is long over, but cleanup is deferred to run 2 rather than firing now.
-			expect(immediate).toBe(false);
-			expect(closed).toEqual([]);
+			// The task still owned its run, so teardown was immediate rather than deferred.
+			expect(immediate).toBe(true);
+			expect(closed).toEqual(["run 1"]);
+			expect(lateAbort).toBe(true);
 
-			// A guard has to use the signal captured during the run: reading `effect.abort`
-			// this late returns run 2's controller, which is not aborted.
-			expect(capturedAbort).toBe(true);
-			expect(lateAbort).toBe(false);
+			// Only once the task settled does the rerun proceed.
+			expect(runs).toBe(2);
 		} finally {
 			effect.close();
 			timer.mockRestore();
 			warn.mockRestore();
 		}
+	});
 
-		expect(closed).toEqual(["run 1"]);
+	test("a rerun waits for a task spawned while the previous one unwinds", async () => {
+		// A task that spawns another as it unwinds (a read loop queueing one last handler) has to
+		// keep the run open too, or the nested task inherits the same broken ownership.
+		const tick = new Signal(0);
+		const outer = Promise.withResolvers<void>();
+		const inner = Promise.withResolvers<void>();
+		const closed: string[] = [];
+		let runs = 0;
+		let immediate: boolean | undefined;
+
+		const effect = new Effect((e) => {
+			e.get(tick);
+			if (++runs > 1) return;
+
+			e.spawn(async () => {
+				await outer.promise;
+
+				e.spawn(async () => {
+					await inner.promise;
+
+					let ran = false;
+					e.cleanup(() => {
+						ran = true;
+						closed.push("nested");
+					});
+					immediate = ran;
+				});
+			});
+		});
+
+		try {
+			await settle();
+			tick.set(1);
+			await settle();
+			expect(runs).toBe(1);
+
+			// The outer task settles, but the one it spawned is still in flight.
+			outer.resolve();
+			await settle();
+			expect(runs).toBe(1);
+
+			inner.resolve();
+			await settle();
+
+			expect(immediate).toBe(true);
+			expect(closed).toEqual(["nested"]);
+			expect(runs).toBe(2);
+		} finally {
+			effect.close();
+		}
 	});
 
 	test("a spawn that outlived its run sees that run aborted and cancelled", async () => {

@@ -223,21 +223,19 @@ new Effect((effect) => {
 
 A stale task may still want to bail for its own reasons, since work outside the effect's scope (plain fields, backoff counters) is not unwound for it. `close()` is permanent; reruns are not.
 
-One boundary is worth knowing, because it is the case where the guarantee above stops holding. A rerun waits at most **5 seconds** for outstanding `spawn` tasks before giving up and starting the next run (with a dev warning). A task that resumes after that cutoff no longer sees a dead run: its `cleanup` lands on the run that has since started, and is torn down with *that* run instead of firing immediately. So a `connect()` that takes longer than 5 seconds hands its socket to an unrelated run rather than closing it promptly.
+What makes this unconditional is that a rerun does not open the next run until every `spawn` task from the previous one has settled, however long that takes. So there is no window in which a slow task wakes up to find a different run installed: `connect()` can take a minute and its `cleanup` still fires immediately, and `effect.abort` still reads as this task's own aborted signal.
 
-After `close()` the immediate teardown always holds, since there is no next run to inherit it. For reruns, keep spawned work inside the window, or make cancellation explicit:
+Teardown runs *before* that wait, so a task is not left hanging: whatever it was awaiting has already been closed, and it unwinds from there. The order is deliberate. A task that ignores both `effect.abort` and `effect.cancel` stalls the rerun rather than leaking its resources, and warns after 5 seconds in dev so the offender is named. `close()` is never blocked and releases everything.
+
+A stale task may still want to bail early for its own reasons, which reads the same way it always did:
 
 ```ts
 new Effect((effect) => {
-	// Capture the signal during the run. Reading `effect.abort` after the cutoff returns the
-	// *next* run's controller, which is not aborted, so the check would silently pass.
-	const abort = effect.abort;
-
 	effect.spawn(async () => {
 		const socket = await connect();
 
-		// Past the 5s cutoff, cleanup() would defer to the run that has already started.
-		if (abort.aborted) {
+		// Still this run's signal, no matter how long connect() took.
+		if (effect.abort.aborted) {
 			socket.close();
 			return;
 		}
@@ -323,7 +321,7 @@ dispose(); // closed now, not when `signals` closes
 
 ### Async
 
-`effect.spawn` runs a task and blocks the next rerun until it settles (with a dev warning after 5 seconds). Three handles tell a task when its run is over:
+`effect.spawn` runs a task and blocks the next rerun until it settles, warning after 5 seconds in dev but continuing to wait. Three handles tell a task when its run is over:
 
 - `effect.cancel`: a promise that resolves when the current run is torn down.
 - `effect.abort`: an `AbortSignal` that fires at the same moment. Pass it to `fetch`, streams, anything that takes one.

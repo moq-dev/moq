@@ -436,27 +436,33 @@ export class Effect {
 		for (const fn of this.#dispose) fn();
 		this.#dispose.length = 0;
 
-		// Wait for all async effects to complete.
+		// Wait for every task this run spawned. Opening the next run while one is still in flight
+		// would hand that task's cleanup registrations, and its `abort` signal, to a run it never
+		// belonged to. The dispose functions above already closed whatever the task was awaiting,
+		// so anything that observes cancellation unwinds from here.
 		if (this.#async.length > 0) {
+			// Diagnostic only: a task that ignores cancellation stalls the rerun, so name it.
+			const warn = DEV
+				? setTimeout(() => {
+						console.warn(
+							"spawn is still running after 5s; the effect cannot rerun until it settles",
+							this.#stack,
+						);
+					}, 5000)
+				: undefined;
+
 			try {
-				let warn: ReturnType<typeof setTimeout> | undefined;
-				const timeout = new Promise<void>((resolve) => {
-					warn = setTimeout(() => {
-						if (DEV) {
-							console.warn("spawn is still running after 5s; continuing anyway", this.#stack);
-						}
-
-						resolve();
-					}, 5000);
-				});
-
-				await Promise.race([Promise.all(this.#async), timeout]);
-				if (warn) clearTimeout(warn);
-
-				this.#async.length = 0;
+				// A task can spawn another as it unwinds, so drain until nothing new is queued.
+				while (this.#dispose !== undefined && this.#async.length > 0) {
+					const pending = this.#async;
+					this.#async = [];
+					await Promise.all(pending);
+				}
 			} catch (error) {
 				console.error("async effect error", error);
 				if (this.#stack) console.error("stack", this.#stack);
+			} finally {
+				if (warn !== undefined) clearTimeout(warn);
 			}
 		}
 
@@ -531,8 +537,7 @@ export class Effect {
 	}
 
 	/**
-	 * Runs an async task. The effect will not rerun until the task's promise settles, up to 5
-	 * seconds, after which it reruns anyway and warns in dev.
+	 * Runs an async task. The effect will not rerun until the task's promise settles.
 	 */
 	// TODO: Add effect for another layer of nesting
 	spawn(fn: () => Promise<void>) {
@@ -638,9 +643,8 @@ export class Effect {
 	 * scopes until it finally reruns or closes.
 	 *
 	 * Called from a task that outlived its run, the child is closed at the *next* teardown rather
-	 * than immediately, unlike {@link cleanup} inside the 5 second window that method describes.
-	 * Closing it now would cancel its first run before `fn` executes, so whatever teardown `fn`
-	 * registers would never fire at all.
+	 * than immediately, unlike {@link cleanup}. Closing it now would cancel its first run before
+	 * `fn` executes, so whatever teardown `fn` registers would never fire at all.
 	 */
 	run(fn: (effect: Effect) => void): Dispose {
 		if (this.#dispose === undefined) {
@@ -791,12 +795,6 @@ export class Effect {
 	 * Runs `fn` immediately if the run that registered it is already over, which is what an
 	 * {@link spawn} task resuming after a rerun or close sees. Registering teardown is
 	 * therefore enough to own a resource, with no staleness check needed first.
-	 *
-	 * That holds for the 5 seconds a rerun waits for outstanding {@link spawn} tasks, and always
-	 * after {@link close} since no next run can inherit the teardown. Past the cutoff the next run
-	 * has already opened, so a task resuming then registers against *that* run and is torn down
-	 * with it instead. To bail explicitly, capture `effect.abort` during the run and check it:
-	 * read late it returns the next run's controller, which is not aborted.
 	 */
 	cleanup(fn: Dispose): void {
 		if (this.#dispose === undefined || this.#stale) {
