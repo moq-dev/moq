@@ -194,6 +194,8 @@ new Effect((effect) => {
 });
 ```
 
+It stops at the first falsy signal, so the ones after it are not tracked on that run. Above, setting `track` while `broadcast` is still `undefined` does not rerun the effect. That is short-circuit tracking, the same as an `effect.get` behind an `if`, and it costs nothing: the values are only used once every signal is truthy, and reaching that state means changing the falsy one, which reruns the effect and reads the rest. Setting `track` first and `broadcast` second still lands on both values.
+
 ### Cleanup
 
 `effect.cleanup(fn)` registers teardown. Everything registered during a run is torn down before the next run and again on `close()`.
@@ -476,7 +478,7 @@ console.log(ticker.out.count.peek()); // read-only to us
 ticker.interval.set(250); // knobs stay writable
 ```
 
-`getter()` throws on a readable this package did not create, since wrapping a foreign object would silently freeze it into a constant that never updates. Pass a `Signal`, `Computed`, or `Once`.
+`getter()` checks the brand, not the class, so a `Signal`, `Computed`, or `Once` from any copy of `@moq/signals` in the dependency tree passes straight through. What it rejects is an unbranded object that merely looks like one (`peek`, `subscribe`, and `changed` of your own), since wrapping that would silently freeze it into a constant that never updates. Anything else is treated as a plain value and wrapped in a fresh `Signal`.
 
 The `#signals` effect stays private and `close()` is the only handle. The two custom elements (`<moq-watch>` and `<moq-publish>`) are the exception: they expose `readonly signals` as the documented place for an app to hang its own reactivity.
 
