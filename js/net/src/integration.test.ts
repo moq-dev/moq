@@ -1373,6 +1373,10 @@ test("origin: remote entries retract when the session dies, local ones survive",
 	serverOrigin.publish(Path.from("remote"));
 	const mine = clientOrigin.publish(Path.from("mine"));
 
+	// Announcements are solicited lazily, so something has to be listening for the peer's to
+	// reach the table at all.
+	const listening = clientOrigin.announced();
+
 	const reader = clientOrigin.consume();
 	await until(() => reader.routes(Path.from("remote")));
 
@@ -1387,6 +1391,7 @@ test("origin: remote entries retract when the session dies, local ones survive",
 	expect(local).toBeDefined();
 	local?.close();
 
+	listening.close();
 	mine.close();
 	serverOrigin.close();
 	clientOrigin.close();
@@ -1404,6 +1409,10 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 		connect(url, { transport: pair.client, publish: shared.consume(), subscribe: shared }),
 		accept(pair.server, url, { publish: serverSees.consume(), subscribe: serverSees }),
 	]);
+
+	// Announcements are solicited lazily; both sides listen so each peer's reach the table.
+	const clientListening = shared.announced();
+	const serverListening = serverSees.announced();
 
 	// The server announces a broadcast; it lands in the shared origin as a remote entry.
 	{
@@ -1434,6 +1443,8 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 	await sleep(50);
 	expect(serverReader.routes(Path.from("from-server"))).toBe(false);
 
+	clientListening.close();
+	serverListening.close();
 	mine.close();
 	client.close();
 	server.close();
@@ -1593,6 +1604,9 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 	const first = await setup();
 	const second = await setup();
 
+	// Announcements are solicited lazily, so hold interest for both sessions to answer.
+	const listening = clientOrigin.announced();
+
 	const reader = clientOrigin.consume();
 	await until(() => reader.routes(Path.from("redundant")));
 
@@ -1608,6 +1622,7 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 
 	track.close();
 	remote.close();
+	listening.close();
 	first.broadcast.close();
 	await first.serving;
 	first.client.close();

@@ -284,6 +284,9 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 	const stub = function StubWebTransport() {
 		const pair = createMockTransportPair(Lite.ALPN_05);
 		const saw = new OriginProducer();
+		// Announcements are solicited lazily; listening is what makes the client announce
+		// its publishes to this session at all. Released with the origin below.
+		void saw.announced();
 		const serverOrigin = new OriginProducer();
 		void accept(pair.server, url, { publish: serverOrigin.consume(), subscribe: saw }).then((session) => {
 			serverOrigin.publish(Path.from("remote"));
@@ -302,6 +305,8 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 		subscribe: subscribeOrigin,
 	});
 	const reader = subscribeOrigin.consume();
+	// Same on the client side, spanning both sessions.
+	const listening = subscribeOrigin.announced();
 
 	try {
 		// First session: the server's broadcast lands in the client origin, and the client's
@@ -318,6 +323,7 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 		await waitUntil(() => reader.routes(Path.from("remote")));
 		await waitUntil(() => servers[1]?.saw.routes(Path.from("mine")));
 	} finally {
+		listening.close();
 		reload.close();
 		publishOrigin.close();
 		subscribeOrigin.close();

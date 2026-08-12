@@ -53,6 +53,12 @@ class OriginState {
 	// What backs the public `discovery` getter.
 	sessions = new Signal({ total: 0, discovery: 0 });
 
+	// Announce demand: prefixes something is listening to, refcounted by how many
+	// announcement streams cover each. Feeding sessions solicit announcements from the
+	// peer only for prefixes in here, so an app that only publishes (or only requests
+	// known paths) never asks for any. Undefined once the origin closes.
+	interest = new Signal<Map<Path.Valid, number> | undefined>(new Map());
+
 	closed = new Once<Error | null>();
 }
 
@@ -223,6 +229,25 @@ export class Producer implements Table {
 	}
 
 	/**
+	 * The prefixes something is listening to, watched by feeding sessions to decide what to
+	 * solicit from the peer; see {@link Consumer.announced}. Undefined once the origin closes.
+	 *
+	 * @internal
+	 */
+	get interest(): Getter<ReadonlyMap<Path.Valid, number> | undefined> {
+		return this.#state.interest;
+	}
+
+	/**
+	 * Resolves once the announce interest changes.
+	 *
+	 * @internal
+	 */
+	interestChanged(): Promise<unknown> {
+		return Signal.race(this.#state.interest);
+	}
+
+	/**
 	 * Provide `front` as the answer for the open request on `path`, taking ownership of it.
 	 *
 	 * Returns undefined (releasing the front) when the request is gone or already answered;
@@ -301,6 +326,9 @@ export class Producer implements Table {
 			}
 			return undefined;
 		});
+		// Ends every feeding session's solicit loop; the announcement streams themselves
+		// close above, with the origin.
+		this.#state.interest.set(undefined);
 	}
 }
 
@@ -477,6 +505,21 @@ export class Consumer {
 	 */
 	announced(prefix: Path.Valid = Path.empty()): announce.Consumer {
 		const producer = new announce.Producer(prefix);
+
+		// Register the demand before the first read: this is what makes a feeding session
+		// solicit announcements for the prefix, and it is released when the stream closes.
+		this.#state.interest.mutate((interest) => {
+			interest?.set(prefix, (interest.get(prefix) ?? 0) + 1);
+		});
+		void producer.closed.then(() => {
+			this.#state.interest.mutate((interest) => {
+				const count = interest?.get(prefix);
+				if (count === undefined) return;
+				if (count > 1) interest?.set(prefix, count - 1);
+				else interest?.delete(prefix);
+			});
+		});
+
 		void this.#runAnnounced(producer, prefix);
 		return producer.consume();
 	}

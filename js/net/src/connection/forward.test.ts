@@ -17,8 +17,15 @@ async function settle() {
 class FakeSession {
 	readonly discovery: boolean;
 
-	/** The announce stream handed to the forwarder, so a test can end or abort it. */
-	readonly announces = new Announce.Producer();
+	/**
+	 * Every prefix the forwarder solicited, in order. Empty until something is interested,
+	 * which is what makes the laziness observable.
+	 */
+	readonly requested: Path.Valid[] = [];
+
+	// One producer per prefix, created on demand so a test can queue announcements before
+	// the forwarder gets around to asking for them.
+	readonly #streams = new Map<Path.Valid, Announce.Producer>();
 
 	/**
 	 * Every broadcast the forwarder consumed, per path. An announcement consumes the path
@@ -36,8 +43,23 @@ class FakeSession {
 		});
 	}
 
-	announced(): Announce.Consumer {
-		return this.announces.consume();
+	/** The stream for `prefix`, so a test can drive, end, or abort it. */
+	stream(prefix: Path.Valid = Path.empty()): Announce.Producer {
+		const existing = this.#streams.get(prefix);
+		if (existing) return existing;
+		const producer = new Announce.Producer(prefix);
+		this.#streams.set(prefix, producer);
+		return producer;
+	}
+
+	/** The root stream, which is what a plain `origin.announced()` solicits. */
+	get announces(): Announce.Producer {
+		return this.stream();
+	}
+
+	announced(prefix: Path.Valid = Path.empty()): Announce.Consumer {
+		this.requested.push(prefix);
+		return this.stream(prefix).consume();
 	}
 
 	consume(path: Path.Valid): BroadcastConsumer {
@@ -71,6 +93,11 @@ test("a discovery failure under a live session downgrades the origin", async () 
 
 	forwardAnnounced(session.session, origin);
 
+	// Something has to be listening before anything is solicited; this handle is what makes
+	// the forwarder open the root stream at all.
+	const listening = origin.announced();
+	await settle();
+
 	// The relay announces a broadcast, which lands in the table.
 	session.announces.append({ path, active: true });
 	await settle();
@@ -101,6 +128,7 @@ test("a discovery failure under a live session downgrades the origin", async () 
 	expect(session.consumes(path)).toBe(2);
 
 	watched.close();
+	listening.close();
 	origin.close();
 });
 
@@ -110,6 +138,10 @@ test("a request outlives the discovery failure that fed it", async () => {
 	const path = Path.from("wanted");
 
 	forwardAnnounced(session.session, origin);
+
+	// Interest is what opens the stream; without it nothing is solicited.
+	const listening = origin.announced();
+	await settle();
 
 	// Announced, so the table routes it and no blind answer is needed.
 	session.announces.append({ path, active: true });
@@ -132,6 +164,7 @@ test("a request outlives the discovery failure that fed it", async () => {
 	expect(session.consumes(path)).toBe(2);
 
 	request.close();
+	listening.close();
 	origin.close();
 });
 
@@ -182,5 +215,86 @@ test("a request replaced across one coalesced wakeup still gets answered", async
 	expect(session.consumes(path)).toBe(2);
 
 	second.close();
+	origin.close();
+});
+
+test("nothing is solicited until something listens", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	const path = Path.from("room");
+
+	forwardAnnounced(session.session, origin);
+	await settle();
+
+	// A session that only publishes, or only resolves known paths by request, must cost the
+	// peer no announce traffic at all. A request is not interest: the serving loop answers it
+	// with a blind subscription, which needs no announcement.
+	const request = origin.request(path);
+	await settle();
+	expect(session.requested).toEqual([]);
+	expect(request.active.peek()).toBeDefined();
+
+	// The first listener opens the stream, once.
+	const listening = origin.announced();
+	await settle();
+	expect(session.requested).toEqual([Path.empty()]);
+
+	const second = origin.announced();
+	await settle();
+	expect(session.requested).toEqual([Path.empty()]);
+
+	second.close();
+	listening.close();
+	request.close();
+	origin.close();
+});
+
+test("a narrow listener asks for its prefix, and a broader one opens its own stream", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	const prefix = Path.from("room", "a");
+	const path = Path.from("room", "a", "cam");
+
+	forwardAnnounced(session.session, origin);
+
+	// Watching one room asks for that room, not the whole relay.
+	const narrow = origin.announced(prefix);
+	await settle();
+	expect(session.requested).toEqual([prefix]);
+
+	// Paths arrive relative to the stream's prefix and land absolute in the table.
+	session.stream(prefix).append({ path: Path.from("cam"), active: true });
+	await settle();
+	expect(origin.routes(path)).toBe(true);
+	expect(session.consumes(path)).toBe(1);
+
+	// A root listener is not covered by the narrow stream, so it opens its own. The narrow one
+	// stays: closing it would retract the routes it feeds out from under whoever is reading.
+	const broad = origin.announced();
+	await settle();
+	expect(session.requested).toEqual([prefix, Path.empty()]);
+
+	// The same path from both streams is one table entry, so nothing re-subscribes...
+	session.announces.append({ path, active: true });
+	await settle();
+	expect(origin.routes(path)).toBe(true);
+
+	// ...and it survives until the last stream announcing it retracts.
+	session.stream(prefix).append({ path: Path.from("cam"), active: false });
+	await settle();
+	expect(origin.routes(path)).toBe(true);
+
+	session.announces.append({ path, active: false });
+	await settle();
+	expect(origin.routes(path)).toBe(false);
+
+	// A prefix under one already open is covered; no third stream.
+	const nested = origin.announced(path);
+	await settle();
+	expect(session.requested).toEqual([prefix, Path.empty()]);
+
+	nested.close();
+	narrow.close();
+	broad.close();
 	origin.close();
 });
