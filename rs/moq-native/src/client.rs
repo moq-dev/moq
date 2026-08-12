@@ -201,6 +201,13 @@ pub struct Client {
 	pub(crate) reconnect: bool,
 	pub(crate) backoff: Backoff,
 	pub(crate) goaway: GoawayConfig,
+	/// The runtime to spawn each [`Connection`]'s dial loop on, when one was entered
+	/// at construction. [`Self::connect`] is synchronous, so a caller writing
+	/// `runtime.block_on(client.connect(url).established())` evaluates it outside the
+	/// runtime; without a handle of our own that dial would panic. `None` when the
+	/// client really was built outside a runtime (a tcp/websocket-only build can be),
+	/// which falls back to the caller's.
+	pub(crate) runtime: Option<tokio::runtime::Handle>,
 	/// The resolved Happy Eyeballs stagger, used by the `tcp://` dial here; the
 	/// QUIC backends capture their own copy from the config.
 	#[cfg(feature = "tcp")]
@@ -289,6 +296,7 @@ impl Client {
 			reconnect: config.reconnect.unwrap_or(true),
 			backoff: config.backoff,
 			goaway: config.goaway,
+			runtime: tokio::runtime::Handle::try_current().ok(),
 			#[cfg(feature = "tcp")]
 			failover_delay,
 			#[cfg(feature = "websocket")]
@@ -380,6 +388,9 @@ impl Client {
 	/// [`Addrs`] instead when the same peer has several candidate addresses and
 	/// only some of them route from here; each attempt walks them in order and
 	/// keeps the first that connects.
+	///
+	/// The dial runs on a tokio task, spawned on the runtime this [`Client`] was
+	/// built on, or the current one when it was built outside a runtime.
 	pub fn connect(&self, addrs: impl Into<Addrs>) -> Connection {
 		Connection::new(self.clone(), addrs.into())
 	}

@@ -522,7 +522,8 @@ impl Connection {
 		let closed: CloseGuard = Default::default();
 		let task_closed = closed.clone();
 
-		let task = tokio::spawn(async move {
+		let runtime = client.runtime.clone();
+		let dial_loop = async move {
 			let reconnect = client.reconnect;
 			let shared = Shared {
 				state: producer,
@@ -540,7 +541,15 @@ impl Connection {
 				shared.failed(err);
 			}
 			// Dropping the producers here closes the channels, signaling consumers.
-		});
+		};
+
+		// The client captured the runtime it was built on, which is what lets a
+		// synchronous `connect` be called from outside one. Falling back to the
+		// caller's runtime covers a client that was built outside one too.
+		let task = match &runtime {
+			Some(runtime) => runtime.spawn(dial_loop),
+			None => tokio::spawn(dial_loop),
+		};
 		Self {
 			task: std::sync::Arc::new(AbortOnDrop {
 				handle: task.abort_handle(),
@@ -1600,6 +1609,42 @@ mod tests {
 		assert!(logs_contain("connecting"), "the dial never logged at all");
 		assert!(!logs_contain(SECRET), "a log line leaked the credential");
 		assert!(!format!("{err}").contains(SECRET), "the error leaked it: {err}");
+	}
+
+	/// [`Client::connect`] is synchronous but spawns the dial, so a caller outside a
+	/// runtime must still get one: `runtime.block_on(client.connect(url).established())`
+	/// evaluates the `connect` before `block_on` enters the runtime.
+	///
+	/// Deliberately not a `#[tokio::test]`, since entering the runtime around the
+	/// call is exactly what this must not require.
+	#[cfg(feature = "tcp")]
+	#[test]
+	fn connect_dials_from_outside_the_runtime() {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let runtime = tokio::runtime::Runtime::new().expect("runtime");
+
+		// The QUIC backend binds its socket through `quinn::default_runtime`, so a
+		// client is essentially always built inside a runtime; that is the handle the
+		// dial below borrows.
+		let client = runtime
+			.block_on(async {
+				let mut config = crate::ClientConfig::default();
+				config.tls.disable_verify = Some(true);
+				config.init()
+			})
+			.expect("build client")
+			// One-shot, so the refused address settles instead of retrying for the
+			// whole backoff window.
+			.with_reconnect(false);
+
+		let connection = client.connect(refused());
+
+		// The dial really ran, rather than a task that was never spawned sitting idle.
+		// `Connection` isn't `Debug`, so unwrap the failure by hand.
+		assert!(
+			runtime.block_on(connection.established()).is_err(),
+			"nothing is listening on the refused port"
+		);
 	}
 
 	/// A settled answer from one candidate ends the walk instead of being buried.

@@ -10,6 +10,14 @@
 //!
 //! See [`Client`] for connecting to relays and [`Server`] for accepting
 //! connections. [`mdns`] finds peers to connect to on the local network.
+//!
+//! ## Async
+//! Where [`moq_net`] spawns nothing behind your back, this crate does: it runs each
+//! session's protocol driver and each [`Connection`]'s dial loop on tokio tasks. The
+//! QUIC backends also bind their socket to the runtime that builds them, so
+//! [`ClientConfig::init`] and [`ServerConfig::init`] want a runtime entered.
+//! [`Client::connect`] is synchronous and reuses the runtime its client was built on,
+//! so dialing from outside one works.
 
 #![warn(missing_docs)]
 
