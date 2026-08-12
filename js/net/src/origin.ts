@@ -8,7 +8,7 @@
  *
  * @module
  */
-import { Derived, type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import { Derived, type Dispose, type GetPromise, type Getter, getter, Once, Signal } from "@moq/signals";
 import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
 import * as Path from "./path.ts";
@@ -59,6 +59,12 @@ class OriginState {
 	// How many sessions are attached, and how many of those support broadcast discovery.
 	// What backs the public `discovery` getter.
 	sessions = new Signal({ total: 0, discovery: 0 });
+
+	// How many things are prepared to answer a request: attached sessions, plus reconnecting
+	// connections that have no session right now but will. Zero means an unrouted path is
+	// unroutable rather than merely unanswered, which is the whole difference between "wait,
+	// this is coming" and "nothing here can ever serve you".
+	answerers = new Signal(0);
 
 	closed = new Once<Error | null>();
 
@@ -216,11 +222,13 @@ export class Producer implements Table {
 	 */
 	attach(discovery: boolean): Dispose {
 		this.#sessions(1, discovery);
+		const release = this.expect();
 		let detached = false;
 		return () => {
 			if (detached) return;
 			detached = true;
 			this.#sessions(-1, discovery);
+			release();
 		};
 	}
 
@@ -229,6 +237,28 @@ export class Producer implements Table {
 			total: total + delta,
 			discovery: d + (discovery ? delta : 0),
 		}));
+	}
+
+	/**
+	 * Declare that something will answer requests on this origin, even with no session
+	 * attached right now.
+	 *
+	 * A reconnecting connection holds one for its whole life, so a request made during a
+	 * reconnect (or before the first session establishes) stays pending instead of reading as
+	 * unroutable. Without it, {@link Request.unroutable} would fire on every page load, in the
+	 * window between wiring the origin up and the handshake completing. Call the returned
+	 * dispose when the connection is done for good.
+	 *
+	 * @internal
+	 */
+	expect(): Dispose {
+		this.#state.answerers.update((count) => count + 1);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			this.#state.answerers.update((count) => count - 1);
+		};
 	}
 
 	/**
@@ -343,7 +373,12 @@ let makeConsumer: (state: OriginState) => Consumer;
 // Same for Request: a public constructor would let a caller forge a handle that no origin
 // ever registered, whose lifecycle guarantees are then false. `@internal` alone would not
 // stop it, since the declaration emit keeps the constructor.
-let makeRequest: (path: Path.Valid, active: Getter<broadcast.Consumer | undefined>, dispose: Dispose) => Request;
+let makeRequest: (
+	path: Path.Valid,
+	active: Getter<broadcast.Consumer | undefined>,
+	unroutable: Getter<boolean>,
+	dispose: Dispose,
+) => Request;
 
 /**
  * An open request for a path nothing announced; see {@link Consumer.request}.
@@ -369,17 +404,35 @@ export class Request {
 	 */
 	readonly active: Getter<broadcast.Consumer | undefined>;
 
+	/**
+	 * Whether nothing can serve this path, as opposed to not having served it yet.
+	 *
+	 * True when the origin routes nothing here and nothing is prepared to answer: no session
+	 * attached and no connection reconnecting toward one. False whenever {@link active} is
+	 * set, and false while a connection is still coming up, so the ordinary page-load window
+	 * before the first handshake reads as pending rather than as a missing broadcast. Waiting
+	 * on this is futile by definition; wait for an announcement instead, via the origin's
+	 * `announced`.
+	 */
+	readonly unroutable: Getter<boolean>;
+
 	#dispose: Dispose;
 	#closed = false;
 
-	private constructor(path: Path.Valid, active: Getter<broadcast.Consumer | undefined>, dispose: Dispose) {
+	private constructor(
+		path: Path.Valid,
+		active: Getter<broadcast.Consumer | undefined>,
+		unroutable: Getter<boolean>,
+		dispose: Dispose,
+	) {
 		this.path = path;
 		this.active = active;
+		this.unroutable = unroutable;
 		this.#dispose = dispose;
 	}
 
 	static {
-		makeRequest = (path, active, dispose) => new Request(path, active, dispose);
+		makeRequest = (path, active, unroutable, dispose) => new Request(path, active, unroutable, dispose);
 	}
 
 	/** Withdraw the request. The path stays routed for any other open request. Idempotent. */
@@ -464,8 +517,8 @@ export class Consumer {
 	request(path: Path.Valid): Request {
 		const requests = this.#state.requests.peek();
 		if (!requests) {
-			// Closed origin: a request that can never resolve.
-			return makeRequest(path, new Signal<broadcast.Consumer | undefined>(undefined), () => {});
+			// Closed origin: a request that can never resolve, and says so.
+			return makeRequest(path, new Signal<broadcast.Consumer | undefined>(undefined), getter(true), () => {});
 		}
 
 		let slot = requests.get(path);
@@ -513,7 +566,12 @@ export class Consumer {
 		// and the memo makes the two paths agree: whichever runs first does the swap.
 		const unsubscribe = route.subscribe(own);
 
-		return makeRequest(path, active, () => {
+		// Only meaningful while nothing is routed, so it reads the route rather than `active`:
+		// the two cannot disagree, since a routed path always has an answerer-independent
+		// answer.
+		const unroutable = new Derived([route, this.#state.answerers], (front, answerers) => !front && answerers === 0);
+
+		return makeRequest(path, active, unroutable, () => {
 			// Releases this request's handle; the route itself belongs to the table.
 			released = true;
 			unsubscribe();

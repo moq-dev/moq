@@ -165,6 +165,11 @@ export class Reload {
 		this.publish = props?.publish;
 		this.subscribe = props?.subscribe;
 
+		// Requests on the subscribe origin stay pending across a reconnect, and before the
+		// first session establishes, rather than reading as unroutable the moment no session
+		// is attached. Released on close, when nothing is coming any more.
+		if (this.subscribe) this.#signals.cleanup(this.subscribe.expect());
+
 		this.closed = new Promise((resolve, reject) => {
 			this.#closedResolve = resolve;
 			this.#closedReject = reject;

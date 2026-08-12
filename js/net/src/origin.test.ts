@@ -641,3 +641,88 @@ test("a request only wakes for its own path", async () => {
 	mine.close();
 	origin.close();
 });
+
+test("a request is unroutable only when nothing can answer it", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("nowhere");
+
+	// Nothing published, nothing attached, nothing coming: waiting here is futile.
+	const request = consumer.request(path);
+	expect(request.active.peek()).toBeUndefined();
+	expect(request.unroutable.peek()).toBe(true);
+
+	// A session attaches: now the path is merely unanswered.
+	const detach = origin.attach(false);
+	await settle();
+	expect(request.unroutable.peek()).toBe(false);
+
+	// It goes back to unroutable when the session dies with nothing to replace it.
+	detach();
+	await settle();
+	expect(request.unroutable.peek()).toBe(true);
+
+	request.close();
+	origin.close();
+});
+
+test("a reconnecting connection keeps requests pending across the gap", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("later");
+
+	// What a reconnecting connection holds: no session yet, but one is coming. This is the
+	// page-load window, and it must not read as a missing broadcast.
+	const release = origin.expect();
+
+	const request = consumer.request(path);
+	expect(request.unroutable.peek()).toBe(false);
+
+	// A session comes and goes; the expectation still covers the gap.
+	const detach = origin.attach(true);
+	await settle();
+	detach();
+	await settle();
+	expect(request.unroutable.peek()).toBe(false);
+
+	// Only giving up for good makes it unroutable.
+	release();
+	await settle();
+	expect(request.unroutable.peek()).toBe(true);
+
+	request.close();
+	origin.close();
+});
+
+test("a routed path is never unroutable", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("here");
+
+	const broadcast = origin.publish(path);
+	const request = consumer.request(path);
+
+	// Routed with nothing attached at all: the route is the answer, so no answerer is needed.
+	expect(request.active.peek()).toBeDefined();
+	expect(request.unroutable.peek()).toBe(false);
+
+	// Unpublishing with nothing able to answer flips it.
+	broadcast.close();
+	await settle();
+	expect(request.active.peek()).toBeUndefined();
+	expect(request.unroutable.peek()).toBe(true);
+
+	request.close();
+	origin.close();
+});
+
+test("a request on a closed origin is unroutable", () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	origin.close();
+
+	const request = consumer.request(Path.from("gone"));
+	expect(request.active.peek()).toBeUndefined();
+	expect(request.unroutable.peek()).toBe(true);
+	request.close();
+});
