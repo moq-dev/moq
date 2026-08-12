@@ -208,16 +208,19 @@ pub struct SendStream {
 	terminal: bool,
 	/// A write driven to completion by `poll_closed` rather than `poll_write`. The
 	/// caller was told `Pending` and is contractually retrying the same bytes, so the
-	/// next `poll_write` reports this length instead of writing them a second time.
-	completed: Option<usize>,
+	/// next `poll_write` reports this write instead of putting the bytes on the wire
+	/// a second time.
+	completed: Option<Bytes>,
 }
 
 enum SendState {
 	Idle(web_transport_wasm::SendStream),
-	/// A write in flight; `len` is what to report when it resolves.
+	/// A write in flight; `chunk` is the copied bytes, kept (refcounted, no
+	/// extra copy) so a completion absorbed by `poll_closed` can verify the
+	/// retrying caller supplied the same bytes.
 	Writing {
 		fut: LocalBoxFuture<'static, (web_transport_wasm::SendStream, Result<(), Error>)>,
-		len: usize,
+		chunk: Bytes,
 	},
 	Closing(LocalBoxFuture<'static, (web_transport_wasm::SendStream, Result<(), Error>)>),
 }
@@ -256,9 +259,15 @@ impl wtt::poll::SendStream for SendStream {
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		// A previous write completed inside poll_closed; report it instead of
-		// writing the same bytes a second time.
-		if let Some(len) = self.completed.take() {
-			return Poll::Ready(Ok(len));
+		// writing the same bytes a second time. The retry contract says the
+		// caller re-supplies the bytes it was told Pending for.
+		if let Some(chunk) = self.completed.take() {
+			debug_assert_eq!(
+				buf.get(..chunk.len()),
+				Some(&chunk[..]),
+				"poll_write must retry the same bytes it was told Pending for"
+			);
+			return Poll::Ready(Ok(chunk.len()));
 		}
 		loop {
 			match self.state.take().expect("in-flight") {
@@ -270,25 +279,25 @@ impl wtt::poll::SendStream for SendStream {
 					// The wasm writer writes the whole slice or errors, so the
 					// reported count is exact. The caller retries with the same
 					// bytes until this resolves.
-					let chunk = buf.to_vec();
-					let len = chunk.len();
+					let chunk = Bytes::copy_from_slice(buf);
+					let retained = chunk.clone();
 					let fut = async move {
 						let res = stream.write(&chunk).await.map_err(Error);
 						(stream, res)
 					}
 					.boxed_local();
-					self.state = Some(SendState::Writing { fut, len });
+					self.state = Some(SendState::Writing { fut, chunk: retained });
 				}
-				SendState::Writing { mut fut, len } => match fut.as_mut().poll(cx) {
+				SendState::Writing { mut fut, chunk } => match fut.as_mut().poll(cx) {
 					Poll::Pending => {
-						self.state = Some(SendState::Writing { fut, len });
+						self.state = Some(SendState::Writing { fut, chunk });
 						return Poll::Pending;
 					}
 					Poll::Ready((mut stream, res)) => {
 						self.settle(&mut stream);
 						self.state = Some(SendState::Idle(stream));
 						res?;
-						return Poll::Ready(Ok(len));
+						return Poll::Ready(Ok(chunk.len()));
 					}
 				},
 				SendState::Closing(mut fut) => match fut.as_mut().poll(cx) {
@@ -351,9 +360,9 @@ impl wtt::poll::SendStream for SendStream {
 					.boxed_local();
 					self.state = Some(SendState::Closing(fut));
 				}
-				SendState::Writing { mut fut, len } => match fut.as_mut().poll(cx) {
+				SendState::Writing { mut fut, chunk } => match fut.as_mut().poll(cx) {
 					Poll::Pending => {
-						self.state = Some(SendState::Writing { fut, len });
+						self.state = Some(SendState::Writing { fut, chunk });
 						return Poll::Pending;
 					}
 					Poll::Ready((mut stream, res)) => {
@@ -366,7 +375,7 @@ impl wtt::poll::SendStream for SendStream {
 						// The caller of poll_write was told Pending and will retry the
 						// same bytes; record the completion so the retry reports it
 						// instead of writing the bytes a second time.
-						self.completed = Some(len);
+						self.completed = Some(chunk);
 					}
 				},
 				SendState::Closing(mut fut) => match fut.as_mut().poll(cx) {

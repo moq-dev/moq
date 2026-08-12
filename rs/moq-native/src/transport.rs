@@ -36,8 +36,10 @@ type OpBox<T> = futures::future::BoxFuture<'static, T>;
 ///   retries with the same buffer.
 /// - `stop`, `reset`, and `finish` during an in-flight operation are deferred
 ///   until that operation settles. If the stream is dropped before then, the
-///   underlying transport's drop behavior applies (a reset or stop with code 0)
-///   and the specific code is lost.
+///   pending operation is finished on the tokio runtime and the deferred code
+///   applied after it, so the peer still sees the real reason; only without a
+///   runtime does the underlying transport's drop behavior (a reset or stop
+///   with code 0) stand in.
 /// - Stream `poll_closed` watches are emulated rather than delegated: the
 ///   underlying async `closed()` future would own the stream for its whole
 ///   lifetime, deadlocking any later read or write (the async trait's
@@ -214,16 +216,18 @@ pub struct AsyncSend<S: web_transport_trait::SendStream + 'static> {
 	/// A write driven to completion by [`poll_closed`](wt_poll::SendStream::poll_closed)
 	/// rather than [`poll_write`](wt_poll::SendStream::poll_write). The caller was told
 	/// `Pending` and is contractually retrying the same bytes, so the next `poll_write`
-	/// reports this length instead of writing the bytes a second time.
-	completed: Option<usize>,
+	/// reports this write instead of putting the bytes on the wire a second time.
+	completed: Option<Bytes>,
 }
 
 enum SendState<S: web_transport_trait::SendStream + 'static> {
 	Idle(S),
-	/// A write in flight; `len` is what to report when it resolves.
+	/// A write in flight; `chunk` is the copied bytes, kept (refcounted, no
+	/// extra copy) so a completion absorbed by `poll_closed` can verify the
+	/// retrying caller supplied the same bytes.
 	Writing {
 		fut: OpBox<(S, Result<(), S::Error>)>,
-		len: usize,
+		chunk: Bytes,
 	},
 	Closing(OpBox<(S, Result<(), S::Error>)>),
 }
@@ -263,9 +267,15 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for Async
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		// A previous write completed inside poll_closed; report it instead of
-		// writing the same bytes a second time.
-		if let Some(len) = self.completed.take() {
-			return Poll::Ready(Ok(len));
+		// writing the same bytes a second time. The retry contract says the
+		// caller re-supplies the bytes it was told Pending for.
+		if let Some(chunk) = self.completed.take() {
+			debug_assert_eq!(
+				buf.get(..chunk.len()),
+				Some(&chunk[..]),
+				"poll_write must retry the same bytes it was told Pending for"
+			);
+			return Poll::Ready(Ok(chunk.len()));
 		}
 		loop {
 			match self.state.get_mut().unwrap().take().expect("in-flight") {
@@ -278,24 +288,24 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for Async
 					// count is exact. The caller retries with the same bytes
 					// until this resolves (see [`Async`]).
 					let chunk = Bytes::copy_from_slice(buf);
-					let len = chunk.len();
+					let retained = chunk.clone();
 					let fut = async move {
 						let res = stream.write_chunk(chunk).await;
 						(stream, res)
 					}
 					.boxed();
-					*self.state.get_mut().unwrap() = Some(SendState::Writing { fut, len });
+					*self.state.get_mut().unwrap() = Some(SendState::Writing { fut, chunk: retained });
 				}
-				SendState::Writing { mut fut, len } => match fut.as_mut().poll(cx) {
+				SendState::Writing { mut fut, chunk } => match fut.as_mut().poll(cx) {
 					Poll::Pending => {
-						*self.state.get_mut().unwrap() = Some(SendState::Writing { fut, len });
+						*self.state.get_mut().unwrap() = Some(SendState::Writing { fut, chunk });
 						return Poll::Pending;
 					}
 					Poll::Ready((mut stream, res)) => {
 						self.settle(&mut stream);
 						*self.state.get_mut().unwrap() = Some(SendState::Idle(stream));
 						res?;
-						return Poll::Ready(Ok(len));
+						return Poll::Ready(Ok(chunk.len()));
 					}
 				},
 				SendState::Closing(mut fut) => match fut.as_mut().poll(cx) {
@@ -358,9 +368,9 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for Async
 					.boxed();
 					*self.state.get_mut().unwrap() = Some(SendState::Closing(fut));
 				}
-				SendState::Writing { mut fut, len } => match fut.as_mut().poll(cx) {
+				SendState::Writing { mut fut, chunk } => match fut.as_mut().poll(cx) {
 					Poll::Pending => {
-						*self.state.get_mut().unwrap() = Some(SendState::Writing { fut, len });
+						*self.state.get_mut().unwrap() = Some(SendState::Writing { fut, chunk });
 						return Poll::Pending;
 					}
 					Poll::Ready((mut stream, res)) => {
@@ -373,7 +383,7 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for Async
 						// The caller of poll_write was told Pending and will retry the
 						// same bytes; record the completion so the retry reports it
 						// instead of writing the bytes a second time.
-						self.completed = Some(len);
+						self.completed = Some(chunk);
 					}
 				},
 				SendState::Closing(mut fut) => match fut.as_mut().poll(cx) {
@@ -394,12 +404,37 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for Async
 
 impl<S: web_transport_trait::SendStream + 'static> Drop for AsyncSend<S> {
 	fn drop(&mut self) {
-		// Apply a deferred reset if the stream is idle; otherwise the underlying
-		// stream's own drop behavior applies.
-		if let Some(SendState::Idle(mut stream)) = self.state.get_mut().unwrap().take()
-			&& let Some(code) = self.reset.take()
-		{
-			stream.reset(code);
+		match self.state.get_mut().unwrap().take() {
+			// Apply a deferred reset if the stream is idle.
+			Some(SendState::Idle(mut stream)) => {
+				if let Some(code) = self.reset.take() {
+					stream.reset(code);
+				}
+			}
+			// The stream lives inside the in-flight future; dropping it here
+			// would fire the backend's default drop behavior (a code-0 reset)
+			// and lose the deferred reset code or FIN the caller asked for. The
+			// peer uses that code to classify the abort (Old vs Cancel vs
+			// Evicted), so finish the operation on the runtime and apply the
+			// terminal action then. Without a runtime the default drop stands.
+			Some(SendState::Writing { fut, .. }) | Some(SendState::Closing(fut)) => {
+				let reset = self.reset.take();
+				let finish = std::mem::take(&mut self.finish);
+				if (reset.is_some() || finish)
+					&& let Ok(handle) = tokio::runtime::Handle::try_current()
+				{
+					handle.spawn(async move {
+						let (mut stream, _) = fut.await;
+						match reset {
+							Some(code) => stream.reset(code),
+							None => {
+								let _ = stream.finish();
+							}
+						}
+					});
+				}
+			}
+			None => {}
 		}
 	}
 }
@@ -578,12 +613,29 @@ impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for Async
 
 impl<S: web_transport_trait::RecvStream + 'static> Drop for AsyncRecv<S> {
 	fn drop(&mut self) {
-		// Apply a deferred stop if the stream is idle; otherwise the underlying
-		// stream's own drop behavior applies.
-		if let Some(RecvState::Idle(mut stream)) = self.state.get_mut().unwrap().take()
-			&& let Some(code) = self.stop.take()
-		{
-			stream.stop(code);
+		match self.state.get_mut().unwrap().take() {
+			// Apply a deferred stop if the stream is idle.
+			Some(RecvState::Idle(mut stream)) => {
+				if let Some(code) = self.stop.take() {
+					stream.stop(code);
+				}
+			}
+			// The stream lives inside the in-flight read; dropping it here would
+			// fire the backend's default drop behavior (a code-0 stop) and lose
+			// the deferred code the peer classifies the abort by. Finish the
+			// read on the runtime and stop with the real code then. Without a
+			// runtime the default drop stands.
+			Some(RecvState::Reading(fut)) => {
+				if let Some(code) = self.stop.take()
+					&& let Ok(handle) = tokio::runtime::Handle::try_current()
+				{
+					handle.spawn(async move {
+						let (mut stream, _) = fut.await;
+						stream.stop(code);
+					});
+				}
+			}
+			None => {}
 		}
 	}
 }
@@ -623,6 +675,7 @@ mod tests {
 		blocked: Arc<AtomicBool>,
 		priorities: Arc<Mutex<Vec<u8>>>,
 		finished: Arc<AtomicBool>,
+		resets: Arc<Mutex<Vec<u32>>>,
 	}
 
 	impl web_transport_trait::SendStream for FakeSend {
@@ -650,7 +703,9 @@ mod tests {
 			Ok(())
 		}
 
-		fn reset(&mut self, _code: u32) {}
+		fn reset(&mut self, code: u32) {
+			self.resets.lock().unwrap().push(code);
+		}
 
 		async fn closed(&mut self) -> Result<(), Self::Error> {
 			match self.finished.load(Ordering::SeqCst) {
@@ -843,6 +898,61 @@ mod tests {
 		blocked.store(false, Ordering::SeqCst);
 		assert_eq!(recv.poll_read(&mut cx, &mut dst), Poll::Ready(Ok(Some(4))));
 		assert_eq!(stops.lock().unwrap().as_slice(), &[7]);
+	}
+
+	// A writer dropped while its write is still in flight must not lose the
+	// deferred reset code: the peer classifies the abort by it (Old vs Cancel),
+	// so the salvage task finishes the write and applies the real code.
+	#[tokio::test]
+	async fn a_deferred_reset_code_survives_a_drop_mid_write() {
+		let fake = FakeSend::default();
+		fake.blocked.store(true, Ordering::SeqCst);
+		let mut send = AsyncSend::new(fake.clone());
+		let mut cx = cx();
+
+		assert!(send.poll_write(&mut cx, b"payload").is_pending());
+		send.reset(9);
+		drop(send);
+
+		fake.blocked.store(false, Ordering::SeqCst);
+		tokio::time::timeout(std::time::Duration::from_secs(1), async {
+			while fake.resets.lock().unwrap().is_empty() {
+				tokio::task::yield_now().await;
+			}
+		})
+		.await
+		.expect("the salvage task never applied the reset");
+		assert_eq!(fake.resets.lock().unwrap().as_slice(), &[9]);
+	}
+
+	// The receive-side twin: a reader dropped mid-read still sends the deferred
+	// STOP_SENDING with the real code.
+	#[tokio::test]
+	async fn a_deferred_stop_code_survives_a_drop_mid_read() {
+		let stops = Arc::new(Mutex::new(Vec::new()));
+		let blocked = Arc::new(AtomicBool::new(true));
+		let fake = FakeRecv {
+			chunks: [Bytes::from_static(b"data")].into_iter().collect(),
+			stops: stops.clone(),
+			blocked: blocked.clone(),
+		};
+		let mut recv = AsyncRecv::new(fake);
+		let mut cx = cx();
+
+		let mut dst = [0u8; 4];
+		assert!(recv.poll_read(&mut cx, &mut dst).is_pending());
+		wt_poll::RecvStream::stop(&mut recv, 11);
+		drop(recv);
+
+		blocked.store(false, Ordering::SeqCst);
+		tokio::time::timeout(std::time::Duration::from_secs(1), async {
+			while stops.lock().unwrap().is_empty() {
+				tokio::task::yield_now().await;
+			}
+		})
+		.await
+		.expect("the salvage task never applied the stop");
+		assert_eq!(stops.lock().unwrap().as_slice(), &[11]);
 	}
 
 	// A FIN sitting behind undelivered payload resolves the closed watch without
