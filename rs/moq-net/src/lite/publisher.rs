@@ -461,6 +461,13 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 			.origin
 			.scope(&[prefix.as_path()])
 			.unwrap_or_else(|| self.shared.origin.empty());
+		// Register the split-horizon peer on the announce cursor too. The origin
+		// model uses this exposure to park a reflected copy before it can replace
+		// the source we are currently advertising to that peer.
+		let origin = match Origin::new(exclude_hop) {
+			Ok(peer) => origin.excluding(peer),
+			Err(_) => origin,
+		};
 		let announced = origin.announced();
 		let run = AnnounceRun::new(prefix, exclude_hop, self.shared.self_origin, self.shared.version);
 		self.state = AnnounceState::Run { origin, announced, run };
@@ -499,6 +506,13 @@ struct AnnounceRun {
 	// peer keeping a stale hop chain. Keyed by suffix; filtered announces are
 	// watched too, since an update can cross the forwarding filter either way.
 	watched: HashMap<crate::PathOwned, WatchedRoute>,
+	// Pre-restart versions (Lite01-04) never populate `watched`, but the
+	// broadcast consumer handed out by an excluding cursor carries the
+	// ExclusionGuard that keeps the front marked as exposed to this peer. Hold
+	// it for as long as the peer holds the advertisement, or the guard releases
+	// right after the Active is written and a reflected UNKNOWN route can
+	// replace the incumbent after all.
+	held: HashMap<crate::PathOwned, crate::broadcast::Consumer>,
 	linger: kio::time::Deadline,
 	phase: AnnouncePhase,
 }
@@ -521,6 +535,7 @@ impl AnnounceRun {
 			next_announce_id: 0,
 			announce_ids: HashMap::new(),
 			watched: HashMap::new(),
+			held: HashMap::new(),
 			linger: kio::time::Deadline::new(),
 			phase: AnnouncePhase::Init,
 		}
@@ -808,6 +823,9 @@ impl AnnounceRun {
 							if let Some(entry) = self.watched.get_mut(&suffix) {
 								entry.sent = Some(route.clone());
 							}
+							if !lite::restart_supported(self.version) {
+								self.held.insert(suffix.clone(), active.clone());
+							}
 							stream.writer.buffer(&lite::AnnounceBroadcast::Active {
 								suffix,
 								hops: route.hops,
@@ -822,6 +840,7 @@ impl AnnounceRun {
 							// versions never populate `watched`, so they keep sending the
 							// Ended even for announces filtered above.
 							let retracted = self.watched.remove(&suffix).is_some_and(|entry| entry.sent.is_none());
+							self.held.remove(&suffix);
 							if self.version.has_announce_id() {
 								// Retract by id; nothing to send if the announce was filtered and
 								// the peer never saw it (an unknown id is a protocol violation).
@@ -2876,7 +2895,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						}
 					};
 					let mut writer = Writer::new(stream, self.ctx.version);
-					writer.set_priority(self.priority.current());
+					writer.set_priority(self.priority.send_order());
 
 					let msg = lite::Group {
 						subscribe: self.ctx.id,
@@ -2898,9 +2917,10 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					let mut cx = Context::from_waker(waiter.waker());
 
 					// Queue and SUBSCRIBE_UPDATE priority changes apply on every pass,
-					// whatever the write pipeline is blocked on.
-					while let Poll::Ready(new_pri) = self.priority.poll_next(waiter) {
-						writer.set_priority(new_pri);
+					// whatever the write pipeline is blocked on. The rank is re-read as
+					// a send order when handled, since the two conventions are inverted.
+					while self.priority.poll_next(waiter).is_ready() {
+						writer.set_priority(self.priority.send_order());
 					}
 					let seen = self.ctx.track_priority_seen;
 					// A dropped producer just disables this arm, like the queue arm above.
@@ -2913,7 +2933,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					}) {
 						self.ctx.track_priority_seen = value;
 						self.priority.set_track(value);
-						writer.set_priority(self.priority.current());
+						writer.set_priority(self.priority.send_order());
 					}
 
 					let outcome = 'serve: {
@@ -2986,7 +3006,10 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 				}
 				GroupState::Closed { writer } => {
 					let mut cx = Context::from_waker(waiter.waker());
-					let res = ready!(writer.poll_closed(&mut cx));
+					// poll_close releases the stream on completion: the peer acknowledged
+					// everything, so the Drop fallback must not reset the stream and
+					// discard bytes still retransmitting.
+					let res = ready!(writer.poll_close(&mut cx));
 					self.state = GroupState::Done;
 					return Poll::Ready(res.map(|()| {
 						tracing::debug!(sequence = self.sequence, "finished group");
@@ -3010,7 +3033,7 @@ impl<S: crate::transport::poll::Session> Machine for GroupServe<S> {
 /// A group that fails mid-stream must reset with its own error code. The subscriber uses
 /// that code to tell a truncated group (Old, Lagged, Evicted) from a routine cancel, so a
 /// blanket [`Error::Cancel`] from the writer's drop fallback loses the reason.
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod serve_group_test {
 	use super::*;
 	use crate::lite::test_transport::*;
@@ -3160,6 +3183,50 @@ mod serve_group_test {
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
+	}
+
+	/// A group that completes cleanly must not reset at all. The completion path
+	/// releases the stream via `poll_close`; leaving the writer to drop after
+	/// `finish()` would fire the Drop fallback and tack a spurious Cancel reset
+	/// onto a stream the peer already acknowledged.
+	#[tokio::test]
+	async fn completed_group_does_not_reset() {
+		let log = Log::default();
+		let session = SinkSession::new(log.clone());
+
+		let track_priority = kio::Producer::new(0u8);
+		let subscription = Subscription {
+			session,
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			version: Version::Lite06Wip,
+			timescale: Some(crate::Timescale::default()),
+		};
+
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
+			.unwrap();
+		let consumer = group.consume();
+		group.finish().unwrap();
+
+		let handle = subscription.priority.insert(Priority::new(0, 0));
+		subscription.serve_group(0, 0, handle, consumer).await.unwrap();
+
+		assert_eq!(log.resets(), Vec::<u32>::new(), "clean completion must not reset");
+
+		// The group held rank 0 (most urgent); the transport sends higher values
+		// first, so every send order set on the stream must be the maximum.
+		let priorities = log.priorities();
+		assert!(!priorities.is_empty(), "the group stream must set a priority");
+		assert!(
+			priorities.iter().all(|&p| p == 255),
+			"rank 0 must reach the transport as send order 255: {priorities:?}",
+		);
 	}
 }
 

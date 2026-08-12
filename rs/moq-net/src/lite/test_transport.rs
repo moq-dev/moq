@@ -193,17 +193,17 @@ impl web_transport_trait::Error for ResetError {
 /// reaches an accept loop in normal operation, not just from a misbehaving peer.
 pub struct DeadRecv;
 
-impl web_transport_trait::RecvStream for DeadRecv {
+impl poll::RecvStream for DeadRecv {
 	type Error = ResetError;
 
-	async fn read(&mut self, _dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
-		Err(ResetError)
+	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+		Poll::Ready(Err(ResetError))
 	}
 
 	fn stop(&mut self, _code: u32) {}
 
-	async fn closed(&mut self) -> Result<(), Self::Error> {
-		Err(ResetError)
+	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		Poll::Ready(Err(ResetError))
 	}
 }
 
@@ -249,40 +249,40 @@ impl DeadStreamSession {
 	}
 }
 
-impl web_transport_trait::Session for DeadStreamSession {
+impl poll::Session for DeadStreamSession {
 	type SendStream = SinkSend;
 	type RecvStream = DeadRecv;
 	type Error = SinkError;
 
-	async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
+	fn poll_accept_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
 		match Self::take(&self.unis) {
-			true => Ok(DeadRecv),
-			false => std::future::pending().await,
+			true => Poll::Ready(Ok(DeadRecv)),
+			false => Poll::Pending,
 		}
 	}
 
-	async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		match Self::take(&self.bis) {
-			true => Ok((SinkSend::new(self.log.clone()), DeadRecv)),
-			false => std::future::pending().await,
+			true => Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv))),
+			false => Poll::Pending,
 		}
 	}
 
-	async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+	fn poll_open_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
-		Ok((SinkSend::new(self.log.clone()), DeadRecv))
+		Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv)))
 	}
 
-	async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
-		Ok(SinkSend::new(self.log.clone()))
+	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+		Poll::Ready(Ok(SinkSend::new(self.log.clone())))
 	}
 
-	fn send_datagram(&self, _payload: bytes::Bytes) -> Result<(), Self::Error> {
-		Ok(())
+	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		Poll::Ready(Ok(()))
 	}
 
-	async fn recv_datagram(&self) -> Result<bytes::Bytes, Self::Error> {
-		std::future::pending().await
+	fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<bytes::Bytes, Self::Error>> {
+		Poll::Pending
 	}
 
 	fn max_datagram_size(&self) -> usize {
@@ -293,12 +293,12 @@ impl web_transport_trait::Session for DeadStreamSession {
 		None
 	}
 
-	fn close(&self, code: u32, reason: &str) {
+	fn close(&mut self, code: u32, reason: &str) {
 		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
 	}
 
-	async fn closed(&self) -> Self::Error {
-		std::future::pending().await
+	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {
+		Poll::Pending
 	}
 
 	fn stats(&self) -> impl web_transport_trait::Stats {

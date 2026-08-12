@@ -59,6 +59,12 @@ impl<S: crate::transport::poll::SendStream, V> Writer<S, V> {
 	}
 
 	/// Encode the given message to the stream.
+	///
+	/// Cancelling this future never desynchronizes the stream: the message is
+	/// already buffered and a later flush completes it. That also means a
+	/// cancelled `encode` must not be retried with the same message, or two
+	/// copies go on the wire; resume with [`Self::poll_flush`] (or any later
+	/// write) instead.
 	pub async fn encode<T: Encode<V> + Debug>(&mut self, msg: &T) -> Result<(), Error>
 	where
 		V: Clone,
@@ -137,6 +143,15 @@ impl<S: crate::transport::poll::SendStream, V> Writer<S, V> {
 			.unwrap()
 			.poll_closed(cx)
 			.map_err(Error::from_transport)
+	}
+
+	/// Poll-friendly [`Self::close`] for a finished writer: once the peer acknowledges
+	/// (or the stream dies), the stream is released so the [`Drop`] fallback cannot
+	/// reset an acknowledged stream with a spurious Cancel.
+	pub fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+		let res = ready!(self.poll_closed(cx));
+		self.stream = None;
+		Poll::Ready(res)
 	}
 
 	/// Wait for the stream to be closed, or the [Self::finish] to be acknowledged by the peer.
