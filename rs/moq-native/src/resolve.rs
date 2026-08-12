@@ -25,6 +25,8 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
+use futures::FutureExt;
+
 /// How long the first candidate waits for the full answer before settling for
 /// the IPv4-only one, unless overridden by `--client-resolution-delay`. RFC
 /// 8305's recommended Resolution Delay.
@@ -121,9 +123,28 @@ impl Query {
 			return std::future::pending().await;
 		};
 
+		let res = call.await;
+		self.record(lookup, res)
+	}
+
+	/// The answer if it has already landed, without waiting for one.
+	///
+	/// Polling with a no-op waker drops nothing: every caller follows up with
+	/// [`answer`](Self::answer), which registers a real one.
+	fn ready(&mut self, lookup: Lookup) -> Option<Vec<SocketAddr>> {
+		let res = self.call.as_mut()?.now_or_never()?;
+		Some(self.record(lookup, res))
+	}
+
+	/// Record what the call returned, closing it out.
+	fn record(
+		&mut self,
+		lookup: Lookup,
+		res: Result<io::Result<Vec<SocketAddr>>, tokio::task::JoinError>,
+	) -> Vec<SocketAddr> {
 		// The only `JoinError` reachable here is a panic in the lookup itself: the
 		// handle is never aborted while it is still in `self`.
-		let res = call.await.unwrap_or_else(|err| Err(io::Error::other(err)));
+		let res = res.unwrap_or_else(|err| Err(io::Error::other(err)));
 		self.call = None;
 
 		match res {
@@ -290,6 +311,12 @@ impl Candidates {
 		}
 
 		loop {
+			// Fold in whatever has answered since the last candidate went out. Without
+			// this, a fast-lane address still sitting in the queue would be handed out
+			// ahead of an authoritative answer that has already landed, and the order
+			// the platform chose would only take effect once the fast lane ran dry.
+			self.poll_answers();
+
 			if let Some(addr) = self.take(self.next) {
 				return Some(addr);
 			}
@@ -387,6 +414,19 @@ impl Candidates {
 	/// Queue one address behind its family.
 	fn queue(&mut self, addr: SocketAddr) {
 		self.queued(Family::of(addr)).push_back(addr);
+	}
+
+	/// Fold in every answer that has already landed, without waiting for one.
+	fn poll_answers(&mut self) {
+		// Full first: accepting it closes out the IPv4-only lookup, which then has
+		// nothing left to fold in.
+		if let Some(addrs) = self.full.ready(Lookup::Full) {
+			self.accept(Lookup::Full, addrs);
+		}
+
+		if let Some(addrs) = self.ipv4.ready(Lookup::Ipv4) {
+			self.accept(Lookup::Ipv4, addrs);
+		}
 	}
 
 	/// Wait for the full lookup to answer.
@@ -772,6 +812,34 @@ mod tests {
 		assert_eq!(candidates.next().await, Some(addr("[2001:db8::1]:443")));
 		assert_eq!(start.elapsed(), Duration::from_secs(1), "waited on the full answer");
 		assert_eq!(candidates.next().await, None, "an address was dialed twice");
+	}
+
+	/// The full answer supersedes fast-lane addresses that are still queued, not
+	/// just the ones after them.
+	///
+	/// A queued IPv4 address must not jump ahead of the one the platform put
+	/// first once that answer has landed: with a broken IPv4 path, every one of
+	/// them would burn a stagger before the IPv6 address sitting right there got
+	/// its turn.
+	#[tokio::test(start_paused = true)]
+	async fn a_queued_address_yields_to_the_full_answer() {
+		let mut candidates = Candidates::slow(
+			(
+				&addrs(&["[2001:db8::1]:443", "1.2.3.4:443", "5.6.7.8:443"]),
+				Duration::from_millis(10),
+			),
+			(&addrs(&["1.2.3.4:443", "5.6.7.8:443"]), Duration::ZERO),
+		);
+
+		// The fast lane is all there is to go on at first.
+		assert_eq!(candidates.next().await, Some(addr("1.2.3.4:443")));
+
+		// That dial is in flight when the full answer lands, so the next candidate
+		// comes from the platform's order rather than the fast lane's leftovers.
+		tokio::time::sleep(Duration::from_millis(20)).await;
+		assert_eq!(candidates.next().await, Some(addr("[2001:db8::1]:443")));
+		assert_eq!(candidates.next().await, Some(addr("5.6.7.8:443")));
+		assert_eq!(candidates.next().await, None);
 	}
 
 	/// A dial that resolves nothing reports why, and reports it once.
