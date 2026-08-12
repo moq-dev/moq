@@ -276,7 +276,7 @@ impl Media {
 								}
 							};
 							let mut decode = moq_video::decode::Config::new();
-							decode.latency_max = Some(self.args.latency_max);
+							decode.latency = moq_mux::Latency::max(self.args.latency_max);
 							match moq_video::decode::Consumer::new(&rendition, &config, &name, decode).await {
 								Ok(consumer) => {
 									tracing::info!(track = name, decoder = consumer.name(), "playing video rendition");
@@ -308,7 +308,7 @@ impl Media {
 								}
 							};
 							let mut decode = moq_audio::decode::Config::new();
-							decode.latency_max = Some(self.args.latency_max);
+							decode.latency = moq_mux::Latency::max(self.args.latency_max);
 							// The sink and the frame-duration math below both assume f32,
 							// so ask for it rather than inheriting the decoder default.
 							decode.format = moq_audio::Format::F32;
