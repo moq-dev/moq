@@ -303,18 +303,6 @@ fn run_emulator(
 	let mut emu = emulator::Emulator::new(rom_path)?;
 	let start = Instant::now();
 
-	// Run a single tick so the encoders get initial data and publish
-	// codec config, even before any viewer subscribes.
-	emu.tick();
-	let elapsed = start.elapsed();
-	let rgba = Bytes::from(emu.framebuffer());
-	let ts = hang::container::Timestamp::from_micros(elapsed.as_micros() as u64).context("timestamp overflow")?;
-	session.video_encoder.try_frame(rgba, ts);
-	let samples = emu.audio_samples();
-	if !samples.is_empty() {
-		audio_encoder.push_samples(&samples, elapsed)?;
-	}
-
 	// Game Boy runs at exactly 59.727 Hz (4194304 Hz CPU / 70224 cycles per frame).
 	// 1/59.727 ≈ 16742 microseconds per frame.
 	let frame_duration = Duration::from_micros(16_742);

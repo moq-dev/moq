@@ -280,9 +280,10 @@ impl MoqBroadcastProducer {
 	///
 	/// The encoder opens here, so an unsupported codec, resolution, or backend
 	/// fails now rather than on the first frame. The track is named after the
-	/// codec (`.avc3` / `.hev1`) and its catalog rendition appears once the first
-	/// keyframe has been encoded, which is where the resolution and codec string
-	/// come from.
+	/// codec (`.avc3` / `.hev1`) and its catalog rendition is published
+	/// immediately, describing what this config will encode, so a subscriber can
+	/// find the track before a frame is written to it. The first keyframe's
+	/// parameter sets refine the rendition in band.
 	pub fn publish_video(
 		&self,
 		input: MoqVideoEncoderInput,
@@ -305,7 +306,7 @@ impl MoqBroadcastProducer {
 			Ok(moq_video::encode::Producer::new(
 				state.broadcast.clone(),
 				state.catalog.clone(),
-				config.codec,
+				&config,
 			)?)
 		})?;
 

@@ -1,7 +1,8 @@
 //! Publish encoded video frames as a moq video track, with optional capture.
 //!
-//! Encoding is strictly on demand: the track and catalog entry are advertised
-//! immediately, but the camera stays closed (LED off, no CPU) until a subscriber
+//! Encoding is strictly on demand: the track and its catalog rendition are
+//! advertised immediately (from the [`Hint`], since nothing has been encoded
+//! yet), but the camera stays closed (LED off, no CPU) until a subscriber
 //! appears. When the last viewer leaves, the camera is released again. This
 //! mirrors `moq-boy`, which pauses its emulator on `track::Producer::used()` /
 //! `unused()`.
@@ -19,7 +20,6 @@ use crate::Frame;
 #[cfg(feature = "capture")]
 use crate::capture;
 
-use super::Encoded;
 #[cfg(feature = "capture")]
 use super::Sink;
 #[cfg(any(feature = "capture", test))]
@@ -27,6 +27,7 @@ use super::encoder;
 use super::encoder::Codec;
 #[cfg(feature = "capture")]
 use super::rate::{Control, Policy};
+use super::{Encoded, Hint};
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
 #[cfg(feature = "capture")]
@@ -60,27 +61,39 @@ pub struct Producer<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Producer<E> {
-	/// Publish a track for `codec` into `broadcast`, registering its rendition
-	/// in `catalog`. The frames fed to [`publish`](Self::publish) must be in
-	/// that codec's framing (the matching [`Encoder`](super::Encoder) emits it).
+	/// Publish a track for `hint`'s codec into `broadcast`, registering its
+	/// rendition in `catalog`. The frames fed to [`publish`](Self::publish) must
+	/// be in that codec's framing (the matching [`Encoder`](super::Encoder)
+	/// emits it).
+	///
+	/// The rendition is published here, before anything is encoded, from what
+	/// [`Hint`] says the stream will be; pass `(&config).into()` for an
+	/// [`Encoder`](super::Encoder)'s [`Config`](super::Config), or a bare
+	/// [`Codec`] when that's all you have. Publishing up front is what lets a
+	/// subscriber discover the track, which is what an encoder running only
+	/// while watched is waiting for. The first keyframe's parameter sets refine
+	/// the rendition in band.
 	pub fn new(
 		mut broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
-		codec: Codec,
+		hint: impl Into<Hint>,
 	) -> Result<Self, Error> {
-		let codecs = match codec {
+		let hint = hint.into();
+		let overlay = moq_mux::catalog::VideoHint::from(&hint);
+
+		let codecs = match hint.codec {
 			Codec::H264 => {
 				let track = broadcast.unique_track(".avc3", catalog.track_info())?;
 				Codecs::H264 {
 					split: moq_mux::codec::h264::Split::new(),
-					import: moq_mux::codec::h264::Import::new(track, catalog.reserve(), Default::default())?,
+					import: moq_mux::codec::h264::Import::new(track, catalog.reserve(), overlay)?,
 				}
 			}
 			Codec::H265 => {
 				let track = broadcast.unique_track(".hev1", catalog.track_info())?;
 				Codecs::H265 {
 					split: moq_mux::codec::h265::Split::new(),
-					import: moq_mux::codec::h265::Import::new(track, catalog.reserve(), Default::default())?,
+					import: moq_mux::codec::h265::Import::new(track, catalog.reserve(), overlay)?,
 				}
 			}
 		};
@@ -227,7 +240,14 @@ pub async fn publish_capture<E: CatalogExt>(
 		return Err(Error::InvalidFramerate(0));
 	}
 
-	let mut producer = Producer::new(broadcast, catalog, encode.codec)?;
+	// Only what the caller pinned: the rest of the geometry belongs to the camera,
+	// which is still closed, and the first keyframe fills it in.
+	let mut hint = Hint::new(encode.codec);
+	hint.size = capture.width.zip(capture.height).map(|(w, h)| crate::Size::new(w, h));
+	hint.framerate = capture.framerate;
+	hint.bitrate = encode.bitrate;
+
+	let mut producer = Producer::new(broadcast, catalog, hint)?;
 	let demand = producer.demand();
 
 	let result = capture_loop(&mut producer, &demand, &capture, &encode, &clock).await;
@@ -332,10 +352,8 @@ fn log_track_ended(err: moq_net::Error) {
 	}
 }
 
-/// Async capture/encode loop. Captures one frame up front to populate the
-/// catalog (the codec/resolution only exist once the encoder has produced an
-/// SPS), then releases the camera whenever the last viewer leaves and reopens it
-/// when one returns.
+/// Async capture/encode loop. Opens the camera while at least one viewer is
+/// watching and releases it when the last one leaves.
 ///
 /// Cancel safety: every wait here is a real `.await` (a frame read, a demand
 /// transition, or an encode), so dropping this future (e.g. on Ctrl+C) drops
@@ -351,19 +369,13 @@ async fn capture_loop<E: CatalogExt>(
 	encode: &Options,
 	clock: &moq_mux::Clock,
 ) -> Result<(), Error> {
-	// The catalog video rendition only appears once a frame has been encoded (the
-	// importer reads the SPS). Until then we capture regardless of demand so a
-	// catalog-driven subscriber can discover the track and trigger `used()`.
-	// After that we release the camera while unwatched.
-	let mut catalog_ready = false;
-
 	loop {
-		if catalog_ready {
-			// Idle until a viewer subscribes; the track ending is a clean exit.
-			if let Err(err) = demand.used().await {
-				log_track_ended(err);
-				return Ok(());
-			}
+		// Idle until a viewer subscribes; the track ending is a clean exit. The
+		// catalog rendition was published when the track was created, so a
+		// subscriber can get here without a frame ever having been encoded.
+		if let Err(err) = demand.used().await {
+			log_track_ended(err);
+			return Ok(());
 		}
 
 		// Open the camera and an encoder sized to its negotiated mode.
@@ -395,29 +407,25 @@ async fn capture_loop<E: CatalogExt>(
 			.map(|bandwidth| (bandwidth, Control::new(Policy::new(encoder_config.resolved_bitrate()))));
 
 		loop {
-			// While watched, race the next frame against the last viewer leaving so
-			// we release the camera promptly when demand drops. `biased` checks
-			// demand first so an unwatched track stops before reading another frame.
-			let frame = if catalog_ready {
-				tokio::select! {
-					biased;
-					res = demand.unused() => {
-						if let Err(err) = res {
-							log_track_ended(err);
-							return Ok(());
-						}
-						break; // no viewers: release the camera, then wait for one
+			// Race the next frame against the last viewer leaving so we release the
+			// camera promptly when demand drops. `biased` checks demand first so an
+			// unwatched track stops before reading another frame.
+			let frame = tokio::select! {
+				biased;
+				res = demand.unused() => {
+					if let Err(err) = res {
+						log_track_ended(err);
+						return Ok(());
 					}
-					// Retune between frames rather than mid-encode, and only when
-					// the policy says the target actually moved.
-					estimate = next_estimate(&mut rate) => {
-						apply_estimate(&mut encoder, &mut rate, estimate).await;
-						continue;
-					}
-					frame = camera.read() => frame,
+					break; // no viewers: release the camera, then wait for one
 				}
-			} else {
-				camera.read().await
+				// Retune between frames rather than mid-encode, and only when
+				// the policy says the target actually moved.
+				estimate = next_estimate(&mut rate) => {
+					apply_estimate(&mut encoder, &mut rate, estimate).await;
+					continue;
+				}
+				frame = camera.read() => frame,
 			};
 
 			let Some(surface) = frame else { break }; // device stopped producing frames
@@ -429,36 +437,34 @@ async fn capture_loop<E: CatalogExt>(
 				encoder.keyframe();
 				force_keyframe = false;
 			}
-			let encoded = encoder.encode(frame).await?;
-			// Once the encoder emits a frame the importer has parsed the SPS and
-			// the catalog rendition exists, so demand gating can take over.
-			catalog_ready |= !encoded.is_empty();
-			producer.publish(&encoded)?;
+			producer.publish(&encoder.encode(frame).await?)?;
 		}
 
 		// Drop the camera (LED off) and encoder before waiting for the next viewer.
 		drop(camera);
-		if catalog_ready {
-			tracing::info!("no viewers: released camera");
-		}
+		tracing::info!("no viewers: released camera");
 	}
 }
 
 #[cfg(test)]
 mod tests {
+	use moq_mux::catalog::Stream as _;
+
 	use super::*;
 	use crate::encode::{Config, Encoder};
 
 	/// Encode a handful of synthetic frames for `codec` and publish them through a
-	/// real [`Producer`], returning the catalog rendition's track name. The
-	/// rendition only appears once the matching importer parses the codec config
-	/// out of the encoded keyframe, so a returned name proves the whole
-	/// encode -> split -> import -> catalog path works for that codec.
+	/// real [`Producer`], returning the catalog rendition's track name and config.
+	///
+	/// The producer is built from a bare codec, so the rendition starts with no
+	/// dimensions: a config carrying them is one the matching importer resolved
+	/// from the encoded keyframe, which proves the whole encode -> split ->
+	/// import -> catalog path works for that codec.
 	///
 	/// `kind` is explicit so the test picks a deterministic encoder rather than
 	/// `Auto`, which on Linux CI would try the NVENC backend and panic in cudarc
 	/// on a GPU-less runner.
-	async fn roundtrip_rendition(codec: Codec, kind: encoder::Kind) -> String {
+	async fn roundtrip_rendition(codec: Codec, kind: encoder::Kind) -> (String, hang::catalog::VideoConfig) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut producer = Producer::new(broadcast, catalog.clone(), codec).unwrap();
@@ -481,21 +487,58 @@ mod tests {
 		snapshot
 			.video
 			.renditions
-			.keys()
+			.iter()
 			.next()
-			.cloned()
+			.map(|(name, config)| (name.clone(), config.clone()))
 			.expect("the importer should have registered a video rendition")
+	}
+
+	/// Regression: the rendition has to reach the wire before anything is encoded.
+	///
+	/// A catalog reservation is held until the rendition resolves, and an unresolved one withholds
+	/// the whole catalog from the broadcast. An encoder that runs only while watched then closes a
+	/// cycle: the catalog waits on a keyframe, the keyframe waits on a subscriber, and the
+	/// subscriber waits on the catalog. Nothing errors on either side; the publisher simply serves
+	/// nothing, forever.
+	#[tokio::test]
+	async fn the_rendition_reaches_the_wire_before_the_first_frame() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		let mut config = Config::new(1920, 1080, 30);
+		config.bitrate = Some(6_000_000);
+		let _producer = Producer::new(broadcast, catalog, &config).unwrap();
+
+		// Published, not merely staged: this reads the catalog track a subscriber would.
+		let mut stream = moq_mux::catalog::Consumer::<()>::new(&consumer, moq_mux::catalog::CatalogFormat::Hang)
+			.await
+			.unwrap();
+		let snapshot = stream.next().await.unwrap().expect("a catalog before any frame");
+
+		let (name, rendition) = snapshot
+			.video
+			.renditions
+			.iter()
+			.next()
+			.expect("the track must be discoverable before it has encoded anything");
+		assert!(name.ends_with(".avc3"));
+		// High profile at level 4.0, the level 1080p30 at 6 Mbps resolves to.
+		assert_eq!(rendition.codec.to_string(), "avc3.640028");
+		assert_eq!(rendition.coded_width, Some(1920));
+		assert_eq!(rendition.coded_height, Some(1080));
+		assert_eq!(rendition.framerate, Some(30.0));
+		assert_eq!(rendition.bitrate, Some(6_000_000));
 	}
 
 	#[tokio::test]
 	async fn h264_roundtrip_publishes_avc3() {
 		// Software (openh264) so the test is deterministic and never touches a
 		// hardware backend.
-		assert!(
-			roundtrip_rendition(Codec::H264, encoder::Kind::Software)
-				.await
-				.ends_with(".avc3")
-		);
+		let (name, config) = roundtrip_rendition(Codec::H264, encoder::Kind::Software).await;
+		assert!(name.ends_with(".avc3"));
+		assert_eq!(config.coded_width, Some(320), "the SPS should have refined the hint");
+		assert_eq!(config.coded_height, Some(240));
 	}
 
 	/// H.265 has no software encoder, so this only runs where a hardware one
@@ -503,10 +546,9 @@ mod tests {
 	#[cfg(target_os = "macos")]
 	#[tokio::test]
 	async fn h265_roundtrip_publishes_hev1() {
-		assert!(
-			roundtrip_rendition(Codec::H265, encoder::Kind::Hardware)
-				.await
-				.ends_with(".hev1")
-		);
+		let (name, config) = roundtrip_rendition(Codec::H265, encoder::Kind::Hardware).await;
+		assert!(name.ends_with(".hev1"));
+		assert_eq!(config.coded_width, Some(320), "the SPS should have refined the hint");
+		assert_eq!(config.coded_height, Some(240));
 	}
 }

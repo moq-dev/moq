@@ -14,6 +14,10 @@ use bytes::Bytes;
 
 use crate::emulator::{HEIGHT, WIDTH};
 
+/// The Game Boy's 59.727 Hz, rounded: the encoder's time base and the framerate the catalog
+/// advertises.
+const FRAMERATE: u32 = 60;
+
 /// Handle to the video encoding thread.
 ///
 /// Frames are submitted via `try_frame()` (non-blocking, drops if full).
@@ -40,8 +44,16 @@ enum EncoderMsg {
 impl VideoEncoder {
 	pub fn spawn(broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Self {
 		let (tx, rx) = tokio::sync::mpsc::channel(4);
-		let producer = moq_video::encode::Producer::new(broadcast, catalog, moq_video::encode::Codec::H264)
-			.expect("failed to create avc3 producer");
+
+		// Game Boy is 160x144; force the openh264 software encoder since hardware
+		// encoders can reject such tiny resolutions.
+		let mut config = moq_video::encode::Config::new(WIDTH, HEIGHT, FRAMERATE);
+		config.kind = moq_video::encode::Kind::Software;
+
+		// The catalog rendition publishes from this config, before the emulator has
+		// run a frame, which is what lets a viewer discover a paused moq-boy.
+		let producer =
+			moq_video::encode::Producer::new(broadcast, catalog, &config).expect("failed to create avc3 producer");
 		let demand = producer.demand();
 
 		let force_keyframe = Arc::new(AtomicBool::new(false));
@@ -50,7 +62,7 @@ impl VideoEncoder {
 		let ed = encode_duration.clone();
 		let thread = std::thread::Builder::new()
 			.name("video-encoder".into())
-			.spawn(move || encoder_thread(rx, producer, fk, ed))
+			.spawn(move || encoder_thread(rx, producer, config, fk, ed))
 			.expect("failed to spawn video encoder thread");
 
 		Self {
@@ -97,6 +109,7 @@ impl VideoEncoder {
 fn encoder_thread(
 	mut rx: tokio::sync::mpsc::Receiver<EncoderMsg>,
 	mut producer: moq_video::encode::Producer,
+	config: moq_video::encode::Config,
 	force_keyframe: Arc<AtomicBool>,
 	encode_duration: Arc<AtomicU64>,
 ) {
@@ -116,10 +129,7 @@ fn encoder_thread(
 		let enc = match encoder.as_mut() {
 			Some(enc) => enc,
 			None => {
-				// Game Boy is 160x144; force the openh264 software encoder since
-				// hardware encoders can reject such tiny resolutions.
-				let mut config = moq_video::encode::Config::new(WIDTH, HEIGHT, 60);
-				config.kind = moq_video::encode::Kind::Software;
+				// Opened on the first frame, so a paused emulator holds no encoder.
 				match moq_video::encode::Encoder::new(&config) {
 					Ok(enc) => encoder.insert(enc),
 					Err(e) => {

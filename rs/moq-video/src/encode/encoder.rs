@@ -107,12 +107,15 @@ impl Config {
 
 	/// Resolved bitrate: explicit override, or a pixels-per-second estimate.
 	pub(crate) fn resolved_bitrate(&self) -> u64 {
-		self.bitrate.unwrap_or_else(|| {
-			// 0.07 bits per pixel per second matches the JS publisher's
-			// default and lands ~4.4 Mbps for 1080p30.
-			((self.size().pixels() * self.framerate as u64) as f64 * 0.07) as u64
-		})
+		self.bitrate
+			.unwrap_or_else(|| default_bitrate(self.size(), self.framerate))
 	}
+}
+
+/// The bitrate an unconfigured encode resolves to: 0.07 bits per pixel per second, which matches
+/// the JS publisher's default and lands ~4.4 Mbps for 1080p30.
+pub(crate) fn default_bitrate(size: Size, framerate: u32) -> u64 {
+	((size.pixels() * framerate as u64) as f64 * 0.07) as u64
 }
 
 /// Video encoder. Build one with [`Encoder::new`], feed it raw [`Frame`]s via

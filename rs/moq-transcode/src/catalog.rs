@@ -1,7 +1,7 @@
 //! Derivative catalog construction: pick the source rendition, size the ladder
 //! against it, and fill the output catalog with rung + passthrough entries.
 
-use hang::catalog::{AV1, H264, Video, VideoCodec, VideoConfig};
+use hang::catalog::{AV1, Video, VideoCodec, VideoConfig};
 use moq_net::PathRelativeOwned;
 
 use crate::{Error, Rung};
@@ -95,22 +95,16 @@ pub(crate) fn resolve_rungs(rungs: &[Rung], source_name: &str, source: &VideoCon
 
 /// The catalog entry for a resolved rung.
 ///
-/// The codec string is computed from the ladder, not the bitstream, so the
-/// catalog can be published before any encoder exists and stays deterministic:
-/// avc3 (in-band parameter sets, matching what every `moq-video` backend
-/// emits), High profile (a superset of what any backend produces, so decoder
-/// capability checks pass), and the level from the Table A-1 lookup.
+/// Built from the ladder rather than the bitstream, via the same
+/// [`Hint`](moq_video::encode::Hint) a `moq-video` publisher advertises its own track with, so the
+/// catalog can be published before any encoder exists and stays deterministic.
 pub(crate) fn rung_entry(rung: &Resolved, source: &VideoConfig) -> VideoConfig {
-	let mut config = VideoConfig::new(H264 {
-		inline: true,
-		profile: 0x64,
-		constraints: 0,
-		level: h264_level(rung.size.width, rung.size.height, rung.framerate, rung.bitrate),
-	});
-	config.coded_width = Some(rung.size.width);
-	config.coded_height = Some(rung.size.height);
-	config.bitrate = Some(rung.bitrate);
-	config.framerate = Some(rung.framerate as f64);
+	let mut hint = moq_video::encode::Hint::new(moq_video::encode::Codec::H264);
+	hint.size = Some(rung.size);
+	hint.framerate = Some(rung.framerate);
+	hint.bitrate = Some(rung.bitrate);
+
+	let mut config = VideoConfig::from(&hint);
 	config.optimize_for_latency = source.optimize_for_latency;
 	config
 }
@@ -168,43 +162,10 @@ pub(crate) fn populate(
 	Ok(())
 }
 
-/// The smallest H.264 level (Table A-1) that fits the given geometry, frame
-/// rate, and bitrate, as a `level_idc` (level 3.1 -> 31, printed `1f` in the
-/// codec string).
-fn h264_level(width: u32, height: u32, framerate: u32, bitrate: u64) -> u8 {
-	// (level_idc, MaxMBPS, MaxFS, MaxBR in kbit/s at the Baseline/Main factor).
-	const LEVELS: &[(u8, u64, u64, u64)] = &[
-		(10, 1_485, 99, 64),
-		(11, 3_000, 396, 192),
-		(12, 6_000, 396, 384),
-		(13, 11_880, 396, 768),
-		(20, 11_880, 396, 2_000),
-		(21, 19_800, 792, 4_000),
-		(22, 20_250, 1_620, 4_000),
-		(30, 40_500, 1_620, 10_000),
-		(31, 108_000, 3_600, 14_000),
-		(32, 216_000, 5_120, 20_000),
-		(40, 245_760, 8_192, 20_000),
-		(41, 245_760, 8_192, 50_000),
-		(42, 522_240, 8_704, 50_000),
-		(50, 589_824, 22_080, 135_000),
-		(51, 983_040, 36_864, 240_000),
-		(52, 2_073_600, 36_864, 240_000),
-	];
-
-	let macroblocks = width.div_ceil(16) as u64 * height.div_ceil(16) as u64;
-	let macroblocks_per_sec = macroblocks * framerate as u64;
-	for &(idc, max_mbps, max_fs, max_br) in LEVELS {
-		// High profile raises the bitrate cap by cpbBrVclFactor 1250/1000.
-		if macroblocks <= max_fs && macroblocks_per_sec <= max_mbps && bitrate <= max_br * 1250 {
-			return idc;
-		}
-	}
-	52
-}
-
 #[cfg(test)]
 mod tests {
+	use hang::catalog::H264;
+
 	use super::*;
 
 	fn source(width: u32, height: u32, bitrate: Option<u64>) -> VideoConfig {
@@ -280,17 +241,29 @@ mod tests {
 		));
 	}
 
+	/// A rung's entry describes the rung, not the source: the codec string's level and every
+	/// dimension come from what this rung will encode, since a player picks between rungs on
+	/// exactly those fields before a single frame exists.
 	#[test]
-	fn level_lookup() {
-		// 640x360 @ 30fps is 920 MBs * 30 = 27600 MB/s: past level 2.2's 20250,
-		// so it lands on level 3.0.
-		assert_eq!(h264_level(640, 360, 30, 600_000), 30);
-		// 1080p30 at 5 Mbit/s needs level 4.0 for the frame size.
-		assert_eq!(h264_level(1920, 1080, 30, 5_000_000), 40);
-		// 1080p60 pushes the MB rate past level 4.0 into 4.2.
-		assert_eq!(h264_level(1920, 1080, 60, 5_000_000), 42);
-		// Absurd input clamps to the highest level.
-		assert_eq!(h264_level(8192, 8192, 120, u64::MAX), 52);
+	fn rung_entry_describes_the_rung() {
+		let rung = Resolved {
+			name: "video/360p".to_string(),
+			size: moq_video::Size::new(640, 360),
+			bitrate: 600_000,
+			framerate: 30,
+		};
+		let mut source = source(1920, 1080, Some(6_000_000));
+		source.optimize_for_latency = Some(true);
+
+		let entry = rung_entry(&rung, &source);
+		// 640x360 @ 30fps is 920 MBs * 30 = 27600 MB/s: past level 2.2's 20250, so level 3.0.
+		assert_eq!(entry.codec.to_string(), "avc3.64001e");
+		assert_eq!(entry.coded_width, Some(640));
+		assert_eq!(entry.coded_height, Some(360));
+		assert_eq!(entry.bitrate, Some(600_000));
+		assert_eq!(entry.framerate, Some(30.0));
+		// Inherited from the source: latency is a property of the stream, not the ladder.
+		assert_eq!(entry.optimize_for_latency, Some(true));
 	}
 
 	#[test]

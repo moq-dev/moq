@@ -295,7 +295,7 @@ impl Video {
 		config: &moq_video::encode::Config,
 		encoder: moq_video::encode::Sink,
 	) -> Result<Id, Error> {
-		let producer = moq_video::encode::Producer::new(broadcast.clone(), catalog, config.codec)?;
+		let producer = moq_video::encode::Producer::new(broadcast.clone(), catalog, config)?;
 		self.producers.insert(Shared::new(VideoEncoder {
 			encoder,
 			producer,
@@ -463,8 +463,10 @@ unsafe fn encoder_kind(output: &moq_video_encoder_output) -> Result<moq_video::e
 ///
 /// The encoder is opened here, so an unsupported codec, resolution, or backend
 /// fails now rather than on the first frame. The track is named after the codec
-/// (`.avc3` / `.hev1`) and its catalog rendition appears once the first keyframe
-/// has been encoded, which is where the resolution and codec string come from.
+/// (`.avc3` / `.hev1`) and its catalog rendition is published immediately,
+/// describing what this config will encode, so a subscriber can find the track
+/// before a frame is written to it. The first keyframe's parameter sets refine
+/// the rendition in band.
 ///
 /// Returns a non-zero handle on success or a negative error code.
 ///
