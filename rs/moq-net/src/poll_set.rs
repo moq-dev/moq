@@ -143,27 +143,27 @@ impl<T: Machine> PollSet<T> {
 			}
 		}
 
-		loop {
-			let ready = std::mem::take(&mut *self.shared.ready.lock().unwrap());
-			if ready.is_empty() {
-				break;
-			}
-			for index in ready {
-				// A stale index (the child finished, maybe its slot was reused) is
-				// skipped or costs one spurious poll; both are harmless.
-				let Some(child) = self.children.get_mut(index).and_then(Option::as_mut) else {
-					continue;
-				};
-				// Cleared before polling: a wake landing mid-poll re-queues the child
-				// rather than being lost.
-				child.flag.dirty.store(false, Ordering::Release);
-				let cx = Context::from_waker(&child.waker);
-				let child_waiter = child.park.hold(&cx);
-				if child.machine.poll(child_waiter).is_ready() {
-					self.children[index] = None;
-					self.free.push(index);
-					self.len -= 1;
-				}
+		// One snapshot per parent poll: a child woken during the pass (including a
+		// self-wake before returning Pending) re-queues itself and has already
+		// woken the parent through its ChildWaker, so the executor re-polls this
+		// set. Looping here instead would let a self-waking child spin without
+		// ever yielding, starving the caller's other arms.
+		let ready = std::mem::take(&mut *self.shared.ready.lock().unwrap());
+		for index in ready {
+			// A stale index (the child finished, maybe its slot was reused) is
+			// skipped or costs one spurious poll; both are harmless.
+			let Some(child) = self.children.get_mut(index).and_then(Option::as_mut) else {
+				continue;
+			};
+			// Cleared before polling: a wake landing mid-poll re-queues the child
+			// rather than being lost.
+			child.flag.dirty.store(false, Ordering::Release);
+			let cx = Context::from_waker(&child.waker);
+			let child_waiter = child.park.hold(&cx);
+			if child.machine.poll(child_waiter).is_ready() {
+				self.children[index] = None;
+				self.free.push(index);
+				self.len -= 1;
 			}
 		}
 
@@ -302,5 +302,51 @@ mod tests {
 
 		let _ = gated(&mut set);
 		assert!(flag.0.load(Ordering::SeqCst), "the push missed the parent");
+	}
+
+	/// A transport is allowed to self-wake before returning Pending. Such a child
+	/// must be polled once per parent poll, not spun on inside it, or it starves
+	/// the caller's other arms; the re-queue instead wakes the parent for the
+	/// next round.
+	#[test]
+	fn a_self_waking_child_yields_to_the_parent() {
+		struct Flag(AtomicBool);
+		impl Wake for Flag {
+			fn wake(self: Arc<Self>) {
+				self.0.store(true, Ordering::SeqCst);
+			}
+		}
+
+		struct SelfWaking {
+			polls: Arc<AtomicUsize>,
+		}
+		impl Machine for SelfWaking {
+			fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+				self.polls.fetch_add(1, Ordering::SeqCst);
+				waiter.waker().wake_by_ref();
+				Poll::Pending
+			}
+		}
+
+		let mut set = PollSet::new();
+		let polls = Arc::new(AtomicUsize::new(0));
+		set.push(SelfWaking { polls: polls.clone() });
+
+		let flag = Arc::new(Flag(AtomicBool::new(false)));
+		let waiter = kio::Waiter::new(Waker::from(flag.clone()));
+
+		assert!(set.poll(&waiter).is_pending());
+		assert_eq!(polls.load(Ordering::SeqCst), 1, "one poll per parent poll");
+		assert!(
+			flag.0.swap(false, Ordering::SeqCst),
+			"the re-queue must wake the parent"
+		);
+
+		assert!(set.poll(&waiter).is_pending());
+		assert_eq!(
+			polls.load(Ordering::SeqCst),
+			2,
+			"the next parent poll runs the child again"
+		);
 	}
 }
