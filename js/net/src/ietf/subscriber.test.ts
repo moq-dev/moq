@@ -12,12 +12,31 @@ const VERSION = Version.DRAFT_19;
 /** How long to wait for a stream before calling it absent. */
 const STREAM_WAIT = 500;
 
-/** Accept the next stream the subscriber opens, or give up rather than hang forever. */
+/**
+ * Accept the next stream the subscriber opens, or give up rather than hang forever.
+ *
+ * Reads the queue directly instead of racing {@link Stream.accept}, whose pending read
+ * would keep the reader locked after the race resolves and could swallow a later stream.
+ */
 async function nextStream(transport: WebTransport): Promise<Stream | undefined> {
-	return Promise.race([
-		Stream.accept(transport, VERSION),
-		new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), STREAM_WAIT)),
-	]);
+	const reader =
+		transport.incomingBidirectionalStreams.getReader() as ReadableStreamDefaultReader<WebTransportBidirectionalStream>;
+
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const next = await Promise.race([
+			reader.read(),
+			new Promise<undefined>((resolve) => {
+				timer = setTimeout(() => resolve(undefined), STREAM_WAIT);
+			}),
+		]);
+
+		if (!next || next.done) return undefined;
+		return new Stream({ readable: next.value.readable, writable: next.value.writable, version: VERSION });
+	} finally {
+		clearTimeout(timer);
+		reader.releaseLock();
+	}
 }
 
 /**
@@ -51,13 +70,21 @@ test("an announcement from a peer that advertises nothing still lands", async ()
 
 	// What the connection dispatch does when a PUBLISH_NAMESPACE arrives.
 	const stream = await Stream.open(pair.server, { version: VERSION });
-	void subscriber.runPublishNamespace(
+	const handler = subscriber.runPublishNamespace(
 		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("surprise") }),
 		stream,
 	);
 
 	const next = await announced.next();
 	expect(next?.path).toBe(Path.from("surprise"));
+	expect(next?.active).toBe(true);
+
+	// The handler holds the request open until the peer drops it, and withdraws the
+	// namespace on the way out.
+	const peer = await nextStream(pair.client);
+	peer?.close();
+	await handler;
+	expect(await announced.next()).toMatchObject({ path: Path.from("surprise"), active: false });
 
 	// The feed ends with the session, since no stream of its own ever does it.
 	subscriber.close();

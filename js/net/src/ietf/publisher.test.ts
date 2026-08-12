@@ -17,12 +17,31 @@ const STREAM_WAIT = 1000;
 /** Long enough for the publish to reach the announce loop's signal. */
 const SETTLE = 5;
 
-/** Accept the next stream the publisher opens, or give up rather than hang forever. */
+/**
+ * Accept the next stream the publisher opens, or give up rather than hang forever.
+ *
+ * Reads the queue directly instead of racing {@link Stream.accept}, whose pending read
+ * would keep the reader locked after the race resolves and could swallow a later stream.
+ */
 async function nextStream(transport: WebTransport): Promise<Stream | undefined> {
-	return Promise.race([
-		Stream.accept(transport, VERSION),
-		new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), STREAM_WAIT)),
-	]);
+	const reader =
+		transport.incomingBidirectionalStreams.getReader() as ReadableStreamDefaultReader<WebTransportBidirectionalStream>;
+
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const next = await Promise.race([
+			reader.read(),
+			new Promise<undefined>((resolve) => {
+				timer = setTimeout(() => resolve(undefined), STREAM_WAIT);
+			}),
+		]);
+
+		if (!next || next.done) return undefined;
+		return new Stream({ readable: next.value.readable, writable: next.value.writable, version: VERSION });
+	} finally {
+		clearTimeout(timer);
+		reader.releaseLock();
+	}
 }
 
 /** Read one PUBLISH_NAMESPACE off a stream the publisher opened. */
