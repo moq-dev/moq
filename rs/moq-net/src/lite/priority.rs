@@ -35,9 +35,9 @@ pub struct Priority {
 	track: u8,
 	subscribe: u64,
 	group: u64,
-	/// The owning subscription's `Ordered` preference. Only ever read when
-	/// `subscribe` matches, so both sides of such a comparison agree on it; see
-	/// [`PriorityState::set_ordered`] for what keeps that true.
+	/// The owning subscription's `Ordered` preference, which decides which way
+	/// `group` is read. [`PriorityState::set_ordered`] moves a whole
+	/// subscription's groups at once so they agree on it.
 	ordered: bool,
 }
 
@@ -74,7 +74,15 @@ impl Ord for Priority {
 			// stable and independent of either one's direction. The older (lower id)
 			// subscription goes first.
 			.then(self.subscribe.cmp(&other.subscribe))
-			// Same subscription, so both sides carry its direction.
+			// Normally redundant, since one subscription's groups all carry its
+			// direction. It is here so the comparison below is reached only by two
+			// groups that agree on it, which makes this a total order for every
+			// value rather than only for well-formed ones: reversing the sense for
+			// one side alone is intransitive, and `sort` is documented to be free
+			// to panic on a comparator that does that. Nothing in the protocol
+			// stops a peer opening two SUBSCRIBEs with one id and disagreeing.
+			.then(self.ordered.cmp(&other.ordered))
+			// Both sides agree on the direction, so it can be read off either.
 			.then_with(|| match self.ordered {
 				true => self.group.cmp(&other.group),
 				false => other.group.cmp(&self.group),
@@ -561,6 +569,35 @@ mod tests {
 		assert_eq!(handles[0].current(), 0);
 		assert_eq!(handles[1].current(), 1);
 		assert_eq!(handles[total - 1].current(), u8::MAX);
+	}
+
+	/// `Ord` has to hold for every value, not just the ones a well-behaved peer
+	/// produces. Nothing stops a peer opening two SUBSCRIBEs with the same id and
+	/// opposite `Ordered`, which lands both directions under one subscribe id, and
+	/// a comparator that says `a < b` and `b < a` is free to panic `sort`.
+	#[test]
+	fn test_ord_is_total_across_mixed_directions() {
+		let mixed = [
+			Priority::ordered(100, 7, 1),
+			Priority::new(100, 7, 1),
+			Priority::ordered(100, 7, 2),
+			Priority::new(100, 7, 2),
+			Priority::new(100, 8, 1),
+			Priority::new(200, 7, 1),
+		];
+
+		for a in mixed {
+			for b in mixed {
+				// Antisymmetric, and agreeing with Eq on what equality means.
+				assert_eq!(a.cmp(&b), b.cmp(&a).reverse(), "{a:?} vs {b:?}");
+				assert_eq!(a.cmp(&b) == Ordering::Equal, a == b, "{a:?} vs {b:?}");
+				for c in mixed {
+					if a.cmp(&b) != Ordering::Greater && b.cmp(&c) != Ordering::Greater {
+						assert_ne!(a.cmp(&c), Ordering::Greater, "{a:?} <= {b:?} <= {c:?}");
+					}
+				}
+			}
+		}
 	}
 
 	/// A flip must not disturb a subscription that did not ask for one.
