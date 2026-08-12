@@ -14,26 +14,44 @@ use std::{
 // - On remove from Vec: pop highest priority item from overflow heap to backfill
 // - On remove from overflow: rebuild heap (rare case, acceptable O(n) cost)
 //
-// Priority ordering: higher track value = higher priority, then higher group value = higher priority
+// Priority ordering: higher track value = higher priority, then higher group rank = higher priority
 
-/// A priority composed of a track-level priority and a group sequence number.
-/// Higher `track` is always preferred; `group` only breaks ties within the same track.
+/// A priority composed of a track-level priority and a group rank within the track.
+/// Higher `track` is always preferred; `group_rank` only breaks ties within the same
+/// track. The rank direction encodes the subscription's `Ordered` preference: a live
+/// subscription ranks newer groups first, an ordered one ranks older groups first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Priority {
-	pub track: u8,
-	pub group: u64,
+	track: u8,
+	group_rank: u64,
 }
 
 impl Priority {
+	/// Rank for a live (unordered) subscription: the newest group transmits first.
 	pub fn new(track: u8, group: u64) -> Self {
-		Self { track, group }
+		Self {
+			track,
+			group_rank: group,
+		}
+	}
+
+	/// Rank for an `Ordered` subscription: the oldest group transmits first, so
+	/// back-to-back groups leave the session in sequence order.
+	pub fn ordered(track: u8, group: u64) -> Self {
+		Self {
+			track,
+			group_rank: !group,
+		}
 	}
 }
 
 impl Ord for Priority {
 	fn cmp(&self, other: &Self) -> Ordering {
 		// Reverse ordering so highest priority sorts first (index 0)
-		other.track.cmp(&self.track).then(other.group.cmp(&self.group))
+		other
+			.track
+			.cmp(&self.track)
+			.then(other.group_rank.cmp(&self.group_rank))
 	}
 }
 
@@ -378,6 +396,20 @@ mod tests {
 		assert_eq!(group10.current(), 0);
 		assert_eq!(group5.current(), 1);
 		assert_eq!(group1.current(), 2);
+	}
+
+	#[test]
+	fn test_ordered_prefers_older_groups() {
+		let queue = PriorityQueue::default();
+
+		// Same track priority, ordered subscription: sequence order wins.
+		let mut group1 = queue.insert(Priority::ordered(100, 1));
+		let mut group5 = queue.insert(Priority::ordered(100, 5));
+		let mut group10 = queue.insert(Priority::ordered(100, 10));
+
+		assert_eq!(group1.current(), 0);
+		assert_eq!(group5.current(), 1);
+		assert_eq!(group10.current(), 2);
 	}
 
 	#[test]

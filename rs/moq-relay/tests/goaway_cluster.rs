@@ -447,9 +447,15 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	)
 	.await
 	.expect("broadcast announced");
+	// Ordered, because the verification below asserts strict sequence order.
+	// A live (unordered) subscription transmits the newest group first, so a
+	// back-to-back burst legally arrives inverted; `ordered` is the protocol's
+	// way to ask every hop for sequence-order transmission instead.
 	let mut sub = within(
 		"subscribe to the video track",
-		bc.track("video").expect("track handle").subscribe(None),
+		bc.track("video")
+			.expect("track handle")
+			.subscribe(moq_net::track::Subscription::default().with_ordered(true)),
 	)
 	.await
 	.expect("subscribe");

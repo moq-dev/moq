@@ -1016,6 +1016,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			priority,
 			track_priority: track_priority_tx.consume(),
 			track_priority_seen: subscribe.priority,
+			ordered: subscribe.ordered,
 			version,
 			timescale,
 		};
@@ -2117,6 +2118,10 @@ struct Subscription<S: web_transport_trait::Session> {
 	track_priority: kio::Consumer<u8>,
 	/// Last track priority observed by this clone, so a change only fires once.
 	track_priority_seen: u8,
+	/// The subscriber's `Ordered` preference: rank older groups first so they
+	/// transmit in sequence order, instead of the live default of newest first.
+	/// Applied to groups as they are queued; refreshed by SUBSCRIBE_UPDATE.
+	ordered: bool,
 	version: Version,
 	/// Negotiated timestamp scale for this track. `Some(_)` on lite-05+ after
 	/// TRACK_INFO; used to validate per-frame timestamps before encoding.
@@ -2253,6 +2258,9 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					if let Ok(mut value) = track_priority_tx.write() {
 						*value = upd.priority;
 					}
+					// Groups already queued keep their rank; only future groups adopt
+					// the new direction, matching how the wire treats mid-flight data.
+					self.ordered = upd.ordered;
 					// Feed the full update into the model subscriber so the producer's
 					// aggregate reflects it (and a relay re-forwards it upstream).
 					let bounds = Bounds::from(&upd);
@@ -2280,7 +2288,11 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 
 		// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
 		let current_priority = self.track_priority_current();
-		let handle = self.priority.insert(Priority::new(current_priority, sequence));
+		let priority = match self.ordered {
+			true => Priority::ordered(current_priority, sequence),
+			false => Priority::new(current_priority, sequence),
+		};
+		let handle = self.priority.insert(priority);
 		let fut = self.clone().serve_group(sequence, frame_start, handle, group);
 		tasks.push(fut.map(|_| ()).maybe_boxed());
 	}
@@ -2644,6 +2656,7 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
+			ordered: false,
 			version: Version::Lite06Wip,
 			timescale: Some(crate::Timescale::default()),
 		};
@@ -2684,6 +2697,7 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
+			ordered: false,
 			version: Version::Lite06Wip,
 			timescale: Some(crate::Timescale::default()),
 		};
