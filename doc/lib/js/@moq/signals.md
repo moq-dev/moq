@@ -221,6 +221,30 @@ new Effect((effect) => {
 
 A stale task may still want to bail for its own reasons, since work outside the effect's scope (plain fields, backoff counters) is not unwound for it. `close()` is permanent; reruns are not.
 
+One boundary is worth knowing, because it is the case where the guarantee above stops holding. A rerun waits at most **5 seconds** for outstanding `spawn` tasks before giving up and starting the next run (with a dev warning). A task that resumes after that cutoff no longer sees a dead run: its `cleanup` lands on the run that has since started, and is torn down with *that* run instead of firing immediately. So a `connect()` that takes longer than 5 seconds hands its socket to an unrelated run rather than closing it promptly.
+
+After `close()` the immediate teardown always holds, since there is no next run to inherit it. For reruns, keep spawned work inside the window, or make cancellation explicit:
+
+```ts
+new Effect((effect) => {
+	// Capture the signal during the run. Reading `effect.abort` after the cutoff returns the
+	// *next* run's controller, which is not aborted, so the check would silently pass.
+	const abort = effect.abort;
+
+	effect.spawn(async () => {
+		const socket = await connect();
+
+		// Past the 5s cutoff, cleanup() would defer to the run that has already started.
+		if (abort.aborted) {
+			socket.close();
+			return;
+		}
+
+		effect.cleanup(() => socket.close());
+	});
+});
+```
+
 ### Scoped helpers
 
 Use these instead of raw timers and listeners so cleanup is automatic. Do **not** reach for `setTimeout`, `setInterval`, `requestAnimationFrame`, or `addEventListener` directly inside an effect.
