@@ -11,7 +11,11 @@
 //! poll implementation inside `web-transport-wasm` would do better; migrate
 //! there once it grows one.
 
-use std::task::{Context, Poll, ready};
+use std::{
+	cell::Cell,
+	rc::Rc,
+	task::{Context, Poll, ready},
+};
 
 use bytes::Bytes;
 use futures::{FutureExt, future::LocalBoxFuture};
@@ -34,6 +38,12 @@ fn poll_op<T>(
 	Poll::Ready(output)
 }
 
+/// How many browser datagram sends may be outstanding before further ones are
+/// dropped. The browser API is promise-based with no readiness signal, so this
+/// is what keeps a backpressured connection from accumulating tasks and payload
+/// copies: at the 1200 byte limit below, the ceiling is under 10 KiB in flight.
+const MAX_PENDING_DATAGRAMS: usize = 8;
+
 /// A connected browser WebTransport session, usable by `moq-net`.
 pub struct Session {
 	inner: web_transport_wasm::Session,
@@ -43,6 +53,9 @@ pub struct Session {
 	open_bi: OpSlot<Result<(SendStream, RecvStream), Error>>,
 	recv_datagram: OpSlot<Result<Bytes, Error>>,
 	closed: OpSlot<Error>,
+	/// Datagram sends spawned but not yet settled. Shared by every clone, since
+	/// the connection they contend for is the shared resource.
+	datagrams_pending: Rc<Cell<usize>>,
 }
 
 impl Session {
@@ -55,15 +68,20 @@ impl Session {
 			open_bi: None,
 			recv_datagram: None,
 			closed: None,
+			datagrams_pending: Rc::new(Cell::new(0)),
 		}
 	}
 }
 
 // Manual impl: a clone starts with no in-flight operations, since each handle
-// owns its own progress under the poll contract.
+// owns its own progress under the poll contract. The datagram budget is the
+// exception, being a property of the connection rather than of one handle.
 impl Clone for Session {
 	fn clone(&self) -> Self {
-		Self::new(self.inner.clone())
+		Self {
+			datagrams_pending: self.datagrams_pending.clone(),
+			..Self::new(self.inner.clone())
+		}
 	}
 }
 
@@ -160,12 +178,24 @@ impl wtt::poll::Session for Session {
 	}
 
 	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		// The browser datagram API is async. moq drives all control/media over
-		// streams, so fire-and-forget is acceptable here.
+		// The browser datagram API is async, so the send runs on its own task and
+		// the caller is told the datagram was accepted either way: datagrams are
+		// best-effort, and the publisher has no fallback to offer if we said no.
+		// What it must not do is let a producer outrunning the network queue those
+		// tasks without bound, so past the budget the datagram is dropped here,
+		// which is the congestion behavior the caller already expects.
+		let pending = self.datagrams_pending.get();
+		if pending >= MAX_PENDING_DATAGRAMS {
+			return Poll::Ready(Ok(()));
+		}
+		self.datagrams_pending.set(pending + 1);
+
 		let session = self.inner.clone();
 		let payload = Bytes::copy_from_slice(payload);
+		let budget = self.datagrams_pending.clone();
 		web_async::spawn(async move {
 			let _ = session.send_datagram(payload).await;
+			budget.set(budget.get() - 1);
 		});
 		Poll::Ready(Ok(()))
 	}
