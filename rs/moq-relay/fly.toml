@@ -16,7 +16,7 @@ port = 443
 # Environment variables
 [env]
 # NOTE: A dedicated IPv4 address is required for UDP.
-MOQ_SERVER_BIND = "fly-global-services:443"
+MOQ_LISTEN = "fly-global-services:443"
 
 # Resource allocation per region
 [[vm]]

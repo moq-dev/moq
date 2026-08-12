@@ -164,11 +164,11 @@ cargo install moq-cli
 ```bash
 # Publish a video file (remux to MPEG-TS and pipe it in)
 ffmpeg -i input.mp4 -c copy -f mpegts - | \
-    moq --client-connect https://relay.example.com/anon --broadcast my-stream import ts
+    moq --connect https://relay.example.com/anon --broadcast my-stream import ts
 
 # Publish from FFmpeg
 ffmpeg -i input.mp4 -f mpegts - | \
-    moq --client-connect https://relay.example.com/anon --broadcast my-stream import ts
+    moq --connect https://relay.example.com/anon --broadcast my-stream import ts
 ```
 
 [Learn more](/bin/cli)
@@ -275,7 +275,7 @@ you, then [`moq-net`](/lib/rs/crate/moq-net) handles the MoQ handshake. Connect 
 a relay with a few lines:
 
 ```rust
-let client = moq_native::ClientConfig::default().init()?;
+let client = moq_native::connect::Config::default().init()?;
 let url = url::Url::parse("https://cdn.moq.dev/anon")?;
 
 // The connection redials with backoff if it drops; drop the handle to disconnect.

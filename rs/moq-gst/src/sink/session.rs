@@ -144,10 +144,10 @@ impl Session {
 		// retry), posting the bus error below. During an outage the pad threads keep writing (bounded
 		// by moq-net's per-group eviction) and the relay catches up from a group boundary on
 		// reconnect. A bounded policy is available via `ClientConfig::backoff`.
-		let mut config = moq_native::ClientConfig::default();
-		config.tls.disable_verify = Some(settings.tls_disable_verify);
+		let mut config = moq_native::connect::Config::default();
+		config.tls.insecure = Some(settings.tls_disable_verify);
 		config.backoff.timeout = Some(std::time::Duration::ZERO);
-		let client = config.init()?.with_publisher(origin.consume());
+		let client = config.init(Default::default())?.with_publisher(origin.consume());
 		let reconnect = client.connect(settings.url.clone());
 		// Persistent handles that survive reconnects; the getters read them without touching the loop.
 		let send_bandwidth = reconnect.send_bandwidth();

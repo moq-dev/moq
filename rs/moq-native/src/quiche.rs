@@ -1,11 +1,11 @@
 //! QUIC backend built on [`web_transport_quiche`], speaking WebTransport over HTTP/3
 //! (`https://`) or raw QUIC (`moqt://` / `moql://`).
 
-use crate::client::ClientConfig;
+use crate::connect;
 use crate::crypto;
+use crate::listen;
 use crate::quic::CongestionControl;
 use crate::quic::Resolved;
-use crate::server::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::net;
@@ -202,7 +202,7 @@ pub(crate) struct QuicheClient {
 	pub bind: net::SocketAddr,
 	/// Resolved server-verification policy, shared with the other backends.
 	pub verification: crate::tls::Verification,
-	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Client::allows_http_bootstrap]).
+	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Connect::allows_http_bootstrap]).
 	pub http_bootstrap: bool,
 	pub quic: Resolved,
 	pub host_name: Option<String>,
@@ -217,8 +217,8 @@ struct ClientIdentity {
 }
 
 impl QuicheClient {
-	pub fn new(config: &ClientConfig) -> Result<Self> {
-		let quic = config.quic.resolve();
+	pub fn new(config: &crate::connect::Config, quic: &crate::quic::Config) -> Result<Self> {
+		let quic = quic.resolve();
 		let identity = match (&config.tls.cert, &config.tls.key) {
 			(Some(cert), Some(key)) => {
 				let (chain, key) = load_quiche_cert(cert, key)?;
@@ -230,20 +230,21 @@ impl QuicheClient {
 
 		// Warn once here rather than on every dial: the constraint is a property of
 		// the config, and a relay reconnecting to its peers would repeat it forever.
-		if config.bind.port() != 0 {
+		let bind = config.resolved_bind();
+		if bind.port() != 0 {
 			tracing::warn!(
-				bind = %config.bind,
+				bind = %bind,
 				"pinned client bind port; only the first resolved address is dialed (address failover needs an ephemeral port on this backend)"
 			);
 		}
 
 		Ok(Self {
-			bind: config.bind,
+			bind,
 			verification: config.tls.verification()?,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			quic,
 			host_name: config.tls.host_name.clone(),
-			failover_delay: config.resolved_failover_delay(),
+			failover_delay: config.resolved_race(),
 			identity,
 		})
 	}
@@ -547,12 +548,12 @@ pub(crate) struct QuicheServer {
 }
 
 impl QuicheServer {
-	pub fn new(config: ServerConfig) -> Result<Self> {
-		if config.quic.quic_lb_id.is_some() {
+	pub fn new(config: listen::Config, quic: &crate::quic::Config) -> Result<Self> {
+		if config.lb_id.is_some() {
 			tracing::warn!("QUIC-LB is not supported with the quiche backend; ignoring server ID");
 		}
 
-		let quic = config.quic.resolve();
+		let quic = quic.resolve();
 
 		let listen =
 			crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND).map_err(Error::ResolveBind)?;
@@ -758,7 +759,7 @@ mod tests {
 	/// one must land on BBR rather than quiche's own CUBIC default.
 	#[test]
 	fn apply_settings_writes_cc_algorithm() {
-		let mut quic = crate::quic::Client::default();
+		let mut quic = crate::quic::Config::default();
 		let mut settings = web_transport_quiche::Settings::default();
 
 		apply_settings(&mut settings, &quic.resolve()).unwrap();

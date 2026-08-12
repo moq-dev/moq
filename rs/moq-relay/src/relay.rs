@@ -24,10 +24,7 @@
 
 use anyhow::Context;
 
-use crate::{
-	Auth, Cluster, Config, Connection, DEFAULT_DRAIN_TIMEOUT, DEFAULT_MAX_STREAMS, Internal, Shutdown, ShutdownTrigger,
-	Web,
-};
+use crate::{Auth, Cluster, Config, Connection, DEFAULT_DRAIN_TIMEOUT, Internal, Shutdown, ShutdownTrigger, Web};
 
 /// A fully assembled relay: the listeners and the shared cluster behind them.
 ///
@@ -87,14 +84,13 @@ impl Relay {
 	/// ready to serve; nothing accepts a connection until [`Self::run`] (or
 	/// [`serve`]) drives it.
 	pub async fn load(mut config: Config) -> anyhow::Result<Self> {
-		config.client.quic.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
-		config.server.quic.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
+		config.resolve();
 
-		let mtls_enabled = !config.server.tls.root.is_empty();
+		let mtls_enabled = !config.listen.tls.root.is_empty();
 
 		#[allow(unused_mut)]
-		let mut server = config.server.init()?;
-		let client = config.client.clone().init()?;
+		let mut server = config.listen.init(config.quic.clone())?;
+		let client = config.connect.clone().init(config.quic.clone())?;
 
 		// `None` for a stream-only server (no QUIC); any other error is real.
 		let addr = match server.local_addr() {
@@ -104,7 +100,7 @@ impl Relay {
 		};
 
 		#[cfg(feature = "iroh")]
-		let (server, client) = match config.iroh.bind(&config.client.quic).await? {
+		let (server, client) = match config.iroh.bind(&config.quic).await? {
 			Some(iroh) => (server.with_iroh(iroh.clone()), client.with_iroh(iroh)),
 			None => (server, client),
 		};
@@ -123,7 +119,7 @@ impl Relay {
 			// mTLS-only: no JWT/public source, but `--auth-mtls-tier` still applies.
 			Auth::default().with_mtls_tier(config.auth.mtls_tier.clone())
 		} else {
-			config.auth.init(&config.client.tls).await?
+			config.auth.init(&config.connect.tls).await?
 		};
 
 		// Before any origin handle is derived: `with_cache` rebuilds the origin, so a
@@ -132,7 +128,7 @@ impl Relay {
 		let cluster = Cluster::new(config.cluster)?
 			.with_cache(cache)
 			.with_client(client.clone())
-			.with_client_tls(config.client.tls.build()?);
+			.with_client_tls(config.connect.tls.build()?);
 		let stats = config.stats.build(cluster.origin.clone());
 		// The cluster takes over keeping the publish task alive, so an embedder that
 		// drops the producer keeps publishing for as long as it serves.

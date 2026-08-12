@@ -27,7 +27,7 @@ pub struct ExportArgs {
 
 	/// TLS certificates, keys, self-signed generation, and optional mTLS roots.
 	#[command(flatten)]
-	pub tls: moq_native::tls::Server,
+	pub tls: moq_native::tls::Listen,
 
 	/// Minimum media listed in each rendition's playlist window. Keep it within the
 	/// relay's group-cache retention, since segments are fetched from there on request.

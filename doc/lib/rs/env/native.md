@@ -21,7 +21,7 @@ The key crates:
 Create a [`ClientConfig`](https://docs.rs/moq-native/latest/moq_native/struct.ClientConfig.html) and connect to a relay:
 
 ```rust
-let client = moq_native::ClientConfig::default().init()?;
+let client = moq_native::connect::Config::default().init()?;
 let url = url::Url::parse("https://cdn.moq.dev/anon/my-broadcast")?;
 
 // A background task dials and redials with backoff if the session drops.

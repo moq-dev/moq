@@ -27,13 +27,13 @@ A test pattern plus tone, so you don't need a media file:
 ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=frequency=440 \
     -c:v libx264 -preset ultrafast -tune zerolatency -g 60 -c:a aac \
     -f mp4 -movflags cmaf+frag_keyframe+empty_moov+default_base_moof - \
-| moq --client-connect https://your-relay.example.com --broadcast bbb.hang import fmp4
+| moq --connect https://your-relay.example.com --broadcast bbb.hang import fmp4
 ```
 
 ## Subscribe
 
 ```bash
-moq --client-connect https://your-relay.example.com --broadcast bbb.hang export fmp4 | ffplay -
+moq --connect https://your-relay.example.com --broadcast bbb.hang export fmp4 | ffplay -
 ```
 
 If it plays, you interop. That's the whole test.
@@ -48,7 +48,7 @@ If it plays, you interop. That's the whole test.
   resolved on demand via `SUBSCRIBE`, so a single-track `PUBLISH` offer is
   answered with a request error. Announce with `PUBLISH_NAMESPACE` and serve
   the resulting `SUBSCRIBE`s instead.
-- **Self-signed or expired cert?** Add `--client-tls-disable-verify`.
+- **Self-signed or expired cert?** Add `--connect-tls-insecure`.
 - **Subscriber sees nothing?** If your relay doesn't replay existing
   announcements, start the subscriber before the publisher.
 - **Verbose logs:** prefix with `RUST_LOG=info,moq_net=debug`. It prints the

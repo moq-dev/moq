@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
 	let publish = moq_net::Origin::random().produce();
 	let remote = moq_net::Origin::random().produce();
 
-	let client = moq_native::ClientConfig::default().init()?;
+	let client = moq_native::connect::Config::default().init(Default::default())?;
 	let mut session = client
 		.with_publisher(&publish)
 		.with_subscriber(remote.clone())

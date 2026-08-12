@@ -17,20 +17,57 @@ const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
 
 /// Plaintext-TCP qmux listener settings (no TLS, no UDP).
 ///
-/// Flattened onto [`crate::ServerConfig::tcp`]. TCP carries no peer identity, so
+/// Flattened onto [`crate::listen::Config::tcp`]. TCP carries no peer identity, so
 /// the listener must only be reachable from trusted clients. Bind it to loopback
 /// or a private interface; a non-loopback bind logs a warning but is allowed.
 // The derived arg group is named after the struct, so it needs an explicit id to
 // stay unique across the flattened sections.
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-#[group(id = "server-tcp")]
+#[group(id = "listen-tcp")]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct Config {
 	/// Bind a plaintext qmux TCP listener on this address.
-	#[arg(long = "server-tcp-bind", id = "server-tcp-bind", env = "MOQ_SERVER_TCP_BIND")]
+	#[arg(long = "listen-tcp-bind", id = "listen-tcp-bind", env = "MOQ_LISTEN_TCP_BIND")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub bind: Option<net::SocketAddr>,
+
+	/// The released `--server-tcp-bind` spelling and its env var, folded in by
+	/// [`Config::resolved`].
+	#[command(flatten)]
+	#[serde(skip)]
+	pub(crate) legacy: Legacy,
+}
+
+/// The `--server-tcp-*` flag from before the accept side was named `listen`.
+///
+/// A separate arg rather than a clap alias, since an alias renames the flag but
+/// leaves its env var behind.
+#[derive(clap::Args, Clone, Debug, Default)]
+#[group(id = "listen-tcp-legacy")]
+pub(crate) struct Legacy {
+	#[arg(
+		long = "server-tcp-bind",
+		id = "server-tcp-bind",
+		env = "MOQ_SERVER_TCP_BIND",
+		hide = true
+	)]
+	bind: Option<net::SocketAddr>,
+}
+
+impl Config {
+	/// Fold the released spelling into the canonical field. Idempotent.
+	pub fn resolved(&self) -> Self {
+		let mut resolved = self.clone();
+		if self.bind.is_none()
+			&& let Some(bind) = self.legacy.bind
+		{
+			tracing::warn!("--server-tcp-bind is deprecated; use --listen-tcp-bind");
+			resolved.bind = Some(bind);
+		}
+		resolved.legacy = Legacy::default();
+		resolved
+	}
 }
 
 /// Errors specific to the plain-TCP qmux transport.
@@ -248,5 +285,39 @@ mod tests {
 	async fn connect_addrs_rejects_empty() {
 		let res = connect_addrs(Vec::new(), &["moq-test"], Duration::ZERO).await;
 		assert!(matches!(res, Err(Error::NoAddresses)));
+	}
+}
+
+#[cfg(test)]
+mod legacy_tests {
+	use super::*;
+	use clap::Parser;
+
+	#[derive(Parser)]
+	struct Cli {
+		#[command(flatten)]
+		tcp: Config,
+	}
+
+	/// The released `--server-tcp-bind` still lands in the canonical field.
+	#[test]
+	fn released_spelling_folds_in() {
+		let config = Cli::parse_from(["test", "--server-tcp-bind", "127.0.0.1:4443"])
+			.tcp
+			.resolved();
+		assert_eq!(config.bind, Some("127.0.0.1:4443".parse().unwrap()));
+
+		// The canonical spelling wins, and folding twice changes nothing.
+		let config = Cli::parse_from([
+			"test",
+			"--listen-tcp-bind",
+			"127.0.0.1:1",
+			"--server-tcp-bind",
+			"127.0.0.1:2",
+		])
+		.tcp
+		.resolved();
+		assert_eq!(config.bind, Some("127.0.0.1:1".parse().unwrap()));
+		assert_eq!(config.resolved().bind, config.bind);
 	}
 }

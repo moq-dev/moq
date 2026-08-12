@@ -22,72 +22,10 @@ use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 
-/// Configuration for the MoQ server.
-#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields, default)]
-#[non_exhaustive]
-pub struct ServerConfig {
-	/// Listen for QUIC (UDP) on the given address. Defaults to `[::]:443`.
-	///
-	/// Accepts standard socket address syntax (e.g. `[::]:443`) or a DNS
-	/// `host:port` pair (e.g. `fly-global-services:443`), resolved at bind time
-	/// (first address only; Quinn cannot bind multiple). Leave unset while a
-	/// `tcp`/`unix` listener is configured to run a stream-only server with no
-	/// QUIC.
-	#[serde(alias = "listen")]
-	#[arg(id = "server-bind", long = "server-bind", alias = "listen", env = "MOQ_SERVER_BIND")]
-	pub bind: Option<String>,
-
-	/// Plaintext qmux TCP listener (`--server-tcp-bind`, no TLS). Requires the
-	/// `tcp` feature.
-	#[cfg(feature = "tcp")]
-	#[command(flatten)]
-	#[serde(default)]
-	pub tcp: crate::tcp::Config,
-
-	/// Plaintext qmux Unix-socket listener (`--server-unix-bind`) with an optional
-	/// peer-credential allowlist. Requires the `uds` feature; unix-only.
-	#[cfg(all(feature = "uds", unix))]
-	#[command(flatten)]
-	#[serde(default)]
-	pub unix: crate::unix::Config,
-
-	/// The QUIC backend to use.
-	/// Auto-detected from compiled features if not specified.
-	#[arg(id = "server-backend", long = "server-backend", env = "MOQ_SERVER_BACKEND")]
-	pub backend: Option<QuicBackend>,
-
-	/// QUIC transport tuning (`--server-quic-*`): stream limits, GSO, timeouts,
-	/// plus the accept-side knobs (preferred address, QUIC-LB connection IDs).
-	#[command(flatten)]
-	#[serde(default)]
-	pub quic: crate::quic::Server,
-
-	/// Restrict the server to specific MoQ protocol version(s).
-	///
-	/// By default, the server accepts all supported versions.
-	/// Use this to restrict to specific versions, e.g. `--server-version moq-lite-02`.
-	/// Can be specified multiple times to accept a subset of versions.
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[arg(
-		id = "server-version",
-		long = "server-version",
-		env = "MOQ_SERVER_VERSION",
-		value_parser = crate::version_parser(),
-	)]
-	pub version: Vec<moq_net::Version>,
-
-	/// The certificates to serve and the roots that authenticate mTLS clients
-	/// (`--server-tls-*`).
-	#[command(flatten)]
-	#[serde(default)]
-	pub tls: crate::tls::Server,
-}
-
-impl ServerConfig {
+impl crate::listen::Config {
 	/// Build the [`Server`] this config describes, binding its listeners.
-	pub fn init(self) -> crate::Result<Server> {
-		Server::new(self)
+	pub fn init(self, quic: crate::quic::Config) -> crate::Result<Server> {
+		Server::new(self, quic)
 	}
 
 	/// Returns the configured versions, defaulting to all if none specified.
@@ -118,15 +56,15 @@ impl ServerConfig {
 	}
 }
 
-/// Default bind address used when [`ServerConfig::bind`] is not set.
+/// Default bind address used when [`crate::listen::Config::bind`] is not set.
 #[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 pub(crate) const DEFAULT_BIND: &str = "[::]:443";
 
 /// Server for accepting MoQ connections.
 ///
 /// Accepts QUIC (and optionally WebSocket), plus plaintext qmux over TCP
-/// (`--server-tcp-bind`) and Unix sockets (`--server-unix-bind`). Create via
-/// [`ServerConfig::init`] or [`Server::new`].
+/// (`--listen-tcp-bind`) and Unix sockets (`--listen-unix-bind`). Create via
+/// [`crate::listen::Config::init`] or [`Server::new`].
 pub struct Server {
 	moq: moq_net::Server,
 	versions: moq_net::Versions,
@@ -150,7 +88,13 @@ impl Server {
 	///
 	/// The stream (`tcp`/`unix`) listeners need a runtime, so they wait for
 	/// [`listen`](Self::listen).
-	pub fn new(config: ServerConfig) -> crate::Result<Self> {
+	pub fn new(config: crate::listen::Config, quic: crate::quic::Config) -> crate::Result<Self> {
+		// Resolve here rather than in `init`, so a caller that builds the config by hand
+		// gets the released spellings folded in too.
+		config.validate()?;
+		let config = config.resolved();
+		let quic = quic.resolved();
+
 		// `default_quic_backend` panics when no backend is compiled, so a WebSocket- or
 		// stream-only build must not ask it.
 		#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
@@ -158,16 +102,16 @@ impl Server {
 
 		let versions = config.versions();
 
-		// Build a QUIC backend when `--server-bind` is set, or when nothing else
-		// is (the default). A stream-only server (`--server-unix-bind` with no
-		// `--server-bind`) doesn't also open UDP/443.
-		config.quic.validate()?;
+		// Build a QUIC backend when `--listen` is set, or when nothing else
+		// is (the default). A stream-only server (`--listen-unix-bind` with no
+		// `--listen`) doesn't also open UDP/443.
+		quic.validate()?;
 
 		let build_quic = config.bind.is_some() || !config.has_stream_listener();
 		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
 		if config.bind.is_some() {
 			return Err(Error::NoBackend(
-				"--server-bind requires a noq, quinn, or quiche backend feature",
+				"--listen requires a noq, quinn, or quiche backend feature",
 			));
 		}
 
@@ -196,20 +140,20 @@ impl Server {
 		#[cfg(feature = "noq")]
 		#[allow(unreachable_patterns)]
 		let noq = match backend {
-			QuicBackend::Noq if build_quic => Some(crate::noq::NoqServer::new(config.clone())?),
+			QuicBackend::Noq if build_quic => Some(crate::noq::NoqServer::new(config.clone(), &quic)?),
 			_ => None,
 		};
 
 		#[cfg(feature = "quinn")]
 		#[allow(unreachable_patterns)]
 		let quinn = match backend {
-			QuicBackend::Quinn if build_quic => Some(crate::quinn::QuinnServer::new(config.clone())?),
+			QuicBackend::Quinn if build_quic => Some(crate::quinn::QuinnServer::new(config.clone(), &quic)?),
 			_ => None,
 		};
 
 		#[cfg(feature = "quiche")]
 		let quiche = match backend {
-			QuicBackend::Quiche if build_quic => Some(crate::quiche::QuicheServer::new(config.clone())?),
+			QuicBackend::Quiche if build_quic => Some(crate::quiche::QuicheServer::new(config.clone(), &quic)?),
 			_ => None,
 		};
 
@@ -347,7 +291,7 @@ impl Server {
 		if let Some(quiche) = self.quiche.as_ref() {
 			return quiche.certificates();
 		}
-		// No QUIC backend (e.g. a stream-only `--server-bind`): no certificates.
+		// No QUIC backend (e.g. a stream-only `--listen-tcp-bind`): no certificates.
 		crate::tls::Certificates::empty()
 	}
 
@@ -393,7 +337,7 @@ impl Server {
 	///
 	/// Terminal, and that is the point: it consumes the `Server`, so the builders
 	/// above cannot run afterwards and every session is served the configuration
-	/// this call captured. The QUIC socket is bound by [`ServerConfig::init`], but
+	/// this call captured. The QUIC socket is bound by [`crate::listen::Config::init`], but
 	/// the stream (`tcp`/`unix`) listeners need a runtime, so they bind here.
 	///
 	/// A bind failure is the error, not a silent `None` from a later accept. It
@@ -596,7 +540,7 @@ impl Server {
 		if let Some(quiche) = self.quiche.as_ref() {
 			return Ok(quiche.local_addr()?);
 		}
-		// No QUIC backend (e.g. a stream-only `--server-bind`).
+		// No QUIC backend (e.g. a stream-only `--listen-tcp-bind`).
 		Err(Error::NoBackend("no QUIC listener configured"))
 	}
 
@@ -729,7 +673,7 @@ fn stream_versions(base: &moq_net::Versions) -> moq_net::Versions {
 	moq_net::Versions::from(versions)
 }
 
-/// A configured stream listener (`--server-tcp-bind` / `--server-unix-bind`).
+/// A configured stream listener (`--listen-tcp-bind` / `--listen-unix-bind`).
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 enum StreamBind {
 	#[cfg(feature = "tcp")]
@@ -1224,7 +1168,7 @@ impl Request {
 	}
 
 	/// The client certificate chain the peer presented, if any, validated
-	/// against a configured [`crate::tls::Server::root`] during the handshake.
+	/// against a configured [`crate::tls::Listen::root`] during the handshake.
 	///
 	/// Captured at the transport handshake (before the SETUP). Only the Quinn and noq
 	/// backends support mTLS; other transports always return `None`. Use it to grant
@@ -1247,7 +1191,7 @@ mod tests {
 
 	#[test]
 	fn version_help_lists_every_parseable_name() {
-		let help = <ServerConfig as clap::Args>::augment_args(clap::Command::new("test"))
+		let help = <crate::listen::Config as clap::Args>::augment_args(clap::Command::new("test"))
 			.render_long_help()
 			.to_string();
 		for name in moq_net::Version::names() {
@@ -1265,9 +1209,9 @@ mod tests {
 	#[cfg(feature = "tcp")]
 	#[test]
 	fn accept_health_covers_stream_listeners_before_they_bind() {
-		let mut config = ServerConfig::default();
+		let mut config = crate::listen::Config::default();
 		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
-		let server = Server::new(config).expect("stream-only server");
+		let server = Server::new(config, Default::default()).expect("stream-only server");
 
 		let names: Vec<_> = server.accept_health().iter().map(|h| h.listener()).collect();
 		assert_eq!(names, vec!["tcp"], "the tcp listener must report before it binds");
@@ -1294,10 +1238,10 @@ mod tests {
 		let port = probe.local_addr().expect("probe addr").port();
 		drop(probe);
 
-		let mut config = ServerConfig::default();
+		let mut config = crate::listen::Config::default();
 		config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 		config.unix.bind = Some(occupied);
-		let server = Server::new(config).expect("stream-only server");
+		let server = Server::new(config, Default::default()).expect("stream-only server");
 
 		assert!(server.listen().await.is_err(), "the unix bind must fail");
 		std::net::TcpListener::bind(("127.0.0.1", port)).expect("the tcp port must be free again");
@@ -1311,9 +1255,9 @@ mod tests {
 		let addr = probe.local_addr().expect("probe addr");
 		drop(probe);
 
-		let mut config = ServerConfig::default();
+		let mut config = crate::listen::Config::default();
 		config.tcp.bind = Some(addr);
-		let listener = Server::new(config)
+		let listener = Server::new(config, Default::default())
 			.expect("stream-only server")
 			.listen()
 			.await
@@ -1348,9 +1292,9 @@ mod tests {
 			.expect("write frame");
 		group.finish().expect("finish group");
 
-		let mut config = ServerConfig::default();
+		let mut config = crate::listen::Config::default();
 		config.unix.bind = Some(path.clone());
-		let server = config.init().expect("server init");
+		let server = config.init(Default::default()).expect("server init");
 
 		// The publisher lives on the server, never on the accepted request.
 		let serve = tokio::spawn(server.serve_publish(origin.consume()));
@@ -1377,8 +1321,8 @@ mod tests {
 		let url: Url = format!("unix://{}", path.display()).parse().expect("parse url");
 		let subscriber = moq_net::Origin::random().produce();
 		let mut announced = subscriber.consume().announced();
-		let client = crate::ClientConfig::default()
-			.init()
+		let client = crate::connect::Config::default()
+			.init(Default::default())
 			.expect("client init")
 			.with_subscriber(subscriber);
 		let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
@@ -1428,9 +1372,9 @@ mod tests {
 		let addr = probe.local_addr().unwrap();
 		drop(probe);
 
-		let mut config = ServerConfig::default();
+		let mut config = crate::listen::Config::default();
 		config.tcp.bind = Some(addr);
-		let server = Server::new(config).expect("stream-only server");
+		let server = Server::new(config, Default::default()).expect("stream-only server");
 		let listener = server.listen().await.expect("listen");
 		assert!(tokio::net::TcpListener::bind(addr).await.is_err(), "listener is bound");
 
@@ -1444,12 +1388,15 @@ mod tests {
 	#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
 	#[test]
 	fn quic_bind_without_a_quic_backend_is_rejected() {
-		let config = ServerConfig {
+		let config = crate::listen::Config {
 			bind: Some("127.0.0.1:0".to_string()),
 			..Default::default()
 		};
 
-		assert!(matches!(Server::new(config), Err(Error::NoBackend(_))));
+		assert!(matches!(
+			Server::new(config, Default::default()),
+			Err(Error::NoBackend(_))
+		));
 	}
 
 	/// A QUIC-only server reports nothing. It multiplexes over one UDP socket and
@@ -1457,7 +1404,9 @@ mod tests {
 	#[cfg(all(feature = "quinn", not(feature = "tcp")))]
 	#[test]
 	fn accept_health_is_empty_without_a_stream_listener() {
-		let server = ServerConfig::default().init().expect("quic server");
+		let server = crate::listen::Config::default()
+			.init(Default::default())
+			.expect("quic server");
 		assert!(server.accept_health().is_empty());
 	}
 
@@ -1475,13 +1424,13 @@ mod tests {
 	#[cfg(feature = "quinn")]
 	#[tokio::test]
 	async fn certificates_expose_generated_fingerprints() {
-		let mut config = ServerConfig {
+		let mut config = crate::listen::Config {
 			bind: Some("[::]:0".to_string()),
 			..Default::default()
 		};
 		config.tls.generate = vec!["localhost".into()];
 
-		let certs = config.init().expect("server init").certificates();
+		let certs = config.init(Default::default()).expect("server init").certificates();
 		let fingerprints = certs.fingerprints();
 		assert_eq!(fingerprints.len(), 1, "one generated certificate");
 		// Hex-encoded SHA-256.
@@ -1494,10 +1443,10 @@ mod tests {
 	#[cfg(all(feature = "uds", unix))]
 	#[tokio::test]
 	async fn certificates_are_empty_without_a_tls_backend() {
-		let mut config = ServerConfig::default();
+		let mut config = crate::listen::Config::default();
 		config.unix.bind = Some(PathBuf::from("/tmp/moq-native-certificates-test.sock"));
 
-		let server = config.init().expect("server init");
+		let server = config.init(Default::default()).expect("server init");
 		assert!(server.certificates().fingerprints().is_empty());
 	}
 
@@ -1508,7 +1457,7 @@ mod tests {
 			cert = "cert.pem"
 			key = "key.pem"
 		"#;
-		let config: crate::tls::Server = toml::from_str(single).unwrap();
+		let config: crate::tls::Listen = toml::from_str(single).unwrap();
 		assert_eq!(config.cert, vec![PathBuf::from("cert.pem")]);
 		assert_eq!(config.key, vec![PathBuf::from("key.pem")]);
 
@@ -1519,7 +1468,7 @@ mod tests {
 			generate = ["localhost"]
 			root = ["ca.pem"]
 		"#;
-		let config: crate::tls::Server = toml::from_str(array).unwrap();
+		let config: crate::tls::Listen = toml::from_str(array).unwrap();
 		assert_eq!(config.cert, vec![PathBuf::from("a.pem"), PathBuf::from("b.pem")]);
 		assert_eq!(config.key, vec![PathBuf::from("a.key"), PathBuf::from("b.key")]);
 		assert_eq!(config.generate, vec!["localhost".to_string()]);
@@ -1529,17 +1478,17 @@ mod tests {
 	#[test]
 	fn bind_string_or_listen_alias() {
 		// The QUIC bind is a plain address; the `listen` alias still works.
-		let bind: ServerConfig = toml::from_str(r#"bind = "[::]:443""#).unwrap();
+		let bind: crate::listen::Config = toml::from_str(r#"bind = "[::]:443""#).unwrap();
 		assert_eq!(bind.bind.as_deref(), Some("[::]:443"));
 
-		let alias: ServerConfig = toml::from_str(r#"listen = "0.0.0.0:4443""#).unwrap();
+		let alias: crate::listen::Config = toml::from_str(r#"listen = "0.0.0.0:4443""#).unwrap();
 		assert_eq!(alias.bind.as_deref(), Some("0.0.0.0:4443"));
 	}
 
 	#[cfg(all(feature = "uds", unix))]
 	#[test]
 	fn stream_listener_config_parses() {
-		let config: ServerConfig = toml::from_str(
+		let config: crate::listen::Config = toml::from_str(
 			r#"
 bind = "[::]:443"
 
@@ -1560,13 +1509,13 @@ uid = [1001, 1002]
 	#[cfg(all(feature = "uds", unix))]
 	#[test]
 	fn stream_only_config_has_no_quic() {
-		// A unix listener with no `--server-bind` is stream-only.
-		let mut config = ServerConfig::default();
+		// A unix listener with no `--listen` is stream-only.
+		let mut config = crate::listen::Config::default();
 		config.unix.bind = Some(PathBuf::from("/run/moq.sock"));
 		assert!(config.has_stream_listener());
 		assert!(config.bind.is_none());
 
 		// The default (nothing configured) still runs QUIC.
-		assert!(!ServerConfig::default().has_stream_listener());
+		assert!(!crate::listen::Config::default().has_stream_listener());
 	}
 }

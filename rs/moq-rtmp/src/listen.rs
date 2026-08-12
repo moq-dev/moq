@@ -64,7 +64,7 @@ pub struct Config {
 	/// TLS configuration for RTMPS (RTMP over TLS). When set, the
 	/// [`listen`](Self::listen) address speaks RTMPS instead of plaintext RTMP,
 	/// so clients connect with `rtmps://`. Build it with
-	/// `moq_native::tls::Server::server_config` (pass an empty ALPN list) or
+	/// `moq_native::tls::Listen::server_config` (pass an empty ALPN list) or
 	/// any [`rustls::ServerConfig`]. Leave `None` for plaintext.
 	///
 	/// To serve both RTMP and RTMPS, clone one base config and call [`run`] for

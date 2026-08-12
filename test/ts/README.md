@@ -24,7 +24,7 @@ just test ts --strict           # also fail on broadcast-shape warnings
 subscriber output:
 
 ```bash
-moq --client-connect http://localhost:4443 --broadcast live.hang export ts > sub.ts
+moq --connect http://localhost:4443 --broadcast live.hang export ts > sub.ts
 ./run.sh --analyze-only sub.ts
 ```
 

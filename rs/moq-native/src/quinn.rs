@@ -1,10 +1,10 @@
 //! The quinn QUIC backend, used for both WebTransport (`https://`) and raw QUIC (`moqt://`, `moql://`).
 
-use crate::client::ClientConfig;
+use crate::connect;
+use crate::listen;
 use crate::quic::CongestionControl;
 use crate::quic::Resolved;
 use crate::quic::ServerId;
-use crate::server::ServerConfig;
 use crate::tls::{FingerprintVerifier, ServeCerts};
 use std::net;
 use std::sync::Arc;
@@ -245,7 +245,7 @@ type Result<T> = std::result::Result<T, Error>;
 pub(crate) struct QuinnClient {
 	pub quic: quinn::Endpoint,
 	pub transport: Arc<quinn::TransportConfig>,
-	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Client::allows_http_bootstrap]).
+	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Connect::allows_http_bootstrap]).
 	pub http_bootstrap: bool,
 	/// Optional TLS SNI / verification hostname override (from config).
 	pub host_name: Option<String>,
@@ -258,11 +258,11 @@ pub(crate) struct QuinnClient {
 }
 
 impl QuinnClient {
-	pub fn new(config: &ClientConfig) -> Result<Self> {
-		let socket = crate::bind::udp(config.bind).map_err(Error::BindSocket)?;
+	pub fn new(config: &connect::Config, quic: &crate::quic::Config) -> Result<Self> {
+		let socket = crate::bind::udp(config.resolved_bind()).map_err(Error::BindSocket)?;
 		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
 
-		let quic = config.quic.resolve();
+		let quic = quic.resolve();
 		let mut transport = quinn::TransportConfig::default();
 		apply_transport(&mut transport, &quic);
 		apply_qlog(&mut transport, &quic, "client")?;
@@ -280,7 +280,7 @@ impl QuinnClient {
 			transport,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			host_name: config.tls.host_name.clone(),
-			failover_delay: config.resolved_failover_delay(),
+			failover_delay: config.resolved_race(),
 			dual_stack,
 		})
 	}
@@ -477,8 +477,8 @@ pub(crate) struct QuinnServer {
 }
 
 impl QuinnServer {
-	pub fn new(config: ServerConfig) -> Result<Self> {
-		let quic = config.quic.resolve();
+	pub fn new(config: listen::Config, quic: &crate::quic::Config) -> Result<Self> {
+		let quic = quic.resolve();
 		let mut transport = quinn::TransportConfig::default();
 		apply_transport(&mut transport, &quic);
 		apply_qlog(&mut transport, &quic, "server")?;
@@ -525,10 +525,10 @@ impl QuinnServer {
 
 		// Advertise the preferred_address transport parameter (RFC 9000 §9.6).
 		// Quinn allocates a fresh CID + reset token for the address during the handshake.
-		if let Some(addr) = config.quic.preferred_v4 {
+		if let Some(addr) = config.preferred_v4 {
 			tls.preferred_address_v4(Some(addr));
 		}
-		if let Some(addr) = config.quic.preferred_v6 {
+		if let Some(addr) = config.preferred_v6 {
 			tls.preferred_address_v6(Some(addr));
 		}
 
@@ -540,8 +540,8 @@ impl QuinnServer {
 
 		// Configure connection ID generator with server ID if provided
 		let mut endpoint_config = quinn::EndpointConfig::default();
-		if let Some(server_id) = config.quic.quic_lb_id {
-			let nonce_len = config.quic.quic_lb_nonce.unwrap_or(8);
+		if let Some(server_id) = config.lb_id {
+			let nonce_len = config.lb_nonce.unwrap_or(8);
 			if nonce_len < 4 {
 				return Err(Error::QuicLbNonceTooSmall);
 			}
@@ -751,7 +751,7 @@ mod tests {
 	/// An unset knob must land on BBR rather than quinn's own CUBIC default.
 	#[test]
 	fn congestion_control_defaults_to_delay() {
-		let mut quic = crate::quic::Client::default();
+		let mut quic = crate::quic::Config::default();
 		assert_eq!(congestion_control(&quic.resolve()), CongestionControl::Delay);
 
 		// An explicit request still gets through.
@@ -763,20 +763,22 @@ mod tests {
 	/// connections that actually run quinn's BBR controller, on both ends.
 	#[tokio::test]
 	async fn delay_reaches_the_live_connection() {
-		let server_config = ServerConfig {
+		let server_config = listen::Config {
 			bind: Some("127.0.0.1:0".to_string()),
-			tls: crate::tls::Server {
+			tls: crate::tls::Listen {
 				generate: vec!["localhost".into()],
-				..Default::default()
-			},
-			quic: crate::quic::Server {
-				congestion_control: Some(CongestionControl::Delay),
 				..Default::default()
 			},
 			..Default::default()
 		};
 
-		let server = QuinnServer::new(server_config).expect("server init");
+		// One shared tuning for both roles, the way a binary composes them.
+		let quic = crate::quic::Config {
+			congestion_control: Some(CongestionControl::Delay),
+			..Default::default()
+		};
+
+		let server = QuinnServer::new(server_config, &quic).expect("server init");
 		let addr = server.local_addr().expect("local addr");
 
 		let accepted = tokio::spawn(async move {
@@ -789,21 +791,17 @@ mod tests {
 		});
 
 		// tls::Client has a private field, so it can't be built with a struct literal.
-		let mut tls_config = crate::tls::Client::default();
-		tls_config.disable_verify = Some(true);
+		let mut tls_config = crate::tls::Connect::default();
+		tls_config.insecure = Some(true);
 
-		let client_config = ClientConfig {
-			bind: "127.0.0.1:0".parse().unwrap(),
+		let client_config = connect::Config {
+			bind: Some("127.0.0.1:0".parse().unwrap()),
 			tls: tls_config,
-			quic: crate::quic::Client {
-				congestion_control: Some(CongestionControl::Delay),
-				..Default::default()
-			},
 			..Default::default()
 		};
 
 		let tls = client_config.tls.build().expect("tls config");
-		let client = QuinnClient::new(&client_config).expect("client init");
+		let client = QuinnClient::new(&client_config, &quic).expect("client init");
 		// Dial the loopback IP directly so the system resolver is never involved.
 		let url: Url = format!("moqt://127.0.0.1:{}", addr.port()).parse().unwrap();
 

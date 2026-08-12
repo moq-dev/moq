@@ -280,12 +280,12 @@ async fn run_session(
 	element: glib::WeakRef<super::MoqSrc>,
 	shutdown: &mut watch::Receiver<bool>,
 ) -> Result<()> {
-	let mut config = moq_native::ClientConfig::default();
-	config.tls.disable_verify = Some(settings.tls_disable_verify);
+	let mut config = moq_native::connect::Config::default();
+	config.tls.insecure = Some(settings.tls_disable_verify);
 
 	let origin = moq_net::Origin::random().produce();
 	let origin_consumer = origin.consume();
-	let client = config.init()?.with_subscriber(origin);
+	let client = config.init(Default::default())?.with_subscriber(origin);
 
 	// One-shot: the catalog subscription below dies with the session anyway, so a
 	// background redial could not resurrect this run. A drop surfaces as the

@@ -83,7 +83,7 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		.client
 		.connect
 		.clone()
-		.context("`transcode` requires a relay: pass --client-connect <url>")?;
+		.context("`transcode` requires a relay: pass --connect <url>")?;
 	let publish = moq_net::Origin::random().produce();
 	// A session drop closes the source broadcast and ends the run: the outage is
 	// surfaced rather than transcoded over. The reconnect loop covers the dial;

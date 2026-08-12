@@ -203,7 +203,7 @@ impl axum::response::IntoResponse for AuthError {
 }
 
 /// Deprecated `--auth-tls-*` overrides, kept for backwards compatibility. The
-/// auth client otherwise reuses the cluster client's `--client-tls-*` config.
+/// auth client otherwise reuses the cluster client's `--connect-tls-*` config.
 /// Hidden from `--help`; setting any field logs a deprecation warning.
 #[doc(hidden)]
 #[serde_as]
@@ -240,25 +240,25 @@ pub struct AuthTls {
 
 impl AuthTls {
 	/// True when any deprecated `--auth-tls-*` override is configured, in which
-	/// case it takes precedence over the shared `--client-tls-*` identity.
+	/// case it takes precedence over the shared `--connect-tls-*` identity.
 	fn is_set(&self) -> bool {
 		!self.root.is_empty() || self.cert.is_some() || self.key.is_some() || self.disable_verify.is_some()
 	}
 
-	/// Convert into a [`moq_native::tls::Client`] so we can reuse its
+	/// Convert into a [`moq_native::tls::Connect`] so we can reuse its
 	/// rustls-building logic. The fields map one-to-one.
-	fn to_client_tls(&self) -> anyhow::Result<moq_native::tls::Client> {
+	fn to_client_tls(&self) -> anyhow::Result<moq_native::tls::Connect> {
 		match (&self.cert, &self.key) {
 			(Some(_), None) => anyhow::bail!("--auth-tls-cert requires --auth-tls-key"),
 			(None, Some(_)) => anyhow::bail!("--auth-tls-key requires --auth-tls-cert"),
 			_ => {}
 		}
 
-		let mut tls = moq_native::tls::Client::default();
+		let mut tls = moq_native::tls::Connect::default();
 		tls.root = self.root.clone();
 		tls.cert = self.cert.clone();
 		tls.key = self.key.clone();
-		tls.disable_verify = self.disable_verify;
+		tls.insecure = self.disable_verify;
 		Ok(tls)
 	}
 }
@@ -291,11 +291,11 @@ pub struct AuthConfig {
 	pub tls: AuthTls,
 
 	/// Cluster client TLS injected by [`AuthConfig::init`] so outbound auth HTTP
-	/// (JWK + auth/public-API fetches) reuses the `--client-tls-*` identity.
+	/// (JWK + auth/public-API fetches) reuses the `--connect-tls-*` identity.
 	/// Not a CLI or TOML field; the deprecated `--auth-tls-*` flags override it.
 	#[arg(skip)]
 	#[serde(skip)]
-	client_tls: Option<moq_native::tls::Client>,
+	client_tls: Option<moq_native::tls::Connect>,
 
 	/// Public (unauthenticated) access configuration.
 	///
@@ -581,10 +581,10 @@ impl PublicAccess {
 impl AuthConfig {
 	/// Initializes an [`Auth`] instance from this configuration.
 	///
-	/// `client_tls` is the cluster client TLS (`--client-tls-*`); the auth client
+	/// `client_tls` is the cluster client TLS (`--connect-tls-*`); the auth client
 	/// reuses it for outbound HTTP unless the deprecated `--auth-tls-*` flags are
 	/// set.
-	pub async fn init(mut self, client_tls: &moq_native::tls::Client) -> anyhow::Result<Auth> {
+	pub async fn init(mut self, client_tls: &moq_native::tls::Connect) -> anyhow::Result<Auth> {
 		self.client_tls = Some(client_tls.clone());
 		Auth::new(self).await
 	}
@@ -2728,7 +2728,7 @@ api = "https://api.example.com/access"
 		// New path: the identity is supplied via the shared --client-tls-* config
 		// (injected through AuthConfig::init) instead of the deprecated
 		// --auth-tls-* flags. The server accepts it the same way.
-		let mut client_tls = moq_native::tls::Client::default();
+		let mut client_tls = moq_native::tls::Connect::default();
 		client_tls.root = vec![fx.ca_pem_path.clone()];
 		client_tls.cert = Some(fx.client_cert_path.clone());
 		client_tls.key = Some(fx.client_key_path.clone());

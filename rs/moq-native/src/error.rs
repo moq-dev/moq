@@ -86,6 +86,10 @@ pub enum Error {
 	#[error("tls.root (mTLS) is not supported by the selected QUIC backend")]
 	MtlsUnsupported,
 
+	/// A QUIC-LB nonce length was set without the server id it encodes alongside.
+	#[error("--listen-quic-lb-nonce needs --listen-quic-lb-id")]
+	LbNonceWithoutId,
+
 	/// The server's WebTransport response carried a status outside the valid HTTP range.
 	#[error("invalid status code")]
 	InvalidStatusCode,

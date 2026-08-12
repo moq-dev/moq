@@ -61,9 +61,9 @@ fn bind_free_tcp_server() -> (u16, moq_native::Server) {
 		let port = probe.local_addr().expect("local addr").port();
 		drop(probe);
 
-		let mut config = moq_native::ServerConfig::default();
+		let mut config = moq_native::listen::Config::default();
 		config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
-		if let Ok(server) = config.init() {
+		if let Ok(server) = config.init(Default::default()) {
 			return (port, server);
 		}
 	}
@@ -98,9 +98,9 @@ async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 	let (port, mut accepted, _handle) = spawn_upstream(origin);
 	wait_listening(port).await;
 
-	let mut client_config = moq_native::ClientConfig::default();
-	client_config.tls.disable_verify = Some(true);
-	let client = client_config.init().expect("client init");
+	let mut client_config = moq_native::connect::Config::default();
+	client_config.tls.insecure = Some(true);
+	let client = client_config.init(Default::default()).expect("client init");
 	let (_client_connection_client, client_connection) = within("client connects", async {
 		connect_once(client, format!("tcp://127.0.0.1:{port}/").parse().expect("parse url")).await
 	})
@@ -193,11 +193,11 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		wait_listening(port_b).await;
 
 		// ── the relay cluster under test, dialing sibling A ─────────────
-		let mut client_config = moq_native::ClientConfig::default();
-		client_config.tls.disable_verify = Some(true);
+		let mut client_config = moq_native::connect::Config::default();
+		client_config.tls.insecure = Some(true);
 		// Short handover so the test observes the old session close quickly.
 		client_config.goaway.handover = Some(Duration::from_secs(2));
-		let client = client_config.init().expect("client init");
+		let client = client_config.init(Default::default()).expect("client init");
 
 		let mut cluster_config = ClusterConfig::default();
 		cluster_config.connect = vec![format!("tcp://127.0.0.1:{port_a}/")];
@@ -304,7 +304,7 @@ async fn spawn_relay_with_upstream(
 	let mut auth_config = AuthConfig::default();
 	auth_config.public = Some(public);
 	let auth = auth_config
-		.init(&moq_native::tls::Client::default())
+		.init(&moq_native::tls::Connect::default())
 		.await
 		.expect("auth init");
 
@@ -312,11 +312,11 @@ async fn spawn_relay_with_upstream(
 	cluster_config.connect = vec![upstream_url.to_string()];
 	// Short drain so the test observes teardown quickly.
 
-	let mut client_config = moq_native::ClientConfig::default();
-	client_config.tls.disable_verify = Some(true);
+	let mut client_config = moq_native::connect::Config::default();
+	client_config.tls.insecure = Some(true);
 	// Short handover so the test observes the old session close quickly.
 	client_config.goaway.handover = Some(Duration::from_secs(2));
-	let client = client_config.init().expect("client init");
+	let client = client_config.init(Default::default()).expect("client init");
 
 	let cluster = Cluster::new(cluster_config).expect("cluster init").with_client(client);
 
@@ -388,11 +388,11 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	// ── MID-A: mini-relay consuming TOP, serving BOTTOM, drains later ───
 	let mid_a_origin = Origin::random().produce();
-	let mut client_config = moq_native::ClientConfig::default();
-	client_config.tls.disable_verify = Some(true);
+	let mut client_config = moq_native::connect::Config::default();
+	client_config.tls.insecure = Some(true);
 	// Short handover so the test observes the old session close quickly.
 	client_config.goaway.handover = Some(Duration::from_secs(2));
-	let mid_a_client = client_config.init().expect("mid-a client init");
+	let mid_a_client = client_config.init(Default::default()).expect("mid-a client init");
 	let (_mid_a_upstream_client, mid_a_upstream) = within(
 		"MID-A connects to TOP",
 		connect_once(
@@ -420,9 +420,11 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	// ── SUBSCRIBER: connects to BOTTOM ───────────────────────────────────
 	let sub_origin = Origin::random().produce();
-	let mut sub_client_config = moq_native::ClientConfig::default();
-	sub_client_config.tls.disable_verify = Some(true);
-	let sub_client = sub_client_config.init().expect("subscriber client init");
+	let mut sub_client_config = moq_native::connect::Config::default();
+	sub_client_config.tls.insecure = Some(true);
+	let sub_client = sub_client_config
+		.init(Default::default())
+		.expect("subscriber client init");
 	let (_sub_connection_client, sub_connection) = within(
 		"subscriber connects to BOTTOM",
 		connect_once(
@@ -605,11 +607,11 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin.clone());
 	wait_listening(port).await;
 
-	let mut client_config = moq_native::ClientConfig::default();
-	client_config.tls.disable_verify = Some(true);
+	let mut client_config = moq_native::connect::Config::default();
+	client_config.tls.insecure = Some(true);
 	// Short handover so the test observes the old session close quickly.
 	client_config.goaway.handover = Some(Duration::from_secs(2));
-	let client = client_config.init().expect("client init");
+	let client = client_config.init(Default::default()).expect("client init");
 
 	let mut cluster_config = ClusterConfig::default();
 	cluster_config.connect = vec![format!("tcp://127.0.0.1:{port}/")];
@@ -728,14 +730,14 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	});
 
 	let handover = Duration::from_millis(200);
-	let mut client_config = moq_native::ClientConfig::default();
-	client_config.tls.disable_verify = Some(true);
+	let mut client_config = moq_native::connect::Config::default();
+	client_config.tls.insecure = Some(true);
 	client_config.goaway.handover = Some(handover);
 	// The GOAWAY has to land on a *healthy* session, which is the path that goes
 	// straight into the replacement dial. Below this bar it takes the immediate
 	// redirect path instead, whose sleep polls the drain either way.
 	client_config.backoff.initial = Some(Duration::from_millis(50));
-	let client = client_config.init().expect("client init");
+	let client = client_config.init(Default::default()).expect("client init");
 
 	let url: Url = format!("tcp://127.0.0.1:{port}/").parse().expect("parse url");
 	let connection = client.connect(url);

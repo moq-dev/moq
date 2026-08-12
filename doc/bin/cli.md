@@ -41,7 +41,7 @@ docker pull moqdev/moq-cli
 # moq-cli reads media from stdin, so pipe an MPEG-TS stream into the container.
 # `-i` forwards stdin to the container process.
 ffmpeg -i video.mp4 -c copy -f mpegts - | \
-    docker run -i moqdev/moq-cli --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
+    docker run -i moqdev/moq-cli --connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 ```
 
 Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/moqdev/moq-cli).
@@ -80,11 +80,11 @@ moq <MoQ side>  play [playback options]
 - **MoQ side** attaches the Origin to the network, and comes before the verb. At
   least one of:
 
-  - `--client-connect <url>` dials a relay. The URL path is the relay auth path
+  - `--connect <url>` dials a relay. The URL path is the relay auth path
     (e.g. `/anon`), `?jwt=<token>` supplies a token, and `--broadcast` names the
     broadcast.
-  - `--server-bind <addr>` hosts MoQ sessions directly (with `--tls-generate` /
-    `--tls-cert` + `--tls-key`).
+  - `--listen <addr>` hosts MoQ sessions directly (with `--listen-tls-generate` /
+    `--listen-tls-cert` + `--listen-tls-key`).
   - `--cluster-lan` meshes with every other participating process on the LAN via
     mDNS, no relay or internet needed. See [LAN Cluster](#lan-cluster-mdns).
 
@@ -124,7 +124,7 @@ cargo install moq-cli --no-default-features --features "iroh,quinn,websocket,pla
 cargo build --release -p moq-cli --no-default-features --features "iroh,quinn,websocket,play"
 # or run straight from that checkout:
 cargo run -p moq-cli --no-default-features --features "iroh,quinn,websocket,play" -- \
-    --client-connect https://relay.example.com/anon --broadcast my-stream.hang play
+    --connect https://relay.example.com/anon --broadcast my-stream.hang play
 ```
 
 Drop the defaults on Linux, as above: the default `pipewire` feature links
@@ -148,7 +148,7 @@ there.
 Once built, play a broadcast with:
 
 ```bash
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang play
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
 ```
 
 `play` starts each media role as soon as the catalog offers a rendition it can
@@ -169,7 +169,7 @@ Playback decodes h264, h265, and av1 video, and opus and pcm audio, so
 skipped and defaults to `500ms`. These flags all follow the `play` verb:
 
 ```bash
-moq --client-connect https://relay.example.com/anon --broadcast conference.hang \
+moq --connect https://relay.example.com/anon --broadcast conference.hang \
     play --video-name hd --audio-name en --latency-max 250ms
 ```
 
@@ -184,7 +184,7 @@ Remux a file to MPEG-TS and pipe it in (`-c copy` avoids re-encoding):
 
 ```bash
 ffmpeg -i video.mp4 -c copy -f mpegts - | \
-    moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
+    moq --connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 ```
 
 ### Captions
@@ -210,20 +210,20 @@ ffmpeg -i video.mp4 -c copy -f mpegts - | \
 moq --cluster-lan --broadcast lan-demo.hang export ts | mpv -
 ```
 
-Peers connect to the `--server-bind` listener, which `--cluster-lan` fills in
+Peers connect to the `--listen` listener, which `--cluster-lan` fills in
 when you haven't: an ephemeral port with a generated certificate, whose SHA-256
 fingerprint rides along in the advertisement. Dialers pin that fingerprint, so
-sessions are encrypted without a CA. Pass `--server-bind` yourself to put the
+sessions are encrypted without a CA. Pass `--listen` yourself to put the
 mesh on a fixed port and your own certificate, shared with ordinary viewers.
 
 It composes with the other MoQ sides. The common pairing is a LAN mesh plus a
-CDN for everyone else: `--cluster-lan --client-connect
+CDN for everyone else: `--cluster-lan --connect
 https://relay.example.com/anon` serves viewers on the same network directly
 while the relay serves external ones, all from one process and one set of
 broadcasts. With `--cluster-lan` alone nothing leaves the local network.
 
 By default anyone who can reach the listener joins, exactly like a bare
-`--server-bind`, so use it on networks you trust. On a network you don't
+`--listen`, so use it on networks you trust. On a network you don't
 control, generate a key and give the same one to every peer:
 
 ```bash
@@ -265,8 +265,8 @@ joining. Run the same command from two aligned encoders, pinning the same id
 on both:
 
 ```bash
-moq --origin 42 --client-connect https://relay-a.example.com/anon --broadcast event.hang import ts
-moq --origin 42 --client-connect https://relay-b.example.com/anon --broadcast event.hang import ts
+moq --origin 42 --connect https://relay-a.example.com/anon --broadcast event.hang import ts
+moq --origin 42 --connect https://relay-b.example.com/anon --broadcast event.hang import ts
 ```
 
 Leave `--origin` unset everywhere else. The default fresh id per run is what
@@ -290,25 +290,25 @@ Build (or run) with the feature enabled:
 ```bash
 cargo build --release -p moq-cli --features capture
 # or run straight from a checkout:
-cargo run -p moq-cli --features capture -- --client-connect https://relay.example.com/anon --broadcast cam.hang import capture
+cargo run -p moq-cli --features capture -- --connect https://relay.example.com/anon --broadcast cam.hang import capture
 
 # Default camera + microphone, hardware-encoded H.264 when available:
-moq --client-connect https://relay.example.com/anon --broadcast cam.hang import capture
+moq --connect https://relay.example.com/anon --broadcast cam.hang import capture
 
 # Pick devices, resolution, and bitrates:
-moq --client-connect https://relay.example.com/anon --broadcast cam.hang \
+moq --connect https://relay.example.com/anon --broadcast cam.hang \
     import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 \
                    --microphone "MacBook Pro Microphone" --audio-bitrate 64000
 
 # One medium only:
-moq --client-connect https://relay.example.com/anon --broadcast cam.hang import capture --no-audio
-moq --client-connect https://relay.example.com/anon --broadcast cam.hang import capture --no-video
+moq --connect https://relay.example.com/anon --broadcast cam.hang import capture --no-audio
+moq --connect https://relay.example.com/anon --broadcast cam.hang import capture --no-video
 
 # Pick a codec (default h264). h265 is hardware-only:
-moq --client-connect https://relay.example.com/anon --broadcast cam.hang import capture --codec h265
+moq --connect https://relay.example.com/anon --broadcast cam.hang import capture --codec h265
 
 # Capture a display instead of a camera:
-moq --client-connect https://relay.example.com/anon --broadcast screen.hang import capture --display --no-audio
+moq --connect https://relay.example.com/anon --broadcast screen.hang import capture --display --no-audio
 ```
 
 ### Pick a source
@@ -344,15 +344,15 @@ Microphones:
 
 ```bash
 # A single window, followed as it moves and resizes (macOS only):
-moq --client-connect https://relay.example.com/anon --broadcast win.hang \
+moq --connect https://relay.example.com/anon --broadcast win.hang \
     import capture --window 39193 --no-audio
 
 # Every window of an application, including ones opened later (macOS only):
-moq --client-connect https://relay.example.com/anon --broadcast app.hang \
+moq --connect https://relay.example.com/anon --broadcast app.hang \
     import capture --app com.apple.Safari --no-audio
 
 # A specific display, without the mouse cursor:
-moq --client-connect https://relay.example.com/anon --broadcast screen.hang \
+moq --connect https://relay.example.com/anon --broadcast screen.hang \
     import capture --display 1 --no-cursor --no-audio
 ```
 
@@ -363,7 +363,7 @@ you usually want next to a screen share:
 
 ```bash
 # Share a screen with its sound (macOS only):
-moq --client-connect https://relay.example.com/anon --broadcast screen.hang \
+moq --connect https://relay.example.com/anon --broadcast screen.hang \
     import capture --display --system-audio
 ```
 
@@ -404,12 +404,12 @@ loopback input device, so it goes through ScreenCaptureKit (the same API as
 screen capture, and the same Screen Recording permission) rather than cpal.
 
 `--bitrate` is a ceiling rather than a fixed rate. When publishing with
-`--client-connect`, the video encoder follows the connection's congestion
+`--connect`, the video encoder follows the connection's congestion
 estimate: it drops below the ceiling as soon as the uplink tightens, and climbs
 back gradually once it clears, so a degrading network costs picture quality
 instead of stalling the stream. It never encodes above `--bitrate`. Encoders that
 can't retune while running (VAAPI today) hold the configured rate and log a
-warning. Without `--client-connect` there is no estimate to follow, so the
+warning. Without `--connect` there is no estimate to follow, so the
 configured rate is used as-is.
 
 Alternatively, pipe an external FFmpeg process as MPEG-TS:
@@ -417,11 +417,11 @@ Alternatively, pipe an external FFmpeg process as MPEG-TS:
 ```bash
 # macOS
 ffmpeg -f avfoundation -i "0:0" -f mpegts - | \
-    moq --client-connect https://relay.example.com/anon --broadcast webcam.hang import ts
+    moq --connect https://relay.example.com/anon --broadcast webcam.hang import ts
 
 # Linux
 ffmpeg -f v4l2 -i /dev/video0 -f mpegts - | \
-    moq --client-connect https://relay.example.com/anon --broadcast webcam.hang import ts
+    moq --connect https://relay.example.com/anon --broadcast webcam.hang import ts
 ```
 
 ### Transcode a Broadcast
@@ -437,14 +437,14 @@ cargo build --release -p moq-cli --features transcode
 
 # Publish `cam.hang/transcode.hang` with the default ladder (1080p..240p,
 # filtered to rungs strictly below the source):
-moq --client-connect https://relay.example.com/anon --broadcast cam.hang transcode
+moq --connect https://relay.example.com/anon --broadcast cam.hang transcode
 
 # Pick the ladder (height:bitrate in bits per second) and pin the codecs:
-moq --client-connect https://relay.example.com/anon --broadcast cam.hang     transcode --rung 720:2500000 --rung 360:600000 --encoder nvenc --decoder nvdec
+moq --connect https://relay.example.com/anon --broadcast cam.hang     transcode --rung 720:2500000 --rung 360:600000 --encoder nvenc --decoder nvdec
 
 # Publish the derivative somewhere else (the catalog then omits the relative
 # source references):
-moq --client-connect https://relay.example.com/anon --broadcast cam.hang transcode --output ladder.hang
+moq --connect https://relay.example.com/anon --broadcast cam.hang transcode --output ladder.hang
 ```
 
 Windows uses the Direct3D11 video processor by default. Pass
@@ -461,7 +461,7 @@ default; drop the default features for a software-only build.
 Pull a broadcast back out and play it:
 
 ```bash
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang export fmp4 | ffplay -
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang export fmp4 | ffplay -
 ```
 
 ## Encoding Options
@@ -473,7 +473,7 @@ ffmpeg -i input.mp4 \
     -c:v libx264 -preset ultrafast -tune zerolatency \
     -g 30 -keyint_min 30 \
     -c:a aac \
-    -f mpegts - | moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
+    -f mpegts - | moq --connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 ```
 
 ## Container Formats
@@ -497,7 +497,7 @@ egress (HLS/DASH), which may only advertise segments that are still fetchable;
 lower it when nothing reads history and the memory matters:
 
 ```bash
-moq --client-connect https://relay.example.com --broadcast my-stream.hang import --latency-max 5s ts
+moq --connect https://relay.example.com --broadcast my-stream.hang import --latency-max 5s ts
 ```
 
 It sits on `import` itself rather than the endpoint, so it applies to every
@@ -527,7 +527,7 @@ the sink subcommand here; `play` takes the same four after its own verb (see
 [Play a Broadcast](#play-a-broadcast)):
 
 ```bash
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang \
     export --video-name 720p --audio-codec opus fmp4 | ffplay -
 ```
 
@@ -559,10 +559,10 @@ Ingest an MPEG-TS stream from FFmpeg and play one back out:
 ```bash
 # Import: remux a file to MPEG-TS and pipe it in
 ffmpeg -i input.mp4 -c copy -f mpegts - | \
-    moq --client-connect https://relay.example.com --broadcast my-stream.hang import ts
+    moq --connect https://relay.example.com --broadcast my-stream.hang import ts
 
 # Export: pull MPEG-TS back out and play it
-moq --client-connect https://relay.example.com --broadcast my-stream.hang export ts | ffplay -
+moq --connect https://relay.example.com --broadcast my-stream.hang export ts | ffplay -
 ```
 
 TS export carries H.264 / H.265 as Annex-B and AAC as ADTS. Both in-band
@@ -590,10 +590,10 @@ captured: they are live or bulky rather than static identity.
 ```bash
 # Import: remux a file to FLV and pipe it in
 ffmpeg -i input.mp4 -c copy -f flv - | \
-    moq --client-connect https://relay.example.com --broadcast my-stream.hang import flv
+    moq --connect https://relay.example.com --broadcast my-stream.hang import flv
 
 # Export: pull FLV back out and play it
-moq --client-connect https://relay.example.com --broadcast my-stream.hang export flv | ffplay -
+moq --connect https://relay.example.com --broadcast my-stream.hang export flv | ffplay -
 ```
 
 FLV is the classic RTMP container: H.264 video and AAC audio, each with an
@@ -605,7 +605,7 @@ older codecs (VP6, MP3) are not supported on the stdin/stdout container path.
 Import a remote HLS master/media playlist into a MoQ broadcast:
 
 ```bash
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang \
     import hls https://example.com/live/master.m3u8
 ```
 
@@ -613,7 +613,7 @@ Serve one MoQ broadcast as HLS over HTTP (reached at
 `http://host:8089/<broadcast>/master.m3u8`):
 
 ```bash
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang \
     export hls --listen '[::]:8089'
 ```
 
@@ -644,7 +644,7 @@ libraries' auth-aware API.)
 Accept OBS / FFmpeg RTMP pushes and forward one broadcast to a relay:
 
 ```bash
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang \
     import rtmp --listen '[::]:1935'
 ```
 
@@ -653,7 +653,7 @@ moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
 Pull a broadcast from a relay and push it to a remote RTMP server:
 
 ```bash
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang \
     export rtmp --connect 'rtmp://live.twitch.tv/app/<stream-key>'
 ```
 
@@ -661,10 +661,10 @@ moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
 
 ```bash
 # Accept incoming SRT publishes as one broadcast and forward to a relay
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import srt --listen '[::]:9000'
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang import srt --listen '[::]:9000'
 
 # Serve a broadcast to SRT players
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang export srt --listen '[::]:9000'
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang export srt --listen '[::]:9000'
 ```
 
 ### WebRTC (WHIP / WHEP)
@@ -675,10 +675,10 @@ Direction picks the HTTP role: import `--listen` is a WHIP server, export
 
 ```bash
 # WHIP ingest: browsers publish one broadcast to us, we forward to a relay
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import rtc --listen '[::]:8080'
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang import rtc --listen '[::]:8080'
 
 # WHEP playback: serve a broadcast to browsers
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang export rtc --listen '[::]:8080'
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang export rtc --listen '[::]:8080'
 ```
 
 The WHIP/WHEP HTTP listener does not allow cross-origin browser access unless
@@ -691,7 +691,7 @@ Pass a JWT token via the URL's `?jwt=` query parameter:
 
 ```bash
 ffmpeg -i video.mp4 -c copy -f mpegts - | \
-    moq --client-connect "https://relay.example.com/?jwt=<token>" --broadcast my-stream.hang import ts
+    moq --connect "https://relay.example.com/?jwt=<token>" --broadcast my-stream.hang import ts
 ```
 
 `moq token` mints those tokens, so a relay operator needs no extra tool:
@@ -733,7 +733,7 @@ just pub tos https://relay.example.com/anon
 
 ```bash
 ffmpeg -i video.mp4 -c copy -f mpegts - | \
-    RUST_LOG=debug moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
+    RUST_LOG=debug moq --connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 ```
 
 ### Check Connection

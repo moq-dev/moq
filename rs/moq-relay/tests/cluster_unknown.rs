@@ -28,10 +28,10 @@ async fn spawn_relay(
 	let port = free_tcp_port();
 
 	let mut config = Config::default();
-	config.server.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse bind"));
-	config.client.bind = "127.0.0.1:0".parse().expect("parse client bind");
-	config.client.tls.disable_verify = Some(true);
-	config.client.version.extend(cluster_version);
+	config.listen.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse bind"));
+	config.connect.bind = Some("127.0.0.1:0".parse().expect("parse client bind"));
+	config.connect.tls.insecure = Some(true);
+	config.connect.version.extend(cluster_version);
 	#[allow(deprecated)]
 	{
 		config.auth.public = Some(PublicConfig::Simple(vec![String::new()]));
@@ -57,12 +57,12 @@ async fn spawn_relay(
 }
 
 fn client(version: Option<moq_net::Version>) -> moq_native::Client {
-	let mut config = moq_native::ClientConfig::default();
-	config.tls.disable_verify = Some(true);
-	config.websocket.delay = None;
-	config.bind = "127.0.0.1:0".parse().expect("parse bind");
+	let mut config = moq_native::connect::Config::default();
+	config.tls.insecure = Some(true);
+	config.websocket.delay = Some(std::time::Duration::ZERO);
+	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	config.version.extend(version);
-	config.init().expect("client init")
+	config.init(Default::default()).expect("client init")
 }
 
 struct Publisher {

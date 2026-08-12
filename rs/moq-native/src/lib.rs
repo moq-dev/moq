@@ -16,7 +16,7 @@
 pub mod accept;
 pub mod bind;
 mod client;
-mod connect;
+pub mod connect;
 mod connection;
 mod crypto;
 mod error;
@@ -24,6 +24,7 @@ mod error;
 pub mod failover;
 #[cfg(feature = "jemalloc")]
 pub mod jemalloc;
+pub mod listen;
 mod log;
 #[cfg(feature = "noq")]
 pub mod noq;
@@ -48,12 +49,12 @@ pub mod websocket;
 
 // Enumerated rather than globbed, so the root surface is a deliberate list and a
 // new `pub` item in these modules doesn't silently join it.
-pub use client::{Client, ClientConfig};
+pub use client::Client;
 pub use connect::{Addrs, ConnectError};
 pub use connection::{Backoff, Connection, ConnectionStatsReader, GoawayConfig, Redirect, Status};
 pub use error::{Error, Result};
 pub use log::Log;
-pub use server::{Listener, Request, Server, ServerConfig, Transport};
+pub use server::{Listener, Request, Server, Transport};
 
 /// Spawn the session's protocol driver on the current tokio runtime, handing back
 /// the session it drives.

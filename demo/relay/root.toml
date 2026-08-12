@@ -3,10 +3,10 @@
 # The RUST_LOG environment variable will take precedence.
 level = "debug"
 
-[server]
+[listen]
 # Listen for QUIC connections on UDP:4443
 # Sometimes IPv6 causes issues; try 127.0.0.1:4443 instead.
-listen = "[::]:4443"
+bind = "[::]:4443"
 
 # Server certificate and key signed by the cluster CA so leaves can
 # verify via `tls.root`. `just cert root` generates these files.

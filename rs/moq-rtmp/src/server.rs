@@ -269,7 +269,7 @@ impl Server {
 
 	/// Terminate TLS on every accepted connection, turning this into an RTMPS
 	/// listener (`rtmps://`). Pass a `rustls::ServerConfig` (e.g. from
-	/// `moq_native::tls::Server::server_config` with an empty ALPN list), or
+	/// `moq_native::tls::Listen::server_config` with an empty ALPN list), or
 	/// `None` to leave it plaintext.
 	#[cfg(feature = "tls")]
 	pub fn with_tls(mut self, tls: impl Into<Option<std::sync::Arc<rustls::ServerConfig>>>) -> Self {
@@ -2105,7 +2105,7 @@ mod tests {
 		let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
 
 		// Server: a self-signed cert for `localhost`, fronting the RTMP listener.
-		let mut tls = moq_native::tls::Server::default();
+		let mut tls = moq_native::tls::Listen::default();
 		tls.generate = vec!["localhost".to_string()];
 		let server_config = tls.server_config(vec![]).expect("build RTMPS server config");
 

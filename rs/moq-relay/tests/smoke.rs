@@ -50,7 +50,7 @@ async fn build_web_with(web_config: WebConfig) -> Web {
 	let mut auth_config = AuthConfig::default();
 	auth_config.public = Some(public);
 	let auth = auth_config
-		.init(&moq_native::tls::Client::default())
+		.init(&moq_native::tls::Connect::default())
 		.await
 		.expect("auth init");
 
@@ -59,10 +59,10 @@ async fn build_web_with(web_config: WebConfig) -> Web {
 	// moq_native::Server is needed for `certificates`, even though we never
 	// expose HTTPS or QUIC in this test. Binding QUIC to `[::]:0` picks an
 	// unused UDP port that we ignore.
-	let mut server_config = moq_native::ServerConfig::default();
+	let mut server_config = moq_native::listen::Config::default();
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
-	let server = server_config.init().expect("server init");
+	let server = server_config.init(Default::default()).expect("server init");
 
 	Web::new(auth, cluster, server.certificates(), web_config)
 }
@@ -125,20 +125,20 @@ fn client() -> moq_native::Client {
 
 /// A client pinned to a single MoQ version, or all versions when `None`.
 fn client_version(version: Option<moq_net::Version>) -> moq_native::Client {
-	let mut config = moq_native::ClientConfig::default();
-	config.tls.disable_verify = Some(true);
+	let mut config = moq_native::connect::Config::default();
+	config.tls.insecure = Some(true);
 	// One-shot: these tests were written against a single dial, and a background
 	// redial would re-register with the relay behind the assertions' back.
-	config.reconnect = Some(false);
+	config.once = Some(true);
 	// Zero head start so the WebSocket path runs immediately.
-	config.websocket.delay = None;
+	config.websocket.delay = Some(std::time::Duration::ZERO);
 	// Every relay in this file listens on IPv4 loopback, so bind the same family
 	// rather than egressing a QUIC dial from a dual-stack IPv6 socket.
-	config.bind = "127.0.0.1:0".parse().expect("parse bind");
+	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	if let Some(version) = version {
 		config.version = vec![version];
 	}
-	config.init().expect("client init")
+	config.init(Default::default()).expect("client init")
 }
 
 /// Connect a publisher and a subscriber to a real relay over `ws://`, push
@@ -462,16 +462,16 @@ async fn two_publish_only_clients_coexist() {
 /// Returns the QUIC socket the server bound, when it has one, so a caller that
 /// asked for an ephemeral port can dial it.
 async fn spawn_accept_relay(
-	config: moq_native::ServerConfig,
+	config: moq_native::listen::Config,
 	auth_config: AuthConfig,
 ) -> (Option<std::net::SocketAddr>, tokio::task::JoinHandle<()>) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	let server = config.init().expect("server init");
+	let server = config.init(Default::default()).expect("server init");
 	let addr = server.local_addr().ok();
 
 	let auth = auth_config
-		.init(&moq_native::tls::Client::default())
+		.init(&moq_native::tls::Connect::default())
 		.await
 		.expect("auth init");
 
@@ -504,7 +504,7 @@ async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	drop(probe);
 
 	// Stream-only: a TCP listener with no `--server-bind`, so no QUIC.
-	let mut config = moq_native::ServerConfig::default();
+	let mut config = moq_native::listen::Config::default();
 	config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 
 	// Public Simple([""]) lets any no-JWT stream client through at the root.
@@ -615,7 +615,7 @@ async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHa
 	let path = std::path::PathBuf::from(format!("/tmp/moq-internal-{}-{seq}.sock", std::process::id()));
 
 	// Stream-only: a Unix listener with no `--server-bind`, so no QUIC.
-	let mut config = moq_native::ServerConfig::default();
+	let mut config = moq_native::listen::Config::default();
 	config.unix.bind = Some(path.clone());
 
 	// Public Simple([""]) lets any no-JWT stream client through at the root.
@@ -829,7 +829,7 @@ async fn internal_unix_path_reaches_server() {
 /// loopback port, with fully public auth (no-JWT => whole root). Returns the bound
 /// address and an abort handle.
 async fn spawn_quic_relay() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
-	let mut config = moq_native::ServerConfig::default();
+	let mut config = moq_native::listen::Config::default();
 	config.bind = Some("127.0.0.1:0".to_string());
 	config.tls.generate = vec!["localhost".into()];
 
@@ -890,7 +890,7 @@ async fn spawn_subscribe_only_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	let port = probe.local_addr().expect("local addr").port();
 	drop(probe);
 
-	let mut config = moq_native::ServerConfig::default();
+	let mut config = moq_native::listen::Config::default();
 	config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 
 	// Subscribe-only public access: the root is granted for subscribing, never publishing.
@@ -981,7 +981,7 @@ async fn spawn_publish_only_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	let port = probe.local_addr().expect("local addr").port();
 	drop(probe);
 
-	let mut config = moq_native::ServerConfig::default();
+	let mut config = moq_native::listen::Config::default();
 	config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 
 	// Publish-only public access: the root is granted for publishing, never subscribing.

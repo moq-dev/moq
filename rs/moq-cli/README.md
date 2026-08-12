@@ -19,26 +19,26 @@ Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub
 
 ## Usage
 
-`moq-cli` routes one endpoint onto a shared MoQ Origin: `moq <MoQ side> <import|export> <endpoint>`. The MoQ side (before the verb) is either `--client-connect <url>` (dial a relay) or `--server-bind <addr>` (self-host). `import` moves media into MoQ, `export` moves it out. The endpoint is a container format (`fmp4`, `ts`, `flv`, ... read from stdin / written to stdout), or a gateway (`hls`, `rtmp`, `srt`, `rtc`). A build with the `play` feature can also render a broadcast locally with `moq <MoQ side> play`.
+`moq-cli` routes one endpoint onto a shared MoQ Origin: `moq <MoQ side> <import|export> <endpoint>`. The MoQ side (before the verb) is either `--connect <url>` (dial a relay) or `--listen <addr>` (self-host). `import` moves media into MoQ, `export` moves it out. The endpoint is a container format (`fmp4`, `ts`, `flv`, ... read from stdin / written to stdout), or a gateway (`hls`, `rtmp`, `srt`, `rtc`). A build with the `play` feature can also render a broadcast locally with `moq <MoQ side> play`.
 
 ### Publish to a remote relay
 
 ```bash
 ffmpeg -i input.mp4 -f mp4 -movflags cmaf - | \
-    moq --client-connect https://relay.example.com --broadcast my-stream.hang import fmp4
+    moq --connect https://relay.example.com --broadcast my-stream.hang import fmp4
 ```
 
 ### Subscribe from a remote relay
 
 ```bash
-moq --client-connect https://relay.example.com --broadcast my-stream.hang export fmp4 | \
+moq --connect https://relay.example.com --broadcast my-stream.hang export fmp4 | \
     ffplay -
 ```
 
 Play the broadcast in a native window and speaker (requires `--features play` when building):
 
 ```bash
-moq --client-connect https://relay.example.com --broadcast my-stream.hang play
+moq --connect https://relay.example.com --broadcast my-stream.hang play
 ```
 
 ### Self-host: publish into a local relay
@@ -47,7 +47,7 @@ Hosts a MoQ server and publishes a single broadcast read from stdin into it. Use
 
 ```bash
 ffmpeg -i input.mp4 -f mp4 -movflags cmaf - | \
-    moq --server-bind '[::]:4443' --tls-generate localhost --broadcast my-stream.hang import fmp4
+    moq --listen '[::]:4443' --listen-tls-generate localhost --broadcast my-stream.hang import fmp4
 ```
 
 ### Self-host: subscribe to an inbound broadcast
@@ -55,7 +55,7 @@ ffmpeg -i input.mp4 -f mp4 -movflags cmaf - | \
 Hosts a MoQ server and writes an incoming broadcast's media to stdout. The inverse of the above.
 
 ```bash
-moq --server-bind '[::]:4443' --tls-generate localhost --broadcast my-stream.hang export fmp4 | ffplay -
+moq --listen '[::]:4443' --listen-tls-generate localhost --broadcast my-stream.hang export fmp4 | ffplay -
 ```
 
 ### Import formats

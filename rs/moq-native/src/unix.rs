@@ -18,16 +18,16 @@ const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
 /// Plaintext Unix-socket qmux listener settings, with an optional
 /// peer-credential allowlist.
 ///
-/// Flattened onto [`crate::ServerConfig::unix`].
+/// Flattened onto [`crate::listen::Config::unix`].
 // The derived arg group is named after the struct, so it needs an explicit id to
 // stay unique across the flattened sections.
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-#[group(id = "server-unix")]
+#[group(id = "listen-unix")]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct Config {
 	/// Bind a plaintext qmux Unix-socket listener at this path.
-	#[arg(long = "server-unix-bind", id = "server-unix-bind", env = "MOQ_SERVER_UNIX_BIND")]
+	#[arg(long = "listen-unix-bind", id = "listen-unix-bind", env = "MOQ_LISTEN_UNIX_BIND")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub bind: Option<PathBuf>,
 
@@ -36,6 +36,117 @@ pub struct Config {
 	#[command(flatten)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub allow: Option<Allow>,
+
+	/// The released `--server-unix-*` spellings and their env vars, folded in by
+	/// [`Config::resolved`].
+	#[command(flatten)]
+	#[serde(skip)]
+	pub(crate) legacy: Legacy,
+}
+
+/// The `--server-unix-*` flags from before the accept side was named `listen`.
+///
+/// Separate args rather than clap aliases, since an alias renames the flag but
+/// leaves its env var behind.
+#[derive(clap::Args, Clone, Debug, Default)]
+#[group(id = "listen-unix-legacy")]
+pub(crate) struct Legacy {
+	#[arg(
+		long = "server-unix-bind",
+		id = "server-unix-bind",
+		env = "MOQ_SERVER_UNIX_BIND",
+		hide = true
+	)]
+	bind: Option<PathBuf>,
+
+	#[arg(
+		long = "server-unix-allow-uid",
+		id = "server-unix-allow-uid",
+		env = "MOQ_SERVER_UNIX_ALLOW_UID",
+		value_delimiter = ',',
+		hide = true
+	)]
+	uid: Vec<u32>,
+
+	#[arg(
+		long = "server-unix-allow-gid",
+		id = "server-unix-allow-gid",
+		env = "MOQ_SERVER_UNIX_ALLOW_GID",
+		value_delimiter = ',',
+		hide = true
+	)]
+	gid: Vec<u32>,
+
+	#[arg(
+		long = "server-unix-allow-pid",
+		id = "server-unix-allow-pid",
+		env = "MOQ_SERVER_UNIX_ALLOW_PID",
+		value_delimiter = ',',
+		hide = true
+	)]
+	pid: Vec<i32>,
+}
+
+impl Config {
+	/// Fold the released spellings into the canonical fields. Idempotent.
+	pub fn resolved(&self) -> Self {
+		let legacy = &self.legacy;
+		let mut resolved = self.clone();
+
+		for (used, deprecated, canonical) in [
+			(legacy.bind.is_some(), "--server-unix-bind", "--listen-unix-bind"),
+			(
+				!legacy.uid.is_empty(),
+				"--server-unix-allow-uid",
+				"--listen-unix-allow-uid",
+			),
+			(
+				!legacy.gid.is_empty(),
+				"--server-unix-allow-gid",
+				"--listen-unix-allow-gid",
+			),
+			(
+				!legacy.pid.is_empty(),
+				"--server-unix-allow-pid",
+				"--listen-unix-allow-pid",
+			),
+		] {
+			if used {
+				tracing::warn!("{deprecated} is deprecated; use {canonical}");
+			}
+		}
+
+		if resolved.bind.is_none() {
+			resolved.bind = legacy.bind.clone();
+		}
+
+		// Merge per credential rather than letting either allowlist win whole. The
+		// three lists are ANDed, so taking the canonical one entire would drop a
+		// legacy `uid` next to a canonical `gid` and *widen* access from "that user"
+		// to "anyone in that group".
+		let allow = resolved.allow.take().unwrap_or_default();
+		let merged = Allow {
+			uid: concat(&allow.uid, &legacy.uid),
+			gid: concat(&allow.gid, &legacy.gid),
+			pid: concat(&allow.pid, &legacy.pid),
+		};
+		// Clap materializes a flattened `Option<Args>` to `Some(default)` even when no
+		// flag was given, so an empty allowlist means unset, not "allow nothing".
+		resolved.allow = Some(merged).filter(|allow| !allow.is_empty());
+		resolved.legacy = Legacy::default();
+		resolved
+	}
+}
+
+/// Both spellings of one credential, in canonical-then-legacy order, deduplicated.
+fn concat<T: Clone + PartialEq>(canonical: &[T], legacy: &[T]) -> Vec<T> {
+	let mut out = canonical.to_vec();
+	for value in legacy {
+		if !out.contains(value) {
+			out.push(value.clone());
+		}
+	}
+	out
 }
 
 /// Peer-credential allowlist for a `unix://` listener.
@@ -44,14 +155,15 @@ pub struct Config {
 /// constrains the corresponding credential (AND across the three, OR within
 /// each); all empty means no check.
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-#[group(id = "server-unix-allow")]
+#[group(id = "listen-unix-allow")]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct Allow {
 	/// Allowed peer user IDs. Empty means any uid.
 	#[arg(
-		long = "server-unix-allow-uid",
-		env = "MOQ_SERVER_UNIX_ALLOW_UID",
+		long = "listen-unix-allow-uid",
+		id = "listen-unix-allow-uid",
+		env = "MOQ_LISTEN_UNIX_ALLOW_UID",
 		value_delimiter = ','
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -59,8 +171,9 @@ pub struct Allow {
 
 	/// Allowed peer group IDs. Empty means any gid.
 	#[arg(
-		long = "server-unix-allow-gid",
-		env = "MOQ_SERVER_UNIX_ALLOW_GID",
+		long = "listen-unix-allow-gid",
+		id = "listen-unix-allow-gid",
+		env = "MOQ_LISTEN_UNIX_ALLOW_GID",
 		value_delimiter = ','
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -69,8 +182,9 @@ pub struct Allow {
 	/// Allowed peer PIDs. Empty means any pid; a populated list rejects peers
 	/// whose PID the platform doesn't report.
 	#[arg(
-		long = "server-unix-allow-pid",
-		env = "MOQ_SERVER_UNIX_ALLOW_PID",
+		long = "listen-unix-allow-pid",
+		id = "listen-unix-allow-pid",
+		env = "MOQ_LISTEN_UNIX_ALLOW_PID",
 		value_delimiter = ','
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -285,5 +399,76 @@ impl Drop for Listener {
 	fn drop(&mut self) {
 		// Best-effort: don't leave a stale socket file behind.
 		let _ = fs::remove_file(&self.path);
+	}
+}
+
+#[cfg(test)]
+mod legacy_tests {
+	use super::*;
+	use clap::Parser;
+
+	#[derive(Parser)]
+	struct Cli {
+		#[command(flatten)]
+		unix: Config,
+	}
+
+	fn parse(args: &[&str]) -> Config {
+		let mut argv = vec!["test"];
+		argv.extend_from_slice(args);
+		Cli::parse_from(argv).unix
+	}
+
+	/// The released `--server-unix-*` spellings still land in the canonical fields,
+	/// allowlist included: clap materializes the flattened `Allow` even when unset,
+	/// so a naive "already Some" check would drop the legacy credentials.
+	#[test]
+	fn released_spellings_fold_in() {
+		let config = parse(&["--server-unix-bind", "/tmp/moq.sock", "--server-unix-allow-uid", "501"]).resolved();
+
+		assert_eq!(config.bind, Some(PathBuf::from("/tmp/moq.sock")));
+		assert_eq!(config.allow.as_ref().map(|allow| allow.uid.clone()), Some(vec![501]));
+	}
+
+	/// The canonical bind wins, and folding twice changes nothing.
+	#[test]
+	fn canonical_wins_over_legacy() {
+		let config = parse(&[
+			"--listen-unix-bind",
+			"/tmp/new.sock",
+			"--server-unix-bind",
+			"/tmp/old.sock",
+		])
+		.resolved();
+
+		assert_eq!(config.bind, Some(PathBuf::from("/tmp/new.sock")));
+		assert_eq!(config.resolved().bind, config.bind);
+	}
+
+	/// The allowlist merges per credential instead of letting one spelling win
+	/// whole. The three lists are ANDed, so dropping the legacy `uid` next to a
+	/// canonical `gid` would widen access from one user to a whole group.
+	#[test]
+	fn allowlist_merges_across_spellings() {
+		let config = parse(&["--listen-unix-allow-gid", "20", "--server-unix-allow-uid", "501"]).resolved();
+		let allow = config.allow.as_ref().expect("allowlist");
+		assert_eq!(allow.uid, vec![501]);
+		assert_eq!(allow.gid, vec![20]);
+
+		// Same credential from both spellings: canonical first, no duplicates.
+		let config = parse(&["--listen-unix-allow-uid", "1000", "--server-unix-allow-uid", "501,1000"]).resolved();
+		assert_eq!(config.allow.as_ref().expect("allowlist").uid, vec![1000, 501]);
+
+		// Folding twice changes nothing.
+		let once = config.resolved();
+		assert_eq!(once.resolved().allow.map(|a| a.uid), once.allow.map(|a| a.uid));
+	}
+
+	/// No flag at all leaves the allowlist unset, so the socket's own permissions
+	/// stay the only gate.
+	#[test]
+	fn no_allowlist_stays_unset() {
+		let config = parse(&["--listen-unix-bind", "/tmp/moq.sock"]).resolved();
+		assert!(config.allow.is_none());
 	}
 }

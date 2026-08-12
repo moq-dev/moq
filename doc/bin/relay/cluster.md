@@ -149,7 +149,7 @@ If a fetch fails or returns garbage, the relay logs and keeps the last good list
 
 Cluster peers must authenticate to each other:
 
-- **mTLS** (recommended). Set `tls.root` to the CA that signed the cluster certificates. Inbound connections presenting a valid client cert are granted full access; outbound dials use `client.tls.cert` / `client.tls.key`.
+- **mTLS** (recommended). Set `tls.root` to the CA that signed the cluster certificates. Inbound connections presenting a valid client cert are granted full access; outbound dials use `connect.tls.cert` / `connect.tls.key`.
 - **JWT**. For static `connect` peers, supply the token inline as a `?jwt=` query parameter on the URL. For gossip- and `connect_api`-discovered peers (whose addresses can't carry an inline token), set `cluster.token` to a file holding the JWT; it's presented on any dial whose URL has no inline `?jwt=` (so an inline token wins per-peer). Either way the token needs broad enough scope to cover whatever paths the cluster carries.
 
 See [Authentication](/bin/relay/auth) for the full setup.

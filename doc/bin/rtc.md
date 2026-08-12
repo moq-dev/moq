@@ -79,7 +79,7 @@ moq-rtc --relay https://relay.example.com --broadcast my-stream \
   deployment behind a firewall pins it (e.g. `0.0.0.0:8089`) and opens just
   that one media port. Pair it with `--public-addr` so the advertised ICE
   candidate uses the pinned port.
-- `--tls-cert` / `--tls-key`: serve HTTPS instead. Most WHIP clients
+- `--listen-tls-cert` / `--listen-tls-key`: serve HTTPS instead. Most WHIP clients
   require it in practice.
 
 ### Client flags

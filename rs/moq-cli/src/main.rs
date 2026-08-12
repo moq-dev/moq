@@ -39,13 +39,15 @@ static ALLOC: moq_native::jemalloc::tikv_jemallocator::Jemalloc = moq_native::je
 /// iroh endpoint so the rest of the code is feature-agnostic.
 #[derive(Clone)]
 struct Net {
+	/// The shared QUIC tuning, handed to whichever roles this process builds.
+	quic: moq_native::quic::Config,
 	#[cfg(feature = "iroh")]
 	iroh: Option<moq_native::iroh::Endpoint>,
 }
 
 impl Net {
-	fn client(&self, config: moq_native::ClientConfig) -> anyhow::Result<moq_native::Client> {
-		let client = config.init()?;
+	fn client(&self, config: moq_native::connect::Config) -> anyhow::Result<moq_native::Client> {
+		let client = config.init(self.quic.clone())?;
 		#[cfg(feature = "iroh")]
 		let client = match self.iroh.clone() {
 			Some(iroh) => client.with_iroh(iroh),
@@ -54,8 +56,8 @@ impl Net {
 		Ok(client)
 	}
 
-	fn server(&self, config: moq_native::ServerConfig) -> anyhow::Result<moq_native::Server> {
-		let server = config.init()?;
+	fn server(&self, config: moq_native::listen::Config) -> anyhow::Result<moq_native::Server> {
+		let server = config.init(self.quic.clone())?;
 		#[cfg(feature = "iroh")]
 		let server = match self.iroh.clone() {
 			Some(iroh) => server.with_iroh(iroh),
@@ -76,7 +78,7 @@ pub enum Direction {
 
 /// Bind the MoQ listener and spawn everything that serves on it: ordinary
 /// clients, the LAN mesh when `--cluster-lan` is on, and the certificate
-/// endpoint for an explicit `--server-bind`. A no-op with no listener configured.
+/// endpoint for an explicit `--listen`. A no-op with no listener configured.
 ///
 async fn spawn_server(
 	tasks: &mut JoinSet<anyhow::Result<()>>,
@@ -170,8 +172,9 @@ async fn main() -> anyhow::Result<()> {
 	cli.moq.validate()?;
 
 	let net = Net {
+		quic: cli.moq.quic.clone(),
 		#[cfg(feature = "iroh")]
-		iroh: cli.moq.iroh.clone().bind(&cli.moq.client.quic).await?,
+		iroh: cli.moq.iroh.clone().bind(&cli.moq.quic).await?,
 	};
 
 	#[cfg(feature = "jemalloc")]
@@ -207,7 +210,7 @@ async fn spawn_moq_consume(
 	origin: &moq_net::origin::Producer,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
-	if moq.client.connect.is_some()
+	if moq.client.url.is_some()
 		&& let Some(reconnect) = net.client(moq.client.clone())?.consume(origin.clone())
 	{
 		tasks.spawn(async move { Ok(reconnect.closed().await?) });
@@ -257,7 +260,7 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 	}
 
 	// The uplink's bandwidth estimate, for sources that can encode to fit it. Only
-	// an outbound client has one: a `--server-bind` publisher's sessions are
+	// an outbound client has one: a `--listen` publisher's sessions are
 	// inbound and never surfaced here, so it stays `None` and those sources encode
 	// at their configured rate. Capture is the only such source today, so without
 	// that feature nothing reads this.
@@ -265,7 +268,7 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 	let mut send_bandwidth = None;
 
 	// MoQ side: publish the Origin outward.
-	if moq.client.connect.is_some()
+	if moq.client.url.is_some()
 		&& let Some(reconnect) = net.client(moq.client.clone())?.publish(origin.consume())
 	{
 		// Read before the handle moves into the task. This consumer is

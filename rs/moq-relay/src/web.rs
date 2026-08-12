@@ -313,7 +313,7 @@ fn build_https_config(
 		"web.https.cert and web.https.key must have the same number of entries"
 	);
 
-	let mut tls = moq_native::tls::Server::default();
+	let mut tls = moq_native::tls::Listen::default();
 	tls.cert = cert.to_vec();
 	tls.key = key.to_vec();
 	tls.root = root.to_vec();

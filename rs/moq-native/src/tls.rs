@@ -1,7 +1,7 @@
 //! TLS trust, certificates, and keys, split by role.
 //!
-//! [`Client`] (`--client-tls-*`) picks who to trust: system roots, custom roots,
-//! a pinned SHA-256 fingerprint, or nothing at all. [`Server`] (`--server-tls-*`)
+//! [`Connect`] (`--connect-tls-*`) picks who to trust: system roots, custom roots,
+//! a pinned SHA-256 fingerprint, or nothing at all. [`Listen`] (`--listen-tls-*`)
 //! supplies the certificate chain to serve, loaded from disk or self-signed on
 //! startup, and optionally the roots that authenticate mTLS clients.
 //!
@@ -56,7 +56,7 @@ pub enum Error {
 
 	/// Nothing is configured that could ever verify a server certificate.
 	#[error(
-		"no trusted roots: provide --client-tls-root, enable --client-tls-system-roots, or use --client-tls-fingerprint / --client-tls-disable-verify"
+		"no trusted roots: provide --connect-tls-root, enable --connect-tls-system-roots, or use --connect-tls-fingerprint / --connect-tls-insecure"
 	)]
 	NoRoots,
 
@@ -71,13 +71,13 @@ pub enum Error {
 	/// Fingerprint pinning was combined with CA roots. Pinning bypasses the chain, so one of
 	/// the two would be silently ignored.
 	#[error(
-		"--client-tls-fingerprint cannot be combined with --client-tls-root or --client-tls-system-roots: fingerprint pinning bypasses CA verification"
+		"--connect-tls-fingerprint cannot be combined with --connect-tls-root or --connect-tls-system-roots: fingerprint pinning bypasses CA verification"
 	)]
 	FingerprintWithRoots,
 
 	/// Trust material was configured alongside the flag that ignores all of it.
 	#[error(
-		"--client-tls-disable-verify cannot be combined with --client-tls-fingerprint, --client-tls-root or --client-tls-system-roots: it accepts every certificate, so the trust material would be ignored"
+		"--connect-tls-insecure cannot be combined with --connect-tls-fingerprint, --connect-tls-root or --connect-tls-system-roots: it accepts every certificate, so the trust material would be ignored"
 	)]
 	DisableVerifyWithTrust,
 
@@ -95,7 +95,7 @@ pub enum Error {
 	ClientAuth(#[source] rustls::Error),
 
 	/// Only one half of the mTLS client identity was given; it needs both a cert and a key.
-	#[error("both --client-tls-cert and --client-tls-key must be provided")]
+	#[error("both --connect-tls-cert and --connect-tls-key must be provided")]
 	IncompleteClientAuth,
 
 	/// The server was given a different number of certificates than keys. They pair by index.
@@ -157,13 +157,13 @@ pub(crate) fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 
 // ── Client ──────────────────────────────────────────────────────────
 
-/// TLS configuration for the client.
+/// The dial side's TLS: who to trust, and the optional mTLS identity to present.
 #[serde_with::serde_as]
 #[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[group(id = "tls-client")]
 #[non_exhaustive]
-pub struct Client {
+pub struct Connect {
 	/// Trust the TLS root at this path, encoded as PEM.
 	///
 	/// This value can be provided multiple times for multiple roots.
@@ -171,24 +171,24 @@ pub struct Client {
 	///
 	/// These roots are added on top of the system roots. By default the system
 	/// roots are only loaded when no custom root is given, so passing a root
-	/// replaces them; set `--client-tls-system-roots` to trust both (e.g. to reach a
+	/// replaces them; set `--connect-tls-system-roots` to trust both (e.g. to reach a
 	/// local relay with a private CA and a remote one with a public CA).
 	#[serde(skip_serializing_if = "Vec::is_empty")]
-	#[arg(id = "client-tls-root", long = "client-tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
+	#[arg(id = "connect-tls-root", long = "connect-tls-root", env = "MOQ_CONNECT_TLS_ROOT")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
 	/// Also trust the platform's native root certificates.
 	///
-	/// Defaults to enabled only when no `--client-tls-root` is given. Set it
+	/// Defaults to enabled only when no `--connect-tls-root` is given. Set it
 	/// explicitly to trust the system roots alongside any custom roots, or set it
 	/// to false to trust only the custom roots. Trusting neither (no custom root
 	/// and system roots disabled) is rejected, since verification could never pass.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
-		id = "client-tls-system-roots",
-		long = "client-tls-system-roots",
-		env = "MOQ_CLIENT_TLS_SYSTEM_ROOTS",
+		id = "connect-tls-system-roots",
+		long = "connect-tls-system-roots",
+		env = "MOQ_CONNECT_TLS_SYSTEM_ROOTS",
 		default_missing_value = "true",
 		num_args = 0..=1,
 		require_equals = true,
@@ -208,9 +208,9 @@ pub struct Client {
 	/// across a certificate rotation). In config files, accepts either a single string or a TOML array.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[arg(
-		id = "client-tls-fingerprint",
-		long = "client-tls-fingerprint",
-		env = "MOQ_CLIENT_TLS_FINGERPRINT"
+		id = "connect-tls-fingerprint",
+		long = "connect-tls-fingerprint",
+		env = "MOQ_CONNECT_TLS_FINGERPRINT"
 	)]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub fingerprint: Vec<String>,
@@ -218,33 +218,33 @@ pub struct Client {
 	/// PEM file containing the client certificate chain for mTLS.
 	///
 	/// Only certificates are extracted; any private keys in the file are ignored.
-	/// Must be paired with `--client-tls-key`.
+	/// Must be paired with `--connect-tls-key`.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "client-tls-cert", long = "client-tls-cert", env = "MOQ_CLIENT_TLS_CERT")]
+	#[arg(id = "connect-tls-cert", long = "connect-tls-cert", env = "MOQ_CONNECT_TLS_CERT")]
 	pub cert: Option<PathBuf>,
 
 	/// PEM file containing the private key for mTLS.
 	///
 	/// Only the private key is extracted; any certificates in the file are ignored.
-	/// Must be paired with `--client-tls-cert`.
+	/// Must be paired with `--connect-tls-cert`.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "client-tls-key", long = "client-tls-key", env = "MOQ_CLIENT_TLS_KEY")]
+	#[arg(id = "connect-tls-key", long = "connect-tls-key", env = "MOQ_CONNECT_TLS_KEY")]
 	pub key: Option<PathBuf>,
 
 	/// Danger: Disable TLS certificate verification.
 	///
 	/// Fine for local development and between relays, but should be used in caution in production.
-	#[serde(skip_serializing_if = "Option::is_none")]
+	#[serde(alias = "disable_verify", skip_serializing_if = "Option::is_none")]
 	#[arg(
-		id = "client-tls-disable-verify",
-		long = "client-tls-disable-verify",
-		env = "MOQ_CLIENT_TLS_DISABLE_VERIFY",
+		id = "connect-tls-insecure",
+		long = "connect-tls-insecure",
+		env = "MOQ_CONNECT_TLS_INSECURE",
 		default_missing_value = "true",
 		num_args = 0..=1,
 		require_equals = true,
 		value_parser = clap::value_parser!(bool),
 	)]
-	pub disable_verify: Option<bool>,
+	pub insecure: Option<bool>,
 
 	/// Override the TLS SNI and certificate verification hostname for outbound connections.
 	///
@@ -252,9 +252,9 @@ pub struct Client {
 	/// raw IP address but needing to present/verify a DNS name the server certificate covers.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
-		id = "client-tls-host-name",
-		long = "client-tls-host-name",
-		env = "MOQ_CLIENT_TLS_HOST_NAME"
+		id = "connect-tls-host-name",
+		long = "connect-tls-host-name",
+		env = "MOQ_CONNECT_TLS_HOST_NAME"
 	)]
 	pub host_name: Option<String>,
 
@@ -266,10 +266,15 @@ pub struct Client {
 	deprecated: Deprecated,
 }
 
-/// Holds the deprecated bare `--tls-*` flag spellings (renamed to `--client-tls-*`).
-/// Flattened into [`Client`] so they keep parsing; folded into the canonical
-/// fields by [`Client::build`] with a deprecation warning. No env (the env names
-/// were never renamed) and no TOML.
+/// Holds the released spellings this section replaced: the bare `--tls-*` flags and
+/// the `--client-tls-*` pair of flag and env var.
+///
+/// Flattened into [`Connect`] so they keep parsing; folded into the canonical fields
+/// by the `effective_*` accessors, with a deprecation warning. Each carries its
+/// original env var, since a clap alias renames the flag but not the variable, and a
+/// deployment that configures a relay through the environment would otherwise find
+/// its TLS settings silently ignored. Not TOML fields: config files use the
+/// canonical names.
 #[derive(Clone, Default, Debug, clap::Args)]
 struct Deprecated {
 	#[arg(long = "tls-root", hide = true)]
@@ -296,7 +301,72 @@ struct Deprecated {
 		require_equals = true,
 		value_parser = clap::value_parser!(bool),
 	)]
-	disable_verify: Option<bool>,
+	insecure: Option<bool>,
+
+	#[arg(
+		id = "client-tls-root",
+		long = "client-tls-root",
+		env = "MOQ_CLIENT_TLS_ROOT",
+		hide = true
+	)]
+	client_root: Vec<PathBuf>,
+
+	#[arg(
+		id = "client-tls-system-roots",
+		long = "client-tls-system-roots",
+		env = "MOQ_CLIENT_TLS_SYSTEM_ROOTS",
+		hide = true,
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+	)]
+	client_system_roots: Option<bool>,
+
+	#[arg(
+		id = "client-tls-fingerprint",
+		long = "client-tls-fingerprint",
+		env = "MOQ_CLIENT_TLS_FINGERPRINT",
+		hide = true
+	)]
+	client_fingerprint: Vec<String>,
+
+	#[arg(
+		id = "client-tls-cert",
+		long = "client-tls-cert",
+		env = "MOQ_CLIENT_TLS_CERT",
+		hide = true
+	)]
+	client_cert: Option<PathBuf>,
+
+	#[arg(
+		id = "client-tls-key",
+		long = "client-tls-key",
+		env = "MOQ_CLIENT_TLS_KEY",
+		hide = true
+	)]
+	client_key: Option<PathBuf>,
+
+	#[arg(
+		id = "client-tls-disable-verify",
+		long = "client-tls-disable-verify",
+		alias = "client-tls-insecure",
+		env = "MOQ_CLIENT_TLS_DISABLE_VERIFY",
+		hide = true,
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+	)]
+	client_insecure: Option<bool>,
+
+	#[arg(
+		id = "client-tls-host-name",
+		long = "client-tls-host-name",
+		env = "MOQ_CLIENT_TLS_HOST_NAME",
+		hide = true
+	)]
+	client_host_name: Option<String>,
 }
 
 /// The resolved server-certificate verification policy.
@@ -307,7 +377,7 @@ struct Deprecated {
 /// are valid.
 #[derive(Clone)]
 pub(crate) enum Verification {
-	/// No verification at all. Insecure; only via `--client-tls-disable-verify`.
+	/// No verification at all. Insecure; only via `--connect-tls-insecure`.
 	Disabled,
 
 	/// Pin the leaf certificate by SHA-256. The CA chain is not consulted, so
@@ -324,63 +394,152 @@ pub(crate) enum Verification {
 	},
 }
 
-impl Client {
+impl Connect {
 	/// Log a warning for each deprecated `--tls-*` flag in use. Called once from
 	/// [`Self::verification`], which every backend runs, so a deprecated flag warns once.
 	pub(crate) fn warn_deprecated(&self) {
-		if !self.deprecated.root.is_empty() {
-			tracing::warn!("--tls-root is deprecated; use --client-tls-root");
-		}
-		if self.deprecated.system_roots.is_some() {
-			tracing::warn!("--tls-system-roots is deprecated; use --client-tls-system-roots");
-		}
-		if !self.deprecated.fingerprint.is_empty() {
-			tracing::warn!("--tls-fingerprint is deprecated; use --client-tls-fingerprint");
-		}
-		if self.deprecated.disable_verify.is_some() {
-			tracing::warn!("--tls-disable-verify is deprecated; use --client-tls-disable-verify");
+		for (used, deprecated, canonical) in [
+			(!self.deprecated.root.is_empty(), "--tls-root", "--connect-tls-root"),
+			(
+				self.deprecated.system_roots.is_some(),
+				"--tls-system-roots",
+				"--connect-tls-system-roots",
+			),
+			(
+				!self.deprecated.fingerprint.is_empty(),
+				"--tls-fingerprint",
+				"--connect-tls-fingerprint",
+			),
+			(
+				self.deprecated.insecure.is_some(),
+				"--tls-disable-verify",
+				"--connect-tls-insecure",
+			),
+			(
+				!self.deprecated.client_root.is_empty(),
+				"--client-tls-root",
+				"--connect-tls-root",
+			),
+			(
+				self.deprecated.client_system_roots.is_some(),
+				"--client-tls-system-roots",
+				"--connect-tls-system-roots",
+			),
+			(
+				!self.deprecated.client_fingerprint.is_empty(),
+				"--client-tls-fingerprint",
+				"--connect-tls-fingerprint",
+			),
+			(
+				self.deprecated.client_cert.is_some(),
+				"--client-tls-cert",
+				"--connect-tls-cert",
+			),
+			(
+				self.deprecated.client_key.is_some(),
+				"--client-tls-key",
+				"--connect-tls-key",
+			),
+			(
+				self.deprecated.client_insecure.is_some(),
+				"--client-tls-disable-verify",
+				"--connect-tls-insecure",
+			),
+			(
+				self.deprecated.client_host_name.is_some(),
+				"--client-tls-host-name",
+				"--connect-tls-host-name",
+			),
+		] {
+			if used {
+				tracing::warn!("{deprecated} is deprecated; use {canonical}");
+			}
 		}
 	}
 
-	/// Roots from the canonical field plus the deprecated `--tls-root` spelling.
+	/// Roots from the canonical field plus the released spellings it replaced.
+	///
+	/// Concatenated rather than "first non-empty wins": each spelling is a separate
+	/// list of roots, and dropping one would silently stop trusting a CA.
 	pub(crate) fn effective_root(&self) -> Vec<PathBuf> {
 		let mut root = self.root.clone();
 		root.extend(self.deprecated.root.iter().cloned());
+		root.extend(self.deprecated.client_root.iter().cloned());
 		root
 	}
 
-	/// Fingerprints from the canonical field plus the deprecated `--tls-fingerprint`.
+	/// Fingerprints from the canonical field plus the released spellings it replaced.
 	pub(crate) fn effective_fingerprint(&self) -> Vec<String> {
 		let mut fp = self.fingerprint.clone();
 		fp.extend(self.deprecated.fingerprint.iter().cloned());
+		fp.extend(self.deprecated.client_fingerprint.iter().cloned());
 		fp
 	}
 
-	/// `system_roots`, preferring the canonical flag over the deprecated alias.
+	/// `system_roots`, preferring the canonical flag over the deprecated spellings.
 	pub(crate) fn effective_system_roots(&self) -> Option<bool> {
-		self.system_roots.or(self.deprecated.system_roots)
+		self.system_roots
+			.or(self.deprecated.system_roots)
+			.or(self.deprecated.client_system_roots)
 	}
 
-	/// `disable_verify`, preferring the canonical flag over the deprecated alias.
+	/// `insecure`, preferring the canonical flag over the deprecated spellings.
 	pub(crate) fn effective_disable_verify(&self) -> Option<bool> {
-		self.disable_verify.or(self.deprecated.disable_verify)
+		self.insecure
+			.or(self.deprecated.insecure)
+			.or(self.deprecated.client_insecure)
+	}
+
+	/// The mTLS identity, preferring the canonical flags over `--client-tls-cert`/`-key`.
+	pub(crate) fn effective_identity(&self) -> (Option<PathBuf>, Option<PathBuf>) {
+		(
+			self.cert.clone().or_else(|| self.deprecated.client_cert.clone()),
+			self.key.clone().or_else(|| self.deprecated.client_key.clone()),
+		)
+	}
+
+	/// The SNI override, preferring the canonical flag over `--client-tls-host-name`.
+	pub(crate) fn effective_host_name(&self) -> Option<String> {
+		self.host_name
+			.clone()
+			.or_else(|| self.deprecated.client_host_name.clone())
+	}
+
+	/// Fold every released spelling into the canonical fields, warning once for each.
+	///
+	/// Applied by [`crate::connect::Config::resolved`], so the backends read plain
+	/// fields and can't each forget a fold. Idempotent.
+	pub fn resolved(&self) -> Self {
+		self.warn_deprecated();
+
+		let (cert, key) = self.effective_identity();
+		Self {
+			root: self.effective_root(),
+			system_roots: self.effective_system_roots(),
+			fingerprint: self.effective_fingerprint(),
+			cert,
+			key,
+			insecure: self.effective_disable_verify(),
+			host_name: self.effective_host_name(),
+			deprecated: Deprecated::default(),
+		}
 	}
 
 	/// Resolve the verification policy from the configured flags.
 	///
 	/// Precedence and rules (shared by all backends):
-	/// - `--client-tls-disable-verify` disables verification, and combining it with any
+	/// - `--connect-tls-insecure` disables verification, and combining it with any
 	///   trust material is rejected rather than silently ignoring that material.
-	/// - `--client-tls-fingerprint` pins the leaf and bypasses the CA chain; combining
-	///   it with `--client-tls-root` or `--client-tls-system-roots` is rejected rather than
+	/// - `--connect-tls-fingerprint` pins the leaf and bypasses the CA chain; combining
+	///   it with `--connect-tls-root` or `--connect-tls-system-roots` is rejected rather than
 	///   silently ignoring one of them.
 	/// - Otherwise, verify against the system roots (default) plus any custom
 	///   roots. The system roots are dropped once a custom root is given unless
-	///   `--client-tls-system-roots` re-enables them.
+	///   `--connect-tls-system-roots` re-enables them.
 	///
 	/// Every combination that would quietly drop one setting is an error. Silently
 	/// weakening trust is the worst outcome here: someone moving off
-	/// `disable_verify` by adding a fingerprint would otherwise still accept every
+	/// `insecure` by adding a fingerprint would otherwise still accept every
 	/// certificate, with the UI showing the pin as configured.
 	pub(crate) fn verification(&self) -> Result<Verification> {
 		self.warn_deprecated();
@@ -431,7 +590,7 @@ impl Client {
 	/// honored for a connection.
 	///
 	/// Only when no stronger verification is configured: an explicit
-	/// `--client-tls-fingerprint` must never be weakened by an attacker-controlled
+	/// `--connect-tls-fingerprint` must never be weakened by an attacker-controlled
 	/// plaintext fetch, and there is nothing to bootstrap when verification is
 	/// disabled. With CA roots (the default), `http://` is the deliberate
 	/// per-connection way to pin a self-signed relay, so it is allowed.
@@ -590,7 +749,7 @@ pub fn init_android(env: &mut jni::Env, context: jni::objects::JObject) -> Resul
 	Ok(())
 }
 
-// ── Server ──────────────────────────────────────────────────────────
+// ── Listen ──────────────────────────────────────────────────────────
 
 /// TLS configuration for the server.
 ///
@@ -603,15 +762,15 @@ pub fn init_android(env: &mut jni::Env, context: jni::objects::JObject) -> Resul
 #[serde(deny_unknown_fields)]
 #[group(id = "tls-server")]
 #[non_exhaustive]
-pub struct Server {
+pub struct Listen {
 	/// Load the given certificate from disk.
-	#[arg(long = "tls-cert", id = "tls-cert", env = "MOQ_SERVER_TLS_CERT")]
+	#[arg(long = "listen-tls-cert", id = "listen-tls-cert", env = "MOQ_LISTEN_TLS_CERT")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub cert: Vec<PathBuf>,
 
 	/// Load the given key from disk.
-	#[arg(long = "tls-key", id = "tls-key", env = "MOQ_SERVER_TLS_KEY")]
+	#[arg(long = "listen-tls-key", id = "listen-tls-key", env = "MOQ_LISTEN_TLS_KEY")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub key: Vec<PathBuf>,
@@ -619,10 +778,10 @@ pub struct Server {
 	/// Or generate a new certificate and key with the given hostnames.
 	/// This won't be valid unless the client uses the fingerprint or disables verification.
 	#[arg(
-		long = "tls-generate",
-		id = "tls-generate",
+		long = "listen-tls-generate",
+		id = "listen-tls-generate",
 		value_delimiter = ',',
-		env = "MOQ_SERVER_TLS_GENERATE"
+		env = "MOQ_LISTEN_TLS_GENERATE"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
@@ -638,17 +797,107 @@ pub struct Server {
 	/// Plain-TLS listeners built via [`Self::server_config`] also use these roots
 	/// for optional mTLS.
 	#[arg(
-		long = "server-tls-root",
-		id = "server-tls-root",
+		long = "listen-tls-root",
+		id = "listen-tls-root",
 		value_delimiter = ',',
-		env = "MOQ_SERVER_TLS_ROOT"
+		env = "MOQ_LISTEN_TLS_ROOT"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
+
+	/// The released `--server-tls-*` spellings and env vars, folded into the fields
+	/// above by [`Self::resolved`].
+	#[command(flatten)]
+	#[serde(skip)]
+	pub(crate) deprecated: ListenDeprecated,
 }
 
-impl Server {
+/// The released served-identity spellings, kept parsing but hidden.
+///
+/// The flags themselves mostly survived this rename (`--tls-cert` is still
+/// `--tls-cert`); what they carry here is their original env var, which a clap
+/// alias cannot. A relay configured through the environment would otherwise come
+/// up with no certificate at all.
+#[derive(Clone, Default, Debug, clap::Args)]
+pub(crate) struct ListenDeprecated {
+	#[arg(
+		id = "server-tls-cert",
+		long = "tls-cert",
+		alias = "server-tls-cert",
+		env = "MOQ_SERVER_TLS_CERT",
+		hide = true
+	)]
+	cert: Vec<PathBuf>,
+
+	#[arg(
+		id = "server-tls-key",
+		long = "tls-key",
+		alias = "server-tls-key",
+		env = "MOQ_SERVER_TLS_KEY",
+		hide = true
+	)]
+	key: Vec<PathBuf>,
+
+	#[arg(
+		id = "server-tls-generate",
+		long = "tls-generate",
+		alias = "server-tls-generate",
+		value_delimiter = ',',
+		env = "MOQ_SERVER_TLS_GENERATE",
+		hide = true
+	)]
+	generate: Vec<String>,
+
+	#[arg(
+		id = "server-tls-root",
+		long = "server-tls-root",
+		value_delimiter = ',',
+		env = "MOQ_SERVER_TLS_ROOT",
+		hide = true
+	)]
+	root: Vec<PathBuf>,
+}
+
+impl Listen {
+	/// Fold every released `--server-tls-*` spelling into the canonical fields.
+	///
+	/// Applied by [`crate::listen::Config::resolved`]. Lists concatenate, since each
+	/// spelling names its own files and dropping one would stop serving (or trusting)
+	/// a certificate. Idempotent.
+	pub fn resolved(&self) -> Self {
+		for (used, deprecated, canonical) in [
+			(!self.deprecated.cert.is_empty(), "--tls-cert", "--listen-tls-cert"),
+			(!self.deprecated.key.is_empty(), "--tls-key", "--listen-tls-key"),
+			(
+				!self.deprecated.generate.is_empty(),
+				"--tls-generate",
+				"--listen-tls-generate",
+			),
+			(
+				!self.deprecated.root.is_empty(),
+				"--server-tls-root",
+				"--listen-tls-root",
+			),
+		] {
+			if used {
+				tracing::warn!("{deprecated} is deprecated; use {canonical}");
+			}
+		}
+
+		let concat = |canonical: &[PathBuf], legacy: &[PathBuf]| -> Vec<PathBuf> {
+			canonical.iter().chain(legacy).cloned().collect()
+		};
+
+		Self {
+			cert: concat(&self.cert, &self.deprecated.cert),
+			key: concat(&self.key, &self.deprecated.key),
+			generate: self.generate.iter().chain(&self.deprecated.generate).cloned().collect(),
+			root: concat(&self.root, &self.deprecated.root),
+			deprecated: ListenDeprecated::default(),
+		}
+	}
+
 	/// Load all configured root CAs into a [`rustls::RootCertStore`].
 	pub fn load_roots(&self) -> Result<rustls::RootCertStore> {
 		let mut roots = rustls::RootCertStore::empty();
@@ -678,9 +927,9 @@ impl Server {
 	}
 }
 
-/// Build a [`rustls::ServerConfig`] from a [`Server`] for a plain-TLS listener.
+/// Build a [`rustls::ServerConfig`] from a [`Listen`] for a plain-TLS listener.
 #[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-fn server_config(config: &Server, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
+fn server_config(config: &Listen, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
 	let provider = crypto::provider();
 
 	let certs = ServeCerts::new(provider.clone());
@@ -709,7 +958,7 @@ fn server_config(config: &Server, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::Serv
 /// A peer's validated client-certificate chain from the mTLS handshake.
 ///
 /// Returned by [`crate::Request::peer_identity`] when the peer presented a
-/// certificate that chained to a configured [`Server::root`]. Owns the chain
+/// certificate that chained to a configured [`Listen::root`]. Owns the chain
 /// (leaf first) so callers can inspect it, e.g. [`expiry`](Self::expiry),
 /// without re-parsing the type-erased QUIC identity.
 #[derive(Clone)]
@@ -908,14 +1157,14 @@ mod tests {
 	/// otherwise ignore.
 	#[test]
 	fn disable_verify_rejects_trust_material() {
-		let insecure = Client {
-			disable_verify: Some(true),
+		let insecure = Connect {
+			insecure: Some(true),
 			..Default::default()
 		};
 		assert!(matches!(insecure.verification(), Ok(Verification::Disabled)));
 
-		let with_fingerprint = Client {
-			disable_verify: Some(true),
+		let with_fingerprint = Connect {
+			insecure: Some(true),
 			fingerprint: vec!["ab".repeat(32)],
 			..Default::default()
 		};
@@ -924,15 +1173,15 @@ mod tests {
 			Err(Error::DisableVerifyWithTrust)
 		));
 
-		let with_root = Client {
-			disable_verify: Some(true),
+		let with_root = Connect {
+			insecure: Some(true),
 			root: vec!["/tmp/root.pem".into()],
 			..Default::default()
 		};
 		assert!(matches!(with_root.verification(), Err(Error::DisableVerifyWithTrust)));
 
-		let with_system_roots = Client {
-			disable_verify: Some(true),
+		let with_system_roots = Connect {
+			insecure: Some(true),
 			system_roots: Some(true),
 			..Default::default()
 		};
@@ -941,8 +1190,8 @@ mod tests {
 			Err(Error::DisableVerifyWithTrust)
 		));
 
-		let without_system_roots = Client {
-			disable_verify: Some(true),
+		let without_system_roots = Connect {
+			insecure: Some(true),
 			system_roots: Some(false),
 			..Default::default()
 		};
@@ -1015,7 +1264,7 @@ mod tests {
 		let fingerprint = hex::encode(crypto::sha256(&crypto::provider(), cert.as_ref()));
 
 		// A bogus hash still builds; verification happens at handshake time.
-		let config = Client {
+		let config = Connect {
 			fingerprint: vec![fingerprint],
 			..Default::default()
 		};
@@ -1024,7 +1273,7 @@ mod tests {
 
 	#[test]
 	fn build_rejects_invalid_fingerprint_hex() {
-		let config = Client {
+		let config = Connect {
 			fingerprint: vec!["not-hex".to_string()],
 			..Default::default()
 		};
@@ -1034,7 +1283,7 @@ mod tests {
 	#[test]
 	fn build_rejects_wrong_length_fingerprint() {
 		// Valid hex, but only 2 bytes instead of 32.
-		let config = Client {
+		let config = Connect {
 			fingerprint: vec!["abcd".to_string()],
 			..Default::default()
 		};
@@ -1045,7 +1294,7 @@ mod tests {
 	fn build_rejects_no_roots() {
 		// System roots disabled with no custom root and no alternate verifier:
 		// nothing could ever verify, so reject up front.
-		let config = Client {
+		let config = Connect {
 			system_roots: Some(false),
 			..Default::default()
 		};
@@ -1054,10 +1303,10 @@ mod tests {
 
 	#[test]
 	fn build_allows_no_roots_when_verification_overridden() {
-		// disable_verify swaps in its own verifier, so an empty store is fine.
-		let config = Client {
+		// insecure swaps in its own verifier, so an empty store is fine.
+		let config = Connect {
 			system_roots: Some(false),
-			disable_verify: Some(true),
+			insecure: Some(true),
 			..Default::default()
 		};
 		assert!(config.build().is_ok());
@@ -1065,7 +1314,7 @@ mod tests {
 		// Same for fingerprint pinning.
 		let cert = self_signed();
 		let fingerprint = hex::encode(crypto::sha256(&crypto::provider(), cert.as_ref()));
-		let config = Client {
+		let config = Connect {
 			system_roots: Some(false),
 			fingerprint: vec![fingerprint],
 			..Default::default()
@@ -1080,7 +1329,7 @@ mod tests {
 
 		// Fingerprint pinning bypasses the CA chain, so combining it with roots
 		// is rejected rather than silently ignoring one of them.
-		let with_system = Client {
+		let with_system = Connect {
 			fingerprint: vec![fingerprint.clone()],
 			system_roots: Some(true),
 			..Default::default()
@@ -1089,7 +1338,7 @@ mod tests {
 
 		// The conflict is detected before any root file is read, so the path
 		// need not exist.
-		let with_custom = Client {
+		let with_custom = Connect {
 			fingerprint: vec![fingerprint],
 			root: vec![PathBuf::from("/does-not-exist.pem")],
 			..Default::default()
@@ -1114,7 +1363,7 @@ mod tests {
 	fn build_uses_platform_verifier_by_default() {
 		// No custom roots, system trust on: resolves to the OS platform verifier
 		// (bundled Mozilla roots on Android) and must build cleanly everywhere.
-		assert!(Client::default().build().is_ok());
+		assert!(Connect::default().build().is_ok());
 	}
 
 	#[test]
@@ -1122,7 +1371,7 @@ mod tests {
 		// A custom root with system trust left at its default disables the system
 		// roots, verifying against the custom PEM alone.
 		let (_keep, path) = self_signed_root();
-		let config = Client {
+		let config = Connect {
 			root: vec![path],
 			..Default::default()
 		};
@@ -1134,7 +1383,7 @@ mod tests {
 		// Custom roots layered on top of system trust: exercises the platform
 		// verifier's extra-roots path (or the bundled roots plus custom on Android).
 		let (_keep, path) = self_signed_root();
-		let config = Client {
+		let config = Connect {
 			root: vec![path],
 			system_roots: Some(true),
 			..Default::default()
@@ -1161,7 +1410,7 @@ impl ServeCerts {
 		}
 	}
 
-	pub fn load_certs(&self, config: &Server) -> Result<()> {
+	pub fn load_certs(&self, config: &Listen) -> Result<()> {
 		if config.cert.len() != config.key.len() {
 			return Err(Error::CertKeyCountMismatch);
 		}
@@ -1302,7 +1551,7 @@ impl rustls::server::ResolvesServerCert for ServeCerts {
 /// `mv`-into-place rotate certs with no external signal. Returns immediately when
 /// only generated certs are configured: there's nothing on disk to watch.
 #[cfg(any(feature = "quinn", feature = "noq"))]
-pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: Server) {
+pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: Listen) {
 	let paths: Vec<PathBuf> = tls_config.cert.iter().chain(tls_config.key.iter()).cloned().collect();
 	if paths.is_empty() {
 		return;
@@ -1323,5 +1572,97 @@ pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: Server) {
 		if let Err(err) = certs.load_certs(&tls_config) {
 			tracing::warn!(%err, "failed to reload server certificates");
 		}
+	}
+}
+
+#[cfg(test)]
+mod legacy_tests {
+	use super::*;
+	use clap::Parser;
+
+	/// A parser wrapping the sections, which derive `Args` rather than `Parser`.
+	#[derive(Parser)]
+	struct Cli {
+		#[command(flatten)]
+		connect: Connect,
+		#[command(flatten)]
+		listen: Listen,
+	}
+
+	fn parse(args: &[&str]) -> Cli {
+		let mut argv = vec!["test"];
+		argv.extend_from_slice(args);
+		Cli::parse_from(argv)
+	}
+
+	/// The released `--client-tls-*` spellings still land in the canonical fields.
+	#[test]
+	fn released_connect_spellings_fold_in() {
+		let tls = parse(&[
+			"--client-tls-root",
+			"/tmp/ca.pem",
+			"--client-tls-cert",
+			"/tmp/client.pem",
+			"--client-tls-key",
+			"/tmp/client.key",
+			"--client-tls-host-name",
+			"relay.example.com",
+			"--client-tls-disable-verify=true",
+		])
+		.connect
+		.resolved();
+
+		assert_eq!(tls.root, vec![PathBuf::from("/tmp/ca.pem")]);
+		assert_eq!(tls.cert, Some(PathBuf::from("/tmp/client.pem")));
+		assert_eq!(tls.key, Some(PathBuf::from("/tmp/client.key")));
+		assert_eq!(tls.host_name.as_deref(), Some("relay.example.com"));
+		assert_eq!(tls.insecure, Some(true));
+	}
+
+	/// The canonical flag wins, and roots from both spellings are kept: each names
+	/// its own CA, so dropping either would stop trusting one.
+	#[test]
+	fn canonical_wins_and_roots_concatenate() {
+		let tls = parse(&[
+			"--connect-tls-root",
+			"/tmp/new.pem",
+			"--client-tls-root",
+			"/tmp/old.pem",
+			"--connect-tls-host-name",
+			"new.example.com",
+			"--client-tls-host-name",
+			"old.example.com",
+		])
+		.connect
+		.resolved();
+
+		assert_eq!(
+			tls.root,
+			vec![PathBuf::from("/tmp/new.pem"), PathBuf::from("/tmp/old.pem")]
+		);
+		assert_eq!(tls.host_name.as_deref(), Some("new.example.com"));
+
+		// Folding an already-folded config changes nothing.
+		assert_eq!(tls.resolved().root, tls.root);
+	}
+
+	/// The released served-identity spellings: the bare `--tls-*` flags and the
+	/// `--server-tls-*` pair, both carrying `MOQ_SERVER_TLS_*`.
+	#[test]
+	fn released_listen_spellings_fold_in() {
+		let tls = parse(&[
+			"--tls-cert",
+			"/tmp/server.pem",
+			"--tls-key",
+			"/tmp/server.key",
+			"--server-tls-generate",
+			"localhost",
+		])
+		.listen
+		.resolved();
+
+		assert_eq!(tls.cert, vec![PathBuf::from("/tmp/server.pem")]);
+		assert_eq!(tls.key, vec![PathBuf::from("/tmp/server.key")]);
+		assert_eq!(tls.generate, vec!["localhost".to_string()]);
 	}
 }

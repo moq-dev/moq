@@ -7,7 +7,7 @@ use crate::origin::MoqOriginProducer;
 use crate::session::MoqSession;
 
 struct ServerState {
-	config: moq_native::ServerConfig,
+	config: moq_native::listen::Config,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 	server: Option<moq_native::Listener>,
@@ -21,7 +21,7 @@ impl ServerState {
 		let server = self
 			.config
 			.clone()
-			.init()
+			.init(Default::default())
 			.map_err(|err| MoqError::Bind(format!("{err}")))?
 			.listen()
 			.await
@@ -62,7 +62,7 @@ impl MoqServer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		Arc::new(Self {
 			task: Task::new(ServerState {
-				config: moq_native::ServerConfig::default(),
+				config: moq_native::listen::Config::default(),
 				publish: None,
 				consume: None,
 				server: None,

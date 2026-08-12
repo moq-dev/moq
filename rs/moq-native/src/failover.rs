@@ -4,7 +4,7 @@
 //! silently broken (an unrouted AAAA, a blocked v4 path). Rather than dial one
 //! address and wait out the handshake timeout, a dial staggers attempts across
 //! every resolved address, alternating families, and takes the first connection
-//! to complete. The stagger is [`crate::ClientConfig::failover_delay`].
+//! to complete. The stagger is [`connect::Config::race`](crate::connect::Config::race).
 //!
 //! Nothing here needs calling: every client dial goes through it. The one type
 //! a consumer sees is [`Failure`], which the backend `Error` types carry when
@@ -361,7 +361,7 @@ fn collapse<E: Aggregate>(mut failures: Vec<Failure<E>>) -> E {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::client::DEFAULT_FAILOVER_DELAY;
+	use crate::connect::DEFAULT_RACE;
 	use std::sync::Arc;
 	use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -435,14 +435,10 @@ mod tests {
 	async fn first_success_returns_immediately() {
 		let dials = Arc::new(AtomicUsize::new(0));
 		let counter = dials.clone();
-		let res: Result<&str, TestError> = race(
-			vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")],
-			DEFAULT_FAILOVER_DELAY,
-			move |_| {
-				counter.fetch_add(1, Ordering::SeqCst);
-				async { Ok("winner") }
-			},
-		)
+		let res: Result<&str, TestError> = race(vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")], DEFAULT_RACE, move |_| {
+			counter.fetch_add(1, Ordering::SeqCst);
+			async { Ok("winner") }
+		})
 		.await;
 		assert_eq!(res, Ok("winner"));
 		assert_eq!(dials.load(Ordering::SeqCst), 1, "no second dial after a fast success");
@@ -453,7 +449,7 @@ mod tests {
 		let start = tokio::time::Instant::now();
 		let res: Result<&str, TestError> = race(
 			vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")],
-			DEFAULT_FAILOVER_DELAY,
+			DEFAULT_RACE,
 			|addr| async move {
 				if addr == v4("1.1.1.1:1") {
 					std::future::pending().await
@@ -464,11 +460,7 @@ mod tests {
 		)
 		.await;
 		assert_eq!(res, Ok("second"));
-		assert_eq!(
-			start.elapsed(),
-			DEFAULT_FAILOVER_DELAY,
-			"second dial waits out the stagger"
-		);
+		assert_eq!(start.elapsed(), DEFAULT_RACE, "second dial waits out the stagger");
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -476,7 +468,7 @@ mod tests {
 		let start = tokio::time::Instant::now();
 		let res: Result<&str, TestError> = race(
 			vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")],
-			DEFAULT_FAILOVER_DELAY,
+			DEFAULT_RACE,
 			|addr| async move {
 				if addr == v4("1.1.1.1:1") {
 					Err(TestError::Dial("boom"))
@@ -549,7 +541,7 @@ mod tests {
 	/// produced (variant, source chain and all) instead of an aggregate of one.
 	#[tokio::test(start_paused = true)]
 	async fn a_lone_failure_is_returned_unwrapped() {
-		let res: Result<&str, TestError> = race(vec![v4("1.1.1.1:1")], DEFAULT_FAILOVER_DELAY, |_| async {
+		let res: Result<&str, TestError> = race(vec![v4("1.1.1.1:1")], DEFAULT_RACE, |_| async {
 			Err(TestError::Dial("invalid peer certificate"))
 		})
 		.await;

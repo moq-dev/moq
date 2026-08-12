@@ -50,7 +50,7 @@ pub struct InternalConfig {
 	/// intentional: on loopback there's nothing to encrypt, and a private
 	/// overlay (e.g. a mesh VPN) already provides transport encryption and peer
 	/// identity. Unset (the default) disables the listener entirely.
-	#[arg(long = "internal-listen", env = "MOQ_INTERNAL_LISTEN")]
+	#[arg(id = "internal-listen", long = "internal-listen", env = "MOQ_INTERNAL_LISTEN")]
 	pub listen: Option<net::SocketAddr>,
 }
 

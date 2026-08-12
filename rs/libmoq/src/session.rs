@@ -20,7 +20,7 @@ struct TaskEntry {
 
 /// Everything needed to prepare a session without holding the global state lock.
 pub(crate) struct Connect {
-	pub config: moq_native::ClientConfig,
+	pub config: crate::client::Config,
 	pub url: Url,
 	pub publish: Option<moq_net::origin::Producer>,
 	pub consume: Option<moq_net::origin::Producer>,
@@ -32,7 +32,9 @@ impl Connect {
 	pub fn prepare(self) -> Result<PreparedConnect, Error> {
 		let mut client = self
 			.config
-			.init()
+			.connect
+			.clone()
+			.init(self.config.quic.clone())
 			.map_err(|err| Error::InvalidConfig(err.to_string()))?;
 		if let Some(publish) = &self.publish {
 			client = client.with_publisher(publish);

@@ -14,10 +14,10 @@ moq-relay relay.toml
 ## Minimal Example
 
 ```toml
-[server]
-listen = "0.0.0.0:4443"
+[listen]
+bind = "0.0.0.0:4443"
 
-[server.tls]
+[listen.tls]
 cert = "cert.pem"
 key = "key.pem"
 ```
@@ -45,7 +45,7 @@ Logging configuration.
 level = "info"
 ```
 
-### \[server]
+### \[listen]
 
 QUIC/WebTransport server settings. Optionally add plaintext qmux stream
 listeners for trusted local workers. Every connection authenticates through the
@@ -53,24 +53,24 @@ same JWT / public-access path; QUIC additionally accepts an mTLS client
 certificate, and Unix sockets add optional peer-credential gating.
 
 ```toml
-[server]
+[listen]
 # QUIC (UDP) bind. Omit to run stream-only (no QUIC) when a tcp/unix listener
 # is configured below.
 bind = "[::]:443"
 
 # Plaintext qmux over TCP (no TLS, carries no peer identity). Trusted networks
 # only; a non-loopback bind logs a warning. Requires the `tcp` build feature.
-[server.tcp]
+[listen.tcp]
 bind = "127.0.0.1:4444"
 
 # Plaintext qmux over a Unix socket, for local workers (e.g. the protocol
 # gateways or a stats publisher). Requires the `uds` build feature. Restrict
 # callers by peer credentials (each list AND across, OR within; empty = no
 # constraint).
-[server.unix]
+[listen.unix]
 bind = "/run/moq/internal.sock"
 
-[server.unix.allow]
+[listen.unix.allow]
 uid = [1001]
 # gid = [2000]
 # pid = [12345]
@@ -80,12 +80,12 @@ No-JWT connections on the stream transports resolve through the same
 public-access rules as tokenless QUIC clients (see [`[auth]`](#auth) `public`).
 See [Stream Listeners](/bin/relay/auth#stream-listeners) for details.
 
-### \[server.tls]
+### \[listen.tls]
 
 TLS configuration for the QUIC endpoint.
 
 ```toml
-[server.tls]
+[listen.tls]
 # Option 1: Provide certificate files
 cert = "/path/to/cert.pem"   # Certificate chain
 key = "/path/to/key.pem"     # Private key
@@ -110,7 +110,7 @@ HTTP server for debugging endpoints.
 [web.http]
 # Listen address for HTTP (TCP)
 # Defaults to disabled if not specified
-listen = "0.0.0.0:4443"
+bind = "0.0.0.0:4443"
 ```
 
 See [HTTP Endpoints](/bin/relay/http) for available endpoints.
@@ -139,7 +139,7 @@ HTTPS/WSS server for TCP fallback.
 # Listen address for HTTPS/WSS (TCP)
 listen = "0.0.0.0:443"
 
-# TLS certificates (can be the same as server.tls)
+# TLS certificates (can be the same as listen.tls)
 cert = "cert.pem"
 key = "key.pem"
 ```
@@ -204,18 +204,18 @@ secret = "/etc/moq/cluster.key"
 
 See [Clustering](/bin/relay/cluster) for topology choices and the trade-off between hand-listed peers and gossip.
 
-### \[client]
+### \[connect]
 
 Client settings used when connecting to other relays (clustering).
 
 ```toml
-[client]
+[connect]
 # Maximum time for one outbound dial and MoQ handshake. Defaults to 30s.
 # Set to "0" to wait forever.
 timeout = "30s"
 
 # Disable TLS verification (development only!)
-tls.disable_verify = true
+tls.insecure = true
 
 # What to do with the URI an upstream peer names in its GOAWAY:
 # "follow" (default), "same-host", or "ignore". A followed redirect is dialed
@@ -242,33 +242,31 @@ goaway.handover = "10s"
 # each starting this long after the previous one (or immediately, if that one
 # fails outright), and the first connection to complete wins. "0s" dials every
 # address at once. Defaults to 250ms, RFC 8305's Connection Attempt Delay.
-# failover_delay = "250ms"
+# race = "250ms"
 ```
 
-The connect timeout is also available as `--client-connect-timeout` or
-`MOQ_CLIENT_CONNECT_TIMEOUT`, and the failover delay as
-`--client-failover-delay` or `MOQ_CLIENT_FAILOVER_DELAY`. The two compose: the
-failover delay staggers the attempts within one dial, and the timeout bounds
-that dial as a whole.
+The connect timeout is also available as `--connect-timeout` or
+`MOQ_CONNECT_TIMEOUT`, and the address race as `--connect-race` or
+`MOQ_CONNECT_RACE`. The two compose: the race staggers the attempts within one
+dial, and the timeout bounds that dial as a whole.
 
-Pinning the source port (a non-zero port in `--client-bind`) disables address
-failover on the `quiche` backend, which binds a fresh socket per attempt and so
+Pinning the source port (a non-zero port in `--connect-bind`) disables address
+racing on the `quiche` backend, which binds a fresh socket per attempt and so
 can only dial one address at a time from a fixed port. The relay logs a warning
 at startup when both are set. Leave the bind port at `0` to keep failover, or
 use the `quinn` or `noq` backend, which share one socket across attempts and are
 unaffected.
 
-### \[server.quic] and \[client.quic]
+### \[quic]
 
-Per-connection QUIC transport knobs, applied to incoming connections
-(`server.quic`) and to outgoing cluster dials (`client.quic`) independently.
+Per-connection QUIC transport knobs. These mean the same thing whichever way a
+connection was opened, so they are spelled once and shared by `[listen]` and
+`[connect]` alike. The knobs that only apply when accepting (the QUIC preferred
+address and QUIC-LB connection IDs) live on `[listen]` instead.
 
 ```toml
-[server.quic]
+[quic]
 # "loss" or "delay". Defaults per backend; don't set "delay" on noq/iroh (see below).
-congestion_control = "delay"
-
-[client.quic]
 congestion_control = "delay"
 ```
 
@@ -291,9 +289,8 @@ noq and iroh are the exception because their shared BBRv3 can panic on packet
 loss, which aborts the process. Do not select `delay` on those backends unless
 you are testing that controller on purpose and can tolerate the crash.
 
-Also available as `--server-quic-congestion-control` /
-`--client-quic-congestion-control`, or `MOQ_SERVER_QUIC_CONGESTION_CONTROL` /
-`MOQ_CLIENT_QUIC_CONGESTION_CONTROL`.
+Also available as `--quic-congestion-control` /
+`--quic-congestion-control`, or `MOQ_QUIC_CONGESTION_CONTROL`.
 
 ### \[stats]
 

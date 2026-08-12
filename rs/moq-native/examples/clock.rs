@@ -8,8 +8,8 @@
 //! Run with:
 //!
 //! ```text
-//! cargo run -p moq-native --example clock -- --client-connect https://relay.example.com/anon --broadcast clock publish
-//! cargo run -p moq-native --example clock -- --client-connect https://relay.example.com/anon --broadcast clock subscribe
+//! cargo run -p moq-native --example clock -- --connect https://relay.example.com/anon --broadcast clock publish
+//! cargo run -p moq-native --example clock -- --connect https://relay.example.com/anon --broadcast clock subscribe
 //! ```
 
 use anyhow::Context;
@@ -25,7 +25,7 @@ struct Config {
 
 	/// The MoQ client configuration.
 	#[command(flatten)]
-	client: moq_native::ClientConfig,
+	client: moq_native::connect::Config,
 
 	/// The name of the clock track.
 	#[arg(long, default_value = "seconds")]
@@ -51,8 +51,8 @@ async fn main() -> anyhow::Result<()> {
 	let config = Config::parse();
 	config.log.init()?;
 
-	let url = config.client.connect.clone().context("--client-connect is required")?;
-	let client = config.client.init()?;
+	let url = config.client.url.clone().context("--connect is required")?;
+	let client = config.client.init(Default::default())?;
 
 	tracing::info!(%url, "connecting to server");
 

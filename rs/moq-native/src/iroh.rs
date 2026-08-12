@@ -161,14 +161,14 @@ pub struct EndpointConfig {
 }
 
 impl EndpointConfig {
-	/// Bind the iroh endpoint, applying the per-connection [`crate::quic::Client`] knobs.
+	/// Bind the iroh endpoint, applying the per-connection [`crate::quic::Config`] knobs.
 	///
 	/// iroh is a single P2P endpoint shared by both roles, so it takes the client
 	/// section (the per-connection knobs are symmetric). It only honors the knobs
 	/// its transport-config builder exposes (stream limits, idle timeout, MTU
 	/// discovery, congestion control); it has no keep-alive knob and cannot disable
 	/// GSO, so `gso = false` fails with [`Error::GsoUnsupported`].
-	pub async fn bind(self, quic: &crate::quic::Client) -> Result<Option<Endpoint>> {
+	pub async fn bind(self, quic: &crate::quic::Config) -> Result<Option<Endpoint>> {
 		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
 		}
@@ -378,7 +378,7 @@ mod tests {
 	/// though every other backend defaults to BBR.
 	#[test]
 	fn congestion_control_defaults_to_loss() {
-		let mut quic = crate::quic::Client::default();
+		let mut quic = crate::quic::Config::default();
 		assert_eq!(congestion_control(&quic.resolve()), CongestionControl::Loss);
 
 		// An explicit request still gets through.

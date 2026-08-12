@@ -10,9 +10,9 @@ use std::time::Duration;
 
 /// A client whose reconnect loop escalates fast enough to assert on inside a test.
 fn client(backoff: moq_native::Backoff) -> moq_native::Client {
-	let mut config = moq_native::ClientConfig::default();
+	let mut config = moq_native::connect::Config::default();
 	config.backoff = backoff;
-	config.init().expect("failed to init client")
+	config.init(Default::default()).expect("failed to init client")
 }
 
 /// A transient failure is retried, escalating, until the budget runs out. The give-up error names

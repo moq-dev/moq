@@ -33,7 +33,7 @@ The binary has two modes, mirroring `moq-srt`:
 
 ```bash
 # serve: ingest RTMP and serve it directly as a local relay
-moq-rtmp serve --server-bind [::]:443 --tls-generate localhost \
+moq-rtmp serve --listen [::]:443 --listen-tls-generate localhost \
   --rtmp-listen 0.0.0.0:1935 --rtmp-prefix live/
 
 # publish: ingest RTMP and forward broadcasts to a remote relay
@@ -60,10 +60,10 @@ vlc rtmp://127.0.0.1:1935/live/cam0
 
 ### `serve` flags
 
-- `--server-bind`: QUIC/WebTransport bind address (default `[::]:443`). Also
+- `--listen`: QUIC/WebTransport bind address (default `[::]:443`). Also
   serves the `/certificate.sha256` endpoint browsers need for self-signed
   `http://` origins, and a static player directory with `--dir`.
-- `--tls-generate <hostname>` / `--tls-cert` / `--tls-key`: server TLS.
+- `--listen-tls-generate <hostname>` / `--listen-tls-cert` / `--listen-tls-key`: server TLS.
 
 ### `publish` flags
 
@@ -87,7 +87,7 @@ plaintext RTMP, sharing the same `--rtmp-prefix`:
   (testing only; clients must disable verification).
 
 ```bash
-moq-rtmp serve --server-bind [::]:443 --tls-generate localhost \
+moq-rtmp serve --listen [::]:443 --listen-tls-generate localhost \
   --rtmp-listen 0.0.0.0:1935 \
   --rtmps-listen 0.0.0.0:1936 --rtmps-tls-cert cert.pem --rtmps-tls-key key.pem \
   --rtmp-prefix live/

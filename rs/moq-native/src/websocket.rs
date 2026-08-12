@@ -2,7 +2,7 @@
 //!
 //! Used when QUIC is unreachable: UDP blocked by a firewall, a proxy in the way, a
 //! network that only passes TCP/443. The client races this against QUIC and gives QUIC
-//! a small head start ([`Client::delay`]), so WebSocket only wins when QUIC can't get
+//! a small head start ([`Config::delay`]), so WebSocket only wins when QUIC can't get
 //! through. Servers accept it on a separate TCP port via [`Listener`].
 
 use qmux::ws::tokio_tungstenite;
@@ -21,7 +21,7 @@ pub enum Error {
 	#[error(transparent)]
 	Io(#[from] std::io::Error),
 
-	/// WebSocket fallback was turned off via [`Client::enabled`].
+	/// WebSocket fallback was turned off via [`Config::enabled`].
 	#[error("WebSocket support is disabled")]
 	Disabled,
 
@@ -69,36 +69,106 @@ static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(||
 #[serde(default, deny_unknown_fields)]
 #[group(id = "websocket-client")]
 #[non_exhaustive]
-pub struct Client {
-	/// Whether to enable WebSocket support.
+#[derive(Default)]
+pub struct Config {
+	/// Whether to enable the WebSocket fallback. Defaults to true.
+	///
+	/// `Option` with the default resolved in code rather than a clap `default_value`,
+	/// which a config file could not override: the CLI is re-parsed after the file is
+	/// read, so a materialized default would win.
+	#[arg(
+		id = "connect-websocket-enabled",
+		long = "connect-websocket-enabled",
+		env = "MOQ_CONNECT_WEBSOCKET_ENABLED",
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+	)]
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub enabled: Option<bool>,
+
+	/// Head start given to the QUIC dial before the WebSocket fallback joins the
+	/// race. Defaults to 200ms, and drops to zero for a server WebSocket already won.
+	#[arg(
+		id = "connect-websocket-delay",
+		long = "connect-websocket-delay",
+		env = "MOQ_CONNECT_WEBSOCKET_DELAY",
+		value_parser = humantime::parse_duration,
+	)]
+	#[serde(default, with = "humantime_serde::option")]
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub delay: Option<time::Duration>,
+
+	/// The released `MOQ_CLIENT_WEBSOCKET_*` env vars, folded in by [`Config::resolved`].
+	#[command(flatten)]
+	#[serde(skip)]
+	pub(crate) legacy: Legacy,
+}
+
+/// The released spellings for this section, which moved to `--connect-websocket-*`
+/// and `MOQ_CONNECT_WEBSOCKET_*` with the rest of the dial side.
+///
+/// Separate args rather than clap aliases, since an alias renames the flag but
+/// leaves its env var behind.
+#[derive(Clone, Debug, Default, clap::Args)]
+#[group(id = "websocket-legacy")]
+pub(crate) struct Legacy {
 	#[arg(
 		id = "websocket-enabled",
 		long = "websocket-enabled",
+		alias = "client-websocket-enabled",
 		env = "MOQ_CLIENT_WEBSOCKET_ENABLED",
-		default_value = "true"
+		hide = true,
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
 	)]
-	pub enabled: bool,
+	enabled: Option<bool>,
 
-	/// Delay in milliseconds before attempting WebSocket fallback (default: 200)
-	/// If WebSocket won the previous race for a given server, this will be 0.
 	#[arg(
 		id = "websocket-delay",
 		long = "websocket-delay",
+		alias = "client-websocket-delay",
 		env = "MOQ_CLIENT_WEBSOCKET_DELAY",
-		default_value = "200ms",
+		hide = true,
 		value_parser = humantime::parse_duration,
 	)]
-	#[serde(with = "humantime_serde")]
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub delay: Option<time::Duration>,
+	delay: Option<time::Duration>,
 }
 
-impl Default for Client {
-	fn default() -> Self {
-		Self {
-			enabled: true,
-			delay: Some(time::Duration::from_millis(200)),
+/// The QUIC head start when `--connect-websocket-delay` is unset.
+const DEFAULT_DELAY: time::Duration = time::Duration::from_millis(200);
+
+impl Config {
+	/// Fold the released env vars into the canonical fields. Idempotent.
+	pub fn resolved(&self) -> Self {
+		let mut resolved = self.clone();
+		if self.enabled.is_none()
+			&& let Some(enabled) = self.legacy.enabled
+		{
+			tracing::warn!("--websocket-enabled is deprecated; use --connect-websocket-enabled");
+			resolved.enabled = Some(enabled);
 		}
+		if self.delay.is_none()
+			&& let Some(delay) = self.legacy.delay
+		{
+			tracing::warn!("--websocket-delay is deprecated; use --connect-websocket-delay");
+			resolved.delay = Some(delay);
+		}
+		resolved.legacy = Legacy::default();
+		resolved
+	}
+
+	/// Whether the fallback runs at all, resolving the default.
+	pub fn resolved_enabled(&self) -> bool {
+		self.enabled.unwrap_or(true)
+	}
+
+	/// The head start a QUIC dial gets, resolving the default.
+	pub fn resolved_delay(&self) -> time::Duration {
+		self.delay.unwrap_or(DEFAULT_DELAY)
 	}
 }
 
@@ -106,12 +176,12 @@ impl Default for Client {
 /// QUIC dial to race against. A WebSocket-only build calls [`connect`] directly.
 #[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 pub(crate) async fn race_handle(
-	config: &Client,
+	config: &Config,
 	tls: &rustls::ClientConfig,
 	url: Url,
 	alpns: &[&str],
 ) -> Option<Result<qmux::Session>> {
-	if !config.enabled {
+	if !config.resolved_enabled() {
 		return None;
 	}
 
@@ -130,12 +200,12 @@ pub(crate) async fn race_handle(
 }
 
 pub(crate) async fn connect(
-	config: &Client,
+	config: &Config,
 	tls: &rustls::ClientConfig,
 	mut url: Url,
 	alpns: &[&str],
 ) -> Result<qmux::Session> {
-	if !config.enabled {
+	if !config.resolved_enabled() {
 		return Err(Error::Disabled);
 	}
 
@@ -150,8 +220,8 @@ pub(crate) async fn connect(
 	// Apply a small penalty to WebSocket to improve odds for QUIC to connect first,
 	// unless we've already had to fall back to WebSockets for this server.
 	// TODO if let chain
-	match config.delay {
-		Some(delay) if !WEBSOCKET_WON.lock().unwrap().contains(&key) => {
+	match config.resolved_delay() {
+		delay if !delay.is_zero() && !WEBSOCKET_WON.lock().unwrap().contains(&key) => {
 			tokio::time::sleep(delay).await;
 			tracing::debug!(peer = %crate::connect::Endpoint(&url), delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");
 		}
@@ -476,5 +546,42 @@ mod tests {
 				assert!(qmux_versions_for(alpn).is_empty(), "{alpn} should not be pinned");
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod legacy_tests {
+	use super::*;
+	use clap::Parser;
+
+	#[derive(Parser)]
+	struct Cli {
+		#[command(flatten)]
+		websocket: Config,
+	}
+
+	fn parse(args: &[&str]) -> Config {
+		let mut argv = vec!["test"];
+		argv.extend_from_slice(args);
+		Cli::parse_from(argv).websocket
+	}
+
+	/// The released env vars have hidden flags of their own; both spellings feed the
+	/// same fields once folded.
+	#[test]
+	fn released_spellings_fold_in() {
+		let config = parse(&["--websocket-enabled=false", "--client-websocket-delay", "1s"]).resolved();
+		assert!(!config.resolved_enabled());
+		assert_eq!(config.resolved_delay(), time::Duration::from_secs(1));
+
+		// The canonical spelling wins.
+		let config = parse(&["--connect-websocket-delay", "2s", "--websocket-delay", "1s"]).resolved();
+		assert_eq!(config.resolved_delay(), time::Duration::from_secs(2));
+		assert!(config.resolved_enabled(), "unset means the default (enabled)");
+
+		// Neither given: the defaults, which no config file can be clobbered out of.
+		let config = parse(&[]).resolved();
+		assert_eq!(config.delay, None);
+		assert_eq!(config.resolved_delay(), DEFAULT_DELAY);
 	}
 }

@@ -2401,6 +2401,7 @@ fn client_set_tls_fingerprints_rejects_malformed_values_before_mutating() {
 				.client
 				.get_mut(client_id)
 				.unwrap()
+				.connect
 				.tls
 				.fingerprint
 				.is_empty()
@@ -2487,15 +2488,15 @@ fn a_fresh_handle_reads_back_the_defaults() {
 		moq_client_close(client);
 	}));
 
-	let config = moq_native::ClientConfig::default();
+	let config = moq_native::connect::Config::default();
 	let quic = moq_native::quic::Resolved::default();
 
 	let mut value = 0u64;
 	assert_eq!(unsafe { moq_client_get_connect_timeout(client, &mut value) }, 0);
-	assert_eq!(value, config.resolved_connect_timeout().as_millis() as u64);
+	assert_eq!(value, config.resolved_timeout().as_millis() as u64);
 
 	assert_eq!(unsafe { moq_client_get_failover_delay(client, &mut value) }, 0);
-	assert_eq!(value, config.resolved_failover_delay().as_millis() as u64);
+	assert_eq!(value, config.resolved_race().as_millis() as u64);
 
 	assert_eq!(unsafe { moq_client_get_backoff_initial(client, &mut value) }, 0);
 	assert_eq!(value, config.backoff.initial().as_millis() as u64);
@@ -2516,7 +2517,7 @@ fn a_fresh_handle_reads_back_the_defaults() {
 	assert_eq!(value, quic.keep_alive.map(|d| d.as_millis() as u64).unwrap_or(0));
 
 	assert_eq!(unsafe { moq_client_get_websocket_delay(client, &mut value) }, 0);
-	assert_eq!(value, config.websocket.delay.map(|d| d.as_millis() as u64).unwrap_or(0));
+	assert_eq!(value, config.websocket.resolved_delay().as_millis() as u64);
 
 	let mut multiplier = 0u32;
 	assert_eq!(unsafe { moq_client_get_backoff_multiplier(client, &mut multiplier) }, 0);
@@ -2524,7 +2525,7 @@ fn a_fresh_handle_reads_back_the_defaults() {
 
 	let mut enabled = false;
 	assert_eq!(unsafe { moq_client_get_websocket_enabled(client, &mut enabled) }, 0);
-	assert_eq!(enabled, config.websocket.enabled);
+	assert_eq!(enabled, config.websocket.resolved_enabled());
 }
 
 /// A getter reports what the matching setter wrote, so the pair can't drift.

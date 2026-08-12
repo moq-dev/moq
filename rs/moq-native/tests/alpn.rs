@@ -14,12 +14,12 @@ async fn connect_with_version(version: &str) {
 	let version: moq_native::moq_net::Version = version.parse().expect("invalid version");
 
 	// ── server ──────────────────────────────────────────────────────
-	let mut server_config = moq_native::ServerConfig::default();
+	let mut server_config = moq_native::listen::Config::default();
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec![version];
 
-	let server = server_config.init().expect("failed to init server");
+	let server = server_config.init(Default::default()).expect("failed to init server");
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
@@ -27,11 +27,11 @@ async fn connect_with_version(version: &str) {
 	let origin = moq_native::moq_net::Origin::random().produce();
 
 	// ── client ──────────────────────────────────────────────────────
-	let mut client_config = moq_native::ClientConfig::default();
+	let mut client_config = moq_native::connect::Config::default();
 	client_config.version = vec![version];
-	client_config.tls.disable_verify = Some(true);
+	client_config.tls.insecure = Some(true);
 
-	let client = client_config.init().expect("failed to init client");
+	let client = client_config.init(Default::default()).expect("failed to init client");
 
 	// Use raw QUIC URL so ALPN negotiation is direct (no WebTransport framing).
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
@@ -64,27 +64,27 @@ async fn connect_with_webtransport(version: Option<&str>) {
 	let version: Option<moq_native::moq_net::Version> = version.map(|v| v.parse().expect("invalid version"));
 
 	// ── server ──────────────────────────────────────────────────────
-	let mut server_config = moq_native::ServerConfig::default();
+	let mut server_config = moq_native::listen::Config::default();
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	if let Some(v) = version {
 		server_config.version = vec![v];
 	}
 
-	let server = server_config.init().expect("failed to init server");
+	let server = server_config.init(Default::default()).expect("failed to init server");
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	let origin = moq_native::moq_net::Origin::random().produce();
 
 	// ── client ──────────────────────────────────────────────────────
-	let mut client_config = moq_native::ClientConfig::default();
-	client_config.tls.disable_verify = Some(true);
+	let mut client_config = moq_native::connect::Config::default();
+	client_config.tls.insecure = Some(true);
 	if let Some(v) = version {
 		client_config.version = vec![v];
 	}
 
-	let client = client_config.init().expect("failed to init client");
+	let client = client_config.init(Default::default()).expect("failed to init client");
 
 	// Use https:// URL to trigger the WebTransport path.
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();

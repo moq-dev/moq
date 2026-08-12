@@ -185,7 +185,7 @@ fi
 # the start of the stream (or the whole thing for a short clip).
 echo "### capturing subscriber output (export ts)"
 timeout -k 3 $((DURATION + 20)) \
-    "$MOQ" --client-connect "$URL" --broadcast "$BROADCAST" export ts >"$SUB_TS" 2>"$TMP/sub.log" &
+    "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts >"$SUB_TS" 2>"$TMP/sub.log" &
 SUB_PID=$!
 sleep 1
 
@@ -198,7 +198,7 @@ echo "### publishing PCR-paced TS -> $BROADCAST"
 # shellcheck disable=SC2016  # $1..$4 are the child bash -c positionals, not ours.
 timeout -k 3 $((DURATION + 20)) bash -c '
     tsp -I file "$1" -P regulate --pcr-synchronous |
-        "$2" --client-connect "$3" --broadcast "$4" import ts
+        "$2" --connect "$3" --broadcast "$4" import ts
 ' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST" >"$TMP/pub.log" 2>&1 &
 PUB_PID=$!
 

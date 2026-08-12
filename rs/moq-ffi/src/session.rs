@@ -7,14 +7,18 @@ use crate::ffi::Task;
 use crate::origin::{MoqOriginConsumer, MoqOriginProducer};
 
 struct Client {
-	config: moq_native::ClientConfig,
+	config: moq_native::connect::Config,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 }
 
 impl Client {
 	async fn connect(&self, url: Url) -> Result<Arc<MoqSession>, MoqError> {
-		let client = self.config.clone().init().map_err(map_connect_error)?;
+		let client = self
+			.config
+			.clone()
+			.init(Default::default())
+			.map_err(map_connect_error)?;
 
 		// Materialize both origin sides so the session can publish/subscribe and the FFI can
 		// always hand back a publisher/consumer.
@@ -182,7 +186,7 @@ impl MoqClient {
 		let _guard = crate::ffi::RUNTIME.enter();
 		Arc::new(Self {
 			task: Task::new(Client {
-				config: moq_native::ClientConfig::default(),
+				config: moq_native::connect::Config::default(),
 				publish: None,
 				consume: None,
 			}),
@@ -192,7 +196,7 @@ impl MoqClient {
 	/// Disable TLS certificate verification (for development only).
 	pub fn set_tls_disable_verify(&self, disable: bool) {
 		if let Some(mut state) = self.task.lock() {
-			state.config.tls.disable_verify = Some(disable);
+			state.config.tls.insecure = Some(disable);
 		}
 	}
 
@@ -259,7 +263,7 @@ impl MoqClient {
 			.parse()
 			.map_err(|err| MoqError::Bind(format!("invalid bind address: {err}")))?;
 		if let Some(mut state) = self.task.lock() {
-			state.config.bind = parsed;
+			state.config.bind = Some(parsed);
 		}
 		Ok(())
 	}
@@ -272,7 +276,7 @@ impl MoqClient {
 	/// (surfaced via [`MoqSession::closed`]).
 	pub fn set_reconnect(&self, enabled: bool) {
 		if let Some(mut state) = self.task.lock() {
-			state.config.reconnect = Some(enabled);
+			state.config.once = Some(!enabled);
 		}
 	}
 

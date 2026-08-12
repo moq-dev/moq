@@ -229,19 +229,19 @@ in
         MOQ_LOG_LEVEL = lib.mkDefault cfg.logLevel;
 
         # Server configuration
-        MOQ_SERVER_BIND = "[::]:${toString cfg.port}";
+        MOQ_LISTEN = "[::]:${toString cfg.port}";
 
-        MOQ_CLIENT_TLS_DISABLE_VERIFY = lib.boolToString cfg.cluster.disableTlsVerify;
+        MOQ_CONNECT_TLS_INSECURE = lib.boolToString cfg.cluster.disableTlsVerify;
       }
       // lib.optionalAttrs (cfg.tls.generate != [ ]) {
         # TLS configuration
-        MOQ_SERVER_TLS_GENERATE = lib.concatStringsSep "," cfg.tls.generate;
+        MOQ_LISTEN_TLS_GENERATE = lib.concatStringsSep "," cfg.tls.generate;
       }
       // lib.optionalAttrs (cfg.tls.certs != [ ]) {
-        MOQ_SERVER_TLS_CERT = lib.concatMapStringsSep "," (cert: "${cert.chain}") cfg.tls.certs;
+        MOQ_LISTEN_TLS_CERT = lib.concatMapStringsSep "," (cert: "${cert.chain}") cfg.tls.certs;
       }
       // lib.optionalAttrs (cfg.tls.certs != [ ]) {
-        MOQ_SERVER_TLS_KEY = lib.concatMapStringsSep "," (cert: "${cert.key}") cfg.tls.certs;
+        MOQ_LISTEN_TLS_KEY = lib.concatMapStringsSep "," (cert: "${cert.key}") cfg.tls.certs;
       }
       // lib.optionalAttrs cfg.auth.enable {
         # Auth configuration

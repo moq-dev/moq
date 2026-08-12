@@ -31,7 +31,7 @@ fn attempt_timeout(index: usize, total: usize) -> Option<Duration> {
 /// Only when reconnecting. `Backoff::timeout` is how long to keep *retrying*, so
 /// applying it to a one-shot dial would cut short the single attempt there will
 /// ever be: a handshake slower than the retry window but well inside
-/// [`ClientConfig::timeout`](crate::ClientConfig::timeout) would fail for a
+/// [`crate::connect::Config::timeout`](crate::connect::Config::timeout) would fail for a
 /// reason that does not apply. That deadline is the one governing a one-shot
 /// dial, and it already does.
 fn retry_budget(reconnect: bool, retry_start: tokio::time::Instant, timeout: Duration) -> Option<tokio::time::Instant> {
@@ -461,7 +461,7 @@ impl ConnectionStatsReader {
 /// Handle to a connection maintained by a background task.
 ///
 /// The task connects, waits for the session to end, then (unless reconnecting is
-/// disabled, see [`ClientConfig::reconnect`](crate::ClientConfig::reconnect))
+/// disabled, see [`crate::connect::Config::once`](crate::connect::Config::once))
 /// redials with exponential backoff. The read surface mirrors [`moq_net::Session`]
 /// so a caller can treat it like a session that transparently reconnects:
 /// [`version`](Self::version), [`send_bandwidth`](Self::send_bandwidth),
@@ -1506,13 +1506,15 @@ mod tests {
 			let port = probe.local_addr().expect("local addr").port();
 			drop(probe);
 
-			let mut config = crate::ServerConfig::default();
+			let mut config = crate::listen::Config::default();
 			config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("valid address"));
-			let Ok(server) = config.init() else { continue };
+			let Ok(server) = config.init(Default::default()) else {
+				continue;
+			};
 
-			let mut config = crate::ClientConfig::default();
-			config.tls.disable_verify = Some(true);
-			let client = config.init().expect("build client");
+			let mut config = crate::connect::Config::default();
+			config.tls.insecure = Some(true);
+			let client = config.init(Default::default()).expect("build client");
 
 			return (server, url(&format!("tcp://127.0.0.1:{port}/")), client);
 		}

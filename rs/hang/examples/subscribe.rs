@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
 // Automatically reconnects if the connection drops.
 async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
-	let client = moq_native::ClientConfig::default().init()?;
+	let client = moq_native::connect::Config::default().init(Default::default())?;
 
 	// For local development, use: http://localhost:4443/video-example
 	// The "anon" path is usually configured to bypass authentication; be careful!
