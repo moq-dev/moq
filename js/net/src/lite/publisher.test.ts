@@ -79,11 +79,11 @@ async function groupSendOrders(options: { priority: number; sequences: number[];
 	const { priority, sequences, update, ordered } = options;
 	const groups = sequences.map((sequence) => new GroupProducer(sequence));
 	const pair = createMockTransportPair(ALPN_05);
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin(), origin.consume());
 
-	const broadcast = new BroadcastProducer();
+	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
-	publisher.publish(Path.from("test"), broadcast);
 
 	const client = await Stream.open(pair.client);
 	const server = await Stream.accept(pair.server);
@@ -171,11 +171,11 @@ test("lite draft-05: a subscribe update re-ranks the whole subscription", async 
 // is already on the wire. Otherwise (say) an active-speaker change waits for the next group.
 test("lite draft-05: a subscribe update re-ranks a group already on the wire", async () => {
 	const pair = createMockTransportPair(ALPN_05);
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin(), origin.consume());
 
-	const broadcast = new BroadcastProducer();
+	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
-	publisher.publish(Path.from("test"), broadcast);
 
 	const client = await Stream.open(pair.client);
 	const server = await Stream.accept(pair.server);
@@ -219,11 +219,11 @@ test("lite draft-05: a subscribe update re-ranks a group already on the wire", a
 // later changes, so an update landing in that window would otherwise be lost until the next one.
 test("lite draft-05: a subscribe update during the stream open still ranks the group", async () => {
 	const pair = createMockTransportPair(ALPN_05);
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin(), origin.consume());
 
-	const broadcast = new BroadcastProducer();
+	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
-	publisher.publish(Path.from("test"), broadcast);
 
 	// Hold the group's stream open call until the test releases it.
 	let release: () => void = () => {};
@@ -274,11 +274,11 @@ test("lite draft-05: a subscribe update during the stream open still ranks the g
 test("lite draft-05: many concurrent groups share one subscription listener", async () => {
 	const count = 120;
 	const pair = createMockTransportPair(ALPN_05);
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin(), origin.consume());
 
-	const broadcast = new BroadcastProducer();
+	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
-	publisher.publish(Path.from("test"), broadcast);
 
 	const client = await Stream.open(pair.client);
 	const server = await Stream.accept(pair.server);
@@ -323,11 +323,11 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 // request; without this the response competes with the group streams at the default order.
 test("lite draft-05: the fetch response ranks the publisher's own writes", async () => {
 	const pair = createMockTransportPair(ALPN_05);
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin(), origin.consume());
 
-	const broadcast = new BroadcastProducer();
+	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
-	publisher.publish(Path.from("test"), broadcast);
 
 	const group = new GroupProducer(7);
 	group.writeString("hello");
@@ -847,10 +847,10 @@ async function saturatedGroup() {
 		return groupStream;
 	};
 
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
-	const broadcast = new BroadcastProducer();
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin(), origin.consume());
+	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
-	publisher.publish(Path.from("test"), broadcast);
 
 	const client = await Stream.open(pair.client);
 	const server = await Stream.accept(pair.server);

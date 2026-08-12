@@ -115,10 +115,13 @@ test("integration: lite draft-05", async () => {
 
 test("integration: lite subscription options and updates reach the publisher", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_05);
-	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
 
-	const broadcast = new BroadcastProducer();
-	server.publish(Path.from("test"), broadcast);
+	const broadcast = origin.publish(Path.from("test"));
 
 	let resolveProducer: ((producer: TrackProducer) => void) | undefined;
 	const accepted = new Promise<TrackProducer>((resolve) => {
@@ -177,12 +180,15 @@ test("integration: lite applies initial and updated group bounds", async () => {
 	const UPDATE_TIMEOUT_MS = 1000;
 
 	const pair = createMockTransportPair(Lite.ALPN_05);
-	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
 
-	const broadcast = new BroadcastProducer();
+	const broadcast = origin.publish(Path.from("test"));
 	const producer = broadcast.createTrack("video");
 	for (let sequence = 0; sequence < GROUP_COUNT; sequence++) producer.appendGroup().close();
-	server.publish(Path.from("test"), broadcast);
 
 	const remote = client.consume(Path.from("test"));
 	const subscriber = remote

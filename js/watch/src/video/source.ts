@@ -1,4 +1,5 @@
 import type * as Catalog from "@moq/hang/catalog";
+import type * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 
@@ -38,8 +39,8 @@ export type SourceInput = {
 	supported: Getter<Supported | undefined>;
 
 	// The connection's PROBE estimates, used to auto-select a rendition when the target has no
-	// explicit bitrate. Usually wired from a `Connection.Reload`'s `probe`. Optional: without
-	// it auto-selection falls back to the preference order alone.
+	// explicit bitrate. Usually wired from a `Connection.Shared`'s or `Reload`'s `probe`.
+	// Optional: without it auto-selection falls back to the preference order alone.
 	probe: Getter<Moq.Connection.Probe | undefined>;
 };
 
