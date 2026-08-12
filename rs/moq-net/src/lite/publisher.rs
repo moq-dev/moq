@@ -2258,9 +2258,15 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					if let Ok(mut value) = track_priority_tx.write() {
 						*value = upd.priority;
 					}
-					// Groups already queued keep their rank; only future groups adopt
-					// the new direction, matching how the wire treats mid-flight data.
-					self.ordered = upd.ordered;
+					// Re-rank the backlog too, not just the groups queued from here on.
+					// The preference is about which of the groups we are holding to send
+					// first, so leaving the queued ones on the old direction would let
+					// every new group outrank exactly the ones the subscriber just asked
+					// to receive first, starving them until they expire.
+					if self.ordered != upd.ordered {
+						self.ordered = upd.ordered;
+						self.priority.set_ordered(self.id, self.ordered);
+					}
 					// Feed the full update into the model subscriber so the producer's
 					// aggregate reflects it (and a relay re-forwards it upstream).
 					let bounds = Bounds::from(&upd);
@@ -2288,9 +2294,12 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 
 		// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
 		let current_priority = self.track_priority_current();
+		// The subscribe id scopes the group tie-break: one queue serves every
+		// subscription on the session, and only groups of the same one may be
+		// ranked against each other by sequence.
 		let priority = match self.ordered {
-			true => Priority::ordered(current_priority, sequence),
-			false => Priority::new(current_priority, sequence),
+			true => Priority::ordered(current_priority, self.id, sequence),
+			false => Priority::new(current_priority, self.id, sequence),
 		};
 		let handle = self.priority.insert(priority);
 		let fut = self.clone().serve_group(sequence, frame_start, handle, group);
@@ -2667,7 +2676,7 @@ mod serve_group_test {
 			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
 			.unwrap();
 
-		let handle = subscription.priority.insert(Priority::new(0, 0));
+		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
 		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group.consume()));
 
 		// Drain the frame, leaving the task parked awaiting the next one.
@@ -2710,7 +2719,7 @@ mod serve_group_test {
 		let consumer = group.consume();
 		group.finish().unwrap();
 
-		let handle = subscription.priority.insert(Priority::new(0, 0));
+		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
 		subscription.serve_group(0, 0, handle, consumer).await.unwrap();
 
 		assert_eq!(log.resets(), Vec::<u32>::new(), "clean completion must not reset");
