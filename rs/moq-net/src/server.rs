@@ -481,7 +481,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 				let mut parameters = ietf::Parameters::default();
 				parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
 				parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
-				let solicit = ietf::solicit::from_origins(publish.as_ref(), subscribe.as_ref());
+				let solicit = ietf::solicit::from_subscribe(subscribe.as_ref());
 				ietf::solicit::into_setup(&mut parameters, solicit, v);
 				parameters.encode_bytes(v)?
 			}

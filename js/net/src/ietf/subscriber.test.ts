@@ -40,35 +40,35 @@ async function nextStream(transport: WebTransport): Promise<Stream | undefined> 
 }
 
 /**
- * A peer that declared it advertises nothing is never asked: a SUBSCRIBE_NAMESPACE would
- * buy one stream and an empty answer.
+ * Every peer is asked, whatever it declared. A peer with nothing to advertise answers
+ * with an empty set, which costs one stream, and a peer that only answers when asked is
+ * the one that would otherwise never be discovered.
  */
-test("a peer that advertises nothing is not asked", async () => {
+test("every peer is asked", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
 
-	const asked = new Subscriber(session, { announce: false, interest: false });
-	asked.announced(Path.empty());
-	expect(await nextStream(pair.client)).toBeDefined();
+	const subscriber = new Subscriber(session);
+	subscriber.announced(Path.empty());
 
-	const quiet = new Subscriber(session, { announce: false, interest: true });
-	quiet.announced(Path.empty());
-	expect(await nextStream(pair.client)).toBeUndefined();
+	expect(await nextStream(pair.client)).toBeDefined();
 });
 
 /**
- * The declaration is advisory, so a peer that said it advertises nothing may still send
- * an unsolicited PUBLISH_NAMESPACE. Skipping the question must not make us deaf to the
- * answer nobody asked for.
+ * The other half of discovery: a peer that tells us unasked. Asking must not make us deaf
+ * to a PUBLISH_NAMESPACE that arrives on its own stream instead.
  */
-test("an announcement from a peer that advertises nothing still lands", async () => {
+test("an unsolicited announcement lands", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
-	const subscriber = new Subscriber(session, { announce: false, interest: true });
+	const subscriber = new Subscriber(session);
 
 	const announced = subscriber.announced(Path.empty());
 
-	// What the connection dispatch does when a PUBLISH_NAMESPACE arrives.
+	// The question we asked, which this peer never answers.
+	expect(await nextStream(pair.client)).toBeDefined();
+
+	// What the connection dispatch does when a PUBLISH_NAMESPACE arrives instead.
 	const stream = await Stream.open(pair.server, { version: VERSION });
 	const handler = subscriber.runPublishNamespace(
 		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("surprise") }),
@@ -85,8 +85,4 @@ test("an announcement from a peer that advertises nothing still lands", async ()
 	peer?.close();
 	await handler;
 	expect(await announced.next()).toMatchObject({ path: Path.from("surprise"), active: false });
-
-	// The feed ends with the session, since no stream of its own ever does it.
-	subscriber.close();
-	expect(await announced.next()).toBeUndefined();
 });

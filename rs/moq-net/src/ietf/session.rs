@@ -89,7 +89,7 @@ pub fn start<S: web_transport_trait::Session>(
 
 		// What we require of the peer. Read here for the same reason as above, since the
 		// placeholders below make both halves look present.
-		let solicit = solicit::from_origins(publish.as_ref(), subscribe.as_ref());
+		let solicit = solicit::from_subscribe(subscribe.as_ref());
 
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces
@@ -883,10 +883,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_peer_requiring_solicitation_is_not_told_unasked() {
 		let declared = peer::Peer {
-			solicit: solicit::Solicit {
-				announce: true,
-				interest: false,
-			},
+			solicit: solicit::Solicit { announce: true },
 			..Default::default()
 		};
 

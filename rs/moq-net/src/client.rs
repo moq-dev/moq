@@ -356,7 +356,7 @@ impl Client {
 		// The encoding is always an IETF version for SETUP negotiation.
 		let ietf_encoding = ietf::Version::try_from(encoding).map_err(|_| Error::Version)?;
 
-		let solicit = ietf::solicit::from_origins(publish.as_ref(), subscribe.as_ref());
+		let solicit = ietf::solicit::from_subscribe(subscribe.as_ref());
 
 		let mut parameters = ietf::Parameters::default();
 		parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);

@@ -1468,10 +1468,7 @@ mod tests {
 	/// A peer that requires solicitation, which is what hands the advertisements to the
 	/// SUBSCRIBE_NAMESPACE stream.
 	fn requires_solicitation() -> peer::PeerSetup {
-		declared(solicit::Solicit {
-			announce: true,
-			interest: false,
-		})
+		declared(solicit::Solicit { announce: true })
 	}
 
 	/// A broadcast whose every route flows through the peer's assigned identity
@@ -1890,11 +1887,7 @@ mod tests {
 		assert_eq!(unsolicited, 1, "a peer that required nothing is told once");
 		assert_eq!(streams, 2, "on its own PUBLISH_NAMESPACE request");
 
-		let (solicited, streams) = advertise_both_ways(solicit::Solicit {
-			announce: true,
-			interest: false,
-		})
-		.await;
+		let (solicited, streams) = advertise_both_ways(solicit::Solicit { announce: true }).await;
 		assert_eq!(solicited, 1, "a peer that asked to be told on request is told once");
 		assert_eq!(streams, 1, "inline on the SUBSCRIBE_NAMESPACE stream it asked on");
 	}

@@ -54,15 +54,6 @@ impl PeerSetup {
 			.await;
 		(*slot).expect("waited for Some")
 	}
-
-	/// What the peer declared, if its SETUP has already been read.
-	///
-	/// For a caller that would rather act on the default than spend a round trip
-	/// finding out: a server has the client's SETUP before the session starts, while a
-	/// client may still be waiting on the server's.
-	pub fn peek(&self) -> Option<Peer> {
-		*self.0.lock()
-	}
 }
 
 #[cfg(test)]
@@ -89,24 +80,9 @@ mod tests {
 				origin: Some(crate::Origin::new(99).unwrap()),
 				cost: Some(0),
 			},
-			solicit: solicit::Solicit {
-				announce: true,
-				interest: true,
-			},
+			solicit: solicit::Solicit { announce: true },
 		});
 
-		assert_eq!(slot.peek(), Some(first));
 		assert_eq!(slot.get().await, first);
-	}
-
-	/// Nothing to report until the peer's SETUP arrives, which is what lets a caller
-	/// skip the wait and use the default.
-	#[test]
-	fn peek_is_empty_until_set() {
-		let slot = PeerSetup::default();
-		assert_eq!(slot.peek(), None);
-
-		slot.set(Peer::default());
-		assert_eq!(slot.peek(), Some(Peer::default()));
 	}
 }

@@ -74,7 +74,7 @@ export class Connection implements Established {
 		version,
 		client,
 		discovery = true,
-		solicit = { announce: false, interest: false },
+		solicit = { announce: false },
 	}: {
 		url: URL;
 		quic: WebTransport;
@@ -109,7 +109,7 @@ export class Connection implements Established {
 		}
 
 		this.#publisher = new Publisher(this.#quic, this.#session, solicit);
-		this.#subscriber = new Subscriber(this.#session, solicit);
+		this.#subscriber = new Subscriber(this.#session);
 
 		void this.#run();
 	}
@@ -128,7 +128,6 @@ export class Connection implements Established {
 		this.#closed = true;
 
 		this.#publisher.close();
-		this.#subscriber.close();
 		this.#session.close();
 
 		try {

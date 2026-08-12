@@ -23,9 +23,9 @@ informative:
 
 --- abstract
 
-This document defines an extension for MoQ Transport {{moqt}} that lets an endpoint declare its solicitation requirements for namespace discovery: whether advertisements to it must be solicited first, and whether soliciting it is worthwhile at all.
-An endpoint that declares nothing receives both PUBLISH_NAMESPACE and SUBSCRIBE_NAMESPACE, which is what a peer unaware of this extension implicitly asks for.
-An endpoint that will ask for what it wants, or that has nothing to advertise, says so once during setup and is spared the messages it would otherwise have to answer and ignore.
+This document defines an extension for MoQ Transport {{moqt}} that lets an endpoint declare that advertisements to it must be solicited first.
+An endpoint that declares nothing receives unsolicited PUBLISH_NAMESPACE, which is what a peer unaware of this extension implicitly asks for.
+An endpoint that will instead ask for what it wants says so once during setup, and is spared the advertisements it would otherwise have to ignore.
 
 --- middle
 
@@ -50,8 +50,8 @@ Implementations resolve this out of band today, by configuring each endpoint wit
 That works only as long as the configuration matches reality, and it makes the same software behave differently depending on a deployment flag rather than on anything in the protocol.
 
 This extension replaces the guess with a declaration.
-Each endpoint states in its SETUP what it requires to be solicited, and what soliciting it would be worth, and the peer honors both.
-The default, declaring nothing, is to send both, so an endpoint that has never heard of this extension keeps working exactly as it does today.
+An endpoint states in its SETUP that it requires advertisements to be solicited, and the peer honors it.
+The default, declaring nothing, is to advertise unasked, so an endpoint that has never heard of this extension keeps working exactly as it does today.
 
 This is deliberately not a role: it says what an endpoint expects delivered to it, not what it is.
 Two endpoints running identical code can declare different things on different sessions, and a relay declares nothing at all.
@@ -73,9 +73,8 @@ The value is a bit field, each flag naming the message its requirement applies t
 | Bit | Name     | Meaning                                                               |
 |:----|:---------|:----------------------------------------------------------------------|
 | 0x1 | ANNOUNCE | Advertisements to me MUST be solicited; I send SUBSCRIBE_NAMESPACE for what I want. |
-| 0x2 | INTEREST | Soliciting me returns nothing; I advertise no namespaces.              |
 
-The option is OPTIONAL and an absent option is identical to a value of 0: no requirements, so both messages may be sent freely.
+The option is OPTIONAL and an absent option is identical to a value of 0: no requirements, so an advertisement may be sent freely.
 Both directions are independent, so each endpoint declares its own and the two need not match.
 
 An endpoint MUST ignore bits it does not recognize, so later flags remain additive.
@@ -99,25 +98,17 @@ Whichever arrives second replaces the source the first attached, which at best w
 Because this flag decides which of the two an endpoint uses, honoring it also settles that question for the whole session.
 
 
-# Declining Solicitation {#interest}
-
-An endpoint that set INTEREST advertises no namespaces at all: any SUBSCRIBE_NAMESPACE it receives can only be answered with an empty set.
-
-A peer that receives this declaration SHOULD NOT send SUBSCRIBE_NAMESPACE for the remainder of the session.
-An endpoint that only subscribes is the expected user of this flag.
-
-This one is an optimization rather than a correctness matter, and it is the weaker of the two: the cost of asking anyway is one stream and one empty answer, while the cost of *waiting* to find out can be a round trip.
-An endpoint that has not yet received the peer's SETUP MAY therefore send SUBSCRIBE_NAMESPACE without waiting, and the receiver answers normally.
-In practice the declaration is most useful to the endpoint that accepted the session, which has the peer's SETUP before it sends anything.
-
-
 # Tolerating a Withheld Message
 
-Both flags are advisory.
-A receiver MUST handle a message it asked not to receive exactly as it would have without the declaration, and MUST NOT close the session over one.
+The flag is advisory.
+A receiver MUST handle an advertisement it asked not to receive exactly as it would have without the declaration, and MUST NOT close the session over one.
 
-Sending one is at worst rude, and there are honest reasons it happens: the SETUP may not have arrived yet ({{interest}}), the peer may not implement this extension, or a relay may be forwarding on behalf of something that does not.
-Making such a message fatal would turn an optimization into a new way for conforming implementations to fail to interoperate, which is the problem this extension exists to remove.
+Sending one is at worst rude, and there are honest reasons it happens: the peer may not implement this extension, or a relay may be forwarding on behalf of something that does not.
+Making it fatal would turn an optimization into a new way for conforming implementations to fail to interoperate, which is the problem this extension exists to remove.
+
+There is no counterpart for SUBSCRIBE_NAMESPACE.
+An endpoint with nothing to advertise answers one with an empty set, which costs a single stream, while waiting on the peer's SETUP to learn whether the question is worth asking costs a round trip on every session.
+Asking unconditionally is therefore the cheaper behavior, and it is what an endpoint SHOULD do.
 
 
 # Security Considerations
@@ -129,7 +120,7 @@ A declaration says nothing about authorization.
 An endpoint that declares no requirements is not thereby entitled to any advertisement, and a peer MUST apply the same authorization to what it advertises as it would without this extension.
 In particular, a relay MUST NOT treat an absent SOLICIT option as permission to advertise namespaces the peer is not authorized to learn about.
 
-The flags reveal a little about an endpoint's intent, roughly whether it intends to publish or subscribe.
+The flag reveals a little about an endpoint's intent, roughly whether it intends to subscribe.
 An endpoint that considers this sensitive can simply declare nothing, which costs it only the messages it would have avoided.
 
 

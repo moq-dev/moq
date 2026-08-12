@@ -46,12 +46,14 @@ If it plays, you interop. That's the whole test.
   moq-transport says which one a peer expects, and the peers that never ask are
   the ones expecting to be told, so we do both by default.
 - **Tell us to stop and we will.** The [MoQ Solicit
-  extension](/draft/moq-solicit) is a `SETUP` option declaring what you require
-  to be solicited: bit `0x1` says advertisements must be asked for and you'll
-  send `SUBSCRIBE_NAMESPACE`, bit `0x2` says asking you is pointless because you
-  advertise nothing. Declaring `0x1` gets you the relay behavior the IETF draft
-  describes. Unknown options are ignored, so an implementation that doesn't know
-  it loses nothing.
+  extension](/draft/moq-solicit) is a `SETUP` option declaring that
+  advertisements to you must be asked for, because you'll send
+  `SUBSCRIBE_NAMESPACE` for what you want. Declaring it gets you the relay
+  behavior the IETF draft describes. Unknown options are ignored, so an
+  implementation that doesn't know it loses nothing.
+- **We ask everyone.** There's no way to tell us not to bother: answering a
+  `SUBSCRIBE_NAMESPACE` with an empty set costs one stream, while waiting on
+  your `SETUP` to find out costs a round trip on every connection.
 - **One namespace, one message.** We never advertise the same namespace as both
   `PUBLISH_NAMESPACE` and `NAMESPACE` on one session; your declaration picks
   which. Rejecting a `PUBLISH_NAMESPACE` is fine and keeps the session up.

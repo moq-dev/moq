@@ -312,22 +312,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// our namespace -- a peer outside it has never heard of our root, so a rooted
 	/// subscriber asks for its scope and mounts the replies under the root.
 	///
-	/// Empty when the peer said it advertises nothing (MoQ Solicit). That is read
-	/// without waiting for its SETUP: asking costs one stream and one empty answer,
-	/// which is cheaper than delaying discovery by a round trip to find out. A server
-	/// has already read the client's SETUP by now, and that is the direction where a
-	/// pointless question actually gets asked.
+	/// Asked unconditionally, without waiting on the peer's SETUP: a peer with nothing to
+	/// advertise answers with an empty set, which costs one stream, while waiting to find
+	/// out costs a round trip on every session.
 	pub fn subscribe_prefixes(&self) -> Vec<PathOwned> {
-		if self.peer_advertises_nothing() {
-			return Vec::new();
-		}
-
 		self.origin.allowed().map(|p| p.to_owned()).collect()
-	}
-
-	/// Whether the peer has already told us that soliciting it returns nothing.
-	fn peer_advertises_nothing(&self) -> bool {
-		self.peer_setup.peek().is_some_and(|declared| declared.solicit.interest)
 	}
 
 	/// Send SUBSCRIBE_NAMESPACE for one prefix on a bidi stream.
@@ -1369,41 +1358,6 @@ mod tests {
 	fn occurrences(log: &crate::lite::test_transport::Log, needle: &[u8]) -> usize {
 		let writes = log.writes.lock().unwrap();
 		writes.windows(needle.len()).filter(|window| *window == needle).count()
-	}
-
-	/// A peer that declared it advertises nothing is never asked, which is the whole
-	/// point of the flag: a publish-only client should not have to field a question it
-	/// can only answer with an empty set.
-	#[tokio::test]
-	async fn a_peer_that_advertises_nothing_is_not_asked() {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let session = crate::lite::test_transport::SinkSession::new(Default::default());
-		let peer_setup = peer::PeerSetup::default();
-		let (tasks, _task_set) = crate::util::TaskSet::new();
-
-		let subscriber = Subscriber::new(
-			session,
-			origin,
-			Control::new(None, false),
-			None,
-			peer_setup.clone(),
-			crate::Origin::new(1).unwrap(),
-			None,
-			Version::Draft17,
-			tasks,
-		);
-
-		// Nothing declared yet: ask, rather than spend a round trip finding out.
-		assert_eq!(subscriber.subscribe_prefixes().len(), 1);
-
-		peer_setup.set(peer::Peer {
-			solicit: crate::ietf::solicit::Solicit {
-				announce: false,
-				interest: true,
-			},
-			..Default::default()
-		});
-		assert!(subscriber.subscribe_prefixes().is_empty());
 	}
 
 	/// A rooted subscriber asks the peer for its permitted SCOPE. The root names where

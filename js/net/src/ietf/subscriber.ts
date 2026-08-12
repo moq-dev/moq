@@ -15,7 +15,6 @@ import { toWire } from "./priority.ts";
 import { type Publish, PublishError } from "./publish.ts";
 import { type PublishNamespace, PublishNamespaceError, PublishNamespaceOk } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import type { Solicit } from "./solicit.ts";
 import { Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
 	PublishBlocked,
@@ -62,7 +61,6 @@ export class Subscriber {
 	#consumes = new BroadcastCache();
 
 	// Any currently active announcements.
-	#solicit: Solicit;
 	#announced = new Set<Path.Valid>();
 
 	// Any consumers that want each new announcement.
@@ -71,38 +69,19 @@ export class Subscriber {
 	/**
 	 * Creates a new Subscriber instance.
 	 * @param session - The session abstraction for bidi streams and request IDs
-	 * @param solicit - What the peer's SETUP declared about being solicited
 	 *
 	 * @internal
 	 */
-	constructor(session: Session, solicit: Solicit = { announce: false, interest: false }) {
+	constructor(session: Session) {
 		this.#session = session;
-		this.#solicit = solicit;
-	}
-
-	/**
-	 * Ends every announced feed, including one that never opened a stream of its own.
-	 *
-	 * @internal
-	 */
-	close() {
-		for (const announced of this.#announcedConsumers) {
-			announced.close();
-		}
-		this.#announcedConsumers.clear();
 	}
 
 	/**
 	 * Gets an announced reader for the specified prefix.
 	 *
-	 * Sends no SUBSCRIBE_NAMESPACE when the peer declared that soliciting it returns
-	 * nothing (MoQ Solicit): the question would buy one stream and an empty answer.
-	 * Unlike the Rust side this never has to guess, since the SETUP is exchanged before
-	 * the connection exists.
-	 *
-	 * The feed stays live either way. That declaration is advisory, so a peer is free to
-	 * send an unsolicited PUBLISH_NAMESPACE anyway, and one that arrives is delivered
-	 * here exactly as it would be without the declaration.
+	 * The peer is asked with SUBSCRIBE_NAMESPACE regardless of what it declared, and an
+	 * unsolicited PUBLISH_NAMESPACE lands here too, so a peer that only tells and one
+	 * that only answers are both discovered.
 	 */
 	announced(prefix = Path.empty()): announce.Consumer {
 		const announced = new announce.Producer(prefix);
@@ -112,12 +91,6 @@ export class Subscriber {
 			announced.append({ path: suffix, active: true });
 		}
 		this.#announcedConsumers.add(announced);
-
-		if (this.#solicit.interest) {
-			// No SUBSCRIBE_NAMESPACE to run, so nothing here ends the feed; {@link close}
-			// does it when the session goes away.
-			return announced.consume();
-		}
 
 		void this.#runAnnounced(announced, prefix).finally(() => {
 			this.#announcedConsumers.delete(announced);

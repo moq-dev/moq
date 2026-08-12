@@ -1,16 +1,14 @@
 //! The MoQ Solicit extension (draft-lcurley-moq-solicit-00).
 //!
 //! moq-transport carries no statement of what an endpoint intends to do with a session,
-//! so neither side can tell whether the other will announce, ask, both, or neither. The
-//! result is that both messages that discover namespaces are guesses: PUBLISH_NAMESPACE
-//! is either expected or unwanted noise, and SUBSCRIBE_NAMESPACE is either the only way
-//! to learn anything or a question the peer will never answer.
+//! so neither side can tell whether the other will announce, ask, both, or neither. An
+//! unsolicited PUBLISH_NAMESPACE is therefore a guess: either the only thing that will
+//! ever tell the peer what we have, or noise it never wanted.
 //!
-//! This extension lets each endpoint declare its solicitation requirements via the
-//! SOLICIT Setup Option: whether advertisements to it must be solicited first, and
-//! whether soliciting it is worth anything. Declaring nothing means "no requirements,
-//! send me both", which is what every peer that has never heard of this extension
-//! implicitly says, so the default is the chatty, interoperable behavior.
+//! This extension lets each endpoint declare, via the SOLICIT Setup Option, that
+//! advertisements to it must be solicited first. Declaring nothing means "no
+//! requirements, tell me unasked", which is what every peer that has never heard of this
+//! extension implicitly says, so the default is the chatty, interoperable behavior.
 //!
 //! The option is a plain Setup Option, so it rides every draft we speak rather than
 //! needing the unified SETUP the MoQ Cluster extension does.
@@ -28,13 +26,10 @@ pub const SOLICIT: u64 = 0x40B5A;
 /// wants with SUBSCRIBE_NAMESPACE.
 const ANNOUNCE: u64 = 0x1;
 
-/// INTEREST: soliciting the sender returns nothing, since it advertises no namespaces.
-const INTEREST: u64 = 0x2;
-
-/// What an endpoint requires to be solicited, and what soliciting it is worth.
+/// What an endpoint requires to be solicited.
 ///
-/// Both default to `false`, which is what an endpoint that declared nothing gets: no
-/// requirements, so send it everything. Each flag is advisory, so sending a message it
+/// Defaults to `false`, which is what an endpoint that declared nothing gets: no
+/// requirements, so tell it everything. The flag is advisory, so sending a message it
 /// asked to be spared is rude rather than fatal, and a receiver handles one normally.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Solicit {
@@ -42,10 +37,6 @@ pub struct Solicit {
 	/// SUBSCRIBE_NAMESPACE, so an unsolicited PUBLISH_NAMESPACE is unwanted. A relay
 	/// declares this; so does an endpoint that can do nothing with an announcement.
 	pub announce: bool,
-
-	/// Soliciting is pointless: this endpoint advertises no namespaces, so a
-	/// SUBSCRIBE_NAMESPACE only buys an empty answer.
-	pub interest: bool,
 }
 
 impl Solicit {
@@ -56,29 +47,25 @@ impl Solicit {
 		if self.announce {
 			bits |= ANNOUNCE;
 		}
-		if self.interest {
-			bits |= INTEREST;
-		}
 		bits
 	}
 
 	fn from_bits(bits: u64) -> Self {
 		Self {
 			announce: bits & ANNOUNCE != 0,
-			interest: bits & INTEREST != 0,
 		}
 	}
 }
 
-/// What we require of the peer, given the two halves of the session.
+/// What we require of the peer, given the half of the session that could use an
+/// advertisement.
 ///
 /// Exactly what we could do nothing with: with no subscribe half an announcement is
-/// useless to us, and with no publish half we have none to give. A relay has both, so it
-/// requires nothing and stays as talkative as every peer expects.
-pub fn from_origins(publish: Option<&origin::Consumer>, subscribe: Option<&origin::Producer>) -> Solicit {
+/// useless to us. A relay has one, so it requires nothing and stays as talkative as every
+/// peer expects.
+pub fn from_subscribe(subscribe: Option<&origin::Producer>) -> Solicit {
 	Solicit {
 		announce: subscribe.is_none_or(|origin| origin.allowed().next().is_none()),
-		interest: publish.is_none_or(|origin| origin.allowed().next().is_none()),
 	}
 }
 
@@ -116,10 +103,8 @@ mod tests {
 	#[test]
 	fn flags_round_trip() {
 		for announce in [false, true] {
-			for interest in [false, true] {
-				let solicit = Solicit { announce, interest };
-				assert_eq!(round_trip(solicit, VERSION), solicit);
-			}
+			let solicit = Solicit { announce };
+			assert_eq!(round_trip(solicit, VERSION), solicit);
 		}
 	}
 
@@ -146,56 +131,34 @@ mod tests {
 		let mut params = super::super::Parameters::default();
 		params.set_varint(super::super::ParameterVarInt::Solicit, ANNOUNCE | 0x8000);
 
-		assert_eq!(
-			from_setup(&params, VERSION).unwrap(),
-			Solicit {
-				announce: true,
-				interest: false
-			}
-		);
+		assert_eq!(from_setup(&params, VERSION).unwrap(), Solicit { announce: true });
 	}
 
 	/// What we declare comes from the session itself, so nothing has to be configured:
-	/// a relay wired up both ways stays as talkative as every peer expects, while a
-	/// publish-only or subscribe-only client opts out of the half it can't use.
+	/// a relay wired up to subscribe stays as talkative as every peer expects, while a
+	/// publish-only client opts out of the advertisements it could never use.
 	#[test]
 	fn declaration_follows_the_wired_halves() {
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		let publish = origin.consume();
 
 		assert_eq!(
-			from_origins(Some(&publish), Some(&origin)),
+			from_subscribe(Some(&origin)),
 			Solicit::default(),
 			"a relay requires nothing"
 		);
 
 		assert_eq!(
-			from_origins(Some(&publish), None),
-			Solicit {
-				announce: true,
-				interest: false
-			},
+			from_subscribe(None),
+			Solicit { announce: true },
 			"nothing to subscribe with: don't announce at me"
-		);
-
-		assert_eq!(
-			from_origins(None, Some(&origin)),
-			Solicit {
-				announce: false,
-				interest: true
-			},
-			"nothing to publish: don't ask me"
 		);
 
 		// A half that permits no prefix at all is the same as an absent one, which is
 		// what a session fills an unset half with.
 		let none = origin::Producer::empty(crate::Origin::random());
 		assert_eq!(
-			from_origins(Some(&publish), Some(&none)),
-			Solicit {
-				announce: true,
-				interest: false
-			},
+			from_subscribe(Some(&none)),
+			Solicit { announce: true },
 			"a scope that permits nothing can't use an announcement either"
 		);
 	}
@@ -204,10 +167,7 @@ mod tests {
 	/// an old peer that wants to opt out still can.
 	#[test]
 	fn every_version_round_trips() {
-		let solicit = Solicit {
-			announce: true,
-			interest: true,
-		};
+		let solicit = Solicit { announce: true };
 
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft19] {
 			assert_eq!(round_trip(solicit, version), solicit);
