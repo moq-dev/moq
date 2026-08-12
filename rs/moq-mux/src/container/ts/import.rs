@@ -1633,6 +1633,12 @@ impl<E: CatalogExt> AacStream<E> {
 		if !self.tail.is_empty() {
 			tracing::debug!(bytes = self.tail.len(), "dropping partial ADTS frame at end of stream");
 		}
+		// Nothing was ever published here, so this rendition will never resolve. Release its
+		// reservation or it gates the initial catalog publish for every other track: `finish`
+		// takes streams by reference, and callers keep the importer alive past it.
+		if self.import.is_none() {
+			self.reserved.take();
+		}
 		if let Some(import) = &mut self.import {
 			import.finish()?;
 		}
@@ -2002,6 +2008,12 @@ impl<E: CatalogExt> LegacyStream<E> {
 				bytes = self.tail.len(),
 				"dropping partial frame at end of stream"
 			);
+		}
+		// Nothing was ever published here, so this rendition will never resolve. Release its
+		// reservation or it gates the initial catalog publish for every other track: `finish`
+		// takes streams by reference, and callers keep the importer alive past it.
+		if self.import.is_none() {
+			self.reserved.take();
 		}
 		if let Some(import) = &mut self.import {
 			import.finish()?;
@@ -3091,6 +3103,56 @@ mod test {
 		);
 		// It began in the first PES, so it keeps that PTS rather than the one it completed under.
 		assert_eq!(frames[0].timestamp, Timestamp::from_micros(1_000_000).unwrap());
+	}
+
+	// A PID that never publishes must not hold the catalog shut for the rest of the
+	// broadcast. Its rendition is reserved from the PMT and only consumed when the importer
+	// is built, and `finish` takes streams by reference (moq-srt finishes the importer and
+	// keeps it), so a reservation left alive there gates the initial catalog publish
+	// indefinitely. A lone frame that can never be confirmed is exactly such a PID.
+	#[tokio::test(start_paused = true)]
+	async fn a_pid_that_never_publishes_releases_the_catalog() {
+		const MP2_PID: u16 = 0x0061;
+		const AAC_PID: u16 = 0x0060;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(
+			&[(StreamType::AdtsAac, AAC_PID), (StreamType::Mpeg1Audio, MP2_PID)],
+			false,
+		);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// MP2 carries a single frame, which nothing can ever confirm, so it is dropped and
+		// the importer for that PID is never built.
+		import
+			.decode(audio_pes_packet(MP2_PID, 0, 90_000, &mp2_frame(0xAA)).as_slice())
+			.unwrap();
+		// AAC resolves normally.
+		let mut aac = adts_frame(40, 0xCC);
+		aac.extend_from_slice(&adts_frame(40, 0xDD));
+		import
+			.decode(audio_pes_packet(AAC_PID, 0, 90_000, &aac).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		// The importer is deliberately still alive here, as moq-srt leaves it after finish.
+		let track = consumer
+			.track(hang::catalog::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+		let published = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await;
+		assert!(
+			matches!(published, Ok(Ok(Some(_)))),
+			"a PID that never published held the catalog shut: {published:?}"
+		);
+		drop(import);
 	}
 
 	// Resync is bounded: a PID carrying something other than the codec its PMT declares is a
