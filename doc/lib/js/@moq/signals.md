@@ -21,7 +21,7 @@ Three classes do the work:
 | `Computed<T>` | A read-only value derived from other signals. |
 | `Effect` | A reactive scope that reruns when a tracked signal changes, and cleans up after itself. |
 
-Alongside them: `Once<T>` for terminal state that settles exactly once, and `Derived` for a lifecycle-free mapped view.
+Alongside them, `Once<T>` holds terminal state that settles exactly once.
 
 The key difference from other signals libraries: **`effect.get(signal)` is what subscribes**. Nothing is tracked implicitly. If you want to read a value without subscribing to it, call `signal.peek()`.
 
@@ -476,45 +476,9 @@ console.log(ticker.out.count.peek()); // read-only to us
 ticker.interval.set(250); // knobs stay writable
 ```
 
-`getter()` throws on a readable this package did not create, since wrapping a foreign object would silently freeze it into a constant that never updates. Pass a `Signal`, `Computed`, `Once`, or `Derived`.
+`getter()` throws on a readable this package did not create, since wrapping a foreign object would silently freeze it into a constant that never updates. Pass a `Signal`, `Computed`, or `Once`.
 
 The `#signals` effect stays private and `close()` is the only handle. The two custom elements (`<moq-watch>` and `<moq-publish>`) are the exception: they expose `readonly signals` as the documented place for an app to hang its own reactivity.
-
-## Derived
-
-A `Derived` is a read-only view over other readables, recomputed on every read. It is the lifecycle-free counterpart to `Computed`:
-
-| | `Computed` | `Derived` |
-|---|---|---|
-| Dependencies | Tracked automatically via `effect.get` | Named up front |
-| First read | `undefined` until the first run completes | Correct immediately |
-| Value | Cached, refreshed on a microtask | Recomputed on every read |
-| Teardown | Needs `close()` | None |
-| Compute function | May be expensive | Must be cheap and pure |
-
-Reach for it when a class wants to publish a small mapped view of its own state as part of its public surface. A hand-written object with the same three methods would work until a consumer passed it to `getter()` or an `Inputs` field, which reject a readable this package did not create.
-
-```ts
-import { Derived, Signal } from "@moq/signals";
-
-class Room {
-	#peers = new Signal(new Set<string>());
-
-	/** True while at least one peer is connected. */
-	readonly online = new Derived([this.#peers], (peers) => peers.size > 0);
-
-	join(name: string): void {
-		this.#peers.mutate((peers) => peers.add(name));
-	}
-}
-
-const room = new Room();
-room.online.peek(); // false, no first-run gap
-room.join("alice");
-room.online.peek(); // true
-```
-
-It notifies only when the derived value actually changes, matching `Signal`. A source can move without moving the view: another peer joining an already-online room changes `#peers` but not `online`, so subscribers stay quiet.
 
 ## Framework adapters
 
