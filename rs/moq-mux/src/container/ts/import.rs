@@ -2815,6 +2815,41 @@ mod test {
 		);
 	}
 
+	// The AAC counterpart of the above. Worth its own test rather than trusting the shared
+	// `Resync`: this path scans for the ADTS sync byte rather than a descriptor's, and
+	// builds its give-up error by adding context to the `anyhow` one `adts::Header::parse`
+	// returns, where the legacy path wraps a `thiserror` value.
+	#[test]
+	fn aac_gives_up_when_nothing_ever_parses() {
+		const AAC_PID: u16 = 0x0060;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// A valid ADTS header every 16 bytes, none of which is ever a real frame boundary:
+		// the 47-byte frames they declare never end on another header.
+		let header = adts_frame(40, 0);
+		let junk: Vec<u8> = (0..150)
+			.map(|i: usize| match i % 16 {
+				n if n < super::adts::MIN_HEADER_LEN => header[n],
+				_ => 0xBB,
+			})
+			.collect();
+
+		let err = (0..1000)
+			.map(|i| import.decode(audio_pes_packet(AAC_PID, (i % 16) as u8, 90_000, &junk).as_slice()))
+			.find_map(Result::err)
+			.expect("an unparseable stream must still fail");
+		assert!(
+			err.to_string().contains("never regained sync"),
+			"gave up with the wrong error: {err}"
+		);
+	}
+
 	// ISO 13818-1 doesn't require audio frames to align with PES boundaries: a
 	// frame split across two PES must be reassembled byte-exact, stamped with the
 	// PTS of the PES it began in, and the next whole frame takes the new PES's PTS.
