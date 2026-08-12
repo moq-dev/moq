@@ -268,6 +268,82 @@ describe("Effect", () => {
 		}
 	});
 
+	test("cleanup from a spawn past the 5s cutoff lands on the next run", async () => {
+		// The immediate teardown above is bounded: a rerun waits at most 5s for outstanding
+		// spawns, then opens the next run anyway. A task resuming after that no longer sees a
+		// dead run, so its cleanup is queued against the run that has since started.
+		const tick = new Signal(0);
+		const gate = Promise.withResolvers<void>();
+		const closed: string[] = [];
+		let runs = 0;
+		let capturedAbort: boolean | undefined;
+		let lateAbort: boolean | undefined;
+		let immediate: boolean | undefined;
+
+		// Fire the cutoff by hand instead of waiting five real seconds for it.
+		let cutoff: (() => void) | undefined;
+		const realSetTimeout = globalThis.setTimeout;
+		const timer = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+			if (ms === 5000) {
+				cutoff = fn;
+				return 0 as unknown as ReturnType<typeof setTimeout>;
+			}
+			return realSetTimeout(fn, ms);
+		}) as typeof setTimeout);
+		const warn = spyOn(console, "warn").mockImplementation(() => {});
+
+		const effect = new Effect((e) => {
+			e.get(tick);
+			const run = ++runs;
+			if (run > 1) return;
+
+			const abort = e.abort; // captured during the run, so it stays this run's controller
+			e.spawn(async () => {
+				await gate.promise;
+
+				capturedAbort = abort.aborted;
+				lateAbort = e.abort.aborted;
+
+				let ran = false;
+				e.cleanup(() => {
+					ran = true;
+					closed.push(`run ${run}`);
+				});
+				immediate = ran;
+			});
+		});
+
+		try {
+			await settle();
+			tick.set(1);
+			await settle();
+			expect(runs).toBe(1); // parked awaiting the task
+
+			// The rerun gives up waiting and run 2 opens while the task is still in flight.
+			cutoff?.();
+			await settle();
+			expect(runs).toBe(2);
+
+			gate.resolve();
+			await settle();
+
+			// Run 1 is long over, but cleanup is deferred to run 2 rather than firing now.
+			expect(immediate).toBe(false);
+			expect(closed).toEqual([]);
+
+			// A guard has to use the signal captured during the run: reading `effect.abort`
+			// this late returns run 2's controller, which is not aborted.
+			expect(capturedAbort).toBe(true);
+			expect(lateAbort).toBe(false);
+		} finally {
+			effect.close();
+			timer.mockRestore();
+			warn.mockRestore();
+		}
+
+		expect(closed).toEqual(["run 1"]);
+	});
+
 	test("a spawn that outlived its run sees that run aborted and cancelled", async () => {
 		// The scope a stale task reads has to be its own, not the incoming run's: an abort
 		// signal that never fires would scope its listeners to the next run, and a cancel
