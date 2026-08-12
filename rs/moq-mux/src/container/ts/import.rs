@@ -1312,6 +1312,13 @@ impl Resync {
 		self.unconfirmed = false;
 	}
 
+	/// Undo the scanning charged since `discarded`. Those bytes turned out to be retained
+	/// rather than discarded, and charging for bytes we keep would fail a large frame that
+	/// legitimately arrives over many small PES.
+	fn refund(&mut self, discarded: usize) {
+		self.discarded = discarded;
+	}
+
 	/// A discontinuity: whatever vouched for the next boundary no longer applies, so the
 	/// frame after it has to be confirmed again.
 	fn desynced(&mut self) {
@@ -1332,6 +1339,18 @@ enum Recover {
 	/// Nothing else in this buffer can start a frame; carry from this offset into the
 	/// next PES.
 	Carry(usize),
+}
+
+/// A candidate passed over for declaring a frame longer than the buffer holds, kept in case
+/// nothing later in the buffer confirms.
+///
+/// Restoring it has to undo the scan that followed: its bytes end up retained rather than
+/// discarded, and it still belongs to the tail its timestamp was derived from.
+struct Fallback {
+	offset: usize,
+	discarded: usize,
+	pts: Option<Timestamp>,
+	in_tail: bool,
 }
 
 /// What a resync needs to know about the codec it is scanning for.
@@ -1434,7 +1453,12 @@ impl<E: CatalogExt> AacStream<E> {
 						// and confirm: waiting here would swallow the real frames inside the
 						// range this one claims. A byte of a real ADTS header is 0xFF often
 						// enough for this to matter.
-						fallback.get_or_insert(offset);
+						fallback.get_or_insert(Fallback {
+							offset,
+							discarded: self.resync.discarded,
+							pts,
+							in_tail,
+						});
 						Err(None)
 					} else if !self.resync.unconfirmed() {
 						Ok((header, end))
@@ -1460,19 +1484,35 @@ impl<E: CatalogExt> AacStream<E> {
 							None => anyhow::Error::msg(context),
 						});
 					}
-					if in_tail {
-						pts = pes_base;
-						in_tail = false;
-					}
+					// Re-anchor only where the tail is actually abandoned: restoring a fallback
+					// keeps the candidate, so it keeps the timestamp it was found with.
 					match self.resync.recover(data, offset, &SyncWord::ADTS) {
 						Recover::At(next) => {
+							if in_tail {
+								pts = pes_base;
+								in_tail = false;
+							}
 							offset = next;
 							continue;
 						}
 						// Nothing in the buffer confirmed, so fall back to the earliest
 						// candidate that was merely too long; it may complete next PES.
 						Recover::Carry(next) => {
-							offset = fallback.unwrap_or(next);
+							match fallback {
+								Some(found) => {
+									self.resync.refund(found.discarded);
+									offset = found.offset;
+									pts = found.pts;
+									in_tail = found.in_tail;
+								}
+								None => {
+									if in_tail {
+										pts = pes_base;
+										in_tail = false;
+									}
+									offset = next;
+								}
+							}
 							break;
 						}
 					}
@@ -1579,8 +1619,12 @@ impl<E: CatalogExt> AacStream<E> {
 
 	fn finish(&mut self) -> anyhow::Result<()> {
 		// Drain a candidate held only for want of a successor to confirm it: at end of
-		// stream that successor is never coming.
-		if !self.tail.is_empty() {
+		// stream that successor is never coming. Only once this stream has published a
+		// frame, though. Before that nothing has vouched for any boundary, so accepting one
+		// here would hand a capture that joined mid-frame and ended immediately the same
+		// false frame that starting unconfirmed exists to reject, and build the track's
+		// config out of it.
+		if !self.tail.is_empty() && self.import.is_some() {
 			self.resync.accept_unconfirmed();
 			self.write(Pending::empty(), None)?;
 		}
@@ -1805,7 +1849,12 @@ impl<E: CatalogExt> LegacyStream<E> {
 						// identical. Remember it, but prefer any later candidate that does fit
 						// and confirm: waiting here would swallow the real frames inside the
 						// range this one claims.
-						fallback.get_or_insert(offset);
+						fallback.get_or_insert(Fallback {
+							offset,
+							discarded: self.resync.discarded,
+							pts,
+							in_tail,
+						});
 						Err(None)
 					} else if !self.resync.unconfirmed() {
 						Ok((header, end))
@@ -1844,19 +1893,35 @@ impl<E: CatalogExt> LegacyStream<E> {
 					// describes anything. Re-anchor on the PES, whose PTS covers the first
 					// frame starting in it: wrong by less than one PES, where a stale tail
 					// (a loop wrap carries the PTS from before it) can be wrong by hours.
-					if in_tail {
-						pts = pes_base;
-						in_tail = false;
-					}
+					// Only where the tail is actually abandoned, though: restoring a fallback
+					// keeps the candidate, so it keeps the timestamp it was found with.
 					match self.resync.recover(data, offset, &self.descriptor.into()) {
 						Recover::At(next) => {
+							if in_tail {
+								pts = pes_base;
+								in_tail = false;
+							}
 							offset = next;
 							continue;
 						}
 						// Nothing in the buffer confirmed, so fall back to the earliest
 						// candidate that was merely too long; it may complete next PES.
 						Recover::Carry(next) => {
-							offset = fallback.unwrap_or(next);
+							match fallback {
+								Some(found) => {
+									self.resync.refund(found.discarded);
+									offset = found.offset;
+									pts = found.pts;
+									in_tail = found.in_tail;
+								}
+								None => {
+									if in_tail {
+										pts = pes_base;
+										in_tail = false;
+									}
+									offset = next;
+								}
+							}
 							break;
 						}
 					}
@@ -1920,8 +1985,12 @@ impl<E: CatalogExt> LegacyStream<E> {
 
 	fn finish(&mut self) -> anyhow::Result<()> {
 		// Drain a candidate held only for want of a successor to confirm it: at end of
-		// stream that successor is never coming.
-		if !self.tail.is_empty() {
+		// stream that successor is never coming. Only once this stream has published a
+		// frame, though. Before that nothing has vouched for any boundary, so accepting one
+		// here would hand a capture that joined mid-frame and ended immediately the same
+		// false frame that starting unconfirmed exists to reject, and build the track's
+		// config out of it.
+		if !self.tail.is_empty() && self.import.is_some() {
 			self.resync.accept_unconfirmed();
 			self.write(Pending::empty())?;
 		}
@@ -2533,9 +2602,12 @@ mod test {
 		));
 		// A whole MP2 frame (MPEG-1 Layer II, 32 kbps, 48 kHz, stereo = 96 bytes),
 		// 2 s ahead of the AAC PES that follows in the same audio run.
+		// Two frames, in their own PES: a frame is confirmed by the one after it, so a lone
+		// frame on a PID that never establishes sync is not published at all.
 		let mut mp2 = vec![0xFF, 0xFD, 0x14, 0x00];
 		mp2.resize(96, 0xAA);
 		bytes.extend_from_slice(&audio_pes_packet(MP2_PID, 0, 90_000, &mp2));
+		bytes.extend_from_slice(&audio_pes_packet(MP2_PID, 1, 92_160, &mp2));
 
 		// Two ADTS frames: a frame is confirmed by the one after it, so a lone frame is only
 		// published at end of stream, after the jitter accounting for its PES has run.
@@ -2668,13 +2740,16 @@ mod test {
 		import
 			.decode(audio_pes_packet(AAC_PID, 0, 90_000, &frame[..25]).as_slice())
 			.expect("a split ADTS frame is not fatal");
+		// The rest of the split frame, plus the frame that confirms its boundary.
+		let mut rest = frame[25..].to_vec();
+		rest.extend_from_slice(&adts_frame(40, 0x77));
 		import
-			.decode(audio_pes_packet(AAC_PID, 1, 270_000, &frame[25..]).as_slice())
+			.decode(audio_pes_packet(AAC_PID, 1, 270_000, &rest).as_slice())
 			.unwrap();
 		import.finish().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
-		assert_eq!(frames.len(), 1, "the split frame is reassembled, not dropped");
+		assert_eq!(frames.len(), 2, "the split frame is reassembled, not dropped");
 		// The ADTS header is stripped: the track carries raw AAC.
 		assert_eq!(frames[0].payload.as_ref(), &frame[7..], "reassembled byte-exact");
 		// It began in PES 1 (90000 ticks = 1 s), so PES 2's PTS must not apply to it.
@@ -2974,6 +3049,48 @@ mod test {
 			vec![mp2_frame(0xAA), mp2_frame(0xBB), mp2_frame(0xCC), mp2_frame(0xDD)],
 			"published the unvouched-for bytes the seek landed in the middle of"
 		);
+	}
+
+	// A frame that legitimately arrives over many small PES must not trip the resync budget.
+	// The candidate is rescanned each time the buffer grows, and charging those bytes on
+	// every pass would bill a single 8 KiB frame for over a hundred KiB of "discarded" data
+	// and fail the stream before it ever completes. Bytes that end up retained are refunded.
+	#[tokio::test(start_paused = true)]
+	async fn legacy_does_not_bill_a_frame_that_arrives_slowly() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// The largest frame MPEG-1 Layer II can declare (384 kbps at 32 kHz), dribbled in 4
+		// bytes at a time so it is rescanned 432 times. Billing each pass would charge ~364
+		// KiB against a 64 KiB budget.
+		let mut frame = vec![0xFF, 0xFD, 0xE8, 0x00];
+		frame.resize(1728, 0xAA);
+		for (i, chunk) in frame.chunks(4).enumerate() {
+			import
+				.decode(audio_pes_packet(MP2_PID, (i % 16) as u8, 90_000, chunk).as_slice())
+				.expect("a slowly arriving frame must not exhaust the resync budget");
+		}
+		// Enough of the next frame to confirm the boundary.
+		import
+			.decode(audio_pes_packet(MP2_PID, 0, 270_000, &frame[..4]).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
+			vec![frame.clone()],
+			"the reassembled frame keeps its bytes"
+		);
+		// It began in the first PES, so it keeps that PTS rather than the one it completed under.
+		assert_eq!(frames[0].timestamp, Timestamp::from_micros(1_000_000).unwrap());
 	}
 
 	// Resync is bounded: a PID carrying something other than the codec its PMT declares is a
