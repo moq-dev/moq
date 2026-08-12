@@ -531,7 +531,8 @@ export class Effect {
 	}
 
 	/**
-	 * Runs an async task. The effect will not rerun until the task's promise settles.
+	 * Runs an async task. The effect will not rerun until the task's promise settles, up to 5
+	 * seconds, after which it reruns anyway and warns in dev.
 	 */
 	// TODO: Add effect for another layer of nesting
 	spawn(fn: () => Promise<void>) {
@@ -637,8 +638,9 @@ export class Effect {
 	 * scopes until it finally reruns or closes.
 	 *
 	 * Called from a task that outlived its run, the child is closed at the *next* teardown rather
-	 * than immediately, unlike {@link cleanup}. Closing it now would cancel its first run before
-	 * `fn` executes, so whatever teardown `fn` registers would never fire at all.
+	 * than immediately, unlike {@link cleanup} inside the 5 second window that method describes.
+	 * Closing it now would cancel its first run before `fn` executes, so whatever teardown `fn`
+	 * registers would never fire at all.
 	 */
 	run(fn: (effect: Effect) => void): Dispose {
 		if (this.#dispose === undefined) {
