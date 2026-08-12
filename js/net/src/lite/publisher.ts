@@ -75,26 +75,31 @@ function supportsTrackStream(version: Version): boolean {
 /**
  * The frame bounds a subscription placed on its start and end group, as they stand
  * after any SUBSCRIBE_UPDATE.
+ *
+ * Only the two named groups are qualified; the group range itself lives on the
+ * subscriber's read cursor (see {@link frameRange}).
  */
 type FrameBounds = {
+	/** The group {@link startFrame} qualifies, if the subscription named one. */
 	startGroup?: number;
+	/** First frame to send within {@link startGroup}; every other group starts at 0. */
 	startFrame: number;
+	/** The group {@link endFrame} qualifies, if the subscription named one. */
 	endGroup?: number;
+	/** Last frame (inclusive) to send within {@link endGroup}; every other group runs to its end. */
 	endFrame?: number;
 };
 
 /**
- * The frames of `sequence` a subscription asked for, as a start index and an inclusive
- * end, or `undefined` when the group falls outside the subscription entirely.
+ * The frames of `sequence` a subscription asked for, as a start index and an inclusive end.
  *
- * The frame bounds qualify the start and end group only; every group between them is
- * served whole. A group outside `[startGroup, endGroup]` was never asked for, and
- * serving it would also let SUBSCRIBE_START report a group below the requested start.
+ * The frame bounds qualify the start and end group only; every other group is served whole.
+ * Which groups are served at all is the subscriber's read cursor (`startAt` / `endAt`),
+ * applied when a group is popped rather than re-checked here: the serving loop prefetches,
+ * so a group in hand has already left the buffer and rejecting it against a cap lowered in
+ * the meantime would drop it for good, even if a later SUBSCRIBE_UPDATE raises the cap again.
  */
-function frameRange(bounds: FrameBounds, sequence: number): { start: number; end?: number } | undefined {
-	if (bounds.startGroup !== undefined && sequence < bounds.startGroup) return;
-	if (bounds.endGroup !== undefined && sequence > bounds.endGroup) return;
-
+function frameRange(bounds: FrameBounds, sequence: number): { start: number; end?: number } {
 	return {
 		start: bounds.startGroup === sequence ? bounds.startFrame : 0,
 		end: bounds.endGroup === sequence ? bounds.endFrame : undefined,
@@ -556,13 +561,6 @@ export class Publisher {
 				next = track.recvGroup();
 
 				const range = frameRange(bounds, group.sequence);
-				if (!range) {
-					// Outside the subscription's group range, so it was never asked for.
-					// Serving it would also let SUBSCRIBE_START name a group below the
-					// requested start.
-					group.close();
-					continue;
-				}
 
 				if (emitRange && !startSent) {
 					startSent = true;

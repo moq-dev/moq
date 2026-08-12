@@ -355,9 +355,47 @@ test("lite draft-05: the fetch response ranks the publisher's own writes", async
 	}
 });
 
+// How long a served-subscription test waits for the next group stream before calling the
+// publisher idle. Nothing waits this out: it only bounds the read when a group never comes.
+const IDLE_MS = 500;
+
+// Wraps a writable so its writes park until `release()`, giving a test a window inside
+// whatever the publisher is writing while its other loops keep running. `parked` settles on
+// the first write attempt, held or not.
+function gateWrites(target: WritableStream<Uint8Array>, hold: boolean) {
+	const writer = target.getWriter();
+
+	let release!: () => void;
+	const released = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	if (!hold) release();
+
+	let parking!: () => void;
+	const parked = new Promise<void>((resolve) => {
+		parking = resolve;
+	});
+
+	const writable = new WritableStream<Uint8Array>({
+		async write(chunk) {
+			parking();
+			await released;
+			await writer.write(chunk);
+		},
+		close: () => writer.close(),
+		abort: (err) => writer.abort(err),
+	});
+
+	return { writable, parked, release };
+}
+
 // Opens a served subscription and returns the machinery to write groups and observe
 // which of them the publisher put on the wire (each group gets its own uni stream).
-async function servedSubscription(options: { startGroup?: number } = {}) {
+//
+// `gated` holds the publisher's subscribe-stream writes until `release()`, parking the
+// serving loop mid-iteration so a test can drive the concurrent SUBSCRIBE_UPDATE loop
+// against a group the loop is already holding.
+async function servedSubscription(options: { startGroup?: number; gated?: boolean } = {}) {
 	const pair = createMockTransportPair(ALPN_05);
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
 
@@ -366,8 +404,16 @@ async function servedSubscription(options: { startGroup?: number } = {}) {
 	publisher.publish(Path.from("test"), broadcast);
 
 	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
-	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	// Accept by hand rather than via Stream.accept, so the gate sits between the publisher
+	// and the wire.
+	const incoming = pair.server.incomingBidirectionalStreams.getReader();
+	const accepted = await incoming.read();
+	incoming.releaseLock();
+	if (accepted.done) throw new Error("publisher never accepted the subscribe stream");
+
+	const gate = gateWrites(accepted.value.writable, options.gated ?? false);
+	const server = new Stream({ readable: accepted.value.readable, writable: gate.writable });
 
 	const msg = new Subscribe({
 		id: 0n,
@@ -382,22 +428,34 @@ async function servedSubscription(options: { startGroup?: number } = {}) {
 
 	return {
 		client,
+		track,
+		parked: gate.parked,
+		release: gate.release,
 		serve(sequence: number) {
 			const group = new GroupProducer(sequence);
 			group.writeString("hello");
 			group.close();
 			track.writeGroup(group);
 		},
-		// The sequence of the next group stream the publisher opened.
-		async servedSequence() {
-			const next = await opened.read();
-			if (next.done) throw new Error("publisher never opened the group stream");
+		// The sequence of the next group stream the publisher opened, or undefined once it
+		// has gone idle. A group the publisher dropped then fails an assertion instead of
+		// hanging the test on a stream that will never arrive.
+		async servedSequence(): Promise<number | undefined> {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const idle = new Promise<undefined>((resolve) => {
+				timer = setTimeout(() => resolve(undefined), IDLE_MS);
+			});
+			const next = await Promise.race([opened.read(), idle]);
+			clearTimeout(timer);
+			if (!next || next.done) return undefined;
+
 			const reader = new Reader(next.value);
 			await reader.u53(); // stream type
 			return (await GroupMessage.decode(reader, Version.DRAFT_05)).sequence;
 		},
-		close() {
-			opened.releaseLock();
+		async close() {
+			// Settles any pending read as well as dropping the stream.
+			await opened.cancel();
 			publisher.close();
 			client.close();
 		},
@@ -420,7 +478,7 @@ test("lite draft-05: a late-arriving older group is still served", async () => {
 		sub.serve(2);
 		expect(await sub.servedSequence()).toBe(2);
 	} finally {
-		sub.close();
+		await sub.close();
 	}
 });
 
@@ -444,7 +502,41 @@ test("lite draft-05: a straggler below the announced start group is not served",
 		sub.serve(3);
 		expect(await sub.servedSequence()).toBe(3);
 	} finally {
-		sub.close();
+		await sub.close();
+	}
+});
+
+// The serving loop prefetches the next group the moment it takes one, so a SUBSCRIBE_UPDATE
+// can lower the cap while a group is already in hand. Dropping it there would be permanent:
+// the group has left the buffer, so raising the cap again could never bring it back. The cap
+// belongs to the read cursor, which applies it when a group is popped.
+test("lite draft-05: a group taken before the cap dropped is still served", async () => {
+	const sub = await servedSubscription({ startGroup: 0, gated: true });
+	try {
+		// Group 0 parks the loop inside its SUBSCRIBE_START write, prefetch already armed.
+		sub.serve(0);
+		await sub.parked;
+
+		// So group 1 leaves the buffer here; only the parked loop still holds it.
+		sub.serve(1);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+
+		// Cap the subscription at group 0, behind the loop's back.
+		await new SubscribeUpdate({ priority: 0, endGroup: 0 }).encode(sub.client.writer, Version.DRAFT_05);
+		while (sub.track.subscription.peek()?.endGroup !== 0) await sub.track.subscription.changed();
+
+		sub.release();
+
+		// The loop spawns group 0's stream and moves straight on to group 1 without waiting
+		// for the open, so its header can only reach the wire after group 1 was decided
+		// against the lowered cap. Raising the cap below is therefore strictly too late to
+		// rescue it.
+		expect(await sub.servedSequence()).toBe(0);
+		await new SubscribeUpdate({ priority: 0 }).encode(sub.client.writer, Version.DRAFT_05);
+
+		expect(await sub.servedSequence()).toBe(1);
+	} finally {
+		await sub.close();
 	}
 });
 
