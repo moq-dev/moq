@@ -7,6 +7,7 @@ import { NativeSession, type Session } from "./adapter.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
+import { SubscribeNamespace } from "./subscribe_namespace.ts";
 import { ALPN, Version } from "./version.ts";
 
 const VERSION = Version.DRAFT_19;
@@ -233,5 +234,47 @@ test("a namespace refused once is retried without anything else changing", async
 	expect(await readPublishNamespace(stream)).toBe(Path.from("lonely"));
 	await acceptPublishNamespace(stream);
 
+	pub.close();
+});
+
+/**
+ * The solicited legacy path advertises with PUBLISH_NAMESPACE requests too, so a declined
+ * one needs the same retry the unsolicited loop has. Without it, a namespace refused once
+ * stays undiscoverable for the life of the subscription, since the peer starting to
+ * answer raises no signal the loop is watching.
+ */
+test("a solicited legacy advertisement refused once is retried", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const inner = new NativeSession(pair.server, Version.DRAFT_15, true);
+
+	let failures = 1;
+	const session: Session = {
+		version: inner.version,
+		acceptBi: () => inner.acceptBi(),
+		nextRequestId: () => inner.nextRequestId(),
+		close: () => inner.close(),
+		openBi: () => {
+			if (failures-- > 0) throw new Error("no stream credit");
+			return inner.openBi();
+		},
+	};
+
+	// The peer declared that advertisements to it must be solicited, so this is the loop
+	// that answers its SUBSCRIBE_NAMESPACE.
+	const pub = new Publisher(pair.server, session, true);
+	pub.publish(Path.from("lonely"), new BroadcastProducer());
+
+	const subscription = await Stream.open(pair.client, { version: Version.DRAFT_15 });
+	const accepted = await Stream.accept(pair.server, Version.DRAFT_15);
+	if (!accepted) throw new Error("the subscription stream was never accepted");
+	void pub.runSubscribeNamespace(new SubscribeNamespace({ requestId: 0n, namespace: Path.empty() }), accepted);
+
+	// Nothing else happens: no second publish, no close. Only the retry can save it.
+	const stream = await nextStream(pair.client);
+	if (!stream) throw new Error("the refused namespace was never retried");
+	expect(await readPublishNamespace(stream)).toBe(Path.from("lonely"));
+	await acceptPublishNamespace(stream);
+
+	subscription.close();
 	pub.close();
 });

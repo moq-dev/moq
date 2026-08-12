@@ -5,6 +5,7 @@ import type * as group from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import type { Timescale } from "../time.ts";
+import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { fromWire } from "./priority.ts";
@@ -26,6 +27,13 @@ const RETRY_BASE = 100;
 
 /** Ceiling on that wait. The loop retries for the life of the session, so it must not spin. */
 const RETRY_MAX = 5000;
+
+/**
+ * How long one advertisement may take to be answered. Matches the Rust publisher, and the
+ * peer accepting the stream is only half the exchange: one it never answers on holds the
+ * loop just as effectively as one it never grants.
+ */
+const ADVERTISE_TIMEOUT_MS = 5000;
 
 /** Sleep `delay`, jittered, so a relay's namespaces don't all retry on the same tick. */
 function retryAfter(delay: number): Promise<void> {
@@ -322,6 +330,7 @@ export class Publisher {
 			};
 
 			let active = new Set<Path.Valid>();
+			let retry = 0;
 
 			for (;;) {
 				// Subscribe BEFORE reconciling, for the same reason as
@@ -360,8 +369,16 @@ export class Publisher {
 
 				active = held;
 
+				// Whatever we wanted up and could not get up, as {@link runPublishNamespaces}
+				// does: only a legacy request can be declined, and nothing about the peer
+				// starting to answer raises a signal this loop is watching.
+				const outstanding = updated.difference(active).size > 0;
+				retry = outstanding ? Math.min(retry ? retry * 2 : RETRY_BASE, RETRY_MAX) : 0;
+
 				// Wait for the next change, or for the peer to unsubscribe.
-				const next = await Promise.race([changed, stream.reader.closed]);
+				const next = await (retry
+					? Promise.race([changed, stream.reader.closed, retryAfter(retry).then(() => broadcasts)])
+					: Promise.race([changed, stream.reader.closed]));
 				dispose();
 				if (!next) break;
 			}
@@ -478,22 +495,33 @@ export class Publisher {
 		let request: Stream | undefined;
 		try {
 			request = await this.#session.openBi();
+			const stream = request;
 
-			await request.writer.u53(PublishNamespace.id);
-			const msg = new PublishNamespace({ requestId, trackNamespace: path });
-			await msg.encode(request.writer, this.#session.version);
+			// Bounded, like the subscriber's own request: the loop is single-threaded over
+			// advertisements, so a peer that takes the stream and answers nothing strands
+			// every publish and withdrawal behind it. Timing out costs this namespace a
+			// turn and leaves it outstanding, which the retry above re-offers.
+			await withTimeout(
+				(async () => {
+					await stream.writer.u53(PublishNamespace.id);
+					const msg = new PublishNamespace({ requestId, trackNamespace: path });
+					await msg.encode(stream.writer, this.#session.version);
 
-			// Read response (RequestOk and PublishNamespaceOk share 0x07)
-			const respTypeId = await request.reader.u53();
-			if (respTypeId !== RequestOk.id) {
-				throw new Error(`PublishNamespace rejected: typeId=0x${respTypeId.toString(16)}`);
-			}
-			// Draft-14 sends PublishNamespaceOk (requestId only, no parameters)
-			if (this.#session.version === Version.DRAFT_14) {
-				await PublishNamespaceOk.decode(request.reader, this.#session.version);
-			} else {
-				await RequestOk.decode(request.reader, this.#session.version);
-			}
+					// Read response (RequestOk and PublishNamespaceOk share 0x07)
+					const respTypeId = await stream.reader.u53();
+					if (respTypeId !== RequestOk.id) {
+						throw new Error(`PublishNamespace rejected: typeId=0x${respTypeId.toString(16)}`);
+					}
+					// Draft-14 sends PublishNamespaceOk (requestId only, no parameters)
+					if (this.#session.version === Version.DRAFT_14) {
+						await PublishNamespaceOk.decode(stream.reader, this.#session.version);
+					} else {
+						await RequestOk.decode(stream.reader, this.#session.version);
+					}
+				})(),
+				ADVERTISE_TIMEOUT_MS,
+				`advertisement timed out after ${ADVERTISE_TIMEOUT_MS}ms waiting for the peer's answer`,
+			);
 
 			requests.set(path, { path, requestId, stream: request });
 			return true;

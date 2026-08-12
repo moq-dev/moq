@@ -1031,9 +1031,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			})
 			.await?;
 
-		let type_id: u64 = request.reader.decode().await?;
-		let size: u16 = request.reader.decode().await?;
-		let mut data = request.reader.read_exact(size as usize).await?;
+		// Bounded for the same reason the open is: a peer that takes the stream and answers
+		// nothing would park this loop forever, and every withdrawal queued behind it.
+		let Some((type_id, mut data)) = Self::read_response(&mut request).await? else {
+			tracing::debug!(broadcast = %self.origin.absolute(path), "no answer to the advertisement");
+			return Ok(());
+		};
 
 		match (self.version, type_id) {
 			(Version::Draft14, ietf::PublishNamespaceOk::ID) => {
@@ -1080,6 +1083,33 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		kio::wait(|waiter| {
 			if let Poll::Ready(res) = waiter.poll_future(open.as_mut()) {
+				return Poll::Ready(res.map(Some));
+			}
+			if timeout.poll(waiter).is_ready() {
+				return Poll::Ready(Ok(None));
+			}
+			Poll::Pending
+		})
+		.await
+	}
+
+	/// Read the peer's answer to one advertisement, or `None` if it did not answer in time.
+	///
+	/// Bounded for the same reason [`Self::open_request`] is, and it is the same peer
+	/// behavior seen a step later: a stream the peer accepts and never answers on holds the
+	/// loop just as effectively as one it never grants. Giving up records nothing, so the
+	/// namespace stays outstanding and the retry re-offers it.
+	async fn read_response(request: &mut Stream<S, Version>) -> Result<Option<(u64, bytes::Bytes)>, Error> {
+		let mut read = std::pin::pin!(async {
+			let type_id: u64 = request.reader.decode().await?;
+			let size: u16 = request.reader.decode().await?;
+			let data = request.reader.read_exact(size as usize).await?;
+			Ok::<_, Error>((type_id, data))
+		});
+		let mut timeout = kio::time::Deadline::after(ADVERTISE_TIMEOUT);
+
+		kio::wait(|waiter| {
+			if let Poll::Ready(res) = waiter.poll_future(read.as_mut()) {
 				return Poll::Ready(res.map(Some));
 			}
 			if timeout.poll(waiter).is_ready() {
@@ -1976,6 +2006,59 @@ mod tests {
 			occurrences(&log, b"second-cam"),
 			1,
 			"never retried once credit returned"
+		);
+	}
+
+	/// The peer granting a stream is only half the exchange. One it accepts and then never
+	/// answers on wedges the loop exactly as a parked open does, so the response is bounded
+	/// too: everything queued behind it is otherwise stranded for the session.
+	///
+	/// Draft-14 so each advertisement names its namespace on the wire.
+	#[tokio::test(start_paused = true)]
+	async fn a_silent_answer_still_lets_the_next_namespace_be_advertised() {
+		const VERSION: Version = Version::Draft14;
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let _first = origin
+			.create_broadcast("first-cam", crate::broadcast::Route::announced())
+			.unwrap();
+		let _second = origin
+			.create_broadcast("second-cam", crate::broadcast::Route::announced())
+			.unwrap();
+		settle().await;
+
+		// Every stream opens and then goes silent: an exhausted script parks rather than
+		// reporting EOF, which is the peer that takes the request and answers nothing.
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new(), Vec::new()]);
+		let log = session.log.clone();
+
+		let publisher = Publisher::new(
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			declared(false),
+			VERSION,
+		);
+
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		for _ in 0..200 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"first-cam") > 0 && occurrences(&log, b"second-cam") > 0 {
+				break;
+			}
+			tick().await;
+		}
+
+		// Whichever went first is the one that stalled, so both having reached the wire is
+		// the proof: the loop gave up on the answer and carried on.
+		assert!(
+			occurrences(&log, b"first-cam") > 0,
+			"the first advertisement never went out"
+		);
+		assert!(
+			occurrences(&log, b"second-cam") > 0,
+			"the silent answer wedged the loop: the second namespace never went out"
 		);
 	}
 
