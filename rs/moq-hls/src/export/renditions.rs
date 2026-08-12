@@ -13,8 +13,8 @@ use std::task::Poll;
 
 use moq_mux::catalog::hang::Catalog;
 
-use super::Config;
 use super::rendition::{Kind, Rendition};
+use super::{Config, Upstream};
 
 /// The `(kind, name)` identity of a rendition. Video and audio are separate axes, so a video
 /// and an audio rendition may share a name without colliding.
@@ -125,7 +125,10 @@ impl Producer {
 	/// Reconcile the rendition set with a complete catalog snapshot. Removed or reconfigured
 	/// renditions are dropped before replacements become visible, which also aborts their
 	/// timeline watchers and releases their subscriptions.
-	pub fn sync(&self, source: &moq_mux::Source, config: &Config, catalog: &Catalog) {
+	///
+	/// `upstream` carries the broadcast the snapshot was read from, so each rendition serves media
+	/// from that same broadcast rather than whatever is at the path by the time it is asked.
+	pub fn sync(&self, upstream: &Upstream, config: &Config, catalog: &Catalog) {
 		let Ok(mut current) = self.state.write() else {
 			return;
 		};
@@ -160,7 +163,7 @@ impl Producer {
 			if current.contains_key(&key) {
 				continue;
 			}
-			match Rendition::video(name.clone(), video, source, config.window) {
+			match Rendition::video(name.clone(), video, upstream, config.window) {
 				Some(rendition) => {
 					current.insert(key, Arc::new(rendition));
 				}
@@ -172,7 +175,7 @@ impl Producer {
 			if current.contains_key(&key) {
 				continue;
 			}
-			match Rendition::audio(name.clone(), audio, source, config.window) {
+			match Rendition::audio(name.clone(), audio, upstream, config.window) {
 				Some(rendition) => {
 					current.insert(key, Arc::new(rendition));
 				}

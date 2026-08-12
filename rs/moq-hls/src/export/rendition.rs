@@ -9,6 +9,7 @@ use moq_mux::container::fmp4::Muxer;
 
 use super::playlist::{Segment, Snapshot};
 use super::segments;
+use super::upstream::Upstream;
 use crate::Result;
 
 /// Fallback advertised bitrates when the catalog doesn't carry one.
@@ -102,16 +103,11 @@ impl Rendition {
 
 	/// Build a video rendition and spawn its timeline watcher. `None` if the catalog doesn't
 	/// advertise a timeline (fetch-on-demand needs one).
-	pub(crate) fn video(
-		name: String,
-		config: &VideoConfig,
-		source: &moq_mux::Source,
-		window: Duration,
-	) -> Option<Self> {
+	pub(crate) fn video(name: String, config: &VideoConfig, upstream: &Upstream, window: Duration) -> Option<Self> {
 		let section = config.timeline.clone()?;
-		let live = Arc::new(segments::Producer::new());
+		let live = Arc::new(segments::Producer::new(upstream.local(config.broadcast.as_ref())));
 		let watcher = spawn_watcher(
-			source.clone(),
+			upstream.clone(),
 			config.broadcast.clone(),
 			section.clone(),
 			live.clone(),
@@ -135,16 +131,11 @@ impl Rendition {
 
 	/// Build an audio rendition and spawn its timeline watcher. `None` if the catalog doesn't
 	/// advertise a timeline.
-	pub(crate) fn audio(
-		name: String,
-		config: &AudioConfig,
-		source: &moq_mux::Source,
-		window: Duration,
-	) -> Option<Self> {
+	pub(crate) fn audio(name: String, config: &AudioConfig, upstream: &Upstream, window: Duration) -> Option<Self> {
 		let section = config.timeline.clone()?;
-		let live = Arc::new(segments::Producer::new());
+		let live = Arc::new(segments::Producer::new(upstream.local(config.broadcast.as_ref())));
 		let watcher = spawn_watcher(
-			source.clone(),
+			upstream.clone(),
 			config.broadcast.clone(),
 			section.clone(),
 			live.clone(),
@@ -425,17 +416,17 @@ fn is_cache_miss_mux(err: &moq_mux::Error) -> bool {
 		.any(is_cache_miss)
 }
 
-/// Spawn the per-rendition watcher: resolve the (possibly sibling) broadcast, subscribe to
-/// the timeline track, and feed records into the shared window.
+/// Spawn the per-rendition watcher: settle which broadcast serves this rendition, subscribe to
+/// the timeline track on it, and feed records into the shared window.
 fn spawn_watcher(
-	source: moq_mux::Source,
+	upstream: Upstream,
 	broadcast: Option<moq_net::PathRelativeOwned>,
 	section: Timeline,
 	live: Arc<segments::Producer>,
 	window: Duration,
 ) -> tokio::task::JoinHandle<()> {
 	tokio::spawn(async move {
-		match watch(source, broadcast, &section, &live, window).await {
+		match watch(upstream, broadcast, &section, &live, window).await {
 			// The timeline finished cleanly: the publisher is done, so its media groups are
 			// finalized and the last record can become a servable (ENDLIST) segment.
 			Ok(()) => live.end(),
@@ -453,15 +444,25 @@ fn spawn_watcher(
 }
 
 async fn watch(
-	source: moq_mux::Source,
+	upstream: Upstream,
 	broadcast: Option<moq_net::PathRelativeOwned>,
 	section: &Timeline,
 	live: &segments::Producer,
 	window: Duration,
 ) -> Result<()> {
-	let broadcast = source.resolve(broadcast.as_ref()).await?;
-	// Publish the resolved broadcast so segment requests can FETCH from it.
-	let _ = live.broadcast.set(broadcast.clone());
+	// A self-referencing rendition already has its broadcast (the catalog's own), so take it
+	// rather than asking the origin again: the timeline and the media it describes must come from
+	// the same broadcast the catalog did, and a same-path takeover in between would hand back a
+	// different one. Only a named sibling still needs resolving, which cannot happen at
+	// construction because `renditions::Producer::sync` runs synchronously under a write lock.
+	let broadcast = match live.broadcast.get() {
+		Some(broadcast) => broadcast.clone(),
+		None => {
+			let resolved = upstream.source.resolve(broadcast.as_ref()).await?;
+			let _ = live.broadcast.set(resolved.clone());
+			resolved
+		}
+	};
 
 	let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(&broadcast, section).await?;
 	while let Some(entry) = timeline.next().await? {

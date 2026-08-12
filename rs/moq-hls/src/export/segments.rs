@@ -31,8 +31,9 @@ const DEFAULT_SEGMENT: Duration = Duration::from_secs(4);
 /// [`kio::Producer`] so a [`Consumer`] can await changes without a separate signal.
 pub(crate) struct Producer {
 	state: kio::Producer<State>,
-	/// The broadcast serving the media track, resolved once by the background task (it may be
-	/// a sibling broadcast when the catalog rendition carries a `broadcast` reference).
+	/// The broadcast serving the media track. Seeded at construction for a rendition served by
+	/// the catalog's own broadcast, and otherwise set by the background task once it has resolved
+	/// the sibling broadcast the catalog rendition's `broadcast` reference names.
 	pub broadcast: OnceLock<moq_net::broadcast::Consumer>,
 }
 
@@ -170,14 +171,17 @@ impl State {
 }
 
 impl Producer {
-	pub fn new() -> Self {
+	/// An empty window. `broadcast` is the media broadcast when it is already known, i.e. for a
+	/// rendition served by the catalog's own broadcast; a sibling reference passes `None` and the
+	/// watcher fills it in once resolved.
+	pub fn new(broadcast: Option<moq_net::broadcast::Consumer>) -> Self {
 		Self {
 			state: kio::Producer::new(State {
 				entries: VecDeque::new(),
 				dropped: 0,
 				ended: false,
 			}),
-			broadcast: OnceLock::new(),
+			broadcast: broadcast.map(OnceLock::from).unwrap_or_default(),
 		}
 	}
 
@@ -421,7 +425,7 @@ mod tests {
 
 	#[test]
 	fn last_record_is_the_live_edge_until_ended() {
-		let live = Producer::new();
+		let live = Producer::new(None);
 		live.push(entry(0, 0), Duration::from_secs(30));
 		live.push(entry(1, 2_000), Duration::from_secs(30));
 		live.push(entry(2, 4_000), Duration::from_secs(30));
@@ -443,7 +447,7 @@ mod tests {
 
 	#[test]
 	fn window_evicts_and_advances_sequence() {
-		let live = Producer::new();
+		let live = Producer::new(None);
 		let window = Duration::from_secs(4);
 		for i in 0..6u64 {
 			live.push(entry(i, i * 2_000), window);
@@ -459,7 +463,7 @@ mod tests {
 
 	#[test]
 	fn segment_groups_cover_record_gaps() {
-		let live = Producer::new();
+		let live = Producer::new(None);
 		let window = Duration::from_secs(30);
 		// An audio-style timeline: records skip groups (granularity throttling).
 		live.push(entry(0, 0), window);
@@ -478,7 +482,7 @@ mod tests {
 
 	#[test]
 	fn backwards_jump_resets_the_window() {
-		let live = Producer::new();
+		let live = Producer::new(None);
 		let window = Duration::from_secs(30);
 		live.push(entry(0, 10_000), window);
 		live.push(entry(1, 12_000), window);
@@ -491,7 +495,7 @@ mod tests {
 
 	#[test]
 	fn non_advancing_record_is_skipped() {
-		let live = Producer::new();
+		let live = Producer::new(None);
 		let window = Duration::from_secs(30);
 		live.push(entry(0, 0), window);
 		live.push(entry(1, 2_000), window);
@@ -518,7 +522,7 @@ mod tests {
 		let window = Duration::from_secs(30);
 
 		// The watcher's own order: end() then close() -- the live edge finalizes.
-		let clean = Producer::new();
+		let clean = Producer::new(None);
 		clean.push(entry(0, 0), window);
 		clean.push(entry(1, 2_000), window);
 		clean.end();
@@ -529,7 +533,7 @@ mod tests {
 		);
 
 		// Reversed: a close() that races ahead of end() strands it forever.
-		let raced = Producer::new();
+		let raced = Producer::new(None);
 		raced.push(entry(0, 0), window);
 		raced.push(entry(1, 2_000), window);
 		raced.close();
@@ -544,7 +548,7 @@ mod tests {
 	// estimated from the observed cadence, not a flat DEFAULT_SEGMENT.
 	#[test]
 	fn final_segment_duration_matches_the_serve_path() {
-		let live = Producer::new();
+		let live = Producer::new(None);
 		let window = Duration::from_secs(30);
 		// A 6s cadence, so the flat 4s DEFAULT_SEGMENT would be wrong for the last segment.
 		live.push(entry(0, 0), window);
@@ -570,7 +574,7 @@ mod tests {
 
 	#[test]
 	fn next_after_walks_finalized_segments() {
-		let live = Producer::new();
+		let live = Producer::new(None);
 		let window = Duration::from_secs(30);
 		live.push(entry(0, 0), window);
 		live.push(entry(1, 2_000), window);

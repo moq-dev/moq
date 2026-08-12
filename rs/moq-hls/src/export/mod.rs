@@ -19,6 +19,7 @@
 mod master;
 mod playlist;
 mod rendition;
+mod upstream;
 
 pub mod renditions;
 pub mod segments;
@@ -31,6 +32,7 @@ use rand::RngExt;
 
 pub(crate) use playlist::render_media;
 pub use rendition::{Kind, Rendition};
+pub(crate) use upstream::Upstream;
 
 /// Backoff bounds for the initial catalog subscription.
 ///
@@ -85,15 +87,19 @@ impl Broadcaster {
 	/// Resolve `source`'s catalog broadcast and start tracking its renditions.
 	pub async fn new(source: moq_mux::Source, config: Config) -> crate::Result<Arc<Self>> {
 		let broadcast = source.broadcast().await?;
+		let upstream = Upstream {
+			source,
+			broadcast: broadcast.clone(),
+		};
 		let renditions = renditions::Producer::new();
 		let broadcaster = Arc::new(Self {
-			broadcast: broadcast.clone(),
+			broadcast,
 			renditions: renditions.clone(),
 			watcher: Mutex::new(None),
 		});
 		// The watcher owns its own producer clone; the `Broadcaster`'s `Drop` aborts it so the
 		// standing catalog subscription stops when nobody's serving from this broadcaster.
-		let watcher = tokio::spawn(watch_catalog(source, broadcast, config, renditions));
+		let watcher = tokio::spawn(watch_catalog(upstream, config, renditions));
 		*broadcaster.watcher.lock().unwrap() = Some(watcher);
 		Ok(broadcaster)
 	}
@@ -179,16 +185,12 @@ impl Drop for Broadcaster {
 	}
 }
 
-async fn watch_catalog(
-	source: moq_mux::Source,
-	broadcast: moq_net::broadcast::Consumer,
-	config: Config,
-	renditions: renditions::Producer,
-) {
+async fn watch_catalog(upstream: Upstream, config: Config, renditions: renditions::Producer) {
+	let broadcast = &upstream.broadcast;
 	let mut delay = CATALOG_RETRY_MIN;
 
 	let mut consumer = loop {
-		match catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await {
+		match catalog::Consumer::<()>::new(broadcast, CatalogFormat::Hang).await {
 			Ok(consumer) => break consumer,
 			Err(err) => {
 				tracing::warn!(%err, "failed to subscribe to broadcast catalog, retrying");
@@ -207,7 +209,7 @@ async fn watch_catalog(
 
 	loop {
 		match kio::wait(|waiter| consumer.poll_next(waiter)).await {
-			Ok(Some(catalog)) => renditions.sync(&source, &config, &catalog),
+			Ok(Some(catalog)) => renditions.sync(&upstream, &config, &catalog),
 			Ok(None) => break,
 			Err(err) => {
 				tracing::warn!(%err, "broadcast catalog stream ended with error");
@@ -225,9 +227,13 @@ mod tests {
 	use super::*;
 
 	fn frame(micros: u64, keyframe: bool) -> moq_mux::container::Frame {
+		payload_frame(micros, keyframe, &[0xDE, 0xAD, 0xBE, 0xEF])
+	}
+
+	fn payload_frame(micros: u64, keyframe: bool, payload: &'static [u8]) -> moq_mux::container::Frame {
 		moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
-			payload: bytes::Bytes::from_static(&[0xDE, 0xAD, 0xBE, 0xEF]),
+			payload: bytes::Bytes::from_static(payload),
 			keyframe,
 			duration: None,
 		}
@@ -377,6 +383,116 @@ mod tests {
 		drop((catalog, media, registration, broadcast, rendition));
 	}
 
+	// A same-path republish takes the origin leaf over with a brand new broadcast (an ordinary
+	// publisher is `Origin::UNKNOWN`, which never counts as the same publisher, so even a plain
+	// reconnect qualifies). Renditions derived from the old broadcast's catalog must not serve the
+	// replacement's media: its group numbering restarts, so those bytes would be served under the
+	// replaced broadcast's segment number, duration, and PROGRAM-DATE-TIME.
+	#[tokio::test]
+	async fn a_replacement_publisher_is_not_served_under_the_replaced_catalog() {
+		const OLD: &[u8] = b"OLDOLDOLDOLDOLDO";
+		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";
+
+		// Publish broadcast "live": a `video0` rendition with a timeline, plus three keyframe
+		// groups whose frames carry `payload` so the two epochs' media differs byte for byte.
+		// The returned handle keeps the publisher alive until it is dropped.
+		fn publish(
+			origin: &moq_net::origin::Producer,
+			payload: &'static [u8],
+		) -> (Box<dyn std::any::Any>, hang::catalog::VideoConfig) {
+			let mut broadcast = origin
+				.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
+				.expect("publish allowed");
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+			let reserved = catalog.reserve();
+			let mut registration = reserved.video("video0");
+			let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			config.framerate = Some(30.0);
+			config.timeline = Some(catalog.timeline("video0").unwrap().section());
+			registration.set(config.clone());
+			drop(reserved);
+
+			let track = broadcast.create_track("video0", None).unwrap();
+			let mut media = catalog
+				.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
+				.unwrap();
+			media.write(payload_frame(0, true, payload)).unwrap();
+			media.write(payload_frame(2_000_000, true, payload)).unwrap();
+			media.write(payload_frame(4_000_000, true, payload)).unwrap();
+
+			(Box::new((broadcast, catalog, registration, media)), config)
+		}
+
+		fn contains(haystack: &bytes::Bytes, needle: &[u8]) -> bool {
+			haystack.windows(needle.len()).any(|window| window == needle)
+		}
+
+		let origin = moq_net::Origin::random().produce();
+		let (old, config) = publish(&origin, OLD);
+		settle().await;
+
+		// The export binds to the broadcast it reads the catalog from.
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let upstream = Upstream {
+			broadcast: source.broadcast().await.unwrap(),
+			source,
+		};
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		catalog.video.renditions.insert("video0".to_string(), config);
+
+		// The publisher reconnects before the catalog snapshot is reconciled. That gap is wide in
+		// practice: `watch_catalog` retries a not-yet-written catalog track with backoff, so
+		// seconds can pass between resolving the broadcast and syncing its first snapshot.
+		drop(old);
+		let (new, _) = publish(&origin, NEW);
+		settle().await;
+
+		// Reconcile by hand, which is what the catalog watcher does with each snapshot.
+		let renditions = renditions::Producer::new();
+		renditions.sync(&upstream, &Config::default(), &catalog);
+		let rendition = renditions.get(Kind::Video, "video0").expect("rendition synced");
+
+		let _ = tokio::time::timeout(Duration::from_secs(1), rendition.playable()).await;
+		let served = rendition.segment(0).await.unwrap();
+		if let Some(served) = &served {
+			assert!(
+				!contains(served, NEW),
+				"the replacement publisher's media was served under the replaced broadcast's catalog"
+			);
+		}
+		assert!(
+			served.is_none(),
+			"the replaced broadcast is closed, so it serves nothing"
+		);
+
+		// Control: an export started after the takeover does serve the new publisher's media, so
+		// the assertion above is about which epoch a rendition is bound to, not about a broadcast
+		// that happens to be unreadable.
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let fresh = Upstream {
+			broadcast: source.broadcast().await.unwrap(),
+			source,
+		};
+		let renditions = renditions::Producer::new();
+		renditions.sync(&fresh, &Config::default(), &catalog);
+		let rendition = renditions.get(Kind::Video, "video0").expect("rendition synced");
+		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
+			.await
+			.expect("the new publisher's timeline arrives");
+		let served = rendition
+			.segment(0)
+			.await
+			.unwrap()
+			.expect("the new publisher is servable on its own catalog");
+		assert!(
+			contains(&served, NEW),
+			"the new export serves the new publisher's media"
+		);
+
+		drop(new);
+	}
+
 	// A rendition the catalog drops must end its segment cursors. The cursor holds an
 	// `Arc<Rendition>`, so without an explicit close the rendition (and its timeline
 	// subscription) would stay alive and the cursor would park at the live edge forever.
@@ -387,6 +503,11 @@ mod tests {
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
 		let source = moq_mux::Source::new(origin.consume(), "live");
+		settle().await;
+		let upstream = Upstream {
+			broadcast: source.broadcast().await.unwrap(),
+			source,
+		};
 
 		// Drive the producer directly so the catalog can be reconciled synchronously.
 		let renditions = renditions::Producer::new();
@@ -394,13 +515,17 @@ mod tests {
 		media.timeline = Some(hang::catalog::Timeline::new("video.timeline"));
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
 		catalog.video.renditions.insert("video".to_string(), media);
-		renditions.sync(&source, &Config::default(), &catalog);
+		renditions.sync(&upstream, &Config::default(), &catalog);
 
 		let rendition = renditions.get(Kind::Video, "video").expect("rendition synced");
 		let mut segments = rendition.segments();
 
 		// The catalog drops the rendition: its cursor must run dry rather than park.
-		renditions.sync(&source, &Config::default(), &moq_mux::catalog::hang::Catalog::default());
+		renditions.sync(
+			&upstream,
+			&Config::default(),
+			&moq_mux::catalog::hang::Catalog::default(),
+		);
 		let ended = tokio::time::timeout(Duration::from_secs(5), segments.next())
 			.await
 			.expect("a removed rendition's cursor ends instead of parking")
