@@ -523,6 +523,12 @@ pub struct Cluster {
 	/// serving and publishing end together, instead of publishing ending early
 	/// because a caller dropped a producer it never asked for.
 	_stats_publisher: Option<moq_stats::Producer>,
+
+	/// Standing announce interest on the origin, held for the cluster's lifetime.
+	/// Sessions solicit announces lazily, but a relay wants every route up front:
+	/// redundant-route failover needs the alternatives in the table before anything
+	/// fails, and a cold mesh warms hop by hop instead of on demand.
+	_interest: Arc<origin::Interest>,
 }
 
 impl Cluster {
@@ -551,6 +557,7 @@ impl Cluster {
 		}
 		let info = origin::Info::new(id);
 		let origin = info.clone().produce();
+		let interest = Arc::new(origin.solicit());
 		let nodes = crate::nodes::Nodes::new(origin.clone());
 		tracing::info!(origin_id = %origin.id(), configured = config.id.is_some(), "cluster initialized");
 		Ok(Cluster {
@@ -563,6 +570,7 @@ impl Cluster {
 			origin,
 			stats: moq_net::stats::Registry::disabled(),
 			_stats_publisher: None,
+			_interest: interest,
 		})
 	}
 
@@ -580,6 +588,7 @@ impl Cluster {
 			.with_pool(cache.pool)
 			.with_cache_duration(cache.duration);
 		self.origin = self.info.clone().produce();
+		self._interest = Arc::new(self.origin.solicit());
 		self.nodes = self.nodes.with_origin(self.origin.clone());
 		self
 	}

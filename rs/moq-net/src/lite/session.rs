@@ -1,3 +1,4 @@
+use crate::model::interest;
 use crate::origin;
 use crate::{
 	Error, Origin, SessionError, bandwidth,
@@ -8,9 +9,10 @@ use crate::{
 
 use std::task::{Context, Poll, ready};
 
+use crate::connecting::Connecting;
+
 use super::{
-	Connecting, DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, SubscriberDriver,
-	Version,
+	DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, SubscriberDriver, Version,
 };
 
 pub(crate) struct SessionStart {
@@ -91,7 +93,9 @@ pub struct Config<S: crate::transport::poll::Session> {
 /// Returns the receive-bandwidth consumer (if any) and a [`Connecting`] handle that
 /// becomes ready once the initial announce set has been inserted into the subscribe
 /// origin, letting `connect()` block past the startup race. It is ready immediately
-/// when there is nothing to wait on (a version without an initial-set boundary).
+/// when there is nothing to wait on: a version without an initial-set boundary, or an
+/// origin with no announce interest yet, where nothing is solicited until interest
+/// appears (see `Subscriber::run_announce`).
 pub fn start<S: crate::transport::poll::Session>(config: Config<S>) -> Result<SessionStart, Error> {
 	let Config {
 		mut session,
@@ -148,7 +152,14 @@ pub fn start<S: crate::transport::poll::Session>(config: Config<S>) -> Result<Se
 	// (and answers the peer's announce-interest with an empty set), and an empty
 	// subscribe origin issues no ANNOUNCE_PLEASE (zero prefixes, so `run_announce`
 	// drops `connecting` at once and `connect()` still unblocks).
-	let publish = publish.unwrap_or_else(|| origin::Producer::empty(Origin::random()).consume());
+	//
+	// The session's identity in the announce-interest ledger: interest the publisher
+	// half raises on behalf of this peer is tagged with it, so the subscriber half
+	// doesn't treat the peer's own solicitation as demand and reciprocate.
+	let session_id = interest::SessionId::new();
+	let publish = publish
+		.map(|p| p.on_behalf_of(session_id))
+		.unwrap_or_else(|| origin::Producer::empty(Origin::random()).consume());
 	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Origin::random()));
 
 	// Publisher and Subscriber each derive their identity from their own
@@ -194,6 +205,7 @@ pub fn start<S: crate::transport::poll::Session>(config: Config<S>) -> Result<Se
 		// for its own egress.
 		cost: our_cost,
 		going_away: goaway.going_away.clone(),
+		session_id,
 	});
 
 	let mut driver = Driver {

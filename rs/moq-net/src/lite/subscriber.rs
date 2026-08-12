@@ -1,3 +1,4 @@
+use crate::model::interest;
 use crate::{frame, group, origin, track};
 use std::{
 	collections::HashMap,
@@ -15,7 +16,9 @@ use crate::{
 	track::{Position, Subscription},
 };
 
-use super::{ConnectingProducer, RouteCost, Version};
+use crate::connecting::{Connecting, ConnectingProducer};
+
+use super::{RouteCost, Version};
 
 use web_async::Lock;
 
@@ -41,6 +44,10 @@ pub(super) struct SubscriberConfig<S: crate::transport::poll::Session> {
 	/// Set once the peer sends a GOAWAY; new request streams are then rejected
 	/// with [`Error::GoingAway`] (the peer told us to stop asking).
 	pub going_away: crate::goaway::GoingAway,
+	/// This session's identity in the origin's announce-interest ledger: the egress
+	/// consumer is tagged with it, so interest raised on behalf of our own peer
+	/// doesn't make us solicit announces right back.
+	pub session_id: interest::SessionId,
 }
 
 #[derive(Clone)]
@@ -80,6 +87,29 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	/// [`SourceServe`] machines.
 	sources: kio::Queue<(PathOwned, crate::broadcast::Dynamic)>,
 	going_away: crate::goaway::GoingAway,
+	// This session's solicitor in the origin's announce-interest ledger. Attached
+	// here (at construction, inside `connect()`) rather than in `run_announce`, so a
+	// request issued the instant `connect()` returns already sees it and waits for
+	// its solicitation instead of settling on a cold table. Shared because the
+	// subscriber is cloned into several long-lived tasks; the last clone dropping
+	// (the session fully dead) is what detaches.
+	solicitor: Arc<interest::Solicitor>,
+}
+
+/// The initial-set producers one announce prefix holds: the session's external
+/// `connect()` gate, and the internal one reporting the solicitor synced.
+/// `take` (or scope exit, e.g. a failed stream) releases both: either way this prefix
+/// will deliver no more initial announcements.
+struct InitialSet {
+	external: Option<ConnectingProducer>,
+	internal: Option<ConnectingProducer>,
+}
+
+impl InitialSet {
+	fn take(&mut self) {
+		self.external.take();
+		self.internal.take();
+	}
 }
 
 #[derive(Clone)]
@@ -97,6 +127,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// every session sharing that origin, required for cross-session
 		// loop detection.
 		let self_origin = *config.origin;
+		let solicitor = Arc::new(config.origin.solicitor(config.session_id));
 		Self {
 			session: config.session,
 			origin: config.origin,
@@ -111,6 +142,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			cost: config.cost,
 			sources: kio::Queue::new(),
 			going_away: config.going_away,
+			solicitor,
 		}
 	}
 
@@ -464,14 +496,21 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 /// error ends it.
 pub(super) struct SubscriberDriver<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
-	/// Our own clone of the connection-progress producer, dropped on the first
-	/// poll. Holding it until then keeps `Connecting` pending so `connect()`
-	/// drives the driver at least once, exactly like the old announce task; the
-	/// per-prefix clones then own the boundary.
+	/// The session's `connect()` gate, held until the prefix machines are built
+	/// (each then owns a per-prefix clone). Dropped at construction when the
+	/// origin has no announce interest yet: the session connects immediately and
+	/// the streams open later, if interest ever appears.
 	connecting: Option<ConnectingProducer>,
-	/// One machine per permitted prefix. Only an error ends the session; a
-	/// prefix finishing cleanly (publisher FIN) just retires.
-	prefixes: Vec<AnnouncePrefix<S>>,
+	/// One machine per permitted prefix, built on the first poll after announce
+	/// interest exists (`None` until then; see [`Self::poll_solicit`]). Only an
+	/// error ends the session; a prefix finishing cleanly (publisher FIN) just
+	/// retires.
+	prefixes: Option<Vec<AnnouncePrefix<S>>>,
+	/// The internal initial-set countdown: ready once every prefix delivered its
+	/// initial set (or died trying), which is when the solicitor reports synced
+	/// and pending requests stop waiting on this session. `None` before the
+	/// prefixes are built and after reporting.
+	synced: Option<Connecting>,
 	uni: UniAccept<S>,
 	/// PROBE feedback; finishes quietly when unsupported or given up on.
 	bandwidth: Option<RecvBandwidth<S>>,
@@ -483,22 +522,16 @@ pub(super) struct SubscriberDriver<S: crate::transport::poll::Session> {
 
 impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 	/// `connecting` is the connection-progress producer for this session (None for
-	/// versions with no initial-set boundary). Each prefix holds its own clone and
-	/// drops it once its initial set is in; with no prefixes it drops here, so the
-	/// session is connected now.
+	/// versions with no initial-set boundary). Held until the first poll so
+	/// `connect()` drives the driver at least once, then either handed to the
+	/// prefix machines (interest already exists, so `connect()` gates on the real
+	/// initial set) or released (no interest yet: the session connects
+	/// immediately and the streams open later, if interest ever appears).
 	pub fn new(subscriber: Subscriber<S>, connecting: Option<ConnectingProducer>) -> Self {
-		let prefixes = subscriber
-			.origin
-			.allowed()
-			.map(|p| p.to_owned())
-			.collect::<Vec<PathOwned>>()
-			.into_iter()
-			.map(|prefix| AnnouncePrefix::new(subscriber.clone(), prefix, connecting.clone()))
-			.collect();
-
 		Self {
 			connecting,
-			prefixes,
+			prefixes: None,
+			synced: None,
 			uni: UniAccept::new(subscriber.clone()),
 			bandwidth: Some(RecvBandwidth::new(subscriber.clone())),
 			datagrams: Some(DatagramRecv::new(subscriber.clone())),
@@ -507,19 +540,82 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 		}
 	}
 
-	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		// Each prefix holds its own clone; with no prefixes, this drop is what
-		// marks the session connected.
-		self.connecting.take();
+	// Announces are solicited lazily: no machine is built (and no ANNOUNCE stream
+	// opens) until the origin has announce interest to serve (an `announced()`
+	// stream, an `announced_broadcast` wait, a pending `request_broadcast`, or
+	// another session's peer). Interest raised by our own peer doesn't count;
+	// reciprocating a solicitation would cost a publish-only endpoint the very
+	// traffic laziness avoids.
+	fn poll_solicit(&mut self, waiter: &kio::Waiter) {
+		let prefixes: Vec<PathOwned> = self.subscriber.origin.allowed().map(|p| p.to_owned()).collect();
+		if prefixes.is_empty() {
+			// Nothing we could ever solicit; requests must not wait on us, and
+			// the session is connected now.
+			self.subscriber.solicitor.synced();
+			self.connecting.take();
+			self.prefixes = Some(Vec::new());
+			return;
+		}
 
-		let mut i = 0;
-		while i < self.prefixes.len() {
-			match self.prefixes[i].poll(waiter) {
-				Poll::Ready(Ok(())) => {
-					self.prefixes.swap_remove(i);
+		// Parked until something is interested in announcements.
+		if self.subscriber.solicitor.poll_needed(waiter).is_pending() {
+			return;
+		}
+
+		// The peer told us to drain instead of opening new streams. Park rather
+		// than error (the session is still serving what it has); the interest is
+		// served by the next session after the reconnect.
+		if self.subscriber.going_away.is_set() {
+			self.subscriber.solicitor.synced();
+			self.connecting.take();
+			self.prefixes = Some(Vec::new());
+			return;
+		}
+
+		let (sync_producer, synced) = Connecting::new();
+		self.prefixes = Some(
+			prefixes
+				.into_iter()
+				.map(|prefix| {
+					let initial = InitialSet {
+						external: self.connecting.clone(),
+						internal: Some(sync_producer.clone()),
+					};
+					AnnouncePrefix::new(self.subscriber.clone(), prefix, initial)
+				})
+				.collect(),
+		);
+		// Each prefix holds its own producer clones; drop ours so the channels
+		// close once the last prefix finishes its initial set.
+		self.connecting.take();
+		self.synced = Some(synced);
+	}
+
+	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if self.prefixes.is_none() {
+			self.poll_solicit(waiter);
+		}
+		// Our clone has done its job once the driver has been polled: the prefix
+		// machines (when built above) own the boundary, and a session parked on
+		// absent interest must not hang `connect()`.
+		self.connecting.take();
+		if let Some(synced) = &self.synced
+			&& synced.poll_ready(waiter).is_ready()
+		{
+			self.subscriber.solicitor.synced();
+			self.synced = None;
+		}
+
+		if let Some(prefixes) = &mut self.prefixes {
+			let mut i = 0;
+			while i < prefixes.len() {
+				match prefixes[i].poll(waiter) {
+					Poll::Ready(Ok(())) => {
+						prefixes.swap_remove(i);
+					}
+					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+					Poll::Pending => i += 1,
 				}
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-				Poll::Pending => i += 1,
 			}
 		}
 		if let Poll::Ready(res) = self.uni.poll(waiter) {
@@ -1079,9 +1175,9 @@ impl<S: crate::transport::poll::Session> ProbeStream<S> {
 struct AnnouncePrefix<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	prefix: PathOwned,
-	// Dropped once this prefix's initial set is in (or on any exit), so a failed
-	// prefix can't hang connect().
-	connecting: Option<ConnectingProducer>,
+	// Released once this prefix's initial set is in (or on any exit), so a failed
+	// prefix can't hang connect() or a pending request.
+	connecting: InitialSet,
 	state: PrefixState<S>,
 }
 
@@ -1126,7 +1222,7 @@ struct PrefixRun {
 }
 
 impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
-	fn new(subscriber: Subscriber<S>, prefix: PathOwned, connecting: Option<ConnectingProducer>) -> Self {
+	fn new(subscriber: Subscriber<S>, prefix: PathOwned, connecting: InitialSet) -> Self {
 		Self {
 			subscriber,
 			prefix,
@@ -1383,6 +1479,7 @@ mod tests {
 			peer_origin: None,
 			cost: None,
 			going_away: Default::default(),
+			session_id: interest::SessionId::new(),
 		});
 		let subscribes = subscriber.subscribes.clone();
 		let serve = TrackServe {
@@ -1455,6 +1552,7 @@ mod tests {
 				peer_origin: None,
 				cost: None,
 				going_away: Default::default(),
+				session_id: interest::SessionId::new(),
 			});
 			let mut broadcast = crate::broadcast::Info::new().produce();
 			let producer = broadcast.create_track("catalog.json", None).unwrap();
@@ -1880,6 +1978,7 @@ mod tests {
 			peer_origin: Some(assigned),
 			cost: None,
 			going_away: Default::default(),
+			session_id: interest::SessionId::new(),
 		});
 
 		// An announce with an empty chain and no responder id: the versions that
@@ -1942,6 +2041,7 @@ mod tests {
 			cost: None,
 			peer_origin: None,
 			going_away: Default::default(),
+			session_id: interest::SessionId::new(),
 		});
 		(subscriber, consumer)
 	}
@@ -2048,6 +2148,7 @@ mod tests {
 			cost: None,
 			peer_origin: None,
 			going_away: Default::default(),
+			session_id: interest::SessionId::new(),
 		});
 
 		let path = Path::new("room/host").to_owned();
@@ -2081,6 +2182,68 @@ mod tests {
 			consumer.get_broadcast("room/host").is_none(),
 			"an explicit retraction must close the broadcast",
 		);
+	}
+
+	/// Announce solicitation is lazy: no ANNOUNCE stream opens until the origin has
+	/// announce interest, and the first interested consumer opens exactly one per
+	/// allowed prefix.
+	#[tokio::test]
+	async fn announce_solicited_lazily() {
+		tokio::time::pause();
+
+		// An open gate: an eager solicitation would reach the wire immediately.
+		let gate = kio::Producer::new(true);
+		let session = SinkSession::gated_bi(gate.consume());
+		let log = session.log.clone();
+
+		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let scoped = origin.scope(&[crate::Path::new("lazycam")]).expect("scope");
+		let subscriber = Subscriber::new(SubscriberConfig {
+			session: session.clone(),
+			origin: scoped,
+			recv_bandwidth: None,
+			// Lite04: no Setup Stream to wait on, and ANNOUNCE_PLEASE carries the
+			// prefix bytes this test greps for.
+			version: Version::Lite04,
+			peer_setup: Default::default(),
+			peer_origin: None,
+			cost: None,
+			going_away: Default::default(),
+			session_id: interest::SessionId::new(),
+		});
+		let mut driver = SubscriberDriver::new(subscriber, None);
+		let _driver = tokio::spawn(async move { kio::wait(|waiter| driver.poll(waiter)).await });
+
+		// Nothing is interested, so nothing may be solicited no matter how long the
+		// session sits there.
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		assert_eq!(log.bi_opens(), 0, "no interest, no stream");
+
+		// The first consumer opens the announce stream for the allowed prefix.
+		let _interest = origin.consume().announced();
+		let mut solicited = false;
+		for _ in 0..100 {
+			tokio::time::sleep(Duration::from_millis(5)).await;
+			if log.bi_opens() > 0 {
+				solicited = true;
+				break;
+			}
+		}
+		assert!(solicited, "interest opens the announce stream");
+
+		// And it asked for the allowed prefix, exactly once.
+		for _ in 0..100 {
+			{
+				let writes = log.writes.lock().unwrap();
+				if writes.windows(b"lazycam".len()).any(|w| w == b"lazycam") {
+					break;
+				}
+			}
+			tokio::time::sleep(Duration::from_millis(5)).await;
+		}
+		let writes = log.writes.lock().unwrap();
+		let count = writes.windows(b"lazycam".len()).filter(|w| *w == b"lazycam").count();
+		assert_eq!(count, 1, "one ANNOUNCE_PLEASE for the allowed prefix");
 	}
 }
 

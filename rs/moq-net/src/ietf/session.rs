@@ -1,3 +1,5 @@
+use crate::connecting::Connecting;
+use crate::model::interest;
 use crate::origin;
 use crate::{
 	Error, Origin, SessionError,
@@ -85,20 +87,36 @@ pub fn start<S: crate::transport::poll::Session>(
 	// server to open connections (draft-19 sect 10.4).
 	let (goaway_handle, goaway) = crate::goaway::Handle::new(!client);
 
+	// Our own Hop ID, taken from whichever origin the caller actually supplied so
+	// every session out of this process stamps the same one and cross-session loop
+	// detection works. Read BEFORE the placeholders below: their ids are random and
+	// identify nothing, so declaring one would compare incoming paths against an
+	// identity no other session shares.
+	let self_origin = self_origin(publish.as_ref(), subscribe.as_ref());
+
+	// moq-transport threads concrete origins through the publisher/subscriber.
+	// An unset half gets an empty origin: an empty publish origin announces
+	// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
+	//
+	// The session's identity in the announce-interest ledger: interest the
+	// publisher half raises on behalf of this peer is tagged with it, so the
+	// subscriber half doesn't treat the peer's own solicitation as demand and
+	// reciprocate.
+	let session_id = interest::SessionId::new();
+	let publish = publish
+		.map(|p| p.on_behalf_of(session_id))
+		.unwrap_or_else(|| origin::Producer::empty(Origin::random()).consume());
+	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Origin::random()));
+
+	// Lazy announce solicitation: SUBSCRIBE_NAMESPACE waits until the origin has
+	// announce interest to serve (see `lite::Subscriber::run_announce` for the
+	// full story). Attached here rather than inside the driver, like the lite
+	// subscriber does at construction: a request issued the instant `start`
+	// returns must see the solicitor and wait for its solicitation instead of
+	// settling on a cold table.
+	let solicitor = subscribe.solicitor(session_id);
+
 	let driver = async move {
-		// Our own Hop ID, taken from whichever origin the caller actually supplied so
-		// every session out of this process stamps the same one and cross-session loop
-		// detection works. Read BEFORE the placeholders below: their ids are random and
-		// identify nothing, so declaring one would compare incoming paths against an
-		// identity no other session shares.
-		let self_origin = self_origin(publish.as_ref(), subscribe.as_ref());
-
-		// moq-transport threads concrete origins through the publisher/subscriber.
-		// An unset half gets an empty origin: an empty publish origin announces
-		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
-		let publish = publish.unwrap_or_else(|| origin::Producer::empty(Origin::random()).consume());
-		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Origin::random()));
-
 		// The peer's cluster options. Seeded now when its SETUP was already read
 		// (a gated server accept), and filled by the uni loop otherwise. A version that
 		// cannot negotiate the extension is settled immediately so nothing blocks on it.
@@ -192,10 +210,22 @@ pub fn start<S: crate::transport::poll::Session>(
 				// One SUBSCRIBE_NAMESPACE per permitted prefix, like `lite::Subscriber`:
 				// the scope is what we may ask for, and it is not the origin's root.
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
+					// Parked until something is interested in announcements; a session
+					// nobody reads announcements from never solicits any.
+					solicitor.needed().await;
+					// Reports the solicitor synced once every prefix has its response (or
+					// died trying). moq-transport marks no end to the initial set (there is
+					// no ANNOUNCE_OK counterpart with a count), so the peer acknowledging
+					// each SUBSCRIBE_NAMESPACE is the last boundary available: a cold
+					// `request_broadcast` still races the NAMESPACE messages behind the
+					// acknowledgment, but never settles before the peer has seen the
+					// solicitation.
+					let (sync_producer, synced) = Connecting::new();
 					let mut prefixes = futures::stream::FuturesUnordered::new();
 					for prefix in sub_ns.subscribe_prefixes() {
 						let mut sub_ns = sub_ns.clone();
 						let sub_ns_adapter = sub_ns_adapter.clone();
+						let connected = sync_producer.clone();
 						prefixes.push(async move {
 							let stream = match version {
 								Version::Draft16 => {
@@ -208,8 +238,8 @@ pub fn start<S: crate::transport::poll::Session>(
 								}
 								_ => Stream::open(&mut sub_ns_adapter.clone(), version).await?,
 							};
-							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
-								// The peer breaking the protocol is fatal, and the driver
+							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, connected).await {
+								// The peer breaking the protocol is fatal, and the poll loop
 								// below turns this into the session close the draft wants.
 								if is_protocol_violation(&err) {
 									return Err(err);
@@ -219,10 +249,24 @@ pub fn start<S: crate::transport::poll::Session>(
 							Ok::<(), Error>(())
 						});
 					}
-					while let Some(result) = futures::StreamExt::next(&mut prefixes).await {
-						result?;
-					}
-					Ok(())
+					// Each prefix holds its own producer clone; drop ours so the channel
+					// closes once the last prefix reports in.
+					drop(sync_producer);
+					let mut drive = std::pin::pin!(async {
+						while let Some(result) = futures::StreamExt::next(&mut prefixes).await {
+							result?;
+						}
+						Ok::<(), Error>(())
+					});
+					let mut reported = false;
+					kio::wait(|waiter| {
+						if !reported && synced.poll_ready(waiter).is_ready() {
+							solicitor.synced();
+							reported = true;
+						}
+						waiter.poll_future(drive.as_mut())
+					})
+					.await
 				}));
 
 				kio::wait(|waiter| {
@@ -319,15 +363,21 @@ pub fn start<S: crate::transport::poll::Session>(
 				let mut setup = std::pin::pin!(setup);
 				// One SUBSCRIBE_NAMESPACE per permitted prefix; see the draft-16 arm.
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
+					// Parked until something is interested in announcements; see the
+					// draft-16 arm.
+					solicitor.needed().await;
+					// Synced once every prefix has its response; see the draft-16 arm.
+					let (sync_producer, synced) = Connecting::new();
 					let mut prefixes = futures::stream::FuturesUnordered::new();
 					for prefix in sub_ns.subscribe_prefixes() {
 						let mut sub_ns = sub_ns.clone();
 						let sub_ns_session = sub_ns_session.clone();
+						let connected = sync_producer.clone();
 						prefixes.push(async move {
 							let mut sub_ns_session = sub_ns_session;
 							let stream = Stream::open(&mut sub_ns_session, version).await?;
-							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
-								// The peer breaking the protocol is fatal, and the driver
+							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, connected).await {
+								// The peer breaking the protocol is fatal, and the poll loop
 								// below turns this into the session close the draft wants.
 								if is_protocol_violation(&err) {
 									return Err(err);
@@ -337,10 +387,22 @@ pub fn start<S: crate::transport::poll::Session>(
 							Ok::<(), Error>(())
 						});
 					}
-					while let Some(result) = futures::StreamExt::next(&mut prefixes).await {
-						result?;
-					}
-					Ok(())
+					drop(sync_producer);
+					let mut drive = std::pin::pin!(async {
+						while let Some(result) = futures::StreamExt::next(&mut prefixes).await {
+							result?;
+						}
+						Ok::<(), Error>(())
+					});
+					let mut reported = false;
+					kio::wait(|waiter| {
+						if !reported && synced.poll_ready(waiter).is_ready() {
+							solicitor.synced();
+							reported = true;
+						}
+						waiter.poll_future(drive.as_mut())
+					})
+					.await
 				}));
 
 				kio::wait(|waiter| {
@@ -855,6 +917,9 @@ mod tests {
 		tokio::time::pause();
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		// Announce interest is what makes the lazy subscriber open SUBSCRIBE_NAMESPACE
+		// at all; without it the scripted NAMESPACE below is never read.
+		let _interest = origin.consume().announced();
 		let session = crate::lite::test_transport::ScriptedSession::new(namespace_without_hop_path(VERSION).await);
 		let log = session.log.clone();
 
@@ -904,6 +969,8 @@ mod tests {
 			.with_root("rootns")
 			.and_then(|rooted| rooted.scope(&[crate::Path::new("cam"), crate::Path::new("mic")]))
 			.expect("scope the origin to two prefixes");
+		// Announce interest is what makes the lazy subscriber solicit at all.
+		let _interest = scoped.consume().announced();
 
 		let gate = kio::Producer::new(true);
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
@@ -937,6 +1004,62 @@ mod tests {
 		assert_eq!(occurrences(&log, b"cam"), 1, "one SUBSCRIBE_NAMESPACE for cam");
 		assert_eq!(occurrences(&log, b"mic"), 1, "one SUBSCRIBE_NAMESPACE for mic");
 		assert_eq!(occurrences(&log, b"rootns"), 0, "asked the peer for our local root");
+	}
+
+	/// A cold `request_broadcast` must not settle before the peer acknowledges the
+	/// SUBSCRIBE_NAMESPACE it triggered: the acknowledgment is the only initial-set
+	/// boundary moq-transport offers. A peer that never responds keeps the request
+	/// pending rather than producing an instant `Unroutable` off a solicitation the
+	/// peer has not even received.
+	#[tokio::test]
+	async fn request_waits_for_the_acknowledgment() {
+		use futures::FutureExt;
+
+		// Scoped so the one SUBSCRIBE_NAMESPACE carries a grep-able prefix.
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap())
+			.produce()
+			.scope(&[crate::Path::new("cam")])
+			.expect("scope the origin");
+
+		// An open gate: the SUBSCRIBE_NAMESPACE reaches the wire, but no response
+		// ever comes back.
+		let gate = kio::Producer::new(true);
+		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
+		let log = session.log.clone();
+
+		let (driver, _goaway) = start(Config {
+			session,
+			setup: None,
+			request_id_max: None,
+			client: true,
+			publish: None,
+			subscribe: Some(origin.clone()),
+			peer_origin: None,
+			cost: None,
+			version: Version::Draft19,
+			path: None,
+			peer_setup_stream: None,
+			peer_cluster: None,
+		})
+		.expect("start the session");
+		let _driver = tokio::spawn(driver);
+
+		// The request itself raises the interest that wakes the lazy solicitor: the
+		// solicitor is attached synchronously in `start`, so a request racing the
+		// spawned driver still counts.
+		let mut request = std::pin::pin!(origin.consume().request_broadcast("cam/live"));
+		for _ in 0..100 {
+			if occurrences(&log, b"cam") > 0 {
+				break;
+			}
+			tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+		}
+		assert_eq!(occurrences(&log, b"cam"), 1, "the request solicited the prefix");
+
+		assert!(
+			request.as_mut().now_or_never().is_none(),
+			"an unacknowledged solicitation must keep the request pending",
+		);
 	}
 
 	/// A namespace is only advertised in response to a SUBSCRIBE_NAMESPACE. A peer

@@ -13,7 +13,7 @@ use std::{
 use rand::RngExt;
 use web_async::Lock;
 
-use super::{Requests, WeakCache};
+use super::{Requests, WeakCache, interest};
 use crate::{
 	AsPath, Error, Path, PathOwned, PathPrefixes,
 	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
@@ -357,6 +357,15 @@ impl ConsumerId {
 	fn new() -> Self {
 		Self(NEXT_CONSUMER_ID.fetch_add(1, Ordering::Relaxed))
 	}
+}
+
+/// Standing announce interest for an origin's whole scope; see [`Producer::solicit`].
+///
+/// Dropping it releases the interest: with no other consumer, sessions that
+/// solicit lazily stop counting this origin as a reason to open announce streams
+/// (already open streams stay open for the session's lifetime).
+pub struct Interest {
+	_guard: interest::Guard,
 }
 
 // The origin-owned broadcast at a leaf: the spliced broadcast consumers see,
@@ -871,6 +880,12 @@ impl OriginNodes {
 		}
 	}
 
+	// The absolute prefixes these roots cover: one per node, joined onto `root`.
+	// What an announce consumer registers in the interest ledger.
+	fn interest_prefixes(&self, root: &PathOwned) -> Vec<PathOwned> {
+		self.nodes.iter().map(|(key, _)| root.join(key).to_owned()).collect()
+	}
+
 	// Returns the root that has this prefix.
 	pub fn get(&self, path: impl AsPath) -> Option<(Lock<OriginNode>, PathOwned)> {
 		let path = path.as_path();
@@ -926,6 +941,10 @@ pub struct Producer {
 	// consumer's `request_broadcast` when no live announcement exists.
 	dynamic: kio::Shared<OriginDynamicState>,
 
+	// Announce demand, shared with every derived handle. Session subscriber halves
+	// watch it to solicit announces lazily: no interest, no announce streams.
+	interest: kio::Producer<interest::Ledger>,
+
 	// The cache pool inherited by broadcasts created under this origin (sessions
 	// mint their remote broadcasts with it). Unbounded by default.
 	pool: cache::Pool,
@@ -962,6 +981,7 @@ impl Producer {
 			nodes: OriginNodes::default(),
 			root: PathOwned::default(),
 			dynamic: kio::Shared::default(),
+			interest: kio::Producer::default(),
 			pool: info.pool,
 			cache_duration: info.cache_duration,
 			latency_default: info.latency_default,
@@ -1004,6 +1024,7 @@ impl Producer {
 			nodes: OriginNodes { nodes: Vec::new() },
 			root: PathOwned::default(),
 			dynamic: kio::Shared::default(),
+			interest: kio::Producer::default(),
 			pool: cache::Pool::default(),
 			cache_duration: Duration::MAX,
 			latency_default: track::DEFAULT_LATENCY_MAX,
@@ -1108,6 +1129,7 @@ impl Producer {
 			nodes: self.nodes.select(&prefixes)?,
 			root: self.root.clone(),
 			dynamic: self.dynamic.clone(),
+			interest: self.interest.clone(),
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			latency_default: self.latency_default,
@@ -1139,6 +1161,7 @@ impl Producer {
 			self.root.clone(),
 			self.nodes.clone(),
 			self.dynamic.clone(),
+			self.interest.clone(),
 			stats::Session::default(),
 		)
 	}
@@ -1149,7 +1172,30 @@ impl Producer {
 	/// [`AnnounceProducer::consume`] to get an [`AnnounceConsumer`] that
 	/// receives announce / unannounce events.
 	pub fn announces(&self) -> AnnounceProducer {
-		AnnounceProducer::new(self.root.clone(), self.nodes.clone())
+		AnnounceProducer::new(self.root.clone(), self.nodes.clone(), self.interest.clone())
+	}
+
+	/// Attach a session subscriber half to the interest ledger as a solicitor.
+	/// `session` is the session's identity there, so interest raised on behalf of
+	/// its own peer (via the egress consumer tagged with the same id) doesn't count
+	/// as demand for this solicitor.
+	pub(crate) fn solicitor(&self, session: interest::SessionId) -> interest::Solicitor {
+		interest::Solicitor::attach(self.interest.clone(), session, self.nodes.interest_prefixes(&self.root))
+	}
+
+	/// Keep announce solicitation warm: attached sessions solicit announces for this
+	/// handle's whole scope even while nothing consumes them, instead of waiting for
+	/// the first [`Consumer::announced`] or request.
+	///
+	/// A relay holds one so its mesh always carries every route (redundant-route
+	/// failover needs the alternatives before anything fails); leaf endpoints
+	/// normally rely on lazy solicitation instead. Drop the guard to release the
+	/// demand.
+	pub fn solicit(&self) -> Interest {
+		let prefixes = self.nodes.interest_prefixes(&self.root);
+		Interest {
+			_guard: interest::Guard::register(self.interest.clone(), prefixes, None),
+		}
 	}
 
 	/// Returns a new Producer that automatically strips out the provided prefix.
@@ -1164,6 +1210,7 @@ impl Producer {
 			root: self.root.join(&prefix).to_owned(),
 			nodes: self.nodes.root(&prefix)?,
 			dynamic: self.dynamic.clone(),
+			interest: self.interest.clone(),
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			latency_default: self.latency_default,
@@ -2396,6 +2443,85 @@ enum RequestState {
 	Failed(Error),
 	// Awaiting a handler: resolves when the request's result channel is written.
 	Pending(kio::Consumer<PendingBroadcast>),
+	// Awaiting an announcement: the table may just be cold because announces are
+	// solicited lazily. Locked because polling advances internal state while
+	// `poll_ok` takes `&self`.
+	Announce(Lock<AnnounceWait>),
+}
+
+// The announce-wait behind a `request_broadcast` on a cold table: interest has been
+// raised (via `announced`, which is what wakes a lazy session), and the request
+// resolves on the announcement or falls back to the dynamic queue once every attached
+// session has delivered its initial set.
+struct AnnounceWait {
+	// Scoped to the requested path; holding it is what holds the interest.
+	announced: AnnounceConsumer,
+	// The requested path relative to the cursor's root, matched exactly: the scope may
+	// be narrower than the request (an authorization deeper than the asked-for path),
+	// and a descendant's announcement is not the requested broadcast.
+	relative: PathOwned,
+	// Settled watch: once every attached solicitor has synced, no announcement is coming.
+	interest: kio::Producer<interest::Ledger>,
+	// What the dynamic fallback needs once settled.
+	dynamic: kio::Shared<OriginDynamicState>,
+	absolute: PathOwned,
+	// The post-settle state, computed at most once. `Announce` is unreachable here.
+	fallback: Option<RequestState>,
+}
+
+impl AnnounceWait {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<broadcast::Consumer, Error>> {
+		loop {
+			if let Some(fallback) = &self.fallback {
+				return match fallback {
+					RequestState::Ready(broadcast) => Poll::Ready(Ok(broadcast.clone())),
+					RequestState::Failed(error) => Poll::Ready(Err(error.clone())),
+					RequestState::Pending(consumer) => {
+						match ready!(consumer.poll(waiter, |state| match &state.resolved {
+							Some(result) => Poll::Ready(result.clone()),
+							None => Poll::Pending,
+						})) {
+							Ok(result) => Poll::Ready(result),
+							// Every handler dropped without resolving: nobody could route it.
+							Err(_closed) => Poll::Ready(Err(Error::Unroutable)),
+						}
+					}
+					RequestState::Announce(_) => unreachable!("fallback is never an announce wait"),
+				};
+			}
+
+			// An announcement resolves first: knowledge beats the fallback.
+			match self.announced.poll_next(waiter) {
+				Poll::Ready(Some(OriginAnnounce {
+					path,
+					broadcast: Some(broadcast),
+				})) if path == self.relative => return Poll::Ready(Ok(broadcast)),
+				// An unannounce, or a descendant of the requested path; keep draining.
+				Poll::Ready(Some(_)) => continue,
+				// The origin is going away; settle now rather than waiting forever.
+				Poll::Ready(None) => {}
+				Poll::Pending => {
+					// No announcement yet: wait until the attached sessions have delivered
+					// everything they will (or the interest channel dies with the origin).
+					let absolute = self.absolute.as_path();
+					match self.interest.poll_ref(waiter, |state| {
+						if state.settled(&absolute) {
+							Poll::Ready(())
+						} else {
+							Poll::Pending
+						}
+					}) {
+						Poll::Ready(_) => {}
+						Poll::Pending => return Poll::Pending,
+					}
+				}
+			}
+
+			// Settled with no announcement: the path is genuinely unannounced. Fall back
+			// to the dynamic queue exactly like a request on a warm table.
+			self.fallback = Some(Consumer::dynamic_fallback(&self.dynamic, self.absolute.clone()));
+		}
+	}
 }
 
 impl Requesting {
@@ -2407,8 +2533,8 @@ impl Requesting {
 		Self::new(RequestState::Failed(error))
 	}
 
-	fn pending(consumer: kio::Consumer<PendingBroadcast>) -> Self {
-		Self::new(RequestState::Pending(consumer))
+	fn announce(wait: AnnounceWait) -> Self {
+		Self::new(RequestState::Announce(Lock::new(wait)))
 	}
 
 	fn new(inner: RequestState) -> Self {
@@ -2449,6 +2575,10 @@ impl Requesting {
 					Err(_closed) => Err(Error::Unroutable),
 				},
 			),
+			RequestState::Announce(wait) => {
+				let result = ready!(wait.lock().poll(waiter));
+				Poll::Ready(result.map(|broadcast| self.hand_out(broadcast)))
+			}
 		}
 	}
 }
@@ -2489,6 +2619,7 @@ impl Consume<Consumer> for Producer {
 			self.root.clone(),
 			self.nodes.clone(),
 			self.dynamic.clone(),
+			self.interest.clone(),
 			stats::Session::default(),
 		)
 	}
@@ -2552,6 +2683,14 @@ pub struct Consumer {
 	// served from a source whose hop chain excludes this origin (the requesting
 	// peer). `None` (the default) serves from the active source as usual.
 	exclude: Option<Origin>,
+
+	// Announce demand, shared with every handle derived from the same origin.
+	interest: kio::Producer<interest::Ledger>,
+
+	// Whose behalf interest raised through this handle is on: `None` for the
+	// application itself, or a session's identity for its egress consumer, so
+	// that session's own subscriber half doesn't count it as demand.
+	session: Option<interest::SessionId>,
 }
 
 impl std::ops::Deref for Consumer {
@@ -2568,6 +2707,7 @@ impl Consumer {
 		root: PathOwned,
 		nodes: OriginNodes,
 		dynamic: kio::Shared<OriginDynamicState>,
+		interest: kio::Producer<interest::Ledger>,
 		stats: stats::Session,
 	) -> Self {
 		Self {
@@ -2577,6 +2717,8 @@ impl Consumer {
 			dynamic,
 			stats,
 			exclude: None,
+			interest,
+			session: None,
 		}
 	}
 
@@ -2586,6 +2728,14 @@ impl Consumer {
 	/// origin id.
 	pub(crate) fn excluding(mut self, peer: Origin) -> Self {
 		self.exclude = Some(peer);
+		self
+	}
+
+	/// Attribute interest raised through this handle (and its derivatives) to a
+	/// session, so that session's subscriber half doesn't solicit announces on the
+	/// strength of its own peer's interest. Sessions tag their egress consumer.
+	pub(crate) fn on_behalf_of(mut self, session: interest::SessionId) -> Self {
+		self.session = Some(session);
 		self
 	}
 
@@ -2619,6 +2769,8 @@ impl Consumer {
 			dynamic: self.dynamic.clone(),
 			stats: self.stats.clone(),
 			exclude: self.exclude,
+			interest: self.interest.clone(),
+			session: self.session,
 		}
 	}
 
@@ -2629,7 +2781,17 @@ impl Consumer {
 	/// set as initial announcements. Drop the returned [`AnnounceConsumer`]
 	/// to unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
-		AnnounceConsumer::new(self.root.clone(), self.nodes.clone(), self.stats.clone(), self.exclude)
+		AnnounceConsumer::new(
+			self.root.clone(),
+			self.nodes.clone(),
+			self.stats.clone(),
+			self.exclude,
+			interest::Guard::register(
+				self.interest.clone(),
+				self.nodes.interest_prefixes(&self.root),
+				self.session,
+			),
+		)
 	}
 
 	/// Returns a cheap duplicate of this read handle.
@@ -2669,11 +2831,11 @@ impl Consumer {
 	/// is closed before the broadcast is announced. The returned broadcast may itself be closed
 	/// later. Subscribers should watch [`broadcast::Consumer::closed`] to react to that.
 	///
-	/// Prefer this over [`Self::request_broadcast`] when you know the exact path you want but
-	/// cannot guarantee the announcement has already been received. With moq-lite-05 (and
-	/// the older Lite01/02) `connect()` already blocks until the initial announce set lands,
-	/// so [`Self::request_broadcast`] is race-free for broadcasts that were live at connect time;
-	/// this method is still needed to wait for a broadcast that comes online *after* connect.
+	/// Prefer this over [`Self::request_broadcast`] to wait for a broadcast that may not be
+	/// online yet: a request settles with [`Error::Unroutable`] once the attached sessions
+	/// have delivered their initial announce sets, while this method keeps waiting for the
+	/// announcement however late it comes. Both raise announce interest, so a session that
+	/// solicits announces lazily starts doing so on either call.
 	pub async fn announced_broadcast(&self, path: impl AsPath) -> Option<broadcast::Consumer> {
 		let path = path.as_path();
 
@@ -2720,6 +2882,8 @@ impl Consumer {
 			dynamic: self.dynamic.clone(),
 			stats: self.stats.clone(),
 			exclude: self.exclude,
+			interest: self.interest.clone(),
+			session: self.session,
 		})
 	}
 
@@ -2741,6 +2905,19 @@ impl Consumer {
 	/// dynamic handler exists. A request that is registered while a handler is live but then loses
 	/// every handler before being served also resolves to [`Error::Unroutable`]. Unlike an announced
 	/// broadcast, a dynamically served one is never visible to [`Self::announced`].
+	///
+	/// A request for a path that is not yet announced raises announce interest at that exact
+	/// path: an attached session that has not solicited announces yet does so now, and the
+	/// request waits for the resulting initial announce set before concluding the path is
+	/// unannounced. Only sessions whose scope covers the path are waited on, so a peer
+	/// authorized elsewhere can never hold the request up. With no such session (or once
+	/// every one of them has delivered its initial set) it concludes immediately, as above.
+	///
+	/// The wait is only as good as the protocol's initial-set boundary: moq-lite-01/02
+	/// (ANNOUNCE_INIT) and moq-lite-05+ (ANNOUNCE_OK) mark one, so the request is race-free
+	/// there. moq-lite-03/04 and moq-transport mark none, so on those the request can still
+	/// conclude before an announcement that was in flight, exactly as it did before
+	/// announces were solicited lazily.
 	pub fn request_broadcast(&self, path: impl AsPath) -> kio::Pending<Requesting> {
 		let path = path.as_path();
 
@@ -2768,14 +2945,45 @@ impl Consumer {
 			Resolved::Missing => {}
 		}
 
-		let mut state = self.dynamic.lock();
+		// Not announced yet, but a lazy session may simply not have solicited announces.
+		// Wait for the announcement (raising interest at exactly this path, which is what
+		// makes such a session solicit) unless the table is already as warm as the attached
+		// sessions will make it. `warming` rather than `settled`: the interest that could
+		// wake a parked solicitor is the one this wait is about to raise, and the wait
+		// itself settles precisely once it is registered. `scope` fails for a path outside
+		// this cursor's prefixes, where no announcement can ever land; fall through like
+		// the settled case.
+		if self.interest.read().warming(&absolute)
+			&& let Some(scoped) = self.scope(std::slice::from_ref(&path))
+		{
+			// Untagged like `announced_broadcast`: a lookup, not egress forwarding.
+			let wait = AnnounceWait {
+				announced: scoped.untagged().announced(),
+				relative: path.to_owned(),
+				interest: self.interest.clone(),
+				dynamic: self.dynamic.clone(),
+				absolute,
+				fallback: None,
+			};
+			let requesting = Requesting::announce(wait).with_path(requested).with_stats(scope);
+			return kio::Pending::new(requesting);
+		}
+
+		let state = Self::dynamic_fallback(&self.dynamic, absolute);
+		kio::Pending::new(Requesting::new(state).with_path(requested).with_stats(scope))
+	}
+
+	// The fallback once a path is known not to be announced: a still-live broadcast a
+	// handler already served, a (possibly coalesced) pending request when a handler is
+	// alive to serve it, or `Unroutable`.
+	fn dynamic_fallback(dynamic: &kio::Shared<OriginDynamicState>, absolute: PathOwned) -> RequestState {
+		let mut state = dynamic.lock();
 
 		// Reuse a still-live broadcast a handler already served for this path, so repeat
 		// requests share one upstream subscription. A closed entry is stale; `get` drops it
 		// and returns `None`, so we fall through and re-serve below.
 		if let Some(weak) = state.served.get(&absolute) {
-			let resolved = Requesting::ready(weak.consume()).with_path(requested).with_stats(scope);
-			return kio::Pending::new(resolved);
+			return RequestState::Ready(weak.consume());
 		}
 
 		// Coalesce onto a pending request for the same path; otherwise register a new
@@ -2786,12 +2994,12 @@ impl Consumer {
 			let producer = kio::Producer::<PendingBroadcast>::default();
 			let consumer = producer.consume();
 			if state.requests.insert(absolute, producer).is_err() {
-				return kio::Pending::new(Requesting::failed(Error::Unroutable));
+				return RequestState::Failed(Error::Unroutable);
 			}
 			consumer
 		};
 
-		kio::Pending::new(Requesting::pending(consumer).with_path(requested).with_stats(scope))
+		RequestState::Pending(consumer)
 	}
 
 	/// Returns a new Consumer that automatically strips out the provided prefix.
@@ -2808,6 +3016,8 @@ impl Consumer {
 			dynamic: self.dynamic.clone(),
 			stats: self.stats.clone(),
 			exclude: self.exclude,
+			interest: self.interest.clone(),
+			session: self.session,
 		})
 	}
 
@@ -2836,11 +3046,12 @@ impl Consumer {
 pub struct AnnounceProducer {
 	nodes: OriginNodes,
 	root: PathOwned,
+	interest: kio::Producer<interest::Ledger>,
 }
 
 impl AnnounceProducer {
-	fn new(root: PathOwned, nodes: OriginNodes) -> Self {
-		Self { nodes, root }
+	fn new(root: PathOwned, nodes: OriginNodes, interest: kio::Producer<interest::Ledger>) -> Self {
+		Self { nodes, root, interest }
 	}
 
 	/// Subscribe to announce / unannounce events for this subtree.
@@ -2851,7 +3062,14 @@ impl AnnounceProducer {
 	pub fn consume(&self) -> AnnounceConsumer {
 		// Untagged: `AnnounceProducer` is used for internal announce plumbing, not
 		// egress attribution (which flows through `origin::Consumer::announced`).
-		AnnounceConsumer::new(self.root.clone(), self.nodes.clone(), stats::Session::default(), None)
+		let prefixes = self.nodes.interest_prefixes(&self.root);
+		AnnounceConsumer::new(
+			self.root.clone(),
+			self.nodes.clone(),
+			stats::Session::default(),
+			None,
+			interest::Guard::register(self.interest.clone(), prefixes, None),
+		)
 	}
 
 	/// Returns the prefix that is automatically stripped from announced paths.
@@ -2881,10 +3099,21 @@ pub struct AnnounceConsumer {
 	// opens one (bumping `announced` + `announced_bytes`); the matching unannounce
 	// drops it (bumping `announced_closed` + `announced_bytes`).
 	guards: HashMap<PathOwned, stats::Announce>,
+
+	// Announce-interest registrations released when this cursor drops. What makes a
+	// lazy session solicit announces at all. Held, never read.
+	#[allow(dead_code)]
+	interest: interest::Guard,
 }
 
 impl AnnounceConsumer {
-	fn new(root: PathOwned, nodes: OriginNodes, stats: stats::Session, exclude: Option<Origin>) -> Self {
+	fn new(
+		root: PathOwned,
+		nodes: OriginNodes,
+		stats: stats::Session,
+		exclude: Option<Origin>,
+		interest: interest::Guard,
+	) -> Self {
 		let state = kio::Producer::<OriginConsumerState>::default();
 		let id = ConsumerId::new();
 
@@ -2904,6 +3133,7 @@ impl AnnounceConsumer {
 			state,
 			stats,
 			guards: HashMap::new(),
+			interest,
 		}
 	}
 
@@ -7284,5 +7514,201 @@ mod tests {
 			source.server.abort();
 		}
 		settle().await;
+	}
+	/// Announce interest: `announced()` handles register in the ledger, a solicitor
+	/// is only needed for interest from someone other than its own session, and
+	/// dropping the last handle releases the demand.
+	#[tokio::test]
+	async fn interest_attributed_by_session() {
+		let origin = Origin::random().produce();
+		let session = interest::SessionId::new();
+		let solicitor = origin.solicitor(session);
+		let noop = kio::Waiter::noop();
+
+		assert!(!solicitor.is_needed(), "no interest yet");
+
+		// Interest raised on behalf of the solicitor's own peer (the publisher
+		// half's tagged egress consumer) is not demand for this solicitor.
+		let own = origin.consume().on_behalf_of(session).announced();
+		assert!(!solicitor.is_needed(), "own peer's interest must not reciprocate");
+
+		// Local interest is demand, and derived handles keep their tag.
+		let local = origin.consume().announced();
+		assert!(solicitor.is_needed());
+		drop(local);
+		assert!(!solicitor.is_needed(), "released with the handle");
+
+		// Another session's interest is demand too.
+		let other = origin.consume().on_behalf_of(interest::SessionId::new()).announced();
+		assert!(solicitor.poll_needed(&noop).is_ready());
+		drop(other);
+		drop(own);
+		assert!(!solicitor.is_needed());
+	}
+
+	/// A request on a cold table waits for a lazy session: interest is raised at the
+	/// exact path, and the request resolves the moment the announcement lands.
+	#[tokio::test]
+	async fn request_waits_for_lazy_session() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let solicitor = origin.solicitor(interest::SessionId::new());
+
+		let consumer = origin.consume();
+		let mut request = std::pin::pin!(consumer.request_broadcast("cam"));
+		assert!(request.as_mut().now_or_never().is_none(), "cold table: not settled yet");
+
+		// The pending request is what wakes the solicitor.
+		assert!(solicitor.is_needed(), "the request raises interest");
+
+		// The "session" delivers the announcement; the request resolves without the
+		// solicitor even reporting synced.
+		let _broadcast = origin.create_broadcast("cam", announce()).unwrap();
+		settle().await;
+		let resolved = request.now_or_never().expect("announced").expect("found");
+		assert_eq!(resolved.info().path, PathOwned::from("cam"));
+	}
+
+	/// A request on a cold table fails once every attached session has delivered its
+	/// initial set without the path, exactly like a warm-table miss.
+	#[tokio::test]
+	async fn request_settles_unroutable() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let solicitor = origin.solicitor(interest::SessionId::new());
+
+		let consumer = origin.consume();
+		let mut request = std::pin::pin!(consumer.request_broadcast("cam"));
+		assert!(request.as_mut().now_or_never().is_none(), "waiting on the solicitor");
+
+		// The initial set landed and `cam` was not in it.
+		solicitor.synced();
+		settle().await;
+		let result = request.now_or_never().expect("settled");
+		assert!(matches!(result, Err(Error::Unroutable)), "nothing announced");
+	}
+
+	/// With no attached session there is nothing to wait for: a request misses
+	/// immediately, exactly as before lazy solicitation existed.
+	#[tokio::test]
+	async fn request_immediate_without_solicitors() {
+		let origin = Origin::random().produce();
+		let result = origin
+			.consume()
+			.request_broadcast("cam")
+			.now_or_never()
+			.expect("nothing to wait for");
+		assert!(matches!(result, Err(Error::Unroutable)), "nothing announced");
+	}
+
+	/// A solicitor parked on interest it cannot serve must not hold requests
+	/// hostage: settling only waits for solicitors the interest actually needs.
+	#[tokio::test]
+	async fn request_ignores_own_sessions_solicitor() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let session = interest::SessionId::new();
+		// The requesting session's own solicitor: our request is tagged with the
+		// same session, so this solicitor is never needed and never syncs.
+		let _own_solicitor = origin.solicitor(session);
+		// An upstream session that is needed and delivers nothing.
+		let upstream = origin.solicitor(interest::SessionId::new());
+
+		let consumer = origin.consume().on_behalf_of(session);
+		let mut request = std::pin::pin!(consumer.request_broadcast("cam"));
+		assert!(request.as_mut().now_or_never().is_none(), "waiting on upstream");
+
+		upstream.synced();
+		settle().await;
+		let result = request.now_or_never().expect("settled");
+		assert!(matches!(result, Err(Error::Unroutable)), "nothing announced");
+	}
+
+	/// A session dying mid-wait detaches its solicitor, settling the requests that
+	/// were waiting on it.
+	#[tokio::test]
+	async fn request_settles_when_solicitor_drops() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let solicitor = origin.solicitor(interest::SessionId::new());
+
+		let consumer = origin.consume();
+		let mut request = std::pin::pin!(consumer.request_broadcast("cam"));
+		assert!(request.as_mut().now_or_never().is_none(), "waiting on the solicitor");
+
+		drop(solicitor);
+		settle().await;
+		let result = request.now_or_never().expect("settled");
+		assert!(matches!(result, Err(Error::Unroutable)), "nothing announced");
+	}
+
+	/// A session scoped somewhere else can neither announce a path nor speak for it, so
+	/// it must not hold a request hostage. Before this was prefix-aware, a stalled peer
+	/// anywhere blocked every cold request, turning a fast `Unroutable` into a hang.
+	#[tokio::test]
+	async fn request_ignores_a_disjoint_scope() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		// A session authorized only for `b`, which never delivers its initial set.
+		let elsewhere = origin
+			.scope(&[crate::Path::new("b")])
+			.expect("scope")
+			.solicitor(interest::SessionId::new());
+
+		let result = origin
+			.consume()
+			.request_broadcast("a/cam")
+			.now_or_never()
+			.expect("a solicitor scoped to b cannot answer for a");
+		assert!(matches!(result, Err(Error::Unroutable)), "nothing announced");
+
+		// And it was never woken to solicit on someone else's behalf.
+		assert!(!elsewhere.is_needed(), "interest in `a` is not `b`'s to serve");
+
+		// The same request does wait for a solicitor whose scope covers it.
+		let covering = origin
+			.scope(&[crate::Path::new("a")])
+			.expect("scope")
+			.solicitor(interest::SessionId::new());
+		let mut request = std::pin::pin!(origin.consume().request_broadcast("a/cam"));
+		assert!(request.as_mut().now_or_never().is_none(), "waits for the `a` session");
+		assert!(covering.is_needed(), "the request is `a`'s to serve");
+
+		covering.synced();
+		settle().await;
+		let result = request.now_or_never().expect("settled");
+		assert!(matches!(result, Err(Error::Unroutable)), "nothing announced");
+	}
+
+	/// Scoped and rooted handles register interest at their absolute prefixes, so a
+	/// narrow consumer raises narrow demand.
+	#[tokio::test]
+	async fn interest_prefixes_are_absolute() {
+		let origin = Origin::random().produce();
+		let solicitor = origin.solicitor(interest::SessionId::new());
+
+		let scoped = origin
+			.consume()
+			.scope(&[crate::Path::new("a/b")])
+			.expect("scope")
+			.announced();
+		assert!(solicitor.is_needed());
+		{
+			let prefixes = origin.interest.read().prefixes();
+			assert_eq!(prefixes, vec![PathOwned::from("a/b")]);
+		}
+		drop(scoped);
+
+		let rooted = origin.with_root("a").expect("root").consume().announced();
+		{
+			let prefixes = origin.interest.read().prefixes();
+			assert_eq!(prefixes, vec![PathOwned::from("a")], "rooted interest is absolute");
+		}
+		drop(rooted);
 	}
 }

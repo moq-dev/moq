@@ -11,6 +11,10 @@ pub mod track;
 #[path = "origin.rs"]
 mod origin_impl;
 
+// The announce-interest ledger behind lazy announce solicitation; sessions and
+// the origin implementation share it. See the module docs for the design.
+pub(crate) mod interest;
+
 mod bytes;
 mod datagram;
 mod requests;
@@ -33,7 +37,7 @@ pub use time::*;
 
 /// Publishing and consuming the set of broadcasts routed through an origin.
 pub mod origin {
-	pub use super::origin_impl::{Consumer, Dynamic, Info, Producer, Request, Requesting};
+	pub use super::origin_impl::{Consumer, Dynamic, Info, Interest, Producer, Request, Requesting};
 }
 
 /// Subscribing to broadcast (un)announcements from an origin.

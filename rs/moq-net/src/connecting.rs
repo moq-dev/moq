@@ -1,9 +1,14 @@
 //! Tracks a session's connection progress so `connect()` can block until it's done.
 //!
-//! Today "connecting" means every announce-prefix stream has received its initial
-//! set (AnnounceInit for Lite01/02, AnnounceOk + N for Lite05). It's deliberately
-//! generic so future work (e.g. extension negotiation) can register additional
-//! steps that must finish before a session is considered connected.
+//! Today "connecting" means every announce-prefix stream opened during connect has
+//! received its initial set (AnnounceInit for Lite01/02, AnnounceOk + N for Lite05).
+//! Announce streams are solicited lazily, so this only gates a session whose origin
+//! already has announce interest when it starts; one solicited later syncs through
+//! the interest ledger instead. The same drop-based countdown also reports a
+//! solicitor synced: moq-lite counts announce prefixes and moq-transport counts
+//! SUBSCRIBE_NAMESPACE responses. It's deliberately generic so future work (e.g.
+//! extension negotiation) can register additional steps that must finish before a
+//! session is considered connected.
 //!
 //! Backed by `kio`: each in-flight step holds a [`ConnectingProducer`], and the
 //! session is connected once they've all been dropped (which closes the channel).
@@ -22,7 +27,7 @@ use kio::{Consumer, Producer, Waiter};
 /// The inner producer exists purely for its `Clone` (adds a step) and `Drop` (closes
 /// the channel when the last one goes); it is never read, hence the allow.
 #[derive(Clone)]
-pub(super) struct ConnectingProducer(#[allow(dead_code)] Producer<()>);
+pub(crate) struct ConnectingProducer(#[allow(dead_code)] Producer<()>);
 
 /// Consumer side: returned by [`crate::lite::start`] and awaited by `connect()`.
 pub(crate) struct Connecting(Consumer<()>);
@@ -30,7 +35,7 @@ pub(crate) struct Connecting(Consumer<()>);
 impl Connecting {
 	/// Create a producer/consumer pair. The consumer reports "connected" once every
 	/// [`ConnectingProducer`] (the original plus any clones) has been dropped.
-	pub(super) fn new() -> (ConnectingProducer, Self) {
+	pub(crate) fn new() -> (ConnectingProducer, Self) {
 		let producer = Producer::new(());
 		let consumer = producer.consume();
 		(ConnectingProducer(producer), Self(consumer))

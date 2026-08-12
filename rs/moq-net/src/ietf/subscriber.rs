@@ -323,6 +323,9 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// The caller is responsible for opening the appropriate stream type
 	/// (virtual for v14/v15, real bidi for v16+), one per prefix.
 	///
+	/// `connected` is released once the peer acknowledges the request (or the
+	/// request fails), which is what reports the session's solicitor synced.
+	///
 	/// A failure here is per-prefix, so the caller decides what it means for the
 	/// session: [`is_protocol_violation`] separates the peer's fault (fatal) from a
 	/// stream of ours that simply died (survivable).
@@ -330,6 +333,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		&mut self,
 		mut stream: Stream<T, Version>,
 		prefix: PathOwned,
+		connected: crate::connecting::ConnectingProducer,
 	) -> Result<(), Error> {
 		// A peer that sent GOAWAY told us to stop opening requests on this session,
 		// announce-interest included (draft-19 sect 10.4).
@@ -389,6 +393,11 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		}
 
 		tracing::debug!(%prefix, "subscribe_namespace ok");
+
+		// The acknowledgment is the closest thing moq-transport has to an
+		// initial-set boundary; report this prefix's solicitation delivered. An
+		// early error above reports it the same way via scope exit.
+		drop(connected);
 
 		// The extension changes the NAMESPACE encoding, so we can't parse one until
 		// the peer's SETUP says whether it negotiated.
@@ -1484,7 +1493,9 @@ mod tests {
 		);
 
 		let stream = Stream::open(&mut session.clone(), Version::Draft16).await.unwrap();
-		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("cam").to_owned()));
+		let connected = crate::connecting::Connecting::new().0;
+		let mut run =
+			std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("cam").to_owned(), connected));
 		// Parks awaiting the peer's response; the request is already on the wire.
 		assert!(futures::poll!(run.as_mut()).is_pending());
 
@@ -1553,7 +1564,8 @@ mod tests {
 		let prefix = subscriber.subscribe_prefixes().pop().expect("one prefix");
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		// Parks on the read after the scripted NAMESPACE is consumed.
-		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix));
+		let connected = crate::connecting::Connecting::new().0;
+		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, connected));
 		for _ in 0..100 {
 			// The result is deliberately ignored: a regressed mount lands out of scope
 			// and errors here, which the assertions below name far better than a poll
@@ -1901,7 +1913,11 @@ mod tests {
 
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		subscriber
-			.run_subscribe_namespace(stream, crate::Path::new("").to_owned())
+			.run_subscribe_namespace(
+				stream,
+				crate::Path::new("").to_owned(),
+				crate::connecting::Connecting::new().0,
+			)
 			.await
 			.expect("a clean FIN is not an error");
 		settle().await;
