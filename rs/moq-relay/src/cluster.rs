@@ -1439,10 +1439,28 @@ fn is_legacy_peer(peer: &str) -> bool {
 /// session. Drops the query (the jwt isn't part of a peer's identity) and lets
 /// `Url` normalize the scheme, host case, and default port. Falls back to the
 /// raw string if the peer can't be parsed.
+///
+/// It has to absorb every normalization a discovery path applies on the way in,
+/// or one relay gets two keys and is dialed twice.
 pub(crate) fn canonicalize_peer_key(peer: &str) -> String {
 	match peer_url(peer) {
 		Ok(mut url) => {
 			url.set_query(None);
+			// mDNS strips these before advertising, so a key that kept them would
+			// give one relay two identities.
+			url.set_fragment(None);
+			url.set_username("").ok();
+			url.set_password(None).ok();
+			// Gossip round-trips the URL through `Path`, which trims slashes and
+			// collapses runs of them, so the key normalizes the path the same way.
+			// A non-special scheme like `moqt` keeps its trailing slash otherwise,
+			// and `moqt://a.example:4443/` is an ordinary way to spell a node.
+			let segments: Vec<&str> = url.path().split('/').filter(|s| !s.is_empty()).collect();
+			let path = match segments.is_empty() {
+				true => String::new(),
+				false => format!("/{}", segments.join("/")),
+			};
+			url.set_path(&path);
 			url.into()
 		}
 		Err(_) => peer.to_string(),
@@ -1941,6 +1959,44 @@ mod tests {
 			canonicalize_peer_key(&advertised_node_url("rendezvous.example.com:4443")),
 			"https://rendezvous.example.com:4443/"
 		);
+	}
+
+	/// What a discovering relay reads off an mDNS record for this node, mirroring
+	/// [`lan_discovery`] and `moq_native::mdns::Config::with_node`.
+	fn advertised_lan(node: &str) -> String {
+		let mut url = peer_url(node).expect("valid node");
+		url.set_fragment(None);
+		url.set_username("").ok();
+		url.set_password(None).ok();
+		url.to_string()
+	}
+
+	/// The two discovery paths must land on the same peer key, or one relay gets
+	/// two [`DialMap`] entries and is dialed twice. This is self-triggering: the
+	/// session the mDNS dial opens is what carries the peer's gossip
+	/// advertisement, so the second dial follows the first.
+	///
+	/// Gossip round-trips the node URL through a [`Path`] (slashes trimmed and
+	/// collapsed) while mDNS strips the fragment and userinfo, so the key has to
+	/// absorb both. The realistic trigger is a trailing slash: `moqt` is not a
+	/// special scheme, so `Url` keeps one that `Path` would have dropped.
+	#[test]
+	fn gossip_and_mdns_agree_on_a_peer_key() {
+		for node in [
+			"moqt://a.example:4443/",
+			"https://a.example/edge/",
+			"https://a.example/#pos",
+			"https://user:pw@a.example/",
+			// Controls: spellings both paths already agreed on.
+			"https://a.example/",
+			"https://b.example:4443/deep/path",
+			"tcp://c.example:4443",
+			"rendezvous.example.com:4443",
+		] {
+			let gossip = canonicalize_peer_key(&advertised_node_url(&advertised(node)));
+			let mdns = canonicalize_peer_key(&advertised_lan(node));
+			assert_eq!(gossip, mdns, "{node} has two peer keys, so it is dialed twice");
+		}
 	}
 
 	/// With both sides canonical, exactly one of a pair dials.
