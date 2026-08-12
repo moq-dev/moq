@@ -3,7 +3,7 @@ import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
-import { NativeSession } from "./adapter.ts";
+import { NativeSession, type Session } from "./adapter.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
@@ -152,6 +152,51 @@ test("a declined advertisement is retried on the next change", async () => {
 
 	expect(seen).toContain(Path.from("second"));
 	expect(seen).toContain(Path.from("first"));
+
+	pub.close();
+});
+
+/**
+ * A peer out of stream credit rejects the open. That has to cost the namespace a turn,
+ * not the session its discovery: the announce loop is never restarted, so unwinding it
+ * would lose every future publish too.
+ */
+test("a failed stream open does not kill the announce loop", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const inner = new NativeSession(pair.server, VERSION, true);
+
+	let failures = 1;
+	const session: Session = {
+		version: inner.version,
+		acceptBi: () => inner.acceptBi(),
+		nextRequestId: () => inner.nextRequestId(),
+		close: () => inner.close(),
+		openBi: () => {
+			if (failures-- > 0) throw new Error("no stream credit");
+			return inner.openBi();
+		},
+	};
+
+	const pub = new Publisher(pair.server, session, { announce: false, interest: false });
+	pub.publish(Path.from("first"), new BroadcastProducer());
+
+	void pub.runPublishNamespaces();
+	await new Promise((resolve) => setTimeout(resolve, SETTLE));
+
+	// The refused open cost "first" its turn; the next change has to bring it back along
+	// with the newcomer.
+	pub.publish(Path.from("second"), new BroadcastProducer());
+
+	const seen = new Set<Path.Valid>();
+	for (let i = 0; i < 2; i++) {
+		const stream = await nextStream(pair.client);
+		if (!stream) break;
+		seen.add(await readPublishNamespace(stream));
+		await acceptPublishNamespace(stream);
+	}
+
+	expect(seen).toContain(Path.from("first"));
+	expect(seen).toContain(Path.from("second"));
 
 	pub.close();
 });

@@ -430,7 +430,9 @@ export class Publisher {
 				if (!next) break;
 			}
 		} catch (err: unknown) {
-			console.debug(`publish_namespace error: ${reason(error(err))}`);
+			// Nothing restarts this loop, so whatever got us here cost the session its
+			// discovery. Not a debug-level event.
+			console.warn(`publish_namespace loop failed: ${reason(error(err))}`);
 		} finally {
 			// Close out every open PUBLISH_NAMESPACE request.
 			for (const path of [...requests.keys()]) {
@@ -451,8 +453,14 @@ export class Publisher {
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) return false;
 
-		const request = await this.#session.openBi();
+		// Opening is inside the try because it fails like any other advertisement does:
+		// a peer out of stream credit rejects here, and letting that escape would unwind
+		// the announce loop and take discovery down for the whole session, rather than
+		// costing this one namespace a turn.
+		let request: Stream | undefined;
 		try {
+			request = await this.#session.openBi();
+
 			await request.writer.u53(PublishNamespace.id);
 			const msg = new PublishNamespace({ requestId, trackNamespace: path });
 			await msg.encode(request.writer, this.#session.version);
@@ -474,7 +482,7 @@ export class Publisher {
 		} catch (err: unknown) {
 			const e = error(err);
 			console.warn(`announce failed: broadcast=${path} error=${reason(e)}`);
-			request.abort(e);
+			request?.abort(e);
 			return false;
 		}
 	}
