@@ -34,11 +34,11 @@ use super::rate::{Control, Policy};
 #[cfg(feature = "capture")]
 const DEFAULT_FRAMERATE: u32 = 30;
 
-/// The geometry the rendition is probed at when the caller pins none. Only the codec string comes
-/// out of it, and only its level and dimensions depend on the size, so a camera that turns out to
-/// be something else updates those from its first keyframe. 720p is a size every encoder accepts,
-/// which matters because a backend that rejects the probe geometry falls through to another one and
-/// would answer for the wrong encoder.
+/// The geometry a capture rendition is probed at. Only the codec string is taken from the result,
+/// and of that only the level depends on the size, so a camera that comes up at something else
+/// updates it from the first keyframe. 720p is a size every encoder accepts, which matters because
+/// a backend that rejects the probe geometry falls through to another one and would answer for the
+/// wrong encoder.
 #[cfg(feature = "capture")]
 const PROBE_WIDTH: u32 = 1280;
 #[cfg(feature = "capture")]
@@ -252,17 +252,6 @@ impl std::fmt::Debug for Options {
 	}
 }
 
-/// The dimension to probe a capture rendition at, if there's one worth probing.
-///
-/// A capture size is a hint its backend may round or substitute, so it can be odd; the I420 encoder
-/// this probes with needs an even, non-zero one. Round down to something openable and leave the
-/// original hint for the camera to negotiate against. A hint too small to round to isn't a basis for
-/// a rendition either, so `None` falls back to probing for the codec alone.
-#[cfg(feature = "capture")]
-fn probe_dimension(hint: Option<u32>) -> Option<u32> {
-	hint.filter(|value| *value >= 2).map(|value| value & !1)
-}
-
 /// Capture a webcam and publish it as an on-demand video track.
 ///
 /// Returns when the broadcast is dropped (the track stops being announced)
@@ -270,6 +259,11 @@ fn probe_dimension(hint: Option<u32>) -> Option<u32> {
 /// subscriber is watching; frames are stamped from `clock`, so passing the
 /// same [`Clock`](moq_mux::Clock) to a concurrent audio publish keeps the two
 /// tracks aligned.
+///
+/// The catalog rendition is published before the camera opens, so it carries the codec and nothing
+/// else: a capture size is a hint the backend may round or substitute, and the encoder is built from
+/// whatever mode the camera negotiates. Dimensions, framerate and bitrate arrive with the first
+/// keyframe, so a consumer that needs them waits for that update.
 #[cfg(feature = "capture")]
 pub async fn publish_capture<E: CatalogExt>(
 	broadcast: moq_net::broadcast::Producer,
@@ -284,39 +278,22 @@ pub async fn publish_capture<E: CatalogExt>(
 		return Err(Error::InvalidFramerate(0));
 	}
 
-	// The rendition is probed before the camera opens, so the only geometry it can be probed at is
-	// the one the caller asked for. Pin a size and framerate and the rendition is exact; leave them
-	// out and the camera's own mode fills them in from its first keyframe.
-	let width = probe_dimension(capture.width);
-	let height = probe_dimension(capture.height);
-
-	let mut probe_config = encoder::Config::new(
-		width.unwrap_or(PROBE_WIDTH),
-		height.unwrap_or(PROBE_HEIGHT),
-		capture.framerate.unwrap_or(DEFAULT_FRAMERATE),
-	);
+	// Only the codec comes out of this probe. Nothing about the picture is knowable before the
+	// camera opens: a size is a hint its backend may round or substitute (macOS ignores it outright),
+	// and the encoder that actually runs is built from the mode the camera negotiates, not from here.
+	let mut probe_config = encoder::Config::new(PROBE_WIDTH, PROBE_HEIGHT, DEFAULT_FRAMERATE);
 	probe_config.bitrate = encode.bitrate;
 	probe_config.codec = encode.codec;
 	probe_config.kind = encode.kind.clone();
 
 	let mut rendition = probe_config.probe().await?;
-	// The probe geometry stands in for a camera nobody has opened yet, so it answers for the codec
-	// but not for the picture. Publishing a size the caller never asked for would be a guess a
-	// player could pick a rendition on, and unlike the codec string it costs nothing to omit: the
-	// first keyframe fills it in.
-	if width.is_none() {
-		rendition.coded_width = None;
-	}
-	if height.is_none() {
-		rendition.coded_height = None;
-	}
-	if capture.framerate.is_none() {
-		rendition.framerate = None;
-	}
-	// A derived bitrate describes the geometry it was derived from, and the encoder that actually
-	// runs is sized to the camera's negotiated mode rather than to this probe. Since the bitstream
-	// never carries a bitrate, anything published here is what the rendition reports forever, so
-	// keep only a target the caller pinned and let the track measure the rest.
+	// So publish none of it. These fields are optional, and a consumer that needs them (a transcoder
+	// sizing a ladder) waits for the first keyframe to fill them in, which beats sizing itself from
+	// a guess it can never revisit. The bitrate goes too unless the caller pinned one, since a
+	// derived one describes this probe's geometry and no bitstream carries a bitrate to correct it.
+	rendition.coded_width = None;
+	rendition.coded_height = None;
+	rendition.framerate = None;
 	if encode.bitrate.is_none() {
 		rendition.bitrate = None;
 	}
@@ -642,18 +619,5 @@ mod tests {
 		assert!(name.ends_with(".hev1"));
 		assert_eq!(config.coded_width, Some(320));
 		assert_eq!(config.coded_height, Some(240));
-	}
-
-	/// A capture size is a hint, so an odd one is legal and the camera rounds it. The probe encoder
-	/// can't, and failing there would reject a config that used to capture fine.
-	#[cfg(feature = "capture")]
-	#[test]
-	fn odd_capture_hints_round_down_to_something_probeable() {
-		assert_eq!(probe_dimension(Some(1279)), Some(1278));
-		assert_eq!(probe_dimension(Some(1280)), Some(1280));
-		// Nothing to stand behind: probe for the codec alone and publish no dimension.
-		assert_eq!(probe_dimension(Some(1)), None);
-		assert_eq!(probe_dimension(Some(0)), None);
-		assert_eq!(probe_dimension(None), None);
 	}
 }
