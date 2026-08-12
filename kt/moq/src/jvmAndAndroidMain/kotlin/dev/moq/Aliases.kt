@@ -67,6 +67,8 @@ typealias MediaStreamProducer = uniffi.moq.MoqMediaStreamProducer
 typealias MediaConsumer = uniffi.moq.MoqMediaConsumer
 /** A finite fetched media group: yields container-decoded frames until the group ends. */
 typealias MediaGroupConsumer = uniffi.moq.MoqMediaGroupConsumer
+/** A media timeline subscription: yields timestamp-to-group index entries. */
+typealias TimelineConsumer = uniffi.moq.MoqTimelineConsumer
 /** The write side of a raw-audio track; PCM written here is encoded inside the FFI boundary. */
 typealias AudioProducer = uniffi.moq.MoqAudioProducer
 /** The read side of a raw-audio track: yields decoded PCM frames. */
@@ -111,6 +113,10 @@ typealias Route = uniffi.moq.MoqRoute
 typealias Subscription = uniffi.moq.MoqSubscription
 /** Options for fetching one past group by sequence. */
 typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
+/** A media track's companion timestamp-to-group index. */
+typealias Timeline = uniffi.moq.MoqTimeline
+/** One timestamp-to-group mapping read from a media timeline track. */
+typealias TimelineEntry = uniffi.moq.MoqTimelineEntry
 /** Delivery settings for a raw track: priority, ordering, latency budget, and timescale. */
 typealias TrackInfo = uniffi.moq.MoqTrackInfo
 /** One audio frame: PCM payload bytes plus a presentation timestamp. */

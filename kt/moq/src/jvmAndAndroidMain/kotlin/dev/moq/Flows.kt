@@ -27,6 +27,8 @@ import uniffi.moq.MoqMediaGroupConsumer
 import uniffi.moq.MoqOriginConsumer
 import uniffi.moq.MoqOriginDynamic
 import uniffi.moq.MoqRoute
+import uniffi.moq.MoqTimelineConsumer
+import uniffi.moq.MoqTimelineEntry
 import uniffi.moq.MoqTrackConsumer
 import uniffi.moq.MoqTrackDynamic
 import uniffi.moq.MoqTrackRequest
@@ -73,6 +75,16 @@ fun MoqMediaConsumer.frames(): Flow<MoqMediaFrame> = flow {
 
 /** Stream of decoded frames from one finite, fetched media group. */
 fun MoqMediaGroupConsumer.frames(): Flow<MoqMediaFrame> = flow {
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        emit(next() ?: break)
+    }
+}.onCompletion { cause ->
+    if (cause is CancellationException) cancel()
+}
+
+/** Stream of indexed group boundaries from a media timeline track. */
+fun MoqTimelineConsumer.entries(): Flow<MoqTimelineEntry> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)
