@@ -141,14 +141,18 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
 ## Testing
 
-- `just check` lints and compiles the crates your branch changed plus every crate depending on them; `just fix` auto-fixes formatting/lint over the same set (`just rs _select` does the selection, via `cargo metadata`). `just check-all` / `just fix-all` cover every default member. `just rs test -p <crate>` (or `cargo nextest run -p <crate>`) for one crate.
+- `just check` lints and compiles the crates your branch changed plus every crate depending on them; `just test` runs their tests; `just fix` auto-fixes formatting/lint over the same set (`just rs _select` does the selection, via `cargo metadata`). `just check-all` / `just test all` / `just fix-all` cover every default member. `just rs test -p <crate>` (or `cargo nextest run -p <crate>`) for one crate.
+
+- **`check` compiles default features only, and so does CI.** The permutations moved to `just rs features` (nightly): `--all-features` costs a full extra workspace compile that shares almost no artifacts with the default one (measured at ~6 minutes on top of an already-warm tree), and `--no-default-features` is a third distinct feature set that shares nothing with either. `features` is the only thing that compiles moq-cli's `play`/`capture`, moq-audio's capture backend, quiche, and jemalloc, so a break in those lands on `main` and surfaces nightly rather than in review. `just rs audit` (cargo-deny) is nightly for the same workflow reason: an advisory is published without this repo changing.
+
+- **`check` runs no `cargo check` pass.** Clippy is a superset of it, and the two use different rustc wrappers, so running both compiles the workspace twice for one set of errors.
 
 - **Run tests through nextest, not `cargo test`.** `.config/nextest.toml` sets a
   `slow-timeout` with `terminate-after`, so a wedged test is reported as a
   TIMEOUT and killed; under `cargo test`'s harness the same test hangs forever,
   holding the target lock and burning a core. That matters here because a lost
   `kio` wakeup parks a task with nothing to wake it, which is a hang rather than
-  a failure. `just rs test` and `just rs ci` both use nextest. Doctests are the
+  a failure. `just rs test` uses nextest, and so does CI. Doctests are the
   one thing it skips (`just rs doctest` covers them), and `just rs loom` stays on
   `cargo test` since loom needs its own `--cfg loom` build.
 
@@ -171,8 +175,8 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
   - Windows (moq-video's Media Foundation and D3D11 backends): `just rs windows`, which must run ON Windows. You can't reproduce it elsewhere, since cross-compiling dies in openh264-sys2's vendored C++. It names `moq-cli/play` explicitly, since that feature is what pulls in moq-video's wgpu renderer and moq-audio's cpal output; a default-feature build compiles neither.
   - macOS (moq-video's VideoToolbox and ScreenCaptureKit, moq-audio's system audio): `just rs macos`, which must run ON macOS. Scoped to moq-video + moq-audio, and needs `--all-features` because moq-audio's capture backend is off by default.
-  - Linux: covered. `just rs ci` already runs `--all-features` in a dev shell carrying PipeWire and ALSA. VAAPI loads libva dynamically, so nvenc/nvdec/vaapi/pipewire all compile without libva installed.
-  - wasm32 (moq-wasm): `just rs wasm`. The crate root is `#![cfg(target_arch = "wasm32")]`, so a host-target `cargo check --workspace` compiles it down to nothing and sees no errors at all. This one needs no special host (the Nix shell carries the target), so `just rs ci` and `just check-all` both run it, and `just check` adds it when the diff touches `rs/moq-wasm/`. It's a compile gate, distinct from the root `just wasm`, which builds the shippable `@moq/wasm` package.
+  - Linux: covered nightly, not per-PR. `just rs features` runs `--all-features` in a dev shell carrying PipeWire and ALSA. VAAPI loads libva dynamically, so nvenc/nvdec/vaapi/pipewire all compile without libva installed.
+  - wasm32 (moq-wasm): `just rs wasm`. The crate root is `#![cfg(target_arch = "wasm32")]`, so a host-target `cargo check --workspace` compiles it down to nothing and sees no errors at all. This one needs no special host (the Nix shell carries the target), so `just check-all` always runs it and `just check` runs it whenever the diff touches any crate directory under `rs/`, not just `rs/moq-wasm/`: moq-wasm builds on moq-net, so a break in a dependency is invisible to every host-target pass. It's a compile gate, distinct from the root `just wasm`, which builds the shippable `@moq/wasm` package.
 
   What still compiles these automatically, and when:
 
@@ -182,7 +186,7 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
   Run the matching recipe by hand when you touch this code, and if you can't (no such host), say plainly in the PR that it's uncompiled rather than implying CI covered it.
 
-- **`just rs loom` model-checks concurrent handoffs in kio and moq-net.** It stays outside `check`/`ci`: `--cfg loom` swaps kio's Mutex/atomics for loom's instrumented ones, which rebuilds the whole dependency tree and can't share artifacts with a normal `cargo test`. Use it when developing or diagnosing concurrent handoffs. Budget about a minute of model checking on top of that build. The search is exhaustive on purpose, so don't reach for `preemption_bound` to speed it up; the recipe already buys the speed back with `--release`, which matters here because a model check reruns the body once per interleaving.
+- **`just rs loom` model-checks concurrent handoffs in kio and moq-net.** It stays outside `check` and `test`: `--cfg loom` swaps kio's Mutex/atomics for loom's instrumented ones, which rebuilds the whole dependency tree and can't share artifacts with a normal `cargo test`. Use it when developing or diagnosing concurrent handoffs. Budget about a minute of model checking on top of that build. The search is exhaustive on purpose, so don't reach for `preemption_bound` to speed it up; the recipe already buys the speed back with `--release`, which matters here because a model check reruns the body once per interleaving.
 
   Loom permutes every thread interleaving instead of hoping a stress loop hits the bad one. It caught a `ProducerWeak::produce` race that had been live for months, on iteration 4. Reading the results:
 

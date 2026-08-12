@@ -126,13 +126,19 @@ just build
 # Lint and compile what your branch changed
 just check
 
+# Test what your branch changed, same scope
+just test
+
 # Automatically fix some linting errors, same scope
 just fix
 
 # Same as the above, over every package
 just check-all
+just test all
 just fix-all
 ```
+
+CI runs `just check` and `just test`, so a green local run means a green CI run.
 
 See the [development guide](https://doc.moq.dev/setup/dev) and the [justfile](justfile) for more.
 

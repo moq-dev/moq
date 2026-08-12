@@ -49,11 +49,17 @@ _changed $BASE:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    # Resolve BASE: arg > upstream > origin/main. A branch's upstream is the
-    # branch it merges into, which is the base a `dev`-targeted branch needs.
-    # `git push -u` repoints upstream at the branch's own remote copy, which
-    # would diff HEAD against itself, so ignore that case (see CLAUDE.md).
+    # Resolve BASE: arg > $GITHUB_BASE_REF > upstream > origin/main. A branch's
+    # upstream is the branch it merges into, which is the base a `dev`-targeted
+    # branch needs. `git push -u` repoints upstream at the branch's own remote
+    # copy, which would diff HEAD against itself, so ignore that case (see
+    # CLAUDE.md). GITHUB_BASE_REF outranks the upstream because a PR checkout
+    # has no upstream configured, and the branch being merged into is exactly
+    # the base GitHub is asking about.
     base="$BASE"
+    if [[ -z "$base" && -n "${GITHUB_BASE_REF:-}" ]]; then
+    	base="origin/${GITHUB_BASE_REF}"
+    fi
     if [[ -z "$base" ]]; then
     	base=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
     	if [[ -z "$base" || "$base" == */"$(git branch --show-current)" ]]; then
@@ -73,14 +79,48 @@ _changed $BASE:
     	git ls-files --others --exclude-standard
     } | sort -u
 
-# Fast inner-loop checks. Lints and compiles only the packages the branch
-# changed plus everything depending on them, so several worktrees can build at
-# once. `check-all` is the unscoped suite.
+# Tools every scope guards with `command -v`, so an incomplete local toolchain
+# checks less instead of failing. That trade is wrong in CI, where a skip is
+# indistinguishable from a pass, so CI exports MOQ_STRICT=1 and this turns the
+# whole set into a precondition. Checked up front, and as one list, so a missing
+# tool is reported before a long compile rather than after it.
+
+# Fail when a tool `check` would otherwise skip is missing. No-op unless MOQ_STRICT.
+[private]
+_tools:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [[ -n "${MOQ_STRICT:-}" ]] || exit 0
+
+    tools=(actionlint bun cargo go gradle java jq nix nixfmt shellcheck shfmt taplo uniffi-bindgen-go uv)
+    # The OBS lints ship only in the Linux dev shell (nixpkgs marks obs-studio
+    # broken on Darwin). Swift is absent on purpose: it exists only on macOS,
+    # where swift.yml is the gate, and `swift check` skips off-macOS by design.
+    if [[ "$(uname -s)" == "Linux" ]]; then
+    	tools+=(clang-format gersemi)
+    fi
+
+    missing=()
+    for tool in "${tools[@]}"; do
+    	command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+    done
+    if ((${#missing[@]})); then
+    	echo "error: MOQ_STRICT is set but these tools are missing: ${missing[*]}" >&2
+    	echo "       run inside 'nix develop', or unset MOQ_STRICT to skip what isn't installed" >&2
+    	exit 1
+    fi
+
+# Lints and compiles only the packages the branch changed plus everything
+# depending on them, so several worktrees can build at once. This is also what
+# CI runs (with MOQ_STRICT=1), so there is no second, drifting definition of
+# "checked". Tests are the sibling `just test`; `check-all` is the unscoped suite.
 
 # Lint and compile what the branch changed since BASE, plus its dependents.
 check $BASE="":
     #!/usr/bin/env bash
     set -euo pipefail
+
+    just _tools
 
     files=$(just _changed "$BASE")
 
@@ -89,10 +129,20 @@ check $BASE="":
     if [[ -n "$files" ]]; then
     	just js check "$files"
     	just rs check-changed "$files"
+    	just py check "$files"
+    	just kt check "$files"
+    	just swift check "$files"
+    	just go check "$files"
     	# The OBS plugin has no compile job in PR CI, so its lint + CMake
     	# guards are the only automated coverage it gets.
     	if echo "$files" | grep -q '^cpp/obs/'; then
     		just obs check
+    	fi
+    	# Validates flake eval + dev shell build; it no longer compiles the
+    	# workspace, so it's cheap. Gated anyway: a pure doc/JS PR can't
+    	# affect flake eval.
+    	if echo "$files" | grep -qE '(^rs/|^Cargo\.(toml|lock)$|^flake\.lock$|\.nix$)'; then
+    		just _flake
     	fi
     else
     	echo "check: nothing changed."
@@ -100,14 +150,28 @@ check $BASE="":
 
     just _check-common
 
-# Check every JavaScript workspace, every default Rust member, and moq-wasm.
+# Check every package in every language, plus moq-wasm.
 check-all *args:
+    just _tools
     just js check
     just rs check {{ args }}
     # Not covered by the line above: moq-wasm only exists on the wasm32 target.
     just rs wasm
+    just py check
+    just kt check
+    just swift check
+    just go check
     just obs check
+    just _flake
     just _check-common
+
+# Skips when nix is absent: the flake is not a precondition for working on the
+# repo, and `_tools` already makes it required under MOQ_STRICT.
+
+# Validate flake evaluation and the dev shell build.
+[private]
+_flake:
+    @if command -v nix >/dev/null 2>&1; then nix flake check; fi
 
 # Repository-wide non-compiling checks shared by `check` and `check-all`.
 # Optional shell, workflow, TOML, Nix, and justfile lints skip if missing.
@@ -165,69 +229,6 @@ _check-common:
     @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --check --justfile "$f"; done
     just gh check
 
-# Run per-language CI against BASE, skipping scopes with no relevant diff.
-ci BASE="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    # Resolve BASE: arg > $GITHUB_BASE_REF > origin/main.
-    if [[ -n "{{ BASE }}" ]]; then
-    	base="{{ BASE }}"
-    elif [[ -n "${GITHUB_BASE_REF:-}" ]]; then
-    	base="origin/${GITHUB_BASE_REF}"
-    else
-    	base="origin/main"
-    fi
-
-    # One git diff for the whole run; pass the file list to each per-lang.
-    merge_base=$(git merge-base "$base" HEAD) || {
-    	echo "error: cannot resolve merge-base against $base (is full history fetched?)" >&2
-    	exit 1
-    }
-    files=$(git diff --name-only "$merge_base")
-
-    # Skip per-lang dispatch when nothing changed (empty FILES means
-    # "force-run" to per-lang, which is the wrong semantic here).
-    if [[ -n "$files" ]]; then
-    	just js    ci "$files"
-    	just rs    ci "$files"
-    	just py    ci "$files"
-    	just kt    ci "$files"
-    	just swift ci "$files"
-    	just go    ci "$files"
-    fi
-
-    # The OBS plugin has no compile job in PR CI, so its lint + CMake guards
-    # are the only automated coverage it gets. Empty $files is a force-run,
-    # so run then.
-    if [[ -z "$files" ]] || echo "$files" | grep -q '^cpp/obs/'; then
-    	just obs check
-    else
-    	echo "ci: no cpp/obs changes; skipping obs check."
-    fi
-
-    # Validate the flake (eval + dev shell build) via `nix flake check`. This no
-    # longer compiles the workspace -- the heavy Rust CI (clippy/doc/test) moved
-    # to `just rs ci` (plain cargo), leaving only lightweight Nix checks -- so
-    # it's cheap. Gate it to Nix/Rust input changes anyway: a pure doc/JS PR
-    # can't affect flake eval. Empty $files is a force-run, so run then.
-    if [[ -z "$files" ]] || echo "$files" | grep -qE '(^rs/|^Cargo\.(toml|lock)$|^flake\.lock$|\.nix$)'; then
-    	nix flake check
-    else
-    	echo "ci: no Nix/Rust inputs changed; skipping nix flake check."
-    fi
-
-    # Cheap; always run. `bun install` is needed for remark-cli, since
-    # `just js ci` (where bun deps would otherwise install) is skipped
-    # when the diff has no JS-scoped files.
-    bun install --frozen-lockfile
-    bun remark . --quiet --frail
-    just _shell check
-    RUST_LOG=error taplo format --check
-    nixfmt --check $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*')
-    for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --check --justfile "$f"; done
-    just gh ci
-
 # Scoped exactly like `check`, because `clippy --fix` compiles what it fixes.
 # `fix-all` is the unscoped version.
 
@@ -241,6 +242,7 @@ fix $BASE="":
     if [[ -n "$files" ]]; then
     	just js fix "$files"
     	just rs fix-changed "$files"
+    	just py fix "$files"
     	if echo "$files" | grep -q '^cpp/obs/'; then
     		just obs fix
     	fi
@@ -248,7 +250,6 @@ fix $BASE="":
     	echo "fix: nothing changed."
     fi
 
-    just py fix
     just _fix-common
 
 # Auto-fix every JavaScript workspace and every default Rust member.

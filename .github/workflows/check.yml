@@ -37,7 +37,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Full history so `just changed` can diff against origin/$GITHUB_BASE_REF.
+          # Full history so `just check` can diff against origin/$GITHUB_BASE_REF.
           fetch-depth: 0
 
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
@@ -51,5 +51,23 @@ jobs:
         with:
           cache-on-failure: true
 
-      # `just ci` calls `just changed` internally to skip unchanged scopes.
-      - run: nix develop --command just ci
+      # The same two recipes a developer runs locally. Both diff against
+      # origin/$GITHUB_BASE_REF and touch only the packages this PR changed plus
+      # their dependents, so a one-crate PR compiles one crate.
+      #
+      # MOQ_STRICT turns every "tool missing, skipping" guard into an error.
+      # Locally an absent formatter means less gets checked; here it would mean
+      # a green run that checked nothing, which is the failure mode worth
+      # spending a preflight on.
+      - name: Check
+        run: nix develop --command just check
+        env:
+          MOQ_STRICT: 1
+
+      # NEXTEST_PROFILE picks up the longer hang timeout in .config/nextest.toml;
+      # without it a runner under load could trip the local one.
+      - name: Test
+        run: nix develop --command just test
+        env:
+          MOQ_STRICT: 1
+          NEXTEST_PROFILE: ci

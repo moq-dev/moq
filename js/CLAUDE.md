@@ -92,8 +92,14 @@ Plain custom elements built directly on `@moq/signals`, no framework (except moq
 ## Tooling and testing
 
 - Use `bun` for everything (install, scripts, test runner). Never npm/yarn/pnpm.
+
 - Biome handles formatting and linting; config is the repo-root `biome.jsonc` (tabs, width 4, line length 120). `just fix` runs `bun biome check --write`.
+
 - Tests are `*.test.ts` run by `bun test`. Add tests where easy (signals, varint, path, ring buffers, sync all have them).
-- `just js check` type-checks + biome-checks every package; `just js test` runs all unit tests; `just js build` builds all. From repo root these are `just check` / `just fix` / `just build`. Root `just check` / `just fix` skip the JS half entirely when the branch's diff has no JS files, but run all of it otherwise (unlike the Rust half, which scopes down to the changed crates: `tsc -b` is fast enough that per-package selection wasn't worth the machinery).
+
+- `just js check` type-checks, biome-checks, **and builds** every package; `just js test` runs all unit tests. From repo root these are `just check` / `just test` / `just fix`. Root `just check` / `just test` / `just fix` skip the JS half entirely when the branch's diff has no JS files, but run all of it otherwise (unlike the Rust half, which scopes down to the changed crates: `tsc -b` is fast enough that per-package selection wasn't worth the machinery).
+
+- **`build` is part of `check`, not a separate gate.** The per-package `check` script is `tsc --noEmit`, which never runs declaration emit, so the errors that only appear when writing a `.d.ts` (TS4023 and friends) pass `check` and then break a JSR/npm publish. The whole workspace builds in about 20s, which is cheap enough to fold in rather than discover at release time.
+
 - For UI / web changes (`watch`, `publish`, `demo/web`, anything touching playback or the `<moq-watch>`/`<moq-publish>` components), don't stop at unit tests: run `just dev` and exercise the change in a real browser via the Claude-in-Chrome plugin (if installed), since WebTransport + WebCodecs playback only surfaces at runtime.
   - `<moq-watch>` gates video download/render on `intersecting && !document.hidden`, so a tab that isn't the frontmost visible one renders black at 0 fps even while bytes download (the Claude-in-Chrome tab often reports `document.hidden`). Set `visible="always"` on the element to bypass the gate (it forces download regardless of viewport or tab visibility), or bring the browser window frontmost so `visibilityState` flips to `visible`.

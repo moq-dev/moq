@@ -1,0 +1,62 @@
+name: Nightly
+
+# The gates that don't belong on a pull request.
+#
+# `audit` is time-based, not diff-based: an advisory is published without this
+# repo changing, so a per-PR run both fires on PRs that can't affect it and
+# stays silent on the days nobody pushes. `features` is diff-independent for a
+# different reason: it compiles the workspace at feature sets that share almost
+# no artifacts with the default one, which is several minutes of duplicate work
+# that a PR gate can't justify for how rarely it catches something.
+#
+# A failure here lands on main rather than being caught in review, which is the
+# accepted trade. Anything that must block a merge belongs in check.yml.
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 7 * * *"
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  nightly:
+    name: Nightly
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
+        with:
+          tool-cache: false
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+        with:
+          determinate: false
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+
+      # Runs even if the audit fails: a fresh advisory shouldn't hide a
+      # compile break in the feature permutations.
+      - name: Features
+        run: nix develop --command just rs features
+        env:
+          NEXTEST_PROFILE: ci
+
+      - name: Audit
+        if: ${{ !cancelled() }}
+        run: nix develop --command just rs audit

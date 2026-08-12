@@ -227,9 +227,11 @@
           jq
         ];
 
-        # Linters / formatters required by `just ci`; `just check` and
-        # `just fix` guard each tool with `command -v` so they skip
-        # silently when the binary isn't on $PATH.
+        # Linters / formatters used by `just check` and `just fix`, which
+        # guard each tool with `command -v` so they skip silently when the
+        # binary isn't on $PATH. CI sets MOQ_STRICT=1, which turns that skip
+        # into an error (see `_tools` in the root justfile), so this list and
+        # that one have to stay in step.
         lintDeps = with pkgs; [
           shellcheck
           shfmt
@@ -334,11 +336,13 @@
 
         formatter = pkgs.nixfmt-tree;
 
-        # Heavy Rust CI (clippy / doc / test) runs as plain cargo via `just rs
-        # ci` (see rs/justfile), no longer through crane. `nix flake check` is
-        # kept -- it still validates flake eval + builds the dev shell -- but no
-        # longer compiles the workspace, so it's cheap. Release artifacts still
-        # build via crane `buildPackage` (see `packages` above / release-*.yml).
+        # Heavy Rust CI (clippy / doc / test) runs as plain cargo via `just
+        # check` and `just test` (see rs/justfile), no longer through crane.
+        # `nix flake check` is kept -- it still validates flake eval + builds the
+        # dev shell -- but no longer compiles the workspace, so it's cheap
+        # enough that `just check` runs it on any Nix/Rust input change. Release
+        # artifacts still build via crane `buildPackage` (see `packages` above /
+        # release-*.yml).
         #
         # On the self-hosted runner those cargo checks transparently reuse a
         # per-crate compiler cache (rustc is wrapped by sccache via the runner

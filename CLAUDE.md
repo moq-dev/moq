@@ -11,6 +11,7 @@ MoQ (Media over QUIC) is a next-generation live media delivery protocol providin
 ```bash
 # Code quality and testing
 nix develop --command just check        # Lint and compile what the branch changed
+nix develop --command just test         # Test what the branch changed, same scope
 nix develop --command just fix          # Auto-fix lint/formatting, same scope
 nix develop --command just check-all    # Same as check, over every package
 nix develop --command just fix-all      # Same as fix, over every package
@@ -19,9 +20,15 @@ nix develop --command just build        # Build all packages
 
 Use the Nix dev shell for project commands so local runs match CI tooling. If Nix is unavailable, use `cargo` or `bun` directly.
 
-`just check` and `just fix` both diff the branch against its base and touch only the crates that changed plus everything depending on them, which is what keeps them fast when several worktrees are building at once. They skip a language entirely when the diff doesn't touch it. Reach for `just check-all` / `just fix-all` when you want the unscoped suite, or pass an explicit base (`just check origin/dev`). See [Workflow](#workflow) for how the base is resolved.
+`just check`, `just test`, and `just fix` all diff the branch against its base and touch only the crates that changed plus everything depending on them, which is what keeps them fast when several worktrees are building at once. They skip a language entirely when the diff doesn't touch it. Reach for `just check-all` / `just test all` / `just fix-all` when you want the unscoped suite. See [Workflow](#workflow) for how the base is resolved.
 
-CI runs `just ci`, which layers a few checks on top of `just check-all` (notably `cargo doc` with `-D warnings`, so a broken doc link after a rename or visibility change passes `just check` but fails CI).
+To force a base, `just check origin/dev` and `just fix origin/dev` take it positionally. `just test` can't: it's a module, so `just test origin/dev` looks for a *recipe* named `origin/dev`. Name the recipe to get past that: `just test default origin/dev`.
+
+**CI runs exactly these recipes: `just check` then `just test`, with `MOQ_STRICT=1`.** There is no separate `just ci`, so there is no second definition of "checked" to drift from this one. The split is by cost, not by environment: `check` lints and compiles (plus `tsc -b` and the Python docs, which catch what `--noEmit` and autodoc can't), while `test` links and runs the test binaries, which is the expensive half.
+
+`MOQ_STRICT` is the one thing CI does differently. Every tool the checks use is guarded with `command -v` so an incomplete local toolchain checks less instead of failing; in CI that would be a green run that silently checked nothing, so the variable turns the whole set into an up-front precondition (`_tools` in the root justfile).
+
+Two gates live outside the PR path, in `.github/workflows/nightly.yml`: `just rs audit` (cargo-deny) because an advisory lands without this repo changing, and `just rs features` (the `--all-features` and `--no-default-features` compiles) because each is a full extra workspace compile that shares almost nothing with the default one. A break there lands on `main` rather than being caught in review, which is the accepted trade; anything that must block a merge belongs in `check`.
 
 ## Architecture
 
@@ -199,7 +206,7 @@ When making changes to the codebase:
    Then push with `git push origin HEAD`, **not** `git push -u`: `-u` repoints the upstream at the branch's own remote copy, and `just check` then has nothing to diff against and silently falls back to `origin/main`. On a `dev`-based branch that fallback drags in every commit `dev` is ahead by, so the check is correct but much slower than it needs to be.
 3. Make your code changes
 4. Run `just fix` before committing to auto-format and fix linting issues
-5. Run `just check` to verify everything passes. Both only touch the crates the branch changed plus their dependents, so use `just fix-all` / `just check-all` when you have changed something the diff can't attribute to a package (build config, a lint rule, a shared toolchain pin)
+5. Run `just check` and `just test` to verify everything passes, which is exactly what CI runs. All three only touch the crates the branch changed plus their dependents, so use `just fix-all` / `just check-all` / `just test all` when you have changed something the diff can't attribute to a package (build config, a lint rule, a shared toolchain pin)
 6. Walk the Cross-Package Sync table; update paired packages and docs in the same PR
 7. Add tests where they're easy to write; bug fixes need a regression test (see Root Cause First)
 8. Commit and push; follow [CONTRIBUTING.md](CONTRIBUTING.md) for commit messages, PR descriptions, and reviews

@@ -250,7 +250,7 @@ let
     '';
   };
 
-  # CI checks (clippy / doc / test) run as plain cargo via `just rs ci`, not
+  # CI checks (clippy / doc / test) run as plain cargo via `just check`, not
   # through crane/`nix flake check`. The self-hosted runner caches compilation
   # per-crate with sccache (wired into the runner environment, not here), so a
   # Cargo.lock change recompiles only the changed crate + its reverse-deps.
