@@ -4,7 +4,7 @@
  * @module
  */
 import type { Dispose } from "@moq/signals";
-import type { Producer as OriginProducer } from "../origin.ts";
+import type { Producer as OriginProducer, RequestSlot } from "../origin.ts";
 import type * as Path from "../path.ts";
 import type { Established } from "./established.ts";
 
@@ -103,8 +103,11 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
  */
 async function serveRequests(conn: Established, origin: OriginProducer): Promise<void> {
 	// The withdraws for the answers this session provided, so a dead session only takes
-	// back its own.
-	const answered = new Map<Path.Valid, Dispose>();
+	// back its own. Keyed by path but remembering the slot, because a path outlives its
+	// slot: the last handle closing tears the slot down and a new request installs a fresh
+	// one, and those two writes coalesce into a single wakeup. Matching on the path alone
+	// would read the new slot as already answered and leave it unanswered forever.
+	const answered = new Map<Path.Valid, { slot: RequestSlot; withdraw: Dispose }>();
 
 	let dead = false;
 	const closed = conn.closed.then(() => {
@@ -116,17 +119,19 @@ async function serveRequests(conn: Established, origin: OriginProducer): Promise
 		if (!map || dead) break;
 
 		for (const [path, slot] of map) {
-			if (answered.has(path) || slot.front.peek() !== undefined) continue;
+			if (answered.get(path)?.slot === slot || slot.front.peek() !== undefined) continue;
 			if (origin.routes(path)) continue;
 			const withdraw = origin.answer(path, conn.consume(path));
-			if (withdraw) answered.set(path, withdraw);
+			if (withdraw) answered.set(path, { slot, withdraw });
 		}
 
 		// A withdrawn request already released the answer; just forget our claim on the path.
-		for (const [path, withdraw] of [...answered]) {
-			if (map.has(path)) continue;
+		// A replaced slot counts as withdrawn: the answer we hold belongs to the slot that
+		// went away, not to whatever now occupies the path.
+		for (const [path, entry] of [...answered]) {
+			if (map.get(path) === entry.slot) continue;
 			answered.delete(path);
-			withdraw();
+			entry.withdraw();
 		}
 
 		// Woken by the table too, not just the requests: a path that stops being routed needs
@@ -135,7 +140,7 @@ async function serveRequests(conn: Established, origin: OriginProducer): Promise
 	}
 
 	// Session gone: withdraw our answers, waking a standby session to provide fresh ones.
-	for (const withdraw of answered.values()) {
+	for (const { withdraw } of answered.values()) {
 		withdraw();
 	}
 	answered.clear();
