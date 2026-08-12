@@ -1183,15 +1183,22 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		match target {
 			Target::Requests(_) => {
 				if let Some(mut request) = requests.remove(&suffix) {
-					// Best effort: the peer may already be gone.
-					let _ = request
-						.stream
-						.writer
-						.encode_message(&ietf::PublishNamespaceDone {
-							track_namespace: request.path.as_path(),
-							request_id: request.request_id,
-						})
-						.await;
+					// Draft-17+ removed PUBLISH_NAMESPACE_DONE: the FIN below is the whole
+					// withdrawal. Sending it anyway puts the type on the wire before the
+					// body fails to encode, and a receiver reading 0x09 there has no choice
+					// but to treat it as a protocol violation (see
+					// `Subscriber::terminal_publish_namespace`).
+					if matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
+						// Best effort: the peer may already be gone.
+						let _ = request
+							.stream
+							.writer
+							.encode_message(&ietf::PublishNamespaceDone {
+								track_namespace: request.path.as_path(),
+								request_id: request.request_id,
+							})
+							.await;
+					}
 
 					// The withdrawal rides this request's own stream, which drops with it, so
 					// it needs the acknowledgement before the drop-time reset can discard it.
@@ -2138,6 +2145,62 @@ mod tests {
 			occurrences(&log, b"second-cam"),
 			1,
 			"never retried once credit returned"
+		);
+	}
+
+	/// Draft-17+ has no PUBLISH_NAMESPACE_DONE, so a withdrawal there is the FIN and
+	/// nothing else. Writing the message anyway puts its type on the wire before the body
+	/// fails to encode, which the receiver can only read as a protocol violation, so every
+	/// unannounce would kill an otherwise healthy session.
+	///
+	/// Only reachable through the unsolicited loop, which is what this branch made the
+	/// default: the solicited path answers inline and never opens a request per namespace.
+	#[tokio::test]
+	async fn a_modern_withdrawal_is_the_fin_alone() {
+		const VERSION: Version = Version::Draft17;
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let cam = origin
+			.create_broadcast("solo-cam", crate::broadcast::Route::announced())
+			.unwrap();
+		settle().await;
+
+		let session =
+			crate::lite::test_transport::ScriptedSession::per_stream(vec![publish_namespace_ok(VERSION).await]);
+		let log = session.log.clone();
+
+		let publisher = Publisher::new(
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			declared(None),
+			VERSION,
+		);
+
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"solo-cam") > 0 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, b"solo-cam"), 1, "the advertisement never went out");
+
+		let advertised = log.writes.lock().unwrap().len();
+
+		// Unannounce, which retires the request the advertisement opened.
+		drop(cam);
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+
+		assert_eq!(
+			log.writes.lock().unwrap().len(),
+			advertised,
+			"a draft-17+ withdrawal wrote a message; the FIN alone retracts"
 		);
 	}
 

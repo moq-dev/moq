@@ -607,12 +607,19 @@ export class Publisher {
 		if (!request) return;
 		requests.delete(path);
 
-		try {
-			await request.stream.writer.u53(PublishNamespaceDone.id);
-			const done = new PublishNamespaceDone({ trackNamespace: request.path, requestId: request.requestId });
-			await done.encode(request.stream.writer, this.#session.version);
-		} catch {
-			// Stream might already be closed
+		// Draft-17+ removed PUBLISH_NAMESPACE_DONE: the close below is the whole
+		// withdrawal. Sending it anyway puts the type on the wire before the body throws,
+		// and a receiver reading 0x09 there has no choice but to treat it as a protocol
+		// violation.
+		const version = this.#session.version;
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+			try {
+				await request.stream.writer.u53(PublishNamespaceDone.id);
+				const done = new PublishNamespaceDone({ trackNamespace: request.path, requestId: request.requestId });
+				await done.encode(request.stream.writer, version);
+			} catch {
+				// Stream might already be closed
+			}
 		}
 		request.stream.close();
 	}
