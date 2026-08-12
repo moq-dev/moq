@@ -38,6 +38,7 @@ pub fn udp(addr: SocketAddr) -> std::io::Result<UdpSocket> {
 /// v6-only can't send to a mapped destination, and it looks identical from the
 /// outside: `local_addr` reads `[::]` either way. Always false for an IPv4
 /// socket, which reaches IPv4 natively rather than through mapping.
+#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 pub(crate) fn udp_is_dual_stack(socket: &UdpSocket) -> bool {
 	match socket.local_addr() {
 		Ok(addr) if addr.is_ipv6() => socket2::SockRef::from(socket).only_v6().is_ok_and(|only| !only),

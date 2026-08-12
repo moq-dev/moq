@@ -1,10 +1,19 @@
 use crate::{Backoff, Error, QuicBackend, Reconnect};
-#[cfg(feature = "websocket")]
+#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
 use std::future::Future;
 use std::net;
 use url::Url;
 
 const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long to wait before also dialing the next resolved address, unless
+/// overridden by `--client-failover-delay`. RFC 8305's recommended Connection
+/// Attempt Delay.
+///
+/// Lives here rather than in [`crate::failover`], which is compiled only for the
+/// transports that dial an address themselves: the resolved default is config, so
+/// [`ClientConfig::resolved_failover_delay`] has to answer in every build.
+pub(crate) const DEFAULT_FAILOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Configuration for the MoQ client.
 #[derive(Clone, Debug, clap::Parser, serde::Serialize, serde::Deserialize)]
@@ -131,7 +140,7 @@ impl ClientConfig {
 	/// it resolves to, so `ClientConfig::default().resolved_failover_delay()` is the
 	/// default itself.
 	pub fn resolved_failover_delay(&self) -> std::time::Duration {
-		self.failover_delay.unwrap_or(crate::failover::DEFAULT_DELAY)
+		self.failover_delay.unwrap_or(DEFAULT_FAILOVER_DELAY)
 	}
 
 	/// The deadline one connection attempt will actually get, dial and handshake
@@ -168,7 +177,16 @@ pub struct Client {
 	/// The single resolved set of protocol versions, used to advertise moq ALPNs across
 	/// every transport (passed into the QUIC backends' `connect` and used directly for
 	/// raw TCP/UDS qmux and WebSocket). Resolved once in [`Client::new`] so the ALPN list
-	/// can't diverge between transports.
+	/// can't diverge between transports. iroh is the exception: it negotiates over the
+	/// full `moq_net::ALPNS` rather than the configured subset, so it reads nothing here.
+	#[cfg(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
+	))]
 	versions: moq_net::Versions,
 	/// The URL from [`ClientConfig::connect`], dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
@@ -181,6 +199,9 @@ pub struct Client {
 	failover_delay: std::time::Duration,
 	#[cfg(feature = "websocket")]
 	websocket: crate::websocket::Client,
+	/// Only the rustls-based dials read this. quiche builds its own TLS stack, and the
+	/// plaintext qmux transports have none.
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "websocket"))]
 	tls: rustls::ClientConfig,
 	#[cfg(feature = "noq")]
 	noq: Option<crate::noq::NoqClient>,
@@ -202,13 +223,14 @@ impl Client {
 		feature = "noq",
 		feature = "quinn",
 		feature = "quiche",
+		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
 		feature = "uds"
 	)))]
 	pub fn new(_config: ClientConfig) -> crate::Result<Self> {
 		Err(Error::NoBackend(
-			"no QUIC or WebSocket backend compiled; enable noq, quinn, quiche, websocket, tcp, or uds feature",
+			"no backend compiled; enable noq, quinn, quiche, iroh, websocket, tcp, or uds feature",
 		))
 	}
 
@@ -217,6 +239,7 @@ impl Client {
 		feature = "noq",
 		feature = "quinn",
 		feature = "quiche",
+		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
 		feature = "uds"
@@ -228,6 +251,10 @@ impl Client {
 		config.quic.validate()?;
 		config.backoff.validate()?;
 
+		// Built even in a build that reads it nowhere (quiche keeps its own TLS stack,
+		// the plaintext qmux transports have none), so a bad `--client-tls-*` is
+		// rejected here rather than at the first dial.
+		#[allow(unused_variables)]
 		let tls = config.tls.build()?;
 
 		#[cfg(feature = "noq")]
@@ -245,6 +272,7 @@ impl Client {
 		};
 
 		#[cfg(feature = "quiche")]
+		#[allow(unreachable_patterns)]
 		let quiche = match backend {
 			QuicBackend::Quiche => Some(crate::quiche::QuicheClient::new(&config)?),
 			_ => None,
@@ -258,6 +286,14 @@ impl Client {
 
 		Ok(Self {
 			moq: moq_net::Client::new().with_versions(versions.clone()),
+			#[cfg(any(
+				feature = "noq",
+				feature = "quinn",
+				feature = "quiche",
+				feature = "websocket",
+				feature = "tcp",
+				feature = "uds"
+			))]
 			versions,
 			connect: config.connect,
 			timeout,
@@ -266,6 +302,7 @@ impl Client {
 			failover_delay,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
+			#[cfg(any(feature = "noq", feature = "quinn", feature = "websocket"))]
 			tls,
 			#[cfg(feature = "noq")]
 			noq,
@@ -449,7 +486,9 @@ impl Client {
 	async fn connect_inner(&self, url: Url) -> crate::Result<(moq_net::Session, moq_net::Driver)> {
 		// Transports with no request URI of their own advertise the request target in the
 		// SETUP instead; `setup_path` returns `None` for the ones that carry a URI, where
-		// sending it again is a protocol violation.
+		// sending it again is a protocol violation. An iroh-only build reads none of this:
+		// that dial waits for the negotiated binding and builds its own.
+		#[allow(unused_variables)]
 		let moq = self.moq_with_path(setup_path(&url));
 
 		// Plain TCP (qmux, no TLS). Explicit opt-in scheme; never raced against
@@ -555,7 +594,10 @@ impl Client {
 	/// `moq` is the QUIC-side builder, which carries the SETUP path for a raw QUIC dial.
 	/// The WebSocket fallback uses the plain builder: qmux over WebSocket carries the
 	/// path in its request URI, so repeating it in the SETUP is a protocol violation.
-	#[cfg(feature = "websocket")]
+	///
+	/// Only compiled when there is a QUIC dial to race: a WebSocket-only build connects
+	/// over the fallback directly.
+	#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
 	async fn race_moq_connect<Q, S>(
 		&self,
 		moq: &moq_net::Client,
@@ -642,14 +684,14 @@ fn setup_path(url: &Url) -> Option<String> {
 	}
 }
 
-#[cfg(feature = "websocket")]
+#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
 #[derive(Debug, PartialEq, Eq)]
 enum TransportRace<Q, W> {
 	Quic(Q),
 	WebSocket(W),
 }
 
-#[cfg(feature = "websocket")]
+#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
 async fn race_transport_connect<Q, W, QT, WT>(quic: Q, websocket: W) -> crate::Result<TransportRace<QT, WT>>
 where
 	Q: Future<Output = crate::Result<QT>>,
@@ -996,7 +1038,7 @@ mod tests {
 		assert_eq!(config.versions().alpns().len(), moq_net::ALPNS.len());
 	}
 
-	#[cfg(feature = "websocket")]
+	#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
 	#[tokio::test]
 	async fn race_transport_connect_stops_on_quic_auth_error() {
 		let quic = async { Err::<usize, _>(crate::ConnectError::Unauthorized.into()) };
@@ -1010,7 +1052,7 @@ mod tests {
 		assert_eq!(err.connect_error(), Some(crate::ConnectError::Unauthorized));
 	}
 
-	#[cfg(feature = "websocket")]
+	#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
 	#[tokio::test]
 	async fn race_transport_connect_keeps_websocket_after_quic_non_auth_error() {
 		let quic = async { Err::<usize, _>(Error::ConnectFailed) };
@@ -1020,7 +1062,7 @@ mod tests {
 		assert_eq!(value, super::TransportRace::WebSocket(7));
 	}
 
-	#[cfg(feature = "websocket")]
+	#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
 	#[tokio::test]
 	async fn race_transport_connect_returns_when_quic_transport_connects() {
 		let quic = async { Ok("quic") };
@@ -1034,6 +1076,15 @@ mod tests {
 		.expect("race waited for WebSocket after QUIC transport connected")
 		.unwrap();
 		assert_eq!(value, super::TransportRace::Quic("quic"));
+	}
+
+	/// The resolved default has to exist in every build, including ones that compile
+	/// no address-racing transport at all, which is what broke in #2773.
+	#[test]
+	fn failover_delay_defaults_to_the_rfc_8305_stagger() {
+		let config = ClientConfig::parse_from(["test"]);
+		assert_eq!(config.failover_delay, None);
+		assert_eq!(config.resolved_failover_delay(), std::time::Duration::from_millis(250));
 	}
 
 	#[test]

@@ -8,6 +8,15 @@ use crate::{Error, QuicBackend};
 use moq_net::Session;
 use url::Url;
 
+// Only the transports that finish their handshake in a spawned future need `.boxed()`;
+// the stream listeners hand back an already-built `Request`.
+#[cfg(any(
+	feature = "noq",
+	feature = "quinn",
+	feature = "quiche",
+	feature = "iroh",
+	feature = "websocket"
+))]
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
@@ -110,6 +119,7 @@ impl ServerConfig {
 }
 
 /// Default bind address used when [`ServerConfig::bind`] is not set.
+#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 pub(crate) const DEFAULT_BIND: &str = "[::]:443";
 
 /// Server for accepting MoQ connections.
@@ -141,6 +151,9 @@ impl Server {
 	/// The stream (`tcp`/`unix`) listeners bind lazily on the first
 	/// [`accept`](Self::accept), since they need a runtime.
 	pub fn new(config: ServerConfig) -> crate::Result<Self> {
+		// `default_quic_backend` panics when no backend is compiled, so a WebSocket- or
+		// stream-only build must not ask it.
+		#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 		let backend = config.backend.clone().unwrap_or_else(crate::default_quic_backend);
 
 		let versions = config.versions();
@@ -153,6 +166,9 @@ impl Server {
 		let build_quic = config.bind.is_some() || !config.has_stream_listener();
 
 		if build_quic && !config.tls.root.is_empty() {
+			// Only a QUIC backend validates client certificates; the qmux listeners
+			// (tcp/unix/websocket) carry no TLS of their own.
+			#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 			let mtls_supported = match backend {
 				#[cfg(feature = "quinn")]
 				QuicBackend::Quinn => true,
@@ -163,6 +179,9 @@ impl Server {
 				#[allow(unreachable_patterns)]
 				_ => false,
 			};
+			#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
+			let mtls_supported = false;
+
 			if !mtls_supported {
 				return Err(Error::MtlsUnsupported);
 			}
@@ -329,6 +348,7 @@ impl Server {
 		feature = "quinn",
 		feature = "quiche",
 		feature = "iroh",
+		feature = "websocket",
 		feature = "tcp",
 		all(feature = "uds", unix)
 	)))]
@@ -336,7 +356,7 @@ impl Server {
 	///
 	/// Panics: no transport feature is compiled in, so nothing can be accepted.
 	pub async fn accept(&mut self) -> Option<Request> {
-		unreachable!("no transport compiled; enable a QUIC backend, tcp, or uds feature");
+		unreachable!("no transport compiled; enable a QUIC backend, websocket, tcp, or uds feature");
 	}
 
 	/// The accept-loop health of every listener this server owns that performs a real
@@ -397,6 +417,7 @@ impl Server {
 		feature = "quinn",
 		feature = "quiche",
 		feature = "iroh",
+		feature = "websocket",
 		feature = "tcp",
 		all(feature = "uds", unix)
 	))]
@@ -621,8 +642,8 @@ impl Server {
 		{
 			let _ = self.websocket.take();
 		}
-		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh")))]
-		unreachable!("no QUIC backend compiled");
+		// The stream (tcp/unix) listeners have nothing to close here: their accept
+		// loops own the sockets and are aborted when this `Server` drops.
 	}
 }
 

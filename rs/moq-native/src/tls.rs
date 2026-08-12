@@ -435,6 +435,7 @@ impl Client {
 	/// plaintext fetch, and there is nothing to bootstrap when verification is
 	/// disabled. With CA roots (the default), `http://` is the deliberate
 	/// per-connection way to pin a self-signed relay, so it is allowed.
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub(crate) fn allows_http_bootstrap(&self) -> bool {
 		self.effective_fingerprint().is_empty() && !self.effective_disable_verify().unwrap_or_default()
 	}
@@ -754,9 +755,11 @@ impl PeerIdentity {
 }
 
 /// The certificates a server is currently serving.
+///
+/// Only a QUIC backend serves TLS of its own, so nothing else populates this.
+#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 #[derive(Debug, Default)]
 pub(crate) struct Info {
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub(crate) certs: Vec<Arc<rustls::sign::CertifiedKey>>,
 	pub(crate) fingerprints: Vec<String>,
 }

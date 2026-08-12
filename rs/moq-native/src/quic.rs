@@ -356,6 +356,7 @@ impl Server {
 	}
 
 	/// The per-connection knobs with defaults applied, ready to hand to a backend.
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub(crate) fn resolve(&self) -> Resolved {
 		Resolved::new(
 			self.max_streams,
@@ -478,6 +479,8 @@ mod tests {
 		assert!(!quic.gso_disabled());
 	}
 
+	// `Server::resolve` only exists where a backend consumes it.
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	#[test]
 	fn zero_keep_alive_disables_it() {
 		let disabled = Server {

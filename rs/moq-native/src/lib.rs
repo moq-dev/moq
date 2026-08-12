@@ -35,6 +35,9 @@ pub mod tcp;
 pub mod tls;
 #[cfg(all(feature = "uds", unix))]
 pub mod unix;
+// Resolving a `host:port` bind string is a QUIC-listener concern; the stream
+// listeners take a `SocketAddr`/path straight from their config.
+#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 mod util;
 #[cfg(feature = "watch")]
 pub mod watch;
@@ -159,6 +162,11 @@ pub fn qlog_supported() -> bool {
 	cfg!(feature = "qlog")
 }
 
+/// The backend a config without an explicit `--*-backend` gets.
+///
+/// Only compiled when there is one to pick: a build with no QUIC backend never
+/// reaches for a default, since `QuicBackend` has no variants there.
+#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 fn default_quic_backend() -> QuicBackend {
 	#[cfg(feature = "quinn")]
 	{
@@ -172,8 +180,6 @@ fn default_quic_backend() -> QuicBackend {
 	{
 		QuicBackend::Quiche
 	}
-	#[cfg(all(not(feature = "quiche"), not(feature = "quinn"), not(feature = "noq")))]
-	panic!("no QUIC backend compiled; enable noq, quinn, or quiche feature");
 }
 
 #[cfg(test)]

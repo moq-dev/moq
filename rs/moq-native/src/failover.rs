@@ -10,18 +10,16 @@
 //! a consumer sees is [`Failure`], which the backend `Error` types carry when
 //! the race loses every attempt.
 
-use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 
-/// How long to wait before also dialing the next address, unless overridden by
-/// `--client-failover-delay`. RFC 8305's recommended Connection Attempt Delay.
-pub(crate) const DEFAULT_DELAY: Duration = Duration::from_millis(250);
+#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+pub(crate) use local::match_local;
 
 /// One failed connection attempt, naming the address it dialed.
 ///
@@ -92,74 +90,173 @@ pub(crate) fn interleave(addrs: impl IntoIterator<Item = SocketAddr>) -> Vec<Soc
 	out
 }
 
-/// [`interleave`], then adapt each address to the family of the `local` socket.
+/// Adapting candidates to the family of an already-bound local socket.
 ///
-/// The QUIC backends send from one already-bound socket, so a candidate the
-/// socket can't reach is converted when the conversion is lossless (IPv4 to
-/// IPv4-mapped IPv6 for a dual-stack socket, and the reverse) and dropped when
-/// it isn't. `dual_stack` is [`crate::bind::udp_is_dual_stack`] for that socket.
-/// When every candidate would be dropped, the normalized candidates are kept so
-/// the dial surfaces the OS error instead of a confusing "no DNS entries". See
-/// <https://github.com/moq-dev/moq/issues/1375> for the Windows failure this
-/// family matching originally fixed.
-pub(crate) fn match_local(
-	addrs: impl IntoIterator<Item = SocketAddr>,
-	local: SocketAddr,
-	dual_stack: bool,
-) -> Vec<SocketAddr> {
-	// Duplicates cost a wasted dial and a repeated line in the error, and they
-	// don't have to arrive adjacent: interleaving separates two copies of the same
-	// address with the other family, and normalizing collapses `1.2.3.4` and
-	// `::ffff:1.2.3.4` into one value only after that. So dedup by value rather
-	// than with `Vec::dedup`, keeping the first occurrence's position.
-	let mut seen = HashSet::new();
-	let candidates: Vec<SocketAddr> = interleave(addrs)
-		.into_iter()
-		.map(|addr| normalize_family(addr, local))
-		.filter(|addr| seen.insert(*addr))
-		.collect();
+/// Only the QUIC backends need this: they send every attempt from one socket
+/// bound up front, so a candidate that socket can't reach has to be converted or
+/// dropped. The stream transports open a fresh socket per attempt and let the OS
+/// pick the source, so nothing here applies to them.
+#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+mod local {
+	use std::collections::HashSet;
+	use std::net::{IpAddr, SocketAddr};
 
-	let usable: Vec<SocketAddr> = candidates
-		.iter()
-		.copied()
-		.filter(|addr| addressable(*addr, local, dual_stack))
-		.collect();
+	/// [`super::interleave`], then adapt each address to the family of the `local` socket.
+	///
+	/// A candidate the socket can't reach is converted when the conversion is
+	/// lossless (IPv4 to IPv4-mapped IPv6 for a dual-stack socket, and the reverse)
+	/// and dropped when it isn't. `dual_stack` is [`crate::bind::udp_is_dual_stack`]
+	/// for that socket. When every candidate would be dropped, the normalized
+	/// candidates are kept so the dial surfaces the OS error instead of a confusing
+	/// "no DNS entries". See <https://github.com/moq-dev/moq/issues/1375> for the
+	/// Windows failure this family matching originally fixed.
+	pub(crate) fn match_local(
+		addrs: impl IntoIterator<Item = SocketAddr>,
+		local: SocketAddr,
+		dual_stack: bool,
+	) -> Vec<SocketAddr> {
+		// Duplicates cost a wasted dial and a repeated line in the error, and they
+		// don't have to arrive adjacent: interleaving separates two copies of the same
+		// address with the other family, and normalizing collapses `1.2.3.4` and
+		// `::ffff:1.2.3.4` into one value only after that. So dedup by value rather
+		// than with `Vec::dedup`, keeping the first occurrence's position.
+		let mut seen = HashSet::new();
+		let candidates: Vec<SocketAddr> = super::interleave(addrs)
+			.into_iter()
+			.map(|addr| normalize_family(addr, local))
+			.filter(|addr| seen.insert(*addr))
+			.collect();
 
-	if usable.is_empty() { candidates } else { usable }
-}
+		let usable: Vec<SocketAddr> = candidates
+			.iter()
+			.copied()
+			.filter(|addr| addressable(*addr, local, dual_stack))
+			.collect();
 
-/// Whether a socket bound to `local` can send to `dest`.
-///
-/// Mostly this is the address family, but reaching IPv4 from an IPv6 socket has
-/// a wrinkle: it means sending to an IPv4-mapped destination, which the kernel
-/// turns back into a real IPv4 packet, and that needs an IPv4 source address. So
-/// it takes both a socket that is actually dual-stack (`IPV6_V6ONLY` cleared,
-/// which [`crate::bind::udp`] only attempts) and a bind that left an IPv4 source
-/// to use: `[::]` does, since the kernel picks the source, and an IPv4-mapped
-/// bind already is one, but a concrete IPv6 bind is not. The mirror holds too:
-/// an IPv4-mapped bind can't reach a real IPv6 destination.
-fn addressable(dest: SocketAddr, local: SocketAddr, dual_stack: bool) -> bool {
-	let (SocketAddr::V6(dest), SocketAddr::V6(local)) = (dest, local) else {
-		return dest.is_ipv4() == local.is_ipv4();
-	};
-
-	match (dest.ip().to_ipv4_mapped(), local.ip().to_ipv4_mapped()) {
-		(Some(_), None) => dual_stack && local.ip().is_unspecified(),
-		(None, Some(_)) => false,
-		_ => true,
+		if usable.is_empty() { candidates } else { usable }
 	}
-}
 
-/// Convert `addr` to match the family of `local` when the conversion is
-/// lossless: unwrap IPv4-mapped IPv6 to IPv4, or wrap IPv4 as IPv4-mapped IPv6.
-fn normalize_family(addr: SocketAddr, local: SocketAddr) -> SocketAddr {
-	match (addr, local.is_ipv4()) {
-		(SocketAddr::V6(v6), true) => match v6.ip().to_ipv4_mapped() {
-			Some(v4) => SocketAddr::new(IpAddr::V4(v4), v6.port()),
-			None => addr,
-		},
-		(SocketAddr::V4(v4), false) => SocketAddr::new(IpAddr::V6(v4.ip().to_ipv6_mapped()), v4.port()),
-		_ => addr,
+	/// Whether a socket bound to `local` can send to `dest`.
+	///
+	/// Mostly this is the address family, but reaching IPv4 from an IPv6 socket has
+	/// a wrinkle: it means sending to an IPv4-mapped destination, which the kernel
+	/// turns back into a real IPv4 packet, and that needs an IPv4 source address. So
+	/// it takes both a socket that is actually dual-stack (`IPV6_V6ONLY` cleared,
+	/// which [`crate::bind::udp`] only attempts) and a bind that left an IPv4 source
+	/// to use: `[::]` does, since the kernel picks the source, and an IPv4-mapped
+	/// bind already is one, but a concrete IPv6 bind is not. The mirror holds too:
+	/// an IPv4-mapped bind can't reach a real IPv6 destination.
+	fn addressable(dest: SocketAddr, local: SocketAddr, dual_stack: bool) -> bool {
+		let (SocketAddr::V6(dest), SocketAddr::V6(local)) = (dest, local) else {
+			return dest.is_ipv4() == local.is_ipv4();
+		};
+
+		match (dest.ip().to_ipv4_mapped(), local.ip().to_ipv4_mapped()) {
+			(Some(_), None) => dual_stack && local.ip().is_unspecified(),
+			(None, Some(_)) => false,
+			_ => true,
+		}
+	}
+
+	/// Convert `addr` to match the family of `local` when the conversion is
+	/// lossless: unwrap IPv4-mapped IPv6 to IPv4, or wrap IPv4 as IPv4-mapped IPv6.
+	fn normalize_family(addr: SocketAddr, local: SocketAddr) -> SocketAddr {
+		match (addr, local.is_ipv4()) {
+			(SocketAddr::V6(v6), true) => match v6.ip().to_ipv4_mapped() {
+				Some(v4) => SocketAddr::new(IpAddr::V4(v4), v6.port()),
+				None => addr,
+			},
+			(SocketAddr::V4(v4), false) => SocketAddr::new(IpAddr::V6(v4.ip().to_ipv6_mapped()), v4.port()),
+			_ => addr,
+		}
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use super::*;
+
+		fn v4(s: &str) -> SocketAddr {
+			s.parse().unwrap()
+		}
+
+		#[test]
+		fn match_local_prefers_matching_family() {
+			let a4 = v4("127.0.0.1:443");
+			let a6 = v4("[::1]:443");
+
+			// IPv6 listed first, but local socket is IPv4: only IPv4 is usable.
+			assert_eq!(match_local([a6, a4], v4("0.0.0.0:0"), false), vec![a4]);
+			// IPv4 wraps to IPv4-mapped for an IPv6 (dual-stack) socket.
+			assert_eq!(
+				match_local([a4, a6], v4("[::]:0"), true),
+				vec![v4("[::ffff:127.0.0.1]:443"), a6]
+			);
+		}
+
+		#[test]
+		fn match_local_skips_mapped_ipv4_on_a_v6_only_socket() {
+			let a4 = v4("192.0.2.1:443");
+			let a6 = v4("[2001:db8::1]:443");
+			assert_eq!(match_local([a4, a6], v4("[::]:0"), false), vec![a6]);
+		}
+
+		#[test]
+		fn match_local_skips_ipv4_for_a_concrete_v6_bind() {
+			let a4 = v4("192.0.2.1:443");
+			let a6 = v4("[2001:db8::1]:443");
+			assert_eq!(match_local([a4, a6], v4("[2001:db8::5]:0"), true), vec![a6]);
+		}
+
+		#[test]
+		fn match_local_keeps_normalized_fallback_when_none_are_usable() {
+			let a4 = v4("192.0.2.1:443");
+			assert_eq!(
+				match_local([a4], v4("[::]:0"), false),
+				vec![v4("[::ffff:192.0.2.1]:443")]
+			);
+		}
+
+		#[test]
+		fn match_local_unwraps_v4_mapped_for_v4_socket() {
+			let mapped = v4("[::ffff:127.0.0.1]:443");
+			assert_eq!(match_local([mapped], v4("0.0.0.0:0"), false), vec![v4("127.0.0.1:443")]);
+		}
+
+		#[test]
+		fn match_local_falls_back_for_unmappable_v6() {
+			// IPv4 socket with only a true IPv6 entry: no conversion possible, keep it
+			// so the OS surfaces a clear error.
+			let a6 = v4("[2001:db8::1]:443");
+			assert_eq!(match_local([a6], v4("0.0.0.0:0"), false), vec![a6]);
+		}
+
+		#[test]
+		fn match_local_empty() {
+			assert!(match_local(std::iter::empty(), v4("0.0.0.0:0"), false).is_empty());
+		}
+
+		#[test]
+		fn match_local_dedups_across_the_interleave() {
+			// Two copies of the same IPv4 entry land either side of the IPv6 one, so
+			// only a value-wise dedup catches them.
+			let a4 = v4("1.2.3.4:443");
+			let a6 = v4("[2001:db8::1]:443");
+			assert_eq!(match_local([a4, a4, a6], v4("0.0.0.0:0"), false), vec![a4]);
+			assert_eq!(
+				match_local([a4, a4, a6], v4("[::]:0"), true),
+				vec![v4("[::ffff:1.2.3.4]:443"), a6]
+			);
+		}
+
+		#[test]
+		fn match_local_dedups_normalized_forms() {
+			// The same address twice, once already IPv4-mapped: different families
+			// going in, one candidate coming out.
+			let a4 = v4("1.2.3.4:443");
+			let mapped = v4("[::ffff:1.2.3.4]:443");
+			assert_eq!(match_local([a4, mapped], v4("[::]:0"), true), vec![mapped]);
+			assert_eq!(match_local([mapped, a4], v4("0.0.0.0:0"), false), vec![a4]);
+		}
 	}
 }
 
@@ -264,6 +361,7 @@ fn collapse<E: Aggregate>(mut failures: Vec<Failure<E>>) -> E {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::client::DEFAULT_FAILOVER_DELAY;
 	use std::sync::Arc;
 	use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -333,93 +431,18 @@ mod tests {
 		assert_eq!(interleave(addrs), addrs.to_vec());
 	}
 
-	#[test]
-	fn match_local_prefers_matching_family() {
-		let a4 = v4("127.0.0.1:443");
-		let a6 = v4("[::1]:443");
-
-		// IPv6 listed first, but local socket is IPv4: only IPv4 is usable.
-		assert_eq!(match_local([a6, a4], v4("0.0.0.0:0"), false), vec![a4]);
-		// IPv4 wraps to IPv4-mapped for an IPv6 (dual-stack) socket.
-		assert_eq!(
-			match_local([a4, a6], v4("[::]:0"), true),
-			vec![v4("[::ffff:127.0.0.1]:443"), a6]
-		);
-	}
-
-	#[test]
-	fn match_local_skips_mapped_ipv4_on_a_v6_only_socket() {
-		let a4 = v4("192.0.2.1:443");
-		let a6 = v4("[2001:db8::1]:443");
-		assert_eq!(match_local([a4, a6], v4("[::]:0"), false), vec![a6]);
-	}
-
-	#[test]
-	fn match_local_skips_ipv4_for_a_concrete_v6_bind() {
-		let a4 = v4("192.0.2.1:443");
-		let a6 = v4("[2001:db8::1]:443");
-		assert_eq!(match_local([a4, a6], v4("[2001:db8::5]:0"), true), vec![a6]);
-	}
-
-	#[test]
-	fn match_local_keeps_normalized_fallback_when_none_are_usable() {
-		let a4 = v4("192.0.2.1:443");
-		assert_eq!(
-			match_local([a4], v4("[::]:0"), false),
-			vec![v4("[::ffff:192.0.2.1]:443")]
-		);
-	}
-
-	#[test]
-	fn match_local_unwraps_v4_mapped_for_v4_socket() {
-		let mapped = v4("[::ffff:127.0.0.1]:443");
-		assert_eq!(match_local([mapped], v4("0.0.0.0:0"), false), vec![v4("127.0.0.1:443")]);
-	}
-
-	#[test]
-	fn match_local_falls_back_for_unmappable_v6() {
-		// IPv4 socket with only a true IPv6 entry: no conversion possible, keep it
-		// so the OS surfaces a clear error.
-		let a6 = v4("[2001:db8::1]:443");
-		assert_eq!(match_local([a6], v4("0.0.0.0:0"), false), vec![a6]);
-	}
-
-	#[test]
-	fn match_local_empty() {
-		assert!(match_local(std::iter::empty(), v4("0.0.0.0:0"), false).is_empty());
-	}
-
-	#[test]
-	fn match_local_dedups_across_the_interleave() {
-		// Two copies of the same IPv4 entry land either side of the IPv6 one, so
-		// only a value-wise dedup catches them.
-		let a4 = v4("1.2.3.4:443");
-		let a6 = v4("[2001:db8::1]:443");
-		assert_eq!(match_local([a4, a4, a6], v4("0.0.0.0:0"), false), vec![a4]);
-		assert_eq!(
-			match_local([a4, a4, a6], v4("[::]:0"), true),
-			vec![v4("[::ffff:1.2.3.4]:443"), a6]
-		);
-	}
-
-	#[test]
-	fn match_local_dedups_normalized_forms() {
-		// The same address twice, once already IPv4-mapped: different families
-		// going in, one candidate coming out.
-		let a4 = v4("1.2.3.4:443");
-		let mapped = v4("[::ffff:1.2.3.4]:443");
-		assert_eq!(match_local([a4, mapped], v4("[::]:0"), true), vec![mapped]);
-		assert_eq!(match_local([mapped, a4], v4("0.0.0.0:0"), false), vec![a4]);
-	}
-
 	#[tokio::test(start_paused = true)]
 	async fn first_success_returns_immediately() {
 		let dials = Arc::new(AtomicUsize::new(0));
 		let counter = dials.clone();
-		let res: Result<&str, TestError> = race(vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")], DEFAULT_DELAY, move |_| {
-			counter.fetch_add(1, Ordering::SeqCst);
-			async { Ok("winner") }
-		})
+		let res: Result<&str, TestError> = race(
+			vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")],
+			DEFAULT_FAILOVER_DELAY,
+			move |_| {
+				counter.fetch_add(1, Ordering::SeqCst);
+				async { Ok("winner") }
+			},
+		)
 		.await;
 		assert_eq!(res, Ok("winner"));
 		assert_eq!(dials.load(Ordering::SeqCst), 1, "no second dial after a fast success");
@@ -430,7 +453,7 @@ mod tests {
 		let start = tokio::time::Instant::now();
 		let res: Result<&str, TestError> = race(
 			vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")],
-			DEFAULT_DELAY,
+			DEFAULT_FAILOVER_DELAY,
 			|addr| async move {
 				if addr == v4("1.1.1.1:1") {
 					std::future::pending().await
@@ -441,7 +464,11 @@ mod tests {
 		)
 		.await;
 		assert_eq!(res, Ok("second"));
-		assert_eq!(start.elapsed(), DEFAULT_DELAY, "second dial waits out the stagger");
+		assert_eq!(
+			start.elapsed(),
+			DEFAULT_FAILOVER_DELAY,
+			"second dial waits out the stagger"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -449,7 +476,7 @@ mod tests {
 		let start = tokio::time::Instant::now();
 		let res: Result<&str, TestError> = race(
 			vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")],
-			DEFAULT_DELAY,
+			DEFAULT_FAILOVER_DELAY,
 			|addr| async move {
 				if addr == v4("1.1.1.1:1") {
 					Err(TestError::Dial("boom"))
@@ -522,7 +549,7 @@ mod tests {
 	/// produced (variant, source chain and all) instead of an aggregate of one.
 	#[tokio::test(start_paused = true)]
 	async fn a_lone_failure_is_returned_unwrapped() {
-		let res: Result<&str, TestError> = race(vec![v4("1.1.1.1:1")], DEFAULT_DELAY, |_| async {
+		let res: Result<&str, TestError> = race(vec![v4("1.1.1.1:1")], DEFAULT_FAILOVER_DELAY, |_| async {
 			Err(TestError::Dial("invalid peer certificate"))
 		})
 		.await;
