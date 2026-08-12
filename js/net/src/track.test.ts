@@ -306,6 +306,55 @@ test("startAt drops groups recvGroup parked at the cap", async () => {
 	expect((await pending)?.sequence).toBe(2);
 });
 
+// A live duplicate would fan out to every subscriber twice (recvGroup has no sequence
+// cursor to hide it), so writeGroup rejects it like Rust's claim_sequence. An aborted
+// incarnation is evicted so a fresh group can serve the sequence again.
+test("writeGroup rejects a duplicate live sequence", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+
+	const first = new GroupProducer(7);
+	first.writeString("first");
+	first.close();
+	producer.writeGroup(first);
+
+	// A peer re-sending a live sequence is rejected, not fanned out again.
+	expect(() => producer.writeGroup(new GroupProducer(7))).toThrow("duplicate group");
+	expect((await track.recvGroup())?.sequence).toBe(7);
+
+	// An aborted incarnation is replaceable: the retry serves the sequence fresh.
+	const aborted = new GroupProducer(8);
+	producer.writeGroup(aborted);
+	aborted.close(new Error("upstream reset"));
+
+	const retry = new GroupProducer(8);
+	retry.writeString("retry");
+	retry.close();
+	producer.writeGroup(retry);
+
+	const got = await track.recvGroup();
+	expect(got?.sequence).toBe(8);
+	expect(await got?.readString()).toBe("retry");
+});
+
+// A group parked at the cap outlives a clean producer close on purpose, so the
+// subscriber leaving is what must release it: close() drops the parked group and
+// settles the pending read instead of leaving it hanging forever.
+test("closing the subscriber releases a recvGroup parked after a clean close", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+
+	track.endAt(0);
+	producer.writeGroup(new GroupProducer(1));
+
+	const pending = track.recvGroup();
+	expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
+
+	producer.close();
+	track.close();
+	expect(await pending).toBeUndefined();
+});
+
 test("recvGroup after nextGroup still returns late arrivals", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();
