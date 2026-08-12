@@ -21,7 +21,7 @@ use super::{Datagram, Requests};
 pub use super::subscription::Subscription;
 
 use std::{
-	collections::{HashMap, VecDeque},
+	collections::{BTreeMap, HashMap, VecDeque},
 	sync::Arc,
 	sync::OnceLock,
 	sync::atomic::{AtomicBool, Ordering},
@@ -1196,6 +1196,7 @@ impl Producer {
 				min_sequence: 0,
 				next_sequence: 0,
 				end_sequence: None,
+				parked: BTreeMap::new(),
 			}),
 			// A producer-side (in-process) subscribe is not egress: stay untagged.
 			stats: stats::Scope::default(),
@@ -1901,6 +1902,7 @@ impl Subscribing {
 						min_sequence: 0,
 						next_sequence: 0,
 						end_sequence: None,
+						parked: BTreeMap::new(),
 					}),
 					stats: self.stats.clone(),
 					_stats_sub: self.stats.subscribe(),
@@ -2188,11 +2190,16 @@ struct PlainSubscriber {
 	/// One past the highest sequence returned by `next_group`.
 	/// Used only by that method to skip late arrivals; does not affect `recv_group`.
 	next_sequence: u64,
-	/// Inclusive upper sequence bound for `next_group`. `None` means no cap. Set by
-	/// `end_at`; can be raised, lowered, or unset at any time. Groups beyond the
-	/// cap stay in the producer's cache and become eligible again when the cap
-	/// rises (or is removed).
+	/// Inclusive upper sequence bound for `next_group` and `recv_group`. `None`
+	/// means no cap. Set by `end_at`; can be raised, lowered, or unset at any time.
+	/// Groups beyond the cap stay in the producer's cache and become eligible again
+	/// when the cap rises (or is removed).
 	end_sequence: Option<u64>,
+	/// Groups received beyond the [`Self::end_sequence`] cap, held for `recv_group`
+	/// until the cap rises (arrival-order reads consume the shared cursor, so they
+	/// are parked here instead of dropped). Keyed by sequence so the lowest is
+	/// re-offered first.
+	parked: BTreeMap<u64, group::Consumer>,
 }
 
 impl PlainSubscriber {
@@ -2209,14 +2216,37 @@ impl PlainSubscriber {
 	}
 
 	fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		let Some((consumer, found_index)) =
-			ready!(self.poll(waiter, |state| state.poll_recv_group(self.index, self.min_sequence))?)
-		else {
-			return Poll::Ready(Ok(None));
-		};
+		// A raised `start_at` drops parked groups it overtook.
+		self.parked.retain(|sequence, _| *sequence >= self.min_sequence);
 
-		self.index = found_index + 1;
-		Poll::Ready(Ok(Some(consumer)))
+		// Re-offer the lowest parked group back inside the cap once it rises.
+		if let Some(&sequence) = self.parked.keys().next()
+			&& self.end_sequence.is_none_or(|end| sequence <= end)
+		{
+			return Poll::Ready(Ok(self.parked.remove(&sequence)));
+		}
+
+		loop {
+			let Some((consumer, found_index)) =
+				ready!(self.poll(waiter, |state| state.poll_recv_group(self.index, self.min_sequence))?)
+			else {
+				// Parked groups survive a finished track: they become deliverable
+				// again if the cap rises, so the stream isn't over while any are held.
+				if self.parked.is_empty() {
+					return Poll::Ready(Ok(None));
+				}
+				return Poll::Pending;
+			};
+			self.index = found_index + 1;
+
+			// Park a group beyond the cap instead of dropping it, and keep scanning
+			// so an in-range group that arrived behind it still flows.
+			if self.end_sequence.is_some_and(|end| consumer.sequence > end) {
+				self.parked.insert(consumer.sequence, consumer);
+				continue;
+			}
+			return Poll::Ready(Ok(Some(consumer)));
+		}
 	}
 
 	fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
@@ -2311,6 +2341,10 @@ impl Subscriber {
 	/// out of sequence due to network reordering or loss. Use [`Self::poll_next_group`] if
 	/// you only want groups whose sequence number is higher than any previously returned.
 	///
+	/// Honors the floor set by [`Self::start_at`] and the cap set by [`Self::end_at`]:
+	/// a group beyond the cap is parked (not dropped) and re-offered once the cap rises,
+	/// without blocking in-range groups that arrive behind it.
+	///
 	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
 	/// `Poll::Ready(Ok(None))` when the track is finished,
 	/// `Poll::Ready(Err(e))` when the track has been aborted, or
@@ -2329,6 +2363,7 @@ impl Subscriber {
 	/// Every group is returned exactly once, in the order it landed on the wire, which may
 	/// be out of sequence due to network reordering or loss. Use [`Self::next_group`] if you
 	/// only want groups whose sequence number is higher than any previously returned.
+	/// See [`Self::poll_recv_group`] for how [`Self::start_at`] and [`Self::end_at`] apply.
 	pub async fn recv_group(&mut self) -> Result<Option<group::Consumer>> {
 		kio::wait(|waiter| self.poll_recv_group(waiter)).await
 	}
@@ -2469,9 +2504,9 @@ impl Subscriber {
 	/// A local filter, not a request; [`Subscription::group_end`] is the wire-level
 	/// counterpart. See [Local cursor vs wire preference](Self#local-cursor-vs-wire-preference).
 	///
-	/// Affects [`Self::next_group`] only: groups beyond the cap stay in the producer's
-	/// cache rather than being skipped past, so a later call to [`Self::end_at`] with a
-	/// higher value (or `None`) makes them available again. Lowering the cap below the
+	/// Affects [`Self::next_group`] and [`Self::recv_group`]: groups beyond the cap are
+	/// held rather than skipped past, so a later call to [`Self::end_at`] with a higher
+	/// value (or `None`) makes them available again. Lowering the cap below the
 	/// consumer's current cursor parks the consumer until the cap is raised.
 	pub fn end_at(&mut self, sequence: impl Into<Option<u64>>) {
 		match &mut self.inner {
@@ -3822,6 +3857,102 @@ mod test {
 		assert_eq!(
 			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
 			8
+		);
+	}
+
+	/// `recv_group` (arrival order) honors the `end_at` cap by parking, like
+	/// `next_group`: beyond-cap groups are held, not dropped, and a raised cap
+	/// re-offers them, even after the track finishes.
+	#[tokio::test]
+	async fn end_at_parks_recv_group() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None);
+
+		for s in 0..3 {
+			producer.create_group(group::Info { sequence: s }).unwrap();
+		}
+
+		consumer.end_at(1);
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			0
+		);
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			1
+		);
+		assert!(consumer.recv_group().now_or_never().is_none(), "capped at 1");
+
+		// A finished track keeps the parked group claimable: the cap may rise.
+		producer.finish().unwrap();
+		assert!(
+			consumer.recv_group().now_or_never().is_none(),
+			"still parked after finish"
+		);
+
+		consumer.end_at(None);
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			2
+		);
+		assert!(
+			matches!(consumer.recv_group().now_or_never(), Some(Ok(None))),
+			"finished once the parked group drains"
+		);
+	}
+
+	/// A group beyond the cap must not block in-range groups that arrive behind
+	/// it: a relay can ingest a burst micro-reordered (newest first).
+	#[tokio::test]
+	async fn recv_group_serves_arrivals_behind_the_cap() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None);
+
+		consumer.end_at(1);
+
+		// Reordered burst: the beyond-cap group arrives first.
+		producer.create_group(group::Info { sequence: 2 }).unwrap();
+		producer.create_group(group::Info { sequence: 0 }).unwrap();
+		producer.create_group(group::Info { sequence: 1 }).unwrap();
+
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			0
+		);
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			1
+		);
+		assert!(consumer.recv_group().now_or_never().is_none(), "capped at 1");
+
+		consumer.end_at(2);
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			2
+		);
+	}
+
+	/// A raised `start_at` drops parked groups it overtook instead of re-offering
+	/// them once the cap rises.
+	#[tokio::test]
+	async fn start_at_drops_parked_recv_groups() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None);
+
+		consumer.end_at(0);
+		producer.create_group(group::Info { sequence: 1 }).unwrap();
+		assert!(
+			consumer.recv_group().now_or_never().is_none(),
+			"group 1 parked at the cap"
+		);
+
+		consumer.start_at(2);
+		consumer.end_at(None);
+		producer.create_group(group::Info { sequence: 2 }).unwrap();
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			2,
+			"the overtaken parked group is dropped, not re-offered"
 		);
 	}
 

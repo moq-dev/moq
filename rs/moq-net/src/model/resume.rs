@@ -12,6 +12,7 @@
 //! its segment bounds, so a session serving a segment just sees an ordinary
 //! subscription that happens to start or end at a boundary.
 
+use std::collections::BTreeMap;
 use std::task::{Poll, ready};
 
 use crate::{Datagram, Error, Result, frame, group, track};
@@ -578,10 +579,12 @@ struct SegmentSub {
 	start: Option<u64>,
 	end: Option<u64>,
 	sub: SubState,
-	/// A received group held back by the subscriber's [`Subscriber::end_at`] cap,
+	/// Received groups held back by the subscriber's [`Subscriber::end_at`] cap,
 	/// re-offered once the cap rises (arrival-order reads consume the underlying
-	/// cursor, so the group is parked here instead of dropped).
-	parked: Option<group::Consumer>,
+	/// cursor, so they are parked here instead of dropped). Keyed by sequence so
+	/// the lowest is re-offered first; holding them here (rather than blocking on
+	/// the first) keeps in-range groups that arrive behind a capped one flowing.
+	parked: BTreeMap<u64, group::Consumer>,
 	/// The producer dropped this segment (pruned from the window, or replaced
 	/// before producing). See [`Self::retired`].
 	pruned: bool,
@@ -594,7 +597,7 @@ impl SegmentSub {
 	/// parked group is re-offered, so a slow reader still gets what the pruned
 	/// segment's track cached.
 	fn retired(&self) -> bool {
-		self.pruned && (self.end.is_none() || (matches!(self.sub, SubState::Done(_)) && self.parked.is_none()))
+		self.pruned && (self.end.is_none() || (matches!(self.sub, SubState::Done(_)) && self.parked.is_empty()))
 	}
 }
 
@@ -675,7 +678,7 @@ impl Subscriber {
 				}
 				if seg.pruned {
 					seg.sub = SubState::Done(None);
-					seg.parked = None;
+					seg.parked.clear();
 					cut -= 1;
 				}
 			}
@@ -763,8 +766,10 @@ impl Subscriber {
 					if existing.end != segment.end {
 						existing.end = segment.end;
 						if let SubState::Active(sub) = &mut existing.sub {
-							sub.end_at(min_some(segment.end, self.end_sequence));
-							// Also shrink the demand so the session can cap upstream.
+							// Shrink the demand so the session can cap upstream. The
+							// read bounds stay on this subscriber (see `poll_recv_group`):
+							// an inner `end_at` would park boundary-crossing groups in the
+							// inner cursor, hiding the segment's completion.
 							let _ = sub.update(slice(&self.last_prefs, segment.start, segment.end));
 						}
 						// A still-pending subscription picks the moved boundary up
@@ -780,7 +785,7 @@ impl Subscriber {
 						start: segment.start,
 						end: segment.end,
 						sub: SubState::Pending(sub),
-						parked: None,
+						parked: BTreeMap::new(),
 						pruned: false,
 					});
 				}
@@ -791,20 +796,16 @@ impl Subscriber {
 	/// Resolve a segment's pending subscription, if any. Ready once the segment is
 	/// `Active` or `Done`; a rejected or closed track becomes `Done` (stall, not
 	/// error). Never consumes groups, so terminal-state pollers can share it.
-	fn poll_activate(
-		seg: &mut SegmentSub,
-		prefs: &Subscription,
-		min_sequence: u64,
-		end_sequence: Option<u64>,
-		waiter: &kio::Waiter,
-	) -> Poll<()> {
+	fn poll_activate(seg: &mut SegmentSub, prefs: &Subscription, min_sequence: u64, waiter: &kio::Waiter) -> Poll<()> {
 		if let SubState::Pending(pending) = &mut seg.sub {
 			match pending.poll_ok(waiter) {
 				Poll::Ready(Ok(mut sub)) => {
-					// Enforce the bounds on the read cursor, and re-slice demand in
-					// case a boundary moved while the subscription was pending.
+					// Enforce the floor on the read cursor, and re-slice demand in
+					// case a boundary moved while the subscription was pending. The
+					// upper bounds (segment boundary and `end_at` cap) are enforced by
+					// this subscriber, never on the inner cursor: an inner cap would
+					// park groups there and hide the segment's completion.
 					sub.start_at(seg.start.unwrap_or(0).max(min_sequence));
-					sub.end_at(min_some(seg.end, end_sequence));
 					let _ = sub.update(slice(prefs, seg.start, seg.end));
 					seg.sub = SubState::Active(sub);
 				}
@@ -822,13 +823,12 @@ impl Subscriber {
 		seg: &mut SegmentSub,
 		prefs: &Subscription,
 		min_sequence: u64,
-		end_sequence: Option<u64>,
 		waiter: &kio::Waiter,
 	) -> Poll<Option<group::Consumer>> {
 		loop {
 			match &mut seg.sub {
 				SubState::Pending(_) => {
-					ready!(Self::poll_activate(seg, prefs, min_sequence, end_sequence, waiter));
+					ready!(Self::poll_activate(seg, prefs, min_sequence, waiter));
 				}
 				SubState::Active(sub) => match sub.poll_recv_group(waiter) {
 					Poll::Ready(Ok(Some(group))) => {
@@ -871,35 +871,34 @@ impl Subscriber {
 		self.poll_sync(waiter);
 
 		let end_sequence = self.end_sequence;
+		let min_sequence = self.min_sequence;
 		let beyond_cap = |sequence: u64| end_sequence.is_some_and(|end| sequence > end);
 
 		let mut all_done = true;
 		for seg in &mut self.segments {
-			// Re-offer a group parked at the cap once the cap rises.
-			if let Some(group) = seg.parked.take_if(|group| !beyond_cap(group.sequence))
-				&& group.sequence >= self.min_sequence
+			// A `start_at` overtook these parked groups; drop them and read on.
+			seg.parked.retain(|sequence, _| *sequence >= min_sequence);
+
+			// Re-offer the lowest parked group back inside the cap once it rises.
+			if let Some(&sequence) = seg.parked.keys().next()
+				&& !beyond_cap(sequence)
 			{
-				self.next_sequence = self.next_sequence.max(group.sequence.saturating_add(1));
+				let group = seg.parked.remove(&sequence).expect("parked key just observed");
+				self.next_sequence = self.next_sequence.max(sequence.saturating_add(1));
 				return Poll::Ready(Ok(Some(group)));
-			}
-			// A `start_at` overtook the parked group; drop it and read on.
-			if seg.parked.is_some() {
-				// Still capped: the segment isn't done, it's parked.
-				all_done = false;
-				continue;
 			}
 
 			loop {
-				match Self::poll_segment(seg, &self.last_prefs, self.min_sequence, end_sequence, waiter) {
+				match Self::poll_segment(seg, &self.last_prefs, min_sequence, waiter) {
 					Poll::Ready(Some(group)) => {
 						if beyond_cap(group.sequence) {
-							// `end_at` parks the subscriber; hold the group until
-							// the cap rises rather than dropping it.
-							seg.parked = Some(group);
-							all_done = false;
-							break;
+							// `end_at` holds the group until the cap rises rather than
+							// dropping it; keep draining so an in-range group that
+							// arrived behind it still flows.
+							seg.parked.insert(group.sequence, group);
+							continue;
 						}
-						if group.sequence < self.min_sequence {
+						if group.sequence < min_sequence {
 							// A `start_at` raced an already-delivered group; skip it
 							// and re-poll the same segment for what's behind it.
 							continue;
@@ -908,11 +907,14 @@ impl Subscriber {
 						return Poll::Ready(Ok(Some(group)));
 					}
 					Poll::Ready(None) => break,
-					Poll::Pending => {
-						all_done = false;
-						break;
-					}
+					Poll::Pending => break,
 				}
+			}
+
+			// Parked groups become deliverable if the cap rises, and a segment that
+			// hasn't completed can still produce; either way the track isn't over.
+			if !seg.parked.is_empty() || !matches!(seg.sub, SubState::Done(_)) {
+				all_done = false;
 			}
 		}
 
@@ -990,7 +992,7 @@ impl Subscriber {
 		// datagrams must still resolve the subscription (registering demand) and
 		// be woken when it activates.
 		if let Some(seg) = self.segments.last_mut()
-			&& Self::poll_activate(seg, &self.last_prefs, self.min_sequence, self.end_sequence, waiter).is_ready()
+			&& Self::poll_activate(seg, &self.last_prefs, self.min_sequence, waiter).is_ready()
 			&& let SubState::Active(sub) = &mut seg.sub
 		{
 			match sub.poll_recv_datagram(waiter) {
@@ -1035,13 +1037,7 @@ impl Subscriber {
 		let Some(seg) = self.segments.last_mut() else {
 			return Poll::Ready(Ok(0));
 		};
-		ready!(Self::poll_activate(
-			seg,
-			&self.last_prefs,
-			self.min_sequence,
-			self.end_sequence,
-			waiter
-		));
+		ready!(Self::poll_activate(seg, &self.last_prefs, self.min_sequence, waiter));
 		match &mut seg.sub {
 			SubState::Done(count) => Poll::Ready(Ok(count.unwrap_or(0))),
 			SubState::Active(sub) => match ready!(sub.poll_finished(waiter)) {
@@ -1075,13 +1071,12 @@ impl Subscriber {
 	}
 
 	/// Cap the subscriber at the specified sequence (inclusive), or remove the cap.
+	///
+	/// Enforced on this subscriber's reads (see [`Self::poll_recv_group`]), never
+	/// on the inner segment cursors, so a capped group parks here and a rising cap
+	/// re-offers it.
 	pub fn end_at(&mut self, sequence: impl Into<Option<u64>>) {
 		self.end_sequence = sequence.into();
-		for seg in &mut self.segments {
-			if let SubState::Active(sub) = &mut seg.sub {
-				sub.end_at(min_some(seg.end, self.end_sequence));
-			}
-		}
 	}
 
 	/// The shared preferences channel, so `track::SubscriberControl` can wrap it.
@@ -1461,6 +1456,33 @@ mod test {
 		// Raising the cap re-offers the parked group.
 		sub.end_at(1);
 		assert_eq!(recv(&mut sub), 1);
+	}
+
+	/// A parked beyond-cap group must not block in-range groups that arrive
+	/// behind it: a relay can ingest a burst micro-reordered (newest first).
+	#[tokio::test]
+	async fn end_at_reoffers_reordered_arrivals() {
+		let (mut track_a, consumer_a) = track_pair("a");
+
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		sub.end_at(1);
+
+		// Reordered burst: the beyond-cap group arrives first.
+		write_group(&mut track_a, 2, "a2");
+		write_group(&mut track_a, 0, "a0");
+		write_group(&mut track_a, 1, "a1");
+
+		// The capped group parks without blocking the in-range late arrivals.
+		assert_eq!(recv(&mut sub), 0);
+		assert_eq!(recv(&mut sub), 1);
+		recv_pending(&mut sub);
+
+		// Raising the cap re-offers the parked group.
+		sub.end_at(2);
+		assert_eq!(recv(&mut sub), 2);
 	}
 
 	#[tokio::test]

@@ -1143,6 +1143,37 @@ mod test {
 			_ => panic!("expected finished once the boundary is reached"),
 		}
 	}
+
+	/// A relay can ingest back-to-back groups micro-reordered (the upstream leg
+	/// sends newest-first). The older group is cached and in demand, so serving
+	/// must still deliver it; a sequence cursor would skip it permanently.
+	#[tokio::test]
+	async fn recv_next_serves_late_arrival_after_newer_group() {
+		let mut producer = track_producer("test");
+		let mut subscriber = producer.subscribe(None);
+
+		producer.create_group(group::Info { sequence: 2 }).unwrap();
+		match recv_next(&mut subscriber, false, false).await.unwrap() {
+			Recv::Group(group) => assert_eq!(group.sequence, 2),
+			_ => panic!("expected group 2"),
+		}
+
+		// Group 1 lands after group 2 was already served.
+		producer.create_group(group::Info { sequence: 1 }).unwrap();
+		match recv_next(&mut subscriber, false, false).now_or_never() {
+			Some(Ok(Recv::Group(group))) => assert_eq!(group.sequence, 1),
+			Some(_) => panic!("expected the late-arriving group"),
+			None => panic!("the late-arriving group was skipped"),
+		}
+
+		// Staleness is the latency window's job, not arrival order's: the track
+		// still finishes normally afterward.
+		producer.finish_at(3).unwrap();
+		match recv_next(&mut subscriber, false, false).await.unwrap() {
+			Recv::Finished => {}
+			_ => panic!("expected finished"),
+		}
+	}
 }
 
 /// The announce loop's demand/linger state machine: a drained broadcast keeps
@@ -1782,9 +1813,15 @@ enum Recv {
 	Finished,
 }
 
-/// Poll a single [`track::Subscriber`] for the next group (cap-aware) or datagram from one `&mut`
-/// borrow, so groups and datagrams share the same subscription. Groups are polled first so a
-/// datagram burst can't starve them; datagrams are polled only when the transport carries them.
+/// Poll a single [`track::Subscriber`] for the next group (cap-aware, in arrival order) or
+/// datagram from one `&mut` borrow, so groups and datagrams share the same subscription. Groups
+/// are polled first so a datagram burst can't starve them; datagrams are polled only when the
+/// transport carries them.
+///
+/// Groups are served in arrival order (`poll_recv_group`), not sequence order: on a relay, a
+/// burst can be ingested micro-reordered by the upstream leg, and a sequence cursor would then
+/// permanently skip the older group even though it is cached and in demand. Staleness is
+/// governed by the latency window (cache expiry), not arrival raciness.
 ///
 /// When `emit_boundary` is set, a declared-but-not-yet-reached final sequence surfaces as
 /// [`Recv::Boundary`] in an idle moment (after groups and datagrams), so the caller can send
@@ -1798,7 +1835,7 @@ fn poll_recv_next(
 ) -> Poll<Result<Recv, Error>> {
 	{
 		let mut groups_finished = false;
-		match track.poll_next_group(waiter) {
+		match track.poll_recv_group(waiter) {
 			Poll::Ready(Ok(Some(group))) => return Poll::Ready(Ok(Recv::Group(group))),
 			Poll::Ready(Ok(None)) => groups_finished = true,
 			Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
@@ -1907,10 +1944,10 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					if let Poll::Ready(upd) = waiter.poll_future(update.as_mut()) {
 						return Poll::Ready(Event::Update(upd));
 					}
-					// One cursor drives the whole subscription: poll the cap-aware next group and,
-					// when enabled, the next best-effort datagram. Groups are polled first so a
-					// datagram burst can't starve them; datagrams flow whenever no group is ready
-					// (including while groups are paused above the cap).
+					// One cursor drives the whole subscription: poll the cap-aware arrival-order
+					// group and, when enabled, the next best-effort datagram. Groups are polled
+					// first so a datagram burst can't starve them; datagrams flow whenever no
+					// group is ready (including while groups are parked above the cap).
 					if let Poll::Ready(res) = poll_recv_next(&mut track, datagrams, emit_boundary, waiter) {
 						return Poll::Ready(Event::Recv(res));
 					}
@@ -1924,6 +1961,11 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					Recv::Group(group) => {
 						if emit_range && !start_sent {
 							start_sent = true;
+							// SUBSCRIBE_OK promises nothing below this sequence will be
+							// delivered. Arrival-order serving could later surface a
+							// straggler below the first group, so pin the floor to what
+							// was announced.
+							track.start_at(group.sequence);
 							writer
 								.encode(&lite::SubscribeResponse::Start(lite::SubscribeStart {
 									group: group.sequence,
