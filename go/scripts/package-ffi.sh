@@ -151,6 +151,11 @@ GO_LIBS=(
 # these libs into git, so an oversized lib fails the publish push (GH001).
 # Catch it here, where the error names the file and points at the fix, rather
 # than after a multi-target build burns an hour to die at `git push`.
+#
+# Only meaningful for artifacts actually destined for the mirror. `go check`
+# reuses this script to stage a throwaway module against a debug staticlib,
+# which carries enough debug info to blow the limit and is never pushed, so it
+# passes --skip-size-check.
 GITHUB_FILE_LIMIT=$((100 * 1024 * 1024))
 STAGED_ANY=false
 OVERSIZED=()

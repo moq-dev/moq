@@ -32,8 +32,19 @@ if ! command -v uniffi-bindgen-go >/dev/null 2>&1; then
 fi
 
 HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
+# Debug by default. This is a compile-and-test gate, not a benchmark, and a
+# release build of moq-ffi shares no artifacts with the debug ones `just check`
+# and `just test` already produce, so it was a third full compile of the
+# dependency tree (~5 min of CI on its own, plus a whole target/release tree on
+# a runner that was already tight on disk). Set MOQ_FFI_PROFILE=release for an
+# optimized cdylib; the shipped artifacts are built by rs/moq-ffi/build.sh,
+# which is release regardless.
+PROFILE="${MOQ_FFI_PROFILE:-debug}"
+CARGO_PROFILE=()
+[[ "$PROFILE" == "release" ]] && CARGO_PROFILE=(--release)
+
 echo "go check: building moq-ffi for $HOST_TARGET..."
-cargo build --release --package moq-ffi \
+cargo build "${CARGO_PROFILE[@]}" --package moq-ffi \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |
@@ -41,16 +52,16 @@ TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/
 
 case "$HOST_TARGET" in
     *-apple-*)
-        CDYLIB="$TARGET_BASE/release/libmoq_ffi.dylib"
-        STATICLIB="$TARGET_BASE/release/libmoq_ffi.a"
+        CDYLIB="$TARGET_BASE/$PROFILE/libmoq_ffi.dylib"
+        STATICLIB="$TARGET_BASE/$PROFILE/libmoq_ffi.a"
         ;;
     *-windows-*)
-        CDYLIB="$TARGET_BASE/release/moq_ffi.dll"
-        STATICLIB="$TARGET_BASE/release/moq_ffi.lib"
+        CDYLIB="$TARGET_BASE/$PROFILE/moq_ffi.dll"
+        STATICLIB="$TARGET_BASE/$PROFILE/moq_ffi.lib"
         ;;
     *)
-        CDYLIB="$TARGET_BASE/release/libmoq_ffi.so"
-        STATICLIB="$TARGET_BASE/release/libmoq_ffi.a"
+        CDYLIB="$TARGET_BASE/$PROFILE/libmoq_ffi.so"
+        STATICLIB="$TARGET_BASE/$PROFILE/libmoq_ffi.a"
         ;;
 esac
 
@@ -95,10 +106,12 @@ if [[ -d "$STAGE_BINDINGS/uniffi/moq" && ! -d "$STAGE_BINDINGS/moq" ]]; then
 fi
 
 echo "go check: assembling ffi module..."
-# --skip-size-check because the lib above is a plain `cargo build --release`,
-# which is ~3x the size of the one the mirror actually publishes:
-# rs/moq-ffi/build.sh scopes thin LTO to the release path to keep this check
-# fast. Enforcing the publish limit here would fail on a lib nobody publishes.
+# --skip-size-check because the lib above is a plain host build, unrelated to
+# what the mirror publishes. It is a debug build by default now, so it carries
+# full line-table debug info and measured 619 MiB against a 100 MiB limit; even
+# at MOQ_FFI_PROFILE=release it skips the thin LTO that rs/moq-ffi/build.sh
+# applies on the publish path. Enforcing the limit here fails on a lib nobody
+# publishes.
 bash "$GO_DIR/scripts/package-ffi.sh" \
     --version "0.0.0-dev" \
     --source-dir "$GO_DIR/ffi" \

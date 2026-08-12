@@ -147,6 +147,8 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
 - **`check` runs no `cargo check` pass.** Clippy is a superset of it, and the two use different rustc wrappers, so running both compiles the workspace twice for one set of errors.
 
+- **Go through `just`, not bare `cargo`, and especially not both.** Cargo fingerprints artifacts by compiler wrapper and emit kind, so `cargo test` and `just test` (which wraps rustc in `clippy-driver` to lint from the same compile) each build and keep a *separate* full copy of the workspace. So does `cargo check` next to `just check`'s clippy. Each copy is gigabytes, every agent worktree carries its own, and they add up fast: ten worktrees were holding 59 GB on a 461 GB disk that had filled to 100%. Alternating between the two forms is what doubles it. If you run rust-analyzer, point it at clippy (`rust-analyzer.check.command = "clippy"`) so it shares with `just check` rather than opening a third set.
+
 - **Run tests through nextest, not `cargo test`.** `.config/nextest.toml` sets a
   `slow-timeout` with `terminate-after`, so a wedged test is reported as a
   TIMEOUT and killed; under `cargo test`'s harness the same test hangs forever,

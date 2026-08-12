@@ -130,6 +130,14 @@ web-transport-trait = "0.3.4"
 
 [profile.dev]
 panic = "abort"
+# Full DWARF is what makes a debug build enormous: the debug `libmoq_ffi.a`
+# measured 619 MiB against a 100 MiB ceiling for the published one, and a
+# workspace of those fills a laptop (and a CI runner) fast. Line tables keep
+# what we actually read -- file and line in every backtrace and panic -- and
+# drop the variable and type records only an interactive debugger uses. Reach
+# for `debug = true` in a temporary edit if you need to step through something
+# in lldb. `profile.test` inherits this.
+debug = "line-tables-only"
 
 # Optimize the bignum crates even in dev/test builds. RSA keygen is bignum
 # arithmetic in a loop, and unoptimized it is orders of magnitude slower: the
