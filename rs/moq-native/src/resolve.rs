@@ -451,9 +451,18 @@ fn resolve(host: &str, port: u16, lookup: Lookup) -> io::Result<Vec<SocketAddr>>
 	// No service is passed (there is no `moq` in /etc/services); the port is
 	// stamped on here instead.
 	let answers = dns_lookup::getaddrinfo(Some(host), None, Some(lookup.hints())).map_err(io::Error::from)?;
-	answers
-		.map(|answer| Ok(SocketAddr::new(answer?.sockaddr.ip(), port)))
-		.collect()
+	answers.map(|answer| Ok(with_port(answer?.sockaddr, port))).collect()
+}
+
+/// The address to dial for one answer: whatever the resolver returned, at our
+/// port.
+///
+/// Rebuilding it from the IP alone would drop the rest of the `sockaddr`, and an
+/// IPv6 one carries a scope id that a link-local address (`fe80::1%eth0`, which
+/// is what mDNS hands back on a LAN) can't be reached without.
+fn with_port(mut addr: SocketAddr, port: u16) -> SocketAddr {
+	addr.set_port(port);
+	addr
 }
 
 /// Whether a socket bound to `local` can send to `dest`.
@@ -781,6 +790,23 @@ mod tests {
 			Some("no A record")
 		);
 		assert!(candidates.failure().is_none());
+	}
+
+	/// A link-local answer is only routable with the scope id the resolver
+	/// attached to it, so stamping our port on must not rebuild the address.
+	#[test]
+	fn the_port_is_stamped_without_losing_the_scope() {
+		use std::net::{Ipv6Addr, SocketAddrV6};
+
+		let answer = SocketAddrV6::new("fe80::1".parse::<Ipv6Addr>().unwrap(), 0, 7, 3);
+		let dialed = with_port(SocketAddr::V6(answer), 443);
+
+		let SocketAddr::V6(dialed) = dialed else {
+			panic!("family changed: {dialed}");
+		};
+		assert_eq!(dialed.port(), 443);
+		assert_eq!(dialed.scope_id(), 3, "dropped the interface scope");
+		assert_eq!(dialed.flowinfo(), 7);
 	}
 
 	/// The end-to-end path through the real resolver: localhost is in
