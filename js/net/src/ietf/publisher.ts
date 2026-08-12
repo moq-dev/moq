@@ -387,7 +387,7 @@ export class Publisher {
 				// does: only a legacy request can be declined, and nothing about the peer
 				// starting to answer raises a signal this loop is watching.
 				const outstanding = [...updated.difference(active)].some((suffix) =>
-					this.#offerable(Path.join(prefix, suffix), refused),
+					this.#pending(Path.join(prefix, suffix), refused),
 				);
 				retry = outstanding ? Math.min(retry ? retry * 2 : RETRY_BASE, RETRY_MAX) : 0;
 
@@ -474,7 +474,7 @@ export class Publisher {
 				// Whatever we wanted up and could not get up. Stream credit freeing, a
 				// transient failure clearing, or the peer starting to answer raises no
 				// signal of its own, so the only way back is to ask again on a timer.
-				const outstanding = [...updated.difference(active)].some((path) => this.#offerable(path, refused));
+				const outstanding = [...updated.difference(active)].some((path) => this.#pending(path, refused));
 				retry = outstanding ? Math.min(retry ? retry * 2 : RETRY_BASE, RETRY_MAX) : 0;
 
 				// Wait for the next change, which has already fired if one landed above.
@@ -497,7 +497,7 @@ export class Publisher {
 	}
 
 	/**
-	 * Whether a namespace may be offered to the peer now.
+	 * Whether a namespace may be offered to the peer right now.
 	 *
 	 * A peer that asked never to be offered it again means it, whatever brought us back;
 	 * one that named a minimum wait gets it, even when our own backoff comes round sooner.
@@ -506,6 +506,18 @@ export class Publisher {
 		const entry = refused.get(path);
 		if (entry === undefined) return true;
 		return entry !== "never" && Date.now() >= entry;
+	}
+
+	/**
+	 * Whether the loop should keep coming back to a namespace the peer does not hold.
+	 *
+	 * Distinct from {@link offerable}, and the difference is what arms the retry: a
+	 * namespace waiting out a minimum is not offerable yet but is still pending, and
+	 * gating the timer on offerable instead would disarm it for exactly the wait it is
+	 * supposed to be counting. Only a refusal that forbids retrying ends it.
+	 */
+	#pending(path: Path.Valid, refused: Map<Path.Valid, Refused>): boolean {
+		return refused.get(path) !== "never";
 	}
 
 	/**
