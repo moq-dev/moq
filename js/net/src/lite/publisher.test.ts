@@ -377,13 +377,13 @@ test("lite draft-05: subscribe end is 0 when no groups were produced", async () 
 type Served = { sequence: number; frameStart: number; payloads: string[] };
 
 /**
- * Serves `groups` (frame payloads per group, keyed by sequence) under `bounds`, and
- * reports every group stream that reached the wire plus the resolved SUBSCRIBE_START.
+ * Serves `groups` (frame payloads per group, keyed by sequence) under `bounds`, and reports
+ * every group stream that reached the wire plus the resolved SUBSCRIBE_START/SUBSCRIBE_END.
  */
 async function serve(
 	groups: Record<number, string[]>,
 	bounds: { startGroup?: number; startFrame?: number; endGroup?: number; endFrame?: number },
-): Promise<{ start?: number; served: Served[] }> {
+): Promise<{ start?: number; end: number; served: Served[] }> {
 	const pair = createMockTransportPair(ALPN_06_WIP);
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomOrigin());
 
@@ -448,12 +448,16 @@ async function serve(
 		}
 
 		let start: number | undefined;
+		let end: number;
 		for (;;) {
 			const resp = await decodeSubscribeResponse(client.reader, Version.DRAFT_06);
 			if ("start" in resp) start = resp.start.group;
-			if ("end" in resp) break;
+			if ("end" in resp) {
+				end = resp.end.group;
+				break;
+			}
 		}
-		return { start, served };
+		return { start, end, served };
 	} finally {
 		// Settles the pending read as well as dropping the stream.
 		await reader.cancel();
@@ -511,6 +515,17 @@ test("lite draft-06: groups below the start group are not served", async () => {
 test("lite draft-06: groups past the end group are not served", async () => {
 	const { served } = await serve({ 0: ["w"], 1: ["x"], 2: ["y"], 3: ["z"] }, { startGroup: 1, endGroup: 2 });
 	expect(served.map((s) => s.sequence)).toEqual([1, 2]);
+});
+
+// The end group is a serving cap, not a subscription terminator: groups above it stay
+// buffered for a SUBSCRIBE_UPDATE that raises it. So the track ending has to reach the
+// subscriber on its own rather than riding the loop that drains those groups, and it
+// reports the track's live edge (group 3 is producible) instead of the range delivered
+// under the cap. Reporting 3 here would promise an ending a later update sends past.
+test("lite draft-06: subscribe end reports the track edge, not the capped range", async () => {
+	const { served, end } = await serve({ 0: ["w"], 1: ["x"], 2: ["y"], 3: ["z"] }, { startGroup: 1, endGroup: 2 });
+	expect(served.map((s) => s.sequence)).toEqual([1, 2]);
+	expect(end).toBe(4);
 });
 
 // Group streams open with waitUntilAvailable, so a browser at its concurrent stream cap

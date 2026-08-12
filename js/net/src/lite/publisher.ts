@@ -488,10 +488,13 @@ export class Publisher {
 		const emitRange = supportsTrackStream(this.version);
 		let startSent = false;
 
-		// The exclusive end of the delivered range. recvGroup is arrival-ordered rather than
-		// sequence-ordered, so this tracks the max and not the last group seen. 0 is already
-		// the encoding for a track that produced no groups.
-		let end = 0;
+		// The exclusive end of the range: "the first group that will never be delivered", so it
+		// is the track's live edge and not the delivered range. A group parked above
+		// `bounds.endGroup` is undelivered but very much producible, and a SUBSCRIBE_UPDATE
+		// raising the cap serves it, so bounding this by what we sent would promise an ending
+		// we then send groups past. `latest` is undefined until the first group, which is the
+		// 0 a track that produced none already encodes.
+		const boundary = () => (track.latest() ?? -1) + 1;
 
 		// One ranking for the whole subscription, shared by every group it serves.
 		const priority = new Priority(track);
@@ -512,10 +515,44 @@ export class Publisher {
 			() => unsubscribe(),
 		);
 
+		// The track ending and this loop ending are separate events, so SUBSCRIBE_END can't
+		// wait for the loop. `track.endAt(bounds.endGroup)` parks `nextGroup` with the groups
+		// above the cap still buffered, waiting for a SUBSCRIBE_UPDATE that raises it, so a
+		// capped subscription reaches its end group and then sits there indefinitely. Report
+		// the ending the moment the track closes and keep serving.
+		//
+		// Only a clean close is an ending, and it's attached once: an abort surfaces through
+		// `nextGroup` below (which resets the stream rather than claiming the track ended),
+		// and `closed` is a signal, so a `then` per iteration would pile up subscribers.
+		const ended = Symbol("ended");
+		const trackEnded = new Promise<symbol>((resolve) => {
+			void track.closed.then((err) => {
+				if (!err) resolve(ended);
+			});
+		});
+		let endSent = false;
+
 		try {
 			for (;;) {
+				// One `nextGroup` spans the SUBSCRIBE_END interleave below, so a group that
+				// lands while it goes out is still picked up rather than dropped with the race.
 				const next = track.nextGroup();
-				const group = await Promise.race([next, stream.closed]);
+
+				let group: Awaited<typeof next>;
+				for (;;) {
+					const racing: PromiseLike<unknown>[] = [next, stream.closed];
+					if (emitRange && !endSent) racing.push(trackEnded);
+
+					const result = await Promise.race(racing);
+					if (result !== ended) {
+						group = result as Awaited<typeof next>;
+						break;
+					}
+
+					endSent = true;
+					await encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary()) }, this.version);
+				}
+
 				if (!group) {
 					next.then((group) => group?.close()).catch(() => {});
 					break;
@@ -534,7 +571,6 @@ export class Publisher {
 					startSent = true;
 					await encodeSubscribeResponse(stream, { start: new SubscribeStart(group.sequence) }, this.version);
 				}
-				end = Math.max(end, group.sequence + 1);
 
 				void this.#runGroup({
 					sub,
@@ -545,11 +581,10 @@ export class Publisher {
 					start: range.start,
 					end: range.end,
 				});
-				if (bounds.endGroup !== undefined && group.sequence >= bounds.endGroup) break;
 			}
 
-			if (emitRange) {
-				await encodeSubscribeResponse(stream, { end: new SubscribeEnd(end) }, this.version);
+			if (emitRange && !endSent) {
+				await encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary()) }, this.version);
 			}
 
 			console.debug(`publish close: broadcast=${broadcast} track=${track.name}`);
