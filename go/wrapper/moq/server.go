@@ -33,6 +33,16 @@ func (r *Request) URL() *string {
 	return r.inner.Url()
 }
 
+// Path is the query-free request path, or an empty string for the root/missing path.
+func (r *Request) Path() string {
+	return r.inner.Path()
+}
+
+// Query is the encoded request query without "?"; it may contain credentials.
+func (r *Request) Query() *string {
+	return r.inner.Query()
+}
+
 // Transport is the wire transport the request arrived over, e.g. TransportQUIC.
 func (r *Request) Transport() Transport {
 	return Transport(r.inner.Transport())
@@ -247,7 +257,7 @@ func (s *Server) Requests(ctx context.Context) iter.Seq2[*Request, error] {
 //	    if err != nil {
 //	        return err
 //	    }
-//	    if url := req.URL(); url != nil && strings.Contains(*url, "/admin") {
+//	    if req.Path() == "/admin" {
 //	        _ = req.Reject(ctx, 403)
 //	        continue
 //	    }

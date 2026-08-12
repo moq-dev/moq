@@ -16,7 +16,7 @@ The Swift integration ships as two SPM packages, each mirrored to its own repo:
 ## Install
 
 ```swift
-.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.2"),
+.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.3"),
 ```
 
 SPM resolves `MoqFFI` (and its prebuilt `MoqFFI.xcframework`, attached to the matching `moq-ffi-v*` GitHub Release) transitively. You only depend on `moq-swift`.
@@ -62,6 +62,8 @@ A note on enum casing: `MoqError` keeps Rust's PascalCase variants, each carryin
 The wrapper fully wraps every stateful handle (`Client`, `Session`, `BroadcastProducer`, `TrackConsumer`, …) and re-exports the plain data records/enums under de-prefixed names via typealias (`Frame`, `Catalog`, `Audio`, `Container`, …). Because the records are typealiased, new fields on the `moq-ffi` side flow through automatically; only new FFI *methods* need a matching wrapper method.
 
 Every consumer conforms to `AsyncSequence`, so `for try await x in consumer` works directly. `TrackConsumer` iterates groups in sequence order; use its `groupsAsArrived` property for arrival order.
+
+Incoming server `Request` values expose the query-free `path` before acceptance. It is consistent across transports and is empty for the root or missing path. The encoded `query` may contain credentials.
 
 Raw tracks also expose best-effort datagrams: `TrackProducer.appendDatagram(_:timestampUs:)`
 returns the assigned sequence number, `TrackConsumer.recvDatagram()` receives one datagram,

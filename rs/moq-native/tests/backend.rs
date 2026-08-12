@@ -42,35 +42,27 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 		client_bind: None,
 		authority: "localhost",
 		path: "",
-		expect_path: None,
+		expect_path: Some(""),
 		backend,
 		qlog: None,
 	})
 	.await;
 }
 
-/// Dial a URL with a path and a query and assert the server sees both.
+/// Dial a URL with a path and a query and assert the server sees both separately.
 ///
 /// Raw QUIC (`moqt`/`moql`) has no request URI, so the whole request target has to
 /// ride the SETUP; WebTransport carries it in the CONNECT URL instead. Either way the
-/// server reports the same thing through [`moq_native::Request::path`].
+/// server reports the same route and query through [`moq_native::Request`].
 #[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
 async fn path_test(scheme: &str, backend: moq_native::QuicBackend) {
-	// A relay reads `?jwt=` off this, so dropping the query silently unauthenticates.
-	let expect_path = match scheme {
-		"moqt" | "moql" => Some("/room?jwt=abc"),
-		// WebTransport splits the two: the path is the request target, the query stays
-		// on the URL.
-		_ => Some("/room"),
-	};
-
 	connect_test(ConnectTest {
 		scheme,
 		bind: "[::]:0",
 		client_bind: None,
 		authority: "localhost",
 		path: "/room?jwt=abc",
-		expect_path,
+		expect_path: Some("/room"),
 		backend,
 		qlog: None,
 	})
@@ -89,7 +81,7 @@ async fn no_sni_test(scheme: &str, backend: moq_native::QuicBackend) {
 		client_bind: None,
 		authority: "127.0.0.1",
 		path: "",
-		expect_path: None,
+		expect_path: Some(""),
 		backend,
 		qlog: None,
 	})
@@ -147,6 +139,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 
 	let client = client_config.init().expect("failed to init client");
 	let url: url::Url = format!("{scheme}://{authority}:{}{path}", addr.port()).parse().unwrap();
+	let expect_query = path.split_once('?').map(|(_, query)| query.to_string());
 
 	// ── run server and client concurrently ──────────────────────────
 	let expect_path = expect_path.map(str::to_string);
@@ -159,6 +152,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 		if let Some(expect_path) = expect_path {
 			assert_eq!(request.path(), expect_path);
 		}
+		assert_eq!(request.query(), expect_query.as_deref());
 		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;
@@ -540,7 +534,8 @@ async fn iroh_connect() {
 		// URL, leaving the SETUP as the only place for the request target.
 		assert_eq!(request.transport(), moq_native::Transport::Iroh);
 		assert_eq!(request.url(), None);
-		assert_eq!(request.path(), "/room?jwt=abc");
+		assert_eq!(request.path(), "/room");
+		assert_eq!(request.query(), Some("jwt=abc"));
 		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;

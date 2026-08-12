@@ -101,6 +101,10 @@ pub enum Error {
 	#[error("unsupported codec: MPEG2")]
 	UnsupportedMpeg2,
 
+	/// An AAC sample entry needs DecoderSpecificInfo to identify its codec profile.
+	#[error("AAC sample entry missing DecoderSpecificInfo")]
+	MissingDecoderSpecific,
+
 	#[error("duplicate moof")]
 	DuplicateMoof,
 
@@ -661,7 +665,7 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 							buffer_size_db: mp4_atom::u24::from([0x00, 0x60, 0x00]),
 							max_bitrate,
 							avg_bitrate,
-							dec_specific,
+							dec_specific: Some(dec_specific),
 						},
 						sl_config: Default::default(),
 					},
@@ -1015,7 +1019,7 @@ mod tests {
 
 	fn dec_config(trak: &mp4_atom::Trak) -> mp4_atom::esds::DecoderConfig {
 		match &trak.mdia.minf.stbl.stsd.codecs[0] {
-			mp4_atom::Codec::Mp4a(mp4a) => mp4a.esds.es_desc.dec_config,
+			mp4_atom::Codec::Mp4a(mp4a) => mp4a.esds.es_desc.dec_config.clone(),
 			other => panic!("expected mp4a, got {other:?}"),
 		}
 	}

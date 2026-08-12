@@ -17,35 +17,24 @@ export async function exchangeSetup(
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode(implementation));
 	const setupMsg = new Ietf.Setup({ parameters: params });
 
-	const [sent, received] = await Promise.all([
+	const [writer, reader] = await Promise.all([
 		sendSetup(transport, version, setupMsg),
 		receiveSetup(transport, version),
 	]);
 
-	return new Stream({
-		writable: sent.writable,
-		readable: received.readable,
-		writer: sent.writer,
-		reader: received.reader,
-	});
+	return new Stream({ writer, reader });
 }
 
-async function sendSetup(
-	transport: WebTransport,
-	version: Ietf.IetfVersion,
-	setupMsg: Ietf.Setup,
-): Promise<{ writable: WritableStream<Uint8Array>; writer: Writer }> {
-	const writable = (await transport.createUnidirectionalStream()) as WritableStream<Uint8Array>;
-	const writer = new Writer(writable, version);
+async function sendSetup(transport: WebTransport, version: Ietf.IetfVersion, setupMsg: Ietf.Setup): Promise<Writer> {
+	// Via Writer.open for its deadline: a peer can advertise a stream limit of zero and
+	// never raise it, which would otherwise hang the handshake rather than failing it.
+	const writer = await Writer.open(transport, { version });
 	await writer.u53(Ietf.Setup.id); // 0x2F00 stream type
 	await setupMsg.encode(writer, version);
-	return { writable, writer };
+	return writer;
 }
 
-async function receiveSetup(
-	transport: WebTransport,
-	version: Ietf.IetfVersion,
-): Promise<{ readable: ReadableStream<Uint8Array>; reader: Reader }> {
+async function receiveSetup(transport: WebTransport, version: Ietf.IetfVersion): Promise<Reader> {
 	const uniReader = transport.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
 	>;
@@ -53,8 +42,7 @@ async function receiveSetup(
 	uniReader.releaseLock();
 	if (next.done) throw new Error("no incoming uni stream for SETUP");
 
-	const readable = next.value;
-	const reader = new Reader(readable, undefined, version);
+	const reader = new Reader(next.value, undefined, version);
 
 	const streamType = await reader.u53();
 	if (streamType !== Ietf.Setup.id) {
@@ -62,5 +50,5 @@ async function receiveSetup(
 	}
 	await Ietf.Setup.decode(reader, version);
 
-	return { readable, reader };
+	return reader;
 }

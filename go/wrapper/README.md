@@ -54,6 +54,10 @@ pinning a generated self-signed certificate.
 `Client.Session().Stats()` returns a connection stats snapshot. Fields are nil
 when the transport backend does not report that metric yet.
 
+Incoming server requests expose the query-free `Path()` before `Accept()`. It
+is consistent across transports and returns an empty string for the root or
+missing path. `Query()` returns the encoded query and may contain credentials.
+
 `BroadcastProducer.Dynamic()` accepts subscriber-requested tracks. Call
 `TrackRequest.Accept()` for raw tracks, or `BroadcastProducer.PublishMediaOnTrack()`
 for media tracks whose timescale should be selected by the importer.

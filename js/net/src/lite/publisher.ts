@@ -34,6 +34,24 @@ function zigzag(delta: bigint): bigint {
 	return delta >= 0n ? delta << 1n : (-delta << 1n) - 1n;
 }
 
+/** What {@link Publisher.runGroup} needs to serve one group. */
+interface RunGroup {
+	/** The subscription ID. */
+	sub: bigint;
+
+	/** The group to serve. */
+	group: group.Consumer;
+
+	/** The track's advertised timescale, applied to every frame timestamp. */
+	timescale: Timescale;
+
+	/** The subscription's ranking, which this stream joins for as long as it runs. */
+	priority: Priority;
+
+	/** Settles when the subscriber leaves, dropping a group still queued for a stream slot. */
+	unsubscribed: Promise<void>;
+}
+
 // The TRACK stream, implicit SUBSCRIBE acceptance, and SUBSCRIBE_START/END are
 // all lite-05+.
 function supportsTrackStream(version: Version): boolean {
@@ -401,6 +419,22 @@ export class Publisher {
 		// One ranking for the whole subscription, shared by every group it serves.
 		const priority = new Priority(track);
 
+		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
+		// a track that ran out of groups still has to flush the ones already queued, and we
+		// FIN the subscribe stream ourselves below to say so.
+		let finished = false;
+		let unsubscribe!: () => void;
+		const unsubscribed = new Promise<void>((resolve) => {
+			unsubscribe = resolve;
+		});
+		void stream.closed.then(
+			() => {
+				if (!finished) unsubscribe();
+			},
+			// A reset is always the peer.
+			() => unsubscribe(),
+		);
+
 		try {
 			for (;;) {
 				const next = track.nextGroup();
@@ -416,7 +450,7 @@ export class Publisher {
 				}
 				end = Math.max(end, group.sequence + 1);
 
-				void this.#runGroup(sub, group, timescale, priority);
+				void this.#runGroup({ sub, group, timescale, priority, unsubscribed });
 			}
 
 			if (emitRange) {
@@ -424,11 +458,13 @@ export class Publisher {
 			}
 
 			console.debug(`publish close: broadcast=${broadcast} track=${track.name}`);
+			finished = true;
 			track.close();
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
 			console.warn(`publish error: broadcast=${broadcast} track=${track.name} error=${reason(e)}`);
+			unsubscribe();
 			track.close(e);
 			stream.reset(e);
 		} finally {
@@ -542,19 +578,29 @@ export class Publisher {
 
 	/**
 	 * Serves one group on its own unidirectional stream.
-	 * @param sub - The subscription ID
-	 * @param group - The group to run
-	 * @param timescale - The track's advertised timescale, applied to every frame timestamp
-	 * @param priority - The subscription's ranking, which this stream joins for as long as it runs
 	 *
 	 * @internal
 	 */
-	async #runGroup(sub: bigint, group: group.Consumer, timescale: Timescale, priority: Priority) {
+	async #runGroup(options: RunGroup) {
+		const { sub, group, timescale, priority, unsubscribed } = options;
 		const msg = new GroupMessage(sub, group.sequence);
 		try {
 			// The transport drains streams by send order, so this is what makes a high-priority
 			// track (and a newer group within it) win the link when there isn't room for both.
-			const stream = await Writer.open(this.#quic, { sendOrder: priority.rank(group.sequence) });
+			//
+			// One stream per group is faster than a peer at its limit can retire them, so this
+			// is the one path that doesn't wait for a slot: the transport would serve the opens
+			// in the order we asked, which is oldest-first, exactly backwards for live media.
+			// Failing here drops the group and lets the next one compete for the next slot.
+			const stream = await Writer.tryOpen(this.#quic, {
+				sendOrder: priority.rank(group.sequence),
+				cancel: unsubscribed,
+				waitUntilAvailable: false,
+			});
+			if (!stream) {
+				group.close(new Error("no stream slot"));
+				return;
+			}
 
 			// Everything past this point runs inside the cleanup scope, so a failure never leaves
 			// a finished group's stream being ranked.

@@ -21,6 +21,21 @@ import {
 import { TrackStatus, type TrackStatusRequest } from "./track.ts";
 import { Version } from "./version.ts";
 
+/** What {@link Publisher.runGroup} needs to serve one group. */
+interface RunGroup {
+	/** The subscription's request ID, doubling as the track alias. */
+	requestId: bigint;
+
+	/** The group to serve. */
+	group: group.Consumer;
+
+	/** The track's advertised timescale, applied to every frame timestamp. */
+	timescale: Timescale;
+
+	/** Settles when the subscriber leaves, dropping a group still queued for a stream slot. */
+	unsubscribed: Promise<void>;
+}
+
 /**
  * Handles publishing broadcasts using moq-transport protocol.
  * Uses the stream-per-request pattern (real bidi streams for v17, virtual for v14-v16).
@@ -120,12 +135,28 @@ export class Publisher {
 			await ok.encode(stream.writer, version);
 			console.debug(`publish ok: broadcast=${name} track=${track.name}`);
 
+			// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
+			// a track that ran out of groups still has to flush the ones already queued, and we
+			// close the stream ourselves below to say so.
+			let finished = false;
+			let unsubscribe!: () => void;
+			const unsubscribed = new Promise<void>((resolve) => {
+				unsubscribe = resolve;
+			});
+			void stream.reader.closed.then(
+				() => {
+					if (!finished) unsubscribe();
+				},
+				// A reset is always the peer.
+				() => unsubscribe(),
+			);
+
 			// Serve track groups, racing with stream close (= Unsubscribe)
 			const serving = (async () => {
 				for (;;) {
 					const group = await track.recvGroup();
 					if (!group) return;
-					void this.#runGroup(msg.requestId, group, timescale);
+					void this.#runGroup({ requestId: msg.requestId, group, timescale, unsubscribed });
 				}
 			})();
 
@@ -148,6 +179,10 @@ export class Publisher {
 				}
 			}
 
+			// Only now is the close below ours. Claiming it any earlier would read a peer FIN
+			// that lands while PublishDone is still going out as our own completion, leaving
+			// queued groups to open for a subscriber that has already left.
+			finished = true;
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
@@ -161,9 +196,22 @@ export class Publisher {
 	/**
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
-	async #runGroup(requestId: bigint, group: group.Consumer, timescale: Timescale) {
+	async #runGroup(options: RunGroup) {
+		const { requestId, group, timescale, unsubscribed } = options;
 		try {
-			const stream = await Writer.open(this.#quic, { version: this.#session.version });
+			// One stream per group is faster than a peer at its limit can retire them, so this
+			// is the one path that doesn't wait for a slot: the transport would serve the opens
+			// in the order we asked, which is oldest-first, exactly backwards for live media.
+			// Failing here drops the group and lets the next one compete for the next slot.
+			const stream = await Writer.tryOpen(this.#quic, {
+				cancel: unsubscribed,
+				version: this.#session.version,
+				waitUntilAvailable: false,
+			});
+			if (!stream) {
+				group.close(new Error("no stream slot"));
+				return;
+			}
 
 			const header = new GroupMessage({
 				trackAlias: requestId,

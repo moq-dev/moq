@@ -180,7 +180,7 @@ impl Connection {
 				params
 			}
 			// URL-less stream transports: path + `?jwt=` ride the SETUP.
-			None => AuthParams::from_path(self.request.path()),
+			None => AuthParams::from_path_query(self.request.path(), self.request.query()),
 		};
 		params.transport = Some(transport);
 

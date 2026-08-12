@@ -14,7 +14,7 @@ Full API reference: [Swift Package Index](https://swiftpackageindex.com/moq-dev/
 ## Install
 
 ```swift
-.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.2"),
+.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.3"),
 ```
 
 Add `Moq` to your target's dependencies:
@@ -56,6 +56,24 @@ When you're done, signal graceful shutdown to the peer:
 
 ```swift
 session.shutdown()  // alias for cancel(code: 0)
+```
+
+Inspect an incoming request's logical endpoint before accepting it with the query-free `request.path`. It is consistent across transports and returns `""` for the root or missing path. `request.query` returns the encoded query and may contain credentials:
+
+```swift
+let server = Server()
+try server.bind("127.0.0.1:4443")
+server.generateTls(hostnames: ["localhost"])
+_ = try await server.listen()
+
+while let request = try await server.accept() {
+    if request.path == "/admin" {
+        try await request.reject(code: 403)
+        continue
+    }
+    let session = try await request.accept()
+    Task { try? await session.closed() }
+}
 ```
 
 A server can reject the connection on auth grounds: `MoqError.Unauthorized` (HTTP 401) or `MoqError.Forbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. Use the `isAuth` helper to catch both:

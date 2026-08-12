@@ -59,10 +59,13 @@ pub struct ServerConfig {
 	/// By default, the server accepts all supported versions.
 	/// Use this to restrict to specific versions, e.g. `--server-version moq-lite-02`.
 	/// Can be specified multiple times to accept a subset of versions.
-	///
-	/// Valid values: moq-lite-01, moq-lite-02, moq-lite-03, moq-transport-14, moq-transport-15, moq-transport-16
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[arg(id = "server-version", long = "server-version", env = "MOQ_SERVER_VERSION")]
+	#[arg(
+		id = "server-version",
+		long = "server-version",
+		env = "MOQ_SERVER_VERSION",
+		value_parser = crate::version_parser(),
+	)]
 	pub version: Vec<moq_net::Version>,
 
 	/// The certificates to serve and the roots that authenticate mTLS clients
@@ -458,7 +461,7 @@ impl Server {
 			#[cfg(feature = "websocket")]
 			let ws_accept = async {
 				match ws_ref {
-					Some(ws) => ws.accept().await,
+					Some(ws) => ws.accept_with_url().await,
 					None => std::future::pending().await,
 				}
 			};
@@ -527,12 +530,12 @@ impl Server {
 				Some(_res) = ws_accept => {
 					#[cfg(feature = "websocket")]
 					match _res {
-						Ok(session) => {
+						Ok((session, url)) => {
 							// Read the SETUP off the qmux session before handing it over, so a
 							// slow peer doesn't stall the accept loop (spawned like the others).
 							self.accept.push(async move {
 								let request = server.accept_request(session).await?;
-								Ok(Request { transport: Transport::WebSocket, url: None, identity: None, kind: RequestKind::Qmux(Box::new(request)) })
+								Ok(Request { transport: Transport::WebSocket, url: Some(url), identity: None, kind: RequestKind::Qmux(Box::new(request)) })
 							}.boxed());
 						}
 						// One connection's upgrade, not the listener's: a failed
@@ -939,7 +942,7 @@ impl std::fmt::Display for Transport {
 /// session, or [Self::close] to reject it (which closes the just-established session).
 pub struct Request {
 	transport: Transport,
-	/// The dial URL, for transports that carry one (QUIC/WebTransport). `None` for the
+	/// The request URL, for transports that carry one (QUIC/WebTransport/WebSocket). `None` for the
 	/// URL-less stream bindings, whose request path rides the SETUP instead.
 	url: Option<Url>,
 	/// The peer's validated mTLS identity, captured at the transport handshake (before
@@ -1077,7 +1080,7 @@ impl Request {
 		self.transport
 	}
 
-	/// Returns the URL the client dialed, for transports that carry one (QUIC/WebTransport).
+	/// Returns the request URL for transports that carry one (QUIC/WebTransport/WebSocket).
 	///
 	/// `None` for the URL-less stream bindings (`tcp`/`unix`); use [`Self::path`] for their
 	/// in-band request path.
@@ -1088,17 +1091,31 @@ impl Request {
 	/// The request path the client advertised, uniform across transports.
 	///
 	/// Taken from the SETUP for the URL-less stream bindings (and moq-transport, which
-	/// carries it in-band), and from the dial [`url`](Self::url) for WebTransport/QUIC.
-	/// Empty only when neither carries one.
+	/// carries it in-band), or the request [`url`](Self::url) for
+	/// WebTransport/QUIC/WebSocket.
+	/// The missing or root path is returned as an empty string.
 	pub fn path(&self) -> &str {
 		// An empty SETUP path means the client advertised none, so fall back to the
-		// dial URL. URI-carrying bindings are the ones that must not send a path at
+		// request URL. URL-carrying bindings are the ones that must not send a path at
 		// all, so this never discards a path the client meant us to use.
 		let setup = request_ref!(self, r => r.path());
-		if setup.is_empty() {
+		let path = if setup.is_empty() {
 			self.url.as_ref().map(Url::path).unwrap_or("")
 		} else {
-			setup
+			setup.split_once('?').map_or(setup, |(path, _)| path)
+		};
+		if path == "/" { "" } else { path }
+	}
+
+	/// The encoded request query without the leading `?`, if one was advertised.
+	///
+	/// Query values can contain credentials. Avoid logging this value.
+	pub fn query(&self) -> Option<&str> {
+		let setup = request_ref!(self, r => r.path());
+		if setup.is_empty() {
+			self.url.as_ref().and_then(Url::query)
+		} else {
+			setup.split_once('?').map(|(_, query)| query)
 		}
 	}
 
@@ -1142,6 +1159,16 @@ impl Request {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn version_help_lists_every_parseable_name() {
+		let help = <ServerConfig as clap::Args>::augment_args(clap::Command::new("test"))
+			.render_long_help()
+			.to_string();
+		for name in moq_net::Version::names() {
+			assert!(help.contains(name), "missing {name} from --server-version help");
+		}
+	}
 
 	/// The handles have to exist before anything binds, and cover the stream
 	/// listeners rather than just the ones an owner happens to construct itself.

@@ -35,6 +35,16 @@ class Request:
         return self._inner.url()
 
     @property
+    def path(self) -> str:
+        """The query-free request path, or an empty string for root/missing."""
+        return self._inner.path()
+
+    @property
+    def query(self) -> str | None:
+        """The encoded request query without `?`; it may contain credentials."""
+        return self._inner.query()
+
+    @property
     def transport(self) -> Transport:
         """The wire transport carrying this session (`"quic"`, `"iroh"`, or `"websocket"`)."""
         return self._inner.transport()  # type: ignore[return-value]
@@ -84,7 +94,7 @@ class Server:
 
         async with Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
             async for request in server:
-                if request.url and "/admin" in request.url:
+                if request.path == "/admin":
                     await request.reject(403)
                     continue
                 session = await request.accept()  # hold to keep the connection alive
@@ -202,7 +212,7 @@ class Server:
         To inspect or reject requests, iterate the server directly instead:
 
             async for request in server:
-                if request.url and "/admin" in request.url:
+                if request.path == "/admin":
                     await request.reject(403)
                     continue
                 session = await request.accept()

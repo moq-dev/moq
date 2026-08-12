@@ -371,3 +371,128 @@ test("lite draft-05: subscribe end clears the max sequence when groups arrive ou
 test("lite draft-05: subscribe end is 0 when no groups were produced", async () => {
 	expect(await subscribeEnd([])).toBe(0);
 });
+
+// Group streams open with waitUntilAvailable, so a browser at its concurrent stream cap
+// parks the open until the peer frees a slot. That can outlast the subscription, and the
+// queued group holds its frames the whole time.
+// Serves one finished group to a subscriber over a transport that has no stream slot free,
+// so the group sits queued inside the open until `freeSlot` is called. `outcome` settles
+// with what became of the group once the slot frees, so no test has to guess at a delay.
+async function saturatedGroup() {
+	const pair = createMockTransportPair(ALPN_05);
+
+	let freeSlot!: () => void;
+	const slot = new Promise<void>((resolve) => {
+		freeSlot = resolve;
+	});
+
+	let opening!: () => void;
+	const opened = new Promise<void>((resolve) => {
+		opening = resolve;
+	});
+
+	let reset!: () => void;
+	let wrote!: () => void;
+	const outcome = Promise.race([
+		new Promise<"reset">((resolve) => {
+			reset = () => resolve("reset");
+		}),
+		new Promise<"sent">((resolve) => {
+			wrote = () => resolve("sent");
+		}),
+	]);
+
+	const groupStream = new WritableStream<Uint8Array>({ write: () => wrote(), abort: () => reset() });
+
+	// Stand in for a transport at its stream cap, which parks the open the way a browser does
+	// rather than rejecting it, whatever we asked for.
+	const requested: unknown[] = [];
+	pair.server.createUnidirectionalStream = async (options?: unknown) => {
+		requested.push(options);
+		opening();
+		await slot;
+		return groupStream;
+	};
+
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video");
+	publisher.publish(Path.from("test"), broadcast);
+
+	const client = await Stream.open(pair.client);
+	const server = await Stream.accept(pair.server);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	const msg = new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 });
+	void publisher.runSubscribe(msg, server);
+
+	// A finished group still has frames to send, so its own close must not drop it.
+	const group = new GroupProducer(0);
+	group.writeString("hello");
+	group.close();
+	track.writeGroup(group);
+
+	// The group is queued inside the open from here on.
+	await opened;
+
+	return {
+		client,
+		track,
+		freeSlot,
+		outcome,
+		requested,
+		close: () => {
+			publisher.close();
+			broadcast.close();
+		},
+	};
+}
+
+// Group streams are the one path that must not queue behind the peer's stream limit: the
+// transport serves queued opens oldest-first, which is backwards for live media, and an
+// open already handed to it can't be taken back.
+test("lite draft-05: group streams do not ask the transport to wait for a slot", async () => {
+	const { requested, freeSlot, close } = await saturatedGroup();
+
+	expect(requested).toEqual([{ sendOrder: expect.any(Number), waitUntilAvailable: false }]);
+
+	freeSlot();
+	close();
+});
+
+test("lite draft-05: a group waiting for a stream slot is dropped when the subscriber leaves", async () => {
+	const { client, track, freeSlot, outcome, close } = await saturatedGroup();
+
+	client.close();
+
+	// Seeing the close is what cancels the queued open, so wait for the publisher to drop
+	// the subscription rather than racing it against the slot below.
+	while (track.subscription.peek() !== undefined) await track.subscription.changed();
+
+	freeSlot();
+	expect(await outcome).toBe("reset");
+
+	close();
+});
+
+// The publisher FINs the subscribe stream itself once a track ends, which must not be
+// mistaken for the subscriber leaving: SUBSCRIBE_END counts those queued groups as
+// delivered, so dropping them here would strand the tail of every finite track.
+test("lite draft-05: a group waiting for a stream slot survives the track finishing", async () => {
+	const { client, track, freeSlot, outcome, close } = await saturatedGroup();
+
+	track.close();
+
+	// Read to the FIN the publisher sends after SUBSCRIBE_END. That FIN is the moment a
+	// cancel keyed on our own close would fire, so the slot must not free up before it.
+	for (;;) {
+		const resp = await decodeSubscribeResponse(client.reader, Version.DRAFT_05);
+		if ("end" in resp) break;
+	}
+	await client.reader.closed;
+
+	freeSlot();
+	expect(await outcome).toBe("sent");
+
+	close();
+});

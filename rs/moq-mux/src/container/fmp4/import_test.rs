@@ -75,6 +75,61 @@ fn test_bbb_catalog() {
 }
 
 #[test]
+fn aac_without_decoder_specific_info_is_rejected() {
+	let data = include_bytes!("test_data/bbb.mp4");
+	let (ftyp, mut moov) = decode_init(data);
+
+	let dec_config = moov
+		.trak
+		.iter_mut()
+		.find_map(|trak| match &mut trak.mdia.minf.stbl.stsd.codecs[0] {
+			mp4_atom::Codec::Mp4a(mp4a) => Some(&mut mp4a.esds.es_desc.dec_config),
+			_ => None,
+		})
+		.expect("bbb has an AAC track");
+	dec_config.dec_specific = None;
+
+	let mut init = Vec::new();
+	ftyp.encode(&mut init).unwrap();
+	moov.encode(&mut init).unwrap();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	let err = fmp4.decode(&init).unwrap_err();
+
+	assert!(matches!(
+		err,
+		crate::Error::Cmaf(crate::container::fmp4::Error::MissingDecoderSpecific)
+	));
+}
+
+#[test]
+fn aac_decoder_specific_info_is_preserved() {
+	let data = include_bytes!("test_data/bbb.mp4");
+	let (ftyp, mut moov) = decode_init(data);
+	let expected = vec![0x12, 0x10, 0x56, 0xe5, 0x00];
+
+	let dec_specific = moov
+		.trak
+		.iter_mut()
+		.find_map(|trak| match &mut trak.mdia.minf.stbl.stsd.codecs[0] {
+			mp4_atom::Codec::Mp4a(mp4a) => mp4a.esds.es_desc.dec_config.dec_specific.as_mut(),
+			_ => None,
+		})
+		.expect("bbb has an AAC DecoderSpecificInfo");
+	dec_specific.raw = expected.clone();
+
+	let mut init = Vec::new();
+	ftyp.encode(&mut init).unwrap();
+	moov.encode(&mut init).unwrap();
+
+	let catalog = run_fmp4(&init);
+	let audio = catalog.audio.renditions.values().next().expect("AAC rendition");
+	assert_eq!(audio.description.as_deref(), Some(expected.as_slice()));
+}
+
+#[test]
 fn dropping_import_retires_catalog_renditions() {
 	let data = include_bytes!("test_data/bbb.mp4");
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
