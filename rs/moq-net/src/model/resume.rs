@@ -877,7 +877,11 @@ impl Subscriber {
 		let mut all_done = true;
 		for seg in &mut self.segments {
 			// A `start_at` overtook these parked groups; drop them and read on.
-			seg.parked.retain(|sequence, _| *sequence >= min_sequence);
+			// Eviction/expiry (which aborts a cached group) drops its entry too,
+			// bounding parking by the track's cache policy rather than retaining
+			// every group a long-capped subscription ever observed.
+			seg.parked
+				.retain(|sequence, group| *sequence >= min_sequence && !group.is_aborted());
 
 			// Re-offer the lowest parked group back inside the cap once it rises.
 			if let Some(&sequence) = seg.parked.keys().next()
@@ -1483,6 +1487,29 @@ mod test {
 		// Raising the cap re-offers the parked group.
 		sub.end_at(2);
 		assert_eq!(recv(&mut sub), 2);
+	}
+
+	/// A parked group the producer aborts (eviction/expiry) is dropped rather
+	/// than re-offered when the cap rises.
+	#[tokio::test]
+	async fn evicted_parked_groups_are_dropped() {
+		let (mut track_a, consumer_a) = track_pair("a");
+
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		sub.end_at(0);
+		write_group(&mut track_a, 0, "a0");
+		assert_eq!(recv(&mut sub), 0);
+
+		let straggler = track_a.create_group(group::Info { sequence: 1 }).unwrap();
+		recv_pending(&mut sub);
+		straggler.abort(Error::Old).unwrap();
+
+		sub.end_at(None);
+		write_group(&mut track_a, 2, "a2");
+		assert_eq!(recv(&mut sub), 2, "the evicted parked group is dropped, not re-offered");
 	}
 
 	#[tokio::test]

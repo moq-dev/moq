@@ -672,6 +672,12 @@ impl Consumer {
 		self
 	}
 
+	/// Whether the group has been aborted (including pool eviction); the abort
+	/// dropped the cached frames, so a held consumer has nothing left to read.
+	pub(crate) fn is_aborted(&self) -> bool {
+		self.state.read().abort.is_some()
+	}
+
 	/// The parent track's timescale.
 	pub fn timescale(&self) -> Timescale {
 		self.track.timescale

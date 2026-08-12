@@ -2216,8 +2216,12 @@ impl PlainSubscriber {
 	}
 
 	fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		// A raised `start_at` drops parked groups it overtook.
-		self.parked.retain(|sequence, _| *sequence >= self.min_sequence);
+		// A raised `start_at` drops parked groups it overtook, and eviction/expiry
+		// (which aborts a cached group) drops its parked entry. The latter is what
+		// bounds parking: a subscription capped indefinitely holds only what the
+		// track's cache policy still retains, not every group it ever observed.
+		self.parked
+			.retain(|sequence, group| *sequence >= self.min_sequence && !group.is_aborted());
 
 		// Re-offer the lowest parked group back inside the cap once it rises.
 		if let Some(&sequence) = self.parked.keys().next()
@@ -2342,8 +2346,10 @@ impl Subscriber {
 	/// you only want groups whose sequence number is higher than any previously returned.
 	///
 	/// Honors the floor set by [`Self::start_at`] and the cap set by [`Self::end_at`]:
-	/// a group beyond the cap is parked (not dropped) and re-offered once the cap rises,
-	/// without blocking in-range groups that arrive behind it.
+	/// a group beyond the cap is parked (not dropped) and re-offered once the cap rises
+	/// (lowest sequence first), without blocking in-range groups that arrive behind it.
+	/// A parked group that the producer evicts or expires in the meantime is dropped,
+	/// so parking never outlives the track's cache policy.
 	///
 	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
 	/// `Poll::Ready(Ok(None))` when the track is finished,
@@ -3953,6 +3959,38 @@ mod test {
 			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
 			2,
 			"the overtaken parked group is dropped, not re-offered"
+		);
+	}
+
+	/// A parked group the producer aborts (eviction/expiry) is dropped: it is
+	/// neither delivered once the cap rises nor allowed to hold the stream open
+	/// after the track finishes. This is what bounds parking by the cache policy.
+	#[tokio::test]
+	async fn evicted_parked_recv_groups_are_dropped() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None);
+
+		producer.create_group(group::Info { sequence: 0 }).unwrap();
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			0
+		);
+
+		consumer.end_at(0);
+		let straggler = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		assert!(
+			consumer.recv_group().now_or_never().is_none(),
+			"group 1 parked at the cap"
+		);
+
+		// The cache evicts the parked group (abort-as-tombstone), then the track ends.
+		straggler.abort(Error::Old).unwrap();
+		producer.finish().unwrap();
+
+		consumer.end_at(None);
+		assert!(
+			matches!(consumer.recv_group().now_or_never(), Some(Ok(None))),
+			"a dead parked group must not be delivered or hold the stream open"
 		);
 	}
 
