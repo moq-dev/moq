@@ -378,12 +378,13 @@ type Served = { sequence: number; frameStart: number; payloads: string[] };
 
 /**
  * Serves `groups` (frame payloads per group, keyed by sequence) under `bounds`, and
- * reports every group stream that reached the wire plus the resolved SUBSCRIBE_START.
+ * reports every group stream that reached the wire plus the resolved
+ * SUBSCRIBE_START / SUBSCRIBE_END range.
  */
 async function serve(
 	groups: Record<number, string[]>,
 	bounds: { startGroup?: number; startFrame?: number; endGroup?: number; endFrame?: number },
-): Promise<{ start?: number; served: Served[] }> {
+): Promise<{ start?: number; end?: number; served: Served[] }> {
 	const pair = createMockTransportPair(ALPN_06_WIP);
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomOrigin());
 
@@ -448,12 +449,16 @@ async function serve(
 		}
 
 		let start: number | undefined;
+		let end: number | undefined;
 		for (;;) {
 			const resp = await decodeSubscribeResponse(client.reader, Version.DRAFT_06);
 			if ("start" in resp) start = resp.start.group;
-			if ("end" in resp) break;
+			if ("end" in resp) {
+				end = resp.end.group;
+				break;
+			}
 		}
-		return { start, served };
+		return { start, end, served };
 	} finally {
 		// Settles the pending read as well as dropping the stream.
 		await reader.cancel();
@@ -511,6 +516,14 @@ test("lite draft-06: groups below the start group are not served", async () => {
 test("lite draft-06: groups past the end group are not served", async () => {
 	const { served } = await serve({ 0: ["w"], 1: ["x"], 2: ["y"], 3: ["z"] }, { startGroup: 1, endGroup: 2 });
 	expect(served.map((s) => s.sequence)).toEqual([1, 2]);
+});
+
+// SUBSCRIBE_END names the track's exclusive final boundary, not the capped delivered
+// range: a Rust peer feeds it into finish_at, so a truncated value would silently drop
+// the held-back groups across languages.
+test("lite draft-06: a capped subscription still reports the track's final boundary", async () => {
+	const { end } = await serve({ 0: ["w"], 1: ["x"], 2: ["y"], 3: ["z"] }, { startGroup: 1, endGroup: 2 });
+	expect(end).toBe(4);
 });
 
 // Group streams open with waitUntilAvailable, so a browser at its concurrent stream cap

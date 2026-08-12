@@ -241,26 +241,38 @@ test("nextGroup returns undefined when track closes", async () => {
 	expect(await track.nextGroup()).toBeUndefined();
 });
 
-// Close kills every buffered group, so a group parked above the cap can never be
-// delivered. nextGroup must report the track finished rather than wait forever
-// for a cap raise that has nothing left to release.
-test("nextGroup resolves undefined when the track closes with a group parked above the cap", async () => {
+// Close doesn't erase buffered frames: a group parked above the cap stays readable, so
+// nextGroup must keep waiting for a cap raise rather than fake an end-of-track and lose
+// the data (mirrors the Rust subscriber). Only a drained closed track reports finished.
+test("a closed track still delivers a group parked above the cap once the cap is raised", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();
 
-	for (let sequence = 0; sequence < 4; sequence++) producer.writeGroup(new GroupProducer(sequence));
+	for (let sequence = 0; sequence < 3; sequence++) {
+		const group = new GroupProducer(sequence);
+		group.writeString(`frame-${sequence}`);
+		group.close();
+		producer.writeGroup(group);
+	}
 
-	track.endAt(2);
+	track.endAt(1);
 	expect((await track.nextGroup())?.sequence).toBe(0);
 	expect((await track.nextGroup())?.sequence).toBe(1);
-	expect((await track.nextGroup())?.sequence).toBe(2);
 
-	// Group 3 is parked above the cap while the track is live.
+	// Group 2 parks above the cap; a clean close must not resolve it as finished.
 	const parked = track.nextGroup();
-	expect(await Promise.race([parked, Promise.resolve("pending")])).toBe("pending");
-
 	producer.close();
-	expect(await parked).toBeUndefined();
+	const timeout = new Promise((resolve) => setTimeout(() => resolve("pending"), 10));
+	expect(await Promise.race([parked, timeout])).toBe("pending");
+
+	// Raising the cap after close releases the buffered group, frames intact.
+	track.endAt(2);
+	const released = await parked;
+	expect(released?.sequence).toBe(2);
+	expect(await released?.readString()).toBe("frame-2");
+
+	// Drained and closed: now it's finished.
+	expect(await track.nextGroup()).toBeUndefined();
 });
 
 test("readFrame does not livelock when a sole group finishes before the next arrives", async () => {
