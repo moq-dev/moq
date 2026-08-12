@@ -155,3 +155,32 @@ test("a session dying does not downgrade discovery for the next one", async () =
 	second.die();
 	origin.close();
 });
+
+test("a request replaced across one coalesced wakeup still gets answered", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession(false);
+	const path = Path.from("wanted");
+
+	forwardAnnounced(session.session, origin);
+
+	const first = origin.request(path);
+	await settle();
+	expect(first.active.peek()).toBeDefined();
+	expect(session.consumes(path)).toBe(1);
+
+	// Withdrawing the last handle defers the slot teardown a microtask. Let that teardown
+	// run, then ask again before the serving loop wakes, so the delete and the fresh slot
+	// land in one notification. The loop sees a slot it never answered under a path it did.
+	first.close();
+	await Promise.resolve();
+	await Promise.resolve();
+	const second = origin.request(path);
+	await settle();
+	await settle();
+
+	expect(second.active.peek()).toBeDefined();
+	expect(session.consumes(path)).toBe(2);
+
+	second.close();
+	origin.close();
+});
