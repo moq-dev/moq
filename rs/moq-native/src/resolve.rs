@@ -27,10 +27,7 @@ use std::time::Duration;
 
 use futures::FutureExt;
 
-/// How long the first candidate waits for the full answer before settling for
-/// the IPv4-only one, unless overridden by `--client-resolution-delay`. RFC
-/// 8305's recommended Resolution Delay.
-pub(crate) const DEFAULT_DELAY: Duration = Duration::from_millis(50);
+use crate::client::DEFAULT_RESOLUTION_DELAY;
 
 /// Which of the two lookups a query is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,7 +215,7 @@ impl Default for Candidates {
 			// Only until an answer says otherwise. RFC 8305 section 4: absent a
 			// preference, IPv6 goes first.
 			next: Family::V6,
-			delay: DEFAULT_DELAY,
+			delay: DEFAULT_RESOLUTION_DELAY,
 			delayed: false,
 			local: None,
 			unreachable: VecDeque::new(),
@@ -287,6 +284,7 @@ impl Candidates {
 	/// are handed out anyway so the dial surfaces the OS error instead of a
 	/// confusing "no DNS entries". See <https://github.com/moq-dev/moq/issues/1375>
 	/// for the Windows failure this family matching originally fixed.
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub(crate) fn with_local(mut self, local: SocketAddr, dual_stack: bool) -> Self {
 		self.local = Some((local, dual_stack));
 		self
@@ -722,7 +720,7 @@ mod tests {
 
 		for (url, want) in cases {
 			let url = url::Url::parse(url).unwrap();
-			let candidates = Candidates::resolve(url.host().unwrap(), 443, DEFAULT_DELAY);
+			let candidates = Candidates::resolve(url.host().unwrap(), 443, DEFAULT_RESOLUTION_DELAY);
 			assert_eq!(drain(candidates).await, vec![addr(want)], "{url}");
 		}
 	}
@@ -732,14 +730,21 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn ipv4_waits_out_the_resolution_delay_for_the_full_answer() {
 		let mut candidates = Candidates::slow(
-			(&addrs(&["[2001:db8::1]:443", "1.2.3.4:443"]), DEFAULT_DELAY / 2),
+			(
+				&addrs(&["[2001:db8::1]:443", "1.2.3.4:443"]),
+				DEFAULT_RESOLUTION_DELAY / 2,
+			),
 			(&addrs(&["1.2.3.4:443"]), Duration::ZERO),
 		);
-		candidates.delay = DEFAULT_DELAY;
+		candidates.delay = DEFAULT_RESOLUTION_DELAY;
 
 		let start = tokio::time::Instant::now();
 		assert_eq!(candidates.next().await, Some(addr("[2001:db8::1]:443")));
-		assert_eq!(start.elapsed(), DEFAULT_DELAY / 2, "waited longer than the answer took");
+		assert_eq!(
+			start.elapsed(),
+			DEFAULT_RESOLUTION_DELAY / 2,
+			"waited longer than the answer took"
+		);
 		assert_eq!(candidates.next().await, Some(addr("1.2.3.4:443")));
 	}
 
@@ -751,11 +756,11 @@ mod tests {
 			(&[], Duration::from_secs(30)),
 			(&addrs(&["1.2.3.4:443"]), Duration::ZERO),
 		);
-		candidates.delay = DEFAULT_DELAY;
+		candidates.delay = DEFAULT_RESOLUTION_DELAY;
 
 		let start = tokio::time::Instant::now();
 		assert_eq!(candidates.next().await, Some(addr("1.2.3.4:443")));
-		assert_eq!(start.elapsed(), DEFAULT_DELAY);
+		assert_eq!(start.elapsed(), DEFAULT_RESOLUTION_DELAY);
 	}
 
 	/// A failed full lookup is an answer: there is nothing to hold the IPv4
@@ -763,7 +768,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn ipv4_does_not_wait_for_a_failed_full_lookup() {
 		let mut candidates = Candidates::slow((&[], Duration::ZERO), (&addrs(&["1.2.3.4:443"]), Duration::ZERO));
-		candidates.delay = DEFAULT_DELAY;
+		candidates.delay = DEFAULT_RESOLUTION_DELAY;
 		candidates.full.call = Some(tokio::spawn(async { Err(io::Error::other("nope")) }));
 
 		let start = tokio::time::Instant::now();
@@ -779,7 +784,7 @@ mod tests {
 			(&[], Duration::from_secs(30)),
 			(&addrs(&["1.2.3.4:443", "5.6.7.8:443"]), Duration::ZERO),
 		);
-		candidates.delay = DEFAULT_DELAY;
+		candidates.delay = DEFAULT_RESOLUTION_DELAY;
 
 		assert_eq!(candidates.next().await, Some(addr("1.2.3.4:443")));
 
@@ -883,7 +888,7 @@ mod tests {
 	#[tokio::test]
 	async fn resolves_localhost() {
 		let url = url::Url::parse("https://localhost").unwrap();
-		let candidates = Candidates::resolve(url.host().unwrap(), 443, DEFAULT_DELAY);
+		let candidates = Candidates::resolve(url.host().unwrap(), 443, DEFAULT_RESOLUTION_DELAY);
 		let addrs = drain(candidates).await;
 
 		assert!(!addrs.is_empty(), "localhost resolved to nothing");

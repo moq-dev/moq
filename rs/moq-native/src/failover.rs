@@ -270,7 +270,11 @@ mod tests {
 		)
 		.await;
 		assert_eq!(res, Ok("second"));
-		assert_eq!(start.elapsed(), DEFAULT_FAILOVER_DELAY, "second dial waits out the stagger");
+		assert_eq!(
+			start.elapsed(),
+			DEFAULT_FAILOVER_DELAY,
+			"second dial waits out the stagger"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -351,9 +355,11 @@ mod tests {
 	/// produced (variant, source chain and all) instead of an aggregate of one.
 	#[tokio::test(start_paused = true)]
 	async fn a_lone_failure_is_returned_unwrapped() {
-		let res: Result<&str, TestError> = race(Candidates::fixed([addr("1.1.1.1:1")]), DEFAULT_FAILOVER_DELAY, |_| async {
-			Err(TestError::Dial("invalid peer certificate"))
-		})
+		let res: Result<&str, TestError> = race(
+			Candidates::fixed([addr("1.1.1.1:1")]),
+			DEFAULT_FAILOVER_DELAY,
+			|_| async { Err(TestError::Dial("invalid peer certificate")) },
+		)
 		.await;
 		assert_eq!(res, Err(TestError::Dial("invalid peer certificate")));
 	}

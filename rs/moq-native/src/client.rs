@@ -15,6 +15,13 @@ const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// [`ClientConfig::resolved_failover_delay`] has to answer in every build.
 pub(crate) const DEFAULT_FAILOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// How long the first candidate waits for the full DNS answer before settling for
+/// the IPv4-only one, unless overridden by `--client-resolution-delay`. RFC 8305's
+/// recommended Resolution Delay.
+///
+/// Lives here for the same reason as [`DEFAULT_FAILOVER_DELAY`].
+pub(crate) const DEFAULT_RESOLUTION_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Configuration for the MoQ client.
 #[derive(Clone, Debug, clap::Parser, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -163,7 +170,7 @@ impl ClientConfig {
 	/// the [`resolution_delay`](Self::resolution_delay) override. Read by every
 	/// backend, like [`resolved_failover_delay`](Self::resolved_failover_delay).
 	pub fn resolved_resolution_delay(&self) -> std::time::Duration {
-		self.resolution_delay.unwrap_or(crate::resolve::DEFAULT_DELAY)
+		self.resolution_delay.unwrap_or(DEFAULT_RESOLUTION_DELAY)
 	}
 
 	/// The deadline one connection attempt will actually get, dial and handshake
