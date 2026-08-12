@@ -1,7 +1,7 @@
 //! Derivative catalog construction: pick the source rendition, size the ladder
 //! against it, and fill the output catalog with rung + passthrough entries.
 
-use hang::catalog::{AV1, H264, Video, VideoCodec, VideoConfig};
+use hang::catalog::{AV1, Video, VideoCodec, VideoConfig};
 use moq_net::PathRelativeOwned;
 
 use crate::{Error, Rung};
@@ -93,29 +93,25 @@ pub(crate) fn resolve_rungs(rungs: &[Rung], source_name: &str, source: &VideoCon
 	Ok(resolved)
 }
 
-/// The catalog entry for a resolved rung.
+/// The catalog entry for a resolved rung, probed from a throwaway encoder at the rung's geometry.
 ///
-/// The codec string is computed from the ladder, not the bitstream, so the catalog can be published
-/// before any encoder exists and stays deterministic: avc3 (in-band parameter sets, matching what
-/// every `moq-video` backend emits), and the level from the shared Table A-1 lookup.
-///
-/// High profile, unlike the Constrained Baseline a `moq-video` publisher advertises before its
-/// first keyframe. That one is provisional and the SPS replaces it within a keyframe, so it claims
-/// the least any backend emits; nothing ever refines a rung entry, so this one has to claim the
-/// most, or a decoder that accepted it could still choke on the stream.
-pub(crate) fn rung_entry(rung: &Resolved, source: &VideoConfig) -> VideoConfig {
-	let mut config = VideoConfig::new(H264 {
-		inline: true,
-		profile: 0x64,
-		constraints: 0,
-		level: moq_video::encode::h264_level(rung.size, rung.framerate, rung.bitrate),
-	});
-	config.coded_width = Some(rung.size.width);
-	config.coded_height = Some(rung.size.height);
+/// The ladder is published before any rung has been encoded (a rung is only encoded once someone
+/// asks for it), and nothing ever refines these entries from a bitstream the way an importer would.
+/// So the codec string has to be right the first time: it is read back out of the encoder that will
+/// serve the rung rather than guessed from the ladder.
+pub(crate) async fn rung_entry(
+	rung: &Resolved,
+	source: &VideoConfig,
+	encoder: &moq_video::encode::Kind,
+) -> Result<VideoConfig, Error> {
+	let mut config = moq_video::encode::Config::new(rung.size.width, rung.size.height, rung.framerate);
 	config.bitrate = Some(rung.bitrate);
-	config.framerate = Some(rung.framerate as f64);
-	config.optimize_for_latency = source.optimize_for_latency;
-	config
+	config.kind = encoder.clone();
+
+	let mut entry = config.probe().await?;
+	// A property of the source rather than the ladder: every rung shows the same picture.
+	entry.optimize_for_latency = source.optimize_for_latency;
+	Ok(entry)
 }
 
 /// Fill the derivative catalog: rung entries plus, when `source_rel` is set,
@@ -173,6 +169,8 @@ pub(crate) fn populate(
 
 #[cfg(test)]
 mod tests {
+	use hang::catalog::H264;
+
 	use super::*;
 
 	fn source(width: u32, height: u32, bitrate: Option<u64>) -> VideoConfig {
@@ -251,8 +249,8 @@ mod tests {
 	/// A rung's entry describes the rung, not the source: the codec string's level and every
 	/// dimension come from what this rung will encode, since a player picks between rungs on
 	/// exactly those fields before a single frame exists.
-	#[test]
-	fn rung_entry_describes_the_rung() {
+	#[tokio::test]
+	async fn rung_entry_describes_the_rung() {
 		let rung = Resolved {
 			name: "video/360p".to_string(),
 			size: moq_video::Size::new(640, 360),
@@ -262,9 +260,18 @@ mod tests {
 		let mut source = source(1920, 1080, Some(6_000_000));
 		source.optimize_for_latency = Some(true);
 
-		let entry = rung_entry(&rung, &source);
-		// 640x360 @ 30fps is 920 MBs * 30 = 27600 MB/s: past level 2.2's 20250, so level 3.0.
-		assert_eq!(entry.codec.to_string(), "avc3.64001e");
+		// Software (openh264) so the probe is deterministic and never touches a hardware backend.
+		let entry = rung_entry(&rung, &source, &moq_video::encode::Kind::Software)
+			.await
+			.unwrap();
+
+		// Read out of the encoder that will serve this rung, so the entry describes the rung rather
+		// than the source: a player picks between rungs on exactly these fields, before a single
+		// frame of any of them exists.
+		let hang::catalog::VideoCodec::H264(h264) = &entry.codec else {
+			panic!("expected H.264, got {}", entry.codec)
+		};
+		assert!(h264.inline, "an avc3 rung carries its parameter sets in band");
 		assert_eq!(entry.coded_width, Some(640));
 		assert_eq!(entry.coded_height, Some(360));
 		assert_eq!(entry.bitrate, Some(600_000));

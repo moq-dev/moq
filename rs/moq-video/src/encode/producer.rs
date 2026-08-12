@@ -1,8 +1,9 @@
 //! Publish encoded video frames as a moq video track, with optional capture.
 //!
 //! Encoding is strictly on demand: the track and its catalog rendition are
-//! advertised immediately (from the [`Hint`], since nothing has been encoded
-//! yet), but the camera stays closed (LED off, no CPU) until a subscriber
+//! advertised immediately (the rendition is probed from the encoder, since
+//! nothing has been encoded yet), but the camera stays closed (LED off, no CPU)
+//! until a subscriber
 //! appears. When the last viewer leaves, the camera is released again. This
 //! mirrors `moq-boy`, which pauses its emulator on `track::Producer::used()` /
 //! `unused()`.
@@ -20,18 +21,49 @@ use crate::Frame;
 #[cfg(feature = "capture")]
 use crate::capture;
 
+use super::Encoded;
 #[cfg(feature = "capture")]
 use super::Sink;
 #[cfg(any(feature = "capture", test))]
 use super::encoder;
+#[cfg(feature = "capture")]
 use super::encoder::Codec;
 #[cfg(feature = "capture")]
 use super::rate::{Control, Policy};
-use super::{Encoded, Hint};
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
 #[cfg(feature = "capture")]
 const DEFAULT_FRAMERATE: u32 = 30;
+
+/// The geometry the rendition is probed at when the caller pins none. Only the codec string comes
+/// out of it, and only its level and dimensions depend on the size, so a camera that turns out to
+/// be something else updates those from its first keyframe. 720p is a size every encoder accepts,
+/// which matters because a backend that rejects the probe geometry falls through to another one and
+/// would answer for the wrong encoder.
+#[cfg(feature = "capture")]
+const PROBE_WIDTH: u32 = 1280;
+#[cfg(feature = "capture")]
+const PROBE_HEIGHT: u32 = 720;
+
+/// The rendition as the importer wants it: what to publish now, and what to keep filling in on
+/// every config it later resolves from the bitstream.
+///
+/// A probed rendition is what the first keyframe carries, so the importer's own config matches it
+/// field for field and the catalog is published once rather than corrected. The fields the
+/// bitstream can't reveal (bitrate always, framerate outside an optional VUI) are the ones this
+/// overlay keeps supplying.
+fn rendition_hint(rendition: hang::catalog::VideoConfig) -> moq_mux::catalog::VideoHint {
+	let mut hint = moq_mux::catalog::VideoHint::default();
+	hint.codec = Some(rendition.codec);
+	hint.coded_width = rendition.coded_width;
+	hint.coded_height = rendition.coded_height;
+	hint.display_aspect_width = rendition.display_aspect_width;
+	hint.display_aspect_height = rendition.display_aspect_height;
+	hint.framerate = rendition.framerate;
+	hint.bitrate = rendition.bitrate;
+	hint.optimize_for_latency = rendition.optimize_for_latency;
+	hint
+}
 
 /// Per-codec splitter + importer pair. Each codec frames its packets and resolves
 /// its catalog rendition differently, so the producer holds one of these.
@@ -61,40 +93,42 @@ pub struct Producer<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Producer<E> {
-	/// Publish a track for `hint`'s codec into `broadcast`, registering its
-	/// rendition in `catalog`. The frames fed to [`publish`](Self::publish) must
-	/// be in that codec's framing (the matching [`Encoder`](super::Encoder)
-	/// emits it).
+	/// Publish a track carrying `rendition` into `broadcast`, registering it in
+	/// `catalog`. The frames fed to [`publish`](Self::publish) must be in that
+	/// codec's framing, which is what the [`Encoder`](super::Encoder) the
+	/// rendition was probed from emits.
 	///
-	/// The rendition is published here, before anything is encoded, from what
-	/// [`Hint`] says the stream will be; pass `(&config).into()` for an
-	/// [`Encoder`](super::Encoder)'s [`Config`](super::Config), or a bare
-	/// [`Codec`] when that's all you have. Publishing up front is what lets a
-	/// subscriber discover the track, which is what an encoder running only
-	/// while watched is waiting for. The first keyframe's parameter sets refine
-	/// the rendition in band.
+	/// `rendition` comes from [`Config::probe`](super::Config::probe), so it is
+	/// what the encoder will actually emit rather than a guess. It is published
+	/// immediately, before anything is encoded, which is what lets a subscriber
+	/// discover a track an on-demand encoder has not run for yet; because it
+	/// already says what the first keyframe says, that keyframe confirms the
+	/// catalog instead of correcting it.
 	pub fn new(
 		mut broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
-		hint: impl Into<Hint>,
+		rendition: hang::catalog::VideoConfig,
 	) -> Result<Self, Error> {
-		let hint = hint.into();
-		let overlay = moq_mux::catalog::VideoHint::from(&hint);
-
-		let codecs = match hint.codec {
-			Codec::H264 => {
+		let codecs = match &rendition.codec {
+			hang::catalog::VideoCodec::H264(_) => {
 				let track = broadcast.unique_track(".avc3", catalog.track_info())?;
 				Codecs::H264 {
 					split: moq_mux::codec::h264::Split::new(),
-					import: moq_mux::codec::h264::Import::new(track, catalog.reserve(), overlay)?,
+					import: moq_mux::codec::h264::Import::new(track, catalog.reserve(), rendition_hint(rendition))?,
 				}
 			}
-			Codec::H265 => {
+			hang::catalog::VideoCodec::H265(_) => {
 				let track = broadcast.unique_track(".hev1", catalog.track_info())?;
 				Codecs::H265 {
 					split: moq_mux::codec::h265::Split::new(),
-					import: moq_mux::codec::h265::Import::new(track, catalog.reserve(), overlay)?,
+					import: moq_mux::codec::h265::Import::new(track, catalog.reserve(), rendition_hint(rendition))?,
 				}
+			}
+			// Unreachable via `Config::probe`, which only encodes what `Codec` covers.
+			other => {
+				return Err(Error::Codec(anyhow::anyhow!(
+					"{other} is not a codec this producer can publish"
+				)));
 			}
 		};
 		Ok(Self { codecs })
@@ -240,14 +274,34 @@ pub async fn publish_capture<E: CatalogExt>(
 		return Err(Error::InvalidFramerate(0));
 	}
 
-	// Only what the caller pinned: the rest of the geometry belongs to the camera,
-	// which is still closed, and the first keyframe fills it in.
-	let mut hint = Hint::new(encode.codec);
-	hint.size = capture.width.zip(capture.height).map(|(w, h)| crate::Size::new(w, h));
-	hint.framerate = capture.framerate;
-	hint.bitrate = encode.bitrate;
+	// The rendition is probed before the camera opens, so the only geometry it can be probed at is
+	// the one the caller asked for. Pin a size and framerate and the rendition is exact; leave them
+	// out and the camera's own mode fills them in from its first keyframe.
+	let mut probe_config = encoder::Config::new(
+		capture.width.unwrap_or(PROBE_WIDTH),
+		capture.height.unwrap_or(PROBE_HEIGHT),
+		capture.framerate.unwrap_or(DEFAULT_FRAMERATE),
+	);
+	probe_config.bitrate = encode.bitrate;
+	probe_config.codec = encode.codec;
+	probe_config.kind = encode.kind.clone();
 
-	let mut producer = Producer::new(broadcast, catalog, hint)?;
+	let mut rendition = probe_config.probe().await?;
+	// The probe geometry stands in for a camera nobody has opened yet, so it answers for the codec
+	// but not for the picture. Publishing a size the caller never asked for would be a guess a
+	// player could pick a rendition on, and unlike the codec string it costs nothing to omit: the
+	// first keyframe fills it in.
+	if capture.width.is_none() {
+		rendition.coded_width = None;
+	}
+	if capture.height.is_none() {
+		rendition.coded_height = None;
+	}
+	if capture.framerate.is_none() {
+		rendition.framerate = None;
+	}
+
+	let mut producer = Producer::new(broadcast, catalog, rendition)?;
 	let demand = producer.demand();
 
 	let result = capture_loop(&mut producer, &demand, &capture, &encode, &clock).await;
@@ -453,33 +507,28 @@ mod tests {
 	use super::*;
 	use crate::encode::{Config, Encoder};
 
-	/// Encode a handful of synthetic frames for `codec` and publish them through a
-	/// real [`Producer`], returning the catalog rendition's track name and config.
+	/// Encode a handful of synthetic frames for `codec` and publish them through a real
+	/// [`Producer`], returning the catalog rendition's track name and config.
 	///
-	/// The producer is built from a bare codec, so the rendition starts with no
-	/// dimensions: a config carrying them is one the matching importer resolved
-	/// from the encoded keyframe, which proves the whole encode -> split ->
-	/// import -> catalog path works for that codec.
+	/// Asserts the property the whole design rests on: the rendition published before anything is
+	/// encoded is the one the first keyframe resolves. A guessed codec string would be corrected
+	/// here; a probed one is confirmed, so the catalog is written once.
 	///
-	/// `kind` is explicit so the test picks a deterministic encoder rather than
-	/// `Auto`, which on Linux CI would try the NVENC backend and panic in cudarc
-	/// on a GPU-less runner.
-	///
-	/// Also checks the invariant the advertised profile rests on: it must never exceed the one this
-	/// machine's encoder actually emits. See [`profile_idc`].
+	/// `kind` is explicit so the test picks a deterministic encoder rather than `Auto`, which on
+	/// Linux CI would try the NVENC backend and panic in cudarc on a GPU-less runner.
 	async fn roundtrip_rendition(codec: Codec, kind: encoder::Kind) -> (String, hang::catalog::VideoConfig) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
-		let mut producer = Producer::new(broadcast, catalog.clone(), codec).unwrap();
-
-		let advertised = rendition(&catalog).expect("the rendition publishes before any frame").1;
 
 		let mut config = Config::new(320, 240, 30);
 		config.codec = codec;
 		config.kind = kind;
+
+		let mut producer = Producer::new(broadcast, catalog.clone(), config.probe().await.unwrap()).unwrap();
+		let advertised = rendition(&catalog).expect("the rendition publishes before any frame").1;
+
 		let mut encoder = Encoder::new(&config).unwrap();
 		assert_eq!(encoder.codec(), codec);
-		let backend = encoder.name().to_string();
 
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		for i in 0..10u64 {
@@ -489,16 +538,16 @@ mod tests {
 		}
 		producer.publish(&encoder.finish().unwrap()).unwrap();
 
-		let (name, refined) = rendition(&catalog).expect("the importer should have registered a video rendition");
-		assert!(
-			profile_idc(&advertised.codec) <= profile_idc(&refined.codec),
-			"advertised {} claims more than {} emits: a decoder that can play the stream would fail \
-			 the capability probe, and one that never subscribes never receives the keyframe that \
-			 would correct the claim",
-			advertised.codec,
-			backend,
+		let (name, resolved) = rendition(&catalog).expect("the importer should have registered a video rendition");
+		// Jitter aside, which is measured from the frames rather than declared by either.
+		let (mut before, mut after) = (advertised, resolved.clone());
+		before.jitter = None;
+		after.jitter = None;
+		assert_eq!(
+			before, after,
+			"the first keyframe should confirm the advertised rendition, not correct it"
 		);
-		(name, refined)
+		(name, resolved)
 	}
 
 	/// The catalog's single video rendition, if it has one yet.
@@ -506,17 +555,6 @@ mod tests {
 		let snapshot = catalog.snapshot();
 		let (name, config) = snapshot.video.renditions.iter().next()?;
 		Some((name.clone(), config.clone()))
-	}
-
-	/// The codec's profile as a comparable number, low to high. Exact for the profiles our backends
-	/// emit (H.264 Constrained Baseline 66 / Main 77 / High 100, HEVC Main 1), which is all this
-	/// needs to order; H.264's numbering is not a capability ladder in general (Extended is 88).
-	fn profile_idc(codec: &hang::catalog::VideoCodec) -> u8 {
-		match codec {
-			hang::catalog::VideoCodec::H264(h264) => h264.profile,
-			hang::catalog::VideoCodec::H265(h265) => h265.profile_idc,
-			other => panic!("unexpected codec {other}"),
-		}
 	}
 
 	/// Regression: the rendition has to reach the wire before anything is encoded.
@@ -534,7 +572,9 @@ mod tests {
 
 		let mut config = Config::new(1920, 1080, 30);
 		config.bitrate = Some(6_000_000);
-		let _producer = Producer::new(broadcast, catalog, &config).unwrap();
+		// Software (openh264) so the test is deterministic and never touches a hardware backend.
+		config.kind = encoder::Kind::Software;
+		let _producer = Producer::new(broadcast, catalog, config.probe().await.unwrap()).unwrap();
 
 		// Published, not merely staged: this reads the catalog track a subscriber would.
 		let mut stream = moq_mux::catalog::Consumer::<()>::new(&consumer, moq_mux::catalog::CatalogFormat::Hang)
@@ -549,11 +589,16 @@ mod tests {
 			.next()
 			.expect("the track must be discoverable before it has encoded anything");
 		assert!(name.ends_with(".avc3"));
-		// Constrained Baseline (the least any backend emits, so no decoder probe rejects it) at
-		// level 4.0, the level 1080p30 at 6 Mbps resolves to.
-		assert_eq!(rendition.codec.to_string(), "avc3.42e028");
+
+		// Read out of the encoder rather than guessed: the avc3 shape (parameter sets in band) and
+		// the geometry it was opened at, which is what its first keyframe will carry.
+		let hang::catalog::VideoCodec::H264(h264) = &rendition.codec else {
+			panic!("expected H.264, got {}", rendition.codec)
+		};
+		assert!(h264.inline, "an avc3 track carries its parameter sets in band");
 		assert_eq!(rendition.coded_width, Some(1920));
 		assert_eq!(rendition.coded_height, Some(1080));
+		// Neither is in the bitstream, so both come from the config that was probed.
 		assert_eq!(rendition.framerate, Some(30.0));
 		assert_eq!(rendition.bitrate, Some(6_000_000));
 	}
@@ -564,7 +609,7 @@ mod tests {
 		// hardware backend.
 		let (name, config) = roundtrip_rendition(Codec::H264, encoder::Kind::Software).await;
 		assert!(name.ends_with(".avc3"));
-		assert_eq!(config.coded_width, Some(320), "the SPS should have refined the hint");
+		assert_eq!(config.coded_width, Some(320));
 		assert_eq!(config.coded_height, Some(240));
 	}
 
@@ -575,7 +620,7 @@ mod tests {
 	async fn h265_roundtrip_publishes_hev1() {
 		let (name, config) = roundtrip_rendition(Codec::H265, encoder::Kind::Hardware).await;
 		assert!(name.ends_with(".hev1"));
-		assert_eq!(config.coded_width, Some(320), "the SPS should have refined the hint");
+		assert_eq!(config.coded_width, Some(320));
 		assert_eq!(config.coded_height, Some(240));
 	}
 }

@@ -42,7 +42,7 @@ enum EncoderMsg {
 }
 
 impl VideoEncoder {
-	pub fn spawn(broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Self {
+	pub async fn spawn(broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Self {
 		let (tx, rx) = tokio::sync::mpsc::channel(4);
 
 		// Game Boy is 160x144; force the openh264 software encoder since hardware
@@ -50,10 +50,11 @@ impl VideoEncoder {
 		let mut config = moq_video::encode::Config::new(WIDTH, HEIGHT, FRAMERATE);
 		config.kind = moq_video::encode::Kind::Software;
 
-		// The catalog rendition publishes from this config, before the emulator has
-		// run a frame, which is what lets a viewer discover a paused moq-boy.
+		// Probed from a throwaway encoder, before the emulator has run a frame, so a
+		// viewer can discover (and unpause) a moq-boy that has published nothing.
+		let rendition = config.probe().await.expect("failed to probe the H.264 encoder");
 		let producer =
-			moq_video::encode::Producer::new(broadcast, catalog, &config).expect("failed to create avc3 producer");
+			moq_video::encode::Producer::new(broadcast, catalog, rendition).expect("failed to create avc3 producer");
 		let demand = producer.demand();
 
 		let force_keyframe = Arc::new(AtomicBool::new(false));

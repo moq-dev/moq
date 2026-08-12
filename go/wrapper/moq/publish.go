@@ -127,10 +127,9 @@ func (b *BroadcastProducer) PublishAudio(name string, input AudioEncoderInput, o
 // encoder.
 //
 // The track is named after the codec (.avc3 / .hev1) and its catalog rendition
-// is published immediately, describing what output will encode, so subscribers
+// is published immediately, read out of the encoder itself, so subscribers
 // discover it through the catalog rather than a name you pick, and can find it
-// before the first frame exists. The first keyframe refines the rendition in
-// band.
+// before the first frame exists.
 func (b *BroadcastProducer) PublishVideo(input VideoEncoderInput, output VideoEncoderOutput) (*VideoProducer, error) {
 	inner, err := b.inner.PublishVideo(input, output)
 	if err != nil {

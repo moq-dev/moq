@@ -284,18 +284,19 @@ impl VideoEncoder {
 impl Video {
 	/// Advertise a track for an already-opened encoder.
 	///
-	/// The encoder is opened by the caller, and before this, so a config this
-	/// machine can't encode fails without leaving a track advertised that will
-	/// never carry frames.
+	/// The encoder and the rendition it will emit are both resolved by the caller,
+	/// and before this, so a config this machine can't encode fails without leaving
+	/// a track advertised that will never carry frames.
 	pub fn publish(
 		&mut self,
 		broadcast: &moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<moq_mux::catalog::hang::Extra>,
 		format: moq_video_pixel_format,
 		config: &moq_video::encode::Config,
+		rendition: hang::catalog::VideoConfig,
 		encoder: moq_video::encode::Sink,
 	) -> Result<Id, Error> {
-		let producer = moq_video::encode::Producer::new(broadcast.clone(), catalog, config)?;
+		let producer = moq_video::encode::Producer::new(broadcast.clone(), catalog, rendition)?;
 		self.producers.insert(Shared::new(VideoEncoder {
 			encoder,
 			producer,
@@ -463,10 +464,9 @@ unsafe fn encoder_kind(output: &moq_video_encoder_output) -> Result<moq_video::e
 ///
 /// The encoder is opened here, so an unsupported codec, resolution, or backend
 /// fails now rather than on the first frame. The track is named after the codec
-/// (`.avc3` / `.hev1`) and its catalog rendition is published immediately,
-/// describing what this config will encode, so a subscriber can find the track
-/// before a frame is written to it. The first keyframe's parameter sets refine
-/// the rendition in band.
+/// (`.avc3` / `.hev1`) and its catalog rendition is published immediately, read
+/// out of the encoder rather than guessed, so a subscriber can find the track
+/// before a frame is written to it.
 ///
 /// Returns a non-zero handle on success or a negative error code.
 ///
@@ -497,15 +497,17 @@ pub unsafe extern "C" fn moq_publish_video_raw(
 			config.gop = raw_output.gop;
 		}
 
-		// Opened before the global lock is taken: bringing up a hardware encoder is
-		// slow enough that every other call would wait behind it.
+		// Both before the global lock is taken: bringing up a hardware encoder is slow
+		// enough that every other call would wait behind it. The probe runs first and
+		// closes its encoder before this one opens, so only one codec session is live.
+		let rendition = block_on(config.probe())?;
 		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
 
 		let mut state = State::lock();
 		let State { publish, video, .. } = &mut *state;
 		let (broadcast_producer, catalog) = publish.pair_mut(broadcast)?;
 
-		video.publish(broadcast_producer, catalog.clone(), format, &config, encoder)
+		video.publish(broadcast_producer, catalog.clone(), format, &config, rendition, encoder)
 	})
 }
 
@@ -695,7 +697,9 @@ mod tests {
 			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())
 				.unwrap();
 		let consumer = broadcast.consume();
-		let producer = moq_video::encode::Producer::new(broadcast, catalog, moq_video::encode::Codec::H264).unwrap();
+		// Probed rather than hand-built, so the test track carries what a real one would.
+		let rendition = moq_video::encode::Config::new(320, 240, 30).probe().await.unwrap();
+		let producer = moq_video::encode::Producer::new(broadcast, catalog, rendition).unwrap();
 
 		let name = producer.demand().name().to_string();
 		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();

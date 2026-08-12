@@ -281,9 +281,8 @@ impl MoqBroadcastProducer {
 	/// The encoder opens here, so an unsupported codec, resolution, or backend
 	/// fails now rather than on the first frame. The track is named after the
 	/// codec (`.avc3` / `.hev1`) and its catalog rendition is published
-	/// immediately, describing what this config will encode, so a subscriber can
-	/// find the track before a frame is written to it. The first keyframe's
-	/// parameter sets refine the rendition in band.
+	/// immediately, read out of the encoder rather than guessed, so a subscriber
+	/// can find the track before a frame is written to it.
 	pub fn publish_video(
 		&self,
 		input: MoqVideoEncoderInput,
@@ -299,14 +298,16 @@ impl MoqBroadcastProducer {
 			config.gop = gop;
 		}
 
-		// Open the encoder first: a config this machine can't encode should fail
-		// without leaving a track advertised that will never carry frames.
+		// Both before the track exists: a config this machine can't encode should fail
+		// without leaving a track advertised that will never carry frames. The probe
+		// closes its encoder before this one opens, so only one codec session is live.
+		let rendition = block_on(config.probe())?;
 		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
 		let producer = self.with_state(|state| {
 			Ok(moq_video::encode::Producer::new(
 				state.broadcast.clone(),
 				state.catalog.clone(),
-				&config,
+				rendition,
 			)?)
 		})?;
 

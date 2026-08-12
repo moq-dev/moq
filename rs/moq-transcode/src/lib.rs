@@ -81,10 +81,11 @@ pub async fn run(
 
 	// Publish the derivative catalog before any encoder exists, so subscribers
 	// can pick a rung immediately.
-	let entries: Vec<_> = rungs
-		.iter()
-		.map(|rung| (rung.name.clone(), catalog::rung_entry(rung, &source_config)))
-		.collect();
+	let mut entries = Vec::with_capacity(rungs.len());
+	for rung in &rungs {
+		let entry = catalog::rung_entry(rung, &source_config, &config.encoder).await?;
+		entries.push((rung.name.clone(), entry));
+	}
 	{
 		let mut guard = derived.lock();
 		catalog::populate(&mut guard, &snapshot, &entries, config.source.as_ref())?;

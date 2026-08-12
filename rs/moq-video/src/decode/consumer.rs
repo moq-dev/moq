@@ -87,19 +87,20 @@ impl Consumer {
 mod tests {
 	use super::*;
 	use crate::decode::Kind;
-	use crate::encode::{Codec, Config as EncodeConfig, Encoder, Kind as EncodeKind, Producer as EncodeProducer};
+	use crate::encode::{Config as EncodeConfig, Encoder, Kind as EncodeKind, Producer as EncodeProducer};
 
 	#[tokio::test]
 	async fn reads_cmaf_container_declared_by_catalog() {
 		let mut source_broadcast = moq_net::broadcast::Info::new().produce();
 		let source_subscriber = source_broadcast.consume();
 		let source_catalog = moq_mux::catalog::Producer::new(&mut source_broadcast).unwrap();
-		let mut producer = EncodeProducer::new(source_broadcast, source_catalog, Codec::H264).unwrap();
-		let mut encoder = Encoder::new(&EncodeConfig {
+		let config = EncodeConfig {
 			kind: EncodeKind::Software,
 			..EncodeConfig::new(320, 240, 30)
-		})
-		.unwrap();
+		};
+		let rendition = config.probe().await.unwrap();
+		let mut producer = EncodeProducer::new(source_broadcast, source_catalog, rendition).unwrap();
+		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		for index in 0..2 {
 			encoder.keyframe();
