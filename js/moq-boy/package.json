@@ -18,7 +18,7 @@
 		"./src/element.tsx"
 	],
 	"scripts": {
-		"build": "rimraf dist && vite build && tsc && bun ../common/package.ts",
+		"build": "rimraf dist && vite build && tsc -p tsconfig.build.json && bun ../common/package.ts",
 		"check": "tsc --noEmit",
 		"release": "bun ../common/release.ts"
 	},
