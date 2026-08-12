@@ -455,8 +455,6 @@ export class Consumer {
 		// Memoized on the route's identity: the same front resolving again returns the handle
 		// we already made, and only a real swap clones a new one (cloning before closing the
 		// old, so a broadcast that both routes share never briefly loses its last handle).
-		// This has to happen on the read rather than in a subscription callback, because a
-		// callback fires a microtask late and a routed path resolves synchronously.
 		let released = false;
 		let source: broadcast.Consumer | undefined;
 		let handle: broadcast.Consumer | undefined;
@@ -471,11 +469,19 @@ export class Consumer {
 			return handle;
 		};
 
-		const active = new Derived([this.#resolved(path, taken)], own);
+		const route = this.#resolved(path, taken);
+		const active = new Derived([route], own);
+
+		// Swapping on the read is what keeps a routed path resolving synchronously, but a
+		// holder that only ever peeked would then pin a route that has already been retracted
+		// until it happened to read again. Following the route as well retires it promptly,
+		// and the memo makes the two paths agree: whichever runs first does the swap.
+		const unsubscribe = route.subscribe(own);
 
 		return makeRequest(path, active, () => {
 			// Releases this request's handle; the route itself belongs to the table.
 			released = true;
+			unsubscribe();
 			handle?.close();
 			handle = undefined;
 			source = undefined;

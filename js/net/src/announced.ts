@@ -374,10 +374,10 @@ export class Broadcast {
 			offline();
 		});
 
-		// Blind fallback: while every attached session lacks discovery, nothing remote will
-		// ever reach the table, so stand a request for whichever session answers. Gated on
-		// exactly `false`: with no session there is nobody to ask, and with discovery the
-		// announcement gate is the point, so a blind subscribe would defeat it.
+		// Blind fallback: while any attached session cannot announce, the table is an
+		// incomplete picture of what is reachable, so stand a request for whichever session
+		// answers. Gated on exactly `false`: with no session there is nobody to ask, and with
+		// every session announcing the gate is the point, so a blind subscribe would defeat it.
 		effect.run((nested) => {
 			if (nested.get(origin.discovery) !== false) return;
 

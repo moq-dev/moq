@@ -581,3 +581,29 @@ test("closing a request releases the handle it was holding", async () => {
 	producer.close();
 	origin.close();
 });
+
+test("a retracted route is retired even for a request nobody reads again", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("redundant");
+
+	const older = new BroadcastProducer();
+	const newer = new BroadcastProducer();
+	const disposeOlder = origin.insertRemote(path, older.consume());
+	const disposeNewer = origin.insertRemote(path, newer.consume());
+
+	const request = consumer.request(path);
+	// One read, then the holder goes quiet: a peek-only holder must not pin the route.
+	expect(request.active.peek()).toBeDefined();
+
+	// The newest route retracts and the older one is promoted. Nothing reads `active`.
+	disposeNewer();
+	await settle();
+
+	expect(newer.closed.peek()).not.toBeUndefined();
+
+	request.close();
+	disposeOlder();
+	older.close();
+	origin.close();
+});
