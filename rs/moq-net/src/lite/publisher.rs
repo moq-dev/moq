@@ -1349,6 +1349,7 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 						priority: self.shared.priority.clone(),
 						track_priority: track_priority_tx.consume(),
 						track_priority_seen: msg.priority,
+						ordered: msg.ordered,
 						version: self.shared.version,
 						timescale,
 					};
@@ -1711,6 +1712,8 @@ mod test {
 	/// must still deliver it; a sequence cursor would skip it permanently.
 	#[tokio::test]
 	async fn recv_next_serves_late_arrival_after_newer_group() {
+		use futures::FutureExt;
+
 		let mut producer = track_producer("test");
 		let mut subscriber = producer.subscribe(None);
 
@@ -2746,6 +2749,15 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 				if let Ok(mut value) = self.track_priority_tx.write() {
 					*value = upd.priority;
 				}
+				// Re-rank the backlog too, not just the groups queued from here on.
+				// The preference is about which of the groups we are holding to send
+				// first, so leaving the queued ones on the old direction would let
+				// every new group outrank exactly the ones the subscriber just asked
+				// to receive first, starving them until they expire.
+				if self.ctx.ordered != upd.ordered {
+					self.ctx.ordered = upd.ordered;
+					self.ctx.priority.set_ordered(self.ctx.id, self.ctx.ordered);
+				}
 				// Feed the full update into the model subscriber so the producer's
 				// aggregate reflects it (and a relay re-forwards it upstream).
 				let bounds = Bounds::from(&upd);
@@ -2764,10 +2776,10 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 				continue;
 			}
 
-			// One cursor drives the whole subscription: poll the cap-aware next group and,
-			// when enabled, the next best-effort datagram. Groups are polled first so a
-			// datagram burst can't starve them; datagrams flow whenever no group is ready
-			// (including while groups are paused above the cap).
+			// One cursor drives the whole subscription: poll the cap-aware arrival-order
+			// group and, when enabled, the next best-effort datagram. Groups are polled
+			// first so a datagram burst can't starve them; datagrams flow whenever no
+			// group is ready (including while groups are parked above the cap).
 			let emit_boundary = self.emit_range && !self.end_sent;
 			if let Poll::Ready(res) = poll_recv_next(&mut self.track, self.datagrams, emit_boundary, waiter) {
 				match res? {
@@ -2802,7 +2814,14 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 
 						// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
 						let current_priority = self.ctx.track_priority_current();
-						let handle = self.ctx.priority.insert(Priority::new(current_priority, sequence));
+						// The subscribe id scopes the group tie-break: one queue serves every
+						// subscription on the session, and only groups of the same one may be
+						// ranked against each other by sequence.
+						let priority = match self.ctx.ordered {
+							true => Priority::ordered(current_priority, self.ctx.id, sequence),
+							false => Priority::new(current_priority, self.ctx.id, sequence),
+						};
+						let handle = self.ctx.priority.insert(priority);
 						self.children
 							.push(GroupServe::new(self.ctx.clone(), sequence, frame_start, handle, group));
 					}
@@ -3202,6 +3221,7 @@ mod serve_group_test {
 			priority: PriorityQueue::default(),
 			track_priority: track_priority.consume(),
 			track_priority_seen: 0,
+			ordered: false,
 			version: Version::Lite06Wip,
 			timescale: Some(crate::Timescale::default()),
 		};
@@ -3214,7 +3234,7 @@ mod serve_group_test {
 		let consumer = group.consume();
 		group.finish().unwrap();
 
-		let handle = subscription.priority.insert(Priority::new(0, 0));
+		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
 		subscription.serve_group(0, 0, handle, consumer).await.unwrap();
 
 		assert_eq!(log.resets(), Vec::<u32>::new(), "clean completion must not reset");
