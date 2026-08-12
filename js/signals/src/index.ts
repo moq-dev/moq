@@ -444,6 +444,10 @@ export class Effect {
 			// Diagnostic only: a task that ignores cancellation stalls the rerun, so name it.
 			const warn = DEV
 				? setTimeout(() => {
+						// A close() racing the timer disarms it, but the callback can already be
+						// queued by then. There is nothing to warn about once the effect is gone.
+						if (this.#dispose === undefined) return;
+
 						console.warn(
 							"spawn is still running after 5s; the effect cannot rerun until it settles",
 							this.#stack,
@@ -456,7 +460,11 @@ export class Effect {
 				while (this.#dispose !== undefined && this.#async.length > 0) {
 					const pending = this.#async;
 					this.#async = [];
-					await Promise.all(pending);
+
+					// close() has to release the wait rather than wait behind it. It already ran
+					// every dispose function, and there is no next run left to protect, so a task
+					// that never settles must not pin this loop (or the timer below) forever.
+					await Promise.race([Promise.all(pending), this.#closed.promise]);
 				}
 			} catch (error) {
 				console.error("async effect error", error);
