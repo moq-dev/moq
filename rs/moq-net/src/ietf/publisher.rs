@@ -34,6 +34,25 @@ struct Watched {
 	/// could not get a stream to make it on. Nothing about that clears on its own, so the
 	/// loop comes back to it on a timer.
 	deferred: bool,
+	/// What the peer's refusal said about coming back, which outranks that timer.
+	refused: Refused,
+}
+
+/// What a refusal said about re-offering the namespace.
+///
+/// A peer answers a request it declines with a retry interval ({{moqt}} REQUEST_ERROR),
+/// and ignoring it is how a permanent refusal (unauthorized, uninterested) turns into a
+/// request every few seconds for the life of the session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Refused {
+	/// Never refused, or refused on a draft whose error carries no interval, so our own
+	/// backoff is the only guidance there is.
+	#[default]
+	No,
+	/// Refused with a minimum wait before re-offering.
+	Until(web_async::time::Instant),
+	/// Refused with an interval of 0: the peer does not want this offered again.
+	Never,
 }
 
 impl Watched {
@@ -45,6 +64,7 @@ impl Watched {
 			idle_at: None,
 			dead: false,
 			deferred: false,
+			refused: Refused::No,
 		}
 	}
 
@@ -925,7 +945,18 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let wanted = advert.wanted();
 		let held = watch.sent.wanted();
 
+		// A peer that asked never to be offered this again means it, whatever brought us
+		// back: a route change re-prices the advertisement but does not make it a
+		// different namespace. Only withdrawing and re-announcing clears this, since that
+		// builds a fresh entry.
+		if watch.refused == Refused::Never && wanted && !held {
+			return Ok(());
+		}
+
 		let absolute = self.origin.absolute(path).to_owned();
+		// Only a fresh PUBLISH_NAMESPACE request can be refused; everything else below
+		// either rides a stream the peer already accepted or says nothing at all.
+		let mut refused = watch.refused;
 		let sent = match target {
 			Target::Requests(_) => {
 				match (advert.wanted(), requests.get_mut(suffix)) {
@@ -950,7 +981,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					}
 					(true, None) => {
 						tracing::debug!(broadcast = %absolute, "publish_namespace");
-						self.advertise_namespace(requests, path, suffix.clone(), advert.params())
+						refused = self
+							.advertise_namespace(requests, path, suffix.clone(), advert.params())
 							.await?;
 					}
 				}
@@ -993,7 +1025,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		if let Some(watch) = watched.get_mut(suffix) {
-			watch.deferred = wanted && !sent.wanted();
+			// A peer that asked not to be offered this again outranks the retry timer;
+			// anything else it should hold and does not comes back on one.
+			watch.refused = refused;
+			watch.deferred = wanted && !sent.wanted() && refused != Refused::Never;
 			watch.set_sent(sent);
 		}
 		Ok(())
@@ -1002,13 +1037,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	/// Open a PUBLISH_NAMESPACE request for one namespace, recording it in `requests`
 	/// so an update or withdrawal reuses the same stream. A declined request records
 	/// nothing: a peer that wants none of this rejects each one and stays connected.
+	///
+	/// Returns what the refusal, if any, said about coming back.
 	async fn advertise_namespace(
 		&self,
 		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
 		path: &crate::PathOwned,
 		suffix: crate::PathOwned,
 		cluster: Option<cluster::Advert>,
-	) -> Result<(), Error> {
+	) -> Result<Refused, Error> {
 		let request_id = self.control.next_request_id().await?;
 
 		// Bounded, because an advertisement holds its stream for as long as the namespace
@@ -1017,7 +1054,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Giving up records nothing, so the namespace is simply retried later.
 		let Some(request) = self.open_request().await? else {
 			tracing::debug!(broadcast = %self.origin.absolute(path), "no stream for the advertisement");
-			return Ok(());
+			return Ok(Refused::No);
 		};
 		let mut request = request;
 
@@ -1035,7 +1072,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// nothing would park this loop forever, and every withdrawal queued behind it.
 		let Some((type_id, mut data)) = Self::read_response(&mut request).await? else {
 			tracing::debug!(broadcast = %self.origin.absolute(path), "no answer to the advertisement");
-			return Ok(());
+			return Ok(Refused::No);
 		};
 
 		match (self.version, type_id) {
@@ -1046,7 +1083,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			(Version::Draft14, ietf::PublishNamespaceError::ID) => {
 				let msg = ietf::PublishNamespaceError::decode_msg(&mut data, self.version)?;
 				tracing::warn!(message = ?msg, "publish namespace error");
-				return Ok(());
+				// Draft-14's error carries no retry interval, so our own backoff stands.
+				return Ok(Refused::No);
 			}
 			(_, ietf::RequestOk::ID) => {
 				let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
@@ -1055,7 +1093,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			(_, ietf::RequestError::ID) => {
 				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
 				tracing::warn!(message = ?msg, "publish namespace error");
-				return Ok(());
+				return Ok(self.refusal(msg.retry_interval));
 			}
 			_ => return Err(Error::UnexpectedMessage),
 		}
@@ -1068,7 +1106,21 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				stream: request,
 			},
 		);
-		Ok(())
+		Ok(Refused::No)
+	}
+
+	/// How to read a refusal's retry interval, in milliseconds.
+	///
+	/// Draft-14/15 errors carry no interval, so a decoded 0 there says nothing and our own
+	/// backoff stands. Everywhere else 0 is the peer asking not to be offered this again,
+	/// which is what keeps a permanent refusal (unauthorized, uninterested) from becoming
+	/// a request every few seconds for the life of the session.
+	fn refusal(&self, retry_interval: u64) -> Refused {
+		match (self.version, retry_interval) {
+			(Version::Draft14 | Version::Draft15, _) => Refused::No,
+			(_, 0) => Refused::Never,
+			(_, ms) => Refused::Until(web_async::time::Instant::now() + std::time::Duration::from_millis(ms)),
+		}
 	}
 
 	/// Open a stream for one advertisement, or `None` if the peer did not give us one in
@@ -1357,10 +1409,18 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					retry_at = None;
 					retry_delay = (retry_delay * 2).min(RETRY_MAX);
 
+					// A peer that named a minimum wait gets it, even when our own backoff
+					// comes round sooner. The next sweep is at most RETRY_MAX away, so a
+					// long wait costs a few skipped turns rather than a timer of its own.
+					let now = web_async::time::Instant::now();
 					let deferred: Vec<crate::PathOwned> = ns
 						.watched
 						.iter()
 						.filter(|(_, watch)| watch.deferred)
+						.filter(|(_, watch)| match watch.refused {
+							Refused::Until(at) => now >= at,
+							_ => true,
+						})
 						.map(|(suffix, _)| suffix.clone())
 						.collect();
 
@@ -1682,6 +1742,78 @@ mod tests {
 	/// The peer's OK to a PUBLISH_NAMESPACE, framed exactly as the announce path
 	/// reads it -- built with the crate's own writer so the framing can't drift
 	/// from the encoder under test.
+	/// A REQUEST_ERROR declining an advertisement, with the retry interval the peer asked
+	/// for in milliseconds. Zero means it does not want the namespace offered again.
+	async fn publish_namespace_error(version: Version, retry_interval: u64) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+
+		writer.encode(&ietf::RequestError::ID).await.unwrap();
+		writer
+			.encode(&ietf::RequestError {
+				request_id: matches!(version, Version::Draft15 | Version::Draft16).then_some(RequestId(1)),
+				error_code: 403,
+				reason_phrase: "no".into(),
+				retry_interval,
+			})
+			.await
+			.unwrap();
+
+		log.writes.lock().unwrap().clone()
+	}
+
+	/// A peer that refuses an advertisement with a retry interval of 0 is asking not to be
+	/// offered it again. Coming back anyway turns a permanent refusal (unauthorized,
+	/// uninterested) into a request every few seconds for the life of the session.
+	#[tokio::test(start_paused = true)]
+	async fn a_refusal_that_forbids_retrying_is_not_retried() {
+		const VERSION: Version = Version::Draft17;
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let _cam = origin
+			.create_broadcast("lonely-cam", crate::broadcast::Route::announced())
+			.unwrap();
+		settle().await;
+
+		// Every stream is answered with the same refusal, so a retry would show up as a
+		// second occurrence on the wire.
+		let refusal = publish_namespace_error(VERSION, 0).await;
+		let session =
+			crate::lite::test_transport::ScriptedSession::per_stream(vec![refusal.clone(), refusal.clone(), refusal]);
+		let log = session.log.clone();
+
+		let publisher = Publisher::new(
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			declared(Some(false)),
+			VERSION,
+		);
+
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"lonely-cam") > 0 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(occurrences(&log, b"lonely-cam"), 1, "the advertisement never went out");
+
+		// Well past every retry the loop would otherwise take.
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			tick().await;
+		}
+
+		assert_eq!(
+			occurrences(&log, b"lonely-cam"),
+			1,
+			"re-offered a namespace the peer asked not to be offered again"
+		);
+	}
+
 	async fn publish_namespace_ok(version: Version) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);

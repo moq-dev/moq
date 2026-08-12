@@ -64,15 +64,18 @@ async function acceptPublishNamespace(stream: Stream): Promise<void> {
  * Decline a PUBLISH_NAMESPACE, which the peer is allowed to do without ending the
  * session. The publisher resets the request as soon as it reads the type, which lands
  * back here as a write error once the refusal is already on the wire.
+ *
+ * `retryInterval` is what the peer says about coming back, in milliseconds: 0 asks not to
+ * be offered the namespace again, and anything else is a minimum wait.
  */
-async function declinePublishNamespace(stream: Stream): Promise<void> {
+async function declinePublishNamespace(stream: Stream, retryInterval = 1n): Promise<void> {
 	try {
 		await stream.writer.u53(RequestError.id);
 		await new RequestError({
 			requestId: undefined,
 			errorCode: 403,
 			reasonPhrase: "no",
-			retryInterval: 0n,
+			retryInterval,
 		}).encode(stream.writer, VERSION);
 	} catch {
 		// The publisher reset the request out from under us.
@@ -276,5 +279,28 @@ test("a solicited legacy advertisement refused once is retried", async () => {
 	await acceptPublishNamespace(stream);
 
 	subscription.close();
+	pub.close();
+});
+
+/**
+ * A peer that refuses an advertisement with a retry interval of 0 is asking not to be
+ * offered it again. Coming back anyway turns a permanent refusal (unauthorized,
+ * uninterested) into a request every few seconds for the life of the session.
+ */
+test("a refusal that forbids retrying is not retried", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pub = publisher(pair.server);
+	pub.publish(Path.from("lonely"), new BroadcastProducer());
+
+	void pub.runPublishNamespaces();
+
+	const stream = await nextStream(pair.client);
+	if (!stream) throw new Error("the namespace was never advertised");
+	expect(await readPublishNamespace(stream)).toBe(Path.from("lonely"));
+	await declinePublishNamespace(stream, 0n);
+
+	// Well past the retry the loop would otherwise take.
+	expect(await nextStream(pair.client)).toBeUndefined();
+
 	pub.close();
 });

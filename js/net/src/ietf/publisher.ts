@@ -40,6 +40,16 @@ function retryAfter(delay: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, delay * (0.5 + Math.random() / 2)));
 }
 
+/**
+ * What a refusal said about re-offering the namespace.
+ *
+ * A peer answers a request it declines with a retry interval, and ignoring it is how a
+ * permanent refusal (unauthorized, uninterested) turns into a request every few seconds
+ * for the life of the session. `"never"` is an interval of 0; a number is the epoch
+ * milliseconds before which we must not come back.
+ */
+type Refused = "never" | number;
+
 /** What {@link Publisher.runGroup} needs to serve one group. */
 interface RunGroup {
 	/** The subscription's request ID, doubling as the track alias. */
@@ -313,7 +323,7 @@ export class Publisher {
 			// lands, but a PUBLISH_NAMESPACE request can be declined.
 			const advertise = async (suffix: Path.Valid): Promise<boolean> => {
 				if (legacy) {
-					return await this.#advertise(Path.join(prefix, suffix), requests);
+					return await this.#advertise(Path.join(prefix, suffix), requests, refused);
 				}
 
 				await stream.writer.u53(SubscribeNamespaceEntry.id);
@@ -331,6 +341,8 @@ export class Publisher {
 
 			let active = new Set<Path.Valid>();
 			let retry = 0;
+			// What the peer refused, and whether coming back is worth anything.
+			const refused = new Map<Path.Valid, Refused>();
 
 			for (;;) {
 				// Subscribe BEFORE reconciling, for the same reason as
@@ -360,7 +372,9 @@ export class Publisher {
 				// believing the namespace is already up.
 				const held = new Set<Path.Valid>(active);
 				for (const added of updated.difference(active)) {
-					if (await advertise(added)) held.add(added);
+					if (this.#offerable(Path.join(prefix, added), refused)) {
+						if (await advertise(added)) held.add(added);
+					}
 				}
 				for (const removed of active.difference(updated)) {
 					await withdraw(removed);
@@ -372,7 +386,9 @@ export class Publisher {
 				// Whatever we wanted up and could not get up, as {@link runPublishNamespaces}
 				// does: only a legacy request can be declined, and nothing about the peer
 				// starting to answer raises a signal this loop is watching.
-				const outstanding = updated.difference(active).size > 0;
+				const outstanding = [...updated.difference(active)].some((suffix) =>
+					this.#offerable(Path.join(prefix, suffix), refused),
+				);
 				retry = outstanding ? Math.min(retry ? retry * 2 : RETRY_BASE, RETRY_MAX) : 0;
 
 				// Wait for the next change, or for the peer to unsubscribe.
@@ -420,6 +436,8 @@ export class Publisher {
 		try {
 			let active = new Set<Path.Valid>();
 			let retry = 0;
+			// What the peer refused, and whether coming back is worth anything.
+			const refused = new Map<Path.Valid, Refused>();
 
 			for (;;) {
 				// Subscribe BEFORE reconciling. Each advertisement below waits a round trip
@@ -441,7 +459,9 @@ export class Publisher {
 
 				const updated = new Set<Path.Valid>(broadcasts.keys());
 				for (const added of updated.difference(active)) {
-					await this.#advertise(added, requests);
+					if (this.#offerable(added, refused)) {
+						await this.#advertise(added, requests, refused);
+					}
 				}
 				for (const removed of active.difference(updated)) {
 					await this.#withdraw(removed, requests);
@@ -454,7 +474,7 @@ export class Publisher {
 				// Whatever we wanted up and could not get up. Stream credit freeing, a
 				// transient failure clearing, or the peer starting to answer raises no
 				// signal of its own, so the only way back is to ask again on a timer.
-				const outstanding = updated.difference(active).size > 0;
+				const outstanding = [...updated.difference(active)].some((path) => this.#offerable(path, refused));
 				retry = outstanding ? Math.min(retry ? retry * 2 : RETRY_BASE, RETRY_MAX) : 0;
 
 				// Wait for the next change, which has already fired if one landed above.
@@ -477,13 +497,29 @@ export class Publisher {
 	}
 
 	/**
+	 * Whether a namespace may be offered to the peer now.
+	 *
+	 * A peer that asked never to be offered it again means it, whatever brought us back;
+	 * one that named a minimum wait gets it, even when our own backoff comes round sooner.
+	 */
+	#offerable(path: Path.Valid, refused: Map<Path.Valid, Refused>): boolean {
+		const entry = refused.get(path);
+		if (entry === undefined) return true;
+		return entry !== "never" && Date.now() >= entry;
+	}
+
+	/**
 	 * Advertise one namespace on its own PUBLISH_NAMESPACE request. A declined request
 	 * is logged and skipped: a peer that wants none of this rejects each one and stays
 	 * connected.
+	 *
+	 * `refused` records what a refusal said about coming back, so a peer that asked not to
+	 * be offered a namespace again is not re-offered it by the retry above.
 	 */
 	async #advertise(
 		path: Path.Valid,
 		requests: Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream }>,
+		refused: Map<Path.Valid, Refused>,
 	): Promise<boolean> {
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) return false;
@@ -509,6 +545,21 @@ export class Publisher {
 
 					// Read response (RequestOk and PublishNamespaceOk share 0x07)
 					const respTypeId = await stream.reader.u53();
+					if (respTypeId === RequestError.id) {
+						// The peer named how long to stay away, in milliseconds. Draft-14/15
+						// carry no such field, so a 0 there says nothing and our own backoff
+						// stands; everywhere else 0 means it does not want this again.
+						const err = await RequestError.decode(stream.reader, this.#session.version);
+						const legacy =
+							this.#session.version === Version.DRAFT_14 || this.#session.version === Version.DRAFT_15;
+						if (!legacy) {
+							refused.set(
+								path,
+								err.retryInterval === 0n ? "never" : Date.now() + Number(err.retryInterval),
+							);
+						}
+						throw new Error(`PublishNamespace rejected: ${err.errorCode} ${err.reasonPhrase}`);
+					}
 					if (respTypeId !== RequestOk.id) {
 						throw new Error(`PublishNamespace rejected: typeId=0x${respTypeId.toString(16)}`);
 					}

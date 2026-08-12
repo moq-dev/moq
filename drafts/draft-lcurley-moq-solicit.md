@@ -34,7 +34,11 @@ Because sending the option at all identifies an endpoint that implements this ex
 {::boilerplate bcp14-tagged}
 
 An endpoint **advertises** a namespace by sending PUBLISH_NAMESPACE, or NAMESPACE in response to a SUBSCRIBE_NAMESPACE.
-An advertisement is **solicited** when it matches a SUBSCRIBE_NAMESPACE the receiver sent, and **unsolicited** otherwise.
+An advertisement is **solicited** when it is carried by a SUBSCRIBE_NAMESPACE the receiver sent, and **unsolicited** otherwise.
+
+On a version of {{moqt}} that has NAMESPACE, the mechanism decides this and nothing else does: PUBLISH_NAMESPACE opens a request of its own and is always unsolicited, however the namespace relates to a prefix the receiver subscribed to.
+That distinction is what makes the requirement observable from a single message, and so enforceable ({{enforcement}}).
+Earlier versions have no NAMESPACE, so an endpoint answers a SUBSCRIBE_NAMESPACE with PUBLISH_NAMESPACE requests and the two are indistinguishable.
 
 
 # Introduction
@@ -86,8 +90,10 @@ Unlike an extension that changes an encoding, this one needs no negotiation hand
 
 An endpoint that declared 1 will solicit the namespaces it wants with SUBSCRIBE_NAMESPACE, or wants none at all.
 
-A peer that receives this declaration SHOULD NOT send an unsolicited PUBLISH_NAMESPACE for the remainder of the session.
+A peer that receives this declaration and implements this extension MUST NOT send an unsolicited PUBLISH_NAMESPACE for the remainder of the session; one that does not implement it cannot be bound by it and is covered by {{enforcement}}.
 It continues to answer SUBSCRIBE_NAMESPACE with NAMESPACE as usual; only the unsolicited half is withheld.
+
+This is a MUST NOT rather than a SHOULD NOT because the receiver enforces it. A SHOULD NOT that a receiver may close the session over is not a permission an endpoint can actually exercise.
 
 A relay is the expected user of this declaration, as is any endpoint that asks for what it wants.
 So is an endpoint that only publishes, which cannot subscribe to anything and therefore has no use for an advertisement of any kind.
@@ -107,10 +113,8 @@ Neither a race nor a partial implementation explains the message, which leaves a
 
 An endpoint that omitted the option gets the opposite treatment for the same reason: it never saw the declaration, so announcing is exactly what it should do, and closing the session over it would turn this extension into a new way for conforming implementations to fail to interoperate.
 
-Two cases are exempt, because a PUBLISH_NAMESPACE there does not mean what it means elsewhere:
-
-- Drafts of {{moqt}} without an inline NAMESPACE message, where a PUBLISH_NAMESPACE request is also how an endpoint answers a SUBSCRIBE_NAMESPACE. The message alone does not say which it is.
-- An advertisement that matches a SUBSCRIBE_NAMESPACE the receiver sent, which is solicited by definition.
+Versions of {{moqt}} without NAMESPACE are exempt, because a PUBLISH_NAMESPACE there is also how an endpoint answers a SUBSCRIBE_NAMESPACE and the message alone does not say which it is.
+Everywhere else the mechanism is the whole test: a receiver MUST NOT treat an advertisement as solicited merely because the namespace falls under a prefix it subscribed to, or an endpoint that subscribes to every prefix it can reach would find the requirement unenforceable against anyone.
 
 There is no counterpart for SUBSCRIBE_NAMESPACE, enforceable or otherwise.
 An endpoint with nothing to advertise answers one with an empty set, which costs a single stream, while waiting on the peer's SETUP to learn whether the question is worth asking costs a round trip on every session.
