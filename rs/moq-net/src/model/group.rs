@@ -600,14 +600,15 @@ impl Producer {
 		}
 	}
 
-	/// Mint a handle watching whether this group's frames are still in the cache.
+	/// Mint a watch-only handle for whether this group's frames are still in the cache.
 	///
 	/// Minted here rather than from a [`Consumer`] because only the side that owns the cache can
 	/// answer the question: a reader's handle may be assembled across routes, none of which it
 	/// caches for. A relay mints one too, since it creates a [`Producer`] per group it caches.
+	/// The group-level analogue of [`track::Producer::demand`].
 	pub fn availability(&self) -> Availability {
 		Availability {
-			state: self.state.consume(),
+			state: self.state.weak(),
 		}
 	}
 
@@ -942,11 +943,16 @@ impl Consumer {
 /// watches this to learn which groups it can still point at.
 ///
 /// Minted from a [`Producer`] via [`Producer::availability`], never from a [`Consumer`]: the
-/// question is about a specific cache, and only the side that owns one can answer it. Holding this
-/// pins no frames, so watching is free, and it is far smaller than a [`Consumer`] (which carries a
-/// read cursor and a frame prefetch it has no use for).
+/// question is about a specific cache, and only the side that owns one can answer it.
+///
+/// The watch-only counterpart to [`track::Demand`], and weak for the same reason: it holds no ref
+/// count, so it neither keeps the group open nor pins its cached frames, and it does not count as
+/// a consumer (a watcher is not a reader, and must not hold [`Producer::unused`] open). It does
+/// keep the state allocated, which is what lets [`gone`](Self::gone) still report the cause after
+/// the channel closed.
+#[derive(Clone)]
 pub struct Availability {
-	state: kio::Consumer<GroupState>,
+	state: kio::ProducerWeak<GroupState>,
 }
 
 impl Availability {
@@ -960,22 +966,17 @@ impl Availability {
 
 	/// Poll until the group is gone; ready with the cause. See [`is_gone`](Self::is_gone).
 	pub fn poll_gone(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		self.state
-			.poll_closed(waiter)
-			.map(|()| self.state.read().abort.clone().unwrap_or(Error::Dropped))
+		self.state.poll_closed(waiter).map(|()| self.abort_reason())
 	}
 
 	/// Block until the group is gone, returning the cause. See [`is_gone`](Self::is_gone).
 	pub async fn gone(&self) -> Error {
 		kio::wait(|waiter| self.poll_gone(waiter)).await
 	}
-}
 
-impl Clone for Availability {
-	fn clone(&self) -> Self {
-		Self {
-			state: self.state.clone(),
-		}
+	/// The recorded abort reason, or [`Error::Dropped`] if the group went without one.
+	fn abort_reason(&self) -> Error {
+		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 }
 
@@ -1754,5 +1755,31 @@ mod test {
 		let state = producer.state.read();
 		assert!(state.frames.is_empty(), "a watcher must not pin the cached frames");
 		assert_eq!(state.cache, 0);
+	}
+
+	/// A watcher is not a reader: it must not register as a consumer, or an on-demand publisher
+	/// waiting on `unused` would stall forever behind an index track that only ever watches.
+	/// This is why `Availability` is weak, matching `track::Demand`.
+	#[test]
+	fn availability_is_not_a_consumer() {
+		let mut producer = Info { sequence: 0 }.produce();
+		producer
+			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hi"))
+			.unwrap();
+
+		let watching = producer.availability();
+		assert!(
+			producer.unused().now_or_never().is_some(),
+			"a watcher must leave the group unused"
+		);
+
+		// A real reader does hold it, and dropping that reader releases it again.
+		let reader = producer.consume();
+		assert!(producer.unused().now_or_never().is_none());
+		drop(reader);
+		assert!(producer.unused().now_or_never().is_some());
+
+		// Still watching throughout, and still weak: it never kept the group open.
+		assert!(!watching.is_gone());
 	}
 }
