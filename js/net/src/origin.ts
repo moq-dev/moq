@@ -513,6 +513,15 @@ export class Consumer {
 	 * republish); when nothing does, the request stands and whichever attached session
 	 * answers first provides a blind subscription instead, re-answered across reconnects.
 	 * Close the request when done. On a closed origin it never resolves.
+	 *
+	 * With several sessions on one origin the first to answer wins, and it may be one that
+	 * does not carry the path. Nothing corrects that: a missing broadcast surfaces as a reset
+	 * on the first track and deliberately leaves the handle open, since the wire cannot tell
+	 * "not here" from "not yet" and a blind handle is expected to survive until a publisher
+	 * arrives. It matters only on an origin mixing sessions that announce with sessions that
+	 * cannot, where a path only the silent session carries may sit behind another session's
+	 * answer. Prefer {@link unroutable} and announcements over blind requests when the origin
+	 * feeds from more than one connection.
 	 */
 	request(path: Path.Valid): Request {
 		const requests = this.#state.requests.peek();
