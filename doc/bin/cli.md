@@ -223,10 +223,10 @@ may publish where.
 The `capture` subcommand captures and encodes from local devices directly, no
 external FFmpeg process required. It publishes the camera as an H.264 video
 track and the microphone as an Opus audio track on the same broadcast. Video is
-captured strictly on demand: the track is announced immediately, but the camera
-is opened only while someone is watching (LED off, no CPU otherwise) and
-released again when the last viewer leaves. It is gated behind the `capture`
-feature:
+encoded strictly on demand: the camera is opened once at startup to read the
+mode it negotiates, which is what lets the catalog describe the track exactly
+before anything is encoded, and is then released until someone watches (no CPU,
+LED off in between). It is gated behind the `capture` feature:
 
 Build (or run) with the feature enabled:
 

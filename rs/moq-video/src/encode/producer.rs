@@ -2,9 +2,10 @@
 //!
 //! Encoding is strictly on demand: the track and its catalog rendition are
 //! advertised immediately (the rendition is probed from the encoder, since
-//! nothing has been encoded yet), but the camera stays closed (LED off, no CPU)
-//! until a subscriber appears. When the last viewer leaves, it is released again. This
-//! mirrors `moq-boy`, which pauses its emulator on `track::Producer::used()` /
+//! nothing has been encoded yet), and the encoder itself only runs while a
+//! subscriber is watching. Capture opens its camera once at startup to learn
+//! the mode it negotiates, then keeps it closed between viewers. This mirrors
+//! `moq-boy`, which pauses its emulator on `track::Producer::used()` /
 //! `unused()`.
 
 #[cfg(feature = "capture")]
@@ -33,16 +34,6 @@ use super::rate::{Control, Policy};
 /// Last-resort framerate when neither the caller nor the camera reports one.
 #[cfg(feature = "capture")]
 const DEFAULT_FRAMERATE: u32 = 30;
-
-/// The geometry a capture rendition is probed at. Only the codec string is taken from the result,
-/// and of that only the level depends on the size, so a camera that comes up at something else
-/// updates it from the first keyframe. 720p is a size every encoder accepts, which matters because
-/// a backend that rejects the probe geometry falls through to another one and would answer for the
-/// wrong encoder.
-#[cfg(feature = "capture")]
-const PROBE_WIDTH: u32 = 1280;
-#[cfg(feature = "capture")]
-const PROBE_HEIGHT: u32 = 720;
 
 /// The rendition as the importer wants it: what to publish now, and what to keep filling in on
 /// every config it later resolves from the bitstream.
@@ -255,15 +246,14 @@ impl std::fmt::Debug for Options {
 /// Capture a webcam and publish it as an on-demand video track.
 ///
 /// Returns when the broadcast is dropped (the track stops being announced)
-/// or the capture loop fails. The camera is opened only while at least one
-/// subscriber is watching; frames are stamped from `clock`, so passing the
+/// or the capture loop fails. Frames are stamped from `clock`, so passing the
 /// same [`Clock`](moq_mux::Clock) to a concurrent audio publish keeps the two
 /// tracks aligned.
 ///
-/// The catalog rendition is published before the camera opens, so it carries the codec and nothing
-/// else: a capture size is a hint the backend may round or substitute, and the encoder is built from
-/// whatever mode the camera negotiates. Dimensions, framerate and bitrate arrive with the first
-/// keyframe, so a consumer that needs them waits for that update.
+/// The camera is opened once at startup to probe the mode it negotiates, then released until a
+/// subscriber arrives and reopened for as long as one is watching. That one open is what lets the
+/// catalog rendition be exact before a single frame is published, so a consumer can size itself
+/// against it (and discover the track at all) without waiting for an encoder that may never run.
 #[cfg(feature = "capture")]
 pub async fn publish_capture<E: CatalogExt>(
 	broadcast: moq_net::broadcast::Producer,
@@ -278,25 +268,25 @@ pub async fn publish_capture<E: CatalogExt>(
 		return Err(Error::InvalidFramerate(0));
 	}
 
-	// Only the codec comes out of this probe. Nothing about the picture is knowable before the
-	// camera opens: a size is a hint its backend may round or substitute (macOS ignores it outright),
-	// and the encoder that actually runs is built from the mode the camera negotiates, not from here.
-	let mut probe_config = encoder::Config::new(PROBE_WIDTH, PROBE_HEIGHT, DEFAULT_FRAMERATE);
-	probe_config.bitrate = encode.bitrate;
-	probe_config.codec = encode.codec;
-	probe_config.kind = encode.kind.clone();
-
-	let mut rendition = probe_config.probe().await?;
-	// So publish none of it. These fields are optional, and a consumer that needs them (a transcoder
-	// sizing a ladder) waits for the first keyframe to fill them in, which beats sizing itself from
-	// a guess it can never revisit. The bitrate goes too unless the caller pinned one, since a
-	// derived one describes this probe's geometry and no bitstream carries a bitrate to correct it.
-	rendition.coded_width = None;
-	rendition.coded_height = None;
-	rendition.framerate = None;
-	if encode.bitrate.is_none() {
-		rendition.bitrate = None;
-	}
+	// Open the camera once to find out what it actually negotiated, since a requested size is only a
+	// hint (macOS ignores it outright) and the encoder is built from the mode, not the request. It
+	// closes again immediately: this costs one camera open at startup and buys a rendition that says
+	// exactly what the stream will carry, rather than one every consumer has to treat as provisional.
+	let rendition = {
+		let camera = capture::open(&capture).await?;
+		let mut probe_config = encoder::Config::new(
+			camera.width(),
+			camera.height(),
+			capture
+				.framerate
+				.or_else(|| camera.framerate())
+				.unwrap_or(DEFAULT_FRAMERATE),
+		);
+		probe_config.bitrate = encode.bitrate;
+		probe_config.codec = encode.codec;
+		probe_config.kind = encode.kind.clone();
+		probe_config.probe().await?
+	};
 
 	let mut producer = Producer::new(broadcast, catalog, rendition)?;
 	let demand = producer.demand();
