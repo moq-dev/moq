@@ -119,7 +119,7 @@ async function serveRequests(conn: Established, origin: OriginProducer): Promise
 		if (!map || dead) break;
 
 		for (const [path, slot] of map) {
-			if (answered.get(path)?.slot === slot || slot.front.peek() !== undefined) continue;
+			if (answered.get(path)?.slot === slot || slot.answer !== undefined) continue;
 			if (origin.routes(path)) continue;
 			const withdraw = origin.answer(path, conn.consume(path));
 			if (withdraw) answered.set(path, { slot, withdraw });

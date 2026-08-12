@@ -14,16 +14,23 @@ import * as broadcast from "./broadcast.ts";
 import * as Path from "./path.ts";
 
 /**
- * One requested path: how many {@link Request} handles want it, and the front the first
- * session to answer provided. The front signal outlives a session: the answering session
- * clears it when it dies, and the next session answers again, which is what makes a
- * request span reconnects.
+ * One requested path: the notify node for everything watching it.
+ *
+ * `route` is the only reactive part, and the only thing a {@link Request} subscribes to, so
+ * a publish or retraction anywhere else in the table cannot wake it. The origin's tables stay
+ * the storage; this is a per-path view onto them, refreshed by whichever mutator touched the
+ * path. The alternative, deriving each request over the whole `local`/`remote` maps, wakes
+ * every open request on every unrelated change.
+ *
+ * `answer` outlives a session: the answering session clears it when it dies and the next one
+ * answers again, which is what makes a request span reconnects.
  *
  * @internal
  */
 export interface RequestSlot {
 	count: number;
-	front: Signal<broadcast.Consumer | undefined>;
+	answer?: broadcast.Consumer;
+	readonly route: Signal<broadcast.Consumer | undefined>;
 }
 
 /** Reactive backing state shared by origin producers and consumers. */
@@ -54,6 +61,24 @@ class OriginState {
 	sessions = new Signal({ total: 0, discovery: 0 });
 
 	closed = new Once<Error | null>();
+
+	/**
+	 * Recompute what `path` resolves to, waking only the requests watching that path.
+	 *
+	 * A no-op for a path nobody requested, so the common case (publishing into a table
+	 * nobody is asking about) costs a map lookup. Call after any write that could change
+	 * the answer for a single path.
+	 */
+	refresh(path: Path.Valid): void {
+		const slot = this.requests.peek()?.get(path);
+		if (!slot) return;
+		slot.route.set(this.route(path, slot));
+	}
+
+	/** What `path` resolves to: the table's route when it has one, else the blind answer. */
+	route(path: Path.Valid, slot: RequestSlot): broadcast.Consumer | undefined {
+		return this.local.peek()?.get(path) ?? this.remote.peek()?.get(path)?.[0] ?? slot.answer;
+	}
 }
 
 /**
@@ -126,6 +151,7 @@ export class Producer implements Table {
 			broadcasts.get(path)?.close();
 			broadcasts.set(path, front);
 		});
+		this.#state.refresh(path);
 
 		// Unpublish when the broadcast closes, unless a republish already replaced it: a
 		// stale broadcast closing must not unpublish the live one.
@@ -133,6 +159,7 @@ export class Producer implements Table {
 			this.#state.local.mutate((broadcasts) => {
 				if (broadcasts?.get(path) === front) broadcasts.delete(path);
 			});
+			this.#state.refresh(path);
 		});
 
 		return producer;
@@ -165,6 +192,7 @@ export class Producer implements Table {
 			front.close();
 			return () => {};
 		}
+		this.#state.refresh(path);
 
 		return () => {
 			this.#state.remote.mutate((broadcasts) => {
@@ -175,6 +203,7 @@ export class Producer implements Table {
 				fronts.splice(index, 1);
 				if (fronts.length === 0) broadcasts?.delete(path);
 			});
+			this.#state.refresh(path);
 			front.close();
 		};
 	}
@@ -235,16 +264,18 @@ export class Producer implements Table {
 	 */
 	answer(path: Path.Valid, front: broadcast.Consumer): Dispose | undefined {
 		const slot = this.#state.requests.peek()?.get(path);
-		if (!slot || slot.front.peek() !== undefined) {
+		if (!slot || slot.answer !== undefined) {
 			front.close();
 			return undefined;
 		}
-		slot.front.set(front);
+		slot.answer = front;
+		this.#state.refresh(path);
 
 		return () => {
-			if (slot.front.peek() === front) {
-				slot.front.set(undefined);
-				// The slot signal only reaches its requesters; poke the map so every
+			if (slot.answer === front) {
+				slot.answer = undefined;
+				this.#state.refresh(path);
+				// The route signal only reaches this path's requesters; poke the map so every
 				// serving loop re-scans and one of them re-answers.
 				this.#state.requests.mutate(() => {});
 			}
@@ -296,8 +327,9 @@ export class Producer implements Table {
 		});
 		this.#state.requests.update((requests) => {
 			for (const slot of requests?.values() ?? []) {
-				slot.front.peek()?.close();
-				slot.front.set(undefined);
+				slot.answer?.close();
+				slot.answer = undefined;
+				slot.route.set(undefined);
 			}
 			return undefined;
 		});
@@ -438,7 +470,10 @@ export class Consumer {
 
 		let slot = requests.get(path);
 		if (!slot) {
-			const created: RequestSlot = { count: 0, front: new Signal<broadcast.Consumer | undefined>(undefined) };
+			const created: RequestSlot = { count: 0, route: new Signal<broadcast.Consumer | undefined>(undefined) };
+			// Seeded before anyone can watch it, so a path the table already routes resolves
+			// on the first read rather than a microtask later.
+			created.route.set(this.#state.route(path, created), false);
 			slot = created;
 			this.#state.requests.mutate((map) => {
 				map?.set(path, created);
@@ -469,7 +504,7 @@ export class Consumer {
 			return handle;
 		};
 
-		const route = this.#resolved(path, taken);
+		const route = taken.route;
 		const active = new Derived([route], own);
 
 		// Swapping on the read is what keeps a routed path resolving synchronously, but a
@@ -497,20 +532,11 @@ export class Consumer {
 				this.#state.requests.mutate((map) => {
 					if (map?.get(path) === taken) map.delete(path);
 				});
-				taken.front.peek()?.close();
-				taken.front.set(undefined);
+				taken.answer?.close();
+				taken.answer = undefined;
+				taken.route.set(undefined);
 			});
 		});
-	}
-
-	// The reactive view behind Request.active: the table's route for `path` when it has
-	// one (knowledge beats assumption), else the slot's blind answer. Derived per access
-	// over the backing signals, so a routed path resolves synchronously.
-	#resolved(path: Path.Valid, slot: RequestSlot): Getter<broadcast.Consumer | undefined> {
-		return new Derived(
-			[this.#state.local, this.#state.remote, slot.front],
-			(local, remote, front) => local?.get(path) ?? remote?.get(path)?.[0] ?? front,
-		);
 	}
 
 	/**

@@ -290,7 +290,7 @@ test("a request resolves once a front answers, and survives its withdrawal", asy
 	const upstream = new BroadcastProducer();
 	const slot = origin.requests.peek()?.get(path);
 	expect(slot).toBeDefined();
-	slot?.front.set(upstream.consume());
+	expect(origin.answer(path, upstream.consume())).toBeDefined();
 	expect(request.active.peek()).toBeDefined();
 
 	// A second request for the same path shares the answer, each through a handle of its
@@ -416,7 +416,7 @@ test("requests never appear in announced or the table", async () => {
 
 	const request = consumer.request(path);
 	const upstream = new BroadcastProducer();
-	origin.requests.peek()?.get(path)?.front.set(upstream.consume());
+	origin.answer(path, upstream.consume());
 
 	// An answered request is assumed present, not known live, so it is not availability: it
 	// stays out of the table, and out of the announcements the table drives.
@@ -605,5 +605,39 @@ test("a retracted route is retired even for a request nobody reads again", async
 	request.close();
 	disposeOlder();
 	older.close();
+	origin.close();
+});
+
+test("a request only wakes for its own path", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const watched = Path.from("watched");
+	const other = Path.from("other");
+
+	const request = consumer.request(watched);
+	let wakeups = 0;
+	const dispose = request.active.subscribe(() => {
+		wakeups += 1;
+	});
+
+	// Churn an unrelated path. Deriving each request over the whole table would wake this
+	// one every time, which is what makes a busy origin cost O(requests) per publish.
+	for (let i = 0; i < 5; i++) {
+		const noise = origin.publish(other);
+		await settle();
+		noise.close();
+		await settle();
+	}
+	expect(wakeups).toBe(0);
+
+	// Its own path still reaches it.
+	const mine = origin.publish(watched);
+	await settle();
+	expect(wakeups).toBe(1);
+	expect(request.active.peek()).toBeDefined();
+
+	dispose();
+	request.close();
+	mine.close();
 	origin.close();
 });
