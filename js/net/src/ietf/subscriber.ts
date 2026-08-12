@@ -13,7 +13,7 @@ import { TrackAliases } from "./aliases.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
 import { toWire } from "./priority.ts";
 import { type Publish, PublishError } from "./publish.ts";
-import { type PublishNamespace, PublishNamespaceError, PublishNamespaceOk } from "./publish_namespace.ts";
+import { type PublishNamespace, PublishNamespaceOk } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
@@ -60,8 +60,14 @@ export class Subscriber {
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
 	#consumes = new BroadcastCache();
 
-	// Any currently active announcements.
-	#announced = new Set<Path.Valid>();
+	// Every announced path, counted by how many live advertisements reference it.
+	//
+	// A peer may advertise one namespace twice on a session: an unsolicited
+	// PUBLISH_NAMESPACE and an inline NAMESPACE answering our own SUBSCRIBE_NAMESPACE are
+	// two messages about one source, which the MoQ Solicit draft requires us to tolerate.
+	// Counting them is what keeps the second from duplicating the announce and the first
+	// to end from retracting what the other still holds.
+	#announced = new Map<Path.Valid, number>();
 
 	// Any consumers that want each new announcement.
 	#announcedConsumers = new Set<announce.Producer>();
@@ -85,7 +91,7 @@ export class Subscriber {
 	 */
 	announced(prefix = Path.empty()): announce.Consumer {
 		const announced = new announce.Producer(prefix);
-		for (const active of this.#announced) {
+		for (const active of this.#announced.keys()) {
 			const suffix = Path.stripPrefix(prefix, active);
 			if (suffix === null) continue;
 			announced.append({ path: suffix, active: true });
@@ -100,8 +106,58 @@ export class Subscriber {
 		return announced.consume();
 	}
 
+	/**
+	 * Record one more advertisement for a path, telling consumers only when it is the
+	 * first. A second one is the same namespace said twice, not news.
+	 */
+	#attachAnnounce(path: Path.Valid) {
+		const count = this.#announced.get(path) ?? 0;
+		this.#announced.set(path, count + 1);
+		if (count > 0) return;
+
+		console.debug(`announced: broadcast=${path} active=true`);
+		for (const consumer of this.#announcedConsumers) {
+			const suffix = Path.stripPrefix(consumer.prefix, path);
+			if (suffix === null) continue;
+			consumer.append({ path: suffix, active: true });
+		}
+	}
+
+	/**
+	 * Drop one advertisement for a path, retracting it only once the last one goes.
+	 */
+	#detachAnnounce(path: Path.Valid) {
+		const count = this.#announced.get(path);
+		if (count === undefined) return;
+		if (count > 1) {
+			this.#announced.set(path, count - 1);
+			return;
+		}
+
+		this.#announced.delete(path);
+
+		// The path is gone, so stop sharing its broadcast: a holder outliving the publisher
+		// would otherwise hand the dead generation to whoever consumes the path next.
+		this.#consumes.evict(path);
+		console.debug(`announced: broadcast=${path} active=false`);
+
+		for (const consumer of this.#announcedConsumers) {
+			const suffix = Path.stripPrefix(consumer.prefix, path);
+			if (suffix === null) continue;
+			try {
+				consumer.append({ path: suffix, active: false });
+			} catch {
+				// Consumer already closed, will be cleaned up
+			}
+		}
+	}
+
 	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid) {
 		const version = this.#session.version;
+
+		// Suffixes live on this stream, so a repeat is recognized as an update to the
+		// advertisement rather than a second one, which would leak the count.
+		const live = new Set<Path.Valid>();
 
 		// v14/v15: SubscribeNamespace on control stream (via adapter virtual stream)
 		// v16+: SubscribeNamespace on its own real bidi stream
@@ -155,25 +211,18 @@ export class Subscriber {
 						if (msgType === SubscribeNamespaceEntry.id) {
 							const entry = await SubscribeNamespaceEntry.decode(stream.reader, version);
 							const path = Path.join(prefix, entry.suffix);
-							console.debug(`announced: broadcast=${path} active=true`);
 
-							this.#announced.add(path);
-							for (const consumer of this.#announcedConsumers) {
-								const suffix = Path.stripPrefix(consumer.prefix, path);
-								if (suffix === null) continue;
-								consumer.append({ path: suffix, active: true });
+							// A repeat updates the advertisement; only the first is news.
+							if (!live.has(path)) {
+								live.add(path);
+								this.#attachAnnounce(path);
 							}
 						} else if (msgType === SubscribeNamespaceEntryDone.id) {
 							const entry = await SubscribeNamespaceEntryDone.decode(stream.reader, version);
 							const path = Path.join(prefix, entry.suffix);
-							console.debug(`announced: broadcast=${path} active=false`);
 
-							this.#announced.delete(path);
-							this.#consumes.evict(path);
-							for (const consumer of this.#announcedConsumers) {
-								const suffix = Path.stripPrefix(consumer.prefix, path);
-								if (suffix === null) continue;
-								consumer.append({ path: suffix, active: false });
+							if (live.delete(path)) {
+								this.#detachAnnounce(path);
 							}
 						} else if (msgType === PublishBlocked.id && version === Version.DRAFT_17) {
 							const blocked = await PublishBlocked.decode(stream.reader, version);
@@ -214,6 +263,15 @@ export class Subscriber {
 			// it from "nothing is published under this prefix" waits forever on a broadcast
 			// that will never be announced. Matches the lite subscriber.
 			announced.close(e);
+		} finally {
+			// The stream owns every advertisement it carried, so release them however it
+			// ends: a clean close, a decode error, or the peer resetting it. Without this
+			// each namespace keeps its count and the source never detaches, which would
+			// pin the path for the session even after the other source withdrew.
+			for (const path of live) {
+				this.#detachAnnounce(path);
+			}
+			live.clear();
 		}
 	}
 
@@ -404,30 +462,10 @@ export class Subscriber {
 		const version = this.#session.version;
 		const path = msg.trackNamespace;
 
-		if (this.#announced.has(path)) {
-			console.warn("duplicate PublishNamespace");
-			if (version === Version.DRAFT_14) {
-				await stream.writer.u53(PublishNamespaceError.id);
-				const err = new PublishNamespaceError({
-					requestId: msg.requestId,
-					errorCode: 409,
-					reasonPhrase: "duplicate namespace",
-				});
-				await err.encode(stream.writer, version);
-			} else {
-				await stream.writer.u53(RequestError.id);
-				const err = new RequestError({
-					requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
-					errorCode: 409,
-					reasonPhrase: "duplicate namespace",
-				});
-				await err.encode(stream.writer, version);
-			}
-			stream.close();
-			return;
-		}
-
-		this.#announced.add(path);
+		// A path this session already knows is not refused: the same namespace can reach
+		// us twice, and the count is what tells the second apart from news. This request
+		// owns exactly one of those references and gives it back when the stream ends.
+		let attached = false;
 
 		try {
 			// Send OK first. This must complete before notifying consumers,
@@ -445,34 +483,20 @@ export class Subscriber {
 				await ok.encode(stream.writer, version);
 			}
 
-			console.debug(`announced: broadcast=${path} active=true`);
-
-			// Notify consumers after OK is written
-			for (const consumer of this.#announcedConsumers) {
-				const suffix = Path.stripPrefix(consumer.prefix, path);
-				if (suffix === null) continue;
-				consumer.append({ path: suffix, active: true });
-			}
+			// Only now is the advertisement ours to announce, for the reason above: a
+			// consumer reacting with a SUBSCRIBE must not interleave with that OK.
+			attached = true;
+			this.#attachAnnounce(path);
 
 			// Wait for stream close (= PublishNamespaceDone)
 			console.debug(`runPublishNamespace: awaiting stream.reader.closed for ${path}`);
 			await stream.reader.closed;
 			console.debug(`runPublishNamespace: stream.reader.closed resolved for ${path}`);
 		} finally {
-			this.#announced.delete(path);
-			// The path is gone, so stop sharing its broadcast: a holder outliving the publisher
-			// would otherwise hand the dead generation to whoever consumes the path next.
-			this.#consumes.evict(path);
-			console.debug(`announced: broadcast=${path} active=false`);
-
-			for (const consumer of this.#announcedConsumers) {
-				const suffix = Path.stripPrefix(consumer.prefix, path);
-				if (suffix === null) continue;
-				try {
-					consumer.append({ path: suffix, active: false });
-				} catch {
-					// Consumer already closed, will be cleaned up
-				}
+			// Give back exactly what was taken: a request that never got its OK out never
+			// referenced the path, and retracting there would drop someone else's count.
+			if (attached) {
+				this.#detachAnnounce(path);
 			}
 		}
 	}
