@@ -1321,8 +1321,13 @@ impl Resync {
 
 	/// A discontinuity: whatever vouched for the next boundary no longer applies, so the
 	/// frame after it has to be confirmed again.
+	///
+	/// The budget resets too. It measures how long *this* run of the stream has gone without
+	/// a frame, and a seek ends that run: carrying the count over would fail a perfectly
+	/// good stream on its first parse failure after seeking away from the damage.
 	fn desynced(&mut self) {
 		self.unconfirmed = true;
+		self.discarded = 0;
 	}
 
 	/// End of stream. Nothing more can arrive to confirm the carried candidate, so take it
@@ -3190,6 +3195,57 @@ mod test {
 		assert!(
 			err.to_string().contains("never regained sync"),
 			"gave up with the wrong error: {err}"
+		);
+	}
+
+	// A seek is a discontinuity, so the budget spent failing to find a frame before it says
+	// nothing about the stream after it. Carrying it over means a stream that scanned close
+	// to the budget, then seeked somewhere clean, dies on its first parse failure with
+	// "never regained sync" despite being perfectly in sync.
+	#[tokio::test(start_paused = true)]
+	async fn legacy_seek_resets_the_resync_budget() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// Burn the budget down to just under the give-up threshold: these discard 147 bytes
+		// and then 150 apiece (a 3-byte partial sync is carried), so 436 of them leaves
+		// 65397 against a 65536 budget.
+		let junk = vec![0x00u8; 150];
+		for i in 0..436 {
+			import
+				.decode(audio_pes_packet(MP2_PID, (i % 16) as u8, 90_000, &junk).as_slice())
+				.expect("still under the budget");
+		}
+
+		// Seek away from the damage. Landing mid-frame costs a couple more failures, which
+		// is what tips a carried-over budget past the threshold.
+		import.seek(10).unwrap();
+		for i in 0..2 {
+			import
+				.decode(audio_pes_packet(MP2_PID, i, 270_000, &junk).as_slice())
+				.expect("a seek must not inherit the pre-seek budget");
+		}
+
+		// Then a perfectly good stream.
+		let mut good = mp2_frame(0xAA);
+		good.extend_from_slice(&mp2_frame(0xBB));
+		import
+			.decode(audio_pes_packet(MP2_PID, 2, 450_000, &good).as_slice())
+			.expect("a clean stream after a seek must not inherit the pre-seek budget");
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
+			vec![mp2_frame(0xAA), mp2_frame(0xBB)],
+			"the post-seek stream should publish normally"
 		);
 	}
 
