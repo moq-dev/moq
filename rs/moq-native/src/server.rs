@@ -164,6 +164,12 @@ impl Server {
 		config.quic.validate()?;
 
 		let build_quic = config.bind.is_some() || !config.has_stream_listener();
+		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
+		if config.bind.is_some() {
+			return Err(Error::NoBackend(
+				"--server-bind requires a noq, quinn, or quiche backend feature",
+			));
+		}
 
 		if build_quic && !config.tls.root.is_empty() {
 			// Only a QUIC backend validates client certificates; the qmux listeners
@@ -619,6 +625,8 @@ impl Server {
 	///
 	/// [`accept`](Self::accept) calls this for you on Ctrl-C.
 	pub async fn close(&mut self) {
+		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+		self.streams.close().await;
 		#[cfg(feature = "noq")]
 		if let Some(noq) = self.noq.as_mut() {
 			noq.close();
@@ -642,8 +650,6 @@ impl Server {
 		{
 			let _ = self.websocket.take();
 		}
-		// The stream (tcp/unix) listeners have nothing to close here: their accept
-		// loops own the sockets and are aborted when this `Server` drops.
 	}
 }
 
@@ -696,8 +702,8 @@ impl StreamBind {
 ///
 /// Bound lazily on the first [`Server::accept`] (they need a runtime), after
 /// which each runs an accept loop in its own task and feeds completed [`Request`]s
-/// back over a channel. The tasks own their listeners and are aborted when the
-/// `Server` (and thus this) is dropped, so bound sockets don't linger.
+/// back over a channel. The tasks own their listeners and are stopped when the
+/// server closes or drops, so bound sockets don't linger.
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 struct StreamListeners {
 	binds: Vec<StreamBind>,
@@ -813,6 +819,17 @@ impl StreamListeners {
 		match self.rx.as_mut() {
 			Some(rx) => rx.recv().await,
 			None => std::future::pending().await,
+		}
+	}
+
+	/// Stop every accept loop and wait until its listener has released the socket.
+	async fn close(&mut self) {
+		self.binds.clear();
+		self.rx = None;
+		let tasks = std::mem::take(&mut self.tasks);
+		for task in tasks {
+			task.abort();
+			let _ = task.await;
 		}
 	}
 }
@@ -1232,6 +1249,40 @@ mod tests {
 		// Same error the second time, rather than a success over a listener that the
 		// first call already tore down.
 		assert!(server.listen().await.is_err(), "a retry must not report success");
+	}
+
+	/// Closing a retained server must release its TCP socket before returning and
+	/// must not let a later `listen` restart the terminal listener.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn close_releases_stream_listener_socket() {
+		let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = probe.local_addr().unwrap();
+		drop(probe);
+
+		let mut config = ServerConfig::default();
+		config.tcp.bind = Some(addr);
+		let mut server = Server::new(config).expect("stream-only server");
+		server.listen().await.expect("listen");
+		assert!(tokio::net::TcpListener::bind(addr).await.is_err(), "listener is bound");
+
+		server.close().await;
+		server.listen().await.expect("closed listener stays terminal");
+		let _rebound = tokio::net::TcpListener::bind(addr)
+			.await
+			.expect("close must release the listener socket");
+	}
+
+	/// An explicit QUIC bind cannot be honored without a QUIC backend.
+	#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
+	#[test]
+	fn quic_bind_without_a_quic_backend_is_rejected() {
+		let config = ServerConfig {
+			bind: Some("127.0.0.1:0".to_string()),
+			..Default::default()
+		};
+
+		assert!(matches!(Server::new(config), Err(Error::NoBackend(_))));
 	}
 
 	/// A QUIC-only server reports nothing. It multiplexes over one UDP socket and

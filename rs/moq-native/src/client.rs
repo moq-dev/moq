@@ -251,10 +251,9 @@ impl Client {
 		config.quic.validate()?;
 		config.backoff.validate()?;
 
-		// Built even in a build that reads it nowhere (quiche keeps its own TLS stack,
-		// the plaintext qmux transports have none), so a bad `--client-tls-*` is
-		// rejected here rather than at the first dial.
-		#[allow(unused_variables)]
+		// Only the rustls-backed transports use this. Iroh, quiche, and the plaintext
+		// qmux transports must not require a rustls crypto provider.
+		#[cfg(any(feature = "noq", feature = "quinn", feature = "websocket"))]
 		let tls = config.tls.build()?;
 
 		#[cfg(feature = "noq")]
@@ -1085,6 +1084,17 @@ mod tests {
 		let config = ClientConfig::parse_from(["test"]);
 		assert_eq!(config.failover_delay, None);
 		assert_eq!(config.resolved_failover_delay(), std::time::Duration::from_millis(250));
+	}
+
+	/// Iroh carries no rustls state, so constructing its client must not require an
+	/// application-installed crypto provider.
+	#[cfg(all(
+		feature = "iroh",
+		not(any(feature = "noq", feature = "quinn", feature = "websocket"))
+	))]
+	#[test]
+	fn iroh_only_client_does_not_require_a_tls_provider() {
+		ClientConfig::default().init().expect("iroh-only client");
 	}
 
 	#[test]
