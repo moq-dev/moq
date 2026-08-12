@@ -5251,8 +5251,8 @@ mod tests {
 		let unknown_a = OriginList::try_from(vec![Origin::UNKNOWN]).unwrap();
 		let unknown_b = OriginList::try_from(vec![Origin::UNKNOWN]).unwrap();
 
-		let source_a = origin
-			.create_broadcast("test", announce().with_hops(unknown_a))
+		let mut source_a = origin
+			.create_broadcast("test", announce().with_hops(unknown_a.clone()))
 			.unwrap();
 		settle().await;
 		settle().await;
@@ -5267,7 +5267,20 @@ mod tests {
 		settle().await;
 		settle().await;
 		announced.assert_next_none("test");
-		announced.assert_next_some("test");
+		let live = announced.assert_next_some("test");
+
+		// Repricing the displaced UNKNOWN source is still not evidence of a new
+		// publisher. It remains parked behind the replacement.
+		source_a
+			.set_route(announce().with_hops(unknown_a).with_cost(9))
+			.unwrap();
+		settle().await;
+		settle().await;
+		assert!(
+			consumer.get_broadcast("test").unwrap().is_clone(&live),
+			"UNKNOWN-to-UNKNOWN repricing must not replace the live front"
+		);
+		announced.assert_next_wait();
 
 		drop(source_a);
 		drop(source_b);
