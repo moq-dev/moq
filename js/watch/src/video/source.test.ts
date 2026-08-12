@@ -72,6 +72,33 @@ describe("Source error signal", () => {
 		});
 	});
 
+	it("does not wedge the effect when a support probe never settles", async () => {
+		// `supported` is consumer-supplied, and a rerun waits for the tasks it spawned, so a probe
+		// that never settles would hold the next run shut for good unless it races the teardown.
+		await withoutWarnings(async () => {
+			const supported = new Signal<(config: Catalog.VideoConfig) => Promise<boolean>>(
+				() => new Promise<boolean>(() => {}), // never settles
+			);
+
+			const source = new Source({
+				broadcast: broadcast({ hd: config("avc1.640028") }),
+				supported,
+			});
+
+			await settle();
+			expect(source.out.available.peek()).toEqual({});
+
+			// Swapping the probe reruns the effect, which has to tear the parked one down first.
+			// If it cannot, this rerun never opens and the new probe never runs.
+			supported.set(async () => true);
+			await settle();
+
+			expect(Object.keys(source.out.available.peek())).toEqual(["hd"]);
+
+			source.close();
+		});
+	});
+
 	it("is undefined when the catalog has no video renditions", async () => {
 		const source = new Source({
 			broadcast: broadcast({}),

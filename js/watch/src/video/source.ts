@@ -261,16 +261,25 @@ export class Source {
 		effect.spawn(async () => {
 			const available: Record<string, Catalog.VideoConfig> = {};
 
+			// `supported` comes from the consumer, so we cannot assume it ever settles. A rerun
+			// waits for the tasks it spawned, so an unraced probe would hold the next run shut
+			// for good. Captured here so it stays this run's promise once we start awaiting.
+			const cancelled = effect.cancel.then(() => undefined);
+
 			for (const [name, config] of Object.entries(renditions)) {
-				let isSupported = false;
+				let isSupported: boolean | undefined = false;
 				try {
-					isSupported = await supported(config);
+					isSupported = await Promise.race([supported(config), cancelled]);
 				} catch (err) {
 					console.warn(
 						`[Source] video rendition ${name} (${config.codec}) support probe failed; treating as unsupported`,
 						err,
 					);
 				}
+
+				// Torn down: stop probing and publish nothing, since the rerun redoes this.
+				if (effect.abort.aborted) return;
+
 				if (isSupported) available[name] = config;
 			}
 
