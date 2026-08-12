@@ -969,32 +969,6 @@ impl Group {
 		}
 	}
 
-	/// Whether the assembly is closed: no route can serve this group again.
-	///
-	/// A spliced group has no single publisher, so this is how it answers the availability
-	/// question [`group::Consumer::is_closed`] asks. A route dying is not enough: another can
-	/// still take over, so only the assembly itself closing is terminal.
-	pub fn is_closed(&self) -> bool {
-		// An abort is recorded in the state rather than by closing the channel (it has to survive
-		// for late subscribers to read the cause), so the channel's own flag only covers the
-		// producer being dropped. A clean `finish` is deliberately not closed: it means no further
-		// switches, and the segments already in place keep serving.
-		self.state.is_closed() || self.state.read().abort.is_some()
-	}
-
-	/// Poll until the assembly closes; ready with the cause. See [`is_closed`](Self::is_closed).
-	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		match self.state.poll(waiter, |state| match &state.abort {
-			Some(err) => Poll::Ready(err.clone()),
-			None => Poll::Pending,
-		}) {
-			Poll::Ready(Ok(err)) => Poll::Ready(err),
-			// The channel closed with no abort recorded: the producer was dropped.
-			Poll::Ready(Err(_)) => Poll::Ready(Error::Dropped),
-			Poll::Pending => Poll::Pending,
-		}
-	}
-
 	/// The logical group's total frame count, which only the unbounded tail copy knows:
 	/// its own count already includes the frames it skipped.
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
@@ -2083,40 +2057,6 @@ mod test {
 		assert_eq!(counter.0.load(Ordering::SeqCst), 2, "second update lost its wakeup");
 		assert!(fut.as_mut().poll(&mut cx).is_pending());
 		assert_eq!(track_a.subscription().unwrap().priority, 2);
-	}
-
-	/// A spliced group reports availability the same way a plain one does, but a dying *route* is
-	/// not the end of availability: another can take over, so only the assembly closing is
-	/// terminal. An index track watching `is_closed` must not retract on a mid-group takeover.
-	#[tokio::test]
-	async fn spliced_group_stays_available_across_a_takeover() {
-		let (mut track_a, consumer_a) = track_pair("a");
-		// Bound, not dropped: B has to stay alive to be a live replacement route.
-		let (_track_b, consumer_b) = track_pair("b");
-
-		let mut producer = Producer::new();
-		producer.takeover(&consumer_a).unwrap();
-		let mut sub = producer.consume().subscribe(None);
-
-		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
-		group.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
-
-		let reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
-		assert!(!reading.is_closed(), "a live spliced group is available");
-
-		// A's route dies, but B takes the group over: still available, since a replacement can
-		// serve it. This is the case that separates availability from a plain group's cache.
-		producer.takeover(&consumer_b).unwrap();
-		track_a.abort(Error::Dropped).unwrap();
-		assert!(!reading.is_closed(), "a dead route is not a dead group");
-
-		// The assembly itself closing is what ends it.
-		producer.abort(Error::Evicted).unwrap();
-		assert!(reading.is_closed());
-		assert!(matches!(
-			reading.poll_closed(&kio::Waiter::noop()),
-			Poll::Ready(Error::Evicted)
-		));
 	}
 
 	/// A route dying partway through a group is resumed at the frame it stopped on:
