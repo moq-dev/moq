@@ -12,7 +12,6 @@ import { Group } from "./object.ts";
 import { Publish } from "./publish.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
-import type { Solicit } from "./solicit.ts";
 import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceLegacy } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
@@ -62,7 +61,7 @@ export class Connection implements Established {
 	 * @param control - The control/setup stream
 	 * @param maxRequestId - The initial max request ID
 	 * @param version - The negotiated protocol version
-	 * @param solicit - What the peer's SETUP requires to be solicited
+	 * @param solicit - Whether the peer's SETUP asked to be told on request
 	 *
 	 * @internal
 	 */
@@ -74,7 +73,7 @@ export class Connection implements Established {
 		version,
 		client,
 		discovery = true,
-		solicit = { announce: false },
+		solicit = false,
 	}: {
 		url: URL;
 		quic: WebTransport;
@@ -84,8 +83,8 @@ export class Connection implements Established {
 		/** Whether this peer initiated the session, selecting the even request-ID space. */
 		client: boolean;
 		discovery?: boolean;
-		/** Defaults to soliciting nothing, which is what a peer that declared nothing wants. */
-		solicit?: Solicit;
+		/** Whether the peer declared that advertisements to it must be solicited. */
+		solicit?: boolean;
 	}) {
 		this.url = url;
 		this.discovery = discovery;

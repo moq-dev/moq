@@ -11,7 +11,6 @@ import { fromWire } from "./priority.ts";
 import { PublishDone } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceDone, PublishNamespaceOk } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import type { Solicit } from "./solicit.ts";
 import { type Subscribe, SubscribeError, SubscribeOk } from "./subscribe.ts";
 import {
 	type SubscribeNamespace,
@@ -57,7 +56,7 @@ interface RunGroup {
 export class Publisher {
 	#quic: WebTransport;
 	#session: Session;
-	#solicit: Solicit;
+	#requiresSolicitation: boolean;
 
 	// Our published broadcasts.
 	// It's a signal so we can live update any subscribe_namespace streams.
@@ -67,14 +66,14 @@ export class Publisher {
 	 * Creates a new Publisher instance.
 	 * @param quic - The WebTransport session (for uni streams)
 	 * @param session - The session abstraction for bidi streams and request IDs
-	 * @param solicit - What the peer's SETUP requires to be solicited
+	 * @param requiresSolicitation - Whether the peer's SETUP asked to be told on request
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, session: Session, solicit: Solicit) {
+	constructor(quic: WebTransport, session: Session, requiresSolicitation: boolean) {
 		this.#quic = quic;
 		this.#session = session;
-		this.#solicit = solicit;
+		this.#requiresSolicitation = requiresSolicitation;
 	}
 
 	/**
@@ -295,7 +294,7 @@ export class Publisher {
 				await ok.encode(stream.writer, version);
 			}
 
-			if (!this.#solicit.announce) {
+			if (!this.#requiresSolicitation) {
 				// Already announced, unasked. Hold the stream open until the peer is done.
 				await stream.reader.closed;
 				stream.close();
@@ -393,7 +392,7 @@ export class Publisher {
 	 * @internal
 	 */
 	async runPublishNamespaces() {
-		if (this.#solicit.announce) {
+		if (this.#requiresSolicitation) {
 			// The peer asked to be told on request; runSubscribeNamespace answers it.
 			return;
 		}

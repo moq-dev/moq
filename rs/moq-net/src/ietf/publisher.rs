@@ -11,7 +11,7 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
-use super::{Message, Version, cluster, peer, solicit};
+use super::{Message, Version, cluster, peer};
 
 /// A broadcast whose route table is watched for changes in what we advertise: the
 /// namespace becoming (un)advertisable, or its path or cost moving.
@@ -248,11 +248,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 	}
 
-	/// What the peer requires to be solicited, from the same SETUP.
+	/// Whether the peer requires advertisements to be solicited, from the same SETUP.
 	///
 	/// Blocks on it for the same reason [`Self::peer`] does: this decides whether the
 	/// first advertisement is sent unasked, so it cannot be guessed and corrected later.
-	async fn solicit(&self) -> solicit::Solicit {
+	async fn requires_solicitation(&self) -> bool {
 		self.peer_setup.get().await.solicit
 	}
 
@@ -1147,13 +1147,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	/// moq-transport itself says nothing about which of the two discovery messages a peer
 	/// expects, and the peers that never send SUBSCRIBE_NAMESPACE are exactly the ones
 	/// expecting a publisher to announce itself, so the default has to be to announce. A
-	/// peer that would rather ask says so with the MoQ Solicit extension ([`solicit`]),
+	/// peer that would rather ask says so with the MoQ Solicit extension
+	/// ([`solicit`](super::solicit)),
 	/// and then this loop does nothing and
 	/// [`Self::run_subscribe_namespace_stream`] carries the advertisements instead.
 	/// Exactly one of the two is live, which is what keeps the peer from hearing a
 	/// namespace twice.
 	pub async fn run_publish_namespaces(self) -> Result<(), Error> {
-		if self.solicit().await.announce {
+		if self.requires_solicitation().await {
 			return Ok(());
 		}
 
@@ -1243,7 +1244,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// this as unsolicited PUBLISH_NAMESPACE. Repeating it here would leave it holding
 		// two sources for one namespace, so this stream carries nothing and simply stays
 		// open until the peer is done with it.
-		let origin = match self.solicit().await.announce {
+		let origin = match self.requires_solicitation().await {
 			true => origin,
 			false => origin.empty(),
 		};
@@ -1456,7 +1457,7 @@ mod tests {
 
 	/// A SETUP slot already filled with what the peer declared. The announce loops block
 	/// on it, so a test that leaves it empty is a test that never advertises.
-	fn declared(solicit: solicit::Solicit) -> peer::PeerSetup {
+	fn declared(solicit: bool) -> peer::PeerSetup {
 		let slot = peer::PeerSetup::default();
 		slot.set(peer::Peer {
 			solicit,
@@ -1468,7 +1469,7 @@ mod tests {
 	/// A peer that requires solicitation, which is what hands the advertisements to the
 	/// SUBSCRIBE_NAMESPACE stream.
 	fn requires_solicitation() -> peer::PeerSetup {
-		declared(solicit::Solicit { announce: true })
+		declared(true)
 	}
 
 	/// A broadcast whose every route flows through the peer's assigned identity
@@ -1826,7 +1827,7 @@ mod tests {
 	/// returning how many times the namespace hit the wire and how many bidi streams
 	/// were opened. One stream means the entry rode the subscription inline; two means
 	/// it went out as its own PUBLISH_NAMESPACE request.
-	async fn advertise_both_ways(solicit: solicit::Solicit) -> (usize, usize) {
+	async fn advertise_both_ways(solicit: bool) -> (usize, usize) {
 		const VERSION: Version = Version::Draft17;
 
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
@@ -1883,11 +1884,11 @@ mod tests {
 	/// namespace goes out exactly once either way.
 	#[tokio::test]
 	async fn each_namespace_is_advertised_exactly_once() {
-		let (unsolicited, streams) = advertise_both_ways(solicit::Solicit::default()).await;
+		let (unsolicited, streams) = advertise_both_ways(false).await;
 		assert_eq!(unsolicited, 1, "a peer that required nothing is told once");
 		assert_eq!(streams, 2, "on its own PUBLISH_NAMESPACE request");
 
-		let (solicited, streams) = advertise_both_ways(solicit::Solicit { announce: true }).await;
+		let (solicited, streams) = advertise_both_ways(true).await;
 		assert_eq!(solicited, 1, "a peer that asked to be told on request is told once");
 		assert_eq!(streams, 1, "inline on the SUBSCRIBE_NAMESPACE stream it asked on");
 	}
@@ -1919,7 +1920,7 @@ mod tests {
 			origin.consume(),
 			Control::new(None, false),
 			None,
-			declared(solicit::Solicit::default()),
+			declared(false),
 			VERSION,
 		);
 
@@ -2002,7 +2003,7 @@ mod tests {
 			origin.consume(),
 			Control::new(None, false),
 			None,
-			declared(solicit::Solicit::default()),
+			declared(false),
 			VERSION,
 		);
 

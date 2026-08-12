@@ -46,11 +46,14 @@ If it plays, you interop. That's the whole test.
   moq-transport says which one a peer expects, and the peers that never ask are
   the ones expecting to be told, so we do both by default.
 - **Tell us to stop and we will.** The [MoQ Solicit
-  extension](/draft/moq-solicit) is a `SETUP` option declaring that
+  extension](/draft/moq-solicit) is a `SETUP` option set to `1` to declare that
   advertisements to you must be asked for, because you'll send
   `SUBSCRIBE_NAMESPACE` for what you want. Declaring it gets you the relay
   behavior the IETF draft describes. Unknown options are ignored, so an
   implementation that doesn't know it loses nothing.
+- **We always declare it ourselves.** We ask for every prefix we're allowed to
+  discover, so an unsolicited `PUBLISH_NAMESPACE` can't tell us anything we
+  won't have asked for. Honor it and you'll never send us one.
 - **We ask everyone.** There's no way to tell us not to bother: answering a
   `SUBSCRIBE_NAMESPACE` with an empty set costs one stream, while waiting on
   your `SETUP` to find out costs a round trip on every connection.

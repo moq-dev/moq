@@ -231,6 +231,7 @@ async function connectTransport(url: URL, session: WebTransport, discovery: bool
 	const params = new Ietf.SetupOptions();
 	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
+	Ietf.solicitIntoSetup(params);
 
 	const client = new Ietf.ClientSetup({
 		versions:

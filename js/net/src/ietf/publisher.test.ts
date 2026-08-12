@@ -80,7 +80,7 @@ async function declinePublishNamespace(stream: Stream): Promise<void> {
 
 function publisher(transport: WebTransport): Publisher {
 	const session = new NativeSession(transport, VERSION, true);
-	return new Publisher(transport, session, { announce: false });
+	return new Publisher(transport, session, false);
 }
 
 /**
@@ -177,7 +177,7 @@ test("a failed stream open does not kill the announce loop", async () => {
 		},
 	};
 
-	const pub = new Publisher(pair.server, session, { announce: false });
+	const pub = new Publisher(pair.server, session, false);
 	pub.publish(Path.from("first"), new BroadcastProducer());
 
 	void pub.runPublishNamespaces();
@@ -222,7 +222,7 @@ test("a namespace refused once is retried without anything else changing", async
 		},
 	};
 
-	const pub = new Publisher(pair.server, session, { announce: false });
+	const pub = new Publisher(pair.server, session, false);
 	pub.publish(Path.from("lonely"), new BroadcastProducer());
 
 	void pub.runPublishNamespaces();

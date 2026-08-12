@@ -7,19 +7,20 @@ import { Reader, Stream, Writer } from "../stream.ts";
  * halves run in parallel and the protocol is symmetric, so both `connect`
  * (client) and `accept` (server) use this same function.
  *
- * Returns the control stream plus what the peer declared, which decides whether we
- * announce namespaces unprompted (see the MoQ Solicit extension). We declare nothing
- * ourselves: this connection can publish and subscribe at any time, so there is nothing
- * we could rule out honestly.
+ * Returns the control stream plus whether the peer requires solicitation, which decides
+ * whether we announce namespaces unprompted (see the MoQ Solicit extension). We declare it
+ * ourselves on every session: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an
+ * unsolicited advertisement can tell us nothing we won't have asked for.
  */
 export async function exchangeSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
 	implementation: string,
-): Promise<{ control: Stream; solicit: Ietf.Solicit }> {
+): Promise<{ control: Stream; solicit: boolean }> {
 	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode(implementation));
+	Ietf.solicitIntoSetup(params);
 	const setupMsg = new Ietf.Setup({ parameters: params });
 
 	const [writer, received] = await Promise.all([
@@ -45,7 +46,7 @@ async function sendSetup(transport: WebTransport, version: Ietf.IetfVersion, set
 async function receiveSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
-): Promise<{ reader: Reader; solicit: Ietf.Solicit }> {
+): Promise<{ reader: Reader; solicit: boolean }> {
 	const uniReader = transport.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
 	>;

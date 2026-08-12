@@ -87,10 +87,6 @@ pub fn start<S: web_transport_trait::Session>(
 		// identity no other session shares.
 		let self_origin = self_origin(publish.as_ref(), subscribe.as_ref());
 
-		// What we require of the peer. Read here for the same reason as above, since the
-		// placeholders below make both halves look present.
-		let solicit = solicit::from_subscribe(subscribe.as_ref());
-
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
@@ -229,7 +225,7 @@ pub fn start<S: web_transport_trait::Session>(
 				let setup = {
 					let session = session.clone();
 					async move {
-						if let Err(err) = run_setup(session, version, path, self_origin, cost, solicit).await {
+						if let Err(err) = run_setup(session, version, path, self_origin, cost).await {
 							tracing::warn!(%err, "setup send error");
 						}
 						std::future::pending::<()>().await;
@@ -456,15 +452,14 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 ///
 /// `path` is the request path we advertise (clients on URL-less transports); a
 /// server passes `None`. `self_origin` and `cost` are the MoQ Cluster options, which
-/// declare our identity and (client-only) what this link costs to cross. `solicit` is
-/// what we require of the peer.
+/// declare our identity and (client-only) what this link costs to cross. The MoQ Solicit
+/// declaration is unconditional, so it takes no argument.
 async fn run_setup<S: web_transport_trait::Session>(
 	session: S,
 	version: Version,
 	path: Option<String>,
 	self_origin: Origin,
 	cost: Option<u64>,
-	solicit: solicit::Solicit,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 
@@ -477,7 +472,7 @@ async fn run_setup<S: web_transport_trait::Session>(
 		parameters.set_bytes(ietf::ParameterBytes::Path, path.into_bytes());
 	}
 	cluster::peer_into_setup(&mut parameters, self_origin, cost, version);
-	solicit::into_setup(&mut parameters, solicit, version);
+	solicit::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer.encode(&setup::Setup { parameters }).await?;
@@ -883,7 +878,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_peer_requiring_solicitation_is_not_told_unasked() {
 		let declared = peer::Peer {
-			solicit: solicit::Solicit { announce: true },
+			solicit: true,
 			..Default::default()
 		};
 

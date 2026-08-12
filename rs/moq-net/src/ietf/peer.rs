@@ -1,6 +1,6 @@
 //! What the peer declared in its SETUP, and the slot the session tasks read it from.
 
-use super::{cluster, solicit};
+use super::cluster;
 
 /// The Setup Options the peer sent us.
 ///
@@ -11,8 +11,9 @@ pub(crate) struct Peer {
 	/// The MoQ Cluster options: the peer's Hop ID and what it charges to cross.
 	pub cluster: cluster::Peer,
 
-	/// The MoQ Solicit options: what the peer requires to be solicited.
-	pub solicit: solicit::Solicit,
+	/// MoQ Solicit: whether the peer requires advertisements to be solicited, so an
+	/// unsolicited PUBLISH_NAMESPACE is unwanted.
+	pub solicit: bool,
 }
 
 /// Shared slot for [`Peer`], filled when the peer's SETUP is read.
@@ -70,7 +71,7 @@ mod tests {
 				origin: Some(crate::Origin::new(42).unwrap()),
 				cost: Some(3),
 			},
-			solicit: solicit::Solicit::default(),
+			solicit: false,
 		};
 
 		let slot = PeerSetup::default();
@@ -80,7 +81,7 @@ mod tests {
 				origin: Some(crate::Origin::new(99).unwrap()),
 				cost: Some(0),
 			},
-			solicit: solicit::Solicit { announce: true },
+			solicit: true,
 		});
 
 		assert_eq!(slot.get().await, first);
