@@ -2085,10 +2085,6 @@ mod test {
 		assert_eq!(track_a.subscription().unwrap().priority, 2);
 	}
 
-	/// A route dying partway through a group is resumed at the frame it stopped on:
-	/// the reader keeps the same group handle, sees no duplicate frames, and never
-	/// learns a route changed. This is the whole point of frame-precise boundaries
-	/// (a JSON append log's group may never roll).
 	/// A spliced group reports availability the same way a plain one does, but a dying *route* is
 	/// not the end of availability: another can take over, so only the assembly closing is
 	/// terminal. An index track watching `is_closed` must not retract on a mid-group takeover.
@@ -2123,6 +2119,10 @@ mod test {
 		));
 	}
 
+	/// A route dying partway through a group is resumed at the frame it stopped on:
+	/// the reader keeps the same group handle, sees no duplicate frames, and never
+	/// learns a route changed. This is the whole point of frame-precise boundaries
+	/// (a JSON append log's group may never roll).
 	#[tokio::test]
 	async fn takeover_splices_mid_group() {
 		let (mut track_a, consumer_a) = track_pair("a");

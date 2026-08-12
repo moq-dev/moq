@@ -220,14 +220,18 @@ impl Fanout {
 	/// Applied to the history as well as the live windows so a rendition that attaches later
 	/// replays the same window a live one holds, rather than being seeded with segments that are
 	/// already unfetchable.
+	///
+	/// [`Feed::anchor`] survives, including a retraction that empties the history. It maps the pts
+	/// axis onto wall clock, and a retraction says nothing about that axis: only a timeline restart
+	/// invalidates it. Re-anchoring would re-estimate from a fresh `now()` and jump every client's
+	/// `EXT-X-PROGRAM-DATE-TIME` over unchanged content, worst of all here, since a retraction deep
+	/// enough to empty the history means the publisher is shedding media and its "this segment just
+	/// ended" assumption is at its least true.
 	pub fn trim(&self, segment: u64) {
 		let mut feed = self.feed.lock().unwrap();
 
 		while feed.history.front().is_some_and(|entry| entry.segment < segment) {
 			feed.history.pop_front();
-		}
-		if feed.history.is_empty() {
-			feed.anchor = None;
 		}
 
 		feed.targets.retain(|target| {
@@ -423,4 +427,60 @@ fn next_event(current: &BTreeMap<Key, Arc<Rendition>>, seen: &BTreeMap<Key, Arc<
 		}
 	}
 	Poll::Pending
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn entry(segment: u64, pts_ms: u64, duration_ms: u64) -> Entry {
+		Entry {
+			segment,
+			pts: moq_net::Timestamp::from_millis(pts_ms).unwrap(),
+			duration: Duration::from_millis(duration_ms),
+			tracks: BTreeMap::new(),
+			ext: (),
+		}
+	}
+
+	/// The wall-clock anchor maps the pts axis onto real time, and a retraction does not move that
+	/// axis. It must therefore survive a trim, including one deep enough to empty the history:
+	/// re-anchoring would re-estimate from a fresh `now()` and jump `EXT-X-PROGRAM-DATE-TIME` (and
+	/// DASH `availabilityStartTime`) for every client following unchanged content.
+	#[test]
+	fn a_trim_keeps_the_wall_clock_anchor() {
+		let producer = Producer::new(Duration::from_secs(30));
+		let fanout = producer.fanout();
+
+		fanout.push(entry(0, 0, 2_000));
+		fanout.push(entry(1, 2_000, 2_000));
+		let anchored = producer.anchor().expect("the first record anchors");
+
+		// A retraction that outruns everything listed: the history empties.
+		fanout.trim(9);
+		assert!(fanout.feed.lock().unwrap().history.is_empty());
+		assert_eq!(
+			producer.anchor(),
+			Some(anchored),
+			"a retraction is not a timeline restart"
+		);
+
+		// The next record lands on the same axis, so it must not re-anchor either.
+		fanout.push(entry(9, 18_000, 2_000));
+		assert_eq!(producer.anchor(), Some(anchored));
+	}
+
+	/// The contrast case, and the only thing that legitimately drops the anchor: a publisher that
+	/// restarts rewinds pts, so the old mapping genuinely no longer describes the new content.
+	#[test]
+	fn a_backwards_jump_still_reanchors() {
+		let producer = Producer::new(Duration::from_secs(30));
+		let fanout = producer.fanout();
+
+		fanout.push(entry(0, 600_000, 2_000));
+		let anchored = producer.anchor().expect("the first record anchors");
+
+		fanout.push(entry(0, 0, 2_000));
+		assert_ne!(producer.anchor(), Some(anchored), "a restart re-anchors");
+	}
 }
