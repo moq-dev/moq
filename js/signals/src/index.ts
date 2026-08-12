@@ -926,6 +926,12 @@ export type GetterValues<S extends readonly Getter<unknown>[]> = { [K in keyof S
  * consumer passed it to {@link getter} or an {@link Inputs} field, which reject a readable
  * this package did not create.
  *
+ * It relays its sources rather than filtering them: every source notification becomes one
+ * here, even when the mapped value is unchanged. Deduplicating instead would have to compare
+ * against the value at subscribe time, which silently swallows two real edges: a source that
+ * already applied a change whose flush is still queued, and an in-place {@link Signal.mutate}
+ * of a value the mapping returns as-is. A redundant rerun is the cheaper failure.
+ *
  * ```ts
  * readonly online = new Derived([this.#peers], (peers) => peers.size > 0);
  * ```
@@ -948,17 +954,9 @@ export class Derived<const S extends readonly Getter<unknown>[], T> implements G
 		return this.#fn(...(this.#sources.map((source) => source.peek()) as unknown as GetterValues<S>));
 	}
 
-	/** Calls `fn` every time the derived value changes. Returns a function to unsubscribe. */
+	/** Calls `fn` with the derived value every time any source notifies. */
 	subscribe(fn: Subscriber<T>): Dispose {
-		// A source can change without moving the derived value (an unrelated key in a map, a
-		// count that keeps a boolean true), so compare before notifying and match Signal's
-		// "only when it actually changed" contract.
-		let last = this.peek();
-		return this.#watch((value) => {
-			if (isEqual(last, value)) return;
-			last = value;
-			fn(value);
-		});
+		return this.#watch(fn);
 	}
 
 	/** Resolves the next time the derived value changes, or calls `fn` once on the next change. */

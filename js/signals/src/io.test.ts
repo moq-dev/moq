@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { Computed, Derived, Effect, type Getter, getter, Once, readonlys, Signal } from "./index.ts";
 
+// Lets the microtask flush and any timer-based follow-up run.
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 test("getter wraps a raw value in a fresh Signal", () => {
 	const g = getter(5);
 	expect(g.peek()).toBe(5);
@@ -126,7 +129,7 @@ test("Derived reads through on every peek, with no first-run gap", () => {
 	expect(sum.peek()).toBe(12);
 });
 
-test("Derived notifies only when the derived value actually changes", async () => {
+test("Derived relays every source notification, redundant or not", async () => {
 	const source = new Signal({ total: 0, discovery: 0 });
 	const view = new Derived([source], ({ total, discovery }) => (total === 0 ? undefined : discovery > 0));
 
@@ -135,13 +138,53 @@ test("Derived notifies only when the derived value actually changes", async () =
 
 	source.set({ total: 1, discovery: 1 });
 	await Promise.resolve();
-	// A second session changes the counts but not the answer.
+	// A second session moves the counts but not the answer: relayed anyway, because the
+	// alternative drops real edges (see the two cases below).
 	source.set({ total: 2, discovery: 2 });
 	await Promise.resolve();
 	source.set({ total: 0, discovery: 0 });
 	await Promise.resolve();
 
-	expect(seen).toEqual([true, undefined]);
+	expect(seen).toEqual([true, true, undefined]);
+	dispose();
+});
+
+test("Derived delivers a change whose flush was already queued when we subscribed", async () => {
+	const source = new Signal(0);
+	const other = source.subscribe(() => {}); // so set() has subscribers and queues a flush
+	const view = new Derived([source], (value) => value);
+
+	// The value is already 1 here; only its notification is still queued. Comparing against
+	// peek() at subscribe time would treat this edge as already seen.
+	source.set(1);
+
+	const raw: number[] = [];
+	const derived: number[] = [];
+	const cancelRaw = source.changed((value) => raw.push(value));
+	const cancelDerived = view.changed((value) => derived.push(value));
+
+	await settle();
+	expect(derived).toEqual(raw);
+	expect(derived).toEqual([1]);
+	cancelRaw();
+	cancelDerived();
+	other();
+});
+
+test("Derived delivers an in-place mutation of a value it returns as-is", async () => {
+	const source = new Signal({ count: 0 });
+	const view = new Derived([source], (value) => value);
+
+	const seen: number[] = [];
+	const dispose = view.subscribe((value) => seen.push(value.count));
+
+	// mutate() force-notifies precisely because the object identity cannot change.
+	source.mutate((value) => {
+		value.count++;
+	});
+	await settle();
+
+	expect(seen).toEqual([1]);
 	dispose();
 });
 
