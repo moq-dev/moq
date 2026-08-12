@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, setSystemTime, test } from "bun:test";
 import * as Json from "@moq/json";
 import type { Time } from "@moq/net";
 import { Track } from "@moq/net";
@@ -13,25 +13,38 @@ function capture(props?: ConstructorParameters<typeof Producer>[1]): {
 	records: () => Promise<Record[]>;
 } {
 	const track = new Track.Producer("timeline.z");
-	const consumer = new Json.Stream.Consumer<Record>(track.subscribe(), { compression: true });
+	const consumer = new Json.Window.Consumer<Record>(track.subscribe(), { compression: true });
 	const timeline = new Producer(track, props);
 
+	// The records a fresh reader ends up holding: appends minus whatever was retracted, which
+	// for a sliding window is what the publisher can still serve rather than everything it sent.
 	const records = async () => {
-		const out: Record[] = [];
+		const live: { position: number; value: Record }[] = [];
 		for (;;) {
-			const record = await consumer.next();
-			if (!record) return out;
-			out.push(record);
+			const update = await consumer.next();
+			if (!update) return live.map((entry) => entry.value);
+			if (update.type === "append") {
+				live.push({ position: update.position, value: update.value });
+			} else {
+				while (live.length > 0 && live[0].position < update.offset) live.shift();
+			}
 		}
 	};
 	return { timeline, records };
 }
 
+/** Enroll a media track by name, at the given retention (the `@moq/net` default when omitted). */
+function enroll(timeline: Producer, name: string, latencyMax?: number) {
+	const track = new Track.Producer(name);
+	track.accept(latencyMax === undefined ? {} : { latencyMax });
+	return timeline.track(track);
+}
+
 // The coarsest track paces: video GOPs are longer than durationMin, so segments are GOPs.
 test("the coarsest track paces the segments", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
-	const audio = timeline.track("audio0");
+	const video = enroll(timeline, "video0");
+	const audio = enroll(timeline, "audio0");
 
 	// Video keyframes every 2s, audio groups every 500ms, minimum 1s.
 	video.record(0, us(0));
@@ -85,7 +98,7 @@ test("the coarsest track paces the segments", async () => {
 // a segment could start and stay decodable, so the segment is simply long.
 test("a GOP longer than the minimum is one segment", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
+	const video = enroll(timeline, "video0");
 
 	video.record(0, us(0));
 	video.record(1, us(30_000));
@@ -102,7 +115,7 @@ test("a GOP longer than the minimum is one segment", async () => {
 // Groups shorter than the minimum pack into one segment rather than each becoming one.
 test("short groups pack up to the minimum", async () => {
 	const { timeline, records } = capture({ durationMin: 1500 });
-	const audio = timeline.track("audio0");
+	const audio = enroll(timeline, "audio0");
 
 	for (let seq = 0; seq < 8; seq++) {
 		audio.record(seq, us(seq * 500));
@@ -120,8 +133,8 @@ test("short groups pack up to the minimum", async () => {
 // a rendition that was about to contribute to it.
 test("a segment waits for every track", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
-	const audio = timeline.track("audio0");
+	const video = enroll(timeline, "video0");
+	const audio = enroll(timeline, "audio0");
 
 	video.record(0, us(0));
 	audio.record(0, us(0));
@@ -144,7 +157,7 @@ test("a segment waits for every track", async () => {
 // An application that knows its own boundaries overrides the pacing.
 test("explicit cuts override the pacing", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
+	const video = enroll(timeline, "video0");
 
 	// Keyframes every second, cut every three: the segments follow the cuts, not the GOPs.
 	timeline.cut(us(3000));
@@ -164,7 +177,7 @@ test("explicit cuts override the pacing", async () => {
 // segment shorter than the minimum is dropped rather than producing a stray segment.
 test("a cut below the minimum is ignored", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
+	const video = enroll(timeline, "video0");
 
 	video.record(0, us(0));
 	timeline.cut(us(2000));
@@ -188,7 +201,7 @@ test("a cut below the minimum is ignored", async () => {
 // the catalog.
 test("exceeding the declared maximum fails the timeline", async () => {
 	const { timeline, records } = capture({ durationMin: 1000, durationMax: 3000 });
-	const video = timeline.track("video0");
+	const video = enroll(timeline, "video0");
 
 	video.record(0, us(0));
 	video.record(1, us(2000));
@@ -214,7 +227,7 @@ test("an undeclared maximum is omitted from the catalog", () => {
 // final segment's duration collapses to zero (an HLS EXTINF:0).
 test("the final segment runs to the reported end", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
+	const video = enroll(timeline, "video0");
 
 	video.record(0, us(0));
 	video.record(1, us(2000));
@@ -236,7 +249,7 @@ test("a reservation defers flushing until every track enrolls", async () => {
 	const release = timeline.reserve();
 
 	// The primary rendition runs a whole batch of segments through before its sibling exists.
-	const first = timeline.track("video0");
+	const first = enroll(timeline, "video0");
 	for (const [seq, ms] of [
 		[0, 0],
 		[1, 2000],
@@ -245,7 +258,7 @@ test("a reservation defers flushing until every track enrolls", async () => {
 		first.record(seq, us(ms));
 	}
 
-	const second = timeline.track("video1");
+	const second = enroll(timeline, "video1");
 	for (const [seq, ms] of [
 		[0, 0],
 		[1, 2000],
@@ -280,8 +293,8 @@ test("a reservation defers flushing until every track enrolls", async () => {
 // A track that races ahead of the others still lands in the segment its content falls in.
 test("groups before the first boundary join the first segment", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
-	const audio = timeline.track("audio0");
+	const video = enroll(timeline, "video0");
+	const audio = enroll(timeline, "audio0");
 
 	audio.record(0, us(0));
 	video.record(0, us(30));
@@ -311,8 +324,8 @@ test("groups before the first boundary join the first segment", async () => {
 
 test("sequence gaps split ranges", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
-	const audio = timeline.track("audio0");
+	const video = enroll(timeline, "video0");
+	const audio = enroll(timeline, "audio0");
 
 	// Elemental-style gap: audio groups 2..=4 never existed inside segment 0.
 	video.record(0, us(0));
@@ -345,8 +358,8 @@ test("sequence gaps split ranges", async () => {
 // has merely gone quiet still gets to say where the boundary is.
 test("a closed track leaves a whole segment gap", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
-	const audio = timeline.track("audio0");
+	const video = enroll(timeline, "video0");
+	const audio = enroll(timeline, "audio0");
 
 	video.record(0, us(0));
 	audio.record(0, us(0));
@@ -362,7 +375,7 @@ test("a closed track leaves a whole segment gap", async () => {
 
 test("a non-keyframe range start is flagged", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
+	const video = enroll(timeline, "video0");
 
 	video.record(0, us(0));
 	// A mid-stream join: the group doesn't open on an IDR.
@@ -395,7 +408,7 @@ test("reservations nest", async () => {
 	const outer = timeline.reserve();
 	const inner = timeline.reserve();
 
-	const first = timeline.track("video0");
+	const first = enroll(timeline, "video0");
 	for (const [seq, ms] of [
 		[0, 0],
 		[1, 2000],
@@ -407,7 +420,7 @@ test("reservations nest", async () => {
 	// If reservations didn't nest, releasing this one would publish segment 0 without video1.
 	inner();
 
-	const second = timeline.track("video1");
+	const second = enroll(timeline, "video1");
 	for (const [seq, ms] of [
 		[0, 0],
 		[1, 2000],
@@ -441,7 +454,7 @@ test("reservations nest", async () => {
 // spent cut must not block the ones behind it, and durationMin pacing must not race ahead of them.
 test("a cut on the first group does not poison later cuts", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
+	const video = enroll(timeline, "video0");
 
 	// Source segments every 3s, keyframes every 1s: 3s segments, not the 1s the durationMin
 	// pacing would produce on its own.
@@ -457,4 +470,67 @@ test("a cut on the first group does not poison later cuts", async () => {
 	const out = await records();
 	expect(out[0]).toEqual({ segment: 0, pts: 0, duration: 3000, tracks: { video0: [{ start: 0, end: 2 }] } });
 	expect(out[1]).toEqual({ segment: 1, pts: 3000, duration: 3000, tracks: { video0: [{ start: 3, end: 5 }] } });
+});
+
+// The timeline lists what the publisher can still serve, so a record goes when the groups behind
+// it age out of the cache. A late joiner therefore gets the live window, not the whole broadcast.
+test("a record is retracted once its groups expire", async () => {
+	const start = Date.now();
+	setSystemTime(start);
+	try {
+		const { timeline, records } = capture();
+		const video = enroll(timeline, "video0", 10_000);
+
+		// Four 2s groups, published a group apart in wall-clock time too.
+		for (let seq = 0; seq < 4; seq++) {
+			video.record(seq, us(seq * 2000));
+			setSystemTime(start + (seq + 1) * 2000);
+		}
+
+		// Past the first two groups' windows but inside the third's. The next report is what
+		// sweeps, matching the track cache, which only prunes as groups are written.
+		setSystemTime(start + 13_000);
+		video.record(4, us(8000));
+		video.close();
+		timeline.finish();
+
+		// Segments 0 and 1 are gone; 4 is the tail `finish` flushes for the last open group.
+		const out = await records();
+		expect(out.map((record) => record.segment)).toEqual([2, 3, 4]);
+	} finally {
+		setSystemTime();
+	}
+});
+
+// A segment spans every track, so it is only fetchable while all of them still hold their groups:
+// the shortest window bounds the record, without the timeline needing a rule for it.
+test("the shortest retention bounds the record", async () => {
+	const start = Date.now();
+	setSystemTime(start);
+	try {
+		const { timeline, records } = capture();
+		const video = enroll(timeline, "video0", 60_000);
+		const audio = enroll(timeline, "audio0", 5000);
+
+		for (let seq = 0; seq < 3; seq++) {
+			video.record(seq, us(seq * 2000));
+			audio.record(seq, us(seq * 2000));
+			setSystemTime(start + (seq + 1) * 2000);
+		}
+
+		// Past audio's 5s window for the first two segments, but inside it for the third, and far
+		// inside video's 60s one throughout.
+		setSystemTime(start + 8000);
+		video.record(3, us(6000));
+		audio.record(3, us(6000));
+		video.close();
+		audio.close();
+		timeline.finish();
+
+		// The segments went with audio's groups even though video still holds its own.
+		const out = await records();
+		expect(out[0]?.segment).toBe(2);
+	} finally {
+		setSystemTime();
+	}
 });

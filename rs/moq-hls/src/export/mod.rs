@@ -336,8 +336,14 @@ async fn watch(
 	renditions: &renditions::Fanout,
 ) -> crate::Result<()> {
 	let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(broadcast, section).await?;
-	while let Some(entry) = timeline.next().await? {
-		renditions.push(entry);
+	while let Some(update) = timeline.next().await? {
+		match update {
+			moq_mux::timeline::Update::Append(entry) => renditions.push(entry),
+			moq_mux::timeline::Update::Trim { segment } => renditions.trim(segment),
+			// The timeline's updates are `#[non_exhaustive]`. Ignoring one this build doesn't
+			// know keeps the playlist stale rather than wrong, which is the safer of the two.
+			other => tracing::warn!(?other, "ignoring an unrecognized timeline update"),
+		}
 	}
 	Ok(())
 }

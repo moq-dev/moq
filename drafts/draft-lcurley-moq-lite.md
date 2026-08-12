@@ -503,7 +503,12 @@ An application MUST support gaps and out-of-order delivery even when `ordered` i
 ## Expiration
 Expiration governs when an older group is dropped.
 The publisher SHOULD reset Group Streams for non-latest groups whose age relative to the latest group exceeds `Subscriber Max Latency` (see [SUBSCRIBE](#subscribe)); the subscriber MAY also locally drop such groups.
-Expiration only removes the group from live delivery; the publisher MAY still retain it for FETCH or new subscriptions until its age exceeds `Publisher Max Latency` (see [TRACK_INFO](#track-info)).
+Expiration only removes the group from live delivery; the publisher retains it for FETCH or new subscriptions for at least `Publisher Max Latency` (see [TRACK_INFO](#track-info)).
+
+`Publisher Max Latency` is a floor, not a deadline: the publisher MUST keep the group fetchable until its age exceeds that value, and SHOULD keep it a further interval covering the expected round trip, one second being a reasonable default.
+Without the extra interval a subscriber that acts on a group at the edge of the window always loses the race, because its FETCH arrives a round trip after it decided to send it.
+The same margin is what lets an index built from `Publisher Max Latency` (such as a media timeline) retract an entry while the content behind it is still fetchable.
+A publisher under memory pressure MAY drop a group earlier.
 
 It is not crucial to aggressively expire groups thanks to [prioritization](#prioritization), but a lower priority group still consumes RAM, bandwidth, and potentially flow control.
 It is RECOMMENDED that an application set conservative limits and only resort to expiration when data is absolutely no longer needed.
@@ -1310,6 +1315,7 @@ The `Message Length` describes the payload size on the wire.
 # Appendix A: Changelog
 
 ## moq-lite-06
+- Specified `Publisher Max Latency` as a floor rather than a deadline: a publisher MUST keep a group fetchable until its age exceeds the value and SHOULD keep it a round trip longer, so a FETCH issued at the edge of the window still lands.
 - Moved the Qmux-over-WebSocket binding details to draft-lcurley-qmux-websocket; the binding itself is unchanged.
 - Extended the SETUP `Path` parameter to carry the URI query: a client appends `?` and the query component after the path, matching moq-transport's PATH option. The credential a deployment puts in the query was previously unrepresentable on a binding with no request URI.
 - Allowed an empty SETUP `Path` parameter, equivalent to omitting it; both request the server's default path. Previously an empty value was a protocol violation, which made the two ways of asking for the default disagree.

@@ -454,15 +454,62 @@ A consumer derives the wall-clock time of any segment as `wall + pts`, and Unix 
 The epoch is 2020 rather than 1970 so the value stays small, safely within a 53-bit integer even at fine timescales.
 
 ## Track Framing {#timeline-framing}
-The timeline track is an append-log: a single group that is never rolled, with one record per frame, every record preserved in order.
-Each record is a UTF-8 JSON object.
+The timeline track is a sliding window: an ordered log that grows at the tail as segments become available and shrinks at the head as they stop being available, like an HLS media playlist.
 
-The frames are DEFLATE-compressed ({{!RFC1951}}) sharing a single compression window across the group, so each record compresses against all earlier ones.
+Every record has a **position**: the count of records ever appended before it.
+Positions never repeat, so a record is identified across group rolls and retractions, exactly like an HLS media sequence number.
+A position is carried on the wire only as the `offset` below; it is distinct from the record's own `segment` field, and a consumer MUST NOT assume the two coincide.
+
+Each group is self-contained.
+The first frame of every group is a snapshot of the window at that moment:
+
+~~~
+type TimelineSnapshot = {
+	"offset": number,
+	"values": [TimelineRecord],
+}
+~~~
+
+The `offset` field is the position of the first record in `values`, and `values` lists every record then in the window, oldest first.
+
+Each later frame in the group is exactly one operation:
+
+~~~
+type TimelineOperation =
+	{ "append": TimelineRecord } |
+	{ "trim": number }
+~~~
+
+An `append` adds one record at the tail, taking the next position.
+A `trim` removes `n` records from the head, where `n` is the value.
+A consumer MUST ignore an operation whose key it does not recognize, so later revisions can add operations without a version bump.
+A `trim` reaching past the oldest record in the window is a protocol error.
+
+A publisher SHOULD start a new group once the records trimmed since the group's snapshot outnumber those still in the window.
+That bounds the track's total bytes at roughly twice an append-only log while keeping every group independently readable.
+A publisher MUST NOT let a group grow without bound, since a consumer always reads a group from its first frame.
+
+A consumer SHOULD begin at the newest available group and MUST read that group from its first frame.
+Because each group opens with a full snapshot, a late joiner needs nothing older, and a publisher MAY drop earlier groups freely.
+Switching to a newer group mid-read is lossless: positions identify what the consumer already holds, so records are not repeated.
+
+The frames are DEFLATE-compressed ({{!RFC1951}}) sharing a single compression window across the group, so each frame compresses against the earlier ones.
 The publisher ends each frame's compressed data with an empty sync-flush block (the `0x00 0x00 0xff 0xff` trailer is removed, as in {{?RFC7692}}), so a consumer decompresses frames incrementally with one shared window.
 The `.z` suffix on the RECOMMENDED track name marks this compression, mirroring the catalog's `catalog.json.z` sibling.
 
-A consumer MUST start reading from the group's first frame; the shared window makes a mid-group join undecodable.
-The live group is therefore bounded history; deep history is served from a recording.
+## Availability {#timeline-availability}
+The timeline indexes what the publisher can still serve, not everything it has ever published.
+A publisher MUST retract a record once the media it names is no longer fetchable, and a consumer MUST NOT fetch a segment the timeline has retracted.
+
+A segment is fetched whole, so a record stays true only while every group it names is still cached.
+A publisher therefore retracts a record at the earliest expiry among those groups, which for moq-lite is each group's arrival plus its track's `Publisher Max Latency` [moql].
+Tracks with different retention need no further rule: the shortest-lived group bounds the record.
+
+A retraction leads the eviction it describes, because `Publisher Max Latency` is a floor rather than a deadline [moql]: the groups stay fetchable for a round trip after the record naming them is gone, so a consumer acting on the last record it saw does not lose the race.
+
+A trim only ever retracts records a consumer was told about.
+A consumer joining a window that has already trimmed receives no retraction for records it never held; a gap surfaces instead as a jump in the first appended record's position.
+Whether such a gap matters is the application's decision.
 
 ## Records {#timeline-records}
 Each record describes one complete segment:

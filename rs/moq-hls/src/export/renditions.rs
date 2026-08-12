@@ -214,6 +214,30 @@ impl Fanout {
 		});
 	}
 
+	/// Retract every segment below `segment`, from the replay history and every living rendition.
+	///
+	/// Deliberately leaves [`Feed::anchor`] alone, even when this empties the history. The anchor
+	/// maps the pts axis onto wall clock and a retraction says nothing about that axis; only a
+	/// timeline restart invalidates it. Re-estimating here would jump
+	/// `EXT-X-PROGRAM-DATE-TIME` (and DASH's `availabilityStartTime`) over content that never
+	/// moved, and worst of all exactly when the publisher is shedding media, which is when the
+	/// "this segment just ended" assumption behind a fresh estimate is least true.
+	pub fn trim(&self, segment: u64) {
+		let mut feed = self.feed.lock().unwrap();
+
+		while feed.history.front().is_some_and(|entry| entry.segment < segment) {
+			feed.history.pop_front();
+		}
+
+		feed.targets.retain(|target| {
+			let Some(rendition) = target.upgrade() else {
+				return false;
+			};
+			rendition.trim(segment);
+			true
+		});
+	}
+
 	/// Mark every living rendition's window ended (the timeline finished cleanly).
 	pub fn end_windows(&self) {
 		let mut feed = self.feed.lock().unwrap();

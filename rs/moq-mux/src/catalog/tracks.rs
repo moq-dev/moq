@@ -564,7 +564,8 @@ mod tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = super::super::Producer::new(&mut broadcast).unwrap();
 
-		let _recorder = catalog.enroll("video0").unwrap();
+		let video = broadcast.create_track("video0", None).unwrap();
+		let _recorder = catalog.enroll(&video).unwrap();
 		let timeline = catalog.timeline();
 		assert_eq!(timeline.section().track, hang::timeline::DEFAULT_NAME);
 		assert_eq!(

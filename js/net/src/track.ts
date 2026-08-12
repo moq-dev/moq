@@ -15,6 +15,18 @@ export type { Datagram } from "./datagram.ts";
 export const DEFAULT_LATENCY_MAX_MS = 5000;
 
 /**
+ * How long a group is kept past {@link Info.latencyMax} before age eviction takes it, in
+ * milliseconds.
+ *
+ * The grace makes `latencyMax` a floor rather than a deadline. A reader deciding to fetch a group
+ * at the edge of the window needs it to still be there when the request lands, which is a round
+ * trip later, and an index built from `latencyMax` (a media timeline) drops a record while the
+ * content behind it is still fetchable rather than a moment after it is gone. Mirrors
+ * `EVICT_GRACE` in the Rust `moq-net`.
+ */
+const EVICT_GRACE_MS = 1000;
+
+/**
  * How long (milliseconds) a datagram stays in the per-subscriber buffer before it is dropped.
  *
  * Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last few
@@ -351,6 +363,17 @@ export class Producer {
 		return this.#state.update;
 	}
 
+	/**
+	 * This track's committed publisher properties, or `undefined` before {@link accept}.
+	 *
+	 * The synchronous peek at {@link info}, for a caller that already knows the track was
+	 * accepted and needs the value inline. Anything sizing itself to the publisher's cache (a
+	 * media timeline deciding how far back to index) reads `latencyMax` from here.
+	 */
+	get accepted(): Info | undefined {
+		return this.#state.info.peek();
+	}
+
 	/** Commit the immutable publisher properties, resolving {@link info}. Returns `this`. */
 	accept(info: Partial<Info> = {}): this {
 		const resolved = infoDefaults(info);
@@ -460,7 +483,7 @@ export class Producer {
 	// each evicted group's mirror from every sink so no consumer can pin it.
 	#prune(): void {
 		const latencyMaxMs = this.#state.info.peek()?.latencyMax ?? DEFAULT_LATENCY_MAX_MS;
-		const cutoff = Date.now() - latencyMaxMs;
+		const cutoff = Date.now() - (latencyMaxMs + EVICT_GRACE_MS);
 
 		const retained: CachedGroup[] = [];
 		for (const entry of this.#cache) {
@@ -777,6 +800,28 @@ export class Subscriber {
 
 			await Signal.race(this.#state.groups, this.#cursor, this.#state.closed);
 		}
+	}
+
+	/**
+	 * Return the next group only if one is already buffered, otherwise `undefined`.
+	 *
+	 * The non-blocking counterpart to {@link nextGroup}. A reader whose groups are each
+	 * self-contained (a snapshot or a sliding window) drains with this to reach the newest
+	 * buffered group, so a late joiner starts from current state instead of replaying every
+	 * cached group.
+	 */
+	tryNextGroup(): GroupConsumer | undefined {
+		const groups = this.#state.groups.peek();
+		const cursor = this.#cursor.peek();
+		const start = Math.max(cursor.start, this.#nextSequence);
+		while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
+
+		const group = groups[0];
+		if (!group || (cursor.end !== undefined && group.sequence > cursor.end)) return undefined;
+
+		groups.shift();
+		this.#nextSequence = group.sequence + 1;
+		return group;
 	}
 
 	/**

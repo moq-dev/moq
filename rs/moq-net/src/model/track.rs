@@ -39,6 +39,19 @@ pub const DEFAULT_LATENCY_MAX: Duration = Duration::from_secs(5);
 /// replaying them. Sized like a typical send buffer for real-time audio/video.
 const MAX_DATAGRAM_AGE: Duration = Duration::from_millis(50);
 
+/// How long a group is kept past [`Info::latency_max`] before age eviction takes it.
+///
+/// The grace makes `latency_max` a floor rather than a deadline. A reader deciding to fetch a
+/// group at the edge of the window needs it to still be there when the request lands, which is a
+/// round trip later, and an index built from `latency_max` (a media timeline) drops a record while
+/// the content behind it is still fetchable rather than a moment after it is gone. Without the
+/// grace every reader reasoning about the window edge races the publisher's own cache.
+///
+/// It applies on top of [`origin::Info::cache_duration`](crate::origin::Info::cache_duration) too,
+/// so that ceiling is exceeded by up to this much; it is bounded and small enough not to matter
+/// against a retention budget measured in seconds.
+const EVICT_GRACE: Duration = Duration::from_secs(1);
+
 /// Slack before the eviction order is rebuilt, so a track holding just a few groups
 /// doesn't rebuild on every write.
 const EVICT_SLACK: usize = 64;
@@ -68,11 +81,15 @@ pub struct Info {
 	/// timestamps at this scale on the wire. Protocols whose wire can't carry it
 	/// (pre-Lite05 moq-lite, IETF moq-transport) fall back to local monotonic milliseconds.
 	pub timescale: Timescale,
-	/// The maximum age of a non-latest group before the publisher evicts it (the
-	/// newest group is always retained). A subscriber's
-	/// [`Subscription::latency`] window is clamped to this, since a group can't be
-	/// waited for longer than it's kept around. Reported in TRACK_INFO so
+	/// How long a non-latest group is guaranteed to stay cached (the newest group is always
+	/// retained). A subscriber's [`Subscription::latency`] window is clamped to this, since a
+	/// group can't be waited for longer than it's kept around. Reported in TRACK_INFO so
 	/// relays re-serve with the same window. Defaults to [`DEFAULT_LATENCY_MAX`].
+	///
+	/// A floor, not a deadline: age eviction fires a short grace period later, so a reader that
+	/// acts on a group at the edge of the window still finds it a round trip later. Don't rely
+	/// on the extra time (it is deliberately unspecified), only on the floor. Memory pressure is
+	/// the exception, and evicts on the byte budget regardless.
 	///
 	/// This is the `Publisher Max Latency` on the wire, the publisher-side half of
 	/// the same budget [`Subscription::latency`] sets for a subscriber.
@@ -515,7 +532,8 @@ impl TrackState {
 		Poll::Pending
 	}
 
-	/// Expire groups whose last access is older than `max_age`, never the latest.
+	/// Expire groups whose last access is older than `max_age` plus [`EVICT_GRACE`], never
+	/// the latest.
 	///
 	/// One bounded, rotating scan over the eviction order, which holds every cached
 	/// group except the protected latest. The cursor persists across calls, so
@@ -525,7 +543,7 @@ impl TrackState {
 	/// byte budget reclaims the remainder under memory pressure.
 	fn evict_expired(&mut self, max_age: Duration) {
 		let now = self.cache.pool().now();
-		let max_ticks = cache::Pool::ticks(max_age);
+		let max_ticks = cache::Pool::ticks(max_age.saturating_add(EVICT_GRACE));
 
 		let len = self.evict.len();
 		if len > 0 {
@@ -985,6 +1003,22 @@ impl Producer {
 	/// The track's name, unique within its broadcast.
 	pub fn name(&self) -> &str {
 		&self.name
+	}
+
+	/// The track's metadata, as it actually applies.
+	///
+	/// Not necessarily what was passed to
+	/// [`create_track`](crate::broadcast::Producer::create_track):
+	/// [`latency_max`](Info::latency_max) is clamped to the origin's
+	/// [`cache_duration`](crate::origin::Info::cache_duration), so this reports the effective
+	/// retention rather than the requested one. Anything sizing itself to the publisher's cache
+	/// (a media timeline deciding how far back to index) wants the effective value.
+	pub fn info(&self) -> Info {
+		self.state
+			.read()
+			.info
+			.clone()
+			.expect("a track installs its info at construction")
 	}
 
 	/// The parent broadcast this track belongs to.
@@ -3310,7 +3344,7 @@ mod test {
 		}
 
 		// Advance time past the eviction threshold.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_LATENCY_MAX + EVICT_GRACE + Duration::from_secs(1)).await;
 
 		// Append a new group to trigger eviction.
 		producer.append_group().unwrap(); // seq 3
@@ -3362,7 +3396,7 @@ mod test {
 		producer.append_group().unwrap(); // seq 0
 
 		// Advance time past threshold.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_LATENCY_MAX + EVICT_GRACE + Duration::from_secs(1)).await;
 
 		// Append another group; seq 0 is expired and evicted.
 		producer.append_group().unwrap(); // seq 1
@@ -3400,7 +3434,7 @@ mod test {
 
 		let mut consumer = producer.subscribe(None);
 
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_LATENCY_MAX + EVICT_GRACE + Duration::from_secs(1)).await;
 		producer.append_group().unwrap(); // seq 1
 
 		// Group 0 was evicted. Consumer should get group 1.
@@ -3416,13 +3450,43 @@ mod test {
 		let mut producer = track_producer("test", Info::default().with_latency_max(Duration::from_secs(1)));
 		producer.append_group().unwrap(); // seq 0
 
-		// Past the custom budget but well within DEFAULT_LATENCY_MAX.
-		tokio::time::advance(Duration::from_secs(2)).await;
+		// Past the custom budget (and its grace) but well within DEFAULT_LATENCY_MAX.
+		tokio::time::advance(Duration::from_secs(1) + EVICT_GRACE + Duration::from_secs(1)).await;
 		producer.append_group().unwrap(); // seq 1
 
 		// Seq 0 is gone because the publisher only keeps groups for 1s.
 		let state = producer.state.read();
 		assert_eq!(live_groups(&state), 1);
+		assert_eq!(first_live_sequence(&state), 1);
+	}
+
+	/// `latency_max` is the age a group is *guaranteed* to survive, not the instant it dies.
+	/// A reader that acts on a group at the edge of the window (an index dropping its last
+	/// record for it, then a client fetching on that record) needs it to still be there a
+	/// round trip later, so eviction lags the declared window by [`EVICT_GRACE`].
+	#[tokio::test]
+	async fn latency_max_survives_its_own_deadline() {
+		tokio::time::pause();
+
+		let latency_max = Duration::from_secs(2);
+		let mut producer = track_producer("test", Info::default().with_latency_max(latency_max));
+		producer.append_group().unwrap(); // seq 0
+
+		// Exactly at the declared window: still fetchable, which is the whole promise.
+		tokio::time::advance(latency_max).await;
+		producer.append_group().unwrap(); // seq 1
+		assert_eq!(live_groups(&producer.state.read()), 2, "seq 0 died at its own deadline");
+
+		// Still inside the grace.
+		tokio::time::advance(EVICT_GRACE).await;
+		producer.append_group().unwrap(); // seq 2
+		assert_eq!(live_groups(&producer.state.read()), 3, "seq 0 died within the grace");
+
+		// Past it, and seq 0 goes. Seq 1 and 2 are younger than the window and stay.
+		tokio::time::advance(Duration::from_secs(1)).await;
+		producer.append_group().unwrap(); // seq 3
+		let state = producer.state.read();
+		assert_eq!(live_groups(&state), 3);
 		assert_eq!(first_live_sequence(&state), 1);
 	}
 
@@ -3495,8 +3559,8 @@ mod test {
 		);
 		producer.append_group().unwrap(); // seq 0
 
-		// Past the origin ceiling but far within the publisher's own 60s window.
-		tokio::time::advance(Duration::from_secs(2)).await;
+		// Past the origin ceiling (and its grace) but far within the publisher's own 60s window.
+		tokio::time::advance(Duration::from_secs(1) + EVICT_GRACE + Duration::from_secs(1)).await;
 		producer.append_group().unwrap(); // seq 1
 
 		// Seq 0 is evicted anyway: the origin ceiling wins over the larger publisher window.
@@ -3645,7 +3709,7 @@ mod test {
 		}
 
 		// Expire all three groups.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_LATENCY_MAX + EVICT_GRACE + Duration::from_secs(1)).await;
 
 		// Append seq 6 (becomes new max_sequence).
 		producer.append_group().unwrap(); // seq 6
@@ -3672,7 +3736,7 @@ mod test {
 		// Arrive: seq 5, then seq 3.
 		producer.create_group(group::Info { sequence: 5 }).unwrap();
 
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_LATENCY_MAX + EVICT_GRACE + Duration::from_secs(1)).await;
 
 		// Seq 3 arrives late; max_sequence is still 5 (at front).
 		producer.create_group(group::Info { sequence: 3 }).unwrap();
@@ -3686,7 +3750,7 @@ mod test {
 		}
 
 		// Expire seq 3 as well.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_LATENCY_MAX + EVICT_GRACE + Duration::from_secs(1)).await;
 
 		// Seq 2 arrives late, triggering eviction.
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
@@ -5101,7 +5165,7 @@ mod test {
 		producer.append_group().unwrap().finish().unwrap(); // seq 1 demotes seq 0
 
 		// Idle past the window, then the straggler receives a late frame.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_LATENCY_MAX + EVICT_GRACE + Duration::from_secs(1)).await;
 		straggler
 			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 100]))
 			.unwrap();
@@ -5111,7 +5175,7 @@ mod test {
 		assert!(consumer.peek_group(0).is_some(), "the write restarted the clock");
 
 		// Once the writes stop, the group ages out normally.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_LATENCY_MAX + EVICT_GRACE + Duration::from_secs(1)).await;
 		producer.append_group().unwrap().finish().unwrap(); // seq 3 runs expiry
 		assert!(consumer.peek_group(0).is_none(), "idle content still expires");
 	}
@@ -5144,7 +5208,7 @@ mod test {
 
 		// Age everything out, then refresh the first four backfills so they sit
 		// fresh at the front of the eviction order, hiding the expired fifth.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_LATENCY_MAX + EVICT_GRACE + Duration::from_secs(1)).await;
 		for sequence in 1..=4u64 {
 			consumer.fetch_group(sequence, None).await.unwrap();
 		}
@@ -5497,7 +5561,7 @@ mod test {
 		let used = pool.used();
 
 		// Age past the track window; the next write reclaims the backfill.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_LATENCY_MAX + EVICT_GRACE + Duration::from_secs(1)).await;
 		producer.create_group(6u64.into()).unwrap().finish().unwrap();
 
 		assert!(consumer.peek_group(2).is_none(), "expired backfill is reclaimed");

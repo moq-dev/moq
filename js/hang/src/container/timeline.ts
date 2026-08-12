@@ -12,12 +12,24 @@
  * track has reported past its end (or closed), so records are self-contained and immediately
  * servable.
  *
+ * The timeline *slides*: it indexes what the publisher can still serve, not everything it ever
+ * published. A record is retracted once the groups behind it reach their track's `latencyMax`,
+ * which is why {@link Producer.track} takes the track itself. Reading the window from the same
+ * place the track declares it leaves nothing for a caller to duplicate and get wrong. A segment
+ * covers every enrolled track, so the earliest deadline among the groups it names bounds it, and
+ * tracks with different retention need no special rule.
+ *
+ * The retraction *leads* the eviction it predicts: `@moq/net` keeps a group for `latencyMax` plus
+ * a grace period, so a consumer that acts on the last record it saw still finds the media when
+ * its fetch lands a round trip later. Both sweeps run as content is written, so a publisher that
+ * stalls stops trimming and stops evicting together, with no timer on either side.
+ *
  * @module
  */
 
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
-import type { Time } from "@moq/net";
+import { type Time, Track } from "@moq/net";
 import type * as Catalog from "../catalog";
 import { MOQ_EPOCH_UNIX_MILLIS, u53 } from "../catalog";
 
@@ -108,25 +120,32 @@ export interface ProducerProps {
 
 /** One enrolled track's report state. */
 interface TrackState {
-	// Group opens reported and not yet flushed into a record.
-	pending: { sequence: number; pts: Time.Micro; keyframe: boolean }[];
+	// Group opens reported and not yet flushed into a record. `reported` is when the report
+	// arrived, i.e. when the publisher created the group: the clock its cache lifetime runs on,
+	// and therefore the clock its record's does too.
+	pending: { sequence: number; pts: Time.Micro; keyframe: boolean; reported: number }[];
 	// The newest reported timestamp: everything earlier is known. Advanced by a group open (the
 	// group starts there) and by Recorder.end (the content stops there).
 	frontier?: Time.Micro;
 	closed: boolean;
+	// How long this track's publisher guarantees to keep a group cached, read at enrollment.
+	latencyMax: number;
 }
 
 /**
  * Publishes the broadcast's timeline track: one JSON record per complete segment,
- * DEFLATE-compressed (a `@moq/json` stream), plus the shared boundary list every media track's
- * groups map onto.
+ * DEFLATE-compressed (a `@moq/json` sliding window), plus the shared boundary list every media
+ * track's groups map onto.
  *
  * One per broadcast. Media tracks enroll with {@link track} and report group opens through the
  * returned {@link Recorder}; an application with its own boundaries overrides the pacing with
  * {@link cut}. Advertise it in the catalog's root `timeline` section via {@link section}.
  */
 export class Producer {
-	#stream: Json.Stream.Producer<Record>;
+	#window: Json.Window.Producer<Record>;
+	// When each record still in the window stops being fetchable, oldest first. One entry per
+	// record the window holds, so #sweep can trim the head without decoding anything.
+	#expiry: number[] = [];
 	#trackName: string;
 	#durationMinUs: number;
 	#durationMaxUs?: number;
@@ -157,21 +176,32 @@ export class Producer {
 			const unixMillis = Math.max(props.wall.getTime(), MOQ_EPOCH_UNIX_MILLIS);
 			this.#wall = Math.floor(((unixMillis - MOQ_EPOCH_UNIX_MILLIS) * DEFAULT_TIMESCALE) / 1000);
 		}
-		this.#stream = new Json.Stream.Producer<Record>(track, { compression: true });
+		this.#window = new Json.Window.Producer<Record>(track, { compression: true });
 	}
 
 	/**
-	 * Enroll the media track `name`, returning the {@link Recorder} it reports through.
+	 * Enroll `track`, returning the {@link Recorder} its group opens are reported through.
 	 *
-	 * The segment records key ranges by this name, and the track paces boundaries and gates
-	 * completeness until its recorder closes. Enroll a track when it is about to produce: an
-	 * enrolled but silent track holds every record back, by design, since a segment isn't
+	 * The segment records key ranges by the track's name, and the track paces boundaries and
+	 * gates completeness until its recorder closes. Enroll a track when it is about to produce:
+	 * an enrolled but silent track holds every record back, by design, since a segment isn't
 	 * complete until every track's content is known. One recorder per track: enrolling the same
 	 * name again resets its state.
+	 *
+	 * Takes the whole track rather than its name so the timeline reads its `latencyMax` from the
+	 * same place, which is how long a record about it stays true. Passing a name could name a
+	 * track whose window is something else entirely, and the timeline would advertise segments
+	 * nobody can fetch. Accept the track first: an unaccepted one has no declared window yet, so
+	 * it falls back to the default.
 	 */
-	track(name: string): Recorder {
-		this.#tracks.set(name, { pending: [], frontier: undefined, closed: false });
-		return new Recorder(this, name);
+	track(track: Moq.Track.Producer): Recorder {
+		this.#tracks.set(track.name, {
+			pending: [],
+			frontier: undefined,
+			closed: false,
+			latencyMax: track.accepted?.latencyMax ?? Track.DEFAULT_LATENCY_MAX_MS,
+		});
+		return new Recorder(this, track.name);
 	}
 
 	/**
@@ -264,14 +294,14 @@ export class Producer {
 			}
 		}
 
-		this.#stream.finish();
+		this.#window.finish();
 	}
 
 	/** @internal A group open reported by a {@link Recorder}. */
 	report(name: string, sequence: number, pts: Time.Micro, keyframe: boolean): void {
 		const track = this.#tracks.get(name);
 		if (!track) return;
-		track.pending.push({ sequence, pts, keyframe });
+		track.pending.push({ sequence, pts, keyframe, reported: Date.now() });
 		this.#advance(track, pts);
 	}
 
@@ -306,6 +336,10 @@ export class Producer {
 	// will report again, so one that never reached a boundary stops voting instead of holding
 	// the timeline open forever.
 	#pump(finished: boolean): void {
+		// Retract before publishing: a reservation withholds records that don't exist yet, it
+		// doesn't resurrect ones whose content is gone.
+		this.#sweep();
+
 		if (this.#tracks.size === 0 || this.#reservers > 0 || this.#overrun) return;
 		while (this.#closeSegment(finished)) {
 			if (this.#overrun) break;
@@ -404,13 +438,19 @@ export class Producer {
 				);
 				// End the track rather than drop it: the records published before the promise
 				// broke are still true, and a consumer that has them should keep them.
-				this.#stream.finish();
+				this.#window.finish();
 				return;
 			}
 		}
 
 		const record: Record = { segment: this.#nextSegment, pts, duration };
 		this.#nextSegment += 1;
+
+		// When this record stops being true. A consumer fetches a segment whole, so the first
+		// group to leave its publisher's cache breaks the segment as thoroughly as any other: the
+		// deadline is the earliest across every group the record names, which is what makes tracks
+		// with different retention fall out rather than need a rule.
+		let expiry: number | undefined;
 
 		const tracks: { [track: string]: Range[] } = {};
 		let any = false;
@@ -420,6 +460,10 @@ export class Producer {
 				const group = track.pending[0];
 				if (end !== undefined && group.pts >= end) break;
 				track.pending.shift();
+
+				const deadline = group.reported + track.latencyMax;
+				expiry = expiry === undefined ? deadline : Math.min(expiry, deadline);
+
 				const last = ranges.at(-1);
 				// Contiguous sequences extend the run; a skip starts a new range (a gap: groups
 				// that never existed).
@@ -438,7 +482,32 @@ export class Producer {
 		}
 		if (any) record.tracks = tracks;
 
-		this.#stream.append(record);
+		// A record naming no groups describes a span with no content, so nothing can evict out
+		// from under it; keep it for as long as the shortest window any enrolled track declares,
+		// so a gap doesn't outlive the segments around it.
+		if (expiry === undefined) {
+			let shortest = Number.POSITIVE_INFINITY;
+			for (const track of this.#tracks.values()) shortest = Math.min(shortest, track.latencyMax);
+			expiry = Date.now() + (Number.isFinite(shortest) ? shortest : 0);
+		}
+
+		this.#window.append(record);
+		this.#expiry.push(expiry);
+	}
+
+	// Retract every record whose content has left the publisher's cache.
+	//
+	// Driven by the same reports that drive publishing, which is also what drives the track
+	// cache's own age eviction (it prunes as groups are written), so the two stay in phase
+	// without a timer: a publisher that stalls stops trimming and stops evicting together.
+	#sweep(): void {
+		const now = Date.now();
+		let expired = 0;
+		while (expired < this.#expiry.length && this.#expiry[expired] <= now) expired += 1;
+		if (expired === 0) return;
+
+		this.#expiry.splice(0, expired);
+		this.#window.trim(expired);
 	}
 }
 

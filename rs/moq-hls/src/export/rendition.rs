@@ -149,6 +149,12 @@ impl Rendition {
 		self.live.push(row, window);
 	}
 
+	/// Drop the segments below `segment` from this rendition's window: the publisher retracted
+	/// them, so their media is no longer fetchable.
+	pub(crate) fn trim(&self, segment: u64) {
+		self.live.trim(segment);
+	}
+
 	/// Mark this rendition's window ended (the timeline finished cleanly).
 	pub(crate) fn end(&self) {
 		self.live.end();

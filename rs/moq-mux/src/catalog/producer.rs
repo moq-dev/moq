@@ -296,7 +296,7 @@ impl<E: CatalogExt> Producer<E> {
 		track: moq_net::track::Producer,
 		container: C,
 	) -> crate::Result<crate::container::Producer<C>> {
-		let recorder = self.enroll(track.name())?;
+		let recorder = self.enroll(&track)?;
 		Ok(crate::container::Producer::new(track, container).with_recorder(recorder))
 	}
 
@@ -306,7 +306,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// [`media_producer`](Self::media_producer) calls this for you; call it directly for a track
 	/// that isn't built through a [`container::Producer`](crate::container::Producer) (an fMP4
 	/// passthrough writing groups by hand).
-	pub fn enroll(&mut self, track: &str) -> crate::Result<crate::timeline::Recorder> {
+	pub fn enroll(&mut self, track: &moq_net::track::Producer) -> crate::Result<crate::timeline::Recorder> {
 		let recorder = self.timeline.track(track)?;
 
 		let section = self.timeline.section();
@@ -674,7 +674,8 @@ mod test {
 
 		// Something else already took the name the timeline track wants.
 		let _taken = broadcast.create_track(hang::timeline::DEFAULT_NAME, None).unwrap();
-		assert!(catalog.enroll("video0").is_err());
+		let video = broadcast.create_track("video0", None).unwrap();
+		assert!(catalog.enroll(&video).is_err());
 	}
 
 	#[test]
@@ -685,7 +686,8 @@ mod test {
 		// A broadcast that never segments never advertises a timeline.
 		assert_eq!(catalog.snapshot().timeline, None);
 
-		let _recorder = catalog.enroll("video0").unwrap();
+		let video = broadcast.create_track("video0", None).unwrap();
+		let _recorder = catalog.enroll(&video).unwrap();
 		assert_eq!(
 			catalog.snapshot().timeline,
 			Some(catalog.timeline().section()),

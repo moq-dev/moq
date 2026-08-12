@@ -157,6 +157,21 @@ impl Producer {
 		}
 	}
 
+	/// Drop every row numbered below `segment`: the publisher can no longer serve them.
+	///
+	/// The hard bound on the window, where [`push`](Self::push)'s duration is a soft preference:
+	/// a segment whose media has left the publisher's cache can't be listed however short the
+	/// configured window is, because a player following the playlist would 404 on it. Whichever
+	/// removes more wins.
+	pub fn trim(&self, segment: u64) {
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		while state.rows.front().is_some_and(|row| row.segment < segment) {
+			state.rows.pop_front();
+		}
+	}
+
 	/// Mark the timeline ended (the broadcast finished cleanly): the playlist gets
 	/// `EXT-X-ENDLIST` and cursors end once drained.
 	pub fn end(&self) {
@@ -396,6 +411,63 @@ mod tests {
 		let span: f64 = snapshot.segments.iter().map(|s| s.duration).sum();
 		assert!(span >= 4.0);
 		assert_eq!(snapshot.segments.first().unwrap().segment, snapshot.sequence);
+	}
+
+	/// A retraction is the hard bound: it drops segments the configured window would have kept,
+	/// because listing media the publisher can no longer serve 404s the player.
+	#[test]
+	fn a_trim_drops_segments_the_window_would_keep() {
+		let live = Producer::new();
+		// A window long enough that its own eviction never fires across these 6 segments.
+		let window = Duration::from_secs(600);
+		for i in 0..6u64 {
+			live.push(row(i, i, i * 2_000, 2_000), window);
+		}
+		assert_eq!(live.window().segments.len(), 6);
+
+		live.trim(4);
+
+		let snapshot = live.window();
+		assert_eq!(
+			snapshot.segments.iter().map(|s| s.segment).collect::<Vec<_>>(),
+			vec![4, 5]
+		);
+		assert_eq!(
+			snapshot.sequence, 4,
+			"EXT-X-MEDIA-SEQUENCE follows the oldest listed segment"
+		);
+	}
+
+	/// `EXT-X-MEDIA-SEQUENCE` may never go backwards, so a trim below the window (one the
+	/// duration bound already removed) has to be a no-op rather than resurrect anything.
+	#[test]
+	fn a_stale_trim_does_not_rewind_the_sequence() {
+		let live = Producer::new();
+		let window = Duration::from_secs(4);
+		for i in 0..6u64 {
+			live.push(row(i, i, i * 2_000, 2_000), window);
+		}
+		let before = live.window();
+		assert!(before.sequence > 0, "the duration bound already evicted the head");
+
+		live.trim(0);
+
+		let after = live.window();
+		assert_eq!(after.sequence, before.sequence);
+		assert_eq!(after.segments.len(), before.segments.len());
+	}
+
+	/// A trim past everything in the window empties it rather than leaving a stale tail.
+	#[test]
+	fn a_trim_past_the_window_empties_it() {
+		let live = Producer::new();
+		let window = Duration::from_secs(600);
+		for i in 0..3u64 {
+			live.push(row(i, i, i * 2_000, 2_000), window);
+		}
+
+		live.trim(99);
+		assert!(live.window().segments.is_empty());
 	}
 
 	#[test]
