@@ -145,8 +145,11 @@ export class Shared {
 			closed = true;
 		});
 
-		const pump = new Effect();
-		pump.run((effect) => {
+		// A child of this handle's scope rather than a standalone Effect it merely cleans up
+		// after: the disposer run() hands back also drops itself from the parent, so opening
+		// and closing announcement streams repeatedly does not pile up dead pumps that live
+		// until the whole handle closes.
+		const stop = this.#signals.run((effect) => {
 			const origin = effect.get(this.#origin);
 			if (!origin) return;
 
@@ -175,8 +178,7 @@ export class Shared {
 			});
 		});
 
-		this.#signals.cleanup(() => pump.close());
-		void consumer.closed.then(() => pump.close());
+		void consumer.closed.then(stop);
 
 		return consumer;
 	}
