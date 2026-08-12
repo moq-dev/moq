@@ -16,14 +16,18 @@ test("we declare that advertisements must be solicited", () => {
 
 /**
  * A peer that has never heard of the extension sends nothing, and must keep getting the
- * unsolicited announcements it expects.
+ * unsolicited announcements it expects. Distinct from an explicit 0, which is what lets
+ * us tell a peer that ignored our declaration from one that never saw it.
  */
-test("an absent option is no requirement", () => {
-	expect(solicitFromSetup(new SetupOptions())).toBe(false);
+test("an absent option declares nothing", () => {
+	expect(solicitFromSetup(new SetupOptions())).toBeUndefined();
 });
 
-/** An explicit 0 says exactly what an absent option says. */
-test("an explicit zero is no requirement", () => {
+/**
+ * An explicit 0 asks for the same treatment an absent option does, but it is not the same
+ * statement: writing the option proves the peer implements this.
+ */
+test("an explicit zero is a declaration, not an absence", () => {
 	const params = new SetupOptions();
 	params.setVarint(SetupOption.Solicit, 0n);
 

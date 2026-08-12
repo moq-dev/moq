@@ -21,14 +21,20 @@ use super::Version;
 /// the value is a bare varint.
 pub const SOLICIT: u64 = 0x40B5A;
 
-/// Whether the peer requires advertisements to be solicited, from its SETUP.
+/// What the peer declared, if anything.
 ///
-/// Absent is the same as 0, which is what a peer unaware of the extension declares: no
-/// requirement, so we advertise unasked. Any non-zero value means it will ask.
-pub fn from_setup(params: &super::Parameters, _version: Version) -> Result<bool, DecodeError> {
+/// The three states are distinct, and the difference between the last two is what makes
+/// the requirement enforceable:
+///
+/// - `None`: no option at all. The peer has never heard of the extension, so it cannot
+///   have honored ours and an unsolicited advertisement from it is expected.
+/// - `Some(false)`: an explicit 0. No requirement of its own, but writing the option at
+///   all proves it implements this, so it is held to ours.
+/// - `Some(true)`: advertisements to it must be solicited, and likewise held to ours.
+pub fn from_setup(params: &super::Parameters, _version: Version) -> Result<Option<bool>, DecodeError> {
 	Ok(params
 		.get_varint(super::ParameterVarInt::Solicit)
-		.is_some_and(|value| value != 0))
+		.map(|value| value != 0))
 }
 
 /// Declare that advertisements to us must be solicited.
@@ -54,25 +60,27 @@ mod tests {
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft19] {
 			let mut params = super::super::Parameters::default();
 			into_setup(&mut params, version);
-			assert!(from_setup(&params, version).unwrap());
+			assert_eq!(from_setup(&params, version).unwrap(), Some(true));
 		}
 	}
 
 	/// A peer that declared nothing wants to be told unasked, which is what keeps this
 	/// backward compatible with every implementation that has never heard of it.
 	#[test]
-	fn absent_requires_nothing() {
+	fn absent_declares_nothing() {
 		let params = super::super::Parameters::default();
-		assert!(!from_setup(&params, VERSION).unwrap());
+		assert_eq!(from_setup(&params, VERSION).unwrap(), None);
 	}
 
-	/// An explicit 0 says exactly what an absent option says.
+	/// An explicit 0 asks for the same treatment an absent option does, but it is not the
+	/// same statement: writing the option proves the peer implements this, which is what
+	/// lets us hold it to our own declaration.
 	#[test]
-	fn zero_requires_nothing() {
+	fn zero_is_a_declaration_not_an_absence() {
 		let mut params = super::super::Parameters::default();
 		params.set_varint(super::super::ParameterVarInt::Solicit, 0);
 
-		assert!(!from_setup(&params, VERSION).unwrap());
+		assert_eq!(from_setup(&params, VERSION).unwrap(), Some(false));
 	}
 
 	/// A value this draft doesn't define still means "ask me first", so a later revision
@@ -83,7 +91,7 @@ mod tests {
 			let mut params = super::super::Parameters::default();
 			params.set_varint(super::super::ParameterVarInt::Solicit, value);
 
-			assert!(from_setup(&params, VERSION).unwrap(), "value {value}");
+			assert_eq!(from_setup(&params, VERSION).unwrap(), Some(true), "value {value}");
 		}
 	}
 }

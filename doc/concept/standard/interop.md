@@ -54,6 +54,12 @@ If it plays, you interop. That's the whole test.
 - **We always declare it ourselves.** We ask for every prefix we're allowed to
   discover, so an unsolicited `PUBLISH_NAMESPACE` can't tell us anything we
   won't have asked for. Honor it and you'll never send us one.
+- **If you implement it, we hold you to it.** Sending the option at all,
+  including `0`, says you read ours. An unsolicited `PUBLISH_NAMESPACE` after
+  that is a protocol violation and we close the session, because the alternative
+  is a bug neither of us ever sees. Omit the option and you get the tolerant
+  path instead: announce away, we'll take it. Draft-14/15 are exempt, since a
+  `PUBLISH_NAMESPACE` is also how you answer a `SUBSCRIBE_NAMESPACE` there.
 - **We ask everyone.** There's no way to tell us not to bother: answering a
   `SUBSCRIBE_NAMESPACE` with an empty set costs one stream, while waiting on
   your `SETUP` to find out costs a round trip on every connection.

@@ -616,6 +616,10 @@ async fn run_dispatch<S: web_transport_trait::Session>(
 	// costs a handshake round rather than blocking.
 	let peer = subscriber.peer().await;
 
+	// From the same slot, so this costs nothing extra: it decides whether an unsolicited
+	// advertisement is the peer ignoring our own SETUP (MoQ Solicit).
+	let declared = subscriber.solicit().await;
+
 	let mut tasks = TaskSet::owned();
 	loop {
 		let mut stream = tasks.drive(Stream::accept(&session, version)).await?;
@@ -652,7 +656,7 @@ async fn run_dispatch<S: web_transport_trait::Session>(
 			}
 			// Subscriber handles: Publish, PublishNamespace
 			ietf::Publish::ID | ietf::PublishNamespace::ID => {
-				tasks.push(subscriber.handle_stream(id, data, stream, peer)?);
+				tasks.push(subscriber.handle_stream(id, data, stream, peer, declared)?);
 			}
 			_ => {
 				tracing::warn!(id, "unexpected bidi stream type");
@@ -878,7 +882,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_peer_requiring_solicitation_is_not_told_unasked() {
 		let declared = peer::Peer {
-			solicit: true,
+			solicit: Some(true),
 			..Default::default()
 		};
 

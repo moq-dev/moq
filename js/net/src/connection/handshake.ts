@@ -16,7 +16,7 @@ export async function exchangeSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
 	implementation: string,
-): Promise<{ control: Stream; solicit: boolean }> {
+): Promise<{ control: Stream; solicit: boolean | undefined }> {
 	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode(implementation));
@@ -46,7 +46,7 @@ async function sendSetup(transport: WebTransport, version: Ietf.IetfVersion, set
 async function receiveSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
-): Promise<{ reader: Reader; solicit: boolean }> {
+): Promise<{ reader: Reader; solicit: boolean | undefined }> {
 	const uniReader = transport.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
 	>;

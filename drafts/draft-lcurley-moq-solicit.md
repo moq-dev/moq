@@ -26,6 +26,7 @@ informative:
 This document defines an extension for MoQ Transport {{moqt}} that lets an endpoint declare that advertisements to it must be solicited first.
 An endpoint that declares nothing receives unsolicited PUBLISH_NAMESPACE, which is what a peer unaware of this extension implicitly asks for.
 An endpoint that will instead ask for what it wants says so once during setup, and is spared the advertisements it would otherwise have to ignore.
+Because sending the option at all identifies an endpoint that implements this extension, the requirement is enforceable between two such endpoints rather than merely advisory.
 
 --- middle
 
@@ -71,8 +72,9 @@ SOLICIT Setup Option {
 A value of 1 means advertisements to the sender MUST be solicited: it sends SUBSCRIBE_NAMESPACE for what it wants.
 A value of 0 means it has no requirement, so an advertisement may be sent freely.
 
-The option is OPTIONAL and an absent option is identical to a value of 0, which is what an endpoint unaware of this extension implicitly declares.
-An endpoint with no requirement SHOULD omit the option rather than send 0.
+The option is OPTIONAL, and omitting it asks for the same treatment as a value of 0.
+The two are not equivalent, because sending either value also identifies the sender as implementing this extension ({{enforcement}}), while omitting it says nothing at all.
+An endpoint that implements this extension and has no requirement SHOULD therefore send 0 rather than omit the option.
 
 A receiver MUST treat any non-zero value as 1.
 The two directions are independent: each endpoint declares its own, and the two need not match.
@@ -95,23 +97,30 @@ Whichever arrives second replaces the source the first attached, which at best w
 Because this declaration decides which of the two an endpoint uses, honoring it also settles that question for the whole session.
 
 
-# Tolerating a Withheld Message
+# Enforcement {#enforcement}
 
-The declaration is advisory.
-A receiver MUST handle an advertisement it asked not to receive exactly as it would have without the declaration, and MUST NOT close the session over one.
+An endpoint that declared 1 and then receives an unsolicited PUBLISH_NAMESPACE MUST close the session as a protocol violation if the sender declared either value, and MUST tolerate the message otherwise.
 
-Sending one is at worst rude, and there are honest reasons it happens: the peer may not implement this extension, or a relay may be forwarding on behalf of something that does not.
-Making it fatal would turn an optimization into a new way for conforming implementations to fail to interoperate, which is the problem this extension exists to remove.
+An endpoint that sent the option implements this extension, so it read the receiver's declaration and ignored it.
+It also cannot have advertised before reading that declaration: the receiver's SETUP is what says whether advertising unasked is permitted at all, so an endpoint MUST have processed it before sending its first advertisement.
+Neither a race nor a partial implementation explains the message, which leaves a bug, and one that both sides would otherwise never see.
 
-There is no counterpart for SUBSCRIBE_NAMESPACE.
+An endpoint that omitted the option gets the opposite treatment for the same reason: it never saw the declaration, so announcing is exactly what it should do, and closing the session over it would turn this extension into a new way for conforming implementations to fail to interoperate.
+
+Two cases are exempt, because a PUBLISH_NAMESPACE there does not mean what it means elsewhere:
+
+- Drafts of {{moqt}} without an inline NAMESPACE message, where a PUBLISH_NAMESPACE request is also how an endpoint answers a SUBSCRIBE_NAMESPACE. The message alone does not say which it is.
+- An advertisement that matches a SUBSCRIBE_NAMESPACE the receiver sent, which is solicited by definition.
+
+There is no counterpart for SUBSCRIBE_NAMESPACE, enforceable or otherwise.
 An endpoint with nothing to advertise answers one with an empty set, which costs a single stream, while waiting on the peer's SETUP to learn whether the question is worth asking costs a round trip on every session.
 Asking unconditionally is therefore the cheaper behavior, and it is what an endpoint SHOULD do.
 
 
 # Security Considerations
 
-A declaration only ever reduces what its sender receives, so an attacker who forges one can silence advertisements to the endpoint it impersonates.
-That is already available to anyone who can interfere with SETUP, which {{moqt}} assumes is protected by the underlying transport.
+A declaration only ever reduces what its sender receives, so an attacker who forges one can silence advertisements to the endpoint it impersonates, or add an option to an endpoint that never sent one so its own advertisements are treated as a violation and its session closed.
+Both are already available to anyone who can interfere with SETUP, which {{moqt}} assumes is protected by the underlying transport.
 
 A declaration says nothing about authorization.
 An endpoint that declares no requirements is not thereby entitled to any advertisement, and a peer MUST apply the same authorization to what it advertises as it would without this extension.

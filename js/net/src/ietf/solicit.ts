@@ -16,15 +16,22 @@ import { SetupOption, type SetupOptions } from "./parameters.ts";
  */
 
 /**
- * Whether the peer requires advertisements to be solicited, from its SETUP.
+ * What the peer declared, if anything.
  *
- * Absent is the same as 0, which is what a peer unaware of the extension declares: no
- * requirement, so we advertise unasked. Any non-zero value means it will ask.
+ * The three states are distinct, and the difference between the last two is what makes the
+ * requirement enforceable:
+ *
+ * - `undefined`: no option at all. The peer has never heard of the extension, so it cannot
+ *   have honored ours and an unsolicited advertisement from it is expected.
+ * - `false`: an explicit 0. No requirement of its own, but writing the option at all proves
+ *   it implements this, so it is held to ours.
+ * - `true`: advertisements to it must be solicited, and likewise held to ours.
  *
  * @internal
  */
-export function solicitFromSetup(params: SetupOptions): boolean {
-	return (params.getVarint(SetupOption.Solicit) ?? 0n) !== 0n;
+export function solicitFromSetup(params: SetupOptions): boolean | undefined {
+	const value = params.getVarint(SetupOption.Solicit);
+	return value === undefined ? undefined : value !== 0n;
 }
 
 /**

@@ -12,8 +12,9 @@ pub(crate) struct Peer {
 	pub cluster: cluster::Peer,
 
 	/// MoQ Solicit: whether the peer requires advertisements to be solicited, so an
-	/// unsolicited PUBLISH_NAMESPACE is unwanted.
-	pub solicit: bool,
+	/// unsolicited PUBLISH_NAMESPACE is unwanted. `None` when it declared nothing, which
+	/// is the one case where sending us one anyway is not a protocol violation.
+	pub solicit: Option<bool>,
 }
 
 /// Shared slot for [`Peer`], filled when the peer's SETUP is read.
@@ -71,7 +72,7 @@ mod tests {
 				origin: Some(crate::Origin::new(42).unwrap()),
 				cost: Some(3),
 			},
-			solicit: false,
+			solicit: None,
 		};
 
 		let slot = PeerSetup::default();
@@ -81,7 +82,7 @@ mod tests {
 				origin: Some(crate::Origin::new(99).unwrap()),
 				cost: Some(0),
 			},
-			solicit: true,
+			solicit: Some(true),
 		});
 
 		assert_eq!(slot.get().await, first);
