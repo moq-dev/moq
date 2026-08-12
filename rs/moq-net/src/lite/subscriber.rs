@@ -1042,11 +1042,13 @@ mod tests {
 		}
 	}
 
-	/// The `(group, frame)` bounds `resume::slice` produces after a mid-group takeover.
+	/// The `(group, frame)` bounds `resume::slice` produces after a mid-group takeover: a
+	/// subscriber resuming at frame 3 of group 5, capped by a later boundary in the same
+	/// group.
 	fn mid_group_demand() -> Subscription {
 		Subscription::default()
 			.with_start(Position { group: 5, frame: 3 })
-			.with_end(Position::after(5, 2))
+			.with_end(Position::after(5, 7))
 	}
 
 	/// A mid-group resume boundary handed to a peer that predates lite-06 is widened to
@@ -1109,7 +1111,7 @@ mod tests {
 			lite::ControlType::Subscribe
 		);
 		let msg = lite::Subscribe::decode(&mut wire, Version::Lite06Wip).unwrap();
-		assert_eq!((msg.start_frame, msg.end_frame), (3, Some(2)));
+		assert_eq!((msg.start_frame, msg.end_frame), (3, Some(7)));
 	}
 
 	/// The model's exclusive end maps back to the wire's inclusive pair.
@@ -1202,6 +1204,85 @@ mod tests {
 
 		assert!(matches!(sub, Sub::None), "the upstream must be canceled");
 		assert_eq!(h.wire().len(), established, "no SUBSCRIBE_UPDATE claiming group 0");
+	}
+
+	/// Bounds that meet anywhere in the track are just as empty as ones that meet at the
+	/// first position.
+	///
+	/// The wire has no encoding for either: an exclusive end at a group head floors to
+	/// the group below it, so group 5 through group 5 would go out as `start_group = 5`,
+	/// `end_group = 4`, an inverted range the publisher happily parks on.
+	#[tokio::test]
+	async fn a_nonzero_empty_range_opens_no_subscription() {
+		let mut h = Harness::new(Version::Lite06Wip);
+		let mut sub = Sub::None;
+
+		let empty = Subscription::default()
+			.with_start(Position::group(5))
+			.with_end(Position::group(5));
+		h.serve
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::default()))
+			.await
+			.unwrap();
+
+		assert!(matches!(sub, Sub::None), "must not open a subscription");
+		assert!(h.wire().is_empty(), "nothing reached the wire");
+	}
+
+	/// Demand collapsing to an empty range mid-track cancels the upstream, the same way
+	/// it does at the first position.
+	#[tokio::test]
+	async fn a_nonzero_empty_range_cancels_a_live_subscription() {
+		let mut h = Harness::new(Version::Lite06Wip);
+		let mut sub = Sub::None;
+
+		h.serve
+			.handle_subscription(
+				&mut h.producer,
+				&mut sub,
+				Some(Subscription::default()),
+				true,
+				Some(Timescale::default()),
+			)
+			.await
+			.unwrap();
+		assert!(matches!(sub, Sub::Active(_)), "the first subscriber opens one");
+		let established = h.wire().len();
+
+		let empty = Subscription::default()
+			.with_start(Position::group(5))
+			.with_end(Position::group(5));
+		h.serve
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::default()))
+			.await
+			.unwrap();
+
+		assert!(matches!(sub, Sub::None), "the upstream must be canceled");
+		assert_eq!(h.wire().len(), established, "no SUBSCRIBE_UPDATE inverting the range");
+	}
+
+	/// Widening rounds the end outward at the last group too, keeping the range at least
+	/// as wide as the request.
+	///
+	/// Rounding inward there would empty a range the caller asked for, and the filter in
+	/// `handle_subscription` runs before the widening, so nothing downstream would catch
+	/// it.
+	#[tokio::test]
+	async fn frame_bounds_widen_outward_at_the_last_group() {
+		let h = Harness::new(Version::Lite05);
+
+		let mut subscription = Subscription::default()
+			.with_start(Position {
+				group: u64::MAX,
+				frame: 1,
+			})
+			.with_end(Position::after(u64::MAX, 5));
+		h.serve.widen_frame_bounds(&mut subscription);
+
+		assert_eq!(subscription.start, Some(Position::group(u64::MAX)));
+		// Past the last group there is no position to round up to, and unbounded is the
+		// wider request.
+		assert_eq!(subscription.end, None);
 	}
 
 	/// The widening covers SUBSCRIBE_UPDATE too: a downstream peer asking for a frame
@@ -1580,7 +1661,8 @@ mod tests {
 ///
 /// The inverse of the publisher's `Bounds::positions`: the model carries whole
 /// positions with an exclusive end, while the wire splits each bound into a group and a
-/// frame and states both ends inclusive.
+/// frame and states both ends inclusive. The range must be non-empty, since an inclusive
+/// end has nothing to say below the first position it excludes.
 struct WireBounds {
 	start_group: Option<u64>,
 	start_frame: u64,
@@ -1590,10 +1672,12 @@ struct WireBounds {
 
 impl WireBounds {
 	fn new(start: Option<Position>, end: Option<Position>) -> Self {
-		// The empty range has no wire encoding, and flooring it below would ask for the
-		// group it excludes. `handle_subscription` drops such a subscription instead.
+		// An empty range has no wire encoding: flooring its end below asks for the
+		// position it excludes, or inverts the range. `handle_subscription` drops such a
+		// subscription instead. An absent start is the live edge, so it only makes the
+		// range empty when the end sits at the very first position.
 		debug_assert!(
-			end != Some(Position::group(0)),
+			end.is_none_or(|end| end > start.unwrap_or_default()),
 			"an empty range cannot be encoded; it should have been dropped as no demand"
 		);
 
@@ -1979,11 +2063,14 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		}
 
 		// Round both bounds outward to the enclosing group, so the peer sends at least
-		// what was asked for and never less.
+		// what was asked for and never less. Rounding the end down instead would be able
+		// to empty a non-empty range, which has no wire encoding at all.
 		let start = subscription.start.map(|start| Position::group(start.group));
-		let end = subscription.end.map(|end| match end.frame {
-			0 => end,
-			_ => Position::group(end.group.saturating_add(1)),
+		let end = subscription.end.and_then(|end| match end.frame {
+			0 => Some(end),
+			// Past the last group there is no position to round up to, and unbounded is
+			// the wider request.
+			_ => Position::after_group(end.group),
 		});
 
 		if (start, end) != (subscription.start, subscription.end) {
@@ -2007,12 +2094,15 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		supports_update: bool,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
-		// A range ending at the very first position asks for nothing. The wire has no
-		// encoding for that (`Group End` = 0 already means unbounded), and the closest it
-		// can say is "through group 0", which would deliver the one group the caller
-		// excluded. No demand at all is the faithful translation, and it is reachable
-		// only from a caller: every internal bound sits at or above the first frame.
-		let pref = pref.filter(|sub| sub.end != Some(Position::group(0)));
+		// An empty half-open range asks for nothing, and the wire cannot say that: its
+		// bounds are inclusive, so the nearest encoding either hands back the position
+		// the caller excluded or inverts the range outright once the two bounds meet. No
+		// demand at all is the faithful translation. `resume::slice` reaches this on its
+		// own: a subscriber resuming exactly at a segment's cap owes that segment nothing.
+		// An absent start is the live edge, wherever that lands, so the only end that is
+		// certainly empty is the very first position, which is what `Position::default()`
+		// stands in for.
+		let pref = pref.filter(|sub| sub.end.is_none_or(|end| end > sub.start.unwrap_or_default()));
 
 		match pref {
 			Some(mut subscription) => {
