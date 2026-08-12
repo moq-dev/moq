@@ -789,6 +789,12 @@ export class Effect {
 	 * Runs `fn` immediately if the run that registered it is already over, which is what an
 	 * {@link spawn} task resuming after a rerun or close sees. Registering teardown is
 	 * therefore enough to own a resource, with no staleness check needed first.
+	 *
+	 * That holds for the 5 seconds a rerun waits for outstanding {@link spawn} tasks, and always
+	 * after {@link close} since no next run can inherit the teardown. Past the cutoff the next run
+	 * has already opened, so a task resuming then registers against *that* run and is torn down
+	 * with it instead. To bail explicitly, capture `effect.abort` during the run and check it:
+	 * read late it returns the next run's controller, which is not aborted.
 	 */
 	cleanup(fn: Dispose): void {
 		if (this.#dispose === undefined || this.#stale) {
