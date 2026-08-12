@@ -33,6 +33,15 @@ default $BASE="":
     files=$(just _changed "$BASE")
     just _tools "$files"
 
+    # Mirrors the root `check`: the dispatch below lives in these two files and
+    # matches no language scope, so a change to either has to run everything or
+    # it goes untested.
+    if grep -qE '^(justfile|test/justfile)$' <<< "$files"; then
+    	echo "test: root orchestration changed; testing everything." >&2
+    	just all
+    	exit 0
+    fi
+
     # An empty list means "force-run" to the per-lang recipes, which is the
     # wrong semantic here, so don't dispatch at all.
     if [[ -n "$files" ]]; then

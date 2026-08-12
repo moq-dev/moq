@@ -138,7 +138,7 @@ just test all
 just fix-all
 ```
 
-CI runs `just check` and `just test`, so a green local run means a green CI run.
+CI runs these same two recipes, so they cover the same ground locally. It sets two things you don't: `MOQ_STRICT=1`, which turns a missing tool into an error instead of a skipped check, and `NEXTEST_PROFILE=ci`, which allows a longer hang timeout.
 
 See the [development guide](https://doc.moq.dev/setup/dev) and the [justfile](justfile) for more.
 

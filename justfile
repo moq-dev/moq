@@ -141,6 +141,15 @@ check $BASE="":
     files=$(just _changed "$BASE")
     just _tools "$files"
 
+    # The dispatch below lives in these two files, and neither matches any
+    # language scope, so a PR that rewrites how CI dispatches would otherwise
+    # validate none of it. Hand off to the unscoped suite instead.
+    if grep -qE '^(justfile|test/justfile)$' <<< "$files"; then
+    	echo "check: root orchestration changed; checking everything." >&2
+    	just check-all
+    	exit 0
+    fi
+
     # An empty list means "force-run" to the per-lang recipes, which is the
     # wrong semantic here, so don't dispatch at all.
     if [[ -n "$files" ]]; then
