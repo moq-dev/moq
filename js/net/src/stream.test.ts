@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { RemoteError } from "./error.ts";
+import { SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { Reader, Stream, Writer } from "./stream.ts";
 
 // Helper to create a writable stream that captures written data
@@ -314,8 +314,8 @@ test("Reader closed rejects with the decoded reset code", async () => {
 		() => undefined,
 		(e: unknown) => e,
 	);
-	expect(err).toBeInstanceOf(RemoteError);
-	expect((err as RemoteError).code).toBe(2);
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.DeliveryTimeout);
 });
 
 test("Writer closed rejects with the decoded reset code", async () => {
@@ -329,8 +329,29 @@ test("Writer closed rejects with the decoded reset code", async () => {
 		() => undefined,
 		(e: unknown) => e,
 	);
-	expect(err).toBeInstanceOf(RemoteError);
-	expect((err as RemoteError).code).toBe(31);
+	expect(err).toBeInstanceOf(StreamError);
+	expect(Number((err as StreamError).code)).toBe(31);
+});
+
+test("Writer reset forwards only a stream error code", async () => {
+	const session = new SessionError(SessionCode.Unauthorized);
+	const sessionWriter = new Writer(new WritableStream<Uint8Array>());
+	sessionWriter.reset(session);
+	const sessionResult = await sessionWriter.closed.then(
+		() => undefined,
+		(err: unknown) => err,
+	);
+	expect(sessionResult).toBe(session);
+
+	const stream = new StreamError(StreamCode.DeliveryTimeout);
+	const streamWriter = new Writer(new WritableStream<Uint8Array>());
+	streamWriter.reset(stream);
+	const streamResult = await streamWriter.closed.then(
+		() => undefined,
+		(err: unknown) => err,
+	);
+	expect(streamResult).toBeInstanceOf(StreamError);
+	expect((streamResult as StreamError).code).toBe(StreamCode.DeliveryTimeout);
 });
 
 test("closed is stable, so racing it per frame does not allocate", async () => {

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Effect } from "@moq/signals";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
-import { RemoteError, SessionCode } from "../error.ts";
+import { SessionCode, SessionError, StreamCode, toTransport } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
@@ -225,13 +225,94 @@ test("a session rejected as unauthorized surfaces the code and stops retrying", 
 			() => undefined,
 			(err: unknown) => err,
 		);
-		expect(err).toBeInstanceOf(RemoteError);
-		expect((err as RemoteError).code).toBe(SessionCode.Unauthorized);
+		expect(err).toBeInstanceOf(SessionError);
+		expect((err as SessionError).code).toBe(SessionCode.Unauthorized);
 
 		// It still surfaced through the established session before the loop gave up.
-		expect(closes.find((e) => e instanceof RemoteError)).toBeInstanceOf(RemoteError);
+		expect(closes.find((e) => e instanceof SessionError)).toBeInstanceOf(SessionError);
 	} finally {
 		watch.close();
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("an unauthorized session close during setup stops retrying", async () => {
+	const original = globalThis.WebTransport;
+	const url = new URL("https://example.com/");
+	let attempts = 0;
+	const stub = function StubWebTransport() {
+		attempts++;
+		const pair = createMockTransportPair("");
+		void (async () => {
+			const incoming = pair.server.incomingBidirectionalStreams.getReader();
+			const accepted = await incoming.read();
+			incoming.releaseLock();
+			if (accepted.done) return;
+
+			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+		})();
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const reload = new Reload({
+		enabled: true,
+		url,
+		websocket: { enabled: false },
+		// Unlimited retries prove that `closed` settles only because the rejection is terminal.
+		delay: { initial: 1, multiplier: 1, max: 1, timeout: 0 },
+	});
+
+	try {
+		const err = await reload.closed.then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+		expect(err).toBeInstanceOf(SessionError);
+		expect((err as SessionError).code).toBe(SessionCode.Unauthorized);
+		expect(attempts).toBe(1);
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+// SessionCode.Unauthorized and StreamCode.DeliveryTimeout are both 2, in registries that are
+// disjoint. Reading a stream reset off the session table would call every SETUP-stream reset
+// an auth rejection and suppress reconnect for the life of the page.
+test("a setup stream reset is not mistaken for an unauthorized session", async () => {
+	const original = globalThis.WebTransport;
+	const url = new URL("https://example.com/");
+	let attempts = 0;
+	const stub = function StubWebTransport() {
+		// No ALPN, so the handshake exchanges SETUP over a bidi stream we can reset.
+		const pair = createMockTransportPair("");
+		void (async () => {
+			const incoming = pair.server.incomingBidirectionalStreams.getReader();
+			const accepted = await incoming.read();
+			incoming.releaseLock();
+			if (accepted.done) return;
+
+			attempts++;
+			await accepted.value.writable.abort(toTransport(StreamCode.DeliveryTimeout, "delivery timeout"));
+		})();
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const reload = new Reload({
+		enabled: true,
+		url,
+		websocket: { enabled: false },
+		// Unlimited retries, so a second attempt can only happen because the first failure
+		// was treated as retryable rather than terminal.
+		delay: { initial: 1, multiplier: 1, max: 1, timeout: 0 },
+	});
+
+	try {
+		await waitUntil(() => attempts >= 2);
+	} finally {
 		reload.close();
 		globalThis.WebTransport = original;
 	}

@@ -66,28 +66,28 @@ See the [publishing example](https://github.com/moq-dev/moq/blob/main/js/net/exa
 
 ### Remote errors
 
-When a peer resets a stream it sends a numeric code, and a read or write in progress rejects with `Moq.RemoteError` carrying it:
+When a peer resets a stream it sends a numeric code, and a read or write in progress rejects with `Moq.StreamError` carrying it:
 
 ```ts
 try {
 	frame = await group.readFrame();
 } catch (err) {
-	if (err instanceof Moq.RemoteError) console.warn("peer reset the group:", err.code);
+	if (err instanceof Moq.StreamError) console.warn("peer reset the group:", err.code);
 	throw err;
 }
 ```
 
 The code arrives the same way whether the session negotiated WebTransport or the WebSocket fallback, so nothing has to feature-detect `WebTransportError`.
 
-There are two code registries, and which one applies depends on what failed. A stream reset carries a `Moq.StreamCode`; a session close carries a `Moq.SessionCode`. They are disjoint, so the same number means different things in each: `0` ends a session cleanly but is an internal error on a stream, where a cancellation is `1`. Both tables reuse moq-transport's codes unchanged, and 64 and up are yours.
+Session and stream codes use distinct branded types and error classes. A stream reset throws `Moq.StreamError` with a `Moq.StreamCode`; a session close returns `Moq.SessionError` with a `Moq.SessionCode`. The registries are disjoint, so the same number means different things in each: `0` ends a session cleanly but is an internal error on a stream, where a cancellation is `1`, and `2` is `Unauthorized` for a session but `DeliveryTimeout` for a stream. Both tables reuse moq-transport's codes unchanged, and 64 and up are yours.
 
 Anything outside those tables is an unspecified error, so treat it as opaque rather than guessing. That includes 32-63, which the draft reserves: an implementation may send a code there for a condition the shared ones don't cover, but it carries no agreed meaning yet.
 
-A session close surfaces through `connection.closed`, which resolves with `null` for a clean close or a `Moq.RemoteError` when the peer sent a code:
+A session close surfaces through `connection.closed`, which resolves with `null` for a clean close or a `Moq.SessionError` when the peer sent a code:
 
 ```ts
 const err = await connection.closed;
-if (err instanceof Moq.RemoteError && err.code === Moq.SessionCode.Unauthorized) {
+if (err instanceof Moq.SessionError && err.code === Moq.SessionCode.Unauthorized) {
 	console.warn("server rejected the session:", err.message);
 }
 ```

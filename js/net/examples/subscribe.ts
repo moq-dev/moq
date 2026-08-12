@@ -20,9 +20,8 @@ async function main() {
 			try {
 				frame = await group.readString();
 			} catch (err) {
-				// The publisher reset the group. The code is whatever it means to that peer,
-				// and reads the same way on every transport.
-				if (err instanceof Moq.RemoteError) {
+				// The publisher reset the group. The code reads the same way on every transport.
+				if (err instanceof Moq.StreamError) {
 					console.warn("group reset with code", err.code);
 					break;
 				}

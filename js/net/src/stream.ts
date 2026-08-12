@@ -1,13 +1,15 @@
-import { fromTransport, RemoteError, StreamCode, toTransport } from "./error.ts";
+import { fromTransport, StreamCode, StreamError, toTransport } from "./error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
 import { TimeoutError, withTimeout } from "./util/timeout.ts";
 import * as Varint from "./varint.ts";
 
 // Forwarding a peer's reset must keep its code, or a relay flattens it to 0 (INTERNAL_ERROR).
-// Anything else is a local failure, which 0 already describes, so leave it alone.
+// Only a code the peer already put on a stream can be re-sent verbatim: the session registry
+// is a disjoint space, so forwarding one of its codes here would mistranslate it. Anything
+// else is a local failure, which 0 already describes, so leave it alone.
 function withCode(reason: unknown): unknown {
-	return reason instanceof RemoteError ? toTransport(reason.code, reason.message) : reason;
+	return reason instanceof StreamError ? toTransport(reason.code, reason.message) : reason;
 }
 
 const MAX_U31 = 2 ** 31 - 1;

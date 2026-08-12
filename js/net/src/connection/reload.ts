@@ -1,6 +1,6 @@
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
-import { error, RemoteError, SessionCode } from "../error.ts";
+import { error, SessionCode, SessionError } from "../error.ts";
 import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
@@ -247,7 +247,11 @@ export class Reload {
 		// specified code rather than one we guessed at, so this is the peer saying these
 		// credentials will never work; retrying them just burns the window. Matches
 		// moq-native's reconnect loop, which stops on the same close.
-		if (cause instanceof RemoteError && cause.code === SessionCode.Unauthorized) {
+		//
+		// Only a session close says that. The stream registry gives 2 to DELIVERY_TIMEOUT,
+		// so a stream reset during the SETUP exchange would otherwise suppress reconnect
+		// for good.
+		if (cause instanceof SessionError && cause.code === SessionCode.Unauthorized) {
 			console.warn("session rejected as unauthorized, not retrying");
 			this.#closedReject(cause);
 			return;

@@ -1,4 +1,5 @@
 import Session, { type Version as QmuxVersion } from "@moq/qmux";
+import { error, fromClose } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { Stream } from "../stream.ts";
@@ -188,6 +189,21 @@ async function connectInner(url: URL, props: ConnectProps | undefined, abort: Pr
 }
 
 async function connectTransport(url: URL, session: WebTransport, discovery: boolean): Promise<Established> {
+	const closed = session.closed.then(
+		(info) => {
+			throw fromClose(info) ?? new Error("session closed during SETUP");
+		},
+		(err: unknown) => {
+			throw error(err);
+		},
+	);
+
+	return await Promise.race([closed, negotiate(url, session, discovery)]);
+}
+
+// Negotiate the MoQ protocol over an established transport. The caller races this against
+// the session closing so a close code is not lost behind a failed or stalled SETUP stream.
+async function negotiate(url: URL, session: WebTransport, discovery: boolean): Promise<Established> {
 	// qmux Session exposes the negotiated protocol directly (as "" when there is none);
 	// native WebTransport doesn't have a standard .protocol property yet.
 	const protocol: string | undefined = (session as { protocol?: string }).protocol || undefined;

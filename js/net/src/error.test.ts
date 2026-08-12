@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { StreamError } from "@moq/qmux";
-import { fromClose, fromTransport, RemoteError, reason, SessionCode, StreamCode, toTransport } from "./error.ts";
+import { StreamError as QmuxStreamError } from "@moq/qmux";
+import {
+	fromClose,
+	fromTransport,
+	reason,
+	SessionCode,
+	SessionError,
+	StreamCode,
+	StreamError,
+	toTransport,
+} from "./error.ts";
 
 // Stand-in for the current WebTransportError constructor, which the test runtime may not define.
 class FakeWebTransportError extends Error {
@@ -56,17 +65,40 @@ afterEach(() => {
 test("fromTransport: a stream reset keeps the peer's code verbatim", () => {
 	const src = fake("stream", 2);
 	const err = fromTransport(src);
-	expect(err).toBeInstanceOf(RemoteError);
-	expect((err as RemoteError).code).toBe(2);
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.DeliveryTimeout);
 	expect(err.message).toBe("remote error: 2");
 	// The original error stays reachable for logging.
 	expect(err.cause).toBe(src);
 });
 
+// Both registries assign 2, to UNAUTHORIZED and DELIVERY_TIMEOUT respectively. Distinct
+// classes and branded code types keep callers from reading either against the wrong table.
+test("the error type names the registry the code came from", () => {
+	const stream = fromTransport(fake("stream", 2)) as StreamError;
+	const session = fromClose({ closeCode: 2, reason: "unauthorized" });
+
+	expect(stream).toBeInstanceOf(StreamError);
+	expect(session).toBeInstanceOf(SessionError);
+	expect(Number(stream.code)).toBe(Number(session?.code));
+});
+
+test("the code types reject the other registry", () => {
+	new StreamError(StreamCode.DeliveryTimeout);
+	new SessionError(SessionCode.Unauthorized);
+
+	// @ts-expect-error A session error cannot carry a stream code.
+	new SessionError(StreamCode.DeliveryTimeout);
+	// @ts-expect-error A stream error cannot carry a session code.
+	new StreamError(SessionCode.Unauthorized);
+	// @ts-expect-error Raw numbers have not been decoded against either registry.
+	new StreamError(2);
+});
+
 test("fromTransport: code 0 is a code like any other", () => {
 	// 0 is what a transport sends for a stream dropped with no code of its own. What it
 	// means is up to the peer, so it gets no special treatment here.
-	expect((fromTransport(fake("stream", 0)) as RemoteError).code).toBe(0);
+	expect((fromTransport(fake("stream", 0)) as StreamError).code).toBe(StreamCode.Internal);
 });
 
 test("fromTransport: decodes a fallback error with no WebTransportError global", () => {
@@ -74,8 +106,8 @@ test("fromTransport: decodes a fallback error with no WebTransportError global",
 	// read the fields rather than the class.
 	globals.WebTransportError = undefined;
 	const err = fromTransport({ source: "stream", streamErrorCode: 31, message: "" });
-	expect(err).toBeInstanceOf(RemoteError);
-	expect((err as RemoteError).code).toBe(31);
+	expect(err).toBeInstanceOf(StreamError);
+	expect(Number((err as StreamError).code)).toBe(31);
 });
 
 test("fromTransport: a session failure has no stream code, so it passes through", () => {
@@ -117,7 +149,7 @@ test("reason: WebTransportError keeps a populated message and appends details", 
 });
 
 test("reason: a decoded remote error names its code", () => {
-	expect(reason(new RemoteError(31))).toBe("remote error: 31");
+	expect(reason(new StreamError(StreamCode.TooFarBehind))).toBe("remote error: 5");
 });
 
 test("fromClose: a clean close is null, a coded close keeps its code", () => {
@@ -126,8 +158,8 @@ test("fromClose: a clean close is null, a coded close keeps its code", () => {
 	expect(fromClose({})).toBeNull();
 
 	const err = fromClose({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
-	expect(err).toBeInstanceOf(RemoteError);
-	expect(err?.code).toBe(0x2);
+	expect(err).toBeInstanceOf(SessionError);
+	expect(err?.code).toBe(SessionCode.Unauthorized);
 	expect(err?.message).toBe("remote error: 2 (unauthorized)");
 
 	expect(fromClose({ closeCode: SessionCode.GoawayTimeout })?.message).toBe("remote error: 16");
@@ -137,13 +169,13 @@ test("fromClose: a clean close is null, a coded close keeps its code", () => {
 // the Rust tables, since the two implementations talk to each other.
 test("the code tables match the spec", () => {
 	// moq-transport's, reused unchanged.
-	expect(SessionCode.Cancel).toBe(0x0);
-	expect(SessionCode.Unauthorized).toBe(0x2);
-	expect(SessionCode.GoawayTimeout).toBe(0x10);
-	expect(SessionCode.Version).toBe(0x15);
-	expect(StreamCode.Cancel).toBe(0x1);
-	expect(StreamCode.SessionClosed).toBe(0x3);
-	expect(StreamCode.TooFarBehind).toBe(0x5);
+	expect(Number(SessionCode.Cancel)).toBe(0x0);
+	expect(Number(SessionCode.Unauthorized)).toBe(0x2);
+	expect(Number(SessionCode.GoawayTimeout)).toBe(0x10);
+	expect(Number(SessionCode.Version)).toBe(0x15);
+	expect(Number(StreamCode.Cancel)).toBe(0x1);
+	expect(Number(StreamCode.SessionClosed)).toBe(0x3);
+	expect(Number(StreamCode.TooFarBehind)).toBe(0x5);
 
 	// The tables carry only what the draft assigns. 32-63 is reserved, so a code there is
 	// something an implementation happens to send, not a meaning to publish.
@@ -152,17 +184,17 @@ test("the code tables match the spec", () => {
 	}
 
 	// The spaces are disjoint: 0 ends a session cleanly but fails a stream.
-	expect(SessionCode.Cancel).not.toBe(StreamCode.Cancel);
-	expect(StreamCode.Internal).toBe(0x0);
+	expect(Number(SessionCode.Cancel)).not.toBe(Number(StreamCode.Cancel));
+	expect(Number(StreamCode.Internal)).toBe(0x0);
 });
 
 test("fromTransport: decodes a real qmux stream reset", () => {
 	// The WebSocket fallback's actual error type, not a stand-in: this is the contract the
 	// fallback path depends on, and it only holds from @moq/qmux 0.3.2 on. Before that, qmux
 	// formatted the code into an Error message and this silently decoded nothing.
-	const err = fromTransport(new StreamError(2, "RESET_STREAM"));
-	expect(err).toBeInstanceOf(RemoteError);
-	expect((err as RemoteError).code).toBe(2);
+	const err = fromTransport(new QmuxStreamError(2, "RESET_STREAM"));
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.DeliveryTimeout);
 });
 
 // The transports read the reset code off a WebTransportError's `streamErrorCode` and send 0
@@ -174,13 +206,13 @@ test("toTransport: carries a code the transports will actually send", () => {
 	expect((reason as unknown as { streamErrorCode: number }).streamErrorCode).toBe(StreamCode.Cancel);
 
 	// A plain Error carries nothing, which is what makes the mistake silent.
-	expect(fromTransport(new Error("cancel"))).not.toBeInstanceOf(RemoteError);
+	expect(fromTransport(new Error("cancel"))).not.toBeInstanceOf(StreamError);
 
 	// Round trip: what we send is what a peer decodes.
 	const decoded = fromTransport(reason);
-	expect(decoded).toBeInstanceOf(RemoteError);
-	expect((decoded as RemoteError).code).toBe(StreamCode.Cancel);
-	expect((decoded as RemoteError).code).not.toBe(StreamCode.Internal);
+	expect(decoded).toBeInstanceOf(StreamError);
+	expect((decoded as StreamError).code).toBe(StreamCode.Cancel);
+	expect((decoded as StreamError).code).not.toBe(StreamCode.Internal);
 });
 
 test("toTransport: supports Chromium's single-dictionary constructor", () => {
@@ -199,5 +231,5 @@ test("toTransport: supports Chromium's single-dictionary constructor", () => {
 test("toTransport: works with no WebTransportError global", () => {
 	globals.WebTransportError = undefined;
 	const decoded = fromTransport(toTransport(StreamCode.TooFarBehind, "lagged"));
-	expect((decoded as RemoteError).code).toBe(StreamCode.TooFarBehind);
+	expect((decoded as StreamError).code).toBe(StreamCode.TooFarBehind);
 });
