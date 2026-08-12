@@ -90,13 +90,8 @@ _changed $BASE:
 # to invoke it. Takes the same file list as the dispatch, or `ALL` to require
 # everything (`check-all`).
 #
-# Two deliberate absences:
-#   - swift exists only on macOS, and `swift check` skips off-macOS by design;
-#     swift.yml is its real gate.
-#   - go and uniffi-bindgen-go are NOT in the dev shell (uniffi-bindgen-go isn't
-#     in nixpkgs; it installs from a NordSecurity git tag). Requiring them would
-#     fail every Go-scoped PR, so `just go check` still skips itself in CI, as it
-#     always has. Packaging them is what would close that hole.
+# One deliberate absence: swift exists only on macOS, and `swift check` skips
+# off-macOS by design; swift.yml is its real gate.
 
 # Fail when a tool the diff's scopes need is missing. No-op unless MOQ_STRICT.
 [private]
@@ -112,6 +107,7 @@ _tools $FILES="":
     scoped '^(rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools+=(cargo)
     scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'     && tools+=(uv)
     scoped '^(kt/|rs/moq-ffi/)'                                && tools+=(gradle java)
+    scoped '^(go/|rs/moq-ffi/)'                                && tools+=(go uniffi-bindgen-go)
     # The OBS lints ship only in the Linux dev shell; nixpkgs marks obs-studio
     # broken on Darwin.
     if [[ "$(uname -s)" == "Linux" ]] && scoped '^cpp/obs/'; then
