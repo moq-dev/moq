@@ -40,11 +40,13 @@ HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
 # optimized cdylib; the shipped artifacts are built by rs/moq-ffi/build.sh,
 # which is release regardless.
 PROFILE="${MOQ_FFI_PROFILE:-debug}"
+# Expanded as ${CARGO_PROFILE[@]+...} at the use sites: macOS ships bash 3.2,
+# where expanding an empty array under `set -u` is an "unbound variable" error.
 CARGO_PROFILE=()
 [[ "$PROFILE" == "release" ]] && CARGO_PROFILE=(--release)
 
 echo "go check: building moq-ffi for $HOST_TARGET..."
-cargo build "${CARGO_PROFILE[@]}" --package moq-ffi \
+cargo build ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |
