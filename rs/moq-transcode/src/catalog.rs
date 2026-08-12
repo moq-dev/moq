@@ -27,9 +27,22 @@ pub(crate) fn choose_source(video: &Video) -> Result<(String, VideoConfig), Erro
 		// through this one; composing relative references is a follow-up.
 		.filter(|(_, config)| config.broadcast.is_none())
 		.filter(|(_, config)| can_decode(config))
+		// A publisher can advertise its codec before it knows its picture: a capture whose camera
+		// hasn't been opened publishes a rendition with no dimensions, and the first keyframe fills
+		// them in. There is no ladder to derive from that yet, so leave it for a later snapshot
+		// rather than choosing it and failing on geometry.
+		.filter(|(_, config)| dimensions(config).is_some())
 		.max_by_key(|(_, config)| (config.coded_height, config.coded_width, config.bitrate))
 		.map(|(name, config)| (name.clone(), config.clone()))
 		.ok_or(Error::NoSource)
+}
+
+/// The source geometry a ladder can be sized against, if it's known at all.
+fn dimensions(config: &VideoConfig) -> Option<(u64, u64)> {
+	match (config.coded_width, config.coded_height) {
+		(Some(w), Some(h)) if w > 0 && h > 0 => Some((w as u64, h as u64)),
+		_ => None,
+	}
 }
 
 fn can_decode(config: &VideoConfig) -> bool {
@@ -47,9 +60,8 @@ fn is_supported_av1(av1: &AV1) -> bool {
 /// Resolve the configured rungs against the source: derive geometry from the
 /// source aspect ratio and drop any rung that isn't strictly below the source.
 pub(crate) fn resolve_rungs(rungs: &[Rung], source_name: &str, source: &VideoConfig) -> Result<Vec<Resolved>, Error> {
-	let (source_width, source_height) = match (source.coded_width, source.coded_height) {
-		(Some(w), Some(h)) if w > 0 && h > 0 => (w as u64, h as u64),
-		_ => return Err(Error::SourceDimensions(source_name.to_string())),
+	let Some((source_width, source_height)) = dimensions(source) else {
+		return Err(Error::SourceDimensions(source_name.to_string()));
 	};
 	let framerate = source
 		.framerate
@@ -233,6 +245,27 @@ mod tests {
 		)
 		.unwrap();
 		assert_eq!(resolved[0].size, moq_video::Size::new(202, 360));
+	}
+
+	/// A publisher that advertises its codec before opening its camera has no dimensions yet, and
+	/// `run` keeps waiting for a snapshot it can use. Choosing that rendition instead would fail on
+	/// geometry and terminate the transcode before any rung could create the demand that opens the
+	/// camera in the first place.
+	#[test]
+	fn dimensionless_rendition_is_not_a_source_yet() {
+		let mut provisional = source(0, 0, None);
+		provisional.coded_width = None;
+		provisional.coded_height = None;
+
+		let mut video = Video::default();
+		video.renditions.insert("video".to_string(), provisional.clone());
+		assert!(matches!(choose_source(&video), Err(Error::NoSource)));
+
+		// The keyframe fills the geometry in, and the same rendition becomes usable.
+		video.renditions.insert("video".to_string(), source(1920, 1080, None));
+		let (name, chosen) = choose_source(&video).unwrap();
+		assert_eq!(name, "video");
+		assert_eq!(chosen.coded_width, Some(1920));
 	}
 
 	#[test]

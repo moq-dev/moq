@@ -42,6 +42,8 @@ enum EncoderMsg {
 }
 
 impl VideoEncoder {
+	/// Publish the catalog rendition, then hand the encoder to a worker thread that only runs while
+	/// someone is watching. The returned handle feeds it frames; the emulator never blocks on it.
 	pub async fn spawn(broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Self {
 		let (tx, rx) = tokio::sync::mpsc::channel(4);
 
