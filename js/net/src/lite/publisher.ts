@@ -545,7 +545,6 @@ export class Publisher {
 					start: range.start,
 					end: range.end,
 				});
-				if (bounds.endGroup !== undefined && group.sequence >= bounds.endGroup) break;
 			}
 
 			if (emitRange) {

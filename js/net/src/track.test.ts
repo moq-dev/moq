@@ -241,6 +241,28 @@ test("nextGroup returns undefined when track closes", async () => {
 	expect(await track.nextGroup()).toBeUndefined();
 });
 
+// Close kills every buffered group, so a group parked above the cap can never be
+// delivered. nextGroup must report the track finished rather than wait forever
+// for a cap raise that has nothing left to release.
+test("nextGroup resolves undefined when the track closes with a group parked above the cap", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+
+	for (let sequence = 0; sequence < 4; sequence++) producer.writeGroup(new GroupProducer(sequence));
+
+	track.endAt(2);
+	expect((await track.nextGroup())?.sequence).toBe(0);
+	expect((await track.nextGroup())?.sequence).toBe(1);
+	expect((await track.nextGroup())?.sequence).toBe(2);
+
+	// Group 3 is parked above the cap while the track is live.
+	const parked = track.nextGroup();
+	expect(await Promise.race([parked, Promise.resolve("pending")])).toBe("pending");
+
+	producer.close();
+	expect(await parked).toBeUndefined();
+});
+
 test("readFrame does not livelock when a sole group finishes before the next arrives", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();

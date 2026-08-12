@@ -746,7 +746,10 @@ export class Subscriber {
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
-			if (closed !== undefined && !group) return undefined;
+			// Reaching here with a group buffered means it's parked above the cap. Close
+			// already closed every buffered group, so a later cap raise has nothing left
+			// to deliver: the track is finished, not paused.
+			if (closed !== undefined) return undefined;
 
 			await Signal.race(this.#state.groups, this.#cursor, this.#state.closed);
 		}
