@@ -355,6 +355,22 @@ test("closing the subscriber releases a recvGroup parked after a clean close", a
 	expect(await pending).toBeUndefined();
 });
 
+// Same, but with the producer still live: the first close() must also clear the
+// buffer, or the parked group re-parks on wake and the read hangs forever.
+test("closing the subscriber releases a recvGroup parked while the producer is live", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+
+	track.endAt(0);
+	producer.writeGroup(new GroupProducer(1));
+
+	const pending = track.recvGroup();
+	expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
+
+	track.close();
+	expect(await pending).toBeUndefined();
+});
+
 test("recvGroup after nextGroup still returns late arrivals", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();

@@ -681,19 +681,15 @@ export class Subscriber {
 
 	/** Close the track (optionally with an error), closing any pending groups. Idempotent. */
 	close(abort?: Error) {
-		if (!closeTrackState(this.#state, abort)) {
-			// The track already settled (e.g. the producer finished), but groups parked
-			// at the endAt cap can still be buffered, keeping a read pending. Leaving is
-			// what abandons them: drop them and wake the read so it observes the end.
-			this.#state.groups.mutate((groups) => {
-				for (const group of groups) group.close(abort);
-				groups.length = 0;
-			});
-			return;
-		}
-		for (const group of this.#state.groups.peek()) {
-			group.close(abort);
-		}
+		// Settle if we're first (the producer may already have); either way drop anything
+		// still buffered. Groups parked at the endAt cap deliberately outlive a clean
+		// producer close, so the subscriber leaving is what must release them: closing
+		// and clearing wakes a pending read to observe the end instead of hanging.
+		closeTrackState(this.#state, abort);
+		this.#state.groups.mutate((groups) => {
+			for (const group of groups) group.close(abort);
+			groups.length = 0;
+		});
 	}
 
 	/**
