@@ -200,3 +200,38 @@ test("a failed stream open does not kill the announce loop", async () => {
 
 	pub.close();
 });
+
+/**
+ * Capacity coming back raises no signal of its own: no broadcast is published, closed, or
+ * changed. The loop has to come back and ask again on its own, or a namespace refused
+ * once stays undiscoverable for the session.
+ */
+test("a namespace refused once is retried without anything else changing", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const inner = new NativeSession(pair.server, VERSION, true);
+
+	let failures = 1;
+	const session: Session = {
+		version: inner.version,
+		acceptBi: () => inner.acceptBi(),
+		nextRequestId: () => inner.nextRequestId(),
+		close: () => inner.close(),
+		openBi: () => {
+			if (failures-- > 0) throw new Error("no stream credit");
+			return inner.openBi();
+		},
+	};
+
+	const pub = new Publisher(pair.server, session, { announce: false, interest: false });
+	pub.publish(Path.from("lonely"), new BroadcastProducer());
+
+	void pub.runPublishNamespaces();
+
+	// Nothing else happens: no second publish, no close. Only the retry can save it.
+	const stream = await nextStream(pair.client);
+	if (!stream) throw new Error("the refused namespace was never retried");
+	expect(await readPublishNamespace(stream)).toBe(Path.from("lonely"));
+	await acceptPublishNamespace(stream);
+
+	pub.close();
+});

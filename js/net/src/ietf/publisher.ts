@@ -22,6 +22,17 @@ import {
 import { TrackStatus, type TrackStatusRequest } from "./track.ts";
 import { Version } from "./version.ts";
 
+/** First wait before re-offering a namespace the peer refused or we couldn't open for. */
+const RETRY_BASE = 100;
+
+/** Ceiling on that wait. The loop retries for the life of the session, so it must not spin. */
+const RETRY_MAX = 5000;
+
+/** Sleep `delay`, jittered, so a relay's namespaces don't all retry on the same tick. */
+function retryAfter(delay: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, delay * (0.5 + Math.random() / 2)));
+}
+
 /** What {@link Publisher.runGroup} needs to serve one group. */
 interface RunGroup {
 	/** The subscription's request ID, doubling as the track alias. */
@@ -392,6 +403,7 @@ export class Publisher {
 
 		try {
 			let active = new Set<Path.Valid>();
+			let retry = 0;
 
 			for (;;) {
 				// Subscribe BEFORE reconciling. Each advertisement below waits a round trip
@@ -420,12 +432,19 @@ export class Publisher {
 				}
 
 				// What the peer holds, not what we attempted: a declined PUBLISH_NAMESPACE
-				// leaves no request behind, so the next turn retries it instead of believing
-				// the namespace is already up.
+				// leaves no request behind, so it stays outstanding below.
 				active = new Set<Path.Valid>(requests.keys());
 
+				// Whatever we wanted up and could not get up. Stream credit freeing, a
+				// transient failure clearing, or the peer starting to answer raises no
+				// signal of its own, so the only way back is to ask again on a timer.
+				const outstanding = updated.difference(active).size > 0;
+				retry = outstanding ? Math.min(retry ? retry * 2 : RETRY_BASE, RETRY_MAX) : 0;
+
 				// Wait for the next change, which has already fired if one landed above.
-				const next = await changed;
+				const next = await (retry
+					? Promise.race([changed, retryAfter(retry).then(() => broadcasts)])
+					: changed);
 				dispose();
 				if (!next) break;
 			}

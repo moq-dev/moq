@@ -30,6 +30,10 @@ struct Watched {
 	idle_at: Option<web_async::time::Instant>,
 	/// Set once the broadcast errors, so a dead entry stops being polled.
 	dead: bool,
+	/// The peer should hold this namespace but does not: it refused the request, or we
+	/// could not get a stream to make it on. Nothing about that clears on its own, so the
+	/// loop comes back to it on a timer.
+	deferred: bool,
 }
 
 impl Watched {
@@ -40,6 +44,7 @@ impl Watched {
 			sent: Advert::None,
 			idle_at: None,
 			dead: false,
+			deferred: false,
 		}
 	}
 
@@ -97,6 +102,27 @@ enum Watch {
 	/// Demand just drained while a discounted cost was advertised. The cold cost is
 	/// restored once the linger expires, not now, so viewer churn does not flap routing.
 	Idle(crate::PathOwned),
+}
+
+/// How long to wait for a stream to advertise one namespace on.
+///
+/// Only reached when the peer has granted no more, which on this path means it is holding
+/// every advertisement we already sent. Long enough that a merely slow peer is not given
+/// up on, short enough that the loop resumes and can retire something.
+const ADVERTISE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// First wait before re-offering a namespace we could not get up.
+const RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Ceiling on that wait. The loop retries for the life of the session, so it must settle
+/// into a slow poll rather than a spin.
+const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Spread a retry over half its window, so every namespace on a busy relay does not come
+/// back at the same instant.
+fn jitter(delay: std::time::Duration) -> std::time::Duration {
+	use rand::RngExt;
+	delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)
 }
 
 /// Where one announce loop's advertisements go.
@@ -167,6 +193,8 @@ enum NamespaceEvent {
 	/// The linger sleep fired without an expired entry (it was canceled, or a later
 	/// deadline remains): restart the turn so the next deadline arms a fresh sleep.
 	Linger,
+	/// The retry sleep fired: re-offer whatever the peer should be holding and isn't.
+	Retry,
 }
 
 #[derive(Clone)]
@@ -894,6 +922,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		if advert == watch.sent {
 			return Ok(());
 		}
+		let wanted = advert.wanted();
 		let held = watch.sent.wanted();
 
 		let absolute = self.origin.absolute(path).to_owned();
@@ -964,6 +993,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		if let Some(watch) = watched.get_mut(suffix) {
+			watch.deferred = wanted && !sent.wanted();
 			watch.set_sent(sent);
 		}
 		Ok(())
@@ -980,7 +1010,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		cluster: Option<cluster::Advert>,
 	) -> Result<(), Error> {
 		let request_id = self.control.next_request_id().await?;
-		let mut request = Stream::open(&self.session, self.version).await?;
+
+		// Bounded, because an advertisement holds its stream for as long as the namespace
+		// lives: a peer whose concurrent-stream limit we have filled makes this open block,
+		// and the withdrawals queued behind it are the only thing that would free a slot.
+		// Giving up records nothing, so the namespace is simply retried later.
+		let Some(request) = self.open_request().await? else {
+			tracing::debug!(broadcast = %self.origin.absolute(path), "no stream for the advertisement");
+			return Ok(());
+		};
+		let mut request = request;
 
 		request.writer.encode(&ietf::PublishNamespace::ID).await?;
 		request
@@ -1027,6 +1066,28 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			},
 		);
 		Ok(())
+	}
+
+	/// Open a stream for one advertisement, or `None` if the peer did not give us one in
+	/// time.
+	///
+	/// The announce loop is single-threaded over origin updates, so an open that parks
+	/// forever parks everything, including the unannounces that release the streams the
+	/// peer is waiting on us to retire. Failing instead keeps the loop moving.
+	async fn open_request(&self) -> Result<Option<Stream<S, Version>>, Error> {
+		let mut open = std::pin::pin!(Stream::open(&self.session, self.version));
+		let mut timeout = kio::time::Deadline::after(ADVERTISE_TIMEOUT);
+
+		kio::wait(|waiter| {
+			if let Poll::Ready(res) = waiter.poll_future(open.as_mut()) {
+				return Poll::Ready(res.map(Some));
+			}
+			if timeout.poll(waiter).is_ready() {
+				return Poll::Ready(Ok(None));
+			}
+			Poll::Pending
+		})
+		.await
 	}
 
 	/// Withdraw an advertised namespace: NAMESPACE_DONE inline, or PUBLISH_NAMESPACE_DONE
@@ -1206,10 +1267,28 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		let mut linger = kio::time::Deadline::new();
 
+		// When to re-offer whatever the peer should hold and doesn't, and how long to wait
+		// the next time that fails. Jittered so a relay's namespaces don't all come back on
+		// the same tick.
+		let mut retry = kio::time::Deadline::new();
+		let mut retry_at: Option<web_async::time::Instant> = None;
+		let mut retry_delay = RETRY_BASE;
+
 		// Stream updates (origin (un)announces plus watched route and demand
 		// changes), bailing if the peer closes its side first.
 		let res = loop {
 			linger.set(Self::linger_deadline(&ns.watched));
+
+			match ns.watched.values().any(|watch| watch.deferred) {
+				// Arm on the edge, so a turn that changes nothing else doesn't push the
+				// deadline out forever.
+				true => retry_at = retry_at.or_else(|| Some(web_async::time::Instant::now() + jitter(retry_delay))),
+				false => {
+					retry_at = None;
+					retry_delay = RETRY_BASE;
+				}
+			}
+			retry.set(retry_at);
 
 			let event = {
 				let mut closed = std::pin::pin!(ns.target.closed());
@@ -1220,6 +1299,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					}
 					if let Poll::Ready(update) = announced.poll_next(waiter) {
 						return Poll::Ready(NamespaceEvent::Update(update));
+					}
+					if retry.poll(waiter).is_ready() {
+						return Poll::Ready(NamespaceEvent::Retry);
 					}
 					// Stamped per poll rather than kept: the turn always ends in a
 					// `Ready` below once it fires, so it never has to survive.
@@ -1240,6 +1322,22 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			match event {
 				NamespaceEvent::Closed(res) => break res,
 				NamespaceEvent::Linger => continue,
+				NamespaceEvent::Retry => {
+					retry_at = None;
+					retry_delay = (retry_delay * 2).min(RETRY_MAX);
+
+					let deferred: Vec<crate::PathOwned> = ns
+						.watched
+						.iter()
+						.filter(|(_, watch)| watch.deferred)
+						.map(|(suffix, _)| suffix.clone())
+						.collect();
+
+					for suffix in deferred {
+						let path = prefix.join(&suffix);
+						self.sync_namespace(&mut ns, &suffix, &path).await?;
+					}
+				}
 				NamespaceEvent::Update(None) => {
 					// The origin is gone: withdraw everything, then finish the
 					// stream and wait for delivery.
@@ -1799,6 +1897,155 @@ mod tests {
 		.await;
 		assert_eq!(solicited, 1, "a peer that asked to be told on request is told once");
 		assert_eq!(streams, 1, "inline on the SUBSCRIBE_NAMESPACE stream it asked on");
+	}
+
+	/// A peer out of stream credit parks the open. That must not wedge the loop, because
+	/// the withdrawals queued behind it are the only thing that frees a slot: an open that
+	/// never gives up is a deadlock, not a delay.
+	///
+	/// Draft-14 so the withdrawal names its namespace on the wire, which is what makes the
+	/// loop's progress visible while every open is blocked.
+	#[tokio::test(start_paused = true)]
+	async fn a_parked_open_still_lets_a_namespace_be_withdrawn() {
+		const VERSION: Version = Version::Draft14;
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let first = origin
+			.create_broadcast("first-cam", crate::broadcast::Route::announced())
+			.unwrap();
+		settle().await;
+
+		// Open: the peer still has credit for the first advertisement, and answers it.
+		let gate = kio::Producer::new(true);
+		let ok = publish_namespace_ok(VERSION).await;
+		let session = crate::lite::test_transport::ScriptedSession::gated_open(vec![ok.clone(), ok], gate.consume());
+		let log = session.log.clone();
+
+		let publisher = Publisher::new(
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			declared(solicit::Solicit::default()),
+			VERSION,
+		);
+
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"first-cam") > 0 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(
+			occurrences(&log, b"first-cam"),
+			1,
+			"the first advertisement never went out"
+		);
+
+		// Credit runs out, and a second namespace wants a stream we cannot get.
+		set_gate(&gate, false);
+		let _second = origin
+			.create_broadcast("second-cam", crate::broadcast::Route::announced())
+			.unwrap();
+		settle().await;
+
+		// Retiring the first frees a slot and needs no new stream, so the loop has to reach
+		// it despite the open above.
+		drop(first);
+
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"first-cam") >= 2 {
+				break;
+			}
+			tick().await;
+		}
+		assert_eq!(
+			occurrences(&log, b"first-cam"),
+			2,
+			"PUBLISH_NAMESPACE_DONE never sent: the open wedged the loop"
+		);
+
+		// Credit returns, and nothing else about the origin changes.
+		set_gate(&gate, true);
+
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"second-cam") > 0 {
+				break;
+			}
+			tick().await;
+		}
+		assert_eq!(
+			occurrences(&log, b"second-cam"),
+			1,
+			"never retried once credit returned"
+		);
+	}
+
+	/// Credit returning raises no signal of its own: no announce, no route change, nothing
+	/// the loop is watching. Only a retry brings the namespace back, and without one it
+	/// stays undiscoverable for the life of the session.
+	#[tokio::test(start_paused = true)]
+	async fn a_namespace_refused_a_stream_is_retried_on_its_own() {
+		const VERSION: Version = Version::Draft14;
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let _cam = origin
+			.create_broadcast("lonely-cam", crate::broadcast::Route::announced())
+			.unwrap();
+		settle().await;
+
+		// Closed from the start: the peer has granted nothing.
+		let gate = kio::Producer::new(false);
+		let ok = publish_namespace_ok(VERSION).await;
+		let session = crate::lite::test_transport::ScriptedSession::gated_open(vec![ok], gate.consume());
+		let log = session.log.clone();
+
+		let publisher = Publisher::new(
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			declared(solicit::Solicit::default()),
+			VERSION,
+		);
+
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+
+		// Well past the point where the open gives up.
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			tick().await;
+		}
+		assert_eq!(occurrences(&log, b"lonely-cam"), 0, "advertised without a stream");
+
+		// Credit returns. Nothing else changes: no publish, no unannounce, no route move.
+		set_gate(&gate, true);
+
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"lonely-cam") > 0 {
+				break;
+			}
+			tick().await;
+		}
+		assert_eq!(occurrences(&log, b"lonely-cam"), 1, "never came back on its own");
+	}
+
+	/// Advance far enough that a parked open gives up and its retry comes due, without
+	/// making the test wait: time is paused, so this only moves the clock the loop reads.
+	async fn tick() {
+		tokio::time::advance(std::time::Duration::from_millis(200)).await;
+	}
+
+	fn set_gate(gate: &kio::Producer<bool>, open: bool) {
+		let Ok(mut gate) = gate.write() else {
+			panic!("gate closed")
+		};
+		*gate = open;
 	}
 
 	/// A publisher talking to a scripted peer that never answers, over one bidi stream.
