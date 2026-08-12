@@ -237,6 +237,12 @@ class TrackState {
 	/** Best-effort datagram channel, parallel to {@link groups}; an age-evicted send buffer per subscriber. */
 	datagrams = new Signal<BufferedDatagram[]>([]);
 	latest?: number;
+	/**
+	 * The exclusive final boundary, stamped when the producer closes cleanly: one past the
+	 * highest sequence produced. Groups and datagrams share the namespace, so this can
+	 * exceed `latest + 1` (which only tracks groups). Mirrors the Rust `final_sequence`.
+	 */
+	final?: number;
 	closed = new Once<Error | null>();
 	update: Signal<Subscription | undefined>;
 	/** Resolved once the producer commits the immutable properties. */
@@ -425,7 +431,10 @@ export class Producer {
 		this.#prune();
 		for (const entry of this.#cache) this.#mirror(entry, sink);
 
-		if (closed !== undefined) closeTrackState(sink, closed instanceof Error ? closed : undefined);
+		if (closed !== undefined) {
+			sink.final = this.#state.final;
+			closeTrackState(sink, closed instanceof Error ? closed : undefined);
+		}
 	}
 
 	// Recompute from every live sink because an update or close can narrow as well as widen
@@ -557,6 +566,11 @@ export class Producer {
 
 	/** Close the track and every subscriber, mirroring the abort to their groups. Idempotent. */
 	close(abort?: Error) {
+		// A clean close declares the final boundary; an abort ends without one.
+		if (abort === undefined && this.#state.closed.peek() === undefined) {
+			this.#state.final = this.#next ?? 0;
+			for (const sink of this.#sinks) sink.final = this.#state.final;
+		}
 		closeTrackState(this.#state, abort);
 		for (const { group } of this.#cache) group.close(abort);
 		for (const sink of this.#sinks) {
@@ -643,6 +657,16 @@ export class Subscriber {
 	/** Return the latest group sequence observed on this track, if any. */
 	latest(): number | undefined {
 		return this.#state.latest;
+	}
+
+	/**
+	 * The track's exclusive final boundary, known once the producer closes cleanly:
+	 * one past the highest sequence produced, or 0 for a track that produced none.
+	 * Groups and datagrams share the sequence namespace, so this can exceed
+	 * `latest() + 1`. Undefined while the track is live or after an abort.
+	 */
+	final(): number | undefined {
+		return this.#state.final;
 	}
 
 	/** Start this subscriber's local read cursor at `sequence`, without changing its wire request. */

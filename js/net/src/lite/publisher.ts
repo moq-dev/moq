@@ -489,14 +489,12 @@ export class Publisher {
 		let startSent = false;
 		let endSent = false;
 
-		// The track's exclusive final boundary: one past the highest sequence produced,
-		// 0 for a track that produced none. A Rust subscriber feeds SUBSCRIBE_END straight
-		// into finish_at, so it must name the track's boundary, not the delivered range
-		// (a subscription cap can hold produced groups back).
-		const boundary = () => {
-			const latest = track.latest();
-			return latest !== undefined ? latest + 1 : 0;
-		};
+		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_END
+		// straight into finish_at, so it must name the track's boundary (which counts
+		// datagram sequences too), not the delivered range: a subscription cap can hold
+		// produced groups back. The latest() fallback covers a subscription torn down
+		// before the producer declared it.
+		const boundary = () => track.final() ?? (track.latest() ?? -1) + 1;
 
 		// Settles once the producer closes cleanly, so SUBSCRIBE_END can go out while
 		// groups parked above the subscription's cap stay servable (a SUBSCRIBE_UPDATE
@@ -530,10 +528,12 @@ export class Publisher {
 			() => unsubscribe(),
 		);
 
+		// One read cursor across iterations: a boundary emission must not spawn a
+		// second concurrent nextGroup against the same subscriber. Declared outside the
+		// try so the finally can observe whatever was in flight when the loop exited
+		// (closing a late group, swallowing the rejection from our own teardown abort).
+		let next = track.nextGroup();
 		try {
-			// One read cursor across iterations: a boundary emission must not spawn a
-			// second concurrent nextGroup against the same subscriber.
-			let next = track.nextGroup();
 			for (;;) {
 				const result = await Promise.race(endSent ? [next, stream.closed] : [next, stream.closed, done]);
 				if (result === doneSentinel) {
@@ -547,10 +547,7 @@ export class Publisher {
 				}
 
 				const group = result;
-				if (!group) {
-					next.then((group) => group?.close()).catch(() => {});
-					break;
-				}
+				if (!group) break;
 				next = track.nextGroup();
 
 				const range = frameRange(bounds, group.sequence);
@@ -593,6 +590,7 @@ export class Publisher {
 			track.close(e);
 			stream.reset(e);
 		} finally {
+			next.then((group) => group?.close()).catch(() => {});
 			priority.close();
 		}
 	}
