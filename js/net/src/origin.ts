@@ -69,7 +69,7 @@ export interface Table {
 	/** Settles once the origin closes; see {@link Producer.closed}. */
 	readonly closed: GetPromise<Error | null>;
 
-	/** Whether an attached session supports discovery; see {@link Consumer.discovery}. */
+	/** Whether every attached session announces into the table; see {@link Consumer.discovery}. */
 	readonly discovery: Getter<boolean | undefined>;
 
 	/** Publish a broadcast at `path`, returning its producer; see {@link Producer.publish}. */
@@ -257,7 +257,7 @@ export class Producer implements Table {
 		return makeConsumer(this.#state);
 	}
 
-	/** Whether an attached session supports discovery; see {@link Consumer.discovery}. */
+	/** Whether every attached session announces into the table; see {@link Consumer.discovery}. */
 	get discovery(): Getter<boolean | undefined> {
 		return this.#reader.discovery;
 	}
@@ -370,8 +370,11 @@ export class Consumer {
 
 	private constructor(state: OriginState) {
 		this.#state = state;
+		// True only when every attached session announces. One session that cannot means the
+		// table is an incomplete picture, so a consumer gated on it has to keep its blind
+		// fallback: the paths only that session carries never reach the table at all.
 		this.#discovery = new Derived([state.sessions], ({ total, discovery }) =>
-			total === 0 ? undefined : discovery > 0,
+			total === 0 ? undefined : discovery === total,
 		);
 	}
 
@@ -385,12 +388,13 @@ export class Consumer {
 	}
 
 	/**
-	 * Whether an attached session supports broadcast discovery.
+	 * Whether the announcement table sees everything the attached sessions can serve.
 	 *
-	 * Undefined while no session is attached (nothing is known yet), true when at least one
-	 * attached session announces broadcasts into the table, false when every attached
-	 * session lacks discovery, where {@link announced} stays silent and consumers should
-	 * {@link request} paths instead of waiting.
+	 * Undefined while no session is attached (nothing is known yet), true when every attached
+	 * session announces into the table, and false as soon as one does not, where
+	 * {@link announced} cannot be complete and consumers should {@link request} paths instead
+	 * of waiting. One blind session among several is still false: the paths only it carries
+	 * never reach the table, so a consumer that trusted the gate would never see them.
 	 */
 	get discovery(): Getter<boolean | undefined> {
 		return this.#discovery;

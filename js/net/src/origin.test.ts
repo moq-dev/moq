@@ -496,12 +496,14 @@ test("discovery reflects the attached sessions", async () => {
 	const blind = origin.attach(false);
 	expect(consumer.discovery.peek()).toBe(false);
 
+	// Mixed: the table cannot be complete while one session announces nothing, so a consumer
+	// gated on this has to keep asking rather than trusting the announcements.
 	const seeing = origin.attach(true);
-	expect(consumer.discovery.peek()).toBe(true);
-
-	seeing();
 	expect(consumer.discovery.peek()).toBe(false);
+
 	blind();
+	expect(consumer.discovery.peek()).toBe(true);
+	seeing();
 	expect(consumer.discovery.peek()).toBeUndefined();
 
 	origin.close();
