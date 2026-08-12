@@ -107,6 +107,11 @@ moq-transcode = { version = "0.0.9", path = "rs/moq-transcode", default-features
 # Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
 # dlopen's libva at runtime (no libva-dev at build, no NEEDED libva in the binary).
 moq-vaapi = "0.0.3"
+# `default-features = false` is also what keeps `capture` (V4L2, libclang) out of
+# moq-ffi, and through it the cross-compiled Python, Swift, Kotlin, and Go
+# builds, which want the codecs and not the device stack. Adding
+# `features = ["capture"]` to a consumer that ships in those bindings pulls the
+# whole device graph into every one of them.
 moq-video = { version = "0.0.15", path = "rs/moq-video", default-features = false }
 percent-encoding = "2"
 qmux = { version = "0.4.0", default-features = false }

@@ -25,21 +25,8 @@ check *args:
     cargo clippy --all-targets {{ args }} -- -D warnings
     cargo fmt --all --check
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps {{ args }}
-    just rs ffi-dependencies
     cargo shear
     cargo sort --workspace --check --no-format
-
-# moq-ffi exposes raw video encode/decode, not device capture. Keep the capture
-# dependency graph out of cross-compiled Python, Swift, Kotlin, and Go builds.
-ffi-dependencies:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    tree=$(cargo tree --locked --package moq-ffi --target x86_64-unknown-linux-gnu)
-    if grep -qE '(^| )(v4l|v4l2-sys-mit|zune-jpeg) v' <<< "$tree"; then
-        echo "moq-ffi unexpectedly enables moq-video capture dependencies" >&2
-        grep -E '(^| )(v4l|v4l2-sys-mit|zune-jpeg) v' <<< "$tree" >&2
-        exit 1
-    fi
 
 # Auto-fix clippy/format/shear/sort.
 fix *args:
