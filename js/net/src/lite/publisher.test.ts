@@ -400,9 +400,21 @@ function gateWrites(target: WritableStream<Uint8Array>, hold: boolean) {
 // `gated` holds the publisher's subscribe-stream writes until `release()`, parking the
 // serving loop mid-iteration so a test can drive the concurrent SUBSCRIBE_UPDATE loop
 // against a group the loop is already holding.
-async function servedSubscription(options: { startGroup?: number; gated?: boolean } = {}) {
-	const pair = createMockTransportPair(ALPN_05);
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+async function servedSubscription(
+	options: {
+		startGroup?: number;
+		endGroup?: number;
+		endFrame?: number;
+		gated?: boolean;
+		// Frame payloads written into every served group. Frame bounds need draft-06.
+		frames?: string[];
+		version?: Version;
+	} = {},
+) {
+	const version = options.version ?? Version.DRAFT_05;
+	const frames = options.frames ?? ["hello"];
+	const pair = createMockTransportPair(version === Version.DRAFT_06 ? ALPN_06_WIP : ALPN_05);
+	const publisher = new Publisher(pair.server, version, randomOrigin());
 
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video");
@@ -426,6 +438,8 @@ async function servedSubscription(options: { startGroup?: number; gated?: boolea
 		track: "video",
 		priority: 0,
 		startGroup: options.startGroup,
+		endGroup: options.endGroup,
+		endFrame: options.endFrame,
 	});
 	void publisher.runSubscribe(msg, server);
 
@@ -438,14 +452,14 @@ async function servedSubscription(options: { startGroup?: number; gated?: boolea
 		release: gate.release,
 		serve(sequence: number) {
 			const group = new GroupProducer(sequence);
-			group.writeString("hello");
+			for (const frame of frames) group.writeString(frame);
 			group.close();
 			track.writeGroup(group);
 		},
-		// The sequence of the next group stream the publisher opened, or undefined once it
-		// has gone idle. A group the publisher dropped then fails an assertion instead of
-		// hanging the test on a stream that will never arrive.
-		async servedSequence(): Promise<number | undefined> {
+		// The next group stream the publisher opened, drained, or undefined once it has gone
+		// idle. A group the publisher dropped then fails an assertion instead of hanging the
+		// test on a stream that will never arrive.
+		async servedGroup(): Promise<Served | undefined> {
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			const idle = new Promise<undefined>((resolve) => {
 				timer = setTimeout(() => resolve(undefined), IDLE_MS);
@@ -456,7 +470,19 @@ async function servedSubscription(options: { startGroup?: number; gated?: boolea
 
 			const reader = new Reader(next.value);
 			await reader.u53(); // stream type
-			return (await GroupMessage.decode(reader, Version.DRAFT_05)).sequence;
+			const header = await GroupMessage.decode(reader, version);
+
+			const payloads: string[] = [];
+			while (!(await reader.done())) {
+				// Each frame is a zigzag timestamp delta, then a length-prefixed payload.
+				await reader.u62();
+				payloads.push(new TextDecoder().decode(await reader.read(await reader.u53())));
+			}
+			return { sequence: header.sequence, frameStart: header.frameStart, payloads };
+		},
+		// The sequence alone, for tests that only care which groups reached the wire.
+		async servedSequence(): Promise<number | undefined> {
+			return (await this.servedGroup())?.sequence;
 		},
 		async close() {
 			// Settles any pending read as well as dropping the stream.
@@ -538,6 +564,42 @@ test("lite draft-05: a group taken before the cap dropped is still served", asyn
 		// the buffer and the second read would go idle instead.
 		expect(await sub.servedSequence()).toBe(0);
 		expect(await sub.servedSequence()).toBe(1);
+	} finally {
+		await sub.close();
+	}
+});
+
+// Frame bounds have to travel with the group they were taken under. An update that moves the
+// cap off a group already in hand leaves it matching neither boundary, and mapping that to
+// the whole group would put frames the subscription excluded on the wire. Nothing downstream
+// trims them: a frame range is a wire request, not a receiver-side cursor.
+test("lite draft-06: a prefetched group keeps the frame bounds it was taken under", async () => {
+	const sub = await servedSubscription({
+		version: Version.DRAFT_06,
+		startGroup: 0,
+		endGroup: 1,
+		endFrame: 1,
+		frames: ["a", "b", "c"],
+		gated: true,
+	});
+	try {
+		// Same window as above: group 0 parks the loop, so the armed prefetch takes group 1.
+		sub.serve(0);
+		await sub.parked;
+		sub.serve(1);
+		await flush();
+
+		// Move the cap off group 1, which the loop is already holding.
+		await new SubscribeUpdate({ priority: 0, endGroup: 0 }).encode(sub.client.writer, Version.DRAFT_06);
+		while (sub.track.subscription.peek()?.endGroup !== 0) await sub.track.subscription.changed();
+
+		sub.release();
+
+		// Group 0 was never the end group, so it goes whole either way.
+		expect(await sub.servedGroup()).toEqual({ sequence: 0, frameStart: 0, payloads: ["a", "b", "c"] });
+		// Group 1 was taken while it was the end group, capped at frame 1, so "c" stays off
+		// the wire even though the cap has since moved below it.
+		expect(await sub.servedGroup()).toEqual({ sequence: 1, frameStart: 0, payloads: ["a", "b"] });
 	} finally {
 		await sub.close();
 	}

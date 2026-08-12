@@ -99,11 +99,11 @@ type FrameBounds = {
  * so a group in hand has already left the buffer and rejecting it against a cap lowered in
  * the meantime would drop it for good, even if a later SUBSCRIBE_UPDATE raises the cap again.
  *
- * A group taken before a SUBSCRIBE_UPDATE moved the bounds therefore matches neither of them
- * here and is served whole, frame offsets included: it can carry frames the old request
- * excluded. The receiver absorbs that. The GROUP header names `frameStart`, and a subscriber
- * positions every group against its own request on the read side, so the extra frames are
- * filtered locally and never surface. The cost is bandwidth, bounded by the race window.
+ * Call this against the bounds the group was taken under, which is why the serving loop
+ * snapshots it at the cursor handoff. Reading moved bounds here would map a group that now
+ * matches neither boundary to the whole group and send frames the request excluded. Nothing
+ * downstream trims those: a subscription's frame range is a wire request, deliberately
+ * decoupled from the receiver's local read cursor (see `moq_net::Subscription::end`).
  */
 function frameRange(bounds: FrameBounds, sequence: number): { start: number; end?: number } {
 	return {
@@ -548,7 +548,17 @@ export class Publisher {
 		// second concurrent recvGroup against the same subscriber. Declared outside the
 		// try so the finally can observe whatever was in flight when the loop exited
 		// (closing a late group, swallowing the rejection from our own teardown abort).
-		let next = track.recvGroup();
+		//
+		// The frame bounds are snapshotted in the same microtask the cursor hands the group
+		// over, not read later in the loop body: a SUBSCRIBE_UPDATE needs a transport read to
+		// arrive, so it can never land inside that microtask, while the loop can sit parked in
+		// a control-stream write long after the group left the buffer. Reading `bounds` there
+		// would serve the group under a range it was never taken under.
+		const take = () =>
+			track
+				.recvGroup()
+				.then((group) => (group ? { group, range: frameRange(bounds, group.sequence) } : undefined));
+		let next = take();
 		try {
 			for (;;) {
 				const result = await Promise.race(endSent ? [next, stream.closed] : [next, stream.closed, done]);
@@ -562,11 +572,9 @@ export class Publisher {
 					continue;
 				}
 
-				const group = result;
-				if (!group) break;
-				next = track.recvGroup();
-
-				const range = frameRange(bounds, group.sequence);
+				if (!result) break;
+				const { group, range } = result;
+				next = take();
 
 				if (emitRange && !startSent) {
 					startSent = true;
@@ -603,7 +611,7 @@ export class Publisher {
 			track.close(e);
 			stream.reset(e);
 		} finally {
-			next.then((group) => group?.close()).catch(() => {});
+			next.then((taken) => taken?.group.close()).catch(() => {});
 			priority.close();
 		}
 	}
