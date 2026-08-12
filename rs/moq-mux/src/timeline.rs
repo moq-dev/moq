@@ -47,7 +47,7 @@
 //! ## Retraction follows the cache
 //!
 //! Trimming is driven by the media cache itself, not a timer. A segment's record names the
-//! group ranges that carry it, and the timeline keeps a [`moq_net::group::Availability`] for
+//! group ranges that carry it, and the timeline keeps a [`moq_net::group::Demand`] for
 //! every one of those groups, on every track. The record is retracted once any of them reports
 //! the group gone (evicted under cache pressure, aged out of the publisher's latency window, or
 //! aborted), since a consumer fetches the whole segment and a hole anywhere in it breaks the
@@ -131,7 +131,7 @@ struct Report {
 	keyframe: bool,
 	/// Watches the group leave the cache, so the segment it lands in can be retracted. Pins no
 	/// frames, so this observes availability without extending it.
-	availability: moq_net::group::Availability,
+	demand: moq_net::group::Demand,
 }
 
 /// One enrolled track's report state.
@@ -168,7 +168,7 @@ struct State {
 	/// One entry per record still in the window, oldest first, holding a handle for every group
 	/// the segment covers across every track. Kept in lockstep with the window, so its length is
 	/// what a trim count is measured against.
-	indexed: VecDeque<Vec<moq_net::group::Availability>>,
+	indexed: VecDeque<Vec<moq_net::group::Demand>>,
 	/// Where the open (unflushed) segment starts; `None` until the first report.
 	start: Option<Timestamp>,
 	/// Explicit [`Producer::cut`] boundaries not yet reached, in order.
@@ -201,7 +201,7 @@ impl State {
 			sequence: group.sequence,
 			pts,
 			keyframe,
-			availability: group.availability(),
+			demand: group.demand(),
 		});
 		self.advance(name, pts);
 	}
@@ -393,7 +393,7 @@ impl State {
 
 		// Every group this segment covers, across every track: the set whose availability the
 		// record's own availability is the AND of.
-		let mut covered: Vec<moq_net::group::Availability> = Vec::new();
+		let mut covered: Vec<moq_net::group::Demand> = Vec::new();
 
 		for (name, track) in &mut self.tracks {
 			let mut ranges: Vec<Range> = Vec::new();
@@ -412,7 +412,7 @@ impl State {
 						ranges.push(range);
 					}
 				}
-				covered.push(report.availability);
+				covered.push(report.demand);
 			}
 			if !ranges.is_empty() {
 				record.tracks.insert(name.clone(), ranges);
@@ -432,7 +432,7 @@ impl State {
 	///
 	/// The timeline is an optional sidecar, so a transport failure logs and stops publishing
 	/// rather than tearing down the media path.
-	fn emit(&mut self, record: Record, covered: Vec<moq_net::group::Availability>) {
+	fn emit(&mut self, record: Record, covered: Vec<moq_net::group::Demand>) {
 		let Some(sink) = self.sink.as_mut() else {
 			return;
 		};
@@ -456,8 +456,7 @@ impl State {
 	/// whole point of the timeline; the cost is a shorter window, and eviction reaches those
 	/// records shortly anyway.
 	fn sweep(&mut self) {
-		let gone =
-			|covered: &Vec<moq_net::group::Availability>| covered.iter().any(moq_net::group::Availability::is_gone);
+		let gone = |covered: &Vec<moq_net::group::Demand>| covered.iter().any(moq_net::group::Demand::is_closed);
 		let Some(last) = self.indexed.iter().rposition(gone) else {
 			return;
 		};
@@ -724,7 +723,7 @@ impl Recorder {
 	/// Reports must be in group order with monotonic timestamps; this is the fact the timeline
 	/// builds ranges, boundaries and completeness from.
 	///
-	/// The timeline mints a [`moq_net::group::Availability`] from `group` to watch when it leaves
+	/// The timeline mints a [`moq_net::group::Demand`] from `group` to watch when it leaves
 	/// the cache, which is what retracts the segment carrying it. That pins no frames, and the
 	/// caller keeps ownership. Taking the producer rather than a sequence number is what makes the
 	/// two impossible to mismatch, and it is the only handle that can answer the question: the

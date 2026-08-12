@@ -600,14 +600,9 @@ impl Producer {
 		}
 	}
 
-	/// Mint a watch-only handle for whether this group's frames are still in the cache.
-	///
-	/// Minted here rather than from a [`Consumer`] because only the side that owns the cache can
-	/// answer the question: a reader's handle may be assembled across routes, none of which it
-	/// caches for. A relay mints one too, since it creates a [`Producer`] per group it caches.
-	/// The group-level analogue of [`track::Producer::demand`].
-	pub fn availability(&self) -> Availability {
-		Availability {
+	/// A watch-only handle to the group's reader demand and lifetime. See [`Demand`].
+	pub fn demand(&self) -> Demand {
+		Demand {
 			state: self.state.weak(),
 		}
 	}
@@ -934,47 +929,86 @@ impl Consumer {
 	}
 }
 
-/// Watches whether a group's frames are still in the cache, and so whether it can still be
-/// fetched.
+/// A cloneable, watch-only handle to a group's reader demand and lifetime.
 ///
-/// This is availability, not completion: a group that finished cleanly stays available while its
-/// frames are still retrievable, and goes once they aren't (evicted under memory pressure, aged
-/// out of the publisher's latency window, or aborted). An index track (a timeline, a playlist)
-/// watches this to learn which groups it can still point at.
+/// Obtained from [`Producer::demand`]; the group-level sibling of
+/// [`broadcast::Demand`](crate::broadcast::Demand) and [`track::Demand`](crate::track::Demand).
+/// [`used`](Self::used) / [`unused`](Self::unused) track whether anyone is reading the group, and
+/// [`is_closed`](Self::is_closed) tracks whether it still exists at all.
 ///
-/// Minted from a [`Producer`] via [`Producer::availability`], never from a [`Consumer`]: the
-/// question is about a specific cache, and only the side that owns one can answer it.
+/// It's a weak handle: it neither keeps the group alive, nor pins its cached frames, nor counts as
+/// a reader itself. It does keep the state allocated, which is what lets [`closed`](Self::closed)
+/// still report the cause after the channel closed.
 ///
-/// The watch-only counterpart to [`track::Demand`], and weak for the same reason: it holds no ref
-/// count, so it neither keeps the group open nor pins its cached frames, and it does not count as
-/// a consumer (a watcher is not a reader, and must not hold [`Producer::unused`] open). It does
-/// keep the state allocated, which is what lets [`gone`](Self::gone) still report the cause after
-/// the channel closed.
+/// ## Closed means gone, not finished
+///
+/// For a group, closure is the *availability* signal an index track (a timeline, a playlist) needs:
+/// a group that [`finished`](Consumer::finished) cleanly stays open while its frames are still
+/// retrievable, and closes once they aren't (evicted under memory pressure, aged out of the
+/// publisher's latency window, or aborted). Keying an index off a clean finish instead would retract
+/// everything the moment it was published.
+///
+/// Minted from a [`Producer`] rather than a [`Consumer`] because the question is about one specific
+/// cache, and only the side that owns a cache can answer it. A relay mints one too, since it creates
+/// a producer per group it caches.
 #[derive(Clone)]
-pub struct Availability {
+pub struct Demand {
 	state: kio::ProducerWeak<GroupState>,
 }
 
-impl Availability {
-	/// Whether the group is gone: its frames have left the cache and can no longer be fetched.
+impl Demand {
+	/// Whether the group has a reader right now.
+	///
+	/// A point-in-time snapshot with no registration; use [`used`](Self::used) /
+	/// [`unused`](Self::unused) (or their `poll_*` forms) to wait for the edge.
+	pub fn is_used(&self) -> bool {
+		self.state.is_used()
+	}
+
+	/// Block until the group has a reader. Resolves immediately if it already does.
+	pub async fn used(&self) -> Result<()> {
+		self.state.used().await.map_err(|_| self.abort_reason())
+	}
+
+	/// Block until the group has no readers. Resolves immediately if it has none.
+	pub async fn unused(&self) -> Result<()> {
+		self.state.unused().await.map_err(|_| self.abort_reason())
+	}
+
+	/// Poll-based variant of [`used`](Self::used).
+	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		self.state
+			.poll_used(waiter)
+			.map(|res| res.ok_or_else(|| self.abort_reason()))
+	}
+
+	/// Poll-based variant of [`unused`](Self::unused).
+	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		self.state
+			.poll_unused(waiter)
+			.map(|res| res.ok_or_else(|| self.abort_reason()))
+	}
+
+	/// Whether the group is gone: its frames have left the cache, so nothing can fetch it.
 	///
 	/// Monotone. Once this is true it stays true, so a retraction driven off it never has to be
-	/// taken back.
-	pub fn is_gone(&self) -> bool {
+	/// taken back. See [the note above](Self#closed-means-gone-not-finished) on why this is
+	/// availability rather than completion.
+	pub fn is_closed(&self) -> bool {
 		self.state.is_closed()
 	}
 
-	/// Poll until the group is gone; ready with the cause. See [`is_gone`](Self::is_gone).
-	pub fn poll_gone(&self, waiter: &kio::Waiter) -> Poll<Error> {
+	/// Poll until the group is closed; ready with the cause. See [`is_closed`](Self::is_closed).
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		self.state.poll_closed(waiter).map(|()| self.abort_reason())
 	}
 
-	/// Block until the group is gone, returning the cause. See [`is_gone`](Self::is_gone).
-	pub async fn gone(&self) -> Error {
-		kio::wait(|waiter| self.poll_gone(waiter)).await
+	/// Block until the group is closed, returning the cause. See [`is_closed`](Self::is_closed).
+	pub async fn closed(&self) -> Error {
+		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	/// The recorded abort reason, or [`Error::Dropped`] if the group went without one.
+	/// The recorded abort reason, or [`Error::Dropped`] if the group closed without one.
 	fn abort_reason(&self) -> Error {
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
@@ -1695,63 +1729,63 @@ mod test {
 		assert!(matches!(result, Err(Error::FrameTooLarge)));
 	}
 
-	/// `Availability` reports availability, not completion: a finished group stays available while
-	/// it is still cached, and an abort (how the cache evicts) ends it. An index track keying off
+	/// `Demand::is_closed` reports availability, not completion: a finished group stays open while
+	/// it is still cached, and an abort (how the cache evicts) closes it. An index track keying off
 	/// this must not see a clean finish as "gone".
 	#[test]
-	fn availability_tracks_the_cache_not_completion() {
+	fn demand_closes_on_eviction_not_completion() {
 		let mut producer = Info { sequence: 0 }.produce();
 		producer
 			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hi"))
 			.unwrap();
-		let watching = producer.availability();
-		assert!(!watching.is_gone());
+		let watching = producer.demand();
+		assert!(!watching.is_closed());
 
 		// Finishing completes the group but leaves it cached and fetchable.
 		producer.finish().unwrap();
-		assert!(!watching.is_gone(), "a finished group is still available");
+		assert!(!watching.is_closed(), "a finished group is still available");
 
 		// Eviction aborts it, even though it finished cleanly.
 		producer.abort(Error::Evicted).unwrap();
-		assert!(watching.is_gone());
+		assert!(watching.is_closed());
 		assert!(matches!(
-			watching.poll_gone(&kio::Waiter::noop()),
+			watching.poll_closed(&kio::Waiter::noop()),
 			Poll::Ready(Error::Evicted)
 		));
 	}
 
 	/// Dropping the last producer (the track releasing a cached group without an explicit
-	/// abort) also ends availability, reported as `Dropped`.
+	/// abort) also closes it, reported as `Dropped`.
 	#[test]
-	fn availability_ends_on_producer_drop() {
+	fn demand_closes_on_producer_drop() {
 		let mut producer = Info { sequence: 0 }.produce();
 		producer
 			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hi"))
 			.unwrap();
 		producer.finish().unwrap();
 
-		let watching = producer.availability();
+		let watching = producer.demand();
 		drop(producer);
-		assert!(watching.is_gone());
+		assert!(watching.is_closed());
 		assert!(matches!(
-			watching.poll_gone(&kio::Waiter::noop()),
+			watching.poll_closed(&kio::Waiter::noop()),
 			Poll::Ready(Error::Dropped)
 		));
 	}
 
-	/// Watching availability must not keep the group's frames alive, or an index track would pin
-	/// exactly the media it exists to stop advertising.
+	/// Watching must not keep the group's frames alive, or an index track would pin exactly the
+	/// media it exists to stop advertising.
 	#[test]
-	fn availability_pins_no_frames() {
+	fn demand_pins_no_frames() {
 		let mut producer = Info { sequence: 0 }.produce();
 		producer
 			.write_frame(Timestamp::ZERO, Bytes::from_static(b"data"))
 			.unwrap();
 
-		let watching = producer.availability();
+		let watching = producer.demand();
 		producer.clone().abort(Error::Evicted).unwrap();
 
-		assert!(watching.is_gone());
+		assert!(watching.is_closed());
 		let state = producer.state.read();
 		assert!(state.frames.is_empty(), "a watcher must not pin the cached frames");
 		assert_eq!(state.cache, 0);
@@ -1759,15 +1793,16 @@ mod test {
 
 	/// A watcher is not a reader: it must not register as a consumer, or an on-demand publisher
 	/// waiting on `unused` would stall forever behind an index track that only ever watches.
-	/// This is why `Availability` is weak, matching `track::Demand`.
+	/// This is why `Demand` is weak, like its broadcast and track siblings.
 	#[test]
-	fn availability_is_not_a_consumer() {
+	fn demand_is_not_a_reader() {
 		let mut producer = Info { sequence: 0 }.produce();
 		producer
 			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hi"))
 			.unwrap();
 
-		let watching = producer.availability();
+		let watching = producer.demand();
+		assert!(!watching.is_used(), "a watcher must leave the group unused");
 		assert!(
 			producer.unused().now_or_never().is_some(),
 			"a watcher must leave the group unused"
@@ -1775,11 +1810,13 @@ mod test {
 
 		// A real reader does hold it, and dropping that reader releases it again.
 		let reader = producer.consume();
+		assert!(watching.is_used());
 		assert!(producer.unused().now_or_never().is_none());
 		drop(reader);
+		assert!(!watching.is_used());
 		assert!(producer.unused().now_or_never().is_some());
 
 		// Still watching throughout, and still weak: it never kept the group open.
-		assert!(!watching.is_gone());
+		assert!(!watching.is_closed());
 	}
 }
