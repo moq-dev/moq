@@ -206,6 +206,10 @@ pub struct SendStream {
 	/// Whether `finish` or `reset` has been observed, so no further writes can
 	/// come and the closed() watch may safely take ownership of the stream.
 	terminal: bool,
+	/// A write driven to completion by `poll_closed` rather than `poll_write`. The
+	/// caller was told `Pending` and is contractually retrying the same bytes, so the
+	/// next `poll_write` reports this length instead of writing them a second time.
+	completed: Option<usize>,
 }
 
 enum SendState {
@@ -226,6 +230,7 @@ impl SendStream {
 			finish: false,
 			reset: None,
 			terminal: false,
+			completed: None,
 		}
 	}
 
@@ -250,6 +255,11 @@ impl wtt::poll::SendStream for SendStream {
 	type Error = Error;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		// A previous write completed inside poll_closed; report it instead of
+		// writing the same bytes a second time.
+		if let Some(len) = self.completed.take() {
+			return Poll::Ready(Ok(len));
+		}
 		loop {
 			match self.state.take().expect("in-flight") {
 				SendState::Idle(mut stream) => {
@@ -353,6 +363,10 @@ impl wtt::poll::SendStream for SendStream {
 						if let Err(err) = res {
 							return Poll::Ready(Err(err));
 						}
+						// The caller of poll_write was told Pending and will retry the
+						// same bytes; record the completion so the retry reports it
+						// instead of writing the bytes a second time.
+						self.completed = Some(len);
 					}
 				},
 				SendState::Closing(mut fut) => match fut.as_mut().poll(cx) {
@@ -376,11 +390,23 @@ pub struct RecvStream {
 	state: Option<RecvState>,
 	/// Bytes already read from the transport but not yet handed to the caller.
 	buffer: Bytes,
+	/// Read-ahead pulled in by the closed-watch while payload sat undelivered, so
+	/// a FIN right behind buffered data still resolves the watch. Drained by the
+	/// read methods before the transport is polled again; bounded by
+	/// [`READ_AHEAD_CAP`].
+	queued: std::collections::VecDeque<Bytes>,
+	/// Total bytes across `queued`, so the cap check is O(1).
+	queued_len: usize,
 	/// The peer finished the stream.
 	fin: bool,
 	/// A deferred STOP_SENDING, applied when the in-flight operation settles.
 	stop: Option<u32>,
 }
+
+/// How much the closed-watch may read ahead of the caller before it parks and
+/// waits for the caller to drain. Bounds memory against a peer that floods a
+/// stream nobody is reading.
+const READ_AHEAD_CAP: usize = 64 * 1024;
 
 enum RecvState {
 	Idle(web_transport_wasm::RecvStream),
@@ -392,13 +418,25 @@ impl RecvStream {
 		Self {
 			state: Some(RecvState::Idle(stream)),
 			buffer: Bytes::new(),
+			queued: std::collections::VecDeque::new(),
+			queued_len: 0,
 			fin: false,
 			stop: None,
 		}
 	}
 
-	/// Fill `self.buffer` (or set `self.fin`) with the next chunk of data.
-	fn poll_fill(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<(), Error>> {
+	/// Pop read-ahead into `self.buffer` if the head is empty.
+	fn unqueue(&mut self) {
+		if self.buffer.is_empty()
+			&& let Some(next) = self.queued.pop_front()
+		{
+			self.queued_len -= next.len();
+			self.buffer = next;
+		}
+	}
+
+	/// Read the next chunk from the transport, setting `self.fin` on the FIN.
+	fn poll_fill(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
 		loop {
 			match self.state.take().expect("in-flight") {
 				RecvState::Idle(mut stream) => {
@@ -417,14 +455,18 @@ impl RecvStream {
 						self.state = Some(RecvState::Reading(fut));
 						return Poll::Pending;
 					}
-					Poll::Ready((stream, res)) => {
-						self.state = Some(RecvState::Idle(stream));
-						match res {
-							Ok(Some(bytes)) => self.buffer = bytes,
-							Ok(None) => self.fin = true,
-							Err(err) => return Poll::Ready(Err(err)),
+					Poll::Ready((mut stream, res)) => {
+						// Apply a stop requested while the read was in flight now, not on
+						// the next read: a caller that stops and never reads again must
+						// still send STOP_SENDING.
+						if let Some(code) = self.stop.take() {
+							stream.stop(&code.to_string());
 						}
-						return Poll::Ready(Ok(()));
+						self.state = Some(RecvState::Idle(stream));
+						if let Ok(None) = &res {
+							self.fin = true;
+						}
+						return Poll::Ready(res);
 					}
 				},
 			}
@@ -441,6 +483,7 @@ impl wtt::poll::RecvStream for RecvStream {
 		}
 
 		loop {
+			self.unqueue();
 			if !self.buffer.is_empty() {
 				let n = dst.len().min(self.buffer.len());
 				dst[..n].copy_from_slice(&self.buffer.split_to(n));
@@ -449,7 +492,9 @@ impl wtt::poll::RecvStream for RecvStream {
 			if self.fin {
 				return Poll::Ready(Ok(None));
 			}
-			ready!(self.poll_fill(cx, dst.len()))?;
+			if let Some(bytes) = ready!(self.poll_fill(cx, dst.len()))? {
+				self.buffer = bytes;
+			}
 		}
 	}
 
@@ -459,6 +504,7 @@ impl wtt::poll::RecvStream for RecvStream {
 		}
 
 		loop {
+			self.unqueue();
 			if !self.buffer.is_empty() {
 				let n = max.min(self.buffer.len());
 				return Poll::Ready(Ok(Some(self.buffer.split_to(n))));
@@ -466,7 +512,9 @@ impl wtt::poll::RecvStream for RecvStream {
 			if self.fin {
 				return Poll::Ready(Ok(None));
 			}
-			ready!(self.poll_fill(cx, max))?;
+			if let Some(bytes) = ready!(self.poll_fill(cx, max))? {
+				self.buffer = bytes;
+			}
 		}
 	}
 
@@ -478,17 +526,25 @@ impl wtt::poll::RecvStream for RecvStream {
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		// Emulated with reads: a FIN or reset surfaces through poll_fill, and
-		// undelivered data parks the watch until the caller drains it.
+		// Emulated with reads: a FIN or reset surfaces through reads; payload
+		// arriving before it is queued as read-ahead (up to READ_AHEAD_CAP) so a
+		// FIN right behind undelivered data still resolves the watch without an
+		// external read.
 		loop {
 			if self.fin {
 				return Poll::Ready(Ok(()));
 			}
-			if !self.buffer.is_empty() {
+			if self.buffer.len() + self.queued_len >= READ_AHEAD_CAP {
+				// The caller's own reads are what drain the backlog, and their
+				// re-poll of this watch is what resumes it.
 				return Poll::Pending;
 			}
 			match ready!(self.poll_fill(cx, 8 * 1024)) {
-				Ok(()) => {}
+				Ok(Some(bytes)) => {
+					self.queued_len += bytes.len();
+					self.queued.push_back(bytes);
+				}
+				Ok(None) => {}
 				// A read error is also a closed stream.
 				Err(err) => return Poll::Ready(Err(err)),
 			}

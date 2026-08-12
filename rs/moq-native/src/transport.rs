@@ -40,11 +40,20 @@ type OpBox<T> = futures::future::BoxFuture<'static, T>;
 ///   and the specific code is lost.
 /// - Stream `poll_closed` watches are emulated rather than delegated: the
 ///   underlying async `closed()` future would own the stream for its whole
-///   lifetime, deadlocking any later read or write. A receive stream reports
-///   closed through its reads (FIN drained, or a read error). A send stream
-///   only starts the real watch once `finish` or `reset` makes it terminal;
-///   before that a closure surfaces as an error on the next write instead of
-///   waking an idle watch.
+///   lifetime, deadlocking any later read or write (the async trait's
+///   `closed(&mut self)` cannot be stored as a `'static` watch without taking
+///   the stream with it). A receive stream reports closed through its reads
+///   (FIN drained, or a read error), buffering bounded read-ahead so a FIN
+///   behind undelivered payload still resolves the watch. A send stream only
+///   starts the real watch once `finish` or `reset` makes it terminal; before
+///   that a closure surfaces as an error on the next write instead of waking an
+///   idle watch. The send-side gap this leaves: a peer that resets a stream
+///   sitting idle (no pending write, not finished) does not wake a parked
+///   `poll_closed`, so a driver waiting on "next frame or peer close" learns of
+///   the closure only when the next write fails. The drivers' other arms keep
+///   the session making progress; the stream itself lingers until then. A
+///   native poll implementation observes closure without owning the stream,
+///   which is the real fix and the reason this adapter is transitional.
 pub struct Async<S: web_transport_trait::Session> {
 	session: S,
 	accept_uni: OpSlot<Result<S::RecvStream, S::Error>>,
@@ -202,6 +211,11 @@ pub struct AsyncSend<S: web_transport_trait::SendStream + 'static> {
 	/// Whether `finish` or `reset` has been observed, so no further writes can
 	/// come and the closed() watch may safely take ownership of the stream.
 	terminal: bool,
+	/// A write driven to completion by [`poll_closed`](wt_poll::SendStream::poll_closed)
+	/// rather than [`poll_write`](wt_poll::SendStream::poll_write). The caller was told
+	/// `Pending` and is contractually retrying the same bytes, so the next `poll_write`
+	/// reports this length instead of writing the bytes a second time.
+	completed: Option<usize>,
 }
 
 enum SendState<S: web_transport_trait::SendStream + 'static> {
@@ -223,6 +237,7 @@ impl<S: web_transport_trait::SendStream + 'static> AsyncSend<S> {
 			finish: false,
 			reset: None,
 			terminal: false,
+			completed: None,
 		}
 	}
 
@@ -247,6 +262,11 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for Async
 	type Error = S::Error;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		// A previous write completed inside poll_closed; report it instead of
+		// writing the same bytes a second time.
+		if let Some(len) = self.completed.take() {
+			return Poll::Ready(Ok(len));
+		}
 		loop {
 			match self.state.get_mut().unwrap().take().expect("in-flight") {
 				SendState::Idle(mut stream) => {
@@ -350,6 +370,10 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for Async
 						if let Err(err) = res {
 							return Poll::Ready(Err(err));
 						}
+						// The caller of poll_write was told Pending and will retry the
+						// same bytes; record the completion so the retry reports it
+						// instead of writing the bytes a second time.
+						self.completed = Some(len);
 					}
 				},
 				SendState::Closing(mut fut) => match fut.as_mut().poll(cx) {
@@ -387,11 +411,23 @@ pub struct AsyncRecv<S: web_transport_trait::RecvStream + 'static> {
 	state: std::sync::Mutex<Option<RecvState<S>>>,
 	/// Bytes already read from the transport but not yet handed to the caller.
 	buffer: Bytes,
+	/// Read-ahead pulled in by the closed-watch while payload sat undelivered, so
+	/// a FIN right behind buffered data still resolves the watch. Drained by the
+	/// read methods before the transport is polled again; bounded by
+	/// [`READ_AHEAD_CAP`].
+	queued: std::collections::VecDeque<Bytes>,
+	/// Total bytes across `queued`, so the cap check is O(1).
+	queued_len: usize,
 	/// The peer finished the stream.
 	fin: bool,
 	/// A deferred STOP_SENDING, applied when the in-flight operation settles.
 	stop: Option<u32>,
 }
+
+/// How much the closed-watch may read ahead of the caller before it parks and
+/// waits for the caller to drain. Bounds memory against a peer that floods a
+/// stream nobody is reading.
+const READ_AHEAD_CAP: usize = 64 * 1024;
 
 enum RecvState<S: web_transport_trait::RecvStream + 'static> {
 	Idle(S),
@@ -404,13 +440,25 @@ impl<S: web_transport_trait::RecvStream + 'static> AsyncRecv<S> {
 		Self {
 			state: std::sync::Mutex::new(Some(RecvState::Idle(stream))),
 			buffer: Bytes::new(),
+			queued: std::collections::VecDeque::new(),
+			queued_len: 0,
 			fin: false,
 			stop: None,
 		}
 	}
 
-	/// Fill `self.buffer` (or set `self.fin`) with the next chunk of data.
-	fn poll_fill(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<(), S::Error>> {
+	/// Pop read-ahead into `self.buffer` if the head is empty.
+	fn unqueue(&mut self) {
+		if self.buffer.is_empty()
+			&& let Some(next) = self.queued.pop_front()
+		{
+			self.queued_len -= next.len();
+			self.buffer = next;
+		}
+	}
+
+	/// Read the next chunk from the transport, setting `self.fin` on the FIN.
+	fn poll_fill(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, S::Error>> {
 		loop {
 			match self.state.get_mut().unwrap().take().expect("in-flight") {
 				RecvState::Idle(mut stream) => {
@@ -429,14 +477,18 @@ impl<S: web_transport_trait::RecvStream + 'static> AsyncRecv<S> {
 						*self.state.get_mut().unwrap() = Some(RecvState::Reading(fut));
 						return Poll::Pending;
 					}
-					Poll::Ready((stream, res)) => {
-						*self.state.get_mut().unwrap() = Some(RecvState::Idle(stream));
-						match res {
-							Ok(Some(bytes)) => self.buffer = bytes,
-							Ok(None) => self.fin = true,
-							Err(err) => return Poll::Ready(Err(err)),
+					Poll::Ready((mut stream, res)) => {
+						// Apply a stop requested while the read was in flight now, not on
+						// the next read: a caller that stops and never reads again must
+						// still send STOP_SENDING.
+						if let Some(code) = self.stop.take() {
+							stream.stop(code);
 						}
-						return Poll::Ready(Ok(()));
+						*self.state.get_mut().unwrap() = Some(RecvState::Idle(stream));
+						if let Ok(None) = &res {
+							self.fin = true;
+						}
+						return Poll::Ready(res);
 					}
 				},
 			}
@@ -453,6 +505,7 @@ impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for Async
 		}
 
 		loop {
+			self.unqueue();
 			if !self.buffer.is_empty() {
 				let n = dst.len().min(self.buffer.len());
 				dst[..n].copy_from_slice(&self.buffer.split_to(n));
@@ -461,7 +514,9 @@ impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for Async
 			if self.fin {
 				return Poll::Ready(Ok(None));
 			}
-			ready!(self.poll_fill(cx, dst.len()))?;
+			if let Some(bytes) = ready!(self.poll_fill(cx, dst.len()))? {
+				self.buffer = bytes;
+			}
 		}
 	}
 
@@ -471,6 +526,7 @@ impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for Async
 		}
 
 		loop {
+			self.unqueue();
 			if !self.buffer.is_empty() {
 				let n = max.min(self.buffer.len());
 				return Poll::Ready(Ok(Some(self.buffer.split_to(n))));
@@ -478,7 +534,9 @@ impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for Async
 			if self.fin {
 				return Poll::Ready(Ok(None));
 			}
-			ready!(self.poll_fill(cx, max))?;
+			if let Some(bytes) = ready!(self.poll_fill(cx, max))? {
+				self.buffer = bytes;
+			}
 		}
 	}
 
@@ -493,19 +551,24 @@ impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for Async
 		// Emulated with reads rather than the underlying closed(): that future
 		// would own the stream, deadlocking any later read (the caller reclaims a
 		// dropped watch by simply reading again, which the bridge must preserve).
-		// A FIN or reset therefore surfaces through poll_fill, and undelivered
-		// data parks the watch until the caller drains it.
+		// A FIN or reset therefore surfaces through reads; payload arriving before
+		// it is queued as read-ahead (up to READ_AHEAD_CAP) so a FIN right behind
+		// undelivered data still resolves the watch without an external read.
 		loop {
 			if self.fin {
 				return Poll::Ready(Ok(()));
 			}
-			if !self.buffer.is_empty() {
-				// Not drained yet. The caller's own reads are what drain it, and
-				// their re-poll of this watch is what resumes it.
+			if self.buffer.len() + self.queued_len >= READ_AHEAD_CAP {
+				// The caller's own reads are what drain the backlog, and their
+				// re-poll of this watch is what resumes it.
 				return Poll::Pending;
 			}
 			match ready!(self.poll_fill(cx, 8 * 1024)) {
-				Ok(()) => {}
+				Ok(Some(bytes)) => {
+					self.queued_len += bytes.len();
+					self.queued.push_back(bytes);
+				}
+				Ok(None) => {}
 				// A read error is also a closed stream.
 				Err(err) => return Poll::Ready(Err(err)),
 			}
@@ -601,12 +664,22 @@ mod tests {
 	struct FakeRecv {
 		chunks: std::collections::VecDeque<Bytes>,
 		stops: Arc<Mutex<Vec<u32>>>,
+		/// Reads park while set, so a test can hold one in flight in the adapter.
+		blocked: Arc<AtomicBool>,
 	}
 
 	impl web_transport_trait::RecvStream for FakeRecv {
 		type Error = FakeError;
 
 		async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+			std::future::poll_fn(|cx| {
+				if self.blocked.load(Ordering::SeqCst) {
+					cx.waker().wake_by_ref();
+					return Poll::Pending;
+				}
+				Poll::Ready(())
+			})
+			.await;
 			let Some(chunk) = self.chunks.front_mut() else {
 				return Ok(None);
 			};
@@ -678,6 +751,34 @@ mod tests {
 		assert_eq!(fake.priorities.lock().unwrap().as_slice(), &[7]);
 	}
 
+	// The cluster-failover corruption: a write held Pending by backpressure is
+	// driven to completion by the peer-close check (poll_closed). Its result must
+	// reach the retrying poll_write; discarding it made the retry put the same
+	// bytes on the wire twice, which a peer decodes as a phantom frame.
+	#[test]
+	fn a_write_completed_by_poll_closed_is_not_duplicated() {
+		let fake = FakeSend::default();
+		fake.blocked.store(true, Ordering::SeqCst);
+		let mut send = AsyncSend::new(fake.clone());
+		let mut cx = cx();
+
+		// Backpressure: the write parks inside the adapter.
+		assert!(send.poll_write(&mut cx, b"header").is_pending());
+
+		// The pressure lifts; the driver's next pass checks for a peer close
+		// first, which drives the stored write to completion.
+		fake.blocked.store(false, Ordering::SeqCst);
+		assert!(send.poll_closed(&mut cx).is_pending(), "not terminal yet");
+
+		// The retry reports the completed write instead of writing again.
+		assert_eq!(send.poll_write(&mut cx, b"header"), Poll::Ready(Ok(6)));
+		assert_eq!(
+			fake.writes.lock().unwrap().as_slice(),
+			b"header",
+			"the bytes must reach the stream exactly once"
+		);
+	}
+
 	// A larger chunk than the destination is buffered and served across reads.
 	#[test]
 	fn recv_buffers_the_excess() {
@@ -685,6 +786,7 @@ mod tests {
 		let fake = FakeRecv {
 			chunks: [Bytes::from_static(b"abcdef")].into_iter().collect(),
 			stops: stops.clone(),
+			blocked: Default::default(),
 		};
 		let mut recv = AsyncRecv::new(fake);
 		let mut cx = cx();
@@ -710,10 +812,59 @@ mod tests {
 		let fake = FakeRecv {
 			chunks: Default::default(),
 			stops: stops.clone(),
+			blocked: Default::default(),
 		};
 		let mut recv = AsyncRecv::new(fake);
 
 		recv.stop(42);
 		assert_eq!(stops.lock().unwrap().as_slice(), &[42]);
+	}
+
+	// A stop issued while a read is in flight goes out when that read settles,
+	// not on a later read that may never come.
+	#[test]
+	fn recv_stop_applies_when_the_read_settles() {
+		let stops = Arc::new(Mutex::new(Vec::new()));
+		let blocked = Arc::new(AtomicBool::new(true));
+		let fake = FakeRecv {
+			chunks: [Bytes::from_static(b"data")].into_iter().collect(),
+			stops: stops.clone(),
+			blocked: blocked.clone(),
+		};
+		let mut recv = AsyncRecv::new(fake);
+		let mut cx = cx();
+
+		let mut dst = [0u8; 4];
+		assert!(recv.poll_read(&mut cx, &mut dst).is_pending());
+		recv.stop(7);
+		assert!(stops.lock().unwrap().is_empty(), "deferred while in flight");
+
+		// The read settles (here via a retry); the stop goes out with it.
+		blocked.store(false, Ordering::SeqCst);
+		assert_eq!(recv.poll_read(&mut cx, &mut dst), Poll::Ready(Ok(Some(4))));
+		assert_eq!(stops.lock().unwrap().as_slice(), &[7]);
+	}
+
+	// A FIN sitting behind undelivered payload resolves the closed watch without
+	// an external read; the payload is still delivered afterward, in order.
+	#[test]
+	fn recv_closed_resolves_behind_buffered_data() {
+		let stops = Arc::new(Mutex::new(Vec::new()));
+		let fake = FakeRecv {
+			chunks: [Bytes::from_static(b"tail")].into_iter().collect(),
+			stops: stops.clone(),
+			blocked: Default::default(),
+		};
+		let mut recv = AsyncRecv::new(fake);
+		let mut cx = cx();
+
+		// The watch reads through the payload to the FIN.
+		assert_eq!(recv.poll_closed(&mut cx), Poll::Ready(Ok(())));
+
+		// Nothing was lost: the read-ahead serves the payload, then EOF.
+		let mut dst = [0u8; 4];
+		assert_eq!(recv.poll_read(&mut cx, &mut dst), Poll::Ready(Ok(Some(4))));
+		assert_eq!(&dst, b"tail");
+		assert_eq!(recv.poll_read(&mut cx, &mut dst), Poll::Ready(Ok(None)));
 	}
 }
