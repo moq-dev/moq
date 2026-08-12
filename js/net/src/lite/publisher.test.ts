@@ -3,8 +3,9 @@ import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { Producer as GroupProducer } from "../group.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
-import { Stream } from "../stream.ts";
+import { Reader, Stream } from "../stream.ts";
 import { Fetch } from "./fetch.ts";
+import { Group as GroupMessage } from "./group.ts";
 import { randomOrigin } from "./origin.ts";
 import { sendOrder } from "./priority.ts";
 import { Publisher } from "./publisher.ts";
@@ -351,6 +352,99 @@ test("lite draft-05: the fetch response ranks the publisher's own writes", async
 	} finally {
 		publisher.close();
 		client.close();
+	}
+});
+
+// Opens a served subscription and returns the machinery to write groups and observe
+// which of them the publisher put on the wire (each group gets its own uni stream).
+async function servedSubscription(options: { startGroup?: number } = {}) {
+	const pair = createMockTransportPair(ALPN_05);
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video");
+	publisher.publish(Path.from("test"), broadcast);
+
+	const client = await Stream.open(pair.client);
+	const server = await Stream.accept(pair.server);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	const msg = new Subscribe({
+		id: 0n,
+		broadcast: Path.from("test"),
+		track: "video",
+		priority: 0,
+		startGroup: options.startGroup,
+	});
+	void publisher.runSubscribe(msg, server);
+
+	const opened = pair.client.incomingUnidirectionalStreams.getReader();
+
+	return {
+		client,
+		serve(sequence: number) {
+			const group = new GroupProducer(sequence);
+			group.writeString("hello");
+			group.close();
+			track.writeGroup(group);
+		},
+		// The sequence of the next group stream the publisher opened.
+		async servedSequence() {
+			const next = await opened.read();
+			if (next.done) throw new Error("publisher never opened the group stream");
+			const reader = new Reader(next.value);
+			await reader.u53(); // stream type
+			return (await GroupMessage.decode(reader)).sequence;
+		},
+		close() {
+			opened.releaseLock();
+			publisher.close();
+			client.close();
+		},
+	};
+}
+
+// A relay can ingest back-to-back groups micro-reordered (the upstream leg sends
+// newest-first). The older group is cached and in demand, so serving must still
+// deliver it; a sequence cursor would skip it permanently.
+test("lite draft-05: a late-arriving older group is still served", async () => {
+	const sub = await servedSubscription({ startGroup: 1 });
+	try {
+		// Serve one at a time so arrival order at the publisher is the order given.
+		sub.serve(1);
+		expect(await sub.servedSequence()).toBe(1);
+		sub.serve(3);
+		expect(await sub.servedSequence()).toBe(3);
+
+		// Group 2 lands after group 3 was already served.
+		sub.serve(2);
+		expect(await sub.servedSequence()).toBe(2);
+	} finally {
+		sub.close();
+	}
+});
+
+// SUBSCRIBE_START promises nothing below the announced sequence will be delivered, so
+// the floor is pinned there: a straggler below the first served group is dropped even
+// though arrival-order serving would otherwise surface it.
+test("lite draft-05: a straggler below the announced start group is not served", async () => {
+	const sub = await servedSubscription();
+	try {
+		sub.serve(2);
+		expect(await sub.servedSequence()).toBe(2);
+
+		// The publisher announced group 2 as the resolved start.
+		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_05);
+		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
+		expect(resp.start.group).toBe(2);
+
+		// A straggler below the announced start never reaches the wire: the next
+		// stream the publisher opens is group 3's.
+		sub.serve(1);
+		sub.serve(3);
+		expect(await sub.servedSequence()).toBe(3);
+	} finally {
+		sub.close();
 	}
 });
 

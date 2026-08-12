@@ -218,6 +218,94 @@ test("local cursor bounds can skip, pause, and release buffered groups", async (
 	expect((await pending)?.sequence).toBe(4);
 });
 
+// A relay can ingest back-to-back groups micro-reordered (the upstream leg sends
+// newest-first). The older group is cached and in demand, so serving must still
+// deliver it; a sequence cursor would skip it permanently.
+test("recvGroup serves a late arrival after a newer group", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+
+	producer.writeGroup(new GroupProducer(2));
+	expect((await track.recvGroup())?.sequence).toBe(2);
+
+	// Group 1 lands after group 2 was already served.
+	producer.writeGroup(new GroupProducer(1));
+	expect((await track.recvGroup())?.sequence).toBe(1);
+
+	// Staleness is the latency window's job, not arrival order's: the track
+	// still finishes normally afterward.
+	producer.close();
+	expect(await track.recvGroup()).toBeUndefined();
+});
+
+// recvGroup honors the endAt cap by parking, like nextGroup: beyond-cap groups are
+// held, not dropped, and a raised cap re-offers them, even after a clean close.
+test("endAt parks recvGroup beyond the cap and a raised cap re-offers", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+
+	for (let sequence = 0; sequence < 3; sequence++) producer.writeGroup(new GroupProducer(sequence));
+
+	track.endAt(1);
+	expect((await track.recvGroup())?.sequence).toBe(0);
+	expect((await track.recvGroup())?.sequence).toBe(1);
+
+	const pending = track.recvGroup();
+	expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
+
+	// A clean close keeps the parked group claimable: the cap may still rise.
+	producer.close();
+	expect(await Promise.race([pending, new Promise((resolve) => setTimeout(() => resolve("parked"), 10))])).toBe(
+		"parked",
+	);
+
+	track.endAt();
+	expect((await pending)?.sequence).toBe(2);
+	expect(await track.recvGroup()).toBeUndefined();
+});
+
+// A group beyond the cap must not block in-range groups that arrive behind it:
+// a relay can ingest a burst micro-reordered (newest first).
+test("recvGroup serves in-range groups that arrive behind a capped one", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+
+	track.endAt(1);
+
+	// Reordered burst: the beyond-cap group arrives first.
+	producer.writeGroup(new GroupProducer(2));
+	producer.writeGroup(new GroupProducer(0));
+	producer.writeGroup(new GroupProducer(1));
+
+	expect((await track.recvGroup())?.sequence).toBe(0);
+	expect((await track.recvGroup())?.sequence).toBe(1);
+
+	const pending = track.recvGroup();
+	expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
+
+	track.endAt(2);
+	expect((await pending)?.sequence).toBe(2);
+});
+
+// A raised startAt drops parked groups it overtook instead of re-offering them
+// once the cap rises.
+test("startAt drops groups recvGroup parked at the cap", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+
+	track.endAt(0);
+	producer.writeGroup(new GroupProducer(1));
+	const pending = track.recvGroup();
+	expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
+
+	track.startAt(2);
+	track.endAt();
+	producer.writeGroup(new GroupProducer(2));
+
+	// The overtaken parked group is dropped, not re-offered.
+	expect((await pending)?.sequence).toBe(2);
+});
+
 test("recvGroup after nextGroup still returns late arrivals", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();

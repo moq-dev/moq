@@ -437,7 +437,11 @@ export class Publisher {
 
 		try {
 			for (;;) {
-				const next = track.nextGroup();
+				// Arrival order, not the sequence cursor: on a relay, a burst can be ingested
+				// micro-reordered by the upstream leg, and a sequence cursor would permanently
+				// skip the older group even though it is cached and in demand. Staleness is the
+				// latency window's job (cache expiry), not arrival order's.
+				const next = track.recvGroup();
 				const group = await Promise.race([next, stream.closed]);
 				if (!group) {
 					next.then((group) => group?.close()).catch(() => {});
@@ -446,6 +450,10 @@ export class Publisher {
 
 				if (emitRange && !startSent) {
 					startSent = true;
+					// SUBSCRIBE_START promises nothing below this sequence will be delivered.
+					// Arrival-order serving could later surface a straggler below the first
+					// group, so pin the floor to what was announced.
+					track.startAt(group.sequence);
 					await encodeSubscribeResponse(stream, { start: new SubscribeStart(group.sequence) }, this.version);
 				}
 				end = Math.max(end, group.sequence + 1);

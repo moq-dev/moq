@@ -651,9 +651,9 @@ export class Subscriber {
 	}
 
 	/**
-	 * Cap {@link nextGroup} at `sequence` inclusively, or omit it to remove the cap.
-	 * Groups above the cap remain buffered and become readable if the cap is raised.
-	 * This local cursor does not change the subscription's wire request.
+	 * Cap {@link nextGroup} and {@link recvGroup} at `sequence` inclusively, or omit it to
+	 * remove the cap. Groups above the cap remain buffered and become readable if the cap
+	 * is raised. This local cursor does not change the subscription's wire request.
 	 */
 	endAt(sequence?: number): void {
 		this.#cursor.update((cursor) => ({ ...cursor, end: sequence }));
@@ -668,23 +668,34 @@ export class Subscriber {
 	}
 
 	/**
-	 * Receive the next group available on this track, in arrival order.
+	 * Receive the next group available on this track, in arrival order, exactly once.
 	 *
 	 * Groups may arrive out of order or with gaps due to network conditions.
 	 * Use {@link nextGroup} for sequence order, skipping those that arrive too late.
+	 *
+	 * Honors the floor set by {@link startAt} and the cap set by {@link endAt}: a group
+	 * beyond the cap stays buffered (not dropped) and is offered once the cap rises, even
+	 * after a clean close, without blocking in-range groups that arrive behind it.
 	 */
 	async recvGroup(): Promise<GroupConsumer | undefined> {
 		for (;;) {
 			const groups = this.#state.groups.peek();
-			const { start } = this.#cursor.peek();
+			const { start, end } = this.#cursor.peek();
 			while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
-			if (groups.length > 0) {
-				return groups.shift();
+
+			// The buffer is sequence-sorted, so an in-range group that arrives behind a
+			// beyond-cap one sorts in front of it and is never blocked by it.
+			const group = groups[0];
+			if (group && (end === undefined || group.sequence <= end)) {
+				groups.shift();
+				return group;
 			}
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
-			if (closed !== undefined) return undefined;
+			// A group beyond the cap outlives a clean close: it becomes deliverable if
+			// the cap rises, so the track isn't over while any are held.
+			if (closed !== undefined && !group) return undefined;
 
 			await Signal.race(this.#state.groups, this.#cursor, this.#state.closed);
 		}
