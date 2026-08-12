@@ -331,7 +331,9 @@ export class Request {
 	 * surfaces as a reset on the first track subscription, not here. Drops back to
 	 * undefined when the providing route dies and resolves again when another appears.
 	 *
-	 * Borrowed, not yours to close: take a `clone()` for a lifetime of your own.
+	 * Yours for as long as the request is open: it is a handle of this request's own, so
+	 * closing it ends your view of the path rather than the route everyone else reads.
+	 * {@link close} releases whatever is current.
 	 */
 	readonly active: Getter<broadcast.Consumer | undefined>;
 
@@ -444,8 +446,40 @@ export class Consumer {
 		}
 		slot.count += 1;
 
+		// Hand out a handle of the request's own rather than the table's. Closing a consumer
+		// closes the broadcast once it was the last one, and the table often holds the only
+		// other handle, so lending its front out means an ordinary close() by one requester
+		// can unpublish the path for everybody else.
 		const taken = slot;
-		return makeRequest(path, this.#resolved(path, taken), () => {
+
+		// Memoized on the route's identity: the same front resolving again returns the handle
+		// we already made, and only a real swap clones a new one (cloning before closing the
+		// old, so a broadcast that both routes share never briefly loses its last handle).
+		// This has to happen on the read rather than in a subscription callback, because a
+		// callback fires a microtask late and a routed path resolves synchronously.
+		let released = false;
+		let source: broadcast.Consumer | undefined;
+		let handle: broadcast.Consumer | undefined;
+		const own = (front: broadcast.Consumer | undefined): broadcast.Consumer | undefined => {
+			if (released) return undefined;
+			if (front !== source) {
+				const previous = handle;
+				source = front;
+				handle = front?.clone();
+				previous?.close();
+			}
+			return handle;
+		};
+
+		const active = new Derived([this.#resolved(path, taken)], own);
+
+		return makeRequest(path, active, () => {
+			// Releases this request's handle; the route itself belongs to the table.
+			released = true;
+			handle?.close();
+			handle = undefined;
+			source = undefined;
+
 			taken.count -= 1;
 			if (taken.count > 0) return;
 

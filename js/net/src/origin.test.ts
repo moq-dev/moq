@@ -293,9 +293,11 @@ test("a request resolves once a front answers, and survives its withdrawal", asy
 	slot?.front.set(upstream.consume());
 	expect(request.active.peek()).toBeDefined();
 
-	// A second request for the same path shares the answer.
+	// A second request for the same path shares the answer, each through a handle of its
+	// own, so one of them closing cannot take the other's subscription down.
 	const again = consumer.request(path);
-	expect(again.active.peek()).toBe(request.active.peek());
+	expect(again.active.peek()).toBeDefined();
+	expect(again.active.peek()).not.toBe(request.active.peek());
 	again.close();
 	expect(request.active.peek()).toBeDefined();
 
@@ -329,7 +331,9 @@ test("a request closed and retaken in the same tick keeps its answer", async () 
 	await settle();
 	await settle();
 
-	expect(second.active.peek()).toBe(front);
+	// A handle of the new request's own, but the same answer underneath: the slot kept it,
+	// so the subscription was never re-dialed.
+	expect(second.active.peek()).toBeDefined();
 	expect(upstream.closed.peek()).toBeUndefined();
 
 	second.close();
@@ -521,5 +525,59 @@ test("the exposed getters are wirable as component inputs", () => {
 	expect(() => getter(request.active)).not.toThrow();
 
 	request.close();
+	origin.close();
+});
+
+test("closing what a request resolved leaves the path published for everyone else", async () => {
+	const origin = new Producer();
+	const path = Path.from("mine");
+
+	const producer = origin.publish(path);
+	const first = origin.request(path);
+	const second = origin.request(path);
+
+	const mine = first.active.peek();
+	expect(mine).toBeDefined();
+	// A handle of the request's own, not the table's front.
+	expect(mine).not.toBe(second.active.peek());
+
+	// The ordinary thing a caller does with a consumer they were handed. It must not reach
+	// through to the table's handle and take the broadcast down with it.
+	mine?.close();
+	await settle();
+
+	expect(producer.closed.peek()).toBeUndefined();
+	expect(second.active.peek()?.closed.peek()).toBeUndefined();
+
+	// A later request still resolves it too.
+	const third = origin.request(path);
+	expect(third.active.peek()).toBeDefined();
+	expect(third.active.peek()?.closed.peek()).toBeUndefined();
+
+	first.close();
+	second.close();
+	third.close();
+	producer.close();
+	origin.close();
+});
+
+test("closing a request releases the handle it was holding", async () => {
+	const origin = new Producer();
+	const path = Path.from("mine");
+
+	const producer = origin.publish(path);
+	const request = origin.request(path);
+	expect(request.active.peek()).toBeDefined();
+
+	request.close();
+	await settle();
+
+	// The handle is released and the view is gone, while the published broadcast, whose
+	// handle belongs to the table, carries on.
+	expect(request.active.peek()).toBeUndefined();
+	expect(producer.closed.peek()).toBeUndefined();
+	expect(origin.consume().routes(path)).toBe(true);
+
+	producer.close();
 	origin.close();
 });
