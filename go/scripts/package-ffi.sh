@@ -14,6 +14,8 @@ set -euo pipefail
 #
 # Optional:
 #   --source-dir DIR   in-tree ffi module skeleton (default: go/ffi)
+#   --skip-size-check  don't enforce GitHub's 100 MiB per-file push limit, for
+#                      callers staging libs that are never pushed to the mirror
 #
 # Expected $LIB_DIR layout (per cargo target):
 #   $LIB_DIR/x86_64-unknown-linux-gnu/libmoq_ffi.a
@@ -31,6 +33,7 @@ BINDINGS_DIR=""
 OUTPUT_DIR=""
 SOURCE_DIR=""
 ARCHIVE=true
+SIZE_CHECK=true
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -56,6 +59,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-archive)
             ARCHIVE=false
+            shift
+            ;;
+        --skip-size-check)
+            SIZE_CHECK=false
             shift
             ;;
         -h | --help)
@@ -171,7 +178,7 @@ if [[ "$STAGED_ANY" != true ]]; then
     exit 1
 fi
 
-if [[ "${#OVERSIZED[@]}" -gt 0 ]]; then
+if [[ "$SIZE_CHECK" == true && "${#OVERSIZED[@]}" -gt 0 ]]; then
     echo "Error: staged libs exceed GitHub's 100 MiB push limit:" >&2
     printf '  %s\n' "${OVERSIZED[@]}" >&2
     echo "The mirror push would be rejected (GH001). Shrink the staticlib in rs/moq-ffi/build.sh (LTO)." >&2

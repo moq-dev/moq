@@ -274,6 +274,11 @@
 
           cargoHash = "sha256-ctDBz0oE8+mkn7SJn2KGSb6P4LF8S5UC3XcjVHWApg4=";
 
+          # The tag is a virtual workspace whose other members are uniffi test
+          # fixtures. Building from the root would compile all of them, and CI
+          # has no Nix binary cache, so it would pay for that on every run.
+          buildAndTestSubdir = "bindgen";
+
           # The upstream test suite generates fixtures and compiles them with a
           # Go toolchain, which is a lot of build for a binary we only invoke.
           doCheck = false;

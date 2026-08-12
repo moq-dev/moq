@@ -107,12 +107,19 @@ _tools $FILES="":
     scoped '^(rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools+=(cargo)
     scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'     && tools+=(uv)
     scoped '^(kt/|rs/moq-ffi/)'                                && tools+=(gradle java)
-    scoped '^(go/|rs/moq-ffi/)'                                && tools+=(go uniffi-bindgen-go)
+    # cargo because `go check` builds moq-ffi for the host, and skips on a
+    # missing cargo the same way it skips on a missing go.
+    scoped '^(go/|rs/moq-ffi/)'                                && tools+=(go uniffi-bindgen-go cargo)
     # The OBS lints ship only in the Linux dev shell; nixpkgs marks obs-studio
     # broken on Darwin.
     if [[ "$(uname -s)" == "Linux" ]] && scoped '^cpp/obs/'; then
     	tools+=(clang-format gersemi)
     fi
+
+    # Scopes overlap (rs/moq-ffi/ is in four of them), so the same tool can land
+    # in the list twice and be reported missing twice. Splitting on whitespace is
+    # safe: every entry is a bare command name.
+    tools=($(printf '%s\n' "${tools[@]}" | sort -u))
 
     missing=()
     for tool in "${tools[@]}"; do

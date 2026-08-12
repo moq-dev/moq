@@ -95,13 +95,18 @@ if [[ -d "$STAGE_BINDINGS/uniffi/moq" && ! -d "$STAGE_BINDINGS/moq" ]]; then
 fi
 
 echo "go check: assembling ffi module..."
+# --skip-size-check because the lib above is a plain `cargo build --release`,
+# which is ~3x the size of the one the mirror actually publishes:
+# rs/moq-ffi/build.sh scopes thin LTO to the release path to keep this check
+# fast. Enforcing the publish limit here would fail on a lib nobody publishes.
 bash "$GO_DIR/scripts/package-ffi.sh" \
     --version "0.0.0-dev" \
     --source-dir "$GO_DIR/ffi" \
     --lib-dir "$STAGE_PARENT/go-libs" \
     --bindings-dir "$STAGE_BINDINGS" \
     --output "$STAGE_FFI" \
-    --no-archive
+    --no-archive \
+    --skip-size-check
 FFI_PKG="$STAGE_FFI/moq-ffi-0.0.0-dev-go"
 
 echo "go check: staging wrapper module..."
