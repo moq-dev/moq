@@ -179,6 +179,29 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 	}
 
+	/// Resolve a namespace off the wire to a path under our origin handle.
+	///
+	/// Namespaces are relative to the session root, matching moq-lite: a peer rooted at
+	/// `foobar` asks for `xd`, one at the origin asks for `foobar/xd`, and that is the
+	/// form we announce back, so it is what a peer normally echoes.
+	///
+	/// A moq-transport namespace is self-contained though (draft-19 section 2.4.1), so a
+	/// client that learned the broadcast out of band spells out the whole path even when
+	/// the URL path already covers it. Read a namespace that repeats the root as that
+	/// spelling rather than joining the root onto it twice, which named nothing and
+	/// refused a broadcast we were serving.
+	///
+	/// The two spellings collide only for a broadcast whose own path repeats the root
+	/// (`foobar/foobar/xd` seen from `foobar`). The self-contained reading wins there, so
+	/// a rooted peer cannot name that one.
+	fn resolve(&self, namespace: &crate::Path<'_>) -> crate::PathOwned {
+		// An empty root strips nothing, so an unrooted session is untouched.
+		match namespace.strip_prefix(self.origin.root()) {
+			Some(relative) => relative.to_owned(),
+			None => namespace.to_owned(),
+		}
+	}
+
 	/// The Hop ID whose paths must not be advertised (or served) back to this peer.
 	///
 	/// A peer that negotiated the extension declares its own; otherwise fall back to
@@ -378,7 +401,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		let request_id = msg.request_id;
 		let track_name = msg.track_name.clone();
-		let absolute = self.origin.absolute(&msg.track_namespace).to_owned();
+		let path = self.resolve(&msg.track_namespace);
+		let absolute = self.origin.absolute(&path).to_owned();
 
 		tracing::info!(id = %request_id, broadcast = %absolute, track = %track_name, "subscribe started");
 
@@ -388,12 +412,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// We just received a subscribe for this exact namespace, so the peer must have already
 		// seen the announcement. `request_broadcast` resolves it immediately, or falls back to
 		// an `origin::Dynamic` handler if one is registered.
-		let broadcast = match self
-			.serving_origin()
-			.await
-			.request_broadcast(&msg.track_namespace)
-			.await
-		{
+		let broadcast = match self.serving_origin().await.request_broadcast(&path).await {
 			Ok(broadcast) => broadcast,
 			Err(_) => {
 				return self
@@ -1025,7 +1044,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		mut stream: Stream<S, Version>,
 		msg: ietf::SubscribeNamespace<'_>,
 	) -> Result<(), Error> {
-		let prefix = msg.namespace.to_owned();
+		let prefix = self.resolve(&msg.namespace);
 
 		tracing::debug!(prefix = %self.origin.absolute(&prefix), "subscribe_namespace stream");
 
@@ -1559,6 +1578,210 @@ mod tests {
 			session,
 			log,
 			_origin: origin,
+		}
+	}
+
+	/// A namespace as it goes on the wire: the segment count, then each segment
+	/// length-prefixed. Every length here fits in a single-byte varint.
+	fn encoded_namespace(path: &str) -> Vec<u8> {
+		let segments: Vec<&str> = match path.is_empty() {
+			true => Vec::new(),
+			false => path.split('/').collect(),
+		};
+
+		let mut encoded = vec![segments.len() as u8];
+		for segment in segments {
+			encoded.push(segment.len() as u8);
+			encoded.extend_from_slice(segment.as_bytes());
+		}
+		encoded
+	}
+
+	/// Drive one SUBSCRIBE against a publisher rooted at `root`, serving a single
+	/// broadcast published at the absolute path `broadcast`. Returns the id of the first
+	/// message the peer would read back.
+	async fn subscribe_rooted(root: &str, broadcast: &str, namespace: &str) -> u64 {
+		const VERSION: Version = Version::Draft19;
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let mut published = origin
+			.create_broadcast(broadcast, crate::broadcast::Route::announced())
+			.unwrap();
+		let _video = published.create_track("video", None).unwrap();
+		settle().await;
+
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
+		let log = session.log.clone();
+
+		// Serving a request blocks on the peer's SETUP, which no scripted peer sends.
+		let peer_setup = cluster::PeerSetup::default();
+		peer_setup.set(cluster::Peer::default());
+
+		let publisher = Publisher::new(
+			session.clone(),
+			origin.consume().with_root(root).expect("root the origin"),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			VERSION,
+		);
+
+		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let mut run = std::pin::pin!(publisher.run_subscribe_stream(
+			stream,
+			ietf::Subscribe {
+				request_id: RequestId(1),
+				track_namespace: crate::Path::new(namespace),
+				track_name: "video".into(),
+				subscriber_priority: 128,
+				group_order: GroupOrder::Descending,
+				filter_type: FilterType::LargestObject,
+			},
+		));
+
+		// A resolved subscription parks serving the track, so wait for the response
+		// rather than for the stream to finish; only a refusal runs to completion.
+		for _ in 0..100 {
+			let done = futures::poll!(run.as_mut()).is_ready();
+			if done || !log.writes.lock().unwrap().is_empty() {
+				break;
+			}
+			settle().await;
+		}
+
+		let writes = log.writes.lock().unwrap().clone();
+		assert!(!writes.is_empty(), "nothing was sent");
+		// Every id here is a single-byte varint.
+		writes[0] as u64
+	}
+
+	/// A moq-transport Track Namespace is self-contained, so a client that knows the
+	/// broadcast out of band spells out the whole path even though the URL path already
+	/// covers it. Joining the root onto that a second time (`room/123` + `room/123/cam`)
+	/// names nothing, and 404s a broadcast we are serving.
+	#[tokio::test]
+	async fn a_self_contained_namespace_resolves_under_the_root() {
+		assert_eq!(
+			subscribe_rooted("room/123", "room/123/cam", "room/123/cam").await,
+			ietf::SubscribeOk::ID,
+			"a namespace that repeats the root has to resolve",
+		);
+	}
+
+	/// The relative spelling stays authoritative: it is what we announce, so it is what a
+	/// peer normally echoes back, and it must keep resolving under the root.
+	#[tokio::test]
+	async fn a_relative_namespace_still_resolves_under_the_root() {
+		assert_eq!(
+			subscribe_rooted("room/123", "room/123/cam", "cam").await,
+			ietf::SubscribeOk::ID,
+			"the relative spelling is the one we advertise",
+		);
+	}
+
+	/// A namespace under neither reading names nothing, and is still refused.
+	#[tokio::test]
+	async fn an_unrelated_namespace_is_still_refused() {
+		assert_eq!(
+			subscribe_rooted("room/123", "room/123/cam", "other/cam").await,
+			ietf::RequestError::ID,
+			"nothing is published there under either spelling",
+		);
+	}
+
+	/// An empty namespace names the broadcast sitting at the root, which is how a client
+	/// addresses one entirely by URL path (the moq-cli form).
+	#[tokio::test]
+	async fn an_empty_namespace_names_the_broadcast_at_the_root() {
+		assert_eq!(
+			subscribe_rooted("room/123/cam", "room/123/cam", "").await,
+			ietf::SubscribeOk::ID,
+			"the URL path alone still names a broadcast",
+		);
+	}
+
+	/// The same broadcast by its full name, which is the empty-suffix edge of the
+	/// self-contained spelling.
+	#[tokio::test]
+	async fn a_namespace_equal_to_the_root_names_the_broadcast_at_the_root() {
+		assert_eq!(
+			subscribe_rooted("room/123/cam", "room/123/cam", "room/123/cam").await,
+			ietf::SubscribeOk::ID,
+			"path plus full namespace has to resolve, not 404",
+		);
+	}
+
+	/// A broadcast whose own path repeats the root is the one case where the two spellings
+	/// name different things. [`Publisher::resolve`] promises the self-contained reading
+	/// wins, so the broadcast answers to its full name and not to the relative one.
+	#[tokio::test]
+	async fn a_repeated_root_prefers_the_self_contained_reading() {
+		// Rooted at `room`, serving `room/room/cam`: `room/cam` is its relative spelling.
+		assert_eq!(
+			subscribe_rooted("room", "room/room/cam", "room/room/cam").await,
+			ietf::SubscribeOk::ID,
+			"the full name resolves",
+		);
+		assert_eq!(
+			subscribe_rooted("room", "room/room/cam", "room/cam").await,
+			ietf::RequestError::ID,
+			"so the relative spelling of the same broadcast cannot also name it",
+		);
+	}
+
+	/// What we announce stays relative to the session root, matching moq-lite: a peer
+	/// rooted at `room/123` is told `cam`, however it spelled the prefix it asked with.
+	/// Both spellings then round-trip, since the peer joins its own prefix back on and
+	/// [`Publisher::resolve`] reads either.
+	#[tokio::test]
+	async fn announced_namespaces_stay_relative_to_the_root() {
+		const VERSION: Version = Version::Draft19;
+
+		for prefix in ["", "room/123"] {
+			let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+			let _cam = origin
+				.create_broadcast("room/123/cam", crate::broadcast::Route::announced())
+				.unwrap();
+			settle().await;
+
+			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
+			let log = session.log.clone();
+
+			let peer_setup = cluster::PeerSetup::default();
+			peer_setup.set(cluster::Peer::default());
+
+			let publisher = Publisher::new(
+				session.clone(),
+				origin.consume().with_root("room/123").expect("root the origin"),
+				Control::new(None, false),
+				None,
+				peer_setup,
+				VERSION,
+			);
+
+			let stream = Stream::open(&session, VERSION).await.unwrap();
+			let mut run = std::pin::pin!(publisher.run_subscribe_namespace_stream(
+				stream,
+				ietf::SubscribeNamespace {
+					request_id: RequestId(1),
+					namespace: crate::Path::new(prefix),
+				},
+			));
+
+			let encoded = encoded_namespace("cam");
+			for _ in 0..100 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				if occurrences(&log, &encoded) > 0 {
+					break;
+				}
+				settle().await;
+			}
+
+			assert_eq!(
+				occurrences(&log, &encoded),
+				1,
+				"prefix {prefix:?}: announced relative to the root",
+			);
 		}
 	}
 

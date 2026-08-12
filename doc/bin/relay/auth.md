@@ -191,6 +191,8 @@ The client's connection URL path does **not** need to match the token's `root` e
 
 The connection is also rejected if the resulting permissions are empty (no publish or subscribe paths remain after scoping).
 
+Paths on the wire are relative to the connection path, so a client connected to `/rooms/123` publishes and subscribes to `alice`, and the relay serves `rooms/123/alice`. Under `moq-transport`, where a Track Namespace is self-contained, the relay also accepts a namespace that spells out the connection path (`rooms/123/alice`) for clients that carry the full name. An empty namespace names the broadcast sitting at the connection path itself.
+
 ### Unified Auth API (`--auth-api`)
 
 Instead of wiring `--auth-key-dir` (URL form) and `--auth-public-api` separately, a relay can resolve **everything it needs to authorize a connection in one call** with `--auth-api <url>` (env `MOQ_AUTH_API`, or `auth_api` under `[auth]` in TOML). It is mutually exclusive with `--auth-key`, `--auth-key-dir`, `--auth-public`, and `--auth-public-api` (configuring both is a startup error); `--auth-domain` still applies.
