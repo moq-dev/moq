@@ -359,6 +359,11 @@ test("lite draft-05: the fetch response ranks the publisher's own writes", async
 // publisher idle. Nothing waits this out: it only bounds the read when a group never comes.
 const IDLE_MS = 500;
 
+// One macrotask turn, which drains every microtask queued behind it. Signal notifications
+// are coalesced per microtask, so this is what lets a just-written group reach the serving
+// loop's armed `recvGroup` without a test guessing at a delay.
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 // Wraps a writable so its writes park until `release()`, giving a test a window inside
 // whatever the publisher is writing while its other loops keep running. `parked` settles on
 // the first write attempt, held or not.
@@ -509,7 +514,7 @@ test("lite draft-05: a straggler below the announced start group is not served",
 // The serving loop prefetches the next group the moment it takes one, so a SUBSCRIBE_UPDATE
 // can lower the cap while a group is already in hand. Dropping it there would be permanent:
 // the group has left the buffer, so raising the cap again could never bring it back. The cap
-// belongs to the read cursor, which applies it when a group is popped.
+// gates what the read cursor hands out, and a group already handed out stays served.
 test("lite draft-05: a group taken before the cap dropped is still served", async () => {
 	const sub = await servedSubscription({ startGroup: 0, gated: true });
 	try {
@@ -519,7 +524,7 @@ test("lite draft-05: a group taken before the cap dropped is still served", asyn
 
 		// So group 1 leaves the buffer here; only the parked loop still holds it.
 		sub.serve(1);
-		await new Promise((resolve) => setTimeout(resolve, 5));
+		await flush();
 
 		// Cap the subscription at group 0, behind the loop's back.
 		await new SubscribeUpdate({ priority: 0, endGroup: 0 }).encode(sub.client.writer, Version.DRAFT_05);
@@ -527,13 +532,11 @@ test("lite draft-05: a group taken before the cap dropped is still served", asyn
 
 		sub.release();
 
-		// The loop spawns group 0's stream and moves straight on to group 1 without waiting
-		// for the open, so its header can only reach the wire after group 1 was decided
-		// against the lowered cap. Raising the cap below is therefore strictly too late to
-		// rescue it.
+		// Both reach the wire under a cap of 0, because group 1 was taken while it was still
+		// in range. Nothing raises the cap to rescue it, so the assertion stays sensitive to
+		// the window under test: had the prefetch not taken group 1, the cap would hold it in
+		// the buffer and the second read would go idle instead.
 		expect(await sub.servedSequence()).toBe(0);
-		await new SubscribeUpdate({ priority: 0 }).encode(sub.client.writer, Version.DRAFT_05);
-
 		expect(await sub.servedSequence()).toBe(1);
 	} finally {
 		await sub.close();

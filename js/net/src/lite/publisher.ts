@@ -98,6 +98,12 @@ type FrameBounds = {
  * applied when a group is popped rather than re-checked here: the serving loop prefetches,
  * so a group in hand has already left the buffer and rejecting it against a cap lowered in
  * the meantime would drop it for good, even if a later SUBSCRIBE_UPDATE raises the cap again.
+ *
+ * A group taken before a SUBSCRIBE_UPDATE moved the bounds therefore matches neither of them
+ * here and is served whole, frame offsets included: it can carry frames the old request
+ * excluded. The receiver absorbs that. The GROUP header names `frameStart`, and a subscriber
+ * positions every group against its own request on the read side, so the extra frames are
+ * filtered locally and never surface. The cost is bandwidth, bounded by the race window.
  */
 function frameRange(bounds: FrameBounds, sequence: number): { start: number; end?: number } {
 	return {
