@@ -23,7 +23,7 @@ use std::rc::Rc;
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 
-mod transport;
+pub mod transport;
 
 /// Map any displayable error into a JS exception.
 fn js_err(e: impl std::fmt::Display) -> JsValue {

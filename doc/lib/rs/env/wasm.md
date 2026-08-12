@@ -26,8 +26,8 @@ poll-based transport interface.
 - **wasm**: [`web-transport-wasm`](https://crates.io/crates/web-transport-wasm)
   (a thin wrapper over the browser's `WebTransport`) exposes only the
   promise-based interface today, so it needs an adapter to satisfy `moq-net`'s
-  bound. This repo carries one in `rs/moq-wasm/src/transport.rs` (the adapter
-  behind the `@moq/wasm` package); copy it or use `moq-wasm` until
+  bound. This repo carries one as `moq_wasm::transport` (the adapter behind the
+  `@moq/wasm` package); depend on `moq-wasm` from git until
   `web-transport-wasm` implements the poll interface natively.
 
 On wasm you skip [`moq-native`](/lib/rs/crate/moq-native) entirely (it's
@@ -46,7 +46,8 @@ executor like a default `tokio` runtime.
 # Cargo.toml
 [dependencies]
 moq-net = "0.1"
-web-transport = "0.10"
+# The WebTransport poll adapter; unpublished, so pull it from git.
+moq-wasm = { git = "https://github.com/moq-dev/moq" }
 url = "2"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
@@ -71,8 +72,8 @@ From there the pub/sub API is identical to [native](/lib/rs/env/native):
 let url = url::Url::parse("https://cdn.moq.dev/anon")?;
 
 // The poll-interface adapter over the browser's native WebTransport
-// (rs/moq-wasm/src/transport.rs; see "How it fits together" above).
-let transport = transport::connect(url).await?;
+// (see "How it fits together" above).
+let transport = moq_wasm::transport::connect(url).await?;
 
 // Hand the transport to moq-net and run the MoQ handshake.
 let origin = moq_net::Origin::random().produce();

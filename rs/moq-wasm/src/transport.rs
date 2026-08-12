@@ -206,11 +206,12 @@ pub struct SendStream {
 	/// Whether `finish` or `reset` has been observed, so no further writes can
 	/// come and the closed() watch may safely take ownership of the stream.
 	terminal: bool,
-	/// A write driven to completion by `poll_closed` rather than `poll_write`. The
-	/// caller was told `Pending` and is contractually retrying the same bytes, so the
-	/// next `poll_write` reports this write instead of putting the bytes on the wire
-	/// a second time.
-	completed: Option<Bytes>,
+	/// Bytes already transmitted but not yet reported to the caller: a write the
+	/// stored future finished (possibly inside `poll_closed`) while the caller
+	/// held a `Pending`. Later `poll_write` calls reconcile against the buffer
+	/// actually presented (the poll contract allows a shorter retry), reporting
+	/// and consuming a prefix per call, never writing these bytes a second time.
+	completed: Bytes,
 }
 
 enum SendState {
@@ -233,7 +234,7 @@ impl SendStream {
 			finish: false,
 			reset: None,
 			terminal: false,
-			completed: None,
+			completed: Bytes::new(),
 		}
 	}
 
@@ -258,18 +259,21 @@ impl wtt::poll::SendStream for SendStream {
 	type Error = Error;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
-		// A previous write completed inside poll_closed; report it instead of
-		// writing the same bytes a second time. The retry contract says the
-		// caller re-supplies the bytes it was told Pending for.
-		if let Some(chunk) = self.completed.take() {
-			debug_assert_eq!(
-				buf.get(..chunk.len()),
-				Some(&chunk[..]),
-				"poll_write must retry the same bytes it was told Pending for"
-			);
-			return Poll::Ready(Ok(chunk.len()));
-		}
 		loop {
+			// Transmitted-but-unreported bytes from a completed write are
+			// reconciled against the buffer presented NOW: the poll contract
+			// allows a retry with a shorter buffer, so report (and consume) at
+			// most its length and keep the rest for the next call.
+			if !self.completed.is_empty() && !buf.is_empty() {
+				let n = buf.len().min(self.completed.len());
+				let reported = self.completed.split_to(n);
+				debug_assert_eq!(
+					&buf[..n],
+					&reported[..],
+					"poll_write retries must present the bytes already accepted"
+				);
+				return Poll::Ready(Ok(n));
+			}
 			match self.state.take().expect("in-flight") {
 				SendState::Idle(mut stream) => {
 					if buf.is_empty() {
@@ -297,7 +301,9 @@ impl wtt::poll::SendStream for SendStream {
 						self.settle(&mut stream);
 						self.state = Some(SendState::Idle(stream));
 						res?;
-						return Poll::Ready(Ok(chunk.len()));
+						// Reported through the reconciliation at the top of the
+						// loop, which caps it at the presented buffer's length.
+						self.completed = chunk;
 					}
 				},
 				SendState::Closing(mut fut) => match fut.as_mut().poll(cx) {
@@ -372,10 +378,10 @@ impl wtt::poll::SendStream for SendStream {
 						if let Err(err) = res {
 							return Poll::Ready(Err(err));
 						}
-						// The caller of poll_write was told Pending and will retry the
-						// same bytes; record the completion so the retry reports it
-						// instead of writing the bytes a second time.
-						self.completed = Some(chunk);
+						// The caller of poll_write was told Pending and will retry;
+						// poll_write's reconciliation reports these bytes instead of
+						// writing them a second time.
+						self.completed = chunk;
 					}
 				},
 				SendState::Closing(mut fut) => match fut.as_mut().poll(cx) {
