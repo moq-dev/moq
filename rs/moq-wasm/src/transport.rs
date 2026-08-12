@@ -67,17 +67,25 @@ impl Clone for Session {
 	}
 }
 
-/// Open a browser WebTransport connection to `url`.
-pub async fn connect(url: Url) -> Result<Session, Error> {
-	let client = web_transport_wasm::ClientBuilder::new().with_system_roots();
-	let session = client.connect(url).await.map_err(Error)?;
-	Ok(Session::new(session))
+/// Options for a browser WebTransport connection.
+///
+/// Build via [`Default`] and set fields; new knobs are added here rather than
+/// as new `connect` parameters.
+#[derive(Default)]
+#[non_exhaustive]
+pub struct Options {
+	/// Trust only these sha-256 certificate hashes instead of the system roots
+	/// (serverless dev, matching the browser's `serverCertificateHashes`).
+	pub server_certificate_hashes: Vec<Vec<u8>>,
 }
 
-/// Connect, trusting only the given sha-256 certificate hashes (serverless dev,
-/// matching the browser's `serverCertificateHashes` option).
-pub async fn connect_with_hashes(url: Url, hashes: Vec<Vec<u8>>) -> Result<Session, Error> {
-	let client = web_transport_wasm::ClientBuilder::new().with_server_certificate_hashes(hashes);
+/// Open a browser WebTransport connection to `url`.
+pub async fn connect(url: Url, options: Options) -> Result<Session, Error> {
+	let client = web_transport_wasm::ClientBuilder::new();
+	let client = match options.server_certificate_hashes.is_empty() {
+		true => client.with_system_roots(),
+		false => client.with_server_certificate_hashes(options.server_certificate_hashes),
+	};
 	let session = client.connect(url).await.map_err(Error)?;
 	Ok(Session::new(session))
 }
@@ -212,18 +220,29 @@ pub struct SendStream {
 	/// actually presented (the poll contract allows a shorter retry), reporting
 	/// and consuming a prefix per call, never writing these bytes a second time.
 	completed: Bytes,
+	/// Cancels the in-flight write so a reset applies immediately instead of
+	/// waiting behind blocked I/O (whose partial progress a reset discards
+	/// anyway). Fired by `reset` and by `Drop`.
+	interrupt: Option<futures::channel::oneshot::Sender<()>>,
 }
 
 enum SendState {
 	Idle(web_transport_wasm::SendStream),
 	/// A write in flight; `chunk` is the copied bytes, kept (refcounted, no
 	/// extra copy) so a completion absorbed by `poll_closed` can verify the
-	/// retrying caller supplied the same bytes.
+	/// retrying caller supplied the same bytes. A `None` result means the write
+	/// was interrupted by a reset (see `SendStream::interrupt`).
 	Writing {
-		fut: LocalBoxFuture<'static, (web_transport_wasm::SendStream, Result<(), Error>)>,
+		#[allow(clippy::type_complexity)]
+		fut: LocalBoxFuture<'static, (web_transport_wasm::SendStream, Option<Result<(), Error>>)>,
 		chunk: Bytes,
 	},
-	Closing(LocalBoxFuture<'static, (web_transport_wasm::SendStream, Result<(), Error>)>),
+	/// The closed() acknowledgement watch; a `None` result means it was
+	/// interrupted by a late reset (see `SendStream::interrupt`).
+	Closing(
+		#[allow(clippy::type_complexity)]
+		LocalBoxFuture<'static, (web_transport_wasm::SendStream, Option<Result<(), Error>>)>,
+	),
 }
 
 impl SendStream {
@@ -235,6 +254,7 @@ impl SendStream {
 			reset: None,
 			terminal: false,
 			completed: Bytes::new(),
+			interrupt: None,
 		}
 	}
 
@@ -267,10 +287,14 @@ impl wtt::poll::SendStream for SendStream {
 			if !self.completed.is_empty() && !buf.is_empty() {
 				let n = buf.len().min(self.completed.len());
 				let reported = self.completed.split_to(n);
-				debug_assert_eq!(
+				// A hard assert, not a debug one: these bytes are already on the
+				// wire and the bridge cannot un-send them, so a caller continuing
+				// with different data would silently corrupt the stream. Failing
+				// loudly is the only honest option left.
+				assert_eq!(
 					&buf[..n],
 					&reported[..],
-					"poll_write retries must present the bytes already accepted"
+					"poll_write must continue with the bytes the write bridge already transmitted"
 				);
 				return Poll::Ready(Ok(n));
 			}
@@ -285,8 +309,25 @@ impl wtt::poll::SendStream for SendStream {
 					// bytes until this resolves.
 					let chunk = Bytes::copy_from_slice(buf);
 					let retained = chunk.clone();
+					let (tx, rx) = futures::channel::oneshot::channel::<()>();
+					self.interrupt = Some(tx);
 					let fut = async move {
-						let res = stream.write(&chunk).await.map_err(Error);
+						let res = {
+							let mut op = std::pin::pin!(async { stream.write(&chunk).await.map_err(Error) }.fuse());
+							let mut rx = rx.fuse();
+							loop {
+								futures::select_biased! {
+									res = op => break Some(res),
+									cancel = rx => match cancel {
+										Ok(()) => break None,
+										// A dropped (unfired) sender must not interrupt;
+										// only an explicit reset does. The fused arm goes
+										// quiet and the write keeps driving.
+										Err(_) => continue,
+									},
+								}
+							}
+						};
 						(stream, res)
 					}
 					.boxed_local();
@@ -298,12 +339,18 @@ impl wtt::poll::SendStream for SendStream {
 						return Poll::Pending;
 					}
 					Poll::Ready((mut stream, res)) => {
+						self.interrupt = None;
 						self.settle(&mut stream);
 						self.state = Some(SendState::Idle(stream));
-						res?;
-						// Reported through the reconciliation at the top of the
-						// loop, which caps it at the presented buffer's length.
-						self.completed = chunk;
+						// An interrupted write was abandoned for a reset, which
+						// settle just applied; the next iteration's write reports
+						// the stream state.
+						if let Some(res) = res {
+							res?;
+							// Reported through the reconciliation at the top of the
+							// loop, which caps it at the presented buffer's length.
+							self.completed = chunk;
+						}
 					}
 				},
 				SendState::Closing(mut fut) => match fut.as_mut().poll(cx) {
@@ -312,6 +359,7 @@ impl wtt::poll::SendStream for SendStream {
 						return Poll::Pending;
 					}
 					Poll::Ready((mut stream, _res)) => {
+						self.interrupt = None;
 						self.settle(&mut stream);
 						self.state = Some(SendState::Idle(stream));
 					}
@@ -342,7 +390,14 @@ impl wtt::poll::SendStream for SendStream {
 		self.terminal = true;
 		match self.state.as_mut() {
 			Some(SendState::Idle(stream)) => stream.reset(&code.to_string()),
-			_ => self.reset = Some(code),
+			_ => {
+				self.reset = Some(code);
+				// A reset discards the in-flight write's progress anyway, so
+				// cancel it rather than letting blocked I/O delay the code.
+				if let Some(tx) = self.interrupt.take() {
+					let _ = tx.send(());
+				}
+			}
 		}
 	}
 
@@ -359,8 +414,26 @@ impl wtt::poll::SendStream for SendStream {
 						self.state = Some(SendState::Idle(stream));
 						return Poll::Pending;
 					}
+					// Interruptible like a write: a late reset (the group machines
+					// cancel a finished stream this way) must not wait for a FIN
+					// acknowledgement that may never come.
+					let (tx, rx) = futures::channel::oneshot::channel::<()>();
+					self.interrupt = Some(tx);
 					let fut = async move {
-						let res = stream.closed().await.map(|_| ()).map_err(Error);
+						let res = {
+							let mut op =
+								std::pin::pin!(async { stream.closed().await.map(|_| ()).map_err(Error) }.fuse());
+							let mut rx = rx.fuse();
+							loop {
+								futures::select_biased! {
+									res = op => break Some(res),
+									cancel = rx => match cancel {
+										Ok(()) => break None,
+										Err(_) => continue,
+									},
+								}
+							}
+						};
 						(stream, res)
 					}
 					.boxed_local();
@@ -372,16 +445,20 @@ impl wtt::poll::SendStream for SendStream {
 						return Poll::Pending;
 					}
 					Poll::Ready((mut stream, res)) => {
+						self.interrupt = None;
 						self.settle(&mut stream);
 						self.state = Some(SendState::Idle(stream));
-						// A failed write is a closed stream; report it here.
-						if let Err(err) = res {
-							return Poll::Ready(Err(err));
+						match res {
+							// A failed write is a closed stream; report it here.
+							Some(Err(err)) => return Poll::Ready(Err(err)),
+							// The caller of poll_write was told Pending and will
+							// retry; poll_write's reconciliation reports these bytes
+							// instead of writing them a second time.
+							Some(Ok(())) => self.completed = chunk,
+							// Interrupted for a reset, applied by settle above; the
+							// next iteration starts the real closed watch.
+							None => {}
 						}
-						// The caller of poll_write was told Pending and will retry;
-						// poll_write's reconciliation reports these bytes instead of
-						// writing them a second time.
-						self.completed = chunk;
 					}
 				},
 				SendState::Closing(mut fut) => match fut.as_mut().poll(cx) {
@@ -390,12 +467,60 @@ impl wtt::poll::SendStream for SendStream {
 						return Poll::Pending;
 					}
 					Poll::Ready((mut stream, res)) => {
+						self.interrupt = None;
 						self.settle(&mut stream);
 						self.state = Some(SendState::Idle(stream));
-						return Poll::Ready(res);
+						// An interrupted watch was abandoned for a late reset,
+						// which settle just applied; the next iteration watches
+						// the now-reset stream, which resolves promptly.
+						if let Some(res) = res {
+							return Poll::Ready(res);
+						}
 					}
 				},
 			}
+		}
+	}
+}
+
+impl Drop for SendStream {
+	fn drop(&mut self) {
+		match self.state.take() {
+			// Apply a deferred reset if the stream is idle.
+			Some(SendState::Idle(mut stream)) => {
+				if let Some(code) = self.reset.take() {
+					stream.reset(&code.to_string());
+				}
+			}
+			// The stream lives inside the in-flight future; dropping it here
+			// would lose the deferred reset code or FIN. The reset already fired
+			// the interrupt, so the future resolves promptly; finish it on a
+			// local task and apply the terminal action then.
+			Some(SendState::Writing { fut, .. }) => {
+				let reset = self.reset.take();
+				let finish = std::mem::take(&mut self.finish);
+				if reset.is_some() || finish {
+					web_async::spawn(async move {
+						let (mut stream, _) = fut.await;
+						match reset {
+							Some(code) => stream.reset(&code.to_string()),
+							None => {
+								let _ = stream.finish();
+							}
+						}
+					});
+				}
+			}
+			Some(SendState::Closing(fut)) => {
+				let reset = self.reset.take();
+				if let Some(code) = reset {
+					web_async::spawn(async move {
+						let (mut stream, _) = fut.await;
+						stream.reset(&code.to_string());
+					});
+				}
+			}
+			None => {}
 		}
 	}
 }
@@ -416,6 +541,9 @@ pub struct RecvStream {
 	fin: bool,
 	/// A deferred STOP_SENDING, applied when the in-flight operation settles.
 	stop: Option<u32>,
+	/// Cancels the in-flight read so a stop applies immediately instead of
+	/// waiting behind blocked I/O. Fired by `stop` and by `Drop`.
+	interrupt: Option<futures::channel::oneshot::Sender<()>>,
 }
 
 /// How much the closed-watch may read ahead of the caller before it parks and
@@ -425,7 +553,12 @@ const READ_AHEAD_CAP: usize = 64 * 1024;
 
 enum RecvState {
 	Idle(web_transport_wasm::RecvStream),
-	Reading(LocalBoxFuture<'static, (web_transport_wasm::RecvStream, Result<Option<Bytes>, Error>)>),
+	/// A read in flight; a `None` result means it was interrupted by a stop
+	/// (see `RecvStream::interrupt`).
+	Reading(
+		#[allow(clippy::type_complexity)]
+		LocalBoxFuture<'static, (web_transport_wasm::RecvStream, Option<Result<Option<Bytes>, Error>>)>,
+	),
 }
 
 impl RecvStream {
@@ -437,6 +570,7 @@ impl RecvStream {
 			queued_len: 0,
 			fin: false,
 			stop: None,
+			interrupt: None,
 		}
 	}
 
@@ -458,8 +592,25 @@ impl RecvStream {
 					if let Some(code) = self.stop.take() {
 						stream.stop(&code.to_string());
 					}
+					let (tx, rx) = futures::channel::oneshot::channel::<()>();
+					self.interrupt = Some(tx);
 					let fut = async move {
-						let res = stream.read(max).await.map_err(Error);
+						let res = {
+							let mut op = std::pin::pin!(async { stream.read(max).await.map_err(Error) }.fuse());
+							let mut rx = rx.fuse();
+							loop {
+								futures::select_biased! {
+									res = op => break Some(res),
+									cancel = rx => match cancel {
+										Ok(()) => break None,
+										// A dropped (unfired) sender must not interrupt;
+										// only an explicit stop does. The fused arm goes
+										// quiet and the read keeps driving.
+										Err(_) => continue,
+									},
+								}
+							}
+						};
 						(stream, res)
 					}
 					.boxed_local();
@@ -471,6 +622,7 @@ impl RecvStream {
 						return Poll::Pending;
 					}
 					Poll::Ready((mut stream, res)) => {
+						self.interrupt = None;
 						// Apply a stop requested while the read was in flight now, not on
 						// the next read: a caller that stops and never reads again must
 						// still send STOP_SENDING.
@@ -478,6 +630,9 @@ impl RecvStream {
 							stream.stop(&code.to_string());
 						}
 						self.state = Some(RecvState::Idle(stream));
+						// An interrupted read was abandoned for the stop applied
+						// above; the next iteration's read reports the stream state.
+						let Some(res) = res else { continue };
 						if let Ok(None) = &res {
 							self.fin = true;
 						}
@@ -536,7 +691,14 @@ impl wtt::poll::RecvStream for RecvStream {
 	fn stop(&mut self, code: u32) {
 		match self.state.as_mut() {
 			Some(RecvState::Idle(stream)) => stream.stop(&code.to_string()),
-			_ => self.stop = Some(code),
+			_ => {
+				self.stop = Some(code);
+				// The caller is discarding the stream, so cancel the in-flight
+				// read rather than letting blocked I/O delay the stop.
+				if let Some(tx) = self.interrupt.take() {
+					let _ = tx.send(());
+				}
+			}
 		}
 	}
 
@@ -563,6 +725,31 @@ impl wtt::poll::RecvStream for RecvStream {
 				// A read error is also a closed stream.
 				Err(err) => return Poll::Ready(Err(err)),
 			}
+		}
+	}
+}
+
+impl Drop for RecvStream {
+	fn drop(&mut self) {
+		match self.state.take() {
+			// Apply a deferred stop if the stream is idle.
+			Some(RecvState::Idle(mut stream)) => {
+				if let Some(code) = self.stop.take() {
+					stream.stop(&code.to_string());
+				}
+			}
+			// The stream lives inside the in-flight read; the stop already fired
+			// the interrupt, so the future resolves promptly. Finish it on a
+			// local task and apply the real code then.
+			Some(RecvState::Reading(fut)) => {
+				if let Some(code) = self.stop.take() {
+					web_async::spawn(async move {
+						let (mut stream, _) = fut.await;
+						stream.stop(&code.to_string());
+					});
+				}
+			}
+			None => {}
 		}
 	}
 }

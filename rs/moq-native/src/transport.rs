@@ -241,7 +241,9 @@ enum SendState<S: web_transport_trait::SendStream + 'static> {
 		fut: OpBox<(S, Option<Result<(), S::Error>>)>,
 		chunk: Bytes,
 	},
-	Closing(OpBox<(S, Result<(), S::Error>)>),
+	/// The closed() acknowledgement watch; a `None` result means it was
+	/// interrupted by a late reset (see [`AsyncSend::interrupt`]).
+	Closing(#[allow(clippy::type_complexity)] OpBox<(S, Option<Result<(), S::Error>>)>),
 }
 
 impl<S: web_transport_trait::SendStream + 'static> AsyncSend<S> {
@@ -287,10 +289,14 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for Async
 			if !self.completed.is_empty() && !buf.is_empty() {
 				let n = buf.len().min(self.completed.len());
 				let reported = self.completed.split_to(n);
-				debug_assert_eq!(
+				// A hard assert, not a debug one: these bytes are already on the
+				// wire and the bridge cannot un-send them, so a caller continuing
+				// with different data would silently corrupt the stream. Failing
+				// loudly is the only honest option left.
+				assert_eq!(
 					&buf[..n],
 					&reported[..],
-					"poll_write retries must present the bytes already accepted"
+					"poll_write must continue with the bytes the write bridge already transmitted"
 				);
 				return Poll::Ready(Ok(n));
 			}
@@ -355,6 +361,7 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for Async
 						return Poll::Pending;
 					}
 					Poll::Ready((mut stream, _res)) => {
+						self.interrupt = None;
 						self.settle(&mut stream);
 						*self.state.get_mut().unwrap() = Some(SendState::Idle(stream));
 					}
@@ -409,8 +416,25 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for Async
 						*self.state.get_mut().unwrap() = Some(SendState::Idle(stream));
 						return Poll::Pending;
 					}
+					// Interruptible like a write: a late reset (the group machines
+					// cancel a finished stream this way) must not wait for a FIN
+					// acknowledgement that may never come.
+					let (tx, rx) = futures::channel::oneshot::channel::<()>();
+					self.interrupt = Some(tx);
 					let fut = async move {
-						let res = stream.closed().await;
+						let res = {
+							let mut op = std::pin::pin!(stream.closed().fuse());
+							let mut rx = rx.fuse();
+							loop {
+								futures::select_biased! {
+									res = op => break Some(res),
+									cancel = rx => match cancel {
+										Ok(()) => break None,
+										Err(_) => continue,
+									},
+								}
+							}
+						};
 						(stream, res)
 					}
 					.boxed();
@@ -444,9 +468,15 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for Async
 						return Poll::Pending;
 					}
 					Poll::Ready((mut stream, res)) => {
+						self.interrupt = None;
 						self.settle(&mut stream);
 						*self.state.get_mut().unwrap() = Some(SendState::Idle(stream));
-						return Poll::Ready(res);
+						// An interrupted watch was abandoned for a late reset,
+						// which settle just applied; the next iteration watches
+						// the now-reset stream, which resolves promptly.
+						if let Some(res) = res {
+							return Poll::Ready(res);
+						}
 					}
 				},
 			}
@@ -780,6 +810,8 @@ mod tests {
 		priorities: Arc<Mutex<Vec<u8>>>,
 		finished: Arc<AtomicBool>,
 		resets: Arc<Mutex<Vec<u32>>>,
+		/// The peer never acknowledges the FIN: closed() stays pending forever.
+		never_ack: Arc<AtomicBool>,
 	}
 
 	impl web_transport_trait::SendStream for FakeSend {
@@ -812,7 +844,7 @@ mod tests {
 		}
 
 		async fn closed(&mut self) -> Result<(), Self::Error> {
-			match self.finished.load(Ordering::SeqCst) {
+			match self.finished.load(Ordering::SeqCst) && !self.never_ack.load(Ordering::SeqCst) {
 				true => Ok(()),
 				false => std::future::pending().await,
 			}
@@ -936,6 +968,31 @@ mod tests {
 			b"header",
 			"the bytes must reach the stream exactly once"
 		);
+	}
+
+	// A late reset must not wait behind a FIN acknowledgement that never comes:
+	// the group machines finish a stream and keep watching precisely so a late
+	// cancel can still reset it.
+	#[test]
+	fn a_late_reset_interrupts_the_ack_watch() {
+		let fake = FakeSend::default();
+		fake.never_ack.store(true, Ordering::SeqCst);
+		let mut send = AsyncSend::new(fake.clone());
+		let mut cx = cx();
+
+		assert_eq!(send.poll_write(&mut cx, b"bye"), Poll::Ready(Ok(3)));
+		send.finish().unwrap();
+		// The ack never arrives; the watch parks.
+		assert!(send.poll_closed(&mut cx).is_pending());
+
+		// The late cancel: the reset applies without waiting for the ack, and
+		// the watch then resolves against the reset stream.
+		send.reset(9);
+		let closed = send.poll_closed(&mut cx);
+		assert_eq!(fake.resets.lock().unwrap().as_slice(), &[9]);
+		// The re-armed watch on the reset stream is allowed to stay pending in
+		// this fake (it never acks); what matters is the reset went out.
+		let _ = closed;
 	}
 
 	// The poll contract allows retrying a pending write with a SHORTER buffer;

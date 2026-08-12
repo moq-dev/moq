@@ -52,7 +52,7 @@ impl Session {
 	/// Connect to a relay over the browser's WebTransport, using the system roots.
 	pub async fn connect(url: String) -> Result<Session, JsValue> {
 		let url = url::Url::parse(&url).map_err(js_err)?;
-		let transport = transport::connect(url).await.map_err(js_err)?;
+		let transport = transport::connect(url, Default::default()).await.map_err(js_err)?;
 		Self::handshake(transport).await
 	}
 
@@ -61,7 +61,11 @@ impl Session {
 	pub async fn connect_with_hashes(url: String, hashes: Vec<Uint8Array>) -> Result<Session, JsValue> {
 		let url = url::Url::parse(&url).map_err(js_err)?;
 		let hashes = hashes.iter().map(|h| h.to_vec()).collect();
-		let transport = transport::connect_with_hashes(url, hashes).await.map_err(js_err)?;
+		let options = transport::Options {
+			server_certificate_hashes: hashes,
+			..Default::default()
+		};
+		let transport = transport::connect(url, options).await.map_err(js_err)?;
 		Self::handshake(transport).await
 	}
 

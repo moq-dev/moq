@@ -73,7 +73,7 @@ let url = url::Url::parse("https://cdn.moq.dev/anon")?;
 
 // The poll-interface adapter over the browser's native WebTransport
 // (see "How it fits together" above).
-let transport = moq_wasm::transport::connect(url).await?;
+let transport = moq_wasm::transport::connect(url, Default::default()).await?;
 
 // Hand the transport to moq-net and run the MoQ handshake.
 let origin = moq_net::Origin::random().produce();
