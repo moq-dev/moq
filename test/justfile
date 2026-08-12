@@ -30,9 +30,8 @@ default $BASE="":
     #!/usr/bin/env bash
     set -euo pipefail
 
-    just _tools
-
     files=$(just _changed "$BASE")
+    just _tools "$files"
 
     # An empty list means "force-run" to the per-lang recipes, which is the
     # wrong semantic here, so don't dispatch at all.
@@ -47,7 +46,7 @@ default $BASE="":
 # Run every language's unit tests, unscoped.
 all:
     just js test
-    just rs test
+    just rs test --workspace
     just py test
 
 # Cross-language media interop smoke test, built from this checkout. Stands up a

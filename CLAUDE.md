@@ -26,7 +26,9 @@ To force a base, `just check origin/dev` and `just fix origin/dev` take it posit
 
 **CI runs exactly these recipes: `just check` then `just test`, with `MOQ_STRICT=1`.** There is no separate `just ci`, so there is no second definition of "checked" to drift from this one. The split is by cost, not by environment: `check` lints and compiles (plus `tsc -b` and the Python docs, which catch what `--noEmit` and autodoc can't), while `test` links and runs the test binaries, which is the expensive half.
 
-`MOQ_STRICT` is the one thing CI does differently. Every tool the checks use is guarded with `command -v` so an incomplete local toolchain checks less instead of failing; in CI that would be a green run that silently checked nothing, so the variable turns the whole set into an up-front precondition (`_tools` in the root justfile).
+`MOQ_STRICT` is the one thing CI does differently. Every tool the checks use is guarded with `command -v` so an incomplete local toolchain checks less instead of failing; in CI that would be a green run that silently checked nothing, so the variable turns the required set into an up-front precondition (`_tools` in the root justfile). Required is per scope, mirroring what the diff actually dispatches, so a docs-only PR doesn't have to have gradle.
+
+Two tools stay unrequired: `swift` exists only on macOS (swift.yml is its gate), and **`go`/`uniffi-bindgen-go` are not in the dev shell**, so `just go check` skips itself in CI exactly as it always has. `uniffi-bindgen-go` isn't in nixpkgs (it installs from a NordSecurity git tag), so closing that hole means packaging it in the flake.
 
 Two gates live outside the PR path, in `.github/workflows/nightly.yml`: `just rs audit` (cargo-deny) because an advisory lands without this repo changing, and `just rs features` (the `--all-features` and `--no-default-features` compiles) because each is a full extra workspace compile that shares almost nothing with the default one. A break there lands on `main` rather than being caught in review, which is the accepted trade; anything that must block a merge belongs in `check`.
 

@@ -19,6 +19,12 @@ default:
 #
 # No `cargo check` pass: clippy is a superset of it, and the two use different
 # rustc wrappers, so running both means compiling the workspace twice.
+#
+# A bare `just rs check` is default-members, which skips libmoq, moq-ffi,
+# moq-gst, and moq-wasm (they need cbindgen, a uniffi build, GStreamer, and a
+# wasm32 target respectively, so they stay out of a casual local check). Every
+# recipe that means "all of it" therefore passes `--workspace` explicitly, since
+# `check` is the only gate now and nothing else would compile them.
 
 # Compile, lint, format-check, doc-check, and verify dependency hygiene.
 check *args:
@@ -49,7 +55,13 @@ _select $FILES:
     set -euo pipefail
 
     # Workspace-wide inputs affect every crate, so there is nothing to scope to.
-    if [[ -z "$FILES" ]] || grep -qE '^(Cargo\.(toml|lock)|rust-toolchain\.toml)$' <<< "$FILES"; then
+    #
+    # `rs/justfile` and the nextest config are in here because they define how
+    # every crate is checked and tested. They also match `^rs/` below while
+    # seeding no crate (the seed pattern needs `rs/<crate>/...`), so without this
+    # a PR editing only the recipes would compile and test nothing at all, and a
+    # broken cargo flag would pass CI on a format check alone.
+    if [[ -z "$FILES" ]] || grep -qE '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|\.config/nextest\.toml)$' <<< "$FILES"; then
     	echo ALL
     	exit 0
     fi
@@ -70,19 +82,22 @@ _select $FILES:
 
     seeds=$(sed -n 's|^rs/\([^/]*\)/.*|\1|p' <<< "$FILES" | sort -u)
 
+    # Every workspace member, not just the default ones. `--no-deps` already
+    # limits this to the workspace. The non-default members (libmoq, moq-ffi,
+    # moq-gst, moq-wasm) have to participate as both seeds and dependents: they
+    # used to drop out here because `check` matched a bare `cargo check`, but
+    # `check` is the only gate now, and the `cargo clippy --workspace` in the
+    # deleted `just rs ci` is what used to cover them. Without them, a PR
+    # touching only rs/libmoq selects nothing and compiles nothing.
     edges=$(jq -r '
-    	.workspace_default_members as $members
-    	| .packages[]
-    	| select(.id | IN($members[]))
+    	.packages[]
     	| .name as $name
     	| .dependencies[]
     	| "\($name) \(.name)"
     ' <<< "$metadata")
 
     # A crate has to be rebuilt when anything it depends on changed, so walk the
-    # edges backwards until the selection stops growing. Non-default members
-    # (libmoq, moq-ffi, moq-gst, moq-wasm) have no edges here and drop out,
-    # matching what an unscoped `cargo check` would have compiled.
+    # edges backwards until the selection stops growing.
     awk -v seeds="$seeds" '
     	BEGIN { split(seeds, s, "\n"); for (i in s) want[s[i]] = 1 }
     	{ pkg[NR] = $1; dep[NR] = $2 }
@@ -108,20 +123,16 @@ check-changed $FILES:
     packages=$(just rs _select "$FILES")
     case "$packages" in
     	"")    echo "rs: no crates affected; skipping." ;;
-    	ALL)   just rs check ;;
+    	ALL)   just rs check --workspace ;;
     	*)     echo "rs: checking ${packages//--package /}"; just rs check $packages ;;
     esac
 
-    # moq-wasm is a non-default member, so `_select` never reaches it and the
-    # branch above would check nothing at all for a moq-wasm-only diff. Any
-    # crate change triggers it, not just `rs/moq-wasm/`: moq-wasm builds on
-    # moq-net, and its whole crate root sits behind
-    # `#![cfg(target_arch = "wasm32")]`, so a break in a dependency is invisible
-    # to every host-target pass here. Deliberately over-approximate. Narrowing
-    # it to moq-wasm's dependency closure means a second graph walk for a pass
-    # that only compiles a handful of crates. The pattern matches a crate
-    # directory rather than `^rs/`, so editing `rs/justfile` doesn't trigger it.
-    if [[ "$packages" == "ALL" ]] || grep -q '^rs/[^/]*/' <<< "$FILES"; then
+    # moq-wasm's crate root is entirely `#![cfg(target_arch = "wasm32")]`, so
+    # however it got selected the host-target pass above compiled it to nothing
+    # and saw no errors in it. This wasm32 pass is what actually checks it, and
+    # the selection already says whether moq-wasm or anything it depends on
+    # changed.
+    if [[ "$packages" == "ALL" ]] || grep -q -- '--package moq-wasm' <<< "$packages"; then
     	just rs wasm
     fi
 
@@ -132,13 +143,13 @@ fix-changed $FILES:
     packages=$(just rs _select "$FILES")
     case "$packages" in
     	"")    echo "rs: no crates affected; skipping." ;;
-    	ALL)   just rs fix ;;
+    	ALL)   just rs fix --workspace ;;
     	*)     echo "rs: fixing ${packages//--package /}"; just rs fix $packages ;;
     esac
 
-    # Mirrors `check-changed`: without this a moq-wasm-only diff is never
-    # formatted, and `ci`'s `cargo fmt --all --check` fails on it later.
-    if grep -q '^rs/moq-wasm/' <<< "$FILES"; then
+    # Mirrors `check-changed`'s gate: without this a moq-wasm lint is never
+    # auto-fixed, and `check`'s wasm32 clippy pass fails on it later.
+    if [[ "$packages" == "ALL" ]] || grep -q -- '--package moq-wasm' <<< "$packages"; then
     	just rs wasm-fix
     fi
 
@@ -249,6 +260,11 @@ test *args:
 
 # Same selection as `check-changed`: compiling a crate's test binaries is the
 # expensive half of a test run, so scoping matters more here than anywhere else.
+#
+# `--no-tests=pass` only on the scoped branch. A selection can legitimately hold
+# nothing testable (moq-wasm has no host-target tests, since its crate root is
+# `#![cfg(target_arch = "wasm32")]`), and nextest exits 4 on that by default.
+# The unscoped branch keeps the default, where finding no tests really is wrong.
 
 # Like `test`, but only the crates a diff touches plus their dependents.
 test-changed $FILES:
@@ -257,8 +273,8 @@ test-changed $FILES:
     packages=$(just rs _select "$FILES")
     case "$packages" in
     	"")    echo "rs: no crates affected; skipping tests." ;;
-    	ALL)   just rs test ;;
-    	*)     echo "rs: testing ${packages//--package /}"; just rs test $packages ;;
+    	ALL)   just rs test --workspace ;;
+    	*)     echo "rs: testing ${packages//--package /}"; just rs test --no-tests=pass $packages ;;
     esac
 
 # Compile and run the `/// ```` examples, which nextest skips.

@@ -82,21 +82,39 @@ _changed $BASE:
 # Tools every scope guards with `command -v`, so an incomplete local toolchain
 # checks less instead of failing. That trade is wrong in CI, where a skip is
 # indistinguishable from a pass, so CI exports MOQ_STRICT=1 and this turns the
-# whole set into a precondition. Checked up front, and as one list, so a missing
-# tool is reported before a long compile rather than after it.
+# required set into a precondition. Checked up front, and as one list, so a
+# missing tool is reported before a long compile rather than after it.
+#
+# Required per scope, mirroring what `check` actually dispatches for a given
+# diff: demanding gradle on a docs-only PR would fail a run that was never going
+# to invoke it. Takes the same file list as the dispatch, or `ALL` to require
+# everything (`check-all`).
+#
+# Two deliberate absences:
+#   - swift exists only on macOS, and `swift check` skips off-macOS by design;
+#     swift.yml is its real gate.
+#   - go and uniffi-bindgen-go are NOT in the dev shell (uniffi-bindgen-go isn't
+#     in nixpkgs; it installs from a NordSecurity git tag). Requiring them would
+#     fail every Go-scoped PR, so `just go check` still skips itself in CI, as it
+#     always has. Packaging them is what would close that hole.
 
-# Fail when a tool `check` would otherwise skip is missing. No-op unless MOQ_STRICT.
+# Fail when a tool the diff's scopes need is missing. No-op unless MOQ_STRICT.
 [private]
-_tools:
+_tools $FILES="":
     #!/usr/bin/env bash
     set -euo pipefail
     [[ -n "${MOQ_STRICT:-}" ]] || exit 0
 
-    tools=(actionlint bun cargo go gradle java jq nix nixfmt shellcheck shfmt taplo uniffi-bindgen-go uv)
-    # The OBS lints ship only in the Linux dev shell (nixpkgs marks obs-studio
-    # broken on Darwin). Swift is absent on purpose: it exists only on macOS,
-    # where swift.yml is the gate, and `swift check` skips off-macOS by design.
-    if [[ "$(uname -s)" == "Linux" ]]; then
+    scoped() { [[ "$FILES" == ALL ]] || grep -qE "$1" <<< "$FILES"; }
+
+    # `_check-common` runs on every invocation, so its tools are unconditional.
+    tools=(actionlint bun jq nix nixfmt shellcheck shfmt taplo)
+    scoped '^(rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools+=(cargo)
+    scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'     && tools+=(uv)
+    scoped '^(kt/|rs/moq-ffi/)'                                && tools+=(gradle java)
+    # The OBS lints ship only in the Linux dev shell; nixpkgs marks obs-studio
+    # broken on Darwin.
+    if [[ "$(uname -s)" == "Linux" ]] && scoped '^cpp/obs/'; then
     	tools+=(clang-format gersemi)
     fi
 
@@ -120,9 +138,8 @@ check $BASE="":
     #!/usr/bin/env bash
     set -euo pipefail
 
-    just _tools
-
     files=$(just _changed "$BASE")
+    just _tools "$files"
 
     # An empty list means "force-run" to the per-lang recipes, which is the
     # wrong semantic here, so don't dispatch at all.
@@ -152,9 +169,9 @@ check $BASE="":
 
 # Check every package in every language, plus moq-wasm.
 check-all *args:
-    just _tools
+    just _tools ALL
     just js check
-    just rs check {{ args }}
+    just rs check --workspace {{ args }}
     # Not covered by the line above: moq-wasm only exists on the wasm32 target.
     just rs wasm
     just py check
@@ -255,7 +272,7 @@ fix $BASE="":
 # Auto-fix every JavaScript workspace and every default Rust member.
 fix-all:
     just js fix
-    just rs fix
+    just rs fix --workspace
     just py fix
     just obs fix
     just _fix-common
