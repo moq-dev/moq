@@ -1731,3 +1731,186 @@ async fn opus_export_import_roundtrip() {
 		assert_eq!(got.as_slice(), orig.as_ref(), "Opus packet survived the round-trip");
 	}
 }
+
+// Two exporters of one broadcast, started at different times, must render the same packets
+// from the moment they overlap. That is what a redundant (SMPTE ST 2022-7) pair compares, and
+// it is what lets a leg be restarted without the merge at the far end seeing the two disagree.
+// See moq-dev/moq#2779.
+
+/// 25 fps video.
+const VIDEO_US: u64 = 40_000;
+/// 48 kHz AAC, 1024 samples per frame.
+const AUDIO_US: u64 = 21_333;
+/// Video frames per group. Deliberately not a whole number of PSI intervals, so a table
+/// cadence anchored anywhere but the media timeline drifts against the keyframes.
+const GOP: u64 = 15;
+/// Audio frames per group, roughly matching the video group duration.
+const AUDIO_GROUP: u64 = 28;
+/// Video-frame ticks to produce, and the tick the second exporter joins at.
+const TICKS: u64 = 150;
+const JOIN: u64 = 75;
+
+/// Produce one broadcast and export it twice, the second exporter joining partway in, and
+/// return what each rendered.
+///
+/// Both exporters are drained after every write, so neither skips a group and the two see the
+/// same arrival order. That isolates the question under test (does the *rendering* depend on
+/// when the process started) from the separate question of whether two legs received the same
+/// groups in the same order.
+async fn export_twice(with_video: bool) -> (Vec<Frame>, Vec<Frame>) {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+	let mut video = with_video.then(|| {
+		let track = broadcast
+			.create_track(broadcast.unique_name(".avc1"), hang::container::track_info())
+			.unwrap();
+		// Out-of-band parameter sets (avc1), so the export source takes the catalog
+		// description as-is instead of parsing them out of the bitstream.
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: false,
+		});
+		cfg.container = Container::Legacy;
+		cfg.description =
+			Some(crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap());
+		catalog.lock().video.renditions.insert(track.name().to_string(), cfg);
+		Producer::new(track, HangContainer::Legacy)
+	});
+
+	let mut audio = {
+		let track = broadcast
+			.create_track(broadcast.unique_name(".aac"), hang::container::track_info())
+			.unwrap();
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		catalog.lock().audio.renditions.insert(track.name().to_string(), cfg);
+		Producer::new(track, HangContainer::Legacy)
+	};
+
+	let source = crate::source::announced(&consumer);
+	let mut a = Export::new(source.clone()).await.unwrap();
+	let mut b = None;
+	let (mut out_a, mut out_b) = (Vec::new(), Vec::new());
+
+	let mut audio_index = 0;
+	for tick in 0..TICKS {
+		if let Some(video) = video.as_mut() {
+			let keyframe = tick % GOP == 0;
+			let slice = if keyframe {
+				vec![0x65u8; 3_000]
+			} else {
+				vec![0x41u8; 400]
+			};
+			video
+				.write(Frame {
+					timestamp: Timestamp::from_micros(tick * VIDEO_US).unwrap(),
+					duration: None,
+					payload: length_prefixed(&[&slice]),
+					keyframe,
+				})
+				.unwrap();
+		}
+		// Every audio frame that starts before the next video tick.
+		while audio_index * AUDIO_US < (tick + 1) * VIDEO_US {
+			audio
+				.write(Frame {
+					timestamp: Timestamp::from_micros(audio_index * AUDIO_US).unwrap(),
+					duration: None,
+					payload: Bytes::from_iter((0..180u16).map(|i| (i ^ audio_index as u16) as u8)),
+					keyframe: audio_index % AUDIO_GROUP == 0,
+				})
+				.unwrap();
+			audio_index += 1;
+		}
+
+		out_a.extend(drain_frames(&mut a).await);
+		if let Some(b) = b.as_mut() {
+			out_b.extend(drain_frames(b).await);
+		}
+		if tick + 1 == JOIN {
+			b = Some(Export::new(source.clone()).await.unwrap());
+		}
+	}
+
+	(out_a, out_b)
+}
+
+/// Pull every frame an exporter can render right now, like `drain` but keeping the frames
+/// whole (this compares them one by one, not as one byte stream).
+async fn drain_frames<E: tscat::Catalog>(export: &mut Export<E>) -> Vec<Frame> {
+	let mut out = Vec::new();
+	while let Ok(res) = tokio::time::timeout(Duration::from_secs(1), export.next()).await {
+		match res.expect("exporter error") {
+			Some(frame) => out.push(frame),
+			None => break,
+		}
+	}
+	out
+}
+
+/// Compare the overlapping output of two exporters, starting at `from`, and assert the only
+/// bytes that disagree are continuity counters.
+///
+/// The counter is the known exception: it is numbered from process state, so two legs are
+/// offset by a constant. Fixing that needs the emitted packet count per group to be a function
+/// of the broadcast, which is a much larger change than this guards. Everything else has to
+/// match exactly, so this fails if any new field starts being minted per process.
+fn assert_only_continuity_differs(a: &[Frame], b: &[Frame], from: Timestamp) {
+	let a: Vec<&Frame> = a.iter().filter(|f| f.timestamp >= from).collect();
+	let b: Vec<&Frame> = b.iter().filter(|f| f.timestamp >= from).collect();
+	assert!(b.len() > 20, "not enough overlap to be worth comparing: {}", b.len());
+	assert_eq!(a.len(), b.len(), "exporters rendered a different number of frames");
+
+	for (a, b) in a.iter().zip(b.iter()) {
+		assert_eq!(a.timestamp, b.timestamp, "compared frames must be the same frame");
+		assert_eq!(
+			a.payload.len(),
+			b.payload.len(),
+			"same frame rendered to a different size"
+		);
+		assert_packet_aligned(&a.payload);
+
+		for (offset, (x, y)) in a.payload.iter().zip(b.payload.iter()).enumerate() {
+			if x == y {
+				continue;
+			}
+			// Byte 3 of a TS packet is `transport_scrambling_control | adaptation_field_control |
+			// continuity_counter`, and only the low nibble is the counter. A difference anywhere
+			// else is a value the exporter minted from its own state rather than from the broadcast.
+			assert_eq!(
+				(offset % 188, (x ^ y) & 0xf0),
+				(3, 0),
+				"frame at {:?} differs outside the continuity counter: offset {offset}, {x:#04x} vs {y:#04x}",
+				a.timestamp,
+			);
+		}
+	}
+}
+
+#[tokio::test(start_paused = true)]
+async fn late_join_matches_a_running_exporter() {
+	let (a, b) = export_twice(true).await;
+
+	// Skip to the joiner's second keyframe: its first group covers tune-in, where the two legs
+	// legitimately differ because only the joiner has to lead with the program tables.
+	let keyframes: Vec<Timestamp> = b.iter().filter(|f| f.keyframe).map(|f| f.timestamp).collect();
+	assert_only_continuity_differs(&a, &b, keyframes[1]);
+}
+
+/// The same property for a program with no video track. Worth its own case because the program
+/// tables are re-emitted at every video keyframe, a boundary both legs share, which hides a
+/// drifting cadence. Audio-only has no such boundary, so the cadence has to come from the media
+/// timeline on its own.
+#[tokio::test(start_paused = true)]
+async fn late_join_matches_a_running_exporter_without_video() {
+	let (a, b) = export_twice(false).await;
+
+	// The joiner leads with PAT/PMT on its very first frame so a receiver can tune in; the
+	// running exporter has no reason to repeat them there. From the next frame on the two are
+	// rendering the same stream.
+	assert_only_continuity_differs(&a, &b, b[1].timestamp);
+}

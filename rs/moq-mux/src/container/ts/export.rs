@@ -69,12 +69,12 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// Standalone SI sections captured on import, keyed by PID and re-emitted verbatim
 	/// on their own cadence. Opaque: export never parses a table it carries.
 	si: BTreeMap<u16, catalog::Si>,
-	/// When each SI PID was last emitted, so each honors its own interval.
+	/// When each SI PID was last emitted, so each honors its own interval ([`due`]).
 	last_si: HashMap<u16, Timestamp>,
 
 	/// Program tables, built once the track layout is known.
 	psi: Option<Psi>,
-	/// Media timestamp of the last PAT/PMT emission.
+	/// Media timestamp of the last PAT/PMT emission ([`due`]).
 	last_psi: Option<Timestamp>,
 	/// Tune-in point: the first video keyframe's timestamp, captured when the program
 	/// tables are built. Non-video frames before it are dropped so the keyframe leads
@@ -978,13 +978,26 @@ const PES_DTS_LEN: usize = 5;
 /// [`author_dts`] and [`Track::dts_reserve`].
 const DEFAULT_DTS_RESERVE: u64 = 16;
 
+/// Whether `timestamp` has crossed into a later repetition slot than `last`.
+///
+/// Slots are absolute on the media timeline (`floor(timestamp / interval)`) rather than
+/// measured forward from the previous emission, so a table lands on the same frames no
+/// matter when the exporter started. Two exporters of one broadcast then emit the tables
+/// at the same points, which a redundant pair compares byte for byte. `None` (nothing
+/// emitted yet) is always due, so a fresh exporter leads with the tables and a receiver
+/// can tune in without waiting for the next slot.
 fn due(timestamp: Timestamp, last: Option<Timestamp>, interval: Duration) -> bool {
 	let Some(last) = last else {
 		return true;
 	};
-	Duration::from(timestamp)
-		.checked_sub(Duration::from(last))
-		.is_some_and(|elapsed| elapsed >= interval)
+	slot(timestamp, interval) != slot(last, interval)
+}
+
+/// Index of `timestamp`'s repetition slot: how many whole `interval`s fit under it.
+///
+/// A zero interval degenerates to one slot per microsecond, which makes every frame due.
+fn slot(timestamp: Timestamp, interval: Duration) -> u128 {
+	Duration::from(timestamp).as_micros() / interval.as_micros().max(1)
 }
 
 /// External byte size of an adaptation field (manual mirror of the crate's
@@ -1289,17 +1302,58 @@ mod tests {
 	}
 
 	#[test]
-	fn due_uses_elapsed_duration() {
+	fn author_dts_is_join_independent_at_a_peak() {
+		// An exporter that has been running and one that just joined author the same decode
+		// timeline from any frame whose PTS leads everything decoded before it. A keyframe is
+		// exactly that (export only ever tunes in on one), so the monotonic bump cannot fire
+		// there and the state carried across the join stops mattering.
+		for b in [1, 3, 5] {
+			let pts = decode_order(40, b, 3_600, 10_000_000);
+			let running = run_clock(&pts, DEFAULT_DTS_RESERVE);
+
+			let mut peaks = 0;
+			for k in 1..pts.len() {
+				if pts[..k].iter().any(|&p| p >= pts[k]) {
+					continue;
+				}
+				peaks += 1;
+				let fresh = run_clock(&pts[k..], DEFAULT_DTS_RESERVE);
+				assert_eq!(
+					&running[k..],
+					&fresh[..],
+					"b={b}: joining at {k} authored a different clock"
+				);
+			}
+			assert!(peaks > 10, "b={b}: fixture must have peaks to join at, got {peaks}");
+		}
+	}
+
+	#[test]
+	fn due_crosses_an_absolute_slot() {
 		assert!(due(ms(1_000), None, PSI_INTERVAL));
 		assert!(!due(ms(1_250), Some(ms(1_000)), PSI_INTERVAL));
 		assert!(due(ms(1_500), Some(ms(1_000)), PSI_INTERVAL));
-		assert!(!due(ms(750), Some(ms(1_000)), PSI_INTERVAL));
+
+		// A backwards timestamp is a rewound timeline, not a slot that has yet to lapse;
+		// re-emit the tables rather than sit out until the old slot comes back around.
+		assert!(due(ms(750), Some(ms(1_000)), PSI_INTERVAL));
 
 		// A per-PID SI interval is honored independently of the PSI cadence: an SDT at
 		// 2s is not due when the 500ms PSI would be.
 		let sdt = Duration::from_millis(2_000);
 		assert!(!due(ms(1_500), Some(ms(1_000)), sdt));
 		assert!(due(ms(3_000), Some(ms(1_000)), sdt));
+	}
+
+	#[test]
+	fn due_ignores_when_the_last_emission_landed_in_its_slot() {
+		// The whole point of the absolute grid: two exporters that emitted at different
+		// points *within* the same slot agree on every later frame, so the emission points
+		// belong to the broadcast rather than to whoever started when.
+		for last in [1_000, 1_100, 1_499] {
+			assert!(!due(ms(1_499), Some(ms(last)), PSI_INTERVAL), "last={last}");
+			assert!(due(ms(1_500), Some(ms(last)), PSI_INTERVAL), "last={last}");
+		}
 	}
 
 	#[test]
