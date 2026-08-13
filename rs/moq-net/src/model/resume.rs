@@ -924,19 +924,26 @@ impl Subscriber {
 
 		let mut all_done = true;
 		for seg in &mut self.segments {
+			// An eviction aborts a parked group without touching any cursor this
+			// subscriber polls, so each entry needs a waiter or this poll would
+			// never rerun. `poll_closed` observes-or-registers under one lock:
+			// `Pending` parks the waiter while the group is open (an open group
+			// cannot be aborted), and `Ready` means closed, where only an abort
+			// invalidates the entry. A cleanly closed group can never gain an
+			// abort, so it needs no waiter. Checking `is_aborted` separately from
+			// the registration would leave a window where an abort lands between
+			// the two and wakes nobody.
+			let watch = |group: &group::Consumer| match group.poll_closed(waiter) {
+				Poll::Pending => true,
+				Poll::Ready(()) => !group.is_aborted(),
+			};
+
 			// A `start_at` overtook these parked groups; drop them and read on.
 			// Eviction/expiry (which aborts a cached group) drops its entry too,
 			// bounding parking by the track's cache policy rather than retaining
 			// every group a long-capped subscription ever observed.
 			seg.parked
-				.retain(|sequence, group| *sequence >= min_sequence && !group.is_aborted());
-
-			// Watch the survivors: an eviction aborts a parked group without
-			// touching any cursor this subscriber polls, so without a waiter here
-			// the retain above (and the completion check below) would never rerun.
-			for group in seg.parked.values() {
-				let _ = group.poll_closed(waiter);
-			}
+				.retain(|sequence, group| *sequence >= min_sequence && watch(group));
 
 			// Re-offer the lowest parked group back inside the cap once it rises.
 			if let Some(&sequence) = seg.parked.keys().next()
@@ -953,8 +960,13 @@ impl Subscriber {
 						if beyond_cap(group.sequence) {
 							// `end_at` holds the group until the cap rises rather than
 							// dropping it; keep draining so an in-range group that
-							// arrived behind it still flows.
-							seg.parked.insert(group.sequence, group);
+							// arrived behind it still flows. Watch it from the moment it
+							// parks: the retain pass above already ran, so an entry
+							// admitted here would otherwise sit unwatched for the rest
+							// of this poll, and an abort could wake nobody.
+							if watch(&group) {
+								seg.parked.insert(group.sequence, group);
+							}
 							continue;
 						}
 						if group.sequence < min_sequence {
@@ -2128,6 +2140,42 @@ mod test {
 		assert!(counter.count() > 0, "the eviction wakeup was lost");
 		let result = fut.as_mut().poll(&mut cx);
 		assert!(matches!(result, Poll::Ready(Ok(None))));
+	}
+
+	/// The counterpart of [`evicted_parked_group_wakes_the_clean_end`] with the
+	/// terminal states already in place when the straggler is first observed:
+	/// the poll that parks it is the same poll that sees the segment finish, so
+	/// the group must be watched from the moment it parks, not from the next
+	/// poll (which nothing would trigger).
+	#[tokio::test]
+	async fn straggler_parked_after_finish_still_wakes() {
+		use std::task::Context;
+
+		let (mut track_a, consumer_a) = track_pair("a");
+
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		sub.end_at(0);
+		write_group(&mut track_a, 0, "a0");
+		assert_eq!(recv(&mut sub), 0);
+
+		let straggler = track_a.create_group(group::Info { sequence: 1 }).unwrap();
+		track_a.finish().unwrap();
+		producer.finish().unwrap();
+
+		let (counter, waker) = CountWaker::new();
+		let mut cx = Context::from_waker(&waker);
+		let mut fut = std::pin::pin!(sub.recv_group());
+		assert!(
+			fut.as_mut().poll(&mut cx).is_pending(),
+			"the parked group holds the end open"
+		);
+
+		straggler.abort(Error::Old).unwrap();
+		assert!(counter.count() > 0, "the abort wakeup was lost");
+		assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Ready(Ok(None))));
 	}
 
 	#[tokio::test]
