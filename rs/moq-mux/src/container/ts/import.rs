@@ -215,8 +215,10 @@ impl<E: catalog::Catalog> Import<E> {
 			// Intercept the standalone SI PIDs before the routing gate below drops them:
 			// they carry the service layer, not media, and are not fed to the reader
 			// (which only routes the PAT/PMT/ES PIDs it learns).
-			if self.supports_mpegts && catalog::SI_PIDS.iter().any(|(p, _)| *p == pid) {
-				self.si_section(pid, &pkt);
+			if self.supports_mpegts
+				&& let Some(si) = catalog::SiPid::get(pid)
+			{
+				self.si_section(si, &pkt);
 				continue;
 			}
 			// PIDs we don't decode and don't carry (`Stream::Ignored`: a base catalog's
@@ -611,17 +613,24 @@ impl<E: catalog::Catalog> Import<E> {
 	}
 
 	/// Feed one TS packet on a standalone SI PID to its reassembler, recording each
-	/// completed section verbatim into that PID's catalog entry.
+	/// completed section we carry verbatim into that PID's catalog entry.
 	///
-	/// Every section is captured, whatever its `table_id`: the SDT PID also carries
-	/// the BAT, an SDT can describe several services across several sections, and a
-	/// table we don't recognize is exactly as worth preserving as one we do. The
-	/// catalog holds a *set* per PID, so these coexist instead of overwriting each
-	/// other, and a plain repetition (SI repeats every couple of seconds) leaves the
-	/// set untouched rather than republishing the catalog.
-	fn si_section(&mut self, pid: u16, pkt: &[u8]) {
+	/// Which sections those are is the PID's own [`catalog::Tables`], and for all but
+	/// the EIT PID it is every one of them: the SDT PID also carries the BAT, an SDT can
+	/// describe several services across several sections, and a table we don't recognize
+	/// is exactly as worth preserving as one we do. The catalog holds a *set* per PID, so
+	/// these coexist instead of overwriting each other, and a plain repetition (SI repeats
+	/// every couple of seconds) leaves the set untouched rather than republishing the
+	/// catalog.
+	fn si_section(&mut self, si_pid: &'static catalog::SiPid, pkt: &[u8]) {
+		let pid = si_pid.pid;
 		let mut sections = Vec::new();
 		self.si_sections.entry(pid).or_default().push(pkt, &mut sections);
+
+		// Reassemble every section on the PID, then drop the tables we don't carry: the
+		// EIT PID interleaves p/f with schedule, so a section boundary is only findable
+		// by following the whole PID.
+		sections.retain(|section| si_pid.captures(section));
 		if sections.is_empty() {
 			return;
 		}
@@ -631,7 +640,7 @@ impl<E: catalog::Catalog> Import<E> {
 		// the other way round would republish the catalog on every SI cycle.
 		let updated = {
 			let si = self.si.entry(pid).or_insert_with(|| catalog::Si {
-				interval: catalog::SI_PIDS.iter().find(|(p, _)| *p == pid).map(|(_, i)| *i),
+				interval: Some(si_pid.interval),
 				..Default::default()
 			});
 			let mut changed = false;

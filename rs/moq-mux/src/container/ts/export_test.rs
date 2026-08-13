@@ -1547,20 +1547,77 @@ fn multi_packet_si_section_is_captured() {
 	let input = si_packets_multi(0x0011, &sdt);
 	assert!(input.len() > 188, "the SDT must span more than one TS packet");
 
+	assert_eq!(
+		import_si(&input).get(&0x0011).expect("an SDT entry").sections,
+		vec![Bytes::from(sdt)],
+		"the multi-packet SDT was reassembled and captured byte-for-byte"
+	);
+}
+
+/// Import raw TS bytes with the `mpegts` catalog extension enabled, returning the SI the
+/// import gate captured.
+fn import_si(input: &[u8]) -> std::collections::BTreeMap<u16, tscat::Si> {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let _consumer = broadcast.consume();
 	let catalog =
 		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
 			.unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(&BytesMut::from(&input[..])).unwrap();
+	import.decode(&BytesMut::from(input)).unwrap();
 	import.finish().unwrap();
+	catalog.snapshot().mpegts.si.clone()
+}
 
-	let si = catalog.snapshot().mpegts.si.clone();
+/// The EIT PID carries present/following and schedule interleaved, and only p/f is
+/// captured. This is the one PID whose `table_id`s are filtered rather than taken whole,
+/// so it is also the test that the filter runs after reassembly (a section boundary is
+/// only findable by following the whole PID).
+#[test]
+fn eit_carries_present_following_not_schedule() {
+	let pf_actual = make_section(0x4E, &[0x01; 16]);
+	let pf_other = make_section(0x4F, &[0x02; 16]);
+	let mut input = Vec::new();
+	for section in [
+		make_section(0x50, &[0x03; 32]), // schedule actual, first table_id
+		pf_actual.clone(),
+		make_section(0x5F, &[0x04; 32]), // schedule actual, last table_id
+		pf_other.clone(),
+		make_section(0x60, &[0x05; 32]), // schedule other, first table_id
+		make_section(0x6F, &[0x06; 32]), // schedule other, last table_id
+	] {
+		input.extend_from_slice(&si_packet(0x0012, &section));
+	}
+
+	let si = import_si(&input);
+	let eit = si.get(&0x0012).expect("an EIT entry");
 	assert_eq!(
-		si.get(&0x0011).expect("an SDT entry").sections,
-		vec![Bytes::from(sdt)],
-		"the multi-packet SDT was reassembled and captured byte-for-byte"
+		eit.sections,
+		vec![Bytes::from(pf_actual), Bytes::from(pf_other)],
+		"only present/following (0x4E, 0x4F) survives; schedule (0x50..=0x6F) is dropped"
+	);
+	assert_eq!(
+		eit.interval,
+		Some(Duration::from_secs(2)),
+		"the EIT PID takes p/f actual's 2s maximum, the tightest of the tables it carries"
+	);
+}
+
+/// Schedule alone leaves no entry at all. An empty one would republish the catalog and
+/// then have export re-emit a PID with nothing on it.
+#[test]
+fn eit_schedule_alone_creates_no_entry() {
+	let input = si_packet(0x0012, &make_section(0x50, &[0x07; 32]));
+	assert!(!import_si(&input).contains_key(&0x0012), "no EIT entry");
+}
+
+/// TDT/TOT is never intercepted: every section is new content, so each would be a catalog
+/// modification, and an exporter's own clock beats a time relayed from upstream.
+#[test]
+fn tdt_is_not_captured() {
+	let input = si_packet(0x0014, &make_section(0x70, &[0x08; 5]));
+	assert!(
+		!import_si(&input).contains_key(&0x0014),
+		"TDT is dropped at the import gate"
 	);
 }
 

@@ -19,18 +19,97 @@ use serde_with::{DisplayFromStr, DurationMilliSeconds, serde_as};
 
 use crate::catalog::hang::CatalogExt;
 
-/// A standalone SI PID we capture, and how often export must re-emit it.
+/// Which of a PID's tables we capture.
+///
+/// A PID is usually all-or-nothing: the SDT PID also carries the BAT, and a table we
+/// have never heard of is as worth preserving as one we have, so [`Self::All`] is the
+/// default posture. [`Self::Only`] exists for a PID that carries tables with genuinely
+/// different carriage requirements, which so far is just the EIT PID.
+///
+/// Selecting on `table_id` does not make the sections any less opaque. The `table_id`
+/// is the first byte of every section under generic section syntax (ISO 13818-1), the
+/// same byte [`section_key`] already reads to dedupe: this narrows what we carry
+/// without widening what we claim to understand.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Tables {
+	/// Every section on the PID, whatever its `table_id`.
+	All,
+	/// Only sections whose `table_id` falls in one of these inclusive ranges.
+	Only(&'static [(u8, u8)]),
+}
+
+/// A standalone SI PID we capture: which of its tables, and how often export must
+/// re-emit them.
 ///
 /// Intervals are the DVB maximum repetition intervals (ETSI TS 101 211); export
 /// treats them as an upper bound, not the source's observed cadence, which is a
-/// property of that multiplexer's bitrate shaping and means nothing downstream.
-/// Adding a table here is a one-line change: the sections themselves are opaque.
-pub(super) const SI_PIDS: &[(u16, Duration)] = &[
+/// property of that multiplexer's bitrate shaping and means nothing downstream. A PID
+/// gets one interval because [`Si`] holds one, so a PID carrying several tables takes
+/// the tightest of them.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SiPid {
+	/// The PID these sections ride on.
+	pub pid: u16,
+
+	/// Which of the PID's tables to capture.
+	pub tables: Tables,
+
+	/// Maximum re-emit interval, recorded in [`Si::interval`] for export.
+	pub interval: Duration,
+}
+
+impl SiPid {
+	/// The entry for `pid`, or `None` if we capture nothing on it.
+	pub fn get(pid: u16) -> Option<&'static Self> {
+		SI_PIDS.iter().find(|si| si.pid == pid)
+	}
+
+	/// Whether a completed section on this PID is one we carry.
+	pub fn captures(&self, section: &[u8]) -> bool {
+		match self.tables {
+			Tables::All => true,
+			Tables::Only(ranges) => {
+				let table_id = section.first().copied().unwrap_or(0);
+				ranges.iter().any(|(first, last)| (*first..=*last).contains(&table_id))
+			}
+		}
+	}
+}
+
+/// The standalone SI PIDs we capture.
+pub(super) const SI_PIDS: &[SiPid] = &[
 	// NIT (network description): 10s.
-	(0x0010, Duration::from_secs(10)),
+	SiPid {
+		pid: 0x0010,
+		tables: Tables::All,
+		interval: Duration::from_secs(10),
+	},
 	// SDT and BAT (service and bouquet description): 2s for SDT Actual, the tightest
 	// of the two, so one interval per PID stays conservative.
-	(0x0011, Duration::from_secs(2)),
+	SiPid {
+		pid: 0x0011,
+		tables: Tables::All,
+		interval: Duration::from_secs(2),
+	},
+	// EIT present/following (0x4E actual, 0x4F other): 2s for actual, the tightest.
+	//
+	// This PID also carries EIT schedule (0x50..=0x6F), which is deliberately left out.
+	// The catalog is whole-state and republished on every change, so it suits a table
+	// that is small and revised rarely. p/f is exactly that: two sections per service,
+	// replaced on event transition. A full schedule is thousands of sections whose
+	// window edges churn as it rolls forward, and every subscriber would pay all of it
+	// at join, ahead of media. If it is ever wanted it belongs on its own track, the way
+	// SCTE-35 sections already ride one (see `SectionStream` in the import path).
+	SiPid {
+		pid: 0x0012,
+		tables: Tables::Only(&[(0x4E, 0x4F)]),
+		interval: Duration::from_secs(2),
+	},
+	// TDT/TOT (0x0014) is left out for the opposite reason: every section is new content
+	// rather than a repetition, so each one would be a catalog modification and a
+	// republish. It also has the least to gain from being relayed, since it carries
+	// nothing but "now", and an exporter's own clock is a better source than a value
+	// forwarded from an upstream multiplexer of unknown delay.
 ];
 
 /// The `mpegts` catalog section.
