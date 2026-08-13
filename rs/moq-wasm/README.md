@@ -57,9 +57,20 @@ Relay-side concerns are deliberately absent: routes, hops, cost, origin scoping,
 and cluster identity have no browser caller. So are the `poll_*` variants, since
 JS has no equivalent of a `kio::Waiter`.
 
+Datagrams are the one part of the track model still unbound:
+`track::Producer::append_datagram` / `write_datagram` and
+`track::Subscriber::recv_datagram` have no counterpart here, so a browser
+publisher can't emit them and a subscriber can't observe them. They only flow on
+moq-lite-05 over a transport that carries datagrams at all, which the browser
+does. Tracked separately.
+
 Media muxing is still out (see below), and there is no WebSocket fallback: the
 Rust `qmux` crate is tokio-based, so a browser session is WebTransport-only
 where `@moq/net` can fall back.
+
+`GroupProducer` has no `closed()`, unlike `TrackProducer`. See the note in
+`src/group.rs`: there is no second handle to wait on, so awaiting it would have
+to hold the producer and fail every `writeFrame` until it resolved.
 
 ### Three moq-net changes this requires
 

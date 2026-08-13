@@ -16,6 +16,17 @@ use wasm_bindgen::prelude::*;
 
 use crate::util::js_err;
 
+/// Convert a JS millisecond duration into a `Duration`, saturating rather than panicking.
+///
+/// `Duration::from_secs_f64` panics on a non-finite or out-of-range value, and `Infinity` is
+/// how a JS caller naturally spells "no limit". A panic here would abort the whole wasm
+/// module over one bad option, so clamp instead: at or below zero is `ZERO`, anything past
+/// `Duration`'s range (including `Infinity`) is `MAX`. NaN lands on `ZERO` via the `max`.
+fn duration_from_millis(millis: f64) -> Duration {
+	let secs = millis.max(0.0) / 1000.0;
+	Duration::try_from_secs_f64(secs).unwrap_or(Duration::MAX)
+}
+
 /// Per-subscription options, requested when a subscription opens and adjustable later
 /// via `TrackSubscriber.update`.
 #[wasm_bindgen]
@@ -53,7 +64,7 @@ impl From<Subscription> for moq_net::track::Subscription {
 		let mut out = Self::default();
 		out.priority = value.priority;
 		out.ordered = value.ordered;
-		out.latency_max = Duration::from_secs_f64(value.latency_max.max(0.0) / 1000.0);
+		out.latency_max = duration_from_millis(value.latency_max);
 		out.group_start = value.start_group;
 		out.group_end = value.end_group;
 		out
@@ -69,6 +80,32 @@ impl From<moq_net::track::Subscription> for Subscription {
 			start_group: value.group_start,
 			end_group: value.group_end,
 		}
+	}
+}
+
+/// Options for fetching a single past group.
+#[wasm_bindgen]
+#[derive(Clone, Default)]
+pub struct Fetch {
+	/// Delivery priority for the fetched group's stream. Higher wins.
+	pub priority: u8,
+}
+
+#[wasm_bindgen]
+impl Fetch {
+	/// Fetch options at their defaults: priority 0.
+	#[wasm_bindgen(constructor)]
+	pub fn new() -> Self {
+		Self::default()
+	}
+}
+
+impl From<Fetch> for moq_net::group::Fetch {
+	fn from(value: Fetch) -> Self {
+		// See the note in `Subscription`: `#[non_exhaustive]`, so fill in field by field.
+		let mut out = Self::default();
+		out.priority = value.priority;
+		out
 	}
 }
 
@@ -109,7 +146,7 @@ impl TryFrom<TrackInfo> for moq_net::track::Info {
 		// See the note in `Subscription`: `#[non_exhaustive]`, so fill in field by field.
 		let mut out = Self::default();
 		out.timescale = Timescale::new(value.timescale).map_err(js_err)?;
-		out.latency_max = Duration::from_secs_f64(value.latency_max.max(0.0) / 1000.0);
+		out.latency_max = duration_from_millis(value.latency_max);
 		out.priority = value.priority;
 		out.ordered = value.ordered;
 		Ok(out)

@@ -53,7 +53,7 @@ mod util;
 pub use announce::{Announce, AnnounceConsumer};
 pub use broadcast::{BroadcastConsumer, BroadcastProducer};
 pub use group::{GroupConsumer, GroupProducer};
-pub use options::{Frame, Subscription, TrackInfo};
+pub use options::{Fetch, Frame, Subscription, TrackInfo};
 pub use session::Session;
 pub use track::{TrackConsumer, TrackProducer, TrackRequest, TrackSubscriber};
 

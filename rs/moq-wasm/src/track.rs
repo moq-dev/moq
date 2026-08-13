@@ -4,13 +4,20 @@ use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 
 use crate::group::{GroupConsumer, GroupProducer};
-use crate::options::{self, Frame, Subscription, TrackInfo};
+use crate::options::{self, Fetch, Frame, Subscription, TrackInfo};
 use crate::util::{Exclusive, js_err};
 
 /// Publishes groups and frames for a single track.
 #[wasm_bindgen]
 pub struct TrackProducer {
 	name: String,
+
+	// A second handle for the waiting methods. `unused` and `closed` take `&self` and are
+	// meant to be awaited *while* publishing, so routing them through `inner` would check
+	// the producer out for the whole wait and reject every write until they resolved. The
+	// clone shares the same track (see the refcount lifecycle in moq-net).
+	waiter: moq_net::track::Producer,
+
 	inner: Exclusive<moq_net::track::Producer>,
 }
 
@@ -18,6 +25,7 @@ impl TrackProducer {
 	pub fn new(inner: moq_net::track::Producer) -> Self {
 		Self {
 			name: inner.name().to_string(),
+			waiter: inner.clone(),
 			inner: Exclusive::new(inner),
 		}
 	}
@@ -92,27 +100,19 @@ impl TrackProducer {
 	/// Reject once the track closes, with the reason it closed.
 	///
 	/// Every close carries a reason, including a clean one, so this never resolves.
+	/// Safe to await while publishing.
 	pub async fn closed(&self) -> Result<(), JsValue> {
-		let err = self
-			.inner
-			.with("closed", async |t| {
-				let e = t.closed().await;
-				(t, e)
-			})
-			.await?;
-		Err(js_err(err))
+		let waiter = self.waiter.clone();
+		Err(js_err(waiter.closed().await))
 	}
 
 	/// Resolve once nobody is subscribed, so the producer can stop working.
+	///
+	/// Safe to await while publishing, which is the point: this is the demand signal a
+	/// publisher races against its own writes.
 	pub async fn unused(&self) -> Result<(), JsValue> {
-		let result = self
-			.inner
-			.with("unused", async |t| {
-				let r = t.unused().await;
-				(t, r)
-			})
-			.await?;
-		result.map_err(js_err)
+		let waiter = self.waiter.clone();
+		waiter.unused().await.map_err(js_err)
 	}
 
 	/// The subscription currently aggregated across every live subscriber, or `null`
@@ -159,8 +159,8 @@ impl TrackConsumer {
 
 	/// Fetch a single past group by sequence.
 	#[wasm_bindgen(js_name = fetchGroup)]
-	pub async fn fetch_group(&self, sequence: u64, priority: Option<u8>) -> Result<GroupConsumer, JsValue> {
-		let options = priority.map(|priority| moq_net::group::Fetch::default().with_priority(priority));
+	pub async fn fetch_group(&self, sequence: u64, options: Option<Fetch>) -> Result<GroupConsumer, JsValue> {
+		let options = options.map(Into::into);
 		let inner = self.inner.fetch_group(sequence, options).await.map_err(js_err)?;
 		Ok(GroupConsumer::new(inner))
 	}
@@ -183,6 +183,13 @@ impl TrackConsumer {
 pub struct TrackSubscriber {
 	name: String,
 	info: TrackInfo,
+
+	// Preferences live on their own handle rather than behind `inner`. A read is pending
+	// most of the time on a live track, and `inner` is checked out for its whole duration,
+	// so routing `update` through it would mean priority and latency could only be changed
+	// in the gaps between arrivals. This is what `moq_net::track::SubscriberControl` is for.
+	control: moq_net::track::SubscriberControl,
+
 	inner: Exclusive<moq_net::track::Subscriber>,
 }
 
@@ -191,6 +198,7 @@ impl TrackSubscriber {
 		Self {
 			name: inner.name().to_string(),
 			info: inner.info().clone().into(),
+			control: inner.control(),
 			inner: Exclusive::new(inner),
 		}
 	}
@@ -289,16 +297,19 @@ impl TrackSubscriber {
 	}
 
 	/// The subscription this reader requested.
+	///
+	/// Readable while a read is in flight, unlike the cursor methods.
 	#[wasm_bindgen(getter)]
-	pub fn subscription(&self) -> Result<Subscription, JsValue> {
-		Ok(self.inner.peek("subscription", |sub| sub.subscription())?.into())
+	pub fn subscription(&self) -> Subscription {
+		self.control.subscription().into()
 	}
 
 	/// Change the subscription, e.g. to raise priority or widen the latency window.
+	///
+	/// Safe to call while a read is in flight, which is the point: a player retunes
+	/// priority or latency mid-stream, not in the gaps between groups.
 	pub fn update(&self, subscription: Subscription) -> Result<(), JsValue> {
-		self.inner
-			.peek("update", |sub| sub.update(subscription.into()))?
-			.map_err(js_err)
+		self.control.update(subscription.into()).map_err(js_err)
 	}
 
 	/// The latest group sequence seen, or `null` if none has arrived.

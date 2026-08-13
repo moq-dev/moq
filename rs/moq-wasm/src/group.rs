@@ -62,21 +62,15 @@ impl GroupProducer {
 		let group = self.inner.take("abort")?;
 		group.abort(moq_net::Error::App(code)).map_err(js_err)
 	}
-
-	/// Reject once the group closes, with the reason it closed.
-	///
-	/// Every close carries a reason, including a clean one, so this never resolves.
-	pub async fn closed(&self) -> Result<(), JsValue> {
-		let err = self
-			.inner
-			.with("closed", async |g| {
-				let e = g.closed().await;
-				(g, e)
-			})
-			.await?;
-		Err(js_err(err))
-	}
 }
+
+// No `closed()` on a group producer, unlike `TrackProducer`. Awaiting it would have to
+// hold the producer for the wait, and every `writeFrame` in the meantime would fail; the
+// two things a caller most wants to do at once are exactly write and watch for a drop.
+// `moq_net::group::Producer` is not `Clone`, so there is no second handle to wait on, and
+// keeping a `group::Consumer` around instead would leave the group permanently "used" and
+// distort the demand signal the track evicts against. Watch `TrackProducer.closed()`
+// instead: a group dies with its track, and the caller owns the group's own lifetime.
 
 /// Reads frames from a single group.
 #[wasm_bindgen]
