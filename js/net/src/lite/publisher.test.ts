@@ -414,11 +414,11 @@ async function servedSubscription(
 	const version = options.version ?? Version.DRAFT_05;
 	const frames = options.frames ?? ["hello"];
 	const pair = createMockTransportPair(version === Version.DRAFT_06 ? ALPN_06_WIP : ALPN_05);
-	const publisher = new Publisher(pair.server, version, randomOrigin());
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, version, randomOrigin(), origin.consume());
 
-	const broadcast = new BroadcastProducer();
+	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
-	publisher.publish(Path.from("test"), broadcast);
 
 	const client = await Stream.open(pair.client);
 
