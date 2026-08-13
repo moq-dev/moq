@@ -16,6 +16,7 @@ from moq_ffi import (
     MoqJsonStreamConfig,
     MoqJsonStreamConsumer,
     MoqMediaConsumer,
+    MoqMediaGroupConsumer,
     MoqTrackConsumer,
 )
 
@@ -63,6 +64,42 @@ class MediaConsumer:
 
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering frames."""
+        self._inner.cancel()
+
+
+class MediaGroupConsumer:
+    """Async iterator of decoded :class:`MediaFrame` within a single fetched group.
+
+    Built via :meth:`BroadcastConsumer.fetch_media_group`. Finite: iteration ends
+    after the group's last frame. Usable as an async context manager that cancels
+    on exit.
+    """
+
+    def __init__(self, inner: MoqMediaGroupConsumer) -> None:
+        self._inner = inner
+
+    @property
+    def sequence(self) -> int:
+        """The sequence number of this group within the track."""
+        return self._inner.sequence()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> MediaFrame:
+        frame = await self._inner.next()
+        if frame is None:
+            raise StopAsyncIteration
+        return frame
+
+    def cancel(self) -> None:
+        """Cancel reading this group and stop delivering frames."""
         self._inner.cancel()
 
 
@@ -372,6 +409,23 @@ class BroadcastConsumer:
         receiving frames, so iterate it until completion.
         """
         return GroupConsumer(await self._inner.fetch_group(name, sequence, options))
+
+    async def fetch_media_group(
+        self,
+        name: str,
+        sequence: int,
+        track: Video | Audio | Container,
+        options: FetchGroupOptions | None = None,
+    ) -> MediaGroupConsumer:
+        """Fetch one group by sequence and decode it into media frames.
+
+        Unlike :meth:`subscribe_media` this holds no live subscription and applies
+        no latency-based group skipping, so every frame in the group is delivered.
+        ``track`` is either the catalog entry for this track (e.g.
+        ``catalog.video[name]``) or a :class:`Container` directly.
+        """
+        container = track if isinstance(track, Container) else track.container
+        return MediaGroupConsumer(await self._inner.fetch_media_group(name, sequence, container, options))
 
     async def subscribe_media(
         self,

@@ -222,6 +222,21 @@ async for request in dynamic:
 
 Call `request.abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
 
+### Fetching media groups
+
+`fetch_group` hands back raw payloads. `fetch_media_group` decodes the same group through the rendition's container, so you get timestamped frames without opening a live subscription:
+
+```python
+catalog = await broadcast_consumer.catalog()
+name, audio = next(iter(catalog.audio.items()))
+
+group = await broadcast_consumer.fetch_media_group(name, sequence=42, track=audio)
+async for frame in group:
+    print(frame.timestamp_us, len(frame.payload))
+```
+
+A fetched media group is finite: it ends after the group's last decoded frame, unlike the live `subscribe_media` stream. Latency-based group skipping does not apply, so you always get every frame in the group.
+
 ### Raw datagrams
 
 Raw tracks can also send best-effort datagrams:
