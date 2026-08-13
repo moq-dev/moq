@@ -33,9 +33,10 @@ use hang::moq_net;
 use crate::publish::PublishFormat;
 use crate::subscribe::{CatalogFormatArg, SubscribeFormat};
 
+// The globals plus the first stage; later stages are parsed as a [`Stage`]. Keep
+// the doc comment to one line: clap renders the rest as `--help` body text, where
+// rustdoc links read as noise.
 /// moq-cli: a media router that wires endpoints onto a shared MoQ Origin.
-///
-/// The globals plus the first stage. Later stages are [`Stage`]s.
 #[derive(Parser, Clone)]
 #[command(name = "moq", version = env!("VERSION"))]
 #[command(after_help = "Separate additional import/export stages with `--`; they share one \
@@ -54,11 +55,11 @@ pub struct Cli {
 	pub command: Command,
 }
 
+// `no_binary_name` because the chunk after a `--` starts at the verb, and the
+// globals are deliberately absent: `--client-connect` past the first stage would
+// read like it scopes that stage, when there is only ever one connection. As with
+// [`Cli`], the doc comment stays one line because clap shows it in `--help`.
 /// A stage after the first: the verb and endpoint, without the globals.
-///
-/// `no_binary_name` because the chunk after a `--` starts at the verb, and the
-/// globals are deliberately absent: `--client-connect` past the first stage would
-/// read like it scopes that stage, when there is only ever one connection.
 #[derive(Parser, Clone)]
 #[command(name = "moq", no_binary_name = true)]
 pub struct Stage {
