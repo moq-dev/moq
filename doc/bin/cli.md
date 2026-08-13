@@ -522,6 +522,9 @@ repetition interval. So the service name, provider, type, and network survive th
 round-trip without being parsed. Regenerated tables (TDT/TOT) and EPG (EIT) are not
 captured: they are live or bulky rather than static identity.
 
+For a redundant broadcast chain built on these two verbs, see
+[Broadcast primary distribution](#broadcast-primary-distribution).
+
 ### FLV
 
 ```bash
@@ -536,6 +539,103 @@ moq --client-connect https://relay.example.com --broadcast my-stream.hang export
 FLV is the classic RTMP container: H.264 video and AAC audio, each with an
 out-of-band header. The enhanced E-RTMP FourCC payloads (HEVC, AV1, Opus) and the
 older codecs (VP6, MP3) are not supported on the stdin/stdout container path.
+
+## Broadcast primary distribution
+
+`import ts` and `export ts` carry a broadcast primary-distribution mux end to
+end, and the relay fans it out to as many receiving sites as required.
+Redundancy is achieved by doubling the chain rather than by any one component: a
+redundant source, two publishers, two relays, two subscribers, and receivers
+that select between the two outputs.
+
+```mermaid
+flowchart LR
+    SA[Source leg A] --> PA["moq import ts"] --> RA[moq-relay A] --> XA["moq export ts + pacer"]
+    SB[Source leg B] --> PB["moq import ts"] --> RB[moq-relay B] --> XB["moq export ts + pacer"]
+    XA --> IRD1[IRD 1]
+    XB --> IRD1
+    XA --> IRD2[IRD 2]
+    XB --> IRD2
+```
+
+MPEG-TS null stuffing is not carried. Where a constant-rate output is required,
+it is regenerated at the handoff.
+
+Every hop is QUIC, so the media is encrypted in transit as shown; for
+production, replace the anonymous `/anon` path with a path-scoped JWT (see
+[Authentication](#authentication)) and authenticate relay peering with mTLS.
+
+### Multicast RTP in (1+1)
+
+`import ts` reads a transport stream from stdin, so the multicast join belongs
+to whatever reads the group. Use a pass-through reader such as TSDuck rather
+than FFmpeg, which re-muxes:
+
+```bash
+# leg A
+tsp -I ip 239.10.0.1:5000 --local-address 10.0.0.7 -O file - \
+    | moq --origin 42 --client-connect https://relay-a.example.com/anon \
+          --broadcast event.hang import ts --latency-max 1s
+
+# leg B: the same command on a second host, same --origin, against the second
+#        relay and the source's other leg if it has one
+```
+
+Where the source is an ST 2022-7 pair, give each publisher one leg; where it is
+a single group, both publishers join it independently and see the same bytes, so
+the feed does not have to be duplicated locally. Either way a publisher may join
+an already-running feed. See [Redundant Publishers](#redundant-publishers-11)
+for what `--origin` promises.
+
+### Relays (1+)
+
+One relay per leg, kept independent of the other so the legs share no failure.
+Add relays *within* a leg for regional fan-out, dialing peers with
+[`cluster.connect`](/bin/relay/cluster):
+
+```bash
+moq-relay relay.toml \
+    --server-quic-congestion-control delay \
+    --server-quic-mtu-discovery=true
+```
+
+### Handoff to a broadcast receiver
+
+MoQ delivers objects in bursts, so `export ts` output is not constant-rate.
+Where the receiver needs one (a hardware IRD locking to PCR does), restore the
+cadence downstream with a CBR pacer, which is also the UDP/RTP sink: it emits
+the paced stream straight to a unicast or multicast destination, so nothing else
+sits between the subscriber and the receiver. Several tools will do it;
+[`mpegts-pacer`](https://github.com/tdrapier-wbd/mpegts-pacer) is one:
+
+```bash
+moq --client-connect https://relay-a.example.com/anon --broadcast event.hang \
+    export ts | mpegts-pacer 239.20.0.1:5000 12000000 --rtp
+```
+
+Pick a target rate above the content rate.
+
+### Redundant handoff (1+1)
+
+Give each leg its own pacer, stream-clocked and sharing the pair's rate, SSRC
+and sequence seed, so the two legs emit identical datagrams under identical RTP
+sequence numbers for an ST 2022-7 receiver to merge:
+
+```bash
+# leg A
+moq --client-connect https://relay-a.example.com/anon --broadcast event.hang \
+    export ts \
+    | mpegts-pacer 239.20.0.1:5000 12000000 --rtp --ssrc 538968071 \
+        --stream-clock --sequence-seed 0 --stall-ms 1000 --on-stall mute
+
+# leg B
+moq --client-connect https://relay-b.example.com/anon --broadcast event.hang \
+    export ts \
+    | mpegts-pacer 239.20.0.2:5000 12000000 --rtp --ssrc 538968071 \
+        --stream-clock --sequence-seed 0 --stall-ms 1000 --on-stall mute
+```
+
+Start both legs together.
 
 ## HLS
 
