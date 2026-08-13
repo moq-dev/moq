@@ -27,7 +27,7 @@
 use std::ffi::{OsStr, OsString};
 use std::time::Duration;
 
-use clap::{ArgGroup, Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand};
 use hang::moq_net;
 
 use crate::publish::PublishFormat;
@@ -103,6 +103,15 @@ impl Invocation {
 
 		let mut stages = vec![cli.command];
 		for chunk in chunks {
+			// A trailing or doubled `--` leaves an empty chunk, which clap would report as a
+			// bare missing-subcommand usage dump. Name what's actually wrong instead.
+			if chunk.is_empty() {
+				return Err(Stage::command().error(
+					clap::error::ErrorKind::MissingSubcommand,
+					"`--` starts another stage, so it must be followed by `import` or `export`",
+				));
+			}
+
 			stages.push(Stage::try_parse_from(chunk)?.command);
 		}
 
@@ -474,7 +483,6 @@ pub struct Fragmented {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use clap::CommandFactory;
 
 	// Catches the conflicts clap only panics on at runtime: a duplicate long, a
 	// dangling `conflicts_with`, a flattened arg colliding with an existing one.
@@ -615,6 +623,33 @@ mod tests {
 		};
 
 		assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+	}
+
+	/// A `--` with nothing after it names no verb, so it's an error rather than an
+	/// empty stage. Same for a doubled `--`, which leaves an empty chunk between them.
+	#[test]
+	fn rejects_an_empty_stage() {
+		for argv in [
+			vec!["moq", "--client-connect", "http://relay", "import", "ts", "--"],
+			vec![
+				"moq",
+				"--client-connect",
+				"http://relay",
+				"import",
+				"ts",
+				"--",
+				"--",
+				"export",
+				"fmp4",
+			],
+		] {
+			let Err(err) = Invocation::try_parse_from(argv.clone()) else {
+				panic!("expected a parse error for {argv:?}")
+			};
+
+			assert_eq!(err.kind(), clap::error::ErrorKind::MissingSubcommand);
+			assert!(err.to_string().contains("must be followed by"), "{err}");
+		}
 	}
 
 	/// The globals belong to the invocation, not a stage: there is only ever one
