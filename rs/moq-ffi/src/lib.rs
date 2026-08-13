@@ -6,6 +6,7 @@
 #[cfg(target_os = "android")]
 mod android;
 pub mod audio;
+pub mod cmaf;
 pub mod consumer;
 pub mod error;
 mod ffi;

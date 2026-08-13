@@ -446,6 +446,71 @@ async fn fetches_cached_group_without_subscribing() {
 	assert!(fetched.read_frame().await.unwrap().is_none());
 }
 
+#[test]
+fn cmaf_muxer_emits_single_track_init_and_deterministic_zero_based_fragment() {
+	use moq_mux::mp4_atom::{self, DecodeMaybe};
+
+	let video = crate::media::MoqVideo {
+		codec: "vp09.00.10.08".into(),
+		description: None,
+		coded: None,
+		display_aspect: None,
+		bitrate: None,
+		framerate: Some(30.0),
+		container: crate::media::MoqContainer::Legacy,
+	};
+	let first_video = vec![
+		crate::media::MoqMediaFrame {
+			payload: b"keyframe".to_vec(),
+			timestamp_us: 10_000_000,
+			keyframe: true,
+			duration_us: Some(17_000),
+		},
+		crate::media::MoqMediaFrame {
+			payload: b"delta".to_vec(),
+			timestamp_us: 10_033_000,
+			keyframe: false,
+			duration_us: None,
+		},
+	];
+	let muxer = crate::cmaf::MoqCmafMuxer::new(crate::cmaf::MoqCmafConfig {
+		track: crate::cmaf::MoqCmafTrack::Video { config: video },
+		origin_us: 10_000_000,
+	})
+	.unwrap();
+
+	let init = muxer.init_segment().unwrap().unwrap();
+	let mut cursor = std::io::Cursor::new(init.as_slice());
+	let mut track_ids = Vec::new();
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+		if let mp4_atom::Any::Moov(moov) = atom {
+			track_ids = moov.trak.iter().map(|trak| trak.tkhd.track_id).collect();
+		}
+	}
+	assert_eq!(track_ids, [1]);
+
+	let video_fragment = muxer.mux(12, first_video).unwrap().fragment.unwrap();
+	let fragment_info = [video_fragment]
+		.into_iter()
+		.map(|fragment| {
+			let mut cursor = std::io::Cursor::new(fragment.as_slice());
+			while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+				if let mp4_atom::Any::Moof(moof) = atom {
+					let traf = &moof.traf[0];
+					return (
+						moof.mfhd.sequence_number,
+						traf.tfhd.track_id,
+						traf.tfdt.as_ref().unwrap().base_media_decode_time,
+						traf.trun[0].entries[0].duration,
+					);
+				}
+			}
+			panic!("fragment missing moof")
+		})
+		.collect::<Vec<_>>();
+	assert_eq!(fragment_info, [(12, 1, 0, Some(510))]);
+}
+
 #[tokio::test]
 async fn dynamic_track_serves_fetch_miss_and_priority() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();

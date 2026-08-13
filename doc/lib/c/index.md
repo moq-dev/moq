@@ -264,6 +264,39 @@ Two knobs run the live encoder. `moq_publish_video_raw_bitrate` retunes it witho
 
 `moq_publish_audio_raw` is the same shape for PCM in and Opus out, and `moq_consume_video_raw` / `moq_consume_audio_raw` are the decode-side mirrors, delivering I420 frames and PCM through the usual callback contract.
 
+## CMAF muxing
+
+Create one muxer per encoded rendition. Use the same `origin_us` for audio and video so independently selected fragments share one zero-based presentation timeline:
+
+```c
+struct moq_cmaf_video_config config = {
+    .codec = "vp09.00.10.08",
+    .codec_len = strlen("vp09.00.10.08"),
+    .framerate = 30.0,
+    .container = 0,  // Legacy
+    .origin_us = interval_start_us,
+};
+int32_t muxer = moq_cmaf_video(&config);
+if (muxer < 0) {
+    fprintf(stderr, "muxer creation failed: %s\n", moq_error());
+}
+
+struct moq_cmaf_frame frame = {
+    .payload = payload,
+    .payload_size = payload_size,
+    .timestamp_us = timestamp_us,
+    .keyframe = true,
+    .duration_us = duration_us,
+    .has_duration = true,
+};
+struct moq_cmaf_output output = {0};
+if (moq_cmaf_mux(muxer, sequence, &frame, 1, &output) < 0) {
+    fprintf(stderr, "mux failed: %s\n", moq_error());
+}
+```
+
+`output.initialization` is NULL until inline H.264/H.265 parameter sets arrive. `output.fragment` is NULL when a batch produces no usable samples. Keep each batch within one codec configuration; if a rendition changes configuration, split and retry at the frame index reported by `moq_error`. Both buffers are borrowed and remain valid until the next call using that muxer or `moq_cmaf_close`.
+
 ## Raw Tracks
 
 Raw tracks carry arbitrary byte payloads without catalog or codec parsing. Use

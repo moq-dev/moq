@@ -149,6 +149,22 @@ async for announcement in client.announced("prefix/"):
         ...
 ```
 
+### Packaging fetched media as CMAF
+
+`CmafMuxer` packages frames selected by the application, including frames read from fetched groups. Use one shared origin for audio and video so independently requested fragments stay synchronized:
+
+```python
+video_muxer = moq.CmafMuxer(catalog.video[video_name], origin_us=interval_start_us)
+output = video_muxer.mux(sequence, video_frames)
+
+if output.initialization is not None:
+    store_init(output.initialization)
+if output.fragment is not None:
+    store_fragment(output.fragment)
+```
+
+Inline H.264/H.265 metadata is resolved from the supplied frames, so `initialization` is `None` until the parameter sets arrive. A batch with no usable samples can return no `fragment`. Keep each batch within one codec configuration; split at the frame index reported by an error when a rendition is reconfigured. `MediaFrame.duration_us` carries an exact sample duration when the source container provides one.
+
 ### Catalog extensions
 
 Advertise application-specific metadata (for example a side-channel transcript track) as an untyped catalog section. The value is any JSON-serializable object; it rides alongside `video`/`audio` and reaches subscribers as `Catalog.sections`.

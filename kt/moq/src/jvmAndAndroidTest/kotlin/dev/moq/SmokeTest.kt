@@ -88,6 +88,35 @@ class SmokeTest {
         }
     }
 
+    @Test
+    fun `cmaf muxer constructs and rebases frames`() {
+        val video = Video(
+            codec = "vp09.00.10.08",
+            description = null,
+            coded = null,
+            displayAspect = null,
+            bitrate = null,
+            framerate = 30.0,
+            container = uniffi.moq.MoqContainer.Legacy,
+        )
+        CmafMuxer(video, originUs = 10_000_000uL).use { muxer ->
+            assertTrue(muxer.initialization != null)
+            val output = muxer.mux(
+                12u,
+                listOf(
+                    MediaFrame(
+                        payload = "keyframe".encodeToByteArray(),
+                        timestampUs = 10_000_000uL,
+                        keyframe = true,
+                        durationUs = 17_000uL,
+                    ),
+                ),
+            )
+            assertTrue(output.initialization != null)
+            assertTrue(output.fragment != null)
+        }
+    }
+
     /** The typed JSON helpers round-trip a `@Serializable` value. */
     @Test
     fun `typed json snapshot round-trips a serializable value`() = runTest {

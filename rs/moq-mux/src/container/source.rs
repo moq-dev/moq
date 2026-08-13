@@ -17,7 +17,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
-use hang::catalog::{AudioConfig, VideoCodec, VideoConfig};
+use hang::catalog::{AudioConfig, Container, VideoCodec, VideoConfig};
 
 use crate::catalog::hang::Container as HangContainer;
 use crate::codec::h264::Avc1;
@@ -25,6 +25,7 @@ use crate::codec::h265::Hvc1;
 use crate::container::{Consumer, Frame};
 
 /// Per-track video transform that bridges between codec shapes.
+#[derive(Clone)]
 pub(crate) enum VideoTransform {
 	Avc1(Avc1),
 	Hvc1(Hvc1),
@@ -160,6 +161,11 @@ impl ExportSource {
 		self.transform.is_none() || self.description.is_some()
 	}
 
+	/// True when inline parameter sets are converted to an out-of-band sample shape.
+	pub fn transforms_video(&self) -> bool {
+		self.transform.is_some()
+	}
+
 	/// Pull the next normalized frame.
 	///
 	/// Parameter-only frames (SPS/PPS-only inputs to the Avc3 transform) are
@@ -253,6 +259,11 @@ impl ExportSource {
 /// Build a video transform for an Annex-B source, or `None` if the catalog
 /// already provides an out-of-band description.
 pub(crate) fn build_video_transform(config: &VideoConfig) -> Option<VideoTransform> {
+	// CMAF samples already use the shape declared by their init segment. The catalog may omit a
+	// duplicate `description`, but that does not make the decoded samples Annex-B.
+	if matches!(config.container, Container::Cmaf { .. }) {
+		return None;
+	}
 	let needs_transform = config.description.as_ref().map(|d| d.is_empty()).unwrap_or(true);
 	if !needs_transform {
 		return None;

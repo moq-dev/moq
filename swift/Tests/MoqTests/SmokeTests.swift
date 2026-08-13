@@ -170,4 +170,32 @@ final class SmokeTests: XCTestCase {
         try track.finish()
         try broadcast.finish()
     }
+
+    func testCMAFMuxerConstructsAndRebasesFrames() throws {
+        let video = Video(
+            codec: "vp09.00.10.08",
+            description: nil,
+            coded: nil,
+            displayAspect: nil,
+            bitrate: nil,
+            framerate: 30,
+            container: .legacy
+        )
+        let muxer = try CMAFMuxer(video: video, originTimestampUs: 10_000_000)
+        XCTAssertNotNil(try muxer.initialization)
+
+        let output = try muxer.mux(
+            sequence: 12,
+            frames: [
+                MediaFrame(
+                    payload: Data("keyframe".utf8),
+                    timestampUs: 10_000_000,
+                    keyframe: true,
+                    durationUs: 17_000
+                )
+            ]
+        )
+        XCTAssertNotNil(output.initialization)
+        XCTAssertNotNil(output.fragment)
+    }
 }

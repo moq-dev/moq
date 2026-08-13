@@ -434,6 +434,7 @@ impl<S: Stream> Export<S> {
 						track.timescale,
 						config,
 						description.map(|d| d.as_ref()),
+						track.source.transforms_video(),
 					)?;
 					trexs.push(mp4_atom::Trex {
 						track_id: trak.tkhd.track_id,

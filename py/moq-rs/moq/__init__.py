@@ -6,6 +6,7 @@ Real-time pub/sub with built-in caching, fan-out, and prioritization.
 from moq_ffi import MoqError as Error
 
 from .client import Client, connect
+from .cmaf import CmafMuxer, CmafOutput
 from .errors import is_auth, is_shutdown
 from .log import log_level
 from .origin import (
@@ -93,6 +94,8 @@ __all__ = [
     "BroadcastRequest",
     "Catalog",
     "CatalogConsumer",
+    "CmafMuxer",
+    "CmafOutput",
     "Client",
     "ConnectionStats",
     "Container",

@@ -19,6 +19,7 @@
 mod api;
 mod audio;
 mod client;
+mod cmaf;
 mod consume;
 mod error;
 mod ffi;
@@ -31,6 +32,7 @@ mod video;
 
 pub use api::*;
 pub use audio::*;
+pub use cmaf::*;
 pub use error::*;
 pub use id::*;
 pub use video::*;

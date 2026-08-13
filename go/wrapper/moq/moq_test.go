@@ -146,6 +146,38 @@ func TestVideoPropertiesUseDefaultedFields(t *testing.T) {
 	}
 }
 
+func TestCMAFMuxerConstructsAndRebasesFrames(t *testing.T) {
+	framerate := 30.0
+	video := moq.Video{
+		Codec:     "vp09.00.10.08",
+		Framerate: &framerate,
+		Container: moq.LegacyContainer(),
+	}
+	muxer, err := moq.NewVideoCMAFMuxer(video, 10_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer muxer.Close()
+
+	initialization, err := muxer.Initialization()
+	if err != nil || initialization == nil {
+		t.Fatalf("initialization=%v err=%v", initialization, err)
+	}
+	duration := uint64(17_000)
+	output, err := muxer.Mux(12, []moq.MediaFrame{{
+		Payload:     []byte("keyframe"),
+		TimestampUs: 10_000_000,
+		Keyframe:    true,
+		DurationUs:  &duration,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Initialization == nil || output.Fragment == nil {
+		t.Fatalf("output=%+v", output)
+	}
+}
+
 func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -208,7 +240,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := produced.WriteFrame(moq.Frame{Payload: []byte("archive"), TimestampUs: request.Sequence()*20_000}); err != nil {
+	if err := produced.WriteFrame(moq.Frame{Payload: []byte("archive"), TimestampUs: request.Sequence() * 20_000}); err != nil {
 		t.Fatal(err)
 	}
 	if err := produced.Finish(); err != nil {

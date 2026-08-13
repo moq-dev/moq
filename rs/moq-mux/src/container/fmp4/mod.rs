@@ -173,6 +173,13 @@ pub enum Error {
 	/// Presentation timestamps do not reveal decode duration for reordered video.
 	#[error("duration-less video needs stated durations or presentation-ordered inference")]
 	MissingVideoDuration,
+
+	/// One batch crossed an inline codec configuration boundary.
+	#[error("codec configuration changed at input frame {index}; split the batch at that frame")]
+	CodecConfigChanged {
+		/// Zero-based input frame index where the new configuration appeared.
+		index: usize,
+	},
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -528,6 +535,7 @@ pub(crate) fn synthesize_video_trak(
 	timescale: u64,
 	config: &VideoConfig,
 	description: Option<&[u8]>,
+	transformed: bool,
 ) -> Result<mp4_atom::Trak> {
 	let width = config.coded_width.unwrap_or(0) as u16;
 	let height = config.coded_height.unwrap_or(0) as u16;
@@ -554,8 +562,9 @@ pub(crate) fn synthesize_video_trak(
 		VideoCodec::H265(h265) => {
 			let mut cursor = std::io::Cursor::new(require_description()?);
 			let hvcc = mp4_atom::Hvcc::decode_body(&mut cursor).map_err(Error::from)?;
-			// `in_band` (catalog) ↔ hev1 sample entry; otherwise hvc1.
-			if h265.in_band {
+			// A normalized inline source has had VPS/SPS/PPS stripped from its samples,
+			// so it must advertise hvc1 even when the input catalog said hev1.
+			if h265.in_band && !transformed {
 				mp4_atom::Codec::from(mp4_atom::Hev1 {
 					visual,
 					hvcc,
@@ -1116,7 +1125,7 @@ mod tests {
 	fn synthesized_video_init_sets_the_track_flags() {
 		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.framerate = Some(30.0);
-		let video = synthesize_video_trak(1, 30_000, &config, None).unwrap();
+		let video = synthesize_video_trak(1, 30_000, &config, None, false).unwrap();
 		let init = encode_init(None, vec![video], Vec::new()).unwrap();
 		let moov = moov(&init);
 

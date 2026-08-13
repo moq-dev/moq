@@ -141,6 +141,24 @@ try broadcast.setVideoProperties(
 
 For sparse or replayed raw tracks, use `track.createGroup(sequence:)`. `track.finish(at:)` declares the exclusive end while still permitting lower groups, and `group.abort(errorCode:)` terminates a group with an application error.
 
+### Packaging fetched media as CMAF
+
+`CMAFMuxer` packages application-selected encoded frames. Give audio and video muxers the same origin so independently fetched fragments share one zero-based timeline:
+
+```swift
+let muxer = try CMAFMuxer(video: catalog.video[videoName]!, originTimestampUs: intervalStartUs)
+let output = try muxer.mux(sequence: sequence, frames: frames)
+
+if let initialization = output.initialization {
+    storeInit(initialization)
+}
+if let fragment = output.fragment {
+    storeFragment(fragment)
+}
+```
+
+Inline H.264/H.265 metadata is resolved from the supplied frames, so `initialization` is `nil` until parameter sets arrive. A batch with no usable samples can return no `fragment`. Keep each batch within one codec configuration; split at the frame index reported by an error when a rendition is reconfigured. `MediaFrame.durationUs` carries an exact sample duration when the source container provides one.
+
 ### Fetching raw groups
 
 Fetch retrieves one group by track name and group sequence without keeping a live subscription:
