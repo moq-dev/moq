@@ -48,9 +48,11 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 - `moq-ffi` (cdylib+staticlib): UniFFI bindings (Python/Swift/Kotlin/Go). Proc-macro based (`uniffi::setup_scaffolding!("moq")`, `#[uniffi::Object]`/`#[uniffi::export]`), no `.udl`. Exposes `Moq*Producer`/`Moq*Consumer`, `MoqError` (`#[uniffi(flat_error)]`).
 - `libmoq` (staticlib): C bindings. `cbindgen` `build.rs` emits `moq.h` + pkg-config. `extern "C"` over opaque handles; dedicated tokio runtime thread (`LazyLock`).
 - `moq-gst` (cdylib): GStreamer plugin. `gst::plugin_define!`, `moqsrc`/`moqsink` elements bridging to a background tokio task.
-- `moq-wasm` (cdylib+rlib): browser/WASM bindings, `wasm-bindgen` over `moq-net`. Consumed by `js/wasm` (`@moq/wasm`); build via `just wasm`.
+- `moq-wasm` (cdylib+rlib): browser/WASM bindings, `wasm-bindgen` over `moq-net`. Consumed by `js/wasm` (`@moq/wasm`); build via `just wasm`. Private modules mirroring moq-net's role modules (`broadcast`, `track`, `group`, `announce`, `session`), re-exported flat. Types carry the role as a prefix (`TrackProducer`, not `track::Producer`) against the usual naming rule, because wasm-bindgen resolves a type in a signature by its Rust ident alone: it ignores the module path *and* `js_name`, so two modules each exporting a `Consumer` silently emit typings where one stands in for the other.
 
 When you change `moq-ffi`'s surface, mirror it in `libmoq` and the language wrappers (see the Cross-Package Sync table in root).
+
+**`moq-wasm` is a binding too, and the easiest one to let rot.** It doesn't go through `moq-ffi` (UniFFI is C-ABI only, so the browser needs its own wasm-bindgen surface), which is exactly why it falls off the radar: it isn't in the `moq-ffi` sync row, `cargo check --workspace` compiles it to nothing on a host target, and no test in the repo exercises it. `just rs wasm` is a *compile* gate, so it catches a `moq-net` change that breaks an existing binding but says nothing about one the binding never grew. So when you add or change a `moq-net` API a browser caller would want (a new `track::Subscriber` control, a group option, a session capability), add the matching method to `rs/moq-wasm` in the same PR. The modules are named after their moq-net counterparts specifically so the two can be read side by side to spot the gap.
 
 ## Producer / Consumer Model (moq-net)
 

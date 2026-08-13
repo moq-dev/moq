@@ -68,6 +68,8 @@ Top-level layout only. Per-crate and per-package detail lives in the nested guid
 
 `rs/moq-ffi` is the single UniFFI core that every non-Rust binding is generated from. The wrappers under `/py`, `/swift`, `/kt`, and `/go` are thin layers over it, and `rs/libmoq` exposes the same core as a C staticlib. So one `moq-ffi` change ripples out to all of them (and their docs) per the [Cross-Package Sync](#cross-package-sync) table. CI mirrors the Swift and Go source packages to their external repos; Kotlin publishes `dev.moq:*` artifacts to Maven Central. For Python, most callers want the ergonomic `moq-rs` wrapper rather than the generated `moq-ffi` bindings directly.
 
+`rs/moq-wasm` is the browser binding and belongs to the same set even though it does not go through `moq-ffi`: UniFFI is C-ABI only, so the browser gets its own wasm-bindgen surface over `moq-net`. **Treat it as one more binding to keep in sync, not as an experiment that can lag.** Nothing compiles it against `moq-net`'s current API except `just rs wasm`, and no test exercises it at all, so a `moq-net` method the browser needs is simply missing until someone notices. When you add or change a `moq-net` API a browser caller would use, mirror it in `rs/moq-wasm` in the same PR, the same way a `moq-ffi` change ripples into `libmoq` and the language wrappers.
+
 ## Per-Directory Guides
 
 Language-specific conventions, crate/package maps, and patterns live in nested `CLAUDE.md` files that load automatically when you work under that directory. Before writing code in one of these areas, read its guide (your editor loads it for you, but check it explicitly if you are reasoning about the area without opening a file in it):
@@ -172,7 +174,7 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 | Change in | Also update |
 |---|---|
 | `rs/moq-ffi` | `rs/libmoq`, `{py,swift,kt}/`, `go/wrapper/moq/*.go` (the `go/ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs`), `doc/lib/{py,swift,kt,go,c}` |
-| `rs/moq-net` wire/API | `js/net`, `doc/concept`, `drafts/draft-lcurley-moq-lite.md` (if the wire spec changes) |
+| `rs/moq-net` wire/API | `js/net`, `rs/moq-wasm` (the browser binding; nothing but `just rs wasm` compiles it, and that only catches a break, never a gap), `doc/concept`, `drafts/draft-lcurley-moq-lite.md` (if the wire spec changes) |
 | `rs/hang` catalog/container | `js/hang`, `doc/concept`, `drafts/draft-lcurley-moq-hang.md` (if the format spec changes) |
 | `rs/moq-token` | `js/token` |
 | `rs/moq-stats` wire (track names, frame shapes) | `doc/bin/relay/config.md` (stats section) |

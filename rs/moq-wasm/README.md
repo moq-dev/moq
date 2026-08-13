@@ -13,23 +13,53 @@ Go). Browsers need `wasm-bindgen`, so this is a separate sibling crate. (For
 *React Native* JS, `uniffi-bindgen-react-native` can reuse `moq-ffi` directly;
 that path is unrelated to this crate.)
 
-## Status: compiles and ships a typed JS package
+## Surface
 
-What works today:
+The modules mirror `moq-net`'s role modules one-for-one, and each type binds the
+methods of its counterpart:
 
-- **The architecture is right.** `moq-net` is generic over
-  `web_transport_trait::Session` and spawns via `web_async::spawn` (not
-  `tokio::spawn`), so it is not tied to native QUIC.
-- **The WebTransport adapter is complete** (`src/transport.rs`): a newtype
-  bridge from `web-transport-wasm` (browser WebTransport) to the
-  `web-transport-trait` abstraction `moq-net` consumes. The orphan rule forces
-  the newtypes; the shapes line up almost 1:1.
-- **It compiles to `wasm32-unknown-unknown` and produces `@moq/wasm`**: `just
-  wasm` emits a typed, importable package (`Session` / `Broadcast` / `Track` /
-  `Group`, used as `Moq.Session` etc. via `import * as Moq`, `Promise`-returning
-  methods, `.d.ts`).
-- Scope is the consume path (connect -> broadcast -> track -> group -> frame),
-  the `@moq/watch` use case. The publish path follows the same shape.
+| module | JS classes | mirrors |
+|---|---|---|
+| `session` | `Session` | `moq_net::Session` + `origin::{Producer, Consumer}` |
+| `broadcast` | `BroadcastProducer`, `BroadcastConsumer` | `moq_net::broadcast` |
+| `track` | `TrackProducer`, `TrackConsumer`, `TrackSubscriber`, `TrackRequest` | `moq_net::track` |
+| `group` | `GroupProducer`, `GroupConsumer` | `moq_net::group` |
+| `announce` | `AnnounceConsumer`, `Announce` | `moq_net::announce` |
+| `options` | `Subscription`, `TrackInfo`, `Frame` | the plain-data types |
+
+That mirroring is the point: the binding is the surface most likely to drift
+from the crate it wraps, so the two are meant to be read side by side. When
+`moq-net` grows an API a browser caller needs, add it to the matching module
+here rather than starting a new flat entry point. See the note in `rs/CLAUDE.md`
+about `moq-wasm` being a binding that nothing but a compile gate covers.
+
+Types carry the role as a prefix (`TrackProducer`, not `track::Producer`),
+against the usual convention of letting the module supply it. wasm-bindgen
+resolves a type in a signature by its Rust ident alone, ignoring both the module
+path and `js_name`, so two modules each exporting a `Consumer` silently generate
+typings where one stands in for the other. The modules stay private and
+re-export flat, so nothing reads `broadcast::BroadcastProducer`.
+
+### Conventions at the boundary
+
+- Durations are milliseconds and timestamps are microseconds, matching `@moq/net`.
+- Sequence numbers stay `u64`, which wasm-bindgen maps to a JS `bigint`.
+- Closing takes an application close code (`moq_net::Error::App`); a JS `Error`
+  has nothing to map onto the wire.
+- `closed()` rejects rather than resolving: every close carries a reason.
+- Async methods take `&self` and must produce `'static` futures, so a handle
+  with an in-flight call moves its value out for the duration (`util::Exclusive`).
+  A re-entrant call errors instead of aliasing: one at a time per handle.
+
+### Not covered
+
+Relay-side concerns are deliberately absent: routes, hops, cost, origin scoping,
+and cluster identity have no browser caller. So are the `poll_*` variants, since
+JS has no equivalent of a `kio::Waiter`.
+
+Media muxing is still out (see below), and there is no WebSocket fallback: the
+Rust `qmux` crate is tokio-based, so a browser session is WebTransport-only
+where `@moq/net` can fall back.
 
 ### Three moq-net changes this requires
 
