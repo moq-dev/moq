@@ -77,6 +77,7 @@
 
 mod client;
 mod coding;
+mod connecting;
 mod error;
 mod ietf;
 mod lite;

@@ -8,8 +8,8 @@ use crate::{
 };
 
 use super::{
-	Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter, cluster, peer, solicit,
-	subscriber::is_protocol_violation,
+	Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter, cluster, namespace_count, peer,
+	solicit, subscriber::is_protocol_violation,
 };
 
 /// Everything one moq-transport session needs to start.
@@ -61,9 +61,17 @@ pub struct Config<S: web_transport_trait::Session> {
 	pub peer_declared: Option<peer::Peer>,
 }
 
-pub fn start<S: web_transport_trait::Session>(
-	config: Config<S>,
-) -> Result<MaybeSendBox<'static, Result<(), Error>>, Error> {
+/// A started session: the driver that runs it, plus the handle that reports when its
+/// initial announce state has landed.
+pub(crate) struct SessionStart {
+	/// Ready once every SUBSCRIBE_NAMESPACE has its initial set, which only the MoQ
+	/// Namespace Count extension marks. Resolves immediately when the peer reports no
+	/// count, since then there is no boundary to wait for.
+	pub connecting: crate::connecting::Connecting,
+	pub driver: MaybeSendBox<'static, Result<(), Error>>,
+}
+
+pub fn start<S: web_transport_trait::Session>(config: Config<S>) -> Result<SessionStart, Error> {
 	let Config {
 		session,
 		setup,
@@ -78,6 +86,11 @@ pub fn start<S: web_transport_trait::Session>(
 		peer_setup_stream,
 		peer_declared,
 	} = config;
+
+	// One producer clone per SUBSCRIBE_NAMESPACE prefix, dropped once that prefix knows
+	// its initial set (or that the peer reports none). Ours goes with the driver, so a
+	// session that opens no prefix at all is connected the moment it starts.
+	let (connecting_producer, connecting) = crate::connecting::Connecting::new();
 
 	let driver = async move {
 		// Our own Hop ID, taken from whichever origin the caller actually supplied so
@@ -163,12 +176,13 @@ pub fn start<S: web_transport_trait::Session>(
 				let mut pub_ns_run = std::pin::pin!(err_only(publisher.clone().run_publish_namespaces()));
 				// One SUBSCRIBE_NAMESPACE per permitted prefix, like `lite::Subscriber`:
 				// the scope is what we may ask for, and it is not the origin's root.
-				let mut sub_ns_run = std::pin::pin!(err_only(async {
-					let mut prefixes = futures::stream::FuturesUnordered::new();
-					for prefix in sub_ns.subscribe_prefixes() {
-						let mut sub_ns = sub_ns.clone();
-						let sub_ns_adapter = sub_ns_adapter.clone();
-						prefixes.push(async move {
+				let mut prefixes = futures::stream::FuturesUnordered::new();
+				for prefix in sub_ns.subscribe_prefixes() {
+					let mut sub_ns = sub_ns.clone();
+					let sub_ns_adapter = sub_ns_adapter.clone();
+					let connecting = connecting_producer.clone();
+					prefixes.push({
+						async move {
 							let stream = match version {
 								Version::Draft16 => {
 									let (send, recv) = sub_ns_adapter.open_native_bi().await?;
@@ -179,7 +193,7 @@ pub fn start<S: web_transport_trait::Session>(
 								}
 								_ => Stream::open(&sub_ns_adapter, version).await?,
 							};
-							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
+							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, Some(connecting)).await {
 								// The peer breaking the protocol is fatal, and the driver
 								// below turns this into the session close the draft wants.
 								if is_protocol_violation(&err) {
@@ -188,8 +202,15 @@ pub fn start<S: web_transport_trait::Session>(
 								tracing::warn!(%err, "subscribe_namespace failed, continuing without");
 							}
 							Ok::<(), Error>(())
-						});
-					}
+						}
+					});
+				}
+
+				// Every prefix holds its own clone; drop ours so a session that opens none
+				// at all reports connected immediately.
+				drop(connecting_producer);
+
+				let mut sub_ns_run = std::pin::pin!(err_only(async move {
 					while let Some(result) = futures::StreamExt::next(&mut prefixes).await {
 						result?;
 					}
@@ -289,24 +310,30 @@ pub fn start<S: web_transport_trait::Session>(
 				// see `Publisher::run_publish_namespaces`.
 				let mut pub_ns_run = std::pin::pin!(err_only(publisher.clone().run_publish_namespaces()));
 				// One SUBSCRIBE_NAMESPACE per permitted prefix; see the draft-16 arm.
-				let mut sub_ns_run = std::pin::pin!(err_only(async {
-					let mut prefixes = futures::stream::FuturesUnordered::new();
-					for prefix in sub_ns.subscribe_prefixes() {
-						let mut sub_ns = sub_ns.clone();
-						let sub_ns_session = sub_ns_session.clone();
-						prefixes.push(async move {
-							let stream = Stream::open(&sub_ns_session, version).await?;
-							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
-								// The peer breaking the protocol is fatal, and the driver
-								// below turns this into the session close the draft wants.
-								if is_protocol_violation(&err) {
-									return Err(err);
-								}
-								tracing::warn!(%err, "subscribe_namespace failed, continuing without");
+				let mut prefixes = futures::stream::FuturesUnordered::new();
+				for prefix in sub_ns.subscribe_prefixes() {
+					let mut sub_ns = sub_ns.clone();
+					let sub_ns_session = sub_ns_session.clone();
+					let connecting = connecting_producer.clone();
+					prefixes.push(async move {
+						let stream = Stream::open(&sub_ns_session, version).await?;
+						if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, Some(connecting)).await {
+							// The peer breaking the protocol is fatal, and the driver
+							// below turns this into the session close the draft wants.
+							if is_protocol_violation(&err) {
+								return Err(err);
 							}
-							Ok::<(), Error>(())
-						});
-					}
+							tracing::warn!(%err, "subscribe_namespace failed, continuing without");
+						}
+						Ok::<(), Error>(())
+					});
+				}
+
+				// Every prefix holds its own clone; drop ours so a session that opens none
+				// at all reports connected immediately.
+				drop(connecting_producer);
+
+				let mut sub_ns_run = std::pin::pin!(err_only(async move {
 					while let Some(result) = futures::StreamExt::next(&mut prefixes).await {
 						result?;
 					}
@@ -361,7 +388,7 @@ pub fn start<S: web_transport_trait::Session>(
 	}
 	.maybe_boxed();
 
-	Ok(driver)
+	Ok(SessionStart { connecting, driver })
 }
 
 /// What a peer's SETUP told us, beyond the stream it arrived on.
@@ -445,6 +472,7 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 	Ok(peer::Peer {
 		cluster: cluster::peer_from_setup(params, version)?,
 		solicit: solicit::from_setup(params, version)?,
+		namespace_count: namespace_count::from_setup(params, version)?,
 	})
 }
 
@@ -473,6 +501,7 @@ async fn run_setup<S: web_transport_trait::Session>(
 	}
 	cluster::peer_into_setup(&mut parameters, self_origin, cost, version);
 	solicit::into_setup(&mut parameters, version);
+	namespace_count::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer.encode(&setup::Setup { parameters }).await?;
@@ -705,7 +734,7 @@ mod tests {
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 
 		writer.encode(&ietf::RequestOk::ID).await.unwrap();
-		writer.encode(&ietf::RequestOk { request_id: None }).await.unwrap();
+		writer.encode(&ietf::RequestOk::default()).await.unwrap();
 		writer.encode(&ietf::Namespace::ID).await.unwrap();
 		writer
 			.encode(&ietf::Namespace {
@@ -759,7 +788,8 @@ mod tests {
 				..Default::default()
 			}),
 		})
-		.expect("start the session");
+		.expect("start the session")
+		.driver;
 
 		let err = tokio::time::timeout(std::time::Duration::from_secs(10), driver)
 			.await
@@ -801,7 +831,8 @@ mod tests {
 			peer_setup_stream: None,
 			peer_declared: None,
 		})
-		.expect("start the session");
+		.expect("start the session")
+		.driver;
 		let _driver = tokio::spawn(driver);
 
 		// Both requests are written before either peer response, which never comes.
@@ -852,7 +883,8 @@ mod tests {
 			peer_setup_stream: None,
 			peer_declared,
 		})
-		.expect("start the session");
+		.expect("start the session")
+		.driver;
 		let _driver = tokio::spawn(driver);
 
 		// Drive until the announce lands, rather than betting on one fixed window.
@@ -960,7 +992,8 @@ mod tests {
 			// carry and the dispatch loop actually runs.
 			peer_declared: Some(peer::Peer::default()),
 		})
-		.expect("start the session");
+		.expect("start the session")
+		.driver;
 
 		tokio::time::timeout(std::time::Duration::from_secs(10), driver)
 			.await

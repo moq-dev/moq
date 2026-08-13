@@ -82,9 +82,14 @@ impl Message for RequestsBlocked {
 /// REQUEST_OK (0x07 in v15) - Generic success response for any request.
 /// Replaces PublishNamespaceOk, SubscribeNamespaceOk in v15.
 /// Also used as response to SubscribeUpdate and TrackStatus in v15.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct RequestOk {
 	pub request_id: Option<RequestId>,
+
+	/// MoQ Namespace Count: how many NAMESPACE messages make up the initial set, on a
+	/// response to SUBSCRIBE_NAMESPACE. Only sent to a peer that asked for it, since an
+	/// unknown parameter closes the session, and ignored on any other response.
+	pub namespace_count: Option<u64>,
 }
 
 impl Message for RequestOk {
@@ -98,7 +103,9 @@ impl Message for RequestOk {
 		} else {
 			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
 		}
-		encode_params!(w, version,);
+		encode_params!(w, version,
+			super::namespace_count::NAMESPACE_COUNT_PARAM => self.namespace_count,
+		);
 		Ok(())
 	}
 
@@ -108,8 +115,13 @@ impl Message for RequestOk {
 		} else {
 			None
 		};
-		decode_params!(r, version,);
-		Ok(Self { request_id })
+		decode_params!(r, version,
+			super::namespace_count::NAMESPACE_COUNT_PARAM => namespace_count: Option<u64>,
+		);
+		Ok(Self {
+			request_id,
+			namespace_count,
+		})
 	}
 }
 
@@ -185,12 +197,43 @@ mod tests {
 	fn test_request_ok_round_trip() {
 		let msg = RequestOk {
 			request_id: Some(RequestId(42)),
+			..Default::default()
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
 		let decoded: RequestOk = decode_message(&encoded, Version::Draft15).unwrap();
 
 		assert_eq!(decoded.request_id, Some(RequestId(42)));
+	}
+
+	/// The MoQ Namespace Count parameter rides the SUBSCRIBE_NAMESPACE response, so a
+	/// count of 0 (an empty initial set) must survive the round trip as `Some(0)`: it is
+	/// the answer "this prefix has nothing", not the absence of an answer.
+	#[test]
+	fn namespace_count_round_trips() {
+		for version in [Version::Draft16, Version::Draft17, Version::Draft18, Version::Draft19] {
+			for count in [0, 1, 1000] {
+				let msg = RequestOk {
+					request_id: matches!(version, Version::Draft16).then_some(RequestId(2)),
+					namespace_count: Some(count),
+				};
+
+				let encoded = encode_message(&msg, version);
+				let decoded: RequestOk = decode_message(&encoded, version).unwrap();
+
+				assert_eq!(decoded.namespace_count, Some(count), "version {version}");
+			}
+		}
+	}
+
+	/// A peer that never heard of the extension sends no parameter, which must stay
+	/// distinguishable from a count of 0.
+	#[test]
+	fn namespace_count_absent_is_none() {
+		let encoded = encode_message(&RequestOk::default(), Version::Draft19);
+		let decoded: RequestOk = decode_message(&encoded, Version::Draft19).unwrap();
+
+		assert_eq!(decoded.namespace_count, None);
 	}
 
 	#[test]
@@ -231,7 +274,7 @@ mod tests {
 
 	#[test]
 	fn test_request_ok_v17_round_trip() {
-		let msg = RequestOk { request_id: None };
+		let msg = RequestOk::default();
 
 		let encoded = encode_message(&msg, Version::Draft17);
 		let decoded: RequestOk = decode_message(&encoded, Version::Draft17).unwrap();
@@ -259,7 +302,7 @@ mod tests {
 
 	#[test]
 	fn test_request_ok_v18_round_trip() {
-		let msg = RequestOk { request_id: None };
+		let msg = RequestOk::default();
 
 		let encoded = encode_message(&msg, Version::Draft18);
 		let decoded: RequestOk = decode_message(&encoded, Version::Draft18).unwrap();
@@ -271,7 +314,7 @@ mod tests {
 	/// treated as Draft14-16 and panic in the encoder.
 	#[test]
 	fn test_request_ok_v18_wire_matches_v17() {
-		let msg = RequestOk { request_id: None };
+		let msg = RequestOk::default();
 		let v17 = encode_message(&msg, Version::Draft17);
 		let v18 = encode_message(&msg, Version::Draft18);
 		assert_eq!(v17, v18);

@@ -8,9 +8,8 @@ use crate::{
 
 use std::task::Poll;
 
-use super::{
-	Connecting, DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, Version,
-};
+use super::{DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, Version};
+use crate::connecting::Connecting;
 
 pub(crate) struct SessionStart {
 	pub recv_bandwidth: Option<bandwidth::Consumer>,

@@ -65,7 +65,7 @@ async function acceptAlpn(
 	version: Ietf.IetfVersion,
 	discovery: boolean,
 ): Promise<Established> {
-	const { control, solicit } = await exchangeSetup(transport, version, "moq-lite-js");
+	const { control, solicit, namespaceCount } = await exchangeSetup(transport, version, "moq-lite-js");
 
 	return new Ietf.Connection({
 		discovery,
@@ -74,6 +74,7 @@ async function acceptAlpn(
 		quic: transport,
 		control,
 		solicit,
+		namespaceCount,
 		// v17+ uses NativeSession which manages its own request IDs; maxRequestId is unused.
 		maxRequestId: 0n,
 		version,
@@ -108,6 +109,7 @@ async function acceptSetup(
 	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 	Ietf.solicitIntoSetup(params);
+	Ietf.namespaceCountIntoSetup(params, version);
 
 	const server = new Ietf.ServerSetup({ version, parameters: params });
 	await server.encode(stream.writer, version);
@@ -123,6 +125,7 @@ async function acceptSetup(
 		maxRequestId,
 		version,
 		solicit: Ietf.solicitFromSetup(client.parameters),
+		namespaceCount: Ietf.namespaceCountFromSetup(client.parameters, version),
 	});
 }
 
@@ -162,6 +165,7 @@ async function acceptNegotiated(transport: WebTransport, url: URL, props?: Accep
 	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 	Ietf.solicitIntoSetup(params);
+	Ietf.namespaceCountIntoSetup(params, selectedVersion as Ietf.IetfVersion);
 
 	const server = new Ietf.ServerSetup({ version: selectedVersion, parameters: params });
 	await server.encode(stream.writer, setupVersion);
@@ -185,6 +189,7 @@ async function acceptNegotiated(transport: WebTransport, url: URL, props?: Accep
 			maxRequestId,
 			version: selectedVersion as Ietf.IetfVersion,
 			solicit: Ietf.solicitFromSetup(client.parameters),
+			namespaceCount: Ietf.namespaceCountFromSetup(client.parameters, selectedVersion as Ietf.IetfVersion),
 		});
 	} else {
 		throw new Error(`unsupported version: ${selectedVersion.toString(16)}`);

@@ -159,7 +159,7 @@ impl Client {
 					.ok_or(Error::Version)?;
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
-				let protocol = ietf::start(ietf::Config {
+				let start = ietf::start(ietf::Config {
 					session: session.clone(),
 					setup: None,
 					request_id_max: None,
@@ -175,7 +175,13 @@ impl Client {
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, protocol));
+
+				// Block until the initial announce set has landed (reported by the MoQ
+				// Namespace Count extension), so a `request_broadcast()` for a live path
+				// resolves immediately instead of racing announcement gossip.
+				let (session, mut driver) = Session::new(session, v, None, start.driver);
+				driver.wait_ready(|waiter| start.connecting.poll_ready(waiter)).await;
+				return Ok((session, driver));
 			}
 			Some(ALPN_18) => {
 				let v = self
@@ -185,7 +191,7 @@ impl Client {
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
-				let protocol = ietf::start(ietf::Config {
+				let start = ietf::start(ietf::Config {
 					session: session.clone(),
 					setup: None,
 					request_id_max: None,
@@ -201,7 +207,13 @@ impl Client {
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, protocol));
+
+				// Block until the initial announce set has landed (reported by the MoQ
+				// Namespace Count extension), so a `request_broadcast()` for a live path
+				// resolves immediately instead of racing announcement gossip.
+				let (session, mut driver) = Session::new(session, v, None, start.driver);
+				driver.wait_ready(|waiter| start.connecting.poll_ready(waiter)).await;
+				return Ok((session, driver));
 			}
 			Some(ALPN_17) => {
 				let v = self
@@ -211,7 +223,7 @@ impl Client {
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
-				let protocol = ietf::start(ietf::Config {
+				let start = ietf::start(ietf::Config {
 					session: session.clone(),
 					setup: None,
 					request_id_max: None,
@@ -227,7 +239,13 @@ impl Client {
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, protocol));
+
+				// Block until the initial announce set has landed (reported by the MoQ
+				// Namespace Count extension), so a `request_broadcast()` for a live path
+				// resolves immediately instead of racing announcement gossip.
+				let (session, mut driver) = Session::new(session, v, None, start.driver);
+				driver.wait_ready(|waiter| start.connecting.poll_ready(waiter)).await;
+				return Ok((session, driver));
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -364,6 +382,7 @@ impl Client {
 			parameters.set_bytes(ietf::ParameterBytes::Path, path.clone().into_bytes());
 		}
 		ietf::solicit::into_setup(&mut parameters, ietf_encoding);
+		ietf::namespace_count::into_setup(&mut parameters, ietf_encoding);
 		let parameters = parameters.encode_bytes(ietf_encoding)?;
 
 		let client = setup::Client {
@@ -408,12 +427,13 @@ impl Client {
 					.map(ietf::RequestId);
 				let peer_declared = ietf::peer::Peer {
 					solicit: ietf::solicit::from_setup(&parameters, v)?,
+					namespace_count: ietf::namespace_count::from_setup(&parameters, v)?,
 					..Default::default()
 				};
 
 				let stream = stream.with_version(v);
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
-				let protocol = ietf::start(ietf::Config {
+				let start = ietf::start(ietf::Config {
 					session: session.clone(),
 					setup: Some(stream),
 					request_id_max,
@@ -427,7 +447,7 @@ impl Client {
 					peer_setup_stream: None,
 					peer_declared: Some(peer_declared),
 				})?;
-				(None, protocol, None)
+				(None, start.driver, Some(start.connecting))
 			}
 		};
 

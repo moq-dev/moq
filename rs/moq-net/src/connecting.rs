@@ -1,7 +1,8 @@
 //! Tracks a session's connection progress so `connect()` can block until it's done.
 //!
 //! Today "connecting" means every announce-prefix stream has received its initial
-//! set (AnnounceInit for Lite01/02, AnnounceOk + N for Lite05). It's deliberately
+//! set: AnnounceInit for Lite01/02, AnnounceOk + N for Lite05+, and the MoQ Namespace
+//! Count on the SUBSCRIBE_NAMESPACE response over moq-transport. It's deliberately
 //! generic so future work (e.g. extension negotiation) can register additional
 //! steps that must finish before a session is considered connected.
 //!
@@ -22,15 +23,15 @@ use kio::{Consumer, Producer, Waiter};
 /// The inner producer exists purely for its `Clone` (adds a step) and `Drop` (closes
 /// the channel when the last one goes); it is never read, hence the allow.
 #[derive(Clone)]
-pub(super) struct ConnectingProducer(#[allow(dead_code)] Producer<()>);
+pub(crate) struct ConnectingProducer(#[allow(dead_code)] Producer<()>);
 
-/// Consumer side: returned by [`crate::lite::start`] and awaited by `connect()`.
+/// Consumer side: returned by the protocol's `start` and awaited by `connect()`.
 pub(crate) struct Connecting(Consumer<()>);
 
 impl Connecting {
 	/// Create a producer/consumer pair. The consumer reports "connected" once every
 	/// [`ConnectingProducer`] (the original plus any clones) has been dropped.
-	pub(super) fn new() -> (ConnectingProducer, Self) {
+	pub(crate) fn new() -> (ConnectingProducer, Self) {
 		let producer = Producer::new(());
 		let consumer = producer.consume();
 		(ConnectingProducer(producer), Self(consumer))

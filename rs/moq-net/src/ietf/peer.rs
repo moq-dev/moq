@@ -15,6 +15,11 @@ pub(crate) struct Peer {
 	/// unsolicited PUBLISH_NAMESPACE is unwanted. `None` when it declared nothing, which
 	/// is the one case where sending us one anyway is not a protocol violation.
 	pub solicit: Option<bool>,
+
+	/// MoQ Namespace Count: whether the peer asked us to report the size of the initial
+	/// set on each SUBSCRIBE_NAMESPACE response. False unless it asked, since an unknown
+	/// Message Parameter closes the session.
+	pub namespace_count: bool,
 }
 
 /// Shared slot for [`Peer`], filled when the peer's SETUP is read.
@@ -73,6 +78,7 @@ mod tests {
 				cost: Some(3),
 			},
 			solicit: None,
+			namespace_count: true,
 		};
 
 		let slot = PeerSetup::default();
@@ -83,6 +89,7 @@ mod tests {
 				cost: Some(0),
 			},
 			solicit: Some(true),
+			namespace_count: false,
 		});
 
 		assert_eq!(slot.get().await, first);

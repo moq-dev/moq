@@ -5,7 +5,7 @@ use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 
 use crate::{
 	AsPath, Error, Timescale,
-	coding::{Stream, Writer},
+	coding::{Encode, Stream, Writer},
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
 	track::Subscription,
 	util::{MaybeBoxedExt, MaybeSendBox},
@@ -864,12 +864,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				writer
 					.encode(&ietf::RequestOk {
 						request_id: Some(request_id),
+						..Default::default()
 					})
 					.await?;
 			}
 			_ => {
 				writer.encode(&ietf::RequestOk::ID).await?;
-				writer.encode(&ietf::RequestOk { request_id: None }).await?;
+				writer.encode(&ietf::RequestOk::default()).await?;
 			}
 		}
 		Ok(())
@@ -1287,7 +1288,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		let ns = Namespaces::new(peer, Target::Requests(None));
-		self.run_namespaces(origin, crate::Path::empty().to_owned(), ns).await
+		self.run_namespaces(origin.announced(), crate::Path::empty().to_owned(), ns)
+			.await
 	}
 
 	/// Handle a SUBSCRIBE_NAMESPACE on its bidi stream.
@@ -1313,35 +1315,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.scope(&[prefix.as_path()])
 			.unwrap_or_else(|| self.origin.empty());
 
-		// Send OK response
-		match self.version {
-			Version::Draft14 => {
-				stream.writer.encode(&ietf::SubscribeNamespaceOk::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::SubscribeNamespaceOk {
-						request_id: msg.request_id,
-					})
-					.await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				stream.writer.encode(&ietf::RequestOk::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::RequestOk {
-						request_id: Some(msg.request_id),
-					})
-					.await?;
-			}
-			_ => {
-				stream.writer.encode(&ietf::RequestOk::ID).await?;
-				stream.writer.encode(&ietf::RequestOk { request_id: None }).await?;
-			}
-		}
+		// Nothing goes out until the peer's SETUP arrives, not even the response: it
+		// decides what an advertisement carries (MoQ Cluster), whether this stream carries
+		// anything at all (MoQ Solicit), and whether the response reports the initial set
+		// (MoQ Namespace Count).
+		let declared = self.peer_setup.get().await;
+		let peer = match cluster::supported(self.version) {
+			true => declared.cluster,
+			false => cluster::Peer::default(),
+		};
 
-		// The extension changes what an advertisement carries, so nothing can be
-		// sent until the peer's SETUP says whether it speaks it.
-		let peer = self.peer().await;
 		// Register the split-horizon peer on the announce cursor too. The origin
 		// model uses this exposure to park a reflected copy before it can replace
 		// the source we are currently advertising to that peer.
@@ -1350,24 +1333,129 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			exclude => origin.excluding(exclude),
 		};
 
-		// Draft-14/15 predate NAMESPACE, so they answer with their own PUBLISH_NAMESPACE
-		// requests and keep this stream open for the subscription's lifetime.
-		let target = match self.version {
-			Version::Draft14 | Version::Draft15 => Target::Requests(Some(stream)),
-			_ => Target::Inline(stream),
-		};
-
 		// Unless the peer asked to be told only on request, it has already heard all of
 		// this as unsolicited PUBLISH_NAMESPACE. Repeating it here would leave it holding
 		// two sources for one namespace, so this stream carries nothing and simply stays
 		// open until the peer is done with it.
-		let origin = match self.requires_solicitation().await {
+		let origin = match declared.solicit.unwrap_or(false) {
 			true => origin,
 			false => origin.empty(),
 		};
 
-		let ns = Namespaces::new(peer, target);
-		self.run_namespaces(origin, prefix, ns).await
+		let mut announced = origin.announced();
+		let mut ns = Namespaces::new(peer, Target::Requests(None));
+
+		// Draft-14/15 predate NAMESPACE, so they answer with their own PUBLISH_NAMESPACE
+		// requests and keep this stream open for the subscription's lifetime. Everything
+		// else answers inline, which is what makes an initial set countable.
+		match self.version {
+			Version::Draft14 | Version::Draft15 => {
+				let ok = match self.version {
+					Version::Draft14 => {
+						stream.writer.encode(&ietf::SubscribeNamespaceOk::ID).await?;
+						stream
+							.writer
+							.encode(&ietf::SubscribeNamespaceOk {
+								request_id: msg.request_id,
+							})
+							.await
+					}
+					_ => {
+						stream.writer.encode(&ietf::RequestOk::ID).await?;
+						stream
+							.writer
+							.encode(&ietf::RequestOk {
+								request_id: Some(msg.request_id),
+								..Default::default()
+							})
+							.await
+					}
+				};
+				ok?;
+				ns.target = Target::Requests(Some(stream));
+			}
+			_ => {
+				let initial = self.initial_namespaces(&mut announced, &prefix, &mut ns);
+				let namespace_count = declared.namespace_count.then_some(initial.len() as u64);
+
+				// One write, so the count and the messages it promises cannot be
+				// separated by anything: the selection already happened, and a route that
+				// moves from here on is a live update the loop below forwards.
+				let mut buf = bytes::BytesMut::new();
+				ietf::RequestOk::ID.encode(&mut buf, self.version)?;
+				ietf::RequestOk {
+					request_id: matches!(self.version, Version::Draft16).then_some(msg.request_id),
+					namespace_count,
+				}
+				.encode(&mut buf, self.version)?;
+
+				for (suffix, advert) in &initial {
+					tracing::debug!(broadcast = %self.origin.absolute(prefix.join(suffix)), "namespace");
+					ietf::Namespace::ID.encode(&mut buf, self.version)?;
+					ietf::Namespace {
+						suffix: suffix.as_path(),
+						cluster: advert.params(),
+					}
+					.encode(&mut buf, self.version)?;
+				}
+
+				let mut buf = buf.freeze();
+				stream.writer.write_all(&mut buf).await?;
+
+				ns.target = Target::Inline(stream);
+			}
+		}
+
+		self.run_namespaces(announced, prefix, ns).await
+	}
+
+	/// Drain what the origin holds right now: the initial set the response counts.
+	///
+	/// Every entry is watched, filtered or not, since a later route change can cross the
+	/// filter in either direction. Only the advertisable ones are returned, already
+	/// selected: running [`Self::select`] once here rather than again per message is what
+	/// keeps the count and the messages from disagreeing, since a route that moves in
+	/// between becomes a live update instead of a message the peer waits for forever.
+	fn initial_namespaces(
+		&self,
+		announced: &mut crate::announce::Consumer,
+		prefix: &crate::PathOwned,
+		ns: &mut Namespaces<S>,
+	) -> Vec<(crate::PathOwned, Advert)> {
+		let mut initial: Vec<(crate::PathOwned, Advert)> = Vec::new();
+
+		while let Some(crate::announce::Update { path, broadcast }) = announced.try_next() {
+			let suffix = path
+				.strip_prefix(prefix)
+				.expect("origin returned invalid path")
+				.to_owned();
+
+			let Some(broadcast) = broadcast else {
+				// A potential race: a just-announced path already unannounced.
+				ns.watched.remove(&suffix);
+				initial.retain(|(held, _)| held != &suffix);
+				continue;
+			};
+
+			let watch = Watched::new(broadcast);
+			let advert = self.select(&watch, &ns.peer);
+			ns.watched.insert(suffix.clone(), watch);
+
+			initial.retain(|(held, _)| held != &suffix);
+			if advert.wanted() {
+				initial.push((suffix, advert));
+			}
+		}
+
+		// What the peer holds once the batch is written, so the loop only speaks up when
+		// the selection moves off it.
+		for (suffix, advert) in &initial {
+			if let Some(watch) = ns.watched.get_mut(suffix) {
+				watch.set_sent(advert.clone());
+			}
+		}
+
+		initial
 	}
 
 	/// Forward origin (un)announces to the peer until the loop ends.
@@ -1377,12 +1465,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	/// for a subset).
 	async fn run_namespaces(
 		&self,
-		origin: origin::Consumer,
+		mut announced: crate::announce::Consumer,
 		prefix: crate::PathOwned,
 		mut ns: Namespaces<S>,
 	) -> Result<(), Error> {
-		let mut announced = origin.announced();
-
 		let mut linger = kio::time::Deadline::new();
 
 		// When to re-offer whatever the peer should hold and doesn't, and how long to wait
@@ -1693,6 +1779,153 @@ mod tests {
 		assert_eq!(Publisher::<SinkSession>::linger_deadline(&watched), None);
 	}
 
+	/// A SETUP slot for a peer that requires solicitation and asked for the MoQ
+	/// Namespace Count, which is what a connecting moq-net client declares.
+	fn asks_for_the_count(namespace_count: bool) -> peer::PeerSetup {
+		let slot = peer::PeerSetup::default();
+		slot.set(peer::Peer {
+			solicit: Some(true),
+			namespace_count,
+			..Default::default()
+		});
+		slot
+	}
+
+	/// Decode the SUBSCRIBE_NAMESPACE response off the wire. `Stream::open` writes no
+	/// header, so the log starts with the response itself.
+	fn response(log: &crate::lite::test_transport::Log, version: Version) -> ietf::RequestOk {
+		use crate::coding::Decode;
+
+		let mut buf = bytes::Bytes::from(log.writes.lock().unwrap().clone());
+		let id = u64::decode(&mut buf, version).expect("a response");
+		assert_eq!(id, ietf::RequestOk::ID, "the response is a REQUEST_OK");
+		ietf::RequestOk::decode(&mut buf, version).expect("decode the response")
+	}
+
+	/// Drive one SUBSCRIBE_NAMESPACE against an origin holding `advertised` broadcasts
+	/// and return the response the peer would read.
+	async fn subscribe_namespace_response(namespace_count: bool, advertised: &[&str]) -> ietf::RequestOk {
+		const VERSION: Version = Version::Draft18;
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let gate = kio::Producer::new(true);
+		let session = SinkSession::gated_bi(gate.consume());
+		let log = session.log.clone();
+		let publisher = Publisher::new(
+			session.clone(),
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			asks_for_the_count(namespace_count),
+			VERSION,
+		);
+
+		// Announced before the request arrives, which is what makes them the initial set.
+		let _held: Vec<_> = advertised
+			.iter()
+			.map(|path| {
+				origin
+					.create_broadcast(*path, crate::broadcast::Route::new().with_announce(true))
+					.unwrap()
+			})
+			.collect();
+		settle().await;
+
+		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let msg = ietf::SubscribeNamespace {
+			request_id: RequestId(1),
+			namespace: crate::Path::new(""),
+		};
+		let mut run = std::pin::pin!(publisher.run_subscribe_namespace_stream(stream, msg));
+		// Parks on the live loop once the initial batch is written.
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		for path in advertised {
+			assert_eq!(
+				occurrences(&log, path.as_bytes()),
+				1,
+				"the counted NAMESPACE for {path} rode the same batch"
+			);
+		}
+
+		response(&log, VERSION)
+	}
+
+	/// The response reports how many NAMESPACE messages make up the initial set, and
+	/// they follow it immediately. That boundary is the whole extension: without it the
+	/// peer cannot tell an empty prefix from one it has not been told about yet.
+	#[tokio::test]
+	async fn the_response_counts_the_initial_set() {
+		let ok = subscribe_namespace_response(true, &["a.hang", "b.hang"]).await;
+		assert_eq!(ok.namespace_count, Some(2));
+	}
+
+	/// An empty initial set is a real answer, not a missing one, so it is reported as 0.
+	#[tokio::test]
+	async fn an_empty_initial_set_counts_zero() {
+		let ok = subscribe_namespace_response(true, &[]).await;
+		assert_eq!(ok.namespace_count, Some(0));
+	}
+
+	/// A peer that did not ask gets no parameter: an unknown Message Parameter closes
+	/// the session, so sending it unasked would break every peer without the extension.
+	#[tokio::test]
+	async fn a_peer_that_did_not_ask_gets_no_count() {
+		let ok = subscribe_namespace_response(false, &["a.hang"]).await;
+		assert_eq!(ok.namespace_count, None);
+	}
+
+	/// The count is of what we will actually send: a broadcast filtered by split horizon
+	/// is never advertised, so counting it would leave the peer waiting for a NAMESPACE
+	/// that is never coming.
+	#[tokio::test]
+	async fn the_count_excludes_a_filtered_namespace() {
+		const VERSION: Version = Version::Draft18;
+
+		let assigned = crate::Origin::new(777).unwrap();
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+
+		let gate = kio::Producer::new(true);
+		let session = SinkSession::gated_bi(gate.consume());
+		let log = session.log.clone();
+		let publisher = Publisher::new(
+			session.clone(),
+			origin.consume(),
+			Control::new(None, false),
+			Some(assigned),
+			asks_for_the_count(true),
+			VERSION,
+		);
+
+		// One broadcast whose only route flows back through the peer, one clean.
+		let mut tainted_hops = crate::OriginList::new();
+		tainted_hops.push(assigned).unwrap();
+		let _tainted = origin
+			.create_broadcast(
+				"reflected.hang",
+				crate::broadcast::Route::new()
+					.with_hops(tainted_hops)
+					.with_announce(true),
+			)
+			.unwrap();
+		let _clean = origin
+			.create_broadcast("clean.hang", crate::broadcast::Route::new().with_announce(true))
+			.unwrap();
+		settle().await;
+
+		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let msg = ietf::SubscribeNamespace {
+			request_id: RequestId(1),
+			namespace: crate::Path::new(""),
+		};
+		let mut run = std::pin::pin!(publisher.run_subscribe_namespace_stream(stream, msg));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		assert_eq!(response(&log, VERSION).namespace_count, Some(1));
+		assert_eq!(occurrences(&log, b"reflected.hang"), 0, "filtered by split horizon");
+		assert_eq!(occurrences(&log, b"clean.hang"), 1);
+	}
+
 	/// A same-path source can splice into (or detach from) an existing broadcast
 	/// without an origin-level (un)announce, silently flipping `advertisable`.
 	/// Namespace forwarding must follow: advertise when a clean route appears,
@@ -1863,6 +2096,7 @@ mod tests {
 				writer
 					.encode(&ietf::RequestOk {
 						request_id: Some(RequestId(1)),
+						..Default::default()
 					})
 					.await
 					.unwrap();
@@ -1870,7 +2104,7 @@ mod tests {
 			// Draft-17+ dropped the request id: the response rides the request's stream.
 			_ => {
 				writer.encode(&ietf::RequestOk::ID).await.unwrap();
-				writer.encode(&ietf::RequestOk { request_id: None }).await.unwrap();
+				writer.encode(&ietf::RequestOk::default()).await.unwrap();
 			}
 		}
 

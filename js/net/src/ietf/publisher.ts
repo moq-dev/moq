@@ -7,7 +7,9 @@ import { type Stream, Writer } from "../stream.ts";
 import type { Timescale } from "../time.ts";
 import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
+import { namespaceCountIntoResponse } from "./namespace_count.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
+import { Parameters } from "./parameters.ts";
 import { fromWire } from "./priority.ts";
 import { PublishDone } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceDone, PublishNamespaceOk } from "./publish_namespace.ts";
@@ -75,6 +77,7 @@ export class Publisher {
 	#quic: WebTransport;
 	#session: Session;
 	#requiresSolicitation: boolean;
+	#reportsNamespaceCount: boolean;
 
 	// Our published broadcasts.
 	// It's a signal so we can live update any subscribe_namespace streams.
@@ -85,13 +88,16 @@ export class Publisher {
 	 * @param quic - The WebTransport session (for uni streams)
 	 * @param session - The session abstraction for bidi streams and request IDs
 	 * @param requiresSolicitation - Whether the peer's SETUP asked to be told on request
+	 * @param reportsNamespaceCount - Whether its SETUP asked for the size of the initial
+	 *   set on each SUBSCRIBE_NAMESPACE response (MoQ Namespace Count)
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, session: Session, requiresSolicitation: boolean) {
+	constructor(quic: WebTransport, session: Session, requiresSolicitation: boolean, reportsNamespaceCount = false) {
 		this.#quic = quic;
 		this.#session = session;
 		this.#requiresSolicitation = requiresSolicitation;
+		this.#reportsNamespaceCount = reportsNamespaceCount;
 	}
 
 	/**
@@ -298,6 +304,17 @@ export class Publisher {
 		// Draft-14/15: the open PUBLISH_NAMESPACE request per advertised suffix.
 		const requests = new Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream }>();
 
+		// The initial set: what we hold right now, snapshotted before the response so the
+		// count and the entries that follow it agree. A peer we advertise to unasked hears
+		// none of it on this stream, so its initial set is empty.
+		const initial: Path.Valid[] = [];
+		if (!legacy && this.#requiresSolicitation) {
+			for (const name of this.#broadcasts.peek()?.keys() ?? []) {
+				const suffix = Path.stripPrefix(prefix, name);
+				if (suffix !== null) initial.push(suffix);
+			}
+		}
+
 		try {
 			// Send OK response
 			if (version === Version.DRAFT_14) {
@@ -306,8 +323,13 @@ export class Publisher {
 				await ok.encode(stream.writer, version);
 			} else {
 				await stream.writer.u53(RequestOk.id);
+				const parameters = new Parameters();
+				if (this.#reportsNamespaceCount) {
+					namespaceCountIntoResponse(parameters, BigInt(initial.length));
+				}
 				const ok = new RequestOk({
 					requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
+					parameters,
 				});
 				await ok.encode(stream.writer, version);
 			}
@@ -339,7 +361,16 @@ export class Publisher {
 				}
 			};
 
-			let active = new Set<Path.Valid>();
+			// The counted entries go out before anything else on the stream, and the loop
+			// below starts out holding them: one that vanished in between is withdrawn on
+			// its first turn rather than silently dropped, which would leave the peer
+			// waiting on a count it can never reach.
+			for (const suffix of initial) {
+				await stream.writer.u53(SubscribeNamespaceEntry.id);
+				await new SubscribeNamespaceEntry({ suffix }).encode(stream.writer, version);
+			}
+
+			let active = new Set<Path.Valid>(initial);
 			let retry = 0;
 			// What the peer refused, and whether coming back is worth anything.
 			const refused = new Map<Path.Valid, Refused>();

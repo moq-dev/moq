@@ -63,6 +63,16 @@ If it plays, you interop. That's the whole test.
 - **We ask everyone.** There's no way to tell us not to bother: answering a
   `SUBSCRIBE_NAMESPACE` with an empty set costs one stream, while waiting on
   your `SETUP` to find out costs a round trip on every connection.
+- **We count the initial set.** moq-transport marks nothing between the
+  namespaces you already had and the ones that showed up a moment later, so a
+  subscriber can never conclude that a prefix is empty. The [MoQ Namespace Count
+  extension](/draft/moq-namespace-count) is a `SETUP` option asking for a
+  `NAMESPACE_COUNT` parameter on each `SUBSCRIBE_NAMESPACE` response: that many
+  `NAMESPACE` messages are the current set, and everything after is a live
+  update. We ask for it, we answer it, and `connect()` waits for the count
+  before it returns so a lookup for a live broadcast resolves instead of racing.
+  Unknown Message Parameters are fatal in moq-transport, so we only send it to a
+  peer that asked.
 - **One namespace, one message.** We never advertise the same namespace as both
   `PUBLISH_NAMESPACE` and `NAMESPACE` on one session; your declaration picks
   which. Rejecting a `PUBLISH_NAMESPACE` is fine and keeps the session up.

@@ -330,6 +330,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		mut stream: Stream<T, Version>,
 		prefix: PathOwned,
+		mut connecting: Option<crate::connecting::ConnectingProducer>,
 	) -> Result<(), Error> {
 		let request_id = self.control.next_request_id().await?;
 
@@ -362,12 +363,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let size: u16 = stream.reader.decode().await?;
 		let mut data = stream.reader.read_exact(size as usize).await?;
 
-		match type_id {
+		// MoQ Namespace Count: how many NAMESPACE messages make up the initial set. `None`
+		// on every peer that does not implement the extension, which leaves this prefix
+		// with no boundary at all rather than one we invent.
+		let mut initial_remaining = match type_id {
 			ietf::SubscribeNamespaceOk::ID if self.version == Version::Draft14 => {
 				let _msg = ietf::SubscribeNamespaceOk::decode_msg(&mut data, self.version)?;
+				None
 			}
 			ietf::RequestOk::ID => {
-				let _msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
+				let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
+				msg.namespace_count
 			}
 			ietf::SubscribeNamespaceError::ID if self.version == Version::Draft14 => {
 				let msg = ietf::SubscribeNamespaceError::decode_msg(&mut data, self.version)?;
@@ -380,9 +386,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return Err(Error::Cancel);
 			}
 			_ => return Err(Error::UnexpectedMessage),
-		}
+		};
 
-		tracing::debug!(%prefix, "subscribe_namespace ok");
+		tracing::debug!(%prefix, count = ?initial_remaining, "subscribe_namespace ok");
+
+		// Nothing left to wait for: an empty initial set is complete on arrival, and a peer
+		// that reported no count never marks one, so holding `connect()` on it would hang.
+		if initial_remaining.unwrap_or(0) == 0 {
+			initial_remaining = None;
+			connecting.take();
+		}
 
 		// The extension changes the NAMESPACE encoding, so we can't parse one until
 		// the peer's SETUP says whether it negotiated.
@@ -401,7 +414,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// its channel without being withdrawn, so hold the front open for a reconnect.
 		// This is what moq-lite already does, where the equivalent map is a local whose
 		// guards drop.
-		let res = self.run_namespace_entries(&mut stream, &prefix, &peer, &mut live).await;
+		let res = self
+			.run_namespace_entries(&mut stream, &prefix, &peer, &mut live, initial_remaining, connecting)
+			.await;
 		for path in live {
 			let _ = self.stop_announce(path, Detach::Abrupt);
 		}
@@ -413,12 +428,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// `live` tracks the suffixes this stream has advertised, so a repeat is recognized
 	/// as an update rather than a second advertisement, and the caller can release
 	/// whatever is still held when the stream ends.
+	///
+	/// `initial_remaining` is how many of them are still owed by the MoQ Namespace Count
+	/// the response carried; `connecting` is dropped once they have all arrived, which is
+	/// what `connect()` blocks on. `None` for either means this prefix has no boundary.
 	async fn run_namespace_entries<T: web_transport_trait::Session>(
 		&mut self,
 		stream: &mut Stream<T, Version>,
 		prefix: &PathOwned,
 		peer: &cluster::Peer,
 		live: &mut std::collections::HashSet<PathOwned>,
+		mut initial_remaining: Option<u64>,
+		mut connecting: Option<crate::connecting::ConnectingProducer>,
 	) -> Result<(), Error> {
 		loop {
 			let type_id: u64 = match stream.reader.decode_maybe().await? {
@@ -437,6 +458,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					if !data.is_empty() {
 						return Err(Error::WrongSize);
 					}
+
+					// Counted before anything can drop it: the count is of messages the peer
+					// sent, and it has no idea we discard the reflected ones.
+					if let Some(remaining) = initial_remaining.as_mut() {
+						*remaining -= 1;
+						if *remaining == 0 {
+							initial_remaining = None;
+							connecting.take();
+						}
+					}
+
 					let path = prefix.join(&msg.suffix);
 					let Some(advert) = self.route(msg.cluster.as_ref(), peer) else {
 						// Looped back through us: forwarding it would extend the loop and
@@ -762,12 +794,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					.writer
 					.encode(&ietf::RequestOk {
 						request_id: Some(request_id),
+						..Default::default()
 					})
 					.await?;
 			}
 			_ => {
 				stream.writer.encode(&ietf::RequestOk::ID).await?;
-				stream.writer.encode(&ietf::RequestOk { request_id: None }).await?;
+				stream.writer.encode(&ietf::RequestOk::default()).await?;
 			}
 		}
 		Ok(())
@@ -1494,7 +1527,8 @@ mod tests {
 		);
 
 		let stream = Stream::open(&session, Version::Draft16).await.unwrap();
-		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("cam").to_owned()));
+		let mut run =
+			std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("cam").to_owned(), None));
 		// Parks awaiting the peer's response; the request is already on the wire.
 		assert!(futures::poll!(run.as_mut()).is_pending());
 
@@ -1502,26 +1536,112 @@ mod tests {
 		assert_eq!(occurrences(&log, b"rootns"), 0, "asked the peer for our local root");
 	}
 
-	/// The peer's REQUEST_OK followed by one NAMESPACE, framed exactly as
+	/// The peer's REQUEST_OK followed by one NAMESPACE per suffix, framed exactly as
 	/// `run_subscribe_namespace` reads it -- built with the crate's own writer so the
 	/// framing can't drift from the encoder under test.
-	async fn namespace_response(version: Version, suffix: &str) -> Vec<u8> {
+	///
+	/// `namespace_count` is the MoQ Namespace Count the response reports, `None` for a
+	/// peer that never heard of the extension.
+	async fn namespace_response(version: Version, namespace_count: Option<u64>, suffixes: &[&str]) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 
 		writer.encode(&ietf::RequestOk::ID).await.unwrap();
-		writer.encode(&ietf::RequestOk { request_id: None }).await.unwrap();
-		writer.encode(&ietf::Namespace::ID).await.unwrap();
 		writer
-			.encode(&ietf::Namespace {
-				suffix: crate::Path::new(suffix),
-				cluster: None,
+			.encode(&ietf::RequestOk {
+				namespace_count,
+				..Default::default()
 			})
 			.await
 			.unwrap();
 
+		for suffix in suffixes {
+			writer.encode(&ietf::Namespace::ID).await.unwrap();
+			writer
+				.encode(&ietf::Namespace {
+					suffix: crate::Path::new(suffix),
+					cluster: None,
+				})
+				.await
+				.unwrap();
+		}
+
 		let writes = log.writes.lock().unwrap();
 		writes.clone()
+	}
+
+	/// Drive one SUBSCRIBE_NAMESPACE against a scripted response and report whether the
+	/// session counts as connected: pending means `connect()` is still waiting on the
+	/// initial set.
+	async fn connected_after(version: Version, namespace_count: Option<u64>, suffixes: &[&str]) -> bool {
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let session = crate::lite::test_transport::ScriptedSession::new(
+			namespace_response(version, namespace_count, suffixes).await,
+		);
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+		let mut subscriber = Subscriber::new(
+			session.clone(),
+			origin,
+			Control::new(None, false),
+			None,
+			peer_setup,
+			crate::Origin::new(1).unwrap(),
+			None,
+			version,
+			tasks,
+		);
+
+		let (producer, connecting) = crate::connecting::Connecting::new();
+		let stream = Stream::open(&session, version).await.unwrap();
+		let mut run =
+			std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::empty().to_owned(), Some(producer)));
+
+		for _ in 0..100 {
+			let _ = futures::poll!(run.as_mut());
+			if connecting.poll_ready(&kio::Waiter::noop()).is_ready() {
+				return true;
+			}
+			settle().await;
+		}
+
+		false
+	}
+
+	/// The whole point of the extension: `connect()` waits until the counted NAMESPACE
+	/// messages have landed, so a `request_broadcast` for a live path resolves instead of
+	/// racing the announcement.
+	#[tokio::test]
+	async fn a_counted_initial_set_is_connected_once_it_arrives() {
+		assert!(
+			connected_after(Version::Draft18, Some(2), &["a.hang", "b.hang"]).await,
+			"the promised messages arrived"
+		);
+	}
+
+	/// A count the peer never sends leaves the session waiting, which is what bounds it:
+	/// nothing else on the stream marks the boundary.
+	#[tokio::test]
+	async fn a_short_initial_set_never_connects() {
+		assert!(
+			!connected_after(Version::Draft18, Some(2), &["a.hang"]).await,
+			"counted two, sent one"
+		);
+	}
+
+	/// An empty set is complete on arrival, and a peer that reports no count has no
+	/// boundary to offer. Both must resolve rather than hang `connect()` forever.
+	#[tokio::test]
+	async fn an_absent_or_empty_initial_set_connects_immediately() {
+		assert!(
+			connected_after(Version::Draft18, Some(0), &[]).await,
+			"an empty initial set is complete"
+		);
+		assert!(
+			connected_after(Version::Draft18, None, &["a.hang"]).await,
+			"a peer without the extension reports no boundary"
+		);
 	}
 
 	/// A NAMESPACE suffix is relative to the prefix we subscribed, and mounts under
@@ -1541,7 +1661,8 @@ mod tests {
 			.and_then(|rooted| rooted.scope(&[crate::Path::new("cam")]))
 			.expect("scope the origin");
 
-		let session = crate::lite::test_transport::ScriptedSession::new(namespace_response(VERSION, "x.hang").await);
+		let session =
+			crate::lite::test_transport::ScriptedSession::new(namespace_response(VERSION, None, &["x.hang"]).await);
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		// Draft-18 can negotiate the cluster extension, so the subscriber waits for
 		// the peer's SETUP before resolving advertisements; settle it as extension-off.
@@ -1562,7 +1683,7 @@ mod tests {
 		let prefix = subscriber.subscribe_prefixes().pop().expect("one prefix");
 		let stream = Stream::open(&session, VERSION).await.unwrap();
 		// Parks on the read after the scripted NAMESPACE is consumed.
-		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix));
+		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, None));
 		for _ in 0..100 {
 			// The result is deliberately ignored: a regressed mount lands out of scope
 			// and errors here, which the assertions below name far better than a poll
@@ -1901,7 +2022,8 @@ mod tests {
 
 		// The peer answers, advertises one namespace, then the stream ends without ever
 		// retracting it.
-		let session = crate::lite::test_transport::ScriptedSession::eof(namespace_response(VERSION, "x.hang").await);
+		let session =
+			crate::lite::test_transport::ScriptedSession::eof(namespace_response(VERSION, None, &["x.hang"]).await);
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		std::mem::forget(task_set);
 		// Draft-18 can negotiate the extension, so the read loop waits for the peer's
@@ -1922,7 +2044,7 @@ mod tests {
 
 		let stream = Stream::open(&session, VERSION).await.unwrap();
 		subscriber
-			.run_subscribe_namespace(stream, crate::Path::new("").to_owned())
+			.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), None)
 			.await
 			.expect("a clean FIN is not an error");
 		settle().await;

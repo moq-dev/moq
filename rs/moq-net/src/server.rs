@@ -212,6 +212,7 @@ impl Server {
 					.map(ietf::RequestId);
 				let peer_declared = ietf::peer::Peer {
 					solicit: ietf::solicit::from_setup(&params, v)?,
+					namespace_count: ietf::namespace_count::from_setup(&params, v)?,
 					..Default::default()
 				};
 				(path, request_id_max, peer_declared)
@@ -398,7 +399,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 			} => {
 				// The client's SETUP was read in `accept_request`; hand the stream back
 				// for GOAWAY. A server never advertises a path, hence `None`.
-				let protocol = ietf::start(ietf::Config {
+				let start = ietf::start(ietf::Config {
 					session: session.clone(),
 					setup: None,
 					request_id_max: None,
@@ -414,7 +415,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					peer_declared: Some(peer_setup.declared),
 				})?;
 				tracing::debug!(?version, "connected");
-				return Ok(Session::new(session, version.into(), None, protocol));
+				return Ok(Session::new(session, version.into(), None, start.driver));
 			}
 			Handshake::LiteBare { session, version } => {
 				let start = lite::start(lite::Config {
@@ -482,6 +483,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 				parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
 				parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
 				ietf::solicit::into_setup(&mut parameters, v);
+				ietf::namespace_count::into_setup(&mut parameters, v);
 				parameters.encode_bytes(v)?
 			}
 			Version::Lite(v) => lite::Parameters::default().encode_bytes(v)?,
@@ -512,7 +514,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 			Version::Ietf(v) => {
 				let stream = stream.with_version(v);
 				// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
-				let protocol = ietf::start(ietf::Config {
+				let start = ietf::start(ietf::Config {
 					session: session.clone(),
 					setup: Some(stream),
 					request_id_max,
@@ -526,7 +528,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					peer_setup_stream: None,
 					peer_declared: Some(peer_declared),
 				})?;
-				(None, protocol)
+				(None, start.driver)
 			}
 		};
 

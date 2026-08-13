@@ -7,20 +7,23 @@ import { Reader, Stream, Writer } from "../stream.ts";
  * halves run in parallel and the protocol is symmetric, so both `connect`
  * (client) and `accept` (server) use this same function.
  *
- * Returns the control stream plus whether the peer requires solicitation, which decides
- * whether we announce namespaces unprompted (see the MoQ Solicit extension). We declare it
- * ourselves on every session: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an
- * unsolicited advertisement can tell us nothing we won't have asked for.
+ * Returns the control stream plus what the peer declared: whether it requires
+ * solicitation, which decides whether we announce namespaces unprompted (see the MoQ
+ * Solicit extension), and whether it wants the size of each initial namespace set (see the
+ * MoQ Namespace Count extension). We declare both ourselves on every session: we send
+ * SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement can tell us
+ * nothing we won't have asked for, and each of those asks wants a boundary.
  */
 export async function exchangeSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
 	implementation: string,
-): Promise<{ control: Stream; solicit: boolean | undefined }> {
+): Promise<{ control: Stream; solicit: boolean | undefined; namespaceCount: boolean }> {
 	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode(implementation));
 	Ietf.solicitIntoSetup(params);
+	Ietf.namespaceCountIntoSetup(params, version);
 	const setupMsg = new Ietf.Setup({ parameters: params });
 
 	const [writer, received] = await Promise.all([
@@ -31,6 +34,7 @@ export async function exchangeSetup(
 	return {
 		control: new Stream({ writer, reader: received.reader }),
 		solicit: received.solicit,
+		namespaceCount: received.namespaceCount,
 	};
 }
 
@@ -46,7 +50,7 @@ async function sendSetup(transport: WebTransport, version: Ietf.IetfVersion, set
 async function receiveSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
-): Promise<{ reader: Reader; solicit: boolean | undefined }> {
+): Promise<{ reader: Reader; solicit: boolean | undefined; namespaceCount: boolean }> {
 	const uniReader = transport.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
 	>;
@@ -62,5 +66,9 @@ async function receiveSetup(
 	}
 	const setup = await Ietf.Setup.decode(reader, version);
 
-	return { reader, solicit: Ietf.solicitFromSetup(setup.parameters) };
+	return {
+		reader,
+		solicit: Ietf.solicitFromSetup(setup.parameters),
+		namespaceCount: Ietf.namespaceCountFromSetup(setup.parameters, version),
+	};
 }

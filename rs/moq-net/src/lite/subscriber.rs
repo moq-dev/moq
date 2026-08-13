@@ -17,7 +17,8 @@ use crate::{
 	track::Subscription,
 };
 
-use super::{ConnectingProducer, RouteCost, Version};
+use super::{RouteCost, Version};
+use crate::connecting::ConnectingProducer;
 
 use web_async::Lock;
 

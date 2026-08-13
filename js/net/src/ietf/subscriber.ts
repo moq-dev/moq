@@ -10,6 +10,7 @@ import type * as track from "../track.ts";
 import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
 import { TrackAliases } from "./aliases.ts";
+import { namespaceCountFromResponse } from "./namespace_count.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
 import { toWire } from "./priority.ts";
 import { type Publish, PublishError } from "./publish.ts";
@@ -136,7 +137,14 @@ export class Subscriber {
 				// Read response
 				const respTypeId = await stream.reader.u53();
 				if (respTypeId === RequestOk.id) {
-					await RequestOk.decode(stream.reader, version);
+					const ok = await RequestOk.decode(stream.reader, version);
+					// MoQ Namespace Count: how many of the entries below make up the initial
+					// set. `undefined` on a peer without the extension, which is every peer
+					// that leaves the boundary unmarked.
+					const count = namespaceCountFromResponse(ok.parameters);
+					if (count !== undefined) {
+						console.debug(`subscribe_namespace ok: prefix=${prefix} initial=${count}`);
+					}
 				} else if (respTypeId === SubscribeNamespaceOk.id) {
 					// v14: SubscribeNamespaceOk
 					const size = await stream.reader.u16();

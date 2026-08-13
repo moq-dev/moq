@@ -65,6 +65,7 @@ export class Connection implements Established {
 	 * @param maxRequestId - The initial max request ID
 	 * @param version - The negotiated protocol version
 	 * @param solicit - What the peer's SETUP declared (undefined when it declared nothing)
+	 * @param namespaceCount - Whether its SETUP asked for the initial set size
 	 *
 	 * @internal
 	 */
@@ -77,6 +78,7 @@ export class Connection implements Established {
 		client,
 		discovery = true,
 		solicit,
+		namespaceCount = false,
 	}: {
 		url: URL;
 		quic: WebTransport;
@@ -91,6 +93,11 @@ export class Connection implements Established {
 		 * nothing, which is the one case where announcing at us unasked is not a bug.
 		 */
 		solicit?: boolean;
+		/**
+		 * Whether the peer asked for the size of the initial set on each
+		 * SUBSCRIBE_NAMESPACE response (MoQ Namespace Count).
+		 */
+		namespaceCount?: boolean;
 	}) {
 		this.url = url;
 		this.discovery = discovery;
@@ -113,7 +120,7 @@ export class Connection implements Established {
 			});
 		}
 
-		this.#publisher = new Publisher(this.#quic, this.#session, solicit ?? false);
+		this.#publisher = new Publisher(this.#quic, this.#session, solicit ?? false, namespaceCount);
 		this.#solicit = solicit;
 		this.#subscriber = new Subscriber(this.#session);
 

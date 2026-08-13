@@ -24,6 +24,8 @@ pub enum ParameterVarInt {
 	RelayCost = super::cluster::RELAY_COST,
 	/// SOLICIT, from the MoQ Solicit extension.
 	Solicit = super::solicit::SOLICIT,
+	/// NAMESPACE_COUNT, from the MoQ Namespace Count extension.
+	NamespaceCount = super::namespace_count::NAMESPACE_COUNT_OPTION,
 	#[num_enum(catch_all)]
 	Unknown(u64),
 }
