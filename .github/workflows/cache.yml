@@ -1,17 +1,14 @@
 name: Cache
 
-# Populates the Rust build cache that check.yml restores.
+# Populates the Rust build cache that check.yml restores, and the dev shell
+# closure that every nix job substitutes.
 #
-# Actions scopes cache reads to the current branch plus the default branch, so a
-# pull request can only ever restore a cache saved on its own ref or on `main`.
-# check.yml runs on `pull_request` only, so nothing was ever written to `main`
-# and every PR started from scratch ("No cache found"), recompiling the world.
-# Worse, each PR saved its own 2-3 GB cache that no other PR could read, which
-# filled the repository's 10 GB budget with entries nobody could use and evicted
-# them before a re-run could benefit.
-#
-# So `main` is the single writer and pull requests are readers only (see
-# `save-if` in check.yml). One cache everyone can reach beats a dozen nobody can.
+# Actions scopes cache reads to the current branch plus the default branch, so
+# only a cache written here on `main` is reachable from a pull request. `main`
+# is therefore the single writer and pull requests are readers (`save-if` in
+# check.yml): one cache everyone can reach, rather than per-PR entries that fill
+# the repository's 10 GB budget while remaining private to the PR that wrote
+# them.
 #
 # This runs the unscoped suite rather than the diff-scoped one: the point is to
 # leave artifacts for whatever a future PR happens to touch, not to check `main`
