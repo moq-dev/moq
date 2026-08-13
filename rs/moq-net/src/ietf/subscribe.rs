@@ -633,6 +633,21 @@ mod tests {
 	}
 
 	#[test]
+	fn test_subscribe_ok_ignores_unknown_parameter_v16() {
+		// The exact SUBSCRIBE_OK body Cloudflare's draft-16 relays send once a
+		// track has content: request_id=4, track_alias=4, one LARGEST_OBJECT
+		// (0x9) parameter carrying Location{group=5, object=0}. Parameters a
+		// message doesn't define MUST be ignored (moq-transport Section 9.2.2);
+		// this used to fail with InvalidValue, aborting every subscribe with
+		// content against those relays (#2832).
+		let payload = [0x04, 0x04, 0x01, 0x09, 0x02, 0x05, 0x00];
+		let decoded: SubscribeOk = decode_message(&payload, Version::Draft16).unwrap();
+
+		assert_eq!(decoded.request_id, Some(RequestId(4)));
+		assert_eq!(decoded.track_alias, 4);
+	}
+
+	#[test]
 	fn test_subscribe_ok_v15() {
 		let msg = SubscribeOk {
 			request_id: Some(RequestId(42)),
