@@ -1002,9 +1002,12 @@ fn due(timestamp: Timestamp, last: Option<Timestamp>, interval: Duration) -> boo
 }
 
 /// Index of `timestamp`'s repetition slot: how many whole `interval`s fit under it.
-/// `interval` must be non-zero; [`due`] handles that case before it gets here.
+///
+/// Nanoseconds, so the divisor is zero only for a genuinely zero `interval`, which [`due`]
+/// takes before it gets here. Coarser units would floor a sub-unit interval to zero and
+/// divide by it.
 fn slot(timestamp: Timestamp, interval: Duration) -> u128 {
-	Duration::from(timestamp).as_micros() / interval.as_micros()
+	Duration::from(timestamp).as_nanos() / interval.as_nanos()
 }
 
 /// External byte size of an adaptation field (manual mirror of the crate's
@@ -1352,8 +1355,10 @@ mod tests {
 		assert!(due(ms(3_000), Some(ms(1_000)), sdt));
 	}
 
-	/// Drive a run of timestamps through the cadence exactly as `write_frame` does (the last
-	/// emission only moves when one actually fires), returning how many tables it emitted.
+	/// Drive a run of timestamps through the interval cadence, advancing the stored emission
+	/// only when one fires, and return how many tables it emitted. That is the whole of the SI
+	/// path; PSI additionally emits (and re-anchors) at every video keyframe, which is what
+	/// keeps two exporters of a program *with* video in step even before this.
 	fn run_cadence(stamps: &[Timestamp], interval: Duration) -> usize {
 		let mut last = None;
 		let mut emissions = 0;
@@ -1388,9 +1393,24 @@ mod tests {
 	#[test]
 	fn due_zero_interval_emits_every_frame() {
 		// A catalog is free to ask for a table on every frame. Slot arithmetic can't express
-		// that (and would divide by zero), so it is handled before the division.
+		// that (and would divide by zero), so it is handled before the division. Repeated
+		// timestamps are the case a slot count gets wrong: two tracks can share one.
 		let stamps: Vec<Timestamp> = [0, 0, 40, 40, 80].iter().map(|&t| ms(t)).collect();
 		assert_eq!(run_cadence(&stamps, Duration::ZERO), stamps.len());
+	}
+
+	#[test]
+	fn due_survives_a_sub_microsecond_interval() {
+		// Only an exactly-zero interval short-circuits, so the slot divisor has to stay
+		// non-zero for every other duration. Nanoseconds do; anything coarser floors a
+		// sub-unit interval to zero and panics on the division.
+		let interval = Duration::from_nanos(500);
+		assert!(
+			!interval.is_zero() && interval.as_micros() == 0,
+			"fixture must be sub-microsecond"
+		);
+		assert!(due(ms(1), Some(ms(0)), interval));
+		assert!(!due(ms(0), Some(ms(0)), interval));
 	}
 
 	#[test]
