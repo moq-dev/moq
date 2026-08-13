@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.7](https://github.com/moq-dev/moq/compare/libmoq-v0.5.6...libmoq-v0.5.7) - 2026-08-13
+
+### Added
+
+- *(native)* start dialing before the AAAA answer lands ([#2749](https://github.com/moq-dev/moq/pull/2749))
+- *(moq-video)* advertise the catalog rendition before the first keyframe ([#2768](https://github.com/moq-dev/moq/pull/2768))
+
 ## [0.5.6](https://github.com/moq-dev/moq/compare/libmoq-v0.5.5...libmoq-v0.5.6) - 2026-08-07
 
 ### Added

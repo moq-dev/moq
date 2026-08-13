@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.10](https://github.com/moq-dev/moq/compare/moq-transcode-v0.0.9...moq-transcode-v0.0.10) - 2026-08-13
+
+### Added
+
+- *(moq-video)* advertise the catalog rendition before the first keyframe ([#2768](https://github.com/moq-dev/moq/pull/2768))
+
 ## [0.0.9](https://github.com/moq-dev/moq/compare/moq-transcode-v0.0.8...moq-transcode-v0.0.9) - 2026-08-07
 
 ### Other

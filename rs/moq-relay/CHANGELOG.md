@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.10](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.9...moq-relay-v0.14.10) - 2026-08-13
+
+### Added
+
+- *(bindings)* expose incoming request path and query ([#2738](https://github.com/moq-dev/moq/pull/2738))
+
 ## [0.14.9](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.8...moq-relay-v0.14.9) - 2026-08-07
 
 ### Fixed

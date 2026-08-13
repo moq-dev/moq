@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.10](https://github.com/moq-dev/moq/compare/moq-native-v0.19.9...moq-native-v0.19.10) - 2026-08-13
+
+### Added
+
+- *(native)* start dialing before the AAAA answer lands ([#2749](https://github.com/moq-dev/moq/pull/2749))
+- *(bindings)* expose incoming request path and query ([#2738](https://github.com/moq-dev/moq/pull/2738))
+
+### Fixed
+
+- *(net)* keep a live-edge subscriber at the live edge across a takeover ([#2785](https://github.com/moq-dev/moq/pull/2785))
+- *(native)* make a build with one transport compile again ([#2780](https://github.com/moq-dev/moq/pull/2780))
+- *(native)* generate protocol version help ([#2719](https://github.com/moq-dev/moq/pull/2719))
+
 ## [0.19.9](https://github.com/moq-dev/moq/compare/moq-native-v0.19.8...moq-native-v0.19.9) - 2026-08-07
 
 ### Added

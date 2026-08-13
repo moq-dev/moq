@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.6](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.5...moq-mux-v0.9.6) - 2026-08-13
+
+### Added
+
+- *(moq-video)* advertise the catalog rendition before the first keyframe ([#2768](https://github.com/moq-dev/moq/pull/2768))
+
+### Fixed
+
+- *(moq-mux)* resync TS audio instead of aborting the broadcast ([#2751](https://github.com/moq-dev/moq/pull/2751))
+
+### Other
+
+- *(deps)* bump cargo group and support mp4-atom 0.15 ([#2728](https://github.com/moq-dev/moq/pull/2728))
+
 ## [0.9.5](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.4...moq-mux-v0.9.5) - 2026-08-07
 
 ### Added

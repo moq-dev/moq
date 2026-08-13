@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.7](https://github.com/moq-dev/moq/compare/moq-hls-v0.4.6...moq-hls-v0.4.7) - 2026-08-13
+
+### Fixed
+
+- *(moq-hls)* bind renditions to the broadcast their catalog came from ([#2795](https://github.com/moq-dev/moq/pull/2795))
+
 ## [0.4.6](https://github.com/moq-dev/moq/compare/moq-hls-v0.4.5...moq-hls-v0.4.6) - 2026-08-06
 
 ### Added

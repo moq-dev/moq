@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.10](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.9...moq-ffi-v0.3.10) - 2026-08-13
+
+### Added
+
+- *(moq-video)* advertise the catalog rendition before the first keyframe ([#2768](https://github.com/moq-dev/moq/pull/2768))
+- *(bindings)* expose incoming request path and query ([#2738](https://github.com/moq-dev/moq/pull/2738))
+
+### Fixed
+
+- *(release)* repair native package releases ([#2731](https://github.com/moq-dev/moq/pull/2731))
+- *(moq-ffi)* support iOS simulator builds ([#2710](https://github.com/moq-dev/moq/pull/2710))
+
 ## [0.3.9](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.8...moq-ffi-v0.3.9) - 2026-08-07
 
 ### Other
