@@ -60,6 +60,11 @@ export class Subscriber {
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
 	#consumes = new BroadcastCache();
 
+	// Paths with a legacy PUBLISH_NAMESPACE request in flight, reserved synchronously.
+	// The count below is only taken once the OK is written, and two requests that both
+	// got past the duplicate check before either attached would both take one.
+	#legacyRequests = new Set<Path.Valid>();
+
 	// Every announced path, counted by how many live advertisements reference it.
 	//
 	// A peer may advertise one namespace twice on a session: an unsolicited
@@ -478,7 +483,8 @@ export class Subscriber {
 		// the other. Nothing is lost by refusing it, because the case that makes a second
 		// reference legitimate (an inline NAMESPACE for a path a PUBLISH_NAMESPACE already
 		// carried) needs a message those drafts do not have.
-		if ((version === Version.DRAFT_14 || version === Version.DRAFT_15) && this.#announced.has(path)) {
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
+		if (legacy && (this.#announced.has(path) || this.#legacyRequests.has(path))) {
 			console.warn("duplicate PublishNamespace");
 			if (version === Version.DRAFT_14) {
 				await stream.writer.u53(PublishNamespaceError.id);
@@ -503,6 +509,7 @@ export class Subscriber {
 		// namespace can reach us twice, and the count is what tells the second apart from
 		// news. This request owns exactly one of those references and gives it back when
 		// the stream ends.
+		if (legacy) this.#legacyRequests.add(path);
 		let attached = false;
 
 		try {
@@ -531,6 +538,8 @@ export class Subscriber {
 			await stream.reader.closed;
 			console.debug(`runPublishNamespace: stream.reader.closed resolved for ${path}`);
 		} finally {
+			if (legacy) this.#legacyRequests.delete(path);
+
 			// Give back exactly what was taken: a request that never got its OK out never
 			// referenced the path, and retracting there would drop someone else's count.
 			if (attached) {

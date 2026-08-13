@@ -294,3 +294,39 @@ test("an entry buffered past a consumer close does not pin the path", async () =
 	]);
 	expect(seeded).toBe("nothing");
 });
+
+/**
+ * The reservation has to be synchronous. The count is only taken once the OK is written,
+ * so two legacy requests dispatched together would both get past a check that looked only
+ * at what is announced, and both would take a reference for one namespace.
+ */
+test("concurrent legacy publish_namespace requests take one reference", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, Version.DRAFT_15, true);
+	const subscriber = new Subscriber(session);
+
+	const announced = subscriber.announced(Path.empty());
+
+	// Dispatched together, as the connection would on two incoming streams.
+	const first = await Stream.open(pair.server, { version: Version.DRAFT_15 });
+	const second = await Stream.open(pair.server, { version: Version.DRAFT_15 });
+	const one = subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("raced") }),
+		first,
+	);
+	const two = subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 2n, trackNamespace: Path.from("raced") }),
+		second,
+	);
+
+	expect(await announced.next()).toMatchObject({ path: Path.from("raced"), active: true });
+	await two;
+
+	// Only one reference was taken, so the surviving request ending retracts the path.
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream to close");
+	peer.close();
+	await one;
+
+	expect(await announced.next()).toMatchObject({ path: Path.from("raced"), active: false });
+});
