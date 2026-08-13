@@ -16,7 +16,7 @@ Full API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("dev.moq:moq:0.4.2")
+    implementation("dev.moq:moq:0.4.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 }
 ```
@@ -223,6 +223,27 @@ dynamic.requestedGroups().collect { request ->
 ```
 
 Call `request.abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
+
+### Fetching media groups
+
+`fetchGroup` hands back raw payloads. `fetchMediaGroup` decodes the same group through the rendition's advertised container, so you get timestamped frames without opening a live subscription:
+
+```kotlin
+val (name, audio) = consumer.catalog().audio.entries.first()
+
+consumer.fetchMediaGroup(
+    name,
+    42uL,
+    audio.container,
+    FetchGroupOptions(priority = 10u),
+).use { group ->
+    group.frames().collect { frame ->
+        println("${frame.timestampUs}: ${frame.payload.size} bytes")
+    }
+}
+```
+
+`frames()` is a cancellation-aware `Flow`. A fetched media group is finite: it completes after the group's last decoded frame, unlike the live `subscribeMedia` stream. Latency-based group skipping does not apply, so you always get every frame in the group.
 
 ### On-demand raw tracks
 

@@ -170,6 +170,26 @@ for try await request in dynamic {
 
 Call `request.abort(errorCode:)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
 
+### Fetching media groups
+
+`fetchGroup` hands back raw payloads. `fetchMediaGroup` decodes the same group through the rendition's advertised container, so you get timestamped frames without opening a live subscription:
+
+```swift
+let catalog = try await consumer.subscribeCatalog().next()!
+let (name, audio) = catalog.audio.first!
+
+let group = try await consumer.fetchMediaGroup(
+    name: name,
+    sequence: 42,
+    container: audio.container
+)
+for try await frame in group {
+    print(frame.timestampUs, frame.payload.count)
+}
+```
+
+`MediaGroupConsumer` is an `AsyncSequence`, and cancels the native read when iteration ends. A fetched media group is finite: it completes after the group's last decoded frame, unlike the live `subscribeMedia` stream. Latency-based group skipping does not apply, so you always get every frame in the group.
+
 ### On-demand raw tracks
 
 Use a dynamic broadcast when subscribers should be able to request raw tracks that are not published yet:
