@@ -230,6 +230,12 @@ Rules worth knowing:
   starting with `-`; write it as `./-playlist.m3u8`.
 - `play`, `transcode`, `token`, and `devices` own the process and can't be
   staged; run those on their own.
+- `import capture` encodes to fit the connection's bandwidth estimate over
+  `--client-connect`, and rate control assumes it's the only publisher on that
+  connection, so it can't share a process with another `import`. Run those as
+  separate processes, or publish over `--server-bind`, which has no estimate.
+  (An audio-only `--no-video` capture never reads the estimate, so it doesn't
+  count.)
 
 ### Redundant Publishers (1+1)
 
