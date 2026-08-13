@@ -66,6 +66,8 @@ pub struct Import<E: catalog::Catalog = ()> {
 	streams: HashMap<Pid, Stream<E>>,
 	/// In-progress PES reassembly, keyed by elementary PID.
 	pending: HashMap<Pid, Pending>,
+	/// Per elementary-stream-PID TS continuity state.
+	continuity: HashMap<Pid, Continuity>,
 	/// True once a PMT with at least one supported stream has been parsed.
 	initialized: bool,
 	/// Raw 90 kHz PTS of the first audio frame in the current consecutive run.
@@ -138,6 +140,7 @@ impl<E: catalog::Catalog> Import<E> {
 			pmt_pids: HashSet::new(),
 			streams: HashMap::new(),
 			pending: HashMap::new(),
+			continuity: HashMap::new(),
 			initialized: false,
 			audio_burst: None,
 			scratch: Vec::new(),
@@ -218,6 +221,30 @@ impl<E: catalog::Catalog> Import<E> {
 			if self.supports_mpegts && catalog::SI_PIDS.iter().any(|(p, _)| *p == pid) {
 				self.si_section(pid, &pkt);
 				continue;
+			}
+			// An elementary stream's PES is as vulnerable to a break as a section is. A
+			// looping publisher wraps with its last PES still open and short of its declared
+			// length, so the next loop's leading packets would otherwise complete it and hand
+			// the codec one buffer straddling the cut.
+			if let Ok(pid) = Pid::new(pid)
+				&& self.streams.contains_key(&pid)
+			{
+				match self.continuity.entry(pid).or_default().observe(&pkt) {
+					Continuation::Duplicate => continue,
+					Continuation::Broken => {
+						// Flush first: whole frames already delivered in the truncated PES are
+						// good, and only what was left mid-frame is lost. Then drop that partial
+						// and require the next frame to prove its boundary.
+						self.flush(pid)?;
+						if let Some(stream) = self.streams.get_mut(&pid) {
+							stream.desync();
+						}
+						// This packet still routes normally: a PUSI opens a fresh PES, while a
+						// continuation finds no pending entry and is dropped, so the stream
+						// resumes at the next PES start rather than mid-frame.
+					}
+					Continuation::Contiguous => {}
+				}
 			}
 			// PIDs we don't decode and don't carry (`Stream::Ignored`: a base catalog's
 			// undecoded streams, or an ambiguous 0x86 PID without CUEI) are dropped here,
@@ -411,6 +438,7 @@ impl<E: catalog::Catalog> Import<E> {
 			self.initialized = true;
 		}
 		self.streams.insert(pid, stream);
+		self.continuity.entry(pid).or_default();
 		Ok(())
 	}
 
@@ -441,6 +469,7 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		// This PID is becoming section-framed; drop any partial PES a prior codec left pending.
 		self.pending.remove(&pid);
+		self.continuity.remove(&pid);
 		if !self.supports_mpegts {
 			// Always route to Ignored, replacing any prior codec on this PID (a later PMT
 			// can reassign it), so a private section never reaches the PES reader. Warn once.
@@ -952,6 +981,82 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 	}
 }
 
+/// Whether one PID's TS packets are still an unbroken chain, for whoever is accumulating
+/// bytes out of them.
+///
+/// Both reassemblers on this PID need the same answer: a section and a PES are equally
+/// meaningless when spliced onto bytes that didn't follow them. Keeping one implementation
+/// keeps a subtle rule (which packets advance the counter, which retransmissions to ignore)
+/// from drifting into two.
+#[derive(Default)]
+struct Continuity {
+	/// Last continuity_counter seen on a packet with payload, to spot gaps.
+	last_cc: Option<u8>,
+	/// Last payload packet, to skip ISO 13818-1 duplicates (same cc, identical bytes).
+	last_pkt: Option<[u8; 188]>,
+}
+
+/// What one packet says about the bytes already accumulated for its PID.
+enum Continuation {
+	/// An exact retransmission, which ISO 13818-1 permits once. Ignore the packet entirely:
+	/// processing it would reset a healthy partial or duplicate its bytes.
+	Duplicate,
+	/// Contiguous with the previous payload packet.
+	Contiguous,
+	/// A counter gap, a declared discontinuity, or a transport error. Whatever was
+	/// accumulating for this PID is lost, and the bytes that follow are not its continuation.
+	Broken,
+}
+
+impl Continuity {
+	/// Classify one 188-byte packet, recording what the next call needs.
+	fn observe(&mut self, pkt: &[u8; 188]) -> Continuation {
+		// transport_error_indicator: the demodulator flagged this packet as corrupt, so its
+		// payload can't be trusted (and we don't validate CRC-32). Forgetting the counter
+		// keeps the next clean packet from also looking like a gap.
+		if pkt[1] & 0x80 != 0 {
+			self.last_cc = None;
+			self.last_pkt = None;
+			return Continuation::Broken;
+		}
+
+		let afc = (pkt[3] >> 4) & 0x3;
+		let has_payload = afc & 0x1 != 0;
+		// Read the adaptation field before the no-payload case: a discontinuity can ride on
+		// an adaptation-only packet, and it counts just the same.
+		let discontinuity = if afc & 0x2 != 0 {
+			let af_len = pkt[4] as usize;
+			af_len > 0 && pkt[5] & 0x80 != 0
+		} else {
+			false
+		};
+
+		if !has_payload {
+			if discontinuity {
+				self.last_cc = None;
+				self.last_pkt = None;
+				return Continuation::Broken;
+			}
+			return Continuation::Contiguous;
+		}
+
+		if self.last_pkt.as_ref().is_some_and(|last| last == pkt) {
+			return Continuation::Duplicate;
+		}
+		self.last_pkt = Some(*pkt);
+
+		// Only payload packets advance the counter, so this is the one place it moves.
+		let cc = pkt[3] & 0x0f;
+		let cc_gap = matches!(self.last_cc, Some(last) if cc != (last + 1) & 0x0f);
+		self.last_cc = Some(cc);
+		if discontinuity || cc_gap {
+			Continuation::Broken
+		} else {
+			Continuation::Contiguous
+		}
+	}
+}
+
 /// Byte-level reassembler for MPEG-TS private sections on one PID.
 ///
 /// Private sections (SCTE-35 table_id 0xFC and others) are not PES. This handles
@@ -965,68 +1070,33 @@ struct SectionReassembler {
 	/// thus section_length) may not all be present yet, so completeness is
 	/// re-checked as bytes arrive; empty means no section in progress.
 	acc: Vec<u8>,
-	/// Last continuity_counter seen on a packet with payload, to spot gaps.
-	last_cc: Option<u8>,
-	/// Last payload packet, to skip ISO 13818-1 duplicates (same cc, identical bytes).
-	last_pkt: Option<[u8; 188]>,
+	/// Shared with the PES path: a broken chain drops the partial either way.
+	continuity: Continuity,
 }
 
 impl SectionReassembler {
 	/// Consume one 188-byte TS packet, appending every completed section to `out`.
 	fn push(&mut self, pkt: &[u8], out: &mut Vec<Vec<u8>>) {
-		// transport_error_indicator: the demodulator flagged this packet as corrupt,
-		// so its payload can't be trusted (and we don't validate CRC-32). Drop it and
-		// any partial; resync at the next clean PUSI.
-		if pkt[1] & 0x80 != 0 {
-			self.acc.clear();
-			self.last_cc = None;
-			self.last_pkt = None;
-			return;
+		let pkt: &[u8; 188] = pkt.try_into().expect("section packet must be 188 bytes");
+		match self.continuity.observe(pkt) {
+			Continuation::Duplicate => return,
+			Continuation::Broken => self.acc.clear(),
+			Continuation::Contiguous => {}
 		}
 
 		let pusi = pkt[1] & 0x40 != 0;
 		let afc = (pkt[3] >> 4) & 0x3;
-		let cc = pkt[3] & 0x0f;
 		let has_payload = afc & 0x1 != 0;
 
-		// Parse the adaptation field before the no-payload early return: a
-		// discontinuity can ride on an adaptation-only packet and must still reset
-		// reassembly.
 		let mut off = 4;
-		let mut discontinuity = false;
 		if afc & 0x2 != 0 {
 			let af_len = pkt[4] as usize;
-			discontinuity = af_len > 0 && pkt[5] & 0x80 != 0;
 			off = 5 + af_len;
 		}
 
 		if !has_payload {
-			// An adaptation-only discontinuity still drops the partial; forgetting the
-			// counter keeps the next payload packet from looking like a gap.
-			if discontinuity {
-				self.acc.clear();
-				self.last_cc = None;
-				self.last_pkt = None;
-			}
 			return;
 		}
-
-		// ISO 13818-1 permits one identical retransmission of a payload packet (same
-		// cc, same bytes); processing it would reset a healthy partial or re-emit a
-		// completed section. Skip it, recording this packet to catch the next.
-		if self.last_pkt.as_ref().is_some_and(|last| last[..] == pkt[..]) {
-			return;
-		}
-		self.last_pkt = pkt.try_into().ok();
-
-		// A continuity-counter gap (only payload packets advance it) or a declared
-		// discontinuity both mean the in-progress section is lost.
-		let cc_gap = matches!(self.last_cc, Some(last) if cc != (last + 1) & 0x0f);
-		let reset = discontinuity || cc_gap;
-		if reset {
-			self.acc.clear();
-		}
-		self.last_cc = Some(cc);
 
 		if off >= pkt.len() {
 			return;
@@ -1163,6 +1233,19 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::Legacy(stream) => stream.write(pending),
 			Stream::Verbatim(stream) => stream.write(pending),
 			Stream::Clock | Stream::Ignored => Ok(()),
+		}
+	}
+
+	/// Sync was lost: drop whatever partial unit is held and stop vouching for the next
+	/// boundary. This is [`seek`](Self::seek) without the group-sequence side effect, for a
+	/// break the stream recovers from in place.
+	fn desync(&mut self) {
+		match self {
+			Stream::H264 { split, .. } => split.reset(),
+			Stream::H265 { split, .. } => split.reset(),
+			Stream::Aac(stream) => stream.desync(),
+			Stream::Legacy(stream) => stream.desync(),
+			Stream::Opus(_) | Stream::Verbatim(_) | Stream::Clock | Stream::Ignored => {}
 		}
 	}
 
@@ -1633,15 +1716,20 @@ impl<E: CatalogExt> AacStream<E> {
 	}
 
 	fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
-		// A seek is a discontinuity; the partial frame will never see its end, and whatever
-		// vouched for the next frame boundary no longer applies.
-		self.tail.clear();
-		self.tail_pts = None;
-		self.resync.desynced();
+		// A seek is a discontinuity like any other.
+		self.desync();
 		if let Some(import) = &mut self.import {
 			import.seek(sequence)?;
 		}
 		Ok(())
+	}
+
+	/// The partial frame will never see its end, and whatever vouched for the next frame
+	/// boundary no longer applies.
+	fn desync(&mut self) {
+		self.tail.clear();
+		self.tail_pts = None;
+		self.resync.desynced();
 	}
 
 	fn finish(&mut self) -> anyhow::Result<()> {
@@ -2007,15 +2095,20 @@ impl<E: CatalogExt> LegacyStream<E> {
 	}
 
 	fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
-		// A seek is a discontinuity; the partial frame will never see its end, and whatever
-		// vouched for the next frame boundary no longer applies.
-		self.tail.clear();
-		self.tail_pts = None;
-		self.resync.desynced();
+		// A seek is a discontinuity like any other.
+		self.desync();
 		if let Some(import) = &mut self.import {
 			import.seek(sequence)?;
 		}
 		Ok(())
+	}
+
+	/// The partial frame will never see its end, and whatever vouched for the next frame
+	/// boundary no longer applies.
+	fn desync(&mut self) {
+		self.tail.clear();
+		self.tail_pts = None;
+		self.resync.desynced();
 	}
 
 	fn finish(&mut self) -> anyhow::Result<()> {
@@ -2624,6 +2717,55 @@ mod test {
 		p
 	}
 
+	/// Open a bounded audio PES whose declared payload is longer than this packet carries.
+	fn audio_pes_open(pid: u16, cc: u8, pts: u64, declared: usize, payload: &[u8]) -> Vec<u8> {
+		assert!(payload.len() < declared, "the test PES must remain open");
+		let pts_field = [
+			0x21 | (((pts >> 30) & 0x07) << 1) as u8,
+			((pts >> 22) & 0xff) as u8,
+			0x01 | (((pts >> 15) & 0x7f) << 1) as u8,
+			((pts >> 7) & 0xff) as u8,
+			0x01 | ((pts & 0x7f) << 1) as u8,
+		];
+		let mut pes = vec![0x00, 0x00, 0x01, 0xc0];
+		let pes_len = 3 + 5 + declared;
+		pes.push((pes_len >> 8) as u8);
+		pes.push((pes_len & 0xff) as u8);
+		pes.extend_from_slice(&[0x80, 0x80, 0x05]);
+		pes.extend_from_slice(&pts_field);
+		pes.extend_from_slice(payload);
+
+		let af_len = 184 - 1 - pes.len();
+		let mut p = vec![
+			0x47,
+			0x40 | ((pid >> 8) as u8 & 0x1f),
+			(pid & 0xff) as u8,
+			0x30 | (cc & 0x0f),
+		];
+		p.push(af_len as u8);
+		if af_len > 0 {
+			p.push(0x00);
+			p.extend(std::iter::repeat_n(0xff, af_len - 1));
+		}
+		p.extend_from_slice(&pes);
+		assert_eq!(p.len(), 188, "open audio PES packet must fill exactly one TS packet");
+		p
+	}
+
+	/// Build a non-PUSI TS payload packet with adaptation-field stuffing.
+	fn ts_continuation(pid: u16, cc: u8, payload: &[u8]) -> Vec<u8> {
+		let af_len = 184 - 1 - payload.len();
+		let mut p = vec![0x47, ((pid >> 8) as u8 & 0x1f), (pid & 0xff) as u8, 0x30 | (cc & 0x0f)];
+		p.push(af_len as u8);
+		if af_len > 0 {
+			p.push(0x00);
+			p.extend(std::iter::repeat_n(0xff, af_len - 1));
+		}
+		p.extend_from_slice(payload);
+		assert_eq!(p.len(), 188, "continuation packet must fill exactly one TS packet");
+		p
+	}
+
 	// MP2/AC-3 flush like any audio PES but don't consume the jitter hint; if one
 	// anchored the audio run, an AAC PID in the same TS would publish a jitter
 	// inflated by the inter-PID PTS offset.
@@ -2759,6 +2901,44 @@ mod test {
 		let mut f = super::adts::write_header(2, 48_000, 2, raw_len).unwrap().to_vec();
 		f.resize(raw_len + 7, fill);
 		f
+	}
+
+	// The AAC mirror of `legacy_drops_a_pes_completed_across_a_continuity_break`.
+	#[tokio::test(start_paused = true)]
+	async fn aac_drops_a_pes_completed_across_a_continuity_break() {
+		const AAC_PID: u16 = 0x0060;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		let mut opening = adts_frame(40, 0xAA);
+		opening.extend_from_slice(&adts_frame(40, 0xBB)[..25]);
+		import
+			.decode(audio_pes_open(AAC_PID, 0, 90_000, 94, &opening).as_slice())
+			.unwrap();
+		import
+			.decode(ts_continuation(AAC_PID, 12, &adts_frame(40, 0xCC)[..32]).as_slice())
+			.unwrap();
+		let mut normal = adts_frame(40, 0xDD);
+		normal.extend_from_slice(&adts_frame(40, 0xEE));
+		import
+			.decode(audio_pes_packet(AAC_PID, 13, 270_000, &normal).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.to_vec()).collect::<Vec<_>>(),
+			[0xAA, 0xDD, 0xEE]
+				.map(|fill| adts_frame(40, fill)[7..].to_vec())
+				.to_vec(),
+			"the wrap was spliced onto the frame the cut left open"
+		);
 	}
 
 	// ISO 13818-1 doesn't require AAC frames to align with PES boundaries any more than it
@@ -2931,6 +3111,47 @@ mod test {
 		let mut f = vec![0xFF, 0xF5, 0x18, 0xC0];
 		f.resize(72, fill);
 		f
+	}
+
+	// The shape a looping mux actually produces, which is not a carried tail: the last PES
+	// before the cut is truncated, so it stays open, and the next loop's leading continuation
+	// packets complete it. The foreign bytes land in the SAME PES, so the codec sees one
+	// buffer with nothing carried, and the confirmation rule above never gets a say. The
+	// continuity counter is what gives the wrap away, so the truncated PES is flushed for the
+	// whole frames it did deliver and the stream resumes at the next PES start.
+	#[tokio::test(start_paused = true)]
+	async fn legacy_drops_a_pes_completed_across_a_continuity_break() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		let mut opening = mp2_frame(0xAA);
+		opening.extend_from_slice(&mp2_frame(0xBB)[..40]);
+		import
+			.decode(audio_pes_open(MP2_PID, 0, 90_000, 144, &opening).as_slice())
+			.unwrap();
+		import
+			.decode(ts_continuation(MP2_PID, 12, &mp2_frame(0xCC)[..32]).as_slice())
+			.unwrap();
+		let mut normal = mp2_frame(0xDD);
+		normal.extend_from_slice(&mp2_frame(0xEE));
+		import
+			.decode(audio_pes_packet(MP2_PID, 13, 270_000, &normal).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
+			vec![mp2_frame(0xAA), mp2_frame(0xDD), mp2_frame(0xEE)],
+			"the wrap was spliced onto the frame the cut left open"
+		);
 	}
 
 	// A damaged frame header must not take the session down with it: the demuxer scans to
