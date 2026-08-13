@@ -573,8 +573,8 @@ test("lite draft-05: a group taken before the cap dropped is still served", asyn
 // by design, since the read cursor shifts and closes every buffered group below it, so a group
 // already in hand has to go the same way: serving it would re-deliver below a floor the
 // subscriber just moved, which on a route splice is duplicate media.
-test("lite draft-05: a group taken before the floor rose is dropped", async () => {
-	const sub = await servedSubscription({ startGroup: 0, gated: true });
+test("lite draft-06: a group taken before the floor rose past it is dropped", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, gated: true });
 	try {
 		// Same window as the cap test: group 0 parks the loop, so the prefetch takes group 1.
 		sub.serve(0);
@@ -583,7 +583,7 @@ test("lite draft-05: a group taken before the floor rose is dropped", async () =
 		await flush();
 
 		// Skip ahead past group 1, which the loop is already holding.
-		await new SubscribeUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, Version.DRAFT_05);
+		await new SubscribeUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, Version.DRAFT_06);
 		while (sub.track.subscription.peek()?.startGroup !== 2) await sub.track.subscription.changed();
 
 		// Buffered while the loop is still parked, so it is taken under the raised floor.
@@ -593,6 +593,41 @@ test("lite draft-05: a group taken before the floor rose is dropped", async () =
 		// Group 0 was already decided and stays in flight; group 1 must not follow it.
 		expect(await sub.servedSequence()).toBe(0);
 		expect(await sub.servedSequence()).toBe(2);
+	} finally {
+		await sub.close();
+	}
+});
+
+// Raising the floor into a group already in hand is just as destructive as raising it past
+// the group. The group stays servable, but its snapshotted frame range must be lifted to the
+// new floor so frames the subscriber discarded do not reach the wire.
+test("lite draft-06: a group taken before the floor rose into it starts at the raised frame", async () => {
+	const sub = await servedSubscription({
+		version: Version.DRAFT_06,
+		startGroup: 0,
+		frames: ["a", "b", "c"],
+		gated: true,
+	});
+	try {
+		// Group 0 parks the loop, so the armed prefetch takes group 1 under the old floor.
+		sub.serve(0);
+		await sub.parked;
+		sub.serve(1);
+		await flush();
+
+		// Raise the floor into held group 1, excluding its first two frames.
+		await new SubscribeUpdate({ priority: 0, startGroup: 1, startFrame: 2 }).encode(
+			sub.client.writer,
+			Version.DRAFT_06,
+		);
+		while (sub.track.subscription.peek()?.startGroup !== 1) await sub.track.subscription.changed();
+
+		sub.release();
+
+		// Group 0 was already decided and stays in flight. Group 1 must honor the newer,
+		// destructive floor even though it was taken with a start frame of 0.
+		expect(await sub.servedGroup()).toEqual({ sequence: 0, frameStart: 0, payloads: ["a", "b", "c"] });
+		expect(await sub.servedGroup()).toEqual({ sequence: 1, frameStart: 2, payloads: ["c"] });
 	} finally {
 		await sub.close();
 	}

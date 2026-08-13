@@ -571,19 +571,18 @@ export class Publisher {
 				next = take();
 
 				// The floor is judged against the bounds as they stand now, deliberately unlike
-				// the frame range above, which is the snapshot this group was taken under. The
-				// two ends of a subscription are not symmetric: raising the floor is destructive
-				// (the read cursor shifts and closes every buffered group below it), so dropping
-				// one already in hand discards nothing the subscriber has not discarded itself,
-				// while serving it would re-deliver below a floor they just moved. Lowering the
-				// cap only parks its groups, which is why the cap must not reject here.
-				//
-				// Whole groups only. A floor raised to a frame *within* a group already in hand
-				// still serves it from the snapshotted start frame, since the group clears this
-				// check and carries its own range.
+				// the rest of the frame range, which is the snapshot this group was taken under.
+				// Raising the floor is destructive: the read cursor shifts and closes every
+				// buffered group below it, so an in-hand group below the new floor must also go.
+				// When the new floor lands within this group, intersect it with the snapshotted
+				// start so neither a raised nor a subsequently lowered floor widens what is sent.
+				// Lowering the cap only parks its groups, which is why the cap does not reject here.
 				if (bounds.startGroup !== undefined && group.sequence < bounds.startGroup) {
 					group.close();
 					continue;
+				}
+				if (bounds.startGroup === group.sequence) {
+					range.start = Math.max(range.start, bounds.startFrame);
 				}
 
 				if (emitRange && !startSent) {
