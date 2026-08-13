@@ -678,6 +678,13 @@ impl Consumer {
 		self.state.read().abort.is_some()
 	}
 
+	/// Park `waiter` until the group closes (finish, abort, or eviction). Spliced
+	/// subscribers register on parked groups so an eviction wakes them; a group
+	/// that already closed cleanly can never abort, so no waiter is needed.
+	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state.poll_closed(waiter)
+	}
+
 	/// The parent track's timescale.
 	pub fn timescale(&self) -> Timescale {
 		self.track.timescale
