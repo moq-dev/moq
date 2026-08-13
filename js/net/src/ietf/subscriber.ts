@@ -13,7 +13,7 @@ import { TrackAliases } from "./aliases.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
 import { toWire } from "./priority.ts";
 import { type Publish, PublishError } from "./publish.ts";
-import { type PublishNamespace, PublishNamespaceOk } from "./publish_namespace.ts";
+import { type PublishNamespace, PublishNamespaceError, PublishNamespaceOk } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
@@ -159,6 +159,13 @@ export class Subscriber {
 		// advertisement rather than a second one, which would leak the count.
 		const live = new Set<Path.Valid>();
 
+		// Set once the teardown below has given back everything this stream held. The read
+		// loop is not awaited when the local consumer closes first, and closing the stream
+		// cancels the transport without discarding what the reader already buffered, so a
+		// fully buffered entry can still decode afterwards. Attaching one then would take a
+		// reference nobody is left to release, pinning the path for the session.
+		let released = false;
+
 		// v14/v15: SubscribeNamespace on control stream (via adapter virtual stream)
 		// v16+: SubscribeNamespace on its own real bidi stream
 
@@ -210,6 +217,7 @@ export class Subscriber {
 						const msgType = await stream.reader.u53();
 						if (msgType === SubscribeNamespaceEntry.id) {
 							const entry = await SubscribeNamespaceEntry.decode(stream.reader, version);
+							if (released) break;
 							const path = Path.join(prefix, entry.suffix);
 
 							// A repeat updates the advertisement; only the first is news.
@@ -219,6 +227,7 @@ export class Subscriber {
 							}
 						} else if (msgType === SubscribeNamespaceEntryDone.id) {
 							const entry = await SubscribeNamespaceEntryDone.decode(stream.reader, version);
+							if (released) break;
 							const path = Path.join(prefix, entry.suffix);
 
 							if (live.delete(path)) {
@@ -268,6 +277,7 @@ export class Subscriber {
 			// ends: a clean close, a decode error, or the peer resetting it. Without this
 			// each namespace keeps its count and the source never detaches, which would
 			// pin the path for the session even after the other source withdrew.
+			released = true;
 			for (const path of live) {
 				this.#detachAnnounce(path);
 			}
@@ -462,9 +472,37 @@ export class Subscriber {
 		const version = this.#session.version;
 		const path = msg.trackNamespace;
 
-		// A path this session already knows is not refused: the same namespace can reach
-		// us twice, and the count is what tells the second apart from news. This request
-		// owns exactly one of those references and gives it back when the stream ends.
+		// Draft-14/15 key their namespace-scoped messages by name, not request ID, so the
+		// adapter can hold only one request per namespace: a second would overwrite the
+		// first, and the withdrawals would then close the wrong stream and fail to find
+		// the other. Nothing is lost by refusing it, because the case that makes a second
+		// reference legitimate (an inline NAMESPACE for a path a PUBLISH_NAMESPACE already
+		// carried) needs a message those drafts do not have.
+		if ((version === Version.DRAFT_14 || version === Version.DRAFT_15) && this.#announced.has(path)) {
+			console.warn("duplicate PublishNamespace");
+			if (version === Version.DRAFT_14) {
+				await stream.writer.u53(PublishNamespaceError.id);
+				await new PublishNamespaceError({
+					requestId: msg.requestId,
+					errorCode: 409,
+					reasonPhrase: "duplicate namespace",
+				}).encode(stream.writer, version);
+			} else {
+				await stream.writer.u53(RequestError.id);
+				await new RequestError({
+					requestId: msg.requestId,
+					errorCode: 409,
+					reasonPhrase: "duplicate namespace",
+				}).encode(stream.writer, version);
+			}
+			stream.close();
+			return;
+		}
+
+		// Everywhere else a path this session already knows is not refused: the same
+		// namespace can reach us twice, and the count is what tells the second apart from
+		// news. This request owns exactly one of those references and gives it back when
+		// the stream ends.
 		let attached = false;
 
 		try {
