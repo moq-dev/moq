@@ -71,6 +71,10 @@ pub(crate) struct ExportSource {
 	/// OpusHead). Some once the codec config is available — from the catalog
 	/// `description`, or synthesized by the transform.
 	description: Option<Bytes>,
+	/// Video codec used to derive geometry from its configuration or keyframes.
+	video_codec: Option<VideoCodec>,
+	/// Geometry resolved from the initial catalog or codec data received afterward.
+	video_dimensions: Option<(u32, u32)>,
 }
 
 impl ExportSource {
@@ -81,20 +85,7 @@ impl ExportSource {
 		config: &VideoConfig,
 		latency: Duration,
 	) -> Result<Option<Self>, crate::Error> {
-		let media: HangContainer = (&config.container).try_into()?;
-		let transform = build_video_transform(config);
-		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
-		let Some(request) = source.request(config.broadcast.as_ref()) else {
-			return Ok(None);
-		};
-
-		Ok(Some(Self {
-			state: SourceState::Requesting(request, name.to_string()),
-			media: Some(media),
-			latency,
-			transform,
-			description,
-		}))
+		Self::video(source, name, config, latency, build_video_transform(config))
 	}
 
 	/// Subscribe to a video rendition without attaching any codec-shape
@@ -107,19 +98,33 @@ impl ExportSource {
 		config: &VideoConfig,
 		latency: Duration,
 	) -> Result<Option<Self>, crate::Error> {
+		Self::video(source, name, config, latency, None)
+	}
+
+	fn video(
+		source: &crate::Source,
+		name: &str,
+		config: &VideoConfig,
+		latency: Duration,
+		transform: Option<VideoTransform>,
+	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 		let Some(request) = source.request(config.broadcast.as_ref()) else {
 			return Ok(None);
 		};
 
-		Ok(Some(Self {
+		let mut source = Self {
 			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
 			latency,
-			transform: None,
+			transform,
 			description,
-		}))
+			video_codec: Some(config.codec.clone()),
+			video_dimensions: catalog_dimensions(config),
+		};
+		source.resolve_video_dimensions(&[]);
+		Ok(Some(source))
 	}
 
 	/// Subscribe to an audio rendition. Audio has no codec-shape transform;
@@ -142,6 +147,8 @@ impl ExportSource {
 			latency,
 			transform: None,
 			description,
+			video_codec: None,
+			video_dimensions: None,
 		}))
 	}
 
@@ -156,6 +163,8 @@ impl ExportSource {
 			latency,
 			transform: None,
 			description: None,
+			video_codec: None,
+			video_dimensions: None,
 		})
 	}
 
@@ -168,6 +177,27 @@ impl ExportSource {
 	/// no transform attached, or the transform has built its record).
 	pub fn header_ready(&self) -> bool {
 		self.transform.is_none() || self.description.is_some()
+	}
+
+	/// Combine the latest catalog config with geometry resolved from codec data.
+	pub fn video_config(&self, config: &VideoConfig) -> Option<VideoConfig> {
+		if catalog_dimensions(config).is_some() {
+			return Some(config.clone());
+		}
+
+		let (width, height) = self.video_dimensions?;
+		let mut config = config.clone();
+		config.coded_width = Some(width);
+		config.coded_height = Some(height);
+		Some(config)
+	}
+
+	/// True when this codec is unsupported or has enough geometry to build a video header.
+	pub fn video_geometry_ready(&self, config: &VideoConfig) -> bool {
+		!matches!(
+			config.codec,
+			VideoCodec::H264(_) | VideoCodec::H265(_) | VideoCodec::VP8 | VideoCodec::VP9(_) | VideoCodec::AV1(_)
+		) || self.video_config(config).is_some()
 	}
 
 	/// Pull the next normalized frame.
@@ -227,6 +257,7 @@ impl ExportSource {
 			};
 
 			let Some(transform) = self.transform.as_mut() else {
+				self.resolve_video_dimensions(&frame.payload);
 				return Poll::Ready(Ok(Some(frame)));
 			};
 
@@ -236,10 +267,12 @@ impl ExportSource {
 					// resolved description (it may have just become available)
 					// and pull the next frame.
 					self.refresh_description();
+					self.resolve_video_dimensions(&frame.payload);
 					continue;
 				}
 				Some(payload) => {
 					self.refresh_description();
+					self.resolve_video_dimensions(&payload);
 					return Poll::Ready(Ok(Some(Frame { payload, ..frame })));
 				}
 			}
@@ -258,6 +291,50 @@ impl ExportSource {
 			self.description = Some(d.clone());
 		}
 	}
+
+	fn resolve_video_dimensions(&mut self, payload: &[u8]) {
+		if self.video_dimensions.is_some() {
+			return;
+		}
+		let Some(codec) = self.video_codec.as_ref() else {
+			return;
+		};
+
+		let dimensions = match codec {
+			VideoCodec::H264(_) => self
+				.description
+				.as_deref()
+				.and_then(|description| crate::codec::h264::config(description).ok())
+				.as_ref()
+				.and_then(catalog_dimensions),
+			VideoCodec::H265(_) => self
+				.description
+				.as_deref()
+				.and_then(|description| crate::codec::h265::config(description).ok())
+				.as_ref()
+				.and_then(catalog_dimensions),
+			VideoCodec::VP8 if !payload.is_empty() => crate::codec::vp8::FrameHeader::parse(payload)
+				.ok()
+				.and_then(|header| header.dimensions)
+				.map(|(width, height)| (u32::from(width), u32::from(height))),
+			VideoCodec::VP9(_) if !payload.is_empty() => crate::codec::vp9::config_from_keyframe(payload)
+				.ok()
+				.flatten()
+				.as_ref()
+				.and_then(catalog_dimensions),
+			VideoCodec::AV1(_) if !payload.is_empty() => crate::codec::av1::dimensions(payload).ok().flatten(),
+			_ => None,
+		};
+
+		if dimensions.is_some_and(|(width, height)| width > 0 && height > 0) {
+			self.video_dimensions = dimensions;
+		}
+	}
+}
+
+fn catalog_dimensions(config: &VideoConfig) -> Option<(u32, u32)> {
+	let dimensions = (config.coded_width?, config.coded_height?);
+	(dimensions.0 > 0 && dimensions.1 > 0).then_some(dimensions)
 }
 
 /// Build a video transform for an Annex-B source, or `None` if the catalog

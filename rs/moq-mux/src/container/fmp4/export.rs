@@ -189,14 +189,23 @@ impl<S: Stream> Export<S> {
 		// is ready, so the source keeps polling for SPS/PPS-bearing frames
 		// instead of parking.
 		let waiting_for_init = !self.init_emitted;
-		for track in self.tracks.values_mut() {
+		for (name, track) in &mut self.tracks {
 			if track.pending.is_some() || track.finished {
 				continue;
 			}
 			loop {
 				match track.source.poll_read(waiter) {
 					Poll::Ready(Ok(Some(frame))) => {
-						if waiting_for_init && !track.source.header_ready() {
+						let geometry_ready = !track.is_video
+							|| self
+								.catalog_snapshot
+								.as_ref()
+								.and_then(|catalog| catalog.video.renditions.get(name))
+								.is_some_and(|config| {
+									matches!(config.container, Container::Cmaf { .. })
+										|| track.source.video_geometry_ready(config)
+								});
+						if waiting_for_init && (!track.source.header_ready() || !geometry_ready) {
 							continue;
 						}
 						track.pending = Some(frame);
@@ -409,7 +418,17 @@ impl<S: Stream> Export<S> {
 	/// True once every source has resolved its codec config so we can build
 	/// the merged init segment.
 	fn init_ready(&self) -> bool {
-		self.catalog_snapshot.is_some() && self.tracks.values().all(|t| t.source.header_ready())
+		let Some(catalog) = self.catalog_snapshot.as_ref() else {
+			return false;
+		};
+		self.tracks.values().all(|t| t.source.header_ready())
+			&& catalog.video.renditions.iter().all(|(name, config)| {
+				matches!(config.container, Container::Cmaf { .. })
+					|| self
+						.tracks
+						.get(name)
+						.is_some_and(|track| track.source.video_geometry_ready(config))
+			})
 	}
 
 	/// Build the merged ftyp + multi-track moov init segment from the cached
@@ -434,10 +453,11 @@ impl<S: Stream> Export<S> {
 				Container::Legacy | Container::Loc => {
 					// H.264/H.265 need a synthesized config record here; VP8 has none.
 					let description = track.source.description();
+					let config = track.source.video_config(config).unwrap_or_else(|| config.clone());
 					let trak = crate::container::fmp4::synthesize_video_trak(
 						track.track_id,
 						track.timescale,
-						config,
+						&config,
 						description.map(|d| d.as_ref()),
 					)?;
 					trexs.push(mp4_atom::Trex {

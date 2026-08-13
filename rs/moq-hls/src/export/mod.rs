@@ -239,6 +239,15 @@ mod tests {
 		}
 	}
 
+	fn video_config(catalog: &moq_mux::catalog::Producer) -> hang::catalog::VideoConfig {
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		config.framerate = Some(30.0);
+		config.timeline = Some(catalog.timeline("video0").unwrap().section());
+		config
+	}
+
 	// Let the origin's spawned attach task run so a created broadcast is routable.
 	async fn settle() {
 		for _ in 0..10 {
@@ -283,9 +292,7 @@ mod tests {
 
 		let reserved = catalog.reserve();
 		let mut registration = reserved.video("video0");
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		config.framerate = Some(30.0);
-		config.timeline = Some(catalog.timeline("video0").unwrap().section());
+		let config = video_config(&catalog);
 		registration.set(config);
 		drop(reserved);
 
@@ -359,9 +366,7 @@ mod tests {
 
 		let reserved = catalog.reserve();
 		let mut registration = reserved.video("video0");
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		config.framerate = Some(30.0);
-		config.timeline = Some(catalog.timeline("video0").unwrap().section());
+		let config = video_config(&catalog);
 		registration.set(config);
 		drop(reserved);
 
@@ -430,9 +435,7 @@ mod tests {
 
 			let reserved = catalog.reserve();
 			let mut registration = reserved.video("video0");
-			let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-			config.framerate = Some(30.0);
-			config.timeline = Some(catalog.timeline("video0").unwrap().section());
+			let config = video_config(&catalog);
 			registration.set(config.clone());
 			drop(reserved);
 
@@ -573,9 +576,7 @@ mod tests {
 
 		let reserved = catalog.reserve();
 		let mut registration = reserved.video("video0");
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		config.framerate = Some(30.0);
-		config.timeline = Some(catalog.timeline("video0").unwrap().section());
+		let config = video_config(&catalog);
 		registration.set(config);
 		drop(reserved);
 
@@ -632,9 +633,7 @@ mod tests {
 
 		let reserved = catalog.reserve();
 		let mut registration = reserved.video("video0");
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		config.framerate = Some(30.0);
-		config.timeline = Some(catalog.timeline("video0").unwrap().section());
+		let config = video_config(&catalog);
 		registration.set(config);
 		drop(reserved);
 

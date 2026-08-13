@@ -321,6 +321,8 @@ mod tests {
 	// A 30 fps Legacy VP8 rendition: no description needed, so the muxer builds without media.
 	fn video_muxer() -> Muxer {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
 		config.framerate = Some(30.0);
 		Muxer::video(&config).unwrap()
 	}
@@ -391,6 +393,8 @@ mod tests {
 	#[test]
 	fn low_framerate_fallback_fits_mp4_timing_fields() {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
 		config.framerate = Some(0.0011);
 		let muxer = Muxer::video(&config).unwrap();
 		assert_eq!(muxer.timescale().as_u64(), 11);
@@ -487,6 +491,8 @@ mod tests {
 	#[test]
 	fn init_rejects_a_catalog_scale_too_large_for_mdhd() {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
 		config.framerate = Some(5_000_000.0); // 5e9 ticks, past u32::MAX
 		let err = Muxer::video(&config).unwrap().init().unwrap_err();
 		assert!(
