@@ -284,7 +284,7 @@ impl Candidates {
 	/// are handed out anyway so the dial surfaces the OS error instead of a
 	/// confusing "no DNS entries". See <https://github.com/moq-dev/moq/issues/1375>
 	/// for the Windows failure this family matching originally fixed.
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", test))]
 	pub(crate) fn with_local(mut self, local: SocketAddr, dual_stack: bool) -> Self {
 		self.local = Some((local, dual_stack));
 		self
