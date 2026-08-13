@@ -192,6 +192,8 @@ fn publish_media_lifecycle() {
 			format.len(),
 			init.as_ptr(),
 			init.len(),
+			std::ptr::null(),
+			0,
 		)
 	});
 
@@ -201,6 +203,150 @@ fn publish_media_lifecycle() {
 
 	assert_eq!(moq_publish_media_finish(media), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
+}
+
+/// Read the rendition name back out of a consumed audio config.
+fn cfg_name(cfg: &moq_audio_config) -> &str {
+	unsafe { std::str::from_utf8(std::slice::from_raw_parts(cfg.name.cast::<u8>(), cfg.name_len)) }.unwrap()
+}
+
+/// The name passed to `moq_publish_media` becomes the track name in the catalog,
+/// made unique the same way the format-derived name is. Two tracks sharing a name
+/// get distinct indices rather than colliding.
+#[test]
+fn publish_media_named_track() {
+	let origin = id(moq_origin_create());
+	let path = b"named-track";
+	let broadcast = publish_broadcast(origin, path);
+
+	let init = opus_head();
+	let format = b"opus";
+	let name = b"audio";
+
+	// The first track named "audio" becomes "0.audio".
+	let media1 = id(unsafe {
+		moq_publish_media(
+			broadcast,
+			format.as_ptr() as *const c_char,
+			format.len(),
+			init.as_ptr(),
+			init.len(),
+			name.as_ptr() as *const c_char,
+			name.len(),
+		)
+	});
+
+	let consume = request_broadcast(origin, path);
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id1 = id(catalog_cb.recv());
+
+	let mut audio_cfg = moq_audio_config {
+		name: std::ptr::null(),
+		name_len: 0,
+		codec: std::ptr::null(),
+		codec_len: 0,
+		description: std::ptr::null(),
+		description_len: 0,
+		sample_rate: 0,
+		channel_count: 0,
+	};
+	assert_eq!(unsafe { moq_consume_audio_config(catalog_id1, 0, &mut audio_cfg) }, 0);
+	assert_eq!(cfg_name(&audio_cfg), "0.audio");
+
+	// A second track with the same name gets the next index, and the refreshed
+	// catalog carries both.
+	let media2 = id(unsafe {
+		moq_publish_media(
+			broadcast,
+			format.as_ptr() as *const c_char,
+			format.len(),
+			init.as_ptr(),
+			init.len(),
+			name.as_ptr() as *const c_char,
+			name.len(),
+		)
+	});
+
+	let catalog_id2 = id(catalog_cb.recv());
+	assert_eq!(unsafe { moq_consume_audio_config(catalog_id2, 0, &mut audio_cfg) }, 0);
+	assert_eq!(cfg_name(&audio_cfg), "0.audio");
+	assert_eq!(unsafe { moq_consume_audio_config(catalog_id2, 1, &mut audio_cfg) }, 0);
+	assert_eq!(cfg_name(&audio_cfg), "1.audio");
+
+	assert_eq!(moq_consume_catalog_free(catalog_id1), 0);
+	assert_eq!(moq_consume_catalog_free(catalog_id2), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_media_finish(media1), 0);
+	assert_eq!(moq_publish_media_finish(media2), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// An unnamed track still gets a unique name from its format, and shares the
+/// broadcast with a named one without colliding.
+#[test]
+fn publish_media_unnamed_uses_format_name() {
+	let origin = id(moq_origin_create());
+	let path = b"named-and-unnamed";
+	let broadcast = publish_broadcast(origin, path);
+
+	let init = opus_head();
+	let format = b"opus";
+
+	let media1 = id(unsafe {
+		moq_publish_media(
+			broadcast,
+			format.as_ptr() as *const c_char,
+			format.len(),
+			init.as_ptr(),
+			init.len(),
+			b"audio".as_ptr() as *const c_char,
+			5,
+		)
+	});
+	let media2 = id(unsafe {
+		moq_publish_media(
+			broadcast,
+			format.as_ptr() as *const c_char,
+			format.len(),
+			init.as_ptr(),
+			init.len(),
+			std::ptr::null(),
+			0,
+		)
+	});
+
+	let consume = request_broadcast(origin, path);
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+
+	let mut audio_cfg = moq_audio_config {
+		name: std::ptr::null(),
+		name_len: 0,
+		codec: std::ptr::null(),
+		codec_len: 0,
+		description: std::ptr::null(),
+		description_len: 0,
+		sample_rate: 0,
+		channel_count: 0,
+	};
+	assert_eq!(unsafe { moq_consume_audio_config(catalog_id, 0, &mut audio_cfg) }, 0);
+	assert_eq!(cfg_name(&audio_cfg), "0.audio");
+	assert_eq!(unsafe { moq_consume_audio_config(catalog_id, 1, &mut audio_cfg) }, 0);
+	assert_eq!(cfg_name(&audio_cfg), "0.opus");
+
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_media_finish(media1), 0);
+	assert_eq!(moq_publish_media_finish(media2), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
 }
 
 #[test]
@@ -1430,6 +1576,8 @@ fn double_close_all_resource_types() {
 			format.len(),
 			init.as_ptr(),
 			init.len(),
+			std::ptr::null(),
+			0,
 		)
 	});
 
@@ -1448,6 +1596,8 @@ fn double_close_all_resource_types() {
 			format.len(),
 			init.as_ptr(),
 			init.len(),
+			std::ptr::null(),
+			0,
 		)
 	});
 
@@ -1503,6 +1653,8 @@ fn media_cut_bounds_audio_groups() {
 			format.len(),
 			init.as_ptr(),
 			init.len(),
+			std::ptr::null(),
+			0,
 		)
 	});
 
@@ -1545,6 +1697,8 @@ fn unknown_format() {
 			broadcast,
 			format.as_ptr() as *const c_char,
 			format.len(),
+			std::ptr::null(),
+			0,
 			std::ptr::null(),
 			0,
 		)
@@ -1629,6 +1783,8 @@ fn local_publish_consume() {
 			format.len(),
 			init.as_ptr(),
 			init.len(),
+			std::ptr::null(),
+			0,
 		)
 	});
 
@@ -1742,6 +1898,8 @@ fn consume_announced_local() {
 			format.len(),
 			init.as_ptr(),
 			init.len(),
+			std::ptr::null(),
+			0,
 		)
 	});
 
@@ -1817,6 +1975,8 @@ fn video_publish_consume() {
 			format.len(),
 			init.as_ptr(),
 			init.len(),
+			std::ptr::null(),
+			0,
 		)
 	});
 
@@ -2369,6 +2529,8 @@ fn video_raw_decode() {
 			format.len(),
 			init.as_ptr(),
 			init.len(),
+			std::ptr::null(),
+			0,
 		)
 	});
 
@@ -2451,6 +2613,8 @@ fn multiple_frames_ordering() {
 			format.len(),
 			init.as_ptr(),
 			init.len(),
+			std::ptr::null(),
+			0,
 		)
 	});
 
@@ -2519,6 +2683,8 @@ fn catalog_update_on_new_track() {
 			format.len(),
 			init.as_ptr(),
 			init.len(),
+			std::ptr::null(),
+			0,
 		)
 	});
 
@@ -2548,6 +2714,8 @@ fn catalog_update_on_new_track() {
 			format.len(),
 			init.as_ptr(),
 			init.len(),
+			std::ptr::null(),
+			0,
 		)
 	});
 

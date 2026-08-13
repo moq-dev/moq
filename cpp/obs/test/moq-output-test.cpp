@@ -195,7 +195,7 @@ int32_t moq_publish_finish(uint32_t)
 	return 0;
 }
 
-int32_t moq_publish_media(uint32_t, const char *, size_t, const uint8_t *, size_t)
+int32_t moq_publish_media(uint32_t, const char *, size_t, const uint8_t *, size_t, const char *, size_t)
 {
 	return 7;
 }

@@ -1188,11 +1188,16 @@ pub extern "C" fn moq_publish_finish(broadcast: u32) -> i32 {
 /// All frames in [moq_publish_media_frame] must be written in decode order.
 /// The `format` controls the encoding, both of `init` and frame payloads.
 ///
+/// The `name` is an optional track name, made unique within the broadcast by an
+/// incrementing index prefix (`0.opus`, `1.opus`, ...). When NULL, it's derived
+/// from the format instead.
+///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that format is a valid pointer to format_len bytes of data.
 /// - The caller must ensure that init is a valid pointer to init_size bytes of data.
+/// - If name is non-null, the caller must ensure it points to name_len valid bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_media(
 	broadcast: u32,
@@ -1200,13 +1205,16 @@ pub unsafe extern "C" fn moq_publish_media(
 	format_len: usize,
 	init: *const u8,
 	init_size: usize,
+	name: *const c_char,
+	name_len: usize,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let format = unsafe { ffi::parse_str(format, format_len)? };
 		let init = unsafe { ffi::parse_slice(init, init_size)? };
+		let name = unsafe { ffi::parse_str_optional(name, name_len)? };
 
-		State::lock().publish.media(broadcast, format, init)
+		State::lock().publish.media(broadcast, format, init, name)
 	})
 }
 

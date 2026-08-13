@@ -480,7 +480,7 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 	}
 
 	// Intialize the media import module with the codec and initialization data.
-	int handle = moq_publish_media(broadcast, moq_codec, strlen(moq_codec), extra_data, extra_size);
+	int handle = moq_publish_media(broadcast, moq_codec, strlen(moq_codec), extra_data, extra_size, NULL, 0);
 	video_tracks[encoder] = handle;
 	if (handle < 0) {
 		LOG_ERROR("Failed to initialize video track: %d", handle);
@@ -519,7 +519,7 @@ void MoQOutput::AudioInit(obs_encoder_t *encoder)
 
 	const char *codec = obs_encoder_get_codec(encoder);
 
-	int handle = moq_publish_media(broadcast, codec, strlen(codec), extra_data, extra_size);
+	int handle = moq_publish_media(broadcast, codec, strlen(codec), extra_data, extra_size, NULL, 0);
 	audio_tracks[encoder] = handle;
 	if (handle < 0) {
 		LOG_ERROR("Failed to initialize audio track: %d", handle);
