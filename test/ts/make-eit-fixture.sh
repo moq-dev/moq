@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# Add a synthetic DVB EPG (EIT) to any transport stream.
+#
+# The MPEG-TS import path routes SI by PID, but no capture in this repository carries
+# EIT (PID 0x0012), so nothing exercises that route. This synthesises one from a clip
+# that has none — including the ffmpeg-generated clip run.sh makes — so the EIT path is
+# testable without needing a broadcast capture.
+#
+# Everything is derived from the input: the service triplet comes from its PAT and SDT, so
+# the generated EIT actually describes the service the stream carries rather than a
+# plausible-looking one a receiver would ignore. The EPG is anchored to a fixed UTC
+# reference by default, which makes the output byte-reproducible for a given input.
+#
+# Requires TSDuck (tsp, tstables) and python3.
+#
+# Usage: make-eit-fixture.sh [options] <input.ts> <output.ts>
+#
+#   --pf-only        EIT p/f actual only. The default also generates EIT schedule.
+#   --events N       events in the EPG (default 12)
+#   --time T         UTC reference, "YYYY/MM/DD:hh:mm:ss". Defaults to the input's own
+#                    TDT if it has one, else a fixed date.
+#   --service-id N   service to describe (default: the first service in the PAT)
+#   --quiet          suppress the post-generation summary
+
+set -euo pipefail
+
+PF_ONLY=""
+EVENTS=12
+TIME_REF=""
+SERVICE_ID=""
+QUIET=""
+ARGS=()
+
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--pf-only) PF_ONLY=1; shift ;;
+		--events) EVENTS="$2"; shift 2 ;;
+		--time) TIME_REF="$2"; shift 2 ;;
+		--service-id) SERVICE_ID="$2"; shift 2 ;;
+		--quiet) QUIET=1; shift ;;
+		-h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		*) ARGS+=("$1"); shift ;;
+	esac
+done
+
+[[ ${#ARGS[@]} -eq 2 ]] || { echo "usage: $(basename "$0") [options] <input.ts> <output.ts>" >&2; exit 2; }
+IN="${ARGS[0]}"
+OUT="${ARGS[1]}"
+[[ -r "$IN" ]] || { echo "error: no such input: $IN" >&2; exit 1; }
+
+for t in tsp tstables python3; do
+	command -v "$t" >/dev/null 2>&1 || { echo "error: missing required tool: $t" >&2; exit 1; }
+done
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+# Read the service triplet from the stream rather than assuming it. An EIT whose
+# (original_network_id, transport_stream_id, service_id) does not match the SDT describes
+# nothing, and a receiver is right to ignore it.
+tstables "$IN" --pid 0x0000 --pid 0x0011 --pid 0x0014 --max-tables 8 \
+	--json-output "$TMP/si.json" --no-pager >/dev/null 2>&1 || true
+
+read -r DERIVED_SID TSID ONID TDT <<<"$(python3 - "$TMP/si.json" <<'PY'
+import json, sys
+
+sid = tsid = onid = tdt = "-"
+try:
+    doc = json.load(open(sys.argv[1]))
+except Exception:
+    doc = {}
+for t in doc.get("#nodes", []) if isinstance(doc, dict) else doc:
+    name = t.get("#name", "")
+    if name == "PAT":
+        tsid = t.get("transport_stream_id", tsid)
+        for s in t.get("#nodes", []):
+            if s.get("#name") == "service" and sid == "-":
+                sid = s.get("service_id", sid)
+    elif name == "SDT":
+        tsid = t.get("transport_stream_id", tsid)
+        onid = t.get("original_network_id", onid)
+        for s in t.get("#nodes", []):
+            if s.get("#name") == "service" and sid == "-":
+                sid = s.get("service_id", sid)
+    elif name == "TDT" and tdt == "-":
+        raw = t.get("utc_time") or t.get("UTC_time") or ""
+        # "YYYY-MM-DD hh:mm:ss" -> the "YYYY/MM/DD:hh:mm:ss" eitinject --time wants.
+        if len(raw) == 19 and raw[4] == "-" and raw[10] == " ":
+            tdt = raw.replace("-", "/").replace(" ", ":")
+print(sid, tsid, onid, tdt)
+PY
+)"
+
+SERVICE_ID="${SERVICE_ID:-$DERIVED_SID}"
+[[ "$SERVICE_ID" == "-" || -z "$SERVICE_ID" ]] && SERVICE_ID=1
+[[ "$TSID" == "-" || -z "$TSID" ]] && TSID=1
+[[ "$ONID" == "-" || -z "$ONID" ]] && ONID=1
+
+# Anchor to the stream's own clock where it has one, so the "present" event is genuinely
+# present for a receiver decoding from the start. Otherwise a fixed date, which keeps the
+# output reproducible; eitinject needs a reference either way and would otherwise take the
+# wall clock, making every run differ.
+if [[ -z "$TIME_REF" ]]; then
+	if [[ "$TDT" != "-" && -n "$TDT" ]]; then
+		TIME_REF="$TDT"
+	else
+		TIME_REF="2026/01/01:12:00:00"
+	fi
+fi
+
+python3 - "$TMP/epg.xml" "$SERVICE_ID" "$TSID" "$ONID" "$TIME_REF" "$EVENTS" <<'PY'
+import sys, datetime
+
+path, sid, tsid, onid, ref, count = sys.argv[1:7]
+sid, tsid, onid, count = int(sid), int(tsid), int(onid), int(count)
+t0 = datetime.datetime.strptime(ref, "%Y/%m/%d:%H:%M:%S")
+
+# The first event has to straddle the reference, not merely precede it: an event ending
+# exactly at the reference is already obsolete and eitinject drops it, leaving p/f empty
+# for the whole clip.
+start = t0 - datetime.timedelta(minutes=15)
+titles = [
+    ("News", "International news, business and weather."),
+    ("Sport", "The day in sport."),
+    ("Documentary", "Long-form reporting."),
+    ("Talk", "Interviews with newsmakers."),
+    ("Markets", "Companies and the people who run them."),
+    ("Weather", "The outlook, region by region."),
+]
+
+rows = []
+for i in range(count):
+    s = start + datetime.timedelta(minutes=30 * i)
+    name, text = titles[i % len(titles)]
+    rows.append(
+        f'    <event event_id="{1000 + i}" start_time="{s:%Y-%m-%d %H:%M:%S}" '
+        f'duration="00:30:00" running_status="{"running" if i == 0 else "not-running"}" '
+        f'CA_mode="false">\n'
+        f'      <short_event_descriptor language_code="eng">\n'
+        f'        <event_name>{name} {i + 1}</event_name>\n'
+        f'        <text>{text}</text>\n'
+        f"      </short_event_descriptor>\n"
+        f"    </event>"
+    )
+
+# eitinject ignores this structure and re-derives p/f and schedule from the event list, so
+# one EIT carrying every event is the intended input shape.
+open(path, "w").write(
+    '<?xml version="1.0" encoding="UTF-8"?>\n<tsduck>\n'
+    f'  <EIT type="pf" actual="true" version="1" current="true"\n'
+    f'       service_id="{sid}" transport_stream_id="{tsid}" original_network_id="{onid}">\n'
+    + "\n".join(rows)
+    + "\n  </EIT>\n</tsduck>\n"
+)
+PY
+
+EIT_ARGS=(--actual)
+[[ -n "$PF_ONLY" ]] && EIT_ARGS=(--actual-pf)
+
+# tsp packet processors replace packets, they do not create them, so EIT can only go where
+# there is stuffing. A broadcast capture has plenty and keeps its mux rate; a clip muxed by
+# ffmpeg has none, so pad it to a constant rate first and say so, since that changes the
+# stream in a way the caller should know about.
+SRC="$IN"
+NULLS=$(tsp -I file "$IN" -P count --pid 0x1FFF --total -O drop 2>&1 |
+	sed -n 's/.*counted \([0-9,]*\) packets out of \([0-9,]*\).*/\1 \2/p' | head -1)
+HAVE=$(echo "$NULLS" | cut -d' ' -f1 | tr -d ,)
+TOTAL=$(echo "$NULLS" | cut -d' ' -f2 | tr -d ,)
+if [[ -z "$HAVE" || -z "$TOTAL" || "$TOTAL" -eq 0 || $((HAVE * 200)) -lt "$TOTAL" ]]; then
+	RATE=$(tsp -I file "$IN" -P analyze --normalized -O drop 2>/dev/null |
+		sed -n 's/^ts:.*:bitrate=\([0-9]*\):.*/\1/p' | head -1)
+	[[ -n "$RATE" && "$RATE" -gt 0 ]] || { echo "error: cannot determine input bitrate to pad to" >&2; exit 1; }
+	PADDED=$((RATE + 200000))
+	[[ -n "$QUIET" ]] || echo "### input carries no stuffing; padding to ${PADDED} b/s CBR to make room"
+	tsstuff --bitrate "$PADDED" "$IN" >"$TMP/padded.ts" 2>"$TMP/stuff.log" || {
+		sed 's/^/  tsstuff: /' "$TMP/stuff.log" >&2 || true
+		exit 1
+	}
+	SRC="$TMP/padded.ts"
+fi
+
+# --wait-first-batch: without it injection races the EPG load and the head of the output
+# carries no EIT, which a short capture would read as "the table was dropped".
+# The SDT flags: a stream that carries EIT while advertising none is internally
+# inconsistent, and a conformance analyser will say so.
+tsp -I file "$SRC" \
+	-P sdt --service-id "$SERVICE_ID" --eit-pf 1 --eit-schedule "$([[ -n "$PF_ONLY" ]] && echo 0 || echo 1)" \
+	-P eitinject --files "$TMP/epg.xml" --wait-first-batch --time "$TIME_REF" "${EIT_ARGS[@]}" \
+	-O file "$OUT" 2>"$TMP/tsp.log" || {
+	sed 's/^/  tsp: /' "$TMP/tsp.log" >&2 || true
+	exit 1
+}
+
+EIT_PKTS=$(tsp -I file "$OUT" -P count --pid 0x0012 --total -O drop 2>&1 |
+	sed -n 's/.*counted \([0-9,]*\) packets.*/\1/p' | head -1)
+if [[ -z "$EIT_PKTS" || "$EIT_PKTS" == "0" ]]; then
+	echo "error: no EIT in the output; the EPG or the time reference did not match the stream" >&2
+	sed 's/^/  tsp: /' "$TMP/tsp.log" >&2 || true
+	exit 1
+fi
+
+[[ -n "$QUIET" ]] || {
+	echo "### EIT fixture: service $SERVICE_ID (ts $TSID, onid $ONID), reference $TIME_REF"
+	echo "### $EVENTS events, $([[ -n "$PF_ONLY" ]] && echo "p/f only" || echo "p/f + schedule")"
+	echo "### $EIT_PKTS packets on PID 0x0012 -> $OUT"
+}

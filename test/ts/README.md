@@ -18,6 +18,7 @@ just test ts                    # generate a clip, round-trip, analyze
 just test ts --source cap.ts    # round-trip a real capture instead
 just test ts --analyze-only x.ts # skip the round-trip, analyze a file
 just test ts --strict           # also fail on broadcast-shape warnings
+just test ts --with-eit         # add a synthetic EPG first, report which SI survived
 ```
 
 `--analyze-only` needs only TSDuck + Python, so you can point it at any captured
@@ -71,6 +72,48 @@ Thresholds are CLI flags forwarded through `run.sh` (e.g.
 `--pcr-repetition-ms`, `--pcr-jitter-us`, `--bitrate-cov-max`, `--burstiness-max`,
 `--tb-size-bytes`, `--video-leak-bps`, `--audio-leak-bps`). `--report-json <path>`
 writes the full machine-readable report.
+
+## EIT fixture
+
+`make-eit-fixture.sh` adds a synthetic DVB EPG to any transport stream, so the
+import path's EIT handling can be exercised without a broadcast capture that
+carries one — no capture in this repository does.
+
+```bash
+./make-eit-fixture.sh in.ts out.ts             # EIT p/f + schedule on PID 0x0012
+./make-eit-fixture.sh --pf-only in.ts out.ts   # p/f only
+```
+
+Everything is derived from the input, so the EIT describes the service the
+stream actually carries: the triplet (`original_network_id`,
+`transport_stream_id`, `service_id`) comes from its PAT and SDT, and the EPG is
+anchored to the stream's own TDT where it has one. Without a TDT — the
+ffmpeg-generated clip has none — it falls back to a fixed date, so the output is
+byte-reproducible for a given input. The SDT's `EIT_present_following_flag` and
+`EIT_schedule_flag` are set to match, since a stream carrying an EIT while
+advertising none is internally inconsistent.
+
+`tsp` replaces packets rather than creating them, so the EIT has to come out of
+existing stuffing. A broadcast capture has plenty and keeps its exact mux rate; a
+clip with none is padded to a constant bitrate first, and the script says so.
+
+`--with-eit` wires this into the round-trip and prints which SI PIDs came back:
+
+```
+### SI round-trip (source -> capture)
+  TABLE      PID           SOURCE      CAPTURE
+  NIT        0x0010             7            5
+  SDT        0x0011            31           21
+  EIT        0x0012         1,007            0
+  TDT/TOT    0x0014            40            0
+```
+
+This is a report, not a gate. `SI_PIDS` in
+[`catalog.rs`](../../rs/moq-mux/src/container/ts/catalog.rs) is the allowlist of
+PIDs the import path routes, and a table outside it is dropped by design rather
+than by malfunction; the census makes that visible instead of leaving it to be
+inferred from the code. Counts differ for a table that *did* survive because the
+exporter re-emits SI on its own repetition cadence rather than the source's.
 
 ## CI
 
