@@ -16,15 +16,27 @@ use wasm_bindgen::prelude::*;
 
 use crate::util::js_err;
 
-/// Convert a JS millisecond duration into a `Duration`, saturating rather than panicking.
+/// The longest duration that still fits the wire, since these all get encoded as a
+/// millisecond QUIC varint. About 146 million years, so it reads as "no limit" to any
+/// caller while staying encodable.
 ///
-/// `Duration::from_secs_f64` panics on a non-finite or out-of-range value, and `Infinity` is
-/// how a JS caller naturally spells "no limit". A panic here would abort the whole wasm
-/// module over one bad option, so clamp instead: at or below zero is `ZERO`, anything past
-/// `Duration`'s range (including `Infinity`) is `MAX`. NaN lands on `ZERO` via the `max`.
+/// `Duration::MAX` would not: its `as_millis()` is ~1.8e22, four orders of magnitude past
+/// `VarInt::MAX`, so encoding a track's properties would fail well after the bad value was
+/// accepted.
+const MAX_ENCODABLE: Duration = Duration::from_millis(moq_net::VarInt::MAX.into_inner());
+
+/// Convert a JS millisecond duration into a `Duration`, clamping rather than panicking.
+///
+/// `Duration::from_secs_f64` panics on a non-finite or out-of-range value, and `Infinity`
+/// is how a JS caller naturally spells "no limit"; a panic would surface as an opaque wasm
+/// trap instead of the error this API declares. So clamp: at or below zero (and NaN, via
+/// the `max`) is `ZERO`, anything above is [`MAX_ENCODABLE`].
 fn duration_from_millis(millis: f64) -> Duration {
-	let secs = millis.max(0.0) / 1000.0;
-	Duration::try_from_secs_f64(secs).unwrap_or(Duration::MAX)
+	let millis = millis.max(0.0);
+	match Duration::try_from_secs_f64(millis / 1000.0) {
+		Ok(d) if d <= MAX_ENCODABLE => d,
+		_ => MAX_ENCODABLE,
+	}
 }
 
 /// Per-subscription options, requested when a subscription opens and adjustable later

@@ -57,12 +57,17 @@ Relay-side concerns are deliberately absent: routes, hops, cost, origin scoping,
 and cluster identity have no browser caller. So are the `poll_*` variants, since
 JS has no equivalent of a `kio::Waiter`.
 
-Datagrams are the one part of the track model still unbound:
-`track::Producer::append_datagram` / `write_datagram` and
-`track::Subscriber::recv_datagram` have no counterpart here, so a browser
-publisher can't emit them and a subscriber can't observe them. They only flow on
-moq-lite-05 over a transport that carries datagrams at all, which the browser
-does. Tracked separately.
+Two parts of the track model are still unbound, both tracked separately:
+
+- **Datagrams.** `track::Producer::append_datagram` / `write_datagram` and
+  `track::Subscriber::recv_datagram` have no counterpart here, so a browser
+  publisher can't emit them and a subscriber can't observe them. They only flow
+  on moq-lite-05 over a transport that carries datagrams at all, which the
+  browser does.
+- **Serving a cache-miss fetch.** `fetchGroup` binds the requesting side, but
+  `track::Dynamic` / `requested_group` is absent, so a publisher can only answer
+  a fetch for a group it still has cached. Note the asymmetry: the
+  broadcast-level equivalent *is* bound, as `BroadcastProducer.requestedTrack`.
 
 Media muxing is still out (see below), and there is no WebSocket fallback: the
 Rust `qmux` crate is tokio-based, so a browser session is WebTransport-only

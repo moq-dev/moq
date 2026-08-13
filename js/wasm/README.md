@@ -14,8 +14,9 @@ Moq.setup(); // install panic/tracing hooks for readable errors
 
 const session = await Moq.Session.connect("https://relay.example.com/anon");
 
-// Consume.
+// Consume. `announcedBroadcast` resolves null if the session closes first.
 const broadcast = await session.announcedBroadcast("room/alice");
+if (!broadcast) throw new Error("session closed before the broadcast appeared");
 const track = await broadcast.subscribe("video");
 for (let group = await track.recvGroup(); group; group = await track.recvGroup()) {
 	for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) {
@@ -44,11 +45,17 @@ Conventions worth knowing before wiring this into app code:
 
 - Durations are milliseconds and timestamps are microseconds, matching `@moq/net`.
 - Sequence numbers are `bigint`, since they are `u64` on the wire.
-- `close()` is a clean finish; `abort(code)` takes an application close code.
+- `close()` is a clean finish; `abort(code)` takes an application close code and
+  consumes the handle, so every later call on it fails. `Session.close(code)` is
+  the exception: it takes an optional code and tears the whole session down.
 - `closed()` **rejects** rather than resolving, because every close carries a
-  reason (a clean one included).
-- One in-flight async call per handle. A second concurrent `recvGroup()` on the
-  same subscriber throws rather than interleaving; clone the handle instead.
+  reason (a clean one included). It is safe to await while still using the
+  handle, and so is `TrackProducer`'s `used()` / `unused()`.
+- One in-flight async call per handle otherwise. A second concurrent
+  `recvGroup()` on the same subscriber throws rather than interleaving; clone
+  the handle instead. Subscription changes are exempt: `update()` and
+  `subscription` go through a separate control handle, so they work while a read
+  is pending.
 
 ## Building
 

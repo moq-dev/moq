@@ -106,10 +106,21 @@ impl TrackProducer {
 		Err(js_err(waiter.closed().await))
 	}
 
+	/// Resolve once somebody is subscribed, so the producer can start working.
+	///
+	/// The counterpart to `unused`, and what a publisher waits on before opening a camera
+	/// or spinning up an encoder for a track nobody is watching yet. Safe to await while
+	/// publishing.
+	pub async fn used(&self) -> Result<(), JsValue> {
+		let waiter = self.waiter.clone();
+		waiter.used().await.map_err(js_err)
+	}
+
 	/// Resolve once nobody is subscribed, so the producer can stop working.
 	///
-	/// Safe to await while publishing, which is the point: this is the demand signal a
-	/// publisher races against its own writes.
+	/// Resolves immediately when nobody has ever subscribed, so use `used` to wait for the
+	/// first viewer rather than expecting this to hold. Safe to await while publishing,
+	/// which is the point: this is the demand signal a publisher races against its writes.
 	pub async fn unused(&self) -> Result<(), JsValue> {
 		let waiter = self.waiter.clone();
 		waiter.unused().await.map_err(js_err)

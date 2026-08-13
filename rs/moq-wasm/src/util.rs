@@ -1,6 +1,6 @@
 //! Small helpers shared by the binding modules.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use wasm_bindgen::prelude::*;
@@ -18,12 +18,26 @@ pub fn js_err(e: impl std::fmt::Display) -> JsValue {
 /// error rather than an aliasing bug: one in-flight call per handle.
 pub struct Exclusive<T> {
 	inner: Rc<RefCell<Option<T>>>,
+
+	// Both "busy" and "consumed" read as an empty cell, so the reason is tracked here.
+	// Otherwise a call after `abort()` reports "already in progress", pointing a JS
+	// developer at concurrency when the real mistake was use-after-consume.
+	consumed: Rc<Cell<bool>>,
 }
 
 impl<T> Exclusive<T> {
 	pub fn new(value: T) -> Self {
 		Self {
 			inner: Rc::new(RefCell::new(Some(value))),
+			consumed: Rc::new(Cell::new(false)),
+		}
+	}
+
+	fn unavailable(&self, what: &str) -> JsValue {
+		if self.consumed.get() {
+			js_err(format!("{what}: handle was already consumed"))
+		} else {
+			js_err(format!("{what} already in progress"))
 		}
 	}
 
@@ -37,10 +51,7 @@ impl<T> Exclusive<T> {
 		Fut: Future<Output = (T, R)>,
 	{
 		let cell = self.inner.clone();
-		let value = cell
-			.borrow_mut()
-			.take()
-			.ok_or_else(|| js_err(format!("{what} already in progress")))?;
+		let value = cell.borrow_mut().take().ok_or_else(|| self.unavailable(what))?;
 
 		let (value, result) = f(value).await;
 		*cell.borrow_mut() = Some(value);
@@ -53,9 +64,7 @@ impl<T> Exclusive<T> {
 		F: FnOnce(&mut T) -> R,
 	{
 		let mut guard = self.inner.borrow_mut();
-		let value = guard
-			.as_mut()
-			.ok_or_else(|| js_err(format!("{what} already in progress")))?;
+		let value = guard.as_mut().ok_or_else(|| self.unavailable(what))?;
 		Ok(f(value))
 	}
 
@@ -64,10 +73,9 @@ impl<T> Exclusive<T> {
 	/// Every later call reports the handle as unusable, which is the closest a
 	/// wasm-bindgen handle gets to moq-net's `fn abort(self)`.
 	pub fn take(&self, what: &str) -> Result<T, JsValue> {
-		self.inner
-			.borrow_mut()
-			.take()
-			.ok_or_else(|| js_err(format!("{what} already in progress")))
+		let value = self.inner.borrow_mut().take().ok_or_else(|| self.unavailable(what))?;
+		self.consumed.set(true);
+		Ok(value)
 	}
 }
 
@@ -75,6 +83,7 @@ impl<T> Clone for Exclusive<T> {
 	fn clone(&self) -> Self {
 		Self {
 			inner: self.inner.clone(),
+			consumed: self.consumed.clone(),
 		}
 	}
 }
