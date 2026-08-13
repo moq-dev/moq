@@ -366,14 +366,17 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 // Wraps a writable so its writes park until `release()`, giving a test a window inside
 // whatever the publisher is writing while its other loops keep running. `parked` settles on
-// the first write attempt, held or not.
+// the first write attempt, held or not. Passing an error to `release` fails the held write
+// instead, which is how a test drives the publisher's error teardown from a known point.
 function gateWrites(target: WritableStream<Uint8Array>, hold: boolean) {
 	const writer = target.getWriter();
 
-	let release!: () => void;
-	const released = new Promise<void>((resolve) => {
-		release = resolve;
+	let release!: (err?: Error) => void;
+	const released = new Promise<void>((resolve, reject) => {
+		release = (err) => (err ? reject(err) : resolve());
 	});
+	// Nobody awaits this until a write parks on it, so a rejection would look unhandled.
+	released.catch(() => void 0);
 	if (!hold) release();
 
 	let parking!: () => void;
@@ -441,13 +444,17 @@ async function servedSubscription(
 		endGroup: options.endGroup,
 		endFrame: options.endFrame,
 	});
-	void publisher.runSubscribe(msg, server);
+	// Kept so a test can wait for the whole subscription to unwind, decoder included, rather
+	// than only for what reached the wire. It reports failures by tearing down, never by
+	// rejecting.
+	const serving = publisher.runSubscribe(msg, server);
 
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
 
 	return {
 		client,
 		track,
+		serving,
 		parked: gate.parked,
 		release: gate.release,
 		serve(sequence: number) {
@@ -667,6 +674,49 @@ test("lite draft-06: a popped group keeps its frame bounds across a queued updat
 
 		sub.release();
 		expect(await sub.servedGroup()).toEqual({ sequence: 0, frameStart: 0, payloads: ["a", "b"] });
+	} finally {
+		await sub.close();
+	}
+});
+
+// A peer FIN is the subscriber leaving, which the loop takes ahead of any ready group: it stops
+// there rather than draining what is buffered, since nobody is reading the rest. Matches the Rust
+// publisher's TrackEnd::PeerFin, which drops the in-flight group machines instead of draining.
+test("lite draft-05: a peer FIN ends serving while the producer is still live", async () => {
+	const sub = await servedSubscription({ startGroup: 0 });
+	try {
+		sub.serve(0);
+		expect(await sub.servedSequence()).toBe(0);
+
+		// The subscriber unsubscribes. The producer doesn't know and keeps going.
+		sub.client.writer.close();
+		await flush();
+		sub.serve(1);
+
+		expect(await sub.servedSequence()).toBeUndefined();
+	} finally {
+		await sub.close();
+	}
+});
+
+// The decoder holds one message at a time and parks until the loop takes it, so a subscription
+// that dies while holding one leaves the decoder parked on the slot rather than on a read that
+// resetting the stream would release. Teardown has to unpark it too, or runSubscribe never
+// returns and the subscription leaks.
+test("lite draft-05: teardown unwinds while the decoder holds an untaken update", async () => {
+	const sub = await servedSubscription({ startGroup: 0, gated: true });
+	try {
+		// Group 0 parks the loop inside its SUBSCRIBE_START write.
+		sub.serve(0);
+		await sub.parked;
+
+		// The update decodes into the slot behind the parked loop, which never takes it
+		// because the write it is parked on fails.
+		await new SubscribeUpdate({ priority: 0, endGroup: 5 }).encode(sub.client.writer, Version.DRAFT_05);
+		await flush();
+
+		sub.release(new Error("write failed"));
+		await sub.serving;
 	} finally {
 		await sub.close();
 	}

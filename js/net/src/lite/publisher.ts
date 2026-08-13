@@ -125,60 +125,100 @@ type ServeGroup = {
 /** What serving fetched frames needs beyond the group and destination stream. */
 type ServeFetch = Omit<ServeGroup, "sub">;
 
-type SubscriptionControl =
+/** What the serving loop takes from the subscribe stream instead of serving a group. */
+type Control =
+	/** The peer re-stated the subscription: priority, ordering, latency, and both ranges. */
 	| { kind: "update"; update: SubscribeUpdate }
-	| { kind: "fin" }
-	| { kind: "closed" }
+	/** The peer FIN'd, or our own half went away. Either way there is nobody left to serve. */
+	| { kind: "done" }
+	/** The stream failed; the subscription goes down with it. */
 	| { kind: "error"; error: Error };
 
-// Decodes control messages independently, but only queues them. The serving loop is the sole
-// owner of the track cursor and frame bounds, so decoding can never mutate either between a
-// synchronous group pop and its frame-range snapshot.
+/**
+ * The subscribe stream's control half, decoded into a single-message slot.
+ *
+ * Decoding runs on its own, but only ever fills the slot: the serving loop owns the track
+ * cursor and the frame bounds, so nothing here may apply an update itself. That is what keeps
+ * a group pop and its frame-range snapshot one indivisible step.
+ *
+ * One message in flight rather than a queue, so a peer that floods SUBSCRIBE_UPDATE while the
+ * loop is parked in a write backs up in QUIC flow control instead of on our heap. It also
+ * matches the Rust publisher, which decodes one message per poll.
+ */
 class SubscriptionControls {
-	#pending: SubscriptionControl[] = [];
+	#update?: SubscribeUpdate;
+	// Sticky, first one wins: null once the stream is over, an Error once it failed.
+	#end?: Error | null;
 	#changed = new Signal(0);
+
+	/** Settles once decoding stops, so teardown can wait for it rather than leaving it running. */
 	readonly decoding: Promise<void>;
 
 	constructor(reader: Reader, writer: Writer, version: Version) {
 		this.decoding = this.#decode(reader, version);
+		// Our own half going away ends the loop too, and has to reach it the same way: the
+		// loop looks at nothing else. This is also what releases a decoder parked on a full
+		// slot during teardown, which closing the reader alone would leave stuck.
 		void writer.closed.then(
-			() => this.#push({ kind: "closed" }),
-			(err: unknown) => this.#push({ kind: "error", error: error(err) }),
+			() => this.#finish(null),
+			(err: unknown) => this.#finish(error(err)),
 		);
 	}
 
-	take(): SubscriptionControl | undefined {
-		return this.#pending.shift();
+	/** The next control to apply, or undefined while the peer is quiet. */
+	take(): Control | undefined {
+		const update = this.#update;
+		if (update) {
+			// An update decoded before the stream ended still applies. `#end` is sticky, so
+			// the next call reports it.
+			this.#update = undefined;
+			this.#wake();
+			return { kind: "update", update };
+		}
+		if (this.#end === undefined) return undefined;
+		return this.#end === null ? { kind: "done" } : { kind: "error", error: this.#end };
 	}
 
+	/** Calls `fn` once {@link take} may answer differently. */
 	changed(fn: () => void): Dispose {
 		return this.#changed.changed(fn);
 	}
 
-	#push(control: SubscriptionControl) {
-		this.#pending.push(control);
+	#finish(end: Error | null) {
+		if (this.#end !== undefined) return;
+		this.#end = end;
+		this.#wake();
+	}
+
+	#wake() {
 		this.#changed.update((value) => value + 1);
 	}
 
 	async #decode(reader: Reader, version: Version) {
 		try {
-			for (;;) {
-				const update = await SubscribeUpdate.decodeMaybe(reader, version);
-				if (!update) {
-					this.#push({ kind: "fin" });
-					return;
+			while (this.#end === undefined) {
+				// Hold the decoded update until the loop takes it, rather than reading ahead.
+				if (this.#update) {
+					await this.#changed.changed();
+					continue;
 				}
-				this.#push({ kind: "update", update });
+
+				const update = await SubscribeUpdate.decodeMaybe(reader, version);
+				if (!update) break;
+				this.#update = update;
+				this.#wake();
 			}
 		} catch (err: unknown) {
-			this.#push({ kind: "error", error: error(err) });
+			this.#finish(error(err));
+			return;
 		}
+		this.#finish(null);
 	}
 }
 
 // Register both readiness sources in the same turn after the caller observed neither ready.
-// The winner disposes both one-shot registrations, so an idle subscription keeps only two
-// listeners no matter how many times it wakes.
+// The winner disposes both registrations, so an idle subscription accumulates nothing no
+// matter how many times it wakes.
 function waitForSubscription(controls: SubscriptionControls, subscriber: track.Subscriber): Promise<void> {
 	return new Promise((resolve) => {
 		let settled = false;
@@ -452,6 +492,7 @@ export class Publisher {
 			stream.close();
 			track.close();
 			// Closing the stream ends the decoder and track.close ends the datagram loop.
+			// Both halves settle, so a decoder parked on an untaken update unwinds too.
 			await Promise.all([datagrams, controls.decoding]);
 		} catch (err: unknown) {
 			const e = error(err);
@@ -536,12 +577,22 @@ export class Publisher {
 		// before the producer declared it.
 		const boundary = () => track.final() ?? (track.latest() ?? -1) + 1;
 
+		// SUBSCRIBE_END names that boundary, which a cap can hold groups back from, so it goes
+		// out as soon as the producer finishes and the subscription keeps serving whatever a
+		// later cap raise releases (see the Rust publisher's Recv::Boundary).
+		const sendEnd = async () => {
+			endSent = true;
+			if (emitRange) {
+				await encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary()) }, this.version);
+			}
+		};
+
 		// One ranking for the whole subscription, shared by every group it serves.
 		const priority = new Priority(track);
 
 		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
-		// a track that ran out of groups still has to flush the ones already queued, and we
-		// FIN the subscribe stream ourselves below to say so.
+		// a track that ran out of groups still has to flush the ones already queued, and the
+		// caller FINs the subscribe stream to say so.
 		let finished = false;
 		let unsubscribe!: () => void;
 		const unsubscribed = new Promise<void>((resolve) => {
@@ -549,13 +600,16 @@ export class Publisher {
 		});
 		try {
 			for (;;) {
-				// Drain every ready control before touching data. The decoder only queues, so
-				// applying the update and popping/positioning a group below cannot interleave.
+				// Control before data, matching the Rust publisher: an update decoded while the
+				// loop was parked applies to the next pop, never to one already made. The
+				// decoder only fills a slot, so nothing here can land between the pop below and
+				// its frame range.
 				const control = controls.take();
 				if (control) {
 					switch (control.kind) {
-						case "fin":
-						case "closed":
+						case "done":
+							// The subscriber left. Its queued groups are pointless now, which
+							// the finally below acts on since `finished` stays false.
 							return;
 						case "error":
 							throw control.error;
@@ -582,35 +636,32 @@ export class Publisher {
 
 				// Exactly-once arrival-order serving. This synchronous package-internal pop
 				// and frameRange call are the operation's linearization point.
-				const result = hooks.tryRecvGroup(track);
-				if (result instanceof Error) throw result;
-				if (result === null) {
-					if (!endSent) {
-						endSent = true;
-						if (emitRange) {
-							await encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary()) }, this.version);
-						}
+				const recv = hooks.tryRecvGroup(track);
+				switch (recv.kind) {
+					case "error":
+						throw recv.error;
+					case "idle":
+						await waitForSubscription(controls, track);
 						continue;
-					}
-					finished = true;
-					return;
+					case "boundary":
+						// The producer finished but is still holding groups above the cap.
+						// Declare the boundary, then wait for an update to release them.
+						if (!endSent) {
+							await sendEnd();
+							continue;
+						}
+						await waitForSubscription(controls, track);
+						continue;
+					case "done":
+						if (!endSent) {
+							await sendEnd();
+							continue;
+						}
+						finished = true;
+						return;
 				}
 
-				if (!result) {
-					// A cleanly finished producer can still hold groups above the cap. Declare
-					// its boundary now, then wait for an update to make those groups readable.
-					if (!endSent && track.closed.peek() === null) {
-						endSent = true;
-						if (emitRange) {
-							await encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary()) }, this.version);
-						}
-						continue;
-					}
-					await waitForSubscription(controls, track);
-					continue;
-				}
-
-				const group = result;
+				const group = recv.group;
 				const range = frameRange(bounds, group.sequence);
 
 				if (emitRange && !startSent) {
