@@ -115,14 +115,19 @@ class SmokeTest {
             val (name, audio) = consumer.catalog().audio.entries.single()
 
             media.writeFrame(Frame(payload = "opus frame".encodeToByteArray(), timestampUs = 5_000_000uL))
-            media.finish()
 
+            // Fetch while the track is still published: finishing the media producer
+            // unpublishes it, and the fetch would then miss with NotFound.
             val fetched: MediaGroupConsumer = consumer.fetchMediaGroup(
                 name,
                 0uL,
                 audio.container,
                 FetchGroupOptions(priority = 3u),
             )
+
+            // Close the group so the fetched stream terminates instead of waiting for more.
+            media.finish()
+
             fetched.use {
                 assertEquals(0uL, it.sequence())
                 val frames = it.frames().toList()
