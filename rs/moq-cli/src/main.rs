@@ -192,17 +192,33 @@ fn spawn_moq(
 	}
 
 	if let Some(web_bind) = moq.server.bind.clone() {
-		let mut server = net.server(moq.server.clone())?;
-		if directions.publish {
-			server = server.with_publisher(origin.consume());
-		}
-		if directions.consume {
-			server = server.with_subscriber(origin.clone());
-		}
-
+		let server = net.server(moq.server.clone())?;
 		let certificates = server.certificates();
 		moq::notify_ready();
-		tasks.spawn(async move { Ok(server.serve().await?) });
+
+		let origin = origin.clone();
+		tasks.spawn(async move {
+			let _: () = match directions {
+				Directions {
+					publish: true,
+					consume: true,
+				} => server.serve_both(origin.consume(), origin).await?,
+				Directions {
+					publish: true,
+					consume: false,
+				} => server.serve_publish(origin.consume()).await?,
+				Directions {
+					publish: false,
+					consume: true,
+				} => server.serve_consume(origin).await?,
+				// Every caller attaches a direction: each stage is an import or an export.
+				Directions {
+					publish: false,
+					consume: false,
+				} => unreachable!("a stage always needs a direction"),
+			};
+			Ok(())
+		});
 		tasks.spawn(async move { web::run_web(&web_bind, certificates).await });
 	}
 
@@ -245,6 +261,19 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 
 	let bandwidth = spawn_moq(&moq, &net, &origin, Directions::of(&stages), &mut tasks)?;
 
+	// Rate control is per-encoder but the estimate is per-connection, so each encoder
+	// would independently target most of the same uplink and together oversubscribe
+	// it. Refuse rather than congest the link the estimate exists to protect.
+	let adaptive = stages
+		.iter()
+		.filter(|stage| matches!(stage, Command::Import(import) if import.source.uses_bandwidth()))
+		.count();
+	anyhow::ensure!(
+		bandwidth.is_none() || adaptive <= 1,
+		"only one stage can encode to fit the connection's bandwidth estimate, but {adaptive} do; \
+		 run them as separate processes, or publish over --server-bind, which has no estimate"
+	);
+
 	// stdin and stdout are one resource each, so two stages can't share them.
 	let mut stdin = None;
 	let mut stdout = None;
@@ -274,28 +303,27 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 		return drive(tasks).await;
 	}
 
-	// Report the first local pipeline to finish, so stdin EOF ends the process just
-	// like a spawned stage returning does.
-	let (done, mut first) = tokio::sync::mpsc::channel(1);
 	let local = tokio::task::LocalSet::new();
-	for publish in locals {
-		let done = done.clone();
-		local.spawn_local(async move {
-			let _ = done.send(publish.run().await).await;
-		});
-	}
-	drop(done);
+	supervise(&local, locals.into_iter().map(Publish::run), &mut tasks);
+	local.run_until(drive(tasks)).await
+}
 
-	local
-		.run_until(async move {
-			tokio::select! {
-				res = drive(tasks) => res,
-				// `None` means every local pipeline ended without reporting, which a
-				// completed one never does: the task panicked, and tokio caught it.
-				res = first.recv() => res.unwrap_or_else(|| Err(anyhow::anyhow!("pipeline panicked"))),
-			}
-		})
-		.await
+/// Run the non-Send pipelines on `local`, reporting each into `tasks`.
+///
+/// The report is what makes a local pipeline end the process on the same terms as a
+/// spawned stage: it returns on stdin EOF, and a panic surfaces as an error instead
+/// of leaving the other stages running without it.
+fn supervise<F>(
+	local: &tokio::task::LocalSet,
+	pipelines: impl IntoIterator<Item = F>,
+	tasks: &mut JoinSet<anyhow::Result<()>>,
+) where
+	F: std::future::Future<Output = anyhow::Result<()>> + 'static,
+{
+	for pipeline in pipelines {
+		let pipeline = local.spawn_local(pipeline);
+		tasks.spawn(async move { pipeline.await.context("pipeline panicked")? });
+	}
 }
 
 /// Refuse a second stage on a stream there is only one of.
@@ -538,4 +566,44 @@ fn reject_listener_cors(cors: &crate::web::Cors, endpoint: &str) -> anyhow::Resu
 		"`--cors-origin` only applies to `{endpoint} --listen`"
 	);
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::future::Future;
+	use std::pin::Pin;
+
+	type Pipeline = Pin<Box<dyn Future<Output = anyhow::Result<()>>>>;
+
+	/// A local pipeline that dies takes the process with it, even while another one is
+	/// still running. Reporting completion from inside the task instead would miss
+	/// this: a panic skips the report, leaving the survivor to keep the process alive
+	/// with one broadcast silently gone.
+	#[tokio::test]
+	async fn a_panicking_pipeline_ends_the_process() {
+		let local = tokio::task::LocalSet::new();
+		let mut tasks = JoinSet::new();
+
+		let pipelines: Vec<Pipeline> = vec![
+			Box::pin(async { panic!("pipeline died") }),
+			Box::pin(std::future::pending()),
+		];
+		supervise(&local, pipelines, &mut tasks);
+
+		let err = local.run_until(drive(tasks)).await.unwrap_err();
+		assert!(err.to_string().contains("pipeline panicked"), "{err}");
+	}
+
+	/// The first to finish ends the process, which is how stdin EOF stops a run.
+	#[tokio::test]
+	async fn a_finished_pipeline_ends_the_process() {
+		let local = tokio::task::LocalSet::new();
+		let mut tasks = JoinSet::new();
+
+		let pipelines: Vec<Pipeline> = vec![Box::pin(async { Ok(()) }), Box::pin(std::future::pending())];
+		supervise(&local, pipelines, &mut tasks);
+
+		local.run_until(drive(tasks)).await.unwrap();
+	}
 }

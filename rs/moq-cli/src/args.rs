@@ -350,6 +350,18 @@ impl ImportSource {
 		})
 	}
 
+	/// Whether this source encodes to fit the connection's bandwidth estimate.
+	///
+	/// Rate control is per-encoder while the estimate is per-connection, so each such
+	/// source assumes it's the only one on the uplink.
+	pub fn uses_bandwidth(&self) -> bool {
+		match self {
+			#[cfg(feature = "capture")]
+			Self::Capture(_) => true,
+			_ => false,
+		}
+	}
+
 	/// Whether this source threads [`Import::latency_max`] into the catalog it publishes.
 	///
 	/// The stdin containers, HLS, and capture build their catalog in this crate, so they honor
