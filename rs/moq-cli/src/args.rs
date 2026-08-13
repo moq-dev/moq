@@ -127,22 +127,47 @@ impl Invocation {
 		})
 	}
 
-	/// Reject the verb combinations a single process can't run.
+	/// Reject the stage combinations a single process can't run.
 	///
-	/// Only `import` and `export` share an Origin. The rest own the process: `play`
-	/// drives a window on the main thread, `transcode` builds its own Origin, and
-	/// `token` / `devices` never touch the network at all.
+	/// Called before anything binds a port or dials out, so a refused invocation has
+	/// no side effects to unwind.
 	pub fn validate(&self) -> anyhow::Result<()> {
+		// One stage is what the CLI has always run, so nothing below can bite.
 		if self.stages.len() == 1 {
 			return Ok(());
 		}
 
+		// Only `import` and `export` share an Origin. The rest own the process: `play`
+		// drives a window on the main thread, `transcode` builds its own Origin, and
+		// `token` / `devices` never touch the network at all.
 		if let Some(command) = self.stages.iter().find(|command| !command.is_stageable()) {
 			anyhow::bail!(
 				"`{}` must be the only verb; it can't share a process with another `--` stage",
 				command.name()
 			);
 		}
+
+		// Rate control assumes it owns the uplink: the encoder targets a fraction of the
+		// connection's estimate, leaving room for its own audio and transport overhead but
+		// not for a second publisher. Anything else importing over the same connection
+		// spends what that encoder already claimed, so refuse rather than congest the link
+		// the estimate exists to protect. Exports only receive, so they don't count, and
+		// only an outbound client has an estimate at all.
+		let imports = self
+			.stages
+			.iter()
+			.filter(|stage| matches!(stage, Command::Import(_)))
+			.count();
+		let adaptive = self
+			.stages
+			.iter()
+			.any(|stage| matches!(stage, Command::Import(import) if import.source.uses_bandwidth()));
+		anyhow::ensure!(
+			self.moq.client.connect.is_none() || !adaptive || imports == 1,
+			"a stage that encodes to fit the connection's bandwidth estimate assumes it's the only \
+			 publisher on that connection, but this runs {imports} import stages; run them as separate \
+			 processes, or publish over --server-bind, which has no estimate"
+		);
 
 		Ok(())
 	}
@@ -701,6 +726,91 @@ mod tests {
 		};
 
 		assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+	}
+
+	/// Stages that never read the estimate can share a connection freely, so the guard
+	/// must not reject them.
+	#[test]
+	fn imports_without_rate_control_can_share_a_connection() {
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--client-connect",
+			"http://relay",
+			"import",
+			"--broadcast",
+			"a.hang",
+			"rtmp",
+			"--listen",
+			"127.0.0.1:1935",
+			"--",
+			"import",
+			"--broadcast",
+			"b.hang",
+			"srt",
+			"--listen",
+			"127.0.0.1:9000",
+		])
+		.unwrap();
+
+		assert!(cli.validate().is_ok());
+	}
+
+	/// An encoder that follows the estimate targets most of it, so a second publisher
+	/// on the same connection spends what it already claimed. Exports only receive, and
+	/// a `--server-bind` publisher has no estimate to oversubscribe.
+	#[cfg(feature = "capture")]
+	#[test]
+	fn an_adaptive_capture_must_be_the_only_import() {
+		let client: &[&str] = &["--client-connect", "http://relay"];
+		let server: &[&str] = &["--server-bind", "[::]:4443"];
+
+		let cases: [(&[&str], &[&str], bool); 3] = [
+			// Two video captures follow the same estimate.
+			(client, &["import", "capture"], false),
+			// A fixed-rate import spends the same uplink from outside the budget.
+			(client, &["import", "rtmp", "--listen", "127.0.0.1:1935"], false),
+			// No outbound client, so there's no estimate to oversubscribe.
+			(server, &["import", "capture"], true),
+		];
+
+		for (side, second, ok) in cases {
+			let argv = [&["moq"][..], side, &["import", "capture", "--"], second].concat();
+			let cli = Invocation::try_parse_from(argv.clone()).unwrap();
+			assert_eq!(cli.validate().is_ok(), ok, "{argv:?}");
+		}
+
+		// An audio-only capture never reads the estimate, so it may share the connection.
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--client-connect",
+			"http://relay",
+			"import",
+			"capture",
+			"--no-video",
+			"--",
+			"import",
+			"rtmp",
+			"--listen",
+			"127.0.0.1:1935",
+		])
+		.unwrap();
+		assert!(cli.validate().is_ok());
+
+		// Exports only receive, so they don't compete for the uplink.
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--client-connect",
+			"http://relay",
+			"import",
+			"capture",
+			"--",
+			"export",
+			"--broadcast",
+			"other.hang",
+			"fmp4",
+		])
+		.unwrap();
+		assert!(cli.validate().is_ok());
 	}
 
 	/// Only the video encoder reads the connection's bandwidth estimate, so an

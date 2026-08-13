@@ -259,26 +259,9 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 	// platform capture stream is not Send, so their futures cannot be spawned.
 	let mut locals: Vec<Publish> = Vec::new();
 
+	// The stage combinations were refused up front by `Invocation::validate`, before
+	// anything bound a port or dialed out.
 	let bandwidth = spawn_moq(&moq, &net, &origin, Directions::of(&stages), &mut tasks)?;
-
-	// Rate control assumes it owns the uplink: the encoder targets a fraction of the
-	// connection's estimate, leaving room for its own audio and transport overhead but
-	// not for a second publisher. Anything else importing over the same connection
-	// spends what that encoder already claimed, so refuse rather than congest the link
-	// the estimate exists to protect. Exports only receive, so they don't count.
-	let imports = stages
-		.iter()
-		.filter(|stage| matches!(stage, Command::Import(_)))
-		.count();
-	let adaptive = stages
-		.iter()
-		.any(|stage| matches!(stage, Command::Import(import) if import.source.uses_bandwidth()));
-	anyhow::ensure!(
-		bandwidth.is_none() || !adaptive || imports == 1,
-		"a stage that encodes to fit the connection's bandwidth estimate assumes it's the only \
-		 publisher on that connection, but this runs {imports} import stages; run them as separate \
-		 processes, or publish over --server-bind, which has no estimate"
-	);
 
 	// stdin and stdout are one resource each, so two stages can't share them.
 	let mut stdin = None;
