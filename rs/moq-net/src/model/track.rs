@@ -2216,12 +2216,25 @@ impl PlainSubscriber {
 	}
 
 	fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		// An eviction aborts a parked group without touching any cursor this
+		// subscriber polls, so each entry needs a waiter or this poll would never
+		// rerun. `poll_closed` observes-or-registers under one lock: `Pending`
+		// parks the waiter while the group is open (an open group cannot be
+		// aborted), and `Ready` means closed, where only an abort invalidates the
+		// entry. Checking `is_aborted` separately from the registration would leave
+		// a window where an abort lands between the two and wakes nobody.
+		let watch = |group: &group::Consumer| match group.poll_closed(waiter) {
+			Poll::Pending => true,
+			Poll::Ready(()) => !group.is_aborted(),
+		};
+
 		// A raised `start_at` drops parked groups it overtook, and eviction/expiry
 		// (which aborts a cached group) drops its parked entry. The latter is what
 		// bounds parking: a subscription capped indefinitely holds only what the
 		// track's cache policy still retains, not every group it ever observed.
+		let min_sequence = self.min_sequence;
 		self.parked
-			.retain(|sequence, group| *sequence >= self.min_sequence && !group.is_aborted());
+			.retain(|sequence, group| *sequence >= min_sequence && watch(group));
 
 		// Re-offer the lowest parked group back inside the cap once it rises.
 		if let Some(&sequence) = self.parked.keys().next()
@@ -2246,7 +2259,12 @@ impl PlainSubscriber {
 			// Park a group beyond the cap instead of dropping it, and keep scanning
 			// so an in-range group that arrived behind it still flows.
 			if self.end_sequence.is_some_and(|end| consumer.sequence > end) {
-				self.parked.insert(consumer.sequence, consumer);
+				// Watch it from the moment it parks: the retain pass above already
+				// ran, so an entry admitted here would otherwise sit unwatched for
+				// the rest of this poll, and an abort could wake nobody.
+				if watch(&consumer) {
+					self.parked.insert(consumer.sequence, consumer);
+				}
 				continue;
 			}
 			return Poll::Ready(Ok(Some(consumer)));
@@ -3992,6 +4010,51 @@ mod test {
 			matches!(consumer.recv_group().now_or_never(), Some(Ok(None))),
 			"a dead parked group must not be delivered or hold the stream open"
 		);
+	}
+
+	/// Eviction aborts a parked group behind a sleeping subscriber's back. Nothing
+	/// else will poll it (the track already finished), so the entry has to carry a
+	/// waiter or the subscription sleeps forever holding its stream open.
+	#[tokio::test]
+	async fn evicted_parked_group_wakes_the_clean_end() {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+		use std::task::{Context, Wake};
+
+		/// A waker that counts its wakes, for asserting a pending poll left a live
+		/// registration behind.
+		struct CountWaker(AtomicUsize);
+		impl Wake for CountWaker {
+			fn wake(self: std::sync::Arc<Self>) {
+				self.0.fetch_add(1, Ordering::SeqCst);
+			}
+		}
+
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None);
+
+		producer.create_group(group::Info { sequence: 0 }).unwrap();
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			0
+		);
+
+		consumer.end_at(0);
+		let straggler = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		assert!(consumer.recv_group().now_or_never().is_none(), "parked at the cap");
+		producer.finish().unwrap();
+
+		let counter = std::sync::Arc::new(CountWaker(AtomicUsize::new(0)));
+		let waker = std::task::Waker::from(counter.clone());
+		let mut cx = Context::from_waker(&waker);
+		let mut fut = std::pin::pin!(consumer.recv_group());
+		assert!(
+			fut.as_mut().poll(&mut cx).is_pending(),
+			"the parked group holds it open"
+		);
+
+		straggler.abort(Error::Old).unwrap();
+		assert!(counter.0.load(Ordering::SeqCst) > 0, "the eviction wakeup was lost");
+		assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Ready(Ok(None))));
 	}
 
 	#[tokio::test]
