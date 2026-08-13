@@ -65,6 +65,8 @@ typealias MediaProducer = uniffi.moq.MoqMediaProducer
 typealias MediaStreamProducer = uniffi.moq.MoqMediaStreamProducer
 /** The read side of a media track: yields frames with codec metadata in decode order. */
 typealias MediaConsumer = uniffi.moq.MoqMediaConsumer
+/** A finite fetched media group: yields container-decoded frames until the group ends. */
+typealias MediaGroupConsumer = uniffi.moq.MoqMediaGroupConsumer
 /** The write side of a raw-audio track; PCM written here is encoded inside the FFI boundary. */
 typealias AudioProducer = uniffi.moq.MoqAudioProducer
 /** The read side of a raw-audio track: yields decoded PCM frames. */
