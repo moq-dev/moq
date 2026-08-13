@@ -986,18 +986,25 @@ const DEFAULT_DTS_RESERVE: u64 = 16;
 /// at the same points, which a redundant pair compares byte for byte. `None` (nothing
 /// emitted yet) is always due, so a fresh exporter leads with the tables and a receiver
 /// can tune in without waiting for the next slot.
+///
+/// A *later* slot, not merely a different one: video is emitted in decode order, so a
+/// reordered (B-frame) PTS steps backwards all the time, and re-emitting on every
+/// oscillation across a boundary buys nothing and costs a table each way.
 fn due(timestamp: Timestamp, last: Option<Timestamp>, interval: Duration) -> bool {
+	// "Every frame", which the slot arithmetic can't express (and would divide by zero on).
+	if interval.is_zero() {
+		return true;
+	}
 	let Some(last) = last else {
 		return true;
 	};
-	slot(timestamp, interval) != slot(last, interval)
+	slot(timestamp, interval) > slot(last, interval)
 }
 
 /// Index of `timestamp`'s repetition slot: how many whole `interval`s fit under it.
-///
-/// A zero interval degenerates to one slot per microsecond, which makes every frame due.
+/// `interval` must be non-zero; [`due`] handles that case before it gets here.
 fn slot(timestamp: Timestamp, interval: Duration) -> u128 {
-	Duration::from(timestamp).as_micros() / interval.as_micros().max(1)
+	Duration::from(timestamp).as_micros() / interval.as_micros()
 }
 
 /// External byte size of an adaptation field (manual mirror of the crate's
@@ -1200,7 +1207,7 @@ fn dts_reserve(config: &VideoConfig) -> u64 {
 mod tests {
 	use std::time::Duration;
 
-	use super::{DEFAULT_DTS_RESERVE, PSI_INTERVAL, author_dts, due, is_complete_section};
+	use super::{DEFAULT_DTS_RESERVE, PSI_INTERVAL, author_dts, due, is_complete_section, slot};
 	use moq_net::Timestamp;
 
 	fn ms(value: u64) -> Timestamp {
@@ -1334,15 +1341,56 @@ mod tests {
 		assert!(!due(ms(1_250), Some(ms(1_000)), PSI_INTERVAL));
 		assert!(due(ms(1_500), Some(ms(1_000)), PSI_INTERVAL));
 
-		// A backwards timestamp is a rewound timeline, not a slot that has yet to lapse;
-		// re-emit the tables rather than sit out until the old slot comes back around.
-		assert!(due(ms(750), Some(ms(1_000)), PSI_INTERVAL));
+		// A backwards timestamp is a slot already served, not a new one. Emitting there would
+		// fire on every B-frame that steps back across a boundary (see `due_ignores_reorder`).
+		assert!(!due(ms(750), Some(ms(1_000)), PSI_INTERVAL));
 
 		// A per-PID SI interval is honored independently of the PSI cadence: an SDT at
 		// 2s is not due when the 500ms PSI would be.
 		let sdt = Duration::from_millis(2_000);
 		assert!(!due(ms(1_500), Some(ms(1_000)), sdt));
 		assert!(due(ms(3_000), Some(ms(1_000)), sdt));
+	}
+
+	/// Drive a run of timestamps through the cadence exactly as `write_frame` does (the last
+	/// emission only moves when one actually fires), returning how many tables it emitted.
+	fn run_cadence(stamps: &[Timestamp], interval: Duration) -> usize {
+		let mut last = None;
+		let mut emissions = 0;
+		for &ts in stamps {
+			if due(ts, last, interval) {
+				emissions += 1;
+				last = Some(ts);
+			}
+		}
+		emissions
+	}
+
+	#[test]
+	fn due_ignores_reorder() {
+		// Video is emitted in decode order, so a B-frame stream steps its PTS backwards
+		// constantly (measured at 39% of frames on real contribution content). The cadence has
+		// to follow the slots the stream has *reached*, not fire on every crossing of one, or
+		// each oscillation across a boundary re-sends the tables both ways.
+		let ticks = decode_order(40, 3, 3_600, 10_000_000);
+		let stamps: Vec<Timestamp> = ticks
+			.iter()
+			.map(|&t| Timestamp::from_micros(t * 1_000_000 / 90_000).unwrap())
+			.collect();
+		assert!(stamps.windows(2).any(|w| w[1] < w[0]), "fixture must reorder its PTS");
+
+		// One table per slot the stream covers, however often the reorder revisits a boundary.
+		let first = slot(stamps[0], PSI_INTERVAL);
+		let last = slot(*stamps.iter().max().unwrap(), PSI_INTERVAL);
+		assert_eq!(run_cadence(&stamps, PSI_INTERVAL), (last - first + 1) as usize);
+	}
+
+	#[test]
+	fn due_zero_interval_emits_every_frame() {
+		// A catalog is free to ask for a table on every frame. Slot arithmetic can't express
+		// that (and would divide by zero), so it is handled before the division.
+		let stamps: Vec<Timestamp> = [0, 0, 40, 40, 80].iter().map(|&t| ms(t)).collect();
+		assert_eq!(run_cadence(&stamps, Duration::ZERO), stamps.len());
 	}
 
 	#[test]
