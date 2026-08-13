@@ -104,7 +104,7 @@ impl Message for RequestOk {
 			assert!(self.request_id.is_none(), "request_id must be None for draft17+");
 		}
 		encode_params!(w, version,
-			super::namespace_count::NAMESPACE_COUNT_PARAM => self.namespace_count,
+			super::solicit::NAMESPACE_COUNT_PARAM => self.namespace_count,
 		);
 		Ok(())
 	}
@@ -116,7 +116,7 @@ impl Message for RequestOk {
 			None
 		};
 		decode_params!(r, version,
-			super::namespace_count::NAMESPACE_COUNT_PARAM => namespace_count: Option<u64>,
+			super::solicit::NAMESPACE_COUNT_PARAM => namespace_count: Option<u64>,
 		);
 		Ok(Self {
 			request_id,

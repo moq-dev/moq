@@ -7,13 +7,13 @@ import { type Stream, Writer } from "../stream.ts";
 import type { Timescale } from "../time.ts";
 import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
-import { namespaceCountIntoResponse } from "./namespace_count.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { fromWire } from "./priority.ts";
 import { PublishDone } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceDone, PublishNamespaceOk } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
+import { namespaceCountIntoResponse } from "./solicit.ts";
 import { type Subscribe, SubscribeError, SubscribeOk } from "./subscribe.ts";
 import {
 	type SubscribeNamespace,
@@ -324,7 +324,11 @@ export class Publisher {
 			} else {
 				await stream.writer.u53(RequestOk.id);
 				const parameters = new Parameters();
-				if (this.#reportsNamespaceCount) {
+				// A count answers for this stream, so it only answers the peer's question when
+				// this stream is where its advertisements are. One that hears them unsolicited
+				// gets nothing here, and reporting the 0 that follows would read as "this prefix
+				// is empty" while they are still in flight.
+				if (this.#reportsNamespaceCount && this.#requiresSolicitation) {
 					namespaceCountIntoResponse(parameters, BigInt(initial.length));
 				}
 				const ok = new RequestOk({

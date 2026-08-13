@@ -22,8 +22,7 @@ export async function exchangeSetup(
 	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode(implementation));
-	Ietf.solicitIntoSetup(params);
-	Ietf.namespaceCountIntoSetup(params, version);
+	Ietf.solicitIntoSetup(params, version);
 	const setupMsg = new Ietf.Setup({ parameters: params });
 
 	const [writer, received] = await Promise.all([

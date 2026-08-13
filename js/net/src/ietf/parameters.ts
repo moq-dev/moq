@@ -12,7 +12,7 @@ export const SetupOption = {
 	Implementation: 7n,
 	/// SOLICIT, from the MoQ Solicit extension. See `solicit.ts`.
 	Solicit: 0x40b5an,
-	/// NAMESPACE_COUNT, from the MoQ Namespace Count extension. See `namespace_count.ts`.
+	/// NAMESPACE_COUNT, from the same extension: whether to report each initial set size.
 	NamespaceCount: 0x40b5cn,
 } as const;
 
@@ -195,7 +195,7 @@ const MSG_PARAM_PUBLISHER_PRIORITY = 0x0en;
 const MSG_PARAM_FORWARD = 0x10n;
 const MSG_PARAM_SUBSCRIBER_PRIORITY = 0x20n;
 const MSG_PARAM_GROUP_ORDER = 0x22n;
-/// NAMESPACE_COUNT, from the MoQ Namespace Count extension. See `namespace_count.ts`.
+/// NAMESPACE_COUNT, from the MoQ Solicit extension. See `solicit.ts`.
 export const MSG_PARAM_NAMESPACE_COUNT = 0x40b5en;
 
 // Bytes parameter IDs (odd)

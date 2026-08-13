@@ -212,7 +212,7 @@ impl Server {
 					.map(ietf::RequestId);
 				let peer_declared = ietf::peer::Peer {
 					solicit: ietf::solicit::from_setup(&params, v)?,
-					namespace_count: ietf::namespace_count::from_setup(&params, v)?,
+					namespace_count: ietf::solicit::count_from_setup(&params, v)?,
 					..Default::default()
 				};
 				(path, request_id_max, peer_declared)
@@ -483,7 +483,6 @@ impl<S: web_transport_trait::Session> Request<S> {
 				parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
 				parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
 				ietf::solicit::into_setup(&mut parameters, v);
-				ietf::namespace_count::into_setup(&mut parameters, v);
 				parameters.encode_bytes(v)?
 			}
 			Version::Lite(v) => lite::Parameters::default().encode_bytes(v)?,

@@ -382,7 +382,6 @@ impl Client {
 			parameters.set_bytes(ietf::ParameterBytes::Path, path.clone().into_bytes());
 		}
 		ietf::solicit::into_setup(&mut parameters, ietf_encoding);
-		ietf::namespace_count::into_setup(&mut parameters, ietf_encoding);
 		let parameters = parameters.encode_bytes(ietf_encoding)?;
 
 		let client = setup::Client {
@@ -427,7 +426,7 @@ impl Client {
 					.map(ietf::RequestId);
 				let peer_declared = ietf::peer::Peer {
 					solicit: ietf::solicit::from_setup(&parameters, v)?,
-					namespace_count: ietf::namespace_count::from_setup(&parameters, v)?,
+					namespace_count: ietf::solicit::count_from_setup(&parameters, v)?,
 					..Default::default()
 				};
 

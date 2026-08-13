@@ -1620,10 +1620,11 @@ mod tests {
 		);
 	}
 
-	/// A count the peer never sends leaves the session waiting, which is what bounds it:
-	/// nothing else on the stream marks the boundary.
+	/// A count the peer never finishes sending leaves the set incomplete: nothing else on
+	/// the stream marks the boundary. What stops that from hanging `connect()` forever is
+	/// the deadline in `Driver::wait_ready`, not anything here.
 	#[tokio::test]
-	async fn a_short_initial_set_never_connects() {
+	async fn a_short_initial_set_does_not_complete() {
 		assert!(
 			!connected_after(Version::Draft18, Some(2), &["a.hang"]).await,
 			"counted two, sent one"

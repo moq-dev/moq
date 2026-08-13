@@ -13,6 +13,13 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
+/// How long `connect()` waits for the peer's initial announce set before giving up on it.
+///
+/// Long enough that a busy relay enumerating a large origin still makes it, short enough
+/// that a peer which promised announcements it never sends costs one pause rather than the
+/// session. See [`Driver::wait_ready`].
+const READY_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A snapshot of connection statistics for a [`Session`].
 ///
 /// Every field is optional: availability depends on the transport backend (native QUIC
@@ -160,12 +167,26 @@ impl Driver {
 	/// A session that dies first still resolves readiness: the connecting producers
 	/// live inside the driver, so its completion drops them and releases the barrier.
 	/// The error isn't lost, it's cached for whoever drives the session next.
+	///
+	/// Gives up after [`READY_TIMEOUT`] and connects anyway. A peer decides how many
+	/// announcements it owes us (moq-lite's `ANNOUNCE_OK`, moq-transport's
+	/// NAMESPACE_COUNT), so one that promises more than it sends would otherwise hold
+	/// `connect()` for the life of the session. Continuing costs only the guarantee this
+	/// wait buys: a lookup for a path the peer never got around to announcing races the
+	/// announcement, which is what every version without a boundary does anyway.
 	pub(super) async fn wait_ready(&mut self, poll_ready: impl Fn(&kio::Waiter) -> Poll<()>) {
+		let mut deadline = kio::time::Deadline::new();
+		deadline.set(Some(web_async::time::Instant::now() + READY_TIMEOUT));
+
 		kio::wait(|waiter| {
 			if poll_ready(waiter).is_ready() {
 				return Poll::Ready(());
 			}
 			let _ = self.poll(waiter);
+			if deadline.poll(waiter).is_ready() {
+				tracing::warn!("timed out waiting for the initial announce set");
+				return Poll::Ready(());
+			}
 			Poll::Pending
 		})
 		.await
@@ -395,5 +416,35 @@ impl<S: web_transport_trait::Session> SessionInner for S {
 			packets_lost: stats.packets_lost(),
 			..Default::default()
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A peer decides how many announcements it owes us, so one that promises more than it
+	/// sends must not hold `connect()` for the life of the session. The wait gives up and
+	/// connects anyway, leaving the caller with the racy lookups every boundary-less
+	/// version already has.
+	#[tokio::test]
+	async fn readiness_gives_up_on_a_promise_the_peer_never_keeps() {
+		tokio::time::pause();
+
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		// A protocol that never ends, holding a readiness barrier that never resolves.
+		let protocol = std::future::pending().maybe_boxed();
+		let (_session, mut driver) =
+			Session::new(session, Version::Ietf(crate::ietf::Version::Draft19), None, protocol);
+
+		let (_producer, connecting) = crate::connecting::Connecting::new();
+
+		let start = web_async::time::Instant::now();
+		driver.wait_ready(|waiter| connecting.poll_ready(waiter)).await;
+
+		assert!(
+			web_async::time::Instant::now() - start >= READY_TIMEOUT,
+			"connected before the deadline"
+		);
 	}
 }

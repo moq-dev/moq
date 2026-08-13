@@ -3,7 +3,6 @@ export * from "./connection.ts";
 export * from "./control.ts";
 export * from "./fetch.ts";
 export * from "./goaway.ts";
-export * from "./namespace_count.ts";
 export * from "./object.ts";
 export * from "./parameters.ts";
 export * from "./publish.ts";

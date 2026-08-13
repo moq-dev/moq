@@ -1337,7 +1337,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// this as unsolicited PUBLISH_NAMESPACE. Repeating it here would leave it holding
 		// two sources for one namespace, so this stream carries nothing and simply stays
 		// open until the peer is done with it.
-		let origin = match declared.solicit.unwrap_or(false) {
+		let solicited = declared.solicit.unwrap_or(false);
+		let origin = match solicited {
 			true => origin,
 			false => origin.empty(),
 		};
@@ -1376,7 +1377,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 			_ => {
 				let initial = self.initial_namespaces(&mut announced, &prefix, &mut ns);
-				let namespace_count = declared.namespace_count.then_some(initial.len() as u64);
+
+				// A count answers for this stream, so it only answers the peer's question
+				// when this stream is where its advertisements are. One that hears them
+				// unsolicited gets nothing here, and reporting the 0 that follows would
+				// read as "this prefix is empty" while they are still in flight. Omitting
+				// it says what is true: this stream marks no boundary.
+				let namespace_count = (declared.namespace_count && solicited).then_some(initial.len() as u64);
 
 				// One write, so the count and the messages it promises cannot be
 				// separated by anything: the selection already happened, and a route that
@@ -1873,6 +1880,56 @@ mod tests {
 	async fn a_peer_that_did_not_ask_gets_no_count() {
 		let ok = subscribe_namespace_response(false, &["a.hang"]).await;
 		assert_eq!(ok.namespace_count, None);
+	}
+
+	/// A peer that asks for the count but never asked for solicitation hears its
+	/// namespaces as unsolicited PUBLISH_NAMESPACE, so this stream carries none of them.
+	/// Reporting the 0 that follows would read as "this prefix is empty" while the
+	/// advertisements are still in flight, so the parameter is omitted instead.
+	#[tokio::test]
+	async fn an_unsolicited_peer_gets_no_count() {
+		const VERSION: Version = Version::Draft18;
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let gate = kio::Producer::new(true);
+		let session = SinkSession::gated_bi(gate.consume());
+		let log = session.log.clone();
+
+		// Asked for the count, declared no solicitation requirement.
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer {
+			solicit: None,
+			namespace_count: true,
+			..Default::default()
+		});
+
+		let publisher = Publisher::new(
+			session.clone(),
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			VERSION,
+		);
+
+		let _held = origin
+			.create_broadcast("a.hang", crate::broadcast::Route::new().with_announce(true))
+			.unwrap();
+		settle().await;
+
+		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let msg = ietf::SubscribeNamespace {
+			request_id: RequestId(1),
+			namespace: crate::Path::new(""),
+		};
+		let mut run = std::pin::pin!(publisher.run_subscribe_namespace_stream(stream, msg));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		assert_eq!(
+			response(&log, VERSION).namespace_count,
+			None,
+			"a count of 0 here would deny a namespace we are advertising elsewhere"
+		);
 	}
 
 	/// The count is of what we will actually send: a broadcast filtered by split horizon

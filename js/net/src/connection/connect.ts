@@ -231,10 +231,9 @@ async function connectTransport(url: URL, session: WebTransport, discovery: bool
 	const params = new Ietf.SetupOptions();
 	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
-	Ietf.solicitIntoSetup(params);
-	// The offer below pins the IETF version we could end up on, so this declares only
-	// when that version can answer: the fallback offer's is draft-14, which cannot.
-	Ietf.namespaceCountIntoSetup(params, setupVersion);
+	// The offer below pins the IETF version we could end up on, so the count is declared
+	// only when that version can answer: the fallback offer's is draft-14, which cannot.
+	Ietf.solicitIntoSetup(params, setupVersion);
 
 	const client = new Ietf.ClientSetup({
 		versions:

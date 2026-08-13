@@ -108,8 +108,7 @@ async function acceptSetup(
 	const params = new Ietf.SetupOptions();
 	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
-	Ietf.solicitIntoSetup(params);
-	Ietf.namespaceCountIntoSetup(params, version);
+	Ietf.solicitIntoSetup(params, version);
 
 	const server = new Ietf.ServerSetup({ version, parameters: params });
 	await server.encode(stream.writer, version);
@@ -164,8 +163,7 @@ async function acceptNegotiated(transport: WebTransport, url: URL, props?: Accep
 	const params = new Ietf.SetupOptions();
 	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
-	Ietf.solicitIntoSetup(params);
-	Ietf.namespaceCountIntoSetup(params, selectedVersion as Ietf.IetfVersion);
+	Ietf.solicitIntoSetup(params, selectedVersion as Ietf.IetfVersion);
 
 	const server = new Ietf.ServerSetup({ version: selectedVersion, parameters: params });
 	await server.encode(stream.writer, setupVersion);

@@ -8,8 +8,8 @@ use crate::{
 };
 
 use super::{
-	Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter, cluster, namespace_count, peer,
-	solicit, subscriber::is_protocol_violation,
+	Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter, cluster, peer, solicit,
+	subscriber::is_protocol_violation,
 };
 
 /// Everything one moq-transport session needs to start.
@@ -472,7 +472,7 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 	Ok(peer::Peer {
 		cluster: cluster::peer_from_setup(params, version)?,
 		solicit: solicit::from_setup(params, version)?,
-		namespace_count: namespace_count::from_setup(params, version)?,
+		namespace_count: solicit::count_from_setup(params, version)?,
 	})
 }
 
@@ -501,7 +501,6 @@ async fn run_setup<S: web_transport_trait::Session>(
 	}
 	cluster::peer_into_setup(&mut parameters, self_origin, cost, version);
 	solicit::into_setup(&mut parameters, version);
-	namespace_count::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer.encode(&setup::Setup { parameters }).await?;
