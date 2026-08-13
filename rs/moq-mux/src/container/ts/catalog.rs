@@ -91,18 +91,28 @@ pub(super) const SI_PIDS: &[SiPid] = &[
 		tables: Tables::All,
 		interval: Duration::from_secs(2),
 	},
-	// EIT present/following (0x4E actual, 0x4F other): 2s for actual, the tightest.
+	// EIT present/following, actual transport stream only (0x4E): 2s.
 	//
-	// This PID also carries EIT schedule (0x50..=0x6F), which is deliberately left out.
-	// The catalog is whole-state and republished on every change, so it suits a table
-	// that is small and revised rarely. p/f is exactly that: two sections per service,
-	// replaced on event transition. A full schedule is thousands of sections whose
-	// window edges churn as it rolls forward, and every subscriber would pay all of it
-	// at join, ahead of media. If it is ever wanted it belongs on its own track, the way
-	// SCTE-35 sections already ride one (see `SectionStream` in the import path).
+	// Two other things ride this PID and are deliberately left out.
+	//
+	// EIT p/f *other* (0x4F) describes services in other multiplexes, and `section_key`
+	// cannot tell them apart. An EIT's `table_id_extension` is its `service_id`, which is
+	// only unique within a transport stream: the rest of the DVB triplet
+	// (`transport_stream_id`, `original_network_id`) sits at bytes 8..12, past the generic
+	// header. So two foreign services sharing a `service_id` would collide on one entry
+	// and overwrite each other every repetition. Telling them apart means parsing EIT
+	// specifically, which is a bigger break of section opacity than this is worth.
+	//
+	// EIT schedule (0x50..=0x6F) is a volume problem instead. The catalog is whole-state
+	// and republished on every change, so it suits a table that is small and revised
+	// rarely. p/f actual is exactly that: two sections per service, replaced on event
+	// transition. A full schedule is thousands of sections whose window edges churn as it
+	// rolls forward, and every subscriber would pay all of it at join, ahead of media. If
+	// it is ever wanted it belongs on its own track, the way SCTE-35 sections already ride
+	// one (see `SectionStream` in the import path).
 	SiPid {
 		pid: 0x0012,
-		tables: Tables::Only(&[(0x4E, 0x4F)]),
+		tables: Tables::Only(&[(0x4E, 0x4E)]),
 		interval: Duration::from_secs(2),
 	},
 	// TDT/TOT (0x0014) is left out for the opposite reason: every section is new content

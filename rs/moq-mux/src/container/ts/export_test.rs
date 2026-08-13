@@ -1568,20 +1568,31 @@ fn import_si(input: &[u8]) -> std::collections::BTreeMap<u16, tscat::Si> {
 	catalog.snapshot().mpegts.si.clone()
 }
 
-/// The EIT PID carries present/following and schedule interleaved, and only p/f is
-/// captured. This is the one PID whose `table_id`s are filtered rather than taken whole,
-/// so it is also the test that the filter runs after reassembly (a section boundary is
-/// only findable by following the whole PID).
+/// A captured SDT to sit alongside a PID under test, so a "not captured" assertion can
+/// prove the import gate actually ran rather than passing because nothing was decoded.
+/// A lone TS packet is never routed: sync needs the following packet's 0x47 to confirm
+/// the 188 stride, so a single-packet input leaves everything buffered.
+fn si_control() -> (Vec<u8>, Vec<u8>) {
+	let sdt = make_section(0x42, &[0xaa; 8]);
+	(si_packet(0x0011, &sdt), sdt)
+}
+
+/// The EIT PID carries p/f actual, p/f other and schedule, and only p/f actual survives.
+///
+/// The p/f section spans several TS packets, which is what pins the filter to *after*
+/// reassembly: a continuation packet has no `table_id` of its own, so judging packets
+/// individually would drop the section's tail and never rebuild it.
 #[test]
-fn eit_carries_present_following_not_schedule() {
-	let pf_actual = make_section(0x4E, &[0x01; 16]);
-	let pf_other = make_section(0x4F, &[0x02; 16]);
-	let mut input = Vec::new();
+fn eit_carries_present_following_actual_only() {
+	// 400 bytes forces the p/f section across three TS packets.
+	let body: Vec<u8> = (0..400u16).map(|i| i as u8).collect();
+	let pf_actual = make_section(0x4E, &body);
+	let mut input = si_packets_multi(0x0012, &pf_actual);
+	assert!(input.len() > 188, "the p/f section must span more than one TS packet");
 	for section in [
+		make_section(0x4F, &[0x02; 32]), // p/f other: collides in `section_key`, excluded
 		make_section(0x50, &[0x03; 32]), // schedule actual, first table_id
-		pf_actual.clone(),
 		make_section(0x5F, &[0x04; 32]), // schedule actual, last table_id
-		pf_other.clone(),
 		make_section(0x60, &[0x05; 32]), // schedule other, first table_id
 		make_section(0x6F, &[0x06; 32]), // schedule other, last table_id
 	] {
@@ -1592,13 +1603,13 @@ fn eit_carries_present_following_not_schedule() {
 	let eit = si.get(&0x0012).expect("an EIT entry");
 	assert_eq!(
 		eit.sections,
-		vec![Bytes::from(pf_actual), Bytes::from(pf_other)],
-		"only present/following (0x4E, 0x4F) survives; schedule (0x50..=0x6F) is dropped"
+		vec![Bytes::from(pf_actual)],
+		"only p/f actual (0x4E) survives, reassembled byte-for-byte; p/f other and schedule are dropped"
 	);
 	assert_eq!(
 		eit.interval,
 		Some(Duration::from_secs(2)),
-		"the EIT PID takes p/f actual's 2s maximum, the tightest of the tables it carries"
+		"EIT p/f actual's 2s maximum"
 	);
 }
 
@@ -1606,18 +1617,83 @@ fn eit_carries_present_following_not_schedule() {
 /// then have export re-emit a PID with nothing on it.
 #[test]
 fn eit_schedule_alone_creates_no_entry() {
-	let input = si_packet(0x0012, &make_section(0x50, &[0x07; 32]));
-	assert!(!import_si(&input).contains_key(&0x0012), "no EIT entry");
+	let (control, sdt) = si_control();
+	let mut input = si_packet(0x0012, &make_section(0x50, &[0x07; 32]));
+	input.extend_from_slice(&control);
+
+	let si = import_si(&input);
+	assert_eq!(
+		si.get(&0x0011).expect("the control SDT").sections,
+		vec![Bytes::from(sdt)],
+		"control: the import gate ran"
+	);
+	assert!(!si.contains_key(&0x0012), "no EIT entry");
 }
 
 /// TDT/TOT is never intercepted: every section is new content, so each would be a catalog
 /// modification, and an exporter's own clock beats a time relayed from upstream.
 #[test]
 fn tdt_is_not_captured() {
-	let input = si_packet(0x0014, &make_section(0x70, &[0x08; 5]));
-	assert!(
-		!import_si(&input).contains_key(&0x0014),
-		"TDT is dropped at the import gate"
+	let (control, sdt) = si_control();
+	let mut input = si_packet(0x0014, &make_section(0x70, &[0x08; 5]));
+	input.extend_from_slice(&control);
+
+	let si = import_si(&input);
+	assert_eq!(
+		si.get(&0x0011).expect("the control SDT").sections,
+		vec![Bytes::from(sdt)],
+		"control: the import gate ran"
+	);
+	assert!(!si.contains_key(&0x0014), "TDT is dropped at the import gate");
+}
+
+/// The claim in full: real EIT p/f packets go in as TS and come back out as TS on the
+/// same PID. The tests above cover the import gate alone, which is only half of what
+/// "survives a round-trip" means.
+#[tokio::test(start_paused = true)]
+async fn eit_survives_a_ts_round_trip() {
+	let pf = make_section(0x4E, &[0x5a; 24]);
+	// Appended to a real multiplex: the importer is already synced by then, and export
+	// needs the video timeline that bbb.ts carries to have anything to emit alongside.
+	let mut input = include_bytes!("test_data/bbb.ts").to_vec();
+	input.extend_from_slice(&si_packet(0x0012, &pf));
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	import.decode(&BytesMut::from(&input[..])).unwrap();
+	import.finish().unwrap();
+	assert_eq!(
+		catalog
+			.snapshot()
+			.mpegts
+			.si
+			.get(&0x0012)
+			.expect("EIT captured")
+			.sections,
+		vec![Bytes::from(pf.clone())],
+		"import captured the p/f section"
+	);
+
+	// `import` and `catalog` stay alive so the exporter can subscribe to the tracks.
+	let ts = drain_with(
+		Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
+			.await
+			.unwrap(),
+	)
+	.await;
+	assert_packet_aligned(&ts);
+
+	assert_eq!(
+		import_si(&ts)
+			.get(&0x0012)
+			.expect("EIT survived the round trip")
+			.sections,
+		vec![Bytes::from(pf)],
+		"the p/f section came back on 0x0012 byte-for-byte"
 	);
 }
 

@@ -519,13 +519,14 @@ The service layer rides the same `mpegts` section. The program identity
 rebuild a matching PAT/PMT, while the standalone SI tables (SDT, NIT) are carried as
 opaque sections and re-emitted byte-for-byte on their original PIDs, each at its own
 repetition interval. So the service name, provider, type, and network survive the
-round-trip without being parsed. Present/following EPG (EIT p/f) rides along too, so
-"now" and "next" survive, but the full EIT schedule does not: the catalog is republished
-whole on every change, which suits a table that is small and revised rarely rather than
-an eight-day listing whose edges churn continuously. Regenerated tables (TDT/TOT) are
-left out for the opposite reason, that every section is new content rather than a
-repetition, and an exporter's own clock beats a time relayed from an upstream
-multiplexer of unknown delay.
+round-trip without being parsed. Present/following EPG for this transport stream (EIT
+p/f actual) rides along too, so "now" and "next" survive. The full EIT schedule does not:
+the catalog is republished whole on every change, which suits a table that is small and
+revised rarely rather than an eight-day listing whose edges churn continuously. Neither
+does EIT for other multiplexes, whose sections a verbatim carriage keyed on the section
+header cannot tell apart. Regenerated tables (TDT/TOT) are left out for a different
+reason, that every section is new content rather than a repetition, and an exporter's own
+clock beats a time relayed from an upstream multiplexer of unknown delay.
 
 ### FLV
 
