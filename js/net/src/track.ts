@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type { Datagram } from "./datagram.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer, Lagged } from "./group.ts";
 import { hooks } from "./internal.ts";
@@ -651,6 +651,8 @@ export class Subscriber {
 
 	static {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
+		hooks.tryRecvGroup = (subscriber) => subscriber.#tryRecvGroup();
+		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
 	}
 
 	/**
@@ -730,26 +732,45 @@ export class Subscriber {
 	 */
 	async recvGroup(): Promise<GroupConsumer | undefined> {
 		for (;;) {
-			const groups = this.#state.groups.peek();
-			const { start, end } = this.#cursor.peek();
-			while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
-
-			// The buffer is sequence-sorted, so an in-range group that arrives behind a
-			// beyond-cap one sorts in front of it and is never blocked by it.
-			const group = groups[0];
-			if (group && (end === undefined || group.sequence <= end)) {
-				groups.shift();
-				return group;
-			}
-
-			const closed = this.#state.closed.peek();
-			if (closed instanceof Error) throw closed;
-			// A group beyond the cap outlives a clean close: it becomes deliverable if
-			// the cap rises, so the track isn't over while any are held.
-			if (closed !== undefined && !group) return undefined;
+			const result = this.#tryRecvGroup();
+			if (result instanceof Error) throw result;
+			if (result === null) return undefined;
+			if (result) return result;
 
 			await Signal.race(this.#state.groups, this.#cursor, this.#state.closed);
 		}
+	}
+
+	// Package-internal synchronous half of recvGroup. The lite publisher uses this so applying
+	// control state, popping the group, and positioning its frames are one JavaScript turn.
+	#tryRecvGroup(): GroupConsumer | Error | null | undefined {
+		const groups = this.#state.groups.peek();
+		const { start, end } = this.#cursor.peek();
+		while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
+
+		// The buffer is sequence-sorted, so an in-range group that arrives behind a
+		// beyond-cap one sorts in front of it and is never blocked by it.
+		const group = groups[0];
+		if (group && (end === undefined || group.sequence <= end)) {
+			groups.shift();
+			return group;
+		}
+
+		const closed = this.#state.closed.peek();
+		if (closed instanceof Error) return closed;
+		// A group beyond the cap outlives a clean close: it becomes deliverable if
+		// the cap rises, so the track isn't over while any are held.
+		if (closed !== undefined && !group) return null;
+		return undefined;
+	}
+
+	// Package-internal readiness half of recvGroup. Each registration fires at most once, and
+	// the caller disposes the two losers after whichever source wakes it.
+	#groupChanged(fn: () => void): Dispose {
+		const dispose = [this.#state.groups.changed(fn), this.#cursor.changed(fn), this.#state.closed.changed(fn)];
+		return () => {
+			for (const close of dispose) close();
+		};
 	}
 
 	/**
