@@ -2,6 +2,7 @@ use super::origin::*;
 use super::producer::*;
 use super::server::MoqServer;
 use super::session::MoqClient;
+use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqRouteWatch;
 use crate::consumer::MoqSubscription;
@@ -444,6 +445,136 @@ async fn fetches_cached_group_without_subscribing() {
 	assert_eq!(frame.payload, b"second".to_vec());
 	assert_eq!(frame.timestamp_us, 20_000);
 	assert!(fetched.read_frame().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn fetches_cached_media_group_and_decodes_container() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let track = broadcast.create_track("media", None).unwrap();
+	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
+	let mut media = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);
+
+	media
+		.write(moq_mux::container::Frame {
+			timestamp: moq_net::Timestamp::from_micros(1_000_000).unwrap(),
+			payload: bytes::Bytes::from_static(b"keyframe"),
+			keyframe: true,
+			duration: None,
+		})
+		.unwrap();
+	media
+		.write(moq_mux::container::Frame {
+			timestamp: moq_net::Timestamp::from_micros(1_020_000).unwrap(),
+			payload: bytes::Bytes::from_static(b"delta"),
+			keyframe: false,
+			duration: None,
+		})
+		.unwrap();
+	media.finish().unwrap();
+
+	let fetched = consumer
+		.fetch_media_group(
+			"media".into(),
+			0,
+			crate::media::MoqContainer::Legacy,
+			Some(MoqFetchGroupOptions { priority: 7 }),
+		)
+		.await
+		.unwrap();
+
+	assert_eq!(fetched.sequence(), 0);
+	let frame = fetched.next().await.unwrap().expect("expected keyframe");
+	assert_eq!(frame.payload, b"keyframe");
+	assert_eq!(frame.timestamp_us, 1_000_000);
+	assert!(frame.keyframe);
+	let frame = fetched.next().await.unwrap().expect("expected delta frame");
+	assert_eq!(frame.payload, b"delta");
+	assert_eq!(frame.timestamp_us, 1_020_000);
+	assert!(!frame.keyframe);
+	assert!(fetched.next().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn fetch_media_group_rejects_invalid_container_before_fetching() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let _track = broadcast.create_track("media", None).unwrap();
+	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
+
+	let result = consumer
+		.fetch_media_group(
+			"media".into(),
+			0,
+			crate::media::MoqContainer::Cmaf { init: Vec::new() },
+			None,
+		)
+		.await;
+
+	assert!(matches!(result, Err(MoqError::Codec(_))));
+}
+
+#[tokio::test]
+async fn fetch_media_group_decodes_multiple_cmaf_samples() {
+	let config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+	let muxer = moq_mux::container::fmp4::Muxer::video(&config).unwrap();
+	let init = muxer.init().unwrap().expect("VP8 init should be available");
+	let catalog_container = hang::catalog::Container::Cmaf { init: init.clone() };
+	let container = moq_mux::catalog::hang::Container::try_from(&catalog_container).unwrap();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let track = broadcast.create_track("video", None).unwrap();
+	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
+	let mut media = moq_mux::container::Producer::new(track, container).with_latency(Duration::from_secs(1));
+	for (timestamp_us, payload, keyframe) in [
+		(2_000_000, bytes::Bytes::from_static(b"keyframe"), true),
+		(2_020_000, bytes::Bytes::from_static(b"delta"), false),
+	] {
+		media
+			.write(moq_mux::container::Frame {
+				timestamp: moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
+				payload,
+				keyframe,
+				duration: Some(moq_net::Timestamp::from_micros(20_000).unwrap()),
+			})
+			.unwrap();
+	}
+	media.finish().unwrap();
+
+	let fetched = tokio::time::timeout(
+		TIMEOUT,
+		consumer.fetch_media_group(
+			"video".into(),
+			0,
+			crate::media::MoqContainer::Cmaf { init: init.to_vec() },
+			None,
+		),
+	)
+	.await
+	.expect("timed out fetching CMAF group")
+	.unwrap();
+
+	let first = tokio::time::timeout(TIMEOUT, fetched.next())
+		.await
+		.expect("timed out reading first CMAF sample")
+		.unwrap()
+		.expect("expected first sample");
+	assert_eq!(first.payload, b"keyframe");
+	assert_eq!(first.timestamp_us, 2_000_000);
+	assert!(first.keyframe);
+	let second = tokio::time::timeout(TIMEOUT, fetched.next())
+		.await
+		.expect("timed out reading second CMAF sample")
+		.unwrap()
+		.expect("expected second sample");
+	assert_eq!(second.payload, b"delta");
+	assert_eq!(second.timestamp_us, 2_020_000);
+	assert!(!second.keyframe);
+	assert!(
+		tokio::time::timeout(TIMEOUT, fetched.next())
+			.await
+			.expect("timed out finishing CMAF group")
+			.unwrap()
+			.is_none()
+	);
 }
 
 #[tokio::test]

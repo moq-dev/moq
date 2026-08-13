@@ -1,6 +1,8 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bytes::Buf;
+use moq_mux::container::Container as _;
 
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -21,6 +23,24 @@ fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {
 		payload: frame.payload.to_vec(),
 		timestamp_us,
 	})
+}
+
+fn media_frame(mut frame: moq_mux::container::Frame) -> Result<MoqMediaFrame, MoqError> {
+	let timestamp_us = timestamp_us(frame.timestamp)?;
+	let payload = frame.payload.copy_to_bytes(frame.payload.remaining()).to_vec();
+
+	Ok(MoqMediaFrame {
+		payload,
+		timestamp_us,
+		keyframe: frame.keyframe,
+	})
+}
+
+fn media_container(container: MoqContainer) -> Result<moq_mux::catalog::hang::Container, MoqError> {
+	let container: hang::catalog::Container = container.into();
+	(&container)
+		.try_into()
+		.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))
 }
 
 /// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`].
@@ -162,22 +182,7 @@ struct Media {
 
 impl Media {
 	async fn next(&mut self) -> Result<Option<MoqMediaFrame>, MoqError> {
-		let frame = self.inner.read().await?;
-
-		let Some(frame) = frame else {
-			return Ok(None);
-		};
-
-		let timestamp_us = timestamp_us(frame.timestamp)?;
-
-		let mut buf = frame.payload;
-		let payload = buf.copy_to_bytes(buf.remaining()).to_vec();
-
-		Ok(Some(MoqMediaFrame {
-			payload,
-			timestamp_us,
-			keyframe: frame.keyframe,
-		}))
+		self.inner.read().await?.map(media_frame).transpose()
 	}
 }
 
@@ -246,6 +251,27 @@ impl MoqBroadcastConsumer {
 		Ok(Arc::new(MoqGroupConsumer::new(group)))
 	}
 
+	/// Fetch one group and decode its track container into media frames.
+	///
+	/// Unlike [`Self::subscribe_media`], this does not create a live subscription or apply
+	/// latency-based group skipping. The returned consumer reads exactly the requested group
+	/// until [`MoqMediaGroupConsumer::next`] returns `None`.
+	pub async fn fetch_media_group(
+		&self,
+		name: String,
+		sequence: u64,
+		container: MoqContainer,
+		options: Option<MoqFetchGroupOptions>,
+	) -> Result<Arc<MoqMediaGroupConsumer>, MoqError> {
+		// Parse the container before fetching so invalid CMAF init data does not leave a
+		// dynamic group request waiting for a consumer that can never read it.
+		let media = media_container(container)?;
+		let options = options.map(moq_net::group::Fetch::from);
+		let track = self.inner.track(&name).map_err(map_fetch_error)?;
+		let group = track.fetch_group(sequence, options).await.map_err(map_fetch_error)?;
+		Ok(Arc::new(MoqMediaGroupConsumer::new(group, media)))
+	}
+
 	/// Subscribe to a track by name, delivering frames in decode order.
 	///
 	/// `container` is the track container from the catalog.
@@ -261,10 +287,7 @@ impl MoqBroadcastConsumer {
 	) -> Result<Arc<MoqMediaConsumer>, MoqError> {
 		// Parse the container before subscribing so we don't leave a dangling
 		// subscription if init parsing fails.
-		let container: hang::catalog::Container = container.into();
-		let media: moq_mux::catalog::hang::Container = (&container)
-			.try_into()
-			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
+		let media = media_container(container)?;
 		let subscription = subscription.map(moq_net::track::Subscription::from).unwrap_or_default();
 		let latency = subscription.latency_max;
 		let track = self.inner.track(&name)?.subscribe(subscription).await?;
@@ -422,6 +445,74 @@ impl GroupInner {
 pub struct MoqGroupConsumer {
 	sequence: u64,
 	task: Task<GroupInner>,
+}
+
+struct MediaGroupInner {
+	group: moq_net::group::Consumer,
+	container: moq_mux::catalog::hang::Container,
+	pending: VecDeque<moq_mux::container::Frame>,
+	first: bool,
+}
+
+impl MediaGroupInner {
+	async fn next(&mut self) -> Result<Option<MoqMediaFrame>, MoqError> {
+		loop {
+			if let Some(mut frame) = self.pending.pop_front() {
+				// Legacy and LOC do not carry a keyframe bit. Media groups open on a
+				// keyframe by construction, matching the fallback in the live consumer.
+				if self.first {
+					frame.keyframe = true;
+					self.first = false;
+				}
+				return Ok(Some(media_frame(frame)?));
+			}
+
+			let Some(frames) = self.container.read(&mut self.group).await? else {
+				return Ok(None);
+			};
+			self.pending.extend(frames);
+		}
+	}
+}
+
+/// A finite, container-decoded media group returned by
+/// [`MoqBroadcastConsumer::fetch_media_group`].
+#[derive(uniffi::Object)]
+pub struct MoqMediaGroupConsumer {
+	sequence: u64,
+	task: Task<MediaGroupInner>,
+}
+
+impl MoqMediaGroupConsumer {
+	fn new(group: moq_net::group::Consumer, container: moq_mux::catalog::hang::Container) -> Self {
+		Self {
+			sequence: group.sequence,
+			task: Task::new(MediaGroupInner {
+				group,
+				container,
+				pending: VecDeque::new(),
+				first: true,
+			}),
+		}
+	}
+}
+
+#[uniffi::export]
+impl MoqMediaGroupConsumer {
+	/// The sequence number of this group within the track.
+	pub fn sequence(&self) -> u64 {
+		self.sequence
+	}
+
+	/// Read the next decoded media frame, or `None` when the group ends.
+	pub async fn next(&self) -> Result<Option<MoqMediaFrame>, MoqError> {
+		self.task.run(|mut state| async move { state.next().await }).await
+	}
+
+	/// Cancel all current and future `next()` calls.
+	pub fn cancel(&self) {
+		self.task.cancel();
+	}
 }
 
 impl MoqGroupConsumer {
