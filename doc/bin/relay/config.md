@@ -48,6 +48,11 @@ certificate, and Unix sockets add optional peer-credential gating.
 # is configured below.
 bind = "[::]:443"
 
+# MoQ versions accepted by QUIC, WebTransport, and WebSocket listeners.
+# TCP and Unix stream listeners also accept moq-lite-05 because it carries
+# their request path in SETUP. Omit to accept every supported version.
+version = ["moq-transport-16"]
+
 # Plaintext qmux over TCP (no TLS, carries no peer identity). Trusted networks
 # only; a non-loopback bind logs a warning. Requires the `tcp` build feature.
 [server.tcp]

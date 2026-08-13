@@ -136,6 +136,7 @@ pub(crate) struct WebState {
 pub struct Web {
 	state: Arc<WebState>,
 	config: WebConfig,
+	versions: moq_net::Versions,
 	health: moq_native::accept::Health,
 }
 
@@ -153,8 +154,15 @@ impl Web {
 		Self {
 			state,
 			config,
+			versions: moq_net::Versions::all(),
 			health: moq_native::accept::Health::new("web"),
 		}
+	}
+
+	/// Restrict which MoQ versions WebSocket sessions accept, in preference order.
+	pub fn with_versions(mut self, versions: moq_net::Versions) -> Self {
+		self.versions = versions;
+		self
 	}
 
 	/// A live handle to the accept-loop health of the HTTP/HTTPS listeners, for an
@@ -215,7 +223,8 @@ impl Web {
 			app
 		};
 
-		app.layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
+		app.layer(Extension(self.versions.clone()))
+			.layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
 			.with_state(self.state.clone())
 	}
 
