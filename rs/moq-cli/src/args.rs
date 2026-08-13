@@ -22,7 +22,10 @@
 //!   one process can bridge several broadcasts (or both directions at once). clap
 //!   can't express a repeated subcommand, so [`Invocation`] splits argv on `--`
 //!   and runs each chunk through a real parser: every stage keeps full validation
-//!   and its own `--help`.
+//!   and its own `--help`. That claims `--` from clap, which would otherwise treat
+//!   it as the end-of-options marker. The only positional it could have escaped is
+//!   an `import hls` playlist path starting with `-`, which `./-name` covers, so
+//!   the separator stays unconditional rather than context-sensitive.
 
 use std::ffi::{OsStr, OsString};
 use std::time::Duration;
@@ -40,7 +43,8 @@ use crate::subscribe::{CatalogFormatArg, SubscribeFormat};
 #[derive(Parser, Clone)]
 #[command(name = "moq", version = env!("VERSION"))]
 #[command(after_help = "Separate additional import/export stages with `--`; they share one \
-                        connection and one Origin.")]
+                        connection and one Origin. Every `--` starts a stage, so it is not an \
+                        end-of-options marker: write a path starting with `-` as `./-name`.")]
 pub struct Cli {
 	/// Logging configuration.
 	#[command(flatten)]
@@ -625,6 +629,29 @@ mod tests {
 		};
 
 		assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+	}
+
+	/// Splitting on `--` claims it from clap, so it can't also escape a positional
+	/// starting with `-`. `./-name` is the documented way to write one.
+	#[test]
+	fn a_dash_prefixed_path_is_written_relative() {
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--client-connect",
+			"http://relay",
+			"import",
+			"hls",
+			"./-odd.m3u8",
+		])
+		.unwrap();
+
+		let Command::Import(import) = &cli.stages[0] else {
+			panic!("expected import")
+		};
+		let ImportSource::Hls(hls) = &import.source else {
+			panic!("expected hls")
+		};
+		assert_eq!(hls.playlist, "./-odd.m3u8");
 	}
 
 	/// A `--` with nothing after it names no verb, so it's an error rather than an

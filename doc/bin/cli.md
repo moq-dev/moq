@@ -225,6 +225,9 @@ Rules worth knowing:
   container from stdin, and at most one may write one to stdout.
 - The MoQ side belongs to the invocation, not a stage: `--client-connect` and
   friends go before the first stage and are rejected after a `--`.
+- `moq` reads every `--` as a stage separator, so it can't double as the usual
+  end-of-options marker. The one place that matters is a local playlist path
+  starting with `-`; write it as `./-playlist.m3u8`.
 - `play`, `transcode`, `token`, and `devices` own the process and can't be
   staged; run those on their own.
 
