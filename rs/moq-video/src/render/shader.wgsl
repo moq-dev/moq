@@ -44,6 +44,11 @@ fn convert(yuv: vec3<f32>) -> vec4<f32> {
 }
 
 @fragment
+fn rgba(in: Vertex) -> @location(0) vec4<f32> {
+	return vec4<f32>(textureSample(plane0, samp, in.uv).rgb, 1.0);
+}
+
+@fragment
 fn nv12(in: Vertex) -> @location(0) vec4<f32> {
 	let y = textureSample(plane0, samp, in.uv).r;
 	// One two-channel plane holds U and V interleaved.

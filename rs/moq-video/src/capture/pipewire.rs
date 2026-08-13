@@ -2,9 +2,11 @@
 //!
 //! The ScreenCast portal owns source selection: [`open`] pops the compositor's
 //! picker dialog, the user chooses a monitor, and the portal hands us a PipeWire
-//! fd + node id. A dedicated thread then runs the PipeWire main loop, converting
-//! each RGB frame to CPU [`I420`] and pushing it into the shared [`FrameChannel`]
-//! (callback-driven like the macOS delegate, not a pull-style pump).
+//! fd + node id. A dedicated thread then runs the PipeWire main loop, forwarding
+//! DMA-BUF frames without copying when the compositor offers them and converting
+//! shared-memory frames to CPU [`I420`] otherwise. It pushes both into the shared
+//! [`FrameChannel`] (callback-driven like the macOS delegate, not a pull-style
+//! pump).
 //!
 //! Two quirks worth knowing:
 //! - `publish_capture` releases the capture while unwatched and reopens it on
@@ -19,7 +21,7 @@
 //!   passes without a fresh one, mirroring the Windows Desktop Duplication pacing.
 
 use std::cell::RefCell;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -29,13 +31,14 @@ use ashpd::desktop::PersistMode;
 use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
 use pipewire as pw;
 use pw::spa;
+use spa::buffer::DataType;
 use spa::param::video::{VideoFormat, VideoInfoRaw};
 
 use super::channel::FrameChannel;
 use super::pump::Geometry;
 use super::{Config, FrameStream};
 use crate::Error;
-use crate::frame::{I420, Surface};
+use crate::frame::{DmaBuf, DmaBufFrame, DmaBufPlane, DrmFormat, I420, Surface};
 
 const DEFAULT_FRAMERATE: u32 = 30;
 /// The compositor sends the negotiated format right after the stream connects;
@@ -68,6 +71,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 	let framerate = config.framerate.unwrap_or(DEFAULT_FRAMERATE).max(1);
 	let (geo_tx, geo_rx) = tokio::sync::oneshot::channel();
 	let (quit_tx, quit_rx) = pw::channel::channel::<()>();
+	let (return_tx, return_rx) = pw::channel::channel::<usize>();
 
 	let handle = std::thread::spawn({
 		let chan = chan.clone();
@@ -79,7 +83,16 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 				last: None,
 				fresh: false,
 			}));
-			if let Err(e) = run_loop(fd, node_id, framerate, chan.clone(), state.clone(), quit_rx) {
+			if let Err(e) = run_loop(
+				fd,
+				node_id,
+				framerate,
+				chan.clone(),
+				state.clone(),
+				quit_rx,
+				return_rx,
+				return_tx,
+			) {
 				// Surface a setup failure through the awaiting `open`; a mid-stream
 				// failure just ends the stream (the encode loop reopens on demand).
 				match state.borrow_mut().geo_tx.take() {
@@ -244,9 +257,211 @@ struct State {
 	geometry: Option<(u32, u32)>,
 	geo_tx: Option<tokio::sync::oneshot::Sender<Result<Geometry, Error>>>,
 	/// Most recent converted frame, re-emitted while the screen is static.
-	last: Option<I420>,
+	last: Option<Last>,
 	/// Whether a fresh frame arrived since the last pacing tick.
 	fresh: bool,
+}
+
+/// A retained frame for the static-screen pacing tick.
+enum Last {
+	I420(I420),
+	DmaBuf(DmaBuf),
+}
+
+impl Last {
+	fn surface(&self) -> Surface {
+		match self {
+			Self::I420(frame) => Surface::I420(frame.clone()),
+			Self::DmaBuf(frame) => Surface::DmaBuf(frame.clone()),
+		}
+	}
+}
+
+/// A dequeued PipeWire DMA-BUF kept out of the producer's pool until every
+/// frame clone drops. Duplicating the fd alone is not enough: it preserves the
+/// allocation, but the compositor may overwrite its pixels as soon as the
+/// original buffer is queued again.
+struct PipeWireDmaBuf {
+	fd: OwnedFd,
+	return_tx: pw::channel::Sender<usize>,
+	buffer: usize,
+	map_offset: u32,
+	allocation_size: usize,
+	data_offset: usize,
+	stride: u32,
+	width: u32,
+	height: u32,
+	format: DrmFormat,
+	modifier: u64,
+}
+
+impl Drop for PipeWireDmaBuf {
+	fn drop(&mut self) {
+		// A failed send means the stream and its pool have already been destroyed.
+		// The duplicated fd still closes normally; the stale pointer is never used.
+		let _ = self.return_tx.send(self.buffer);
+	}
+}
+
+impl DmaBufFrame for PipeWireDmaBuf {
+	fn export(&self) -> std::io::Result<OwnedFd> {
+		self.fd.as_fd().try_clone_to_owned()
+	}
+
+	fn download_i420(&self) -> Result<I420, Error> {
+		// DRM_FORMAT_MOD_LINEAR is zero. A tiled allocation cannot be interpreted
+		// as strided rows; its fallback needs a GPU/VPP download instead.
+		if self.modifier != 0 {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"cannot download DMA-BUF modifier {:#x} as linear rows",
+				self.modifier
+			)));
+		}
+
+		let mapping = Mapping::new(&self.fd, self.map_offset, self.allocation_size)?;
+		let data = mapping
+			.as_slice()
+			.get(self.data_offset..)
+			.ok_or_else(|| Error::Codec(anyhow::anyhow!("DMA-BUF chunk starts outside its allocation")))?;
+
+		match self.format {
+			DrmFormat::NV12 => nv12_to_i420(data, self.stride, self.width, self.height),
+			DrmFormat::XRGB8888 | DrmFormat::ARGB8888 => I420::from_bgra(data, self.stride, self.width, self.height),
+			DrmFormat::XBGR8888 | DrmFormat::ABGR8888 => I420::from_rgba(data, self.stride, self.width, self.height),
+			other => Err(Error::Codec(anyhow::anyhow!(
+				"cannot download DMA-BUF format {:#x}",
+				other.as_raw()
+			))),
+		}
+	}
+}
+
+/// Read-only mmap of one linear DMA-BUF allocation.
+struct Mapping {
+	ptr: *mut libc::c_void,
+	len: usize,
+}
+
+impl Mapping {
+	fn new(fd: &OwnedFd, offset: u32, len: usize) -> Result<Self, Error> {
+		if len == 0 {
+			return Err(Error::Codec(anyhow::anyhow!("cannot map an empty DMA-BUF")));
+		}
+		// SAFETY: `fd` stays open for the mapping's lifetime, `len` is non-zero,
+		// and the kernel validates the PipeWire-provided offset and allocation.
+		let ptr = unsafe {
+			libc::mmap(
+				std::ptr::null_mut(),
+				len,
+				libc::PROT_READ,
+				libc::MAP_SHARED,
+				std::os::fd::AsRawFd::as_raw_fd(fd),
+				offset as libc::off_t,
+			)
+		};
+		if ptr == libc::MAP_FAILED {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"DMA-BUF mmap: {}",
+				std::io::Error::last_os_error()
+			)));
+		}
+		Ok(Self { ptr, len })
+	}
+
+	fn as_slice(&self) -> &[u8] {
+		// SAFETY: `ptr` and `len` came from a successful `mmap`, and `self`
+		// keeps that mapping alive for the returned slice's lifetime.
+		unsafe { std::slice::from_raw_parts(self.ptr.cast(), self.len) }
+	}
+}
+
+impl Drop for Mapping {
+	fn drop(&mut self) {
+		// SAFETY: this exact pointer and length came from the successful `mmap`
+		// in `Mapping::new`, and the mapping is released exactly once here.
+		unsafe {
+			libc::munmap(self.ptr, self.len);
+		}
+	}
+}
+
+/// Deinterleave strided NV12 into the crate's tightly packed I420 layout.
+fn nv12_to_i420(data: &[u8], stride: u32, width: u32, height: u32) -> Result<I420, Error> {
+	let (stride, width, height) = (stride as usize, width as usize, height as usize);
+	let y_len = stride
+		.checked_mul(height)
+		.ok_or_else(|| Error::Codec(anyhow::anyhow!("NV12 luma size overflow")))?;
+	let uv_len = stride
+		.checked_mul(height / 2)
+		.ok_or_else(|| Error::Codec(anyhow::anyhow!("NV12 chroma size overflow")))?;
+	if stride < width || data.len() < y_len + uv_len {
+		return Err(Error::Codec(anyhow::anyhow!(
+			"NV12 DMA-BUF is shorter than its declared rows"
+		)));
+	}
+
+	let mut packed = vec![0; width * height * 3 / 2];
+	for row in 0..height {
+		packed[row * width..(row + 1) * width].copy_from_slice(&data[row * stride..row * stride + width]);
+	}
+	let uv = &data[y_len..y_len + uv_len];
+	let packed_uv = width * height;
+	for row in 0..height / 2 {
+		packed[packed_uv + row * width..packed_uv + (row + 1) * width]
+			.copy_from_slice(&uv[row * stride..row * stride + width]);
+	}
+	I420::from_nv12(&packed, width as u32, height as u32)
+}
+
+/// Queues a raw PipeWire buffer unless ownership is transferred to a DMA-BUF
+/// surface. This mirrors `pipewire::buffer::Buffer` while allowing the surface
+/// to return the buffer asynchronously on the PipeWire loop thread.
+struct Dequeued<'a> {
+	stream: &'a pw::stream::Stream,
+	raw: *mut pw::sys::pw_buffer,
+	queue: bool,
+}
+
+impl<'a> Dequeued<'a> {
+	unsafe fn new(stream: &'a pw::stream::Stream) -> Option<Self> {
+		// SAFETY: PipeWire permits one dequeue from this process callback. The
+		// wrapper below returns the pointer to this same stream unless leased.
+		let raw = unsafe { stream.dequeue_raw_buffer() };
+		(!raw.is_null()).then_some(Self {
+			stream,
+			raw,
+			queue: true,
+		})
+	}
+
+	fn datas_mut(&mut self) -> &mut [spa::buffer::Data] {
+		// SAFETY: `raw` is a non-null buffer dequeued from `stream` and remains
+		// out of PipeWire's pool while this wrapper owns it.
+		let buffer = unsafe { (*self.raw).buffer };
+		if buffer.is_null() || unsafe { (*buffer).n_datas == 0 || (*buffer).datas.is_null() } {
+			return &mut [];
+		}
+		// SAFETY: PipeWire owns this SPA buffer and guarantees its `datas` array
+		// has `n_datas` entries until the buffer is queued back.
+		unsafe {
+			std::slice::from_raw_parts_mut((*buffer).datas.cast::<spa::buffer::Data>(), (*buffer).n_datas as usize)
+		}
+	}
+
+	fn lease(mut self) -> usize {
+		self.queue = false;
+		self.raw as usize
+	}
+}
+
+impl Drop for Dequeued<'_> {
+	fn drop(&mut self) {
+		if self.queue {
+			// SAFETY: the pointer came from `self.stream` and has not previously
+			// been returned or transferred to a leased surface.
+			unsafe { self.stream.queue_raw_buffer(self.raw) };
+		}
+	}
 }
 
 /// Connect to the portal's PipeWire node and run the main loop until the stream
@@ -258,6 +473,8 @@ fn run_loop(
 	chan: Arc<FrameChannel>,
 	state: Rc<RefCell<State>>,
 	quit_rx: pw::channel::Receiver<()>,
+	return_rx: pw::channel::Receiver<usize>,
+	return_tx: pw::channel::Sender<usize>,
 ) -> Result<(), Error> {
 	pw::init();
 
@@ -277,6 +494,20 @@ fn run_loop(
 		},
 	)
 	.map_err(|e| err("pipewire stream", e))?;
+
+	// DMA-BUF surfaces return their dequeued PipeWire buffer here on the loop
+	// thread. A surface may drop on an encoder or renderer task, where calling
+	// `pw_stream_queue_buffer` directly would violate PipeWire's threading model.
+	let _returns = return_rx.attach(mainloop.loop_(), {
+		let stream = stream.downgrade();
+		move |raw| {
+			if let Some(stream) = stream.upgrade() {
+				// SAFETY: leased surfaces send each pointer exactly once, and every
+				// pointer was originally dequeued from this stream.
+				unsafe { stream.queue_raw_buffer(raw as *mut pw::sys::pw_buffer) };
+			}
+		}
+	});
 
 	let _listener = stream
 		.add_local_listener::<()>()
@@ -307,7 +538,7 @@ fn run_loop(
 		.param_changed({
 			let state = state.clone();
 			let mainloop = mainloop.downgrade();
-			move |_, _, id, param| {
+			move |stream, _, id, param| {
 				let Some(param) = param else { return };
 				if id != spa::param::ParamType::Format.as_raw() {
 					return;
@@ -325,6 +556,13 @@ fn run_loop(
 				if let Err(e) = state.format.parse(param) {
 					tracing::warn!(error = %e, "failed to parse pipewire video format");
 					return;
+				}
+				let buffers = buffer_offer();
+				if let Some(param) = spa::pod::Pod::from_bytes(&buffers) {
+					let mut params = [param];
+					if let Err(e) = stream.update_params(&mut params) {
+						tracing::warn!(error = %e, "DMA-BUF buffer negotiation failed; capture may use shared memory");
+					}
 				}
 
 				let size = state.format.size();
@@ -363,10 +601,13 @@ fn run_loop(
 			let state = state.clone();
 			let chan = chan.clone();
 			let mainloop = mainloop.downgrade();
+			let return_tx = return_tx.clone();
 			move |stream, _| {
 				let mut state = state.borrow_mut();
 				let Some((width, height)) = state.geometry else { return };
-				let Some(mut buffer) = stream.dequeue_buffer() else {
+				// SAFETY: this is PipeWire's process callback for `stream`; `Dequeued`
+				// returns the buffer on drop unless a DMA-BUF surface leases it.
+				let Some(mut buffer) = (unsafe { Dequeued::new(stream) }) else {
 					return;
 				};
 				let datas = buffer.datas_mut();
@@ -374,15 +615,80 @@ fn run_loop(
 
 				let offset = data.chunk().offset() as usize;
 				let size = data.chunk().size() as usize;
-				let stride = data.chunk().stride();
+				let stride = match data.chunk().stride() {
+					stride if stride > 0 => stride,
+					_ => match state.format.format() {
+						VideoFormat::NV12 => state.format.size().width,
+						VideoFormat::BGRx | VideoFormat::BGRA | VideoFormat::RGBx | VideoFormat::RGBA => {
+							state.format.size().width.saturating_mul(4)
+						}
+						_ => 0,
+					},
+				};
 				// Compositors mark skipped frames as empty or corrupted; drop those
 				// rather than treating them as a fatal conversion failure below.
 				if size == 0 || data.chunk().flags().contains(spa::buffer::ChunkFlags::CORRUPTED) {
 					return;
 				}
-				// Without dmabuf modifiers in our format offer the compositor uses
-				// shared memory, which MAP_BUFFERS mmaps for us; `None` here means
-				// it forced something we can't read, so give up cleanly.
+				if data.type_() == DataType::DmaBuf {
+					let Some(format) = drm_format(state.format.format()) else {
+						tracing::warn!(format = ?state.format.format(), "unsupported DMA-BUF pixel format");
+						return;
+					};
+					let raw = data.as_raw();
+					if data.fd() < 0 || stride == 0 {
+						tracing::warn!("DMA-BUF has no valid fd or row stride");
+						return;
+					}
+					// SAFETY: PipeWire owns this fd while the buffer is dequeued. It is
+					// duplicated immediately, before the buffer can be queued again.
+					let fd = unsafe { BorrowedFd::borrow_raw(data.fd()) };
+					let Ok(fd) = fd.try_clone_to_owned() else {
+						return;
+					};
+					let map_offset = raw.mapoffset;
+					let allocation_size = raw.maxsize as usize;
+					let Some(base) = map_offset.checked_add(offset as u32) else {
+						tracing::warn!("DMA-BUF plane offset overflow");
+						return;
+					};
+					let planes = if format == DrmFormat::NV12 {
+						let Some(uv) = stride.checked_mul(height).and_then(|size| base.checked_add(size)) else {
+							tracing::warn!("DMA-BUF chroma plane offset overflow");
+							return;
+						};
+						vec![DmaBufPlane::new(base, stride), DmaBufPlane::new(uv, stride)]
+					} else {
+						vec![DmaBufPlane::new(base, stride)]
+					};
+					let modifier = state.format.modifier();
+					let raw = buffer.lease();
+					let inner = Arc::new(PipeWireDmaBuf {
+						fd,
+						return_tx: return_tx.clone(),
+						buffer: raw,
+						map_offset,
+						allocation_size,
+						data_offset: offset,
+						stride,
+						width,
+						height,
+						format,
+						modifier,
+					});
+					match DmaBuf::new(format, modifier, width, height, planes, inner) {
+						Ok(frame) => {
+							chan.push(Surface::DmaBuf(frame.clone()));
+							state.last = Some(Last::DmaBuf(frame));
+							state.fresh = true;
+						}
+						Err(e) => tracing::warn!(error = %e, "invalid PipeWire DMA-BUF"),
+					}
+					return;
+				}
+
+				// MAP_BUFFERS maps MemPtr/MemFd for the CPU fallback. `None` here
+				// means the producer forced an unsupported buffer representation.
 				let Some(bytes) = data.data() else {
 					tracing::warn!("pipewire buffer is not CPU-mapped; stopping capture");
 					if let Some(mainloop) = mainloop.upgrade() {
@@ -393,18 +699,10 @@ fn run_loop(
 				let Some(bytes) = bytes.get(offset..offset + size) else {
 					return;
 				};
-				// Fall back to the unclamped source width: for an odd-width source
-				// the real row is one pixel wider than the clamped `width`.
-				let stride = if stride > 0 {
-					stride as u32
-				} else {
-					state.format.size().width * 4
-				};
-
 				match convert(state.format.format(), bytes, stride, width, height) {
 					Ok(i420) => {
 						chan.push(Surface::I420(i420.clone()));
-						state.last = Some(i420);
+						state.last = Some(Last::I420(i420));
 						state.fresh = true;
 					}
 					Err(e) => {
@@ -420,12 +718,16 @@ fn run_loop(
 		.register()
 		.map_err(|e| err("pipewire listener", e))?;
 
-	// Offer the CPU-convertible RGB layouts; the compositor picks one and
-	// replies through `param_changed`. No dmabuf modifiers, so buffers stay in
-	// shared memory (the CPU path, like the other non-macOS backends).
+	// Offer packed RGB first for the Vulkan zero-copy render path, then NV12.
+	// Buffer parameters advertise DMA-BUF with shared-memory fallback.
 	let pod = format_offer(framerate);
-	let mut params = [spa::pod::Pod::from_bytes(&pod)
-		.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build pipewire format offer")))?];
+	let buffers = buffer_offer();
+	let mut params = [
+		spa::pod::Pod::from_bytes(&pod)
+			.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build pipewire format offer")))?,
+		spa::pod::Pod::from_bytes(&buffers)
+			.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build pipewire buffer offer")))?,
+	];
 	stream
 		.connect(
 			spa::utils::Direction::Input,
@@ -446,7 +748,7 @@ fn run_loop(
 				return;
 			}
 			if let Some(last) = &state.last {
-				chan.push(Surface::I420(last.clone()));
+				chan.push(last.surface());
 			}
 		}
 	});
@@ -470,9 +772,10 @@ fn run_loop(
 	Ok(())
 }
 
-/// Convert one strided RGB screen frame to tightly-packed I420.
+/// Convert one strided screen frame to tightly-packed I420.
 fn convert(format: VideoFormat, bytes: &[u8], stride: u32, width: u32, height: u32) -> Result<I420, Error> {
 	match format {
+		VideoFormat::NV12 => nv12_to_i420(bytes, stride, width, height),
 		VideoFormat::BGRx | VideoFormat::BGRA => I420::from_bgra(bytes, stride, width, height),
 		VideoFormat::RGBx | VideoFormat::RGBA => I420::from_rgba(bytes, stride, width, height),
 		other => Err(Error::Codec(anyhow::anyhow!(
@@ -481,8 +784,20 @@ fn convert(format: VideoFormat, bytes: &[u8], stride: u32, width: u32, height: u
 	}
 }
 
-/// Serialize the `EnumFormat` pod offering the RGB layouts we can convert,
-/// any size, and a framerate range preferring `framerate`.
+/// Map the negotiated SPA layout to its DRM fourcc.
+fn drm_format(format: VideoFormat) -> Option<DrmFormat> {
+	match format {
+		VideoFormat::NV12 => Some(DrmFormat::NV12),
+		VideoFormat::BGRx => Some(DrmFormat::XRGB8888),
+		VideoFormat::BGRA => Some(DrmFormat::ARGB8888),
+		VideoFormat::RGBx => Some(DrmFormat::XBGR8888),
+		VideoFormat::RGBA => Some(DrmFormat::ABGR8888),
+		_ => None,
+	}
+}
+
+/// Serialize the `EnumFormat` pod offering packed RGB first, then NV12, any
+/// size, and a framerate range preferring `framerate`.
 fn format_offer(framerate: u32) -> Vec<u8> {
 	let obj = spa::pod::object!(
 		spa::utils::SpaTypes::ObjectParamFormat,
@@ -503,10 +818,10 @@ fn format_offer(framerate: u32) -> Vec<u8> {
 			Enum,
 			Id,
 			VideoFormat::BGRx,
-			VideoFormat::BGRx,
 			VideoFormat::BGRA,
 			VideoFormat::RGBx,
 			VideoFormat::RGBA,
+			VideoFormat::NV12,
 		),
 		spa::pod::property!(
 			spa::param::format::FormatProperties::VideoSize,
@@ -542,6 +857,35 @@ fn format_offer(framerate: u32) -> Vec<u8> {
 		.into_inner()
 }
 
+/// Serialize `SPA_PARAM_Buffers` support for DMA-BUF with MemFd/MemPtr
+/// fallbacks. Producers otherwise default to shared memory even when both ends
+/// understand DMA-BUF.
+fn buffer_offer() -> Vec<u8> {
+	const DATA_TYPE: u32 = 6;
+	const MEM_PTR: i32 = 1 << 1;
+	const MEM_FD: i32 = 1 << 2;
+	const DMA_BUF: i32 = 1 << 3;
+
+	let obj = spa::pod::Object {
+		type_: spa::utils::SpaTypes::ObjectParamBuffers.as_raw(),
+		id: spa::param::ParamType::Buffers.as_raw(),
+		properties: vec![spa::pod::Property::new(
+			DATA_TYPE,
+			spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
+				spa::utils::ChoiceFlags::empty(),
+				spa::utils::ChoiceEnum::Flags {
+					default: DMA_BUF | MEM_FD | MEM_PTR,
+					flags: vec![DMA_BUF, MEM_FD, MEM_PTR],
+				},
+			))),
+		)],
+	};
+	spa::pod::serialize::PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &spa::pod::Value::Object(obj))
+		.expect("serializing a static buffer pod cannot fail")
+		.0
+		.into_inner()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -552,6 +896,102 @@ mod tests {
 	fn format_offer_is_valid_pod() {
 		let bytes = format_offer(30);
 		assert!(spa::pod::Pod::from_bytes(&bytes).is_some(), "offer did not round-trip");
+	}
+
+	#[test]
+	fn buffer_offer_is_valid_pod() {
+		let bytes = buffer_offer();
+		assert!(
+			spa::pod::Pod::from_bytes(&bytes).is_some(),
+			"buffer offer did not round-trip"
+		);
+	}
+
+	#[test]
+	fn nv12_stride_is_removed_and_chroma_is_deinterleaved() {
+		let data = [
+			1, 2, 3, 4, 99, 99, // Y row 0 plus padding
+			5, 6, 7, 8, 99, 99, // Y row 1 plus padding
+			9, 10, 11, 12, 99, 99, // UV row plus padding
+		];
+		let frame = nv12_to_i420(&data, 6, 4, 2).unwrap();
+		assert_eq!(frame.y(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+		assert_eq!(frame.u(), &[9, 11]);
+		assert_eq!(frame.v(), &[10, 12]);
+	}
+
+	/// A duplicated fd does not protect the pixels from producer reuse. The
+	/// dequeued PipeWire buffer must be returned only after the last surface
+	/// clone drops, and its return crosses back onto the PipeWire loop.
+	#[test]
+	fn dmabuf_returns_on_last_drop() {
+		use std::cell::Cell;
+		use std::os::fd::OwnedFd;
+		use std::os::unix::net::UnixStream;
+		use std::rc::Rc;
+
+		pw::init();
+		let mainloop = pw::main_loop::MainLoopRc::new(None).expect("main loop");
+		let (return_tx, return_rx) = pw::channel::channel::<usize>();
+		let returned = Rc::new(Cell::new(None));
+		let _returns = return_rx.attach(mainloop.loop_(), {
+			let mainloop = mainloop.downgrade();
+			let returned = returned.clone();
+			move |raw| {
+				returned.set(Some(raw));
+				mainloop.upgrade().expect("live loop").quit();
+			}
+		});
+		let timer = mainloop.loop_().add_timer({
+			let mainloop = mainloop.downgrade();
+			move |_| mainloop.upgrade().expect("live loop").quit()
+		});
+
+		let (socket, _peer) = UnixStream::pair().expect("fd pair");
+		let inner = Arc::new(PipeWireDmaBuf {
+			fd: OwnedFd::from(socket),
+			return_tx,
+			buffer: 7,
+			map_offset: 0,
+			allocation_size: 6,
+			data_offset: 0,
+			stride: 2,
+			width: 2,
+			height: 2,
+			format: DrmFormat::NV12,
+			modifier: 0,
+		});
+		let frame = DmaBuf::new(
+			DrmFormat::NV12,
+			0,
+			2,
+			2,
+			vec![DmaBufPlane::new(0, 2), DmaBufPlane::new(4, 2)],
+			inner,
+		)
+		.expect("DMA-BUF");
+		assert_eq!(frame.format(), DrmFormat::NV12);
+		assert_eq!(frame.modifier(), 0);
+		assert_eq!((frame.width(), frame.height()), (2, 2));
+		assert_eq!(frame.planes()[1], DmaBufPlane::new(4, 2));
+		drop(frame.export().expect("exported fd"));
+		let clone = frame.clone();
+
+		drop(frame);
+		timer
+			.update_timer(Some(Duration::from_millis(10)), None)
+			.into_result()
+			.expect("timer");
+		mainloop.run();
+		assert_eq!(returned.get(), None, "one live clone still owns the lease");
+
+		drop(clone);
+		timer
+			.update_timer(Some(Duration::from_secs(1)), None)
+			.into_result()
+			.expect("timeout timer");
+		mainloop.run();
+		assert_eq!(returned.get(), Some(7));
 	}
 
 	/// Open the portal, grab a few frames, and check geometry. Ignored because it

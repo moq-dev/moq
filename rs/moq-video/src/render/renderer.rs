@@ -125,6 +125,8 @@ struct Pipelines {
 	/// everywhere, so it stays validated on every platform either way.
 	#[cfg(target_os = "macos")]
 	nv12: wgpu::RenderPipeline,
+	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	rgba: wgpu::RenderPipeline,
 	i420: wgpu::RenderPipeline,
 }
 
@@ -133,7 +135,9 @@ impl Renderer {
 	///
 	/// The device and queue are the application's: the renderer draws into
 	/// textures that application already owns, so it never creates a device of
-	/// its own. Both handles are cheap to clone and are kept.
+	/// its own. Both handles are cheap to clone and are kept. On Linux, request
+	/// [`wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF`] on the device to import
+	/// PipeWire DMA-BUFs instead of downloading them.
 	pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, config: Config) -> Result<Self, Error> {
 		if let Some(size) = config.size {
 			size.validate_nonzero("render output")?;
@@ -167,7 +171,7 @@ impl Renderer {
 	/// call overwrites what you are holding. Present or copy it before rendering
 	/// again.
 	pub fn render(&mut self, frame: &Frame) -> Result<wgpu::Texture, Error> {
-		let source = self.source(frame)?;
+		let mut source = self.source(frame)?;
 		let color = self.config.color.unwrap_or(source.color);
 		if self.color != Some(color) {
 			self.queue
@@ -206,6 +210,8 @@ impl Renderer {
 		});
 
 		let pipeline = match source.layout {
+			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			Layout::Rgba => &self.shader.rgba,
 			#[cfg(target_os = "macos")]
 			Layout::Nv12 => &self.shader.nv12,
 			Layout::I420 => &self.shader.i420,
@@ -237,6 +243,12 @@ impl Renderer {
 			pass.draw(0..3, 0..1);
 		}
 		self.queue.submit([encoder.finish()]);
+		if let Some(keepalive) = source.keepalive.take() {
+			// Queue callbacks run after every submission registered before them.
+			// Holding the producer surface here prevents PipeWire from recycling
+			// and overwriting its buffer while the draw still samples it.
+			self.queue.on_submitted_work_done(move || drop(keepalive));
+		}
 
 		Ok(output)
 	}
@@ -406,6 +418,8 @@ impl Pipelines {
 		});
 
 		Ok(Self {
+			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			rgba: pipeline("rgba"),
 			#[cfg(target_os = "macos")]
 			nv12: pipeline("nv12"),
 			i420: pipeline("i420"),
