@@ -362,11 +362,12 @@ impl ImportSource {
 	/// Whether this source encodes to fit the connection's bandwidth estimate.
 	///
 	/// Rate control is per-encoder while the estimate is per-connection, so each such
-	/// source assumes it's the only one on the uplink.
+	/// source assumes it's the only one on the uplink. Only the video encoder reads
+	/// the estimate, so an audio-only capture doesn't count.
 	pub fn uses_bandwidth(&self) -> bool {
 		match self {
 			#[cfg(feature = "capture")]
-			Self::Capture(_) => true,
+			Self::Capture(capture) => !capture.no_video,
 			_ => false,
 		}
 	}
@@ -672,6 +673,22 @@ mod tests {
 		};
 
 		assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+	}
+
+	/// Only the video encoder reads the connection's bandwidth estimate, so an
+	/// audio-only capture doesn't compete for it and isn't counted against the
+	/// one-adaptive-stage limit.
+	#[cfg(feature = "capture")]
+	#[test]
+	fn audio_only_capture_is_not_bandwidth_adaptive() {
+		for (args, adaptive) in [(vec!["capture"], true), (vec!["capture", "--no-video"], false)] {
+			let argv = [vec!["moq", "--client-connect", "http://relay", "import"], args].concat();
+			let cli = Invocation::try_parse_from(argv).unwrap();
+			let Command::Import(import) = &cli.stages[0] else {
+				panic!("expected import")
+			};
+			assert_eq!(import.source.uses_bandwidth(), adaptive);
+		}
 	}
 
 	#[test]
