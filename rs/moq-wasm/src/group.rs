@@ -67,10 +67,12 @@ impl GroupProducer {
 // No `closed()` on a group producer, unlike `TrackProducer`. Awaiting it would have to
 // hold the producer for the wait, and every `writeFrame` in the meantime would fail; the
 // two things a caller most wants to do at once are exactly write and watch for a drop.
-// `moq_net::group::Producer` is not `Clone`, so there is no second handle to wait on, and
-// keeping a `group::Consumer` around instead would leave the group permanently "used" and
-// distort the demand signal the track evicts against. Watch `TrackProducer.closed()`
-// instead: a group dies with its track, and the caller owns the group's own lifetime.
+//
+// `TrackProducer` avoids that with `track::Demand`, a weak observer. Groups have no
+// equivalent: `group::Producer` is `Clone`, but every clone shares the `Alive` guard, so a
+// clone parked in a pending `closed()` would keep the group and its cached frames alive
+// and defeat close-on-last-drop. Rather than ship that, leave the method out until
+// `moq-net` grows a weak group observer.
 
 /// Reads frames from a single group.
 #[wasm_bindgen]

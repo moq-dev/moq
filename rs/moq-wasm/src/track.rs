@@ -12,11 +12,16 @@ use crate::util::{Exclusive, js_err};
 pub struct TrackProducer {
 	name: String,
 
-	// A second handle for the waiting methods. `unused` and `closed` take `&self` and are
-	// meant to be awaited *while* publishing, so routing them through `inner` would check
-	// the producer out for the whole wait and reject every write until they resolved. The
-	// clone shares the same track (see the refcount lifecycle in moq-net).
-	waiter: moq_net::track::Producer,
+	// The observers (`used`, `unused`, `closed`) run off this rather than `inner`. They
+	// take `&self` and are meant to be awaited *while* publishing, so routing them through
+	// `inner` would check the producer out for the whole wait and reject every write until
+	// they resolved.
+	//
+	// It has to be `Demand` and not a `Producer` clone: `Demand` is a weak handle, so it
+	// neither keeps the track alive nor pins its cached groups. A strong clone held across
+	// a pending `closed()` would defeat close-on-last-drop, and the promise would keep the
+	// very track it is waiting on alive.
+	demand: moq_net::track::Demand,
 
 	inner: Exclusive<moq_net::track::Producer>,
 }
@@ -25,7 +30,7 @@ impl TrackProducer {
 	pub fn new(inner: moq_net::track::Producer) -> Self {
 		Self {
 			name: inner.name().to_string(),
-			waiter: inner.clone(),
+			demand: inner.demand(),
 			inner: Exclusive::new(inner),
 		}
 	}
@@ -102,8 +107,8 @@ impl TrackProducer {
 	/// Every close carries a reason, including a clean one, so this never resolves.
 	/// Safe to await while publishing.
 	pub async fn closed(&self) -> Result<(), JsValue> {
-		let waiter = self.waiter.clone();
-		Err(js_err(waiter.closed().await))
+		let demand = self.demand.clone();
+		Err(js_err(demand.closed().await))
 	}
 
 	/// Resolve once somebody is subscribed, so the producer can start working.
@@ -112,8 +117,8 @@ impl TrackProducer {
 	/// or spinning up an encoder for a track nobody is watching yet. Safe to await while
 	/// publishing.
 	pub async fn used(&self) -> Result<(), JsValue> {
-		let waiter = self.waiter.clone();
-		waiter.used().await.map_err(js_err)
+		let demand = self.demand.clone();
+		demand.used().await.map_err(js_err)
 	}
 
 	/// Resolve once nobody is subscribed, so the producer can stop working.
@@ -122,8 +127,8 @@ impl TrackProducer {
 	/// first viewer rather than expecting this to hold. Safe to await while publishing,
 	/// which is the point: this is the demand signal a publisher races against its writes.
 	pub async fn unused(&self) -> Result<(), JsValue> {
-		let waiter = self.waiter.clone();
-		waiter.unused().await.map_err(js_err)
+		let demand = self.demand.clone();
+		demand.unused().await.map_err(js_err)
 	}
 
 	/// The subscription currently aggregated across every live subscriber, or `null`
