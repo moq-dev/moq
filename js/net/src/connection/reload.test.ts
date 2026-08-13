@@ -217,6 +217,49 @@ test("announcedBroadcast follows the reconnect loop", async () => {
 	}
 });
 
+test("a reload that gives up stops claiming it will answer requests", async () => {
+	const original = globalThis.WebTransport;
+	const url = new URL("https://example.com/");
+	const stub = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+		void accept(pair.server, url).then(() => {
+			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+		});
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const origin = new OriginProducer();
+	const reload = new Reload({
+		enabled: true,
+		url,
+		websocket: { enabled: false },
+		delay: { initial: 1, multiplier: 2, max: 1, timeout: 0 },
+		subscribe: origin,
+	});
+
+	// A reconnecting connection holds requests pending, which is the point: no session is
+	// attached yet and one is coming.
+	const request = origin.consume().request(Path.from("wanted"));
+	expect(request.unroutable.peek()).toBe(false);
+
+	try {
+		// Terminal: these credentials will never work, so nothing is coming after all and a
+		// request must stop waiting on it rather than hanging on a connection that is done.
+		await reload.closed.then(
+			() => undefined,
+			() => undefined,
+		);
+		await waitUntil(() => request.unroutable.peek() === true);
+		expect(request.unroutable.peek()).toBe(true);
+	} finally {
+		request.close();
+		reload.close();
+		origin.close();
+		globalThis.WebTransport = original;
+	}
+});
+
 test("a session rejected as unauthorized surfaces the code and stops retrying", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");

@@ -78,12 +78,12 @@ class OriginState {
 	refresh(path: Path.Valid): void {
 		const slot = this.requests.peek()?.get(path);
 		if (!slot) return;
-		slot.route.set(this.route(path, slot));
+		slot.route.set(this.route(path, slot.answer));
 	}
 
 	/** What `path` resolves to: the table's route when it has one, else the blind answer. */
-	route(path: Path.Valid, slot: RequestSlot): broadcast.Consumer | undefined {
-		return this.local.peek()?.get(path) ?? this.remote.peek()?.get(path)?.[0] ?? slot.answer;
+	route(path: Path.Valid, answer?: broadcast.Consumer): broadcast.Consumer | undefined {
+		return this.local.peek()?.get(path) ?? this.remote.peek()?.get(path)?.[0] ?? answer;
 	}
 }
 
@@ -257,7 +257,9 @@ export class Producer implements Table {
 		return () => {
 			if (released) return;
 			released = true;
-			this.#state.answerers.update((count) => count - 1);
+			// Clamped because closing the origin zeroes the count, and the sessions attached at
+			// the time still release afterwards.
+			this.#state.answerers.update((count) => Math.max(0, count - 1));
 		};
 	}
 
@@ -355,6 +357,9 @@ export class Producer implements Table {
 			}
 			return undefined;
 		});
+		// Nothing will answer a request on a closed origin, whatever is still attached, so
+		// existing requests report unroutable rather than waiting on a corpse.
+		this.#state.answerers.set(0);
 		this.#state.requests.update((requests) => {
 			for (const slot of requests?.values() ?? []) {
 				slot.answer?.close();
@@ -532,10 +537,12 @@ export class Consumer {
 
 		let slot = requests.get(path);
 		if (!slot) {
-			const created: RequestSlot = { count: 0, route: new Signal<broadcast.Consumer | undefined>(undefined) };
-			// Seeded before anyone can watch it, so a path the table already routes resolves
-			// on the first read rather than a microtask later.
-			created.route.set(this.#state.route(path, created), false);
+			// Seeded through the constructor, so a path the table already routes resolves on the
+			// first read. It must not go through a silent set: that still captures the pre-seed
+			// value as the baseline the next change is compared against, and never flushes to
+			// clear it, so a seeded route retracting to undefined would look like no change and
+			// notify nobody.
+			const created: RequestSlot = { count: 0, route: new Signal(this.#state.route(path)) };
 			slot = created;
 			this.#state.requests.mutate((map) => {
 				map?.set(path, created);

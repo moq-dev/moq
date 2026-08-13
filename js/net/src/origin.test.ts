@@ -726,3 +726,55 @@ test("a request on a closed origin is unroutable", () => {
 	expect(request.unroutable.peek()).toBe(true);
 	request.close();
 });
+
+test("a seeded route still notifies when it retracts", async () => {
+	const origin = new Producer();
+	const path = Path.from("seeded");
+
+	// Routed before the request exists, so the request is seeded rather than notified into
+	// its first value. A silent seed leaves the pre-seed value as the baseline the next
+	// change is compared against, which makes this retraction look like no change at all.
+	const upstream = new BroadcastProducer();
+	const dispose = origin.insertRemote(path, upstream.consume());
+
+	const request = origin.consume().request(path);
+	expect(request.active.peek()).toBeDefined();
+
+	let wakeups = 0;
+	const stop = request.active.subscribe(() => {
+		wakeups += 1;
+	});
+
+	dispose();
+	await settle();
+
+	expect(wakeups).toBeGreaterThan(0);
+	expect(request.active.peek()).toBeUndefined();
+
+	stop();
+	request.close();
+	upstream.close();
+	origin.close();
+});
+
+test("closing the origin makes an existing request unroutable", async () => {
+	const origin = new Producer();
+	const path = Path.from("doomed");
+
+	const detach = origin.attach(true);
+	const request = origin.consume().request(path);
+	expect(request.unroutable.peek()).toBe(false);
+
+	// The session is still attached, but a closed origin can never answer through it.
+	origin.close();
+	await settle();
+	expect(request.unroutable.peek()).toBe(true);
+
+	// The attached session releasing afterwards must not drive the count below zero and
+	// resurrect the idea that something can answer.
+	detach();
+	await settle();
+	expect(request.unroutable.peek()).toBe(true);
+
+	request.close();
+});

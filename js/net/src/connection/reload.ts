@@ -1,4 +1,4 @@
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { type Dispose, Effect, type Getter, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { error, RemoteError, SessionCode } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
@@ -141,6 +141,10 @@ export class Reload {
 	#closedResolve!: () => void;
 	#closedReject!: (err: Error) => void;
 
+	// Releases the subscribe origin's expectation. Idempotent, so the terminal paths and the
+	// close cleanup can both call it.
+	#expected?: Dispose;
+
 	// The current wait between attempts, doubling per failure, and when the retry window expires.
 	// Both are undefined between sequences, so a later edit to `delay` applies to the next one.
 	#delay: DOMHighResTimeStamp | undefined;
@@ -167,8 +171,13 @@ export class Reload {
 
 		// Requests on the subscribe origin stay pending across a reconnect, and before the
 		// first session establishes, rather than reading as unroutable the moment no session
-		// is attached. Released on close, when nothing is coming any more.
-		if (this.subscribe) this.#signals.cleanup(this.subscribe.expect());
+		// is attached. Released once nothing is coming any more, which is either a close or a
+		// terminal failure: a reconnect loop that has given up must stop claiming it will
+		// answer, or every request on the origin waits forever on a connection that is done.
+		if (this.subscribe) {
+			this.#expected = this.subscribe.expect();
+			this.#signals.cleanup(this.#expected);
+		}
 
 		this.closed = new Promise((resolve, reject) => {
 			this.#closedResolve = resolve;
@@ -295,6 +304,7 @@ export class Reload {
 		// moq-native's reconnect loop, which stops on the same close.
 		if (cause instanceof RemoteError && cause.code === SessionCode.Unauthorized) {
 			console.warn("session rejected as unauthorized, not retrying");
+			this.#expected?.();
 			this.#closedReject(cause);
 			return;
 		}
@@ -306,6 +316,7 @@ export class Reload {
 		if (now >= this.#deadline) {
 			console.warn("reconnect timed out");
 			// A graceful close has no error, so report the timeout itself.
+			this.#expected?.();
 			this.#closedReject(cause === undefined ? new Error("reconnect timed out") : error(cause));
 			return;
 		}
