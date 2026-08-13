@@ -569,6 +569,35 @@ test("lite draft-05: a group taken before the cap dropped is still served", asyn
 	}
 });
 
+// The other end of the subscription is not symmetric. Raising the start floor is destructive
+// by design, since the read cursor shifts and closes every buffered group below it, so a group
+// already in hand has to go the same way: serving it would re-deliver below a floor the
+// subscriber just moved, which on a route splice is duplicate media.
+test("lite draft-05: a group taken before the floor rose is dropped", async () => {
+	const sub = await servedSubscription({ startGroup: 0, gated: true });
+	try {
+		// Same window as the cap test: group 0 parks the loop, so the prefetch takes group 1.
+		sub.serve(0);
+		await sub.parked;
+		sub.serve(1);
+		await flush();
+
+		// Skip ahead past group 1, which the loop is already holding.
+		await new SubscribeUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, Version.DRAFT_05);
+		while (sub.track.subscription.peek()?.startGroup !== 2) await sub.track.subscription.changed();
+
+		// Buffered while the loop is still parked, so it is taken under the raised floor.
+		sub.serve(2);
+		sub.release();
+
+		// Group 0 was already decided and stays in flight; group 1 must not follow it.
+		expect(await sub.servedSequence()).toBe(0);
+		expect(await sub.servedSequence()).toBe(2);
+	} finally {
+		await sub.close();
+	}
+});
+
 // Frame bounds have to travel with the group they were taken under. An update that moves the
 // cap off a group already in hand leaves it matching neither boundary, and mapping that to
 // the whole group would put frames the subscription excluded on the wire. Nothing downstream

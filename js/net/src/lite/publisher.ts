@@ -576,6 +576,18 @@ export class Publisher {
 				const { group, range } = result;
 				next = take();
 
+				// The floor is judged against the bounds as they stand now, deliberately unlike
+				// the frame range above, which is the snapshot this group was taken under. The
+				// two ends of a subscription are not symmetric: raising the floor is destructive
+				// (the read cursor shifts and closes every buffered group below it), so dropping
+				// one already in hand discards nothing the subscriber has not discarded itself,
+				// while serving it would re-deliver below a floor they just moved. Lowering the
+				// cap only parks its groups, which is why the cap must not reject here.
+				if (bounds.startGroup !== undefined && group.sequence < bounds.startGroup) {
+					group.close();
+					continue;
+				}
+
 				if (emitRange && !startSent) {
 					startSent = true;
 					// SUBSCRIBE_START promises nothing below this sequence will be delivered.
