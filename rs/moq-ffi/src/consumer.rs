@@ -1,8 +1,6 @@
-use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bytes::Buf;
-use moq_mux::container::Container as _;
 
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -448,30 +446,12 @@ pub struct MoqGroupConsumer {
 }
 
 struct MediaGroupInner {
-	group: moq_net::group::Consumer,
-	container: moq_mux::catalog::hang::Container,
-	pending: VecDeque<moq_mux::container::Frame>,
-	first: bool,
+	inner: moq_mux::container::GroupConsumer<moq_mux::catalog::hang::Container>,
 }
 
 impl MediaGroupInner {
 	async fn next(&mut self) -> Result<Option<MoqMediaFrame>, MoqError> {
-		loop {
-			if let Some(mut frame) = self.pending.pop_front() {
-				// Legacy and LOC do not carry a keyframe bit. Media groups open on a
-				// keyframe by construction, matching the fallback in the live consumer.
-				if self.first {
-					frame.keyframe = true;
-					self.first = false;
-				}
-				return Ok(Some(media_frame(frame)?));
-			}
-
-			let Some(frames) = self.container.read(&mut self.group).await? else {
-				return Ok(None);
-			};
-			self.pending.extend(frames);
-		}
+		self.inner.read().await?.map(media_frame).transpose()
 	}
 }
 
@@ -485,14 +465,10 @@ pub struct MoqMediaGroupConsumer {
 
 impl MoqMediaGroupConsumer {
 	fn new(group: moq_net::group::Consumer, container: moq_mux::catalog::hang::Container) -> Self {
+		let inner = moq_mux::container::GroupConsumer::new(group, container);
 		Self {
-			sequence: group.sequence,
-			task: Task::new(MediaGroupInner {
-				group,
-				container,
-				pending: VecDeque::new(),
-				first: true,
-			}),
+			sequence: inner.sequence(),
+			task: Task::new(MediaGroupInner { inner }),
 		}
 	}
 }
