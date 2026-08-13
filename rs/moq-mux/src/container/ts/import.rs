@@ -1236,6 +1236,11 @@ impl<E: catalog::Catalog> Stream<E> {
 /// publish payload bytes as audio, and worse, each false positive would reset the budget
 /// below and keep a stream that never really parses scanning forever.
 ///
+/// A frame joined out of a carried tail is confirmed the same way, even though the previous
+/// frame vouched for where that tail begins. What it vouched for is the boundary, not the
+/// bytes the next PES supplies, and a splice joins two unrelated halves whose seam a header
+/// alone can't see. See [`needs_confirmation`](Self::needs_confirmation).
+///
 /// The budget is what keeps that from failing silently. A PID whose frames never parse
 /// (a PMT declaring a stream type the payload doesn't match) would otherwise scan
 /// forever, publishing nothing and holding its catalog reservation open, which withholds
@@ -1247,6 +1252,9 @@ struct Resync {
 	/// Whether the next frame comes from a scan rather than the previous frame's end, and
 	/// so has to be confirmed before it can be published.
 	unconfirmed: bool,
+	/// End of stream: nothing more can arrive to confirm anything, so publish what parses
+	/// rather than drop a frame that is whole.
+	draining: bool,
 }
 
 impl Default for Resync {
@@ -1259,6 +1267,7 @@ impl Default for Resync {
 			// would publish payload as audio and take the track's sample rate and channel
 			// count from it for the life of the broadcast.
 			unconfirmed: true,
+			draining: false,
 		}
 	}
 }
@@ -1299,10 +1308,20 @@ impl Resync {
 		self.discarded > Self::BUDGET
 	}
 
-	/// Whether the frame at the current offset still needs a header at its end to confirm
-	/// it, which is true from a scan until the frame it found is published.
+	/// Whether the offset itself is one nothing has vouched for, which is true from a scan
+	/// (or the start of a stream, or a seek) until the frame it found is published.
 	fn unconfirmed(&self) -> bool {
 		self.unconfirmed
+	}
+
+	/// Whether the frame at the current offset has to be confirmed by a header where it ends
+	/// before it can be published. Beyond an unconfirmed offset, that covers a frame
+	/// beginning in a carried tail: the previous frame vouched for where the tail starts, but
+	/// nothing vouches for the bytes joined onto it, and at a splice the two halves are
+	/// unrelated. Confirming only these keeps the cost off the common path, since a frame
+	/// that begins inside a PES is whole by the time it is parsed.
+	fn needs_confirmation(&self, in_tail: bool) -> bool {
+		!self.draining && (self.unconfirmed || in_tail)
 	}
 
 	/// A frame was published, so the stream is back in sync: the next frame starts where
@@ -1330,10 +1349,11 @@ impl Resync {
 		self.discarded = 0;
 	}
 
-	/// End of stream. Nothing more can arrive to confirm the carried candidate, so take it
-	/// as-is rather than drop a frame that is whole and parses.
-	fn accept_unconfirmed(&mut self) {
+	/// End of stream. Nothing more can arrive to confirm the carried tail, so take it as-is
+	/// rather than drop a frame that is whole and parses.
+	fn drain(&mut self) {
 		self.unconfirmed = false;
+		self.draining = true;
 	}
 }
 
@@ -1439,17 +1459,19 @@ impl<E: CatalogExt> AacStream<E> {
 				in_tail = false;
 			}
 
-			// Parse the frame here, and when this offset came from a scan rather than the
-			// previous frame's end, require a header where the frame it declares ends
-			// before believing it. See `Resync`. `Err(None)` means nothing parsed badly,
-			// the candidate just isn't usable.
+			// Parse the frame here, and unless the previous frame vouched for this offset and
+			// for the bytes past it, require a header where the frame it declares ends before
+			// believing it. See `Resync`. `Err(None)` means nothing parsed badly, the
+			// candidate just isn't usable.
+			let confirm = self.resync.needs_confirmation(in_tail);
 			let parsed: Result<_, Option<anyhow::Error>> = match adts::Header::parse(&data[offset..]) {
 				Ok(header) => {
 					let end = offset + header.frame_len;
 					if end > data.len() {
 						if !self.resync.unconfirmed() {
 							// A boundary the previous frame vouched for: the frame continues in
-							// the next PES, so finish it there.
+							// the next PES, so finish it there. A joined tail waits here too, since
+							// nothing can confirm a frame the buffer doesn't hold yet.
 							break;
 						}
 						// Unconfirmed, and the length it declares outruns the buffer, so a split
@@ -1465,7 +1487,7 @@ impl<E: CatalogExt> AacStream<E> {
 							in_tail,
 						});
 						Err(None)
-					} else if !self.resync.unconfirmed() {
+					} else if !confirm {
 						Ok((header, end))
 					} else if end + adts::MIN_HEADER_LEN > data.len() {
 						// Whole, but too few bytes left to confirm it. Carry it and retry once
@@ -1623,14 +1645,14 @@ impl<E: CatalogExt> AacStream<E> {
 	}
 
 	fn finish(&mut self) -> anyhow::Result<()> {
-		// Drain a candidate held only for want of a successor to confirm it: at end of
-		// stream that successor is never coming. Only once this stream has published a
-		// frame, though. Before that nothing has vouched for any boundary, so accepting one
-		// here would hand a capture that joined mid-frame and ended immediately the same
-		// false frame that starting unconfirmed exists to reject, and build the track's
-		// config out of it.
+		// Drain a frame held only for want of a successor to confirm it: at end of stream
+		// that successor is never coming. Only once this stream has published a frame,
+		// though. Before that nothing has vouched for any boundary, so accepting one here
+		// would hand a capture that joined mid-frame and ended immediately the same false
+		// frame that starting unconfirmed exists to reject, and build the track's config out
+		// of it.
 		if !self.tail.is_empty() && self.import.is_some() {
-			self.resync.accept_unconfirmed();
+			self.resync.drain();
 			self.write(Pending::empty(), None)?;
 		}
 		// A partial frame at end of stream isn't emissible; drop it, but leave a trace for
@@ -1842,17 +1864,19 @@ impl<E: CatalogExt> LegacyStream<E> {
 				in_tail = false;
 			}
 
-			// Parse the frame here, and when this offset came from a scan rather than the
-			// previous frame's end, require a header where the frame it declares ends
-			// before believing it. See `Resync`. `Err(None)` means nothing parsed badly,
-			// the candidate just isn't usable.
+			// Parse the frame here, and unless the previous frame vouched for this offset and
+			// for the bytes past it, require a header where the frame it declares ends before
+			// believing it. See `Resync`. `Err(None)` means nothing parsed badly, the
+			// candidate just isn't usable.
+			let confirm = self.resync.needs_confirmation(in_tail);
 			let parsed: Result<_, Option<legacy::Error>> = match (self.descriptor.parse)(&data[offset..]) {
 				Ok(header) => {
 					let end = offset + header.len;
 					if end > data.len() {
 						if !self.resync.unconfirmed() {
 							// A boundary the previous frame vouched for: the frame continues in
-							// the next PES, so finish it there.
+							// the next PES, so finish it there. A joined tail waits here too, since
+							// nothing can confirm a frame the buffer doesn't hold yet.
 							break;
 						}
 						// Unconfirmed, and the length it declares outruns the buffer, so a split
@@ -1867,7 +1891,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 							in_tail,
 						});
 						Err(None)
-					} else if !self.resync.unconfirmed() {
+					} else if !confirm {
 						Ok((header, end))
 					} else if end + self.descriptor.min_header_len > data.len() {
 						// Whole, but too few bytes left to confirm it. Carry it and retry once
@@ -1995,14 +2019,14 @@ impl<E: CatalogExt> LegacyStream<E> {
 	}
 
 	fn finish(&mut self) -> anyhow::Result<()> {
-		// Drain a candidate held only for want of a successor to confirm it: at end of
-		// stream that successor is never coming. Only once this stream has published a
-		// frame, though. Before that nothing has vouched for any boundary, so accepting one
-		// here would hand a capture that joined mid-frame and ended immediately the same
-		// false frame that starting unconfirmed exists to reject, and build the track's
-		// config out of it.
+		// Drain a frame held only for want of a successor to confirm it: at end of stream
+		// that successor is never coming. Only once this stream has published a frame,
+		// though. Before that nothing has vouched for any boundary, so accepting one here
+		// would hand a capture that joined mid-frame and ended immediately the same false
+		// frame that starting unconfirmed exists to reject, and build the track's config out
+		// of it.
 		if !self.tail.is_empty() && self.import.is_some() {
-			self.resync.accept_unconfirmed();
+			self.resync.drain();
 			self.write(Pending::empty())?;
 		}
 		// A partial frame at end of stream isn't emissible verbatim; drop it, but
@@ -2817,6 +2841,88 @@ mod test {
 		);
 	}
 
+	// AAC reassembles a split frame the same way the legacy codecs do, so it splices the same
+	// way at a wrap and confirms the join for the same reason. See
+	// `legacy_confirms_a_frame_joined_out_of_a_carried_tail`.
+	#[tokio::test(start_paused = true)]
+	async fn aac_confirms_a_frame_joined_out_of_a_carried_tail() {
+		const AAC_PID: u16 = 0x0060;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// A whole frame, then one cut mid-frame by the wrap.
+		let mut payload = adts_frame(40, 0xAA);
+		payload.extend_from_slice(&adts_frame(40, 0xBB)[..25]);
+		import
+			.decode(audio_pes_packet(AAC_PID, 0, 90_000, &payload).as_slice())
+			.unwrap();
+		// The top of the file again: the tail splices onto its first frame.
+		let mut wrapped = adts_frame(40, 0xCC);
+		wrapped.extend_from_slice(&adts_frame(40, 0xDD));
+		import
+			.decode(audio_pes_packet(AAC_PID, 1, 270_000, &wrapped).as_slice())
+			.expect("a splice is not fatal");
+		import
+			.decode(audio_pes_packet(AAC_PID, 2, 450_000, &adts_frame(40, 0xEE)).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		// The track carries raw AAC, so each published frame is its ADTS body.
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.to_vec()).collect::<Vec<_>>(),
+			[0xAA, 0xCC, 0xDD, 0xEE]
+				.map(|fill| adts_frame(40, fill)[7..].to_vec())
+				.to_vec(),
+			"the splice cost more than the frame it interrupted"
+		);
+		assert_eq!(
+			frames[1].timestamp,
+			Timestamp::from_micros(3_000_000).unwrap(),
+			"not re-anchored on the new PES"
+		);
+	}
+
+	// The end-of-stream drain, for AAC. See `legacy_drains_a_joined_frame_at_end_of_stream`.
+	#[tokio::test(start_paused = true)]
+	async fn aac_drains_a_joined_frame_at_end_of_stream() {
+		const AAC_PID: u16 = 0x0060;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		let split = adts_frame(40, 0xBB);
+		let mut payload = adts_frame(40, 0xAA);
+		payload.extend_from_slice(&split[..25]);
+		import
+			.decode(audio_pes_packet(AAC_PID, 0, 90_000, &payload).as_slice())
+			.unwrap();
+		// The rest of the split frame and nothing else, so the stream ends with it joined,
+		// whole, and unconfirmed.
+		import
+			.decode(audio_pes_packet(AAC_PID, 1, 270_000, &split[25..]).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.to_vec()).collect::<Vec<_>>(),
+			[0xAA, 0xBB].map(|fill| adts_frame(40, fill)[7..].to_vec()).to_vec(),
+			"the last frame was held for a confirmation that could never arrive"
+		);
+	}
+
 	/// One whole MPEG-2 Layer II frame (8 kbps, 16 kHz, mono = 72 bytes), filled with
 	/// `fill` so frames are told apart on the wire. Small enough that two fit in the
 	/// single TS packet [`audio_pes_packet`] builds. `fill` must not be 0xFF, which a
@@ -2899,32 +3005,113 @@ mod test {
 		import
 			.decode(audio_pes_packet(MP2_PID, 1, 270_000, &wrapped).as_slice())
 			.expect("a splice is not fatal");
-		// The recovered frame is only published once the frame after it confirms the
-		// boundary, so the stream has to keep running past the wrap.
+		// One more PES to show the wrap costs nothing after it.
 		import
 			.decode(audio_pes_packet(MP2_PID, 2, 450_000, &mp2_frame(0xEE)).as_slice())
 			.unwrap();
 		import.finish().unwrap();
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
-		// The tail still carries an intact header claiming 72 bytes, and it sits at a
-		// boundary the previous frame vouched for, so the splice itself is published as one
-		// frame of mixed bytes; the demuxer only learns sync was lost at the frame after it.
-		// Catching that too would mean confirming every frame, not just scanned ones.
-		assert_eq!(frames.len(), 3, "the stream recovers after the splice");
+		// The stale tail still carries an intact header claiming 72 bytes, so what gives the
+		// splice away is the confirmation: the frame it declares ends inside the wrapped
+		// frame rather than at a header. The tail is scanned past, not published.
 		assert_eq!(
-			frames[1].payload.as_ref(),
-			&mp2_frame(0xDD)[..],
-			"resynced onto the next whole frame"
+			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
+			vec![mp2_frame(0xCC), mp2_frame(0xDD), mp2_frame(0xEE)],
+			"the splice was published as audio instead of scanned past"
 		);
-		// Re-anchored on PES 2 (270000 ticks = 3 s), give or take the frame the splice ate,
-		// rather than inheriting the stale tail's 1 s. At a real loop wrap that inherited
-		// error is the whole file's duration, not a frame.
-		assert!(
-			(Timestamp::from_micros(3_000_000).unwrap()..Timestamp::from_micros(3_200_000).unwrap())
-				.contains(&frames[1].timestamp),
-			"not re-anchored on the new PES: {:?}",
-			frames[1].timestamp
+		// Re-anchored on PES 2 (270000 ticks = 3 s) rather than inheriting the stale tail's
+		// 1 s. At a real loop wrap that inherited error is the whole file's duration, not a
+		// frame.
+		assert_eq!(
+			frames[0].timestamp,
+			Timestamp::from_micros(3_000_000).unwrap(),
+			"not re-anchored on the new PES"
+		);
+	}
+
+	// The same splice one frame later, which is the shape a real wrap takes: the stream has
+	// already published a frame, so the tail sits at a boundary the previous frame vouched
+	// for. What it vouched for is where the tail begins, not the unrelated bytes the next PES
+	// joins onto it, so the join still has to be confirmed. Without that this published one
+	// frame of pre-wrap and post-wrap bytes spliced together, and swallowed the real frame
+	// underneath it (#2802).
+	#[tokio::test(start_paused = true)]
+	async fn legacy_confirms_a_frame_joined_out_of_a_carried_tail() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// A whole frame, then one cut mid-frame by the wrap. The first vouches for where the
+		// tail begins, which is what made the join look trustworthy.
+		let mut payload = mp2_frame(0xAA);
+		payload.extend_from_slice(&mp2_frame(0xBB)[..40]);
+		import
+			.decode(audio_pes_packet(MP2_PID, 0, 90_000, &payload).as_slice())
+			.unwrap();
+		// The top of the file again: the tail splices onto its first frame.
+		let mut wrapped = mp2_frame(0xCC);
+		wrapped.extend_from_slice(&mp2_frame(0xDD));
+		import
+			.decode(audio_pes_packet(MP2_PID, 1, 270_000, &wrapped).as_slice())
+			.expect("a splice is not fatal");
+		import
+			.decode(audio_pes_packet(MP2_PID, 2, 450_000, &mp2_frame(0xEE)).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
+			vec![mp2_frame(0xAA), mp2_frame(0xCC), mp2_frame(0xDD), mp2_frame(0xEE)],
+			"the splice cost more than the frame it interrupted"
+		);
+		// The wrapped frame keeps the new PES's PTS, not the pre-wrap tail's.
+		assert_eq!(
+			frames[1].timestamp,
+			Timestamp::from_micros(3_000_000).unwrap(),
+			"not re-anchored on the new PES"
+		);
+	}
+
+	// Confirming a joined frame means holding it when the buffer ends too soon after it to
+	// hold a header. At end of stream that header is never coming, so the drain publishes it
+	// anyway rather than dropping a frame that is whole and parses.
+	#[tokio::test(start_paused = true)]
+	async fn legacy_drains_a_joined_frame_at_end_of_stream() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		let mut payload = mp2_frame(0xAA);
+		payload.extend_from_slice(&mp2_frame(0xBB)[..40]);
+		import
+			.decode(audio_pes_packet(MP2_PID, 0, 90_000, &payload).as_slice())
+			.unwrap();
+		// The rest of the split frame and nothing else, so the stream ends with it joined,
+		// whole, and unconfirmed.
+		import
+			.decode(audio_pes_packet(MP2_PID, 1, 270_000, &mp2_frame(0xBB)[40..]).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
+			vec![mp2_frame(0xAA), mp2_frame(0xBB)],
+			"the last frame was held for a confirmation that could never arrive"
 		);
 	}
 
