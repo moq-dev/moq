@@ -308,9 +308,14 @@ impl Server {
 		self.with_subscriber(origin).serve().await
 	}
 
-	/// Shared accept loop for [`serve_publish`](Self::serve_publish) /
-	/// [`serve_consume`](Self::serve_consume); the origin is already attached.
-	async fn serve(mut self) -> crate::Result<()> {
+	/// Accept sessions until the listener stops, serving whatever directions were
+	/// already attached by [`with_publisher`](Self::with_publisher) /
+	/// [`with_subscriber`](Self::with_subscriber).
+	///
+	/// [`serve_publish`](Self::serve_publish) and [`serve_consume`](Self::serve_consume)
+	/// are the one-direction shorthands; call this directly to serve both, so inbound
+	/// sessions can subscribe to the origin and publish into it over one connection.
+	pub async fn serve(mut self) -> crate::Result<()> {
 		if let Ok(addr) = self.local_addr() {
 			tracing::info!(%addr, "listening");
 		}

@@ -1,11 +1,12 @@
 //! The unified moq-cli argument surface.
 //!
-//! Grammar: `moq <MoQ side> <import|export> <endpoint> [endpoint opts]`, plus
-//! `moq <MoQ side> play` for native playback.
+//! Grammar: `moq <MoQ side> <stage> [-- <stage>]...`, where a stage is
+//! `<import|export> <endpoint> [endpoint opts]`, plus `moq <MoQ side> play` for
+//! native playback.
 //!
 //! - The MoQ side (`--client-connect` / `--server-bind`, both optional, at least
 //!   one) attaches the shared Origin to the MoQ network, and comes before the
-//!   verb. Both may be given: dial a relay *and* accept incoming sessions.
+//!   first stage. Both may be given: dial a relay *and* accept incoming sessions.
 //! - `import` routes media INTO MoQ from one source; `export` routes it OUT to
 //!   one sink. The verb fixes the data direction (and thus, for the
 //!   bidirectional gateways, whether `--connect`/`--listen` push or pull).
@@ -15,9 +16,15 @@
 //!   conditional on the subcommand.
 //! - The endpoint is one subcommand: a container format (`ts`, `fmp4`, ... read
 //!   from stdin on import, written to stdout on export) or a gateway (`hls`,
-//!   `rtmp`, `srt`, `rtc`). Exactly one per invocation, so "which endpoint" is
+//!   `rtmp`, `srt`, `rtc`). Exactly one per stage, so "which endpoint" is
 //!   unambiguous and there's no silently-ignored flag.
+//! - `--` starts another stage on the same Origin and the same MoQ attachment, so
+//!   one process can bridge several broadcasts (or both directions at once). clap
+//!   can't express a repeated subcommand, so [`Invocation`] splits argv on `--`
+//!   and runs each chunk through a real parser: every stage keeps full validation
+//!   and its own `--help`.
 
+use std::ffi::{OsStr, OsString};
 use std::time::Duration;
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
@@ -26,9 +33,13 @@ use hang::moq_net;
 use crate::publish::PublishFormat;
 use crate::subscribe::{CatalogFormatArg, SubscribeFormat};
 
-/// moq-cli: a media router that wires one endpoint onto a shared MoQ Origin.
+/// moq-cli: a media router that wires endpoints onto a shared MoQ Origin.
+///
+/// The globals plus the first stage. Later stages are [`Stage`]s.
 #[derive(Parser, Clone)]
 #[command(name = "moq", version = env!("VERSION"))]
+#[command(after_help = "Separate additional import/export stages with `--`; they share one \
+                        connection and one Origin.")]
 pub struct Cli {
 	/// Logging configuration.
 	#[command(flatten)]
@@ -43,6 +54,86 @@ pub struct Cli {
 	pub command: Command,
 }
 
+/// A stage after the first: the verb and endpoint, without the globals.
+///
+/// `no_binary_name` because the chunk after a `--` starts at the verb, and the
+/// globals are deliberately absent: `--client-connect` past the first stage would
+/// read like it scopes that stage, when there is only ever one connection.
+#[derive(Parser, Clone)]
+#[command(name = "moq", no_binary_name = true)]
+pub struct Stage {
+	/// The verb and endpoint.
+	#[command(subcommand)]
+	pub command: Command,
+}
+
+/// The whole command line: the globals plus one or more `--`-separated stages.
+pub struct Invocation {
+	/// Logging configuration.
+	pub log: moq_native::Log,
+
+	/// The MoQ attachment, shared by every stage.
+	pub moq: MoqSide,
+
+	/// The stages, in the order given. Never empty.
+	pub stages: Vec<Command>,
+}
+
+impl Invocation {
+	/// Parse the process arguments, exiting with clap's own message on error.
+	pub fn parse() -> Self {
+		match Self::try_parse_from(std::env::args_os()) {
+			Ok(parsed) => parsed,
+			Err(err) => err.exit(),
+		}
+	}
+
+	/// Split `argv` on `--` and run each chunk through a real parser.
+	pub fn try_parse_from<I, T>(argv: I) -> Result<Self, clap::Error>
+	where
+		I: IntoIterator<Item = T>,
+		T: Into<OsString>,
+	{
+		let argv: Vec<OsString> = argv.into_iter().map(Into::into).collect();
+		let mut chunks = argv.split(|arg| arg == OsStr::new("--"));
+
+		// `split` always yields at least one chunk, even for an empty argv; clap then
+		// reports the missing subcommand as usual.
+		let cli = Cli::try_parse_from(chunks.next().unwrap_or_default())?;
+
+		let mut stages = vec![cli.command];
+		for chunk in chunks {
+			stages.push(Stage::try_parse_from(chunk)?.command);
+		}
+
+		Ok(Self {
+			log: cli.log,
+			moq: cli.moq,
+			stages,
+		})
+	}
+
+	/// Reject the verb combinations a single process can't run.
+	///
+	/// Only `import` and `export` share an Origin. The rest own the process: `play`
+	/// drives a window on the main thread, `transcode` builds its own Origin, and
+	/// `token` / `devices` never touch the network at all.
+	pub fn validate(&self) -> anyhow::Result<()> {
+		if self.stages.len() == 1 {
+			return Ok(());
+		}
+
+		if let Some(command) = self.stages.iter().find(|command| !command.is_stageable()) {
+			anyhow::bail!(
+				"`{}` must be the only verb; it can't share a process with another `--` stage",
+				command.name()
+			);
+		}
+
+		Ok(())
+	}
+}
+
 /// The MoQ attachment. At least one of `--client-connect` / `--server-bind`;
 /// both may be given at once.
 ///
@@ -52,10 +143,12 @@ pub struct Cli {
 #[derive(Args, Clone)]
 #[command(group = ArgGroup::new("moq").multiple(true).args(["client-connect", "server-bind"]))]
 pub struct MoqSide {
-	/// The broadcast name. Optional for the point endpoints (stdin/stdout, HLS
-	/// import, and the `--connect` dials), which default to the root broadcast at
-	/// the connection path; required by the `--listen` endpoints and `hls export`,
-	/// which bridge one named broadcast.
+	/// The default broadcast name for every stage that doesn't name its own.
+	///
+	/// Optional for the point endpoints (stdin/stdout, HLS import, and the
+	/// `--connect` dials), which default to the root broadcast at the connection
+	/// path; required by the `--listen` endpoints and `hls export`, which bridge one
+	/// named broadcast.
 	#[arg(long, alias = "name", help_heading = "MoQ")]
 	pub broadcast: Option<String>,
 
@@ -153,11 +246,55 @@ pub enum Command {
 	Devices,
 }
 
+impl Command {
+	/// The verb as typed, for error messages.
+	pub fn name(&self) -> &'static str {
+		match self {
+			Self::Import(_) => "import",
+			Self::Export(_) => "export",
+			#[cfg(feature = "play")]
+			Self::Play(_) => "play",
+			#[cfg(feature = "transcode")]
+			Self::Transcode(_) => "transcode",
+			Self::Token(_) => "token",
+			#[cfg(feature = "capture")]
+			Self::Devices => "devices",
+		}
+	}
+
+	/// Whether this verb can share a process (and an Origin) with other stages.
+	pub fn is_stageable(&self) -> bool {
+		matches!(self, Self::Import(_) | Self::Export(_))
+	}
+
+	/// The broadcast this stage names, falling back to the process-wide `--broadcast`.
+	///
+	/// Empty means the root broadcast: MoQ names each broadcast by the connection
+	/// path plus any explicit `--broadcast`, so an unset name is the connection path
+	/// itself.
+	pub fn broadcast(&self, moq: &MoqSide) -> String {
+		let stage = match self {
+			Self::Import(import) => import.broadcast.as_deref(),
+			Self::Export(export) => export.broadcast.as_deref(),
+			_ => None,
+		};
+
+		stage.or(moq.broadcast.as_deref()).unwrap_or_default().to_string()
+	}
+}
+
 // ------------------------------------------------------------------ import
 
 /// import = one source -> MoQ.
 #[derive(Args, Clone)]
 pub struct Import {
+	/// The broadcast this stage publishes, overriding the process-wide `--broadcast`.
+	///
+	/// Required when a process imports more than one broadcast; a single stage can
+	/// keep naming it before the verb.
+	#[arg(long, alias = "name")]
+	pub broadcast: Option<String>,
+
 	/// How long relays keep a non-latest group of the published media tracks fetchable,
 	/// e.g. "30s" or "5s". Defaults to hang's 30s.
 	///
@@ -236,6 +373,13 @@ impl ImportSource {
 /// export = MoQ -> one sink.
 #[derive(Args, Clone)]
 pub struct Export {
+	/// The broadcast this stage subscribes to, overriding the process-wide `--broadcast`.
+	///
+	/// Required when a process exports more than one broadcast; a single stage can
+	/// keep naming it before the verb.
+	#[arg(long, alias = "name")]
+	pub broadcast: Option<String>,
+
 	/// Catalog format to read for track discovery (default: detect from the broadcast suffix).
 	#[arg(long = "catalog-format")]
 	pub catalog_format: Option<CatalogFormatArg>,
@@ -327,6 +471,160 @@ mod tests {
 	#[test]
 	fn valid() {
 		Cli::command().debug_assert();
+	}
+
+	/// The `Stage` parser is a second entry point into the same command tree, so it
+	/// needs the same conflict check as [`Cli`].
+	#[test]
+	fn valid_stage() {
+		Stage::command().debug_assert();
+	}
+
+	#[test]
+	fn single_stage() {
+		let cli = Invocation::try_parse_from(["moq", "--client-connect", "http://relay", "import", "ts"]).unwrap();
+		assert_eq!(cli.stages.len(), 1);
+		assert_eq!(cli.stages[0].name(), "import");
+		assert!(cli.validate().is_ok());
+	}
+
+	/// The grammar clap can't express: one connection, several endpoints.
+	#[test]
+	fn multiple_stages() {
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--client-connect",
+			"http://localhost:4444/event",
+			"import",
+			"--broadcast",
+			"cam1.hang",
+			"rtmp",
+			"--listen",
+			"0.0.0.0:1935",
+			"--",
+			"import",
+			"--broadcast",
+			"cam2.hang",
+			"rtmp",
+			"--listen",
+			"0.0.0.0:1936",
+			"--",
+			"export",
+			"--broadcast",
+			"cam1.hang",
+			"hls",
+			"--listen",
+			"0.0.0.0:8080",
+		])
+		.unwrap();
+
+		assert!(cli.validate().is_ok());
+		assert_eq!(cli.stages.len(), 3);
+
+		// The globals are read once, from the first chunk, and shared by every stage.
+		assert_eq!(
+			cli.moq.client.connect.as_ref().map(ToString::to_string).as_deref(),
+			Some("http://localhost:4444/event")
+		);
+
+		let names: Vec<String> = cli.stages.iter().map(|stage| stage.broadcast(&cli.moq)).collect();
+		assert_eq!(names, ["cam1.hang", "cam2.hang", "cam1.hang"]);
+		assert_eq!(cli.stages[2].name(), "export");
+	}
+
+	/// A stage without its own `--broadcast` falls back to the process-wide one, so
+	/// every single-stage invocation keeps naming the broadcast before the verb.
+	#[test]
+	fn broadcast_falls_back_to_the_global() {
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--client-connect",
+			"http://relay",
+			"--broadcast",
+			"room.hang",
+			"import",
+			"ts",
+			"--",
+			"export",
+			"--broadcast",
+			"other.hang",
+			"fmp4",
+		])
+		.unwrap();
+
+		assert_eq!(cli.stages[0].broadcast(&cli.moq), "room.hang");
+		assert_eq!(cli.stages[1].broadcast(&cli.moq), "other.hang");
+	}
+
+	/// An unnamed broadcast is the root one at the connection path, not an error.
+	#[test]
+	fn broadcast_defaults_to_root() {
+		let cli = Invocation::try_parse_from(["moq", "--client-connect", "http://relay", "import", "ts"]).unwrap();
+		assert_eq!(cli.stages[0].broadcast(&cli.moq), "");
+	}
+
+	/// Only import/export share an Origin; the rest own the process.
+	#[test]
+	fn rejects_unstageable_verbs() {
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--client-connect",
+			"http://relay",
+			"import",
+			"ts",
+			"--",
+			"token",
+			"generate",
+			"--algorithm",
+			"ES256",
+		])
+		.unwrap();
+
+		let err = cli.validate().unwrap_err().to_string();
+		assert!(err.contains("token"), "{err}");
+	}
+
+	/// Each stage is parsed by a real clap parser, so a typo past the first `--` is
+	/// still a parse error rather than something swallowed as a positional.
+	#[test]
+	fn stage_errors_are_parse_errors() {
+		let Err(err) = Invocation::try_parse_from([
+			"moq",
+			"--client-connect",
+			"http://relay",
+			"import",
+			"ts",
+			"--",
+			"import",
+			"rtmp",
+			"--bogus",
+		]) else {
+			panic!("expected a parse error")
+		};
+
+		assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+	}
+
+	/// The globals belong to the invocation, not a stage: there is only ever one
+	/// connection, so accepting `--client-connect` again would be a lie.
+	#[test]
+	fn stages_reject_globals() {
+		let Err(err) = Invocation::try_parse_from([
+			"moq",
+			"--client-connect",
+			"http://relay",
+			"import",
+			"ts",
+			"--",
+			"--client-connect",
+			"http://other",
+			"import",
+			"fmp4",
+		]) else {
+			panic!("expected a parse error")
+		};
+
+		assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
 	}
 
 	#[test]

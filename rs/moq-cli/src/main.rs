@@ -1,8 +1,8 @@
-//! moq-cli: a media router that wires one endpoint onto a shared MoQ Origin.
+//! moq-cli: a media router that wires endpoints onto a shared MoQ Origin.
 //!
 //! The binary is `moq`. See [`args`] for the `import`/`export`/`play` command
 //! grammar; this module orchestrates the shared Origin and spawns the MoQ side
-//! plus the selected endpoint.
+//! plus every stage's endpoint.
 
 mod args;
 #[cfg(feature = "capture")]
@@ -20,13 +20,12 @@ mod subscribe;
 mod transcode;
 mod web;
 
-use args::{Cli, Command, Export, ExportSink, Import, ImportSource, MoqSide};
+use args::{Command, Export, ExportSink, Import, ImportSource, Invocation, MoqSide};
 use hang::moq_net;
 use publish::Publish;
 use subscribe::{Subscribe, SubscribeArgs};
 
 use anyhow::Context;
-use clap::Parser;
 use tokio::task::JoinSet;
 
 #[cfg(feature = "jemalloc")]
@@ -71,23 +70,28 @@ async fn main() -> anyhow::Result<()> {
 		.install_default()
 		.expect("failed to install default crypto provider");
 
-	let cli = Cli::parse();
+	let cli = Invocation::parse();
 	cli.log.init()?;
+	cli.validate()?;
 
 	// The local verbs never touch the network, so answer them before binding any
-	// transport. Each arm returns, so the move out of `cli.command` can't reach the
-	// code below.
-	match cli.command {
-		Command::Token(token) => {
-			cli.moq.reject("token")?;
-			return token.run();
+	// transport. `validate` has already refused to pair them with another stage, so
+	// the single stage here is the whole invocation.
+	let mut stages = cli.stages;
+	if stages.len() == 1 {
+		match stages.remove(0) {
+			Command::Token(token) => {
+				cli.moq.reject("token")?;
+				return token.run();
+			}
+			#[cfg(feature = "capture")]
+			Command::Devices => {
+				cli.moq.reject("devices")?;
+				return devices::run().await;
+			}
+			// Put it back: it needs the transport bound below.
+			other => stages.push(other),
 		}
-		#[cfg(feature = "capture")]
-		Command::Devices => {
-			cli.moq.reject("devices")?;
-			return devices::run().await;
-		}
-		_ => {}
 	}
 
 	cli.moq.validate()?;
@@ -103,17 +107,19 @@ async fn main() -> anyhow::Result<()> {
 	let jemalloc = std::future::pending::<anyhow::Result<()>>();
 
 	let run = async move {
-		match cli.command {
-			Command::Import(import) => run_import(cli.moq, import, net).await,
-			Command::Export(export) => run_export(cli.moq, export, net).await,
-			#[cfg(feature = "play")]
-			Command::Play(args) => run_play(cli.moq, args, net).await,
-			#[cfg(feature = "transcode")]
-			Command::Transcode(args) => transcode::run(cli.moq, args, net).await,
-			Command::Token(_) => unreachable!("handled above, before the transport is bound"),
-			#[cfg(feature = "capture")]
-			Command::Devices => unreachable!("handled above, before the transport is bound"),
+		// The verbs that own the process were refused alongside another stage, so a
+		// lone one of those runs by itself; everything else is a list of stages.
+		if stages.len() == 1 && !stages[0].is_stageable() {
+			match stages.remove(0) {
+				#[cfg(feature = "play")]
+				Command::Play(args) => return run_play(cli.moq, args, net).await,
+				#[cfg(feature = "transcode")]
+				Command::Transcode(args) => return transcode::run(cli.moq, args, net).await,
+				_ => unreachable!("the local verbs returned before the transport was bound"),
+			}
 		}
+
+		run_stages(cli.moq, stages, net).await
 	};
 
 	tokio::select! {
@@ -122,29 +128,85 @@ async fn main() -> anyhow::Result<()> {
 	}
 }
 
-/// Attach the MoQ side so it fills the shared Origin: dial a relay, accept
-/// inbound sessions, or both. Shared by every verb that consumes.
-fn spawn_moq_consume(
+/// Which directions the stages need on the shared MoQ attachment.
+#[derive(Clone, Copy, Default)]
+struct Directions {
+	/// Any `import`: the Origin is published outward.
+	publish: bool,
+	/// Any `export` or `play`: the Origin is filled from the network.
+	consume: bool,
+}
+
+impl Directions {
+	/// The union of what the stages need, so one attachment serves them all.
+	fn of(stages: &[Command]) -> Self {
+		Self {
+			publish: stages.iter().any(|stage| matches!(stage, Command::Import(_))),
+			consume: stages.iter().any(|stage| matches!(stage, Command::Export(_))),
+		}
+	}
+}
+
+/// Attach the shared Origin to the MoQ network: dial a relay, accept inbound
+/// sessions, or both.
+///
+/// An invocation that both imports and exports attaches both directions to the
+/// same session rather than opening two, which is how a relay peers with another
+/// relay. Loops are the network's problem, not ours: an announcement carries the
+/// hops it crossed, and our own origin id is one of them, so a broadcast we
+/// publish is never announced back to us.
+///
+/// Returns the uplink's bandwidth estimate, for the sources that can encode to
+/// fit it. Only an outbound client has one: a `--server-bind` publisher's sessions
+/// are inbound and never surfaced here, so it stays `None` and those sources
+/// encode at their configured rate.
+fn spawn_moq(
 	moq: &MoqSide,
 	net: &Net,
 	origin: &moq_net::origin::Producer,
+	directions: Directions,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
-) -> anyhow::Result<()> {
-	if moq.client.connect.is_some()
-		&& let Some(reconnect) = net.client(moq.client.clone())?.consume(origin.clone())
-	{
+) -> anyhow::Result<Option<moq_net::bandwidth::Consumer>> {
+	let mut bandwidth = None;
+
+	if let Some(url) = moq.client.connect.clone() {
+		let mut client = net.client(moq.client.clone())?;
+		if directions.publish {
+			client = client.with_publisher(origin.consume());
+		}
+		if directions.consume {
+			// Matching `Client::consume`: broadcasts fed by these sessions linger across a
+			// session drop for as long as the reconnect loop keeps retrying, so a relay
+			// restart is a bounded gap rather than a teardown.
+			let linger = origin.clone().with_linger(moq.client.backoff.linger());
+			client = client.with_subscriber(linger);
+		}
+
+		let reconnect = client.reconnect(url);
 		moq::notify_ready();
+		// Read before the handle moves into the task. This consumer is persistent: it
+		// survives reconnects, reading `None` while down, so it can be wired up before
+		// anything connects.
+		bandwidth = Some(reconnect.send_bandwidth());
 		tasks.spawn(async move { Ok(reconnect.closed().await?) });
 	}
+
 	if let Some(web_bind) = moq.server.bind.clone() {
-		let server = net.server(moq.server.clone())?;
+		let mut server = net.server(moq.server.clone())?;
+		if directions.publish {
+			server = server.with_publisher(origin.consume());
+		}
+		if directions.consume {
+			server = server.with_subscriber(origin.clone());
+		}
+
 		let certificates = server.certificates();
 		moq::notify_ready();
-		let origin = origin.clone();
-		tasks.spawn(async move { Ok(server.serve_consume(origin).await?) });
+		tasks.spawn(async move { Ok(server.serve().await?) });
 		tasks.spawn(async move { web::run_web(&web_bind, certificates).await });
 	}
-	Ok(())
+
+	Ok(bandwidth)
 }
 
 /// Fill the shared Origin from MoQ, then play one broadcast locally.
@@ -161,21 +223,115 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 	let name = moq.broadcast.clone().unwrap_or_default();
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
-	spawn_moq_consume(&moq, &net, &origin, &mut tasks)?;
+	let directions = Directions {
+		consume: true,
+		..Default::default()
+	};
+	spawn_moq(&moq, &net, &origin, directions, &mut tasks)?;
 
 	play::run(origin.consume(), name, args, tasks)
 }
 
-/// Route one source INTO the shared Origin, exposing it to the MoQ network.
-async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()> {
+/// Run every stage over one Origin and one MoQ attachment.
+///
+/// Stages are independent: each names its own broadcast and owns its own endpoint,
+/// and the first to finish (stdin EOF, Ctrl-C, or an error) ends the process.
+async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Result<()> {
 	let origin = moq.origin()?;
-	// The broadcast defaults to "": MoQ names each broadcast by the connection
-	// path plus any explicit `--broadcast`, so an unset name is the root broadcast.
-	let name = moq.broadcast.clone().unwrap_or_default();
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
-	// The stdin/capture pipeline runs on this task instead of the JoinSet: the
-	// platform capture stream is not Send, so its future cannot be spawned.
-	let mut local: Option<Publish> = None;
+	// The stdin/capture pipelines run on this thread instead of the JoinSet: the
+	// platform capture stream is not Send, so their futures cannot be spawned.
+	let mut locals: Vec<Publish> = Vec::new();
+
+	let bandwidth = spawn_moq(&moq, &net, &origin, Directions::of(&stages), &mut tasks)?;
+
+	// stdin and stdout are one resource each, so two stages can't share them.
+	let mut stdin = None;
+	let mut stdout = None;
+
+	for stage in stages {
+		let name = stage.broadcast(&moq);
+		match stage {
+			Command::Import(import) => {
+				if import.source.stdin_format().is_some() {
+					claim("stdin", &mut stdin, &name)?;
+				}
+				if let Some(publish) = spawn_import(&origin, import, name, bandwidth.clone(), &mut tasks)? {
+					locals.push(publish);
+				}
+			}
+			Command::Export(export) => {
+				if export.sink.stdout().is_some() {
+					claim("stdout", &mut stdout, &name)?;
+				}
+				spawn_export(&origin, export, name, &mut tasks)?;
+			}
+			other => unreachable!("`{}` is not a stage", other.name()),
+		}
+	}
+
+	if locals.is_empty() {
+		return drive(tasks).await;
+	}
+
+	// Report the first local pipeline to finish, so stdin EOF ends the process just
+	// like a spawned stage returning does.
+	let (done, mut first) = tokio::sync::mpsc::channel(1);
+	let local = tokio::task::LocalSet::new();
+	for publish in locals {
+		let done = done.clone();
+		local.spawn_local(async move {
+			let _ = done.send(publish.run().await).await;
+		});
+	}
+	drop(done);
+
+	local
+		.run_until(async move {
+			tokio::select! {
+				res = drive(tasks) => res,
+				// `None` means every local pipeline ended without reporting, which a
+				// completed one never does: the task panicked, and tokio caught it.
+				res = first.recv() => res.unwrap_or_else(|| Err(anyhow::anyhow!("pipeline panicked"))),
+			}
+		})
+		.await
+}
+
+/// Refuse a second stage on a stream there is only one of.
+fn claim(stream: &str, held: &mut Option<String>, name: &str) -> anyhow::Result<()> {
+	if let Some(first) = held {
+		anyhow::bail!(
+			"only one stage can use {stream}, but both `{}` and `{}` do",
+			display_name(first),
+			display_name(name),
+		);
+	}
+
+	*held = Some(name.to_string());
+	Ok(())
+}
+
+/// The broadcast name for an error message; the root broadcast has none.
+fn display_name(name: &str) -> &str {
+	if name.is_empty() { "<root>" } else { name }
+}
+
+/// Route one stage's source INTO the shared Origin, exposing it to the MoQ network.
+///
+/// Returns the pipeline that has to run on the caller's thread, for the sources
+/// that have one (the stdin containers and capture).
+fn spawn_import(
+	origin: &moq_net::origin::Producer,
+	import: Import,
+	name: String,
+	bandwidth: Option<moq_net::bandwidth::Consumer>,
+	tasks: &mut JoinSet<anyhow::Result<()>>,
+) -> anyhow::Result<Option<Publish>> {
+	// Capture is the only source that reads the bandwidth estimate, so without that
+	// feature nothing does.
+	#[cfg(not(feature = "capture"))]
+	let _ = bandwidth;
 
 	if let ImportSource::Rtc(rtc) = &import.source
 		&& rtc.connect.is_some()
@@ -191,38 +347,8 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 		 formats, hls, and capture"
 	);
 
-	// The uplink's bandwidth estimate, for sources that can encode to fit it. Only
-	// an outbound client has one: a `--server-bind` publisher's sessions are
-	// inbound and never surfaced here, so it stays `None` and those sources encode
-	// at their configured rate. Capture is the only such source today, so without
-	// that feature nothing reads this.
-	#[cfg(feature = "capture")]
-	let mut send_bandwidth = None;
+	let mut local = None;
 
-	// MoQ side: publish the Origin outward.
-	if moq.client.connect.is_some()
-		&& let Some(reconnect) = net.client(moq.client.clone())?.publish(origin.consume())
-	{
-		moq::notify_ready();
-		// Read before the handle moves into the task. This consumer is
-		// persistent: it survives reconnects, reading `None` while down, so it
-		// can be wired up before anything connects.
-		#[cfg(feature = "capture")]
-		{
-			send_bandwidth = Some(reconnect.send_bandwidth());
-		}
-		tasks.spawn(async move { Ok(reconnect.closed().await?) });
-	}
-	if let Some(web_bind) = moq.server.bind.clone() {
-		let server = net.server(moq.server.clone())?;
-		let certificates = server.certificates();
-		moq::notify_ready();
-		let origin = origin.consume();
-		tasks.spawn(async move { Ok(server.serve_publish(origin).await?) });
-		tasks.spawn(async move { web::run_web(&web_bind, certificates).await });
-	}
-
-	// Foreign side: the single source.
 	if let Some(format) = import.source.stdin_format() {
 		warn_if_missing_format(&name);
 		let broadcast = origin
@@ -274,44 +400,28 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 				let broadcast = origin
 					.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
 					.context("failed to create broadcast")?;
-				local = Some(Publish::capture(
-					broadcast,
-					&capture,
-					send_bandwidth,
-					import.latency_max,
-				)?);
+				local = Some(Publish::capture(broadcast, &capture, bandwidth, import.latency_max)?);
 			}
 			_ => unreachable!("container formats are handled by stdin_format above"),
 		}
 	}
 
-	match local {
-		Some(publish) => tokio::select! {
-			res = publish.run() => res,
-			res = drive(tasks) => res,
-		},
-		None => drive(tasks).await,
-	}
+	Ok(local)
 }
 
-/// Route the shared Origin OUT to one sink, filling it from the MoQ network.
-async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()> {
-	let origin = moq.origin()?;
-	// The broadcast defaults to "": MoQ names each broadcast by the connection
-	// path plus any explicit `--broadcast`, so an unset name is the root broadcast.
-	let name = moq.broadcast.clone().unwrap_or_default();
-	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
-
+/// Route the shared Origin OUT to one stage's sink, filling it from the MoQ network.
+fn spawn_export(
+	origin: &moq_net::origin::Producer,
+	export: Export,
+	name: String,
+	tasks: &mut JoinSet<anyhow::Result<()>>,
+) -> anyhow::Result<()> {
 	if let ExportSink::Rtc(rtc) = &export.sink
 		&& rtc.connect.is_some()
 	{
 		reject_listener_cors(&rtc.cors, "export rtc")?;
 	}
 
-	// MoQ side: fill the Origin.
-	spawn_moq_consume(&moq, &net, &origin, &mut tasks)?;
-
-	// Foreign side: the single sink.
 	if let Some((format, max_latency, fragment_duration)) = export.sink.stdout() {
 		let args = SubscribeArgs {
 			format,
@@ -363,7 +473,7 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 		}
 	}
 
-	drive(tasks).await
+	Ok(())
 }
 
 /// Subscribe to `name` from the Origin and write it to stdout.
