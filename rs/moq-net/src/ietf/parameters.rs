@@ -515,36 +515,7 @@ macro_rules! decode_params {
 						continue;
 					}
 				)*
-
-				// A parameter this message doesn't handle. Through draft-16 the
-				// Key-Value-Pair shape is self-describing (even key = varint value,
-				// odd key = length-prefixed bytes), and parameters that appear in an
-				// unexpected message type MUST be ignored (moq-transport Section
-				// 9.2.2) — faulting them tears down interop with spec-compliant
-				// peers: Cloudflare's draft-16 relays send LARGEST_OBJECT (0x9) in
-				// SUBSCRIBE_OK, which used to kill every subscribe with content as
-				// `InvalidValue`. From draft-17 on this implementation encodes
-				// parameter values type-specifically (see `Param`), so an unknown
-				// value's length is unknowable and rejecting stays the only option.
-				match _version {
-					$crate::ietf::Version::Draft14 | $crate::ietf::Version::Draft15 | $crate::ietf::Version::Draft16 => {
-						if _key % 2 == 0 {
-							let _: u64 = <u64 as $crate::coding::Decode<$crate::ietf::Version>>::decode($r, _version)?;
-						} else {
-							let _len =
-								<u64 as $crate::coding::Decode<$crate::ietf::Version>>::decode($r, _version)? as usize;
-							// Mirrors MAX_KVP_VALUE_LEN; the const is private to the defining module.
-							if _len > (1 << 16) - 1 {
-								return Err($crate::coding::DecodeError::BoundsExceeded);
-							}
-							if ::bytes::Buf::remaining($r) < _len {
-								return Err($crate::coding::DecodeError::Short);
-							}
-							::bytes::Buf::advance($r, _len);
-						}
-					}
-					_ => return Err($crate::coding::DecodeError::InvalidValue),
-				}
+				return Err($crate::coding::DecodeError::InvalidValue);
 			}
 		}
 
@@ -714,52 +685,6 @@ mod tests {
 				|r, v| {
 					decode_params!(r, v, 0x09 => val: Option<Location>);
 					assert_eq!(val, Some(Location { group: 5, object: 3 }));
-					Ok(())
-				},
-			);
-		}
-	}
-
-	#[test]
-	fn test_unknown_params_are_skipped() {
-		// Parameters a message doesn't define MUST be ignored, not faulted
-		// (moq-transport Section 9.2.2). Skipping goes by Key-Value-Pair shape:
-		// odd keys are length-prefixed, even keys are a bare varint. Only
-		// through draft-16: from draft-17 on values are encoded
-		// type-specifically, so unknown ones cannot be skipped (see
-		// test_param_unknown_rejected_v17_plus).
-		let loc = Location { group: 5, object: 0 };
-		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
-			// Unknown ODD key (0x09) before a known one.
-			round_trip_params(
-				version,
-				|w, v| {
-					encode_params!(w, v,
-						0x09 => loc.clone(),
-						0x20 => 200u8,
-					);
-					Ok(())
-				},
-				|r, v| {
-					decode_params!(r, v, 0x20 => val: Option<u8>);
-					assert_eq!(val, Some(200));
-					Ok(())
-				},
-			);
-
-			// Unknown EVEN key (0x20) before a known one.
-			round_trip_params(
-				version,
-				|w, v| {
-					encode_params!(w, v,
-						0x20 => 7u8,
-						0x22 => 9u8,
-					);
-					Ok(())
-				},
-				|r, v| {
-					decode_params!(r, v, 0x22 => val: Option<u8>);
-					assert_eq!(val, Some(9));
 					Ok(())
 				},
 			);
@@ -945,12 +870,15 @@ mod tests {
 	}
 
 	#[test]
-	fn test_param_unknown_rejected_v17_plus() {
-		// From draft-17 on, parameter values are encoded type-specifically
-		// (see `Param`), so an unknown parameter's length is unknowable and
-		// the message must be rejected. Draft-14/15/16 skip instead — see
-		// test_unknown_params_are_skipped.
-		for version in [Version::Draft17, Version::Draft18] {
+	fn test_param_unknown_rejected() {
+		// Manually encode one param at key 0x10, try to decode expecting key 0x20
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+		] {
 			let mut buf = BytesMut::new();
 			1usize.encode(&mut buf, version).unwrap();
 			0x10u64.encode(&mut buf, version).unwrap();
