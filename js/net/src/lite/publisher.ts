@@ -549,11 +549,16 @@ export class Publisher {
 		// try so the finally can observe whatever was in flight when the loop exited
 		// (closing a late group, swallowing the rejection from our own teardown abort).
 		//
-		// The frame bounds are snapshotted in the same microtask the cursor hands the group
-		// over, not read later in the loop body: a SUBSCRIBE_UPDATE needs a transport read to
-		// arrive, so it can never land inside that microtask, while the loop can sit parked in
-		// a control-stream write long after the group left the buffer. Reading `bounds` there
-		// would serve the group under a range it was never taken under.
+		// Snapshot the frame bounds as the cursor hands the group over, rather than reading
+		// them in the loop body, which can sit parked in a control-stream write long after the
+		// group left the buffer. Reading `bounds` there serves the group under a range it was
+		// never taken under.
+		//
+		// That narrows the window to the microtask between `recvGroup` removing the group and
+		// this callback, but does not close it: a SUBSCRIBE_UPDATE whose bytes are already
+		// buffered decodes without another transport read, so its continuation can still land
+		// in between. Closing it means handing the bounds back with the group, or the two
+		// loops not sharing mutable state at all.
 		const take = () =>
 			track
 				.recvGroup()
@@ -583,6 +588,10 @@ export class Publisher {
 				// one already in hand discards nothing the subscriber has not discarded itself,
 				// while serving it would re-deliver below a floor they just moved. Lowering the
 				// cap only parks its groups, which is why the cap must not reject here.
+				//
+				// Whole groups only. A floor raised to a frame *within* a group already in hand
+				// still serves it from the snapshotted start frame, since the group clears this
+				// check and carries its own range.
 				if (bounds.startGroup !== undefined && group.sequence < bounds.startGroup) {
 					group.close();
 					continue;
