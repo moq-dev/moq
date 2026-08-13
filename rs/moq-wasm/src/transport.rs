@@ -14,9 +14,16 @@ use web_transport_trait as wtt;
 #[derive(Clone)]
 pub struct Session(web_transport_wasm::Session);
 
+/// Advertise every version `moq-net` supports, so the peer picks one via ALPN.
+/// Without this the browser negotiates no subprotocol and the session has no
+/// version to start from.
+fn builder() -> web_transport_wasm::ClientBuilder {
+	web_transport_wasm::ClientBuilder::new().with_protocols(moq_net::ALPNS.iter().copied())
+}
+
 /// Open a browser WebTransport connection to `url`.
 pub async fn connect(url: Url) -> Result<Session, Error> {
-	let client = web_transport_wasm::ClientBuilder::new().with_system_roots();
+	let client = builder().with_system_roots();
 	let session = client.connect(url).await.map_err(Error)?;
 	Ok(Session(session))
 }
@@ -24,7 +31,7 @@ pub async fn connect(url: Url) -> Result<Session, Error> {
 /// Connect, trusting only the given sha-256 certificate hashes (serverless dev,
 /// matching the browser's `serverCertificateHashes` option).
 pub async fn connect_with_hashes(url: Url, hashes: Vec<Vec<u8>>) -> Result<Session, Error> {
-	let client = web_transport_wasm::ClientBuilder::new().with_server_certificate_hashes(hashes);
+	let client = builder().with_server_certificate_hashes(hashes);
 	let session = client.connect(url).await.map_err(Error)?;
 	Ok(Session(session))
 }
@@ -90,7 +97,9 @@ impl wtt::Session for Session {
 	}
 
 	fn protocol(&self) -> Option<&str> {
-		self.0.protocol()
+		// The browser reports "" when no subprotocol was negotiated, which means the
+		// same thing as `None`: fall back to negotiating the version over SETUP.
+		self.0.protocol().filter(|p| !p.is_empty())
 	}
 
 	fn close(&self, code: u32, reason: &str) {
