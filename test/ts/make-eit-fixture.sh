@@ -32,24 +32,54 @@ QUIET=""
 ARGS=()
 
 while [[ $# -gt 0 ]]; do
-	case "$1" in
-		--pf-only) PF_ONLY=1; shift ;;
-		--events) EVENTS="$2"; shift 2 ;;
-		--time) TIME_REF="$2"; shift 2 ;;
-		--service-id) SERVICE_ID="$2"; shift 2 ;;
-		--quiet) QUIET=1; shift ;;
-		-h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-		*) ARGS+=("$1"); shift ;;
-	esac
+    case "$1" in
+        --pf-only)
+            PF_ONLY=1
+            shift
+            ;;
+        --events)
+            EVENTS="$2"
+            shift 2
+            ;;
+        --time)
+            TIME_REF="$2"
+            shift 2
+            ;;
+        --service-id)
+            SERVICE_ID="$2"
+            shift 2
+            ;;
+        --quiet)
+            QUIET=1
+            shift
+            ;;
+        -h | --help)
+            sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            ARGS+=("$1")
+            shift
+            ;;
+    esac
 done
 
-[[ ${#ARGS[@]} -eq 2 ]] || { echo "usage: $(basename "$0") [options] <input.ts> <output.ts>" >&2; exit 2; }
+[[ ${#ARGS[@]} -eq 2 ]] || {
+    echo "usage: $(basename "$0") [options] <input.ts> <output.ts>" >&2
+    exit 2
+}
 IN="${ARGS[0]}"
 OUT="${ARGS[1]}"
-[[ -r "$IN" ]] || { echo "error: no such input: $IN" >&2; exit 1; }
+[[ -r "$IN" ]] || {
+    echo "error: no such input: $IN" >&2
+    exit 1
+}
 
 for t in tsp tstables python3; do
-	command -v "$t" >/dev/null 2>&1 || { echo "error: missing required tool: $t" >&2; exit 1; }
+    command -v "$t" >/dev/null 2>&1 || {
+        echo "error: missing required tool: $t" >&2
+        exit 1
+    }
 done
 
 TMP="$(mktemp -d)"
@@ -59,9 +89,10 @@ trap 'rm -rf "$TMP"' EXIT
 # (original_network_id, transport_stream_id, service_id) does not match the SDT describes
 # nothing, and a receiver is right to ignore it.
 tstables "$IN" --pid 0x0000 --pid 0x0011 --pid 0x0014 --max-tables 8 \
-	--json-output "$TMP/si.json" --no-pager >/dev/null 2>&1 || true
+    --json-output "$TMP/si.json" --no-pager >/dev/null 2>&1 || true
 
-read -r DERIVED_SID TSID ONID TDT <<<"$(python3 - "$TMP/si.json" <<'PY'
+read -r DERIVED_SID TSID ONID TDT <<<"$(
+    python3 - "$TMP/si.json" <<'PY'
 import json, sys
 
 sid = tsid = onid = tdt = "-"
@@ -101,11 +132,11 @@ SERVICE_ID="${SERVICE_ID:-$DERIVED_SID}"
 # output reproducible; eitinject needs a reference either way and would otherwise take the
 # wall clock, making every run differ.
 if [[ -z "$TIME_REF" ]]; then
-	if [[ "$TDT" != "-" && -n "$TDT" ]]; then
-		TIME_REF="$TDT"
-	else
-		TIME_REF="2026/01/01:12:00:00"
-	fi
+    if [[ "$TDT" != "-" && -n "$TDT" ]]; then
+        TIME_REF="$TDT"
+    else
+        TIME_REF="2026/01/01:12:00:00"
+    fi
 fi
 
 python3 - "$TMP/epg.xml" "$SERVICE_ID" "$TSID" "$ONID" "$TIME_REF" "$EVENTS" <<'PY'
@@ -163,20 +194,23 @@ EIT_ARGS=(--actual)
 # stream in a way the caller should know about.
 SRC="$IN"
 NULLS=$(tsp -I file "$IN" -P count --pid 0x1FFF --total -O drop 2>&1 |
-	sed -n 's/.*counted \([0-9,]*\) packets out of \([0-9,]*\).*/\1 \2/p' | head -1)
+    sed -n 's/.*counted \([0-9,]*\) packets out of \([0-9,]*\).*/\1 \2/p' | head -1)
 HAVE=$(echo "$NULLS" | cut -d' ' -f1 | tr -d ,)
 TOTAL=$(echo "$NULLS" | cut -d' ' -f2 | tr -d ,)
 if [[ -z "$HAVE" || -z "$TOTAL" || "$TOTAL" -eq 0 || $((HAVE * 200)) -lt "$TOTAL" ]]; then
-	RATE=$(tsp -I file "$IN" -P analyze --normalized -O drop 2>/dev/null |
-		sed -n 's/^ts:.*:bitrate=\([0-9]*\):.*/\1/p' | head -1)
-	[[ -n "$RATE" && "$RATE" -gt 0 ]] || { echo "error: cannot determine input bitrate to pad to" >&2; exit 1; }
-	PADDED=$((RATE + 200000))
-	[[ -n "$QUIET" ]] || echo "### input carries no stuffing; padding to ${PADDED} b/s CBR to make room"
-	tsstuff --bitrate "$PADDED" "$IN" >"$TMP/padded.ts" 2>"$TMP/stuff.log" || {
-		sed 's/^/  tsstuff: /' "$TMP/stuff.log" >&2 || true
-		exit 1
-	}
-	SRC="$TMP/padded.ts"
+    RATE=$(tsp -I file "$IN" -P analyze --normalized -O drop 2>/dev/null |
+        sed -n 's/^ts:.*:bitrate=\([0-9]*\):.*/\1/p' | head -1)
+    [[ -n "$RATE" && "$RATE" -gt 0 ]] || {
+        echo "error: cannot determine input bitrate to pad to" >&2
+        exit 1
+    }
+    PADDED=$((RATE + 200000))
+    [[ -n "$QUIET" ]] || echo "### input carries no stuffing; padding to ${PADDED} b/s CBR to make room"
+    tsstuff --bitrate "$PADDED" "$IN" >"$TMP/padded.ts" 2>"$TMP/stuff.log" || {
+        sed 's/^/  tsstuff: /' "$TMP/stuff.log" >&2 || true
+        exit 1
+    }
+    SRC="$TMP/padded.ts"
 fi
 
 # --wait-first-batch: without it injection races the EPG load and the head of the output
@@ -184,23 +218,23 @@ fi
 # The SDT flags: a stream that carries EIT while advertising none is internally
 # inconsistent, and a conformance analyser will say so.
 tsp -I file "$SRC" \
-	-P sdt --service-id "$SERVICE_ID" --eit-pf 1 --eit-schedule "$([[ -n "$PF_ONLY" ]] && echo 0 || echo 1)" \
-	-P eitinject --files "$TMP/epg.xml" --wait-first-batch --time "$TIME_REF" "${EIT_ARGS[@]}" \
-	-O file "$OUT" 2>"$TMP/tsp.log" || {
-	sed 's/^/  tsp: /' "$TMP/tsp.log" >&2 || true
-	exit 1
+    -P sdt --service-id "$SERVICE_ID" --eit-pf 1 --eit-schedule "$([[ -n "$PF_ONLY" ]] && echo 0 || echo 1)" \
+    -P eitinject --files "$TMP/epg.xml" --wait-first-batch --time "$TIME_REF" "${EIT_ARGS[@]}" \
+    -O file "$OUT" 2>"$TMP/tsp.log" || {
+    sed 's/^/  tsp: /' "$TMP/tsp.log" >&2 || true
+    exit 1
 }
 
 EIT_PKTS=$(tsp -I file "$OUT" -P count --pid 0x0012 --total -O drop 2>&1 |
-	sed -n 's/.*counted \([0-9,]*\) packets.*/\1/p' | head -1)
+    sed -n 's/.*counted \([0-9,]*\) packets.*/\1/p' | head -1)
 if [[ -z "$EIT_PKTS" || "$EIT_PKTS" == "0" ]]; then
-	echo "error: no EIT in the output; the EPG or the time reference did not match the stream" >&2
-	sed 's/^/  tsp: /' "$TMP/tsp.log" >&2 || true
-	exit 1
+    echo "error: no EIT in the output; the EPG or the time reference did not match the stream" >&2
+    sed 's/^/  tsp: /' "$TMP/tsp.log" >&2 || true
+    exit 1
 fi
 
 [[ -n "$QUIET" ]] || {
-	echo "### EIT fixture: service $SERVICE_ID (ts $TSID, onid $ONID), reference $TIME_REF"
-	echo "### $EVENTS events, $([[ -n "$PF_ONLY" ]] && echo "p/f only" || echo "p/f + schedule")"
-	echo "### $EIT_PKTS packets on PID 0x0012 -> $OUT"
+    echo "### EIT fixture: service $SERVICE_ID (ts $TSID, onid $ONID), reference $TIME_REF"
+    echo "### $EVENTS events, $([[ -n "$PF_ONLY" ]] && echo "p/f only" || echo "p/f + schedule")"
+    echo "### $EIT_PKTS packets on PID 0x0012 -> $OUT"
 }
