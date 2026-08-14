@@ -120,6 +120,8 @@ Moq.connect("https://relay.example.com").use { moq ->
 }
 ```
 
+Each catalog `Video` has a `stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
+
 Properties that apply to every video rendition are updated together. `null` fields clear the corresponding catalog property, and rotation is normalized to the nearest clockwise quarter turn:
 
 ```kotlin

@@ -42,7 +42,7 @@ type (
 	Subscription = ffi.MoqSubscription
 	// TrackInfo holds publisher-side track properties: priority, ordering, latency budget, and timescale.
 	TrackInfo = ffi.MoqTrackInfo
-	// Video describes one video rendition in a broadcast catalog: codec, dimensions, bitrate, framerate, and container.
+	// Video describes one catalog rendition, including whether the publisher recommends temporarily avoiding it.
 	Video = ffi.MoqVideo
 	// VideoHint supplies catalog fields a video stream can't reveal itself, such as bitrate, filling only the gaps.
 	VideoHint = ffi.MoqVideoHint

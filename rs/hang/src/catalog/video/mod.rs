@@ -187,6 +187,13 @@ pub struct VideoConfig {
 	#[serde(default)]
 	pub bitrate: Option<u64>,
 
+	/// Whether the publisher recommends temporarily avoiding this rendition.
+	///
+	/// The track remains available. Consumers may still select it when no
+	/// unstalled rendition is suitable.
+	#[serde(default)]
+	pub stalled: Option<bool>,
+
 	/// The frame rate of the video track, if known.
 	#[serde(default)]
 	pub framerate: Option<f64>,
@@ -239,6 +246,7 @@ impl VideoConfig {
 			display_aspect_width: None,
 			display_aspect_height: None,
 			bitrate: None,
+			stalled: None,
 			framerate: None,
 			optimize_for_latency: None,
 			container: Container::default(),
@@ -285,6 +293,20 @@ mod test {
 		let config: VideoConfig = serde_json::from_value(json).expect("failed to decode legacy keys");
 		assert_eq!(config.display_aspect_width, Some(16));
 		assert_eq!(config.display_aspect_height, Some(9));
+	}
+
+	#[test]
+	fn stalled_is_optional_and_round_trips() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		let encoded = serde_json::to_value(&config).expect("failed to encode");
+		assert!(encoded.get("stalled").is_none());
+
+		config.stalled = Some(true);
+		let encoded = serde_json::to_value(&config).expect("failed to encode");
+		assert_eq!(encoded["stalled"], true);
+
+		let decoded: VideoConfig = serde_json::from_value(encoded).expect("failed to decode");
+		assert_eq!(decoded.stalled, Some(true));
 	}
 
 	#[test]

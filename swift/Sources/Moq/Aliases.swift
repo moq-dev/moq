@@ -14,8 +14,8 @@ public typealias MediaFrame = MoqFFI.MoqMediaFrame
 /// The JSON manifest describing a broadcast's tracks: video and audio
 /// renditions, display geometry, and untyped application sections.
 public typealias Catalog = MoqFFI.MoqCatalog
-/// A video rendition in the catalog: codec, coded/display dimensions, bitrate,
-/// framerate, and container.
+/// A video rendition in the catalog: codec, dimensions, bitrate, temporary
+/// avoidance recommendation, framerate, and container.
 public typealias Video = MoqFFI.MoqVideo
 /// Caller-provided catalog fields for a video track.
 public typealias VideoHint = MoqFFI.MoqVideoHint

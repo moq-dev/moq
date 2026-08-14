@@ -125,6 +125,8 @@ video = broadcast.publish_media(
 
 A value the stream later detects fills only a gap the hint left, so a detected value always wins. Audio formats resolve entirely from their init bytes, so they take no hint.
 
+Each catalog `Video` has a `stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
+
 Properties that apply to every video rendition are updated together. Omitted fields clear the corresponding catalog property, and rotation is normalized to the nearest clockwise quarter turn:
 
 ```python

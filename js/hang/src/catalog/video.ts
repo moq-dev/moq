@@ -46,6 +46,10 @@ export const VideoConfigSchema = z.object({
 	// TODO: Support up to Number.MAX_SAFE_INTEGER
 	bitrate: z.optional(u53Schema),
 
+	// Whether the publisher recommends temporarily avoiding this rendition.
+	// The track remains available and may still be selected as a fallback.
+	stalled: z.optional(z.boolean()),
+
 	// If true, the decoder will optimize for latency.
 	// Default: true
 	optimizeForLatency: z.optional(z.boolean()),

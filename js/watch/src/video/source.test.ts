@@ -3,6 +3,7 @@ import * as Catalog from "@moq/hang/catalog";
 import { Path } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Broadcast } from "../broadcast";
+import { decoderConfigKey, supportCacheKey } from "./config";
 import { Source } from "./source";
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -11,8 +12,8 @@ async function settle(): Promise<void> {
 	for (let i = 0; i < 5; i++) await flush();
 }
 
-function config(codec: string): Catalog.VideoConfig {
-	return { codec, container: { kind: "legacy" } };
+function config(codec: string, fields: Record<string, unknown> = {}): Catalog.VideoConfig {
+	return Catalog.VideoConfigSchema.parse({ codec, container: { kind: "legacy" }, ...fields });
 }
 
 function mockBroadcast(renditions: Record<string, Catalog.VideoConfig>): Broadcast {
@@ -24,6 +25,20 @@ function mockBroadcast(renditions: Record<string, Catalog.VideoConfig>): Broadca
 			catalog: new Signal({ video: { renditions } }),
 		},
 	} as unknown as Broadcast;
+}
+
+function mutableBroadcast(renditions: Record<string, Catalog.VideoConfig>): {
+	broadcast: Broadcast;
+	catalog: Signal<Catalog.Root>;
+} {
+	const catalog = new Signal<Catalog.Root>({ video: { renditions } });
+	return {
+		broadcast: {
+			in: { connection: new Signal(undefined) },
+			out: { catalog },
+		} as unknown as Broadcast,
+		catalog,
+	};
 }
 
 async function withoutWarnings(fn: () => Promise<void>): Promise<void> {
@@ -147,4 +162,112 @@ describe("Source error signal", () => {
 		source.close();
 		broadcast.close();
 	});
+});
+
+describe("Source stalled rendition selection", () => {
+	it("skips a stalled manual target while an unstalled rendition exists", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast({
+				low: config("avc1.64001e", { bitrate: 1_000_000 }),
+				high: config("avc1.640028", { bitrate: 2_000_000, stalled: true }),
+			}),
+			target: { name: "high" },
+			supported: async () => true,
+		});
+
+		await settle();
+		expect(source.out.track.peek()).toBe("low");
+		expect(Object.keys(source.out.available.peek())).toEqual(["low", "high"]);
+		source.close();
+	});
+
+	it("selects the lowest rendition when every supported rendition is stalled", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast({
+				high: config("avc1.640028", { bitrate: 2_000_000, stalled: true }),
+				low: config("avc1.64001e", { bitrate: 1_000_000, stalled: true }),
+			}),
+			supported: async () => true,
+		});
+
+		await settle();
+		expect(source.out.track.peek()).toBe("low");
+		source.close();
+	});
+
+	it("uses coded dimensions when stalled renditions omit bitrate", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast({
+				high: config("avc1.640028", { codedWidth: 1920, codedHeight: 1080, stalled: true }),
+				low: config("avc1.64001e", { codedWidth: 854, codedHeight: 480, stalled: true }),
+			}),
+			supported: async () => true,
+		});
+
+		await settle();
+		expect(source.out.track.peek()).toBe("low");
+		source.close();
+	});
+
+	it("does not repeat support probes for metadata-only changes", async () => {
+		const state = mutableBroadcast({ high: config("avc1.640028", { bitrate: 2_000_000 }) });
+		let probes = 0;
+		const supported = async () => {
+			probes++;
+			return true;
+		};
+		Object.assign(supported, { [supportCacheKey]: decoderConfigKey });
+		const source = new Source({
+			broadcast: state.broadcast,
+			supported,
+		});
+
+		await settle();
+		expect(probes).toBe(1);
+
+		state.catalog.set({
+			video: {
+				renditions: {
+					high: config("avc1.640028", {
+						bitrate: 1_500_000,
+						stalled: true,
+						codedWidth: 1280,
+						codedHeight: 720,
+					}),
+				},
+			},
+		});
+		await settle();
+
+		expect(probes).toBe(1);
+		expect(Number(source.out.config.peek()?.bitrate)).toBe(1_500_000);
+		expect(source.out.config.peek()?.stalled).toBe(true);
+		source.close();
+	});
+
+	it("repeats custom support probes when metadata changes", async () =>
+		withoutWarnings(async () => {
+			const state = mutableBroadcast({ high: config("avc1.640028", { codedWidth: 1280 }) });
+			let probes = 0;
+			const source = new Source({
+				broadcast: state.broadcast,
+				supported: async (rendition) => {
+					probes++;
+					return (rendition.codedWidth ?? 0) <= 1920;
+				},
+			});
+
+			await settle();
+			expect(probes).toBe(1);
+			expect(Object.keys(source.out.available.peek())).toEqual(["high"]);
+
+			state.catalog.set({
+				video: { renditions: { high: config("avc1.640028", { codedWidth: 3840 }) } },
+			});
+			await settle();
+
+			expect(probes).toBe(2);
+			expect(source.out.available.peek()).toEqual({});
+			source.close();
+		}));
 });

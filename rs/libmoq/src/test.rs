@@ -285,6 +285,30 @@ fn publish_catalog_roundtrip() {
 		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
+	let stalled_video_name = "video-stalled";
+	let stalled_video = moq_video_config {
+		name: stalled_video_name.as_ptr() as *const c_char,
+		name_len: stalled_video_name.len(),
+		codec: video_codec.as_ptr() as *const c_char,
+		codec_len: video_codec.len(),
+		description: description.as_ptr(),
+		description_len: description.len(),
+		coded_width: &width,
+		coded_height: &height,
+		container: moq_container::default(),
+	};
+	assert_eq!(unsafe { moq_publish_video_config(broadcast, &stalled_video) }, 0);
+	{
+		let mut state = State::lock();
+		let (_, catalog) = state.publish.pair_mut(Id::try_from(broadcast).unwrap()).unwrap();
+		catalog
+			.lock()
+			.video
+			.renditions
+			.get_mut(stalled_video_name)
+			.unwrap()
+			.stalled = Some(true);
+	}
 	let properties = moq_video_properties {
 		display_width: 1080,
 		display_height: 1920,
@@ -340,6 +364,35 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(codec, "vp8");
 	assert_eq!(unsafe { *video_cfg.coded_width }, 1920);
 	assert_eq!(unsafe { *video_cfg.coded_height }, 1080);
+	let mut stalled = std::mem::MaybeUninit::<bool>::uninit();
+	assert_eq!(
+		unsafe { moq_consume_video_stalled(catalog_id, 0, stalled.as_mut_ptr()) },
+		0
+	);
+	assert!(!unsafe { stalled.assume_init() });
+
+	let mut stalled = std::mem::MaybeUninit::<bool>::uninit();
+	assert_eq!(
+		unsafe { moq_consume_video_stalled(catalog_id, 1, stalled.as_mut_ptr()) },
+		0
+	);
+	assert!(unsafe { stalled.assume_init() });
+	assert_eq!(
+		unsafe { moq_consume_video_stalled(catalog_id, 0, std::ptr::null_mut()) },
+		-6,
+		"null stalled pointer should return InvalidPointer (-6)"
+	);
+	assert_eq!(
+		unsafe {
+			moq_publish_video_remove(
+				broadcast,
+				stalled_video_name.as_ptr() as *const c_char,
+				stalled_video_name.len(),
+			)
+		},
+		0
+	);
+	let active_catalog_id = id(catalog_cb.recv());
 
 	let mut properties = moq_video_properties::default();
 	assert_eq!(unsafe { moq_consume_video_properties(catalog_id, &mut properties) }, 0);
@@ -380,6 +433,7 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id2, 0, &mut audio_cfg) }, 0);
 
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_free(active_catalog_id), 0);
 	assert_eq!(moq_consume_catalog_free(catalog_id2), 0);
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");

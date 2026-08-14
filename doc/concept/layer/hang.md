@@ -75,6 +75,9 @@ For example, it's not possible to have a different `flip` or `rotation` value fo
 Each rendition is an extension of [VideoDecoderConfig](https://www.w3.org/TR/webcodecs/#video-decoder-config).
 This is the minimum amount of information required to initialize a video decoder.
 
+A publisher can set a rendition's optional `stalled` field to recommend temporarily avoiding it without removing or closing the track.
+Players prefer decoder-supported unstalled renditions and can fall back to a stalled rendition when none remain.
+
 ### Cross-broadcast renditions
 
 A rendition may set an optional `broadcast` field: a path relative to the broadcast that served the catalog (e.g. `"./source"`), pointing at another broadcast that publishes the actual track.

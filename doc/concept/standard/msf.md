@@ -17,4 +17,7 @@ moved init data out of the track into a root `initDataList` referenced by `initR
 Our implementation hides this on the wire: the catalog API is a version-agnostic snapshot, draft-00
 catalogs still decode, and init data is always presented inline regardless of how it was carried.
 
+Our implementation also carries an optional `stalled` boolean on video tracks as a non-standard extension shared with the hang catalog.
+It recommends temporarily avoiding a track without making that track unavailable.
+
 [See the draft](https://www.ietf.org/archive/id/draft-ietf-moq-msf-01.html) for the latest details.

@@ -215,6 +215,7 @@ mod test {
 				display_aspect_width: None,
 				display_aspect_height: None,
 				bitrate: None,
+				stalled: None,
 				framerate: None,
 				optimize_for_latency: None,
 				container: Container::Legacy,

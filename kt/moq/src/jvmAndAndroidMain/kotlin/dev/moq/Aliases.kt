@@ -93,7 +93,7 @@ typealias Datagram = uniffi.moq.MoqDatagram
 typealias Frame = uniffi.moq.MoqFrame
 /** A [Frame] plus the codec metadata a media track carries. */
 typealias MediaFrame = uniffi.moq.MoqMediaFrame
-/** The catalog description of a video track: codec, dimensions, bitrate, and container. */
+/** The catalog description of a video track, including whether the publisher recommends temporarily avoiding it. */
 typealias Video = uniffi.moq.MoqVideo
 /** Caller-provided catalog fields for a video track. */
 typealias VideoHint = uniffi.moq.MoqVideoHint

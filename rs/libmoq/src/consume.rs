@@ -219,6 +219,19 @@ impl Consume {
 		Ok(())
 	}
 
+	/// Return whether the publisher recommends temporarily avoiding a video rendition.
+	pub fn video_stalled(&self, catalog: Id, index: usize) -> Result<bool, Error> {
+		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
+		let (_, config) = consume
+			.catalog
+			.video
+			.renditions
+			.iter()
+			.nth(index)
+			.ok_or(Error::NoIndex)?;
+		Ok(config.stalled.unwrap_or(false))
+	}
+
 	/// Fill `dst` with the properties shared by every video rendition.
 	pub fn video_properties(&self, catalog: Id, dst: &mut moq_video_properties) -> Result<(), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;

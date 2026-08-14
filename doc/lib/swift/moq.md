@@ -127,6 +127,8 @@ try broadcast.finish()
 
 Video publishers can pass `video: VideoHint(...)` to seed catalog fields before the stream reveals them. Use `publishMedia(on:format:initData:video:)` to accept a media track obtained from `BroadcastDynamic`.
 
+Each catalog `Video` has a `stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
+
 Properties that apply to every video rendition are updated together. `nil` fields clear the corresponding catalog property, and rotation is normalized to the nearest clockwise quarter turn:
 
 ```swift
