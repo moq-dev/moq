@@ -1925,10 +1925,61 @@ impl Demand {
 		self.abort_reason()
 	}
 
+	/// The publisher's tie-break priority, as set in [`Info::priority`].
+	pub(crate) fn priority(&self) -> u8 {
+		// Always Some once the track exists; a closed one reads its last value.
+		self.state.read().info.as_ref().map_or(0, |info| info.priority)
+	}
+
+	/// Whether anyone is subscribed right now, without waiting.
+	pub(crate) fn is_used(&self) -> bool {
+		self.state.is_used()
+	}
+
+	/// Whether the track is gone, without waiting.
+	pub(crate) fn is_closed(&self) -> bool {
+		self.state.is_closed()
+	}
+
+	/// Read the current demand and arm `waiter` for the next transition.
+	///
+	/// Level-triggered, unlike [`used`](Self::used) / [`unused`](Self::unused): it
+	/// answers what the demand is *now* and wakes on whichever way it can move
+	/// next, so a poll-driven caller watching several tracks at once doesn't have
+	/// to track which edge it's waiting for.
+	pub(crate) fn poll_state(&self, waiter: &kio::Waiter) -> DemandState {
+		loop {
+			match self.state.poll_used(waiter) {
+				Poll::Ready(None) => return DemandState::Closed,
+				// Not used, and armed for it becoming used.
+				Poll::Pending => return DemandState::Idle,
+				// Used, so arm for the reverse.
+				Poll::Ready(Some(())) => match self.state.poll_unused(waiter) {
+					Poll::Ready(None) => return DemandState::Closed,
+					Poll::Pending => return DemandState::Active,
+					// Went idle between the two reads, so neither poll armed anything.
+					// Start over rather than returning a state with no waker behind it.
+					Poll::Ready(Some(())) => continue,
+				},
+			}
+		}
+	}
+
 	/// The recorded abort reason, or [`Error::Dropped`] if the track closed without one.
 	fn abort_reason(&self) -> Error {
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
+}
+
+/// What [`Demand::poll_state`] found.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum DemandState {
+	/// At least one subscriber.
+	Active,
+	/// No subscribers, but the track is still open.
+	Idle,
+	/// The track is gone; it will never be demanded again.
+	Closed,
 }
 
 /// A handle to a single track within a broadcast.

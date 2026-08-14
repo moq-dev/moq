@@ -45,6 +45,17 @@ pub struct Options {
 	/// Encoded frame duration. Opus accepts 2.5 / 5 / 10 / 20 / 40 / 60 ms.
 	/// PCM accepts any duration containing a whole number of samples.
 	pub frame_duration: Duration,
+	/// The connection's bandwidth, as an allocator over
+	/// [`Session::send_bandwidth`](moq_net::Session::send_bandwidth).
+	///
+	/// Set it and the audio track reserves its bitrate, so the video encoder
+	/// sharing the connection sizes itself against what's actually left rather
+	/// than against the whole uplink. Pass the same allocator to both.
+	///
+	/// Audio reserves but does not follow its share: Opus can retune live and PCM
+	/// can't at all, and at `hang`'s priorities audio outranks video, so it is only
+	/// ever squeezed on a link that can't carry audio alone.
+	pub bandwidth: Option<moq_net::bandwidth::Allocator>,
 }
 
 impl Default for Options {
@@ -58,6 +69,7 @@ impl Default for Options {
 			fec: false,
 			dtx: false,
 			frame_duration: Duration::from_millis(20),
+			bandwidth: None,
 		}
 	}
 }

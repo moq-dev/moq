@@ -215,7 +215,7 @@ impl<E: CatalogExt> Producer<E> {
 ///
 /// `#[non_exhaustive]`: construct via [`Options::default`] and set fields, so
 /// new knobs can be added without breaking callers.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 #[cfg(feature = "capture")]
 pub struct Options {
@@ -229,31 +229,22 @@ pub struct Options {
 	pub codec: Codec,
 	/// Encoder implementation preference.
 	pub kind: encoder::Kind,
-	/// The connection's send-bandwidth estimate, from
+	/// The connection's bandwidth, as an allocator over
 	/// [`Session::send_bandwidth`](moq_net::Session::send_bandwidth) (or
 	/// `moq_tokio::Connection::send_bandwidth`, which survives reconnects).
 	///
-	/// Set it and the encoder tracks the estimate per the default
-	/// [`rate::Policy`](super::rate::Policy), so a closing uplink gets a softer
-	/// picture instead of a stalled one. Leave it `None` and the
-	/// encoder holds [`bitrate`](Self::bitrate) regardless of congestion, which
-	/// is what you want when the estimate isn't meaningful (a local file, a test
-	/// harness) or unavailable (a publisher that only accepts inbound sessions).
-	pub bandwidth: Option<moq_net::bandwidth::Consumer>,
-}
-
-// Hand-written: `bandwidth::Consumer` isn't `Debug`, but its presence is the
-// only part worth printing anyway.
-#[cfg(feature = "capture")]
-impl std::fmt::Debug for Options {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("Options")
-			.field("bitrate", &self.bitrate)
-			.field("codec", &self.codec)
-			.field("kind", &self.kind)
-			.field("bandwidth", &self.bandwidth.is_some())
-			.finish()
-	}
+	/// Set it and the encoder registers this track, then tracks its share of the
+	/// estimate per the default [`rate::Policy`](super::rate::Policy), so a closing
+	/// uplink gets a softer picture instead of a stalled one. Pass the same
+	/// allocator to every sender on the connection, including the audio side:
+	/// that's what keeps their bitrates summing to the uplink instead of each
+	/// matching it.
+	///
+	/// Leave it `None` and the encoder holds [`bitrate`](Self::bitrate) regardless
+	/// of congestion, which is what you want when the estimate isn't meaningful (a
+	/// local file, a test harness) or unavailable (a publisher that only accepts
+	/// inbound sessions).
+	pub bandwidth: Option<moq_net::bandwidth::Allocator>,
 }
 
 /// Capture a webcam and publish it as an on-demand video track.
@@ -424,6 +415,11 @@ async fn capture_loop<E: CatalogExt>(
 	encode: &Options,
 	clock: &moq_mux::Clock,
 ) -> Result<(), Error> {
+	// This track's slice of the connection, once the encoder's ceiling is known.
+	// Unset when the caller passed no allocator, which means encode at the
+	// configured bitrate and ignore congestion entirely.
+	let mut share: Option<moq_net::bandwidth::Consumer> = None;
+
 	loop {
 		// Idle until a viewer subscribes; the track ending is a clean exit. The
 		// catalog rendition was published when the track was created, so a
@@ -453,14 +449,22 @@ async fn capture_loop<E: CatalogExt>(
 		let mut force_keyframe = true;
 		tracing::info!(encoder = encoder.name(), device = camera.device(), "capturing");
 
+		// The negotiated mode is what finally says how much this encoder can ever
+		// send, so the reservation waits for the first open. It's kept across
+		// reopens: one registry entry per publish, and the allocator releases the
+		// share on its own while nothing is subscribed.
+		let ceiling = encoder_config.resolved_bitrate();
+		if share.is_none()
+			&& let Some(allocator) = &encode.bandwidth
+		{
+			share = Some(allocator.register(demand, ceiling));
+		}
+
 		// Rate control is per encoder: this one opened at the configured bitrate,
 		// so the policy's ceiling is that rate and the target starts there. A
 		// reopened camera starts optimistic again rather than inheriting the
 		// backed-off rate from whatever the link was doing last time.
-		let mut rate = encode
-			.bandwidth
-			.clone()
-			.map(|bandwidth| (bandwidth, Control::new(Policy::new(encoder_config.resolved_bitrate()))));
+		let mut rate = share.clone().map(|share| (share, Control::new(Policy::new(ceiling))));
 
 		loop {
 			// Race the next frame against the last viewer leaving so we release the

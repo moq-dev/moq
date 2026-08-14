@@ -266,9 +266,12 @@ impl Publish {
 	/// Build a publisher capturing local devices (camera/screen and microphone).
 	///
 	/// `bandwidth` is the uplink's send estimate, when there is one: the video
-	/// encoder follows it down while the link is congested rather than
+	/// encoder follows its share down while the link is congested rather than
 	/// overshooting a pipe that can't carry it. Pass `None` to encode at the
 	/// configured bitrate regardless.
+	///
+	/// Audio and video share one allocator, so the video encoder targets what's
+	/// left after audio's reservation rather than the whole uplink.
 	#[cfg(feature = "capture")]
 	pub fn capture(
 		mut broadcast: moq_net::broadcast::Producer,
@@ -279,8 +282,9 @@ impl Publish {
 		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 
-		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode(bandwidth)));
-		let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode()));
+		let bandwidth = bandwidth.map(moq_net::bandwidth::Allocator::new);
+		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode(bandwidth.clone())));
+		let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode(bandwidth)));
 		anyhow::ensure!(video.is_some() || audio.is_some(), "nothing to capture");
 
 		Ok(Self {
@@ -392,7 +396,7 @@ impl CaptureArgs {
 		config
 	}
 
-	fn video_encode(&self, bandwidth: Option<moq_net::bandwidth::Consumer>) -> moq_video::encode::Options {
+	fn video_encode(&self, bandwidth: Option<moq_net::bandwidth::Allocator>) -> moq_video::encode::Options {
 		let mut options = moq_video::encode::Options::default();
 		options.bitrate = self.bitrate;
 		options.codec = self.codec.into();
@@ -428,9 +432,10 @@ impl CaptureArgs {
 	/// The audio counterpart to [`video_encode`](Self::video_encode). `track` is
 	/// left unset so the name derives from the codec, the way the video side
 	/// names its track; consumers find it through the catalog either way.
-	fn audio_encode(&self) -> moq_audio::encode::Options {
+	fn audio_encode(&self, bandwidth: Option<moq_net::bandwidth::Allocator>) -> moq_audio::encode::Options {
 		let mut options = moq_audio::encode::Options::default();
 		options.bitrate = self.audio_bitrate;
+		options.bandwidth = bandwidth;
 		options
 	}
 }
