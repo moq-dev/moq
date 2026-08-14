@@ -128,9 +128,6 @@ pub struct Allocator {
 impl Allocator {
 	/// Divide `estimate`, normally a connection's
 	/// [`Session::send_bandwidth`](crate::Session::send_bandwidth).
-	///
-	/// Nesting works: the estimate can itself be a share, which splits one slice
-	/// again among the tracks behind it.
 	pub fn new(estimate: Consumer) -> Self {
 		Self {
 			estimate,
@@ -147,10 +144,16 @@ impl Allocator {
 	/// to somebody else.
 	///
 	/// Priority comes from the track ([`track::Info::priority`], higher served
-	/// first), so allocation and transmission order can't disagree. A tier is
-	/// filled to its reservations before the next one sees a bit; within a tier
-	/// the split is max-min fair, so a share asking for less than an even cut
-	/// takes all of it and leaves the difference to the others.
+	/// first). A tier is filled to its reservations before the next one sees a
+	/// bit; within a tier the split is max-min fair, so a share asking for less
+	/// than an even cut takes all of it and leaves the difference to the others.
+	///
+	/// That is the *publisher's* priority, which is not what orders the local send
+	/// queue: that ranks by each subscription's own priority, so a subscriber
+	/// asking for video ahead of audio is served that way whatever this decides.
+	/// The publisher's is still the right one to divide by, since allocation is a
+	/// decision about what to *produce*, and there is no single subscriber
+	/// priority to read when several are watching one track.
 	///
 	/// That last part is what carries the common case, since publishers leave
 	/// `priority` at its default today: one tier of audio and video still serves
