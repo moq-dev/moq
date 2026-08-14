@@ -280,6 +280,14 @@ impl Last {
 	}
 }
 
+#[derive(Clone, Copy)]
+struct FrameLayout {
+	stride: u32,
+	width: u32,
+	height: u32,
+	source_height: u32,
+}
+
 /// A dequeued PipeWire DMA-BUF kept out of the producer's pool until every
 /// frame clone drops. Duplicating the fd alone is not enough: it preserves the
 /// allocation, but the compositor may overwrite its pixels as soon as the
@@ -291,9 +299,7 @@ struct PipeWireDmaBuf {
 	map_offset: u32,
 	allocation_size: usize,
 	data_offset: usize,
-	stride: u32,
-	width: u32,
-	height: u32,
+	layout: FrameLayout,
 	format: DrmFormat,
 	modifier: u64,
 }
@@ -329,12 +335,12 @@ impl DmaBufFrame for PipeWireDmaBuf {
 				.ok_or_else(|| Error::Codec(anyhow::anyhow!("DMA-BUF chunk starts outside its allocation")))?;
 
 			match self.format {
-				DrmFormat::NV12 => nv12_to_i420(data, self.stride, self.width, self.height),
+				DrmFormat::NV12 => nv12_to_i420(data, self.layout),
 				DrmFormat::XRGB8888 | DrmFormat::ARGB8888 => {
-					I420::from_bgra(data, self.stride, self.width, self.height)
+					I420::from_bgra(data, self.layout.stride, self.layout.width, self.layout.height)
 				}
 				DrmFormat::XBGR8888 | DrmFormat::ABGR8888 => {
-					I420::from_rgba(data, self.stride, self.width, self.height)
+					I420::from_rgba(data, self.layout.stride, self.layout.width, self.layout.height)
 				}
 				other => Err(Error::Codec(anyhow::anyhow!(
 					"cannot download DMA-BUF format {:#x}",
@@ -464,17 +470,27 @@ impl Drop for Mapping {
 }
 
 /// Deinterleave strided NV12 into the crate's tightly packed I420 layout.
-fn nv12_to_i420(data: &[u8], stride: u32, width: u32, height: u32) -> Result<I420, Error> {
-	let (stride, width, height) = (stride as usize, width as usize, height as usize);
+fn nv12_to_i420(data: &[u8], layout: FrameLayout) -> Result<I420, Error> {
+	let (stride, width, height, source_height) = (
+		layout.stride as usize,
+		layout.width as usize,
+		layout.height as usize,
+		layout.source_height as usize,
+	);
+	if source_height < height {
+		return Err(Error::Codec(anyhow::anyhow!(
+			"NV12 source is shorter than the cropped output"
+		)));
+	}
 	let y_len = stride
-		.checked_mul(height)
+		.checked_mul(source_height)
 		.ok_or_else(|| Error::Codec(anyhow::anyhow!("NV12 luma size overflow")))?;
 	let uv_len = stride
 		.checked_mul(height / 2)
 		.ok_or_else(|| Error::Codec(anyhow::anyhow!("NV12 chroma size overflow")))?;
 	if stride < width || data.len() < y_len + uv_len {
 		return Err(Error::Codec(anyhow::anyhow!(
-			"NV12 DMA-BUF is shorter than its declared rows"
+			"NV12 frame is shorter than its declared rows"
 		)));
 	}
 
@@ -716,6 +732,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 			move |stream, _| {
 				let mut state = state.borrow_mut();
 				let Some((width, height)) = state.geometry else { return };
+				let source_height = state.format.size().height;
 				// SAFETY: this is PipeWire's process callback for `stream`; `Dequeued`
 				// returns the buffer on drop unless a DMA-BUF surface leases it.
 				let Some(mut buffer) = (unsafe { Dequeued::new(stream) }) else {
@@ -751,9 +768,15 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						_ => 0,
 					},
 				};
+				let layout = FrameLayout {
+					stride,
+					width,
+					height,
+					source_height,
+				};
 				// Compositors mark skipped frames as empty or corrupted; drop those
 				// rather than treating them as a fatal conversion failure below.
-				if data.chunk().flags().contains(spa::buffer::ChunkFlags::CORRUPTED) {
+				if !valid_chunk(size, data.chunk().flags()) {
 					return;
 				}
 				if data.type_() == DataType::DmaBuf {
@@ -776,13 +799,20 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						return;
 					};
 					let planes = if format == DrmFormat::NV12 {
-						let Some(uv) = stride.checked_mul(height).and_then(|size| base.checked_add(size)) else {
+						let Some(uv) = layout
+							.stride
+							.checked_mul(layout.source_height)
+							.and_then(|size| base.checked_add(size))
+						else {
 							tracing::warn!("DMA-BUF chroma plane offset overflow");
 							return;
 						};
-						vec![DmaBufPlane::new(base, stride), DmaBufPlane::new(uv, stride)]
+						vec![
+							DmaBufPlane::new(base, layout.stride),
+							DmaBufPlane::new(uv, layout.stride),
+						]
 					} else {
-						vec![DmaBufPlane::new(base, stride)]
+						vec![DmaBufPlane::new(base, layout.stride)]
 					};
 					let modifier = state.format.modifier();
 					let lease = buffer.lease(state.generation);
@@ -793,13 +823,11 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						map_offset,
 						allocation_size,
 						data_offset: offset,
-						stride,
-						width,
-						height,
+						layout,
 						format,
 						modifier,
 					});
-					match DmaBuf::new(format, modifier, width, height, planes, inner) {
+					match DmaBuf::new(format, modifier, layout.width, layout.height, planes, inner) {
 						Ok(frame) => {
 							chan.push(Surface::DmaBuf(frame.clone()));
 							state.last = Some(Last::DmaBuf(frame));
@@ -809,10 +837,6 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					}
 					return;
 				}
-				if size == 0 {
-					return;
-				}
-
 				// MAP_BUFFERS maps MemPtr/MemFd for the CPU fallback. `None` here
 				// means the producer forced an unsupported buffer representation.
 				let Some(bytes) = data.data() else {
@@ -826,7 +850,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 				let Some(bytes) = bytes.get(offset..end) else {
 					return;
 				};
-				match convert(state.format.format(), bytes, stride, width, height) {
+				match convert(state.format.format(), bytes, layout) {
 					Ok(i420) => {
 						chan.push(Surface::I420(i420.clone()));
 						state.last = Some(Last::I420(i420));
@@ -903,12 +927,16 @@ fn normalize_chunk_offset(offset: u32, maxsize: u32) -> Option<usize> {
 	(maxsize != 0).then(|| (offset % maxsize) as usize)
 }
 
+fn valid_chunk(size: usize, flags: spa::buffer::ChunkFlags) -> bool {
+	size > 0 && !flags.contains(spa::buffer::ChunkFlags::CORRUPTED)
+}
+
 /// Convert one strided screen frame to tightly-packed I420.
-fn convert(format: VideoFormat, bytes: &[u8], stride: u32, width: u32, height: u32) -> Result<I420, Error> {
+fn convert(format: VideoFormat, bytes: &[u8], layout: FrameLayout) -> Result<I420, Error> {
 	match format {
-		VideoFormat::NV12 => nv12_to_i420(bytes, stride, width, height),
-		VideoFormat::BGRx | VideoFormat::BGRA => I420::from_bgra(bytes, stride, width, height),
-		VideoFormat::RGBx | VideoFormat::RGBA => I420::from_rgba(bytes, stride, width, height),
+		VideoFormat::NV12 => nv12_to_i420(bytes, layout),
+		VideoFormat::BGRx | VideoFormat::BGRA => I420::from_bgra(bytes, layout.stride, layout.width, layout.height),
+		VideoFormat::RGBx | VideoFormat::RGBA => I420::from_rgba(bytes, layout.stride, layout.width, layout.height),
 		other => Err(Error::Codec(anyhow::anyhow!(
 			"pipewire negotiated an unsupported video format {other:?}"
 		))),
@@ -1122,6 +1150,13 @@ mod tests {
 	}
 
 	#[test]
+	fn empty_or_corrupted_chunks_are_skipped() {
+		assert!(!valid_chunk(0, spa::buffer::ChunkFlags::empty()));
+		assert!(!valid_chunk(1, spa::buffer::ChunkFlags::CORRUPTED));
+		assert!(valid_chunk(1, spa::buffer::ChunkFlags::empty()));
+	}
+
+	#[test]
 	fn stale_pool_lease_is_not_current() {
 		let buffer = std::ptr::dangling_mut::<pw::sys::pw_buffer>();
 		let lease = Lease {
@@ -1139,7 +1174,39 @@ mod tests {
 			5, 6, 7, 8, 99, 99, // Y row 1 plus padding
 			9, 10, 11, 12, 99, 99, // UV row plus padding
 		];
-		let frame = nv12_to_i420(&data, 6, 4, 2).unwrap();
+		let frame = nv12_to_i420(
+			&data,
+			FrameLayout {
+				stride: 6,
+				width: 4,
+				height: 2,
+				source_height: 2,
+			},
+		)
+		.unwrap();
+		assert_eq!(frame.y(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+		assert_eq!(frame.u(), &[9, 11]);
+		assert_eq!(frame.v(), &[10, 12]);
+	}
+
+	#[test]
+	fn nv12_crop_uses_the_source_height_for_chroma() {
+		let data = [
+			1, 2, 3, 4, // Y row 0
+			5, 6, 7, 8, // Y row 1
+			99, 99, 99, 99, // cropped Y row 2
+			9, 10, 11, 12, // UV row 0
+		];
+		let frame = nv12_to_i420(
+			&data,
+			FrameLayout {
+				stride: 4,
+				width: 4,
+				height: 2,
+				source_height: 3,
+			},
+		)
+		.unwrap();
 		assert_eq!(frame.y(), &[1, 2, 3, 4, 5, 6, 7, 8]);
 		assert_eq!(frame.u(), &[9, 11]);
 		assert_eq!(frame.v(), &[10, 12]);
@@ -1183,9 +1250,12 @@ mod tests {
 			map_offset: 0,
 			allocation_size: 6,
 			data_offset: 0,
-			stride: 2,
-			width: 2,
-			height: 2,
+			layout: FrameLayout {
+				stride: 2,
+				width: 2,
+				height: 2,
+				source_height: 2,
+			},
 			format: DrmFormat::NV12,
 			modifier: 0,
 		});
