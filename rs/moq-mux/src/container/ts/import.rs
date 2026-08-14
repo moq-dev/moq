@@ -405,7 +405,9 @@ impl<E: catalog::Catalog> Import<E> {
 
 		let stream = match stream_type {
 			StreamType::H264 => {
-				let track = self.broadcast.unique_track(".avc3", self.catalog.track_info())?;
+				let track = self
+					.broadcast
+					.unique_track(".avc3", self.catalog.track_info(hang::catalog::PRIORITY.video))?;
 				Stream::H264 {
 					split: h264::Split::new(),
 					import: Box::new(h264::Import::new(track, self.reserve(), self.video_hint())?),
@@ -413,7 +415,9 @@ impl<E: catalog::Catalog> Import<E> {
 				}
 			}
 			StreamType::H265 => {
-				let track = self.broadcast.unique_track(".hev1", self.catalog.track_info())?;
+				let track = self
+					.broadcast
+					.unique_track(".hev1", self.catalog.track_info(hang::catalog::PRIORITY.video))?;
 				Stream::H265 {
 					split: h265::Split::new(),
 					import: Box::new(h265::Import::new(track, self.reserve(), self.video_hint())?),
@@ -444,7 +448,9 @@ impl<E: catalog::Catalog> Import<E> {
 			// come from the descriptors, so the importer is built up front.
 			StreamType::Mpeg2PacketizedData if registration_format(descriptors) == Some(*b"Opus") => {
 				let channel_count = opus_channel_count(descriptors).unwrap_or(2);
-				let track = self.broadcast.unique_track(".opus", self.catalog.track_info())?;
+				let track = self
+					.broadcast
+					.unique_track(".opus", self.catalog.track_info(hang::catalog::PRIORITY.audio))?;
 				let config = opus::Config::new(48_000, channel_count);
 				let mut config: hang::catalog::AudioConfig = config.into();
 				config.container = self.container.clone();
@@ -803,7 +809,12 @@ fn register_verbatim<E: catalog::Catalog>(
 	// Verbatim payloads ride the legacy container, which normalizes the per-frame
 	// timestamp to microseconds on the wire (see `hang::container::Frame::encode`),
 	// so the track declares that timescale to match.
-	let track = broadcast.unique_track(".ts", catalog.track_info())?;
+	//
+	// Priority follows text rather than the media tiers: an undecoded elementary
+	// stream (SCTE-35 cues, teletext, DVB subtitles) is tiny and timing-critical, so
+	// it should never queue behind a media backlog, and it's too small to starve
+	// anything by sitting above one.
+	let track = broadcast.unique_track(".ts", catalog.track_info(hang::catalog::PRIORITY.text))?;
 	let name = track.name().to_string();
 
 	// Build the media producer before advertising the track. It is fallible (its
@@ -1736,7 +1747,9 @@ impl<E: CatalogExt> AacStream<E> {
 					// The importer synthesizes the AudioSpecificConfig `description` from the config so
 					// out-of-band consumers (fMP4/MKV export, WebCodecs) can configure the decoder.
 					let reserved = self.reserved.take().expect("aac reservation already consumed");
-					let track = self.broadcast.unique_track(".aac", reserved.track_info())?;
+					let track = self
+						.broadcast
+						.unique_track(".aac", reserved.track_info(hang::catalog::PRIORITY.audio))?;
 					let mut config: hang::catalog::AudioConfig = config.into();
 					config.container = self.container.clone();
 					let aac = aac::Import::new(track, reserved, config)?;
@@ -2159,9 +2172,10 @@ impl<E: CatalogExt> LegacyStream<E> {
 					// Consume the reservation held since the PMT: this resolves the gated rendition,
 					// and carries the catalog's declared media retention onto the track.
 					let reserved = self.reserved.take().expect("legacy reservation already consumed");
-					let track = self
-						.broadcast
-						.unique_track(self.descriptor.track_suffix, reserved.track_info())?;
+					let track = self.broadcast.unique_track(
+						self.descriptor.track_suffix,
+						reserved.track_info(hang::catalog::PRIORITY.audio),
+					)?;
 					let legacy = legacy::Import::new(self.descriptor, track, reserved, config)?;
 					self.import.insert(legacy)
 				}

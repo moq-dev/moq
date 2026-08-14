@@ -37,5 +37,5 @@ pub fn unique_track(
 	broadcast: &mut moq_net::broadcast::Producer,
 	suffix: &str,
 ) -> crate::Result<moq_net::track::Producer> {
-	Ok(broadcast.unique_track(suffix, hang::container::track_info())?)
+	Ok(broadcast.unique_track(suffix, hang::container::track_info(0))?)
 }

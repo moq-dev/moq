@@ -241,7 +241,7 @@ impl Publish {
 		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 		let source = match format {
 			PublishFormat::Avc3 => {
-				let track = broadcast.unique_track(".avc3", catalog.track_info())?;
+				let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))?;
 				let import = moq_mux::codec::h264::Import::new(track, catalog.reserve(), Default::default())?;
 				let split = Box::new(moq_mux::codec::h264::Split::new());
 				Source::Stream(PublishDecoder::Avc3 {
@@ -510,7 +510,7 @@ mod tests {
 
 		// Section-framed verbatim stream (SCTE-35, stream_type 0x86).
 		let section = broadcast
-			.unique_track(".scte35", hang::container::track_info())
+			.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.text))
 			.unwrap();
 		let mut section_track = tscat::Track::new(SECTION_PID);
 		section_track.verbatim = Some(tscat::Verbatim::new(0x86, tscat::Framing::Section));
@@ -536,7 +536,9 @@ mod tests {
 
 		// PES-framed verbatim stream (undecoded private data, stream_type 0x06), with
 		// an explicit PES stream_id to round-trip.
-		let pes = broadcast.unique_track(".data", hang::container::track_info()).unwrap();
+		let pes = broadcast
+			.unique_track(".data", hang::container::track_info(hang::catalog::PRIORITY.text))
+			.unwrap();
 		let mut verbatim = tscat::Verbatim::new(0x06, tscat::Framing::Pes);
 		verbatim.stream_id = Some(VERBATIM_PES_STREAM_ID);
 		let mut pes_track = tscat::Track::new(VERBATIM_PES_PID);

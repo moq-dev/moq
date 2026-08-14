@@ -290,10 +290,11 @@ impl<E: CatalogExt> Producer<E> {
 	/// Track properties for a media track under this catalog: hang's media defaults, plus any
 	/// [`Config::with_max_age`] override.
 	///
-	/// Chain [`with_timescale`](moq_net::track::Info::with_timescale) for a container that
-	/// carries the source's own scale (CMAF and Matroska both do).
-	pub fn track_info(&self) -> moq_net::track::Info {
-		let info = hang::container::track_info();
+	/// `priority` should come from [`PRIORITY`](hang::catalog::PRIORITY) for the kind of media
+	/// the track carries. Chain [`with_timescale`](moq_net::track::Info::with_timescale) for a
+	/// container that carries the source's own scale (CMAF and Matroska both do).
+	pub fn track_info(&self, priority: u8) -> moq_net::track::Info {
+		let info = hang::container::track_info(priority);
 		match self.max_age {
 			Some(max_age) => info.with_max_age(max_age),
 			None => info,
@@ -704,8 +705,8 @@ mod test {
 		// Unset, a catalog mints hang's media defaults, sized so a segmented egress can serve a
 		// full playlist window rather than moq-net's live-edge default.
 		let catalog = Producer::new(&mut broadcast).unwrap();
-		assert_eq!(catalog.track_info().max_age, hang::container::track_info().max_age);
-		assert!(catalog.track_info().max_age > moq_net::track::DEFAULT_MAX_AGE);
+		assert_eq!(catalog.track_info(hang::catalog::PRIORITY.video).max_age, hang::container::track_info(hang::catalog::PRIORITY.video).max_age);
+		assert!(catalog.track_info(hang::catalog::PRIORITY.video).max_age > moq_net::track::DEFAULT_MAX_AGE);
 
 		// An override reaches every media track this catalog mints, and does NOT disturb the
 		// timescale hang pins (or survive a retimescale for a source-scale container).
@@ -713,7 +714,7 @@ mod test {
 		let config = Config::default().with_max_age(std::time::Duration::from_secs(3));
 		let catalog = Producer::with_config(&mut broadcast, config).unwrap();
 
-		let info = catalog.track_info();
+		let info = catalog.track_info(hang::catalog::PRIORITY.video);
 		assert_eq!(info.max_age, std::time::Duration::from_secs(3));
 		assert_eq!(info.timescale, hang::container::TIMESCALE);
 
@@ -724,10 +725,10 @@ mod test {
 		// Every handle mints under the same policy, whatever order it was taken in: the codec
 		// paths hold a reservation and the container paths hold a clone.
 		assert_eq!(
-			catalog.reserve().track_info().max_age,
+			catalog.reserve().track_info(hang::catalog::PRIORITY.video).max_age,
 			std::time::Duration::from_secs(3)
 		);
-		assert_eq!(catalog.clone().track_info().max_age, std::time::Duration::from_secs(3));
+		assert_eq!(catalog.clone().track_info(hang::catalog::PRIORITY.video).max_age, std::time::Duration::from_secs(3));
 	}
 
 	#[test]

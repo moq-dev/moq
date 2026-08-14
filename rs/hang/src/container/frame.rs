@@ -42,10 +42,19 @@ const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 /// anyone play further behind live: a subscriber's own
 /// [`Subscription::max_age`](moq_net::track::Subscription::max_age) defaults to
 /// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) (skip the moment a newer group arrives).
-pub fn track_info() -> moq_net::track::Info {
+///
+/// `priority` is the publisher's tie-break priority, and should come from
+/// [`PRIORITY`](crate::catalog::PRIORITY) so every publisher orders its kinds the
+/// same way (`PRIORITY.video` for a video track, and so on). It's a parameter
+/// rather than a default because there is no correct value for "some media
+/// track": leaving it at zero is what puts audio and video in one undifferentiated
+/// tier, both on the wire and in
+/// [`bandwidth::Allocator`](moq_net::bandwidth::Allocator).
+pub fn track_info(priority: u8) -> moq_net::track::Info {
 	moq_net::track::Info::default()
 		.with_timescale(TIMESCALE)
 		.with_max_age(MAX_AGE)
+		.with_priority(priority)
 }
 
 /// A media frame with a timestamp and codec-specific payload.
@@ -165,21 +174,32 @@ mod test {
 		assert_eq!(decoded.timestamp, Timestamp::from_micros(1_234_567).expect("timestamp"));
 	}
 
+	/// Publishers stamp the kind's priority, which is what keeps audio ahead of video
+	/// both on the wire and in `bandwidth::Allocator`. It is a parameter precisely so
+	/// this can't silently fall back to the undifferentiated default.
+	#[test]
+	fn track_info_carries_the_publisher_priority() {
+		use crate::catalog::PRIORITY;
+
+		assert_eq!(track_info(PRIORITY.video).priority, PRIORITY.video);
+		assert_eq!(track_info(PRIORITY.audio).priority, PRIORITY.audio);
+	}
+
 	#[test]
 	fn track_info_uses_container_timescale() {
-		assert_eq!(track_info().timescale, TIMESCALE);
+		assert_eq!(track_info(crate::catalog::PRIORITY.video).timescale, TIMESCALE);
 	}
 
 	#[test]
 	fn media_tracks_declare_their_retention() {
 		// A media track is read as history (a segmented egress FETCHes segments a playlist
 		// advertised), so it declares a retention rather than inheriting the live-edge default.
-		assert_eq!(track_info().max_age, MAX_AGE);
+		assert_eq!(track_info(crate::catalog::PRIORITY.video).max_age, MAX_AGE);
 		assert!(MAX_AGE > moq_net::track::DEFAULT_MAX_AGE);
 
 		// Retimescaling for a container that carries the source's own scale keeps it, since that
 		// is the shape that would otherwise reach for `Info::default()` and lose the retention.
-		let at = track_info().with_timescale(Timescale::MILLI);
+		let at = track_info(crate::catalog::PRIORITY.video).with_timescale(Timescale::MILLI);
 		assert_eq!(at.timescale, Timescale::MILLI);
 		assert_eq!(at.max_age, MAX_AGE);
 	}

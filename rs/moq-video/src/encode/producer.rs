@@ -105,7 +105,7 @@ impl<E: CatalogExt> Producer<E> {
 				)));
 			}
 		};
-		let track = broadcast.unique_track(suffix, catalog.track_info())?;
+		let track = broadcast.unique_track(suffix, catalog.track_info(hang::catalog::PRIORITY.video))?;
 		Self::with_track(track, catalog, rendition)
 	}
 

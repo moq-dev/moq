@@ -199,7 +199,7 @@ impl<E: CatalogExt> Track<E> {
 	) -> Result<Self> {
 		// Accept at the legacy microsecond timescale, matching the frame timestamps the container
 		// stamps. A codec-specific timescale (e.g. the opus sample rate) would be chosen here.
-		let track = request.accept(reserved.track_info());
+		let track = request.accept(reserved.track_info(hang::catalog::PRIORITY.audio));
 		let data = init.data.as_ref();
 		let kind = match init.format {
 			AudioFormat::Aac => {
@@ -236,7 +236,7 @@ impl<E: CatalogExt> Track<E> {
 	) -> Result<Self> {
 		use hang::catalog::VideoCodec;
 
-		let track = request.accept(reserved.track_info());
+		let track = request.accept(reserved.track_info(hang::catalog::PRIORITY.video));
 		let data = init.data.as_ref();
 		let kind = match init.format {
 			VideoFormat::Avc1 => {
@@ -561,7 +561,7 @@ impl<E: CatalogExt> TrackStream<E> {
 		reserved: crate::catalog::Reserved<E>,
 		init: VideoInit,
 	) -> Result<Self> {
-		let track = request.accept(reserved.track_info());
+		let track = request.accept(reserved.track_info(hang::catalog::PRIORITY.video));
 		let hint = video_hint(&init, None);
 		// Only the self-delimiting codecs can be recovered from a raw byte stream.
 		let kind = match init.format {
@@ -891,7 +891,9 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn opus_import_delivers_frames() {
 		let (mut broadcast, catalog) = new_broadcast();
-		let track = broadcast.create_track("audio", hang::container::track_info()).unwrap();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
 		let subscriber = track.subscribe(None);
 
 		let config = crate::codec::opus::Config::new(48_000, 2);
@@ -933,7 +935,9 @@ mod tests {
 		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: &crate::catalog::Producer,
 	) -> (crate::codec::opus::Import, moq_net::track::Subscriber) {
-		let track = broadcast.create_track("audio", hang::container::track_info()).unwrap();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
 		// Every group is written before anything reads, which the default
 		// REAL_TIME budget would collapse to the live edge.
 		let subscriber = track.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(30)));

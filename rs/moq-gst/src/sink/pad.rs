@@ -332,7 +332,7 @@ impl Pad {
 				// directly and lifts it into a `Track` via `.into()`.
 				let name = Self::track_name(&broadcast, requested, ".mp3");
 				let request = broadcast.reserve_track(name.clone())?;
-				let producer = request.accept(hang::container::track_info());
+				let producer = request.accept(hang::container::track_info(hang::catalog::PRIORITY.audio));
 				(
 					moq_mux::codec::mp3::Import::new(
 						producer,
@@ -377,7 +377,7 @@ impl Pad {
 				// importer directly and lifts it into a `Track` via `.into()`.
 				let name = Self::track_name(&broadcast, requested, ".opus");
 				let request = broadcast.reserve_track(name.clone())?;
-				let producer = request.accept(hang::container::track_info());
+				let producer = request.accept(hang::container::track_info(hang::catalog::PRIORITY.audio));
 				(
 					moq_mux::codec::opus::Import::new(
 						producer,
@@ -416,7 +416,7 @@ impl Pad {
 		structure: &gst::StructureRef,
 	) -> Result<Text> {
 		let request = broadcast.reserve_track(name.clone())?;
-		let producer = request.accept(hang::container::track_info());
+		let producer = request.accept(hang::container::track_info(hang::catalog::PRIORITY.text));
 
 		let mut config = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
 		// A demuxed text track is a subtitle track unless something says otherwise. Claiming

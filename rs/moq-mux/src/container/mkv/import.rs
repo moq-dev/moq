@@ -67,6 +67,17 @@ enum TrackKind {
 	Audio,
 }
 
+impl TrackKind {
+	/// The publisher priority for this kind of media, so audio isn't stuck behind a
+	/// video backlog on a busy connection.
+	fn priority(&self) -> u8 {
+		match self {
+			Self::Video => hang::catalog::PRIORITY.video,
+			Self::Audio => hang::catalog::PRIORITY.audio,
+		}
+	}
+}
+
 struct MkvTrack {
 	kind: TrackKind,
 	track: crate::container::Producer<crate::catalog::hang::Container>,
@@ -282,9 +293,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 		};
 
-		let track = self
-			.broadcast
-			.create_track(self.broadcast.unique_name(suffix), self.catalog.track_info())?;
+		let track = self.broadcast.create_track(
+			self.broadcast.unique_name(suffix),
+			self.catalog.track_info(kind.priority()),
+		)?;
 		let name = track.name().to_string();
 
 		// Build the media producer before publishing the rendition. It is fallible (its

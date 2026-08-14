@@ -157,10 +157,13 @@ impl<E: CatalogExt> Producer<E> {
 			// The catalog's info carries the microsecond timescale audio hang frames stamp, so
 			// Lite05 subscribers know what scale to expect and the model layer accepts
 			// Frame::timestamp on append, plus whatever retention the broadcast declared.
-			Some(name) => broadcast.create_track(name.clone(), catalog.track_info())?,
+			Some(name) => broadcast.create_track(name.clone(), catalog.track_info(hang::catalog::PRIORITY.audio))?,
 			// Mirrors the video side, which derives a unique name from the codec
 			// rather than making every caller invent one.
-			None => broadcast.unique_track(&format!(".{}", options.codec), catalog.track_info())?,
+			None => broadcast.unique_track(
+				&format!(".{}", options.codec),
+				catalog.track_info(hang::catalog::PRIORITY.audio),
+			)?,
 		};
 		let name = track.name().to_string();
 		let track = catalog.media_producer(track, moq_mux::container::legacy::Wire)?;

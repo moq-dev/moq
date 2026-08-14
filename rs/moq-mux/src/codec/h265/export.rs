@@ -266,7 +266,7 @@ mod tests {
 		let catalog = hvc1_catalog("video.hvc1", hvcc(vps, sps, pps));
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut track = broadcast
-			.create_track("video.hvc1", hang::container::track_info())
+			.create_track("video.hvc1", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 
 		let mut g0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();

@@ -335,7 +335,9 @@ impl MoqBroadcastProducer {
 		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
 		let producer = self.with_state(|state| match output.track {
 			Some(name) => {
-				let track = state.broadcast.create_track(name, state.catalog.track_info())?;
+				let track = state
+					.broadcast
+					.create_track(name, state.catalog.track_info(hang::catalog::PRIORITY.video))?;
 				Ok(moq_video::encode::Producer::with_track(
 					track,
 					state.catalog.clone(),
