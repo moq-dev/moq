@@ -86,11 +86,14 @@ generate = ["localhost", "127.0.0.1"]
 # Optional: root CAs to accept for mTLS peer authentication.
 # Clients that present a cert signed by one of these CAs are granted
 # full access (publish/subscribe/cluster). Intended for relay clustering.
-# Supported by the quinn and noq backends.
 root = ["/path/to/peer-ca.pem"]
 ```
 
-For production, use certificates from Let's Encrypt or another CA.
+For production, use certificates from Let's Encrypt or another CA. The Quinn
+and Noq backends watch certificate, key, and root CA files and reload them for
+new connections. Existing connections keep the identity established by their
+original handshake. The Quiche backend reloads outbound client roots but
+requires a relay restart after rotating its inbound TLS files.
 
 ### \[web.http]
 
@@ -132,7 +135,13 @@ listen = "0.0.0.0:443"
 # TLS certificates (can be the same as server.tls)
 cert = "cert.pem"
 key = "key.pem"
+
+# Optional root CAs for HTTPS/WSS client certificate authentication.
+root = ["/path/to/peer-ca.pem"]
 ```
+
+HTTPS certificate, key, and root CA files are watched and reloaded for new
+connections. A failed reload retains the last valid configuration.
 
 ### \[auth]
 
@@ -228,6 +237,10 @@ tls.disable_verify = true
 # address resolves. Defaults to 50ms, RFC 8305's Resolution Delay.
 # resolution_delay = "50ms"
 ```
+
+Custom client root files are watched and reloaded for new outbound connections.
+If a changed file is temporarily missing, empty, or invalid, the relay retains
+the last valid roots.
 
 The connect timeout is also available as `--client-connect-timeout` or
 `MOQ_CLIENT_CONNECT_TIMEOUT`, the failover delay as `--client-failover-delay` or

@@ -309,18 +309,13 @@ fn build_https_config(
 		.context("failed to build https TLS config")
 }
 
-/// Reload the HTTPS cert/key/root whenever they change on disk.
+/// Reload the HTTPS certificate and key whenever they change on disk.
 ///
 /// `RustlsConfig::reload_from_pem_file` would rebuild with `with_no_client_auth`
 /// (silently stripping mTLS when configured), so we always rebuild via the full
-/// [`build_https_config`] path.
+/// [`build_https_config`] path. The client verifier watches root files itself.
 async fn reload_https_config(config: RustlsConfig, cert: Vec<PathBuf>, key: Vec<PathBuf>, root: Vec<PathBuf>) {
-	let paths: Vec<PathBuf> = cert
-		.iter()
-		.cloned()
-		.chain(key.iter().cloned())
-		.chain(root.iter().cloned())
-		.collect();
+	let paths: Vec<PathBuf> = cert.iter().cloned().chain(key.iter().cloned()).collect();
 
 	let mut watcher = match moq_native::watch::FileWatcher::new(&paths) {
 		Ok(watcher) => watcher,
