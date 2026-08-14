@@ -550,19 +550,23 @@ test("lite draft-05: a straggler below the announced start group is not served",
 // to the next pop rather than reaching backward into this one.
 test("lite draft-05: a group popped before a cap update is still served", async () => {
 	const sub = await servedSubscription({ startGroup: 1, gated: true });
+	const ranges = spyOn(TrackSubscriber.prototype, "endAt");
 	try {
 		sub.serve(1);
 		await sub.parked;
 
 		await new SubscribeUpdate({ priority: 0, endGroup: 0 }).encode(sub.client.writer, Version.DRAFT_05);
 		await flush();
-		// The decoder queues controls, but the parked serving loop remains the sole state owner.
-		expect(sub.track.subscription.peek()?.endGroup).toBeUndefined();
+		// The full update is visible, but the parked serving loop still owns its local cursor.
+		expect(ranges).not.toHaveBeenCalled();
 
 		sub.release();
 		expect(await sub.servedSequence()).toBe(1);
-		while (sub.track.subscription.peek()?.endGroup !== 0) await sub.track.subscription.changed();
+		while (ranges.mock.calls.length === 0) await flush();
+		expect(ranges).toHaveBeenLastCalledWith(0);
 	} finally {
+		ranges.mockRestore();
+		sub.release();
 		await sub.close();
 	}
 });
@@ -572,6 +576,7 @@ test("lite draft-05: a group popped before a cap update is still served", async 
 // poll order.
 test("lite draft-06: a queued floor update applies before the next group pop", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, gated: true });
+	const ranges = spyOn(TrackSubscriber.prototype, "startAt");
 	try {
 		sub.serve(0);
 		await sub.parked;
@@ -580,14 +585,17 @@ test("lite draft-06: a queued floor update applies before the next group pop", a
 		await new SubscribeUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, Version.DRAFT_06);
 		sub.serve(2);
 		await flush();
-		expect(sub.track.subscription.peek()?.startGroup).toBe(0);
+		expect(ranges).toHaveBeenCalledTimes(1);
+		expect(ranges).toHaveBeenLastCalledWith(0);
 
 		sub.release();
 
 		expect(await sub.servedSequence()).toBe(0);
 		expect(await sub.servedSequence()).toBe(2);
-		while (sub.track.subscription.peek()?.startGroup !== 2) await sub.track.subscription.changed();
+		expect(ranges).toHaveBeenLastCalledWith(2);
 	} finally {
+		ranges.mockRestore();
+		sub.release();
 		await sub.close();
 	}
 });
@@ -601,6 +609,7 @@ test("lite draft-06: a queued frame floor applies before the next group pop", as
 		frames: ["a", "b", "c"],
 		gated: true,
 	});
+	const ranges = spyOn(TrackSubscriber.prototype, "startAt");
 	try {
 		sub.serve(0);
 		await sub.parked;
@@ -611,14 +620,17 @@ test("lite draft-06: a queued frame floor applies before the next group pop", as
 			Version.DRAFT_06,
 		);
 		await flush();
-		expect(sub.track.subscription.peek()?.startGroup).toBe(0);
+		expect(ranges).toHaveBeenCalledTimes(1);
+		expect(ranges).toHaveBeenLastCalledWith(0);
 
 		sub.release();
 
 		expect(await sub.servedGroup()).toEqual({ sequence: 0, frameStart: 0, payloads: ["a", "b", "c"] });
 		expect(await sub.servedGroup()).toEqual({ sequence: 1, frameStart: 2, payloads: ["c"] });
-		while (sub.track.subscription.peek()?.startGroup !== 1) await sub.track.subscription.changed();
+		expect(ranges).toHaveBeenLastCalledWith(1);
 	} finally {
+		ranges.mockRestore();
+		sub.release();
 		await sub.close();
 	}
 });
@@ -696,7 +708,7 @@ test("lite draft-06: a burst of updates coalesces before the next group pop", as
 		sub.serve(0);
 		await sub.parked;
 		sub.serve(1);
-		const updates = spyOn(TrackSubscriber.prototype, "update");
+		const ranges = spyOn(TrackSubscriber.prototype, "endAt");
 
 		try {
 			// Two updates land back to back, the second superseding the first.
@@ -720,9 +732,10 @@ test("lite draft-06: a burst of updates coalesces before the next group pop", as
 			});
 			// Group 1 is popped under the latest state, with no application of the older one.
 			expect(await sub.servedGroup()).toEqual({ sequence: 1, frameStart: 0, payloads: ["a"] });
-			expect(updates).toHaveBeenCalledTimes(1);
+			expect(ranges).toHaveBeenCalledTimes(1);
+			expect(ranges).toHaveBeenLastCalledWith(1);
 		} finally {
-			updates.mockRestore();
+			ranges.mockRestore();
 		}
 	} finally {
 		await sub.close();
@@ -738,13 +751,13 @@ test("lite draft-06: a newer update wins before a buffered group backlog drains"
 		gated: true,
 	});
 	let second!: Promise<void>;
-	const update = TrackSubscriber.prototype.update;
-	const updates = spyOn(TrackSubscriber.prototype, "update").mockImplementation(function (
+	const endAt = TrackSubscriber.prototype.endAt;
+	const ranges = spyOn(TrackSubscriber.prototype, "endAt").mockImplementation(function (
 		this: TrackSubscriber,
-		options,
+		endGroup,
 	) {
 		second ??= new SubscribeUpdate({ priority: 0, endGroup: 1 }).encode(sub.client.writer, Version.DRAFT_06);
-		return update.call(this, options);
+		return endAt.call(this, endGroup);
 	});
 
 	try {
@@ -764,9 +777,44 @@ test("lite draft-06: a newer update wins before a buffered group backlog drains"
 		expect(await sub.servedSequence()).toBe(1);
 		await second;
 		expect(await sub.servedSequence()).toBeUndefined();
-		expect(updates).toHaveBeenCalledTimes(2);
+		expect(ranges).toHaveBeenCalledTimes(2);
 	} finally {
-		updates.mockRestore();
+		ranges.mockRestore();
+		await sub.close();
+	}
+});
+
+// Scheduling affects streams already in flight, so it cannot wait behind a response write.
+// The full update remains atomic to observers, while the local range cursor stays serialized.
+test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, gated: true });
+	const ranges = spyOn(TrackSubscriber.prototype, "endAt");
+	try {
+		sub.serve(0);
+		await sub.parked;
+
+		await new SubscribeUpdate({ priority: 9, ordered: true, endGroup: 5 }).encode(
+			sub.client.writer,
+			Version.DRAFT_06,
+		);
+		await flush();
+
+		expect(sub.track.subscription.peek()).toEqual({
+			priority: 9,
+			ordered: true,
+			latencyMax: 0,
+			startGroup: undefined,
+			endGroup: 5,
+		});
+		expect(ranges).not.toHaveBeenCalled();
+
+		sub.release();
+		expect(await sub.servedSequence()).toBe(0);
+		while (ranges.mock.calls.length === 0) await flush();
+		expect(ranges).toHaveBeenLastCalledWith(5);
+	} finally {
+		ranges.mockRestore();
+		sub.release();
 		await sub.close();
 	}
 });
@@ -787,6 +835,27 @@ test("lite draft-05: a peer FIN ends serving while the producer is still live", 
 
 		expect(await sub.servedSequence()).toBeUndefined();
 	} finally {
+		await sub.close();
+	}
+});
+
+// The two halves of a bidirectional stream close independently. A peer FIN cannot unblock a
+// response write by itself, so serving must race the write against decoded termination.
+test("lite draft-05: a peer FIN interrupts a blocked SUBSCRIBE_START", async () => {
+	const sub = await servedSubscription({ startGroup: 0, gated: true });
+	try {
+		sub.serve(0);
+		await sub.parked;
+
+		sub.client.writer.close();
+		const stopped = await Promise.race([
+			sub.serving.then(() => true),
+			new Promise<false>((resolve) => setTimeout(() => resolve(false), IDLE_MS)),
+		]);
+		expect(stopped).toBe(true);
+	} finally {
+		// Also unwinds the old behavior when this regression fails.
+		sub.release();
 		await sub.close();
 	}
 });

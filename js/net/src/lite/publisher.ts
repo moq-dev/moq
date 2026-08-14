@@ -134,12 +134,20 @@ type Control =
 	/** The stream failed; the subscription goes down with it. */
 	| { kind: "error"; error: Error };
 
+type SubscriptionControlOptions = {
+	reader: Reader;
+	writer: Writer;
+	version: Version;
+	apply: (update: SubscribeUpdate) => void;
+};
+
 /**
  * The subscribe stream's control half, decoded ahead of the serving loop.
  *
- * Decoding runs on its own, but only stores the latest full-state update: the serving loop owns
- * the track cursor and frame bounds, so nothing here may apply an update itself. That is what
- * keeps a group pop and its frame-range snapshot one indivisible step.
+ * Decoding runs on its own and publishes each full subscription update immediately, so a
+ * blocked response write cannot delay re-ranking streams already in flight. It separately
+ * stores only the latest range state for the serving loop, which owns the local track cursor
+ * and frame bounds. That keeps a group pop and its frame-range snapshot one indivisible step.
  *
  * Reading ahead makes control-first ordering hold for a burst. Coalescing bounds memory while
  * preserving the newest state decoded before the next group pop. The Rust publisher gets the
@@ -150,13 +158,18 @@ class SubscriptionControls {
 	#update?: SubscribeUpdate;
 	// Sticky, first one wins: null once the stream is over, an Error once it failed.
 	#end?: Error | null;
+	#ended: Promise<Error | null>;
+	#resolveEnd!: (end: Error | null) => void;
 	#changed = new Signal(0);
 
 	/** Settles once decoding stops, so teardown can wait for it rather than leaving it running. */
 	readonly decoding: Promise<void>;
 
-	constructor(reader: Reader, writer: Writer, version: Version) {
-		this.decoding = this.#decode(reader, version);
+	constructor({ reader, writer, version, apply }: SubscriptionControlOptions) {
+		this.#ended = new Promise((resolve) => {
+			this.#resolveEnd = resolve;
+		});
+		this.decoding = this.#decode(reader, version, apply);
 		// Our own half going away ends the loop too, and has to reach it the same way: the
 		// loop looks at nothing else.
 		void writer.closed.then(
@@ -180,17 +193,35 @@ class SubscriptionControls {
 		return this.#changed.changed(fn);
 	}
 
+	/** Returns false when peer departure supersedes a blocked response write. */
+	async response(pending: Promise<void>): Promise<boolean> {
+		const result = await Promise.race([
+			pending.then(
+				() => ({ kind: "sent" }) as const,
+				(err: unknown) => ({ kind: "error", error: error(err) }) as const,
+			),
+			this.#ended.then((end) => ({ kind: "ended", end }) as const),
+		]);
+
+		if (result.kind === "sent") return true;
+		if (result.kind === "error") throw result.error;
+		if (result.end) throw result.end;
+		return false;
+	}
+
 	#finish(end: Error | null) {
 		if (this.#end !== undefined) return;
 		this.#end = end;
+		this.#resolveEnd(end);
 		this.#changed.update((value) => value + 1);
 	}
 
-	async #decode(reader: Reader, version: Version) {
+	async #decode(reader: Reader, version: Version, apply: (update: SubscribeUpdate) => void) {
 		try {
 			while (this.#end === undefined) {
 				const update = await SubscribeUpdate.decodeMaybe(reader, version);
 				if (!update) break;
+				apply(update);
 				this.#update = update;
 				this.#changed.update((value) => value + 1);
 			}
@@ -467,7 +498,20 @@ export class Publisher {
 				datagrams = this.#runDatagrams(msg.id, track, timescale);
 			}
 
-			controls = new SubscriptionControls(stream.reader, stream.writer, this.version);
+			controls = new SubscriptionControls({
+				reader: stream.reader,
+				writer: stream.writer,
+				version: this.version,
+				apply: (update) => {
+					track.update({
+						priority: update.priority,
+						ordered: update.ordered,
+						latencyMax: update.latencyMax,
+						startGroup: update.startGroup,
+						endGroup: update.endGroup,
+					});
+				},
+			});
 			await this.#runTrack(track, stream.writer, controls, {
 				sub: msg.id,
 				broadcast: msg.broadcast,
@@ -571,11 +615,14 @@ export class Publisher {
 		// SUBSCRIBE_END names that boundary, which a cap can hold groups back from, so it goes
 		// out as soon as the producer finishes and the subscription keeps serving whatever a
 		// later cap raise releases (see the Rust publisher's Recv::Boundary).
-		const sendEnd = async () => {
+		const sendEnd = async (): Promise<boolean> => {
 			endSent = true;
 			if (emitRange) {
-				await encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary()) }, this.version);
+				return controls.response(
+					encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary()) }, this.version),
+				);
 			}
+			return true;
 		};
 
 		// One ranking for the whole subscription, shared by every group it serves.
@@ -607,13 +654,6 @@ export class Publisher {
 						case "update": {
 							const update = control.update;
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
-							track.update({
-								priority: update.priority,
-								ordered: update.ordered,
-								latencyMax: update.latencyMax,
-								startGroup: update.startGroup,
-								endGroup: update.endGroup,
-							});
 							if (update.startGroup !== undefined) track.startAt(update.startGroup);
 							track.endAt(update.endGroup);
 							bounds.startGroup = update.startGroup;
@@ -639,14 +679,14 @@ export class Publisher {
 						// The producer finished but is still holding groups above the cap.
 						// Declare the boundary, then wait for an update to release them.
 						if (!endSent) {
-							await sendEnd();
+							if (!(await sendEnd())) return;
 							continue;
 						}
 						await waitForSubscription(controls, track);
 						continue;
 					case "done":
 						if (!endSent) {
-							await sendEnd();
+							if (!(await sendEnd())) return;
 							continue;
 						}
 						finished = true;
@@ -662,7 +702,16 @@ export class Publisher {
 					// Arrival-order serving could later surface a straggler below the first
 					// group, so pin the floor to what was announced.
 					track.startAt(group.sequence);
-					await encodeSubscribeResponse(stream, { start: new SubscribeStart(group.sequence) }, this.version);
+					if (
+						!(await controls.response(
+							encodeSubscribeResponse(
+								stream,
+								{ start: new SubscribeStart(group.sequence) },
+								this.version,
+							),
+						))
+					)
+						return;
 				}
 
 				void this.#runGroup({
