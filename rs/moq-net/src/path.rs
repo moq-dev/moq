@@ -369,6 +369,40 @@ impl<'a> Path<'a> {
 			})
 		}
 	}
+
+	/// Resolve a [`PathRelative`], returning `None` if it escapes above the root.
+	///
+	/// Unlike [`Path::resolve`], this distinguishes a valid reference to the empty root
+	/// path from excess `..` segments. Use it when an untrusted relative reference must
+	/// not be clamped to the root.
+	pub fn try_resolve(&self, rel: &PathRelative<'_>) -> Option<PathOwned> {
+		if rel.is_empty() {
+			return Some(self.to_owned());
+		}
+
+		let mut segments: Vec<&str> = self.parts().collect();
+		segments.pop();
+
+		for seg in rel.as_str().split('/') {
+			if seg == "." {
+				continue;
+			} else if seg == ".." {
+				segments.pop()?;
+			} else {
+				segments.push(seg);
+			}
+		}
+
+		let path = segments.join("/");
+		if path.is_empty() {
+			Some(Path::empty())
+		} else {
+			Some(Path(Repr::Shared {
+				buf: path.into(),
+				start: 0,
+			}))
+		}
+	}
 }
 
 // Comparisons, ordering, and hashing all go through `as_str()` so a borrowed and a
@@ -1446,5 +1480,16 @@ mod tests {
 		// caller compare resolved == base to detect a self-reference.
 		let base = Path::new("a/b");
 		assert_eq!(base.resolve(&PathRelative::new("./b")).as_str(), "a/b");
+	}
+
+	#[test]
+	fn test_try_resolve_distinguishes_root_from_escape() {
+		let base = Path::new("top");
+		assert_eq!(base.try_resolve(&PathRelative::new(".")).unwrap().as_str(), "");
+		assert!(base.try_resolve(&PathRelative::new("..")).is_none());
+
+		let nested = Path::new("a/b");
+		assert_eq!(nested.try_resolve(&PathRelative::new("..")).unwrap().as_str(), "");
+		assert!(nested.try_resolve(&PathRelative::new("../..")).is_none());
 	}
 }

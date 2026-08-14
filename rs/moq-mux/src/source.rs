@@ -47,19 +47,16 @@ impl Source {
 	/// Begin resolving the broadcast that serves rendition track `name`, honoring an
 	/// optional cross-broadcast reference.
 	///
-	/// A missing/empty `rel`, or one that resolves back to the catalog's own path (or
-	/// walks past the origin root), targets the catalog broadcast; anything else targets
-	/// the resolved sibling broadcast. Either way the broadcast is fetched from the origin,
+	/// A missing/empty `rel`, one that resolves back to the catalog's own path, or one that
+	/// walks past the origin root targets the catalog broadcast. Anything else, including
+	/// the empty root broadcast, targets the resolved path. Either way it is fetched from the origin,
 	/// which deduplicates repeat requests for the same live path (announced or dynamically
 	/// served) so the catalog and every rendition share one upstream subscription.
 	pub(crate) fn request(&self, rel: Option<&moq_net::PathRelative<'_>>) -> kio::Pending<moq_net::origin::Requesting> {
 		let target = match rel.filter(|rel| !rel.is_empty()) {
-			// Excess `..` clamps to the (empty) origin root, which is not a broadcast; treat
-			// it as a self-reference and use the catalog broadcast instead.
-			Some(rel) => match self.path.resolve(rel) {
-				resolved if resolved.is_empty() => self.path.clone(),
-				resolved => resolved,
-			},
+			// Preserve the existing self-reference fallback for an escape, while allowing
+			// a valid reference to the empty root broadcast to remain empty.
+			Some(rel) => self.path.try_resolve(rel).unwrap_or_else(|| self.path.clone()),
 			None => self.path.clone(),
 		};
 
@@ -240,5 +237,27 @@ mod tests {
 			.subscribe_track(Some(&rel), "video")
 			.await
 			.expect("dot should resolve to the catalog broadcast's parent");
+	}
+
+	#[tokio::test]
+	async fn dot_resolves_one_segment_catalog_to_root() {
+		let origin = Origin::random().produce();
+
+		let _catalog = origin
+			.create_broadcast("top", moq_net::broadcast::Route::new().with_announce(true))
+			.unwrap();
+
+		let mut root = origin
+			.create_broadcast("", moq_net::broadcast::Route::new().with_announce(true))
+			.unwrap();
+		let _video = root.create_track("video", None).unwrap();
+		settle().await;
+
+		let source = Source::new(origin.consume(), "top");
+		let rel = PathRelative::new(".");
+		source
+			.subscribe_track(Some(&rel), "video")
+			.await
+			.expect("dot should resolve to the empty root broadcast");
 	}
 }

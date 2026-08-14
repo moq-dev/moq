@@ -67,15 +67,19 @@ fn parse_resize_acceleration(arg: &str) -> Result<moq_video::resize::Acceleratio
 /// Run the transcoder: subscribe to the source through the relay, publish the
 /// derivative back through the same session, and serve rungs until either ends.
 pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
-	let source_path = moq
-		.broadcast
-		.clone()
-		.filter(|name| !name.is_empty())
-		.context("`transcode` requires the source broadcast: pass --broadcast <name>")?;
-	let output_path = args
-		.output
-		.clone()
-		.unwrap_or_else(|| format!("{source_path}/transcode.hang"));
+	let source_path = moq_net::PathOwned::from(
+		moq.broadcast
+			.clone()
+			.context("`transcode` requires the source broadcast: pass --broadcast <name>")?,
+	);
+	if source_path.is_empty() {
+		anyhow::bail!("`transcode` requires the source broadcast: pass --broadcast <name>");
+	}
+	let output_path = moq_net::PathOwned::from(
+		args.output
+			.clone()
+			.unwrap_or_else(|| format!("{source_path}/transcode.hang")),
+	);
 
 	// Publish the derivative through one origin and consume the source through
 	// another, over a single auto-reconnecting session.
@@ -135,7 +139,7 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	config.resize.acceleration = args.resize_acceleration;
 	// Reference the source renditions relatively when the output nests under it;
 	// otherwise the derivative catalog advertises only the rungs.
-	config.source = source_reference(&source_path, &output_path);
+	config.source = moq_transcode::source_reference(&source_path, &output_path);
 
 	let output = publish
 		.create_broadcast(&output_path, moq_net::broadcast::Route::new().with_announce(true))
@@ -145,36 +149,5 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	tokio::select! {
 		res = moq_transcode::run(source, output, config) => Ok(res?),
 		res = session.closed() => Ok(res?),
-	}
-}
-
-fn source_reference(source: &str, output: &str) -> Option<moq_net::PathRelativeOwned> {
-	output.strip_prefix(&format!("{source}/")).map(|rest| {
-		let parents = rest.split('/').count().saturating_sub(1);
-		let rel = if parents == 0 {
-			".".to_string()
-		} else {
-			vec![".."; parents].join("/")
-		};
-		moq_net::PathRelativeOwned::from(rel)
-	})
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn source_reference_resolves_from_output_parent() {
-		assert_eq!(source_reference("a/b", "a/b/transcode.hang").unwrap().as_str(), ".");
-		assert_eq!(
-			source_reference("a/b", "a/b/dir/transcode.hang").unwrap().as_str(),
-			".."
-		);
-		assert_eq!(
-			source_reference("a/b", "a/b/one/two/transcode.hang").unwrap().as_str(),
-			"../.."
-		);
-		assert!(source_reference("a/b", "other/transcode.hang").is_none());
 	}
 }

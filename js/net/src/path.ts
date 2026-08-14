@@ -228,3 +228,30 @@ export function resolve(base: Valid, rel: string): Valid {
 
 	return segments.join("/") as Valid;
 }
+
+/**
+ * Resolve a relative path, returning `undefined` if it escapes above the root.
+ *
+ * Unlike {@link resolve}, this distinguishes a valid reference to the empty root
+ * path from excess `..` segments. Use it for untrusted catalog references that
+ * must not be clamped to the root.
+ */
+export function tryResolve(base: Valid, rel: string): Valid | undefined {
+	if (rel === "") return base;
+
+	const segments = base === "" ? [] : base.split("/");
+	segments.pop();
+
+	for (const seg of rel.split("/")) {
+		if (seg === "" || seg === ".") {
+			continue;
+		}
+		if (seg === "..") {
+			if (segments.pop() === undefined) return undefined;
+		} else {
+			segments.push(seg);
+		}
+	}
+
+	return segments.join("/") as Valid;
+}

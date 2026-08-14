@@ -6,9 +6,9 @@
 //     cargo run -p moq-transcode --example transcode -- \
 //         --url http://localhost:4443/anon --source my-broadcast
 //
-// The derivative appears at `<source>/transcode.hang`: its catalog references
-// the source renditions via a relative `broadcast: "."` pointer and adds the
-// ladder rungs, which are only encoded while someone watches (or fetches) them.
+// When the derivative is nested beneath the source, its catalog references the
+// source renditions relatively and adds the ladder rungs. An unrelated output
+// omits the passthrough renditions. Rungs are only encoded while watched or fetched.
 
 use anyhow::Context;
 use clap::Parser;
@@ -32,10 +32,12 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
 	moq_native::Log::new(tracing::Level::INFO).init()?;
 	let args = Args::parse();
-	let output_path = args
-		.output
-		.clone()
-		.unwrap_or_else(|| format!("{}/transcode.hang", args.source));
+	let source_path = moq_net::PathOwned::from(args.source);
+	let output_path = moq_net::PathOwned::from(
+		args.output
+			.clone()
+			.unwrap_or_else(|| format!("{source_path}/transcode.hang")),
+	);
 
 	// Publish the derivative through one origin and consume the source through
 	// another, over a single auto-reconnecting session.
@@ -57,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
 	// otherwise leave us waiting for an announcement that can never arrive.
 	let consumer = remote.consume();
 	tokio::select! {
-		announced = consumer.announced_broadcast(&args.source) => {
+		announced = consumer.announced_broadcast(&source_path) => {
 			announced.context("origin closed before the source broadcast was announced")?;
 		}
 		closed = session.closed() => {
@@ -68,19 +70,19 @@ async fn main() -> anyhow::Result<()> {
 
 	// Resolve it for real; the session subscribes upstream on demand.
 	let source = consumer
-		.request_broadcast(&args.source)
+		.request_broadcast(&source_path)
 		.await
 		.context("source broadcast unavailable")?;
 
 	let mut config = moq_transcode::Config::default();
-	// The derivative lives one level below the source, so its parent is the source.
-	// The default ladder and encoder (hardware first: NVENC on Linux) apply.
-	config.source = Some(moq_net::PathRelativeOwned::from(".".to_string()));
+	// Reference the source when the normalized output is nested beneath it. The
+	// default ladder and encoder (hardware first: NVENC on Linux) apply.
+	config.source = moq_transcode::source_reference(&source_path, &output_path);
 
 	let output = publish
 		.create_broadcast(&output_path, moq_net::broadcast::Route::new().with_announce(true))
 		.context("failed to create the derivative broadcast")?;
-	tracing::info!(source = %args.source, output = %output_path, "transcoding");
+	tracing::info!(source = %source_path, output = %output_path, "transcoding");
 
 	tokio::select! {
 		res = moq_transcode::run(source, output, config) => Ok(res?),

@@ -264,12 +264,11 @@ export class Broadcast {
 		if (!rel) return effect.get(this.out.active);
 
 		const base = effect.get(this.in.name);
-		const resolved = Path.resolve(base, rel);
+		const resolved = Path.tryResolve(base, rel);
 
-		// A reference that walks back to the catalog's own broadcast (or resolves to
-		// the empty root, via excess `..`) is served by the catalog broadcast itself,
-		// avoiding a duplicate subscription on the same path.
-		if (resolved === base || resolved === Path.empty()) return effect.get(this.out.active);
+		// An escape or a reference back to the catalog is served by the catalog broadcast.
+		// A valid empty result names the root broadcast and continues below.
+		if (resolved === undefined || resolved === base) return effect.get(this.out.active);
 
 		if (!effect.get(this.in.enabled)) return undefined;
 

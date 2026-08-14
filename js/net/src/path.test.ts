@@ -233,6 +233,13 @@ test("resolve self-reference via sibling name equals base", () => {
 	expect(Path.resolve(Path.from("a/b"), "./b")).toBe(Path.from("a/b"));
 });
 
+test("tryResolve distinguishes the root from an escape", () => {
+	expect(Path.tryResolve(Path.from("top"), ".")).toBe(Path.empty());
+	expect(Path.tryResolve(Path.from("top"), "..")).toBeUndefined();
+	expect(Path.tryResolve(Path.from("a/b"), "..")).toBe(Path.empty());
+	expect(Path.tryResolve(Path.from("a/b"), "../..")).toBeUndefined();
+});
+
 test("normalizeRelative preserves an all-dot reference", () => {
 	expect(Path.normalizeRelative("")).toBe("");
 	expect(Path.normalizeRelative(".")).toBe(".");
