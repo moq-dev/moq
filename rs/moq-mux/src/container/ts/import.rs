@@ -1005,11 +1005,13 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 struct Continuity {
 	/// Last continuity_counter seen on a packet with payload, to spot gaps.
 	last_cc: Option<u8>,
+	/// Last payload packet, to skip ISO 13818-1 duplicates (same cc, identical bytes).
+	last_pkt: Option<[u8; 188]>,
 }
 
 /// What one packet says about the bytes already accumulated for its PID.
 enum Continuation {
-	/// A retransmission, which ISO 13818-1 permits once. Ignore the packet entirely:
+	/// An exact retransmission, which ISO 13818-1 permits once. Ignore the packet entirely:
 	/// processing it would duplicate its bytes.
 	Duplicate,
 	/// Contiguous with the previous payload packet.
@@ -1030,6 +1032,7 @@ impl Continuity {
 		// keeps the next clean packet from also looking like a gap.
 		if pkt[1] & 0x80 != 0 {
 			self.last_cc = None;
+			self.last_pkt = None;
 			return Continuation::Corrupt;
 		}
 
@@ -1047,20 +1050,23 @@ impl Continuity {
 		if !has_payload {
 			if discontinuity {
 				self.last_cc = None;
+				self.last_pkt = None;
 				return Continuation::Broken;
 			}
 			return Continuation::Contiguous;
 		}
 
-		// Only payload packets advance the counter, so this is the one place it moves.
-		let cc = pkt[3] & 0x0f;
-		// A repeat of the counter is never evidence that anything was lost, so it must not
-		// reach the gap check below and destroy a healthy partial. ISO 13818-1 lets a
-		// retransmission differ from the original in its PCR, so comparing the bytes would
-		// miss one; the counter is what actually carries the claim.
-		if self.last_cc == Some(cc) && !discontinuity {
+		// A retransmission repeats the counter, and so does a loss of exactly 15 packets.
+		// Only the bytes tell them apart, which is why the counter alone can't decide: taking
+		// every repeat for a duplicate would carry a partial straight across that loss and
+		// join it to unrelated bytes.
+		if self.last_pkt.as_ref().is_some_and(|last| last == pkt) {
 			return Continuation::Duplicate;
 		}
+		self.last_pkt = Some(*pkt);
+
+		// Only payload packets advance the counter, so this is the one place it moves.
+		let cc = pkt[3] & 0x0f;
 		let cc_gap = matches!(self.last_cc, Some(last) if cc != (last + 1) & 0x0f);
 		self.last_cc = Some(cc);
 		if discontinuity || cc_gap {
@@ -4008,27 +4014,6 @@ mod test {
 			run(&[corrupt, clean]),
 			vec![CUE.to_vec()],
 			"a section was emitted from a packet flagged corrupt"
-		);
-	}
-
-	#[test]
-	fn a_repeated_counter_never_drops_the_partial() {
-		// A repeat of the counter says nothing was lost, so it must never reach the gap check
-		// and destroy a healthy partial. Byte equality is too strict a test for it: ISO
-		// 13818-1 lets a retransmission differ from the original in its adaptation field, and
-		// anything outside the section can differ without the section changing.
-		// The repeat has to be a continuation for the loss to show: repeating a PUSI would
-		// just restart the same section and hide it.
-		let section = fake_section(0xfc, 400);
-		let first = packet(true, 0, 0, &section[..183]);
-		let middle = packet(false, 1, 0, &section[183..367]);
-		let mut repeat = middle.clone();
-		repeat[1] |= 0x20; // transport_priority: outside the section, like a refreshed PCR
-		let rest = packet(false, 2, 0, &section[367..]);
-		assert_eq!(
-			run(&[first, middle, repeat, rest]),
-			vec![section],
-			"a repeated counter was read as a gap and dropped an undamaged section"
 		);
 	}
 
