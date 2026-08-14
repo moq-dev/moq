@@ -140,12 +140,50 @@ impl DmaBufPlane {
 	}
 }
 
+/// An exported Linux DMA-BUF descriptor and its producer lease.
+///
+/// Keep this value alive for as long as an external device may read from the
+/// descriptor returned by [`as_fd`](Self::as_fd). Dropping it releases the
+/// producer's buffer when no other frame or export still owns that lease.
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+pub struct DmaBufExport {
+	fd: OwnedFd,
+	inner: Arc<dyn DmaBufFrame>,
+}
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+impl DmaBufExport {
+	/// Borrow the exported descriptor without separating it from its producer lease.
+	pub fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+		std::os::fd::AsFd::as_fd(&self.fd)
+	}
+
+	pub(crate) fn into_parts(self) -> (OwnedFd, Arc<dyn DmaBufFrame>) {
+		(self.fd, self.inner)
+	}
+}
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+impl std::os::fd::AsFd for DmaBufExport {
+	fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+		std::os::fd::AsFd::as_fd(&self.fd)
+	}
+}
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+impl std::fmt::Debug for DmaBufExport {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("DmaBufExport").finish_non_exhaustive()
+	}
+}
+
 /// A Linux DMA-BUF surface with an on-demand exported descriptor.
 ///
 /// Cloning this value retains the producer's surface but opens no file
 /// descriptor. [`export`](Self::export) duplicates the descriptor only when a
 /// consumer is ready to import it, avoiding one open fd for every buffered
-/// frame. Dropping the last clone releases the producer's buffer.
+/// frame. Dropping the last clone or [`DmaBufExport`] releases the producer's
+/// buffer.
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 #[derive(Clone)]
 pub struct DmaBuf {
@@ -195,9 +233,12 @@ impl DmaBuf {
 		})
 	}
 
-	/// Duplicate the allocation fd for one import operation.
-	pub fn export(&self) -> std::io::Result<OwnedFd> {
-		self.inner.export()
+	/// Export the allocation descriptor together with its producer lease.
+	pub fn export(&self) -> std::io::Result<DmaBufExport> {
+		Ok(DmaBufExport {
+			fd: self.inner.export()?,
+			inner: self.inner.clone(),
+		})
 	}
 
 	/// DRM fourcc describing the plane layout.

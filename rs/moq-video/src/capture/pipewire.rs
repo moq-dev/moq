@@ -400,7 +400,7 @@ fn dma_buf_sync(fd: &OwnedFd, flags: u64) -> Result<(), Error> {
 		let result = unsafe {
 			libc::ioctl(
 				std::os::fd::AsRawFd::as_raw_fd(fd),
-				linux_raw_sys::ioctl::DMA_BUF_IOCTL_SYNC as libc::c_ulong,
+				linux_raw_sys::ioctl::DMA_BUF_IOCTL_SYNC as libc::Ioctl,
 				&mut sync,
 			)
 		};
@@ -1144,7 +1144,7 @@ mod tests {
 		assert_eq!(frame.modifier(), 0);
 		assert_eq!((frame.width(), frame.height()), (2, 2));
 		assert_eq!(frame.planes()[1], DmaBufPlane::new(4, 2));
-		drop(frame.export().expect("exported fd"));
+		let export = frame.export().expect("exported fd");
 		let clone = frame.clone();
 
 		drop(frame);
@@ -1156,6 +1156,14 @@ mod tests {
 		assert_eq!(returned.get(), None, "one live clone still owns the lease");
 
 		drop(clone);
+		timer
+			.update_timer(Some(Duration::from_millis(10)), None)
+			.into_result()
+			.expect("timer");
+		mainloop.run();
+		assert_eq!(returned.get(), None, "one live export still owns the lease");
+
+		drop(export);
 		timer
 			.update_timer(Some(Duration::from_secs(1)), None)
 			.into_result()

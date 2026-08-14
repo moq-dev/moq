@@ -58,7 +58,8 @@ pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Option<So
 		view_formats: Vec::new(),
 	};
 
-	let fd = buffer.export().map_err(|e| err(format!("export DMA-BUF: {e}")))?;
+	let export = buffer.export().map_err(|e| err(format!("export DMA-BUF: {e}")))?;
+	let (fd, keepalive) = export.into_parts();
 	// SAFETY: the guard is only used to import a descriptor into the same
 	// Vulkan device. It drops before the resulting HAL texture is wrapped.
 	let Some(hal) = (unsafe { device.as_hal::<wgpu::hal::api::Vulkan>() }) else {
@@ -93,6 +94,6 @@ pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Option<So
 		plane0: view.clone(),
 		plane1: view.clone(),
 		plane2: view,
-		keepalive: Some(Box::new(buffer.clone())),
+		keepalive: Some(Box::new(keepalive)),
 	}))
 }
