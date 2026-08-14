@@ -121,6 +121,9 @@ impl<S: Stream> Export<S> {
 	}
 
 	fn update_catalog(&mut self, catalog: &Catalog) -> crate::Result<()> {
+		let mut catalog = catalog.clone();
+		self.source.retain_valid_media(&mut catalog);
+
 		let picked = catalog
 			.video
 			.renditions
@@ -149,7 +152,9 @@ impl<S: Stream> Export<S> {
 			return Ok(());
 		}
 
-		let source = ExportSource::for_video_raw(&self.source, name, config, self.latency)?;
+		let Some(source) = ExportSource::for_video_raw(&self.source, name, config, self.latency)? else {
+			unreachable!("invalid broadcast references were removed above");
+		};
 		let convert = match config.description.as_ref().filter(|d| !d.is_empty()) {
 			None => None,
 			Some(avcc) => {

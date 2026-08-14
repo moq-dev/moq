@@ -296,7 +296,9 @@ impl<S: Stream> Export<S> {
 		Poll::Pending
 	}
 
-	fn update_catalog(&mut self, catalog: Catalog) -> Result<()> {
+	fn update_catalog(&mut self, mut catalog: Catalog) -> Result<()> {
+		self.source.retain_valid_media(&mut catalog);
+
 		let mut active: HashMap<String, ()> = HashMap::new();
 		for name in catalog.video.renditions.keys() {
 			active.insert(name.clone(), ());
@@ -329,7 +331,9 @@ impl<S: Stream> Export<S> {
 				continue;
 			}
 			ensure_legacy(&config.container, "video", name)?;
-			let source = ExportSource::for_video(&self.source, name, config, self.latency)?;
+			let Some(source) = ExportSource::for_video(&self.source, name, config, self.latency)? else {
+				continue;
+			};
 			self.tracks.insert(
 				name.clone(),
 				MkvTrack {
@@ -348,7 +352,9 @@ impl<S: Stream> Export<S> {
 				continue;
 			}
 			ensure_legacy(&config.container, "audio", name)?;
-			let source = ExportSource::for_audio(&self.source, name, config, self.latency)?;
+			let Some(source) = ExportSource::for_audio(&self.source, name, config, self.latency)? else {
+				continue;
+			};
 			self.tracks.insert(
 				name.clone(),
 				MkvTrack {

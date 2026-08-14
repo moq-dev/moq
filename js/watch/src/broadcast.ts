@@ -266,9 +266,10 @@ export class Broadcast {
 		const base = effect.get(this.in.name);
 		const resolved = Path.tryResolve(base, rel);
 
-		// An escape or a reference back to the catalog is served by the catalog broadcast.
-		// A valid empty result names the root broadcast and continues below.
-		if (resolved === undefined || resolved === base) return effect.get(this.out.active);
+		// Ignore a rendition whose reference escapes above the root. A valid empty result
+		// names the root broadcast, while a reference back to the catalog uses its active handle.
+		if (resolved === undefined) return undefined;
+		if (resolved === base) return effect.get(this.out.active);
 
 		if (!effect.get(this.in.enabled)) return undefined;
 

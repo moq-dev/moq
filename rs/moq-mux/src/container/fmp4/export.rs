@@ -328,6 +328,7 @@ impl<S: Stream> Export<S> {
 			.audio
 			.renditions
 			.retain(|name, config| crate::catalog::hang::supported(name, &config.container));
+		self.source.retain_valid_media(&mut catalog);
 		let catalog = &catalog;
 
 		let mut active: HashMap<String, ()> = HashMap::new();
@@ -346,7 +347,9 @@ impl<S: Stream> Export<S> {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			let source = ExportSource::for_video(&self.source, name, config, self.latency)?;
+			let Some(source) = ExportSource::for_video(&self.source, name, config, self.latency)? else {
+				continue;
+			};
 			let timescale = catalog_timescale_video(config)?;
 			let framerate = super::usable_video_framerate(config).unwrap_or(30.0);
 			self.tracks.insert(
@@ -372,7 +375,9 @@ impl<S: Stream> Export<S> {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			let source = ExportSource::for_audio(&self.source, name, config, self.latency)?;
+			let Some(source) = ExportSource::for_audio(&self.source, name, config, self.latency)? else {
+				continue;
+			};
 			let timescale = catalog_timescale_audio(config)?;
 			self.tracks.insert(
 				name.clone(),

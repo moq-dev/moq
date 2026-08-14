@@ -340,6 +340,8 @@ impl<E: catalog::Catalog> Export<E> {
 	}
 
 	fn update_catalog(&mut self, mut catalog: Catalog<E>) -> anyhow::Result<()> {
+		self.source.retain_valid(&mut catalog);
+
 		// The MPEG-TS section lives in the extension. The trait only exposes
 		// `mpegts_mut`, and this snapshot is owned, so clone it out (`()` yields the
 		// empty default: no verbatim streams, no preserved PIDs/descriptors).
@@ -424,7 +426,9 @@ impl<E: catalog::Catalog> Export<E> {
 					self.tracks.insert(name.clone(), track);
 				}
 				None => {
-					let source = ExportSource::for_video(&self.source, name, config, self.latency)?;
+					let Some(source) = ExportSource::for_video(&self.source, name, config, self.latency)? else {
+						continue;
+					};
 					self.insert_track(name, source, pid, kind, descriptors, reserve);
 				}
 			}
@@ -441,7 +445,9 @@ impl<E: catalog::Catalog> Export<E> {
 					self.tracks.insert(name.clone(), track);
 				}
 				None => {
-					let source = ExportSource::for_audio(&self.source, name, config, self.latency)?;
+					let Some(source) = ExportSource::for_audio(&self.source, name, config, self.latency)? else {
+						continue;
+					};
 					self.insert_track(name, source, pid, kind, descriptors, DEFAULT_DTS_RESERVE);
 				}
 			}

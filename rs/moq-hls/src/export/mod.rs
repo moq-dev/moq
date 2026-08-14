@@ -246,6 +246,29 @@ mod tests {
 		}
 	}
 
+	#[tokio::test]
+	async fn escaping_broadcast_reference_is_not_advertised() {
+		let origin = moq_net::Origin::random().produce();
+		let _broadcast = origin
+			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
+			.expect("publish allowed");
+		settle().await;
+		let source = moq_mux::Source::new(origin.consume(), "a/pub");
+		let upstream = Upstream {
+			broadcast: source.broadcast().await.unwrap(),
+			source,
+		};
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.broadcast = Some(moq_net::PathRelative::new("../../source").to_owned());
+		config.timeline = Some(hang::catalog::Timeline::new("video.timeline"));
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		catalog.video.renditions.insert("video".to_string(), config);
+
+		let renditions = renditions::Producer::new();
+		renditions.sync(&upstream, &Config::default(), &catalog);
+		assert!(renditions.get(Kind::Video, "video").is_none());
+	}
+
 	// The whole fetch-on-demand path in process: a broadcast publishes media through the
 	// catalog (which records the timeline), the Broadcaster renders playlists from the
 	// timeline alone, and a segment request fetches and transmuxes exactly its groups.

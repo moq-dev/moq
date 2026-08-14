@@ -80,18 +80,21 @@ impl ExportSource {
 		name: &str,
 		config: &VideoConfig,
 		latency: Duration,
-	) -> Result<Self, crate::Error> {
+	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let transform = build_video_transform(config);
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
+		let Some(request) = source.request(config.broadcast.as_ref()) else {
+			return Ok(None);
+		};
 
-		Ok(Self {
-			state: SourceState::Requesting(source.request(config.broadcast.as_ref()), name.to_string()),
+		Ok(Some(Self {
+			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
 			latency,
 			transform,
 			description,
-		})
+		}))
 	}
 
 	/// Subscribe to a video rendition without attaching any codec-shape
@@ -103,17 +106,20 @@ impl ExportSource {
 		name: &str,
 		config: &VideoConfig,
 		latency: Duration,
-	) -> Result<Self, crate::Error> {
+	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
+		let Some(request) = source.request(config.broadcast.as_ref()) else {
+			return Ok(None);
+		};
 
-		Ok(Self {
-			state: SourceState::Requesting(source.request(config.broadcast.as_ref()), name.to_string()),
+		Ok(Some(Self {
+			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
 			latency,
 			transform: None,
 			description,
-		})
+		}))
 	}
 
 	/// Subscribe to an audio rendition. Audio has no codec-shape transform;
@@ -123,25 +129,29 @@ impl ExportSource {
 		name: &str,
 		config: &AudioConfig,
 		latency: Duration,
-	) -> Result<Self, crate::Error> {
+	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
+		let Some(request) = source.request(config.broadcast.as_ref()) else {
+			return Ok(None);
+		};
 
-		Ok(Self {
-			state: SourceState::Requesting(source.request(config.broadcast.as_ref()), name.to_string()),
+		Ok(Some(Self {
+			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
 			latency,
 			transform: None,
 			description,
-		})
+		}))
 	}
 
 	/// Subscribe to a verbatim `mpegts` stream rendition (SCTE-35, private PES, ...).
 	/// No codec-shape transform and no description: the frames are Legacy-framed
 	/// verbatim bytes the muxer writes back out as PES or private sections.
 	pub fn for_stream(source: &crate::Source, name: &str, latency: Duration) -> Result<Self, crate::Error> {
+		let request = source.request(None).expect("the catalog broadcast is always valid");
 		Ok(Self {
-			state: SourceState::Requesting(source.request(None), name.to_string()),
+			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(HangContainer::Legacy),
 			latency,
 			transform: None,

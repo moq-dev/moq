@@ -201,12 +201,9 @@ impl EgressSource {
 async fn pick_track(source: &moq_mux::Source, catalog: &Catalog, codec: Codec) -> Result<Option<codec::Track>> {
 	match codec {
 		Codec::Opus => {
-			let Some((name, config)) = catalog
-				.audio
-				.renditions
-				.iter()
-				.find(|(_, c)| matches!(c.codec, AudioCodec::Opus))
-			else {
+			let Some((name, config)) = catalog.audio.renditions.iter().find(|(_, c)| {
+				matches!(c.codec, AudioCodec::Opus) && source.resolve_reference(c.broadcast.as_ref()).is_some()
+			}) else {
 				return Ok(None);
 			};
 			let track = source.subscribe_track(config.broadcast.as_ref(), name).await?;
@@ -221,7 +218,11 @@ async fn pick_track(source: &moq_mux::Source, catalog: &Catalog, codec: Codec) -
 				Codec::Av1 => VideoCodecKind::AV1,
 				_ => unreachable!(),
 			};
-			let Some((name, config)) = catalog.video.renditions.iter().find(|(_, c)| c.codec.kind() == target) else {
+			let Some((name, config)) =
+				catalog.video.renditions.iter().find(|(_, c)| {
+					c.codec.kind() == target && source.resolve_reference(c.broadcast.as_ref()).is_some()
+				})
+			else {
 				return Ok(None);
 			};
 			let track = source.subscribe_track(config.broadcast.as_ref(), name).await?;

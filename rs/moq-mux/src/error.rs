@@ -132,6 +132,10 @@ pub enum Error {
 	/// frames cannot be parsed. Such a rendition must be ignored, not guessed at.
 	#[error("unsupported container: {0}")]
 	UnsupportedContainer(String),
+
+	/// A rendition's relative broadcast reference escaped above the origin root.
+	#[error("broadcast reference escapes above the root: {0}")]
+	InvalidBroadcastReference(String),
 }
 
 impl Error {
