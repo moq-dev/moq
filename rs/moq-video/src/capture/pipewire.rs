@@ -730,8 +730,17 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					return;
 				};
 
-				let offset = data.chunk().offset() as usize;
+				let chunk_offset = data.chunk().offset();
 				let size = data.chunk().size() as usize;
+				let (map_offset, maxsize) = {
+					let raw = data.as_raw();
+					(raw.mapoffset, raw.maxsize)
+				};
+				let allocation_size = maxsize as usize;
+				let Some(offset) = normalize_chunk_offset(chunk_offset, maxsize) else {
+					tracing::warn!("pipewire buffer has zero maximum size");
+					return;
+				};
 				let stride = match u32::try_from(data.chunk().stride()) {
 					Ok(stride) if stride > 0 => stride,
 					_ => match state.format.format() {
@@ -752,7 +761,6 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						tracing::warn!(format = ?state.format.format(), "unsupported DMA-BUF pixel format");
 						return;
 					};
-					let raw = data.as_raw();
 					if data.fd() < 0 || stride == 0 {
 						tracing::warn!("DMA-BUF has no valid fd or row stride");
 						return;
@@ -763,8 +771,6 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					let Ok(fd) = fd.try_clone_to_owned() else {
 						return;
 					};
-					let map_offset = raw.mapoffset;
-					let allocation_size = raw.maxsize as usize;
 					let Some(base) = map_offset.checked_add(offset as u32) else {
 						tracing::warn!("DMA-BUF plane offset overflow");
 						return;
@@ -893,6 +899,10 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 	Ok(())
 }
 
+fn normalize_chunk_offset(offset: u32, maxsize: u32) -> Option<usize> {
+	(maxsize != 0).then(|| (offset % maxsize) as usize)
+}
+
 /// Convert one strided screen frame to tightly-packed I420.
 fn convert(format: VideoFormat, bytes: &[u8], stride: u32, width: u32, height: u32) -> Result<I420, Error> {
 	match format {
@@ -985,6 +995,7 @@ fn buffer_offer() -> Vec<u8> {
 	let mem_ptr = 1 << DataType::MemPtr.as_raw();
 	let mem_fd = 1 << DataType::MemFd.as_raw();
 	let dma_buf = 1 << DataType::DmaBuf.as_raw();
+	let data_types = dma_buf | mem_fd | mem_ptr;
 
 	let obj = spa::pod::Object {
 		type_: spa::utils::SpaTypes::ObjectParamBuffers.as_raw(),
@@ -1007,8 +1018,8 @@ fn buffer_offer() -> Vec<u8> {
 				spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
 					spa::utils::ChoiceFlags::empty(),
 					spa::utils::ChoiceEnum::Flags {
-						default: dma_buf,
-						flags: vec![dma_buf, mem_fd, mem_ptr],
+						default: data_types,
+						flags: Vec::new(),
 					},
 				))),
 			),
@@ -1064,16 +1075,23 @@ mod tests {
 		let dma_buf = 1 << DataType::DmaBuf.as_raw();
 		let mem_fd = 1 << DataType::MemFd.as_raw();
 		let mem_ptr = 1 << DataType::MemPtr.as_raw();
+		let data_types = dma_buf | mem_fd | mem_ptr;
 		assert_eq!(
 			property(spa::sys::SPA_PARAM_BUFFERS_dataType),
 			&spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
 				spa::utils::ChoiceFlags::empty(),
 				spa::utils::ChoiceEnum::Flags {
-					default: dma_buf,
-					flags: vec![dma_buf, mem_fd, mem_ptr],
+					default: data_types,
+					flags: Vec::new(),
 				},
 			)))
 		);
+	}
+
+	#[test]
+	fn chunk_offset_wraps_to_the_allocation() {
+		assert_eq!(normalize_chunk_offset(18, 16), Some(2));
+		assert_eq!(normalize_chunk_offset(0, 0), None);
 	}
 
 	#[test]
