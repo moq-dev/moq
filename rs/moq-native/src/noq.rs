@@ -520,6 +520,7 @@ impl NoqServer {
 
 		tls.alpn_protocols = alpns;
 		tls.key_log = Arc::new(rustls::KeyLogFile::new());
+		config.tls.disable_resumption(&mut tls);
 
 		let tls: noq::crypto::rustls::QuicServerConfig = tls.try_into()?;
 		let mut tls = noq::ServerConfig::with_crypto(Arc::new(tls));

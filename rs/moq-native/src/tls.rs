@@ -823,6 +823,15 @@ pub struct Server {
 }
 
 impl Server {
+	/// Disable cached client authentication when client roots can reload.
+	#[cfg(feature = "watch")]
+	pub(crate) fn disable_resumption(&self, tls: &mut rustls::ServerConfig) {
+		if !self.root.is_empty() {
+			tls.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+			tls.send_tls13_tickets = 0;
+		}
+	}
+
 	/// Load all configured root CAs into a [`rustls::RootCertStore`].
 	pub fn load_roots(&self) -> Result<rustls::RootCertStore> {
 		root_store(&read_roots(&self.root)?)
@@ -898,6 +907,7 @@ fn server_config(config: &Server, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::Serv
 	};
 
 	tls.alpn_protocols = alpn;
+	config.disable_resumption(&mut tls);
 	Ok(Arc::new(tls))
 }
 
@@ -1448,6 +1458,7 @@ mod tests {
 		CertificateDer<'static>,
 		PrivateKeyDer<'static>,
 		CertificateDer<'static>,
+		PrivateKeyDer<'static>,
 	) {
 		use rcgen::{BasicConstraints, ExtendedKeyUsagePurpose, IsCa, Issuer};
 
@@ -1464,15 +1475,25 @@ mod tests {
 		let server = server_params.signed_by(&server_key, &issuer).unwrap();
 
 		let client_key = rcgen::KeyPair::generate().unwrap();
+		let client_key_der = PrivatePkcs8KeyDer::from(client_key.serialize_der());
 		let mut client_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
 		client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
 		let client = client_params.signed_by(&client_key, &issuer).unwrap();
 
-		(ca.pem(), server.into(), server_key_der.into(), client.into())
+		(
+			ca.pem(),
+			server.into(),
+			server_key_der.into(),
+			client.into(),
+			client_key_der.into(),
+		)
 	}
 
 	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
-	fn handshake_kind(client: Arc<rustls::ClientConfig>, server: Arc<rustls::ServerConfig>) -> rustls::HandshakeKind {
+	fn handshake_kinds(
+		client: Arc<rustls::ClientConfig>,
+		server: Arc<rustls::ServerConfig>,
+	) -> std::result::Result<(rustls::HandshakeKind, rustls::HandshakeKind), rustls::Error> {
 		let name = ServerName::try_from("localhost").unwrap();
 		let mut client = rustls::ClientConnection::new(client, name).unwrap();
 		let mut server = rustls::ServerConnection::new(server).unwrap();
@@ -1482,18 +1503,18 @@ mod tests {
 			client.write_tls(&mut client_data).unwrap();
 			if !client_data.is_empty() {
 				server.read_tls(&mut client_data.as_slice()).unwrap();
-				server.process_new_packets().unwrap();
+				server.process_new_packets()?;
 			}
 
 			let mut server_data = Vec::new();
 			server.write_tls(&mut server_data).unwrap();
 			if !server_data.is_empty() {
 				client.read_tls(&mut server_data.as_slice()).unwrap();
-				client.process_new_packets().unwrap();
+				client.process_new_packets()?;
 			}
 
 			if !client.is_handshaking() && !server.is_handshaking() && !client.wants_write() && !server.wants_write() {
-				return client.handshake_kind().unwrap();
+				return Ok((client.handshake_kind().unwrap(), server.handshake_kind().unwrap()));
 			}
 		}
 
@@ -1505,7 +1526,7 @@ mod tests {
 	fn reloadable_roots_disable_session_resumption() {
 		use std::io::Write;
 
-		let (ca, server_cert, server_key, _) = signed_certificates();
+		let (ca, server_cert, server_key, _, _) = signed_certificates();
 		let mut root_file = tempfile::NamedTempFile::new().unwrap();
 		root_file.write_all(ca.as_bytes()).unwrap();
 		let roots = read_roots(&[root_file.path().to_path_buf()]).unwrap();
@@ -1532,17 +1553,97 @@ mod tests {
 
 		let control = Arc::new(control);
 		assert_eq!(
-			handshake_kind(control.clone(), server.clone()),
+			handshake_kinds(control.clone(), server.clone()).unwrap().0,
 			rustls::HandshakeKind::Full
 		);
-		assert_eq!(handshake_kind(control, server.clone()), rustls::HandshakeKind::Resumed);
+		assert_eq!(
+			handshake_kinds(control, server.clone()).unwrap().0,
+			rustls::HandshakeKind::Resumed
+		);
 
 		let reloadable = Arc::new(reloadable);
 		assert_eq!(
-			handshake_kind(reloadable.clone(), server.clone()),
+			handshake_kinds(reloadable.clone(), server.clone()).unwrap().0,
 			rustls::HandshakeKind::Full
 		);
-		assert_eq!(handshake_kind(reloadable, server), rustls::HandshakeKind::Full);
+		assert_eq!(
+			handshake_kinds(reloadable, server).unwrap().0,
+			rustls::HandshakeKind::Full
+		);
+	}
+
+	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[test]
+	fn reloadable_client_roots_disable_server_resumption() {
+		use std::io::Write;
+
+		let (ca_a, server_cert, server_key, client_cert, client_key) = signed_certificates();
+		let (ca_b, _, _, _, _) = signed_certificates();
+		let mut root_file = tempfile::NamedTempFile::new().unwrap();
+		root_file.write_all(ca_a.as_bytes()).unwrap();
+		let paths = vec![root_file.path().to_path_buf()];
+		let provider = crypto::provider();
+
+		let build_client = |cert, key| {
+			rustls::ClientConfig::builder_with_provider(provider.clone())
+				.with_safe_default_protocol_versions()
+				.unwrap()
+				.dangerous()
+				.with_custom_certificate_verifier(Arc::new(NoCertificateVerification(provider.clone())))
+				.with_client_auth_cert(vec![cert], key)
+				.unwrap()
+		};
+		let control_client = Arc::new(build_client(client_cert.clone(), client_key.clone_key()));
+		let reloadable_client = Arc::new(build_client(client_cert, client_key));
+
+		let verifier = Server::build_client_verifier(&paths, &provider).unwrap();
+		let control = rustls::ServerConfig::builder_with_provider(provider.clone())
+			.with_safe_default_protocol_versions()
+			.unwrap()
+			.with_client_cert_verifier(verifier)
+			.with_single_cert(vec![server_cert.clone()], server_key.clone_key())
+			.unwrap();
+
+		let initial = Server::build_client_verifier(&paths, &provider).unwrap();
+		let reload_paths = paths.clone();
+		let reload_provider = provider.clone();
+		let verifier = Arc::new(ReloadingClientVerifier::new(&paths, initial, move || {
+			Server::build_client_verifier(&reload_paths, &reload_provider)
+		}));
+		let reload = verifier.inner.state.clone();
+		let mut reloadable = rustls::ServerConfig::builder_with_provider(provider)
+			.with_safe_default_protocol_versions()
+			.unwrap()
+			.with_client_cert_verifier(verifier)
+			.with_single_cert(vec![server_cert], server_key)
+			.unwrap();
+		Server {
+			root: paths,
+			..Default::default()
+		}
+		.disable_resumption(&mut reloadable);
+
+		let control = Arc::new(control);
+		assert_eq!(
+			handshake_kinds(control_client.clone(), control.clone()).unwrap().1,
+			rustls::HandshakeKind::Full
+		);
+		assert_eq!(
+			handshake_kinds(control_client, control).unwrap().1,
+			rustls::HandshakeKind::Resumed
+		);
+
+		let reloadable = Arc::new(reloadable);
+		assert_eq!(
+			handshake_kinds(reloadable_client.clone(), reloadable.clone())
+				.unwrap()
+				.1,
+			rustls::HandshakeKind::Full
+		);
+
+		std::fs::write(root_file.path(), ca_b).unwrap();
+		reload.reload();
+		assert!(handshake_kinds(reloadable_client, reloadable).is_err());
 	}
 
 	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
@@ -1550,8 +1651,8 @@ mod tests {
 	fn custom_roots_reload_for_new_client_and_server_handshakes() {
 		use std::io::Write;
 
-		let (ca_a, server_a, _, client_a) = signed_certificates();
-		let (ca_b, server_b, _, client_b) = signed_certificates();
+		let (ca_a, server_a, _, client_a, _) = signed_certificates();
+		let (ca_b, server_b, _, client_b, _) = signed_certificates();
 		let mut root_file = tempfile::NamedTempFile::new().unwrap();
 		root_file.write_all(ca_a.as_bytes()).unwrap();
 		let paths = vec![root_file.path().to_path_buf()];
@@ -1618,8 +1719,8 @@ mod tests {
 	fn custom_root_refresh_retains_last_valid_bundle() {
 		use std::io::Write;
 
-		let (ca_a, _, _, _) = signed_certificates();
-		let (ca_b, _, _, _) = signed_certificates();
+		let (ca_a, _, _, _, _) = signed_certificates();
+		let (ca_b, _, _, _, _) = signed_certificates();
 		let mut root_file = tempfile::NamedTempFile::new().unwrap();
 		root_file.write_all(ca_a.as_bytes()).unwrap();
 		let roots = CustomRoots::new(vec![root_file.path().to_path_buf()]).unwrap();
