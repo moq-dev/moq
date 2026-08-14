@@ -8,14 +8,13 @@ use crate::{Result, codec};
 
 /// Bridges str0m VP9 frames into a MoQ VP9 track.
 pub struct Bridge {
-	import: moq_mux::codec::vp9::Import,
+	import: codec::DeferredVideo<moq_mux::codec::vp9::Import>,
 }
 
 impl Bridge {
 	/// Publish a `.vp9` track on `broadcast`, adding the catalog rendition once config is known.
-	pub fn new(mut broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
-		let track = broadcast.unique_track(".vp9", catalog.track_info())?;
-		let import = moq_mux::codec::vp9::Import::new(track, catalog.reserve(), Default::default())?;
+	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
+		let import = codec::DeferredVideo::new(broadcast, catalog, ".vp9")?;
 		Ok(Self { import })
 	}
 }
@@ -24,8 +23,7 @@ impl codec::Bridge for Bridge {
 	fn push(&mut self, frame: codec::Frame) -> Result<()> {
 		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us)
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("invalid timestamp: {err}")))?;
-		self.import.decode(frame.payload, Some(pts))?;
-		Ok(())
+		self.import.decode(frame.payload, pts)
 	}
 
 	fn abort(self: Box<Self>, err: moq_net::Error) {

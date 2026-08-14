@@ -89,6 +89,34 @@ async fn opus_frame_publishes_catalog_entry() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn idle_video_bridges_do_not_gate_audio_catalog() {
+	let broadcast = moq_net::broadcast::Info::new();
+	let mut producer = broadcast.produce();
+	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
+	let mut updates = catalog.consume().expect("catalog consumer");
+
+	let _vp8 = codec::vp8::Bridge::new(producer.clone(), catalog.clone()).expect("vp8 bridge");
+	let _vp9 = codec::vp9::Bridge::new(producer.clone(), catalog.clone()).expect("vp9 bridge");
+	let mut opus = codec::opus::Bridge::new(producer, catalog, 48_000, 2).expect("opus bridge");
+	Bridge::push(
+		&mut opus,
+		Frame {
+			timestamp_us: 0,
+			payload: Bytes::from_static(&[0xfc, 0xff, 0xfe]),
+		},
+	)
+	.expect("push opus");
+
+	let snapshot = tokio::time::timeout(std::time::Duration::from_millis(1), updates.next())
+		.await
+		.expect("idle video must not gate active audio")
+		.expect("catalog update")
+		.expect("catalog snapshot");
+	assert_eq!(snapshot.audio.renditions.len(), 1);
+	assert!(snapshot.video.renditions.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
 async fn vp9_keyframe_publishes_dimensions_and_starts_group() {
 	let broadcast = moq_net::broadcast::Info::new();
 	let mut producer = broadcast.produce();
