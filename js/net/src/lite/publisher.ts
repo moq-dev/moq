@@ -202,6 +202,12 @@ class SubscriptionControls {
 	}
 }
 
+// A microtask is too short: decoding one framed update crosses several awaits, each of which
+// can requeue behind the serving continuation. A task boundary lets the decoder finish whatever
+// the transport already delivered before the next group pop. Updates are rare, so groups do not
+// pay this scheduling cost on the normal path.
+const yieldToControls = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
 // Register both readiness sources in the same turn after the caller observed neither ready.
 // The winner disposes both registrations, so an idle subscription accumulates nothing no
 // matter how many times it wakes.
@@ -614,6 +620,7 @@ export class Publisher {
 							bounds.startFrame = update.startFrame;
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
+							await yieldToControls();
 							continue;
 						}
 					}

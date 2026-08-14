@@ -729,6 +729,48 @@ test("lite draft-06: a burst of updates coalesces before the next group pop", as
 	}
 });
 
+// Applying one update can itself race the decoder's next message. The serving loop yields a task
+// before another pop so the decoder can finish the already-delivered update and tighten the cap.
+test("lite draft-06: a newer update wins before a buffered group backlog drains", async () => {
+	const sub = await servedSubscription({
+		version: Version.DRAFT_06,
+		startGroup: 0,
+		gated: true,
+	});
+	let second!: Promise<void>;
+	const update = TrackSubscriber.prototype.update;
+	const updates = spyOn(TrackSubscriber.prototype, "update").mockImplementation(function (
+		this: TrackSubscriber,
+		options,
+	) {
+		second ??= new SubscribeUpdate({ priority: 0, endGroup: 1 }).encode(sub.client.writer, Version.DRAFT_06);
+		return update.call(this, options);
+	});
+
+	try {
+		// Group 0 parks the loop. Groups 1 and 2 are both readable when it wakes.
+		sub.serve(0);
+		await sub.parked;
+		sub.serve(1);
+		sub.serve(2);
+
+		// The first update wakes the serving loop. Applying it starts the second update,
+		// which caps the subscription before group 2.
+		await new SubscribeUpdate({ priority: 0, endGroup: 2 }).encode(sub.client.writer, Version.DRAFT_06);
+		await flush();
+		sub.release();
+
+		expect(await sub.servedSequence()).toBe(0);
+		expect(await sub.servedSequence()).toBe(1);
+		await second;
+		expect(await sub.servedSequence()).toBeUndefined();
+		expect(updates).toHaveBeenCalledTimes(2);
+	} finally {
+		updates.mockRestore();
+		await sub.close();
+	}
+});
+
 // A peer FIN is the subscriber leaving, which the loop takes ahead of any ready group: it stops
 // there rather than draining what is buffered, since nobody is reading the rest. Matches the Rust
 // publisher's TrackEnd::PeerFin, which drops the in-flight group machines instead of draining.
