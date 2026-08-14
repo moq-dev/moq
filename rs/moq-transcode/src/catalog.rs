@@ -319,7 +319,7 @@ mod tests {
 		video.insert("low", source(640, 360, None)).unwrap();
 		video.insert("high", source(1920, 1080, None)).unwrap();
 		let mut remote = source(3840, 2160, None);
-		remote.broadcast = Some(PathRelativeOwned::from("../other".to_string()));
+		remote.broadcast = Some(PathRelativeOwned::from("./other".to_string()));
 		video.insert("remote", remote).unwrap();
 
 		let (name, config) = choose_source(&video).unwrap();

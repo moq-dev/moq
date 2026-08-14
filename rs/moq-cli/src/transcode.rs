@@ -133,13 +133,9 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		name => moq_video::decode::Kind::Named(name.to_string()),
 	};
 	config.resize.acceleration = args.resize_acceleration;
-	// Reference the source renditions relatively when the output nests under
-	// the source (`a/b` -> `a/b/transcode.hang` is `..`, one `..` per level);
+	// Reference the source renditions relatively when the output nests under it;
 	// otherwise the derivative catalog advertises only the rungs.
-	config.source = output_path.strip_prefix(&format!("{source_path}/")).map(|rest| {
-		let depth = rest.split('/').count();
-		moq_net::PathRelativeOwned::from(vec![".."; depth].join("/"))
-	});
+	config.source = source_reference(&source_path, &output_path);
 
 	let output = publish
 		.create_broadcast(&output_path, moq_net::broadcast::Route::new().with_announce(true))
@@ -149,5 +145,36 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	tokio::select! {
 		res = moq_transcode::run(source, output, config) => Ok(res?),
 		res = session.closed() => Ok(res?),
+	}
+}
+
+fn source_reference(source: &str, output: &str) -> Option<moq_net::PathRelativeOwned> {
+	output.strip_prefix(&format!("{source}/")).map(|rest| {
+		let parents = rest.split('/').count().saturating_sub(1);
+		let rel = if parents == 0 {
+			".".to_string()
+		} else {
+			vec![".."; parents].join("/")
+		};
+		moq_net::PathRelativeOwned::from(rel)
+	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn source_reference_resolves_from_output_parent() {
+		assert_eq!(source_reference("a/b", "a/b/transcode.hang").unwrap().as_str(), ".");
+		assert_eq!(
+			source_reference("a/b", "a/b/dir/transcode.hang").unwrap().as_str(),
+			".."
+		);
+		assert_eq!(
+			source_reference("a/b", "a/b/one/two/transcode.hang").unwrap().as_str(),
+			"../.."
+		);
+		assert!(source_reference("a/b", "other/transcode.hang").is_none());
 	}
 }

@@ -142,7 +142,7 @@ pub struct Display {
 #[non_exhaustive]
 pub struct VideoConfig {
 	/// Optional reference to another broadcast that publishes this track, expressed
-	/// relative to the broadcast that served this catalog (e.g. `../source`). If unset,
+	/// relative to the broadcast that served this catalog (e.g. `./source`). If unset,
 	/// the track lives in the same broadcast as the catalog.
 	///
 	/// This allows a transcoder to author a downstream catalog that points unchanged

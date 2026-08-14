@@ -2,7 +2,7 @@
 //!
 //! A hang catalog rendition may reference a track published in *another*
 //! broadcast via its `broadcast` field (a path relative to the catalog's
-//! broadcast, e.g. `../source`). Resolving that reference needs the catalog
+//! broadcast, e.g. `./source`). Resolving that reference needs the catalog
 //! broadcast's own path and an [`moq_net::origin::Consumer`] to fetch the
 //! referenced broadcast from. [`Source`] bundles the two, and resolves both the
 //! catalog broadcast and any referenced broadcast through the same origin so
@@ -178,8 +178,8 @@ mod tests {
 
 		let source = Source::new(origin.consume(), "a/pub");
 
-		// Walks back to the catalog's own path.
-		let rel = PathRelative::new("../pub");
+		// Names the catalog within its own parent.
+		let rel = PathRelative::new("./pub");
 		source
 			.subscribe_track(Some(&rel), "video")
 			.await
@@ -210,10 +210,35 @@ mod tests {
 		let source = Source::new(origin.consume(), "a/pub");
 
 		// The reference resolves to `a/source`, whose "video" track answers the subscribe.
-		let rel = PathRelative::new("../source");
+		let rel = PathRelative::new("./source");
 		source
 			.subscribe_track(Some(&rel), "video")
 			.await
 			.expect("referenced track should resolve");
+	}
+
+	#[tokio::test]
+	async fn dot_resolves_output_parent() {
+		let origin = Origin::random().produce();
+
+		let _catalog = origin
+			.create_broadcast(
+				"a/source/transcode",
+				moq_net::broadcast::Route::new().with_announce(true),
+			)
+			.unwrap();
+
+		let mut referenced = origin
+			.create_broadcast("a/source", moq_net::broadcast::Route::new().with_announce(true))
+			.unwrap();
+		let _video = referenced.create_track("video", None).unwrap();
+		settle().await;
+
+		let source = Source::new(origin.consume(), "a/source/transcode");
+		let rel = PathRelative::new(".");
+		source
+			.subscribe_track(Some(&rel), "video")
+			.await
+			.expect("dot should resolve to the catalog broadcast's parent");
 	}
 }

@@ -7,7 +7,7 @@
 //         --url http://localhost:4443/anon --source my-broadcast
 //
 // The derivative appears at `<source>/transcode.hang`: its catalog references
-// the source renditions via a relative `broadcast: ".."` pointer and adds the
+// the source renditions via a relative `broadcast: "."` pointer and adds the
 // ladder rungs, which are only encoded while someone watches (or fetches) them.
 
 use anyhow::Context;
@@ -73,9 +73,9 @@ async fn main() -> anyhow::Result<()> {
 		.context("source broadcast unavailable")?;
 
 	let mut config = moq_transcode::Config::default();
-	// The derivative lives one level below the source, so the source is `..`.
+	// The derivative lives one level below the source, so its parent is the source.
 	// The default ladder and encoder (hardware first: NVENC on Linux) apply.
-	config.source = Some(moq_net::PathRelativeOwned::from("..".to_string()));
+	config.source = Some(moq_net::PathRelativeOwned::from(".".to_string()));
 
 	let output = publish
 		.create_broadcast(&output_path, moq_net::broadcast::Route::new().with_announce(true))

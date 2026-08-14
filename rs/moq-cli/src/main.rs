@@ -499,7 +499,7 @@ async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: Sub
 
 	// Confirm the broadcast is reachable and wait for it to be announced; `Subscribe` then
 	// resolves it (and any sibling broadcast a rendition's `broadcast` field references,
-	// e.g. "../source") through the origin.
+	// e.g. "./source") through the origin.
 	consumer
 		.announced_broadcast(&name)
 		.await

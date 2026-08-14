@@ -258,7 +258,7 @@ mod test {
 			"video": {
 				"renditions": {
 					"video": {
-						"broadcast": "../source",
+						"broadcast": "./source",
 						"codec": "avc1.64001f",
 						"codedWidth": 1280,
 						"codedHeight": 720,
@@ -272,7 +272,7 @@ mod test {
 		let rendition = parsed.video.renditions.get("video").expect("missing rendition");
 		assert_eq!(
 			rendition.broadcast.as_ref().map(|p| p.as_str()),
-			Some("../source"),
+			Some("source"),
 			"broadcast field did not deserialize"
 		);
 
@@ -335,6 +335,29 @@ mod test {
 			rendition.broadcast.as_ref().map(|p| p.is_empty()),
 			Some(true),
 			"empty broadcast should deserialize as Some(empty)"
+		);
+	}
+
+	#[test]
+	fn rendition_with_parent_broadcast_stays_distinct_from_empty() {
+		let encoded = r#"{
+			"video": {
+				"renditions": {
+					"video": {
+						"broadcast": ".",
+						"codec": "avc1.64001f",
+						"container": {"kind": "legacy"}
+					}
+				}
+			}
+		}"#;
+
+		let parsed = Catalog::from_str(encoded).expect("failed to decode");
+		let rendition = parsed.video.renditions.get("video").expect("missing rendition");
+		assert_eq!(
+			rendition.broadcast.as_ref().map(|p| p.as_str()),
+			Some("."),
+			"parent reference should not normalize to empty"
 		);
 	}
 

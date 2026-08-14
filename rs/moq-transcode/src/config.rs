@@ -39,7 +39,7 @@ pub struct Config {
 	pub rungs: Vec<Rung>,
 
 	/// Where the source broadcast lives relative to the output broadcast, e.g.
-	/// `".."` when the output is published at `<source>/transcode.hang`. When
+	/// `"."` when the output is published at `<source>/transcode.hang`. When
 	/// set, the derivative catalog references the source renditions (all video
 	/// and audio) through this path so players fetch them from the source
 	/// directly; the transcoder never proxies or subscribes them. `None` omits

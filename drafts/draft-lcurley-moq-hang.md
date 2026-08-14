@@ -270,7 +270,9 @@ By default a rendition's track lives in the same broadcast that served the catal
 The `broadcast` field overrides that, naming a different broadcast that publishes the track.
 
 The value is a relative path, resolved against the path of the broadcast that served the catalog.
-It uses the `.` and `..` semantics of a relative URL reference ({{!RFC3986, Section 5.2.4}}), for example `../source`.
+It uses relative reference resolution ({{!RFC3986, Section 5.2}}): a non-empty reference replaces the catalog broadcast's last path segment before applying `.` and `..` segments.
+For example, `./source` in a catalog served by `room/transcode` resolves to `room/source`, while `.` resolves to `room`.
+An empty reference resolves to the catalog broadcast itself.
 A publisher MUST NOT use an absolute path, and a consumer MUST ignore a rendition whose `broadcast` escapes above the root.
 
 This lets a publisher author a catalog that points at tracks it does not republish.

@@ -505,7 +505,7 @@ mod tests {
 			rungs: vec![Rung::new(120, 100_000)],
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
-			source: Some(moq_net::PathRelativeOwned::from("..".to_string())),
+			source: Some(moq_net::PathRelativeOwned::from(".".to_string())),
 			..Default::default()
 		};
 
@@ -542,7 +542,7 @@ mod tests {
 		assert!(rung.codec.to_string().starts_with("avc3."));
 
 		let passthrough = derived.video.renditions.get("video").expect("passthrough missing");
-		assert_eq!(passthrough.broadcast.as_ref().map(|b| b.as_ref()), Some(".."));
+		assert_eq!(passthrough.broadcast.as_ref().map(|b| b.as_ref()), Some("."));
 
 		// Subscribing to the rung starts the live loop, which mirrors source
 		// group sequences 1:1.
