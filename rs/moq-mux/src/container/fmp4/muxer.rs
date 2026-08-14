@@ -67,7 +67,7 @@ impl Muxer {
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 		let mut config = config.clone();
 		if catalog_dimensions(&config).is_none()
-			&& let Some((width, height)) = codec_dimensions(&config.codec, description.as_deref(), &[])
+			&& let Some((width, height)) = codec_dimensions(&config.codec, description.as_deref(), &[])?
 		{
 			config.coded_width = Some(width);
 			config.coded_height = Some(height);
@@ -146,7 +146,7 @@ impl Muxer {
 		while let Some(frames) = self.container.read(group).await? {
 			for frame in frames {
 				let Some(transform) = self.transform.as_mut() else {
-					self.resolve_video_dimensions(&frame.payload);
+					self.resolve_video_dimensions(&frame.payload)?;
 					out.push(frame);
 					continue;
 				};
@@ -158,7 +158,7 @@ impl Muxer {
 				{
 					self.description = Some(d.clone());
 				}
-				self.resolve_video_dimensions(&frame.payload);
+				self.resolve_video_dimensions(&frame.payload)?;
 				if let Some(payload) = payload {
 					out.push(Frame { payload, ..frame });
 				}
@@ -170,17 +170,18 @@ impl Muxer {
 		Ok(out)
 	}
 
-	fn resolve_video_dimensions(&mut self, payload: &[u8]) {
+	fn resolve_video_dimensions(&mut self, payload: &[u8]) -> crate::Result<()> {
 		let Kind::Video(config) = &mut self.kind else {
-			return;
+			return Ok(());
 		};
 		if catalog_dimensions(config).is_some() {
-			return;
+			return Ok(());
 		}
-		if let Some((width, height)) = codec_dimensions(&config.codec, self.description.as_deref(), payload) {
+		if let Some((width, height)) = codec_dimensions(&config.codec, self.description.as_deref(), payload)? {
 			config.coded_width = Some(width);
 			config.coded_height = Some(height);
 		}
+		Ok(())
 	}
 
 	/// Build the rendition's CMAF init segment (ftyp+moov), or `None` if it isn't buildable yet.
@@ -380,6 +381,22 @@ mod tests {
 			panic!("expected VP8 sample entry");
 		};
 		assert_eq!((vp08.visual.width, vp08.visual.height), (320, 240));
+	}
+
+	#[test]
+	fn malformed_fixed_description_errors_instead_of_waiting_for_geometry() {
+		let mut config = VideoConfig::new(hang::catalog::H264 {
+			profile: 0x42,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		config.description = Some(Bytes::from_static(&[1]));
+
+		assert!(matches!(
+			Muxer::video(&config),
+			Err(crate::Error::H264(crate::codec::h264::Error::AvccTooShort))
+		));
 	}
 
 	// A 30 fps Legacy VP8 rendition: no description needed, so the muxer builds without media.

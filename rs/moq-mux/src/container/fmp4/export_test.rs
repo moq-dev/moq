@@ -218,6 +218,32 @@ async fn dimensionless_video_waits_for_catalog_geometry() {
 	assert_eq!((vp08.visual.width, vp08.visual.height), (320, 240));
 }
 
+/// A fixed codec description cannot recover on a later frame, so malformed
+/// metadata must fail instead of leaving the exporter pending for geometry.
+#[tokio::test(start_paused = true)]
+async fn dimensionless_video_rejects_a_malformed_description() {
+	use hang::catalog::{Container, H264, VideoConfig};
+
+	let live = Live::new(".avc1", |catalog, name| {
+		let mut config = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		config.description = Some(bytes::Bytes::from_static(&[1]));
+		config.container = Container::Legacy;
+		catalog.lock().video.renditions.insert(name, config);
+	});
+
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let error = exporter.next().await.expect_err("malformed fixed description");
+	assert!(matches!(
+		error,
+		crate::Error::H264(crate::codec::h264::Error::AvccTooShort)
+	));
+}
+
 /// VP9 source (catalog `Container::Legacy`, codec `vp09`, no `description`) →
 /// fMP4 export must synthesize a `vp09` sample entry whose `vpcC` round-trips
 /// the catalog's VP9 parameters.
