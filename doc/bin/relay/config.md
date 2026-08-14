@@ -140,7 +140,7 @@ key = "key.pem"
 root = ["/path/to/peer-ca.pem"]
 ```
 
-HTTPS certificate, key, and root CA files are watched and reloaded for new
+HTTPS/WSS certificate, key, and root CA files are watched and reloaded for new
 connections. A failed reload retains the last valid configuration.
 
 ### \[auth]

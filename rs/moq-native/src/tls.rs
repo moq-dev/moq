@@ -593,6 +593,8 @@ impl Client {
 	pub fn build(&self) -> Result<rustls::ClientConfig> {
 		let provider = crypto::provider();
 		let verification = self.verification()?;
+		let reloadable_roots = cfg!(feature = "watch")
+			&& matches!(&verification, Verification::Roots { custom, .. } if !custom.paths.is_empty());
 
 		// Allow TLS 1.2 in addition to 1.3 for WebSocket compatibility.
 		// QUIC always negotiates TLS 1.3 regardless of this setting.
@@ -614,7 +616,16 @@ impl Client {
 		};
 
 		let builder = builder.dangerous().with_custom_certificate_verifier(verifier);
-		self.with_client_auth(builder)
+		let mut tls = self.with_client_auth(builder)?;
+
+		// A resumed session skips certificate verification. Disable resumption when
+		// roots can change underneath this config so removing a CA takes effect on
+		// every subsequent handshake.
+		if reloadable_roots {
+			tls.resumption = rustls::client::Resumption::disabled();
+		}
+
+		Ok(tls)
 	}
 
 	/// Build a reloadable verifier for custom roots and system/default trust.
@@ -1432,7 +1443,12 @@ mod tests {
 	}
 
 	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
-	fn signed_certificates() -> (String, CertificateDer<'static>, CertificateDer<'static>) {
+	fn signed_certificates() -> (
+		String,
+		CertificateDer<'static>,
+		PrivateKeyDer<'static>,
+		CertificateDer<'static>,
+	) {
 		use rcgen::{BasicConstraints, ExtendedKeyUsagePurpose, IsCa, Issuer};
 
 		let ca_key = rcgen::KeyPair::generate().unwrap();
@@ -1442,6 +1458,7 @@ mod tests {
 		let issuer = Issuer::from_params(&ca_params, &ca_key);
 
 		let server_key = rcgen::KeyPair::generate().unwrap();
+		let server_key_der = PrivatePkcs8KeyDer::from(server_key.serialize_der());
 		let mut server_params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
 		server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
 		let server = server_params.signed_by(&server_key, &issuer).unwrap();
@@ -1451,7 +1468,81 @@ mod tests {
 		client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
 		let client = client_params.signed_by(&client_key, &issuer).unwrap();
 
-		(ca.pem(), server.into(), client.into())
+		(ca.pem(), server.into(), server_key_der.into(), client.into())
+	}
+
+	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	fn handshake_kind(client: Arc<rustls::ClientConfig>, server: Arc<rustls::ServerConfig>) -> rustls::HandshakeKind {
+		let name = ServerName::try_from("localhost").unwrap();
+		let mut client = rustls::ClientConnection::new(client, name).unwrap();
+		let mut server = rustls::ServerConnection::new(server).unwrap();
+
+		for _ in 0..100 {
+			let mut client_data = Vec::new();
+			client.write_tls(&mut client_data).unwrap();
+			if !client_data.is_empty() {
+				server.read_tls(&mut client_data.as_slice()).unwrap();
+				server.process_new_packets().unwrap();
+			}
+
+			let mut server_data = Vec::new();
+			server.write_tls(&mut server_data).unwrap();
+			if !server_data.is_empty() {
+				client.read_tls(&mut server_data.as_slice()).unwrap();
+				client.process_new_packets().unwrap();
+			}
+
+			if !client.is_handshaking() && !server.is_handshaking() && !client.wants_write() && !server.wants_write() {
+				return client.handshake_kind().unwrap();
+			}
+		}
+
+		panic!("TLS handshake did not settle");
+	}
+
+	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[test]
+	fn reloadable_roots_disable_session_resumption() {
+		use std::io::Write;
+
+		let (ca, server_cert, server_key, _) = signed_certificates();
+		let mut root_file = tempfile::NamedTempFile::new().unwrap();
+		root_file.write_all(ca.as_bytes()).unwrap();
+		let roots = read_roots(&[root_file.path().to_path_buf()]).unwrap();
+		let provider = crypto::provider();
+
+		let control = rustls::ClientConfig::builder_with_provider(provider.clone())
+			.with_safe_default_protocol_versions()
+			.unwrap()
+			.with_root_certificates(root_store(&roots).unwrap())
+			.with_no_client_auth();
+		let reloadable = Client {
+			root: vec![root_file.path().to_path_buf()],
+			..Default::default()
+		}
+		.build()
+		.unwrap();
+		let server = rustls::ServerConfig::builder_with_provider(provider)
+			.with_safe_default_protocol_versions()
+			.unwrap()
+			.with_no_client_auth()
+			.with_single_cert(vec![server_cert], server_key)
+			.unwrap();
+		let server = Arc::new(server);
+
+		let control = Arc::new(control);
+		assert_eq!(
+			handshake_kind(control.clone(), server.clone()),
+			rustls::HandshakeKind::Full
+		);
+		assert_eq!(handshake_kind(control, server.clone()), rustls::HandshakeKind::Resumed);
+
+		let reloadable = Arc::new(reloadable);
+		assert_eq!(
+			handshake_kind(reloadable.clone(), server.clone()),
+			rustls::HandshakeKind::Full
+		);
+		assert_eq!(handshake_kind(reloadable, server), rustls::HandshakeKind::Full);
 	}
 
 	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
@@ -1459,8 +1550,8 @@ mod tests {
 	fn custom_roots_reload_for_new_client_and_server_handshakes() {
 		use std::io::Write;
 
-		let (ca_a, server_a, client_a) = signed_certificates();
-		let (ca_b, server_b, client_b) = signed_certificates();
+		let (ca_a, server_a, _, client_a) = signed_certificates();
+		let (ca_b, server_b, _, client_b) = signed_certificates();
 		let mut root_file = tempfile::NamedTempFile::new().unwrap();
 		root_file.write_all(ca_a.as_bytes()).unwrap();
 		let paths = vec![root_file.path().to_path_buf()];
@@ -1522,13 +1613,13 @@ mod tests {
 		assert!(client_verifier.verify_client_cert(&client_b, &[], now).is_ok());
 	}
 
-	#[cfg(feature = "quiche")]
+	#[cfg(all(feature = "quiche", feature = "watch"))]
 	#[test]
 	fn custom_root_refresh_retains_last_valid_bundle() {
 		use std::io::Write;
 
-		let (ca_a, _, _) = signed_certificates();
-		let (ca_b, _, _) = signed_certificates();
+		let (ca_a, _, _, _) = signed_certificates();
+		let (ca_b, _, _, _) = signed_certificates();
 		let mut root_file = tempfile::NamedTempFile::new().unwrap();
 		root_file.write_all(ca_a.as_bytes()).unwrap();
 		let roots = CustomRoots::new(vec![root_file.path().to_path_buf()]).unwrap();
