@@ -230,11 +230,16 @@ impl Parameters {
 
 /// Trait for encoding/decoding parameter values with version-specific formats.
 ///
-/// Parameter encoding differs from field encoding:
-/// - Draft-14/15/16: u8 and bool are encoded as varints (cast to u64)
-/// - Draft-17: type-specific encoding (u8 as raw byte, bool as raw byte, etc.)
+/// A message parameter is a Key-Value-Pair, so the *key* decides the value's framing: an even
+/// key carries a bare varint, an odd key a length-prefixed byte string. That framing is the
+/// same in every draft, which is why `u8`, `bool` and `u64` (all of which only ever sit at even
+/// keys) are varints unconditionally. What does change with the draft is how a varint is spelled
+/// (QUIC through draft-16, leading-ones from draft-17), and `Encode`/`Decode for u64` already
+/// dispatches on that.
 ///
-/// Use `_ =>` for the newest draft behavior so future versions default forward.
+/// The types at odd keys still need a version split, because what goes *inside* their length
+/// prefix is draft-specific. Use `_ =>` for the newest draft behavior there so future versions
+/// default forward.
 pub trait Param: Sized {
 	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError>;
 	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError>;
@@ -247,44 +252,25 @@ pub trait Param: Sized {
 
 impl Param for u8 {
 	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		match version {
-			// Draft-14/15/16: u8 encoded as varint (cast to u64)
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => (*self as u64).encode(w, version),
-			_ => Encode::encode(self, w, version),
-		}
+		(*self as u64).encode(w, version)
 	}
 
 	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-				let v = u64::decode(r, version)?;
-				u8::try_from(v).map_err(|_| DecodeError::InvalidValue)
-			}
-			_ => u8::decode(r, version),
-		}
+		let v = u64::decode(r, version)?;
+		u8::try_from(v).map_err(|_| DecodeError::InvalidValue)
 	}
 }
 
 impl Param for bool {
 	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		match version {
-			// Draft-14/15/16: bool encoded as varint (cast to u64)
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => (*self as u64).encode(w, version),
-			_ => Encode::encode(self, w, version),
-		}
+		(*self as u64).encode(w, version)
 	}
 
 	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-				let v = u64::decode(r, version)?;
-				match v {
-					0 => Ok(false),
-					1 => Ok(true),
-					_ => Err(DecodeError::InvalidValue),
-				}
-			}
-			_ => bool::decode(r, version),
+		match u64::decode(r, version)? {
+			0 => Ok(false),
+			1 => Ok(true),
+			_ => Err(DecodeError::InvalidValue),
 		}
 	}
 }
@@ -639,6 +625,53 @@ mod tests {
 					Ok(())
 				},
 			);
+		}
+	}
+
+	/// A `u8` parameter value is the key's varint, not a raw byte.
+	///
+	/// The two spellings coincide below 0x80, so a round-trip against ourselves passes at any
+	/// plausible test value and the disagreement only shows at the top of the range. It is
+	/// reachable: SUBSCRIBER_PRIORITY (0x20) carries `priority::to_wire(0)`, which is `u8::MAX`.
+	/// A raw `0xFF` is the 9-byte leading-ones prefix to a draft-17 decoder, so the peer reads
+	/// eight more bytes of whatever followed and then runs off the end of the message.
+	///
+	/// Byte-level, because a round-trip cannot catch a wire format both of our sides get wrong.
+	#[test]
+	fn test_param_u8_max_encodes_as_a_varint() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+		] {
+			round_trip_params(
+				version,
+				|w, v| {
+					encode_params!(w, v, 0x20 => u8::MAX);
+					Ok(())
+				},
+				|r, v| {
+					decode_params!(r, v, 0x20 => val: Option<u8>);
+					assert_eq!(val, Some(u8::MAX), "{v}");
+					Ok(())
+				},
+			);
+		}
+
+		// Draft-17+ spells a varint with leading ones, draft-14/15/16 the QUIC way. Neither is
+		// a bare 0xFF.
+		for (version, expected) in [
+			(Version::Draft15, [0x40, 0xFF].as_slice()),
+			(Version::Draft16, [0x40, 0xFF].as_slice()),
+			(Version::Draft17, [0x80, 0xFF].as_slice()),
+			(Version::Draft18, [0x80, 0xFF].as_slice()),
+		] {
+			let mut buf = BytesMut::new();
+			u8::MAX.param_encode(&mut buf, version).unwrap();
+			assert_eq!(&buf[..], expected, "{version}");
 		}
 	}
 
