@@ -26,7 +26,7 @@ for (let group = await track.recvGroup(); group; group = await track.recvGroup()
 
 // Publish.
 const room = session.publish("room/bob");
-const video = room.createTrack("video");
+const video = room.createTrack("video", { timescale: 1_000_000 });
 const group = video.appendGroup();
 group.writeFrame(timestampMicros, payload);
 group.close();
@@ -45,17 +45,21 @@ Conventions worth knowing before wiring this into app code:
 
 - Durations are milliseconds and timestamps are microseconds, matching `@moq/net`.
 - Sequence numbers are `bigint`, since they are `u64` on the wire.
+- Options are plain objects (`{ priority: 3 }`), not classes, so one can be built
+  once and reused across calls. Omitted fields take `moq-net`'s defaults; a wrong
+  type or an out-of-range value is an error, while a misspelled field is caught by
+  the TypeScript interface rather than at runtime.
 - `close()` is a clean finish; `abort(code)` takes an application close code and
   consumes the handle, so every later call on it fails. `Session.close(code)` is
   the exception: it takes an optional code and tears the whole session down.
 - `closed()` **rejects** rather than resolving, because every close carries a
   reason (a clean one included). It is safe to await while still using the
   handle, and so is `TrackProducer`'s `used()` / `unused()`.
-- One in-flight async call per handle otherwise. A second concurrent
-  `recvGroup()` on the same subscriber throws rather than interleaving; clone
-  the handle instead. Subscription changes are exempt: `update()` and
-  `subscription` go through a separate control handle, so they work while a read
-  is pending.
+- One in-flight async call per handle otherwise: a second concurrent
+  `recvGroup()` on the same subscriber throws rather than interleaving. Subscribe
+  again for a second independent reader. Subscription changes are exempt, since
+  `update()` and `subscription` go through a separate control handle and work
+  while a read is pending.
 
 ## Building
 

@@ -1,17 +1,29 @@
 //! Option bags and value types crossing the JS boundary.
 //!
 //! These mirror the plain-data types in `moq-net` (`track::Subscription`, `track::Info`,
-//! `frame::Frame`). They are classes rather than positional arguments so a new knob is an
+//! `frame::Frame`). They are bags rather than positional parameters so a new knob is an
 //! added field instead of a changed signature.
 //!
+//! The three input bags cross as **plain JS objects** (serde), not exported classes.
+//! wasm-bindgen passes an exported class by value, which zeroes the JS object's pointer,
+//! and it encodes a null pointer as `None`. So a caller who built one bag and reused it
+//! across two calls silently got defaults on the second: measured, a `TrackInfo` reused
+//! across two `createTrack` calls gave the second track a millisecond timescale instead of
+//! the microsecond one it asked for, with no error anywhere. A plain object has no
+//! ownership to lose, and it matches how `@moq/net` already takes options.
+//!
+//! `Frame` stays a class: it is only ever returned, so it can't hit that, and its payload
+//! rides as a `Uint8Array` rather than a serialized number array.
+//!
 //! Units are the ones `@moq/net` uses, since that is what a JS caller expects: durations
-//! in milliseconds, timestamps in microseconds. Sequences stay `u64`, which wasm-bindgen
-//! maps to a JS `bigint`.
+//! in milliseconds, timestamps in microseconds. Sequence numbers stay `u64`.
 
 use std::time::Duration;
 
 use js_sys::Uint8Array;
 use moq_net::{Timescale, Timestamp};
+use serde::{Deserialize, Serialize};
+use tsify::Tsify;
 use wasm_bindgen::prelude::*;
 
 use crate::util::js_err;
@@ -41,31 +53,27 @@ fn duration_from_millis(millis: f64) -> Duration {
 
 /// Per-subscription options, requested when a subscription opens and adjustable later
 /// via `TrackSubscriber.update`.
-#[wasm_bindgen]
-#[derive(Clone, Default)]
+///
+/// Field types and ranges are enforced on the way in (a string priority, or one past
+/// `u8`, is an error), but a misspelled field is not: this deserializer never sees the
+/// keys it wasn't asked for, so `deny_unknown_fields` would be a no-op. The generated
+/// TypeScript interface is what catches a typo, the same as `@moq/net`.
+#[derive(Tsify, Serialize, Deserialize, Clone, Default)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+#[serde(rename_all = "camelCase", default)]
 pub struct Subscription {
 	/// Delivery priority relative to this session's other subscriptions. Higher wins.
 	pub priority: u8,
 	/// Whether groups are prioritized in sequence order, rather than newest-first.
 	pub ordered: bool,
 	/// Maximum age in milliseconds of a non-latest group before it is skipped.
-	#[wasm_bindgen(js_name = latencyMax)]
 	pub latency_max: f64,
 	/// First group the publisher should deliver, or unset to start at the latest group.
-	#[wasm_bindgen(js_name = startGroup)]
+	#[tsify(optional)]
 	pub start_group: Option<u64>,
 	/// Last group the publisher should deliver (inclusive), or unset for no end.
-	#[wasm_bindgen(js_name = endGroup)]
+	#[tsify(optional)]
 	pub end_group: Option<u64>,
-}
-
-#[wasm_bindgen]
-impl Subscription {
-	/// A subscription with every field at its default: live edge, unordered, priority 0.
-	#[wasm_bindgen(constructor)]
-	pub fn new() -> Self {
-		Self::default()
-	}
 }
 
 impl From<Subscription> for moq_net::track::Subscription {
@@ -96,20 +104,12 @@ impl From<moq_net::track::Subscription> for Subscription {
 }
 
 /// Options for fetching a single past group.
-#[wasm_bindgen]
-#[derive(Clone, Default)]
+#[derive(Tsify, Serialize, Deserialize, Clone, Default)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+#[serde(rename_all = "camelCase", default)]
 pub struct Fetch {
 	/// Delivery priority for the fetched group's stream. Higher wins.
 	pub priority: u8,
-}
-
-#[wasm_bindgen]
-impl Fetch {
-	/// Fetch options at their defaults: priority 0.
-	#[wasm_bindgen(constructor)]
-	pub fn new() -> Self {
-		Self::default()
-	}
 }
 
 impl From<Fetch> for moq_net::group::Fetch {
@@ -122,13 +122,13 @@ impl From<Fetch> for moq_net::group::Fetch {
 }
 
 /// Immutable per-track properties, set by the publisher and reported over the wire.
-#[wasm_bindgen]
-#[derive(Clone)]
+#[derive(Tsify, Serialize, Deserialize, Clone)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+#[serde(rename_all = "camelCase", default)]
 pub struct TrackInfo {
 	/// Units per second for this track's frame timestamps. Defaults to 1000 (milliseconds).
 	pub timescale: u64,
 	/// Maximum age in milliseconds of a non-latest group before the publisher evicts it.
-	#[wasm_bindgen(js_name = latencyMax)]
 	pub latency_max: f64,
 	/// Tie-break priority between subscriptions of equal subscriber priority.
 	pub priority: u8,
@@ -136,18 +136,11 @@ pub struct TrackInfo {
 	pub ordered: bool,
 }
 
-#[wasm_bindgen]
-impl TrackInfo {
-	/// Track properties at their defaults: millisecond timescale, unordered, priority 0.
-	#[wasm_bindgen(constructor)]
-	pub fn new() -> Self {
-		moq_net::track::Info::default().into()
-	}
-}
-
 impl Default for TrackInfo {
+	/// Millisecond timescale, unordered, priority 0: `moq-net`'s own defaults, so an
+	/// omitted field means the same thing here as it does on the wire.
 	fn default() -> Self {
-		Self::new()
+		moq_net::track::Info::default().into()
 	}
 }
 

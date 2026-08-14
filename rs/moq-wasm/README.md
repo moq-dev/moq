@@ -25,7 +25,7 @@ methods of its counterpart:
 | `track` | `TrackProducer`, `TrackConsumer`, `TrackSubscriber`, `TrackRequest` | `moq_net::track` |
 | `group` | `GroupProducer`, `GroupConsumer` | `moq_net::group` |
 | `announce` | `AnnounceConsumer`, `Announce` | `moq_net::announce` |
-| `options` | `Subscription`, `TrackInfo`, `Frame` | the plain-data types |
+| `options` | `Subscription`, `TrackInfo`, `Fetch`, `Frame` | the plain-data types |
 
 That mirroring is the point: the binding is the surface most likely to drift
 from the crate it wraps, so the two are meant to be read side by side. When
@@ -42,6 +42,13 @@ re-export flat, so nothing reads `broadcast::BroadcastProducer`.
 
 ### Conventions at the boundary
 
+- The input option bags (`Subscription`, `TrackInfo`, `Fetch`) cross as plain JS
+  objects via serde, not as exported classes, and `tsify` derives their
+  TypeScript interfaces. wasm-bindgen passes an exported class *by value*: it
+  zeroes the JS object's pointer and encodes a null pointer as `None`, so a
+  caller who reused one bag silently got defaults on the second call. A plain
+  object has no ownership to lose. `Frame` stays a class because it is only ever
+  returned and carries a `Uint8Array`.
 - Durations are milliseconds and timestamps are microseconds, matching `@moq/net`.
 - Sequence numbers stay `u64`, which wasm-bindgen maps to a JS `bigint`.
 - Closing takes an application close code (`moq_net::Error::App`); a JS `Error`

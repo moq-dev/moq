@@ -10,8 +10,9 @@ publish = false
 
 [package.metadata.cargo-shear]
 # Required indirectly (getrandom: feature enabler; wasm-bindgen-futures: async
-# codegen) with no `use`, so cargo-shear can't see them.
-ignored = ["getrandom", "wasm-bindgen-futures"]
+# codegen; serde-wasm-bindgen: what tsify's derive expands into) with no `use`,
+# so cargo-shear can't see them.
+ignored = ["getrandom", "serde-wasm-bindgen", "wasm-bindgen-futures"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -30,8 +31,14 @@ console_error_panic_hook = "0.1"
 getrandom = { version = "0.4", features = ["wasm_js"] } # wasm_js backend for rand-via-moq-net; cfg flag in .cargo/config.toml
 js-sys = "0.3"
 moq-net = { workspace = true }
+serde = { workspace = true }
+# The option bags cross as plain JS objects rather than exported classes, so a
+# caller can reuse one. serde-wasm-bindgen does the conversion; tsify derives the
+# matching TypeScript interface so the .d.ts stays typed.
+serde-wasm-bindgen = "0.6"
 thiserror = "2"
 tracing-wasm = "0.2"
+tsify = { version = "0.5", default-features = false, features = ["js"] }
 url = "2"
 # Pinned to the wasm-bindgen-cli version in the Nix dev shell: the bindgen
 # schema must match exactly between crate and CLI. Bump both together.
