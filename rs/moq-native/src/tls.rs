@@ -356,17 +356,26 @@ impl CustomRoots {
 	/// Refresh from disk, retaining and returning the last valid roots on failure.
 	#[cfg(feature = "quiche")]
 	pub(crate) fn refresh(&self) -> Vec<CertificateDer<'static>> {
-		match self.load().and_then(|roots| {
+		self.refresh_with(|| self.load())
+	}
+
+	#[cfg(feature = "quiche")]
+	fn refresh_with(
+		&self,
+		load: impl FnOnce() -> Result<Vec<CertificateDer<'static>>>,
+	) -> Vec<CertificateDer<'static>> {
+		let mut current = self.current.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+		match load().and_then(|roots| {
 			root_store(&roots)?;
 			Ok(roots)
 		}) {
 			Ok(roots) => {
-				self.replace(roots.clone());
+				*current = roots.clone();
 				roots
 			}
 			Err(err) => {
 				tracing::warn!(%err, "failed to reload client root certificates; retaining previous roots");
-				self.current()
+				current.clone()
 			}
 		}
 	}
@@ -1743,6 +1752,60 @@ mod tests {
 		let rotated = roots.refresh();
 		assert_ne!(rotated, initial);
 		assert_eq!(roots.current(), rotated);
+	}
+
+	#[cfg(all(feature = "quiche", feature = "watch"))]
+	#[test]
+	fn custom_root_refresh_serializes_cache_updates() {
+		let (ca_a, _, _, _, _) = signed_certificates();
+		let (ca_b, _, _, _, _) = signed_certificates();
+		let (ca_c, _, _, _, _) = signed_certificates();
+		let parse = |pem: &str| {
+			CertificateDer::pem_slice_iter(pem.as_bytes())
+				.collect::<std::result::Result<Vec<_>, _>>()
+				.unwrap()
+		};
+		let initial = parse(&ca_a);
+		let bundle_b = parse(&ca_b);
+		let bundle_c = parse(&ca_c);
+		let roots = CustomRoots {
+			paths: Vec::new(),
+			current: Arc::new(RwLock::new(initial)),
+		};
+
+		let (first_loaded_tx, first_loaded_rx) = std::sync::mpsc::sync_channel(0);
+		let (release_first_tx, release_first_rx) = std::sync::mpsc::sync_channel(0);
+		let first_roots = roots.clone();
+		let first = std::thread::spawn(move || {
+			first_roots.refresh_with(|| {
+				first_loaded_tx.send(()).unwrap();
+				release_first_rx.recv().unwrap();
+				Ok(bundle_b)
+			})
+		});
+		first_loaded_rx.recv().unwrap();
+
+		let (second_ready_tx, second_ready_rx) = std::sync::mpsc::sync_channel(0);
+		let (second_loaded_tx, second_loaded_rx) = std::sync::mpsc::channel();
+		let second_roots = roots.clone();
+		let expected = bundle_c.clone();
+		let second = std::thread::spawn(move || {
+			second_ready_tx.send(()).unwrap();
+			second_roots.refresh_with(|| {
+				second_loaded_tx.send(()).unwrap();
+				Ok(bundle_c)
+			})
+		});
+		second_ready_rx.recv().unwrap();
+		let overlapped = second_loaded_rx
+			.recv_timeout(std::time::Duration::from_millis(100))
+			.is_ok();
+
+		release_first_tx.send(()).unwrap();
+		first.join().unwrap();
+		second.join().unwrap();
+		assert!(!overlapped, "root cache refresh transactions must not overlap");
+		assert_eq!(roots.current(), expected);
 	}
 
 	#[test]
