@@ -232,10 +232,14 @@ impl<E: catalog::Catalog> Import<E> {
 				match self.continuity.entry(pid).or_default().observe(&pkt) {
 					Continuation::Duplicate => continue,
 					Continuation::Broken => {
-						// Flush first: whole frames already delivered in the truncated PES are
-						// good, and only what was left mid-frame is lost. Then drop that partial
-						// and require the next frame to prove its boundary.
-						self.flush(pid)?;
+						// Salvage the truncated PES only where its bytes stand on their own, then
+						// drop whatever is left mid-unit and require the next frame to prove its
+						// boundary.
+						if self.streams.get(&pid).is_some_and(Stream::salvages_partial_pes) {
+							self.flush(pid)?;
+						} else {
+							self.pending.remove(&pid);
+						}
 						if let Some(stream) = self.streams.get_mut(&pid) {
 							stream.desync();
 						}
@@ -1233,6 +1237,20 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::Legacy(stream) => stream.write(pending),
 			Stream::Verbatim(stream) => stream.write(pending),
 			Stream::Clock | Stream::Ignored => Ok(()),
+		}
+	}
+
+	/// Whether a PES cut short by a break is still worth publishing.
+	///
+	/// True where one PES carries many independently decodable units, so the ones ahead of
+	/// the cut are whole and correct on their own. False where it carries exactly one: half
+	/// an access unit is a picture with missing slices, and half a keyframe stays wrong for
+	/// every picture that references it. Verbatim payloads are all-or-nothing the same way.
+	fn salvages_partial_pes(&self) -> bool {
+		match self {
+			Stream::Aac(_) | Stream::Legacy(_) | Stream::Opus(_) => true,
+			Stream::H264 { .. } | Stream::H265 { .. } | Stream::Verbatim(_) => false,
+			Stream::Clock | Stream::Ignored => false,
 		}
 	}
 
@@ -2892,6 +2910,92 @@ mod test {
 			frames.len() > pristine,
 			"the wrap swallowed frames: {} looped vs {pristine} pristine",
 			frames.len()
+		);
+	}
+
+	/// Read every retained frame of the single video rendition in `catalog`.
+	async fn read_video_frames(
+		consumer: &moq_net::broadcast::Consumer,
+		catalog: &crate::catalog::Producer,
+	) -> Vec<crate::container::Frame> {
+		let name = catalog
+			.snapshot()
+			.video
+			.renditions
+			.keys()
+			.next()
+			.expect("a video track")
+			.clone();
+		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+		let mut frames = Vec::new();
+		while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await
+		{
+			frames.push(frame);
+		}
+		frames
+	}
+
+	/// Annex-B bytes for one access unit: SPS + PPS + IDR for a keyframe, else a delta slice.
+	fn annexb_au(keyframe: bool) -> Vec<u8> {
+		use crate::container::test_util::{IDR, PPS, SPS};
+		let nals: &[&[u8]] = if keyframe {
+			&[SPS, PPS, IDR]
+		} else {
+			&[&[0x41, 0x9a, 0x00, 0x01]]
+		};
+		let mut out = Vec::new();
+		for nal in nals {
+			out.extend_from_slice(&[0, 0, 0, 1]);
+			out.extend_from_slice(nal);
+		}
+		out
+	}
+
+	// A break mid-picture is not the same as a break mid-audio. One video PES is exactly one
+	// access unit, so there is no whole unit ahead of the cut to salvage: publishing what
+	// arrived would hand the decoder a picture with missing slices, and a keyframe missing
+	// slices stays wrong for every picture that references it. Drop it and wait for the next.
+	#[tokio::test(start_paused = true)]
+	async fn video_drops_a_partial_access_unit_across_a_continuity_break() {
+		const VIDEO_PID: u16 = 0x0050;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::H264, VIDEO_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// A keyframe cut in half by the wrap: the PES declares more than this packet carries.
+		let whole = annexb_au(true);
+		import
+			.decode(audio_pes_open(VIDEO_PID, 0, 90_000, whole.len() + 32, &whole[..28]).as_slice())
+			.unwrap();
+		// The wrap completes the open PES with unrelated bytes, and continuity gives it away.
+		import
+			.decode(ts_continuation(VIDEO_PID, 12, &whole[28..]).as_slice())
+			.unwrap();
+		// A clean keyframe after it, which is what the track should carry.
+		import
+			.decode(audio_pes_packet(VIDEO_PID, 13, 270_000, &whole).as_slice())
+			.unwrap();
+		import
+			.decode(audio_pes_packet(VIDEO_PID, 14, 450_000, &annexb_au(false)).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_video_frames(&consumer, &catalog).await;
+		assert!(
+			frames.iter().all(|f| f.payload.len() >= whole.len() || !f.keyframe),
+			"a keyframe with missing slices reached the track: {:?}",
+			frames.iter().map(|f| (f.keyframe, f.payload.len())).collect::<Vec<_>>()
+		);
+		assert_eq!(
+			frames.first().map(|f| f.payload.to_vec()),
+			Some(whole.clone()),
+			"the first published picture is not the whole keyframe"
 		);
 	}
 
