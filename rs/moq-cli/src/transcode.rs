@@ -86,7 +86,7 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		.context("`transcode` requires a relay: pass --client-connect <url>")?;
 	let publish = moq_net::Origin::random().produce();
 	let remote = moq_net::Origin::random().produce();
-	let mut session = net
+	let session = net
 		.client(moq.client.clone())?
 		.with_publisher(&publish)
 		.with_subscriber(remote.clone())
@@ -95,11 +95,20 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	// Wait for the source to be announced rather than for the session to connect:
 	// `request_broadcast` answers on the spot, so asking the moment a session exists
 	// races the announcement that makes the path routable.
+	//
+	// Raced against the session ending, since the wait itself never fails: the origin
+	// outlives the session here, so a rejected token or an exhausted retry budget would
+	// otherwise leave us waiting for an announcement that can never arrive.
 	let consumer = remote.consume();
-	consumer
-		.announced_broadcast(&source_path)
-		.await
-		.context("origin closed before the source broadcast was announced")?;
+	tokio::select! {
+		announced = consumer.announced_broadcast(&source_path) => {
+			announced.context("origin closed before the source broadcast was announced")?;
+		}
+		closed = session.closed() => {
+			closed.context("session failed before the source broadcast was announced")?;
+			anyhow::bail!("session closed before the source broadcast was announced");
+		}
+	}
 
 	// Resolve it for real; the session subscribes upstream on demand.
 	let source = consumer
