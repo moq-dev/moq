@@ -356,7 +356,10 @@ impl CustomRoots {
 	/// Refresh from disk, retaining and returning the last valid roots on failure.
 	#[cfg(feature = "quiche")]
 	pub(crate) fn refresh(&self) -> Vec<CertificateDer<'static>> {
-		match self.load() {
+		match self.load().and_then(|roots| {
+			root_store(&roots)?;
+			Ok(roots)
+		}) {
 			Ok(roots) => {
 				self.replace(roots.clone());
 				roots
@@ -1727,6 +1730,13 @@ mod tests {
 		let initial = roots.current();
 
 		std::fs::write(root_file.path(), "not a PEM certificate").unwrap();
+		assert_eq!(roots.refresh(), initial);
+
+		std::fs::write(
+			root_file.path(),
+			"-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n",
+		)
+		.unwrap();
 		assert_eq!(roots.refresh(), initial);
 
 		std::fs::write(root_file.path(), ca_b).unwrap();
