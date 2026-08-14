@@ -5,10 +5,10 @@
 //! supplies the certificate chain to serve, loaded from disk or self-signed on
 //! startup, and optionally the roots that authenticate mTLS clients.
 //!
-//! Certificates, keys, and custom root CAs loaded from disk are watched and hot
-//! reloaded for new handshakes, so rotating them normally needs no restart.
-//! Quiche servers are the exception: their client-auth roots are fixed when the
-//! listener is built. [`Certificates`] reads the current served set back out.
+//! Certificates, keys, and custom root CAs loaded from disk are normally hot
+//! reloaded for new handshakes. Quiche servers are the exception: all inbound
+//! TLS material is fixed when the listener is built. [`Certificates`] reads the
+//! current served set back out.
 
 use crate::crypto;
 use rustls::pki_types::pem::PemObject;
