@@ -135,18 +135,20 @@ type Control =
 	| { kind: "error"; error: Error };
 
 /**
- * The subscribe stream's control half, decoded into a single-message slot.
+ * The subscribe stream's control half, decoded ahead of the serving loop into a queue.
  *
- * Decoding runs on its own, but only ever fills the slot: the serving loop owns the track
- * cursor and the frame bounds, so nothing here may apply an update itself. That is what keeps
- * a group pop and its frame-range snapshot one indivisible step.
+ * Decoding runs on its own, but only ever queues: the serving loop owns the track cursor and
+ * the frame bounds, so nothing here may apply an update itself. That is what keeps a group pop
+ * and its frame-range snapshot one indivisible step.
  *
- * One message in flight rather than a queue, so a peer that floods SUBSCRIBE_UPDATE while the
- * loop is parked in a write backs up in QUIC flow control instead of on our heap. It also
- * matches the Rust publisher, which decodes one message per poll.
+ * Reading ahead is what makes control-first ordering hold for a burst. The loop drains this
+ * queue synchronously, so it cannot yield to the decoder between two controls: anything not
+ * already decoded when the loop resumes would land after the next pop instead of before it.
+ * The Rust publisher gets the same property from `poll_decode_maybe`, which decodes straight
+ * out of the reader's buffer; nothing here can decode synchronously, so it reads ahead instead.
  */
 class SubscriptionControls {
-	#update?: SubscribeUpdate;
+	#updates: SubscribeUpdate[] = [];
 	// Sticky, first one wins: null once the stream is over, an Error once it failed.
 	#end?: Error | null;
 	#changed = new Signal(0);
@@ -157,8 +159,7 @@ class SubscriptionControls {
 	constructor(reader: Reader, writer: Writer, version: Version) {
 		this.decoding = this.#decode(reader, version);
 		// Our own half going away ends the loop too, and has to reach it the same way: the
-		// loop looks at nothing else. This is also what releases a decoder parked on a full
-		// slot during teardown, which closing the reader alone would leave stuck.
+		// loop looks at nothing else.
 		void writer.closed.then(
 			() => this.#finish(null),
 			(err: unknown) => this.#finish(error(err)),
@@ -167,14 +168,10 @@ class SubscriptionControls {
 
 	/** The next control to apply, or undefined while the peer is quiet. */
 	take(): Control | undefined {
-		const update = this.#update;
-		if (update) {
-			// An update decoded before the stream ended still applies. `#end` is sticky, so
-			// the next call reports it.
-			this.#update = undefined;
-			this.#wake();
-			return { kind: "update", update };
-		}
+		const update = this.#updates.shift();
+		// An update decoded before the stream ended still applies, so the queue drains first.
+		// `#end` is sticky, so it is still there once the queue is empty.
+		if (update) return { kind: "update", update };
 		if (this.#end === undefined) return undefined;
 		return this.#end === null ? { kind: "done" } : { kind: "error", error: this.#end };
 	}
@@ -187,26 +184,16 @@ class SubscriptionControls {
 	#finish(end: Error | null) {
 		if (this.#end !== undefined) return;
 		this.#end = end;
-		this.#wake();
-	}
-
-	#wake() {
 		this.#changed.update((value) => value + 1);
 	}
 
 	async #decode(reader: Reader, version: Version) {
 		try {
 			while (this.#end === undefined) {
-				// Hold the decoded update until the loop takes it, rather than reading ahead.
-				if (this.#update) {
-					await this.#changed.changed();
-					continue;
-				}
-
 				const update = await SubscribeUpdate.decodeMaybe(reader, version);
 				if (!update) break;
-				this.#update = update;
-				this.#wake();
+				this.#updates.push(update);
+				this.#changed.update((value) => value + 1);
 			}
 		} catch (err: unknown) {
 			this.#finish(error(err));
@@ -492,7 +479,6 @@ export class Publisher {
 			stream.close();
 			track.close();
 			// Closing the stream ends the decoder and track.close ends the datagram loop.
-			// Both halves settle, so a decoder parked on an untaken update unwinds too.
 			await Promise.all([datagrams, controls.decoding]);
 		} catch (err: unknown) {
 			const e = error(err);
@@ -600,10 +586,10 @@ export class Publisher {
 		});
 		try {
 			for (;;) {
-				// Control before data, matching the Rust publisher: an update decoded while the
-				// loop was parked applies to the next pop, never to one already made. The
-				// decoder only fills a slot, so nothing here can land between the pop below and
-				// its frame range.
+				// Control before data, matching the Rust publisher: every control decoded while
+				// the loop was parked applies to the next pop, never to one already made. This
+				// drain is synchronous, so nothing the decoder holds can land between the pop
+				// below and its frame range.
 				const control = controls.take();
 				if (control) {
 					switch (control.kind) {

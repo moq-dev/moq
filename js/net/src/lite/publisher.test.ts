@@ -679,6 +679,46 @@ test("lite draft-06: a popped group keeps its frame bounds across a queued updat
 	}
 });
 
+// Control-first has to mean every buffered control, not just the first. Two updates that arrive
+// while the loop is parked both describe the subscription the peer wants now, so serving a group
+// under the older one puts frames on the wire that the newer one excluded.
+test("lite draft-06: a burst of updates all apply before the next group pop", async () => {
+	const sub = await servedSubscription({
+		version: Version.DRAFT_06,
+		startGroup: 0,
+		endGroup: 1,
+		endFrame: 2,
+		frames: ["a", "b", "c"],
+		gated: true,
+	});
+	try {
+		// Group 0 parks the loop inside its SUBSCRIBE_START write; group 1 buffers behind it.
+		sub.serve(0);
+		await sub.parked;
+		sub.serve(1);
+
+		// Two updates land back to back, the second superseding the first.
+		await new SubscribeUpdate({ priority: 0, endGroup: 1, endFrame: 1 }).encode(
+			sub.client.writer,
+			Version.DRAFT_06,
+		);
+		await new SubscribeUpdate({ priority: 0, endGroup: 1, endFrame: 0 }).encode(
+			sub.client.writer,
+			Version.DRAFT_06,
+		);
+		await flush();
+
+		sub.release();
+
+		// Group 0 was popped before either update and is not the end group either way.
+		expect(await sub.servedGroup()).toEqual({ sequence: 0, frameStart: 0, payloads: ["a", "b", "c"] });
+		// Group 1 is popped after both, so it honors the second: "b" stays off the wire.
+		expect(await sub.servedGroup()).toEqual({ sequence: 1, frameStart: 0, payloads: ["a"] });
+	} finally {
+		await sub.close();
+	}
+});
+
 // A peer FIN is the subscriber leaving, which the loop takes ahead of any ready group: it stops
 // there rather than draining what is buffered, since nobody is reading the rest. Matches the Rust
 // publisher's TrackEnd::PeerFin, which drops the in-flight group machines instead of draining.
@@ -699,11 +739,10 @@ test("lite draft-05: a peer FIN ends serving while the producer is still live", 
 	}
 });
 
-// The decoder holds one message at a time and parks until the loop takes it, so a subscription
-// that dies while holding one leaves the decoder parked on the slot rather than on a read that
-// resetting the stream would release. Teardown has to unpark it too, or runSubscribe never
-// returns and the subscription leaks.
-test("lite draft-05: teardown unwinds while the decoder holds an untaken update", async () => {
+// runSubscribe waits on the decoder before it returns, so a subscription that dies mid-write
+// with a control still queued has to end the decoder too, or it never returns and the
+// subscription leaks.
+test("lite draft-05: teardown unwinds with an undelivered update queued", async () => {
 	const sub = await servedSubscription({ startGroup: 0, gated: true });
 	try {
 		// Group 0 parks the loop inside its SUBSCRIBE_START write.
