@@ -1,9 +1,10 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Producer as GroupProducer } from "../group.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
+import { Subscriber as TrackSubscriber } from "../track.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { randomOrigin } from "./origin.ts";
@@ -679,10 +680,9 @@ test("lite draft-06: a popped group keeps its frame bounds across a queued updat
 	}
 });
 
-// Control-first has to mean every buffered control, not just the first. Two updates that arrive
-// while the loop is parked both describe the subscription the peer wants now, so serving a group
-// under the older one puts frames on the wire that the newer one excluded.
-test("lite draft-06: a burst of updates all apply before the next group pop", async () => {
+// Updates are full-state, so a burst buffered while the serving loop is parked only needs its
+// newest member. Keeping one pending update bounds memory without serving under stale bounds.
+test("lite draft-06: a burst of updates coalesces before the next group pop", async () => {
 	const sub = await servedSubscription({
 		version: Version.DRAFT_06,
 		startGroup: 0,
@@ -696,24 +696,34 @@ test("lite draft-06: a burst of updates all apply before the next group pop", as
 		sub.serve(0);
 		await sub.parked;
 		sub.serve(1);
+		const updates = spyOn(TrackSubscriber.prototype, "update");
 
-		// Two updates land back to back, the second superseding the first.
-		await new SubscribeUpdate({ priority: 0, endGroup: 1, endFrame: 1 }).encode(
-			sub.client.writer,
-			Version.DRAFT_06,
-		);
-		await new SubscribeUpdate({ priority: 0, endGroup: 1, endFrame: 0 }).encode(
-			sub.client.writer,
-			Version.DRAFT_06,
-		);
-		await flush();
+		try {
+			// Two updates land back to back, the second superseding the first.
+			await new SubscribeUpdate({ priority: 0, endGroup: 1, endFrame: 1 }).encode(
+				sub.client.writer,
+				Version.DRAFT_06,
+			);
+			await new SubscribeUpdate({ priority: 0, endGroup: 1, endFrame: 0 }).encode(
+				sub.client.writer,
+				Version.DRAFT_06,
+			);
+			await flush();
 
-		sub.release();
+			sub.release();
 
-		// Group 0 was popped before either update and is not the end group either way.
-		expect(await sub.servedGroup()).toEqual({ sequence: 0, frameStart: 0, payloads: ["a", "b", "c"] });
-		// Group 1 is popped after both, so it honors the second: "b" stays off the wire.
-		expect(await sub.servedGroup()).toEqual({ sequence: 1, frameStart: 0, payloads: ["a"] });
+			// Group 0 was popped before either update and is not the end group either way.
+			expect(await sub.servedGroup()).toEqual({
+				sequence: 0,
+				frameStart: 0,
+				payloads: ["a", "b", "c"],
+			});
+			// Group 1 is popped under the latest state, with no application of the older one.
+			expect(await sub.servedGroup()).toEqual({ sequence: 1, frameStart: 0, payloads: ["a"] });
+			expect(updates).toHaveBeenCalledTimes(1);
+		} finally {
+			updates.mockRestore();
+		}
 	} finally {
 		await sub.close();
 	}

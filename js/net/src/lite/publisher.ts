@@ -135,20 +135,19 @@ type Control =
 	| { kind: "error"; error: Error };
 
 /**
- * The subscribe stream's control half, decoded ahead of the serving loop into a queue.
+ * The subscribe stream's control half, decoded ahead of the serving loop.
  *
- * Decoding runs on its own, but only ever queues: the serving loop owns the track cursor and
- * the frame bounds, so nothing here may apply an update itself. That is what keeps a group pop
- * and its frame-range snapshot one indivisible step.
+ * Decoding runs on its own, but only stores the latest full-state update: the serving loop owns
+ * the track cursor and frame bounds, so nothing here may apply an update itself. That is what
+ * keeps a group pop and its frame-range snapshot one indivisible step.
  *
- * Reading ahead is what makes control-first ordering hold for a burst. The loop drains this
- * queue synchronously, so it cannot yield to the decoder between two controls: anything not
- * already decoded when the loop resumes would land after the next pop instead of before it.
- * The Rust publisher gets the same property from `poll_decode_maybe`, which decodes straight
- * out of the reader's buffer; nothing here can decode synchronously, so it reads ahead instead.
+ * Reading ahead makes control-first ordering hold for a burst. Coalescing bounds memory while
+ * preserving the newest state decoded before the next group pop. The Rust publisher gets the
+ * same ordering from `poll_decode_maybe`, which decodes straight out of the reader's buffer;
+ * nothing here can decode synchronously, so it reads ahead instead.
  */
 class SubscriptionControls {
-	#updates: SubscribeUpdate[] = [];
+	#update?: SubscribeUpdate;
 	// Sticky, first one wins: null once the stream is over, an Error once it failed.
 	#end?: Error | null;
 	#changed = new Signal(0);
@@ -168,9 +167,9 @@ class SubscriptionControls {
 
 	/** The next control to apply, or undefined while the peer is quiet. */
 	take(): Control | undefined {
-		const update = this.#updates.shift();
-		// An update decoded before the stream ended still applies, so the queue drains first.
-		// `#end` is sticky, so it is still there once the queue is empty.
+		const update = this.#update;
+		this.#update = undefined;
+		// An update decoded before the stream ended still applies before the sticky end.
 		if (update) return { kind: "update", update };
 		if (this.#end === undefined) return undefined;
 		return this.#end === null ? { kind: "done" } : { kind: "error", error: this.#end };
@@ -192,7 +191,7 @@ class SubscriptionControls {
 			while (this.#end === undefined) {
 				const update = await SubscribeUpdate.decodeMaybe(reader, version);
 				if (!update) break;
-				this.#updates.push(update);
+				this.#update = update;
 				this.#changed.update((value) => value + 1);
 			}
 		} catch (err: unknown) {
