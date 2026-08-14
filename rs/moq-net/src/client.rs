@@ -685,6 +685,32 @@ mod tests {
 		assert_ne!(code, Error::Version.to_code(), "SessionInfo failed to decode");
 	}
 
+	/// `connect` must not depend on the peer answering. A peer that opens the announce
+	/// stream and then says nothing (or promises a count it never delivers) used to hold
+	/// `connect` for the life of the session, since it waited for the initial announce
+	/// set. Resolving a path you need is `announced_broadcast`'s job, which waits for
+	/// that path rather than for the peer to finish talking.
+	#[tokio::test(start_paused = true)]
+	async fn connect_does_not_wait_for_the_peer_to_announce() {
+		// Serves bidi streams, so the announce stream opens, and never answers on them.
+		let gate = kio::Producer::new(true);
+		let transport = crate::lite::test_transport::SinkSession::gated_bi(gate.consume())
+			.with_protocol(crate::version::ALPN_LITE_05);
+
+		// A subscribe origin is what makes the client open an announce stream at all.
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let client = Client::new()
+			.with_versions([Version::Lite(lite::Version::Lite05)].into())
+			.with_subscriber(origin);
+
+		// Paused time auto-advances while every task is idle, so a `connect` that waits
+		// on the silent peer trips this rather than hanging the suite.
+		tokio::time::timeout(std::time::Duration::from_secs(30), client.connect(transport))
+			.await
+			.expect("connect waited on a peer that never announced")
+			.expect("connect failed");
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn alpn_lite_falls_back_to_draft14_and_switches_version_post_setup() {
 		run_alpn_lite_fallback_case(Some(ALPN_LITE)).await;
