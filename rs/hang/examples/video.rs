@@ -71,8 +71,9 @@ fn create_track(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<
 	group.finish()?;
 
 	// Actually create the media track now.
-	// track_info() pins the microsecond timescale that the legacy container encodes with.
-	let track = broadcast.create_track(video_track, hang::container::track_info())?;
+	// track_info() pins the microsecond timescale that the legacy container encodes with, and
+	// declares the publisher priority so a subscriber orders this against a broadcast's audio.
+	let track = broadcast.create_track(video_track, hang::container::track_info(hang::catalog::PRIORITY.video))?;
 
 	Ok(track)
 }

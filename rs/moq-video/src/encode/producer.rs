@@ -101,14 +101,14 @@ impl<E: CatalogExt> Producer<E> {
 	) -> Result<Self, Error> {
 		let codecs = match &rendition.codec {
 			hang::catalog::VideoCodec::H264(_) => {
-				let track = broadcast.unique_track(".avc3", catalog.track_info())?;
+				let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))?;
 				Codecs::H264 {
 					split: moq_mux::codec::h264::Split::new(),
 					import: moq_mux::codec::h264::Import::new(track, catalog.reserve(), rendition_hint(rendition))?,
 				}
 			}
 			hang::catalog::VideoCodec::H265(_) => {
-				let track = broadcast.unique_track(".hev1", catalog.track_info())?;
+				let track = broadcast.unique_track(".hev1", catalog.track_info(hang::catalog::PRIORITY.video))?;
 				Codecs::H265 {
 					split: moq_mux::codec::h265::Split::new(),
 					import: moq_mux::codec::h265::Import::new(track, catalog.reserve(), rendition_hint(rendition))?,

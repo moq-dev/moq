@@ -93,7 +93,10 @@ async fn export_aac_roundtrip() {
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let track = broadcast
-		.create_track(broadcast.unique_name(".aac"), hang::container::track_info())
+		.create_track(
+			broadcast.unique_name(".aac"),
+			hang::container::track_info(hang::catalog::PRIORITY.audio),
+		)
 		.unwrap();
 	let name = track.name().to_string();
 	{
@@ -206,7 +209,10 @@ async fn export_lead_audio() -> BytesMut {
 
 	// In-band avc3 video (SPS/PPS inline on keyframes; no out-of-band description).
 	let vtrack = broadcast
-		.create_track(broadcast.unique_name(".avc3"), hang::container::track_info())
+		.create_track(
+			broadcast.unique_name(".avc3"),
+			hang::container::track_info(hang::catalog::PRIORITY.video),
+		)
 		.unwrap();
 	{
 		let mut cfg = VideoConfig::new(H264 {
@@ -221,7 +227,10 @@ async fn export_lead_audio() -> BytesMut {
 	let mut video = Producer::new(vtrack, HangContainer::Legacy);
 
 	let atrack = broadcast
-		.create_track(broadcast.unique_name(".aac"), hang::container::track_info())
+		.create_track(
+			broadcast.unique_name(".aac"),
+			hang::container::track_info(hang::catalog::PRIORITY.audio),
+		)
 		.unwrap();
 	{
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
@@ -339,7 +348,10 @@ async fn export_avc3_in_band_reassembles() {
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let track = broadcast
-		.create_track(broadcast.unique_name(".avc3"), hang::container::track_info())
+		.create_track(
+			broadcast.unique_name(".avc3"),
+			hang::container::track_info(hang::catalog::PRIORITY.video),
+		)
 		.unwrap();
 	let name = track.name().to_string();
 	{
@@ -387,7 +399,10 @@ async fn export_avc3_preserves_multiple_pps() {
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let track = broadcast
-		.create_track(broadcast.unique_name(".avc3"), hang::container::track_info())
+		.create_track(
+			broadcast.unique_name(".avc3"),
+			hang::container::track_info(hang::catalog::PRIORITY.video),
+		)
 		.unwrap();
 	let name = track.name().to_string();
 	{
@@ -437,7 +452,10 @@ async fn export_avc1_out_of_band_reassembles() {
 	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
 
 	let track = broadcast
-		.create_track(broadcast.unique_name(".avc1"), hang::container::track_info())
+		.create_track(
+			broadcast.unique_name(".avc1"),
+			hang::container::track_info(hang::catalog::PRIORITY.video),
+		)
 		.unwrap();
 	let name = track.name().to_string();
 	{
@@ -561,7 +579,7 @@ async fn export_scte35_roundtrip() {
 	// `Import` (which consumes it); the producer stays alive so the exporter can
 	// subscribe to the retained track.
 	let scte = broadcast
-		.unique_track(".scte35", hang::container::track_info())
+		.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.video))
 		.unwrap();
 	let scte_name = scte.name().to_string();
 	{
@@ -673,7 +691,9 @@ async fn export_pes_verbatim_roundtrip() {
 
 	// Build the verbatim PES track BEFORE moving `broadcast` into `Import`; the
 	// producer stays alive so the exporter can subscribe to the retained track.
-	let data_track = broadcast.unique_track(".data", hang::container::track_info()).unwrap();
+	let data_track = broadcast
+		.unique_track(".data", hang::container::track_info(hang::catalog::PRIORITY.video))
+		.unwrap();
 	let data_name = data_track.name().to_string();
 	{
 		let mut verbatim = tscat::Verbatim::new(0x06, tscat::Framing::Pes);
@@ -759,7 +779,7 @@ async fn scte35_without_video_export_is_rejected() {
 
 	// A SCTE-35 cue track and nothing else.
 	let scte = broadcast
-		.unique_track(".scte35", hang::container::track_info())
+		.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.video))
 		.unwrap();
 	let scte_name = scte.name().to_string();
 	{
@@ -1461,7 +1481,10 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 
 	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
 	let track = broadcast
-		.create_track(broadcast.unique_name(".avc1"), hang::container::track_info())
+		.create_track(
+			broadcast.unique_name(".avc1"),
+			hang::container::track_info(hang::catalog::PRIORITY.video),
+		)
 		.unwrap();
 	let name = track.name().to_string();
 	{
@@ -1606,7 +1629,10 @@ async fn export_opus_roundtrip() {
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let track = broadcast
-		.create_track(broadcast.unique_name(".opus"), hang::container::track_info())
+		.create_track(
+			broadcast.unique_name(".opus"),
+			hang::container::track_info(hang::catalog::PRIORITY.video),
+		)
 		.unwrap();
 	let name = track.name().to_string();
 	{
@@ -1683,7 +1709,10 @@ async fn opus_export_import_roundtrip() {
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let track = broadcast
-		.create_track(broadcast.unique_name(".opus"), hang::container::track_info())
+		.create_track(
+			broadcast.unique_name(".opus"),
+			hang::container::track_info(hang::catalog::PRIORITY.video),
+		)
 		.unwrap();
 	let name = track.name().to_string();
 	{

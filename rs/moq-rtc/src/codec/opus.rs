@@ -17,7 +17,7 @@ impl Bridge {
 		channel_count: u32,
 	) -> Result<Self> {
 		let config = moq_mux::codec::opus::Config::new(sample_rate, channel_count);
-		let track = broadcast.unique_track(".opus", catalog.track_info())?;
+		let track = broadcast.unique_track(".opus", catalog.track_info(hang::catalog::PRIORITY.audio))?;
 		let import = moq_mux::codec::opus::Import::new(track, catalog.reserve(), config.into())?;
 		Ok(Self { import })
 	}
