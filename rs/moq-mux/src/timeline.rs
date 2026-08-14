@@ -546,7 +546,11 @@ impl Producer {
 	/// Create the timeline track when the first pacing track enrolls.
 	fn prepare_pacing(&self, state: &mut State) -> crate::Result<()> {
 		if state.sink.is_none() && state.overrun.is_none() {
-			let net = state.broadcast.create_track(DEFAULT_NAME, None)?;
+			// Catalog priority, like the catalog tracks: the timeline is the index a
+			// player reads before any media is useful to it, and it is far too small
+			// to starve the media it indexes by sitting above it.
+			let info = moq_net::track::Info::default().with_priority(hang::catalog::PRIORITY.catalog);
+			let net = state.broadcast.create_track(DEFAULT_NAME, info)?;
 			let config = moq_json::stream::ProducerConfig::default().with_compression(true);
 			state.sink = Some(moq_json::stream::Producer::new(net, config));
 		}
