@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.11](https://github.com/moq-dev/moq/compare/moq-native-v0.19.10...moq-native-v0.19.11) - 2026-08-14
+
+### Added
+
+- *(cli)* run multiple import/export stages over one connection ([#2809](https://github.com/moq-dev/moq/pull/2809))
+
+### Other
+
+- reload custom root CAs without restart ([#2863](https://github.com/moq-dev/moq/pull/2863))
+
 ## [0.19.10](https://github.com/moq-dev/moq/compare/moq-native-v0.19.9...moq-native-v0.19.10) - 2026-08-13
 
 ### Added

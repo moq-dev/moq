@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.11](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.10...moq-ffi-v0.3.11) - 2026-08-14
+
+### Added
+
+- *(bindings)* fetch and decode a retained media group ([#2827](https://github.com/moq-dev/moq/pull/2827))
+
+### Fixed
+
+- *(mux)* derive missing video geometry ([#2840](https://github.com/moq-dev/moq/pull/2840))
+- *(net)* stop blocking connect on the initial announce set ([#2856](https://github.com/moq-dev/moq/pull/2856))
+
 ## [0.3.10](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.9...moq-ffi-v0.3.10) - 2026-08-13
 
 ### Added
