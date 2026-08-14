@@ -281,13 +281,12 @@ impl Client {
 					peer_setup: None,
 				})?;
 
-				// Block until the initial announce set has landed (Lite05+ reports it
-				// via AnnounceOk + N), so a `request_broadcast()` for a live path resolves
-				// immediately instead of racing announcement gossip.
-				let (session, mut driver) = Session::new(session, version.into(), start.recv_bandwidth, start.driver);
-				driver.wait_ready(|waiter| start.connecting.poll_ready(waiter)).await;
-
-				return Ok((session, driver));
+				return Ok(Session::new(
+					session,
+					version.into(),
+					start.recv_bandwidth,
+					start.driver,
+				));
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions
@@ -305,16 +304,12 @@ impl Client {
 					peer_setup: None,
 				})?;
 
-				// Lite04 has no initial-set boundary, so this resolves immediately.
-				let (session, mut driver) = Session::new(
+				return Ok(Session::new(
 					session,
 					lite::Version::Lite04.into(),
 					start.recv_bandwidth,
 					start.driver,
-				);
-				driver.wait_ready(|waiter| start.connecting.poll_ready(waiter)).await;
-
-				return Ok((session, driver));
+				));
 			}
 			Some(ALPN_LITE_03) => {
 				self.versions
@@ -333,16 +328,12 @@ impl Client {
 					peer_setup: None,
 				})?;
 
-				// Lite03 has no initial-set boundary, so this resolves immediately.
-				let (session, mut driver) = Session::new(
+				return Ok(Session::new(
 					session,
 					lite::Version::Lite03.into(),
 					start.recv_bandwidth,
 					start.driver,
-				);
-				driver.wait_ready(|waiter| start.connecting.poll_ready(waiter)).await;
-
-				return Ok((session, driver));
+				));
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -381,7 +372,7 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		let (recv_bw, protocol, connecting) = match version {
+		let (recv_bw, protocol) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
@@ -397,7 +388,7 @@ impl Client {
 					peer_setup: None,
 				})?;
 
-				(start.recv_bandwidth, start.driver, Some(start.connecting))
+				(start.recv_bandwidth, start.driver)
 			}
 			Version::Ietf(v) => {
 				// Decode the parameters to get the initial request ID and what the server
@@ -427,18 +418,11 @@ impl Client {
 					peer_setup_stream: None,
 					peer_declared: Some(peer_declared),
 				})?;
-				(None, protocol, None)
+				(None, protocol)
 			}
 		};
 
-		let (session, mut driver) = Session::new(session, version, recv_bw, protocol);
-		if let Some(connecting) = connecting {
-			// Block until the initial announce set has landed (for versions that
-			// report one); resolves immediately otherwise.
-			driver.wait_ready(|waiter| connecting.poll_ready(waiter)).await;
-		}
-
-		Ok((session, driver))
+		Ok(Session::new(session, version, recv_bw, protocol))
 	}
 }
 
@@ -673,7 +657,10 @@ mod tests {
 			.into(),
 		);
 
-		let _connection = client.connect(fake.clone()).await.unwrap();
+		// `connect` returns as soon as the handshake completes and never polls the driver,
+		// so the session makes no progress (and never closes) unless we drive it here.
+		let (_session, driver) = client.connect(fake.clone()).await.unwrap();
+		let _driver = tokio::spawn(driver);
 
 		// Verify the client setup was encoded using Draft14 framing (ALPN_LITE fallback path).
 		let mut setup_bytes = Bytes::from(fake.control_writes());

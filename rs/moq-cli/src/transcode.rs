@@ -92,13 +92,17 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		.with_subscriber(remote.clone())
 		.reconnect(url);
 
-	// Wait for the first session: the origin can't route a broadcast request
-	// until a connected session registers its handler.
-	while !matches!(session.status().await?, moq_native::Status::Connected) {}
+	// Wait for the source to be announced rather than for the session to connect:
+	// `request_broadcast` answers on the spot, so asking the moment a session exists
+	// races the announcement that makes the path routable.
+	let consumer = remote.consume();
+	consumer
+		.announced_broadcast(&source_path)
+		.await
+		.context("origin closed before the source broadcast was announced")?;
 
-	// Request the source broadcast; the session subscribes upstream on demand.
-	let source = remote
-		.consume()
+	// Resolve it for real; the session subscribes upstream on demand.
+	let source = consumer
 		.request_broadcast(&source_path)
 		.await
 		.context("source broadcast unavailable")?;

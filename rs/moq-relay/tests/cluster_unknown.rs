@@ -136,10 +136,13 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 		.map_err(|_| "subscriber connect timeout".to_string())?
 		.map_err(|err| format!("subscriber connect failed: {err}"))?;
 
-	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast(PATH))
+	// Wait for the announcement rather than asking the moment the session connects:
+	// `request_broadcast` answers on the spot, so it would race the announcement that
+	// makes the path routable.
+	let broadcast = tokio::time::timeout(TIMEOUT, consumer.announced_broadcast(PATH))
 		.await
-		.map_err(|_| "request_broadcast timed out".to_string())?
-		.map_err(|err| format!("request_broadcast failed: {err}"))?;
+		.map_err(|_| "announced_broadcast timed out".to_string())?
+		.ok_or_else(|| "origin closed before the broadcast was announced".to_string())?;
 
 	let mut track = tokio::time::timeout(TIMEOUT, broadcast.track("video").expect("track handle").subscribe(None))
 		.await
