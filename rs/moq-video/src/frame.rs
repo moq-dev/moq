@@ -662,9 +662,9 @@ impl I420 {
 
 	/// Split tightly-packed NV12 (Y plane `width * height`, then interleaved UV
 	/// `width/2 * height/2` pairs) into planar I420. A chroma deinterleave, no
-	/// color-space conversion. Used for the Windows Media Foundation capture path,
-	/// whose source reader hands us NV12.
-	#[cfg(target_os = "windows")]
+	/// color-space conversion. Used by the Windows Media Foundation and Linux
+	/// PipeWire capture paths.
+	#[cfg(any(target_os = "windows", all(target_os = "linux", feature = "pipewire")))]
 	pub(crate) fn from_nv12(nv12: &[u8], width: u32, height: u32) -> Result<Self, Error> {
 		let (w, h) = (width as usize, height as usize);
 		let luma = w * h;
