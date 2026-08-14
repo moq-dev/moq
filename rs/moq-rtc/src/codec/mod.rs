@@ -99,6 +99,7 @@ struct PendingVideo {
 enum DeferredState<I> {
 	Pending(Box<PendingVideo>),
 	Active(Box<I>),
+	Failed(Box<moq_net::track::Producer>),
 	Poisoned,
 }
 
@@ -132,7 +133,14 @@ impl<I: DeferredImport> DeferredVideo<I> {
 			)));
 		};
 		let reserved = pending.catalog.reserve();
-		let import = I::create(pending.track, reserved)?;
+		let abort = pending.track.clone();
+		let import = match I::create(pending.track, reserved) {
+			Ok(import) => import,
+			Err(err) => {
+				self.state = DeferredState::Failed(Box::new(abort));
+				return Err(err.into());
+			}
+		};
 		self.state = DeferredState::Active(Box::new(import));
 		let DeferredState::Active(import) = &mut self.state else {
 			unreachable!();
@@ -147,6 +155,9 @@ impl<I: DeferredImport> DeferredVideo<I> {
 				let _ = pending.track.abort(err);
 			}
 			DeferredState::Active(import) => import.abort(err),
+			DeferredState::Failed(track) => {
+				let _ = track.abort(err);
+			}
 			DeferredState::Poisoned => {}
 		}
 	}

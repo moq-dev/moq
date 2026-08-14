@@ -58,4 +58,29 @@ mod tests {
 		assert_eq!(config.coded_width, Some(320));
 		assert_eq!(config.coded_height, Some(240));
 	}
+
+	#[tokio::test]
+	async fn importer_creation_failure_preserves_abort_error() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let _collision = broadcast.create_track("0.vp8.timeline.z", None).unwrap();
+		let consumer = broadcast.consume();
+		let mut bridge = super::Bridge::new(broadcast, catalog).unwrap();
+		let mut track = consumer.track("0.vp8").unwrap().subscribe(None).await.unwrap();
+
+		let result = bridge.push(codec::Frame {
+			timestamp_us: 0,
+			payload: Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00]),
+		});
+		assert!(result.is_err(), "timeline collision must fail importer creation");
+
+		Box::new(bridge).abort(moq_net::Error::Transport("session failed".into()));
+		let Err(error) = track.recv_group().await else {
+			panic!("aborted track must fail");
+		};
+		assert!(matches!(
+			error,
+			moq_net::Error::Transport(message) if message == "session failed"
+		));
+	}
 }
