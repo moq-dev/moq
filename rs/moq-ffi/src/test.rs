@@ -514,7 +514,9 @@ async fn fetch_media_group_rejects_invalid_container_before_fetching() {
 
 #[tokio::test]
 async fn fetch_media_group_decodes_multiple_cmaf_samples() {
-	let config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+	let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+	config.coded_width = Some(320);
+	config.coded_height = Some(240);
 	let muxer = moq_mux::container::fmp4::Muxer::video(&config).unwrap();
 	let init = muxer.init().unwrap().expect("VP8 init should be available");
 	let catalog_container = hang::catalog::Container::Cmaf { init: init.clone() };

@@ -239,6 +239,21 @@ mod tests {
 		}
 	}
 
+	fn vp8_frame(micros: u64, keyframe: bool) -> moq_mux::container::Frame {
+		let payload = if keyframe {
+			// Key frame tag, start code, and 320x240 geometry.
+			&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00][..]
+		} else {
+			&[0x31, 0x00, 0x00][..]
+		};
+		moq_mux::container::Frame {
+			timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+			payload: bytes::Bytes::copy_from_slice(payload),
+			keyframe,
+			duration: None,
+		}
+	}
+
 	fn video_config(catalog: &moq_mux::catalog::Producer) -> hang::catalog::VideoConfig {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.coded_width = Some(320);
@@ -292,7 +307,9 @@ mod tests {
 
 		let reserved = catalog.reserve();
 		let mut registration = reserved.video("video0");
-		let config = video_config(&catalog);
+		let mut config = video_config(&catalog);
+		config.coded_width = None;
+		config.coded_height = None;
 		registration.set(config);
 		drop(reserved);
 
@@ -301,11 +318,11 @@ mod tests {
 		let mut media = catalog
 			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
 			.unwrap();
-		media.write(frame(0, true)).unwrap();
-		media.write(frame(1_000_000, false)).unwrap();
-		media.write(frame(2_000_000, true)).unwrap();
-		media.write(frame(3_000_000, false)).unwrap();
-		media.write(frame(4_000_000, true)).unwrap();
+		media.write(vp8_frame(0, true)).unwrap();
+		media.write(vp8_frame(1_000_000, false)).unwrap();
+		media.write(vp8_frame(2_000_000, true)).unwrap();
+		media.write(vp8_frame(3_000_000, false)).unwrap();
+		media.write(vp8_frame(4_000_000, true)).unwrap();
 
 		let source = moq_mux::Source::new(origin.consume(), "live");
 		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();

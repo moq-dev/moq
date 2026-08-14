@@ -109,7 +109,9 @@ mod tests {
 	/// One CMAF fragment decodes to several samples, which are handed back one at a time.
 	#[tokio::test]
 	async fn hands_back_a_cmaf_batch_one_frame_at_a_time() {
-		let config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
 		let muxer = crate::container::fmp4::Muxer::video(&config).unwrap();
 		let init = muxer.init().unwrap().expect("VP8 init should be available");
 		let cmaf = hang::catalog::Container::Cmaf { init };

@@ -299,42 +299,40 @@ impl ExportSource {
 		let Some(codec) = self.video_codec.as_ref() else {
 			return;
 		};
-
-		let dimensions = match codec {
-			VideoCodec::H264(_) => self
-				.description
-				.as_deref()
-				.and_then(|description| crate::codec::h264::config(description).ok())
-				.as_ref()
-				.and_then(catalog_dimensions),
-			VideoCodec::H265(_) => self
-				.description
-				.as_deref()
-				.and_then(|description| crate::codec::h265::config(description).ok())
-				.as_ref()
-				.and_then(catalog_dimensions),
-			VideoCodec::VP8 if !payload.is_empty() => crate::codec::vp8::FrameHeader::parse(payload)
-				.ok()
-				.and_then(|header| header.dimensions)
-				.map(|(width, height)| (u32::from(width), u32::from(height))),
-			VideoCodec::VP9(_) if !payload.is_empty() => crate::codec::vp9::config_from_keyframe(payload)
-				.ok()
-				.flatten()
-				.as_ref()
-				.and_then(catalog_dimensions),
-			VideoCodec::AV1(_) if !payload.is_empty() => crate::codec::av1::dimensions(payload).ok().flatten(),
-			_ => None,
-		};
-
-		if dimensions.is_some_and(|(width, height)| width > 0 && height > 0) {
-			self.video_dimensions = dimensions;
-		}
+		self.video_dimensions = codec_dimensions(codec, self.description.as_deref(), payload);
 	}
 }
 
-fn catalog_dimensions(config: &VideoConfig) -> Option<(u32, u32)> {
+pub(crate) fn catalog_dimensions(config: &VideoConfig) -> Option<(u32, u32)> {
 	let dimensions = (config.coded_width?, config.coded_height?);
 	(dimensions.0 > 0 && dimensions.1 > 0).then_some(dimensions)
+}
+
+/// Resolve encoded dimensions from codec configuration or an in-band keyframe.
+pub(crate) fn codec_dimensions(codec: &VideoCodec, description: Option<&[u8]>, payload: &[u8]) -> Option<(u32, u32)> {
+	let dimensions = match codec {
+		VideoCodec::H264(_) => description
+			.and_then(|description| crate::codec::h264::config(description).ok())
+			.as_ref()
+			.and_then(catalog_dimensions),
+		VideoCodec::H265(_) => description
+			.and_then(|description| crate::codec::h265::config(description).ok())
+			.as_ref()
+			.and_then(catalog_dimensions),
+		VideoCodec::VP8 if !payload.is_empty() => crate::codec::vp8::FrameHeader::parse(payload)
+			.ok()
+			.and_then(|header| header.dimensions)
+			.map(|(width, height)| (u32::from(width), u32::from(height))),
+		VideoCodec::VP9(_) if !payload.is_empty() => crate::codec::vp9::config_from_keyframe(payload)
+			.ok()
+			.flatten()
+			.as_ref()
+			.and_then(catalog_dimensions),
+		VideoCodec::AV1(_) if !payload.is_empty() => crate::codec::av1::dimensions(payload).ok().flatten(),
+		_ => None,
+	};
+
+	dimensions.filter(|(width, height)| *width > 0 && *height > 0)
 }
 
 /// Build a video transform for an Annex-B source, or `None` if the catalog
