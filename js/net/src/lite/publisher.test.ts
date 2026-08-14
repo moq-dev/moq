@@ -3,7 +3,7 @@ import { Producer as GroupProducer } from "../group.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { Reader, Stream } from "../stream.ts";
+import { Reader, Stream, Writer } from "../stream.ts";
 import { Subscriber as TrackSubscriber } from "../track.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
@@ -843,6 +843,7 @@ test("lite draft-05: a peer FIN ends serving while the producer is still live", 
 // response write by itself, so serving must race the write against decoded termination.
 test("lite draft-05: a peer FIN interrupts a blocked SUBSCRIBE_START", async () => {
 	const sub = await servedSubscription({ startGroup: 0, gated: true });
+	const resets = spyOn(Writer.prototype, "reset");
 	try {
 		sub.serve(0);
 		await sub.parked;
@@ -853,7 +854,9 @@ test("lite draft-05: a peer FIN interrupts a blocked SUBSCRIBE_START", async () 
 			new Promise<false>((resolve) => setTimeout(() => resolve(false), IDLE_MS)),
 		]);
 		expect(stopped).toBe(true);
+		expect(resets).toHaveBeenCalledTimes(1);
 	} finally {
+		resets.mockRestore();
 		// Also unwinds the old behavior when this regression fails.
 		sub.release();
 		await sub.close();

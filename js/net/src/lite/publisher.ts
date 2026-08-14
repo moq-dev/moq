@@ -1,6 +1,6 @@
 import { type Dispose, type Getter, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
-import { error, reason } from "../error.ts";
+import { error, reason, StreamCode, toTransport } from "../error.ts";
 import type * as group from "../group.ts";
 import { hooks } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
@@ -155,6 +155,7 @@ type SubscriptionControlOptions = {
  * nothing here can decode synchronously, so it reads ahead instead.
  */
 class SubscriptionControls {
+	#writer: Writer;
 	#update?: SubscribeUpdate;
 	// Sticky, first one wins: null once the stream is over, an Error once it failed.
 	#end?: Error | null;
@@ -166,6 +167,7 @@ class SubscriptionControls {
 	readonly decoding: Promise<void>;
 
 	constructor({ reader, writer, version, apply }: SubscriptionControlOptions) {
+		this.#writer = writer;
 		this.#ended = new Promise((resolve) => {
 			this.#resolveEnd = resolve;
 		});
@@ -205,6 +207,8 @@ class SubscriptionControls {
 
 		if (result.kind === "sent") return true;
 		if (result.kind === "error") throw result.error;
+		// Promise.race leaves the blocked encode running, so reset the writable half too.
+		this.#writer.reset(result.end ?? toTransport(StreamCode.Cancel, "cancel"));
 		if (result.end) throw result.end;
 		return false;
 	}
