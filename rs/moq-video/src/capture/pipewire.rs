@@ -949,6 +949,7 @@ fn format_offer(framerate: u32) -> Vec<u8> {
 			Enum,
 			Id,
 			VideoFormat::BGRx,
+			VideoFormat::BGRx,
 			VideoFormat::BGRA,
 			VideoFormat::RGBx,
 			VideoFormat::RGBA,
@@ -1040,7 +1041,33 @@ mod tests {
 	#[test]
 	fn format_offer_is_valid_pod() {
 		let bytes = format_offer(30);
-		assert!(spa::pod::Pod::from_bytes(&bytes).is_some(), "offer did not round-trip");
+		let (remaining, value) = spa::pod::deserialize::PodDeserializer::deserialize_any_from(&bytes)
+			.expect("format offer did not round-trip");
+		assert!(remaining.is_empty());
+		let spa::pod::Value::Object(object) = value else {
+			panic!("format offer is not an object");
+		};
+		let property = object
+			.properties
+			.iter()
+			.find(|property| property.key == spa::param::format::FormatProperties::VideoFormat.as_raw())
+			.expect("missing video format property");
+		assert_eq!(
+			property.value,
+			spa::pod::Value::Choice(spa::pod::ChoiceValue::Id(spa::utils::Choice(
+				spa::utils::ChoiceFlags::empty(),
+				spa::utils::ChoiceEnum::Enum {
+					default: spa::utils::Id(VideoFormat::BGRx.as_raw()),
+					alternatives: vec![
+						spa::utils::Id(VideoFormat::BGRx.as_raw()),
+						spa::utils::Id(VideoFormat::BGRA.as_raw()),
+						spa::utils::Id(VideoFormat::RGBx.as_raw()),
+						spa::utils::Id(VideoFormat::RGBA.as_raw()),
+						spa::utils::Id(VideoFormat::NV12.as_raw()),
+					],
+				},
+			)))
+		);
 	}
 
 	#[test]
