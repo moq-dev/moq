@@ -231,6 +231,15 @@ impl<E: catalog::Catalog> Import<E> {
 			{
 				match self.continuity.entry(pid).or_default().observe(&pkt) {
 					Continuation::Duplicate => continue,
+					// Flagged corrupt, so the packet joins the partial rather than opening a
+					// new PES out of bytes the demodulator already disowned.
+					Continuation::Corrupt => {
+						self.pending.remove(&pid);
+						if let Some(stream) = self.streams.get_mut(&pid) {
+							stream.desync();
+						}
+						continue;
+					}
 					Continuation::Broken => {
 						// Salvage the truncated PES only where its bytes stand on their own, then
 						// drop whatever is left mid-unit and require the next frame to prove its
@@ -996,20 +1005,21 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 struct Continuity {
 	/// Last continuity_counter seen on a packet with payload, to spot gaps.
 	last_cc: Option<u8>,
-	/// Last payload packet, to skip ISO 13818-1 duplicates (same cc, identical bytes).
-	last_pkt: Option<[u8; 188]>,
 }
 
 /// What one packet says about the bytes already accumulated for its PID.
 enum Continuation {
-	/// An exact retransmission, which ISO 13818-1 permits once. Ignore the packet entirely:
-	/// processing it would reset a healthy partial or duplicate its bytes.
+	/// A retransmission, which ISO 13818-1 permits once. Ignore the packet entirely:
+	/// processing it would duplicate its bytes.
 	Duplicate,
 	/// Contiguous with the previous payload packet.
 	Contiguous,
-	/// A counter gap, a declared discontinuity, or a transport error. Whatever was
-	/// accumulating for this PID is lost, and the bytes that follow are not its continuation.
+	/// A counter gap or a declared discontinuity. Whatever was accumulating for this PID is
+	/// lost, but this packet's own payload is intact and still worth routing.
 	Broken,
+	/// The demodulator flagged this packet corrupt. The partial is lost like [`Broken`], and
+	/// so is the packet: nothing in it can be trusted.
+	Corrupt,
 }
 
 impl Continuity {
@@ -1020,8 +1030,7 @@ impl Continuity {
 		// keeps the next clean packet from also looking like a gap.
 		if pkt[1] & 0x80 != 0 {
 			self.last_cc = None;
-			self.last_pkt = None;
-			return Continuation::Broken;
+			return Continuation::Corrupt;
 		}
 
 		let afc = (pkt[3] >> 4) & 0x3;
@@ -1038,19 +1047,20 @@ impl Continuity {
 		if !has_payload {
 			if discontinuity {
 				self.last_cc = None;
-				self.last_pkt = None;
 				return Continuation::Broken;
 			}
 			return Continuation::Contiguous;
 		}
 
-		if self.last_pkt.as_ref().is_some_and(|last| last == pkt) {
-			return Continuation::Duplicate;
-		}
-		self.last_pkt = Some(*pkt);
-
 		// Only payload packets advance the counter, so this is the one place it moves.
 		let cc = pkt[3] & 0x0f;
+		// A repeat of the counter is never evidence that anything was lost, so it must not
+		// reach the gap check below and destroy a healthy partial. ISO 13818-1 lets a
+		// retransmission differ from the original in its PCR, so comparing the bytes would
+		// miss one; the counter is what actually carries the claim.
+		if self.last_cc == Some(cc) && !discontinuity {
+			return Continuation::Duplicate;
+		}
 		let cc_gap = matches!(self.last_cc, Some(last) if cc != (last + 1) & 0x0f);
 		self.last_cc = Some(cc);
 		if discontinuity || cc_gap {
@@ -1084,6 +1094,12 @@ impl SectionReassembler {
 		let pkt: &[u8; 188] = pkt.try_into().expect("section packet must be 188 bytes");
 		match self.continuity.observe(pkt) {
 			Continuation::Duplicate => return,
+			// A packet flagged corrupt takes its own payload down with the partial: this is
+			// the one case where the packet itself must not be processed.
+			Continuation::Corrupt => {
+				self.acc.clear();
+				return;
+			}
 			Continuation::Broken => self.acc.clear(),
 			Continuation::Contiguous => {}
 		}
@@ -1248,7 +1264,12 @@ impl<E: catalog::Catalog> Stream<E> {
 	/// every picture that references it. Verbatim payloads are all-or-nothing the same way.
 	fn salvages_partial_pes(&self) -> bool {
 		match self {
-			Stream::Aac(_) | Stream::Legacy(_) | Stream::Opus(_) => true,
+			Stream::Aac(_) | Stream::Legacy(_) => true,
+			// Opus carries many packets per PES like the audio above, but its framing is
+			// declared rather than self-describing: a trailing packet cut short of the length
+			// its control header promises is a parse error, and that error would travel up out
+			// of `decode` and end the session. Losing the PES beats losing the broadcast.
+			Stream::Opus(_) => false,
 			Stream::H264 { .. } | Stream::H265 { .. } | Stream::Verbatim(_) => false,
 			Stream::Clock | Stream::Ignored => false,
 		}
@@ -3973,6 +3994,41 @@ mod test {
 		assert!(
 			catalog.snapshot().mpegts.tracks.is_empty(),
 			"a 0x86 PID without CUEI must not be cataloged"
+		);
+	}
+
+	#[test]
+	fn tei_pusi_section_is_dropped() {
+		// A PUSI flagged TEI must not start a section out of payload the demodulator has
+		// already disowned. Resetting the counter is not enough: the packet itself is junk.
+		let mut corrupt = packet(true, 0, 0, &CUE);
+		corrupt[1] |= 0x80; // transport_error_indicator
+		let clean = packet(true, 1, 0, &CUE);
+		assert_eq!(
+			run(&[corrupt, clean]),
+			vec![CUE.to_vec()],
+			"a section was emitted from a packet flagged corrupt"
+		);
+	}
+
+	#[test]
+	fn a_repeated_counter_never_drops_the_partial() {
+		// A repeat of the counter says nothing was lost, so it must never reach the gap check
+		// and destroy a healthy partial. Byte equality is too strict a test for it: ISO
+		// 13818-1 lets a retransmission differ from the original in its adaptation field, and
+		// anything outside the section can differ without the section changing.
+		// The repeat has to be a continuation for the loss to show: repeating a PUSI would
+		// just restart the same section and hide it.
+		let section = fake_section(0xfc, 400);
+		let first = packet(true, 0, 0, &section[..183]);
+		let middle = packet(false, 1, 0, &section[183..367]);
+		let mut repeat = middle.clone();
+		repeat[1] |= 0x20; // transport_priority: outside the section, like a refreshed PCR
+		let rest = packet(false, 2, 0, &section[367..]);
+		assert_eq!(
+			run(&[first, middle, repeat, rest]),
+			vec![section],
+			"a repeated counter was read as a gap and dropped an undamaged section"
 		);
 	}
 
