@@ -84,16 +84,16 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 				fresh: false,
 				generation: 0,
 			}));
-			if let Err(e) = run_loop(
+			if let Err(e) = run_loop(CaptureLoop {
 				fd,
 				node_id,
 				framerate,
-				chan.clone(),
-				state.clone(),
+				chan: chan.clone(),
+				state: state.clone(),
 				quit_rx,
 				return_rx,
 				return_tx,
-			) {
+			}) {
 				// Surface a setup failure through the awaiting `open`; a mid-stream
 				// failure just ends the stream (the encode loop reopens on demand).
 				match state.borrow_mut().geo_tx.take() {
@@ -557,9 +557,7 @@ impl Drop for Dequeued<'_> {
 	}
 }
 
-/// Connect to the portal's PipeWire node and run the main loop until the stream
-/// ends, `quit_rx` fires (the `FrameStream` dropped), or the format changes.
-fn run_loop(
+struct CaptureLoop {
 	fd: OwnedFd,
 	node_id: u32,
 	framerate: u32,
@@ -568,7 +566,21 @@ fn run_loop(
 	quit_rx: pw::channel::Receiver<()>,
 	return_rx: pw::channel::Receiver<Lease>,
 	return_tx: pw::channel::Sender<Lease>,
-) -> Result<(), Error> {
+}
+
+/// Connect to the portal's PipeWire node and run until the stream ends, the
+/// consumer drops, or the format changes.
+fn run_loop(args: CaptureLoop) -> Result<(), Error> {
+	let CaptureLoop {
+		fd,
+		node_id,
+		framerate,
+		chan,
+		state,
+		quit_rx,
+		return_rx,
+		return_tx,
+	} = args;
 	pw::init();
 
 	let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| err("pipewire main loop", e))?;
