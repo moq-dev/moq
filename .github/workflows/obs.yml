@@ -1,0 +1,74 @@
+name: OBS
+
+# Compiles and links the OBS plugin, which nothing else does: `just check`
+# lints cpp/obs but never builds it, and a local build needs the
+# multi-hundred-MB obs-deps bundle on macOS and Windows.
+#
+# Linux is the platform that needs no bundle at all -- nixpkgs has obs-studio,
+# Qt6 and ffmpeg, so the dev shell is the whole dependency set. The plugin is
+# platform-independent C++ over libmoq's C ABI, so a Linux compile catches the
+# breakage a macOS developer would otherwise ship uncompiled.
+#
+# Narrow trigger, like swift.yml: this fires only for changes that can break
+# the plugin, which is its own sources or the libmoq header they call through.
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    # `closed` is here only so merging/closing a PR cancels its in-flight run
+    # via the concurrency group below; the job itself is skipped on close.
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - "cpp/obs/**"
+      - "rs/libmoq/**"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/obs.yml"
+
+concurrency:
+  group: obs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: OBS
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
+        with:
+          tool-cache: false
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+        with:
+          determinate: false
+          # Trust the flake's cachix substituter, so the dev shell substitutes
+          # instead of building from source. See check.yml for the full story.
+          extra-conf: |
+            extra-substituters = https://kixelated.cachix.org
+            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+
+      # Restore only. cache.yml is the single writer, on `main`; see the comment
+      # there for why. `shared-key` has to match the one it saves under. It
+      # holds dev-profile artifacts, which is why `just obs ci` builds libmoq in
+      # debug rather than the preset's release.
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: rust
+          save-if: false
+
+      # The same recipe a developer runs on Linux. Warnings are errors here, via
+      # the platform's CI preset.
+      - name: Build
+        run: nix develop --command just obs ci
