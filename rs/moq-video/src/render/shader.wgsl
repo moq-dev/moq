@@ -1,5 +1,5 @@
-// YUV 4:2:0 -> RGB, for the two plane layouts the renderer feeds it: NV12 (luma
-// plane + interleaved chroma plane) and I420 (three separate planes).
+// The renderer feeds this shader packed RGBA, NV12 (luma plus interleaved
+// chroma), or I420 (three separate planes).
 //
 // Chroma is sampled with a linear filter, so the half-resolution planes are
 // upsampled by the texture unit rather than in here. Output is gamma-encoded

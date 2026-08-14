@@ -26,12 +26,13 @@ pub(super) enum Layout {
 /// that one bind group layout serves both shaders.
 pub(super) struct Source {
 	pub layout: Layout,
-	pub color: Color,
+	/// The color conversion for YUV layouts. Packed RGB needs no conversion.
+	pub color: Option<Color>,
 	pub plane0: wgpu::TextureView,
 	pub plane1: wgpu::TextureView,
 	pub plane2: wgpu::TextureView,
 	/// Producer-owned storage that must remain leased until the submitted draw
-	/// stops reading it. The renderer moves this into a queue completion callback.
+	/// stops reading it. The renderer moves this to its completion worker.
 	pub keepalive: Option<Box<dyn Send + Sync>>,
 }
 
@@ -64,7 +65,7 @@ impl Cache {
 	pub fn import(&mut self, device: &wgpu::Device, surface: &Surface) -> Result<Option<Source>, Error> {
 		match surface {
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
-			Surface::DmaBuf(buffer) => super::dmabuf::import(device, buffer).map(Some),
+			Surface::DmaBuf(buffer) => super::dmabuf::import(device, buffer),
 			#[cfg(target_os = "macos")]
 			Surface::PixelBuffer(buffer) => {
 				let metal = match &mut self.metal {
@@ -106,7 +107,7 @@ impl Cache {
 			// The conversion that produced these samples says which space they
 			// are in where it knows. Only a passthrough (a decode, a camera)
 			// leaves it open, and then the resolution is all there is to go on.
-			color: i420.color().unwrap_or_else(|| Color::infer(size)),
+			color: Some(i420.color().unwrap_or_else(|| Color::infer(size))),
 			plane0,
 			plane1,
 			plane2,

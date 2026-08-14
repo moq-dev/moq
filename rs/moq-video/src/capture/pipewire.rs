@@ -71,7 +71,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 	let framerate = config.framerate.unwrap_or(DEFAULT_FRAMERATE).max(1);
 	let (geo_tx, geo_rx) = tokio::sync::oneshot::channel();
 	let (quit_tx, quit_rx) = pw::channel::channel::<()>();
-	let (return_tx, return_rx) = pw::channel::channel::<usize>();
+	let (return_tx, return_rx) = pw::channel::channel::<Lease>();
 
 	let handle = std::thread::spawn({
 		let chan = chan.clone();
@@ -82,6 +82,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 				geo_tx: Some(geo_tx),
 				last: None,
 				fresh: false,
+				generation: 0,
 			}));
 			if let Err(e) = run_loop(
 				fd,
@@ -260,6 +261,8 @@ struct State {
 	last: Option<Last>,
 	/// Whether a fresh frame arrived since the last pacing tick.
 	fresh: bool,
+	/// Buffer-pool generation. Returns from superseded pools are discarded.
+	generation: u64,
 }
 
 /// A retained frame for the static-screen pacing tick.
@@ -283,8 +286,8 @@ impl Last {
 /// original buffer is queued again.
 struct PipeWireDmaBuf {
 	fd: OwnedFd,
-	return_tx: pw::channel::Sender<usize>,
-	buffer: usize,
+	return_tx: pw::channel::Sender<Lease>,
+	lease: Lease,
 	map_offset: u32,
 	allocation_size: usize,
 	data_offset: usize,
@@ -299,7 +302,7 @@ impl Drop for PipeWireDmaBuf {
 	fn drop(&mut self) {
 		// A failed send means the stream and its pool have already been destroyed.
 		// The duplicated fd still closes normally; the stale pointer is never used.
-		let _ = self.return_tx.send(self.buffer);
+		let _ = self.return_tx.send(self.lease);
 	}
 }
 
@@ -318,20 +321,95 @@ impl DmaBufFrame for PipeWireDmaBuf {
 			)));
 		}
 
-		let mapping = Mapping::new(&self.fd, self.map_offset, self.allocation_size)?;
-		let data = mapping
-			.as_slice()
-			.get(self.data_offset..)
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("DMA-BUF chunk starts outside its allocation")))?;
+		with_dma_buf_read(&self.fd, || {
+			let mapping = Mapping::new(&self.fd, self.map_offset, self.allocation_size)?;
+			let data = mapping
+				.as_slice()
+				.get(self.data_offset..)
+				.ok_or_else(|| Error::Codec(anyhow::anyhow!("DMA-BUF chunk starts outside its allocation")))?;
 
-		match self.format {
-			DrmFormat::NV12 => nv12_to_i420(data, self.stride, self.width, self.height),
-			DrmFormat::XRGB8888 | DrmFormat::ARGB8888 => I420::from_bgra(data, self.stride, self.width, self.height),
-			DrmFormat::XBGR8888 | DrmFormat::ABGR8888 => I420::from_rgba(data, self.stride, self.width, self.height),
-			other => Err(Error::Codec(anyhow::anyhow!(
-				"cannot download DMA-BUF format {:#x}",
-				other.as_raw()
-			))),
+			match self.format {
+				DrmFormat::NV12 => nv12_to_i420(data, self.stride, self.width, self.height),
+				DrmFormat::XRGB8888 | DrmFormat::ARGB8888 => {
+					I420::from_bgra(data, self.stride, self.width, self.height)
+				}
+				DrmFormat::XBGR8888 | DrmFormat::ABGR8888 => {
+					I420::from_rgba(data, self.stride, self.width, self.height)
+				}
+				other => Err(Error::Codec(anyhow::anyhow!(
+					"cannot download DMA-BUF format {:#x}",
+					other.as_raw()
+				))),
+			}
+		})
+	}
+}
+
+const DMA_BUF_SYNC_READ: u64 = 1 << 0;
+const DMA_BUF_SYNC_END: u64 = 1 << 2;
+
+#[repr(C)]
+struct DmaBufSync {
+	flags: u64,
+}
+
+/// Brackets CPU reads with the cache-coherency protocol required by DMA-BUF.
+fn with_dma_buf_read<T>(fd: &OwnedFd, read: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
+	let sync = DmaBufRead::new(fd)?;
+	let result = read();
+	let end = sync.finish();
+	match (result, end) {
+		(Ok(value), Ok(())) => Ok(value),
+		(Err(err), _) => Err(err),
+		(Ok(_), Err(err)) => Err(err),
+	}
+}
+
+struct DmaBufRead<'a> {
+	fd: &'a OwnedFd,
+	finished: bool,
+}
+
+impl<'a> DmaBufRead<'a> {
+	fn new(fd: &'a OwnedFd) -> Result<Self, Error> {
+		dma_buf_sync(fd, DMA_BUF_SYNC_READ)?;
+		Ok(Self { fd, finished: false })
+	}
+
+	fn finish(mut self) -> Result<(), Error> {
+		self.finished = true;
+		dma_buf_sync(self.fd, DMA_BUF_SYNC_READ | DMA_BUF_SYNC_END)
+	}
+}
+
+impl Drop for DmaBufRead<'_> {
+	fn drop(&mut self) {
+		if !self.finished
+			&& let Err(err) = dma_buf_sync(self.fd, DMA_BUF_SYNC_READ | DMA_BUF_SYNC_END)
+		{
+			tracing::warn!(%err, "ending DMA-BUF CPU access failed");
+		}
+	}
+}
+
+fn dma_buf_sync(fd: &OwnedFd, flags: u64) -> Result<(), Error> {
+	let mut sync = DmaBufSync { flags };
+	loop {
+		// SAFETY: this is the DMA-BUF sync ioctl with its matching UAPI payload,
+		// and `fd` stays open for the duration of the call.
+		let result = unsafe {
+			libc::ioctl(
+				std::os::fd::AsRawFd::as_raw_fd(fd),
+				linux_raw_sys::ioctl::DMA_BUF_IOCTL_SYNC as libc::c_ulong,
+				&mut sync,
+			)
+		};
+		if result == 0 {
+			return Ok(());
+		}
+		let err = std::io::Error::last_os_error();
+		if err.kind() != std::io::ErrorKind::Interrupted {
+			return Err(Error::Codec(anyhow::anyhow!("DMA-BUF sync: {err}")));
 		}
 	}
 }
@@ -416,6 +494,18 @@ fn nv12_to_i420(data: &[u8], stride: u32, width: u32, height: u32) -> Result<I42
 /// Queues a raw PipeWire buffer unless ownership is transferred to a DMA-BUF
 /// surface. This mirrors `pipewire::buffer::Buffer` while allowing the surface
 /// to return the buffer asynchronously on the PipeWire loop thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Lease {
+	buffer: usize,
+	generation: u64,
+}
+
+impl Lease {
+	fn current(self, generation: u64) -> Option<*mut pw::sys::pw_buffer> {
+		(self.generation == generation).then_some(self.buffer as *mut pw::sys::pw_buffer)
+	}
+}
+
 struct Dequeued<'a> {
 	stream: &'a pw::stream::Stream,
 	raw: *mut pw::sys::pw_buffer,
@@ -448,9 +538,12 @@ impl<'a> Dequeued<'a> {
 		}
 	}
 
-	fn lease(mut self) -> usize {
+	fn lease(mut self, generation: u64) -> Lease {
 		self.queue = false;
-		self.raw as usize
+		Lease {
+			buffer: self.raw as usize,
+			generation,
+		}
 	}
 }
 
@@ -473,8 +566,8 @@ fn run_loop(
 	chan: Arc<FrameChannel>,
 	state: Rc<RefCell<State>>,
 	quit_rx: pw::channel::Receiver<()>,
-	return_rx: pw::channel::Receiver<usize>,
-	return_tx: pw::channel::Sender<usize>,
+	return_rx: pw::channel::Receiver<Lease>,
+	return_tx: pw::channel::Sender<Lease>,
 ) -> Result<(), Error> {
 	pw::init();
 
@@ -500,11 +593,14 @@ fn run_loop(
 	// `pw_stream_queue_buffer` directly would violate PipeWire's threading model.
 	let _returns = return_rx.attach(mainloop.loop_(), {
 		let stream = stream.downgrade();
-		move |raw| {
-			if let Some(stream) = stream.upgrade() {
+		let state = state.clone();
+		move |lease| {
+			if let Some(stream) = stream.upgrade()
+				&& let Some(raw) = lease.current(state.borrow().generation)
+			{
 				// SAFETY: leased surfaces send each pointer exactly once, and every
-				// pointer was originally dequeued from this stream.
-				unsafe { stream.queue_raw_buffer(raw as *mut pw::sys::pw_buffer) };
+				// current-generation pointer was dequeued from this stream's pool.
+				unsafe { stream.queue_raw_buffer(raw) };
 			}
 		}
 	});
@@ -553,6 +649,7 @@ fn run_loop(
 				}
 
 				let mut state = state.borrow_mut();
+				state.last = None;
 				if let Err(e) = state.format.parse(param) {
 					tracing::warn!(error = %e, "failed to parse pipewire video format");
 					return;
@@ -562,6 +659,8 @@ fn run_loop(
 					let mut params = [param];
 					if let Err(e) = stream.update_params(&mut params) {
 						tracing::warn!(error = %e, "DMA-BUF buffer negotiation failed; capture may use shared memory");
+					} else {
+						state.generation = state.generation.wrapping_add(1);
 					}
 				}
 
@@ -611,12 +710,18 @@ fn run_loop(
 					return;
 				};
 				let datas = buffer.datas_mut();
-				let Some(data) = datas.first_mut() else { return };
+				let [data] = datas else {
+					tracing::warn!(
+						blocks = datas.len(),
+						"pipewire ignored the negotiated single-block layout"
+					);
+					return;
+				};
 
 				let offset = data.chunk().offset() as usize;
 				let size = data.chunk().size() as usize;
-				let stride = match data.chunk().stride() {
-					stride if stride > 0 => stride,
+				let stride = match u32::try_from(data.chunk().stride()) {
+					Ok(stride) if stride > 0 => stride,
 					_ => match state.format.format() {
 						VideoFormat::NV12 => state.format.size().width,
 						VideoFormat::BGRx | VideoFormat::BGRA | VideoFormat::RGBx | VideoFormat::RGBA => {
@@ -627,7 +732,7 @@ fn run_loop(
 				};
 				// Compositors mark skipped frames as empty or corrupted; drop those
 				// rather than treating them as a fatal conversion failure below.
-				if size == 0 || data.chunk().flags().contains(spa::buffer::ChunkFlags::CORRUPTED) {
+				if data.chunk().flags().contains(spa::buffer::ChunkFlags::CORRUPTED) {
 					return;
 				}
 				if data.type_() == DataType::DmaBuf {
@@ -662,11 +767,11 @@ fn run_loop(
 						vec![DmaBufPlane::new(base, stride)]
 					};
 					let modifier = state.format.modifier();
-					let raw = buffer.lease();
+					let lease = buffer.lease(state.generation);
 					let inner = Arc::new(PipeWireDmaBuf {
 						fd,
 						return_tx: return_tx.clone(),
-						buffer: raw,
+						lease,
 						map_offset,
 						allocation_size,
 						data_offset: offset,
@@ -686,6 +791,9 @@ fn run_loop(
 					}
 					return;
 				}
+				if size == 0 {
+					return;
+				}
 
 				// MAP_BUFFERS maps MemPtr/MemFd for the CPU fallback. `None` here
 				// means the producer forced an unsupported buffer representation.
@@ -696,7 +804,8 @@ fn run_loop(
 					}
 					return;
 				};
-				let Some(bytes) = bytes.get(offset..offset + size) else {
+				let Some(end) = offset.checked_add(size) else { return };
+				let Some(bytes) = bytes.get(offset..end) else {
 					return;
 				};
 				match convert(state.format.format(), bytes, stride, width, height) {
@@ -861,24 +970,37 @@ fn format_offer(framerate: u32) -> Vec<u8> {
 /// fallbacks. Producers otherwise default to shared memory even when both ends
 /// understand DMA-BUF.
 fn buffer_offer() -> Vec<u8> {
-	const DATA_TYPE: u32 = 6;
-	const MEM_PTR: i32 = 1 << 1;
-	const MEM_FD: i32 = 1 << 2;
-	const DMA_BUF: i32 = 1 << 3;
+	let mem_ptr = 1 << DataType::MemPtr.as_raw();
+	let mem_fd = 1 << DataType::MemFd.as_raw();
+	let dma_buf = 1 << DataType::DmaBuf.as_raw();
 
 	let obj = spa::pod::Object {
 		type_: spa::utils::SpaTypes::ObjectParamBuffers.as_raw(),
 		id: spa::param::ParamType::Buffers.as_raw(),
-		properties: vec![spa::pod::Property::new(
-			DATA_TYPE,
-			spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
-				spa::utils::ChoiceFlags::empty(),
-				spa::utils::ChoiceEnum::Flags {
-					default: DMA_BUF | MEM_FD | MEM_PTR,
-					flags: vec![DMA_BUF, MEM_FD, MEM_PTR],
-				},
-			))),
-		)],
+		properties: vec![
+			spa::pod::Property::new(
+				spa::sys::SPA_PARAM_BUFFERS_buffers,
+				spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
+					spa::utils::ChoiceFlags::empty(),
+					spa::utils::ChoiceEnum::Range {
+						default: 8,
+						min: 2,
+						max: 64,
+					},
+				))),
+			),
+			spa::pod::Property::new(spa::sys::SPA_PARAM_BUFFERS_blocks, spa::pod::Value::Int(1)),
+			spa::pod::Property::new(
+				spa::sys::SPA_PARAM_BUFFERS_dataType,
+				spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
+					spa::utils::ChoiceFlags::empty(),
+					spa::utils::ChoiceEnum::Flags {
+						default: dma_buf,
+						flags: vec![dma_buf, mem_fd, mem_ptr],
+					},
+				))),
+			),
+		],
 	};
 	spa::pod::serialize::PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &spa::pod::Value::Object(obj))
 		.expect("serializing a static buffer pod cannot fail")
@@ -901,10 +1023,55 @@ mod tests {
 	#[test]
 	fn buffer_offer_is_valid_pod() {
 		let bytes = buffer_offer();
-		assert!(
-			spa::pod::Pod::from_bytes(&bytes).is_some(),
-			"buffer offer did not round-trip"
+		let (remaining, value) = spa::pod::deserialize::PodDeserializer::deserialize_any_from(&bytes)
+			.expect("buffer offer did not round-trip");
+		assert!(remaining.is_empty());
+		let spa::pod::Value::Object(object) = value else {
+			panic!("buffer offer is not an object");
+		};
+		let property = |key| {
+			&object
+				.properties
+				.iter()
+				.find(|property| property.key == key)
+				.unwrap_or_else(|| panic!("missing buffer property {key}"))
+				.value
+		};
+		assert_eq!(
+			property(spa::sys::SPA_PARAM_BUFFERS_buffers),
+			&spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
+				spa::utils::ChoiceFlags::empty(),
+				spa::utils::ChoiceEnum::Range {
+					default: 8,
+					min: 2,
+					max: 64,
+				},
+			)))
 		);
+		assert_eq!(property(spa::sys::SPA_PARAM_BUFFERS_blocks), &spa::pod::Value::Int(1));
+		let dma_buf = 1 << DataType::DmaBuf.as_raw();
+		let mem_fd = 1 << DataType::MemFd.as_raw();
+		let mem_ptr = 1 << DataType::MemPtr.as_raw();
+		assert_eq!(
+			property(spa::sys::SPA_PARAM_BUFFERS_dataType),
+			&spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
+				spa::utils::ChoiceFlags::empty(),
+				spa::utils::ChoiceEnum::Flags {
+					default: dma_buf,
+					flags: vec![dma_buf, mem_fd, mem_ptr],
+				},
+			)))
+		);
+	}
+
+	#[test]
+	fn stale_pool_lease_is_not_current() {
+		let lease = Lease {
+			buffer: 7,
+			generation: 2,
+		};
+		assert_eq!(lease.current(1), None);
+		assert_eq!(lease.current(2), Some(7usize as *mut pw::sys::pw_buffer));
 	}
 
 	#[test]
@@ -932,7 +1099,7 @@ mod tests {
 
 		pw::init();
 		let mainloop = pw::main_loop::MainLoopRc::new(None).expect("main loop");
-		let (return_tx, return_rx) = pw::channel::channel::<usize>();
+		let (return_tx, return_rx) = pw::channel::channel::<Lease>();
 		let returned = Rc::new(Cell::new(None));
 		let _returns = return_rx.attach(mainloop.loop_(), {
 			let mainloop = mainloop.downgrade();
@@ -951,7 +1118,10 @@ mod tests {
 		let inner = Arc::new(PipeWireDmaBuf {
 			fd: OwnedFd::from(socket),
 			return_tx,
-			buffer: 7,
+			lease: Lease {
+				buffer: 7,
+				generation: 1,
+			},
 			map_offset: 0,
 			allocation_size: 6,
 			data_offset: 0,
@@ -991,7 +1161,13 @@ mod tests {
 			.into_result()
 			.expect("timeout timer");
 		mainloop.run();
-		assert_eq!(returned.get(), Some(7));
+		assert_eq!(
+			returned.get(),
+			Some(Lease {
+				buffer: 7,
+				generation: 1
+			})
+		);
 	}
 
 	/// Open the portal, grab a few frames, and check geometry. Ignored because it

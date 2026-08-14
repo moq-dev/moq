@@ -7,19 +7,19 @@
 use wgpu::hal::MemoryFlags;
 
 use super::source::{Layout, Source};
-use crate::{Color, DmaBuf, DrmFormat, Error, Size};
+use crate::{DmaBuf, DrmFormat, Error, Size};
 
 fn err(message: impl std::fmt::Display) -> Error {
 	Error::Render(anyhow::anyhow!("{message}"))
 }
 
 /// Alias one packed DMA-BUF allocation as a sampled Vulkan texture.
-pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Source, Error> {
+pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Option<Source>, Error> {
 	if !device
 		.features()
 		.contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF)
 	{
-		return Err(err("wgpu device was created without VULKAN_EXTERNAL_MEMORY_DMA_BUF"));
+		return Ok(None);
 	}
 
 	let format = match buffer.format() {
@@ -61,8 +61,9 @@ pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Source, E
 	let fd = buffer.export().map_err(|e| err(format!("export DMA-BUF: {e}")))?;
 	// SAFETY: the guard is only used to import a descriptor into the same
 	// Vulkan device. It drops before the resulting HAL texture is wrapped.
-	let hal = unsafe { device.as_hal::<wgpu::hal::api::Vulkan>() }
-		.ok_or_else(|| err("wgpu device is not a Vulkan device"))?;
+	let Some(hal) = (unsafe { device.as_hal::<wgpu::hal::api::Vulkan>() }) else {
+		return Ok(None);
+	};
 	// SAFETY: `fd` is a fresh duplicate of this live DMA-BUF, and its format,
 	// modifier, extent, stride, and offset come from PipeWire's buffer metadata.
 	// Vulkan consumes the duplicate on success and wgpu-hal closes it on error.
@@ -86,12 +87,12 @@ pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Source, E
 	};
 	let view = texture.create_view(&Default::default());
 
-	Ok(Source {
+	Ok(Some(Source {
 		layout: Layout::Rgba,
-		color: Color::infer(size),
+		color: None,
 		plane0: view.clone(),
 		plane1: view.clone(),
 		plane2: view,
 		keepalive: Some(Box::new(buffer.clone())),
-	})
+	}))
 }

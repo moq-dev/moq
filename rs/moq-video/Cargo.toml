@@ -40,7 +40,7 @@ nvdec = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
 vaapi = ["dmabuf", "dep:moq-vaapi"]
 # Linux DMA-BUF surface vocabulary and CPU fallback support. Enabled by every
 # backend that can produce or consume one. It pulls no graphics API by itself.
-dmabuf = ["dep:libc"]
+dmabuf = ["dep:libc", "dep:linux-raw-sys"]
 # GPU rendering of decoded frames (the `render` module): a wgpu pipeline that
 # converts a frame to RGBA and hands back a texture the caller presents. Off by
 # default because wgpu pulls a graphics stack (and its backend drivers) that a
@@ -114,11 +114,13 @@ cudarc = { version = "0.19", optional = true, default-features = false, features
 # Mapping a linear DMA-BUF for the universal CPU I420 fallback. Non-linear
 # modifiers stay GPU-only and return an honest error instead of treating tiled
 # memory as rows.
-libc = { version = "0.2", optional = true }
+libc = { workspace = true, optional = true }
 # Probe for the NVIDIA driver libraries before calling cudarc / the NVENC SDK,
 # which panic (process-abort under release `panic = "abort"`) if their library is
 # absent. Lets a GPU-less host fall back to the next encoder instead of crashing.
 libloading = { version = "0.9", optional = true }
+# Architecture-correct DMA_BUF_IOCTL_SYNC request values for CPU access.
+linux-raw-sys = { workspace = true, optional = true }
 moq-nvenc = { workspace = true, optional = true }
 # Intel/AMD VAAPI hardware encoder, behind the opt-in `vaapi` feature. As of
 # moq-vaapi 0.0.3 libva is dlopen'd at runtime, so the binary carries no NEEDED

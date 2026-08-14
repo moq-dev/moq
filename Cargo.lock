@@ -5130,6 +5130,7 @@ dependencies = [
  "hang",
  "libc",
  "libloading 0.9.0",
+ "linux-raw-sys 0.12.1",
  "moq-mux",
  "moq-net",
  "moq-nvenc",
