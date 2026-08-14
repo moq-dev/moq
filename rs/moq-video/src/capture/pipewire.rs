@@ -1096,12 +1096,13 @@ mod tests {
 
 	#[test]
 	fn stale_pool_lease_is_not_current() {
+		let buffer = std::ptr::dangling_mut::<pw::sys::pw_buffer>();
 		let lease = Lease {
-			buffer: 7,
+			buffer: buffer as usize,
 			generation: 2,
 		};
 		assert_eq!(lease.current(1), None);
-		assert_eq!(lease.current(2), Some(7usize as *mut pw::sys::pw_buffer));
+		assert_eq!(lease.current(2), Some(buffer));
 	}
 
 	#[test]
