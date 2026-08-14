@@ -24,6 +24,33 @@ function skipDiscovery(conn: Moq.Connection.Established): boolean {
 	return true;
 }
 
+type ReferencedRendition = {
+	broadcast?: string;
+};
+
+function filterRenditions<T extends ReferencedRendition>(
+	base: Moq.Path.Valid,
+	renditions: Record<string, T>,
+): Record<string, T> {
+	return Object.fromEntries(
+		Object.entries(renditions).filter(([, config]) =>
+			config.broadcast === undefined ? true : Path.tryResolve(base, config.broadcast) !== undefined,
+		),
+	);
+}
+
+function filterCatalog(base: Moq.Path.Valid, catalog: Catalog.Root): Catalog.Root {
+	return {
+		...catalog,
+		video: catalog.video
+			? { ...catalog.video, renditions: filterRenditions(base, catalog.video.renditions) }
+			: undefined,
+		audio: catalog.audio
+			? { ...catalog.audio, renditions: filterRenditions(base, catalog.audio.renditions) }
+			: undefined,
+	};
+}
+
 // Watch supports the on-the-wire catalog formats from @moq/hang, plus "hangz" (the
 // DEFLATE-compressed `catalog.json.z` track) and a "manual" mode where the user supplies the
 // catalog directly without fetching. "hangz" is opt-in only: it shares the `.hang` broadcast suffix
@@ -199,7 +226,7 @@ export class Broadcast {
 		if (format === "manual") {
 			// Mirror the caller-supplied catalog into the effective output.
 			const catalog = effect.get(this.in.catalog);
-			effect.set(this.#out.catalog, catalog, undefined);
+			effect.set(this.#out.catalog, catalog ? filterCatalog(name, catalog) : undefined, undefined);
 			this.#out.status.set(catalog ? "live" : "loading");
 			return;
 		}
@@ -237,7 +264,7 @@ export class Broadcast {
 
 					console.debug("received catalog", format, this.in.name.peek(), update);
 
-					this.#out.catalog.set(update);
+					this.#out.catalog.set(filterCatalog(name, update));
 					this.#out.status.set("live");
 				}
 			} catch (err) {

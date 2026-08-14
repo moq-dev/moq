@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import type * as Catalog from "@moq/hang/catalog";
+import * as Catalog from "@moq/hang/catalog";
+import { Path } from "@moq/net";
 import { Signal } from "@moq/signals";
-import type { Broadcast } from "../broadcast";
+import { Broadcast } from "../broadcast";
 import { Source } from "./source";
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -14,7 +15,7 @@ function config(codec: string): Catalog.VideoConfig {
 	return { codec, container: { kind: "legacy" } };
 }
 
-function broadcast(renditions: Record<string, Catalog.VideoConfig>): Broadcast {
+function mockBroadcast(renditions: Record<string, Catalog.VideoConfig>): Broadcast {
 	return {
 		in: {
 			connection: new Signal(undefined),
@@ -39,7 +40,7 @@ describe("Source error signal", () => {
 	it("is unsupported when the catalog has video renditions but none are supported", async () => {
 		await withoutWarnings(async () => {
 			const source = new Source({
-				broadcast: broadcast({ hd: config("hev1.1.6.L120.90") }),
+				broadcast: mockBroadcast({ hd: config("hev1.1.6.L120.90") }),
 				supported: async () => false,
 			});
 
@@ -54,7 +55,7 @@ describe("Source error signal", () => {
 	it("treats a support probe throw as unsupported without aborting the remaining renditions", async () => {
 		await withoutWarnings(async () => {
 			const source = new Source({
-				broadcast: broadcast({
+				broadcast: mockBroadcast({
 					bad: config("not-a-codec"),
 					good: config("avc1.640028"),
 				}),
@@ -81,7 +82,7 @@ describe("Source error signal", () => {
 			);
 
 			const source = new Source({
-				broadcast: broadcast({ hd: config("avc1.640028") }),
+				broadcast: mockBroadcast({ hd: config("avc1.640028") }),
 				supported,
 			});
 
@@ -101,7 +102,7 @@ describe("Source error signal", () => {
 
 	it("is undefined when the catalog has no video renditions", async () => {
 		const source = new Source({
-			broadcast: broadcast({}),
+			broadcast: mockBroadcast({}),
 			supported: async () => false,
 		});
 
@@ -110,5 +111,40 @@ describe("Source error signal", () => {
 		expect(source.out.available.peek()).toEqual({});
 
 		source.close();
+	});
+
+	it("ignores escaping renditions before selecting a valid fallback", async () => {
+		const invalidVideo = { ...config("avc1.640028"), broadcast: "../../source" };
+		const validVideo = { ...config("avc1.640028"), broadcast: "./source" };
+		const audioConfig = Catalog.AudioConfigSchema.parse({
+			codec: "opus",
+			container: { kind: "legacy" },
+			sampleRate: 48_000,
+			numberOfChannels: 2,
+		});
+		const broadcast = new Broadcast({
+			enabled: true,
+			name: Path.from("room/catalog.hang"),
+			catalogFormat: "manual",
+			catalog: {
+				video: { renditions: { invalid: invalidVideo, fallback: validVideo } },
+				audio: {
+					renditions: {
+						invalid: { ...audioConfig, broadcast: "../../source" },
+						fallback: { ...audioConfig, broadcast: "./source" },
+					},
+				},
+			},
+		});
+		const source = new Source({ broadcast, supported: async () => true });
+
+		await settle();
+		expect(Object.keys(broadcast.out.catalog.peek()?.video?.renditions ?? {})).toEqual(["fallback"]);
+		expect(Object.keys(broadcast.out.catalog.peek()?.audio?.renditions ?? {})).toEqual(["fallback"]);
+		expect(Object.keys(source.out.available.peek())).toEqual(["fallback"]);
+		expect(source.out.track.peek()).toBe("fallback");
+
+		source.close();
+		broadcast.close();
 	});
 });
