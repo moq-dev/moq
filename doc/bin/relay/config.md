@@ -186,12 +186,14 @@ node = "us-west.example.com:4443"
 mesh = true
 
 # Optional. Fetch the peer list from an HTTP(S) endpoint or local file (a JSON
-# array of hostnames) and reconcile it at runtime, no restart needed.
+# array of peer URLs) and reconcile it at runtime, replacing sessions when URL
+# configuration such as ?cost= or ?jwt= changes.
 connect_api = "https://api.example.com/cluster/connect"
 
 # JWT for outbound cluster dials (alternative to mTLS), applied to any peer
-# whose URL has no inline ?jwt=. Required to authenticate gossip / connect_api
-# discovered peers; for static `connect` peers, prefer an inline ?jwt=.
+# whose URL has no inline ?jwt=. An inline token works for static and
+# connect_api-discovered peers. Gossip must use this shared token or mTLS because
+# the advertised cluster.node URL is public.
 token = "cluster.jwt"
 
 # Optional. How long a broadcast stays alive and announced after abruptly
