@@ -259,6 +259,12 @@ fn discover(consume: &moq_net::origin::Producer, name: &str) -> moq_net::announc
 
 /// Watch announcements and drain up to `want` peer broadcasts (excluding our own),
 /// spreading each subscription's start over `startup` to avoid a thundering herd.
+///
+/// Candidates are gathered over the `startup` window and picked at random. The
+/// relay replays existing announcements in deterministic path order, so a
+/// first-come pick would put every subscriber on the same first few broadcasts
+/// and collapse the 1:N presets into hotspots. Announcements arriving after the
+/// window fill any remaining slots in arrival order.
 async fn subscribe(
 	mut announced: moq_net::announce::Consumer,
 	own: HashSet<String>,
@@ -268,38 +274,83 @@ async fn subscribe(
 ) -> anyhow::Result<()> {
 	let mut tasks = JoinSet::new();
 	let mut seen: HashSet<String> = HashSet::new();
+	let mut pool = Vec::new();
 
-	while (seen.len() as u64) < want {
+	// Gather candidates until the startup window closes (or the announce stream ends).
+	let deadline = tokio::time::sleep(startup);
+	tokio::pin!(deadline);
+	loop {
+		tokio::select! {
+			_ = &mut deadline => break,
+			update = announced.next() => {
+				let Some(moq_net::announce::Update { path, broadcast }) = update else { break };
+				let Some(broadcast) = broadcast else { continue };
+				let path = path.as_str().to_string();
+				if own.contains(&path) || !seen.insert(path.clone()) {
+					continue;
+				}
+				pool.push((path, broadcast));
+			}
+		}
+	}
+
+	pick_random(&mut pool, want as usize);
+	let mut selected = pool.len() as u64;
+	for (path, broadcast) in pool {
+		spawn_drain(&mut tasks, path, broadcast, startup, stats.clone());
+	}
+
+	// Top up from late announcements, first-come: the pool was too small, so
+	// there is nothing to spread over.
+	while selected < want {
 		let Some(moq_net::announce::Update { path, broadcast }) = announced.next().await else {
 			break;
 		};
 		let Some(broadcast) = broadcast else {
 			continue;
 		};
-
 		let path = path.as_str().to_string();
 		if own.contains(&path) || !seen.insert(path.clone()) {
 			continue;
 		}
-
-		// Stagger the subscription start somewhere within the startup window.
-		let delay = {
-			let mut rng = rand::rng();
-			startup.mul_f64(rng.random_range(0.0..1.0))
-		};
-
-		let stats = stats.clone();
-		tasks.spawn(async move {
-			tokio::time::sleep(delay).await;
-			if let Err(err) = drain(broadcast, &stats).await {
-				tracing::debug!(%path, %err, "subscription ended");
-			}
-		});
+		selected += 1;
+		spawn_drain(&mut tasks, path, broadcast, startup, stats.clone());
 	}
 
 	// Keep the drain tasks alive; they run until their broadcasts close.
 	while tasks.join_next().await.is_some() {}
 	Ok(())
+}
+
+/// Keep `want` elements of the pool, chosen uniformly at random (Fisher-Yates,
+/// then truncate). The whole pool survives when it is smaller than `want`.
+fn pick_random<T>(pool: &mut Vec<T>, want: usize) {
+	let mut rng = rand::rng();
+	for i in (1..pool.len()).rev() {
+		pool.swap(i, rng.random_range(0..=i));
+	}
+	pool.truncate(want);
+}
+
+/// Queue one broadcast for draining, staggered somewhere within the startup
+/// window so `want` subscriptions don't all fire at once.
+fn spawn_drain(
+	tasks: &mut JoinSet<()>,
+	path: String,
+	broadcast: broadcast::Consumer,
+	startup: Duration,
+	stats: Arc<Stats>,
+) {
+	let delay = {
+		let mut rng = rand::rng();
+		startup.mul_f64(rng.random_range(0.0..1.0))
+	};
+	tasks.spawn(async move {
+		tokio::time::sleep(delay).await;
+		if let Err(err) = drain(broadcast, &stats).await {
+			tracing::debug!(%path, %err, "subscription ended");
+		}
+	});
 }
 
 /// Subscribe to the broadcast's track, counting every frame received and tracking
@@ -609,6 +660,28 @@ mod tests {
 		// The one wanted slot went to the peer, not `.stats` and not our own.
 		assert_eq!(stats.frames_recv.load(Ordering::Relaxed), 1);
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 1);
+	}
+
+	/// Subscription targets must be picked at random from the gathered pool.
+	/// Announcements replay in deterministic path order, so a first-come pick
+	/// put every subscriber on the same first rooms and turned the 1:N presets
+	/// into hotspots on one or two broadcasts.
+	#[test]
+	fn pick_random_spreads_selections() {
+		let mut distinct = HashSet::new();
+		for _ in 0..64 {
+			let mut pool = vec![0, 1, 2, 3, 4, 5, 6, 7];
+			pick_random(&mut pool, 1);
+			distinct.insert(pool[0]);
+		}
+		// First-come always yields element 0. Randomness missing this over 64
+		// draws from 8 elements has probability (1/8)^63, i.e. never.
+		assert!(distinct.len() > 1, "selection must not be deterministic");
+
+		// A pool smaller than want survives whole.
+		let mut pool = vec![1, 2];
+		pick_random(&mut pool, 5);
+		assert_eq!(pool.len(), 2);
 	}
 
 	fn lost(stats: &Stats) -> u64 {
