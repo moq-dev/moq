@@ -398,6 +398,19 @@ mod tests {
 			.unwrap()
 	}
 
+	/// Subscribe with a budget wide enough to read a whole batch.
+	///
+	/// These tests write every group up front and only then read, which the default
+	/// [`Latency::REAL_TIME`](moq_net::Latency::REAL_TIME) budget collapses to the live
+	/// edge: completeness has to be asked for.
+	fn subscribe_all(track: &moq_net::track::Producer) -> moq_net::track::Subscriber {
+		track.subscribe(moq_net::track::Subscription::default().with_latency(moq_net::Latency::max(BATCH)))
+	}
+
+	/// A drift budget no test timeline comes close to, so nothing is skipped. Clamped to
+	/// the track's own retention window, which is what actually bounds it.
+	const BATCH: std::time::Duration = std::time::Duration::from_secs(3600);
+
 	fn frame(timestamp_us: u64, keyframe: bool) -> Frame {
 		Frame {
 			timestamp: Timestamp::from_micros(timestamp_us).unwrap(),
@@ -544,8 +557,11 @@ mod tests {
 	/// consumer can see the break instead of inferring continuity from adjacent sequences.
 	#[tokio::test]
 	async fn discontinuity_publishes_an_empty_group() {
-		let track = track_producer("test", hang::container::track_info());
-		let consumer = track.subscribe(None);
+		// The resumed clock jumps forty minutes, so both the retention window and the
+		// drift budget have to cover it or the pre-discontinuity group reads as ancient.
+		let info = hang::container::track_info().with_latency_max(BATCH);
+		let track = track_producer("test", info);
+		let consumer = subscribe_all(&track);
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap();
@@ -581,7 +597,7 @@ mod tests {
 	#[tokio::test]
 	async fn keyframe_closes_group_immediately() {
 		let track = track_producer("test", hang::container::track_info());
-		let consumer = track.subscribe(None);
+		let consumer = subscribe_all(&track);
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap(); // first frame must be a keyframe
@@ -600,7 +616,7 @@ mod tests {
 	#[tokio::test]
 	async fn needs_keyframe_drives_audio_grouping() {
 		let track = track_producer("test", hang::container::track_info());
-		let consumer = track.subscribe(None);
+		let consumer = subscribe_all(&track);
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		// Drive grouping off `needs_keyframe`, as the audio importers do: the first frame of each
@@ -624,7 +640,7 @@ mod tests {
 	#[tokio::test]
 	async fn cut_closes_immediately() {
 		let track = track_producer("test", hang::container::track_info());
-		let consumer = track.subscribe(None);
+		let consumer = subscribe_all(&track);
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap();
@@ -642,7 +658,7 @@ mod tests {
 	#[allow(deprecated)]
 	async fn deprecated_finish_group_still_closes() {
 		let track = track_producer("test", hang::container::track_info());
-		let consumer = track.subscribe(None);
+		let consumer = subscribe_all(&track);
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap();
@@ -677,7 +693,7 @@ mod tests {
 	#[tokio::test]
 	async fn seek_uses_explicit_sequence() {
 		let track = track_producer("test", hang::container::track_info());
-		let consumer = track.subscribe(None);
+		let consumer = subscribe_all(&track);
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap(); // seq 0
@@ -692,7 +708,7 @@ mod tests {
 	#[tokio::test]
 	async fn seek_clears_pending_after_use() {
 		let track = track_producer("test", hang::container::track_info());
-		let consumer = track.subscribe(None);
+		let consumer = subscribe_all(&track);
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.seek(5).unwrap();

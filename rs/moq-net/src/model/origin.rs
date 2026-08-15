@@ -3844,6 +3844,61 @@ mod tests {
 		assert_eq!(entry.subscriber.fetches, 0, "ingress cannot fetch");
 	}
 
+	/// A group the drift budget skips is counted, not silently dropped: without a
+	/// counter a skip is indistinguishable from loss, and `groups` alone would just
+	/// quietly under-report.
+	#[tokio::test]
+	async fn test_stats_counts_stale_skips() {
+		use crate::Timestamp;
+		use crate::stats::{Config, Registry, Tier};
+		use bytes::Bytes;
+
+		tokio::time::pause();
+
+		let registry = Registry::new(Config::new());
+		let ctx = registry.tier(Tier::default()).session("acme");
+
+		let origin = Origin::random().produce();
+		let ingress = origin.clone().with_stats(ctx.clone());
+		let egress = origin.consume().with_stats(ctx.clone());
+
+		let mut announced = egress.announced();
+		let source = ingress.create_broadcast("demo", announce()).unwrap();
+		let mut dynamic = source.dynamic();
+		settle().await;
+		settle().await;
+
+		let broadcast = announced.next().await.unwrap().broadcast.unwrap();
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		let mut sub = subscribing.await.unwrap();
+
+		// Three seconds of media, delivered as a burst before the subscriber reads.
+		for second in 0..3 {
+			let mut group = producer.append_group().unwrap();
+			group
+				.write_frame(
+					Timestamp::from_millis(second * 1000).unwrap(),
+					Bytes::from_static(b"hi"),
+				)
+				.unwrap();
+			group.finish().unwrap();
+		}
+
+		// The default REAL_TIME budget takes the live edge and writes the other two off.
+		let group = sub.recv_group().await.unwrap().unwrap();
+		assert_eq!(group.sequence, 2);
+		settle().await;
+
+		let report = registry.report();
+		let entry = report.traffic.iter().find(|e| e.path.as_str() == "demo").unwrap();
+		assert_eq!(entry.publisher.stale, 2, "two groups skipped on the way out");
+		assert_eq!(entry.publisher.groups, 1, "only the live edge was delivered");
+		assert_eq!(entry.subscriber.stale, 0, "ingress wrote all three");
+		assert_eq!(entry.subscriber.groups, 3);
+	}
+
 	/// `Subscriber::read_frame` collapses a group to its first frame. The paths it
 	/// delegates to (plain and spliced) build their own *unmetered* group consumers,
 	/// so the wrapper is the only place that can attribute the read: exactly one

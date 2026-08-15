@@ -2,6 +2,18 @@ use futures::FutureExt;
 use hang::catalog::Container;
 use mp4_atom::{Decode, Encode};
 
+/// A drift budget no test timeline comes close to, so every group is read.
+///
+/// These tests write a whole batch of groups up front and only then read them, which the
+/// default [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) budget collapses to the live
+/// edge: completeness has to be asked for.
+const BATCH: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// A subscription with that budget, for a test asserting every group is delivered.
+fn subscribe_all() -> moq_net::track::Subscription {
+	moq_net::track::Subscription::default().with_latency(moq_net::Latency::max(BATCH))
+}
+
 /// Drain every group currently buffered on the consumer without waiting for new ones.
 /// Used in tests where the producer is still alive after writing.
 #[cfg(test)]
@@ -631,8 +643,18 @@ async fn segmented_source_groups_per_segment() {
 	let snapshot = catalog.snapshot();
 	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
-	let mut video_track = consumer.track(&video_name).unwrap().subscribe(None).await.unwrap();
-	let mut audio_track = consumer.track(&audio_name).unwrap().subscribe(None).await.unwrap();
+	let mut video_track = consumer
+		.track(&video_name)
+		.unwrap()
+		.subscribe(subscribe_all())
+		.await
+		.unwrap();
+	let mut audio_track = consumer
+		.track(&audio_name)
+		.unwrap()
+		.subscribe(subscribe_all())
+		.await
+		.unwrap();
 
 	// Three 1s segments: 2 video fragments each (only the first an IDR) and 4 audio fragments,
 	// so a per-fragment grouping and a per-segment one can't be confused.
@@ -867,8 +889,18 @@ async fn a_single_leading_styp_still_segments_on_keyframes() {
 	let snapshot = catalog.snapshot();
 	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
-	let mut video_track = consumer.track(&video_name).unwrap().subscribe(None).await.unwrap();
-	let mut audio_track = consumer.track(&audio_name).unwrap().subscribe(None).await.unwrap();
+	let mut video_track = consumer
+		.track(&video_name)
+		.unwrap()
+		.subscribe(subscribe_all())
+		.await
+		.unwrap();
+	let mut audio_track = consumer
+		.track(&audio_name)
+		.unwrap()
+		.subscribe(subscribe_all())
+		.await
+		.unwrap();
 
 	// One styp up front, then four segments' worth of fragments each opening on an IDR.
 	fmp4.decode(&styp()).unwrap();

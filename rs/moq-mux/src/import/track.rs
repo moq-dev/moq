@@ -888,7 +888,12 @@ mod tests {
 		catalog: &crate::catalog::Producer,
 	) -> (crate::codec::opus::Import, moq_net::track::Subscriber) {
 		let track = broadcast.create_track("audio", hang::container::track_info()).unwrap();
-		let subscriber = track.subscribe(None);
+		// Every group is written before anything reads, which the default
+		// REAL_TIME budget would collapse to the live edge.
+		let subscriber = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_latency(moq_net::Latency::max(std::time::Duration::from_secs(3600))),
+		);
 		let config = crate::codec::opus::Config::new(48_000, 2);
 		let import = crate::codec::opus::Import::new(track, catalog.reserve(), config.into()).unwrap();
 		(import, subscriber)

@@ -151,6 +151,9 @@ pub(crate) struct Counters {
 	groups: AtomicU64,
 	// Subset of `groups` carried over an unreliable QUIC datagram.
 	datagrams: AtomicU64,
+	// Groups the drift budget gave up on before they were delivered. Disjoint from
+	// `groups`, which counts only what was handed over.
+	stale: AtomicU64,
 }
 
 impl Counters {
@@ -174,6 +177,7 @@ impl Counters {
 		let frames = self.frames.load(Ordering::Relaxed);
 		let groups = self.groups.load(Ordering::Relaxed);
 		let datagrams = self.datagrams.load(Ordering::Relaxed);
+		let stale = self.stale.load(Ordering::Relaxed);
 		Traffic {
 			announced,
 			announced_closed,
@@ -187,6 +191,7 @@ impl Counters {
 			frames,
 			groups,
 			datagrams,
+			stale,
 		}
 	}
 }
@@ -257,6 +262,11 @@ pub struct Traffic {
 	/// A subset of `groups`: each one also counts there and its payload in
 	/// `frames` / `bytes`.
 	pub datagrams: u64,
+	/// Cumulative groups skipped because they drifted past a subscriber's
+	/// [`Latency`](crate::Latency) budget. Disjoint from `groups`: a skipped group is
+	/// never handed over, so none of its payload reaches `frames` / `bytes` either.
+	/// A steady rate here means subscribers are consistently behind the live edge.
+	pub stale: u64,
 }
 
 impl Traffic {
@@ -274,6 +284,7 @@ impl Traffic {
 		self.frames += other.frames;
 		self.groups += other.groups;
 		self.datagrams += other.datagrams;
+		self.stale += other.stale;
 	}
 
 	/// True while the broadcast is announced (an announce guard is open).
@@ -994,6 +1005,23 @@ impl Meter {
 			counters.groups.fetch_add(1, Ordering::Relaxed);
 			counters.frames.fetch_add(1, Ordering::Relaxed);
 			counters.bytes.fetch_add(n, Ordering::Relaxed);
+		}
+	}
+
+	/// Whether this meter attributes anything, i.e. the broadcast is tracked and the
+	/// handle was tagged. A caller holding a count that has to land exactly once can
+	/// keep it rather than drop it into an untagged meter.
+	pub(crate) fn is_tracked(&self) -> bool {
+		self.counters.is_some()
+	}
+
+	/// Bump `stale` by `n` (groups skipped before delivery by the drift budget).
+	pub(crate) fn stale(&self, n: u64) {
+		if n == 0 {
+			return;
+		}
+		if let Some(counters) = self.counters() {
+			counters.stale.fetch_add(n, Ordering::Relaxed);
 		}
 	}
 

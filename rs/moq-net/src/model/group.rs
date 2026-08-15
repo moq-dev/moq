@@ -124,6 +124,13 @@ pub(crate) struct GroupState {
 	// against the byte budget tracks evict toward.
 	charge: cache::Charge,
 
+	// The first frame's timestamp, recorded once and never revised: the group's
+	// presentation start. Kept here rather than read off `frames` so it survives a
+	// front eviction, and so an abort doesn't erase where the group sat in time.
+	// `None` until the first frame is written, which is the only honest answer: an
+	// empty group has not presented anything yet.
+	timestamp: Option<Timestamp>,
+
 	// Once finalized, the total number of frames the group will ever contain. Recorded
 	// at finish so the count outlives an abort that clears the cache.
 	pub(crate) fin: Option<usize>,
@@ -185,6 +192,11 @@ impl GroupState {
 		} else {
 			Poll::Pending
 		}
+	}
+
+	/// Record where the group starts in presentation time, on the first frame only.
+	fn stamp(&mut self, timestamp: Timestamp) {
+		self.timestamp.get_or_insert(timestamp);
 	}
 
 	/// Evict completed frames from the front until within the byte budget.
@@ -405,6 +417,7 @@ impl Producer {
 		state.frames.push_back(Frame { timestamp, payload });
 		state.next_index = next_index;
 		state.committed = state.next_index;
+		state.stamp(timestamp);
 		state.evict();
 		drop(state);
 
@@ -452,6 +465,9 @@ impl Producer {
 			buf: buf.clone(),
 		});
 		state.next_index = next_index;
+		// Opening the frame is enough: the header carries the timestamp, so the group's
+		// place in time is known before a single payload byte streams in.
+		state.stamp(timestamp);
 		state.evict();
 		drop(state);
 
@@ -501,6 +517,9 @@ impl Producer {
 			buf: buf.clone(),
 		});
 		state.next_index = next_index;
+		// Opening the frame is enough: the header carries the timestamp, so the group's
+		// place in time is known before a single payload byte streams in.
+		state.stamp(timestamp);
 		state.evict();
 		drop(state);
 
@@ -601,6 +620,19 @@ impl Producer {
 	/// use it whole.
 	pub(crate) fn committed_frames(&self) -> usize {
 		self.state.read().committed
+	}
+
+	/// Where the group starts in presentation time: its first frame's timestamp,
+	/// or `None` while no frame has been opened.
+	///
+	/// Stamped once, when the group's first frame arrives, so it measures the group's
+	/// place in the media timeline rather than when it happened to be delivered. That
+	/// is what lets the track tell a burst of old content apart from live content (see
+	/// [`track::Subscriber`]). On protocols whose wire can't carry a timestamp the
+	/// receiver stamps frames with [`Timestamp::now`], which makes this the local
+	/// receive time instead: an estimate that a burst compresses.
+	pub(crate) fn timestamp(&self) -> Option<Timestamp> {
+		self.state.read().timestamp
 	}
 
 	/// The group's full cached footprint (payload plus fixed overhead), used by the

@@ -131,7 +131,12 @@ mod tests {
 			.await
 			.unwrap();
 		let source = moq_mux::Source::new(origin.consume(), "test");
-		let mut export = moq_mux::container::fmp4::Export::new(source, catalog);
+		// Both frames are encoded before the export runs, so the exporter needs a budget
+		// wide enough to read them: its REAL_TIME default keeps only the live edge, and
+		// the second `next()` would then block forever waiting for a group that was
+		// skipped.
+		let mut export = moq_mux::container::fmp4::Export::new(source, catalog)
+			.with_latency(moq_mux::Latency::max(std::time::Duration::from_secs(3600)));
 		let init = export.next().await.unwrap().expect("CMAF init");
 		let fragment = export.next().await.unwrap().expect("CMAF fragment");
 

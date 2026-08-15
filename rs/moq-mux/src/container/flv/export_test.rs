@@ -10,6 +10,13 @@ use hang::catalog::{AudioCodec, VideoCodec};
 
 use super::{Export, Import};
 
+/// A drift budget no test timeline comes close to, so the exporter reads every group.
+///
+/// These tests write or import a whole broadcast and only then export it, which the
+/// exporter's default [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) collapses to the
+/// live edge: completeness has to be asked for, exactly as a real recorder does.
+const BATCH: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// A minimal `AVCDecoderConfigurationRecord` (profile 0x42, level 0x1f, one SPS + PPS).
 fn avcc() -> Vec<u8> {
 	let sps = [0x67u8, 0x42, 0xc0, 0x1f];
@@ -169,7 +176,10 @@ async fn export_emits_sequence_headers_and_frames() {
 	importer.decode(&bytes::BytesMut::from(synth_flv().as_slice())).unwrap();
 	catalog.finish().unwrap();
 
-	let exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	let exporter = Export::new(crate::source::announced(&consumer))
+		.await
+		.unwrap()
+		.with_latency(crate::Latency::max(BATCH));
 	let exported = drain_export(exporter, importer).await;
 
 	let tags = parse_tags(&exported);
