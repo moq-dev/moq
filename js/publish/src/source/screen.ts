@@ -4,7 +4,8 @@ import type * as Video from "../video";
 
 // Signals the screen capture reads.
 export type ScreenInput = {
-	// Whether to hold the capture open. Enabling it prompts the user to pick a surface.
+	// Whether to hold the capture open. Defaults to true. Enabling prompts the user to pick a surface,
+	// so construct an enabled screen source during a user gesture or start it later with a live input.
 	enabled: Getter<boolean>;
 };
 
@@ -45,7 +46,7 @@ export class Screen {
 
 	constructor(props?: ScreenProps) {
 		this.in = {
-			enabled: getter(props?.enabled ?? false),
+			enabled: getter(props?.enabled ?? true),
 		};
 		this.video = Signal.from(props?.video);
 		this.audio = Signal.from(props?.audio);

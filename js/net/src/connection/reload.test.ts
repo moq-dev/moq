@@ -13,6 +13,22 @@ async function settle() {
 	await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+test("enabled defaults to true", () => {
+	const omitted = new Reload();
+	const explicitUndefined = new Reload({ enabled: undefined });
+	const disabled = new Reload({ enabled: false });
+
+	try {
+		expect(omitted.enabled.peek()).toBe(true);
+		expect(explicitUndefined.enabled.peek()).toBe(true);
+		expect(disabled.enabled.peek()).toBe(false);
+	} finally {
+		omitted.close();
+		explicitUndefined.close();
+		disabled.close();
+	}
+});
+
 test("equivalent URL instances do not restart a pending connection", async () => {
 	const original = globalThis.WebTransport;
 	let connects = 0;

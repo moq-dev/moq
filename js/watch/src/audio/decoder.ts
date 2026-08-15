@@ -19,7 +19,7 @@ import { unlockOnGesture } from "./unlock";
 const LATENCY_REANCHOR_DEBOUNCE_MS = 150;
 
 export type DecoderInput = {
-	// Enable to download the audio track.
+	// Whether to download the audio track. Defaults to true.
 	enabled: Getter<boolean>;
 };
 
@@ -106,7 +106,7 @@ export class Decoder {
 
 	constructor(source: Source, sync: Sync, props?: Inputs<DecoderInput>) {
 		this.in = {
-			enabled: getter(props?.enabled ?? false),
+			enabled: getter(props?.enabled ?? true),
 		};
 
 		this.source = source;

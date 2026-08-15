@@ -61,8 +61,7 @@ export type BroadcastInput = {
 	// the origin resolve the broadcast, and the handle spans their reconnects.
 	origin: Getter<Moq.Origin.Table | undefined>;
 
-	// Whether to start downloading the broadcast.
-	// Defaults to false so you can make sure everything is ready before starting.
+	// Whether to start downloading the broadcast. Defaults to true.
 	enabled: Getter<boolean>;
 
 	// The broadcast name.
@@ -119,7 +118,7 @@ export class Broadcast {
 		this.in = {
 			origin: getter(props?.origin),
 			name: getter(props?.name ?? Path.empty()),
-			enabled: getter(props?.enabled ?? false),
+			enabled: getter(props?.enabled ?? true),
 			reload: getter(props?.reload ?? true),
 			catalogFormat: getter<CatalogFormat | undefined>(props?.catalogFormat),
 			catalog: getter(props?.catalog),

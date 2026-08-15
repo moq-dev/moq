@@ -15,7 +15,7 @@ import type { Source } from "./source";
 const BUFFERING = Time.Milli(500);
 
 export type DecoderInput = {
-	// Whether to download the video track. Wired from the renderer's output by the parent.
+	// Whether to download the video track. Defaults to true; the parent may wire it from the renderer's output.
 	enabled: Getter<boolean>;
 };
 
@@ -86,7 +86,7 @@ export class Decoder {
 
 	constructor(source: Source, sync: Sync, props?: Inputs<DecoderInput>) {
 		this.in = {
-			enabled: getter(props?.enabled ?? false),
+			enabled: getter(props?.enabled ?? true),
 		};
 
 		this.source = source;

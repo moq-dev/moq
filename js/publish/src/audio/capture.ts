@@ -40,7 +40,7 @@ export type CaptureInput = {
 	// The track or decoded samples to pump PCM off.
 	source: Getter<Source | undefined>;
 
-	// Whether to hold the capture device. Decoded samples ignore this: there's no device to release,
+	// Whether to hold the capture device. Defaults to true. Decoded samples ignore this: there's no device to release,
 	// and their stream is one-shot, so dropping it would mean never reading it again.
 	enabled: Getter<boolean>;
 };
@@ -94,7 +94,7 @@ export class Capture {
 	constructor(props?: CaptureProps) {
 		this.in = {
 			source: getter(props?.source),
-			enabled: getter(props?.enabled ?? false),
+			enabled: getter(props?.enabled ?? true),
 		};
 		this.sampleRate = Signal.from<number | undefined>(props?.sampleRate);
 		this.channelCount = Signal.from<number | undefined>(props?.channelCount);

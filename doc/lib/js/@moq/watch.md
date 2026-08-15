@@ -102,7 +102,6 @@ const connection = new Moq.Connection.Shared({ url: new URL("https://relay.examp
 
 const broadcast = new Watch.Broadcast({
     origin: connection.origin,
-    enabled: true,
     name: "alice.hang",
     catalogFormat: "msf",
 });
@@ -124,7 +123,6 @@ import * as Watch from "@moq/watch";
 
 const broadcast = new Watch.Broadcast({
     origin: connection.origin,
-    enabled: true,
     name: "alice.hang",
     catalogFormat: "manual",
     catalog: {
@@ -271,6 +269,9 @@ The `<moq-watch-ui>` element automatically discovers the nested `<moq-watch>` an
 
 ## JavaScript API
 
+Standalone components start enabled when the `enabled` input is omitted. Pass `false` to construct
+one inactive, or supply a `Signal<boolean>` when activation follows application lifecycle state.
+
 ```typescript
 import * as Watch from "@moq/watch";
 import * as Moq from "@moq/net";
@@ -283,7 +284,6 @@ const reload = new Signal(true);
 
 const broadcast = new Watch.Broadcast({
     origin: connection.origin,
-    enabled: true,
     name: "alice.hang",
     reload,
 });

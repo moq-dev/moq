@@ -5,7 +5,7 @@ const { Effect } = Moq.Signals;
 
 async function main() {
 	const url = new URL("https://cdn.moq.dev/anon");
-	const connection = new Moq.Connection.Reload({ url, enabled: true });
+	const connection = new Moq.Connection.Reload({ url });
 
 	// Wait for a broadcast that may not exist yet. `consume` would subscribe blind and get reset
 	// if nobody is publishing the path; this waits for the announcement instead.

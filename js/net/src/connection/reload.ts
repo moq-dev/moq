@@ -161,7 +161,7 @@ export class Reload {
 	#url: Getter<string | undefined>;
 	constructor(props?: ReloadProps) {
 		this.url = Signal.from(props?.url);
-		this.enabled = Signal.from(props?.enabled ?? false);
+		this.enabled = Signal.from(props?.enabled ?? true);
 		this.delay = props?.delay ?? {};
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;

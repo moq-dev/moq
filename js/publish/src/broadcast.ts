@@ -12,7 +12,7 @@ export type BroadcastInput = {
 	// origin announce the broadcast, and it survives their reconnects.
 	origin: Getter<Moq.Origin.Table | undefined>;
 
-	// Whether to publish the broadcast. Defaults to false so nothing is announced until ready.
+	// Whether to publish the broadcast. Defaults to true.
 	enabled: Getter<boolean>;
 
 	// The broadcast name.
@@ -79,7 +79,7 @@ export class Broadcast {
 	constructor(props?: Inputs<BroadcastInput>) {
 		this.in = {
 			origin: getter(props?.origin),
-			enabled: getter(props?.enabled ?? false),
+			enabled: getter(props?.enabled ?? true),
 			name: getter(props?.name ?? Moq.Path.empty()),
 			display: getter(props?.display),
 			flip: getter(props?.flip ?? false),
