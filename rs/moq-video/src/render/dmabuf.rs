@@ -63,7 +63,9 @@ pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Option<So
 	let Some(hal) = (unsafe { device.as_hal::<wgpu::hal::api::Vulkan>() }) else {
 		return Ok(None);
 	};
-	let export = buffer.export().map_err(|e| err(format!("export DMA-BUF: {e}")))?;
+	let export = buffer
+		.export()
+		.map_err(|e| Error::Render(anyhow::Error::new(e).context("export DMA-BUF")))?;
 	let (fd, keepalive) = export.into_parts();
 	// SAFETY: `fd` is a fresh duplicate of this live DMA-BUF. Export waited for
 	// producer writes, and the format, modifier, extent, stride, and offset come

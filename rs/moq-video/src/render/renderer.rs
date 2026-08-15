@@ -12,6 +12,18 @@ use crate::{Color, Error, Frame, Size};
 /// frame rate, so the path is retired and the CPU fallback takes over.
 const ZERO_COPY_STRIKES: u32 = 3;
 
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+fn dma_buf_import_timed_out(error: &Error) -> bool {
+	let Error::Render(error) = error else {
+		return false;
+	};
+	error.chain().any(|cause| {
+		cause
+			.downcast_ref::<std::io::Error>()
+			.is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut)
+	})
+}
+
 /// Renderer configuration.
 ///
 /// `#[non_exhaustive]`: build via [`Config::new`] (or `default()`) and set the
@@ -331,6 +343,8 @@ impl Renderer {
 				// failure, so it costs no strike: the CPU path is the answer
 				// for this surface and always will be.
 				Ok(None) => {}
+				#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+				Err(err) if dma_buf_import_timed_out(&err) => return Err(err),
 				Err(err) => {
 					self.strikes += 1;
 					self.retired = self.strikes >= ZERO_COPY_STRIKES;
@@ -500,6 +514,18 @@ mod tests {
 
 	use super::*;
 	use crate::Surface;
+
+	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	#[test]
+	fn dma_buf_fence_timeout_is_terminal_for_the_frame() {
+		let timed_out = Error::Render(anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::TimedOut)));
+		let other = Error::Render(anyhow::Error::new(std::io::Error::from(
+			std::io::ErrorKind::PermissionDenied,
+		)));
+
+		assert!(dma_buf_import_timed_out(&timed_out));
+		assert!(!dma_buf_import_timed_out(&other));
+	}
 
 	/// Every test here draws on a real GPU, which a headless CI runner does not
 	/// have (wgpu finds no adapter and `Renderer::new` never gets built). The

@@ -489,10 +489,16 @@ fn nv12_to_i420(data: &[u8], layout: FrameLayout) -> Result<I420, Error> {
 	let y_len = stride
 		.checked_mul(source_height)
 		.ok_or_else(|| Error::Codec(anyhow::anyhow!("NV12 luma size overflow")))?;
-	let uv_len = stride
-		.checked_mul(height / 2)
+	let uv_rows = height / 2;
+	let uv_len = uv_rows
+		.checked_sub(1)
+		.and_then(|rows| rows.checked_mul(stride))
+		.and_then(|offset| offset.checked_add(width))
 		.ok_or_else(|| Error::Codec(anyhow::anyhow!("NV12 chroma size overflow")))?;
-	if stride < width || data.len() < y_len + uv_len {
+	let frame_len = y_len
+		.checked_add(uv_len)
+		.ok_or_else(|| Error::Codec(anyhow::anyhow!("NV12 frame size overflow")))?;
+	if stride < width || data.len() < frame_len {
 		return Err(Error::Codec(anyhow::anyhow!(
 			"NV12 frame is shorter than its declared rows"
 		)));
@@ -502,9 +508,9 @@ fn nv12_to_i420(data: &[u8], layout: FrameLayout) -> Result<I420, Error> {
 	for row in 0..height {
 		packed[row * width..(row + 1) * width].copy_from_slice(&data[row * stride..row * stride + width]);
 	}
-	let uv = &data[y_len..y_len + uv_len];
+	let uv = &data[y_len..frame_len];
 	let packed_uv = width * height;
-	for row in 0..height / 2 {
+	for row in 0..uv_rows {
 		packed[packed_uv + row * width..packed_uv + (row + 1) * width]
 			.copy_from_slice(&uv[row * stride..row * stride + width]);
 	}
@@ -1301,6 +1307,25 @@ mod tests {
 			},
 		)
 		.unwrap();
+		assert_eq!(frame.y(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+		assert_eq!(frame.u(), &[9, 11]);
+		assert_eq!(frame.v(), &[10, 12]);
+	}
+
+	#[test]
+	fn nv12_accepts_a_width_precise_final_row() {
+		let layout = FrameLayout {
+			stride: 6,
+			width: 4,
+			height: 2,
+			source_height: 2,
+		};
+		let mut data = vec![99; frame_data_size(VideoFormat::NV12, layout).unwrap()];
+		data[..4].copy_from_slice(&[1, 2, 3, 4]);
+		data[6..10].copy_from_slice(&[5, 6, 7, 8]);
+		data[12..16].copy_from_slice(&[9, 10, 11, 12]);
+
+		let frame = nv12_to_i420(&data, layout).unwrap();
 		assert_eq!(frame.y(), &[1, 2, 3, 4, 5, 6, 7, 8]);
 		assert_eq!(frame.u(), &[9, 11]);
 		assert_eq!(frame.v(), &[10, 12]);
