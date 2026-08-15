@@ -219,11 +219,9 @@
             gzip
           ];
 
-        # Developer workflow tooling not needed for builds: the GitHub CLI
-        # for opening/reviewing PRs, plus jq to read `cargo metadata` in
-        # `just rs check-changed`.
+        # Developer workflow tooling not needed for builds: jq reads
+        # `cargo metadata` in `just rs check-changed`.
         devTools = with pkgs; [
-          gh
           jq
         ];
 
