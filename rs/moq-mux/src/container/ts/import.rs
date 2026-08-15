@@ -627,10 +627,11 @@ impl<E: catalog::Catalog> Import<E> {
 		let mut sections = Vec::new();
 		self.si_sections.entry(pid).or_default().push(pkt, &mut sections);
 
-		// Reassemble every section on the PID, then drop the tables we don't carry: the
-		// EIT PID interleaves p/f with schedule, so a section boundary is only findable
-		// by following the whole PID.
-		sections.retain(|section| si_pid.captures(section));
+		// Reassemble every section on the PID, then drop what we don't carry: the tables
+		// this PID isn't captured for (the EIT PID interleaves p/f with schedule, so a
+		// section boundary is only findable by following the whole PID), and any version
+		// that doesn't apply yet.
+		sections.retain(|section| si_pid.captures(section) && catalog::is_current(section));
 		if sections.is_empty() {
 			return;
 		}

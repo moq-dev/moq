@@ -237,6 +237,21 @@ impl Si {
 	}
 }
 
+/// Whether a section is the version that applies now.
+///
+/// Generic section syntax again (ISO 13818-1), so this parses no table: a long-form
+/// section carries `current_next_indicator` in the low bit of byte 5, and a source may
+/// transmit the *next* version of a sub-table ahead of a version change with the bit
+/// clear. Those cannot be carried alongside the current version, because [`section_key`]
+/// identifies a section by `(table_id, table_id_extension, section_number)` and both
+/// versions share all three: they would replace each other on every repetition,
+/// republishing the catalog each cycle and exporting whichever landed last. A short-form
+/// section (TDT and friends) has no version and is always current.
+pub(super) fn is_current(section: &[u8]) -> bool {
+	let long_form = section.get(1).is_some_and(|b| b & 0x80 != 0);
+	!long_form || section.get(5).is_some_and(|b| b & 0x01 != 0)
+}
+
 /// Identify a section within its PID: `(table_id, table_id_extension, section_number)`.
 ///
 /// Generic section syntax (ISO 13818-1 / EN 300 468), not table-specific: a long-form

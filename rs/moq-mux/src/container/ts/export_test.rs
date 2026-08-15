@@ -1272,6 +1272,12 @@ fn make_section(table_id: u8, body: &[u8]) -> Vec<u8> {
 		(section_length & 0xff) as u8,
 	];
 	s.extend_from_slice(body);
+	// Byte 5 of a long-form section holds version_number + current_next_indicator. Set the
+	// indicator, so the section is the currently-applicable version a conformant
+	// multiplexer transmits; a test wanting the pending version clears it again.
+	if let Some(b) = s.get_mut(5) {
+		*b |= 0x01;
+	}
 	s.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
 	s
 }
@@ -1645,6 +1651,43 @@ fn tdt_is_not_captured() {
 		"control: the import gate ran"
 	);
 	assert!(!si.contains_key(&0x0014), "TDT is dropped at the import gate");
+}
+
+/// A multiplexer may transmit the *next* version of a sub-table alongside the current
+/// one, with `current_next_indicator` clear. The two differ only in byte 5, which
+/// `section_key` does not read, so carrying both would have them replace each other on
+/// every repetition: the catalog would republish each cycle and export would emit
+/// whichever landed last, which half the time is the version that does not apply yet.
+#[test]
+fn eit_pending_version_is_not_carried() {
+	// Same service_id (bytes 3..5) and section_number (byte 6); only the version differs.
+	let current = make_section(0x4E, &[0x00, 0x44, 0x0a, 0x00, 0x00, 0xaa, 0xaa, 0xaa]);
+	let mut pending = make_section(0x4E, &[0x00, 0x44, 0x0c, 0x00, 0x00, 0xbb, 0xbb, 0xbb]);
+	pending[5] &= !0x01;
+	assert_eq!(
+		section_key_of(&current),
+		section_key_of(&pending),
+		"the two versions must be indistinguishable to `section_key`, or this proves nothing"
+	);
+
+	// Two full cycles, so a collision shows up as the entry flipping between them.
+	let mut input = Vec::new();
+	for _ in 0..2 {
+		input.extend_from_slice(&si_packet(0x0012, &current));
+		input.extend_from_slice(&si_packet(0x0012, &pending));
+	}
+
+	assert_eq!(
+		import_si(&input).get(&0x0012).expect("an EIT entry").sections,
+		vec![Bytes::from(current)],
+		"only the currently-applicable version is carried"
+	);
+}
+
+/// `(table_id, table_id_extension, section_number)`, mirroring the private `section_key`
+/// so a test can assert two sections are indistinguishable to it.
+fn section_key_of(section: &[u8]) -> (u8, u16, u8) {
+	(section[0], ((section[3] as u16) << 8) | section[4] as u16, section[6])
 }
 
 /// The claim in full: real EIT p/f packets go in as TS and come back out as TS on the
