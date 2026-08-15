@@ -82,15 +82,19 @@ pub async fn run(ctx: Connection) {
 	let publish = Origin::random().produce();
 	// Consume side: the session fills this with peer announcements.
 	let consume = Origin::random().produce();
-	let announced = consume.consume().announced();
 
 	let name = config.name();
+	let announced = discover(&consume, name);
+
 	let mut broadcasts = Vec::new();
 	let mut own = HashSet::new();
 	let mut tasks = JoinSet::new();
 
 	for index in 0..rolled.broadcasts {
-		let path = format!("{name}/{run_id:08x}/{connection}/{index}");
+		// The announce consumer is rooted at `name`, so `own` (compared against
+		// announced paths) stays relative while the full path goes on the wire.
+		let relative = format!("{run_id:08x}/{connection}/{index}");
+		let path = format!("{name}/{relative}");
 
 		let mut broadcast = match publish.create_broadcast(&path, broadcast::Route::new().with_announce(true)) {
 			Ok(broadcast) => broadcast,
@@ -106,7 +110,7 @@ pub async fn run(ctx: Connection) {
 				continue;
 			}
 		};
-		own.insert(path.clone());
+		own.insert(relative);
 		// Hold the broadcast producer for the connection's lifetime so it stays announced.
 		broadcasts.push(broadcast);
 
@@ -223,6 +227,19 @@ async fn produce(
 		group.finish()?;
 		sequence += 1;
 	}
+}
+
+/// Announce consumer scoped to the bench namespace, emitting paths relative to it.
+///
+/// The relay announces its own broadcasts too (`.stats/...` when stats publishing
+/// is on, which production relays enable), and a subscription slot burned on one
+/// of those is never retried, so an unscoped consumer starves the subscribe side.
+fn discover(consume: &moq_net::origin::Producer, name: &str) -> moq_net::announce::Consumer {
+	consume
+		.consume()
+		.with_root(name)
+		.expect("origin must permit the bench namespace")
+		.announced()
 }
 
 /// Watch announcements and drain up to `want` peer broadcasts (excluding our own),
@@ -472,6 +489,44 @@ mod tests {
 		assert!(group.read_frame().await.unwrap().is_none(), "no payload frames");
 
 		task.abort();
+	}
+
+	/// Discovery must skip broadcasts outside the bench namespace: a relay with
+	/// stats publishing enabled announces `.stats/...` too, and a subscription
+	/// slot burned on it is never retried, so a chat-shaped run (`subscribe = 1`)
+	/// used to end up with zero working subscriptions.
+	#[tokio::test]
+	async fn subscribe_ignores_relay_internal_broadcasts() {
+		tokio::time::pause();
+
+		let stats = Arc::new(Stats::default());
+		let origin = Origin::random().produce();
+
+		// The relay-internal broadcast: announced, but with no bench data track.
+		let _internal = origin
+			.create_broadcast(".stats/node/host", broadcast::Route::new().with_announce(true))
+			.unwrap();
+
+		// One legitimate peer under the bench namespace with a single finished group.
+		let mut peer = origin
+			.create_broadcast("bench/00000000/0/0", broadcast::Route::new().with_announce(true))
+			.unwrap();
+		let mut track = peer.create_track(TRACK, None).unwrap();
+		let mut group = track.append_group().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
+			.unwrap();
+		group.finish().unwrap();
+		track.finish().unwrap();
+
+		let announced = discover(&origin, "bench");
+		subscribe(announced, HashSet::new(), 1, Duration::ZERO, stats.clone())
+			.await
+			.unwrap();
+
+		// The one wanted slot went to the bench peer, not `.stats`.
+		assert_eq!(stats.frames_recv.load(Ordering::Relaxed), 1);
+		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 1);
 	}
 
 	fn lost(stats: &Stats) -> u64 {
