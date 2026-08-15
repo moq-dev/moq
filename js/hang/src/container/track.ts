@@ -26,12 +26,26 @@ const LATENCY_MAX_MS = 30_000;
  *
  * Options override that retention; see {@link TrackInfoOptions.latencyMax}.
  */
-export function trackInfo(options?: TrackInfoOptions): Partial<Track.Info> {
-	return { timescale: Time.Timescale.MICRO, latencyMax: options?.latencyMax ?? LATENCY_MAX_MS };
+export function trackInfo(options: TrackInfoOptions): Partial<Track.Info> {
+	return {
+		timescale: Time.Timescale.MICRO,
+		latencyMax: options.latencyMax ?? LATENCY_MAX_MS,
+		priority: options.priority,
+	};
 }
 
-/** Overrides for {@link trackInfo}. */
+/** Options for {@link trackInfo}. */
 export type TrackInfoOptions = {
+	/**
+	 * The publisher's tie-break priority, which should come from `PRIORITY` in `@moq/hang/catalog`
+	 * for the kind of media the track carries (`PRIORITY.video` for a video track, and so on).
+	 *
+	 * Required rather than defaulted, matching `hang::container::track_info`: there is no correct
+	 * value for "some media track", and leaving it at zero is what puts audio and video in one
+	 * undifferentiated tier for every relay deciding what to forward first.
+	 */
+	priority: number;
+
 	/**
 	 * How long a relay keeps a non-latest group fetchable, in milliseconds, replacing the
 	 * retention {@link trackInfo} declares by default.

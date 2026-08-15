@@ -527,7 +527,10 @@ pub struct TrackStream<E: CatalogExt = ()> {
 /// after, and its priority never reaches a subscriber.
 fn format_priority(format: &str) -> u8 {
 	match format {
-		"aac" | "opus" => hang::catalog::PRIORITY.audio,
+		// Every audio format `Track::new` accepts. Keep this in step with the format
+		// match there: an audio codec missing from this list silently publishes at the
+		// video priority, which is the ordering bug the priorities exist to prevent.
+		"aac" | "opus" | "flac" | "mp3" => hang::catalog::PRIORITY.audio,
 		_ => hang::catalog::PRIORITY.video,
 	}
 }
@@ -1017,6 +1020,21 @@ mod tests {
 		assert_eq!(audio.codec.to_string(), "opus");
 		assert_eq!(audio.sample_rate, 48_000);
 		assert_eq!(audio.channel_count, 2);
+	}
+
+	/// Regression: `flac` and `mp3` fell through to the video priority, so those tracks
+	/// advertised 60 while `aac` and `opus` advertised 80 and lost the ordering the
+	/// priorities exist for. Every format `Track::new` accepts as audio belongs here.
+	#[test]
+	fn every_audio_format_ranks_as_audio() {
+		use hang::catalog::PRIORITY;
+
+		for format in ["aac", "opus", "flac", "mp3"] {
+			assert_eq!(format_priority(format), PRIORITY.audio, "{format} is an audio format");
+		}
+		for format in ["avc3", "h264", "hev1", "av01", "vp8", "vp9"] {
+			assert_eq!(format_priority(format), PRIORITY.video, "{format} is a video format");
+		}
 	}
 
 	/// An audio format with no init bytes errors up front (audio can't resolve its config from frames),
