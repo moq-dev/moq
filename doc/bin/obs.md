@@ -74,7 +74,9 @@ It compiles the Qt sources too, which the CMake build only does when `ENABLE_QT`
 
 ### Compiling in CI
 
-[`obs.yml`](https://github.com/moq-dev/moq/blob/main/.github/workflows/obs.yml) compiles **and links** the plugin on every PR that touches `cpp/obs/`, `rs/libmoq/`, or the flake. It runs on Linux, the one platform where the whole dependency set (`libobs`, `Qt6`, `ffmpeg`) comes from nixpkgs with no obs-deps bundle to download. The plugin is platform-independent C++ over libmoq's C ABI, so this catches what a macOS developer would otherwise ship uncompiled. `just obs ci` is the same recipe locally.
+[`obs.yml`](https://github.com/moq-dev/moq/blob/main/.github/workflows/obs.yml) compiles **and links** the plugin on every PR that touches the plugin, `rs/libmoq/`, a workspace manifest or build script, or the flake. It runs on Linux, the one platform where the whole dependency set (`libobs`, `Qt6`, `ffmpeg`) comes from nixpkgs with no obs-deps bundle to download. The plugin is platform-independent C++ over libmoq's C ABI, so this catches what a macOS developer would otherwise ship uncompiled. `just obs ci` is the same recipe locally.
+
+The filter reaches past `cpp/obs/` because this is the only place `libmoq.a` is linked from outside cargo, which needs the hand-maintained native-library lists in `rs/libmoq/native-libs/`. A dependency that starts pulling in a new native library leaves those stale, and every Rust gate stays green because cargo passes the flag itself. No list of paths catches all of those, so [`nightly.yml`](https://github.com/moq-dev/moq/blob/main/.github/workflows/nightly.yml) runs the same recipe diff-independently as the backstop.
 
 ### Tests
 

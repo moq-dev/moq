@@ -19,12 +19,19 @@ name: OBS
 # Rust gate stays green, because cargo passes the flag itself and only this job
 # links without it.
 #
-# Manifests rather than Cargo.lock alone, because a feature toggle is enough:
-# libmoq takes moq-native with default features, so flipping one of those
-# defaults on (`jemalloc` gates `dep:tikv-jemallocator`) changes what libmoq.a
-# needs at link time while Cargo.lock stays byte-identical, since moq-relay
-# already put that package in the graph. Not `rs/**`: sources can't move the
-# link line, and this job would then run on nearly every PR.
+# Manifests and build scripts rather than Cargo.lock alone, because neither a
+# feature toggle nor a build script has to touch the lockfile. libmoq takes
+# moq-native with default features, so flipping one of those defaults on
+# (`jemalloc` gates `dep:tikv-jemallocator`) changes what libmoq.a needs at link
+# time while Cargo.lock stays byte-identical, since moq-relay already put that
+# package in the graph; a build.rs emitting `cargo::rustc-link-lib` needs no
+# manifest change at all.
+#
+# A list of paths still can't be complete here -- a vendored C source or a
+# .cargo/config.toml could do it too -- and `rs/**` would run this on nearly
+# every PR, which is the cost that removed the Windows and macOS gates (#2600).
+# So this filter covers the likely inputs at PR time and nightly.yml runs the
+# same recipe diff-independently to cover the rest.
 
 permissions:
   contents: read
@@ -38,6 +45,7 @@ on:
       - "cpp/obs/**"
       - "rs/libmoq/**"
       - "rs/**/Cargo.toml"
+      - "rs/**/build.rs"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
