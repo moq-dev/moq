@@ -160,11 +160,21 @@ _includes:
 
     (cd ../.. && cargo check --quiet -p libmoq)
 
-    # Ask cargo where the header landed rather than assuming ../../target:
-    # CARGO_TARGET_DIR (or a config target-dir) moves it, and the hardcoded path
-    # would then type-check against whatever stale copy the default directory
-    # still holds, which is worse than not finding one at all.
-    moq_include="$(cd ../.. && cargo metadata --format-version 1 --no-deps | jq -r '.target_directory')/include"
+    # Ask cargo where its build script ran rather than reconstructing the path.
+    # CARGO_TARGET_DIR, a `--target` triple and a custom profile each move the
+    # generated header, and guessing wrong doesn't fail: it type-checks against
+    # whatever stale copy the default directory still holds. Replays the check
+    # above from cache, so it costs a process rather than a compile.
+    out_dir=$(cd ../.. && cargo check -p libmoq --message-format=json |
+        jq -r 'select(.reason == "build-script-executed") | select(.package_id | tostring | test("libmoq")) | .out_dir' |
+        tail -1)
+    if [ -z "$out_dir" ]; then
+        echo "cargo reported no build script output for libmoq" >&2
+        exit 1
+    fi
+    # <target>/<profile>/build/libmoq-<hash>/out, and the header sits beside the
+    # profile directory. rs/libmoq/build.rs derives it from OUT_DIR the same way.
+    moq_include="$(dirname "$(dirname "$(dirname "$(dirname "$out_dir")")")")/include"
     if [ ! -f "$moq_include/moq.h" ]; then
         echo "$moq_include/moq.h missing after 'cargo check -p libmoq'" >&2
         exit 1
