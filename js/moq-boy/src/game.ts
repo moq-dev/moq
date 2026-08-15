@@ -163,7 +163,8 @@ export class Game {
 		this.#signals.run(this.#runVideoEnabled.bind(this, videoEnabled));
 
 		// Audio pipeline. The emitter stops the download when muted or paused.
-		this.audioDecoder = new Watch.Audio.Decoder(this.audioSource, this.sync);
+		const audioEnabled = new Moq.Signals.Signal(false);
+		this.audioDecoder = new Watch.Audio.Decoder(this.audioSource, this.sync, { enabled: audioEnabled });
 		this.#signals.cleanup(() => this.audioDecoder.close());
 
 		const audioPaused = new Moq.Signals.Signal(true);
@@ -175,6 +176,7 @@ export class Game {
 			paused: audioPaused,
 		});
 		this.#signals.cleanup(() => this.audioEmitter.close());
+		this.#signals.proxy(audioEnabled, this.audioEmitter.out.enabled);
 
 		// Resume AudioContext on first user interaction (browser autoplay policy).
 		for (const event of ["click", "touchstart", "touchend", "mousedown", "keydown"]) {
