@@ -20,6 +20,7 @@
 //!   the encoder. A loop timer re-emits the last frame whenever a frame interval
 //!   passes without a fresh one, mirroring the Windows Desktop Duplication pacing.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::rc::Rc;
@@ -801,11 +802,8 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					tracing::warn!("pipewire frame layout overflows its buffer");
 					return;
 				};
-				let Some(end) = offset.checked_add(required) else {
-					tracing::warn!("pipewire frame range overflows its buffer");
-					return;
-				};
-				if required > size || end > allocation_size {
+				let wraps = offset.checked_add(required).is_none_or(|end| end > allocation_size);
+				if required > size || required > allocation_size {
 					tracing::warn!(
 						required,
 						available = size,
@@ -814,6 +812,10 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					return;
 				}
 				if data.type_() == DataType::DmaBuf {
+					if wraps {
+						tracing::warn!("wrapped DMA-BUF frame cannot be imported");
+						return;
+					}
 					let Some(format) = drm_format(state.format.format()) else {
 						tracing::warn!(format = ?state.format.format(), "unsupported DMA-BUF pixel format");
 						return;
@@ -880,10 +882,13 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					}
 					return;
 				};
-				let Some(bytes) = bytes.get(offset..end) else {
+				let Some(allocation) = bytes.get(..allocation_size) else {
 					return;
 				};
-				match convert(state.format.format(), bytes, layout) {
+				let Some(bytes) = chunk_bytes(allocation, offset, required) else {
+					return;
+				};
+				match convert(state.format.format(), bytes.as_ref(), layout) {
 					Ok(i420) => {
 						chan.push(Surface::I420(i420.clone()));
 						state.last = Some(Last::I420(i420));
@@ -964,6 +969,22 @@ fn clamp_chunk_size(size: u32, maxsize: u32) -> usize {
 	size.min(maxsize) as usize
 }
 
+fn chunk_bytes(data: &[u8], offset: usize, size: usize) -> Option<Cow<'_, [u8]>> {
+	if offset >= data.len() || size > data.len() {
+		return None;
+	}
+	let end = offset.checked_add(size)?;
+	if end <= data.len() {
+		return Some(Cow::Borrowed(&data[offset..end]));
+	}
+
+	let mut wrapped = Vec::with_capacity(size);
+	wrapped.extend_from_slice(&data[offset..]);
+	let head = size - wrapped.len();
+	wrapped.extend_from_slice(&data[..head]);
+	Some(Cow::Owned(wrapped))
+}
+
 fn frame_data_size(format: VideoFormat, layout: FrameLayout) -> Option<usize> {
 	let stride = layout.stride as usize;
 	let width = layout.width as usize;
@@ -977,13 +998,14 @@ fn frame_data_size(format: VideoFormat, layout: FrameLayout) -> Option<usize> {
 		return None;
 	}
 
-	let last_row = match format {
+	match format {
 		VideoFormat::NV12 => (layout.source_height as usize)
 			.checked_add(height / 2)?
-			.checked_sub(1)?,
-		_ => height.checked_sub(1)?,
-	};
-	last_row.checked_mul(stride)?.checked_add(row_size)
+			.checked_sub(1)?
+			.checked_mul(stride)?
+			.checked_add(row_size),
+		_ => stride.checked_mul(height),
+	}
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1246,7 +1268,7 @@ mod tests {
 			height: 2,
 			source_height: 2,
 		};
-		assert_eq!(frame_data_size(VideoFormat::BGRx, packed), Some(36));
+		assert_eq!(frame_data_size(VideoFormat::BGRx, packed), Some(40));
 
 		let nv12 = FrameLayout {
 			stride: 6,
@@ -1259,6 +1281,13 @@ mod tests {
 			frame_data_size(VideoFormat::BGRx, FrameLayout { stride: 15, ..packed }),
 			None
 		);
+	}
+
+	#[test]
+	fn wrapped_chunk_is_reassembled() {
+		let data = [0, 1, 2, 3, 4, 5];
+		assert_eq!(chunk_bytes(&data, 1, 3).as_deref(), Some([1, 2, 3].as_slice()));
+		assert_eq!(chunk_bytes(&data, 4, 4).as_deref(), Some([4, 5, 0, 1].as_slice()));
 	}
 
 	#[test]
