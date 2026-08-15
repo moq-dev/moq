@@ -774,10 +774,18 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					height,
 					source_height,
 				};
-				// Compositors mark skipped frames as empty or corrupted; drop those
-				// rather than treating them as a fatal conversion failure below.
-				if !valid_chunk(size, data.chunk().flags()) {
-					return;
+				match chunk_kind(size, data.chunk().flags()) {
+					ChunkKind::Data => {}
+					ChunkKind::Empty => {
+						let Ok(frame) = neutral_frame(width, height) else {
+							return;
+						};
+						chan.push(Surface::I420(frame.clone()));
+						state.last = Some(Last::I420(frame));
+						state.fresh = true;
+						return;
+					}
+					ChunkKind::Invalid => return,
 				}
 				if data.type_() == DataType::DmaBuf {
 					let Some(format) = drm_format(state.format.format()) else {
@@ -927,8 +935,32 @@ fn normalize_chunk_offset(offset: u32, maxsize: u32) -> Option<usize> {
 	(maxsize != 0).then(|| (offset % maxsize) as usize)
 }
 
-fn valid_chunk(size: usize, flags: spa::buffer::ChunkFlags) -> bool {
-	size > 0 && !flags.contains(spa::buffer::ChunkFlags::CORRUPTED)
+#[derive(Debug, PartialEq, Eq)]
+enum ChunkKind {
+	Data,
+	Empty,
+	Invalid,
+}
+
+fn chunk_kind(size: usize, flags: spa::buffer::ChunkFlags) -> ChunkKind {
+	if flags.contains(spa::buffer::ChunkFlags::CORRUPTED) {
+		ChunkKind::Invalid
+	} else if flags.contains(spa::buffer::ChunkFlags::EMPTY) {
+		ChunkKind::Empty
+	} else if size == 0 {
+		ChunkKind::Invalid
+	} else {
+		ChunkKind::Data
+	}
+}
+
+fn neutral_frame(width: u32, height: u32) -> Result<I420, Error> {
+	let luma = width as usize * height as usize;
+	// Unknown-color I420 is interpreted as limited range, whose black is Y=16
+	// with neutral U/V=128.
+	let mut data = vec![128; I420::len(width, height)];
+	data[..luma].fill(16);
+	I420::new(width, height, data)
 }
 
 /// Convert one strided screen frame to tightly-packed I420.
@@ -1150,10 +1182,20 @@ mod tests {
 	}
 
 	#[test]
-	fn empty_or_corrupted_chunks_are_skipped() {
-		assert!(!valid_chunk(0, spa::buffer::ChunkFlags::empty()));
-		assert!(!valid_chunk(1, spa::buffer::ChunkFlags::CORRUPTED));
-		assert!(valid_chunk(1, spa::buffer::ChunkFlags::empty()));
+	fn chunk_flags_distinguish_neutral_and_invalid_frames() {
+		assert_eq!(chunk_kind(0, spa::buffer::ChunkFlags::empty()), ChunkKind::Invalid);
+		assert_eq!(chunk_kind(1, spa::buffer::ChunkFlags::CORRUPTED), ChunkKind::Invalid);
+		assert_eq!(chunk_kind(1, spa::buffer::ChunkFlags::EMPTY), ChunkKind::Empty);
+		assert_eq!(chunk_kind(0, spa::buffer::ChunkFlags::EMPTY), ChunkKind::Empty);
+		assert_eq!(chunk_kind(1, spa::buffer::ChunkFlags::empty()), ChunkKind::Data);
+	}
+
+	#[test]
+	fn empty_chunk_is_limited_range_black() {
+		let frame = neutral_frame(4, 2).unwrap();
+		assert_eq!(frame.y(), &[16; 8]);
+		assert_eq!(frame.u(), &[128; 2]);
+		assert_eq!(frame.v(), &[128; 2]);
 	}
 
 	#[test]
