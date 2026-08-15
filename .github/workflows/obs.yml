@@ -12,11 +12,19 @@ name: OBS
 # Narrow trigger, like swift.yml: the plugin's own sources, the libmoq header
 # they call through, and the flake that supplies the toolchain.
 #
-# Cargo.lock is in there for the one way a crate the plugin never names can
-# break it: linking libmoq.a from outside cargo needs the native libraries in
-# `rs/libmoq/native-libs/*.txt`, which are maintained by hand. A dependency that
-# starts pulling in a new one leaves that list stale, and every Rust gate stays
-# green because cargo passes the flag itself. Such a change lands in Cargo.lock.
+# The manifests and Cargo.lock are in there for the one way a crate the plugin
+# never names can break it: linking libmoq.a from outside cargo needs the native
+# libraries in `rs/libmoq/native-libs/*.txt`, which are maintained by hand. A
+# dependency that starts pulling in a new one leaves that list stale, and every
+# Rust gate stays green, because cargo passes the flag itself and only this job
+# links without it.
+#
+# Manifests rather than Cargo.lock alone, because a feature toggle is enough:
+# libmoq takes moq-native with default features, so flipping one of those
+# defaults on (`jemalloc` gates `dep:tikv-jemallocator`) changes what libmoq.a
+# needs at link time while Cargo.lock stays byte-identical, since moq-relay
+# already put that package in the graph. Not `rs/**`: sources can't move the
+# link line, and this job would then run on nearly every PR.
 
 permissions:
   contents: read
@@ -29,7 +37,10 @@ on:
     paths:
       - "cpp/obs/**"
       - "rs/libmoq/**"
+      - "rs/**/Cargo.toml"
+      - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
       - "flake.nix"
       - "flake.lock"
       - ".github/workflows/obs.yml"
