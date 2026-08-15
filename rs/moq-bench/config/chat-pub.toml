@@ -14,7 +14,8 @@ broadcasts = 1
 subscribe = 0
 # D: messages per second per room
 fps = "1:10"
-# E: bytes per message
-frame_size = "100:400"
+# E: bytes per message. The floor sits above the JSON keyframe header (roughly
+# 170 bytes), so every rolled size is delivered exactly.
+frame_size = "200:400"
 # F: each group is a lone JSON keyframe
 group_size = 0

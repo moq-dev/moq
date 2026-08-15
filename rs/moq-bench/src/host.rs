@@ -185,10 +185,12 @@ mod linux {
 		Ok((busy as f64 / tps, kernel.cpu_time.len() as u64))
 	}
 
-	/// Snapshot one process; `Err` means it exited (or /proc denied us) and should be dropped.
-	fn sample(target: &mut Target, tps: f64, page: u64, threads: bool) -> anyhow::Result<Sample> {
+	/// Snapshot one process; `Err` means it exited (or /proc denied us) and should
+	/// be dropped. Everything read here is per-target, so an error only ever
+	/// condemns this target; host-wide reads live in the caller and fail the run.
+	fn sample(target: &mut Target, tps: f64, page: u64, threads: bool, host: (f64, u64)) -> anyhow::Result<Sample> {
 		let stat = target.proc.stat()?;
-		let (host_cpu_busy, host_cores) = host_cpu(tps)?;
+		let (host_cpu_busy, host_cores) = host;
 
 		// /proc/<pid>/status reports the context-switch counters of the thread group
 		// leader alone (utime/stime in stat are the aggregated ones), so the
@@ -220,7 +222,10 @@ mod linux {
 		target.ctx.retain(|tid| live.contains(&tid));
 
 		Ok(Sample {
-			timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+			timestamp_ms: SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.unwrap_or_default()
+				.as_millis(),
 			pid: target.proc.pid,
 			comm: stat.comm.clone(),
 			cpu_user: stat.utime as f64 / tps,
@@ -235,6 +240,8 @@ mod linux {
 		})
 	}
 
+	/// Resolve the targets, then sample them every interval until the duration
+	/// elapses, the process is interrupted, or every target exits (an error).
 	pub fn run() -> anyhow::Result<()> {
 		let args = Args::parse();
 		let tps = procfs::ticks_per_second() as f64;
@@ -264,8 +271,12 @@ mod linux {
 
 		let start = std::time::Instant::now();
 		loop {
+			// Host-wide once per round: unlike the per-target reads inside `sample`,
+			// a failure here is not a target exiting, so it fails the run.
+			let host = host_cpu(tps).context("failed to read /proc/stat")?;
+
 			// Drop targets that exited; sampling the survivors is still useful.
-			targets.retain_mut(|target| match sample(target, tps, page, args.threads) {
+			targets.retain_mut(|target| match sample(target, tps, page, args.threads, host) {
 				Ok(record) => {
 					// A serialization failure is a bug, not a runtime condition.
 					let line = serde_json::to_string(&record).expect("sample must serialize");
@@ -284,13 +295,25 @@ mod linux {
 			out.flush()?;
 
 			anyhow::ensure!(!targets.is_empty(), "all target processes exited");
-			if let Some(duration) = args.duration
-				&& start.elapsed() >= duration
-			{
+			let Some(delay) = next_delay(args.interval, args.duration, start.elapsed()) else {
 				return Ok(());
-			}
-			std::thread::sleep(args.interval);
+			};
+			std::thread::sleep(delay);
 		}
+	}
+
+	/// How long to sleep before the next sample: the interval, capped at the time
+	/// left in `duration`. `None` means the duration has elapsed and the run is
+	/// done, so a `--duration` shorter than `--interval` cannot overshoot.
+	fn next_delay(interval: Duration, duration: Option<Duration>, elapsed: Duration) -> Option<Duration> {
+		let Some(duration) = duration else {
+			return Some(interval);
+		};
+		let remaining = duration.checked_sub(elapsed)?;
+		if remaining.is_zero() {
+			return None;
+		}
+		Some(interval.min(remaining))
 	}
 
 	#[cfg(test)]
@@ -308,6 +331,23 @@ mod linux {
 			// Nonzero still parses, and the default holds.
 			let args = Args::try_parse_from(["moq-bench-host"]).unwrap();
 			assert_eq!(args.interval, Duration::from_secs(1));
+		}
+
+		/// A duration shorter than the interval must cap the sleep, not stretch the
+		/// run to the full interval (10ms of sampling used to take a whole second).
+		#[test]
+		fn short_duration_caps_the_sleep() {
+			let second = Duration::from_secs(1);
+			let ms = Duration::from_millis(10);
+
+			// No duration: always the full interval.
+			assert_eq!(next_delay(second, None, second * 100), Some(second));
+			// Time remains: sleep the smaller of interval and what's left.
+			assert_eq!(next_delay(second, Some(ms), Duration::ZERO), Some(ms));
+			assert_eq!(next_delay(ms, Some(second), Duration::ZERO), Some(ms));
+			// Elapsed at or past the duration: done.
+			assert_eq!(next_delay(second, Some(ms), ms), None);
+			assert_eq!(next_delay(second, Some(ms), second), None);
 		}
 
 		/// The process-wide context-switch totals must stay monotonic when a

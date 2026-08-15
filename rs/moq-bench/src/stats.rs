@@ -151,8 +151,10 @@ mod tests {
 	/// A failed stats write must surface as an error so the run dies loudly.
 	/// Silently dropping output leaves a partial JSONL file behind a green exit,
 	/// which reads as a valid benchmark that quietly lost data.
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn report_fails_on_output_error() {
+		tokio::time::pause();
+
 		let dir = std::env::temp_dir().join("moq-bench-stats-test");
 		std::fs::create_dir_all(&dir).unwrap();
 		let path = dir.join("out.jsonl");

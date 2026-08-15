@@ -539,6 +539,33 @@ mod tests {
 		task.abort();
 	}
 
+	/// A frame size below the JSON header's own length is a floor, not an error:
+	/// the keyframe goes out at its natural size and still parses. The chat
+	/// presets stay above the floor so their configured sizes hold exactly.
+	#[tokio::test]
+	async fn keyframe_below_header_floor_is_unpadded() {
+		tokio::time::pause();
+
+		let stats = Arc::new(Stats::default());
+		let mut broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track(TRACK, None).unwrap();
+		let consumer = broadcast.consume();
+
+		// 50 bytes is well under the serialized header (roughly 170 bytes).
+		let task = tokio::spawn(produce(3, "bench/test".into(), rolled(10, 50, 0), track, stats.clone()));
+		tokio::time::advance(Duration::from_millis(250)).await;
+
+		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap();
+		let mut group = sub.next_group().await.unwrap().expect("a group");
+		let keyframe = group.read_frame().await.unwrap().expect("keyframe").payload;
+
+		assert!(keyframe.len() > 50, "header is the floor; no truncation to fit");
+		let header: serde_json::Value = serde_json::from_slice(&keyframe).expect("unpadded keyframe is valid JSON");
+		assert_eq!(header["pad"], "");
+
+		task.abort();
+	}
+
 	/// Discovery must skip broadcasts outside the bench namespace: a relay with
 	/// stats publishing enabled announces `.stats/...` too, and a subscription
 	/// slot burned on it is never retried, so a chat-shaped run (`subscribe = 1`)
@@ -555,6 +582,13 @@ mod tests {
 			.create_broadcast(".stats/node/host", broadcast::Route::new().with_announce(true))
 			.unwrap();
 
+		// Our own broadcast: in the namespace, but excluded via the `own` set
+		// (paths relative to the namespace, matching the scoped announce consumer).
+		let _own = origin
+			.create_broadcast("bench/00000000/9/9", broadcast::Route::new().with_announce(true))
+			.unwrap();
+		let own = HashSet::from(["00000000/9/9".to_string()]);
+
 		// One legitimate peer under the bench namespace with a single finished group.
 		let mut peer = origin
 			.create_broadcast("bench/00000000/0/0", broadcast::Route::new().with_announce(true))
@@ -568,11 +602,11 @@ mod tests {
 		track.finish().unwrap();
 
 		let announced = discover(&origin, "bench");
-		subscribe(announced, HashSet::new(), 1, Duration::ZERO, stats.clone())
+		subscribe(announced, own, 1, Duration::ZERO, stats.clone())
 			.await
 			.unwrap();
 
-		// The one wanted slot went to the bench peer, not `.stats`.
+		// The one wanted slot went to the peer, not `.stats` and not our own.
 		assert_eq!(stats.frames_recv.load(Ordering::Relaxed), 1);
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 1);
 	}

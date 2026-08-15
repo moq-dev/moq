@@ -19,11 +19,13 @@ For a run, `moq-bench` establishes **A** connections. Each connection:
 The first frame of every group is a JSON keyframe describing the rolled
 parameters (connection id, broadcast path, group sequence, fps, frame size,
 group size, and a wall-clock timestamp), padded up to **E** bytes so the
-configured frame size holds even when it is the only frame. The remaining **F**
-frames in the group are zeroed. **F may be 0**, in which case each group is a
-lone JSON keyframe: that is the chat shape (every message pays a full group),
-and it also stresses the announce/subscribe control plane rather than the data
-path.
+configured frame size holds even when it is the only frame. The keyframe's own
+header is the floor: an **E** below roughly 170 bytes sends the header at its
+natural size, so configure **E** at 200 or above when exact sizes matter. The
+remaining **F** frames in the group are zeroed. **F may be 0**, in which case
+each group is a lone JSON keyframe: that is the chat shape (every message pays
+a full group), and it also stresses the announce/subscribe control plane rather
+than the data path.
 
 To avoid a thundering herd at startup, connections and subscriptions are
 staggered over a `--startup` ramp window instead of all firing at once.
@@ -97,11 +99,12 @@ The `config/` directory has a few starting points:
 
 ## Machine-readable output
 
-`--output stats.jsonl` mirrors every report interval to a file as one JSON line
-of the cumulative counters (`frames_sent`, `bytes_recv`, `connections`, ...),
-each stamped with `timestamp_ms`. Counters are cumulative and monotonic, so a
-consumer diffs successive lines to compute rates, the same convention as
-`moq-stats` frames.
+`--output stats.jsonl` mirrors every report interval to a file as one JSON
+line, each stamped with `timestamp_ms`. The frame, byte, and group counters are
+cumulative and monotonic, so a consumer diffs successive lines to compute
+rates, the same convention as `moq-stats` frames. `connections`, `broadcasts`,
+and `subscriptions` are live gauges that fall as work ends; diff only the
+counters.
 
 ## Host-side sampling: moq-bench-host
 
@@ -137,10 +140,14 @@ so keep both NTP-synced; the join only has to agree on the window boundaries,
 since every rate comes from deltas within a single file:
 
 - CPU per connection: `(delta cpu_user + delta cpu_system) / delta seconds / connections`.
-- CPU per message: `(delta cpu_user + delta cpu_system) / (delta frames_sent + delta frames_recv)`,
-  using the frame counters from the load side, since every chat message is one
-  frame.
-- Context switches per message: same shape, with `delta ctx_voluntary + delta ctx_involuntary`
+- CPU per published message: `(delta cpu_user + delta cpu_system) / delta frames_sent`.
+  This charges each message once, including its whole fanout, so it is the
+  number that answers "what does one chat message cost the relay".
+- CPU per delivered copy: same numerator over `delta frames_recv`, when the
+  per-subscriber cost is the question. Do not sum the two frame counters: in
+  the 1:1 preset every message is counted by both, so the sum double-counts
+  and halves the apparent cost.
+- Context switches per message: either shape, with `delta ctx_voluntary + delta ctx_involuntary`
   as the numerator.
 
 Comparisons are only meaningful between runs on the same hardware with the same
