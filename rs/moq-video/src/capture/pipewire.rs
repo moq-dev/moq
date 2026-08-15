@@ -38,7 +38,7 @@ use super::channel::FrameChannel;
 use super::pump::Geometry;
 use super::{Config, FrameStream};
 use crate::Error;
-use crate::frame::{DmaBuf, DmaBufFrame, DmaBufPlane, DrmFormat, I420, Surface};
+use crate::frame::{DmaBuf, DmaBufFrame, DmaBufPlane, DrmFormat, I420, Surface, wait_dma_buf_readable};
 
 const DEFAULT_FRAMERATE: u32 = 30;
 // libspa 0.10 omits this flag from its safe wrapper, but exposes the raw bits.
@@ -329,6 +329,8 @@ impl DmaBufFrame for PipeWireDmaBuf {
 			)));
 		}
 
+		wait_dma_buf_readable(self.fd.as_fd())
+			.map_err(|e| Error::Codec(anyhow::anyhow!("waiting for DMA-BUF producer: {e}")))?;
 		with_dma_buf_read(&self.fd, || {
 			let mapping = Mapping::new(&self.fd, self.map_offset, self.allocation_size)?;
 			let data = mapping
@@ -1273,6 +1275,7 @@ mod tests {
 	#[test]
 	fn dmabuf_returns_on_last_drop() {
 		use std::cell::Cell;
+		use std::io::Write;
 		use std::os::fd::OwnedFd;
 		use std::os::unix::net::UnixStream;
 		use std::rc::Rc;
@@ -1294,7 +1297,8 @@ mod tests {
 			move |_| mainloop.upgrade().expect("live loop").quit()
 		});
 
-		let (socket, _peer) = UnixStream::pair().expect("fd pair");
+		let (socket, mut peer) = UnixStream::pair().expect("fd pair");
+		peer.write_all(&[0]).expect("signal readable");
 		let inner = Arc::new(PipeWireDmaBuf {
 			fd: OwnedFd::from(socket),
 			return_tx,

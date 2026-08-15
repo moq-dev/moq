@@ -26,7 +26,7 @@
 use std::borrow::Cow;
 
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 use std::sync::Arc;
 
@@ -152,6 +152,34 @@ pub struct DmaBufExport {
 }
 
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
+pub(crate) fn wait_dma_buf_readable(fd: BorrowedFd<'_>) -> std::io::Result<()> {
+	let mut event = libc::pollfd {
+		fd: fd.as_raw_fd(),
+		events: libc::POLLIN,
+		revents: 0,
+	};
+	loop {
+		// SAFETY: `event` is valid for this call and `fd` remains borrowed until
+		// the producer's current write fence has completed.
+		let result = unsafe { libc::poll(&mut event, 1, -1) };
+		if result > 0 && event.revents & libc::POLLIN != 0 {
+			return Ok(());
+		}
+		if result < 0 {
+			let error = std::io::Error::last_os_error();
+			if error.kind() == std::io::ErrorKind::Interrupted {
+				continue;
+			}
+			return Err(error);
+		}
+		return Err(std::io::Error::other(format!(
+			"DMA-BUF poll returned events {:#x}",
+			event.revents
+		)));
+	}
+}
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 impl DmaBufExport {
 	/// Borrow the exported descriptor without separating it from its producer lease.
 	pub fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
@@ -233,10 +261,12 @@ impl DmaBuf {
 		})
 	}
 
-	/// Export the allocation descriptor together with its producer lease.
+	/// Wait for producer writes, then export the descriptor with its producer lease.
 	pub fn export(&self) -> std::io::Result<DmaBufExport> {
+		let fd = self.inner.export()?;
+		wait_dma_buf_readable(fd.as_fd())?;
 		Ok(DmaBufExport {
-			fd: self.inner.export()?,
+			fd,
 			inner: self.inner.clone(),
 		})
 	}

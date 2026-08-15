@@ -58,16 +58,17 @@ pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Option<So
 		view_formats: Vec::new(),
 	};
 
-	let export = buffer.export().map_err(|e| err(format!("export DMA-BUF: {e}")))?;
-	let (fd, keepalive) = export.into_parts();
 	// SAFETY: the guard is only used to import a descriptor into the same
 	// Vulkan device. It drops before the resulting HAL texture is wrapped.
 	let Some(hal) = (unsafe { device.as_hal::<wgpu::hal::api::Vulkan>() }) else {
 		return Ok(None);
 	};
-	// SAFETY: `fd` is a fresh duplicate of this live DMA-BUF, and its format,
-	// modifier, extent, stride, and offset come from PipeWire's buffer metadata.
-	// Vulkan consumes the duplicate on success and wgpu-hal closes it on error.
+	let export = buffer.export().map_err(|e| err(format!("export DMA-BUF: {e}")))?;
+	let (fd, keepalive) = export.into_parts();
+	// SAFETY: `fd` is a fresh duplicate of this live DMA-BUF. Export waited for
+	// producer writes, and the format, modifier, extent, stride, and offset come
+	// from PipeWire's buffer metadata. Vulkan consumes the duplicate on success
+	// and wgpu-hal closes it on error.
 	let texture = unsafe {
 		hal.texture_from_dmabuf_fd(
 			fd,
