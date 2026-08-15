@@ -3,8 +3,9 @@
 //! The ScreenCast portal owns source selection: [`open`] pops the compositor's
 //! picker dialog, the user chooses a monitor, and the portal hands us a PipeWire
 //! fd + node id. A dedicated thread then runs the PipeWire main loop, converting
-//! each RGB frame to CPU [`I420`] and pushing it into the shared [`FrameChannel`]
-//! (callback-driven like the macOS delegate, not a pull-style pump).
+//! each packed RGB or NV12 frame to CPU [`I420`] and pushing it into the shared
+//! [`FrameChannel`] (callback-driven like the macOS delegate, not a pull-style
+//! pump).
 //!
 //! Two quirks worth knowing:
 //! - `publish_capture` releases the capture while unwatched and reopens it on
@@ -366,20 +367,63 @@ fn run_loop(
 			move |stream, _| {
 				let mut state = state.borrow_mut();
 				let Some((width, height)) = state.geometry else { return };
+				let source_height = state.format.size().height;
 				let Some(mut buffer) = stream.dequeue_buffer() else {
 					return;
 				};
 				let datas = buffer.datas_mut();
 				let Some(data) = datas.first_mut() else { return };
 
-				let offset = data.chunk().offset() as usize;
-				let size = data.chunk().size() as usize;
-				let stride = data.chunk().stride();
-				// Compositors mark skipped frames as empty or corrupted; drop those
+				let maxsize = data.as_raw().maxsize;
+				let size = clamp_chunk_size(data.chunk().size(), maxsize);
+				let Some(offset) = normalize_chunk_offset(data.chunk().offset(), maxsize) else {
+					tracing::warn!("pipewire buffer has zero maximum size");
+					return;
+				};
+				// Compositors mark a skipped frame corrupted or empty; drop those
 				// rather than treating them as a fatal conversion failure below.
-				if size == 0 || data.chunk().flags().contains(spa::buffer::ChunkFlags::CORRUPTED) {
+				// An empty chunk means "nothing new", so the pacing tick below
+				// keeps re-emitting the last real frame.
+				if size == 0 || data.chunk().flags().intersects(skip_flags()) {
 					return;
 				}
+				// Fall back to the unclamped source width: for an odd-width source
+				// the real row is one pixel wider than the clamped `width`. The
+				// packing differs per format, so NV12 cannot assume 4 bytes/pixel.
+				let stride = match u32::try_from(data.chunk().stride()) {
+					Ok(stride) if stride > 0 => stride,
+					_ => match state.format.format() {
+						VideoFormat::NV12 => state.format.size().width,
+						_ => state.format.size().width.saturating_mul(4),
+					},
+				};
+				let layout = FrameLayout {
+					stride,
+					width,
+					height,
+					source_height,
+				};
+
+				// The chunk only says how many bytes the producer wrote. Check it
+				// actually spans every row `convert` will sample, so a short or
+				// mislabeled buffer is dropped here rather than read past.
+				let Some(required) = frame_data_size(state.format.format(), layout) else {
+					tracing::warn!("pipewire frame layout overflows its buffer");
+					return;
+				};
+				let Some(end) = offset.checked_add(required) else {
+					tracing::warn!("pipewire frame range overflows its buffer");
+					return;
+				};
+				if required > size {
+					tracing::warn!(
+						required,
+						available = size,
+						"pipewire chunk does not contain a complete frame"
+					);
+					return;
+				}
+
 				// Without dmabuf modifiers in our format offer the compositor uses
 				// shared memory, which MAP_BUFFERS mmaps for us; `None` here means
 				// it forced something we can't read, so give up cleanly.
@@ -390,18 +434,11 @@ fn run_loop(
 					}
 					return;
 				};
-				let Some(bytes) = bytes.get(offset..offset + size) else {
+				let Some(bytes) = bytes.get(offset..end) else {
 					return;
 				};
-				// Fall back to the unclamped source width: for an odd-width source
-				// the real row is one pixel wider than the clamped `width`.
-				let stride = if stride > 0 {
-					stride as u32
-				} else {
-					state.format.size().width * 4
-				};
 
-				match convert(state.format.format(), bytes, stride, width, height) {
+				match convert(state.format.format(), bytes, layout) {
 					Ok(i420) => {
 						chan.push(Surface::I420(i420.clone()));
 						state.last = Some(i420);
@@ -470,19 +507,114 @@ fn run_loop(
 	Ok(())
 }
 
-/// Convert one strided RGB screen frame to tightly-packed I420.
-fn convert(format: VideoFormat, bytes: &[u8], stride: u32, width: u32, height: u32) -> Result<I420, Error> {
+/// The geometry `convert` needs: the producer's row stride and source height,
+/// plus the even-clamped output size.
+#[derive(Clone, Copy)]
+struct FrameLayout {
+	stride: u32,
+	width: u32,
+	height: u32,
+	/// Unclamped source height. NV12's chroma plane starts after this many luma
+	/// rows, which is one more than `height` for an odd-height source.
+	source_height: u32,
+}
+
+/// Chunk flags that mean "no usable frame here".
+///
+/// libspa 0.10 wraps only `CORRUPTED`, so `EMPTY` (`SPA_CHUNK_FLAG_EMPTY`) comes
+/// from its raw bit.
+fn skip_flags() -> spa::buffer::ChunkFlags {
+	const EMPTY: i32 = 1 << 1;
+	spa::buffer::ChunkFlags::CORRUPTED | spa::buffer::ChunkFlags::from_bits_retain(EMPTY)
+}
+
+/// A chunk offset is a ring position within the allocation, so wrap it rather
+/// than trusting it to be in range. `None` means the allocation is unusable.
+fn normalize_chunk_offset(offset: u32, maxsize: u32) -> Option<usize> {
+	(maxsize != 0).then(|| (offset % maxsize) as usize)
+}
+
+fn clamp_chunk_size(size: u32, maxsize: u32) -> usize {
+	size.min(maxsize) as usize
+}
+
+/// Bytes from the chunk start through the last byte `convert` will read, which
+/// is the last row's width rather than its full stride.
+fn frame_data_size(format: VideoFormat, layout: FrameLayout) -> Option<usize> {
+	let stride = layout.stride as usize;
+	let width = layout.width as usize;
+	let height = layout.height as usize;
+	let row_size = match format {
+		VideoFormat::NV12 => width,
+		VideoFormat::BGRx | VideoFormat::BGRA | VideoFormat::RGBx | VideoFormat::RGBA => width.checked_mul(4)?,
+		_ => return None,
+	};
+	if stride < row_size {
+		return None;
+	}
+
+	let last_row = match format {
+		// Chroma follows every source luma row, then runs at half height.
+		VideoFormat::NV12 => (layout.source_height as usize)
+			.checked_add(height / 2)?
+			.checked_sub(1)?,
+		_ => height.checked_sub(1)?,
+	};
+	last_row.checked_mul(stride)?.checked_add(row_size)
+}
+
+/// Deinterleave strided NV12 into the crate's tightly packed I420 layout.
+fn nv12_to_i420(data: &[u8], layout: FrameLayout) -> Result<I420, Error> {
+	let (stride, width, height, source_height) = (
+		layout.stride as usize,
+		layout.width as usize,
+		layout.height as usize,
+		layout.source_height as usize,
+	);
+	if source_height < height {
+		return Err(Error::Codec(anyhow::anyhow!(
+			"NV12 source is shorter than the cropped output"
+		)));
+	}
+	let y_len = stride
+		.checked_mul(source_height)
+		.ok_or_else(|| Error::Codec(anyhow::anyhow!("NV12 luma size overflow")))?;
+	let uv_len = stride
+		.checked_mul(height / 2)
+		.ok_or_else(|| Error::Codec(anyhow::anyhow!("NV12 chroma size overflow")))?;
+	if stride < width || data.len() < y_len + uv_len {
+		return Err(Error::Codec(anyhow::anyhow!(
+			"NV12 frame is shorter than its declared rows"
+		)));
+	}
+
+	let mut packed = vec![0; I420::len(width as u32, height as u32)];
+	for row in 0..height {
+		packed[row * width..(row + 1) * width].copy_from_slice(&data[row * stride..row * stride + width]);
+	}
+	let uv = &data[y_len..y_len + uv_len];
+	let packed_uv = width * height;
+	for row in 0..height / 2 {
+		packed[packed_uv + row * width..packed_uv + (row + 1) * width]
+			.copy_from_slice(&uv[row * stride..row * stride + width]);
+	}
+	I420::from_nv12(&packed, width as u32, height as u32)
+}
+
+/// Convert one strided screen frame to tightly-packed I420.
+fn convert(format: VideoFormat, bytes: &[u8], layout: FrameLayout) -> Result<I420, Error> {
 	match format {
-		VideoFormat::BGRx | VideoFormat::BGRA => I420::from_bgra(bytes, stride, width, height),
-		VideoFormat::RGBx | VideoFormat::RGBA => I420::from_rgba(bytes, stride, width, height),
+		VideoFormat::NV12 => nv12_to_i420(bytes, layout),
+		VideoFormat::BGRx | VideoFormat::BGRA => I420::from_bgra(bytes, layout.stride, layout.width, layout.height),
+		VideoFormat::RGBx | VideoFormat::RGBA => I420::from_rgba(bytes, layout.stride, layout.width, layout.height),
 		other => Err(Error::Codec(anyhow::anyhow!(
 			"pipewire negotiated an unsupported video format {other:?}"
 		))),
 	}
 }
 
-/// Serialize the `EnumFormat` pod offering the RGB layouts we can convert,
-/// any size, and a framerate range preferring `framerate`.
+/// Serialize the `EnumFormat` pod offering the layouts we can convert (packed
+/// RGB first, then NV12), any size, and a framerate range preferring `framerate`.
 fn format_offer(framerate: u32) -> Vec<u8> {
 	let obj = spa::pod::object!(
 		spa::utils::SpaTypes::ObjectParamFormat,
@@ -507,6 +639,7 @@ fn format_offer(framerate: u32) -> Vec<u8> {
 			VideoFormat::BGRA,
 			VideoFormat::RGBx,
 			VideoFormat::RGBA,
+			VideoFormat::NV12,
 		),
 		spa::pod::property!(
 			spa::param::format::FormatProperties::VideoSize,
@@ -547,11 +680,133 @@ mod tests {
 	use super::*;
 	use crate::capture::Config;
 
-	/// The serialized format offer must parse back as a valid pod.
+	/// The serialized format offer must parse back as a valid pod, carrying every
+	/// layout `convert` knows how to handle.
 	#[test]
 	fn format_offer_is_valid_pod() {
 		let bytes = format_offer(30);
-		assert!(spa::pod::Pod::from_bytes(&bytes).is_some(), "offer did not round-trip");
+		let (remaining, value) = spa::pod::deserialize::PodDeserializer::deserialize_any_from(&bytes)
+			.expect("format offer did not round-trip");
+		assert!(remaining.is_empty());
+		let spa::pod::Value::Object(object) = value else {
+			panic!("format offer is not an object");
+		};
+		let property = object
+			.properties
+			.iter()
+			.find(|property| property.key == spa::param::format::FormatProperties::VideoFormat.as_raw())
+			.expect("missing video format property");
+		assert_eq!(
+			property.value,
+			spa::pod::Value::Choice(spa::pod::ChoiceValue::Id(spa::utils::Choice(
+				spa::utils::ChoiceFlags::empty(),
+				spa::utils::ChoiceEnum::Enum {
+					default: spa::utils::Id(VideoFormat::BGRx.as_raw()),
+					alternatives: vec![
+						spa::utils::Id(VideoFormat::BGRx.as_raw()),
+						spa::utils::Id(VideoFormat::BGRA.as_raw()),
+						spa::utils::Id(VideoFormat::RGBx.as_raw()),
+						spa::utils::Id(VideoFormat::RGBA.as_raw()),
+						spa::utils::Id(VideoFormat::NV12.as_raw()),
+					],
+				},
+			)))
+		);
+	}
+
+	#[test]
+	fn chunk_offset_wraps_to_the_allocation() {
+		assert_eq!(normalize_chunk_offset(18, 16), Some(2));
+		assert_eq!(normalize_chunk_offset(0, 0), None);
+	}
+
+	#[test]
+	fn chunk_size_is_clamped_to_the_allocation() {
+		assert_eq!(clamp_chunk_size(18, 16), 16);
+		assert_eq!(clamp_chunk_size(8, 16), 8);
+	}
+
+	/// A skipped frame carries no pixels, whichever way the compositor says so.
+	#[test]
+	fn corrupt_and_empty_chunks_are_both_skipped() {
+		let empty = spa::buffer::ChunkFlags::from_bits_retain(1 << 1);
+		assert!(spa::buffer::ChunkFlags::CORRUPTED.intersects(skip_flags()));
+		assert!(empty.intersects(skip_flags()));
+		assert!(!spa::buffer::ChunkFlags::empty().intersects(skip_flags()));
+	}
+
+	/// The required size must reach the last sampled row, but not the padding
+	/// past it, or a tightly-sized final row would be rejected.
+	#[test]
+	fn frame_data_size_covers_every_sampled_row() {
+		let packed = FrameLayout {
+			stride: 20,
+			width: 4,
+			height: 2,
+			source_height: 2,
+		};
+		assert_eq!(frame_data_size(VideoFormat::BGRx, packed), Some(36));
+
+		let nv12 = FrameLayout {
+			stride: 6,
+			width: 4,
+			height: 2,
+			source_height: 3,
+		};
+		assert_eq!(frame_data_size(VideoFormat::NV12, nv12), Some(22));
+
+		// A stride narrower than one row means the layout is nonsense.
+		assert_eq!(
+			frame_data_size(VideoFormat::BGRx, FrameLayout { stride: 15, ..packed }),
+			None
+		);
+	}
+
+	#[test]
+	fn nv12_stride_is_removed_and_chroma_is_deinterleaved() {
+		let data = [
+			1, 2, 3, 4, 99, 99, // Y row 0 plus padding
+			5, 6, 7, 8, 99, 99, // Y row 1 plus padding
+			9, 10, 11, 12, 99, 99, // UV row plus padding
+		];
+		let frame = nv12_to_i420(
+			&data,
+			FrameLayout {
+				stride: 6,
+				width: 4,
+				height: 2,
+				source_height: 2,
+			},
+		)
+		.unwrap();
+		assert_eq!(frame.y(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+		assert_eq!(frame.u(), &[9, 11]);
+		assert_eq!(frame.v(), &[10, 12]);
+	}
+
+	/// An odd-height source has one more luma row than the clamped output, and
+	/// chroma starts after all of them.
+	#[test]
+	fn nv12_crop_uses_the_source_height_for_chroma() {
+		let data = [
+			1, 2, 3, 4, // Y row 0
+			5, 6, 7, 8, // Y row 1
+			99, 99, 99, 99, // cropped Y row 2
+			9, 10, 11, 12, // UV row 0
+		];
+		let frame = nv12_to_i420(
+			&data,
+			FrameLayout {
+				stride: 4,
+				width: 4,
+				height: 2,
+				source_height: 3,
+			},
+		)
+		.unwrap();
+		assert_eq!(frame.y(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+		assert_eq!(frame.u(), &[9, 11]);
+		assert_eq!(frame.v(), &[10, 12]);
 	}
 
 	/// Open the portal, grab a few frames, and check geometry. Ignored because it
