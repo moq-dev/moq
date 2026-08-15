@@ -750,11 +750,11 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 				};
 
 				let chunk_offset = data.chunk().offset();
-				let size = data.chunk().size() as usize;
 				let (map_offset, maxsize) = {
 					let raw = data.as_raw();
 					(raw.mapoffset, raw.maxsize)
 				};
+				let size = clamp_chunk_size(data.chunk().size(), maxsize);
 				let allocation_size = maxsize as usize;
 				let Some(offset) = normalize_chunk_offset(chunk_offset, maxsize) else {
 					tracing::warn!("pipewire buffer has zero maximum size");
@@ -935,6 +935,10 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 
 fn normalize_chunk_offset(offset: u32, maxsize: u32) -> Option<usize> {
 	(maxsize != 0).then(|| (offset % maxsize) as usize)
+}
+
+fn clamp_chunk_size(size: u32, maxsize: u32) -> usize {
+	size.min(maxsize) as usize
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1181,6 +1185,12 @@ mod tests {
 	fn chunk_offset_wraps_to_the_allocation() {
 		assert_eq!(normalize_chunk_offset(18, 16), Some(2));
 		assert_eq!(normalize_chunk_offset(0, 0), None);
+	}
+
+	#[test]
+	fn chunk_size_is_clamped_to_the_allocation() {
+		assert_eq!(clamp_chunk_size(18, 16), 16);
+		assert_eq!(clamp_chunk_size(8, 16), 8);
 	}
 
 	#[test]
