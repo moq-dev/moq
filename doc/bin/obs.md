@@ -82,7 +82,7 @@ The filter reaches past `cpp/obs/` because this is the only place `libmoq.a` is 
 
 `just obs test` compiles the plugin sources against stubbed `libobs`/`libmoq` under ThreadSanitizer and drives the session status callback's orderings directly: a connection that fails permanently, a terminal arriving mid-`Start()`, a restart, and one arriving while the output is being destroyed. Run it after touching `cpp/obs/src/`.
 
-It finds the `libobs` headers the same way `just obs compile` does, and regenerates `moq.h` the same way; set `OBS_INCLUDE_DIR` to point it somewhere else. It stays a manual gate, like `just rs macos`: CI links the plugin but doesn't run these, since ThreadSanitizer needs its own build.
+It finds the `libobs` headers the same way `just obs compile` does, and regenerates `moq.h` the same way; set `OBS_INCLUDE_DIR` to point it somewhere else. That shared step asks cargo where the header landed and reads the answer with `jq`, so outside the dev shell (running from WSL, say) `jq` has to be installed alongside cargo and the compiler. It stays a manual gate, like `just rs macos`: CI links the plugin but doesn't run these, since ThreadSanitizer needs its own build.
 
 It also needs a Clang or GCC whose ThreadSanitizer runtime *runs* on the host, so it fails rather than skipping when one isn't available. On Windows run it from WSL, since neither MSVC nor Clang on Windows implements ThreadSanitizer.
 
