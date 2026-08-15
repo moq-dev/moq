@@ -19,6 +19,12 @@ name = "moq-bench"
 path = "src/main.rs"
 doc = false
 
+# Host-side resource sampler, run next to the process under test (see src/host.rs).
+[[bin]]
+name = "moq-bench-host"
+path = "src/host.rs"
+doc = false
+
 [features]
 default = ["quinn", "websocket"]
 iroh = ["moq-native/iroh"]
@@ -41,6 +47,10 @@ serde_json = "1"
 tokio = { workspace = true, features = ["full"] }
 toml = "1.1"
 tracing = "0.1"
+
+# The host sampler reads /proc, so it is Linux-only (production relays are Linux).
+[target.'cfg(target_os = "linux")'.dependencies]
+procfs = "0.17"
 
 [dev-dependencies]
 # test-util enables tokio::time::pause/advance for the deterministic produce tests.

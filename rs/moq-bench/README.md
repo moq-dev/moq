@@ -73,6 +73,7 @@ table (`fps = { min = 24, max = 60 }`).
 | `--startup` | | Ramp window for staggering connections/subscriptions |
 | `--duration` | | Stop after this long (runs until interrupted otherwise) |
 | `--report` | | How often to log throughput stats |
+| `--output` | | Also append the stats as JSON lines to this file |
 
 Client TLS/QUIC flags (`--client-tls-disable-verify`, `--client-bind`, ...) come from
 `moq-native` and behave the same as in `moq-cli` and `moq-relay`.
@@ -85,3 +86,58 @@ The `config/` directory has a few starting points:
 - `sd.toml`: standard-definition video with more viewers per publisher.
 - `audio.toml`: small, frequent frames with short groups (Opus-like).
 - `announce.toml`: many broadcasts, near-zero media, to stress announcements.
+- `chat.toml`: a chat message bus, 1:1. Many connections, tiny frames, one
+  group per message, so the cost is per-message overhead rather than bandwidth.
+- `chat-pub.toml` / `chat-sub.toml`: chat rooms, 1:N. A pair of configs run as
+  two instances against the same relay: a few busy rooms and a large
+  subscriber-only audience that discovers them via announcements. Scale the
+  audience's `--connections` (or run more instances) to push the fanout.
+
+## Machine-readable output
+
+`--output stats.jsonl` mirrors every report interval to a file as one JSON line
+of the cumulative counters (`frames_sent`, `bytes_recv`, `connections`, ...),
+each stamped with `timestamp_ms`. Counters are cumulative and monotonic, so a
+consumer diffs successive lines to compute rates, the same convention as
+`moq-stats` frames.
+
+## Host-side sampling: moq-bench-host
+
+`moq-bench` measures the load it generates; `moq-bench-host` measures what that
+load costs. It runs on the host of the process under test, production included:
+it only reads `/proc` (Linux-only), needs no privileges beyond visibility of the
+target process, and never touches the process itself (no ptrace, no perf, no
+signals).
+
+```bash
+# On the relay host: sample the relay once per second, forever, to stdout.
+moq-bench-host --name moq-relay
+
+# Bounded run to a file, with the per-thread breakdown.
+moq-bench-host --name moq-relay --interval 1s --duration 5m \
+  --threads --output host.jsonl
+```
+
+Each line carries cumulative CPU seconds (`cpu_user`, `cpu_system`), RSS, and
+context switches summed across threads (`ctx_voluntary`, `ctx_involuntary`),
+plus the host's total busy CPU seconds (`host_cpu_busy`) and core count so the
+process's share of the machine is computable. `--threads` adds a per-thread
+breakdown including the core each thread last ran on, which is how to verify
+pinning once the relay grows a thread-per-core mode.
+
+## Measuring CPU cost
+
+Run the load from one machine and the sampler on the relay's host, then join
+the two JSONL files on `timestamp_ms` over the same steady-state window (skip
+the `--startup` ramp):
+
+- CPU per connection: `(delta cpu_user + delta cpu_system) / delta seconds / connections`.
+- CPU per message: `(delta cpu_user + delta cpu_system) / (delta frames_sent + delta frames_recv)`,
+  using the frame counters from the load side, since every chat message is one
+  frame.
+- Context switches per message: same shape, with `delta ctx_voluntary + delta ctx_involuntary`
+  as the numerator.
+
+Comparisons are only meaningful between runs on the same hardware with the same
+preset. Pin the relay build (`--version` appears in the logs) and record it next
+to the results.

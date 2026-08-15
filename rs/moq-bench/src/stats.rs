@@ -1,5 +1,8 @@
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde::Serialize;
 
 /// Shared counters bumped by the connection tasks and drained by the reporter.
 #[derive(Default)]
@@ -32,7 +35,11 @@ impl Stats {
 	}
 
 	/// Periodically log totals plus the throughput since the previous report.
-	pub async fn report(&self, interval: Duration) {
+	///
+	/// With an `output` file, each report also appends one JSON line of the
+	/// cumulative counters, timestamped so it can be joined against the host
+	/// sampler's records (see `moq-bench-host`).
+	pub async fn report(&self, interval: Duration, mut output: Option<std::fs::File>) {
 		let mut ticker = tokio::time::interval(interval);
 		// Skip the immediate first tick so the first report covers a full interval.
 		ticker.tick().await;
@@ -41,6 +48,24 @@ impl Stats {
 		loop {
 			ticker.tick().await;
 			let now = Snapshot::take(self);
+
+			if let Some(file) = &mut output {
+				let record = Record {
+					timestamp_ms: SystemTime::now()
+						.duration_since(UNIX_EPOCH)
+						.unwrap_or_default()
+						.as_millis(),
+					snapshot: &now,
+				};
+				// A serialization failure is a bug, not a runtime condition.
+				let line = serde_json::to_string(&record).expect("stats must serialize");
+				// Losing lines mid-run makes the whole file lie, so stop writing at
+				// the first error instead of leaving a silent gap.
+				if let Err(err) = writeln!(file, "{line}").and_then(|_| file.flush()) {
+					tracing::error!(%err, "stats output failed, disabling");
+					output = None;
+				}
+			}
 			let secs = interval.as_secs_f64().max(f64::MIN_POSITIVE);
 
 			let send_mbps = (now.bytes_sent.saturating_sub(prev.bytes_sent) as f64 * 8.0) / secs / 1e6;
@@ -75,6 +100,18 @@ impl Stats {
 	}
 }
 
+/// One machine-readable stats line: a timestamp plus the cumulative counters.
+/// Cumulative and monotonic like moq-stats frames: consumers diff successive
+/// lines to compute rates.
+#[derive(Serialize)]
+struct Record<'a> {
+	/// Wall-clock milliseconds since the Unix epoch.
+	timestamp_ms: u128,
+	#[serde(flatten)]
+	snapshot: &'a Snapshot,
+}
+
+#[derive(Serialize)]
 struct Snapshot {
 	connections: u64,
 	broadcasts: u64,

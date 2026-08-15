@@ -31,11 +31,12 @@ async fn main() -> anyhow::Result<()> {
 	let client = config.client.clone().init()?;
 	let stats = Arc::new(Stats::default());
 
-	// Periodic throughput reporter.
+	// Periodic throughput reporter, optionally mirrored to a JSONL file.
 	{
 		let stats = stats.clone();
 		let interval = config.report();
-		tokio::spawn(async move { stats.report(interval).await });
+		let output = config.output.as_ref().map(std::fs::File::create).transpose()?;
+		tokio::spawn(async move { stats.report(interval, output).await });
 	}
 
 	// Roll the per-connection parameters up front: `ThreadRng` is not `Send`, so it
