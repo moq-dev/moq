@@ -18,10 +18,12 @@ For a run, `moq-bench` establishes **A** connections. Each connection:
 
 The first frame of every group is a JSON keyframe describing the rolled
 parameters (connection id, broadcast path, group sequence, fps, frame size,
-group size, and a wall-clock timestamp). The remaining **F** frames in the group
-are zeroed. **F may be 0**, in which case each group is a lone JSON keyframe,
-which is useful for stressing the announce/subscribe control plane rather than
-the data path.
+group size, and a wall-clock timestamp), padded up to **E** bytes so the
+configured frame size holds even when it is the only frame. The remaining **F**
+frames in the group are zeroed. **F may be 0**, in which case each group is a
+lone JSON keyframe: that is the chat shape (every message pays a full group),
+and it also stresses the announce/subscribe control plane rather than the data
+path.
 
 To avoid a thundering herd at startup, connections and subscriptions are
 staggered over a `--startup` ramp window instead of all firing at once.
@@ -119,7 +121,8 @@ moq-bench-host --name moq-relay --interval 1s --duration 5m \
 ```
 
 Each line carries cumulative CPU seconds (`cpu_user`, `cpu_system`), RSS, and
-context switches summed across threads (`ctx_voluntary`, `ctx_involuntary`),
+context switches summed across threads (`ctx_voluntary`, `ctx_involuntary`;
+an exited thread's contribution is retained, so the counters stay monotonic),
 plus the host's total busy CPU seconds (`host_cpu_busy`) and core count so the
 process's share of the machine is computable. `--threads` adds a per-thread
 breakdown including the core each thread last ran on, which is how to verify
@@ -129,7 +132,9 @@ pinning once the relay grows a thread-per-core mode.
 
 Run the load from one machine and the sampler on the relay's host, then join
 the two JSONL files on `timestamp_ms` over the same steady-state window (skip
-the `--startup` ramp):
+the `--startup` ramp). `timestamp_ms` is wall clock from two different hosts,
+so keep both NTP-synced; the join only has to agree on the window boundaries,
+since every rate comes from deltas within a single file:
 
 - CPU per connection: `(delta cpu_user + delta cpu_system) / delta seconds / connections`.
 - CPU per message: `(delta cpu_user + delta cpu_system) / (delta frames_sent + delta frames_recv)`,

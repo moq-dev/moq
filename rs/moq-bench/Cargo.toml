@@ -13,6 +13,8 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 publish = false
+# `cargo run -p moq-bench` means the load generator; the sampler needs --bin.
+default-run = "moq-bench"
 
 [[bin]]
 name = "moq-bench"
@@ -50,7 +52,7 @@ tracing = "0.1"
 
 # The host sampler reads /proc, so it is Linux-only (production relays are Linux).
 [target.'cfg(target_os = "linux")'.dependencies]
-procfs = "0.17"
+procfs = "0.18"
 
 [dev-dependencies]
 # test-util enables tokio::time::pause/advance for the deterministic produce tests.

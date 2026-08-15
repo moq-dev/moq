@@ -39,6 +39,10 @@ struct GroupHeader<'a> {
 	subscribe: u64,
 	/// Wall-clock milliseconds, handy for rough one-way latency when clocks agree.
 	timestamp_ms: u128,
+	/// Zero padding sizing the keyframe up to the rolled frame size, so a
+	/// lone-keyframe group (`group_size = 0`, the chat shape) still costs
+	/// `frame_size` bytes on the wire.
+	pad: String,
 }
 
 /// The subset of [`GroupHeader`] a subscriber reads back to learn the shape of a
@@ -199,7 +203,7 @@ async fn produce(
 
 		// Keyframe: the JSON header describing this connection's rolled parameters.
 		ticker.tick().await;
-		let header = GroupHeader {
+		let mut header = GroupHeader {
 			connection,
 			broadcast: &path,
 			group: sequence,
@@ -212,8 +216,19 @@ async fn produce(
 				.duration_since(UNIX_EPOCH)
 				.unwrap_or_default()
 				.as_millis(),
+			pad: String::new(),
 		};
-		let header = Bytes::from(serde_json::to_vec(&header)?);
+		let mut payload = serde_json::to_vec(&header)?;
+		// Pad the keyframe up to the rolled frame size, so `frame_size` holds even
+		// when the keyframe is the only frame (`group_size = 0`, the chat shape).
+		// A header already at or past the target is sent as-is.
+		if let Some(n) = (rolled.frame_size as usize).checked_sub(payload.len())
+			&& n > 0
+		{
+			header.pad = "0".repeat(n);
+			payload = serde_json::to_vec(&header)?;
+		}
+		let header = Bytes::from(payload);
 		group.write_frame(moq_net::Timestamp::now(), header.clone())?;
 		stats.frame_sent(header.len());
 
@@ -487,6 +502,39 @@ mod tests {
 		// Just the keyframe, then the group ends.
 		assert!(group.read_frame().await.unwrap().is_some(), "keyframe");
 		assert!(group.read_frame().await.unwrap().is_none(), "no payload frames");
+
+		task.abort();
+	}
+
+	/// A lone-keyframe group (`group_size = 0`) must still cost `frame_size`
+	/// bytes: the keyframe is padded via its `pad` field, and stays valid JSON.
+	/// Without this, the chat presets' frame_size setting had no effect at all.
+	#[tokio::test]
+	async fn keyframe_padded_to_frame_size() {
+		tokio::time::pause();
+
+		let stats = Arc::new(Stats::default());
+		let mut broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track(TRACK, None).unwrap();
+		let consumer = broadcast.consume();
+
+		// 10fps, 300-byte messages, lone-keyframe groups (the chat shape).
+		let task = tokio::spawn(produce(
+			3,
+			"bench/test".into(),
+			rolled(10, 300, 0),
+			track,
+			stats.clone(),
+		));
+		tokio::time::advance(Duration::from_millis(250)).await;
+
+		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap();
+		let mut group = sub.next_group().await.unwrap().expect("a group");
+		let keyframe = group.read_frame().await.unwrap().expect("keyframe").payload;
+
+		assert_eq!(keyframe.len(), 300, "keyframe padded to the rolled frame size");
+		let header: serde_json::Value = serde_json::from_slice(&keyframe).expect("padded keyframe is valid JSON");
+		assert_eq!(header["frame_size"], 300);
 
 		task.abort();
 	}

@@ -31,13 +31,14 @@ async fn main() -> anyhow::Result<()> {
 	let client = config.client.clone().init()?;
 	let stats = Arc::new(Stats::default());
 
-	// Periodic throughput reporter, optionally mirrored to a JSONL file.
-	{
+	// Periodic throughput reporter, optionally mirrored to a JSONL file. Keep the
+	// handle: a failed stats write must fail the whole run (see Stats::report).
+	let mut reporter = {
 		let stats = stats.clone();
 		let interval = config.report();
 		let output = config.output.as_ref().map(std::fs::File::create).transpose()?;
-		tokio::spawn(async move { stats.report(interval, output).await });
-	}
+		tokio::spawn(async move { stats.report(interval, output).await })
+	};
 
 	// Roll the per-connection parameters up front: `ThreadRng` is not `Send`, so it
 	// can't cross the spawn boundary.
@@ -93,6 +94,9 @@ async fn main() -> anyhow::Result<()> {
 		_ = stop => tracing::info!("duration elapsed, stopping"),
 		_ = tokio::signal::ctrl_c() => tracing::info!("interrupted, stopping"),
 		_ = drained => tracing::warn!("all connections ended"),
+		// The reporter only returns on a stats-output failure; die loudly rather
+		// than exit green with a partial JSONL file.
+		res = &mut reporter => res??,
 	}
 
 	Ok(())

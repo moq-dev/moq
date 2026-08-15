@@ -2,6 +2,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use anyhow::Context;
 use serde::Serialize;
 
 /// Shared counters bumped by the connection tasks and drained by the reporter.
@@ -38,8 +39,10 @@ impl Stats {
 	///
 	/// With an `output` file, each report also appends one JSON line of the
 	/// cumulative counters, timestamped so it can be joined against the host
-	/// sampler's records (see `moq-bench-host`).
-	pub async fn report(&self, interval: Duration, mut output: Option<std::fs::File>) {
+	/// sampler's records (see `moq-bench-host`). Returns only on a failed write:
+	/// a benchmark whose recorded stats are partial is invalid, so the caller
+	/// must fail the run rather than exit green.
+	pub async fn report(&self, interval: Duration, mut output: Option<std::fs::File>) -> anyhow::Result<()> {
 		let mut ticker = tokio::time::interval(interval);
 		// Skip the immediate first tick so the first report covers a full interval.
 		ticker.tick().await;
@@ -59,12 +62,9 @@ impl Stats {
 				};
 				// A serialization failure is a bug, not a runtime condition.
 				let line = serde_json::to_string(&record).expect("stats must serialize");
-				// Losing lines mid-run makes the whole file lie, so stop writing at
-				// the first error instead of leaving a silent gap.
-				if let Err(err) = writeln!(file, "{line}").and_then(|_| file.flush()) {
-					tracing::error!(%err, "stats output failed, disabling");
-					output = None;
-				}
+				writeln!(file, "{line}")
+					.and_then(|_| file.flush())
+					.context("failed to write stats output")?;
 			}
 			let secs = interval.as_secs_f64().max(f64::MIN_POSITIVE);
 
@@ -139,5 +139,35 @@ impl Snapshot {
 			groups_expected: stats.groups_expected.load(Ordering::Relaxed),
 			groups_present: stats.groups_present.load(Ordering::Relaxed),
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::sync::Arc;
+
+	use super::*;
+
+	/// A failed stats write must surface as an error so the run dies loudly.
+	/// Silently dropping output leaves a partial JSONL file behind a green exit,
+	/// which reads as a valid benchmark that quietly lost data.
+	#[tokio::test(start_paused = true)]
+	async fn report_fails_on_output_error() {
+		let dir = std::env::temp_dir().join("moq-bench-stats-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("out.jsonl");
+		std::fs::write(&path, b"").unwrap();
+		// A read-only handle: the first write fails.
+		let file = std::fs::File::open(&path).unwrap();
+
+		let stats = Arc::new(Stats::default());
+		let task = tokio::spawn({
+			let stats = stats.clone();
+			async move { stats.report(Duration::from_secs(1), Some(file)).await }
+		});
+
+		tokio::time::advance(Duration::from_secs(3)).await;
+		let result = task.await.unwrap();
+		assert!(result.is_err(), "report must surface the output failure");
 	}
 }
