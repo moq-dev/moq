@@ -279,6 +279,7 @@ async fn subscribe(
 	let mut tasks = JoinSet::new();
 	let mut seen: HashSet<String> = HashSet::new();
 	let mut pool = Vec::new();
+	let mut eligible = 0;
 
 	// Gather candidates until the startup window closes (or the announce stream ends).
 	let deadline = tokio::time::sleep(startup);
@@ -296,12 +297,12 @@ async fn subscribe(
 				if own.contains(&path) || !seen.insert(path.clone()) {
 					continue;
 				}
-				pool.push((path, broadcast));
+				eligible += 1;
+				reservoir_push(&mut pool, want as usize, eligible, (path, broadcast));
 			}
 		}
 	}
 
-	pick_random(&mut pool, want as usize);
 	let mut selected = pool.len() as u64;
 	for (path, broadcast) in pool {
 		spawn_drain(&mut tasks, path, broadcast, stats.clone());
@@ -329,14 +330,19 @@ async fn subscribe(
 	Ok(())
 }
 
-/// Keep `want` elements of the pool, chosen uniformly at random (Fisher-Yates,
-/// then truncate). The whole pool survives when it is smaller than `want`.
-fn pick_random<T>(pool: &mut Vec<T>, want: usize) {
-	let mut rng = rand::rng();
-	for i in (1..pool.len()).rev() {
-		pool.swap(i, rng.random_range(0..=i));
+/// Reservoir-sample (Algorithm R): offer the `eligible`-th stream item (1-based)
+/// to a pool holding at most `want` uniform picks. Bounded memory, so a big
+/// namespace never piles a copy of itself into every subscriber; dropped
+/// candidates release their broadcast handles immediately.
+fn reservoir_push<T>(pool: &mut Vec<T>, want: usize, eligible: usize, item: T) {
+	if pool.len() < want {
+		pool.push(item);
+		return;
 	}
-	pool.truncate(want);
+	let slot = rand::rng().random_range(0..eligible);
+	if slot < want {
+		pool[slot] = item;
+	}
 }
 
 /// Queue one broadcast for draining. No extra delay: the caller's gather window
@@ -658,26 +664,29 @@ mod tests {
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 1);
 	}
 
-	/// Subscription targets must be picked at random from the gathered pool.
+	/// Subscription targets must be picked at random from the announced stream.
 	/// Announcements replay in deterministic path order, so a first-come pick
 	/// put every subscriber on the same first rooms and turned the 1:N presets
 	/// into hotspots on one or two broadcasts.
 	#[test]
-	fn pick_random_spreads_selections() {
+	fn reservoir_spreads_selections() {
 		let mut distinct = HashSet::new();
 		for _ in 0..64 {
-			let mut pool = vec![0, 1, 2, 3, 4, 5, 6, 7];
-			pick_random(&mut pool, 1);
+			let mut pool = Vec::new();
+			for item in 0..8 {
+				reservoir_push(&mut pool, 1, item + 1, item);
+			}
 			distinct.insert(pool[0]);
 		}
 		// First-come always yields element 0. Randomness missing this over 64
 		// draws from 8 elements has probability (1/8)^63, i.e. never.
 		assert!(distinct.len() > 1, "selection must not be deterministic");
 
-		// A pool smaller than want survives whole.
-		let mut pool = vec![1, 2];
-		pick_random(&mut pool, 5);
-		assert_eq!(pool.len(), 2);
+		// Fewer eligible items than want: everything survives.
+		let mut pool = Vec::new();
+		reservoir_push(&mut pool, 5, 1, 1);
+		reservoir_push(&mut pool, 5, 2, 2);
+		assert_eq!(pool, vec![1, 2]);
 	}
 
 	fn lost(stats: &Stats) -> u64 {
