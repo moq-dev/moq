@@ -84,8 +84,13 @@ moq <MoQ side>  play [playback options]
   - `--connect <url>` dials a relay. The URL path is the relay auth path
     (e.g. `/anon`), `?jwt=<token>` supplies a token, and `--broadcast` names the
     broadcast.
-  - `--listen <addr>` hosts MoQ sessions directly (with `--listen-tls-generate` /
-    `--listen-tls-cert` + `--listen-tls-key`).
+  - `--listen <addr>` hosts encrypted QUIC/WebTransport sessions directly (with
+    `--listen-tls-generate` / `--listen-tls-cert` + `--listen-tls-key`).
+  - `--listen-tcp-bind <addr>` hosts plaintext qmux over TCP. Bind it only to
+    loopback or a trusted private network.
+  - `--listen-unix-bind <path>` hosts qmux over a Unix socket. The socket's
+    filesystem permissions control access, and an optional peer-credential
+    allowlist can restrict it further.
   - `--cluster-lan` meshes with every other participating process on the LAN via
     mDNS, no relay or internet needed. See [LAN Cluster](#lan-cluster-mdns).
 

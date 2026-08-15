@@ -19,7 +19,7 @@ Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub
 
 ## Usage
 
-`moq-cli` routes endpoints onto a shared MoQ Origin: `moq <MoQ side> <import|export> <endpoint>`. The MoQ side (before the verb) is either `--connect <url>` (dial a relay) or `--listen <addr>` (self-host). `import` moves media into MoQ, `export` moves it out. The endpoint is a container format (`fmp4`, `ts`, `flv`, ... read from stdin / written to stdout), or a gateway (`hls`, `rtmp`, `srt`, `rtc`). A build with the `play` feature can also render a broadcast locally with `moq <MoQ side> play`.
+`moq-cli` routes endpoints onto a shared MoQ Origin: `moq <MoQ side> <import|export> <endpoint>`. The MoQ side (before the verb) dials with `--connect <url>`, self-hosts QUIC/WebTransport with `--listen <addr>`, or self-hosts raw qmux with `--listen-tcp-bind <addr>` / `--listen-unix-bind <path>` (Unix only). `import` moves media into MoQ, `export` moves it out. The endpoint is a container format (`fmp4`, `ts`, `flv`, ... read from stdin / written to stdout), or a gateway (`hls`, `rtmp`, `srt`, `rtc`). A build with the `play` feature can also render a broadcast locally with `moq <MoQ side> play`.
 
 Separate additional stages with `--` to bridge several broadcasts (or both directions) over one connection, each naming its own `--broadcast`:
 

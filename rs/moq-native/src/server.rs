@@ -37,6 +37,12 @@ impl crate::listen::Config {
 		}
 	}
 
+	/// Whether a QUIC, TCP, or Unix listener is explicitly configured.
+	pub fn has_explicit_listener(&self) -> bool {
+		let config = self.resolved();
+		config.bind.is_some() || config.has_stream_listener()
+	}
+
 	/// Whether a `tcp`/`unix` stream listener is configured.
 	///
 	/// When true and [`bind`](Self::bind) is unset, the server runs stream-only
@@ -1519,6 +1525,7 @@ uid = [1001, 1002]
 		assert_eq!(config.unix.bind.as_deref(), Some(std::path::Path::new("/run/moq.sock")));
 		assert_eq!(config.unix.allow.as_ref().expect("allow").uid, vec![1001, 1002]);
 		assert!(config.has_stream_listener());
+		assert!(config.has_explicit_listener());
 	}
 
 	#[cfg(all(feature = "uds", unix))]
@@ -1528,9 +1535,11 @@ uid = [1001, 1002]
 		let mut config = crate::listen::Config::default();
 		config.unix.bind = Some(PathBuf::from("/run/moq.sock"));
 		assert!(config.has_stream_listener());
+		assert!(config.has_explicit_listener());
 		assert!(config.bind.is_none());
 
 		// The default (nothing configured) still runs QUIC.
 		assert!(!crate::listen::Config::default().has_stream_listener());
+		assert!(!crate::listen::Config::default().has_explicit_listener());
 	}
 }

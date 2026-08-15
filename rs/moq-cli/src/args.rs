@@ -4,10 +4,10 @@
 //! `<import|export> <endpoint> [endpoint opts]`, plus `moq <MoQ side> play` for
 //! native playback.
 //!
-//! - The MoQ side (`--connect`, `--listen`, `--cluster-lan`; all
-//!   optional, at least one) attaches the shared Origin to the MoQ network, and
-//!   comes before the first stage. They compose: dial a relay, accept incoming
-//!   sessions, and mesh with the LAN all at once.
+//! - The MoQ side (`--connect`, the `--listen*` transport binds, and
+//!   `--cluster-lan`; all optional, at least one) attaches the shared Origin to
+//!   the MoQ network, and comes before the first stage. They compose: dial a
+//!   relay, accept incoming sessions, and mesh with the LAN all at once.
 //! - `import` routes media INTO MoQ from one source; `export` routes it OUT to
 //!   one sink. The verb fixes the data direction (and thus, for the
 //!   bidirectional gateways, whether `--connect`/`--listen` push or pull).
@@ -218,7 +218,8 @@ pub struct MoqSide {
 	#[command(flatten)]
 	pub quic: moq_native::quic::Config,
 
-	/// MoQ server transport config (`--listen`, `--listen-tls-*`).
+	/// MoQ server transport config (`--listen`, `--listen-tcp-bind`,
+	/// `--listen-unix-bind`, `--listen-tls-*`).
 	#[command(flatten)]
 	pub server: moq_native::listen::Config,
 
@@ -272,7 +273,7 @@ impl MoqSide {
 
 	/// Whether a listener has to be bound at all.
 	pub fn serves(&self) -> bool {
-		self.server.resolved().bind.is_some() || self.lan()
+		self.server.has_explicit_listener() || self.lan()
 	}
 
 	/// Reject a verb that needs the MoQ network but was given no way to reach it.
@@ -281,7 +282,7 @@ impl MoqSide {
 	pub fn validate(&self) -> anyhow::Result<()> {
 		anyhow::ensure!(
 			self.client.resolved().url.is_some() || self.serves(),
-			"a MoQ side is required: pass --connect <url> to dial a relay, --listen <addr> to self-host, or --cluster-lan to mesh over the LAN"
+			"a MoQ side is required: pass --connect <url> to dial a relay, a --listen option to self-host, or --cluster-lan to mesh over the LAN"
 		);
 		#[cfg(feature = "cluster-lan")]
 		{
@@ -313,12 +314,16 @@ impl MoqSide {
 		let ignored = [
 			("--connect", connect.url.is_some()),
 			("--listen", listen.bind.is_some()),
+			("--listen-tcp-bind", listen.tcp.bind.is_some()),
 			("--cluster-lan", self.lan()),
 			("--cluster-lan-secret", cluster_secret),
 			("--broadcast", self.broadcast.is_some()),
 		];
+		let ignored = ignored.into_iter().find(|(_, given)| *given).map(|(flag, _)| flag);
+		#[cfg(unix)]
+		let ignored = ignored.or_else(|| listen.unix.bind.is_some().then_some("--listen-unix-bind"));
 
-		if let Some((flag, _)) = ignored.into_iter().find(|(_, given)| *given) {
+		if let Some(flag) = ignored {
 			anyhow::bail!("`{command}` runs locally and takes no MoQ side; drop {flag}");
 		}
 
@@ -587,6 +592,28 @@ mod tests {
 		assert_eq!(cli.stages.len(), 1);
 		assert_eq!(cli.stages[0].name(), "import");
 		assert!(cli.validate().is_ok());
+	}
+
+	#[test]
+	fn tcp_only_listener_is_a_moq_side() {
+		let cli =
+			Invocation::try_parse_from(["moq", "--listen-tcp-bind", "127.0.0.1:0", "import", "ts"]).expect("parse");
+		assert!(cli.moq.validate().is_ok());
+		assert!(cli.moq.serves());
+		assert_eq!(cli.moq.server_config().tcp.bind, Some("127.0.0.1:0".parse().unwrap()));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn unix_only_listener_is_a_moq_side() {
+		let cli = Invocation::try_parse_from(["moq", "--listen-unix-bind", "/tmp/moq-cli.sock", "export", "ts"])
+			.expect("parse");
+		assert!(cli.moq.validate().is_ok());
+		assert!(cli.moq.serves());
+		assert_eq!(
+			cli.moq.server_config().unix.bind.as_deref(),
+			Some(std::path::Path::new("/tmp/moq-cli.sock"))
+		);
 	}
 
 	/// The grammar clap can't express: one connection, several endpoints.
@@ -922,11 +949,20 @@ mod tests {
 			// The released spelling folds in, so it is rejected under its
 			// canonical name rather than silently ignored.
 			("--client-connect", "https://relay.example.com", "--connect"),
+			("--listen-tcp-bind", "127.0.0.1:0", "--listen-tcp-bind"),
 			("--broadcast", "room", "--broadcast"),
 		] {
 			let cli = Cli::try_parse_from(["moq", flag, value, "token", "generate"]).unwrap();
 			let err = cli.moq.reject("token").unwrap_err().to_string();
 			assert!(err.contains(reported), "{err}");
+		}
+
+		#[cfg(unix)]
+		{
+			let cli =
+				Cli::try_parse_from(["moq", "--listen-unix-bind", "/tmp/moq-cli.sock", "token", "generate"]).unwrap();
+			let err = cli.moq.reject("token").unwrap_err().to_string();
+			assert!(err.contains("--listen-unix-bind"), "{err}");
 		}
 
 		#[cfg(feature = "cluster-lan")]

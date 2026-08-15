@@ -72,7 +72,8 @@ moq-audio = { workspace = true, optional = true }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
 moq-mux = { workspace = true }
-moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
+# Raw qmux listeners are part of the CLI surface. `uds` compiles only on Unix.
+moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs", "tcp", "uds"] }
 moq-rtc = { workspace = true }
 moq-rtmp = { workspace = true }
 moq-srt = { workspace = true }
