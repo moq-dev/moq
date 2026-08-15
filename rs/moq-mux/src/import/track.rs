@@ -1095,6 +1095,33 @@ mod tests {
 		assert_eq!(audio.channel_count, 2);
 	}
 
+	/// Each constructor stamps its own kind's priority, so an audio track never goes
+	/// out at the video priority and queues behind a video backlog.
+	#[tokio::test(start_paused = true)]
+	async fn each_kind_ranks_as_itself() {
+		use hang::catalog::PRIORITY;
+
+		let (mut broadcast, catalog) = new_broadcast();
+		let consumer = broadcast.consume();
+
+		let request = broadcast.reserve_track("audio").unwrap();
+		let _audio = Track::audio(
+			request,
+			catalog.reserve(),
+			AudioInit::new(AudioFormat::Opus, opus_head()),
+		)
+		.unwrap();
+
+		let request = broadcast.reserve_track("video").unwrap();
+		let _video = Track::video(request, catalog.reserve(), VideoInit::new(VideoFormat::Vp8, Vec::new())).unwrap();
+
+		let audio = consumer.track("audio").unwrap().info().await.unwrap();
+		assert_eq!(audio.priority, PRIORITY.audio);
+
+		let video = consumer.track("video").unwrap().info().await.unwrap();
+		assert_eq!(video.priority, PRIORITY.video);
+	}
+
 	/// An audio format with no init bytes errors up front (audio can't resolve its config from frames),
 	/// rather than registering a track that never publishes.
 	#[tokio::test(start_paused = true)]

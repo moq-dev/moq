@@ -237,7 +237,10 @@ export class Broadcast {
 
 			if (request.name === Broadcast.CATALOG_TRACK || request.name === Broadcast.CATALOG_TRACK_COMPRESSED) {
 				const compression = request.name === Broadcast.CATALOG_TRACK_COMPRESSED;
-				const track = request.accept();
+				// The catalog keeps the bare retention defaults (it is read at the live edge, which
+				// is always retained) but still declares its priority, so a relay forwards it ahead
+				// of the media it describes. Matches `hang::Catalog::default_track_info`.
+				const track = request.accept({ priority: Catalog.PRIORITY.catalog });
 
 				// Serve from a per-subscription child scope. Releasing it when this subscriber leaves keeps
 				// serving state from piling up on the connection-lifetime effect as viewers come and go.
@@ -257,9 +260,17 @@ export class Broadcast {
 			}
 
 			// Media, so declare the retention a FETCH-based consumer needs (the catalog above
-			// keeps the bare defaults: it is read at the live edge, which is always retained).
-			// Matches what a Rust publisher declares via `hang::container::track_info`.
-			const track = request.accept(Container.trackInfo({ maxAge: this.in.maxAge.peek() }));
+			// keeps the bare defaults: it is read at the live edge, which is always retained),
+			// plus the priority for what this rendition carries. Matches what a Rust publisher
+			// declares via `hang::container::track_info`; `Kind` and `PRIORITY` share their names,
+			// so a new kind can't be added on one side without the other noticing.
+			const kind = this.#renditions.peek()[request.name]?.kind;
+			const track = request.accept(
+				Container.trackInfo({
+					maxAge: this.in.maxAge.peek(),
+					priority: kind ? Catalog.PRIORITY[kind] : Catalog.PRIORITY.video,
+				}),
+			);
 
 			// A second subscription for the same name supersedes the first: close the old producer.
 			signal.peek()?.close();

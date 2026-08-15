@@ -142,14 +142,22 @@ impl Control {
 		// lands once it clears the threshold instead of being starved forever by
 		// a per-tick allowance smaller than the threshold.
 		//
-		// A raise landing exactly on `desired` is exempt: that's the last step of
-		// the ramp, not a twitch. `next` stops growing once it reaches the ceiling,
-		// so a target that arrives within `hysteresis` of it would otherwise have no
-		// move left that could ever clear the threshold, and the encoder would sit a
-		// few percent under its configured rate for good after one congestion event.
-		// Drops keep the deadband: sitting a little above a falling estimate is what
-		// it's for.
-		let settling = next > self.target && next == desired;
+		// A raise landing exactly on [`Policy::max`] is exempt: that's the last step
+		// of a recovery, not a twitch. `next` stops growing once it reaches the
+		// ceiling, so a target arriving within `hysteresis` of it has no move left
+		// that could ever clear the threshold, and the encoder would sit a few
+		// percent under its configured rate for good after one congestion event.
+		//
+		// Scoped to the *configured* ceiling, not to any `desired`. Every raise
+		// eventually lands on `desired`, so exempting all of them would let a
+		// slowly-rising estimate reconfigure the encoder on every tick, which is
+		// precisely what the deadband exists to prevent. Stalling a few percent
+		// below a merely estimate-limited ceiling is the deadband working; stalling
+		// below the rate the caller asked for is not.
+		//
+		// Drops keep the deadband either way: sitting a little above a falling
+		// estimate is what it's for.
+		let settling = next > self.target && next == self.policy.max;
 		let hysteresis = self.policy.hysteresis.max(0.0);
 		if !settling && (next.abs_diff(self.target) as f64) < self.target as f64 * hysteresis {
 			return None;
@@ -287,6 +295,42 @@ mod tests {
 		assert_eq!(last, Some(4_000_000));
 		// And it stops there rather than reapplying the same value forever.
 		assert_eq!(control.update(Some(4_000_000), start + Duration::from_secs(60)), None);
+	}
+
+	/// Regression: the ceiling exemption above must not swallow the deadband. Every
+	/// raise eventually lands on `desired`, so keying it on that rather than on the
+	/// configured ceiling let a slowly-rising estimate retune the encoder on every
+	/// single tick, which is the exact behavior `hysteresis` exists to prevent.
+	#[test]
+	fn upward_jitter_stays_inside_the_deadband() {
+		let mut control = control();
+		let start = Instant::now();
+		control.update(Some(2_000_000), start).unwrap(); // target 2M, well under the 4M ceiling
+
+		// A 0.5% rise: inside the 5% deadband, and nowhere near the ceiling.
+		assert_eq!(
+			control.update(Some(2_010_000), start + Duration::from_millis(100)),
+			None
+		);
+
+		// A whole walk of them still doesn't, rather than one reconfigure per tick.
+		// Stops short of 2.1M, which is exactly 5% up and so clears the threshold.
+		for tick in 2..=9 {
+			let estimate = 2_000_000 + tick * 10_000;
+			assert_eq!(
+				control.update(Some(estimate), start + Duration::from_millis(100 * tick)),
+				None,
+				"estimate {estimate} is inside the deadband"
+			);
+		}
+		assert_eq!(control.target(), 2_000_000);
+
+		// And the deadband is still only a deadband: once the estimate does clear it,
+		// the raise lands normally, without needing the ceiling exemption.
+		assert_eq!(
+			control.update(Some(2_200_000), start + Duration::from_secs(2)),
+			Some(2_200_000)
+		);
 	}
 
 	#[test]
