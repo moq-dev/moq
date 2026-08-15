@@ -19,6 +19,7 @@
 //!   the encoder. A loop timer re-emits the last frame whenever a frame interval
 //!   passes without a fresh one, mirroring the Windows Desktop Duplication pacing.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::os::fd::OwnedFd;
 use std::rc::Rc;
@@ -417,11 +418,7 @@ fn run_loop(
 					tracing::warn!("pipewire frame layout overflows its buffer");
 					return;
 				};
-				let Some(end) = offset.checked_add(required) else {
-					tracing::warn!("pipewire frame range overflows its buffer");
-					return;
-				};
-				if required > size {
+				if required > size || required > maxsize as usize {
 					tracing::warn!(
 						required,
 						available = size,
@@ -440,11 +437,14 @@ fn run_loop(
 					}
 					return;
 				};
-				let Some(bytes) = bytes.get(offset..end) else {
+				let Some(allocation) = bytes.get(..maxsize as usize) else {
+					return;
+				};
+				let Some(bytes) = chunk_bytes(allocation, offset, required) else {
 					return;
 				};
 
-				match convert(state.format.format(), bytes, layout) {
+				match convert(state.format.format(), bytes.as_ref(), layout) {
 					Ok(i420) => {
 						chan.push(Surface::I420(i420.clone()));
 						state.last = Some(i420);
@@ -565,8 +565,24 @@ fn clamp_chunk_size(size: u32, maxsize: u32) -> usize {
 	size.min(maxsize) as usize
 }
 
-/// Bytes from the chunk start through the last byte `convert` will read, which
-/// is the last row's width rather than its full stride.
+fn chunk_bytes(data: &[u8], offset: usize, size: usize) -> Option<Cow<'_, [u8]>> {
+	if offset >= data.len() || size > data.len() {
+		return None;
+	}
+	let end = offset.checked_add(size)?;
+	if end <= data.len() {
+		return Some(Cow::Borrowed(&data[offset..end]));
+	}
+
+	let mut wrapped = Vec::with_capacity(size);
+	wrapped.extend_from_slice(&data[offset..]);
+	let head = size - wrapped.len();
+	wrapped.extend_from_slice(&data[..head]);
+	Some(Cow::Owned(wrapped))
+}
+
+/// Bytes from the chunk start through the span required by `convert`. NV12 stops
+/// at the visible width of its final row; packed RGB requires every full stride.
 fn frame_data_size(format: VideoFormat, layout: FrameLayout) -> Option<usize> {
 	let stride = layout.stride as usize;
 	let width = layout.width as usize;
@@ -580,14 +596,15 @@ fn frame_data_size(format: VideoFormat, layout: FrameLayout) -> Option<usize> {
 		return None;
 	}
 
-	let last_row = match format {
+	match format {
 		// Chroma follows every source luma row, then runs at half height.
 		VideoFormat::NV12 => (layout.source_height as usize)
 			.checked_add(height / 2)?
-			.checked_sub(1)?,
-		_ => height.checked_sub(1)?,
-	};
-	last_row.checked_mul(stride)?.checked_add(row_size)
+			.checked_sub(1)?
+			.checked_mul(stride)?
+			.checked_add(row_size),
+		_ => stride.checked_mul(height),
+	}
 }
 
 /// Deinterleave strided NV12 into the crate's tightly packed I420 layout.
@@ -787,7 +804,7 @@ mod tests {
 			height: 2,
 			source_height: 2,
 		};
-		assert_eq!(frame_data_size(VideoFormat::BGRx, packed), Some(36));
+		assert_eq!(frame_data_size(VideoFormat::BGRx, packed), Some(40));
 
 		let nv12 = FrameLayout {
 			stride: 6,
@@ -802,6 +819,13 @@ mod tests {
 			frame_data_size(VideoFormat::BGRx, FrameLayout { stride: 15, ..packed }),
 			None
 		);
+	}
+
+	#[test]
+	fn wrapped_chunk_is_reassembled() {
+		let data = [0, 1, 2, 3, 4, 5];
+		assert_eq!(chunk_bytes(&data, 1, 3).as_deref(), Some([1, 2, 3].as_slice()));
+		assert_eq!(chunk_bytes(&data, 4, 4).as_deref(), Some([4, 5, 0, 1].as_slice()));
 	}
 
 	#[test]
