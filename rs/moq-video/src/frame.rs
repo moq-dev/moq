@@ -151,6 +151,15 @@ pub struct DmaBufExport {
 	inner: Arc<dyn DmaBufFrame>,
 }
 
+/// How long to wait on a producer's write fence before giving up.
+///
+/// Vulkan does not adopt a DMA-BUF's implicit fence, so a reader has to wait for
+/// it here. A screen frame's fence signals within a frame time; anything past
+/// this is a wedged compositor, and the caller's CPU fallback beats blocking a
+/// render thread forever.
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+const DMA_BUF_FENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 pub(crate) fn wait_dma_buf_readable(fd: BorrowedFd<'_>) -> std::io::Result<()> {
 	let mut event = libc::pollfd {
@@ -158,12 +167,28 @@ pub(crate) fn wait_dma_buf_readable(fd: BorrowedFd<'_>) -> std::io::Result<()> {
 		events: libc::POLLIN,
 		revents: 0,
 	};
+	let deadline = std::time::Instant::now() + DMA_BUF_FENCE_TIMEOUT;
 	loop {
+		// A signal restarts the wait against the same deadline rather than
+		// granting a fresh budget, so the total stall stays bounded.
+		let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+		if remaining.is_zero() {
+			return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+		}
 		// SAFETY: `event` is valid for this call and `fd` remains borrowed until
 		// the producer's current write fence has completed.
-		let result = unsafe { libc::poll(&mut event, 1, -1) };
+		let result = unsafe {
+			libc::poll(
+				&mut event,
+				1,
+				remaining.as_millis().min(i32::MAX as u128) as libc::c_int,
+			)
+		};
 		if result > 0 && event.revents & libc::POLLIN != 0 {
 			return Ok(());
+		}
+		if result == 0 {
+			return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
 		}
 		if result < 0 {
 			let error = std::io::Error::last_os_error();
