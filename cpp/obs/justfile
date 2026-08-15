@@ -159,7 +159,18 @@ _includes:
     fi
 
     (cd ../.. && cargo check --quiet -p libmoq)
-    echo "-I src -I $obs_include -I ../../target/include"
+
+    # Ask cargo where the header landed rather than assuming ../../target:
+    # CARGO_TARGET_DIR (or a config target-dir) moves it, and the hardcoded path
+    # would then type-check against whatever stale copy the default directory
+    # still holds, which is worse than not finding one at all.
+    moq_include="$(cd ../.. && cargo metadata --format-version 1 --no-deps | jq -r '.target_directory')/include"
+    if [ ! -f "$moq_include/moq.h" ]; then
+        echo "$moq_include/moq.h missing after 'cargo check -p libmoq'" >&2
+        exit 1
+    fi
+
+    echo "-I src -I $obs_include -I $moq_include"
 
 # Unit-test the plugin sources against stubbed libobs/libmoq, under ThreadSanitizer.
 #
