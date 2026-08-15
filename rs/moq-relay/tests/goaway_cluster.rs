@@ -453,11 +453,18 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// A live (unordered) subscription transmits the newest group first, so a
 	// back-to-back burst legally arrives inverted; `ordered` is the protocol's
 	// way to ask every hop for sequence-order transmission instead.
+	//
+	// The latency budget is the other half of that ask: this test asserts every group
+	// arrives exactly once, which is more than the default REAL_TIME budget promises.
+	// A subscriber that wants completeness across a failover has to say how far behind
+	// the live edge it is willing to sit (clamped to what the publisher retains).
 	let mut sub = within(
 		"subscribe to the video track",
-		bc.track("video")
-			.expect("track handle")
-			.subscribe(moq_net::track::Subscription::default().with_ordered(true)),
+		bc.track("video").expect("track handle").subscribe(
+			moq_net::track::Subscription::default()
+				.with_ordered(true)
+				.with_latency(moq_net::Latency::max(Duration::from_secs(60))),
+		),
 	)
 	.await
 	.expect("subscribe");

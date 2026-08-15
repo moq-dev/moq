@@ -60,12 +60,20 @@ fn length_prefixed(nals: &[&[u8]]) -> Bytes {
 /// finished, retained tracks; that means it never reaches a hard end-of-stream,
 /// so we pull until a `next()` blocks (`Pending`, surfaced as a timeout under
 /// paused time) or the stream ends.
+/// A drift budget no test timeline comes close to, so the exporter reads every group.
+///
+/// These tests write a whole broadcast up front and only then export it, which the
+/// exporter's default [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) collapses to the
+/// live edge: completeness has to be asked for, exactly as a real recorder does.
+const BATCH: std::time::Duration = std::time::Duration::from_secs(3600);
+
 async fn drain(consumer: moq_net::broadcast::Consumer) -> BytesMut {
 	drain_with(Export::new(crate::source::announced(&consumer)).await.unwrap()).await
 }
 
 /// `drain` for an exporter built with an explicit catalog extension.
-async fn drain_with<E: tscat::Catalog>(mut exporter: Export<E>) -> BytesMut {
+async fn drain_with<E: tscat::Catalog>(exporter: Export<E>) -> BytesMut {
+	let mut exporter = exporter.with_latency(crate::Latency::max(BATCH));
 	let mut out = BytesMut::new();
 	// `while let Ok` stops on the first timeout (`Pending`: no more output).
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
@@ -639,7 +647,8 @@ async fn export_scte35_roundtrip() {
 	let name = scte_track(&snapshot).expect("a scte35 track");
 
 	let track = consumer2.track(&name).unwrap().subscribe(None).await.unwrap();
-	let mut scte_reader = crate::container::Consumer::new(track, HangContainer::Legacy);
+	let mut scte_reader =
+		crate::container::Consumer::new(track, HangContainer::Legacy).with_latency(crate::Latency::max(BATCH));
 	let frame = scte_reader
 		.read()
 		.await
@@ -734,7 +743,8 @@ async fn export_pes_verbatim_roundtrip() {
 	let name = name.clone();
 
 	let track = consumer2.track(&name).unwrap().subscribe(None).await.unwrap();
-	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
+	let mut reader =
+		crate::container::Consumer::new(track, HangContainer::Legacy).with_latency(crate::Latency::max(BATCH));
 	let frame = reader
 		.read()
 		.await
@@ -802,7 +812,8 @@ async fn scte35_without_video_export_is_rejected() {
 /// Subscribe to a track and read every retained frame payload it holds.
 async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<Vec<u8>> {
 	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
-	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
+	let mut reader =
+		crate::container::Consumer::new(track, HangContainer::Legacy).with_latency(crate::Latency::max(BATCH));
 	let mut frames = Vec::new();
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		let Some(frame) = res.unwrap() else { break };
@@ -1118,7 +1129,8 @@ fn scte_track(snap: &crate::catalog::hang::Catalog<tscat::Ext>) -> Option<String
 /// Subscribe to a cue track and read every retained `splice_info_section` it holds.
 async fn read_cues(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(Vec<u8>, Timestamp)> {
 	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
-	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
+	let mut reader =
+		crate::container::Consumer::new(track, HangContainer::Legacy).with_latency(crate::Latency::max(BATCH));
 	let mut cues = Vec::new();
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		let Some(frame) = res.unwrap() else { break };

@@ -560,10 +560,17 @@ mod tests {
 			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), CatalogFormat::Hang)
 				.await
 				.unwrap()
-				.with_latency(moq_mux::Latency::REAL_TIME),
+				.with_latency(moq_mux::Latency::max(BATCH)),
 		)
 		.await
 	}
+
+	/// A drift budget no test timeline comes close to, so the exporter reads every group.
+	///
+	/// These tests publish a whole feed before exporting it, which the default
+	/// [`Latency::REAL_TIME`](moq_mux::Latency::REAL_TIME) collapses to the live edge:
+	/// completeness has to be asked for, exactly as a real recorder does.
+	const BATCH: std::time::Duration = std::time::Duration::from_secs(3600);
 
 	/// Full CLI round-trip: a TS feed with undecoded streams goes through `Publish`
 	/// (which selects the `mpegts` catalog) and the subscribe-side `Export::with_ts`,
@@ -597,7 +604,7 @@ mod tests {
 			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), CatalogFormat::Hang)
 				.await
 				.unwrap()
-				.with_latency(moq_mux::Latency::REAL_TIME),
+				.with_latency(moq_mux::Latency::max(BATCH)),
 		)
 		.await;
 

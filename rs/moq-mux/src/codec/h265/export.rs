@@ -279,7 +279,10 @@ mod tests {
 		track.finish().unwrap();
 
 		let consumer = broadcast.consume();
-		let mut export = Export::new(crate::source::announced(&consumer), Once(Some(catalog)));
+		// The whole track is written before the exporter runs, so it needs a budget
+		// wide enough to read it: the default skips everything but the live edge.
+		let mut export = Export::new(crate::source::announced(&consumer), Once(Some(catalog)))
+			.with_latency(crate::Latency::max(std::time::Duration::from_secs(3600)));
 
 		let frame0 = export.next().await.unwrap().expect("first frame");
 		let frame1 = export.next().await.unwrap().expect("second frame");
