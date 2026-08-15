@@ -41,6 +41,8 @@ use crate::Error;
 use crate::frame::{DmaBuf, DmaBufFrame, DmaBufPlane, DrmFormat, I420, Surface};
 
 const DEFAULT_FRAMERATE: u32 = 30;
+// libspa 0.10 omits this flag from its safe wrapper, but exposes the raw bits.
+const CHUNK_FLAG_EMPTY: i32 = 1 << 1;
 /// The compositor sends the negotiated format right after the stream connects;
 /// if nothing arrives the session is broken (or the grant was revoked mid-setup).
 const FORMAT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -945,7 +947,7 @@ enum ChunkKind {
 fn chunk_kind(size: usize, flags: spa::buffer::ChunkFlags) -> ChunkKind {
 	if flags.contains(spa::buffer::ChunkFlags::CORRUPTED) {
 		ChunkKind::Invalid
-	} else if flags.contains(spa::buffer::ChunkFlags::EMPTY) {
+	} else if flags.bits() & CHUNK_FLAG_EMPTY != 0 {
 		ChunkKind::Empty
 	} else if size == 0 {
 		ChunkKind::Invalid
@@ -1183,10 +1185,11 @@ mod tests {
 
 	#[test]
 	fn chunk_flags_distinguish_neutral_and_invalid_frames() {
+		let empty = spa::buffer::ChunkFlags::from_bits_retain(CHUNK_FLAG_EMPTY);
 		assert_eq!(chunk_kind(0, spa::buffer::ChunkFlags::empty()), ChunkKind::Invalid);
 		assert_eq!(chunk_kind(1, spa::buffer::ChunkFlags::CORRUPTED), ChunkKind::Invalid);
-		assert_eq!(chunk_kind(1, spa::buffer::ChunkFlags::EMPTY), ChunkKind::Empty);
-		assert_eq!(chunk_kind(0, spa::buffer::ChunkFlags::EMPTY), ChunkKind::Empty);
+		assert_eq!(chunk_kind(1, empty), ChunkKind::Empty);
+		assert_eq!(chunk_kind(0, empty), ChunkKind::Empty);
 		assert_eq!(chunk_kind(1, spa::buffer::ChunkFlags::empty()), ChunkKind::Data);
 	}
 
