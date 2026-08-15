@@ -93,7 +93,12 @@ compile:
         fi
     done
 
-    includes=$(just _includes)
+    # Assign first so a failure in `_includes` still aborts under `set -e`,
+    # then split on newlines only: an include path may contain spaces.
+    includes_raw=$(just _includes)
+    includes=()
+    while IFS= read -r flag; do includes+=("$flag"); done <<< "$includes_raw"
+
     qt=$(pkg-config --cflags Qt6Widgets Qt6Gui Qt6Core)
     ffmpeg=$(pkg-config --cflags libavcodec libavutil libswscale libswresample)
 
@@ -104,8 +109,10 @@ compile:
         # shellcheck disable=SC2086
         # -Wno-unused-command-line-argument: the nix compiler wrapper injects
         # link flags, which a syntax-only run reports as unused, once per file.
+        # $qt and $ffmpeg stay unquoted on purpose: pkg-config hands back one
+        # space-separated string, and splitting it is the intended reading.
         if ! "$cxx" -std=c++17 -fsyntax-only -Wno-unused-command-line-argument \
-            $includes $qt $ffmpeg \
+            "${includes[@]}" $qt $ffmpeg \
             -DMOQ_FRONTEND_ENABLED -DMOQ_VERSION_STRING='"0.0.0"' "$source"; then
             status=1
         fi
@@ -180,7 +187,9 @@ _includes:
         exit 1
     fi
 
-    echo "-I src -I $obs_include -I $moq_include"
+    # One flag per line, path glued to the -I, so a caller can rebuild the
+    # arguments without splitting on the spaces in a path.
+    printf -- '-I%s\n' src "$obs_include" "$moq_include"
 
 # Unit-test the plugin sources against stubbed libobs/libmoq, under ThreadSanitizer.
 #
@@ -219,9 +228,11 @@ test:
         exit 1
     fi
 
-    includes=$(just _includes)
-    # shellcheck disable=SC2086
-    "$cxx" -std=c++17 -g -O0 -fsanitize=thread $includes \
+    includes_raw=$(just _includes)
+    includes=()
+    while IFS= read -r flag; do includes+=("$flag"); done <<< "$includes_raw"
+
+    "$cxx" -std=c++17 -g -O0 -fsanitize=thread "${includes[@]}" \
         -o "$out/moq-output-test" test/moq-output-test.cpp src/moq-output.cpp
     TSAN_OPTIONS="halt_on_error=1" "$out/moq-output-test"
 
