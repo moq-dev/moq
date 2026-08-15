@@ -9,8 +9,14 @@ name: OBS
 # platform-independent C++ over libmoq's C ABI, so a Linux compile catches the
 # breakage a macOS developer would otherwise ship uncompiled.
 #
-# Narrow trigger, like swift.yml: this fires only for changes that can break
-# the plugin, which is its own sources or the libmoq header they call through.
+# Narrow trigger, like swift.yml: the plugin's own sources, the libmoq header
+# they call through, and the flake that supplies the toolchain.
+#
+# Cargo.lock is in there for the one way a crate the plugin never names can
+# break it: linking libmoq.a from outside cargo needs the native libraries in
+# `rs/libmoq/native-libs/*.txt`, which are maintained by hand. A dependency that
+# starts pulling in a new one leaves that list stale, and every Rust gate stays
+# green because cargo passes the flag itself. Such a change lands in Cargo.lock.
 
 permissions:
   contents: read
@@ -23,6 +29,7 @@ on:
     paths:
       - "cpp/obs/**"
       - "rs/libmoq/**"
+      - "Cargo.lock"
       - "flake.nix"
       - "flake.lock"
       - ".github/workflows/obs.yml"

@@ -215,8 +215,15 @@ check:
     # The headers `just obs compile` type-checks against are a second copy of
     # the OBS version this spec downloads, so a bump here has to reach flake.nix
     # or the two gates check different libobs.
-    spec_obs=$(sed -n '/"obs-studio"/,/}/p' buildspec.json | sed -n 's/.*"version": "\([^"]*\)".*/\1/p')
+    spec_obs=$(jq -r '.dependencies["obs-studio"].version // ""' buildspec.json)
     flake_obs=$(sed -n '/pname = "libobs-headers"/,/}/p' ../../flake.nix | sed -n 's/.*version = "\([^"]*\)".*/\1/p')
+    # Both are pattern matches against files this recipe doesn't own the shape
+    # of. An empty parse compares equal to an empty parse, so the guard would
+    # pass by reporting nothing rather than by finding the versions in sync.
+    if [ -z "$spec_obs" ] || [ -z "$flake_obs" ]; then
+        echo "couldn't read the obs-studio version: '$spec_obs' from buildspec.json, '$flake_obs' from flake.nix" >&2
+        exit 1
+    fi
     if [ "$spec_obs" != "$flake_obs" ]; then
         echo "obs-studio is $spec_obs in buildspec.json but $flake_obs in flake.nix (libobs-headers)" >&2
         exit 1

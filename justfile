@@ -163,11 +163,16 @@ check $BASE="":
     	just go check "$files"
     	# Type-checking the plugin needs only headers, so it runs here rather
     	# than waiting for obs.yml to link it on Linux. libmoq is in scope
-    	# because the plugin calls through its generated C header.
-    	if echo "$files" | grep -qE '^(cpp/obs/|rs/libmoq/)'; then
+    	# because the plugin calls through its generated C header, and flake.nix
+    	# because it owns the libobs headers this compiles against -- obs.yml
+    	# links against nixpkgs' obs-studio instead, so nothing else would notice
+    	# that package going bad.
+    	if echo "$files" | grep -qE '^(cpp/obs/|rs/libmoq/|flake\.nix$)'; then
     		just obs compile
     	fi
-    	if echo "$files" | grep -q '^cpp/obs/'; then
+    	# flake.nix is in scope because `just obs check` is what compares the OBS
+    	# version pinned there against buildspec.json, and either side can move.
+    	if echo "$files" | grep -qE '^(cpp/obs/|flake\.nix$)'; then
     		just obs check
     	fi
     	# Validates flake eval + dev shell build; it no longer compiles the
