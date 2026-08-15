@@ -791,6 +791,22 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					}
 					ChunkKind::Invalid => return,
 				}
+				let Some(required) = frame_data_size(state.format.format(), layout) else {
+					tracing::warn!("pipewire frame layout overflows its buffer");
+					return;
+				};
+				let Some(end) = offset.checked_add(required) else {
+					tracing::warn!("pipewire frame range overflows its buffer");
+					return;
+				};
+				if required > size || end > allocation_size {
+					tracing::warn!(
+						required,
+						available = size,
+						"pipewire chunk does not contain a complete frame"
+					);
+					return;
+				}
 				if data.type_() == DataType::DmaBuf {
 					let Some(format) = drm_format(state.format.format()) else {
 						tracing::warn!(format = ?state.format.format(), "unsupported DMA-BUF pixel format");
@@ -858,7 +874,6 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					}
 					return;
 				};
-				let Some(end) = offset.checked_add(size) else { return };
 				let Some(bytes) = bytes.get(offset..end) else {
 					return;
 				};
@@ -941,6 +956,28 @@ fn normalize_chunk_offset(offset: u32, maxsize: u32) -> Option<usize> {
 
 fn clamp_chunk_size(size: u32, maxsize: u32) -> usize {
 	size.min(maxsize) as usize
+}
+
+fn frame_data_size(format: VideoFormat, layout: FrameLayout) -> Option<usize> {
+	let stride = layout.stride as usize;
+	let width = layout.width as usize;
+	let height = layout.height as usize;
+	let row_size = match format {
+		VideoFormat::NV12 => width,
+		VideoFormat::BGRx | VideoFormat::BGRA | VideoFormat::RGBx | VideoFormat::RGBA => width.checked_mul(4)?,
+		_ => return None,
+	};
+	if stride < row_size {
+		return None;
+	}
+
+	let last_row = match format {
+		VideoFormat::NV12 => (layout.source_height as usize)
+			.checked_add(height / 2)?
+			.checked_sub(1)?,
+		_ => height.checked_sub(1)?,
+	};
+	last_row.checked_mul(stride)?.checked_add(row_size)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1193,6 +1230,29 @@ mod tests {
 	fn chunk_size_is_clamped_to_the_allocation() {
 		assert_eq!(clamp_chunk_size(18, 16), 16);
 		assert_eq!(clamp_chunk_size(8, 16), 8);
+	}
+
+	#[test]
+	fn frame_data_size_covers_every_sampled_row() {
+		let packed = FrameLayout {
+			stride: 20,
+			width: 4,
+			height: 2,
+			source_height: 2,
+		};
+		assert_eq!(frame_data_size(VideoFormat::BGRx, packed), Some(36));
+
+		let nv12 = FrameLayout {
+			stride: 6,
+			width: 4,
+			height: 2,
+			source_height: 3,
+		};
+		assert_eq!(frame_data_size(VideoFormat::NV12, nv12), Some(22));
+		assert_eq!(
+			frame_data_size(VideoFormat::BGRx, FrameLayout { stride: 15, ..packed }),
+			None
+		);
 	}
 
 	#[test]
