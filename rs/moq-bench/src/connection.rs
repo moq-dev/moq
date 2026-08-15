@@ -257,14 +257,18 @@ fn discover(consume: &moq_net::origin::Producer, name: &str) -> moq_net::announc
 		.announced()
 }
 
-/// Watch announcements and drain up to `want` peer broadcasts (excluding our own),
-/// spreading each subscription's start over `startup` to avoid a thundering herd.
+/// Watch announcements and drain up to `want` peer broadcasts (excluding our own).
 ///
 /// Candidates are gathered over the `startup` window and picked at random. The
 /// relay replays existing announcements in deterministic path order, so a
 /// first-come pick would put every subscriber on the same first few broadcasts
 /// and collapse the 1:N presets into hotspots. Announcements arriving after the
 /// window fill any remaining slots in arrival order.
+///
+/// The gather window is the only delay added here: connections are already
+/// staggered across `startup` by main, so subscriptions land spread over the
+/// second startup window of the run, and the whole swarm is subscribed within
+/// two of them.
 async fn subscribe(
 	mut announced: moq_net::announce::Consumer,
 	own: HashSet<String>,
@@ -281,6 +285,9 @@ async fn subscribe(
 	tokio::pin!(deadline);
 	loop {
 		tokio::select! {
+			// Deadline first: with random polling, a stream that always has another
+			// announcement ready could keep gathering past the startup window.
+			biased;
 			_ = &mut deadline => break,
 			update = announced.next() => {
 				let Some(moq_net::announce::Update { path, broadcast }) = update else { break };
@@ -297,7 +304,7 @@ async fn subscribe(
 	pick_random(&mut pool, want as usize);
 	let mut selected = pool.len() as u64;
 	for (path, broadcast) in pool {
-		spawn_drain(&mut tasks, path, broadcast, startup, stats.clone());
+		spawn_drain(&mut tasks, path, broadcast, stats.clone());
 	}
 
 	// Top up from late announcements, first-come: the pool was too small, so
@@ -314,7 +321,7 @@ async fn subscribe(
 			continue;
 		}
 		selected += 1;
-		spawn_drain(&mut tasks, path, broadcast, startup, stats.clone());
+		spawn_drain(&mut tasks, path, broadcast, stats.clone());
 	}
 
 	// Keep the drain tasks alive; they run until their broadcasts close.
@@ -332,21 +339,10 @@ fn pick_random<T>(pool: &mut Vec<T>, want: usize) {
 	pool.truncate(want);
 }
 
-/// Queue one broadcast for draining, staggered somewhere within the startup
-/// window so `want` subscriptions don't all fire at once.
-fn spawn_drain(
-	tasks: &mut JoinSet<()>,
-	path: String,
-	broadcast: broadcast::Consumer,
-	startup: Duration,
-	stats: Arc<Stats>,
-) {
-	let delay = {
-		let mut rng = rand::rng();
-		startup.mul_f64(rng.random_range(0.0..1.0))
-	};
+/// Queue one broadcast for draining. No extra delay: the caller's gather window
+/// and main's connection stagger already spread subscription starts.
+fn spawn_drain(tasks: &mut JoinSet<()>, path: String, broadcast: broadcast::Consumer, stats: Arc<Stats>) {
 	tasks.spawn(async move {
-		tokio::time::sleep(delay).await;
 		if let Err(err) = drain(broadcast, &stats).await {
 			tracing::debug!(%path, %err, "subscription ended");
 		}

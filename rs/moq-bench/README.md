@@ -134,8 +134,9 @@ pinning once the relay grows a thread-per-core mode.
 ## Measuring CPU cost
 
 Run the load from one machine and the sampler on the relay's host, then join
-the two JSONL files on `timestamp_ms` over the same steady-state window (skip
-the `--startup` ramp). `timestamp_ms` is wall clock from two different hosts,
+the two JSONL files on `timestamp_ms` over the same steady-state window. Skip
+the first two `--startup` windows: connections ramp across the first, and each
+connection then gathers announcements for one more window before subscribing. `timestamp_ms` is wall clock from two different hosts,
 so keep both NTP-synced; the join only has to agree on the window boundaries,
 since every rate comes from deltas within a single file:
 
