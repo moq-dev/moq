@@ -376,17 +376,23 @@ fn run_loop(
 
 				let maxsize = data.as_raw().maxsize;
 				let size = clamp_chunk_size(data.chunk().size(), maxsize);
+				match chunk_kind(size, data.chunk().flags()) {
+					ChunkKind::Data => {}
+					ChunkKind::Empty => {
+						let Ok(frame) = neutral_frame(width, height) else {
+							return;
+						};
+						chan.push(Surface::I420(frame.clone()));
+						state.last = Some(frame);
+						state.fresh = true;
+						return;
+					}
+					ChunkKind::Invalid => return,
+				}
 				let Some(offset) = normalize_chunk_offset(data.chunk().offset(), maxsize) else {
 					tracing::warn!("pipewire buffer has zero maximum size");
 					return;
 				};
-				// Compositors mark a skipped frame corrupted or empty; drop those
-				// rather than treating them as a fatal conversion failure below.
-				// An empty chunk means "nothing new", so the pacing tick below
-				// keeps re-emitting the last real frame.
-				if size == 0 || data.chunk().flags().intersects(skip_flags()) {
-					return;
-				}
 				// Fall back to the unclamped source width: for an odd-width source
 				// the real row is one pixel wider than the clamped `width`. The
 				// packing differs per format, so NV12 cannot assume 4 bytes/pixel.
@@ -519,13 +525,34 @@ struct FrameLayout {
 	source_height: u32,
 }
 
-/// Chunk flags that mean "no usable frame here".
-///
-/// libspa 0.10 wraps only `CORRUPTED`, so `EMPTY` (`SPA_CHUNK_FLAG_EMPTY`) comes
-/// from its raw bit.
-fn skip_flags() -> spa::buffer::ChunkFlags {
-	const EMPTY: i32 = 1 << 1;
-	spa::buffer::ChunkFlags::CORRUPTED | spa::buffer::ChunkFlags::from_bits_retain(EMPTY)
+const CHUNK_FLAG_EMPTY: i32 = 1 << 1;
+
+#[derive(Debug, PartialEq, Eq)]
+enum ChunkKind {
+	Data,
+	Empty,
+	Invalid,
+}
+
+fn chunk_kind(size: usize, flags: spa::buffer::ChunkFlags) -> ChunkKind {
+	if flags.contains(spa::buffer::ChunkFlags::CORRUPTED) {
+		ChunkKind::Invalid
+	} else if flags.bits() & CHUNK_FLAG_EMPTY != 0 {
+		ChunkKind::Empty
+	} else if size == 0 {
+		ChunkKind::Invalid
+	} else {
+		ChunkKind::Data
+	}
+}
+
+fn neutral_frame(width: u32, height: u32) -> Result<I420, Error> {
+	let luma = width as usize * height as usize;
+	// Unknown-color I420 is interpreted as limited range, whose black is Y=16
+	// with neutral U/V=128.
+	let mut data = vec![128; I420::len(width, height)];
+	data[..luma].fill(16);
+	I420::new(width, height, data)
 }
 
 /// A chunk offset is a ring position within the allocation, so wrap it rather
@@ -579,10 +606,16 @@ fn nv12_to_i420(data: &[u8], layout: FrameLayout) -> Result<I420, Error> {
 	let y_len = stride
 		.checked_mul(source_height)
 		.ok_or_else(|| Error::Codec(anyhow::anyhow!("NV12 luma size overflow")))?;
-	let uv_len = stride
-		.checked_mul(height / 2)
+	let uv_rows = height / 2;
+	let uv_len = uv_rows
+		.checked_sub(1)
+		.and_then(|rows| rows.checked_mul(stride))
+		.and_then(|offset| offset.checked_add(width))
 		.ok_or_else(|| Error::Codec(anyhow::anyhow!("NV12 chroma size overflow")))?;
-	if stride < width || data.len() < y_len + uv_len {
+	let frame_len = y_len
+		.checked_add(uv_len)
+		.ok_or_else(|| Error::Codec(anyhow::anyhow!("NV12 frame size overflow")))?;
+	if stride < width || data.len() < frame_len {
 		return Err(Error::Codec(anyhow::anyhow!(
 			"NV12 frame is shorter than its declared rows"
 		)));
@@ -592,9 +625,9 @@ fn nv12_to_i420(data: &[u8], layout: FrameLayout) -> Result<I420, Error> {
 	for row in 0..height {
 		packed[row * width..(row + 1) * width].copy_from_slice(&data[row * stride..row * stride + width]);
 	}
-	let uv = &data[y_len..y_len + uv_len];
+	let uv = &data[y_len..frame_len];
 	let packed_uv = width * height;
-	for row in 0..height / 2 {
+	for row in 0..uv_rows {
 		packed[packed_uv + row * width..packed_uv + (row + 1) * width]
 			.copy_from_slice(&uv[row * stride..row * stride + width]);
 	}
@@ -726,13 +759,22 @@ mod tests {
 		assert_eq!(clamp_chunk_size(8, 16), 8);
 	}
 
-	/// A skipped frame carries no pixels, whichever way the compositor says so.
 	#[test]
-	fn corrupt_and_empty_chunks_are_both_skipped() {
-		let empty = spa::buffer::ChunkFlags::from_bits_retain(1 << 1);
-		assert!(spa::buffer::ChunkFlags::CORRUPTED.intersects(skip_flags()));
-		assert!(empty.intersects(skip_flags()));
-		assert!(!spa::buffer::ChunkFlags::empty().intersects(skip_flags()));
+	fn chunk_flags_distinguish_neutral_and_invalid_frames() {
+		let empty = spa::buffer::ChunkFlags::from_bits_retain(CHUNK_FLAG_EMPTY);
+		assert_eq!(chunk_kind(0, spa::buffer::ChunkFlags::empty()), ChunkKind::Invalid);
+		assert_eq!(chunk_kind(1, spa::buffer::ChunkFlags::CORRUPTED), ChunkKind::Invalid);
+		assert_eq!(chunk_kind(1, empty), ChunkKind::Empty);
+		assert_eq!(chunk_kind(0, empty), ChunkKind::Empty);
+		assert_eq!(chunk_kind(1, spa::buffer::ChunkFlags::empty()), ChunkKind::Data);
+	}
+
+	#[test]
+	fn empty_chunk_is_limited_range_black() {
+		let frame = neutral_frame(4, 2).unwrap();
+		assert_eq!(frame.y(), &[16; 8]);
+		assert_eq!(frame.u(), &[128; 2]);
+		assert_eq!(frame.v(), &[128; 2]);
 	}
 
 	/// The required size must reach the last sampled row, but not the padding
@@ -779,6 +821,25 @@ mod tests {
 			},
 		)
 		.unwrap();
+		assert_eq!(frame.y(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+		assert_eq!(frame.u(), &[9, 11]);
+		assert_eq!(frame.v(), &[10, 12]);
+	}
+
+	#[test]
+	fn nv12_accepts_a_width_precise_final_row() {
+		let layout = FrameLayout {
+			stride: 6,
+			width: 4,
+			height: 2,
+			source_height: 2,
+		};
+		let mut data = vec![99; frame_data_size(VideoFormat::NV12, layout).unwrap()];
+		data[..4].copy_from_slice(&[1, 2, 3, 4]);
+		data[6..10].copy_from_slice(&[5, 6, 7, 8]);
+		data[12..16].copy_from_slice(&[9, 10, 11, 12]);
+
+		let frame = nv12_to_i420(&data, layout).unwrap();
 		assert_eq!(frame.y(), &[1, 2, 3, 4, 5, 6, 7, 8]);
 		assert_eq!(frame.u(), &[9, 11]);
 		assert_eq!(frame.v(), &[10, 12]);
