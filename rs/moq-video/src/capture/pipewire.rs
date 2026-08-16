@@ -441,18 +441,31 @@ fn dma_buf_sync(fd: &OwnedFd, flags: u64) -> Result<(), Error> {
 }
 
 fn dma_buf_allocation_size(fd: BorrowedFd<'_>, map_offset: u32) -> std::io::Result<Option<usize>> {
-	let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-	// SAFETY: `stat` points to writable storage and `fd` remains borrowed for
-	// the duration of the metadata query.
-	if unsafe { libc::fstat(std::os::fd::AsRawFd::as_raw_fd(&fd), stat.as_mut_ptr()) } != 0 {
-		return Err(std::io::Error::last_os_error());
-	}
-	// SAFETY: a successful `fstat` initialized the full structure.
-	let stat = unsafe { stat.assume_init() };
-	let Ok(end) = usize::try_from(stat.st_size) else {
+	let raw = std::os::fd::AsRawFd::as_raw_fd(&fd);
+	// DMA-BUF supports SEEK_END specifically so userspace can discover the
+	// allocation size even though fstat commonly reports zero.
+	let end = seek_fd(raw, 0, libc::SEEK_END)?;
+	// DMA-BUF also supports SEEK_SET. Reset the shared file description to the
+	// canonical position before handing the descriptor to another subsystem.
+	seek_fd(raw, 0, libc::SEEK_SET)?;
+	let Ok(end) = usize::try_from(end) else {
 		return Ok(None);
 	};
 	Ok(end.checked_sub(map_offset as usize).filter(|size| *size > 0))
+}
+
+fn seek_fd(fd: std::os::fd::RawFd, offset: libc::off_t, whence: libc::c_int) -> std::io::Result<libc::off_t> {
+	loop {
+		// SAFETY: the caller keeps `fd` open for the duration of this syscall.
+		let result = unsafe { libc::lseek(fd, offset, whence) };
+		if result >= 0 {
+			return Ok(result);
+		}
+		let error = std::io::Error::last_os_error();
+		if error.kind() != std::io::ErrorKind::Interrupted {
+			return Err(error);
+		}
+	}
 }
 
 /// Read-only mmap of one linear DMA-BUF allocation.
@@ -1606,7 +1619,7 @@ mod tests {
 	}
 
 	#[test]
-	fn dmabuf_size_comes_from_the_descriptor() {
+	fn dmabuf_size_comes_from_the_seekable_descriptor() {
 		use std::os::fd::AsFd;
 
 		let path = std::env::temp_dir().join(format!(
