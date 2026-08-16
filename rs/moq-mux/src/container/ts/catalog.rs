@@ -196,6 +196,14 @@ pub struct Program {
 /// table we've never heard of all round-trip the same way. A PID carries a *set* of
 /// sections (a multi-service SDT is several, and the SDT PID also carries the BAT),
 /// so they are held together and replaced individually as each is re-signaled.
+///
+/// Only the version that applies now is carried. A section is identified by its
+/// `table_id`, `table_id_extension` and `section_number`, which is the generic header
+/// minus the version, so a pending version transmitted ahead of a change cannot be held
+/// alongside the current one and is dropped at import. Replacement being per-section also
+/// means a multi-section table changes version one section at a time, so a consumer can
+/// briefly observe a mix of the two. Both are consequences of the identity, not of the
+/// tables involved.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
