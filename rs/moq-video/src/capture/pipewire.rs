@@ -38,8 +38,8 @@ use spa::param::video::{VideoFormat, VideoInfoRaw};
 use super::channel::FrameChannel;
 use super::pump::Geometry;
 use super::{Config, FrameStream};
-use crate::Error;
 use crate::frame::{DmaBuf, DmaBufFrame, DmaBufPlane, DrmFormat, I420, Surface, wait_dma_buf_readable};
+use crate::{Color, Error, Size};
 
 const DEFAULT_FRAMERATE: u32 = 30;
 // libspa 0.10 omits this flag from its safe wrapper, but exposes the raw bits.
@@ -305,6 +305,7 @@ struct PipeWireDmaBuf {
 	layout: FrameLayout,
 	format: DrmFormat,
 	modifier: u64,
+	color: Option<Color>,
 }
 
 impl Drop for PipeWireDmaBuf {
@@ -340,7 +341,13 @@ impl DmaBufFrame for PipeWireDmaBuf {
 				.ok_or_else(|| Error::Codec(anyhow::anyhow!("DMA-BUF chunk starts outside its allocation")))?;
 
 			match self.format {
-				DrmFormat::NV12 => nv12_to_i420(data, self.layout),
+				DrmFormat::NV12 => {
+					let frame = nv12_to_i420(data, self.layout)?;
+					Ok(match self.color {
+						Some(color) => frame.with_color(color),
+						None => frame,
+					})
+				}
 				DrmFormat::XRGB8888 | DrmFormat::ARGB8888 => {
 					I420::from_bgra(data, self.layout.stride, self.layout.width, self.layout.height)
 				}
@@ -744,6 +751,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 				let mut state = state.borrow_mut();
 				let Some((width, height)) = state.geometry else { return };
 				let source_height = state.format.size().height;
+				let color = pipewire_color(state.format, width, height);
 				// SAFETY: this is PipeWire's process callback for `stream`; `Dequeued`
 				// returns the buffer on drop unless a DMA-BUF surface leases it.
 				let Some(mut buffer) = (unsafe { Dequeued::new(stream) }) else {
@@ -788,7 +796,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 				match chunk_kind(size, data.chunk().flags()) {
 					ChunkKind::Data => {}
 					ChunkKind::Empty => {
-						let Ok(frame) = neutral_frame(width, height) else {
+						let Ok(frame) = neutral_frame(width, height, color) else {
 							return;
 						};
 						chan.push(Surface::I420(frame.clone()));
@@ -862,8 +870,9 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						layout,
 						format,
 						modifier,
+						color,
 					});
-					match DmaBuf::new(format, modifier, layout.width, layout.height, planes, inner) {
+					match DmaBuf::new(format, modifier, layout.width, layout.height, planes, color, inner) {
 						Ok(frame) => {
 							chan.push(Surface::DmaBuf(frame.clone()));
 							state.last = Some(Last::DmaBuf(frame));
@@ -888,7 +897,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 				let Some(bytes) = chunk_bytes(allocation, offset, required) else {
 					return;
 				};
-				match convert(state.format.format(), bytes.as_ref(), layout) {
+				match convert(state.format.format(), bytes.as_ref(), layout, color) {
 					Ok(i420) => {
 						chan.push(Surface::I420(i420.clone()));
 						state.last = Some(Last::I420(i420));
@@ -1027,19 +1036,61 @@ fn chunk_kind(size: usize, flags: spa::buffer::ChunkFlags) -> ChunkKind {
 	}
 }
 
-fn neutral_frame(width: u32, height: u32) -> Result<I420, Error> {
+fn neutral_frame(width: u32, height: u32, color: Option<Color>) -> Result<I420, Error> {
+	let color = color.unwrap_or_else(|| Color::infer(Size::new(width, height)));
 	let luma = width as usize * height as usize;
-	// Unknown-color I420 is interpreted as limited range, whose black is Y=16
-	// with neutral U/V=128.
 	let mut data = vec![128; I420::len(width, height)];
-	data[..luma].fill(16);
-	I420::new(width, height, data)
+	data[..luma].fill(if color.limited() { 16 } else { 0 });
+	Ok(I420::new(width, height, data)?.with_color(color))
+}
+
+/// Preserve the color description that names NV12 samples. Unknown fields use
+/// the same size-based, limited-range fallback as the encoder; unsupported
+/// matrices stay unknown because labeling those samples as 601/709 is worse.
+fn pipewire_color(format: VideoInfoRaw, width: u32, height: u32) -> Option<Color> {
+	if format.format() != VideoFormat::NV12 {
+		return None;
+	}
+	color_from_pipewire(format.color_range(), format.color_matrix(), Size::new(width, height))
+}
+
+fn color_from_pipewire(range: u32, matrix: u32, size: Size) -> Option<Color> {
+	if range == spa::sys::SPA_VIDEO_COLOR_RANGE_UNKNOWN && matrix == spa::sys::SPA_VIDEO_COLOR_MATRIX_UNKNOWN {
+		return None;
+	}
+
+	let limited = match range {
+		spa::sys::SPA_VIDEO_COLOR_RANGE_UNKNOWN | spa::sys::SPA_VIDEO_COLOR_RANGE_16_235 => true,
+		spa::sys::SPA_VIDEO_COLOR_RANGE_0_255 => false,
+		_ => return None,
+	};
+	let bt709 = match matrix {
+		spa::sys::SPA_VIDEO_COLOR_MATRIX_UNKNOWN => {
+			matches!(Color::infer(size), Color::Bt709Limited | Color::Bt709Full)
+		}
+		spa::sys::SPA_VIDEO_COLOR_MATRIX_BT709 => true,
+		spa::sys::SPA_VIDEO_COLOR_MATRIX_BT601 => false,
+		_ => return None,
+	};
+
+	Some(match (bt709, limited) {
+		(false, true) => Color::Bt601Limited,
+		(false, false) => Color::Bt601Full,
+		(true, true) => Color::Bt709Limited,
+		(true, false) => Color::Bt709Full,
+	})
 }
 
 /// Convert one strided screen frame to tightly-packed I420.
-fn convert(format: VideoFormat, bytes: &[u8], layout: FrameLayout) -> Result<I420, Error> {
+fn convert(format: VideoFormat, bytes: &[u8], layout: FrameLayout, color: Option<Color>) -> Result<I420, Error> {
 	match format {
-		VideoFormat::NV12 => nv12_to_i420(bytes, layout),
+		VideoFormat::NV12 => {
+			let frame = nv12_to_i420(bytes, layout)?;
+			Ok(match color {
+				Some(color) => frame.with_color(color),
+				None => frame,
+			})
+		}
 		VideoFormat::BGRx | VideoFormat::BGRA => I420::from_bgra(bytes, layout.stride, layout.width, layout.height),
 		VideoFormat::RGBx | VideoFormat::RGBA => I420::from_rgba(bytes, layout.stride, layout.width, layout.height),
 		other => Err(Error::Codec(anyhow::anyhow!(
@@ -1302,10 +1353,55 @@ mod tests {
 
 	#[test]
 	fn empty_chunk_is_limited_range_black() {
-		let frame = neutral_frame(4, 2).unwrap();
+		let frame = neutral_frame(4, 2, None).unwrap();
 		assert_eq!(frame.y(), &[16; 8]);
 		assert_eq!(frame.u(), &[128; 2]);
 		assert_eq!(frame.v(), &[128; 2]);
+	}
+
+	#[test]
+	fn negotiated_nv12_color_overrides_size_inference() {
+		let size = Size::new(1920, 1080);
+		assert_eq!(
+			color_from_pipewire(
+				spa::sys::SPA_VIDEO_COLOR_RANGE_0_255,
+				spa::sys::SPA_VIDEO_COLOR_MATRIX_BT601,
+				size,
+			),
+			Some(Color::Bt601Full)
+		);
+		assert_eq!(
+			color_from_pipewire(
+				spa::sys::SPA_VIDEO_COLOR_RANGE_UNKNOWN,
+				spa::sys::SPA_VIDEO_COLOR_MATRIX_UNKNOWN,
+				size,
+			),
+			None
+		);
+
+		let layout = FrameLayout {
+			stride: 4,
+			width: 4,
+			height: 2,
+			source_height: 2,
+		};
+		let frame = convert(
+			VideoFormat::NV12,
+			&[16, 16, 16, 16, 16, 16, 16, 16, 128, 128, 128, 128],
+			layout,
+			Some(Color::Bt601Full),
+		)
+		.unwrap();
+		assert_eq!(frame.color(), Some(Color::Bt601Full));
+	}
+
+	#[test]
+	fn empty_chunk_uses_full_range_black() {
+		let frame = neutral_frame(4, 2, Some(Color::Bt709Full)).unwrap();
+		assert_eq!(frame.y(), &[0; 8]);
+		assert_eq!(frame.u(), &[128; 2]);
+		assert_eq!(frame.v(), &[128; 2]);
+		assert_eq!(frame.color(), Some(Color::Bt709Full));
 	}
 
 	#[test]
@@ -1431,6 +1527,7 @@ mod tests {
 			},
 			format: DrmFormat::NV12,
 			modifier: 0,
+			color: Some(Color::Bt709Full),
 		});
 		let frame = DmaBuf::new(
 			DrmFormat::NV12,
@@ -1438,6 +1535,7 @@ mod tests {
 			2,
 			2,
 			vec![DmaBufPlane::new(0, 2), DmaBufPlane::new(4, 2)],
+			Some(Color::Bt709Full),
 			inner,
 		)
 		.expect("DMA-BUF");
@@ -1445,6 +1543,7 @@ mod tests {
 		assert_eq!(frame.modifier(), 0);
 		assert_eq!((frame.width(), frame.height()), (2, 2));
 		assert_eq!(frame.planes()[1], DmaBufPlane::new(4, 2));
+		assert_eq!(Surface::DmaBuf(frame.clone()).color(), Some(Color::Bt709Full));
 		let export = frame.export().expect("exported fd");
 		let clone = frame.clone();
 

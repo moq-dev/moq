@@ -245,6 +245,7 @@ pub struct DmaBuf {
 	width: u32,
 	height: u32,
 	planes: Vec<DmaBufPlane>,
+	color: Option<Color>,
 	inner: Arc<dyn DmaBufFrame>,
 }
 
@@ -270,6 +271,7 @@ impl DmaBuf {
 		width: u32,
 		height: u32,
 		planes: Vec<DmaBufPlane>,
+		color: Option<Color>,
 		inner: Arc<dyn DmaBufFrame>,
 	) -> Result<Self, Error> {
 		Size::new(width, height).validate("DMA-BUF")?;
@@ -282,6 +284,7 @@ impl DmaBuf {
 			width,
 			height,
 			planes,
+			color,
 			inner,
 		})
 	}
@@ -554,7 +557,7 @@ impl Surface {
 			#[cfg(all(target_os = "linux", feature = "nvdec"))]
 			Surface::Cuda(_) => None,
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
-			Surface::DmaBuf(_) => None,
+			Surface::DmaBuf(d) => d.color,
 			Surface::I420(i) => i.color(),
 		}
 	}
