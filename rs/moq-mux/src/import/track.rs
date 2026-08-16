@@ -189,7 +189,7 @@ impl<E: CatalogExt> Track<E> {
 		// Accept at the legacy microsecond timescale, matching the frame timestamps
 		// the container stamps. A codec-specific timescale (e.g. the opus sample
 		// rate) would be chosen here instead.
-		let track = request.accept(reserved.track_info());
+		let track = request.accept(reserved.track_info(format_priority(&init.format)));
 		let data = init.data.as_ref();
 		let kind = match init.format.as_str() {
 			"avc1" | "avcc" => {
@@ -521,6 +521,20 @@ pub struct TrackStream<E: CatalogExt = ()> {
 	kind: TrackStreamKind<E>,
 }
 
+/// The publisher priority for an [`Init`]'s format, so audio isn't queued behind a
+/// video backlog. The track has to be accepted before the format is matched, so this
+/// classifies from the format string; an unrecognized one is rejected immediately
+/// after, and its priority never reaches a subscriber.
+fn format_priority(format: &str) -> u8 {
+	match format {
+		// Every audio format `Track::new` accepts. Keep this in step with the format
+		// match there: an audio codec missing from this list silently publishes at the
+		// video priority, which is the ordering bug the priorities exist to prevent.
+		"aac" | "opus" | "flac" | "mp3" => hang::catalog::PRIORITY.audio,
+		_ => hang::catalog::PRIORITY.video,
+	}
+}
+
 impl<E: CatalogExt> TrackStream<E> {
 	/// Create an importer that publishes a single codec onto a reserved track.
 	///
@@ -530,7 +544,7 @@ impl<E: CatalogExt> TrackStream<E> {
 	/// timescale would be chosen). A [`VideoHint`] carrying a codec publishes the catalog before the
 	/// first frame; any [`Init::data`] seeds the stream (as a call to [`initialize`](Self::initialize)).
 	pub fn new(request: moq_net::track::Request, reserved: crate::catalog::Reserved<E>, init: Init) -> Result<Self> {
-		let track = request.accept(reserved.track_info());
+		let track = request.accept(reserved.track_info(format_priority(&init.format)));
 		let hint = video_hint(&init, None);
 		// Only the self-delimiting codecs can be recovered from a raw byte stream.
 		let kind = match init.format.as_str() {
@@ -817,7 +831,9 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn opus_import_delivers_frames() {
 		let (mut broadcast, catalog) = new_broadcast();
-		let track = broadcast.create_track("audio", hang::container::track_info()).unwrap();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
 		let subscriber = track.subscribe(None);
 
 		let config = crate::codec::opus::Config::new(48_000, 2);
@@ -859,7 +875,9 @@ mod tests {
 		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: &crate::catalog::Producer,
 	) -> (crate::codec::opus::Import, moq_net::track::Subscriber) {
-		let track = broadcast.create_track("audio", hang::container::track_info()).unwrap();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
 		let subscriber = track.subscribe(None);
 		let config = crate::codec::opus::Config::new(48_000, 2);
 		let import = crate::codec::opus::Import::new(track, catalog.reserve(), config.into()).unwrap();
@@ -1002,6 +1020,21 @@ mod tests {
 		assert_eq!(audio.codec.to_string(), "opus");
 		assert_eq!(audio.sample_rate, 48_000);
 		assert_eq!(audio.channel_count, 2);
+	}
+
+	/// Regression: `flac` and `mp3` fell through to the video priority, so those tracks
+	/// advertised 60 while `aac` and `opus` advertised 80 and lost the ordering the
+	/// priorities exist for. Every format `Track::new` accepts as audio belongs here.
+	#[test]
+	fn every_audio_format_ranks_as_audio() {
+		use hang::catalog::PRIORITY;
+
+		for format in ["aac", "opus", "flac", "mp3"] {
+			assert_eq!(format_priority(format), PRIORITY.audio, "{format} is an audio format");
+		}
+		for format in ["avc3", "h264", "hev1", "av01", "vp8", "vp9"] {
+			assert_eq!(format_priority(format), PRIORITY.video, "{format} is a video format");
+		}
 	}
 
 	/// An audio format with no init bytes errors up front (audio can't resolve its config from frames),

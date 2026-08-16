@@ -242,17 +242,22 @@ impl Directions {
 /// hops it crossed, and our own origin id is one of them, so a broadcast we
 /// publish is never announced back to us.
 ///
-/// Returns the uplink's bandwidth estimate, for the sources that can encode to
-/// fit it. Only an outbound client has one: a `--server-bind` publisher's sessions
-/// are inbound and never surfaced here, so it stays `None` and those sources
-/// encode at their configured rate.
+/// Returns an allocator over the uplink's bandwidth estimate, for the sources that
+/// can encode to fit it. Only an outbound client has one: a `--server-bind`
+/// publisher's sessions are inbound and never surfaced here, so it stays `None` and
+/// those sources encode at their configured rate.
+///
+/// One allocator per connection, minted here rather than per stage, since dividing
+/// the estimate is only meaningful across everything sharing it. A stage that built
+/// its own would split its own tracks correctly and still oversubscribe every other
+/// stage on the same connection, which is the whole problem.
 async fn spawn_moq(
 	moq: &MoqSide,
 	net: &Net,
 	origin: &moq_net::origin::Producer,
 	directions: Directions,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
-) -> anyhow::Result<Option<moq_net::bandwidth::Consumer>> {
+) -> anyhow::Result<Option<moq_net::bandwidth::Allocator>> {
 	let mut bandwidth = None;
 
 	if let Some(url) = moq.client.url.clone() {
@@ -271,7 +276,7 @@ async fn spawn_moq(
 		// Read before the handle moves into the task. This consumer is persistent: it
 		// survives reconnects, reading `None` while down, so it can be wired up before
 		// anything connects.
-		bandwidth = Some(reconnect.send_bandwidth());
+		bandwidth = Some(moq_net::bandwidth::Allocator::new(reconnect.send_bandwidth()));
 		tasks.spawn(async move { Ok(reconnect.closed().await?) });
 	}
 	spawn_server(tasks, moq, origin, net, directions).await?;
@@ -400,7 +405,7 @@ fn spawn_import(
 	origin: &moq_net::origin::Producer,
 	import: Import,
 	name: String,
-	bandwidth: Option<moq_net::bandwidth::Consumer>,
+	bandwidth: Option<moq_net::bandwidth::Allocator>,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Option<Publish>> {
 	// Capture is the only source that reads the bandwidth estimate, so without that

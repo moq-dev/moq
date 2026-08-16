@@ -158,7 +158,11 @@ impl<E: CatalogExt> Producer<E> {
 		let hang_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
 		let hangz_track =
 			broadcast.create_track(hang::Catalog::COMPRESSED_NAME, hang::Catalog::default_track_info())?;
-		let msf_track = broadcast.create_track(moq_msf::DEFAULT_NAME, None)?;
+		// The MSF track is the same catalog in another encoding, so it takes the same
+		// priority. Leaving it at the default would rank a subscriber reading MSF
+		// below every media track on a relay's upstream leg.
+		let msf_info = moq_net::track::Info::default().with_priority(hang::catalog::PRIORITY.catalog);
+		let msf_track = broadcast.create_track(moq_msf::DEFAULT_NAME, msf_info)?;
 
 		// Disable deltas for now to stay byte-compatible with consumers that only read snapshots.
 		let mut json_config = moq_json::snapshot::ProducerConfig::default();
@@ -185,10 +189,11 @@ impl<E: CatalogExt> Producer<E> {
 	/// Track properties for a media track under this catalog: hang's media defaults, plus any
 	/// [`Config::with_latency_max`] override.
 	///
-	/// Chain [`with_timescale`](moq_net::track::Info::with_timescale) for a container that
-	/// carries the source's own scale (CMAF and Matroska both do).
-	pub fn track_info(&self) -> moq_net::track::Info {
-		let info = hang::container::track_info();
+	/// `priority` should come from [`PRIORITY`](hang::catalog::PRIORITY) for the kind of media
+	/// the track carries. Chain [`with_timescale`](moq_net::track::Info::with_timescale) for a
+	/// container that carries the source's own scale (CMAF and Matroska both do).
+	pub fn track_info(&self, priority: u8) -> moq_net::track::Info {
+		let info = hang::container::track_info(priority);
 		match self.latency_max {
 			Some(latency_max) => info.with_latency_max(latency_max),
 			None => info,
@@ -563,6 +568,32 @@ mod test {
 
 	use super::*;
 
+	/// The catalog, its MSF twin, and the timeline all rank above media. They're the
+	/// index a player reads before any media is useful, and they're small enough that
+	/// sitting above media can't starve it. Regression: the MSF and timeline tracks
+	/// were minted with no `Info` at all, so one broadcast advertised its hang catalog
+	/// at 100 and the same catalog in MSF at 0.
+	#[tokio::test]
+	async fn non_media_tracks_rank_above_media() {
+		use hang::catalog::PRIORITY;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast).unwrap();
+		catalog.timeline().track("video").unwrap();
+
+		let consumer = broadcast.consume();
+		for name in [
+			hang::Catalog::DEFAULT_NAME,
+			hang::Catalog::COMPRESSED_NAME,
+			moq_msf::DEFAULT_NAME,
+			hang::timeline::DEFAULT_NAME,
+		] {
+			let track = consumer.track(name).expect("track");
+			let info = track.info().await.expect("info");
+			assert_eq!(info.priority, PRIORITY.catalog, "{name} should rank with the catalog");
+		}
+	}
+
 	#[test]
 	fn media_tracks_inherit_the_catalogs_declared_retention() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -571,10 +602,10 @@ mod test {
 		// full playlist window rather than moq-net's live-edge default.
 		let catalog = Producer::new(&mut broadcast).unwrap();
 		assert_eq!(
-			catalog.track_info().latency_max,
-			hang::container::track_info().latency_max
+			catalog.track_info(hang::catalog::PRIORITY.video).latency_max,
+			hang::container::track_info(hang::catalog::PRIORITY.video).latency_max
 		);
-		assert!(catalog.track_info().latency_max > moq_net::track::DEFAULT_LATENCY_MAX);
+		assert!(catalog.track_info(hang::catalog::PRIORITY.video).latency_max > moq_net::track::DEFAULT_LATENCY_MAX);
 
 		// An override reaches every media track this catalog mints, and does NOT disturb the
 		// timescale hang pins (or survive a retimescale for a source-scale container).
@@ -582,7 +613,7 @@ mod test {
 		let config = Config::default().with_latency_max(std::time::Duration::from_secs(3));
 		let catalog = Producer::with_config(&mut broadcast, config).unwrap();
 
-		let info = catalog.track_info();
+		let info = catalog.track_info(hang::catalog::PRIORITY.video);
 		assert_eq!(info.latency_max, std::time::Duration::from_secs(3));
 		assert_eq!(info.timescale, hang::container::TIMESCALE);
 
@@ -593,11 +624,11 @@ mod test {
 		// Every handle mints under the same policy, whatever order it was taken in: the codec
 		// paths hold a reservation and the container paths hold a clone.
 		assert_eq!(
-			catalog.reserve().track_info().latency_max,
+			catalog.reserve().track_info(hang::catalog::PRIORITY.video).latency_max,
 			std::time::Duration::from_secs(3)
 		);
 		assert_eq!(
-			catalog.clone().track_info().latency_max,
+			catalog.clone().track_info(hang::catalog::PRIORITY.video).latency_max,
 			std::time::Duration::from_secs(3)
 		);
 	}

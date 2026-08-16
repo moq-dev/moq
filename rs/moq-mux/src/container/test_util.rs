@@ -20,7 +20,10 @@ impl Live {
 		let consumer = broadcast.consume();
 		let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let track = broadcast
-			.create_track(broadcast.unique_name(name), hang::container::track_info())
+			.create_track(
+				broadcast.unique_name(name),
+				hang::container::track_info(hang::catalog::PRIORITY.video),
+			)
 			.unwrap();
 		insert(&mut catalog, track.name().to_string());
 		Self {

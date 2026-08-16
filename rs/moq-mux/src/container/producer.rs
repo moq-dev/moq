@@ -418,7 +418,7 @@ mod tests {
 	/// by hand, it just hands `estimate()` to its rendition.
 	#[tokio::test]
 	async fn writes_measure_the_catalog_estimate() {
-		let track = track_producer("test", hang::container::track_info());
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		// 25ms frames of 5 kB, a keyframe every 10, over more than the bitrate window.
@@ -437,7 +437,7 @@ mod tests {
 	/// Dropping it there instead would leave an audio track's bitrate permanently undetectable.
 	#[tokio::test]
 	async fn per_frame_groups_still_measure_bitrate() {
-		let track = track_producer("test", hang::container::track_info());
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		// 40ms packets of 5 kB: 1 Mbps.
@@ -454,7 +454,7 @@ mod tests {
 	/// reset a paused publisher would advertise the whole gap as the buffer a player must hold.
 	#[tokio::test]
 	async fn discontinuity_is_not_measured_across() {
-		let track = track_producer("test", hang::container::track_info());
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(sized_frame(0, true, 5_000)).unwrap();
@@ -496,7 +496,7 @@ mod tests {
 	/// inflated bitrate on the catalog permanently.
 	#[tokio::test]
 	async fn a_rejected_frame_is_not_measured() {
-		let track = track_producer("test", hang::container::track_info());
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut producer = Producer::new(track, RejectAt(40_000));
 
 		// 40ms frames of 5 kB (1 Mbps), except one 500 kB frame the container turns away.
@@ -512,7 +512,7 @@ mod tests {
 	/// Reorder delay is the one input the writes can't reveal, since frames carry no decode time.
 	#[tokio::test]
 	async fn reorder_raises_the_measured_jitter() {
-		let track = track_producer("test", hang::container::track_info());
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap();
@@ -544,7 +544,7 @@ mod tests {
 	/// consumer can see the break instead of inferring continuity from adjacent sequences.
 	#[tokio::test]
 	async fn discontinuity_publishes_an_empty_group() {
-		let track = track_producer("test", hang::container::track_info());
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
@@ -564,7 +564,7 @@ mod tests {
 	/// 40-minute-stale frame reached a VOD recording in moq-dev/moq.pro#814.
 	#[tokio::test]
 	async fn discontinuity_moves_the_live_edge_off_stale_content() {
-		let track = track_producer("test", hang::container::track_info());
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap();
@@ -580,7 +580,7 @@ mod tests {
 	/// Explicit keyframe closes the current group and starts a new one.
 	#[tokio::test]
 	async fn keyframe_closes_group_immediately() {
-		let track = track_producer("test", hang::container::track_info());
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
@@ -599,7 +599,7 @@ mod tests {
 	/// per audio packet" storm.
 	#[tokio::test]
 	async fn needs_keyframe_drives_audio_grouping() {
-		let track = track_producer("test", hang::container::track_info());
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
@@ -623,7 +623,7 @@ mod tests {
 	/// `cut()` flushes the current group immediately; the next write must be a keyframe.
 	#[tokio::test]
 	async fn cut_closes_immediately() {
-		let track = track_producer("test", hang::container::track_info());
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
@@ -641,7 +641,7 @@ mod tests {
 	#[tokio::test]
 	#[allow(deprecated)]
 	async fn deprecated_finish_group_still_closes() {
-		let track = track_producer("test", hang::container::track_info());
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
@@ -657,7 +657,7 @@ mod tests {
 	/// Writing a non-keyframe with no open group returns MissingKeyframe.
 	#[test]
 	fn first_frame_must_be_keyframe() {
-		let track = track_producer("test", hang::container::track_info());
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		let err = producer.write(frame(0, false)).unwrap_err();
@@ -676,7 +676,7 @@ mod tests {
 	/// `seek(n)` opens the next group at sequence `n`.
 	#[tokio::test]
 	async fn seek_uses_explicit_sequence() {
-		let track = track_producer("test", hang::container::track_info());
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
@@ -691,7 +691,7 @@ mod tests {
 	/// `seek` is consumed on the next group creation; subsequent groups auto-increment from there.
 	#[tokio::test]
 	async fn seek_clears_pending_after_use() {
-		let track = track_producer("test", hang::container::track_info());
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy);
 
@@ -729,7 +729,7 @@ mod tests {
 	/// group's last frame, without buffering an extra frame.
 	#[tokio::test]
 	async fn keyframe_backfills_batched_durations() {
-		let track = track_producer("test", hang::container::track_info());
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let recording = Recording::default();
 		let mut producer = Producer::new(track, recording.clone()).with_buffer(std::time::Duration::from_secs(10));
 

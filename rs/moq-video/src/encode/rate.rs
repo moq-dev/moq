@@ -15,17 +15,16 @@ use std::time::Instant;
 /// bandwidth immediately when the pipe closes, take it back slowly when it
 /// opens, and don't twitch at every jitter in the estimate.
 ///
+/// The estimate handed in is expected to be this sender's alone. Splitting one
+/// connection's estimate among the senders sharing it is
+/// [`bandwidth::Allocator`](moq_net::bandwidth::Allocator)'s job, one layer down,
+/// so nothing here holds a fraction back for anyone else.
+///
 /// `#[non_exhaustive]`: construct via [`Policy::new`] and set fields, so new
 /// knobs stay additive.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Policy {
-	/// Fraction of the estimate to target, reserving room for the other tracks
-	/// sharing this connection (audio) and for transport overhead. Defaults to
-	/// 0.9. Must be greater than 0; values above 1.0 target more than the link
-	/// is estimated to carry and are clamped away.
-	pub headroom: f64,
-
 	/// Upper bound in bits per second, normally the bitrate the caller asked
 	/// for. The estimate can only ever take the target *down* from here: an
 	/// optimistic estimate is not a reason to send more than was configured.
@@ -54,7 +53,6 @@ impl Policy {
 	/// defaults for every other knob.
 	pub fn new(max: u64) -> Self {
 		Self {
-			headroom: 0.9,
 			max,
 			// A tenth of the ceiling: low enough to ride out a bad uplink, high
 			// enough that what we do send is still worth decoding.
@@ -76,8 +74,8 @@ impl Policy {
 /// # use moq_video::encode::rate::{Control, Policy};
 /// # use std::time::Instant;
 /// let mut control = Control::new(Policy::new(4_000_000));
-/// // A 2 Mbps estimate takes the 4 Mbps target down to 2 Mbps * 0.9 headroom.
-/// assert_eq!(control.update(Some(2_000_000), Instant::now()), Some(1_800_000));
+/// // A 2 Mbps estimate takes the 4 Mbps target down to what the link will carry.
+/// assert_eq!(control.update(Some(2_000_000), Instant::now()), Some(2_000_000));
 /// ```
 ///
 /// The time source is a parameter rather than an [`Instant::now`] call so the
@@ -116,16 +114,10 @@ impl Control {
 	pub fn update(&mut self, estimate: Option<u64>, now: Instant) -> Option<u64> {
 		let estimate = estimate?;
 
-		// Normalize here rather than trusting the fields: `min > max` would make
-		// the clamp below panic, and a non-finite headroom would poison the cast.
+		// Normalize rather than trusting the fields: `min > max` would make the
+		// clamp below panic.
 		let min = self.policy.min.min(self.policy.max);
-		let headroom = if self.policy.headroom.is_finite() {
-			self.policy.headroom.clamp(0.0, 1.0)
-		} else {
-			0.0
-		};
-
-		let desired = ((estimate as f64 * headroom) as u64).clamp(min, self.policy.max);
+		let desired = estimate.clamp(min, self.policy.max);
 
 		let next = if desired <= self.target {
 			// Attack: the pipe is closing, give the bandwidth back now.
@@ -149,8 +141,25 @@ impl Control {
 		// therefore keeps growing while small raises are suppressed, so a raise
 		// lands once it clears the threshold instead of being starved forever by
 		// a per-tick allowance smaller than the threshold.
+		//
+		// A raise landing exactly on [`Policy::max`] is exempt: that's the last step
+		// of a recovery, not a twitch. `next` stops growing once it reaches the
+		// ceiling, so a target arriving within `hysteresis` of it has no move left
+		// that could ever clear the threshold, and the encoder would sit a few
+		// percent under its configured rate for good after one congestion event.
+		//
+		// Scoped to the *configured* ceiling, not to any `desired`. Every raise
+		// eventually lands on `desired`, so exempting all of them would let a
+		// slowly-rising estimate reconfigure the encoder on every tick, which is
+		// precisely what the deadband exists to prevent. Stalling a few percent
+		// below a merely estimate-limited ceiling is the deadband working; stalling
+		// below the rate the caller asked for is not.
+		//
+		// Drops keep the deadband either way: sitting a little above a falling
+		// estimate is what it's for.
+		let settling = next > self.target && next == self.policy.max;
 		let hysteresis = self.policy.hysteresis.max(0.0);
-		if (next.abs_diff(self.target) as f64) < self.target as f64 * hysteresis {
+		if !settling && (next.abs_diff(self.target) as f64) < self.target as f64 * hysteresis {
 			return None;
 		}
 
@@ -166,8 +175,7 @@ mod tests {
 
 	use super::*;
 
-	/// 4 Mbps ceiling, so the 0.9 headroom and the max/10 floor land on round
-	/// numbers: 400 kbps floor, and an estimate of E targets 0.9 * E.
+	/// 4 Mbps ceiling, so the max/10 floor lands on a round 400 kbps.
 	fn control() -> Control {
 		Control::new(Policy::new(4_000_000))
 	}
@@ -178,11 +186,11 @@ mod tests {
 	}
 
 	#[test]
-	fn drop_applies_immediately_with_headroom() {
+	fn drop_applies_immediately() {
 		let mut control = control();
-		// A 2 Mbps pipe: target 90% of it at once, no ramp, no waiting.
-		assert_eq!(control.update(Some(2_000_000), Instant::now()), Some(1_800_000));
-		assert_eq!(control.target(), 1_800_000);
+		// A 2 Mbps pipe: take the target down to it at once, no ramp, no waiting.
+		assert_eq!(control.update(Some(2_000_000), Instant::now()), Some(2_000_000));
+		assert_eq!(control.target(), 2_000_000);
 	}
 
 	#[test]
@@ -194,7 +202,7 @@ mod tests {
 		// Losing the estimate (disconnected) is not evidence the uplink is
 		// healthy again, so the target must not jump back to max.
 		assert_eq!(control.update(None, now + Duration::from_secs(10)), None);
-		assert_eq!(control.target(), 1_800_000);
+		assert_eq!(control.target(), 2_000_000);
 	}
 
 	#[test]
@@ -217,26 +225,26 @@ mod tests {
 	fn raise_is_ramp_limited() {
 		let mut control = control();
 		let start = Instant::now();
-		control.update(Some(1_000_000), start).unwrap(); // target 900k
+		control.update(Some(1_000_000), start).unwrap(); // target 1M
 
 		// The pipe reopens to 4 Mbps. One second later the default 25%/s ramp
-		// allows only 900k -> 1125k, not the full 3.6 Mbps the estimate wants.
+		// allows only 1M -> 1.25M, not the full 4 Mbps the estimate wants.
 		let raised = control.update(Some(4_000_000), start + Duration::from_secs(1)).unwrap();
-		assert_eq!(raised, 1_125_000);
+		assert_eq!(raised, 1_250_000);
 	}
 
 	#[test]
 	fn raise_eventually_reaches_the_estimate() {
 		let mut control = control();
 		let start = Instant::now();
-		control.update(Some(1_000_000), start).unwrap(); // target 900k
+		control.update(Some(1_000_000), start).unwrap(); // target 1M
 
 		// Feed a steady healthy estimate every 100ms; the ramp should walk the
-		// target up to the full 90% of it and then stop.
+		// target back up to the ceiling and then stop.
 		for tick in 1..=200 {
 			control.update(Some(4_000_000), start + Duration::from_millis(100 * tick));
 		}
-		assert_eq!(control.target(), 3_600_000);
+		assert_eq!(control.target(), 4_000_000);
 	}
 
 	/// Regression: the ramp allowance per tick (25%/s * 100ms = 2.5%) is smaller
@@ -248,7 +256,7 @@ mod tests {
 	fn suppressed_raises_do_not_starve_the_ramp() {
 		let mut control = control();
 		let start = Instant::now();
-		control.update(Some(1_000_000), start).unwrap(); // target 900k
+		control.update(Some(1_000_000), start).unwrap(); // target 1M
 
 		// Tick at 100ms: each tick alone is under the 5% threshold.
 		let mut raised = None;
@@ -260,25 +268,85 @@ mod tests {
 		}
 
 		let (tick, next) = raised.expect("a raise must eventually clear hysteresis");
-		// 5% of 900k needs 0.05/0.25 = 0.2s of ramp, i.e. the tick at 200ms.
+		// 5% of 1M needs 0.05/0.25 = 0.2s of ramp, i.e. the tick at 200ms.
 		assert_eq!(tick, 2);
-		assert_eq!(next, 945_000);
+		assert_eq!(next, 1_050_000);
+	}
+
+	/// Regression: the ramp stops growing `next` once it reaches the ceiling, so a
+	/// target that lands within the 5% deadband of it has no move left that can
+	/// clear hysteresis. Without the exemption for a raise that reaches `desired`,
+	/// the walk above stalls at 3_866_256 and the encoder never returns to the
+	/// bitrate it was configured with.
+	#[test]
+	fn a_raise_reaching_the_ceiling_beats_hysteresis() {
+		let mut control = control();
+		let start = Instant::now();
+		control.update(Some(1_000_000), start).unwrap();
+
+		// Walk up until it settles, then confirm where it settled.
+		let mut last = None;
+		for tick in 1..=200 {
+			if let Some(next) = control.update(Some(4_000_000), start + Duration::from_millis(100 * tick)) {
+				last = Some(next);
+			}
+		}
+
+		assert_eq!(last, Some(4_000_000));
+		// And it stops there rather than reapplying the same value forever.
+		assert_eq!(control.update(Some(4_000_000), start + Duration::from_secs(60)), None);
+	}
+
+	/// Regression: the ceiling exemption above must not swallow the deadband. Every
+	/// raise eventually lands on `desired`, so keying it on that rather than on the
+	/// configured ceiling let a slowly-rising estimate retune the encoder on every
+	/// single tick, which is the exact behavior `hysteresis` exists to prevent.
+	#[test]
+	fn upward_jitter_stays_inside_the_deadband() {
+		let mut control = control();
+		let start = Instant::now();
+		control.update(Some(2_000_000), start).unwrap(); // target 2M, well under the 4M ceiling
+
+		// A 0.5% rise: inside the 5% deadband, and nowhere near the ceiling.
+		assert_eq!(
+			control.update(Some(2_010_000), start + Duration::from_millis(100)),
+			None
+		);
+
+		// A whole walk of them still doesn't, rather than one reconfigure per tick.
+		// Stops short of 2.1M, which is exactly 5% up and so clears the threshold.
+		for tick in 2..=9 {
+			let estimate = 2_000_000 + tick * 10_000;
+			assert_eq!(
+				control.update(Some(estimate), start + Duration::from_millis(100 * tick)),
+				None,
+				"estimate {estimate} is inside the deadband"
+			);
+		}
+		assert_eq!(control.target(), 2_000_000);
+
+		// And the deadband is still only a deadband: once the estimate does clear it,
+		// the raise lands normally, without needing the ceiling exemption.
+		assert_eq!(
+			control.update(Some(2_200_000), start + Duration::from_secs(2)),
+			Some(2_200_000)
+		);
 	}
 
 	#[test]
 	fn small_moves_are_suppressed() {
 		let mut control = control();
 		let now = Instant::now();
-		control.update(Some(2_000_000), now).unwrap(); // target 1.8M
+		control.update(Some(2_000_000), now).unwrap(); // target 2M
 
 		// 2% under the current target: inside the 5% deadband, so no reconfigure.
 		assert_eq!(control.update(Some(1_960_000), now + Duration::from_secs(1)), None);
-		assert_eq!(control.target(), 1_800_000);
+		assert_eq!(control.target(), 2_000_000);
 
 		// 20% under: outside the deadband, so it applies.
 		assert_eq!(
 			control.update(Some(1_600_000), now + Duration::from_secs(2)),
-			Some(1_440_000)
+			Some(1_600_000)
 		);
 	}
 
@@ -291,16 +359,5 @@ mod tests {
 		let mut control = Control::new(policy);
 		control.update(Some(2_000_000), Instant::now());
 		assert!(control.target() <= 5_000_000);
-	}
-
-	/// A non-finite headroom would make the `as u64` cast produce garbage rather
-	/// than a rate, so it's normalized away.
-	#[test]
-	fn non_finite_headroom_does_not_poison_the_target() {
-		let mut policy = Policy::new(4_000_000);
-		policy.headroom = f64::NAN;
-		let mut control = Control::new(policy);
-		control.update(Some(2_000_000), Instant::now());
-		assert_eq!(control.target(), 400_000); // floored, not NaN-cast to 0
 	}
 }

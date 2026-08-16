@@ -765,7 +765,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn read_single_group() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));
@@ -784,7 +784,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn read_multiple_frames_single_group() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));
@@ -803,7 +803,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn read_multiple_groups_within_latency() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));
@@ -823,7 +823,7 @@ mod tests {
 	#[tokio::test]
 	async fn latency_skip_delivers_recent_groups() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(100)));
@@ -866,7 +866,7 @@ mod tests {
 	#[tokio::test]
 	async fn zero_latency_skips_aggressively() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::REAL_TIME);
 
@@ -905,7 +905,7 @@ mod tests {
 	#[tokio::test]
 	async fn latency_skip_correctness() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(100)));
@@ -975,7 +975,7 @@ mod tests {
 	#[tokio::test]
 	async fn reset_keeps_out_of_order_new_group() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_secs(10)));
@@ -1015,7 +1015,7 @@ mod tests {
 	#[tokio::test]
 	async fn reset_detected_behind_forward_newest_group() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_secs(10)));
@@ -1051,7 +1051,7 @@ mod tests {
 	#[tokio::test]
 	async fn backwards_timestamp_resets_buffer() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		// Large latency so the slow-group skip never fires; isolate the rewind path.
 		let mut consumer =
@@ -1078,7 +1078,7 @@ mod tests {
 	/// configuration. Here group 2 rewinds the timeline and bumps the discontinuity counter.
 	#[tokio::test]
 	async fn backwards_timestamp_always_resets() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_secs(10)));
@@ -1114,7 +1114,7 @@ mod tests {
 	/// last (a group's end) -- and a publisher emitting them must not break us.
 	#[tokio::test]
 	async fn empty_payload_is_skipped() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));
@@ -1144,7 +1144,7 @@ mod tests {
 	/// read, so a stall or an infinite loop fails this rather than hanging forever.
 	#[tokio::test]
 	async fn consecutive_markers_do_not_stall() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));
@@ -1178,7 +1178,7 @@ mod tests {
 	#[tokio::test]
 	async fn groups_delivered_in_sequence_order() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));
@@ -1215,7 +1215,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn adjacent_group_flushed_immediately() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));
@@ -1234,7 +1234,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn bframes_within_group() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));
@@ -1254,7 +1254,7 @@ mod tests {
 	#[tokio::test]
 	async fn empty_track_returns_none() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));
@@ -1273,7 +1273,7 @@ mod tests {
 	#[tokio::test]
 	async fn track_closed_with_error() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));
@@ -1297,7 +1297,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn gap_in_group_sequence_recovery() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(100)));
@@ -1316,7 +1316,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn gap_at_start_of_sequence() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(80)));
@@ -1340,7 +1340,7 @@ mod tests {
 	/// group + the sequences after it evict, then it resumes).
 	#[tokio::test]
 	async fn evicted_group_with_gap_skips_to_live() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(100)));
@@ -1384,7 +1384,7 @@ mod tests {
 	/// higher group is buffered, and the track never finishes.
 	#[tokio::test]
 	async fn missing_sequence_skips_on_live_track() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(100)));
@@ -1484,7 +1484,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn frame_timestamp_and_index_decoding() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));
@@ -1505,7 +1505,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn frame_payload_preserved() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));
@@ -1544,7 +1544,7 @@ mod tests {
 	#[tokio::test]
 	async fn no_infinite_loop_with_buffered_frames() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_secs(10)));
@@ -1591,7 +1591,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn large_timestamps() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_secs(3700)));
@@ -1608,7 +1608,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn set_latency_changes_behavior() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_secs(10)));
@@ -1627,7 +1627,7 @@ mod tests {
 	#[tokio::test]
 	async fn max_timestamp_tracks_through_bframes() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		// latency must exceed (group1_max - group0_min) = 100ms - 0ms = 100ms
 		// to avoid the latency skip and test B-frame timestamp tracking.
@@ -1680,7 +1680,7 @@ mod tests {
 	#[tokio::test]
 	async fn startup_selects_earliest_group() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(100)));
@@ -1734,7 +1734,7 @@ mod tests {
 	#[tokio::test]
 	async fn startup_skips_groups_without_data() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));
@@ -1758,7 +1758,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn startup_single_group_mid_stream() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));
@@ -1773,7 +1773,7 @@ mod tests {
 	#[tokio::test]
 	async fn multiple_sequential_latency_skips() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(50)));
@@ -1810,7 +1810,7 @@ mod tests {
 	#[tokio::test]
 	async fn latency_skip_boundary_exact() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(100)));
@@ -1849,7 +1849,7 @@ mod tests {
 	#[tokio::test]
 	async fn single_newer_group_triggers_skip() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(100)));
@@ -1888,7 +1888,7 @@ mod tests {
 	#[tokio::test]
 	async fn single_missing_sequence_near_eof_skips() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(100)));
@@ -1905,7 +1905,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn group_error_skips_to_next() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));
@@ -1923,7 +1923,7 @@ mod tests {
 	#[tokio::test]
 	async fn track_finishes_while_reading() {
 		tokio::time::pause();
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));
@@ -1953,7 +1953,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn empty_group_advances() {
-		let mut track = track_producer("test", hang::container::track_info());
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));
@@ -1974,7 +1974,7 @@ mod tests {
 	async fn video_container_legacy() {
 		tokio::time::pause();
 
-		let mut track = track_producer("video", hang::container::track_info());
+		let mut track = track_producer("video", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(None);
 		let mut consumer =
 			Consumer::new(consumer_track, Container::Legacy).with_latency(Latency::max(Duration::from_millis(500)));

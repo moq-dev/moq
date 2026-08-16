@@ -203,7 +203,7 @@ mod tests {
 		video.framerate = Some(30.0);
 		catalog.lock().video.insert("video", video).unwrap();
 
-		let info = hang::container::track_info();
+		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 		let mut track = broadcast.create_track("video", info).unwrap();
 
 		let mut encoder = moq_video::encode::Encoder::new(&{
@@ -259,7 +259,7 @@ mod tests {
 		video.framerate = Some(30.0);
 		catalog.lock().video.insert("video", video).unwrap();
 
-		let info = hang::container::track_info();
+		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 		let mut track = broadcast.create_track("video", info).unwrap();
 
 		let source = Source {

@@ -169,7 +169,9 @@ mod tests {
 	#[tokio::test]
 	async fn reads_the_container_the_catalog_declares() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast.create_track("audio", hang::container::track_info()).unwrap();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
 		let subscriber = broadcast.consume();
 
 		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
@@ -231,7 +233,9 @@ mod tests {
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let subscriber = broadcast.consume();
-		let track = broadcast.create_track("audio", hang::container::track_info()).unwrap();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(&catalog.container).unwrap();
 		let mut producer = moq_mux::container::Producer::new(track, container);
 

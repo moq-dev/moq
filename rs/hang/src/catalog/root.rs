@@ -105,8 +105,11 @@ impl Catalog {
 	/// Track properties for creating the catalog track via
 	/// [`create_track`](moq_net::broadcast::Producer::create_track) at
 	/// [`DEFAULT_NAME`](Self::DEFAULT_NAME).
+	///
+	/// Keeps the bare `moq_net` retention rather than the media one: the catalog is
+	/// snapshot mode, so the useful value is the live edge, which is always kept.
 	pub fn default_track_info() -> moq_net::track::Info {
-		moq_net::track::Info::default()
+		moq_net::track::Info::default().with_priority(PRIORITY.catalog)
 	}
 
 	/// The subscription preferences used for the catalog track (high priority so

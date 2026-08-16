@@ -241,7 +241,7 @@ impl Publish {
 		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 		let source = match format {
 			PublishFormat::Avc3 => {
-				let track = broadcast.unique_track(".avc3", catalog.track_info())?;
+				let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))?;
 				let import = moq_mux::codec::h264::Import::new(track, catalog.reserve(), Default::default())?;
 				let split = Box::new(moq_mux::codec::h264::Split::new());
 				Source::Stream(PublishDecoder::Avc3 {
@@ -266,21 +266,24 @@ impl Publish {
 	/// Build a publisher capturing local devices (camera/screen and microphone).
 	///
 	/// `bandwidth` is the uplink's send estimate, when there is one: the video
-	/// encoder follows it down while the link is congested rather than
+	/// encoder follows its share down while the link is congested rather than
 	/// overshooting a pipe that can't carry it. Pass `None` to encode at the
 	/// configured bitrate regardless.
+	///
+	/// Audio and video share one allocator, so the video encoder targets what's
+	/// left after audio's reservation rather than the whole uplink.
 	#[cfg(feature = "capture")]
 	pub fn capture(
 		mut broadcast: moq_net::broadcast::Producer,
 		args: &CaptureArgs,
-		bandwidth: Option<moq_net::bandwidth::Consumer>,
+		bandwidth: Option<moq_net::bandwidth::Allocator>,
 		latency_max: Option<std::time::Duration>,
 	) -> anyhow::Result<Self> {
 		let config = moq_mux::catalog::Config::default().with_latency_max(latency_max);
 		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 
-		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode(bandwidth)));
-		let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode()));
+		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode(bandwidth.clone())));
+		let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode(bandwidth)));
 		anyhow::ensure!(video.is_some() || audio.is_some(), "nothing to capture");
 
 		Ok(Self {
@@ -392,7 +395,7 @@ impl CaptureArgs {
 		config
 	}
 
-	fn video_encode(&self, bandwidth: Option<moq_net::bandwidth::Consumer>) -> moq_video::encode::Options {
+	fn video_encode(&self, bandwidth: Option<moq_net::bandwidth::Allocator>) -> moq_video::encode::Options {
 		let mut options = moq_video::encode::Options::default();
 		options.bitrate = self.bitrate;
 		options.codec = self.codec.into();
@@ -428,9 +431,10 @@ impl CaptureArgs {
 	/// The audio counterpart to [`video_encode`](Self::video_encode). `track` is
 	/// left unset so the name derives from the codec, the way the video side
 	/// names its track; consumers find it through the catalog either way.
-	fn audio_encode(&self) -> moq_audio::encode::Options {
+	fn audio_encode(&self, bandwidth: Option<moq_net::bandwidth::Allocator>) -> moq_audio::encode::Options {
 		let mut options = moq_audio::encode::Options::default();
 		options.bitrate = self.audio_bitrate;
+		options.bandwidth = bandwidth;
 		options
 	}
 }
@@ -505,7 +509,7 @@ mod tests {
 
 		// Section-framed verbatim stream (SCTE-35, stream_type 0x86).
 		let section = broadcast
-			.unique_track(".scte35", hang::container::track_info())
+			.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.text))
 			.unwrap();
 		let mut section_track = tscat::Track::new(SECTION_PID);
 		section_track.verbatim = Some(tscat::Verbatim::new(0x86, tscat::Framing::Section));
@@ -531,7 +535,9 @@ mod tests {
 
 		// PES-framed verbatim stream (undecoded private data, stream_type 0x06), with
 		// an explicit PES stream_id to round-trip.
-		let pes = broadcast.unique_track(".data", hang::container::track_info()).unwrap();
+		let pes = broadcast
+			.unique_track(".data", hang::container::track_info(hang::catalog::PRIORITY.text))
+			.unwrap();
 		let mut verbatim = tscat::Verbatim::new(0x06, tscat::Framing::Pes);
 		verbatim.stream_id = Some(VERBATIM_PES_STREAM_ID);
 		let mut pes_track = tscat::Track::new(VERBATIM_PES_PID);

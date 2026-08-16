@@ -39,6 +39,15 @@ pub async fn publish_capture(
 	let mut producer = Producer::new(&mut broadcast, catalog, input, &encode)?;
 	let track = producer.track().clone();
 
+	// Reserve what audio actually costs, so a video encoder on the same connection
+	// sizes itself against what's left. The share is deliberately dropped: audio
+	// doesn't follow it yet, and the reservation lives with the track rather than
+	// with this handle. The encoder is open by now, so this is its real rate even
+	// when the caller left `Options::bitrate` unset for Opus to pick.
+	if let Some(allocator) = &encode.bandwidth {
+		allocator.register(&track.demand(), producer.bitrate());
+	}
+
 	let result = capture_loop(&mut producer, &track, &capture, &clock).await;
 
 	// Best-effort clean close: flush the trailing sub-frame and finalize the
