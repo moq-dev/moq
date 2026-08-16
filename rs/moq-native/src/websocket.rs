@@ -5,8 +5,8 @@
 //! a small head start ([`Client::delay`]), so WebSocket only wins when QUIC can't get
 //! through. Servers accept it on a separate TCP port via [`Listener`].
 
-use qmux::tokio_tungstenite;
-use qmux::tokio_tungstenite::tungstenite::{self, http};
+use qmux::ws::tokio_tungstenite;
+use qmux::ws::tokio_tungstenite::tungstenite::{self, http};
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::{net, time};
@@ -188,10 +188,10 @@ pub(crate) async fn connect(
 	// restricts. qmux also offers the bare ALPNs (`qmux-01`, `qmux-00`,
 	// `webtransport`) by default so we still interop with relays that only know a
 	// wire-format version.
-	let session = qmux::Client::new()
+	let session = qmux::ws::Client::new()
 		.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
 		.with_connector(connector)
-		.with_keep_alive(qmux::KeepAlive::default()) // 5s ping / 30s deadline, parity with QUIC
+		.with_keep_alive(qmux::ws::KeepAlive::default()) // 5s ping / 30s deadline, parity with QUIC
 		.connect(url.as_str())
 		.await
 		.map_err(Error::Connect)?;
@@ -202,7 +202,7 @@ pub(crate) async fn connect(
 	Ok(session)
 }
 
-/// The QMux drafts a moq ALPN is allowed to ride on, for `qmux::*::with_protocols`.
+/// The QMux drafts a moq ALPN is allowed to ride on, for `qmux::ws::Client::with_protocols`.
 ///
 /// moq-transport-18 and -19 require qmux-01, so we never pair them with qmux-00.
 /// This mirrors the policy in `js/net`'s `connect.ts`. Every other ALPN returns
@@ -349,7 +349,7 @@ impl Listener {
 				.unwrap()
 				.take()
 				.expect("successful upgrade selected a protocol");
-			let upgraded = qmux::ws::Upgraded::new(websocket).with_keep_alive(qmux::KeepAlive::default());
+			let upgraded = qmux::ws::Upgraded::new(websocket).with_keep_alive(qmux::ws::KeepAlive::default());
 			let session = match protocol {
 				Some(protocol) => upgraded.with_alpn(&protocol).accept(),
 				None => upgraded.accept(),
