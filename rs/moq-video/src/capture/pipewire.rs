@@ -1169,7 +1169,7 @@ fn frame_data_size(format: VideoFormat, layout: FrameLayout) -> Option<usize> {
 			.checked_sub(1)?
 			.checked_mul(stride)?
 			.checked_add(row_size),
-		_ => stride.checked_mul(height),
+		_ => height.checked_sub(1)?.checked_mul(stride)?.checked_add(row_size),
 	}
 }
 
@@ -1586,7 +1586,7 @@ mod tests {
 			height: 2,
 			source_height: 2,
 		};
-		assert_eq!(frame_data_size(VideoFormat::BGRx, packed), Some(40));
+		assert_eq!(frame_data_size(VideoFormat::BGRx, packed), Some(36));
 
 		let nv12 = FrameLayout {
 			stride: 6,
