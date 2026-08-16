@@ -422,6 +422,7 @@ export class Producer {
 			// it opened, which undercounts that group's tail.
 			let max = start;
 			for (const track of this.#tracks.values()) {
+				if (track.passive) continue;
 				if (track.frontier !== undefined && track.frontier > max) max = track.frontier;
 			}
 			endUnits = Math.floor((max * DEFAULT_TIMESCALE) / 1_000_000);
@@ -453,7 +454,10 @@ export class Producer {
 			const ranges: Range[] = [];
 			while (track.pending.length > 0) {
 				const group = track.pending[0];
-				if (end !== undefined && group.pts >= end) break;
+				// A pacing track is assigned by content time. A passive track is assigned by
+				// arrival, so every group pending when the segment closes belongs to it regardless
+				// of the timestamp basis carried by that track.
+				if (!track.passive && end !== undefined && group.pts >= end) break;
 				track.pending.shift();
 				const last = ranges.at(-1);
 				// Contiguous sequences extend the run; a skip starts a new range (a gap: groups

@@ -515,3 +515,25 @@ test("a late passive group lands in the next segment", async () => {
 		tracks: { "catalog.json": [{ start: 0, end: 0 }], video0: [{ start: 1, end: 1 }] },
 	});
 });
+
+test("a passive track uses arrival and does not extend the tail", async () => {
+	const { timeline, records } = capture();
+	const video = timeline.track("video0");
+	const catalog = timeline.passive("catalog.json");
+
+	video.record(0, us(0));
+	catalog.record(0, us(10_000));
+	video.record(1, us(2000));
+	video.end(us(4000));
+	timeline.finish();
+
+	expect(await records()).toEqual([
+		{
+			segment: 0,
+			pts: 0,
+			duration: 2000,
+			tracks: { "catalog.json": [{ start: 0, end: 0 }], video0: [{ start: 0, end: 0 }] },
+		},
+		{ segment: 1, pts: 2000, duration: 2000, tracks: { video0: [{ start: 1, end: 1 }] } },
+	]);
+});

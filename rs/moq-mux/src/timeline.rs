@@ -23,9 +23,9 @@
 //!   Pacing on such a track would stall the timeline the moment it went quiet.
 //! - **Records flush on completeness.** A segment's record is published only once every
 //!   enrolled pacing track has reported a group at or past the segment's end (or closed), proving
-//!   the segment's group ranges are final on every track that paces. The record is then self-contained and
-//!   immediately servable. [`Producer::reserve`] extends that across a batch of enrollments,
-//!   the way the catalog's own reservation does.
+//!   the segment's group ranges are final on every track that paces. The record is then
+//!   self-contained and immediately servable. [`Producer::reserve`] extends that across a batch
+//!   of enrollments, the way the catalog's own reservation does.
 //!
 //! Alignment falls out of construction: every track maps its groups onto the same boundary
 //! list, so segment N covers the same span of content time on every track, which is what HLS
@@ -322,6 +322,7 @@ impl State {
 			None => self
 				.tracks
 				.values()
+				.filter(|t| !t.passive)
 				.filter_map(|t| t.frontier)
 				.map(|f| f.as_scale(self.timescale) as u64)
 				.max()
@@ -359,7 +360,10 @@ impl State {
 		for (name, track) in &mut self.tracks {
 			let mut ranges: Vec<Range> = Vec::new();
 			while let Some(&(sequence, group_pts, keyframe)) = track.pending.front() {
-				if end.is_some_and(|end| group_pts.as_micros() >= end.as_micros()) {
+				// A pacing track is assigned by content time. A passive track is assigned by
+				// arrival, so every group pending when the segment closes belongs to it regardless
+				// of the timestamp basis carried by that track.
+				if !track.passive && end.is_some_and(|end| group_pts.as_micros() >= end.as_micros()) {
 					break;
 				}
 				track.pending.pop_front();
@@ -1394,6 +1398,30 @@ mod test {
 			entries[1],
 			entry(1, 2_000, 2_000, &[("catalog.json", &[(0, 0)]), ("video0", &[(1, 1)])]),
 			"the late group belongs to the segment that was open when it arrived"
+		);
+	}
+
+	// Passive placement is by arrival rather than timestamp. A catalog can stamp snapshots from a
+	// wall-clock basis while imported media starts at PTS zero, so its frontier must neither hold
+	// the group for a much later segment nor stretch the final media segment to that timestamp.
+	#[tokio::test]
+	async fn a_passive_track_uses_arrival_and_does_not_extend_the_tail() {
+		let (broadcast, mut timeline) = setup();
+		let mut video = timeline.track("video0").unwrap();
+		let mut catalog = timeline.passive("catalog.json").unwrap();
+
+		video.record(0, ms(0), true);
+		catalog.record(0, ms(10_000), true);
+		video.record(1, ms(2_000), true);
+		video.end(ms(4_000));
+		timeline.finish().unwrap();
+
+		assert_eq!(
+			drain(&broadcast, &timeline).await,
+			vec![
+				entry(0, 0, 2_000, &[("catalog.json", &[(0, 0)]), ("video0", &[(0, 0)])]),
+				entry(1, 2_000, 2_000, &[("video0", &[(1, 1)])]),
+			]
 		);
 	}
 
