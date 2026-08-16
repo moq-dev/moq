@@ -644,6 +644,24 @@ fn negotiated_memory(param: &spa::pod::Pod, format: VideoInfoRaw) -> Option<Nego
 	})
 }
 
+fn fixate_modifier(param: &spa::pod::Pod, modifier: u64) -> Option<Vec<u8>> {
+	let (_, value) = spa::pod::deserialize::PodDeserializer::deserialize_any_from(param.as_bytes()).ok()?;
+	let spa::pod::Value::Object(mut object) = value else {
+		return None;
+	};
+	let property = object
+		.properties
+		.iter_mut()
+		.find(|property| property.key == spa::param::format::FormatProperties::VideoModifier.as_raw())?;
+	property.flags.remove(spa::pod::PropertyFlags::from_bits_retain(
+		spa::sys::SPA_POD_PROP_FLAG_DONT_FIXATE,
+	));
+	property.value = spa::pod::Value::Long(modifier as i64);
+	spa::pod::serialize::PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &spa::pod::Value::Object(object))
+		.ok()
+		.map(|serialized| serialized.0.into_inner())
+}
+
 /// Connect to the portal's PipeWire node and run until the stream ends, the
 /// consumer drops, or the format changes.
 fn run_loop(args: CaptureLoop) -> Result<(), Error> {
@@ -748,8 +766,17 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					NegotiatedMemory::DmaBuf(modifier) => Some(modifier),
 					NegotiatedMemory::SharedMemory => None,
 					NegotiatedMemory::Fixating => {
-						// The producer owns modifier fixation. It will update the format
-						// with one concrete modifier before buffers can be allocated.
+						let Some(fixed) = fixate_modifier(param, state.format.modifier()) else {
+							tracing::warn!("failed to fixate the PipeWire DMA-BUF modifier");
+							return;
+						};
+						let Some(param) = spa::pod::Pod::from_bytes(&fixed) else {
+							return;
+						};
+						let mut params = [param];
+						if let Err(e) = stream.update_params(&mut params) {
+							tracing::warn!(error = %e, "failed to fixate the PipeWire DMA-BUF modifier");
+						}
 						return;
 					}
 				};
@@ -842,7 +869,12 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					(raw.mapoffset, raw.maxsize)
 				};
 				let dmabuf = data.type_() == DataType::DmaBuf;
-				let size = clamp_chunk_size(data.chunk().size(), maxsize);
+				let chunk_size = data.chunk().size();
+				let size = if dmabuf {
+					dma_buf_chunk_size(chunk_size, maxsize)
+				} else {
+					clamp_chunk_size(chunk_size, maxsize)
+				};
 				let stride = match u32::try_from(data.chunk().stride()) {
 					Ok(stride) if stride > 0 => stride,
 					_ => match state.format.format() {
@@ -885,7 +917,15 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					let Ok(fd) = fd.try_clone_to_owned() else {
 						return;
 					};
-					let offset = chunk_offset as usize;
+					let offset = normalize_dma_buf_offset(chunk_offset, maxsize);
+					if !dma_buf_chunk_contains(required, chunk_size, maxsize) {
+						tracing::warn!(
+							required,
+							available = size,
+							"DMA-BUF chunk does not contain a complete frame"
+						);
+						return;
+					}
 					let allocation_size = match dma_buf_allocation_size(fd.as_fd(), map_offset) {
 						Ok(Some(size)) if offset.checked_add(required).is_some_and(|end| end <= size) => Some(size),
 						Ok(Some(size)) => {
@@ -1054,8 +1094,24 @@ fn normalize_chunk_offset(offset: u32, maxsize: u32) -> Option<usize> {
 	(maxsize != 0).then(|| (offset % maxsize) as usize)
 }
 
+fn normalize_dma_buf_offset(offset: u32, maxsize: u32) -> usize {
+	normalize_chunk_offset(offset, maxsize).unwrap_or(offset as usize)
+}
+
 fn clamp_chunk_size(size: u32, maxsize: u32) -> usize {
 	size.min(maxsize) as usize
+}
+
+fn dma_buf_chunk_size(size: u32, maxsize: u32) -> usize {
+	if maxsize == 0 {
+		size as usize
+	} else {
+		clamp_chunk_size(size, maxsize)
+	}
+}
+
+fn dma_buf_chunk_contains(required: usize, size: u32, maxsize: u32) -> bool {
+	size == 0 || required <= dma_buf_chunk_size(size, maxsize)
 }
 
 fn chunk_bytes(data: &[u8], offset: usize, size: usize) -> Option<Cow<'_, [u8]>> {
@@ -1431,24 +1487,7 @@ mod tests {
 		format.parse(offered).unwrap();
 		assert_eq!(negotiated_memory(offered, format), Some(NegotiatedMemory::Fixating));
 
-		let (_, value) = spa::pod::deserialize::PodDeserializer::deserialize_any_from(offered.as_bytes()).unwrap();
-		let spa::pod::Value::Object(mut object) = value else {
-			panic!("format offer is not an object");
-		};
-		let modifier = object
-			.properties
-			.iter_mut()
-			.find(|property| property.key == spa::param::format::FormatProperties::VideoModifier.as_raw())
-			.unwrap();
-		modifier.flags = spa::pod::PropertyFlags::from_bits_retain(spa::sys::SPA_POD_PROP_FLAG_MANDATORY);
-		modifier.value = spa::pod::Value::Long(0);
-		let fixed = spa::pod::serialize::PodSerializer::serialize(
-			std::io::Cursor::new(Vec::new()),
-			&spa::pod::Value::Object(object),
-		)
-		.unwrap()
-		.0
-		.into_inner();
+		let fixed = fixate_modifier(offered, format.modifier()).unwrap();
 		let fixed = spa::pod::Pod::from_bytes(&fixed).unwrap();
 		replace_video_format(&mut format, |format| format.parse(fixed)).unwrap();
 		assert_eq!(negotiated_memory(fixed, format), Some(NegotiatedMemory::DmaBuf(0)));
@@ -1504,12 +1543,19 @@ mod tests {
 	fn chunk_offset_wraps_to_the_allocation() {
 		assert_eq!(normalize_chunk_offset(18, 16), Some(2));
 		assert_eq!(normalize_chunk_offset(0, 0), None);
+		assert_eq!(normalize_dma_buf_offset(18, 16), 2);
+		assert_eq!(normalize_dma_buf_offset(18, 0), 18);
 	}
 
 	#[test]
 	fn chunk_size_is_clamped_to_the_allocation() {
 		assert_eq!(clamp_chunk_size(18, 16), 16);
 		assert_eq!(clamp_chunk_size(8, 16), 8);
+		assert_eq!(dma_buf_chunk_size(8, 16), 8);
+		assert_eq!(dma_buf_chunk_size(8, 0), 8);
+		assert!(dma_buf_chunk_contains(16, 0, 0));
+		assert!(!dma_buf_chunk_contains(16, 8, 0));
+		assert!(dma_buf_chunk_contains(16, 16, 16));
 	}
 
 	#[test]
