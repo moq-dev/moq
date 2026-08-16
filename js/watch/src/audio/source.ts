@@ -88,8 +88,17 @@ export class Source {
 		effect.spawn(async () => {
 			const available: Record<string, Catalog.AudioConfig> = {};
 
+			// `supported` comes from the consumer, so we cannot assume it ever settles. A rerun
+			// waits for the tasks it spawned, so an unraced probe would hold the next run shut
+			// for good. Captured here so it stays this run's promise once we start awaiting.
+			const cancelled = effect.cancel.then(() => undefined);
+
 			for (const [name, config] of Object.entries(renditions)) {
-				const isSupported = await supported(config);
+				const isSupported = await Promise.race([supported(config), cancelled]);
+
+				// Torn down: stop probing and publish nothing, since the rerun redoes this.
+				if (effect.abort.aborted) return;
+
 				if (isSupported) available[name] = config;
 			}
 

@@ -1,6 +1,7 @@
 package dev.moq
 
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.Serializable
 import uniffi.moq.MoqException
@@ -13,16 +14,33 @@ import kotlin.test.assertTrue
 @Serializable
 private data class Status(val state: String)
 
+private fun opusHead(): ByteArray =
+    "OpusHead".encodeToByteArray() + byteArrayOf(
+        1,
+        2,
+        0,
+        0,
+        0x80.toByte(),
+        0xbb.toByte(),
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
+
 class SmokeTest {
     /**
      * Exercises the [Moq.connect] facade end to end without a network: a bogus
      * URL fails fast, and the failure surfaces as a [MoqException]. Also proves
      * the native lib loads through the transitive `moq-ffi` dependency.
+     * One-shot mode, since the default reconnect would retry the dial with
+     * backoff instead of failing.
      */
     @Test
     fun `connect fails fast and surfaces a MoqException`() = runTest {
         val ex = assertFailsWith<MoqException> {
-            Moq.connect("https://localhost:0/test", tlsVerify = false)
+            Moq.connect("https://localhost:0/test", tlsVerify = false, reconnect = false)
         }
         assertTrue(
             ex.isShutdown || ex is MoqException.Connect || ex is MoqException.Url,
@@ -55,11 +73,20 @@ class SmokeTest {
         val snapshot: JsonSnapshotConfig = JsonSnapshotConfig(deltaRatio = 8u, compression = false)
         val stream: JsonStreamConfig = JsonStreamConfig(compression = false)
         val properties: VideoProperties = VideoProperties(rotation = 315.0)
+        val backoff: Backoff = Backoff(
+            initialMs = 500uL,
+            multiplier = 2u,
+            maxMs = 10_000uL,
+            timeoutMs = 0uL,
+        )
+        val status: ConnectionStatus = ConnectionStatus.CONNECTED
         assertEquals(4_000_000uL, hint.bitrate)
         assertEquals(8u, snapshot.deltaRatio)
         assertEquals(false, stream.compression)
         assertNull(properties.display)
         assertNull(properties.flip)
+        assertEquals(500uL, backoff.initialMs)
+        assertEquals(ConnectionStatus.CONNECTED, status)
     }
 
     @Test
@@ -85,6 +112,41 @@ class SmokeTest {
             assertEquals(0uL, fetched.sequence())
             assertEquals("cached", fetched.readFrame()?.payload?.decodeToString())
             assertNull(fetched.readFrame())
+        }
+    }
+
+    /** A fetched media group streams its decoded frames and then completes. */
+    @Test
+    fun `media group helper streams fetched frames`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val media = broadcast.publishMedia(
+                Init(format = "opus", data = opusHead(), video = null),
+            )
+            val consumer = broadcast.consume()
+            val (name, audio) = consumer.catalog().audio.entries.single()
+
+            media.writeFrame(Frame(payload = "opus frame".encodeToByteArray(), timestampUs = 5_000_000uL))
+
+            // Fetch while the track is still published: finishing the media producer
+            // unpublishes it, and the fetch would then miss with NotFound.
+            val fetched: MediaGroupConsumer = consumer.fetchMediaGroup(
+                name,
+                0uL,
+                audio.container,
+                FetchGroupOptions(priority = 3u),
+            )
+
+            // Close the group so the fetched stream terminates instead of waiting for more.
+            media.finish()
+
+            fetched.use {
+                assertEquals(0uL, it.sequence())
+                val frames = it.frames().toList()
+                assertEquals(1, frames.size)
+                val frame = frames.single()
+                assertEquals("opus frame", frame.payload.decodeToString())
+                assertEquals(5_000_000uL, frame.timestampUs)
+            }
         }
     }
 

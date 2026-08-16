@@ -10,14 +10,29 @@ MoQ (Media over QUIC) is a next-generation live media delivery protocol providin
 
 ```bash
 # Code quality and testing
-nix develop --command just check        # Run all tests and linting
-nix develop --command just fix          # Auto-fix linting issues
+nix develop --command just check        # Lint and compile what the branch changed
+nix develop --command just test         # Test what the branch changed, same scope
+nix develop --command just fix          # Auto-fix lint/formatting, same scope
+nix develop --command just check-all    # Same as check, over every package
+nix develop --command just fix-all      # Same as fix, over every package
 nix develop --command just build        # Build all packages
 ```
 
 Use the Nix dev shell for project commands so local runs match CI tooling. If Nix is unavailable, use `cargo` or `bun` directly.
 
-CI runs `just ci`, which layers a few checks on top of `just check` (notably `cargo doc` with `-D warnings`, so a broken doc link after a rename or visibility change passes `just check` but fails CI).
+`just check`, `just test`, and `just fix` all diff the branch against its base and touch only the crates that changed plus everything depending on them, which is what keeps them fast when several worktrees are building at once. They skip a language entirely when the diff doesn't touch it. Reach for `just check-all` / `just test all` / `just fix-all` when you want the unscoped suite. See [Workflow](#workflow) for how the base is resolved.
+
+To force a base, `just check origin/dev` and `just fix origin/dev` take it positionally. `just test` can't: it's a module, so `just test origin/dev` looks for a *recipe* named `origin/dev`. Name the recipe to get past that: `just test default origin/dev`.
+
+**CI runs exactly these recipes: `just check` and `just test`, with `MOQ_STRICT=1`.** There is no separate `just ci`, so there is no second definition of "checked" to drift from this one. The split is by cost, not by environment: `check` lints and compiles (plus `tsc -b` and the Python docs, which catch what `--noEmit` and autodoc can't), while `test` links and runs the test binaries, which is the expensive half. They run as concurrent jobs in `check.yml`, because clippy emits rmeta without codegen while nextest codegens and links, so there is nearly nothing for one to reuse from the other.
+
+The Rust build cache is written by `main` and read by pull requests, never the other way around (`.github/workflows/cache.yml`). Actions scopes cache reads to the current branch plus the default branch, so a PR-only workflow can never leave anything a *later* PR can restore. Both jobs in `check.yml` therefore restore under `shared-key: rust` with `save-if: false`. Don't add a save to a PR job: each one is gigabytes, the repository budget is 10 GB, and PR-scoped entries evict each other while remaining unreadable to everyone else.
+
+`MOQ_STRICT` is the one thing CI does differently. Every tool the checks use is guarded with `command -v` so an incomplete local toolchain checks less instead of failing; in CI that would be a green run that silently checked nothing, so the variable turns the required set into an up-front precondition (`_tools` in the root justfile). Required is per scope, mirroring what the diff actually dispatches, so a docs-only PR doesn't have to have gradle.
+
+One tool stays unrequired: `swift` exists only on macOS, so swift.yml is its gate rather than the PR path.
+
+Two gates live outside the PR path, in `.github/workflows/nightly.yml`: `just rs audit` (cargo-deny) because an advisory lands without this repo changing, and `just rs features` (the `--all-features` and `--no-default-features` compiles) because each is a full extra workspace compile that shares almost nothing with the default one. A break there lands on `main` rather than being caught in review, which is the accepted trade; anything that must block a merge belongs in `check`.
 
 ## Architecture
 
@@ -45,7 +60,7 @@ Top-level layout only. Per-crate and per-package detail lives in the nested guid
 - `/rs/` - Rust crates: core networking (`moq-net`), native helpers, the relay, CLIs, media muxing/codecs, and the FFI/C bindings. See `rs/CLAUDE.md`.
 - `/js/` - TypeScript/JavaScript packages for the browser, published as `@moq/*`. See `js/CLAUDE.md`.
 - `/py/`, `/swift/`, `/kt/`, `/go/` - language wrappers over `rs/moq-ffi` (see [Language Bindings](#language-bindings)). `/py/` has `py/CLAUDE.md`; the others defer to their `README.md`.
-- `/cpp/` - C/C++ consumers of `libmoq`. `cpp/obs/` is the OBS Studio plugin (CMake; links `libmoq` via `MOQ_LOCAL`), licensed GPL-2.0-or-later because it links `libobs`. See `doc/bin/obs.md`.
+- `/cpp/` - C/C++ consumers of `libmoq`. `cpp/obs/` is the OBS Studio plugin (CMake; links `libmoq` via `MOQ_LOCAL`), licensed GPL-2.0-or-later because it links `libobs`. PR CI never compiles it, so `just obs build` and `just obs test` (the latter runs `cpp/obs/test/` against stubbed libobs/libmoq under ThreadSanitizer) are manual gates, like `just rs macos`. See `doc/bin/obs.md`.
 - `/demo/` - demos and test media: relay configs, the web demo, MoQ Boy, media hosting, and a network throttle script.
 - `/test/` - cross-language interop smoke tests (`test/smoke/`), run via `just test smoke[-full]`.
 - `/doc/` - documentation site (VitePress, deployed via Cloudflare). The `/draft/` section is generated from `drafts/` by `doc/.vitepress/drafts.ts`.
@@ -92,6 +107,12 @@ Don't document deprecated flags, options, or APIs. User-facing docs (`/doc`), `-
 - Remove the example invocations and prose that mention it from `/doc`.
 
 The rename/removal rationale lives in the commit message and PR description, not in docs that users read. Warning someone who *uses* the deprecated path is not just fine but encouraged -- at compile time (Rust's `#[deprecated(note = "...")]`) or at runtime (a log line). Those fire on use, so they reach the one person who needs them and nobody else; they aren't documentation. A standing note in the docs that advertises the dead name is what's banned.
+
+## Retries
+
+Retry only operations that are safe to repeat and whose failure may clear without caller action. Use capped exponential backoff with jitter and normally stop after a short time or attempt budget, returning the last real error. Retry indefinitely only in process-lifetime supervisors waiting for external state; cap the delay and report failures.
+
+Use explicit protocol semantics to fail early when available, such as authentication rejection or a non-retryable HTTP status. Avoid broad `is_retryable()` classifications for opaque failures. Exactly one layer owns each retry sequence: callers must observe its terminal result rather than recreate it and reset its budget.
 
 ## Root Cause First
 
@@ -165,7 +186,7 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
 | a kramdown-rfc construct new to `drafts/` | `doc/.vitepress/drafts.ts`, which translates the drafts into `/draft/` site pages |
 
-**Any change to the on-the-wire format MUST update the matching IETF draft under `drafts/` in the same PR.** The drafts are the normative spec other implementations (and future us) build against, so a wire change that lands without the draft update silently forks the code from the spec. This covers new/changed/removed SETUP parameters, messages, fields, framing, enum values, and version bumps anywhere under `rs/moq-net` (and the catalog/container framing in `rs/hang`). Update the draft for the specific feature you touched: `draft-lcurley-moq-lite.md` for moq-lite session/SETUP/framing, and the per-feature draft for the rest (`draft-lcurley-moq-probe.md`, `draft-lcurley-moq-relay-hops.md`, `draft-lcurley-moq-timestamp.md`, `draft-lcurley-moq-hang.md`, etc.). New capabilities go in as backward-compatible extensions even after a draft is published: SETUP requires receivers to ignore unknown parameter IDs, so a new parameter is additive. Validate with `just drafts check` (kramdown-rfc). See [`drafts/CLAUDE.md`](drafts/CLAUDE.md).
+**Any change to the on-the-wire format MUST update the matching IETF draft under `drafts/` in the same PR.** The drafts are the normative spec other implementations (and future us) build against, so a wire change that lands without the draft update silently forks the code from the spec. This covers new/changed/removed SETUP parameters, messages, fields, framing, enum values, and version bumps anywhere under `rs/moq-net` (and the catalog/container framing in `rs/hang`). Update the draft for the specific feature you touched: `draft-lcurley-moq-lite.md` for moq-lite session/SETUP/framing, and the per-feature draft for the rest (`draft-lcurley-moq-probe.md`, `draft-lcurley-moq-cluster.md`, `draft-lcurley-moq-timestamp.md`, `draft-lcurley-moq-hang.md`, etc.). New capabilities go in as backward-compatible extensions even after a draft is published: SETUP requires receivers to ignore unknown parameter IDs, so a new parameter is additive. Validate with `just drafts check` (kramdown-rfc). See [`drafts/CLAUDE.md`](drafts/CLAUDE.md).
 
 For wire, `moq-ffi`, or gateway changes, also run the cross-language interop matrix: `just test smoke-full` (see `test/justfile`; plain `smoke` is rust-only).
 
@@ -179,10 +200,17 @@ PRs target `main` by default, however large the change: bug fixes, new behavior,
 
 When making changes to the codebase:
 
-1. Pick the base branch per [Branch Targeting](#branch-targeting) above. **When creating a new worktree, base it on the freshly-fetched remote branch** (`git fetch origin` first, then branch off `origin/main` / `origin/dev`), not on whatever local `main`/`dev` the repo happens to be sitting on. A local branch can lag the remote by many commits (or carry a stale local merge), which produces a massive conflicting PR diff against the real base at merge time.
-2. Make your code changes
-3. Run `just fix` before committing to auto-format and fix linting issues
-4. Run `just check` to verify everything passes
-5. Walk the Cross-Package Sync table; update paired packages and docs in the same PR
-6. Add tests where they're easy to write; bug fixes need a regression test (see Root Cause First)
-7. Commit and push; follow [CONTRIBUTING.md](CONTRIBUTING.md) for commit messages, PR descriptions, and reviews
+1. Pick the base branch per [Branch Targeting](#branch-targeting) above: `dev` only for a semver break in a published API, `main` for everything else. **When creating a new worktree, base it on the freshly-fetched remote branch** (`git fetch origin` first, then branch off `origin/main` / `origin/dev`), not on whatever local `main`/`dev` the repo happens to be sitting on. A local branch can lag the remote by many commits (or carry a stale local merge), which produces a massive conflicting PR diff against the real base at merge time.
+2. **Point the branch's upstream at that base**, which is where `just check` reads it from:
+
+   ```bash
+   git branch --set-upstream-to=origin/dev   # or origin/main
+   ```
+
+   Then push with `git push origin HEAD`, **not** `git push -u`: `-u` repoints the upstream at the branch's own remote copy, and `just check` then has nothing to diff against and silently falls back to `origin/main`. On a `dev`-based branch that fallback drags in every commit `dev` is ahead by, so the check is correct but much slower than it needs to be.
+3. Make your code changes
+4. Run `just fix` before committing to auto-format and fix linting issues
+5. Run `just check` and `just test` to verify everything passes, which is exactly what CI runs. All three only touch the crates the branch changed plus their dependents, so use `just fix-all` / `just check-all` / `just test all` when you have changed something the diff can't attribute to a package (build config, a lint rule, a shared toolchain pin)
+6. Walk the Cross-Package Sync table; update paired packages and docs in the same PR
+7. Add tests where they're easy to write; bug fixes need a regression test (see Root Cause First)
+8. Commit and push; follow [CONTRIBUTING.md](CONTRIBUTING.md) for commit messages, PR descriptions, and reviews

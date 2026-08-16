@@ -30,7 +30,14 @@ enum PadState {
 /// Both payloads are large (a codec importer, a container producer), so each is boxed to keep the
 /// enum small.
 enum Sink {
-	Media(Box<import::Track>),
+	/// `audio` decides grouping. `import::Track` draws no audio boundaries of its own (every
+	/// packet is independently decodable, so there is no keyframe to group on), leaving them to
+	/// whoever knows the latency target. A live sink wants each packet forwarded without waiting,
+	/// so it cuts per frame. Video groups at its own keyframes and needs nothing.
+	Media {
+		track: Box<import::Track>,
+		audio: bool,
+	},
 	Text(Box<Text>),
 }
 
@@ -198,12 +205,12 @@ impl Pad {
 			return Ok(());
 		}
 
-		let track: import::Track = match structure.name().as_str() {
-			"video/x-h264" => Self::reserve(&mut broadcast, catalog, ".avc3", "avc3", &[])?,
-			"video/x-h265" => Self::reserve(&mut broadcast, catalog, ".hev1", "hev1", &[])?,
-			"video/x-av1" => Self::reserve(&mut broadcast, catalog, ".av01", "av01", &[])?,
-			"video/x-vp8" => Self::reserve(&mut broadcast, catalog, ".vp8", "vp8", &[])?,
-			"video/x-vp9" => Self::reserve(&mut broadcast, catalog, ".vp9", "vp9", &[])?,
+		let (track, audio): (import::Track, bool) = match structure.name().as_str() {
+			"video/x-h264" => (Self::reserve(&mut broadcast, catalog, ".avc3", "avc3", &[])?, false),
+			"video/x-h265" => (Self::reserve(&mut broadcast, catalog, ".hev1", "hev1", &[])?, false),
+			"video/x-av1" => (Self::reserve(&mut broadcast, catalog, ".av01", "av01", &[])?, false),
+			"video/x-vp8" => (Self::reserve(&mut broadcast, catalog, ".vp8", "vp8", &[])?, false),
+			"video/x-vp9" => (Self::reserve(&mut broadcast, catalog, ".vp9", "vp9", &[])?, false),
 			// MP3: no config blob to parse (the config lives in each frame header), so the importer is
 			// built straight from the caps rate/channels. Keyed on `layer == 3`, which positively
 			// identifies Layer III: AAC (`audio/mpeg`, no layer field) and MP2 (`layer=2`) fall through
@@ -222,7 +229,10 @@ impl Pad {
 				let name = broadcast.unique_name(".mp3");
 				let request = broadcast.reserve_track(name)?;
 				let producer = request.accept(hang::container::track_info());
-				moq_mux::codec::mp3::Import::new(producer, catalog.reserve(), config.into())?.into()
+				(
+					moq_mux::codec::mp3::Import::new(producer, catalog.reserve(), config.into())?.into(),
+					true,
+				)
 			}
 			"audio/mpeg" => {
 				// AAC: the AudioSpecificConfig rides in caps as codec_data, not in the bitstream.
@@ -230,7 +240,10 @@ impl Pad {
 					.get::<gst::Buffer>("codec_data")
 					.context("AAC caps missing codec_data")?;
 				let map = codec_data.map_readable().context("failed to map AAC codec_data")?;
-				Self::reserve(&mut broadcast, catalog, ".aac", "aac", map.as_slice())?
+				(
+					Self::reserve(&mut broadcast, catalog, ".aac", "aac", map.as_slice())?,
+					true,
+				)
 			}
 			"audio/x-opus" => {
 				// Opus: GStreamer carries channels/rate in caps (not an OpusHead), and valid Opus caps
@@ -250,11 +263,17 @@ impl Pad {
 				let name = broadcast.unique_name(".opus");
 				let request = broadcast.reserve_track(name)?;
 				let producer = request.accept(hang::container::track_info());
-				moq_mux::codec::opus::Import::new(producer, catalog.reserve(), config.into())?.into()
+				(
+					moq_mux::codec::opus::Import::new(producer, catalog.reserve(), config.into())?.into(),
+					true,
+				)
 			}
 			other => anyhow::bail!("unsupported caps: {other}"),
 		};
-		self.track = Some(Sink::Media(Box::new(track)));
+		self.track = Some(Sink::Media {
+			track: Box::new(track),
+			audio,
+		});
 		self.caps = Some(caps.clone());
 		Ok(())
 	}
@@ -395,9 +414,14 @@ impl Pad {
 		match timestamp {
 			Ok(micros) => {
 				let result: Result<()> = match self.track.as_mut().expect("track present") {
-					Sink::Media(track) => {
+					Sink::Media { track, audio } => {
 						let ts = hang::container::Timestamp::from_micros(micros).ok();
-						track.decode(&data, ts).map_err(Into::into)
+						track
+							.decode(&data, ts)
+							// One group (one QUIC stream) per audio packet, so the relay forwards
+							// it without waiting for the next. See `Sink::Media`.
+							.and_then(|()| if *audio { track.cut(None) } else { Ok(()) })
+							.map_err(Into::into)
 					}
 					Sink::Text(text) => match std::str::from_utf8(&data) {
 						// A cue with no duration would never be dismissed, so drop it rather than pin it
@@ -437,7 +461,7 @@ impl Pad {
 			return Ok(false);
 		};
 		match track {
-			Sink::Media(mut track) => track.finish()?,
+			Sink::Media { mut track, .. } => track.finish()?,
 			Sink::Text(mut text) => text.producer.finish()?,
 		}
 		Ok(true)

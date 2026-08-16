@@ -284,6 +284,11 @@ impl Backend for Nvenc {
 		})
 	}
 
+	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+		// Each encode locks its own output synchronously, so nothing is buffered.
+		Ok(Vec::new())
+	}
+
 	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
 		// Each encode locks its own output synchronously, so nothing is buffered.
 		Ok(Vec::new())

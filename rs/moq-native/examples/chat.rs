@@ -22,17 +22,19 @@ async fn main() -> anyhow::Result<()> {
 // Connect to the server and publish our origin of broadcasts.
 async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
-	let client = moq_native::ClientConfig::default().init()?;
+	let client = moq_native::connect::Config::default().init(Default::default())?;
 
 	// For local development, use: http://localhost:4443
 	// The "anon" path is usually configured to bypass authentication; be careful!
 	let url = url::Url::parse("https://cdn.moq.dev/anon/chat-example").unwrap();
 
 	// Establish a WebTransport/QUIC connection and MoQ handshake.
-	let cs = client.with_publisher(&origin).connect(url).await?;
+	// The connection automatically redials with backoff if it drops.
+	let connection = client.with_publisher(&origin).connect(url);
 
-	// Wait until the session is closed.
-	Err(cs.closed().await.into())
+	// Wait until the connection gives up for good.
+	connection.closed().await?;
+	Ok(())
 }
 
 // Produce a broadcast and publish it to the origin.

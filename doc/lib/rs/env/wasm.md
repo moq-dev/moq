@@ -17,16 +17,21 @@ browser implementation.
 
 ## How it fits together
 
-`moq-net` talks to anything that implements [`web_transport_trait::Session`](https://docs.rs/web-transport-trait).
-The [`web-transport`](https://crates.io/crates/web-transport) meta-crate picks
-the backend by target automatically:
+`moq-net` talks to anything that implements
+[`web_transport_trait::poll::Session`](https://docs.rs/web-transport-trait), the
+poll-based transport interface.
 
-- **native** → [`web-transport-quinn`](https://crates.io/crates/web-transport-quinn) (a real QUIC stack)
-- **wasm** → [`web-transport-wasm`](https://crates.io/crates/web-transport-wasm) (a thin wrapper over the browser's `WebTransport`)
+- **native**: [`web-transport-quinn`](https://crates.io/crates/web-transport-quinn)
+  (a real QUIC stack) implements the poll interface directly.
+- **wasm**: [`web-transport-wasm`](https://crates.io/crates/web-transport-wasm)
+  (a thin wrapper over the browser's `WebTransport`) exposes only the
+  promise-based interface today, so it needs an adapter to satisfy `moq-net`'s
+  bound. This repo carries one as `moq_wasm::transport` (the adapter behind the
+  `@moq/wasm` package); depend on `moq-wasm` from git until
+  `web-transport-wasm` implements the poll interface natively.
 
-So the same `moq-net` code works in both places. On wasm you skip
-[`moq-native`](/lib/rs/crate/moq-native) entirely (it's quinn-only) and get the
-`Session` from `web-transport` instead.
+On wasm you skip [`moq-native`](/lib/rs/crate/moq-native) entirely (it's
+quinn-only).
 
 ::: warning No `Send` on wasm
 Browser wasm is single-threaded and its `WebTransport` handles aren't `Send`,
@@ -41,7 +46,8 @@ executor like a default `tokio` runtime.
 # Cargo.toml
 [dependencies]
 moq-net = "0.1"
-web-transport = "0.10"
+# The WebTransport poll adapter; unpublished, so pull it from git.
+moq-wasm = { git = "https://github.com/moq-dev/moq" }
 url = "2"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
@@ -58,21 +64,19 @@ trunk serve
 
 ## Connecting
 
-Build a transport `Session` with `web-transport`, then hand it to
+Build a poll-interface transport `Session` (see above), then hand it to
 [`moq_net::Client`](https://docs.rs/moq-net/latest/moq_net/struct.Client.html).
 From there the pub/sub API is identical to [native](/lib/rs/env/native):
 
 ```rust
 let url = url::Url::parse("https://cdn.moq.dev/anon")?;
 
-// On wasm this wraps the browser's native WebTransport.
-let transport = web_transport::ClientBuilder::new()
-    .with_system_roots()
-    .connect(url)
-    .await?;
+// The poll-interface adapter over the browser's native WebTransport
+// (see "How it fits together" above).
+let transport = moq_wasm::transport::connect(url, Default::default()).await?;
 
 // Hand the transport to moq-net and run the MoQ handshake.
-let origin = moq_net::Origin::new().produce();
+let origin = moq_net::Origin::random().produce();
 let mut consumer = origin.consume();
 let (session, driver) = moq_net::Client::new()
     .with_subscriber(origin)

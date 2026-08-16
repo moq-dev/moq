@@ -18,6 +18,50 @@ struct TaskEntry {
 	stats: moq_native::ConnectionStatsReader,
 }
 
+/// Everything needed to prepare a session without holding the global state lock.
+pub(crate) struct Connect {
+	pub config: crate::client::Config,
+	pub url: Url,
+	pub publish: Option<moq_net::origin::Producer>,
+	pub consume: Option<moq_net::origin::Producer>,
+	pub callback: ffi::OnStatus,
+}
+
+impl Connect {
+	/// Resolve files and backend configuration before the session is inserted.
+	pub fn prepare(self) -> Result<PreparedConnect, Error> {
+		let mut client = self
+			.config
+			.connect
+			.clone()
+			.init(self.config.quic.clone())
+			.map_err(|err| Error::InvalidConfig(err.to_string()))?;
+		if let Some(publish) = &self.publish {
+			client = client.with_publisher(publish);
+		}
+		if let Some(consume) = &self.consume {
+			client = client.with_subscriber(consume.clone());
+		}
+
+		Ok(PreparedConnect {
+			client,
+			url: self.url,
+			publish: self.publish,
+			consume: self.consume,
+			callback: self.callback,
+		})
+	}
+}
+
+/// A validated session request ready for insertion into global state.
+pub(crate) struct PreparedConnect {
+	client: moq_native::Client,
+	url: Url,
+	publish: Option<moq_net::origin::Producer>,
+	consume: Option<moq_net::origin::Producer>,
+	callback: ffi::OnStatus,
+}
+
 #[derive(Default)]
 pub struct Session {
 	/// Session tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
@@ -25,24 +69,18 @@ pub struct Session {
 }
 
 impl Session {
-	pub fn connect(
-		&mut self,
-		url: Url,
-		publish: Option<moq_net::origin::Producer>,
-		consume: Option<moq_net::origin::Producer>,
-		callback: ffi::OnStatus,
-	) -> Result<Id, Error> {
-		let mut client = moq_native::ClientConfig::default().init()?;
-		if let Some(publish) = &publish {
-			client = client.with_publisher(publish);
-		}
-		if let Some(consume) = &consume {
-			client = client.with_subscriber(consume.clone());
-		}
+	pub fn connect(&mut self, request: PreparedConnect) -> Result<Id, Error> {
+		let PreparedConnect {
+			client,
+			url,
+			publish,
+			consume,
+			callback,
+		} = request;
 
 		// Build the reconnect loop up front so we can grab a stats reader for it
 		// before moving it into the spawned task.
-		let reconnect = client.reconnect(url);
+		let reconnect = client.connect(url);
 		let stats = reconnect.stats();
 
 		let closed = oneshot::channel();
@@ -95,7 +133,7 @@ impl Session {
 	///
 	/// Returns the terminal error via `?`. Disconnects aren't reported: status 0 is reserved for a
 	/// clean close (delivered as the terminal callback once the task ends).
-	async fn report(callback: ffi::OnStatus, mut reconnect: moq_native::Reconnect) -> Result<(), Error> {
+	async fn report(callback: ffi::OnStatus, mut reconnect: moq_native::Connection) -> Result<(), Error> {
 		let mut connects: u64 = 0;
 		loop {
 			if let moq_native::Status::Connected = reconnect.status().await.map_err(map_connect_error)? {

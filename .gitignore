@@ -55,3 +55,6 @@ __pycache__/
 
 # Generated JSR manifest (derived from package.json by js/common/package.ts)
 jsr.json
+
+# msys/cygwin crash dumps, from running the shell scripts on Windows.
+*.stackdump

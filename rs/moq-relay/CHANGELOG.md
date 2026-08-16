@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.11](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.10...moq-relay-v0.14.11) - 2026-08-14
+
+### Fixed
+
+- *(relay)* honor server version over WebSocket ([#2841](https://github.com/moq-dev/moq/pull/2841))
+- *(net)* stop blocking connect on the initial announce set ([#2856](https://github.com/moq-dev/moq/pull/2856))
+
+### Other
+
+- reload custom root CAs without restart ([#2863](https://github.com/moq-dev/moq/pull/2863))
+
+## [0.14.10](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.9...moq-relay-v0.14.10) - 2026-08-13
+
+### Added
+
+- *(bindings)* expose incoming request path and query ([#2738](https://github.com/moq-dev/moq/pull/2738))
+
+## [0.14.9](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.8...moq-relay-v0.14.9) - 2026-08-07
+
+### Fixed
+
+- *(net)* keep UNKNOWN publishers announced across relay loops ([#2718](https://github.com/moq-dev/moq/pull/2718))
+
+## [0.14.8](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.7...moq-relay-v0.14.8) - 2026-08-06
+
+### Added
+
+- *(moq-native)* classify, pace, and publish accept(2) failures ([#2687](https://github.com/moq-dev/moq/pull/2687))
+- fail-fast retries: jittered backoff bounded by time, not error type ([#2647](https://github.com/moq-dev/moq/pull/2647))
+- *(relay)* add Internal::serve(router) for embedders ([#2678](https://github.com/moq-dev/moq/pull/2678))
+
+### Fixed
+
+- *(net)* let the accepting side pick the retention window when the wire carries none ([#2657](https://github.com/moq-dev/moq/pull/2657))
+
+## [0.14.7](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.6...moq-relay-v0.14.7) - 2026-08-05
+
+### Added
+
+- *(relay)* assemble the relay in `Relay::load` instead of `main` ([#2639](https://github.com/moq-dev/moq/pull/2639))
+
+### Fixed
+
+- *(relay)* fail the WebSocket handshake when no subprotocol matches ([#2625](https://github.com/moq-dev/moq/pull/2625))
+- *(native)* bound Client::connect so a silent peer can't wedge reconnect ([#2622](https://github.com/moq-dev/moq/pull/2622))
+
+### Other
+
+- *(rs)* clean up pedantic clippy warnings ([#2621](https://github.com/moq-dev/moq/pull/2621))
+
+## [0.14.6](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.5...moq-relay-v0.14.6) - 2026-08-03
+
+### Fixed
+
+- unbreak the libmoq release, and moq-relay's fresh-resolve build ([#2597](https://github.com/moq-dev/moq/pull/2597))
+- *(native)* send the request path and query in the SETUP on every URI-less transport ([#2572](https://github.com/moq-dev/moq/pull/2572))
+
+### Other
+
+- *(deps)* bump the cargo group with 2 updates ([#2591](https://github.com/moq-dev/moq/pull/2591))
+
+## [0.14.5](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.4...moq-relay-v0.14.5) - 2026-07-31
+
+### Added
+
+- *(relay)* expose internal nodes endpoint ([#2555](https://github.com/moq-dev/moq/pull/2555))
+
+### Fixed
+
+- *(relay)* restore the scheme on a gossip-advertised node URL ([#2563](https://github.com/moq-dev/moq/pull/2563))
+
 ## [0.14.4](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.3...moq-relay-v0.14.4) - 2026-07-27
 
 ### Other

@@ -10,7 +10,7 @@ use hang::moq_net;
 use moq_rtmp::{Client, Request, Server};
 use url::Url;
 
-use crate::moq::notify_ready;
+use crate::moq::{ImportTarget, notify_ready};
 
 /// RTMP endpoint args: exactly one of `--connect` (dial) / `--listen` (bind).
 /// The parent direction fixes whether that dial/bind pushes or pulls. Import uses
@@ -41,8 +41,20 @@ pub struct ExportArgs {
 	pub latency_max: Duration,
 }
 
-/// Accept incoming RTMP publishes into the Origin as `name`; reject plays (import).
-pub async fn listen_import(origin: moq_net::origin::Producer, addr: SocketAddr, name: String) -> anyhow::Result<()> {
+impl ExportArgs {
+	/// The configured latency tolerance.
+	pub fn latency(&self) -> moq_mux::Latency {
+		moq_mux::Latency::max(self.latency_max)
+	}
+}
+
+/// Accept incoming RTMP publishes into the Origin as `target.name`; reject plays (import).
+pub async fn listen_import(target: ImportTarget, addr: SocketAddr) -> anyhow::Result<()> {
+	let ImportTarget {
+		origin,
+		name,
+		latency_max,
+	} = target;
 	let mut server = Server::bind(addr).await?;
 	tracing::info!(%addr, %name, "RTMP listening (import)");
 	notify_ready();
@@ -53,7 +65,7 @@ pub async fn listen_import(origin: moq_net::origin::Producer, addr: SocketAddr, 
 				let origin = origin.clone();
 				let name = name.clone();
 				tokio::spawn(async move {
-					if let Err(err) = publish.accept(&origin, &name).await {
+					if let Err(err) = publish.with_latency_max(latency_max).accept(&origin, &name).await {
 						tracing::warn!(%name, %err, "RTMP ingest ended with error");
 					}
 				});
@@ -75,7 +87,7 @@ pub async fn listen_export(
 	origin: moq_net::origin::Consumer,
 	addr: SocketAddr,
 	name: String,
-	latency: Duration,
+	latency: moq_mux::Latency,
 ) -> anyhow::Result<()> {
 	let mut server = Server::bind(addr).await?;
 	tracing::info!(%addr, %name, "RTMP listening (export)");
@@ -106,14 +118,15 @@ pub async fn listen_export(
 	Ok(())
 }
 
-/// Dial a remote RTMP server and pull its play into the Origin under `name` (import).
-pub async fn connect_import(origin: moq_net::origin::Producer, url: Url, name: String) -> anyhow::Result<()> {
+/// Dial a remote RTMP server and pull its play into the Origin under `target.name` (import).
+pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()> {
 	let (addr, app, key) = parse_url(&url).await?;
+	let name = &target.name;
 	tracing::info!(%url, %name, "RTMP client pulling");
 	notify_ready();
 
-	let client = Client::connect(addr, &app).await?;
-	Ok(client.pull(&key, &origin, &name).await?)
+	let client = Client::connect(addr, &app).await?.with_latency_max(target.latency_max);
+	Ok(client.pull(&key, &target.origin, name).await?)
 }
 
 /// Push a broadcast from the Origin to a remote RTMP server (export).
@@ -121,7 +134,7 @@ pub async fn connect_export(
 	origin: moq_net::origin::Consumer,
 	url: Url,
 	name: String,
-	latency: Duration,
+	latency: moq_mux::Latency,
 ) -> anyhow::Result<()> {
 	let (addr, app, key) = parse_url(&url).await?;
 	// Confirm the broadcast is reachable (and wait for it to be announced) before dialing;

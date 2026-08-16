@@ -84,13 +84,13 @@ Two ways to serve `rtmps://`:
 
 - **Let the gateway terminate TLS.** Set `Config::tls` (or call
   `Server::with_tls`) with a `rustls::ServerConfig`, and the listener speaks
-  RTMPS with no other change. Build the config from a `moq_native::tls::Server`
+  RTMPS with no other change. Build the config from a `moq_native::tls::Listen`
   instance (RTMPS has no ALPN), or supply any `rustls::ServerConfig`. To serve
   both RTMP and RTMPS, clone one base config so duplicate-publish rejection is
   shared across both listeners, then call `run` with a cloned origin.
 
   ```rust
-  let mut tls = moq_native::tls::Server::default();
+  let mut tls = moq_native::tls::Listen::default();
   tls.generate = vec!["your-domain.com".to_string()]; // or set tls.cert / tls.key
   let server_config = tls.server_config(vec![])?; // RTMPS has no ALPN
 
@@ -108,11 +108,18 @@ Two ways to serve `rtmps://`:
   which runs the RTMP handshake and yields the same `Request`:
 
   ```rust
+  moq_rtmp::configure_socket(&tcp, peer); // Nagle off, keepalive on
   let tls = acceptor.accept(tcp).await?; // your tokio_rustls TlsAcceptor
   if let Some(request) = moq_rtmp::accept_stream(tls, peer).await? {
       // authorize, then match on Request::Publish / Request::Play and accept it
   }
   ```
+
+  When the transport is a `TcpStream` you own, call `configure_socket` on it
+  first; `Server` does this for every socket it accepts. Its keepalive is the
+  only thing that reaps a **play** session whose viewer vanished without a FIN:
+  publishers are bounded by `PUBLISH_IDLE_TIMEOUT`, but a play session sitting on
+  a quiet broadcast neither reads nor writes, so nothing else would notice.
 
 ## CLI
 

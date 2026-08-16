@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
 // Automatically reconnects if the connection drops.
 async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
-	let client = moq_native::ClientConfig::default().init()?;
+	let client = moq_native::connect::Config::default().init(Default::default())?;
 
 	// For local development, use: http://localhost:4443/video-example
 	// The "anon" path is usually configured to bypass authentication; be careful!
@@ -33,7 +33,7 @@ async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 	// Establish a connection with automatic reconnection.
 	// with_subscriber() registers an OriginProducer for incoming data.
 	// Use with_publisher() if you also want to publish from the session.
-	let reconnect = client.with_subscriber(origin).reconnect(url);
+	let reconnect = client.with_subscriber(origin).connect(url);
 
 	// Wait until the reconnect loop stops (e.g. timeout exceeded).
 	Ok(reconnect.closed().await?)
@@ -79,7 +79,7 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 		.subscribe(moq_net::track::Subscription::default().with_priority(1))
 		.await?;
 	let mut ordered = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
-		.with_latency(Duration::from_millis(500));
+		.with_latency(moq_mux::Latency::max(Duration::from_millis(500)));
 
 	// Read frames in latency-bounded presentation order.
 	while let Some(frame) = ordered.read().await? {

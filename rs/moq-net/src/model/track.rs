@@ -18,12 +18,10 @@ use crate::{broadcast, cache, frame, group, stats};
 
 use super::{Datagram, Requests};
 
-pub use super::subscription::Subscription;
-
-pub(crate) use super::subscription::Position;
+pub use super::subscription::{Position, Subscription};
 
 use std::{
-	collections::{HashMap, VecDeque},
+	collections::{BTreeMap, HashMap, VecDeque},
 	sync::Arc,
 	sync::OnceLock,
 	sync::atomic::{AtomicBool, Ordering},
@@ -72,12 +70,12 @@ pub struct Info {
 	pub timescale: Timescale,
 	/// The maximum age of a non-latest group before the publisher evicts it (the
 	/// newest group is always retained). A subscriber's
-	/// [`Subscription::latency_max`] window is clamped to this, since a group can't be
+	/// [`Subscription::latency`] window is clamped to this, since a group can't be
 	/// waited for longer than it's kept around. Reported in TRACK_INFO so
 	/// relays re-serve with the same window. Defaults to [`DEFAULT_LATENCY_MAX`].
 	///
 	/// This is the `Publisher Max Latency` on the wire, the publisher-side half of
-	/// the same budget [`Subscription::latency_max`] sets for a subscriber.
+	/// the same budget [`Subscription::latency`] sets for a subscriber.
 	pub latency_max: Duration,
 	/// The publisher's priority for this track, used only to break ties between
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
@@ -203,6 +201,11 @@ pub(crate) struct TrackState {
 
 	// The sequence number at which the track was finalized.
 	final_sequence: Option<u64>,
+
+	// The first sequence the live feed serves, once the publisher declared one
+	// (the wire's SUBSCRIBE_START). Lower groups never arrive on their own; a
+	// fetch can still create them.
+	start_sequence: Option<u64>,
 
 	// Where production stopped, snapshotted when the cached groups are released (an
 	// abort, or the last producer dropping). Computed live from the cache otherwise;
@@ -801,6 +804,14 @@ impl TrackState {
 		}
 	}
 
+	/// Record the declared first sequence of the live feed, replacing any earlier
+	/// declaration: the signal is scoped to the current subscription's demand,
+	/// which may legitimately move in either direction. `None` clears it (the
+	/// demand dropped to the live edge, whose floor is unknown until declared).
+	fn set_start(&mut self, start_sequence: Option<u64>) {
+		self.start_sequence = start_sequence;
+	}
+
 	/// Record the exclusive final sequence, rejecting a re-finish or a boundary that
 	/// would orphan already-produced groups.
 	fn set_final(&mut self, final_sequence: u64) -> Result<()> {
@@ -1135,6 +1146,27 @@ impl Producer {
 		self.modify()?.set_final(final_sequence)
 	}
 
+	/// Declare the first group the live feed serves (the wire's SUBSCRIBE_START,
+	/// or the start the subscription itself requested): groups below `sequence`
+	/// will never arrive on their own, so a reader waiting for one fails over
+	/// instead of stalling. A fetch can still retrieve them.
+	///
+	/// Scoped to the current subscription's demand, so a later declaration
+	/// replaces this one in either direction: a re-subscription may start
+	/// earlier, and a narrowed subscription skips groups an earlier declaration
+	/// still promised. Pass `None` to clear it, for demand at the live edge:
+	/// its floor is unknown until the feed declares one.
+	pub fn start_at(&mut self, sequence: impl Into<Option<u64>>) -> Result<()> {
+		self.modify()?.set_start(sequence.into());
+		Ok(())
+	}
+
+	/// The declared first sequence of the live feed, once [`Self::start_at`]
+	/// declared one. `None` while nothing was declared.
+	pub fn start_sequence(&self) -> Option<u64> {
+		self.state.read().start_sequence
+	}
+
 	/// The exclusive final sequence, once [`Self::finish`] or [`Self::finish_at`] declared one.
 	///
 	/// `None` while the track is still open ended. Both methods reject a second boundary, so
@@ -1250,8 +1282,12 @@ impl Producer {
 		let subscription = kio::Producer::new(preferences);
 		register_subscription(self.state.read(), &subscription);
 
+		// Hoisted: an inline `read()` guard would live to the end of the struct literal,
+		// deadlocking against the `consume()` below.
+		let broadcast = self.state.read().broadcast.clone();
 		Subscriber {
 			name: self.name.clone(),
+			broadcast,
 			info,
 			inner: SubscriberKind::Plain(PlainSubscriber {
 				state: self.state.consume(),
@@ -1261,6 +1297,7 @@ impl Producer {
 				min_sequence: 0,
 				next_sequence: 0,
 				end_sequence: None,
+				parked: BTreeMap::new(),
 			}),
 			// A producer-side (in-process) subscribe is not egress: stay untagged.
 			stats: stats::Scope::default(),
@@ -1281,7 +1318,7 @@ impl Producer {
 	/// when there are no live subscribers. Unlike [`Self::subscription`], this
 	/// doesn't wait for a change or advance the change cursor.
 	///
-	/// The aggregate's [`Subscription::latency_max`] is clamped to this track's
+	/// The aggregate's [`Subscription::latency`] is clamped to this track's
 	/// [`Info::latency_max`]: no subscriber can wait for a late group longer than the
 	/// publisher keeps it.
 	pub fn subscription(&self) -> Option<Subscription> {
@@ -1530,20 +1567,31 @@ impl Drop for Alive {
 		// release the cached groups so a stale consumer can't pin them (and their
 		// frame buffers) forever, the same as an explicit abort. A cleanly
 		// finished track keeps its cache so consumers can still drain it.
-		if let Ok(mut state) = self.state.write()
-			&& state.final_sequence.is_none()
-		{
-			// Dropped without finish() or abort(), so consumers will see
-			// Error::Dropped instead of a clean end. Deliberate ends go through
-			// finish()/abort().
-			tracing::warn!(
-				track = %self.name,
-				"track::Producer dropped without finish() or abort()"
-			);
-			// See `abort`: keep the frame boundary once its groups go away.
-			state.resume = state.resume_position();
-			state.clear_cache();
-			state.datagrams.clear();
+		// `abort()` closes the channel, so `write()` returns `Err(Ref)`. `finish()`
+		// leaves it open with `final_sequence` set, so inspect both outcomes.
+		match self.state.write() {
+			Ok(mut state) => {
+				if state.final_sequence.is_some() || state.abort.is_some() {
+					return;
+				}
+				tracing::warn!(
+					track = %self.name,
+					"track::Producer dropped without finish() or abort()"
+				);
+				// See `abort`: keep the frame boundary once its groups go away.
+				state.resume = state.resume_position();
+				state.clear_cache();
+				state.datagrams.clear();
+			}
+			Err(state) => {
+				if state.final_sequence.is_some() || state.abort.is_some() {
+					return;
+				}
+				tracing::warn!(
+					track = %self.name,
+					"track::Producer dropped without finish() or abort()"
+				);
+			}
 		}
 	}
 }
@@ -1600,7 +1648,7 @@ fn snapshot_subscription(subs: &kio::Shared<Subscriptions>, bound: Option<Durati
 fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Option<Subscription> {
 	let mut combined = combined?;
 	if let Some(bound) = bound {
-		combined.latency_max = combined.latency_max.min(bound);
+		combined.latency.max = combined.latency.max.min(bound);
 	}
 	Some(combined)
 }
@@ -1719,6 +1767,10 @@ impl Demand {
 #[derive(Clone)]
 pub struct Consumer {
 	name: Arc<str>,
+	// The broadcast this track belongs to, so a catalog track can name the path its
+	// relative references resolve against. Rebound by `broadcast::Consumer::track` to
+	// that handle's view, which may name the broadcast differently than its producer did.
+	broadcast: Arc<broadcast::Info>,
 	inner: ConsumerKind,
 	// Egress stats scope, set by a tagged [`broadcast::Consumer`] via
 	// [`Self::with_stats`]. Empty (no-op) for an untagged track.
@@ -1733,17 +1785,20 @@ enum ConsumerKind {
 
 impl Consumer {
 	fn plain(name: Arc<str>, state: kio::Consumer<TrackState>) -> Self {
+		let broadcast = state.read().broadcast.clone();
 		Self {
 			name,
+			broadcast,
 			inner: ConsumerKind::Plain(state),
 			stats: stats::Scope::default(),
 		}
 	}
 
 	/// A consumer over a spliced logical track (a route-fed broadcast's track).
-	pub(crate) fn spliced(name: Arc<str>, resume: super::resume::Consumer) -> Self {
+	pub(crate) fn spliced(name: Arc<str>, broadcast: Arc<broadcast::Info>, resume: super::resume::Consumer) -> Self {
 		Self {
 			name,
+			broadcast,
 			inner: ConsumerKind::Spliced(resume),
 			stats: stats::Scope::default(),
 		}
@@ -1756,9 +1811,24 @@ impl Consumer {
 		self
 	}
 
+	/// Rebind the track to the broadcast handle it was reached through, so
+	/// [`broadcast`](Self::broadcast) reports the path that handle was handed out at (see
+	/// [`broadcast::Info::path`]). Called by [`broadcast::Consumer::track`].
+	pub(crate) fn with_broadcast(mut self, broadcast: Arc<broadcast::Info>) -> Self {
+		self.broadcast = broadcast;
+		self
+	}
+
 	/// The track name this handle is bound to.
 	pub fn name(&self) -> &str {
 		&self.name
+	}
+
+	/// The broadcast this track belongs to, as reached through the handle it came from.
+	/// Its [`path`](broadcast::Info::path) is what a catalog's relative `broadcast`
+	/// references resolve against.
+	pub fn broadcast(&self) -> &broadcast::Info {
+		&self.broadcast
 	}
 
 	/// Open a live subscription.
@@ -1782,6 +1852,7 @@ impl Consumer {
 
 		kio::Pending::new(Subscribing {
 			name: self.name.clone(),
+			broadcast: self.broadcast.clone(),
 			inner,
 			subscription,
 			stats: self.stats.clone(),
@@ -1821,6 +1892,8 @@ impl Consumer {
 				Some(_) => Poll::Ready(None),
 				// Past the declared end, so it can never exist.
 				None if state.final_sequence.is_some_and(|fin| sequence >= fin) => Poll::Ready(None),
+				// Below the declared start, so the live feed skipped it for good.
+				None if state.start_sequence.is_some_and(|start| sequence < start) => Poll::Ready(None),
 				None => Poll::Pending,
 			}
 		});
@@ -1830,6 +1903,46 @@ impl Consumer {
 			// The track died; whatever it cached went with it.
 			Poll::Ready(Err(_)) => Poll::Ready(None),
 			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Poll for a live cached copy of `sequence` that can serve frame `index`,
+	/// parking until one exists.
+	///
+	/// Unlike [`Self::poll_peek_group`] this never gives a verdict: a missing
+	/// group parks (registered for its arrival) even below the declared start,
+	/// since demand may move backward and revive it. The spliced reader uses it
+	/// to reconsider a route it gave up on, so it must be exact about what
+	/// "available" means: a copy that cannot start at `index` (its head is gone)
+	/// leaves the route buried rather than reviving it into a peek that would
+	/// bury it again. That exactness is load-bearing, since the reader consults
+	/// this ahead of its terminal checks: relaxing it to "the group exists" makes
+	/// revive and re-bury alternate forever inside one poll
+	/// (`resume::test::misaligned_copy_is_lost_without_spinning`, where the
+	/// regression surfaces as a hang).
+	pub(crate) fn poll_serving_group(&self, sequence: u64, index: u64, waiter: &kio::Waiter) -> Poll<()> {
+		let ConsumerKind::Plain(state) = &self.inner else {
+			// A segment's track is never itself spliced.
+			return Poll::Pending;
+		};
+		let res = state.poll(waiter, |state| match state.lookup.get(&sequence) {
+			Some(slot) if !slot.group.is_aborted() => {
+				// `start_at` clamps up, so landing higher means the copy no longer
+				// holds this position.
+				let mut group = slot.group.consume();
+				group.start_at(index);
+				match group.index() == index {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				}
+			}
+			_ => Poll::Pending,
+		});
+		match res {
+			Poll::Ready(Ok(())) => Poll::Ready(()),
+			// The track died; whatever would arrive never will, and the caller's
+			// terminal checks settle the wait.
+			Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
 		}
 	}
 
@@ -1983,6 +2096,7 @@ impl Consumer {
 /// [`kio::Pending`] wrapper, whose `DerefMut` exposes [`Self::update`].
 pub struct Subscribing {
 	name: Arc<str>,
+	broadcast: Arc<broadcast::Info>,
 	inner: SubscribingKind,
 	subscription: kio::Producer<Subscription>,
 	stats: stats::Scope,
@@ -2005,6 +2119,7 @@ impl Subscribing {
 
 				Poll::Ready(Ok(Subscriber {
 					name: self.name.clone(),
+					broadcast: self.broadcast.clone(),
 					info,
 					inner: SubscriberKind::Plain(PlainSubscriber {
 						state: state.clone(),
@@ -2014,6 +2129,7 @@ impl Subscribing {
 						min_sequence: 0,
 						next_sequence: 0,
 						end_sequence: None,
+						parked: BTreeMap::new(),
 					}),
 					stats: self.stats.clone(),
 					_stats_sub: self.stats.subscribe(),
@@ -2026,6 +2142,7 @@ impl Subscribing {
 
 				Poll::Ready(Ok(Subscriber {
 					name: self.name.clone(),
+					broadcast: self.broadcast.clone(),
 					info,
 					inner: SubscriberKind::Spliced(Box::new(resume.subscribe_shared(self.subscription.clone()))),
 					stats: self.stats.clone(),
@@ -2283,7 +2400,7 @@ impl kio::Pollable for Fetching {
 ///
 /// - [`Self::start_at`] / [`Self::end_at`] move **this subscriber's read cursor**. They
 ///   filter exactly what this handle returns and are invisible to the publisher.
-/// - [`Subscription::group_start`] / [`Subscription::group_end`], set via [`Self::update`],
+/// - [`Subscription::start`] / [`Subscription::end`], set via [`Self::update`],
 ///   are a **request to the publisher**. They're aggregated across every live subscriber
 ///   (earliest start, widest end), so they say what the publisher should send, not what
 ///   this subscriber sees.
@@ -2295,6 +2412,8 @@ impl kio::Pollable for Fetching {
 /// for. Set both to skip them *and* avoid the transfer.
 pub struct Subscriber {
 	name: Arc<str>,
+	// The broadcast this track belongs to; see [`Self::broadcast`].
+	broadcast: Arc<broadcast::Info>,
 	info: Info,
 	inner: SubscriberKind,
 	// Egress stats scope, used to meter the groups this subscriber reads. Empty
@@ -2325,11 +2444,16 @@ struct PlainSubscriber {
 	/// One past the highest sequence returned by `next_group`.
 	/// Used only by that method to skip late arrivals; does not affect `recv_group`.
 	next_sequence: u64,
-	/// Inclusive upper sequence bound for `next_group`. `None` means no cap. Set by
-	/// `end_at`; can be raised, lowered, or unset at any time. Groups beyond the
-	/// cap stay in the producer's cache and become eligible again when the cap
-	/// rises (or is removed).
+	/// Inclusive upper sequence bound for `next_group` and `recv_group`. `None`
+	/// means no cap. Set by `end_at`; can be raised, lowered, or unset at any time.
+	/// Groups beyond the cap stay in the producer's cache and become eligible again
+	/// when the cap rises (or is removed).
 	end_sequence: Option<u64>,
+	/// Groups received beyond the [`Self::end_sequence`] cap, held for `recv_group`
+	/// until the cap rises (arrival-order reads consume the shared cursor, so they
+	/// are parked here instead of dropped). Keyed by sequence so the lowest is
+	/// re-offered first.
+	parked: BTreeMap<u64, group::Consumer>,
 }
 
 impl PlainSubscriber {
@@ -2346,14 +2470,59 @@ impl PlainSubscriber {
 	}
 
 	fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		let Some((consumer, found_index)) =
-			ready!(self.poll(waiter, |state| state.poll_recv_group(self.index, self.min_sequence))?)
-		else {
-			return Poll::Ready(Ok(None));
+		// An eviction aborts a parked group without touching any cursor this
+		// subscriber polls, so each entry needs a waiter or this poll would never
+		// rerun. `poll_closed` observes-or-registers under one lock: `Pending`
+		// parks the waiter while the group is open (an open group cannot be
+		// aborted), and `Ready` means closed, where only an abort invalidates the
+		// entry. Checking `is_aborted` separately from the registration would leave
+		// a window where an abort lands between the two and wakes nobody.
+		let watch = |group: &group::Consumer| match group.poll_closed(waiter) {
+			Poll::Pending => true,
+			Poll::Ready(()) => !group.is_aborted(),
 		};
 
-		self.index = found_index + 1;
-		Poll::Ready(Ok(Some(consumer)))
+		// A raised `start_at` drops parked groups it overtook, and eviction/expiry
+		// (which aborts a cached group) drops its parked entry. The latter is what
+		// bounds parking: a subscription capped indefinitely holds only what the
+		// track's cache policy still retains, not every group it ever observed.
+		let min_sequence = self.min_sequence;
+		self.parked
+			.retain(|sequence, group| *sequence >= min_sequence && watch(group));
+
+		// Re-offer the lowest parked group back inside the cap once it rises.
+		if let Some(&sequence) = self.parked.keys().next()
+			&& self.end_sequence.is_none_or(|end| sequence <= end)
+		{
+			return Poll::Ready(Ok(self.parked.remove(&sequence)));
+		}
+
+		loop {
+			let Some((consumer, found_index)) =
+				ready!(self.poll(waiter, |state| state.poll_recv_group(self.index, self.min_sequence))?)
+			else {
+				// Parked groups survive a finished track: they become deliverable
+				// again if the cap rises, so the stream isn't over while any are held.
+				if self.parked.is_empty() {
+					return Poll::Ready(Ok(None));
+				}
+				return Poll::Pending;
+			};
+			self.index = found_index + 1;
+
+			// Park a group beyond the cap instead of dropping it, and keep scanning
+			// so an in-range group that arrived behind it still flows.
+			if self.end_sequence.is_some_and(|end| consumer.sequence > end) {
+				// Watch it from the moment it parks: the retain pass above already
+				// ran, so an entry admitted here would otherwise sit unwatched for
+				// the rest of this poll, and an abort could wake nobody.
+				if watch(&consumer) {
+					self.parked.insert(consumer.sequence, consumer);
+				}
+				continue;
+			}
+			return Poll::Ready(Ok(Some(consumer)));
+		}
 	}
 
 	fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
@@ -2432,6 +2601,13 @@ impl Subscriber {
 		&self.name
 	}
 
+	/// The broadcast this track belongs to, as reached through the handle it came from.
+	/// Its [`path`](broadcast::Info::path) is what a catalog's relative `broadcast`
+	/// references resolve against.
+	pub fn broadcast(&self) -> &broadcast::Info {
+		&self.broadcast
+	}
+
 	/// Create a handle for updating this subscriber's delivery preferences.
 	pub fn control(&self) -> SubscriberControl {
 		SubscriberControl {
@@ -2447,6 +2623,12 @@ impl Subscriber {
 	/// Returns every group exactly once in the order it landed on the wire, which may be
 	/// out of sequence due to network reordering or loss. Use [`Self::poll_next_group`] if
 	/// you only want groups whose sequence number is higher than any previously returned.
+	///
+	/// Honors the floor set by [`Self::start_at`] and the cap set by [`Self::end_at`]:
+	/// a group beyond the cap is parked (not dropped) and re-offered once the cap rises
+	/// (lowest sequence first), without blocking in-range groups that arrive behind it.
+	/// A parked group that the producer evicts or expires in the meantime is dropped,
+	/// so parking never outlives the track's cache policy.
 	///
 	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
 	/// `Poll::Ready(Ok(None))` when the track is finished,
@@ -2466,6 +2648,7 @@ impl Subscriber {
 	/// Every group is returned exactly once, in the order it landed on the wire, which may
 	/// be out of sequence due to network reordering or loss. Use [`Self::next_group`] if you
 	/// only want groups whose sequence number is higher than any previously returned.
+	/// See [`Self::poll_recv_group`] for how [`Self::start_at`] and [`Self::end_at`] apply.
 	pub async fn recv_group(&mut self) -> Result<Option<group::Consumer>> {
 		kio::wait(|waiter| self.poll_recv_group(waiter)).await
 	}
@@ -2589,7 +2772,7 @@ impl Subscriber {
 	///
 	/// A local filter, not a request: it doesn't tell the publisher anything, so the
 	/// skipped groups are still delivered and simply not returned. To ask the publisher
-	/// to start there instead, set [`Subscription::group_start`] via [`Self::update`].
+	/// to start there instead, set [`Subscription::start`] via [`Self::update`].
 	/// See [Local cursor vs wire preference](Self#local-cursor-vs-wire-preference).
 	pub fn start_at(&mut self, sequence: u64) {
 		match &mut self.inner {
@@ -2603,12 +2786,12 @@ impl Subscriber {
 	///
 	/// Accepts a bare `u64` (cap), `Some(u64)`, or `None` (uncap).
 	///
-	/// A local filter, not a request; [`Subscription::group_end`] is the wire-level
+	/// A local filter, not a request; [`Subscription::end`] is the wire-level
 	/// counterpart. See [Local cursor vs wire preference](Self#local-cursor-vs-wire-preference).
 	///
-	/// Affects [`Self::next_group`] only: groups beyond the cap stay in the producer's
-	/// cache rather than being skipped past, so a later call to [`Self::end_at`] with a
-	/// higher value (or `None`) makes them available again. Lowering the cap below the
+	/// Affects [`Self::next_group`] and [`Self::recv_group`]: groups beyond the cap are
+	/// held rather than skipped past, so a later call to [`Self::end_at`] with a higher
+	/// value (or `None`) makes them available again. Lowering the cap below the
 	/// consumer's current cursor parks the consumer until the cap is raised.
 	pub fn end_at(&mut self, sequence: impl Into<Option<u64>>) {
 		match &mut self.inner {
@@ -2857,6 +3040,8 @@ impl Subscriber {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use crate::Latency;
+	use crate::model::test_tracing::count_drop_warnings;
 
 	/// Mint a track for tests with a default parent broadcast, since tracks are
 	/// normally born from a [`broadcast::Producer`].
@@ -2886,6 +3071,37 @@ mod test {
 			.expect("datagram would have blocked")
 			.expect("would have errored")
 			.expect("track was closed")
+	}
+
+	/// A declared start (SUBSCRIBE_START) resolves a peek below it as a permanent
+	/// miss, while a group that is already cached below the start stays readable
+	/// (a fetch can create one; the declaration only covers the live feed).
+	#[tokio::test]
+	async fn peek_resolves_below_the_declared_start() {
+		let mut producer = track_producer("test", None);
+		let consumer = producer.consume();
+
+		let mut cached = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		cached.write_frame(Timestamp::ZERO, b"backfill".to_vec()).unwrap();
+		cached.finish().unwrap();
+
+		// Nothing declared yet: a missing group parks.
+		let waiter = kio::Waiter::noop();
+		assert!(consumer.poll_peek_group(0, &waiter).is_pending());
+
+		// The declaration turns the missing group into a permanent miss, but the
+		// cached one below it still resolves.
+		producer.start_at(3).unwrap();
+		assert!(matches!(consumer.poll_peek_group(0, &waiter), Poll::Ready(None)));
+		assert!(matches!(consumer.poll_peek_group(1, &waiter), Poll::Ready(Some(_))));
+		assert!(consumer.poll_peek_group(3, &waiter).is_pending());
+
+		// The declaration follows the demand in either direction: forward retires
+		// the skipped range, backward reopens it.
+		producer.start_at(4).unwrap();
+		assert!(matches!(consumer.poll_peek_group(3, &waiter), Poll::Ready(None)));
+		producer.start_at(0).unwrap();
+		assert!(consumer.poll_peek_group(0, &waiter).is_pending());
 	}
 
 	#[tokio::test]
@@ -3276,27 +3492,35 @@ mod test {
 		// A latency budget beyond the cache is capped in the aggregate; a group can't be
 		// waited for longer than the publisher keeps it. The subscriber's own preference
 		// is stored verbatim, so what it asked for stays readable.
-		let mut subscriber = producer.subscribe(Subscription::default().with_latency_max(Duration::from_secs(10)));
-		assert_eq!(subscriber.subscription().latency_max, Duration::from_secs(10));
-		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_secs(2));
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_secs(10))));
+		assert_eq!(subscriber.subscription().latency.max, Duration::from_secs(10));
+		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_secs(2));
 
 		// A budget within the cache is left alone, and ZERO (skip immediately) stays ZERO.
 		subscriber
-			.update(Subscription::default().with_latency_max(Duration::from_millis(500)))
+			.update(Subscription::default().with_latency(Latency::max(Duration::from_millis(500))))
 			.unwrap();
-		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_millis(500));
+		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_millis(500));
 
 		subscriber
-			.update(Subscription::default().with_latency_max(Duration::ZERO))
+			.update(Subscription::default().with_latency(Latency::REAL_TIME))
 			.unwrap();
-		assert_eq!(producer.subscription().unwrap().latency_max, Duration::ZERO);
+		assert_eq!(producer.subscription().unwrap().latency.max, Duration::ZERO);
 	}
 
 	/// Mint a track under an origin whose retention ceiling is `cap`, so the
 	/// track's own window is clamped down to it on bind.
 	fn track_producer_capped(name: impl Into<Arc<str>>, info: Info, cap: Duration) -> Producer {
 		let origin = crate::origin::Info::default().with_cache_duration(cap);
-		Producer::new(Arc::new(broadcast::Info { origin }), name, info)
+		Producer::new(
+			Arc::new(broadcast::Info {
+				origin,
+				..Default::default()
+			}),
+			name,
+			info,
+		)
 	}
 
 	#[test]
@@ -3343,18 +3567,18 @@ mod test {
 	#[test]
 	fn latency_max_clamped_via_every_update_path() {
 		let producer = track_producer("test", Info::default().with_latency_max(Duration::from_secs(2)));
-		let over = Subscription::default().with_latency_max(Duration::from_secs(10));
+		let over = Subscription::default().with_latency(Latency::max(Duration::from_secs(10)));
 
 		// The clamp lives in the aggregation, so it applies no matter which entry point
 		// wrote the raw preference. Previously only `Subscriber::update` clamped.
 		let mut subscriber = producer.subscribe(over.clone());
-		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_secs(2));
 
 		subscriber.control().update(over.clone()).unwrap();
-		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_secs(2));
 
 		subscriber.update(over).unwrap();
-		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_secs(2));
 	}
 
 	#[test]
@@ -3363,10 +3587,10 @@ mod test {
 
 		// The aggregate takes the max, then clamps once. Equivalent to clamping each
 		// subscriber first, since `min` distributes over `max`.
-		let _a = producer.subscribe(Subscription::default().with_latency_max(Duration::from_millis(500)));
-		let _b = producer.subscribe(Subscription::default().with_latency_max(Duration::from_secs(10)));
+		let _a = producer.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_millis(500))));
+		let _b = producer.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_secs(10))));
 
-		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_secs(2));
 	}
 
 	#[test]
@@ -3586,6 +3810,36 @@ mod test {
 
 		let result = consumer.recv_group().now_or_never().expect("should not block");
 		assert!(matches!(result, Err(Error::Dropped)));
+	}
+
+	#[tokio::test]
+	async fn drop_after_abort_does_not_warn() {
+		// abort() closes the channel after recording `abort`. Drop must treat the
+		// read-only guard returned by write() as clean or it emits a false WARN.
+		let warns = count_drop_warnings("track::Producer dropped without finish", || {
+			let producer = track_producer("test", None);
+			let keep = producer.clone();
+			let mut writer = producer.clone();
+			let mut group = writer.append_group().unwrap();
+			group.finish().unwrap();
+			let _consumer = producer.subscribe(None);
+			writer.abort(Error::Cancel).unwrap();
+			drop(keep);
+		});
+		assert_eq!(warns, 0, "abort-then-drop must not emit unfinished-producer WARN");
+	}
+
+	#[tokio::test]
+	async fn drop_unfinished_warns() {
+		let warns = count_drop_warnings("track::Producer dropped without finish", || {
+			let producer = track_producer("test", None);
+			let mut writer = producer.clone();
+			writer.append_group().unwrap();
+			let _consumer = producer.subscribe(None);
+			drop(writer);
+			drop(producer);
+		});
+		assert!(warns >= 1, "unfinished drop must emit unfinished-producer WARN");
 	}
 
 	#[tokio::test]
@@ -3969,6 +4223,179 @@ mod test {
 			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().sequence,
 			8
 		);
+	}
+
+	/// `recv_group` (arrival order) honors the `end_at` cap by parking, like
+	/// `next_group`: beyond-cap groups are held, not dropped, and a raised cap
+	/// re-offers them, even after the track finishes.
+	#[tokio::test]
+	async fn end_at_parks_recv_group() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None);
+
+		for s in 0..3 {
+			producer.create_group(group::Info { sequence: s }).unwrap();
+		}
+
+		consumer.end_at(1);
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			0
+		);
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			1
+		);
+		assert!(consumer.recv_group().now_or_never().is_none(), "capped at 1");
+
+		// A finished track keeps the parked group claimable: the cap may rise.
+		producer.finish().unwrap();
+		assert!(
+			consumer.recv_group().now_or_never().is_none(),
+			"still parked after finish"
+		);
+
+		consumer.end_at(None);
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			2
+		);
+		assert!(
+			matches!(consumer.recv_group().now_or_never(), Some(Ok(None))),
+			"finished once the parked group drains"
+		);
+	}
+
+	/// A group beyond the cap must not block in-range groups that arrive behind
+	/// it: a relay can ingest a burst micro-reordered (newest first).
+	#[tokio::test]
+	async fn recv_group_serves_arrivals_behind_the_cap() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None);
+
+		consumer.end_at(1);
+
+		// Reordered burst: the beyond-cap group arrives first.
+		producer.create_group(group::Info { sequence: 2 }).unwrap();
+		producer.create_group(group::Info { sequence: 0 }).unwrap();
+		producer.create_group(group::Info { sequence: 1 }).unwrap();
+
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			0
+		);
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			1
+		);
+		assert!(consumer.recv_group().now_or_never().is_none(), "capped at 1");
+
+		consumer.end_at(2);
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			2
+		);
+	}
+
+	/// A raised `start_at` drops parked groups it overtook instead of re-offering
+	/// them once the cap rises.
+	#[tokio::test]
+	async fn start_at_drops_parked_recv_groups() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None);
+
+		consumer.end_at(0);
+		producer.create_group(group::Info { sequence: 1 }).unwrap();
+		assert!(
+			consumer.recv_group().now_or_never().is_none(),
+			"group 1 parked at the cap"
+		);
+
+		consumer.start_at(2);
+		consumer.end_at(None);
+		producer.create_group(group::Info { sequence: 2 }).unwrap();
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			2,
+			"the overtaken parked group is dropped, not re-offered"
+		);
+	}
+
+	/// A parked group the producer aborts (eviction/expiry) is dropped: it is
+	/// neither delivered once the cap rises nor allowed to hold the stream open
+	/// after the track finishes. This is what bounds parking by the cache policy.
+	#[tokio::test]
+	async fn evicted_parked_recv_groups_are_dropped() {
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None);
+
+		producer.create_group(group::Info { sequence: 0 }).unwrap();
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			0
+		);
+
+		consumer.end_at(0);
+		let straggler = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		assert!(
+			consumer.recv_group().now_or_never().is_none(),
+			"group 1 parked at the cap"
+		);
+
+		// The cache evicts the parked group (abort-as-tombstone), then the track ends.
+		straggler.abort(Error::Old).unwrap();
+		producer.finish().unwrap();
+
+		consumer.end_at(None);
+		assert!(
+			matches!(consumer.recv_group().now_or_never(), Some(Ok(None))),
+			"a dead parked group must not be delivered or hold the stream open"
+		);
+	}
+
+	/// Eviction aborts a parked group behind a sleeping subscriber's back. Nothing
+	/// else will poll it (the track already finished), so the entry has to carry a
+	/// waiter or the subscription sleeps forever holding its stream open.
+	#[tokio::test]
+	async fn evicted_parked_group_wakes_the_clean_end() {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+		use std::task::{Context, Wake};
+
+		/// A waker that counts its wakes, for asserting a pending poll left a live
+		/// registration behind.
+		struct CountWaker(AtomicUsize);
+		impl Wake for CountWaker {
+			fn wake(self: std::sync::Arc<Self>) {
+				self.0.fetch_add(1, Ordering::SeqCst);
+			}
+		}
+
+		let mut producer = track_producer("test", None);
+		let mut consumer = producer.subscribe(None);
+
+		producer.create_group(group::Info { sequence: 0 }).unwrap();
+		assert_eq!(
+			consumer.recv_group().now_or_never().unwrap().unwrap().unwrap().sequence,
+			0
+		);
+
+		consumer.end_at(0);
+		let straggler = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		assert!(consumer.recv_group().now_or_never().is_none(), "parked at the cap");
+		producer.finish().unwrap();
+
+		let counter = std::sync::Arc::new(CountWaker(AtomicUsize::new(0)));
+		let waker = std::task::Waker::from(counter.clone());
+		let mut cx = Context::from_waker(&waker);
+		let mut fut = std::pin::pin!(consumer.recv_group());
+		assert!(
+			fut.as_mut().poll(&mut cx).is_pending(),
+			"the parked group holds it open"
+		);
+
+		straggler.abort(Error::Old).unwrap();
+		assert!(counter.0.load(Ordering::SeqCst) > 0, "the eviction wakeup was lost");
+		assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Ready(Ok(None))));
 	}
 
 	#[tokio::test]

@@ -305,6 +305,45 @@ async fn export_waits_for_catalog_before_header() {
 	drop(producer);
 }
 
+/// A catalog may publish a codec before its optional dimensions. The MKV
+/// header is immutable, so derive geometry from the first keyframe before
+/// writing `PixelWidth` and `PixelHeight`.
+#[tokio::test(start_paused = true)]
+async fn export_derives_video_geometry_before_header() {
+	use hang::catalog::{Container, VideoConfig};
+
+	let mut live = Live::new(".vp8", |catalog, name| {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.container = Container::Legacy;
+		catalog.lock().video.renditions.insert(name, config);
+	});
+	// Geometry-less startup frames must not park the source before the keyframe.
+	live.track.write(raw_frame(0, &[0x31, 0x00, 0x00], true)).unwrap();
+	live.track
+		.write(raw_frame(
+			33_000,
+			&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00],
+			true,
+		))
+		.unwrap();
+	live.track.finish().unwrap();
+
+	let mut exporter = crate::container::mkv::Export::new(live.source(), live.catalog_stream().await);
+	let header = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
+		.await
+		.expect("exporter timed out")
+		.expect("exporter result")
+		.expect("expected header bytes");
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut importer = crate::container::mkv::Import::new(broadcast, catalog.reserve());
+	importer.decode(&bytes::BytesMut::from(header.as_ref())).unwrap();
+	let video = catalog.snapshot().video.renditions.values().next().unwrap().clone();
+	assert_eq!(video.coded_width, Some(320));
+	assert_eq!(video.coded_height, Some(240));
+}
+
 #[tokio::test(start_paused = true)]
 async fn export_emits_blocks_for_each_frame() {
 	// Import a WebM that contains 3 video frames + 2 audio frames, export it,

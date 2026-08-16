@@ -59,6 +59,41 @@ for ann, err := range announced.All(ctx) {
 }
 ```
 
+## Reconnecting
+
+The session automatically redials with backoff when the transport drops (a relay
+restart, a laptop waking from sleep), and broadcasts consumed through it ride out
+the gap. Pass `moq.WithReconnect(false)` for a one-shot dial, or tune the pacing:
+
+```go
+client, err := moq.Dial(ctx, "https://relay.example.com",
+    moq.WithBackoff(moq.Backoff{
+        Initial:    500 * time.Millisecond,
+        Multiplier: 2,
+        Max:        10 * time.Second,
+        Timeout:    moq.RetryForever,
+    }),
+)
+```
+
+Every `Backoff` field is optional and its zero value means the default (1s / 2 /
+30s / 5m), so `moq.Backoff{Max: 5 * time.Second}` changes only the ceiling.
+`moq.RetryForever` as `Timeout` is how you ask for unlimited retries.
+
+`Session.Status` reports each transition (`StatusConnected`, `StatusDisconnected`,
+`StatusMigrating`), and `Session.Closed` returns only once the connection stops
+for good:
+
+```go
+for {
+    status, err := client.Session().Status(ctx)
+    if err != nil {
+        break // gave up for good (or ctx cancelled)
+    }
+    fmt.Println("status:", status)
+}
+```
+
 ## TLS and stats
 
 Use certificate roots or fingerprints when a client needs to trust a private or
@@ -81,6 +116,33 @@ fmt.Printf("rtt: %v\n", stats.RttUs)
 
 `Stats()` returns a snapshot. Individual fields are nil when the transport does
 not report that metric yet.
+
+## Accept connections
+
+Inspect an incoming request's logical endpoint before accepting it with the query-free `Path()`. It is consistent across transports and returns `""` for the root or missing path. `Query()` returns the encoded query and may contain credentials:
+
+```go
+server, err := moq.Listen(ctx, "127.0.0.1:4443", moq.WithTLSGenerate("localhost"))
+if err != nil {
+    log.Fatal(err)
+}
+defer server.Close()
+
+for request, err := range server.Requests(ctx) {
+    if err != nil {
+        log.Fatal(err)
+    }
+    if request.Path() == "/admin" {
+        _ = request.Reject(ctx, 403)
+        continue
+    }
+    session, err := request.Accept(ctx)
+    if err != nil {
+        log.Fatal(err)
+    }
+    go func() { _ = session.Closed(ctx) }()
+}
+```
 
 ## Dynamic tracks
 
@@ -125,6 +187,9 @@ if err != nil {
     log.Fatal(err)
 }
 _ = media.WriteFrame(moq.Frame{Payload: opusFrame, TimestampUs: 20_000})
+// Audio has no keyframes, so Cut is what gives it group boundaries. Once per
+// frame is the lowest latency; a segment cadence suits HLS/DASH.
+_ = media.Cut()
 ```
 
 Video catalog fields that are known before the first keyframe can be supplied
@@ -135,6 +200,8 @@ media, err := broadcast.PublishMedia("avc3", nil, moq.WithVideoHint(moq.VideoHin
     Coded: &moq.Dimensions{Width: 1920, Height: 1080},
 }))
 ```
+
+Each catalog `Video` has a `Stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
 
 Properties that apply to every video rendition are updated together. Nil fields clear the corresponding catalog property, and rotation is normalized to the nearest clockwise quarter turn:
 
@@ -185,6 +252,36 @@ broadcast.Finish()
 ```
 
 If a producer is collected without `Finish()`, the underlying library logs a warning (`broadcast::Producer dropped without close()`) to help you spot the leak.
+
+## Raw media
+
+`PublishMedia` takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `PublishVideo` / `PublishAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
+
+```go
+video, err := broadcast.PublishVideo(
+    moq.VideoEncoderInput{
+        Format:    moq.VideoPixelFormatRgba,
+        Width:     1280,
+        Height:    720,
+        Framerate: 30,
+    },
+    moq.VideoEncoderOutput{
+        Codec: moq.VideoCodecH264,
+        Kind:  moq.AutoEncoder(),
+    },
+)
+if err != nil {
+    // handle error
+}
+
+err = video.Write(moq.VideoFrame{TimestampUs: ptsUs, Data: rgba})
+// ...
+video.Finish()
+```
+
+`AutoEncoder()` prefers a hardware encoder and falls back to software; `SoftwareEncoder()`, `HardwareEncoder()`, and `NamedEncoder("videotoolbox")` pin the choice. The bindings compile VideoToolbox (macOS), Media Foundation (Windows), and openh264 (software, everywhere); the Linux hardware codecs are a libmoq-only build option. `SetBitrate` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
+
+The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition is published immediately, read out of the encoder itself, so subscribers discover it through the catalog rather than a name you pick, and can find it before the first frame exists. `Cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `Gop` frames on its own, and each of those cuts a group.
 
 ## Raw Track Controls
 
@@ -273,6 +370,30 @@ for request, err := range dynamic.Requests(ctx) {
     _ = producer.Finish()
 }
 ```
+
+## Fetching media groups
+
+`FetchGroup` hands back raw payloads. `FetchMediaGroup` decodes the same group through the rendition's container, so you get timestamped frames without opening a live subscription:
+
+```go
+catalog, err := consumer.Catalog(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+
+group, err := consumer.FetchMediaGroup("audio0", 42, catalog.Audio["audio0"].Container, nil)
+if err != nil {
+    log.Fatal(err)
+}
+for frame, err := range group.Frames(ctx) {
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("%d: %d bytes\n", frame.TimestampUs, len(frame.Payload))
+}
+```
+
+A fetched media group is finite: it ends after the group's last decoded frame, unlike the live `SubscribeMedia` stream. Latency-based group skipping does not apply, so you always get every frame in the group.
 
 ## Raw track timestamps
 

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.44](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.43...moq-token-cli-v0.5.44) - 2026-08-14
+
+### Other
+
+- update Cargo.lock dependencies
+
+## [0.5.43](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.42...moq-token-cli-v0.5.43) - 2026-08-07
+
+### Other
+
+- update Cargo.lock dependencies
+
+## [0.5.42](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.41...moq-token-cli-v0.5.42) - 2026-08-05
+
+### Other
+
+- *(rs)* clean up pedantic clippy warnings ([#2621](https://github.com/moq-dev/moq/pull/2621))
+
+## [0.5.41](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.40...moq-token-cli-v0.5.41) - 2026-08-03
+
+### Added
+
+- *(cli)* add a `token` subcommand to moq-cli ([#2593](https://github.com/moq-dev/moq/pull/2593))
+
 ## [0.5.40](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.39...moq-token-cli-v0.5.40) - 2026-07-29
 
 ### Other

@@ -1,26 +1,89 @@
 /**
- * Errors, including the code a peer reports when it resets a stream.
+ * Errors, including the code a peer reports when it resets a stream or closes the session.
  *
  * @module
  */
 
 /**
- * An error the peer reported by resetting a stream, carrying the raw code it sent.
+ * Codes a peer sends when terminating the session, mirroring the Rust `SessionError`.
  *
- * The codes are not standardized, so this deliberately does not translate one into a local
- * error: the number means whatever the peer's implementation says it means. A read or write
- * rejects with this on every transport, so branch on {@link code} rather than feature-detecting
- * `WebTransportError`, which a non-browser runtime never defines and the WebSocket fallback
- * never throws.
+ * Specified by moq-lite, which reuses moq-transport's codes unchanged; 64 and up are the
+ * application's. {@link StreamCode} is the other registry, and the two are disjoint, so the
+ * same integer means different things in each.
  *
- * Code 0 is what a transport sends when a stream is dropped or aborted with no code of its own.
+ * Codes 32-63 are reserved rather than assigned. An implementation may send one for a
+ * condition with no code here, but the draft gives it no meaning, so treat anything not
+ * listed below as an unspecified error rather than guessing.
+ *
+ * @public
+ */
+export const SessionCode = {
+	/** Ending the session normally, with no error. */
+	Cancel: 0x0,
+	/** Something went wrong that isn't worth a dedicated code. */
+	Internal: 0x1,
+	/** The credentials don't grant the requested path or operation. Retrying will fail again. */
+	Unauthorized: 0x2,
+	/** A protocol rule was broken; the session is unusable. */
+	ProtocolViolation: 0x3,
+	/** A key-value pair was malformed or repeated more than allowed. */
+	KeyValueFormatting: 0x6,
+	/** The peer did not close within the GOAWAY drain deadline. */
+	GoawayTimeout: 0x10,
+	/** A control message took too long. */
+	Timeout: 0x11,
+	/** No version could be negotiated. */
+	Version: 0x15,
+} as const;
+
+/** A session termination code. See {@link SessionCode}. */
+export type SessionCode = (typeof SessionCode)[keyof typeof SessionCode];
+
+/**
+ * Codes a peer sends when resetting a stream, mirroring the Rust `StreamError`.
+ *
+ * The counterpart to {@link SessionCode}, and a disjoint space: a stream reset of 0 is
+ * {@link StreamCode.Internal}, not a cancellation ({@link StreamCode.Cancel} is 1).
+ *
+ * Codes 32-63 are reserved rather than assigned, same as {@link SessionCode}.
+ *
+ * @public
+ */
+export const StreamCode = {
+	/** Something went wrong that isn't worth a dedicated code. */
+	Internal: 0x0,
+	/** The sender is done with this stream, not failing. A routine unsubscribe. */
+	Cancel: 0x1,
+	/** The content missed its delivery deadline. */
+	DeliveryTimeout: 0x2,
+	/** The session ended, taking this stream with it. */
+	SessionClosed: 0x3,
+	/** The session is going away (a GOAWAY was received). */
+	GoingAway: 0x4,
+	/** The reader fell too far behind and content was dropped to catch up. */
+	TooFarBehind: 0x5,
+	/** The track's content could not be parsed. */
+	MalformedTrack: 0x12,
+} as const;
+
+/** A stream reset code. See {@link StreamCode}. */
+export type StreamCode = (typeof StreamCode)[keyof typeof StreamCode];
+
+/**
+ * An error the peer reported by resetting a stream or closing the session, carrying the
+ * code it sent.
+ *
+ * Which registry {@link code} belongs to depends on what failed: a stream read or write
+ * rejects with a {@link StreamCode}, while a session close carries a {@link SessionCode}.
+ * The two spaces are disjoint, so read it against the right one. This surfaces on every
+ * transport, so branch on {@link code} rather than feature-detecting `WebTransportError`,
+ * which a non-browser runtime never defines and the WebSocket fallback never throws.
  *
  * ```ts
  * try {
  *   frame = await group.readFrame();
  * } catch (err) {
- *   // Whatever this peer's code 2 means to it.
- *   if (err instanceof RemoteError && err.code === 2) return;
+ *   if (err instanceof RemoteError && err.code === StreamCode.Cancel) return;
  *   throw err;
  * }
  * ```
@@ -31,8 +94,8 @@ export class RemoteError extends Error {
 	/** The code the peer sent, verbatim. */
 	readonly code: number;
 
-	constructor(code: number, options?: { cause?: unknown }) {
-		super(`remote error: ${code}`, options);
+	constructor(code: number, options?: { cause?: unknown; reason?: string }) {
+		super(options?.reason ? `remote error: ${code} (${options.reason})` : `remote error: ${code}`, options);
 		this.name = "RemoteError";
 		this.code = code;
 	}
@@ -64,6 +127,53 @@ export function fromTransport(err: unknown): Error {
 	const code = streamCode(err);
 	if (code === undefined) return error(err);
 	return new RemoteError(code, { cause: err });
+}
+
+const legacyWebTransportErrors = new WeakSet<object>();
+
+/**
+ * Build the `reason` to hand `abort()` / `cancel()` so the transport puts `code` on the wire.
+ *
+ * Both the WebTransport spec and the WebSocket fallback take the reset code from a
+ * `WebTransportError`'s `streamErrorCode` and send 0 for anything else, a plain `Error`
+ * included. Since 0 is {@link StreamCode.Internal}, cancelling with a bare `Error` tells the
+ * peer we failed rather than that we are done.
+ *
+ * The native constructor exists exactly where native WebTransport does, which is where the
+ * fallback isn't used, so mint a matching shape elsewhere rather than feature-detect a global
+ * that will not be there.
+ *
+ * @internal
+ */
+export function toTransport(code: number, message: string): Error {
+	const Native = (globalThis as { WebTransportError?: typeof WebTransportError }).WebTransportError;
+	if (Native) {
+		const Legacy = Native as unknown as new (init: { message: string; streamErrorCode: number }) => Error;
+		if (legacyWebTransportErrors.has(Native)) return new Legacy({ message, streamErrorCode: code });
+
+		try {
+			return new Native(message, { source: "stream", streamErrorCode: code });
+		} catch (err) {
+			// Chromium still implements the previous single-dictionary constructor.
+			if (!(err instanceof TypeError)) throw err;
+			legacyWebTransportErrors.add(Native);
+			return new Legacy({ message, streamErrorCode: code });
+		}
+	}
+
+	return Object.assign(new Error(message), { source: "stream" as const, streamErrorCode: code });
+}
+
+/**
+ * Decode a session close into its terminal error: `null` for a clean close
+ * ({@link SessionCode.Cancel}), otherwise a {@link RemoteError} carrying the peer's code.
+ *
+ * @internal Applied to the transport's `closed` info so the code survives to the application.
+ */
+export function fromClose(info: WebTransportCloseInfo): RemoteError | null {
+	const code = info.closeCode ?? SessionCode.Cancel;
+	if (code === SessionCode.Cancel) return null;
+	return new RemoteError(code, { reason: info.reason });
 }
 
 /**

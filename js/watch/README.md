@@ -89,14 +89,16 @@ Only the distance mode suspends video while the tab is hidden; `always` keeps do
 
 For more control:
 
+Standalone components start enabled when `enabled` is omitted. Pass `false` or a live signal when
+activation follows application lifecycle state.
+
 ```typescript
 import * as Watch from "@moq/watch";
 
 const watch = new Watch.Broadcast(connection, {
-    enabled: true,
-    name: "alice.hang",
-    video: { enabled: true },
-    audio: { enabled: true },
+	name: "alice.hang",
+	video: {},
+	audio: {},
 });
 
 // Access the video stream

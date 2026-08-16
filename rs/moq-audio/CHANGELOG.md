@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.17](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.16...moq-audio-v0.0.17) - 2026-08-07
+
+### Added
+
+- *(cli)* add moq play ([#2697](https://github.com/moq-dev/moq/pull/2697))
+
+## [0.0.16](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.15...moq-audio-v0.0.16) - 2026-08-06
+
+### Added
+
+- *(hang)* declare a configurable 30s retention on media tracks, and fix relayed cache misses ([#2615](https://github.com/moq-dev/moq/pull/2615))
+- fail-fast retries: jittered backoff bounded by time, not error type ([#2647](https://github.com/moq-dev/moq/pull/2647))
+
 ## [0.0.15](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.14...moq-audio-v0.0.15) - 2026-07-29
 
 ### Added

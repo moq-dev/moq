@@ -1,10 +1,48 @@
-import { fromTransport } from "./error.ts";
+import { fromTransport, RemoteError, StreamCode, toTransport } from "./error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
+import { TimeoutError, withTimeout } from "./util/timeout.ts";
 import * as Varint from "./varint.ts";
+
+// Forwarding a peer's reset must keep its code, or a relay flattens it to 0 (INTERNAL_ERROR).
+// Anything else is a local failure, which 0 already describes, so leave it alone.
+function withCode(reason: unknown): unknown {
+	return reason instanceof RemoteError ? toTransport(reason.code, reason.message) : reason;
+}
 
 const MAX_U31 = 2 ** 31 - 1;
 const MAX_READ_SIZE = 1024 * 1024 * 64; // don't allocate more than 64MB for a message
+
+/**
+ * Options handed to the transport for one outgoing stream.
+ *
+ * `waitUntilAvailable` waits for the peer's concurrent stream limit to free a slot instead
+ * of rejecting with a `QuotaExceededError`, which is what we want for the streams a session
+ * opens occasionally. `@types/web` doesn't declare it yet, hence the intersection.
+ */
+export function sendOptions(options?: OpenOptions): WebTransportSendStreamOptions & { waitUntilAvailable?: boolean } {
+	return { sendOrder: options?.sendOrder, waitUntilAvailable: options?.waitUntilAvailable ?? true };
+}
+
+// How long any open may wait for the peer to free a stream slot. Every open needs this,
+// whether or not it asked to wait: an implementation may park an over-limit open rather
+// than rejecting it, and a peer can advertise a stream limit of zero and never raise it.
+// Matches the subscribe budget.
+const OPEN_TIMEOUT_MS = 10_000;
+
+/**
+ * Bound an open that would otherwise park until the peer grants stream credit, restoring
+ * the pre-waitUntilAvailable failure after a grace period. A stream arriving after the
+ * deadline is discarded, since nobody is waiting for it any more.
+ */
+async function openWithin<T>(opening: Promise<T>, timeout: number, discard: (stream: T) => void): Promise<T> {
+	try {
+		return await withTimeout(opening, timeout, `stream open timed out after ${timeout}ms waiting for a slot`);
+	} catch (err: unknown) {
+		opening.then(discard).catch(() => void 0);
+		throw err;
+	}
+}
 
 function isLeadingOnes(version?: IetfVersion): boolean {
 	return (
@@ -15,19 +53,79 @@ function isLeadingOnes(version?: IetfVersion): boolean {
 	);
 }
 
+/**
+ * The `WebTransportSendStream` that every outgoing stream is, narrowed to the one attribute
+ * this package uses. The DOM types available here still describe them as plain
+ * `WritableStream`s, so the interface has to be named structurally.
+ *
+ * `sendOrder` is optional because it is absent until set, and stays absent on an
+ * implementation that doesn't carry the interface at all.
+ *
+ * @see https://www.w3.org/TR/webtransport/#webtransportsendstream
+ */
+export type SendStream = WritableStream<Uint8Array> & { sendOrder?: number };
+
+/** Options for opening an outgoing stream. */
+export interface OpenOptions {
+	/** The negotiated IETF version, which selects the varint encoding. */
+	version?: IetfVersion;
+
+	/**
+	 * The transport send order, where HIGHER values are transmitted first.
+	 * Left to the transport's default when unset.
+	 */
+	sendOrder?: number;
+
+	/**
+	 * Reject if the peer hasn't freed a stream slot within this many milliseconds. Defaults
+	 * to 10s. There is no way to wait indefinitely: a peer can advertise a stream limit of
+	 * zero and never raise it, so every open needs a way out.
+	 */
+	timeout?: number;
+
+	/**
+	 * Ask the transport to wait for a stream slot rather than failing when the peer's
+	 * concurrent stream limit is exhausted. Defaults to true.
+	 *
+	 * Set it false on a path that opens streams faster than the peer can retire them. The
+	 * transport queues the opens it can't satisfy and serves them in order, with no way to
+	 * cancel one, so waiting there spends returning credit on whatever was requested first
+	 * rather than on what matters now.
+	 */
+	waitUntilAvailable?: boolean;
+}
+
+/** Options for {@link Writer.tryOpen}. */
+export interface TryOpenOptions extends OpenOptions {
+	/** Give up once this settles, however it settles. */
+	cancel: Promise<unknown>;
+}
+
 export class Stream {
 	reader: Reader;
 	writer: Writer;
 
+	/** Wrap the two halves of a transport stream. */
 	constructor(props: {
 		writable: WritableStream<Uint8Array>;
 		readable: ReadableStream<Uint8Array>;
+		version?: IetfVersion;
+	});
+	/** Pair halves that were opened separately, as the SETUP exchange does. */
+	constructor(props: { writer: Writer; reader: Reader });
+	constructor(props: {
+		writable?: WritableStream<Uint8Array>;
+		readable?: ReadableStream<Uint8Array>;
 		writer?: Writer;
 		reader?: Reader;
 		version?: IetfVersion;
 	}) {
-		this.writer = props.writer ?? new Writer(props.writable, props.version);
-		this.reader = props.reader ?? new Reader(props.readable, undefined, props.version);
+		const writer = props.writer ?? (props.writable && new Writer(props.writable, props.version));
+		const reader = props.reader ?? (props.readable && new Reader(props.readable, undefined, props.version));
+		if (!writer || !reader) throw new Error("stream needs both halves");
+
+		this.writer = writer;
+		this.reader = reader;
 	}
 
 	static async accept(quic: WebTransport, version?: IetfVersion): Promise<Stream | undefined> {
@@ -43,14 +141,30 @@ export class Stream {
 		}
 	}
 
-	static async open(quic: WebTransport, version?: IetfVersion, priority?: number): Promise<Stream> {
-		const { readable, writable } = await quic.createBidirectionalStream({ sendOrder: priority });
-		return new Stream({ readable, writable, version });
+	/**
+	 * Open an outgoing bidirectional stream.
+	 * @param quic - The session to open it on
+	 * @param options - The version its varints encode with, and the send order ranking it
+	 *   against the session's other streams
+	 */
+	static async open(quic: WebTransport, options?: OpenOptions): Promise<Stream> {
+		const { readable, writable } = await openWithin(
+			quic.createBidirectionalStream(sendOptions(options)),
+			options?.timeout ?? OPEN_TIMEOUT_MS,
+			(stream) => {
+				void stream.writable.abort().catch(() => void 0);
+				void stream.readable.cancel().catch(() => void 0);
+			},
+		);
+		return new Stream({ readable, writable, version: options?.version });
 	}
 
 	close() {
 		this.writer.close();
-		this.reader.stop(new Error("cancel"));
+		// A routine unsubscribe, so send CANCELLED. A bare Error would put 0 on the wire,
+		// which the stream registry reads as INTERNAL_ERROR: the peer would log a failure
+		// for every subscription we walk away from.
+		this.reader.stop(toTransport(StreamCode.Cancel, "cancel"));
 	}
 
 	abort(reason: Error) {
@@ -263,7 +377,7 @@ export class Reader {
 	}
 
 	stop(reason: unknown) {
-		this.#reader?.cancel(reason).catch(() => void 0);
+		this.#reader?.cancel(withCode(reason)).catch(() => void 0);
 	}
 
 	// Decoded like #fill: a caller racing this against a read must not get a different error
@@ -293,6 +407,20 @@ export class Writer {
 		this.#scratch = new ArrayBuffer(9);
 		this.#writer = this.#stream.getWriter();
 		this.version = version;
+	}
+
+	/**
+	 * Rank this stream against the session's others, where HIGHER values are sent first.
+	 *
+	 * A send order only schedules the local end, so a stream the peer opened has to be ranked
+	 * here rather than at the peer's {@link open}.
+	 *
+	 * The spec makes `sendOrder` a settable attribute on every {@link SendStream}. Where the
+	 * interface isn't implemented (Chrome as of writing, a mock, a polyfill) this just sets an
+	 * ignored property, the same way an ignored `sendOrder` option does at {@link open}.
+	 */
+	setPriority(sendOrder: number) {
+		(this.#stream as SendStream).sendOrder = sendOrder;
 	}
 
 	async bool(v: boolean) {
@@ -368,12 +496,56 @@ export class Writer {
 	}
 
 	reset(reason: unknown) {
-		this.#writer.abort(reason).catch(() => void 0);
+		this.#writer.abort(withCode(reason)).catch(() => void 0);
 	}
 
-	static async open(quic: WebTransport, version?: IetfVersion): Promise<Writer> {
-		const writable = (await quic.createUnidirectionalStream()) as WritableStream<Uint8Array>;
-		return new Writer(writable, version);
+	/**
+	 * Open an outgoing unidirectional stream.
+	 * @param quic - The session to open it on
+	 * @param options - The version its varints encode with, and the send order ranking it
+	 *   against the session's other streams
+	 */
+	static async open(quic: WebTransport, options?: OpenOptions): Promise<Writer> {
+		const writable = await openWithin(
+			quic.createUnidirectionalStream(sendOptions(options)) as Promise<WritableStream<Uint8Array>>,
+			options?.timeout ?? OPEN_TIMEOUT_MS,
+			(stream) => void stream.abort().catch(() => void 0),
+		);
+
+		return new Writer(writable, options?.version);
+	}
+
+	/**
+	 * Like {@link Writer.open}, but gives up when `cancel` settles or `timeout` elapses,
+	 * returning undefined so the caller can drop whatever it meant to send. A stream that
+	 * opens after that is reset rather than leaked. A real transport failure still throws.
+	 *
+	 * Worth using even with `waitUntilAvailable: false`, since an implementation may park
+	 * an over-limit open instead of rejecting it.
+	 */
+	static async tryOpen(quic: WebTransport, options: TryOpenOptions): Promise<Writer | undefined> {
+		// A rejected `cancel` (STOP_SENDING) means the peer is gone too, so both settle
+		// paths mean "give up" and neither is left unhandled. Built before the open, and
+		// raced ahead of it, so an already-cancelled caller wins even against a slot that
+		// is free right now.
+		const cancelled = options.cancel.then(
+			() => undefined,
+			() => undefined,
+		);
+		const open = Writer.open(quic, options);
+
+		try {
+			const stream = await Promise.race([cancelled, open]);
+			if (stream) return stream;
+		} catch (err: unknown) {
+			// open already discarded the late stream on its way out.
+			if (!(err instanceof TimeoutError)) throw err;
+			return undefined;
+		}
+
+		const abandoned = new Error("abandoned waiting for a stream slot");
+		open.then((w) => w.reset(abandoned)).catch(() => void 0);
+		return undefined;
 	}
 }
 

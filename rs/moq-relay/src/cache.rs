@@ -67,6 +67,7 @@ pub struct CacheConfig {
 
 /// The relay's resolved cache settings: the shared byte-budget pool plus the
 /// age ceiling applied to every track.
+#[non_exhaustive]
 pub struct Cache {
 	/// The shared byte-budget pool every session's groups register with.
 	pub pool: cache::Pool,

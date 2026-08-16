@@ -22,10 +22,16 @@ from moq_ffi import (
     MoqAudioFrame as AudioFrame,
 )
 from moq_ffi import (
+    MoqBackoff as Backoff,
+)
+from moq_ffi import (
     MoqCatalog as Catalog,
 )
 from moq_ffi import (
     MoqConnectionStats as ConnectionStats,
+)
+from moq_ffi import (
+    MoqConnectionStatus as ConnectionStatus,
 )
 from moq_ffi import (
     MoqContainer as Container,
@@ -58,7 +64,25 @@ from moq_ffi import (
     MoqVideo as Video,
 )
 from moq_ffi import (
+    MoqVideoCodec as VideoCodec,
+)
+from moq_ffi import (
+    MoqVideoEncoderInput as VideoEncoderInput,
+)
+from moq_ffi import (
+    MoqVideoEncoderKind as VideoEncoderKind,
+)
+from moq_ffi import (
+    MoqVideoEncoderOutput as VideoEncoderOutput,
+)
+from moq_ffi import (
+    MoqVideoFrame as VideoFrame,
+)
+from moq_ffi import (
     MoqVideoHint as VideoHint,
+)
+from moq_ffi import (
+    MoqVideoPixelFormat as VideoPixelFormat,
 )
 from moq_ffi import (
     MoqVideoProperties,
@@ -75,8 +99,10 @@ __all__ = [
     "AudioEncoderOutput",
     "AudioFormat",
     "AudioFrame",
+    "Backoff",
     "Catalog",
     "ConnectionStats",
+    "ConnectionStatus",
     "Container",
     "Datagram",
     "Dimensions",
@@ -87,6 +113,12 @@ __all__ = [
     "Subscription",
     "TrackInfo",
     "Video",
+    "VideoCodec",
+    "VideoEncoderInput",
+    "VideoEncoderKind",
+    "VideoEncoderOutput",
+    "VideoFrame",
     "VideoHint",
+    "VideoPixelFormat",
     "VideoProperties",
 ]

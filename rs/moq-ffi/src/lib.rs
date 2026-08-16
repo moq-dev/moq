@@ -16,6 +16,7 @@ pub mod origin;
 pub mod producer;
 pub mod server;
 pub mod session;
+pub mod video;
 
 uniffi::setup_scaffolding!("moq");
 

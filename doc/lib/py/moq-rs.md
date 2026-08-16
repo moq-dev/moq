@@ -39,7 +39,35 @@ async with moq.Client("https://relay.example.com") as client:
     ...
 ```
 
-`Client(url, *, tls_verify=True, tls_roots=None, tls_system_roots=None, tls_fingerprints=None, tls_cert=None, tls_key=None, bind=None, publish=None, subscribe=None)`. Use `tls_cert` and `tls_key` for mutual TLS. Without `publish` / `subscribe` an internal origin is created automatically. Pass an `OriginProducer` to share state across multiple clients.
+`Client(url, *, tls_verify=True, tls_roots=None, tls_system_roots=None, tls_fingerprints=None, tls_cert=None, tls_key=None, bind=None, reconnect=True, backoff=None, publish=None, subscribe=None)`. Use `tls_cert` and `tls_key` for mutual TLS. Without `publish` / `subscribe` an internal origin is created automatically. Pass an `OriginProducer` to share state across multiple clients.
+
+The session automatically reconnects with backoff when the transport drops (a relay restart, a laptop waking from sleep), and broadcasts consumed through it ride out the gap. Pass `reconnect=False` for a one-shot dial, or `backoff=moq.Backoff(initial_ms=500, multiplier=2, max_ms=10_000, timeout_ms=0)` to tune the pacing (`timeout_ms=0` retries forever). Observe the transitions with `Session.status()`:
+
+```python
+while True:
+    status = await client.session.status()  # CONNECTED / DISCONNECTED / MIGRATING
+```
+
+`Session.closed()` resolves only when the connection stops for good: it raises the terminal error when the retries are exhausted, and returns normally after a local shutdown.
+
+Inspect a server request's logical endpoint before accepting it with the query-free `request.path`. It is consistent across transports and returns `""` for the root or missing path. `request.query` returns the encoded query and may contain credentials:
+
+```python
+import asyncio
+
+active = set()
+async with moq.Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
+    async for request in server:
+        if request.path == "/admin":
+            await request.reject(403)
+            continue
+        session = await request.accept()
+        closed = asyncio.create_task(session.closed())
+        active.add(closed)
+        closed.add_done_callback(active.discard)
+
+await asyncio.gather(*active, return_exceptions=True)
+```
 
 A server can reject the connection on auth grounds: `moq.Error.Unauthorized` (HTTP 401) or `moq.Error.Forbidden` (HTTP 403). These are terminal, so handle them separately from a transient transport failure rather than reconnecting. `moq.is_auth(err)` catches both:
 
@@ -61,12 +89,41 @@ except moq.Error as err:
 broadcast = client.create_broadcast("my-stream")
 audio = broadcast.publish_media("opus", opus_init_bytes)
 
+# Audio has no keyframes, so `cut` is what gives it group boundaries. Once per
+# frame is the lowest latency; a segment cadence suits HLS/DASH.
 audio.write_frame(payload, timestamp_us=0)
+audio.cut()
 audio.finish()
 broadcast.finish()
 ```
 
 Supported codec formats include `opus`, `avc3`, `hev1`, `av01`, `vp09`, and others. See [`hang`](/lib/rs/crate/hang) for the full list.
+
+### Publishing raw media
+
+`publish_media` above takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `publish_video` / `publish_audio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
+
+```python
+video = broadcast.publish_video(
+    moq.VideoEncoderInput(
+        format=moq.VideoPixelFormat.RGBA,
+        width=1280,
+        height=720,
+        framerate=30,
+    ),
+    moq.VideoEncoderOutput(
+        codec=moq.VideoCodec.H264,
+        kind=moq.VideoEncoderKind.AUTO(),
+    ),
+)
+
+video.write(moq.VideoFrame(timestamp_us=pts_us, data=rgba))
+video.finish()
+```
+
+`VideoEncoderKind.AUTO()` prefers a hardware encoder and falls back to software; `SOFTWARE()`, `HARDWARE()`, and `NAMED("videotoolbox")` pin the choice (each variant is a class, so call it). The bindings compile VideoToolbox (macOS), Media Foundation (Windows), and openh264 (software, everywhere); the Linux hardware codecs are a libmoq-only build option. `set_bitrate` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
+
+The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition is published immediately, read out of the encoder itself, so subscribers discover it through the catalog rather than a name you pick, and can find it before the first frame exists. `cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group.
 
 `publish_media` fills the catalog by parsing the codec bitstream. For a video format you can pass a `VideoHint` to supply fields the stream can't reveal (such as `bitrate`), or to publish the catalog before the first keyframe:
 
@@ -79,6 +136,8 @@ video = broadcast.publish_media(
 ```
 
 A value the stream later detects fills only a gap the hint left, so a detected value always wins. Audio formats resolve entirely from their init bytes, so they take no hint.
+
+Each catalog `Video` has a `stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
 
 Properties that apply to every video rendition are updated together. Omitted fields clear the corresponding catalog property, and rotation is normalized to the nearest clockwise quarter turn:
 
@@ -177,6 +236,21 @@ async for request in dynamic:
 
 Call `request.abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
 
+### Fetching media groups
+
+`fetch_group` hands back raw payloads. `fetch_media_group` decodes the same group through the rendition's container, so you get timestamped frames without opening a live subscription:
+
+```python
+catalog = await broadcast_consumer.catalog()
+name, audio = next(iter(catalog.audio.items()))
+
+group = await broadcast_consumer.fetch_media_group(name, sequence=42, track=audio)
+async for frame in group:
+    print(frame.timestamp_us, len(frame.payload))
+```
+
+A fetched media group is finite: it ends after the group's last decoded frame, unlike the live `subscribe_media` stream. Latency-based group skipping does not apply, so you always get every frame in the group.
+
 ### Raw datagrams
 
 Raw tracks can also send best-effort datagrams:
@@ -264,6 +338,8 @@ broadcast = await client.announced_broadcast("live/cam1")
 # handler if the origin has one, else raises. Does not wait for a future announce.
 broadcast = await client.request_broadcast("live/cam1")
 ```
+
+Announcements arrive over the session after it connects, so `request_broadcast` on its own races them: right after connecting it can raise for a broadcast that is live. Await `announced_broadcast(path)` first when you know the path you want; `request_broadcast` is for a path a dynamic handler serves, or one you already know is announced.
 
 Each broadcast carries a `Route`: `route.hops` is the chain of relay origin ids (as `list[int]`) the broadcast passed through to reach you, oldest first, and `route.cost` is the publisher's advertised preference (lower wins). The route is dynamic; `await broadcast.route_changed()` returns the current route first, then blocks for each change (e.g. an upstream failover), and returns `None` once the broadcast ends. A publisher advertises its own route with `producer.set_route(moq.Route(hops=[], cost=10))`, for example a standby transcoder that lowers its cost to 0 once it is warm.
 

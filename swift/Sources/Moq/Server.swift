@@ -78,6 +78,16 @@ public final class Request: Sendable {
         ffi.url()
     }
 
+    /// The query-free request path, or an empty string for the root/missing path.
+    public var path: String {
+        ffi.path()
+    }
+
+    /// The encoded request query without `?`; it may contain credentials.
+    public var query: String? {
+        ffi.query()
+    }
+
     /// The transport type, e.g. `"quic"`, `"iroh"`, or `"websocket"`.
     public var transport: String {
         ffi.transport()

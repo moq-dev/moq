@@ -53,7 +53,9 @@
 //!   handshake yourself (any [`Stream`]: a `tokio_rustls` stream, a custom
 //!   socket, a test pipe), then hand the established stream to [`accept_stream`].
 //!   Useful when an existing TLS terminator, proxy, or non-TCP transport already
-//!   owns the socket.
+//!   owns the socket. When that transport is a `TcpStream`, call
+//!   [`configure_socket`] on it first: [`Server`] does, and its keepalive is what
+//!   reaps a play session whose viewer vanished without closing.
 //!
 //! Pure Rust: the RTMP handshake, chunk codec, and session state machine live in
 //! the vendored `rml` module (a fork of `rml_rtmp`), with no librtmp or ffmpeg
@@ -79,12 +81,12 @@ mod server;
 /// instant a newer one arrives, which is too aggressive for RTMP's typical jitter,
 /// so the default holds a couple of seconds. Override per request with
 /// [`Play::with_latency`] / [`Client::with_latency`] or via [`Config::latency`].
-pub const DEFAULT_LATENCY: Duration = Duration::from_secs(2);
+pub const DEFAULT_LATENCY: moq_mux::Latency = moq_mux::Latency::max(Duration::from_secs(2));
 
 pub use dial::Client;
 pub use error::{Error, Result};
 pub use listen::{Config, run};
-pub use server::{Conn, Play, Publish, Request, Server, Stream, accept_stream};
+pub use server::{Conn, PUBLISH_IDLE_TIMEOUT, Play, Publish, Request, Server, Stream, accept_stream, configure_socket};
 
 /// Re-export of the `rustls` version this crate builds [`Config::tls`] against,
 /// so consumers construct a matching [`rustls::ServerConfig`] (a major `rustls`

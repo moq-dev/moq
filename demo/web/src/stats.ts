@@ -84,18 +84,18 @@ const selectedNode = new Signals.Signal<string | undefined>(undefined);
 
 // The relay URL, editable at runtime (see the input binding below).
 const relayUrl = new Signals.Signal<URL | undefined>(new URL(RELAY_URL));
-const connection = new Net.Connection.Reload({ url: relayUrl, enabled: true });
+const connection = new Net.Connection.Shared({ url: relayUrl });
 
 // ---- Discover nodes + subscribe to each -----------------------------------
 
 const discovery = new Signals.Effect();
 discovery.run((effect) => {
-	const conn = effect.get(connection.established);
+	const origin = effect.get(connection.origin);
 	nodeStats.set({});
-	if (!conn) return;
+	if (!origin) return;
 
 	const prefix = Net.Path.from(STATS_PREFIX);
-	const announced = conn.announced(prefix);
+	const announced = origin.announced(prefix);
 	effect.cleanup(() => announced.close());
 
 	// One sub-effect per node so we can tear a node's subscriptions down when it
@@ -117,7 +117,7 @@ discovery.run((effect) => {
 				if (subs.has(node)) continue;
 				const ne = new Signals.Effect();
 				subs.set(node, ne);
-				subscribeNode(ne, conn, path, node);
+				subscribeNode(ne, origin, path, node);
 			} else {
 				subs.get(node)?.close();
 				subs.delete(node);
@@ -129,7 +129,7 @@ discovery.run((effect) => {
 	});
 });
 
-function subscribeNode(effect: Signals.Effect, conn: Net.Connection.Established, path: Net.Path.Valid, node: string) {
+function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Table, path: Net.Path.Valid, node: string) {
 	nodeStats.mutate((s) => {
 		s[node] = {
 			egress: {},
@@ -138,8 +138,11 @@ function subscribeNode(effect: Signals.Effect, conn: Net.Connection.Established,
 		};
 	});
 
-	const consumer = conn.consume(path);
-	effect.cleanup(() => consumer.close());
+	// The path was just announced, so the request resolves from the table immediately.
+	const request = origin.request(path);
+	effect.cleanup(() => request.close());
+	const consumer = request.active.peek();
+	if (!consumer) return;
 
 	const sub = <K extends keyof NodeStats>(trackName: string, key: K) => {
 		const track = consumer.subscribe(trackName);
@@ -256,7 +259,7 @@ sampler.run((effect) => {
 	// Only sample while connected; the interval restarts on reconnect. Drop the
 	// rolling history when disconnected so a reconnect doesn't splice new
 	// samples onto stale ones across the downtime gap.
-	if (!effect.get(connection.established)) {
+	if (effect.get(connection.status) !== "connected") {
 		history.clear();
 		clusterMembership = "";
 		clock.update((n) => n + 1);

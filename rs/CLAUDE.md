@@ -33,14 +33,15 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 **Apps / binaries**
 
 - `moq-relay` (lib+bin): clusterable, media-agnostic relay. axum HTTP API, JWT auth, WebSocket fallback, clustering. Config/TOML merge pattern lives here (see below).
-- `moq-cli` (bin, `moq`): the unified media router (`moq <MoQ side> <import|export> <endpoint>`, plus the feature-gated `transcode` verb); stdin/stdout media piping. The CLI surface for the gateway library crates below lives here.
+- `moq-cli` (bin, `moq`): the unified media router (`moq <MoQ side> <import|export> <endpoint>`, plus the feature-gated `transcode` verb); stdin/stdout media piping. The CLI surface for the gateway library crates below lives here. `token` and `devices` are the local verbs: they run before any transport is bound and reject a MoQ side rather than ignoring it.
 - `moq-rtc` (lib): WebRTC (WHIP/WHEP) gateway. Bridges browser WebRTC ingest/playback to MoQ broadcasts (str0m ICE/DTLS, A/V sync, NACK). Embeddable axum routers / `Client`; the CLI surface lives in `moq-cli`.
 - `moq-rtmp` (lib): RTMP / enhanced-RTMP gateway (ingest + egress, `rml_rtmp`, FLV via `moq-mux`). RTMPS (rustls + tokio-rustls) is the optional `tls` feature.
 - `moq-srt` (lib): bidirectional SRT gateway (MPEG-TS via `srt-tokio` + `moq-mux`).
 - `moq-hls` (lib): HLS / LL-HLS gateway (import + export, playlists + fMP4 via `moq-mux`).
 - `moq-bench` (bin): relay load generator. `JoinSet`-spawned staggered connections, rand sampling.
 - `moq-boy` (bin): crowd-controlled Game Boy emulator publisher (blocking emulator thread + async monitor tasks).
-- `moq-token` (lib) / `moq-token` (bin from the `moq-token-cli` crate): JWT auth. `Claims`, `Algorithm`, `KeyMaterial` (EC/RSA/OCT/OKP), JWKS. CLI does generate/sign/verify.
+- `moq-token` (lib): JWT auth. `Claims`, `Algorithm`, `KeyMaterial` (EC/RSA/OCT/OKP), JWKS. No clap, no anyhow: the command surface lives a layer up.
+- `moq-token-cli` (lib+bin, `moq-token`): the generate/sign/verify commands, as `moq_token_cli::Args`. The `moq-token` binary flattens it and `moq token` (moq-cli) nests it, so there's one implementation and two entry points. It's a lib so moq-cli can reuse it without pulling clap and anyhow into the `moq-token` library's API.
 
 **Bindings**
 
@@ -108,6 +109,8 @@ Negotiation: `version::NEGOTIATED` lists SETUP-negotiated versions in preference
 
 ## Rust conventions
 
+- **Use typed time units**: never represent a duration or timestamp as an untyped numeric value such as `f64` seconds or `u64` milliseconds. Use `std::time::Duration`, `moq_net::Timestamp`, or another type that carries the unit. When a serialized format requires a numeric value, convert at that boundary with `serde_with` where possible.
+- **Retry loops use capped backoff with jitter** (root Retries has the policy). For a local loop, escalate a `Duration` toward a `const MAX`, jitter each wait (`delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)`), and keep its budget next to the delay. Reuse an existing operation-specific retry abstraction when one owns the sequence already.
 - **Prefer `kio` over tokio sync primitives**: reach for `kio::Producer`/`Consumer` (and the `poll_*` plumbing) instead of `tokio::sync` channels or `watch`. A `tokio::sync::watch` (or a channel) carrying a single value is a code smell. `kio` ties into the runtime-free `poll_*` model and avoids a hard runtime dependency.
 - **Errors**: `thiserror` with `#[from]` for libraries, `anyhow` (with `.context("...")`, not `.map_err(|_| anyhow!())`) for binaries. Always `#[non_exhaustive]` on public error enums (e.g. `moq-net/src/error.rs`, `moq-ffi/src/error.rs`, `moq-loc/src/lib.rs`). Use `#[error(transparent)]` + `#[from]` for wrapped foreign errors (see `moq-token/src/error.rs`).
 - **Config + TOML merge**: any `#[arg]` field on a TOML-loadable config must be `Option<T>`, never a bare `bool`/`String`/etc. The TOML->CLI merge re-applies clap defaults and silently clobbers TOML values for bare fields. See `moq-relay/src/config.rs` and its regression tests (`cli_does_not_clobber_toml_*`); add such a test for any new flag.
@@ -120,6 +123,7 @@ Negotiation: `version::NEGOTIATED` lists SETUP-negotiated versions in preference
 
   Skip it everywhere else: on a struct that won't grow, or where a new field would *change behavior* rather than default to a no-op. There the addition should be a deliberate breaking change, not one the attribute waves through.
 - **Enum variant order**: append new variants to the end of a public fieldless enum that uses implicit discriminants. Inserting one earlier changes the numeric values exposed by `as`, which is a semver break even when the enum is `#[non_exhaustive]`.
+- **`libmoq` is a staticlib, so its C structs are cheap to extend.** The release tarball ships `include/moq.h` beside `lib/libmoq.a` and there is no cdylib, so a caller always compiles against the header matching the archive it links: appending a field is a recompile, not an ABI break. Configuration therefore belongs in a plain `#[repr(C)]` struct, not behind `create`/`set_*`/`get_*` functions. Two rules keep it additive: **append** new fields (never insert, so offsets don't move) and make **zero mean the previous behavior**, which needs a `has_*` / `*_valid` flag on any knob whose default is not zero (`websocket.enabled` defaults to true and the reconnect backoff to one second, so reading those straight out of a zeroed struct would silently disable them). `#[non_exhaustive]` does nothing here: it is rustc-only and cbindgen emits the whole struct regardless.
 - **Builders** (private fields + chained `.with_x()` setters) are the orthogonal construction-ergonomics layer: reach for one when a struct has a lot of optional knobs, or is `#[non_exhaustive]` and you want construction to stay clean as fields get added (e.g. `select::Broadcast`).
 - **Make misuse unrepresentable in the type system** (root Public API Scrutiny): make terminal operations consume `self` (e.g. `fn close(self)`) so use-after-close can't even be written, rather than `&mut self` plus a `closed` flag. Return owned handles whose `Drop` runs the cleanup instead of asking callers to remember a teardown call.
 - **Borrow in, own out**: a parameter the callee only reads is a slice (`&[T]`, `&str`), and what you hand back is owned (`Vec<T>`, `String`). `fn publish(&mut self, encoded: &[Encoded])` accepts a `Vec`, an array, a boxed slice, or a sub-range without the caller rebuilding anything, and the signature already says the callee won't keep it. Take `Vec<T>` only when it genuinely takes ownership of the elements: it stores them (`I420::new(w, h, data: Vec<u8>)`) or moves fields out of them. When it merely consumes them once, `impl IntoIterator<Item = T>` says that without demanding a `Vec` the caller may not have.
@@ -139,14 +143,20 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
 ## Testing
 
-- `just check` runs all tests + lint; `just fix` auto-fixes formatting/lint. `just rs test -p <crate>` (or `cargo nextest run -p <crate>`) for one crate.
+- `just check` lints and compiles the crates your branch changed plus every crate depending on them; `just test` runs their tests; `just fix` auto-fixes formatting/lint over the same set (`just rs _select` does the selection, via `cargo metadata`). `just check-all` / `just test all` / `just fix-all` cover every default member. `just rs test -p <crate>` (or `cargo nextest run -p <crate>`) for one crate.
+
+- **`check` compiles default features only, and so does CI.** The permutations moved to `just rs features` (nightly): `--all-features` costs a full extra workspace compile that shares almost no artifacts with the default one (measured at ~6 minutes on top of an already-warm tree), and `--no-default-features` is a third distinct feature set that shares nothing with either. `features` is the only thing that compiles moq-cli's `play`/`capture`, moq-audio's capture backend, quiche, and jemalloc, so a break in those lands on `main` and surfaces nightly rather than in review. `just rs audit` (cargo-deny) is nightly for the same workflow reason: an advisory is published without this repo changing.
+
+- **`check` runs no `cargo check` pass.** Clippy is a superset of it, and the two use different rustc wrappers, so running both compiles the workspace twice for one set of errors.
+
+- **Go through `just` rather than bare `cargo`.** Cargo fingerprints artifacts by emit kind and by compiler wrapper, so the same crate can sit in `target/` several times over. The expensive split is metadata versus codegen: `cargo check` and `clippy` emit metadata, while `cargo test` and `just test` codegen and link, and *dependencies* duplicate across that line. Within one emit kind it is cheaper than it sounds, since `just test` uses `RUSTC_WORKSPACE_WRAPPER`, which wraps only workspace crates, so dependencies stay shared with a plain `cargo test` and just our ~28 crates duplicate. It still adds up: each full tree is gigabytes, every agent worktree keeps its own, and ten worktrees were holding 59 GB on a 461 GB disk that had filled to 100%. If you run rust-analyzer, point it at clippy (`rust-analyzer.check.command = "clippy"`) so it shares with `just check` instead of opening another set.
 
 - **Run tests through nextest, not `cargo test`.** `.config/nextest.toml` sets a
   `slow-timeout` with `terminate-after`, so a wedged test is reported as a
   TIMEOUT and killed; under `cargo test`'s harness the same test hangs forever,
   holding the target lock and burning a core. That matters here because a lost
   `kio` wakeup parks a task with nothing to wake it, which is a hang rather than
-  a failure. `just rs test` and `just rs ci` both use nextest. Doctests are the
+  a failure. `just rs test` uses nextest, and so does CI. Doctests are the
   one thing it skips (`just rs doctest` covers them), and `just rs loom` stays on
   `cargo test` since loom needs its own `--cfg loom` build.
 
@@ -165,15 +175,22 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
 - Config-merge regressions belong next to the config (`moq-relay/src/config.rs::tests`); they serialize env mutation with a lock since clap reads env.
 
-- **`just check` only compiles the host's platform.** `#[cfg(target_os = "...")]` code for other platforms is invisible to it, and `cargo fmt` skips those modules too. Each platform has its own gate, and each only runs on that platform's runner:
+- **Local checks only compile the host's platform and target, and PR CI is Linux-only.** `#[cfg(target_os = "...")]` code for other platforms is invisible to them, and `cargo fmt` skips those modules too. Windows and Mac runners cost too much for a per-PR gate, so those platforms are manual:
 
-  - Windows (moq-video's Media Foundation and D3D11 backends): `just rs windows`, via `.github/workflows/windows.yml`. You can't reproduce it off Windows, since cross-compiling dies in openh264-sys2's vendored C++.
-  - macOS (moq-video's VideoToolbox and ScreenCaptureKit, moq-audio's system audio): `just rs macos`, via `.github/workflows/macos.yml`. Scoped to moq-video + moq-audio, and needs `--all-features` because moq-audio's capture backend is off by default.
-  - Linux: no separate gate needed. `just rs ci` already runs `--all-features` in a dev shell carrying pipewire/libva/alsa, so nvenc/nvdec/vaapi/pipewire all compile.
+  - Windows (moq-video's Media Foundation and D3D11 backends): `just rs windows`, which must run ON Windows. You can't reproduce it elsewhere, since cross-compiling dies in openh264-sys2's vendored C++. It names `moq-cli/play` explicitly, since that feature is what pulls in moq-video's wgpu renderer and moq-audio's cpal output; a default-feature build compiles neither.
+  - macOS (moq-video's VideoToolbox and ScreenCaptureKit, moq-audio's system audio): `just rs macos`, which must run ON macOS. Scoped to moq-video + moq-audio, and needs `--all-features` because moq-audio's capture backend is off by default.
+  - Linux: covered nightly, not per-PR. `just rs features` runs `--all-features` in a dev shell carrying PipeWire and ALSA. VAAPI loads libva dynamically, so nvenc/nvdec/vaapi/pipewire all compile without libva installed.
+  - wasm32 (moq-wasm): `just rs wasm`. The crate root is `#![cfg(target_arch = "wasm32")]`, so a host-target `cargo check --workspace` compiles it down to nothing and sees no errors at all. This one needs no special host (the Nix shell carries the target), so `just check-all` always runs it and `just check` runs it whenever the diff touches any crate directory under `rs/`, not just `rs/moq-wasm/`: moq-wasm builds on moq-net, so a break in a dependency is invisible to every host-target pass. It's a compile gate, distinct from the root `just wasm`, which builds the shippable `@moq/wasm` package.
 
-  Both extra gates are path-filtered, so a change outside their trigger paths that breaks them surfaces on the merge commit rather than the PR.
+  What still compiles these automatically, and when:
 
-- **`just rs loom` is a manual gate. Run it by hand whenever you touch kio's refcount/waiter plumbing (`lock.rs`, `producer.rs`, `consumer.rs`, `weak.rs`, `waiter.rs`) or moq-net's model layer (`model/`), and mention the result in the PR.** Nothing else will run it: `--cfg loom` swaps kio's Mutex/atomics for loom's instrumented ones, which rebuilds the whole dependency tree and can't share artifacts with a normal `cargo test`, so it's deliberately outside `check`/`ci`. Budget about a minute of model checking on top of that build. The search is exhaustive on purpose, so don't reach for `preemption_bound` to speed it up; the recipe already buys the speed back with `--release`, which matters here because a model check reruns the body once per interleaving.
+  - moq-video's platform backends are gated on `target_os` alone, and libmoq depends on moq-video, so a `libmoq-v*` tag builds them on `windows-latest` and Apple Silicon. That's a release-time backstop, not a PR one: a break lands on `main` and surfaces at the tag.
+  - **moq-audio's macOS capture has no automated backstop at all.** ScreenCaptureKit system audio and the TCC pre-check sit behind the off-by-default `capture` feature, and every consumer leaves it off (libmoq and moq-ffi don't enable it; moq-cli's own `capture` feature is off in release builds). `just rs macos` is the only thing that compiles it, ever.
+  - `.github/workflows/swift.yml` still runs on a Mac for `swift/**` and `rs/moq-ffi/**` PRs, so moq-ffi and the Swift wrapper keep a PR-time gate.
+
+  Run the matching recipe by hand when you touch this code, and if you can't (no such host), say plainly in the PR that it's uncompiled rather than implying CI covered it.
+
+- **`just rs loom` model-checks concurrent handoffs in kio and moq-net.** It stays outside `check` and `test`: `--cfg loom` swaps kio's Mutex/atomics for loom's instrumented ones, which rebuilds the whole dependency tree and can't share artifacts with a normal `cargo test`. Use it when developing or diagnosing concurrent handoffs. Budget about a minute of model checking on top of that build. The search is exhaustive on purpose, so don't reach for `preemption_bound` to speed it up; the recipe already buys the speed back with `--release`, which matters here because a model check reruns the body once per interleaving.
 
   Loom permutes every thread interleaving instead of hoping a stress loop hits the bad one. It caught a `ProducerWeak::produce` race that had been live for months, on iteration 4. Reading the results:
 

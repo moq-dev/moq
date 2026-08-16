@@ -18,8 +18,12 @@ author:
 
 normative:
   moql: I-D.lcurley-moq-lite
-  moqt: I-D.ietf-moq-transport
-  webcodecs: WebCodecs
+  webcodecs:
+    title: "WebCodecs"
+    target: https://www.w3.org/TR/webcodecs/
+    author:
+      - org: W3C
+    date: false
 
 informative:
 
@@ -40,8 +44,8 @@ Hang is built on top of moq-lite [moql] and uses much of the same terminology.
 A quick recap:
 
 - **Broadcast**: A collection of Tracks from a single publisher.
-- **Track**: An series of Groups, each of which can be delivered and decoded *out-of-order*.
-- **Group**: An series of Frames, each of which must be delivered and decoded *in-order*.
+- **Track**: A series of Groups, each of which can be delivered and decoded *out-of-order*.
+- **Group**: A series of Frames, each of which must be delivered and decoded *in-order*.
 - **Frame**: A sized payload of bytes representing a single moment in time.
 
 Hang introduces additional terminology:
@@ -78,7 +82,7 @@ ANNOUNCE suffix=alice.hang active=true
 ANNOUNCE suffix=bob.hang   active=true
 ~~~
 
-If a publisher no longer wants to participant, or is disconnected somehow, their presence will be unannounced.
+If a participant leaves or is disconnected, their broadcast is unannounced.
 Publishers and subscribers SHOULD terminate any subscriptions once a participant is unannounced.
 
 ~~~
@@ -87,7 +91,7 @@ ANNOUNCE suffix=alice.hang active=false
 
 # Catalog {#catalog}
 The catalog describes the available media tracks for a single participant.
-It's a JSON document that extends the the W3C WebCodecs specification.
+It's a JSON document that extends the W3C WebCodecs specification {{webcodecs}}.
 
 The catalog is published as a `catalog.json` track within the broadcast so it can be updated live as the participant's media tracks change.
 A participant MAY forgo publishing a catalog if it does not wish to publish any media tracks now and in the future.
@@ -97,16 +101,19 @@ Each group contains a single frame with UTF-8 JSON.
 
 A publisher MUST NOT write multiple frames to a group until a future specification includes a delta-encoding mechanism (via JSON Patch most likely).
 
+A publisher SHOULD also serve the catalog as a `catalog.json.z` track: the identical JSON under the same group and frame rules, differing only by compression ({{compression}}).
+A consumer reads whichever of the two tracks it prefers.
+
 ## Root
 The root of the catalog is a JSON document with the following schema:
 
 ~~~
 type Catalog = {
-	"audio": AudioSchema | undefined,
-	"video": VideoSchema | undefined,
-	"timeline": TimelineSchema | undefined,
-	"text": TextSchema | undefined,
-	// ... any custom fields ...
+  "audio": AudioSchema | undefined,
+  "video": VideoSchema | undefined,
+  "timeline": TimelineSchema | undefined,
+  "text": TextSchema | undefined,
+  // ... any custom fields ...
 }
 ~~~
 
@@ -124,13 +131,13 @@ A video track contains the necessary information to decode a video stream.
 
 ~~~
 type VideoSchema = {
-	"renditions": Map<TrackName, VideoDecoderConfig>,
-	"display": {
-		"width": number,
-		"height": number,
-	} | undefined,
-	"rotation": number | undefined,
-	"flip": boolean | undefined,
+  "renditions": Map<TrackName, VideoDecoderConfig>,
+  "display": {
+    "width": number,
+    "height": number,
+  } | undefined,
+  "rotation": number | undefined,
+  "flip": boolean | undefined,
 }
 ~~~
 
@@ -145,8 +152,9 @@ In addition to the WebCodecs fields, each rendition MAY carry the fields common 
 
 ~~~
 type VideoDecoderConfigExtensions = {
-	"displayAspectWidth": number | undefined,
-	"displayAspectHeight": number | undefined,
+  "displayAspectWidth": number | undefined,
+  "displayAspectHeight": number | undefined,
+  "stalled": boolean | undefined,
 }
 ~~~
 
@@ -154,36 +162,42 @@ type VideoDecoderConfigExtensions = {
 A consumer that understands neither field MUST assume square pixels, a 1:1 ratio.
 Both MUST be present together; a consumer that sees only one MUST ignore it.
 
+`stalled` indicates that the publisher recommends temporarily avoiding the rendition.
+The track remains available when `stalled` is true.
+A consumer SHOULD select an unstalled rendition when it supports one, but MAY select a stalled rendition when no unstalled rendition is suitable.
+If absent, `stalled` defaults to false.
+
 For example:
 
 ~~~
 {
-	"renditions": {
-		"720p": {
-			"codec": "avc1.64001f",
-			"container": { "kind": "legacy" },
-			"codedWidth": 1280,
-			"codedHeight": 720,
-			"bitrate": 6000000,
-			"framerate": 30.0,
-			"jitter": 33
-		},
-		"480p": {
-			"codec": "avc1.64001e",
-			"container": { "kind": "legacy" },
-			"codedWidth": 848,
-			"codedHeight": 480,
-			"bitrate": 2000000,
-			"framerate": 30.0,
-			"jitter": 33
-		}
-	},
-	"display": {
-		"width": 1280,
-		"height": 720
-	},
-	"rotation": 0,
-	"flip": false,
+  "renditions": {
+    "720p": {
+      "codec": "avc1.64001f",
+      "container": { "kind": "legacy" },
+      "codedWidth": 1280,
+      "codedHeight": 720,
+      "bitrate": 6000000,
+      "stalled": true,
+      "framerate": 30.0,
+      "jitter": 33
+    },
+    "480p": {
+      "codec": "avc1.64001e",
+      "container": { "kind": "legacy" },
+      "codedWidth": 848,
+      "codedHeight": 480,
+      "bitrate": 2000000,
+      "framerate": 30.0,
+      "jitter": 33
+    }
+  },
+  "display": {
+    "width": 1280,
+    "height": 720
+  },
+  "rotation": 0,
+  "flip": false,
 }
 ~~~
 
@@ -193,7 +207,7 @@ An audio track contains the necessary information to decode an audio stream.
 
 ~~~
 type AudioSchema = {
-	"renditions": Map<TrackName, AudioDecoderConfig>,
+  "renditions": Map<TrackName, AudioDecoderConfig>,
 }
 ~~~
 
@@ -220,24 +234,24 @@ For example:
 
 ~~~
 {
-	"renditions": {
-		"stereo": {
-			"codec": "opus",
-			"container": { "kind": "legacy" },
-			"sampleRate": 48000,
-			"numberOfChannels": 2,
-			"bitrate": 128000,
-			"jitter": 20
-		},
-		"mono": {
-			"codec": "opus",
-			"container": { "kind": "legacy" },
-			"sampleRate": 48000,
-			"numberOfChannels": 1,
-			"bitrate": 64000,
-			"jitter": 20
-		}
-	},
+  "renditions": {
+    "stereo": {
+      "codec": "opus",
+      "container": { "kind": "legacy" },
+      "sampleRate": 48000,
+      "numberOfChannels": 2,
+      "bitrate": 128000,
+      "jitter": 20
+    },
+    "mono": {
+      "codec": "opus",
+      "container": { "kind": "legacy" },
+      "sampleRate": 48000,
+      "numberOfChannels": 1,
+      "bitrate": 64000,
+      "jitter": 20
+    }
+  },
 }
 ~~~
 
@@ -311,17 +325,16 @@ A decoder config field carrying raw bytes, notably `description` (an `AllowShare
 A publisher SHOULD emit lowercase hexadecimal characters and MUST NOT emit a `0x` prefix or any separators.
 A consumer MUST accept either case.
 
-Note that this differs from the `cmaf` container's `init` field ({{container}}), which is base64 ({{!RFC4648, Section 4}}).
-Encoding a binary field as base64 is not reliably detectable: the alphabets overlap, so such a value is usually rejected but may instead decode to the wrong bytes.
+Note that this differs from the `cmaf` container's `init` field ({{container}}), which is base64 ({{!RFC4648, Section 4}}); the two alphabets overlap, so the encoding cannot be detected and must be specified.
 
 ## Common Rendition Fields {#common}
 Audio, video, and text renditions share the following fields, extending the WebCodecs decoder config for audio and video:
 
 ~~~
 type CommonExtensions = {
-	"broadcast": string | undefined,
-	"container": Container,
-	"jitter": number | undefined,
+  "broadcast": string | undefined,
+  "container": Container,
+  "jitter": number | undefined,
 }
 ~~~
 
@@ -330,8 +343,12 @@ By default a rendition's track lives in the same broadcast that served the catal
 The `broadcast` field overrides that, naming a different broadcast that publishes the track.
 
 The value is a relative path, resolved against the path of the broadcast that served the catalog.
-It uses the `.` and `..` semantics of a relative URL reference ({{!RFC3986, Section 5.2.4}}), for example `../source`.
-A publisher MUST NOT use an absolute path, and a consumer MUST ignore a rendition whose `broadcast` escapes above the root.
+It uses relative reference resolution ({{!RFC3986, Section 5.2}}): a non-empty reference replaces the catalog broadcast's last path segment before applying `.` and `..` segments.
+For example, `./source` in a catalog served by `room/transcode` resolves to `room/source`, while `.` resolves to `room`.
+An empty reference resolves to the catalog broadcast itself.
+A publisher MUST NOT use an absolute path, nor a reference that escapes above the root.
+The root is the consumer's authorized subtree, so such a reference names content the consumer cannot reach.
+A consumer MUST reject a catalog containing one, rather than resolving the reference against a different broadcast or ignoring the rendition.
 
 This lets a publisher author a catalog that points at tracks it does not republish.
 For example, a transcoder produces a catalog listing its own downstream renditions alongside the untouched source rendition, referencing the latter in the source broadcast rather than copying the bytes through.
@@ -362,16 +379,16 @@ A rendition declares its container via the `container` field of its catalog entr
 
 ~~~
 type Container =
-	{ "kind": "legacy" } |
-	{ "kind": "cmaf", "init": string } |
-	{ "kind": "loc" }
+  { "kind": "legacy" } |
+  { "kind": "cmaf", "init": string } |
+  { "kind": "loc" }
 ~~~
 
 The `kind` field selects the framing; a consumer MUST ignore a rendition whose `kind` it does not recognize.
 Every container shares the same group rules:
 
 Each moq-lite group MUST start with a keyframe.
-If codec does not support delta frames (ex. audio), then a group MAY consist of multiple keyframes.
+If the codec does not support delta frames (e.g. audio), a group MAY consist of multiple keyframes.
 Otherwise, a group MUST consist of a single keyframe followed by zero or more delta frames.
 
 ## legacy
@@ -391,6 +408,17 @@ A consumer MUST feed `init` to the decoder before the first frame.
 
 ## loc
 Each frame is a Low Overhead Container frame {{!I-D.ietf-moq-loc}}: a property block, carrying the timestamp among other properties, followed by the codec payload.
+
+
+# Compression {#compression}
+Some metadata tracks are compressed, conventionally marked with a `.z` suffix on the track name.
+
+Each group is one raw DEFLATE stream ({{!RFC1951}}), sync-flushed at each frame boundary.
+Each frame is therefore a self-delimited, byte-aligned slice, while later frames compress against the earlier ones in the same group.
+A consumer MUST decompress a group's frames in order, starting from the first.
+
+A sync flush ends with the empty-block marker `0x00 0x00 0xff 0xff`.
+A publisher MUST omit this trailing marker from each frame and a consumer MUST append it before decompressing, the same trick as permessage-deflate ({{!RFC7692, Section 7.2.1}}).
 
 
 # Timeline {#timeline}
@@ -611,6 +639,9 @@ Nothing derived needs to be stored: the playlist or manifest is a function of th
 
 
 # Security Considerations
+A rendition's `broadcast` reference ({{field-broadcast}}) resolves against the consumer's root, which is the subtree it is authorized for.
+Clamping a reference that escapes above that root would silently redirect the subscription to an unrelated broadcast, so a consumer rejects the catalog instead.
+
 TODO Security
 
 A consumer parsing a recording ({{recording}}) is parsing data at rest that it did not necessarily write.

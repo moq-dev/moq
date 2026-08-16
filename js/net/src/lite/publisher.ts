@@ -1,9 +1,11 @@
-import { type Dispose, Signal } from "@moq/signals";
+import { type Dispose, type Getter, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
-import { error, reason } from "../error.ts";
+import { error, reason, StreamCode, toTransport } from "../error.ts";
 import type * as group from "../group.ts";
+import { hooks } from "../internal.ts";
+import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { type Stream, Writer } from "../stream.ts";
+import { type Reader, type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type * as track from "../track.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
@@ -12,6 +14,7 @@ import * as DatagramStream from "./datagram_stream.ts";
 import type { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
+import { Priority, sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
@@ -33,6 +36,30 @@ function zigzag(delta: bigint): bigint {
 	return delta >= 0n ? delta << 1n : (-delta << 1n) - 1n;
 }
 
+/** What {@link Publisher.runGroup} needs to serve one group. */
+interface RunGroup {
+	/** The subscription ID. */
+	sub: bigint;
+
+	/** The group to serve. */
+	group: group.Consumer;
+
+	/** The track's advertised timescale, applied to every frame timestamp. */
+	timescale: Timescale;
+
+	/** The subscription's ranking, which this stream joins for as long as it runs. */
+	priority: Priority;
+
+	/** Settles when the subscriber leaves, dropping a group still queued for a stream slot. */
+	unsubscribed: Promise<void>;
+
+	/** First frame to send; anything below it was excluded by the subscription. */
+	start: number;
+
+	/** Last frame to send (inclusive), or undefined for the rest of the group. */
+	end?: number;
+}
+
 // The TRACK stream, implicit SUBSCRIBE acceptance, and SUBSCRIBE_START/END are
 // all lite-05+.
 function supportsTrackStream(version: Version): boolean {
@@ -50,26 +77,33 @@ function supportsTrackStream(version: Version): boolean {
 /**
  * The frame bounds a subscription placed on its start and end group, as they stand
  * after any SUBSCRIBE_UPDATE.
+ *
+ * Only the two named groups are qualified; the group range itself lives on the
+ * subscriber's read cursor (see {@link frameRange}).
  */
 type FrameBounds = {
+	/** The group {@link startFrame} qualifies, if the subscription named one. */
 	startGroup?: number;
+	/** First frame to send within {@link startGroup}; every other group starts at 0. */
 	startFrame: number;
+	/** The group {@link endFrame} qualifies, if the subscription named one. */
 	endGroup?: number;
+	/** Last frame (inclusive) to send within {@link endGroup}; every other group runs to its end. */
 	endFrame?: number;
 };
 
 /**
- * The frames of `sequence` a subscription asked for, as a start index and an inclusive
- * end, or `undefined` when the group falls outside the subscription entirely.
+ * The frames of `sequence` a subscription asked for, as a start index and an inclusive end.
  *
- * The frame bounds qualify the start and end group only; every group between them is
- * served whole. A group outside `[startGroup, endGroup]` was never asked for, and
- * serving it would also let SUBSCRIBE_START report a group below the requested start.
+ * The frame bounds qualify the start and end group only; every other group is served whole.
+ * Which groups are served at all is the subscriber's read cursor (`startAt` / `endAt`),
+ * applied when a group is popped rather than re-checked here.
+ *
+ * The serving loop calls this synchronously after the pop, before any SUBSCRIBE_UPDATE can
+ * change `bounds`. Nothing downstream trims the frame range: it is a wire request,
+ * deliberately decoupled from the receiver's local read cursor.
  */
-function frameRange(bounds: FrameBounds, sequence: number): { start: number; end?: number } | undefined {
-	if (bounds.startGroup !== undefined && sequence < bounds.startGroup) return;
-	if (bounds.endGroup !== undefined && sequence > bounds.endGroup) return;
-
+function frameRange(bounds: FrameBounds, sequence: number): { start: number; end?: number } {
 	return {
 		start: bounds.startGroup === sequence ? bounds.startFrame : 0,
 		end: bounds.endGroup === sequence ? bounds.endFrame : undefined,
@@ -90,6 +124,141 @@ type ServeGroup = {
 
 /** What serving fetched frames needs beyond the group and destination stream. */
 type ServeFetch = Omit<ServeGroup, "sub">;
+
+/** What the serving loop takes from the subscribe stream instead of serving a group. */
+type Control =
+	/** The peer re-stated the subscription: priority, ordering, latency, and both ranges. */
+	| { kind: "update"; update: SubscribeUpdate }
+	/** The peer FIN'd, or our own half went away. Either way there is nobody left to serve. */
+	| { kind: "done" }
+	/** The stream failed; the subscription goes down with it. */
+	| { kind: "error"; error: Error };
+
+type SubscriptionControlOptions = {
+	reader: Reader;
+	writer: Writer;
+	version: Version;
+	apply: (update: SubscribeUpdate) => void;
+};
+
+/**
+ * The subscribe stream's control half, decoded ahead of the serving loop.
+ *
+ * Decoding runs on its own and publishes each full subscription update immediately, so a
+ * blocked response write cannot delay re-ranking streams already in flight. It separately
+ * stores only the latest range state for the serving loop, which owns the local track cursor
+ * and frame bounds. That keeps a group pop and its frame-range snapshot one indivisible step.
+ *
+ * Reading ahead makes control-first ordering hold for a burst. Coalescing bounds memory while
+ * preserving the newest state decoded before the next group pop. The Rust publisher gets the
+ * same ordering from `poll_decode_maybe`, which decodes straight out of the reader's buffer;
+ * nothing here can decode synchronously, so it reads ahead instead.
+ */
+class SubscriptionControls {
+	#writer: Writer;
+	#update?: SubscribeUpdate;
+	// Sticky, first one wins: null once the stream is over, an Error once it failed.
+	#end?: Error | null;
+	#ended: Promise<Error | null>;
+	#resolveEnd!: (end: Error | null) => void;
+	#changed = new Signal(0);
+
+	/** Settles once decoding stops, so teardown can wait for it rather than leaving it running. */
+	readonly decoding: Promise<void>;
+
+	constructor({ reader, writer, version, apply }: SubscriptionControlOptions) {
+		this.#writer = writer;
+		this.#ended = new Promise((resolve) => {
+			this.#resolveEnd = resolve;
+		});
+		this.decoding = this.#decode(reader, version, apply);
+		// Our own half going away ends the loop too, and has to reach it the same way: the
+		// loop looks at nothing else.
+		void writer.closed.then(
+			() => this.#finish(null),
+			(err: unknown) => this.#finish(error(err)),
+		);
+	}
+
+	/** The next control to apply, or undefined while the peer is quiet. */
+	take(): Control | undefined {
+		const update = this.#update;
+		this.#update = undefined;
+		// An update decoded before the stream ended still applies before the sticky end.
+		if (update) return { kind: "update", update };
+		if (this.#end === undefined) return undefined;
+		return this.#end === null ? { kind: "done" } : { kind: "error", error: this.#end };
+	}
+
+	/** Calls `fn` once {@link take} may answer differently. */
+	changed(fn: () => void): Dispose {
+		return this.#changed.changed(fn);
+	}
+
+	/** Returns false when peer departure supersedes a blocked response write. */
+	async response(pending: Promise<void>): Promise<boolean> {
+		const result = await Promise.race([
+			pending.then(
+				() => ({ kind: "sent" }) as const,
+				(err: unknown) => ({ kind: "error", error: error(err) }) as const,
+			),
+			this.#ended.then((end) => ({ kind: "ended", end }) as const),
+		]);
+
+		if (result.kind === "sent") return true;
+		if (result.kind === "error") throw result.error;
+		// Promise.race leaves the blocked encode running, so reset the writable half too.
+		this.#writer.reset(result.end ?? toTransport(StreamCode.Cancel, "cancel"));
+		if (result.end) throw result.end;
+		return false;
+	}
+
+	#finish(end: Error | null) {
+		if (this.#end !== undefined) return;
+		this.#end = end;
+		this.#resolveEnd(end);
+		this.#changed.update((value) => value + 1);
+	}
+
+	async #decode(reader: Reader, version: Version, apply: (update: SubscribeUpdate) => void) {
+		try {
+			while (this.#end === undefined) {
+				const update = await SubscribeUpdate.decodeMaybe(reader, version);
+				if (!update) break;
+				apply(update);
+				this.#update = update;
+				this.#changed.update((value) => value + 1);
+			}
+		} catch (err: unknown) {
+			this.#finish(error(err));
+			return;
+		}
+		this.#finish(null);
+	}
+}
+
+// A microtask is too short: decoding one framed update crosses several awaits, each of which
+// can requeue behind the serving continuation. A task boundary lets the decoder finish whatever
+// the transport already delivered before the next group pop. Updates are rare, so groups do not
+// pay this scheduling cost on the normal path.
+const yieldToControls = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+// Register both readiness sources in the same turn after the caller observed neither ready.
+// The winner disposes both registrations, so an idle subscription accumulates nothing no
+// matter how many times it wakes.
+function waitForSubscription(controls: SubscriptionControls, subscriber: track.Subscriber): Promise<void> {
+	return new Promise((resolve) => {
+		let settled = false;
+		const dispose: Dispose[] = [];
+		const wake = () => {
+			if (settled) return;
+			settled = true;
+			for (const close of dispose) close();
+			resolve();
+		};
+		dispose.push(controls.changed(wake), hooks.groupChanged(subscriber, wake));
+	});
+}
 
 /**
  * Handles publishing broadcasts and managing their lifecycle.
@@ -114,9 +283,10 @@ export class Publisher {
 	// subscriptions share it, since a second getWriter on the same stream would throw.
 	#datagramWriter?: WritableStreamDefaultWriter<Uint8Array>;
 
-	// Our published broadcasts.
-	// It's a signal so we can live update any announce streams.
-	#broadcasts = new Signal<Map<Path.Valid, broadcast.Producer> | undefined>(new Map());
+	// The published broadcasts, borrowed from the origin this session serves. The origin
+	// outlives the session, so this is read-only here: announce streams watch it for
+	// changes, and closing the session leaves the broadcasts alone.
+	#broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
 
 	// TRACK_INFO is immutable per track, so resolve it from the application once
 	// (via a throwaway subscribe whose info() resolves when the app calls accept)
@@ -129,37 +299,21 @@ export class Publisher {
 	 * @param quic - The WebTransport session to use
 	 * @param version - Negotiated protocol version
 	 * @param origin - Origin id shared with the Subscriber
+	 * @param publish - The origin whose broadcasts this session serves; omit to publish nothing
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, version: Version, origin: Origin) {
+	constructor(quic: WebTransport, version: Version, origin: Origin, publish?: OriginConsumer) {
 		this.#quic = quic;
 		this.version = version;
 		this.origin = origin;
+		this.#broadcasts = publish?.broadcasts ?? new Signal(new Map());
 
 		// Grab the datagram writer up front when the transport carries datagrams (no group
 		// fallback, so it stays undefined otherwise). One writer for all subscriptions.
 		if (hasDatagrams(version)) {
 			this.#datagramWriter = DatagramStream.datagramWriter(quic);
 		}
-	}
-
-	/**
-	 * Publishes a broadcast with any associated tracks.
-	 * @param name - The broadcast to publish
-	 */
-	publish(path: Path.Valid, broadcast: broadcast.Producer) {
-		this.#broadcasts.mutate((broadcasts) => {
-			if (!broadcasts) throw new Error("closed");
-			broadcasts.set(path, broadcast);
-		});
-
-		// Remove the broadcast from the lookup when it's closed.
-		void broadcast.closed.then(() => {
-			this.#broadcasts.mutate((broadcasts) => {
-				broadcasts?.delete(path);
-			});
-		});
 	}
 
 	/**
@@ -172,17 +326,19 @@ export class Publisher {
 	async runAnnounce(msg: AnnounceRequest, stream: Stream) {
 		console.debug(`announce: prefix=${msg.prefix}`);
 
-		// Send initial announcements
-		let active = new Set<Path.Valid>();
+		// Send initial announcements. Keyed by suffix, valued by the routing front, so a
+		// republish (a new broadcast taking the path) diffs as ended-then-active rather
+		// than nothing; the subscriber treats that as a restart and re-consumes.
+		let active = new Map<Path.Valid, broadcast.Consumer>();
 
 		const broadcasts = this.#broadcasts.peek();
 		if (!broadcasts) return; // closed
 
-		for (const name of broadcasts.keys()) {
+		for (const [name, front] of broadcasts) {
 			const suffix = Path.stripPrefix(msg.prefix, name);
 			if (suffix === null) continue;
 			console.debug(`announce: broadcast=${name} active=true`);
-			active.add(suffix);
+			active.set(suffix, front);
 		}
 
 		// Lite06+: announce ids. Every active we send implicitly assigns the next
@@ -193,14 +349,14 @@ export class Publisher {
 		switch (this.version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02: {
-				const init = new AnnounceInit([...active]);
+				const init = new AnnounceInit([...active.keys()]);
 				await init.encode(stream.writer, this.version);
 				break;
 			}
 			default: {
 				if (!hasAnnounceOk(this.version)) {
 					// Draft03/04: send individual Announce messages, stamping our origin as a hop.
-					for (const suffix of active) {
+					for (const suffix of active.keys()) {
 						await encodeAnnounceBroadcast(
 							stream.writer,
 							{ status: "active", suffix, hops: [this.origin] },
@@ -214,7 +370,7 @@ export class Publisher {
 				// that follow; the subscriber stamps our origin onto each hop chain, so we omit it.
 				const ok = new AnnounceOk(this.origin, active.size);
 				await ok.encode(stream.writer, this.version);
-				for (const suffix of active) {
+				for (const suffix of active.keys()) {
 					if (hasAnnounceId(this.version)) {
 						announceIds.set(suffix, nextAnnounceId++);
 					}
@@ -228,7 +384,7 @@ export class Publisher {
 		for (;;) {
 			// TODO Make a better helper within Signals.
 			let dispose!: Dispose;
-			const changed = new Promise<Map<Path.Valid, broadcast.Producer> | undefined>((resolve) => {
+			const changed = new Promise<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>((resolve) => {
 				dispose = this.#broadcasts.changed(resolve);
 			});
 
@@ -237,29 +393,20 @@ export class Publisher {
 			dispose();
 			if (!broadcasts) break;
 
-			// Create a new set of active broadcasts.
+			// Create a new map of active broadcasts.
 			// This is SLOW, but it's not worth optimizing because we often have just 1 broadcast anyway.
-			const newActive = new Set<Path.Valid>();
-			for (const name of broadcasts.keys()) {
+			const newActive = new Map<Path.Valid, broadcast.Consumer>();
+			for (const [name, front] of broadcasts) {
 				const suffix = Path.stripPrefix(msg.prefix, name);
 				if (suffix === null) continue; // Not our prefix.
-				newActive.add(suffix);
+				newActive.set(suffix, front);
 			}
 
-			// Announce any new broadcasts. Lite05+ reports our origin once via AnnounceOk, so
-			// the subscriber stamps it onto each hop chain; older versions stamp it here.
-			for (const added of newActive.difference(active)) {
-				console.debug(`announce: broadcast=${added} active=true`);
-				const hops = hasAnnounceOk(this.version) ? [] : [this.origin];
-				if (hasAnnounceId(this.version)) {
-					announceIds.set(added, nextAnnounceId++);
-				}
-				await encodeAnnounceBroadcast(stream.writer, { status: "active", suffix: added, hops }, this.version);
-			}
-
-			// Announce any removed broadcasts. Lite06+ retracts by announce id;
+			// Retract removed and superseded broadcasts first, so a republish reads as
+			// ended-then-active (a restart) on the wire. Lite06+ retracts by announce id;
 			// older versions repeat the path (ended announces don't need hops).
-			for (const removed of active.difference(newActive)) {
+			for (const [removed, front] of active) {
+				if (newActive.get(removed) === front) continue;
 				console.debug(`announce: broadcast=${removed} active=false`);
 				if (hasAnnounceId(this.version)) {
 					const id = announceIds.get(removed);
@@ -271,8 +418,18 @@ export class Publisher {
 				}
 			}
 
-			// NOTE: This is kind of a hack that won't work with a rapid UNANNOUNCE/ANNOUNCE cycle.
-			// However, our client doesn't do that anyway.
+			// Announce new and superseding broadcasts. Lite05+ reports our origin once via
+			// AnnounceOk, so the subscriber stamps it onto each hop chain; older versions
+			// stamp it here.
+			for (const [added, front] of newActive) {
+				if (active.get(added) === front) continue;
+				console.debug(`announce: broadcast=${added} active=true`);
+				const hops = hasAnnounceOk(this.version) ? [] : [this.origin];
+				if (hasAnnounceId(this.version)) {
+					announceIds.set(added, nextAnnounceId++);
+				}
+				await encodeAnnounceBroadcast(stream.writer, { status: "active", suffix: added, hops }, this.version);
+			}
 
 			active = newActive;
 		}
@@ -293,21 +450,22 @@ export class Publisher {
 			return;
 		}
 
-		const track = broadcast.subscribe(msg.track, { priority: msg.priority });
-
-		// Frame bounds qualify the start and end group only, and SUBSCRIBE_UPDATE can move
-		// them, so the serving loop reads them from here rather than closing over `msg`.
-		const bounds: FrameBounds = {
+		const track = broadcast.subscribe(msg.track, {
+			priority: msg.priority,
+			ordered: msg.ordered,
+			latencyMax: msg.latencyMax,
 			startGroup: msg.startGroup,
-			startFrame: msg.startFrame,
 			endGroup: msg.endGroup,
-			endFrame: msg.endFrame,
-		};
+		});
+		const startGroup = msg.startGroup ?? track.latest();
+		if (startGroup !== undefined) track.startAt(startGroup);
+		track.endAt(msg.endGroup);
 
 		// The best-effort datagram loop, started once serving begins. It parks when the
 		// track finishes (recvDatagram returns undefined), so #runTrack alone ends the
 		// subscription; awaited during teardown so it doesn't outlive the subscription.
-		let datagrams: Promise<void> | undefined;
+		let datagrams = Promise.resolve();
+		let controls: SubscriptionControls | undefined;
 
 		try {
 			let timescale: Timescale = Timescale.MILLI;
@@ -326,18 +484,17 @@ export class Publisher {
 				timescale = info.timescale;
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
-				const ok = new SubscribeOk({ priority: msg.priority });
+				const ok = new SubscribeOk({
+					priority: msg.priority,
+					ordered: msg.ordered,
+					latencyMax: msg.latencyMax,
+					startGroup: msg.startGroup,
+					endGroup: msg.endGroup,
+				});
 				await encodeSubscribeResponse(stream.writer, { ok }, this.version);
 			}
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);
-
-			const serving = this.#runTrack(track, stream.writer, {
-				sub: msg.id,
-				broadcast: msg.broadcast,
-				timescale,
-				bounds,
-			});
 
 			// Serve datagrams concurrently with groups whenever the transport carries them
 			// (the writer exists iff so). No group fallback: otherwise they simply aren't sent.
@@ -345,35 +502,43 @@ export class Publisher {
 				datagrams = this.#runDatagrams(msg.id, track, timescale);
 			}
 
-			for (;;) {
-				const decode = SubscribeUpdate.decodeMaybe(stream.reader, this.version);
-
-				const result = await Promise.any([serving, decode]);
-				if (!result) break;
-
-				if (result instanceof SubscribeUpdate) {
-					console.debug(
-						`subscribe update: broadcast=${msg.broadcast} track=${track.name} priority=${result.priority}`,
-					);
-					track.update({ priority: result.priority });
-					bounds.startGroup = result.startGroup;
-					bounds.startFrame = result.startFrame;
-					bounds.endGroup = result.endGroup;
-					bounds.endFrame = result.endFrame;
-				}
-			}
+			controls = new SubscriptionControls({
+				reader: stream.reader,
+				writer: stream.writer,
+				version: this.version,
+				apply: (update) => {
+					track.update({
+						priority: update.priority,
+						ordered: update.ordered,
+						latencyMax: update.latencyMax,
+						startGroup: update.startGroup,
+						endGroup: update.endGroup,
+					});
+				},
+			});
+			await this.#runTrack(track, stream.writer, controls, {
+				sub: msg.id,
+				broadcast: msg.broadcast,
+				timescale,
+				bounds: {
+					startGroup: msg.startGroup,
+					startFrame: msg.startFrame,
+					endGroup: msg.endGroup,
+					endFrame: msg.endFrame,
+				},
+			});
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
 			stream.close();
 			track.close();
-			// track.close ends the datagram loop; wait so it doesn't leak past teardown.
-			await datagrams;
+			// Closing the stream ends the decoder and track.close ends the datagram loop.
+			await Promise.all([datagrams, controls.decoding]);
 		} catch (err: unknown) {
 			const e = error(err);
 			console.warn(`publish error: broadcast=${msg.broadcast} track=${track.name} error=${reason(e)}`);
 			track.close(e);
 			stream.abort(e);
-			await datagrams;
+			await Promise.all([datagrams, controls?.decoding]);
 		}
 	}
 
@@ -394,6 +559,10 @@ export class Publisher {
 			stream.writer.reset(new Error("not found"));
 			return;
 		}
+
+		// The subscriber opened this stream, so its send order only ranked the request. Rank the
+		// response here, on the same scale as the group streams it competes with.
+		stream.writer.setPriority(sendOrder({ priority: msg.priority }));
 
 		let group: group.Consumer | undefined;
 		try {
@@ -430,6 +599,7 @@ export class Publisher {
 	async #runTrack(
 		track: track.Subscriber,
 		stream: Writer,
+		controls: SubscriptionControls,
 		serving: { sub: bigint; broadcast: Path.Valid; timescale: Timescale; bounds: FrameBounds },
 	) {
 		const { sub, broadcast, timescale, bounds } = serving;
@@ -437,51 +607,130 @@ export class Publisher {
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = supportsTrackStream(this.version);
 		let startSent = false;
+		let endSent = false;
 
-		// The exclusive end of the delivered range. recvGroup is arrival-ordered rather than
-		// sequence-ordered, so this tracks the max and not the last group seen. 0 is already
-		// the encoding for a track that produced no groups.
-		let end = 0;
+		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_END
+		// straight into finish_at, so it must name the track's boundary (which counts
+		// datagram sequences too), not the delivered range: a subscription cap can hold
+		// produced groups back. The latest() fallback covers a subscription torn down
+		// before the producer declared it.
+		const boundary = () => track.final() ?? (track.latest() ?? -1) + 1;
 
+		// SUBSCRIBE_END names that boundary, which a cap can hold groups back from, so it goes
+		// out as soon as the producer finishes and the subscription keeps serving whatever a
+		// later cap raise releases (see the Rust publisher's Recv::Boundary).
+		const sendEnd = async (): Promise<boolean> => {
+			endSent = true;
+			if (emitRange) {
+				return controls.response(
+					encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary()) }, this.version),
+				);
+			}
+			return true;
+		};
+
+		// One ranking for the whole subscription, shared by every group it serves.
+		const priority = new Priority(track);
+
+		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
+		// a track that ran out of groups still has to flush the ones already queued, and the
+		// caller FINs the subscribe stream to say so.
+		let finished = false;
+		let unsubscribe!: () => void;
+		const unsubscribed = new Promise<void>((resolve) => {
+			unsubscribe = resolve;
+		});
 		try {
 			for (;;) {
-				const next = track.recvGroup();
-				const group = await Promise.race([next, stream.closed]);
-				if (!group) {
-					next.then((group) => group?.close()).catch(() => {});
-					break;
+				// Control before data, matching the Rust publisher: every control decoded while
+				// the loop was parked applies to the next pop, never to one already made. This
+				// drain is synchronous, so nothing the decoder holds can land between the pop
+				// below and its frame range.
+				const control = controls.take();
+				if (control) {
+					switch (control.kind) {
+						case "done":
+							// The subscriber left. Its queued groups are pointless now, which
+							// the finally below acts on since `finished` stays false.
+							return;
+						case "error":
+							throw control.error;
+						case "update": {
+							const update = control.update;
+							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
+							if (update.startGroup !== undefined) track.startAt(update.startGroup);
+							track.endAt(update.endGroup);
+							bounds.startGroup = update.startGroup;
+							bounds.startFrame = update.startFrame;
+							bounds.endGroup = update.endGroup;
+							bounds.endFrame = update.endFrame;
+							await yieldToControls();
+							continue;
+						}
+					}
 				}
 
-				const range = frameRange(bounds, group.sequence);
-				if (!range) {
-					// Outside the subscription's group range, so it was never asked for.
-					// Serving it would also let SUBSCRIBE_START name a group below the
-					// requested start.
-					group.close();
-					continue;
+				// Exactly-once arrival-order serving. This synchronous package-internal pop
+				// and frameRange call are the operation's linearization point.
+				const recv = hooks.tryRecvGroup(track);
+				switch (recv.kind) {
+					case "error":
+						throw recv.error;
+					case "idle":
+						await waitForSubscription(controls, track);
+						continue;
+					case "boundary":
+						// The producer finished but is still holding groups above the cap.
+						// Declare the boundary, then wait for an update to release them.
+						if (!endSent) {
+							if (!(await sendEnd())) return;
+							continue;
+						}
+						await waitForSubscription(controls, track);
+						continue;
+					case "done":
+						if (!endSent) {
+							if (!(await sendEnd())) return;
+							continue;
+						}
+						finished = true;
+						return;
 				}
+
+				const group = recv.group;
+				const range = frameRange(bounds, group.sequence);
 
 				if (emitRange && !startSent) {
 					startSent = true;
-					await encodeSubscribeResponse(stream, { start: new SubscribeStart(group.sequence) }, this.version);
+					// SUBSCRIBE_START promises nothing below this sequence will be delivered.
+					// Arrival-order serving could later surface a straggler below the first
+					// group, so pin the floor to what was announced.
+					track.startAt(group.sequence);
+					if (
+						!(await controls.response(
+							encodeSubscribeResponse(
+								stream,
+								{ start: new SubscribeStart(group.sequence) },
+								this.version,
+							),
+						))
+					)
+						return;
 				}
-				end = Math.max(end, group.sequence + 1);
 
-				void this.#runGroup(group, { sub, timescale, start: range.start, end: range.end });
+				void this.#runGroup({
+					sub,
+					group,
+					timescale,
+					priority,
+					unsubscribed,
+					start: range.start,
+					end: range.end,
+				});
 			}
-
-			if (emitRange) {
-				await encodeSubscribeResponse(stream, { end: new SubscribeEnd(end) }, this.version);
-			}
-
-			console.debug(`publish close: broadcast=${broadcast} track=${track.name}`);
-			track.close();
-			stream.close();
-		} catch (err: unknown) {
-			const e = error(err);
-			console.warn(`publish error: broadcast=${broadcast} track=${track.name} error=${reason(e)}`);
-			track.close(e);
-			stream.reset(e);
+		} finally {
+			if (!finished) unsubscribe();
+			priority.close();
 		}
 	}
 
@@ -572,13 +821,6 @@ export class Publisher {
 		}
 	}
 
-	/**
-	 * Runs a group and sends its frames to the stream.
-	 * @param sub - The subscription ID
-	 * @param group - The group to run
-	 *
-	 * @internal
-	 */
 	// Serialize a fetched group's frames onto the FETCH stream as bare records: each a
 	// zigzag-delta timestamp (at the track's advertised timescale) followed by size + bytes.
 	async #runFetchGroup(
@@ -609,24 +851,52 @@ export class Publisher {
 		}
 	}
 
-	async #runGroup(group: group.Consumer, { sub, timescale, start: startFrame, end: endFrame }: ServeGroup) {
+	/**
+	 * Serves one group on its own unidirectional stream.
+	 *
+	 * @internal
+	 */
+	async #runGroup(options: RunGroup) {
+		const { sub, group, timescale, priority, unsubscribed, start: startFrame, end: endFrame } = options;
 		// This model holds whole groups, so frame `startFrame` is always reachable unless
 		// the group ends first. Declaring it up front keeps the stream self-describing.
 		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame });
 		try {
-			const stream = await Writer.open(this.#quic);
-			await stream.u53(0); // stream type
-			await msg.encode(stream, this.version);
+			// The transport drains streams by send order, so this is what makes a high-priority
+			// track (and a newer group within it) win the link when there isn't room for both.
+			//
+			// One stream per group is faster than a peer at its limit can retire them, so this
+			// is the one path that doesn't wait for a slot: the transport would serve the opens
+			// in the order we asked, which is oldest-first, exactly backwards for live media.
+			// Failing here drops the group and lets the next one compete for the next slot.
+			const stream = await Writer.tryOpen(this.#quic, {
+				sendOrder: priority.rank(group.sequence),
+				cancel: unsubscribed,
+				waitUntilAvailable: false,
+			});
+			if (!stream) {
+				group.close(new Error("no stream slot"));
+				return;
+			}
 
-			// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
-			// advertised timescale; older drafts omit it.
-			const timestamps = supportsTrackStream(this.version);
-			let prevTs = 0n;
-			// Whether the cursor ever reached the requested start, which decides how the
-			// end of the group is read below.
-			let reached = startFrame === 0;
-
+			// Everything past this point runs inside the cleanup scope, so a failure never leaves
+			// a finished group's stream being ranked.
 			try {
+				// A SUBSCRIBE_UPDATE re-ranks the subscription, so a group already on the wire
+				// follows it too rather than keeping a stale rank until it finishes.
+				priority.add(stream, group.sequence);
+
+				await stream.u53(0); // stream type
+				await msg.encode(stream, this.version);
+
+				// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
+				// advertised timescale; older drafts omit it.
+				const timestamps = supportsTrackStream(this.version);
+				let prevTs = 0n;
+				// Whether the cursor ever reached the requested start, which decides how the
+				// end of the group is read below.
+				let reached = startFrame === 0;
+
 				for (;;) {
 					const frame = await Promise.race([group.readFrameSequence(), stream.closed]);
 					if (!frame) {
@@ -661,6 +931,8 @@ export class Publisher {
 				const e = error(err);
 				stream.reset(e);
 				group.close(e);
+			} finally {
+				priority.remove(stream);
 			}
 		} catch (err: unknown) {
 			const e = error(err);
@@ -728,12 +1000,8 @@ export class Publisher {
 	}
 
 	close() {
-		this.#broadcasts.update((broadcasts) => {
-			for (const broadcast of broadcasts?.values() ?? []) {
-				broadcast.close();
-			}
-			return undefined;
-		});
+		// The broadcasts belong to the origin, which outlives this session; closing here
+		// only drops the borrow. The peer sees the unannounce when the streams die.
 
 		// Release the datagram writer's lock so the stream can be torn down.
 		this.#datagramWriter?.releaseLock();

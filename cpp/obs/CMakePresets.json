@@ -14,14 +14,13 @@
         "ENABLE_QT": true,
         "CMAKE_EXPORT_COMPILE_COMMANDS": true,
         "BUILD_PLUGIN": true,
-        "MOQ_VERSION": "0.3.6",
         "MOQ_ARCHIVE": "tar.gz"
       }
     },
     {
       "name": "macos",
-      "displayName": "macOS Universal",
-      "description": "Build for macOS 12.0+ (Universal binary)",
+      "displayName": "macOS Apple Silicon",
+      "description": "Build for macOS 12.0+ on Apple Silicon",
       "inherits": [
         "template"
       ],
@@ -49,8 +48,8 @@
       "inherits": [
         "macos"
       ],
-      "displayName": "macOS Universal CI build",
-      "description": "Build for macOS 12.0+ (Universal binary) for CI",
+      "displayName": "macOS Apple Silicon CI build",
+      "description": "Build for macOS 12.0+ on Apple Silicon for CI",
       "generator": "Xcode",
       "cacheVariables": {
         "CMAKE_COMPILE_WARNING_AS_ERROR": true,
@@ -134,15 +133,15 @@
     {
       "name": "macos",
       "configurePreset": "macos",
-      "displayName": "macOS Universal",
-      "description": "macOS build for Universal architectures",
+      "displayName": "macOS Apple Silicon",
+      "description": "macOS build for Apple Silicon",
       "configuration": "RelWithDebInfo"
     },
     {
       "name": "macos-ci",
       "configurePreset": "macos-ci",
-      "displayName": "macOS Universal CI",
-      "description": "macOS CI build for Universal architectures",
+      "displayName": "macOS Apple Silicon CI",
+      "description": "macOS CI build for Apple Silicon",
       "configuration": "RelWithDebInfo"
     },
     {

@@ -10,6 +10,15 @@
 
 set working-directory := '.'
 
+# Paths a Python check depends on. `rs/moq-ffi` is in scope because maturin
+# bundles it into the moq-ffi wheel. `check`, `fix`, and `test` all skip
+# themselves when a diff misses this; no FILES at all means force-run.
+#
+# They also skip when uv is absent, matching the kt/swift/go check scripts: an
+# incomplete local toolchain should check less rather than fail. The root
+# `_tools` preflight makes uv a hard requirement under MOQ_STRICT.
+scope := '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'
+
 default:
     just check
 
@@ -21,23 +30,61 @@ _develop:
     cd moq-ffi && uv run --no-sync maturin develop --uv
     uv pip install --no-deps -e moq-rs
 
-# Lint + format + editable build + pyright. `--no-install-workspace` installs
-# the root dev group (ruff, maturin, pyright, pytest) without trying to
+# Lint + format + editable build + pyright + docs. `--no-install-workspace`
+# installs the root dev group (ruff, maturin, pyright, pytest) without trying to
+# pip-build the workspace members; `_develop` then installs them editable, which
+# is also what `build` does, so there is no separate build gate here.
+#
+# `docs` runs here because a broken autodoc reference otherwise surfaces on Read
+# the Docs after the fact. It mocks the native module, so it costs no Rust build.
 
-# pip-build the workspace members; `_develop` then installs them editable.
-check:
+# Lint, type-check, editable-build, and render the docs.
+check $FILES="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "$FILES" ]] && ! grep -qE '{{ scope }}' <<< "$FILES"; then
+    	echo "py: no Python changes; skipping."
+    	exit 0
+    fi
+    if ! command -v uv >/dev/null 2>&1; then
+    	echo "py: uv not on PATH, skipping" >&2
+    	exit 0
+    fi
     uv sync --no-install-workspace
     uv run --no-sync ruff check .
     uv run --no-sync ruff format --check .
     just _develop
     uv run --no-sync pyright
+    just docs
 
-fix:
+# Auto-fix lint and formatting issues. Skips on the same terms as `check`.
+fix $FILES="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "$FILES" ]] && ! grep -qE '{{ scope }}' <<< "$FILES"; then
+    	echo "py: no Python changes; skipping."
+    	exit 0
+    fi
+    if ! command -v uv >/dev/null 2>&1; then
+    	echo "py: uv not on PATH, skipping" >&2
+    	exit 0
+    fi
     uv sync --no-install-workspace
     uv run --no-sync ruff check --fix .
     uv run --no-sync ruff format .
 
-test:
+# Run the unit tests. Skips on the same terms as `check`.
+test $FILES="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "$FILES" ]] && ! grep -qE '{{ scope }}' <<< "$FILES"; then
+    	echo "py: no Python changes; skipping tests."
+    	exit 0
+    fi
+    if ! command -v uv >/dev/null 2>&1; then
+    	echo "py: uv not on PATH, skipping" >&2
+    	exit 0
+    fi
     uv sync --no-install-workspace
     just _develop
     uv run --no-sync pytest moq-rs/tests/ moq-ffi/tests/
@@ -79,20 +126,3 @@ docs:
     rm -rf dist/docs
     uv run --no-sync --with sphinx --with myst-parser --with furo \
         sphinx-build -b html moq-rs/docs dist/docs
-
-# Full Python CI: lint + tests + build. Takes a newline-separated list
-# of changed files; skips if FILES is non-empty and none match the
-# Python scope (which includes rs/moq-ffi because moq-ffi bundles it via
-
-# maturin). Run `just py ci` (no FILES) to force-run everything.
-ci FILES="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'; then
-    	echo "py: no Python changes; skipping."
-    	exit 0
-    fi
-    just check
-    just test
-    just build
-    just docs

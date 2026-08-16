@@ -66,20 +66,20 @@ impl std::fmt::Display for AV1 {
 		write!(
 			f,
 			".{:01}.{}{}{}.{:02}.{:02}.{:02}.{:01}",
-			self.mono_chrome as u8,
-			self.chroma_subsampling_x as u8,
-			self.chroma_subsampling_y as u8,
+			u8::from(self.mono_chrome),
+			u8::from(self.chroma_subsampling_x),
+			u8::from(self.chroma_subsampling_y),
 			{ self.chroma_sample_position },
 			self.color_primaries,
 			self.transfer_characteristics,
 			self.matrix_coefficients,
-			self.full_range as u8,
+			u8::from(self.full_range),
 		)
 	}
 }
 
 lazy_static::lazy_static! {
-	static ref AV1_REGEX: regex::Regex = regex::Regex::new(&r#"
+	static ref AV1_REGEX: regex::Regex = regex::Regex::new(&r"
 		^av01
 		\.(?<profile>[01])
 		\.(?<level>\d{2})(?<tier>\w)
@@ -92,7 +92,7 @@ lazy_static::lazy_static! {
 			\.(?<matrix>\d{2})
 			\.(?<full>[01])
 		)?
-		$"#.replace(['\n', ' ', '\t'], "")
+		$".replace(['\n', ' ', '\t'], "")
 	).unwrap();
 }
 

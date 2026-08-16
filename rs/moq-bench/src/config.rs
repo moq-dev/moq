@@ -70,7 +70,12 @@ pub struct Config {
 	/// The MoQ client (QUIC/TLS) configuration.
 	#[command(flatten)]
 	#[serde(default)]
-	pub client: moq_native::ClientConfig,
+	pub client: moq_native::connect::Config,
+
+	/// QUIC transport tuning (`--quic-*`).
+	#[command(flatten)]
+	#[serde(default)]
+	pub quic: moq_native::quic::Config,
 
 	/// Log configuration.
 	#[command(flatten)]
@@ -164,7 +169,7 @@ fps = "24:60"
 
 [client]
 connect = "https://example.com"
-tls.disable_verify = true
+tls.insecure = true
 "#;
 		let dir = std::env::temp_dir().join("moq-bench-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
@@ -180,8 +185,8 @@ tls.disable_verify = true
 		let config = Config::parse_and_merge(args).unwrap();
 		assert_eq!(config.connections(), Range::new(100, 100));
 		assert_eq!(config.fps(), Range::new(24, 60));
-		assert_eq!(config.client.connect.as_ref().unwrap().as_str(), "https://example.com/");
-		assert_eq!(config.client.tls.disable_verify, Some(true));
+		assert_eq!(config.client.url.as_ref().unwrap().as_str(), "https://example.com/");
+		assert_eq!(config.client.tls.insecure, Some(true));
 
 		// CLI flag wins over the TOML value.
 		let args = vec![

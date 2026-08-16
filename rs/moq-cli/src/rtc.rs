@@ -10,7 +10,7 @@ use hang::moq_net;
 use hang::moq_net::AsPath;
 use url::Url;
 
-use crate::moq::notify_ready;
+use crate::moq::{ImportTarget, notify_ready};
 
 /// WebRTC endpoint args: exactly one of `--connect` (WHIP/WHEP client) /
 /// `--listen` (WHIP/WHEP server). The parent direction picks WHIP vs WHEP.
@@ -39,37 +39,40 @@ pub struct Args {
 	pub cors: crate::web::Cors,
 }
 
-/// WHIP server: accept incoming WebRTC publishes into the Origin as `name` (import).
-pub async fn listen_import(
-	origin: moq_net::origin::Producer,
-	listen: SocketAddr,
-	udp_bind: SocketAddr,
-	public_addr: Vec<SocketAddr>,
-	cors: crate::web::Cors,
-	name: String,
-) -> anyhow::Result<()> {
-	let publisher = scope_producer(&origin, &name)?;
-	let server = server(publisher, origin.consume(), udp_bind, public_addr);
-	serve(server.publish_router(), listen, "WHIP", cors).await
+/// HTTP and ICE settings shared by the WHIP and WHEP listeners.
+pub struct Listen {
+	/// HTTP address to bind.
+	pub addr: SocketAddr,
+
+	/// Shared UDP socket for ICE and media.
+	pub udp_bind: SocketAddr,
+
+	/// Public UDP addresses advertised as ICE host candidates.
+	pub public_addr: Vec<SocketAddr>,
+
+	/// Browser CORS policy for the HTTP listener.
+	pub cors: crate::web::Cors,
+}
+
+/// WHIP server: accept incoming WebRTC publishes into the Origin as `target.name` (import).
+pub async fn listen_import(target: ImportTarget, listen: Listen) -> anyhow::Result<()> {
+	let publisher = scope_producer(&target.origin, &target.name)?;
+	let mut config = server_config(&listen);
+	config.latency_max = target.latency_max;
+	let server = moq_rtc::Server::new(config, publisher, target.origin.consume());
+	serve(server.publish_router(), "WHIP", listen).await
 }
 
 /// WHEP server: serve WebRTC plays of `name` from the Origin (export).
-pub async fn listen_export(
-	origin: moq_net::origin::Consumer,
-	listen: SocketAddr,
-	udp_bind: SocketAddr,
-	public_addr: Vec<SocketAddr>,
-	cors: crate::web::Cors,
-	name: String,
-) -> anyhow::Result<()> {
+pub async fn listen_export(origin: moq_net::origin::Consumer, name: String, listen: Listen) -> anyhow::Result<()> {
 	let subscriber = origin
 		.scope(&[name.as_path()])
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 	// A WHEP server only reads; it still needs a publisher handle for the shared
 	// glue, so hand it an unused, empty Origin producer.
 	let publisher = moq_net::Origin::random().produce();
-	let server = server(publisher, subscriber, udp_bind, public_addr);
-	serve(server.subscribe_router(), listen, "WHEP", cors).await
+	let server = moq_rtc::Server::new(server_config(&listen), publisher, subscriber);
+	serve(server.subscribe_router(), "WHEP", listen).await
 }
 
 /// Restrict a producer to the single broadcast `name` so a WHIP peer can only publish it.
@@ -79,16 +82,20 @@ fn scope_producer(origin: &moq_net::origin::Producer, name: &str) -> anyhow::Res
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))
 }
 
-/// WHEP client: pull a remote broadcast into the Origin under `name` (import).
-pub async fn connect_import(origin: moq_net::origin::Producer, url: Url, name: String) -> anyhow::Result<()> {
-	let producer = origin
-		.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
+/// WHEP client: pull a remote broadcast into the Origin under `target.name` (import).
+pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()> {
+	let name = &target.name;
+	let producer = target
+		.origin
+		.create_broadcast(name, moq_net::broadcast::Route::new().with_announce(true))
 		.context("failed to create broadcast")?;
 
 	tracing::info!(%url, %name, "WHEP client pulling");
 	notify_ready();
 
-	let client = moq_rtc::Client::new(moq_rtc::client::Config::default());
+	let mut config = moq_rtc::client::Config::default();
+	config.latency_max = target.latency_max;
+	let client = moq_rtc::Client::new(config);
 	Ok(client.subscribe(url, producer).await?)
 }
 
@@ -108,24 +115,21 @@ pub async fn connect_export(origin: moq_net::origin::Consumer, url: Url, name: S
 	Ok(client.publish(url, origin, &name).await?)
 }
 
-fn server(
-	publisher: moq_net::origin::Producer,
-	subscriber: moq_net::origin::Consumer,
-	udp_bind: SocketAddr,
-	public_addr: Vec<SocketAddr>,
-) -> moq_rtc::Server {
+fn server_config(listen: &Listen) -> moq_rtc::server::Config {
 	let mut config = moq_rtc::server::Config::default();
-	config.udp_bind = udp_bind;
-	config.ice_candidates = public_addr;
-	moq_rtc::Server::new(config, publisher, subscriber)
+	config.udp_bind = listen.udp_bind;
+	config.ice_candidates.clone_from(&listen.public_addr);
+	config
 }
 
-async fn serve(router: axum::Router, listen: SocketAddr, role: &str, cors: crate::web::Cors) -> anyhow::Result<()> {
-	let cors = cors.layer([Method::POST, Method::PATCH, Method::DELETE, Method::OPTIONS])?;
+async fn serve(router: axum::Router, role: &str, listen: Listen) -> anyhow::Result<()> {
+	let cors = listen
+		.cors
+		.layer([Method::POST, Method::PATCH, Method::DELETE, Method::OPTIONS])?;
 	let app = router.layer(cors);
-	let listener = moq_native::bind::tcp(listen)?;
+	let listener = moq_native::bind::tcp(listen.addr)?;
 
-	tracing::info!(%listen, role, "serving WebRTC");
+	tracing::info!(listen = %listen.addr, role, "serving WebRTC");
 	notify_ready();
 
 	crate::web::serve(listener, app, None).await

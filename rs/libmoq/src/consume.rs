@@ -203,19 +203,25 @@ impl Consume {
 				.map(|desc| desc.as_ptr())
 				.unwrap_or(std::ptr::null()),
 			description_len: config.description.as_ref().map(|desc| desc.len()).unwrap_or(0),
-			coded_width: config
-				.coded_width
-				.as_ref()
-				.map(|width| width as *const u32)
-				.unwrap_or(std::ptr::null()),
-			coded_height: config
-				.coded_height
-				.as_ref()
-				.map(|height| height as *const u32)
-				.unwrap_or(std::ptr::null()),
+			coded_width: config.coded_width.unwrap_or(0),
+			coded_height: config.coded_height.unwrap_or(0),
+			container: crate::api::borrow_container(&config.container),
 		};
 
 		Ok(())
+	}
+
+	/// Return whether the publisher recommends temporarily avoiding a video rendition.
+	pub fn video_stalled(&self, catalog: Id, index: usize) -> Result<bool, Error> {
+		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
+		let (_, config) = consume
+			.catalog
+			.video
+			.renditions
+			.iter()
+			.nth(index)
+			.ok_or(Error::NoIndex)?;
+		Ok(config.stalled.unwrap_or(false))
 	}
 
 	/// Fill `dst` with the properties shared by every video rendition.
@@ -261,6 +267,7 @@ impl Consume {
 			description_len: config.description.as_ref().map(|desc| desc.len()).unwrap_or(0),
 			sample_rate: config.sample_rate,
 			channel_count: config.channel_count,
+			container: crate::api::borrow_container(&config.container),
 		};
 
 		Ok(())
@@ -330,7 +337,7 @@ impl Consume {
 		&mut self,
 		catalog: Id,
 		index: usize,
-		latency: std::time::Duration,
+		latency: moq_mux::Latency,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
@@ -382,7 +389,7 @@ impl Consume {
 		&mut self,
 		catalog: Id,
 		index: usize,
-		latency: std::time::Duration,
+		latency: moq_mux::Latency,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
@@ -539,10 +546,14 @@ impl Consume {
 		subscription: Option<moq_net::track::Subscription>,
 	) {
 		let subscription = subscription.unwrap_or_default();
-		if let Some(start) = subscription.group_start.or_else(|| track.latest()) {
+		if let Some(start) = subscription.start.map(|start| start.group).or_else(|| track.latest()) {
 			track.start_at(start);
 		}
-		track.end_at(subscription.group_end);
+		// The read cursor is a group sequence, and its cap is inclusive. An end at the
+		// very first position is the empty range, which no inclusive group can express;
+		// leaving it uncapped would serve everything, so cap at the first group and let
+		// the empty demand stop delivery upstream.
+		track.end_at(subscription.end.map(|end| end.before().map_or(0, |end| end.group)));
 		// A closed track makes the update meaningless; the reader already sees the close.
 		let _ = track.update(subscription);
 	}

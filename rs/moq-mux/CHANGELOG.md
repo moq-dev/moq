@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.6...moq-mux-v0.9.7) - 2026-08-14
+
+### Added
+
+- *(bindings)* fetch and decode a retained media group ([#2827](https://github.com/moq-dev/moq/pull/2827))
+
+### Fixed
+
+- *(mux)* derive missing video geometry ([#2840](https://github.com/moq-dev/moq/pull/2840))
+- *(path)* resolve catalog references like URLs ([#2855](https://github.com/moq-dev/moq/pull/2855))
+- *(moq-mux)* stop publishing audio spliced across a TS discontinuity ([#2823](https://github.com/moq-dev/moq/pull/2823))
+- *(moq-mux)* anchor the TS table cadence to the media timeline ([#2825](https://github.com/moq-dev/moq/pull/2825))
+
+## [0.9.6](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.5...moq-mux-v0.9.6) - 2026-08-13
+
+### Added
+
+- *(moq-video)* advertise the catalog rendition before the first keyframe ([#2768](https://github.com/moq-dev/moq/pull/2768))
+
+### Fixed
+
+- *(moq-mux)* resync TS audio instead of aborting the broadcast ([#2751](https://github.com/moq-dev/moq/pull/2751))
+
+### Other
+
+- *(deps)* bump cargo group and support mp4-atom 0.15 ([#2728](https://github.com/moq-dev/moq/pull/2728))
+
+## [0.9.5](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.4...moq-mux-v0.9.5) - 2026-08-07
+
+### Added
+
+- *(moq-mux)* add stateful per-frame fMP4 fragmenting
+- *(moq-mux)* timescale control, and two duration fixes ([#2693](https://github.com/moq-dev/moq/pull/2693))
+
+## [0.9.4](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.3...moq-mux-v0.9.4) - 2026-08-06
+
+### Added
+
+- *(hang)* declare a configurable 30s retention on media tracks, and fix relayed cache misses ([#2615](https://github.com/moq-dev/moq/pull/2615))
+
+### Fixed
+
+- *(moq-mux)* make the synthesized fMP4 init playable on strict players ([#2679](https://github.com/moq-dev/moq/pull/2679))
+
+## [0.9.3](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.2...moq-mux-v0.9.3) - 2026-08-05
+
+### Fixed
+
+- *(hang)* reverse bits, not bytes, in the HEVC codec string ([#2658](https://github.com/moq-dev/moq/pull/2658))
+
+### Other
+
+- *(rs)* clean up pedantic clippy warnings ([#2621](https://github.com/moq-dev/moq/pull/2621))
+
+## [0.9.2](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.1...moq-mux-v0.9.2) - 2026-08-03
+
+### Fixed
+
+- *(loc)* adopt the draft-ietf-moq-loc-04 Timestamp code point, and align relay-hops with lite-06 ([#2581](https://github.com/moq-dev/moq/pull/2581))
+
+### Other
+
+- *(deps)* bump the cargo group with 2 updates ([#2591](https://github.com/moq-dev/moq/pull/2591))
+
 ## [0.9.1](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.0...moq-mux-v0.9.1) - 2026-07-27
 
 ### Added

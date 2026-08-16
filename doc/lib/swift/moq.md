@@ -14,7 +14,7 @@ Full API reference: [Swift Package Index](https://swiftpackageindex.com/moq-dev/
 ## Install
 
 ```swift
-.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.1"),
+.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.4"),
 ```
 
 Add `Moq` to your target's dependencies:
@@ -30,7 +30,7 @@ Add `Moq` to your target's dependencies:
 
 The raw `MoqFFI` bindings and the prebuilt XCFramework are pulled in transitively from [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi); you only depend on `moq-swift`.
 
-Supported platforms: iOS 15+, iPadOS 15+, macOS 12+. The XCFramework ships iOS device (arm64), iOS Simulator (arm64 + x86\_64), and macOS universal slices.
+Supported platforms: iOS 15+, iPadOS 15+, macOS 12.3+ (ScreenCaptureKit, which the video backend links, ships in 12.3). The XCFramework ships arm64 slices for iOS devices, the iOS Simulator, and macOS.
 
 ## Connect
 
@@ -58,6 +58,24 @@ When you're done, signal graceful shutdown to the peer:
 session.shutdown()  // alias for cancel(code: 0)
 ```
 
+Inspect an incoming request's logical endpoint before accepting it with the query-free `request.path`. It is consistent across transports and returns `""` for the root or missing path. `request.query` returns the encoded query and may contain credentials:
+
+```swift
+let server = Server()
+try server.bind("127.0.0.1:4443")
+server.generateTls(hostnames: ["localhost"])
+_ = try await server.listen()
+
+while let request = try await server.accept() {
+    if request.path == "/admin" {
+        try await request.reject(code: 403)
+        continue
+    }
+    let session = try await request.accept()
+    Task { try? await session.closed() }
+}
+```
+
 A server can reject the connection on auth grounds: `MoqError.Unauthorized` (HTTP 401) or `MoqError.Forbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. Use the `isAuth` helper to catch both:
 
 ```swift
@@ -65,6 +83,21 @@ do {
     let session = try await client.connect(url: "https://relay.example.com")
 } catch let error as MoqError where error.isAuth {
     // Prompt for credentials; don't reconnect.
+}
+```
+
+### Reconnecting
+
+The session automatically redials with backoff when the transport drops (a relay
+restart, a laptop waking from sleep), and broadcasts consumed through it ride out
+the gap. Call `client.setReconnect(false)` before connecting for a one-shot dial,
+or `client.setBackoff(...)` to tune the pacing. `session.status()` reports each
+transition, and `session.closed()` resolves only once the connection stops for
+good:
+
+```swift
+while let status = try? await session.status() {
+    print("status: \(status)")  // .connected / .disconnected / .migrating
 }
 ```
 
@@ -101,13 +134,19 @@ track.update(subscription: Subscription(priority: 20, ordered: false))
 let broadcast = try session.publisher.createBroadcast(path: "my-stream")
 let audio = try broadcast.publishMedia(format: "opus", initData: opusInitBytes)
 
+// Audio has no keyframes, so `cut` is what gives it group boundaries. Once per
+// frame is the lowest latency; a segment cadence suits HLS/DASH.
 try audio.writeFrame(payload, timestampUs: 0)
+try audio.cut()
 try audio.writeFrame(payload, timestampUs: 20_000)
+try audio.cut()
 try audio.finish()
 try broadcast.finish()
 ```
 
 Video publishers can pass `video: VideoHint(...)` to seed catalog fields before the stream reveals them. Use `publishMedia(on:format:initData:video:)` to accept a media track obtained from `BroadcastDynamic`.
+
+Each catalog `Video` has a `stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
 
 Properties that apply to every video rendition are updated together. `nil` fields clear the corresponding catalog property, and rotation is normalized to the nearest clockwise quarter turn:
 
@@ -151,6 +190,26 @@ for try await request in dynamic {
 ```
 
 Call `request.abort(errorCode:)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
+
+### Fetching media groups
+
+`fetchGroup` hands back raw payloads. `fetchMediaGroup` decodes the same group through the rendition's advertised container, so you get timestamped frames without opening a live subscription:
+
+```swift
+let catalog = try await consumer.subscribeCatalog().next()!
+let (name, audio) = catalog.audio.first!
+
+let group = try await consumer.fetchMediaGroup(
+    name: name,
+    sequence: 42,
+    container: audio.container
+)
+for try await frame in group {
+    print(frame.timestampUs, frame.payload.count)
+}
+```
+
+`MediaGroupConsumer` is an `AsyncSequence`, and cancels the native read when iteration ends. A fetched media group is finite: it completes after the group's last decoded frame, unlike the live `subscribeMedia` stream. Latency-based group skipping does not apply, so you always get every frame in the group.
 
 ### On-demand raw tracks
 
@@ -241,6 +300,24 @@ for try await request in dynamic {
 ```
 
 The served broadcast is not announced. It only resolves consumers that call `requestBroadcast(path:)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast:)` to serve it, or `abort(errorCode:)` to fail the requester.
+
+### Raw media
+
+`publishMedia` above takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `publishVideo` / `publishAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
+
+```swift
+let video = try broadcast.publishVideo(
+    input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: 30),
+    output: VideoEncoderOutput(codec: .h264, bitrate: nil, gop: nil, kind: .auto)
+)
+
+try video.write(VideoFrame(timestampUs: ptsUs, data: rgba))
+try video.finish()
+```
+
+`kind: .auto` prefers a hardware encoder and falls back to software; `.software`, `.hardware`, and `.named(name: "videotoolbox")` pin the choice. The bindings compile VideoToolbox (macOS), Media Foundation (Windows), and openh264 (software, everywhere); the Linux hardware codecs are a libmoq-only build option. `setBitrate(_:)` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
+
+The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition is published immediately, read out of the encoder itself, so subscribers discover it through the catalog rather than a name you pick, and can find it before the first frame exists. `cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group.
 
 ## Cancellation
 

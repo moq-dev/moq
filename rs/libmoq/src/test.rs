@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::ffi::ReturnCode;
 use std::ffi::{c_char, c_void};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -213,8 +214,9 @@ fn publish_catalog_config_invalid_broadcast() {
 		codec_len: codec.len(),
 		description: std::ptr::null(),
 		description_len: 0,
-		coded_width: std::ptr::null(),
-		coded_height: std::ptr::null(),
+		coded_width: 0,
+		coded_height: 0,
+		container: moq_container::default(),
 	};
 	assert!(unsafe { moq_publish_video_config(0, &video) } < 0);
 	assert!(unsafe { moq_publish_video_properties(0, &moq_video_properties::default()) } < 0);
@@ -229,6 +231,7 @@ fn publish_catalog_config_invalid_broadcast() {
 		description_len: 0,
 		sample_rate: 48000,
 		channel_count: 2,
+		container: moq_container::default(),
 	};
 	assert!(unsafe { moq_publish_audio_config(0, &audio) } < 0);
 
@@ -277,10 +280,35 @@ fn publish_catalog_roundtrip() {
 		codec_len: video_codec.len(),
 		description: description.as_ptr(),
 		description_len: description.len(),
-		coded_width: &width,
-		coded_height: &height,
+		coded_width: width,
+		coded_height: height,
+		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
+	let stalled_video_name = "video-stalled";
+	let stalled_video = moq_video_config {
+		name: stalled_video_name.as_ptr() as *const c_char,
+		name_len: stalled_video_name.len(),
+		codec: video_codec.as_ptr() as *const c_char,
+		codec_len: video_codec.len(),
+		description: description.as_ptr(),
+		description_len: description.len(),
+		coded_width: width,
+		coded_height: height,
+		container: moq_container::default(),
+	};
+	assert_eq!(unsafe { moq_publish_video_config(broadcast, &stalled_video) }, 0);
+	{
+		let mut state = State::lock();
+		let (_, catalog) = state.publish.pair_mut(Id::try_from(broadcast).unwrap()).unwrap();
+		catalog
+			.lock()
+			.video
+			.renditions
+			.get_mut(stalled_video_name)
+			.unwrap()
+			.stalled = Some(true);
+	}
 	let properties = moq_video_properties {
 		display_width: 1080,
 		display_height: 1920,
@@ -303,6 +331,7 @@ fn publish_catalog_roundtrip() {
 		description_len: 0,
 		sample_rate: 48000,
 		channel_count: 2,
+		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &audio) }, 0);
 
@@ -320,8 +349,9 @@ fn publish_catalog_roundtrip() {
 		codec_len: 0,
 		description: std::ptr::null(),
 		description_len: 0,
-		coded_width: std::ptr::null(),
-		coded_height: std::ptr::null(),
+		coded_width: 0,
+		coded_height: 0,
+		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_consume_video_config(catalog_id, 0, &mut video_cfg) }, 0);
 	let codec = unsafe {
@@ -332,8 +362,37 @@ fn publish_catalog_roundtrip() {
 	}
 	.unwrap();
 	assert_eq!(codec, "vp8");
-	assert_eq!(unsafe { *video_cfg.coded_width }, 1920);
-	assert_eq!(unsafe { *video_cfg.coded_height }, 1080);
+	assert_eq!(video_cfg.coded_width, 1920);
+	assert_eq!(video_cfg.coded_height, 1080);
+	let mut stalled = std::mem::MaybeUninit::<bool>::uninit();
+	assert_eq!(
+		unsafe { moq_consume_video_stalled(catalog_id, 0, stalled.as_mut_ptr()) },
+		0
+	);
+	assert!(!unsafe { stalled.assume_init() });
+
+	let mut stalled = std::mem::MaybeUninit::<bool>::uninit();
+	assert_eq!(
+		unsafe { moq_consume_video_stalled(catalog_id, 1, stalled.as_mut_ptr()) },
+		0
+	);
+	assert!(unsafe { stalled.assume_init() });
+	assert_eq!(
+		unsafe { moq_consume_video_stalled(catalog_id, 0, std::ptr::null_mut()) },
+		-6,
+		"null stalled pointer should return InvalidPointer (-6)"
+	);
+	assert_eq!(
+		unsafe {
+			moq_publish_video_remove(
+				broadcast,
+				stalled_video_name.as_ptr() as *const c_char,
+				stalled_video_name.len(),
+			)
+		},
+		0
+	);
+	let active_catalog_id = id(catalog_cb.recv());
 
 	let mut properties = moq_video_properties::default();
 	assert_eq!(unsafe { moq_consume_video_properties(catalog_id, &mut properties) }, 0);
@@ -355,6 +414,7 @@ fn publish_catalog_roundtrip() {
 		description_len: 0,
 		sample_rate: 0,
 		channel_count: 0,
+		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id, 0, &mut audio_cfg) }, 0);
 	assert_eq!(audio_cfg.sample_rate, 48000);
@@ -373,10 +433,295 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id2, 0, &mut audio_cfg) }, 0);
 
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_free(active_catalog_id), 0);
 	assert_eq!(moq_consume_catalog_free(catalog_id2), 0);
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// hang carries coded_width and coded_height as independent options, so a catalog
+/// that declares only one must survive a consume/publish round trip. Collapsing
+/// them behind one presence flag would invent a zero for the missing half.
+#[test]
+fn a_half_specified_coded_size_round_trips() {
+	let origin = id(moq_origin_create());
+	let path = b"half-coded-size";
+	let broadcast = publish_broadcast(origin, path);
+
+	let name = "video";
+	let codec = "vp8";
+	let mut video = moq_video_config {
+		name: name.as_ptr() as *const c_char,
+		name_len: name.len(),
+		codec: codec.as_ptr() as *const c_char,
+		codec_len: codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: 1920,
+		coded_height: 0, // absent, not "zero pixels tall"
+		container: moq_container::default(),
+	};
+	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
+
+	let consume = request_broadcast(origin, path);
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog = id(catalog_cb.recv());
+
+	let mut read = moq_video_config {
+		name: std::ptr::null(),
+		name_len: 0,
+		codec: std::ptr::null(),
+		codec_len: 0,
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: 0,
+		coded_height: 0,
+		container: moq_container::default(),
+	};
+	assert_eq!(unsafe { moq_consume_video_config(catalog, 0, &mut read) }, 0);
+	assert_eq!(read.coded_width, 1920);
+	assert_eq!(read.coded_height, 0, "the absent height must not come back invented");
+
+	// Forwarding what we read into another broadcast carries the half-specified
+	// size across unchanged, which is the case a shared presence flag would break
+	// by inventing a zero height.
+	let forward = publish_broadcast(origin, b"half-coded-size-forwarded");
+	video.coded_width = read.coded_width;
+	video.coded_height = read.coded_height;
+	assert_eq!(unsafe { moq_publish_video_config(forward, &video) }, 0);
+
+	let forwarded = request_broadcast(origin, b"half-coded-size-forwarded");
+	let forwarded_cb = Callback::new();
+	let forwarded_task = id(unsafe { moq_consume_catalog(forwarded, Some(channel_callback), forwarded_cb.ptr) });
+	let forwarded_catalog = id(forwarded_cb.recv());
+	assert_eq!(unsafe { moq_consume_video_config(forwarded_catalog, 0, &mut read) }, 0);
+	assert_eq!(read.coded_width, 1920);
+	assert_eq!(read.coded_height, 0, "forwarding must not invent the absent height");
+
+	assert_eq!(moq_consume_catalog_free(forwarded_catalog), 0);
+	assert_eq!(moq_consume_catalog_close(forwarded_task), 0);
+	assert_eq!(forwarded_cb.recv_catalog_terminal(), 0);
+	assert_eq!(moq_consume_close(forwarded), 0);
+	assert_eq!(moq_publish_finish(forward), 0);
+
+	assert_eq!(moq_consume_catalog_free(catalog), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn raw_loc_video_uses_the_declared_catalog_container() {
+	let origin = id(moq_origin_create());
+	let path = b"raw-loc-video";
+	let broadcast = publish_broadcast(origin, path);
+
+	let name = b"video";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+
+	let codec = b"vp8";
+	let video = moq_video_config {
+		name: name.as_ptr() as *const c_char,
+		name_len: name.len(),
+		codec: codec.as_ptr() as *const c_char,
+		codec_len: codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: 0,
+		coded_height: 0,
+		container: moq_container {
+			kind: moq_container_kind::MOQ_CONTAINER_KIND_LOC as u32,
+			init: std::ptr::null(),
+			init_len: 0,
+		},
+	};
+	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
+
+	let consume = request_broadcast(origin, path);
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog = id(catalog_cb.recv());
+
+	// The declaration survives the round trip, so a consumer knows to parse LOC.
+	let mut video_cfg = moq_video_config {
+		name: std::ptr::null(),
+		name_len: 0,
+		codec: std::ptr::null(),
+		codec_len: 0,
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: 0,
+		coded_height: 0,
+		container: moq_container::default(),
+	};
+	assert_eq!(unsafe { moq_consume_video_config(catalog, 0, &mut video_cfg) }, 0);
+	assert_eq!(
+		video_cfg.container.kind,
+		moq_container_kind::MOQ_CONTAINER_KIND_LOC as u32
+	);
+	assert!(video_cfg.container.init.is_null());
+
+	let frame_cb = Callback::new();
+	let consumer = id(unsafe { moq_consume_video(catalog, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
+
+	let timestamp_us = 42_000;
+	let payload = b"codec frame";
+	let loc = moq_loc::encode(timestamp_us, payload).unwrap();
+	let group = id(moq_publish_track_group(track));
+	assert_eq!(
+		unsafe { moq_publish_group_frame(group, loc.as_ptr(), loc.len(), timestamp_us) },
+		0
+	);
+	assert_eq!(moq_publish_group_finish(group), 0);
+
+	let frame_id = id(frame_cb.recv());
+	let mut frame = moq_frame {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp_us: 0,
+		keyframe: false,
+	};
+	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(frame.timestamp_us, timestamp_us);
+	assert!(frame.keyframe);
+	assert_eq!(
+		unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) },
+		payload
+	);
+
+	assert_eq!(moq_consume_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_video_close(consumer), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_catalog_free(catalog), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn cmaf_catalog_container_carries_its_init_segment() {
+	let origin = id(moq_origin_create());
+	let path = b"cmaf-container";
+	let broadcast = publish_broadcast(origin, path);
+
+	let name = "audio";
+	let codec = "opus";
+	let init: &[u8] = &[0x00, 0x01, 0x02, 0x03];
+	let audio = moq_audio_config {
+		name: name.as_ptr() as *const c_char,
+		name_len: name.len(),
+		codec: codec.as_ptr() as *const c_char,
+		codec_len: codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		sample_rate: 48000,
+		channel_count: 2,
+		container: moq_container {
+			kind: moq_container_kind::MOQ_CONTAINER_KIND_CMAF as u32,
+			init: init.as_ptr(),
+			init_len: init.len(),
+		},
+	};
+	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &audio) }, 0);
+
+	let consume = request_broadcast(origin, path);
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog = id(catalog_cb.recv());
+
+	let mut audio_cfg = moq_audio_config {
+		name: std::ptr::null(),
+		name_len: 0,
+		codec: std::ptr::null(),
+		codec_len: 0,
+		description: std::ptr::null(),
+		description_len: 0,
+		sample_rate: 0,
+		channel_count: 0,
+		container: moq_container::default(),
+	};
+	assert_eq!(unsafe { moq_consume_audio_config(catalog, 0, &mut audio_cfg) }, 0);
+	assert_eq!(
+		audio_cfg.container.kind,
+		moq_container_kind::MOQ_CONTAINER_KIND_CMAF as u32
+	);
+	assert_eq!(
+		unsafe { std::slice::from_raw_parts(audio_cfg.container.init, audio_cfg.container.init_len) },
+		init
+	);
+
+	assert_eq!(moq_consume_catalog_free(catalog), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn unpublishable_catalog_containers_are_rejected() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"container-reject");
+
+	let name = "video";
+	let codec = "vp8";
+	let config = |container| moq_video_config {
+		name: name.as_ptr() as *const c_char,
+		name_len: name.len(),
+		codec: codec.as_ptr() as *const c_char,
+		codec_len: codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: 0,
+		coded_height: 0,
+		container,
+	};
+
+	// UNKNOWN only ever comes out of a catalog: we keep none of the original JSON, so
+	// there is nothing to write back.
+	let unknown = config(moq_container {
+		kind: moq_container_kind::MOQ_CONTAINER_KIND_UNKNOWN as u32,
+		init: std::ptr::null(),
+		init_len: 0,
+	});
+	assert_eq!(
+		unsafe { moq_publish_video_config(broadcast, &unknown) },
+		-15,
+		"unknown container should return InvalidCode (-15)"
+	);
+
+	let garbage = config(moq_container {
+		kind: 12345,
+		init: std::ptr::null(),
+		init_len: 0,
+	});
+	assert_eq!(
+		unsafe { moq_publish_video_config(broadcast, &garbage) },
+		-15,
+		"out of range container should return InvalidCode (-15)"
+	);
+
+	let cmaf = config(moq_container {
+		kind: moq_container_kind::MOQ_CONTAINER_KIND_CMAF as u32,
+		init: std::ptr::null(),
+		init_len: 0,
+	});
+	assert_eq!(
+		unsafe { moq_publish_video_config(broadcast, &cmaf) },
+		-6,
+		"cmaf without an init segment should return InvalidPointer (-6)"
+	);
+
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -1142,6 +1487,50 @@ fn double_close_all_resource_types() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// Audio has no keyframes, so `moq_publish_media_cut` is the only thing that gives it group
+/// boundaries: without it every packet lands in one group that never closes. Cutting per packet is
+/// what a live publisher does, and `_seek` does the same with a chosen sequence number.
+#[test]
+fn media_cut_bounds_audio_groups() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"media-cut");
+	let init = opus_head();
+	let format = b"opus";
+	let media = id(unsafe {
+		moq_publish_media(
+			broadcast,
+			format.as_ptr() as *const c_char,
+			format.len(),
+			init.as_ptr(),
+			init.len(),
+		)
+	});
+
+	let payload = b"test";
+	for i in 0..3u64 {
+		assert_eq!(
+			unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), i * 20_000) },
+			0
+		);
+		assert_eq!(moq_publish_media_cut(media), 0, "each packet is its own group");
+	}
+
+	// The same boundary, with the next group explicitly numbered.
+	assert_eq!(
+		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), 60_000) },
+		0
+	);
+	assert_eq!(moq_publish_media_seek(media, 42), 0);
+
+	// Both report a missing importer rather than panicking on an unknown id.
+	assert!(moq_publish_media_cut(9999) < 0);
+	assert!(moq_publish_media_seek(9999, 0) < 0);
+
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn unknown_format() {
 	let origin = id(moq_origin_create());
@@ -1258,6 +1647,7 @@ fn local_publish_consume() {
 		description_len: 0,
 		sample_rate: 0,
 		channel_count: 0,
+		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id, 0, &mut audio_cfg) }, 0);
 	assert_eq!(audio_cfg.sample_rate, 48000);
@@ -1279,8 +1669,9 @@ fn local_publish_consume() {
 		codec_len: 0,
 		description: std::ptr::null(),
 		description_len: 0,
-		coded_width: std::ptr::null(),
-		coded_height: std::ptr::null(),
+		coded_width: 0,
+		coded_height: 0,
+		container: moq_container::default(),
 	};
 	assert!(
 		unsafe { moq_consume_video_config(catalog_id, 0, &mut video_cfg) } < 0,
@@ -1372,6 +1763,7 @@ fn consume_announced_local() {
 		description_len: 0,
 		sample_rate: 0,
 		channel_count: 0,
+		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id, 0, &mut audio_cfg) }, 0);
 	assert_eq!(audio_cfg.sample_rate, 48000);
@@ -1441,8 +1833,9 @@ fn video_publish_consume() {
 		codec_len: 0,
 		description: std::ptr::null(),
 		description_len: 0,
-		coded_width: std::ptr::null(),
-		coded_height: std::ptr::null(),
+		coded_width: 0,
+		coded_height: 0,
+		container: moq_container::default(),
 	};
 	assert_eq!(
 		unsafe { moq_consume_video_config(catalog_id, 0, &mut video_cfg) },
@@ -1462,12 +1855,8 @@ fn video_publish_consume() {
 		"codec should be avc1/avc3, got {codec}"
 	);
 
-	assert!(!video_cfg.coded_width.is_null(), "coded_width should be set");
-	assert!(!video_cfg.coded_height.is_null(), "coded_height should be set");
-	let width = unsafe { *video_cfg.coded_width };
-	let height = unsafe { *video_cfg.coded_height };
-	assert_eq!(width, 1280);
-	assert_eq!(height, 720);
+	assert_eq!(video_cfg.coded_width, 1280);
+	assert_eq!(video_cfg.coded_height, 720);
 
 	let mut audio_cfg = moq_audio_config {
 		name: std::ptr::null(),
@@ -1478,6 +1867,7 @@ fn video_publish_consume() {
 		description_len: 0,
 		sample_rate: 0,
 		channel_count: 0,
+		container: moq_container::default(),
 	};
 	assert!(
 		unsafe { moq_consume_audio_config(catalog_id, 0, &mut audio_cfg) } < 0,
@@ -1512,6 +1902,433 @@ fn video_publish_consume() {
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// The raw audio publish path: PCM in, an Opus track out. The decode half has
+/// its own coverage in moq-audio; this pins the producer lifecycle the C surface
+/// owns, including that a finished handle is gone.
+#[test]
+fn audio_raw_publish() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"audio-raw-publish-test");
+
+	let name = b"audio";
+	let input = moq_audio_encoder_input {
+		format: moq_audio_format::MOQ_AUDIO_FORMAT_F32 as u32,
+		sample_rate: 48_000,
+		channels: 2,
+	};
+	let codec = b"opus";
+	let output = moq_audio_encoder_output {
+		codec: codec.as_ptr() as *const c_char,
+		codec_len: codec.len(),
+		sample_rate: 0,
+		channels: 0,
+		bitrate: 0,
+		frame_duration_ms: 20,
+	};
+	let producer =
+		id(unsafe { moq_publish_audio_raw(broadcast, name.as_ptr() as *const c_char, name.len(), &input, &output) });
+
+	// 20 ms of silence: interleaved stereo f32 at 48 kHz, one encoded frame's worth.
+	let samples = vec![0.0f32; 960 * 2];
+	let pcm = unsafe { std::slice::from_raw_parts(samples.as_ptr().cast::<u8>(), std::mem::size_of_val(&samples[..])) };
+	let frame = moq_audio_frame {
+		timestamp_us: 0,
+		data: pcm.as_ptr(),
+		data_size: pcm.len(),
+	};
+	assert_eq!(unsafe { moq_publish_audio_raw_frame(producer, &frame) }, 0);
+
+	assert_eq!(moq_publish_audio_raw_finish(producer), 0);
+	assert!(moq_publish_audio_raw_finish(producer) < 0, "double-finish should fail");
+	assert!(
+		unsafe { moq_publish_audio_raw_frame(producer, &frame) } < 0,
+		"a finished producer should take no more frames"
+	);
+
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A mid-gray RGBA frame, encodable without a camera.
+fn gray_rgba(width: u32, height: u32) -> Vec<u8> {
+	vec![0x80u8; width as usize * height as usize * 4]
+}
+
+/// The publish-side mirror of [`video_raw_decode`]: hand raw RGBA to
+/// `moq_publish_video_raw` and read decoded I420 back out of
+/// `moq_consume_video_raw`, so the encode and decode halves meet on the wire.
+#[test]
+fn video_raw_publish_consume() {
+	let origin = id(moq_origin_create());
+	let path = b"video-raw-publish-test";
+	let broadcast = publish_broadcast(origin, path);
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: 30,
+	};
+	// Software so the test is deterministic everywhere: `Auto` would reach for a
+	// hardware backend that CI runners don't have.
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 0,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let producer = id(unsafe { moq_publish_video_raw(broadcast, &input, &output) });
+
+	let rgba = gray_rgba(320, 240);
+	let publish = |index: u64| {
+		let frame = moq_video_encoder_frame {
+			timestamp_us: index * 33_333,
+			data: rgba.as_ptr(),
+			data_size: rgba.len(),
+		};
+		assert_eq!(unsafe { moq_publish_video_raw_frame(producer, &frame) }, 0);
+	};
+
+	// The catalog rendition only exists once the importer has parsed the codec
+	// config out of an encoded keyframe, so publish before subscribing.
+	assert_eq!(moq_publish_video_raw_cut(producer), 0);
+	for i in 0..5u64 {
+		publish(i);
+	}
+
+	let consume = request_broadcast(origin, path);
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+
+	let decoder = moq_video_decoder_output { latency_max_ms: 10_000 };
+	let frame_cb = Callback::new();
+	let consumer = id(unsafe { moq_consume_video_raw(catalog_id, 0, &decoder, Some(channel_callback), frame_cb.ptr) });
+
+	// Keep feeding the encoder so the subscriber has frames to decode after it
+	// joins, whatever the group boundary it landed on.
+	for i in 5..20u64 {
+		publish(i);
+	}
+
+	let frame_id = id(frame_cb.recv());
+	let mut frame = moq_video_frame {
+		timestamp_us: 0,
+		width: 0,
+		height: 0,
+		data: std::ptr::null(),
+		data_size: 0,
+	};
+	assert_eq!(unsafe { moq_consume_video_raw_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(frame.width, 320);
+	assert_eq!(frame.height, 240);
+	assert_eq!(frame.data_size, 320 * 240 * 3 / 2, "tightly-packed I420");
+
+	assert_eq!(moq_consume_video_raw_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_video_raw_close(consumer), 0);
+	loop {
+		let code = frame_cb.recv();
+		if code > 0 {
+			assert_eq!(moq_consume_video_raw_frame_free(id(code)), 0);
+		} else {
+			assert_eq!(code, 0, "raw video close delivers terminal 0");
+			break;
+		}
+	}
+
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_video_raw_finish(producer), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Regression: a producer handle is just an integer, so a C caller may drive it
+/// from any thread, and each call runs on the thread that made it. Holding a bare
+/// `Encoder` was therefore unsound on Windows, where the codec's COM apartment is
+/// per-thread: it was opened on the publishing thread and closed on whichever
+/// thread called finish. The confinement itself is asserted in moq-video
+/// (`encode::sink`); this pins that the C surface supports the usage, including
+/// the drain on finish.
+#[test]
+fn video_raw_publish_from_many_threads() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"video-raw-threads-test");
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: 30,
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		// An explicit ceiling so the retunes below stay under the rate the encoder
+		// opened at, which openh264 requires.
+		bitrate: 1_000_000,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let producer = id(unsafe { moq_publish_video_raw(broadcast, &input, &output) });
+
+	// A fresh caller thread per frame, never the one that published.
+	let rgba = std::sync::Arc::new(gray_rgba(320, 240));
+	for i in 0..8u64 {
+		let rgba = rgba.clone();
+		std::thread::spawn(move || {
+			if i == 0 {
+				assert_eq!(moq_publish_video_raw_cut(producer), 0);
+			}
+			let frame = moq_video_encoder_frame {
+				timestamp_us: i * 33_333,
+				data: rgba.as_ptr(),
+				data_size: rgba.len(),
+			};
+			assert_eq!(unsafe { moq_publish_video_raw_frame(producer, &frame) }, 0);
+			assert_eq!(moq_publish_video_raw_bitrate(producer, 900_000 - i), 0);
+		})
+		.join()
+		.unwrap();
+	}
+
+	// ...and finished, so the encoder is drained and dropped, from yet another.
+	std::thread::spawn(move || assert_eq!(moq_publish_video_raw_finish(producer), 0))
+		.join()
+		.unwrap();
+
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Publish one mid-gray frame to a raw video producer, returning the status code.
+fn publish_gray(producer: u32, rgba: &[u8]) -> i32 {
+	let frame = moq_video_encoder_frame {
+		timestamp_us: 0,
+		data: rgba.as_ptr(),
+		data_size: rgba.len(),
+	};
+	unsafe { moq_publish_video_raw_frame(producer, &frame) }
+}
+
+/// Regression: an encode is a round trip to the codec thread, and a wedged codec
+/// never comes back from it. It used to run under both of libmoq's process-wide
+/// locks, the `State` mutex and one wrapping the runtime handle, so a single
+/// stalled producer parked every unrelated call in the process behind it: another
+/// broadcast's publish, a consumer's frame free, a session close.
+///
+/// Stalling the codec itself would take a test-only backend, so this holds the
+/// per-producer lock an in-flight encode holds instead. From every other caller's
+/// point of view that is the same wait.
+#[test]
+fn a_stalled_encode_does_not_block_unrelated_calls() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"video-raw-stall-test");
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: 30,
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 0,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let stalled = id(unsafe { moq_publish_video_raw(broadcast, &input, &output) });
+	let other = id(unsafe { moq_publish_video_raw(broadcast, &input, &output) });
+
+	// Hold the lock a publish takes for the duration of its encode.
+	let handle = State::lock().video.producer(Id::try_from(stalled).unwrap()).unwrap();
+	let held = handle.lock();
+
+	let rgba = std::sync::Arc::new(gray_rgba(320, 240));
+	let stalling = {
+		let rgba = rgba.clone();
+		std::thread::spawn(move || publish_gray(stalled, &rgba))
+	};
+
+	// Wait until it has resolved the handle, so it is genuinely inside the stalled
+	// call rather than still on its way in: the slab holds one reference, this test
+	// a second, and the parked publish is the third.
+	let deadline = std::time::Instant::now() + TIMEOUT;
+	while handle.holders() < 3 {
+		assert!(
+			std::time::Instant::now() < deadline,
+			"the publish never reached the encoder"
+		);
+		std::thread::yield_now();
+	}
+
+	// Unrelated work must not be queued behind it. On its own thread so a
+	// regression fails this assertion rather than hanging the test.
+	let (tx, rx) = mpsc::channel();
+	let unrelated = {
+		let rgba = rgba.clone();
+		std::thread::spawn(move || {
+			let _ = tx.send((moq_origin_create(), publish_gray(other, &rgba)));
+		})
+	};
+	let (created, published) = rx
+		.recv_timeout(TIMEOUT)
+		.expect("an unrelated call was waiting on the stalled encode");
+	assert!(created > 0, "creating an origin failed while a producer was stalled");
+	assert_eq!(
+		published, 0,
+		"a second producer could not encode while the first stalled"
+	);
+	unrelated.join().unwrap();
+
+	// ...and the stalled publish was still in flight the whole time, so the calls
+	// above really did overlap it.
+	assert_eq!(handle.holders(), 3, "the stalled publish finished early");
+
+	drop(held);
+	assert_eq!(stalling.join().unwrap(), 0);
+
+	assert_eq!(moq_origin_close(id(created)), 0);
+	assert_eq!(moq_publish_video_raw_finish(stalled), 0);
+	assert_eq!(moq_publish_video_raw_finish(other), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A raw video producer rejects a buffer that isn't one picture at the
+/// configured resolution, rather than reinterpreting it.
+#[test]
+fn video_raw_publish_rejects_frame_size_mismatch() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"video-raw-mismatch-test");
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: 30,
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 0,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let producer = id(unsafe { moq_publish_video_raw(broadcast, &input, &output) });
+
+	// A 640x480 buffer against a 320x240 encoder: the frame carries no dimensions
+	// of its own, so this is caught as a wrong-sized picture.
+	let rgba = gray_rgba(640, 480);
+	let frame = moq_video_encoder_frame {
+		timestamp_us: 0,
+		data: rgba.as_ptr(),
+		data_size: rgba.len(),
+	};
+	assert!(unsafe { moq_publish_video_raw_frame(producer, &frame) } < 0);
+
+	assert_eq!(moq_publish_video_raw_finish(producer), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Bad discriminants and pointers are rejected at the boundary rather than
+/// reaching moq-video.
+#[test]
+fn video_raw_publish_rejects_invalid_config() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"video-raw-invalid-test");
+
+	let valid_input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
+		width: 320,
+		height: 240,
+		framerate: 30,
+	};
+	let valid_output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 0,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+
+	assert!(unsafe { moq_publish_video_raw(broadcast, std::ptr::null(), &valid_output) } < 0);
+	assert!(unsafe { moq_publish_video_raw(broadcast, &valid_input, std::ptr::null()) } < 0);
+
+	let bad_format = moq_video_encoder_input {
+		format: 99,
+		..valid_input
+	};
+	assert!(unsafe { moq_publish_video_raw(broadcast, &bad_format, &valid_output) } < 0);
+
+	let zero_framerate = moq_video_encoder_input {
+		framerate: 0,
+		..valid_input
+	};
+	assert!(unsafe { moq_publish_video_raw(broadcast, &zero_framerate, &valid_output) } < 0);
+
+	// Regression: dimensions arrive as a raw `u32` pair, and their product used to
+	// overflow the default-bitrate estimate inside the encoder. A panic here is an
+	// aborted host process, not an error return, since release builds are
+	// `panic = "abort"`. It has to come back as a negative code.
+	let unrepresentable = moq_video_encoder_input {
+		width: u32::MAX - 1,
+		height: u32::MAX - 1,
+		..valid_input
+	};
+	assert!(unsafe { moq_publish_video_raw(broadcast, &unrepresentable, &valid_output) } < 0);
+
+	// A size no encoder can take, but whose arithmetic is fine, is the backend's
+	// call rather than the boundary's: it must not be swept up by the check above.
+	// Asserted on the reason, not just the code, since a backend refusing it looks
+	// the same from the outside as the boundary refusing it.
+	let merely_huge = moq_video_encoder_input {
+		width: 65534,
+		height: 65534,
+		..valid_input
+	};
+	let huge = unsafe { moq_publish_video_raw(broadcast, &merely_huge, &valid_output) };
+	if huge > 0 {
+		assert_eq!(moq_publish_video_raw_finish(id(huge)), 0);
+	} else {
+		let reason = unsafe { std::ffi::CStr::from_ptr(moq_error()) }.to_str().unwrap();
+		assert!(
+			!reason.contains("too large to represent"),
+			"the representability check rejected a size it should have left to the backend: {reason}"
+		);
+	}
+
+	let bad_codec = moq_video_encoder_output {
+		codec: 99,
+		..valid_output
+	};
+	assert!(unsafe { moq_publish_video_raw(broadcast, &valid_input, &bad_codec) } < 0);
+
+	let bad_kind = moq_video_encoder_output {
+		kind: 99,
+		..valid_output
+	};
+	assert!(unsafe { moq_publish_video_raw(broadcast, &valid_input, &bad_kind) } < 0);
+
+	// Handles for a producer that was never created.
+	assert!(moq_publish_video_raw_cut(0) < 0);
+	assert!(moq_publish_video_raw_bitrate(0, 1_000_000) < 0);
+	assert!(moq_publish_video_raw_finish(0) < 0);
+
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -1719,6 +2536,7 @@ fn catalog_update_on_new_track() {
 		description_len: 0,
 		sample_rate: 0,
 		channel_count: 0,
+		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id1, 0, &mut audio_cfg) }, 0);
 	assert!(unsafe { moq_consume_audio_config(catalog_id1, 1, &mut audio_cfg) } < 0);
@@ -1780,6 +2598,7 @@ fn session_connect_invalid_url() {
 		moq_session_connect(
 			url.as_ptr() as *const c_char,
 			url.len(),
+			std::ptr::null(),
 			0,
 			0,
 			None,
@@ -1797,6 +2616,7 @@ fn session_connect_and_close() {
 		moq_session_connect(
 			url.as_ptr() as *const c_char,
 			url.len(),
+			std::ptr::null(),
 			0,
 			0,
 			Some(channel_callback),
@@ -1807,6 +2627,458 @@ fn session_connect_and_close() {
 	// close() requests shutdown; the task still delivers exactly one terminal
 	// callback (0 = clean close, or a negative connect error), after which
 	// user_data is safe to free.
+	assert_eq!(moq_session_close(session), 0);
+	assert!(cb.recv() <= 0, "session close delivers a terminal code");
+}
+
+/// Borrow a `&str` as the `moq_string` the list setters take.
+fn moq_str(s: &str) -> moq_string {
+	moq_string {
+		data: s.as_ptr() as *const c_char,
+		len: s.len(),
+	}
+}
+
+/// A zeroed config, which is what a C caller gets from `memset` or `{0}` and must
+/// mean "the defaults" for every knob.
+fn client_config() -> moq_client_config {
+	unsafe { std::mem::zeroed() }
+}
+
+/// Dial `moqt://localhost:1` with `config` and return the raw status.
+fn dial(config: Option<&moq_client_config>) -> i32 {
+	let url = b"moqt://localhost:1";
+	unsafe {
+		moq_session_connect(
+			url.as_ptr() as *const c_char,
+			url.len(),
+			config.map_or(std::ptr::null(), |c| c as *const _),
+			0,
+			0,
+			None,
+			std::ptr::null_mut(),
+		)
+	}
+}
+
+/// The native config a zeroed struct produces, which is the thing every default
+/// assertion below is really about.
+fn parsed(config: &moq_client_config) -> crate::client::Config {
+	unsafe { crate::parse_client(Some(config)) }.expect("config should parse")
+}
+
+#[test]
+fn a_null_config_dials_with_the_defaults() {
+	let defaults = crate::client::Config::default();
+	let parsed = unsafe { crate::parse_client(None) }.expect("NULL is the defaults");
+	assert_eq!(parsed.connect.backoff.initial(), defaults.connect.backoff.initial());
+	assert_eq!(
+		parsed.connect.websocket.resolved_enabled(),
+		defaults.connect.websocket.resolved_enabled()
+	);
+}
+
+/// The whole point of the `has_*` flags: a caller who zeroes the struct and sets
+/// nothing must land on the defaults, not on zero. The backoff and the WebSocket
+/// fallback are the ones with non-zero defaults, so they are what would break.
+#[test]
+fn a_zeroed_config_is_the_defaults() {
+	let defaults = crate::client::Config::default();
+	let parsed = parsed(&client_config());
+
+	assert_eq!(parsed.connect.backoff.initial(), defaults.connect.backoff.initial());
+	assert_eq!(
+		parsed.connect.backoff.multiplier(),
+		defaults.connect.backoff.multiplier()
+	);
+	assert_eq!(parsed.connect.backoff.max(), defaults.connect.backoff.max());
+	assert_eq!(parsed.connect.backoff.timeout(), defaults.connect.backoff.timeout());
+	assert_eq!(
+		parsed.connect.websocket.resolved_enabled(),
+		defaults.connect.websocket.resolved_enabled()
+	);
+	assert_eq!(
+		parsed.connect.websocket.resolved_delay(),
+		defaults.connect.websocket.resolved_delay()
+	);
+	assert_eq!(parsed.connect.version, defaults.connect.version);
+	assert_eq!(parsed.connect.bind, defaults.connect.bind);
+	assert!(parsed.connect.tls.fingerprint.is_empty());
+	assert!(parsed.connect.tls.root.is_empty());
+	assert!(parsed.quic.gso.is_none());
+	assert!(parsed.quic.mtu_discovery.is_none());
+}
+
+/// `moq_client_defaults` has to agree with what a zeroed struct actually dials,
+/// or a settings UI shows numbers the library won't use. Pinned against the
+/// config each value comes from, so retuning a default without following through
+/// to C fails right here.
+#[test]
+fn defaults_report_what_a_zeroed_config_dials() {
+	let config = moq_client_defaults();
+
+	let expected = crate::client::Config::default();
+	let quic = moq_native::quic::Resolved::default();
+
+	assert!(config.has_connect_timeout);
+	assert_eq!(
+		config.connect_timeout_ms,
+		expected.connect.resolved_timeout().as_millis() as u64
+	);
+	assert!(config.has_failover_delay);
+	assert_eq!(
+		config.failover_delay_ms,
+		expected.connect.resolved_race().as_millis() as u64
+	);
+	assert!(config.has_resolution_delay);
+	assert_eq!(
+		config.resolution_delay_ms,
+		expected.connect.resolved_resolution_delay().as_millis() as u64
+	);
+
+	assert!(config.has_backoff_initial);
+	assert_eq!(
+		config.backoff_initial_ms,
+		expected.connect.backoff.initial().as_millis() as u64
+	);
+	assert!(config.has_backoff_multiplier);
+	assert_eq!(config.backoff_multiplier, expected.connect.backoff.multiplier());
+	assert!(config.has_backoff_max);
+	assert_eq!(config.backoff_max_ms, expected.connect.backoff.max().as_millis() as u64);
+	assert!(config.has_backoff_timeout);
+	assert_eq!(
+		config.backoff_timeout_ms,
+		expected.connect.backoff.timeout().as_millis() as u64
+	);
+
+	assert!(config.has_websocket_enabled);
+	assert_eq!(config.websocket_enabled, expected.connect.websocket.resolved_enabled());
+	assert!(config.has_websocket_delay);
+	assert_eq!(
+		config.websocket_delay_ms,
+		expected.connect.websocket.resolved_delay().as_millis() as u64
+	);
+
+	assert!(config.has_quic_max_streams);
+	assert_eq!(config.quic_max_streams, quic.max_streams);
+	assert!(config.has_quic_idle_timeout);
+	assert_eq!(config.quic_idle_timeout_ms, quic.idle_timeout.as_millis() as u64);
+	assert_eq!(
+		config.has_quic_keep_alive.then_some(config.quic_keep_alive_ms),
+		quic.keep_alive.map(|d| d.as_millis() as u64)
+	);
+
+	// The backend-dependent knobs have no single value to report, so they come
+	// back unset rather than guessing one.
+	assert!(!config.has_quic_gso);
+	assert!(!config.has_quic_mtu_discovery);
+	assert!(!config.has_tls_system_roots);
+	assert!(config.quic_congestion_control.is_null());
+
+	// And what it reports must round-trip: dialing with it is dialing with the defaults.
+	let expected = crate::client::Config::default();
+	let reparsed = parsed(&config);
+	assert_eq!(reparsed.connect.backoff.initial(), expected.connect.backoff.initial());
+	assert_eq!(
+		reparsed.connect.websocket.resolved_enabled(),
+		expected.connect.websocket.resolved_enabled()
+	);
+}
+
+/// Zero is a real setting for these two, not "unset": retry forever, and no
+/// keep-alive pings. The flag is what carries that distinction.
+#[test]
+fn zero_with_a_flag_set_is_a_real_value() {
+	let mut config = client_config();
+	config.backoff_timeout_ms = 0;
+	config.has_backoff_timeout = true;
+	config.quic_keep_alive_ms = 0;
+	config.has_quic_keep_alive = true;
+
+	let explicit = parsed(&config);
+	assert_eq!(explicit.connect.backoff.timeout(), std::time::Duration::ZERO);
+	assert_eq!(explicit.quic.keep_alive, Some(std::time::Duration::ZERO));
+
+	// Without the flags the same zeroes mean nothing at all.
+	let defaults = parsed(&client_config());
+	assert_ne!(defaults.connect.backoff.timeout(), std::time::Duration::ZERO);
+	assert_eq!(defaults.quic.keep_alive, None);
+}
+
+#[test]
+fn config_versions_round_trip() {
+	let versions = [moq_str("moq-lite-05"), moq_str("moq-transport-19")];
+	let mut config = client_config();
+	config.versions = versions.as_ptr();
+	config.versions_len = versions.len();
+	assert_eq!(parsed(&config).connect.version.len(), 2);
+
+	// An empty list is no pin at all, so the default set is offered.
+	let mut config = client_config();
+	config.versions_len = 0;
+	assert_eq!(
+		parsed(&config).connect.version,
+		crate::client::Config::default().connect.version
+	);
+}
+
+#[test]
+fn config_rejects_an_unknown_version() {
+	let versions = [moq_str("moq-lite-05"), moq_str("moq-carrier-pigeon-01")];
+	let mut config = client_config();
+	config.versions = versions.as_ptr();
+	config.versions_len = versions.len();
+
+	assert_eq!(dial(Some(&config)), Error::InvalidConfig(String::new()).code());
+}
+
+#[test]
+fn config_rejects_a_bad_bind_address() {
+	let good = "127.0.0.1:0";
+	let mut config = client_config();
+	config.bind = good.as_ptr() as *const c_char;
+	config.bind_len = good.len();
+	assert_eq!(parsed(&config).connect.bind, Some(good.parse().unwrap()));
+
+	let bad = "not-an-address";
+	let mut config = client_config();
+	config.bind = bad.as_ptr() as *const c_char;
+	config.bind_len = bad.len();
+	assert_eq!(dial(Some(&config)), Error::InvalidConfig(String::new()).code());
+}
+
+#[test]
+fn config_optional_strings_are_unset_when_null_or_empty() {
+	let name = "relay.example.com";
+	let mut config = client_config();
+	config.tls_host_name = name.as_ptr() as *const c_char;
+	config.tls_host_name_len = name.len();
+	assert_eq!(parsed(&config).connect.tls.host_name.as_deref(), Some(name));
+
+	// NULL and empty both mean "unset".
+	let config = client_config();
+	assert_eq!(parsed(&config).connect.tls.host_name, None);
+
+	let mut config = client_config();
+	config.tls_host_name = "".as_ptr() as *const c_char;
+	config.tls_host_name_len = 0;
+	assert_eq!(parsed(&config).connect.tls.host_name, None);
+}
+
+#[test]
+fn config_rejects_malformed_tls_fingerprints() {
+	for invalid in ["not-hex", "abcd"] {
+		let fingerprints = [moq_str(invalid)];
+		let mut config = client_config();
+		config.tls_fingerprints = fingerprints.as_ptr();
+		config.tls_fingerprints_len = fingerprints.len();
+		assert_eq!(dial(Some(&config)), Error::InvalidConfig(String::new()).code());
+	}
+
+	let valid_value = "ab".repeat(32);
+	let valid = [moq_str(&valid_value)];
+	let mut config = client_config();
+	config.tls_fingerprints = valid.as_ptr();
+	config.tls_fingerprints_len = valid.len();
+	assert_eq!(parsed(&config).connect.tls.fingerprint, vec![valid_value]);
+}
+
+#[test]
+fn config_rejects_unknown_congestion_control() {
+	let bogus = "sideways";
+	let mut config = client_config();
+	config.quic_congestion_control = bogus.as_ptr() as *const c_char;
+	config.quic_congestion_control_len = bogus.len();
+	assert_eq!(dial(Some(&config)), Error::InvalidConfig(String::new()).code());
+
+	let delay = "delay";
+	let mut config = client_config();
+	config.quic_congestion_control = delay.as_ptr() as *const c_char;
+	config.quic_congestion_control_len = delay.len();
+	assert!(parsed(&config).quic.congestion_control.is_some());
+
+	// NULL leaves it on the backend default, so the knob can stay automatic.
+	assert!(parsed(&client_config()).quic.congestion_control.is_none());
+}
+
+/// Every QUIC and backoff knob lands where it should. A new one is a new field on
+/// the end of the struct, which a zeroed caller never notices.
+#[test]
+fn config_quic_and_backoff_knobs_apply() {
+	let mut config = client_config();
+	config.backoff_initial_ms = 500;
+	config.has_backoff_initial = true;
+	config.backoff_multiplier = 3;
+	config.has_backoff_multiplier = true;
+	config.backoff_max_ms = 10_000;
+	config.has_backoff_max = true;
+
+	config.quic_max_streams = 4096;
+	config.has_quic_max_streams = true;
+	config.quic_idle_timeout_ms = 15_000;
+	config.has_quic_idle_timeout = true;
+	config.quic_gso = false;
+	config.has_quic_gso = true;
+	config.quic_mtu_discovery = true;
+	config.has_quic_mtu_discovery = true;
+
+	let dir = "/tmp/qlog";
+	config.quic_qlog = dir.as_ptr() as *const c_char;
+	config.quic_qlog_len = dir.len();
+
+	let parsed = parsed(&config);
+	assert_eq!(parsed.connect.backoff.initial(), std::time::Duration::from_millis(500));
+	assert_eq!(parsed.connect.backoff.multiplier(), 3);
+	assert_eq!(parsed.connect.backoff.max(), std::time::Duration::from_millis(10_000));
+	assert_eq!(parsed.quic.max_streams, Some(4096));
+	assert_eq!(parsed.quic.idle_timeout, Some(std::time::Duration::from_millis(15_000)));
+	assert_eq!(parsed.quic.gso, Some(false));
+	assert_eq!(parsed.quic.mtu_discovery, Some(true));
+	assert_eq!(parsed.quic.qlog.as_deref(), Some(std::path::Path::new(dir)));
+}
+
+/// An idle timeout outside QUIC's millisecond varint is an ordinary configuration
+/// error, and later calls remain usable.
+#[test]
+fn dial_rejects_an_unrepresentable_idle_timeout() {
+	let mut config = client_config();
+	config.quic_idle_timeout_ms = u64::MAX;
+	config.has_quic_idle_timeout = true;
+
+	assert_eq!(dial(Some(&config)), Error::InvalidConfig(String::new()).code());
+
+	// A rejected dial leaves the library usable.
+	assert!(moq_client_defaults().has_connect_timeout);
+}
+
+/// The backend variants are feature-gated, so a hardcoded menu offers options this
+/// build rejects. Every name reported must be one a dial takes, same contract as
+/// `moq_versions`.
+#[test]
+fn backends_lists_only_what_a_dial_accepts() {
+	let count = unsafe { moq_backends(std::ptr::null_mut(), 0) };
+	assert!(count > 0, "expected at least one compiled backend, got {count}");
+
+	let mut names = vec![
+		moq_string {
+			data: std::ptr::null(),
+			len: 0
+		};
+		count as usize
+	];
+	assert_eq!(unsafe { moq_backends(names.as_mut_ptr(), names.len()) }, count);
+
+	let accepts = |name: &str| {
+		let mut config = client_config();
+		config.backend = name.as_ptr() as *const c_char;
+		config.backend_len = name.len();
+		unsafe { crate::parse_client(Some(&config)) }.is_ok()
+	};
+
+	for name in &names {
+		let name = unsafe { ffi::parse_str(name.data, name.len) }.expect("backend name is UTF-8");
+		assert!(accepts(name), "listed backend {name} must be settable");
+	}
+
+	// And the converse: a backend this build lacks is not listed, so the menu can't
+	// offer a dead option.
+	for candidate in ["quinn", "quiche", "noq"] {
+		let listed = names.iter().any(|n| {
+			unsafe { ffi::parse_str(n.data, n.len) }
+				.map(|s| s == candidate)
+				.unwrap_or(false)
+		});
+		assert_eq!(
+			listed,
+			accepts(candidate),
+			"{candidate}: listed and accepted must agree"
+		);
+	}
+}
+
+/// Whether a qlog directory works at all is a compile-time feature, so the capability
+/// has to agree with what a dial does. Both branches matter: `just check` runs without
+/// `--all-features` and only ever sees the unsupported one, while CI runs with them and
+/// only sees the supported one.
+#[test]
+fn qlog_support_matches_what_a_dial_accepts() {
+	// A real directory: with capture compiled in, the dial creates a trace file inside
+	// it, so a path that doesn't exist would fail for that reason instead of the one
+	// under test. The pid keeps concurrent test binaries out of each other's way.
+	let dir = std::env::temp_dir().join(format!("moq-qlog-test-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).expect("create the qlog directory");
+	let path = dir.to_str().expect("temp dir is UTF-8").to_string();
+
+	let mut config = client_config();
+	config.quic_qlog = path.as_ptr() as *const c_char;
+	config.quic_qlog_len = path.len();
+
+	// Parsing stores the path either way; the dial is what rejects it.
+	assert!(unsafe { crate::parse_client(Some(&config)) }.is_ok());
+
+	let ret = dial(Some(&config));
+	match moq_qlog_supported() {
+		true => {
+			assert!(ret > 0, "qlog is supported, so the dial must start: {ret}");
+			moq_session_close(id(ret));
+		}
+		false => assert!(ret < 0, "qlog is unsupported, so the dial must be refused"),
+	}
+
+	std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn versions_lists_the_offered_set() {
+	let count = unsafe { moq_versions(std::ptr::null_mut(), 0) };
+	assert!(count > 0, "expected at least one offered version, got {count}");
+
+	let mut names = vec![
+		moq_string {
+			data: std::ptr::null(),
+			len: 0
+		};
+		count as usize
+	];
+	assert_eq!(unsafe { moq_versions(names.as_mut_ptr(), names.len()) }, count);
+
+	for name in &names {
+		let name = unsafe { ffi::parse_str(name.data, name.len) }.expect("version name is UTF-8");
+		// Every listed name must be one a dial accepts, or the menu it builds is a lie.
+		let one = [moq_str(name)];
+		let mut config = client_config();
+		config.versions = one.as_ptr();
+		config.versions_len = one.len();
+		assert!(
+			unsafe { crate::parse_client(Some(&config)) }.is_ok(),
+			"listed version {name} must be settable"
+		);
+	}
+}
+
+#[test]
+fn dial_applies_the_config() {
+	let versions = [moq_str("moq-lite-05")];
+	let mut config = client_config();
+	config.versions = versions.as_ptr();
+	config.versions_len = versions.len();
+	config.connect_timeout_ms = 100;
+	config.has_connect_timeout = true;
+
+	let cb = Callback::new();
+	let url = b"moqt://localhost:1";
+	let session = id(unsafe {
+		moq_session_connect(
+			url.as_ptr() as *const c_char,
+			url.len(),
+			&config,
+			0,
+			0,
+			Some(channel_callback),
+			cb.ptr,
+		)
+	});
+
 	assert_eq!(moq_session_close(session), 0);
 	assert!(cb.recv() <= 0, "session close delivers a terminal code");
 }

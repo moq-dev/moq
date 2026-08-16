@@ -21,6 +21,9 @@ use crate::{Error, Frame};
 
 mod openh264;
 
+#[cfg(test)]
+pub(crate) mod probe;
+
 #[cfg(target_os = "macos")]
 mod videotoolbox;
 
@@ -104,6 +107,19 @@ const SOFTWARE: Candidate = Candidate {
 	open: openh264::Openh264::open,
 };
 
+/// Test-only backends. Deliberately in neither list above, so `Auto` /
+/// `Hardware` / `Software` can never select one: they exist to be asked for by
+/// name.
+#[cfg(test)]
+const NAMED_ONLY: &[Candidate] = &[Candidate {
+	name: probe::NAME,
+	supports: |c| matches!(c, Codec::H264),
+	open: probe::Probe::open,
+}];
+
+#[cfg(not(test))]
+const NAMED_ONLY: &[Candidate] = &[];
+
 /// Open the best decoder for `codec` and `config`, trying candidates in priority
 /// order and falling back until one succeeds. Candidates that don't support the
 /// codec are skipped before they're even tried.
@@ -113,7 +129,10 @@ pub(crate) fn open(codec: Codec, config: &Config) -> Result<Box<dyn Backend>, Er
 		Kind::Hardware => HARDWARE.iter().collect(),
 		Kind::Software => vec![&SOFTWARE],
 		Kind::Named(name) => {
-			let all = HARDWARE.iter().chain(std::iter::once(&SOFTWARE));
+			let all = HARDWARE
+				.iter()
+				.chain(std::iter::once(&SOFTWARE))
+				.chain(NAMED_ONLY.iter());
 			all.filter(|c| c.name == name).collect()
 		}
 	};

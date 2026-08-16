@@ -4,16 +4,15 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use hang::catalog::{AudioConfig, Container as CatalogContainer, VideoConfig};
-use mp4_atom::Encode;
 
 use crate::catalog::hang::Container as HangContainer;
 use crate::container::Frame;
-use crate::container::source::{VideoTransform, build_video_transform};
+use crate::container::source::{VideoTransform, build_video_transform, catalog_dimensions, codec_dimensions};
 
 use super::export::{
 	apply_codec_durations, catalog_timescale_audio, catalog_timescale_video, extract_init, infer_missing_durations,
 };
-use super::{Error, synthesize_audio_trak, synthesize_video_trak};
+use super::{Error, Fragmenter, fragment, synthesize_audio_trak, synthesize_video_trak};
 
 /// The single track id used by a muxer's init segment and fragments.
 ///
@@ -40,9 +39,11 @@ enum Kind {
 /// 2. [`init`](Self::init) builds the rendition's init segment (ftyp+moov).
 /// 3. [`fragment`](Self::fragment) encodes frames as one moof+mdat whose `tfdt` carries their
 ///    real presentation time, so a fragment built from a mid-stream group stands alone.
+///    [`fragmenter`](Self::fragmenter) instead cuts a stream into one separately addressable
+///    fragment per frame, for a consumer that stores media per encoded frame.
 ///
-/// For inline-parameter-set codecs (catalog `description` absent), [`init`](Self::init) returns
-/// `None` until a group has been [`read`](Self::read) to resolve the config from a keyframe.
+/// For video missing codec configuration or geometry, [`init`](Self::init) returns `None` until a
+/// group has been [`read`](Self::read) to resolve the missing fields from a keyframe.
 pub struct Muxer {
 	kind: Kind,
 	container: HangContainer,
@@ -50,7 +51,7 @@ pub struct Muxer {
 	/// Resolved codec config record: the catalog `description`, or synthesized by the
 	/// transform from in-band parameter sets.
 	description: Option<Bytes>,
-	timescale: u64,
+	timescale: moq_net::Timescale,
 	/// Fallback duration for frames that carry none (Legacy / LOC sources), derived from the
 	/// catalog framerate / sample rate.
 	default_frame: Duration,
@@ -62,18 +63,23 @@ impl Muxer {
 	/// A muxer for a video rendition described by `config`.
 	pub fn video(config: &VideoConfig) -> crate::Result<Self> {
 		let container = (&config.container).try_into()?;
-		let framerate = config
-			.framerate
-			.filter(|fps| fps.is_finite() && *fps > 0.0)
-			.unwrap_or(30.0);
+		let framerate = super::usable_video_framerate(config).unwrap_or(30.0);
+		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
+		let mut config = config.clone();
+		if catalog_dimensions(&config).is_none()
+			&& let Some((width, height)) = codec_dimensions(&config.codec, description.as_deref(), &[])?
+		{
+			config.coded_width = Some(width);
+			config.coded_height = Some(height);
+		}
 		Ok(Self {
 			container,
-			transform: build_video_transform(config),
-			description: config.description.as_ref().filter(|b| !b.is_empty()).cloned(),
-			timescale: catalog_timescale_video(config)?,
+			transform: build_video_transform(&config),
+			description,
+			timescale: moq_net::Timescale::new(catalog_timescale_video(&config)?).map_err(Error::from)?,
 			default_frame: Duration::from_secs_f64(1.0 / framerate),
 			opus: false,
-			kind: Kind::Video(config.clone()),
+			kind: Kind::Video(config),
 		})
 	}
 
@@ -84,12 +90,47 @@ impl Muxer {
 			container,
 			transform: None,
 			description: config.description.as_ref().filter(|b| !b.is_empty()).cloned(),
-			timescale: catalog_timescale_audio(config)?,
+			timescale: moq_net::Timescale::new(catalog_timescale_audio(config)?).map_err(Error::from)?,
 			// Fallback for a duration-less trailing sample (~1024 samples per frame).
 			default_frame: Duration::from_secs_f64(1024.0 / config.sample_rate.max(1) as f64),
 			opus: matches!(config.codec, hang::catalog::AudioCodec::Opus),
 			kind: Kind::Audio(config.clone()),
 		})
+	}
+
+	/// The media timescale this muxer's init segment and fragments are expressed in.
+	///
+	/// Derived from the catalog: a `Cmaf` rendition's own init scale, a cadence-compatible scale
+	/// for video (falling back to 90 kHz) and the sample rate for audio, unless
+	/// [`with_timescale`](Self::with_timescale) overrode it.
+	pub fn timescale(&self) -> moq_net::Timescale {
+		self.timescale
+	}
+
+	/// Emit at an explicit timescale instead of the one derived from the catalog.
+	///
+	/// For a consumer whose downstream timeline is fixed, for example an HLS or DASH origin
+	/// working in 90 kHz ticks.
+	///
+	/// Errors for a `Cmaf` rendition, whose init segment passes through from the catalog at its
+	/// own scale: overriding would leave the init and the fragments on different timelines. Also
+	/// errors above `u32::MAX`, which the init segment's `mdhd.timescale` field cannot hold.
+	pub fn with_timescale(mut self, timescale: moq_net::Timescale) -> crate::Result<Self> {
+		if matches!(self.catalog_container(), CatalogContainer::Cmaf { .. }) {
+			return Err(Error::TimescaleOverride.into());
+		}
+		// Reject here rather than at init(), so the failure lands on the call that is wrong.
+		super::mdhd_timescale(timescale.as_u64())?;
+		self.timescale = timescale;
+		Ok(self)
+	}
+
+	/// The rendition's catalog container, whichever kind of track this is.
+	fn catalog_container(&self) -> &CatalogContainer {
+		match &self.kind {
+			Kind::Video(config) => &config.container,
+			Kind::Audio(config) => &config.container,
+		}
 	}
 
 	/// Decode one fetched group into media frames, in decode order.
@@ -105,6 +146,7 @@ impl Muxer {
 		while let Some(frames) = self.container.read(group).await? {
 			for frame in frames {
 				let Some(transform) = self.transform.as_mut() else {
+					self.resolve_video_dimensions(&frame.payload)?;
 					out.push(frame);
 					continue;
 				};
@@ -116,6 +158,7 @@ impl Muxer {
 				{
 					self.description = Some(d.clone());
 				}
+				self.resolve_video_dimensions(&frame.payload)?;
 				if let Some(payload) = payload {
 					out.push(Frame { payload, ..frame });
 				}
@@ -127,17 +170,38 @@ impl Muxer {
 		Ok(out)
 	}
 
+	fn resolve_video_dimensions(&mut self, payload: &[u8]) -> crate::Result<()> {
+		let Kind::Video(config) = &mut self.kind else {
+			return Ok(());
+		};
+		if catalog_dimensions(config).is_some() {
+			return Ok(());
+		}
+		if let Some((width, height)) = codec_dimensions(&config.codec, self.description.as_deref(), payload)? {
+			config.coded_width = Some(width);
+			config.coded_height = Some(height);
+		}
+		Ok(())
+	}
+
 	/// Build the rendition's CMAF init segment (ftyp+moov), or `None` if it isn't buildable yet.
 	///
 	/// A `Cmaf` rendition's catalog init passes through (with the track id normalized to match
 	/// [`fragment`](Self::fragment)); a `Legacy`/`Loc` rendition's is synthesized from the catalog
-	/// config. `None` means an inline-parameter-set video rendition whose codec config hasn't been
-	/// resolved yet: [`read`](Self::read) a group (its keyframe carries the parameter sets) and call
-	/// again.
+	/// config. `None` means a video rendition whose codec config or geometry hasn't been resolved
+	/// yet: [`read`](Self::read) a group (its keyframe carries those fields) and call again.
 	pub fn init(&self) -> crate::Result<Option<Bytes>> {
 		// An inline codec carries its config in-band, so the init can't be built until a keyframe
 		// group has been read.
 		if self.transform.is_some() && self.description.is_none() {
+			return Ok(None);
+		}
+		if matches!(
+			self.catalog_container(),
+			CatalogContainer::Legacy | CatalogContainer::Loc
+		) && let Kind::Video(config) = &self.kind
+			&& catalog_dimensions(config).is_none()
+		{
 			return Ok(None);
 		}
 
@@ -145,21 +209,16 @@ impl Muxer {
 		let mut trexs: Vec<mp4_atom::Trex> = Vec::new();
 		let mut ftyp: Option<mp4_atom::Ftyp> = None;
 
-		let container = match &self.kind {
-			Kind::Video(config) => &config.container,
-			Kind::Audio(config) => &config.container,
-		};
-
-		match container {
+		match self.catalog_container() {
 			CatalogContainer::Cmaf { init, .. } => {
 				extract_init(init, TRACK_ID, &mut ftyp, &mut traks, &mut trexs)?;
 			}
 			CatalogContainer::Legacy | CatalogContainer::Loc => {
 				let trak = match &self.kind {
 					Kind::Video(config) => {
-						synthesize_video_trak(TRACK_ID, self.timescale, config, self.description.as_deref())?
+						synthesize_video_trak(TRACK_ID, self.timescale.as_u64(), config, self.description.as_deref())?
 					}
-					Kind::Audio(config) => synthesize_audio_trak(TRACK_ID, self.timescale, config)?,
+					Kind::Audio(config) => synthesize_audio_trak(TRACK_ID, self.timescale.as_u64(), config)?,
 				};
 				trexs.push(mp4_atom::Trex {
 					track_id: trak.tkhd.track_id,
@@ -171,34 +230,7 @@ impl Muxer {
 			CatalogContainer::Unknown(unknown) => return Err(crate::Error::unsupported_container(unknown)),
 		}
 
-		let ftyp = ftyp.unwrap_or(mp4_atom::Ftyp {
-			major_brand: b"isom".into(),
-			minor_version: 0x200,
-			compatible_brands: vec![b"isom".into(), b"iso6".into(), b"mp41".into()],
-		});
-		let timescale = traks.first().map(|t| t.mdia.mdhd.timescale).unwrap_or(1000);
-
-		let moov = mp4_atom::Moov {
-			mvhd: mp4_atom::Mvhd {
-				timescale,
-				..Default::default()
-			},
-			trak: traks,
-			mvex: if trexs.is_empty() {
-				None
-			} else {
-				Some(mp4_atom::Mvex {
-					trex: trexs,
-					..Default::default()
-				})
-			},
-			..Default::default()
-		};
-
-		let mut buf = Vec::new();
-		ftyp.encode(&mut buf).map_err(Error::from)?;
-		moov.encode(&mut buf).map_err(Error::from)?;
-		Ok(Some(Bytes::from(buf)))
+		Ok(Some(super::encode_init(ftyp, traks, trexs)?))
 	}
 
 	/// Encode frames as one moof+mdat fragment.
@@ -212,12 +244,56 @@ impl Muxer {
 	/// `frames` may span several groups, and a sample is never timed by one in the next group
 	/// even so: consecutive sequence numbers say nothing about whether the publisher paused
 	/// across the boundary.
+	///
+	/// To make each frame separately addressable instead, use
+	/// [`fragmenter`](Self::fragmenter).
 	pub fn fragment(&self, sequence: u32, frames: &[Frame]) -> crate::Result<Bytes> {
+		let frames = self.resolve_durations(frames)?;
+		Ok(super::encode_fragment(self.fragment_info(sequence), &frames)?)
+	}
+
+	/// A [`Fragmenter`] cutting this rendition into one fragment per frame.
+	///
+	/// It emits at the same timescale as [`init`](Self::init) and [`fragment`](Self::fragment),
+	/// and owns its own decode timeline and sequence numbering, so feed it every frame of the
+	/// stream in decode order. One fragmenter per continuous stream: a fetch-on-demand caller
+	/// serving unrelated groups builds a fresh one per group and
+	/// [`flush`](Fragmenter::flush)es it.
+	pub fn fragmenter(&self, config: fragment::Config) -> Fragmenter {
+		let is_video = matches!(self.kind, Kind::Video(_));
+		Fragmenter {
+			track_id: TRACK_ID,
+			timescale: self.timescale,
+			default_frame: self.default_frame,
+			is_video,
+			opus: self.opus,
+			infer_missing: !is_video
+				|| matches!(
+					config.missing_duration,
+					fragment::MissingDuration::InferFromPresentationTime
+				),
+			pending: None,
+			dts: None,
+			sequence: 0,
+		}
+	}
+
+	/// Give every frame a duration: the one its codec states, else the gap to its successor in
+	/// this slice, else the catalog frame rate / sample rate.
+	fn resolve_durations(&self, frames: &[Frame]) -> crate::Result<Vec<Frame>> {
 		let mut frames = frames.to_vec();
 		apply_codec_durations(&mut frames, self.opus);
-		let frames = infer_missing_durations(frames, None, self.default_frame);
-		let timescale = moq_net::Timescale::new(self.timescale).map_err(Error::from)?;
-		Ok(super::encode_fragment(TRACK_ID, timescale, sequence, &frames)?)
+		infer_missing_durations(&mut frames, None, self.default_frame, self.timescale)?;
+		Ok(frames)
+	}
+
+	/// Where a fragment sits: this muxer's single track, at its resolved timescale.
+	fn fragment_info(&self, sequence: u32) -> super::FragmentInfo {
+		super::FragmentInfo {
+			track_id: TRACK_ID,
+			timescale: self.timescale,
+			sequence_number: sequence,
+		}
 	}
 }
 
@@ -252,10 +328,7 @@ mod tests {
 
 		let mut group = subscriber.next_group().await.unwrap().expect("a group");
 
-		// VP8 needs no description, so the init builds without reading any media.
-		let mut config = VideoConfig::new(VideoCodec::VP8);
-		config.framerate = Some(30.0);
-		let mut muxer = Muxer::video(&config).unwrap();
+		let mut muxer = video_muxer();
 
 		let init = muxer.init().unwrap().expect("init buildable for an out-of-band codec");
 		assert_eq!(&init[4..8], b"ftyp");
@@ -274,6 +347,261 @@ mod tests {
 		assert_eq!(decoded[0].timestamp.as_micros(), 10_000_000);
 		assert!(decoded[0].keyframe);
 		assert_eq!(decoded[1].timestamp.as_micros(), 10_033_000);
+	}
+
+	#[tokio::test]
+	async fn dimensionless_vp8_init_waits_for_keyframe_geometry() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("v", None)
+			.unwrap();
+		let mut subscriber = track.subscribe(None);
+		let mut producer = crate::container::Producer::new(track, HangContainer::Legacy);
+		producer
+			.write(Frame {
+				timestamp: Timestamp::ZERO,
+				// Key frame tag, start code, and 320x240 geometry.
+				payload: Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00]),
+				keyframe: true,
+				duration: None,
+			})
+			.unwrap();
+		producer.finish().unwrap();
+		let mut group = subscriber.next_group().await.unwrap().expect("a group");
+
+		let config = VideoConfig::new(VideoCodec::VP8);
+		let mut muxer = Muxer::video(&config).unwrap();
+		assert!(muxer.init().unwrap().is_none(), "geometry is unresolved before media");
+
+		let frames = muxer.read(&mut group).await.unwrap();
+		assert_eq!(frames.len(), 1);
+		let init = muxer.init().unwrap().expect("keyframe geometry makes init buildable");
+		let wire = super::super::Wire::from_init(&init).unwrap();
+		let mp4_atom::Codec::Vp08(vp08) = &wire.trak().mdia.minf.stbl.stsd.codecs[0] else {
+			panic!("expected VP8 sample entry");
+		};
+		assert_eq!((vp08.visual.width, vp08.visual.height), (320, 240));
+	}
+
+	#[test]
+	fn malformed_fixed_description_errors_instead_of_waiting_for_geometry() {
+		let mut config = VideoConfig::new(hang::catalog::H264 {
+			profile: 0x42,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		config.description = Some(Bytes::from_static(&[1]));
+
+		assert!(matches!(
+			Muxer::video(&config),
+			Err(crate::Error::H264(crate::codec::h264::Error::AvccTooShort))
+		));
+	}
+
+	// A 30 fps Legacy VP8 rendition: no description needed, so the muxer builds without media.
+	fn video_muxer() -> Muxer {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		config.framerate = Some(30.0);
+		Muxer::video(&config).unwrap()
+	}
+
+	#[test]
+	fn fragment_with_no_frames_is_empty() {
+		assert!(video_muxer().fragment(0, &[]).unwrap().is_empty());
+	}
+
+	#[test]
+	fn ntsc_fallback_duration_uses_the_derived_timescale() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.framerate = Some(30_000.0 / 1001.0);
+		let muxer = Muxer::video(&config).unwrap();
+		assert_eq!(muxer.timescale().as_u64(), 30_000);
+
+		let frame = Frame {
+			timestamp: Timestamp::ZERO,
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: None,
+		};
+		let fragment = muxer.fragment(0, std::slice::from_ref(&frame)).unwrap();
+		assert_eq!(super::super::sample_durations(&fragment), vec![Some(1001)]);
+
+		let mut fragmenter = muxer.fragmenter(fragment::Config {
+			missing_duration: fragment::MissingDuration::InferFromPresentationTime,
+		});
+		assert!(fragmenter.push(frame).unwrap().is_empty());
+		let fragment = fragmenter.flush().unwrap().unwrap();
+		assert_eq!(super::super::sample_durations(&fragment.data), vec![Some(1001)]);
+	}
+
+	#[test]
+	fn microsecond_pts_quantize_without_timeline_drift() {
+		let muxer = video_muxer();
+		let input = [0, 33_333, 66_667].map(|micros| Frame {
+			timestamp: Timestamp::from_micros(micros).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: micros == 0,
+			duration: None,
+		});
+
+		let fragment = muxer.fragment(0, &input).unwrap();
+		assert_eq!(super::super::sample_durations(&fragment), vec![Some(1_000); 3]);
+		assert_eq!(super::super::timeline(&fragment), (0, vec![0; 3]));
+
+		let mut fragmenter = muxer.fragmenter(fragment::Config {
+			missing_duration: fragment::MissingDuration::InferFromPresentationTime,
+		});
+		let mut fragments = Vec::new();
+		for frame in input {
+			fragments.extend(fragmenter.push(frame).unwrap());
+		}
+		fragments.extend(fragmenter.flush().unwrap());
+		let durations: Vec<_> = fragments
+			.iter()
+			.map(|fragment| super::super::sample_durations(&fragment.data)[0])
+			.collect();
+		assert_eq!(durations, vec![Some(1_000); 3]);
+		let timelines: Vec<_> = fragments
+			.iter()
+			.map(|fragment| super::super::timeline(&fragment.data))
+			.collect();
+		assert_eq!(timelines, vec![(0, vec![0]), (1_000, vec![0]), (2_000, vec![0])]);
+	}
+
+	#[test]
+	fn low_framerate_fallback_fits_mp4_timing_fields() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		config.framerate = Some(0.0011);
+		let muxer = Muxer::video(&config).unwrap();
+		assert_eq!(muxer.timescale().as_u64(), 11);
+		assert!(muxer.init().unwrap().is_some());
+
+		let frame = Frame {
+			timestamp: Timestamp::ZERO,
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: None,
+		};
+		let fragment = muxer.fragment(0, &[frame]).unwrap();
+		assert_eq!(super::super::sample_durations(&fragment), vec![Some(10_000)]);
+	}
+
+	#[test]
+	fn unusable_framerate_uses_the_standard_fallback_rate() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.framerate = Some(0.0005);
+		let muxer = Muxer::video(&config).unwrap();
+		let timescale = moq_net::Timescale::new(90_000).unwrap();
+		assert_eq!(muxer.timescale(), timescale);
+
+		let frame = Frame {
+			timestamp: Timestamp::ZERO,
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: None,
+		};
+		let decoded = super::super::decode(muxer.fragment(0, &[frame]).unwrap(), timescale).unwrap();
+		assert_eq!(decoded[0].duration.unwrap().as_scale(timescale), 3_000);
+	}
+
+	// A downstream timeline fixed at 90 kHz overrides the framerate-derived default, and the
+	// init and the fragments have to agree on it.
+	#[test]
+	fn with_timescale_overrides_the_catalog_derived_scale() {
+		let timescale = moq_net::Timescale::new(90_000).unwrap();
+		assert_eq!(video_muxer().timescale().as_u64(), 30_000, "framerate * 1000");
+
+		let muxer = video_muxer().with_timescale(timescale).unwrap();
+		assert_eq!(muxer.timescale(), timescale);
+
+		let init = muxer.init().unwrap().expect("init buildable for an out-of-band codec");
+		let trak = super::super::Wire::from_init(&init).unwrap();
+		assert_eq!(trak.trak().mdia.mdhd.timescale, 90_000);
+
+		// One 30 fps frame period is 3000 ticks at 90 kHz.
+		let frame = Frame {
+			timestamp: Timestamp::from_scale(3_000, 90_000).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: Some(Timestamp::from_scale(3_000, 90_000).unwrap()),
+		};
+		let decoded = super::super::decode(muxer.fragment(0, &[frame]).unwrap(), timescale).unwrap();
+		assert_eq!(decoded[0].timestamp.as_micros(), 33_333);
+	}
+
+	#[test]
+	fn with_timescale_recomputes_the_fallback_frame_duration() {
+		let timescale = moq_net::Timescale::new(90_000).unwrap();
+		let muxer = video_muxer().with_timescale(timescale).unwrap();
+		let frame = Frame {
+			timestamp: Timestamp::ZERO,
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: None,
+		};
+
+		let decoded = super::super::decode(muxer.fragment(0, &[frame]).unwrap(), timescale).unwrap();
+		assert_eq!(decoded[0].duration.unwrap().as_scale(timescale), 3_000);
+	}
+
+	// mdhd.timescale is 32 bits, but moq_net::Timescale spans the whole QUIC varint range. A
+	// wider scale used to truncate into the init while the fragments kept the full value,
+	// silently putting them on different timelines.
+	#[test]
+	fn with_timescale_rejects_a_scale_too_large_for_mdhd() {
+		let too_large = moq_net::Timescale::new(u64::from(u32::MAX) + 1).unwrap();
+		// Muxer isn't Debug, so match the Result rather than unwrap_err() it.
+		assert!(matches!(
+			video_muxer().with_timescale(too_large),
+			Err(crate::Error::Cmaf(Error::TimescaleTooLarge(_)))
+		));
+
+		// The largest scale the field can hold is still accepted.
+		let largest = moq_net::Timescale::new(u64::from(u32::MAX)).unwrap();
+		let muxer = video_muxer().with_timescale(largest).unwrap();
+		assert_eq!(muxer.timescale(), largest);
+	}
+
+	// The same truncation was reachable without with_timescale at all: the video timescale is
+	// `framerate * 1000`, so an absurd catalog framerate overflows the field on its own.
+	#[test]
+	fn init_rejects_a_catalog_scale_too_large_for_mdhd() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		config.framerate = Some(5_000_000.0); // 5e9 ticks, past u32::MAX
+		let err = Muxer::video(&config).unwrap().init().unwrap_err();
+		assert!(
+			matches!(err, crate::Error::Cmaf(Error::TimescaleTooLarge(_))),
+			"got {err:?}"
+		);
+	}
+
+	// A Cmaf rendition's init passes through from the catalog at its own scale, so an override
+	// would leave the init and the fragments on different timelines.
+	#[test]
+	fn with_timescale_rejects_a_cmaf_rendition() {
+		// Any valid single-track init will do; a synthesized one saves a fixture. Build it at
+		// 48 kHz so the scale can only have come from the init: the framerate below would
+		// otherwise derive 30_000, and the catalog carries no timescale of its own.
+		let init = video_muxer()
+			.with_timescale(moq_net::Timescale::new(48_000).unwrap())
+			.unwrap()
+			.init()
+			.unwrap()
+			.unwrap();
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.framerate = Some(30.0);
+		config.container = CatalogContainer::Cmaf { init };
+
+		let muxer = Muxer::video(&config).unwrap();
+		assert_eq!(muxer.timescale().as_u64(), 48_000, "read from the init segment");
+		assert!(muxer.with_timescale(moq_net::Timescale::new(90_000).unwrap()).is_err());
 	}
 
 	// The HLS origin accumulates every group of a (multi-group) audio segment into ONE fragment,

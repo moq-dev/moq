@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.8](https://github.com/moq-dev/moq/compare/libmoq-v0.5.7...libmoq-v0.5.8) - 2026-08-14
+
+### Added
+
+- *(libmoq)* declare the catalog container for manually authored renditions ([#2805](https://github.com/moq-dev/moq/pull/2805))
+
+## [0.5.7](https://github.com/moq-dev/moq/compare/libmoq-v0.5.6...libmoq-v0.5.7) - 2026-08-13
+
+### Added
+
+- *(native)* start dialing before the AAAA answer lands ([#2749](https://github.com/moq-dev/moq/pull/2749))
+- *(moq-video)* advertise the catalog rendition before the first keyframe ([#2768](https://github.com/moq-dev/moq/pull/2768))
+
+## [0.5.6](https://github.com/moq-dev/moq/compare/libmoq-v0.5.5...libmoq-v0.5.6) - 2026-08-07
+
+### Added
+
+- *(libmoq)* add a client config handle, and advanced settings to the OBS plugin ([#2650](https://github.com/moq-dev/moq/pull/2650))
+
+### Other
+
+- drop Intel macOS release targets ([#2715](https://github.com/moq-dev/moq/pull/2715))
+
+## [0.5.5](https://github.com/moq-dev/moq/compare/libmoq-v0.5.4...libmoq-v0.5.5) - 2026-08-06
+
+### Fixed
+
+- *(libmoq)* stop holding the global locks across a video encode ([#2663](https://github.com/moq-dev/moq/pull/2663))
+- *(libmoq)* fix the generated CMake package config for Windows and installs ([#2671](https://github.com/moq-dev/moq/pull/2671))
+- *(libmoq)* unbreak the Linux C link list, and make VAAPI opt-in ([#2669](https://github.com/moq-dev/moq/pull/2669))
+
+## [0.5.4](https://github.com/moq-dev/moq/compare/libmoq-v0.5.3...libmoq-v0.5.4) - 2026-08-05
+
+### Added
+
+- *(bindings)* publish raw video with a native encoder ([#2608](https://github.com/moq-dev/moq/pull/2608))
+
+### Fixed
+
+- *(moq-video)* reject unrepresentable sizes, and unbreak the macOS build ([#2648](https://github.com/moq-dev/moq/pull/2648))
+
+## [0.5.3](https://github.com/moq-dev/moq/compare/libmoq-v0.5.2...libmoq-v0.5.3) - 2026-08-03
+
+### Other
+
+- updated the following local packages: moq-video
+
 ## [0.5.2](https://github.com/moq-dev/moq/compare/libmoq-v0.5.1...libmoq-v0.5.2) - 2026-07-29
 
 ### Other

@@ -145,6 +145,16 @@ pub enum Error {
 	/// frames cannot be parsed. Such a rendition must be ignored, not guessed at.
 	#[error("unsupported container: {0}")]
 	UnsupportedContainer(String),
+
+	/// A rendition's `broadcast` reference walks above the root, so it names no broadcast.
+	///
+	/// The root is the consumer's authorized subtree, so such a reference is an attempt to
+	/// name content the consumer cannot reach. It rejects the whole catalog
+	/// ([`catalog::hang::Consumer`](crate::catalog::hang::Consumer)) rather than the one
+	/// rendition, and is also what a direct [`Source::resolve`](crate::Source::resolve) /
+	/// [`Source::subscribe_track`](crate::Source::subscribe_track) reports.
+	#[error("broadcast reference escapes the root: {0}")]
+	EscapingBroadcast(String),
 }
 
 impl Error {

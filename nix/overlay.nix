@@ -1,4 +1,4 @@
-# Accept crane as argument to the overlay
+# Accept crane as argument to the overlay.
 { crane }:
 final: prev:
 let
@@ -8,35 +8,11 @@ let
   # Without an explicit toolchain, crane falls back to `final.rustc`/
   # `final.cargo`, which nixpkgs resolves to its own default Rust.
   #
-  # Add both Apple targets so an aarch64-darwin host can cross-compile the
-  # x86_64-darwin release artifacts (Apple's clang is multi-arch, so no
-  # emulated x86_64 toolchain is needed). The default profile only ships
-  # std for the host triple, which is why the target list is explicit.
-  rustToolchain = final.rust-bin.stable."1.95.0".default.override {
-    targets = final.lib.optionals final.stdenv.isDarwin [
-      "x86_64-apple-darwin"
-      "aarch64-apple-darwin"
-    ];
-  };
+  rustToolchain = final.rust-bin.stable."1.95.0".default;
   craneLib = (crane.mkLib final).overrideToolchain rustToolchain;
 
   # Helper function to get crate info from Cargo.toml
   crateInfo = cargoTomlPath: craneLib.crateNameFromCargoToml { cargoToml = cargoTomlPath; };
-
-  # Cross-compile a crate's release artifact to x86_64-darwin from an
-  # aarch64-darwin host. The Determinate Nix installer dropped Intel macOS
-  # runners, but Apple's clang is multi-arch, so pointing cargo at the
-  # target produces a native (non-emulated) x86_64 build. doCheck is off
-  # because the x86_64 test binaries can't run in the aarch64 build sandbox.
-  # Only valid for pure-Rust artifacts with no cross buildInputs; moq-gst's
-  # GStreamer link would need pkgsCross instead.
-  crossX86Darwin =
-    args:
-    args
-    // {
-      CARGO_BUILD_TARGET = "x86_64-apple-darwin";
-      doCheck = false;
-    };
 
   moqRelayArgs = crateInfo ../rs/moq-relay/Cargo.toml // {
     src = craneLib.cleanCargoSource ../.;
@@ -85,7 +61,6 @@ let
     meta.mainProgram = "moq-token";
   };
   moqTokenPackage = craneLib.buildPackage moqTokenCliArgs;
-  moqTokenX86DarwinPackage = craneLib.buildPackage (crossX86Darwin moqTokenCliArgs);
 
   moqBenchArgs = crateInfo ../rs/moq-bench/Cargo.toml // {
     src = craneLib.cleanCargoSource ../.;
@@ -124,19 +99,28 @@ let
     # generate the pkgconfig file. craneLib.cleanCargoSource's default filter
     # drops both, which makes build.rs skip pkgconfig generation (see the
     # `if let Ok(template)` in rs/libmoq/build.rs) or fail reading the lib list,
-    # and the installPhase's `cp .../moq.pc` then fails.
+    # and the installPhase's `cp .../moq.pc` then fails. moq-video's Linux NVDEC
+    # path also includes a vendored PTX kernel at compile time.
     src = final.lib.cleanSourceWith {
       src = ../.;
       name = "source";
       filter =
         path: type:
         (final.lib.hasSuffix ".pc.in" path)
+        || (final.lib.hasSuffix ".ptx" path)
         || (final.lib.hasInfix "/rs/libmoq/native-libs/" path)
         || (craneLib.filterCargoSources path type);
     };
     cargoExtraArgs = "-p libmoq";
     doCheck = false;
-    nativeBuildInputs = with final; [ pkg-config ];
+    nativeBuildInputs = with final; [
+      pkg-config
+      # libmoq is the only nix-built package that pulls moq-video, and on Linux
+      # that brings v4l -> v4l2-sys-mit, whose build.rs runs bindgen over
+      # <linux/videodev2.h>. Sets LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS so it
+      # finds libclang and the libc headers, same as the devShell in flake.nix.
+      rustPlatform.bindgenHook
+    ];
 
     # libmoq.a carries moq-ffi's whole dep tree, so an unstripped build is
     # ~75 MB+. Thin LTO with a single codegen unit dead-strips the unused
@@ -192,13 +176,6 @@ let
       runHook postInstall
     '';
   };
-
-  # Native x86_64-darwin package set (matches cache.nixos.org's prebuilt
-  # binaries), used to link the cross moq-gst plugin against an x86_64
-  # GStreamer. pkgsCross would rebuild GStreamer from source under a cross
-  # stdenv; this fetches it. Lazy, so it's only instantiated when the cross
-  # plugin is actually built (aarch64-darwin only, see flake.nix).
-  pkgsX86Darwin = import final.path { system = "x86_64-darwin"; };
 
   moqGstPluginArgs = crateInfo ../rs/moq-gst/Cargo.toml // {
     src = craneLib.cleanCargoSource ../.;
@@ -273,7 +250,8 @@ let
     '';
   };
 
-  # CI checks (clippy / doc / test) run as plain cargo via `just rs ci`, not
+  # CI checks run as plain cargo via `just check` (clippy / doc) and `just test`
+  # (nextest), not
   # through crane/`nix flake check`. The self-hosted runner caches compilation
   # per-crate with sccache (wired into the runner environment, not here), so a
   # Cargo.lock change recompiles only the changed crate + its reverse-deps.
@@ -283,18 +261,13 @@ let
 in
 {
   moq-relay = craneLib.buildPackage moqRelayArgs;
-  moq-relay-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin moqRelayArgs);
 
   moq-cli = craneLib.buildPackage moqCliArgs;
-  moq-cli-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin moqCliArgs);
 
   moq-bench = craneLib.buildPackage moqBenchArgs;
-  moq-bench-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin moqBenchArgs);
 
   moq-token = moqTokenPackage;
   moq-token-cli = moqTokenPackage;
-  moq-token-x86_64-apple-darwin = moqTokenX86DarwinPackage;
-  moq-token-cli-x86_64-apple-darwin = moqTokenX86DarwinPackage;
 
   moq-boy = craneLib.buildPackage (
     crateInfo ../rs/moq-boy/Cargo.toml
@@ -316,26 +289,8 @@ in
   );
 
   libmoq = craneLib.buildPackage libmoqArgs;
-  libmoq-x86_64-apple-darwin = craneLib.buildPackage (crossX86Darwin libmoqArgs);
 
   moq-gst-plugin = craneLib.buildPackage moqGstPluginArgs;
-
-  # Cross plugin links the x86_64 GStreamer so the cdylib's LC_LOAD_DYLIB
-  # entries point at x86_64 libs. The release build (rs/moq-gst/build.sh)
-  # scrubs those nix paths to the user's system GStreamer and skips the
-  # gst-inspect smoke test, which can't load an x86_64 plugin under the
-  # arm runner's arm gst-inspect.
-  moq-gst-plugin-x86_64-apple-darwin = craneLib.buildPackage (
-    crossX86Darwin (
-      moqGstPluginArgs
-      // {
-        buildInputs = [
-          pkgsX86Darwin.gst_all_1.gstreamer
-          pkgsX86Darwin.gst_all_1.gst-plugins-base
-        ];
-      }
-    )
-  );
 
   # User-facing flake output. Bundles the plugin with wrapped gstreamer
   # tools so a single `nix shell .#moq-gst` gives you gst-inspect-1.0 /

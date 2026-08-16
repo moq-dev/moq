@@ -84,6 +84,9 @@ pub struct MoqVideo {
 	pub coded: Option<MoqDimensions>,
 	pub display_aspect: Option<MoqDimensions>,
 	pub bitrate: Option<u64>,
+	/// Whether the publisher recommends temporarily avoiding this rendition.
+	#[uniffi(default = false)]
+	pub stalled: bool,
 	pub framerate: Option<f64>,
 	pub container: MoqContainer,
 }
@@ -217,6 +220,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 						_ => None,
 					},
 					bitrate: config.bitrate,
+					stalled: config.stalled.unwrap_or(false),
 					framerate: config.framerate,
 					container: MoqContainer::from_catalog(&config.container)?,
 				},
@@ -260,5 +264,24 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 		rotation: catalog.video.rotation,
 		flip: catalog.video.flip,
 		sections,
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	#[test]
+	fn catalog_exposes_stalled_renditions() {
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		let active = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		catalog.video.renditions.insert("active".to_string(), active);
+		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		video.stalled = Some(true);
+		catalog.video.renditions.insert("video".to_string(), video);
+
+		let converted = convert_catalog(&catalog);
+		assert!(!converted.video["active"].stalled);
+		assert!(converted.video["video"].stalled);
 	}
 }

@@ -7,19 +7,26 @@
 //! produces them.
 
 mod export;
+pub mod fragment;
+mod fragmenter;
 mod import;
 mod muxer;
 
 pub use export::*;
+pub use fragmenter::*;
 pub use import::*;
 pub use muxer::*;
+
+/// Re-export of the [`mp4_atom`] crate, whose types appear in this module's public API.
+/// A major version bump of `mp4_atom` is a breaking change for moq-mux.
+pub use mp4_atom;
 
 #[cfg(test)]
 mod export_test;
 #[cfg(test)]
 mod import_test;
 
-use std::task::Poll;
+use std::{task::Poll, time::Duration};
 
 use bytes::Bytes;
 use hang::catalog::{AudioCodec, AudioConfig, VideoCodec, VideoConfig};
@@ -98,6 +105,10 @@ pub enum Error {
 	#[error("unsupported codec: MPEG2")]
 	UnsupportedMpeg2,
 
+	/// An AAC sample entry needs DecoderSpecificInfo to identify its codec profile.
+	#[error("AAC sample entry missing DecoderSpecificInfo")]
+	MissingDecoderSpecific,
+
 	#[error("duplicate moof")]
 	DuplicateMoof,
 
@@ -112,6 +123,10 @@ pub enum Error {
 
 	#[error("video track {0} missing in catalog")]
 	MissingVideoTrack(String),
+
+	/// A synthesized video track has no usable encoded dimensions.
+	#[error("missing video dimensions for codec: {0}")]
+	MissingVideoDimensions(String),
 
 	#[error("audio track {0} missing in catalog")]
 	MissingAudioTrack(String),
@@ -139,6 +154,33 @@ pub enum Error {
 
 	#[error("multi-sample fragment has a non-final sample with no duration; DTS is unrecoverable")]
 	MissingSampleDuration,
+
+	/// `mdhd.timescale` is a 32-bit field, so a larger scale would reach the init segment
+	/// truncated while the fragments kept the full value, putting them on different timelines.
+	#[error("timescale {0} does not fit the 32-bit mdhd field")]
+	TimescaleTooLarge(u64),
+
+	/// A `Cmaf` rendition's init passes through from the catalog at its own scale, so
+	/// [`Muxer::with_timescale`] can't move it without desynchronising it from the fragments.
+	#[error("a CMAF rendition's timescale comes from its init segment and can't be overridden")]
+	TimescaleOverride,
+
+	/// A sample duration is a 32-bit `trun` field. A larger value would wrap in the media
+	/// while the fragment metadata kept the full duration, putting them on different timelines.
+	#[error("sample duration {0} does not fit the 32-bit trun field")]
+	SampleDurationTooLarge(u64),
+
+	/// A positive sample duration must occupy at least one tick in the output timescale.
+	#[error("sample duration is shorter than one tick at timescale {0}")]
+	SampleDurationTooSmall(u64),
+
+	/// Repeatedly flooring fractional sample ticks would make the decode timeline drift.
+	#[error("sample duration is not exactly representable at timescale {0}")]
+	SampleDurationInexact(u64),
+
+	/// Presentation timestamps do not reveal decode duration for reordered video.
+	#[error("duration-less video needs stated durations or presentation-ordered inference")]
+	MissingVideoDuration,
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -312,7 +354,12 @@ pub(crate) fn encode(
 	}
 
 	let sequence_number = group.frame_count() as u32;
-	let bytes = encode_fragment(track_id, timescale, sequence_number, frames)?;
+	let info = FragmentInfo {
+		track_id,
+		timescale,
+		sequence_number,
+	};
+	let bytes = encode_fragment(info, frames)?;
 	// The fragment may carry several samples; the net frame's timestamp is the
 	// fragment's earliest presentation time so a relay can order it.
 	let mut writer = group.create_frame(moq_net::frame::Info {
@@ -325,31 +372,80 @@ pub(crate) fn encode(
 	Ok(())
 }
 
-/// Encode a single-traf moof+mdat fragment from a sequence of frames.
+/// Which track a fragment belongs to, and where it sits in that track.
+///
+/// Bundled rather than passed positionally because `track_id` and `sequence_number` are both
+/// `u32`, so a swapped pair would still compile.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FragmentInfo {
+	/// The `tfhd` track id, which must match the one the init segment declares.
+	pub track_id: u32,
+	/// The track's media timescale, which every timestamp is re-expressed at.
+	pub timescale: moq_net::Timescale,
+	/// The `mfhd` sequence number, informative only.
+	pub sequence_number: u32,
+}
+
+/// Encode a single-traf moof+mdat fragment anchored at its own first frame.
+///
+/// The fragment stands alone: its `tfdt` is `frames[0]`'s presentation time, so it decodes
+/// without reference to whatever came before it. To cut a stream into one fragment per
+/// frame, on a single continuous decode timeline, use [`Fragmenter`].
+///
+/// Returns an empty `Bytes` when `frames` is empty.
+pub(crate) fn encode_fragment(info: FragmentInfo, frames: &[Frame]) -> Result<Bytes> {
+	let Some(first) = frames.first() else {
+		return Ok(Bytes::new());
+	};
+	encode_at(info, base_ticks(first, info.timescale)?, frames)
+}
+
+/// A frame's presentation time as a tick count at the track's timescale.
+///
+/// When the importer preserved the source scale (the common passthrough case) this is a no-op;
+/// otherwise it's a single rescale rather than the legacy `micros * scale / 1_000_000`
+/// round-trip.
+fn base_ticks(frame: &Frame, timescale: moq_net::Timescale) -> Result<u64> {
+	timestamp_ticks(frame.timestamp, timescale)
+}
+
+/// Round an absolute timestamp to its nearest tick at the output scale.
+fn timestamp_ticks(timestamp: Timestamp, timescale: moq_net::Timescale) -> Result<u64> {
+	let source_scale = u128::from(timestamp.scale().as_u64());
+	let scaled = u128::from(timestamp.value()) * u128::from(timescale.as_u64());
+	let ticks = (scaled + source_scale / 2) / source_scale;
+	u64::try_from(ticks).map_err(|_| Error::PtsOverflow)
+}
+
+/// Encode a single-traf moof+mdat fragment whose decode timeline starts at `base_dts` ticks.
 ///
 /// Performs the two-pass encoding required by ISO/IEC 14496-12: encode once
 /// to learn the moof size, then again with `trun.data_offset` pointing past
-/// the moof and mdat header. The DTS of the first frame is computed at the
-/// caller-supplied `timescale`.
+/// the moof and mdat header.
+///
+/// `base_dts` is already at the track's timescale, so it is the same unit the `trun` sample
+/// durations are written in. That's what lets [`Fragmenter`] carry a timeline across
+/// calls without a rounding step between them.
+///
+/// Frames arrive in decode order carrying presentation timestamps. DTS is authored by
+/// accumulating sample durations from `base_dts`, and each sample stores `PTS - DTS` as its
+/// signed composition offset, so a reordered frame keeps its presentation time even when the
+/// fragment holds a single sample.
 ///
 /// Returns an empty `Bytes` when `frames` is empty.
-pub(crate) fn encode_fragment(
-	track_id: u32,
-	timescale: moq_net::Timescale,
-	sequence_number: u32,
-	frames: &[Frame],
-) -> Result<Bytes> {
+fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Bytes> {
+	let FragmentInfo {
+		track_id,
+		timescale,
+		sequence_number,
+	} = info;
+
 	use mp4_atom::Encode;
 
 	if frames.is_empty() {
 		return Ok(Bytes::new());
 	}
 
-	// Re-express the first frame's timestamp at the target track's scale. When the
-	// importer preserved the source scale (the common passthrough case), this is a
-	// no-op; otherwise it's a single rescale rather than the legacy `micros * scale
-	// / 1_000_000` round-trip.
-	let base_dts = frames[0].timestamp.as_scale(timescale) as u64;
 	let mut dts = base_dts;
 
 	let entries: Vec<_> = frames
@@ -358,8 +454,8 @@ pub(crate) fn encode_fragment(
 			let flags = if f.keyframe { 0x0200_0000 } else { 0x0001_0000 };
 			// Write the sample-duration back at the track's scale when we know it, so
 			// fMP4 -> fMP4 round-trips it. Frames without one stay byte-identical.
-			let duration = f.duration.map(|d| d.as_scale(timescale) as u32);
-			let pts = f.timestamp.as_scale(timescale) as i128;
+			let duration = f.duration.map(|d| trun_duration(d, timescale)).transpose()?;
+			let pts = i128::from(timestamp_ticks(f.timestamp, timescale)?);
 			let cts = pts - i128::from(dts);
 			let cts = i32::try_from(cts).map_err(|_| Error::PtsOverflow)?;
 
@@ -413,6 +509,21 @@ pub(crate) fn encode_fragment(
 	Ok(Bytes::from(buf))
 }
 
+/// Convert a duration to the exact value stored in a 32-bit `trun` sample-duration field.
+fn trun_duration(duration: Timestamp, timescale: moq_net::Timescale) -> Result<u32> {
+	let source_timescale = duration.scale().as_u64();
+	let output_timescale = timescale.as_u64();
+	let scaled = u128::from(duration.value()) * u128::from(output_timescale);
+	let ticks = scaled / u128::from(source_timescale);
+	if !duration.is_zero() && ticks == 0 {
+		return Err(Error::SampleDurationTooSmall(timescale.as_u64()));
+	}
+	if scaled % u128::from(source_timescale) != 0 {
+		return Err(Error::SampleDurationInexact(output_timescale));
+	}
+	u32::try_from(ticks).map_err(|_| Error::SampleDurationTooLarge(u64::try_from(ticks).unwrap_or(u64::MAX)))
+}
+
 /// Synthesize a CMAF `Trak` for a video rendition that has no init segment.
 ///
 /// Used by the fMP4 exporter when its source is a `Container::Legacy` track
@@ -426,8 +537,28 @@ pub(crate) fn synthesize_video_trak(
 	config: &VideoConfig,
 	description: Option<&[u8]>,
 ) -> Result<mp4_atom::Trak> {
-	let width = config.coded_width.unwrap_or(0) as u16;
-	let height = config.coded_height.unwrap_or(0) as u16;
+	if !matches!(
+		config.codec,
+		VideoCodec::H264(_) | VideoCodec::H265(_) | VideoCodec::AV1(_) | VideoCodec::VP8 | VideoCodec::VP9(_)
+	) {
+		return Err(Error::UnsupportedSynthesis(format!("video codec {:?}", config.codec)));
+	}
+
+	let width = u16::try_from(
+		config
+			.coded_width
+			.ok_or_else(|| Error::MissingVideoDimensions(config.codec.to_string()))?,
+	)
+	.map_err(|_| Error::MissingVideoDimensions(config.codec.to_string()))?;
+	let height = u16::try_from(
+		config
+			.coded_height
+			.ok_or_else(|| Error::MissingVideoDimensions(config.codec.to_string()))?,
+	)
+	.map_err(|_| Error::MissingVideoDimensions(config.codec.to_string()))?;
+	if width == 0 || height == 0 {
+		return Err(Error::MissingVideoDimensions(config.codec.to_string()));
+	}
 	let visual = mp4_atom::Visual {
 		data_reference_index: 1,
 		width,
@@ -481,10 +612,16 @@ pub(crate) fn synthesize_video_trak(
 			vpcc: crate::codec::vp9::vpcc(vp9),
 			..Default::default()
 		}),
-		other => return Err(Error::UnsupportedSynthesis(format!("video codec {:?}", other))),
+		other => unreachable!("unsupported codecs rejected before geometry synthesis: {other:?}"),
 	};
 
-	Ok(build_video_trak(track_id, timescale, sample_entry, width, height))
+	Ok(build_video_trak(
+		track_id,
+		mdhd_timescale(timescale)?,
+		sample_entry,
+		width,
+		height,
+	))
 }
 
 /// Synthesize a CMAF `Trak` for an audio rendition that has no init segment.
@@ -530,7 +667,18 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 			let mut cursor = std::io::Cursor::new(description.as_ref());
 			let dec_specific = mp4_atom::esds::DecoderSpecific::decode(&mut cursor)?;
 
-			let bitrate = config.bitrate.unwrap_or(0) as u32;
+			// Safari and AVFoundation reject an AAC track whose DecoderConfigDescriptor is all
+			// zeros: they endOfStream("decode") on the *init* append, which leaves the
+			// ManagedMediaSource ended and every later audio and video append failing. The
+			// catalog bitrate is optional and real publishers omit it, so fall back to the
+			// AAC-LC values ffmpeg and the iTunes encoders write. A zero or wider-than-u32
+			// bitrate takes the fallback as well, since writing it back would rebuild the
+			// all-zero descriptor this exists to avoid.
+			let bitrate = config.bitrate.and_then(|b| u32::try_from(b).ok()).filter(|b| *b > 0);
+			let (max_bitrate, avg_bitrate) = match bitrate {
+				Some(bitrate) => (bitrate, bitrate),
+				None => (256_000, 128_000),
+			};
 			mp4_atom::Codec::from(mp4_atom::Mp4a {
 				audio,
 				esds: mp4_atom::Esds {
@@ -541,10 +689,11 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 							object_type_indication: 0x40, // MPEG-4 AAC
 							stream_type: 0x05,            // audio
 							up_stream: 0,
-							buffer_size_db: Default::default(),
-							max_bitrate: bitrate,
-							avg_bitrate: bitrate,
-							dec_specific,
+							// 24 KiB, the decoder buffer those same encoders declare.
+							buffer_size_db: mp4_atom::u24::from([0x00, 0x60, 0x00]),
+							max_bitrate,
+							avg_bitrate,
+							dec_specific: Some(dec_specific),
 						},
 						sl_config: Default::default(),
 					},
@@ -585,12 +734,17 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 		other => return Err(Error::UnsupportedSynthesis(format!("audio codec {:?}", other))),
 	};
 
-	Ok(build_audio_trak(track_id, timescale, sample_entry))
+	Ok(build_audio_trak(track_id, mdhd_timescale(timescale)?, sample_entry))
 }
+
+/// All-ones: the ISO/IEC 14496-12 spelling of "duration not known up front", which is always
+/// the case for the live fragmented streams synthesized here. Zero reads as an empty file to a
+/// strict parser, and VLC refuses to play one.
+const UNKNOWN_DURATION: u64 = u64::MAX;
 
 fn build_video_trak(
 	track_id: u32,
-	timescale: u64,
+	timescale: u32,
 	sample_entry: mp4_atom::Codec,
 	width: u16,
 	height: u16,
@@ -599,6 +753,10 @@ fn build_video_trak(
 		tkhd: mp4_atom::Tkhd {
 			track_id,
 			enabled: true,
+			// track_in_movie. A player is entitled to skip a track the presentation doesn't
+			// claim, and the flags field is 0x000001 rather than 0x000003 without it.
+			in_movie: true,
+			duration: UNKNOWN_DURATION,
 			width: mp4_atom::FixedPoint::from(width),
 			height: mp4_atom::FixedPoint::from(height),
 			..Default::default()
@@ -608,11 +766,16 @@ fn build_video_trak(
 	}
 }
 
-fn build_audio_trak(track_id: u32, timescale: u64, sample_entry: mp4_atom::Codec) -> mp4_atom::Trak {
+fn build_audio_trak(track_id: u32, timescale: u32, sample_entry: mp4_atom::Codec) -> mp4_atom::Trak {
 	mp4_atom::Trak {
 		tkhd: mp4_atom::Tkhd {
 			track_id,
 			enabled: true,
+			in_movie: true,
+			duration: UNKNOWN_DURATION,
+			// Full volume (8.8 fixed point). The default is 0, which is a muted track, and
+			// only an audio track carries a meaningful value.
+			volume: mp4_atom::FixedPoint::from(1),
 			..Default::default()
 		},
 		mdia: build_mdia(timescale, b"soun", false, sample_entry),
@@ -620,10 +783,66 @@ fn build_audio_trak(track_id: u32, timescale: u64, sample_entry: mp4_atom::Codec
 	}
 }
 
-fn build_mdia(timescale: u64, handler: &[u8; 4], is_video: bool, sample_entry: mp4_atom::Codec) -> mp4_atom::Mdia {
+/// Assemble a fragmented init segment (ftyp + moov) around already-built traks.
+///
+/// `ftyp` is the one a passed-through CMAF init carried, if any; otherwise a plain `isom` one
+/// is synthesized. The `mvhd` is ours either way, so it declares the unknown duration and the
+/// movie timescale of the assembled init rather than of whatever source a trak came from.
+/// [`extract_init`] normalizes a passed-through trak to match.
+pub(crate) fn encode_init(
+	ftyp: Option<mp4_atom::Ftyp>,
+	traks: Vec<mp4_atom::Trak>,
+	trexs: Vec<mp4_atom::Trex>,
+) -> Result<Bytes> {
+	use mp4_atom::Encode;
+
+	let ftyp = ftyp.unwrap_or(mp4_atom::Ftyp {
+		major_brand: b"isom".into(),
+		minor_version: 0x200,
+		compatible_brands: vec![b"isom".into(), b"iso6".into(), b"mp41".into()],
+	});
+	let timescale = traks.first().map(|t| t.mdia.mdhd.timescale).unwrap_or(1000);
+	let next_track_id = traks.iter().map(|t| t.tkhd.track_id).max().unwrap_or(0) + 1;
+
+	let moov = mp4_atom::Moov {
+		mvhd: mp4_atom::Mvhd {
+			timescale,
+			duration: UNKNOWN_DURATION,
+			// Normal playback rate and full volume (16.16 and 8.8 fixed point). Both default
+			// to 0, which declares a stopped, muted presentation.
+			rate: mp4_atom::FixedPoint::from(1),
+			volume: mp4_atom::FixedPoint::from(1),
+			// The next id a track could take, so it must be past every one already present.
+			next_track_id,
+			..Default::default()
+		},
+		trak: traks,
+		mvex: (!trexs.is_empty()).then(|| mp4_atom::Mvex {
+			trex: trexs,
+			..Default::default()
+		}),
+		..Default::default()
+	};
+
+	let mut buf = Vec::new();
+	ftyp.encode(&mut buf)?;
+	moov.encode(&mut buf)?;
+	Ok(Bytes::from(buf))
+}
+
+/// Narrow a media timescale to the 32-bit `mdhd` field, rejecting what would truncate.
+///
+/// `moq_net::Timescale` permits the whole QUIC varint range, so a caller-supplied scale can be
+/// wider than the field. Truncating would put the init segment and the fragments on different
+/// timelines, silently, so refuse instead.
+fn mdhd_timescale(timescale: u64) -> Result<u32> {
+	u32::try_from(timescale).map_err(|_| Error::TimescaleTooLarge(timescale))
+}
+
+fn build_mdia(timescale: u32, handler: &[u8; 4], is_video: bool, sample_entry: mp4_atom::Codec) -> mp4_atom::Mdia {
 	mp4_atom::Mdia {
 		mdhd: mp4_atom::Mdhd {
-			timescale: timescale as u32,
+			timescale,
 			..Default::default()
 		},
 		hdlr: mp4_atom::Hdlr {
@@ -651,15 +870,141 @@ fn build_mdia(timescale: u64, handler: &[u8; 4], is_video: bool, sample_entry: m
 
 /// Default video timescale when the catalog doesn't supply one.
 ///
-/// Used by the fMP4 exporter when synthesizing an init segment for a
-/// Legacy or LOC source: prefer `framerate * 1000` (so each frame has an
-/// integer duration), falling back to 90 kHz (the MPEG-TS convention).
+/// Used by the fMP4 exporter when synthesizing an init segment for a Legacy or LOC source.
+/// Prefer `framerate * 1000`, then the common NTSC denominator, an exact scale for the
+/// nanosecond-rounded cadence, and finally the highest safe approximate scale.
+///
+/// A framerate that scales to less than one tick takes the fallback too: zero and negative land
+/// on 0 through `as u64`, which is not a timescale anything accepts, and a non-finite one is
+/// filtered out before the cast, since infinity would saturate to `u64::MAX`, past the varint
+/// range a `Timescale` holds.
 pub(crate) fn default_video_timescale(config: &VideoConfig) -> u64 {
-	if let Some(fps) = config.framerate {
-		(fps * 1000.0) as u64
-	} else {
-		90000
+	usable_video_framerate(config)
+		.and_then(select_video_timescale)
+		.unwrap_or(90_000)
+}
+
+/// A finite catalog framerate with a synthesized scale and duration that fit their MP4 fields.
+pub(crate) fn usable_video_framerate(config: &VideoConfig) -> Option<f64> {
+	config
+		.framerate
+		.filter(|fps| fps.is_finite() && *fps > 0.0 && (*fps * 1000.0) as u64 > 0)
+		.filter(|fps| select_video_timescale(*fps).is_some())
+}
+
+/// Choose a scale that represents the rounded cadence without overflowing `trun` duration.
+fn select_video_timescale(framerate: f64) -> Option<u64> {
+	let preferred = (framerate * 1000.0) as u64;
+
+	let frame = Duration::from_secs_f64(1.0 / framerate);
+	for timescale in [preferred, (framerate * 1001.0).round() as u64] {
+		if duration_fits_trun(frame, timescale) {
+			return Some(timescale);
+		}
 	}
+
+	const NANOS_PER_SECOND: u128 = 1_000_000_000;
+	let exact = NANOS_PER_SECOND / gcd(frame.as_nanos(), NANOS_PER_SECOND);
+	let exact = u64::try_from(exact).ok()?;
+	if duration_fits_trun(frame, exact) {
+		return Some(exact);
+	}
+	if let Some(timescale) = rational_timescale(frame) {
+		return Some(timescale);
+	}
+
+	let max_scale = u128::from(u32::MAX)
+		.checked_mul(NANOS_PER_SECOND)?
+		.checked_div(frame.as_nanos())?
+		.min(u128::from(u32::MAX));
+	let max_scale = u64::try_from(max_scale).ok()?;
+	duration_fits_trun(frame, max_scale).then_some(max_scale)
+}
+
+/// Find a small rational scale whose rounded cadence stays within one nanosecond.
+fn rational_timescale(duration: Duration) -> Option<u64> {
+	const NANOS_PER_SECOND: u128 = 1_000_000_000;
+	let mut numerator = duration.as_nanos();
+	let mut denominator = NANOS_PER_SECOND;
+	let (mut previous_ticks, mut ticks) = (0_u128, 1_u128);
+	let (mut previous_scale, mut scale) = (1_u128, 0_u128);
+
+	while denominator != 0 {
+		let coefficient = numerator / denominator;
+		let next_ticks = coefficient.checked_mul(ticks)?.checked_add(previous_ticks)?;
+		let next_scale = coefficient.checked_mul(scale)?.checked_add(previous_scale)?;
+		if next_ticks > u128::from(u32::MAX) || next_scale > u128::from(u32::MAX) {
+			break;
+		}
+
+		let candidate = u64::try_from(next_scale).ok()?;
+		if duration_fits_trun(duration, candidate) {
+			return Some(candidate);
+		}
+
+		(previous_ticks, ticks) = (ticks, next_ticks);
+		(previous_scale, scale) = (scale, next_scale);
+		(numerator, denominator) = (denominator, numerator % denominator);
+	}
+
+	None
+}
+
+/// Whether the scale represents the rounded cadence and keeps its sample duration 32-bit.
+fn duration_fits_trun(duration: Duration, timescale: u64) -> bool {
+	timescale > 0 && rounded_duration_ticks(duration, timescale).is_some_and(|ticks| u32::try_from(ticks).is_ok())
+}
+
+/// Convert a rounded duration to ticks when it is within one nanosecond of an exact tick.
+fn rounded_duration_ticks(duration: Duration, timescale: u64) -> Option<u64> {
+	const NANOS_PER_SECOND: u128 = 1_000_000_000;
+	let scaled = duration.as_nanos().checked_mul(u128::from(timescale))?;
+	let rounded = scaled.checked_add(NANOS_PER_SECOND / 2)? / NANOS_PER_SECOND;
+	let exact = rounded.checked_mul(NANOS_PER_SECOND)?;
+	if scaled.abs_diff(exact) > u128::from(timescale) {
+		return None;
+	}
+	u64::try_from(rounded).ok()
+}
+
+/// Greatest common divisor for reducing exact timestamp ratios.
+fn gcd(mut a: u128, mut b: u128) -> u128 {
+	while b != 0 {
+		(a, b) = (b, a % b);
+	}
+	a
+}
+
+/// The decode timeline a fragment actually carries: its `tfdt` and each sample's composition
+/// offset. This is what a player reads, as opposed to the PTS [`decode`] reconstructs from it.
+#[cfg(test)]
+pub(crate) fn timeline(fragment: &Bytes) -> (u64, Vec<i32>) {
+	let traf = first_traf(fragment);
+	let cts = traf.trun[0].entries.iter().map(|e| e.cts.unwrap_or_default()).collect();
+	(traf.tfdt.as_ref().unwrap().base_media_decode_time, cts)
+}
+
+/// How long each sample in a fragment claims to last, as written into its `trun`.
+#[cfg(test)]
+pub(crate) fn sample_durations(fragment: &Bytes) -> Vec<Option<u32>> {
+	first_traf(fragment).trun[0]
+		.entries
+		.iter()
+		.map(|e| e.duration)
+		.collect()
+}
+
+#[cfg(test)]
+fn first_traf(fragment: &Bytes) -> mp4_atom::Traf {
+	use mp4_atom::DecodeMaybe;
+
+	let mut cursor = std::io::Cursor::new(fragment.as_ref());
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+		if let mp4_atom::Any::Moof(moof) = atom {
+			return moof.traf.into_iter().next().expect("a traf");
+		}
+	}
+	panic!("no moof");
 }
 
 #[cfg(test)]
@@ -668,6 +1013,153 @@ mod tests {
 
 	fn ts(micros: u64) -> Timestamp {
 		Timestamp::from_micros(micros).unwrap()
+	}
+
+	fn info(track_id: u32, timescale: moq_net::Timescale, sequence_number: u32) -> FragmentInfo {
+		FragmentInfo {
+			track_id,
+			timescale,
+			sequence_number,
+		}
+	}
+
+	// An AAC-LC / 44.1 kHz / stereo AudioSpecificConfig, the catalog `description` shape.
+	fn aac_config(bitrate: Option<u64>) -> AudioConfig {
+		let mut config = AudioConfig::new(AudioCodec::AAC(hang::catalog::AAC { profile: 2 }), 44_100, 2);
+		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+		config.bitrate = bitrate;
+		config
+	}
+
+	/// The moov an encoded init segment carries, so a test asserts on what a player parses
+	/// rather than on the struct that went in.
+	fn moov(init: &Bytes) -> mp4_atom::Moov {
+		use mp4_atom::DecodeMaybe;
+
+		let mut cursor = std::io::Cursor::new(init.as_ref());
+		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+			if let mp4_atom::Any::Moov(moov) = atom {
+				return moov;
+			}
+		}
+		panic!("no moov");
+	}
+
+	fn dec_config(trak: &mp4_atom::Trak) -> mp4_atom::esds::DecoderConfig {
+		match &trak.mdia.minf.stbl.stsd.codecs[0] {
+			mp4_atom::Codec::Mp4a(mp4a) => mp4a.esds.es_desc.dec_config.clone(),
+			other => panic!("expected mp4a, got {other:?}"),
+		}
+	}
+
+	// Safari and AVFoundation reject an all-zero DecoderConfigDescriptor on the *init* append,
+	// which ends the ManagedMediaSource and fails every append after it. The catalog bitrate is
+	// optional and real publishers omit it, so a synthesized esds must not lean on it.
+	#[test]
+	fn synthesized_aac_init_has_non_zero_bitrates() {
+		let inferred = dec_config(&synthesize_audio_trak(1, 44_100, &aac_config(None)).unwrap());
+		assert_ne!(u32::from(inferred.buffer_size_db), 0);
+		assert_ne!(inferred.max_bitrate, 0);
+		assert_ne!(inferred.avg_bitrate, 0);
+
+		let stated = dec_config(&synthesize_audio_trak(1, 44_100, &aac_config(Some(96_000))).unwrap());
+		assert_eq!(stated.max_bitrate, 96_000, "the catalog's bitrate wins");
+		assert_eq!(stated.avg_bitrate, 96_000);
+
+		// A stated bitrate the field can't carry rebuilds the same all-zero descriptor, so it
+		// takes the fallback rather than the catalog.
+		for unusable in [Some(0), Some(u64::from(u32::MAX) + 1)] {
+			let config = dec_config(&synthesize_audio_trak(1, 44_100, &aac_config(unusable)).unwrap());
+			assert_eq!(config.max_bitrate, inferred.max_bitrate, "{unusable:?}");
+			assert_eq!(config.avg_bitrate, inferred.avg_bitrate, "{unusable:?}");
+		}
+	}
+
+	// `framerate * 1000` is 0 for a zero, negative or non-finite catalog framerate, and 0 is not
+	// a timescale: Timescale::new rejects it, so Muxer::video would fail to build at all.
+	#[test]
+	fn default_video_timescale_ignores_an_unusable_framerate() {
+		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		for unusable in [0.0, -30.0, f64::NAN, f64::INFINITY, 0.0005] {
+			config.framerate = Some(unusable);
+			assert_eq!(default_video_timescale(&config), 90_000, "{unusable}");
+		}
+
+		config.framerate = Some(30.0);
+		assert_eq!(default_video_timescale(&config), 30_000);
+
+		config.framerate = Some(30_000.0 / 1001.0);
+		assert_eq!(default_video_timescale(&config), 30_000);
+	}
+
+	#[test]
+	fn default_video_timescale_keeps_low_cadence_within_trun() {
+		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		for framerate in [0.2001, 0.0011] {
+			config.framerate = Some(framerate);
+			let timescale = default_video_timescale(&config);
+			let duration = Duration::from_secs_f64(1.0 / framerate);
+			let ticks = rounded_duration_ticks(duration, timescale).unwrap();
+
+			assert!(timescale <= u64::from(u32::MAX));
+			assert!(ticks <= u64::from(u32::MAX));
+		}
+
+		assert_eq!(default_video_timescale(&config), 11);
+	}
+
+	// A live fragmented stream's duration isn't known up front. Zero reads as an empty file to a
+	// strict parser: VLC refuses to play one.
+	#[test]
+	fn synthesized_init_declares_unknown_duration() {
+		let trak = synthesize_audio_trak(1, 44_100, &aac_config(None)).unwrap();
+		assert_eq!(trak.tkhd.duration, u64::MAX);
+
+		let init = encode_init(None, vec![trak], Vec::new()).unwrap();
+		let moov = moov(&init);
+		assert_eq!(moov.mvhd.duration, u64::MAX);
+		assert_eq!(moov.trak[0].tkhd.duration, u64::MAX);
+	}
+
+	// The header defaults are all the "off" value: a track the presentation doesn't claim, a
+	// stopped playback rate, a muted volume, and a next id that collides with the track already
+	// there. A strict player is entitled to act on any of them.
+	#[test]
+	fn synthesized_init_headers_describe_a_playable_presentation() {
+		let audio = synthesize_audio_trak(1, 44_100, &aac_config(None)).unwrap();
+		let init = encode_init(None, vec![audio], Vec::new()).unwrap();
+		let moov = moov(&init);
+
+		assert_eq!(moov.mvhd.rate.integer(), 1, "normal playback rate");
+		assert_eq!(moov.mvhd.volume.integer(), 1, "full volume");
+		assert_eq!(moov.mvhd.next_track_id, 2, "past the only track id");
+
+		let tkhd = &moov.trak[0].tkhd;
+		assert!(tkhd.enabled && tkhd.in_movie, "flags 0x000003");
+		assert_eq!(tkhd.volume.integer(), 1, "an audio track carries the volume");
+	}
+
+	// A video track's volume stays 0: the field only means something for audio.
+	#[test]
+	fn synthesized_video_init_sets_the_track_flags() {
+		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		config.framerate = Some(30.0);
+		let video = synthesize_video_trak(1, 30_000, &config, None).unwrap();
+		let init = encode_init(None, vec![video], Vec::new()).unwrap();
+		let moov = moov(&init);
+
+		let tkhd = &moov.trak[0].tkhd;
+		assert!(tkhd.enabled && tkhd.in_movie, "flags 0x000003");
+		assert_eq!(tkhd.volume.integer(), 0);
+	}
+
+	#[test]
+	fn synthesized_video_init_rejects_missing_dimensions() {
+		let config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		let error = synthesize_video_trak(1, 30_000, &config, None).unwrap_err();
+		assert!(matches!(error, Error::MissingVideoDimensions(_)));
 	}
 
 	#[test]
@@ -734,11 +1226,95 @@ mod tests {
 			duration: Some(ts(33_333)),
 		}];
 
-		let fragment = encode_fragment(1, timescale, 0, &input).unwrap();
+		let fragment = encode_fragment(info(1, timescale, 0), &input).unwrap();
 		let frames = decode(fragment, timescale).unwrap();
 
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].duration, Some(ts(33_333)));
+	}
+
+	// A trun sample duration is 32 bits. Narrowing silently would make the media claim a
+	// shorter duration than the metadata returned to the fragmenting consumer.
+	#[test]
+	fn encode_fragment_rejects_a_duration_too_large_for_trun() {
+		let timescale = moq_net::Timescale::new(u64::from(u32::MAX)).unwrap();
+		let over = u64::from(u32::MAX) + 1;
+		let frame = Frame {
+			timestamp: Timestamp::from_scale(0, timescale.as_u64()).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: Some(Timestamp::from_scale(over, timescale.as_u64()).unwrap()),
+		};
+
+		let err = encode_fragment(info(1, timescale, 0), std::slice::from_ref(&frame)).unwrap_err();
+		assert!(matches!(err, Error::SampleDurationTooLarge(ticks) if ticks == over));
+
+		let largest = Frame {
+			duration: Some(Timestamp::from_scale(u64::from(u32::MAX), timescale.as_u64()).unwrap()),
+			..frame
+		};
+		let fragment = encode_fragment(info(1, timescale, 0), &[largest]).unwrap();
+		assert_eq!(sample_durations(&fragment), vec![Some(u32::MAX)]);
+	}
+
+	// A positive duration that becomes zero ticks would leave tfdt stationary while the
+	// fragment metadata still advances, so a coarse override has to fail explicitly.
+	#[test]
+	fn encode_fragment_rejects_a_duration_shorter_than_one_tick() {
+		let timescale = moq_net::Timescale::SECOND;
+		let frame = Frame {
+			timestamp: Timestamp::from_secs(0).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: Some(Timestamp::from_millis(33).unwrap()),
+		};
+
+		let err = encode_fragment(info(1, timescale, 0), std::slice::from_ref(&frame)).unwrap_err();
+		assert!(matches!(err, Error::SampleDurationTooSmall(1)));
+
+		let one_tick = Frame {
+			duration: Some(Timestamp::from_secs(1).unwrap()),
+			..frame
+		};
+		let fragment = encode_fragment(info(1, timescale, 0), &[one_tick]).unwrap();
+		assert_eq!(sample_durations(&fragment), vec![Some(1)]);
+	}
+
+	// Flooring every 1/24-second sample at a 1 kHz output scale would lose 16 ticks per
+	// second. The caller must choose a scale that represents the duration exactly.
+	#[test]
+	fn encode_fragment_rejects_an_inexact_sample_duration() {
+		let input_scale = moq_net::Timescale::new(24).unwrap();
+		let output_scale = moq_net::Timescale::MILLI;
+		let frame = Frame {
+			timestamp: Timestamp::new(0, input_scale).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: Some(Timestamp::new(1, input_scale).unwrap()),
+		};
+
+		let err = encode_fragment(info(1, output_scale, 0), std::slice::from_ref(&frame)).unwrap_err();
+		assert!(matches!(err, Error::SampleDurationInexact(1_000)));
+
+		let exact_scale = moq_net::Timescale::new(24_000).unwrap();
+		let fragment = encode_fragment(info(1, exact_scale, 0), &[frame]).unwrap();
+		assert_eq!(sample_durations(&fragment), vec![Some(1_000)]);
+	}
+
+	// tfdt is 64 bits. A timestamp rescaled past that range must fail rather than wrap the
+	// fragment back onto an unrelated point in the presentation.
+	#[test]
+	fn encode_fragment_rejects_a_pts_too_large_for_tfdt() {
+		let timescale = moq_net::Timescale::new(u64::from(u32::MAX)).unwrap();
+		let frame = Frame {
+			timestamp: Timestamp::from_secs(1 << 40).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: None,
+		};
+
+		let err = encode_fragment(info(1, timescale, 0), &[frame]).unwrap_err();
+		assert!(matches!(err, Error::PtsOverflow));
 	}
 
 	#[test]
@@ -765,7 +1341,7 @@ mod tests {
 			},
 		];
 
-		let fragment = encode_fragment(1, timescale, 0, &input).unwrap();
+		let fragment = encode_fragment(info(1, timescale, 0), &input).unwrap();
 		let frames = decode(fragment, timescale).unwrap();
 
 		assert_eq!(frames.len(), input.len());
@@ -788,7 +1364,7 @@ mod tests {
 			duration: None,
 		}];
 
-		let fragment = encode_fragment(1, timescale, 0, &frames).unwrap();
+		let fragment = encode_fragment(info(1, timescale, 0), &frames).unwrap();
 		let frames = decode(fragment, timescale).unwrap();
 
 		assert_eq!(frames.len(), 1);

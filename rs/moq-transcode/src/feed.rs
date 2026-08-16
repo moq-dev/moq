@@ -168,7 +168,11 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 
 	let mut config = moq_video::decode::Config::new();
 	config.kind = inner.decoder.clone();
-	let mut decoder = moq_video::decode::Decoder::new(&inner.config, &config)?;
+	// A `Sink` rather than a bare `Decoder`: this loop is a spawned task holding
+	// the codec across every `.await` below, so on a multi-thread runtime it would
+	// migrate workers and unbalance the per-thread COM apartment the Windows
+	// backend opens.
+	let mut decoder = moq_video::decode::Sink::open(&inner.config, &config).await?;
 
 	// The feed serves whichever rungs are active, so there is no single
 	// downstream subscription to mirror; live-edge defaults fit every rung.
@@ -189,7 +193,7 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 				let keyframe = frame.keyframe || first;
 				first = false;
 
-				for decoded in decoder.decode(&frame.payload, timestamp, keyframe)? {
+				for decoded in decoder.decode(frame.payload, timestamp, keyframe).await? {
 					let _ = sender.send(Item::Frame(Arc::new(decoded)));
 				}
 			}

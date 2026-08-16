@@ -27,7 +27,7 @@ test("rendition broadcast reference is parsed and normalized", () => {
 		video: {
 			renditions: {
 				video: {
-					broadcast: ".././source/",
+					broadcast: "././source/",
 					codec: "avc1.64001f",
 					container: { kind: "legacy" },
 				},
@@ -36,8 +36,25 @@ test("rendition broadcast reference is parsed and normalized", () => {
 	};
 	const parsed = RootSchema.parse(catalog);
 	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
-	// Normalized like Rust PathRelative: `.` and empty segments dropped, `..` preserved.
-	expect(parsed.video.renditions.video?.broadcast).toBe("../source");
+	// Normalized like Rust PathRelative: redundant `.` and empty segments are dropped.
+	expect(parsed.video.renditions.video?.broadcast).toBe("source");
+});
+
+test("rendition parent broadcast reference stays distinct from empty", () => {
+	const catalog = {
+		video: {
+			renditions: {
+				video: {
+					broadcast: ".",
+					codec: "avc1.64001f",
+					container: { kind: "legacy" },
+				},
+			},
+		},
+	};
+	const parsed = RootSchema.parse(catalog);
+	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
+	expect(parsed.video.renditions.video?.broadcast).toBe(".");
 });
 
 test("rendition without broadcast reference stays undefined", () => {

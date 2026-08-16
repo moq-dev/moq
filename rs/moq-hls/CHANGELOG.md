@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.8](https://github.com/moq-dev/moq/compare/moq-hls-v0.4.7...moq-hls-v0.4.8) - 2026-08-14
+
+### Fixed
+
+- *(mux)* derive missing video geometry ([#2840](https://github.com/moq-dev/moq/pull/2840))
+- *(path)* resolve catalog references like URLs ([#2855](https://github.com/moq-dev/moq/pull/2855))
+
+## [0.4.7](https://github.com/moq-dev/moq/compare/moq-hls-v0.4.6...moq-hls-v0.4.7) - 2026-08-13
+
+### Fixed
+
+- *(moq-hls)* bind renditions to the broadcast their catalog came from ([#2795](https://github.com/moq-dev/moq/pull/2795))
+
+## [0.4.6](https://github.com/moq-dev/moq/compare/moq-hls-v0.4.5...moq-hls-v0.4.6) - 2026-08-06
+
+### Added
+
+- *(hang)* declare a configurable 30s retention on media tracks, and fix relayed cache misses ([#2615](https://github.com/moq-dev/moq/pull/2615))
+- fail-fast retries: jittered backoff bounded by time, not error type ([#2647](https://github.com/moq-dev/moq/pull/2647))
+
+## [0.4.5](https://github.com/moq-dev/moq/compare/moq-hls-v0.4.4...moq-hls-v0.4.5) - 2026-08-05
+
+### Other
+
+- *(rs)* clean up pedantic clippy warnings ([#2621](https://github.com/moq-dev/moq/pull/2621))
+
+## [0.4.4](https://github.com/moq-dev/moq/compare/moq-hls-v0.4.3...moq-hls-v0.4.4) - 2026-08-03
+
+### Fixed
+
+- *(moq-hls)* support nested and encoded HLS routes ([#2598](https://github.com/moq-dev/moq/pull/2598))
+
 ## [0.4.3](https://github.com/moq-dev/moq/compare/moq-hls-v0.4.2...moq-hls-v0.4.3) - 2026-07-27
 
 ### Other

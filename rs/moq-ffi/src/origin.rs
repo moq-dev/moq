@@ -119,17 +119,19 @@ impl Announced {
 			}
 		}
 	}
+}
 
+/// Waits for one exact path, delegating to [`moq_net::origin::Consumer::announced_broadcast`].
+struct AnnouncedBroadcast {
+	origin: moq_net::origin::Consumer,
+	path: moq_net::PathOwned,
+}
+
+impl AnnouncedBroadcast {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		loop {
-			match self.inner.next().await {
-				// Skip unannounce events; we're waiting for the broadcast to become available.
-				Some(moq_net::announce::Update { broadcast, .. }) => match broadcast {
-					Some(broadcast) => return Ok(Arc::new(MoqBroadcastConsumer::new(broadcast))),
-					None => continue,
-				},
-				None => return Err(MoqError::Closed),
-			}
+		match self.origin.announced_broadcast(&self.path).await {
+			Some(broadcast) => Ok(Arc::new(MoqBroadcastConsumer::new(broadcast))),
+			None => Err(MoqError::Closed),
 		}
 	}
 }
@@ -144,7 +146,7 @@ pub struct MoqAnnouncement {
 /// Waits for a specific broadcast to be announced.
 #[derive(uniffi::Object)]
 pub struct MoqAnnouncedBroadcast {
-	task: Task<Announced>,
+	task: Task<AnnouncedBroadcast>,
 }
 
 impl MoqOriginProducer {
@@ -235,8 +237,8 @@ impl MoqOriginProducer {
 	/// path for subscribes and fetches without being announced.
 	///
 	/// [`MoqBroadcastProducer::finish`] unpublishes immediately. Dropping the producer
-	/// without finishing is treated as a failure: the path lingers briefly so a
-	/// replacement publisher can take over without subscribers noticing.
+	/// without finishing also unpublishes, but subscribers observe the end as a
+	/// failure rather than a deliberate one.
 	pub fn create_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.
@@ -261,12 +263,25 @@ impl MoqOriginConsumer {
 	}
 
 	/// Wait for a specific broadcast to be announced by path.
+	///
+	/// This is how you resolve a path right after connecting: announcements arrive over the
+	/// session after it opens, so `request_broadcast` on its own races them.
 	pub fn announced_broadcast(&self, path: String) -> Result<Arc<MoqAnnouncedBroadcast>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let origin = self.inner.with_root(path).ok_or(MoqError::Unauthorized)?;
+		let path = moq_net::Path::new(&path).to_owned();
+
+		// Probe the permission eagerly so an unreachable path fails here, rather than
+		// surfacing later as a `Closed` the caller can't tell from the origin ending.
+		self.inner.with_root(&path).ok_or(MoqError::Unauthorized)?;
+
 		Ok(Arc::new(MoqAnnouncedBroadcast {
-			task: Task::new(Announced {
-				inner: origin.announced(),
+			task: Task::new(AnnouncedBroadcast {
+				// The wait runs on the *unrooted* cursor. `announced_broadcast` narrows with
+				// `scope`, which leaves the root alone, so the broadcast is handed out named by
+				// its full path. Rooting the cursor at `path` would name it "" instead, making
+				// it its own root, and a catalog's `../sibling` reference would read as escaping.
+				origin: self.inner.clone(),
+				path,
 			}),
 		}))
 	}
@@ -278,6 +293,9 @@ impl MoqOriginConsumer {
 	/// errors if nothing can serve it. Unlike `announced_broadcast`, this does *not* wait
 	/// indefinitely for a future announcement: it resolves or fails based on what is
 	/// announced now plus any dynamic fallback. Drop the returned future to cancel.
+	///
+	/// Calling this straight after connecting therefore races the session's announcements
+	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first.
 	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		let broadcast = self.inner.request_broadcast(path.as_str()).await?;
 		Ok(Arc::new(MoqBroadcastConsumer::new(broadcast)))

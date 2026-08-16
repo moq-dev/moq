@@ -13,10 +13,12 @@ export * as Announce from "./announced.ts";
 export * as Broadcast from "./broadcast.ts";
 /** Connection helpers: connect to or accept a MoQ session and reconnect on failure. */
 export * as Connection from "./connection/index.ts";
-/** The error a read or write rejects with when the peer resets a stream, carrying its code. */
-export { RemoteError } from "./error.ts";
+/** The error a read, write, or session close rejects with when the peer sends a code, carrying it. */
+export { RemoteError, SessionCode, StreamCode } from "./error.ts";
 /** Group role handles and frame helpers. */
 export * as Group from "./group.ts";
+/** Broadcast routing tables, independent of any connection. */
+export * as Origin from "./origin.ts";
 /** Broadcast path utilities with delimiter-aware prefix matching. */
 export * as Path from "./path.ts";
 /** Branded time types (nanoseconds, microseconds, milliseconds, seconds) with conversions. */

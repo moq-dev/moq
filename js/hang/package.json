@@ -1,7 +1,7 @@
 {
 	"name": "@moq/hang",
 	"type": "module",
-	"version": "0.3.3",
+	"version": "0.4.0",
 	"description": "WebCodecs-based media format for MoQ",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
@@ -13,8 +13,9 @@
 		"./util": "./src/util/index.ts"
 	},
 	"scripts": {
-		"build": "rimraf dist && tsc -b && bun ../common/package.ts",
+		"build": "rimraf dist && tsc -b tsconfig.build.json && bun ../common/package.ts",
 		"check": "tsc --noEmit",
+		"test": "bun test --only-failures",
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
@@ -24,7 +25,8 @@
 		"@moq/loc": "workspace:^",
 		"@moq/net": "workspace:^",
 		"@moq/signals": "workspace:^",
-		"@svta/cml-iso-bmff": "^1.0.2",
+		"@svta/cml-iso-bmff": "^1.0.4",
+		"@svta/cml-utils": "1.6.0",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {

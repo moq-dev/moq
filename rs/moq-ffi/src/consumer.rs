@@ -23,6 +23,24 @@ fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {
 	})
 }
 
+fn media_frame(mut frame: moq_mux::container::Frame) -> Result<MoqMediaFrame, MoqError> {
+	let timestamp_us = timestamp_us(frame.timestamp)?;
+	let payload = frame.payload.copy_to_bytes(frame.payload.remaining()).to_vec();
+
+	Ok(MoqMediaFrame {
+		payload,
+		timestamp_us,
+		keyframe: frame.keyframe,
+	})
+}
+
+fn media_container(container: MoqContainer) -> Result<moq_mux::catalog::hang::Container, MoqError> {
+	let container: hang::catalog::Container = container.into();
+	(&container)
+		.try_into()
+		.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))
+}
+
 /// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`].
 ///
 /// Construct with the fields you care about; the rest default to moq-net's defaults
@@ -71,9 +89,11 @@ impl From<MoqSubscription> for moq_net::track::Subscription {
 		moq_net::track::Subscription::default()
 			.with_priority(s.priority)
 			.with_ordered(s.ordered)
-			.with_latency_max(std::time::Duration::from_millis(s.latency_max_ms))
-			.with_group_start(s.group_start)
-			.with_group_end(s.group_end)
+			.with_latency(moq_net::Latency::max(std::time::Duration::from_millis(
+				s.latency_max_ms,
+			)))
+			.with_start(s.group_start.map(moq_net::track::Position::group))
+			.with_end(s.group_end.and_then(moq_net::track::Position::after_group))
 	}
 }
 
@@ -162,22 +182,7 @@ struct Media {
 
 impl Media {
 	async fn next(&mut self) -> Result<Option<MoqMediaFrame>, MoqError> {
-		let frame = self.inner.read().await?;
-
-		let Some(frame) = frame else {
-			return Ok(None);
-		};
-
-		let timestamp_us = timestamp_us(frame.timestamp)?;
-
-		let mut buf = frame.payload;
-		let payload = buf.copy_to_bytes(buf.remaining()).to_vec();
-
-		Ok(Some(MoqMediaFrame {
-			payload,
-			timestamp_us,
-			keyframe: frame.keyframe,
-		}))
+		self.inner.read().await?.map(media_frame).transpose()
 	}
 }
 
@@ -246,6 +251,27 @@ impl MoqBroadcastConsumer {
 		Ok(Arc::new(MoqGroupConsumer::new(group)))
 	}
 
+	/// Fetch one group and decode its track container into media frames.
+	///
+	/// Unlike [`Self::subscribe_media`], this does not create a live subscription or apply
+	/// latency-based group skipping. The returned consumer reads exactly the requested group
+	/// until [`MoqMediaGroupConsumer::next`] returns `None`.
+	pub async fn fetch_media_group(
+		&self,
+		name: String,
+		sequence: u64,
+		container: MoqContainer,
+		options: Option<MoqFetchGroupOptions>,
+	) -> Result<Arc<MoqMediaGroupConsumer>, MoqError> {
+		// Parse the container before fetching so invalid CMAF init data does not leave a
+		// dynamic group request waiting for a consumer that can never read it.
+		let media = media_container(container)?;
+		let options = options.map(moq_net::group::Fetch::from);
+		let track = self.inner.track(&name).map_err(map_fetch_error)?;
+		let group = track.fetch_group(sequence, options).await.map_err(map_fetch_error)?;
+		Ok(Arc::new(MoqMediaGroupConsumer::new(group, media)))
+	}
+
 	/// Subscribe to a track by name, delivering frames in decode order.
 	///
 	/// `container` is the track container from the catalog.
@@ -261,12 +287,9 @@ impl MoqBroadcastConsumer {
 	) -> Result<Arc<MoqMediaConsumer>, MoqError> {
 		// Parse the container before subscribing so we don't leave a dangling
 		// subscription if init parsing fails.
-		let container: hang::catalog::Container = container.into();
-		let media: moq_mux::catalog::hang::Container = (&container)
-			.try_into()
-			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
+		let media = media_container(container)?;
 		let subscription = subscription.map(moq_net::track::Subscription::from).unwrap_or_default();
-		let latency = subscription.latency_max;
+		let latency = subscription.latency;
 		let track = self.inner.track(&name)?.subscribe(subscription).await?;
 		let consumer = moq_mux::container::Consumer::new(track, media).with_latency(latency);
 		Ok(Arc::new(MoqMediaConsumer {
@@ -422,6 +445,52 @@ impl GroupInner {
 pub struct MoqGroupConsumer {
 	sequence: u64,
 	task: Task<GroupInner>,
+}
+
+struct MediaGroupInner {
+	inner: moq_mux::container::GroupConsumer<moq_mux::catalog::hang::Container>,
+}
+
+impl MediaGroupInner {
+	async fn next(&mut self) -> Result<Option<MoqMediaFrame>, MoqError> {
+		self.inner.read().await?.map(media_frame).transpose()
+	}
+}
+
+/// A finite, container-decoded media group returned by
+/// [`MoqBroadcastConsumer::fetch_media_group`].
+#[derive(uniffi::Object)]
+pub struct MoqMediaGroupConsumer {
+	sequence: u64,
+	task: Task<MediaGroupInner>,
+}
+
+impl MoqMediaGroupConsumer {
+	fn new(group: moq_net::group::Consumer, container: moq_mux::catalog::hang::Container) -> Self {
+		let inner = moq_mux::container::GroupConsumer::new(group, container);
+		Self {
+			sequence: inner.sequence(),
+			task: Task::new(MediaGroupInner { inner }),
+		}
+	}
+}
+
+#[uniffi::export]
+impl MoqMediaGroupConsumer {
+	/// The sequence number of this group within the track.
+	pub fn sequence(&self) -> u64 {
+		self.sequence
+	}
+
+	/// Read the next decoded media frame, or `None` when the group ends.
+	pub async fn next(&self) -> Result<Option<MoqMediaFrame>, MoqError> {
+		self.task.run(|mut state| async move { state.next().await }).await
+	}
+
+	/// Cancel all current and future `next()` calls.
+	pub fn cancel(&self) {
+		self.task.cancel();
+	}
 }
 
 impl MoqGroupConsumer {

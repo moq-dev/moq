@@ -263,16 +263,28 @@ impl Drop for Alive {
 		// See track::Alive: the last producer dropping without a clean finish releases
 		// the cached frames so a stale consumer can't pin their buffers forever. A
 		// finished group keeps its cache so consumers can drain.
-		if let Ok(mut state) = modify(&self.state)
-			&& state.fin.is_none()
-		{
-			// Dropped without finish() or abort(), so consumers will see
-			// Error::Dropped mid-group. Deliberate ends go through finish()/abort().
-			tracing::warn!(
-				sequence = self.info.sequence,
-				"group::Producer dropped without finish() or abort()"
-			);
-			state.release();
+		//
+		// Check Ok and Err: Ok is unreachable after a deliberate close.
+		match self.state.write() {
+			Ok(mut state) => {
+				if state.fin.is_some() || state.abort.is_some() {
+					return;
+				}
+				tracing::warn!(
+					sequence = self.info.sequence,
+					"group::Producer dropped without finish() or abort()"
+				);
+				state.release();
+			}
+			Err(state) => {
+				if state.fin.is_some() || state.abort.is_some() {
+					return;
+				}
+				tracing::warn!(
+					sequence = self.info.sequence,
+					"group::Producer dropped without finish() or abort()"
+				);
+			}
 		}
 	}
 }
@@ -457,6 +469,55 @@ impl Producer {
 			timestamp,
 		};
 		Ok(frame::Producer::new(self, buf, info).with_meter(meter))
+	}
+
+	/// The owned counterpart of [`Self::create_frame`], for the wire drivers that
+	/// stream a frame across polls and cannot hold the group borrowed inside their
+	/// state. The one-live-frame rule the borrow normally enforces becomes the
+	/// caller's promise; see [`frame::ProducerOwned`].
+	pub(crate) fn create_frame_owned(&mut self, frame: frame::Info) -> Result<frame::ProducerOwned> {
+		let timestamp = frame
+			.timestamp
+			.convert(self.track.timescale)
+			.map_err(|_| Error::TimestampMismatch)?;
+		if frame.size > MAX_GROUP_CACHE {
+			return Err(Error::FrameTooLarge);
+		}
+		let buf = FrameBuf::new(frame.size as usize);
+
+		let mut state = modify(&self.state)?;
+		if state.fin.is_some() {
+			return Err(Error::Closed);
+		}
+		let next_index = state
+			.next_index
+			.checked_add(1)
+			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		debug_assert!(state.partial.is_none(), "a frame is already open");
+		state.cache += frame.size;
+		state.charge.add(frame.size);
+		state.partial = Some(Partial {
+			timestamp,
+			buf: buf.clone(),
+		});
+		state.next_index = next_index;
+		state.evict();
+		drop(state);
+
+		// With the group lock released (lock order is track then group), settle
+		// eviction debt if enough has been written since the track last paid.
+		self.cache.settle();
+
+		// Ingress payload: one frame opened; its bytes are counted per chunk as the
+		// producer writes them.
+		self.stats.frames(1);
+		let meter = self.stats.clone();
+
+		let info = frame::Info {
+			size: frame.size,
+			timestamp,
+		};
+		Ok(frame::ProducerOwned::new(self.clone(), buf, info).with_meter(meter))
 	}
 
 	/// Wake consumers parked on the group channel (called after a partial write).
@@ -794,6 +855,32 @@ impl Consumer {
 		self
 	}
 
+	/// Whether the group has been aborted (including pool eviction); the abort
+	/// dropped the cached frames, so a held consumer has nothing left to read.
+	///
+	/// A spliced group spans several routes, so no single abort empties it; only a
+	/// plain cursor can answer.
+	pub(crate) fn is_aborted(&self) -> bool {
+		match &self.inner {
+			ConsumerKind::Plain(plain) => plain.state.read().abort.is_some(),
+			ConsumerKind::Spliced(_) => false,
+		}
+	}
+
+	/// Park `waiter` until the group closes (finish, abort, or eviction). Spliced
+	/// subscribers register on parked groups so an eviction wakes them; a group
+	/// that already closed cleanly can never abort, so no waiter is needed.
+	///
+	/// A spliced group reads as closed without registering anything: no single abort
+	/// empties it, so [`Self::is_aborted`] can never turn true and there is nothing
+	/// a wakeup would change.
+	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
+		match &self.inner {
+			ConsumerKind::Plain(plain) => plain.state.poll_closed(waiter),
+			ConsumerKind::Spliced(_) => Poll::Ready(()),
+		}
+	}
+
 	/// The parent track's timescale.
 	pub fn timescale(&self) -> Timescale {
 		self.track.timescale
@@ -1062,6 +1149,7 @@ impl Fetch {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use crate::model::test_tracing::count_drop_warnings;
 	use bytes::Bytes;
 	use futures::FutureExt;
 
@@ -1218,6 +1306,37 @@ mod test {
 
 		let result = consumer.next_frame().now_or_never().unwrap();
 		assert!(matches!(result, Err(crate::Error::Dropped)));
+	}
+
+	#[test]
+	fn drop_after_abort_does_not_warn() {
+		let warns = count_drop_warnings("group::Producer dropped without finish", || {
+			let producer = Info { sequence: 0 }.produce();
+			let keep = producer.clone();
+			let mut writer = producer.clone();
+			writer
+				.write_frame(Timestamp::ZERO, Bytes::from_static(b"data"))
+				.unwrap();
+			let _consumer = producer.consume();
+			writer.abort(crate::Error::Cancel).unwrap();
+			drop(keep);
+		});
+		assert_eq!(warns, 0, "abort-then-drop must not emit unfinished-producer WARN");
+	}
+
+	#[test]
+	fn drop_unfinished_warns() {
+		let warns = count_drop_warnings("group::Producer dropped without finish", || {
+			let producer = Info { sequence: 0 }.produce();
+			let mut writer = producer.clone();
+			writer
+				.write_frame(Timestamp::ZERO, Bytes::from_static(b"data"))
+				.unwrap();
+			let _consumer = producer.consume();
+			drop(writer);
+			drop(producer);
+		});
+		assert!(warns >= 1, "unfinished drop must emit unfinished-producer WARN");
 	}
 
 	#[test]

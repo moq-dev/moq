@@ -14,10 +14,10 @@ moq-relay relay.toml
 ## Minimal Example
 
 ```toml
-[server]
-listen = "0.0.0.0:4443"
+[listen]
+bind = "0.0.0.0:4443"
 
-[server.tls]
+[listen.tls]
 cert = "cert.pem"
 key = "key.pem"
 ```
@@ -45,7 +45,7 @@ Logging configuration.
 level = "info"
 ```
 
-### \[server]
+### \[listen]
 
 QUIC/WebTransport server settings. Optionally add plaintext qmux stream
 listeners for trusted local workers. Every connection authenticates through the
@@ -53,24 +53,29 @@ same JWT / public-access path; QUIC additionally accepts an mTLS client
 certificate, and Unix sockets add optional peer-credential gating.
 
 ```toml
-[server]
+[listen]
 # QUIC (UDP) bind. Omit to run stream-only (no QUIC) when a tcp/unix listener
 # is configured below.
 bind = "[::]:443"
 
+# MoQ versions accepted by QUIC, WebTransport, and WebSocket listeners.
+# TCP and Unix stream listeners also accept moq-lite-05 because it carries
+# their request path in SETUP. Omit to accept every supported version.
+version = ["moq-transport-16"]
+
 # Plaintext qmux over TCP (no TLS, carries no peer identity). Trusted networks
 # only; a non-loopback bind logs a warning. Requires the `tcp` build feature.
-[server.tcp]
+[listen.tcp]
 bind = "127.0.0.1:4444"
 
 # Plaintext qmux over a Unix socket, for local workers (e.g. the protocol
 # gateways or a stats publisher). Requires the `uds` build feature. Restrict
 # callers by peer credentials (each list AND across, OR within; empty = no
 # constraint).
-[server.unix]
+[listen.unix]
 bind = "/run/moq/internal.sock"
 
-[server.unix.allow]
+[listen.unix.allow]
 uid = [1001]
 # gid = [2000]
 # pid = [12345]
@@ -80,12 +85,12 @@ No-JWT connections on the stream transports resolve through the same
 public-access rules as tokenless QUIC clients (see [`[auth]`](#auth) `public`).
 See [Stream Listeners](/bin/relay/auth#stream-listeners) for details.
 
-### \[server.tls]
+### \[listen.tls]
 
 TLS configuration for the QUIC endpoint.
 
 ```toml
-[server.tls]
+[listen.tls]
 # Option 1: Provide certificate files
 cert = "/path/to/cert.pem"   # Certificate chain
 key = "/path/to/key.pem"     # Private key
@@ -96,11 +101,14 @@ generate = ["localhost", "127.0.0.1"]
 # Optional: root CAs to accept for mTLS peer authentication.
 # Clients that present a cert signed by one of these CAs are granted
 # full access (publish/subscribe/cluster). Intended for relay clustering.
-# Supported by the quinn and noq backends.
 root = ["/path/to/peer-ca.pem"]
 ```
 
-For production, use certificates from Let's Encrypt or another CA.
+For production, use certificates from Let's Encrypt or another CA. The Quinn
+and Noq backends watch certificate, key, and root CA files and reload them for
+new connections. Existing connections keep the identity established by their
+original handshake. The Quiche backend reloads outbound client roots but
+requires a relay restart after rotating its inbound TLS files.
 
 ### \[web.http]
 
@@ -110,10 +118,25 @@ HTTP server for debugging endpoints.
 [web.http]
 # Listen address for HTTP (TCP)
 # Defaults to disabled if not specified
-listen = "0.0.0.0:4443"
+bind = "0.0.0.0:4443"
 ```
 
 See [HTTP Endpoints](/bin/relay/http) for available endpoints.
+
+### \[internal]
+
+Plain HTTP listener for unauthenticated operational endpoints. It is disabled
+unless `listen` is configured. Bind it only to loopback or a trusted private
+network.
+
+```toml
+[internal]
+listen = "127.0.0.1:9101"
+```
+
+It serves `/health`, Prometheus traffic and listener counters at `/metrics`, and
+the local cluster topology view at `/nodes`. See
+[HTTP Endpoints](/bin/relay/http) for the response formats.
 
 ### \[web.https]
 
@@ -124,10 +147,16 @@ HTTPS/WSS server for TCP fallback.
 # Listen address for HTTPS/WSS (TCP)
 listen = "0.0.0.0:443"
 
-# TLS certificates (can be the same as server.tls)
+# TLS certificates (can be the same as listen.tls)
 cert = "cert.pem"
 key = "key.pem"
+
+# Optional root CAs for HTTPS/WSS client certificate authentication.
+root = ["/path/to/peer-ca.pem"]
 ```
+
+HTTPS/WSS certificate, key, and root CA files are watched and reloaded for new
+connections. A failed reload retains the last valid configuration.
 
 ### \[auth]
 
@@ -167,32 +196,42 @@ node = "us-west.example.com:4443"
 mesh = true
 
 # Optional. Fetch the peer list from an HTTP(S) endpoint or local file (a JSON
-# array of hostnames) and reconcile it at runtime, no restart needed.
+# array of peer URLs) and reconcile it at runtime, replacing sessions when URL
+# configuration such as ?cost= or ?jwt= changes.
 connect_api = "https://api.example.com/cluster/connect"
 
 # JWT for outbound cluster dials (alternative to mTLS), applied to any peer
-# whose URL has no inline ?jwt=. Required to authenticate gossip / connect_api
-# discovered peers; for static `connect` peers, prefer an inline ?jwt=.
+# whose URL has no inline ?jwt=. An inline token works for static and
+# connect_api-discovered peers. Gossip must use this shared token or mTLS because
+# the advertised cluster.node URL is public.
 token = "cluster.jwt"
 
-# Optional. How long a broadcast stays alive and announced after abruptly
-# losing its last publisher (a session dying without unannouncing). A publisher
-# reconnecting within the window resumes the same broadcast and subscribers
-# never notice. A clean unannounce always takes effect immediately. "0"
-# unannounces abrupt losses immediately too. Default: 5s.
-linger = "5s"
+[cluster.lan]
+# Optional. Discover peers on the local network with mDNS instead of (or as well
+# as) gossip and connect_api. Requires `node` and `secret`.
+enabled = true
+
+# The shared key admitting a peer to the LAN mesh: 64 hexadecimal characters, or
+# a path to a file containing them. Every peer needs the same value. Required,
+# because mDNS is unauthenticated and the relay attaches `token` to any peer it
+# dials.
+secret = "/etc/moq/cluster.key"
 ```
 
 See [Clustering](/bin/relay/cluster) for topology choices and the trade-off between hand-listed peers and gossip.
 
-### \[client]
+### \[connect]
 
 Client settings used when connecting to other relays (clustering).
 
 ```toml
-[client]
+[connect]
+# Maximum time for one outbound dial and MoQ handshake. Defaults to 30s.
+# Set to "0" to wait forever.
+timeout = "30s"
+
 # Disable TLS verification (development only!)
-tls.disable_verify = true
+tls.insecure = true
 
 # What to do with the URI an upstream peer names in its GOAWAY:
 # "follow" (default), "same-host", or "ignore". A followed redirect is dialed
@@ -213,19 +252,52 @@ goaway.handover = "10s"
 # e.g. to dial a local relay with a private CA and a remote one with a public CA.
 # Defaults to true only when no custom root is set.
 # tls.system_roots = true
+
+# Delay before also dialing the next resolved address (Happy Eyeballs).
+# When DNS returns both IPv6 and IPv4, attempts alternate between the families,
+# each starting this long after the previous one (or immediately, if that one
+# fails outright), and the first connection to complete wins. "0s" dials every
+# address at once. Defaults to 250ms, RFC 8305's Connection Attempt Delay.
+# race = "250ms"
+
+# Delay before dialing an IPv4 address while the full DNS answer is outstanding.
+# A dial runs the usual all-families lookup alongside an IPv4-only one that
+# answers without waiting for the AAAA record, and starts on the first answer, so
+# a slow or dropped AAAA query no longer delays it. The full answer is
+# authoritative, including which family to try first, so this is how long the
+# IPv4-only one waits for it before going ahead alone. "0s" dials as soon as any
+# address resolves. Defaults to 50ms, RFC 8305's Resolution Delay.
+# resolution_delay = "50ms"
 ```
 
-### \[server.quic] and \[client.quic]
+Custom client root files are watched and reloaded for new outbound connections.
+If a changed file is temporarily missing, empty, or invalid, the relay retains
+the last valid roots.
 
-Per-connection QUIC transport knobs, applied to incoming connections
-(`server.quic`) and to outgoing cluster dials (`client.quic`) independently.
+The connect timeout is also available as `--connect-timeout` or
+`MOQ_CONNECT_TIMEOUT`, the address race as `--connect-race` or
+`MOQ_CONNECT_RACE`, and the resolution delay as `--connect-resolution-delay` or
+`MOQ_CONNECT_RESOLUTION_DELAY`. They compose: the resolution delay picks which
+family goes first, the race staggers the attempts within one dial, and the
+timeout bounds that dial as a whole.
+
+Pinning the source port (a non-zero port in `--connect-bind`) disables address
+racing on the `quiche` backend, which binds a fresh socket per attempt and so
+can only dial one address at a time from a fixed port. The relay logs a warning
+at startup when both are set. Leave the bind port at `0` to keep failover, or
+use the `quinn` or `noq` backend, which share one socket across attempts and are
+unaffected.
+
+### \[quic]
+
+Per-connection QUIC transport knobs. These mean the same thing whichever way a
+connection was opened, so they are spelled once and shared by `[listen]` and
+`[connect]` alike. The knobs that only apply when accepting (the QUIC preferred
+address and QUIC-LB connection IDs) live on `[listen]` instead.
 
 ```toml
-[server.quic]
+[quic]
 # "loss" or "delay". Defaults per backend; don't set "delay" on noq/iroh (see below).
-congestion_control = "delay"
-
-[client.quic]
 congestion_control = "delay"
 ```
 
@@ -248,9 +320,8 @@ noq and iroh are the exception because their shared BBRv3 can panic on packet
 loss, which aborts the process. Do not select `delay` on those backends unless
 you are testing that controller on purpose and can tolerate the crash.
 
-Also available as `--server-quic-congestion-control` /
-`--client-quic-congestion-control`, or `MOQ_SERVER_QUIC_CONGESTION_CONTROL` /
-`MOQ_CLIENT_QUIC_CONGESTION_CONTROL`.
+Also available as `--quic-congestion-control` /
+`--quic-congestion-control`, or `MOQ_QUIC_CONGESTION_CONTROL`.
 
 ### \[stats]
 
@@ -466,7 +537,7 @@ All eviction happens as tracks write (there is no background reaper), so both
 up. A publisher that stops writing but stays connected keeps what it had cached
 until it resumes or the broadcast closes; under memory pressure the byte budget
 is repaid by the tracks that are still writing. A publisher that disconnects has
-its groups released once the broadcast closes (see `cluster.linger`).
+its groups released as soon as the broadcast closes with it.
 
 All three flags also accept CLI arguments (`--cache-capacity`,
 `--cache-headroom`, `--cache-duration`) and environment variables

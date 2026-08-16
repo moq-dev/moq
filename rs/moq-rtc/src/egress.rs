@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use hang::catalog::{AudioCodec, VideoCodecKind};
+use moq_mux::catalog::Stream;
 use moq_mux::catalog::hang::Catalog;
 use str0m::format::Codec;
 use str0m::media::{Frequency, MediaTime, Mid, Pt};
@@ -105,13 +106,7 @@ impl EgressSource {
 	/// caller hands `EgressSource` to [`Session::egress`](crate::session::Session::egress)
 	/// which takes the receiver via [`Self::take_writes`].
 	pub async fn new(source: moq_mux::Source) -> Result<Self> {
-		let catalog_track = source
-			.broadcast()
-			.await?
-			.track(hang::Catalog::DEFAULT_NAME)?
-			.subscribe(hang::Catalog::default_subscription())
-			.await?;
-		let mut consumer = moq_mux::catalog::hang::Consumer::new(catalog_track);
+		let mut consumer = source.catalog::<()>(moq_mux::catalog::CatalogFormat::Hang).await?;
 		let catalog = consumer
 			.next()
 			.await
@@ -171,11 +166,14 @@ impl EgressSource {
 			.audio
 			.renditions
 			.values()
-			.any(|r| matches!(r.codec, AudioCodec::Opus))
+			.any(|r| matches!(r.codec, AudioCodec::Opus) && valid_reference(&self.source, r.broadcast.as_ref()))
 		{
 			out.push(Codec::Opus);
 		}
 		for rendition in self.catalog.video.renditions.values() {
+			if !valid_reference(&self.source, rendition.broadcast.as_ref()) {
+				continue;
+			}
 			let codec = match rendition.codec.kind() {
 				VideoCodecKind::H264 => Some(Codec::H264),
 				VideoCodecKind::H265 => Some(Codec::H265),
@@ -194,6 +192,10 @@ impl EgressSource {
 	}
 }
 
+fn valid_reference(source: &moq_mux::Source, broadcast: Option<&moq_net::PathRelative<'_>>) -> bool {
+	source.resolve_reference(broadcast).is_some()
+}
+
 /// Find the first catalog rendition for the given codec and build a
 /// [`codec::Track`] subscribed to it, honoring an optional cross-broadcast
 /// reference (the rendition's catalog `broadcast` field). Returns `None` if no
@@ -201,11 +203,10 @@ impl EgressSource {
 async fn pick_track(source: &moq_mux::Source, catalog: &Catalog, codec: Codec) -> Result<Option<codec::Track>> {
 	match codec {
 		Codec::Opus => {
-			let Some((name, config)) = catalog
-				.audio
-				.renditions
-				.iter()
-				.find(|(_, c)| matches!(c.codec, AudioCodec::Opus))
+			let Some((name, config)) =
+				catalog.audio.renditions.iter().find(|(_, c)| {
+					matches!(c.codec, AudioCodec::Opus) && valid_reference(source, c.broadcast.as_ref())
+				})
 			else {
 				return Ok(None);
 			};
@@ -221,7 +222,12 @@ async fn pick_track(source: &moq_mux::Source, catalog: &Catalog, codec: Codec) -
 				Codec::Av1 => VideoCodecKind::AV1,
 				_ => unreachable!(),
 			};
-			let Some((name, config)) = catalog.video.renditions.iter().find(|(_, c)| c.codec.kind() == target) else {
+			let Some((name, config)) = catalog
+				.video
+				.renditions
+				.iter()
+				.find(|(_, c)| c.codec.kind() == target && valid_reference(source, c.broadcast.as_ref()))
+			else {
 				return Ok(None);
 			};
 			let track = source.subscribe_track(config.broadcast.as_ref(), name).await?;
@@ -293,6 +299,42 @@ pub fn dispatch(rtc: &mut str0m::Rtc, request: WriteRequest, wallclock: Instant)
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use hang::catalog::{AudioConfig, H264, VideoCodec, VideoConfig};
+	use moq_net::{Origin, PathRelative};
+
+	#[test]
+	fn catalog_codecs_ignores_codecs_available_only_via_escaping_references() {
+		let origin = Origin::random().produce();
+		let source = moq_mux::Source::new(origin.consume(), "a/pub");
+		let mut catalog = Catalog::default();
+
+		let mut escaped_audio = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		escaped_audio.broadcast = Some(PathRelative::new("../../source").to_owned());
+		catalog.audio.renditions.insert("opus".to_string(), escaped_audio);
+
+		let mut escaped_video = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0,
+			level: 0x1e,
+			inline: false,
+		});
+		escaped_video.broadcast = Some(PathRelative::new("../../source").to_owned());
+		catalog.video.renditions.insert("h264".to_string(), escaped_video);
+
+		let mut valid_video = VideoConfig::new(VideoCodec::VP8);
+		valid_video.broadcast = Some(PathRelative::new("./source").to_owned());
+		catalog.video.renditions.insert("vp8".to_string(), valid_video);
+
+		let (writes_tx, writes_rx) = mpsc::channel(1);
+		let egress = EgressSource {
+			source,
+			catalog,
+			writes_tx,
+			writes_rx: Some(writes_rx),
+		};
+
+		assert_eq!(egress.catalog_codecs(), vec![Codec::Vp8]);
+	}
 
 	#[test]
 	fn egress_clock_ignores_cross_track_dequeue_jitter() {

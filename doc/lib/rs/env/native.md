@@ -13,7 +13,7 @@ This guide covers connecting to a relay, discovering broadcasts, subscribing to 
 The key crates:
 
 - [moq-native](https://crates.io/crates/moq-native): Configures QUIC (via [quinn](https://crates.io/crates/quinn) by default, with [noq](https://crates.io/crates/noq) available through the `noq` feature) and TLS (via [rustls](https://crates.io/crates/rustls)) for you.
-- [moq-net](https://crates.io/crates/moq-net) — The core networking layer. Can be used directly with any `web_transport_trait::Session` implementation if you need full control over the QUIC endpoint.
+- [moq-net](https://crates.io/crates/moq-net): The core networking layer. Can be used directly with any `web_transport_trait::poll::Session` implementation if you need full control over the QUIC endpoint.
 - [hang](https://crates.io/crates/hang) — Media-specific catalog and container format on top of `moq-net`.
 
 ## Connecting
@@ -21,12 +21,17 @@ The key crates:
 Create a [`ClientConfig`](https://docs.rs/moq-native/latest/moq_native/struct.ClientConfig.html) and connect to a relay:
 
 ```rust
-let client = moq_native::ClientConfig::default().init()?;
+let client = moq_native::connect::Config::default().init()?;
 let url = url::Url::parse("https://cdn.moq.dev/anon/my-broadcast")?;
-let session = client.connect(url).await?;
+
+// A background task dials and redials with backoff if the session drops.
+// `established` waits for the first session and hands the connection back;
+// hold it to keep reconnecting, drop it to disconnect.
+let connection = client.connect(url).established().await?;
 ```
 
 The default configuration uses system TLS roots, enables WebSocket fallback, and gives QUIC a 200ms head-start.
+Set [`ClientConfig::reconnect`](https://docs.rs/moq-native/latest/moq_native/struct.ClientConfig.html#structfield.reconnect) to `false` for a one-shot dial: the session's close then ends the connection instead of triggering a redial.
 
 ### URL Schemes
 
@@ -36,6 +41,22 @@ The client supports several URL schemes:
 - `http://` — Local development with self-signed certs (fetches the certificate fingerprint automatically)
 - `moqt://` — Raw QUIC with the MoQ IETF ALPN (no WebTransport overhead)
 - `moql://` — Raw QUIC with the moq-lite ALPN
+
+The URL path and query mean the same thing on every scheme.
+Raw QUIC has no request URI to put them in, so the client sends them in the MoQ SETUP instead; the server sees the same request path either way.
+
+### Several Addresses for One Peer
+
+`connect` takes a `Url` for the usual case of a peer at a known address.
+When the same peer has several candidate addresses and only some of them route from here, pass [`Addrs`](https://docs.rs/moq-native/latest/moq_native/struct.Addrs.html) instead: each attempt walks them in order and keeps the first that connects.
+
+```rust
+let addrs = moq_native::Addrs::new(primary).or(fallback);
+let connection = client.connect(addrs).established().await?;
+```
+
+This is for a peer that was *discovered* rather than configured, where the record lists every interface it answered on and nothing says which one reaches you.
+`Addrs` is non-empty by construction, so a connection always has somewhere to dial; use `Addrs::collect` when the addresses come from an iterator that may be empty.
 
 ### Transport Racing
 
@@ -52,7 +73,7 @@ Pass JWT tokens via URL query parameters:
 let url = Url::parse(&format!(
     "https://relay.example.com/room/123?jwt={}", token
 ))?;
-let session = client.connect(url).await?;
+let connection = client.connect(url).established().await?;
 ```
 
 See the [Authentication guide](/bin/relay/auth) for how to generate tokens.
@@ -61,13 +82,16 @@ See the [Authentication guide](/bin/relay/auth) for how to generate tokens.
 
 The [video example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) demonstrates publishing end-to-end.
 
-The connected [`Session`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html) exposes a [`publisher()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.publisher) [`origin::Producer`](https://docs.rs/moq-net/latest/moq_net/origin/struct.Producer.html) you publish broadcasts into:
+Wire an [`origin::Producer`](https://docs.rs/moq-net/latest/moq_net/origin/struct.Producer.html) into the client before connecting and publish your broadcasts into that. The origin outlives any single session, so a reconnect resumes where it left off; reaching for the session's own [`publisher()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.publisher) instead ties your broadcasts to one transport.
 
 ```rust
-let session = client.connect(url).await?;
+// Publish into an origin wired before connecting: it outlives any one session,
+// so the broadcast survives a reconnect. Hold the connection to keep redialing.
+let origin = moq_net::Origin::random().produce();
+let _connection = client.with_publisher(origin.consume()).connect(url);
 
 let route = moq_net::broadcast::Route::new().with_announce(true);
-let mut broadcast = session.publisher().create_broadcast("", route)?;
+let mut broadcast = origin.create_broadcast("", route)?;
 // ... add catalog and tracks to the broadcast ...
 ```
 
@@ -77,16 +101,19 @@ See the full [video.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/example
 
 The [subscribe example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs) demonstrates subscribing end-to-end.
 
-The session also exposes a [`consumer()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.consumer) [`origin::Consumer`](https://docs.rs/moq-net/latest/moq_net/origin/struct.Consumer.html) for receiving announcements:
+Subscribing works the same way round: wire an origin in before connecting and read announcements from its [`origin::Consumer`](https://docs.rs/moq-net/latest/moq_net/origin/struct.Consumer.html), so they keep arriving across a reconnect.
 
 ```rust
-let session = client.connect(url).await?;
-let mut announced = session.consumer().announced();
+// Consume into an origin wired before connecting, so announcements keep flowing
+// across a reconnect. Hold the connection to keep redialing.
+let origin = moq_net::Origin::random().produce();
+let mut announced = origin.consume().announced();
+let _connection = client.with_subscriber(origin).connect(url);
 
 // Wait for broadcasts to be announced.
-while let Some((path, broadcast)) = announced.next().await {
-    let Some(broadcast) = broadcast else {
-        tracing::info!(%path, "broadcast ended");
+while let Some(update) = announced.next().await {
+    let Some(broadcast) = update.broadcast else {
+        tracing::info!(path = %update.path, "broadcast ended");
         continue;
     };
     // Subscribe to tracks on this broadcast...

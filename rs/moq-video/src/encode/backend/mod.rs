@@ -23,6 +23,9 @@ use crate::{Error, Frame};
 
 mod openh264;
 
+#[cfg(test)]
+pub(crate) mod probe;
+
 #[cfg(target_os = "macos")]
 mod videotoolbox;
 
@@ -44,7 +47,20 @@ pub(crate) trait Backend: Send {
 	/// request, arriving via [`Encoder::keyframe`](super::Encoder::keyframe).
 	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error>;
 
-	/// Flush the encoder, returning any buffered access units.
+	/// Return every access unit the codec is still holding, leaving the encoder
+	/// usable for the frames that follow.
+	///
+	/// The caller reaches for this at a boundary the output has to respect, which
+	/// on a live track is a group: a codec that pipelines would otherwise carry the
+	/// last frames of one group into the next, ahead of its keyframe, where a
+	/// consumer joining there cannot decode them.
+	///
+	/// No default, even though most backends have nothing to hold: a pipelined one
+	/// that inherited an empty implementation would drop frames at every boundary
+	/// and look like it worked.
+	fn flush(&mut self) -> Result<Vec<Encoded>, Error>;
+
+	/// Flush the encoder for the last time, returning any buffered access units.
 	fn finish(&mut self) -> Result<Vec<Encoded>, Error>;
 
 	/// Retune the live encoder to `bitrate` bits per second, taking effect from
@@ -106,6 +122,19 @@ const SOFTWARE: &[Candidate] = &[Candidate {
 	open: openh264::Openh264::open,
 }];
 
+/// Test-only backends. Deliberately in neither list above, so `Auto` /
+/// `Hardware` / `Software` can never select one: they exist to be asked for by
+/// name.
+#[cfg(test)]
+const NAMED_ONLY: &[Candidate] = &[Candidate {
+	name: probe::NAME,
+	codecs: &[Codec::H264],
+	open: probe::Probe::open,
+}];
+
+#[cfg(not(test))]
+const NAMED_ONLY: &[Candidate] = &[];
+
 /// Open the best encoder for `config.codec` + `config.kind`, trying candidates
 /// in priority order and falling back until one succeeds.
 pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
@@ -121,6 +150,7 @@ pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 		Kind::Named(name) => HARDWARE
 			.iter()
 			.chain(SOFTWARE.iter())
+			.chain(NAMED_ONLY.iter())
 			.filter(supports)
 			.filter(|c| c.name == name)
 			.collect(),

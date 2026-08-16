@@ -47,14 +47,24 @@ pub struct Config {
 
 	/// How long a play's FLV muxer waits for a stalled group before skipping to a
 	/// newer one (the moq-level frame-drop latency). Defaults to
-	/// [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY); set [`Duration::ZERO`] to drop
-	/// stale groups aggressively. Only affects egress (plays); ingest ignores it.
-	pub latency: Duration,
+	/// [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY); set [`Latency::REAL_TIME`](moq_mux::Latency::REAL_TIME)
+	/// to drop stale groups aggressively. Only affects egress (plays); ingest ignores it.
+	pub latency: moq_mux::Latency,
+
+	/// How long relays keep a non-latest group of an ingested media track fetchable, or
+	/// `None` for hang's own default.
+	///
+	/// A retention budget, not a delivery one: it never makes a subscriber play further
+	/// behind live, it caps how far back a FETCH can still reach. The default suits a
+	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
+	/// advertise segments that are still fetchable. Lower it when nothing reads history
+	/// and the memory matters. Only affects ingest (publishes); egress ignores it.
+	pub latency_max: Option<Duration>,
 
 	/// TLS configuration for RTMPS (RTMP over TLS). When set, the
 	/// [`listen`](Self::listen) address speaks RTMPS instead of plaintext RTMP,
 	/// so clients connect with `rtmps://`. Build it with
-	/// `moq_native::tls::Server::server_config` (pass an empty ALPN list) or
+	/// `moq_native::tls::Listen::server_config` (pass an empty ALPN list) or
 	/// any [`rustls::ServerConfig`]. Leave `None` for plaintext.
 	///
 	/// To serve both RTMP and RTMPS, clone one base config and call [`run`] for
@@ -71,6 +81,7 @@ impl Default for Config {
 			listen: None,
 			prefix: String::new(),
 			latency: crate::DEFAULT_LATENCY,
+			latency_max: None,
 			#[cfg(feature = "tls")]
 			tls: None,
 			active: ActivePaths::default(),
@@ -121,6 +132,7 @@ pub async fn run(origin: origin::Producer, config: Config) -> Result<()> {
 	let active = config.active.clone();
 	let prefix = Arc::new(config.prefix);
 	let latency = config.latency;
+	let latency_max = config.latency_max;
 	// Players are served out of the same origin the publishers write into.
 	let consumer = origin.consume();
 
@@ -147,7 +159,7 @@ pub async fn run(origin: origin::Producer, config: Config) -> Result<()> {
 						let _ = publish.reject("path already being published").await;
 						return;
 					};
-					if let Err(err) = publish.accept(&origin, &path).await {
+					if let Err(err) = publish.with_latency_max(latency_max).accept(&origin, &path).await {
 						tracing::warn!(%peer, %path, %err, "RTMP ingest ended with error");
 					}
 				});

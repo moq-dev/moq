@@ -1,7 +1,7 @@
 {
 	"name": "@moq/token",
 	"type": "module",
-	"version": "0.3.0",
+	"version": "0.3.1",
 	"description": "Media over QUIC - Token Generation and Validation",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
@@ -13,7 +13,7 @@
 		"moq-token": "./src/cli.ts"
 	},
 	"scripts": {
-		"build": "rimraf dist && tsc -b && bun ../common/package.ts",
+		"build": "rimraf dist && tsc -b tsconfig.build.json && bun ../common/package.ts",
 		"check": "tsc --noEmit && tsc -b examples/tsconfig.json",
 		"test": "bun test --only-failures",
 		"release": "bun ../common/release.ts"
@@ -21,12 +21,12 @@
 	"dependencies": {
 		"@hexagon/base64": "^2.0.4",
 		"commander": "^15.0.0",
-		"jose": "^6.2.3",
+		"jose": "^6.2.7",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
 		"@types/bun": "^1.3.14",
-		"@types/node": "^26.1.1",
+		"@types/node": "^26.1.2",
 		"rimraf": "^6.1.3",
 		"typescript": "7.0.2"
 	}

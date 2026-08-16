@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/moq-dev/moq/compare/moq-loc-v0.2.0...moq-loc-v0.2.1) - 2026-08-03
+
+### Fixed
+
+- *(loc)* adopt the draft-ietf-moq-loc-04 Timestamp code point, and align relay-hops with lite-06 ([#2581](https://github.com/moq-dev/moq/pull/2581))
+
 ## [0.2.0](https://github.com/moq-dev/moq/compare/moq-loc-v0.1.0...moq-loc-v0.2.0) - 2026-07-22
 
 ### Other

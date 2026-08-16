@@ -12,11 +12,12 @@ use std::{
 	collections::{HashMap, VecDeque},
 	sync::Arc,
 	task::{Poll, ready},
+	time::Duration,
 };
 
 use crate::Error;
 
-use super::{OriginList, Requests, WeakCache};
+use super::{Origin, OriginList, Requests, WeakCache};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
@@ -32,6 +33,21 @@ pub struct Info {
 	/// broadcast. Defaults to an unknown origin with an unbounded pool (a standalone
 	/// broadcast with no relay origin).
 	pub origin: super::origin::Info,
+
+	/// The path this broadcast is named by, which relative references in a catalog it
+	/// serves (hang's `broadcast` field) resolve against.
+	///
+	/// [`origin::Producer::create_broadcast`](super::origin::Producer::create_broadcast) stamps
+	/// the path the broadcast was created at, relative to the origin root (including through a
+	/// scoped producer). Every [`Consumer`] an origin hands out is then re-stamped with the path
+	/// *that handle* was requested or announced at, relative to its cursor's root, since the
+	/// same broadcast can be reached under more than one name: a dynamic handler may serve a
+	/// standalone broadcast at any path, and a rooted cursor names a broadcast more tightly
+	/// than the origin does.
+	///
+	/// Empty (the default) for a standalone broadcast with no origin, which is then its own
+	/// root: any `..` reference escapes.
+	pub path: crate::PathOwned,
 }
 
 impl Info {
@@ -60,8 +76,10 @@ pub const MAX_COST: u64 = (1 << 62) - 1;
 /// The cost given to a route whose session is draining, so every other candidate
 /// outranks it while it stays selectable as the last path to the content.
 ///
-/// A session sets this on its routes when its peer sends a GOAWAY, so seeing it
-/// on a [`Route`] means the path still works but is on its way out.
+/// A session sets this on its routes when its peer sends a GOAWAY. Draining is
+/// deliberately not a distinct state: cost is the whole mechanism, so a route
+/// whose accumulated cost saturates the wire ceiling ranks (and is treated)
+/// identically, as a path of last resort.
 ///
 /// It is [`MAX_COST`] rather than a value beyond it for the reason above: a
 /// draining route is still announced downstream, so its cost has to fit the wire.
@@ -167,6 +185,72 @@ impl Route {
 	}
 }
 
+/// How long a drained broadcast keeps advertising a zero cost before restoring its
+/// cold one.
+///
+/// Pure hysteresis: demand edges arrive exactly (via [`Demand`]), but re-pricing the
+/// instant the last viewer leaves would flap routing across the mesh on viewer churn.
+pub(crate) const COST_LINGER: Duration = Duration::from_secs(5);
+
+/// The routes advertisable to one peer, best first: the announced ones whose hop chain
+/// avoids both the peer (`exclude`) and ourselves (a reflection), each paired with
+/// whether it is the serving route.
+///
+/// `routes` is the broadcast's table in preference order with the serving (active)
+/// route first, so a peer usually receives exactly what we serve everyone; a peer the
+/// active chain flows through receives the best standby instead of nothing. The
+/// subscribe path picks its source by the same exclusion (see
+/// [`origin::Consumer::excluding`](super::origin::Consumer::excluding)), which keeps
+/// the advertised chain truthful and the mesh loop-free.
+///
+/// Callers take the first entry they can actually stamp themselves onto, since a chain
+/// already at `MAX_HOPS` has no room and almost certainly means a loop. Empty when
+/// every chain loops through the peer or us, or none is announced.
+/// [`Origin::UNKNOWN`] identifies nothing, so it excludes nothing and is never a loop.
+pub(crate) fn advertisable_routes(
+	routes: &[Route],
+	self_origin: Origin,
+	exclude: Origin,
+) -> impl Iterator<Item = (&Route, bool)> {
+	routes.iter().enumerate().filter_map(move |(index, route)| {
+		// Offline routes are reachable by exact path but never advertised.
+		if !route.announce {
+			return None;
+		}
+		if exclude != Origin::UNKNOWN && route.hops.contains(&exclude) {
+			return None;
+		}
+		if self_origin != Origin::UNKNOWN && route.hops.contains(&self_origin) {
+			return None;
+		}
+		Some((route, index == 0))
+	})
+}
+
+/// The cost to advertise for a route.
+///
+/// While the broadcast has demand, the *serving* (active) route costs zero: our
+/// ingress is already paid for (or, for a local standby publisher, the work is already
+/// running), so one more subscriber only pays the links below us. That is what lets a
+/// cluster deduplicate onto a warm copy. A standby advertised to a peer the active
+/// chain flows through keeps its own accumulated cost, since serving that peer means
+/// opening a fresh ingest. Otherwise we forward the accumulated cost unchanged.
+///
+/// A ceiling-cost route pierces the carrying discount. For a drain (the ceiling's
+/// primary producer), advertising zero would keep pulling subscribers onto a path
+/// about to vanish. The rule keys on the value because the reason does not travel on
+/// the wire, and a cost that saturated through charges is a last-resort path too.
+///
+/// The receiving side adds its own link price on top, so this never accounts for the
+/// link we are sending over. The result is clamped to the largest wire varint because
+/// locally created routes can name an arbitrary `u64`.
+pub(crate) fn outgoing_cost(demand: &Demand, route: &Route, serving: bool) -> u64 {
+	match serving && demand.is_used() && route.cost < DRAIN_COST {
+		true => 0,
+		false => route.cost.min(MAX_COST),
+	}
+}
+
 #[derive(Default)]
 struct BroadcastState {
 	// Weak references for deduplication. Doesn't prevent track auto-close.
@@ -205,8 +289,7 @@ struct BroadcastState {
 	closing: bool,
 
 	// Set only by `Producer::finish()`: the broadcast ended deliberately, as
-	// opposed to aborting or losing its producer. The origin reads this to decide
-	// whether a detached source may linger for a replacement.
+	// opposed to aborting or losing its producer.
 	finished: bool,
 
 	// The error passed to `Producer::abort()`, reported by `Consumer::closed`.
@@ -372,9 +455,26 @@ impl Producer {
 		name: impl Into<Arc<str>>,
 		info: impl Into<Option<track::Info>>,
 	) -> Result<track::Producer, Error> {
+		let name = name.into();
 		let info = info.into().unwrap_or_default();
+		let mut state = self.state.lock();
+
+		// A consumer may have requested this name before it existed (a live
+		// [`Dynamic`] queues such requests). Creating the track fulfills that
+		// request: its consumers resolve against this very producer. Without
+		// this they would be stranded, since the name is taken the moment the
+		// track exists, so no handler could ever serve their queue entry.
+		if let Some(request) = state.requests.take(name.as_ref()) {
+			let track = request.with_stats(self.stats.clone()).accept(info);
+			// Cache it like a served request so concurrent lookups coalesce; a
+			// live same-name entry cannot exist (its presence would have kept
+			// the request from queuing).
+			let _ = state.tracks.insert(name, track.weak());
+			return Ok(track);
+		}
+
 		let track = track::Producer::new(self.info.clone(), name, info).with_stats(self.stats.clone());
-		self.state.lock().insert_track(track.weak())?;
+		state.insert_track(track.weak())?;
 		Ok(track)
 	}
 
@@ -541,9 +641,8 @@ impl Producer {
 	/// producer clones are still alive, and existing tracks stay readable so
 	/// consumers can drain what they already have (an abort does not cascade into
 	/// the tracks). Unlike a finish, consumers observe `err` from
-	/// [`Consumer::closed`], and an origin treats the source as ungracefully lost,
-	/// so the path may linger for a replacement (see
-	/// [`origin::Info::linger`](crate::origin::Info::linger)).
+	/// [`Consumer::closed`], so the end reads as a failure rather than a
+	/// deliberate one.
 	///
 	/// Consumes the producer: an abort is terminal. Errors if the broadcast was
 	/// already finished or aborted.
@@ -613,8 +712,8 @@ impl Producer {
 /// A session-owned handle to a source broadcast created via
 /// [`crate::origin::Producer::create_broadcast`]: [`Self::finish`] ends it
 /// deliberately, while dropping the guard aborts it as [`Error::Dropped`] (a dead
-/// session), letting the origin linger the path for a reconnect. Shared by the
-/// lite and IETF subscribers so the drop-vs-finish contract lives in one place.
+/// session), so consumers observe the loss as an error. Shared by the lite and
+/// IETF subscribers so the drop-vs-finish contract lives in one place.
 pub(crate) struct SourceGuard {
 	// `Option` so `finish` can consume the producer while `Drop` aborts it.
 	producer: Option<Producer>,
@@ -889,7 +988,23 @@ impl Consumer {
 		self
 	}
 
-	/// The broadcast's static metadata, fixed when it was created.
+	/// Stamp the path this handle was handed out at, overriding [`Info::path`].
+	///
+	/// The origin applies it to every broadcast it resolves, because the name belongs to
+	/// the (broadcast, cursor) pair rather than to the broadcast: what a catalog's relative
+	/// references resolve against is where the *reader* found the broadcast, not where its
+	/// producer happened to create it. Free when the two already agree, which is the case
+	/// for a broadcast created at the path an unrooted cursor asks for.
+	pub(crate) fn with_path(mut self, path: crate::PathOwned) -> Self {
+		if self.info.path != path {
+			let mut info = (*self.info).clone();
+			info.path = path;
+			self.info = Arc::new(info);
+		}
+		self
+	}
+
+	/// The broadcast's metadata, as reached through this handle.
 	pub fn info(&self) -> &Info {
 		&self.info
 	}
@@ -956,9 +1071,12 @@ impl Consumer {
 
 	/// Get a handle to a track on this broadcast.
 	pub fn track(&self, name: &str) -> Result<track::Consumer, Error> {
-		// Tag the resolved track with this broadcast's egress scope so its
-		// subscriptions, fetches, and groups are attributed to the same broadcast.
-		self.track_inner(name).map(|track| track.with_stats(self.stats.clone()))
+		// Rebind the track to *this* handle's view of the broadcast, so a catalog track
+		// resolves its relative references against the path we were handed out at rather
+		// than the one the producer was created at, and tag it with this broadcast's egress
+		// scope so its subscriptions, fetches, and groups are attributed to the same broadcast.
+		self.track_inner(name)
+			.map(|track| track.with_broadcast(self.info.clone()).with_stats(self.stats.clone()))
 	}
 
 	fn track_inner(&self, name: &str) -> Result<track::Consumer, Error> {
@@ -982,7 +1100,11 @@ impl Consumer {
 				spliced.tracks.remove(name);
 			}
 			if let Some(producer) = spliced.tracks.get(name) {
-				return Ok(track::Consumer::spliced(name.into(), producer.consume()));
+				return Ok(track::Consumer::spliced(
+					name.into(),
+					self.info.clone(),
+					producer.consume(),
+				));
 			}
 			// A deliberately-ended broadcast serves nothing new; nothing drains the
 			// pending queue once the front is torn down.
@@ -994,7 +1116,7 @@ impl Consumer {
 			let consumer = producer.consume();
 			spliced.tracks.insert(name.clone(), producer);
 			spliced.pending.push_back(name.clone());
-			return Ok(track::Consumer::spliced(name, consumer));
+			return Ok(track::Consumer::spliced(name, self.info.clone(), consumer));
 		}
 
 		// Reuse a live producer if one is already publishing the track. `get` drops a
@@ -1063,9 +1185,7 @@ impl Consumer {
 	}
 
 	/// Whether the broadcast ended via a deliberate [`Producer::finish`], as opposed
-	/// to aborting or losing its producer. `false` while the broadcast is still live;
-	/// an origin uses this to close a front immediately on a deliberate end instead
-	/// of lingering for a replacement.
+	/// to aborting or losing its producer. `false` while the broadcast is still live.
 	pub fn is_finished(&self) -> bool {
 		self.state.read().finished
 	}
@@ -1505,6 +1625,34 @@ mod test {
 			producer2.unused().now_or_never().is_some(),
 			"new track producer should be unused after its consumer is dropped"
 		);
+	}
+
+	/// Creating a track a consumer already requested fulfills that request: the
+	/// waiting subscriber resolves against the created producer, and no handler
+	/// ever sees the (now-taken) name. Without this the requester is stranded:
+	/// the name exists the moment the track does, so the queue entry could
+	/// never be served under it.
+	#[tokio::test]
+	async fn create_track_fulfills_queued_request() {
+		let mut producer = Info::new().produce();
+		let mut dynamic = producer.dynamic();
+		let bc = dynamic.consume();
+
+		// Queue a request for a track that doesn't exist yet.
+		let subscribing = subscribe_pending!(bc, "video");
+
+		// The producer creates the track before any handler drains the queue.
+		let mut track = producer.create_track("video", None).unwrap();
+		let mut sub = subscribing.await.expect("fulfilled by create_track");
+
+		// The fulfilled subscription is live against this very producer.
+		track.append_group().unwrap();
+		sub.recv_group().await.expect("recv").expect("group");
+
+		// The handler never sees the request; a fresh subscribe reuses the track.
+		dynamic.assert_no_request();
+		let again = bc.track("video").unwrap().subscribe(None).await.unwrap();
+		again.assert_is_clone(&track.subscribe(None));
 	}
 
 	// Cloning a `Consumer` resets its route cursor: a clone that inherited the

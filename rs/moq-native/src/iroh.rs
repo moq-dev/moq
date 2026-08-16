@@ -161,14 +161,14 @@ pub struct EndpointConfig {
 }
 
 impl EndpointConfig {
-	/// Bind the iroh endpoint, applying the per-connection [`crate::quic::Client`] knobs.
+	/// Bind the iroh endpoint, applying the per-connection [`crate::quic::Config`] knobs.
 	///
 	/// iroh is a single P2P endpoint shared by both roles, so it takes the client
 	/// section (the per-connection knobs are symmetric). It only honors the knobs
 	/// its transport-config builder exposes (stream limits, idle timeout, MTU
 	/// discovery, congestion control); it has no keep-alive knob and cannot disable
 	/// GSO, so `gso = false` fails with [`Error::GsoUnsupported`].
-	pub async fn bind(self, quic: &crate::quic::Client) -> Result<Option<Endpoint>> {
+	pub async fn bind(self, quic: &crate::quic::Config) -> Result<Option<Endpoint>> {
 		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
 		}
@@ -273,11 +273,24 @@ pub(crate) async fn accept(
 	}
 }
 
+/// Which transport binding an `iroh://` dial negotiated.
+///
+/// Unlike the other schemes, this isn't known until the ALPN is chosen, and it decides
+/// where the request target travels: H3 puts it in the CONNECT URL, raw QUIC has nowhere
+/// to put it but the SETUP.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Binding {
+	/// Raw QUIC over an iroh connection, carrying no request URI.
+	Raw,
+	/// WebTransport over HTTP/3, carrying the request URI in its CONNECT.
+	H3,
+}
+
 pub(crate) async fn connect(
 	endpoint: &Endpoint,
 	url: Url,
 	addrs: impl IntoIterator<Item = std::net::SocketAddr>,
-) -> Result<web_transport_iroh::Session> {
+) -> Result<(web_transport_iroh::Session, Binding)> {
 	let host = url.host().ok_or(Error::MissingHost)?.to_string();
 	let endpoint_id: iroh::EndpointId = host.parse().map_err(Error::InvalidEndpointId)?;
 
@@ -311,11 +324,14 @@ pub(crate) async fn connect(
 				request = request.with_protocol(alpn.to_string());
 			}
 
-			web_transport_iroh::Session::connect_h3(conn, request).await?
+			(
+				web_transport_iroh::Session::connect_h3(conn, request).await?,
+				Binding::H3,
+			)
 		}
 		alpn if moq_net::ALPNS.contains(&alpn) => {
 			let conn = connecting.await?;
-			web_transport_iroh::Session::raw(conn)
+			(web_transport_iroh::Session::raw(conn), Binding::Raw)
 		}
 		_ => return Err(Error::UnsupportedAlpn(alpn)),
 	};
@@ -362,7 +378,7 @@ mod tests {
 	/// though every other backend defaults to BBR.
 	#[test]
 	fn congestion_control_defaults_to_loss() {
-		let mut quic = crate::quic::Client::default();
+		let mut quic = crate::quic::Config::default();
 		assert_eq!(congestion_control(&quic.resolve()), CongestionControl::Loss);
 
 		// An explicit request still gets through.

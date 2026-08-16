@@ -123,6 +123,21 @@ func (b *BroadcastProducer) PublishAudio(name string, input AudioEncoderInput, o
 	return &AudioProducer{inner: inner}, nil
 }
 
+// PublishVideo publishes a raw-video track with an in-process H.264/H.265
+// encoder.
+//
+// The track is named after the codec (.avc3 / .hev1) and its catalog rendition
+// is published immediately, read out of the encoder itself, so subscribers
+// discover it through the catalog rather than a name you pick, and can find it
+// before the first frame exists.
+func (b *BroadcastProducer) PublishVideo(input VideoEncoderInput, output VideoEncoderOutput) (*VideoProducer, error) {
+	inner, err := b.inner.PublishVideo(input, output)
+	if err != nil {
+		return nil, err
+	}
+	return &VideoProducer{inner: inner}, nil
+}
+
 // PublishTrack creates a track that carries arbitrary byte payloads with no
 // codec validation. info sets track properties (priority, cache, timescale);
 // pass nil for defaults.
@@ -246,6 +261,26 @@ func (m *MediaProducer) Unused(ctx context.Context) error {
 // the bitstream, so a Frame carries only the payload and its timestamp.
 func (m *MediaProducer) WriteFrame(frame Frame) error {
 	return m.inner.WriteFrame(frame)
+}
+
+// Cut draws a group boundary here.
+//
+// Audio has no boundary of its own (every packet is independently decodable), so this is
+// the only thing that gives it groups: call it after every frame for one group (one QUIC
+// stream) the relay forwards without waiting, or at a segment cadence to align with video.
+// Video groups at its own keyframes and needs this only to override that.
+//
+// On a container this declares a new segment, rolling a group on every track it publishes.
+func (m *MediaProducer) Cut() error {
+	return m.inner.Cut()
+}
+
+// Seek draws a group boundary and numbers the next group sequence.
+//
+// Cut with an explicit sequence, for a publisher whose group numbers have to be
+// deterministic: two encoders aligning per GOP so a consumer can fail over between them.
+func (m *MediaProducer) Seek(sequence uint64) error {
+	return m.inner.Seek(sequence)
 }
 
 // Finish closes the media track.
@@ -455,4 +490,40 @@ func (a *AudioProducer) Write(frame AudioFrame) error {
 // Finish flushes pending samples and finalizes the track.
 func (a *AudioProducer) Finish() error {
 	return a.inner.Finish()
+}
+
+// VideoProducer pushes raw pictures and lets a native encoder compress them on
+// the way out.
+type VideoProducer struct {
+	inner *ffi.MoqVideoProducer
+}
+
+// Write encodes and publishes one frame in the configured input format. A
+// hardware encoder pipelines, so a call that puts nothing on the wire is normal
+// rather than an error.
+func (v *VideoProducer) Write(frame VideoFrame) error {
+	return v.inner.Write(frame)
+}
+
+// Cut starts a new group at the next written frame.
+//
+// Optional: the encoder keyframes every Gop frames on its own, and each of
+// those cuts a group, so a subscriber can always join without this. Reach for it
+// only to place the boundaries yourself, aligning groups with something the
+// encoder can't see such as a scene change.
+func (v *VideoProducer) Cut() error {
+	return v.inner.Cut()
+}
+
+// SetBitrate retunes the live encoder, in bits per second. Cheap enough to drive
+// from a congestion controller: no keyframe is forced. An error means this
+// backend can't retune while running, which is not fatal; the encoder keeps its
+// current rate.
+func (v *VideoProducer) SetBitrate(bitrate uint64) error {
+	return v.inner.SetBitrate(bitrate)
+}
+
+// Finish flushes any frames the codec is holding and finalizes the track.
+func (v *VideoProducer) Finish() error {
+	return v.inner.Finish()
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { closeSync, fchmodSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import * as base64 from "@hexagon/base64";
 import { Command, Option } from "commander";
 import type { Algorithm } from "./algorithm.ts";
@@ -47,7 +47,7 @@ program
 				return json;
 			};
 
-			writeFileSync(options.key, encodeKey(key), "utf-8");
+			writePrivateFileSync(options.key, encodeKey(key));
 			console.log(`Generated ${algorithm} key: ${options.key}`);
 
 			if (options.public && key.kty !== "oct") {
@@ -123,6 +123,27 @@ program
 			process.exit(1);
 		}
 	});
+
+/**
+ * Write a file holding private key material, restricted to the owner on Unix.
+ *
+ * The `mode` on open(2) only applies when the file is created, and is masked by the umask either
+ * way. Chmod the handle before writing so overwriting an existing world-readable key tightens it
+ * and the secret never sits in a readable file.
+ */
+function writePrivateFileSync(path: string, contents: string) {
+	const fd = openSync(path, "w", 0o600);
+	try {
+		// Windows has no equivalent of the mode bits, so the file inherits the directory's ACL.
+		if (process.platform !== "win32") {
+			fchmodSync(fd, 0o600);
+		}
+		// writeFileSync loops until every byte lands, unlike writeSync's single short-write-prone call.
+		writeFileSync(fd, contents);
+	} finally {
+		closeSync(fd);
+	}
+}
 
 function parseUnixTimestamp(value: string): number {
 	const timestamp = Number.parseInt(value, 10);

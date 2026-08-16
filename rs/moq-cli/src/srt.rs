@@ -9,7 +9,7 @@ use hang::moq_net;
 use moq_srt::{Request, Server};
 use url::Url;
 
-use crate::moq::notify_ready;
+use crate::moq::{ImportTarget, notify_ready};
 
 /// SRT endpoint args: exactly one of `--connect` (dial) / `--listen` (bind).
 #[derive(clap::Args, Clone)]
@@ -29,13 +29,13 @@ pub struct Args {
 	pub latency: Duration,
 }
 
-/// Accept incoming SRT publishes into the Origin as `name`; reject requests (import).
-pub async fn listen_import(
-	origin: moq_net::origin::Producer,
-	addr: SocketAddr,
-	name: String,
-	latency: Duration,
-) -> anyhow::Result<()> {
+/// Accept incoming SRT publishes into the Origin as `target.name`; reject requests (import).
+pub async fn listen_import(target: ImportTarget, addr: SocketAddr, latency: Duration) -> anyhow::Result<()> {
+	let ImportTarget {
+		origin,
+		name,
+		latency_max,
+	} = target;
 	let mut server = Server::bind(addr, latency).await?;
 	tracing::info!(%addr, %name, "SRT listening (import)");
 	notify_ready();
@@ -46,7 +46,7 @@ pub async fn listen_import(
 				let origin = origin.clone();
 				let name = name.clone();
 				tokio::spawn(async move {
-					if let Err(err) = publish.accept(&origin, &name).await {
+					if let Err(err) = publish.with_latency_max(latency_max).accept(&origin, &name).await {
 						tracing::warn!(%name, %err, "SRT ingest ended with error");
 					}
 				});
@@ -97,18 +97,17 @@ pub async fn listen_export(
 	Ok(())
 }
 
-/// Dial a remote SRT server and pull its stream into the Origin under `name` (import).
-pub async fn connect_import(
-	origin: moq_net::origin::Producer,
-	url: Url,
-	name: String,
-	latency: Duration,
-) -> anyhow::Result<()> {
+/// Dial a remote SRT server and pull its stream into the Origin under `target.name` (import).
+pub async fn connect_import(target: ImportTarget, url: Url, latency: Duration) -> anyhow::Result<()> {
 	let (addr, resource) = parse_url(&url).await?;
+	let name = &target.name;
 	tracing::info!(%url, %name, "SRT client pulling");
 	notify_ready();
 
-	Ok(moq_srt::dial::pull(addr, &resource, latency, &origin, &name).await?)
+	let mut config = moq_srt::dial::Config::new(addr, resource);
+	config.latency = latency;
+	config.latency_max = target.latency_max;
+	Ok(moq_srt::dial::pull(&config, &target.origin, name).await?)
 }
 
 /// Push a broadcast from the Origin to a remote SRT server (export).
@@ -122,7 +121,9 @@ pub async fn connect_export(
 	tracing::info!(%url, %name, "SRT client pushing");
 	notify_ready();
 
-	Ok(moq_srt::dial::publish(addr, &resource, latency, &origin, &name).await?)
+	let mut config = moq_srt::dial::Config::new(addr, resource);
+	config.latency = latency;
+	Ok(moq_srt::dial::publish(&config, &origin, &name).await?)
 }
 
 /// Parse `srt://host:port?streamid=<resource>` into a resolved address and resource.

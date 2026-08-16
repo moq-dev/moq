@@ -14,7 +14,7 @@ use crate::{Error, Frame};
 /// [`read`](Self::read) returns plain [`Frame`]s.
 pub struct Consumer {
 	decoder: Decoder,
-	track: moq_mux::container::Consumer<moq_mux::container::legacy::Wire>,
+	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
 	resampler: Option<Resampler>,
 	config: Config,
 	resolved_sample_rate: u32,
@@ -52,10 +52,11 @@ impl Consumer {
 			.track(&name)?
 			.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio))
 			.await?;
-		let mut track = moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire);
-		if let Some(latency) = config.latency_max {
-			track = track.with_latency(latency);
-		}
+		// The catalog says how the track is framed, and it is not always the legacy
+		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
+		// varint timestamp plus a payload decodes to garbage rather than failing.
+		let container = moq_mux::catalog::hang::Container::try_from(&catalog.container)?;
+		let track = moq_mux::container::Consumer::new(track, container).with_latency(config.latency);
 
 		Ok(Self {
 			decoder,
@@ -163,5 +164,99 @@ mod tests {
 		for pair in samples.chunks_exact(2) {
 			assert_eq!(pair[0], pair[1]);
 		}
+	}
+
+	#[tokio::test]
+	async fn reads_the_container_the_catalog_declares() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("audio", hang::container::track_info()).unwrap();
+		let subscriber = broadcast.consume();
+
+		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		catalog.container = hang::catalog::Container::Loc;
+
+		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Loc);
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Config {
+				format: Format::F32,
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let samples = [0.25f32, -0.5, 0.75, -1.0];
+		let payload: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+		producer
+			.write(moq_mux::container::Frame {
+				timestamp: Timestamp::ZERO,
+				duration: None,
+				payload: payload.into(),
+				keyframe: true,
+			})
+			.unwrap();
+
+		let frame = consumer.read().await.unwrap().expect("decoded frame");
+		assert_eq!(
+			Format::F32.as_interleaved_f32(&frame.data, 1).unwrap().as_ref(),
+			samples
+		);
+	}
+
+	/// The catalog picks the framing, not this crate. Hardcoding the legacy wire
+	/// read a CMAF fragment as a varint timestamp plus a payload, which handed the
+	/// codec garbage instead of failing, so anything published by `moq import
+	/// fmp4` was undecodable.
+	#[tokio::test]
+	async fn decodes_a_cmaf_framed_track() {
+		let input = Input {
+			format: Format::F32,
+			sample_rate: 48_000,
+			channels: 2,
+		};
+
+		// One real Opus packet, so a mis-framed read can't accidentally decode.
+		let mut encoder = Encoder::new(&crate::encode::Config::new(input.clone())).unwrap();
+		let mut catalog = encoder.catalog();
+		let pcm = vec![0.0f32; encoder.frame_size() * encoder.codec_channels() as usize];
+		let packet = encoder.encode(&pcm).unwrap();
+
+		// Re-describe the same rendition as CMAF and publish it that way.
+		let muxer = moq_mux::container::fmp4::Muxer::audio(&catalog).unwrap();
+		let init = muxer.init().unwrap().expect("an out-of-band codec has an init segment");
+		catalog.container = hang::catalog::Container::Cmaf { init };
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let subscriber = broadcast.consume();
+		let track = broadcast.create_track("audio", hang::container::track_info()).unwrap();
+		let container = moq_mux::catalog::hang::Container::try_from(&catalog.container).unwrap();
+		let mut producer = moq_mux::container::Producer::new(track, container);
+
+		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", Config::new())
+			.await
+			.unwrap();
+
+		producer
+			.write(moq_mux::container::Frame {
+				timestamp: Timestamp::ZERO,
+				payload: packet,
+				keyframe: true,
+				duration: None,
+			})
+			.unwrap();
+		producer.cut(None).unwrap();
+
+		// The whole packet decodes: one 20 ms Opus frame at 48 kHz, less the pre-skip
+		// trimmed off the first packet. Reading the fragment as legacy hands the codec
+		// a slice of the moof instead, which still decodes, just to a shorter buffer.
+		let frame = consumer.read().await.unwrap().expect("decoded frame");
+		// `as_micros`, not `==`: the CMAF path carries the fmp4 timescale and
+		// `Timestamp`'s equality is structural, so the scales would have to match too.
+		assert_eq!(frame.timestamp.as_micros(), 0);
+		let samples = Format::F32.as_interleaved_f32(&frame.data, 2).unwrap();
+		assert_eq!(samples.len(), (960 - 312) * 2);
 	}
 }

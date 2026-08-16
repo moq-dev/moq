@@ -7,10 +7,10 @@ use crate::origin::MoqOriginProducer;
 use crate::session::MoqSession;
 
 struct ServerState {
-	config: moq_native::ServerConfig,
+	config: moq_native::listen::Config,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
-	server: Option<moq_native::Server>,
+	server: Option<moq_native::Listener>,
 }
 
 impl ServerState {
@@ -21,7 +21,10 @@ impl ServerState {
 		let server = self
 			.config
 			.clone()
-			.init()
+			.init(Default::default())
+			.map_err(|err| MoqError::Bind(format!("{err}")))?
+			.listen()
+			.await
 			.map_err(|err| MoqError::Bind(format!("{err}")))?;
 		let addr = server
 			.local_addr()
@@ -59,7 +62,7 @@ impl MoqServer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		Arc::new(Self {
 			task: Task::new(ServerState {
-				config: moq_native::ServerConfig::default(),
+				config: moq_native::listen::Config::default(),
 				publish: None,
 				consume: None,
 				server: None,
@@ -174,6 +177,8 @@ pub struct MoqRequest {
 	task: Task<RequestState>,
 	transport: String,
 	url: Option<String>,
+	path: String,
+	query: Option<String>,
 }
 
 impl MoqRequest {
@@ -184,6 +189,8 @@ impl MoqRequest {
 	) -> Arc<Self> {
 		let transport = request.transport().to_string();
 		let url = request.url().map(|u| u.to_string());
+		let path = request.path().to_string();
+		let query = request.query().map(str::to_string);
 		Arc::new(Self {
 			task: Task::new(RequestState {
 				request: Some(request),
@@ -192,6 +199,8 @@ impl MoqRequest {
 			}),
 			transport,
 			url,
+			path,
+			query,
 		})
 	}
 }
@@ -201,6 +210,16 @@ impl MoqRequest {
 	/// The URL provided by the client, if any.
 	pub fn url(&self) -> Option<String> {
 		self.url.clone()
+	}
+
+	/// The query-free request path, or empty for the root/missing path.
+	pub fn path(&self) -> String {
+		self.path.clone()
+	}
+
+	/// The encoded request query without the leading `?`, if present.
+	pub fn query(&self) -> Option<String> {
+		self.query.clone()
 	}
 
 	/// The transport type, e.g. `"quic"`, `"iroh"`, or `"websocket"`.
@@ -240,7 +259,7 @@ impl MoqRequest {
 					.ok()
 					.await
 					.map_err(|err| MoqError::Connect(format!("{err}")))?;
-				Ok(Arc::new(MoqSession::new(session, publish, subscribe)))
+				Ok(Arc::new(MoqSession::accepted(session, publish, subscribe)))
 			})
 			.await
 	}

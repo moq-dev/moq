@@ -1,10 +1,10 @@
 //! The quinn QUIC backend, used for both WebTransport (`https://`) and raw QUIC (`moqt://`, `moql://`).
 
-use crate::client::ClientConfig;
+use crate::connect;
+use crate::listen;
 use crate::quic::CongestionControl;
 use crate::quic::Resolved;
 use crate::quic::ServerId;
-use crate::server::ServerConfig;
 use crate::tls::{FingerprintVerifier, ServeCerts};
 use std::net;
 use std::sync::Arc;
@@ -122,7 +122,7 @@ pub enum Error {
 	#[error("failed DNS lookup")]
 	DnsLookup(#[source] std::io::Error),
 
-	/// DNS returned no address usable from the local socket, usually an address family mismatch.
+	/// DNS resolved the host to no addresses at all.
 	#[error("no DNS entries")]
 	NoDnsEntries,
 
@@ -221,6 +221,27 @@ pub enum Error {
 	/// The TLS configuration or certificates couldn't be loaded.
 	#[error(transparent)]
 	Tls(#[from] crate::tls::Error),
+
+	/// Two or more addresses were raced and every attempt failed, each paired
+	/// with its own error in dial order. All of them are kept: picking one to
+	/// report would bury a rejected certificate or a refused port behind
+	/// whichever address happened to be unroutable or to blackhole until its
+	/// timeout. A host with a single address reports that error directly instead.
+	#[error("all {} connection attempts failed: {}", .0.len(), crate::failover::describe(.0))]
+	Failover(Vec<crate::failover::Failure<Error>>),
+}
+
+impl crate::failover::Aggregate for Error {
+	fn aggregate(failures: Vec<crate::failover::Failure<Self>>) -> Self {
+		Self::Failover(failures)
+	}
+
+	fn resolve(error: Option<std::io::Error>) -> Self {
+		match error {
+			Some(error) => Self::DnsLookup(error),
+			None => Self::NoDnsEntries,
+		}
+	}
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -231,17 +252,27 @@ type Result<T> = std::result::Result<T, Error>;
 pub(crate) struct QuinnClient {
 	pub quic: quinn::Endpoint,
 	pub transport: Arc<quinn::TransportConfig>,
-	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Client::allows_http_bootstrap]).
+	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Connect::allows_http_bootstrap]).
 	pub http_bootstrap: bool,
 	/// Optional TLS SNI / verification hostname override (from config).
 	pub host_name: Option<String>,
+	/// Stagger between Happy Eyeballs connection attempts (see [`crate::failover`]).
+	pub failover_delay: Duration,
+	/// How long the first candidate waits for the full DNS answer, RFC 8305's
+	/// Resolution Delay (see [`crate::connect::Config::resolution_delay`]).
+	pub resolution_delay: Duration,
+	/// Whether the bound socket really came back dual-stack, which decides
+	/// whether an IPv4 destination is reachable at all. Captured here because the
+	/// endpoint owns the socket from here on and `local_addr` can't tell us.
+	dual_stack: bool,
 }
 
 impl QuinnClient {
-	pub fn new(config: &ClientConfig) -> Result<Self> {
-		let socket = crate::bind::udp(config.bind).map_err(Error::BindSocket)?;
+	pub fn new(config: &connect::Config, quic: &crate::quic::Config) -> Result<Self> {
+		let socket = crate::bind::udp(config.resolved_bind()).map_err(Error::BindSocket)?;
+		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
 
-		let quic = config.quic.resolve();
+		let quic = quic.resolve();
 		let mut transport = quinn::TransportConfig::default();
 		apply_transport(&mut transport, &quic);
 		apply_qlog(&mut transport, &quic, "client")?;
@@ -259,6 +290,9 @@ impl QuinnClient {
 			transport,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			host_name: config.tls.host_name.clone(),
+			failover_delay: config.resolved_race(),
+			resolution_delay: config.resolved_resolution_delay(),
+			dual_stack,
 		})
 	}
 
@@ -271,19 +305,16 @@ impl QuinnClient {
 		let mut url = url;
 		let mut config = tls.clone();
 
-		let host = url.host().ok_or(Error::InvalidDnsName)?.to_string();
+		let target = url.host().ok_or(Error::InvalidDnsName)?;
+		let host = target.to_string();
 		let port = url.port().unwrap_or(443);
 
-		// Look up the DNS entry.
-		// Quinn doesn't support happy eyeballs, so we pick a single address,
-		// preferring one whose family matches the local socket so the OS
-		// doesn't reject it (notably on Windows, where IPv6 sockets aren't
-		// dual-stack by default).
+		// Resolve, adapted to the local socket's family; the dial below races the
+		// answers Happy Eyeballs style as they land, so neither a broken family nor a
+		// lookup still waiting on its AAAA record can stall the connect.
 		let local = self.quic.local_addr().map_err(Error::LocalAddr)?;
-		let addrs = tokio::net::lookup_host((host.clone(), port))
-			.await
-			.map_err(Error::DnsLookup)?;
-		let ip = crate::util::pick_addr(addrs, local).ok_or(Error::NoDnsEntries)?;
+		let candidates =
+			crate::resolve::Candidates::resolve(target, port, self.resolution_delay).with_local(local, self.dual_stack);
 
 		if url.scheme() == "http" {
 			// Insecure per-connection bootstrap: only honored when no stronger
@@ -331,12 +362,21 @@ impl QuinnClient {
 		let mut config = quinn::ClientConfig::new(Arc::new(config));
 		config.transport_config(self.transport.clone());
 
-		tracing::debug!(%url, %ip, "connecting");
+		tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting");
 
 		// Use the configured host_name override for SNI + cert verification, else the URL host.
 		let host_name = self.host_name.clone().unwrap_or(host);
 
-		let connection = self.quic.connect_with(config, ip, &host_name)?.await?;
+		// Race only the QUIC handshake: the winner alone performs the WebTransport
+		// CONNECT below, so the server sees a single request no matter how many
+		// addresses were dialed.
+		let connection = crate::failover::race(candidates, self.failover_delay, |addr| {
+			let endpoint = self.quic.clone();
+			let config = config.clone();
+			let host_name = host_name.clone();
+			async move { Ok::<_, Error>(endpoint.connect_with(config, addr, &host_name)?.await?) }
+		})
+		.await?;
 		tracing::Span::current().record("id", connection.stable_id());
 
 		let mut request = web_transport_quinn::proto::ConnectRequest::new(url.clone());
@@ -348,19 +388,7 @@ impl QuinnClient {
 			"https" => web_transport_quinn::Session::connect(connection, request)
 				.await
 				.map_err(map_client_error)?,
-			"moqt" | "moql" => {
-				let handshake = connection
-					.handshake_data()
-					.ok_or(Error::MissingHandshake)?
-					.downcast::<quinn::crypto::rustls::HandshakeData>()
-					.unwrap();
-
-				let alpn = handshake.protocol.ok_or(Error::MissingAlpn)?;
-				let alpn = String::from_utf8(alpn)?;
-
-				let response = web_transport_quinn::proto::ConnectResponse::OK.with_protocol(alpn);
-				web_transport_quinn::Session::raw(connection, request, response)
-			}
+			"moqt" | "moql" => web_transport_quinn::Session::raw(connection),
 			_ => return Err(Error::UnsupportedScheme(url.scheme().to_string())),
 		};
 
@@ -373,6 +401,34 @@ impl Error {
 		match self {
 			Self::ConnectRejected(err) => Some(*err),
 			Self::Client(err) => classify_client_error(err),
+			Self::Failover(failures) => failures.iter().find_map(|failure| failure.error.connect_error()),
+			_ => None,
+		}
+	}
+
+	/// The HTTP status a server answered with, if it answered with one at all.
+	///
+	/// Two places see a real status: the insecure `http://` fingerprint bootstrap, and the
+	/// WebTransport CONNECT response. See [`crate::Error::status`].
+	pub(crate) fn status(&self) -> Option<u16> {
+		match self {
+			Self::FetchFingerprint(err) | Self::FingerprintStatus(err) | Self::ReadFingerprint(err) => {
+				err.status().map(|status| status.as_u16())
+			}
+			Self::Client(err) => client_status(err),
+			// Every raced address has to have answered, and answered with something not worth
+			// repeating, before the set counts as settled: one address refusing says nothing about
+			// the others, which may simply have been unroutable.
+			Self::Failover(failures) => {
+				let mut settled = None;
+				for failure in failures {
+					match failure.error.status() {
+						Some(status) if !crate::error::status_retryable(status) => settled = Some(status),
+						_ => return None,
+					}
+				}
+				settled
+			}
 			_ => None,
 		}
 	}
@@ -387,26 +443,35 @@ fn map_client_error(err: web_transport_quinn::ClientError) -> Error {
 }
 
 fn classify_client_error(err: &web_transport_quinn::ClientError) -> Option<crate::ConnectError> {
+	client_status(err).and_then(crate::ConnectError::from_status_u16)
+}
+
+/// The HTTP status the server answered the WebTransport CONNECT with, when it answered with one at
+/// all (as opposed to the connection failing underneath the request).
+///
+/// Both classifications read this: [`classify_client_error`] turns an auth status into a
+/// [`crate::ConnectError`], and [`Error::status`] hands it to the caller, whose backoff consults
+/// the status. A `404` or `405` is the server's settled answer, so retrying
+/// it just burns the reconnect budget on a URL that will never work.
+fn client_status(err: &web_transport_quinn::ClientError) -> Option<u16> {
 	match err {
-		web_transport_quinn::ClientError::HttpError(err) => classify_connect_error(err),
+		web_transport_quinn::ClientError::HttpError(err) => connect_status(err),
 		_ => None,
 	}
 }
 
-fn classify_connect_error(err: &web_transport_quinn::ConnectError) -> Option<crate::ConnectError> {
+fn connect_status(err: &web_transport_quinn::ConnectError) -> Option<u16> {
 	match err {
-		web_transport_quinn::ConnectError::ErrorStatus(status) => crate::ConnectError::from_status_u16(status.as_u16()),
-		web_transport_quinn::ConnectError::ProtoError(err) => classify_proto_error(err),
+		web_transport_quinn::ConnectError::ErrorStatus(status) => Some(status.as_u16()),
+		web_transport_quinn::ConnectError::ProtoError(err) => proto_status(err),
 		_ => None,
 	}
 }
 
-fn classify_proto_error(err: &web_transport_quinn::proto::ConnectError) -> Option<crate::ConnectError> {
+fn proto_status(err: &web_transport_quinn::proto::ConnectError) -> Option<u16> {
 	match err {
 		web_transport_quinn::proto::ConnectError::ErrorStatus(status)
-		| web_transport_quinn::proto::ConnectError::WrongStatus(Some(status)) => {
-			crate::ConnectError::from_status_u16(status.as_u16())
-		}
+		| web_transport_quinn::proto::ConnectError::WrongStatus(Some(status)) => Some(status.as_u16()),
 		_ => None,
 	}
 }
@@ -419,8 +484,8 @@ pub(crate) struct QuinnServer {
 }
 
 impl QuinnServer {
-	pub fn new(config: ServerConfig) -> Result<Self> {
-		let quic = config.quic.resolve();
+	pub fn new(config: listen::Config, quic: &crate::quic::Config) -> Result<Self> {
+		let quic = quic.resolve();
 		let mut transport = quinn::TransportConfig::default();
 		apply_transport(&mut transport, &quic);
 		apply_qlog(&mut transport, &quic, "server")?;
@@ -439,11 +504,7 @@ impl QuinnServer {
 		let mut tls = if config.tls.root.is_empty() {
 			tls_builder.with_no_client_auth().with_cert_resolver(certs.clone())
 		} else {
-			let roots = config.tls.load_roots()?;
-			let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
-				.allow_unauthenticated()
-				.build()
-				.map_err(Error::ClientVerifier)?;
+			let verifier = config.tls.client_verifier(provider)?;
 			tls_builder
 				.with_client_cert_verifier(verifier)
 				.with_cert_resolver(certs.clone())
@@ -460,6 +521,7 @@ impl QuinnServer {
 
 		tls.alpn_protocols = alpns;
 		tls.key_log = Arc::new(rustls::KeyLogFile::new());
+		config.tls.disable_resumption(&mut tls);
 
 		let tls: quinn::crypto::rustls::QuicServerConfig = tls.try_into()?;
 		let mut tls = quinn::ServerConfig::with_crypto(Arc::new(tls));
@@ -467,10 +529,10 @@ impl QuinnServer {
 
 		// Advertise the preferred_address transport parameter (RFC 9000 §9.6).
 		// Quinn allocates a fresh CID + reset token for the address during the handshake.
-		if let Some(addr) = config.quic.preferred_v4 {
+		if let Some(addr) = config.preferred_v4 {
 			tls.preferred_address_v4(Some(addr));
 		}
-		if let Some(addr) = config.quic.preferred_v6 {
+		if let Some(addr) = config.preferred_v6 {
 			tls.preferred_address_v6(Some(addr));
 		}
 
@@ -482,8 +544,8 @@ impl QuinnServer {
 
 		// Configure connection ID generator with server ID if provided
 		let mut endpoint_config = quinn::EndpointConfig::default();
-		if let Some(server_id) = config.quic.quic_lb_id {
-			let nonce_len = config.quic.quic_lb_nonce.unwrap_or(8);
+		if let Some(server_id) = config.lb_id {
+			let nonce_len = config.lb_nonce.unwrap_or(8);
 			if nonce_len < 4 {
 				return Err(Error::QuicLbNonceTooSmall);
 			}
@@ -592,22 +654,9 @@ pub(crate) async fn accept(
 		// this covers opt-in / work-in-progress versions (e.g. moq-lite-06-wip) that are
 		// deliberately absent from `moq_net::ALPNS`.
 		alpn if alpns.contains(&alpn) => {
-			// Raw QUIC carries no in-band request URL like WebTransport's CONNECT, so the TLS
-			// SNI is the only authority the client can offer, and it's optional. A client dialing
-			// a bare IP sends no SNI (RFC 6066 forbids IP literals), leaving `host` empty; the
-			// resulting hostless `moqt://` routes to the root path, exactly like a URL-less stream
-			// transport. `url()` returns `None` for the raw variant either way.
-			let host_str = if host.contains(':') {
-				format!("[{}]", host)
-			} else {
-				host.clone()
-			};
-			let url = format!("moqt://{}", host_str).parse::<Url>().map_err(Error::BuildUrl)?;
-			let request = web_transport_quinn::proto::ConnectRequest::new(url);
-			let response = web_transport_quinn::proto::ConnectResponse::OK.with_protocol(alpn);
 			let identity = crate::tls::PeerIdentity::from_any(conn.peer_identity());
 			// Raw QUIC carries no request URL; the path rides the SETUP.
-			let session = web_transport_quinn::Session::raw(conn, request, response);
+			let session = web_transport_quinn::Session::raw(conn);
 			Ok((session, None, identity))
 		}
 		_ => Err(Error::UnsupportedAlpn(alpn)),
@@ -652,6 +701,43 @@ impl quinn::ConnectionIdGenerator for ServerIdGenerator {
 mod tests {
 	use super::*;
 
+	fn connect_rejected(status: u16) -> Error {
+		Error::Client(web_transport_quinn::ClientError::HttpError(
+			web_transport_quinn::ConnectError::ErrorStatus(
+				web_transport_quinn::http::StatusCode::from_u16(status).unwrap(),
+			),
+		))
+	}
+
+	/// A CONNECT the relay answered carries its status through to the caller, so a wrong path or an
+	/// endpoint that doesn't speak WebTransport can surface immediately rather than after the whole
+	/// reconnect budget.
+	#[test]
+	fn a_rejected_connect_reports_its_status() {
+		for status in [400, 404, 405, 410, 501] {
+			assert_eq!(connect_rejected(status).status(), Some(status));
+			assert!(
+				!crate::error::status_retryable(status),
+				"{status} should stop the reconnect loop"
+			);
+		}
+
+		for status in [408, 429, 502, 503, 504] {
+			assert_eq!(connect_rejected(status).status(), Some(status));
+			assert!(crate::error::status_retryable(status), "{status} should be retried");
+		}
+
+		// Auth is peeled off into its own variant before reaching the generic client arm.
+		assert_eq!(
+			connect_rejected(401).connect_error(),
+			Some(crate::ConnectError::Unauthorized)
+		);
+		assert_eq!(
+			connect_rejected(403).connect_error(),
+			Some(crate::ConnectError::Forbidden)
+		);
+	}
+
 	/// Build a controller from each family's factory and downcast it to the
 	/// concrete quinn implementation it must map to.
 	#[test]
@@ -669,7 +755,7 @@ mod tests {
 	/// An unset knob must land on BBR rather than quinn's own CUBIC default.
 	#[test]
 	fn congestion_control_defaults_to_delay() {
-		let mut quic = crate::quic::Client::default();
+		let mut quic = crate::quic::Config::default();
 		assert_eq!(congestion_control(&quic.resolve()), CongestionControl::Delay);
 
 		// An explicit request still gets through.
@@ -681,20 +767,22 @@ mod tests {
 	/// connections that actually run quinn's BBR controller, on both ends.
 	#[tokio::test]
 	async fn delay_reaches_the_live_connection() {
-		let server_config = ServerConfig {
+		let server_config = listen::Config {
 			bind: Some("127.0.0.1:0".to_string()),
-			tls: crate::tls::Server {
+			tls: crate::tls::Listen {
 				generate: vec!["localhost".into()],
-				..Default::default()
-			},
-			quic: crate::quic::Server {
-				congestion_control: Some(CongestionControl::Delay),
 				..Default::default()
 			},
 			..Default::default()
 		};
 
-		let server = QuinnServer::new(server_config).expect("server init");
+		// One shared tuning for both roles, the way a binary composes them.
+		let quic = crate::quic::Config {
+			congestion_control: Some(CongestionControl::Delay),
+			..Default::default()
+		};
+
+		let server = QuinnServer::new(server_config, &quic).expect("server init");
 		let addr = server.local_addr().expect("local addr");
 
 		let accepted = tokio::spawn(async move {
@@ -707,21 +795,17 @@ mod tests {
 		});
 
 		// tls::Client has a private field, so it can't be built with a struct literal.
-		let mut tls_config = crate::tls::Client::default();
-		tls_config.disable_verify = Some(true);
+		let mut tls_config = crate::tls::Connect::default();
+		tls_config.insecure = Some(true);
 
-		let client_config = ClientConfig {
-			bind: "127.0.0.1:0".parse().unwrap(),
+		let client_config = connect::Config {
+			bind: Some("127.0.0.1:0".parse().unwrap()),
 			tls: tls_config,
-			quic: crate::quic::Client {
-				congestion_control: Some(CongestionControl::Delay),
-				..Default::default()
-			},
 			..Default::default()
 		};
 
 		let tls = client_config.tls.build().expect("tls config");
-		let client = QuinnClient::new(&client_config).expect("client init");
+		let client = QuinnClient::new(&client_config, &quic).expect("client init");
 		// Dial the loopback IP directly so the system resolver is never involved.
 		let url: Url = format!("moqt://127.0.0.1:{}", addr.port()).parse().unwrap();
 

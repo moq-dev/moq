@@ -62,6 +62,14 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 		}
 	}
 
+	fn cut(&mut self) {
+		// Only fMP4 has a segment concept to declare. The others recover their own framing and
+		// group on what they find in it, so there is nothing for a caller to draw.
+		if let ContainerImpl::Fmp4(decoder) = self {
+			decoder.cut();
+		}
+	}
+
 	fn seek(&mut self, sequence: u64) -> Result<()> {
 		match self {
 			ContainerImpl::Fmp4(decoder) => decoder.seek(sequence),
@@ -115,6 +123,15 @@ impl<E: crate::container::ts::Catalog> Container<E> {
 		self.inner.abort(err)
 	}
 
+	/// Declare that the next fragment starts a new segment, rolling a group on every track.
+	///
+	/// For a caller that knows the source's segmentation out of band (an HLS import following its
+	/// playlist). An fMP4 source that carries `styp` atoms declares its own, so this is only
+	/// needed when it doesn't. Ignored by container formats with no segment concept (MKV, TS, FLV).
+	pub fn cut(&mut self) {
+		self.inner.cut()
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.inner.seek(sequence)
@@ -164,6 +181,15 @@ impl<E: crate::container::ts::Catalog> ContainerStream<E> {
 	/// rather than [`moq_net::Error::Dropped`]. Consumes the importer.
 	pub fn abort(self, err: moq_net::Error) {
 		self.inner.abort(err)
+	}
+
+	/// Declare that the next fragment starts a new segment, rolling a group on every track.
+	///
+	/// For a caller that knows the source's segmentation out of band (an HLS import following its
+	/// playlist). An fMP4 source that carries `styp` atoms declares its own, so this is only
+	/// needed when it doesn't. Ignored by container formats with no segment concept (MKV, TS, FLV).
+	pub fn cut(&mut self) {
+		self.inner.cut()
 	}
 
 	/// Close the current group and open the next one at `sequence`.

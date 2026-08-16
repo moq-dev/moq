@@ -87,7 +87,7 @@ export class RequestOk {
 				? await r.u62()
 				: undefined;
 		const parameters = await Parameters.decode(r, version);
-		await Properties.skip(r, version);
+		await Properties.decode(r, version);
 		return new RequestOk({ requestId, parameters });
 	}
 

@@ -103,7 +103,7 @@ pub async fn accept(
 		.map_err(|err| Error::Other(anyhow::anyhow!("failed to create broadcast: {err}")))?;
 
 	let handle = producer.clone();
-	let sink = Box::new(IngestSink::new(producer)?);
+	let sink = Box::new(IngestSink::new(producer, server.config().latency_max)?);
 
 	// Register a session on the shared media mux: known ICE credentials (so the
 	// demux routes this peer's STUN by ufrag), an inbox to read datagrams from,

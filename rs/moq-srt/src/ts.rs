@@ -32,9 +32,13 @@ pub struct Publisher {
 impl Publisher {
 	/// Create the broadcast on `origin` at `path` and wire up the TS importer +
 	/// catalog.
-	pub fn new(origin: &origin::Producer, path: &str) -> Result<Self> {
+	///
+	/// `latency_max` is the retention declared on the media tracks the importer mints: how
+	/// long relays keep a non-latest group fetchable, or `None` for hang's own default.
+	pub fn new(origin: &origin::Producer, path: &str, latency_max: Option<Duration>) -> Result<Self> {
 		let mut broadcast = origin.create_broadcast(path, broadcast::Route::new().with_announce(true))?;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+		let config = moq_mux::catalog::Config::default().with_latency_max(latency_max);
+		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 		let handle = broadcast.clone();
 		let importer = ts::Import::new(broadcast, catalog.reserve());
 		tracing::info!(%path, "publishing ingest broadcast");
@@ -103,7 +107,9 @@ impl Subscriber {
 		}
 
 		let source = moq_mux::Source::new(origin.consume(), path);
-		let export = ts::Export::new(source).await?.with_latency(latency);
+		let export = ts::Export::new(source)
+			.await?
+			.with_latency(moq_mux::Latency::max(latency));
 		Ok(Some(Self { export }))
 	}
 
@@ -111,5 +117,70 @@ impl Subscriber {
 	/// broadcast ends.
 	pub async fn next(&mut self) -> Result<Option<Frame>> {
 		Ok(self.export.next().await?)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// One payload-only TS packet carrying a complete PSI section (PUSI + pointer_field
+	/// 0), padded to 188 with stuffing.
+	fn psi_packet(pid: u16, section: &[u8]) -> Vec<u8> {
+		let mut p = vec![0x47, 0x40 | (pid >> 8) as u8, pid as u8, 0x10, 0x00];
+		p.extend_from_slice(section);
+		p.resize(188, 0xff);
+		p
+	}
+
+	/// Append the CRC-32/MPEG-2 the PSI parser checks (poly 0x04c11db7, init all-ones,
+	/// unreflected, no final xor) over everything written so far.
+	fn seal(mut section: Vec<u8>) -> Vec<u8> {
+		let mut crc = 0xffff_ffffu32;
+		for byte in &section {
+			crc ^= u32::from(*byte) << 24;
+			for _ in 0..8 {
+				crc = if crc & 0x8000_0000 != 0 {
+					(crc << 1) ^ 0x04c1_1db7
+				} else {
+					crc << 1
+				};
+			}
+		}
+		section.extend_from_slice(&crc.to_be_bytes());
+		section
+	}
+
+	/// A PAT with one program (number 1) whose PMT lives on `pmt_pid`.
+	fn pat(pmt_pid: u16) -> Vec<u8> {
+		let mut s = vec![0x00, 0xb0, 0x0d, 0x00, 0x01, 0xc1, 0x00, 0x00];
+		s.extend_from_slice(&[0x00, 0x01]);
+		s.extend_from_slice(&[0xe0 | (pmt_pid >> 8) as u8, pmt_pid as u8]);
+		seal(s)
+	}
+
+	/// A PMT for program 1 declaring a single H.264 elementary stream on `es_pid`.
+	fn pmt(es_pid: u16) -> Vec<u8> {
+		let mut s = vec![0x02, 0xb0, 0x12, 0x00, 0x01, 0xc1, 0x00, 0x00];
+		s.extend_from_slice(&[0xe0 | (es_pid >> 8) as u8, es_pid as u8]);
+		s.extend_from_slice(&[0xf0, 0x00]);
+		s.extend_from_slice(&[0x1b, 0xe0 | (es_pid >> 8) as u8, es_pid as u8, 0xf0, 0x00]);
+		seal(s)
+	}
+
+	/// The retention the caller configured has to reach the media tracks the TS importer
+	/// mints off the PMT, not stop at the catalog producer it was set on.
+	#[tokio::test]
+	async fn publisher_declares_the_configured_retention() {
+		let origin = moq_net::Origin::random().produce();
+		let mut publisher = Publisher::new(&origin, "live/cam0", Some(Duration::from_secs(3))).unwrap();
+
+		let mut ts = psi_packet(0x0000, &pat(0x0100));
+		ts.extend_from_slice(&psi_packet(0x0100, &pmt(0x0101)));
+		publisher.feed(Bytes::from(ts)).unwrap();
+
+		let broadcast = origin.consume().announced_broadcast("live/cam0").await.unwrap();
+		let info = broadcast.track("0.avc3").unwrap().info().await.unwrap();
+		assert_eq!(info.latency_max, Duration::from_secs(3));
 	}
 }

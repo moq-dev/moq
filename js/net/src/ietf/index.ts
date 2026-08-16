@@ -10,6 +10,7 @@ export * from "./publish_namespace.ts";
 export * from "./publisher.ts";
 export * from "./request.ts";
 export * from "./setup.ts";
+export * from "./solicit.ts";
 export * from "./subscribe.ts";
 export * from "./subscribe_namespace.ts";
 export * from "./subscriber.ts";

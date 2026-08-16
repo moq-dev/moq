@@ -1,15 +1,14 @@
-//! QUIC transport tuning, split by role.
+//! QUIC transport tuning.
 //!
-//! [`Client`] (`--client-quic-*`) and [`Server`] (`--server-quic-*`) carry the
-//! per-connection knobs (stream limits, GSO, timeouts) that each backend applies.
-//! [`Server`] additionally owns the knobs that only make sense when accepting
-//! connections: the QUIC preferred address and the QUIC-LB connection-ID encoding.
+//! One [`Config`] (`--quic-*`) carries the per-connection knobs (stream limits,
+//! GSO, timeouts) that each backend applies. They mean the same thing whichever
+//! way a connection was opened, so it is spelled once and shared by
+//! [`crate::connect`] and [`crate::listen`] rather than owned by either.
 //!
-//! Each is flattened directly onto [`crate::ClientConfig`] / [`crate::ServerConfig`],
-//! so the args parse straight into the config the endpoint is built from. Not
-//! every backend honors every knob, see the field docs.
+//! The knobs that only apply when accepting (the QUIC preferred address and the
+//! QUIC-LB connection-ID encoding) live on [`crate::listen::Config`] instead.
+//! Not every backend honors every knob, see the field docs.
 
-use std::net;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -18,7 +17,7 @@ use std::time::Duration;
 /// Parsed from, and serialized as, a hex string. Its length must match the load
 /// balancer's configured server-ID length.
 #[serde_with::serde_as]
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ServerId(#[serde_as(as = "serde_with::hex::Hex")] pub(crate) Vec<u8>);
 
 impl ServerId {
@@ -60,6 +59,15 @@ pub enum CongestionControl {
 	Delay,
 }
 
+/// Parses the same spellings the CLI and TOML accept (`loss`, `delay`), case-insensitively.
+impl std::str::FromStr for CongestionControl {
+	type Err = String;
+
+	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+		<Self as clap::ValueEnum>::from_str(s, true)
+	}
+}
+
 /// Default maximum number of concurrent QUIC streams (bidi and uni) per connection.
 pub(crate) const DEFAULT_MAX_STREAMS: u64 = 1024;
 
@@ -69,20 +77,16 @@ pub(crate) const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default keep-alive ping interval.
 pub(crate) const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(5);
 
-/// The `--client-quic-*` transport section.
+/// The `--quic-*` transport section, applied to dialed and accepted connections alike.
 #[derive(Clone, Debug, Default, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[group(id = "quic")]
 #[non_exhaustive]
-pub struct Client {
+pub struct Config {
 	/// Maximum number of concurrent QUIC streams per connection (both bidi and uni).
 	/// Defaults to 1024. MoQ opens a stream per group, so busy endpoints want this high.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "client-quic-max-streams",
-		long = "client-quic-max-streams",
-		alias = "client-max-streams",
-		env = "MOQ_CLIENT_QUIC_MAX_STREAMS"
-	)]
+	#[arg(id = "quic-max-streams", long = "quic-max-streams", env = "MOQ_QUIC_MAX_STREAMS")]
 	pub max_streams: Option<u64>,
 
 	/// Enable UDP generic segmentation offload (GSO).
@@ -92,9 +96,9 @@ pub struct Client {
 	/// cannot turn it off and rejects an explicit `false`.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
-		id = "client-quic-gso",
-		long = "client-quic-gso",
-		env = "MOQ_CLIENT_QUIC_GSO",
+		id = "quic-gso",
+		long = "quic-gso",
+		env = "MOQ_QUIC_GSO",
 		default_missing_value = "true",
 		num_args = 0..=1,
 		require_equals = true,
@@ -105,9 +109,9 @@ pub struct Client {
 	/// Idle timeout before an inactive connection is dropped. Defaults to 30s.
 	#[serde(default, skip_serializing_if = "Option::is_none", with = "humantime_serde::option")]
 	#[arg(
-		id = "client-quic-idle-timeout",
-		long = "client-quic-idle-timeout",
-		env = "MOQ_CLIENT_QUIC_IDLE_TIMEOUT",
+		id = "quic-idle-timeout",
+		long = "quic-idle-timeout",
+		env = "MOQ_QUIC_IDLE_TIMEOUT",
 		value_parser = humantime::parse_duration,
 	)]
 	pub idle_timeout: Option<Duration>,
@@ -116,9 +120,9 @@ pub struct Client {
 	/// Ignored by the iroh backend, which has no keep-alive knob.
 	#[serde(default, skip_serializing_if = "Option::is_none", with = "humantime_serde::option")]
 	#[arg(
-		id = "client-quic-keep-alive",
-		long = "client-quic-keep-alive",
-		env = "MOQ_CLIENT_QUIC_KEEP_ALIVE",
+		id = "quic-keep-alive",
+		long = "quic-keep-alive",
+		env = "MOQ_QUIC_KEEP_ALIVE",
 		value_parser = humantime::parse_duration,
 	)]
 	pub keep_alive: Option<Duration>,
@@ -126,9 +130,9 @@ pub struct Client {
 	/// Enable path MTU discovery. Defaults to off.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
-		id = "client-quic-mtu-discovery",
-		long = "client-quic-mtu-discovery",
-		env = "MOQ_CLIENT_QUIC_MTU_DISCOVERY",
+		id = "quic-mtu-discovery",
+		long = "quic-mtu-discovery",
+		env = "MOQ_QUIC_MTU_DISCOVERY",
 		default_missing_value = "true",
 		num_args = 0..=1,
 		require_equals = true,
@@ -141,168 +145,12 @@ pub struct Client {
 	/// the process with it. Selecting `delay` there is for deliberate testing only.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
-		id = "client-quic-congestion-control",
-		long = "client-quic-congestion-control",
-		env = "MOQ_CLIENT_QUIC_CONGESTION_CONTROL",
+		id = "quic-congestion-control",
+		long = "quic-congestion-control",
+		env = "MOQ_QUIC_CONGESTION_CONTROL",
 		value_enum
 	)]
 	pub congestion_control: Option<CongestionControl>,
-
-	/// Write qlog traces into this directory. See [`Server::qlog`].
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	#[arg(id = "client-quic-qlog", long = "client-quic-qlog", env = "MOQ_CLIENT_QUIC_QLOG")]
-	pub qlog: Option<PathBuf>,
-}
-
-/// Reject a qlog directory that this build can't honor.
-///
-/// Erroring beats silently ignoring the flag: the operator asked for traces and would
-/// otherwise go looking for files that were never going to appear. Checked once when
-/// the client/server is built, so the backends can assume the directory is usable.
-fn validate_qlog(qlog: Option<&PathBuf>) -> crate::Result<()> {
-	match qlog {
-		Some(_) if cfg!(not(feature = "qlog")) => Err(crate::Error::QlogUnsupported),
-		_ => Ok(()),
-	}
-}
-
-impl Client {
-	/// Reject knobs this build can't honor. Called when the client is built.
-	pub(crate) fn validate(&self) -> crate::Result<()> {
-		validate_qlog(self.qlog.as_ref())
-	}
-
-	/// The per-connection knobs with defaults applied, ready to hand to a backend.
-	pub(crate) fn resolve(&self) -> Resolved {
-		Resolved::new(
-			self.max_streams,
-			self.gso,
-			self.idle_timeout,
-			self.keep_alive,
-			self.mtu_discovery,
-			self.congestion_control,
-			self.qlog.clone(),
-		)
-	}
-}
-
-/// The `--server-quic-*` transport section.
-///
-/// Carries the same per-connection knobs as [`Client`] plus the accept-side knobs
-/// (preferred address, QUIC-LB connection IDs).
-#[derive(Clone, Debug, Default, clap::Args, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields, default)]
-#[non_exhaustive]
-pub struct Server {
-	/// Maximum number of concurrent QUIC streams per connection (both bidi and uni).
-	/// Defaults to 1024. MoQ opens a stream per group, so busy endpoints want this high.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "server-quic-max-streams",
-		long = "server-quic-max-streams",
-		alias = "server-max-streams",
-		env = "MOQ_SERVER_QUIC_MAX_STREAMS"
-	)]
-	pub max_streams: Option<u64>,
-
-	/// Enable UDP generic segmentation offload (GSO). See [`Client::gso`].
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "server-quic-gso",
-		long = "server-quic-gso",
-		env = "MOQ_SERVER_QUIC_GSO",
-		default_missing_value = "true",
-		num_args = 0..=1,
-		require_equals = true,
-		value_parser = clap::value_parser!(bool),
-	)]
-	pub gso: Option<bool>,
-
-	/// Idle timeout before an inactive connection is dropped. Defaults to 30s.
-	#[serde(default, skip_serializing_if = "Option::is_none", with = "humantime_serde::option")]
-	#[arg(
-		id = "server-quic-idle-timeout",
-		long = "server-quic-idle-timeout",
-		env = "MOQ_SERVER_QUIC_IDLE_TIMEOUT",
-		value_parser = humantime::parse_duration,
-	)]
-	pub idle_timeout: Option<Duration>,
-
-	/// Keep-alive ping interval. Defaults to 5s; set `0s` to disable.
-	#[serde(default, skip_serializing_if = "Option::is_none", with = "humantime_serde::option")]
-	#[arg(
-		id = "server-quic-keep-alive",
-		long = "server-quic-keep-alive",
-		env = "MOQ_SERVER_QUIC_KEEP_ALIVE",
-		value_parser = humantime::parse_duration,
-	)]
-	pub keep_alive: Option<Duration>,
-
-	/// Enable path MTU discovery. Defaults to off.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "server-quic-mtu-discovery",
-		long = "server-quic-mtu-discovery",
-		env = "MOQ_SERVER_QUIC_MTU_DISCOVERY",
-		default_missing_value = "true",
-		num_args = 0..=1,
-		require_equals = true,
-		value_parser = clap::value_parser!(bool),
-	)]
-	pub mtu_discovery: Option<bool>,
-
-	/// Congestion control family. Defaults to `delay` on quinn and quiche, and to
-	/// `loss` on noq, whose BBRv3 can panic on packet loss and take the process with
-	/// it. Selecting `delay` there is for deliberate testing only.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "server-quic-congestion-control",
-		long = "server-quic-congestion-control",
-		env = "MOQ_SERVER_QUIC_CONGESTION_CONTROL",
-		value_enum
-	)]
-	pub congestion_control: Option<CongestionControl>,
-
-	/// IPv4 address advertised as the QUIC preferred_address.
-	///
-	/// Supporting clients (Chrome M131+, native Quinn) migrate to this address
-	/// shortly after the handshake completes. Typical use: handshake on an
-	/// anycast IP, steady-state on this host's unicast IP.
-	///
-	/// Honored by the Quinn and noq backends.
-	#[arg(
-		id = "server-preferred-v4",
-		long = "server-preferred-v4",
-		env = "MOQ_SERVER_PREFERRED_V4"
-	)]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub preferred_v4: Option<net::SocketAddrV4>,
-
-	/// IPv6 address advertised as the QUIC preferred_address. See [`Self::preferred_v4`].
-	#[arg(
-		id = "server-preferred-v6",
-		long = "server-preferred-v6",
-		env = "MOQ_SERVER_PREFERRED_V6"
-	)]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub preferred_v6: Option<net::SocketAddrV6>,
-
-	/// Server ID to embed in connection IDs for QUIC-LB compatibility.
-	/// If set, connection IDs will be derived semi-deterministically.
-	#[arg(id = "server-quic-lb-id", long = "server-quic-lb-id", env = "MOQ_SERVER_QUIC_LB_ID")]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub quic_lb_id: Option<ServerId>,
-
-	/// Number of random nonce bytes in QUIC-LB connection IDs.
-	/// Must be at least 4, and server_id + nonce + 1 must not exceed 20.
-	#[arg(
-		id = "server-quic-lb-nonce",
-		long = "server-quic-lb-nonce",
-		requires = "server-quic-lb-id",
-		env = "MOQ_SERVER_QUIC_LB_NONCE"
-	)]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub quic_lb_nonce: Option<usize>,
 
 	/// Write qlog traces into this directory, which must already exist.
 	///
@@ -312,37 +160,322 @@ pub struct Server {
 	///
 	/// Requires the `qlog` feature; setting it errors at init otherwise.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	#[arg(id = "server-quic-qlog", long = "server-quic-qlog", env = "MOQ_SERVER_QUIC_QLOG")]
+	#[arg(id = "quic-qlog", long = "quic-qlog", env = "MOQ_QUIC_QLOG")]
 	pub qlog: Option<PathBuf>,
+
+	/// The old role-prefixed spellings, kept parsing but hidden. Folded into the
+	/// canonical fields by [`Config::resolved`]. Not a TOML surface (config files
+	/// use the canonical names).
+	#[command(flatten)]
+	#[serde(skip)]
+	pub(crate) legacy: Legacy,
 }
 
-impl Server {
-	/// Reject knobs this build can't honor. Called when the server is built.
+/// The hidden `--client-quic-*` / `--server-quic-*` spellings (and their env
+/// vars), from when the endpoint config was split by role.
+#[derive(Clone, Debug, Default, clap::Args)]
+#[group(id = "quic-legacy")]
+pub(crate) struct Legacy {
+	#[arg(
+		id = "client-quic-max-streams",
+		long = "client-quic-max-streams",
+		alias = "client-max-streams",
+		env = "MOQ_CLIENT_QUIC_MAX_STREAMS",
+		hide = true
+	)]
+	client_max_streams: Option<u64>,
+
+	#[arg(
+		id = "server-quic-max-streams",
+		long = "server-quic-max-streams",
+		alias = "server-max-streams",
+		env = "MOQ_SERVER_QUIC_MAX_STREAMS",
+		hide = true
+	)]
+	server_max_streams: Option<u64>,
+
+	#[arg(
+		id = "client-quic-gso",
+		long = "client-quic-gso",
+		env = "MOQ_CLIENT_QUIC_GSO",
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+		hide = true,
+	)]
+	client_gso: Option<bool>,
+
+	#[arg(
+		id = "server-quic-gso",
+		long = "server-quic-gso",
+		env = "MOQ_SERVER_QUIC_GSO",
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+		hide = true,
+	)]
+	server_gso: Option<bool>,
+
+	#[arg(
+		id = "client-quic-idle-timeout",
+		long = "client-quic-idle-timeout",
+		env = "MOQ_CLIENT_QUIC_IDLE_TIMEOUT",
+		value_parser = humantime::parse_duration,
+		hide = true,
+	)]
+	client_idle_timeout: Option<Duration>,
+
+	#[arg(
+		id = "server-quic-idle-timeout",
+		long = "server-quic-idle-timeout",
+		env = "MOQ_SERVER_QUIC_IDLE_TIMEOUT",
+		value_parser = humantime::parse_duration,
+		hide = true,
+	)]
+	server_idle_timeout: Option<Duration>,
+
+	#[arg(
+		id = "client-quic-keep-alive",
+		long = "client-quic-keep-alive",
+		env = "MOQ_CLIENT_QUIC_KEEP_ALIVE",
+		value_parser = humantime::parse_duration,
+		hide = true,
+	)]
+	client_keep_alive: Option<Duration>,
+
+	#[arg(
+		id = "server-quic-keep-alive",
+		long = "server-quic-keep-alive",
+		env = "MOQ_SERVER_QUIC_KEEP_ALIVE",
+		value_parser = humantime::parse_duration,
+		hide = true,
+	)]
+	server_keep_alive: Option<Duration>,
+
+	#[arg(
+		id = "client-quic-mtu-discovery",
+		long = "client-quic-mtu-discovery",
+		env = "MOQ_CLIENT_QUIC_MTU_DISCOVERY",
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+		hide = true,
+	)]
+	client_mtu_discovery: Option<bool>,
+
+	#[arg(
+		id = "server-quic-mtu-discovery",
+		long = "server-quic-mtu-discovery",
+		env = "MOQ_SERVER_QUIC_MTU_DISCOVERY",
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+		hide = true,
+	)]
+	server_mtu_discovery: Option<bool>,
+
+	#[arg(
+		id = "client-quic-congestion-control",
+		long = "client-quic-congestion-control",
+		env = "MOQ_CLIENT_QUIC_CONGESTION_CONTROL",
+		value_enum,
+		hide = true
+	)]
+	client_congestion_control: Option<CongestionControl>,
+
+	#[arg(
+		id = "server-quic-congestion-control",
+		long = "server-quic-congestion-control",
+		env = "MOQ_SERVER_QUIC_CONGESTION_CONTROL",
+		value_enum,
+		hide = true
+	)]
+	server_congestion_control: Option<CongestionControl>,
+
+	#[arg(
+		id = "client-quic-qlog",
+		long = "client-quic-qlog",
+		env = "MOQ_CLIENT_QUIC_QLOG",
+		hide = true
+	)]
+	client_qlog: Option<PathBuf>,
+
+	#[arg(
+		id = "server-quic-qlog",
+		long = "server-quic-qlog",
+		env = "MOQ_SERVER_QUIC_QLOG",
+		hide = true
+	)]
+	server_qlog: Option<PathBuf>,
+}
+
+impl Legacy {
+	/// The legacy flags in use, by canonical replacement, for one deprecation warning.
+	fn used(&self) -> Vec<&'static str> {
+		let mut used = Vec::new();
+		if self.client_max_streams.is_some() || self.server_max_streams.is_some() {
+			used.push("--quic-max-streams");
+		}
+		if self.client_gso.is_some() || self.server_gso.is_some() {
+			used.push("--quic-gso");
+		}
+		if self.client_idle_timeout.is_some() || self.server_idle_timeout.is_some() {
+			used.push("--quic-idle-timeout");
+		}
+		if self.client_keep_alive.is_some() || self.server_keep_alive.is_some() {
+			used.push("--quic-keep-alive");
+		}
+		if self.client_mtu_discovery.is_some() || self.server_mtu_discovery.is_some() {
+			used.push("--quic-mtu-discovery");
+		}
+		if self.client_congestion_control.is_some() || self.server_congestion_control.is_some() {
+			used.push("--quic-congestion-control");
+		}
+		if self.client_qlog.is_some() || self.server_qlog.is_some() {
+			used.push("--quic-qlog");
+		}
+		used
+	}
+}
+
+impl Config {
+	/// Fold the legacy role-prefixed spellings into the canonical fields.
+	///
+	/// The canonical spelling wins; between the legacy pair, the client spelling
+	/// wins (the roles now share one value, so a config that set both to
+	/// different values was relying on a distinction that no longer exists).
+	/// Warns once when any legacy spelling contributed. Idempotent.
+	pub fn resolved(&self) -> Self {
+		let used = self.legacy.used();
+		if !used.is_empty() {
+			// Name the consequence, not just the rename: these knobs used to apply to
+			// one direction, so a value that only ever bounded outbound connections
+			// now bounds accepted ones too.
+			tracing::warn!(
+				"deprecated --client-quic-*/--server-quic-* flags in use; QUIC tuning is now one shared section applied to dialed and accepted connections alike, so these values now apply to both directions: {}",
+				used.join(", ")
+			);
+		}
+		let legacy = &self.legacy;
+		Self {
+			max_streams: self
+				.max_streams
+				.or(legacy.client_max_streams)
+				.or(legacy.server_max_streams),
+			gso: self.gso.or(legacy.client_gso).or(legacy.server_gso),
+			idle_timeout: self
+				.idle_timeout
+				.or(legacy.client_idle_timeout)
+				.or(legacy.server_idle_timeout),
+			keep_alive: self
+				.keep_alive
+				.or(legacy.client_keep_alive)
+				.or(legacy.server_keep_alive),
+			mtu_discovery: self
+				.mtu_discovery
+				.or(legacy.client_mtu_discovery)
+				.or(legacy.server_mtu_discovery),
+			congestion_control: self
+				.congestion_control
+				.or(legacy.client_congestion_control)
+				.or(legacy.server_congestion_control),
+			qlog: self
+				.qlog
+				.clone()
+				.or(legacy.client_qlog.clone())
+				.or(legacy.server_qlog.clone()),
+			legacy: Legacy::default(),
+		}
+	}
+
+	/// Reject knobs this build can't honor. Called when the endpoint is built.
 	pub(crate) fn validate(&self) -> crate::Result<()> {
-		validate_qlog(self.qlog.as_ref())
+		// Erroring beats silently ignoring the flag: the operator asked for traces and
+		// would otherwise go looking for files that were never going to appear.
+		match self.qlog.as_ref() {
+			Some(_) if cfg!(not(feature = "qlog")) => Err(crate::Error::QlogUnsupported),
+			_ => Ok(()),
+		}?;
+		validate_idle_timeout(self.idle_timeout)
+	}
+
+	/// Fill every unset knob from `fallback`, keeping the ones this config sets.
+	///
+	/// For merging a lower-precedence source, such as the released per-role
+	/// `[client.quic]` / `[server.quic]` tables into the shared section.
+	pub fn or(&self, fallback: &Self) -> Self {
+		Self {
+			max_streams: self.max_streams.or(fallback.max_streams),
+			gso: self.gso.or(fallback.gso),
+			idle_timeout: self.idle_timeout.or(fallback.idle_timeout),
+			keep_alive: self.keep_alive.or(fallback.keep_alive),
+			mtu_discovery: self.mtu_discovery.or(fallback.mtu_discovery),
+			congestion_control: self.congestion_control.or(fallback.congestion_control),
+			qlog: self.qlog.clone().or_else(|| fallback.qlog.clone()),
+			legacy: self.legacy.clone(),
+		}
 	}
 
 	/// The per-connection knobs with defaults applied, ready to hand to a backend.
-	pub(crate) fn resolve(&self) -> Resolved {
-		Resolved::new(
-			self.max_streams,
-			self.gso,
-			self.idle_timeout,
-			self.keep_alive,
-			self.mtu_discovery,
-			self.congestion_control,
-			self.qlog.clone(),
-		)
+	pub fn resolve(&self) -> Resolved {
+		// A zero keep-alive means "disabled"; anything else (including unset) keeps
+		// the connection warm, defaulting to 5s.
+		let keep_alive = match self.keep_alive {
+			Some(d) if d.is_zero() => None,
+			Some(d) => Some(d),
+			None => Some(DEFAULT_KEEP_ALIVE),
+		};
+
+		Resolved {
+			max_streams: self.max_streams.unwrap_or(DEFAULT_MAX_STREAMS),
+			gso: self.gso,
+			idle_timeout: self.idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT),
+			keep_alive,
+			mtu_discovery: self.mtu_discovery.unwrap_or(false),
+			congestion_control: self.congestion_control,
+			qlog: self.qlog.clone(),
+		}
+	}
+}
+
+/// QUIC carries `max_idle_timeout` as a varint of milliseconds, so anything past this
+/// can't go on the wire.
+const MAX_IDLE_TIMEOUT: Duration = Duration::from_millis((1 << 62) - 1);
+
+/// Reject an idle timeout no QUIC connection can express.
+///
+/// Checked here rather than in each backend because the conversion the backends do is
+/// infallible-by-panic, and this config reaches them from a TOML file or a C caller.
+fn validate_idle_timeout(idle_timeout: Option<Duration>) -> crate::Result<()> {
+	match idle_timeout {
+		Some(timeout) if timeout > MAX_IDLE_TIMEOUT => Err(crate::Error::IdleTimeoutRange),
+		_ => Ok(()),
+	}
+}
+
+/// Every knob at its default, which is what an untouched [`Config`] resolves to.
+impl Default for Resolved {
+	fn default() -> Self {
+		Config::default().resolve()
 	}
 }
 
 /// A resolved view of the per-connection knobs (defaults filled in), shared by
-/// [`Client`] and [`Server`] so backends apply them the same way regardless of role.
+/// the dial and accept paths so backends apply them the same way regardless of role.
 ///
-/// Internal: the backends consume it and [`crate::iroh::EndpointConfig::bind`]
-/// resolves it from a [`Client`], so it never appears in the public surface.
+/// The backends consume it, and [`Config::resolve`] produces it. [`Resolved::default`]
+/// is therefore the canonical statement of what every QUIC knob defaults to, which is
+/// what a UI should show rather than repeating the numbers.
+///
+/// Non-exhaustive because it gains a field for every knob [`Config`] gains, so build it
+/// from [`Config::resolve`] or [`Resolved::default`] rather than a struct literal.
 #[derive(Clone, Debug)]
-pub(crate) struct Resolved {
+#[non_exhaustive]
+pub struct Resolved {
 	/// Max concurrent streams (bidi and uni).
 	pub max_streams: u64,
 	/// GSO override, or `None` to leave the backend default (on).
@@ -361,38 +494,10 @@ pub(crate) struct Resolved {
 }
 
 impl Resolved {
-	fn new(
-		max_streams: Option<u64>,
-		gso: Option<bool>,
-		idle_timeout: Option<Duration>,
-		keep_alive: Option<Duration>,
-		mtu_discovery: Option<bool>,
-		congestion_control: Option<CongestionControl>,
-		qlog: Option<PathBuf>,
-	) -> Self {
-		// A zero keep-alive means "disabled"; anything else (including unset) keeps
-		// the connection warm, defaulting to 5s.
-		let keep_alive = match keep_alive {
-			Some(d) if d.is_zero() => None,
-			Some(d) => Some(d),
-			None => Some(DEFAULT_KEEP_ALIVE),
-		};
-
-		Self {
-			max_streams: max_streams.unwrap_or(DEFAULT_MAX_STREAMS),
-			gso,
-			idle_timeout: idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT),
-			keep_alive,
-			mtu_discovery: mtu_discovery.unwrap_or(false),
-			congestion_control,
-			qlog,
-		}
-	}
-
 	/// The directory to write qlog traces into, if any.
 	///
-	/// Only meaningful once [`Client::validate`] / [`Server::validate`] has passed; a
-	/// build without the `qlog` feature never gets here with a directory set.
+	/// Only meaningful once [`Config::validate`] has passed; a build without the
+	/// `qlog` feature never gets here with a directory set.
 	#[cfg_attr(not(any(feature = "quinn", feature = "noq", feature = "quiche")), allow(dead_code))]
 	pub(crate) fn qlog_dir(&self) -> Option<&std::path::Path> {
 		self.qlog.as_deref()
@@ -413,25 +518,23 @@ mod tests {
 	use super::*;
 	use clap::Parser;
 
-	/// Minimal parsers so we can exercise the `--client-quic-*` / `--server-quic-*`
-	/// args in isolation (and together, the way relay/cli flatten both).
+	/// A minimal parser so we can exercise the `--quic-*` args (and the legacy
+	/// role-prefixed spellings) in isolation.
 	#[derive(Parser)]
-	struct Both {
+	struct Cli {
 		#[command(flatten)]
-		client: Client,
-		#[command(flatten)]
-		server: Server,
+		quic: Config,
 	}
 
-	fn parse(args: &[&str]) -> Both {
+	fn parse(args: &[&str]) -> Config {
 		let mut full = vec!["test"];
 		full.extend_from_slice(args);
-		Both::parse_from(full)
+		Cli::parse_from(full).quic
 	}
 
 	#[test]
 	fn defaults_apply_when_unset() {
-		let quic = Client::default().resolve();
+		let quic = Config::default().resolve();
 		assert_eq!(quic.max_streams, DEFAULT_MAX_STREAMS);
 		assert_eq!(quic.idle_timeout, DEFAULT_IDLE_TIMEOUT);
 		assert_eq!(quic.keep_alive, Some(DEFAULT_KEEP_ALIVE));
@@ -442,13 +545,13 @@ mod tests {
 
 	#[test]
 	fn zero_keep_alive_disables_it() {
-		let disabled = Server {
+		let disabled = Config {
 			keep_alive: Some(Duration::ZERO),
 			..Default::default()
 		};
 		assert_eq!(disabled.resolve().keep_alive, None);
 
-		let explicit = Client {
+		let explicit = Config {
 			keep_alive: Some(Duration::from_secs(2)),
 			..Default::default()
 		};
@@ -457,12 +560,12 @@ mod tests {
 
 	#[test]
 	fn gso_disabled_only_on_explicit_false() {
-		let off = Client {
+		let off = Config {
 			gso: Some(false),
 			..Default::default()
 		};
 		assert!(off.resolve().gso_disabled());
-		let on = Client {
+		let on = Config {
 			gso: Some(true),
 			..Default::default()
 		};
@@ -470,49 +573,55 @@ mod tests {
 	}
 
 	#[test]
-	fn client_and_server_flags_are_distinct() {
-		let both = parse(&["--client-quic-max-streams", "5000", "--server-quic-max-streams", "9000"]);
-		assert_eq!(both.client.max_streams, Some(5000));
-		assert_eq!(both.server.max_streams, Some(9000));
+	fn canonical_flags_parse() {
+		let quic = parse(&[
+			"--quic-max-streams",
+			"5000",
+			"--quic-gso=false",
+			"--quic-congestion-control",
+			"delay",
+			"--quic-qlog",
+			"/tmp/qlog",
+		]);
+		assert_eq!(quic.max_streams, Some(5000));
+		assert_eq!(quic.gso, Some(false));
+		assert_eq!(quic.congestion_control, Some(CongestionControl::Delay));
+		assert_eq!(quic.qlog.as_deref(), Some(std::path::Path::new("/tmp/qlog")));
 	}
 
+	/// Every old role-prefixed spelling still parses and folds into the
+	/// canonical field.
 	#[test]
-	fn server_only_knobs_parse() {
-		let both = parse(&["--server-preferred-v4", "192.0.2.1:443", "--server-quic-lb-id", "ab"]);
-		assert_eq!(both.server.preferred_v4, Some("192.0.2.1:443".parse().unwrap()));
-		assert!(both.server.quic_lb_id.is_some());
-		// The accept-side knobs live only on the server section.
-		assert_eq!(both.client.max_streams, None);
+	fn legacy_spellings_fold_into_canonical() {
+		let quic = parse(&["--client-quic-max-streams", "2048"]).resolved();
+		assert_eq!(quic.max_streams, Some(2048));
+
+		let quic = parse(&["--server-quic-max-streams", "4096"]).resolved();
+		assert_eq!(quic.max_streams, Some(4096));
+
+		let quic = parse(&["--client-max-streams", "1", "--server-quic-gso=false"]).resolved();
+		assert_eq!(quic.max_streams, Some(1));
+		assert_eq!(quic.gso, Some(false));
 	}
 
+	/// The canonical spelling wins; between the legacy pair, client wins.
 	#[test]
-	fn deprecated_max_streams_aliases() {
-		let both = parse(&["--client-max-streams", "2048", "--server-max-streams", "4096"]);
-		assert_eq!(both.client.max_streams, Some(2048));
-		assert_eq!(both.server.max_streams, Some(4096));
-	}
+	fn canonical_wins_over_legacy() {
+		let quic = parse(&["--quic-max-streams", "10", "--client-quic-max-streams", "20"]).resolved();
+		assert_eq!(quic.max_streams, Some(10));
 
-	#[test]
-	fn qlog_flags_are_distinct_per_role() {
-		let both = parse(&["--client-quic-qlog", "/tmp/client", "--server-quic-qlog", "/tmp/server"]);
-		assert_eq!(both.client.qlog.as_deref(), Some(std::path::Path::new("/tmp/client")));
-		assert_eq!(both.server.qlog.as_deref(), Some(std::path::Path::new("/tmp/server")));
-
-		assert_eq!(
-			both.client.resolve().qlog_dir(),
-			Some(std::path::Path::new("/tmp/client"))
-		);
-		assert_eq!(Client::default().resolve().qlog_dir(), None);
+		let quic = parse(&["--client-quic-max-streams", "20", "--server-quic-max-streams", "30"]).resolved();
+		assert_eq!(quic.max_streams, Some(20));
 	}
 
 	/// A build that can't capture must reject the flag rather than ignore it, so an
 	/// operator isn't left waiting on trace files that will never appear.
 	#[test]
 	fn qlog_requires_the_feature() {
-		let unset = Client::default().validate();
+		let unset = Config::default().validate();
 		assert!(unset.is_ok(), "no directory configured is always fine");
 
-		let set = Client {
+		let set = Config {
 			qlog: Some("/tmp/qlog".into()),
 			..Default::default()
 		};
@@ -524,35 +633,41 @@ mod tests {
 		}
 	}
 
+	/// The backends convert this duration with an infallible-by-panic `expect`, and the
+	/// value arrives from a TOML file or a C caller, so validation has to catch it here.
+	#[test]
+	fn idle_timeout_beyond_the_varint_is_rejected() {
+		let over = Config {
+			idle_timeout: Some(MAX_IDLE_TIMEOUT + Duration::from_millis(1)),
+			..Default::default()
+		};
+		assert!(matches!(over.validate(), Err(crate::Error::IdleTimeoutRange)));
+
+		let saturated = Config {
+			idle_timeout: Some(Duration::from_millis(u64::MAX)),
+			..Default::default()
+		};
+		assert!(matches!(saturated.validate(), Err(crate::Error::IdleTimeoutRange)));
+
+		let at_limit = Config {
+			idle_timeout: Some(MAX_IDLE_TIMEOUT),
+			..Default::default()
+		};
+		assert!(at_limit.validate().is_ok());
+	}
+
 	#[test]
 	fn toml_round_trips() {
 		let toml = r#"
 			max_streams = 7000
 			gso = false
-			preferred_v4 = "192.0.2.1:443"
 			congestion_control = "delay"
 			qlog = "/tmp/qlog"
 		"#;
-		let quic: Server = toml::from_str(toml).unwrap();
+		let quic: Config = toml::from_str(toml).unwrap();
 		assert_eq!(quic.max_streams, Some(7000));
 		assert_eq!(quic.gso, Some(false));
-		assert_eq!(quic.preferred_v4, Some("192.0.2.1:443".parse().unwrap()));
 		assert_eq!(quic.congestion_control, Some(CongestionControl::Delay));
 		assert_eq!(quic.qlog.as_deref(), Some(std::path::Path::new("/tmp/qlog")));
-	}
-
-	#[test]
-	fn congestion_control_flags_parse() {
-		let both = parse(&[
-			"--client-quic-congestion-control",
-			"delay",
-			"--server-quic-congestion-control",
-			"loss",
-		]);
-		assert_eq!(both.client.congestion_control, Some(CongestionControl::Delay));
-		assert_eq!(both.server.congestion_control, Some(CongestionControl::Loss));
-
-		// Unset stays None; each backend then picks its own default.
-		assert_eq!(Client::default().resolve().congestion_control, None);
 	}
 }

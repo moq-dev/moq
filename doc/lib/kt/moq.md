@@ -16,7 +16,7 @@ Full API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("dev.moq:moq:0.4.1")
+    implementation("dev.moq:moq:0.4.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 }
 ```
@@ -24,7 +24,7 @@ dependencies {
 The wrapper depends on `dev.moq:moq-ffi:[0.3,0.4)`, so Gradle resolves the latest bindings patch automatically. The bindings carry the native binaries:
 
 - Android: arm64-v8a, armeabi-v7a, x86\_64
-- JVM: Linux x86\_64 + aarch64, macOS x86\_64 + aarch64, Windows x86\_64
+- JVM: Linux x86\_64 + aarch64, macOS aarch64, Windows x86\_64
 
 Android uses JNI (`jniLibs/`), desktop JVM uses JNA (resource-classpath layout).
 
@@ -76,6 +76,17 @@ try {
 }
 ```
 
+### Reconnecting
+
+The session automatically redials with backoff when the transport drops (a relay
+restart, a laptop waking from sleep), and broadcasts consumed through it ride out
+the gap. Pass `reconnect = false` to `Moq.connect` for a one-shot dial, or a
+`Backoff` to tune the pacing. `moq.session.status()` reports the current state
+(`CONNECTED`, `DISCONNECTED`, `MIGRATING`) whenever it differs from the last one
+you saw, rather than a queue of every edge, so a drop that reconnects before you
+ask again is coalesced away. `moq.session.closed()` resolves only once the
+connection stops for good.
+
 ## Subscribe
 
 ```kotlin
@@ -113,12 +124,18 @@ Moq.connect("https://relay.example.com").use { moq ->
     val broadcast = moq.createBroadcast("my-stream")
     val audio = broadcast.publishMedia(Init(format = "opus", data = opusInitBytes, video = null))
 
+    // Audio has no keyframes, so `cut` is what gives it group boundaries. Once
+    // per frame is the lowest latency; a segment cadence suits HLS/DASH.
     audio.writeFrame(Frame(payload = payload))
+    audio.cut()
     audio.writeFrame(Frame(payload = payload, timestampUs = 20_000u))
+    audio.cut()
     audio.finish()
     broadcast.finish()
 }
 ```
+
+Each catalog `Video` has a `stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
 
 Properties that apply to every video rendition are updated together. `null` fields clear the corresponding catalog property, and rotation is normalized to the nearest clockwise quarter turn:
 
@@ -131,6 +148,34 @@ broadcast.setVideoProperties(
     )
 )
 ```
+
+### Raw media
+
+`publishMedia` above takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `publishVideo` / `publishAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
+
+```kotlin
+val video = broadcast.publishVideo(
+    VideoEncoderInput(
+        format = VideoPixelFormat.RGBA,
+        width = 1280u,
+        height = 720u,
+        framerate = 30u,
+    ),
+    VideoEncoderOutput(
+        codec = VideoCodec.H264,
+        bitrate = null,
+        gop = null,
+        kind = autoEncoder,
+    ),
+)
+
+video.write(VideoFrame(timestampUs = ptsUs, data = rgba))
+video.finish()
+```
+
+`autoEncoder` prefers a hardware encoder and falls back to software; `softwareEncoder`, `hardwareEncoder`, and `namedEncoder("videotoolbox")` pin the choice. The bindings compile VideoToolbox (macOS), Media Foundation (Windows), and openh264 (software, everywhere); the Linux hardware codecs are a libmoq-only build option. `setBitrate` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
+
+The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition is published immediately, read out of the encoder itself, so subscribers discover it through the catalog rather than a name you pick, and can find it before the first frame exists. `cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group.
 
 ## Serve
 
@@ -151,8 +196,7 @@ Collect `requests()` instead when you need to inspect or reject a session before
 ```kotlin
 Server.listen("127.0.0.1:4443", tlsGenerate = listOf("localhost")).use { server ->
     server.requests().collect { request ->
-        val url = request.url()
-        if (url != null && "/admin" in url) {
+        if (request.path() == "/admin") {
             request.reject(403u)
             return@collect
         }
@@ -163,6 +207,8 @@ Server.listen("127.0.0.1:4443", tlsGenerate = listOf("localhost")).use { server 
     }
 }
 ```
+
+`request.path()` returns the query-free request path consistently across transports. The root or missing path is an empty string. `request.query()` returns the encoded query and may contain credentials.
 
 `server.certFingerprints()` returns the hex SHA-256 fingerprints of the configured certificates, for pinning a generated self-signed certificate in a browser via `serverCertificateHashes`. Advanced callers can pass their own `publish` / `subscribe` origins to `listen`, or drive `uniffi.moq.MoqServer` directly.
 
@@ -194,6 +240,27 @@ dynamic.requestedGroups().collect { request ->
 ```
 
 Call `request.abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
+
+### Fetching media groups
+
+`fetchGroup` hands back raw payloads. `fetchMediaGroup` decodes the same group through the rendition's advertised container, so you get timestamped frames without opening a live subscription:
+
+```kotlin
+val (name, audio) = consumer.catalog().audio.entries.first()
+
+consumer.fetchMediaGroup(
+    name,
+    42uL,
+    audio.container,
+    FetchGroupOptions(priority = 10u),
+).use { group ->
+    group.frames().collect { frame ->
+        println("${frame.timestampUs}: ${frame.payload.size} bytes")
+    }
+}
+```
+
+`frames()` is a cancellation-aware `Flow`. A fetched media group is finite: it completes after the group's last decoded frame, unlike the live `subscribeMedia` stream. Latency-based group skipping does not apply, so you always get every frame in the group.
 
 ### On-demand raw tracks
 

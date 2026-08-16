@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use hang::catalog::{AudioCodec, Catalog, Container, VideoConfig};
-use mp4_atom::{DecodeMaybe, Encode};
+use mp4_atom::DecodeMaybe;
 
 use crate::Result;
 use crate::catalog::Stream;
@@ -28,16 +28,16 @@ use moq_net::Timestamp;
 /// fragment duration for downstream consumers that throttle by fragment rate.
 /// Returns `None` when the broadcast ends.
 ///
-/// [`next_fragment`](Self::next_fragment) returns the same bytes wrapped in a
-/// [`Fragment`] that also carries whether the chunk is the init segment, whether
-/// a media fragment begins at a sync sample, and its presentation duration. A
-/// segmenting consumer (e.g. an HLS/LL-HLS packager) needs that to map fragments
-/// onto segments and parts; narrow the catalog to a single rendition with
-/// [`Stream::select`](crate::catalog::Stream::select) so the fragments belong to one track.
+/// [`next_chunk`](Self::next_chunk) returns the same bytes as a [`Chunk`], which
+/// separates the init segment from a [`Fragment`] carrying whether it begins at a
+/// sync sample and how long it lasts. A segmenting consumer (e.g. an HLS/LL-HLS
+/// packager) needs that to map fragments onto segments and parts; narrow the catalog
+/// to a single rendition with [`Stream::select`](crate::catalog::Stream::select) so the
+/// fragments belong to one track.
 pub struct Export<S: Stream> {
 	source: crate::Source,
 	catalog: Option<S>,
-	latency: Duration,
+	latency: crate::Latency,
 	fragment_duration: Option<Duration>,
 
 	tracks: HashMap<String, Fmp4Track>,
@@ -51,23 +51,67 @@ pub struct Export<S: Stream> {
 	init_emitted: bool,
 }
 
-/// One emitted CMAF chunk: either the init segment or a moof+mdat fragment,
-/// with the metadata a segmenting consumer needs.
+/// One emitted CMAF chunk: the init segment, then media fragments.
+///
+/// The two carry different metadata, so they are separate variants rather than one
+/// struct with fields that are meaningless on the init. The set is closed by the
+/// container format, so a `match` on it stays exhaustive.
+#[derive(Clone, Debug)]
+pub enum Chunk {
+	/// The merged init segment (ftyp + multi-track moov), emitted once, first.
+	Init(Bytes),
+
+	/// One moof+mdat fragment.
+	Fragment(Fragment),
+}
+
+impl Chunk {
+	/// The encoded bytes, whichever kind of chunk this is.
+	pub fn data(&self) -> &Bytes {
+		match self {
+			Chunk::Init(data) => data,
+			Chunk::Fragment(fragment) => &fragment.data,
+		}
+	}
+
+	/// Consume the chunk for its encoded bytes, dropping any metadata.
+	pub fn into_data(self) -> Bytes {
+		match self {
+			Chunk::Init(data) => data,
+			Chunk::Fragment(fragment) => fragment.data,
+		}
+	}
+
+	/// The init segment's bytes, or `None` for a media fragment.
+	pub fn init(self) -> Option<Bytes> {
+		match self {
+			Chunk::Init(data) => Some(data),
+			Chunk::Fragment(_) => None,
+		}
+	}
+
+	/// The media fragment, or `None` for the init segment.
+	pub fn fragment(self) -> Option<Fragment> {
+		match self {
+			Chunk::Init(_) => None,
+			Chunk::Fragment(fragment) => Some(fragment),
+		}
+	}
+}
+
+/// One moof+mdat fragment, with the metadata a segmenting consumer needs.
 #[derive(Clone, Debug)]
 pub struct Fragment {
-	/// The encoded bytes: ftyp+moov for the init, otherwise one moof+mdat.
+	/// The encoded moof+mdat bytes.
 	pub data: Bytes,
 
-	/// True only for the first emit (the init segment).
-	pub init: bool,
-
-	/// A media fragment that begins at a sync sample, so it can start a segment.
+	/// A fragment that begins at a sync sample, so it can start a segment.
 	/// Video fragments are independent only at a GOP boundary (keyframe); audio
-	/// fragments are always independent. Always false for the init segment.
+	/// fragments are always independent.
 	pub independent: bool,
 
-	/// Presentation duration of the fragment in seconds (0 for the init segment).
-	pub duration: f64,
+	/// Presentation duration of the fragment.
+	pub duration: Duration,
 }
 
 struct Fmp4Track {
@@ -113,7 +157,7 @@ impl<S: Stream> Export<S> {
 		Self {
 			source,
 			catalog: Some(catalog),
-			latency: Duration::ZERO,
+			latency: crate::Latency::REAL_TIME,
 			fragment_duration: None,
 			tracks: HashMap::new(),
 			catalog_snapshot: None,
@@ -121,11 +165,12 @@ impl<S: Stream> Export<S> {
 		}
 	}
 
-	/// Set the maximum buffering latency for each per-track source.
+	/// Set the latency tolerance for each per-track source.
 	///
-	/// See [`crate::container::Consumer::with_latency`] for the per-track skip behavior.
-	/// Default is zero (skip aggressively).
-	pub fn with_latency(mut self, latency: Duration) -> Self {
+	/// See [`Consumer::with_latency`](crate::container::Consumer::with_latency) for the
+	/// per-track skip behavior. Defaults to
+	/// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) (skip aggressively).
+	pub fn with_latency(mut self, latency: crate::Latency) -> Self {
 		self.latency = latency;
 		self
 	}
@@ -153,22 +198,24 @@ impl<S: Stream> Export<S> {
 	/// timestamp order across tracks. Returns `None` when the catalog and every track
 	/// have ended.
 	pub async fn next(&mut self) -> Result<Option<Bytes>> {
-		Ok(self.next_fragment().await?.map(|f| f.data))
+		Ok(self.next_chunk().await?.map(Chunk::into_data))
 	}
 
 	/// Poll-based variant of [`Self::next`].
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
-		Poll::Ready(Ok(std::task::ready!(self.poll_next_fragment(waiter)?).map(|f| f.data)))
+		Poll::Ready(Ok(
+			std::task::ready!(self.poll_next_chunk(waiter)?).map(Chunk::into_data)
+		))
 	}
 
-	/// Like [`next`](Self::next) but returns a [`Fragment`] carrying segment metadata
-	/// (init flag, sync-sample independence, presentation duration).
-	pub async fn next_fragment(&mut self) -> Result<Option<Fragment>> {
-		kio::wait(|waiter| self.poll_next_fragment(waiter)).await
+	/// Like [`next`](Self::next) but returns a [`Chunk`], which tells the init segment
+	/// apart from a [`Fragment`] and carries that fragment's segmenting metadata.
+	pub async fn next_chunk(&mut self) -> Result<Option<Chunk>> {
+		kio::wait(|waiter| self.poll_next_chunk(waiter)).await
 	}
 
-	/// Poll-based variant of [`Self::next_fragment`].
-	pub fn poll_next_fragment(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Fragment>>> {
+	/// Poll-based variant of [`Self::next_chunk`].
+	pub fn poll_next_chunk(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Chunk>>> {
 		// 1. Drain catalog updates and (un)subscribe tracks accordingly.
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {
@@ -189,14 +236,23 @@ impl<S: Stream> Export<S> {
 		// is ready, so the source keeps polling for SPS/PPS-bearing frames
 		// instead of parking.
 		let waiting_for_init = !self.init_emitted;
-		for track in self.tracks.values_mut() {
+		for (name, track) in &mut self.tracks {
 			if track.pending.is_some() || track.finished {
 				continue;
 			}
 			loop {
 				match track.source.poll_read(waiter) {
 					Poll::Ready(Ok(Some(frame))) => {
-						if waiting_for_init && !track.source.header_ready() {
+						let geometry_ready = !track.is_video
+							|| self
+								.catalog_snapshot
+								.as_ref()
+								.and_then(|catalog| catalog.video.renditions.get(name))
+								.is_some_and(|config| {
+									matches!(config.container, Container::Cmaf { .. })
+										|| track.source.video_geometry_ready(config)
+								});
+						if waiting_for_init && (!track.source.header_ready() || !geometry_ready) {
 							continue;
 						}
 						track.pending = Some(frame);
@@ -219,12 +275,7 @@ impl<S: Stream> Export<S> {
 			if self.init_ready() {
 				let init = self.build_init()?;
 				self.init_emitted = true;
-				return Poll::Ready(Ok(Some(Fragment {
-					data: init,
-					init: true,
-					independent: false,
-					duration: 0.0,
-				})));
+				return Poll::Ready(Ok(Some(Chunk::Init(init))));
 			}
 			// Still waiting for codec configs. If every track is finished and
 			// the init still isn't buildable, the source ended before producing
@@ -261,11 +312,11 @@ impl<S: Stream> Export<S> {
 					let frames = std::mem::take(&mut track.buffer);
 					let fragment = emit_fragment(track, frames, Some(&frame))?;
 					track.pending = Some(frame);
-					return Poll::Ready(Ok(Some(fragment)));
+					return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
 				}
 				track.buffer_independent = frame.keyframe;
 				let fragment = emit_fragment(track, vec![frame], None)?;
-				return Poll::Ready(Ok(Some(fragment)));
+				return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
 			}
 			if should_flush(track, &frame, frag) {
 				let frames = std::mem::take(&mut track.buffer);
@@ -273,14 +324,14 @@ impl<S: Stream> Export<S> {
 				// The flushed run is done; the incoming frame opens the next buffer.
 				track.buffer_independent = frame.keyframe;
 				track.buffer.push(frame);
-				return Poll::Ready(Ok(Some(fragment)));
+				return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
 			}
 			if track.buffer.is_empty() {
 				track.buffer_independent = frame.keyframe;
 			}
 			track.buffer.push(frame);
 			// Frame appended to buffer; loop again to look for more work or a flush.
-			return self.poll_next_fragment(waiter);
+			return self.poll_next_chunk(waiter);
 		}
 
 		// 5. No pending frames. Flush any finished tracks' remaining buffers,
@@ -302,7 +353,7 @@ impl<S: Stream> Export<S> {
 			let track = self.tracks.get_mut(&name).unwrap();
 			let frames = std::mem::take(&mut track.buffer);
 			let fragment = emit_fragment(track, frames, None)?;
-			return Poll::Ready(Ok(Some(fragment)));
+			return Poll::Ready(Ok(Some(Chunk::Fragment(fragment))));
 		}
 
 		// 6. If catalog is closed and every track is finished and drained, we're done.
@@ -318,7 +369,10 @@ impl<S: Stream> Export<S> {
 	}
 
 	fn update_catalog(&mut self, catalog: &Catalog) -> Result<()> {
-		// A rendition we can't parse is ignored rather than failing the whole export.
+		// A rendition we can't parse is ignored rather than failing the whole export. Drop it
+		// before the snapshot is cached, since the init segment expects a track for every
+		// rendition in it. (An escaping `broadcast` reference is already gone: the catalog
+		// stream drops those.)
 		let mut catalog = catalog.clone();
 		catalog
 			.video
@@ -328,6 +382,7 @@ impl<S: Stream> Export<S> {
 			.audio
 			.renditions
 			.retain(|name, config| crate::catalog::hang::supported(name, &config.container));
+		self.source.retain_valid_media(&mut catalog);
 		let catalog = &catalog;
 
 		let mut active: HashMap<String, ()> = HashMap::new();
@@ -346,14 +401,11 @@ impl<S: Stream> Export<S> {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			let source = ExportSource::for_video(&self.source, name, config, self.latency)?;
+			let Some(source) = ExportSource::for_video(&self.source, name, config, self.latency)? else {
+				continue;
+			};
 			let timescale = catalog_timescale_video(config)?;
-			// A zero / NaN / infinite framerate would make `1.0 / fps` non-finite and panic
-			// `Duration::from_secs_f64`; fall back to the default in that case.
-			let framerate = config
-				.framerate
-				.filter(|fps| fps.is_finite() && *fps > 0.0)
-				.unwrap_or(30.0);
+			let framerate = super::usable_video_framerate(config).unwrap_or(30.0);
 			self.tracks.insert(
 				name.clone(),
 				Fmp4Track {
@@ -377,7 +429,9 @@ impl<S: Stream> Export<S> {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			let source = ExportSource::for_audio(&self.source, name, config, self.latency)?;
+			let Some(source) = ExportSource::for_audio(&self.source, name, config, self.latency)? else {
+				continue;
+			};
 			let timescale = catalog_timescale_audio(config)?;
 			self.tracks.insert(
 				name.clone(),
@@ -409,7 +463,17 @@ impl<S: Stream> Export<S> {
 	/// True once every source has resolved its codec config so we can build
 	/// the merged init segment.
 	fn init_ready(&self) -> bool {
-		self.catalog_snapshot.is_some() && self.tracks.values().all(|t| t.source.header_ready())
+		let Some(catalog) = self.catalog_snapshot.as_ref() else {
+			return false;
+		};
+		self.tracks.values().all(|t| t.source.header_ready())
+			&& catalog.video.renditions.iter().all(|(name, config)| {
+				matches!(config.container, Container::Cmaf { .. })
+					|| self
+						.tracks
+						.get(name)
+						.is_some_and(|track| track.source.video_geometry_ready(config))
+			})
 	}
 
 	/// Build the merged ftyp + multi-track moov init segment from the cached
@@ -434,10 +498,11 @@ impl<S: Stream> Export<S> {
 				Container::Legacy | Container::Loc => {
 					// H.264/H.265 need a synthesized config record here; VP8 has none.
 					let description = track.source.description();
+					let config = track.source.video_config(config).unwrap_or_else(|| config.clone());
 					let trak = crate::container::fmp4::synthesize_video_trak(
 						track.track_id,
 						track.timescale,
-						config,
+						&config,
 						description.map(|d| d.as_ref()),
 					)?;
 					trexs.push(mp4_atom::Trex {
@@ -473,34 +538,7 @@ impl<S: Stream> Export<S> {
 			}
 		}
 
-		let ftyp = ftyp_data.unwrap_or(mp4_atom::Ftyp {
-			major_brand: b"isom".into(),
-			minor_version: 0x200,
-			compatible_brands: vec![b"isom".into(), b"iso6".into(), b"mp41".into()],
-		});
-		let timescale = traks.first().map(|t| t.mdia.mdhd.timescale).unwrap_or(1000);
-
-		let moov = mp4_atom::Moov {
-			mvhd: mp4_atom::Mvhd {
-				timescale,
-				..Default::default()
-			},
-			trak: traks,
-			mvex: if trexs.is_empty() {
-				None
-			} else {
-				Some(mp4_atom::Mvex {
-					trex: trexs,
-					..Default::default()
-				})
-			},
-			..Default::default()
-		};
-
-		let mut buf = Vec::new();
-		ftyp.encode(&mut buf)?;
-		moov.encode(&mut buf)?;
-		Ok(Bytes::from(buf))
+		Ok(crate::container::fmp4::encode_init(ftyp_data, traks, trexs)?)
 	}
 }
 
@@ -535,6 +573,12 @@ pub(crate) fn extract_init(
 					// browser applying an empty-edit media_time would shift the track
 					// off the others (a black screen in Media Source Extensions).
 					trak.edts = None;
+					// tkhd.duration is in the *movie* timescale, and the merged moov
+					// picks its own (the first trak's media scale), so whatever the
+					// source stated is now read at a scale it wasn't written in. A
+					// merged multi-track moov can't hold one scale that suits every
+					// source anyway, so declare it unknown like the rest of the init.
+					trak.tkhd.duration = super::UNKNOWN_DURATION;
 					traks.push(trak);
 				}
 				if let Some(mvex) = moov.mvex {
@@ -583,12 +627,12 @@ fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> Result<Bytes> {
 	let seq = track.sequence_number;
 	track.sequence_number += 1;
 	let timescale = moq_net::Timescale::new(track.timescale)?;
-	Ok(crate::container::fmp4::encode_fragment(
-		track.track_id,
+	let info = crate::container::fmp4::FragmentInfo {
+		track_id: track.track_id,
 		timescale,
-		seq,
-		&frames,
-	)?)
+		sequence_number: seq,
+	};
+	Ok(crate::container::fmp4::encode_fragment(info, &frames)?)
 }
 
 /// Encode a buffered run and wrap it with the metadata a segmenting consumer needs.
@@ -597,26 +641,26 @@ fn emit_fragment(track: &mut Fmp4Track, mut frames: Vec<Frame>, successor: Optio
 	// Audio has no keyframes, so every audio fragment is independent; video is
 	// independent only when its buffer opened on a keyframe (a GOP boundary).
 	let independent = !track.is_video || track.buffer_independent;
-	let frames = infer_missing_durations(frames, successor, track.default_frame);
-	let duration = fragment_seconds(&frames, track.default_frame);
+	let timescale = moq_net::Timescale::new(track.timescale)?;
+	infer_missing_durations(&mut frames, successor, track.default_frame, timescale)?;
+	let duration = fragment_duration(&frames, track.default_frame);
 	let data = encode_fragment(track, frames)?;
 	Ok(Fragment {
 		data,
-		init: false,
 		independent,
 		duration,
 	})
 }
 
-/// Presentation duration of a fragment, in seconds.
+/// Presentation duration of a fragment.
 ///
 /// When every sample carries a duration (the CMAF case) the per-sample durations
 /// tile the timeline, so their sum is exact. Legacy / LOC sources carry none, so
 /// fall back to the presentation span plus one `default_frame` for the trailing
 /// sample (which has no successor to bound it).
-fn fragment_seconds(frames: &[Frame], default_frame: Duration) -> f64 {
+fn fragment_duration(frames: &[Frame], default_frame: Duration) -> Duration {
 	if frames.is_empty() {
-		return 0.0;
+		return Duration::ZERO;
 	}
 	if frames
 		.iter()
@@ -625,8 +669,7 @@ fn fragment_seconds(frames: &[Frame], default_frame: Duration) -> f64 {
 		return frames
 			.iter()
 			.map(|f| Duration::from(f.duration.unwrap()))
-			.sum::<Duration>()
-			.as_secs_f64();
+			.sum::<Duration>();
 	}
 	let mut min = Duration::MAX;
 	let mut max = Duration::ZERO;
@@ -635,7 +678,7 @@ fn fragment_seconds(frames: &[Frame], default_frame: Duration) -> f64 {
 		min = min.min(pts);
 		max = max.max(pts);
 	}
-	((max - min) + default_frame).as_secs_f64()
+	(max - min) + default_frame
 }
 
 /// Fill in the durations the codec states outright, before anything has to be inferred
@@ -679,33 +722,81 @@ pub(crate) fn apply_codec_durations(frames: &mut [Frame], opus: bool) {
 /// [`Producer::cut`](crate::container::Producer::cut) is how it says so: the durations it
 /// writes arrive already set and are left alone here.
 pub(crate) fn infer_missing_durations(
-	mut frames: Vec<Frame>,
+	frames: &mut [Frame],
 	successor: Option<&Frame>,
 	default_frame: Duration,
-) -> Vec<Frame> {
-	let infer_from_pts = pts_monotonic(&frames, successor);
-	// Express the fallback at the frames' own timescale so it matches the durations derived from
-	// their timestamps (a `Timestamp` carries its scale, and `try_from(Duration)` is nanosecond-scale).
-	let fallback = frames.first().map(|f| f.timestamp.scale()).and_then(|scale| {
-		Timestamp::try_from(default_frame)
-			.ok()
-			.and_then(|t| t.convert(scale).ok())
-	});
+	timescale: moq_net::Timescale,
+) -> Result<()> {
+	let infer_from_pts = pts_monotonic(frames, successor);
 
 	for i in 0..frames.len() {
-		if frames[i].duration.is_some_and(|duration| !duration.is_zero()) {
-			continue;
-		}
-
-		frames[i].duration = infer_from_pts
-			.then(|| duration_bound(&frames, successor, i))
+		let successor = infer_from_pts
+			.then(|| duration_bound(frames, successor, i))
 			.flatten()
-			.and_then(|next| next.timestamp.checked_sub(frames[i].timestamp).ok())
-			.filter(|duration| !duration.is_zero())
-			.or(fallback);
+			.cloned();
+		infer_missing_duration(&mut frames[i], successor.as_ref(), default_frame, timescale)?;
 	}
 
-	frames
+	Ok(())
+}
+
+/// Infer one frame's duration from a known same-group successor, else the catalog cadence.
+pub(crate) fn infer_missing_duration(
+	frame: &mut Frame,
+	successor: Option<&Frame>,
+	default_frame: Duration,
+	timescale: moq_net::Timescale,
+) -> Result<()> {
+	if frame.duration.is_some_and(|duration| !duration.is_zero()) {
+		return Ok(());
+	}
+
+	frame.duration = match successor {
+		Some(next) => timestamp_gap(frame.timestamp, next.timestamp, timescale)?,
+		None => None,
+	}
+	.or_else(|| fallback_duration(default_frame, timescale))
+	.filter(|duration| !duration.is_zero());
+	Ok(())
+}
+
+/// Snap floating-point catalog cadence to an output tick only when the mismatch is no more
+/// than the nanosecond precision used by `Duration`.
+fn fallback_duration(default_frame: Duration, timescale: moq_net::Timescale) -> Option<Timestamp> {
+	if let Some(ticks) = super::rounded_duration_ticks(default_frame, timescale.as_u64()) {
+		Timestamp::new(ticks, timescale).ok()
+	} else {
+		Timestamp::try_from(default_frame).ok()
+	}
+}
+
+/// Quantize two absolute instants at the output scale, then subtract their tick positions.
+///
+/// Quantizing endpoints instead of each gap independently carries fractional ticks forward:
+/// a microsecond clock alternating 33,333 and 33,334 microsecond steps at 30 kHz produces
+/// consecutive 1,000-tick samples instead of either drifting or failing as inexact.
+fn timestamp_gap(start: Timestamp, end: Timestamp, timescale: moq_net::Timescale) -> Result<Option<Timestamp>> {
+	let start_scale = u128::from(start.scale().as_u64());
+	let end_scale = u128::from(end.scale().as_u64());
+	let end_numerator = u128::from(end.value()) * start_scale;
+	let start_numerator = u128::from(start.value()) * end_scale;
+	let Some(numerator) = end_numerator.checked_sub(start_numerator) else {
+		return Ok(None);
+	};
+	if numerator == 0 {
+		return Ok(None);
+	}
+
+	let start_ticks = super::timestamp_ticks(start, timescale)?;
+	let end_ticks = super::timestamp_ticks(end, timescale)?;
+	let Some(ticks) = end_ticks.checked_sub(start_ticks) else {
+		return Ok(None);
+	};
+	if ticks == 0 {
+		return Err(Error::SampleDurationTooSmall(timescale.as_u64()).into());
+	}
+
+	Ok(Some(Timestamp::new(ticks, timescale)?))
 }
 
 fn pts_monotonic(frames: &[Frame], successor: Option<&Frame>) -> bool {
@@ -770,6 +861,10 @@ mod tests {
 		Timestamp::from_micros(micros).unwrap()
 	}
 
+	fn duration_micros(frame: &Frame) -> u128 {
+		frame.duration.unwrap().as_micros()
+	}
+
 	fn frame(timestamp_us: u64, duration_us: Option<u64>) -> Frame {
 		Frame {
 			timestamp: ts(timestamp_us),
@@ -790,33 +885,63 @@ mod tests {
 
 	#[test]
 	fn infer_missing_durations_uses_default_for_trailing_sample() {
-		let frames = infer_missing_durations(
-			vec![frame(0, Some(0)), frame(41_667, None), frame(83_334, None)],
-			None,
-			Duration::from_millis(33),
-		);
+		let mut frames = vec![frame(0, Some(0)), frame(41_667, None), frame(83_334, None)];
+		infer_missing_durations(&mut frames, None, Duration::from_millis(33), moq_net::Timescale::MICRO).unwrap();
 
 		assert_eq!(frames[0].duration, Some(ts(41_667)));
 		assert_eq!(frames[1].duration, Some(ts(41_667)));
 		assert_eq!(frames[2].duration, Some(ts(33_000)));
-		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.116334);
+		assert_eq!(
+			fragment_duration(&frames, Duration::from_millis(33)),
+			Duration::from_micros(116_334)
+		);
 	}
 
 	#[test]
 	fn infer_missing_duration_uses_default_for_single_frame() {
-		let frames = infer_missing_durations(vec![frame(83_333, Some(0))], None, Duration::from_millis(40));
+		let mut frames = vec![frame(83_333, Some(0))];
+		infer_missing_durations(&mut frames, None, Duration::from_millis(40), moq_net::Timescale::MICRO).unwrap();
 
 		assert_eq!(frames[0].duration, Some(ts(40_000)));
-		assert_eq!(fragment_seconds(&frames, Duration::from_millis(40)), 0.04);
+		assert_eq!(
+			fragment_duration(&frames, Duration::from_millis(40)),
+			Duration::from_millis(40)
+		);
 	}
 
 	#[test]
 	fn infer_trailing_duration_from_successor_frame() {
 		let successor = frame(83_334, None);
-		let frames = infer_missing_durations(vec![frame(41_667, None)], Some(&successor), Duration::from_millis(33));
+		let mut frames = vec![frame(41_667, None)];
+		infer_missing_durations(
+			&mut frames,
+			Some(&successor),
+			Duration::from_millis(33),
+			moq_net::Timescale::MICRO,
+		)
+		.unwrap();
 
 		assert_eq!(frames[0].duration, Some(ts(41_667)));
-		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.041667);
+		assert_eq!(
+			fragment_duration(&frames, Duration::from_millis(33)),
+			Duration::from_micros(41_667)
+		);
+	}
+
+	#[test]
+	fn inferred_microsecond_clock_carries_fractional_ticks_forward() {
+		let timescale = moq_net::Timescale::new(30_000).unwrap();
+		let mut frames = vec![frame(0, None), frame(33_333, None), frame(66_667, None)];
+		infer_missing_durations(&mut frames, None, Duration::from_nanos(33_333_333), timescale).unwrap();
+
+		let durations: Vec<_> = frames
+			.iter()
+			.map(|frame| {
+				let duration = frame.duration.unwrap();
+				(duration.value(), duration.scale())
+			})
+			.collect();
+		assert_eq!(durations, vec![(1_000, timescale); 3]);
 	}
 
 	/// The regression for moq-dev/moq.pro#814: a subscriber that got a stale cached group
@@ -826,10 +951,20 @@ mod tests {
 	#[test]
 	fn infer_stops_at_a_group_boundary() {
 		let next_group = group_start(2_405_070_000);
-		let frames = infer_missing_durations(vec![frame(63_244, None)], Some(&next_group), Duration::from_millis(33));
+		let mut frames = vec![frame(63_244, None)];
+		infer_missing_durations(
+			&mut frames,
+			Some(&next_group),
+			Duration::from_millis(33),
+			moq_net::Timescale::MICRO,
+		)
+		.unwrap();
 
 		assert_eq!(frames[0].duration, Some(ts(33_000)));
-		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.033);
+		assert_eq!(
+			fragment_duration(&frames, Duration::from_millis(33)),
+			Duration::from_millis(33)
+		);
 	}
 
 	/// Audio never rolls a fragment on a keyframe, so its buffer can span whole groups.
@@ -837,15 +972,12 @@ mod tests {
 	/// the same.
 	#[test]
 	fn infer_stops_at_an_interior_group_boundary() {
-		let frames = infer_missing_durations(
-			vec![frame(0, None), frame(21_333, None), group_start(600_000_000)],
-			None,
-			Duration::from_millis(21),
-		);
+		let mut frames = vec![frame(0, None), frame(21_333, None), group_start(600_000_000)];
+		infer_missing_durations(&mut frames, None, Duration::from_millis(21), moq_net::Timescale::MICRO).unwrap();
 
 		assert_eq!(frames[0].duration, Some(ts(21_333)), "same group, real delta");
-		assert_eq!(frames[1].duration, Some(ts(21_000)), "bounded by the next group");
-		assert_eq!(frames[2].duration, Some(ts(21_000)), "nothing after it at all");
+		assert_eq!(duration_micros(&frames[1]), 21_000, "bounded by the next group");
+		assert_eq!(duration_micros(&frames[2]), 21_000, "nothing after it at all");
 	}
 
 	/// The duration cap splits a GOP across fragments, so the successor is a delta frame
@@ -853,7 +985,14 @@ mod tests {
 	#[test]
 	fn infer_crosses_a_mid_group_fragment_boundary() {
 		let successor = frame(83_334, None);
-		let frames = infer_missing_durations(vec![frame(41_667, None)], Some(&successor), Duration::from_millis(33));
+		let mut frames = vec![frame(41_667, None)];
+		infer_missing_durations(
+			&mut frames,
+			Some(&successor),
+			Duration::from_millis(33),
+			moq_net::Timescale::MICRO,
+		)
+		.unwrap();
 
 		assert_eq!(frames[0].duration, Some(ts(41_667)));
 	}
@@ -874,7 +1013,13 @@ mod tests {
 			.collect();
 
 		apply_codec_durations(&mut frames, true);
-		let frames = infer_missing_durations(frames, None, Duration::from_micros(21_333));
+		infer_missing_durations(
+			&mut frames,
+			None,
+			Duration::from_micros(21_333),
+			moq_net::Timescale::MICRO,
+		)
+		.unwrap();
 
 		for f in &frames {
 			assert_eq!(
@@ -890,33 +1035,42 @@ mod tests {
 	#[test]
 	fn infer_ignores_a_rewound_group_boundary() {
 		let next_group = group_start(0);
-		let frames = infer_missing_durations(
-			vec![frame(1_000_000, None), frame(1_033_000, None)],
+		let mut frames = vec![frame(1_000_000, None), frame(1_033_000, None)];
+		infer_missing_durations(
+			&mut frames,
 			Some(&next_group),
 			Duration::from_millis(50),
-		);
+			moq_net::Timescale::MICRO,
+		)
+		.unwrap();
 
 		assert_eq!(
 			frames[0].duration,
 			Some(ts(33_000)),
 			"in-group delta survives the rewind"
 		);
-		assert_eq!(frames[1].duration, Some(ts(50_000)), "last in group falls back");
+		assert_eq!(duration_micros(&frames[1]), 50_000, "last in group falls back");
 	}
 
 	#[test]
 	fn infer_missing_durations_avoids_non_monotonic_pts() {
 		let successor = frame(66_000, None);
-		let frames = infer_missing_durations(
-			vec![frame(0, None), frame(99_000, None), frame(33_000, None)],
+		let mut frames = vec![frame(0, None), frame(99_000, None), frame(33_000, None)];
+		infer_missing_durations(
+			&mut frames,
 			Some(&successor),
 			Duration::from_millis(33),
-		);
+			moq_net::Timescale::MICRO,
+		)
+		.unwrap();
 
 		assert_eq!(frames[0].duration, Some(ts(33_000)));
 		assert_eq!(frames[1].duration, Some(ts(33_000)));
 		assert_eq!(frames[2].duration, Some(ts(33_000)));
-		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.099);
+		assert_eq!(
+			fragment_duration(&frames, Duration::from_millis(33)),
+			Duration::from_micros(99_000)
+		);
 	}
 
 	// A source init whose trak carries an edit list must come out of extract_init with
@@ -948,5 +1102,49 @@ mod tests {
 
 		assert_eq!(traks.len(), 1);
 		assert!(traks[0].edts.is_none(), "CMAF init must not carry an edit list");
+	}
+
+	// tkhd.duration is in the movie timescale, which the merged moov replaces with its own. A
+	// duration carried over from the source is then read at a scale it wasn't written in: a 30
+	// second track authored at a 1 kHz movie scale reads as 0.625s once the moov says 48 kHz.
+	#[test]
+	fn extract_init_clears_a_stale_track_duration() {
+		use mp4_atom::Encode;
+
+		let moov = mp4_atom::Moov {
+			mvhd: mp4_atom::Mvhd {
+				timescale: 1_000,
+				..Default::default()
+			},
+			trak: vec![mp4_atom::Trak {
+				tkhd: mp4_atom::Tkhd {
+					duration: 30_000, // 30s at the source's 1 kHz movie scale
+					..Default::default()
+				},
+				mdia: mp4_atom::Mdia {
+					mdhd: mp4_atom::Mdhd {
+						timescale: 48_000,
+						..Default::default()
+					},
+					..Default::default()
+				},
+				..Default::default()
+			}],
+			..Default::default()
+		};
+		let mut init = Vec::new();
+		moov.encode(&mut init).unwrap();
+
+		let mut traks = Vec::new();
+		let mut trexs = Vec::new();
+		let mut ftyp = None;
+		extract_init(&Bytes::from(init), 1, &mut ftyp, &mut traks, &mut trexs).unwrap();
+
+		assert_eq!(traks.len(), 1);
+		assert_eq!(
+			traks[0].tkhd.duration,
+			u64::MAX,
+			"a live fragmented init declares an unknown duration"
+		);
 	}
 }

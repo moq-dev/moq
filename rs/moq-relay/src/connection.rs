@@ -69,6 +69,7 @@ impl Connection {
 	/// Authenticates and serves this connection until it closes.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
+		let peer_origin = self.request.peer_origin();
 		let token = match self.authenticate().await {
 			Ok(token) => token,
 			Err(err) => {
@@ -97,19 +98,19 @@ impl Connection {
 		};
 		if !authorized {
 			let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
-			let wanted = role.map(|role| role.as_str()).unwrap_or("any");
+			let wanted = role.map_or("any", moq_net::Role::as_str);
 			anyhow::bail!("token does not grant {wanted} access to {}", token.root);
 		}
 
 		match (&publish, &subscribe) {
 			(Some(publish), Some(subscribe)) => {
-				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "session accepted");
+				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), "session accepted");
 			}
 			(Some(publish), None) => {
-				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
+				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), "publisher accepted");
 			}
 			(None, Some(subscribe)) => {
-				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted")
+				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, subscribe = %subscribe.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), "subscriber accepted");
 			}
 			_ => unreachable!("authorized above guarantees at least one origin"),
 		}
@@ -149,6 +150,7 @@ impl Connection {
 			request = request.with_subscriber(publish);
 		}
 		let session = request.ok().await?;
+		let _node_connection = peer_origin.map(|origin| self.cluster.nodes.connect_inbound(self.id, origin));
 
 		tracing::info!(version = %session.version(), %transport, "negotiated");
 
@@ -222,7 +224,7 @@ impl Connection {
 				params
 			}
 			// URL-less stream transports: path + `?jwt=` ride the SETUP.
-			None => AuthParams::from_path(self.request.path()),
+			None => AuthParams::from_path_query(self.request.path(), self.request.query()),
 		};
 		params.transport = Some(transport);
 

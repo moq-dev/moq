@@ -147,7 +147,7 @@ async fn goaway_drains_without_a_wire_message_moq_lite_03() {
 		// The deadline still force-closes the session on schedule.
 		let err = pair.server.closed().await;
 		assert!(
-			err.to_string().contains("goaway timeout") || matches!(err, moq_net::Error::GoawayTimeout),
+			matches!(err, moq_net::Error::GoawayTimeout),
 			"expected a GoawayTimeout close, got {err}"
 		);
 	})
@@ -210,10 +210,11 @@ async fn goaway_timeout_force_close_moq_transport_17() {
 			.expect("session closed before GOAWAY");
 		assert_eq!(goaway.timeout, Some(Duration::from_millis(100)));
 
-		// The deadline fires and the driver force-closes with GoawayTimeout (33).
+		// The deadline fires and the driver force-closes with GOAWAY_TIMEOUT (0x10),
+		// which the peer decodes back through the session registry.
 		let reason = pair.client.closed().await;
 		assert!(
-			reason.to_string().contains("goaway timeout"),
+			matches!(reason, moq_net::Error::GoawayTimeout),
 			"peer should observe the GoawayTimeout close: {reason}"
 		);
 	})
@@ -235,8 +236,9 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 	/// Varints under 64 encode as a single byte, so the frame is hand-rolled.
 	/// Returns the recv half so the caller can wait for the peer to fully
 	/// process (and drop) the stream.
-	async fn send_goaway_raw<S: web_transport_trait::Session>(session: &S, uri: &str) -> S::RecvStream {
-		use web_transport_trait::SendStream as _;
+	async fn send_goaway_raw<S: moq_net::transport::poll::Session>(session: &mut S, uri: &str) -> S::RecvStream {
+		use moq_net::transport::poll::SendStream as _;
+		use moq_net::web_transport_trait::poll::SendStream as _;
 		assert!(uri.len() < 63, "helper only encodes single-byte varints");
 		// Message body = [uri length varint][uri bytes]; the size prefix covers it.
 		let mut frame = vec![0x05u8, uri.len() as u8 + 1, uri.len() as u8];
@@ -251,7 +253,7 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 
 	/// Block until the peer closes its half of the stream, i.e. it finished
 	/// processing the control message and dropped the stream.
-	async fn wait_processed<R: web_transport_trait::RecvStream>(mut recv: R) {
+	async fn wait_processed<R: moq_net::transport::poll::RecvStream>(mut recv: R) {
 		let mut buf = [0u8; 16];
 		while let Ok(Some(_)) = recv.read(&mut buf).await {}
 	}
@@ -273,7 +275,8 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 
 		// First GOAWAY: observed with its URI. Waiting for the peer to close the
 		// stream guarantees the control message was fully processed.
-		let recv_a = send_goaway_raw(&server_raw, "a").await;
+		let mut server_raw = server_raw;
+		let recv_a = send_goaway_raw(&mut server_raw, "a").await;
 		wait_processed(recv_a).await;
 		let goaway = client_session
 			.draining()
@@ -285,7 +288,7 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 
 		// Second GOAWAY: once the client has fully processed the stream, the
 		// observed payload must still carry the FIRST URI.
-		let recv_b = send_goaway_raw(&server_raw, "bb").await;
+		let recv_b = send_goaway_raw(&mut server_raw, "bb").await;
 		wait_processed(recv_b).await;
 
 		let goaway = client_session
@@ -360,18 +363,20 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 		assert!(client.draining().peek().is_some());
 
 		// A NEW subscription must not reach the wire: the upstream open is gated
-		// with GoingAway. In the resume model a failed route delivers a stall
-		// (waiting for another route) rather than an error, so accept either the
-		// specific GoingAway rejection or a stall (a track with content ready
-		// producing nothing within a generous bound). Any OTHER error fails the
-		// test, so a regression that breaks for a different reason still fails.
+		// with GoingAway. The rejection can surface three ways: at subscribe (a
+		// gated request), through the track (lite-04 has no TRACK_INFO, so the
+		// request is accepted and the copy aborts at the gated SUBSCRIBE open,
+		// which the origin treats as a refusal and aborts the logical track), or
+		// as a stall (nothing within a generous bound). Any OTHER error, and any
+		// delivered group, fails the test.
 		match bc.track("audio").unwrap().subscribe(None).await {
 			Err(moq_net::Error::GoingAway) => {}
 			Err(other) => panic!("unexpected error gating a post-GOAWAY subscribe: {other}"),
-			Ok(mut gated) => {
-				let delivered = tokio::time::timeout(Duration::from_millis(500), gated.recv_group()).await;
-				assert!(delivered.is_err(), "new subscribe after GOAWAY must not deliver");
-			}
+			Ok(mut gated) => match tokio::time::timeout(Duration::from_millis(500), gated.recv_group()).await {
+				Err(_) | Ok(Err(moq_net::Error::GoingAway)) => {}
+				Ok(Err(other)) => panic!("unexpected error gating a post-GOAWAY subscribe: {other}"),
+				Ok(Ok(_)) => panic!("new subscribe after GOAWAY must not deliver"),
+			},
 		}
 
 		// The EXISTING subscription keeps flowing.

@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.17](https://github.com/moq-dev/moq/compare/moq-video-v0.0.16...moq-video-v0.0.17) - 2026-08-14
+
+### Added
+
+- *(libmoq)* declare the catalog container for manually authored renditions ([#2805](https://github.com/moq-dev/moq/pull/2805))
+
+## [0.0.16](https://github.com/moq-dev/moq/compare/moq-video-v0.0.15...moq-video-v0.0.16) - 2026-08-13
+
+### Added
+
+- *(moq-video)* advertise the catalog rendition before the first keyframe ([#2768](https://github.com/moq-dev/moq/pull/2768))
+
+### Fixed
+
+- *(release)* repair native package releases ([#2731](https://github.com/moq-dev/moq/pull/2731))
+- *(moq-ffi)* support iOS simulator builds ([#2710](https://github.com/moq-dev/moq/pull/2710))
+
+## [0.0.15](https://github.com/moq-dev/moq/compare/moq-video-v0.0.14...moq-video-v0.0.15) - 2026-08-07
+
+### Added
+
+- *(cli)* add moq play ([#2697](https://github.com/moq-dev/moq/pull/2697))
+
+## [0.0.14](https://github.com/moq-dev/moq/compare/moq-video-v0.0.13...moq-video-v0.0.14) - 2026-08-06
+
+### Added
+
+- *(hang)* declare a configurable 30s retention on media tracks, and fix relayed cache misses ([#2615](https://github.com/moq-dev/moq/pull/2615))
+
+### Fixed
+
+- *(libmoq)* unbreak the Linux C link list, and make VAAPI opt-in ([#2669](https://github.com/moq-dev/moq/pull/2669))
+
+## [0.0.13](https://github.com/moq-dev/moq/compare/moq-video-v0.0.12...moq-video-v0.0.13) - 2026-08-05
+
+### Added
+
+- *(bindings)* publish raw video with a native encoder ([#2608](https://github.com/moq-dev/moq/pull/2608))
+- *(moq-video)* resize Direct3D11 textures on the GPU ([#2601](https://github.com/moq-dev/moq/pull/2601))
+
+### Fixed
+
+- *(moq-video)* reject unrepresentable sizes, and unbreak the macOS build ([#2648](https://github.com/moq-dev/moq/pull/2648))
+- *(moq-video)* unbreak the d3d11-resize-probe example on Windows ([#2638](https://github.com/moq-dev/moq/pull/2638))
+
+## [0.0.12](https://github.com/moq-dev/moq/compare/moq-video-v0.0.11...moq-video-v0.0.12) - 2026-08-03
+
+### Fixed
+
+- *(moq-video)* keep Media Foundation decoded frames on the GPU, and stop losing frames at group boundaries ([#2584](https://github.com/moq-dev/moq/pull/2584))
+
 ## [0.0.11](https://github.com/moq-dev/moq/compare/moq-video-v0.0.10...moq-video-v0.0.11) - 2026-07-29
 
 ### Added

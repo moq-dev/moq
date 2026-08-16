@@ -89,23 +89,47 @@ async fn opus_frame_publishes_catalog_entry() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn vp9_keyframe_flag_from_uncompressed_header() {
+async fn idle_video_bridges_do_not_gate_audio_catalog() {
+	let broadcast = moq_net::broadcast::Info::new();
+	let mut producer = broadcast.produce();
+	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
+	let mut updates = catalog.consume().expect("catalog consumer");
+
+	let _vp8 = codec::vp8::Bridge::new(producer.clone(), catalog.clone()).expect("vp8 bridge");
+	let _vp9 = codec::vp9::Bridge::new(producer.clone(), catalog.clone()).expect("vp9 bridge");
+	let mut opus = codec::opus::Bridge::new(producer, catalog, 48_000, 2).expect("opus bridge");
+	Bridge::push(
+		&mut opus,
+		Frame {
+			timestamp_us: 0,
+			payload: Bytes::from_static(&[0xfc, 0xff, 0xfe]),
+		},
+	)
+	.expect("push opus");
+
+	let snapshot = tokio::time::timeout(std::time::Duration::from_millis(1), updates.next())
+		.await
+		.expect("idle video must not gate active audio")
+		.expect("catalog update")
+		.expect("catalog snapshot");
+	assert_eq!(snapshot.audio.renditions.len(), 1);
+	assert!(snapshot.video.renditions.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn vp9_keyframe_publishes_dimensions_and_starts_group() {
 	let broadcast = moq_net::broadcast::Info::new();
 	let mut producer = broadcast.produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut producer).expect("catalog");
 
 	let mut bridge = codec::vp9::Bridge::new(producer, catalog.clone()).expect("bridge");
 
-	// VP9 uncompressed header: frame_type is bit 2. 0 = keyframe, 1 = inter.
-	// Byte with bit 2 cleared is a keyframe; with bit 2 set is an inter frame.
-	let keyframe_byte = 0b1000_0010; // frame_marker=10, profile bits, frame_type=0
-	let interframe_byte = 0b1000_0110; // same shape but frame_type=1
-
 	Bridge::push(
 		&mut bridge,
 		Frame {
 			timestamp_us: 0,
-			payload: Bytes::from(vec![keyframe_byte, 0, 0]),
+			// VP9 profile 0 keyframe header for 320x240.
+			payload: Bytes::from_static(&[0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00]),
 		},
 	)
 	.expect("keyframe accepted");
@@ -117,12 +141,17 @@ async fn vp9_keyframe_flag_from_uncompressed_header() {
 		&mut bridge,
 		Frame {
 			timestamp_us: 33_000,
-			payload: Bytes::from(vec![interframe_byte, 0, 0]),
+			// frame_marker=10, profile=0, show_existing=0, frame_type=1.
+			payload: Bytes::from_static(&[0x84, 0x00, 0x00]),
 		},
 	)
 	.expect("interframe accepted");
 
-	assert_eq!(catalog.snapshot().video.renditions.len(), 1, "vp9 rendition announced");
+	let snapshot = catalog.snapshot();
+	assert_eq!(snapshot.video.renditions.len(), 1, "vp9 rendition announced");
+	let config = snapshot.video.renditions.values().next().unwrap();
+	assert_eq!(config.coded_width, Some(320));
+	assert_eq!(config.coded_height, Some(240));
 }
 
 // ── Egress (RTP-out) round-trip tests ─────────────────────────────────────

@@ -60,6 +60,7 @@ await quicheLoaded; //This is a promise, connect after it resolves
 - **[Publishing](examples/publish.ts)** - Publish data to a broadcast
 - **[Subscribing](examples/subscribe.ts)** - Subscribe to and receive broadcast data
 - **[Discovery](examples/discovery.ts)** - Discover broadcasts announced by the server
+- **[Waiting](examples/wait.ts)** - Wait for one known broadcast to come online, and follow it
 - **[Server side usage](https://github.com/sb2702/webcodecs-examples/tree/main/src/moq-server)** - Publish from browser to a server
 
 ## License

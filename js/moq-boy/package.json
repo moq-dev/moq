@@ -1,7 +1,7 @@
 {
 	"name": "@moq/boy",
 	"type": "module",
-	"version": "0.3.0",
+	"version": "0.3.1",
 	"jsr": false,
 	"description": "MoQ Boy - Crowd-controlled Game Boy streaming via MoQ",
 	"license": "(MIT OR Apache-2.0)",
@@ -18,8 +18,9 @@
 		"./src/element.tsx"
 	],
 	"scripts": {
-		"build": "rimraf dist && vite build && tsc && bun ../common/package.ts",
+		"build": "rimraf dist && vite build && tsc -p tsconfig.build.json && bun ../common/package.ts",
 		"check": "tsc --noEmit",
+		"test": "bun test --only-failures",
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
@@ -36,7 +37,7 @@
 		"rimraf": "^6.1.3",
 		"solid-js": "^1.9.14",
 		"typescript": "7.0.2",
-		"vite": "^8.1.4",
-		"vite-plugin-solid": "^2.11.13"
+		"vite": "^8.2.0",
+		"vite-plugin-solid": "^2.11.14"
 	}
 }

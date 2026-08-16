@@ -21,6 +21,7 @@ from moq_ffi import (
     MoqTrackDynamic,
     MoqTrackProducer,
     MoqTrackRequest,
+    MoqVideoProducer,
 )
 
 from .types import (
@@ -31,6 +32,9 @@ from .types import (
     Route,
     Subscription,
     TrackInfo,
+    VideoEncoderInput,
+    VideoEncoderOutput,
+    VideoFrame,
     VideoHint,
     VideoProperties,
 )
@@ -69,6 +73,29 @@ class MediaProducer:
     def write_frame(self, payload: bytes, timestamp_us: int = 0) -> None:
         """Write one encoded frame with a presentation timestamp in microseconds."""
         self._inner.write_frame(Frame(payload=payload, timestamp_us=timestamp_us))
+
+    def cut(self) -> None:
+        """Draw a group boundary here.
+
+        Audio has no boundary of its own (every packet is independently
+        decodable), so this is the only thing that gives it groups: call it
+        after every frame for one group (one QUIC stream) the relay forwards
+        without waiting, or at a segment cadence to align with video. Video
+        groups at its own keyframes and needs this only to override that.
+
+        On a container this declares a new segment, rolling a group on every
+        track it publishes.
+        """
+        self._inner.cut()
+
+    def seek(self, sequence: int) -> None:
+        """Draw a group boundary and number the next group ``sequence``.
+
+        :meth:`cut` with an explicit sequence, for a publisher whose group
+        numbers have to be deterministic: two encoders aligning per GOP so a
+        consumer can fail over between them.
+        """
+        self._inner.seek(sequence)
 
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers."""
@@ -331,6 +358,48 @@ class AudioProducer:
         self._inner.finish()
 
 
+class VideoProducer:
+    """Publish raw pictures and let a native encoder compress them on the way out.
+
+    Built via :meth:`BroadcastProducer.publish_video`. Pixel format,
+    resolution, and framerate are fixed at construction; each
+    :meth:`write` call passes only pixels and a presentation timestamp.
+    """
+
+    def __init__(self, inner: MoqVideoProducer) -> None:
+        self._inner = inner
+
+    def write(self, frame: VideoFrame) -> None:
+        """Encode and publish one frame in the configured input format.
+
+        A hardware encoder pipelines, so a call that puts nothing on the wire
+        is normal rather than an error.
+        """
+        self._inner.write(frame)
+
+    def cut(self) -> None:
+        """Start a new group at the next written frame.
+
+        Optional: the encoder keyframes every ``gop`` frames on its own, and
+        each of those cuts a group, so a subscriber can always join without
+        this. Reach for it only to place the boundaries yourself.
+        """
+        self._inner.cut()
+
+    def set_bitrate(self, bitrate: int) -> None:
+        """Retune the live encoder, in bits per second.
+
+        Cheap enough to drive from a congestion controller: no keyframe is
+        forced. Raises if this backend cannot retune while running. That is
+        not fatal: the encoder keeps its current rate.
+        """
+        self._inner.set_bitrate(bitrate)
+
+    def finish(self) -> None:
+        """Flush any frames the codec is holding and finalize the track."""
+        self._inner.finish()
+
+
 class BroadcastDynamic:
     """Async source of tracks requested by subscribers.
 
@@ -439,6 +508,20 @@ class BroadcastProducer:
     ) -> AudioProducer:
         """Publish a raw-audio track with an in-process Opus encoder."""
         return AudioProducer(self._inner.publish_audio(name, input, output))
+
+    def publish_video(
+        self,
+        input: VideoEncoderInput,
+        output: VideoEncoderOutput,
+    ) -> VideoProducer:
+        """Publish a raw-video track with an in-process H.264/H.265 encoder.
+
+        The track is named after the codec (``.avc3`` / ``.hev1``) and its
+        catalog rendition is published immediately, read out of the encoder
+        itself, so subscribers discover it through the catalog rather than a
+        name you pick, and can find it before the first frame exists.
+        """
+        return VideoProducer(self._inner.publish_video(input, output))
 
     def publish_track(self, name: str, info: TrackInfo | None = None) -> TrackProducer:
         """Create a track. Send any bytes, no codec validation. ``info`` sets track

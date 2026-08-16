@@ -5,7 +5,12 @@ import type * as Path from "../path.ts";
 import type { Probe, Stats } from "./stats.ts";
 import type { Transport } from "./transport.ts";
 
-/** An established MoQ session, implemented by both the moq-lite and moq-ietf protocols. */
+/**
+ * An established MoQ session, implemented by both the moq-lite and moq-ietf protocols.
+ *
+ * Publishing goes through an origin, not the session: pass an `Origin.Consumer` as the
+ * `publish` connect option and the session announces and serves that origin's broadcasts.
+ */
 export interface Established {
 	/** URL of the connected server. */
 	readonly url: URL;
@@ -32,11 +37,22 @@ export interface Established {
 	/** Subscribe to broadcast announcements under an optional path prefix, returning paths relative to that prefix. */
 	announced(prefix?: Path.Valid): announce.Consumer;
 
-	/** Publish a broadcast at the given path. */
-	publish(path: Path.Valid, broadcast: broadcast.Producer): void;
-
-	/** Consume the broadcast at the given path. */
+	/**
+	 * Consume the broadcast at the given path, immediately.
+	 *
+	 * The subscription is reset if nobody publishes the path, so use
+	 * {@link announcedBroadcast} instead when the broadcast may not be online yet.
+	 */
 	consume(path: Path.Valid): broadcast.Consumer;
+
+	/**
+	 * A reactive handle to the broadcast at the given path, live only while it is announced.
+	 *
+	 * The announcement-gated counterpart to {@link consume}: it waits for the broadcast to come
+	 * online instead of resetting, and drops back to `undefined` when it goes away. See
+	 * {@link announce.Broadcast}. Close the handle when done.
+	 */
+	announcedBroadcast(path: Path.Valid): announce.Broadcast;
 
 	/**
 	 * Snapshot the transport's counters, querying it fresh on each call.
@@ -49,6 +65,10 @@ export interface Established {
 	/** Close the session. */
 	close(): void;
 
-	/** Resolves when the session closes. */
-	closed: Promise<void>;
+	/**
+	 * Resolves when the session closes: `null` for a clean close, a `RemoteError` when the
+	 * peer closed with a code (e.g. `SessionCode.Unauthorized` for an auth rejection), or the
+	 * transport's own failure. Never rejects.
+	 */
+	closed: Promise<Error | null>;
 }

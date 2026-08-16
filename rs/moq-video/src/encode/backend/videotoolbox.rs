@@ -241,6 +241,11 @@ impl Backend for VideoToolbox {
 			.collect())
 	}
 
+	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+		// complete_frames runs per-encode, so nothing is ever buffered.
+		Ok(Vec::new())
+	}
+
 	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
 		// complete_frames runs per-encode, so nothing is buffered at shutdown.
 		Ok(Vec::new())

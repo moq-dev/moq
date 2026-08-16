@@ -43,6 +43,23 @@ public final class BroadcastConsumer: Sendable {
         GroupConsumer(try await ffi.fetchGroup(name: name, sequence: sequence, options: options))
     }
 
+    /// Fetch one complete group and decode its track container into media frames.
+    public func fetchMediaGroup(
+        name: String,
+        sequence: UInt64,
+        container: Container,
+        options: FetchGroupOptions? = nil
+    ) async throws -> MediaGroupConsumer {
+        MediaGroupConsumer(
+            try await ffi.fetchMediaGroup(
+                name: name,
+                sequence: sequence,
+                container: container,
+                options: options
+            )
+        )
+    }
+
     /// Subscribe to a media track, delivering frames in decode order. `container`
     /// comes from the catalog. `subscription` tunes delivery priority, group ordering
     /// priority, group range, and the latency budget; omit for defaults. Raise
@@ -213,6 +230,17 @@ public final class BroadcastProducer: Sendable {
     /// (e.g. to Opus) inside the FFI boundary per `input`/`output`.
     public func publishAudio(name: String, input: AudioEncoderInput, output: AudioEncoderOutput) throws -> AudioProducer {
         AudioProducer(try ffi.publishAudio(name: name, input: input, output: output))
+    }
+
+    /// Open a raw-video track. Pixels written via `VideoProducer.write` are
+    /// encoded (H.264 or H.265) inside the FFI boundary per `input`/`output`.
+    ///
+    /// The track is named after the codec (`.avc3` / `.hev1`) and its catalog
+    /// rendition is published immediately, read out of the encoder itself, so
+    /// subscribers discover it through the catalog rather than a name you pick,
+    /// and can find it before the first frame exists.
+    public func publishVideo(input: VideoEncoderInput, output: VideoEncoderOutput) throws -> VideoProducer {
+        VideoProducer(try ffi.publishVideo(input: input, output: output))
     }
 
     /// Open a JSON snapshot track (lossy latest-value), encoding each value from `Value`.

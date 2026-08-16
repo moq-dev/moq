@@ -25,7 +25,8 @@ The library exposes the following C functions, see [api.rs](src/api.rs) for full
 int32_t moq_log_level(const char *level, uintptr_t level_len);
 
 // Session
-int32_t moq_session_connect(const char *url, uintptr_t url_len, uint32_t origin_publish, uint32_t origin_consume, void (*on_status)(void *user_data, int32_t code), void *user_data);
+int32_t moq_session_connect(const char *url, uintptr_t url_len, const moq_client_config *config, uint32_t origin_publish, uint32_t origin_consume, void (*on_status)(void *user_data, int32_t code), void *user_data);
+moq_client_config moq_client_defaults(void);
 int32_t moq_session_close(uint32_t session);
 
 // Origin
@@ -62,14 +63,15 @@ int32_t moq_consume_catalog(uint32_t broadcast, void (*on_catalog)(void *user_da
 int32_t moq_consume_catalog_close(uint32_t catalog);
 int32_t moq_consume_catalog_free(uint32_t catalog);
 int32_t moq_consume_video_config(uint32_t catalog, uint32_t index, moq_video_config *dst);
+int32_t moq_consume_video_stalled(uint32_t catalog, uint32_t index, bool *dst);
 int32_t moq_consume_audio_config(uint32_t catalog, uint32_t index, moq_audio_config *dst);
 
 // Consuming: Video
-int32_t moq_consume_video(uint32_t catalog, uint32_t index, uint64_t max_latency_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
+int32_t moq_consume_video(uint32_t catalog, uint32_t index, uint64_t latency_max_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
 int32_t moq_consume_video_close(uint32_t track);
 
 // Consuming: Audio
-int32_t moq_consume_audio(uint32_t catalog, uint32_t index, uint64_t max_latency_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
+int32_t moq_consume_audio(uint32_t catalog, uint32_t index, uint64_t latency_max_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
 int32_t moq_consume_audio_close(uint32_t track);
 
 // Consuming: Frames

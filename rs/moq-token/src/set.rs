@@ -47,23 +47,31 @@ impl<'de> Deserialize<'de> for KeySet {
 }
 
 impl KeySet {
+	/// Parse a set from a JSON string.
 	#[allow(clippy::should_implement_trait)]
 	pub fn from_str(s: &str) -> crate::Result<Self> {
 		Ok(serde_json::from_str(s)?)
 	}
 
+	/// Load a set from a JSON file.
 	pub fn from_file<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
 		let json = std::fs::read_to_string(&path)?;
 		Ok(serde_json::from_str(&json)?)
 	}
 
+	/// Encode the set as JSON.
 	pub fn to_str(&self) -> crate::Result<String> {
 		Ok(serde_json::to_string(&self)?)
 	}
 
+	/// Write the set to a file as JSON.
+	///
+	/// A set holding any private key is written owner-only (mode `0600` on Unix), including when
+	/// it overwrites a file that was more permissive.
 	pub fn to_file<P: AsRef<Path>>(&self, path: P) -> crate::Result<()> {
 		let json = serde_json::to_string(&self)?;
-		std::fs::write(path, json)?;
+		let private = self.keys.iter().any(|key| key.is_private());
+		crate::fs::write(path.as_ref(), &json, private)?;
 		Ok(())
 	}
 
@@ -89,9 +97,7 @@ impl KeySet {
 	pub fn find_supported_key(&self, operation: &KeyOperation) -> Option<Arc<Key>> {
 		self.keys
 			.iter()
-			.find(|key| {
-				key.operations.contains(operation) && (*operation != KeyOperation::Sign || key.has_signing_material())
-			})
+			.find(|key| key.operations.contains(operation) && (*operation != KeyOperation::Sign || key.is_private()))
 			.cloned()
 	}
 
@@ -439,6 +445,28 @@ mod tests {
 		assert_eq!(loaded.keys[0].kid.as_ref().map(|k| k.encode()), Some("1"));
 
 		// Clean up
+		let _ = std::fs::remove_file(path);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn test_file_io_permissions() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let unique = SystemTime::now()
+			.duration_since(SystemTime::UNIX_EPOCH)
+			.unwrap()
+			.as_nanos();
+		let path = std::env::temp_dir().join(format!("test_keyset_perms_{unique}.json"));
+
+		let set = KeySet {
+			keys: vec![Arc::new(create_test_key(Some("1")))],
+		};
+		set.to_file(&path).expect("failed to write to file");
+
+		let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+		assert_eq!(mode, 0o600, "a set holding a private key must be owner-only");
+
 		let _ = std::fs::remove_file(path);
 	}
 }

@@ -14,8 +14,8 @@ public typealias MediaFrame = MoqFFI.MoqMediaFrame
 /// The JSON manifest describing a broadcast's tracks: video and audio
 /// renditions, display geometry, and untyped application sections.
 public typealias Catalog = MoqFFI.MoqCatalog
-/// A video rendition in the catalog: codec, coded/display dimensions, bitrate,
-/// framerate, and container.
+/// A video rendition in the catalog: codec, dimensions, bitrate, temporary
+/// avoidance recommendation, framerate, and container.
 public typealias Video = MoqFFI.MoqVideo
 /// Caller-provided catalog fields for a video track.
 public typealias VideoHint = MoqFFI.MoqVideoHint
@@ -41,6 +41,21 @@ public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
 public typealias AudioFormat = MoqFFI.MoqAudioFormat
 /// An audio codec identifier (e.g. Opus).
 public typealias AudioCodec = MoqFFI.MoqAudioCodec
+/// One raw video frame: pixels in the configured layout plus a presentation
+/// timestamp.
+public typealias VideoFrame = MoqFFI.MoqVideoFrame
+/// The pixel layout, resolution, and framerate written to a `VideoProducer`.
+public typealias VideoEncoderInput = MoqFFI.MoqVideoEncoderInput
+/// The encoder-side config for a published video track: codec, bitrate,
+/// keyframe interval, and backend preference.
+public typealias VideoEncoderOutput = MoqFFI.MoqVideoEncoderOutput
+/// A raw pixel layout (I420 or RGBA) fed to a `VideoProducer`.
+public typealias VideoPixelFormat = MoqFFI.MoqVideoPixelFormat
+/// A video codec identifier (H.264 or H.265).
+public typealias VideoCodec = MoqFFI.MoqVideoCodec
+/// Which encoder implementation to use: automatic, hardware, software, or one
+/// named backend.
+public typealias VideoEncoderKind = MoqFFI.MoqVideoEncoderKind
 /// How a track's frames are packaged (Legacy, CMAF, or LOC), as advertised in
 /// the catalog.
 public typealias Container = MoqFFI.MoqContainer
@@ -61,6 +76,12 @@ public typealias TrackInfo = MoqFFI.MoqTrackInfo
 /// A snapshot of connection statistics (RTT, bandwidth estimates, byte/packet
 /// counters). Fields are `nil` when the transport backend doesn't report them.
 public typealias ConnectionStats = MoqFFI.MoqConnectionStats
+
+/// Retry pacing for the automatic reconnect; see `Client.setBackoff`.
+public typealias Backoff = MoqFFI.MoqBackoff
+
+/// A connection lifecycle transition reported by `Session.status()`.
+public typealias ConnectionStatus = MoqFFI.MoqConnectionStatus
 
 /// The error thrown by every throwing call in this package. Already conforms to
 /// `Swift.Error` and `LocalizedError`; see `Errors.swift` for conveniences.

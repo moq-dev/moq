@@ -62,7 +62,7 @@ export interface Stats {
 
 // Signals the encoder reads.
 export type EncoderInput = {
-	// Whether to publish (and encode) this rendition. When false the rendition drops out of the
+	// Whether to publish (and encode) this rendition. Defaults to true. When false the rendition drops out of the
 	// catalog and stops encoding, but stays registered so a subscriber still gets an idle track.
 	enabled: Getter<boolean>;
 
@@ -158,7 +158,7 @@ export class Encoder {
 
 		this.name = name;
 		this.in = {
-			enabled: getter(props?.enabled ?? false),
+			enabled: getter(props?.enabled ?? true),
 			broadcast: getter(props?.broadcast),
 			capture: getter(props?.capture),
 		};

@@ -43,7 +43,9 @@ When pushing additional commits to an existing PR, check whether the title and d
 - Summary bullets describing behavior the latest commits have changed or removed.
 - The test-plan checklist lagging behind newly added tests.
 
-## AI Attribution
+## AI Contributions
+
+AI-assisted issues, pull requests, reviews, and comments are welcome. If the right solution is not obvious, open an issue before writing code so contributors and maintainers can brainstorm the approach together.
 
 Every piece of LLM-authored prose posted to GitHub ends with the agent model, e.g. `(Written by GPT-5)`. That covers PR descriptions, issue bodies, review summaries, review replies, and any comment on a PR, issue, or discussion. Keep the marker when editing a body you authored, so readers still know it wasn't human-written.
 
@@ -52,6 +54,8 @@ The marker never goes in the codebase itself: no code comments, doc comments, or
 ## Reviews
 
 CodeRabbit reviews PRs automatically, but it has an hourly quota and runs out of org credits. If a PR shows a "Review limit reached" / "out of usage credits" message instead of an actual review (or CodeRabbit otherwise fails to produce one), run the `/review` skill locally against the PR. Then act on the findings the same way you would CodeRabbit's: push the high-confidence, unambiguous fixes directly, and escalate anything ambiguous, architectural, or open to interpretation by asking first rather than guessing.
+
+Reply to review comments as you address them, saying what changed or why you disagree, so the reviewer doesn't have to diff the branch to find out. Replies are GitHub prose like any other, so they carry the [AI Contributions](#ai-contributions) marker.
 
 When reviewing a PR, always include the same public API changes list described above, and call out anything breaking per [Branch Targeting](#branch-targeting).
 

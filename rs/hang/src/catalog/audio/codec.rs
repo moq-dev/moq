@@ -89,8 +89,7 @@ impl AudioCodec {
 			Self::Mp3 => AudioCodecKind::Mp3,
 			// Legacy TS-bridge codecs aren't WebCodecs-decodable, so they share the
 			// coarse Unknown family for tag-only matching.
-			Self::Mp2 | Self::Ac3 | Self::Ec3 => AudioCodecKind::Unknown,
-			Self::Unknown(_) => AudioCodecKind::Unknown,
+			Self::Mp2 | Self::Ac3 | Self::Ec3 | Self::Unknown(_) => AudioCodecKind::Unknown,
 		}
 	}
 }

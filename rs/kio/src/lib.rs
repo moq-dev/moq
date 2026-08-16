@@ -8,6 +8,14 @@
 //! For state that both sides legitimately mutate (e.g. a reverse request queue),
 //! [`Shared`] is a role-less sibling: every handle can lock, read, or park on a
 //! predicate, with no liveness of its own.
+//!
+//! [`Queue`] is a poll-native FIFO queue built in the same style: role-less
+//! clone-able handles, bounded or unbounded, with separate wake lists for the
+//! push and pop sides.
+//!
+//! [`Fan`] hands out a [`Waker`](std::task::Waker) that wakes a whole [`WaiterList`], for
+//! driving a foreign future that keeps a single waker on behalf of everyone parked on it.
+//! It either owns the list or, via [`Fan::project`], wakes one already inside a [`Lock`].
 
 use std::{
 	fmt,
@@ -23,6 +31,7 @@ mod waiter;
 mod consumer;
 mod pollable;
 mod producer;
+mod queue;
 mod shared;
 mod weak;
 
@@ -39,10 +48,12 @@ mod loom;
 mod tests;
 
 pub use consumer::Consumer;
+pub use lock::{Lock, LockGuard, WeakLock};
 pub use pollable::{Pending, Pollable};
 pub use producer::{Mut, Producer, Ref};
+pub use queue::{PushError, Queue};
 pub use shared::Shared;
-pub use waiter::{Waiter, WaiterList, wait};
+pub use waiter::{Fan, Hold, Park, Waiter, WaiterList, wait};
 pub use weak::{ConsumerWeak, ProducerWeak, Weak};
 
 /// The channel closed before the awaited condition held.

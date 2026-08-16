@@ -18,14 +18,20 @@ export interface Frame {
 	keyframe: boolean;
 }
 
-const PROP_TIMESTAMP = 0x06;
 const PROP_TIMESCALE = 0x08;
+const PROP_TIMESTAMP = 0x10;
+
+// The Timestamp id from draft-ietf-moq-loc-03, accepted on decode only. Draft-03's
+// body text and its IANA table disagreed (0x0A vs 0x06); this is the table's value,
+// which is what shipped. Draft-04 assigns 0x0A to Secure Objects private properties,
+// so it is not accepted here.
+const PROP_TIMESTAMP_DRAFT03 = 0x06;
 
 const DEFAULT_TIMESCALE = 1_000_000;
 
 /**
  * Decoder for the Low Overhead Container (LOC) defined in
- * draft-ietf-moq-loc.
+ * draft-ietf-moq-loc-04.
  *
  * Each MoQ frame is a small property block (timestamp, optional per-frame
  * timescale) followed by the codec bitstream payload. Frames without a 0x08
@@ -57,7 +63,7 @@ export class Format {
 			if (abs % 2 === 0) {
 				const [value, afterValue] = Moq.Varint.decode(cursor);
 				cursor = afterValue;
-				if (abs === PROP_TIMESTAMP) {
+				if (abs === PROP_TIMESTAMP || abs === PROP_TIMESTAMP_DRAFT03) {
 					timestamp = value;
 				} else if (abs === PROP_TIMESCALE) {
 					if (value === 0) {
@@ -97,7 +103,7 @@ export interface Source {
  * Encoder that packages frames as LOC and writes them to a moq-net track.
  *
  * Each call to {@link encode} produces one moq-net frame containing a
- * property block with the 0x06 timestamp (in microseconds) and the codec
+ * property block with the 0x10 timestamp (in microseconds) and the codec
  * bitstream payload.
  */
 export class Producer {

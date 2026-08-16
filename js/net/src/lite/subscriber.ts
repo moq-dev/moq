@@ -16,6 +16,7 @@ import * as DatagramStream from "./datagram_stream.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
+import { sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
@@ -24,9 +25,9 @@ import { TrackInfo, Track as TrackMessage } from "./track.ts";
 import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasExcludeHop, Version } from "./version.ts";
 
 // Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
-// drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC
-// streams (Chrome ~100); past the cap createBidirectionalStream silently blocks.
-// The timeout turns that into a clear error.
+// drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC streams
+// (Chrome ~100) and we open with waitUntilAvailable, so past the cap the open blocks
+// until the peer frees a slot. The timeout turns a stall into a clear error.
 const SUBSCRIBE_SETUP_TIMEOUT_MS = 10_000;
 
 /** Decode an unsigned zigzag varint back to a signed delta (mirrors Rust `VarInt::to_zigzag`). */
@@ -206,6 +207,13 @@ export class Subscriber {
 			let nextAnnounceId = 0n;
 			const announcedById = new Map<bigint, Path.Valid>();
 
+			// The publisher behind each path we currently advertise, so a restart can tell a
+			// route change (same publisher, subscriptions resume) from a replacement (a new
+			// generation took the path, nothing carries over). At most one advertisement per
+			// path is current, and every announce on this stream shares `prefix`, so the
+			// suffix is the key.
+			const advertised = new Map<Path.Valid, Origin | undefined>();
+
 			// Receive announce updates (for Draft03, this includes initial state)
 			for (;;) {
 				const announce = await Promise.race([
@@ -254,19 +262,61 @@ export class Subscriber {
 					}
 				}
 
+				const path = Path.join(prefix, suffix);
+
+				// Retract the path: forget the advertisement, drop the shared consume entry so a
+				// later announce subscribes fresh rather than cloning the dead generation's tracks,
+				// and tell the consumer.
+				const retract = () => {
+					advertised.delete(suffix);
+					this.#consumes.evict(path);
+					console.debug(`announced: broadcast=${path} active=false`);
+					announced.append({ path: suffix, active: false });
+				};
+
 				// In Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
 				// list, so fold it back in before checking.
 				if (hops !== undefined && dropReflected) {
 					const full = responderOrigin !== undefined ? [...hops, responderOrigin] : hops;
 					if (full.includes(this.origin)) {
+						// A reflected restart means the peer's remaining route loops back through
+						// us, so the advertisement is gone even though the message says active.
+						if (advertised.has(suffix)) retract();
 						continue;
 					}
 				}
 
-				const path = Path.join(prefix, suffix);
+				if (active) {
+					// The first hop identifies the original publisher; an empty chain means the
+					// peer itself originated it. See `restart_announce` in the Rust subscriber.
+					const publisher = hops?.[0] ?? responderOrigin;
 
-				console.debug(`announced: broadcast=${path} active=${active}`);
-				announced.append({ path: suffix, active });
+					// A second advertisement for a path we already carry is a restart: either an
+					// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.
+					if (advertised.has(suffix)) {
+						if (advertised.get(suffix) === publisher) {
+							// Same publisher, new route. In-flight subscriptions resume across it,
+							// so there is nothing for a consumer to react to.
+							console.debug(`announced: broadcast=${path} rerouted`);
+							continue;
+						}
+
+						// A different publisher took the path, so cached track info and existing
+						// subscriptions must not carry over. Surface a real end before the start.
+						retract();
+					}
+
+					// After `retract()`, which clears the entry: the path is advertised again, by
+					// whoever just took it over. Recording it before would leave nothing behind, so
+					// the *next* takeover would read as a first announcement and skip its own end.
+					advertised.set(suffix, publisher);
+				} else {
+					retract();
+					continue;
+				}
+
+				console.debug(`announced: broadcast=${path} active=true`);
+				announced.append({ path: suffix, active: true });
 			}
 
 			announced.close();
@@ -308,6 +358,7 @@ export class Subscriber {
 
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
 		const id = this.#subscribeNext++;
+		const subscription = request.subscription;
 
 		// `timescale` stays undefined until TRACK_INFO (or, on older drafts,
 		// implicit defaults) resolves it; runGroup blocks on it before decoding.
@@ -315,7 +366,16 @@ export class Subscriber {
 
 		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.name}`);
 
-		const msg = new Subscribe({ id, broadcast, track: request.name, priority: request.priority });
+		const msg = new Subscribe({
+			id,
+			broadcast,
+			track: request.name,
+			priority: subscription.priority ?? 0,
+			ordered: subscription.ordered,
+			latencyMax: subscription.latencyMax,
+			startGroup: subscription.startGroup,
+			endGroup: subscription.endGroup,
+		});
 
 		// Open the stream under a timeout. The stream handle flows back via `state`
 		// so the timeout path can abort it if it finishes opening after the deadline.
@@ -347,7 +407,7 @@ export class Subscriber {
 
 		const { stream, producer } = opened;
 		try {
-			// Watch for priority changes and send SUBSCRIBE_UPDATE. Lite01/Lite02
+			// Watch for subscription changes and send SUBSCRIBE_UPDATE. Lite01/Lite02
 			// don't carry SUBSCRIBE_UPDATE on the wire, so skip the watcher there
 			// and just wait on the stream/track like before.
 			//
@@ -355,15 +415,15 @@ export class Subscriber {
 			// drain them (we don't drive delivery off the resolved range) so the FIN is
 			// observed. Older drafts just wait for the stream to close.
 			const closed = supportsTrackStream(this.version) ? this.#drainResponses(stream) : stream.reader.closed;
-			const priorityUpdates =
+			const subscriptionUpdates =
 				this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02
 					? undefined
-					: this.#runPriorityUpdates(id, broadcast, producer, msg, stream);
+					: this.#runSubscriptionUpdates(id, broadcast, producer, msg, stream);
 
-			// Terminal conditions (stream end, track close, a failed priority update) settle at most
+			// Terminal conditions (stream end, track close, a failed subscription update) settle at most
 			// once; race them into one stable promise so the demand loop doesn't re-subscribe each pass.
 			const terminal: PromiseLike<unknown>[] = [closed, producer.closed];
-			if (priorityUpdates !== undefined) terminal.push(priorityUpdates);
+			if (subscriptionUpdates !== undefined) terminal.push(subscriptionUpdates);
 			const done = Promise.race(terminal);
 
 			// Serve until a terminal condition fires or the last local subscriber leaves. The unused
@@ -517,7 +577,7 @@ export class Subscriber {
 
 			const info = await this.#trackInfo(broadcast, track);
 			const priority = options.priority ?? 0;
-			const stream = await Stream.open(this.#quic, undefined, priority);
+			const stream = await Stream.open(this.#quic, { sendOrder: sendOrder({ priority }) });
 
 			try {
 				await stream.writer.u53(StreamId.Fetch);
@@ -599,17 +659,17 @@ export class Subscriber {
 	}
 
 	/**
-	 * Send SUBSCRIBE_UPDATE messages whenever the track's priority signal changes.
+	 * Send SUBSCRIBE_UPDATE messages whenever the track's aggregate subscription changes.
 	 *
 	 * Resolves cleanly when the stream or track closes, so the caller can include
 	 * this in Promise.race without leaving a dangling pending write that would
-	 * become an unhandled rejection if the user calls updatePriority after close.
+	 * become an unhandled rejection if the user calls update after close.
 	 *
 	 * Peeks the signal at the top of every iteration so that updates which landed
 	 * before SubscribeOk arrived (or between iterations, before .next() registered
 	 * its listener) aren't lost.
 	 */
-	async #runPriorityUpdates(
+	async #runSubscriptionUpdates(
 		id: bigint,
 		broadcast: Path.Valid,
 		track: track.Producer,
@@ -617,11 +677,17 @@ export class Subscriber {
 		stream: Stream,
 	): Promise<void> {
 		const stopped: Promise<null> = Promise.race([track.closed, stream.reader.closed]).then(() => null);
-		let lastSent: number | undefined;
+		let lastSent: track.Subscription = {
+			priority: msg.priority,
+			ordered: msg.ordered,
+			latencyMax: msg.latencyMax,
+			startGroup: msg.startGroup,
+			endGroup: msg.endGroup,
+		};
 
 		for (;;) {
-			const current = track.subscription.peek()?.priority;
-			if (current === undefined || current === lastSent) {
+			const current = track.subscription.peek();
+			if (current === undefined || this.#sameSubscription(current, lastSent)) {
 				// Nothing new to send; wait for a change or termination.
 				const next = await Promise.race([track.subscription.changed(), stopped]);
 				if (next === null) return;
@@ -629,18 +695,28 @@ export class Subscriber {
 			}
 
 			// Round-trip the other Subscribe parameters so the publisher doesn't
-			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxLatency/etc.
+			// interpret SUBSCRIBE_UPDATE as a reset of ordered/latencyMax/etc.
 			const update = new SubscribeUpdate({
-				priority: current,
-				ordered: msg.ordered,
-				maxLatency: msg.maxLatency,
-				startGroup: msg.startGroup,
-				endGroup: msg.endGroup,
+				priority: current.priority ?? 0,
+				ordered: current.ordered,
+				latencyMax: current.latencyMax,
+				startGroup: current.startGroup,
+				endGroup: current.endGroup,
 			});
 			await update.encode(stream.writer, this.version);
-			lastSent = current;
-			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name} priority=${current}`);
+			lastSent = { ...current };
+			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}
+	}
+
+	#sameSubscription(a: track.Subscription, b: track.Subscription): boolean {
+		return (
+			(a.priority ?? 0) === (b.priority ?? 0) &&
+			(a.ordered ?? false) === (b.ordered ?? false) &&
+			(a.latencyMax ?? 0) === (b.latencyMax ?? 0) &&
+			a.startGroup === b.startGroup &&
+			a.endGroup === b.endGroup
+		);
 	}
 
 	/**

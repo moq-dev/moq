@@ -2,15 +2,20 @@
 
 Python bindings for [Media over QUIC](https://github.com/moq-dev/moq): real-time pub/sub with built-in caching, fan-out, and prioritization, on top of QUIC.
 
-`moq` wraps the auto-generated [`moq-ffi`](https://pypi.org/project/moq-ffi/) UniFFI bindings with a Pythonic API: no `Moq` prefixes, async iterators, context managers, and simplified connection setup. At session setup it negotiates either the `moq-lite` or `moq-transport` wire protocol.
+Installed as [`moq-rs`](https://pypi.org/project/moq-rs/) (the `moq` name is taken on PyPI), imported as `moq`.
+
+It wraps the auto-generated [`moq-ffi`](https://pypi.org/project/moq-ffi/) UniFFI bindings with a Pythonic API: no `Moq` prefixes, async iterators, context managers, and simplified connection setup. At session setup it negotiates either the `moq-lite` or `moq-transport` wire protocol.
 
 ## Installation
 
 ```bash
-pip install moq
+pip install moq-rs
+
+# or with uv
+uv add moq-rs
 ```
 
-This pulls in the `moq-ffi` native bindings automatically. `moq` is pure Python and is versioned independently of `moq-ffi`; it floats to the latest compatible `moq-ffi` patch.
+This pulls in the `moq-ffi` native bindings automatically. `moq-rs` is pure Python and is versioned independently of `moq-ffi`; it floats to the latest compatible `moq-ffi` patch.
 
 ## Quick Start
 
@@ -19,6 +24,7 @@ This pulls in the `moq-ffi` native bindings automatically. `moq` is pure Python 
 ```python
 import asyncio
 import moq
+
 
 async def main():
     async with moq.connect("https://cdn.moq.dev/anon") as client:
@@ -31,6 +37,7 @@ async def main():
                     async for frame in frames:
                         print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp_us}")
 
+
 asyncio.run(main())
 ```
 
@@ -40,6 +47,7 @@ asyncio.run(main())
 import asyncio
 import moq
 
+
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
         broadcast = client.create_broadcast("my-stream")
@@ -48,12 +56,16 @@ async def main():
         audio = broadcast.publish_media("opus", opus_init_bytes)
 
         # Write frames
+        # Audio has no keyframes, so `cut` is what gives it group boundaries.
         audio.write_frame(payload, timestamp_us=0)
+        audio.cut()
         audio.write_frame(payload, timestamp_us=20000)
+        audio.cut()
 
         # Clean up
         audio.finish()
         broadcast.finish()
+
 
 asyncio.run(main())
 ```
@@ -64,6 +76,7 @@ asyncio.run(main())
 import asyncio
 import moq
 
+
 async def main():
     async with moq.Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
         broadcast = server.create_broadcast("hello")
@@ -72,8 +85,11 @@ async def main():
 
         sessions = []
         async for request in server:
-            print(f"  + {request.transport} from {request.url}")
+            safe_path = request.path.split("?", 1)[0]
+            safe_url = request.url.split("?", 1)[0] if request.url else None
+            print(f"  + {request.transport} {safe_path} from {safe_url}")
             sessions.append(await request.accept())
+
 
 asyncio.run(main())
 ```
@@ -111,7 +127,7 @@ client = moq.Client(
   - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
   - `.create_broadcast(path) → BroadcastProducer`. Create a live broadcast served to incoming sessions; `finish()` unpublishes it.
 - **`Request`**. An incoming session, yielded by `async for request in server`.
-  - `.url`, `.transport`. Properties.
+  - `.url`, `.path`, `.query`, `.transport`. The query-free path is uniform across transports; the root or missing path is `""`. The encoded query may contain credentials.
   - `.set_publish(origin)`, `.set_consume(origin)`. Per-request overrides.
   - `await .accept() → Session`. Complete the handshake (hold the result to keep the connection alive).
   - `await .reject(code)`. Reject with an HTTP status code.
@@ -133,6 +149,7 @@ client = moq.Client(
   - Async iterator yielding `TrackRequest`
 - **`MediaProducer`**. Write frames to a track.
   - `.write_frame(payload, timestamp_us=0)`
+  - `.cut()` / `.seek(sequence)` draw a group boundary (audio has none of its own)
   - `.finish()`
 - **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
   - `.write_frame(payload, timestamp_us=0)` writes a payload with a presentation timestamp in microseconds.
@@ -184,7 +201,7 @@ All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsum
 - **`MediaFrame`**. `.payload: bytes`, `.timestamp_us: int`, `.keyframe: bool`. Returned by media subscriptions.
 - **`Datagram`**. `.sequence: int`, `.timestamp_us: int`, `.payload: bytes`. Delivered only on datagram-capable transports and lite-05 or newer moq-lite.
 - **`Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.description`.
-- **`Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.framerate`, `.description`.
+- **`Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.stalled`, `.framerate`, `.description`. A true `.stalled` recommends temporarily avoiding the rendition without making it unavailable.
 - **`Subscription`**. Subscriber delivery preferences: priority, ordering priority, staleness, and optional group range.
 - **`TrackInfo`**. Publisher track properties: priority, ordering priority, cache window, and timescale.
 - **`Dimensions`**. `.width: int`, `.height: int`.

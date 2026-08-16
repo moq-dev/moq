@@ -66,6 +66,8 @@ pub struct Import<E: catalog::Catalog = ()> {
 	streams: HashMap<Pid, Stream<E>>,
 	/// In-progress PES reassembly, keyed by elementary PID.
 	pending: HashMap<Pid, Pending>,
+	/// Per elementary-stream-PID TS continuity state.
+	continuity: HashMap<Pid, Continuity>,
 	/// True once a PMT with at least one supported stream has been parsed.
 	initialized: bool,
 	/// Raw 90 kHz PTS of the first audio frame in the current consecutive run.
@@ -138,6 +140,7 @@ impl<E: catalog::Catalog> Import<E> {
 			pmt_pids: HashSet::new(),
 			streams: HashMap::new(),
 			pending: HashMap::new(),
+			continuity: HashMap::new(),
 			initialized: false,
 			audio_burst: None,
 			scratch: Vec::new(),
@@ -218,6 +221,43 @@ impl<E: catalog::Catalog> Import<E> {
 			if self.supports_mpegts && catalog::SI_PIDS.iter().any(|(p, _)| *p == pid) {
 				self.si_section(pid, &pkt);
 				continue;
+			}
+			// An elementary stream's PES is as vulnerable to a break as a section is. A
+			// looping publisher wraps with its last PES still open and short of its declared
+			// length, so the next loop's leading packets would otherwise complete it and hand
+			// the codec one buffer straddling the cut.
+			if let Ok(pid) = Pid::new(pid)
+				&& self.streams.contains_key(&pid)
+			{
+				match self.continuity.entry(pid).or_default().observe(&pkt) {
+					Continuation::Duplicate => continue,
+					// Flagged corrupt, so the packet joins the partial rather than opening a
+					// new PES out of bytes the demodulator already disowned.
+					Continuation::Corrupt => {
+						self.pending.remove(&pid);
+						if let Some(stream) = self.streams.get_mut(&pid) {
+							stream.desync();
+						}
+						continue;
+					}
+					Continuation::Broken => {
+						// Salvage the truncated PES only where its bytes stand on their own, then
+						// drop whatever is left mid-unit and require the next frame to prove its
+						// boundary.
+						if self.streams.get(&pid).is_some_and(Stream::salvages_partial_pes) {
+							self.flush(pid)?;
+						} else {
+							self.pending.remove(&pid);
+						}
+						if let Some(stream) = self.streams.get_mut(&pid) {
+							stream.desync();
+						}
+						// This packet still routes normally: a PUSI opens a fresh PES, while a
+						// continuation finds no pending entry and is dropped, so the stream
+						// resumes at the next PES start rather than mid-frame.
+					}
+					Continuation::Contiguous => {}
+				}
 			}
 			// PIDs we don't decode and don't carry (`Stream::Ignored`: a base catalog's
 			// undecoded streams, or an ambiguous 0x86 PID without CUEI) are dropped here,
@@ -333,7 +373,7 @@ impl<E: catalog::Catalog> Import<E> {
 
 		let stream = match stream_type {
 			StreamType::H264 => {
-				let track = crate::import::unique_track(&mut self.broadcast, ".avc3")?;
+				let track = self.broadcast.unique_track(".avc3", self.catalog.track_info())?;
 				Stream::H264 {
 					split: h264::Split::new(),
 					import: Box::new(h264::Import::new(track, self.catalog.reserve(), Default::default())?),
@@ -341,7 +381,7 @@ impl<E: catalog::Catalog> Import<E> {
 				}
 			}
 			StreamType::H265 => {
-				let track = crate::import::unique_track(&mut self.broadcast, ".hev1")?;
+				let track = self.broadcast.unique_track(".hev1", self.catalog.track_info())?;
 				Stream::H265 {
 					split: h265::Split::new(),
 					import: Box::new(h265::Import::new(track, self.catalog.reserve(), Default::default())?),
@@ -356,6 +396,9 @@ impl<E: catalog::Catalog> Import<E> {
 				reserved: Some(self.catalog.reserve()),
 				unwrap: PtsUnwrap::default(),
 				jitter: None,
+				tail: Vec::new(),
+				tail_pts: None,
+				resync: Resync::default(),
 			})),
 			// Legacy broadcast audio, carried verbatim. Both MP2 stream types
 			// (0x03 MPEG-1, 0x04 MPEG-2 half rate) share one parser; sample rate and
@@ -368,7 +411,7 @@ impl<E: catalog::Catalog> Import<E> {
 			// come from the descriptors, so the importer is built up front.
 			StreamType::Mpeg2PacketizedData if registration_format(descriptors) == Some(*b"Opus") => {
 				let channel_count = opus_channel_count(descriptors).unwrap_or(2);
-				let track = crate::import::unique_track(&mut self.broadcast, ".opus")?;
+				let track = self.broadcast.unique_track(".opus", self.catalog.track_info())?;
 				let config = opus::Config::new(48_000, channel_count);
 				Stream::Opus(Box::new(OpusStream {
 					import: opus::Import::new(track, self.catalog.reserve(), config.into())?,
@@ -408,6 +451,7 @@ impl<E: catalog::Catalog> Import<E> {
 			self.initialized = true;
 		}
 		self.streams.insert(pid, stream);
+		self.continuity.entry(pid).or_default();
 		Ok(())
 	}
 
@@ -420,6 +464,7 @@ impl<E: catalog::Catalog> Import<E> {
 			unwrap: PtsUnwrap::default(),
 			tail: Vec::new(),
 			tail_pts: None,
+			resync: Resync::default(),
 		}))
 	}
 
@@ -437,6 +482,7 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		// This PID is becoming section-framed; drop any partial PES a prior codec left pending.
 		self.pending.remove(&pid);
+		self.continuity.remove(&pid);
 		if !self.supports_mpegts {
 			// Always route to Ignored, replacing any prior codec on this PID (a later PMT
 			// can reassign it), so a private section never reaches the PES reader. Warn once.
@@ -698,6 +744,19 @@ struct Pending {
 	data_len: Option<usize>,
 }
 
+impl Pending {
+	/// A PES carrying nothing, used to drain a stream's carried tail at end of stream.
+	fn empty() -> Self {
+		Self {
+			pts: None,
+			dts: None,
+			stream_id: 0,
+			data: Vec::new(),
+			data_len: None,
+		}
+	}
+}
+
 /// Convert mpeg2ts PMT descriptors to the catalog's verbatim form.
 fn to_descriptors(descriptors: &[mpeg2ts::ts::Descriptor]) -> Vec<catalog::Descriptor> {
 	descriptors
@@ -723,7 +782,7 @@ fn register_verbatim<E: catalog::Catalog>(
 	// Verbatim payloads ride the legacy container, which normalizes the per-frame
 	// timestamp to microseconds on the wire (see `hang::container::Frame::encode`),
 	// so the track declares that timescale to match.
-	let track = broadcast.unique_track(".ts", hang::container::track_info())?;
+	let track = broadcast.unique_track(".ts", catalog.track_info())?;
 	let name = track.name().to_string();
 
 	// Build the media producer before advertising the track. It is fallible (its
@@ -935,6 +994,89 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 	}
 }
 
+/// Whether one PID's TS packets are still an unbroken chain, for whoever is accumulating
+/// bytes out of them.
+///
+/// Both reassemblers on this PID need the same answer: a section and a PES are equally
+/// meaningless when spliced onto bytes that didn't follow them. Keeping one implementation
+/// keeps a subtle rule (which packets advance the counter, which retransmissions to ignore)
+/// from drifting into two.
+#[derive(Default)]
+struct Continuity {
+	/// Last continuity_counter seen on a packet with payload, to spot gaps.
+	last_cc: Option<u8>,
+	/// Last payload packet, to skip ISO 13818-1 duplicates (same cc, identical bytes).
+	last_pkt: Option<[u8; 188]>,
+}
+
+/// What one packet says about the bytes already accumulated for its PID.
+enum Continuation {
+	/// An exact retransmission, which ISO 13818-1 permits once. Ignore the packet entirely:
+	/// processing it would duplicate its bytes.
+	Duplicate,
+	/// Contiguous with the previous payload packet.
+	Contiguous,
+	/// A counter gap or a declared discontinuity. Whatever was accumulating for this PID is
+	/// lost, but this packet's own payload is intact and still worth routing.
+	Broken,
+	/// The demodulator flagged this packet corrupt. The partial is lost like [`Broken`], and
+	/// so is the packet: nothing in it can be trusted.
+	Corrupt,
+}
+
+impl Continuity {
+	/// Classify one 188-byte packet, recording what the next call needs.
+	fn observe(&mut self, pkt: &[u8; 188]) -> Continuation {
+		// transport_error_indicator: the demodulator flagged this packet as corrupt, so its
+		// payload can't be trusted (and we don't validate CRC-32). Forgetting the counter
+		// keeps the next clean packet from also looking like a gap.
+		if pkt[1] & 0x80 != 0 {
+			self.last_cc = None;
+			self.last_pkt = None;
+			return Continuation::Corrupt;
+		}
+
+		let afc = (pkt[3] >> 4) & 0x3;
+		let has_payload = afc & 0x1 != 0;
+		// Read the adaptation field before the no-payload case: a discontinuity can ride on
+		// an adaptation-only packet, and it counts just the same.
+		let discontinuity = if afc & 0x2 != 0 {
+			let af_len = pkt[4] as usize;
+			af_len > 0 && pkt[5] & 0x80 != 0
+		} else {
+			false
+		};
+
+		if !has_payload {
+			if discontinuity {
+				self.last_cc = None;
+				self.last_pkt = None;
+				return Continuation::Broken;
+			}
+			return Continuation::Contiguous;
+		}
+
+		// A retransmission repeats the counter, and so does a loss of exactly 15 packets.
+		// Only the bytes tell them apart, which is why the counter alone can't decide: taking
+		// every repeat for a duplicate would carry a partial straight across that loss and
+		// join it to unrelated bytes.
+		if self.last_pkt.as_ref().is_some_and(|last| last == pkt) {
+			return Continuation::Duplicate;
+		}
+		self.last_pkt = Some(*pkt);
+
+		// Only payload packets advance the counter, so this is the one place it moves.
+		let cc = pkt[3] & 0x0f;
+		let cc_gap = matches!(self.last_cc, Some(last) if cc != (last + 1) & 0x0f);
+		self.last_cc = Some(cc);
+		if discontinuity || cc_gap {
+			Continuation::Broken
+		} else {
+			Continuation::Contiguous
+		}
+	}
+}
+
 /// Byte-level reassembler for MPEG-TS private sections on one PID.
 ///
 /// Private sections (SCTE-35 table_id 0xFC and others) are not PES. This handles
@@ -948,68 +1090,39 @@ struct SectionReassembler {
 	/// thus section_length) may not all be present yet, so completeness is
 	/// re-checked as bytes arrive; empty means no section in progress.
 	acc: Vec<u8>,
-	/// Last continuity_counter seen on a packet with payload, to spot gaps.
-	last_cc: Option<u8>,
-	/// Last payload packet, to skip ISO 13818-1 duplicates (same cc, identical bytes).
-	last_pkt: Option<[u8; 188]>,
+	/// Shared with the PES path: a broken chain drops the partial either way.
+	continuity: Continuity,
 }
 
 impl SectionReassembler {
 	/// Consume one 188-byte TS packet, appending every completed section to `out`.
 	fn push(&mut self, pkt: &[u8], out: &mut Vec<Vec<u8>>) {
-		// transport_error_indicator: the demodulator flagged this packet as corrupt,
-		// so its payload can't be trusted (and we don't validate CRC-32). Drop it and
-		// any partial; resync at the next clean PUSI.
-		if pkt[1] & 0x80 != 0 {
-			self.acc.clear();
-			self.last_cc = None;
-			self.last_pkt = None;
-			return;
+		let pkt: &[u8; 188] = pkt.try_into().expect("section packet must be 188 bytes");
+		match self.continuity.observe(pkt) {
+			Continuation::Duplicate => return,
+			// A packet flagged corrupt takes its own payload down with the partial: this is
+			// the one case where the packet itself must not be processed.
+			Continuation::Corrupt => {
+				self.acc.clear();
+				return;
+			}
+			Continuation::Broken => self.acc.clear(),
+			Continuation::Contiguous => {}
 		}
 
 		let pusi = pkt[1] & 0x40 != 0;
 		let afc = (pkt[3] >> 4) & 0x3;
-		let cc = pkt[3] & 0x0f;
 		let has_payload = afc & 0x1 != 0;
 
-		// Parse the adaptation field before the no-payload early return: a
-		// discontinuity can ride on an adaptation-only packet and must still reset
-		// reassembly.
 		let mut off = 4;
-		let mut discontinuity = false;
 		if afc & 0x2 != 0 {
 			let af_len = pkt[4] as usize;
-			discontinuity = af_len > 0 && pkt[5] & 0x80 != 0;
 			off = 5 + af_len;
 		}
 
 		if !has_payload {
-			// An adaptation-only discontinuity still drops the partial; forgetting the
-			// counter keeps the next payload packet from looking like a gap.
-			if discontinuity {
-				self.acc.clear();
-				self.last_cc = None;
-				self.last_pkt = None;
-			}
 			return;
 		}
-
-		// ISO 13818-1 permits one identical retransmission of a payload packet (same
-		// cc, same bytes); processing it would reset a healthy partial or re-emit a
-		// completed section. Skip it, recording this packet to catch the next.
-		if self.last_pkt.as_ref().is_some_and(|last| last[..] == pkt[..]) {
-			return;
-		}
-		self.last_pkt = pkt.try_into().ok();
-
-		// A continuity-counter gap (only payload packets advance it) or a declared
-		// discontinuity both mean the in-progress section is lost.
-		let cc_gap = matches!(self.last_cc, Some(last) if cc != (last + 1) & 0x0f);
-		let reset = discontinuity || cc_gap;
-		if reset {
-			self.acc.clear();
-		}
-		self.last_cc = Some(cc);
 
 		if off >= pkt.len() {
 			return;
@@ -1149,6 +1262,38 @@ impl<E: catalog::Catalog> Stream<E> {
 		}
 	}
 
+	/// Whether a PES cut short by a break is still worth publishing.
+	///
+	/// True where one PES carries many independently decodable units, so the ones ahead of
+	/// the cut are whole and correct on their own. False where it carries exactly one: half
+	/// an access unit is a picture with missing slices, and half a keyframe stays wrong for
+	/// every picture that references it. Verbatim payloads are all-or-nothing the same way.
+	fn salvages_partial_pes(&self) -> bool {
+		match self {
+			Stream::Aac(_) | Stream::Legacy(_) => true,
+			// Opus carries many packets per PES like the audio above, but its framing is
+			// declared rather than self-describing: a trailing packet cut short of the length
+			// its control header promises is a parse error, and that error would travel up out
+			// of `decode` and end the session. Losing the PES beats losing the broadcast.
+			Stream::Opus(_) => false,
+			Stream::H264 { .. } | Stream::H265 { .. } | Stream::Verbatim(_) => false,
+			Stream::Clock | Stream::Ignored => false,
+		}
+	}
+
+	/// Sync was lost: drop whatever partial unit is held and stop vouching for the next
+	/// boundary. This is [`seek`](Self::seek) without the group-sequence side effect, for a
+	/// break the stream recovers from in place.
+	fn desync(&mut self) {
+		match self {
+			Stream::H264 { split, .. } => split.reset(),
+			Stream::H265 { split, .. } => split.reset(),
+			Stream::Aac(stream) => stream.desync(),
+			Stream::Legacy(stream) => stream.desync(),
+			Stream::Opus(_) | Stream::Verbatim(_) | Stream::Clock | Stream::Ignored => {}
+		}
+	}
+
 	fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
 		match self {
 			Stream::H264 { split, import, .. } => {
@@ -1205,6 +1350,187 @@ impl<E: catalog::Catalog> Stream<E> {
 	}
 }
 
+/// Tracks how far a self-describing audio stream has scanned without finding a frame.
+///
+/// A frame header that doesn't parse means sync was lost: a damaged byte, a dropped PES,
+/// or a splice (a looping file wraps mid-frame). The stream scans to the next sync-word
+/// candidate and resumes, so a few lost milliseconds of audio stay a gap in one track
+/// rather than an error that takes the whole session down.
+///
+/// A scanned candidate is not trusted on its own. Sync words are short enough to occur by
+/// chance in compressed payload (a valid-looking MP2 header turns up about every 25 KiB of
+/// random bytes, an ADTS one every 5 KiB), so a candidate is only accepted once a second
+/// header parses exactly where the frame it declares ends. Without that the scan would
+/// publish payload bytes as audio, and worse, each false positive would reset the budget
+/// below and keep a stream that never really parses scanning forever.
+///
+/// A frame joined out of a carried tail is confirmed the same way, even though the previous
+/// frame vouched for where that tail begins. What it vouched for is the boundary, not the
+/// bytes the next PES supplies, and a splice joins two unrelated halves whose seam a header
+/// alone can't see. See [`needs_confirmation`](Self::needs_confirmation).
+///
+/// The budget is what keeps that from failing silently. A PID whose frames never parse
+/// (a PMT declaring a stream type the payload doesn't match) would otherwise scan
+/// forever, publishing nothing and holding its catalog reservation open, which withholds
+/// the catalog for every other track. Past the budget the parse error propagates, so a
+/// stream that is simply the wrong codec still fails the way it always has.
+struct Resync {
+	/// Bytes discarded since the last frame was emitted.
+	discarded: usize,
+	/// Whether the next frame comes from a scan rather than the previous frame's end, and
+	/// so has to be confirmed before it can be published.
+	unconfirmed: bool,
+	/// End of stream: nothing more can arrive to confirm anything, so publish what parses
+	/// rather than drop a frame that is whole.
+	draining: bool,
+}
+
+impl Default for Resync {
+	fn default() -> Self {
+		Self {
+			discarded: 0,
+			// A stream starts unconfirmed for the same reason a scan does: nothing has
+			// vouched for the boundary yet. A capture joins mid-stream, so the first PES
+			// routed to a PID can open in the middle of a frame, and a chance header there
+			// would publish payload as audio and take the track's sample rate and channel
+			// count from it for the life of the broadcast.
+			unconfirmed: true,
+			draining: false,
+		}
+	}
+}
+
+impl Resync {
+	/// Roughly a second of audio at the highest legacy bitrate: orders of magnitude more
+	/// than the one or two frames a damaged header costs, and short enough that a stream
+	/// that never parses fails while its capture is still on screen.
+	const BUDGET: usize = 64 * 1024;
+
+	/// Where to resume after the header at `offset` failed to parse, discarding what is
+	/// skipped.
+	///
+	/// The offset it picks is only a candidate: the caller confirms it by parsing a header
+	/// there and comes back here if that fails too. That mirrors how the TS layer
+	/// reacquires packet alignment, where a lone sync byte is a guess until the next
+	/// packet confirms it.
+	///
+	/// `offset` must leave room for a header, which is the loop condition at both call
+	/// sites; the scan starts one byte past it, since a header just failed to parse there.
+	fn recover(&mut self, data: &[u8], offset: usize, codec: &SyncWord) -> Recover {
+		self.unconfirmed = true;
+		if let Some(rel) = memchr::memchr(codec.sync_byte, &data[offset + 1..]) {
+			let found = offset + 1 + rel;
+			self.discarded += found - offset;
+			return Recover::At(found);
+		}
+		// No candidate left, so only a partial sync word can remain: keep that much for
+		// the next PES (the word can straddle the boundary) and discard the rest.
+		let keep = data.len().saturating_sub(codec.min_header_len - 1).max(offset);
+		self.discarded += keep - offset;
+		Recover::Carry(keep)
+	}
+
+	/// Give up once a stream has scanned further than [`BUDGET`](Self::BUDGET) without
+	/// emitting a frame.
+	fn exhausted(&self) -> bool {
+		self.discarded > Self::BUDGET
+	}
+
+	/// Whether the offset itself is one nothing has vouched for, which is true from a scan
+	/// (or the start of a stream, or a seek) until the frame it found is published.
+	fn unconfirmed(&self) -> bool {
+		self.unconfirmed
+	}
+
+	/// Whether the frame at the current offset has to be confirmed by a header where it ends
+	/// before it can be published. Beyond an unconfirmed offset, that covers a frame
+	/// beginning in a carried tail: the previous frame vouched for where the tail starts, but
+	/// nothing vouches for the bytes joined onto it, and at a splice the two halves are
+	/// unrelated. Confirming only these keeps the cost off the common path, since a frame
+	/// that begins inside a PES is whole by the time it is parsed.
+	fn needs_confirmation(&self, in_tail: bool) -> bool {
+		!self.draining && (self.unconfirmed || in_tail)
+	}
+
+	/// A frame was published, so the stream is back in sync: the next frame starts where
+	/// this one ended and needs no confirmation of its own.
+	fn recovered(&mut self) {
+		self.discarded = 0;
+		self.unconfirmed = false;
+	}
+
+	/// Undo the scanning charged since `discarded`. Those bytes turned out to be retained
+	/// rather than discarded, and charging for bytes we keep would fail a large frame that
+	/// legitimately arrives over many small PES.
+	fn refund(&mut self, discarded: usize) {
+		self.discarded = discarded;
+	}
+
+	/// A discontinuity: whatever vouched for the next boundary no longer applies, so the
+	/// frame after it has to be confirmed again.
+	///
+	/// The budget resets too. It measures how long *this* run of the stream has gone without
+	/// a frame, and a seek ends that run: carrying the count over would fail a perfectly
+	/// good stream on its first parse failure after seeking away from the damage.
+	fn desynced(&mut self) {
+		self.unconfirmed = true;
+		self.discarded = 0;
+	}
+
+	/// End of stream. Nothing more can arrive to confirm the carried tail, so take it as-is
+	/// rather than drop a frame that is whole and parses.
+	fn drain(&mut self) {
+		self.unconfirmed = false;
+		self.draining = true;
+	}
+}
+
+/// Where a stream picks up after losing frame sync. See [`Resync::recover`].
+enum Recover {
+	/// Try to parse a frame header at this offset.
+	At(usize),
+	/// Nothing else in this buffer can start a frame; carry from this offset into the
+	/// next PES.
+	Carry(usize),
+}
+
+/// A candidate passed over for declaring a frame longer than the buffer holds, kept in case
+/// nothing later in the buffer confirms.
+///
+/// Restoring it has to undo the scan that followed: its bytes end up retained rather than
+/// discarded, and it still belongs to the tail its timestamp was derived from.
+struct Fallback {
+	offset: usize,
+	discarded: usize,
+	pts: Option<Timestamp>,
+	in_tail: bool,
+}
+
+/// What a resync needs to know about the codec it is scanning for.
+struct SyncWord {
+	/// Bytes needed to attempt a header parse.
+	min_header_len: usize,
+	/// First byte of the frame sync word.
+	sync_byte: u8,
+}
+
+impl SyncWord {
+	/// ADTS: an 11-bit sync of all ones, then at least 7 bytes of header.
+	const ADTS: Self = Self {
+		min_header_len: adts::MIN_HEADER_LEN,
+		sync_byte: 0xFF,
+	};
+}
+
+impl From<&legacy::Descriptor> for SyncWord {
+	fn from(descriptor: &legacy::Descriptor) -> Self {
+		Self {
+			min_header_len: descriptor.min_header_len,
+			sync_byte: descriptor.sync_byte,
+		}
+	}
+}
+
 /// AAC needs the first ADTS header before it can build a [`aac::Import`]
 /// (the sample rate and channel layout aren't in the PMT), so creation is
 /// deferred until the first frame arrives.
@@ -1218,21 +1544,135 @@ struct AacStream<E: CatalogExt = ()> {
 	unwrap: PtsUnwrap,
 	/// Largest audio burst span seen, published as the catalog jitter.
 	jitter: Option<Timestamp>,
+	/// Partial frame left at the end of the previous PES. ISO 13818-1 doesn't require
+	/// audio frames to align with PES boundaries, so a legitimate mux can split one.
+	tail: Vec<u8>,
+	/// PTS for the frame the tail begins, computed when it was cut. The PES PTS only
+	/// covers frames that begin in that PES.
+	tail_pts: Option<Timestamp>,
+	resync: Resync,
 }
 
 impl<E: CatalogExt> AacStream<E> {
 	fn write(&mut self, pending: Pending, run_start: Option<u64>) -> anyhow::Result<()> {
-		let base = unwrap_pts(&mut self.unwrap, pending.pts)?;
+		let pes_base = unwrap_pts(&mut self.unwrap, pending.pts)?;
+
+		// Prepend the partial frame left by the previous PES, if any.
+		let carried = self.tail.len();
+		let joined;
+		let data: &[u8] = if carried == 0 {
+			&pending.data
+		} else {
+			let mut j = std::mem::take(&mut self.tail);
+			j.extend_from_slice(&pending.data);
+			joined = j;
+			&joined
+		};
+
+		// PTS for the next frame to emit. The tail frame keeps the PTS computed at its cut;
+		// the first frame that BEGINS in this PES takes the PES PTS (per ISO 13818-1).
+		let mut pts = if carried > 0 { self.tail_pts.take() } else { pes_base };
+		let mut in_tail = carried > 0;
 
 		// A single PES can carry several ADTS frames; split and feed each raw frame.
-		let data = &pending.data;
 		let mut offset = 0;
 		let mut index = 0u64;
 		let mut sample_rate = None;
-		while offset + 7 <= data.len() {
-			let header = adts::Header::parse(&data[offset..])?;
-			let end = offset + header.frame_len;
-			anyhow::ensure!(end <= data.len(), "ADTS frame exceeds PES payload");
+		// Earliest candidate passed over for declaring a frame longer than the buffer holds,
+		// carried only if nothing later in the buffer confirms.
+		let mut fallback = None;
+		while offset + adts::MIN_HEADER_LEN <= data.len() {
+			if in_tail && offset >= carried {
+				pts = pes_base;
+				in_tail = false;
+			}
+
+			// Parse the frame here, and unless the previous frame vouched for this offset and
+			// for the bytes past it, require a header where the frame it declares ends before
+			// believing it. See `Resync`. `Err(None)` means nothing parsed badly, the
+			// candidate just isn't usable.
+			let confirm = self.resync.needs_confirmation(in_tail);
+			let parsed: Result<_, Option<anyhow::Error>> = match adts::Header::parse(&data[offset..]) {
+				Ok(header) => {
+					let end = offset + header.frame_len;
+					if end > data.len() {
+						if !self.resync.unconfirmed() {
+							// A boundary the previous frame vouched for: the frame continues in
+							// the next PES, so finish it there. A joined tail waits here too, since
+							// nothing can confirm a frame the buffer doesn't hold yet.
+							break;
+						}
+						// Unconfirmed, and the length it declares outruns the buffer, so a split
+						// frame and a false sync claiming a length the stream never delivers look
+						// identical. Remember it, but prefer any later candidate that does fit
+						// and confirm: waiting here would swallow the real frames inside the
+						// range this one claims. A byte of a real ADTS header is 0xFF often
+						// enough for this to matter.
+						fallback.get_or_insert(Fallback {
+							offset,
+							discarded: self.resync.discarded,
+							pts,
+							in_tail,
+						});
+						Err(None)
+					} else if !confirm {
+						Ok((header, end))
+					} else if end + adts::MIN_HEADER_LEN > data.len() {
+						// Whole, but too few bytes left to confirm it. Carry it and retry once
+						// the next PES extends the buffer, rather than trusting it now.
+						break;
+					} else {
+						adts::Header::parse(&data[end..]).map(|_| (header, end)).map_err(Some)
+					}
+				}
+				Err(err) => Err(Some(err)),
+			};
+
+			let (header, end) = match parsed {
+				Ok(found) => found,
+				Err(err) => {
+					// Sync is lost; scan to the next candidate. See `Resync`.
+					if self.resync.exhausted() {
+						let context = format!("AAC stream never regained sync after {} bytes", self.resync.discarded);
+						return Err(match err {
+							Some(err) => err.context(context),
+							None => anyhow::Error::msg(context),
+						});
+					}
+					// Re-anchor only where the tail is actually abandoned: restoring a fallback
+					// keeps the candidate, so it keeps the timestamp it was found with.
+					match self.resync.recover(data, offset, &SyncWord::ADTS) {
+						Recover::At(next) => {
+							if in_tail {
+								pts = pes_base;
+								in_tail = false;
+							}
+							offset = next;
+							continue;
+						}
+						// Nothing in the buffer confirmed, so fall back to the earliest
+						// candidate that was merely too long; it may complete next PES.
+						Recover::Carry(next) => {
+							match fallback {
+								Some(found) => {
+									self.resync.refund(found.discarded);
+									offset = found.offset;
+									pts = found.pts;
+									in_tail = found.in_tail;
+								}
+								None => {
+									if in_tail {
+										pts = pes_base;
+										in_tail = false;
+									}
+									offset = next;
+								}
+							}
+							break;
+						}
+					}
+				}
+			};
 			sample_rate = Some(header.sample_rate);
 
 			let import = match &mut self.import {
@@ -1243,34 +1683,39 @@ impl<E: CatalogExt> AacStream<E> {
 						sample_rate: header.sample_rate,
 						channel_count: header.channel_count,
 					};
-					let track = crate::import::unique_track(&mut self.broadcast, ".aac")?;
-					// Consume the reservation held since the PMT: this resolves the gated rendition.
+					// Consume the reservation held since the PMT: this resolves the gated rendition,
+					// and carries the catalog's declared media retention onto the track.
 					// The importer synthesizes the AudioSpecificConfig `description` from the config so
 					// out-of-band consumers (fMP4/MKV export, WebCodecs) can configure the decoder.
 					let reserved = self.reserved.take().expect("aac reservation already consumed");
+					let track = self.broadcast.unique_track(".aac", reserved.track_info())?;
 					let aac = aac::Import::new(track, reserved, config.into())?;
 					self.import.insert(aac)
 				}
-			};
-
-			// Each frame after the first in this PES advances by 1024 samples.
-			let pts = match base {
-				Some(base) if index > 0 => {
-					let advance = Timestamp::from_scale(index * 1024, header.sample_rate as u64)?;
-					// `base` is a 90 kHz PTS; rescale the sample-rate advance to match
-					// before adding (the scale-aware Timestamp rejects mixed scales).
-					Some(base.checked_add(advance.convert(base.scale())?)?)
-				}
-				other => other,
 			};
 
 			import.decode(&data[offset + header.header_len..end], pts)?;
 			// The importer accumulates; cut each ADTS frame into its own group (one QUIC stream)
 			// so the relay forwards it without waiting for the next.
 			import.cut(None)?;
+			self.resync.recovered();
+			// Offsets behind the published frame are spent; carrying one would republish it.
+			fallback = None;
 
+			// Every ADTS frame is 1024 samples.
+			pts = advance_pts(pts, 1024, header.sample_rate)?;
 			offset = end;
 			index += 1;
+		}
+
+		// Keep any partial frame (cut mid-frame, or even mid-header) for the next PES,
+		// with the PTS it should carry.
+		if offset < data.len() {
+			if in_tail && offset >= carried {
+				pts = pes_base;
+			}
+			self.tail = data[offset..].to_vec();
+			self.tail_pts = pts;
 		}
 
 		self.update_jitter(run_start, pending.pts, index, sample_rate)
@@ -1316,13 +1761,44 @@ impl<E: CatalogExt> AacStream<E> {
 	}
 
 	fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
+		// A seek is a discontinuity like any other.
+		self.desync();
 		if let Some(import) = &mut self.import {
 			import.seek(sequence)?;
 		}
 		Ok(())
 	}
 
+	/// The partial frame will never see its end, and whatever vouched for the next frame
+	/// boundary no longer applies.
+	fn desync(&mut self) {
+		self.tail.clear();
+		self.tail_pts = None;
+		self.resync.desynced();
+	}
+
 	fn finish(&mut self) -> anyhow::Result<()> {
+		// Drain a frame held only for want of a successor to confirm it: at end of stream
+		// that successor is never coming. Only once this stream has published a frame,
+		// though. Before that nothing has vouched for any boundary, so accepting one here
+		// would hand a capture that joined mid-frame and ended immediately the same false
+		// frame that starting unconfirmed exists to reject, and build the track's config out
+		// of it.
+		if !self.tail.is_empty() && self.import.is_some() {
+			self.resync.drain();
+			self.write(Pending::empty(), None)?;
+		}
+		// A partial frame at end of stream isn't emissible; drop it, but leave a trace for
+		// diagnosing truncated captures.
+		if !self.tail.is_empty() {
+			tracing::debug!(bytes = self.tail.len(), "dropping partial ADTS frame at end of stream");
+		}
+		// Nothing was ever published here, so this rendition will never resolve. Release its
+		// reservation or it gates the initial catalog publish for every other track: `finish`
+		// takes streams by reference, and callers keep the importer alive past it.
+		if self.import.is_none() {
+			self.reserved.take();
+		}
 		if let Some(import) = &mut self.import {
 			import.finish()?;
 		}
@@ -1478,12 +1954,13 @@ struct LegacyStream<E: CatalogExt = ()> {
 	unwrap: PtsUnwrap,
 	/// Partial frame left at the end of the previous PES. ISO 13818-1 doesn't
 	/// require audio frames to align with PES boundaries, so a legitimate mux can
-	/// split one; it's reassembled here. A lost PES between the cut and its
-	/// continuation still fails the next header parse (no frame-level resync).
+	/// split one; it's reassembled here. A lost or spliced PES makes the join
+	/// garbage, which [`Resync`] then scans past.
 	tail: Vec<u8>,
 	/// PTS for the frame the tail begins, computed when it was cut. The PES PTS
 	/// only covers frames that begin in that PES.
 	tail_pts: Option<Timestamp>,
+	resync: Resync,
 }
 
 impl<E: CatalogExt> LegacyStream<E> {
@@ -1511,18 +1988,113 @@ impl<E: CatalogExt> LegacyStream<E> {
 		let mut in_tail = carried > 0;
 
 		let mut offset = 0;
+		// Earliest candidate passed over for declaring a frame longer than the buffer holds,
+		// carried only if nothing later in the buffer confirms.
+		let mut fallback = None;
 		while offset + self.descriptor.min_header_len <= data.len() {
 			if in_tail && offset >= carried {
 				pts = pes_base;
 				in_tail = false;
 			}
 
-			let header = (self.descriptor.parse)(&data[offset..])?;
-			let end = offset + header.len;
-			if end > data.len() {
-				// The frame continues in the next PES; finish it there.
-				break;
-			}
+			// Parse the frame here, and unless the previous frame vouched for this offset and
+			// for the bytes past it, require a header where the frame it declares ends before
+			// believing it. See `Resync`. `Err(None)` means nothing parsed badly, the
+			// candidate just isn't usable.
+			let confirm = self.resync.needs_confirmation(in_tail);
+			let parsed: Result<_, Option<legacy::Error>> = match (self.descriptor.parse)(&data[offset..]) {
+				Ok(header) => {
+					let end = offset + header.len;
+					if end > data.len() {
+						if !self.resync.unconfirmed() {
+							// A boundary the previous frame vouched for: the frame continues in
+							// the next PES, so finish it there. A joined tail waits here too, since
+							// nothing can confirm a frame the buffer doesn't hold yet.
+							break;
+						}
+						// Unconfirmed, and the length it declares outruns the buffer, so a split
+						// frame and a false sync claiming a length the stream never delivers look
+						// identical. Remember it, but prefer any later candidate that does fit
+						// and confirm: waiting here would swallow the real frames inside the
+						// range this one claims.
+						fallback.get_or_insert(Fallback {
+							offset,
+							discarded: self.resync.discarded,
+							pts,
+							in_tail,
+						});
+						Err(None)
+					} else if !confirm {
+						Ok((header, end))
+					} else if end + self.descriptor.min_header_len > data.len() {
+						// Whole, but too few bytes left to confirm it. Carry it and retry once
+						// the next PES extends the buffer, rather than trusting it now.
+						break;
+					} else {
+						(self.descriptor.parse)(&data[end..])
+							.map(|_| (header, end))
+							.map_err(Some)
+					}
+				}
+				Err(err) => Err(Some(err)),
+			};
+
+			let (header, end) = match parsed {
+				Ok(found) => found,
+				Err(err) => {
+					// Sync is lost. Scan past this byte to the next candidate and let the
+					// next iteration confirm it by parsing there.
+					if self.resync.exhausted() {
+						// Nothing in this PID parses, so it isn't the codec its PMT declares.
+						// That's a mux or config error rather than damage: fail loudly instead
+						// of scanning forever behind an unresolved catalog reservation.
+						let context = format!(
+							"{} stream never regained sync after {} bytes",
+							self.descriptor.track_suffix, self.resync.discarded
+						);
+						return Err(match err {
+							Some(err) => anyhow::Error::new(err).context(context),
+							None => anyhow::Error::msg(context),
+						});
+					}
+					// The tail's frame boundary is what we just lost, so its PTS no longer
+					// describes anything. Re-anchor on the PES, whose PTS covers the first
+					// frame starting in it: wrong by less than one PES, where a stale tail
+					// (a loop wrap carries the PTS from before it) can be wrong by hours.
+					// Only where the tail is actually abandoned, though: restoring a fallback
+					// keeps the candidate, so it keeps the timestamp it was found with.
+					match self.resync.recover(data, offset, &self.descriptor.into()) {
+						Recover::At(next) => {
+							if in_tail {
+								pts = pes_base;
+								in_tail = false;
+							}
+							offset = next;
+							continue;
+						}
+						// Nothing in the buffer confirmed, so fall back to the earliest
+						// candidate that was merely too long; it may complete next PES.
+						Recover::Carry(next) => {
+							match fallback {
+								Some(found) => {
+									self.resync.refund(found.discarded);
+									offset = found.offset;
+									pts = found.pts;
+									in_tail = found.in_tail;
+								}
+								None => {
+									if in_tail {
+										pts = pes_base;
+										in_tail = false;
+									}
+									offset = next;
+								}
+							}
+							break;
+						}
+					}
+				}
+			};
 
 			let import = match &mut self.import {
 				Some(import) => import,
@@ -1531,9 +2103,12 @@ impl<E: CatalogExt> LegacyStream<E> {
 						sample_rate: header.sample_rate,
 						channel_count: header.channel_count,
 					};
-					let track = crate::import::unique_track(&mut self.broadcast, self.descriptor.track_suffix)?;
-					// Consume the reservation held since the PMT: this resolves the gated rendition.
+					// Consume the reservation held since the PMT: this resolves the gated rendition,
+					// and carries the catalog's declared media retention onto the track.
 					let reserved = self.reserved.take().expect("legacy reservation already consumed");
+					let track = self
+						.broadcast
+						.unique_track(self.descriptor.track_suffix, reserved.track_info())?;
 					let legacy = legacy::Import::new(self.descriptor, track, reserved, config)?;
 					self.import.insert(legacy)
 				}
@@ -1543,16 +2118,11 @@ impl<E: CatalogExt> LegacyStream<E> {
 			// The importer accumulates; cut each frame into its own group (one QUIC stream)
 			// so the relay forwards it without waiting for the next.
 			import.cut(None)?;
+			self.resync.recovered();
+			// Offsets behind the published frame are spent; carrying one would republish it.
+			fallback = None;
 
-			pts = match pts {
-				// `pts` is a 90 kHz PES PTS; rescale the sample-rate advance to match
-				// before adding (the scale-aware Timestamp rejects mixed scales).
-				Some(pts) => {
-					let advance = Timestamp::from_scale(header.samples, header.sample_rate as u64)?;
-					Some(pts.checked_add(advance.convert(pts.scale())?)?)
-				}
-				None => None,
-			};
+			pts = advance_pts(pts, header.samples, header.sample_rate)?;
 			offset = end;
 		}
 
@@ -1570,16 +2140,33 @@ impl<E: CatalogExt> LegacyStream<E> {
 	}
 
 	fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
-		// A seek is a discontinuity; the partial frame will never see its end.
-		self.tail.clear();
-		self.tail_pts = None;
+		// A seek is a discontinuity like any other.
+		self.desync();
 		if let Some(import) = &mut self.import {
 			import.seek(sequence)?;
 		}
 		Ok(())
 	}
 
+	/// The partial frame will never see its end, and whatever vouched for the next frame
+	/// boundary no longer applies.
+	fn desync(&mut self) {
+		self.tail.clear();
+		self.tail_pts = None;
+		self.resync.desynced();
+	}
+
 	fn finish(&mut self) -> anyhow::Result<()> {
+		// Drain a frame held only for want of a successor to confirm it: at end of stream
+		// that successor is never coming. Only once this stream has published a frame,
+		// though. Before that nothing has vouched for any boundary, so accepting one here
+		// would hand a capture that joined mid-frame and ended immediately the same false
+		// frame that starting unconfirmed exists to reject, and build the track's config out
+		// of it.
+		if !self.tail.is_empty() && self.import.is_some() {
+			self.resync.drain();
+			self.write(Pending::empty())?;
+		}
 		// A partial frame at end of stream isn't emissible verbatim; drop it, but
 		// leave a trace for diagnosing truncated captures.
 		if !self.tail.is_empty() {
@@ -1588,6 +2175,12 @@ impl<E: CatalogExt> LegacyStream<E> {
 				bytes = self.tail.len(),
 				"dropping partial frame at end of stream"
 			);
+		}
+		// Nothing was ever published here, so this rendition will never resolve. Release its
+		// reservation or it gates the initial catalog publish for every other track: `finish`
+		// takes streams by reference, and callers keep the importer alive past it.
+		if self.import.is_none() {
+			self.reserved.take();
 		}
 		if let Some(import) = &mut self.import {
 			import.finish()?;
@@ -1621,6 +2214,20 @@ fn skip_missing_keyframe(result: crate::Result<()>) -> anyhow::Result<()> {
 		Ok(()) | Err(crate::Error::MissingKeyframe(_)) => Ok(()),
 		Err(e) => Err(e.into()),
 	}
+}
+
+/// Advance a PES-derived PTS past one frame of `samples` at `sample_rate`.
+///
+/// Per frame rather than `index * constant`: E-AC-3 varies the samples per frame, and a
+/// resync means the frames in a PES are no longer a contiguous run to index into.
+fn advance_pts(pts: Option<Timestamp>, samples: u64, sample_rate: u32) -> anyhow::Result<Option<Timestamp>> {
+	let Some(pts) = pts else {
+		return Ok(None);
+	};
+	// `pts` is a 90 kHz PES PTS; rescale the sample-rate advance to match before adding
+	// (the scale-aware Timestamp rejects mixed scales).
+	let advance = Timestamp::from_scale(samples, sample_rate as u64)?;
+	Ok(Some(pts.checked_add(advance.convert(pts.scale())?)?))
 }
 
 /// Convert a raw 90 kHz PTS to a microsecond [`Timestamp`], unwrapping the
@@ -1711,6 +2318,7 @@ mod test {
 	use mpeg2ts::es::StreamType;
 
 	use super::SectionReassembler;
+	use crate::Latency;
 	use moq_net::Timestamp;
 
 	// libklvanc public-sample cue: table_id 0xFC, section_length 0x1b (27), 30 bytes total.
@@ -2041,7 +2649,7 @@ mod test {
 		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
 		import.finish().unwrap();
 		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
-		let mut reader = Consumer::new(track, Container::Legacy).with_latency(std::time::Duration::ZERO);
+		let mut reader = Consumer::new(track, Container::Legacy).with_latency(Latency::REAL_TIME);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
 			.await
 			.expect("cue read timed out")
@@ -2155,6 +2763,55 @@ mod test {
 		p
 	}
 
+	/// Open a bounded audio PES whose declared payload is longer than this packet carries.
+	fn audio_pes_open(pid: u16, cc: u8, pts: u64, declared: usize, payload: &[u8]) -> Vec<u8> {
+		assert!(payload.len() < declared, "the test PES must remain open");
+		let pts_field = [
+			0x21 | (((pts >> 30) & 0x07) << 1) as u8,
+			((pts >> 22) & 0xff) as u8,
+			0x01 | (((pts >> 15) & 0x7f) << 1) as u8,
+			((pts >> 7) & 0xff) as u8,
+			0x01 | ((pts & 0x7f) << 1) as u8,
+		];
+		let mut pes = vec![0x00, 0x00, 0x01, 0xc0];
+		let pes_len = 3 + 5 + declared;
+		pes.push((pes_len >> 8) as u8);
+		pes.push((pes_len & 0xff) as u8);
+		pes.extend_from_slice(&[0x80, 0x80, 0x05]);
+		pes.extend_from_slice(&pts_field);
+		pes.extend_from_slice(payload);
+
+		let af_len = 184 - 1 - pes.len();
+		let mut p = vec![
+			0x47,
+			0x40 | ((pid >> 8) as u8 & 0x1f),
+			(pid & 0xff) as u8,
+			0x30 | (cc & 0x0f),
+		];
+		p.push(af_len as u8);
+		if af_len > 0 {
+			p.push(0x00);
+			p.extend(std::iter::repeat_n(0xff, af_len - 1));
+		}
+		p.extend_from_slice(&pes);
+		assert_eq!(p.len(), 188, "open audio PES packet must fill exactly one TS packet");
+		p
+	}
+
+	/// Build a non-PUSI TS payload packet with adaptation-field stuffing.
+	fn ts_continuation(pid: u16, cc: u8, payload: &[u8]) -> Vec<u8> {
+		let af_len = 184 - 1 - payload.len();
+		let mut p = vec![0x47, ((pid >> 8) as u8 & 0x1f), (pid & 0xff) as u8, 0x30 | (cc & 0x0f)];
+		p.push(af_len as u8);
+		if af_len > 0 {
+			p.push(0x00);
+			p.extend(std::iter::repeat_n(0xff, af_len - 1));
+		}
+		p.extend_from_slice(payload);
+		assert_eq!(p.len(), 188, "continuation packet must fill exactly one TS packet");
+		p
+	}
+
 	// MP2/AC-3 flush like any audio PES but don't consume the jitter hint; if one
 	// anchored the audio run, an AAC PID in the same TS would publish a jitter
 	// inflated by the inter-PID PTS offset.
@@ -2174,12 +2831,20 @@ mod test {
 		));
 		// A whole MP2 frame (MPEG-1 Layer II, 32 kbps, 48 kHz, stereo = 96 bytes),
 		// 2 s ahead of the AAC PES that follows in the same audio run.
+		// Two frames, in their own PES: a frame is confirmed by the one after it, so a lone
+		// frame on a PID that never establishes sync is not published at all.
 		let mut mp2 = vec![0xFF, 0xFD, 0x14, 0x00];
 		mp2.resize(96, 0xAA);
 		bytes.extend_from_slice(&audio_pes_packet(MP2_PID, 0, 90_000, &mp2));
+		bytes.extend_from_slice(&audio_pes_packet(MP2_PID, 1, 92_160, &mp2));
 
-		let mut aac = super::adts::write_header(2, 48_000, 2, 8).unwrap().to_vec();
-		aac.extend_from_slice(&[0u8; 8]);
+		// Two ADTS frames: a frame is confirmed by the one after it, so a lone frame is only
+		// published at end of stream, after the jitter accounting for its PES has run.
+		let mut aac = Vec::new();
+		for _ in 0..2 {
+			aac.extend_from_slice(&super::adts::write_header(2, 48_000, 2, 8).unwrap());
+			aac.extend_from_slice(&[0u8; 8]);
+		}
 		bytes.extend_from_slice(&audio_pes_packet(AAC_PID, 0, 270_000, &aac));
 
 		import.decode(&bytes).unwrap();
@@ -2223,6 +2888,940 @@ mod test {
 			frames.push(frame);
 		}
 		frames
+	}
+
+	// The production shape from #2729, on a real capture: a looping publisher plays part of
+	// a file and wraps to the top, so the audio PES open at the cut leaves a tail that
+	// splices onto the file's first frames. Every wrap used to end the session with
+	// "missing AC-3 sync word", which is what accumulated 216 restarts on the reporter's
+	// feed. AC-3 also exercises a different sync word and parser than the synthetic MP2
+	// and ADTS tests above.
+	#[tokio::test(start_paused = true)]
+	async fn legacy_survives_a_looping_file_wrap() {
+		let data = include_bytes!("test_data/ac3.ts");
+
+		// Wrap mid-file on a packet boundary, so the TS layer stays aligned and the
+		// discontinuity lands squarely on the audio frame the last PES left open.
+		let cut = (data.len() / 2) / 188 * 188;
+		let mut looped = data[..cut].to_vec();
+		looped.extend_from_slice(data);
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.decode(&bytes::BytesMut::from(&looped[..]))
+			.expect("a loop wrap must not end the session");
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		// Every frame published is still a whole AC-3 frame: resync lands on sync words,
+		// never mid-frame.
+		assert!(
+			frames.iter().all(|f| f.payload[0] == 0x0B && f.payload[1] == 0x77),
+			"resync published a frame that doesn't start at an AC-3 sync word"
+		);
+		// The wrap costs at most the frame it interrupted, not the rest of the stream.
+		let pristine = {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+			let mut import = super::Import::new(broadcast, catalog.reserve());
+			import.decode(&bytes::BytesMut::from(&data[..])).unwrap();
+			import.finish().unwrap();
+			read_audio_frames(&consumer, &catalog).await.len()
+		};
+		// The wrap costs nothing after it: the whole second copy is published, on top of
+		// the frames the truncated first pass already delivered.
+		assert!(
+			frames.len() > pristine,
+			"the wrap swallowed frames: {} looped vs {pristine} pristine",
+			frames.len()
+		);
+	}
+
+	/// Read every retained frame of the single video rendition in `catalog`.
+	async fn read_video_frames(
+		consumer: &moq_net::broadcast::Consumer,
+		catalog: &crate::catalog::Producer,
+	) -> Vec<crate::container::Frame> {
+		let name = catalog
+			.snapshot()
+			.video
+			.renditions
+			.keys()
+			.next()
+			.expect("a video track")
+			.clone();
+		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+		let mut frames = Vec::new();
+		while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await
+		{
+			frames.push(frame);
+		}
+		frames
+	}
+
+	/// Annex-B bytes for one access unit: SPS + PPS + IDR for a keyframe, else a delta slice.
+	fn annexb_au(keyframe: bool) -> Vec<u8> {
+		use crate::container::test_util::{IDR, PPS, SPS};
+		let nals: &[&[u8]] = if keyframe {
+			&[SPS, PPS, IDR]
+		} else {
+			&[&[0x41, 0x9a, 0x00, 0x01]]
+		};
+		let mut out = Vec::new();
+		for nal in nals {
+			out.extend_from_slice(&[0, 0, 0, 1]);
+			out.extend_from_slice(nal);
+		}
+		out
+	}
+
+	// A break mid-picture is not the same as a break mid-audio. One video PES is exactly one
+	// access unit, so there is no whole unit ahead of the cut to salvage: publishing what
+	// arrived would hand the decoder a picture with missing slices, and a keyframe missing
+	// slices stays wrong for every picture that references it. Drop it and wait for the next.
+	#[tokio::test(start_paused = true)]
+	async fn video_drops_a_partial_access_unit_across_a_continuity_break() {
+		const VIDEO_PID: u16 = 0x0050;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::H264, VIDEO_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// A keyframe cut in half by the wrap: the PES declares more than this packet carries.
+		let whole = annexb_au(true);
+		import
+			.decode(audio_pes_open(VIDEO_PID, 0, 90_000, whole.len() + 32, &whole[..28]).as_slice())
+			.unwrap();
+		// The wrap completes the open PES with unrelated bytes, and continuity gives it away.
+		import
+			.decode(ts_continuation(VIDEO_PID, 12, &whole[28..]).as_slice())
+			.unwrap();
+		// A clean keyframe after it, which is what the track should carry.
+		import
+			.decode(audio_pes_packet(VIDEO_PID, 13, 270_000, &whole).as_slice())
+			.unwrap();
+		import
+			.decode(audio_pes_packet(VIDEO_PID, 14, 450_000, &annexb_au(false)).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_video_frames(&consumer, &catalog).await;
+		assert!(
+			frames.iter().all(|f| f.payload.len() >= whole.len() || !f.keyframe),
+			"a keyframe with missing slices reached the track: {:?}",
+			frames.iter().map(|f| (f.keyframe, f.payload.len())).collect::<Vec<_>>()
+		);
+		assert_eq!(
+			frames.first().map(|f| f.payload.to_vec()),
+			Some(whole.clone()),
+			"the first published picture is not the whole keyframe"
+		);
+	}
+
+	/// One whole ADTS frame carrying `raw_len` bytes of `fill`. `fill` must not be 0xFF,
+	/// which a resync would mistake for a frame sync.
+	fn adts_frame(raw_len: usize, fill: u8) -> Vec<u8> {
+		let mut f = super::adts::write_header(2, 48_000, 2, raw_len).unwrap().to_vec();
+		f.resize(raw_len + 7, fill);
+		f
+	}
+
+	// The AAC mirror of `legacy_drops_a_pes_completed_across_a_continuity_break`.
+	#[tokio::test(start_paused = true)]
+	async fn aac_drops_a_pes_completed_across_a_continuity_break() {
+		const AAC_PID: u16 = 0x0060;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		let mut opening = adts_frame(40, 0xAA);
+		opening.extend_from_slice(&adts_frame(40, 0xBB)[..25]);
+		import
+			.decode(audio_pes_open(AAC_PID, 0, 90_000, 94, &opening).as_slice())
+			.unwrap();
+		import
+			.decode(ts_continuation(AAC_PID, 12, &adts_frame(40, 0xCC)[..32]).as_slice())
+			.unwrap();
+		let mut normal = adts_frame(40, 0xDD);
+		normal.extend_from_slice(&adts_frame(40, 0xEE));
+		import
+			.decode(audio_pes_packet(AAC_PID, 13, 270_000, &normal).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.to_vec()).collect::<Vec<_>>(),
+			[0xAA, 0xDD, 0xEE]
+				.map(|fill| adts_frame(40, fill)[7..].to_vec())
+				.to_vec(),
+			"the wrap was spliced onto the frame the cut left open"
+		);
+	}
+
+	// ISO 13818-1 doesn't require AAC frames to align with PES boundaries any more than it
+	// does the legacy codecs, but only the legacy path reassembled a split frame: AAC
+	// rejected the PES outright, so a mux that split one killed the broadcast on well-formed
+	// input, with no corruption or discontinuity involved.
+	#[tokio::test(start_paused = true)]
+	async fn aac_frame_split_across_pes_reassembles() {
+		const AAC_PID: u16 = 0x0060;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		let frame = adts_frame(40, 0x5A);
+		import
+			.decode(audio_pes_packet(AAC_PID, 0, 90_000, &frame[..25]).as_slice())
+			.expect("a split ADTS frame is not fatal");
+		// The rest of the split frame, plus the frame that confirms its boundary.
+		let mut rest = frame[25..].to_vec();
+		rest.extend_from_slice(&adts_frame(40, 0x77));
+		import
+			.decode(audio_pes_packet(AAC_PID, 1, 270_000, &rest).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(frames.len(), 2, "the split frame is reassembled, not dropped");
+		// The ADTS header is stripped: the track carries raw AAC.
+		assert_eq!(frames[0].payload.as_ref(), &frame[7..], "reassembled byte-exact");
+		// It began in PES 1 (90000 ticks = 1 s), so PES 2's PTS must not apply to it.
+		assert_eq!(frames[0].timestamp, Timestamp::from_micros(1_000_000).unwrap());
+	}
+
+	// AAC resyncs past a damaged header for the same reason the legacy codecs do.
+	#[tokio::test(start_paused = true)]
+	async fn aac_resyncs_past_damaged_header() {
+		const AAC_PID: u16 = 0x0060;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// Two good frames to lock onto (a frame is confirmed by the one after it), then a
+		// frame whose syncword lost a bit, then two more good ones.
+		let mut payload = adts_frame(40, 0xAA);
+		payload.extend_from_slice(&adts_frame(40, 0xBB));
+		import
+			.decode(audio_pes_packet(AAC_PID, 0, 90_000, &payload).as_slice())
+			.unwrap();
+
+		let mut damaged = adts_frame(40, 0x11);
+		damaged[0] = 0xFE;
+		let mut hit = damaged.clone();
+		hit.extend_from_slice(&adts_frame(40, 0xCC));
+		import
+			.decode(audio_pes_packet(AAC_PID, 1, 270_000, &hit).as_slice())
+			.expect("a damaged ADTS header is not fatal");
+		import
+			.decode(audio_pes_packet(AAC_PID, 2, 450_000, &adts_frame(40, 0xDD)).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		// The track carries raw AAC, so each published frame is its ADTS body.
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.to_vec()).collect::<Vec<_>>(),
+			[0xAA, 0xBB, 0xCC, 0xDD]
+				.map(|fill| adts_frame(40, fill)[7..].to_vec())
+				.to_vec(),
+			"the undamaged frames either side survive, and only the damaged one is dropped"
+		);
+	}
+
+	// AAC reassembles a split frame the same way the legacy codecs do, so it splices the same
+	// way at a wrap and confirms the join for the same reason. See
+	// `legacy_confirms_a_frame_joined_out_of_a_carried_tail`.
+	#[tokio::test(start_paused = true)]
+	async fn aac_confirms_a_frame_joined_out_of_a_carried_tail() {
+		const AAC_PID: u16 = 0x0060;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// A whole frame, then one cut mid-frame by the wrap.
+		let mut payload = adts_frame(40, 0xAA);
+		payload.extend_from_slice(&adts_frame(40, 0xBB)[..25]);
+		import
+			.decode(audio_pes_packet(AAC_PID, 0, 90_000, &payload).as_slice())
+			.unwrap();
+		// The top of the file again: the tail splices onto its first frame.
+		let mut wrapped = adts_frame(40, 0xCC);
+		wrapped.extend_from_slice(&adts_frame(40, 0xDD));
+		import
+			.decode(audio_pes_packet(AAC_PID, 1, 270_000, &wrapped).as_slice())
+			.expect("a splice is not fatal");
+		import
+			.decode(audio_pes_packet(AAC_PID, 2, 450_000, &adts_frame(40, 0xEE)).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		// The track carries raw AAC, so each published frame is its ADTS body.
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.to_vec()).collect::<Vec<_>>(),
+			[0xAA, 0xCC, 0xDD, 0xEE]
+				.map(|fill| adts_frame(40, fill)[7..].to_vec())
+				.to_vec(),
+			"the splice cost more than the frame it interrupted"
+		);
+		assert_eq!(
+			frames[1].timestamp,
+			Timestamp::from_micros(3_000_000).unwrap(),
+			"not re-anchored on the new PES"
+		);
+	}
+
+	// The end-of-stream drain, for AAC. See `legacy_drains_a_joined_frame_at_end_of_stream`.
+	#[tokio::test(start_paused = true)]
+	async fn aac_drains_a_joined_frame_at_end_of_stream() {
+		const AAC_PID: u16 = 0x0060;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		let split = adts_frame(40, 0xBB);
+		let mut payload = adts_frame(40, 0xAA);
+		payload.extend_from_slice(&split[..25]);
+		import
+			.decode(audio_pes_packet(AAC_PID, 0, 90_000, &payload).as_slice())
+			.unwrap();
+		// The rest of the split frame and nothing else, so the stream ends with it joined,
+		// whole, and unconfirmed.
+		import
+			.decode(audio_pes_packet(AAC_PID, 1, 270_000, &split[25..]).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.to_vec()).collect::<Vec<_>>(),
+			[0xAA, 0xBB].map(|fill| adts_frame(40, fill)[7..].to_vec()).to_vec(),
+			"the last frame was held for a confirmation that could never arrive"
+		);
+	}
+
+	/// One whole MPEG-2 Layer II frame (8 kbps, 16 kHz, mono = 72 bytes), filled with
+	/// `fill` so frames are told apart on the wire. Small enough that two fit in the
+	/// single TS packet [`audio_pes_packet`] builds. `fill` must not be 0xFF, which a
+	/// resync would mistake for a frame sync.
+	fn mp2_frame(fill: u8) -> Vec<u8> {
+		let mut f = vec![0xFF, 0xF5, 0x18, 0xC0];
+		f.resize(72, fill);
+		f
+	}
+
+	// The shape a looping mux actually produces, which is not a carried tail: the last PES
+	// before the cut is truncated, so it stays open, and the next loop's leading continuation
+	// packets complete it. The foreign bytes land in the SAME PES, so the codec sees one
+	// buffer with nothing carried, and the confirmation rule above never gets a say. The
+	// continuity counter is what gives the wrap away, so the truncated PES is flushed for the
+	// whole frames it did deliver and the stream resumes at the next PES start.
+	#[tokio::test(start_paused = true)]
+	async fn legacy_drops_a_pes_completed_across_a_continuity_break() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		let mut opening = mp2_frame(0xAA);
+		opening.extend_from_slice(&mp2_frame(0xBB)[..40]);
+		import
+			.decode(audio_pes_open(MP2_PID, 0, 90_000, 144, &opening).as_slice())
+			.unwrap();
+		import
+			.decode(ts_continuation(MP2_PID, 12, &mp2_frame(0xCC)[..32]).as_slice())
+			.unwrap();
+		let mut normal = mp2_frame(0xDD);
+		normal.extend_from_slice(&mp2_frame(0xEE));
+		import
+			.decode(audio_pes_packet(MP2_PID, 13, 270_000, &normal).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
+			vec![mp2_frame(0xAA), mp2_frame(0xDD), mp2_frame(0xEE)],
+			"the wrap was spliced onto the frame the cut left open"
+		);
+	}
+
+	// A damaged frame header must not take the session down with it: the demuxer scans to
+	// the next sync word and keeps publishing, the way the TS and video layers already do.
+	// One bit flipped in a sync word used to abort the whole broadcast (#2729).
+	#[tokio::test(start_paused = true)]
+	async fn legacy_resyncs_past_damaged_header() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// Two good frames to lock onto (a frame is confirmed by the one after it, and two
+		// 72-byte frames is all one TS packet holds), then a frame whose sync word lost a
+		// bit, then two more good ones.
+		let mut payload = mp2_frame(0xAA);
+		payload.extend_from_slice(&mp2_frame(0xBB));
+		import
+			.decode(audio_pes_packet(MP2_PID, 0, 90_000, &payload).as_slice())
+			.unwrap();
+
+		let mut damaged = mp2_frame(0x11);
+		damaged[0] = 0xFE;
+		let mut hit = damaged.clone();
+		hit.extend_from_slice(&mp2_frame(0xCC));
+		import
+			.decode(audio_pes_packet(MP2_PID, 1, 270_000, &hit).as_slice())
+			.expect("a damaged frame header is not fatal");
+		import
+			.decode(audio_pes_packet(MP2_PID, 2, 450_000, &mp2_frame(0xDD)).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
+			vec![mp2_frame(0xAA), mp2_frame(0xBB), mp2_frame(0xCC), mp2_frame(0xDD)],
+			"the undamaged frames either side survive, and only the damaged one is dropped"
+		);
+	}
+
+	// The reported production shape: a looping publisher wraps mid-frame, so the carried
+	// tail is spliced onto unrelated bytes and the join can't parse. The stale tail must be
+	// scanned past rather than ending the session, and the recovered frame takes the new
+	// PES's PTS instead of the pre-wrap one it would have inherited.
+	#[tokio::test(start_paused = true)]
+	async fn legacy_resyncs_past_stale_tail_at_a_splice() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// PES 1 ends mid-frame, leaving a tail the wrap will never complete.
+		let mut cut = mp2_frame(0xAA);
+		cut.truncate(40);
+		import
+			.decode(audio_pes_packet(MP2_PID, 0, 90_000, &cut).as_slice())
+			.unwrap();
+		// PES 2 is the top of the file again: the tail splices onto its first frame.
+		let mut wrapped = mp2_frame(0xCC);
+		wrapped.extend_from_slice(&mp2_frame(0xDD));
+		import
+			.decode(audio_pes_packet(MP2_PID, 1, 270_000, &wrapped).as_slice())
+			.expect("a splice is not fatal");
+		// One more PES to show the wrap costs nothing after it.
+		import
+			.decode(audio_pes_packet(MP2_PID, 2, 450_000, &mp2_frame(0xEE)).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		// The stale tail still carries an intact header claiming 72 bytes, so what gives the
+		// splice away is the confirmation: the frame it declares ends inside the wrapped
+		// frame rather than at a header. The tail is scanned past, not published.
+		assert_eq!(
+			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
+			vec![mp2_frame(0xCC), mp2_frame(0xDD), mp2_frame(0xEE)],
+			"the splice was published as audio instead of scanned past"
+		);
+		// Re-anchored on PES 2 (270000 ticks = 3 s) rather than inheriting the stale tail's
+		// 1 s. At a real loop wrap that inherited error is the whole file's duration, not a
+		// frame.
+		assert_eq!(
+			frames[0].timestamp,
+			Timestamp::from_micros(3_000_000).unwrap(),
+			"not re-anchored on the new PES"
+		);
+	}
+
+	// The same splice one frame later, which is the shape a real wrap takes: the stream has
+	// already published a frame, so the tail sits at a boundary the previous frame vouched
+	// for. What it vouched for is where the tail begins, not the unrelated bytes the next PES
+	// joins onto it, so the join still has to be confirmed. Without that this published one
+	// frame of pre-wrap and post-wrap bytes spliced together, and swallowed the real frame
+	// underneath it (#2802).
+	#[tokio::test(start_paused = true)]
+	async fn legacy_confirms_a_frame_joined_out_of_a_carried_tail() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// A whole frame, then one cut mid-frame by the wrap. The first vouches for where the
+		// tail begins, which is what made the join look trustworthy.
+		let mut payload = mp2_frame(0xAA);
+		payload.extend_from_slice(&mp2_frame(0xBB)[..40]);
+		import
+			.decode(audio_pes_packet(MP2_PID, 0, 90_000, &payload).as_slice())
+			.unwrap();
+		// The top of the file again: the tail splices onto its first frame.
+		let mut wrapped = mp2_frame(0xCC);
+		wrapped.extend_from_slice(&mp2_frame(0xDD));
+		import
+			.decode(audio_pes_packet(MP2_PID, 1, 270_000, &wrapped).as_slice())
+			.expect("a splice is not fatal");
+		import
+			.decode(audio_pes_packet(MP2_PID, 2, 450_000, &mp2_frame(0xEE)).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
+			vec![mp2_frame(0xAA), mp2_frame(0xCC), mp2_frame(0xDD), mp2_frame(0xEE)],
+			"the splice cost more than the frame it interrupted"
+		);
+		// The wrapped frame keeps the new PES's PTS, not the pre-wrap tail's.
+		assert_eq!(
+			frames[1].timestamp,
+			Timestamp::from_micros(3_000_000).unwrap(),
+			"not re-anchored on the new PES"
+		);
+	}
+
+	// Confirming a joined frame means holding it when the buffer ends too soon after it to
+	// hold a header. At end of stream that header is never coming, so the drain publishes it
+	// anyway rather than dropping a frame that is whole and parses.
+	#[tokio::test(start_paused = true)]
+	async fn legacy_drains_a_joined_frame_at_end_of_stream() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		let mut payload = mp2_frame(0xAA);
+		payload.extend_from_slice(&mp2_frame(0xBB)[..40]);
+		import
+			.decode(audio_pes_packet(MP2_PID, 0, 90_000, &payload).as_slice())
+			.unwrap();
+		// The rest of the split frame and nothing else, so the stream ends with it joined,
+		// whole, and unconfirmed.
+		import
+			.decode(audio_pes_packet(MP2_PID, 1, 270_000, &mp2_frame(0xBB)[40..]).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
+			vec![mp2_frame(0xAA), mp2_frame(0xBB)],
+			"the last frame was held for a confirmation that could never arrive"
+		);
+	}
+
+	// A sync word is short enough to turn up by chance in compressed payload (a valid-looking
+	// MP2 header lands about every 25 KiB of random bytes). Scanning onto one and trusting it
+	// would publish payload as audio, so a scanned candidate is only accepted once a header
+	// parses where the frame it declares ends. Here the planted header's frame would end in
+	// the middle of the next real frame, which is what gives it away.
+	#[tokio::test(start_paused = true)]
+	async fn legacy_rejects_an_unconfirmed_sync_candidate() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// Two good frames to lock onto, then a damaged one with an intact header planted 8
+		// bytes into its payload for the scan to find, then two more good ones.
+		let mut payload = mp2_frame(0xAA);
+		payload.extend_from_slice(&mp2_frame(0xBB));
+		import
+			.decode(audio_pes_packet(MP2_PID, 0, 90_000, &payload).as_slice())
+			.unwrap();
+
+		let mut damaged = mp2_frame(0x11);
+		damaged[0] = 0xFE;
+		damaged[8..12].copy_from_slice(&mp2_frame(0)[..4]);
+		let mut hit = damaged.clone();
+		hit.extend_from_slice(&mp2_frame(0xCC));
+		import
+			.decode(audio_pes_packet(MP2_PID, 1, 270_000, &hit).as_slice())
+			.unwrap();
+		import
+			.decode(audio_pes_packet(MP2_PID, 2, 450_000, &mp2_frame(0xDD)).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		// Without confirmation the planted header is published as a frame of payload bytes,
+		// and it eats the front of the next real frame on the way past.
+		assert_eq!(
+			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
+			vec![mp2_frame(0xAA), mp2_frame(0xBB), mp2_frame(0xCC), mp2_frame(0xDD)],
+			"a false sync inside the payload was published as audio"
+		);
+	}
+
+	// A capture joins mid-stream, so the first PES routed to a PID can open in the middle of
+	// a frame whose start was never seen. Nothing vouches for that boundary, so the first
+	// frame is confirmed like a scanned one: otherwise a chance header there is published as
+	// audio and, worse, the track takes its sample rate and channel count from it for the
+	// life of the broadcast.
+	#[tokio::test(start_paused = true)]
+	async fn legacy_confirms_the_first_frame_of_a_stream() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// Join mid-frame: a fragment that happens to open with a valid MP2 header. It declares
+		// 72 bytes but only 40 arrive before the real stream, so the frame it claims ends
+		// inside a real one. (Confirmation catches a false sync whose declared length misses
+		// a real boundary; one that happens to land on it is indistinguishable.)
+		let mut joined = mp2_frame(0)[..4].to_vec();
+		joined.resize(40, 0x11);
+		import
+			.decode(audio_pes_packet(MP2_PID, 0, 90_000, &joined).as_slice())
+			.unwrap();
+		// The real stream, which does chain.
+		let mut real = mp2_frame(0xCC);
+		real.extend_from_slice(&mp2_frame(0xDD));
+		import
+			.decode(audio_pes_packet(MP2_PID, 1, 270_000, &real).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert!(
+			!frames.iter().any(|f| f.payload.ends_with(&[0x11; 8])),
+			"published the unvouched-for bytes the capture joined in the middle of"
+		);
+		assert_eq!(
+			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
+			vec![mp2_frame(0xCC), mp2_frame(0xDD)],
+			"the real stream is picked up once two frames chain"
+		);
+	}
+
+	// A seek is a discontinuity, so whatever vouched for the next boundary no longer holds
+	// and the frame after it is confirmed like any other unvouched-for one.
+	#[tokio::test(start_paused = true)]
+	async fn legacy_confirms_the_first_frame_after_a_seek() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		let mut opening = mp2_frame(0xAA);
+		opening.extend_from_slice(&mp2_frame(0xBB));
+		import
+			.decode(audio_pes_packet(MP2_PID, 0, 90_000, &opening).as_slice())
+			.unwrap();
+
+		import.seek(10).unwrap();
+
+		// Landing mid-frame after the seek, on a fragment that parses as a header but whose
+		// declared frame ends inside a real one.
+		let mut landed = mp2_frame(0)[..4].to_vec();
+		landed.resize(40, 0x11);
+		import
+			.decode(audio_pes_packet(MP2_PID, 1, 270_000, &landed).as_slice())
+			.unwrap();
+		let mut real = mp2_frame(0xCC);
+		real.extend_from_slice(&mp2_frame(0xDD));
+		import
+			.decode(audio_pes_packet(MP2_PID, 2, 450_000, &real).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		// Only the four real frames: the fragment the seek landed inside is dropped rather
+		// than spliced onto the front of the first real frame after it.
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
+			vec![mp2_frame(0xAA), mp2_frame(0xBB), mp2_frame(0xCC), mp2_frame(0xDD)],
+			"published the unvouched-for bytes the seek landed in the middle of"
+		);
+	}
+
+	// A frame that legitimately arrives over many small PES must not trip the resync budget.
+	// The candidate is rescanned each time the buffer grows, and charging those bytes on
+	// every pass would bill a single 8 KiB frame for over a hundred KiB of "discarded" data
+	// and fail the stream before it ever completes. Bytes that end up retained are refunded.
+	#[tokio::test(start_paused = true)]
+	async fn legacy_does_not_bill_a_frame_that_arrives_slowly() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// The largest frame MPEG-1 Layer II can declare (384 kbps at 32 kHz), dribbled in 4
+		// bytes at a time so it is rescanned 432 times. Billing each pass would charge ~364
+		// KiB against a 64 KiB budget.
+		let mut frame = vec![0xFF, 0xFD, 0xE8, 0x00];
+		frame.resize(1728, 0xAA);
+		for (i, chunk) in frame.chunks(4).enumerate() {
+			import
+				.decode(audio_pes_packet(MP2_PID, (i % 16) as u8, 90_000, chunk).as_slice())
+				.expect("a slowly arriving frame must not exhaust the resync budget");
+		}
+		// Enough of the next frame to confirm the boundary.
+		import
+			.decode(audio_pes_packet(MP2_PID, 0, 270_000, &frame[..4]).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
+			vec![frame.clone()],
+			"the reassembled frame keeps its bytes"
+		);
+		// It began in the first PES, so it keeps that PTS rather than the one it completed under.
+		assert_eq!(frames[0].timestamp, Timestamp::from_micros(1_000_000).unwrap());
+	}
+
+	// A PID that never publishes must not hold the catalog shut for the rest of the
+	// broadcast. Its rendition is reserved from the PMT and only consumed when the importer
+	// is built, and `finish` takes streams by reference (moq-srt finishes the importer and
+	// keeps it), so a reservation left alive there gates the initial catalog publish
+	// indefinitely. A lone frame that can never be confirmed is exactly such a PID.
+	#[tokio::test(start_paused = true)]
+	async fn a_pid_that_never_publishes_releases_the_catalog() {
+		const MP2_PID: u16 = 0x0061;
+		const AAC_PID: u16 = 0x0060;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(
+			&[(StreamType::AdtsAac, AAC_PID), (StreamType::Mpeg1Audio, MP2_PID)],
+			false,
+		);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// MP2 carries a single frame, which nothing can ever confirm, so it is dropped and
+		// the importer for that PID is never built.
+		import
+			.decode(audio_pes_packet(MP2_PID, 0, 90_000, &mp2_frame(0xAA)).as_slice())
+			.unwrap();
+		// AAC resolves normally.
+		let mut aac = adts_frame(40, 0xCC);
+		aac.extend_from_slice(&adts_frame(40, 0xDD));
+		import
+			.decode(audio_pes_packet(AAC_PID, 0, 90_000, &aac).as_slice())
+			.unwrap();
+		import.finish().unwrap();
+
+		// The importer is deliberately still alive here, as moq-srt leaves it after finish.
+		let track = consumer
+			.track(hang::catalog::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+		let published = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await;
+		assert!(
+			matches!(published, Ok(Ok(Some(_)))),
+			"a PID that never published held the catalog shut: {published:?}"
+		);
+		drop(import);
+	}
+
+	// Resync is bounded: a PID carrying something other than the codec its PMT declares is a
+	// config error, not damage, so it must still fail rather than scan forever behind an
+	// unresolved catalog reservation (which would withhold the catalog for every track).
+	//
+	// The junk is seeded with header-shaped bytes because that is what defeats a naive
+	// budget: every false positive that gets published resets it, so a stream that never
+	// really parses would scan forever. Only confirmed frames may reset it.
+	#[test]
+	fn legacy_gives_up_when_nothing_ever_parses() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// A valid MP2 header every 16 bytes, none of which is ever a real frame boundary:
+		// the frames they declare are 72 bytes long, which never lands on another header.
+		let header = mp2_frame(0);
+		let junk: Vec<u8> = (0..150)
+			.map(|i: usize| match i % 16 {
+				n @ 0..=3 => header[n],
+				_ => 0xBB,
+			})
+			.collect();
+
+		let err = (0..1000)
+			.map(|i| import.decode(audio_pes_packet(MP2_PID, (i % 16) as u8, 90_000, &junk).as_slice()))
+			.find_map(Result::err)
+			.expect("an unparseable stream must still fail");
+		assert!(
+			err.to_string().contains("never regained sync"),
+			"gave up with the wrong error: {err}"
+		);
+	}
+
+	// A seek is a discontinuity, so the budget spent failing to find a frame before it says
+	// nothing about the stream after it. Carrying it over means a stream that scanned close
+	// to the budget, then seeked somewhere clean, dies on its first parse failure with
+	// "never regained sync" despite being perfectly in sync.
+	#[tokio::test(start_paused = true)]
+	async fn legacy_seek_resets_the_resync_budget() {
+		const MP2_PID: u16 = 0x0061;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::Mpeg1Audio, MP2_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// Burn the budget down to just under the give-up threshold: these discard 147 bytes
+		// and then 150 apiece (a 3-byte partial sync is carried), so 436 of them leaves
+		// 65397 against a 65536 budget.
+		let junk = vec![0x00u8; 150];
+		for i in 0..436 {
+			import
+				.decode(audio_pes_packet(MP2_PID, (i % 16) as u8, 90_000, &junk).as_slice())
+				.expect("still under the budget");
+		}
+
+		// Seek away from the damage. Landing mid-frame costs a couple more failures, which
+		// is what tips a carried-over budget past the threshold.
+		import.seek(10).unwrap();
+		for i in 0..2 {
+			import
+				.decode(audio_pes_packet(MP2_PID, i, 270_000, &junk).as_slice())
+				.expect("a seek must not inherit the pre-seek budget");
+		}
+
+		// Then a perfectly good stream.
+		let mut good = mp2_frame(0xAA);
+		good.extend_from_slice(&mp2_frame(0xBB));
+		import
+			.decode(audio_pes_packet(MP2_PID, 2, 450_000, &good).as_slice())
+			.expect("a clean stream after a seek must not inherit the pre-seek budget");
+		import.finish().unwrap();
+
+		let frames = read_audio_frames(&consumer, &catalog).await;
+		assert_eq!(
+			frames.iter().map(|f| f.payload.clone()).collect::<Vec<_>>(),
+			vec![mp2_frame(0xAA), mp2_frame(0xBB)],
+			"the post-seek stream should publish normally"
+		);
+	}
+
+	// The AAC counterpart of the above. Worth its own test rather than trusting the shared
+	// `Resync`: this path scans for the ADTS sync byte rather than a descriptor's, and
+	// builds its give-up error by adding context to the `anyhow` one `adts::Header::parse`
+	// returns, where the legacy path wraps a `thiserror` value.
+	#[test]
+	fn aac_gives_up_when_nothing_ever_parses() {
+		const AAC_PID: u16 = 0x0060;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let pmt = synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+
+		// A valid ADTS header every 16 bytes, none of which is ever a real frame boundary:
+		// the 47-byte frames they declare never end on another header.
+		let header = adts_frame(40, 0);
+		let junk: Vec<u8> = (0..150)
+			.map(|i: usize| match i % 16 {
+				n if n < super::adts::MIN_HEADER_LEN => header[n],
+				_ => 0xBB,
+			})
+			.collect();
+
+		let err = (0..1000)
+			.map(|i| import.decode(audio_pes_packet(AAC_PID, (i % 16) as u8, 90_000, &junk).as_slice()))
+			.find_map(Result::err)
+			.expect("an unparseable stream must still fail");
+		assert!(
+			err.to_string().contains("never regained sync"),
+			"gave up with the wrong error: {err}"
+		);
 	}
 
 	// ISO 13818-1 doesn't require audio frames to align with PES boundaries: a
@@ -2347,7 +3946,7 @@ mod test {
 
 		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
 		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
-		let mut reader = Consumer::new(track, Container::Legacy).with_latency(std::time::Duration::ZERO);
+		let mut reader = Consumer::new(track, Container::Legacy).with_latency(Latency::REAL_TIME);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
 			.await
 			.expect("cue read timed out")
@@ -2402,6 +4001,20 @@ mod test {
 		assert!(
 			catalog.snapshot().mpegts.tracks.is_empty(),
 			"a 0x86 PID without CUEI must not be cataloged"
+		);
+	}
+
+	#[test]
+	fn tei_pusi_section_is_dropped() {
+		// A PUSI flagged TEI must not start a section out of payload the demodulator has
+		// already disowned. Resetting the counter is not enough: the packet itself is junk.
+		let mut corrupt = packet(true, 0, 0, &CUE);
+		corrupt[1] |= 0x80; // transport_error_indicator
+		let clean = packet(true, 1, 0, &CUE);
+		assert_eq!(
+			run(&[corrupt, clean]),
+			vec![CUE.to_vec()],
+			"a section was emitted from a packet flagged corrupt"
 		);
 	}
 
@@ -2478,7 +4091,7 @@ mod test {
 		assert_eq!(track.pid, DATA_PID, "recorded the original PID");
 
 		let track = consumer.track(name.as_str()).unwrap().subscribe(None).await.unwrap();
-		let mut reader = Consumer::new(track, Container::Legacy).with_latency(std::time::Duration::ZERO);
+		let mut reader = Consumer::new(track, Container::Legacy).with_latency(Latency::REAL_TIME);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
 			.await
 			.expect("verbatim read timed out")

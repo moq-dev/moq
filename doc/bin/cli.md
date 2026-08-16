@@ -5,9 +5,9 @@ description: Command-line tools for MoQ media
 
 # FFmpeg / moq-cli
 
-`moq-cli` is a media router: it wires one endpoint onto a shared MoQ Origin. It
-moves media into MoQ from a source, or out of MoQ to a sink, bridging stdin/stdout
-(via FFmpeg), HLS, RTMP, SRT, and WebRTC.
+`moq-cli` is a media router: it wires endpoints onto a shared MoQ Origin. It
+moves media into MoQ from a source, out of MoQ to a sink, or plays a broadcast
+locally, bridging stdin/stdout (via FFmpeg), HLS, RTMP, SRT, and WebRTC.
 
 ## Installation
 
@@ -41,7 +41,7 @@ docker pull moqdev/moq-cli
 # moq-cli reads media from stdin, so pipe an MPEG-TS stream into the container.
 # `-i` forwards stdin to the container process.
 ffmpeg -i video.mp4 -c copy -f mpegts - | \
-    docker run -i moqdev/moq-cli --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
+    docker run -i moqdev/moq-cli --connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 ```
 
 Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/moqdev/moq-cli).
@@ -74,35 +74,121 @@ Each signal writes a numbered `/tmp/moq.heap.*.heap` profile for analysis with
 
 ```
 moq <MoQ side>  <import|export>  <endpoint> [endpoint options]
+moq <MoQ side>  <stage>  [-- <stage>]...
+moq <MoQ side>  play [playback options]
 ```
 
 - **MoQ side** attaches the Origin to the network, and comes before the verb. At
   least one of:
 
-  - `--client-connect <url>` dials a relay. The URL path is the relay auth path
+  - `--connect <url>` dials a relay. The URL path is the relay auth path
     (e.g. `/anon`), `?jwt=<token>` supplies a token, and `--broadcast` names the
     broadcast.
-  - `--server-bind <addr>` hosts MoQ sessions directly (with `--tls-generate` /
-    `--tls-cert` + `--tls-key`).
+  - `--listen <addr>` hosts encrypted QUIC/WebTransport sessions directly (with
+    `--listen-tls-generate` / `--listen-tls-cert` + `--listen-tls-key`).
+  - `--listen-tcp-bind <addr>` hosts plaintext qmux over TCP. Bind it only to
+    loopback or a trusted private network.
+  - `--listen-unix-bind <path>` hosts qmux over a Unix socket. The socket is
+    created with mode `0666`, so restrict access through its parent directory or
+    an explicit peer-credential allowlist.
+  - `--cluster-lan` meshes with every other participating process on the LAN via
+    mDNS, no relay or internet needed. See [LAN Cluster](#lan-cluster-mdns).
 
-  Both may be given at once (dial a relay *and* accept incoming sessions).
-  `--origin <id>` pins the process's origin id (default: fresh and random per
-  run); see [Redundant Publishers](#redundant-publishers-11).
+Any combination may be given at once (e.g. dial a relay *and* accept incoming
+sessions). `--origin <id>` pins the process's origin id (default: fresh and
+random per run); see [Redundant Publishers](#redundant-publishers-11).
+
 - **`import`** routes media INTO MoQ (a source fills the Origin); **`export`**
   routes it OUT (a sink drains the Origin). The verb fixes the data direction.
+
+- **`play`** subscribes to a broadcast and plays its audio and video locally.
+
 - **endpoint** is one subcommand: a container format (`avc3`, `fmp4`, `ts`, `flv`
   read from stdin on import; `fmp4`, `mkv`, `ts`, `flv` written to stdout on
   export), or a gateway (`hls`, `rtmp`, `srt`, `rtc`). For the bidirectional
   gateways, `--connect` dials out and `--listen` binds a socket; the parent verb
   decides whether that pushes or pulls.
 
+- **`--`** starts another stage, where a stage is one `import` or `export` with
+  its endpoint. See [Multiple Stages](#multiple-stages).
+
 Run `moq import --help` / `moq export --help` to see the endpoints, and
 `moq import rtmp --help` for a specific one.
+
+Two verbs sit outside this grammar because they never touch the network:
+[`moq token`](#authentication) manages relay JWTs, and `moq devices` lists the
+capture devices in a build with the `capture` feature enabled. Both take no MoQ
+side and reject one if given.
 
 ## Basic Usage
 
 `moq <MoQ side> import <format>` reads a container from stdin;
 `moq <MoQ side> export <format>` writes one to stdout.
+
+### Play a Broadcast
+
+Native playback is gated behind the `play` feature, which adds the platform
+window, graphics, decoder, and speaker dependencies:
+
+```bash
+cargo install moq-cli --no-default-features --features "iroh,quinn,websocket,play"
+# or build from a checkout:
+cargo build --release -p moq-cli --no-default-features --features "iroh,quinn,websocket,play"
+# or run straight from that checkout:
+cargo run -p moq-cli --no-default-features --features "iroh,quinn,websocket,play" -- \
+    --connect https://relay.example.com/anon --broadcast my-stream.hang play
+```
+
+Drop the defaults on Linux, as above: the default `pipewire` feature links
+libpipewire-0.3 at build time to give `import capture` a display source that
+playback never uses.
+
+A Linux playback-only build needs ALSA because the speaker goes through cpal.
+It does not compile moq-video's capture feature, so it no longer needs V4L2
+headers or libclang. On Debian and Ubuntu:
+
+```bash
+sudo apt install libasound2-dev
+```
+
+A build with the `capture` feature additionally needs `libclang-dev` and
+`libv4l-dev` for V4L2 camera capture.
+
+macOS and Windows need nothing extra, so plain `--features play` is enough
+there.
+
+Once built, play a broadcast with:
+
+```bash
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
+```
+
+`play` starts each media role as soon as the catalog offers a rendition it can
+decode, independently of the other, and keeps following catalog updates until
+both have started. Audio-only and video-only broadcasts play fine; playback ends
+once every track it started has ended. It doesn't switch renditions afterwards,
+so a publisher that replaces the one being played ends that role.
+
+Within a role it takes the first rendition it can decode, in track-name order,
+which is arbitrary as a quality choice. Pass `--video-name` / `--audio-name` to
+pick a specific rung of a ladder. Audio drives the video clock when both are
+present. The window preserves the video's aspect ratio and can be closed with
+Escape, the close button, or Ctrl-C.
+
+Playback decodes h264, h265, and av1 video, and opus and pcm audio, so
+`--video-codec` / `--audio-codec` are rejected up front for anything else.
+`--latency-max` controls how far a stalled media group may lag before it is
+skipped and defaults to `500ms`. These flags all follow the `play` verb:
+
+```bash
+moq --connect https://relay.example.com/anon --broadcast conference.hang \
+    play --video-name hd --audio-name en --latency-max 250ms
+```
+
+Video decoding prefers the platform hardware backend and falls back to the
+built-in software H.264 decoder. Rendering picks the best graphics API the
+machine offers: Metal on macOS, and Vulkan ahead of D3D12 or OpenGL elsewhere.
+Audio uses the system default output device through CoreAudio, WASAPI, or ALSA.
 
 ### Publish a Video File
 
@@ -110,7 +196,7 @@ Remux a file to MPEG-TS and pipe it in (`-c copy` avoids re-encoding):
 
 ```bash
 ffmpeg -i video.mp4 -c copy -f mpegts - | \
-    moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
+    moq --connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 ```
 
 ### Captions
@@ -119,6 +205,102 @@ Subtitles ride in the source container. The current `moq import` path does not p
 tracks in fragmented MP4, so captions arrive over the GStreamer path instead: `moqsink` accepts a
 decoded text pad and publishes it as a caption track. See
 [GStreamer](gstreamer.md).
+
+### LAN Cluster (mDNS)
+
+`--cluster-lan` advertises this process over mDNS (DNS-SD, `_moq._udp.local`)
+and connects to every other participating MoQ process on the LAN, with no relay,
+internet, or certificate setup needed. Each pair opens one bidirectional session
+and shares one set of broadcasts, like a miniature relay cluster:
+
+```bash
+# On one machine: publish a stream to the LAN.
+ffmpeg -i video.mp4 -c copy -f mpegts - | \
+    moq --cluster-lan --broadcast lan-demo.hang import ts
+
+# On another: discover it and play it.
+moq --cluster-lan --broadcast lan-demo.hang export ts | mpv -
+```
+
+Peers connect to the `--listen` listener, which `--cluster-lan` fills in
+when you haven't: an ephemeral port with a generated certificate, whose SHA-256
+fingerprint rides along in the advertisement. Dialers pin that fingerprint, so
+sessions are encrypted without a CA. Pass `--listen` yourself to put the
+mesh on a fixed port and your own certificate, shared with ordinary viewers.
+
+It composes with the other MoQ sides. The common pairing is a LAN mesh plus a
+CDN for everyone else: `--cluster-lan --connect
+https://relay.example.com/anon` serves viewers on the same network directly
+while the relay serves external ones, all from one process and one set of
+broadcasts. With `--cluster-lan` alone nothing leaves the local network.
+
+By default anyone who can reach the listener joins, exactly like a bare
+`--listen`, so use it on networks you trust. On a network you don't
+control, generate a key and give the same one to every peer:
+
+```bash
+openssl rand -hex 32 > cluster.key
+moq --cluster-lan --cluster-lan-secret cluster.key --broadcast lan-demo.hang export ts
+```
+
+Peers then prove they hold the key before anything else happens. Each
+advertisement carries an HMAC-SHA256 proof bound to the record it travels in
+(the advertiser's service instance, port, nonce, certificate fingerprint, and
+node identity), and a peer whose proof doesn't verify is never dialed at all.
+Copying another member's proof into your own advertisement therefore gets you
+nowhere, even though the record is public. The proof a dialer presents in return is bound to the one
+listener it was derived from, so an impostor that advertises a fingerprint it
+controls gets nothing it can reuse anywhere else. The key itself never crosses
+the network, and peers with different keys (or none) are mutually invisible.
+
+Because the proofs are HMACs over a public nonce, a weak key can be brute-forced
+offline by anyone watching the network. Generate 32 random bytes as above rather
+than choosing something memorable.
+
+### Multiple Stages
+
+One `moq` process bridges one broadcast by default. Separate stages with `--` to
+bridge several over a single connection, each naming its own `--broadcast`:
+
+```bash
+moq --connect https://relay.example.com/anon \
+    import --broadcast cam1.hang rtmp --listen 0.0.0.0:1935 \
+    -- import --broadcast cam2.hang rtmp --listen 0.0.0.0:1936
+```
+
+Stages may run in opposite directions, so one process can ingest and re-publish
+without a second connection or a second copy of the media:
+
+```bash
+moq --connect https://relay.example.com/anon \
+    import --broadcast event.hang srt --listen 0.0.0.0:9000 \
+    -- export --broadcast event.hang hls --listen 0.0.0.0:8080
+```
+
+Every stage shares one connection, one origin id, and one Origin, and each keeps
+its own `--help` (`moq import rtmp --help`). A stage without `--broadcast` falls
+back to the process-wide one, so a single-stage command can keep naming the
+broadcast before the verb.
+
+Rules worth knowing:
+
+- The first stage to finish (stdin EOF, Ctrl-C, or an error) ends the process,
+  taking the others with it.
+- stdin and stdout are one resource each, so at most one stage may read a
+  container from stdin, and at most one may write one to stdout.
+- The MoQ side belongs to the invocation, not a stage: `--connect` and
+  friends go before the first stage and are rejected after a `--`.
+- `moq` reads every `--` as a stage separator, so it can't double as the usual
+  end-of-options marker. The one place that matters is a local playlist path
+  starting with `-`; write it as `./-playlist.m3u8`.
+- `play`, `transcode`, `token`, and `devices` own the process and can't be
+  staged; run those on their own.
+- `import capture` encodes to fit the connection's bandwidth estimate over
+  `--connect`, and rate control assumes it's the only publisher on that
+  connection, so it can't share a process with another `import`. Run those as
+  separate processes, or publish over `--listen`, which has no estimate.
+  (An audio-only `--no-video` capture never reads the estimate, so it doesn't
+  count.)
 
 ### Redundant Publishers (1+1)
 
@@ -140,8 +322,8 @@ joining. Run the same command from two aligned encoders, pinning the same id
 on both:
 
 ```bash
-moq --origin 42 --client-connect https://relay-a.example.com/anon --broadcast event.hang import ts
-moq --origin 42 --client-connect https://relay-b.example.com/anon --broadcast event.hang import ts
+moq --origin 42 --connect https://relay-a.example.com/anon --broadcast event.hang import ts
+moq --origin 42 --connect https://relay-b.example.com/anon --broadcast event.hang import ts
 ```
 
 Leave `--origin` unset everywhere else. The default fresh id per run is what
@@ -157,33 +339,36 @@ may publish where.
 
 The `capture` subcommand captures and encodes from local devices directly, no
 external FFmpeg process required. It publishes the camera as an H.264 video
-track and the microphone as an Opus audio track on the same broadcast. It is
-gated behind the `capture` feature:
+track and the microphone as an Opus audio track on the same broadcast. Video is
+encoded strictly on demand: the camera is opened once at startup to read the
+mode it negotiates, which is what lets the catalog describe the track exactly
+before anything is encoded, and is then released until someone watches (no CPU,
+LED off in between). It is gated behind the `capture` feature:
 
 Build (or run) with the feature enabled:
 
 ```bash
 cargo build --release -p moq-cli --features capture
 # or run straight from a checkout:
-cargo run -p moq-cli --features capture -- --client-connect https://relay.example.com/anon --broadcast cam.hang import capture
+cargo run -p moq-cli --features capture -- --connect https://relay.example.com/anon --broadcast cam.hang import capture
 
 # Default camera + microphone, hardware-encoded H.264 when available:
-moq --client-connect https://relay.example.com/anon --broadcast cam.hang import capture
+moq --connect https://relay.example.com/anon --broadcast cam.hang import capture
 
 # Pick devices, resolution, and bitrates:
-moq --client-connect https://relay.example.com/anon --broadcast cam.hang \
+moq --connect https://relay.example.com/anon --broadcast cam.hang \
     import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 \
                    --microphone "MacBook Pro Microphone" --audio-bitrate 64000
 
 # One medium only:
-moq --client-connect https://relay.example.com/anon --broadcast cam.hang import capture --no-audio
-moq --client-connect https://relay.example.com/anon --broadcast cam.hang import capture --no-video
+moq --connect https://relay.example.com/anon --broadcast cam.hang import capture --no-audio
+moq --connect https://relay.example.com/anon --broadcast cam.hang import capture --no-video
 
 # Pick a codec (default h264). h265 is hardware-only:
-moq --client-connect https://relay.example.com/anon --broadcast cam.hang import capture --codec h265
+moq --connect https://relay.example.com/anon --broadcast cam.hang import capture --codec h265
 
 # Capture a display instead of a camera:
-moq --client-connect https://relay.example.com/anon --broadcast screen.hang import capture --display --no-audio
+moq --connect https://relay.example.com/anon --broadcast screen.hang import capture --display --no-audio
 ```
 
 ### Pick a source
@@ -219,15 +404,15 @@ Microphones:
 
 ```bash
 # A single window, followed as it moves and resizes (macOS only):
-moq --client-connect https://relay.example.com/anon --broadcast win.hang \
+moq --connect https://relay.example.com/anon --broadcast win.hang \
     import capture --window 39193 --no-audio
 
 # Every window of an application, including ones opened later (macOS only):
-moq --client-connect https://relay.example.com/anon --broadcast app.hang \
+moq --connect https://relay.example.com/anon --broadcast app.hang \
     import capture --app com.apple.Safari --no-audio
 
 # A specific display, without the mouse cursor:
-moq --client-connect https://relay.example.com/anon --broadcast screen.hang \
+moq --connect https://relay.example.com/anon --broadcast screen.hang \
     import capture --display 1 --no-cursor --no-audio
 ```
 
@@ -238,14 +423,16 @@ you usually want next to a screen share:
 
 ```bash
 # Share a screen with its sound (macOS only):
-moq --client-connect https://relay.example.com/anon --broadcast screen.hang \
+moq --connect https://relay.example.com/anon --broadcast screen.hang \
     import capture --display --system-audio
 ```
 
-On Linux the NVENC (NVIDIA) and VAAPI (Intel/AMD) encoders and the PipeWire
-screen capture are compiled in by default and link the CUDA / libva / libpipewire
-system libraries. To build `capture` without them (software openh264 + V4L2
-camera capture only, no system library dependency), drop the default features:
+On Linux the NVENC (NVIDIA) encoder and the PipeWire screen capture are compiled
+in by default. VAAPI (Intel/AMD) is behind the off-by-default `vaapi` feature,
+since that backend has never been validated on real hardware. To build `capture`
+without any of them (software openh264 + V4L2 camera capture only), drop the
+default features. `capture` itself still needs libclang and the V4L2 headers for
+the camera, and ALSA for the microphone:
 
 ```bash
 cargo build --release -p moq-cli --no-default-features \
@@ -262,27 +449,27 @@ On macOS these capture at the logical resolution, i.e. what the screen looks lik
 to its owner rather than its native pixels: a 2x retina display shares as
 1710x1106, not 3420x2214, which keeps the derived bitrate sane. Pass
 `--width`/`--height` to capture native pixels instead.
-The Linux screen backend links libpipewire and
-is behind the default-on `pipewire` feature; drop it (like the codecs above) for
-a build without the dependency. The codec is chosen with `--codec`
-(`h264` default, or `h265`). For H.264 it picks a hardware encoder
-(VideoToolbox on macOS, NVENC on Linux NVIDIA, VAAPI on Linux Intel/AMD) when one
-is present, falling back to the built-in software encoder (openh264); force either
+The Linux screen backend links libpipewire and is behind the default-on
+`pipewire` feature; drop it (like the codecs above) for a build without the
+dependency. The codec is chosen with `--codec` (`h264` default, or `h265`). For
+H.264 it picks a hardware encoder (VideoToolbox on macOS, NVENC on Linux NVIDIA,
+or VAAPI on Linux Intel/AMD when built with the `vaapi` feature) when one is
+present, falling back to the built-in software encoder (openh264); force either
 with `--hardware` / `--software`. H.265 is hardware-only (VideoToolbox on macOS,
-Media Foundation on Windows). `--camera` takes a bare integer as a device index, otherwise a
-device path (Linux) or name (a friendly-name substring on Windows, the
+Media Foundation on Windows). `--camera` takes a bare integer as a device index,
+otherwise a device path (Linux) or name (a friendly-name substring on Windows, the
 AVFoundation `uniqueID` on macOS). Microphone capture uses cpal (CoreAudio /
 WASAPI / ALSA) and encodes Opus. `--system-audio` is macOS-only: there is no
 loopback input device, so it goes through ScreenCaptureKit (the same API as
 screen capture, and the same Screen Recording permission) rather than cpal.
 
 `--bitrate` is a ceiling rather than a fixed rate. When publishing with
-`--client-connect`, the video encoder follows the connection's congestion
+`--connect`, the video encoder follows the connection's congestion
 estimate: it drops below the ceiling as soon as the uplink tightens, and climbs
 back gradually once it clears, so a degrading network costs picture quality
 instead of stalling the stream. It never encodes above `--bitrate`. Encoders that
 can't retune while running (VAAPI today) hold the configured rate and log a
-warning. Without `--client-connect` there is no estimate to follow, so the
+warning. Without `--connect` there is no estimate to follow, so the
 configured rate is used as-is.
 
 Alternatively, pipe an external FFmpeg process as MPEG-TS:
@@ -290,11 +477,11 @@ Alternatively, pipe an external FFmpeg process as MPEG-TS:
 ```bash
 # macOS
 ffmpeg -f avfoundation -i "0:0" -f mpegts - | \
-    moq --client-connect https://relay.example.com/anon --broadcast webcam.hang import ts
+    moq --connect https://relay.example.com/anon --broadcast webcam.hang import ts
 
 # Linux
 ffmpeg -f v4l2 -i /dev/video0 -f mpegts - | \
-    moq --client-connect https://relay.example.com/anon --broadcast webcam.hang import ts
+    moq --connect https://relay.example.com/anon --broadcast webcam.hang import ts
 ```
 
 ### Transcode a Broadcast
@@ -310,15 +497,18 @@ cargo build --release -p moq-cli --features transcode
 
 # Publish `cam.hang/transcode.hang` with the default ladder (1080p..240p,
 # filtered to rungs strictly below the source):
-moq --client-connect https://relay.example.com/anon --broadcast cam.hang transcode
+moq --connect https://relay.example.com/anon --broadcast cam.hang transcode
 
 # Pick the ladder (height:bitrate in bits per second) and pin the codecs:
-moq --client-connect https://relay.example.com/anon --broadcast cam.hang     transcode --rung 720:2500000 --rung 360:600000 --encoder nvenc --decoder nvdec
+moq --connect https://relay.example.com/anon --broadcast cam.hang     transcode --rung 720:2500000 --rung 360:600000 --encoder nvenc --decoder nvdec
 
 # Publish the derivative somewhere else (the catalog then omits the relative
 # source references):
-moq --client-connect https://relay.example.com/anon --broadcast cam.hang transcode --output ladder.hang
+moq --connect https://relay.example.com/anon --broadcast cam.hang transcode --output ladder.hang
 ```
+
+Windows uses the Direct3D11 video processor by default. Pass
+`--resize-acceleration cpu` to force frames through CPU resizing.
 
 On an NVIDIA GPU the pipeline is fully GPU-resident: one shared NVDEC session
 decodes the source for all active rungs, a CUDA kernel resizes each rung's copy,
@@ -331,7 +521,7 @@ default; drop the default features for a software-only build.
 Pull a broadcast back out and play it:
 
 ```bash
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang export fmp4 | ffplay -
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang export fmp4 | ffplay -
 ```
 
 ## Encoding Options
@@ -343,7 +533,7 @@ ffmpeg -i input.mp4 \
     -c:v libx264 -preset ultrafast -tune zerolatency \
     -g 30 -keyint_min 30 \
     -c:a aac \
-    -f mpegts - | moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
+    -f mpegts - | moq --connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 ```
 
 ## Container Formats
@@ -358,6 +548,22 @@ Import formats:
 - `ts` - MPEG-TS (H.264 / H.265 video; AAC, MP2, AC-3, or E-AC-3 audio)
 - `flv` - FLV / RTMP (H.264 video, AAC audio)
 - `capture` - capture local devices directly (camera H.264 + microphone Opus; requires the `capture` build feature; does not read stdin)
+
+`import --latency-max <duration>` (default `30s`) declares how long relays keep a
+non-latest group of the published media tracks fetchable. It is a retention
+budget, so raising it never makes a subscriber play further behind live: it caps
+how far back a fetch can still reach. The default is sized for a segmented
+egress (HLS/DASH), which may only advertise segments that are still fetchable;
+lower it when nothing reads history and the memory matters:
+
+```bash
+moq --connect https://relay.example.com --broadcast my-stream.hang import --latency-max 5s ts
+```
+
+It sits on `import` itself rather than the endpoint, so it applies to every
+source: the stdin containers, `hls`, `capture`, and the `rtmp` / `srt` / `rtc`
+gateways alike. Media tracks only, since the catalog and timeline are read at
+the live edge, which is retained unconditionally.
 
 Export formats:
 
@@ -376,18 +582,19 @@ discovery. When omitted, it's auto-detected from the broadcast name suffix
 - `hangz` - the DEFLATE-compressed `catalog.json.z` catalog (opt-in; shares the `.hang` suffix and is never auto-detected)
 - `msf` - the MSF `catalog` track
 
-Stdout exports can also select one rendition per media role before the sink
-subcommand:
+Stdout exports can also select one rendition per media role. The flags go before
+the sink subcommand here; `play` takes the same four after its own verb (see
+[Play a Broadcast](#play-a-broadcast)):
 
 ```bash
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang \
     export --video-name 720p --audio-codec opus fmp4 | ffplay -
 ```
 
 - `--video-name <name>` picks the video rendition with that exact catalog name.
 - `--video-codec <h264|h265|vp8|vp9|av1>` keeps only matching video renditions.
 - `--audio-name <name>` picks the audio rendition with that exact catalog name.
-- `--audio-codec <aac|opus>` keeps only matching audio renditions.
+- `--audio-codec <aac|opus|pcm>` keeps only matching audio renditions.
 
 With no selection flags, every matching rendition is kept. The `h264` and `h265`
 export sinks force the matching video codec, so use `export h264` / `export h265`
@@ -400,7 +607,10 @@ stdout containers and `rtmp` take `--latency-max` (default `500ms`), and `srt`
 reuses its `--latency` (the receive buffer doubles as the skip threshold).
 WebRTC (`rtc`) is real-time and doesn't buffer, so it has no such knob. HLS
 export doesn't subscribe to media at all (segments are fetched on demand), so
-it has no latency knob either.
+it has no latency knob either. This is the subscriber half of the pair the
+protocol names: the export knob is how long *this* consumer waits, while
+[`import --latency-max`](#container-formats) is how long the publisher keeps a
+group around for anyone to fetch.
 
 ### MPEG-TS
 
@@ -409,10 +619,10 @@ Ingest an MPEG-TS stream from FFmpeg and play one back out:
 ```bash
 # Import: remux a file to MPEG-TS and pipe it in
 ffmpeg -i input.mp4 -c copy -f mpegts - | \
-    moq --client-connect https://relay.example.com --broadcast my-stream.hang import ts
+    moq --connect https://relay.example.com --broadcast my-stream.hang import ts
 
 # Export: pull MPEG-TS back out and play it
-moq --client-connect https://relay.example.com --broadcast my-stream.hang export ts | ffplay -
+moq --connect https://relay.example.com --broadcast my-stream.hang export ts | ffplay -
 ```
 
 TS export carries H.264 / H.265 as Annex-B and AAC as ADTS. Both in-band
@@ -440,10 +650,10 @@ captured: they are live or bulky rather than static identity.
 ```bash
 # Import: remux a file to FLV and pipe it in
 ffmpeg -i input.mp4 -c copy -f flv - | \
-    moq --client-connect https://relay.example.com --broadcast my-stream.hang import flv
+    moq --connect https://relay.example.com --broadcast my-stream.hang import flv
 
 # Export: pull FLV back out and play it
-moq --client-connect https://relay.example.com --broadcast my-stream.hang export flv | ffplay -
+moq --connect https://relay.example.com --broadcast my-stream.hang export flv | ffplay -
 ```
 
 FLV is the classic RTMP container: H.264 video and AAC audio, each with an
@@ -455,7 +665,7 @@ older codecs (VP6, MP3) are not supported on the stdin/stdout container path.
 Import a remote HLS master/media playlist into a MoQ broadcast:
 
 ```bash
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang \
     import hls https://example.com/live/master.m3u8
 ```
 
@@ -463,7 +673,7 @@ Serve one MoQ broadcast as HLS over HTTP (reached at
 `http://host:8089/<broadcast>/master.m3u8`):
 
 ```bash
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang \
     export hls --listen '[::]:8089'
 ```
 
@@ -494,7 +704,7 @@ libraries' auth-aware API.)
 Accept OBS / FFmpeg RTMP pushes and forward one broadcast to a relay:
 
 ```bash
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang \
     import rtmp --listen '[::]:1935'
 ```
 
@@ -503,7 +713,7 @@ moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
 Pull a broadcast from a relay and push it to a remote RTMP server:
 
 ```bash
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang \
     export rtmp --connect 'rtmp://live.twitch.tv/app/<stream-key>'
 ```
 
@@ -511,10 +721,10 @@ moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
 
 ```bash
 # Accept incoming SRT publishes as one broadcast and forward to a relay
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import srt --listen '[::]:9000'
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang import srt --listen '[::]:9000'
 
 # Serve a broadcast to SRT players
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang export srt --listen '[::]:9000'
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang export srt --listen '[::]:9000'
 ```
 
 ### WebRTC (WHIP / WHEP)
@@ -525,10 +735,10 @@ Direction picks the HTTP role: import `--listen` is a WHIP server, export
 
 ```bash
 # WHIP ingest: browsers publish one broadcast to us, we forward to a relay
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import rtc --listen '[::]:8080'
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang import rtc --listen '[::]:8080'
 
 # WHEP playback: serve a broadcast to browsers
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang export rtc --listen '[::]:8080'
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang export rtc --listen '[::]:8080'
 ```
 
 The WHIP/WHEP HTTP listener does not allow cross-origin browser access unless
@@ -541,10 +751,29 @@ Pass a JWT token via the URL's `?jwt=` query parameter:
 
 ```bash
 ffmpeg -i video.mp4 -c copy -f mpegts - | \
-    moq --client-connect "https://relay.example.com/?jwt=<token>" --broadcast my-stream.hang import ts
+    moq --connect "https://relay.example.com/?jwt=<token>" --broadcast my-stream.hang import ts
 ```
 
-See [Authentication](/bin/relay/auth) for token generation.
+`moq token` mints those tokens, so a relay operator needs no extra tool:
+
+```bash
+# Generate a signing key. Only private.jwk has to stay secret; the relay
+# verifies with public.jwk.
+moq token generate --algorithm ES256 --out private.jwk --public public.jwk
+
+# Sign a token letting the bearer publish `rooms/123/alice` and watch the room.
+# Add `--expires <unix-timestamp>` to bound how long it stays valid.
+moq token sign --key private.jwk \
+    --root "rooms/123" \
+    --publish "alice" \
+    --subscribe "" > alice.jwt
+
+# Inspect a token's claims.
+moq token verify --key public.jwk --in alice.jwt
+```
+
+See [Authentication](/bin/relay/auth) for the key formats, scoping rules, and
+relay configuration.
 
 ## Test Videos
 
@@ -564,7 +793,7 @@ just pub tos https://relay.example.com/anon
 
 ```bash
 ffmpeg -i video.mp4 -c copy -f mpegts - | \
-    RUST_LOG=debug moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
+    RUST_LOG=debug moq --connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 ```
 
 ### Check Connection

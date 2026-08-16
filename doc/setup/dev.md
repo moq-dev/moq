@@ -28,14 +28,19 @@ just --list
 # just web
 # just pub bbb
 
-# Make sure the code compiles and passes linting
+# Make sure the code you changed compiles and passes linting
 just check
 
-# Auto-fix linting errors
+# Run the tests for the code you changed
+just test
+
+# Auto-fix linting errors, same scope
 just fix
 
-# Run the tests
-just test
+# Same as the above, over every package
+just check-all
+just test all
+just fix-all
 
 # Publish a HLS broadcast (CMAF) over MoQ
 just pub hls tos
@@ -107,7 +112,8 @@ Recommended extensions:
 ## Contributing
 
 Run `just fix` before pushing your changes, otherwise CI will yell at you.
-It runs `just check` so that's the easiest way to debug any issues.
+CI runs `just check` and then `just test`, so running those two locally is the easiest way to debug any issues.
+All three only touch the packages your branch changed (plus anything depending on them), measured against the branch's upstream; `just check-all`, `just test all`, and `just fix-all` cover everything.
 
 Please don't submit a vibe coded PR unless you understand it.
 `You're absolutely right!` is not always good enough.

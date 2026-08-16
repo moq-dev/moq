@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.11](https://github.com/moq-dev/moq/compare/moq-transcode-v0.0.10...moq-transcode-v0.0.11) - 2026-08-14
+
+### Fixed
+
+- *(path)* resolve catalog references like URLs ([#2855](https://github.com/moq-dev/moq/pull/2855))
+- *(net)* stop blocking connect on the initial announce set ([#2856](https://github.com/moq-dev/moq/pull/2856))
+
+## [0.0.10](https://github.com/moq-dev/moq/compare/moq-transcode-v0.0.9...moq-transcode-v0.0.10) - 2026-08-13
+
+### Added
+
+- *(moq-video)* advertise the catalog rendition before the first keyframe ([#2768](https://github.com/moq-dev/moq/pull/2768))
+
+## [0.0.9](https://github.com/moq-dev/moq/compare/moq-transcode-v0.0.8...moq-transcode-v0.0.9) - 2026-08-07
+
+### Other
+
+- updated the following local packages: moq-video
+
+## [0.0.8](https://github.com/moq-dev/moq/compare/moq-transcode-v0.0.7...moq-transcode-v0.0.8) - 2026-08-06
+
+### Fixed
+
+- *(libmoq)* unbreak the Linux C link list, and make VAAPI opt-in ([#2669](https://github.com/moq-dev/moq/pull/2669))
+
+## [0.0.7](https://github.com/moq-dev/moq/compare/moq-transcode-v0.0.6...moq-transcode-v0.0.7) - 2026-08-05
+
+### Added
+
+- *(bindings)* publish raw video with a native encoder ([#2608](https://github.com/moq-dev/moq/pull/2608))
+- *(moq-video)* resize Direct3D11 textures on the GPU ([#2601](https://github.com/moq-dev/moq/pull/2601))
+
+## [0.0.6](https://github.com/moq-dev/moq/compare/moq-transcode-v0.0.5...moq-transcode-v0.0.6) - 2026-08-03
+
+### Fixed
+
+- *(moq-video)* keep Media Foundation decoded frames on the GPU, and stop losing frames at group boundaries ([#2584](https://github.com/moq-dev/moq/pull/2584))
+
 ## [0.0.5](https://github.com/moq-dev/moq/compare/moq-transcode-v0.0.4...moq-transcode-v0.0.5) - 2026-07-29
 
 ### Added

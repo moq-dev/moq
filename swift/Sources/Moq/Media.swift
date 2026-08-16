@@ -60,6 +60,40 @@ public final class MediaConsumer: AsyncSequence, Sendable {
     }
 }
 
+/// A finite, container-decoded media group returned by ``BroadcastConsumer/fetchMediaGroup(name:sequence:container:options:)``.
+public final class MediaGroupConsumer: AsyncSequence, Sendable {
+    /// The decoded media frame emitted by this sequence.
+    public typealias Element = MediaFrame
+
+    let ffi: MoqMediaGroupConsumer
+
+    init(_ ffi: MoqMediaGroupConsumer) {
+        self.ffi = ffi
+    }
+
+    /// The sequence number of this group within the track.
+    public var sequence: UInt64 {
+        ffi.sequence()
+    }
+
+    /// The next frame, or `nil` once the group ends.
+    public func next() async throws -> MediaFrame? {
+        try await ffi.next()
+    }
+
+    /// Cancel all current and future reads.
+    public func cancel() {
+        ffi.cancel()
+    }
+
+    /// Create an iterator that cancels native reads when iteration ends.
+    public func makeAsyncIterator() -> AsyncThrowingStream<MediaFrame, Swift.Error>.Iterator {
+        moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
+            try await ffi.next()
+        }.makeAsyncIterator()
+    }
+}
+
 /// Write side of a media track fed pre-framed payloads.
 public final class MediaProducer: Sendable {
     let ffi: MoqMediaProducer
@@ -89,6 +123,26 @@ public final class MediaProducer: Sendable {
     /// timestamp cross the boundary.
     public func writeFrame(_ payload: Data, timestampUs: UInt64 = 0) throws {
         try ffi.writeFrame(frame: Frame(payload: payload, timestampUs: timestampUs))
+    }
+
+    /// Draw a group boundary here.
+    ///
+    /// Audio has no boundary of its own (every packet is independently decodable), so this is the
+    /// only thing that gives it groups: call it after every frame for one group (one QUIC stream)
+    /// the relay forwards without waiting, or at a segment cadence to align with video. Video
+    /// groups at its own keyframes and needs this only to override that.
+    ///
+    /// On a container this declares a new segment, rolling a group on every track it publishes.
+    public func cut() throws {
+        try ffi.cut()
+    }
+
+    /// Draw a group boundary and number the next group `sequence`.
+    ///
+    /// ``cut()`` with an explicit sequence, for a publisher whose group numbers have to be
+    /// deterministic: two encoders aligning per GOP so a consumer can fail over between them.
+    public func seek(_ sequence: UInt64) throws {
+        try ffi.seek(sequence: sequence)
     }
 
     /// Finish the track and finalize encoding.

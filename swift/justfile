@@ -8,10 +8,20 @@ set working-directory := '.'
 default:
     just check
 
-# Build moq-ffi for the host, regenerate uniffi bindings, run swift test.
+# Skips cleanly on non-macOS hosts, which is why swift.yml runs it on a Mac.
+#
+# This runs the tests too, so there is no separate `just swift test`. Takes an
+# optional newline-separated list of changed files and skips when none are
+# Swift-scoped; `just swift check` (no FILES) always runs.
 
-# Skips cleanly on non-macOS hosts.
-check:
+# Build moq-ffi for the host, regenerate uniffi bindings, run swift test.
+check $FILES="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "$FILES" ]] && ! grep -qE '^(swift/|rs/moq-ffi/)' <<< "$FILES"; then
+    	echo "swift: no Swift changes; skipping."
+    	exit 0
+    fi
     bash scripts/check.sh
 
 # Assemble the released wrapper package from Package.swift.template.
@@ -25,17 +35,3 @@ package *args:
 # that scripts/check.sh lays down (see swift/.gitignore).
 clean:
     rm -rf .build .swiftpm Package.resolved Sources/MoqFFI/Generated.swift MoqFFI.xcframework
-
-# Full Swift CI: `check` already builds moq-ffi and runs swift test.
-# Takes a newline-separated list of changed files; skips if FILES is
-# non-empty and none match the Swift scope. Run `just swift ci` (no
-
-# FILES) to force-run.
-ci FILES="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(swift/|rs/moq-ffi/)'; then
-    	echo "swift: no Swift changes; skipping."
-    	exit 0
-    fi
-    just check

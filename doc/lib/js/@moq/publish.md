@@ -114,16 +114,26 @@ The overlay has no `simulcast` control; enable it via the attribute on the neste
 
 ## JavaScript API
 
+Standalone components start enabled when the `enabled` input is omitted. Pass `false` to construct
+one inactive, or supply a `Signal<boolean>` when activation follows application lifecycle state.
+Camera and microphone sources may request permission immediately. Construct an enabled screen source
+during the user gesture that authorizes screen capture, or pass a false live input and enable it from
+that gesture.
+
 ```typescript
 import * as Publish from "@moq/publish";
+import * as Moq from "@moq/net";
+
+// A connection shared with every other component pointed at the same URL. Its `origin` is
+// where the broadcasts live, so they survive a reconnect.
+const connection = new Moq.Connection.Shared({ url: new URL("https://relay.example.com/anon") });
 
 const broadcast = new Publish.Broadcast({
-    connection,
-    enabled: true,
+    origin: connection.origin,
     name: "alice.hang",
     // Publish two video renditions: video/hd plus a lower-resolution video/sd.
-    video: { hd: { enabled: true }, sd: { enabled: true } },
-    audio: { enabled: true },
+    video: { hd: {}, sd: {} },
+    audio: {},
 });
 
 // Reactive controls

@@ -288,6 +288,27 @@ fn marshal(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Seeding the delta baseline at each snapshot, two ways. The encoder has already serialized the
+/// document to produce the frame, so it can parse the baseline back out of those bytes
+/// (`from_slice`) instead of walking the value a second time (`to_value`).
+///
+/// The encoder uses `from_slice` because it makes the baseline the emitted snapshot by construction,
+/// which `to_value` cannot guarantee for a stateful `Serialize`. This measures what that costs: a
+/// text parse in place of a second traversal, which is not automatically the cheaper of the two.
+fn baseline(c: &mut Criterion) {
+	let mut group = c.benchmark_group("baseline");
+	for f in &fixtures() {
+		group.throughput(Throughput::Bytes(f.snapshot_bytes.len() as u64));
+		group.bench_with_input(BenchmarkId::new("from_slice", f.name), f, |b, f| {
+			b.iter(|| black_box(serde_json::from_slice::<Value>(&f.snapshot_bytes).unwrap()));
+		});
+		group.bench_with_input(BenchmarkId::new("to_value", f.name), f, |b, f| {
+			b.iter(|| black_box(serde_json::to_value(&f.old).unwrap()));
+		});
+	}
+	group.finish();
+}
+
 /// The full producer step, head to head: the delta path (diff + serialize patch + deflate) vs the
 /// snapshot-only path (serialize the whole document + deflate it), both into a warm window. The
 /// snapshot path is charged for the full marshal it pays every tick.
@@ -361,6 +382,7 @@ criterion_group!(
 	deflate,
 	inflate,
 	marshal,
+	baseline,
 	producer,
 	consumer
 );

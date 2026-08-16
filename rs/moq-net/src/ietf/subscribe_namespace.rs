@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use crate::{Path, coding::*, ietf::RequestId};
 
 use super::Message;
+use super::cluster;
 use super::namespace::{decode_namespace, encode_namespace};
 
 use super::Version;
@@ -192,11 +193,36 @@ impl Message for UnsubscribeNamespace {
 	}
 }
 
-/// NAMESPACE message (0x08): v16 only, sent on SUBSCRIBE_NAMESPACE bidi stream
+/// NAMESPACE message (0x08): v16+, sent on the SUBSCRIBE_NAMESPACE bidi stream.
 /// Indicates a namespace suffix matching the subscribed prefix is active.
+///
+/// The base message carries only the suffix. A session that negotiated the MoQ Cluster
+/// extension uses the extended form instead, which appends a Parameters field so the
+/// advertisement can carry its HOP_PATH and ROUTE_COST (see [`cluster`]).
 #[derive(Clone, Debug)]
 pub struct Namespace<'a> {
 	pub suffix: Path<'a>,
+
+	/// The MoQ Cluster parameters. `Some` selects the extended form; `None` the base
+	/// one. An endpoint must not append them on a session that did not negotiate.
+	pub cluster: Option<cluster::Advert>,
+}
+
+impl Namespace<'_> {
+	/// Decode the message body, expecting the extended form when the session negotiated
+	/// the MoQ Cluster extension. See [`super::PublishNamespace::decode_body`].
+	pub fn decode_body<R: bytes::Buf>(r: &mut R, version: Version, negotiated: bool) -> Result<Self, DecodeError> {
+		let suffix = decode_namespace(r, version)?;
+
+		// The base form has no Parameters field at all, so there is nothing to read
+		// (and nothing to reject) unless the extension is on.
+		let cluster = match negotiated {
+			true => super::publish_namespace::decode_cluster_params(r, version, true)?,
+			false => None,
+		};
+
+		Ok(Self { suffix, cluster })
+	}
 }
 
 impl Message for Namespace<'_> {
@@ -204,12 +230,14 @@ impl Message for Namespace<'_> {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		encode_namespace(w, &self.suffix, version)?;
-		Ok(())
+		match &self.cluster {
+			Some(advert) => super::publish_namespace::encode_cluster_params(w, version, Some(advert)),
+			None => Ok(()),
+		}
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let suffix = decode_namespace(r, version)?;
-		Ok(Self { suffix })
+		Self::decode_body(r, version, false)
 	}
 }
 
@@ -272,6 +300,110 @@ mod tests {
 		let mut buf = BytesMut::new();
 		msg.encode_msg(&mut buf, version).unwrap();
 		buf.to_vec()
+	}
+
+	fn hop_path(ids: &[u64]) -> cluster::HopPath {
+		let hops = ids
+			.iter()
+			.map(|&id| crate::Origin::new(id).unwrap())
+			.collect::<Vec<_>>();
+		cluster::HopPath::new(crate::OriginList::try_from(hops).unwrap())
+	}
+
+	/// The extended NAMESPACE appends a Parameters field carrying the path and cost;
+	/// the base one has no such field at all.
+	#[test]
+	fn cluster_namespace_round_trips() {
+		let version = Version::Draft19;
+		let msg = Namespace {
+			suffix: Path::new("alice.hang"),
+			cluster: Some(cluster::Advert {
+				hops: hop_path(&[7, 9]),
+				cost: 5,
+			}),
+		};
+
+		let encoded = body(&msg, version);
+		let mut buf = bytes::Bytes::from(encoded.clone());
+		let decoded = Namespace::decode_body(&mut buf, version, true).unwrap();
+		assert!(buf.is_empty());
+		assert_eq!(decoded.suffix.as_str(), "alice.hang");
+		assert_eq!(decoded.cluster, msg.cluster);
+
+		// The base form is strictly shorter, and reading the extended bytes as base
+		// leaves the parameters behind rather than silently absorbing them.
+		let base = Namespace {
+			suffix: Path::new("alice.hang"),
+			cluster: None,
+		};
+		let base_encoded = body(&base, version);
+		assert!(base_encoded.len() < encoded.len());
+
+		let mut buf = bytes::Bytes::from(encoded);
+		let decoded = Namespace::decode_body(&mut buf, version, false).unwrap();
+		assert!(decoded.cluster.is_none());
+		assert!(!buf.is_empty(), "the parameters were not consumed");
+	}
+
+	/// ROUTE_COST is optional and absent means 0, so a free path sends nothing.
+	#[test]
+	fn cluster_namespace_omits_zero_cost() {
+		let version = Version::Draft19;
+		let free = Namespace {
+			suffix: Path::new("a"),
+			cluster: Some(cluster::Advert {
+				hops: hop_path(&[7]),
+				cost: 0,
+			}),
+		};
+		let priced = Namespace {
+			suffix: Path::new("a"),
+			cluster: Some(cluster::Advert {
+				hops: hop_path(&[7]),
+				cost: 1,
+			}),
+		};
+		assert!(body(&free, version).len() < body(&priced, version).len());
+
+		let mut buf = bytes::Bytes::from(body(&free, version));
+		let decoded = Namespace::decode_body(&mut buf, version, true).unwrap();
+		assert_eq!(decoded.cluster.unwrap().cost, 0);
+	}
+
+	/// A negotiated session that omits HOP_PATH is a protocol violation.
+	#[test]
+	fn cluster_namespace_requires_hop_path() {
+		let version = Version::Draft19;
+		let mut buf = BytesMut::new();
+		encode_namespace(&mut buf, &Path::new("a"), version).unwrap();
+		// Number of Parameters = 0.
+		0u64.encode(&mut buf, version).unwrap();
+
+		let mut bytes = buf.freeze();
+		assert!(matches!(
+			Namespace::decode_body(&mut bytes, version, true),
+			Err(DecodeError::InvalidValue)
+		));
+	}
+
+	/// An endpoint must not append the parameters on a session that did not negotiate,
+	/// so a receiver that sees them there rejects the message.
+	#[test]
+	fn cluster_params_rejected_when_not_negotiated() {
+		let version = Version::Draft19;
+		let msg = super::super::PublishNamespace {
+			request_id: RequestId(1),
+			track_namespace: Path::new("a"),
+			cluster: Some(cluster::Advert {
+				hops: hop_path(&[7]),
+				cost: 0,
+			}),
+		};
+
+		let mut buf = BytesMut::new();
+		msg.encode_msg(&mut buf, version).unwrap();
+		let mut bytes = buf.freeze();
+		assert!(super::super::PublishNamespace::decode_body(&mut bytes, version, false).is_err());
 	}
 
 	#[test]

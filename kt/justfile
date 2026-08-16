@@ -9,10 +9,21 @@ set working-directory := '.'
 default:
     just check
 
-# Build moq-ffi for the host, regenerate uniffi bindings, and run
-# :moq-ffi:jvmTest + :moq:jvmTest. Missing tools are errors so wrapper drift
-# cannot slip past a green check.
-check:
+# Missing tools are errors so wrapper drift cannot slip past a green check.
+#
+# This runs the tests too, so there is no separate `just kt test`: the script
+# builds, generates, and tests as one gradle invocation. Takes an optional
+# newline-separated list of changed files and skips when none are Kotlin-scoped;
+# `just kt check` (no FILES) always runs.
+
+# Build moq-ffi, regenerate the bindings, and run :moq-ffi:jvmTest + :moq:jvmTest.
+check $FILES="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "$FILES" ]] && ! grep -qE '^(kt/|rs/moq-ffi/)' <<< "$FILES"; then
+    	echo "kt: no Kotlin changes; skipping."
+    	exit 0
+    fi
     bash scripts/check.sh
 
 # Regenerate the checked-in uniffi bindings and host native library without
@@ -37,17 +48,3 @@ clean:
     	moq/src/jvmAndAndroidMain/kotlin/uniffi \
     	moq/src/jvmMain/resources \
     	moq/src/androidMain/jniLibs
-
-# Full Kotlin CI: `check` already builds moq-ffi and runs gradle tests.
-# Takes a newline-separated list of changed files; skips if FILES is
-# non-empty and none match the Kotlin scope. Run `just kt ci` (no
-
-# FILES) to force-run.
-ci FILES="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(kt/|rs/moq-ffi/)'; then
-    	echo "kt: no Kotlin changes; skipping."
-    	exit 0
-    fi
-    just check

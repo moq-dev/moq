@@ -27,7 +27,7 @@ pub struct ExportArgs {
 
 	/// TLS certificates, keys, self-signed generation, and optional mTLS roots.
 	#[command(flatten)]
-	pub tls: moq_native::tls::Server,
+	pub tls: moq_native::tls::Listen,
 
 	/// Minimum media listed in each rendition's playlist window. Keep it within the
 	/// relay's group-cache retention, since segments are fetched from there on request.
@@ -40,14 +40,20 @@ pub struct ExportArgs {
 }
 
 /// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `name`.
-pub async fn import(origin: &moq_net::origin::Producer, name: String, playlist: String) -> anyhow::Result<()> {
+pub async fn import(
+	origin: &moq_net::origin::Producer,
+	name: String,
+	playlist: String,
+	latency_max: Option<std::time::Duration>,
+) -> anyhow::Result<()> {
 	let mut producer = origin
 		.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
 		.context("failed to create broadcast")?;
 
 	// Create catalog tracks before the broadcast becomes visible so a subscriber
 	// can consume the catalog as soon as it observes the announcement.
-	let catalog = moq_mux::catalog::Producer::new(&mut producer)?;
+	let config = moq_mux::catalog::Config::default().with_latency_max(latency_max);
+	let catalog = moq_mux::catalog::Producer::with_config(&mut producer, config)?;
 
 	let mut importer = moq_hls::import::Import::new(producer, catalog, moq_hls::import::Config::new(playlist))?;
 

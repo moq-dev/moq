@@ -280,14 +280,21 @@ async fn run_session(
 	element: glib::WeakRef<super::MoqSrc>,
 	shutdown: &mut watch::Receiver<bool>,
 ) -> Result<()> {
-	let mut config = moq_native::ClientConfig::default();
-	config.tls.disable_verify = Some(settings.tls_disable_verify);
+	let mut config = moq_native::connect::Config::default();
+	config.tls.insecure = Some(settings.tls_disable_verify);
 
 	let origin = moq_net::Origin::random().produce();
 	let origin_consumer = origin.consume();
-	let client = config.init()?.with_subscriber(origin);
+	let client = config.init(Default::default())?.with_subscriber(origin);
 
-	let _session = client.connect(settings.url.clone()).await?;
+	// One-shot: the catalog subscription below dies with the session anyway, so a
+	// background redial could not resurrect this run. A drop surfaces as the
+	// catalog closing and the loop below winding down.
+	let _connection = client
+		.with_reconnect(false)
+		.connect(settings.url.clone())
+		.established()
+		.await?;
 
 	// Wait for the broadcast to be announced. Synchronous lookup would race the gossip of
 	// announcements that happens after the session is established.
@@ -436,7 +443,8 @@ async fn reconcile(
 		.fetch_add(1, Ordering::Relaxed);
 
 		let track_subscriber = broadcast.track(&name)?.subscribe(None).await?;
-		let track = moq_mux::container::Consumer::new(track_subscriber, container).with_latency(Duration::from_secs(1));
+		let track = moq_mux::container::Consumer::new(track_subscriber, container)
+			.with_latency(moq_mux::Latency::max(Duration::from_secs(1)));
 
 		let descriptor = TrackDescriptor {
 			kind: d.kind,

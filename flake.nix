@@ -35,6 +35,13 @@
       rust-overlay,
       ...
     }:
+    let
+      eachSupportedSystem = flake-utils.lib.eachSystem [
+        "x86_64-linux"
+        "aarch64-linux"
+        "aarch64-darwin"
+      ];
+    in
     {
       nixosModules = {
         moq-relay = import ./nix/modules/moq-relay.nix;
@@ -42,7 +49,7 @@
 
       overlays.default = import ./nix/overlay.nix { inherit crane; };
     }
-    // flake-utils.lib.eachDefaultSystem (
+    // eachSupportedSystem (
       system:
       let
         pkgs = import nixpkgs {
@@ -64,7 +71,6 @@
             "wasm32-unknown-unknown"
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-            "x86_64-apple-darwin"
             "aarch64-apple-darwin"
           ];
         };
@@ -128,11 +134,6 @@
             # PulseAudio rather than the `pipewire` PCM below. Loaded at runtime
             # only, via `alsaPlugins`.
             pkgs.alsa-plugins
-            # moq-video's VAAPI backend (always-on for Linux): moq-vaapi dlopen's
-            # libva at runtime, so it isn't needed to build. This is here only to
-            # actually run vaapi in the devShell; a libva-less host loads and falls
-            # back cleanly. macOS has no VAAPI.
-            pkgs.libva
             # moq-video's `pipewire` screen-capture feature: the pipewire crate
             # links libpipewire-0.3 via pkg-config and generates bindings at build
             # time (bindgenHook above provides libclang). Linux-only; macOS uses
@@ -219,14 +220,18 @@
           ];
 
         # Developer workflow tooling not needed for builds: the GitHub CLI
-        # for opening/reviewing PRs from the dev shell.
+        # for opening/reviewing PRs, plus jq to read `cargo metadata` in
+        # `just rs check-changed`.
         devTools = with pkgs; [
           gh
+          jq
         ];
 
-        # Linters / formatters required by `just ci`; `just check` and
-        # `just fix` guard each tool with `command -v` so they skip
-        # silently when the binary isn't on $PATH.
+        # Linters / formatters used by `just check` and `just fix`, which
+        # guard each tool with `command -v` so they skip silently when the
+        # binary isn't on $PATH. CI sets MOQ_STRICT=1, which turns that skip
+        # into an error (see `_tools` in the root justfile), so this list and
+        # that one have to stay in step.
         lintDeps = with pkgs; [
           shellcheck
           shfmt
@@ -243,6 +248,48 @@
         ktDeps = with pkgs; [
           jdk17
           gradle_8
+        ];
+
+        # uniffi-bindgen-go renders rs/moq-ffi into the generated half of
+        # go/ffi. Not in nixpkgs, so build it from NordSecurity's fork; without
+        # it `just go check` skips itself, which reads as a pass in CI.
+        #
+        # The tag pairs the generator's own version with the uniffi release it
+        # targets (v0.7.1+v0.31.0 -> uniffi 0.31), and it only understands
+        # metadata emitted by that uniffi, so it moves with the `uniffi`
+        # dependency in rs/moq-ffi/Cargo.toml. Three other places name the same
+        # tag and must be bumped together: UNIFFI_BINDGEN_GO_TAG in
+        # release-go-ffi.yml, and the `cargo install` line in go/ffi/README.md
+        # and go/scripts/check.sh.
+        uniffi-bindgen-go = pkgs.rustPlatform.buildRustPackage rec {
+          pname = "uniffi-bindgen-go";
+          version = "0.7.1+v0.31.0";
+
+          src = pkgs.fetchFromGitHub {
+            owner = "NordSecurity";
+            repo = "uniffi-bindgen-go";
+            rev = "v${version}";
+            hash = "sha256-ZoGxEWJKriGhe/nMpSbJF6pyyZQZLzdVervUrBzUM5k=";
+          };
+
+          cargoHash = "sha256-ctDBz0oE8+mkn7SJn2KGSb6P4LF8S5UC3XcjVHWApg4=";
+
+          # The tag is a virtual workspace whose other members are uniffi test
+          # fixtures. Building from the root would compile all of them, and CI
+          # has no Nix binary cache, so it would pay for that on every run.
+          buildAndTestSubdir = "bindgen";
+
+          # The upstream test suite generates fixtures and compiles them with a
+          # Go toolchain, which is a lot of build for a binary we only invoke.
+          doCheck = false;
+        };
+
+        # Go toolchain (go/) so `just go check` regenerates the bindings and
+        # runs `go test -race` on the wrapper instead of skipping. Cross-platform:
+        # the check builds moq-ffi for the host and runs on Linux and macOS.
+        goDeps = [
+          pkgs.go
+          uniffi-bindgen-go
         ];
 
         # Dependencies for building the OBS plugin (`just obs build`).
@@ -293,22 +340,7 @@
             name = "moq-packaging-tools";
             paths = packagingDeps ++ publishDeps;
           };
-        })
-        # x86_64-darwin release artifacts are cross-compiled from the
-        # aarch64-darwin runner (see nix/overlay.nix). The cross outputs only
-        # evaluate on an aarch64-darwin host, so gate them on the system to
-        # keep `nix flake check` working on Linux and Intel macs.
-        // pkgs.lib.optionalAttrs (system == "aarch64-darwin") {
-          inherit (overlayPkgs)
-            moq-relay-x86_64-apple-darwin
-            moq-cli-x86_64-apple-darwin
-            moq-bench-x86_64-apple-darwin
-            moq-token-x86_64-apple-darwin
-            moq-token-cli-x86_64-apple-darwin
-            libmoq-x86_64-apple-darwin
-            moq-gst-plugin-x86_64-apple-darwin
-            ;
-        };
+        });
 
         # Re-export gst_all_1 so users can pair the plugin with a matching
         # gstreamer in one nix invocation:
@@ -333,6 +365,7 @@
             ++ lintDeps
             ++ obsDeps
             ++ ktDeps
+            ++ goDeps
             ++ devTools;
 
           # jemalloc's configure uses -O0 test builds, which conflict with
@@ -346,18 +379,33 @@
 
         formatter = pkgs.nixfmt-tree;
 
-        # Heavy Rust CI (clippy / doc / test) runs as plain cargo via `just rs
-        # ci` (see rs/justfile), no longer through crane. `nix flake check` is
-        # kept -- it still validates flake eval + builds the dev shell -- but no
-        # longer compiles the workspace, so it's cheap. Release artifacts still
-        # build via crane `buildPackage` (see `packages` above / release-*.yml).
+        # Heavy Rust CI (clippy / doc / test) runs as plain cargo via `just
+        # check` and `just test` (see rs/justfile), no longer through crane.
+        # `nix flake check` is kept -- it still validates flake eval + builds the
+        # dev shell -- but no longer compiles the workspace, so it's cheap
+        # enough that `just check` runs it on any Nix/Rust input change. Release
+        # artifacts still build via crane `buildPackage` (see `packages` above /
+        # release-*.yml).
         #
         # On the self-hosted runner those cargo checks transparently reuse a
         # per-crate compiler cache (rustc is wrapped by sccache via the runner
         # environment), so a Cargo.lock change recompiles only the changed crate
         # + its reverse-deps. That's a runner-side concern -- nothing here or in
         # the workflows configures it.
-        checks = { };
+        checks = {
+          libmoq-source-assets = pkgs.runCommand "libmoq-source-assets" { } ''
+            for asset in \
+              rs/libmoq/moq.pc.in \
+              rs/libmoq/native-libs/apple.txt \
+              rs/libmoq/native-libs/linux.txt \
+              rs/libmoq/native-libs/windows.txt \
+              rs/moq-video/src/frame/nv12_resize.ptx
+            do
+              test -f "${overlayPkgs.libmoq.src}/$asset"
+            done
+            touch "$out"
+          '';
+        };
       }
     );
 }

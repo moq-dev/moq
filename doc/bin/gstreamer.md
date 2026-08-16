@@ -41,9 +41,13 @@ signal when it changes, so you can poll it via `g_object_get` or connect to `not
 | `estimated-send-bitrate` | uint64 | Estimated send bitrate in bits per second (congestion controller); 0 when unavailable |
 | `estimated-recv-bitrate` | uint64 | Estimated receive bitrate in bits per second; 0 when unavailable |
 
-`status` distinguishes a transient drop (`disconnected`, the reconnect loop is still retrying) from a
-permanent give-up (`failed`, a non-retryable error such as an auth rejection), which a bare
-`connected` bool cannot.
+`status` distinguishes a drop the reconnect loop is still retrying (`disconnected`) from a permanent
+give-up (`failed`), which a bare `connected` bool cannot. The sink retries for as long as the
+pipeline runs, so a relay outage of any length is ridden out; it goes `failed` only on an answer the
+relay actually gave that redialing cannot change: a rejected token, or a CONNECT answered with a
+status that isn't an invitation to retry. Everything else keeps retrying, so watch the logs when a
+sink stays `disconnected` from the very first attempt: a pipeline that has never connected once is
+far more likely misconfigured than waiting out an outage.
 
 ## Prerequisites
 
@@ -57,7 +61,7 @@ If you're using Nix, GStreamer is included in the dev shell automatically. Other
 
 ## Quick start with Nix
 
-If you have Nix installed, you don't need to build anything or set any environment variables. The `moq-gst` flake output bundles the plugin with wrappers around `gst-inspect-1.0` / `gst-launch-1.0` that preload moq alongside `gst-plugins-{base,good,bad}`, so the standard tools find `moqsink` / `moqsrc` automatically.
+On Linux or Apple Silicon macOS, Nix avoids a manual build and environment variables. The `moq-gst` flake output bundles the plugin with wrappers around `gst-inspect-1.0` / `gst-launch-1.0` that preload moq alongside `gst-plugins-{base,good,bad}`, so the standard tools find `moqsink` / `moqsrc` automatically.
 
 ### Inspect the plugin
 

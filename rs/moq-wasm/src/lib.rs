@@ -23,7 +23,7 @@ use std::rc::Rc;
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 
-mod transport;
+pub mod transport;
 
 /// Map any displayable error into a JS exception.
 fn js_err(e: impl std::fmt::Display) -> JsValue {
@@ -52,7 +52,7 @@ impl Session {
 	/// Connect to a relay over the browser's WebTransport, using the system roots.
 	pub async fn connect(url: String) -> Result<Session, JsValue> {
 		let url = url::Url::parse(&url).map_err(js_err)?;
-		let transport = transport::connect(url).await.map_err(js_err)?;
+		let transport = transport::connect(url, Default::default()).await.map_err(js_err)?;
 		Self::handshake(transport).await
 	}
 
@@ -61,7 +61,11 @@ impl Session {
 	pub async fn connect_with_hashes(url: String, hashes: Vec<Uint8Array>) -> Result<Session, JsValue> {
 		let url = url::Url::parse(&url).map_err(js_err)?;
 		let hashes = hashes.iter().map(|h| h.to_vec()).collect();
-		let transport = transport::connect_with_hashes(url, hashes).await.map_err(js_err)?;
+		let options = transport::Options {
+			server_certificate_hashes: hashes,
+			..Default::default()
+		};
+		let transport = transport::connect(url, options).await.map_err(js_err)?;
 		Self::handshake(transport).await
 	}
 
@@ -86,9 +90,11 @@ impl Session {
 		self.inner.version().to_string()
 	}
 
-	/// Resolve when the session closes (cleanly or with an error).
+	/// Reject when the session closes, with the reason it closed.
+	///
+	/// Every close carries a reason, including a clean one, so this never resolves.
 	pub async fn closed(&self) -> Result<(), JsValue> {
-		self.inner.closed().await.map_err(js_err)
+		Err(js_err(self.inner.closed().await))
 	}
 
 	/// Subscribe to a broadcast by path, waiting until it is announced.
@@ -174,6 +180,6 @@ impl Group {
 		*cell.borrow_mut() = Some(group);
 
 		let frame = result.map_err(js_err)?;
-		Ok(frame.map(|bytes| Uint8Array::from(bytes.as_ref())))
+		Ok(frame.map(|frame| Uint8Array::from(frame.payload.as_ref())))
 	}
 }

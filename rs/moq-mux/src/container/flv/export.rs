@@ -16,7 +16,6 @@
 //! this only for a player that advertised the `Multitrack` capability).
 
 use std::task::Poll;
-use std::time::Duration;
 
 use anyhow::Context;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -104,7 +103,7 @@ impl Flavor {
 pub struct Export {
 	source: crate::Source,
 	catalog: Option<crate::catalog::Consumer>,
-	latency: Duration,
+	latency: crate::Latency,
 	/// Emit every rendition as an enhanced-RTMP multitrack track, rather than only
 	/// the first video + first audio rendition.
 	multitrack: bool,
@@ -176,12 +175,11 @@ impl Export {
 		source: crate::Source,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
-		let broadcast = source.broadcast().await?;
-		let catalog = crate::catalog::Consumer::new(&broadcast, catalog_format).await?;
+		let catalog = source.catalog(catalog_format).await?;
 		Ok(Self {
 			source,
 			catalog: Some(catalog),
-			latency: Duration::ZERO,
+			latency: crate::Latency::REAL_TIME,
 			multitrack: false,
 			video: Vec::new(),
 			audio: Vec::new(),
@@ -189,8 +187,12 @@ impl Export {
 		})
 	}
 
-	/// Set the maximum buffering latency for each per-track source.
-	pub fn with_latency(mut self, latency: Duration) -> Self {
+	/// Set the latency tolerance for each per-track source.
+	///
+	/// See [`Consumer::with_latency`](crate::container::Consumer::with_latency) for the
+	/// per-track skip behavior. Defaults to
+	/// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) (skip aggressively).
+	pub fn with_latency(mut self, latency: crate::Latency) -> Self {
 		self.latency = latency;
 		self
 	}
@@ -301,7 +303,9 @@ impl Export {
 		!self.video.is_empty() || !self.audio.is_empty()
 	}
 
-	fn update_catalog(&mut self, catalog: Catalog) -> anyhow::Result<()> {
+	fn update_catalog(&mut self, mut catalog: Catalog) -> anyhow::Result<()> {
+		self.source.retain_valid_media(&mut catalog);
+
 		// A single-track FLV stream binds only the first rendition of each kind;
 		// multitrack binds them all. Bind newly-seen renditions in name order (the
 		// catalog is a BTreeMap) so each keeps a stable track id.
@@ -349,7 +353,9 @@ impl Export {
 				(VideoCodec::AV1(av1), None) => Some(Bytes::copy_from_slice(&av1c_bytes(av1))),
 				_ => None,
 			};
-			let source = ExportSource::for_video(&self.source, name, config, self.latency)?;
+			let Some(source) = ExportSource::for_video(&self.source, name, config, self.latency)? else {
+				continue;
+			};
 			let track_id = u8::try_from(self.video.len()).context("too many FLV video tracks")?;
 			self.video.push(FlvTrack {
 				name: name.clone(),
@@ -377,7 +383,9 @@ impl Export {
 			}
 			let flavor = audio_flavor(config)?;
 			ensure_legacy(&config.container, "audio", name)?;
-			let source = ExportSource::for_audio(&self.source, name, config, self.latency)?;
+			let Some(source) = ExportSource::for_audio(&self.source, name, config, self.latency)? else {
+				continue;
+			};
 			let track_id = u8::try_from(self.audio.len()).context("too many FLV audio tracks")?;
 			self.audio.push(FlvTrack {
 				name: name.clone(),

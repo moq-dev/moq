@@ -44,6 +44,37 @@ See [`js/net/examples/discovery.ts`](https://github.com/moq-dev/moq/blob/main/js
 
 ## Core Concepts
 
+### Origins
+
+A routing table of broadcasts by path, independent of any connection. Publishing goes through an origin, not a session: create one, publish broadcasts into it, and hand it to a connection via the `publish` option. The connection announces and serves the table for as long as the session lasts, and a reconnect re-announces whatever is still published.
+
+```ts
+const origin = new Moq.Origin.Producer();
+await Moq.Connection.connect(url, { publish: origin.consume() });
+
+const broadcast = origin.publish(Moq.Path.from("my-broadcast"));
+broadcast.createTrack("chat");
+```
+
+Closing the connection unannounces the broadcasts but does not close them; they stay in the origin for the next session. Closing a broadcast's producer unpublishes just that path.
+
+The other direction works the same way: pass an origin as the `subscribe` option and everything the peer announces appears in its table, gone when the session dies.
+
+`origin.request(path)` is how you consume by path, whether or not anything announced it:
+
+```ts
+// One origin can back both directions of the same connection.
+await Moq.Connection.connect(url, { publish: origin.consume(), subscribe: origin });
+
+const request = origin.request(Moq.Path.from("some-broadcast"));
+const broadcast = request.active.peek(); // or effect.get(request.active)
+request.close(); // when done
+```
+
+`request.active` follows whatever the table routes: a local publish first, so a page that publishes and watches the same broadcast reads its own copy with no round trip, then any session's announcement, swapping when a republish takes the path. When nothing routes it (a relay without discovery, or subscribing before the publisher exists on purpose), an attached session answers it blind instead. Either way the request stands across reconnects, so hold it for as long as you want the path, and close it when you don't.
+
+Use `origin.announced(prefix)` to discover what is available rather than asking for a path you already know.
+
 ### Broadcasts
 
 A collection of related tracks.
@@ -77,7 +108,22 @@ try {
 }
 ```
 
-The code arrives the same way whether the session negotiated WebTransport or the WebSocket fallback, so nothing has to feature-detect `WebTransportError`. The codes themselves are not standardized: each number means whatever the peer's implementation decided, so `@moq/net` hands it over without interpreting it. Code 0 is the exception worth knowing, since that is what a transport sends for a stream dropped or aborted with no code of its own.
+The code arrives the same way whether the session negotiated WebTransport or the WebSocket fallback, so nothing has to feature-detect `WebTransportError`.
+
+There are two code registries, and which one applies depends on what failed. A stream reset carries a `Moq.StreamCode`; a session close carries a `Moq.SessionCode`. They are disjoint, so the same number means different things in each: `0` ends a session cleanly but is an internal error on a stream, where a cancellation is `1`. Both tables reuse moq-transport's codes unchanged, and 64 and up are yours.
+
+Anything outside those tables is an unspecified error, so treat it as opaque rather than guessing. That includes 32-63, which the draft reserves: an implementation may send a code there for a condition the shared ones don't cover, but it carries no agreed meaning yet.
+
+A session close surfaces through `connection.closed`, which resolves with `null` for a clean close or a `Moq.RemoteError` when the peer sent a code:
+
+```ts
+const err = await connection.closed;
+if (err instanceof Moq.RemoteError && err.code === Moq.SessionCode.Unauthorized) {
+	console.warn("server rejected the session:", err.message);
+}
+```
+
+`Connection.closed` rejects with that same error when the reconnect loop gives up, and an `Unauthorized` close ends it immediately: the same credentials cannot start working, so retrying only burns the window. Every other close keeps retrying under the usual backoff.
 
 Errors this side detects keep their own messages, like the `Group.Lagged` a read throws after frames were evicted before it got to them.
 

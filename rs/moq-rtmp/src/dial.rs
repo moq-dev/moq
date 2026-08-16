@@ -67,7 +67,10 @@ pub struct Client<S = TcpStream> {
 	work: VecDeque<ClientSessionResult>,
 	/// How long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
 	/// before skipping. Defaults to [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY).
-	latency: Duration,
+	latency: moq_mux::Latency,
+	/// Retention declared on the media tracks [`pull`](Self::pull) publishes, or `None`
+	/// for hang's own default.
+	latency_max: Option<Duration>,
 }
 
 impl Client<TcpStream> {
@@ -146,15 +149,32 @@ impl<S: Stream> Client<S> {
 			session,
 			work,
 			latency: crate::DEFAULT_LATENCY,
+			latency_max: None,
 		})
 	}
 
 	/// Set how long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
 	/// before skipping to a newer one (the moq-level frame-drop latency). Defaults
-	/// to [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY); pass [`Duration::ZERO`] to
-	/// drop stale groups aggressively.
-	pub fn with_latency(mut self, latency: Duration) -> Self {
+	/// to [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY); pass
+	/// [`Latency::REAL_TIME`](moq_mux::Latency::REAL_TIME) to drop stale groups aggressively.
+	pub fn with_latency(mut self, latency: moq_mux::Latency) -> Self {
 		self.latency = latency;
+		self
+	}
+
+	/// Set how long relays keep a non-latest group of the media tracks
+	/// [`pull`](Self::pull) publishes fetchable. `None` keeps hang's own default.
+	///
+	/// A retention budget, not a delivery one: it never makes a subscriber play further
+	/// behind live, it caps how far back a FETCH can still reach. The default suits a
+	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
+	/// advertise segments that are still fetchable. Lower it when nothing reads history
+	/// and the memory matters.
+	///
+	/// The pull (ingest) direction only; [`publish`](Self::publish) reads a broadcast
+	/// someone else declared, and takes [`with_latency`](Self::with_latency) instead.
+	pub fn with_latency_max(mut self, latency_max: impl Into<Option<Duration>>) -> Self {
+		self.latency_max = latency_max.into();
 		self
 	}
 
@@ -250,7 +270,7 @@ impl<S: Stream> Client<S> {
 
 		tracing::info!(%stream_key, %path, "rtmp play accepted by remote");
 
-		let mut publisher = Publisher::new(origin, path.as_str())?;
+		let mut publisher = Publisher::new(origin, path.as_str(), self.latency_max)?;
 
 		let result = self.pull_media(&mut publisher).await;
 		match &result {
@@ -447,11 +467,12 @@ struct Publisher {
 }
 
 impl Publisher {
-	fn new(origin: &origin::Producer, path: &str) -> anyhow::Result<Self> {
+	fn new(origin: &origin::Producer, path: &str, latency_max: Option<Duration>) -> anyhow::Result<Self> {
 		let mut broadcast = origin
 			.create_broadcast(path, broadcast::Route::new().with_announce(true))
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+		let config = moq_mux::catalog::Config::default().with_latency_max(latency_max);
+		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 		let handle = broadcast.clone();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
 

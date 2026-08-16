@@ -201,8 +201,15 @@ in
 
         ExecStart = "${cfg.package}/bin/moq-relay";
 
+        # Escalating restart backoff: 5s after the first failure, stepping up to a minute. A relay
+        # that dies on a bad config or an unbindable port would otherwise restart every 5s forever,
+        # which buries the real error under a restart loop and hammers whatever it dials.
+        # RestartSteps/RestartMaxDelaySec need systemd 254+; older versions log an unknown-directive
+        # warning and keep the fixed RestartSec.
         Restart = "on-failure";
         RestartSec = "5s";
+        RestartSteps = 5;
+        RestartMaxDelaySec = "1min";
 
         # Security hardening
         NoNewPrivileges = true;
@@ -222,19 +229,19 @@ in
         MOQ_LOG_LEVEL = lib.mkDefault cfg.logLevel;
 
         # Server configuration
-        MOQ_SERVER_BIND = "[::]:${toString cfg.port}";
+        MOQ_LISTEN = "[::]:${toString cfg.port}";
 
-        MOQ_CLIENT_TLS_DISABLE_VERIFY = lib.boolToString cfg.cluster.disableTlsVerify;
+        MOQ_CONNECT_TLS_INSECURE = lib.boolToString cfg.cluster.disableTlsVerify;
       }
       // lib.optionalAttrs (cfg.tls.generate != [ ]) {
         # TLS configuration
-        MOQ_SERVER_TLS_GENERATE = lib.concatStringsSep "," cfg.tls.generate;
+        MOQ_LISTEN_TLS_GENERATE = lib.concatStringsSep "," cfg.tls.generate;
       }
       // lib.optionalAttrs (cfg.tls.certs != [ ]) {
-        MOQ_SERVER_TLS_CERT = lib.concatMapStringsSep "," (cert: "${cert.chain}") cfg.tls.certs;
+        MOQ_LISTEN_TLS_CERT = lib.concatMapStringsSep "," (cert: "${cert.chain}") cfg.tls.certs;
       }
       // lib.optionalAttrs (cfg.tls.certs != [ ]) {
-        MOQ_SERVER_TLS_KEY = lib.concatMapStringsSep "," (cert: "${cert.key}") cfg.tls.certs;
+        MOQ_LISTEN_TLS_KEY = lib.concatMapStringsSep "," (cert: "${cert.key}") cfg.tls.certs;
       }
       // lib.optionalAttrs cfg.auth.enable {
         # Auth configuration

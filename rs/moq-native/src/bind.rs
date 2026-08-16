@@ -5,7 +5,8 @@
 //! `IPV6_V6ONLY` to on, so an IPv6 socket silently drops every IPv4 packet. The
 //! helpers here clear that before binding, so a relay on `[::]` is reachable
 //! over IPv4 and a dual-stack client can dial IPv4 servers (via IPv4-mapped
-//! addresses; the client's address-family matching lives in `util::pick_addr`).
+//! addresses; the client's address-family matching lives in
+//! `resolve::Candidates::with_local`).
 //! See <https://github.com/moq-dev/moq/issues/1375>.
 
 use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
@@ -31,10 +32,25 @@ pub fn udp(addr: SocketAddr) -> std::io::Result<UdpSocket> {
 	Ok(socket.into())
 }
 
+/// Whether `socket` also reaches IPv4, through IPv4-mapped addresses.
+///
+/// [`udp`] clears `IPV6_V6ONLY` best-effort, so this reads back what the
+/// platform actually did rather than assuming it took. A socket that stayed
+/// v6-only can't send to a mapped destination, and it looks identical from the
+/// outside: `local_addr` reads `[::]` either way. Always false for an IPv4
+/// socket, which reaches IPv4 natively rather than through mapping.
+#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+pub(crate) fn udp_is_dual_stack(socket: &UdpSocket) -> bool {
+	match socket.local_addr() {
+		Ok(addr) if addr.is_ipv6() => socket2::SockRef::from(socket).only_v6().is_ok_and(|only| !only),
+		_ => false,
+	}
+}
+
 /// Bind a TCP listener, making an IPv6 socket dual-stack so it also serves IPv4.
 ///
-/// The returned listener is non-blocking, ready for
-/// [`axum_server::from_tcp`](https://docs.rs/axum-server).
+/// The returned listener is non-blocking, ready to be adopted by an async runtime
+/// (`tokio::net::TcpListener::from_std`, `axum_server::from_tcp`).
 pub fn tcp(addr: SocketAddr) -> std::io::Result<TcpListener> {
 	let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
 	let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
@@ -45,9 +61,9 @@ pub fn tcp(addr: SocketAddr) -> std::io::Result<TcpListener> {
 	socket.set_reuse_address(true)?;
 	// Enable keepalive on the listening socket so every accepted connection
 	// inherits it (accept() carries socket options across on Linux, macOS, and
-	// Windows). axum_server owns the accept loop, so this is the one hook we have
-	// to reach the HTTP/HTTPS/WebSocket connections it serves. Best-effort: a
-	// platform that rejects the option keeps the connection rather than failing.
+	// Windows). Setting it once here reaches every HTTP/HTTPS/WebSocket connection
+	// without the serve loop touching each one. Best-effort: a platform that rejects
+	// the option keeps the connection rather than failing.
 	let keepalive = TcpKeepalive::new()
 		.with_time(KEEPALIVE_IDLE)
 		.with_interval(KEEPALIVE_INTERVAL);

@@ -65,10 +65,14 @@ typealias MediaProducer = uniffi.moq.MoqMediaProducer
 typealias MediaStreamProducer = uniffi.moq.MoqMediaStreamProducer
 /** The read side of a media track: yields frames with codec metadata in decode order. */
 typealias MediaConsumer = uniffi.moq.MoqMediaConsumer
+/** A finite fetched media group: yields container-decoded frames until the group ends. */
+typealias MediaGroupConsumer = uniffi.moq.MoqMediaGroupConsumer
 /** The write side of a raw-audio track; PCM written here is encoded inside the FFI boundary. */
 typealias AudioProducer = uniffi.moq.MoqAudioProducer
 /** The read side of a raw-audio track: yields decoded PCM frames. */
 typealias AudioConsumer = uniffi.moq.MoqAudioConsumer
+/** The write side of a raw-video track; pixels written here are encoded inside the FFI boundary. */
+typealias VideoProducer = uniffi.moq.MoqVideoProducer
 /** The read side of a broadcast's catalog: yields updates as the set of tracks changes. */
 typealias CatalogConsumer = uniffi.moq.MoqCatalogConsumer
 /** Publishes lossy latest-value JSON snapshots. */
@@ -89,7 +93,7 @@ typealias Datagram = uniffi.moq.MoqDatagram
 typealias Frame = uniffi.moq.MoqFrame
 /** A [Frame] plus the codec metadata a media track carries. */
 typealias MediaFrame = uniffi.moq.MoqMediaFrame
-/** The catalog description of a video track: codec, dimensions, bitrate, and container. */
+/** The catalog description of a video track, including whether the publisher recommends temporarily avoiding it. */
 typealias Video = uniffi.moq.MoqVideo
 /** Caller-provided catalog fields for a video track. */
 typealias VideoHint = uniffi.moq.MoqVideoHint
@@ -121,8 +125,24 @@ typealias AudioDecoderOutput = uniffi.moq.MoqAudioDecoderOutput
 typealias AudioEncoderInput = uniffi.moq.MoqAudioEncoderInput
 /** The codec-side encoder configuration: codec, output rate/channels, bitrate, and frame duration. */
 typealias AudioEncoderOutput = uniffi.moq.MoqAudioEncoderOutput
+/** One video frame: pixels in the configured layout plus a presentation timestamp. */
+typealias VideoFrame = uniffi.moq.MoqVideoFrame
+/** A video codec identifier (H.264 or H.265). */
+typealias VideoCodec = uniffi.moq.MoqVideoCodec
+/** A raw pixel layout (I420 or RGBA) fed to a [VideoProducer]. */
+typealias VideoPixelFormat = uniffi.moq.MoqVideoPixelFormat
+/** The pixel layout, resolution, and framerate the caller feeds a [VideoProducer]. */
+typealias VideoEncoderInput = uniffi.moq.MoqVideoEncoderInput
+/** The codec-side encoder configuration: codec, bitrate, keyframe interval, and backend preference. */
+typealias VideoEncoderOutput = uniffi.moq.MoqVideoEncoderOutput
+/** Which encoder implementation to use: automatic, hardware, software, or one named backend. */
+typealias VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind
 /** A snapshot of transport connection statistics. */
 typealias ConnectionStats = uniffi.moq.MoqConnectionStats
+/** A connection lifecycle transition reported by [Session.status]. */
+typealias ConnectionStatus = uniffi.moq.MoqConnectionStatus
+/** Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window. */
+typealias Backoff = uniffi.moq.MoqBackoff
 /** Configures a lossy latest-value JSON track. */
 typealias JsonSnapshotConfig = uniffi.moq.MoqJsonSnapshotConfig
 /** Configures a lossless JSON stream track. */

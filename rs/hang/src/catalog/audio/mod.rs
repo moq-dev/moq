@@ -69,8 +69,11 @@ impl Audio {
 #[non_exhaustive]
 pub struct AudioConfig {
 	/// Optional reference to another broadcast that publishes this track, expressed
-	/// relative to the broadcast that served this catalog (e.g. `../source`). If unset,
+	/// relative to the broadcast that served this catalog (e.g. `./source`). If unset,
 	/// the track lives in the same broadcast as the catalog.
+	///
+	/// Resolve it with [`Path::resolve`](moq_net::Path::resolve): a reference that walks
+	/// above the root names no broadcast, so the catalog is rejected.
 	#[serde(default)]
 	pub broadcast: Option<moq_net::PathRelativeOwned>,
 

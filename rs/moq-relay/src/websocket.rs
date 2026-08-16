@@ -1,5 +1,5 @@
 use futures::{Sink, Stream};
-use qmux::tungstenite;
+use qmux::ws::tungstenite;
 use std::{
 	pin::Pin,
 	sync::{Arc, atomic::Ordering},
@@ -8,7 +8,7 @@ use std::{
 
 use axum::{
 	extract::{Extension, OriginalUri, State, WebSocketUpgrade, ws::rejection::WebSocketUpgradeRejection},
-	http::{HeaderMap, StatusCode, Uri, header::HOST},
+	http::{HeaderMap, HeaderValue, StatusCode, Uri, header::HOST},
 	response::Response,
 };
 use moq_net::origin;
@@ -21,6 +21,7 @@ pub(crate) async fn serve_ws(
 	OriginalUri(uri): OriginalUri,
 	headers: HeaderMap,
 	mtls: Option<Extension<MtlsPeer>>,
+	Extension(versions): Extension<moq_net::Versions>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
 	// If this isn't a WebSocket upgrade (e.g. a plain browser visit), serve
@@ -29,15 +30,12 @@ pub(crate) async fn serve_ws(
 		return Ok(landing_response());
 	};
 
-	// Advertise the full qmux × moq-net subprotocol matrix, with bare qmux
-	// fallbacks last. axum picks the first entry that the client also offered,
-	// so a modern client lands on `qmux-00.moq-lite-04`; old clients still
-	// match `webtransport` or `qmux-00.moql` and negotiate via SETUP.
-	let ws = ws.protocols(supported_subprotocols());
+	let alpns = versions.alpns();
+	let ws = negotiate_subprotocol(ws, &alpns)?;
 
 	let host = uri
 		.authority()
-		.map(|authority| authority.as_str())
+		.map(axum::http::uri::Authority::as_str)
 		.or_else(|| headers.get(HOST).and_then(|value| value.to_str().ok()))
 		.ok_or(StatusCode::BAD_REQUEST)?;
 	let mut params = request_auth_params(&state.auth, host, &uri)?;
@@ -67,7 +65,16 @@ pub(crate) async fn serve_ws(
 		// Unfortunately, we need to convert from Axum to Tungstenite.
 		// Axum uses Tungstenite internally, but it's not exposed to avoid semvar issues.
 		let socket = WebSocketAdapter::new(socket);
-		let _ = handle_socket(id, socket, alpn, publish, subscribe, stats, state.shutdown.clone()).await;
+		let session = SessionInputs {
+			id,
+			alpn,
+			versions,
+			publish,
+			subscribe,
+			stats,
+			shutdown: state.shutdown.clone(),
+		};
+		let _ = handle_socket(socket, session).await;
 	}))
 }
 
@@ -78,16 +85,18 @@ fn request_auth_params(auth: &Auth, host: &str, uri: &Uri) -> Result<AuthParams,
 	Ok(auth.params_from_url(&url))
 }
 
-#[tracing::instrument("ws", err, skip_all, fields(id = _id))]
-async fn handle_socket<T>(
-	_id: u64,
-	socket: T,
+struct SessionInputs {
+	id: u64,
 	alpn: Option<String>,
+	versions: moq_net::Versions,
 	publish: Option<origin::Producer>,
 	subscribe: Option<origin::Producer>,
 	stats: Session,
-	mut shutdown: crate::Shutdown,
-) -> anyhow::Result<()>
+	shutdown: crate::Shutdown,
+}
+
+#[tracing::instrument("ws", err, skip_all, fields(id = session.id))]
+async fn handle_socket<T>(socket: T, session: SessionInputs) -> anyhow::Result<()>
 where
 	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
 		+ futures::Sink<tungstenite::Message, Error = tungstenite::Error>
@@ -95,6 +104,16 @@ where
 		+ Unpin
 		+ 'static,
 {
+	let SessionInputs {
+		id: _,
+		alpn,
+		versions,
+		publish,
+		subscribe,
+		stats,
+		mut shutdown,
+	} = session;
+
 	// Wrap the WebSocket in a WebTransport compatibility layer. We have to
 	// forward the negotiated subprotocol explicitly; axum performed the
 	// upgrade, so qmux can't sniff it from the handshake.
@@ -105,7 +124,7 @@ where
 	// broadcast it published stays announced for that entire window and the
 	// announce propagates to the rest of the cluster. QUIC gets this from its
 	// idle timeout; WebSocket has no equivalent of its own.
-	let upgraded = qmux::ws::Upgraded::new(socket).with_keep_alive(qmux::KeepAlive::default());
+	let upgraded = qmux::ws::Upgraded::new(socket).with_keep_alive(qmux::ws::KeepAlive::default());
 	let upgraded = match alpn.as_deref() {
 		Some(alpn) => upgraded.with_alpn(alpn),
 		None => upgraded,
@@ -114,7 +133,7 @@ where
 	// Only set the side the token actually grants. moq-net defaults the
 	// unset side to a fresh no-op origin, which is fine for a
 	// publish-only or subscribe-only token.
-	let mut server = moq_net::Server::new().with_stats(stats);
+	let mut server = moq_net::Server::new().with_versions(versions).with_stats(stats);
 	if let Some(subscribe) = subscribe {
 		server = server.with_publisher(&subscribe);
 	}
@@ -122,7 +141,7 @@ where
 		server = server.with_subscriber(publish);
 	}
 	// Hold the session so it doesn't close early; the driver serves it in place.
-	let (session, mut driver) = server.accept(ws).await?;
+	let (session, mut driver) = server.accept(moq_native::transport::Async::new(ws)).await?;
 
 	tokio::select! {
 		res = &mut driver => res.map_err(Into::into),
@@ -141,6 +160,55 @@ where
 	}
 }
 
+/// Pick a subprotocol for the upgrade, or fail the handshake outright.
+///
+/// We advertise the configured qmux × moq-net subprotocol matrix, with bare
+/// qmux fallbacks last. axum picks the first entry that the client also offered, so
+/// a modern client lands on `qmux-01.moq-lite-05`; old clients still match
+/// `webtransport` or `qmux-00.moql` and negotiate via SETUP.
+///
+/// When the client offered subprotocols and none of them are ours, the
+/// qmux-over-WebSocket draft requires us to fail the handshake rather than
+/// upgrade with no selection: the client MUST treat a missing
+/// `Sec-WebSocket-Protocol` response header as a failure anyway, so upgrading
+/// only wastes a connection that has already agreed on nothing.
+///
+/// A client that offers no subprotocol at all is left alone: it upgrades and
+/// negotiates the moq version over moq-lite SETUP instead.
+fn negotiate_subprotocol(ws: WebSocketUpgrade, alpns: &[&str]) -> Result<WebSocketUpgrade, StatusCode> {
+	let supported = supported_subprotocols(alpns);
+
+	if !subprotocols_acceptable(ws.requested_protocols().map(HeaderValue::as_bytes), &supported) {
+		tracing::debug!("rejecting WebSocket upgrade: no supported subprotocol offered");
+		return Err(StatusCode::BAD_REQUEST);
+	}
+
+	Ok(ws.protocols(supported))
+}
+
+/// Whether the offered subprotocols leave us something to select.
+///
+/// True when the client offered one we support, or offered none at all. Empty
+/// entries are ignored so a blank header reads as "offered nothing" instead of
+/// as an identifier we don't know.
+fn subprotocols_acceptable<'a>(requested: impl IntoIterator<Item = &'a [u8]>, supported: &[String]) -> bool {
+	let mut offered = false;
+
+	for protocol in requested {
+		let protocol = protocol.trim_ascii();
+		if protocol.is_empty() {
+			continue;
+		}
+		offered = true;
+
+		if supported.iter().any(|s| s.as_bytes() == protocol) {
+			return true;
+		}
+	}
+
+	!offered
+}
+
 /// QMux wire-format versions that can ride under a `{prefix}.{alpn}` pair.
 /// Newest first so axum's exact-string match picks the freshest one.
 const QMUX_VERSIONS: &[qmux::Version] = &[qmux::Version::QMux01, qmux::Version::QMux00];
@@ -151,7 +219,7 @@ const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-19"];
 
 /// Subprotocols to advertise on the WebSocket upgrade.
 ///
-/// Generates the cross product of [`QMUX_VERSIONS`] × `moq_net::ALPNS`, with
+/// Generates the cross product of `alpns` × [`QMUX_VERSIONS`], with
 /// the bare qmux fallbacks (`qmux-01`, `qmux-00`, `webtransport`) appended
 /// last so versioned subprotocols always win the exact-string match axum
 /// performs. Without the versioned entries, axum picks bare `webtransport`,
@@ -160,10 +228,10 @@ const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-19"];
 ///
 /// `qmux-00.moqt-1{8,9}` is excluded: moq-transport-18 and -19 require qmux-01, so
 /// those pairs are illegal.
-fn supported_subprotocols() -> Vec<String> {
-	let mut out = Vec::with_capacity(QMUX_VERSIONS.len() * moq_net::ALPNS.len() + qmux::ALPNS.len());
-	for &version in QMUX_VERSIONS {
-		for &alpn in moq_net::ALPNS {
+fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
+	let mut out = Vec::with_capacity(QMUX_VERSIONS.len() * alpns.len() + qmux::ALPNS.len());
+	for &alpn in alpns {
+		for &version in QMUX_VERSIONS {
 			if version == qmux::Version::QMux00 && QMUX01_ONLY_ALPNS.contains(&alpn) {
 				continue;
 			}
@@ -332,7 +400,7 @@ mod tests {
 	}
 
 	/// The newest moq ALPN both sides agree on. Derived from the same source
-	/// of truth that `supported_subprotocols` and `qmux::Client::with_protocols`
+	/// of truth that `supported_subprotocols` and `qmux::ws::Client::with_protocols`
 	/// consume, so adding a new ALPN doesn't break these tests independently
 	/// of the production logic.
 	fn newest_moq_alpn() -> &'static str {
@@ -355,7 +423,7 @@ mod tests {
 			vec![Some(0xff000012), Some(0xff000013)]
 		);
 
-		let list = supported_subprotocols();
+		let list = supported_subprotocols(moq_net::ALPNS);
 
 		// Newest moq ALPN under the preferred prefix must come first so axum
 		// picks it whenever the client offers it.
@@ -395,6 +463,130 @@ mod tests {
 		}
 	}
 
+	#[test]
+	fn supported_subprotocols_only_lists_configured_alpns() {
+		let list = supported_subprotocols(&["moqt-16"]);
+
+		assert!(list.contains(&"qmux-01.moqt-16".to_string()));
+		assert!(list.contains(&"qmux-00.moqt-16".to_string()));
+		assert!(list.iter().all(|entry| !entry.contains("moq-lite")));
+		assert!(list.iter().all(|entry| !entry.contains("moqt-19")));
+	}
+
+	#[test]
+	fn supported_subprotocols_preserves_moq_preference_across_qmux_versions() {
+		let list = supported_subprotocols(&["moqt-16", "moqt-18"]);
+		let preferred = list
+			.iter()
+			.position(|entry| entry == "qmux-00.moqt-16")
+			.expect("missing preferred moqt-16 pair");
+		let newer_qmux = list
+			.iter()
+			.position(|entry| entry == "qmux-01.moqt-18")
+			.expect("missing moqt-18 pair");
+
+		assert!(
+			preferred < newer_qmux,
+			"configured MoQ preference must outrank QMux version preference: {list:?}",
+		);
+	}
+
+	#[test]
+	fn subprotocols_acceptable_requires_a_match_when_any_are_offered() {
+		let supported = supported_subprotocols(moq_net::ALPNS);
+		let known = supported.first().expect("no supported subprotocols").clone();
+
+		// Offering nothing is the legacy route: upgrade and negotiate via SETUP.
+		assert!(subprotocols_acceptable([], &supported));
+		// A blank header carries no identifier, so it reads the same way.
+		assert!(subprotocols_acceptable([b"" as &[u8], b"  "], &supported));
+
+		// Something we know, alone or among identifiers we don't.
+		assert!(subprotocols_acceptable([known.as_bytes()], &supported));
+		assert!(subprotocols_acceptable(
+			[b"bogus-99" as &[u8], known.as_bytes()],
+			&supported
+		));
+
+		// Nothing we know: the draft says fail the handshake.
+		assert!(!subprotocols_acceptable([b"bogus-99" as &[u8]], &supported));
+		assert!(!subprotocols_acceptable([b"bogus-99" as &[u8], b"soap"], &supported));
+
+		// Near misses must not sneak through a prefix or substring match.
+		assert!(!subprotocols_acceptable(
+			[format!("{known}-next").as_bytes()],
+			&supported
+		));
+	}
+
+	/// Send a raw WebSocket handshake and return its HTTP status line.
+	///
+	/// `protocols` is the `Sec-WebSocket-Protocol` request header, omitted when
+	/// `None`. Hand-rolled because a qmux client always appends the bare
+	/// fallbacks we support, so it can't express "offers only what we reject".
+	async fn handshake_status(addr: std::net::SocketAddr, protocols: Option<&str>) -> String {
+		use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+		let mut request = format!(
+			"GET / HTTP/1.1\r\n\
+			 Host: {addr}\r\n\
+			 Upgrade: websocket\r\n\
+			 Connection: Upgrade\r\n\
+			 Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+			 Sec-WebSocket-Version: 13\r\n"
+		);
+		if let Some(protocols) = protocols {
+			request.push_str(&format!("Sec-WebSocket-Protocol: {protocols}\r\n"));
+		}
+		request.push_str("\r\n");
+
+		let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+		stream.write_all(request.as_bytes()).await.expect("write request");
+
+		// Read through the newline rather than taking whatever one read returns:
+		// TCP is free to split the status line across segments. We never read
+		// past it, so the headers and body stay in the socket.
+		let mut stream = BufReader::new(stream);
+		let mut status = Vec::new();
+		tokio::time::timeout(Duration::from_secs(5), stream.read_until(b'\n', &mut status))
+			.await
+			.expect("server did not respond")
+			.expect("read response");
+
+		String::from_utf8_lossy(&status).trim_end().to_owned()
+	}
+
+	/// A client offering only subprotocols we don't support must fail the
+	/// handshake, per draft-lcurley-qmux-websocket. Upgrading anyway leaves the
+	/// connection with no negotiated ALPN, which the client is required to treat
+	/// as a failure regardless.
+	#[tokio::test]
+	async fn axum_ws_rejects_unsupported_subprotocols() {
+		let (addr, _rx) = spawn_test_server().await;
+
+		let status = handshake_status(addr, Some("bogus-99, soap")).await;
+		assert!(
+			status.starts_with("HTTP/1.1 400"),
+			"unsupported subprotocols must fail the handshake, got {status:?}",
+		);
+
+		// A supported identifier still upgrades.
+		let supported = supported_subprotocols(moq_net::ALPNS);
+		let known = supported.first().expect("no supported subprotocols");
+		let status = handshake_status(addr, Some(&format!("bogus-99, {known}"))).await;
+		assert!(
+			status.starts_with("HTTP/1.1 101"),
+			"a supported subprotocol must upgrade, got {status:?}",
+		);
+
+		// No header at all is the legacy route: upgrade, negotiate via SETUP.
+		let status = handshake_status(addr, None).await;
+		assert!(
+			status.starts_with("HTTP/1.1 101"),
+			"offering no subprotocol must still upgrade, got {status:?}",
+		);
+	}
+
 	/// What a single accepted WebSocket connection negotiated, as seen by the server.
 	#[derive(Debug)]
 	struct Observed {
@@ -414,8 +606,8 @@ mod tests {
 		let route = any(move |ws: WebSocketUpgrade| {
 			let tx = tx.clone();
 			async move {
-				let ws = ws.protocols(supported_subprotocols());
-				ws.on_upgrade(move |socket| async move {
+				let ws = negotiate_subprotocol(ws, moq_net::ALPNS)?;
+				Ok::<_, StatusCode>(ws.on_upgrade(move |socket| async move {
 					let wire = socket.protocol().and_then(|h| h.to_str().ok()).map(str::to_owned);
 					let socket = WebSocketAdapter::new(socket);
 
@@ -432,7 +624,7 @@ mod tests {
 					// Hold the session open so the client stays alive long enough
 					// to observe the negotiated subprotocol.
 					let _ = session.closed().await;
-				})
+				}))
 			}
 		});
 
@@ -470,7 +662,7 @@ mod tests {
 	async fn axum_ws_negotiates_newest_moq_alpn() {
 		let (addr, mut rx) = spawn_test_server().await;
 
-		let session = qmux::Client::new()
+		let session = qmux::ws::Client::new()
 			.with_protocols(moq_net::ALPNS.iter().map(|&a| (a, &[] as &[qmux::Version])))
 			.connect(&format!("ws://{addr}/"))
 			.await
@@ -502,14 +694,14 @@ mod tests {
 		let (addr, mut rx) = spawn_test_server().await;
 		let url = format!("ws://{addr}/");
 
-		for entry in supported_subprotocols() {
+		for entry in supported_subprotocols(moq_net::ALPNS) {
 			// Bare fallbacks can't be offered in isolation via the qmux client API;
 			// they're covered by `axum_ws_negotiates_newest_moq_alpn`.
 			let Some((version, app)) = split_pair(&entry) else {
 				continue;
 			};
 
-			let session = qmux::Client::new()
+			let session = qmux::ws::Client::new()
 				.with_protocol(app, &[version])
 				.connect(&url)
 				.await
@@ -531,7 +723,7 @@ mod tests {
 		// rather than failing: we always accept a bare web-transport connection, and
 		// there's no other qmux version worth negotiating for moqt-18. It just never
 		// lands on `moqt-18`.
-		let session = qmux::Client::new()
+		let session = qmux::ws::Client::new()
 			.with_protocol("moqt-18", &[qmux::Version::QMux00])
 			.connect(&url)
 			.await
@@ -626,14 +818,18 @@ mod tests {
 		let (server_to_client, client_incoming) = mpsc::unbounded_channel();
 		let frozen = Arc::new(AtomicBool::new(false));
 
+		let session = SessionInputs {
+			id: 0,
+			alpn: Some(alpn.clone()),
+			versions: moq_net::Versions::all(),
+			publish: None,
+			subscribe: None,
+			stats: Session::default(),
+			shutdown: crate::Shutdown::disabled(),
+		};
 		let server = tokio::spawn(handle_socket(
-			0,
 			Pipe::new(server_incoming, server_to_client, frozen.clone()),
-			Some(alpn.clone()),
-			None,
-			None,
-			Session::default(),
-			crate::Shutdown::disabled(),
+			session,
 		));
 
 		// A real qmux peer, so the transport handshake completes and its 10s

@@ -71,7 +71,11 @@ pub struct Config {
 
 	/// The MoQ client configuration.
 	#[command(flatten)]
-	pub client: moq_native::ClientConfig,
+	pub client: moq_native::connect::Config,
+
+	/// QUIC transport tuning (`--quic-*`).
+	#[command(flatten)]
+	pub quic: moq_native::quic::Config,
 
 	/// The log configuration.
 	#[command(flatten)]
@@ -201,8 +205,8 @@ async fn run(config: &Config) -> Result<()> {
 	tracing::info!(rom = %rom_path.display(), %name, "starting Game Boy emulator");
 
 	let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<input::Command>(64);
-	let url = config.client.connect.clone().context("--client-connect is required")?;
-	let client = config.client.clone().init()?;
+	let url = config.client.url.clone().context("--connect is required")?;
+	let client = config.client.clone().init(config.quic.clone())?;
 
 	// Publish origin: the game session broadcast.
 	let publish_origin = moq_net::Origin::random().produce();
@@ -232,11 +236,11 @@ async fn run(config: &Config) -> Result<()> {
 	let reconnect = client
 		.with_publisher(&publish_origin)
 		.with_subscriber(consume_origin)
-		.reconnect(url);
+		.connect(url);
 
 	// Set up catalog and encoders.
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
-	let video_encoder = video::VideoEncoder::spawn(broadcast.clone(), catalog.clone());
+	let video_encoder = video::VideoEncoder::spawn(broadcast.clone(), catalog.clone()).await;
 
 	let audio_encoder = audio::AudioEncoder::new(broadcast.clone(), catalog.clone(), 44100)?;
 
@@ -302,18 +306,6 @@ fn run_emulator(
 ) -> Result<()> {
 	let mut emu = emulator::Emulator::new(rom_path)?;
 	let start = Instant::now();
-
-	// Run a single tick so the encoders get initial data and publish
-	// codec config, even before any viewer subscribes.
-	emu.tick();
-	let elapsed = start.elapsed();
-	let rgba = Bytes::from(emu.framebuffer());
-	let ts = hang::container::Timestamp::from_micros(elapsed.as_micros() as u64).context("timestamp overflow")?;
-	session.video_encoder.try_frame(rgba, ts);
-	let samples = emu.audio_samples();
-	if !samples.is_empty() {
-		audio_encoder.push_samples(&samples, elapsed)?;
-	}
 
 	// Game Boy runs at exactly 59.727 Hz (4194304 Hz CPU / 70224 cycles per frame).
 	// 1/59.727 ≈ 16742 microseconds per frame.
@@ -485,9 +477,9 @@ async fn main() -> Result<()> {
 mod tests {
 	use super::*;
 
-	/// `--client-connect` is the only way to reach the relay: it must parse without
+	/// `--connect` is the only way to reach the relay: it must parse without
 	/// a connect flag of our own alongside it, and the URL must land where `run`
-	/// reads it. A second required flag would leave `--client-connect` inert.
+	/// reads it. A second required flag would leave `--connect` inert.
 	///
 	/// The argv is a copy of `demo/boy/justfile`, not a read of it, so this pins the
 	/// binary's flag surface rather than the two staying in sync.
@@ -506,8 +498,9 @@ mod tests {
 
 		let connect = config
 			.client
-			.connect
-			.expect("--client-connect should reach the client config");
+			.resolved()
+			.url
+			.expect("the connect URL should reach the dial config");
 		assert_eq!(connect.scheme(), "http");
 		assert_eq!(connect.host_str(), Some("localhost"));
 		assert_eq!(connect.port(), Some(4443));

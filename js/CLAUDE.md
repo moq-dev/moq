@@ -47,9 +47,10 @@ This is the spine of the JS code; read `signals/src/index.ts` before touching re
 Lifecycle and cleanup (the rules that actually bite):
 
 - Register teardown with `effect.cleanup(fn)`. Everything registered during a run is torn down before the next run and on `close()`. A run that is already over runs `fn` immediately, so a `spawn` task that resumes after a rerun still releases what it acquired: register teardown unconditionally rather than checking staleness first. A stale task may still want to bail for its own reasons, since work outside the effect's scope (plain fields, backoff counters) isn't unwound for it. `close()` is permanent; reruns are not.
+- A rerun does not open the next run until every `spawn` task from the previous one settles, which is what keeps the guarantee above unconditional. Teardown runs first and closes whatever those tasks await, so they unwind from there. A task that ignores cancellation stalls the rerun instead of leaking (it warns after 5s in dev); `close()` always works and releases everything.
 - Use the Effect-scoped helpers instead of raw timers/listeners so cleanup is automatic: `effect.interval`, `effect.timer`, `effect.timeout`, `effect.animate`, `effect.event(target, type, listener)` (merges an `AbortSignal`), `effect.subscribe(sig, fn)` (runs now + on change), `effect.set(sig, value, cleanup)`, `effect.proxy(dst, src)`. Do NOT reach for raw `setInterval`/`setTimeout`/`requestAnimationFrame`/`addEventListener` inside an effect.
 - Nesting: `effect.run(fn)` / `effect.computed(fn)` create child scopes closed with the parent. Prefer nested effects over one giant effect so unrelated deps do not re-trigger each other.
-- Async: `effect.spawn(() => Promise<void>)` runs a task and blocks the next rerun until it settles (warns after 5s). `effect.cancel` (promise) and `effect.abort` (`AbortSignal`) fire when the current run is torn down; `effect.closed` resolves on `close()`.
+- Async: `effect.spawn(() => Promise<void>)` runs a task and blocks the next rerun until it settles (warns after 5s, but keeps waiting). `effect.cancel` (promise) and `effect.abort` (`AbortSignal`) are per-run and fire when the current run is torn down; `effect.closed` resolves on `close()`.
 - DEV warnings catch leaks: a signal passing ~100 subscribers throws ("may be leaking"); an effect that subscribed to nothing warns ("will never rerun"); a `FinalizationRegistry` warns if an Effect is GC'd without `close()`. If you see these, you forgot a `close()` or tracked the wrong thing.
 
 ## Producer / consumer and pub/sub shapes
@@ -80,17 +81,25 @@ Plain custom elements built directly on `@moq/signals`, no framework (except moq
 
 ## Conventions
 
+- **Retry loops use capped backoff with jitter** (root Retries has the policy). For a local loop, escalate a delay toward a `max`, jitter each wait (`delay * (0.5 + Math.random() / 2)`), and hand it to `effect.timer`. Reuse an existing operation-specific retry abstraction when one owns the sequence already.
 - **Avoid callback parameters.** A function taking a `fn`/`create`/`onXxx` to invoke later reads poorly and hides control flow. Prefer returning a value the caller acts on, exposing a method or getter, or splitting into a couple of small calls the caller sequences itself (e.g. a cache `get()` then `insert(value)`, not `getOrCreate(key, () => value)`). Reserve callbacks for genuine event/subscription sinks where there is no alternative (`effect.subscribe`, DOM listeners, `Signal` subscriptions).
 - ESM only (`"type": "module"`). Relative imports include the `.ts`/`.tsx` extension in the lower-level packages (`net`, `signals`, `hang`); `rewriteRelativeImportExtensions` in `tsconfig.json` rewrites them to `.js` on build. Some higher-level packages (watch/publish) still omit extensions, so match the file you are editing.
 - Document every exported symbol and add a top-of-file `@module` doc block to each entrypoint (root convention; the published JSR/`.d.ts` docs render these). Use `@public` on the load-bearing classes.
 - **Deprecation mechanics** (root Deprecation explains the why): mark a deprecated export `@internal` or drop it from the entrypoint re-exports so it falls off the published JSR/`.d.ts` docs. No "deprecated, use X" note in its doc comment.
-- Build is per-package: `tsc -b` (or `vite build` for the bundled UI/web-component packages) then `bun ../common/package.ts`, which rewrites `package.json` exports from `./src/*.ts` to built `./*.js`/`.d.ts` and runs `publint`. Release via `bun ../common/release.ts`.
+- Build is per-package: `tsc -b tsconfig.build.json` (or `vite build` plus `tsc -p tsconfig.build.json` for the bundled UI/web-component packages) then `bun ../common/package.ts`, which rewrites `package.json` exports from `./src/*.ts` to built `./*.js`/`.d.ts` and runs `publint`. Release via `bun ../common/release.ts`.
+- `tsconfig.build.json` exists only to drop `src/**/*.test.ts` from the emit; `tsconfig.json` is what `tsc --noEmit` (the `check` script) and your editor use, so tests are still type-checked. Keeping tests out of `dist/` matters twice over: `package.ts` globs all of `dist/` into the published tarball, and a compiled test in `dist/` is a second runnable copy that `bun test` discovers at the package root and runs against the wrong `import.meta.dir`.
 
 ## Tooling and testing
 
 - Use `bun` for everything (install, scripts, test runner). Never npm/yarn/pnpm.
+
 - Biome handles formatting and linting; config is the repo-root `biome.jsonc` (tabs, width 4, line length 120). `just fix` runs `bun biome check --write`.
+
 - Tests are `*.test.ts` run by `bun test`. Add tests where easy (signals, varint, path, ring buffers, sync all have them).
-- `just js check` type-checks + biome-checks every package; `just js test` runs all unit tests; `just js build` builds all. From repo root these are `just check` / `just fix` / `just build`.
+
+- `just js check` type-checks, biome-checks, **and builds** every package; `just js test` runs all unit tests. From repo root these are `just check` / `just test` / `just fix`. Root `just check` / `just test` / `just fix` skip the JS half entirely when the branch's diff has no JS files, but run all of it otherwise (unlike the Rust half, which scopes down to the changed crates: `tsc -b` is fast enough that per-package selection wasn't worth the machinery).
+
+- **`build` is part of `check`, not a separate gate.** The per-package `check` script is `tsc --noEmit`, which never runs declaration emit, so the errors that only appear when writing a `.d.ts` (TS4023 and friends) pass `check` and then break a JSR/npm publish. The whole workspace builds in about 20s, which is cheap enough to fold in rather than discover at release time.
+
 - For UI / web changes (`watch`, `publish`, `demo/web`, anything touching playback or the `<moq-watch>`/`<moq-publish>` components), don't stop at unit tests: run `just dev` and exercise the change in a real browser via the Claude-in-Chrome plugin (if installed), since WebTransport + WebCodecs playback only surfaces at runtime.
   - `<moq-watch>` gates video download/render on `intersecting && !document.hidden`, so a tab that isn't the frontmost visible one renders black at 0 fps even while bytes download (the Claude-in-Chrome tab often reports `document.hidden`). Set `visible="always"` on the element to bypass the gate (it forces download regardless of viewport or tab visibility), or bring the browser window frontmost so `visibilityState` flips to `visible`.

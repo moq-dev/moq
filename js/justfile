@@ -6,6 +6,11 @@
 
 set working-directory := '.'
 
+# Paths a JS check depends on: every bun workspace (they are not all under js/,
+# see the root package.json) plus the config shared by all of them. `check`,
+# `fix`, and `ci` all skip themselves when a diff misses this.
+scope := '^(js/|doc/|demo/(boy|web)/|test/smoke/clients/js|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
+
 # Run all checks by default.
 default:
     just check
@@ -13,28 +18,59 @@ default:
 install:
     bun install
 
-# Lint, type-check, and biome-format all packages.
-check:
+# Takes an optional newline-separated list of changed files and skips if none
+# match the JS scope; `just js check` (no FILES) always runs.
+#
+# FILES is an exported parameter, not `{{ FILES }}`: just interpolates the
+# latter into the recipe source, where a filename like `$(...)` would run as a
+# command. Git-derived paths are untrusted input, so they stay data.
+
+# `build` runs here rather than as its own gate: the per-package `check` script
+# is `tsc --noEmit`, which never runs declaration emit, so the errors that only
+# surface when emitting a `.d.ts` (TS4023 and friends) pass `check` and then
+# break a JSR/npm publish. It costs about 20s for every package.
+
+# Lint, type-check, biome-format, and build all packages.
+check $FILES="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "$FILES" ]] && ! grep -qE '{{ scope }}' <<< "$FILES"; then
+    	echo "js: no JS changes; skipping."
+    	exit 0
+    fi
     bun install --frozen-lockfile
-    if tty -s; then \
-    	bun run --filter='*' --elide-lines=0 check; \
-    else \
-    	bun run --filter='*' check; \
+    if tty -s; then
+    	bun run --filter='*' --elide-lines=0 check
+    else
+    	bun run --filter='*' check
     fi
     bun biome check
+    just build
 
-# Auto-fix lint and formatting issues.
-fix:
+# Auto-fix lint and formatting issues. Skips on the same terms as `check`.
+fix $FILES="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "$FILES" ]] && ! grep -qE '{{ scope }}' <<< "$FILES"; then
+    	echo "js: no JS changes; skipping."
+    	exit 0
+    fi
     bun install
     bun biome check --write
 
-# Run all unit tests.
-test:
+# Run all unit tests. Skips on the same terms as `check`.
+test $FILES="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "$FILES" ]] && ! grep -qE '{{ scope }}' <<< "$FILES"; then
+    	echo "js: no JS changes; skipping tests."
+    	exit 0
+    fi
     bun install --frozen-lockfile
-    if tty -s; then \
-    	bun run --filter='*' --elide-lines=0 test; \
-    else \
-    	bun run --filter='*' test; \
+    if tty -s; then
+    	bun run --filter='*' --elide-lines=0 test
+    else
+    	bun run --filter='*' test
     fi
 
 # Build all packages.
@@ -52,21 +88,6 @@ clean:
     	-type d \( -name node_modules -o -name dist -o -name out -o -name pkg \) \
     	-prune -exec rm -rf {} +
     find . -name .claude -prune -o -type f -name '*.tsbuildinfo' -exec rm -f {} +
-
-# Full JS CI: lint + tests + build. Takes a newline-separated list of
-# changed files; skips if FILES is non-empty and none match the JS
-
-# scope. Run `just js ci` (no FILES) to force-run everything.
-ci FILES="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(js/|package\.json$|bun\.lock$|bun\.lockb$|biome\.jsonc$)'; then
-    	echo "js: no JS changes; skipping."
-    	exit 0
-    fi
-    just check
-    just test
-    just build
 
 # Pull in new versions and report what's outdated.
 update:

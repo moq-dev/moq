@@ -9,7 +9,7 @@ use std::{
 use web_transport_trait::Stats;
 
 use crate::{
-	Error, Version, bandwidth, goaway,
+	Error, SessionError, Version, bandwidth, goaway,
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
@@ -104,12 +104,18 @@ impl Session {
 	/// Close the transport with an explicit error, instead of waiting for the last
 	/// clone to drop. Idempotent: the first close wins.
 	pub fn abort(&self, err: Error) {
-		self.shared.close(err.to_code(), err.to_string().as_ref());
+		self.shared
+			.close(SessionError::from(&err).to_code(), err.to_string().as_ref());
 	}
 
 	/// Block until the transport session is closed, returning the reason.
+	///
+	/// A close code the peer sent is decoded through the session registry (so an auth
+	/// rejection arrives as [`Error::Unauthorized`]); an unregistered code is kept
+	/// verbatim as [`Error::Remote`], and a close carrying no application code surfaces
+	/// as [`Error::Transport`]. See [`Error::from_transport`].
 	pub async fn closed(&self) -> Error {
-		Error::Transport(self.shared.inner.closed().await)
+		self.shared.inner.closed().await
 	}
 
 	/// Drain the peer gracefully: the handle for sending this session's single
@@ -156,18 +162,23 @@ impl Session {
 /// On native, driving requires a tokio runtime with a time driver (timers go
 /// through `web_async::time`); see the crate-level Async docs.
 pub struct Driver {
+	state: DriverState,
+	// Retains the waiter across `Future` polls so its kio registrations stay live.
+	// Kept out of `DriverState` so the borrow `hold` hands back doesn't collide with
+	// the `&mut` that polling the state needs.
+	park: kio::Park,
+}
+
+/// Everything the driver polls, split from the park so the two borrow disjointly.
+struct DriverState {
 	protocol: MaybeSendBox<'static, Result<(), Error>>,
 	// Bandwidth sampling, polled alongside the protocol. Its completion never ends
 	// the driver: the protocol owns the teardown. `None` once finished (or when the
 	// transport reports no send-rate estimate), since a completed future must not be
 	// polled again.
 	maintenance: Option<MaybeSendBox<'static, ()>>,
-	// Cached so a poll after completion (e.g. after `wait_ready` consumed the
-	// result) doesn't re-poll a finished future.
+	// Cached so a poll after completion doesn't re-poll a finished future.
 	result: Option<Result<(), Error>>,
-	// Retains the previous poll's waiter so its kio registrations stay live until
-	// the next poll replaces it (same dance as `kio::wait`).
-	waiter: Option<kio::Waiter>,
 }
 
 impl Driver {
@@ -176,6 +187,12 @@ impl Driver {
 	/// The `poll_*` counterpart of `.await`ing the driver, for callers composing it
 	/// into their own [`kio`]-style poll functions.
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.state.poll(waiter)
+	}
+}
+
+impl DriverState {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		if let Some(result) = &self.result {
 			return Poll::Ready(result.clone());
 		}
@@ -193,23 +210,6 @@ impl Driver {
 		self.maintenance = None;
 		Poll::Ready(result)
 	}
-
-	/// Drive the session until the readiness condition resolves, so `connect` can block on the
-	/// initial announce set.
-	///
-	/// A session that dies first still resolves readiness: the connecting producers
-	/// live inside the driver, so its completion drops them and releases the barrier.
-	/// The error isn't lost, it's cached for whoever drives the session next.
-	pub(super) async fn wait_ready(&mut self, poll_ready: impl Fn(&kio::Waiter) -> Poll<()>) {
-		kio::wait(|waiter| {
-			if poll_ready(waiter).is_ready() {
-				return Poll::Ready(());
-			}
-			let _ = self.poll(waiter);
-			Poll::Pending
-		})
-		.await
-	}
 }
 
 impl Future for Driver {
@@ -217,12 +217,10 @@ impl Future for Driver {
 
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = &mut *self;
-		// Replacing drops the previous waiter, keeping this one live until the next
-		// poll so any kio registrations it made survive (see `kio::wait`).
-		let waiter = kio::Waiter::new(cx.waker().clone());
-		let result = this.poll(&waiter);
-		this.waiter = Some(waiter);
-		result
+		// Disjoint field borrows: `hold` borrows the park for as long as the waiter
+		// lives, while the state is polled through its own `&mut`.
+		let waiter = this.park.hold(cx);
+		this.state.poll(waiter)
 	}
 }
 
@@ -244,12 +242,12 @@ impl SessionShared {
 
 impl Drop for SessionShared {
 	fn drop(&mut self) {
-		self.close(Error::Cancel.to_code(), "dropped");
+		self.close(SessionError::Cancel.to_code(), "dropped");
 	}
 }
 
 impl Session {
-	pub(super) fn new<S: web_transport_trait::Session>(
+	pub(super) fn new<S: crate::transport::poll::Session>(
 		session: S,
 		version: Version,
 		recv_bandwidth: Option<bandwidth::Consumer>,
@@ -271,7 +269,7 @@ impl Session {
 
 		let session = Self {
 			shared: Arc::new(SessionShared {
-				inner: Box::new(session),
+				inner: Box::new(SessionInnerImpl(std::sync::Mutex::new(session))),
 				closed: std::sync::atomic::AtomicBool::new(false),
 			}),
 			version,
@@ -280,10 +278,12 @@ impl Session {
 			goaway: Arc::new(goaway),
 		};
 		let driver = Driver {
-			protocol,
-			maintenance,
-			result: None,
-			waiter: None,
+			state: DriverState {
+				protocol,
+				maintenance,
+				result: None,
+			},
+			park: kio::Park::default(),
 		};
 
 		(session, driver)
@@ -298,8 +298,9 @@ impl Session {
 struct SendBandwidth<S> {
 	session: S,
 	producer: bandwidth::Producer,
-	// The transport close, boxed once so it can be re-polled each step.
-	closed: MaybeSendBox<'static, ()>,
+	// A dedicated clone for the close watch, since each pending poll operation
+	// needs its own handle.
+	closed: S,
 	mode: SendBandwidthMode,
 }
 
@@ -310,18 +311,11 @@ enum SendBandwidthMode {
 	Polling { sleep: MaybeSendBox<'static, ()> },
 }
 
-impl<S: web_transport_trait::Session> SendBandwidth<S> {
+impl<S: crate::transport::poll::Session> SendBandwidth<S> {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	fn new(session: S, producer: bandwidth::Producer) -> Self {
-		let closed = {
-			let session = session.clone();
-			async move {
-				session.closed().await;
-			}
-		}
-		.maybe_boxed();
-
+		let closed = session.clone();
 		Self {
 			session,
 			producer,
@@ -342,7 +336,8 @@ impl<S: web_transport_trait::Session> SendBandwidth<S> {
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		if waiter.poll_future(self.closed.as_mut()).is_ready() {
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		if self.closed.poll_closed(&mut cx).is_ready() {
 			return Poll::Ready(());
 		}
 
@@ -388,34 +383,31 @@ impl<S: web_transport_trait::Session> SendBandwidth<S> {
 // allowing the !Send browser WebTransport on wasm.
 trait SessionInner: web_transport_trait::MaybeSend + web_transport_trait::MaybeSync {
 	fn close(&self, code: u32, reason: &str);
-	fn closed(&self) -> MaybeSendBox<'_, String>;
+	fn closed(&self) -> MaybeSendBox<'static, Error>;
 	fn stats(&self) -> ConnectionStats;
 }
 
-impl<S: web_transport_trait::Session> SessionInner for S {
+// The poll interface takes `&mut self`, but the shared close-once state is
+// reached through `&self` from every clone, so the canonical handle lives
+// behind a Mutex. The lock is held only for the synchronous calls; `closed`
+// clones a handle out and polls that instead.
+struct SessionInnerImpl<S>(std::sync::Mutex<S>);
+
+impl<S: crate::transport::poll::Session> SessionInner for SessionInnerImpl<S> {
 	fn close(&self, code: u32, reason: &str) {
-		S::close(self, code, reason);
+		self.0.lock().unwrap().close(code, reason);
 	}
 
-	fn closed(&self) -> MaybeSendBox<'_, String> {
-		Box::pin(async move {
-			let err = S::closed(self).await;
-			// Surface the application close code and reason when the transport
-			// carries them: Display alone often drops both (e.g. quinn reports a
-			// bare "connection error: closed"), and the reason is how a peer
-			// distinguishes a GOAWAY-timeout force-close from a network failure.
-			match web_transport_trait::Error::session_error(&err) {
-				Some((code, reason)) if !reason.is_empty() => format!("code={code}: {reason}"),
-				Some((code, _)) => format!("code={code}: {err}"),
-				None => err.to_string(),
-			}
-		})
+	fn closed(&self) -> MaybeSendBox<'static, Error> {
+		let mut session = self.0.lock().unwrap().clone();
+		Box::pin(async move { Error::from_transport(session.closed().await) })
 	}
 
 	fn stats(&self) -> ConnectionStats {
 		// estimated_recv_rate is filled in at the Session level (it comes from MoQ PROBE,
 		// not the transport), so leave it at the Default `None` here.
-		let stats = S::stats(self);
+		let session = self.0.lock().unwrap();
+		let stats = session.stats();
 		ConnectionStats {
 			rtt: stats.rtt(),
 			estimated_send_rate: stats.estimated_send_rate(),

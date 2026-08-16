@@ -69,6 +69,17 @@ func (b *BroadcastConsumer) FetchGroup(name string, sequence uint64, options *Fe
 	return &GroupConsumer{inner: inner}, nil
 }
 
+// FetchMediaGroup fetches one group by sequence and decodes it with the given
+// container. Unlike SubscribeMedia this holds no live subscription and applies no
+// latency-based group skipping, so every frame in the group is delivered.
+func (b *BroadcastConsumer) FetchMediaGroup(name string, sequence uint64, container Container, options *FetchGroupOptions) (*MediaGroupConsumer, error) {
+	inner, err := b.inner.FetchMediaGroup(name, sequence, container, options)
+	if err != nil {
+		return nil, err
+	}
+	return &MediaGroupConsumer{inner: inner}, nil
+}
+
 // SubscribeMedia subscribes to a media track, decoded with the given container.
 // subscription tunes delivery priority, group ordering priority, group range, and
 // the latency budget; pass nil for defaults. Raise Subscription.LatencyMaxMs to
@@ -126,6 +137,32 @@ func (m *MediaConsumer) Frames(ctx context.Context) iter.Seq2[*MediaFrame, error
 
 // Cancel stops the stream.
 func (m *MediaConsumer) Cancel() {
+	m.inner.Cancel()
+}
+
+// MediaGroupConsumer is a finite stream of decoded media frames from one fetched
+// group. It ends after the group's last frame.
+type MediaGroupConsumer struct {
+	inner *ffi.MoqMediaGroupConsumer
+}
+
+// Sequence is this group's sequence number within the track.
+func (m *MediaGroupConsumer) Sequence() uint64 {
+	return m.inner.Sequence()
+}
+
+// Next returns the next decoded frame, or (nil, nil) when the group ends.
+func (m *MediaGroupConsumer) Next(ctx context.Context) (*MediaFrame, error) {
+	return runCancellable(ctx, m.inner.Cancel, m.inner.Next)
+}
+
+// Frames ranges over decoded frames until the group ends or the loop breaks.
+func (m *MediaGroupConsumer) Frames(ctx context.Context) iter.Seq2[*MediaFrame, error] {
+	return streamSeq(ctx, m.Next)
+}
+
+// Cancel stops the stream.
+func (m *MediaGroupConsumer) Cancel() {
 	m.inner.Cancel()
 }
 

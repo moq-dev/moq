@@ -268,6 +268,234 @@ describe("Effect", () => {
 		}
 	});
 
+	test("the 5s warning does not open the next run while a spawn is in flight", async () => {
+		// The 5s timer is a diagnostic, not a cutoff. It used to win a Promise.race and open the
+		// next run while the task was still in flight, which reset #stale and swapped in a fresh
+		// AbortController: the task's cleanup then landed on a run it never belonged to, and its
+		// `abort` guard read that run's un-aborted signal and silently passed.
+		const tick = new Signal(0);
+		const gate = Promise.withResolvers<void>();
+		const closed: string[] = [];
+		let runs = 0;
+		let lateAbort: boolean | undefined;
+		let immediate: boolean | undefined;
+
+		// Fire the 5s timer by hand instead of waiting five real seconds for it.
+		let elapsed5s: (() => void) | undefined;
+		const realSetTimeout = globalThis.setTimeout;
+		const timer = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+			if (ms === 5000) {
+				elapsed5s = fn;
+				return 0 as unknown as ReturnType<typeof setTimeout>;
+			}
+			return realSetTimeout(fn, ms);
+		}) as typeof setTimeout);
+		const warn = spyOn(console, "warn").mockImplementation(() => {});
+
+		const effect = new Effect((e) => {
+			e.get(tick);
+			const run = ++runs;
+			if (run > 1) return;
+
+			e.spawn(async () => {
+				await gate.promise;
+
+				// Read off the effect, not off a signal captured during the run: the point is
+				// that the effect still exposes this run's scope while the task is in flight.
+				lateAbort = e.abort.aborted;
+
+				let ran = false;
+				e.cleanup(() => {
+					ran = true;
+					closed.push(`run ${run}`);
+				});
+				immediate = ran;
+			});
+		});
+
+		try {
+			await settle();
+			tick.set(1);
+			await settle();
+			expect(runs).toBe(1); // parked awaiting the task
+
+			// Five seconds pass. The warning fires, but the next run must stay shut.
+			expect(elapsed5s).toBeDefined();
+			elapsed5s?.();
+			await settle();
+			expect(runs).toBe(1);
+			expect(warn).toHaveBeenCalled();
+
+			gate.resolve();
+			await settle();
+
+			// The task still owned its run, so teardown was immediate rather than deferred.
+			expect(immediate).toBe(true);
+			expect(closed).toEqual(["run 1"]);
+			expect(lateAbort).toBe(true);
+
+			// Only once the task settled does the rerun proceed.
+			expect(runs).toBe(2);
+		} finally {
+			effect.close();
+			timer.mockRestore();
+			warn.mockRestore();
+		}
+	});
+
+	test("close() during the wait releases it and drops the warning", async () => {
+		// A task that never settles pins the drain. close() has to cut it loose: it already ran
+		// every dispose function and there is no next run to protect, so continuing to wait would
+		// keep the effect's own promise pending and fire the 5s warning at an effect that is
+		// already gone.
+		const tick = new Signal(0);
+		const never = Promise.withResolvers<void>(); // deliberately never resolved
+
+		let elapsed5s: (() => void) | undefined;
+		let cleared = false;
+		const realSetTimeout = globalThis.setTimeout;
+		const realClearTimeout = globalThis.clearTimeout;
+		const TIMER = 987 as unknown as ReturnType<typeof setTimeout>;
+
+		const timer = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+			if (ms === 5000) {
+				elapsed5s = fn;
+				return TIMER;
+			}
+			return realSetTimeout(fn, ms);
+		}) as typeof setTimeout);
+		const clear = spyOn(globalThis, "clearTimeout").mockImplementation(((id?: unknown) => {
+			if (id === TIMER) cleared = true;
+			else realClearTimeout(id as never);
+		}) as typeof clearTimeout);
+		const warn = spyOn(console, "warn").mockImplementation(() => {});
+
+		const effect = new Effect((e) => {
+			e.get(tick);
+			e.spawn(async () => {
+				await never.promise;
+			});
+		});
+
+		try {
+			await settle();
+			tick.set(1);
+			await settle();
+			expect(elapsed5s).toBeDefined(); // parked on the task, timer armed
+
+			effect.close();
+			await settle();
+
+			// The wait let go, so the diagnostic timer was disarmed on the way out.
+			expect(cleared).toBe(true);
+
+			// Even if the timer had already been queued, a closed effect must not be warned about.
+			elapsed5s?.();
+			const warned = warn.mock.calls.some((call) => String(call[0]).includes("spawn is still running"));
+			expect(warned).toBe(false);
+		} finally {
+			effect.close();
+			timer.mockRestore();
+			clear.mockRestore();
+			warn.mockRestore();
+		}
+	});
+
+	test("a task that never settles stalls the rerun instead of leaking", async () => {
+		// The tradeoff the unbounded wait buys: a task ignoring both abort and cancel holds the
+		// next run shut rather than handing its cleanup to a run it never belonged to. Teardown
+		// of the run it did belong to still happened, and close() still recovers everything.
+		const tick = new Signal(0);
+		const never = Promise.withResolvers<void>();
+		const closed: string[] = [];
+		let runs = 0;
+
+		const effect = new Effect((e) => {
+			e.get(tick);
+			if (++runs > 1) return;
+
+			e.cleanup(() => closed.push("run 1"));
+			e.spawn(async () => {
+				await never.promise;
+			});
+		});
+
+		try {
+			await settle();
+			tick.set(1);
+			await settle(20);
+
+			expect(runs).toBe(1); // stalled, not advanced
+			expect(closed).toEqual(["run 1"]); // teardown still ran, before the wait
+
+			// Further signal changes cannot sneak a run open while the task is outstanding.
+			tick.set(2);
+			await settle(20);
+			expect(runs).toBe(1);
+		} finally {
+			effect.close();
+		}
+
+		// close() is never blocked, and a late registration from the wedged task fires at once.
+		let late = false;
+		effect.cleanup(() => {
+			late = true;
+		});
+		expect(late).toBe(true);
+	});
+
+	test("a rerun waits for a task spawned while the previous one unwinds", async () => {
+		// A task that spawns another as it unwinds (a read loop queueing one last handler) has to
+		// keep the run open too, or the nested task inherits the same broken ownership.
+		const tick = new Signal(0);
+		const outer = Promise.withResolvers<void>();
+		const inner = Promise.withResolvers<void>();
+		const closed: string[] = [];
+		let runs = 0;
+		let immediate: boolean | undefined;
+
+		const effect = new Effect((e) => {
+			e.get(tick);
+			if (++runs > 1) return;
+
+			e.spawn(async () => {
+				await outer.promise;
+
+				e.spawn(async () => {
+					await inner.promise;
+
+					let ran = false;
+					e.cleanup(() => {
+						ran = true;
+						closed.push("nested");
+					});
+					immediate = ran;
+				});
+			});
+		});
+
+		try {
+			await settle();
+			tick.set(1);
+			await settle();
+			expect(runs).toBe(1);
+
+			// The outer task settles, but the one it spawned is still in flight.
+			outer.resolve();
+			await settle();
+			expect(runs).toBe(1);
+
+			inner.resolve();
+			await settle();
+
+			expect(immediate).toBe(true);
+			expect(closed).toEqual(["nested"]);
+			expect(runs).toBe(2);
+		} finally {
+			effect.close();
+		}
+	});
+
 	test("a spawn that outlived its run sees that run aborted and cancelled", async () => {
 		// The scope a stale task reads has to be its own, not the incoming run's: an abort
 		// signal that never fires would scope its listeners to the next run, and a cancel

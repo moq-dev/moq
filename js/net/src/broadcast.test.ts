@@ -51,6 +51,36 @@ test("consumer dedupes repeat subscriptions onto one upstream request", async ()
 	expect((await pendingRequest(consumer))?.name).toBe("video");
 });
 
+test("a request exposes the aggregate subscription options", async () => {
+	const consumer = new TestConsumer();
+
+	consumer.subscribe("video", { priority: 3, ordered: true, latencyMax: 100, startGroup: 10, endGroup: 20 });
+	consumer.subscribe("video", { priority: 7, ordered: true, latencyMax: 250, startGroup: 0, endGroup: 30 });
+
+	const request = await pendingRequest(consumer);
+	expect(request?.subscription).toEqual({
+		priority: 7,
+		ordered: true,
+		latencyMax: 250,
+		startGroup: 0,
+		endGroup: 30,
+	});
+	expect(request?.priority).toBe(7);
+});
+
+test("requested selects the highest current priority", async () => {
+	const consumer = new TestConsumer();
+
+	const first = consumer.subscribe("first", { priority: 1 });
+	consumer.subscribe("second", { priority: 5 });
+	const updated = first.subscription.changed();
+	first.update({ priority: 9 });
+	await updated;
+
+	expect((await consumer.requested())?.name).toBe("first");
+	expect((await consumer.requested())?.name).toBe("second");
+});
+
 test("a consumer clone shares the broadcast until every handle closes", () => {
 	const consumer = new TestConsumer();
 	const clone = consumer.clone();

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/moq-dev/moq/compare/moq-rtmp-v0.2.3...moq-rtmp-v0.2.4) - 2026-08-06
+
+### Added
+
+- fail-fast retries: jittered backoff bounded by time, not error type ([#2647](https://github.com/moq-dev/moq/pull/2647))
+
+## [0.2.3](https://github.com/moq-dev/moq/compare/moq-rtmp-v0.2.2...moq-rtmp-v0.2.3) - 2026-08-05
+
+### Fixed
+
+- *(rtmp,native)* close two keep-alive gaps on the accept side ([#2644](https://github.com/moq-dev/moq/pull/2644))
+
 ## [0.2.2](https://github.com/moq-dev/moq/compare/moq-rtmp-v0.2.1...moq-rtmp-v0.2.2) - 2026-07-25
 
 ### Other

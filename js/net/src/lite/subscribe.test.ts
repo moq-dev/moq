@@ -10,6 +10,7 @@ import {
 	SubscribeOk,
 	type SubscribeResponse,
 	SubscribeStart,
+	SubscribeUpdate,
 } from "./subscribe.ts";
 import { Version } from "./version.ts";
 
@@ -49,15 +50,70 @@ async function encodeSubscribe(msg: Subscribe): Promise<void> {
 	}
 }
 
+async function encodeMessage(
+	version: Version,
+	message: { encode(writer: Writer, version: Version): Promise<void> },
+): Promise<Uint8Array> {
+	const written: Uint8Array[] = [];
+	const writer = new Writer(
+		new WritableStream<Uint8Array>({ write: (chunk) => void written.push(new Uint8Array(chunk)) }),
+	);
+	await message.encode(writer, version);
+	writer.close();
+	await writer.closed;
+	return concat(written);
+}
+
 test("SubscribeOk round-trips priority/ordered/groups on draft-04", async () => {
 	const got = await responseRoundtrip(Version.DRAFT_04, {
-		ok: new SubscribeOk({ priority: 7, ordered: true, maxLatency: 250, startGroup: 3 }),
+		ok: new SubscribeOk({ priority: 7, ordered: true, latencyMax: 250, startGroup: 3 }),
 	});
 	expect("ok" in got).toBe(true);
 	if (!("ok" in got)) throw new Error("expected ok");
 	expect(got.ok.priority).toBe(7);
 	expect(got.ok.ordered).toBe(true);
 	expect(got.ok.startGroup).toBe(3);
+});
+
+test("Subscribe round-trips every option including startGroup 0", async () => {
+	const message = new Subscribe({
+		id: 4n,
+		broadcast: Path.from("test"),
+		track: "video",
+		priority: 7,
+		ordered: true,
+		latencyMax: 250,
+		startGroup: 0,
+		endGroup: 9,
+	});
+	const got = await Subscribe.decode(
+		new Reader(undefined, await encodeMessage(Version.DRAFT_05, message)),
+		Version.DRAFT_05,
+	);
+	expect(got.priority).toBe(7);
+	expect(got.ordered).toBe(true);
+	expect(got.latencyMax).toBe(250);
+	expect(got.startGroup).toBe(0);
+	expect(got.endGroup).toBe(9);
+});
+
+test("SubscribeUpdate round-trips every option including startGroup 0", async () => {
+	const message = new SubscribeUpdate({
+		priority: 8,
+		ordered: true,
+		latencyMax: 500,
+		startGroup: 0,
+		endGroup: 12,
+	});
+	const got = await SubscribeUpdate.decode(
+		new Reader(undefined, await encodeMessage(Version.DRAFT_05, message)),
+		Version.DRAFT_05,
+	);
+	expect(got.priority).toBe(8);
+	expect(got.ordered).toBe(true);
+	expect(got.latencyMax).toBe(500);
+	expect(got.startGroup).toBe(0);
+	expect(got.endGroup).toBe(12);
 });
 
 test("SubscribeStart round-trips on draft-05", async () => {

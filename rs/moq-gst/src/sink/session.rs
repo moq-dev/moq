@@ -29,7 +29,7 @@ pub(crate) static CAT: LazyLock<gst::DebugCategory> =
 /// The publish connection's lifecycle, surfaced as the `status` property.
 ///
 /// Bundles what a bare `connected` bool can't: `Failed` (a terminal give-up) is distinct from
-/// `Disconnected` (a transient drop the reconnect loop is still retrying), so a consumer watching
+/// `Disconnected` (a drop the reconnect loop is still retrying), so a consumer watching
 /// `notify::status` learns when a connection is newly established or permanently rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, glib::Enum)]
 #[enum_type(name = "GstMoqSinkConnectionStatus")]
@@ -42,7 +42,8 @@ pub enum ConnectionStatus {
 	/// A session is connected and publishing.
 	#[enum_value(name = "Connected: session established", nick = "connected")]
 	Connected,
-	/// The reconnect loop gave up permanently (a non-retryable error, e.g. auth rejection). Terminal.
+	/// The reconnect loop gave up permanently (an auth rejection, or a CONNECT status that isn't an
+	/// invitation to retry). Terminal.
 	#[enum_value(name = "Failed: connection rejected, gave up", nick = "failed")]
 	Failed,
 }
@@ -136,15 +137,18 @@ impl Session {
 		let errored = Arc::new(AtomicBool::new(false));
 
 		// Publish through a background reconnect loop: connect, wait for close, reconnect with backoff.
-		// `timeout = 0` retries transport/connection failures indefinitely so an unattended publisher
-		// outlives relay/QUIC outages; non-retryable errors (e.g. auth) stay terminal. During an outage
-		// the pad threads keep writing (bounded by moq-net's per-group eviction) and the relay catches up
-		// from a group boundary on reconnect. A bounded policy is available via `ClientConfig::backoff`.
-		let mut config = moq_native::ClientConfig::default();
-		config.tls.disable_verify = Some(settings.tls_disable_verify);
-		config.backoff.timeout = std::time::Duration::ZERO;
-		let client = config.init()?.with_publisher(origin.consume());
-		let reconnect = client.reconnect(settings.url.clone());
+		// `timeout = 0` drops the give-up deadline so an unattended publisher outlives relay/QUIC
+		// outages of any length, which is the trade this element wants: a pipeline nobody is watching
+		// should still be publishing when the relay comes back. The loop still ends on the two answers
+		// a server states outright (an auth rejection, or a CONNECT status that isn't an invitation to
+		// retry), posting the bus error below. During an outage the pad threads keep writing (bounded
+		// by moq-net's per-group eviction) and the relay catches up from a group boundary on
+		// reconnect. A bounded policy is available via `ClientConfig::backoff`.
+		let mut config = moq_native::connect::Config::default();
+		config.tls.insecure = Some(settings.tls_disable_verify);
+		config.backoff.timeout = Some(std::time::Duration::ZERO);
+		let client = config.init(Default::default())?.with_publisher(origin.consume());
+		let reconnect = client.connect(settings.url.clone());
 		// Persistent handles that survive reconnects; the getters read them without touching the loop.
 		let send_bandwidth = reconnect.send_bandwidth();
 		let recv_bandwidth = reconnect.recv_bandwidth();
@@ -200,16 +204,16 @@ impl Drop for Session {
 /// Track the reconnect loop's observable state into the element's [`Status`] and fire GObject
 /// notifications until the loop stops.
 ///
-/// The reconnect loop owns the session; this task follows [`moq_native::Reconnect`] to mirror
+/// The reconnect loop owns the session; this task follows [`moq_native::Connection`] to mirror
 /// status/version into the `Status` the getters read, and watches the persistent bandwidth consumers
 /// only to `notify` the bitrate properties (the getters read the estimates directly). Each source is
 /// notified on its own change: a status edge notifies `status`/`connected`/`moq-version` together, a
 /// bitrate change notifies just that bitrate. The loop stops only on a terminal error (a non-retryable
 /// auth failure, or a bounded backoff's give-up), which the `Err` arm posts as a bus error.
-/// [`Session`]'s `Drop` aborts this task, which drops the `Reconnect` handle and quietly tears the loop
+/// [`Session`]'s `Drop` aborts this task, which drops the `Connection` handle and quietly tears the loop
 /// down.
 async fn forward(
-	mut reconnect: moq_native::Reconnect,
+	mut reconnect: moq_native::Connection,
 	origin: moq_net::origin::Producer,
 	status: Arc<Status>,
 	errored: Arc<AtomicBool>,

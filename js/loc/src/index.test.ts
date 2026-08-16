@@ -2,8 +2,9 @@ import { expect, test } from "bun:test";
 import { type Time, Varint } from "@moq/net";
 import { Format } from "./index.ts";
 
-const PROP_TIMESTAMP = 0x06;
 const PROP_TIMESCALE = 0x08;
+const PROP_TIMESTAMP = 0x10;
+const PROP_TIMESTAMP_DRAFT03 = 0x06;
 
 function buildFrame(props: Uint8Array, payload: Uint8Array): Uint8Array {
 	const lenBytes = Varint.encode(props.byteLength);
@@ -41,10 +42,10 @@ test("Format decodes timestamp at default microseconds timescale", () => {
 test("Format honors per-frame timescale property", () => {
 	// timestamp = 96000 at per-frame timescale 48000 -> 2 seconds = 2_000_000 micros
 	const props = concat(
-		Varint.encode(PROP_TIMESTAMP),
-		Varint.encode(96_000),
-		Varint.encode(PROP_TIMESCALE - PROP_TIMESTAMP), // delta to 0x08
+		Varint.encode(PROP_TIMESCALE),
 		Varint.encode(48_000),
+		Varint.encode(PROP_TIMESTAMP - PROP_TIMESCALE), // delta to 0x10
+		Varint.encode(96_000),
 	);
 	const frame = buildFrame(props, new Uint8Array());
 
@@ -55,13 +56,13 @@ test("Format honors per-frame timescale property", () => {
 });
 
 test("Format skips unknown odd-typed properties", () => {
-	// 0x06 timestamp, then 0x0d (delta 7) video config bytes [1,2,3]
+	// 0x0d video config bytes [1,2,3], then 0x10 (delta 3) timestamp
 	const props = concat(
-		Varint.encode(PROP_TIMESTAMP),
-		Varint.encode(10),
-		Varint.encode(0x0d - PROP_TIMESTAMP),
+		Varint.encode(0x0d),
 		Varint.encode(3),
 		new Uint8Array([0x01, 0x02, 0x03]),
+		Varint.encode(PROP_TIMESTAMP - 0x0d),
+		Varint.encode(10),
 	);
 	const payload = new Uint8Array([0xaa]);
 	const frame = buildFrame(props, payload);
@@ -83,10 +84,10 @@ test("Format throws when the timestamp property is missing", () => {
 
 test("Format rejects zero per-frame timescale", () => {
 	const props = concat(
-		Varint.encode(PROP_TIMESTAMP),
-		Varint.encode(10),
-		Varint.encode(PROP_TIMESCALE - PROP_TIMESTAMP),
+		Varint.encode(PROP_TIMESCALE),
 		Varint.encode(0),
+		Varint.encode(PROP_TIMESTAMP - PROP_TIMESCALE),
+		Varint.encode(10),
 	);
 	const frame = buildFrame(props, new Uint8Array([0xaa]));
 
@@ -98,8 +99,20 @@ test("Format throws when properties_length exceeds frame size", () => {
 	const lenBytes = Varint.encode(100);
 	const buf = new Uint8Array(lenBytes.byteLength + 1);
 	buf.set(lenBytes, 0);
-	buf[lenBytes.byteLength] = 0x06;
+	buf[lenBytes.byteLength] = 0x10;
 
 	const fmt = new Format();
 	expect(() => fmt.decode(buf)).toThrow();
+});
+
+test("Format decodes the draft-03 timestamp property", () => {
+	const props = concat(Varint.encode(PROP_TIMESTAMP_DRAFT03), Varint.encode(4242));
+	const payload = new Uint8Array([0x01]);
+	const frame = buildFrame(props, payload);
+
+	const fmt = new Format();
+	const [decoded] = fmt.decode(frame);
+
+	expect(decoded.timestamp).toBe(4242 as Time.Micro);
+	expect(decoded.payload).toEqual(payload);
 });

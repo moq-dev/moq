@@ -76,7 +76,7 @@ pub async fn run(ctx: Connection) {
 		stats,
 	} = ctx;
 
-	let url = config.client.connect.clone().expect("url required");
+	let url = config.client.url.clone().expect("url required");
 
 	// Publish side: an origin we fill with our broadcasts and hand to the session.
 	let publish = Origin::random().produce();
@@ -115,7 +115,7 @@ pub async fn run(ctx: Connection) {
 	}
 
 	let client = client.with_publisher(&publish).with_subscriber(consume);
-	let mut reconnect = client.reconnect(url);
+	let mut reconnect = client.connect(url);
 
 	// Subscriber: drain up to `subscribe` peer broadcasts.
 	if rolled.subscribe > 0 {

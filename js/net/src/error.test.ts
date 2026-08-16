@@ -1,18 +1,43 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { StreamError } from "@moq/qmux";
-import { fromTransport, RemoteError, reason } from "./error.ts";
+import { fromClose, fromTransport, RemoteError, reason, SessionCode, StreamCode, toTransport } from "./error.ts";
 
-// Minimal stand-in for the DOM WebTransportError, which the test runtime may not define.
+// Stand-in for the current WebTransportError constructor, which the test runtime may not define.
 class FakeWebTransportError extends Error {
 	readonly source: string;
 	readonly streamErrorCode: number | null;
 
-	constructor(source: string, streamErrorCode: number | null, message = "") {
-		super(message);
+	constructor(message?: string, options?: { source?: string; streamErrorCode?: number | null }) {
+		super(message ?? "");
 		this.name = "WebTransportError";
-		this.source = source;
-		this.streamErrorCode = streamErrorCode;
+		this.source = options?.source ?? "stream";
+		this.streamErrorCode = options?.streamErrorCode ?? null;
 	}
+}
+
+// Chromium still implements the previous constructor shape even though the current DOM types
+// expose `(message, options)`. This strict stand-in reproduces Chromium rejecting a string where
+// it expects WebTransportErrorInit.
+class LegacyFakeWebTransportError extends Error {
+	static standardAttempts = 0;
+
+	readonly source = "stream";
+	readonly streamErrorCode: number | null;
+
+	constructor(init: { message?: string; streamErrorCode?: number | null }) {
+		if (typeof init !== "object" || init === null) {
+			LegacyFakeWebTransportError.standardAttempts += 1;
+			throw new TypeError("The provided value is not of type 'WebTransportErrorInit'");
+		}
+		super(init.message ?? "");
+		this.name = "WebTransportError";
+		this.streamErrorCode = init.streamErrorCode ?? null;
+	}
+}
+
+/** The old positional shape, kept so the existing cases stay readable. */
+function fake(source: string, streamErrorCode: number | null, message = ""): FakeWebTransportError {
+	return new FakeWebTransportError(message, { source, streamErrorCode });
 }
 
 const globals = globalThis as { WebTransportError?: unknown };
@@ -29,7 +54,7 @@ afterEach(() => {
 });
 
 test("fromTransport: a stream reset keeps the peer's code verbatim", () => {
-	const src = new FakeWebTransportError("stream", 2);
+	const src = fake("stream", 2);
 	const err = fromTransport(src);
 	expect(err).toBeInstanceOf(RemoteError);
 	expect((err as RemoteError).code).toBe(2);
@@ -41,7 +66,7 @@ test("fromTransport: a stream reset keeps the peer's code verbatim", () => {
 test("fromTransport: code 0 is a code like any other", () => {
 	// 0 is what a transport sends for a stream dropped with no code of its own. What it
 	// means is up to the peer, so it gets no special treatment here.
-	expect((fromTransport(new FakeWebTransportError("stream", 0)) as RemoteError).code).toBe(0);
+	expect((fromTransport(fake("stream", 0)) as RemoteError).code).toBe(0);
 });
 
 test("fromTransport: decodes a fallback error with no WebTransportError global", () => {
@@ -54,7 +79,7 @@ test("fromTransport: decodes a fallback error with no WebTransportError global",
 });
 
 test("fromTransport: a session failure has no stream code, so it passes through", () => {
-	const src = new FakeWebTransportError("session", null, "connection lost");
+	const src = fake("session", null, "connection lost");
 	expect(fromTransport(src)).toBe(src);
 });
 
@@ -80,21 +105,55 @@ test("reason: empty message falls back to the type name", () => {
 
 test("reason: WebTransportError with a blank message surfaces source and code", () => {
 	// The Safari case from the bug report: a RESET_STREAM with no message.
-	expect(reason(new FakeWebTransportError("stream", 0))).toBe("WebTransportError: source=stream code=0");
+	expect(reason(fake("stream", 0))).toBe("WebTransportError: source=stream code=0");
 });
 
 test("reason: WebTransportError omits a null stream error code", () => {
-	expect(reason(new FakeWebTransportError("session", null))).toBe("WebTransportError: source=session");
+	expect(reason(fake("session", null))).toBe("WebTransportError: source=session");
 });
 
 test("reason: WebTransportError keeps a populated message and appends details", () => {
-	expect(reason(new FakeWebTransportError("stream", 42, "Received RESET_STREAM."))).toBe(
-		"Received RESET_STREAM. (source=stream code=42)",
-	);
+	expect(reason(fake("stream", 42, "Received RESET_STREAM."))).toBe("Received RESET_STREAM. (source=stream code=42)");
 });
 
 test("reason: a decoded remote error names its code", () => {
 	expect(reason(new RemoteError(31))).toBe("remote error: 31");
+});
+
+test("fromClose: a clean close is null, a coded close keeps its code", () => {
+	expect(fromClose({ closeCode: SessionCode.Cancel, reason: "" })).toBeNull();
+	// A missing code is what a transport reports for a close with no code of its own.
+	expect(fromClose({})).toBeNull();
+
+	const err = fromClose({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+	expect(err).toBeInstanceOf(RemoteError);
+	expect(err?.code).toBe(0x2);
+	expect(err?.message).toBe("remote error: 2 (unauthorized)");
+
+	expect(fromClose({ closeCode: SessionCode.GoawayTimeout })?.message).toBe("remote error: 16");
+});
+
+// The two registries are wire contracts (draft-lcurley-moq-lite, Error Codes) and must match
+// the Rust tables, since the two implementations talk to each other.
+test("the code tables match the spec", () => {
+	// moq-transport's, reused unchanged.
+	expect(SessionCode.Cancel).toBe(0x0);
+	expect(SessionCode.Unauthorized).toBe(0x2);
+	expect(SessionCode.GoawayTimeout).toBe(0x10);
+	expect(SessionCode.Version).toBe(0x15);
+	expect(StreamCode.Cancel).toBe(0x1);
+	expect(StreamCode.SessionClosed).toBe(0x3);
+	expect(StreamCode.TooFarBehind).toBe(0x5);
+
+	// The tables carry only what the draft assigns. 32-63 is reserved, so a code there is
+	// something an implementation happens to send, not a meaning to publish.
+	for (const code of [...Object.values(SessionCode), ...Object.values(StreamCode)]) {
+		expect(code).toBeLessThan(32);
+	}
+
+	// The spaces are disjoint: 0 ends a session cleanly but fails a stream.
+	expect(SessionCode.Cancel).not.toBe(StreamCode.Cancel);
+	expect(StreamCode.Internal).toBe(0x0);
 });
 
 test("fromTransport: decodes a real qmux stream reset", () => {
@@ -104,4 +163,41 @@ test("fromTransport: decodes a real qmux stream reset", () => {
 	const err = fromTransport(new StreamError(2, "RESET_STREAM"));
 	expect(err).toBeInstanceOf(RemoteError);
 	expect((err as RemoteError).code).toBe(2);
+});
+
+// The transports read the reset code off a WebTransportError's `streamErrorCode` and send 0
+// for anything else. 0 is INTERNAL_ERROR, so cancelling with a bare Error tells the peer we
+// failed: every routine unsubscribe would land as a publisher-side error rather than a cancel.
+test("toTransport: carries a code the transports will actually send", () => {
+	const reason = toTransport(StreamCode.Cancel, "cancel");
+	expect((reason as unknown as { source: string }).source).toBe("stream");
+	expect((reason as unknown as { streamErrorCode: number }).streamErrorCode).toBe(StreamCode.Cancel);
+
+	// A plain Error carries nothing, which is what makes the mistake silent.
+	expect(fromTransport(new Error("cancel"))).not.toBeInstanceOf(RemoteError);
+
+	// Round trip: what we send is what a peer decodes.
+	const decoded = fromTransport(reason);
+	expect(decoded).toBeInstanceOf(RemoteError);
+	expect((decoded as RemoteError).code).toBe(StreamCode.Cancel);
+	expect((decoded as RemoteError).code).not.toBe(StreamCode.Internal);
+});
+
+test("toTransport: supports Chromium's single-dictionary constructor", () => {
+	globals.WebTransportError = LegacyFakeWebTransportError;
+	const reason = toTransport(StreamCode.Cancel, "cancel");
+	expect(reason).toBeInstanceOf(LegacyFakeWebTransportError);
+	expect(reason.message).toBe("cancel");
+	expect((reason as LegacyFakeWebTransportError).streamErrorCode).toBe(StreamCode.Cancel);
+
+	// Remember the constructor shape so routine stream cancellation does not throw every time.
+	toTransport(StreamCode.Cancel, "cancel again");
+	expect(LegacyFakeWebTransportError.standardAttempts).toBe(1);
+});
+
+// Without the global, the fallback must still produce the shape qmux and fromTransport read.
+test("toTransport: works with no WebTransportError global", () => {
+	globals.WebTransportError = undefined;
+	const decoded = fromTransport(toTransport(StreamCode.TooFarBehind, "lagged"));
+	expect((decoded as RemoteError).code).toBe(StreamCode.TooFarBehind);
 });

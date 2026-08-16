@@ -35,6 +35,11 @@ pub struct Args {
 	/// backend name like `nvdec`.
 	#[arg(long, default_value = "auto")]
 	pub decoder: String,
+
+	/// Frame resize acceleration: `auto` (GPU-backed frames stay resident), `cpu`,
+	/// or `gpu`.
+	#[arg(long, default_value = "auto", value_parser = parse_resize_acceleration)]
+	pub resize_acceleration: moq_video::resize::Acceleration,
 }
 
 /// Parse a `height:bitrate` rung, e.g. `720:2500000`.
@@ -49,18 +54,32 @@ fn parse_rung(arg: &str) -> Result<moq_transcode::Rung, String> {
 	Ok(moq_transcode::Rung::new(height, bitrate))
 }
 
+/// Parse a frame resize acceleration preference.
+fn parse_resize_acceleration(arg: &str) -> Result<moq_video::resize::Acceleration, String> {
+	match arg {
+		"auto" => Ok(moq_video::resize::Acceleration::Auto),
+		"cpu" => Ok(moq_video::resize::Acceleration::Cpu),
+		"gpu" => Ok(moq_video::resize::Acceleration::Gpu),
+		_ => Err(format!("expected auto, cpu, or gpu, got `{arg}`")),
+	}
+}
+
 /// Run the transcoder: subscribe to the source through the relay, publish the
 /// derivative back through the same session, and serve rungs until either ends.
 pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
-	let source_path = moq
-		.broadcast
-		.clone()
-		.filter(|name| !name.is_empty())
-		.context("`transcode` requires the source broadcast: pass --broadcast <name>")?;
-	let output_path = args
-		.output
-		.clone()
-		.unwrap_or_else(|| format!("{source_path}/transcode.hang"));
+	let source_path = moq_net::PathOwned::from(
+		moq.broadcast
+			.clone()
+			.context("`transcode` requires the source broadcast: pass --broadcast <name>")?,
+	);
+	if source_path.is_empty() {
+		anyhow::bail!("`transcode` requires the source broadcast: pass --broadcast <name>");
+	}
+	let output_path = moq_net::PathOwned::from(
+		args.output
+			.clone()
+			.unwrap_or_else(|| format!("{source_path}/transcode.hang")),
+	);
 
 	// Publish the derivative through one origin and consume the source through
 	// another, over a single auto-reconnecting session.
@@ -68,22 +87,38 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		.client
 		.connect
 		.clone()
-		.context("`transcode` requires a relay: pass --client-connect <url>")?;
+		.context("`transcode` requires a relay: pass --connect <url>")?;
 	let publish = moq_net::Origin::random().produce();
+	// A session drop closes the source broadcast and ends the run: the outage is
+	// surfaced rather than transcoded over. The reconnect loop covers the dial;
+	// restarting after a mid-run drop is the caller's call.
 	let remote = moq_net::Origin::random().produce();
-	let mut session = net
+	let session = net
 		.client(moq.client.clone())?
 		.with_publisher(&publish)
 		.with_subscriber(remote.clone())
-		.reconnect(url);
+		.connect(url);
 
-	// Wait for the first session: the origin can't route a broadcast request
-	// until a connected session registers its handler.
-	while !matches!(session.status().await?, moq_native::Status::Connected) {}
+	// Wait for the source to be announced rather than for the session to connect:
+	// `request_broadcast` answers on the spot, so asking the moment a session exists
+	// races the announcement that makes the path routable.
+	//
+	// Raced against the session ending, since the wait itself never fails: the origin
+	// outlives the session here, so a rejected token or an exhausted retry budget would
+	// otherwise leave us waiting for an announcement that can never arrive.
+	let consumer = remote.consume();
+	tokio::select! {
+		announced = consumer.announced_broadcast(&source_path) => {
+			announced.context("origin closed before the source broadcast was announced")?;
+		}
+		closed = session.closed() => {
+			closed.context("session failed before the source broadcast was announced")?;
+			anyhow::bail!("session closed before the source broadcast was announced");
+		}
+	}
 
-	// Request the source broadcast; the session subscribes upstream on demand.
-	let source = remote
-		.consume()
+	// Resolve it for real; the session subscribes upstream on demand.
+	let source = consumer
 		.request_broadcast(&source_path)
 		.await
 		.context("source broadcast unavailable")?;
@@ -104,13 +139,10 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		"software" => moq_video::decode::Kind::Software,
 		name => moq_video::decode::Kind::Named(name.to_string()),
 	};
-	// Reference the source renditions relatively when the output nests under
-	// the source (`a/b` -> `a/b/transcode.hang` is `..`, one `..` per level);
+	config.resize.acceleration = args.resize_acceleration;
+	// Reference the source renditions relatively when the output nests under it;
 	// otherwise the derivative catalog advertises only the rungs.
-	config.source = output_path.strip_prefix(&format!("{source_path}/")).map(|rest| {
-		let depth = rest.split('/').count();
-		moq_net::PathRelativeOwned::from(vec![".."; depth].join("/"))
-	});
+	config.source = moq_transcode::source_reference(&source_path, &output_path);
 
 	let output = publish
 		.create_broadcast(&output_path, moq_net::broadcast::Route::new().with_announce(true))

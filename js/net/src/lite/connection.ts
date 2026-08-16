@@ -1,9 +1,11 @@
 import { type Getter, Signal } from "@moq/signals";
-import type * as announce from "../announced.ts";
+import * as announce from "../announced.ts";
 import type * as broadcast from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
+import { error, fromClose } from "../error.ts";
+import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
 import { AnnounceRequest } from "./announce.ts";
@@ -36,6 +38,8 @@ export interface ConnectionProps {
 	session?: Stream;
 	/** Whether the relay supports broadcast discovery. Defaults to true. */
 	discovery?: boolean;
+	/** The origin whose broadcasts are served to the peer. Omit to publish nothing. */
+	publish?: OriginConsumer;
 }
 
 /**
@@ -108,7 +112,7 @@ export class Connection implements Established {
 	 *
 	 * @internal
 	 */
-	constructor({ url, quic, version, session, discovery = true }: ConnectionProps) {
+	constructor({ url, quic, version, session, discovery = true, publish }: ConnectionProps) {
 		this.url = url;
 		this.#quic = quic;
 		this.#session = session;
@@ -120,7 +124,7 @@ export class Connection implements Established {
 		this.probe = this.#probe;
 
 		this.origin = randomOrigin();
-		this.#publisher = new Publisher(this.#quic, this.#version, this.origin);
+		this.#publisher = new Publisher(this.#quic, this.#version, this.origin, publish);
 		this.#subscriber = new Subscriber(this.#quic, this.#version, this.origin, this.#probe, this.#peerSetup);
 
 		void this.#run();
@@ -165,16 +169,22 @@ export class Connection implements Established {
 		}
 	}
 
-	publish(path: Path.Valid, producer: broadcast.Producer) {
-		this.#publisher.publish(path, producer);
-	}
-
 	announced(prefix = Path.empty()): announce.Consumer {
 		return this.#subscriber.announced(prefix);
 	}
 
 	consume(path: Path.Valid): broadcast.Consumer {
 		return this.#subscriber.consume(path);
+	}
+
+	/**
+	 * Watches a broadcast, live only while it is announced.
+	 *
+	 * @param path - The path of the broadcast to watch
+	 * @returns A reactive handle to the broadcast
+	 */
+	announcedBroadcast(path: Path.Valid): announce.Broadcast {
+		return new announce.Broadcast({ connection: this, path });
 	}
 
 	async #runSession() {
@@ -196,9 +206,10 @@ export class Connection implements Established {
 	// The browser uses WebTransport, which carries the request URI, so we advertise no
 	// path and leave routing to the URL. We advertise probe = Report (we measure and
 	// report bitrate over the PROBE stream, but don't actively pad the connection).
-	// Role stays Both: publish/consume are called after this point, so there is nothing
-	// to narrow yet. The origin declares our session identity so the peer can filter
-	// reflected announcements (lite-06 removed ANNOUNCE_REQUEST's exclude_hop for it).
+	// Role stays Both: the publish origin starts empty and fills later, and consume is
+	// called after this point, so there is nothing to narrow yet. The origin id declares
+	// our session identity so the peer can filter reflected announcements (lite-06
+	// removed ANNOUNCE_REQUEST's exclude_hop for it).
 	async #sendSetup(): Promise<void> {
 		const writer = await Writer.open(this.#quic);
 		try {
@@ -291,7 +302,8 @@ export class Connection implements Established {
 		return transportStats(this.#quic);
 	}
 
-	get closed(): Promise<void> {
-		return this.#quic.closed.then(() => undefined);
+	/** Resolves when the session closes, decoding the peer's close code; see {@link Established.closed}. */
+	get closed(): Promise<Error | null> {
+		return this.#quic.closed.then(fromClose, (err: unknown) => error(err));
 	}
 }

@@ -33,9 +33,6 @@ pub mod timeline;
 
 pub use clock::Clock;
 pub use error::*;
+/// Re-export of [`moq_net::Latency`], the drift budget every consumer-side knob here takes.
+pub use moq_net::Latency;
 pub use source::Source;
-
-/// Re-export of the [`mp4_atom`] crate, whose types appear in the public CMAF
-/// surface ([`container::fmp4`]). A major version bump of `mp4_atom` is a
-/// breaking change for moq-mux.
-pub use mp4_atom;

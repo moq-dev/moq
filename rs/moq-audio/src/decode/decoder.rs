@@ -3,8 +3,6 @@
 //! Mirror of [`encode::Encoder`](crate::encode::Encoder): dispatches over the
 //! catalog codec and produces interleaved `f32` PCM.
 
-use std::time::Duration;
-
 use unsafe_libopus::{OPUS_OK, OpusDecoder, opus_decode_float, opus_decoder_create, opus_decoder_destroy};
 
 use crate::opus;
@@ -33,22 +31,19 @@ pub struct Config {
 	/// Channel count to emit. `None` uses the codec's native count; anything
 	/// else remixes mono and stereo at the decode boundary.
 	pub channels: Option<u32>,
-	/// Upper bound on buffering before skipping a stalled group.
+	/// How far playback may drift from the live edge before skipping a stalled group.
 	///
-	/// Forwarded to [`moq_mux::container::Consumer::with_latency`]: if a group is
-	/// stuck and a newer group is more than this far ahead, the consumer skips.
-	/// `None` keeps the moq-mux default of zero, which skips aggressively. Set it
-	/// to the playout buffer you can tolerate (typically tens to a few hundred ms)
-	/// for the best congestion-vs-quality trade-off. The `_max` suffix is a
-	/// reminder that we never *add* latency here: the consumer skips only when
-	/// newer data is already this far ahead. A companion `latency_min` for
-	/// jitter-buffer padding will land in a follow-up.
-	pub latency_max: Option<Duration>,
+	/// Forwarded to [`moq_mux::container::Consumer::with_latency`]. Defaults to
+	/// [`Latency::REAL_TIME`](moq_mux::Latency::REAL_TIME), which skips aggressively.
+	/// Set [`Latency::max`](moq_mux::Latency::max) to the playout buffer you can
+	/// tolerate (typically tens to a few hundred ms) for the best
+	/// congestion-vs-quality trade-off.
+	pub latency: moq_mux::Latency,
 }
 
 impl Config {
 	/// A default config: the codec's native rate and channel count, interleaved
-	/// `f32`, and the moq-mux default latency.
+	/// `f32`, and real-time latency.
 	pub fn new() -> Self {
 		Self::default()
 	}

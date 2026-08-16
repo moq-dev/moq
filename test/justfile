@@ -13,11 +13,50 @@
 set fallback
 set working-directory := '.'
 
-# Run unit tests for every language (default).
-default *args:
+# The `check` sibling: same diff scoping, same BASE resolution, and what CI runs
+# after `just check`. Only js/rs/py appear here. The kt, swift, and go wrappers
+# build, regenerate bindings, and test in a single script, so their tests run as
+# part of `just check` and there is nothing left to dispatch.
+#
+# `just _changed` resolves through `set fallback` to the root justfile, which is
+# also where it runs, so the paths it prints stay repo-relative.
+#
+# BASE has to be passed as `just test default origin/dev`. This is a module, so
+# a bare `just test origin/dev` makes just look for a recipe by that name rather
+# than reaching the default recipe's parameter.
+
+# Run unit tests for what the branch changed since BASE, plus its dependents.
+default $BASE="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    files=$(just _changed "$BASE")
+    just _tools "$files"
+
+    # Mirrors the root `check`: the dispatch below lives in these two files and
+    # matches no language scope, so a change to either has to run everything or
+    # it goes untested.
+    if grep -qE '^(justfile|test/justfile)$' <<< "$files"; then
+    	echo "test: root orchestration changed; testing everything." >&2
+    	just all
+    	exit 0
+    fi
+
+    # An empty list means "force-run" to the per-lang recipes, which is the
+    # wrong semantic here, so don't dispatch at all.
+    if [[ -n "$files" ]]; then
+    	just js test "$files"
+    	just rs test-changed "$files"
+    	just py test "$files"
+    else
+    	echo "test: nothing changed."
+    fi
+
+# Run every language's unit tests, unscoped.
+all:
     just js test
-    just rs test {{ args }}
-    if command -v uv &> /dev/null; then just py test; fi
+    just rs test --workspace
+    just py test
 
 # Cross-language media interop smoke test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only. Pass

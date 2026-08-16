@@ -29,7 +29,8 @@ For production use with key rotation. Keys are resolved on demand by extracting 
 
 ### Generate a Key
 
-Using the Rust CLI:
+Using the Rust CLI. The same commands are available as `moq token ...` if you
+already have [moq-cli](/bin/cli) installed:
 
 ```bash
 # Symmetric key (simpler, key must stay secret)
@@ -46,6 +47,10 @@ moq-token generate --algorithm ES256 --out-dir ./private/ --public-dir ./keys/
 ```
 
 A random key ID is generated if `--id` is not specified.
+
+Any file holding private key material is written owner-only (mode `0600` on
+Unix), so a relay running as another user needs the public half instead. Public
+key files keep the default permissions.
 
 ### Scope a Key
 
@@ -210,10 +215,10 @@ Unlike the standalone flags, the unified call **fails closed**: any network erro
 
 ### Authenticating the relay to the auth API
 
-The outbound HTTP the relay makes for auth (`--auth-api` requests and JWK fetches) reuses the cluster client's TLS configuration. The same `--client-tls-cert` / `--client-tls-key` the relay presents when dialing cluster peers also identifies it to the auth API, and `--client-tls-root` trusts a private CA on the endpoint (env `MOQ_CLIENT_TLS_*`, or `[client.tls]` in TOML). So an auth API can require mTLS and recognize the relay by the same certificate it uses for clustering.
+The outbound HTTP the relay makes for auth (`--auth-api` requests and JWK fetches) reuses the cluster dial TLS configuration. The same `--connect-tls-cert` / `--connect-tls-key` the relay presents when dialing cluster peers also identifies it to the auth API, and `--connect-tls-root` trusts a private CA on the endpoint (env `MOQ_CONNECT_TLS_*`, or `[connect.tls]` in TOML). So an auth API can require mTLS and recognize the relay by the same certificate it uses for clustering.
 
 ```toml
-[client.tls]
+[connect.tls]
 cert = "/etc/moq/relay-client.pem"
 key  = "/etc/moq/relay-client.key"
 root = ["/etc/moq/auth-api-ca.pem"]
@@ -270,7 +275,7 @@ Client certificate presentation is **optional**: connections without a
 certificate fall through to the normal JWT path unchanged.
 
 ```toml
-[server.tls]
+[listen.tls]
 cert = ["/etc/moq/server.pem"]
 key  = ["/etc/moq/server.key"]
 # One or more PEM files containing the CAs trusted to sign peer certificates.
@@ -283,14 +288,15 @@ advertises its own identity by setting `--cluster-mesh` to its
 externally-reachable URL, which it publishes on the cluster origin for other
 peers to discover and dial.
 
-The `quinn` and `noq` QUIC backends support mTLS; configuring `tls.root` with a
-backend that does not (e.g. `quiche`) is a startup error.
+The `quinn`, `noq`, and `quiche` QUIC backends support mTLS. Quinn and noq hot
+reload the trusted roots for new handshakes. Quiche currently requires a relay
+restart after rotating inbound `server.tls.root` files.
 
 ## Stream Listeners
 
 For trusted local workers that don't want the overhead of TLS or UDP, the relay
 can also listen for the qmux wire format directly over a plain stream: TCP
-(`--server-tcp-bind`) or a Unix socket (`--server-unix-bind`). These listeners
+(`--listen-tcp-bind`) or a Unix socket (`--listen-unix-bind`). These listeners
 authenticate **through the same path as QUIC**: a JWT (carried in the moq-lite-05
 SETUP path as `/broadcast?jwt=<token>`) is verified and scopes the session, so a
 memory-safety bug in an out-of-process gateway can reach only what its users'
@@ -304,10 +310,10 @@ grant it publicly, e.g. `--auth-public-publish .stats` for a stats publisher.
 ### TCP
 
 ```toml
-[server]
+[listen]
 bind = "[::]:443"      # QUIC; omit to run stream-only
 
-[server.tcp]
+[listen.tcp]
 bind = "127.0.0.1:4444"
 ```
 
@@ -317,7 +323,7 @@ logs a warning when the address is not loopback but does not refuse to start,
 so firewalling the port is your responsibility.
 
 ```bash
-moq --client-connect "tcp://127.0.0.1:4444/my-broadcast.hang?jwt=$TOKEN" import fmp4 < video.mp4
+moq --connect "tcp://127.0.0.1:4444/my-broadcast.hang?jwt=$TOKEN" import fmp4 < video.mp4
 ```
 
 ### Unix socket (with a uid/gid/pid allowlist)
@@ -325,16 +331,18 @@ moq --client-connect "tcp://127.0.0.1:4444/my-broadcast.hang?jwt=$TOKEN" import 
 A Unix socket lets the relay additionally gate the connecting process by its
 kernel credentials (`SO_PEERCRED` / `LOCAL_PEERCRED`), so you can restrict
 access to a specific worker user. Requires the relay to be built with the `uds`
-feature. The allowlist (`--server-unix-allow-uid` / `-gid` / `-pid`) applies to
-the `unix://` listener.
+feature. The allowlist (`--listen-unix-allow-uid` / `-gid` / `-pid`) applies to
+the `unix://` listener. The socket is created with mode `0666`, so use a
+restrictive parent directory or an explicit allowlist when local users must not
+reach it.
 
 ```toml
-[server.unix]
+[listen.unix]
 bind = "/run/moq/internal.sock"
 
 # Each list is matched independently (AND across fields, OR within a field);
 # an omitted field imposes no constraint. Empty = any local process.
-[server.unix.allow]
+[listen.unix.allow]
 uid = [1001]
 # gid = [2000]
 # pid = [12345]
@@ -346,7 +354,7 @@ read. A pid requirement rejects peers whose PID the platform doesn't report
 of the JWT, not a replacement for it.
 
 ```bash
-moq --client-connect "unix:///run/moq/internal.sock/?jwt=$TOKEN" --broadcast my-broadcast.hang import fmp4 < video.mp4
+moq --connect "unix:///run/moq/internal.sock/?jwt=$TOKEN" --broadcast my-broadcast.hang import fmp4 < video.mp4
 ```
 
 ### Notes

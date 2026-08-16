@@ -11,7 +11,7 @@ mod web
 # Picks the first free port at/after 4443 (both UDP for QUIC and TCP for HTTP)
 # so multiple worktrees can run `just dev` without colliding. The relay reads
 
-# the port from MOQ_SERVER_BIND/MOQ_WEB_HTTP_LISTEN, overriding localhost.toml.
+# the port from MOQ_LISTEN/MOQ_WEB_HTTP_LISTEN, overriding localhost.toml.
 default:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -25,10 +25,10 @@ default:
     base="http://localhost:$port"
 
     # Scope the bind env vars to the relay only. The unified `moq` binary also
-    # reads MOQ_SERVER_BIND, so exporting it globally would make the `pub` client
+    # reads MOQ_LISTEN, so exporting it globally would make the `pub` client
     # try to start a server (and fail without a TLS cert).
     bun run concurrently --kill-others --names rly,bbb,web --prefix-colors auto \
-    	"MOQ_SERVER_BIND='[::]:$port' MOQ_WEB_HTTP_LISTEN='[::]:$port' just relay" \
+    	"MOQ_LISTEN='[::]:$port' MOQ_WEB_HTTP_LISTEN='[::]:$port' just relay" \
     	"just wait $base/certificate.sha256 && just pub bbb $base" \
     	"just wait $base/certificate.sha256 && just web serve $base"
 

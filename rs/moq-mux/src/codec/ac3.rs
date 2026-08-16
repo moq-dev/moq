@@ -9,6 +9,7 @@ use super::legacy;
 pub(crate) static DESCRIPTOR: legacy::Descriptor = legacy::Descriptor {
 	track_suffix: ".ac3",
 	codec: hang::catalog::AudioCodec::Ac3,
+	sync_byte: 0x0B,
 	min_header_len: 7,
 	parse: parse_header,
 };

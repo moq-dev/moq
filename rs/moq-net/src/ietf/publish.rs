@@ -110,7 +110,7 @@ use crate::{
 	Path,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 	ietf::{
-		FilterType, GroupOrder, Location, Parameters, RequestId,
+		FilterType, GroupOrder, Location, Parameters, Properties, RequestId,
 		namespace::{decode_namespace, encode_namespace},
 	},
 };
@@ -170,9 +170,11 @@ pub struct Publish<'a> {
 	pub track_namespace: Path<'a>,
 	pub track_name: Cow<'a, str>,
 	pub track_alias: u64,
-	pub group_order: GroupOrder,
 	pub largest_location: Option<Location>,
 	pub forward: bool,
+
+	/// Metadata about the track, sent as Track Properties (draft-17+).
+	pub properties: Properties,
 	// pub parameters: Parameters,
 }
 
@@ -190,7 +192,10 @@ impl Message for Publish<'_> {
 
 		match version {
 			Version::Draft14 => {
-				self.group_order.encode(w, version)?;
+				self.properties
+					.group_order
+					.unwrap_or(GroupOrder::Ascending)
+					.encode(w, version)?;
 				if let Some(location) = &self.largest_location {
 					true.encode(w, version)?;
 					location.encode(w, version)?;
@@ -203,11 +208,23 @@ impl Message for Publish<'_> {
 				0u8.encode(w, version)?;
 			}
 			_ => {
+				// GROUP_ORDER is a legal PUBLISH parameter only through draft-15; a later peer
+				// closes the session with PROTOCOL_VIOLATION when it sees one. The publisher's
+				// preference is a DEFAULT_PUBLISHER_GROUP_ORDER track property instead, which we
+				// write from draft-17 on. Draft-16 gets neither form; see Properties::encode.
+				let group_order = match version {
+					Version::Draft15 => self.properties.group_order,
+					_ => None,
+				};
+
 				encode_params!(w, version,
 					0x09 => self.largest_location,
 					0x10 => self.forward,
-					0x22 => self.group_order,
+					0x22 => group_order,
 				);
+
+				// Track Properties are the final field, so nothing may follow.
+				self.properties.encode(w, version)?;
 			}
 		}
 
@@ -225,7 +242,7 @@ impl Message for Publish<'_> {
 
 		match version {
 			Version::Draft14 => {
-				let group_order = GroupOrder::decode(r, version)?;
+				let group_order = GroupOrder::decode(r, version)?.any_to_descending();
 				let content_exists = bool::decode(r, version)?;
 				let largest_location = match content_exists {
 					true => Some(Location::decode(r, version)?),
@@ -240,20 +257,25 @@ impl Message for Publish<'_> {
 					track_namespace,
 					track_name,
 					track_alias,
-					group_order,
 					largest_location,
 					forward,
+					properties: Properties {
+						group_order: Some(group_order),
+						..Default::default()
+					},
 				})
 			}
 			_ => {
+				// GROUP_ORDER is only legal here through draft-15, but keep accepting it so a
+				// peer that still sends it doesn't have its session torn down over a hint.
 				decode_params!(r, version,
 					0x09 => largest_location: Option<Location>,
 					0x10 => forward: Option<bool>,
 					0x22 => group_order: Option<GroupOrder>,
 				);
-				super::properties::skip(r, version)?;
+				let mut properties = Properties::decode(r, version)?;
+				properties.group_order = properties.group_order.or(group_order);
 
-				let group_order = group_order.unwrap_or(GroupOrder::Descending);
 				let forward = forward.unwrap_or(true);
 
 				Ok(Self {
@@ -261,9 +283,9 @@ impl Message for Publish<'_> {
 					track_namespace,
 					track_name,
 					track_alias,
-					group_order,
 					largest_location,
 					forward,
+					properties,
 				})
 			}
 		}
@@ -429,9 +451,12 @@ mod tests {
 			track_namespace: Path::new("test/ns"),
 			track_name: "video".into(),
 			track_alias: 42,
-			group_order: GroupOrder::Descending,
 			largest_location: Some(Location { group: 10, object: 5 }),
 			forward: true,
+			properties: Properties {
+				group_order: Some(GroupOrder::Descending),
+				..Default::default()
+			},
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -452,9 +477,12 @@ mod tests {
 			track_namespace: Path::new("test/ns"),
 			track_name: "video".into(),
 			track_alias: 42,
-			group_order: GroupOrder::Descending,
 			largest_location: Some(Location { group: 10, object: 5 }),
 			forward: true,
+			properties: Properties {
+				group_order: Some(GroupOrder::Descending),
+				..Default::default()
+			},
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -511,9 +539,12 @@ mod tests {
 			track_namespace: Path::new("test/ns"),
 			track_name: "video".into(),
 			track_alias: 42,
-			group_order: GroupOrder::Descending,
 			largest_location: Some(Location { group: 10, object: 5 }),
 			forward: true,
+			properties: Properties {
+				group_order: Some(GroupOrder::Descending),
+				..Default::default()
+			},
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -570,9 +601,12 @@ mod tests {
 			track_namespace: Path::new("test/ns"),
 			track_name: "video".into(),
 			track_alias: 42,
-			group_order: GroupOrder::Descending,
 			largest_location: Some(Location { group: 10, object: 5 }),
 			forward: true,
+			properties: Properties {
+				group_order: Some(GroupOrder::Descending),
+				..Default::default()
+			},
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -586,6 +620,76 @@ mod tests {
 		assert!(decoded.forward);
 	}
 
+	/// GROUP_ORDER (0x22) is only a legal PUBLISH *message parameter* through draft-15; a
+	/// draft-16+ peer closes the session with PROTOCOL_VIOLATION when it sees one. The
+	/// publisher's preference belongs in the DEFAULT_PUBLISHER_GROUP_ORDER track property,
+	/// which shares the number 0x22 in the separate property registry.
+	#[test]
+	fn test_publish_v18_group_order_is_a_property() {
+		let msg = Publish {
+			request_id: RequestId(1),
+			track_namespace: Path::new("ns"),
+			track_name: "video".into(),
+			track_alias: 42,
+			largest_location: None,
+			forward: true,
+			properties: Properties {
+				timescale: None,
+				group_order: Some(GroupOrder::Descending),
+			},
+		};
+
+		#[rustfmt::skip]
+		let expected = vec![
+			1,                            // request id
+			1,                            // namespace tuple count
+			2, b'n', b's',                // "ns"
+			5, b'v', b'i', b'd', b'e', b'o', // "video"
+			42,                           // track alias
+			1,                            // one message parameter
+			0x10, 0x01,                   // FORWARD = true
+			0x22, 0x02,                   // DEFAULT_PUBLISHER_GROUP_ORDER = descending
+		];
+		assert_eq!(encode_message(&msg, Version::Draft18), expected);
+
+		let decoded: Publish = decode_message(&expected, Version::Draft18).unwrap();
+		assert_eq!(decoded.properties.group_order, Some(GroupOrder::Descending));
+	}
+
+	/// Draft-15 is the last version that takes it as a message parameter, and has no track
+	/// properties to put it in.
+	#[test]
+	fn test_publish_v15_group_order_is_a_parameter() {
+		let msg = Publish {
+			request_id: RequestId(1),
+			track_namespace: Path::new("ns"),
+			track_name: "video".into(),
+			track_alias: 42,
+			largest_location: None,
+			forward: true,
+			properties: Properties {
+				timescale: None,
+				group_order: Some(GroupOrder::Descending),
+			},
+		};
+
+		#[rustfmt::skip]
+		let expected = vec![
+			1,                            // request id
+			1,                            // namespace tuple count
+			2, b'n', b's',                // "ns"
+			5, b'v', b'i', b'd', b'e', b'o', // "video"
+			42,                           // track alias
+			2,                            // two message parameters
+			0x10, 0x01,                   // FORWARD = true
+			0x22, 0x02,                   // GROUP_ORDER = descending
+		];
+		assert_eq!(encode_message(&msg, Version::Draft15), expected);
+
+		let decoded: Publish = decode_message(&expected, Version::Draft15).unwrap();
+		assert_eq!(decoded.properties.group_order, Some(GroupOrder::Descending));
+	}
+
 	/// Draft-18 drops the required_request_id_delta varint (#1615).
 	/// For Publish (#1D) the field is a single zero varint = 1 byte.
 	#[test]
@@ -595,9 +699,12 @@ mod tests {
 			track_namespace: Path::new("test/ns"),
 			track_name: "video".into(),
 			track_alias: 42,
-			group_order: GroupOrder::Descending,
 			largest_location: None,
 			forward: true,
+			properties: Properties {
+				group_order: Some(GroupOrder::Descending),
+				..Default::default()
+			},
 		};
 
 		let v17 = encode_message(&msg, Version::Draft17);

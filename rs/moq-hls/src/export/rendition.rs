@@ -10,6 +10,7 @@ use moq_mux::container::fmp4::Muxer;
 use moq_mux::timeline::Entry;
 
 use super::playlist::{Segment, Snapshot};
+use super::upstream::Upstream;
 use super::{mpd, segments};
 use crate::Result;
 
@@ -84,7 +85,8 @@ pub struct Rendition {
 	/// This rendition's window over the broadcast timeline, fed by the catalog watcher's
 	/// fan-out.
 	live: Arc<segments::Producer>,
-	/// The source and (possibly sibling) broadcast reference, resolved lazily for FETCH.
+	/// The source and sibling broadcast reference, for the cross-broadcast case: a rendition
+	/// served by the catalog's own broadcast already holds it (see [`Upstream::local`]).
 	source: moq_mux::Source,
 	sibling: Option<moq_net::PathRelativeOwned>,
 	/// The init segment, built on first request.
@@ -101,7 +103,7 @@ impl Rendition {
 	}
 
 	/// Build a video rendition over the broadcast's timeline `section`.
-	pub(crate) fn video(name: String, config: &VideoConfig, source: &moq_mux::Source, section: Timeline) -> Self {
+	pub(crate) fn video(name: String, config: &VideoConfig, upstream: &Upstream, section: Timeline) -> Self {
 		Self {
 			name,
 			kind: Kind::Video,
@@ -111,15 +113,15 @@ impl Rendition {
 			codec: config.codec.to_string(),
 			config: Config::Video(config.clone()),
 			section,
-			live: Arc::new(segments::Producer::new()),
-			source: source.clone(),
+			live: Arc::new(segments::Producer::new(upstream.local(config.broadcast.as_ref()))),
+			source: upstream.source.clone(),
 			sibling: config.broadcast.clone(),
 			init: tokio::sync::Mutex::new(None),
 		}
 	}
 
 	/// Build an audio rendition over the broadcast's timeline `section`.
-	pub(crate) fn audio(name: String, config: &AudioConfig, source: &moq_mux::Source, section: Timeline) -> Self {
+	pub(crate) fn audio(name: String, config: &AudioConfig, upstream: &Upstream, section: Timeline) -> Self {
 		Self {
 			name,
 			kind: Kind::Audio,
@@ -129,8 +131,8 @@ impl Rendition {
 			codec: config.codec.to_string(),
 			config: Config::Audio(config.clone()),
 			section,
-			live: Arc::new(segments::Producer::new()),
-			source: source.clone(),
+			live: Arc::new(segments::Producer::new(upstream.local(config.broadcast.as_ref()))),
+			source: upstream.source.clone(),
 			sibling: config.broadcast.clone(),
 			init: tokio::sync::Mutex::new(None),
 		}
@@ -315,9 +317,9 @@ impl Rendition {
 	/// The wall-clock time of a media timestamp, when the timeline advertises an anchor.
 	pub(crate) fn wall_clock(&self, pts: moq_net::Timestamp) -> Option<SystemTime> {
 		let wall = self.section.wall?;
-		let timescale = moq_net::Timescale::new(self.section.timescale as u64).ok()?;
-		let units = wall as u128 + pts.as_scale(timescale);
-		let unix_ms = MOQ_EPOCH_UNIX_MILLIS as u128 + units * 1000 / timescale.as_u64() as u128;
+		let timescale = moq_net::Timescale::new(u64::from(self.section.timescale)).ok()?;
+		let units = u128::from(wall) + pts.as_scale(timescale);
+		let unix_ms = u128::from(MOQ_EPOCH_UNIX_MILLIS) + units * 1000 / u128::from(timescale.as_u64());
 		Some(SystemTime::UNIX_EPOCH + Duration::from_millis(u64::try_from(unix_ms).ok()?))
 	}
 
@@ -328,8 +330,12 @@ impl Rendition {
 		})
 	}
 
-	/// The media track handle on its (possibly sibling) broadcast, resolved lazily on the
-	/// first fetch.
+	/// The media track handle on the broadcast serving this rendition.
+	///
+	/// Seeded at construction unless the catalog names a sibling, so the media comes from the
+	/// same broadcast the catalog did. Resolving the path again would not be idempotent: a
+	/// same-path republish installs a new broadcast at the leaf, whose group numbering restarts,
+	/// and its bytes would be served under the replaced broadcast's segment numbers.
 	async fn track(&self) -> Option<moq_net::track::Consumer> {
 		if self.live.broadcast.get().is_none() {
 			let broadcast = self.source.resolve(self.sibling.as_ref()).await.ok()?;
@@ -343,7 +349,7 @@ impl Rendition {
 	///
 	/// For inline-parameter-set codecs (no catalog `description`), the parameter sets are
 	/// resolved by fetching the newest keyframe group first.
-	pub(crate) async fn init(&self) -> Result<Option<Bytes>> {
+	pub async fn init(&self) -> Result<Option<Bytes>> {
 		let mut cache = self.init.lock().await;
 		if let Some(bytes) = cache.as_ref() {
 			return Ok(Some(bytes.clone()));
@@ -466,19 +472,81 @@ async fn read_group(
 
 /// True if a moq-net error means the group left (or hasn't reached) the relay cache: a 404, not
 /// a 500.
+///
+/// Compares WIRE CODES rather than variants, because the same miss arrives in two shapes: a
+/// LOCAL cache answers with the named variant, while anything that crossed a session arrives as
+/// [`moq_net::Error::Remote`] carrying the raw code (`from_transport` decodes only code 0, back
+/// to `Cancel`). In a relay the publisher we FETCH from is always remote, so the remote shape is
+/// the common one and matching variants alone would classify it as a server error.
 fn is_cache_miss(err: &moq_net::Error) -> bool {
-	matches!(
-		err,
-		moq_net::Error::NotFound | moq_net::Error::Old | moq_net::Error::Evicted
-	)
+	let code = err.to_code();
+	code == moq_net::Error::NotFound.to_code()
+		|| code == moq_net::Error::Old.to_code()
+		|| code == moq_net::Error::Evicted.to_code()
 }
 
-/// [`is_cache_miss`] through the moq-mux error layers a group read surfaces (plain transport, or
-/// wrapped in a CMAF decode error).
+/// [`is_cache_miss`] for a group read, which reaches us wrapped in whichever container the track
+/// uses: plain transport for a raw read, `Hang` for the legacy container (what the JS and native
+/// encoders publish), `Cmaf` for fMP4.
+///
+/// Walks the source chain rather than matching those wrappings, since missing one turns that
+/// container's evictions back into server errors while the rest 404, and `moq_mux::Error` is
+/// `#[non_exhaustive]`: a container added later would silently reintroduce the bug.
 fn is_cache_miss_mux(err: &moq_mux::Error) -> bool {
-	match err {
-		moq_mux::Error::Moq(err) => is_cache_miss(err),
-		moq_mux::Error::Cmaf(moq_mux::container::fmp4::Error::Moq(err)) => is_cache_miss(err),
-		_ => false,
+	std::iter::successors(Some(err as &(dyn std::error::Error + 'static)), |err| err.source())
+		.filter_map(|err| err.downcast_ref::<moq_net::Error>())
+		.any(is_cache_miss)
+}
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn a_cache_miss_that_crossed_a_session_is_still_a_cache_miss() {
+		// A miss must classify the same whichever shape it arrives in. The remote shape is the
+		// one a relay actually sees: it always FETCHes from a remote publisher, and moq-net
+		// surfaces every wire reset code as `Error::Remote(code)` (only code 0 maps back to a
+		// named variant, `Cancel`).
+		for local in [moq_net::Error::NotFound, moq_net::Error::Old, moq_net::Error::Evicted] {
+			assert!(is_cache_miss(&local), "{local:?} locally");
+			let remote = moq_net::Error::Remote(local.to_code());
+			assert!(is_cache_miss(&remote), "{local:?} over the wire ({remote:?})");
+		}
+	}
+
+	#[test]
+	fn a_real_failure_is_not_a_cache_miss() {
+		// The mapping must not swallow genuine errors into a 404, in either shape.
+		for err in [
+			moq_net::Error::Unauthorized,
+			moq_net::Error::ProtocolViolation,
+			moq_net::Error::Timeout,
+		] {
+			assert!(!is_cache_miss(&err), "{err:?} locally");
+			let remote = moq_net::Error::Remote(err.to_code());
+			assert!(!is_cache_miss(&remote), "{err:?} over the wire ({remote:?})");
+		}
+	}
+
+	#[test]
+	fn a_cache_miss_is_recognised_through_the_mux_error_layers() {
+		// A group read wraps the same miss differently per container, and every wrapping has to
+		// resolve to 404. `Hang` is the shape a real relay produces most, since it is what the
+		// legacy container (the JS and native encoders) surfaces.
+		let remote = moq_net::Error::Remote(moq_net::Error::NotFound.to_code());
+		assert!(is_cache_miss_mux(&moq_mux::Error::Moq(remote.clone())));
+		assert!(is_cache_miss_mux(&moq_mux::Error::Hang(hang::Error::Moq(
+			remote.clone()
+		))));
+		assert!(is_cache_miss_mux(&moq_mux::Error::Cmaf(
+			moq_mux::container::fmp4::Error::Moq(remote)
+		)));
+
+		// A genuine failure stays a failure through the same wrappings, and an error carrying no
+		// transport error at all is never a miss.
+		let denied = moq_net::Error::Unauthorized;
+		assert!(!is_cache_miss_mux(&moq_mux::Error::Moq(denied.clone())));
+		assert!(!is_cache_miss_mux(&moq_mux::Error::Hang(hang::Error::Moq(denied))));
+		assert!(!is_cache_miss_mux(&moq_mux::Error::UnknownFormat("nope".to_string())));
 	}
 }

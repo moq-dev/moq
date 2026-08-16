@@ -12,14 +12,146 @@ set working-directory := '..'
 default:
     just check
 
+# Default features only, here and in CI. The permutations (`--all-features`,
+# `--no-default-features`) each cost a full extra workspace compile that shares
+# almost nothing with this one, which is too slow for a per-PR gate; `features`
+# below covers them nightly.
+#
+# No `cargo check` pass: clippy is a superset of it, and the two use different
+# rustc wrappers, so running both means compiling the workspace twice.
+#
+# A bare `just rs check` is default-members, which skips libmoq, moq-ffi,
+# moq-gst, and moq-wasm (they need cbindgen, a uniffi build, GStreamer, and a
+# wasm32 target respectively, so they stay out of a casual local check). Every
+# recipe that means "all of it" therefore passes `--workspace` explicitly, since
+# `check` is the only gate now and nothing else would compile them.
+
 # Compile, lint, format-check, doc-check, and verify dependency hygiene.
 check *args:
-    cargo check --all-targets {{ args }}
     cargo clippy --all-targets {{ args }} -- -D warnings
     cargo fmt --all --check
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps {{ args }}
     cargo shear
     cargo sort --workspace --check --no-format
+
+# Auto-fix clippy/format/shear/sort.
+fix *args:
+    cargo clippy --fix --allow-staged --allow-dirty --all-targets {{ args }}
+    cargo fmt --all
+    cargo shear --fix
+    cargo sort --workspace --no-format
+
+# Prints `ALL` when the diff hits something every crate depends on, and nothing
+# when no crate is affected.
+#
+# FILES is an exported parameter, not `{{ FILES }}`: just interpolates the
+# latter into the recipe source, where a filename like `$(...)` would run as a
+# command. Git-derived paths are untrusted input, so they stay data.
+
+# Print `--package` flags for the crates a diff touches, plus their dependents.
+[private]
+_select $FILES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Workspace-wide inputs affect every crate, so there is nothing to scope to.
+    #
+    # `rs/justfile` and the nextest config are in here because they define how
+    # every crate is checked and tested. They also match `^rs/` below while
+    # seeding no crate (the seed pattern needs `rs/<crate>/...`), so without this
+    # a PR editing only the recipes would compile and test nothing at all, and a
+    # broken cargo flag would pass CI on a format check alone.
+    if [[ -z "$FILES" ]] || grep -qE '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|\.config/nextest\.toml)$' <<< "$FILES"; then
+    	echo ALL
+    	exit 0
+    fi
+
+    grep -q '^rs/' <<< "$FILES" || exit 0
+
+    # `--no-deps` keeps this to workspace members and off the network.
+    metadata=$(cargo metadata --format-version 1 --no-deps)
+
+    # Every crate directory is named after the crate it holds, which is what
+    # makes a changed path a seed below. Verify it rather than trust it: under-
+    # selecting silently checks nothing, so fall back to checking everything.
+    if jq -e '.packages[] | select((.manifest_path | split("/")[-2]) != .name)' <<< "$metadata" > /dev/null; then
+    	echo "rs: a crate directory no longer matches its crate name; selecting everything." >&2
+    	echo ALL
+    	exit 0
+    fi
+
+    seeds=$(sed -n 's|^rs/\([^/]*\)/.*|\1|p' <<< "$FILES" | sort -u)
+
+    # Every workspace member, not just the default ones. `--no-deps` already
+    # limits this to the workspace. The non-default members (libmoq, moq-ffi,
+    # moq-gst, moq-wasm) have to participate as both seeds and dependents: they
+    # used to drop out here because `check` matched a bare `cargo check`, but
+    # `check` is the only gate now, and the `cargo clippy --workspace` in the
+    # deleted `just rs ci` is what used to cover them. Without them, a PR
+    # touching only rs/libmoq selects nothing and compiles nothing.
+    edges=$(jq -r '
+    	.packages[]
+    	| .name as $name
+    	| .dependencies[]
+    	| "\($name) \(.name)"
+    ' <<< "$metadata")
+
+    # A crate has to be rebuilt when anything it depends on changed, so walk the
+    # edges backwards until the selection stops growing.
+    awk -v seeds="$seeds" '
+    	BEGIN { split(seeds, s, "\n"); for (i in s) want[s[i]] = 1 }
+    	{ pkg[NR] = $1; dep[NR] = $2 }
+    	END {
+    		do {
+    			grew = 0
+    			for (i = 1; i <= NR; i++)
+    				if (want[dep[i]] && !want[pkg[i]]) { want[pkg[i]] = 1; grew = 1 }
+    		} while (grew)
+    		for (i = 1; i <= NR; i++) if (want[pkg[i]]) print pkg[i]
+    	}
+    ' <<< "$edges" | sort -u | sed 's/^/--package /' | tr '\n' ' '
+
+# Takes a newline-separated list of changed files; skips when no crate is
+# affected. The `just rs ...` calls below go through the root justfile's
+# `mod rs` because these recipes run from the repo root, where a bare `check`
+# would resolve to the root recipe of that name.
+
+# Like `check`, but only the crates a diff touches plus their dependents.
+check-changed $FILES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    packages=$(just rs _select "$FILES")
+    case "$packages" in
+    	"")    echo "rs: no crates affected; skipping." ;;
+    	ALL)   just rs check --workspace ;;
+    	*)     echo "rs: checking ${packages//--package /}"; just rs check $packages ;;
+    esac
+
+    # moq-wasm's crate root is entirely `#![cfg(target_arch = "wasm32")]`, so
+    # however it got selected the host-target pass above compiled it to nothing
+    # and saw no errors in it. This wasm32 pass is what actually checks it, and
+    # the selection already says whether moq-wasm or anything it depends on
+    # changed.
+    if [[ "$packages" == "ALL" ]] || grep -q -- '--package moq-wasm' <<< "$packages"; then
+    	just rs wasm
+    fi
+
+# Same as `fix`, but scoped the same way as `check-changed`.
+fix-changed $FILES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    packages=$(just rs _select "$FILES")
+    case "$packages" in
+    	"")    echo "rs: no crates affected; skipping." ;;
+    	ALL)   just rs fix --workspace ;;
+    	*)     echo "rs: fixing ${packages//--package /}"; just rs fix $packages ;;
+    esac
+
+    # Mirrors `check-changed`'s gate: without this a moq-wasm lint is never
+    # auto-fixed, and `check`'s wasm32 clippy pass fails on it later.
+    if [[ "$packages" == "ALL" ]] || grep -q -- '--package moq-wasm' <<< "$packages"; then
+    	just rs wasm-fix
+    fi
 
 # Runs the `#[cfg(target_os = "windows")]` code past the compiler: moq-video's
 # Media Foundation capture/encode/decode and its D3D11 frames, which the Linux
@@ -27,18 +159,32 @@ check *args:
 # builds vendored C++ that needs an MSVC toolchain and openh264 is a
 # non-optional dependency.
 #
+# Nothing in CI runs this. Windows runners cost too much for a per-PR gate, so
+# the code compiles for the first time in a tag-triggered release build unless
+# someone runs this by hand on a Windows host.
+#
 # Default features rather than `--all-features`: jemalloc and the quiche
-# backend don't build on MSVC, while moq-video's Linux-only nvenc/vaapi/nvdec
-# defaults are already no-ops off Linux. moq-gst is excluded because it links
+# backend don't build on MSVC, while moq-video's Linux-only nvenc/nvdec defaults
+# are already no-ops off Linux. moq-gst is excluded because it links
 # GStreamer via pkg-config, which the Windows runner doesn't have.
+#
+# `moq-cli/play` is named explicitly because it's off by default and is what
+# turns on moq-video's wgpu renderer and moq-audio's cpal output, neither of
+# which any default-feature build compiles.
 
 # Compile the whole workspace on a Windows host. Must run ON Windows.
 windows *args:
-    cargo check --workspace --exclude moq-gst --all-targets {{ args }}
+    cargo check --workspace --exclude moq-gst --all-targets --features "moq-cli/play moq-cli/capture" {{ args }}
 
 # Runs the `#[cfg(target_os = "macos")]` code past the compiler: moq-video's
 # VideoToolbox encode/decode and its ScreenCaptureKit / AVFoundation capture,
 # plus moq-audio's ScreenCaptureKit system audio and TCC permission pre-check.
+#
+# Nothing in CI runs this either; Mac runners cost too much for a per-PR gate.
+# The moq-video half has a release-time backstop, since libmoq's `libmoq-v*` tag
+# build compiles it on Apple Silicon. The moq-audio half has none: its
+# capture backend is behind an off-by-default feature no release build enables,
+# so this recipe is the only thing that ever compiles it.
 #
 # Scoped to those two crates instead of the workspace, because they hold all
 # the Apple-gated code the Linux gate misses. moq-ffi (and through it the
@@ -52,63 +198,106 @@ windows *args:
 macos *args:
     cargo check -p moq-video -p moq-audio --all-targets --all-features {{ args }}
 
-# Full Rust CI: check + feature edge cases + tests + build. Takes a
-# newline-separated list of changed files; skips if FILES is non-empty
-# and none match the Rust scope. Run `just rs ci` (no FILES) to
-# force-run everything. `cargo publish --dry-run` lives in release-rs.yml.
+# Same idea as `windows`/`macos`, for the browser: moq-wasm's whole crate root is
+# `#![cfg(target_arch = "wasm32")]`, so a host-target `cargo check --workspace`
+# compiles an empty crate and every error in it stays invisible. Only a wasm32
+# build sees the code.
 #
-# `cargo deny` runs here (not in `check`) so the inner-loop stays fast
+# Unlike those two this needs no special host, so `ci` runs it on every Rust PR.
+# The wasm32 target and the `getrandom`/`web-sys` cfg flags come from the Nix dev
+# shell and `.cargo/config.toml`. Not to be confused with the root `just wasm`,
+# which builds the shippable `@moq/wasm` package (wasm-bindgen, release profile);
+# this is the compile gate.
 
-# and devs aren't blocked by a fresh upstream advisory mid-edit.
-ci FILES="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(rs/|Cargo\.toml$|Cargo\.lock$)'; then
-    	echo "rs: no Rust changes; skipping."
-    	exit 0
-    fi
-    # Hygiene (non-compiling) + cargo-deny (hits the network, so it couldn't run
-    # in the old Nix sandbox; runs fine here).
-    cargo fmt --all --check
-    cargo sort --workspace --check --no-format
-    cargo shear
+# Compile and lint the browser/WASM bindings, which the host-target check skips.
+wasm *args:
+    cargo clippy -p moq-wasm --target wasm32-unknown-unknown --all-targets {{ args }} -- -D warnings
+
+# The `fix` counterpart to `wasm`. `cargo fmt` is scoped rather than `--all`
+# because this runs alongside `fix`, which already formats everything else.
+
+# Auto-fix the browser/WASM bindings.
+wasm-fix *args:
+    cargo clippy --fix --allow-staged --allow-dirty -p moq-wasm --target wasm32-unknown-unknown --all-targets {{ args }}
+    cargo fmt -p moq-wasm
+
+# Dependency advisories plus the license/ban policy. Time-based rather than
+# diff-based: an advisory lands without this repo changing, so a per-PR run both
+# fires on PRs that cannot affect it and stays silent on the days nobody pushes.
+# Runs nightly instead (.github/workflows/nightly.yml), which also keeps a fresh
+# advisory from blocking an unrelated PR mid-review.
+
+# Audit dependencies against deny.toml.
+audit:
     cargo deny check --show-stats
 
-    # Compiles. The all-features clippy / doc / test run as plain cargo (flake.nix
-    # `checks` is unwired). Each full-workspace compile below is expensive, so we
-    # run the minimum set that still covers every feature edge:
-    #   - clippy --all-targets --all-features is the gate and a superset of a plain
-    #     `cargo check --all-targets` (default features), so that redundant check
-    #     pass is intentionally omitted -- one fewer full workspace compile.
-    #   - --no-default-features stays: it's the only pass that exercises code behind
-    #     `#[cfg(not(feature = ...))]`, which the all-features run never compiles.
-    # (Local devs still get the full cargo loop via `just rs check`.)
+# The feature permutations `check` leaves out. Each is a full workspace compile
+# at a feature set that shares almost no artifacts with the default one (~6min
+# for the all-features clippy alone), which is why this is nightly rather than
+# part of the per-PR gate.
+#
+# `--all-features` is the only thing that compiles moq-cli's play/capture,
+# moq-audio's capture backend, quiche, and jemalloc. `--no-default-features` is
+# the only thing that compiles the `#[cfg(not(feature = ...))]` arms.
+
+# Compile the workspace at the feature extremes.
+features:
     cargo check --workspace --no-default-features
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-    # nextest compiles + runs the test binaries with real parallelism (faster than
-    # `cargo test`'s serial harness). It does not build or run
-    # doctests, so the `/// ```` examples are no longer compile-checked in CI -- an
-    # accepted trade for speed (they still render in `cargo doc` output).
-    # `--profile ci` picks up the longer hang timeout in .config/nextest.toml;
-    # without it a runner under load could trip the local one.
-    cargo nextest run --profile ci --workspace --all-targets --all-features
+    cargo nextest run --workspace --all-targets --all-features
 
-# Auto-fix clippy/format/shear/sort.
-fix:
-    cargo clippy --fix --allow-staged --allow-dirty --all-targets
-    cargo fmt --all
-    cargo shear --fix
-    cargo sort --workspace --no-format
-
-# Run the test suite.
-#
 # nextest, not `cargo test`, so a wedged test is killed instead of pinning a core
-# until someone notices (`.config/nextest.toml` sets the timeout). It also
-# matches what `ci` runs. The trade is doctests, which nextest does not execute;
-# `just rs doctest` covers those.
+# until someone notices (`.config/nextest.toml` sets the timeout). The trade is
+# doctests, which nextest does not execute; `just rs doctest` covers those.
+#
+# Takes cargo arguments, so `just rs test -p moq-net` works. `test-changed` is
+# the diff-scoped variant that `just test` dispatches to.
+#
+# clippy-driver as the compiler wrapper is rustc plus the lint passes, so this
+# one compilation both builds the test binaries and reports clippy findings.
+# `cargo clippy` can't be reused here: it asks cargo for metadata only, and a
+# metadata build and a codegen build have different fingerprints, so running
+# both compiles the dependency tree twice. Linting here is free, which makes
+# `just test` a single-compile substitute for `check` + `test` on a laptop.
+#
+# RUSTC_WORKSPACE_WRAPPER, not RUSTC_WRAPPER, for two reasons. Cargo folds it
+# into the fingerprint, so a crate already built by a plain `cargo test` is
+# rebuilt through clippy rather than silently reported as fresh with no
+# findings. And it applies to workspace crates only, so dependencies keep the
+# artifacts they share with plain cargo instead of duplicating the whole tree.
+# It is also what `cargo clippy` sets internally.
+#
+# Findings stay warnings rather than errors. `check` is the gate (it runs
+# `clippy -D warnings`), and a hard failure here would block running the tests
+# over an unused import while you are mid-edit.
+#
+# No RUSTFLAGS: it is part of cargo's fingerprint too, so setting it here would
+# split the artifact cache against every other cargo invocation, including CI's
+# warm cache. Skips the wrapper entirely when clippy-driver is absent.
+
+# Run the test suite, reporting clippy findings from the same compile.
 test *args:
-    cargo nextest run --all-targets {{ args }}
+    RUSTC_WORKSPACE_WRAPPER="$(command -v clippy-driver || true)" cargo nextest run --all-targets {{ args }}
+
+# Same selection as `check-changed`: compiling a crate's test binaries is the
+# expensive half of a test run, so scoping matters more here than anywhere else.
+#
+# `--no-tests=pass` only on the scoped branch. A selection can legitimately hold
+# nothing testable (moq-wasm has no host-target tests, since its crate root is
+# `#![cfg(target_arch = "wasm32")]`), and nextest exits 4 on that by default.
+# The unscoped branch keeps the default, where finding no tests really is wrong.
+
+# Like `test`, but only the crates a diff touches plus their dependents.
+test-changed $FILES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    packages=$(just rs _select "$FILES")
+    case "$packages" in
+    	"")    echo "rs: no crates affected; skipping tests." ;;
+    	ALL)   just rs test --workspace ;;
+    	*)     echo "rs: testing ${packages//--package /}"; just rs test --no-tests=pass $packages ;;
+    esac
 
 # Compile and run the `/// ```` examples, which nextest skips.
 doctest *args:
@@ -117,9 +306,8 @@ doctest *args:
 # Permutation-test the concurrent handoffs with loom.
 #
 # `--cfg loom` swaps kio's Mutex/atomics for loom's instrumented ones, so it
-# rebuilds the world and can't share artifacts with a normal `cargo test`. That
-# is why it's a manual gate rather than part of `check`/`ci`; see the Testing
-# section of rs/CLAUDE.md for when to run it.
+# rebuilds the world and can't share artifacts with a normal `cargo test`, so
+# it stays separate from `check`/`ci`.
 #
 # `--release` because a model check runs the body once per interleaving, so the
 # optimizer pays for itself many times over: 411s -> 51s across the two suites.

@@ -1,13 +1,21 @@
 //! Transport doubles shared by the lite tests: a session whose streams record
-//! everything written and every reset code, and peers that never speak.
+//! everything written and every reset code, peers that never speak, and peers
+//! whose incoming streams die before their first byte.
+//!
+//! These implement the poll traits directly, since that is what the crate's
+//! transport bound requires. A pending fake simply returns `Poll::Pending`
+//! without registering a waker: it models a peer that never answers, so nothing
+//! should ever wake it.
 
 use std::{
 	sync::{
 		Arc, Mutex,
 		atomic::{AtomicUsize, Ordering},
 	},
-	task::Poll,
+	task::{Context, Poll},
 };
+
+use web_transport_trait::poll;
 
 #[derive(Debug, Clone, Default)]
 pub struct SinkError;
@@ -32,12 +40,27 @@ impl web_transport_trait::Error for SinkError {
 pub struct Log {
 	pub writes: Arc<Mutex<Vec<u8>>>,
 	pub resets: Arc<Mutex<Vec<u32>>>,
+	closes: Arc<Mutex<Vec<(u32, String)>>>,
 	bi_opens: Arc<AtomicUsize>,
+	priorities: Arc<Mutex<Vec<u8>>>,
 }
 
 impl Log {
 	pub fn resets(&self) -> Vec<u32> {
 		self.resets.lock().unwrap().clone()
+	}
+
+	/// Every value handed to the transport's `set_priority`, in call order. These are
+	/// trait-contract send orders (higher = transmitted first), recorded so tests can
+	/// verify priority conversions at their protocol boundaries.
+	pub fn priorities(&self) -> Vec<u8> {
+		self.priorities.lock().unwrap().clone()
+	}
+
+	/// The session-level closes, as (code, reason). A list rather than a last-value so
+	/// a second close racing the first is visible.
+	pub fn closes(&self) -> Vec<(u32, String)> {
+		self.closes.lock().unwrap().clone()
 	}
 
 	/// How many bidi streams the session has opened, so a test can pin down how many
@@ -52,41 +75,73 @@ pub struct SinkSend {
 	/// Writes park until this flips to true; `None` writes immediately. See
 	/// [`SinkSession::gated_bi`].
 	gate: Option<kio::Consumer<bool>>,
+	/// Bridges the gate's kio wakeups onto the caller's `Context`.
+	park: kio::Park,
+	/// Set by [`finish`](poll::SendStream::finish). A finished stream is what
+	/// [`poll_closed`](poll::SendStream::poll_closed) waits on, mirroring a peer that
+	/// acknowledges the FIN; an unfinished one parks like a peer that never answers.
+	finished: bool,
 }
 
 impl SinkSend {
 	pub fn new(log: Log) -> Self {
-		Self { log, gate: None }
+		Self {
+			log,
+			gate: None,
+			park: kio::Park::default(),
+			finished: false,
+		}
+	}
+
+	/// A send stream whose writes park until `gate` flips to true.
+	pub fn gated(log: Log, gate: kio::Consumer<bool>) -> Self {
+		Self {
+			log,
+			gate: Some(gate),
+			park: kio::Park::default(),
+			finished: false,
+		}
 	}
 }
 
-impl web_transport_trait::SendStream for SinkSend {
+impl poll::SendStream for SinkSend {
 	type Error = SinkError;
 
-	async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		if let Some(gate) = &self.gate {
 			// A closed gate parks forever, which surfaces as a hung test rather than a
 			// write that silently skipped the gate.
-			let _ = gate
-				.wait(|open| if **open { Poll::Ready(()) } else { Poll::Pending })
-				.await;
+			let waiter = self.park.hold(cx);
+			match gate.poll(waiter, |open| if **open { Poll::Ready(()) } else { Poll::Pending }) {
+				Poll::Ready(Ok(())) => {}
+				Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
+			}
 		}
 		self.log.writes.lock().unwrap().extend_from_slice(buf);
-		Ok(buf.len())
+		Poll::Ready(Ok(buf.len()))
 	}
 
-	fn set_priority(&mut self, _order: u8) {}
+	fn set_priority(&mut self, order: u8) {
+		self.log.priorities.lock().unwrap().push(order);
+	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
+		self.finished = true;
 		Ok(())
 	}
 
+	/// Always recorded, even after a finish: quinn resets a stream that has sent its FIN but
+	/// still has unacknowledged data, which is exactly the case that loses a final message.
 	fn reset(&mut self, code: u32) {
 		self.log.resets.lock().unwrap().push(code);
 	}
 
-	async fn closed(&mut self) -> Result<(), Self::Error> {
-		std::future::pending().await
+	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		match self.finished {
+			true => Poll::Ready(Ok(())),
+			// Nothing to acknowledge yet, so park like a peer that never answers.
+			false => Poll::Pending,
+		}
 	}
 }
 
@@ -94,17 +149,160 @@ impl web_transport_trait::SendStream for SinkSend {
 /// model-side events.
 pub struct PendingRecv;
 
-impl web_transport_trait::RecvStream for PendingRecv {
+impl poll::RecvStream for PendingRecv {
 	type Error = SinkError;
 
-	async fn read(&mut self, _dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
-		std::future::pending().await
+	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+		Poll::Pending
 	}
 
 	fn stop(&mut self, _code: u32) {}
 
-	async fn closed(&mut self) -> Result<(), Self::Error> {
-		std::future::pending().await
+	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		Poll::Pending
+	}
+}
+
+/// What a reset stream's reads report: RESET_STREAM with application code 0,
+/// the code a routine group drop carries. `Error::from_transport` decodes it
+/// back to `Error::Cancel`.
+#[derive(Debug, Clone, Default)]
+pub struct ResetError;
+
+impl std::fmt::Display for ResetError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "stream reset by peer (code 0)")
+	}
+}
+
+impl std::error::Error for ResetError {}
+
+impl web_transport_trait::Error for ResetError {
+	fn session_error(&self) -> Option<(u32, String)> {
+		None
+	}
+
+	fn stream_error(&self) -> Option<u32> {
+		Some(0)
+	}
+}
+
+/// A stream that died before delivering a single byte: every read reports a
+/// code-0 RESET_STREAM ([`ResetError`]), the wire shape of a reset arriving
+/// ahead of any payload. QUIC does not order a reset behind the data, so this
+/// reaches an accept loop in normal operation, not just from a misbehaving peer.
+pub struct DeadRecv;
+
+impl poll::RecvStream for DeadRecv {
+	type Error = ResetError;
+
+	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+		Poll::Ready(Err(ResetError))
+	}
+
+	fn stop(&mut self, _code: u32) {}
+
+	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		Poll::Ready(Err(ResetError))
+	}
+}
+
+/// Incoming streams that die before their first byte: `accept_uni` / `accept_bi`
+/// each yield the configured number of [`DeadRecv`] streams and then park like a
+/// peer with nothing more to say. Sends record to [`Log`] like [`SinkSession`].
+#[derive(Clone)]
+pub struct DeadStreamSession {
+	/// What the session's send streams recorded, for test assertions.
+	pub log: Log,
+	unis: Arc<Mutex<usize>>,
+	bis: Arc<Mutex<usize>>,
+}
+
+impl DeadStreamSession {
+	/// `count` uni streams that die before their first byte, then silence.
+	pub fn unis(count: usize) -> Self {
+		Self {
+			log: Log::default(),
+			unis: Arc::new(Mutex::new(count)),
+			bis: Arc::new(Mutex::new(0)),
+		}
+	}
+
+	/// `count` bidi streams that die before their first byte, then silence.
+	pub fn bis(count: usize) -> Self {
+		Self {
+			log: Log::default(),
+			unis: Arc::new(Mutex::new(0)),
+			bis: Arc::new(Mutex::new(count)),
+		}
+	}
+
+	fn take(counter: &Mutex<usize>) -> bool {
+		let mut remaining = counter.lock().unwrap();
+		match *remaining {
+			0 => false,
+			_ => {
+				*remaining -= 1;
+				true
+			}
+		}
+	}
+}
+
+impl poll::Session for DeadStreamSession {
+	type SendStream = SinkSend;
+	type RecvStream = DeadRecv;
+	type Error = SinkError;
+
+	fn poll_accept_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+		match Self::take(&self.unis) {
+			true => Poll::Ready(Ok(DeadRecv)),
+			false => Poll::Pending,
+		}
+	}
+
+	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+		match Self::take(&self.bis) {
+			true => Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv))),
+			false => Poll::Pending,
+		}
+	}
+
+	fn poll_open_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
+		Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv)))
+	}
+
+	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+		Poll::Ready(Ok(SinkSend::new(self.log.clone())))
+	}
+
+	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		Poll::Ready(Ok(()))
+	}
+
+	fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<bytes::Bytes, Self::Error>> {
+		Poll::Pending
+	}
+
+	fn max_datagram_size(&self) -> usize {
+		0
+	}
+
+	fn protocol(&self) -> Option<&str> {
+		None
+	}
+
+	fn close(&mut self, code: u32, reason: &str) {
+		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
+	}
+
+	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {
+		Poll::Pending
+	}
+
+	fn stats(&self) -> impl web_transport_trait::Stats {
+		SinkStats
 	}
 }
 
@@ -115,11 +313,24 @@ pub struct SinkSession {
 	/// Set by [`Self::gated_bi`]. `None` parks `open_bi` itself forever, which is all
 	/// a test driving only uni streams needs.
 	bi_gate: Option<kio::Consumer<bool>>,
+	/// The ALPN to report, for a test that needs a specific negotiated version rather
+	/// than the SETUP-negotiated fallback an absent one selects.
+	protocol: Option<&'static str>,
 }
 
 impl SinkSession {
 	pub fn new(log: Log) -> Self {
-		Self { log, bi_gate: None }
+		Self {
+			log,
+			bi_gate: None,
+			protocol: None,
+		}
+	}
+
+	/// Report `protocol` as the negotiated ALPN.
+	pub fn with_protocol(mut self, protocol: &'static str) -> Self {
+		self.protocol = Some(protocol);
+		self
 	}
 
 	/// Serve bidi streams, holding every write until `gate` flips to true.
@@ -131,46 +342,49 @@ impl SinkSession {
 		Self {
 			log: Log::default(),
 			bi_gate: Some(gate),
+			protocol: None,
 		}
 	}
 }
 
-impl web_transport_trait::Session for SinkSession {
+impl poll::Session for SinkSession {
 	type SendStream = SinkSend;
 	type RecvStream = PendingRecv;
 	type Error = SinkError;
 
-	async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
-		std::future::pending().await
+	fn poll_accept_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+		Poll::Pending
 	}
 
-	async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-		std::future::pending().await
+	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+		Poll::Pending
 	}
 
-	async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+	fn poll_open_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		let Some(gate) = self.bi_gate.clone() else {
-			return std::future::pending().await;
+			return Poll::Pending;
 		};
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
 
 		let send = SinkSend {
 			log: self.log.clone(),
 			gate: Some(gate),
+			park: kio::Park::default(),
+			finished: false,
 		};
-		Ok((send, PendingRecv))
+		Poll::Ready(Ok((send, PendingRecv)))
 	}
 
-	async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
-		Ok(SinkSend::new(self.log.clone()))
+	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+		Poll::Ready(Ok(SinkSend::new(self.log.clone())))
 	}
 
-	fn send_datagram(&self, _payload: bytes::Bytes) -> Result<(), Self::Error> {
-		Ok(())
+	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		Poll::Ready(Ok(()))
 	}
 
-	async fn recv_datagram(&self) -> Result<bytes::Bytes, Self::Error> {
-		std::future::pending().await
+	fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<bytes::Bytes, Self::Error>> {
+		Poll::Pending
 	}
 
 	fn max_datagram_size(&self) -> usize {
@@ -178,13 +392,15 @@ impl web_transport_trait::Session for SinkSession {
 	}
 
 	fn protocol(&self) -> Option<&str> {
-		None
+		self.protocol
 	}
 
-	fn close(&self, _code: u32, _reason: &str) {}
+	fn close(&mut self, code: u32, reason: &str) {
+		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
+	}
 
-	async fn closed(&self) -> Self::Error {
-		std::future::pending().await
+	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {
+		Poll::Pending
 	}
 
 	fn stats(&self) -> impl web_transport_trait::Stats {
@@ -197,5 +413,185 @@ pub struct SinkStats;
 impl web_transport_trait::Stats for SinkStats {
 	fn estimated_send_rate(&self) -> Option<u64> {
 		None
+	}
+}
+
+/// A peer that replays a canned byte script and then goes quiet, so a test can drive
+/// a response arm end to end instead of duplicating its decoding.
+///
+/// Parks once the script is exhausted rather than reporting EOF: a read loop that saw
+/// EOF would exit, and a test usually wants to assert against the loop still running.
+pub struct ScriptedRecv {
+	script: Arc<Mutex<Vec<u8>>>,
+	/// Report EOF once the script is exhausted rather than parking, so a test can drive
+	/// a read loop all the way through its exit path. See [`ScriptedSession::eof`].
+	eof: bool,
+}
+
+impl poll::RecvStream for ScriptedRecv {
+	type Error = SinkError;
+
+	fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+		let take = {
+			let mut script = self.script.lock().unwrap();
+			if script.is_empty() {
+				0
+			} else {
+				let take = dst.len().min(script.len());
+				dst[..take].copy_from_slice(&script[..take]);
+				script.drain(..take);
+				take
+			}
+		};
+
+		match take {
+			0 if self.eof => Poll::Ready(Ok(None)),
+			0 => Poll::Pending,
+			take => Poll::Ready(Ok(Some(take))),
+		}
+	}
+
+	fn stop(&mut self, _code: u32) {}
+
+	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		Poll::Pending
+	}
+}
+
+/// Records what we send while replaying a scripted peer response on every stream.
+///
+/// The script is shared across streams, so a test that only opens one gets exactly
+/// what it wrote; drive one stream at a time. [`Self::per_stream`] hands each
+/// opened stream its own script instead, for flows holding several requests open
+/// at once.
+#[derive(Clone)]
+pub struct ScriptedSession {
+	pub log: Log,
+	/// Whether an exhausted script reports EOF instead of parking.
+	eof: bool,
+	script: Arc<Mutex<Vec<u8>>>,
+	/// Per-stream scripts popped by `open_bi` in order; `None` shares `script`
+	/// across every stream.
+	queue: Option<Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>>,
+	/// Set by [`Self::gated_open`]: parks `poll_open_bi` until the gate opens, standing in
+	/// for a peer that has granted no more concurrent streams.
+	open_gate: Option<kio::Consumer<bool>>,
+	/// Keeps the gate registration alive between `poll_open_bi` calls.
+	park: kio::Park,
+}
+
+impl ScriptedSession {
+	pub fn new(script: Vec<u8>) -> Self {
+		Self {
+			log: Log::default(),
+			eof: false,
+			script: Arc::new(Mutex::new(script)),
+			queue: None,
+			open_gate: None,
+			park: kio::Park::default(),
+		}
+	}
+
+	/// Replay `script`, then close the stream instead of parking.
+	///
+	/// Parking is the right default for asserting that a loop is still running, but a
+	/// test for what a loop does on the way *out* needs the read to actually end.
+	pub fn eof(script: Vec<u8>) -> Self {
+		Self {
+			eof: true,
+			..Self::new(script)
+		}
+	}
+
+	/// Each `open_bi` replays the next script in order. An exhausted queue (or an
+	/// empty entry) reads as a peer that never speaks.
+	pub fn per_stream(scripts: Vec<Vec<u8>>) -> Self {
+		Self {
+			log: Log::default(),
+			eof: false,
+			script: Arc::new(Mutex::new(Vec::new())),
+			queue: Some(Arc::new(Mutex::new(scripts.into_iter().collect()))),
+			open_gate: None,
+			park: kio::Park::default(),
+		}
+	}
+
+	/// Answer each stream from `scripts`, but only once the gate opens: a peer that
+	/// replies normally and is simply out of stream credit until then.
+	pub fn gated_open(scripts: Vec<Vec<u8>>, gate: kio::Consumer<bool>) -> Self {
+		Self {
+			open_gate: Some(gate),
+			..Self::per_stream(scripts)
+		}
+	}
+}
+
+impl poll::Session for ScriptedSession {
+	type SendStream = SinkSend;
+	type RecvStream = ScriptedRecv;
+	type Error = SinkError;
+
+	fn poll_accept_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+		Poll::Pending
+	}
+
+	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+		Poll::Pending
+	}
+
+	fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+		if let Some(gate) = self.open_gate.clone() {
+			let waiter = self.park.hold(cx);
+			// A closed gate reads as open: the test dropped the producer, so nothing is
+			// holding the stream back anymore.
+			if gate
+				.poll(waiter, |open| if **open { Poll::Ready(()) } else { Poll::Pending })
+				.is_pending()
+			{
+				return Poll::Pending;
+			}
+		}
+
+		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
+		let script = match &self.queue {
+			Some(queue) => Arc::new(Mutex::new(queue.lock().unwrap().pop_front().unwrap_or_default())),
+			None => self.script.clone(),
+		};
+		Poll::Ready(Ok((
+			SinkSend::new(self.log.clone()),
+			ScriptedRecv { script, eof: self.eof },
+		)))
+	}
+
+	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+		Poll::Ready(Ok(SinkSend::new(self.log.clone())))
+	}
+
+	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		Poll::Ready(Ok(()))
+	}
+
+	fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<bytes::Bytes, Self::Error>> {
+		Poll::Pending
+	}
+
+	fn max_datagram_size(&self) -> usize {
+		0
+	}
+
+	fn protocol(&self) -> Option<&str> {
+		None
+	}
+
+	fn close(&mut self, code: u32, reason: &str) {
+		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
+	}
+
+	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {
+		Poll::Pending
+	}
+
+	fn stats(&self) -> impl web_transport_trait::Stats {
+		SinkStats
 	}
 }

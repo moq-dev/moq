@@ -66,7 +66,11 @@ export default class MoqWatch extends HTMLElement {
 	static observedAttributes = OBSERVED;
 
 	// The connection to the moq-relay server.
-	connection: Moq.Connection.Reload;
+	/**
+	 * The relay connection, shared with every other element on the page pointing at the
+	 * same URL; see `Moq.Connection.Shared`. Its `origin` is where the broadcasts live.
+	 */
+	connection: Moq.Connection.Shared;
 
 	// The broadcast being watched.
 	broadcast: Broadcast;
@@ -146,13 +150,13 @@ export default class MoqWatch extends HTMLElement {
 
 		cleanup.register(this, this.signals);
 
-		this.connection = new Moq.Connection.Reload({
+		this.connection = new Moq.Connection.Shared({
 			enabled: this.#enabled,
 		});
 		this.signals.cleanup(() => this.connection.close());
 
 		this.broadcast = new Broadcast({
-			connection: this.connection.established,
+			origin: this.connection.origin,
 			enabled: this.#enabled,
 			name: this.#name,
 			reload: this.#reload,
@@ -166,6 +170,7 @@ export default class MoqWatch extends HTMLElement {
 			broadcast: this.broadcast,
 			target: this.controls.target,
 			supported: Video.Decoder.supported,
+			probe: this.connection.probe,
 		});
 		const audioSource = new Audio.Source({
 			broadcast: this.broadcast,
@@ -182,17 +187,19 @@ export default class MoqWatch extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.text.close());
 
-		// Sources produce the per-rendition jitter that Sync reads, so they're created
-		// before Sync to avoid a construction cycle.
+		// The video decoder owns rendition handoffs but also needs Sync. Bridge its output through a
+		// parent-owned signal so Sync can be constructed first without exposing mutable wiring.
+		const videoJitter = new Signal<Time.Milli | undefined>(undefined);
 		this.sync = new Sync({
 			latency: this.controls.latency,
-			connection: this.connection.established,
-			video: videoSource.out.jitter,
+			probe: this.connection.probe,
+			video: videoJitter,
 			audio: audioSource.out.jitter,
 		});
 		this.signals.cleanup(() => this.sync.close());
 
 		this.video = new Video.Decoder(videoSource, this.sync, { enabled: this.#videoEnabled });
+		this.signals.proxy(videoJitter, this.video.out.jitter);
 		this.audio = new Audio.Decoder(audioSource, this.sync, { enabled: this.#audioEnabled });
 		this.signals.cleanup(() => {
 			this.video.close();

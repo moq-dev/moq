@@ -164,18 +164,19 @@ cargo install moq-cli
 ```bash
 # Publish a video file (remux to MPEG-TS and pipe it in)
 ffmpeg -i input.mp4 -c copy -f mpegts - | \
-    moq --client-connect https://relay.example.com/anon --broadcast my-stream import ts
+    moq --connect https://relay.example.com/anon --broadcast my-stream import ts
 
 # Publish from FFmpeg
 ffmpeg -i input.mp4 -f mpegts - | \
-    moq --client-connect https://relay.example.com/anon --broadcast my-stream import ts
+    moq --connect https://relay.example.com/anon --broadcast my-stream import ts
 ```
 
 [Learn more](/bin/cli)
 
 ### moq-token CLI
 
-Command-line tool for JWT token management (binary name: `moq-token`).
+Command-line tool for JWT token management (binary name: `moq-token`). The same
+commands are built into moq-cli as `moq token ...`.
 
 **Installation:**
 
@@ -274,21 +275,25 @@ you, then [`moq-net`](/lib/rs/crate/moq-net) handles the MoQ handshake. Connect 
 a relay with a few lines:
 
 ```rust
-let client = moq_native::ClientConfig::default().init()?;
+let client = moq_native::connect::Config::default().init()?;
 let url = url::Url::parse("https://cdn.moq.dev/anon")?;
-let session = client.connect(url).await?;
+
+// The connection redials with backoff if it drops; drop the handle to disconnect.
+let connection = client.connect(url);
 ```
 
 To publish or consume, wire an [`Origin`](https://docs.rs/moq-net/latest/moq_net/struct.Origin.html)
-into the session before connecting:
+into the client before connecting. The origin outlives any individual session, so
+your broadcasts and subscriptions carry across reconnects:
 
 ```rust
 // Subscribe: wait for broadcasts to be announced.
-let origin = moq_net::Origin::new().produce();
-let mut consumer = origin.consume();
-let session = client.with_subscriber(origin).connect(url).await?;
+let origin = moq_net::Origin::random().produce();
+let mut announced = origin.consume().announced();
+let _connection = client.with_subscriber(origin).connect(url);
 
-while let Some((path, broadcast)) = consumer.announced().await {
+while let Some(update) = announced.next().await {
+    // `update.broadcast` is None when the path went away.
     // ... subscribe to tracks on each broadcast ...
 }
 ```

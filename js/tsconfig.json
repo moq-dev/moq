@@ -6,6 +6,10 @@
 
 		"declaration": true,
 		"declarationMap": true,
+		// `@internal` is how this workspace hides a symbol from the published surface, so the
+		// declarations have to actually drop it. Without this the tag is a comment: the symbol
+		// still ships, still type-checks for consumers, and reads as supported API.
+		"stripInternal": true,
 		"isolatedModules": true,
 		"sourceMap": true,
 		"inlineSources": true,

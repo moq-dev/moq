@@ -1,10 +1,11 @@
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type * as Video from "../video";
 import { Device, type DeviceProps } from "./device";
+import { Retry } from "./retry";
 
 // Signals the camera reads.
 export type CameraInput = {
-	// Whether to hold the camera open. When false the track is stopped and `out.source` clears.
+	// Whether to hold the camera open. Defaults to true. When false the track is stopped and `out.source` clears.
 	enabled: Getter<boolean>;
 };
 
@@ -49,10 +50,11 @@ export class Camera {
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
+	#retry = new Retry();
 
 	constructor(props?: CameraProps) {
 		this.in = {
-			enabled: getter(props?.enabled ?? false),
+			enabled: getter(props?.enabled ?? true),
 		};
 		this.device = new Device("video", props?.device);
 		this.constraints = Signal.from(props?.constraints);
@@ -62,10 +64,28 @@ export class Camera {
 
 	#run(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
-		if (!enabled) return;
+		if (!enabled) {
+			// Being switched off is the app's reset, so a later enable starts with a full budget.
+			this.#retry.refund();
+			return;
+		}
 
+		// Read the settings before checking the budget, so changing one both reruns this effect and
+		// buys it a fresh budget.
 		const device = effect.get(this.device.out.requested);
-		const constraints = effect.get(this.constraints) ?? {};
+		const constraints = effect.get(this.constraints);
+
+		if (!this.#retry.begin(effect, [device, constraints])) {
+			// Waiting out a backoff, or out of budget entirely, with the same settings. Either way
+			// a change to what is plugged in is new information worth acting on now, so watch the
+			// device list here and not while healthy, where a rerun would restart a working capture
+			// for unrelated device churn.
+			const spent = this.device.out.available.peek();
+			effect.subscribe(this.device.out.available, (available) => {
+				if (available !== spent) this.#retry.refund();
+			});
+			return;
+		}
 
 		// Build final constraints with device selection, defaulting resolution unless overridden.
 		const finalConstraints: MediaTrackConstraints = {
@@ -87,14 +107,21 @@ export class Camera {
 			);
 
 			const stream = await Promise.race([media, effect.cancel]);
-			if (!stream) return;
+
+			// A torn-down run is not a failed attempt: whatever cancelled it reruns us.
+			if (effect.abort.aborted) return;
+
+			if (!stream) return this.#retry.failed();
 
 			const source = stream.getVideoTracks()[0] as Video.StreamTrack | undefined;
 
 			// getUserMedia resolved, so we have permission even if no track came back.
 			effect.cleanup(this.device.capture(source?.getSettings().deviceId));
-			if (!source) return;
 
+			// A track that arrives dead already fired "ended", so nothing would ever rerun us.
+			if (!source || source.readyState === "ended") return this.#retry.failed();
+
+			this.#retry.succeeded(effect, source);
 			effect.set(this.#out.source, source);
 		});
 	}

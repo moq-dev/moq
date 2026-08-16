@@ -61,7 +61,8 @@ impl Live {
 	}
 
 	pub(crate) async fn catalog_stream(&self) -> crate::catalog::Consumer {
-		crate::catalog::Consumer::<()>::new(&self.consumer, crate::catalog::CatalogFormat::Hang)
+		self.source()
+			.catalog::<()>(crate::catalog::CatalogFormat::Hang)
 			.await
 			.expect("catalog consumer")
 	}

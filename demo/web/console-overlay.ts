@@ -140,6 +140,21 @@ class MoqConsole extends HTMLElement {
 		});
 		const label = document.createElement("span");
 		label.textContent = "console";
+		const copyButton = document.createElement("button");
+		copyButton.type = "button";
+		copyButton.textContent = "copy";
+		Object.assign(copyButton.style, {
+			font: "inherit",
+			background: "#222",
+			color: "#eee",
+			border: "1px solid #444",
+			borderRadius: "3px",
+			padding: "0 6px",
+			cursor: "pointer",
+		});
+		copyButton.addEventListener("click", () => this.copyLogs());
+		this.copyButton = copyButton;
+
 		const select = document.createElement("select");
 		Object.assign(select.style, {
 			font: "inherit",
@@ -158,7 +173,11 @@ class MoqConsole extends HTMLElement {
 		select.value = this.levelName();
 		select.addEventListener("change", () => this.setAttribute("level", select.value));
 		this.select = select;
-		header.append(label, select);
+
+		const controls = document.createElement("div");
+		Object.assign(controls.style, { display: "flex", alignItems: "center", gap: "4px" });
+		controls.append(copyButton, select);
+		header.append(label, controls);
 
 		this.body = document.createElement("div");
 		Object.assign(this.body.style, { overflowY: "auto", flex: "1 1 auto" });
@@ -223,6 +242,23 @@ class MoqConsole extends HTMLElement {
 		this.body.appendChild(line);
 		this.updateVisibility();
 		this.body.scrollTop = this.body.scrollHeight;
+	}
+
+	copyLogs() {
+		const text = Array.from(this.body.children)
+			.map((line) => line.textContent)
+			.join("\\n");
+		navigator.clipboard.writeText(text).then(
+			() => this.flashCopyButton("copied"),
+			() => this.flashCopyButton("failed"),
+		);
+	}
+
+	flashCopyButton(message) {
+		this.copyButton.textContent = message;
+		setTimeout(() => {
+			this.copyButton.textContent = "copy";
+		}, 1200);
 	}
 }
 customElements.define("moq-console", MoqConsole);

@@ -1,18 +1,20 @@
 //! TLS trust, certificates, and keys, split by role.
 //!
-//! [`Client`] (`--client-tls-*`) picks who to trust: system roots, custom roots,
-//! a pinned SHA-256 fingerprint, or nothing at all. [`Server`] (`--server-tls-*`)
+//! [`Connect`] (`--connect-tls-*`) picks who to trust: system roots, custom roots,
+//! a pinned SHA-256 fingerprint, or nothing at all. [`Listen`] (`--listen-tls-*`)
 //! supplies the certificate chain to serve, loaded from disk or self-signed on
 //! startup, and optionally the roots that authenticate mTLS clients.
 //!
-//! Certificates loaded from disk are watched and hot reloaded, so rotating them
-//! needs no restart. [`Certificates`] reads the current set back out.
+//! Certificates, keys, and custom root CAs loaded from disk are normally hot
+//! reloaded for new handshakes. Quiche servers are the exception: all inbound
+//! TLS material is fixed when the listener is built. [`Certificates`] reads the
+//! current served set back out.
 
 use crate::crypto;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::{fs, io};
 
 #[cfg(all(
@@ -20,9 +22,6 @@ use std::{fs, io};
 	any(feature = "aws-lc-rs", feature = "ring")
 ))]
 use rustls::pki_types::PrivatePkcs8KeyDer;
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
-use std::sync::RwLock;
-
 /// Errors loading or generating TLS certificates and keys.
 ///
 /// Shared by the client TLS config and the quinn/noq servers so each backend's
@@ -56,7 +55,7 @@ pub enum Error {
 
 	/// Nothing is configured that could ever verify a server certificate.
 	#[error(
-		"no trusted roots: provide --client-tls-root, enable --client-tls-system-roots, or use --client-tls-fingerprint / --client-tls-disable-verify"
+		"no trusted roots: provide --connect-tls-root, enable --connect-tls-system-roots, or use --connect-tls-fingerprint / --connect-tls-insecure"
 	)]
 	NoRoots,
 
@@ -71,9 +70,15 @@ pub enum Error {
 	/// Fingerprint pinning was combined with CA roots. Pinning bypasses the chain, so one of
 	/// the two would be silently ignored.
 	#[error(
-		"--client-tls-fingerprint cannot be combined with --client-tls-root or --client-tls-system-roots: fingerprint pinning bypasses CA verification"
+		"--connect-tls-fingerprint cannot be combined with --connect-tls-root or --connect-tls-system-roots: fingerprint pinning bypasses CA verification"
 	)]
 	FingerprintWithRoots,
+
+	/// Trust material was configured alongside the flag that ignores all of it.
+	#[error(
+		"--connect-tls-insecure cannot be combined with --connect-tls-fingerprint, --connect-tls-root or --connect-tls-system-roots: it accepts every certificate, so the trust material would be ignored"
+	)]
+	DisableVerifyWithTrust,
 
 	/// A root certificate parsed as PEM but rustls rejected it as a trust anchor.
 	#[error("failed to add root certificate")]
@@ -89,7 +94,7 @@ pub enum Error {
 	ClientAuth(#[source] rustls::Error),
 
 	/// Only one half of the mTLS client identity was given; it needs both a cert and a key.
-	#[error("both --client-tls-cert and --client-tls-key must be provided")]
+	#[error("both --connect-tls-cert and --connect-tls-key must be provided")]
 	IncompleteClientAuth,
 
 	/// The server was given a different number of certificates than keys. They pair by index.
@@ -121,6 +126,10 @@ pub enum Error {
 	#[error("failed to build client certificate verifier")]
 	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
 
+	/// The server-certificate verifier couldn't be built from the configured roots.
+	#[error("failed to build server certificate verifier")]
+	ServerVerifier(#[source] rustls::client::VerifierBuilderError),
+
 	/// Generating a self-signed certificate failed.
 	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
 	#[error(transparent)]
@@ -134,6 +143,12 @@ pub enum Error {
 /// Convenience alias for results produced by this module.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Parse a hex-encoded SHA-256 certificate fingerprint.
+pub fn parse_fingerprint(value: &str) -> Result<[u8; 32]> {
+	let bytes = hex::decode(value.trim()).map_err(Error::Fingerprint)?;
+	bytes.try_into().map_err(|v: Vec<u8>| Error::FingerprintLength(v.len()))
+}
+
 /// Read a PEM file into its list of certificates.
 pub(crate) fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 	let file = fs::File::open(path).map_err(Error::Open)?;
@@ -143,15 +158,28 @@ pub(crate) fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 		.map_err(Error::Read)
 }
 
+/// Load every configured custom root, rejecting a path that contains no certificates.
+fn read_roots(paths: &[PathBuf]) -> Result<Vec<CertificateDer<'static>>> {
+	let mut roots = Vec::new();
+	for path in paths {
+		let certs = read_certs(path)?;
+		if certs.is_empty() {
+			return Err(Error::EmptyRoots(path.clone()));
+		}
+		roots.extend(certs);
+	}
+	Ok(roots)
+}
+
 // ── Client ──────────────────────────────────────────────────────────
 
-/// TLS configuration for the client.
+/// The dial side's TLS: who to trust, and the optional mTLS identity to present.
 #[serde_with::serde_as]
 #[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[group(id = "tls-client")]
 #[non_exhaustive]
-pub struct Client {
+pub struct Connect {
 	/// Trust the TLS root at this path, encoded as PEM.
 	///
 	/// This value can be provided multiple times for multiple roots.
@@ -159,24 +187,26 @@ pub struct Client {
 	///
 	/// These roots are added on top of the system roots. By default the system
 	/// roots are only loaded when no custom root is given, so passing a root
-	/// replaces them; set `--client-tls-system-roots` to trust both (e.g. to reach a
+	/// replaces them; set `--connect-tls-system-roots` to trust both (e.g. to reach a
 	/// local relay with a private CA and a remote one with a public CA).
+	/// Files are hot reloaded for new connections, retaining the last valid roots
+	/// if a rotation is temporarily missing or malformed.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
-	#[arg(id = "client-tls-root", long = "client-tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
+	#[arg(id = "connect-tls-root", long = "connect-tls-root", env = "MOQ_CONNECT_TLS_ROOT")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
 	/// Also trust the platform's native root certificates.
 	///
-	/// Defaults to enabled only when no `--client-tls-root` is given. Set it
+	/// Defaults to enabled only when no `--connect-tls-root` is given. Set it
 	/// explicitly to trust the system roots alongside any custom roots, or set it
 	/// to false to trust only the custom roots. Trusting neither (no custom root
 	/// and system roots disabled) is rejected, since verification could never pass.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
-		id = "client-tls-system-roots",
-		long = "client-tls-system-roots",
-		env = "MOQ_CLIENT_TLS_SYSTEM_ROOTS",
+		id = "connect-tls-system-roots",
+		long = "connect-tls-system-roots",
+		env = "MOQ_CONNECT_TLS_SYSTEM_ROOTS",
 		default_missing_value = "true",
 		num_args = 0..=1,
 		require_equals = true,
@@ -196,9 +226,9 @@ pub struct Client {
 	/// across a certificate rotation). In config files, accepts either a single string or a TOML array.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[arg(
-		id = "client-tls-fingerprint",
-		long = "client-tls-fingerprint",
-		env = "MOQ_CLIENT_TLS_FINGERPRINT"
+		id = "connect-tls-fingerprint",
+		long = "connect-tls-fingerprint",
+		env = "MOQ_CONNECT_TLS_FINGERPRINT"
 	)]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub fingerprint: Vec<String>,
@@ -206,33 +236,33 @@ pub struct Client {
 	/// PEM file containing the client certificate chain for mTLS.
 	///
 	/// Only certificates are extracted; any private keys in the file are ignored.
-	/// Must be paired with `--client-tls-key`.
+	/// Must be paired with `--connect-tls-key`.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "client-tls-cert", long = "client-tls-cert", env = "MOQ_CLIENT_TLS_CERT")]
+	#[arg(id = "connect-tls-cert", long = "connect-tls-cert", env = "MOQ_CONNECT_TLS_CERT")]
 	pub cert: Option<PathBuf>,
 
 	/// PEM file containing the private key for mTLS.
 	///
 	/// Only the private key is extracted; any certificates in the file are ignored.
-	/// Must be paired with `--client-tls-cert`.
+	/// Must be paired with `--connect-tls-cert`.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "client-tls-key", long = "client-tls-key", env = "MOQ_CLIENT_TLS_KEY")]
+	#[arg(id = "connect-tls-key", long = "connect-tls-key", env = "MOQ_CONNECT_TLS_KEY")]
 	pub key: Option<PathBuf>,
 
 	/// Danger: Disable TLS certificate verification.
 	///
 	/// Fine for local development and between relays, but should be used in caution in production.
-	#[serde(skip_serializing_if = "Option::is_none")]
+	#[serde(alias = "disable_verify", skip_serializing_if = "Option::is_none")]
 	#[arg(
-		id = "client-tls-disable-verify",
-		long = "client-tls-disable-verify",
-		env = "MOQ_CLIENT_TLS_DISABLE_VERIFY",
+		id = "connect-tls-insecure",
+		long = "connect-tls-insecure",
+		env = "MOQ_CONNECT_TLS_INSECURE",
 		default_missing_value = "true",
 		num_args = 0..=1,
 		require_equals = true,
 		value_parser = clap::value_parser!(bool),
 	)]
-	pub disable_verify: Option<bool>,
+	pub insecure: Option<bool>,
 
 	/// Override the TLS SNI and certificate verification hostname for outbound connections.
 	///
@@ -240,9 +270,9 @@ pub struct Client {
 	/// raw IP address but needing to present/verify a DNS name the server certificate covers.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
-		id = "client-tls-host-name",
-		long = "client-tls-host-name",
-		env = "MOQ_CLIENT_TLS_HOST_NAME"
+		id = "connect-tls-host-name",
+		long = "connect-tls-host-name",
+		env = "MOQ_CONNECT_TLS_HOST_NAME"
 	)]
 	pub host_name: Option<String>,
 
@@ -254,10 +284,15 @@ pub struct Client {
 	deprecated: Deprecated,
 }
 
-/// Holds the deprecated bare `--tls-*` flag spellings (renamed to `--client-tls-*`).
-/// Flattened into [`Client`] so they keep parsing; folded into the canonical
-/// fields by [`Client::build`] with a deprecation warning. No env (the env names
-/// were never renamed) and no TOML.
+/// Holds the released spellings this section replaced: the bare `--tls-*` flags and
+/// the `--client-tls-*` pair of flag and env var.
+///
+/// Flattened into [`Connect`] so they keep parsing; folded into the canonical fields
+/// by the `effective_*` accessors, with a deprecation warning. Each carries its
+/// original env var, since a clap alias renames the flag but not the variable, and a
+/// deployment that configures a relay through the environment would otherwise find
+/// its TLS settings silently ignored. Not TOML fields: config files use the
+/// canonical names.
 #[derive(Clone, Default, Debug, clap::Args)]
 struct Deprecated {
 	#[arg(long = "tls-root", hide = true)]
@@ -284,7 +319,214 @@ struct Deprecated {
 		require_equals = true,
 		value_parser = clap::value_parser!(bool),
 	)]
-	disable_verify: Option<bool>,
+	insecure: Option<bool>,
+
+	#[arg(
+		id = "client-tls-root",
+		long = "client-tls-root",
+		env = "MOQ_CLIENT_TLS_ROOT",
+		hide = true
+	)]
+	client_root: Vec<PathBuf>,
+
+	#[arg(
+		id = "client-tls-system-roots",
+		long = "client-tls-system-roots",
+		env = "MOQ_CLIENT_TLS_SYSTEM_ROOTS",
+		hide = true,
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+	)]
+	client_system_roots: Option<bool>,
+
+	#[arg(
+		id = "client-tls-fingerprint",
+		long = "client-tls-fingerprint",
+		env = "MOQ_CLIENT_TLS_FINGERPRINT",
+		hide = true
+	)]
+	client_fingerprint: Vec<String>,
+
+	#[arg(
+		id = "client-tls-cert",
+		long = "client-tls-cert",
+		env = "MOQ_CLIENT_TLS_CERT",
+		hide = true
+	)]
+	client_cert: Option<PathBuf>,
+
+	#[arg(
+		id = "client-tls-key",
+		long = "client-tls-key",
+		env = "MOQ_CLIENT_TLS_KEY",
+		hide = true
+	)]
+	client_key: Option<PathBuf>,
+
+	#[arg(
+		id = "client-tls-disable-verify",
+		long = "client-tls-disable-verify",
+		alias = "client-tls-insecure",
+		env = "MOQ_CLIENT_TLS_DISABLE_VERIFY",
+		hide = true,
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+	)]
+	client_insecure: Option<bool>,
+
+	#[arg(
+		id = "client-tls-host-name",
+		long = "client-tls-host-name",
+		env = "MOQ_CLIENT_TLS_HOST_NAME",
+		hide = true
+	)]
+	client_host_name: Option<String>,
+}
+
+/// The last valid contents of a set of custom root files.
+///
+/// Quiche consumes concrete DER roots per connection, while rustls consumes a
+/// verifier. Keeping the parsed roots here gives both paths identical
+/// last-known-good behavior when a file is briefly absent or incomplete during
+/// rotation.
+#[derive(Clone)]
+pub(crate) struct CustomRoots {
+	paths: Vec<PathBuf>,
+	current: Arc<RwLock<Vec<CertificateDer<'static>>>>,
+}
+
+impl CustomRoots {
+	fn new(paths: Vec<PathBuf>) -> Result<Self> {
+		let current = read_roots(&paths)?;
+		Ok(Self {
+			paths,
+			current: Arc::new(RwLock::new(current)),
+		})
+	}
+
+	fn load(&self) -> Result<Vec<CertificateDer<'static>>> {
+		read_roots(&self.paths)
+	}
+
+	fn replace(&self, roots: Vec<CertificateDer<'static>>) {
+		*self.current.write().unwrap_or_else(std::sync::PoisonError::into_inner) = roots;
+	}
+
+	pub(crate) fn current(&self) -> Vec<CertificateDer<'static>> {
+		self.current
+			.read()
+			.unwrap_or_else(std::sync::PoisonError::into_inner)
+			.clone()
+	}
+
+	/// Refresh from disk, retaining and returning the last valid roots on failure.
+	#[cfg(feature = "quiche")]
+	pub(crate) fn refresh(&self) -> Vec<CertificateDer<'static>> {
+		self.refresh_with(|| self.load())
+	}
+
+	#[cfg(feature = "quiche")]
+	fn refresh_with(
+		&self,
+		load: impl FnOnce() -> Result<Vec<CertificateDer<'static>>>,
+	) -> Vec<CertificateDer<'static>> {
+		let mut current = self.current.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+		match load().and_then(|roots| {
+			root_store(&roots)?;
+			Ok(roots)
+		}) {
+			Ok(roots) => {
+				*current = roots.clone();
+				roots
+			}
+			Err(err) => {
+				tracing::warn!(%err, "failed to reload client root certificates; retaining previous roots");
+				current.clone()
+			}
+		}
+	}
+}
+
+#[cfg(feature = "watch")]
+struct ReloadState<T: ?Sized + Send + Sync + 'static> {
+	current: RwLock<Arc<T>>,
+	build: Box<dyn Fn() -> Result<Arc<T>> + Send + Sync>,
+	role: &'static str,
+}
+
+#[cfg(feature = "watch")]
+impl<T: ?Sized + Send + Sync + 'static> ReloadState<T> {
+	fn reload(&self) {
+		match (self.build)() {
+			Ok(next) => {
+				*self.current.write().unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+				tracing::info!(role = self.role, "reloaded TLS root certificates");
+			}
+			Err(err) => {
+				tracing::warn!(%err, role = self.role, "failed to reload TLS root certificates; retaining previous roots");
+			}
+		}
+	}
+
+	fn current(&self) -> Arc<T> {
+		self.current
+			.read()
+			.unwrap_or_else(std::sync::PoisonError::into_inner)
+			.clone()
+	}
+}
+
+/// A verifier whose implementation is replaced after its root files change.
+#[cfg(feature = "watch")]
+struct Reloading<T: ?Sized + Send + Sync + 'static> {
+	state: Arc<ReloadState<T>>,
+	// Holds the OS watcher alive for exactly as long as the TLS config.
+	_watcher: Option<notify::RecommendedWatcher>,
+}
+
+#[cfg(feature = "watch")]
+impl<T: ?Sized + Send + Sync + 'static> Reloading<T> {
+	fn new(
+		paths: &[PathBuf],
+		initial: Arc<T>,
+		role: &'static str,
+		build: impl Fn() -> Result<Arc<T>> + Send + Sync + 'static,
+	) -> Self {
+		let state = Arc::new(ReloadState {
+			current: RwLock::new(initial),
+			build: Box::new(build),
+			role,
+		});
+
+		let reload = state.clone();
+		let watcher = match crate::watch::callback(paths, move || reload.reload()) {
+			Ok(watcher) => Some(watcher),
+			Err(err) => {
+				tracing::error!(%err, role, "failed to watch TLS root certificates; hot reload disabled");
+				None
+			}
+		};
+
+		Self {
+			state,
+			_watcher: watcher,
+		}
+	}
+
+	fn current(&self) -> Arc<T> {
+		self.state.current()
+	}
+}
+
+#[cfg(feature = "watch")]
+impl<T: ?Sized + Send + Sync + 'static> std::fmt::Debug for Reloading<T> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Reloading").field("role", &self.state.role).finish()
+	}
 }
 
 /// The resolved server-certificate verification policy.
@@ -295,7 +537,7 @@ struct Deprecated {
 /// are valid.
 #[derive(Clone)]
 pub(crate) enum Verification {
-	/// No verification at all. Insecure; only via `--client-tls-disable-verify`.
+	/// No verification at all. Insecure; only via `--connect-tls-insecure`.
 	Disabled,
 
 	/// Pin the leaf certificate by SHA-256. The CA chain is not consulted, so
@@ -306,98 +548,188 @@ pub(crate) enum Verification {
 	/// store is trusted too; each backend resolves that its own way (the rustls
 	/// backends use the OS platform verifier, quiche loads the native roots).
 	/// `custom` are extra PEM roots trusted in addition.
-	Roots {
-		custom: Vec<CertificateDer<'static>>,
-		system: bool,
-	},
+	Roots { custom: CustomRoots, system: bool },
 }
 
-impl Client {
+impl Connect {
 	/// Log a warning for each deprecated `--tls-*` flag in use. Called once from
 	/// [`Self::verification`], which every backend runs, so a deprecated flag warns once.
 	pub(crate) fn warn_deprecated(&self) {
-		if !self.deprecated.root.is_empty() {
-			tracing::warn!("--tls-root is deprecated; use --client-tls-root");
-		}
-		if self.deprecated.system_roots.is_some() {
-			tracing::warn!("--tls-system-roots is deprecated; use --client-tls-system-roots");
-		}
-		if !self.deprecated.fingerprint.is_empty() {
-			tracing::warn!("--tls-fingerprint is deprecated; use --client-tls-fingerprint");
-		}
-		if self.deprecated.disable_verify.is_some() {
-			tracing::warn!("--tls-disable-verify is deprecated; use --client-tls-disable-verify");
+		for (used, deprecated, canonical) in [
+			(!self.deprecated.root.is_empty(), "--tls-root", "--connect-tls-root"),
+			(
+				self.deprecated.system_roots.is_some(),
+				"--tls-system-roots",
+				"--connect-tls-system-roots",
+			),
+			(
+				!self.deprecated.fingerprint.is_empty(),
+				"--tls-fingerprint",
+				"--connect-tls-fingerprint",
+			),
+			(
+				self.deprecated.insecure.is_some(),
+				"--tls-disable-verify",
+				"--connect-tls-insecure",
+			),
+			(
+				!self.deprecated.client_root.is_empty(),
+				"--client-tls-root",
+				"--connect-tls-root",
+			),
+			(
+				self.deprecated.client_system_roots.is_some(),
+				"--client-tls-system-roots",
+				"--connect-tls-system-roots",
+			),
+			(
+				!self.deprecated.client_fingerprint.is_empty(),
+				"--client-tls-fingerprint",
+				"--connect-tls-fingerprint",
+			),
+			(
+				self.deprecated.client_cert.is_some(),
+				"--client-tls-cert",
+				"--connect-tls-cert",
+			),
+			(
+				self.deprecated.client_key.is_some(),
+				"--client-tls-key",
+				"--connect-tls-key",
+			),
+			(
+				self.deprecated.client_insecure.is_some(),
+				"--client-tls-disable-verify",
+				"--connect-tls-insecure",
+			),
+			(
+				self.deprecated.client_host_name.is_some(),
+				"--client-tls-host-name",
+				"--connect-tls-host-name",
+			),
+		] {
+			if used {
+				tracing::warn!("{deprecated} is deprecated; use {canonical}");
+			}
 		}
 	}
 
-	/// Roots from the canonical field plus the deprecated `--tls-root` spelling.
+	/// Roots from the canonical field plus the released spellings it replaced.
+	///
+	/// Concatenated rather than "first non-empty wins": each spelling is a separate
+	/// list of roots, and dropping one would silently stop trusting a CA.
 	pub(crate) fn effective_root(&self) -> Vec<PathBuf> {
 		let mut root = self.root.clone();
 		root.extend(self.deprecated.root.iter().cloned());
+		root.extend(self.deprecated.client_root.iter().cloned());
 		root
 	}
 
-	/// Fingerprints from the canonical field plus the deprecated `--tls-fingerprint`.
+	/// Fingerprints from the canonical field plus the released spellings it replaced.
 	pub(crate) fn effective_fingerprint(&self) -> Vec<String> {
 		let mut fp = self.fingerprint.clone();
 		fp.extend(self.deprecated.fingerprint.iter().cloned());
+		fp.extend(self.deprecated.client_fingerprint.iter().cloned());
 		fp
 	}
 
-	/// `system_roots`, preferring the canonical flag over the deprecated alias.
+	/// `system_roots`, preferring the canonical flag over the deprecated spellings.
 	pub(crate) fn effective_system_roots(&self) -> Option<bool> {
-		self.system_roots.or(self.deprecated.system_roots)
+		self.system_roots
+			.or(self.deprecated.system_roots)
+			.or(self.deprecated.client_system_roots)
 	}
 
-	/// `disable_verify`, preferring the canonical flag over the deprecated alias.
+	/// `insecure`, preferring the canonical flag over the deprecated spellings.
 	pub(crate) fn effective_disable_verify(&self) -> Option<bool> {
-		self.disable_verify.or(self.deprecated.disable_verify)
+		self.insecure
+			.or(self.deprecated.insecure)
+			.or(self.deprecated.client_insecure)
+	}
+
+	/// The mTLS identity, preferring the canonical flags over `--client-tls-cert`/`-key`.
+	pub(crate) fn effective_identity(&self) -> (Option<PathBuf>, Option<PathBuf>) {
+		(
+			self.cert.clone().or_else(|| self.deprecated.client_cert.clone()),
+			self.key.clone().or_else(|| self.deprecated.client_key.clone()),
+		)
+	}
+
+	/// The SNI override, preferring the canonical flag over `--client-tls-host-name`.
+	pub(crate) fn effective_host_name(&self) -> Option<String> {
+		self.host_name
+			.clone()
+			.or_else(|| self.deprecated.client_host_name.clone())
+	}
+
+	/// Fold every released spelling into the canonical fields, warning once for each.
+	///
+	/// Applied by [`crate::connect::Config::resolved`], so the backends read plain
+	/// fields and can't each forget a fold. Idempotent.
+	pub fn resolved(&self) -> Self {
+		self.warn_deprecated();
+
+		let (cert, key) = self.effective_identity();
+		Self {
+			root: self.effective_root(),
+			system_roots: self.effective_system_roots(),
+			fingerprint: self.effective_fingerprint(),
+			cert,
+			key,
+			insecure: self.effective_disable_verify(),
+			host_name: self.effective_host_name(),
+			deprecated: Deprecated::default(),
+		}
 	}
 
 	/// Resolve the verification policy from the configured flags.
 	///
 	/// Precedence and rules (shared by all backends):
-	/// - `--client-tls-disable-verify` wins and disables verification.
-	/// - `--client-tls-fingerprint` pins the leaf and bypasses the CA chain; combining
-	///   it with `--client-tls-root` or `--client-tls-system-roots` is rejected rather than
+	/// - `--connect-tls-insecure` disables verification, and combining it with any
+	///   trust material is rejected rather than silently ignoring that material.
+	/// - `--connect-tls-fingerprint` pins the leaf and bypasses the CA chain; combining
+	///   it with `--connect-tls-root` or `--connect-tls-system-roots` is rejected rather than
 	///   silently ignoring one of them.
 	/// - Otherwise, verify against the system roots (default) plus any custom
 	///   roots. The system roots are dropped once a custom root is given unless
-	///   `--client-tls-system-roots` re-enables them.
+	///   `--connect-tls-system-roots` re-enables them.
+	///
+	/// Every combination that would quietly drop one setting is an error. Silently
+	/// weakening trust is the worst outcome here: someone moving off
+	/// `insecure` by adding a fingerprint would otherwise still accept every
+	/// certificate, with the UI showing the pin as configured.
 	pub(crate) fn verification(&self) -> Result<Verification> {
 		self.warn_deprecated();
 
+		let fingerprints = self.fingerprints()?;
+		let roots = self.effective_root();
+		let system_roots = self.effective_system_roots();
+
 		if self.effective_disable_verify().unwrap_or_default() {
+			if !fingerprints.is_empty() || !roots.is_empty() || system_roots == Some(true) {
+				return Err(Error::DisableVerifyWithTrust);
+			}
 			return Ok(Verification::Disabled);
 		}
 
-		let fingerprints = self.fingerprints()?;
 		if !fingerprints.is_empty() {
-			if !self.effective_root().is_empty() || self.effective_system_roots() == Some(true) {
+			if !roots.is_empty() || system_roots == Some(true) {
 				return Err(Error::FingerprintWithRoots);
 			}
 			return Ok(Verification::Fingerprints(fingerprints));
 		}
 
-		let root = self.effective_root();
 		// Default to system roots only when no custom root is given, so passing a
 		// root replaces them unless the system roots are explicitly re-enabled.
-		let system = self.effective_system_roots().unwrap_or(root.is_empty());
+		let system = system_roots.unwrap_or(roots.is_empty());
 
-		let mut custom = Vec::new();
-		for root in &root {
-			let certs = read_certs(root)?;
-			if certs.is_empty() {
-				return Err(Error::EmptyRoots(root.clone()));
-			}
-			custom.extend(certs);
-		}
+		let custom = CustomRoots::new(roots)?;
 
 		// WebPKI needs at least one trusted root to ever succeed, so fail fast
 		// instead of producing confusing handshake errors later. With system
 		// trust enabled the verifier supplies its own roots, so custom roots are
 		// optional.
-		if !system && custom.is_empty() {
+		if !system && custom.current().is_empty() {
 			return Err(Error::NoRoots);
 		}
 
@@ -408,10 +740,11 @@ impl Client {
 	/// honored for a connection.
 	///
 	/// Only when no stronger verification is configured: an explicit
-	/// `--client-tls-fingerprint` must never be weakened by an attacker-controlled
+	/// `--connect-tls-fingerprint` must never be weakened by an attacker-controlled
 	/// plaintext fetch, and there is nothing to bootstrap when verification is
 	/// disabled. With CA roots (the default), `http://` is the deliberate
 	/// per-connection way to pin a self-signed relay, so it is allowed.
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub(crate) fn allows_http_bootstrap(&self) -> bool {
 		self.effective_fingerprint().is_empty() && !self.effective_disable_verify().unwrap_or_default()
 	}
@@ -420,10 +753,7 @@ impl Client {
 	fn fingerprints(&self) -> Result<Vec<[u8; 32]>> {
 		self.effective_fingerprint()
 			.iter()
-			.map(|fp| {
-				let bytes = hex::decode(fp.trim()).map_err(Error::Fingerprint)?;
-				bytes.try_into().map_err(|v: Vec<u8>| Error::FingerprintLength(v.len()))
-			})
+			.map(|fp| parse_fingerprint(fp))
 			.collect()
 	}
 
@@ -434,56 +764,86 @@ impl Client {
 	pub fn build(&self) -> Result<rustls::ClientConfig> {
 		let provider = crypto::provider();
 		let verification = self.verification()?;
+		let reloadable_roots = cfg!(feature = "watch")
+			&& matches!(&verification, Verification::Roots { custom, .. } if !custom.paths.is_empty());
 
 		// Allow TLS 1.2 in addition to 1.3 for WebSocket compatibility.
 		// QUIC always negotiates TLS 1.3 regardless of this setting.
 		let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
 			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?;
 
-		// Install the server-certificate verifier. Disabled/Fingerprints get a
-		// placeholder empty store here and swap in their own verifier below.
-		let builder = match &verification {
-			Verification::Roots { custom, system: true } => Self::system_verifier(builder, custom, &provider)?,
-			Verification::Roots { custom, system: false } => builder.with_root_certificates(root_store(custom)?),
-			Verification::Disabled | Verification::Fingerprints(_) => {
-				builder.with_root_certificates(rustls::RootCertStore::empty())
-			}
-		};
-
-		let mut tls = self.with_client_auth(builder)?;
-
-		match verification {
+		let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> = match verification {
 			Verification::Disabled => {
 				tracing::warn!(
 					"TLS server certificate verification is disabled; A man-in-the-middle attack is possible."
 				);
-				tls.dangerous()
-					.set_certificate_verifier(Arc::new(NoCertificateVerification(provider)));
+				Arc::new(NoCertificateVerification(provider))
 			}
 			Verification::Fingerprints(fingerprints) => {
 				let fingerprints = fingerprints.into_iter().map(|fp| fp.to_vec()).collect();
-				let verifier = FingerprintVerifier::new(provider, fingerprints);
-				tls.dangerous().set_certificate_verifier(Arc::new(verifier));
+				Arc::new(FingerprintVerifier::new(provider, fingerprints))
 			}
-			// The verifier was installed by the builder above.
-			Verification::Roots { .. } => {}
+			Verification::Roots { custom, system } => Self::root_server_verifier(custom, system, provider)?,
+		};
+
+		let builder = builder.dangerous().with_custom_certificate_verifier(verifier);
+		let mut tls = self.with_client_auth(builder)?;
+
+		// A resumed session skips certificate verification. Disable resumption when
+		// roots can change underneath this config so removing a CA takes effect on
+		// every subsequent handshake.
+		if reloadable_roots {
+			tls.resumption = rustls::client::Resumption::disabled();
 		}
 
 		Ok(tls)
 	}
 
-	/// Build the verifier for system/default trust on the rustls backends.
+	/// Build a reloadable verifier for custom roots and system/default trust.
 	///
 	/// Uses the OS-native platform verifier (Keychain/SecTrust, Windows
 	/// CryptoAPI, or the native store on Linux) everywhere it works, optionally
 	/// extended with `custom` PEM roots. Android's platform verifier needs JNI
 	/// setup (see [`init_android`]); until that has run we trust the bundled
 	/// Mozilla roots so verification still works out of the box.
-	fn system_verifier(
-		builder: rustls::ConfigBuilder<rustls::ClientConfig, rustls::WantsVerifier>,
+	fn root_server_verifier(
+		custom: CustomRoots,
+		system: bool,
+		provider: crypto::Provider,
+	) -> Result<Arc<dyn rustls::client::danger::ServerCertVerifier>> {
+		let initial = Self::build_root_server_verifier(&custom.current(), system, &provider)?;
+
+		#[cfg(feature = "watch")]
+		if !custom.paths.is_empty() {
+			let paths = custom.paths.clone();
+			let reload = custom.clone();
+			let reload_provider = provider.clone();
+			let verifier = ReloadingServerVerifier::new(&paths, initial, move || {
+				let roots = reload.load()?;
+				let verifier = Self::build_root_server_verifier(&roots, system, &reload_provider)?;
+				reload.replace(roots);
+				Ok(verifier)
+			});
+			return Ok(Arc::new(verifier));
+		}
+
+		Ok(initial)
+	}
+
+	fn build_root_server_verifier(
 		custom: &[CertificateDer<'static>],
+		system: bool,
 		provider: &crypto::Provider,
-	) -> Result<rustls::ConfigBuilder<rustls::ClientConfig, rustls::client::WantsClientCert>> {
+	) -> Result<Arc<dyn rustls::client::danger::ServerCertVerifier>> {
+		if !system {
+			let roots = root_store(custom)?;
+			let verifier =
+				rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
+					.build()
+					.map_err(Error::ServerVerifier)?;
+			return Ok(verifier);
+		}
+
 		// Android's platform verifier needs JNI init (see `init_android`) and,
 		// unlike the other platforms, can't be extended with custom roots. So use
 		// it only once initialized and with no custom roots; otherwise trust the
@@ -492,7 +852,7 @@ impl Client {
 		{
 			if ANDROID_INITIALIZED.load(std::sync::atomic::Ordering::Acquire) && custom.is_empty() {
 				let verifier = rustls_platform_verifier::Verifier::new(provider.clone())?;
-				return Ok(builder.dangerous().with_custom_certificate_verifier(Arc::new(verifier)));
+				return Ok(Arc::new(verifier));
 			}
 
 			let mut roots = rustls::RootCertStore::empty();
@@ -500,7 +860,11 @@ impl Client {
 			for cert in custom {
 				roots.add(cert.clone()).map_err(Error::AddRoot)?;
 			}
-			Ok(builder.with_root_certificates(roots))
+			let verifier =
+				rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
+					.build()
+					.map_err(Error::ServerVerifier)?;
+			Ok(verifier)
 		}
 
 		#[cfg(not(target_os = "android"))]
@@ -510,7 +874,7 @@ impl Client {
 			} else {
 				rustls_platform_verifier::Verifier::new_with_extra_roots(custom.iter().cloned(), provider.clone())?
 			};
-			Ok(builder.dangerous().with_custom_certificate_verifier(Arc::new(verifier)))
+			Ok(Arc::new(verifier))
 		}
 	}
 
@@ -569,7 +933,7 @@ pub fn init_android(env: &mut jni::Env, context: jni::objects::JObject) -> Resul
 	Ok(())
 }
 
-// ── Server ──────────────────────────────────────────────────────────
+// ── Listen ──────────────────────────────────────────────────────────
 
 /// TLS configuration for the server.
 ///
@@ -582,15 +946,15 @@ pub fn init_android(env: &mut jni::Env, context: jni::objects::JObject) -> Resul
 #[serde(deny_unknown_fields)]
 #[group(id = "tls-server")]
 #[non_exhaustive]
-pub struct Server {
+pub struct Listen {
 	/// Load the given certificate from disk.
-	#[arg(long = "tls-cert", id = "tls-cert", env = "MOQ_SERVER_TLS_CERT")]
+	#[arg(long = "listen-tls-cert", id = "listen-tls-cert", env = "MOQ_LISTEN_TLS_CERT")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub cert: Vec<PathBuf>,
 
 	/// Load the given key from disk.
-	#[arg(long = "tls-key", id = "tls-key", env = "MOQ_SERVER_TLS_KEY")]
+	#[arg(long = "listen-tls-key", id = "listen-tls-key", env = "MOQ_LISTEN_TLS_KEY")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub key: Vec<PathBuf>,
@@ -598,10 +962,10 @@ pub struct Server {
 	/// Or generate a new certificate and key with the given hostnames.
 	/// This won't be valid unless the client uses the fingerprint or disables verification.
 	#[arg(
-		long = "tls-generate",
-		id = "tls-generate",
+		long = "listen-tls-generate",
+		id = "listen-tls-generate",
 		value_delimiter = ',',
-		env = "MOQ_SERVER_TLS_GENERATE"
+		env = "MOQ_LISTEN_TLS_GENERATE"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
@@ -615,32 +979,158 @@ pub struct Server {
 	/// do not present a certificate are unaffected.
 	///
 	/// Plain-TLS listeners built via [`Self::server_config`] also use these roots
-	/// for optional mTLS.
+	/// for optional mTLS. Root files are hot reloaded for new handshakes on the
+	/// rustls-based backends; quiche servers require a restart because their TLS
+	/// hook fixes client-auth roots when the listener is built.
 	#[arg(
-		long = "server-tls-root",
-		id = "server-tls-root",
+		long = "listen-tls-root",
+		id = "listen-tls-root",
 		value_delimiter = ',',
-		env = "MOQ_SERVER_TLS_ROOT"
+		env = "MOQ_LISTEN_TLS_ROOT"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
+
+	/// The released `--server-tls-*` spellings and env vars, folded into the fields
+	/// above by [`Self::resolved`].
+	#[command(flatten)]
+	#[serde(skip)]
+	pub(crate) deprecated: ListenDeprecated,
 }
 
-impl Server {
-	/// Load all configured root CAs into a [`rustls::RootCertStore`].
-	pub fn load_roots(&self) -> Result<rustls::RootCertStore> {
-		let mut roots = rustls::RootCertStore::empty();
-		for path in &self.root {
-			let certs = read_certs(path)?;
-			if certs.is_empty() {
-				return Err(Error::Empty);
-			}
-			for cert in certs {
-				roots.add(cert).map_err(Error::AddRoot)?;
+/// The released served-identity spellings, kept parsing but hidden.
+///
+/// The flags themselves mostly survived this rename (`--tls-cert` is still
+/// `--tls-cert`); what they carry here is their original env var, which a clap
+/// alias cannot. A relay configured through the environment would otherwise come
+/// up with no certificate at all.
+#[derive(Clone, Default, Debug, clap::Args)]
+pub(crate) struct ListenDeprecated {
+	#[arg(
+		id = "server-tls-cert",
+		long = "tls-cert",
+		alias = "server-tls-cert",
+		env = "MOQ_SERVER_TLS_CERT",
+		hide = true
+	)]
+	cert: Vec<PathBuf>,
+
+	#[arg(
+		id = "server-tls-key",
+		long = "tls-key",
+		alias = "server-tls-key",
+		env = "MOQ_SERVER_TLS_KEY",
+		hide = true
+	)]
+	key: Vec<PathBuf>,
+
+	#[arg(
+		id = "server-tls-generate",
+		long = "tls-generate",
+		alias = "server-tls-generate",
+		value_delimiter = ',',
+		env = "MOQ_SERVER_TLS_GENERATE",
+		hide = true
+	)]
+	generate: Vec<String>,
+
+	#[arg(
+		id = "server-tls-root",
+		long = "server-tls-root",
+		value_delimiter = ',',
+		env = "MOQ_SERVER_TLS_ROOT",
+		hide = true
+	)]
+	root: Vec<PathBuf>,
+}
+
+impl Listen {
+	/// Fold every released `--server-tls-*` spelling into the canonical fields.
+	///
+	/// Applied by [`crate::listen::Config::resolved`]. Lists concatenate, since each
+	/// spelling names its own files and dropping one would stop serving (or trusting)
+	/// a certificate. Idempotent.
+	pub fn resolved(&self) -> Self {
+		for (used, deprecated, canonical) in [
+			(!self.deprecated.cert.is_empty(), "--tls-cert", "--listen-tls-cert"),
+			(!self.deprecated.key.is_empty(), "--tls-key", "--listen-tls-key"),
+			(
+				!self.deprecated.generate.is_empty(),
+				"--tls-generate",
+				"--listen-tls-generate",
+			),
+			(
+				!self.deprecated.root.is_empty(),
+				"--server-tls-root",
+				"--listen-tls-root",
+			),
+		] {
+			if used {
+				tracing::warn!("{deprecated} is deprecated; use {canonical}");
 			}
 		}
-		Ok(roots)
+
+		let concat = |canonical: &[PathBuf], legacy: &[PathBuf]| -> Vec<PathBuf> {
+			canonical.iter().chain(legacy).cloned().collect()
+		};
+
+		Self {
+			cert: concat(&self.cert, &self.deprecated.cert),
+			key: concat(&self.key, &self.deprecated.key),
+			generate: self.generate.iter().chain(&self.deprecated.generate).cloned().collect(),
+			root: concat(&self.root, &self.deprecated.root),
+			deprecated: ListenDeprecated::default(),
+		}
+	}
+
+	/// Disable cached client authentication when client roots can reload.
+	#[cfg(feature = "watch")]
+	pub(crate) fn disable_resumption(&self, tls: &mut rustls::ServerConfig) {
+		if !self.root.is_empty() {
+			tls.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+			tls.send_tls13_tickets = 0;
+		}
+	}
+
+	/// Load all configured root CAs into a [`rustls::RootCertStore`].
+	pub fn load_roots(&self) -> Result<rustls::RootCertStore> {
+		root_store(&read_roots(&self.root)?)
+	}
+
+	/// Build the optional-client-auth verifier, reloading configured roots in place.
+	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+	pub(crate) fn client_verifier(
+		&self,
+		provider: crypto::Provider,
+	) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> {
+		let initial = Self::build_client_verifier(&self.root, &provider)?;
+
+		#[cfg(feature = "watch")]
+		{
+			let paths = self.root.clone();
+			let reload_paths = paths.clone();
+			let reload_provider = provider.clone();
+			let verifier = ReloadingClientVerifier::new(&paths, initial, move || {
+				Self::build_client_verifier(&reload_paths, &reload_provider)
+			});
+			Ok(Arc::new(verifier))
+		}
+
+		#[cfg(not(feature = "watch"))]
+		Ok(initial)
+	}
+
+	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+	fn build_client_verifier(
+		paths: &[PathBuf],
+		provider: &crypto::Provider,
+	) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> {
+		let roots = root_store(&read_roots(paths)?)?;
+		rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone())
+			.allow_unauthenticated()
+			.build()
+			.map_err(Error::ClientVerifier)
 	}
 
 	/// Build a [`rustls::ServerConfig`] for a plain-TLS (non-QUIC) server, e.g. an
@@ -657,9 +1147,9 @@ impl Server {
 	}
 }
 
-/// Build a [`rustls::ServerConfig`] from a [`Server`] for a plain-TLS listener.
+/// Build a [`rustls::ServerConfig`] from a [`Listen`] for a plain-TLS listener.
 #[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-fn server_config(config: &Server, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
+fn server_config(config: &Listen, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
 	let provider = crypto::provider();
 
 	let certs = ServeCerts::new(provider.clone());
@@ -673,22 +1163,19 @@ fn server_config(config: &Server, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::Serv
 	let mut tls = if config.root.is_empty() {
 		builder.with_no_client_auth().with_cert_resolver(certs)
 	} else {
-		let roots = config.load_roots()?;
-		let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
-			.allow_unauthenticated()
-			.build()
-			.map_err(Error::ClientVerifier)?;
+		let verifier = config.client_verifier(provider)?;
 		builder.with_client_cert_verifier(verifier).with_cert_resolver(certs)
 	};
 
 	tls.alpn_protocols = alpn;
+	config.disable_resumption(&mut tls);
 	Ok(Arc::new(tls))
 }
 
 /// A peer's validated client-certificate chain from the mTLS handshake.
 ///
 /// Returned by [`crate::Request::peer_identity`] when the peer presented a
-/// certificate that chained to a configured [`Server::root`]. Owns the chain
+/// certificate that chained to a configured [`Listen::root`]. Owns the chain
 /// (leaf first) so callers can inspect it, e.g. [`expiry`](Self::expiry),
 /// without re-parsing the type-erased QUIC identity.
 #[derive(Clone)]
@@ -734,9 +1221,11 @@ impl PeerIdentity {
 }
 
 /// The certificates a server is currently serving.
+///
+/// Only a QUIC backend serves TLS of its own, so nothing else populates this.
+#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 #[derive(Debug, Default)]
 pub(crate) struct Info {
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub(crate) certs: Vec<Arc<rustls::sign::CertifiedKey>>,
 	pub(crate) fingerprints: Vec<String>,
 }
@@ -781,6 +1270,141 @@ impl Certificates {
 		}
 		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
 		Vec::new()
+	}
+}
+
+/// Delegates each server-certificate check to the latest valid root verifier.
+#[cfg(feature = "watch")]
+#[derive(Debug)]
+struct ReloadingServerVerifier {
+	inner: Reloading<dyn rustls::client::danger::ServerCertVerifier>,
+}
+
+#[cfg(feature = "watch")]
+impl ReloadingServerVerifier {
+	fn new(
+		paths: &[PathBuf],
+		initial: Arc<dyn rustls::client::danger::ServerCertVerifier>,
+		build: impl Fn() -> Result<Arc<dyn rustls::client::danger::ServerCertVerifier>> + Send + Sync + 'static,
+	) -> Self {
+		Self {
+			inner: Reloading::new(paths, initial, "client", build),
+		}
+	}
+}
+
+#[cfg(feature = "watch")]
+impl rustls::client::danger::ServerCertVerifier for ReloadingServerVerifier {
+	fn verify_server_cert(
+		&self,
+		end_entity: &CertificateDer<'_>,
+		intermediates: &[CertificateDer<'_>],
+		server_name: &ServerName<'_>,
+		ocsp_response: &[u8],
+		now: UnixTime,
+	) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+		self.inner
+			.current()
+			.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+	}
+
+	fn verify_tls12_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &rustls::DigitallySignedStruct,
+	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+		self.inner.current().verify_tls12_signature(message, cert, dss)
+	}
+
+	fn verify_tls13_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &rustls::DigitallySignedStruct,
+	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+		self.inner.current().verify_tls13_signature(message, cert, dss)
+	}
+
+	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+		self.inner.current().supported_verify_schemes()
+	}
+
+	fn requires_raw_public_keys(&self) -> bool {
+		self.inner.current().requires_raw_public_keys()
+	}
+}
+
+/// Delegates each client-certificate check to the latest valid root verifier.
+#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+#[derive(Debug)]
+struct ReloadingClientVerifier {
+	inner: Reloading<dyn rustls::server::danger::ClientCertVerifier>,
+}
+
+#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+impl ReloadingClientVerifier {
+	fn new(
+		paths: &[PathBuf],
+		initial: Arc<dyn rustls::server::danger::ClientCertVerifier>,
+		build: impl Fn() -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> + Send + Sync + 'static,
+	) -> Self {
+		Self {
+			inner: Reloading::new(paths, initial, "server", build),
+		}
+	}
+}
+
+#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+impl rustls::server::danger::ClientCertVerifier for ReloadingClientVerifier {
+	fn offer_client_auth(&self) -> bool {
+		self.inner.current().offer_client_auth()
+	}
+
+	fn client_auth_mandatory(&self) -> bool {
+		self.inner.current().client_auth_mandatory()
+	}
+
+	fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+		// A live verifier cannot return a borrowed slice from a replaceable value.
+		// Empty hints ask clients to offer any configured identity, which rustls
+		// then verifies against the current roots.
+		&[]
+	}
+
+	fn verify_client_cert(
+		&self,
+		end_entity: &CertificateDer<'_>,
+		intermediates: &[CertificateDer<'_>],
+		now: UnixTime,
+	) -> std::result::Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+		self.inner.current().verify_client_cert(end_entity, intermediates, now)
+	}
+
+	fn verify_tls12_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &rustls::DigitallySignedStruct,
+	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+		self.inner.current().verify_tls12_signature(message, cert, dss)
+	}
+
+	fn verify_tls13_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &rustls::DigitallySignedStruct,
+	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+		self.inner.current().verify_tls13_signature(message, cert, dss)
+	}
+
+	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+		self.inner.current().supported_verify_schemes()
+	}
+
+	fn requires_raw_public_keys(&self) -> bool {
+		self.inner.current().requires_raw_public_keys()
 	}
 }
 
@@ -881,9 +1505,59 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 #[cfg(test)]
 #[cfg(all(any(feature = "quinn", feature = "noq", feature = "quiche"), feature = "aws-lc-rs"))]
 mod tests {
+	/// Disabling verification cannot be combined with trust material that it would
+	/// otherwise ignore.
+	#[test]
+	fn disable_verify_rejects_trust_material() {
+		let insecure = Connect {
+			insecure: Some(true),
+			..Default::default()
+		};
+		assert!(matches!(insecure.verification(), Ok(Verification::Disabled)));
+
+		let with_fingerprint = Connect {
+			insecure: Some(true),
+			fingerprint: vec!["ab".repeat(32)],
+			..Default::default()
+		};
+		assert!(matches!(
+			with_fingerprint.verification(),
+			Err(Error::DisableVerifyWithTrust)
+		));
+
+		let with_root = Connect {
+			insecure: Some(true),
+			root: vec!["/tmp/root.pem".into()],
+			..Default::default()
+		};
+		assert!(matches!(with_root.verification(), Err(Error::DisableVerifyWithTrust)));
+
+		let with_system_roots = Connect {
+			insecure: Some(true),
+			system_roots: Some(true),
+			..Default::default()
+		};
+		assert!(matches!(
+			with_system_roots.verification(),
+			Err(Error::DisableVerifyWithTrust)
+		));
+
+		let without_system_roots = Connect {
+			insecure: Some(true),
+			system_roots: Some(false),
+			..Default::default()
+		};
+		assert!(matches!(
+			without_system_roots.verification(),
+			Ok(Verification::Disabled)
+		));
+	}
+
 	use super::*;
 	use rustls::client::danger::ServerCertVerifier;
 	use rustls::pki_types::ServerName;
+	#[cfg(feature = "watch")]
+	use rustls::server::danger::ClientCertVerifier;
 
 	fn self_signed() -> CertificateDer<'static> {
 		let key = rcgen::KeyPair::generate().unwrap();
@@ -944,7 +1618,7 @@ mod tests {
 		let fingerprint = hex::encode(crypto::sha256(&crypto::provider(), cert.as_ref()));
 
 		// A bogus hash still builds; verification happens at handshake time.
-		let config = Client {
+		let config = Connect {
 			fingerprint: vec![fingerprint],
 			..Default::default()
 		};
@@ -953,7 +1627,7 @@ mod tests {
 
 	#[test]
 	fn build_rejects_invalid_fingerprint_hex() {
-		let config = Client {
+		let config = Connect {
 			fingerprint: vec!["not-hex".to_string()],
 			..Default::default()
 		};
@@ -963,7 +1637,7 @@ mod tests {
 	#[test]
 	fn build_rejects_wrong_length_fingerprint() {
 		// Valid hex, but only 2 bytes instead of 32.
-		let config = Client {
+		let config = Connect {
 			fingerprint: vec!["abcd".to_string()],
 			..Default::default()
 		};
@@ -974,7 +1648,7 @@ mod tests {
 	fn build_rejects_no_roots() {
 		// System roots disabled with no custom root and no alternate verifier:
 		// nothing could ever verify, so reject up front.
-		let config = Client {
+		let config = Connect {
 			system_roots: Some(false),
 			..Default::default()
 		};
@@ -983,10 +1657,10 @@ mod tests {
 
 	#[test]
 	fn build_allows_no_roots_when_verification_overridden() {
-		// disable_verify swaps in its own verifier, so an empty store is fine.
-		let config = Client {
+		// insecure swaps in its own verifier, so an empty store is fine.
+		let config = Connect {
 			system_roots: Some(false),
-			disable_verify: Some(true),
+			insecure: Some(true),
 			..Default::default()
 		};
 		assert!(config.build().is_ok());
@@ -994,7 +1668,7 @@ mod tests {
 		// Same for fingerprint pinning.
 		let cert = self_signed();
 		let fingerprint = hex::encode(crypto::sha256(&crypto::provider(), cert.as_ref()));
-		let config = Client {
+		let config = Connect {
 			system_roots: Some(false),
 			fingerprint: vec![fingerprint],
 			..Default::default()
@@ -1009,7 +1683,7 @@ mod tests {
 
 		// Fingerprint pinning bypasses the CA chain, so combining it with roots
 		// is rejected rather than silently ignoring one of them.
-		let with_system = Client {
+		let with_system = Connect {
 			fingerprint: vec![fingerprint.clone()],
 			system_roots: Some(true),
 			..Default::default()
@@ -1018,7 +1692,7 @@ mod tests {
 
 		// The conflict is detected before any root file is read, so the path
 		// need not exist.
-		let with_custom = Client {
+		let with_custom = Connect {
 			fingerprint: vec![fingerprint],
 			root: vec![PathBuf::from("/does-not-exist.pem")],
 			..Default::default()
@@ -1039,11 +1713,355 @@ mod tests {
 		(file, path)
 	}
 
+	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	fn signed_certificates() -> (
+		String,
+		CertificateDer<'static>,
+		PrivateKeyDer<'static>,
+		CertificateDer<'static>,
+		PrivateKeyDer<'static>,
+	) {
+		use rcgen::{BasicConstraints, ExtendedKeyUsagePurpose, IsCa, Issuer};
+
+		let ca_key = rcgen::KeyPair::generate().unwrap();
+		let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+		ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+		let ca = ca_params.self_signed(&ca_key).unwrap();
+		let issuer = Issuer::from_params(&ca_params, &ca_key);
+
+		let server_key = rcgen::KeyPair::generate().unwrap();
+		let server_key_der = PrivatePkcs8KeyDer::from(server_key.serialize_der());
+		let mut server_params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+		server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+		let server = server_params.signed_by(&server_key, &issuer).unwrap();
+
+		let client_key = rcgen::KeyPair::generate().unwrap();
+		let client_key_der = PrivatePkcs8KeyDer::from(client_key.serialize_der());
+		let mut client_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+		client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+		let client = client_params.signed_by(&client_key, &issuer).unwrap();
+
+		(
+			ca.pem(),
+			server.into(),
+			server_key_der.into(),
+			client.into(),
+			client_key_der.into(),
+		)
+	}
+
+	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	fn handshake_kinds(
+		client: Arc<rustls::ClientConfig>,
+		server: Arc<rustls::ServerConfig>,
+	) -> std::result::Result<(rustls::HandshakeKind, rustls::HandshakeKind), rustls::Error> {
+		let name = ServerName::try_from("localhost").unwrap();
+		let mut client = rustls::ClientConnection::new(client, name).unwrap();
+		let mut server = rustls::ServerConnection::new(server).unwrap();
+
+		for _ in 0..100 {
+			let mut client_data = Vec::new();
+			client.write_tls(&mut client_data).unwrap();
+			if !client_data.is_empty() {
+				server.read_tls(&mut client_data.as_slice()).unwrap();
+				server.process_new_packets()?;
+			}
+
+			let mut server_data = Vec::new();
+			server.write_tls(&mut server_data).unwrap();
+			if !server_data.is_empty() {
+				client.read_tls(&mut server_data.as_slice()).unwrap();
+				client.process_new_packets()?;
+			}
+
+			if !client.is_handshaking() && !server.is_handshaking() && !client.wants_write() && !server.wants_write() {
+				return Ok((client.handshake_kind().unwrap(), server.handshake_kind().unwrap()));
+			}
+		}
+
+		panic!("TLS handshake did not settle");
+	}
+
+	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[test]
+	fn reloadable_roots_disable_session_resumption() {
+		use std::io::Write;
+
+		let (ca, server_cert, server_key, _, _) = signed_certificates();
+		let mut root_file = tempfile::NamedTempFile::new().unwrap();
+		root_file.write_all(ca.as_bytes()).unwrap();
+		let roots = read_roots(&[root_file.path().to_path_buf()]).unwrap();
+		let provider = crypto::provider();
+
+		let control = rustls::ClientConfig::builder_with_provider(provider.clone())
+			.with_safe_default_protocol_versions()
+			.unwrap()
+			.with_root_certificates(root_store(&roots).unwrap())
+			.with_no_client_auth();
+		let reloadable = Connect {
+			root: vec![root_file.path().to_path_buf()],
+			..Default::default()
+		}
+		.build()
+		.unwrap();
+		let server = rustls::ServerConfig::builder_with_provider(provider)
+			.with_safe_default_protocol_versions()
+			.unwrap()
+			.with_no_client_auth()
+			.with_single_cert(vec![server_cert], server_key)
+			.unwrap();
+		let server = Arc::new(server);
+
+		let control = Arc::new(control);
+		assert_eq!(
+			handshake_kinds(control.clone(), server.clone()).unwrap().0,
+			rustls::HandshakeKind::Full
+		);
+		assert_eq!(
+			handshake_kinds(control, server.clone()).unwrap().0,
+			rustls::HandshakeKind::Resumed
+		);
+
+		let reloadable = Arc::new(reloadable);
+		assert_eq!(
+			handshake_kinds(reloadable.clone(), server.clone()).unwrap().0,
+			rustls::HandshakeKind::Full
+		);
+		assert_eq!(
+			handshake_kinds(reloadable, server).unwrap().0,
+			rustls::HandshakeKind::Full
+		);
+	}
+
+	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[test]
+	fn reloadable_client_roots_disable_server_resumption() {
+		use std::io::Write;
+
+		let (ca_a, server_cert, server_key, client_cert, client_key) = signed_certificates();
+		let (ca_b, _, _, _, _) = signed_certificates();
+		let mut root_file = tempfile::NamedTempFile::new().unwrap();
+		root_file.write_all(ca_a.as_bytes()).unwrap();
+		let paths = vec![root_file.path().to_path_buf()];
+		let provider = crypto::provider();
+
+		let build_client = |cert, key| {
+			rustls::ClientConfig::builder_with_provider(provider.clone())
+				.with_safe_default_protocol_versions()
+				.unwrap()
+				.dangerous()
+				.with_custom_certificate_verifier(Arc::new(NoCertificateVerification(provider.clone())))
+				.with_client_auth_cert(vec![cert], key)
+				.unwrap()
+		};
+		let control_client = Arc::new(build_client(client_cert.clone(), client_key.clone_key()));
+		let reloadable_client = Arc::new(build_client(client_cert, client_key));
+
+		let verifier = Listen::build_client_verifier(&paths, &provider).unwrap();
+		let control = rustls::ServerConfig::builder_with_provider(provider.clone())
+			.with_safe_default_protocol_versions()
+			.unwrap()
+			.with_client_cert_verifier(verifier)
+			.with_single_cert(vec![server_cert.clone()], server_key.clone_key())
+			.unwrap();
+
+		let initial = Listen::build_client_verifier(&paths, &provider).unwrap();
+		let reload_paths = paths.clone();
+		let reload_provider = provider.clone();
+		let verifier = Arc::new(ReloadingClientVerifier::new(&paths, initial, move || {
+			Listen::build_client_verifier(&reload_paths, &reload_provider)
+		}));
+		let reload = verifier.inner.state.clone();
+		let mut reloadable = rustls::ServerConfig::builder_with_provider(provider)
+			.with_safe_default_protocol_versions()
+			.unwrap()
+			.with_client_cert_verifier(verifier)
+			.with_single_cert(vec![server_cert], server_key)
+			.unwrap();
+		Listen {
+			root: paths,
+			..Default::default()
+		}
+		.disable_resumption(&mut reloadable);
+
+		let control = Arc::new(control);
+		assert_eq!(
+			handshake_kinds(control_client.clone(), control.clone()).unwrap().1,
+			rustls::HandshakeKind::Full
+		);
+		assert_eq!(
+			handshake_kinds(control_client, control).unwrap().1,
+			rustls::HandshakeKind::Resumed
+		);
+
+		let reloadable = Arc::new(reloadable);
+		assert_eq!(
+			handshake_kinds(reloadable_client.clone(), reloadable.clone())
+				.unwrap()
+				.1,
+			rustls::HandshakeKind::Full
+		);
+
+		std::fs::write(root_file.path(), ca_b).unwrap();
+		reload.reload();
+		assert!(handshake_kinds(reloadable_client, reloadable).is_err());
+	}
+
+	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[test]
+	fn custom_roots_reload_for_new_client_and_server_handshakes() {
+		use std::io::Write;
+
+		let (ca_a, server_a, _, client_a, _) = signed_certificates();
+		let (ca_b, server_b, _, client_b, _) = signed_certificates();
+		let mut root_file = tempfile::NamedTempFile::new().unwrap();
+		root_file.write_all(ca_a.as_bytes()).unwrap();
+		let paths = vec![root_file.path().to_path_buf()];
+		let provider = crypto::provider();
+
+		let custom = CustomRoots::new(paths.clone()).unwrap();
+		let initial = Connect::build_root_server_verifier(&custom.current(), false, &provider).unwrap();
+		let reload_custom = custom.clone();
+		let reload_provider = provider.clone();
+		let server_verifier = ReloadingServerVerifier::new(&paths, initial, move || {
+			let roots = reload_custom.load()?;
+			let verifier = Connect::build_root_server_verifier(&roots, false, &reload_provider)?;
+			reload_custom.replace(roots);
+			Ok(verifier)
+		});
+
+		let initial = Listen::build_client_verifier(&paths, &provider).unwrap();
+		let reload_paths = paths.clone();
+		let reload_provider = provider.clone();
+		let client_verifier = ReloadingClientVerifier::new(&paths, initial, move || {
+			Listen::build_client_verifier(&reload_paths, &reload_provider)
+		});
+
+		let name = ServerName::try_from("localhost").unwrap();
+		let now = UnixTime::now();
+		assert!(
+			server_verifier
+				.verify_server_cert(&server_a, &[], &name, &[], now)
+				.is_ok()
+		);
+		assert!(
+			server_verifier
+				.verify_server_cert(&server_b, &[], &name, &[], now)
+				.is_err()
+		);
+		assert!(client_verifier.verify_client_cert(&client_a, &[], now).is_ok());
+		assert!(client_verifier.verify_client_cert(&client_b, &[], now).is_err());
+
+		std::fs::write(root_file.path(), ca_b).unwrap();
+		server_verifier.inner.state.reload();
+		client_verifier.inner.state.reload();
+
+		assert!(
+			server_verifier
+				.verify_server_cert(&server_a, &[], &name, &[], now)
+				.is_err()
+		);
+		assert!(client_verifier.verify_client_cert(&client_a, &[], now).is_err());
+
+		// A malformed replacement must not erase the last valid verifier.
+		std::fs::write(root_file.path(), "not a PEM certificate").unwrap();
+		server_verifier.inner.state.reload();
+		client_verifier.inner.state.reload();
+		assert!(
+			server_verifier
+				.verify_server_cert(&server_b, &[], &name, &[], now)
+				.is_ok()
+		);
+		assert!(client_verifier.verify_client_cert(&client_b, &[], now).is_ok());
+	}
+
+	#[cfg(all(feature = "quiche", feature = "watch"))]
+	#[test]
+	fn custom_root_refresh_retains_last_valid_bundle() {
+		use std::io::Write;
+
+		let (ca_a, _, _, _, _) = signed_certificates();
+		let (ca_b, _, _, _, _) = signed_certificates();
+		let mut root_file = tempfile::NamedTempFile::new().unwrap();
+		root_file.write_all(ca_a.as_bytes()).unwrap();
+		let roots = CustomRoots::new(vec![root_file.path().to_path_buf()]).unwrap();
+		let initial = roots.current();
+
+		std::fs::write(root_file.path(), "not a PEM certificate").unwrap();
+		assert_eq!(roots.refresh(), initial);
+
+		std::fs::write(
+			root_file.path(),
+			"-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n",
+		)
+		.unwrap();
+		assert_eq!(roots.refresh(), initial);
+
+		std::fs::write(root_file.path(), ca_b).unwrap();
+		let rotated = roots.refresh();
+		assert_ne!(rotated, initial);
+		assert_eq!(roots.current(), rotated);
+	}
+
+	#[cfg(all(feature = "quiche", feature = "watch"))]
+	#[test]
+	fn custom_root_refresh_serializes_cache_updates() {
+		let (ca_a, _, _, _, _) = signed_certificates();
+		let (ca_b, _, _, _, _) = signed_certificates();
+		let (ca_c, _, _, _, _) = signed_certificates();
+		let parse = |pem: &str| {
+			CertificateDer::pem_slice_iter(pem.as_bytes())
+				.collect::<std::result::Result<Vec<_>, _>>()
+				.unwrap()
+		};
+		let initial = parse(&ca_a);
+		let bundle_b = parse(&ca_b);
+		let bundle_c = parse(&ca_c);
+		let roots = CustomRoots {
+			paths: Vec::new(),
+			current: Arc::new(RwLock::new(initial)),
+		};
+
+		let (first_loaded_tx, first_loaded_rx) = std::sync::mpsc::sync_channel(0);
+		let (release_first_tx, release_first_rx) = std::sync::mpsc::sync_channel(0);
+		let first_roots = roots.clone();
+		let first = std::thread::spawn(move || {
+			first_roots.refresh_with(|| {
+				first_loaded_tx.send(()).unwrap();
+				release_first_rx.recv().unwrap();
+				Ok(bundle_b)
+			})
+		});
+		first_loaded_rx.recv().unwrap();
+
+		let (second_ready_tx, second_ready_rx) = std::sync::mpsc::sync_channel(0);
+		let (second_loaded_tx, second_loaded_rx) = std::sync::mpsc::channel();
+		let second_roots = roots.clone();
+		let expected = bundle_c.clone();
+		let second = std::thread::spawn(move || {
+			second_ready_tx.send(()).unwrap();
+			second_roots.refresh_with(|| {
+				second_loaded_tx.send(()).unwrap();
+				Ok(bundle_c)
+			})
+		});
+		second_ready_rx.recv().unwrap();
+		let overlapped = second_loaded_rx
+			.recv_timeout(std::time::Duration::from_millis(100))
+			.is_ok();
+
+		release_first_tx.send(()).unwrap();
+		first.join().unwrap();
+		second.join().unwrap();
+		assert!(!overlapped, "root cache refresh transactions must not overlap");
+		assert_eq!(roots.current(), expected);
+	}
+
 	#[test]
 	fn build_uses_platform_verifier_by_default() {
 		// No custom roots, system trust on: resolves to the OS platform verifier
 		// (bundled Mozilla roots on Android) and must build cleanly everywhere.
-		assert!(Client::default().build().is_ok());
+		assert!(Connect::default().build().is_ok());
 	}
 
 	#[test]
@@ -1051,7 +2069,7 @@ mod tests {
 		// A custom root with system trust left at its default disables the system
 		// roots, verifying against the custom PEM alone.
 		let (_keep, path) = self_signed_root();
-		let config = Client {
+		let config = Connect {
 			root: vec![path],
 			..Default::default()
 		};
@@ -1063,7 +2081,7 @@ mod tests {
 		// Custom roots layered on top of system trust: exercises the platform
 		// verifier's extra-roots path (or the bundled roots plus custom on Android).
 		let (_keep, path) = self_signed_root();
-		let config = Client {
+		let config = Connect {
 			root: vec![path],
 			system_roots: Some(true),
 			..Default::default()
@@ -1090,7 +2108,7 @@ impl ServeCerts {
 		}
 	}
 
-	pub fn load_certs(&self, config: &Server) -> Result<()> {
+	pub fn load_certs(&self, config: &Listen) -> Result<()> {
 		if config.cert.len() != config.key.len() {
 			return Err(Error::CertKeyCountMismatch);
 		}
@@ -1231,7 +2249,7 @@ impl rustls::server::ResolvesServerCert for ServeCerts {
 /// `mv`-into-place rotate certs with no external signal. Returns immediately when
 /// only generated certs are configured: there's nothing on disk to watch.
 #[cfg(any(feature = "quinn", feature = "noq"))]
-pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: Server) {
+pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: Listen) {
 	let paths: Vec<PathBuf> = tls_config.cert.iter().chain(tls_config.key.iter()).cloned().collect();
 	if paths.is_empty() {
 		return;
@@ -1252,5 +2270,97 @@ pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: Server) {
 		if let Err(err) = certs.load_certs(&tls_config) {
 			tracing::warn!(%err, "failed to reload server certificates");
 		}
+	}
+}
+
+#[cfg(test)]
+mod legacy_tests {
+	use super::*;
+	use clap::Parser;
+
+	/// A parser wrapping the sections, which derive `Args` rather than `Parser`.
+	#[derive(Parser)]
+	struct Cli {
+		#[command(flatten)]
+		connect: Connect,
+		#[command(flatten)]
+		listen: Listen,
+	}
+
+	fn parse(args: &[&str]) -> Cli {
+		let mut argv = vec!["test"];
+		argv.extend_from_slice(args);
+		Cli::parse_from(argv)
+	}
+
+	/// The released `--client-tls-*` spellings still land in the canonical fields.
+	#[test]
+	fn released_connect_spellings_fold_in() {
+		let tls = parse(&[
+			"--client-tls-root",
+			"/tmp/ca.pem",
+			"--client-tls-cert",
+			"/tmp/client.pem",
+			"--client-tls-key",
+			"/tmp/client.key",
+			"--client-tls-host-name",
+			"relay.example.com",
+			"--client-tls-disable-verify=true",
+		])
+		.connect
+		.resolved();
+
+		assert_eq!(tls.root, vec![PathBuf::from("/tmp/ca.pem")]);
+		assert_eq!(tls.cert, Some(PathBuf::from("/tmp/client.pem")));
+		assert_eq!(tls.key, Some(PathBuf::from("/tmp/client.key")));
+		assert_eq!(tls.host_name.as_deref(), Some("relay.example.com"));
+		assert_eq!(tls.insecure, Some(true));
+	}
+
+	/// The canonical flag wins, and roots from both spellings are kept: each names
+	/// its own CA, so dropping either would stop trusting one.
+	#[test]
+	fn canonical_wins_and_roots_concatenate() {
+		let tls = parse(&[
+			"--connect-tls-root",
+			"/tmp/new.pem",
+			"--client-tls-root",
+			"/tmp/old.pem",
+			"--connect-tls-host-name",
+			"new.example.com",
+			"--client-tls-host-name",
+			"old.example.com",
+		])
+		.connect
+		.resolved();
+
+		assert_eq!(
+			tls.root,
+			vec![PathBuf::from("/tmp/new.pem"), PathBuf::from("/tmp/old.pem")]
+		);
+		assert_eq!(tls.host_name.as_deref(), Some("new.example.com"));
+
+		// Folding an already-folded config changes nothing.
+		assert_eq!(tls.resolved().root, tls.root);
+	}
+
+	/// The released served-identity spellings: the bare `--tls-*` flags and the
+	/// `--server-tls-*` pair, both carrying `MOQ_SERVER_TLS_*`.
+	#[test]
+	fn released_listen_spellings_fold_in() {
+		let tls = parse(&[
+			"--tls-cert",
+			"/tmp/server.pem",
+			"--tls-key",
+			"/tmp/server.key",
+			"--server-tls-generate",
+			"localhost",
+		])
+		.listen
+		.resolved();
+
+		assert_eq!(tls.cert, vec![PathBuf::from("/tmp/server.pem")]);
+		assert_eq!(tls.key, vec![PathBuf::from("/tmp/server.key")]);
+		assert_eq!(tls.generate, vec!["localhost".to_string()]);
 	}
 }

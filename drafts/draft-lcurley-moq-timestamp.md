@@ -18,14 +18,16 @@ author:
 
 normative:
   moqt: I-D.ietf-moq-transport
+  loc: I-D.ietf-moq-loc
 
 informative:
 
 --- abstract
 
-This document defines an extension for MoQ Transport {{moqt}} that attaches a media presentation timestamp to each object.
+This document specifies the transport-level use of the TIMESTAMP and TIMESCALE properties registered by {{loc}}, independent of the LOC container itself.
 A track-level Timescale property establishes the units, and an object-level Timestamp property carries the presentation time of each object.
 Exposing media time to the transport lets relays make consistent age-based decisions (e.g. dropping stale objects) without parsing the media container, and it remains consistent across hops regardless of buffering or jitter.
+No new code points are requested: an endpoint implementing this document is on the wire indistinguishable from a LOC endpoint that carries only these two properties.
 
 --- middle
 
@@ -34,33 +36,34 @@ Exposing media time to the transport lets relays make consistent age-based decis
 
 
 # Introduction
-{{moqt}} treats object payloads as opaque: "the amount of time elapsed between publishing an Object in Group ID N and in a Group ID > N ... is not defined by this specification" ({{moqt}} Section 2.3.1), and timing is left to the application's container format.
-
+{{moqt}} treats object payloads as opaque, leaving timing to the application's container format.
 This works for endpoints that parse the media, but not for relays.
 A relay frequently needs a notion of *when* an object is meant to be presented:
 
-- **Age-based dropping**: a relay serving a live, latency-sensitive subscription wants to drop objects that are too old to be useful, keeping the freshest content flowing under congestion. Without a timestamp it can only approximate age from wall-clock arrival time, which drifts across hops and is corrupted by buffering and jitter.
-- **Consistent expiration across hops**: every relay on a path should make the same drop decision for the same object. A timestamp embedded in the object is identical at every hop; a wall-clock arrival time is not.
-- **Synchronization hints**: a subscriber can align objects from multiple tracks (e.g. audio and video) using a shared media timeline without first decoding each container.
-
-MoQ also demultiplexes media into many independent tracks — audio, video, captions, metadata, and more — so a timestamp is needed on nearly every track.
-Re-implementing per-object timestamping inside each application's container format, for every track, is repetitive and error-prone; standardizing it at the transport lets one implementation serve every track and lets relays use it directly.
+- **Age-based dropping**: a relay serving a live subscription wants to drop objects too old to be useful. Wall-clock arrival time drifts across hops and is corrupted by buffering and jitter.
+- **Consistent expiration across hops**: a timestamp embedded in the object is identical at every hop, so every relay makes the same drop decision.
+- **Synchronization hints**: a subscriber can align objects from multiple tracks (e.g. audio and video) without first decoding each container.
 
 This extension exposes media time to the transport with two Key-Value-Pairs ({{moqt}} Section 2.5): a track-level **Timescale** and an object-level **Timestamp**.
-The transport does not interpret the *meaning* of the timeline (it is still the application's clock); it only uses the timestamp for relative age comparisons.
+The transport does not interpret the *meaning* of the timeline; it only uses the timestamp for relative age comparisons.
 
-These properties are self-describing and require no SETUP negotiation: a receiver that understands the extension uses them directly, and one that does not ignores them per {{moqt}}.
-Whenever a property is absent — including when neither endpoint implements this extension — the defaults defined below apply: a Timescale of `1000` (milliseconds), and for an object with no Timestamp, the wall-clock arrival time of the object.
+Both properties are already registered by {{loc}}, which defines them for use inside the LOC container.
+This document reuses those registrations verbatim and specifies what a *transport* does with them: a timestamp is only useful to a relay if every publisher writes it the same way, so a second set of code points for the same concept would defeat the purpose.
+An endpoint that implements both this document and LOC writes one copy of each property, not two.
+
+The properties are self-describing and require no SETUP negotiation: a receiver that understands them uses them directly, and one that does not ignores them per {{moqt}}.
+TIMESCALE is what opts a track in: a track that carries it has media times in the stated units, and a track without it has no timeline at all.
+There is deliberately no default timescale; a wrong guess is off by a factor of 1000 rather than detectably broken, and making presence the signal avoids contradicting {{loc}}, which reads a bare Timestamp as microseconds.
 
 
 # TIMESCALE Track Property
-The TIMESCALE property establishes the units for every Timestamp on a track.
+The TIMESCALE property opts a track into timestamps and establishes the units for every Timestamp on it.
 It is a track-level Key-Value-Pair, carried with the track's properties (see {{moqt}} Section 2.5 and Section 12).
 Because the value is a single integer, TIMESCALE uses an even Type so the value is a bare varint with no length prefix:
 
 ~~~
 TIMESCALE Track Property {
-  Type (vi64) = 0x915C0
+  Type (vi64) = 0x08
   Value (vi64)  ; units per second
 }
 ~~~
@@ -68,12 +71,18 @@ TIMESCALE Track Property {
 **Value**:
 The number of timestamp units per second.
 Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (a typical audio sample rate), and `90000` (the RTP video clock).
-The absence of the property defaults to `1000` (milliseconds), so every track has a usable timeline whether or not this extension is in use. A value of `0` is invalid and MUST be treated as this default.
+A value of `0` is invalid; a receiver MUST treat a track that declares it as carrying no timeline.
+
+Absence is meaningful and is not an error.
+A track with no TIMESCALE has no media timeline: a receiver MUST NOT infer units for it, and MUST use wall-clock arrival time for age-based decisions on that track.
+A publisher that emits Timestamps MUST send TIMESCALE, even for units a receiver might otherwise assume.
+{{loc}} permits a bare Timestamp and reads it as microseconds; a receiver that also implements LOC MAY apply that interpretation to a track that omits TIMESCALE, and MUST NOT apply any other.
 
 The Timescale is fixed for the lifetime of the track and MUST NOT change.
+{{loc}} also registers TIMESCALE with Object scope; a receiver that implements both applies such an override to that object alone, and a publisher following this document SHOULD NOT send one.
 
-The Timescale is required to interpret the units of every Timestamp.
-The track's properties are delivered in SUBSCRIBE_OK or TRACK_STATUS ({{moqt}} Section 12); a receiver that begins receiving objects before it has them cannot yet know whether a non-default Timescale applies, so it MUST fall back to wall-clock arrival time for any age-based decision until the properties arrive.
+The track's properties are delivered in SUBSCRIBE_OK or TRACK_STATUS ({{moqt}} Section 12).
+Until they arrive, a receiver MUST fall back to wall-clock arrival time for any age-based decision.
 
 
 # TIMESTAMP Object Property
@@ -83,7 +92,7 @@ It uses an even Type so the value is a bare varint:
 
 ~~~
 TIMESTAMP Object Property {
-  Type (vi64) = 0x915C2
+  Type (vi64) = 0x10
   Value (vi64)  ; absolute presentation time, in Timescale units
 }
 ~~~
@@ -92,11 +101,11 @@ TIMESTAMP Object Property {
 The absolute presentation timestamp of the object, expressed in the track's Timescale.
 Any value (including 0) is valid.
 
-Each Timestamp is absolute, not delta-encoded against a previous object.
-{{moqt}} does not guarantee reliable delivery of every object within a group or subgroup, so an object may be dropped or lost independently; an absolute timestamp remains correct regardless, whereas a delta would be corrupted by any missing predecessor.
+Each Timestamp is absolute, not delta-encoded against a previous object: {{moqt}} does not guarantee delivery of every object, and a delta would be corrupted by any missing predecessor.
 
-A publisher SHOULD attach TIMESTAMP to every object that has a media time.
-An object with no TIMESTAMP has no media time; for age comparisons a receiver MUST treat its effective time as the wall-clock arrival time of the object, which avoids stalling expiration on objects that intentionally carry no timestamp (e.g. keep-alives or gap markers).
+On a track that declares a TIMESCALE, a publisher SHOULD attach TIMESTAMP to every object that has a media time.
+For an object with no TIMESTAMP, a receiver MUST treat its effective time as the wall-clock arrival time, which avoids stalling expiration on objects that intentionally carry no timestamp (e.g. keep-alives or gap markers).
+The same fallback covers every object on a track that declares no TIMESCALE, so a receiver needs one rule, not two.
 
 ## Age-Based Dropping
 Given two objects on the same track, both with TIMESTAMP, a relay computes their relative age as the difference of their timestamps divided by the Timescale.
@@ -116,18 +125,18 @@ Because age-based dropping only affects which objects a live subscription receiv
 
 # IANA Considerations
 
-This document requests the following registrations.
-High, distinctive values are requested to avoid the low ranges reserved by {{moqt}} and to minimize collisions with provisional registrations by other extensions; they also avoid the greasing pattern (`0x7f * N + 0x9D`).
-The property Types are even so that each value is a bare varint with no length prefix (see {{moqt}} Section 2.5).
+This document requests no registrations.
 
-## MOQT Properties
+Both properties it uses are already registered by {{loc}} in the "MOQ Properties" registry ({{moqt}} Section 15.8), and this document changes neither their code points nor their value encodings:
 
-This document requests registrations in the "MOQT Properties" registry ({{moqt}} Section 15.8), used for object and track properties.
+| Value | Name      | Scope         | Reference |
+|:------|:----------|:--------------|:----------|
+| 0x08  | TIMESCALE | Track, Object | {{loc}}   |
+| 0x10  | TIMESTAMP | Object        | {{loc}}   |
 
-| Value   | Name      | Scope  | Reference     |
-|:--------|:----------|:-------|:--------------|
-| 0x915C0 | TIMESCALE | Track  | This Document |
-| 0x915C2 | TIMESTAMP | Object | This Document |
+Both Types are even, so each value is a bare varint with no length prefix (see {{moqt}} Section 2.5).
+
+An earlier version of this document requested its own code points (`0x915C0` and `0x915C2`); they are abandoned in favor of the {{loc}} registrations.
 
 
 --- back

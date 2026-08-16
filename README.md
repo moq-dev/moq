@@ -114,6 +114,8 @@ Read the specifications:
 
 ## Development
 
+Contributions are welcome, including AI-assisted issues, pull requests, reviews, and comments. See [CONTRIBUTING.md](CONTRIBUTING.md#ai-contributions) for the attribution policy and guidance on when to open an issue before writing code.
+
 ```sh
 # See all available commands
 just
@@ -121,12 +123,22 @@ just
 # Build everything
 just build
 
-# Run tests and linting
+# Lint and compile what your branch changed
 just check
 
-# Automatically fix some linting errors
+# Test what your branch changed, same scope
+just test
+
+# Automatically fix some linting errors, same scope
 just fix
+
+# Same as the above, over every package
+just check-all
+just test all
+just fix-all
 ```
+
+CI runs these same two recipes, so they cover the same ground locally. It sets two things you don't: `MOQ_STRICT=1`, which turns a missing tool into an error instead of a skipped check, and `NEXTEST_PROFILE=ci`, which allows a longer hang timeout.
 
 See the [development guide](https://doc.moq.dev/setup/dev) and the [justfile](justfile) for more.
 

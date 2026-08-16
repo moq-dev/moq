@@ -15,8 +15,9 @@ pub struct IngestSink {
 }
 
 impl IngestSink {
-	pub fn new(mut broadcast: moq_net::broadcast::Producer) -> Result<Self> {
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+	pub fn new(mut broadcast: moq_net::broadcast::Producer, latency_max: Option<std::time::Duration>) -> Result<Self> {
+		let config = moq_mux::catalog::Config::default().with_latency_max(latency_max);
+		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 		Ok(Self {
 			broadcast,
 			catalog,
@@ -70,5 +71,32 @@ impl session::MediaSink for IngestSink {
 
 	fn abort(&mut self, err: moq_net::Error) {
 		self.bridges.abort(err);
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::Duration;
+
+	use super::*;
+	use crate::session::MediaSink;
+
+	/// The retention the caller configured has to land on the media tracks the codec
+	/// bridges mint, not just on the catalog producer it was set on.
+	#[tokio::test]
+	async fn tracks_inherit_the_configured_retention() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let mut sink = IngestSink::new(broadcast.clone(), Some(Duration::from_secs(3))).unwrap();
+
+		sink.on_track(
+			"0".into(),
+			str0m::media::MediaKind::Video,
+			str0m::format::Codec::H264,
+			None,
+		)
+		.unwrap();
+
+		let info = broadcast.consume().track("0.avc3").unwrap().info().await.unwrap();
+		assert_eq!(info.latency_max, Duration::from_secs(3));
 	}
 }

@@ -8,8 +8,8 @@
 //! Run with:
 //!
 //! ```text
-//! cargo run -p moq-native --example clock -- --client-connect https://relay.example.com/anon --broadcast clock publish
-//! cargo run -p moq-native --example clock -- --client-connect https://relay.example.com/anon --broadcast clock subscribe
+//! cargo run -p moq-native --example clock -- --connect https://relay.example.com/anon --broadcast clock publish
+//! cargo run -p moq-native --example clock -- --connect https://relay.example.com/anon --broadcast clock subscribe
 //! ```
 
 use anyhow::Context;
@@ -25,7 +25,7 @@ struct Config {
 
 	/// The MoQ client configuration.
 	#[command(flatten)]
-	client: moq_native::ClientConfig,
+	client: moq_native::connect::Config,
 
 	/// The name of the clock track.
 	#[arg(long, default_value = "seconds")]
@@ -51,8 +51,8 @@ async fn main() -> anyhow::Result<()> {
 	let config = Config::parse();
 	config.log.init()?;
 
-	let url = config.client.connect.clone().context("--client-connect is required")?;
-	let client = config.client.init()?;
+	let url = config.client.url.clone().context("--connect is required")?;
+	let client = config.client.init(Default::default())?;
 
 	tracing::info!(%url, "connecting to server");
 
@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
 			let track = broadcast.create_track(track, None)?;
 			let clock = Publisher::new(track);
 
-			let reconnect = client.with_publisher(&origin).reconnect(url);
+			let reconnect = client.with_publisher(&origin).connect(url);
 
 			// Keep the result out of the `select!` arm (a `?` there would return
 			// before the close below runs), so the broadcast is always closed.
@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
 			result
 		}
 		Command::Subscribe => {
-			let reconnect = client.with_subscriber(origin.clone()).reconnect(url);
+			let reconnect = client.with_subscriber(origin.clone()).connect(url);
 
 			// IETF MoQ + the current origin::Consumer API don't let us call
 			// `session.consume_broadcast(&path)` directly, so loop on announces

@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { Computed, Effect, type Getter, getter, Once, readonlys, Signal } from "./index.ts";
+import { Computed, Derived, Effect, type Getter, getter, Once, readonlys, Signal } from "./index.ts";
+
+// Lets the microtask flush and any timer-based follow-up run.
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 test("getter wraps a raw value in a fresh Signal", () => {
 	const g = getter(5);
@@ -106,6 +109,104 @@ test("getter still wraps plain objects that are not readables", () => {
 	const value = { peek: 1 };
 	const g = getter(value);
 	expect(g.peek()).toBe(value);
+});
+
+test("getter accepts a Derived, so a mapped view can be wired as an input", () => {
+	const source = new Signal({ total: 0 });
+	const view = new Derived([source], ({ total }) => total > 0);
+
+	// The point of the class over a hand-written object: getter() would reject that as foreign.
+	expect(getter(view)).toBe(view);
+});
+
+test("Derived reads through on every peek, with no first-run gap", () => {
+	const a = new Signal(1);
+	const b = new Signal(2);
+	const sum = new Derived([a, b], (x, y) => x + y);
+
+	expect(sum.peek()).toBe(3);
+	a.set(10);
+	expect(sum.peek()).toBe(12);
+});
+
+test("Derived relays every source notification, redundant or not", async () => {
+	const source = new Signal({ total: 0, discovery: 0 });
+	const view = new Derived([source], ({ total, discovery }) => (total === 0 ? undefined : discovery > 0));
+
+	const seen: (boolean | undefined)[] = [];
+	const dispose = view.subscribe((value) => seen.push(value));
+
+	source.set({ total: 1, discovery: 1 });
+	await Promise.resolve();
+	// A second session moves the counts but not the answer: relayed anyway, because the
+	// alternative drops real edges (see the two cases below).
+	source.set({ total: 2, discovery: 2 });
+	await Promise.resolve();
+	source.set({ total: 0, discovery: 0 });
+	await Promise.resolve();
+
+	expect(seen).toEqual([true, true, undefined]);
+	dispose();
+});
+
+test("Derived delivers a change whose flush was already queued when we subscribed", async () => {
+	const source = new Signal(0);
+	const other = source.subscribe(() => {}); // so set() has subscribers and queues a flush
+	const view = new Derived([source], (value) => value);
+
+	// The value is already 1 here; only its notification is still queued. Comparing against
+	// peek() at subscribe time would treat this edge as already seen.
+	source.set(1);
+
+	const raw: number[] = [];
+	const derived: number[] = [];
+	const cancelRaw = source.changed((value) => raw.push(value));
+	const cancelDerived = view.changed((value) => derived.push(value));
+
+	await settle();
+	expect(derived).toEqual(raw);
+	expect(derived).toEqual([1]);
+	cancelRaw();
+	cancelDerived();
+	other();
+});
+
+test("Derived delivers an in-place mutation of a value it returns as-is", async () => {
+	const source = new Signal({ count: 0 });
+	const view = new Derived([source], (value) => value);
+
+	const seen: number[] = [];
+	const dispose = view.subscribe((value) => seen.push(value.count));
+
+	// mutate() force-notifies precisely because the object identity cannot change.
+	source.mutate((value) => {
+		value.count++;
+	});
+	await settle();
+
+	expect(seen).toEqual([1]);
+	dispose();
+});
+
+test("Derived changed() fires once and unsubscribes itself", async () => {
+	const a = new Signal(1);
+	const b = new Signal(1);
+	const max = new Derived([a, b], (x, y) => Math.max(x, y));
+
+	const seen: number[] = [];
+	const cancel = max.changed((value) => seen.push(value));
+
+	b.set(5);
+	await Promise.resolve();
+	a.set(9);
+	await Promise.resolve();
+
+	expect(seen).toEqual([5]);
+	cancel();
+
+	const next = max.changed();
+	a.set(11);
+	expect(await next).toBe(11);
 });
 
 test("an out Getter feeds another component's in end to end", () => {

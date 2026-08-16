@@ -59,7 +59,7 @@ pub async fn serve(
 }
 
 /// Serve the `/certificate.sha256` self-signed fingerprint over HTTP, so an
-/// `http://` client can pin a `--server-bind` server's generated cert.
+/// `http://` client can pin a `--listen` server's generated cert.
 pub async fn run_web(bind: &str, certificates: moq_native::tls::Certificates) -> anyhow::Result<()> {
 	let listen = tokio::net::lookup_host(bind)
 		.await
