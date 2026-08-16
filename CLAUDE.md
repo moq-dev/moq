@@ -89,6 +89,10 @@ This root file holds only cross-cutting rules that apply everywhere (writing sty
 - When adding new dependencies, always use the **newest stable version** available.
 - **Prefer a maintained third-party crate over hand-rolling non-core functionality** (standard container/codec parsers, compression, serialization, etc.). Reserve bespoke code for the wire/protocol layers where we need full control or no suitable crate exists.
 
+## Package Versions
+
+**Do not bump package versions unless the user explicitly asks for a version bump or release.** Feature and fix work must leave version fields and matching lockfile version metadata unchanged. Periodic release work owns those bumps.
+
 ## Writing Style
 
 - **No em dashes (—)** in code, comments, doc comments, commit messages, or any prose. Use a period and start a new sentence, or use a comma/parenthesis if the clauses are tightly bound.
