@@ -225,6 +225,17 @@ pub(crate) struct TrackState {
 	fetch: kio::Shared<FetchState>,
 }
 
+/// What a frame-level scan found: the frame, where it came from so the cursor can
+/// advance past it, and how many groups the drift budget made the scan step over on the
+/// way there (counted here rather than skipped silently, since a silent drop is
+/// indistinguishable from loss).
+struct FrameHit {
+	frame: frame::Frame,
+	index: usize,
+	sequence: u64,
+	stale: u64,
+}
+
 /// A cached group plus its bookkeeping in the track's `lookup` map.
 ///
 /// Access times and the evictable-population sample live in the group's own
@@ -350,9 +361,13 @@ impl TrackState {
 		next_sequence: u64,
 		drift: Drift,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<(frame::Frame, usize, u64)>>> {
+	) -> Poll<Result<Option<FrameHit>>> {
 		let start = index.saturating_sub(self.offset);
 		let mut pending_seen = false;
+		// Groups the budget gave up on below the frame this returns. Counted only on the
+		// winning scan, whose cursor jumps past them, so a scan that ends Pending leaves
+		// them to be counted exactly once by the one that eventually succeeds.
+		let mut stale = 0;
 		for (i, (sequence, stamp)) in self.arrival.iter().enumerate().skip(start) {
 			if *sequence < next_sequence {
 				continue;
@@ -369,13 +384,19 @@ impl TrackState {
 			// from a group the subscription has given up on is no fresher for being
 			// read one frame at a time.
 			if self.is_stale(*sequence, drift.edge, drift.budget) {
+				stale += 1;
 				continue;
 			}
 
 			let mut consumer = slot.group.consume();
 			match consumer.poll_read_frame(waiter) {
 				Poll::Ready(Ok(Some(frame))) => {
-					return Poll::Ready(Ok(Some((frame, self.offset + i, *sequence))));
+					return Poll::Ready(Ok(Some(FrameHit {
+						frame,
+						index: self.offset + i,
+						sequence: *sequence,
+						stale,
+					})));
 				}
 				Poll::Ready(Ok(None)) => continue,
 				// A single group failing (aborted upstream, or evicted from the
@@ -510,17 +531,21 @@ impl TrackState {
 	/// Capped because a group can only be late relative to data that would actually be
 	/// served in its place: a subscription ending at a takeover boundary can't jump past
 	/// it, so the groups it still wants aren't stale just because the route ran on.
-	fn live_edge(&self, cap: Option<u64>) -> Option<(u64, Timestamp)> {
-		let mut edge: Option<(u64, Timestamp)> = None;
+	fn live_edge(&self, cap: Option<u64>) -> Option<Edge> {
+		let mut edge: Option<Edge> = None;
 		for slot in self.lookup.values() {
 			let group = &slot.group;
 			if cap.is_some_and(|cap| group.sequence > cap) || group.is_aborted() {
 				continue;
 			}
 			if let Some(timestamp) = group.timestamp()
-				&& edge.is_none_or(|(seq, _)| group.sequence > seq)
+				&& edge.is_none_or(|edge| group.sequence > edge.sequence)
 			{
-				edge = Some((group.sequence, timestamp));
+				edge = Some(Edge {
+					sequence: group.sequence,
+					stamp: slot.stamp,
+					timestamp,
+				});
 			}
 		}
 		edge
@@ -540,11 +565,22 @@ impl TrackState {
 	/// The edge must sit strictly above the candidate. The live edge is never late
 	/// against itself, and backfill or the tail of a rewound timeline can carry a high
 	/// timestamp on a low sequence without being an edge at all.
-	fn is_stale(&self, sequence: u64, edge: Option<(u64, Timestamp)>, budget: Duration) -> bool {
-		let Some((edge_sequence, stamped)) = edge else {
+	fn is_stale(&self, sequence: u64, edge: Option<Edge>, budget: Duration) -> bool {
+		let Some(edge) = edge else {
 			return false;
 		};
-		if edge_sequence <= sequence {
+		if edge.sequence <= sequence {
+			return false;
+		}
+		// The anchor was resolved under an earlier lock, so confirm it is still the
+		// group it was: an eviction or a re-served sequence in between would otherwise
+		// convict a candidate on content that is no longer servable. Failing safe
+		// (delivering) is right, since the next poll resolves a fresh anchor.
+		let live = self
+			.lookup
+			.get(&edge.sequence)
+			.is_some_and(|slot| slot.stamp == edge.stamp && !slot.group.is_aborted());
+		if !live {
 			return false;
 		}
 		let Some(slot) = self.lookup.get(&sequence) else {
@@ -555,7 +591,7 @@ impl TrackState {
 		};
 		// Newer data below this group's timestamp isn't drift, and a scale that can't
 		// subtract carries no information either way.
-		matches!(stamped.checked_sub(timestamp), Ok(age) if Duration::from(age) > budget)
+		matches!(edge.timestamp.checked_sub(timestamp), Ok(age) if Duration::from(age) > budget)
 	}
 
 	/// Resolve a one-shot fetch from the track side: the cached group, or an [`Error`]
@@ -2534,7 +2570,18 @@ enum SubscriberKind {
 #[derive(Clone, Copy)]
 struct Drift {
 	budget: Duration,
-	edge: Option<(u64, Timestamp)>,
+	edge: Option<Edge>,
+}
+
+/// The group a poll's drift is measured against, identified well enough to tell it apart
+/// from whatever may occupy its sequence by the time a candidate is judged.
+#[derive(Clone, Copy)]
+struct Edge {
+	sequence: u64,
+	/// The slot incarnation this timestamp was read from, so an eviction or a re-served
+	/// sequence between resolving the anchor and using it is detectable.
+	stamp: u32,
+	timestamp: Timestamp,
 }
 
 /// The cursor state for a subscription over a single (per-session) track.
@@ -2730,15 +2777,16 @@ impl PlainSubscriber {
 	fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
 		let drift = ready!(self.poll_drift(waiter))?;
 		let lower = self.min_sequence.max(self.next_sequence);
-		let Some((frame, found_index, sequence)) = ready!(self.poll(waiter, |state| {
+		let Some(hit) = ready!(self.poll(waiter, |state| {
 			state.poll_read_frame(self.index, lower, drift, waiter)
 		})?) else {
 			return Poll::Ready(Ok(None));
 		};
 
-		self.index = found_index + 1;
-		self.next_sequence = sequence.saturating_add(1);
-		Poll::Ready(Ok(Some(frame)))
+		self.stale += hit.stale;
+		self.index = hit.index + 1;
+		self.next_sequence = hit.sequence.saturating_add(1);
+		Poll::Ready(Ok(Some(hit.frame)))
 	}
 }
 
@@ -4007,6 +4055,49 @@ mod test {
 			subscriber.read_frame().now_or_never().is_none(),
 			"the skipped groups are gone, not queued"
 		);
+	}
+
+	/// The live edge is resolved once per poll and applied to every group that poll
+	/// walks off, so it has to be revalidated before it convicts anything: an eviction
+	/// in between would otherwise discard a group on the strength of content that is no
+	/// longer there to jump to.
+	#[test]
+	fn an_evicted_live_edge_convicts_nothing() {
+		let mut producer = track_producer("test", None);
+		append_at(&mut producer, 0);
+		let edge = append_at(&mut producer, 30_000);
+
+		let state = producer.state.read();
+		let drift = Drift {
+			budget: Duration::ZERO,
+			edge: state.live_edge(None),
+		};
+		assert!(state.is_stale(0, drift.edge, drift.budget), "stale against a live edge");
+		drop(state);
+
+		// The edge dies between resolving it and judging the candidate.
+		let slot = producer.modify().unwrap().lookup.remove(&edge).unwrap();
+		let _ = slot.group.abort(Error::Evicted);
+
+		let state = producer.state.read();
+		assert!(
+			!state.is_stale(0, drift.edge, drift.budget),
+			"a vanished edge is no reason to drop what is left"
+		);
+	}
+
+	#[tokio::test]
+	async fn read_frame_counts_what_it_skips() {
+		let mut producer = track_producer("test", None);
+		for second in 0..4 {
+			append_at(&mut producer, second * 1000);
+		}
+
+		// A silent skip is indistinguishable from loss whichever read did it, so the
+		// frame-level path reports its drops like the group-level ones.
+		let mut subscriber = producer.subscribe(None);
+		subscriber.read_frame().await.unwrap().expect("a frame");
+		assert_eq!(subscriber.take_stale(), 3);
 	}
 
 	#[test]
