@@ -90,10 +90,22 @@ async fn spawn_server(
 		false => None,
 	};
 	#[cfg(feature = "cluster-lan")]
+	let server = match lan {
+		Some(_) => server,
+		None => route_server(server, origin, directions),
+	};
+	#[cfg(not(feature = "cluster-lan"))]
+	let server = route_server(server, origin, directions);
+
+	// Stream sockets bind asynchronously in `listen`, so this must finish before
+	// `spawn_moq` reports readiness. The serve task only owns an already-bound
+	// listener and cannot discover a late bind failure.
+	let listener = server.listen().await.context("failed to bind listeners")?;
+	#[cfg(feature = "cluster-lan")]
 	match lan {
 		Some((lan, discovery)) => {
 			tasks.spawn(cluster::serve(
-				server,
+				listener,
 				lan.clone(),
 				origin.clone(),
 				directions,
@@ -101,10 +113,10 @@ async fn spawn_server(
 			));
 			tasks.spawn(lan.run(discovery));
 		}
-		None => spawn_serve(tasks, server, origin, directions),
+		None => spawn_serve(tasks, listener),
 	}
 	#[cfg(not(feature = "cluster-lan"))]
-	spawn_serve(tasks, server, origin, directions);
+	spawn_serve(tasks, listener);
 
 	// The certificate endpoint is for clients dialing a URL, so it follows the
 	// explicit listener rather than the mesh's ephemeral one.
@@ -115,34 +127,47 @@ async fn spawn_server(
 	Ok(())
 }
 
-/// Serve ordinary clients with moq-native's own accept loop.
-fn spawn_serve(
-	tasks: &mut JoinSet<anyhow::Result<()>>,
+/// Attach the requested directions before stream accept loops capture the server.
+fn route_server(
 	server: moq_native::Server,
 	origin: &moq_net::origin::Producer,
 	directions: Directions,
-) {
-	let origin = origin.clone();
+) -> moq_native::Server {
+	match directions {
+		Directions {
+			publish: true,
+			consume: true,
+		} => server.with_publisher(origin.consume()).with_subscriber(origin.clone()),
+		Directions {
+			publish: true,
+			consume: false,
+		} => server.with_publisher(origin.consume()),
+		Directions {
+			publish: false,
+			consume: true,
+		} => server.with_subscriber(origin.clone()),
+		Directions {
+			publish: false,
+			consume: false,
+		} => unreachable!("a stage always needs a direction"),
+	}
+}
+
+/// Serve ordinary clients from an already-bound listener.
+fn spawn_serve(tasks: &mut JoinSet<anyhow::Result<()>>, mut listener: moq_native::Listener) {
+	if let Ok(addr) = listener.local_addr() {
+		tracing::info!(%addr, "listening");
+	}
 	tasks.spawn(async move {
-		let _: () = match directions {
-			Directions {
-				publish: true,
-				consume: true,
-			} => server.serve_both(origin.consume(), origin).await?,
-			Directions {
-				publish: true,
-				consume: false,
-			} => server.serve_publish(origin.consume()).await?,
-			Directions {
-				publish: false,
-				consume: true,
-			} => server.serve_consume(origin).await?,
-			// Every caller attaches a direction: each stage is an import or an export.
-			Directions {
-				publish: false,
-				consume: false,
-			} => unreachable!("a stage always needs a direction"),
-		};
+		while let Some(request) = listener.accept().await {
+			tokio::spawn(async move {
+				let err = match request.ok().await {
+					Ok(session) => session.closed().await.into(),
+					Err(err) => err,
+				};
+				tracing::warn!(%err, "session ended with error");
+			});
+		}
 		Ok(())
 	});
 }
@@ -274,13 +299,19 @@ async fn spawn_moq(
 		bandwidth = Some(reconnect.send_bandwidth());
 		tasks.spawn(async move { Ok(reconnect.closed().await?) });
 	}
-	spawn_server(tasks, moq, origin, net, directions).await?;
-	// Every configured MoQ attachment is now initialized. In particular, a
-	// combined client + LAN process must not report ready before the listener and
-	// mDNS announcement have succeeded.
-	moq::notify_ready();
+	notify_when_initialized(spawn_server(tasks, moq, origin, net, directions), moq::notify_ready).await?;
 
 	Ok(bandwidth)
+}
+
+/// Report readiness only after every configured MoQ attachment initializes.
+async fn notify_when_initialized(
+	initialization: impl std::future::Future<Output = anyhow::Result<()>>,
+	notify_ready: impl FnOnce(),
+) -> anyhow::Result<()> {
+	initialization.await?;
+	notify_ready();
+	Ok(())
 }
 
 /// Fill the shared Origin from MoQ, then play one broadcast locally.
@@ -623,6 +654,7 @@ fn reject_listener_cors(cors: &crate::web::Cors, endpoint: &str) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::cell::Cell;
 	use std::future::Future;
 	use std::pin::Pin;
 
@@ -657,5 +689,43 @@ mod tests {
 		supervise(&local, pipelines, &mut tasks);
 
 		local.run_until(drive(tasks)).await.unwrap();
+	}
+
+	/// A stream bind failure is part of initialization, so systemd must never see
+	/// READY=1 for a process that has no listening socket.
+	#[tokio::test]
+	async fn a_stream_bind_failure_prevents_readiness() {
+		let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupy a port");
+		let addr = occupied.local_addr().expect("occupied address").to_string();
+		let invocation = Invocation::try_parse_from(["moq", "--listen-tcp-bind", &addr, "import", "ts"])
+			.expect("parse stream-only invocation");
+		let origin = invocation.moq.origin().expect("create origin");
+		let net = Net {
+			quic: invocation.moq.quic.clone(),
+			#[cfg(feature = "iroh")]
+			iroh: None,
+		};
+		let mut tasks = JoinSet::new();
+		let ready = Cell::new(false);
+
+		let err = notify_when_initialized(
+			spawn_server(
+				&mut tasks,
+				&invocation.moq,
+				&origin,
+				&net,
+				Directions {
+					publish: true,
+					consume: false,
+				},
+			),
+			|| ready.set(true),
+		)
+		.await
+		.expect_err("the occupied port must fail initialization");
+
+		assert!(err.to_string().contains("failed to bind listeners"), "{err:#}");
+		assert!(!ready.get(), "readiness must be withheld after a bind failure");
+		assert!(tasks.is_empty(), "nothing should be spawned after a bind failure");
 	}
 }

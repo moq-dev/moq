@@ -298,13 +298,12 @@ fn split_credential(request: &str) -> (&str, Option<&str>) {
 /// [`moq_native::Server::serve_publish`] and its sibling already do the ordinary
 /// half, so this exists only to interleave the two.
 pub async fn serve(
-	server: moq_native::Server,
+	mut server: moq_native::Listener,
 	lan: Lan,
 	origin: moq_net::origin::Producer,
 	directions: crate::Directions,
 	public_quic: bool,
 ) -> anyhow::Result<()> {
-	let mut server = server.listen().await.context("failed to bind listeners")?;
 	let mut tasks = tokio::task::JoinSet::new();
 
 	while let Some(request) = server.accept().await {
@@ -607,6 +606,7 @@ mod tests {
 			.expect("failed to create broadcast");
 
 		let (server, peer) = listener();
+		let server = server.listen().await.expect("listen");
 		let mut accept = lan("listener-proof");
 		accept.origin = origin_b.clone();
 		// The mesh shares the listener with ordinary clients, so go through the
@@ -661,6 +661,7 @@ mod tests {
 			.expect("failed to create broadcast");
 
 		let (server, peer) = listener();
+		let server = server.listen().await.expect("listen");
 		let mut accept = lan("the-real-proof");
 		accept.origin = origin_b.clone();
 		tokio::spawn(serve(
@@ -700,6 +701,7 @@ mod tests {
 			.expect("failed to create broadcast");
 
 		let (server, peer) = listener();
+		let server = server.listen().await.expect("listen");
 		let mut accept = lan("the-real-proof");
 		accept.origin = origin.clone();
 		// `public_quic: false` is what `--cluster-lan` passes with no `--listen`.
