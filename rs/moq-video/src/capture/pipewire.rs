@@ -77,6 +77,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 			let state = Rc::new(RefCell::new(State {
 				format: VideoInfoRaw::default(),
 				geometry: None,
+				color: None,
 				geo_tx: Some(geo_tx),
 				last: None,
 				fresh: false,
@@ -241,9 +242,10 @@ impl Drop for LoopGuard {
 /// Shared by the stream callbacks and the pacing timer, all on the loop thread.
 struct State {
 	format: VideoInfoRaw,
-	/// The even-clamped size sent to `open`; a later renegotiation to a different
-	/// size quits the loop so the encode loop reopens at the new geometry.
+	/// The even-clamped size sent to `open`.
 	geometry: Option<(u32, u32)>,
+	/// The NV12 color space used to configure the encoder.
+	color: Option<Color>,
 	geo_tx: Option<tokio::sync::oneshot::Sender<Result<Geometry, Error>>>,
 	/// Most recent converted frame, re-emitted while the screen is static.
 	last: Option<I420>,
@@ -337,9 +339,25 @@ fn run_loop(
 					tracing::warn!(width = size.width, height = size.height, "unusable capture size");
 					return;
 				}
+				let color = match pipewire_color(state.format, width, height) {
+					Ok(color) => color,
+					Err(e) => {
+						match state.geo_tx.take() {
+							Some(tx) => drop(tx.send(Err(e))),
+							None => {
+								tracing::warn!(error = %e, "unsupported pipewire video color space");
+								if let Some(mainloop) = mainloop.upgrade() {
+									mainloop.quit();
+								}
+							}
+						}
+						return;
+					}
+				};
 
 				if let Some(tx) = state.geo_tx.take() {
 					state.geometry = Some((width, height));
+					state.color = color;
 					// The compositor reports 0/1 for a variable rate; only a real
 					// rate is worth forwarding to the encoder.
 					let fr = state.format.framerate();
@@ -350,11 +368,10 @@ fn run_loop(
 						framerate,
 						device: format!("pipewire:{node_id}"),
 					}));
-				} else if state.geometry != Some((width, height)) {
-					// Renegotiated to a new size (e.g. the monitor changed mode).
-					// End the stream; the encode loop reopens at the new geometry
-					// and the restore token skips the picker.
-					tracing::info!(width, height, "capture size changed; restarting the stream");
+				} else if format_requires_restart(state.geometry, state.color, width, height, color) {
+					// The encoder's geometry and VUI are fixed when it opens. End the
+					// stream so the encode loop reopens it with the new format.
+					tracing::info!(width, height, ?color, "capture format changed; restarting the stream");
 					if let Some(mainloop) = mainloop.upgrade() {
 						mainloop.quit();
 					}
@@ -369,7 +386,7 @@ fn run_loop(
 				let mut state = state.borrow_mut();
 				let Some((width, height)) = state.geometry else { return };
 				let source_height = state.format.size().height;
-				let color = pipewire_color(state.format, width, height);
+				let color = state.color;
 				let Some(mut buffer) = stream.dequeue_buffer() else {
 					return;
 				};
@@ -556,24 +573,28 @@ fn neutral_frame(width: u32, height: u32, color: Option<Color>) -> Result<I420, 
 }
 
 /// Preserve the color description that names NV12 samples. Unknown fields use
-/// the same size-based, limited-range fallback as the encoder; unsupported
-/// matrices stay unknown because labeling those samples as 601/709 is worse.
-fn pipewire_color(format: VideoInfoRaw, width: u32, height: u32) -> Option<Color> {
+/// the same size-based, limited-range fallback as the encoder. Reject matrices
+/// the crate cannot represent rather than writing a false 601/709 VUI.
+fn pipewire_color(format: VideoInfoRaw, width: u32, height: u32) -> Result<Option<Color>, Error> {
 	if format.format() != VideoFormat::NV12 {
-		return None;
+		return Ok(None);
 	}
 	color_from_pipewire(format.color_range(), format.color_matrix(), Size::new(width, height))
 }
 
-fn color_from_pipewire(range: u32, matrix: u32, size: Size) -> Option<Color> {
+fn color_from_pipewire(range: u32, matrix: u32, size: Size) -> Result<Option<Color>, Error> {
 	if range == spa::sys::SPA_VIDEO_COLOR_RANGE_UNKNOWN && matrix == spa::sys::SPA_VIDEO_COLOR_MATRIX_UNKNOWN {
-		return None;
+		return Ok(None);
 	}
 
 	let limited = match range {
 		spa::sys::SPA_VIDEO_COLOR_RANGE_UNKNOWN | spa::sys::SPA_VIDEO_COLOR_RANGE_16_235 => true,
 		spa::sys::SPA_VIDEO_COLOR_RANGE_0_255 => false,
-		_ => return None,
+		_ => {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"unsupported PipeWire NV12 color range {range}"
+			)));
+		}
 	};
 	let bt709 = match matrix {
 		spa::sys::SPA_VIDEO_COLOR_MATRIX_UNKNOWN => {
@@ -581,15 +602,29 @@ fn color_from_pipewire(range: u32, matrix: u32, size: Size) -> Option<Color> {
 		}
 		spa::sys::SPA_VIDEO_COLOR_MATRIX_BT709 => true,
 		spa::sys::SPA_VIDEO_COLOR_MATRIX_BT601 => false,
-		_ => return None,
+		_ => {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"unsupported PipeWire NV12 color matrix {matrix}"
+			)));
+		}
 	};
 
-	Some(match (bt709, limited) {
+	Ok(Some(match (bt709, limited) {
 		(false, true) => Color::Bt601Limited,
 		(false, false) => Color::Bt601Full,
 		(true, true) => Color::Bt709Limited,
 		(true, false) => Color::Bt709Full,
-	})
+	}))
+}
+
+fn format_requires_restart(
+	geometry: Option<(u32, u32)>,
+	color: Option<Color>,
+	width: u32,
+	height: u32,
+	next_color: Option<Color>,
+) -> bool {
+	geometry.is_some_and(|geometry| geometry != (width, height) || color != next_color)
 }
 
 /// A chunk offset is a ring position within the allocation, so wrap it rather
@@ -845,7 +880,8 @@ mod tests {
 				spa::sys::SPA_VIDEO_COLOR_RANGE_0_255,
 				spa::sys::SPA_VIDEO_COLOR_MATRIX_BT601,
 				size,
-			),
+			)
+			.unwrap(),
 			Some(Color::Bt601Full)
 		);
 		assert_eq!(
@@ -853,8 +889,17 @@ mod tests {
 				spa::sys::SPA_VIDEO_COLOR_RANGE_UNKNOWN,
 				spa::sys::SPA_VIDEO_COLOR_MATRIX_UNKNOWN,
 				size,
-			),
+			)
+			.unwrap(),
 			None
+		);
+		assert!(
+			color_from_pipewire(
+				spa::sys::SPA_VIDEO_COLOR_RANGE_16_235,
+				spa::sys::SPA_VIDEO_COLOR_MATRIX_BT2020,
+				size,
+			)
+			.is_err()
 		);
 
 		let layout = FrameLayout {
@@ -871,6 +916,25 @@ mod tests {
 		)
 		.unwrap();
 		assert_eq!(frame.color(), Some(Color::Bt601Full));
+	}
+
+	#[test]
+	fn color_renegotiation_restarts_the_capture() {
+		let geometry = Some((1920, 1080));
+		assert!(!format_requires_restart(
+			geometry,
+			Some(Color::Bt709Limited),
+			1920,
+			1080,
+			Some(Color::Bt709Limited),
+		));
+		assert!(format_requires_restart(
+			geometry,
+			Some(Color::Bt709Limited),
+			1920,
+			1080,
+			Some(Color::Bt709Full),
+		));
 	}
 
 	#[test]
