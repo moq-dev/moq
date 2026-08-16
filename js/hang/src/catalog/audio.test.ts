@@ -12,3 +12,15 @@ test("pcm codec is accepted", () => {
 
 	expect(config.codec).toBe("pcm");
 });
+
+test("audio config accepts a human-readable label", () => {
+	const config = AudioConfigSchema.parse({
+		label: "English",
+		codec: "opus",
+		container: { kind: "legacy" },
+		sampleRate: 48_000,
+		numberOfChannels: 2,
+	});
+
+	expect(config.label).toBe("English");
+});

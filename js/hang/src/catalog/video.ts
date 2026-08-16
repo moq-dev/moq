@@ -16,6 +16,9 @@ export const VideoConfigSchema = z.object({
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
 
+	// Human-readable rendition name for track pickers.
+	label: z.optional(z.string()),
+
 	// See: https://w3c.github.io/webcodecs/codec_registry.html
 	codec: z.string(),
 

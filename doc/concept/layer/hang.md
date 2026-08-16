@@ -13,6 +13,11 @@ A simple, WebCodecs-based media format utilizing MoQ. See the [specification](ht
 This is how the viewer decides what it can decode and wants to receive.
 The catalog track is live updated as media tracks are added, removed, or changed.
 
+Each audio, video, or text rendition may carry a human-readable `label` for a
+track picker. The rendition map key remains the transport track name used to
+subscribe, so labels do not need to be unique and changing one does not rename
+the track.
+
 Each media track is described using the [WebCodecs specification](https://www.w3.org/TR/webcodecs/) and we plan to support every codec in the [WebCodecs registry](https://w3c.github.io/webcodecs/codec_registry.html).
 
 ### Example
@@ -24,6 +29,7 @@ Here is Big Buck Bunny's `catalog.json` as of 2026-02-02:
   "video": {
     "renditions": {
       "video0": {
+        "label": "HD",
         "codec": "avc1.64001f",
         "description": "0164001fffe100196764001fac2484014016ec0440000003004000000c23c60c9201000568ee32c8b0",
         "codedWidth": 1280,
@@ -35,6 +41,7 @@ Here is Big Buck Bunny's `catalog.json` as of 2026-02-02:
   "audio": {
     "renditions": {
       "audio1": {
+        "label": "English",
         "codec": "mp4a.40.2",
         "sampleRate": 44100,
         "numberOfChannels": 2,

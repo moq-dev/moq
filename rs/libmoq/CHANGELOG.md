@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Publish and consume human-readable audio and video rendition labels.
+
 ## [0.5.8](https://github.com/moq-dev/moq/compare/libmoq-v0.5.7...libmoq-v0.5.8) - 2026-08-14
 
 ### Added

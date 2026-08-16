@@ -198,8 +198,11 @@ with `WithVideoHint`:
 ```go
 media, err := broadcast.PublishMedia("avc3", nil, moq.WithVideoHint(moq.VideoHint{
     Coded: &moq.Dimensions{Width: 1920, Height: 1080},
-}))
+}), moq.WithLabel("Main camera"))
 ```
+
+`WithLabel` stores a human-readable rendition name in the catalog without
+changing the generated transport track name. Labels do not need to be unique.
 
 Each catalog `Video` has a `Stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
 

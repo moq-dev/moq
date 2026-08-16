@@ -242,6 +242,7 @@ fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::
 	}
 
 	let mut config = hang::catalog::AudioConfig::new(codec, catalog_audio.sample_rate, catalog_audio.channel_count);
+	config.label = catalog_audio.label;
 	config.bitrate = catalog_audio.bitrate;
 	config.description = catalog_audio.description.map(Into::into);
 	config.container = catalog_audio.container.into();
@@ -286,6 +287,7 @@ mod tests {
 
 	fn catalog_audio(codec: &str) -> MoqAudio {
 		MoqAudio {
+			label: None,
 			codec: codec.to_string(),
 			description: None,
 			sample_rate: 48_000,

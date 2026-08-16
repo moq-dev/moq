@@ -43,8 +43,8 @@ if TYPE_CHECKING:
     from .subscribe import BroadcastConsumer, GroupConsumer, TrackConsumer
 
 
-def _media_init(format: str, init: bytes, video: VideoHint | None) -> MoqInit:
-    return MoqInit(format=format, data=init, video=video)
+def _media_init(format: str, init: bytes, video: VideoHint | None, label: str | None) -> MoqInit:
+    return MoqInit(format=format, data=init, label=label, video=video)
 
 
 class MediaProducer:
@@ -473,12 +473,13 @@ class BroadcastProducer:
         format: str,
         init: bytes = b"",
         video: VideoHint | None = None,
+        label: str | None = None,
     ) -> MediaProducer:
         """Publish a single media track. `format` selects the codec (e.g. "opus", "avc3"); `init` is
-        its codec init bytes (required for audio formats). `video` seeds catalog fields the stream
-        can't reveal (bitrate) or publishes the catalog before the first keyframe. See
-        :class:`VideoHint`."""
-        return MediaProducer(self._inner.publish_media(_media_init(format, init, video)))
+        its codec init bytes (required for audio formats). `label` is the human-readable rendition
+        name stored in the catalog. `video` seeds fields the stream can't reveal (bitrate) or
+        publishes the catalog before the first keyframe. See :class:`VideoHint`."""
+        return MediaProducer(self._inner.publish_media(_media_init(format, init, video, label)))
 
     def publish_media_on_track(
         self,
@@ -486,19 +487,23 @@ class BroadcastProducer:
         format: str,
         init: bytes = b"",
         video: VideoHint | None = None,
+        label: str | None = None,
     ) -> MediaProducer:
         """Publish media onto a requested track. See :meth:`publish_media` for the arguments."""
-        return MediaProducer(self._inner.publish_media_on_track(request._inner, _media_init(format, init, video)))
+        return MediaProducer(
+            self._inner.publish_media_on_track(request._inner, _media_init(format, init, video, label))
+        )
 
     def publish_media_stream(
         self,
         format: str,
         video: VideoHint | None = None,
+        label: str | None = None,
     ) -> MediaStreamProducer:
         """Publish a media track fed by a raw byte stream (unknown frame
         boundaries). `format` is a stream format (avc3, hev1, av01, fmp4, mkv).
-        `video` seeds catalog fields as in :meth:`publish_media`."""
-        return MediaStreamProducer(self._inner.publish_media_stream(_media_init(format, b"", video)))
+        `label` and `video` seed catalog fields as in :meth:`publish_media`."""
+        return MediaStreamProducer(self._inner.publish_media_stream(_media_init(format, b"", video, label)))
 
     def publish_audio(
         self,

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Human-readable labels for audio and video renditions.
+
 ## [0.20.5](https://github.com/moq-dev/moq/compare/hang-v0.20.4...hang-v0.20.5) - 2026-08-14
 
 ### Fixed

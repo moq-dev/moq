@@ -15,10 +15,21 @@ pub use super::Init;
 /// carries no extra parameters (VP8), so a hint with a codec can publish before the first frame.
 fn video_hint(init: &Init, default_codec: Option<hang::catalog::VideoCodec>) -> VideoHint {
 	let mut hint = init.video.clone().unwrap_or_default();
+	if hint.label.is_none() {
+		hint.label = init.label.clone();
+	}
 	if hint.codec.is_none() {
 		hint.codec = default_codec;
 	}
 	hint
+}
+
+/// Apply the import's common catalog fields to a parsed audio config.
+fn audio_config(init: &Init, mut config: hang::catalog::AudioConfig) -> hang::catalog::AudioConfig {
+	if config.label.is_none() {
+		config.label = init.label.clone();
+	}
+	config
 }
 
 /// Build an H.264 avc3 split + import pair.
@@ -226,20 +237,20 @@ impl<E: CatalogExt> Track<E> {
 			// Audio can't resolve its config from frames, so it needs the init bytes up front (an
 			// OpusHead, AudioSpecificConfig, ...); `codec::config` errors when they're missing or bad.
 			"aac" => {
-				let config = crate::codec::aac::config(data)?;
+				let config = audio_config(&init, crate::codec::aac::config(data)?);
 				TrackKind::Aac(crate::codec::aac::Import::new(track, reserved, config)?)
 			}
 			"opus" => {
-				let config = crate::codec::opus::config(data)?;
+				let config = audio_config(&init, crate::codec::opus::config(data)?);
 				TrackKind::Opus(crate::codec::opus::Import::new(track, reserved, config)?)
 			}
 			"flac" => {
 				// `data` is a FLAC header: the `fLaC` marker plus the STREAMINFO block.
-				let config = crate::codec::flac::config(data)?;
+				let config = audio_config(&init, crate::codec::flac::config(data)?);
 				TrackKind::Flac(crate::codec::flac::Import::new(track, reserved, config)?)
 			}
 			"mp3" => {
-				let config = crate::codec::mp3::config(data)?;
+				let config = audio_config(&init, crate::codec::mp3::config(data)?);
 				TrackKind::Mp3(crate::codec::mp3::Import::new(track, reserved, config)?)
 			}
 			_ => return Err(crate::Error::UnknownFormat(init.format)),
@@ -781,7 +792,12 @@ mod tests {
 		let init = config.encode();
 		let request = broadcast.reserve_track("audio").unwrap();
 
-		let import = Track::new(request, catalog.reserve(), Init::new("aac", init.clone())).unwrap();
+		let import = Track::new(
+			request,
+			catalog.reserve(),
+			Init::new("aac", init.clone()).with_label("English"),
+		)
+		.unwrap();
 
 		assert_eq!(import.name(), "audio");
 		let snapshot = catalog.snapshot();
@@ -790,6 +806,7 @@ mod tests {
 		assert_eq!(audio.sample_rate, config.sample_rate);
 		assert_eq!(audio.channel_count, config.channel_count);
 		assert_eq!(audio.description.as_deref(), Some(init.as_ref()));
+		assert_eq!(audio.label.as_deref(), Some("English"));
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1019,10 +1036,16 @@ mod tests {
 	async fn video_publishes_before_first_frame() {
 		let (mut broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("video").unwrap();
-		let _import = Track::new(request, catalog.reserve(), Init::new("vp8", Vec::new())).unwrap();
+		let _import = Track::new(
+			request,
+			catalog.reserve(),
+			Init::new("vp8", Vec::new()).with_label("Main camera"),
+		)
+		.unwrap();
 
 		let video = catalog.snapshot().video.renditions.get("video").cloned().unwrap();
 		assert_eq!(video.codec.to_string(), "vp8");
+		assert_eq!(video.label.as_deref(), Some("Main camera"));
 	}
 
 	/// hvc1 publishes the catalog up front from the out-of-band hvcC: dimensions

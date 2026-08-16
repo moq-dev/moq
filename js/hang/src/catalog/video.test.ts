@@ -26,6 +26,16 @@ test("video config accepts optional stalled state", () => {
 	expect(stalled.stalled).toBe(true);
 });
 
+test("video config accepts a human-readable label", () => {
+	const config = VideoConfigSchema.parse({
+		label: "Main camera",
+		codec: "vp8",
+		container: { kind: "legacy" },
+	});
+
+	expect(config.label).toBe("Main camera");
+});
+
 test("legacy video arrays derive display size from display aspect fields", () => {
 	const parsed = VideoSchema.parse([
 		{

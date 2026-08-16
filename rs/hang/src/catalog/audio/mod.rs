@@ -77,6 +77,10 @@ pub struct AudioConfig {
 	#[serde(default)]
 	pub broadcast: Option<moq_net::PathRelativeOwned>,
 
+	/// Human-readable rendition name for track pickers.
+	#[serde(default)]
+	pub label: Option<String>,
+
 	// The codec, see the registry for details:
 	// https://w3c.github.io/webcodecs/codec_registry.html
 	#[serde_as(as = "DisplayFromStr")]
@@ -127,6 +131,7 @@ impl AudioConfig {
 	pub fn new(codec: impl Into<AudioCodec>, sample_rate: u32, channel_count: u32) -> Self {
 		Self {
 			broadcast: None,
+			label: None,
 			codec: codec.into(),
 			sample_rate,
 			channel_count,
@@ -135,5 +140,21 @@ impl AudioConfig {
 			container: Container::default(),
 			jitter: None,
 		}
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	#[test]
+	fn label_round_trips() {
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		config.label = Some("English".to_string());
+
+		let encoded = serde_json::to_value(&config).expect("failed to encode");
+		assert_eq!(encoded["label"], "English");
+		let decoded: AudioConfig = serde_json::from_value(encoded).expect("failed to decode");
+		assert_eq!(decoded.label.as_deref(), Some("English"));
 	}
 }

@@ -173,6 +173,7 @@ For example:
 {
   "renditions": {
     "720p": {
+      "label": "HD",
       "codec": "avc1.64001f",
       "container": { "kind": "legacy" },
       "codedWidth": 1280,
@@ -236,6 +237,7 @@ For example:
 {
   "renditions": {
     "stereo": {
+      "label": "English stereo",
       "codec": "opus",
       "container": { "kind": "legacy" },
       "sampleRate": 48000,
@@ -268,7 +270,6 @@ type TextConfig = {
 	"format": "vtt" | "ttml" | "utf8" | string,
 	"role": "subtitle" | "caption" | string | undefined,
 	"lang": string | undefined,
-	"label": string | undefined,
 	// plus the common rendition fields
 }
 ~~~
@@ -293,7 +294,6 @@ It SHOULD keep such a rendition selectable and treat the role as `subtitle`, and
 Unlike `format`, an unrecognized `role` never prevents rendering: it describes intent, not the wire.
 
 The `lang` field is the BCP-47 {{!RFC5646}} language tag of the track, for example `en` or `es-419`.
-The `label` field is a human-readable name for a track picker, useful when `lang` alone is ambiguous (for example distinguishing subtitles from same-language captions).
 
 Regardless of `format`, each frame's timestamp ({{container}}) is the authoritative cue start time on the media clock, so a relay and a consumer can order and schedule cues without parsing the payload.
 A text track has no delta frames: every frame is a self-contained cue, so a group MAY consist of multiple frames, following the same rule as a codec that lacks delta frames ({{container}}).
@@ -333,6 +333,7 @@ Audio, video, and text renditions share the following fields, extending the WebC
 ~~~
 type CommonExtensions = {
   "broadcast": string | undefined,
+  "label": string | undefined,
   "container": Container,
   "jitter": number | undefined,
 }
@@ -354,6 +355,11 @@ This lets a publisher author a catalog that points at tracks it does not republi
 For example, a transcoder produces a catalog listing its own downstream renditions alongside the untouched source rendition, referencing the latter in the source broadcast rather than copying the bytes through.
 
 A consumer subscribes to such a rendition in the referenced broadcast, using the rendition's track name unchanged.
+
+### label {#field-label}
+The `label` field is a human-readable rendition name for a track picker.
+It is presentation metadata, not the track name used to subscribe.
+Multiple renditions MAY use the same label.
 
 ### container {#field-container}
 The container used to frame this rendition's media, as described in {{container}}.

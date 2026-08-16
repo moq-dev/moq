@@ -153,6 +153,10 @@ pub struct VideoConfig {
 	#[serde(default)]
 	pub broadcast: Option<moq_net::PathRelativeOwned>,
 
+	/// Human-readable rendition name for track pickers.
+	#[serde(default)]
+	pub label: Option<String>,
+
 	/// The codec, see the registry for details:
 	/// <https://w3c.github.io/webcodecs/codec_registry.html>
 	#[serde_as(as = "DisplayFromStr")]
@@ -237,6 +241,7 @@ impl VideoConfig {
 	pub fn new(codec: impl Into<VideoCodec>) -> Self {
 		Self {
 			broadcast: None,
+			label: None,
 			codec: codec.into(),
 			description: None,
 			coded_width: None,
@@ -258,6 +263,17 @@ mod test {
 	use crate::catalog::{Container, H264};
 
 	use super::*;
+
+	#[test]
+	fn label_round_trips() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.label = Some("Main camera".to_string());
+
+		let encoded = serde_json::to_value(&config).expect("failed to encode");
+		assert_eq!(encoded["label"], "Main camera");
+		let decoded: VideoConfig = serde_json::from_value(encoded).expect("failed to decode");
+		assert_eq!(decoded.label.as_deref(), Some("Main camera"));
+	}
 
 	#[test]
 	fn display_aspect_uses_canonical_json_names() {

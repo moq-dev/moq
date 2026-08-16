@@ -79,6 +79,9 @@ pub struct MoqCatalog {
 
 #[derive(Clone, uniffi::Record)]
 pub struct MoqVideo {
+	/// Human-readable rendition name for track pickers.
+	#[uniffi(default = None)]
+	pub label: Option<String>,
 	pub codec: String,
 	pub description: Option<Vec<u8>>,
 	pub coded: Option<MoqDimensions>,
@@ -93,6 +96,9 @@ pub struct MoqVideo {
 
 #[derive(Clone, uniffi::Record)]
 pub struct MoqAudio {
+	/// Human-readable rendition name for track pickers.
+	#[uniffi(default = None)]
+	pub label: Option<String>,
 	pub codec: String,
 	pub description: Option<Vec<u8>>,
 	pub sample_rate: u32,
@@ -161,7 +167,8 @@ pub struct MoqVideoHint {
 	pub optimize_for_latency: Option<bool>,
 }
 
-/// What a single-track media publish needs: a format, its init bytes, and optional video fields.
+/// What a single-track media publish needs: a format, its init bytes, an optional label, and
+/// optional video fields.
 ///
 /// `format` selects the codec (e.g. `"opus"`, `"avc3"`); `data` carries the codec init bytes (an
 /// OpusHead, an avcC, an AudioSpecificConfig, ...). Audio formats need those bytes up front; video
@@ -174,6 +181,9 @@ pub struct MoqInit {
 	pub format: String,
 	/// Codec init bytes. Required for audio; may be empty for a video format that resolves in band.
 	pub data: Vec<u8>,
+	/// Human-readable rendition name for a single-codec track picker entry.
+	#[uniffi(default = None)]
+	pub label: Option<String>,
 	/// Caller-provided fields for a video track.
 	pub video: Option<MoqVideoHint>,
 }
@@ -195,6 +205,7 @@ impl From<MoqVideoHint> for moq_mux::catalog::VideoHint {
 impl From<MoqInit> for moq_mux::import::Init {
 	fn from(init: MoqInit) -> Self {
 		let mut out = moq_mux::import::Init::new(init.format, init.data);
+		out.label = init.label;
 		out.video = init.video.map(Into::into);
 		out
 	}
@@ -209,6 +220,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 			Some((
 				name.clone(),
 				MoqVideo {
+					label: config.label.clone(),
 					codec: config.codec.to_string(),
 					description: config.description.as_ref().map(|d| d.to_vec()),
 					coded: match (config.coded_width, config.coded_height) {
@@ -236,6 +248,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 			Some((
 				name.clone(),
 				MoqAudio {
+					label: config.label.clone(),
 					codec: config.codec.to_string(),
 					description: config.description.as_ref().map(|d| d.to_vec()),
 					sample_rate: config.sample_rate,
@@ -283,5 +296,21 @@ mod test {
 		let converted = convert_catalog(&catalog);
 		assert!(!converted.video["active"].stalled);
 		assert!(converted.video["video"].stalled);
+	}
+
+	#[test]
+	fn catalog_exposes_rendition_labels() {
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		video.label = Some("Main camera".to_string());
+		catalog.video.renditions.insert("video".to_string(), video);
+
+		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		audio.label = Some("English".to_string());
+		catalog.audio.renditions.insert("audio".to_string(), audio);
+
+		let converted = convert_catalog(&catalog);
+		assert_eq!(converted.video["video"].label.as_deref(), Some("Main camera"));
+		assert_eq!(converted.audio["audio"].label.as_deref(), Some("English"));
 	}
 }

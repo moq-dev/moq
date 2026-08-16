@@ -132,7 +132,7 @@ track.update(subscription: Subscription(priority: 20, ordered: false))
 
 ```swift
 let broadcast = try session.publisher.createBroadcast(path: "my-stream")
-let audio = try broadcast.publishMedia(format: "opus", initData: opusInitBytes)
+let audio = try broadcast.publishMedia(format: "opus", initData: opusInitBytes, label: "English")
 
 // Audio has no keyframes, so `cut` is what gives it group boundaries. Once per
 // frame is the lowest latency; a segment cadence suits HLS/DASH.
@@ -144,7 +144,11 @@ try audio.finish()
 try broadcast.finish()
 ```
 
-Video publishers can pass `video: VideoHint(...)` to seed catalog fields before the stream reveals them. Use `publishMedia(on:format:initData:video:)` to accept a media track obtained from `BroadcastDynamic`.
+The optional `label` is presentation metadata for a track picker and does not
+change the generated transport track name. Video publishers can pass
+`video: VideoHint(...)` to seed catalog fields before the stream reveals them.
+Use `publishMedia(on:format:initData:label:video:)` to accept a media track
+obtained from `BroadcastDynamic`.
 
 Each catalog `Video` has a `stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
 

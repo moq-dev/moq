@@ -223,6 +223,7 @@ mod test {
 			"video".to_string(),
 			VideoConfig {
 				broadcast: None,
+				label: None,
 				codec: H264 {
 					profile: 0x64,
 					constraints: 0x00,
@@ -249,6 +250,7 @@ mod test {
 			"audio".to_string(),
 			AudioConfig {
 				broadcast: None,
+				label: None,
 				codec: Opus,
 				sample_rate: 48_000,
 				channel_count: 2,

@@ -12,10 +12,18 @@ import (
 type MediaOption func(*mediaConfig)
 
 type mediaConfig struct {
+	label *string
 	video *VideoHint
 }
 
 var errNilTrackRequest = errors.New("moq: nil track request")
+
+// WithLabel sets the human-readable rendition name stored in the catalog.
+func WithLabel(label string) MediaOption {
+	return func(c *mediaConfig) {
+		c.label = &label
+	}
+}
 
 // WithVideoHint seeds catalog fields that a video stream cannot reveal itself.
 func WithVideoHint(hint VideoHint) MediaOption {
@@ -30,7 +38,7 @@ func mediaInit(format string, init []byte, opts []MediaOption) ffi.MoqInit {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	return ffi.MoqInit{Format: format, Data: init, Video: cfg.video}
+	return ffi.MoqInit{Format: format, Data: init, Label: cfg.label, Video: cfg.video}
 }
 
 // BroadcastProducer publishes a collection of tracks. Create one at a path with

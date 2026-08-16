@@ -205,25 +205,30 @@ fn publish_media_lifecycle() {
 	assert_eq!(moq_publish_finish(broadcast), 0);
 }
 
-/// Read the rendition name back out of a consumed audio config.
-fn cfg_name(cfg: &moq_audio_config) -> &str {
-	unsafe { std::str::from_utf8(std::slice::from_raw_parts(cfg.name.cast::<u8>(), cfg.name_len)) }.unwrap()
+fn borrowed_string(ptr: *const c_char, len: usize) -> Option<String> {
+	if ptr.is_null() {
+		return None;
+	}
+
+	Some(
+		unsafe { std::str::from_utf8(std::slice::from_raw_parts(ptr.cast::<u8>(), len)) }
+			.unwrap()
+			.to_string(),
+	)
 }
 
-/// The name passed to `moq_publish_media` becomes the track name in the catalog,
-/// made unique the same way the format-derived name is. Two tracks sharing a name
-/// get distinct indices rather than colliding.
+/// A label describes the rendition without changing its generated track name.
+/// Duplicate labels remain valid because the transport identifiers stay unique.
 #[test]
-fn publish_media_named_track() {
+fn publish_media_labels_config_without_naming_track() {
 	let origin = id(moq_origin_create());
-	let path = b"named-track";
+	let path = b"labeled-track";
 	let broadcast = publish_broadcast(origin, path);
 
 	let init = opus_head();
 	let format = b"opus";
-	let name = b"audio";
+	let label = b"English";
 
-	// The first track named "audio" becomes "0.audio".
 	let media1 = id(unsafe {
 		moq_publish_media(
 			broadcast,
@@ -231,8 +236,8 @@ fn publish_media_named_track() {
 			format.len(),
 			init.as_ptr(),
 			init.len(),
-			name.as_ptr() as *const c_char,
-			name.len(),
+			label.as_ptr() as *const c_char,
+			label.len(),
 		)
 	});
 
@@ -244,18 +249,26 @@ fn publish_media_named_track() {
 	let mut audio_cfg = moq_audio_config {
 		name: std::ptr::null(),
 		name_len: 0,
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: std::ptr::null(),
 		codec_len: 0,
 		description: std::ptr::null(),
 		description_len: 0,
 		sample_rate: 0,
 		channel_count: 0,
+		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id1, 0, &mut audio_cfg) }, 0);
-	assert_eq!(cfg_name(&audio_cfg), "0.audio");
+	assert_eq!(
+		borrowed_string(audio_cfg.name, audio_cfg.name_len).as_deref(),
+		Some("0.opus")
+	);
+	assert_eq!(
+		borrowed_string(audio_cfg.label, audio_cfg.label_len).as_deref(),
+		Some("English")
+	);
 
-	// A second track with the same name gets the next index, and the refreshed
-	// catalog carries both.
 	let media2 = id(unsafe {
 		moq_publish_media(
 			broadcast,
@@ -263,83 +276,33 @@ fn publish_media_named_track() {
 			format.len(),
 			init.as_ptr(),
 			init.len(),
-			name.as_ptr() as *const c_char,
-			name.len(),
+			label.as_ptr() as *const c_char,
+			label.len(),
 		)
 	});
 
 	let catalog_id2 = id(catalog_cb.recv());
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id2, 0, &mut audio_cfg) }, 0);
-	assert_eq!(cfg_name(&audio_cfg), "0.audio");
+	assert_eq!(
+		borrowed_string(audio_cfg.name, audio_cfg.name_len).as_deref(),
+		Some("0.opus")
+	);
+	assert_eq!(
+		borrowed_string(audio_cfg.label, audio_cfg.label_len).as_deref(),
+		Some("English")
+	);
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id2, 1, &mut audio_cfg) }, 0);
-	assert_eq!(cfg_name(&audio_cfg), "1.audio");
+	assert_eq!(
+		borrowed_string(audio_cfg.name, audio_cfg.name_len).as_deref(),
+		Some("1.opus")
+	);
+	assert_eq!(
+		borrowed_string(audio_cfg.label, audio_cfg.label_len).as_deref(),
+		Some("English")
+	);
 
 	assert_eq!(moq_consume_catalog_free(catalog_id1), 0);
 	assert_eq!(moq_consume_catalog_free(catalog_id2), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
-	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
-	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_media_finish(media1), 0);
-	assert_eq!(moq_publish_media_finish(media2), 0);
-	assert_eq!(moq_publish_finish(broadcast), 0);
-	assert_eq!(moq_origin_close(origin), 0);
-}
-
-/// An unnamed track still gets a unique name from its format, and shares the
-/// broadcast with a named one without colliding.
-#[test]
-fn publish_media_unnamed_uses_format_name() {
-	let origin = id(moq_origin_create());
-	let path = b"named-and-unnamed";
-	let broadcast = publish_broadcast(origin, path);
-
-	let init = opus_head();
-	let format = b"opus";
-
-	let media1 = id(unsafe {
-		moq_publish_media(
-			broadcast,
-			format.as_ptr() as *const c_char,
-			format.len(),
-			init.as_ptr(),
-			init.len(),
-			b"audio".as_ptr() as *const c_char,
-			5,
-		)
-	});
-	let media2 = id(unsafe {
-		moq_publish_media(
-			broadcast,
-			format.as_ptr() as *const c_char,
-			format.len(),
-			init.as_ptr(),
-			init.len(),
-			std::ptr::null(),
-			0,
-		)
-	});
-
-	let consume = request_broadcast(origin, path);
-	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
-	let catalog_id = id(catalog_cb.recv());
-
-	let mut audio_cfg = moq_audio_config {
-		name: std::ptr::null(),
-		name_len: 0,
-		codec: std::ptr::null(),
-		codec_len: 0,
-		description: std::ptr::null(),
-		description_len: 0,
-		sample_rate: 0,
-		channel_count: 0,
-	};
-	assert_eq!(unsafe { moq_consume_audio_config(catalog_id, 0, &mut audio_cfg) }, 0);
-	assert_eq!(cfg_name(&audio_cfg), "0.audio");
-	assert_eq!(unsafe { moq_consume_audio_config(catalog_id, 1, &mut audio_cfg) }, 0);
-	assert_eq!(cfg_name(&audio_cfg), "0.opus");
-
-	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
@@ -356,6 +319,8 @@ fn publish_catalog_config_invalid_broadcast() {
 	let video = moq_video_config {
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: codec.as_ptr() as *const c_char,
 		codec_len: codec.len(),
 		description: std::ptr::null(),
@@ -371,6 +336,8 @@ fn publish_catalog_config_invalid_broadcast() {
 	let audio = moq_audio_config {
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: audio_codec.as_ptr() as *const c_char,
 		codec_len: audio_codec.len(),
 		description: std::ptr::null(),
@@ -415,6 +382,7 @@ fn publish_catalog_roundtrip() {
 
 	// Author the catalog directly instead of via moq_publish_media.
 	let video_name = "video";
+	let video_label = "Main camera";
 	let video_codec = "vp8";
 	let width: u32 = 1920;
 	let height: u32 = 1080;
@@ -422,6 +390,8 @@ fn publish_catalog_roundtrip() {
 	let video = moq_video_config {
 		name: video_name.as_ptr() as *const c_char,
 		name_len: video_name.len(),
+		label: video_label.as_ptr() as *const c_char,
+		label_len: video_label.len(),
 		codec: video_codec.as_ptr() as *const c_char,
 		codec_len: video_codec.len(),
 		description: description.as_ptr(),
@@ -435,6 +405,8 @@ fn publish_catalog_roundtrip() {
 	let stalled_video = moq_video_config {
 		name: stalled_video_name.as_ptr() as *const c_char,
 		name_len: stalled_video_name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: video_codec.as_ptr() as *const c_char,
 		codec_len: video_codec.len(),
 		description: description.as_ptr(),
@@ -467,10 +439,13 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(unsafe { moq_publish_video_properties(broadcast, &properties) }, 0);
 
 	let audio_name = "audio";
+	let audio_label = "English";
 	let audio_codec = "opus";
 	let audio = moq_audio_config {
 		name: audio_name.as_ptr() as *const c_char,
 		name_len: audio_name.len(),
+		label: audio_label.as_ptr() as *const c_char,
+		label_len: audio_label.len(),
 		codec: audio_codec.as_ptr() as *const c_char,
 		codec_len: audio_codec.len(),
 		description: std::ptr::null(),
@@ -491,6 +466,8 @@ fn publish_catalog_roundtrip() {
 	let mut video_cfg = moq_video_config {
 		name: std::ptr::null(),
 		name_len: 0,
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: std::ptr::null(),
 		codec_len: 0,
 		description: std::ptr::null(),
@@ -508,6 +485,10 @@ fn publish_catalog_roundtrip() {
 	}
 	.unwrap();
 	assert_eq!(codec, "vp8");
+	assert_eq!(
+		borrowed_string(video_cfg.label, video_cfg.label_len).as_deref(),
+		Some("Main camera")
+	);
 	assert_eq!(video_cfg.coded_width, 1920);
 	assert_eq!(video_cfg.coded_height, 1080);
 	let mut stalled = std::mem::MaybeUninit::<bool>::uninit();
@@ -554,6 +535,8 @@ fn publish_catalog_roundtrip() {
 	let mut audio_cfg = moq_audio_config {
 		name: std::ptr::null(),
 		name_len: 0,
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: std::ptr::null(),
 		codec_len: 0,
 		description: std::ptr::null(),
@@ -563,6 +546,10 @@ fn publish_catalog_roundtrip() {
 		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id, 0, &mut audio_cfg) }, 0);
+	assert_eq!(
+		borrowed_string(audio_cfg.label, audio_cfg.label_len).as_deref(),
+		Some("English")
+	);
 	assert_eq!(audio_cfg.sample_rate, 48000);
 	assert_eq!(audio_cfg.channel_count, 2);
 
@@ -602,6 +589,8 @@ fn a_half_specified_coded_size_round_trips() {
 	let mut video = moq_video_config {
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: codec.as_ptr() as *const c_char,
 		codec_len: codec.len(),
 		description: std::ptr::null(),
@@ -620,6 +609,8 @@ fn a_half_specified_coded_size_round_trips() {
 	let mut read = moq_video_config {
 		name: std::ptr::null(),
 		name_len: 0,
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: std::ptr::null(),
 		codec_len: 0,
 		description: std::ptr::null(),
@@ -676,6 +667,8 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 	let video = moq_video_config {
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: codec.as_ptr() as *const c_char,
 		codec_len: codec.len(),
 		description: std::ptr::null(),
@@ -699,6 +692,8 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 	let mut video_cfg = moq_video_config {
 		name: std::ptr::null(),
 		name_len: 0,
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: std::ptr::null(),
 		codec_len: 0,
 		description: std::ptr::null(),
@@ -766,6 +761,8 @@ fn cmaf_catalog_container_carries_its_init_segment() {
 	let audio = moq_audio_config {
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: codec.as_ptr() as *const c_char,
 		codec_len: codec.len(),
 		description: std::ptr::null(),
@@ -788,6 +785,8 @@ fn cmaf_catalog_container_carries_its_init_segment() {
 	let mut audio_cfg = moq_audio_config {
 		name: std::ptr::null(),
 		name_len: 0,
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: std::ptr::null(),
 		codec_len: 0,
 		description: std::ptr::null(),
@@ -824,6 +823,8 @@ fn unpublishable_catalog_containers_are_rejected() {
 	let config = |container| moq_video_config {
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: codec.as_ptr() as *const c_char,
 		codec_len: codec.len(),
 		description: std::ptr::null(),
@@ -1797,6 +1798,8 @@ fn local_publish_consume() {
 	let mut audio_cfg = moq_audio_config {
 		name: std::ptr::null(),
 		name_len: 0,
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: std::ptr::null(),
 		codec_len: 0,
 		description: std::ptr::null(),
@@ -1821,6 +1824,8 @@ fn local_publish_consume() {
 	let mut video_cfg = moq_video_config {
 		name: std::ptr::null(),
 		name_len: 0,
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: std::ptr::null(),
 		codec_len: 0,
 		description: std::ptr::null(),
@@ -1915,6 +1920,8 @@ fn consume_announced_local() {
 	let mut audio_cfg = moq_audio_config {
 		name: std::ptr::null(),
 		name_len: 0,
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: std::ptr::null(),
 		codec_len: 0,
 		description: std::ptr::null(),
@@ -1989,6 +1996,8 @@ fn video_publish_consume() {
 	let mut video_cfg = moq_video_config {
 		name: std::ptr::null(),
 		name_len: 0,
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: std::ptr::null(),
 		codec_len: 0,
 		description: std::ptr::null(),
@@ -2021,6 +2030,8 @@ fn video_publish_consume() {
 	let mut audio_cfg = moq_audio_config {
 		name: std::ptr::null(),
 		name_len: 0,
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: std::ptr::null(),
 		codec_len: 0,
 		description: std::ptr::null(),
@@ -2696,6 +2707,8 @@ fn catalog_update_on_new_track() {
 	let mut audio_cfg = moq_audio_config {
 		name: std::ptr::null(),
 		name_len: 0,
+		label: std::ptr::null(),
+		label_len: 0,
 		codec: std::ptr::null(),
 		codec_len: 0,
 		description: std::ptr::null(),

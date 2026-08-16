@@ -109,6 +109,11 @@ pub struct moq_video_config {
 	pub name: *const c_char,
 	pub name_len: usize,
 
+	/// Human-readable rendition name for track pickers, or NULL if not used.
+	pub label: *const c_char,
+	/// Length of `label` in bytes.
+	pub label_len: usize,
+
 	/// The codec of the track, NOT NULL terminated
 	pub codec: *const c_char,
 	pub codec_len: usize,
@@ -166,6 +171,11 @@ pub struct moq_audio_config {
 	/// The name of the track, NOT NULL terminated
 	pub name: *const c_char,
 	pub name_len: usize,
+
+	/// Human-readable rendition name for track pickers, or NULL if not used.
+	pub label: *const c_char,
+	/// Length of `label` in bytes.
+	pub label_len: usize,
 
 	/// The codec of the track, NOT NULL terminated
 	pub codec: *const c_char,
@@ -1188,16 +1198,17 @@ pub extern "C" fn moq_publish_finish(broadcast: u32) -> i32 {
 /// All frames in [moq_publish_media_frame] must be written in decode order.
 /// The `format` controls the encoding, both of `init` and frame payloads.
 ///
-/// The `name` is an optional track name, made unique within the broadcast by an
-/// incrementing index prefix (`0.opus`, `1.opus`, ...). When NULL, it's derived
-/// from the format instead.
+/// The `label` is an optional human-readable name stored in the audio or video
+/// catalog configuration. The track name is generated from `format` and remains
+/// an internal identifier. Labels apply only to single-codec formats; container
+/// formats describe their tracks independently.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that format is a valid pointer to format_len bytes of data.
 /// - The caller must ensure that init is a valid pointer to init_size bytes of data.
-/// - If name is non-null, the caller must ensure it points to name_len valid bytes.
+/// - If label is non-null, the caller must ensure it points to label_len valid bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_media(
 	broadcast: u32,
@@ -1205,16 +1216,16 @@ pub unsafe extern "C" fn moq_publish_media(
 	format_len: usize,
 	init: *const u8,
 	init_size: usize,
-	name: *const c_char,
-	name_len: usize,
+	label: *const c_char,
+	label_len: usize,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let format = unsafe { ffi::parse_str(format, format_len)? };
 		let init = unsafe { ffi::parse_slice(init, init_size)? };
-		let name = unsafe { ffi::parse_str_optional(name, name_len)? };
+		let label = unsafe { ffi::parse_str_optional(label, label_len)? };
 
-		State::lock().publish.media(broadcast, format, init, name)
+		State::lock().publish.media(broadcast, format, init, label)
 	})
 }
 
@@ -1327,6 +1338,7 @@ pub unsafe extern "C" fn moq_publish_video_properties(broadcast: u32, properties
 ///
 /// The struct fields are read as inputs:
 /// - `name` / `codec` are required (NOT NULL terminated) string slices.
+/// - `label` may be NULL to omit the human-readable rendition name.
 /// - `description` may be NULL to omit it.
 /// - `coded_width` / `coded_height` may be zero to omit them.
 /// - `container` describes how the frames written to the track are wrapped. A
@@ -1346,10 +1358,12 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
 
 		let name = unsafe { ffi::parse_str(config.name, config.name_len)? };
+		let label = unsafe { ffi::parse_str_optional(config.label, config.label_len)? };
 		let codec = unsafe { ffi::parse_str(config.codec, config.codec_len)? };
 		let codec = hang::catalog::VideoCodec::from_str(codec).map_err(Error::Hang)?;
 
 		let mut video = hang::catalog::VideoConfig::new(codec);
+		video.label = label.map(str::to_string);
 		if !config.description.is_null() {
 			let description = unsafe { ffi::parse_slice(config.description, config.description_len)? };
 			video.description = Some(bytes::Bytes::copy_from_slice(description));
@@ -1372,6 +1386,7 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 ///
 /// The struct fields are read as inputs:
 /// - `name` / `codec` are required (NOT NULL terminated) string slices.
+/// - `label` may be NULL to omit the human-readable rendition name.
 /// - `sample_rate` / `channel_count` are required.
 /// - `description` may be NULL to omit it.
 /// - `container` describes how the frames written to the track are wrapped, the
@@ -1389,10 +1404,12 @@ pub unsafe extern "C" fn moq_publish_audio_config(broadcast: u32, config: *const
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
 
 		let name = unsafe { ffi::parse_str(config.name, config.name_len)? };
+		let label = unsafe { ffi::parse_str_optional(config.label, config.label_len)? };
 		let codec = unsafe { ffi::parse_str(config.codec, config.codec_len)? };
 		let codec = hang::catalog::AudioCodec::from_str(codec).map_err(Error::Hang)?;
 
 		let mut audio = hang::catalog::AudioConfig::new(codec, config.sample_rate, config.channel_count);
+		audio.label = label.map(str::to_string);
 		audio.container = unsafe { parse_container(&config.container)? };
 		if !config.description.is_null() {
 			let description = unsafe { ffi::parse_slice(config.description, config.description_len)? };

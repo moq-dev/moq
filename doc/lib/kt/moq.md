@@ -122,7 +122,9 @@ import dev.moq.*
 
 Moq.connect("https://relay.example.com").use { moq ->
     val broadcast = moq.createBroadcast("my-stream")
-    val audio = broadcast.publishMedia(Init(format = "opus", data = opusInitBytes, video = null))
+    val audio = broadcast.publishMedia(
+        Init(format = "opus", data = opusInitBytes, label = "English", video = null)
+    )
 
     // Audio has no keyframes, so `cut` is what gives it group boundaries. Once
     // per frame is the lowest latency; a segment cadence suits HLS/DASH.
@@ -134,6 +136,9 @@ Moq.connect("https://relay.example.com").use { moq ->
     broadcast.finish()
 }
 ```
+
+`label` is presentation metadata for a track picker and does not change the
+generated transport track name. Labels do not need to be unique.
 
 Each catalog `Video` has a `stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
 

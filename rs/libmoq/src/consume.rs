@@ -195,6 +195,12 @@ impl Consume {
 		*dst = moq_video_config {
 			name: rendition.as_str().as_ptr() as *const c_char,
 			name_len: rendition.len(),
+			label: config
+				.label
+				.as_ref()
+				.map(|label| label.as_ptr() as *const c_char)
+				.unwrap_or(std::ptr::null()),
+			label_len: config.label.as_ref().map_or(0, String::len),
 			codec: codec.as_str().as_ptr() as *const c_char,
 			codec_len: codec.len(),
 			description: config
@@ -257,6 +263,12 @@ impl Consume {
 		*dst = moq_audio_config {
 			name: rendition.as_str().as_ptr() as *const c_char,
 			name_len: rendition.len(),
+			label: config
+				.label
+				.as_ref()
+				.map(|label| label.as_ptr() as *const c_char)
+				.unwrap_or(std::ptr::null()),
+			label_len: config.label.as_ref().map_or(0, String::len),
 			codec: codec.as_str().as_ptr() as *const c_char,
 			codec_len: codec.len(),
 			description: config

@@ -194,9 +194,10 @@ public final class BroadcastProducer: Sendable {
     public func publishMedia(
         format: String,
         initData: Data = Data(),
+        label: String? = nil,
         video: VideoHint? = nil
     ) throws -> MediaProducer {
-        MediaProducer(try ffi.publishMedia(init: MoqInit(format: format, data: initData, video: video)))
+        MediaProducer(try ffi.publishMedia(init: MoqInit(format: format, data: initData, label: label, video: video)))
     }
 
     /// Publish a single media track requested through `BroadcastDynamic`.
@@ -204,20 +205,26 @@ public final class BroadcastProducer: Sendable {
         on request: TrackRequest,
         format: String,
         initData: Data = Data(),
+        label: String? = nil,
         video: VideoHint? = nil
     ) throws -> MediaProducer {
         MediaProducer(
             try ffi.publishMediaOnTrack(
                 request: request.ffi,
-                init: MoqInit(format: format, data: initData, video: video)
+                init: MoqInit(format: format, data: initData, label: label, video: video)
             )
         )
     }
 
     /// Open a media track fed by a raw byte stream with inferred frame boundaries
     /// (e.g. piped Annex-B H.264). Only self-describing formats are supported.
-    public func publishMediaStream(format: String, video: VideoHint? = nil) throws -> MediaStreamProducer {
-        MediaStreamProducer(try ffi.publishMediaStream(init: MoqInit(format: format, data: Data(), video: video)))
+    public func publishMediaStream(
+        format: String,
+        label: String? = nil,
+        video: VideoHint? = nil
+    ) throws -> MediaStreamProducer {
+        MediaStreamProducer(
+            try ffi.publishMediaStream(init: MoqInit(format: format, data: Data(), label: label, video: video)))
     }
 
     /// Open a track for arbitrary byte payloads, with no codec or container.

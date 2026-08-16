@@ -20,6 +20,7 @@ fn media_init(format: &str, data: Vec<u8>) -> MoqInit {
 	MoqInit {
 		format: format.to_string(),
 		data,
+		label: None,
 		video: None,
 	}
 }
@@ -1368,7 +1369,9 @@ async fn catalog_update_on_new_track() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let broadcast = origin.create_broadcast("catalog-update".into()).unwrap();
 	let init = opus_head();
-	let _media1 = broadcast.publish_media(media_init("opus", init.clone())).unwrap();
+	let mut first = media_init("opus", init.clone());
+	first.label = Some("English".to_string());
+	let _media1 = broadcast.publish_media(first).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -1387,6 +1390,7 @@ async fn catalog_update_on_new_track() {
 		.unwrap()
 		.unwrap();
 	assert_eq!(catalog1.audio.len(), 1);
+	assert_eq!(catalog1.audio["0.opus"].label.as_deref(), Some("English"));
 
 	let _media2 = broadcast.publish_media(media_init("opus", init)).unwrap();
 
@@ -1396,6 +1400,8 @@ async fn catalog_update_on_new_track() {
 		.unwrap()
 		.unwrap();
 	assert_eq!(catalog2.audio.len(), 2);
+	assert_eq!(catalog2.audio["0.opus"].label.as_deref(), Some("English"));
+	assert_eq!(catalog2.audio["1.opus"].label, None);
 
 	broadcast.finish().unwrap();
 }

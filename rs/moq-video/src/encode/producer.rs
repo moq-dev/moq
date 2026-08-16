@@ -44,6 +44,7 @@ const DEFAULT_FRAMERATE: u32 = 30;
 /// overlay keeps supplying.
 fn rendition_hint(rendition: hang::catalog::VideoConfig) -> moq_mux::catalog::VideoHint {
 	let mut hint = moq_mux::catalog::VideoHint::default();
+	hint.label = rendition.label;
 	hint.codec = Some(rendition.codec);
 	hint.coded_width = rendition.coded_width;
 	hint.coded_height = rendition.coded_height;
