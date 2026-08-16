@@ -321,7 +321,18 @@ impl MoqSide {
 		];
 		let ignored = ignored.into_iter().find(|(_, given)| *given).map(|(flag, _)| flag);
 		#[cfg(unix)]
-		let ignored = ignored.or_else(|| listen.unix.bind.is_some().then_some("--listen-unix-bind"));
+		let ignored = ignored
+			.or_else(|| listen.unix.bind.is_some().then_some("--listen-unix-bind"))
+			.or_else(|| {
+				let allow = listen.unix.allow.as_ref()?;
+				[
+					("--listen-unix-allow-uid", !allow.uid.is_empty()),
+					("--listen-unix-allow-gid", !allow.gid.is_empty()),
+					("--listen-unix-allow-pid", !allow.pid.is_empty()),
+				]
+				.into_iter()
+				.find_map(|(flag, given)| given.then_some(flag))
+			});
 
 		if let Some(flag) = ignored {
 			anyhow::bail!("`{command}` runs locally and takes no MoQ side; drop {flag}");
@@ -959,10 +970,17 @@ mod tests {
 
 		#[cfg(unix)]
 		{
-			let cli =
-				Cli::try_parse_from(["moq", "--listen-unix-bind", "/tmp/moq-cli.sock", "token", "generate"]).unwrap();
-			let err = cli.moq.reject("token").unwrap_err().to_string();
-			assert!(err.contains("--listen-unix-bind"), "{err}");
+			for (flag, value, reported) in [
+				("--listen-unix-bind", "/tmp/moq-cli.sock", "--listen-unix-bind"),
+				("--listen-unix-allow-uid", "1000", "--listen-unix-allow-uid"),
+				("--listen-unix-allow-gid", "1000", "--listen-unix-allow-gid"),
+				("--listen-unix-allow-pid", "1000", "--listen-unix-allow-pid"),
+				("--server-unix-allow-uid", "1000", "--listen-unix-allow-uid"),
+			] {
+				let cli = Cli::try_parse_from(["moq", flag, value, "token", "generate"]).unwrap();
+				let err = cli.moq.reject("token").unwrap_err().to_string();
+				assert!(err.contains(reported), "{err}");
+			}
 		}
 
 		#[cfg(feature = "cluster-lan")]

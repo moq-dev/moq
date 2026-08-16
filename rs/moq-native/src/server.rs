@@ -803,8 +803,8 @@ impl StreamListeners {
 						.await?
 						.with_protocols(alpns)
 						.with_accept_health(health);
-					// Loose file perms: the uid/gid/pid allow list is the real gate,
-					// and the worker usually runs as a different user than the server.
+					// Loose socket perms let workers run as a different user. The parent
+					// directory or uid/gid/pid allowlist is the access gate.
 					listener.set_mode(0o666)?;
 					tracing::info!(path = %path.display(), allow = ?self.unix_allow, "listening (unix)");
 					bound.push(BoundListener::Unix(listener));

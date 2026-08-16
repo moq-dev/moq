@@ -331,7 +331,9 @@ A Unix socket lets the relay additionally gate the connecting process by its
 kernel credentials (`SO_PEERCRED` / `LOCAL_PEERCRED`), so you can restrict
 access to a specific worker user. Requires the relay to be built with the `uds`
 feature. The allowlist (`--listen-unix-allow-uid` / `-gid` / `-pid`) applies to
-the `unix://` listener.
+the `unix://` listener. The socket is created with mode `0666`, so use a
+restrictive parent directory or an explicit allowlist when local users must not
+reach it.
 
 ```toml
 [listen.unix]

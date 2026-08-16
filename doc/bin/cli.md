@@ -88,9 +88,9 @@ moq <MoQ side>  play [playback options]
     `--listen-tls-generate` / `--listen-tls-cert` + `--listen-tls-key`).
   - `--listen-tcp-bind <addr>` hosts plaintext qmux over TCP. Bind it only to
     loopback or a trusted private network.
-  - `--listen-unix-bind <path>` hosts qmux over a Unix socket. The socket's
-    filesystem permissions control access, and an optional peer-credential
-    allowlist can restrict it further.
+  - `--listen-unix-bind <path>` hosts qmux over a Unix socket. The socket is
+    created with mode `0666`, so restrict access through its parent directory or
+    an explicit peer-credential allowlist.
   - `--cluster-lan` meshes with every other participating process on the LAN via
     mDNS, no relay or internet needed. See [LAN Cluster](#lan-cluster-mdns).
 

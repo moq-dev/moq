@@ -32,7 +32,7 @@ pub struct Config {
 	pub bind: Option<PathBuf>,
 
 	/// Peer-credential allowlist. `None` (the default) enforces nothing, so the
-	/// socket's filesystem permissions are the only gate.
+	/// parent directory's permissions are the only filesystem gate.
 	#[command(flatten)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub allow: Option<Allow>,
@@ -464,8 +464,8 @@ mod legacy_tests {
 		assert_eq!(once.resolved().allow.map(|a| a.uid), once.allow.map(|a| a.uid));
 	}
 
-	/// No flag at all leaves the allowlist unset, so the socket's own permissions
-	/// stay the only gate.
+	/// No flag at all leaves the allowlist unset, so the parent directory's
+	/// permissions stay the only filesystem gate.
 	#[test]
 	fn no_allowlist_stays_unset() {
 		let config = parse(&["--listen-unix-bind", "/tmp/moq.sock"]).resolved();
