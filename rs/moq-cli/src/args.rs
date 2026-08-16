@@ -273,7 +273,7 @@ impl MoqSide {
 
 	/// Whether a listener has to be bound at all.
 	pub fn serves(&self) -> bool {
-		self.server.has_explicit_listener() || self.lan()
+		self.server.has_explicit_bind() || self.lan()
 	}
 
 	/// Reject a verb that needs the MoQ network but was given no way to reach it.
