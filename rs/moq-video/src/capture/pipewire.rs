@@ -442,12 +442,19 @@ fn dma_buf_sync(fd: &OwnedFd, flags: u64) -> Result<(), Error> {
 
 fn dma_buf_allocation_size(fd: BorrowedFd<'_>, map_offset: u32) -> std::io::Result<Option<usize>> {
 	let raw = std::os::fd::AsRawFd::as_raw_fd(&fd);
+	dma_buf_allocation_size_with_seek(map_offset, |offset, whence| seek_fd(raw, offset, whence))
+}
+
+fn dma_buf_allocation_size_with_seek(
+	map_offset: u32,
+	mut seek: impl FnMut(libc::off_t, libc::c_int) -> std::io::Result<libc::off_t>,
+) -> std::io::Result<Option<usize>> {
 	// DMA-BUF supports SEEK_END specifically so userspace can discover the
 	// allocation size even though fstat commonly reports zero.
-	let end = seek_fd(raw, 0, libc::SEEK_END)?;
+	let end = seek(0, libc::SEEK_END)?;
 	// DMA-BUF also supports SEEK_SET. Reset the shared file description to the
 	// canonical position before handing the descriptor to another subsystem.
-	seek_fd(raw, 0, libc::SEEK_SET)?;
+	seek(0, libc::SEEK_SET)?;
 	let Ok(end) = usize::try_from(end) else {
 		return Ok(None);
 	};
@@ -1619,23 +1626,31 @@ mod tests {
 	}
 
 	#[test]
-	fn dmabuf_size_comes_from_the_seekable_descriptor() {
-		use std::os::fd::AsFd;
+	fn dmabuf_size_comes_from_seek_end_not_stat() {
+		let mut calls = Vec::new();
+		let size = dma_buf_allocation_size_with_seek(1024, |offset, whence| {
+			calls.push((offset, whence));
+			match whence {
+				libc::SEEK_END => Ok(4096),
+				libc::SEEK_SET => Ok(0),
+				_ => panic!("unexpected seek mode {whence}"),
+			}
+		})
+		.unwrap();
 
-		let path = std::env::temp_dir().join(format!(
-			"moq-video-dmabuf-{}-{}",
-			std::process::id(),
-			std::time::SystemTime::now()
-				.duration_since(std::time::UNIX_EPOCH)
-				.unwrap()
-				.as_nanos()
-		));
-		let file = std::fs::File::create(&path).unwrap();
-		file.set_len(4096).unwrap();
-		assert_eq!(dma_buf_allocation_size(file.as_fd(), 1024).unwrap(), Some(3072));
-		assert_eq!(dma_buf_allocation_size(file.as_fd(), 4096).unwrap(), None);
-		drop(file);
-		std::fs::remove_file(path).unwrap();
+		// This models a DMA-BUF anon inode: no stat size is available, and the
+		// allocation length comes exclusively from its SEEK_END operation.
+		assert_eq!(size, Some(3072));
+		assert_eq!(calls, [(0, libc::SEEK_END), (0, libc::SEEK_SET)]);
+		assert_eq!(
+			dma_buf_allocation_size_with_seek(4096, |_, whence| match whence {
+				libc::SEEK_END => Ok(4096),
+				libc::SEEK_SET => Ok(0),
+				_ => unreachable!(),
+			})
+			.unwrap(),
+			None
+		);
 	}
 
 	#[test]
