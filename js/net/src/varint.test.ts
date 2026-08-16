@@ -54,11 +54,12 @@ test("Varint encode/decode roundtrip - 8 byte values (1073741824+)", () => {
 });
 
 test("Varint bigint roundtrip preserves 62-bit precision", () => {
-	const value = 9007199254740993n;
-	const encoded = Varint.encode(value);
-	const [decoded, remaining] = Varint.decodeBigInt(encoded);
-	expect(decoded).toBe(value);
-	expect(remaining.byteLength).toBe(0);
+	for (const value of [9007199254740993n, 2n ** 62n - 1n]) {
+		const encoded = Varint.encode(value);
+		const [decoded, remaining] = Varint.decodeBigInt(encoded);
+		expect(decoded).toBe(value);
+		expect(remaining.byteLength).toBe(0);
+	}
 });
 
 test("Varint size calculation", () => {
