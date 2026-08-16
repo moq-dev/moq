@@ -503,7 +503,9 @@ impl Producer {
 	/// Creates the timeline track on first use, which errors if the broadcast can't (something
 	/// else already took the name).
 	pub fn track(&self, name: &str) -> crate::Result<Recorder> {
-		self.enroll(name, false)
+		let mut state = self.state.lock().unwrap();
+		self.prepare_pacing(&mut state)?;
+		Ok(self.enroll(&mut state, name, false))
 	}
 
 	/// Enroll the track `name` without letting it influence segmentation, returning its
@@ -526,21 +528,13 @@ impl Producer {
 	/// A group that never closes (a `moq_json::stream` log) is recorded once, in the segment its
 	/// group opened in, and never again. Roll the group at segment boundaries if its content
 	/// needs to be addressable per segment.
-	pub fn passive(&self, name: &str) -> crate::Result<Recorder> {
-		self.enroll(name, true)
+	pub fn passive(&self, name: &str) -> Recorder {
+		let mut state = self.state.lock().unwrap();
+		self.enroll(&mut state, name, true)
 	}
 
-	/// Enroll `name`, creating the timeline track if this is a pacing track and the first to need
-	/// it.
-	fn enroll(&self, name: &str, passive: bool) -> crate::Result<Recorder> {
-		let mut state = self.state.lock().unwrap();
-
-		if !passive && state.sink.is_none() && state.overrun.is_none() {
-			let net = state.broadcast.create_track(DEFAULT_NAME, None)?;
-			let config = moq_json::stream::ProducerConfig::default().with_compression(true);
-			state.sink = Some(moq_json::stream::Producer::new(net, config));
-		}
-
+	/// Enroll `name` after any fallible pacing-track setup has completed.
+	fn enroll(&self, state: &mut State, name: &str, passive: bool) -> Recorder {
 		state.tracks.insert(
 			name.to_string(),
 			TrackState {
@@ -549,10 +543,20 @@ impl Producer {
 			},
 		);
 
-		Ok(Recorder {
+		Recorder {
 			state: self.state.clone(),
 			name: name.to_string(),
-		})
+		}
+	}
+
+	/// Create the timeline track when the first pacing track enrolls.
+	fn prepare_pacing(&self, state: &mut State) -> crate::Result<()> {
+		if state.sink.is_none() && state.overrun.is_none() {
+			let net = state.broadcast.create_track(DEFAULT_NAME, None)?;
+			let config = moq_json::stream::ProducerConfig::default().with_compression(true);
+			state.sink = Some(moq_json::stream::Producer::new(net, config));
+		}
+		Ok(())
 	}
 
 	/// Declare a segment boundary at `pts`, overriding the [`Config::duration_min`] pacing.
@@ -1351,7 +1355,7 @@ mod test {
 	async fn a_passive_track_neither_paces_nor_gates() {
 		let (broadcast, mut timeline) = setup();
 		let mut video = timeline.track("video0").unwrap();
-		let mut catalog = timeline.passive("catalog.json").unwrap();
+		let mut catalog = timeline.passive("catalog.json");
 
 		catalog.record(0, ms(0), true);
 		for (seq, t) in [(0u64, 0u64), (1, 2_000), (2, 4_000)] {
@@ -1379,7 +1383,7 @@ mod test {
 	async fn a_late_passive_group_lands_in_the_next_segment() {
 		let (broadcast, mut timeline) = setup();
 		let mut video = timeline.track("video0").unwrap();
-		let mut catalog = timeline.passive("catalog.json").unwrap();
+		let mut catalog = timeline.passive("catalog.json");
 
 		video.record(0, ms(0), true);
 		// Flushes segment 0, which the catalog has contributed nothing to.
@@ -1408,7 +1412,7 @@ mod test {
 	async fn a_passive_track_uses_arrival_and_does_not_extend_the_tail() {
 		let (broadcast, mut timeline) = setup();
 		let mut video = timeline.track("video0").unwrap();
-		let mut catalog = timeline.passive("catalog.json").unwrap();
+		let mut catalog = timeline.passive("catalog.json");
 
 		video.record(0, ms(0), true);
 		catalog.record(0, ms(10_000), true);
@@ -1425,12 +1429,34 @@ mod test {
 		);
 	}
 
+	#[tokio::test]
+	async fn the_built_in_catalog_is_recorded_passively() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let timeline = catalog.timeline();
+		let mut video = catalog.enroll("video0").unwrap();
+
+		video.record(0, ms(0), true);
+		video.record(1, ms(2_000), true);
+		video.end(ms(4_000));
+		drop(video);
+		catalog.finish().unwrap();
+
+		assert_eq!(
+			drain(&broadcast, &timeline).await,
+			vec![
+				entry(0, 0, 2_000, &[("catalog.json", &[(0, 0)]), ("video0", &[(0, 0)])]),
+				entry(1, 2_000, 2_000, &[("video0", &[(1, 1)])]),
+			]
+		);
+	}
+
 	// Segmentation stays opt-in by pacing track: passive tracks alone describe nothing, so the
 	// timeline track is never created and its name stays free.
 	#[tokio::test]
 	async fn passive_tracks_alone_publish_no_timeline() {
 		let (mut broadcast, mut timeline) = setup();
-		let mut catalog = timeline.passive("catalog.json").unwrap();
+		let mut catalog = timeline.passive("catalog.json");
 
 		catalog.record(0, ms(0), true);
 		timeline.finish().unwrap();

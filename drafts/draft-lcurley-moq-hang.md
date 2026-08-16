@@ -561,7 +561,8 @@ A recording is a set of objects under a common prefix:
 <prefix>/<track>/<segment>
 ~~~
 
-`<track>` is the track's name with every byte outside `A-Z a-z 0-9 _ -` percent-encoded.
+`<track>` is the track's name with every byte outside `A-Z a-z 0-9 _ -` percent-encoded as `%` followed by two uppercase hexadecimal digits.
+For example, `catalog.json` becomes `catalog%2Ejson`.
 An encoded name therefore never contains `/` and never begins with `.`, so a track can neither collide with the reserved `.timeline` name nor address anything outside the prefix.
 
 `.track` stores the immutable properties of its parent track ({{recording-track}}).
@@ -629,8 +630,9 @@ Segment objects are immutable once written.
 `.timeline` holds the timeline records in order, using the track's framing ({{timeline-framing}}).
 It is the one track not addressed by segment, because it is the index that names the segments.
 
-An unbounded archive stores the timeline track's frames verbatim.
+An unbounded archive re-encodes each source record into a recording-owned timeline stream.
 The object grows as the broadcast does, and its content is append-only: bytes once written never change.
+Re-encoding lets the writer replace a source record with an atomic gap ({{recording-writer}}) while keeping one coherent compression window for the recording.
 
 A reader starting fresh reads the object from the beginning, which the shared DEFLATE window requires anyway.
 A reader following a live recording issues a ranged GET from the offset it last read and feeds the new bytes to the decompressor it already holds: each frame's sync-flush block terminates its own compressed data, so the appended bytes decode without re-reading earlier ones.
@@ -654,6 +656,8 @@ Since the timeline record itself is only published once the segment is complete 
 
 If any object for a segment cannot be made durable, the writer MUST record an atomic gap for that segment rather than publish a partial set of tracks.
 The gap is the same timeline record with `tracks` absent or empty, so it preserves the segment number and timing but references no objects.
+The writer encodes that gap and every subsequent record through the recording's own DEFLATE encoder, whose shared dictionary therefore contains the gap rather than the source record it replaced.
+It MUST NOT append a later source frame compressed against the source timeline's different dictionary.
 The writer then continues with the next segment.
 
 A group that arrives after its segment object has been written is not recorded.
