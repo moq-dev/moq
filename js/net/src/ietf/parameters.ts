@@ -200,6 +200,7 @@ const MSG_PARAM_LARGEST_OBJECT = 0x09n;
 const MSG_PARAM_SUBSCRIPTION_FILTER = 0x21n;
 
 type MessageParamKind = "varint" | "uint8" | "bool" | "location" | "bytes";
+type MessageLocation = { groupId: bigint; objectId: bigint };
 
 function getMessageParamKind(id: bigint): MessageParamKind {
 	switch (id) {
@@ -222,7 +223,7 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 	}
 }
 
-function decodeLocation(data: Uint8Array): { groupId: bigint; objectId: bigint } {
+function decodeLocation(data: Uint8Array): MessageLocation {
 	const [groupId, objectData] = Varint.decodeBigInt(data);
 	const [objectId, trailing] = Varint.decodeBigInt(objectData);
 	if (trailing.length !== 0) {
@@ -231,7 +232,7 @@ function decodeLocation(data: Uint8Array): { groupId: bigint; objectId: bigint }
 	return { groupId, objectId };
 }
 
-function encodeLocation({ groupId, objectId }: { groupId: bigint; objectId: bigint }): Uint8Array {
+function encodeLocation({ groupId, objectId }: MessageLocation): Uint8Array {
 	const group = Varint.encode(groupId);
 	const object = Varint.encode(objectId);
 	const combined = new Uint8Array(group.length + object.length);
@@ -244,10 +245,12 @@ function encodeLocation({ groupId, objectId }: { groupId: bigint; objectId: bigi
 export class Parameters {
 	vars: Map<bigint, bigint>;
 	bytes: Map<bigint, Uint8Array>;
+	#locations: Map<bigint, MessageLocation>;
 
 	constructor() {
 		this.vars = new Map();
 		this.bytes = new Map();
+		this.#locations = new Map();
 	}
 
 	// --- Numeric accessors ---
@@ -314,14 +317,13 @@ export class Parameters {
 
 	// --- Bytes accessors ---
 
-	get largest(): { groupId: bigint; objectId: bigint } | undefined {
-		const data = this.bytes.get(MSG_PARAM_LARGEST_OBJECT);
-		if (!data || data.length === 0) return undefined;
-		return decodeLocation(data);
+	get largest(): MessageLocation | undefined {
+		const location = this.#locations.get(MSG_PARAM_LARGEST_OBJECT);
+		return location && { ...location };
 	}
 
-	set largest(v: { groupId: bigint; objectId: bigint }) {
-		this.bytes.set(MSG_PARAM_LARGEST_OBJECT, encodeLocation(v));
+	set largest(v: MessageLocation) {
+		this.#locations.set(MSG_PARAM_LARGEST_OBJECT, { ...v });
 	}
 
 	get subscriptionFilter(): number | undefined {
@@ -336,7 +338,7 @@ export class Parameters {
 	}
 
 	async encode(w: Writer, version: IetfVersion) {
-		await w.u53(this.vars.size + this.bytes.size);
+		await w.u53(this.vars.size + this.bytes.size + this.#locations.size);
 
 		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
 			for (const [id, value] of this.vars) {
@@ -349,27 +351,39 @@ export class Parameters {
 				await w.u53(value.length);
 				await w.write(value);
 			}
+
+			for (const [id, value] of this.#locations) {
+				const encoded = encodeLocation(value);
+				await w.u62(id);
+				await w.u53(encoded.length);
+				await w.write(encoded);
+			}
 		} else {
-			// d16+: Delta encoding, merge vars and bytes, sort by key
-			const all: { key: bigint; isVar: boolean }[] = [];
-			for (const id of this.vars.keys()) all.push({ key: id, isVar: true });
-			for (const id of this.bytes.keys()) all.push({ key: id, isVar: false });
+			// d16+: Delta encoding, merge all parameter storage, sort by key
+			const all: { key: bigint; storage: "var" | "bytes" | "location" }[] = [];
+			for (const id of this.vars.keys()) all.push({ key: id, storage: "var" });
+			for (const id of this.bytes.keys()) all.push({ key: id, storage: "bytes" });
+			for (const id of this.#locations.keys()) all.push({ key: id, storage: "location" });
 			all.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 
 			let prevId = 0n;
 			for (let i = 0; i < all.length; i++) {
-				const { key, isVar } = all[i];
+				const { key, storage } = all[i];
 				const delta = i === 0 ? key : key - prevId;
 				prevId = key;
 				await w.u62(delta);
 
 				if (version === Version.DRAFT_16) {
-					if (isVar) {
+					if (storage === "var") {
 						// biome-ignore lint/style/noNonNullAssertion: key is guaranteed to exist in vars map
 						await w.u62(this.vars.get(key)!);
 					} else {
-						// biome-ignore lint/style/noNonNullAssertion: key is guaranteed to exist in bytes map
-						const value = this.bytes.get(key)!;
+						const value =
+							storage === "bytes"
+								? // biome-ignore lint/style/noNonNullAssertion: key is guaranteed to exist in bytes map
+									this.bytes.get(key)!
+								: // biome-ignore lint/style/noNonNullAssertion: key is guaranteed to exist in locations map
+									encodeLocation(this.#locations.get(key)!);
 						await w.u53(value.length);
 						await w.write(value);
 					}
@@ -400,10 +414,9 @@ export class Parameters {
 						break;
 					}
 					case "location": {
-						const value = this.bytes.get(key);
-						if (value === undefined)
+						const location = this.#locations.get(key);
+						if (location === undefined)
 							throw new Error(`invalid Location message parameter: ${key.toString()}`);
-						const location = decodeLocation(value);
 						await w.u62(location.groupId);
 						await w.u62(location.objectId);
 						break;
@@ -445,17 +458,24 @@ export class Parameters {
 					const varint = await r.u62();
 					params.vars.set(id, varint);
 				} else {
-					if (params.bytes.has(id)) {
-						throw new Error(`duplicate message parameter id: ${id.toString()}`);
-					}
 					const size = await r.u53();
 					const bytes = await r.read(size);
-					params.bytes.set(id, bytes);
+					if (id === MSG_PARAM_LARGEST_OBJECT) {
+						if (params.#locations.has(id)) {
+							throw new Error(`duplicate message parameter id: ${id.toString()}`);
+						}
+						params.#locations.set(id, decodeLocation(bytes));
+					} else {
+						if (params.bytes.has(id)) {
+							throw new Error(`duplicate message parameter id: ${id.toString()}`);
+						}
+						params.bytes.set(id, bytes);
+					}
 				}
 				continue;
 			}
 
-			if (params.vars.has(id) || params.bytes.has(id)) {
+			if (params.vars.has(id) || params.bytes.has(id) || params.#locations.has(id)) {
 				throw new Error(`duplicate message parameter id: ${id.toString()}`);
 			}
 
@@ -472,7 +492,7 @@ export class Parameters {
 				case "location": {
 					const groupId = await r.u62();
 					const objectId = await r.u62();
-					params.bytes.set(id, encodeLocation({ groupId, objectId }));
+					params.#locations.set(id, { groupId, objectId });
 					break;
 				}
 				case "bytes": {
