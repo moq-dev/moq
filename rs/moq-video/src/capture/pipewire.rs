@@ -698,7 +698,7 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 
 				let mut state = state.borrow_mut();
 				state.last = None;
-				if let Err(e) = state.format.parse(param) {
+				if let Err(e) = replace_video_format(&mut state.format, |format| format.parse(param)) {
 					tracing::warn!(error = %e, "failed to parse pipewire video format");
 					return;
 				}
@@ -1059,6 +1059,19 @@ fn neutral_frame(width: u32, height: u32, color: Option<Color>) -> Result<I420, 
 	let mut data = vec![128; I420::len(width, height)];
 	data[..luma].fill(if color.limited() { 16 } else { 0 });
 	Ok(I420::new(width, height, data)?.with_color(color))
+}
+
+/// Parse into a zeroed value before replacing the current format. libspa leaves
+/// omitted optional properties untouched, so parsing into the reused value
+/// would retain stale color metadata across renegotiation.
+fn replace_video_format<T, E>(
+	current: &mut VideoInfoRaw,
+	parse: impl FnOnce(&mut VideoInfoRaw) -> Result<T, E>,
+) -> Result<T, E> {
+	let mut next = VideoInfoRaw::default();
+	let result = parse(&mut next)?;
+	*current = next;
+	Ok(result)
 }
 
 /// Preserve the color description that names NV12 samples. Unknown fields use
@@ -1492,6 +1505,20 @@ mod tests {
 			1080,
 			Some(Color::Bt709Full),
 		));
+	}
+
+	#[test]
+	fn omitted_color_fields_reset_on_renegotiation() {
+		let mut format = VideoInfoRaw::default();
+		format.set_color_range(spa::sys::SPA_VIDEO_COLOR_RANGE_0_255);
+		format.set_color_matrix(spa::sys::SPA_VIDEO_COLOR_MATRIX_BT709);
+		replace_video_format(&mut format, |next| {
+			next.set_format(VideoFormat::NV12);
+			Ok::<_, std::convert::Infallible>(())
+		})
+		.unwrap();
+		assert_eq!(format.color_range(), spa::sys::SPA_VIDEO_COLOR_RANGE_UNKNOWN);
+		assert_eq!(format.color_matrix(), spa::sys::SPA_VIDEO_COLOR_MATRIX_UNKNOWN);
 	}
 
 	#[test]
