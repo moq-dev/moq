@@ -137,6 +137,26 @@ fn h264_init() -> Vec<u8> {
 	init
 }
 
+fn publish_media(broadcast: u32, format: &[u8], init: &[u8], label: Option<&[u8]>) -> i32 {
+	let (label, label_len) = label
+		.map(|label| (label.as_ptr() as *const c_char, label.len()))
+		.unwrap_or((std::ptr::null(), 0));
+	let config = moq_media_config {
+		format: format.as_ptr() as *const c_char,
+		format_len: format.len(),
+		init: if !init.is_empty() {
+			init.as_ptr()
+		} else {
+			std::ptr::null()
+		},
+		init_len: init.len(),
+		label,
+		label_len,
+	};
+
+	unsafe { moq_publish_media(broadcast, &config) }
+}
+
 #[test]
 fn origin_lifecycle() {
 	let origin = id(moq_origin_create());
@@ -185,17 +205,7 @@ fn publish_media_lifecycle() {
 
 	let init = opus_head();
 	let format = b"opus";
-	let media = id(unsafe {
-		moq_publish_media(
-			broadcast,
-			format.as_ptr() as *const c_char,
-			format.len(),
-			init.as_ptr(),
-			init.len(),
-			std::ptr::null(),
-			0,
-		)
-	});
+	let media = id(publish_media(broadcast, format, &init, None));
 
 	let payload = b"opus frame";
 	let ret = unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), 1000) };
@@ -203,6 +213,17 @@ fn publish_media_lifecycle() {
 
 	assert_eq!(moq_publish_media_finish(media), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
+}
+
+#[test]
+fn publish_media_rejects_a_null_config() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"publish-media-null-config");
+
+	assert!(unsafe { moq_publish_media(broadcast, std::ptr::null()) } < 0);
+
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
 }
 
 fn borrowed_string(ptr: *const c_char, len: usize) -> Option<String> {
@@ -229,17 +250,7 @@ fn publish_media_labels_config_without_naming_track() {
 	let format = b"opus";
 	let label = b"English";
 
-	let media1 = id(unsafe {
-		moq_publish_media(
-			broadcast,
-			format.as_ptr() as *const c_char,
-			format.len(),
-			init.as_ptr(),
-			init.len(),
-			label.as_ptr() as *const c_char,
-			label.len(),
-		)
-	});
+	let media1 = id(publish_media(broadcast, format, &init, Some(label)));
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -269,17 +280,7 @@ fn publish_media_labels_config_without_naming_track() {
 		Some("English")
 	);
 
-	let media2 = id(unsafe {
-		moq_publish_media(
-			broadcast,
-			format.as_ptr() as *const c_char,
-			format.len(),
-			init.as_ptr(),
-			init.len(),
-			label.as_ptr() as *const c_char,
-			label.len(),
-		)
-	});
+	let media2 = id(publish_media(broadcast, format, &init, Some(label)));
 
 	let catalog_id2 = id(catalog_cb.recv());
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id2, 0, &mut audio_cfg) }, 0);
@@ -1570,17 +1571,7 @@ fn double_close_all_resource_types() {
 	let broadcast = publish_broadcast(origin, b"double-close-all-resource-types");
 	let init = opus_head();
 	let format = b"opus";
-	let media = id(unsafe {
-		moq_publish_media(
-			broadcast,
-			format.as_ptr() as *const c_char,
-			format.len(),
-			init.as_ptr(),
-			init.len(),
-			std::ptr::null(),
-			0,
-		)
-	});
+	let media = id(publish_media(broadcast, format, &init, None));
 
 	assert_eq!(moq_publish_media_finish(media), 0);
 	assert!(moq_publish_media_finish(media) < 0);
@@ -1590,17 +1581,7 @@ fn double_close_all_resource_types() {
 	let path = b"double-close-test";
 	let broadcast = publish_broadcast(origin, path);
 	let init = opus_head();
-	let media = id(unsafe {
-		moq_publish_media(
-			broadcast,
-			format.as_ptr() as *const c_char,
-			format.len(),
-			init.as_ptr(),
-			init.len(),
-			std::ptr::null(),
-			0,
-		)
-	});
+	let media = id(publish_media(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -1647,17 +1628,7 @@ fn media_cut_bounds_audio_groups() {
 	let broadcast = publish_broadcast(origin, b"media-cut");
 	let init = opus_head();
 	let format = b"opus";
-	let media = id(unsafe {
-		moq_publish_media(
-			broadcast,
-			format.as_ptr() as *const c_char,
-			format.len(),
-			init.as_ptr(),
-			init.len(),
-			std::ptr::null(),
-			0,
-		)
-	});
+	let media = id(publish_media(broadcast, format, &init, None));
 
 	let payload = b"test";
 	for i in 0..3u64 {
@@ -1693,17 +1664,7 @@ fn unknown_format() {
 	}));
 
 	let format = b"nope";
-	let ret = unsafe {
-		moq_publish_media(
-			broadcast,
-			format.as_ptr() as *const c_char,
-			format.len(),
-			std::ptr::null(),
-			0,
-			std::ptr::null(),
-			0,
-		)
-	};
+	let ret = publish_media(broadcast, format, &[], None);
 	assert!(ret < 0, "unknown format should fail");
 }
 
@@ -1777,17 +1738,7 @@ fn local_publish_consume() {
 
 	let init = opus_head();
 	let format = b"opus";
-	let media = id(unsafe {
-		moq_publish_media(
-			broadcast,
-			format.as_ptr() as *const c_char,
-			format.len(),
-			init.as_ptr(),
-			init.len(),
-			std::ptr::null(),
-			0,
-		)
-	});
+	let media = id(publish_media(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -1896,17 +1847,7 @@ fn consume_announced_local() {
 	let broadcast = publish_broadcast(origin, path);
 	let init = opus_head();
 	let format = b"opus";
-	let media = id(unsafe {
-		moq_publish_media(
-			broadcast,
-			format.as_ptr() as *const c_char,
-			format.len(),
-			init.as_ptr(),
-			init.len(),
-			std::ptr::null(),
-			0,
-		)
-	});
+	let media = id(publish_media(broadcast, format, &init, None));
 
 	// First the broadcast handle, then a terminal 0 once the wait finishes.
 	let consume = id(cb.recv());
@@ -1975,17 +1916,7 @@ fn video_publish_consume() {
 
 	let init = h264_init();
 	let format = b"avc3";
-	let media = id(unsafe {
-		moq_publish_media(
-			broadcast,
-			format.as_ptr() as *const c_char,
-			format.len(),
-			init.as_ptr(),
-			init.len(),
-			std::ptr::null(),
-			0,
-		)
-	});
+	let media = id(publish_media(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -2533,17 +2464,7 @@ fn video_raw_decode() {
 	// inline parameter sets, so the decoder reads the true 320x240 from the wire.
 	let init = h264_init();
 	let format = b"avc3";
-	let media = id(unsafe {
-		moq_publish_media(
-			broadcast,
-			format.as_ptr() as *const c_char,
-			format.len(),
-			init.as_ptr(),
-			init.len(),
-			std::ptr::null(),
-			0,
-		)
-	});
+	let media = id(publish_media(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -2617,17 +2538,7 @@ fn multiple_frames_ordering() {
 
 	let init = opus_head();
 	let format = b"opus";
-	let media = id(unsafe {
-		moq_publish_media(
-			broadcast,
-			format.as_ptr() as *const c_char,
-			format.len(),
-			init.as_ptr(),
-			init.len(),
-			std::ptr::null(),
-			0,
-		)
-	});
+	let media = id(publish_media(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -2687,17 +2598,7 @@ fn catalog_update_on_new_track() {
 
 	let init = opus_head();
 	let format = b"opus";
-	let media1 = id(unsafe {
-		moq_publish_media(
-			broadcast,
-			format.as_ptr() as *const c_char,
-			format.len(),
-			init.as_ptr(),
-			init.len(),
-			std::ptr::null(),
-			0,
-		)
-	});
+	let media1 = id(publish_media(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -2720,17 +2621,7 @@ fn catalog_update_on_new_track() {
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id1, 0, &mut audio_cfg) }, 0);
 	assert!(unsafe { moq_consume_audio_config(catalog_id1, 1, &mut audio_cfg) } < 0);
 
-	let media2 = id(unsafe {
-		moq_publish_media(
-			broadcast,
-			format.as_ptr() as *const c_char,
-			format.len(),
-			init.as_ptr(),
-			init.len(),
-			std::ptr::null(),
-			0,
-		)
-	});
+	let media2 = id(publish_media(broadcast, format, &init, None));
 
 	let catalog_id2 = id(catalog_cb.recv());
 

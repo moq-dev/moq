@@ -249,12 +249,27 @@ if (moq_consume_video_stalled(catalog, index, &stalled) < 0) {
 
 The `moq_publish_media_*` and `moq_consume_video` / `moq_consume_audio` calls carry already-encoded frames, for a caller that brings its own codec. The `_raw` calls carry uncompressed media instead and run the codec inside libmoq, so a C application can publish pixels and PCM without linking one.
 
-`moq_publish_media` generates the transport track name from the codec format.
-Its final `label` / `label_len` pair is an optional human-readable rendition
-name stored in the audio or video catalog configuration. Pass `NULL, 0` to omit
-it. The same optional pair is available on `moq_video_config` and
-`moq_audio_config`; pointers returned by the consume APIs borrow the catalog
-snapshot just like `name` and `codec`.
+`moq_publish_media` takes a `moq_media_config` so publishing options can grow
+without adding positional arguments. Zero the struct, then set its required
+`format` / `format_len` pair and any optional fields:
+
+```c
+moq_media_config config = {0};
+config.format = "opus";
+config.format_len = 4;
+config.init = opus_head;
+config.init_len = opus_head_len;
+config.label = "English";
+config.label_len = 7;
+
+int32_t media = moq_publish_media(broadcast, &config);
+```
+
+The transport track name is generated from the codec format. `label` is an
+optional human-readable rendition name stored in the audio or video catalog
+configuration, and leaving it zero omits it. The same optional pair is
+available on `moq_video_config` and `moq_audio_config`; pointers returned by the
+consume APIs borrow the catalog snapshot just like `name` and `codec`.
 
 `moq_publish_video_raw` opens an encoder and a video track together. Resolution, framerate, and pixel layout are fixed there, so each `moq_video_encoder_frame` carries only pixels and a timestamp:
 

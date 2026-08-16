@@ -45,7 +45,7 @@ int32_t moq_origin_announced_close(uint32_t announced);
 // Publishing
 int32_t moq_publish_set_announce(uint32_t broadcast, bool announce);
 int32_t moq_publish_finish(uint32_t broadcast);
-int32_t moq_publish_media(uint32_t broadcast, const char *format, uintptr_t format_len, const uint8_t *init, uintptr_t init_size, const char *label, uintptr_t label_len);
+int32_t moq_publish_media(uint32_t broadcast, const moq_media_config *config);
 int32_t moq_publish_media_finish(uint32_t media);
 int32_t moq_publish_media_frame(uint32_t media, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
 int32_t moq_publish_track(uint32_t broadcast, const char *name, uintptr_t name_len);

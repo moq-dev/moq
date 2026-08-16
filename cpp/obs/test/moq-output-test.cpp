@@ -195,7 +195,7 @@ int32_t moq_publish_finish(uint32_t)
 	return 0;
 }
 
-int32_t moq_publish_media(uint32_t, const char *, size_t, const uint8_t *, size_t, const char *, size_t)
+int32_t moq_publish_media(uint32_t, const moq_media_config *)
 {
 	return 7;
 }
@@ -206,6 +206,11 @@ int32_t moq_publish_media_finish(uint32_t)
 }
 
 int32_t moq_publish_media_frame(uint32_t, const uint8_t *, uintptr_t, uint64_t)
+{
+	return 0;
+}
+
+int32_t moq_publish_media_cut(uint32_t)
 {
 	return 0;
 }

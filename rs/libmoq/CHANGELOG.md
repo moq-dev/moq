@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Publish and consume human-readable audio and video rendition labels.
 
+### Changed
+
+- `moq_publish_media` now takes an extensible `moq_media_config` instead of positional arguments.
+
 ## [0.5.8](https://github.com/moq-dev/moq/compare/libmoq-v0.5.7...libmoq-v0.5.8) - 2026-08-14
 
 ### Added

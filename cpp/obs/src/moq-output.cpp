@@ -479,8 +479,13 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 		moq_codec = "hev1";
 	}
 
-	// Intialize the media import module with the codec and initialization data.
-	int handle = moq_publish_media(broadcast, moq_codec, strlen(moq_codec), extra_data, extra_size, NULL, 0);
+	// Initialize the media import module with the codec and initialization data.
+	moq_media_config config{};
+	config.format = moq_codec;
+	config.format_len = strlen(moq_codec);
+	config.init = extra_data;
+	config.init_len = extra_size;
+	int handle = moq_publish_media(broadcast, &config);
 	video_tracks[encoder] = handle;
 	if (handle < 0) {
 		LOG_ERROR("Failed to initialize video track: %d", handle);
@@ -519,7 +524,12 @@ void MoQOutput::AudioInit(obs_encoder_t *encoder)
 
 	const char *codec = obs_encoder_get_codec(encoder);
 
-	int handle = moq_publish_media(broadcast, codec, strlen(codec), extra_data, extra_size, NULL, 0);
+	moq_media_config config{};
+	config.format = codec;
+	config.format_len = strlen(codec);
+	config.init = extra_data;
+	config.init_len = extra_size;
+	int handle = moq_publish_media(broadcast, &config);
 	audio_tracks[encoder] = handle;
 	if (handle < 0) {
 		LOG_ERROR("Failed to initialize audio track: %d", handle);

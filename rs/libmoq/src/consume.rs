@@ -195,12 +195,6 @@ impl Consume {
 		*dst = moq_video_config {
 			name: rendition.as_str().as_ptr() as *const c_char,
 			name_len: rendition.len(),
-			label: config
-				.label
-				.as_ref()
-				.map(|label| label.as_ptr() as *const c_char)
-				.unwrap_or(std::ptr::null()),
-			label_len: config.label.as_ref().map_or(0, String::len),
 			codec: codec.as_str().as_ptr() as *const c_char,
 			codec_len: codec.len(),
 			description: config
@@ -212,6 +206,12 @@ impl Consume {
 			coded_width: config.coded_width.unwrap_or(0),
 			coded_height: config.coded_height.unwrap_or(0),
 			container: crate::api::borrow_container(&config.container),
+			label: config
+				.label
+				.as_ref()
+				.map(|label| label.as_ptr() as *const c_char)
+				.unwrap_or(std::ptr::null()),
+			label_len: config.label.as_ref().map_or(0, String::len),
 		};
 
 		Ok(())
@@ -263,12 +263,6 @@ impl Consume {
 		*dst = moq_audio_config {
 			name: rendition.as_str().as_ptr() as *const c_char,
 			name_len: rendition.len(),
-			label: config
-				.label
-				.as_ref()
-				.map(|label| label.as_ptr() as *const c_char)
-				.unwrap_or(std::ptr::null()),
-			label_len: config.label.as_ref().map_or(0, String::len),
 			codec: codec.as_str().as_ptr() as *const c_char,
 			codec_len: codec.len(),
 			description: config
@@ -280,6 +274,12 @@ impl Consume {
 			sample_rate: config.sample_rate,
 			channel_count: config.channel_count,
 			container: crate::api::borrow_container(&config.container),
+			label: config
+				.label
+				.as_ref()
+				.map(|label| label.as_ptr() as *const c_char)
+				.unwrap_or(std::ptr::null()),
+			label_len: config.label.as_ref().map_or(0, String::len),
 		};
 
 		Ok(())
