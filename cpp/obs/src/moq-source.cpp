@@ -611,6 +611,7 @@ static void moq_source_reconnect(struct moq_source *ctx)
 
 	// Connect to MoQ server (consume will happen in on_session_status callback)
 	int32_t new_session = moq_session_connect(url_copy, strlen(url_copy),
+						  NULL,       // config: the source dials with the defaults
 						  0,          // origin_publish
 						  new_origin, // origin_consume
 						  on_session_status, ctx);
@@ -916,13 +917,14 @@ static bool moq_source_init_decoder(struct moq_source *ctx, const struct moq_vid
 	uint32_t width = 0;
 	uint32_t height = 0;
 
-	if (config->coded_width && *config->coded_width > 0) {
-		new_codec_ctx->width = *config->coded_width;
-		width = *config->coded_width;
+	// Zero means the catalog didn't declare it; the codec context keeps its own.
+	if (config->coded_width > 0) {
+		new_codec_ctx->width = (int)config->coded_width;
+		width = config->coded_width;
 	}
-	if (config->coded_height && *config->coded_height > 0) {
-		new_codec_ctx->height = *config->coded_height;
-		height = *config->coded_height;
+	if (config->coded_height > 0) {
+		new_codec_ctx->height = (int)config->coded_height;
+		height = config->coded_height;
 	}
 
 	// Use codec description as extradata (contains SPS/PPS for H.264, VPS/SPS/PPS for HEVC, etc.)

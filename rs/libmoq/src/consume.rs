@@ -203,16 +203,8 @@ impl Consume {
 				.map(|desc| desc.as_ptr())
 				.unwrap_or(std::ptr::null()),
 			description_len: config.description.as_ref().map(|desc| desc.len()).unwrap_or(0),
-			coded_width: config
-				.coded_width
-				.as_ref()
-				.map(|width| width as *const u32)
-				.unwrap_or(std::ptr::null()),
-			coded_height: config
-				.coded_height
-				.as_ref()
-				.map(|height| height as *const u32)
-				.unwrap_or(std::ptr::null()),
+			coded_width: config.coded_width.unwrap_or(0),
+			coded_height: config.coded_height.unwrap_or(0),
 			container: crate::api::borrow_container(&config.container),
 		};
 

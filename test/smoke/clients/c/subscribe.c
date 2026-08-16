@@ -135,7 +135,7 @@ int main(int argc, char **argv) {
     }
 
     // origin_publish = 0 disables publishing; consume via our origin.
-    int32_t session = moq_session_connect(url, strlen(url), 0, (uint32_t)origin, on_status, &c);
+    int32_t session = moq_session_connect(url, strlen(url), NULL, 0, (uint32_t)origin, on_status, &c);
     if (session <= 0) {
         // A registration that fails never invokes its callback, so &c isn't held
         // yet and returning is still safe here.

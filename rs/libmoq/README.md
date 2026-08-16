@@ -25,7 +25,8 @@ The library exposes the following C functions, see [api.rs](src/api.rs) for full
 int32_t moq_log_level(const char *level, uintptr_t level_len);
 
 // Session
-int32_t moq_session_connect(const char *url, uintptr_t url_len, uint32_t origin_publish, uint32_t origin_consume, void (*on_status)(void *user_data, int32_t code), void *user_data);
+int32_t moq_session_connect(const char *url, uintptr_t url_len, const moq_client_config *config, uint32_t origin_publish, uint32_t origin_consume, void (*on_status)(void *user_data, int32_t code), void *user_data);
+moq_client_config moq_client_defaults(void);
 int32_t moq_session_close(uint32_t session);
 
 // Origin

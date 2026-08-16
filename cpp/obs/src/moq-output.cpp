@@ -91,14 +91,14 @@ bool MoQOutput::Start()
 		return false;
 	}
 
-	// Advanced settings live on the service alongside the URL and path. A 0 handle
-	// means the group is switched off, which moq_client_connect reads as "defaults":
-	// the same dial moq_session_connect would have made.
+	// Advanced settings live on the service alongside the URL and path. With the group
+	// switched off Pointer() is NULL, which dials with the library defaults. The config
+	// borrows its strings, so it has to outlive the connect below.
 	OBSDataAutoRelease service_settings = obs_service_get_settings(service);
-	int client = MoQSettings::CreateClient(service_settings);
-	if (client < 0) {
-		// CreateClient logged which setting was rejected and why. Refusing to start
-		// beats connecting with a setting the user asked for quietly dropped.
+	MoQSettings::Config client;
+	if (!MoQSettings::BuildConfig(service_settings, &client)) {
+		// BuildConfig logged why. Refusing to start beats connecting with a setting
+		// the user asked for quietly dropped.
 		obs_output_set_last_error(output, "Invalid advanced MoQ settings; see the log for details.");
 		SignalStop(OBS_OUTPUT_CONNECT_FAILED);
 		return false;
@@ -131,12 +131,8 @@ bool MoQOutput::Start()
 
 	// Start establishing a session with the MoQ server
 	// NOTE: You could publish the same broadcasts to multiple sessions if you want (redundant ingest).
-	int handle = moq_client_connect(server_url.data(), server_url.size(), (uint32_t)client, origin, 0,
-					MoQOutput::SessionStatus, ref);
-
-	// The connect copied the config, so the handle has done its job either way.
-	if (client > 0)
-		moq_client_close(client);
+	int handle = moq_session_connect(server_url.data(), server_url.size(), client.Pointer(), origin, 0,
+					 MoQOutput::SessionStatus, ref);
 
 	if (handle < 0) {
 		const char *reason = moq_error();

@@ -214,8 +214,8 @@ fn publish_catalog_config_invalid_broadcast() {
 		codec_len: codec.len(),
 		description: std::ptr::null(),
 		description_len: 0,
-		coded_width: std::ptr::null(),
-		coded_height: std::ptr::null(),
+		coded_width: 0,
+		coded_height: 0,
 		container: moq_container::default(),
 	};
 	assert!(unsafe { moq_publish_video_config(0, &video) } < 0);
@@ -280,8 +280,8 @@ fn publish_catalog_roundtrip() {
 		codec_len: video_codec.len(),
 		description: description.as_ptr(),
 		description_len: description.len(),
-		coded_width: &width,
-		coded_height: &height,
+		coded_width: width,
+		coded_height: height,
 		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
@@ -293,8 +293,8 @@ fn publish_catalog_roundtrip() {
 		codec_len: video_codec.len(),
 		description: description.as_ptr(),
 		description_len: description.len(),
-		coded_width: &width,
-		coded_height: &height,
+		coded_width: width,
+		coded_height: height,
 		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &stalled_video) }, 0);
@@ -349,8 +349,8 @@ fn publish_catalog_roundtrip() {
 		codec_len: 0,
 		description: std::ptr::null(),
 		description_len: 0,
-		coded_width: std::ptr::null(),
-		coded_height: std::ptr::null(),
+		coded_width: 0,
+		coded_height: 0,
 		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_consume_video_config(catalog_id, 0, &mut video_cfg) }, 0);
@@ -362,8 +362,8 @@ fn publish_catalog_roundtrip() {
 	}
 	.unwrap();
 	assert_eq!(codec, "vp8");
-	assert_eq!(unsafe { *video_cfg.coded_width }, 1920);
-	assert_eq!(unsafe { *video_cfg.coded_height }, 1080);
+	assert_eq!(video_cfg.coded_width, 1920);
+	assert_eq!(video_cfg.coded_height, 1080);
 	let mut stalled = std::mem::MaybeUninit::<bool>::uninit();
 	assert_eq!(
 		unsafe { moq_consume_video_stalled(catalog_id, 0, stalled.as_mut_ptr()) },
@@ -442,6 +442,80 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// hang carries coded_width and coded_height as independent options, so a catalog
+/// that declares only one must survive a consume/publish round trip. Collapsing
+/// them behind one presence flag would invent a zero for the missing half.
+#[test]
+fn a_half_specified_coded_size_round_trips() {
+	let origin = id(moq_origin_create());
+	let path = b"half-coded-size";
+	let broadcast = publish_broadcast(origin, path);
+
+	let name = "video";
+	let codec = "vp8";
+	let mut video = moq_video_config {
+		name: name.as_ptr() as *const c_char,
+		name_len: name.len(),
+		codec: codec.as_ptr() as *const c_char,
+		codec_len: codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: 1920,
+		coded_height: 0, // absent, not "zero pixels tall"
+		container: moq_container::default(),
+	};
+	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
+
+	let consume = request_broadcast(origin, path);
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog = id(catalog_cb.recv());
+
+	let mut read = moq_video_config {
+		name: std::ptr::null(),
+		name_len: 0,
+		codec: std::ptr::null(),
+		codec_len: 0,
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: 0,
+		coded_height: 0,
+		container: moq_container::default(),
+	};
+	assert_eq!(unsafe { moq_consume_video_config(catalog, 0, &mut read) }, 0);
+	assert_eq!(read.coded_width, 1920);
+	assert_eq!(read.coded_height, 0, "the absent height must not come back invented");
+
+	// Forwarding what we read into another broadcast carries the half-specified
+	// size across unchanged, which is the case a shared presence flag would break
+	// by inventing a zero height.
+	let forward = publish_broadcast(origin, b"half-coded-size-forwarded");
+	video.coded_width = read.coded_width;
+	video.coded_height = read.coded_height;
+	assert_eq!(unsafe { moq_publish_video_config(forward, &video) }, 0);
+
+	let forwarded = request_broadcast(origin, b"half-coded-size-forwarded");
+	let forwarded_cb = Callback::new();
+	let forwarded_task = id(unsafe { moq_consume_catalog(forwarded, Some(channel_callback), forwarded_cb.ptr) });
+	let forwarded_catalog = id(forwarded_cb.recv());
+	assert_eq!(unsafe { moq_consume_video_config(forwarded_catalog, 0, &mut read) }, 0);
+	assert_eq!(read.coded_width, 1920);
+	assert_eq!(read.coded_height, 0, "forwarding must not invent the absent height");
+
+	assert_eq!(moq_consume_catalog_free(forwarded_catalog), 0);
+	assert_eq!(moq_consume_catalog_close(forwarded_task), 0);
+	assert_eq!(forwarded_cb.recv_catalog_terminal(), 0);
+	assert_eq!(moq_consume_close(forwarded), 0);
+	assert_eq!(moq_publish_finish(forward), 0);
+
+	assert_eq!(moq_consume_catalog_free(catalog), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn raw_loc_video_uses_the_declared_catalog_container() {
 	let origin = id(moq_origin_create());
@@ -460,8 +534,8 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 		codec_len: codec.len(),
 		description: std::ptr::null(),
 		description_len: 0,
-		coded_width: std::ptr::null(),
-		coded_height: std::ptr::null(),
+		coded_width: 0,
+		coded_height: 0,
 		container: moq_container {
 			kind: moq_container_kind::MOQ_CONTAINER_KIND_LOC as u32,
 			init: std::ptr::null(),
@@ -483,8 +557,8 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 		codec_len: 0,
 		description: std::ptr::null(),
 		description_len: 0,
-		coded_width: std::ptr::null(),
-		coded_height: std::ptr::null(),
+		coded_width: 0,
+		coded_height: 0,
 		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_consume_video_config(catalog, 0, &mut video_cfg) }, 0);
@@ -608,8 +682,8 @@ fn unpublishable_catalog_containers_are_rejected() {
 		codec_len: codec.len(),
 		description: std::ptr::null(),
 		description_len: 0,
-		coded_width: std::ptr::null(),
-		coded_height: std::ptr::null(),
+		coded_width: 0,
+		coded_height: 0,
 		container,
 	};
 
@@ -1595,8 +1669,8 @@ fn local_publish_consume() {
 		codec_len: 0,
 		description: std::ptr::null(),
 		description_len: 0,
-		coded_width: std::ptr::null(),
-		coded_height: std::ptr::null(),
+		coded_width: 0,
+		coded_height: 0,
 		container: moq_container::default(),
 	};
 	assert!(
@@ -1759,8 +1833,8 @@ fn video_publish_consume() {
 		codec_len: 0,
 		description: std::ptr::null(),
 		description_len: 0,
-		coded_width: std::ptr::null(),
-		coded_height: std::ptr::null(),
+		coded_width: 0,
+		coded_height: 0,
 		container: moq_container::default(),
 	};
 	assert_eq!(
@@ -1781,12 +1855,8 @@ fn video_publish_consume() {
 		"codec should be avc1/avc3, got {codec}"
 	);
 
-	assert!(!video_cfg.coded_width.is_null(), "coded_width should be set");
-	assert!(!video_cfg.coded_height.is_null(), "coded_height should be set");
-	let width = unsafe { *video_cfg.coded_width };
-	let height = unsafe { *video_cfg.coded_height };
-	assert_eq!(width, 1280);
-	assert_eq!(height, 720);
+	assert_eq!(video_cfg.coded_width, 1280);
+	assert_eq!(video_cfg.coded_height, 720);
 
 	let mut audio_cfg = moq_audio_config {
 		name: std::ptr::null(),
@@ -2528,6 +2598,7 @@ fn session_connect_invalid_url() {
 		moq_session_connect(
 			url.as_ptr() as *const c_char,
 			url.len(),
+			std::ptr::null(),
 			0,
 			0,
 			None,
@@ -2545,6 +2616,7 @@ fn session_connect_and_close() {
 		moq_session_connect(
 			url.as_ptr() as *const c_char,
 			url.len(),
+			std::ptr::null(),
 			0,
 			0,
 			Some(channel_callback),
@@ -2559,10 +2631,6 @@ fn session_connect_and_close() {
 	assert!(cb.recv() <= 0, "session close delivers a terminal code");
 }
 
-/// A handle that parses but was never handed out: IDs come from a counter starting at 1,
-/// so the top of the range stays free. Distinct from 0, which is not a handle at all.
-const UNUSED_ID: u32 = i32::MAX as u32;
-
 /// Borrow a `&str` as the `moq_string` the list setters take.
 fn moq_str(s: &str) -> moq_string {
 	moq_string {
@@ -2571,310 +2639,323 @@ fn moq_str(s: &str) -> moq_string {
 	}
 }
 
-#[test]
-fn client_create_and_close() {
-	let client = id(moq_client_create());
-	assert_eq!(moq_client_close(client), 0);
-	assert!(
-		moq_client_close(client) < 0,
-		"closing a released client handle should fail"
-	);
+/// A zeroed config, which is what a C caller gets from `memset` or `{0}` and must
+/// mean "the defaults" for every knob.
+fn client_config() -> moq_client_config {
+	unsafe { std::mem::zeroed() }
 }
 
-#[test]
-fn client_setters_reject_unknown_handle() {
-	// Every setter funnels through the same lookup, so one is enough to pin the code.
-	// Zero is not a handle at all, so it fails the range check before the lookup;
-	// UNUSED_ID is in range and simply was never handed out.
-	assert_eq!(moq_client_set_tls_disable_verify(0, true), Error::InvalidId.code());
-	assert_eq!(
-		moq_client_set_connect_timeout(UNUSED_ID, 1000),
-		Error::ClientNotFound.code()
-	);
-}
-
-#[test]
-fn client_set_versions_round_trips() {
-	let client = id(moq_client_create());
-	let _guard = Guard(Some(|| {
-		moq_client_close(client);
-	}));
-
-	let versions = [moq_str("moq-lite-05"), moq_str("moq-transport-19")];
-	assert_eq!(
-		unsafe { moq_client_set_versions(client, versions.as_ptr(), versions.len()) },
-		0
-	);
-
-	// An empty list clears the pin, restoring the default of offering everything.
-	assert_eq!(unsafe { moq_client_set_versions(client, std::ptr::null(), 0) }, 0);
-}
-
-#[test]
-fn client_set_versions_rejects_unknown_name() {
-	let client = id(moq_client_create());
-	let _guard = Guard(Some(|| {
-		moq_client_close(client);
-	}));
-
-	let versions = [moq_str("moq-lite-05"), moq_str("moq-carrier-pigeon-01")];
-	let ret = unsafe { moq_client_set_versions(client, versions.as_ptr(), versions.len()) };
-	assert_eq!(ret, Error::InvalidConfig(String::new()).code());
-}
-
-#[test]
-fn client_set_bind_rejects_a_bad_address() {
-	let client = id(moq_client_create());
-	let _guard = Guard(Some(|| {
-		moq_client_close(client);
-	}));
-
-	let good = b"127.0.0.1:0";
-	assert_eq!(
-		unsafe { moq_client_set_bind(client, good.as_ptr() as *const c_char, good.len()) },
-		0
-	);
-
-	let bad = b"not-an-address";
-	let ret = unsafe { moq_client_set_bind(client, bad.as_ptr() as *const c_char, bad.len()) };
-	assert_eq!(ret, Error::InvalidConfig(String::new()).code());
-}
-
-#[test]
-fn client_optional_strings_clear_on_null() {
-	let client = id(moq_client_create());
-	let _guard = Guard(Some(|| {
-		moq_client_close(client);
-	}));
-
-	let name = b"relay.example.com";
-	assert_eq!(
-		unsafe { moq_client_set_tls_host_name(client, name.as_ptr() as *const c_char, name.len()) },
-		0
-	);
-	// NULL and empty both mean "unset", so one setter both sets and clears.
-	assert_eq!(unsafe { moq_client_set_tls_host_name(client, std::ptr::null(), 0) }, 0);
-	assert_eq!(
-		unsafe { moq_client_set_tls_host_name(client, b"".as_ptr() as *const c_char, 0) },
-		0
-	);
-}
-
-#[test]
-fn client_set_tls_fingerprints_rejects_malformed_values_before_mutating() {
-	let client = id(moq_client_create());
-	let _guard = Guard(Some(|| {
-		moq_client_close(client);
-	}));
-
-	for invalid in ["not-hex", "abcd"] {
-		let fingerprints = [moq_str(invalid)];
-		let ret = unsafe { moq_client_set_tls_fingerprints(client, fingerprints.as_ptr(), fingerprints.len()) };
-		assert_eq!(ret, Error::InvalidConfig(String::new()).code());
-		let client_id = ffi::parse_id(client).unwrap();
-		assert!(
-			State::lock()
-				.client
-				.get_mut(client_id)
-				.unwrap()
-				.connect
-				.tls
-				.fingerprint
-				.is_empty()
-		);
-	}
-
-	let valid_value = "ab".repeat(32);
-	let valid = [moq_str(&valid_value)];
-	assert_eq!(
-		unsafe { moq_client_set_tls_fingerprints(client, valid.as_ptr(), valid.len()) },
-		0
-	);
-}
-
-#[test]
-fn client_set_quic_rejects_unknown_congestion_control() {
-	let client = id(moq_client_create());
-	let _guard = Guard(Some(|| {
-		moq_client_close(client);
-	}));
-
-	let bogus = "sideways";
-	let ret = unsafe { moq_client_set_quic_congestion_control(client, bogus.as_ptr() as *const c_char, bogus.len()) };
-	assert_eq!(ret, Error::InvalidConfig(String::new()).code());
-
-	let delay = "delay";
-	assert_eq!(
-		unsafe { moq_client_set_quic_congestion_control(client, delay.as_ptr() as *const c_char, delay.len()) },
-		0
-	);
-
-	// NULL puts it back to the backend default, so the knob can return to automatic.
-	assert_eq!(
-		unsafe { moq_client_set_quic_congestion_control(client, std::ptr::null(), 0) },
-		0
-	);
-}
-
-/// Every QUIC and backoff knob is its own setter, so adding one stays additive. Nothing
-/// here is a struct field, which is what keeps a new knob off the ABI.
-#[test]
-fn client_quic_and_backoff_setters_apply() {
-	let client = id(moq_client_create());
-	let _guard = Guard(Some(|| {
-		moq_client_close(client);
-	}));
-
-	assert_eq!(moq_client_set_backoff_initial(client, 500), 0);
-	assert_eq!(moq_client_set_backoff_multiplier(client, 3), 0);
-	assert_eq!(moq_client_set_backoff_max(client, 10_000), 0);
-	assert_eq!(moq_client_set_backoff_timeout(client, 0), 0);
-
-	assert_eq!(moq_client_set_quic_max_streams(client, 4096), 0);
-	assert_eq!(moq_client_set_quic_idle_timeout(client, 15_000), 0);
-	assert_eq!(moq_client_set_quic_keep_alive(client, 0), 0);
-	assert_eq!(moq_client_set_quic_gso(client, false), 0);
-	assert_eq!(moq_client_set_quic_mtu_discovery(client, true), 0);
-
-	let dir = "/tmp/qlog";
-	assert_eq!(
-		unsafe { moq_client_set_quic_qlog(client, dir.as_ptr() as *const c_char, dir.len()) },
-		0
-	);
-	assert_eq!(unsafe { moq_client_set_quic_qlog(client, std::ptr::null(), 0) }, 0);
-
-	// Every one of them rejects an unknown handle rather than silently doing nothing.
-	assert_eq!(
-		moq_client_set_quic_max_streams(UNUSED_ID, 1),
-		Error::ClientNotFound.code()
-	);
-	assert_eq!(
-		moq_client_set_backoff_initial(UNUSED_ID, 1),
-		Error::ClientNotFound.code()
-	);
-}
-
-/// A knob never set reads back as its default, which is what lets a UI show the real
-/// ones. Pinned against the config each comes from rather than a literal copied here, so
-/// retuning a default without following through to C fails right here.
-#[test]
-fn a_fresh_handle_reads_back_the_defaults() {
-	let client = id(moq_client_create());
-	let _guard = Guard(Some(|| {
-		moq_client_close(client);
-	}));
-
-	let config = moq_native::connect::Config::default();
-	let quic = moq_native::quic::Resolved::default();
-
-	let mut value = 0u64;
-	assert_eq!(unsafe { moq_client_get_connect_timeout(client, &mut value) }, 0);
-	assert_eq!(value, config.resolved_timeout().as_millis() as u64);
-
-	assert_eq!(unsafe { moq_client_get_failover_delay(client, &mut value) }, 0);
-	assert_eq!(value, config.resolved_race().as_millis() as u64);
-
-	assert_eq!(unsafe { moq_client_get_resolution_delay(client, &mut value) }, 0);
-	assert_eq!(value, config.resolved_resolution_delay().as_millis() as u64);
-
-	assert_eq!(unsafe { moq_client_get_backoff_initial(client, &mut value) }, 0);
-	assert_eq!(value, config.backoff.initial().as_millis() as u64);
-
-	assert_eq!(unsafe { moq_client_get_backoff_max(client, &mut value) }, 0);
-	assert_eq!(value, config.backoff.max().as_millis() as u64);
-
-	assert_eq!(unsafe { moq_client_get_backoff_timeout(client, &mut value) }, 0);
-	assert_eq!(value, config.backoff.timeout().as_millis() as u64);
-
-	assert_eq!(unsafe { moq_client_get_quic_max_streams(client, &mut value) }, 0);
-	assert_eq!(value, quic.max_streams);
-
-	assert_eq!(unsafe { moq_client_get_quic_idle_timeout(client, &mut value) }, 0);
-	assert_eq!(value, quic.idle_timeout.as_millis() as u64);
-
-	assert_eq!(unsafe { moq_client_get_quic_keep_alive(client, &mut value) }, 0);
-	assert_eq!(value, quic.keep_alive.map(|d| d.as_millis() as u64).unwrap_or(0));
-
-	assert_eq!(unsafe { moq_client_get_websocket_delay(client, &mut value) }, 0);
-	assert_eq!(value, config.websocket.resolved_delay().as_millis() as u64);
-
-	let mut multiplier = 0u32;
-	assert_eq!(unsafe { moq_client_get_backoff_multiplier(client, &mut multiplier) }, 0);
-	assert_eq!(multiplier, config.backoff.multiplier());
-
-	let mut enabled = false;
-	assert_eq!(unsafe { moq_client_get_websocket_enabled(client, &mut enabled) }, 0);
-	assert_eq!(enabled, config.websocket.resolved_enabled());
-}
-
-/// A getter reports what the matching setter wrote, so the pair can't drift.
-#[test]
-fn getters_read_back_what_the_setters_wrote() {
-	let client = id(moq_client_create());
-	let _guard = Guard(Some(|| {
-		moq_client_close(client);
-	}));
-
-	assert_eq!(moq_client_set_quic_idle_timeout(client, 15_000), 0);
-	assert_eq!(moq_client_set_backoff_timeout(client, 0), 0);
-	assert_eq!(moq_client_set_quic_keep_alive(client, 0), 0);
-
-	let mut value = 0u64;
-	assert_eq!(unsafe { moq_client_get_quic_idle_timeout(client, &mut value) }, 0);
-	assert_eq!(value, 15_000);
-
-	// Zero is a real setting for both of these, not "unset": retry forever, and no
-	// keep-alive pings. So they must read back as zero rather than as their defaults.
-	assert_eq!(unsafe { moq_client_get_backoff_timeout(client, &mut value) }, 0);
-	assert_eq!(value, 0);
-	assert_eq!(unsafe { moq_client_get_quic_keep_alive(client, &mut value) }, 0);
-	assert_eq!(value, 0);
-
-	assert_eq!(
-		unsafe { moq_client_get_quic_idle_timeout(client, std::ptr::null_mut()) },
-		Error::InvalidPointer.code()
-	);
-	assert_eq!(
-		unsafe { moq_client_get_quic_idle_timeout(UNUSED_ID, &mut value) },
-		Error::ClientNotFound.code()
-	);
-}
-
-/// An idle timeout outside QUIC's millisecond varint returns an ordinary configuration
-/// error, and later client API calls remain usable.
-#[test]
-fn client_connect_rejects_an_unrepresentable_idle_timeout() {
-	let client = id(moq_client_create());
-	let _guard = Guard(Some(|| {
-		moq_client_close(client);
-	}));
-
-	assert_eq!(moq_client_set_quic_idle_timeout(client, u64::MAX), 0);
-
+/// Dial `moqt://localhost:1` with `config` and return the raw status.
+fn dial(config: Option<&moq_client_config>) -> i32 {
 	let url = b"moqt://localhost:1";
-	let ret = unsafe {
-		moq_client_connect(
+	unsafe {
+		moq_session_connect(
 			url.as_ptr() as *const c_char,
 			url.len(),
-			client,
+			config.map_or(std::ptr::null(), |c| c as *const _),
 			0,
 			0,
 			None,
 			std::ptr::null_mut(),
 		)
-	};
-	assert_eq!(ret, Error::InvalidConfig(String::new()).code());
+	}
+}
 
-	// A rejected dial leaves the global client state usable.
-	let next = id(moq_client_create());
-	moq_client_close(next);
+/// The native config a zeroed struct produces, which is the thing every default
+/// assertion below is really about.
+fn parsed(config: &moq_client_config) -> crate::client::Config {
+	unsafe { crate::parse_client(Some(config)) }.expect("config should parse")
+}
+
+#[test]
+fn a_null_config_dials_with_the_defaults() {
+	let defaults = crate::client::Config::default();
+	let parsed = unsafe { crate::parse_client(None) }.expect("NULL is the defaults");
+	assert_eq!(parsed.connect.backoff.initial(), defaults.connect.backoff.initial());
+	assert_eq!(
+		parsed.connect.websocket.resolved_enabled(),
+		defaults.connect.websocket.resolved_enabled()
+	);
+}
+
+/// The whole point of the `has_*` flags: a caller who zeroes the struct and sets
+/// nothing must land on the defaults, not on zero. The backoff and the WebSocket
+/// fallback are the ones with non-zero defaults, so they are what would break.
+#[test]
+fn a_zeroed_config_is_the_defaults() {
+	let defaults = crate::client::Config::default();
+	let parsed = parsed(&client_config());
+
+	assert_eq!(parsed.connect.backoff.initial(), defaults.connect.backoff.initial());
+	assert_eq!(
+		parsed.connect.backoff.multiplier(),
+		defaults.connect.backoff.multiplier()
+	);
+	assert_eq!(parsed.connect.backoff.max(), defaults.connect.backoff.max());
+	assert_eq!(parsed.connect.backoff.timeout(), defaults.connect.backoff.timeout());
+	assert_eq!(
+		parsed.connect.websocket.resolved_enabled(),
+		defaults.connect.websocket.resolved_enabled()
+	);
+	assert_eq!(
+		parsed.connect.websocket.resolved_delay(),
+		defaults.connect.websocket.resolved_delay()
+	);
+	assert_eq!(parsed.connect.version, defaults.connect.version);
+	assert_eq!(parsed.connect.bind, defaults.connect.bind);
+	assert!(parsed.connect.tls.fingerprint.is_empty());
+	assert!(parsed.connect.tls.root.is_empty());
+	assert!(parsed.quic.gso.is_none());
+	assert!(parsed.quic.mtu_discovery.is_none());
+}
+
+/// `moq_client_defaults` has to agree with what a zeroed struct actually dials,
+/// or a settings UI shows numbers the library won't use. Pinned against the
+/// config each value comes from, so retuning a default without following through
+/// to C fails right here.
+#[test]
+fn defaults_report_what_a_zeroed_config_dials() {
+	let config = moq_client_defaults();
+
+	let expected = crate::client::Config::default();
+	let quic = moq_native::quic::Resolved::default();
+
+	assert!(config.has_connect_timeout);
+	assert_eq!(
+		config.connect_timeout_ms,
+		expected.connect.resolved_timeout().as_millis() as u64
+	);
+	assert!(config.has_failover_delay);
+	assert_eq!(
+		config.failover_delay_ms,
+		expected.connect.resolved_race().as_millis() as u64
+	);
+	assert!(config.has_resolution_delay);
+	assert_eq!(
+		config.resolution_delay_ms,
+		expected.connect.resolved_resolution_delay().as_millis() as u64
+	);
+
+	assert!(config.has_backoff_initial);
+	assert_eq!(
+		config.backoff_initial_ms,
+		expected.connect.backoff.initial().as_millis() as u64
+	);
+	assert!(config.has_backoff_multiplier);
+	assert_eq!(config.backoff_multiplier, expected.connect.backoff.multiplier());
+	assert!(config.has_backoff_max);
+	assert_eq!(config.backoff_max_ms, expected.connect.backoff.max().as_millis() as u64);
+	assert!(config.has_backoff_timeout);
+	assert_eq!(
+		config.backoff_timeout_ms,
+		expected.connect.backoff.timeout().as_millis() as u64
+	);
+
+	assert!(config.has_websocket_enabled);
+	assert_eq!(config.websocket_enabled, expected.connect.websocket.resolved_enabled());
+	assert!(config.has_websocket_delay);
+	assert_eq!(
+		config.websocket_delay_ms,
+		expected.connect.websocket.resolved_delay().as_millis() as u64
+	);
+
+	assert!(config.has_quic_max_streams);
+	assert_eq!(config.quic_max_streams, quic.max_streams);
+	assert!(config.has_quic_idle_timeout);
+	assert_eq!(config.quic_idle_timeout_ms, quic.idle_timeout.as_millis() as u64);
+	assert_eq!(
+		config.has_quic_keep_alive.then_some(config.quic_keep_alive_ms),
+		quic.keep_alive.map(|d| d.as_millis() as u64)
+	);
+
+	// The backend-dependent knobs have no single value to report, so they come
+	// back unset rather than guessing one.
+	assert!(!config.has_quic_gso);
+	assert!(!config.has_quic_mtu_discovery);
+	assert!(!config.has_tls_system_roots);
+	assert!(config.quic_congestion_control.is_null());
+
+	// And what it reports must round-trip: dialing with it is dialing with the defaults.
+	let expected = crate::client::Config::default();
+	let reparsed = parsed(&config);
+	assert_eq!(reparsed.connect.backoff.initial(), expected.connect.backoff.initial());
+	assert_eq!(
+		reparsed.connect.websocket.resolved_enabled(),
+		expected.connect.websocket.resolved_enabled()
+	);
+}
+
+/// Zero is a real setting for these two, not "unset": retry forever, and no
+/// keep-alive pings. The flag is what carries that distinction.
+#[test]
+fn zero_with_a_flag_set_is_a_real_value() {
+	let mut config = client_config();
+	config.backoff_timeout_ms = 0;
+	config.has_backoff_timeout = true;
+	config.quic_keep_alive_ms = 0;
+	config.has_quic_keep_alive = true;
+
+	let explicit = parsed(&config);
+	assert_eq!(explicit.connect.backoff.timeout(), std::time::Duration::ZERO);
+	assert_eq!(explicit.quic.keep_alive, Some(std::time::Duration::ZERO));
+
+	// Without the flags the same zeroes mean nothing at all.
+	let defaults = parsed(&client_config());
+	assert_ne!(defaults.connect.backoff.timeout(), std::time::Duration::ZERO);
+	assert_eq!(defaults.quic.keep_alive, None);
+}
+
+#[test]
+fn config_versions_round_trip() {
+	let versions = [moq_str("moq-lite-05"), moq_str("moq-transport-19")];
+	let mut config = client_config();
+	config.versions = versions.as_ptr();
+	config.versions_len = versions.len();
+	assert_eq!(parsed(&config).connect.version.len(), 2);
+
+	// An empty list is no pin at all, so the default set is offered.
+	let mut config = client_config();
+	config.versions_len = 0;
+	assert_eq!(
+		parsed(&config).connect.version,
+		crate::client::Config::default().connect.version
+	);
+}
+
+#[test]
+fn config_rejects_an_unknown_version() {
+	let versions = [moq_str("moq-lite-05"), moq_str("moq-carrier-pigeon-01")];
+	let mut config = client_config();
+	config.versions = versions.as_ptr();
+	config.versions_len = versions.len();
+
+	assert_eq!(dial(Some(&config)), Error::InvalidConfig(String::new()).code());
+}
+
+#[test]
+fn config_rejects_a_bad_bind_address() {
+	let good = "127.0.0.1:0";
+	let mut config = client_config();
+	config.bind = good.as_ptr() as *const c_char;
+	config.bind_len = good.len();
+	assert_eq!(parsed(&config).connect.bind, Some(good.parse().unwrap()));
+
+	let bad = "not-an-address";
+	let mut config = client_config();
+	config.bind = bad.as_ptr() as *const c_char;
+	config.bind_len = bad.len();
+	assert_eq!(dial(Some(&config)), Error::InvalidConfig(String::new()).code());
+}
+
+#[test]
+fn config_optional_strings_are_unset_when_null_or_empty() {
+	let name = "relay.example.com";
+	let mut config = client_config();
+	config.tls_host_name = name.as_ptr() as *const c_char;
+	config.tls_host_name_len = name.len();
+	assert_eq!(parsed(&config).connect.tls.host_name.as_deref(), Some(name));
+
+	// NULL and empty both mean "unset".
+	let config = client_config();
+	assert_eq!(parsed(&config).connect.tls.host_name, None);
+
+	let mut config = client_config();
+	config.tls_host_name = "".as_ptr() as *const c_char;
+	config.tls_host_name_len = 0;
+	assert_eq!(parsed(&config).connect.tls.host_name, None);
+}
+
+#[test]
+fn config_rejects_malformed_tls_fingerprints() {
+	for invalid in ["not-hex", "abcd"] {
+		let fingerprints = [moq_str(invalid)];
+		let mut config = client_config();
+		config.tls_fingerprints = fingerprints.as_ptr();
+		config.tls_fingerprints_len = fingerprints.len();
+		assert_eq!(dial(Some(&config)), Error::InvalidConfig(String::new()).code());
+	}
+
+	let valid_value = "ab".repeat(32);
+	let valid = [moq_str(&valid_value)];
+	let mut config = client_config();
+	config.tls_fingerprints = valid.as_ptr();
+	config.tls_fingerprints_len = valid.len();
+	assert_eq!(parsed(&config).connect.tls.fingerprint, vec![valid_value]);
+}
+
+#[test]
+fn config_rejects_unknown_congestion_control() {
+	let bogus = "sideways";
+	let mut config = client_config();
+	config.quic_congestion_control = bogus.as_ptr() as *const c_char;
+	config.quic_congestion_control_len = bogus.len();
+	assert_eq!(dial(Some(&config)), Error::InvalidConfig(String::new()).code());
+
+	let delay = "delay";
+	let mut config = client_config();
+	config.quic_congestion_control = delay.as_ptr() as *const c_char;
+	config.quic_congestion_control_len = delay.len();
+	assert!(parsed(&config).quic.congestion_control.is_some());
+
+	// NULL leaves it on the backend default, so the knob can stay automatic.
+	assert!(parsed(&client_config()).quic.congestion_control.is_none());
+}
+
+/// Every QUIC and backoff knob lands where it should. A new one is a new field on
+/// the end of the struct, which a zeroed caller never notices.
+#[test]
+fn config_quic_and_backoff_knobs_apply() {
+	let mut config = client_config();
+	config.backoff_initial_ms = 500;
+	config.has_backoff_initial = true;
+	config.backoff_multiplier = 3;
+	config.has_backoff_multiplier = true;
+	config.backoff_max_ms = 10_000;
+	config.has_backoff_max = true;
+
+	config.quic_max_streams = 4096;
+	config.has_quic_max_streams = true;
+	config.quic_idle_timeout_ms = 15_000;
+	config.has_quic_idle_timeout = true;
+	config.quic_gso = false;
+	config.has_quic_gso = true;
+	config.quic_mtu_discovery = true;
+	config.has_quic_mtu_discovery = true;
+
+	let dir = "/tmp/qlog";
+	config.quic_qlog = dir.as_ptr() as *const c_char;
+	config.quic_qlog_len = dir.len();
+
+	let parsed = parsed(&config);
+	assert_eq!(parsed.connect.backoff.initial(), std::time::Duration::from_millis(500));
+	assert_eq!(parsed.connect.backoff.multiplier(), 3);
+	assert_eq!(parsed.connect.backoff.max(), std::time::Duration::from_millis(10_000));
+	assert_eq!(parsed.quic.max_streams, Some(4096));
+	assert_eq!(parsed.quic.idle_timeout, Some(std::time::Duration::from_millis(15_000)));
+	assert_eq!(parsed.quic.gso, Some(false));
+	assert_eq!(parsed.quic.mtu_discovery, Some(true));
+	assert_eq!(parsed.quic.qlog.as_deref(), Some(std::path::Path::new(dir)));
+}
+
+/// An idle timeout outside QUIC's millisecond varint is an ordinary configuration
+/// error, and later calls remain usable.
+#[test]
+fn dial_rejects_an_unrepresentable_idle_timeout() {
+	let mut config = client_config();
+	config.quic_idle_timeout_ms = u64::MAX;
+	config.has_quic_idle_timeout = true;
+
+	assert_eq!(dial(Some(&config)), Error::InvalidConfig(String::new()).code());
+
+	// A rejected dial leaves the library usable.
+	assert!(moq_client_defaults().has_connect_timeout);
 }
 
 /// The backend variants are feature-gated, so a hardcoded menu offers options this
-/// build rejects. Every name reported must be one the setter takes, same contract as
+/// build rejects. Every name reported must be one a dial takes, same contract as
 /// `moq_versions`.
 #[test]
-fn backends_lists_only_what_the_setter_accepts() {
+fn backends_lists_only_what_a_dial_accepts() {
 	let count = unsafe { moq_backends(std::ptr::null_mut(), 0) };
 	assert!(count > 0, "expected at least one compiled backend, got {count}");
 
@@ -2887,32 +2968,31 @@ fn backends_lists_only_what_the_setter_accepts() {
 	];
 	assert_eq!(unsafe { moq_backends(names.as_mut_ptr(), names.len()) }, count);
 
+	let accepts = |name: &str| {
+		let mut config = client_config();
+		config.backend = name.as_ptr() as *const c_char;
+		config.backend_len = name.len();
+		unsafe { crate::parse_client(Some(&config)) }.is_ok()
+	};
+
 	for name in &names {
 		let name = unsafe { ffi::parse_str(name.data, name.len) }.expect("backend name is UTF-8");
-		let client = id(moq_client_create());
-		assert_eq!(
-			unsafe { moq_client_set_backend(client, name.as_ptr() as *const c_char, name.len()) },
-			0,
-			"listed backend {name} must be settable"
-		);
-		moq_client_close(client);
+		assert!(accepts(name), "listed backend {name} must be settable");
 	}
 
 	// And the converse: a backend this build lacks is not listed, so the menu can't
 	// offer a dead option.
-	let client = id(moq_client_create());
-	let _guard = Guard(Some(|| {
-		moq_client_close(client);
-	}));
 	for candidate in ["quinn", "quiche", "noq"] {
 		let listed = names.iter().any(|n| {
 			unsafe { ffi::parse_str(n.data, n.len) }
 				.map(|s| s == candidate)
 				.unwrap_or(false)
 		});
-		let accepted =
-			unsafe { moq_client_set_backend(client, candidate.as_ptr() as *const c_char, candidate.len()) } == 0;
-		assert_eq!(listed, accepted, "{candidate}: listed and accepted must agree");
+		assert_eq!(
+			listed,
+			accepts(candidate),
+			"{candidate}: listed and accepted must agree"
+		);
 	}
 }
 
@@ -2922,11 +3002,6 @@ fn backends_lists_only_what_the_setter_accepts() {
 /// only sees the supported one.
 #[test]
 fn qlog_support_matches_what_a_dial_accepts() {
-	let client = id(moq_client_create());
-	let _guard = Guard(Some(|| {
-		moq_client_close(client);
-	}));
-
 	// A real directory: with capture compiled in, the dial creates a trace file inside
 	// it, so a path that doesn't exist would fail for that reason instead of the one
 	// under test. The pid keeps concurrent test binaries out of each other's way.
@@ -2934,25 +3009,14 @@ fn qlog_support_matches_what_a_dial_accepts() {
 	std::fs::create_dir_all(&dir).expect("create the qlog directory");
 	let path = dir.to_str().expect("temp dir is UTF-8").to_string();
 
-	assert_eq!(
-		unsafe { moq_client_set_quic_qlog(client, path.as_ptr() as *const c_char, path.len()) },
-		0,
-		"the setter stores the path either way; the dial is what rejects it"
-	);
+	let mut config = client_config();
+	config.quic_qlog = path.as_ptr() as *const c_char;
+	config.quic_qlog_len = path.len();
 
-	let url = b"moqt://localhost:1";
-	let ret = unsafe {
-		moq_client_connect(
-			url.as_ptr() as *const c_char,
-			url.len(),
-			client,
-			0,
-			0,
-			None,
-			std::ptr::null_mut(),
-		)
-	};
+	// Parsing stores the path either way; the dial is what rejects it.
+	assert!(unsafe { crate::parse_client(Some(&config)) }.is_ok());
 
+	let ret = dial(Some(&config));
 	match moq_qlog_supported() {
 		true => {
 			assert!(ret > 0, "qlog is supported, so the dial must start: {ret}");
@@ -2980,35 +3044,34 @@ fn versions_lists_the_offered_set() {
 
 	for name in &names {
 		let name = unsafe { ffi::parse_str(name.data, name.len) }.expect("version name is UTF-8");
-		// Every listed name must be one the setter accepts, or the menu it builds is a lie.
+		// Every listed name must be one a dial accepts, or the menu it builds is a lie.
 		let one = [moq_str(name)];
-		let client = id(moq_client_create());
-		assert_eq!(unsafe { moq_client_set_versions(client, one.as_ptr(), one.len()) }, 0);
-		moq_client_close(client);
+		let mut config = client_config();
+		config.versions = one.as_ptr();
+		config.versions_len = one.len();
+		assert!(
+			unsafe { crate::parse_client(Some(&config)) }.is_ok(),
+			"listed version {name} must be settable"
+		);
 	}
 }
 
 #[test]
-fn client_connect_applies_the_config() {
-	let client = id(moq_client_create());
-	let _guard = Guard(Some(|| {
-		moq_client_close(client);
-	}));
-
+fn dial_applies_the_config() {
 	let versions = [moq_str("moq-lite-05")];
-	assert_eq!(
-		unsafe { moq_client_set_versions(client, versions.as_ptr(), versions.len()) },
-		0
-	);
-	assert_eq!(moq_client_set_connect_timeout(client, 100), 0);
+	let mut config = client_config();
+	config.versions = versions.as_ptr();
+	config.versions_len = versions.len();
+	config.connect_timeout_ms = 100;
+	config.has_connect_timeout = true;
 
 	let cb = Callback::new();
 	let url = b"moqt://localhost:1";
 	let session = id(unsafe {
-		moq_client_connect(
+		moq_session_connect(
 			url.as_ptr() as *const c_char,
 			url.len(),
-			client,
+			&config,
 			0,
 			0,
 			Some(channel_callback),
@@ -3018,21 +3081,4 @@ fn client_connect_applies_the_config() {
 
 	assert_eq!(moq_session_close(session), 0);
 	assert!(cb.recv() <= 0, "session close delivers a terminal code");
-}
-
-#[test]
-fn client_connect_rejects_unknown_client() {
-	let url = b"moqt://localhost:1";
-	let ret = unsafe {
-		moq_client_connect(
-			url.as_ptr() as *const c_char,
-			url.len(),
-			UNUSED_ID,
-			0,
-			0,
-			None,
-			std::ptr::null_mut(),
-		)
-	};
-	assert_eq!(ret, Error::ClientNotFound.code());
 }

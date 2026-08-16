@@ -29,12 +29,21 @@ fn main() {
 	let include_dir = target_dir.join("include");
 	fs::create_dir_all(&include_dir).expect("Failed to create include directory");
 	let header = include_dir.join(format!("{}.h", LIB_NAME));
-	let mut config = cbindgen::Config::default();
-	// The codec enums cross the ABI as plain `uint32_t`, so that an unknown
-	// discriminant from C is an error rather than UB. That leaves no signature
-	// referencing them, and cbindgen emits only what a signature reaches, so name
-	// them here: without this a C caller has to hardcode the integers.
-	config.export.include = ENUMS.iter().map(|name| name.to_string()).collect();
+	let config = cbindgen::Config {
+		// cbindgen.toml is never loaded (see its header comment), so the generated
+		// header has no include guard unless we ask for one here. Without it a
+		// project reaching moq.h down two include paths gets redefinition errors.
+		pragma_once: true,
+		export: cbindgen::ExportConfig {
+			// The codec enums cross the ABI as plain `uint32_t`, so that an unknown
+			// discriminant from C is an error rather than UB. That leaves no signature
+			// referencing them, and cbindgen emits only what a signature reaches, so
+			// name them here: without this a C caller has to hardcode the integers.
+			include: ENUMS.iter().map(|name| name.to_string()).collect(),
+			..Default::default()
+		},
+		..Default::default()
+	};
 	cbindgen::Builder::new()
 		.with_crate(&crate_dir)
 		.with_config(config)
