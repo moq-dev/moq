@@ -1793,7 +1793,10 @@ async fn export_twice(with_video: bool) -> (Vec<Frame>, Vec<Frame>) {
 
 	let mut video = with_video.then(|| {
 		let track = broadcast
-			.create_track(broadcast.unique_name(".avc1"), hang::container::track_info())
+			.create_track(
+				broadcast.unique_name(".avc1"),
+				hang::container::track_info(hang::catalog::PRIORITY.video),
+			)
 			.unwrap();
 		// Out-of-band parameter sets (avc1), so the export source takes the catalog
 		// description as-is instead of parsing them out of the bitstream.
@@ -1812,7 +1815,10 @@ async fn export_twice(with_video: bool) -> (Vec<Frame>, Vec<Frame>) {
 
 	let mut audio = {
 		let track = broadcast
-			.create_track(broadcast.unique_name(".aac"), hang::container::track_info())
+			.create_track(
+				broadcast.unique_name(".aac"),
+				hang::container::track_info(hang::catalog::PRIORITY.audio),
+			)
 			.unwrap();
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
 		cfg.container = Container::Legacy;

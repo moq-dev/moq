@@ -276,13 +276,12 @@ impl Publish {
 	pub fn capture(
 		mut broadcast: moq_net::broadcast::Producer,
 		args: &CaptureArgs,
-		bandwidth: Option<moq_net::bandwidth::Consumer>,
+		bandwidth: Option<moq_net::bandwidth::Allocator>,
 		latency_max: Option<std::time::Duration>,
 	) -> anyhow::Result<Self> {
 		let config = moq_mux::catalog::Config::default().with_latency_max(latency_max);
 		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 
-		let bandwidth = bandwidth.map(moq_net::bandwidth::Allocator::new);
 		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode(bandwidth.clone())));
 		let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode(bandwidth)));
 		anyhow::ensure!(video.is_some() || audio.is_some(), "nothing to capture");
