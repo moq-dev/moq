@@ -151,6 +151,20 @@ test("Message Parameters: Location preserves bigint precision", async () => {
 	}
 });
 
+test("Message Parameters: Location preserves full uint64 values in draft 17", async () => {
+	const largest = { groupId: 2n ** 64n - 1n, objectId: 2n ** 62n };
+	const params = new Parameters();
+	params.largest = largest;
+
+	expect(params.largest).toEqual(largest);
+
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19]) {
+		const encoded = await encodeVersioned(params, version);
+		const decoded = await decodeVersioned(encoded, Parameters.decode, version);
+		expect(decoded.largest).toEqual(largest);
+	}
+});
+
 // Subscribe tests (v14)
 test("Subscribe v14: round trip", async () => {
 	const msg = new Subscribe.Subscribe({
