@@ -3893,9 +3893,12 @@ mod tests {
 
 		let report = registry.report();
 		let entry = report.traffic.iter().find(|e| e.path.as_str() == "demo").unwrap();
-		assert_eq!(entry.publisher.stale, 2, "two groups skipped on the way out");
+		assert_eq!(entry.publisher.stale.groups, 2, "two groups skipped on the way out");
+		assert_eq!(entry.publisher.stale.frames, 2);
+		assert_eq!(entry.publisher.stale.bytes, 4);
+		assert_eq!(entry.publisher.stale.datagrams, 0);
 		assert_eq!(entry.publisher.groups, 1, "only the live edge was delivered");
-		assert_eq!(entry.subscriber.stale, 0, "ingress wrote all three");
+		assert_eq!(entry.subscriber.stale.groups, 0, "ingress wrote all three");
 		assert_eq!(entry.subscriber.groups, 3);
 	}
 

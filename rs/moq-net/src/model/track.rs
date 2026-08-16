@@ -225,15 +225,18 @@ pub(crate) struct TrackState {
 	fetch: kio::Shared<FetchState>,
 }
 
-/// What a frame-level scan found: the frame, where it came from so the cursor can
-/// advance past it, and how many groups the drift budget made the scan step over on the
-/// way there (counted here rather than skipped silently, since a silent drop is
-/// indistinguishable from loss).
+/// What a frame-level scan found, including content skipped on the way to either a
+/// frame or the clean end of the track.
+struct FrameScan {
+	hit: Option<FrameHit>,
+	stale: stats::Content,
+}
+
+/// A frame found by a frame-level scan and the cursor position it came from.
 struct FrameHit {
 	frame: frame::Frame,
 	index: usize,
 	sequence: u64,
-	stale: u64,
 }
 
 /// A cached group plus its bookkeeping in the track's `lookup` map.
@@ -361,13 +364,13 @@ impl TrackState {
 		next_sequence: u64,
 		drift: Drift,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<FrameHit>>> {
+	) -> Poll<Result<FrameScan>> {
 		let start = index.saturating_sub(self.offset);
 		let mut pending_seen = false;
 		// Groups the budget gave up on below the frame this returns. Counted only on the
 		// winning scan, whose cursor jumps past them, so a scan that ends Pending leaves
 		// them to be counted exactly once by the one that eventually succeeds.
-		let mut stale = 0;
+		let mut stale = stats::Content::default();
 		for (i, (sequence, stamp)) in self.arrival.iter().enumerate().skip(start) {
 			if *sequence < next_sequence {
 				continue;
@@ -384,19 +387,21 @@ impl TrackState {
 			// from a group the subscription has given up on is no fresher for being
 			// read one frame at a time.
 			if self.is_stale(*sequence, drift.edge, drift.budget) {
-				stale += 1;
+				stale.add(slot.group.content());
 				continue;
 			}
 
 			let mut consumer = slot.group.consume();
 			match consumer.poll_read_frame(waiter) {
 				Poll::Ready(Ok(Some(frame))) => {
-					return Poll::Ready(Ok(Some(FrameHit {
-						frame,
-						index: self.offset + i,
-						sequence: *sequence,
+					return Poll::Ready(Ok(FrameScan {
+						hit: Some(FrameHit {
+							frame,
+							index: self.offset + i,
+							sequence: *sequence,
+						}),
 						stale,
-					})));
+					}));
 				}
 				Poll::Ready(Ok(None)) => continue,
 				// A single group failing (aborted upstream, or evicted from the
@@ -414,7 +419,7 @@ impl TrackState {
 		if pending_seen {
 			Poll::Pending
 		} else if self.is_complete() {
-			Poll::Ready(Ok(None))
+			Poll::Ready(Ok(FrameScan { hit: None, stale }))
 		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
 		} else {
@@ -1403,7 +1408,7 @@ impl Producer {
 				end_sequence: None,
 				parked: BTreeMap::new(),
 				stale_cap: None,
-				stale: 0,
+				stale: stats::Content::default(),
 			}),
 			// A producer-side (in-process) subscribe is not egress: stay untagged.
 			stats: stats::Scope::default(),
@@ -2263,7 +2268,7 @@ impl Subscribing {
 						end_sequence: None,
 						parked: BTreeMap::new(),
 						stale_cap: None,
-						stale: 0,
+						stale: stats::Content::default(),
 					}),
 					stats: self.stats.clone(),
 					_stats_sub: self.stats.subscribe(),
@@ -2617,7 +2622,7 @@ struct PlainSubscriber {
 	/// is the outer [`Subscriber`], which may be reading this cursor through a
 	/// [`super::resume::Subscriber`] segment (untagged, so the outer wrapper is the
 	/// only place attribution happens once).
-	stale: u64,
+	stale: stats::Content,
 }
 
 impl PlainSubscriber {
@@ -2634,14 +2639,14 @@ impl PlainSubscriber {
 	}
 
 	/// Take the groups skipped since the last call, for the owner to meter.
-	fn take_stale(&mut self) -> u64 {
+	fn take_stale(&mut self) -> stats::Content {
 		std::mem::take(&mut self.stale)
 	}
 
 	/// Note a group an outer reader skipped on this cursor's behalf, so it lands in the
 	/// same counter as the ones skipped here.
-	fn note_stale(&mut self) {
-		self.stale += 1;
+	fn note_stale(&mut self, group: &group::Consumer) {
+		self.stale.add(group.content());
 	}
 
 	/// This subscriber's clamped drift budget and the live edge to measure against,
@@ -2733,7 +2738,7 @@ impl PlainSubscriber {
 			// Drop a group the drift budget has given up on and keep scanning, so one
 			// poll walks a whole backlog off rather than handing it out group by group.
 			if ready!(self.poll_stale(&consumer, drift, waiter))? {
-				self.stale += 1;
+				self.stale.add(consumer.content());
 				continue;
 			}
 			return Poll::Ready(Ok(Some(consumer)));
@@ -2764,7 +2769,7 @@ impl PlainSubscriber {
 			// Advance before the budget check: a skipped group is consumed, not retried.
 			self.next_sequence = group.sequence.saturating_add(1);
 			if ready!(self.poll_stale(&group, drift, waiter))? {
-				self.stale += 1;
+				self.stale.add(group.content());
 				continue;
 			}
 			return Poll::Ready(Ok(Some(group)));
@@ -2774,13 +2779,14 @@ impl PlainSubscriber {
 	fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
 		let drift = ready!(self.poll_drift(waiter))?;
 		let lower = self.min_sequence.max(self.next_sequence);
-		let Some(hit) = ready!(self.poll(waiter, |state| {
+		let scan = ready!(self.poll(waiter, |state| {
 			state.poll_read_frame(self.index, lower, drift, waiter)
-		})?) else {
+		})?);
+		self.stale.add(scan.stale);
+		let Some(hit) = scan.hit else {
 			return Poll::Ready(Ok(None));
 		};
 
-		self.stale += hit.stale;
 		self.index = hit.index + 1;
 		self.next_sequence = hit.sequence.saturating_add(1);
 		Poll::Ready(Ok(Some(hit.frame)))
@@ -2852,7 +2858,7 @@ impl Subscriber {
 
 	/// Take the groups the drift budget skipped since the last call, so a nesting
 	/// handle (a spliced subscriber reading this one as a segment) can attribute them.
-	pub(crate) fn take_stale(&mut self) -> u64 {
+	pub(crate) fn take_stale(&mut self) -> stats::Content {
 		match &mut self.inner {
 			SubscriberKind::Plain(plain) => plain.take_stale(),
 			SubscriberKind::Spliced(spliced) => spliced.take_stale(),
@@ -2882,7 +2888,7 @@ impl Subscriber {
 		let drift = ready!(plain.poll_drift(waiter))?;
 		let stale = ready!(plain.poll_stale(group, drift, waiter))?;
 		if stale {
-			plain.note_stale();
+			plain.note_stale(group);
 		}
 		Poll::Ready(Ok(stale))
 	}
@@ -4094,7 +4100,32 @@ mod test {
 		// frame-level path reports its drops like the group-level ones.
 		let mut subscriber = producer.subscribe(None);
 		subscriber.read_frame().await.unwrap().expect("a frame");
-		assert_eq!(subscriber.take_stale(), 3);
+		let stale = subscriber.take_stale();
+		assert_eq!(stale.groups, 3);
+		assert_eq!(stale.frames, 3);
+	}
+
+	#[tokio::test]
+	async fn read_frame_counts_stale_groups_at_eof() {
+		let mut producer = track_producer("test", None);
+		append_at(&mut producer, 0);
+		append_at(&mut producer, 1000);
+
+		// The live edge starts past frame zero, so the frame helper cannot read it.
+		// The two older groups are still stale and must be reported when the scan
+		// reaches the clean end without returning a frame.
+		let mut edge = producer.append_group().unwrap();
+		edge.start_at(1).unwrap();
+		edge.write_frame(Timestamp::from_millis(2000).unwrap(), b"edge".to_vec())
+			.unwrap();
+		edge.finish().unwrap();
+		producer.finish().unwrap();
+
+		let mut subscriber = producer.subscribe(None);
+		assert!(subscriber.read_frame().await.unwrap().is_none());
+		let stale = subscriber.take_stale();
+		assert_eq!(stale.groups, 2);
+		assert_eq!(stale.frames, 2);
 	}
 
 	#[test]

@@ -4,14 +4,15 @@ use mp4_atom::{Decode, Encode};
 
 /// A drift budget no test timeline comes close to, so every group is read.
 ///
-/// These tests write a whole batch of groups up front and only then read them, which the
+/// The media track's full retention window, so a reader started after publishing can
+/// still read every retained group. These tests write every group up front, which the
 /// default [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) budget collapses to the live
 /// edge: completeness has to be asked for.
-const BATCH: std::time::Duration = std::time::Duration::from_secs(3600);
+const RECORDING_LATENCY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// A subscription with that budget, for a test asserting every group is delivered.
 fn subscribe_all() -> moq_net::track::Subscription {
-	moq_net::track::Subscription::default().with_latency(moq_net::Latency::max(BATCH))
+	moq_net::track::Subscription::default().with_latency(moq_net::Latency::max(RECORDING_LATENCY))
 }
 
 /// Drain every group currently buffered on the consumer without waiting for new ones.

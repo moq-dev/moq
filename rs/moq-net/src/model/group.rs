@@ -140,6 +140,16 @@ pub(crate) struct GroupState {
 }
 
 impl GroupState {
+	/// Content still available to a reader of this group.
+	fn content(&self) -> stats::Content {
+		stats::Content {
+			bytes: self.cache,
+			frames: self.next_index.saturating_sub(self.offset) as u64,
+			groups: 1,
+			datagrams: 0,
+		}
+	}
+
 	/// Resolve the source for the frame at `index`: a completed frame (whole) or the
 	/// in-flight tail (streamed). Used by [`Consumer::poll_next_frame`].
 	fn poll_frame_source(&self, index: usize) -> Poll<Result<Option<(frame::Info, frame::Source)>>> {
@@ -635,6 +645,11 @@ impl Producer {
 		self.state.read().timestamp
 	}
 
+	/// Snapshot the content a subscriber would discard by skipping this group.
+	pub(crate) fn content(&self) -> stats::Content {
+		self.state.read().content()
+	}
+
 	/// The group's full cached footprint (payload plus fixed overhead), used by the
 	/// track to size this group as an eviction victim.
 	pub(crate) fn cache_size(&self) -> u64 {
@@ -868,6 +883,19 @@ impl std::ops::Deref for Consumer {
 }
 
 impl Consumer {
+	/// Snapshot the content this cursor would discard if its group were skipped.
+	pub(crate) fn content(&self) -> stats::Content {
+		match &self.inner {
+			ConsumerKind::Plain(plain) => plain.state.read().content(),
+			// Drift is evaluated before a segment copy is wrapped as a spliced group.
+			// Keep the group count honest if a future caller reaches this fallback.
+			ConsumerKind::Spliced(_) => stats::Content {
+				groups: 1,
+				..Default::default()
+			},
+		}
+	}
+
 	/// Rebuild this consumer as the head of a group assembled across route changes,
 	/// keeping the group's identity and its track's properties. See [`super::resume`].
 	pub(crate) fn into_spliced(self, spliced: super::resume::Group) -> Self {

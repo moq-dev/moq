@@ -7,10 +7,11 @@ use bytes::BytesMut;
 
 /// A drift budget no test timeline comes close to, so the reader sees every group.
 ///
-/// These tests import a whole file and only then read it back, which the default
+/// The media track's full retention window, so a reader started after importing can
+/// still read every retained group. These tests import a whole file first, which the default
 /// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) budget collapses to the live edge:
 /// completeness has to be asked for.
-const BATCH: std::time::Duration = std::time::Duration::from_secs(3600);
+const RECORDING_LATENCY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Decode a whole TS buffer into a fresh broadcast and return the catalog.
 fn import_ts(data: &[u8]) -> crate::catalog::hang::Catalog {
@@ -151,7 +152,7 @@ async fn import_opus_frames() {
 
 	let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
 	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy)
-		.with_latency(crate::Latency::max(BATCH));
+		.with_latency(crate::Latency::max(RECORDING_LATENCY));
 	let mut frames = Vec::new();
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		let Some(frame) = res.unwrap() else { break };
@@ -293,7 +294,7 @@ async fn import_export_import_roundtrip() {
 	let mut exporter = crate::container::ts::Export::new(crate::source::announced(&consumer))
 		.await
 		.unwrap()
-		.with_latency(crate::Latency::max(BATCH));
+		.with_latency(crate::Latency::max(RECORDING_LATENCY));
 	let mut out = BytesMut::new();
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
 		match res.expect("exporter error") {
@@ -347,7 +348,7 @@ async fn survives_midstream_join() {
 	// anchors the one and only group.
 	let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
 	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy)
-		.with_latency(crate::Latency::max(BATCH));
+		.with_latency(crate::Latency::max(RECORDING_LATENCY));
 	let mut frames = Vec::new();
 	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		frames.push(frame);
@@ -392,7 +393,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 		.expect("scte35 track");
 	let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
 	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy)
-		.with_latency(crate::Latency::max(BATCH));
+		.with_latency(crate::Latency::max(RECORDING_LATENCY));
 	let mut cues = Vec::new();
 	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		cues.push((frame.payload.to_vec(), frame.timestamp));

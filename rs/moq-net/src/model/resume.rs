@@ -1049,6 +1049,9 @@ struct SegmentSub {
 	start: Option<Position>,
 	end: Option<Position>,
 	sub: SubState,
+	/// A completed segment's cursor, retained while parked groups may need their
+	/// latency budget re-evaluated after the outer cap rises.
+	terminal: Option<track::Subscriber>,
 	/// The producer dropped this segment (pruned, or replaced before producing).
 	/// The cursor drains what it already holds, then retires; see
 	/// [`Self::retired`].
@@ -1062,6 +1065,23 @@ struct SegmentSub {
 }
 
 impl SegmentSub {
+	/// The cursor that can evaluate staleness, whether the segment is live or has
+	/// already completed.
+	fn stale_sub_mut(&mut self) -> Option<&mut track::Subscriber> {
+		match &mut self.sub {
+			SubState::Active(sub) => Some(sub),
+			_ => self.terminal.as_mut(),
+		}
+	}
+
+	/// Move an active cursor into terminal retention and mark the segment done.
+	fn complete(&mut self, count: Option<u64>) {
+		let previous = std::mem::replace(&mut self.sub, SubState::Done(count));
+		if let SubState::Active(sub) = previous {
+			self.terminal = Some(sub);
+		}
+	}
+
 	/// The first group this segment can serve, for the underlying read cursor.
 	fn first_group(&self) -> u64 {
 		self.start.map_or(0, |start| start.group)
@@ -1178,6 +1198,7 @@ impl Subscriber {
 				}
 				if seg.pruned {
 					seg.sub = SubState::Done(None);
+					seg.terminal = None;
 					seg.parked.clear();
 					cut -= 1;
 				}
@@ -1203,8 +1224,9 @@ impl Subscriber {
 			};
 			self.last_prefs = prefs;
 			for seg in &mut self.segments {
-				if let SubState::Active(sub) = &mut seg.sub {
-					let _ = sub.update(slice(&self.last_prefs, seg.start, seg.end));
+				let prefs = slice(&self.last_prefs, seg.start, seg.end);
+				if let Some(sub) = seg.stale_sub_mut() {
+					let _ = sub.update(prefs);
 				}
 			}
 		}
@@ -1274,7 +1296,7 @@ impl Subscriber {
 					if existing.end != segment.end {
 						existing.end = segment.end;
 						let cap = Self::stale_cap(existing, self.end_sequence);
-						if let SubState::Active(sub) = &mut existing.sub {
+						if let Some(sub) = existing.stale_sub_mut() {
 							// The boundary bounds the drift anchor as well as the demand.
 							sub.set_stale_cap(cap);
 							// Shrink the demand so the session can cap upstream. The
@@ -1298,6 +1320,7 @@ impl Subscriber {
 						start: segment.start,
 						end: segment.end,
 						sub: SubState::Pending(sub),
+						terminal: None,
 						pruned: false,
 						parked: BTreeMap::new(),
 					});
@@ -1402,13 +1425,13 @@ impl Subscriber {
 							Poll::Ready(count) => count,
 							Poll::Pending => None,
 						};
-						seg.sub = SubState::Done(count);
+						seg.complete(count);
 						return Poll::Ready(None);
 					}
 					// A dead segment stalls the logical track rather than erroring;
 					// the next switch resumes it.
 					Poll::Ready(Err(_)) => {
-						seg.sub = SubState::Done(None);
+						seg.complete(None);
 						return Poll::Ready(None);
 					}
 					// An empty cursor on a pruned segment is NOT proof it drained:
@@ -1476,7 +1499,7 @@ impl Subscriber {
 				// The cap rising widens the live edge too, so a group parked while it
 				// was current can be a backlog by the time it is owed again. Re-check it
 				// rather than hand back content the budget has since given up on.
-				if let SubState::Active(sub) = &mut self.segments[index].sub
+				if let Some(sub) = self.segments[index].stale_sub_mut()
 					&& matches!(sub.poll_stale(&group, waiter), Poll::Ready(Ok(true)))
 				{
 					continue;
@@ -1686,11 +1709,11 @@ impl Subscriber {
 			SubState::Done(count) => Poll::Ready(Ok(count.unwrap_or(0))),
 			SubState::Active(sub) => match ready!(sub.poll_finished(waiter)) {
 				Ok(count) => {
-					seg.sub = SubState::Done(Some(count));
+					seg.complete(Some(count));
 					Poll::Ready(Ok(count))
 				}
 				Err(_) => {
-					seg.sub = SubState::Done(None);
+					seg.complete(None);
 					Poll::Ready(Ok(0))
 				}
 			},
@@ -1727,7 +1750,7 @@ impl Subscriber {
 		let end_sequence = self.end_sequence;
 		for seg in &mut self.segments {
 			let cap = Self::stale_cap(seg, end_sequence);
-			if let SubState::Active(sub) = &mut seg.sub {
+			if let Some(sub) = seg.stale_sub_mut() {
 				sub.set_stale_cap(cap);
 			}
 		}
@@ -1743,11 +1766,11 @@ impl Subscriber {
 	/// The segments are subscribed untagged, so their skips have nowhere to be counted
 	/// until they reach the [`track::Subscriber`] that owns the stats scope. A retired
 	/// segment's tail is lost with it, which is the same bound its groups already had.
-	pub(crate) fn take_stale(&mut self) -> u64 {
-		let mut stale = 0;
+	pub(crate) fn take_stale(&mut self) -> crate::stats::Content {
+		let mut stale = crate::stats::Content::default();
 		for seg in &mut self.segments {
-			if let SubState::Active(sub) = &mut seg.sub {
-				stale += sub.take_stale();
+			if let Some(sub) = seg.stale_sub_mut() {
+				stale.add(sub.take_stale());
 			}
 		}
 		stale
@@ -2057,6 +2080,33 @@ mod test {
 		// Raising the cap owes the reader group 1 again, but by now it is a backlog.
 		sub.end_at(None);
 		assert_eq!(recv(&mut sub), 2);
+		recv_pending(&mut sub);
+	}
+
+	/// Completing the segment must not discard the cursor that evaluates parked
+	/// groups. A later cap increase still uses the terminal track's live edge.
+	#[tokio::test]
+	async fn a_raised_cap_rechecks_parked_groups_after_segment_finish() {
+		let retain = track::Info::default().with_latency_max(Duration::from_secs(60));
+		let (mut track_a, consumer_a) = track_pair_with("a", retain);
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		sub.end_at(0);
+
+		write_group_at(&mut track_a, 0, "a0", Duration::ZERO);
+		assert_eq!(recv(&mut sub), 0);
+
+		write_group_at(&mut track_a, 1, "a1", Duration::from_secs(1));
+		write_group_at(&mut track_a, 2, "a2", Duration::from_secs(30));
+		track_a.finish().unwrap();
+		// Drive the inner cursor through its clean end while both newer groups are
+		// parked above the cap.
+		recv_pending(&mut sub);
+
+		sub.end_at(None);
+		assert_eq!(recv(&mut sub), 2, "the stale parked group is skipped after finish");
 		recv_pending(&mut sub);
 	}
 
