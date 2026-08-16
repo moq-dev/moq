@@ -861,6 +861,10 @@ unsafe fn connect_session(
 ///
 /// # Safety
 /// - The caller must ensure that url is a valid pointer to url_len bytes of data.
+/// - `config` must be NULL, or an aligned, readable [moq_client_config]. Every
+///   non-NULL pointer inside it must be valid for its paired length, and all of
+///   them must stay alive for the duration of this call: the config is read
+///   here, not copied by whoever filled it in.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_status` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_session_connect(

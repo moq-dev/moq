@@ -211,8 +211,7 @@ int32_t moq_publish_media_frame(uint32_t, const uint8_t *, uintptr_t, uint64_t)
 }
 
 int32_t moq_session_connect(const char *, size_t, const moq_client_config *, uint32_t, uint32_t,
-			    void (*on_status)(void *, int32_t),
-			    void *user_data)
+			    void (*on_status)(void *, int32_t), void *user_data)
 {
 	g_on_status = on_status;
 	g_user_data = user_data;
