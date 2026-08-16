@@ -766,18 +766,18 @@ mod tests {
 		Ok(frames)
 	}
 
-	/// Wrap `track` in a consumer whose skipping is entirely its own: the subscription
-	/// gets a budget no test timeline reaches, so the transport hands over every group
-	/// and what the consumer does with them is what the test measures.
+	/// Wrap `track` so only the container consumer performs latency skips. The
+	/// transport gets the media track's full retention window and hands over every
+	/// retained group; what the container does with them is what the test measures.
 	///
 	/// Both layers enforce the same budget, and normally should: the transport skipping
 	/// a group the consumer was going to skip anyway just saves the bandwidth. These
 	/// tests are the exception, since they are about the consumer's half of it.
-	fn consumer_only(track: moq_net::track::Subscriber, latency: Latency) -> Consumer<Container> {
+	fn container_latency_only(track: moq_net::track::Subscriber, latency: Latency) -> Consumer<Container> {
 		let control = track.control();
 		let consumer = Consumer::new(track, Container::Legacy).with_latency(latency);
 		control
-			.update(moq_net::track::Subscription::default().with_latency(Latency::max(Duration::from_secs(3600))))
+			.update(moq_net::track::Subscription::default().with_latency(Latency::max(Duration::from_secs(30))))
 			.unwrap();
 		consumer
 	}
@@ -889,7 +889,7 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info());
 		let consumer_track = track.subscribe(None);
-		let mut consumer = consumer_only(consumer_track, Latency::REAL_TIME);
+		let mut consumer = container_latency_only(consumer_track, Latency::REAL_TIME);
 
 		// Group 0 at ts 0 keeps timestamps monotonic with sequence (groups 1-9 follow at
 		// g*50 ms), so the test exercises latency skipping and not rewind detection.
@@ -928,7 +928,7 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info());
 		let consumer_track = track.subscribe(None);
-		let mut consumer = consumer_only(consumer_track, Latency::max(Duration::from_millis(100)));
+		let mut consumer = container_latency_only(consumer_track, Latency::max(Duration::from_millis(100)));
 
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		Container::Legacy
@@ -1871,7 +1871,7 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info());
 		let consumer_track = track.subscribe(None);
-		let mut consumer = consumer_only(consumer_track, Latency::max(Duration::from_millis(100)));
+		let mut consumer = container_latency_only(consumer_track, Latency::max(Duration::from_millis(100)));
 
 		// Group 0: stalled at ts=0, NOT finished
 		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
@@ -1909,7 +1909,7 @@ mod tests {
 		tokio::time::pause();
 		let mut track = track_producer("test", hang::container::track_info());
 		let consumer_track = track.subscribe(None);
-		let mut consumer = consumer_only(consumer_track, Latency::max(Duration::from_millis(100)));
+		let mut consumer = container_latency_only(consumer_track, Latency::max(Duration::from_millis(100)));
 
 		// Group 0: finished normally
 		write_group(&mut track, 0, &[ts(0), ts(20_000)]);

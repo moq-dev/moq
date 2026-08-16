@@ -400,14 +400,16 @@ counterpart no traffic can flow, so the entry is dropped:
     "broadcasts": 1, "broadcasts_closed": 0,
     "subscriptions": 5, "subscriptions_closed": 2,
     "fetches": 3,
-    "bytes": 12345, "frames": 678, "groups": 9, "datagrams": 2, "stale": 4
+    "bytes": 12345, "frames": 678, "groups": 9, "datagrams": 2,
+    "stale": { "bytes": 456, "frames": 23, "groups": 4, "datagrams": 0 }
   },
   "anon/foo": {
     "announced": 1, "announced_closed": 0, "announced_bytes": 8,
     "broadcasts": 1, "broadcasts_closed": 0,
     "subscriptions": 2, "subscriptions_closed": 0,
     "fetches": 0,
-    "bytes": 234, "frames": 12, "groups": 1, "datagrams": 0, "stale": 0
+    "bytes": 234, "frames": 12, "groups": 1, "datagrams": 0,
+    "stale": { "bytes": 0, "frames": 0, "groups": 0, "datagrams": 0 }
   }
 }
 ```
@@ -457,13 +459,13 @@ Field semantics:
   when the datagram enters or leaves the model, so an egress datagram dropped by
   congestion or an oversized body still counts.
 
-- `stale`: cumulative groups skipped because they drifted further behind the live
-  edge than the subscriber's latency budget allows, so the relay never put them on
-  the wire. Disjoint from `groups`: a skipped group is not delivered, and none of
-  its payload reaches `frames` / `bytes` either. A steady rate here means
-  subscribers are consistently behind the live edge, which is normal for a
-  real-time subscription during congestion and a problem for one that asked to
-  tolerate more.
+- `stale`: cumulative `{ bytes, frames, groups, datagrams }` skipped because the
+  content drifted further behind the live edge than the subscriber's latency
+  budget allows, so the relay never put it on the wire. These are disjoint from
+  the top-level payload counters, which remain the backwards-compatible shape for
+  delivered content. A steady rate here means subscribers are consistently behind
+  the live edge, which is normal for a real-time subscription during congestion
+  and a problem for one that asked to tolerate more.
 
 The session tracks (`sessions.json` and any `<tier>/sessions.json`) instead map
 each auth root to a `{ sessions, sessions_closed }` snapshot. `sessions`

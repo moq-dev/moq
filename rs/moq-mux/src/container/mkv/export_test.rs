@@ -15,10 +15,12 @@ use crate::container::test_util::{IDR, Live, PPS, SPS, raw_frame, video_frame};
 
 /// A drift budget no test timeline comes close to, so the exporter reads every group.
 ///
-/// These tests import a whole file and only then export it, which the exporter's default
+/// The media track's full retention window, so an exporter started after publishing
+/// can still read every retained group. These tests import a whole file and only then
+/// export it, which the exporter's default
 /// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) collapses to the live edge:
 /// completeness has to be asked for, exactly as a real recorder does.
-const BATCH: std::time::Duration = std::time::Duration::from_secs(3600);
+const RECORDING_LATENCY: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[tokio::test(start_paused = true)]
 async fn export_header_roundtrip_vp9_opus() {
@@ -375,7 +377,7 @@ async fn export_emits_blocks_for_each_frame() {
 		// Use per-frame clustering so each frame is observable as its own
 		// Cluster chunk; batching is exercised in a dedicated test below.
 		.with_fragment_duration(std::time::Duration::ZERO)
-		.with_latency(crate::Latency::max(BATCH));
+		.with_latency(crate::Latency::max(RECORDING_LATENCY));
 	let mut exported: Vec<u8> = Vec::new();
 
 	let mut importer = Some(importer);
@@ -614,7 +616,7 @@ async fn export_fragment_duration_batches_blocks() {
 		.expect("catalog consumer");
 	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer), catalog_stream)
 		.with_fragment_duration(std::time::Duration::from_secs(2))
-		.with_latency(crate::Latency::max(BATCH));
+		.with_latency(crate::Latency::max(RECORDING_LATENCY));
 	let mut exported: Vec<u8> = Vec::new();
 
 	let mut importer = Some(importer);
