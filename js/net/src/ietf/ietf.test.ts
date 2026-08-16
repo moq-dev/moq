@@ -130,6 +130,27 @@ test("Message Parameters: Location loses its length prefix in draft 17", async (
 	}
 });
 
+test("Message Parameters: Location preserves bigint precision", async () => {
+	const largest = { groupId: 9007199254740993n, objectId: 9007199254740995n };
+	const params = new Parameters();
+	params.largest = largest;
+
+	expect(params.largest).toEqual(largest);
+
+	for (const version of [
+		Version.DRAFT_14,
+		Version.DRAFT_15,
+		Version.DRAFT_16,
+		Version.DRAFT_17,
+		Version.DRAFT_18,
+		Version.DRAFT_19,
+	]) {
+		const encoded = await encodeVersioned(params, version);
+		const decoded = await decodeVersioned(encoded, Parameters.decode, version);
+		expect(decoded.largest).toEqual(largest);
+	}
+});
+
 // Subscribe tests (v14)
 test("Subscribe v14: round trip", async () => {
 	const msg = new Subscribe.Subscribe({

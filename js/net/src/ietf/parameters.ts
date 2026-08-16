@@ -223,24 +223,24 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 }
 
 function decodeLocation(data: Uint8Array): { groupId: bigint; objectId: bigint } {
-	const [groupId, objectData] = Varint.decode(data);
-	const [objectId, trailing] = Varint.decode(objectData);
+	const [groupId, objectData] = Varint.decodeBigInt(data);
+	const [objectId, trailing] = Varint.decodeBigInt(objectData);
 	if (trailing.length !== 0) {
 		throw new Error("trailing bytes in message parameter Location");
 	}
-	return { groupId: BigInt(groupId), objectId: BigInt(objectId) };
+	return { groupId, objectId };
 }
 
 function encodeLocation({ groupId, objectId }: { groupId: bigint; objectId: bigint }): Uint8Array {
-	const group = Varint.encode(Number(groupId));
-	const object = Varint.encode(Number(objectId));
+	const group = Varint.encode(groupId);
+	const object = Varint.encode(objectId);
 	const combined = new Uint8Array(group.length + object.length);
 	combined.set(group, 0);
 	combined.set(object, group.length);
 	return combined;
 }
 
-/// Message Parameters used in control messages.
+/** Message parameters used in control messages. */
 export class Parameters {
 	vars: Map<bigint, bigint>;
 	bytes: Map<bigint, Uint8Array>;
