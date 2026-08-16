@@ -579,7 +579,11 @@ fn pipewire_color(format: VideoInfoRaw, width: u32, height: u32) -> Result<Optio
 	if format.format() != VideoFormat::NV12 {
 		return Ok(None);
 	}
-	color_from_pipewire(format.color_range(), format.color_matrix(), Size::new(width, height))
+	let color = color_from_pipewire(format.color_range(), format.color_matrix(), Size::new(width, height))?;
+	if let Some(color) = color {
+		validate_pipewire_description(color, format.color_primaries(), format.transfer_function())?;
+	}
+	Ok(color)
 }
 
 fn color_from_pipewire(range: u32, matrix: u32, size: Size) -> Result<Option<Color>, Error> {
@@ -615,6 +619,30 @@ fn color_from_pipewire(range: u32, matrix: u32, size: Size) -> Result<Option<Col
 		(true, true) => Color::Bt709Limited,
 		(true, false) => Color::Bt709Full,
 	}))
+}
+
+fn validate_pipewire_description(color: Color, primaries: u32, transfer: u32) -> Result<(), Error> {
+	let expected_primaries = match color {
+		Color::Bt601Limited | Color::Bt601Full => spa::sys::SPA_VIDEO_COLOR_PRIMARIES_SMPTE170M,
+		Color::Bt709Limited | Color::Bt709Full => spa::sys::SPA_VIDEO_COLOR_PRIMARIES_BT709,
+	};
+	if primaries != spa::sys::SPA_VIDEO_COLOR_PRIMARIES_UNKNOWN && primaries != expected_primaries {
+		return Err(Error::Codec(anyhow::anyhow!(
+			"PipeWire NV12 primaries {primaries} do not match the negotiated matrix"
+		)));
+	}
+	if !matches!(
+		transfer,
+		spa::sys::SPA_VIDEO_TRANSFER_UNKNOWN
+			| spa::sys::SPA_VIDEO_TRANSFER_BT709
+			| spa::sys::SPA_VIDEO_TRANSFER_BT601
+			| spa::sys::SPA_VIDEO_TRANSFER_BT2020_10
+	) {
+		return Err(Error::Codec(anyhow::anyhow!(
+			"unsupported PipeWire NV12 transfer function {transfer}"
+		)));
+	}
+	Ok(())
 }
 
 fn format_requires_restart(
@@ -901,6 +929,13 @@ mod tests {
 			)
 			.is_err()
 		);
+		let mut format = VideoInfoRaw::default();
+		format.set_format(VideoFormat::NV12);
+		format.set_color_range(spa::sys::SPA_VIDEO_COLOR_RANGE_16_235);
+		format.set_color_matrix(spa::sys::SPA_VIDEO_COLOR_MATRIX_BT709);
+		format.set_color_primaries(spa::sys::SPA_VIDEO_COLOR_PRIMARIES_BT2020);
+		format.set_transfer_function(spa::sys::SPA_VIDEO_TRANSFER_BT709);
+		assert!(pipewire_color(format, 1920, 1080).is_err());
 
 		let layout = FrameLayout {
 			stride: 4,
