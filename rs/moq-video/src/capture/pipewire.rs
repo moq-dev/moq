@@ -87,6 +87,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameS
 				last: None,
 				fresh: false,
 				generation: 0,
+				dmabuf_modifier: None,
 			}));
 			if let Err(e) = run_loop(CaptureLoop {
 				fd,
@@ -268,6 +269,8 @@ struct State {
 	fresh: bool,
 	/// Buffer-pool generation. Returns from superseded pools are discarded.
 	generation: u64,
+	/// Explicit DRM modifier from the negotiated DMA-BUF format.
+	dmabuf_modifier: Option<u64>,
 }
 
 /// A retained frame for the static-screen pacing tick.
@@ -302,7 +305,7 @@ struct PipeWireDmaBuf {
 	return_tx: pw::channel::Sender<Lease>,
 	lease: Lease,
 	map_offset: u32,
-	allocation_size: usize,
+	allocation_size: Option<usize>,
 	data_offset: usize,
 	layout: FrameLayout,
 	format: DrmFormat,
@@ -336,7 +339,10 @@ impl DmaBufFrame for PipeWireDmaBuf {
 		wait_dma_buf_readable(self.fd.as_fd())
 			.map_err(|e| Error::Codec(anyhow::anyhow!("waiting for DMA-BUF producer: {e}")))?;
 		with_dma_buf_read(&self.fd, || {
-			let mapping = Mapping::new(&self.fd, self.map_offset, self.allocation_size)?;
+			let allocation_size = self
+				.allocation_size
+				.ok_or_else(|| Error::Codec(anyhow::anyhow!("DMA-BUF descriptor does not report a mappable size")))?;
+			let mapping = Mapping::new(&self.fd, self.map_offset, allocation_size)?;
 			let data = mapping
 				.as_slice()
 				.get(self.data_offset..)
@@ -432,6 +438,21 @@ fn dma_buf_sync(fd: &OwnedFd, flags: u64) -> Result<(), Error> {
 			return Err(Error::Codec(anyhow::anyhow!("DMA-BUF sync: {err}")));
 		}
 	}
+}
+
+fn dma_buf_allocation_size(fd: BorrowedFd<'_>, map_offset: u32) -> std::io::Result<Option<usize>> {
+	let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+	// SAFETY: `stat` points to writable storage and `fd` remains borrowed for
+	// the duration of the metadata query.
+	if unsafe { libc::fstat(std::os::fd::AsRawFd::as_raw_fd(&fd), stat.as_mut_ptr()) } != 0 {
+		return Err(std::io::Error::last_os_error());
+	}
+	// SAFETY: a successful `fstat` initialized the full structure.
+	let stat = unsafe { stat.assume_init() };
+	let Ok(end) = usize::try_from(stat.st_size) else {
+		return Ok(None);
+	};
+	Ok(end.checked_sub(map_offset as usize).filter(|size| *size > 0))
 }
 
 /// Read-only mmap of one linear DMA-BUF allocation.
@@ -604,6 +625,25 @@ struct CaptureLoop {
 	return_tx: pw::channel::Sender<Lease>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum NegotiatedMemory {
+	Fixating,
+	SharedMemory,
+	DmaBuf(u64),
+}
+
+fn negotiated_memory(param: &spa::pod::Pod, format: VideoInfoRaw) -> Option<NegotiatedMemory> {
+	let object = param.as_object().ok()?;
+	let modifier = object.find_prop(spa::utils::Id(
+		spa::param::format::FormatProperties::VideoModifier.as_raw(),
+	));
+	Some(match modifier {
+		Some(modifier) if modifier.flags().contains(spa::pod::PodPropFlags::DONT_FIXATE) => NegotiatedMemory::Fixating,
+		Some(_) => NegotiatedMemory::DmaBuf(format.modifier()),
+		None => NegotiatedMemory::SharedMemory,
+	})
+}
+
 /// Connect to the portal's PipeWire node and run until the stream ends, the
 /// consumer drops, or the format changes.
 fn run_loop(args: CaptureLoop) -> Result<(), Error> {
@@ -697,12 +737,25 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 				}
 
 				let mut state = state.borrow_mut();
-				state.last = None;
 				if let Err(e) = replace_video_format(&mut state.format, |format| format.parse(param)) {
 					tracing::warn!(error = %e, "failed to parse pipewire video format");
 					return;
 				}
-				let buffers = buffer_offer();
+				let Some(memory) = negotiated_memory(param, state.format) else {
+					return;
+				};
+				let dmabuf_modifier = match memory {
+					NegotiatedMemory::DmaBuf(modifier) => Some(modifier),
+					NegotiatedMemory::SharedMemory => None,
+					NegotiatedMemory::Fixating => {
+						// The producer owns modifier fixation. It will update the format
+						// with one concrete modifier before buffers can be allocated.
+						return;
+					}
+				};
+				state.last = None;
+				state.dmabuf_modifier = dmabuf_modifier;
+				let buffers = buffer_offer(state.dmabuf_modifier.is_some());
 				if let Some(param) = spa::pod::Pod::from_bytes(&buffers) {
 					let mut params = [param];
 					if let Err(e) = stream.update_params(&mut params) {
@@ -788,12 +841,8 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					let raw = data.as_raw();
 					(raw.mapoffset, raw.maxsize)
 				};
+				let dmabuf = data.type_() == DataType::DmaBuf;
 				let size = clamp_chunk_size(data.chunk().size(), maxsize);
-				let allocation_size = maxsize as usize;
-				let Some(offset) = normalize_chunk_offset(chunk_offset, maxsize) else {
-					tracing::warn!("pipewire buffer has zero maximum size");
-					return;
-				};
 				let stride = match u32::try_from(data.chunk().stride()) {
 					Ok(stride) if stride > 0 => stride,
 					_ => match state.format.format() {
@@ -810,37 +859,18 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					height,
 					source_height,
 				};
-				match chunk_kind(size, data.chunk().flags()) {
+				match chunk_kind(size, data.chunk().flags(), dmabuf) {
 					ChunkKind::Data => {}
-					ChunkKind::Empty => {
-						let Ok(frame) = neutral_frame(width, height, color) else {
-							return;
-						};
-						chan.push(Surface::I420(frame.clone()));
-						state.last = Some(Last::I420(frame));
-						state.fresh = true;
-						return;
-					}
+					// An empty screencast chunk means there is no new damage. Keep
+					// the previous frame for the pacing timer instead of blanking it.
+					ChunkKind::Empty => return,
 					ChunkKind::Invalid => return,
 				}
 				let Some(required) = frame_data_size(state.format.format(), layout) else {
 					tracing::warn!("pipewire frame layout overflows its buffer");
 					return;
 				};
-				let wraps = offset.checked_add(required).is_none_or(|end| end > allocation_size);
-				if required > size || required > allocation_size {
-					tracing::warn!(
-						required,
-						available = size,
-						"pipewire chunk does not contain a complete frame"
-					);
-					return;
-				}
-				if data.type_() == DataType::DmaBuf {
-					if wraps {
-						tracing::warn!("wrapped DMA-BUF frame cannot be imported");
-						return;
-					}
+				if dmabuf {
 					let Some(format) = drm_format(state.format.format()) else {
 						tracing::warn!(format = ?state.format.format(), "unsupported DMA-BUF pixel format");
 						return;
@@ -854,6 +884,23 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					let fd = unsafe { BorrowedFd::borrow_raw(data.fd()) };
 					let Ok(fd) = fd.try_clone_to_owned() else {
 						return;
+					};
+					let offset = chunk_offset as usize;
+					let allocation_size = match dma_buf_allocation_size(fd.as_fd(), map_offset) {
+						Ok(Some(size)) if offset.checked_add(required).is_some_and(|end| end <= size) => Some(size),
+						Ok(Some(size)) => {
+							tracing::warn!(
+								required,
+								available = size,
+								"DMA-BUF allocation is shorter than its frame layout"
+							);
+							return;
+						}
+						Ok(None) => None,
+						Err(error) => {
+							tracing::debug!(%error, "could not query DMA-BUF allocation size; CPU fallback is unavailable");
+							None
+						}
 					};
 					let Some(base) = map_offset.checked_add(offset as u32) else {
 						tracing::warn!("DMA-BUF plane offset overflow");
@@ -875,7 +922,10 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 					} else {
 						vec![DmaBufPlane::new(base, layout.stride)]
 					};
-					let modifier = state.format.modifier();
+					let Some(modifier) = state.dmabuf_modifier else {
+						tracing::warn!("received a DMA-BUF without a negotiated modifier");
+						return;
+					};
 					let lease = buffer.lease(state.generation);
 					let inner = Arc::new(PipeWireDmaBuf {
 						fd,
@@ -897,6 +947,19 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 						}
 						Err(e) => tracing::warn!(error = %e, "invalid PipeWire DMA-BUF"),
 					}
+					return;
+				}
+				let allocation_size = maxsize as usize;
+				let Some(offset) = normalize_chunk_offset(chunk_offset, maxsize) else {
+					tracing::warn!("pipewire buffer has zero maximum size");
+					return;
+				};
+				if required > size || required > allocation_size {
+					tracing::warn!(
+						required,
+						available = size,
+						"pipewire chunk does not contain a complete frame"
+					);
 					return;
 				}
 				// MAP_BUFFERS maps MemPtr/MemFd for the CPU fallback. `None` here
@@ -933,16 +996,16 @@ fn run_loop(args: CaptureLoop) -> Result<(), Error> {
 		.register()
 		.map_err(|e| err("pipewire listener", e))?;
 
-	// Offer packed RGB first for the Vulkan zero-copy render path, then NV12.
-	// Buffer parameters advertise DMA-BUF with shared-memory fallback.
-	let pod = format_offer(framerate);
-	let buffers = buffer_offer();
-	let mut params = [
-		spa::pod::Pod::from_bytes(&pod)
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build pipewire format offer")))?,
-		spa::pod::Pod::from_bytes(&buffers)
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build pipewire buffer offer")))?,
-	];
+	// DMA-BUF formats come first so PipeWire prefers them. Each has a matching
+	// shared-memory offer without a modifier as the required fallback.
+	let offers = format_offers(framerate);
+	let mut params = offers
+		.iter()
+		.map(|offer| {
+			spa::pod::Pod::from_bytes(offer)
+				.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build pipewire format offer")))
+		})
+		.collect::<Result<Vec<_>, _>>()?;
 	stream
 		.connect(
 			spa::utils::Direction::Input,
@@ -1041,24 +1104,16 @@ enum ChunkKind {
 	Invalid,
 }
 
-fn chunk_kind(size: usize, flags: spa::buffer::ChunkFlags) -> ChunkKind {
+fn chunk_kind(size: usize, flags: spa::buffer::ChunkFlags, dmabuf: bool) -> ChunkKind {
 	if flags.contains(spa::buffer::ChunkFlags::CORRUPTED) {
 		ChunkKind::Invalid
 	} else if flags.bits() & CHUNK_FLAG_EMPTY != 0 {
 		ChunkKind::Empty
-	} else if size == 0 {
+	} else if size == 0 && !dmabuf {
 		ChunkKind::Invalid
 	} else {
 		ChunkKind::Data
 	}
-}
-
-fn neutral_frame(width: u32, height: u32, color: Option<Color>) -> Result<I420, Error> {
-	let color = color.unwrap_or_else(|| Color::infer(Size::new(width, height)));
-	let luma = width as usize * height as usize;
-	let mut data = vec![128; I420::len(width, height)];
-	data[..luma].fill(if color.limited() { 16 } else { 0 });
-	Ok(I420::new(width, height, data)?.with_color(color))
 }
 
 /// Parse into a zeroed value before replacing the current format. libspa leaves
@@ -1190,10 +1245,17 @@ fn drm_format(format: VideoFormat) -> Option<DrmFormat> {
 	}
 }
 
-/// Serialize the `EnumFormat` pod offering packed RGB first, then NV12, any
-/// size, and a framerate range preferring `framerate`.
-fn format_offer(framerate: u32) -> Vec<u8> {
-	let obj = spa::pod::object!(
+const PIPEWIRE_FORMATS: [VideoFormat; 5] = [
+	VideoFormat::BGRx,
+	VideoFormat::BGRA,
+	VideoFormat::RGBx,
+	VideoFormat::RGBA,
+	VideoFormat::NV12,
+];
+
+/// Serialize one `EnumFormat` pod for a concrete pixel format.
+fn format_offer(framerate: u32, format: VideoFormat, dmabuf: bool) -> Vec<u8> {
+	let mut obj = spa::pod::object!(
 		spa::utils::SpaTypes::ObjectParamFormat,
 		spa::param::ParamType::EnumFormat,
 		spa::pod::property!(
@@ -1206,18 +1268,7 @@ fn format_offer(framerate: u32) -> Vec<u8> {
 			Id,
 			spa::param::format::MediaSubtype::Raw
 		),
-		spa::pod::property!(
-			spa::param::format::FormatProperties::VideoFormat,
-			Choice,
-			Enum,
-			Id,
-			VideoFormat::BGRx,
-			VideoFormat::BGRx,
-			VideoFormat::BGRA,
-			VideoFormat::RGBx,
-			VideoFormat::RGBA,
-			VideoFormat::NV12,
-		),
+		spa::pod::property!(spa::param::format::FormatProperties::VideoFormat, Id, format),
 		spa::pod::property!(
 			spa::param::format::FormatProperties::VideoSize,
 			Choice,
@@ -1246,20 +1297,46 @@ fn format_offer(framerate: u32) -> Vec<u8> {
 			spa::utils::Fraction { num: 1000, denom: 1 }
 		),
 	);
+	if dmabuf {
+		obj.properties.push(spa::pod::Property {
+			key: spa::param::format::FormatProperties::VideoModifier.as_raw(),
+			flags: spa::pod::PropertyFlags::from_bits_retain(
+				spa::sys::SPA_POD_PROP_FLAG_MANDATORY | spa::sys::SPA_POD_PROP_FLAG_DONT_FIXATE,
+			),
+			value: spa::pod::Value::Choice(spa::pod::ChoiceValue::Long(spa::utils::Choice(
+				spa::utils::ChoiceFlags::empty(),
+				spa::utils::ChoiceEnum::Enum {
+					default: 0,
+					alternatives: vec![0],
+				},
+			))),
+		});
+	}
 	spa::pod::serialize::PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &spa::pod::Value::Object(obj))
 		.expect("serializing a static format pod cannot fail")
 		.0
 		.into_inner()
 }
 
-/// Serialize `SPA_PARAM_Buffers` support for DMA-BUF with MemFd/MemPtr
-/// fallbacks. Producers otherwise default to shared memory even when both ends
-/// understand DMA-BUF.
-fn buffer_offer() -> Vec<u8> {
+/// Serialize DMA-BUF formats first and shared-memory fallbacks second.
+fn format_offers(framerate: u32) -> Vec<Vec<u8>> {
+	PIPEWIRE_FORMATS
+		.into_iter()
+		.map(|format| format_offer(framerate, format, true))
+		.chain(
+			PIPEWIRE_FORMATS
+				.into_iter()
+				.map(|format| format_offer(framerate, format, false)),
+		)
+		.collect()
+}
+
+/// Serialize `SPA_PARAM_Buffers` for the negotiated memory representation.
+fn buffer_offer(dmabuf: bool) -> Vec<u8> {
 	let mem_ptr = 1 << DataType::MemPtr.as_raw();
 	let mem_fd = 1 << DataType::MemFd.as_raw();
 	let dma_buf = 1 << DataType::DmaBuf.as_raw();
-	let data_types = dma_buf | mem_fd | mem_ptr;
+	let data_types = if dmabuf { dma_buf } else { mem_fd | mem_ptr };
 
 	let obj = spa::pod::Object {
 		type_: spa::utils::SpaTypes::ObjectParamBuffers.as_raw(),
@@ -1303,79 +1380,124 @@ mod tests {
 	/// The serialized format offer must parse back as a valid pod.
 	#[test]
 	fn format_offer_is_valid_pod() {
-		let bytes = format_offer(30);
-		let (remaining, value) = spa::pod::deserialize::PodDeserializer::deserialize_any_from(&bytes)
-			.expect("format offer did not round-trip");
-		assert!(remaining.is_empty());
-		let spa::pod::Value::Object(object) = value else {
+		let offers = format_offers(30);
+		assert_eq!(offers.len(), PIPEWIRE_FORMATS.len() * 2);
+		for (index, bytes) in offers.iter().enumerate() {
+			let (remaining, value) = spa::pod::deserialize::PodDeserializer::deserialize_any_from(bytes)
+				.expect("format offer did not round-trip");
+			assert!(remaining.is_empty());
+			let spa::pod::Value::Object(object) = value else {
+				panic!("format offer is not an object");
+			};
+			let property = |key| object.properties.iter().find(|property| property.key == key);
+			let format = PIPEWIRE_FORMATS[index % PIPEWIRE_FORMATS.len()];
+			assert_eq!(
+				property(spa::param::format::FormatProperties::VideoFormat.as_raw()).map(|p| &p.value),
+				Some(&spa::pod::Value::Id(spa::utils::Id(format.as_raw())))
+			);
+			let modifier = property(spa::param::format::FormatProperties::VideoModifier.as_raw());
+			if index < PIPEWIRE_FORMATS.len() {
+				let modifier = modifier.expect("DMA-BUF offer has no modifier");
+				assert_eq!(
+					modifier.flags.bits(),
+					spa::sys::SPA_POD_PROP_FLAG_MANDATORY | spa::sys::SPA_POD_PROP_FLAG_DONT_FIXATE
+				);
+				assert_eq!(
+					modifier.value,
+					spa::pod::Value::Choice(spa::pod::ChoiceValue::Long(spa::utils::Choice(
+						spa::utils::ChoiceFlags::empty(),
+						spa::utils::ChoiceEnum::Enum {
+							default: 0,
+							alternatives: vec![0],
+						},
+					)))
+				);
+			} else {
+				assert!(modifier.is_none(), "shared-memory offer contains a modifier");
+			}
+		}
+	}
+
+	#[test]
+	fn negotiated_modifier_must_be_present_and_fixed() {
+		let shared = format_offer(30, VideoFormat::BGRx, false);
+		let shared = spa::pod::Pod::from_bytes(&shared).unwrap();
+		let mut format = VideoInfoRaw::default();
+		format.parse(shared).unwrap();
+		assert_eq!(negotiated_memory(shared, format), Some(NegotiatedMemory::SharedMemory));
+
+		let offered = format_offer(30, VideoFormat::BGRx, true);
+		let offered = spa::pod::Pod::from_bytes(&offered).unwrap();
+		format.parse(offered).unwrap();
+		assert_eq!(negotiated_memory(offered, format), Some(NegotiatedMemory::Fixating));
+
+		let (_, value) = spa::pod::deserialize::PodDeserializer::deserialize_any_from(offered.as_bytes()).unwrap();
+		let spa::pod::Value::Object(mut object) = value else {
 			panic!("format offer is not an object");
 		};
-		let property = object
+		let modifier = object
 			.properties
-			.iter()
-			.find(|property| property.key == spa::param::format::FormatProperties::VideoFormat.as_raw())
-			.expect("missing video format property");
-		assert_eq!(
-			property.value,
-			spa::pod::Value::Choice(spa::pod::ChoiceValue::Id(spa::utils::Choice(
-				spa::utils::ChoiceFlags::empty(),
-				spa::utils::ChoiceEnum::Enum {
-					default: spa::utils::Id(VideoFormat::BGRx.as_raw()),
-					alternatives: vec![
-						spa::utils::Id(VideoFormat::BGRx.as_raw()),
-						spa::utils::Id(VideoFormat::BGRA.as_raw()),
-						spa::utils::Id(VideoFormat::RGBx.as_raw()),
-						spa::utils::Id(VideoFormat::RGBA.as_raw()),
-						spa::utils::Id(VideoFormat::NV12.as_raw()),
-					],
-				},
-			)))
-		);
+			.iter_mut()
+			.find(|property| property.key == spa::param::format::FormatProperties::VideoModifier.as_raw())
+			.unwrap();
+		modifier.flags = spa::pod::PropertyFlags::from_bits_retain(spa::sys::SPA_POD_PROP_FLAG_MANDATORY);
+		modifier.value = spa::pod::Value::Long(0);
+		let fixed = spa::pod::serialize::PodSerializer::serialize(
+			std::io::Cursor::new(Vec::new()),
+			&spa::pod::Value::Object(object),
+		)
+		.unwrap()
+		.0
+		.into_inner();
+		let fixed = spa::pod::Pod::from_bytes(&fixed).unwrap();
+		replace_video_format(&mut format, |format| format.parse(fixed)).unwrap();
+		assert_eq!(negotiated_memory(fixed, format), Some(NegotiatedMemory::DmaBuf(0)));
 	}
 
 	#[test]
 	fn buffer_offer_is_valid_pod() {
-		let bytes = buffer_offer();
-		let (remaining, value) = spa::pod::deserialize::PodDeserializer::deserialize_any_from(&bytes)
-			.expect("buffer offer did not round-trip");
-		assert!(remaining.is_empty());
-		let spa::pod::Value::Object(object) = value else {
-			panic!("buffer offer is not an object");
-		};
-		let property = |key| {
-			&object
-				.properties
-				.iter()
-				.find(|property| property.key == key)
-				.unwrap_or_else(|| panic!("missing buffer property {key}"))
-				.value
-		};
-		assert_eq!(
-			property(spa::sys::SPA_PARAM_BUFFERS_buffers),
-			&spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
-				spa::utils::ChoiceFlags::empty(),
-				spa::utils::ChoiceEnum::Range {
-					default: 8,
-					min: 2,
-					max: 64,
-				},
-			)))
-		);
-		assert_eq!(property(spa::sys::SPA_PARAM_BUFFERS_blocks), &spa::pod::Value::Int(1));
 		let dma_buf = 1 << DataType::DmaBuf.as_raw();
 		let mem_fd = 1 << DataType::MemFd.as_raw();
 		let mem_ptr = 1 << DataType::MemPtr.as_raw();
-		let data_types = dma_buf | mem_fd | mem_ptr;
-		assert_eq!(
-			property(spa::sys::SPA_PARAM_BUFFERS_dataType),
-			&spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
-				spa::utils::ChoiceFlags::empty(),
-				spa::utils::ChoiceEnum::Flags {
-					default: data_types,
-					flags: Vec::new(),
-				},
-			)))
-		);
+		for (dmabuf, data_types) in [(true, dma_buf), (false, mem_fd | mem_ptr)] {
+			let bytes = buffer_offer(dmabuf);
+			let (remaining, value) = spa::pod::deserialize::PodDeserializer::deserialize_any_from(&bytes)
+				.expect("buffer offer did not round-trip");
+			assert!(remaining.is_empty());
+			let spa::pod::Value::Object(object) = value else {
+				panic!("buffer offer is not an object");
+			};
+			let property = |key| {
+				&object
+					.properties
+					.iter()
+					.find(|property| property.key == key)
+					.unwrap_or_else(|| panic!("missing buffer property {key}"))
+					.value
+			};
+			assert_eq!(
+				property(spa::sys::SPA_PARAM_BUFFERS_buffers),
+				&spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
+					spa::utils::ChoiceFlags::empty(),
+					spa::utils::ChoiceEnum::Range {
+						default: 8,
+						min: 2,
+						max: 64,
+					},
+				)))
+			);
+			assert_eq!(property(spa::sys::SPA_PARAM_BUFFERS_blocks), &spa::pod::Value::Int(1));
+			assert_eq!(
+				property(spa::sys::SPA_PARAM_BUFFERS_dataType),
+				&spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
+					spa::utils::ChoiceFlags::empty(),
+					spa::utils::ChoiceEnum::Flags {
+						default: data_types,
+						flags: Vec::new(),
+					},
+				)))
+			);
+		}
 	}
 
 	#[test]
@@ -1421,21 +1543,40 @@ mod tests {
 	}
 
 	#[test]
-	fn chunk_flags_distinguish_neutral_and_invalid_frames() {
+	fn chunk_flags_distinguish_empty_and_invalid_frames() {
 		let empty = spa::buffer::ChunkFlags::from_bits_retain(CHUNK_FLAG_EMPTY);
-		assert_eq!(chunk_kind(0, spa::buffer::ChunkFlags::empty()), ChunkKind::Invalid);
-		assert_eq!(chunk_kind(1, spa::buffer::ChunkFlags::CORRUPTED), ChunkKind::Invalid);
-		assert_eq!(chunk_kind(1, empty), ChunkKind::Empty);
-		assert_eq!(chunk_kind(0, empty), ChunkKind::Empty);
-		assert_eq!(chunk_kind(1, spa::buffer::ChunkFlags::empty()), ChunkKind::Data);
+		assert_eq!(
+			chunk_kind(0, spa::buffer::ChunkFlags::empty(), false),
+			ChunkKind::Invalid
+		);
+		assert_eq!(chunk_kind(0, spa::buffer::ChunkFlags::empty(), true), ChunkKind::Data);
+		assert_eq!(
+			chunk_kind(1, spa::buffer::ChunkFlags::CORRUPTED, false),
+			ChunkKind::Invalid
+		);
+		assert_eq!(chunk_kind(1, empty, false), ChunkKind::Empty);
+		assert_eq!(chunk_kind(0, empty, true), ChunkKind::Empty);
+		assert_eq!(chunk_kind(1, spa::buffer::ChunkFlags::empty(), false), ChunkKind::Data);
 	}
 
 	#[test]
-	fn empty_chunk_is_limited_range_black() {
-		let frame = neutral_frame(4, 2, None).unwrap();
-		assert_eq!(frame.y(), &[16; 8]);
-		assert_eq!(frame.u(), &[128; 2]);
-		assert_eq!(frame.v(), &[128; 2]);
+	fn dmabuf_size_comes_from_the_descriptor() {
+		use std::os::fd::AsFd;
+
+		let path = std::env::temp_dir().join(format!(
+			"moq-video-dmabuf-{}-{}",
+			std::process::id(),
+			std::time::SystemTime::now()
+				.duration_since(std::time::UNIX_EPOCH)
+				.unwrap()
+				.as_nanos()
+		));
+		let file = std::fs::File::create(&path).unwrap();
+		file.set_len(4096).unwrap();
+		assert_eq!(dma_buf_allocation_size(file.as_fd(), 1024).unwrap(), Some(3072));
+		assert_eq!(dma_buf_allocation_size(file.as_fd(), 4096).unwrap(), None);
+		drop(file);
+		std::fs::remove_file(path).unwrap();
 	}
 
 	#[test]
@@ -1526,15 +1667,6 @@ mod tests {
 		.unwrap();
 		assert_eq!(format.color_range(), spa::sys::SPA_VIDEO_COLOR_RANGE_UNKNOWN);
 		assert_eq!(format.color_matrix(), spa::sys::SPA_VIDEO_COLOR_MATRIX_UNKNOWN);
-	}
-
-	#[test]
-	fn empty_chunk_uses_full_range_black() {
-		let frame = neutral_frame(4, 2, Some(Color::Bt709Full)).unwrap();
-		assert_eq!(frame.y(), &[0; 8]);
-		assert_eq!(frame.u(), &[128; 2]);
-		assert_eq!(frame.v(), &[128; 2]);
-		assert_eq!(frame.color(), Some(Color::Bt709Full));
 	}
 
 	#[test]
@@ -1650,7 +1782,7 @@ mod tests {
 				generation: 1,
 			},
 			map_offset: 0,
-			allocation_size: 6,
+			allocation_size: Some(6),
 			data_offset: 0,
 			layout: FrameLayout {
 				stride: 2,
