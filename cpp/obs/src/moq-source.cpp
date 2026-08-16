@@ -142,9 +142,9 @@ struct subscription_ref {
 	subscription_ref &operator=(const subscription_ref &) = delete;
 };
 
-// user_data for a single moq_origin_request. The generation must travel with the
-// request rather than live on ctx: a reconnect can issue a new request while an
-// older one still has a delivery in flight, and a single slot on ctx would let
+// user_data for a single moq_origin_consume_announced. The generation must travel
+// with the request rather than live on ctx: a reconnect can issue a new request while
+// an older one still has a delivery in flight, and a single slot on ctx would let
 // that stale delivery read the new generation and pass the staleness check.
 // Allocated before the request exists and freed by its terminal on_broadcast.
 struct broadcast_request {
@@ -698,11 +698,14 @@ static void moq_source_start_consume(struct moq_source *ctx, uint32_t expected_g
 	req->ctx = ctx;
 	req->gen = expected_gen;
 
-	// Resolve the broadcast by path against what is announced now plus any
-	// dynamic fallback, failing if neither can serve it. libmoq copies the path,
+	// Wait for the broadcast to be announced. This runs off the session-connected
+	// callback, and announcements arrive over the session after it connects, so
+	// resolving against only what is announced *now* (moq_origin_request) would race
+	// them and blank the source for a broadcast that is live. libmoq copies the path,
 	// so it need not outlive this call, and delivers the broadcast handle
 	// asynchronously to on_broadcast.
-	int32_t request = moq_origin_request(origin, broadcast_copy, strlen(broadcast_copy), on_broadcast, req);
+	int32_t request =
+		moq_origin_consume_announced(origin, broadcast_copy, strlen(broadcast_copy), on_broadcast, req);
 	if (request < 0) {
 		LOG_ERROR("Failed to request broadcast '%s': %d", broadcast_copy, request);
 		bfree(broadcast_copy);
@@ -730,15 +733,15 @@ static void moq_source_start_consume(struct moq_source *ctx, uint32_t expected_g
 	} else {
 		// Stale or shutting down: close it; its terminal releases the reference.
 		pthread_mutex_unlock(&ctx->mutex);
-		moq_origin_request_close(request);
+		moq_origin_consume_announced_close(request);
 	}
 }
 
-// Receives the broadcast resolved by moq_origin_request: a positive handle once
-// served, then exactly once more with a terminal code (0 = finished, including
-// after moq_origin_request_close; < 0 = could not be served). The terminal is the
-// last touch of user_data, so it both frees the request context and releases the
-// request's lifetime reference via subscription_ref.
+// Receives the announced broadcast: a positive handle once announced, then exactly
+// once more with a terminal code (0 = finished, including after
+// moq_origin_consume_announced_close; < 0 = error). The terminal is the last touch
+// of user_data, so it both frees the request context and releases the request's
+// lifetime reference via subscription_ref.
 static void on_broadcast(void *user_data, int32_t broadcast)
 {
 	struct broadcast_request *req = (struct broadcast_request *)user_data;
@@ -843,10 +846,11 @@ static void moq_source_disconnect_locked(struct moq_source *ctx)
 		ctx->catalog_handle = -1;
 	}
 
-	// An unresolved request still owes a terminal on_broadcast; closing it makes
-	// that fire (with 0) instead of leaving it pending until the source dies.
+	// An unresolved wait still owes a terminal on_broadcast; closing it makes that
+	// fire (with 0) instead of leaving it pending until the source dies. This is the
+	// path that ends a wait for a broadcast that is never announced.
 	if (ctx->request >= 0) {
-		moq_origin_request_close(ctx->request);
+		moq_origin_consume_announced_close(ctx->request);
 		ctx->request = -1;
 	}
 

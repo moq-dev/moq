@@ -503,11 +503,7 @@ impl NoqServer {
 		let mut tls = if config.tls.root.is_empty() {
 			tls_builder.with_no_client_auth().with_cert_resolver(certs.clone())
 		} else {
-			let roots = config.tls.load_roots()?;
-			let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
-				.allow_unauthenticated()
-				.build()
-				.map_err(Error::ClientVerifier)?;
+			let verifier = config.tls.client_verifier(provider)?;
 			tls_builder
 				.with_client_cert_verifier(verifier)
 				.with_cert_resolver(certs.clone())
@@ -524,6 +520,7 @@ impl NoqServer {
 
 		tls.alpn_protocols = alpns;
 		tls.key_log = Arc::new(rustls::KeyLogFile::new());
+		config.tls.disable_resumption(&mut tls);
 
 		let tls: noq::crypto::rustls::QuicServerConfig = tls.try_into()?;
 		let mut tls = noq::ServerConfig::with_crypto(Arc::new(tls));

@@ -225,6 +225,17 @@ if (moq_consume_video_properties(catalog, &snapshot) < 0) {
 }
 ```
 
+## Stalled video renditions
+
+`moq_consume_video_stalled` reports whether the publisher recommends temporarily avoiding a rendition. The track remains directly usable, and catalogs that omit the hint report false. Pass the same catalog snapshot and rendition index used by `moq_consume_video_config`:
+
+```c
+bool stalled;
+if (moq_consume_video_stalled(catalog, index, &stalled) < 0) {
+    fprintf(stderr, "video stalled state failed: %s\n", moq_error());
+}
+```
+
 ## Raw media
 
 The `moq_publish_media_*` and `moq_consume_video` / `moq_consume_audio` calls carry already-encoded frames, for a caller that brings its own codec. The `_raw` calls carry uncompressed media instead and run the codec inside libmoq, so a C application can publish pixels and PCM without linking one.

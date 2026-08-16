@@ -6,7 +6,7 @@ import type * as Path from "./path.ts";
  * subscribers.
  *
  * `Connection.consume(path)` must not mint a fresh subscription per call: repeat requests
- * for the same path (e.g. several renditions referencing one `broadcast: "../source"`) should
+ * for the same path (e.g. several renditions referencing one `broadcast: "./source"`) should
  * share a single upstream subscription. This mirrors the Rust `origin::Consumer` weak-cache:
  * a still-live path resolves to a shared {@link broadcast.Consumer.clone}, a closed one is
  * re-consumed on the next request. Each handle is reference-counted, so the shared broadcast

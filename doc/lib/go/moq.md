@@ -163,6 +163,8 @@ media, err := broadcast.PublishMedia("avc3", nil, moq.WithVideoHint(moq.VideoHin
 }))
 ```
 
+Each catalog `Video` has a `Stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
+
 Properties that apply to every video rendition are updated together. Nil fields clear the corresponding catalog property, and rotation is normalized to the nearest clockwise quarter turn:
 
 ```go
@@ -330,6 +332,30 @@ for request, err := range dynamic.Requests(ctx) {
     _ = producer.Finish()
 }
 ```
+
+## Fetching media groups
+
+`FetchGroup` hands back raw payloads. `FetchMediaGroup` decodes the same group through the rendition's container, so you get timestamped frames without opening a live subscription:
+
+```go
+catalog, err := consumer.Catalog(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+
+group, err := consumer.FetchMediaGroup("audio0", 42, catalog.Audio["audio0"].Container, nil)
+if err != nil {
+    log.Fatal(err)
+}
+for frame, err := range group.Frames(ctx) {
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("%d: %d bytes\n", frame.TimestampUs, len(frame.Payload))
+}
+```
+
+A fetched media group is finite: it ends after the group's last decoded frame, unlike the live `SubscribeMedia` stream. Latency-based group skipping does not apply, so you always get every frame in the group.
 
 ## Raw track timestamps
 

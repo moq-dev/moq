@@ -10,7 +10,7 @@
 use std::{net::TcpListener, time::Duration};
 
 use moq_native::moq_net::{self, Origin};
-use moq_relay::{AuthConfig, Cluster, ClusterConfig, Connection, PublicConfig, Web, WebConfig};
+use moq_relay::{AuthConfig, Cluster, ClusterConfig, Config, Connection, PublicConfig, Relay, Web, WebConfig};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -119,6 +119,31 @@ async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	(port, handle)
 }
 
+/// Stand up the assembled relay path with `--server-version` restricted.
+async fn spawn_versioned_relay(versions: Vec<moq_net::Version>) -> (u16, tokio::task::JoinHandle<()>) {
+	let port = free_tcp_port();
+	let mut config = Config::default();
+	config.server.bind = Some("127.0.0.1:0".to_string());
+	config.server.tls.generate = vec!["localhost".into()];
+	config.server.version = versions;
+	config.web.ws = true;
+	config.web.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
+
+	#[allow(deprecated)]
+	let public = PublicConfig::Simple(vec![String::new()]);
+	config.auth.public = Some(public);
+
+	let relay = Relay::load(config).await.expect("load relay");
+	let web = relay.web;
+	let (server_result_tx, mut server_result_rx) = tokio::sync::oneshot::channel();
+	let handle = tokio::spawn(async move {
+		let _ = server_result_tx.send(web.run().await);
+	});
+
+	wait_for_http(port, &mut server_result_rx).await;
+	(port, handle)
+}
+
 fn client() -> moq_native::Client {
 	client_version(None)
 }
@@ -212,6 +237,32 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 
 	drop(pub_session);
 	drop(sub_session);
+	web_handle.abort();
+}
+
+/// `--server-version` applies to the WebSocket fallback as well as QUIC.
+#[tokio::test]
+async fn relay_websocket_honors_server_version() {
+	let allowed: moq_net::Version = "moq-transport-16".parse().expect("parse allowed version");
+	let excluded = newest_lite_version();
+	let (port, web_handle) = spawn_versioned_relay(vec![allowed]).await;
+	let url: url::Url = format!("ws://127.0.0.1:{port}/smoke").parse().expect("parse url");
+
+	let excluded_result = tokio::time::timeout(TIMEOUT, client_version(Some(excluded)).connect(url.clone()))
+		.await
+		.expect("excluded client connect timeout");
+	assert!(
+		excluded_result.is_err(),
+		"WebSocket accepted excluded version {excluded} despite --server-version {allowed}"
+	);
+
+	let session = tokio::time::timeout(TIMEOUT, client_version(Some(allowed)).connect(url))
+		.await
+		.expect("allowed client connect timeout")
+		.expect("allowed client connect failed");
+	assert_eq!(session.version(), allowed);
+
+	drop(session);
 	web_handle.abort();
 }
 

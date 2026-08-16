@@ -43,6 +43,23 @@ public final class BroadcastConsumer: Sendable {
         GroupConsumer(try await ffi.fetchGroup(name: name, sequence: sequence, options: options))
     }
 
+    /// Fetch one complete group and decode its track container into media frames.
+    public func fetchMediaGroup(
+        name: String,
+        sequence: UInt64,
+        container: Container,
+        options: FetchGroupOptions? = nil
+    ) async throws -> MediaGroupConsumer {
+        MediaGroupConsumer(
+            try await ffi.fetchMediaGroup(
+                name: name,
+                sequence: sequence,
+                container: container,
+                options: options
+            )
+        )
+    }
+
     /// Subscribe to a media track, delivering frames in decode order. `container`
     /// comes from the catalog. `subscription` tunes delivery priority, group ordering
     /// priority, group range, and the latency budget; omit for defaults. Raise

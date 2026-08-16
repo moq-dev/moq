@@ -5,7 +5,7 @@ description: Command-line tools for MoQ media
 
 # FFmpeg / moq-cli
 
-`moq-cli` is a media router: it wires one endpoint onto a shared MoQ Origin. It
+`moq-cli` is a media router: it wires endpoints onto a shared MoQ Origin. It
 moves media into MoQ from a source, out of MoQ to a sink, or plays a broadcast
 locally, bridging stdin/stdout (via FFmpeg), HLS, RTMP, SRT, and WebRTC.
 
@@ -74,6 +74,7 @@ Each signal writes a numbered `/tmp/moq.heap.*.heap` profile for analysis with
 
 ```
 moq <MoQ side>  <import|export>  <endpoint> [endpoint options]
+moq <MoQ side>  <stage>  [-- <stage>]...
 moq <MoQ side>  play [playback options]
 ```
 
@@ -89,14 +90,20 @@ moq <MoQ side>  play [playback options]
   Both may be given at once (dial a relay *and* accept incoming sessions).
   `--origin <id>` pins the process's origin id (default: fresh and random per
   run); see [Redundant Publishers](#redundant-publishers-11).
+
 - **`import`** routes media INTO MoQ (a source fills the Origin); **`export`**
   routes it OUT (a sink drains the Origin). The verb fixes the data direction.
+
 - **`play`** subscribes to a broadcast and plays its audio and video locally.
+
 - **endpoint** is one subcommand: a container format (`avc3`, `fmp4`, `ts`, `flv`
   read from stdin on import; `fmp4`, `mkv`, `ts`, `flv` written to stdout on
   export), or a gateway (`hls`, `rtmp`, `srt`, `rtc`). For the bidirectional
   gateways, `--connect` dials out and `--listen` binds a socket; the parent verb
   decides whether that pushes or pulls.
+
+- **`--`** starts another stage, where a stage is one `import` or `export` with
+  its endpoint. See [Multiple Stages](#multiple-stages).
 
 Run `moq import --help` / `moq export --help` to see the endpoints, and
 `moq import rtmp --help` for a specific one.
@@ -184,6 +191,51 @@ Remux a file to MPEG-TS and pipe it in (`-c copy` avoids re-encoding):
 ffmpeg -i video.mp4 -c copy -f mpegts - | \
     moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 ```
+
+### Multiple Stages
+
+One `moq` process bridges one broadcast by default. Separate stages with `--` to
+bridge several over a single connection, each naming its own `--broadcast`:
+
+```bash
+moq --client-connect https://relay.example.com/anon \
+    import --broadcast cam1.hang rtmp --listen 0.0.0.0:1935 \
+    -- import --broadcast cam2.hang rtmp --listen 0.0.0.0:1936
+```
+
+Stages may run in opposite directions, so one process can ingest and re-publish
+without a second connection or a second copy of the media:
+
+```bash
+moq --client-connect https://relay.example.com/anon \
+    import --broadcast event.hang srt --listen 0.0.0.0:9000 \
+    -- export --broadcast event.hang hls --listen 0.0.0.0:8080
+```
+
+Every stage shares one connection, one origin id, and one Origin, and each keeps
+its own `--help` (`moq import rtmp --help`). A stage without `--broadcast` falls
+back to the process-wide one, so a single-stage command can keep naming the
+broadcast before the verb.
+
+Rules worth knowing:
+
+- The first stage to finish (stdin EOF, Ctrl-C, or an error) ends the process,
+  taking the others with it.
+- stdin and stdout are one resource each, so at most one stage may read a
+  container from stdin, and at most one may write one to stdout.
+- The MoQ side belongs to the invocation, not a stage: `--client-connect` and
+  friends go before the first stage and are rejected after a `--`.
+- `moq` reads every `--` as a stage separator, so it can't double as the usual
+  end-of-options marker. The one place that matters is a local playlist path
+  starting with `-`; write it as `./-playlist.m3u8`.
+- `play`, `transcode`, `token`, and `devices` own the process and can't be
+  staged; run those on their own.
+- `import capture` encodes to fit the connection's bandwidth estimate over
+  `--client-connect`, and rate control assumes it's the only publisher on that
+  connection, so it can't share a process with another `import`. Run those as
+  separate processes, or publish over `--server-bind`, which has no estimate.
+  (An audio-only `--no-video` capture never reads the estimate, so it doesn't
+  count.)
 
 ### Redundant Publishers (1+1)
 

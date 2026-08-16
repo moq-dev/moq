@@ -308,8 +308,23 @@ impl Server {
 		self.with_subscriber(origin).serve().await
 	}
 
-	/// Shared accept loop for [`serve_publish`](Self::serve_publish) /
-	/// [`serve_consume`](Self::serve_consume); the origin is already attached.
+	/// Accept sessions until the listener stops, serving `publish` to each subscriber
+	/// and ingesting each publisher into `subscribe`.
+	///
+	/// The both-directions counterpart of [`serve_publish`](Self::serve_publish) and
+	/// [`serve_consume`](Self::serve_consume), so an inbound session can subscribe to
+	/// the origin and publish into it over one connection.
+	pub async fn serve_both(
+		self,
+		publish: moq_net::origin::Consumer,
+		subscribe: moq_net::origin::Producer,
+	) -> crate::Result<()> {
+		self.with_publisher(publish).with_subscriber(subscribe).serve().await
+	}
+
+	/// Shared accept loop for the `serve_*` entry points; the origin is already
+	/// attached. Private so a server can't be served with no direction at all, which
+	/// would accept and handshake sessions that carry nothing.
 	async fn serve(mut self) -> crate::Result<()> {
 		if let Ok(addr) = self.local_addr() {
 			tracing::info!(%addr, "listening");

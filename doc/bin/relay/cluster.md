@@ -95,25 +95,25 @@ connect_api = "https://api.example.com/cluster/connect"
 node        = "us-west.example.com:4443"
 ```
 
-The source returns a bare JSON array of peer hostnames:
+The source returns a JSON array of peer URLs. Legacy bare hosts remain accepted:
 
 ```json
-["eu-west.example.com:4443", "us-east.example.com:4443"]
+["https://eu-west.example.com/?cost=10", "us-east.example.com:4443"]
 ```
 
-The relay reconciles that list against its live dials: new entries are dialed, entries that disappear are dropped. It composes with `connect` (static seeds that are never reconciled away) and `mesh` (gossip). The relay's own `node` value, when set, is sent as a `?node=` query parameter so the endpoint can return the peers for that specific node; for mTLS-gated endpoints the cluster client certificate identifies the caller as well.
+The relay reconciles that list against its live dials: new entries are dialed, entries that disappear are dropped, and a changed URL for a `connect_api`-owned peer replaces its session. That includes dial-side inputs such as `?cost=` and an inline `?jwt=`. An identical render is a no-op. It composes with `connect` (static seeds that are never reconciled away) and `mesh` (gossip). If another source already owns a peer's session, the API entry remains its updated fallback until that source disappears. The relay's own `node` value, when set, is sent as a `?node=` query parameter so the endpoint can return the peers for that specific node; for mTLS-gated endpoints the cluster client certificate identifies the caller as well.
 
 - **HTTP(S) URL**: re-checked every 30s, but freshness is delegated to a standard HTTP cache (`http-cache`), so the response's `Cache-Control` controls how often a check turns into a real fetch. While the cached list is still fresh (`max-age`), the re-check is served from cache with no network round-trip; once it's stale the cache issues a conditional GET (`ETag` / `Last-Modified`) and falls back to the last cached body if revalidation fails (stale-if-error). Set a longer `max-age` to reduce load on your endpoint, or `no-cache` to force a conditional GET on every tick. Transient endpoint blips don't churn the dial set.
 - **Local file** (a path or `file://` URL): watched via OS filesystem notifications (inotify / FSEvents / kqueue), with a periodic re-check as a safety net.
 
-If a fetch fails or returns garbage, the relay logs and keeps the last good list rather than tearing the cluster down. This keeps the moq-relay binary generic: all routing decisions (which node connects where) live in whatever service answers the endpoint.
+If a fetch fails, an entry is invalid, or one identity has conflicting entries, the relay logs and keeps the entire last good list rather than applying a partial topology. This keeps the moq-relay binary generic: all routing decisions (which node connects where) live in whatever service answers the endpoint.
 
 ## Authentication
 
 Cluster peers must authenticate to each other:
 
 - **mTLS** (recommended). Set `tls.root` to the CA that signed the cluster certificates. Inbound connections presenting a valid client cert are granted full access; outbound dials use `client.tls.cert` / `client.tls.key`.
-- **JWT**. For static `connect` peers, supply the token inline as a `?jwt=` query parameter on the URL. For gossip- and `connect_api`-discovered peers (whose addresses can't carry an inline token), set `cluster.token` to a file holding the JWT; it's presented on any dial whose URL has no inline `?jwt=` (so an inline token wins per-peer). Either way the token needs broad enough scope to cover whatever paths the cluster carries.
+- **JWT**. Supply a per-peer token inline as a `?jwt=` query parameter on a static or `connect_api` URL. Alternatively, set `cluster.token` to a file holding the shared JWT; it is presented on any dial whose URL has no inline token. Gossip must use the shared token or mTLS: never put a JWT in `cluster.node`, because that URL is advertised to the mesh and written to logs. Either way the token needs broad enough scope to cover whatever paths the cluster carries.
 
 See [Authentication](/bin/relay/auth) for the full setup.
 
@@ -127,7 +127,7 @@ peer stays loudly visible in the logs and a returning one is picked up within se
 
 `cluster.root` was removed. To dial cluster peers use `cluster.connect`; to advertise this relay's own address set `cluster.node` and enable `cluster.mesh`. `cluster.mesh` is now a boolean gossip toggle (it used to take this relay's URL); the URL moved to `cluster.node`. The old `mesh = "<url>"` form still works for backwards compatibility: it enables gossip and is treated as `cluster.node`, with a deprecation warning (or an error if it conflicts with an explicit `cluster.node`).
 
-`cluster.connect` entries are now full URLs; a bare host or `host:port` still works but logs a deprecation warning. A JWT for a static peer belongs inline as a `?jwt=` query parameter (the `cluster.token` file remains for gossip / `connect_api` peers, which can't carry an inline token).
+`cluster.connect` entries are now full URLs; a bare host or `host:port` still works but logs a deprecation warning. A per-peer JWT belongs inline as a `?jwt=` query parameter on a static or `connect_api` URL. The `cluster.token` file remains the shared fallback and is required for JWT-authenticated gossip; never put a JWT in the advertised `cluster.node` URL.
 
 | Old | New |
 |---|---|

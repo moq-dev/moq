@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.6...moq-mux-v0.9.7) - 2026-08-14
+
+### Added
+
+- *(bindings)* fetch and decode a retained media group ([#2827](https://github.com/moq-dev/moq/pull/2827))
+
+### Fixed
+
+- *(mux)* derive missing video geometry ([#2840](https://github.com/moq-dev/moq/pull/2840))
+- *(path)* resolve catalog references like URLs ([#2855](https://github.com/moq-dev/moq/pull/2855))
+- *(moq-mux)* stop publishing audio spliced across a TS discontinuity ([#2823](https://github.com/moq-dev/moq/pull/2823))
+- *(moq-mux)* anchor the TS table cadence to the media timeline ([#2825](https://github.com/moq-dev/moq/pull/2825))
+
 ## [0.9.6](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.5...moq-mux-v0.9.6) - 2026-08-13
 
 ### Added

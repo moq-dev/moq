@@ -132,6 +132,28 @@ impl Producer {
 		let Ok(mut current) = self.state.write() else {
 			return;
 		};
+		let mut catalog = catalog.clone();
+		catalog.video.renditions.retain(|name, config| {
+			let valid = upstream.source.resolve_reference(config.broadcast.as_ref()).is_some();
+			if !valid {
+				tracing::warn!(
+					rendition = name,
+					"ignoring video rendition whose broadcast escapes above the root"
+				);
+			}
+			valid
+		});
+		catalog.audio.renditions.retain(|name, config| {
+			let valid = upstream.source.resolve_reference(config.broadcast.as_ref()).is_some();
+			if !valid {
+				tracing::warn!(
+					rendition = name,
+					"ignoring audio rendition whose broadcast escapes above the root"
+				);
+			}
+			valid
+		});
+		let catalog = &catalog;
 
 		// Renditions the catalog dropped or reconfigured. Close each as it goes so any cursor
 		// over it drains and ends, instead of parking on a timeline that never finishes -- the

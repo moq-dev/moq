@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/moq-dev/moq/compare/moq-rtc-v0.2.3...moq-rtc-v0.2.4) - 2026-08-14
+
+### Fixed
+
+- *(path)* resolve catalog references like URLs ([#2855](https://github.com/moq-dev/moq/pull/2855))
+- *(rtc)* publish VP8 and VP9 dimensions ([#2845](https://github.com/moq-dev/moq/pull/2845))
+
 ## [0.2.3](https://github.com/moq-dev/moq/compare/moq-rtc-v0.2.2...moq-rtc-v0.2.3) - 2026-08-06
 
 ### Added

@@ -32,7 +32,9 @@ The Rust build cache is written by `main` and read by pull requests, never the o
 
 One tool stays unrequired: `swift` exists only on macOS, so swift.yml is its gate rather than the PR path.
 
-Two gates live outside the PR path, in `.github/workflows/nightly.yml`: `just rs audit` (cargo-deny) because an advisory lands without this repo changing, and `just rs features` (the `--all-features` and `--no-default-features` compiles) because each is a full extra workspace compile that shares almost nothing with the default one. A break there lands on `main` rather than being caught in review, which is the accepted trade; anything that must block a merge belongs in `check`.
+Two path-filtered workflows run recipes of their own alongside `check.yml`, each for something the Linux `just check` can't reach: swift.yml (`swift/scripts/check.sh`, on a Mac) and obs.yml (`just obs ci`, which links the OBS plugin against nixpkgs' libobs/Qt6 -- Linux is the only platform where that needs no obs-deps download).
+
+Three gates live outside the PR path, in `.github/workflows/nightly.yml`: `just rs audit` (cargo-deny) because an advisory lands without this repo changing, `just rs features` (the `--all-features` and `--no-default-features` compiles) because each is a full extra workspace compile that shares almost nothing with the default one, and `just obs ci` because obs.yml's path filter can't be complete (a build script can change what linking `libmoq.a` needs without touching a manifest). A break there lands on `main` rather than being caught in review, which is the accepted trade; anything that must block a merge belongs in `check`.
 
 ## Architecture
 
@@ -60,7 +62,7 @@ Top-level layout only. Per-crate and per-package detail lives in the nested guid
 - `/rs/` - Rust crates: core networking (`moq-net`), native helpers, the relay, CLIs, media muxing/codecs, and the FFI/C bindings. See `rs/CLAUDE.md`.
 - `/js/` - TypeScript/JavaScript packages for the browser, published as `@moq/*`. See `js/CLAUDE.md`.
 - `/py/`, `/swift/`, `/kt/`, `/go/` - language wrappers over `rs/moq-ffi` (see [Language Bindings](#language-bindings)). `/py/` has `py/CLAUDE.md`; the others defer to their `README.md`.
-- `/cpp/` - C/C++ consumers of `libmoq`. `cpp/obs/` is the OBS Studio plugin (CMake; links `libmoq` via `MOQ_LOCAL`), licensed GPL-2.0-or-later because it links `libobs`. PR CI never compiles it, so `just obs build` and `just obs test` (the latter runs `cpp/obs/test/` against stubbed libobs/libmoq under ThreadSanitizer) are manual gates, like `just rs macos`. See `doc/bin/obs.md`.
+- `/cpp/` - C/C++ consumers of `libmoq`. `cpp/obs/` is the OBS Studio plugin (CMake; links `libmoq` via `MOQ_LOCAL`), licensed GPL-2.0-or-later because it links `libobs`. `just check` type-checks it via `just obs compile`, which needs headers rather than an obs-deps download, and obs.yml links it on Linux for `cpp/obs/` and `rs/libmoq/` PRs. Still manual, like `just rs macos`: `just obs build` (a loadable plugin, and the only path on macOS/Windows) and `just obs test` (`cpp/obs/test/` against stubbed libobs/libmoq under ThreadSanitizer). See `doc/bin/obs.md`.
 - `/demo/` - demos and test media: relay configs, the web demo, MoQ Boy, media hosting, and a network throttle script.
 - `/test/` - cross-language interop smoke tests (`test/smoke/`), run via `just test smoke[-full]`.
 - `/doc/` - documentation site (VitePress, deployed via Cloudflare). The `/draft/` section is generated from `drafts/` by `doc/.vitepress/drafts.ts`.
@@ -86,6 +88,10 @@ This root file holds only cross-cutting rules that apply everywhere (writing sty
 
 - When adding new dependencies, always use the **newest stable version** available.
 - **Prefer a maintained third-party crate over hand-rolling non-core functionality** (standard container/codec parsers, compression, serialization, etc.). Reserve bespoke code for the wire/protocol layers where we need full control or no suitable crate exists.
+
+## Package Versions
+
+**Do not bump package versions unless the user explicitly asks for a version bump or release.** Feature and fix work must leave version fields and matching lockfile version metadata unchanged. Periodic release work owns those bumps.
 
 ## Writing Style
 

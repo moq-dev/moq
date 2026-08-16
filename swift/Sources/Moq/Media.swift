@@ -60,6 +60,40 @@ public final class MediaConsumer: AsyncSequence, Sendable {
     }
 }
 
+/// A finite, container-decoded media group returned by ``BroadcastConsumer/fetchMediaGroup(name:sequence:container:options:)``.
+public final class MediaGroupConsumer: AsyncSequence, Sendable {
+    /// The decoded media frame emitted by this sequence.
+    public typealias Element = MediaFrame
+
+    let ffi: MoqMediaGroupConsumer
+
+    init(_ ffi: MoqMediaGroupConsumer) {
+        self.ffi = ffi
+    }
+
+    /// The sequence number of this group within the track.
+    public var sequence: UInt64 {
+        ffi.sequence()
+    }
+
+    /// The next frame, or `nil` once the group ends.
+    public func next() async throws -> MediaFrame? {
+        try await ffi.next()
+    }
+
+    /// Cancel all current and future reads.
+    public func cancel() {
+        ffi.cancel()
+    }
+
+    /// Create an iterator that cancels native reads when iteration ends.
+    public func makeAsyncIterator() -> AsyncThrowingStream<MediaFrame, Swift.Error>.Iterator {
+        moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
+            try await ffi.next()
+        }.makeAsyncIterator()
+    }
+}
+
 /// Write side of a media track fed pre-framed payloads.
 public final class MediaProducer: Sendable {
     let ffi: MoqMediaProducer

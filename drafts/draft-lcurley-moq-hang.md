@@ -152,12 +152,18 @@ In addition to the WebCodecs fields, each rendition MAY carry the fields common 
 type VideoDecoderConfigExtensions = {
   "displayAspectWidth": number | undefined,
   "displayAspectHeight": number | undefined,
+  "stalled": boolean | undefined,
 }
 ~~~
 
 `displayAspectWidth` and `displayAspectHeight` give the display aspect ratio of the media, stretching or shrinking the coded pixels.
 A consumer that understands neither field MUST assume square pixels, a 1:1 ratio.
 Both MUST be present together; a consumer that sees only one MUST ignore it.
+
+`stalled` indicates that the publisher recommends temporarily avoiding the rendition.
+The track remains available when `stalled` is true.
+A consumer SHOULD select an unstalled rendition when it supports one, but MAY select a stalled rendition when no unstalled rendition is suitable.
+If absent, `stalled` defaults to false.
 
 For example:
 
@@ -170,6 +176,7 @@ For example:
       "codedWidth": 1280,
       "codedHeight": 720,
       "bitrate": 6000000,
+      "stalled": true,
       "framerate": 30.0,
       "jitter": 33
     },
@@ -270,7 +277,9 @@ By default a rendition's track lives in the same broadcast that served the catal
 The `broadcast` field overrides that, naming a different broadcast that publishes the track.
 
 The value is a relative path, resolved against the path of the broadcast that served the catalog.
-It uses the `.` and `..` semantics of a relative URL reference ({{!RFC3986, Section 5.2.4}}), for example `../source`.
+It uses relative reference resolution ({{!RFC3986, Section 5.2}}): a non-empty reference replaces the catalog broadcast's last path segment before applying `.` and `..` segments.
+For example, `./source` in a catalog served by `room/transcode` resolves to `room/source`, while `.` resolves to `room`.
+An empty reference resolves to the catalog broadcast itself.
 A publisher MUST NOT use an absolute path, and a consumer MUST ignore a rendition whose `broadcast` escapes above the root.
 
 This lets a publisher author a catalog that points at tracks it does not republish.

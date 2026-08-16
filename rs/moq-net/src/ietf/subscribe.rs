@@ -255,9 +255,23 @@ impl Message for SubscribeOk {
 			_ => {
 				// GROUP_ORDER is only legal here through draft-15, but keep accepting it so a
 				// peer that still sends it doesn't have its session torn down over a hint.
-				decode_params!(r, version,
-					0x22 => group_order: Option<GroupOrder>,
-				);
+				let group_order = match version {
+					Version::Draft15 | Version::Draft16 => {
+						// LARGEST_OBJECT is required here once the track has content, but
+						// the session model does not currently expose the location.
+						decode_params!(r, version,
+							0x09 => _largest_location: Option<Location>,
+							0x22 => group_order: Option<GroupOrder>,
+						);
+						group_order
+					}
+					_ => {
+						decode_params!(r, version,
+							0x22 => group_order: Option<GroupOrder>,
+						);
+						group_order
+					}
+				};
 				properties = Properties::decode(r, version)?;
 				properties.group_order = properties.group_order.or(group_order);
 			}
@@ -630,6 +644,18 @@ mod tests {
 		let decoded: SubscribeOk = decode_message(&encoded, Version::Draft14).unwrap();
 
 		assert_eq!(decoded.request_id, Some(RequestId(42)));
+	}
+
+	#[test]
+	fn test_subscribe_ok_accepts_largest_object() {
+		// request_id=4, track_alias=4, one LARGEST_OBJECT parameter at {5, 0}.
+		let payload = [0x04, 0x04, 0x01, 0x09, 0x02, 0x05, 0x00];
+		for version in [Version::Draft15, Version::Draft16] {
+			let decoded: SubscribeOk = decode_message(&payload, version).unwrap();
+
+			assert_eq!(decoded.request_id, Some(RequestId(4)));
+			assert_eq!(decoded.track_alias, 4);
+		}
 	}
 
 	#[test]

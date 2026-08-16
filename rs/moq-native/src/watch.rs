@@ -1,4 +1,4 @@
-//! Watch on-disk files (TLS certs/keys) and get notified when they're rotated.
+//! Watch on-disk TLS certificates, keys, and root CAs for rotation.
 
 use std::path::{Path, PathBuf};
 
@@ -34,32 +34,9 @@ impl FileWatcher {
 		// notify emits per change (and any unrelated churn in the directory): a
 		// full buffer already has a pending wakeup, so extra sends are dropped.
 		let (tx, rx) = mpsc::channel(1);
-		let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-			let send = match res {
-				Ok(event) => is_reload_trigger(&event.kind),
-				// A watcher error (e.g. inotify queue overflow) may mean we missed a
-				// real change, so reload to be safe.
-				Err(_) => true,
-			};
-			if send {
-				let _ = tx.try_send(());
-			}
+		let watcher = callback(paths, move || {
+			let _ = tx.try_send(());
 		})?;
-
-		// Watch each distinct parent directory once. A bare filename like
-		// `cert.pem` has an empty-string parent (`Some("")`, not `None`), which the
-		// OS watcher rejects with "No path was found", so map that to the current
-		// directory.
-		let mut dirs: Vec<&Path> = paths
-			.iter()
-			.filter_map(|p| p.parent())
-			.map(|p| if p.as_os_str().is_empty() { Path::new(".") } else { p })
-			.collect();
-		dirs.sort_unstable();
-		dirs.dedup();
-		for dir in dirs {
-			watcher.watch(dir, notify::RecursiveMode::NonRecursive)?;
-		}
 
 		Ok(Self {
 			_watcher: watcher,
@@ -78,6 +55,43 @@ impl FileWatcher {
 			.await
 			.expect("file watcher channel closed unexpectedly");
 	}
+}
+
+/// Watch `paths` and invoke `changed` after a write or atomic replacement.
+///
+/// The callback runs on notify's worker thread, so it must finish promptly.
+pub(crate) fn callback(
+	paths: &[PathBuf],
+	mut changed: impl FnMut() + Send + 'static,
+) -> notify::Result<notify::RecommendedWatcher> {
+	let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+		let reload = match res {
+			Ok(event) => is_reload_trigger(&event.kind),
+			// A watcher error (e.g. inotify queue overflow) may mean we missed a
+			// real change, so reload to be safe.
+			Err(_) => true,
+		};
+		if reload {
+			changed();
+		}
+	})?;
+
+	// Watch each distinct parent directory once. A bare filename like
+	// `cert.pem` has an empty-string parent (`Some("")`, not `None`), which the
+	// OS watcher rejects with "No path was found", so map that to the current
+	// directory.
+	let mut dirs: Vec<&Path> = paths
+		.iter()
+		.filter_map(|p| p.parent())
+		.map(|p| if p.as_os_str().is_empty() { Path::new(".") } else { p })
+		.collect();
+	dirs.sort_unstable();
+	dirs.dedup();
+	for dir in dirs {
+		watcher.watch(dir, notify::RecursiveMode::NonRecursive)?;
+	}
+
+	Ok(watcher)
 }
 
 /// Whether a raw notify event reflects a real change that should trigger a reload.

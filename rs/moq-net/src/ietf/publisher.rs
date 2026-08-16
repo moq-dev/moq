@@ -678,6 +678,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	/// Serve a track using FuturesUnordered for unlimited concurrent groups.
 	async fn run_track(&self, mut track: track::Subscriber, request_id: RequestId) -> Result<(), Error> {
+		// A fresh cursor starts at the oldest cached group, so leaving it there replays the
+		// whole retained history at once, one concurrent stream per group. LargestObject is
+		// the only filter we accept and it means the live edge.
+		if let Some(latest) = track.latest() {
+			track.start_at(latest);
+		}
+
 		let mut tasks = FuturesUnordered::new();
 
 		loop {
@@ -1558,6 +1565,51 @@ mod group_priority_test {
 			vec![200],
 			"model priority must pass through unchanged"
 		);
+	}
+}
+
+#[cfg(test)]
+mod subscribe_cursor_test {
+	use super::*;
+	use crate::lite::test_transport::{Log, SinkSession};
+
+	/// A subscription's cursor starts at the oldest cached group, so serving it verbatim
+	/// replays every retained group at once, each on its own stream. Relays reject the burst
+	/// and players skip straight back to the live edge, so the catch-up is pure waste.
+	#[tokio::test]
+	async fn a_subscribe_is_served_from_the_live_edge() {
+		let log = Log::default();
+		let session = SinkSession::new(log.clone());
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+
+		let publisher = Publisher::new(
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			Version::Draft16,
+		);
+
+		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		for sequence in 0..4 {
+			let mut group = track.create_group(group::Info { sequence }).unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+		}
+
+		let subscriber = track.subscribe(None);
+		track.finish().unwrap();
+
+		publisher.run_track(subscriber, RequestId(1)).await.unwrap();
+
+		// `run_group` sets the priority once per stream it opens, so this counts groups served.
+		assert_eq!(log.priorities().len(), 1, "only group 3 should have been served");
 	}
 }
 

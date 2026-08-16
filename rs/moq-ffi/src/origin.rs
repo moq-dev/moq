@@ -261,6 +261,9 @@ impl MoqOriginConsumer {
 	}
 
 	/// Wait for a specific broadcast to be announced by path.
+	///
+	/// This is how you resolve a path right after connecting: announcements arrive over the
+	/// session after it opens, so `request_broadcast` on its own races them.
 	pub fn announced_broadcast(&self, path: String) -> Result<Arc<MoqAnnouncedBroadcast>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let origin = self.inner.with_root(path).ok_or(MoqError::Unauthorized)?;
@@ -278,6 +281,9 @@ impl MoqOriginConsumer {
 	/// errors if nothing can serve it. Unlike `announced_broadcast`, this does *not* wait
 	/// indefinitely for a future announcement: it resolves or fails based on what is
 	/// announced now plus any dynamic fallback. Drop the returned future to cancel.
+	///
+	/// Calling this straight after connecting therefore races the session's announcements
+	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first.
 	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		let broadcast = self.inner.request_broadcast(path.as_str()).await?;
 		Ok(Arc::new(MoqBroadcastConsumer::new(broadcast)))

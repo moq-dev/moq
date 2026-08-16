@@ -140,8 +140,7 @@ struct DriverState {
 	// transport reports no send-rate estimate), since a completed future must not be
 	// polled again.
 	maintenance: Option<MaybeSendBox<'static, ()>>,
-	// Cached so a poll after completion (e.g. after `wait_ready` consumed the
-	// result) doesn't re-poll a finished future.
+	// Cached so a poll after completion doesn't re-poll a finished future.
 	result: Option<Result<(), Error>>,
 }
 
@@ -152,23 +151,6 @@ impl Driver {
 	/// into their own [`kio`]-style poll functions.
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		self.state.poll(waiter)
-	}
-
-	/// Drive the session until the readiness condition resolves, so `connect` can block on the
-	/// initial announce set.
-	///
-	/// A session that dies first still resolves readiness: the connecting producers
-	/// live inside the driver, so its completion drops them and releases the barrier.
-	/// The error isn't lost, it's cached for whoever drives the session next.
-	pub(super) async fn wait_ready(&mut self, poll_ready: impl Fn(&kio::Waiter) -> Poll<()>) {
-		kio::wait(|waiter| {
-			if poll_ready(waiter).is_ready() {
-				return Poll::Ready(());
-			}
-			let _ = self.poll(waiter);
-			Poll::Pending
-		})
-		.await
 	}
 }
 

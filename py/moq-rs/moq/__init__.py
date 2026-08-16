@@ -42,6 +42,7 @@ from .subscribe import (
     JsonSnapshotConsumer,
     JsonStreamConsumer,
     MediaConsumer,
+    MediaGroupConsumer,
     TrackConsumer,
 )
 from .types import (
@@ -110,6 +111,7 @@ __all__ = [
     "JsonStreamConsumer",
     "JsonStreamProducer",
     "MediaConsumer",
+    "MediaGroupConsumer",
     "MediaProducer",
     "MediaStreamProducer",
     "OriginConsumer",

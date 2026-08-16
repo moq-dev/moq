@@ -5,14 +5,16 @@
 //! supplies the certificate chain to serve, loaded from disk or self-signed on
 //! startup, and optionally the roots that authenticate mTLS clients.
 //!
-//! Certificates loaded from disk are watched and hot reloaded, so rotating them
-//! needs no restart. [`Certificates`] reads the current set back out.
+//! Certificates, keys, and custom root CAs loaded from disk are normally hot
+//! reloaded for new handshakes. Quiche servers are the exception: all inbound
+//! TLS material is fixed when the listener is built. [`Certificates`] reads the
+//! current served set back out.
 
 use crate::crypto;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::{fs, io};
 
 #[cfg(all(
@@ -20,9 +22,6 @@ use std::{fs, io};
 	any(feature = "aws-lc-rs", feature = "ring")
 ))]
 use rustls::pki_types::PrivatePkcs8KeyDer;
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
-use std::sync::RwLock;
-
 /// Errors loading or generating TLS certificates and keys.
 ///
 /// Shared by the client TLS config and the quinn/noq servers so each backend's
@@ -127,6 +126,10 @@ pub enum Error {
 	#[error("failed to build client certificate verifier")]
 	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
 
+	/// The server-certificate verifier couldn't be built from the configured roots.
+	#[error("failed to build server certificate verifier")]
+	ServerVerifier(#[source] rustls::client::VerifierBuilderError),
+
 	/// Generating a self-signed certificate failed.
 	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
 	#[error(transparent)]
@@ -155,6 +158,19 @@ pub(crate) fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 		.map_err(Error::Read)
 }
 
+/// Load every configured custom root, rejecting a path that contains no certificates.
+fn read_roots(paths: &[PathBuf]) -> Result<Vec<CertificateDer<'static>>> {
+	let mut roots = Vec::new();
+	for path in paths {
+		let certs = read_certs(path)?;
+		if certs.is_empty() {
+			return Err(Error::EmptyRoots(path.clone()));
+		}
+		roots.extend(certs);
+	}
+	Ok(roots)
+}
+
 // ── Client ──────────────────────────────────────────────────────────
 
 /// TLS configuration for the client.
@@ -173,6 +189,8 @@ pub struct Client {
 	/// roots are only loaded when no custom root is given, so passing a root
 	/// replaces them; set `--client-tls-system-roots` to trust both (e.g. to reach a
 	/// local relay with a private CA and a remote one with a public CA).
+	/// Files are hot reloaded for new connections, retaining the last valid roots
+	/// if a rotation is temporarily missing or malformed.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[arg(id = "client-tls-root", long = "client-tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
@@ -299,6 +317,148 @@ struct Deprecated {
 	disable_verify: Option<bool>,
 }
 
+/// The last valid contents of a set of custom root files.
+///
+/// Quiche consumes concrete DER roots per connection, while rustls consumes a
+/// verifier. Keeping the parsed roots here gives both paths identical
+/// last-known-good behavior when a file is briefly absent or incomplete during
+/// rotation.
+#[derive(Clone)]
+pub(crate) struct CustomRoots {
+	paths: Vec<PathBuf>,
+	current: Arc<RwLock<Vec<CertificateDer<'static>>>>,
+}
+
+impl CustomRoots {
+	fn new(paths: Vec<PathBuf>) -> Result<Self> {
+		let current = read_roots(&paths)?;
+		Ok(Self {
+			paths,
+			current: Arc::new(RwLock::new(current)),
+		})
+	}
+
+	fn load(&self) -> Result<Vec<CertificateDer<'static>>> {
+		read_roots(&self.paths)
+	}
+
+	fn replace(&self, roots: Vec<CertificateDer<'static>>) {
+		*self.current.write().unwrap_or_else(std::sync::PoisonError::into_inner) = roots;
+	}
+
+	pub(crate) fn current(&self) -> Vec<CertificateDer<'static>> {
+		self.current
+			.read()
+			.unwrap_or_else(std::sync::PoisonError::into_inner)
+			.clone()
+	}
+
+	/// Refresh from disk, retaining and returning the last valid roots on failure.
+	#[cfg(feature = "quiche")]
+	pub(crate) fn refresh(&self) -> Vec<CertificateDer<'static>> {
+		self.refresh_with(|| self.load())
+	}
+
+	#[cfg(feature = "quiche")]
+	fn refresh_with(
+		&self,
+		load: impl FnOnce() -> Result<Vec<CertificateDer<'static>>>,
+	) -> Vec<CertificateDer<'static>> {
+		let mut current = self.current.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+		match load().and_then(|roots| {
+			root_store(&roots)?;
+			Ok(roots)
+		}) {
+			Ok(roots) => {
+				*current = roots.clone();
+				roots
+			}
+			Err(err) => {
+				tracing::warn!(%err, "failed to reload client root certificates; retaining previous roots");
+				current.clone()
+			}
+		}
+	}
+}
+
+#[cfg(feature = "watch")]
+struct ReloadState<T: ?Sized + Send + Sync + 'static> {
+	current: RwLock<Arc<T>>,
+	build: Box<dyn Fn() -> Result<Arc<T>> + Send + Sync>,
+	role: &'static str,
+}
+
+#[cfg(feature = "watch")]
+impl<T: ?Sized + Send + Sync + 'static> ReloadState<T> {
+	fn reload(&self) {
+		match (self.build)() {
+			Ok(next) => {
+				*self.current.write().unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+				tracing::info!(role = self.role, "reloaded TLS root certificates");
+			}
+			Err(err) => {
+				tracing::warn!(%err, role = self.role, "failed to reload TLS root certificates; retaining previous roots");
+			}
+		}
+	}
+
+	fn current(&self) -> Arc<T> {
+		self.current
+			.read()
+			.unwrap_or_else(std::sync::PoisonError::into_inner)
+			.clone()
+	}
+}
+
+/// A verifier whose implementation is replaced after its root files change.
+#[cfg(feature = "watch")]
+struct Reloading<T: ?Sized + Send + Sync + 'static> {
+	state: Arc<ReloadState<T>>,
+	// Holds the OS watcher alive for exactly as long as the TLS config.
+	_watcher: Option<notify::RecommendedWatcher>,
+}
+
+#[cfg(feature = "watch")]
+impl<T: ?Sized + Send + Sync + 'static> Reloading<T> {
+	fn new(
+		paths: &[PathBuf],
+		initial: Arc<T>,
+		role: &'static str,
+		build: impl Fn() -> Result<Arc<T>> + Send + Sync + 'static,
+	) -> Self {
+		let state = Arc::new(ReloadState {
+			current: RwLock::new(initial),
+			build: Box::new(build),
+			role,
+		});
+
+		let reload = state.clone();
+		let watcher = match crate::watch::callback(paths, move || reload.reload()) {
+			Ok(watcher) => Some(watcher),
+			Err(err) => {
+				tracing::error!(%err, role, "failed to watch TLS root certificates; hot reload disabled");
+				None
+			}
+		};
+
+		Self {
+			state,
+			_watcher: watcher,
+		}
+	}
+
+	fn current(&self) -> Arc<T> {
+		self.state.current()
+	}
+}
+
+#[cfg(feature = "watch")]
+impl<T: ?Sized + Send + Sync + 'static> std::fmt::Debug for Reloading<T> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Reloading").field("role", &self.state.role).finish()
+	}
+}
+
 /// The resolved server-certificate verification policy.
 ///
 /// Computed once by [Client::verification] and shared by every backend (the
@@ -318,10 +478,7 @@ pub(crate) enum Verification {
 	/// store is trusted too; each backend resolves that its own way (the rustls
 	/// backends use the OS platform verifier, quiche loads the native roots).
 	/// `custom` are extra PEM roots trusted in addition.
-	Roots {
-		custom: Vec<CertificateDer<'static>>,
-		system: bool,
-	},
+	Roots { custom: CustomRoots, system: bool },
 }
 
 impl Client {
@@ -407,20 +564,13 @@ impl Client {
 		// root replaces them unless the system roots are explicitly re-enabled.
 		let system = system_roots.unwrap_or(roots.is_empty());
 
-		let mut custom = Vec::new();
-		for root in &roots {
-			let certs = read_certs(root)?;
-			if certs.is_empty() {
-				return Err(Error::EmptyRoots(root.clone()));
-			}
-			custom.extend(certs);
-		}
+		let custom = CustomRoots::new(roots)?;
 
 		// WebPKI needs at least one trusted root to ever succeed, so fail fast
 		// instead of producing confusing handshake errors later. With system
 		// trust enabled the verifier supplies its own roots, so custom roots are
 		// optional.
-		if !system && custom.is_empty() {
+		if !system && custom.current().is_empty() {
 			return Err(Error::NoRoots);
 		}
 
@@ -455,56 +605,86 @@ impl Client {
 	pub fn build(&self) -> Result<rustls::ClientConfig> {
 		let provider = crypto::provider();
 		let verification = self.verification()?;
+		let reloadable_roots = cfg!(feature = "watch")
+			&& matches!(&verification, Verification::Roots { custom, .. } if !custom.paths.is_empty());
 
 		// Allow TLS 1.2 in addition to 1.3 for WebSocket compatibility.
 		// QUIC always negotiates TLS 1.3 regardless of this setting.
 		let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
 			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?;
 
-		// Install the server-certificate verifier. Disabled/Fingerprints get a
-		// placeholder empty store here and swap in their own verifier below.
-		let builder = match &verification {
-			Verification::Roots { custom, system: true } => Self::system_verifier(builder, custom, &provider)?,
-			Verification::Roots { custom, system: false } => builder.with_root_certificates(root_store(custom)?),
-			Verification::Disabled | Verification::Fingerprints(_) => {
-				builder.with_root_certificates(rustls::RootCertStore::empty())
-			}
-		};
-
-		let mut tls = self.with_client_auth(builder)?;
-
-		match verification {
+		let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> = match verification {
 			Verification::Disabled => {
 				tracing::warn!(
 					"TLS server certificate verification is disabled; A man-in-the-middle attack is possible."
 				);
-				tls.dangerous()
-					.set_certificate_verifier(Arc::new(NoCertificateVerification(provider)));
+				Arc::new(NoCertificateVerification(provider))
 			}
 			Verification::Fingerprints(fingerprints) => {
 				let fingerprints = fingerprints.into_iter().map(|fp| fp.to_vec()).collect();
-				let verifier = FingerprintVerifier::new(provider, fingerprints);
-				tls.dangerous().set_certificate_verifier(Arc::new(verifier));
+				Arc::new(FingerprintVerifier::new(provider, fingerprints))
 			}
-			// The verifier was installed by the builder above.
-			Verification::Roots { .. } => {}
+			Verification::Roots { custom, system } => Self::root_server_verifier(custom, system, provider)?,
+		};
+
+		let builder = builder.dangerous().with_custom_certificate_verifier(verifier);
+		let mut tls = self.with_client_auth(builder)?;
+
+		// A resumed session skips certificate verification. Disable resumption when
+		// roots can change underneath this config so removing a CA takes effect on
+		// every subsequent handshake.
+		if reloadable_roots {
+			tls.resumption = rustls::client::Resumption::disabled();
 		}
 
 		Ok(tls)
 	}
 
-	/// Build the verifier for system/default trust on the rustls backends.
+	/// Build a reloadable verifier for custom roots and system/default trust.
 	///
 	/// Uses the OS-native platform verifier (Keychain/SecTrust, Windows
 	/// CryptoAPI, or the native store on Linux) everywhere it works, optionally
 	/// extended with `custom` PEM roots. Android's platform verifier needs JNI
 	/// setup (see [`init_android`]); until that has run we trust the bundled
 	/// Mozilla roots so verification still works out of the box.
-	fn system_verifier(
-		builder: rustls::ConfigBuilder<rustls::ClientConfig, rustls::WantsVerifier>,
+	fn root_server_verifier(
+		custom: CustomRoots,
+		system: bool,
+		provider: crypto::Provider,
+	) -> Result<Arc<dyn rustls::client::danger::ServerCertVerifier>> {
+		let initial = Self::build_root_server_verifier(&custom.current(), system, &provider)?;
+
+		#[cfg(feature = "watch")]
+		if !custom.paths.is_empty() {
+			let paths = custom.paths.clone();
+			let reload = custom.clone();
+			let reload_provider = provider.clone();
+			let verifier = ReloadingServerVerifier::new(&paths, initial, move || {
+				let roots = reload.load()?;
+				let verifier = Self::build_root_server_verifier(&roots, system, &reload_provider)?;
+				reload.replace(roots);
+				Ok(verifier)
+			});
+			return Ok(Arc::new(verifier));
+		}
+
+		Ok(initial)
+	}
+
+	fn build_root_server_verifier(
 		custom: &[CertificateDer<'static>],
+		system: bool,
 		provider: &crypto::Provider,
-	) -> Result<rustls::ConfigBuilder<rustls::ClientConfig, rustls::client::WantsClientCert>> {
+	) -> Result<Arc<dyn rustls::client::danger::ServerCertVerifier>> {
+		if !system {
+			let roots = root_store(custom)?;
+			let verifier =
+				rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
+					.build()
+					.map_err(Error::ServerVerifier)?;
+			return Ok(verifier);
+		}
+
 		// Android's platform verifier needs JNI init (see `init_android`) and,
 		// unlike the other platforms, can't be extended with custom roots. So use
 		// it only once initialized and with no custom roots; otherwise trust the
@@ -513,7 +693,7 @@ impl Client {
 		{
 			if ANDROID_INITIALIZED.load(std::sync::atomic::Ordering::Acquire) && custom.is_empty() {
 				let verifier = rustls_platform_verifier::Verifier::new(provider.clone())?;
-				return Ok(builder.dangerous().with_custom_certificate_verifier(Arc::new(verifier)));
+				return Ok(Arc::new(verifier));
 			}
 
 			let mut roots = rustls::RootCertStore::empty();
@@ -521,7 +701,11 @@ impl Client {
 			for cert in custom {
 				roots.add(cert.clone()).map_err(Error::AddRoot)?;
 			}
-			Ok(builder.with_root_certificates(roots))
+			let verifier =
+				rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
+					.build()
+					.map_err(Error::ServerVerifier)?;
+			Ok(verifier)
 		}
 
 		#[cfg(not(target_os = "android"))]
@@ -531,7 +715,7 @@ impl Client {
 			} else {
 				rustls_platform_verifier::Verifier::new_with_extra_roots(custom.iter().cloned(), provider.clone())?
 			};
-			Ok(builder.dangerous().with_custom_certificate_verifier(Arc::new(verifier)))
+			Ok(Arc::new(verifier))
 		}
 	}
 
@@ -636,7 +820,9 @@ pub struct Server {
 	/// do not present a certificate are unaffected.
 	///
 	/// Plain-TLS listeners built via [`Self::server_config`] also use these roots
-	/// for optional mTLS.
+	/// for optional mTLS. Root files are hot reloaded for new handshakes on the
+	/// rustls-based backends; quiche servers require a restart because their TLS
+	/// hook fixes client-auth roots when the listener is built.
 	#[arg(
 		long = "server-tls-root",
 		id = "server-tls-root",
@@ -649,19 +835,53 @@ pub struct Server {
 }
 
 impl Server {
+	/// Disable cached client authentication when client roots can reload.
+	#[cfg(feature = "watch")]
+	pub(crate) fn disable_resumption(&self, tls: &mut rustls::ServerConfig) {
+		if !self.root.is_empty() {
+			tls.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+			tls.send_tls13_tickets = 0;
+		}
+	}
+
 	/// Load all configured root CAs into a [`rustls::RootCertStore`].
 	pub fn load_roots(&self) -> Result<rustls::RootCertStore> {
-		let mut roots = rustls::RootCertStore::empty();
-		for path in &self.root {
-			let certs = read_certs(path)?;
-			if certs.is_empty() {
-				return Err(Error::Empty);
-			}
-			for cert in certs {
-				roots.add(cert).map_err(Error::AddRoot)?;
-			}
+		root_store(&read_roots(&self.root)?)
+	}
+
+	/// Build the optional-client-auth verifier, reloading configured roots in place.
+	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+	pub(crate) fn client_verifier(
+		&self,
+		provider: crypto::Provider,
+	) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> {
+		let initial = Self::build_client_verifier(&self.root, &provider)?;
+
+		#[cfg(feature = "watch")]
+		{
+			let paths = self.root.clone();
+			let reload_paths = paths.clone();
+			let reload_provider = provider.clone();
+			let verifier = ReloadingClientVerifier::new(&paths, initial, move || {
+				Self::build_client_verifier(&reload_paths, &reload_provider)
+			});
+			Ok(Arc::new(verifier))
 		}
-		Ok(roots)
+
+		#[cfg(not(feature = "watch"))]
+		Ok(initial)
+	}
+
+	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+	fn build_client_verifier(
+		paths: &[PathBuf],
+		provider: &crypto::Provider,
+	) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> {
+		let roots = root_store(&read_roots(paths)?)?;
+		rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone())
+			.allow_unauthenticated()
+			.build()
+			.map_err(Error::ClientVerifier)
 	}
 
 	/// Build a [`rustls::ServerConfig`] for a plain-TLS (non-QUIC) server, e.g. an
@@ -694,15 +914,12 @@ fn server_config(config: &Server, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::Serv
 	let mut tls = if config.root.is_empty() {
 		builder.with_no_client_auth().with_cert_resolver(certs)
 	} else {
-		let roots = config.load_roots()?;
-		let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
-			.allow_unauthenticated()
-			.build()
-			.map_err(Error::ClientVerifier)?;
+		let verifier = config.client_verifier(provider)?;
 		builder.with_client_cert_verifier(verifier).with_cert_resolver(certs)
 	};
 
 	tls.alpn_protocols = alpn;
+	config.disable_resumption(&mut tls);
 	Ok(Arc::new(tls))
 }
 
@@ -804,6 +1021,141 @@ impl Certificates {
 		}
 		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
 		Vec::new()
+	}
+}
+
+/// Delegates each server-certificate check to the latest valid root verifier.
+#[cfg(feature = "watch")]
+#[derive(Debug)]
+struct ReloadingServerVerifier {
+	inner: Reloading<dyn rustls::client::danger::ServerCertVerifier>,
+}
+
+#[cfg(feature = "watch")]
+impl ReloadingServerVerifier {
+	fn new(
+		paths: &[PathBuf],
+		initial: Arc<dyn rustls::client::danger::ServerCertVerifier>,
+		build: impl Fn() -> Result<Arc<dyn rustls::client::danger::ServerCertVerifier>> + Send + Sync + 'static,
+	) -> Self {
+		Self {
+			inner: Reloading::new(paths, initial, "client", build),
+		}
+	}
+}
+
+#[cfg(feature = "watch")]
+impl rustls::client::danger::ServerCertVerifier for ReloadingServerVerifier {
+	fn verify_server_cert(
+		&self,
+		end_entity: &CertificateDer<'_>,
+		intermediates: &[CertificateDer<'_>],
+		server_name: &ServerName<'_>,
+		ocsp_response: &[u8],
+		now: UnixTime,
+	) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+		self.inner
+			.current()
+			.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+	}
+
+	fn verify_tls12_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &rustls::DigitallySignedStruct,
+	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+		self.inner.current().verify_tls12_signature(message, cert, dss)
+	}
+
+	fn verify_tls13_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &rustls::DigitallySignedStruct,
+	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+		self.inner.current().verify_tls13_signature(message, cert, dss)
+	}
+
+	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+		self.inner.current().supported_verify_schemes()
+	}
+
+	fn requires_raw_public_keys(&self) -> bool {
+		self.inner.current().requires_raw_public_keys()
+	}
+}
+
+/// Delegates each client-certificate check to the latest valid root verifier.
+#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+#[derive(Debug)]
+struct ReloadingClientVerifier {
+	inner: Reloading<dyn rustls::server::danger::ClientCertVerifier>,
+}
+
+#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+impl ReloadingClientVerifier {
+	fn new(
+		paths: &[PathBuf],
+		initial: Arc<dyn rustls::server::danger::ClientCertVerifier>,
+		build: impl Fn() -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> + Send + Sync + 'static,
+	) -> Self {
+		Self {
+			inner: Reloading::new(paths, initial, "server", build),
+		}
+	}
+}
+
+#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+impl rustls::server::danger::ClientCertVerifier for ReloadingClientVerifier {
+	fn offer_client_auth(&self) -> bool {
+		self.inner.current().offer_client_auth()
+	}
+
+	fn client_auth_mandatory(&self) -> bool {
+		self.inner.current().client_auth_mandatory()
+	}
+
+	fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+		// A live verifier cannot return a borrowed slice from a replaceable value.
+		// Empty hints ask clients to offer any configured identity, which rustls
+		// then verifies against the current roots.
+		&[]
+	}
+
+	fn verify_client_cert(
+		&self,
+		end_entity: &CertificateDer<'_>,
+		intermediates: &[CertificateDer<'_>],
+		now: UnixTime,
+	) -> std::result::Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+		self.inner.current().verify_client_cert(end_entity, intermediates, now)
+	}
+
+	fn verify_tls12_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &rustls::DigitallySignedStruct,
+	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+		self.inner.current().verify_tls12_signature(message, cert, dss)
+	}
+
+	fn verify_tls13_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &rustls::DigitallySignedStruct,
+	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+		self.inner.current().verify_tls13_signature(message, cert, dss)
+	}
+
+	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+		self.inner.current().supported_verify_schemes()
+	}
+
+	fn requires_raw_public_keys(&self) -> bool {
+		self.inner.current().requires_raw_public_keys()
 	}
 }
 
@@ -955,6 +1307,8 @@ mod tests {
 	use super::*;
 	use rustls::client::danger::ServerCertVerifier;
 	use rustls::pki_types::ServerName;
+	#[cfg(feature = "watch")]
+	use rustls::server::danger::ClientCertVerifier;
 
 	fn self_signed() -> CertificateDer<'static> {
 		let key = rcgen::KeyPair::generate().unwrap();
@@ -1108,6 +1462,350 @@ mod tests {
 		file.write_all(cert.pem().as_bytes()).unwrap();
 		let path = file.path().to_path_buf();
 		(file, path)
+	}
+
+	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	fn signed_certificates() -> (
+		String,
+		CertificateDer<'static>,
+		PrivateKeyDer<'static>,
+		CertificateDer<'static>,
+		PrivateKeyDer<'static>,
+	) {
+		use rcgen::{BasicConstraints, ExtendedKeyUsagePurpose, IsCa, Issuer};
+
+		let ca_key = rcgen::KeyPair::generate().unwrap();
+		let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+		ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+		let ca = ca_params.self_signed(&ca_key).unwrap();
+		let issuer = Issuer::from_params(&ca_params, &ca_key);
+
+		let server_key = rcgen::KeyPair::generate().unwrap();
+		let server_key_der = PrivatePkcs8KeyDer::from(server_key.serialize_der());
+		let mut server_params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+		server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+		let server = server_params.signed_by(&server_key, &issuer).unwrap();
+
+		let client_key = rcgen::KeyPair::generate().unwrap();
+		let client_key_der = PrivatePkcs8KeyDer::from(client_key.serialize_der());
+		let mut client_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+		client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+		let client = client_params.signed_by(&client_key, &issuer).unwrap();
+
+		(
+			ca.pem(),
+			server.into(),
+			server_key_der.into(),
+			client.into(),
+			client_key_der.into(),
+		)
+	}
+
+	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	fn handshake_kinds(
+		client: Arc<rustls::ClientConfig>,
+		server: Arc<rustls::ServerConfig>,
+	) -> std::result::Result<(rustls::HandshakeKind, rustls::HandshakeKind), rustls::Error> {
+		let name = ServerName::try_from("localhost").unwrap();
+		let mut client = rustls::ClientConnection::new(client, name).unwrap();
+		let mut server = rustls::ServerConnection::new(server).unwrap();
+
+		for _ in 0..100 {
+			let mut client_data = Vec::new();
+			client.write_tls(&mut client_data).unwrap();
+			if !client_data.is_empty() {
+				server.read_tls(&mut client_data.as_slice()).unwrap();
+				server.process_new_packets()?;
+			}
+
+			let mut server_data = Vec::new();
+			server.write_tls(&mut server_data).unwrap();
+			if !server_data.is_empty() {
+				client.read_tls(&mut server_data.as_slice()).unwrap();
+				client.process_new_packets()?;
+			}
+
+			if !client.is_handshaking() && !server.is_handshaking() && !client.wants_write() && !server.wants_write() {
+				return Ok((client.handshake_kind().unwrap(), server.handshake_kind().unwrap()));
+			}
+		}
+
+		panic!("TLS handshake did not settle");
+	}
+
+	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[test]
+	fn reloadable_roots_disable_session_resumption() {
+		use std::io::Write;
+
+		let (ca, server_cert, server_key, _, _) = signed_certificates();
+		let mut root_file = tempfile::NamedTempFile::new().unwrap();
+		root_file.write_all(ca.as_bytes()).unwrap();
+		let roots = read_roots(&[root_file.path().to_path_buf()]).unwrap();
+		let provider = crypto::provider();
+
+		let control = rustls::ClientConfig::builder_with_provider(provider.clone())
+			.with_safe_default_protocol_versions()
+			.unwrap()
+			.with_root_certificates(root_store(&roots).unwrap())
+			.with_no_client_auth();
+		let reloadable = Client {
+			root: vec![root_file.path().to_path_buf()],
+			..Default::default()
+		}
+		.build()
+		.unwrap();
+		let server = rustls::ServerConfig::builder_with_provider(provider)
+			.with_safe_default_protocol_versions()
+			.unwrap()
+			.with_no_client_auth()
+			.with_single_cert(vec![server_cert], server_key)
+			.unwrap();
+		let server = Arc::new(server);
+
+		let control = Arc::new(control);
+		assert_eq!(
+			handshake_kinds(control.clone(), server.clone()).unwrap().0,
+			rustls::HandshakeKind::Full
+		);
+		assert_eq!(
+			handshake_kinds(control, server.clone()).unwrap().0,
+			rustls::HandshakeKind::Resumed
+		);
+
+		let reloadable = Arc::new(reloadable);
+		assert_eq!(
+			handshake_kinds(reloadable.clone(), server.clone()).unwrap().0,
+			rustls::HandshakeKind::Full
+		);
+		assert_eq!(
+			handshake_kinds(reloadable, server).unwrap().0,
+			rustls::HandshakeKind::Full
+		);
+	}
+
+	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[test]
+	fn reloadable_client_roots_disable_server_resumption() {
+		use std::io::Write;
+
+		let (ca_a, server_cert, server_key, client_cert, client_key) = signed_certificates();
+		let (ca_b, _, _, _, _) = signed_certificates();
+		let mut root_file = tempfile::NamedTempFile::new().unwrap();
+		root_file.write_all(ca_a.as_bytes()).unwrap();
+		let paths = vec![root_file.path().to_path_buf()];
+		let provider = crypto::provider();
+
+		let build_client = |cert, key| {
+			rustls::ClientConfig::builder_with_provider(provider.clone())
+				.with_safe_default_protocol_versions()
+				.unwrap()
+				.dangerous()
+				.with_custom_certificate_verifier(Arc::new(NoCertificateVerification(provider.clone())))
+				.with_client_auth_cert(vec![cert], key)
+				.unwrap()
+		};
+		let control_client = Arc::new(build_client(client_cert.clone(), client_key.clone_key()));
+		let reloadable_client = Arc::new(build_client(client_cert, client_key));
+
+		let verifier = Server::build_client_verifier(&paths, &provider).unwrap();
+		let control = rustls::ServerConfig::builder_with_provider(provider.clone())
+			.with_safe_default_protocol_versions()
+			.unwrap()
+			.with_client_cert_verifier(verifier)
+			.with_single_cert(vec![server_cert.clone()], server_key.clone_key())
+			.unwrap();
+
+		let initial = Server::build_client_verifier(&paths, &provider).unwrap();
+		let reload_paths = paths.clone();
+		let reload_provider = provider.clone();
+		let verifier = Arc::new(ReloadingClientVerifier::new(&paths, initial, move || {
+			Server::build_client_verifier(&reload_paths, &reload_provider)
+		}));
+		let reload = verifier.inner.state.clone();
+		let mut reloadable = rustls::ServerConfig::builder_with_provider(provider)
+			.with_safe_default_protocol_versions()
+			.unwrap()
+			.with_client_cert_verifier(verifier)
+			.with_single_cert(vec![server_cert], server_key)
+			.unwrap();
+		Server {
+			root: paths,
+			..Default::default()
+		}
+		.disable_resumption(&mut reloadable);
+
+		let control = Arc::new(control);
+		assert_eq!(
+			handshake_kinds(control_client.clone(), control.clone()).unwrap().1,
+			rustls::HandshakeKind::Full
+		);
+		assert_eq!(
+			handshake_kinds(control_client, control).unwrap().1,
+			rustls::HandshakeKind::Resumed
+		);
+
+		let reloadable = Arc::new(reloadable);
+		assert_eq!(
+			handshake_kinds(reloadable_client.clone(), reloadable.clone())
+				.unwrap()
+				.1,
+			rustls::HandshakeKind::Full
+		);
+
+		std::fs::write(root_file.path(), ca_b).unwrap();
+		reload.reload();
+		assert!(handshake_kinds(reloadable_client, reloadable).is_err());
+	}
+
+	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[test]
+	fn custom_roots_reload_for_new_client_and_server_handshakes() {
+		use std::io::Write;
+
+		let (ca_a, server_a, _, client_a, _) = signed_certificates();
+		let (ca_b, server_b, _, client_b, _) = signed_certificates();
+		let mut root_file = tempfile::NamedTempFile::new().unwrap();
+		root_file.write_all(ca_a.as_bytes()).unwrap();
+		let paths = vec![root_file.path().to_path_buf()];
+		let provider = crypto::provider();
+
+		let custom = CustomRoots::new(paths.clone()).unwrap();
+		let initial = Client::build_root_server_verifier(&custom.current(), false, &provider).unwrap();
+		let reload_custom = custom.clone();
+		let reload_provider = provider.clone();
+		let server_verifier = ReloadingServerVerifier::new(&paths, initial, move || {
+			let roots = reload_custom.load()?;
+			let verifier = Client::build_root_server_verifier(&roots, false, &reload_provider)?;
+			reload_custom.replace(roots);
+			Ok(verifier)
+		});
+
+		let initial = Server::build_client_verifier(&paths, &provider).unwrap();
+		let reload_paths = paths.clone();
+		let reload_provider = provider.clone();
+		let client_verifier = ReloadingClientVerifier::new(&paths, initial, move || {
+			Server::build_client_verifier(&reload_paths, &reload_provider)
+		});
+
+		let name = ServerName::try_from("localhost").unwrap();
+		let now = UnixTime::now();
+		assert!(
+			server_verifier
+				.verify_server_cert(&server_a, &[], &name, &[], now)
+				.is_ok()
+		);
+		assert!(
+			server_verifier
+				.verify_server_cert(&server_b, &[], &name, &[], now)
+				.is_err()
+		);
+		assert!(client_verifier.verify_client_cert(&client_a, &[], now).is_ok());
+		assert!(client_verifier.verify_client_cert(&client_b, &[], now).is_err());
+
+		std::fs::write(root_file.path(), ca_b).unwrap();
+		server_verifier.inner.state.reload();
+		client_verifier.inner.state.reload();
+
+		assert!(
+			server_verifier
+				.verify_server_cert(&server_a, &[], &name, &[], now)
+				.is_err()
+		);
+		assert!(client_verifier.verify_client_cert(&client_a, &[], now).is_err());
+
+		// A malformed replacement must not erase the last valid verifier.
+		std::fs::write(root_file.path(), "not a PEM certificate").unwrap();
+		server_verifier.inner.state.reload();
+		client_verifier.inner.state.reload();
+		assert!(
+			server_verifier
+				.verify_server_cert(&server_b, &[], &name, &[], now)
+				.is_ok()
+		);
+		assert!(client_verifier.verify_client_cert(&client_b, &[], now).is_ok());
+	}
+
+	#[cfg(all(feature = "quiche", feature = "watch"))]
+	#[test]
+	fn custom_root_refresh_retains_last_valid_bundle() {
+		use std::io::Write;
+
+		let (ca_a, _, _, _, _) = signed_certificates();
+		let (ca_b, _, _, _, _) = signed_certificates();
+		let mut root_file = tempfile::NamedTempFile::new().unwrap();
+		root_file.write_all(ca_a.as_bytes()).unwrap();
+		let roots = CustomRoots::new(vec![root_file.path().to_path_buf()]).unwrap();
+		let initial = roots.current();
+
+		std::fs::write(root_file.path(), "not a PEM certificate").unwrap();
+		assert_eq!(roots.refresh(), initial);
+
+		std::fs::write(
+			root_file.path(),
+			"-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n",
+		)
+		.unwrap();
+		assert_eq!(roots.refresh(), initial);
+
+		std::fs::write(root_file.path(), ca_b).unwrap();
+		let rotated = roots.refresh();
+		assert_ne!(rotated, initial);
+		assert_eq!(roots.current(), rotated);
+	}
+
+	#[cfg(all(feature = "quiche", feature = "watch"))]
+	#[test]
+	fn custom_root_refresh_serializes_cache_updates() {
+		let (ca_a, _, _, _, _) = signed_certificates();
+		let (ca_b, _, _, _, _) = signed_certificates();
+		let (ca_c, _, _, _, _) = signed_certificates();
+		let parse = |pem: &str| {
+			CertificateDer::pem_slice_iter(pem.as_bytes())
+				.collect::<std::result::Result<Vec<_>, _>>()
+				.unwrap()
+		};
+		let initial = parse(&ca_a);
+		let bundle_b = parse(&ca_b);
+		let bundle_c = parse(&ca_c);
+		let roots = CustomRoots {
+			paths: Vec::new(),
+			current: Arc::new(RwLock::new(initial)),
+		};
+
+		let (first_loaded_tx, first_loaded_rx) = std::sync::mpsc::sync_channel(0);
+		let (release_first_tx, release_first_rx) = std::sync::mpsc::sync_channel(0);
+		let first_roots = roots.clone();
+		let first = std::thread::spawn(move || {
+			first_roots.refresh_with(|| {
+				first_loaded_tx.send(()).unwrap();
+				release_first_rx.recv().unwrap();
+				Ok(bundle_b)
+			})
+		});
+		first_loaded_rx.recv().unwrap();
+
+		let (second_ready_tx, second_ready_rx) = std::sync::mpsc::sync_channel(0);
+		let (second_loaded_tx, second_loaded_rx) = std::sync::mpsc::channel();
+		let second_roots = roots.clone();
+		let expected = bundle_c.clone();
+		let second = std::thread::spawn(move || {
+			second_ready_tx.send(()).unwrap();
+			second_roots.refresh_with(|| {
+				second_loaded_tx.send(()).unwrap();
+				Ok(bundle_c)
+			})
+		});
+		second_ready_rx.recv().unwrap();
+		let overlapped = second_loaded_rx
+			.recv_timeout(std::time::Duration::from_millis(100))
+			.is_ok();
+
+		release_first_tx.send(()).unwrap();
+		first.join().unwrap();
+		second.join().unwrap();
+		assert!(!overlapped, "root cache refresh transactions must not overlap");
+		assert_eq!(roots.current(), expected);
 	}
 
 	#[test]

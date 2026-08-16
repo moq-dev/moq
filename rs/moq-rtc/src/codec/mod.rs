@@ -51,18 +51,115 @@ pub trait Bridge: Send {
 	fn abort(self: Box<Self>, err: moq_net::Error);
 }
 
-/// A bridge's video catalog entry, removed however the bridge ends.
-///
-/// A separate value rather than a `Drop` on the bridge itself, so a bridge's terminal
-/// [`Bridge::abort`] can consume its track producer.
-pub(crate) struct VideoRendition {
-	pub catalog: moq_mux::catalog::Producer,
-	pub name: String,
+/// A mux importer whose catalog configuration is resolved from its first frame.
+pub(crate) trait DeferredImport: Send + Sized {
+	/// Create the importer and its unresolved catalog rendition.
+	fn create(track: moq_net::track::Producer, reserved: moq_mux::catalog::Reserved) -> moq_mux::Result<Self>;
+
+	/// Decode one complete codec frame.
+	fn decode(&mut self, frame: Bytes, pts: moq_net::Timestamp) -> moq_mux::Result<()>;
+
+	/// Abort the active media track.
+	fn abort(self, err: moq_net::Error);
 }
 
-impl Drop for VideoRendition {
-	fn drop(&mut self) {
-		self.catalog.lock().video.renditions.remove(&self.name);
+impl DeferredImport for moq_mux::codec::vp8::Import {
+	fn create(track: moq_net::track::Producer, reserved: moq_mux::catalog::Reserved) -> moq_mux::Result<Self> {
+		Self::new(track, reserved, Default::default())
+	}
+
+	fn decode(&mut self, frame: Bytes, pts: moq_net::Timestamp) -> moq_mux::Result<()> {
+		moq_mux::codec::vp8::Import::decode(self, frame, Some(pts))
+	}
+
+	fn abort(self, err: moq_net::Error) {
+		moq_mux::codec::vp8::Import::abort(self, err);
+	}
+}
+
+impl DeferredImport for moq_mux::codec::vp9::Import {
+	fn create(track: moq_net::track::Producer, reserved: moq_mux::catalog::Reserved) -> moq_mux::Result<Self> {
+		Self::new(track, reserved, Default::default())
+	}
+
+	fn decode(&mut self, frame: Bytes, pts: moq_net::Timestamp) -> moq_mux::Result<()> {
+		moq_mux::codec::vp9::Import::decode(self, frame, Some(pts))
+	}
+
+	fn abort(self, err: moq_net::Error) {
+		moq_mux::codec::vp9::Import::abort(self, err);
+	}
+}
+
+struct PendingVideo {
+	track: moq_net::track::Producer,
+	catalog: moq_mux::catalog::Producer,
+}
+
+enum DeferredState<I> {
+	Pending(Box<PendingVideo>),
+	Active(Box<I>),
+	Failed(Box<moq_net::track::Producer>),
+	Poisoned,
+}
+
+/// Defers a video importer's catalog reservation until its first frame.
+pub(crate) struct DeferredVideo<I> {
+	state: DeferredState<I>,
+}
+
+impl<I: DeferredImport> DeferredVideo<I> {
+	/// Create the media track without gating the initial catalog snapshot.
+	pub fn new(
+		mut broadcast: moq_net::broadcast::Producer,
+		catalog: moq_mux::catalog::Producer,
+		suffix: &str,
+	) -> Result<Self> {
+		let track = broadcast.unique_track(suffix, catalog.track_info())?;
+		Ok(Self {
+			state: DeferredState::Pending(Box::new(PendingVideo { track, catalog })),
+		})
+	}
+
+	/// Decode a frame, creating the importer on first use.
+	pub fn decode(&mut self, frame: Bytes, pts: moq_net::Timestamp) -> Result<()> {
+		if let DeferredState::Active(import) = &mut self.state {
+			return import.decode(frame, pts).map_err(Into::into);
+		}
+
+		let DeferredState::Pending(pending) = std::mem::replace(&mut self.state, DeferredState::Poisoned) else {
+			return Err(crate::Error::Other(anyhow::anyhow!(
+				"video bridge initialization already failed"
+			)));
+		};
+		let reserved = pending.catalog.reserve();
+		let abort = pending.track.clone();
+		let import = match I::create(pending.track, reserved) {
+			Ok(import) => import,
+			Err(err) => {
+				self.state = DeferredState::Failed(Box::new(abort));
+				return Err(err.into());
+			}
+		};
+		self.state = DeferredState::Active(Box::new(import));
+		let DeferredState::Active(import) = &mut self.state else {
+			unreachable!();
+		};
+		import.decode(frame, pts).map_err(Into::into)
+	}
+
+	/// Abort the media track in either lifecycle state.
+	pub fn abort(self, err: moq_net::Error) {
+		match self.state {
+			DeferredState::Pending(pending) => {
+				let _ = pending.track.abort(err);
+			}
+			DeferredState::Active(import) => import.abort(err),
+			DeferredState::Failed(track) => {
+				let _ = track.abort(err);
+			}
+			DeferredState::Poisoned => {}
+		}
 	}
 }
 

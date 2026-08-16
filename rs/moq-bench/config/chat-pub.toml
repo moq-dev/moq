@@ -1,0 +1,21 @@
+# Chat rooms, publisher half of the 1:N fanout pair. Run this against the relay
+# alongside chat-sub.toml (another process or host): this instance is the small
+# set of busy rooms, the other is the audience. Both use the default broadcast
+# namespace, so the subscribers discover these rooms via announcements.
+
+startup = "5s"
+report = "5s"
+
+# A: a handful of rooms
+connections = 10
+# B: one broadcast per room
+broadcasts = 1
+# C: rooms publish only
+subscribe = 0
+# D: messages per second per room
+fps = "1:10"
+# E: bytes per message. The floor sits above the JSON keyframe header (roughly
+# 170 bytes), so every rolled size is delivered exactly.
+frame_size = "200:400"
+# F: each group is a lone JSON keyframe
+group_size = 0

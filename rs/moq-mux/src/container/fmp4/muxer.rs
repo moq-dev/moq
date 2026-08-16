@@ -7,7 +7,7 @@ use hang::catalog::{AudioConfig, Container as CatalogContainer, VideoConfig};
 
 use crate::catalog::hang::Container as HangContainer;
 use crate::container::Frame;
-use crate::container::source::{VideoTransform, build_video_transform};
+use crate::container::source::{VideoTransform, build_video_transform, catalog_dimensions, codec_dimensions};
 
 use super::export::{
 	apply_codec_durations, catalog_timescale_audio, catalog_timescale_video, extract_init, infer_missing_durations,
@@ -42,8 +42,8 @@ enum Kind {
 ///    [`fragmenter`](Self::fragmenter) instead cuts a stream into one separately addressable
 ///    fragment per frame, for a consumer that stores media per encoded frame.
 ///
-/// For inline-parameter-set codecs (catalog `description` absent), [`init`](Self::init) returns
-/// `None` until a group has been [`read`](Self::read) to resolve the config from a keyframe.
+/// For video missing codec configuration or geometry, [`init`](Self::init) returns `None` until a
+/// group has been [`read`](Self::read) to resolve the missing fields from a keyframe.
 pub struct Muxer {
 	kind: Kind,
 	container: HangContainer,
@@ -64,14 +64,22 @@ impl Muxer {
 	pub fn video(config: &VideoConfig) -> crate::Result<Self> {
 		let container = (&config.container).try_into()?;
 		let framerate = super::usable_video_framerate(config).unwrap_or(30.0);
+		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
+		let mut config = config.clone();
+		if catalog_dimensions(&config).is_none()
+			&& let Some((width, height)) = codec_dimensions(&config.codec, description.as_deref(), &[])?
+		{
+			config.coded_width = Some(width);
+			config.coded_height = Some(height);
+		}
 		Ok(Self {
 			container,
-			transform: build_video_transform(config),
-			description: config.description.as_ref().filter(|b| !b.is_empty()).cloned(),
-			timescale: moq_net::Timescale::new(catalog_timescale_video(config)?).map_err(Error::from)?,
+			transform: build_video_transform(&config),
+			description,
+			timescale: moq_net::Timescale::new(catalog_timescale_video(&config)?).map_err(Error::from)?,
 			default_frame: Duration::from_secs_f64(1.0 / framerate),
 			opus: false,
-			kind: Kind::Video(config.clone()),
+			kind: Kind::Video(config),
 		})
 	}
 
@@ -138,6 +146,7 @@ impl Muxer {
 		while let Some(frames) = self.container.read(group).await? {
 			for frame in frames {
 				let Some(transform) = self.transform.as_mut() else {
+					self.resolve_video_dimensions(&frame.payload)?;
 					out.push(frame);
 					continue;
 				};
@@ -149,6 +158,7 @@ impl Muxer {
 				{
 					self.description = Some(d.clone());
 				}
+				self.resolve_video_dimensions(&frame.payload)?;
 				if let Some(payload) = payload {
 					out.push(Frame { payload, ..frame });
 				}
@@ -160,17 +170,38 @@ impl Muxer {
 		Ok(out)
 	}
 
+	fn resolve_video_dimensions(&mut self, payload: &[u8]) -> crate::Result<()> {
+		let Kind::Video(config) = &mut self.kind else {
+			return Ok(());
+		};
+		if catalog_dimensions(config).is_some() {
+			return Ok(());
+		}
+		if let Some((width, height)) = codec_dimensions(&config.codec, self.description.as_deref(), payload)? {
+			config.coded_width = Some(width);
+			config.coded_height = Some(height);
+		}
+		Ok(())
+	}
+
 	/// Build the rendition's CMAF init segment (ftyp+moov), or `None` if it isn't buildable yet.
 	///
 	/// A `Cmaf` rendition's catalog init passes through (with the track id normalized to match
 	/// [`fragment`](Self::fragment)); a `Legacy`/`Loc` rendition's is synthesized from the catalog
-	/// config. `None` means an inline-parameter-set video rendition whose codec config hasn't been
-	/// resolved yet: [`read`](Self::read) a group (its keyframe carries the parameter sets) and call
-	/// again.
+	/// config. `None` means a video rendition whose codec config or geometry hasn't been resolved
+	/// yet: [`read`](Self::read) a group (its keyframe carries those fields) and call again.
 	pub fn init(&self) -> crate::Result<Option<Bytes>> {
 		// An inline codec carries its config in-band, so the init can't be built until a keyframe
 		// group has been read.
 		if self.transform.is_some() && self.description.is_none() {
+			return Ok(None);
+		}
+		if matches!(
+			self.catalog_container(),
+			CatalogContainer::Legacy | CatalogContainer::Loc
+		) && let Kind::Video(config) = &self.kind
+			&& catalog_dimensions(config).is_none()
+		{
 			return Ok(None);
 		}
 
@@ -318,9 +349,61 @@ mod tests {
 		assert_eq!(decoded[1].timestamp.as_micros(), 10_033_000);
 	}
 
+	#[tokio::test]
+	async fn dimensionless_vp8_init_waits_for_keyframe_geometry() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("v", None)
+			.unwrap();
+		let mut subscriber = track.subscribe(None);
+		let mut producer = crate::container::Producer::new(track, HangContainer::Legacy);
+		producer
+			.write(Frame {
+				timestamp: Timestamp::ZERO,
+				// Key frame tag, start code, and 320x240 geometry.
+				payload: Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00]),
+				keyframe: true,
+				duration: None,
+			})
+			.unwrap();
+		producer.finish().unwrap();
+		let mut group = subscriber.next_group().await.unwrap().expect("a group");
+
+		let config = VideoConfig::new(VideoCodec::VP8);
+		let mut muxer = Muxer::video(&config).unwrap();
+		assert!(muxer.init().unwrap().is_none(), "geometry is unresolved before media");
+
+		let frames = muxer.read(&mut group).await.unwrap();
+		assert_eq!(frames.len(), 1);
+		let init = muxer.init().unwrap().expect("keyframe geometry makes init buildable");
+		let wire = super::super::Wire::from_init(&init).unwrap();
+		let mp4_atom::Codec::Vp08(vp08) = &wire.trak().mdia.minf.stbl.stsd.codecs[0] else {
+			panic!("expected VP8 sample entry");
+		};
+		assert_eq!((vp08.visual.width, vp08.visual.height), (320, 240));
+	}
+
+	#[test]
+	fn malformed_fixed_description_errors_instead_of_waiting_for_geometry() {
+		let mut config = VideoConfig::new(hang::catalog::H264 {
+			profile: 0x42,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		config.description = Some(Bytes::from_static(&[1]));
+
+		assert!(matches!(
+			Muxer::video(&config),
+			Err(crate::Error::H264(crate::codec::h264::Error::AvccTooShort))
+		));
+	}
+
 	// A 30 fps Legacy VP8 rendition: no description needed, so the muxer builds without media.
 	fn video_muxer() -> Muxer {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
 		config.framerate = Some(30.0);
 		Muxer::video(&config).unwrap()
 	}
@@ -391,6 +474,8 @@ mod tests {
 	#[test]
 	fn low_framerate_fallback_fits_mp4_timing_fields() {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
 		config.framerate = Some(0.0011);
 		let muxer = Muxer::video(&config).unwrap();
 		assert_eq!(muxer.timescale().as_u64(), 11);
@@ -487,6 +572,8 @@ mod tests {
 	#[test]
 	fn init_rejects_a_catalog_scale_too_large_for_mdhd() {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
 		config.framerate = Some(5_000_000.0); // 5e9 ticks, past u32::MAX
 		let err = Muxer::video(&config).unwrap().init().unwrap_err();
 		assert!(

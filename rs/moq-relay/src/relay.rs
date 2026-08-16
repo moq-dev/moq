@@ -82,6 +82,7 @@ impl Relay {
 		config.server.quic.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
 
 		let mtls_enabled = !config.server.tls.root.is_empty();
+		let server_versions = config.server.versions();
 
 		#[allow(unused_mut)]
 		let mut server = config.server.init()?;
@@ -130,7 +131,8 @@ impl Relay {
 		let cluster = cluster.with_stats(stats.clone());
 
 		// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
-		let web = Web::new(auth.clone(), cluster.clone(), server.certificates(), config.web);
+		let web =
+			Web::new(auth.clone(), cluster.clone(), server.certificates(), config.web).with_versions(server_versions);
 
 		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
 		// /metrics + /health + /nodes, separate from the customer-facing web server. No-op

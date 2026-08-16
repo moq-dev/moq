@@ -7,7 +7,10 @@ name: Nightly
 # stays silent on the days nobody pushes. `features` is diff-independent for a
 # different reason: it compiles the workspace at feature sets that share almost
 # no artifacts with the default one, which is several minutes of duplicate work
-# that a PR gate can't justify for how rarely it catches something.
+# that a PR gate can't justify for how rarely it catches something. `obs` is
+# diff-independent because its PR-time counterpart can't be: obs.yml has to
+# name the paths that can break an external link to libmoq.a, and no list of
+# paths covers every one of them (see the comment there).
 #
 # A failure here lands on main rather than being caught in review, which is the
 # accepted trade. Anything that must block a merge belongs in check.yml.
@@ -46,7 +49,7 @@ jobs:
           determinate: false
 
       - name: Rust Cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
         with:
           cache-on-failure: true
 
@@ -60,3 +63,14 @@ jobs:
       - name: Audit
         if: ${{ !cancelled() }}
         run: nix develop --command just rs audit
+
+      # The OBS plugin is the only thing that links libmoq.a from outside cargo,
+      # so a stale `rs/libmoq/native-libs/*.txt` breaks it and nothing else.
+      # obs.yml lists the inputs that can do that, but a list of paths can't be
+      # complete: a build script emitting `cargo::rustc-link-lib` needs no
+      # manifest change, and widening that filter to `rs/**` would run a link on
+      # nearly every PR. Being diff-independent, this run covers whatever the
+      # filter misses, at the cost of surfacing a day late rather than in review.
+      - name: OBS
+        if: ${{ !cancelled() }}
+        run: nix develop --command just obs ci

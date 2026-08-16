@@ -69,12 +69,12 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// Standalone SI sections captured on import, keyed by PID and re-emitted verbatim
 	/// on their own cadence. Opaque: export never parses a table it carries.
 	si: BTreeMap<u16, catalog::Si>,
-	/// When each SI PID was last emitted, so each honors its own interval.
+	/// When each SI PID was last emitted, so each honors its own interval ([`due`]).
 	last_si: HashMap<u16, Timestamp>,
 
 	/// Program tables, built once the track layout is known.
 	psi: Option<Psi>,
-	/// Media timestamp of the last PAT/PMT emission.
+	/// Media timestamp of the last PAT/PMT emission ([`due`]).
 	last_psi: Option<Timestamp>,
 	/// Tune-in point: the first video keyframe's timestamp, captured when the program
 	/// tables are built. Non-video frames before it are dropped so the keyframe leads
@@ -340,6 +340,8 @@ impl<E: catalog::Catalog> Export<E> {
 	}
 
 	fn update_catalog(&mut self, mut catalog: Catalog<E>) -> anyhow::Result<()> {
+		self.source.retain_valid(&mut catalog);
+
 		// The MPEG-TS section lives in the extension. The trait only exposes
 		// `mpegts_mut`, and this snapshot is owned, so clone it out (`()` yields the
 		// empty default: no verbatim streams, no preserved PIDs/descriptors).
@@ -424,7 +426,9 @@ impl<E: catalog::Catalog> Export<E> {
 					self.tracks.insert(name.clone(), track);
 				}
 				None => {
-					let source = ExportSource::for_video(&self.source, name, config, self.latency)?;
+					let Some(source) = ExportSource::for_video(&self.source, name, config, self.latency)? else {
+						continue;
+					};
 					self.insert_track(name, source, pid, kind, descriptors, reserve);
 				}
 			}
@@ -441,7 +445,9 @@ impl<E: catalog::Catalog> Export<E> {
 					self.tracks.insert(name.clone(), track);
 				}
 				None => {
-					let source = ExportSource::for_audio(&self.source, name, config, self.latency)?;
+					let Some(source) = ExportSource::for_audio(&self.source, name, config, self.latency)? else {
+						continue;
+					};
 					self.insert_track(name, source, pid, kind, descriptors, DEFAULT_DTS_RESERVE);
 				}
 			}
@@ -978,13 +984,36 @@ const PES_DTS_LEN: usize = 5;
 /// [`author_dts`] and [`Track::dts_reserve`].
 const DEFAULT_DTS_RESERVE: u64 = 16;
 
+/// Whether `timestamp` has crossed into a later repetition slot than `last`.
+///
+/// Slots are absolute on the media timeline (`floor(timestamp / interval)`) rather than
+/// measured forward from the previous emission, so a table lands on the same frames no
+/// matter when the exporter started. Two exporters of one broadcast then emit the tables
+/// at the same points, which a redundant pair compares byte for byte. `None` (nothing
+/// emitted yet) is always due, so a fresh exporter leads with the tables and a receiver
+/// can tune in without waiting for the next slot.
+///
+/// A *later* slot, not merely a different one: video is emitted in decode order, so a
+/// reordered (B-frame) PTS steps backwards all the time, and re-emitting on every
+/// oscillation across a boundary buys nothing and costs a table each way.
 fn due(timestamp: Timestamp, last: Option<Timestamp>, interval: Duration) -> bool {
+	// "Every frame", which the slot arithmetic can't express (and would divide by zero on).
+	if interval.is_zero() {
+		return true;
+	}
 	let Some(last) = last else {
 		return true;
 	};
-	Duration::from(timestamp)
-		.checked_sub(Duration::from(last))
-		.is_some_and(|elapsed| elapsed >= interval)
+	slot(timestamp, interval) > slot(last, interval)
+}
+
+/// Index of `timestamp`'s repetition slot: how many whole `interval`s fit under it.
+///
+/// Nanoseconds, so the divisor is zero only for a genuinely zero `interval`, which [`due`]
+/// takes before it gets here. Coarser units would floor a sub-unit interval to zero and
+/// divide by it.
+fn slot(timestamp: Timestamp, interval: Duration) -> u128 {
+	Duration::from(timestamp).as_nanos() / interval.as_nanos()
 }
 
 /// External byte size of an adaptation field (manual mirror of the crate's
@@ -1187,7 +1216,7 @@ fn dts_reserve(config: &VideoConfig) -> u64 {
 mod tests {
 	use std::time::Duration;
 
-	use super::{DEFAULT_DTS_RESERVE, PSI_INTERVAL, author_dts, due, is_complete_section};
+	use super::{DEFAULT_DTS_RESERVE, PSI_INTERVAL, author_dts, due, is_complete_section, slot};
 	use moq_net::Timestamp;
 
 	fn ms(value: u64) -> Timestamp {
@@ -1289,10 +1318,40 @@ mod tests {
 	}
 
 	#[test]
-	fn due_uses_elapsed_duration() {
+	fn author_dts_is_join_independent_at_a_peak() {
+		// An exporter that has been running and one that just joined author the same decode
+		// timeline from any frame whose PTS leads everything decoded before it. A keyframe is
+		// exactly that (export only ever tunes in on one), so the monotonic bump cannot fire
+		// there and the state carried across the join stops mattering.
+		for b in [1, 3, 5] {
+			let pts = decode_order(40, b, 3_600, 10_000_000);
+			let running = run_clock(&pts, DEFAULT_DTS_RESERVE);
+
+			let mut peaks = 0;
+			for k in 1..pts.len() {
+				if pts[..k].iter().any(|&p| p >= pts[k]) {
+					continue;
+				}
+				peaks += 1;
+				let fresh = run_clock(&pts[k..], DEFAULT_DTS_RESERVE);
+				assert_eq!(
+					&running[k..],
+					&fresh[..],
+					"b={b}: joining at {k} authored a different clock"
+				);
+			}
+			assert!(peaks > 10, "b={b}: fixture must have peaks to join at, got {peaks}");
+		}
+	}
+
+	#[test]
+	fn due_crosses_an_absolute_slot() {
 		assert!(due(ms(1_000), None, PSI_INTERVAL));
 		assert!(!due(ms(1_250), Some(ms(1_000)), PSI_INTERVAL));
 		assert!(due(ms(1_500), Some(ms(1_000)), PSI_INTERVAL));
+
+		// A backwards timestamp is a slot already served, not a new one. Emitting there would
+		// fire on every B-frame that steps back across a boundary (see `due_ignores_reorder`).
 		assert!(!due(ms(750), Some(ms(1_000)), PSI_INTERVAL));
 
 		// A per-PID SI interval is honored independently of the PSI cadence: an SDT at
@@ -1300,6 +1359,75 @@ mod tests {
 		let sdt = Duration::from_millis(2_000);
 		assert!(!due(ms(1_500), Some(ms(1_000)), sdt));
 		assert!(due(ms(3_000), Some(ms(1_000)), sdt));
+	}
+
+	/// Drive a run of timestamps through the interval cadence, advancing the stored emission
+	/// only when one fires, and return how many tables it emitted. That is the whole of the SI
+	/// path; PSI additionally emits (and re-anchors) at every video keyframe, which is what
+	/// keeps two exporters of a program *with* video in step even before this.
+	fn run_cadence(stamps: &[Timestamp], interval: Duration) -> usize {
+		let mut last = None;
+		let mut emissions = 0;
+		for &ts in stamps {
+			if due(ts, last, interval) {
+				emissions += 1;
+				last = Some(ts);
+			}
+		}
+		emissions
+	}
+
+	#[test]
+	fn due_ignores_reorder() {
+		// Video is emitted in decode order, so a B-frame stream steps its PTS backwards
+		// constantly (measured at 39% of frames on real contribution content). The cadence has
+		// to follow the slots the stream has *reached*, not fire on every crossing of one, or
+		// each oscillation across a boundary re-sends the tables both ways.
+		let ticks = decode_order(40, 3, 3_600, 10_000_000);
+		let stamps: Vec<Timestamp> = ticks
+			.iter()
+			.map(|&t| Timestamp::from_micros(t * 1_000_000 / 90_000).unwrap())
+			.collect();
+		assert!(stamps.windows(2).any(|w| w[1] < w[0]), "fixture must reorder its PTS");
+
+		// One table per slot the stream covers, however often the reorder revisits a boundary.
+		let first = slot(stamps[0], PSI_INTERVAL);
+		let last = slot(*stamps.iter().max().unwrap(), PSI_INTERVAL);
+		assert_eq!(run_cadence(&stamps, PSI_INTERVAL), (last - first + 1) as usize);
+	}
+
+	#[test]
+	fn due_zero_interval_emits_every_frame() {
+		// A catalog is free to ask for a table on every frame. Slot arithmetic can't express
+		// that (and would divide by zero), so it is handled before the division. Repeated
+		// timestamps are the case a slot count gets wrong: two tracks can share one.
+		let stamps: Vec<Timestamp> = [0, 0, 40, 40, 80].iter().map(|&t| ms(t)).collect();
+		assert_eq!(run_cadence(&stamps, Duration::ZERO), stamps.len());
+	}
+
+	#[test]
+	fn due_survives_a_sub_microsecond_interval() {
+		// Only an exactly-zero interval short-circuits, so the slot divisor has to stay
+		// non-zero for every other duration. Nanoseconds do; anything coarser floors a
+		// sub-unit interval to zero and panics on the division.
+		let interval = Duration::from_nanos(500);
+		assert!(
+			!interval.is_zero() && interval.as_micros() == 0,
+			"fixture must be sub-microsecond"
+		);
+		assert!(due(ms(1), Some(ms(0)), interval));
+		assert!(!due(ms(0), Some(ms(0)), interval));
+	}
+
+	#[test]
+	fn due_ignores_when_the_last_emission_landed_in_its_slot() {
+		// The whole point of the absolute grid: two exporters that emitted at different
+		// points *within* the same slot agree on every later frame, so the emission points
+		// belong to the broadcast rather than to whoever started when.
+		for last in [1_000, 1_100, 1_499] {
+			assert!(!due(ms(1_499), Some(ms(last)), PSI_INTERVAL), "last={last}");
+			assert!(due(ms(1_500), Some(ms(last)), PSI_INTERVAL), "last={last}");
+		}
 	}
 
 	#[test]

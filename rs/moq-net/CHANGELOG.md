@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.12](https://github.com/moq-dev/moq/compare/moq-net-v0.2.11...moq-net-v0.2.12) - 2026-08-14
+
+### Fixed
+
+- *(path)* resolve catalog references like URLs ([#2855](https://github.com/moq-dev/moq/pull/2855))
+- *(moq-net)* serve an IETF subscribe from the live edge ([#2862](https://github.com/moq-dev/moq/pull/2862))
+- *(net)* stop blocking connect on the initial announce set ([#2856](https://github.com/moq-dev/moq/pull/2856))
+- *(net)* wake a capped subscriber when its parked group is evicted ([#2844](https://github.com/moq-dev/moq/pull/2844))
+- *(net)* decode largest object in subscribe ok ([#2837](https://github.com/moq-dev/moq/pull/2837))
+
 ## [0.2.11](https://github.com/moq-dev/moq/compare/moq-net-v0.2.10...moq-net-v0.2.11) - 2026-08-13
 
 ### Added

@@ -288,8 +288,9 @@ advertises its own identity by setting `--cluster-mesh` to its
 externally-reachable URL, which it publishes on the cluster origin for other
 peers to discover and dial.
 
-The `quinn` and `noq` QUIC backends support mTLS; configuring `tls.root` with a
-backend that does not (e.g. `quiche`) is a startup error.
+The `quinn`, `noq`, and `quiche` QUIC backends support mTLS. Quinn and noq hot
+reload the trusted roots for new handshakes. Quiche currently requires a relay
+restart after rotating inbound `server.tls.root` files.
 
 ## Stream Listeners
 

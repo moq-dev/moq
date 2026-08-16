@@ -326,6 +326,16 @@ loom *args:
 build:
     cargo build
 
+# Run a moq-bench preset against a relay, e.g. `just rs bench chat https://relay.example.com`.
+# Extra args pass through, so `--connections 500 --output stats.jsonl` work as-is.
+bench preset url *args:
+    cargo run --release -p moq-bench -- --file 'rs/moq-bench/config/{{ preset }}.toml' --client-connect '{{ url }}' {{ args }}
+
+# Sample a process's CPU/memory/context switches on this host (run it where the
+# relay runs; it only reads /proc). E.g. `just rs bench-host --name moq-relay`.
+bench-host *args:
+    cargo run --release -p moq-bench --bin moq-bench-host -- {{ args }}
+
 # Remove the Rust target directory.
 clean:
     cargo clean

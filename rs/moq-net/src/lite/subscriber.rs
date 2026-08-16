@@ -17,7 +17,7 @@ use crate::{
 	track::Subscription,
 };
 
-use super::{ConnectingProducer, RouteCost, Version};
+use super::{RouteCost, Version};
 
 use web_async::Lock;
 
@@ -136,17 +136,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
-	/// `connecting` is the connection-progress producer for this session (None for
-	/// versions with no initial-set boundary). It is threaded through the announce path
-	/// rather than stored on `Subscriber`: the struct is cloned for several long-lived
-	/// tasks (`bw`, `run_uni`), and any clone retaining a producer would keep the channel
-	/// open and hang `connect()`.
-	pub async fn run(self, connecting: Option<ConnectingProducer>, mut tasks: TaskSet) -> Result<(), Error> {
+	pub async fn run(self, mut tasks: TaskSet) -> Result<(), Error> {
 		let bw = self.clone();
 		let dg = self.clone();
 		// The watchdog halves (announce/bandwidth/datagrams) only end the session on
 		// error; their clean completion parks and the other futures keep running.
-		let mut announce = std::pin::pin!(err_only(self.clone().run_announce(connecting)));
+		let mut announce = std::pin::pin!(err_only(self.clone().run_announce()));
 		let mut uni = std::pin::pin!(self.run_uni());
 		let mut bandwidth = std::pin::pin!(err_only(bw.run_recv_bandwidth()));
 		let mut datagrams = std::pin::pin!(err_only(dg.run_datagrams()));
@@ -217,18 +212,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	async fn run_announce(self, connecting: Option<ConnectingProducer>) -> Result<(), Error> {
+	async fn run_announce(self) -> Result<(), Error> {
 		let prefixes: Vec<PathOwned> = self.origin.allowed().map(|p| p.to_owned()).collect();
 
 		let mut tasks = FuturesUnordered::new();
 		for prefix in prefixes {
-			tasks.push(self.clone().run_announce_prefix(prefix, connecting.clone()));
+			tasks.push(self.clone().run_announce_prefix(prefix));
 		}
-
-		// Each prefix holds its own producer clone; drop ours so the channel closes (and
-		// connect() unblocks) once the last prefix finishes its initial set. With no
-		// prefixes, this is the only producer, so the session is connected now.
-		drop(connecting);
 
 		while let Some(result) = tasks.next().await {
 			result?;
@@ -237,11 +227,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	async fn run_announce_prefix(
-		mut self,
-		prefix: PathOwned,
-		mut connecting: Option<ConnectingProducer>,
-	) -> Result<(), Error> {
+	async fn run_announce_prefix(mut self, prefix: PathOwned) -> Result<(), Error> {
 		let mut stream = Stream::open(&self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Announce).await?;
 
@@ -254,10 +240,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		};
 		stream.writer.encode(&msg).await?;
 
-		// Lite05+: the publisher reports its own origin id (which we stamp onto every
-		// received Announce's hop chain, since it no longer does so itself) plus the
-		// count of initial active announces that follow immediately.
-		let (responder_origin, initial_count) = if self.version.has_announce_ok() {
+		// Lite05+: the publisher reports its own origin id, which we stamp onto every
+		// received Announce's hop chain since it no longer does so itself. Its `active`
+		// count marks where the initial set ends; nothing here needs that boundary, so
+		// it is read and dropped. Callers that must not race an announcement use
+		// `origin::Consumer::announced_broadcast`, which waits for the path itself.
+		let responder_origin = if self.version.has_announce_ok() {
 			let ok: lite::AnnounceOk = stream.reader.decode().await?;
 			// A peer may legally report id 0 (no identity). When the caller assigned
 			// it one, stand that in so the route isn't loop-blind.
@@ -265,9 +253,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				0 => self.peer_origin.unwrap_or(ok.origin),
 				_ => ok.origin,
 			};
-			(Some(origin), ok.active)
+			Some(origin)
 		} else {
-			(None, 0)
+			None
 		};
 
 		// What we charge every announcement arriving on this stream. Resolved once:
@@ -284,12 +272,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// but a peer may.
 		let mut next_announce_id: u64 = 0;
 		let mut announced_by_id: HashMap<u64, PathOwned> = HashMap::new();
-
-		// `connecting` is a local (a param), not a `self` field, so the `self.clone()` that
-		// start_announce uses for long-lived broadcast tasks doesn't carry the producer
-		// (which would keep the channel open for the broadcast's lifetime). Dropping it marks
-		// this prefix connected; on an early error it drops via scope exit, so a failed prefix
-		// can't hang connect().
 
 		match self.version {
 			Version::Lite01 | Version::Lite02 => {
@@ -314,26 +296,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		}
 
-		// Release the producer once this prefix's initial set is in. Lite01/02 delivered it
-		// via AnnounceInit (consumed just above); Lite05 delivers `initial_count`
-		// Announce::Active counted in the loop below; Lite03/04 have no boundary (already None).
-		let mut initial_remaining = match self.version {
-			Version::Lite01 | Version::Lite02 => {
-				connecting.take();
-				0
-			}
-			_ if self.version.has_announce_ok() => {
-				if initial_count == 0 {
-					connecting.take();
-				}
-				initial_count
-			}
-			_ => {
-				connecting.take();
-				0
-			}
-		};
-
 		while let Some(announce) = stream.reader.decode_maybe::<lite::AnnounceBroadcast>().await? {
 			match announce {
 				lite::AnnounceBroadcast::Active { suffix, hops, cost } => {
@@ -354,14 +316,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						self.restart_announce(path.clone(), hops, cost, link_cost, responder_origin, &mut routes)?;
 					} else {
 						self.start_announce(path.clone(), hops, cost, link_cost, responder_origin, &mut routes)?;
-					}
-					// The first `initial_count` Active messages are the initial set; once
-					// they're all in, drop our producer to mark this prefix connected.
-					if initial_remaining > 0 {
-						initial_remaining -= 1;
-						if initial_remaining == 0 {
-							connecting.take();
-						}
 					}
 				}
 				lite::AnnounceBroadcast::Ended { suffix, .. } => {

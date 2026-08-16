@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.19.10"
+version = "0.19.11"
 edition = "2024"
 rust-version.workspace = true
 
@@ -16,8 +16,8 @@ categories = ["multimedia", "network-programming", "web-programming"]
 default = ["quinn", "aws-lc-rs", "websocket", "tcp", "uds"]
 quinn = ["dep:quinn", "dep:web-transport-quinn", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch", "dep:dns-lookup"]
 noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch", "dep:dns-lookup"]
-quiche = ["dep:web-transport-quiche", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "dep:rustls-native-certs", "dep:dns-lookup"]
-# Filesystem watcher for hot-reloading on-disk TLS certs/keys; the QUIC backends imply it.
+quiche = ["dep:web-transport-quiche", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "dep:rustls-native-certs", "dep:dns-lookup", "watch"]
+# Filesystem watcher for hot-reloading on-disk TLS certs, keys, and root CAs.
 watch = ["dep:notify"]
 # Capture qlog traces (`--*-quic-qlog <DIR>`). Off by default: quinn and noq pull in
 # the qlog crate and its serde_json encoder, which a production build has no use for.
@@ -30,7 +30,7 @@ qlog = ["quinn?/qlog", "web-transport-noq?/qlog"]
 aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs", "web-transport-noq?/aws-lc-rs"]
 iroh = ["dep:web-transport-iroh", "dep:web-transport-proto", "dep:noq-proto"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
-websocket = ["dep:qmux"]
+websocket = ["dep:qmux", "watch"]
 # Plain-TCP qmux transport (`tcp://`), no TLS. Server-side and client-side.
 tcp = ["dep:qmux", "dep:dns-lookup"]
 # Unix-domain-socket qmux transport (`unix://`), unix-only. Adds peer-credential

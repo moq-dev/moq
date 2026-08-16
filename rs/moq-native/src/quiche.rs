@@ -304,7 +304,9 @@ impl QuicheClient {
 		// handshake fails closed.
 		let roots = match &verification {
 			Verification::Roots { custom, system } => {
-				let mut roots = custom.clone();
+				// Quiche takes concrete trust anchors per connection rather than a
+				// verifier, so refresh the custom bundle before each handshake.
+				let mut roots = custom.refresh();
 				if *system {
 					let native = rustls_native_certs::load_native_certs();
 					for err in native.errors {
@@ -619,6 +621,7 @@ impl QuicheServer {
 		}
 
 		if !config.tls.root.is_empty() {
+			tracing::warn!("the quiche backend snapshots server mTLS roots; restart after rotating --server-tls-root");
 			let roots = config
 				.tls
 				.root

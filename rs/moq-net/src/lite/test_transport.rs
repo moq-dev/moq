@@ -291,11 +291,24 @@ pub struct SinkSession {
 	/// Set by [`Self::gated_bi`]. `None` parks `open_bi` itself forever, which is all
 	/// a test driving only uni streams needs.
 	bi_gate: Option<kio::Consumer<bool>>,
+	/// The ALPN to report, for a test that needs a specific negotiated version rather
+	/// than the SETUP-negotiated fallback an absent one selects.
+	protocol: Option<&'static str>,
 }
 
 impl SinkSession {
 	pub fn new(log: Log) -> Self {
-		Self { log, bi_gate: None }
+		Self {
+			log,
+			bi_gate: None,
+			protocol: None,
+		}
+	}
+
+	/// Report `protocol` as the negotiated ALPN.
+	pub fn with_protocol(mut self, protocol: &'static str) -> Self {
+		self.protocol = Some(protocol);
+		self
 	}
 
 	/// Serve bidi streams, holding every write until `gate` flips to true.
@@ -307,6 +320,7 @@ impl SinkSession {
 		Self {
 			log: Log::default(),
 			bi_gate: Some(gate),
+			protocol: None,
 		}
 	}
 }
@@ -355,7 +369,7 @@ impl web_transport_trait::Session for SinkSession {
 	}
 
 	fn protocol(&self) -> Option<&str> {
-		None
+		self.protocol
 	}
 
 	fn close(&self, code: u32, reason: &str) {

@@ -190,9 +190,12 @@ test("from sanitizes multiple arguments with slashes", () => {
 	expect(Path.from("foo//", "//bar", "baz")).toBe("foo/bar/baz" as Path.Valid);
 });
 
-test("resolve appends named segments", () => {
-	expect(Path.resolve(Path.from("a/b"), "c")).toBe(Path.from("a/b/c"));
-	expect(Path.resolve(Path.from("a/b"), "c/d")).toBe(Path.from("a/b/c/d"));
+test("resolve replaces the base name", () => {
+	expect(Path.resolve(Path.from("a/b"), "c")).toBe(Path.from("a/c"));
+	expect(Path.resolve(Path.from("a/b"), "c/d")).toBe(Path.from("a/c/d"));
+	expect(Path.resolve(Path.from("foo.hang/catalog.pro"), "./transcode.pro")).toBe(
+		Path.from("foo.hang/transcode.pro"),
+	);
 });
 
 test("resolve with empty rel returns base", () => {
@@ -200,12 +203,12 @@ test("resolve with empty rel returns base", () => {
 });
 
 test("resolve single dotdot pops one segment", () => {
-	expect(Path.resolve(Path.from("a/b/c"), "../d")).toBe(Path.from("a/b/d"));
-	expect(Path.resolve(Path.from("a/b/c"), "..")).toBe(Path.from("a/b"));
+	expect(Path.resolve(Path.from("a/b/c"), "../d")).toBe(Path.from("a/d"));
+	expect(Path.resolve(Path.from("a/b/c"), "..")).toBe(Path.from("a"));
 });
 
 test("resolve multiple dotdot pops multiple segments", () => {
-	expect(Path.resolve(Path.from("a/b/c"), "../../x")).toBe(Path.from("a/x"));
+	expect(Path.resolve(Path.from("a/b/c"), "../../x")).toBe(Path.from("x"));
 	expect(Path.resolve(Path.from("a/b/c"), "../../../x")).toBe(Path.from("x"));
 });
 
@@ -219,20 +222,28 @@ test("resolve with empty base", () => {
 	expect(Path.resolve(Path.empty(), "..")).toBe(Path.from(""));
 });
 
-test("resolve treats dot as a no-op", () => {
-	expect(Path.resolve(Path.from("a/b"), ".")).toBe(Path.from("a/b"));
-	expect(Path.resolve(Path.from("a/b"), "./c")).toBe(Path.from("a/b/c"));
-	expect(Path.resolve(Path.from("a/b"), "./../c")).toBe(Path.from("a/c"));
-	expect(Path.resolve(Path.from("a/b"), "foo/./bar")).toBe(Path.from("a/b/foo/bar"));
+test("resolve dot names the base parent", () => {
+	expect(Path.resolve(Path.from("a/b"), ".")).toBe(Path.from("a"));
+	expect(Path.resolve(Path.from("a/b"), "./c")).toBe(Path.from("a/c"));
+	expect(Path.resolve(Path.from("a/b"), "./../c")).toBe(Path.from("c"));
+	expect(Path.resolve(Path.from("a/b"), "foo/./bar")).toBe(Path.from("a/foo/bar"));
 });
 
-test("resolve self-reference via dotdot equals base", () => {
-	expect(Path.resolve(Path.from("a/b"), "../b")).toBe(Path.from("a/b"));
+test("resolve self-reference via sibling name equals base", () => {
+	expect(Path.resolve(Path.from("a/b"), "./b")).toBe(Path.from("a/b"));
 });
 
-test("normalizeRelative drops empty and dot segments", () => {
+test("tryResolve distinguishes the root from an escape", () => {
+	expect(Path.tryResolve(Path.from("top"), ".")).toBe(Path.empty());
+	expect(Path.tryResolve(Path.from("top"), "..")).toBeUndefined();
+	expect(Path.tryResolve(Path.from("a/b"), "..")).toBe(Path.empty());
+	expect(Path.tryResolve(Path.from("a/b"), "../..")).toBeUndefined();
+});
+
+test("normalizeRelative preserves an all-dot reference", () => {
 	expect(Path.normalizeRelative("")).toBe("");
-	expect(Path.normalizeRelative(".")).toBe("");
+	expect(Path.normalizeRelative(".")).toBe(".");
+	expect(Path.normalizeRelative("././")).toBe(".");
 	expect(Path.normalizeRelative("./foo")).toBe("foo");
 	expect(Path.normalizeRelative("foo//bar")).toBe("foo/bar");
 	expect(Path.normalizeRelative("foo/./bar")).toBe("foo/bar");

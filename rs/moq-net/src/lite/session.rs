@@ -8,13 +8,10 @@ use crate::{
 
 use std::task::Poll;
 
-use super::{
-	Connecting, DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, Version,
-};
+use super::{DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, Version};
 
 pub(crate) struct SessionStart {
 	pub recv_bandwidth: Option<bandwidth::Consumer>,
-	pub connecting: Connecting,
 	pub driver: MaybeSendBox<'static, Result<(), Error>>,
 }
 
@@ -82,10 +79,7 @@ pub struct Config<S: web_transport_trait::Session> {
 
 /// Start a lite session.
 ///
-/// Returns the receive-bandwidth consumer (if any) and a [`Connecting`] handle that
-/// becomes ready once the initial announce set has been inserted into the subscribe
-/// origin, letting `connect()` block past the startup race. It is ready immediately
-/// when there is nothing to wait on (a version without an initial-set boundary).
+/// Returns the receive-bandwidth consumer (if any) plus the driver that runs the session.
 pub fn start<S: web_transport_trait::Session>(config: Config<S>) -> Result<SessionStart, Error> {
 	let Config {
 		session,
@@ -110,18 +104,6 @@ pub fn start<S: web_transport_trait::Session>(config: Config<S>) -> Result<Sessi
 		_ => Some(recv_bw),
 	};
 
-	// Connection-progress tracker. Only block on the initial set for versions with an
-	// initial-set boundary (AnnounceInit for Lite01/02, AnnounceOk for Lite05+). For other
-	// versions we drop the producer here, which closes the channel and makes
-	// `Connecting::ready` resolve immediately. An empty subscribe origin also resolves
-	// immediately because the subscriber arms with a prefix count of zero.
-	let (connecting_producer, connecting) = Connecting::new();
-	let sub_connecting = if matches!(version, Version::Lite01 | Version::Lite02) || version.has_announce_ok() {
-		Some(connecting_producer)
-	} else {
-		None
-	};
-
 	// Declare our origin (hop) id in SETUP so the peer can serve our
 	// subscriptions from a route that does not flow through us. Taken from the
 	// caller's real handles before the empty-half defaulting below, since those
@@ -140,8 +122,7 @@ pub fn start<S: web_transport_trait::Session>(config: Config<S>) -> Result<Sessi
 	// and GROUP streams are accepted regardless of which halves the caller wired.
 	// An unset half gets an empty origin: an empty publish origin announces nothing
 	// (and answers the peer's announce-interest with an empty set), and an empty
-	// subscribe origin issues no ANNOUNCE_PLEASE (zero prefixes, so `run_announce`
-	// drops `connecting` at once and `connect()` still unblocks).
+	// subscribe origin issues no ANNOUNCE_PLEASE.
 	let publish = publish.unwrap_or_else(|| origin::Producer::empty(Origin::random()).consume());
 	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Origin::random()));
 
@@ -202,7 +183,7 @@ pub fn start<S: web_transport_trait::Session>(config: Config<S>) -> Result<Sessi
 			// stream) parks so the publisher and subscriber keep running.
 			let mut session = std::pin::pin!(err_only(run_session(setup_stream)));
 			let mut publisher = std::pin::pin!(publisher.run());
-			let mut subscriber = std::pin::pin!(subscriber.run(sub_connecting, task_set));
+			let mut subscriber = std::pin::pin!(subscriber.run(task_set));
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = waiter.poll_future(session.as_mut()) {
 					return Poll::Ready(Err(err));
@@ -239,7 +220,6 @@ pub fn start<S: web_transport_trait::Session>(config: Config<S>) -> Result<Sessi
 
 	Ok(SessionStart {
 		recv_bandwidth: recv_bw_consumer,
-		connecting,
 		driver,
 	})
 }
