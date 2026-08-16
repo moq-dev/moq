@@ -1744,22 +1744,22 @@ fn snapshot_subscription(subs: &kio::Shared<Subscriptions>, bound: Option<Durati
 	clamp_combined(combined, bound)
 }
 
-/// The highest sequence a subscription could ever be served: its read cursor's cap
-/// ([`Subscriber::end_at`]), the end it requested, and any cap imposed from outside,
-/// whichever is lowest.
+/// The highest sequence this subscriber could actually be handed: its read cursor's cap
+/// ([`Subscriber::end_at`]) and any cap imposed from outside, whichever is lower.
 ///
-/// The first two are separate knobs (see [`Subscriber`]) and either one alone bounds what
-/// the live edge means for this subscriber. `outer` is the third: a spliced segment is
+/// Deliberately not [`Subscription::end`]. That is a *request to the publisher*, folded
+/// in with every other subscriber's, and it does not filter this handle (see
+/// [`Subscriber`]): another unbounded subscriber widens the aggregate and the groups
+/// arrive here anyway. Capping the drift anchor with it would pin the live edge at the
+/// requested end while delivery ran past it, and everything above would then have nothing
+/// newer to be late against.
+///
+/// `outer` is what a reader wrapping this cursor imposes. A spliced segment is
 /// deliberately not given an inner cursor cap (it would park boundary-crossing groups out
-/// of sight), so the reader wrapping it passes its own cap down instead. Without that, a
-/// segment would anchor drift on groups its reader can never be served.
-fn servable_cap(cursor: Option<u64>, requested: Option<Position>, outer: Option<u64>) -> Option<u64> {
-	// Ends are exclusive, so one at the head of a group excludes that whole group.
-	let requested = requested.map(|end| match end.frame {
-		0 => end.group.saturating_sub(1),
-		_ => end.group,
-	});
-	super::subscription::min_some(super::subscription::min_some(cursor, requested), outer)
+/// of sight), so its reader passes down its own cap and the segment boundary that way.
+/// Without it, a segment would anchor drift on groups it can never hand over.
+fn servable_cap(cursor: Option<u64>, outer: Option<u64>) -> Option<u64> {
+	super::subscription::min_some(cursor, outer)
 }
 
 /// Clamp a drift budget to the publisher's retention window: nobody can wait for a late
@@ -2653,11 +2653,8 @@ impl PlainSubscriber {
 	/// [`Poll::Ready`]; the track ending surfaces as the error the caller was going to
 	/// get anyway.
 	fn poll_drift(&self, waiter: &kio::Waiter) -> Poll<Result<Drift>> {
-		let (latency, end) = {
-			let prefs = self.subscription.read();
-			(prefs.latency, prefs.end)
-		};
-		let cap = servable_cap(self.end_sequence, end, self.stale_cap);
+		let latency = self.subscription.read().latency;
+		let cap = servable_cap(self.end_sequence, self.stale_cap);
 		self.poll(waiter, move |state| {
 			Poll::Ready(Ok(Drift {
 				budget: clamp_latency(latency, state.latency_bound()).max,
@@ -4121,6 +4118,21 @@ mod test {
 
 		let mut subscriber = producer.subscribe(None);
 		assert_eq!(drain(&mut subscriber), vec![0, 1]);
+	}
+
+	#[test]
+	fn a_requested_end_does_not_cap_the_live_edge() {
+		let mut producer = track_producer("test", None);
+		for second in 0..4 {
+			append_at(&mut producer, second * 1000);
+		}
+
+		// `Subscription::end` is a request to the publisher, folded in with every other
+		// subscriber's, and it does not filter this handle: the groups above it arrive
+		// anyway. Capping the live edge with it would pin the edge below them, leaving
+		// everything past it with nothing newer to be late against.
+		let mut subscriber = producer.subscribe(Subscription::default().with_end(Position::after_group(1)));
+		assert_eq!(drain(&mut subscriber), vec![3]);
 	}
 
 	#[test]

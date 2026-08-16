@@ -1273,7 +1273,10 @@ impl Subscriber {
 				Some(existing) => {
 					if existing.end != segment.end {
 						existing.end = segment.end;
+						let cap = Self::stale_cap(existing, self.end_sequence);
 						if let SubState::Active(sub) = &mut existing.sub {
+							// The boundary bounds the drift anchor as well as the demand.
+							sub.set_stale_cap(cap);
 							// Shrink the demand so the session can cap upstream. The
 							// read bounds stay on this subscriber (see `poll_recv_group`):
 							// an inner `end_at` would park boundary-crossing groups in the
@@ -1325,6 +1328,18 @@ impl Subscriber {
 		Some(group.into_spliced(spliced))
 	}
 
+	/// The highest sequence a segment could hand its reader: the reader's own cap and
+	/// the segment's boundary, whichever is lower.
+	///
+	/// A segment's inner cursor is deliberately left uncapped (an inner `end_at` would
+	/// park boundary-crossing groups where its completion can't be seen), so this is how
+	/// both bounds reach the drift anchor. Without them a segment measures staleness
+	/// against groups it will never surface: the route running past the boundary, or the
+	/// reader's own cap holding content back.
+	fn stale_cap(seg: &SegmentSub, end_sequence: Option<u64>) -> Option<u64> {
+		min_some(end_sequence, seg.last_group())
+	}
+
 	/// Resolve a segment's pending subscription, if any. Ready once the segment is
 	/// `Active` or `Done`; a rejected or closed track becomes `Done` (stall, not
 	/// error). Never consumes groups, so terminal-state pollers can share it.
@@ -1332,7 +1347,7 @@ impl Subscriber {
 		seg: &mut SegmentSub,
 		prefs: &Subscription,
 		min_sequence: u64,
-		stale_cap: Option<u64>,
+		end_sequence: Option<u64>,
 		waiter: &kio::Waiter,
 	) -> Poll<()> {
 		if let SubState::Pending(pending) = &mut seg.sub {
@@ -1344,7 +1359,7 @@ impl Subscriber {
 					// this subscriber, never on the inner cursor: an inner cap would
 					// park groups there and hide the segment's completion.
 					sub.start_at(seg.first_group().max(min_sequence));
-					sub.set_stale_cap(stale_cap);
+					sub.set_stale_cap(Self::stale_cap(seg, end_sequence));
 					let _ = sub.update(slice(prefs, seg.start, seg.end));
 					seg.sub = SubState::Active(sub);
 				}
@@ -1362,13 +1377,13 @@ impl Subscriber {
 		seg: &mut SegmentSub,
 		prefs: &Subscription,
 		min_sequence: u64,
-		stale_cap: Option<u64>,
+		end_sequence: Option<u64>,
 		waiter: &kio::Waiter,
 	) -> Poll<Option<group::Consumer>> {
 		loop {
 			match &mut seg.sub {
 				SubState::Pending(_) => {
-					ready!(Self::poll_activate(seg, prefs, min_sequence, stale_cap, waiter));
+					ready!(Self::poll_activate(seg, prefs, min_sequence, end_sequence, waiter));
 				}
 				SubState::Active(sub) => match sub.poll_recv_group(waiter) {
 					Poll::Ready(Ok(Some(group))) => {
@@ -1709,9 +1724,11 @@ impl Subscriber {
 		self.end_sequence = sequence.into();
 		// The cap bounds each segment's drift anchor as well as this reader's own
 		// delivery: a segment must not measure against groups this cap hides.
+		let end_sequence = self.end_sequence;
 		for seg in &mut self.segments {
+			let cap = Self::stale_cap(seg, end_sequence);
 			if let SubState::Active(sub) = &mut seg.sub {
-				sub.set_stale_cap(self.end_sequence);
+				sub.set_stale_cap(cap);
 			}
 		}
 	}
