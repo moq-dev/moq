@@ -1081,10 +1081,13 @@ fn pipewire_color(format: VideoInfoRaw, width: u32, height: u32) -> Result<Optio
 	if format.format() != VideoFormat::NV12 {
 		return Ok(None);
 	}
-	let color = color_from_pipewire(format.color_range(), format.color_matrix(), Size::new(width, height))?;
-	if let Some(color) = color {
-		validate_pipewire_description(color, format.color_primaries(), format.transfer_function())?;
-	}
+	let size = Size::new(width, height);
+	let color = color_from_pipewire(format.color_range(), format.color_matrix(), size)?;
+	validate_pipewire_description(
+		color.unwrap_or_else(|| Color::infer(size)),
+		format.color_primaries(),
+		format.transfer_function(),
+	)?;
 	Ok(color)
 }
 
@@ -1470,6 +1473,10 @@ mod tests {
 		format.set_color_matrix(spa::sys::SPA_VIDEO_COLOR_MATRIX_BT709);
 		format.set_color_primaries(spa::sys::SPA_VIDEO_COLOR_PRIMARIES_BT2020);
 		format.set_transfer_function(spa::sys::SPA_VIDEO_TRANSFER_BT709);
+		assert!(pipewire_color(format, 1920, 1080).is_err());
+		format.set_color_range(spa::sys::SPA_VIDEO_COLOR_RANGE_UNKNOWN);
+		format.set_color_matrix(spa::sys::SPA_VIDEO_COLOR_MATRIX_UNKNOWN);
+		format.set_transfer_function(spa::sys::SPA_VIDEO_TRANSFER_SMPTE2084);
 		assert!(pipewire_color(format, 1920, 1080).is_err());
 
 		let layout = FrameLayout {
