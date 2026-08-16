@@ -6,7 +6,7 @@ import * as Varint from "../varint.ts";
 import * as GoAway from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
 import { Frame, Group, type GroupFlags } from "./object.ts";
-import { SetupOptions } from "./parameters.ts";
+import { Parameters, SetupOptions } from "./parameters.ts";
 import { Publish, PublishDone } from "./publish.ts";
 import * as Announce from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
@@ -75,6 +75,60 @@ async function encodeFrameVersioned(
 	await writer.closed;
 	return concatChunks(written);
 }
+
+test("Message Parameters: uint8 wire encoding changes in draft 17", async () => {
+	const params = new Parameters();
+	params.subscriberPriority = 255;
+
+	expect(Array.from(await encodeVersioned(params, Version.DRAFT_16))).toEqual([
+		0x01, // parameter count
+		0x20, // SUBSCRIBER_PRIORITY
+		0x40,
+		0xff, // QUIC varint 255
+	]);
+
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19]) {
+		const expected = new Uint8Array([
+			0x01, // parameter count
+			0x20, // SUBSCRIBER_PRIORITY
+			0xff, // raw uint8 255
+		]);
+		expect(Array.from(await encodeVersioned(params, version))).toEqual(Array.from(expected));
+
+		const decoded = await decodeVersioned(expected, Parameters.decode, version);
+		expect(decoded.subscriberPriority).toBe(255);
+	}
+});
+
+test("Message Parameters: Location loses its length prefix in draft 17", async () => {
+	const params = new Parameters();
+	params.largest = { groupId: 255n, objectId: 128n };
+
+	expect(Array.from(await encodeVersioned(params, Version.DRAFT_16))).toEqual([
+		0x01, // parameter count
+		0x09, // LARGEST_OBJECT
+		0x04, // byte-string length
+		0x40,
+		0xff, // QUIC varint 255
+		0x40,
+		0x80, // QUIC varint 128
+	]);
+
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19]) {
+		const expected = new Uint8Array([
+			0x01, // parameter count
+			0x09, // LARGEST_OBJECT
+			0x80,
+			0xff, // leading-ones varint 255
+			0x80,
+			0x80, // leading-ones varint 128
+		]);
+		expect(Array.from(await encodeVersioned(params, version))).toEqual(Array.from(expected));
+
+		const decoded = await decodeVersioned(expected, Parameters.decode, version);
+		expect(decoded.largest).toEqual({ groupId: 255n, objectId: 128n });
+	}
+});
 
 // Subscribe tests (v14)
 test("Subscribe v14: round trip", async () => {

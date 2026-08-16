@@ -183,7 +183,8 @@ export class SetupOptions {
 }
 
 // ---- Message Parameters (used in Subscribe, Publish, Fetch, etc.) ----
-// Count-prefixed KVPs with delta-encoded keys (d16+).
+// Count-prefixed KVPs through d16, then definition-specific Type-Value pairs.
+// Parameter types are delta-encoded from d16 onward.
 
 // Varint parameter IDs (even)
 const MSG_PARAM_DELIVERY_TIMEOUT = 0x02n;
@@ -198,7 +199,48 @@ const MSG_PARAM_GROUP_ORDER = 0x22n;
 const MSG_PARAM_LARGEST_OBJECT = 0x09n;
 const MSG_PARAM_SUBSCRIPTION_FILTER = 0x21n;
 
-/// Message Parameters — count-prefixed KVPs used in control messages.
+type MessageParamKind = "varint" | "uint8" | "bool" | "location" | "bytes";
+
+function getMessageParamKind(id: bigint): MessageParamKind {
+	switch (id) {
+		case MSG_PARAM_DELIVERY_TIMEOUT:
+		case MSG_PARAM_MAX_CACHE_DURATION:
+		case MSG_PARAM_EXPIRES:
+			return "varint";
+		case MSG_PARAM_PUBLISHER_PRIORITY:
+		case MSG_PARAM_SUBSCRIBER_PRIORITY:
+		case MSG_PARAM_GROUP_ORDER:
+			return "uint8";
+		case MSG_PARAM_FORWARD:
+			return "bool";
+		case MSG_PARAM_LARGEST_OBJECT:
+			return "location";
+		case MSG_PARAM_SUBSCRIPTION_FILTER:
+			return "bytes";
+		default:
+			throw new Error(`unknown message parameter id: ${id.toString()}`);
+	}
+}
+
+function decodeLocation(data: Uint8Array): { groupId: bigint; objectId: bigint } {
+	const [groupId, objectData] = Varint.decode(data);
+	const [objectId, trailing] = Varint.decode(objectData);
+	if (trailing.length !== 0) {
+		throw new Error("trailing bytes in message parameter Location");
+	}
+	return { groupId: BigInt(groupId), objectId: BigInt(objectId) };
+}
+
+function encodeLocation({ groupId, objectId }: { groupId: bigint; objectId: bigint }): Uint8Array {
+	const group = Varint.encode(Number(groupId));
+	const object = Varint.encode(Number(objectId));
+	const combined = new Uint8Array(group.length + object.length);
+	combined.set(group, 0);
+	combined.set(object, group.length);
+	return combined;
+}
+
+/// Message Parameters used in control messages.
 export class Parameters {
 	vars: Map<bigint, bigint>;
 	bytes: Map<bigint, Uint8Array>;
@@ -208,7 +250,7 @@ export class Parameters {
 		this.bytes = new Map();
 	}
 
-	// --- Varint accessors ---
+	// --- Numeric accessors ---
 
 	get subscriberPriority(): number | undefined {
 		const v = this.vars.get(MSG_PARAM_SUBSCRIBER_PRIORITY);
@@ -275,18 +317,11 @@ export class Parameters {
 	get largest(): { groupId: bigint; objectId: bigint } | undefined {
 		const data = this.bytes.get(MSG_PARAM_LARGEST_OBJECT);
 		if (!data || data.length === 0) return undefined;
-		const [groupId, rest] = Varint.decode(data);
-		const [objectId] = Varint.decode(rest);
-		return { groupId: BigInt(groupId), objectId: BigInt(objectId) };
+		return decodeLocation(data);
 	}
 
 	set largest(v: { groupId: bigint; objectId: bigint }) {
-		const buf1 = Varint.encode(Number(v.groupId));
-		const buf2 = Varint.encode(Number(v.objectId));
-		const combined = new Uint8Array(buf1.length + buf2.length);
-		combined.set(buf1, 0);
-		combined.set(buf2, buf1.length);
-		this.bytes.set(MSG_PARAM_LARGEST_OBJECT, combined);
+		this.bytes.set(MSG_PARAM_LARGEST_OBJECT, encodeLocation(v));
 	}
 
 	get subscriptionFilter(): number | undefined {
@@ -328,14 +363,58 @@ export class Parameters {
 				prevId = key;
 				await w.u62(delta);
 
-				if (isVar) {
-					// biome-ignore lint/style/noNonNullAssertion: key is guaranteed to exist in vars map
-					await w.u62(this.vars.get(key)!);
-				} else {
-					// biome-ignore lint/style/noNonNullAssertion: key is guaranteed to exist in bytes map
-					const value = this.bytes.get(key)!;
-					await w.u53(value.length);
-					await w.write(value);
+				if (version === Version.DRAFT_16) {
+					if (isVar) {
+						// biome-ignore lint/style/noNonNullAssertion: key is guaranteed to exist in vars map
+						await w.u62(this.vars.get(key)!);
+					} else {
+						// biome-ignore lint/style/noNonNullAssertion: key is guaranteed to exist in bytes map
+						const value = this.bytes.get(key)!;
+						await w.u53(value.length);
+						await w.write(value);
+					}
+					continue;
+				}
+
+				switch (getMessageParamKind(key)) {
+					case "varint": {
+						const value = this.vars.get(key);
+						if (value === undefined) throw new Error(`invalid varint message parameter: ${key.toString()}`);
+						await w.u62(value);
+						break;
+					}
+					case "uint8": {
+						const value = this.vars.get(key);
+						if (value === undefined || value < 0n || value > 0xffn) {
+							throw new Error(`invalid uint8 message parameter: ${key.toString()}`);
+						}
+						await w.u8(Number(value));
+						break;
+					}
+					case "bool": {
+						const value = this.vars.get(key);
+						if (value !== 0n && value !== 1n) {
+							throw new Error(`invalid bool message parameter: ${key.toString()}`);
+						}
+						await w.bool(value === 1n);
+						break;
+					}
+					case "location": {
+						const value = this.bytes.get(key);
+						if (value === undefined)
+							throw new Error(`invalid Location message parameter: ${key.toString()}`);
+						const location = decodeLocation(value);
+						await w.u62(location.groupId);
+						await w.u62(location.objectId);
+						break;
+					}
+					case "bytes": {
+						const value = this.bytes.get(key);
+						if (value === undefined) throw new Error(`invalid bytes message parameter: ${key.toString()}`);
+						await w.u53(value.length);
+						await w.write(value);
+						break;
+					}
 				}
 			}
 		}
@@ -358,19 +437,49 @@ export class Parameters {
 				prevType = id;
 			}
 
-			if (id % 2n === 0n) {
-				if (params.vars.has(id)) {
-					throw new Error(`duplicate message parameter id: ${id.toString()}`);
+			if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+				if (id % 2n === 0n) {
+					if (params.vars.has(id)) {
+						throw new Error(`duplicate message parameter id: ${id.toString()}`);
+					}
+					const varint = await r.u62();
+					params.vars.set(id, varint);
+				} else {
+					if (params.bytes.has(id)) {
+						throw new Error(`duplicate message parameter id: ${id.toString()}`);
+					}
+					const size = await r.u53();
+					const bytes = await r.read(size);
+					params.bytes.set(id, bytes);
 				}
-				const varint = await r.u62();
-				params.vars.set(id, varint);
-			} else {
-				if (params.bytes.has(id)) {
-					throw new Error(`duplicate message parameter id: ${id.toString()}`);
+				continue;
+			}
+
+			if (params.vars.has(id) || params.bytes.has(id)) {
+				throw new Error(`duplicate message parameter id: ${id.toString()}`);
+			}
+
+			switch (getMessageParamKind(id)) {
+				case "varint":
+					params.vars.set(id, await r.u62());
+					break;
+				case "uint8":
+					params.vars.set(id, BigInt(await r.u8()));
+					break;
+				case "bool":
+					params.vars.set(id, (await r.bool()) ? 1n : 0n);
+					break;
+				case "location": {
+					const groupId = await r.u62();
+					const objectId = await r.u62();
+					params.bytes.set(id, encodeLocation({ groupId, objectId }));
+					break;
 				}
-				const size = await r.u53();
-				const bytes = await r.read(size);
-				params.bytes.set(id, bytes);
+				case "bytes": {
+					const size = await r.u53();
+					params.bytes.set(id, await r.read(size));
+					break;
+				}
 			}
 		}
 

@@ -643,6 +643,21 @@ mod tests {
 	}
 
 	#[test]
+	fn test_param_u8_wire_vectors() -> Result<(), EncodeError> {
+		for (version, expected) in [
+			(Version::Draft16, &[0x01, 0x20, 0x40, 0xff][..]),
+			(Version::Draft17, &[0x01, 0x20, 0xff][..]),
+			(Version::Draft18, &[0x01, 0x20, 0xff][..]),
+			(Version::Draft19, &[0x01, 0x20, 0xff][..]),
+		] {
+			let mut buf = BytesMut::new();
+			encode_params!(&mut buf, version, 0x20 => u8::MAX);
+			assert_eq!(&buf[..], expected, "{version}");
+		}
+		Ok(())
+	}
+
+	#[test]
 	fn test_param_bool_all_versions() {
 		for version in [
 			Version::Draft14,
@@ -689,6 +704,25 @@ mod tests {
 				},
 			);
 		}
+	}
+
+	#[test]
+	fn test_param_location_wire_vectors() -> Result<(), EncodeError> {
+		let location = Location {
+			group: 255,
+			object: 128,
+		};
+		for (version, expected) in [
+			(Version::Draft16, &[0x01, 0x09, 0x04, 0x40, 0xff, 0x40, 0x80][..]),
+			(Version::Draft17, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
+			(Version::Draft18, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
+			(Version::Draft19, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
+		] {
+			let mut buf = BytesMut::new();
+			encode_params!(&mut buf, version, 0x09 => location.clone());
+			assert_eq!(&buf[..], expected, "{version}");
+		}
+		Ok(())
 	}
 
 	#[test]
