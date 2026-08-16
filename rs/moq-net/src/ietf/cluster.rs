@@ -174,6 +174,9 @@ impl Advert {
 			.with_hops(self.hops.hops().clone())
 			.with_cost(self.cost.saturating_add(link_cost))
 			.with_announce(true);
+		// The current MoQ Cluster extension carries only marginal cost. Keep the
+		// cold rank unknown instead of mistaking a warm zero for a stable cold path.
+		route.cold = None;
 		route.advertised = self.cost;
 		route
 	}

@@ -92,7 +92,7 @@ pub const DRAIN_COST: u64 = MAX_COST;
 /// Publish a change with [`Producer::set_route`] and observe one with
 /// [`Consumer::route_changed`]; downstream sessions forward updates as a restart
 /// on the wire, so route churn never looks like a new broadcast.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Route {
 	/// The chain of origins the broadcast has traversed, oldest first. Each relay
@@ -101,8 +101,8 @@ pub struct Route {
 	pub hops: OriginList,
 
 	/// The cost of pulling the broadcast via this route, accumulated per link:
-	/// lower wins, with ties broken by hop length, then a deterministic hash, and
-	/// finally the most recently attached route.
+	/// lower wins, with ties broken by the warm relay's cold rank when available,
+	/// then hop length, a deterministic hash, and the most recently attached route.
 	///
 	/// Selection accepts any value, but only [`MAX_COST`] of it survives a hop:
 	/// forwarding clamps to what a varint can carry, so a cost set beyond the
@@ -121,11 +121,25 @@ pub struct Route {
 	/// the hop-count tie-break as the effective metric exactly as before.
 	pub cost: u64,
 
+	/// The cost of this route without any warm-copy discount.
+	///
+	/// Kept inside the routing model rather than exposed as a second public metric:
+	/// consumers still select on [`Self::cost`]. Lite-06 relays carry this value so a
+	/// warm relay can advertise its own stable rank even after its marginal cost drops
+	/// to zero. `None` marks a route learned from a wire version that did not carry it.
+	pub(crate) cold: Option<u64>,
+
 	/// The cost as the announcing peer advertised it, before this link's charge
 	/// was added to [`Self::cost`]. Local bookkeeping, never forwarded: zero on a
 	/// chain of two or more hops means the announcing relay is actively carrying
 	/// the broadcast, which is what the origin's handover gate keys on.
 	pub(crate) advertised: u64,
+
+	/// The announcing peer's cold cost before this link's charge was added.
+	///
+	/// Present on lite-06 and used with the announcing peer's per-broadcast hash to
+	/// order warm relays without inheriting the rank of their current parent.
+	pub(crate) advertised_cold: Option<u64>,
 
 	/// Whether the broadcast should be announced: advertised to consumers via
 	/// [`crate::origin::Consumer::announced`] while this is the best route. A
@@ -134,6 +148,19 @@ pub struct Route {
 	/// [`Producer::set_route`] announces or unannounces without touching the
 	/// broadcast itself. Defaults to `false`.
 	pub announce: bool,
+}
+
+impl Default for Route {
+	fn default() -> Self {
+		Self {
+			hops: OriginList::new(),
+			cost: 0,
+			cold: Some(0),
+			advertised: 0,
+			advertised_cold: None,
+			announce: false,
+		}
+	}
 }
 
 impl Route {
@@ -175,6 +202,7 @@ impl Route {
 	/// Set the cost: lower wins among routes serving the same broadcast.
 	pub fn with_cost(mut self, cost: u64) -> Self {
 		self.cost = cost;
+		self.cold = Some(cost);
 		self
 	}
 
@@ -826,6 +854,7 @@ impl Dynamic {
 		}
 
 		state.route.cost = DRAIN_COST;
+		state.route.cold = Some(DRAIN_COST);
 		state.route_epoch += 1;
 
 		// An ordinary source's table is just its own route, and the origin reads the

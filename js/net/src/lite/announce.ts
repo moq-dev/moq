@@ -32,17 +32,17 @@ const ANNOUNCE_RESTART = 2;
  * message that retracts by path (`ended`).
  */
 export type AnnounceBroadcast =
-	/** A broadcast is now available, carrying the path suffix, the hop chain, and
-	 * (lite-06+) the route cost. An absent cost encodes as zero. */
-	| { status: "active"; suffix: Path.Valid; hops: Origin[]; cost?: bigint }
+	/** A broadcast is now available, carrying the path suffix, hop chain, and
+	 * (lite-06+) marginal and undiscounted cold costs. Absent costs encode as zero. */
+	| { status: "active"; suffix: Path.Valid; hops: Origin[]; cost?: bigint; cold?: bigint }
 	/** Pre-lite-06: a broadcast is no longer available, retracted by path. */
 	| { status: "ended"; suffix: Path.Valid }
 	/** Lite06+: a broadcast is no longer available, retracted by announce id.
 	 * The id is retired; referencing it again is a protocol violation. */
 	| { status: "endedId"; id: bigint }
 	/** Lite06+: atomically replace the announcement with this id (e.g. a new hop
-	 * chain after a relay failover, or a route whose cost moved). The id stays live. */
-	| { status: "restart"; id: bigint; hops: Origin[]; cost?: bigint };
+	 * chain after a relay failover, or a route whose cost or cold rank moved). */
+	| { status: "restart"; id: bigint; hops: Origin[]; cost?: bigint; cold?: bigint };
 
 function checkHops(hops: Origin[]) {
 	if (hops.length > MAX_HOPS) {
@@ -95,8 +95,8 @@ async function decodeHops(r: Reader, version: Version): Promise<Origin[]> {
 	}
 }
 
-// The route cost rides lite-06+ announcements as a single varint; older
-// versions carry nothing and decode as zero.
+// Each route cost rides lite-06+ announcements as a varint; older versions
+// carry nothing and decode as zero.
 async function encodeRouteCost(w: Writer, version: Version, cost: bigint | undefined) {
 	if (!hasRouteCost(version)) return;
 	await w.u62(cost ?? 0n);
@@ -114,6 +114,7 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			await w.string(Path.encode(msg.suffix));
 			await encodeHops(w, version, msg.hops);
 			await encodeRouteCost(w, version, msg.cost);
+			await encodeRouteCost(w, version, msg.cold);
 			break;
 		case "endedId":
 			await w.u62(msg.id);
@@ -122,6 +123,7 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			await w.u62(msg.id);
 			await encodeHops(w, version, msg.hops);
 			await encodeRouteCost(w, version, msg.cost);
+			await encodeRouteCost(w, version, msg.cold);
 			break;
 		case "ended":
 			// The pre-lite-06 path-form retraction has no place on lite-06.
@@ -148,14 +150,16 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 		case ANNOUNCE_START: {
 			const suffix = Path.decode(await r.string());
 			const hops = await decodeHops(r, version);
-			return { status: "active", suffix, hops, cost: await decodeRouteCost(r, version) };
+			const cost = await decodeRouteCost(r, version);
+			return { status: "active", suffix, hops, cost, cold: await decodeRouteCost(r, version) };
 		}
 		case ANNOUNCE_END:
 			return { status: "endedId", id: await r.u62() };
 		case ANNOUNCE_RESTART: {
 			const id = await r.u62();
 			const hops = await decodeHops(r, version);
-			return { status: "restart", id, hops, cost: await decodeRouteCost(r, version) };
+			const cost = await decodeRouteCost(r, version);
+			return { status: "restart", id, hops, cost, cold: await decodeRouteCost(r, version) };
 		}
 		default:
 			throw new Error(`unknown announce message type: ${typ}`);

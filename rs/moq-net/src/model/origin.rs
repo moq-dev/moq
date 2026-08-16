@@ -417,13 +417,13 @@ fn fnv_key(name: &Path, origins: impl IntoIterator<Item = Origin>) -> u64 {
 
 /// Full ordering key for an attached route: announced routes first (an actively
 /// published source beats an offline one), then the marginal cost of pulling via
-/// the route, then the [`route_key`] hop ordering, and finally the newest source
-/// to attach. Lower wins.
+/// the route, the warm-relay rank, the [`route_key`] hop ordering, and finally the
+/// newest source to attach. Lower wins.
 ///
-/// Hop length stays the tie-break below cost, so peers that never carry a cost
-/// (pre-lite-06, or a plain local publish) rank exactly as they did before route
-/// cost existed, and equal-cost warm copies resolve to the closest one, which
-/// bounds same-datacenter chains to a single hop.
+/// The warm rank only differs from the local rank when lite-06 supplied a cold
+/// cost. Peers that do not carry it retain the old cost, hop length, and hash
+/// ordering. Among ranked routes, a lower-rooted warm copy can beat an equal-cost
+/// direct route before hop count, which is what consolidates a transitive tree.
 ///
 /// Recency is the last word, so it only separates routes that are identical in
 /// every advertised respect: same hop chain, same cost. That is a publisher
@@ -433,9 +433,16 @@ fn fnv_key(name: &Path, origins: impl IntoIterator<Item = Origin>) -> u64 {
 /// retires the corpse. Local attach order never leaks into cluster convergence:
 /// routes it can reorder are indistinguishable downstream, since what is
 /// forwarded is the chain and cost, which are equal by construction here.
-fn route_order(name: &Path, route: &FrontRoute) -> (bool, u64, usize, u64, Reverse<u64>) {
+fn route_order(name: &Path, route: &FrontRoute, rank: (u64, u64)) -> (bool, u64, (u64, u64), usize, u64, Reverse<u64>) {
 	let (len, hash) = route_key(name, &route.route.hops);
-	(!route.route.announce, route.route.cost, len, hash, Reverse(route.id))
+	(
+		!route.route.announce,
+		route.route.cost,
+		rank,
+		len,
+		hash,
+		Reverse(route.id),
+	)
 }
 
 /// One coalesced update queued for an `AnnounceConsumer`.
@@ -1252,6 +1259,44 @@ struct FrontState {
 }
 
 impl FrontState {
+	/// This relay's stable per-broadcast rank: its cheapest path without warm
+	/// discounts, followed by its own deterministic hash.
+	///
+	/// The cost is recomputed from every announced route rather than inherited from
+	/// the active parent. Every warm adoption therefore descends a node rank even
+	/// after the active route changes.
+	fn own_rank(&self) -> (u64, u64) {
+		let cold = self
+			.routes
+			.iter()
+			.filter(|route| route.route.announce && route.route.cost < broadcast::DRAIN_COST)
+			.filter_map(|route| route.route.cold)
+			.min()
+			.unwrap_or(broadcast::MAX_COST);
+		(cold, fnv_key(&self.path.as_path(), [self.self_origin]))
+	}
+
+	/// The announcing relay's rank when `route` is a warm-copy advertisement.
+	fn peer_rank(&self, route: &broadcast::Route) -> Option<(u64, u64)> {
+		if route.advertised != 0 || route.hops.len() < 2 {
+			return None;
+		}
+		let peer = route.hops.iter().last().copied()?;
+		let cold = route.advertised_cold?;
+		Some((cold, fnv_key(&self.path.as_path(), [peer])))
+	}
+
+	/// Route ordering in this front's local rank context.
+	///
+	/// Non-warm routes stand for keeping our own cold upstream. A warm peer stands
+	/// for adopting that peer's rank. On equal marginal cost this comparison happens
+	/// before hop count, so an already-carried copy rooted on a cheaper cold path is
+	/// not bypassed merely because the direct path has fewer hops.
+	fn route_order(&self, route: &FrontRoute) -> (bool, u64, (u64, u64), usize, u64, Reverse<u64>) {
+		let rank = self.peer_rank(&route.route).unwrap_or_else(|| self.own_rank());
+		route_order(&self.path.as_path(), route, rank)
+	}
+
 	/// The one selection primitive every picker goes through: the best route by
 	/// [`route_order`] among those surviving `keep`. With `untainted`, the pick
 	/// also steers away from routes that flow through a peer currently reading
@@ -1264,16 +1309,13 @@ impl FrontState {
 			true => self.prefer_untainted(&candidates),
 			false => candidates,
 		};
-		candidates
-			.into_iter()
-			.min_by_key(|r| route_order(&self.path.as_path(), r))
-			.map(|r| r.id)
+		candidates.into_iter().min_by_key(|r| self.route_order(r)).map(|r| r.id)
 	}
 
 	/// The source new track requests should dispatch to: live first, then lowest
-	/// cost, then shortest hop chain with a deterministic hash tie-break and the
-	/// newest source last, skipping routes that flow through a peer currently
-	/// reading the front while any other route remains.
+	/// marginal cost, warm rank, shortest hop chain, deterministic hash, and newest
+	/// source last. Routes flowing through a current reader are skipped while any
+	/// other route remains.
 	fn best_route(&self) -> Option<u64> {
 		self.pick(|_| true, true)
 	}
@@ -1366,33 +1408,36 @@ impl FrontState {
 			&& let Some(candidate) = self.routes.iter().find(|r| r.id == best_id)
 			&& let Some(incumbent) = self.routes.iter().find(|r| r.id == cur_id)
 			&& incumbent.route.announce
-			&& candidate.route.cost < incumbent.route.cost
 			&& candidate.route.advertised == 0
 			&& candidate.route.hops.len() >= 2
-			&& !self.handover_allowed(&candidate.route)
+			&& !self.handover_allowed(&candidate.route, &incumbent.route)
 		{
-			// We won the key comparison: keep our source and let the peer come to us.
+			// Our rank wins: keep our source and let the peer come to us.
 			return;
 		}
 		self.active = best;
 	}
 
-	/// Whether re-parenting onto `route` is allowed while actively carrying: the
-	/// announcing peer (the chain's last hop) must hash strictly below our own
-	/// origin for this broadcast name.
+	/// Whether re-parenting onto `route` is allowed while actively carrying.
 	///
-	/// Both sides compute the same two keys (the hash is build-stable and the
-	/// inputs are shared), so the comparison resolves the same way everywhere:
-	/// the lower-keyed node keeps its source, the higher-keyed one re-parents.
-	/// A strict total order has no cycles, so mutual pulls cannot happen. Mixing
-	/// the broadcast name in spreads ownership across a region's relays instead
-	/// of funneling every broadcast onto the lowest-keyed one. A route with no
-	/// hops is a local publish and always allowed.
-	fn handover_allowed(&self, route: &broadcast::Route) -> bool {
+	/// Lite-06 compares the announcing peer's `(cold cost, per-broadcast hash)` with
+	/// our own rank. Both sides compute the same strict total order, so mutual pulls
+	/// cannot happen. Older wire versions fall back to the hash-only comparison.
+	/// A route with no hops is a local publish and is always allowed.
+	fn handover_allowed(&self, route: &broadcast::Route, incumbent: &broadcast::Route) -> bool {
 		let name = self.path.as_path();
-		match route.hops.iter().last() {
-			Some(peer) => fnv_key(&name, [*peer]) < fnv_key(&name, [self.self_origin]),
-			None => true,
+		let Some(peer) = route.hops.iter().last().copied() else {
+			return true;
+		};
+		// A fresh session from the same relay is a reconnect, not a new parent.
+		if incumbent.hops.iter().last().copied() == Some(peer) {
+			return true;
+		}
+		match route.advertised_cold {
+			Some(cold) => (cold, fnv_key(&name, [peer])) < self.own_rank(),
+			// MoQ Cluster and older lite versions do not carry a cold cost. Preserve
+			// their original symmetric-race gate until their wire can express one.
+			None => fnv_key(&name, [peer]) < fnv_key(&name, [self.self_origin]),
 		}
 	}
 
@@ -1403,7 +1448,7 @@ impl FrontState {
 	/// always what this node is actually serving from.
 	fn routes_snapshot(&self) -> Vec<broadcast::Route> {
 		let mut routes: Vec<&FrontRoute> = self.routes.iter().collect();
-		routes.sort_by_key(|r| route_order(&self.path.as_path(), r));
+		routes.sort_by_key(|r| self.route_order(r));
 		routes.sort_by_key(|r| Some(r.id) != self.active);
 		routes.into_iter().map(|r| r.route.clone()).collect()
 	}
@@ -3120,6 +3165,16 @@ mod tests {
 		announce().with_hops(hops)
 	}
 
+	/// A lite-06 warm-sibling route. `cold` includes this relay's link charge;
+	/// `advertised_cold` is the peer's own uncharged rank from the wire.
+	fn ranked_sibling_route(peer: Origin, marginal: u64, peer_cold: u64, cold: u64) -> broadcast::Route {
+		let mut route = sibling_route(peer).with_cost(marginal);
+		route.advertised = 0;
+		route.advertised_cold = Some(peer_cold);
+		route.cold = Some(cold);
+		route
+	}
+
 	/// A route as the upstream announces it: priced, one hop.
 	fn upstream_route(cost: u64) -> broadcast::Route {
 		let hops = OriginList::try_from(vec![Origin::new(90).unwrap()]).unwrap();
@@ -3176,6 +3231,107 @@ mod tests {
 			a_moved != b_moved,
 			"exactly one side must re-parent (a: {a_moved}, b: {b_moved})"
 		);
+	}
+
+	/// A lower cold cost outranks the local relay regardless of the hash. This is
+	/// the asymmetric SJC/DAL case: DAL's direct cold path costs 1, while SJC's
+	/// costs 2, so SJC must aggregate onto DAL even when SJC wins the hash.
+	#[test]
+	fn test_carrying_gate_prefers_lower_cold_rank() {
+		let peer = Origin::new(3).unwrap();
+		let self_origin = origin_keyed("test", peer, false);
+		let mut state = front_state(
+			self_origin,
+			vec![upstream_route(2), ranked_sibling_route(peer, 0, 1, 2)],
+		);
+
+		state.reselect(true);
+		assert_eq!(state.active, Some(1), "the lower cold-cost relay must win");
+	}
+
+	/// A warm route with the same marginal cost as the direct route compares the
+	/// cold rank before hop count. Otherwise the shorter direct path would bypass
+	/// an already-carried copy rooted on a cheaper upstream.
+	#[test]
+	fn test_equal_marginal_cost_prefers_lower_warm_rank_before_hops() {
+		let peer = Origin::new(3).unwrap();
+		let mut direct = upstream_route(1);
+		direct.cold = Some(2);
+		let warm = ranked_sibling_route(peer, 1, 1, 2);
+		let mut state = front_state(Origin::new(4).unwrap(), vec![direct, warm]);
+
+		state.reselect(true);
+		assert_eq!(state.active, Some(1), "hop count bypassed the lower-ranked warm copy");
+	}
+
+	/// Equal cold costs fall through to the per-broadcast relay hash, so two relays
+	/// activating simultaneously choose exactly one root.
+	#[test]
+	fn test_equal_cold_rank_race_uses_hash() {
+		let a = Origin::new(1).unwrap();
+		let b = Origin::new(2).unwrap();
+		let mut a_view = front_state(a, vec![upstream_route(10), ranked_sibling_route(b, 0, 10, 10)]);
+		let mut b_view = front_state(b, vec![upstream_route(10), ranked_sibling_route(a, 0, 10, 10)]);
+
+		a_view.reselect(true);
+		b_view.reselect(true);
+		assert_ne!(
+			a_view.active == Some(1),
+			b_view.active == Some(1),
+			"equal-rank peers must elect exactly one root"
+		);
+	}
+
+	/// Each relay advertises its own cold rank rather than inheriting its active
+	/// parent's. That makes a transitive warm tree strictly descend A <- B <- C.
+	#[test]
+	fn test_cold_rank_stays_local_across_transitive_adoption() {
+		let a = Origin::new(1).unwrap();
+		let b = Origin::new(2).unwrap();
+		let c = Origin::new(3).unwrap();
+
+		let mut b_view = front_state(b, vec![upstream_route(2), ranked_sibling_route(a, 0, 1, 2)]);
+		b_view.reselect(true);
+		assert_eq!(b_view.active, Some(1));
+		assert_eq!(b_view.own_rank().0, 2, "B inherited A's rank");
+
+		let mut c_view = front_state(
+			c,
+			vec![upstream_route(3), ranked_sibling_route(b, 0, b_view.own_rank().0, 3)],
+		);
+		c_view.reselect(true);
+		assert_eq!(c_view.active, Some(1));
+		assert_eq!(c_view.own_rank().0, 3, "C inherited B's rank");
+	}
+
+	/// Losing the lower-ranked warm peer returns the relay to its cold upstream.
+	#[test]
+	fn test_ranked_parent_loss_reverts_to_cold_route() {
+		let peer = Origin::new(3).unwrap();
+		let mut state = front_state(
+			Origin::new(4).unwrap(),
+			vec![upstream_route(2), ranked_sibling_route(peer, 0, 1, 2)],
+		);
+		state.reselect(true);
+		assert_eq!(state.active, Some(1));
+
+		state.routes.retain(|route| route.id != 1);
+		state.reselect(true);
+		assert_eq!(state.active, Some(0), "the cold route was not restored");
+	}
+
+	/// A warm peer whose cold rank is not lower cannot attract a carrying relay,
+	/// even when its marginal route looks cheaper.
+	#[test]
+	fn test_carrying_gate_rejects_higher_cold_rank() {
+		let peer = Origin::new(3).unwrap();
+		let mut state = front_state(
+			origin_keyed("test", peer, true),
+			vec![upstream_route(5), ranked_sibling_route(peer, 0, 6, 6)],
+		);
+
+		state.reselect(true);
+		assert_eq!(state.active, Some(0), "a higher-ranked warm peer was adopted");
 	}
 
 	/// The gate is scoped to warm siblings: a cheaper route via a relay that is
@@ -3972,6 +4128,54 @@ mod tests {
 		assert_eq!(advertised.hops, hops_b);
 		assert_eq!(advertised.cost, 5);
 		announced.assert_next_wait();
+	}
+
+	/// An equal-marginal warm route with a lower cold rank takes a live track over
+	/// at a group boundary without origin-level announce churn.
+	#[tokio::test]
+	async fn test_warm_rank_handover_is_group_boundary_safe() {
+		tokio::time::pause();
+
+		let publisher = Origin::new(1).unwrap();
+		let peer = Origin::new(3).unwrap();
+		let origin = Info::new(Origin::new(4).unwrap()).produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let direct_hops = OriginList::try_from(vec![publisher]).unwrap();
+		let mut direct = announce().with_hops(direct_hops).with_cost(1);
+		direct.cold = Some(2);
+		let source_a = origin.create_broadcast("test", direct).unwrap();
+		let mut dynamic_a = source_a.dynamic();
+		settle().await;
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+		announced.assert_next_some("test");
+
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let mut producer_a = accept_track(&mut dynamic_a, "video").await;
+		settle().await;
+		let mut sub = subscribing.await.unwrap();
+		producer_a.append_group().unwrap();
+		assert_eq!(sub.assert_group().sequence, 0);
+
+		let mut warm = announce()
+			.with_hops(OriginList::try_from(vec![publisher, peer]).unwrap())
+			.with_cost(1);
+		warm.advertised = 0;
+		warm.advertised_cold = Some(1);
+		warm.cold = Some(2);
+		let source_b = origin.create_broadcast("test", warm).unwrap();
+		let mut dynamic_b = source_b.dynamic();
+		settle().await;
+		announced.assert_next_wait();
+
+		let mut producer_b = accept_track(&mut dynamic_b, "video").await;
+		settle().await;
+		sub.assert_no_group();
+		assert_eq!(producer_b.subscription().unwrap().start, Some(Position::group(1)));
+		producer_b.create_group(group::Info { sequence: 1 }).unwrap();
+		assert_eq!(sub.assert_group().sequence, 1);
+		sub.assert_not_closed();
 	}
 
 	/// A track completed for good must survive later source churn: it is never
@@ -6965,15 +7169,16 @@ mod tests {
 		};
 
 		let draining = front(9, announce().with_cost(broadcast::DRAIN_COST));
+		let rank = (0, 0);
 
-		assert!(route_order(&name, &draining) > route_order(&name, &front(0, announce())));
-		assert!(route_order(&name, &draining) > route_order(&name, &front(0, announce().with_cost(1000))));
+		assert!(route_order(&name, &draining, rank) > route_order(&name, &front(0, announce()), rank));
+		assert!(route_order(&name, &draining, rank) > route_order(&name, &front(0, announce().with_cost(1000)), rank));
 
 		// Two hops beats one when the cheaper one is draining: the longer path is
 		// still the one that will still be there.
 		let hops = OriginList::try_from(vec![Origin::new(1).unwrap(), Origin::new(2).unwrap()]).unwrap();
 		let long = front(0, announce().with_hops(hops).with_cost(1));
-		assert!(route_order(&name, &draining) > route_order(&name, &long));
+		assert!(route_order(&name, &draining, rank) > route_order(&name, &long, rank));
 	}
 
 	/// The whole point of the mechanism: with two sources for one broadcast,

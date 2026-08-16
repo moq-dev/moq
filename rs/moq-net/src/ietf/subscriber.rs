@@ -250,10 +250,12 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		let mut hops = crate::OriginList::new();
 		hops.push(self.session_origin)
 			.expect("an empty hop chain has room for one entry");
-		broadcast::Route::new()
+		let mut route = broadcast::Route::new()
 			.with_hops(hops)
 			.with_cost(cluster::link_cost(self.cost, peer))
-			.with_announce(true)
+			.with_announce(true);
+		route.cold = None;
+		route
 	}
 
 	/// The route an advertisement describes, or `None` when it must be discarded.
@@ -924,6 +926,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// no race between the two.
 		if self.going_away.is_set() {
 			route.cost = broadcast::DRAIN_COST;
+			route.cold = Some(broadcast::DRAIN_COST);
 		}
 
 		// A different original publisher, or one that identifies nothing, means a

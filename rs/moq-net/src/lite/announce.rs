@@ -37,12 +37,13 @@ pub fn restart_supported(version: Version) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnnounceBroadcast<'a> {
 	/// ANNOUNCE_START (lite-06) / active (older): a broadcast is now available.
-	/// Carries the path suffix, the hop chain, and (lite-06+) the route cost, and
-	/// assigns the next announce id.
+	/// Carries the path suffix, the hop chain, and (lite-06+) the marginal and cold
+	/// route costs, and assigns the next announce id.
 	Active {
 		suffix: Path<'a>,
 		hops: OriginList,
 		cost: RouteCost,
+		cold: RouteCost,
 	},
 	/// Pre-lite-06: a broadcast is no longer available, retracted by path.
 	Ended { suffix: Path<'a>, hops: OriginList },
@@ -50,26 +51,27 @@ pub enum AnnounceBroadcast<'a> {
 	/// announce id. The id is retired; referencing it again is a protocol violation.
 	EndedId { id: u64 },
 	/// ANNOUNCE_RESTART (lite-06+): atomically replace the announcement with this id
-	/// (e.g. a new hop chain after a relay failover, or a route whose cost moved).
+	/// (e.g. a new hop chain after a relay failover, or a route whose costs moved).
 	/// The id stays live.
 	///
 	/// Only ever received: we advertise a replacement as an `EndedId` + `Active` pair.
-	Restart { id: u64, hops: OriginList, cost: RouteCost },
+	Restart {
+		id: u64,
+		hops: OriginList,
+		cost: RouteCost,
+		cold: RouteCost,
+	},
 }
 
-/// The marginal cost of pulling the broadcast via this route, carried on lite-06
-/// announcements as a single varint.
+/// A route cost carried on lite-06 announcements as a varint.
 ///
-/// The original publisher seeds it with its production cost: zero for a live
-/// publish, something large for a standby that would have to start working (a
-/// cold transcoder). Each link adds its own price when the announcement crosses
-/// it, and a node actively carrying the broadcast re-announces zero instead: its
-/// ingress is already paid for, so a peer should pull the copy that exists rather
-/// than open a second one all the way back. The sum is what routing minimizes:
-/// what one more subscription would actually cost the mesh.
+/// Each lite-06 announcement carries two of these. The marginal cost is what one
+/// more subscription would cost the mesh, including a warm-copy discount when the
+/// announcing relay already carries the broadcast. The cold cost follows the same
+/// path with that discount removed, giving every carrying relay a stable rank.
+/// Each link charges both values as the announcement crosses it.
 ///
-/// Pre-lite-06 peers don't carry it, so it stays zero and routing falls back to
-/// the hop-count tie-break.
+/// Pre-lite-06 peers carry neither value, so both stay zero on their wire messages.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RouteCost(pub u64);
 
@@ -113,20 +115,27 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 			// infrequent, so the scratch buffer is cheap.
 			let mut body = Vec::new();
 			let typ = match self {
-				Self::Active { suffix, hops, cost } => {
+				Self::Active {
+					suffix,
+					hops,
+					cost,
+					cold,
+				} => {
 					suffix.encode(&mut body, version)?;
 					hops.encode(&mut body, version)?;
 					cost.encode(&mut body, version)?;
+					cold.encode(&mut body, version)?;
 					ANNOUNCE_START
 				}
 				Self::EndedId { id } => {
 					id.encode(&mut body, version)?;
 					ANNOUNCE_END
 				}
-				Self::Restart { id, hops, cost } => {
+				Self::Restart { id, hops, cost, cold } => {
 					id.encode(&mut body, version)?;
 					hops.encode(&mut body, version)?;
 					cost.encode(&mut body, version)?;
+					cold.encode(&mut body, version)?;
 					ANNOUNCE_RESTART
 				}
 				// The pre-lite-06 path-form retraction has no place on lite-06.
@@ -177,6 +186,7 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 					suffix: Path::decode(&mut body, version)?,
 					hops: OriginList::decode(&mut body, version)?,
 					cost: RouteCost::decode(&mut body, version)?,
+					cold: RouteCost::decode(&mut body, version)?,
 				},
 				ANNOUNCE_END => Self::EndedId {
 					id: u64::decode(&mut body, version)?,
@@ -185,6 +195,7 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 					id: u64::decode(&mut body, version)?,
 					hops: OriginList::decode(&mut body, version)?,
 					cost: RouteCost::decode(&mut body, version)?,
+					cold: RouteCost::decode(&mut body, version)?,
 				},
 				_ => return Err(DecodeError::InvalidMessage(typ)),
 			};
@@ -234,6 +245,7 @@ impl AnnounceBroadcast<'_> {
 				suffix,
 				hops,
 				cost: RouteCost::default(),
+				cold: RouteCost::default(),
 			},
 			AnnounceStatus::Ended => Self::Ended { suffix, hops },
 			// On lite-05 a restart travels as a duplicate ANNOUNCE (a second `Active`), so accept
@@ -245,6 +257,7 @@ impl AnnounceBroadcast<'_> {
 				suffix,
 				hops,
 				cost: RouteCost::default(),
+				cold: RouteCost::default(),
 			},
 			AnnounceStatus::Restart => return Err(DecodeError::InvalidValue),
 		})
@@ -411,6 +424,7 @@ mod tests {
 			suffix: Path::new("foo/bar"),
 			hops: OriginList::new(),
 			cost: RouteCost::default(),
+			cold: RouteCost::default(),
 		}
 		.encode(&mut buf, version)
 		.expect("encode");
@@ -489,17 +503,23 @@ mod tests {
 		assert!(slice.is_empty(), "trailing bytes after decode");
 		// Decode borrows from `buf`; re-own so the value can outlive this frame.
 		match got {
-			AnnounceBroadcast::Active { suffix, hops, cost } => AnnounceBroadcast::Active {
+			AnnounceBroadcast::Active {
+				suffix,
+				hops,
+				cost,
+				cold,
+			} => AnnounceBroadcast::Active {
 				suffix: suffix.to_owned(),
 				hops,
 				cost,
+				cold,
 			},
 			AnnounceBroadcast::Ended { suffix, hops } => AnnounceBroadcast::Ended {
 				suffix: suffix.to_owned(),
 				hops,
 			},
 			AnnounceBroadcast::EndedId { id } => AnnounceBroadcast::EndedId { id },
-			AnnounceBroadcast::Restart { id, hops, cost } => AnnounceBroadcast::Restart { id, hops, cost },
+			AnnounceBroadcast::Restart { id, hops, cost, cold } => AnnounceBroadcast::Restart { id, hops, cost, cold },
 		}
 	}
 
@@ -511,6 +531,7 @@ mod tests {
 			suffix: Path::new("room/cam"),
 			hops: hops.clone(),
 			cost: RouteCost::default(),
+			cold: RouteCost::default(),
 		};
 		assert_eq!(broadcast_round_trip(&msg, Version::Lite05), msg);
 
@@ -527,18 +548,25 @@ mod tests {
 		hops.push(Origin::new(7).unwrap()).unwrap();
 
 		let cost = RouteCost(12);
+		let cold = RouteCost(34);
 
 		let active = AnnounceBroadcast::Active {
 			suffix: Path::new("room/cam"),
 			hops: hops.clone(),
 			cost,
+			cold,
 		};
 		assert_eq!(broadcast_round_trip(&active, Version::Lite06Wip), active);
 
 		let ended = AnnounceBroadcast::EndedId { id: 3 };
 		assert_eq!(broadcast_round_trip(&ended, Version::Lite06Wip), ended);
 
-		let restart = AnnounceBroadcast::Restart { id: 3, hops, cost };
+		let restart = AnnounceBroadcast::Restart {
+			id: 3,
+			hops,
+			cost,
+			cold,
+		};
 		assert_eq!(broadcast_round_trip(&restart, Version::Lite06Wip), restart);
 	}
 
@@ -554,7 +582,8 @@ mod tests {
 			AnnounceBroadcast::Restart {
 				id: 1,
 				hops: OriginList::new(),
-				cost: RouteCost::default()
+				cost: RouteCost::default(),
+				cold: RouteCost::default(),
 			}
 			.encode(&mut buf, Version::Lite05),
 			Err(EncodeError::Version)
@@ -578,6 +607,7 @@ mod tests {
 			suffix: Path::new("room/cam"),
 			hops: OriginList::new(),
 			cost: RouteCost(9),
+			cold: RouteCost(11),
 		};
 		let got = broadcast_round_trip(&msg, Version::Lite05);
 		assert_eq!(
@@ -586,6 +616,7 @@ mod tests {
 				suffix: Path::new("room/cam"),
 				hops: OriginList::new(),
 				cost: RouteCost::default(),
+				cold: RouteCost::default(),
 			}
 		);
 	}

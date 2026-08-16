@@ -48,28 +48,28 @@ test("AnnounceBroadcast round-trips on draft-05", async () => {
 
 test("AnnounceBroadcast round-trips on draft-06", async () => {
 	const hops = [OriginSchema.parse(7n)];
-	// An absent cost encodes as zero and decodes explicitly.
+	// Absent marginal and cold costs encode as zero and decode explicitly.
 	const gotActive = await roundTrip({ status: "active", suffix: Path.from("room/cam"), hops }, Version.DRAFT_06);
-	expect(gotActive).toEqual({ status: "active", suffix: Path.from("room/cam"), hops, cost: 0n });
+	expect(gotActive).toEqual({ status: "active", suffix: Path.from("room/cam"), hops, cost: 0n, cold: 0n });
 
 	const gotCost = await roundTrip(
-		{ status: "active", suffix: Path.from("room/cam"), hops, cost: 12n },
+		{ status: "active", suffix: Path.from("room/cam"), hops, cost: 12n, cold: 34n },
 		Version.DRAFT_06,
 	);
-	expect(gotCost).toEqual({ status: "active", suffix: Path.from("room/cam"), hops, cost: 12n });
+	expect(gotCost).toEqual({ status: "active", suffix: Path.from("room/cam"), hops, cost: 12n, cold: 34n });
 
 	const gotEnded = await roundTrip({ status: "endedId", id: 3n }, Version.DRAFT_06);
 	expect(gotEnded).toEqual({ status: "endedId", id: 3n });
 
-	const gotRestart = await roundTrip({ status: "restart", id: 3n, hops, cost: 12n }, Version.DRAFT_06);
-	expect(gotRestart).toEqual({ status: "restart", id: 3n, hops, cost: 12n });
+	const gotRestart = await roundTrip({ status: "restart", id: 3n, hops, cost: 12n, cold: 34n }, Version.DRAFT_06);
+	expect(gotRestart).toEqual({ status: "restart", id: 3n, hops, cost: 12n, cold: 34n });
 });
 
-test("AnnounceBroadcast drops the route cost before draft-06", async () => {
-	// Pre-lite-06 has no room for a cost on the wire, so one set locally is
-	// simply not sent, keeping mixed-version meshes ranking on hop count.
+test("AnnounceBroadcast drops route costs before draft-06", async () => {
+	// Pre-lite-06 has no room for costs on the wire, so values set locally are
+	// simply not sent.
 	const got = await roundTrip(
-		{ status: "active", suffix: Path.from("room/cam"), hops: [], cost: 9n },
+		{ status: "active", suffix: Path.from("room/cam"), hops: [], cost: 9n, cold: 11n },
 		Version.DRAFT_05,
 	);
 	expect(got).toEqual({ status: "active", suffix: Path.from("room/cam"), hops: [] });

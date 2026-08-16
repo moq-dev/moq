@@ -44,6 +44,8 @@ struct WatchedRoute {
 struct SentRoute {
 	hops: OriginList,
 	cost: lite::RouteCost,
+	/// This relay's cold route cost, which stays stable while `cost` is discounted.
+	cold: lite::RouteCost,
 	/// Whether this is the route we actually serve from (the table's first
 	/// entry) rather than a standby selected because the serving chain flows
 	/// through the peer. Only a serving advertisement carries the demand
@@ -664,6 +666,7 @@ impl AnnounceRun {
 						suffix: suffix.as_path(),
 						hops: route.hops.clone(),
 						cost: route.cost,
+						cold: route.cold,
 					})?;
 				}
 			}
@@ -830,6 +833,7 @@ impl AnnounceRun {
 								suffix,
 								hops: route.hops,
 								cost: route.cost,
+								cold: route.cold,
 							})?;
 						}
 						None => {
@@ -885,7 +889,9 @@ impl AnnounceRun {
 						// send. The serving flag may still have flipped (a failover
 						// onto the already-advertised standby), so store it for the
 						// demand watches without a wire message.
-						(Some(route), Some(sent)) if route.hops == sent.hops && route.cost == sent.cost => {
+						(Some(route), Some(sent))
+							if route.hops == sent.hops && route.cost == sent.cost && route.cold == sent.cold =>
+						{
 							entry.sent = Some(route);
 						}
 						// The chain or the cost changed (an upstream failover, a repriced
@@ -907,6 +913,7 @@ impl AnnounceRun {
 									id,
 									hops: route.hops,
 									cost: route.cost,
+									cold: route.cold,
 								})?;
 							} else {
 								// Lite05: a duplicate ANNOUNCE for a live path is the restart.
@@ -915,6 +922,7 @@ impl AnnounceRun {
 									suffix,
 									hops: route.hops,
 									cost: route.cost,
+									cold: route.cold,
 								})?;
 							}
 						}
@@ -930,6 +938,7 @@ impl AnnounceRun {
 								suffix,
 								hops: route.hops,
 								cost: route.cost,
+								cold: route.cold,
 							})?;
 						}
 						// The new chain must not be forwarded (it now loops through the
@@ -993,6 +1002,13 @@ fn select_route(
 		id => Origin::new(id).unwrap_or(Origin::UNKNOWN),
 	};
 
+	let cold = routes
+		.iter()
+		.filter(|route| route.announce && route.cost < crate::broadcast::DRAIN_COST)
+		.filter_map(|route| route.cold)
+		.min()
+		.unwrap_or(crate::broadcast::MAX_COST);
+
 	for (route, serving) in crate::broadcast::advertisable_routes(routes, self_origin, exclude) {
 		let mut hops = route.hops.clone();
 		// Lite05+ moves the self-stamp to the receiver, which appends our id (reported
@@ -1003,7 +1019,23 @@ fn select_route(
 			continue;
 		}
 		let cost = outgoing_cost(version, demand, route, serving);
-		return Some(SentRoute { hops, cost, serving });
+		let cold = if version.has_route_cost() {
+			lite::RouteCost(
+				match serving {
+					true => cold,
+					false => route.cold.unwrap_or(route.cost),
+				}
+				.min(crate::broadcast::MAX_COST),
+			)
+		} else {
+			lite::RouteCost::default()
+		};
+		return Some(SentRoute {
+			hops,
+			cost,
+			cold,
+			serving,
+		});
 	}
 	tracing::debug!(broadcast = %absolute, %exclude_hop, "no advertisable route for this peer");
 	None
@@ -1809,17 +1841,25 @@ mod announce_test {
 	/// Re-own a decoded message so it can outlive the decode buffer.
 	fn own(msg: lite::AnnounceBroadcast<'_>) -> lite::AnnounceBroadcast<'static> {
 		match msg {
-			lite::AnnounceBroadcast::Active { suffix, hops, cost } => lite::AnnounceBroadcast::Active {
+			lite::AnnounceBroadcast::Active {
+				suffix,
+				hops,
+				cost,
+				cold,
+			} => lite::AnnounceBroadcast::Active {
 				suffix: suffix.to_owned(),
 				hops,
 				cost,
+				cold,
 			},
 			lite::AnnounceBroadcast::Ended { suffix, hops } => lite::AnnounceBroadcast::Ended {
 				suffix: suffix.to_owned(),
 				hops,
 			},
 			lite::AnnounceBroadcast::EndedId { id } => lite::AnnounceBroadcast::EndedId { id },
-			lite::AnnounceBroadcast::Restart { id, hops, cost } => lite::AnnounceBroadcast::Restart { id, hops, cost },
+			lite::AnnounceBroadcast::Restart { id, hops, cost, cold } => {
+				lite::AnnounceBroadcast::Restart { id, hops, cost, cold }
+			}
 		}
 	}
 
@@ -2068,6 +2108,7 @@ mod announce_test {
 					id: 0,
 					hops: sent,
 					cost,
+					..
 				},
 			] => {
 				assert_eq!(sent, &hops);
@@ -2299,6 +2340,40 @@ mod announce_test {
 			other => panic!("expected the re-announce, got {other:?}"),
 		}
 		assert!(!task.is_finished(), "the announce loop ended unexpectedly");
+	}
+
+	/// A relay that adopted a warm parent advertises its own cold route cost, not
+	/// the parent's rank. Otherwise every descendant would claim the root's rank
+	/// and the strict descent that prevents warm cycles would disappear.
+	#[test]
+	fn outgoing_cold_rank_belongs_to_this_relay() {
+		let publisher = Origin::new(9).unwrap();
+		let parent = Origin::new(8).unwrap();
+		let self_origin = Origin::new(7).unwrap();
+		let mut adopted = crate::broadcast::Route::announced()
+			.with_hops(OriginList::try_from(vec![publisher, parent]).unwrap())
+			.with_cost(0);
+		adopted.advertised = 0;
+		adopted.advertised_cold = Some(1);
+		adopted.cold = Some(2);
+		let direct = crate::broadcast::Route::announced()
+			.with_hops(OriginList::try_from(vec![publisher]).unwrap())
+			.with_cost(2);
+		let routes = vec![adopted, direct];
+
+		let producer = crate::broadcast::Info::new().produce();
+		let demand = producer.consume().demand();
+		let sent = select_route(
+			&routes,
+			&demand,
+			self_origin,
+			0,
+			Version::Lite06Wip,
+			&crate::Path::new("cam"),
+		)
+		.expect("route");
+
+		assert_eq!(sent.cold, lite::RouteCost(2));
 	}
 
 	/// A locally created route may set `Route::cost` past what a varint can carry,
