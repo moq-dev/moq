@@ -77,7 +77,7 @@ writes the full machine-readable report.
 
 `make-eit-fixture.sh` adds a synthetic DVB EPG to any transport stream, so the
 import path's EIT handling can be exercised without a broadcast capture that
-carries one — no capture in this repository does.
+carries one. No capture in this repository does.
 
 ```bash
 ./make-eit-fixture.sh in.ts out.ts             # EIT p/f + schedule on PID 0x0012
@@ -87,8 +87,8 @@ carries one — no capture in this repository does.
 Everything is derived from the input, so the EIT describes the service the
 stream actually carries: the triplet (`original_network_id`,
 `transport_stream_id`, `service_id`) comes from its PAT and SDT, and the EPG is
-anchored to the stream's own TDT where it has one. Without a TDT — the
-ffmpeg-generated clip has none — it falls back to a fixed date, so the output is
+anchored to the stream's own TDT where it has one. Without a TDT (the
+ffmpeg-generated clip has none), it falls back to a fixed date, so the output is
 byte-reproducible for a given input. The SDT's `EIT_present_following_flag` and
 `EIT_schedule_flag` are set to match, since a stream carrying an EIT while
 advertising none is internally inconsistent.
@@ -99,7 +99,7 @@ clip with none is padded to a constant bitrate first, and the script says so.
 
 `--with-eit` wires this into the round-trip and prints which SI PIDs came back:
 
-```
+```text
 ### SI round-trip (source -> capture)
   TABLE      PID           SOURCE      CAPTURE
   NIT        0x0010             7            5

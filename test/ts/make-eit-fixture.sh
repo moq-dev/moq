@@ -3,7 +3,7 @@
 #
 # The MPEG-TS import path routes SI by PID, but no capture in this repository carries
 # EIT (PID 0x0012), so nothing exercises that route. This synthesises one from a clip
-# that has none — including the ffmpeg-generated clip run.sh makes — so the EIT path is
+# that has none, including the ffmpeg-generated clip run.sh makes. This makes the EIT path
 # testable without needing a broadcast capture.
 #
 # Everything is derived from the input: the service triplet comes from its PAT and SDT, so
@@ -89,43 +89,100 @@ trap 'rm -rf "$TMP"' EXIT
 # (original_network_id, transport_stream_id, service_id) does not match the SDT describes
 # nothing, and a receiver is right to ignore it.
 tstables "$IN" --pid 0x0000 --pid 0x0011 --pid 0x0014 --max-tables 8 \
-    --json-output "$TMP/si.json" --no-pager >/dev/null 2>&1 || true
+    --json-output "$TMP/si.json" --no-pager >/dev/null
 
-read -r DERIVED_SID TSID ONID TDT <<<"$(
-    python3 - "$TMP/si.json" <<'PY'
+METADATA=$(
+    python3 - "$TMP/si.json" "$SERVICE_ID" <<'PY'
 import json, sys
 
-sid = tsid = onid = tdt = "-"
+path, requested_sid = sys.argv[1:3]
+
+
+def fail(message):
+    print(f"error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def integer(value, name):
+    if isinstance(value, bool):
+        fail(f"invalid {name} in SI metadata: {value!r}")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        fail(f"invalid {name} in SI metadata: {value!r}")
+
+
 try:
-    doc = json.load(open(sys.argv[1]))
-except Exception:
-    doc = {}
-for t in doc.get("#nodes", []) if isinstance(doc, dict) else doc:
-    name = t.get("#name", "")
-    if name == "PAT":
-        tsid = t.get("transport_stream_id", tsid)
-        for s in t.get("#nodes", []):
-            if s.get("#name") == "service" and sid == "-":
-                sid = s.get("service_id", sid)
-    elif name == "SDT":
-        tsid = t.get("transport_stream_id", tsid)
-        onid = t.get("original_network_id", onid)
-        for s in t.get("#nodes", []):
-            if s.get("#name") == "service" and sid == "-":
-                sid = s.get("service_id", sid)
-    elif name == "TDT" and tdt == "-":
+    with open(path) as stream:
+        doc = json.load(stream)
+except (OSError, json.JSONDecodeError) as error:
+    fail(f"cannot read complete PAT/SDT metadata: {error}")
+
+tables = doc.get("#nodes", []) if isinstance(doc, dict) else doc
+if not isinstance(tables, list):
+    fail("PAT/SDT metadata is not a table list")
+
+pats = [table for table in tables if table.get("#name") == "PAT"]
+sdts = [
+    table
+    for table in tables
+    if table.get("#name") == "SDT" and table.get("actual", True)
+]
+if not pats:
+    fail("input has no complete PAT")
+if not sdts:
+    fail("input has no complete actual SDT")
+
+pat_tsids = {integer(table.get("transport_stream_id"), "PAT transport_stream_id") for table in pats}
+sdt_tsids = {integer(table.get("transport_stream_id"), "SDT transport_stream_id") for table in sdts}
+if len(pat_tsids) != 1 or len(sdt_tsids) != 1 or pat_tsids != sdt_tsids:
+    fail(f"PAT/SDT transport_stream_id mismatch: PAT {sorted(pat_tsids)}, SDT {sorted(sdt_tsids)}")
+tsid = pat_tsids.pop()
+
+onids = {integer(table.get("original_network_id"), "original_network_id") for table in sdts}
+if len(onids) != 1:
+    fail(f"actual SDT tables disagree on original_network_id: {sorted(onids)}")
+onid = onids.pop()
+
+pat_services = [
+    integer(node.get("service_id"), "PAT service_id")
+    for table in pats
+    for node in table.get("#nodes", [])
+    if node.get("#name") == "service"
+]
+sdt_services = {
+    integer(node.get("service_id"), "SDT service_id")
+    for table in sdts
+    for node in table.get("#nodes", [])
+    if node.get("#name") == "service"
+}
+if requested_sid:
+    try:
+        sid = int(requested_sid, 0)
+    except ValueError:
+        fail(f"invalid --service-id: {requested_sid}")
+    if sid not in sdt_services:
+        fail(f"service {sid} is not present in the actual SDT")
+    if sid not in pat_services:
+        fail(f"service {sid} is not present in the PAT")
+else:
+    try:
+        sid = next(service for service in pat_services if service in sdt_services)
+    except StopIteration:
+        fail("PAT and actual SDT have no service in common")
+
+tdt = "-"
+for t in tables:
+    if t.get("#name") == "TDT" and tdt == "-":
         raw = t.get("utc_time") or t.get("UTC_time") or ""
         # "YYYY-MM-DD hh:mm:ss" -> the "YYYY/MM/DD:hh:mm:ss" eitinject --time wants.
         if len(raw) == 19 and raw[4] == "-" and raw[10] == " ":
             tdt = raw.replace("-", "/").replace(" ", ":")
 print(sid, tsid, onid, tdt)
 PY
-)"
+)
 
-SERVICE_ID="${SERVICE_ID:-$DERIVED_SID}"
-[[ "$SERVICE_ID" == "-" || -z "$SERVICE_ID" ]] && SERVICE_ID=1
-[[ "$TSID" == "-" || -z "$TSID" ]] && TSID=1
-[[ "$ONID" == "-" || -z "$ONID" ]] && ONID=1
+read -r SERVICE_ID TSID ONID TDT <<<"$METADATA"
 
 # Anchor to the stream's own clock where it has one, so the "present" event is genuinely
 # present for a receiver decoding from the start. Otherwise a fixed date, which keeps the
@@ -225,13 +282,39 @@ tsp -I file "$SRC" \
     exit 1
 }
 
+tstables "$OUT" --pid 0x0012 --json-output "$TMP/eit.json" --no-pager >/dev/null
+python3 - "$TMP/eit.json" "$SERVICE_ID" "$TSID" "$ONID" <<'PY'
+import json, sys
+
+path, sid, tsid, onid = sys.argv[1:5]
+expected = tuple(map(int, (sid, tsid, onid)))
+try:
+    with open(path) as stream:
+        doc = json.load(stream)
+except (OSError, json.JSONDecodeError) as error:
+    print(f"error: cannot read generated EIT metadata: {error}", file=sys.stderr)
+    sys.exit(1)
+
+tables = doc.get("#nodes", []) if isinstance(doc, dict) else doc
+observed = {
+    (
+        table.get("service_id"),
+        table.get("transport_stream_id"),
+        table.get("original_network_id"),
+    )
+    for table in tables
+    if table.get("#name") == "EIT"
+}
+if expected not in observed:
+    print(
+        f"error: no generated EIT for service triplet {expected}; observed {sorted(observed)}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+PY
+
 EIT_PKTS=$(tsp -I file "$OUT" -P count --pid 0x0012 --total -O drop 2>&1 |
     sed -n 's/.*counted \([0-9,]*\) packets.*/\1/p' | head -1)
-if [[ -z "$EIT_PKTS" || "$EIT_PKTS" == "0" ]]; then
-    echo "error: no EIT in the output; the EPG or the time reference did not match the stream" >&2
-    sed 's/^/  tsp: /' "$TMP/tsp.log" >&2 || true
-    exit 1
-fi
 
 [[ -n "$QUIET" ]] || {
     echo "### EIT fixture: service $SERVICE_ID (ts $TSID, onid $ONID), reference $TIME_REF"
