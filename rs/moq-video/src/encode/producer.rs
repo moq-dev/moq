@@ -35,26 +35,6 @@ use super::rate::{Control, Policy};
 #[cfg(feature = "capture")]
 const DEFAULT_FRAMERATE: u32 = 30;
 
-/// The rendition as the importer wants it: what to publish now, and what to keep filling in on
-/// every config it later resolves from the bitstream.
-///
-/// A probed rendition is what the first keyframe carries, so the importer's own config matches it
-/// field for field and the catalog is published once rather than corrected. The fields the
-/// bitstream can't reveal (bitrate always, framerate outside an optional VUI) are the ones this
-/// overlay keeps supplying.
-fn rendition_hint(rendition: hang::catalog::VideoConfig) -> moq_mux::catalog::VideoHint {
-	let mut hint = moq_mux::catalog::VideoHint::default();
-	hint.codec = Some(rendition.codec);
-	hint.coded_width = rendition.coded_width;
-	hint.coded_height = rendition.coded_height;
-	hint.display_aspect_width = rendition.display_aspect_width;
-	hint.display_aspect_height = rendition.display_aspect_height;
-	hint.framerate = rendition.framerate;
-	hint.bitrate = rendition.bitrate;
-	hint.optimize_for_latency = rendition.optimize_for_latency;
-	hint
-}
-
 /// Per-codec splitter + importer pair. Each codec frames its packets and resolves
 /// its catalog rendition differently, so the producer holds one of these.
 enum Codecs<E: CatalogExt> {
@@ -104,14 +84,14 @@ impl<E: CatalogExt> Producer<E> {
 				let track = broadcast.unique_track(".avc3", catalog.track_info())?;
 				Codecs::H264 {
 					split: moq_mux::codec::h264::Split::new(),
-					import: moq_mux::codec::h264::Import::new(track, catalog.reserve(), rendition_hint(rendition))?,
+					import: moq_mux::codec::h264::Import::new(track, catalog.reserve(), rendition.into())?,
 				}
 			}
 			hang::catalog::VideoCodec::H265(_) => {
 				let track = broadcast.unique_track(".hev1", catalog.track_info())?;
 				Codecs::H265 {
 					split: moq_mux::codec::h265::Split::new(),
-					import: moq_mux::codec::h265::Import::new(track, catalog.reserve(), rendition_hint(rendition))?,
+					import: moq_mux::codec::h265::Import::new(track, catalog.reserve(), rendition.into())?,
 				}
 			}
 			// Unreachable via `Config::probe`, which only encodes what `Codec` covers.

@@ -129,6 +129,29 @@ fn fill<T>(slot: &mut Option<T>, value: Option<T>) {
 	}
 }
 
+impl From<hang::catalog::VideoConfig> for VideoHint {
+	/// Carry a whole rendition across as hints, for a caller that already knows what its encoder
+	/// emits (moq-video probes its encoder for exactly this).
+	///
+	/// Total by construction: every field the hint can hold is taken from the config, so there is no
+	/// per-field copy for a caller to forget. Fields with no hint slot (`broadcast`, `description`,
+	/// `container`, `stalled`) are set through the catalog directly.
+	fn from(config: hang::catalog::VideoConfig) -> Self {
+		Self {
+			label: config.label,
+			codec: Some(config.codec),
+			coded_width: config.coded_width,
+			coded_height: config.coded_height,
+			display_aspect_width: config.display_aspect_width,
+			display_aspect_height: config.display_aspect_height,
+			bitrate: config.bitrate,
+			framerate: config.framerate,
+			optimize_for_latency: config.optimize_for_latency,
+			jitter: config.jitter,
+		}
+	}
+}
+
 impl VideoHint {
 	/// Fill a detected video config's absent optional fields from these hints.
 	///
@@ -503,6 +526,47 @@ mod tests {
 			Some(Duration::from_millis(50)),
 			"a provided jitter must not be overwritten"
 		);
+	}
+
+	/// A caller hands moq-video a whole `VideoConfig`, so the conversion into hints must be total.
+	/// Hand-copying it field by field is what dropped the label on that path.
+	#[test]
+	fn a_config_converts_into_hints_without_losing_the_label() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+
+		let mut source = config(Some(456), None);
+		source.label = Some("Main camera".to_string());
+		source.coded_width = Some(1920);
+		source.coded_height = Some(1080);
+		let hint = VideoHint::from(source);
+
+		// The importer applies the hint to each config it publishes, so check the label survives
+		// both the up-front publish and a later one the stream resolved.
+		let mut first = config(None, None);
+		hint.apply(&mut first);
+		rendition.set(first);
+		feed(&mut rendition);
+		assert_eq!(
+			catalog.snapshot().video.renditions.get("v").unwrap().label.as_deref(),
+			Some("Main camera"),
+			"the label must survive the config the importer publishes up front"
+		);
+
+		let mut resolved = config(None, None);
+		resolved.coded_width = Some(1280);
+		resolved.coded_height = Some(720);
+		hint.apply(&mut resolved);
+		rendition.set(resolved);
+		feed(&mut rendition);
+
+		let snapshot = catalog.snapshot();
+		let published = snapshot.video.renditions.get("v").unwrap();
+		assert_eq!(
+			published.label.as_deref(),
+			Some("Main camera"),
+			"the label must survive a config the stream resolved later"
+		);
+		assert_eq!(published.bitrate, Some(456), "the rest of the config converts too");
 	}
 
 	/// A hint is applied by the importer before `set`, so a hinted field is indistinguishable from

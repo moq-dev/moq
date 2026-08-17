@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Propagate rendition labels through single-track media imports.
+- `From<hang::catalog::VideoConfig> for catalog::VideoHint`, a total conversion for a caller that
+  already has a whole rendition. Replaces the per-field copy in `moq-video`, which dropped the label.
 
 ### Changed
 
