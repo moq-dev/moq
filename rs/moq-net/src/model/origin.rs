@@ -1354,13 +1354,13 @@ impl DriverState {
 			teardown_cursors(node);
 		}
 
-		// Reject the dynamic requests no handler will ever serve now. Requests
-		// already handed to a live handler stay pending, resolved by its
-		// `Request` handle instead.
+		// Reject every pending dynamic request, including those already handed
+		// to a handler: the teardown is terminal, so a handler resolving late
+		// must not beat it (resolution is first-write-wins).
 		let mut dynamic = self.dynamic.lock();
-		for producer in dynamic.requests.drain_queued() {
+		for producer in dynamic.requests.drain_all() {
 			if let Ok(mut pending) = producer.write() {
-				pending.resolved = Some(Err(Error::Dropped));
+				pending.resolved.get_or_insert(Err(Error::Dropped));
 			}
 		}
 	}
@@ -2612,7 +2612,9 @@ impl Request {
 		};
 
 		if let Ok(mut pending) = self.producer.write() {
-			pending.resolved = Some(Ok(resolved));
+			// First write wins: the origin's teardown may have already rejected
+			// this request, and a late accept must not overturn that.
+			pending.resolved.get_or_insert(Ok(resolved));
 		}
 		// `self.producer` drops here, closing the channel; the value is still observable.
 	}
@@ -2624,7 +2626,8 @@ impl Request {
 			.requests
 			.remove_if(&self.path, |producer| producer.same_channel(&self.producer));
 		if let Ok(mut state) = self.producer.write() {
-			state.resolved = Some(Err(err));
+			// First write wins, matching `accept`.
+			state.resolved.get_or_insert(Err(err));
 		}
 	}
 }
@@ -4040,6 +4043,27 @@ mod tests {
 		));
 		let mut late = consumer.announced();
 		assert!(late.next().now_or_never().expect("born ended").is_none());
+	}
+
+	/// A dynamic request already handed to a handler is still rejected by the
+	/// teardown, and the handler resolving late cannot overturn the rejection.
+	#[tokio::test]
+	async fn test_driver_drop_rejects_handed_out_requests() {
+		tokio::time::pause();
+
+		let (origin, driver) = Producer::new(Info::new(Origin::random()));
+		let consumer = origin.consume();
+		let mut handler = origin.dynamic();
+
+		let pending = consumer.request_broadcast("vod");
+		let request = handler.requested_broadcast().await.unwrap();
+
+		drop(driver);
+
+		// The handler answers after the teardown: first write wins, so the
+		// requester still observes the rejection.
+		request.accept(broadcast::Info::new().produce());
+		assert!(matches!(pending.await, Err(Error::Dropped)));
 	}
 
 	/// The driver holds no producer clone: once every producer drops and the
