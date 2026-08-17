@@ -19,8 +19,11 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
 ## Workflow
 
 1. Resolve or create the PR.
-   - Prefer an explicit PR number or URL. Bind the checkout to that PR's exact head branch and commit before editing or
-     pushing; check out the exact head or stop if local and remote identities differ. Otherwise inspect the current branch.
+   - Run `git status --short` before changing the checkout or refs. Treat pre-existing changes as user-owned; preserve
+     them or stop rather than carrying them into the PR implicitly.
+   - Prefer an explicit PR number or URL. Resolve its `headRepository.fullName`, `headRefName`, and `headRefOid`, then
+     bind the checkout to that exact head before editing or pushing. Stop if local and remote identities differ and the
+     exact head cannot be checked out safely. Otherwise inspect the current branch.
    - Target `main` for fixes, features, additive APIs, documentation, refactors, and wire changes. Use `dev` only for a
      semver-breaking rename, removal, or signature change to a published API in a core library or language wrapper.
    - Require a current head branch distinct from the selected base before any push. If the checkout is detached or on
