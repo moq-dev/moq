@@ -17,6 +17,9 @@ use crate::{
 
 use super::{Message, Version, cluster, peer};
 
+/// Largest millisecond duration every implementation can carry losslessly.
+const MAX_SAFE_LATENCY_MS: u64 = (1_u64 << 53) - 1;
+
 /// Build the serving-side subscription for a peer whose wire protocol carries no
 /// latency preference. The receiver applies its own budget after the transfer.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
@@ -24,7 +27,7 @@ fn serving_subscription(subscriber_priority: u8) -> Subscription {
 		priority: super::priority::from_wire(subscriber_priority),
 		// Demand can cross a Lite hop before the producer's retention bound is
 		// known, so use the largest duration that remains wire-encodable.
-		latency: Latency::max(Duration::from_millis(crate::coding::VarInt::MAX.into_inner())),
+		latency: Latency::max(Duration::from_millis(MAX_SAFE_LATENCY_MS)),
 		..Default::default()
 	}
 }
@@ -1784,10 +1787,7 @@ mod tests {
 		}
 
 		let subscription = serving_subscription(128);
-		assert!(
-			crate::coding::VarInt::try_from(subscription.latency.max.as_millis()).is_ok(),
-			"fallback must remain encodable across a Lite relay hop"
-		);
+		assert_eq!(subscription.latency.max.as_millis(), MAX_SAFE_LATENCY_MS as u128);
 		let mut subscriber = producer.subscribe(subscription);
 		for sequence in [0, 1] {
 			let group = subscriber
