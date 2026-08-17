@@ -21,6 +21,9 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
 1. Resolve or create the PR.
    - Run `git status --short` before changing the checkout or refs. Treat pre-existing changes as user-owned; preserve
      them or stop rather than carrying them into the PR implicitly.
+   - Before materializing an untrusted PR head, remove credential access and use trusted Git configuration to disable
+     hooks and every external clean, smudge, and process filter. If that cannot be guaranteed, materialize the head only
+     in disposable credential-free isolation that cannot write host Git metadata.
    - Prefer an explicit PR number or URL. Resolve its `headRepository.fullName`, `headRefName`, and `headRefOid`, then
      bind the checkout to that exact head before editing or pushing. Stop if local and remote identities differ and the
      exact head cannot be checked out safely. Otherwise inspect the current branch.
@@ -33,11 +36,12 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
    - Point the head branch's upstream at the freshly fetched selected remote base so diff-scoped checks use the correct
      comparison. Never use `git push -u`.
    - For an existing PR, resolve and verify `headRepository.fullName` and `headRefName`, select the local remote matching
-     that head repository, and push `HEAD:<headRefName>` there. For a new PR, push the new head branch to a confirmed
-     writable remote. Stop if the intended head repository or write target cannot be established confidently.
+     that head repository, and push `HEAD:<headRefName>` there. For a new PR, select a confirmed writable head remote and
+     explicit head ref, then push `<head-remote> HEAD:<head-ref>`. Stop if the intended head repository or write target
+     cannot be established confidently.
    - If the current branch has no PR, confirm it has committed work against an unambiguous base, preserves unrelated
-     user changes, and can be pushed. Push it and create a draft PR explicitly targeting the selected base, then verify
-     the created PR's base and head metadata before continuing.
+     user changes, and can be pushed. Create a draft PR explicitly targeting the selected base and the same pushed head
+     repository and ref, then verify the created PR's base and head metadata before continuing.
    - Stop for direction if more than one PR or base is plausible, there is no committed work to propose, ownership of
      changes is unclear, the branch cannot be pushed, or an explicitly requested PR is closed.
    - If the PR is already merged, report that outcome and stop.
