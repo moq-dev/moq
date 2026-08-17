@@ -964,6 +964,11 @@ impl Consumer {
 		self.expired
 	}
 
+	/// Whether this cursor failed because its subscription latency budget expired.
+	pub(crate) fn latency_expired(&self) -> bool {
+		self.expired
+	}
+
 	/// Whether the group has been aborted (including pool eviction); the abort
 	/// dropped the cached frames, so a held consumer has nothing left to read.
 	///
