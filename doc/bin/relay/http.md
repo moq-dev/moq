@@ -109,7 +109,10 @@ cluster topology endpoint below.
 ### GET /metrics
 
 Prometheus text exposition of this node's own traffic counters (bytes, frames,
-groups, subscriptions, viewers, sessions), split by `tier` and `role`.
+groups, subscriptions, viewers, sessions), split by `tier` and `role`. Content
+skipped after drifting beyond a subscriber's latency budget is exposed through
+`moq_relay_stale_bytes_total`, `moq_relay_stale_frames_total`,
+`moq_relay_stale_groups_total`, and `moq_relay_stale_datagrams_total`.
 
 Alongside them are the TCP listeners' accept-loop counters, which are how a node
 that has stopped accepting connections says so:
