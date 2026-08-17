@@ -34,7 +34,8 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
      that head repository, and push `HEAD:<headRefName>` there. For a new PR, push the new head branch to a confirmed
      writable remote. Stop if the intended head repository or write target cannot be established confidently.
    - If the current branch has no PR, confirm it has committed work against an unambiguous base, preserves unrelated
-     user changes, and can be pushed. Push it and create a draft PR with an accurate title and body, then continue.
+     user changes, and can be pushed. Push it and create a draft PR explicitly targeting the selected base, then verify
+     the created PR's base and head metadata before continuing.
    - Stop for direction if more than one PR or base is plausible, there is no committed work to propose, ownership of
      changes is unclear, the branch cannot be pushed, or an explicitly requested PR is closed.
    - If the PR is already merged, report that outcome and stop.
@@ -96,8 +97,9 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
    - Execute PR-controlled code only in a credential-free isolated environment. Remove secret-bearing environment
      variables and credential access, and restrict network access to what validation requires. Use a disposable source
      copy without `.git`, or mount both the checkout and Git metadata read-only while writing build outputs to separate
-     disposable storage. If safe local isolation cannot be established, do not run the code locally; rely on the
-     repository's trusted required CI instead.
+     disposable storage. Expose no other writable host mounts; only disposable scratch and build storage may be writable.
+     If safe local isolation cannot be established, do not run the code locally; rely on the repository's trusted
+     required CI instead.
    - Run the repository's documented full merge gate in its documented environment. If none exists, run the most
      relevant checks and tests.
    - Recheck the final diff, worktree status, PR metadata, review threads, approvals, checks, and mergeability after the
