@@ -1,0 +1,172 @@
+//! [`kio::Tasks`] against `futures::stream::FuturesUnordered`, on the set
+//! machinery alone.
+//!
+//! Both contestants drive the same hand-rolled [`Gate`] primitive with
+//! identical poll bodies, so the difference is pure bookkeeping: storage
+//! layout, the wake queue, and poll dispatch. Two scenarios:
+//!
+//! - `wake_16_of_1000`: steady state. 1000 parked tasks, each iteration fires
+//!   16 gates and polls the set once; the woken tasks consume the fire and
+//!   re-park. This is the shape of a driver serving many subscriptions, where
+//!   per-task wakeup granularity is the whole point.
+//! - `spawn_drain_1000`: churn. Push 1000 immediately-ready tasks and drain
+//!   them, measuring per-task setup and retirement (allocation included).
+//!
+//! Run with `cargo bench -p kio`.
+
+use std::{
+	future::Future,
+	hint::black_box,
+	pin::Pin,
+	sync::{
+		Arc, Mutex,
+		atomic::{AtomicBool, Ordering},
+	},
+	task::{Context, Poll, Waker},
+};
+
+use criterion::{Criterion, criterion_group, criterion_main};
+use futures::stream::StreamExt;
+
+/// The shared wakeable primitive: a resettable flag plus a parked waker.
+///
+/// Deliberately minimal and identical for both contestants, so neither pays
+/// costs the other doesn't.
+struct Gate {
+	fired: AtomicBool,
+	waker: Mutex<Option<Waker>>,
+}
+
+impl Gate {
+	fn new() -> Arc<Self> {
+		Arc::new(Self {
+			fired: AtomicBool::new(false),
+			waker: Mutex::new(None),
+		})
+	}
+
+	/// Fire the gate, waking whoever parked.
+	fn fire(&self) {
+		self.fired.store(true, Ordering::Release);
+		if let Some(waker) = self.waker.lock().unwrap().take() {
+			waker.wake();
+		}
+	}
+
+	/// Consume a fire (if any) and park `waker` for the next one.
+	fn consume_and_park(&self, waker: &Waker) -> bool {
+		let fired = self.fired.swap(false, Ordering::AcqRel);
+		*self.waker.lock().unwrap() = Some(waker.clone());
+		fired
+	}
+}
+
+/// The `FuturesUnordered` contestant: consumes fires forever, never completes.
+/// Its poll body is byte-for-byte the closure the `Tasks` contestant uses.
+struct Forever(Arc<Gate>);
+
+impl Future for Forever {
+	type Output = ();
+
+	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+		black_box(self.0.consume_and_park(cx.waker()));
+		Poll::Pending
+	}
+}
+
+/// The `Tasks` contestant, minted by one factory so the set stays unboxed.
+fn forever(gate: Arc<Gate>) -> impl FnMut(&kio::Waiter) -> Poll<()> {
+	move |waiter| {
+		black_box(gate.consume_and_park(waiter.waker()));
+		Poll::Pending
+	}
+}
+
+fn wake_sparse(c: &mut Criterion) {
+	const N: usize = 1000;
+	const K: usize = 16;
+
+	let mut group = c.benchmark_group("wake_16_of_1000");
+
+	group.bench_function("kio_tasks", |b| {
+		let gates: Vec<_> = (0..N).map(|_| Gate::new()).collect();
+		let mut tasks = kio::Tasks::new();
+		for gate in &gates {
+			tasks.push(forever(gate.clone()));
+		}
+		// Park everyone.
+		let waiter = kio::Waiter::noop();
+		let _ = tasks.poll(&waiter);
+
+		let mut next = 0;
+		b.iter(|| {
+			for _ in 0..K {
+				gates[next].fire();
+				next = (next + 1) % N;
+			}
+			let _ = black_box(tasks.poll(&waiter));
+		});
+	});
+
+	group.bench_function("futures_unordered", |b| {
+		let gates: Vec<_> = (0..N).map(|_| Gate::new()).collect();
+		let mut set = futures::stream::FuturesUnordered::new();
+		for gate in &gates {
+			set.push(Forever(gate.clone()));
+		}
+		// Park everyone. Nothing ever completes, so poll_next reports Pending
+		// after polling the woken (here: all new) futures.
+		let waker = Waker::noop();
+		let mut cx = Context::from_waker(waker);
+		let _ = set.poll_next_unpin(&mut cx);
+
+		let mut next = 0;
+		b.iter(|| {
+			for _ in 0..K {
+				gates[next].fire();
+				next = (next + 1) % N;
+			}
+			let _ = black_box(set.poll_next_unpin(&mut cx));
+		});
+	});
+
+	group.finish();
+}
+
+fn spawn_drain(c: &mut Criterion) {
+	const N: usize = 1000;
+
+	let mut group = c.benchmark_group("spawn_drain_1000");
+
+	group.bench_function("kio_tasks", |b| {
+		let waiter = kio::Waiter::noop();
+		b.iter(|| {
+			let mut tasks = kio::Tasks::new();
+			for _ in 0..N {
+				tasks.push(|_: &kio::Waiter| Poll::Ready(()));
+			}
+			while tasks.poll(&waiter).is_pending() {}
+			black_box(&tasks);
+		});
+	});
+
+	group.bench_function("futures_unordered", |b| {
+		let waker = Waker::noop();
+		b.iter(|| {
+			let mut set = futures::stream::FuturesUnordered::new();
+			for _ in 0..N {
+				set.push(std::future::ready(()));
+			}
+			let mut cx = Context::from_waker(waker);
+			// Drain to completion; the yield cap makes poll_next return Pending
+			// (with a self-wake) every 32 completions, so keep polling.
+			while !matches!(set.poll_next_unpin(&mut cx), Poll::Ready(None)) {}
+			black_box(&set);
+		});
+	});
+
+	group.finish();
+}
+
+criterion_group!(benches, wake_sparse, spawn_drain);
+criterion_main!(benches);

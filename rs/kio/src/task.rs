@@ -44,6 +44,10 @@ pub struct Tasks<T> {
 	free: Vec<usize>,
 	len: usize,
 	shared: Arc<Shared>,
+	/// Tasks awaiting their first poll. Owner-local (`push` has `&mut self`),
+	/// so a push skips the [`Shared::ready`] lock; their `dirty` flag stays set
+	/// until that first poll, so a pre-poll wake can't double-queue them.
+	newborn: Vec<usize>,
 	/// Swapped with [`Shared::ready`] each poll so both buffers keep their
 	/// capacity: past the high-water mark, wakes and polls stop allocating.
 	scratch: Vec<usize>,
@@ -110,6 +114,7 @@ impl<T> Tasks<T> {
 				ready: Mutex::new(Vec::new()),
 				parent: Mutex::new(None),
 			}),
+			newborn: Vec::new(),
 			scratch: Vec::new(),
 		}
 	}
@@ -148,7 +153,7 @@ impl<T> Tasks<T> {
 			park: Park::default(),
 		});
 		self.len += 1;
-		self.shared.ready.lock().unwrap().push(index);
+		self.newborn.push(index);
 		self.shared.wake_parent();
 	}
 }
@@ -177,6 +182,8 @@ impl<T: FnMut(&Waiter) -> Poll<()>> Tasks<T> {
 		// ever yielding, starving the caller's other arms.
 		debug_assert!(self.scratch.is_empty());
 		std::mem::swap(&mut *self.shared.ready.lock().unwrap(), &mut self.scratch);
+		// Newborns join the pass without ever having touched the shared lock.
+		self.scratch.append(&mut self.newborn);
 		for index in self.scratch.drain(..) {
 			// A stale index (the task finished, maybe its slot was reused) is
 			// skipped or costs one spurious poll; both are harmless.
