@@ -2025,6 +2025,27 @@ impl Consumer {
 		}
 	}
 
+	/// Attach a subscription's drift policy to a cached group resolved outside its cursor.
+	pub(crate) fn guard_group(
+		&self,
+		group: group::Consumer,
+		subscription: kio::Consumer<Subscription>,
+		cap: kio::Consumer<Option<u64>>,
+		bound: Option<u64>,
+	) -> group::Consumer {
+		let ConsumerKind::Plain(state) = &self.inner else {
+			return group;
+		};
+		let sequence = group.sequence;
+		group.with_expiry(Arc::new(GroupExpiry {
+			state: state.clone(),
+			subscription,
+			cap,
+			bound,
+			sequence,
+		}))
+	}
+
 	/// Poll for a cached group by sequence, parking `waiter` until it lands.
 	///
 	/// `Ready(None)` once it can never arrive: the track ended below the sequence, or
@@ -2601,6 +2622,7 @@ struct GroupExpiry {
 	state: kio::Consumer<TrackState>,
 	subscription: kio::Consumer<Subscription>,
 	cap: kio::Consumer<Option<u64>>,
+	bound: Option<u64>,
 	sequence: u64,
 }
 
@@ -2617,6 +2639,7 @@ impl group::Expiry for GroupExpiry {
 			cap = **current;
 			Poll::<()>::Pending
 		});
+		let cap = super::subscription::min_some(cap, self.bound);
 
 		let mut expired = false;
 		let _ = self.state.poll(waiter, |state| {
@@ -2752,7 +2775,11 @@ impl PlainSubscriber {
 	/// [`Poll::Ready`]; the track ending surfaces as the error the caller was going to
 	/// get anyway.
 	fn poll_drift(&self, waiter: &kio::Waiter) -> Poll<Result<Drift>> {
-		let latency = self.subscription.read().latency;
+		let mut latency = Latency::default();
+		let _ = self.subscription.poll(waiter, |subscription| {
+			latency = subscription.latency;
+			Poll::<()>::Pending
+		});
 		let cap = servable_cap(self.end_sequence, self.stale_cap);
 		self.poll(waiter, move |state| {
 			Poll::Ready(Ok(Drift {
@@ -2776,6 +2803,7 @@ impl PlainSubscriber {
 			state: self.state.clone(),
 			subscription: self.subscription.consume(),
 			cap: self.drift_cap.consume(),
+			bound: None,
 			sequence,
 		}))
 	}
@@ -4112,6 +4140,34 @@ mod test {
 
 		let result = pending.await.unwrap();
 		assert!(matches!(result, Err(Error::Old)), "the held group expires: {result:?}");
+	}
+
+	#[tokio::test]
+	async fn widening_latency_wakes_a_pending_frame_read() {
+		tokio::time::pause();
+
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(None);
+		let control = subscriber.control();
+
+		append_at(&mut producer, 0);
+		tokio::time::advance(Duration::from_secs(1)).await;
+		let _edge = producer.append_group().unwrap();
+
+		let pending = tokio::spawn(async move { subscriber.read_frame().await });
+		tokio::task::yield_now().await;
+		assert!(!pending.is_finished(), "the real-time budget skips the old frame");
+
+		control
+			.update(Subscription::default().with_latency(Latency::max(Duration::from_secs(2))))
+			.unwrap();
+
+		let frame = pending
+			.await
+			.unwrap()
+			.unwrap()
+			.expect("the wider budget admits the frame");
+		assert_eq!(frame.payload, bytes::Bytes::from_static(b"x"));
 	}
 
 	#[test]

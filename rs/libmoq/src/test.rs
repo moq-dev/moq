@@ -1144,12 +1144,23 @@ fn raw_track_publish_consume() {
 	let consume = request_broadcast(origin, path);
 
 	let frame_cb = Callback::new();
+	// This round trip verifies every published frame. Allow the first group to
+	// finish draining if the second becomes visible while the callback runs.
+	let subscription = moq_subscription {
+		priority: 0,
+		ordered: false,
+		latency_max_ms: 1_000,
+		group_start: 0,
+		group_start_valid: false,
+		group_end: 0,
+		group_end_valid: false,
+	};
 	let consumer = id(unsafe {
 		moq_consume_track(
 			consume,
 			track_name.as_ptr() as *const c_char,
 			track_name.len(),
-			std::ptr::null(),
+			&subscription,
 			Some(channel_callback),
 			frame_cb.ptr,
 		)

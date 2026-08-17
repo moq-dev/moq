@@ -468,6 +468,7 @@ impl Consumer {
 			next_sequence: 0,
 			min_sequence: 0,
 			end_sequence: None,
+			drift_cap: kio::Producer::new(None),
 			reading: None,
 		}
 	}
@@ -667,6 +668,11 @@ fn frames(start: Option<Position>, end: Option<Position>, sequence: u64) -> Opti
 	Some((start, end))
 }
 
+/// The last group a half-open segment can serve, or no bound for the newest segment.
+fn last_group(end: Option<Position>) -> Option<u64> {
+	end?.before().map(|position| position.group)
+}
+
 /// A group assembled from several routes' copies, joined at frame boundaries.
 ///
 /// Rather than being fed, it pulls: on every frame it asks the segment list which route
@@ -679,6 +685,10 @@ fn frames(start: Option<Position>, end: Option<Position>, sequence: u64) -> Opti
 /// replacement can arrive.
 pub(crate) struct Group {
 	state: kio::Consumer<ResumeState>,
+	/// The logical subscription's live latency budget.
+	subscription: kio::Consumer<Subscription>,
+	/// The logical reader's group cap, used only to bound each route's drift anchor.
+	cap: kio::Consumer<Option<u64>>,
 
 	/// The logical group being assembled.
 	sequence: u64,
@@ -700,13 +710,14 @@ pub(crate) struct Group {
 struct Current {
 	segment: u64,
 	cap: Option<u64>,
+	bound: Option<u64>,
 	group: group::Consumer,
 }
 
 /// A route covering one position: the segment id, its track, and the segment's
 /// exclusive frame bound on the group (outer `None` when the group escapes the
 /// segment's range entirely, from [`frames`]).
-type Covering = (u64, track::Consumer, Option<Option<u64>>);
+type Covering = (u64, track::Consumer, Option<Option<u64>>, Option<u64>);
 
 impl Clone for Group {
 	fn clone(&self) -> Self {
@@ -722,11 +733,14 @@ impl Clone for Group {
 			(group.index() == self.index).then_some(Current {
 				segment: current.segment,
 				cap: current.cap,
+				bound: current.bound,
 				group,
 			})
 		});
 		Self {
 			state: self.state.clone(),
+			subscription: self.subscription.clone(),
+			cap: self.cap.clone(),
 			sequence: self.sequence,
 			index: self.index,
 			end: self.end,
@@ -737,9 +751,17 @@ impl Clone for Group {
 }
 
 impl Group {
-	fn new(state: kio::Consumer<ResumeState>, sequence: u64, index: u64) -> Self {
+	fn new(
+		state: kio::Consumer<ResumeState>,
+		subscription: kio::Consumer<Subscription>,
+		cap: kio::Consumer<Option<u64>>,
+		sequence: u64,
+		index: u64,
+	) -> Self {
 		Self {
 			state,
+			subscription,
+			cap,
 			sequence,
 			index,
 			end: None,
@@ -758,12 +780,17 @@ impl Group {
 	/// latched, since the reuse path trusts the latch's alignment and would
 	/// misnumber its frames. The reader re-resolves instead, and the peek path's
 	/// own check buries the copy as lagged.
-	fn latched(mut self, segment: u64, cap: Option<u64>, mut group: group::Consumer) -> Self {
+	fn latched(mut self, segment: u64, cap: Option<u64>, bound: Option<u64>, mut group: group::Consumer) -> Self {
 		// The segment bound is exclusive; a group consumer's cap is inclusive.
 		group.end_at(cap.map(|cap| cap.saturating_sub(1)));
 		group.start_at(self.index);
 		if group.index() == self.index {
-			self.current = Some(Current { segment, cap, group });
+			self.current = Some(Current {
+				segment,
+				cap,
+				bound,
+				group,
+			});
 		}
 		self
 	}
@@ -833,6 +860,7 @@ impl Group {
 							segment.id,
 							segment.track.clone(),
 							frames(segment.start, segment.end, sequence).map(|(_, end)| end),
+							last_group(segment.end),
 						))),
 						Poll::Pending => match terminal {
 							true => Poll::Ready(None),
@@ -844,6 +872,7 @@ impl Group {
 					segment.id,
 					segment.track.clone(),
 					frames(segment.start, segment.end, sequence).map(|(_, end)| end),
+					last_group(segment.end),
 				))),
 				// No route owns them yet; park unless none is coming.
 				None if terminal => Poll::Ready(None),
@@ -873,7 +902,7 @@ impl Group {
 			let sequence = self.sequence;
 			let found = ready!(self.poll_covering(position, dead, waiter));
 
-			let Some((segment, track, Some(cap))) = found else {
+			let Some((segment, track, Some(cap), bound)) = found else {
 				// No segment covers the position, but a latched copy still drains:
 				// a pruned segment's cursor holds exactly the frames it owned (its
 				// cap was its produced edge), so read it dry before giving up. Once
@@ -889,13 +918,13 @@ impl Group {
 			if self
 				.current
 				.as_ref()
-				.is_some_and(|current| current.segment == segment && current.cap == cap)
+				.is_some_and(|current| current.segment == segment && current.cap == cap && current.bound == bound)
 			{
 				return Poll::Ready(Ok(true));
 			}
 
 			// The route may not have delivered this group yet, so wait on its cache.
-			let Some(mut group) = ready!(track.poll_peek_group(sequence, waiter)) else {
+			let Some(group) = ready!(track.poll_peek_group(sequence, waiter)) else {
 				// This route will never have it; fall back to whichever segment replaces it.
 				self.dead = Some((segment, Error::NotFound));
 				continue;
@@ -904,6 +933,7 @@ impl Group {
 			// `start_at` clamps up to the first frame the copy still holds, so landing
 			// higher than asked means this route can't cover the seam after all. Treat it
 			// like a dead copy and wait for one that can.
+			let mut group = track.guard_group(group, self.subscription.clone(), self.cap.clone(), bound);
 			group.start_at(self.index);
 			if group.index() != self.index {
 				self.dead = Some((segment, Error::Lagged));
@@ -912,7 +942,12 @@ impl Group {
 
 			// The segment bound is exclusive; a group consumer's cap is inclusive.
 			group.end_at(cap.map(|cap| cap.saturating_sub(1)));
-			self.current = Some(Current { segment, cap, group });
+			self.current = Some(Current {
+				segment,
+				cap,
+				bound,
+				group,
+			});
 			self.dead = None;
 			return Poll::Ready(Ok(true));
 		}
@@ -970,14 +1005,22 @@ impl Group {
 			if !ready!(self.poll_current(waiter))? {
 				return Poll::Ready(Ok(None));
 			}
-			let current = self.current.as_mut().expect("resolved above");
-			match ready!(current.group.poll_read_frame(waiter)) {
+			let result = {
+				let current = self.current.as_mut().expect("resolved above");
+				ready!(current.group.poll_read_frame(waiter))
+			};
+			let latency_expired = self
+				.current
+				.as_ref()
+				.is_some_and(|current| current.group.latency_expired());
+			match result {
 				Ok(Some(frame)) => {
 					self.index += 1;
 					return Poll::Ready(Ok(Some(frame)));
 				}
 				Ok(None) if self.roll() => continue,
 				Ok(None) => return Poll::Ready(Ok(None)),
+				Err(err) if latency_expired => return Poll::Ready(Err(err)),
 				Err(err) => self.bury(err),
 			}
 		}
@@ -991,14 +1034,22 @@ impl Group {
 			if !ready!(self.poll_current(waiter))? {
 				return Poll::Ready(Ok(None));
 			}
-			let current = self.current.as_mut().expect("resolved above");
-			match ready!(current.group.poll_next_frame(waiter)) {
+			let result = {
+				let current = self.current.as_mut().expect("resolved above");
+				ready!(current.group.poll_next_frame(waiter))
+			};
+			let latency_expired = self
+				.current
+				.as_ref()
+				.is_some_and(|current| current.group.latency_expired());
+			match result {
 				Ok(Some(frame)) => {
 					self.index += 1;
 					return Poll::Ready(Ok(Some(frame)));
 				}
 				Ok(None) if self.roll() => continue,
 				Ok(None) => return Poll::Ready(Ok(None)),
+				Err(err) if latency_expired => return Poll::Ready(Err(err)),
 				Err(err) => self.bury(err),
 			}
 		}
@@ -1029,13 +1080,17 @@ impl Group {
 		};
 		loop {
 			let dead = self.dead.as_ref().map(|(segment, _)| *segment);
-			let Some((segment, track, _)) = ready!(self.poll_covering(seam, dead, waiter)) else {
+			let Some((segment, track, _, bound)) = ready!(self.poll_covering(seam, dead, waiter)) else {
 				return Poll::Ready(Ok(cap));
 			};
 			match ready!(track.poll_peek_group(self.sequence, waiter)) {
 				// The continuation's copy declares the count: its own count
 				// already includes the frames it skipped.
-				Some(mut continuation) => return continuation.poll_finished(waiter),
+				Some(continuation) => {
+					let mut continuation =
+						track.guard_group(continuation, self.subscription.clone(), self.cap.clone(), bound);
+					return continuation.poll_finished(waiter);
+				}
 				// This route will never have it; wait for whatever replaces it.
 				None => self.dead = Some((segment, Error::NotFound)),
 			}
@@ -1090,17 +1145,16 @@ impl SegmentSub {
 	/// The last group this segment can serve (inclusive), for the underlying read
 	/// cursor. `None` while it is the newest segment.
 	fn last_group(&self) -> Option<u64> {
-		let end = self.end?;
 		// An empty segment would serve nothing, and no switch produces one: every
 		// boundary comes from `resume_position`, which sits at or above the first frame.
 		// `None` here reads as "no cap", which is why it is asserted rather than relied
 		// on; the authoritative filter is `Segment::covers`, which uses the exclusive
 		// bound directly.
 		debug_assert!(
-			end != Position::default(),
+			self.end != Some(Position::default()),
 			"a segment cannot end at the start of the track"
 		);
-		Some(end.before()?.group)
+		last_group(self.end)
 	}
 
 	/// Whether a producer-dropped segment is spent and can be removed. A capped
@@ -1161,6 +1215,8 @@ pub struct Subscriber {
 	min_sequence: u64,
 	/// Inclusive cap for [`Self::next_group`], set by [`Self::end_at`].
 	end_sequence: Option<u64>,
+	/// Shared copy of [`Self::end_sequence`] for groups that outlive this cursor poll.
+	drift_cap: kio::Producer<Option<u64>>,
 
 	/// The group currently being drained by [`Self::read_frame`].
 	reading: Option<group::Consumer>,
@@ -1347,7 +1403,14 @@ impl Subscriber {
 		// through the segment list, which forgets this route the moment its
 		// segment is pruned, turning a group the cursor already delivered into an
 		// empty husk.
-		let spliced = Group::new(self.state.clone(), sequence, 0).latched(seg.id, end, group.clone());
+		let spliced = Group::new(
+			self.state.clone(),
+			self.prefs.consume(),
+			self.drift_cap.consume(),
+			sequence,
+			0,
+		)
+		.latched(seg.id, end, seg.last_group(), group.clone());
 		Some(group.into_spliced(spliced))
 	}
 
@@ -1745,6 +1808,9 @@ impl Subscriber {
 	/// re-offers it.
 	pub fn end_at(&mut self, sequence: impl Into<Option<u64>>) {
 		self.end_sequence = sequence.into();
+		if let Ok(mut cap) = self.drift_cap.write() {
+			*cap = self.end_sequence;
+		}
 		// The cap bounds each segment's drift anchor as well as this reader's own
 		// delivery: a segment must not measure against groups this cap hides.
 		let end_sequence = self.end_sequence;
@@ -2483,6 +2549,46 @@ mod test {
 		assert_eq!(read(&mut reading), b"b2");
 		assert!(reading.read_frame().now_or_never().unwrap().unwrap().is_none());
 		recv_pending(&mut sub);
+	}
+
+	#[tokio::test]
+	async fn a_replacement_copy_keeps_the_handed_out_group_latency_budget() {
+		tokio::time::pause();
+
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		let mut head = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		head.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().expect("head group");
+		assert_eq!(read(&mut reading), b"a0");
+
+		producer.takeover(&consumer_b).unwrap();
+		track_a.abort(Error::Dropped).unwrap();
+		recv_pending(&mut sub);
+
+		let mut continuation = track_b.create_group(group::Info { sequence: 0 }).unwrap();
+		continuation.start_at(1).unwrap();
+		continuation.write_frame(Timestamp::ZERO, b"b1".to_vec()).unwrap();
+		assert_eq!(read(&mut reading), b"b1");
+
+		assert!(
+			reading.read_frame().now_or_never().is_none(),
+			"the replacement group is still the live edge"
+		);
+
+		tokio::time::advance(Duration::from_secs(1)).await;
+		write_group_at(&mut track_b, 1, "edge", Duration::from_secs(1));
+
+		let result = reading
+			.read_frame()
+			.now_or_never()
+			.expect("the newer group changes the verdict");
+		assert!(matches!(result, Err(Error::Old)), "the replacement expires: {result:?}");
 	}
 
 	/// A replacement that serves the whole group instead of the requested tail still
