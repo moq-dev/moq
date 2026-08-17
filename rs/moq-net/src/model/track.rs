@@ -592,11 +592,12 @@ impl TrackState {
 				.lookup
 				.get(&edge.wall.sequence)
 				.is_some_and(|live| live.stamp == edge.wall.stamp && !live.group.is_aborted())
-			&& edge
-				.wall
-				.arrived
-				.checked_duration_since(slot.arrived)
-				.is_some_and(|age| age > budget);
+			&& (budget.is_zero()
+				|| edge
+					.wall
+					.arrived
+					.checked_duration_since(slot.arrived)
+					.is_some_and(|age| age > budget));
 
 		let presentation_stale = edge.presentation.is_some_and(|edge| {
 			edge.sequence > sequence
@@ -4221,6 +4222,18 @@ mod test {
 		assert!(subscriber.next_group().now_or_never().is_none());
 	}
 
+	#[tokio::test]
+	async fn real_time_skips_older_sequences_with_equal_ages() {
+		tokio::time::pause();
+
+		let mut producer = track_producer("test", None);
+		append_at(&mut producer, 0);
+		append_at(&mut producer, 0);
+
+		let mut subscriber = producer.subscribe(None);
+		assert_eq!(drain(&mut subscriber), vec![1]);
+	}
+
 	#[test]
 	fn fetch_ignores_the_budget() {
 		let mut producer = track_producer("test", None);
@@ -4342,7 +4355,7 @@ mod test {
 			.unwrap();
 		rewound.finish().unwrap();
 
-		let mut subscriber = producer.subscribe(None);
+		let mut subscriber = producer.subscribe(replay());
 		assert_eq!(drain(&mut subscriber), vec![0, 1]);
 	}
 
@@ -4828,7 +4841,7 @@ mod test {
 	#[tokio::test]
 	async fn next_group_and_recv_group_use_independent_cursors() {
 		let mut producer = track_producer("test", None);
-		let mut consumer = producer.subscribe(None);
+		let mut consumer = producer.subscribe(replay());
 
 		// Out-of-order arrivals: seq 5 first, then seq 3.
 		producer.create_group(group::Info { sequence: 5 }).unwrap();

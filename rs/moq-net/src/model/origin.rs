@@ -4403,7 +4403,10 @@ mod tests {
 		announced.assert_next_wait();
 
 		// Subscribing dispatches the track to the best source (A).
-		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let subscribing = broadcast
+			.track("video")
+			.unwrap()
+			.subscribe(track::Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(5))));
 		let mut producer = accept_track(&mut dynamic_a, "video").await;
 		settle().await;
 		dynamic_b.assert_no_request();
@@ -4786,7 +4789,10 @@ mod tests {
 		let broadcast = consumer.request_broadcast("test").await.unwrap();
 		announced.assert_next_some("test");
 
-		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let subscribing = broadcast
+			.track("video")
+			.unwrap()
+			.subscribe(track::Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(5))));
 		let mut producer_a = accept_track(&mut dynamic_a, "video").await;
 		settle().await;
 		let mut sub = subscribing.await.unwrap();

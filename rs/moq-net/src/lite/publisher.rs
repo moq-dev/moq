@@ -1718,7 +1718,8 @@ mod test {
 		use futures::FutureExt;
 
 		let mut producer = track_producer("test");
-		let mut subscriber = producer.subscribe(None);
+		let mut subscriber = producer
+			.subscribe(track::Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(5))));
 
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
 		match recv_next(&mut subscriber, false, false).await.unwrap() {
