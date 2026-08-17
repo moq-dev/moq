@@ -226,6 +226,22 @@ fn publish_media_rejects_a_null_config() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A container publishes and describes its own tracks, so there is no single rendition for a label
+/// to name. Report that rather than accepting the call and dropping the label.
+#[test]
+fn publish_media_rejects_a_label_on_a_container_format() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"publish-media-container-label");
+
+	assert!(publish_media(broadcast, b"fmp4", &[], Some(b"English")) < 0);
+	// The same container format is fine without one.
+	let media = id(publish_media(broadcast, b"fmp4", &[], None));
+
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 fn borrowed_string(ptr: *const c_char, len: usize) -> Option<String> {
 	if ptr.is_null() {
 		return None;

@@ -100,6 +100,8 @@ broadcast.finish()
 Supported codec formats include `opus`, `avc3`, `hev1`, `av01`, `vp09`, and others. See [`hang`](/lib/rs/crate/hang) for the full list.
 The optional `label` is presentation metadata for a track picker. The transport
 track name remains generated from the format and labels do not need to be unique.
+It names one rendition, so a container format (`fmp4`, `mkv`, `ts`, `flv`) raises
+rather than ignoring it: those describe their own tracks.
 
 ### Publishing raw media
 

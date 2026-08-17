@@ -145,7 +145,9 @@ try broadcast.finish()
 ```
 
 The optional `label` is presentation metadata for a track picker and does not
-change the generated transport track name. Video publishers can pass
+change the generated transport track name. It names one rendition, so a container
+format (`fmp4`, `mkv`, `ts`, `flv`) throws rather than ignoring it: those describe
+their own tracks. Video publishers can pass
 `video: VideoHint(...)` to seed catalog fields before the stream reveals them.
 Use `publishMedia(on:format:initData:label:video:)` to accept a media track
 obtained from `BroadcastDynamic`.

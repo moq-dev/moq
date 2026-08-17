@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `moq_publish_media` now takes an extensible `moq_media_config` instead of positional arguments.
+- `moq_video_config` and `moq_audio_config` gained trailing `label` / `label_len` fields. Both structs
+  are caller-allocated and the consume calls write into them, so this is a recompile, not a
+  drop-in replacement for an existing header.
+- `moq_publish_media` rejects a label on a container format (fmp4, mkv, ts, flv) instead of
+  silently dropping it.
 
 ## [0.5.8](https://github.com/moq-dev/moq/compare/libmoq-v0.5.7...libmoq-v0.5.8) - 2026-08-14
 

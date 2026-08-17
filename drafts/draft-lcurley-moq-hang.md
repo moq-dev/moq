@@ -148,7 +148,7 @@ Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}
 The `display` field is the size to render the video at, in pixels.
 It is separate from a rendition's `displayAspectWidth`/`displayAspectHeight` because changing it does not require reinitializing the decoder.
 
-In addition to the WebCodecs fields, each rendition MAY carry the fields common to audio and video ({{common}}) plus:
+In addition to the WebCodecs fields, each rendition MAY carry the common rendition fields ({{common}}) plus:
 
 ~~~
 type VideoDecoderConfigExtensions = {
@@ -216,7 +216,7 @@ The `renditions` field contains a map of track names to audio decoder configurat
 See the [WebCodecs specification](https://www.w3.org/TR/webcodecs/#audio-decoder-config) for specifics and registered codecs.
 Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}).
 
-In addition to the WebCodecs fields, each rendition MAY carry the fields common to audio and video ({{common}}).
+In addition to the WebCodecs fields, each rendition MAY carry the common rendition fields ({{common}}).
 
 ### PCM {#audio-pcm}
 
@@ -294,6 +294,7 @@ It SHOULD keep such a rendition selectable and treat the role as `subtitle`, and
 Unlike `format`, an unrecognized `role` never prevents rendering: it describes intent, not the wire.
 
 The `lang` field is the BCP-47 {{!RFC5646}} language tag of the track, for example `en` or `es-419`.
+Two renditions sharing a `lang` are told apart by `label` ({{field-label}}), one of the common rendition fields ({{common}}).
 
 Regardless of `format`, each frame's timestamp ({{container}}) is the authoritative cue start time on the media clock, so a relay and a consumer can order and schedule cues without parsing the payload.
 A text track has no delta frames: every frame is a self-contained cue, so a group MAY consist of multiple frames, following the same rule as a codec that lacks delta frames ({{container}}).

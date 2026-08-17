@@ -99,6 +99,13 @@ pub enum Error {
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
 
+	/// A single-rendition [`Init`](crate::import::Init) field was set on a container format.
+	///
+	/// A container publishes its own tracks and describes each one from the container's metadata, so
+	/// there is no single rendition for the field to apply to.
+	#[error("container format does not support {0}")]
+	UnsupportedByContainer(&'static str),
+
 	/// A non-keyframe frame was received before any keyframe opened a group.
 	/// A track joining mid-stream should skip frames until the first keyframe.
 	#[error("{0}")]

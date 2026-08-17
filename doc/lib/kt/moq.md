@@ -138,7 +138,9 @@ Moq.connect("https://relay.example.com").use { moq ->
 ```
 
 `label` is presentation metadata for a track picker and does not change the
-generated transport track name. Labels do not need to be unique.
+generated transport track name. Labels do not need to be unique. It names one
+rendition, so a container format (`fmp4`, `mkv`, `ts`, `flv`) throws rather than
+ignoring it: those describe their own tracks.
 
 Each catalog `Video` has a `stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
 

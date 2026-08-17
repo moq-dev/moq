@@ -267,9 +267,11 @@ int32_t media = moq_publish_media(broadcast, &config);
 
 The transport track name is generated from the codec format. `label` is an
 optional human-readable rendition name stored in the audio or video catalog
-configuration, and leaving it zero omits it. The same optional pair is
-available on `moq_video_config` and `moq_audio_config`; pointers returned by the
-consume APIs borrow the catalog snapshot just like `name` and `codec`.
+configuration, and leaving it zero omits it. It names one rendition, so a
+container format (`fmp4`, `mkv`, `ts`, `flv`) returns an error rather than
+ignoring it: those publish and describe their own tracks. The same optional pair
+is available on `moq_video_config` and `moq_audio_config`; pointers returned by
+the consume APIs borrow the catalog snapshot just like `name` and `codec`.
 
 `moq_publish_video_raw` opens an encoder and a video track together. Resolution, framerate, and pixel layout are fixed there, so each `moq_video_encoder_frame` carries only pixels and a timestamp:
 

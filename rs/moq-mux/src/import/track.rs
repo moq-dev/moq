@@ -13,6 +13,9 @@ pub use super::Init;
 
 /// The caller-provided video fields for `init`, defaulting the codec from the format when the codec
 /// carries no extra parameters (VP8), so a hint with a codec can publish before the first frame.
+///
+/// [`Init::label`] is the label for callers that never build a hint, so an explicit
+/// [`VideoHint::label`] wins over it.
 fn video_hint(init: &Init, default_codec: Option<hang::catalog::VideoCodec>) -> VideoHint {
 	let mut hint = init.video.clone().unwrap_or_default();
 	if hint.label.is_none() {
@@ -24,11 +27,12 @@ fn video_hint(init: &Init, default_codec: Option<hang::catalog::VideoCodec>) -> 
 	hint
 }
 
-/// Apply the import's common catalog fields to a parsed audio config.
+/// Apply the import's caller-provided catalog fields to a parsed audio config.
+///
+/// Audio has no hint type: the codec parser fills everything else from the init bytes, so the label
+/// is the only field the caller supplies.
 fn audio_config(init: &Init, mut config: hang::catalog::AudioConfig) -> hang::catalog::AudioConfig {
-	if config.label.is_none() {
-		config.label = init.label.clone();
-	}
+	config.label = init.label.clone();
 	config
 }
 
@@ -795,7 +799,10 @@ mod tests {
 		let import = Track::new(
 			request,
 			catalog.reserve(),
-			Init::new("aac", init.clone()).with_label("English"),
+			Init {
+				label: Some("English".to_string()),
+				..Init::new("aac", init.clone())
+			},
 		)
 		.unwrap();
 
@@ -1039,12 +1046,37 @@ mod tests {
 		let _import = Track::new(
 			request,
 			catalog.reserve(),
-			Init::new("vp8", Vec::new()).with_label("Main camera"),
+			Init {
+				label: Some("Main camera".to_string()),
+				..Init::new("vp8", Vec::new())
+			},
 		)
 		.unwrap();
 
 		let video = catalog.snapshot().video.renditions.get("video").cloned().unwrap();
 		assert_eq!(video.codec.to_string(), "vp8");
+		assert_eq!(video.label.as_deref(), Some("Main camera"));
+	}
+
+	/// A caller that builds a hint has two places to put a label, so pin which one wins.
+	#[tokio::test(start_paused = true)]
+	async fn an_explicit_hint_label_beats_the_init_label() {
+		let (mut broadcast, catalog) = new_broadcast();
+		let request = broadcast.reserve_track("video").unwrap();
+		let _import = Track::new(
+			request,
+			catalog.reserve(),
+			Init {
+				label: Some("ignored".to_string()),
+				..Init::new("vp8", Vec::new()).with_video(VideoHint {
+					label: Some("Main camera".to_string()),
+					..Default::default()
+				})
+			},
+		)
+		.unwrap();
+
+		let video = catalog.snapshot().video.renditions.get("video").cloned().unwrap();
 		assert_eq!(video.label.as_deref(), Some("Main camera"));
 	}
 

@@ -1225,8 +1225,9 @@ pub extern "C" fn moq_publish_finish(broadcast: u32) -> i32 {
 ///
 /// [moq_media_config::label] is an optional human-readable name stored in the
 /// audio or video catalog configuration. The track name is generated from the
-/// format and remains an internal identifier. Labels apply only to single-codec
-/// formats; container formats describe their tracks independently.
+/// format and remains an internal identifier. It names one rendition, so a
+/// container format (fmp4, mkv, ts, flv), which publishes and describes its own
+/// tracks, rejects a label rather than ignoring it.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
