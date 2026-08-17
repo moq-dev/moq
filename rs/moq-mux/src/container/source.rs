@@ -444,7 +444,9 @@ mod tests {
 	async fn latency_is_sent_with_the_initial_subscription() {
 		let live = Live::avc3();
 		let latency = crate::Latency::max(std::time::Duration::from_secs(10));
-		let mut export = ExportSource::for_video(&live.source(), live.track.name(), &video(None), latency).unwrap();
+		let mut export = ExportSource::for_video(&live.source(), live.track.name(), &video(None), latency)
+			.unwrap()
+			.expect("fixture should produce a video rendition");
 
 		let observed = kio::wait(|waiter| {
 			let _ = export.poll_read(waiter);
