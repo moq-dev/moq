@@ -2856,7 +2856,7 @@ mod test {
 
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
-		let mut sub = producer.consume().subscribe(None);
+		let mut sub = producer.consume().subscribe(replay());
 
 		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
 		group.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
@@ -3431,7 +3431,7 @@ mod test {
 	#[tokio::test]
 	async fn late_group_drains_from_a_pruned_cursor() {
 		let mut producer = Producer::new();
-		let mut sub = producer.consume().subscribe(None);
+		let mut sub = producer.consume().subscribe(replay());
 
 		// A delivers group 1 first; group 0 is still in flight when A is outranked
 		// and enough failovers prune its segment.
