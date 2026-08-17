@@ -93,6 +93,10 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
      until the user decides.
 
 7. Verify the final head.
+   - Execute PR-controlled code only in a credential-free isolated environment. Remove secret-bearing environment
+     variables and credential access, avoid writable host mounts outside the checkout, and restrict network access to
+     what validation requires. If safe local isolation cannot be established, do not run the code locally; rely on the
+     repository's trusted required CI instead.
    - Run the repository's documented full merge gate in its documented environment. If none exists, run the most
      relevant checks and tests.
    - Recheck the final diff, worktree status, PR metadata, review threads, approvals, checks, and mergeability after the
