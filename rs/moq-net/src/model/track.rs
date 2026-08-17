@@ -13,7 +13,7 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
-use crate::{Error, Result, Timescale, Timestamp, coding};
+use crate::{Error, Latency, Result, Timescale, Timestamp, coding};
 use crate::{broadcast, cache, frame, group, stats};
 
 use super::{Datagram, Requests};
@@ -1404,6 +1404,7 @@ impl Producer {
 		let info = self.state.read().info.clone().expect("producer always has info");
 		let subscription = kio::Producer::new(preferences);
 		register_subscription(self.state.read(), &subscription);
+		let drift_cap = kio::Producer::new(None);
 
 		// Hoisted: an inline `read()` guard would live to the end of the struct literal,
 		// deadlocking against the `consume()` below.
@@ -1422,6 +1423,7 @@ impl Producer {
 				end_sequence: None,
 				parked: BTreeMap::new(),
 				stale_cap: None,
+				drift_cap,
 				stale: stats::Content::default(),
 			}),
 			// A producer-side (in-process) subscribe is not egress: stay untagged.
@@ -2268,6 +2270,7 @@ impl Subscribing {
 				let info = ready!(state.poll(waiter, |state| state.poll_info()))
 					.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
 
+				let drift_cap = kio::Producer::new(None);
 				Poll::Ready(Ok(Subscriber {
 					name: self.name.clone(),
 					broadcast: self.broadcast.clone(),
@@ -2282,6 +2285,7 @@ impl Subscribing {
 						end_sequence: None,
 						parked: BTreeMap::new(),
 						stale_cap: None,
+						drift_cap,
 						stale: stats::Content::default(),
 					}),
 					stats: self.stats.clone(),
@@ -2592,6 +2596,57 @@ struct Drift {
 	edge: Option<Edge>,
 }
 
+/// Keeps one handed-out group tied to the subscription whose cursor selected it.
+struct GroupExpiry {
+	state: kio::Consumer<TrackState>,
+	subscription: kio::Consumer<Subscription>,
+	cap: kio::Consumer<Option<u64>>,
+	sequence: u64,
+}
+
+impl group::Expiry for GroupExpiry {
+	fn is_expired(&self, waiter: &kio::Waiter) -> bool {
+		let mut latency = Latency::default();
+		let _ = self.subscription.poll(waiter, |subscription| {
+			latency = subscription.latency;
+			Poll::<()>::Pending
+		});
+
+		let mut cap = None;
+		let _ = self.cap.poll(waiter, |current| {
+			cap = **current;
+			Poll::<()>::Pending
+		});
+
+		let mut expired = false;
+		let _ = self.state.poll(waiter, |state| {
+			let budget = clamp_latency(latency, state.latency_bound()).max;
+			let edge = state.live_edge(cap);
+			expired = state.is_stale(self.sequence, edge, budget);
+
+			if !expired {
+				// A first timestamp can change the presentation-time verdict without
+				// mutating the track. Register on both the candidate and the current
+				// presentation edge so either first frame wakes the held reader.
+				if let Some(slot) = state.lookup.get(&self.sequence) {
+					let _ = slot.group.poll_timestamp(waiter);
+				}
+				if let Some(edge) = edge.and_then(|edge| edge.presentation)
+					&& let Some(slot) = state.lookup.get(&edge.sequence)
+				{
+					let _ = slot.group.poll_timestamp(waiter);
+				}
+			}
+
+			// Register on track changes even though the current answer is known: a
+			// newer group can move either live edge while this group read is pending.
+			Poll::<()>::Pending
+		});
+
+		expired
+	}
+}
+
 /// The group a poll's drift is measured against, identified well enough to tell it apart
 /// from whatever may occupy its sequence by the time a candidate is judged.
 #[derive(Clone, Copy)]
@@ -2648,6 +2703,8 @@ struct PlainSubscriber {
 	/// segment), folded into the drift anchor only. Delivery is still bounded by
 	/// `end_sequence`, which stays unset on a segment so its completion is visible.
 	stale_cap: Option<u64>,
+	/// Shared effective cap used by groups after this cursor hands them out.
+	drift_cap: kio::Producer<Option<u64>>,
 	/// Groups the drift budget skipped since the count was last drained. Accumulated
 	/// here rather than metered in place because the handle that owns the stats scope
 	/// is the outer [`Subscriber`], which may be reading this cursor through a
@@ -2657,6 +2714,12 @@ struct PlainSubscriber {
 }
 
 impl PlainSubscriber {
+	fn update_drift_cap(&mut self) {
+		if let Ok(mut cap) = self.drift_cap.write() {
+			*cap = servable_cap(self.end_sequence, self.stale_cap);
+		}
+	}
+
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where
@@ -2705,6 +2768,16 @@ impl PlainSubscriber {
 		self.poll(waiter, move |state| {
 			Poll::Ready(Ok(state.is_stale(group.sequence, drift.edge, drift.budget)))
 		})
+	}
+
+	fn with_expiry(&self, group: group::Consumer) -> group::Consumer {
+		let sequence = group.sequence;
+		group.with_expiry(Arc::new(GroupExpiry {
+			state: self.state.clone(),
+			subscription: self.subscription.consume(),
+			cap: self.drift_cap.consume(),
+			sequence,
+		}))
 	}
 
 	fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
@@ -2772,7 +2845,7 @@ impl PlainSubscriber {
 				self.stale.add(consumer.content());
 				continue;
 			}
-			return Poll::Ready(Ok(Some(consumer)));
+			return Poll::Ready(Ok(Some(self.with_expiry(consumer))));
 		}
 	}
 
@@ -2803,7 +2876,7 @@ impl PlainSubscriber {
 				self.stale.add(group.content());
 				continue;
 			}
-			return Poll::Ready(Ok(Some(group)));
+			return Poll::Ready(Ok(Some(self.with_expiry(group))));
 		}
 	}
 
@@ -2906,6 +2979,7 @@ impl Subscriber {
 	pub(crate) fn set_stale_cap(&mut self, cap: Option<u64>) {
 		if let SubscriberKind::Plain(plain) = &mut self.inner {
 			plain.stale_cap = cap;
+			plain.update_drift_cap();
 		}
 	}
 
@@ -2949,6 +3023,8 @@ impl Subscriber {
 	/// edge and writes the rest off; raise it to read history. [`Self::start_at`] and
 	/// [`Subscription::start`] are filters, not exemptions: backfill needs a budget that
 	/// covers it. [`Consumer::fetch_group`] is the way to ask for one old group outright.
+	/// The budget remains attached to a returned group: if it stalls while newer data
+	/// advances, its pending frame read ends with [`Error::Old`].
 	///
 	/// Honors the floor set by [`Self::start_at`] and the cap set by [`Self::end_at`]:
 	/// a group beyond the cap is parked (not dropped) and re-offered once the cap rises
@@ -3127,7 +3203,10 @@ impl Subscriber {
 	/// consumer's current cursor parks the consumer until the cap is raised.
 	pub fn end_at(&mut self, sequence: impl Into<Option<u64>>) {
 		match &mut self.inner {
-			SubscriberKind::Plain(plain) => plain.end_sequence = sequence.into(),
+			SubscriberKind::Plain(plain) => {
+				plain.end_sequence = sequence.into();
+				plain.update_drift_cap();
+			}
 			SubscriberKind::Spliced(spliced) => spliced.end_at(sequence),
 		}
 	}
@@ -4010,6 +4089,29 @@ mod test {
 
 		// With the real-time budget, wall-clock age backstops the missing timestamp.
 		assert_eq!(drain(&mut subscriber), vec![1]);
+	}
+
+	#[tokio::test]
+	async fn a_handed_out_group_expires_while_its_first_frame_is_stalled() {
+		tokio::time::pause();
+
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(None);
+		producer.append_group().unwrap();
+
+		let mut stalled = subscriber.recv_group().await.unwrap().expect("stalled group");
+		let pending = tokio::spawn(async move { stalled.read_frame().await });
+		tokio::task::yield_now().await;
+		assert!(
+			!pending.is_finished(),
+			"the empty live edge still waits for its first frame"
+		);
+
+		tokio::time::advance(Duration::from_secs(1)).await;
+		append_at(&mut producer, 1000);
+
+		let result = pending.await.unwrap();
+		assert!(matches!(result, Err(Error::Old)), "the held group expires: {result:?}");
 	}
 
 	#[test]
