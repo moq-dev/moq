@@ -9,8 +9,12 @@
 //!   16 gates and polls the set once; the woken tasks consume the fire and
 //!   re-park. This is the shape of a driver serving many subscriptions, where
 //!   per-task wakeup granularity is the whole point.
-//! - `spawn_drain_1000`: churn. Push 1000 immediately-ready tasks and drain
-//!   them, measuring per-task setup and retirement (allocation included).
+//! - `spawn_drain_1000`: cold churn. A fresh set per iteration pushes 1000
+//!   immediately-ready tasks and drains them, measuring per-task setup and
+//!   retirement (allocation included).
+//! - `spawn_drain_1000_hot`: hot churn. One long-lived set does the same,
+//!   which is the driver shape: `Tasks` reuses retired slots and their wakers,
+//!   so steady-state churn stops allocating.
 //!
 //! Run with `cargo bench -p kio`.
 
@@ -168,5 +172,38 @@ fn spawn_drain(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, wake_sparse, spawn_drain);
+fn spawn_drain_hot(c: &mut Criterion) {
+	const N: usize = 1000;
+
+	let mut group = c.benchmark_group("spawn_drain_1000_hot");
+
+	group.bench_function("kio_tasks", |b| {
+		let waiter = kio::Waiter::noop();
+		let mut tasks = kio::Tasks::new();
+		b.iter(|| {
+			for _ in 0..N {
+				tasks.push(|_: &kio::Waiter| Poll::Ready(()));
+			}
+			while tasks.poll(&waiter).is_pending() {}
+			black_box(&tasks);
+		});
+	});
+
+	group.bench_function("futures_unordered", |b| {
+		let waker = Waker::noop();
+		let mut set = futures::stream::FuturesUnordered::new();
+		b.iter(|| {
+			for _ in 0..N {
+				set.push(std::future::ready(()));
+			}
+			let mut cx = Context::from_waker(waker);
+			while !matches!(set.poll_next_unpin(&mut cx), Poll::Ready(None)) {}
+			black_box(&set);
+		});
+	});
+
+	group.finish();
+}
+
+criterion_group!(benches, wake_sparse, spawn_drain, spawn_drain_hot);
 criterion_main!(benches);

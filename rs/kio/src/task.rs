@@ -21,16 +21,45 @@
 //! ```
 //!
 //! Dropping the set cancels every remaining task.
+//!
+//! # Design
+//!
+//! Wakes land in a chunked atomic bitset rather than a queue (the approach
+//! [unicycle](https://github.com/udoprog/unicycle) proved out against
+//! `FuturesUnordered`'s intrusive list): a wake is one `fetch_or`, lock-free,
+//! and inherently deduplicated since setting a set bit is a no-op. Each poll
+//! snapshots a word at a time with `swap(0)`, so a task woken mid-pass lands in
+//! the next pass instead of spinning this one. Because tasks are closures, not
+//! pinned futures, a slot's identity is stable and its [`Waker`] is minted once
+//! and reused across occupants: the per-task allocation `FuturesUnordered`
+//! pays per future (and futures-buffered removes with an unsafe arena) is a
+//! per-slot cost here, amortized to zero in a long-lived set. Safe Rust
+//! throughout.
 
 use std::{
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicBool, Ordering},
+		atomic::{AtomicBool, AtomicU64, Ordering},
 	},
 	task::{Context, Poll, Wake, Waker},
 };
 
 use crate::waiter::{Park, Waiter};
+
+/// Wake-bits per chunk word and words per chunk: one chunk covers 1024 slots.
+const WORD_BITS: usize = 64;
+const CHUNK_WORDS: usize = 16;
+const CHUNK_SLOTS: usize = WORD_BITS * CHUNK_WORDS;
+
+/// One fixed block of the wake bitset. Chunks never move or grow, so a waker
+/// can hold its chunk directly and set its bit without any lock.
+struct Chunk([AtomicU64; CHUNK_WORDS]);
+
+impl Chunk {
+	fn new() -> Arc<Self> {
+		Arc::new(Self(std::array::from_fn(|_| AtomicU64::new(0))))
+	}
+}
 
 /// A set of poll-closure tasks polled by their owner with per-task granularity.
 ///
@@ -40,39 +69,39 @@ use crate::waiter::{Park, Waiter};
 /// remaining task.
 pub struct Tasks<T> {
 	/// Slab of tasks; `None` slots are free and listed in `free`.
-	children: Vec<Option<Child<T>>>,
+	children: Vec<Option<Occupant<T>>>,
+	/// Per-slot wakers, parallel to `children`. A slot's bit position never
+	/// changes, so its waker is created once and reused by every occupant.
+	wakers: Vec<Waker>,
+	/// The wake bitset, chunked so it grows without moving: slot `i` is bit
+	/// `i % 64` of word `(i % 1024) / 64` in chunk `i / 1024`.
+	chunks: Vec<Arc<Chunk>>,
 	free: Vec<usize>,
 	len: usize,
 	shared: Arc<Shared>,
-	/// Tasks awaiting their first poll. Owner-local (`push` has `&mut self`),
-	/// so a push skips the [`Shared::ready`] lock; their `dirty` flag stays set
-	/// until that first poll, so a pre-poll wake can't double-queue them.
-	newborn: Vec<usize>,
-	/// Swapped with [`Shared::ready`] each poll so both buffers keep their
-	/// capacity: past the high-water mark, wakes and polls stop allocating.
-	scratch: Vec<usize>,
 }
 
-struct Child<T> {
+/// A slot's current task and its retained kio registrations.
+struct Occupant<T> {
 	task: T,
-	/// This task's waker, marking it ready and waking the owner.
-	waker: Waker,
-	flag: Arc<ChildWaker>,
-	/// Retains the task's kio registrations between polls.
 	park: Park,
 }
 
-/// Waker state shared with every child; deliberately `T`-free so the wakers
+/// Waker state shared with every slot; deliberately `T`-free so the wakers
 /// stay `Send + Sync` even when the tasks themselves are not.
 struct Shared {
-	/// Indices needing a poll. A task appears at most once (see [`ChildWaker::dirty`]).
-	ready: Mutex<Vec<usize>>,
 	/// The waker of whoever polls the set, re-registered on every poll.
 	parent: Mutex<Option<Waker>>,
+	/// Set by the first wake since the last poll began, so a burst of wakes
+	/// costs one parent wake, not one each.
+	pending: AtomicBool,
 }
 
 impl Shared {
 	fn wake_parent(&self) {
+		if self.pending.swap(true, Ordering::AcqRel) {
+			return;
+		}
 		let parent = self.parent.lock().unwrap().clone();
 		if let Some(waker) = parent {
 			waker.wake();
@@ -80,26 +109,25 @@ impl Shared {
 	}
 }
 
-/// The per-task waker: queues the task's index and wakes the owner.
-struct ChildWaker {
-	index: usize,
-	/// Set while the task is queued, so a burst of wakes queues it once. Cleared
-	/// just before the task is polled, so a wake racing the poll re-queues it.
-	dirty: AtomicBool,
+/// The per-slot waker: sets the slot's wake bit and nudges the owner.
+struct SlotWaker {
+	chunk: Arc<Chunk>,
+	word: usize,
+	bit: u64,
 	shared: Arc<Shared>,
 }
 
-impl Wake for ChildWaker {
+impl Wake for SlotWaker {
 	fn wake(self: Arc<Self>) {
 		self.wake_by_ref();
 	}
 
 	fn wake_by_ref(self: &Arc<Self>) {
-		if self.dirty.swap(true, Ordering::AcqRel) {
-			return;
+		// An already-set bit means the slot is queued for the next pass and the
+		// owner was already nudged: a burst of wakes is one bit and one nudge.
+		if self.chunk.0[self.word].fetch_or(self.bit, Ordering::AcqRel) & self.bit == 0 {
+			self.shared.wake_parent();
 		}
-		self.shared.ready.lock().unwrap().push(self.index);
-		self.shared.wake_parent();
 	}
 }
 
@@ -108,14 +136,14 @@ impl<T> Tasks<T> {
 	pub fn new() -> Self {
 		Self {
 			children: Vec::new(),
+			wakers: Vec::new(),
+			chunks: Vec::new(),
 			free: Vec::new(),
 			len: 0,
 			shared: Arc::new(Shared {
-				ready: Mutex::new(Vec::new()),
 				parent: Mutex::new(None),
+				pending: AtomicBool::new(false),
 			}),
-			newborn: Vec::new(),
-			scratch: Vec::new(),
 		}
 	}
 
@@ -137,24 +165,27 @@ impl<T> Tasks<T> {
 		let index = match self.free.pop() {
 			Some(index) => index,
 			None => {
+				let index = self.children.len();
+				if index.is_multiple_of(CHUNK_SLOTS) {
+					self.chunks.push(Chunk::new());
+				}
 				self.children.push(None);
-				self.children.len() - 1
+				self.wakers.push(Waker::from(Arc::new(SlotWaker {
+					chunk: self.chunks[index / CHUNK_SLOTS].clone(),
+					word: (index % CHUNK_SLOTS) / WORD_BITS,
+					bit: 1 << (index % WORD_BITS),
+					shared: self.shared.clone(),
+				})));
+				index
 			}
 		};
-		let flag = Arc::new(ChildWaker {
-			index,
-			dirty: AtomicBool::new(true),
-			shared: self.shared.clone(),
-		});
-		self.children[index] = Some(Child {
+		self.children[index] = Some(Occupant {
 			task,
-			waker: Waker::from(flag.clone()),
-			flag,
 			park: Park::default(),
 		});
 		self.len += 1;
-		self.newborn.push(index);
-		self.shared.wake_parent();
+		// Queue the first poll exactly the way any wake would.
+		self.wakers[index].wake_by_ref();
 	}
 }
 
@@ -174,31 +205,35 @@ impl<T: FnMut(&Waiter) -> Poll<()>> Tasks<T> {
 				*parent = Some(waker.clone());
 			}
 		}
+		// Re-arm before sweeping: a wake landing mid-pass must nudge the owner
+		// again, since its word may already have been swept.
+		self.shared.pending.store(false, Ordering::Release);
 
-		// One snapshot per owner poll: a task woken during the pass (including a
-		// self-wake before returning Pending) re-queues itself and has already
-		// woken the owner through its ChildWaker, so the executor re-polls this
-		// set. Looping here instead would let a self-waking task spin without
-		// ever yielding, starving the caller's other arms.
-		debug_assert!(self.scratch.is_empty());
-		std::mem::swap(&mut *self.shared.ready.lock().unwrap(), &mut self.scratch);
-		// Newborns join the pass without ever having touched the shared lock.
-		self.scratch.append(&mut self.newborn);
-		for index in self.scratch.drain(..) {
-			// A stale index (the task finished, maybe its slot was reused) is
-			// skipped or costs one spurious poll; both are harmless.
-			let Some(child) = self.children.get_mut(index).and_then(Option::as_mut) else {
-				continue;
-			};
-			// Cleared before polling: a wake landing mid-poll re-queues the task
-			// rather than being lost.
-			child.flag.dirty.store(false, Ordering::Release);
-			let cx = Context::from_waker(&child.waker);
-			let child_waiter = child.park.hold(&cx);
-			if (child.task)(child_waiter).is_ready() {
-				self.children[index] = None;
-				self.free.push(index);
-				self.len -= 1;
+		// One snapshot per owner poll, a word at a time: `swap(0)` takes the
+		// woken bits and clears them, so a task woken during the pass (or a
+		// self-wake before returning Pending) lands in the next pass instead of
+		// spinning this one, which would starve the caller's other arms.
+		for (c, chunk) in self.chunks.iter().enumerate() {
+			for (w, word) in chunk.0.iter().enumerate() {
+				let mut bits = word.swap(0, Ordering::AcqRel);
+				while bits != 0 {
+					let bit = bits.trailing_zeros() as usize;
+					bits &= bits - 1;
+					let index = (c * CHUNK_WORDS + w) * WORD_BITS + bit;
+					// A stale bit (the occupant finished; maybe the slot was
+					// reused) is skipped or costs one spurious poll; both are
+					// harmless.
+					let Some(occupant) = self.children.get_mut(index).and_then(Option::as_mut) else {
+						continue;
+					};
+					let cx = Context::from_waker(&self.wakers[index]);
+					let child_waiter = occupant.park.hold(&cx);
+					if (occupant.task)(child_waiter).is_ready() {
+						self.children[index] = None;
+						self.free.push(index);
+						self.len -= 1;
+					}
+				}
 			}
 		}
 
@@ -315,7 +350,8 @@ mod tests {
 	}
 
 	/// The owner is woken by a task wake and by a push, so neither is lost when
-	/// it happens between polls.
+	/// it happens between polls. A burst of edges before the next poll coalesces
+	/// into one nudge; the outstanding nudge covers them all.
 	#[test]
 	fn task_wakes_and_pushes_reach_the_owner() {
 		struct Flag(AtomicBool);
@@ -336,10 +372,15 @@ mod tests {
 		open(&gate);
 		assert!(flag.0.swap(false, Ordering::SeqCst), "the task wake missed the owner");
 
-		tasks.push(gated(
-			crate::Producer::new(false).consume(),
-			Arc::new(AtomicUsize::new(0)),
-		));
+		// A second edge before the poll is covered by the outstanding nudge.
+		let b_gate = crate::Producer::new(false);
+		tasks.push(gated(b_gate.consume(), Arc::new(AtomicUsize::new(0))));
+		assert!(!flag.0.load(Ordering::SeqCst), "coalesced into the outstanding nudge");
+
+		// Once the owner polls, the next edge nudges again.
+		assert!(tasks.poll(&waiter).is_pending());
+		let c_gate = crate::Producer::new(false);
+		tasks.push(gated(c_gate.consume(), Arc::new(AtomicUsize::new(0))));
 		assert!(flag.0.load(Ordering::SeqCst), "the push missed the owner");
 	}
 
