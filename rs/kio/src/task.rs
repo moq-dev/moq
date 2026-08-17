@@ -44,6 +44,9 @@ pub struct Tasks<T> {
 	free: Vec<usize>,
 	len: usize,
 	shared: Arc<Shared>,
+	/// Swapped with [`Shared::ready`] each poll so both buffers keep their
+	/// capacity: past the high-water mark, wakes and polls stop allocating.
+	scratch: Vec<usize>,
 }
 
 struct Child<T> {
@@ -107,6 +110,7 @@ impl<T> Tasks<T> {
 				ready: Mutex::new(Vec::new()),
 				parent: Mutex::new(None),
 			}),
+			scratch: Vec::new(),
 		}
 	}
 
@@ -171,8 +175,9 @@ impl<T: FnMut(&Waiter) -> Poll<()>> Tasks<T> {
 		// woken the owner through its ChildWaker, so the executor re-polls this
 		// set. Looping here instead would let a self-waking task spin without
 		// ever yielding, starving the caller's other arms.
-		let ready = std::mem::take(&mut *self.shared.ready.lock().unwrap());
-		for index in ready {
+		debug_assert!(self.scratch.is_empty());
+		std::mem::swap(&mut *self.shared.ready.lock().unwrap(), &mut self.scratch);
+		for index in self.scratch.drain(..) {
 			// A stale index (the task finished, maybe its slot was reused) is
 			// skipped or costs one spurious poll; both are harmless.
 			let Some(child) = self.children.get_mut(index).and_then(Option::as_mut) else {
