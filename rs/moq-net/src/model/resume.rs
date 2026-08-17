@@ -705,6 +705,9 @@ pub(crate) struct Group {
 
 	/// The segment whose copy died under us, and why.
 	dead: Option<(u64, Error)>,
+
+	/// The tagged logical subscriber's meter for route-copy expiry only.
+	stale_stats: crate::stats::Meter,
 }
 
 struct Current {
@@ -746,6 +749,7 @@ impl Clone for Group {
 			end: self.end,
 			current,
 			dead: self.dead.clone(),
+			stale_stats: self.stale_stats.clone(),
 		}
 	}
 }
@@ -767,7 +771,15 @@ impl Group {
 			end: None,
 			current: None,
 			dead: None,
+			stale_stats: Default::default(),
 		}
+	}
+
+	pub(crate) fn set_stale_meter(&mut self, meter: crate::stats::Meter) {
+		if let Some(current) = &mut self.current {
+			current.group.set_stale_meter(meter.clone());
+		}
+		self.stale_stats = meter;
 	}
 
 	/// Pre-latch the delivering route's own copy, so the payload it already
@@ -784,6 +796,7 @@ impl Group {
 		// The segment bound is exclusive; a group consumer's cap is inclusive.
 		group.end_at(cap.map(|cap| cap.saturating_sub(1)));
 		group.start_at(self.index);
+		group.set_stale_meter(self.stale_stats.clone());
 		if group.index() == self.index {
 			self.current = Some(Current {
 				segment,
@@ -934,6 +947,7 @@ impl Group {
 			// higher than asked means this route can't cover the seam after all. Treat it
 			// like a dead copy and wait for one that can.
 			let mut group = track.guard_group(group, self.subscription.clone(), self.cap.clone(), bound);
+			group.set_stale_meter(self.stale_stats.clone());
 			group.start_at(self.index);
 			if group.index() != self.index {
 				self.dead = Some((segment, Error::Lagged));
@@ -1089,6 +1103,7 @@ impl Group {
 				Some(continuation) => {
 					let mut continuation =
 						track.guard_group(continuation, self.subscription.clone(), self.cap.clone(), bound);
+					continuation.set_stale_meter(self.stale_stats.clone());
 					return continuation.poll_finished(waiter);
 				}
 				// This route will never have it; wait for whatever replaces it.

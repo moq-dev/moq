@@ -21,6 +21,7 @@ use crate::{Timescale, stats, track};
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Poll, ready};
 
 use crate::{Error, IntoBytes, Result, Timestamp};
@@ -146,6 +147,36 @@ impl GroupState {
 			bytes: self.cache,
 			frames: self.next_index.saturating_sub(self.offset) as u64,
 			groups: 1,
+			datagrams: 0,
+		}
+	}
+
+	/// Content in the half-open frame range that is still cached here.
+	fn content_range(&self, start: usize, end: usize) -> stats::Content {
+		let start = start.max(self.offset);
+		let end = end.min(self.next_index);
+		if start >= end {
+			return stats::Content::default();
+		}
+
+		let local_start = start.saturating_sub(self.offset).min(self.frames.len());
+		let local_end = end.saturating_sub(self.offset).min(self.frames.len());
+		let mut bytes = self
+			.frames
+			.range(local_start..local_end)
+			.map(|frame| frame.payload.len() as u64)
+			.sum();
+		if start <= self.committed
+			&& self.committed < end
+			&& let Some(partial) = &self.partial
+		{
+			bytes += partial.buf.capacity() as u64;
+		}
+
+		stats::Content {
+			bytes,
+			frames: (end - start) as u64,
+			groups: 0,
 			datagrams: 0,
 		}
 	}
@@ -693,8 +724,10 @@ impl Producer {
 			// Untagged: a tagged track attaches the egress meter via `with_meter`
 			// when it hands the consumer to a subscriber/fetch.
 			stats: stats::Meter::default(),
+			stale_stats: stats::Meter::default(),
 			expiry: None,
 			expired: false,
+			stale_counted: Arc::default(),
 		}
 	}
 
@@ -834,11 +867,17 @@ pub struct Consumer {
 	// Egress payload meter, set by a tagged track via [`Self::with_meter`]. Empty
 	// (no-op) for an untagged group.
 	stats: stats::Meter,
+	// The meter that owns unread content discarded by expiry. Route-specific
+	// cursors inside a spliced group inherit this without metering delivery twice.
+	stale_stats: stats::Meter,
 
 	// Subscriber-specific drift policy. A group can become stale after the track
 	// hands it out, while its reader is waiting for the first or next frame.
 	expiry: Option<Arc<dyn Expiry>>,
 	expired: bool,
+	// Cloned cursors are parallel views of one handed-out delivery. Whichever
+	// observes expiry first records its unread tail; the others must not repeat it.
+	stale_counted: Arc<AtomicBool>,
 }
 
 /// Subscriber-specific policy for expiring a group after it was handed out.
@@ -898,8 +937,10 @@ impl Clone for Consumer {
 			// Inherit the meter without re-counting the group: the original already
 			// counted it when the track handed it out.
 			stats: self.stats.clone(),
+			stale_stats: self.stale_stats.clone(),
 			expiry: self.expiry.clone(),
 			expired: self.expired,
+			stale_counted: self.stale_counted.clone(),
 		}
 	}
 }
@@ -926,19 +967,31 @@ impl Consumer {
 		}
 	}
 
+	/// Content not already attributed as delivered by this handed-out cursor.
+	fn unread_content(&self) -> stats::Content {
+		match &self.inner {
+			ConsumerKind::Plain(plain) => plain.unread_content(),
+			// Each route-specific plain cursor enforces expiry inside a spliced group.
+			ConsumerKind::Spliced(_) => stats::Content::default(),
+		}
+	}
+
 	/// Rebuild this consumer as the head of a group assembled across route changes,
 	/// keeping the group's identity and its track's properties. See [`super::resume`].
-	pub(crate) fn into_spliced(self, spliced: super::resume::Group) -> Self {
+	pub(crate) fn into_spliced(self, mut spliced: super::resume::Group) -> Self {
+		spliced.set_stale_meter(self.stale_stats.clone());
 		Self {
 			inner: ConsumerKind::Spliced(Box::new(spliced)),
 			info: self.info,
 			track: self.track,
 			stats: self.stats,
+			stale_stats: self.stale_stats,
 			// Each segment keeps its own route-specific expiry policy. Applying the
 			// head segment's policy to the assembled group would use the wrong edge
 			// after a takeover.
 			expiry: None,
 			expired: false,
+			stale_counted: self.stale_counted,
 		}
 	}
 
@@ -946,8 +999,17 @@ impl Consumer {
 	/// Called by a tagged track when it hands the consumer to a subscriber or fetch.
 	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
 		meter.group();
-		self.stats = meter;
+		self.stats = meter.clone();
+		self.set_stale_meter(meter);
 		self
+	}
+
+	/// Attach only the meter that owns content discarded by expiry.
+	pub(crate) fn set_stale_meter(&mut self, meter: stats::Meter) {
+		if let ConsumerKind::Spliced(spliced) = &mut self.inner {
+			spliced.set_stale_meter(meter.clone());
+		}
+		self.stale_stats = meter;
 	}
 
 	/// Keep applying this subscription's drift budget while the group is read.
@@ -959,7 +1021,9 @@ impl Consumer {
 	fn poll_expired(&mut self, waiter: &kio::Waiter) -> bool {
 		if !self.expired && self.expiry.as_ref().is_some_and(|expiry| expiry.is_expired(waiter)) {
 			self.expired = true;
-			self.stats.stale(self.content());
+			if !self.stale_counted.swap(true, Ordering::Relaxed) {
+				self.stale_stats.stale(self.unread_content());
+			}
 		}
 		self.expired
 	}
@@ -1123,6 +1187,14 @@ impl Consumer {
 }
 
 impl Plain {
+	/// Content this cursor has neither returned nor already counted in a prefetch batch.
+	fn unread_content(&self) -> stats::Content {
+		let prefetched = self.prefetch.buffered().0 as usize;
+		let start = self.index.saturating_add(prefetched);
+		let end = self.end.map_or(usize::MAX, |end| end.saturating_add(1));
+		self.state.read().content_range(start, end)
+	}
+
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where
