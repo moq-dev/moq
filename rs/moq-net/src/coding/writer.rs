@@ -49,6 +49,11 @@ impl<S: crate::transport::poll::SendStream, V> Writer<S, V> {
 		self.buffer.extend_from_slice(bytes);
 	}
 
+	/// Whether encoded bytes are still waiting to reach the transport.
+	pub fn has_pending(&self) -> bool {
+		!self.buffer.is_empty()
+	}
+
 	/// Poll until the write buffer has fully hit the stream.
 	pub fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
 		while !self.buffer.is_empty() {

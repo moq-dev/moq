@@ -2966,9 +2966,10 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					}
 
 					let outcome = 'serve: {
-						// Keep the group guard live while the transport owns a detached
-						// frame chunk and may be blocked on flow control.
-						if self.group.poll_expired(waiter) {
+						// Keep the group guard live while the transport owns buffered data,
+						// including a final frame already removed from the group cursor.
+						let pending = writer.has_pending() || frame.is_some() || chunk.is_some();
+						if self.group.poll_expired_while_pending(waiter, pending) {
 							break 'serve Err(Error::Old);
 						}
 						// The peer closing first cancels the group.
@@ -3253,6 +3254,69 @@ mod serve_group_test {
 		assert!(
 			futures::poll!(serve.as_mut()).is_pending(),
 			"transport write is blocked"
+		);
+
+		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		let mut edge = track.append_group().unwrap();
+		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
+			.unwrap();
+		edge.finish().unwrap();
+
+		assert!(matches!(serve.await, Err(Error::Old)));
+		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
+	}
+
+	/// The final payload remains guarded after its frame has advanced the group cursor.
+	#[tokio::test]
+	async fn blocked_final_transport_chunk_expires_with_the_group() {
+		tokio::time::pause();
+
+		let gate = kio::Producer::new(true);
+		let session = SinkSession::gated_uni(gate.consume());
+		let log = session.log.clone();
+		let track_priority = kio::Producer::new(0u8);
+		let subscription = Subscription {
+			session,
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			ordered: false,
+			version: Version::Lite06Wip,
+			timescale: Some(crate::Timescale::default()),
+		};
+
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut subscriber = track.subscribe(None);
+		let mut old = track.append_group().unwrap();
+		let mut frame = old
+			.create_frame(frame::Info {
+				timestamp: Timestamp::ZERO,
+				size: 2,
+			})
+			.unwrap();
+		frame.write(b"a".as_slice()).unwrap();
+		let group = subscriber.recv_group().await.unwrap().expect("old group");
+
+		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group));
+		assert!(
+			futures::poll!(serve.as_mut()).is_pending(),
+			"waiting for the final byte"
+		);
+
+		let Ok(mut open) = gate.write() else {
+			panic!("transport gate closed");
+		};
+		*open = false;
+		drop(open);
+		frame.write(b"b".as_slice()).unwrap();
+		frame.finish().unwrap();
+		old.finish().unwrap();
+		assert!(
+			futures::poll!(serve.as_mut()).is_pending(),
+			"the final byte is transport-blocked"
 		);
 
 		tokio::time::advance(std::time::Duration::from_secs(1)).await;

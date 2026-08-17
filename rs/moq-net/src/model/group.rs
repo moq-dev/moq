@@ -1020,8 +1020,13 @@ impl Consumer {
 
 	/// Check the parent subscription while a wire publisher drains detached payload.
 	pub(crate) fn poll_expired(&mut self, waiter: &kio::Waiter) -> bool {
+		self.poll_expired_while_pending(waiter, false)
+	}
+
+	/// Keep checking expiry while a wire publisher still owns buffered group data.
+	pub(crate) fn poll_expired_while_pending(&mut self, waiter: &kio::Waiter, pending: bool) -> bool {
 		if !self.expired
-			&& self.expiry_pending()
+			&& (pending || self.expiry_pending())
 			&& self.expiry.as_ref().is_some_and(|expiry| expiry.is_expired(waiter))
 		{
 			self.expired = true;
