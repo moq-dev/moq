@@ -57,11 +57,6 @@ impl Tasks {
 	pub fn push(&self, task: impl MaybeBoxedExt<'static, Output = ()>) {
 		let _ = self.tx.unbounded_send(task.maybe_boxed());
 	}
-
-	/// Whether the associated [`TaskSet`] is gone, so a push would be dropped.
-	pub fn is_closed(&self) -> bool {
-		self.tx.is_closed()
-	}
 }
 
 /// A dynamic set of child futures polled by its parent driver.

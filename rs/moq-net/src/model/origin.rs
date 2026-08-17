@@ -1091,6 +1091,14 @@ impl Producer {
 	pub fn create_broadcast(&self, path: impl AsPath, route: broadcast::Route) -> Result<broadcast::Producer, Error> {
 		let path = path.as_path();
 
+		// Held across the whole attach: the driver's teardown sets `closed` under
+		// this lock, so a create either completes before the teardown (whose walk
+		// then cleans the entry up) or observes `closed` here and fails.
+		let lifecycle = self.dynamic.lock();
+		if lifecycle.closed {
+			return Err(Error::Closed);
+		}
+
 		debug_assert!(
 			!route.hops.contains(&self.info),
 			"create_broadcast called with a looping hop chain",
@@ -1104,10 +1112,6 @@ impl Producer {
 		// can be re-encoded when forwarded.
 		if full.parts().count() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
-		}
-
-		if self.tasks.is_closed() {
-			return Err(Error::Closed);
 		}
 
 		// Resolve the ingress counters once, keyed by the absolute broadcast path.
@@ -1132,9 +1136,9 @@ impl Producer {
 
 		// Attach synchronously: an eligible source is visible (exact lookups and
 		// announcements) before this returns; only lifecycle work needs the driver.
-		let info = self.info();
+		let origin = self.info();
 		let ctx = AttachContext {
-			origin: &info,
+			origin: &origin,
 			node: &node,
 			full: &full,
 			rest: &rest,
@@ -1151,30 +1155,20 @@ impl Producer {
 		// handed to the watcher, which toggles it on route transitions.
 		let announce = route.announce.then(|| ingress.announce());
 
-		// The driver may have dropped while we attached; its teardown walk ran
-		// before the attach landed (the leaf lock orders the two), so nothing
-		// will ever clean the entry up. Undo it ourselves.
-		if self.tasks.is_closed() {
-			if let Attach::Ready(state, front, id) = first {
-				detach_source(&state, &front, &leaf, id);
-				node.lock().remove(&state, &rest);
-			}
-			return Err(Error::Closed);
-		}
-
-		self.tasks.push(run_source(
-			info,
+		self.tasks.push(run_source(SourceTask {
+			origin,
 			node,
 			full,
 			rest,
-			consumer,
+			source: consumer,
 			ingress,
-			self.tasks.clone(),
+			tasks: self.tasks.clone(),
 			route,
 			announce,
 			leaf,
 			first,
-		));
+		}));
+		drop(lifecycle);
 
 		Ok(source)
 	}
@@ -1338,11 +1332,28 @@ impl DriverState {
 	/// Tear the origin down: cancel the lifecycle work, abort and unpublish every
 	/// front, end announcement cursors, and reject pending dynamic requests.
 	fn teardown(&mut self) {
-		// Refuse new work first: producer mutations fail with `Closed` (the
-		// submission queue closes) and new dynamic requests fail immediately, so
-		// nothing slips in behind the walks below.
+		// Cancel queued and running lifecycle work first, so nothing re-attaches
+		// or serves while the walks below empty the tree.
 		drop(std::mem::replace(&mut self.set, TaskSet::owned()));
-		self.dynamic.lock().closed = true;
+
+		// Refuse new work and take the pending requests, under the same lock
+		// `create_broadcast` holds across its attach: a concurrent create either
+		// finishes before this (the walk below cleans its entry up) or observes
+		// `closed` and fails with `Closed`.
+		let pending = {
+			let mut dynamic = self.dynamic.lock();
+			dynamic.closed = true;
+			dynamic.requests.drain_all()
+		};
+
+		// Reject every pending dynamic request, including those already handed
+		// to a handler: the teardown is terminal, so a handler resolving late
+		// must not beat it (resolution is first-write-wins).
+		for producer in pending {
+			if let Ok(mut request) = producer.write() {
+				request.resolved.get_or_insert(Err(Error::Dropped));
+			}
+		}
 
 		// Two passes: unannounce every broadcast first, then end the cursors, so
 		// the final unannounces are still delivered (a cursor drains its pending
@@ -1352,16 +1363,6 @@ impl DriverState {
 		}
 		for (_, node) in &self.nodes.nodes {
 			teardown_cursors(node);
-		}
-
-		// Reject every pending dynamic request, including those already handed
-		// to a handler: the teardown is terminal, so a handler resolving late
-		// must not beat it (resolution is first-write-wins).
-		let mut dynamic = self.dynamic.lock();
-		for producer in dynamic.requests.drain_all() {
-			if let Ok(mut pending) = producer.write() {
-				pending.resolved.get_or_insert(Err(Error::Dropped));
-			}
 		}
 	}
 }
@@ -1717,34 +1718,58 @@ fn sync_announce(guard: &mut Option<stats::Announce>, announced: bool, ingress: 
 	}
 }
 
+/// Everything a queued source watcher continues with after
+/// [`Producer::create_broadcast`] performed the synchronous first attach.
+struct SourceTask {
+	origin: Info,
+	node: Lock<OriginNode>,
+	/// Absolute path, for the front's identity and log lines.
+	full: PathOwned,
+	/// Path relative to `node`, for locating (and later pruning) the leaf.
+	rest: PathOwned,
+	/// The source's route cursor, already advanced past its initial observation.
+	source: broadcast::Consumer,
+	ingress: stats::Scope,
+	tasks: Tasks,
+	/// The initial route, as create_broadcast observed it.
+	route: broadcast::Route,
+	/// Ingress announce guard: held while this source's route is announced.
+	/// Opened by create_broadcast when the initial route announces; the watcher
+	/// toggles it on transitions, bumping `announced` / `announced_closed`
+	/// (+ bytes). Empty scope = no-op.
+	announce: Option<stats::Announce>,
+	/// The leaf the first attach landed on.
+	leaf: Lock<OriginNode>,
+	/// The outcome of the synchronous first attach.
+	first: Attach,
+}
+
 /// Owns one source's lifecycle after its synchronous first attach: forwards
 /// route updates, re-attaches on publisher swaps and takeovers, and detaches the
 /// source when it closes. Queued on the origin's [`Driver`] by
 /// [`Producer::create_broadcast`], which performs the first attach itself and
-/// hands the outcome in as `first` so the watcher never attaches twice.
+/// hands the outcome in as [`SourceTask::first`] so the watcher never attaches
+/// twice.
 ///
 /// An announced source whose original publisher (first hop) differs from the
 /// live front's takes the path over as a fresh broadcast rather than joining; an
 /// offline one parks until the front closes. A route update that changes the
 /// source's own first hop likewise detaches it and re-runs the attach, so a
 /// publisher swap is always a replacement, never a silent splice.
-#[allow(clippy::too_many_arguments)] // Crate-private continuation of create_broadcast's local state.
-async fn run_source(
-	origin: Info,
-	node: Lock<OriginNode>,
-	full: PathOwned,
-	rest: PathOwned,
-	mut source: broadcast::Consumer,
-	ingress: stats::Scope,
-	tasks: Tasks,
-	mut route: broadcast::Route,
-	// Ingress announce guard: held while this source's route is announced. Opened
-	// by create_broadcast when the initial route announces; toggling it here bumps
-	// `announced` / `announced_closed` (+ bytes). Empty scope = no-op.
-	mut announce: Option<stats::Announce>,
-	leaf: Lock<OriginNode>,
-	first: Attach,
-) {
+async fn run_source(task: SourceTask) {
+	let SourceTask {
+		origin,
+		node,
+		full,
+		rest,
+		mut source,
+		ingress,
+		tasks,
+		mut route,
+		mut announce,
+		leaf,
+		first,
+	} = task;
 	let ctx = AttachContext {
 		origin: &origin,
 		node: &node,
@@ -2604,6 +2629,11 @@ impl Request {
 		// than replace a good entry with a duplicate subscription.
 		let resolved = {
 			let mut state = self.state.lock();
+			// The origin tore down and already rejected this request; keep the
+			// served cache untouched so nothing outlives the teardown.
+			if state.closed {
+				return;
+			}
 			let existing = state.served.insert(self.path.clone(), broadcast.weak());
 			state
 				.requests
@@ -2621,10 +2651,16 @@ impl Request {
 
 	/// Reject the request, resolving every awaiting requester with `err`.
 	pub fn reject(self, err: Error) {
-		self.state
-			.lock()
-			.requests
-			.remove_if(&self.path, |producer| producer.same_channel(&self.producer));
+		{
+			let mut state = self.state.lock();
+			// Already rejected by the origin's teardown.
+			if state.closed {
+				return;
+			}
+			state
+				.requests
+				.remove_if(&self.path, |producer| producer.same_channel(&self.producer));
+		}
 		if let Ok(mut state) = self.producer.write() {
 			// First write wins, matching `accept`.
 			state.resolved.get_or_insert(Err(err));
@@ -3275,8 +3311,12 @@ impl AnnounceConsumer {
 			};
 			match state.take() {
 				Some(update) => update,
-				// Ended by the origin's teardown, pending updates already drained.
-				None => return Poll::Ready(None),
+				None => {
+					// Ended by the origin's teardown, pending updates already
+					// drained; close the channel so every closure signal agrees.
+					state.close();
+					return Poll::Ready(None);
+				}
 			}
 		};
 		Poll::Ready(Some(self.hand_out(update)))
