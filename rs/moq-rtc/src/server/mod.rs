@@ -295,10 +295,28 @@ pub(crate) async fn delete(State(server): State<Server>, Path(path): Path<String
 mod tests {
 	use super::*;
 
-	fn server() -> Server {
-		let publisher = moq_net::Origin::random().produce();
-		let subscriber = moq_net::Origin::random().produce().consume();
-		Server::new(Config::default(), publisher, subscriber)
+	struct TestServer {
+		server: Server,
+		_drivers: [moq_net::origin::Driver; 2],
+	}
+
+	impl std::ops::Deref for TestServer {
+		type Target = Server;
+
+		fn deref(&self) -> &Self::Target {
+			&self.server
+		}
+	}
+
+	fn server() -> TestServer {
+		let (publisher, publisher_driver) =
+			moq_net::origin::Producer::new(moq_net::origin::Info::new(moq_net::Origin::random()));
+		let (subscriber, subscriber_driver) =
+			moq_net::origin::Producer::new(moq_net::origin::Info::new(moq_net::Origin::random()));
+		TestServer {
+			server: Server::new(Config::default(), publisher, subscriber.consume()),
+			_drivers: [publisher_driver, subscriber_driver],
+		}
 	}
 
 	#[test]

@@ -1888,7 +1888,7 @@ mod announce_test {
 	/// against it, optionally with a viewer already attached (so the initial
 	/// announce goes out warm, at cost zero).
 	async fn harness(demand: bool) -> (Harness, Option<track::Consumer>) {
-		let origin = Origin::new(1).unwrap().produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(Origin::new(1).unwrap()));
 		let source = origin
 			.create_broadcast(
 				"cam",
@@ -2132,7 +2132,7 @@ mod announce_test {
 	#[tokio::test(start_paused = true)]
 	async fn excluded_peer_receives_the_standby() {
 		let peer = Origin::new(33).unwrap();
-		let origin = Origin::new(1).unwrap().produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(Origin::new(1).unwrap()));
 
 		// Active: free, but its chain flows through the peer. Standby: the same
 		// publisher reached directly, at its cold cost.
@@ -2196,7 +2196,7 @@ mod announce_test {
 	#[tokio::test(start_paused = true)]
 	async fn standby_attach_announces_to_excluded_peer() {
 		let peer = Origin::new(33).unwrap();
-		let origin = Origin::new(1).unwrap().produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(Origin::new(1).unwrap()));
 
 		// The active route: the broadcast as carried via the peer itself.
 		let via_peer = OriginList::try_from(vec![Origin::new(9).unwrap(), peer]).unwrap();
@@ -2247,7 +2247,7 @@ mod announce_test {
 	#[tokio::test(start_paused = true)]
 	async fn retracts_when_route_swings_through_peer() {
 		let peer = Origin::new(33).unwrap();
-		let origin = Origin::new(1).unwrap().produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(Origin::new(1).unwrap()));
 		let mut source = origin
 			.create_broadcast(
 				"cam",
@@ -3264,7 +3264,7 @@ mod tests {
 		let assigned = crate::Origin::new(777).unwrap();
 		let clean_publisher = crate::Origin::new(778).unwrap();
 		let self_origin = crate::Origin::new(1).unwrap();
-		let origin = crate::origin::Info::new(self_origin).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(self_origin));
 
 		let mut tainted_hops = OriginList::new();
 		tainted_hops.push(assigned).unwrap();

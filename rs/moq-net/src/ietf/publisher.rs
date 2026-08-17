@@ -1770,7 +1770,7 @@ mod tests {
 		let assigned = crate::Origin::new(777).unwrap();
 		let other = crate::Origin::new(778).unwrap();
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let consumer = origin.consume();
 
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
@@ -1822,7 +1822,7 @@ mod tests {
 	/// spin on it forever.
 	#[tokio::test]
 	async fn linger_clears_when_the_advert_stops_being_discounted() {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let broadcast = origin
 			.clone()
 			.create_broadcast("cam", crate::broadcast::Route::announced())
@@ -1870,7 +1870,7 @@ mod tests {
 	async fn namespace_follows_route_eligibility_changes() {
 		let assigned = crate::Origin::new(777).unwrap();
 		let clean_publisher = crate::Origin::new(778).unwrap();
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());
@@ -1968,7 +1968,7 @@ mod tests {
 	async fn a_refusal_that_forbids_retrying_is_not_retried() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let _cam = origin
 			.create_broadcast("lonely-cam", crate::broadcast::Route::announced())
 			.unwrap();
@@ -2055,7 +2055,7 @@ mod tests {
 	async fn v14_subscribe_namespace_is_answered_with_publish_namespace() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let consumer = origin.consume();
 
 		// Announced before the peer subscribes: it must only hit the wire after.
@@ -2144,7 +2144,7 @@ mod tests {
 	async fn a_peer_that_declared_nothing_is_told_unsolicited() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let _local = origin
 			.create_broadcast("local-cam", crate::broadcast::Route::announced())
 			.unwrap();
@@ -2191,7 +2191,7 @@ mod tests {
 	async fn advertise_both_ways(solicit: Option<bool>) -> (usize, usize) {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let _cam = origin
 			.create_broadcast("cam", crate::broadcast::Route::announced())
 			.unwrap();
@@ -2264,7 +2264,7 @@ mod tests {
 	async fn a_parked_open_still_lets_a_namespace_be_withdrawn() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let first = origin
 			.create_broadcast("first-cam", crate::broadcast::Route::announced())
 			.unwrap();
@@ -2347,7 +2347,7 @@ mod tests {
 	async fn a_namespace_that_stops_being_advertisable_stops_being_deferred() {
 		let assigned = crate::Origin::new(777).unwrap();
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 
 		// Every route flows through the peer's own identity, so split horizon says this
 		// must never be advertised back to it: `select` wants nothing, which is what the
@@ -2397,7 +2397,7 @@ mod tests {
 	async fn a_route_change_still_waits_out_a_refusal() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let cam = origin
 			.create_broadcast("solo-cam", crate::broadcast::Route::announced())
 			.unwrap();
@@ -2459,7 +2459,7 @@ mod tests {
 	async fn a_modern_withdrawal_is_the_fin_alone() {
 		const VERSION: Version = Version::Draft17;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let cam = origin
 			.create_broadcast("solo-cam", crate::broadcast::Route::announced())
 			.unwrap();
@@ -2513,7 +2513,7 @@ mod tests {
 	async fn a_silent_answer_still_lets_the_next_namespace_be_advertised() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let _first = origin
 			.create_broadcast("first-cam", crate::broadcast::Route::announced())
 			.unwrap();
@@ -2564,7 +2564,7 @@ mod tests {
 	async fn a_namespace_refused_a_stream_is_retried_on_its_own() {
 		const VERSION: Version = Version::Draft14;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let _cam = origin
 			.create_broadcast("lonely-cam", crate::broadcast::Route::announced())
 			.unwrap();
@@ -2630,7 +2630,7 @@ mod tests {
 	}
 
 	fn harness(version: Version) -> Harness {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
 		let log = session.log.clone();
 

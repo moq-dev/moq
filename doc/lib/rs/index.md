@@ -284,11 +284,15 @@ let connection = client.connect(url);
 
 To publish or consume, wire an [`Origin`](https://docs.rs/moq-net/latest/moq_net/struct.Origin.html)
 into the client before connecting. The origin outlives any individual session, so
-your broadcasts and subscriptions carry across reconnects:
+your broadcasts and subscriptions carry across reconnects. The native helper
+spawns the origin driver on Tokio; direct `moq-net` users must retain and poll the
+driver returned by `origin::Producer::new` for as long as the origin is in use:
 
 ```rust
 // Subscribe: wait for broadcasts to be announced.
-let origin = moq_net::Origin::random().produce();
+let origin = moq_native::origin::spawn(moq_net::origin::Info::new(
+    moq_net::Origin::random(),
+));
 let mut announced = origin.consume().announced();
 let _connection = client.with_subscriber(origin).connect(url);
 

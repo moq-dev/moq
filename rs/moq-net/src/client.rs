@@ -720,7 +720,7 @@ mod tests {
 			.with_protocol(crate::version::ALPN_LITE_05);
 
 		// A subscribe origin is what makes the client open an announce stream at all.
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let client = Client::new()
 			.with_versions([Version::Lite(lite::Version::Lite05)].into())
 			.with_subscriber(origin);

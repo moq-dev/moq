@@ -86,6 +86,12 @@ mod tests {
 	use crate::decode::Kind;
 	use crate::encode::{Config as EncodeConfig, Encoder, Kind as EncodeKind, Producer as EncodeProducer};
 
+	fn spawn_origin() -> moq_net::origin::Producer {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Info::new(moq_net::Origin::random()));
+		tokio::spawn(driver);
+		origin
+	}
+
 	#[tokio::test]
 	async fn reads_cmaf_container_declared_by_catalog() {
 		let mut source_broadcast = moq_net::broadcast::Info::new().produce();
@@ -106,7 +112,7 @@ mod tests {
 			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
 		}
 
-		let origin = moq_net::Origin::random().produce();
+		let origin = spawn_origin();
 		let mut requests = origin.dynamic();
 		let served = source_subscriber.clone();
 		tokio::spawn(async move {

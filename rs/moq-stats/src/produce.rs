@@ -883,8 +883,14 @@ mod tests {
 
 	use super::*;
 
+	fn spawn_origin() -> origin::Producer {
+		let (origin, driver) = origin::Producer::new(origin::Info::new(Origin::random()));
+		tokio::spawn(driver);
+		origin
+	}
+
 	fn test_producer(node: Option<&str>) -> (Producer, origin::Producer) {
-		let origin = Origin::random().produce();
+		let origin = spawn_origin();
 		let producer = Producer::new(
 			ProducerConfig::new()
 				.with_origin(origin.clone())
@@ -918,7 +924,7 @@ mod tests {
 		frame_size: usize,
 	) -> Feed {
 		let ctx = registry.tier(tier).session("feed");
-		let origin = Origin::random().produce();
+		let origin = spawn_origin();
 		// Egress (publisher side) is tagged; the local publisher stays untagged.
 		let egress = origin.consume().with_stats(ctx);
 

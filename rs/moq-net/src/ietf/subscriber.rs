@@ -1491,7 +1491,7 @@ mod tests {
 	/// What an unsolicited advertisement means to a subscriber on `version` whose peer
 	/// declared `solicit`.
 	fn unsolicited_is_a_violation(solicit: Option<bool>, version: Version) -> bool {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer {
@@ -1559,7 +1559,7 @@ mod tests {
 	/// so sending it asks for a prefix that matches nothing there.
 	#[tokio::test]
 	async fn a_rooted_subscriber_asks_for_its_scope_not_its_root() {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let scoped = origin
 			.with_root("rootns")
 			.and_then(|rooted| rooted.scope(&[crate::Path::new("cam")]))
@@ -1629,7 +1629,7 @@ mod tests {
 	async fn a_rooted_subscriber_mounts_a_reply_under_its_root_once() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let consumer = origin.consume();
 		let scoped = origin
 			.with_root("rootns")
@@ -1699,7 +1699,7 @@ mod tests {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let assigned = crate::Origin::new(777).unwrap();
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let consumer = origin.consume();
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
@@ -1740,7 +1740,7 @@ mod tests {
 		let peer = crate::Origin::new(777).unwrap();
 		let self_origin = crate::Origin::new(1).unwrap();
 
-		let origin = crate::origin::Info::new(self_origin).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(self_origin));
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
@@ -1805,7 +1805,7 @@ mod tests {
 		let peer = crate::Origin::new(777).unwrap();
 		let self_origin = crate::Origin::new(1).unwrap();
 
-		let origin = crate::origin::Info::new(self_origin).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(self_origin));
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
@@ -1851,9 +1851,10 @@ mod tests {
 	) -> (
 		Subscriber<crate::lite::test_transport::SinkSession>,
 		crate::origin::Producer,
+		crate::origin::Driver,
 	) {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
-		let origin = crate::origin::Info::new(self_origin).produce();
+		let (origin, driver) = crate::origin::Producer::new(crate::origin::Info::new(self_origin));
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		// The set only drains announce-serving tasks; the tests here drive the model
 		// directly, so leaking it keeps the handles alive without a spawner.
@@ -1871,7 +1872,7 @@ mod tests {
 			tasks,
 			Default::default(),
 		);
-		(subscriber, origin)
+		(subscriber, origin, driver)
 	}
 
 	fn hop_path(ids: &[u64]) -> cluster::HopPath {
@@ -1887,7 +1888,8 @@ mod tests {
 	/// upstream value ranks last rather than wrapping to best).
 	#[tokio::test]
 	async fn cluster_advert_becomes_a_route_with_the_link_charged() {
-		let (subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (subscriber, origin, driver) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		tokio::spawn(driver);
 		let consumer = origin.consume();
 
 		let peer = cluster::Peer {
@@ -1925,7 +1927,7 @@ mod tests {
 	/// back to ourselves. Hop ID 0 identifies nothing, so it is never a loop.
 	#[test]
 	fn cluster_advert_loop_is_discarded() {
-		let (subscriber, _origin) = cluster_subscriber(crate::Origin::new(5).unwrap());
+		let (subscriber, _origin, _driver) = cluster_subscriber(crate::Origin::new(5).unwrap());
 		let peer = cluster::Peer {
 			origin: Some(crate::Origin::new(9).unwrap()),
 			cost: None,
@@ -1948,7 +1950,7 @@ mod tests {
 	/// hop count and degenerates to shortest-path routing.
 	#[test]
 	fn unpriced_link_costs_one() {
-		let (subscriber, _origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (subscriber, _origin, _driver) = cluster_subscriber(crate::Origin::new(1).unwrap());
 		let peer = cluster::Peer {
 			origin: Some(crate::Origin::new(9).unwrap()),
 			cost: None,
@@ -1979,7 +1981,7 @@ mod tests {
 	async fn a_lost_namespace_stream_closes_the_broadcast() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let consumer = origin.consume();
 
 		// The peer answers, advertises one namespace, then the stream ends without ever
@@ -2021,7 +2023,8 @@ mod tests {
 	/// said the namespace is gone, so a later create at the path is new content.
 	#[tokio::test(start_paused = true)]
 	async fn an_explicit_namespace_done_closes_the_broadcast() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (mut subscriber, origin, driver) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		tokio::spawn(driver);
 		let consumer = origin.consume();
 
 		let path = crate::Path::new("room/host").to_owned();
@@ -2056,7 +2059,7 @@ mod tests {
 			.unwrap();
 		let script = log.writes.lock().unwrap().clone();
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let consumer = origin.consume();
 		let session = crate::lite::test_transport::ScriptedSession::eof(script);
 		let (tasks, task_set) = crate::util::TaskSet::new();
@@ -2102,7 +2105,7 @@ mod tests {
 	async fn a_broken_publish_namespace_stream_closes_the_broadcast() {
 		const VERSION: Version = Version::Draft19;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let consumer = origin.consume();
 
 		// The peer sends something that does not belong on this stream, ending it with an
@@ -2157,7 +2160,8 @@ mod tests {
 	/// what the origin sees.
 	#[tokio::test(start_paused = true)]
 	async fn the_last_owner_out_decides_the_detach() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (mut subscriber, origin, driver) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		tokio::spawn(driver);
 		let consumer = origin.consume();
 		let path = crate::Path::new("room/host").to_owned();
 		let peer = cluster::Peer::default();
@@ -2190,7 +2194,7 @@ mod tests {
 	/// advertise a paid upstream as the cheapest route in the mesh.
 	#[test]
 	fn a_pathless_advert_still_pays_for_its_link() {
-		let (unpriced, _origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (unpriced, _origin, _driver) = cluster_subscriber(crate::Origin::new(1).unwrap());
 		let peer = cluster::Peer::default();
 
 		// Nothing priced this direction, so it ranks by hop count.
@@ -2204,7 +2208,7 @@ mod tests {
 		assert_eq!(unpriced.route(None, &priced_peer).unwrap().route.cost, 4);
 
 		// Local policy still wins over what the peer declared.
-		let (mut priced, _origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (mut priced, _origin, _priced_driver) = cluster_subscriber(crate::Origin::new(1).unwrap());
 		priced.cost = Some(6);
 		assert_eq!(priced.route(None, &priced_peer).unwrap().route.cost, 6);
 	}
@@ -2214,7 +2218,8 @@ mod tests {
 	/// it, since that content is not interchangeable.
 	#[tokio::test]
 	async fn cluster_update_replaces_in_place() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (mut subscriber, origin, driver) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		tokio::spawn(driver);
 		let consumer = origin.consume();
 		let path = crate::Path::new("room/host").to_owned();
 
@@ -2260,7 +2265,8 @@ mod tests {
 	/// still reference the path.
 	#[tokio::test]
 	async fn cluster_publisher_change_replaces_the_source() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (mut subscriber, origin, driver) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		tokio::spawn(driver);
 		let consumer = origin.consume();
 		let path = crate::Path::new("room/host").to_owned();
 
@@ -2303,7 +2309,8 @@ mod tests {
 	/// as a subscriber is resolving a track through it.
 	#[tokio::test]
 	async fn pathless_adverts_never_replace_the_source() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (mut subscriber, origin, driver) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		tokio::spawn(driver);
 		let consumer = origin.consume();
 		let path = crate::Path::new("room/host").to_owned();
 		let peer = cluster::Peer::default();
@@ -2338,7 +2345,8 @@ mod tests {
 	#[tokio::test]
 	async fn reflected_replacement_retracts_the_route() {
 		let self_origin = crate::Origin::new(5).unwrap();
-		let (mut subscriber, origin) = cluster_subscriber(self_origin);
+		let (mut subscriber, origin, driver) = cluster_subscriber(self_origin);
+		tokio::spawn(driver);
 		let consumer = origin.consume();
 		let path = crate::Path::new("room/host").to_owned();
 		let peer = cluster::Peer {
@@ -2417,7 +2425,7 @@ mod tests {
 		const VERSION: Version = Version::Draft19;
 		let script = publish_namespace_updates(request_id, "room/host", updates).await;
 		let session = crate::lite::test_transport::ScriptedSession::new(script);
-		let origin = crate::origin::Info::new(self_origin).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(self_origin));
 		let consumer = origin.consume();
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		// The tests drive the loop directly, so nothing spawns; leaking keeps the
@@ -2565,7 +2573,8 @@ mod tests {
 	/// session keeps running).
 	#[tokio::test]
 	async fn namespace_stream_close_releases_live_paths() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let (mut subscriber, origin, driver) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		tokio::spawn(driver);
 		let consumer = origin.consume();
 		let peer = cluster::Peer::default();
 
@@ -2598,7 +2607,7 @@ mod tests {
 		// An open gate, so the rejection actually reaches the wire.
 		let gate = kio::Producer::new(true);
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let consumer = origin.consume();
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		std::mem::forget(task_set);

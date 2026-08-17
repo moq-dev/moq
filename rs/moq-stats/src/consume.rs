@@ -109,8 +109,14 @@ mod tests {
 
 	use super::*;
 
+	fn spawn_origin() -> origin::Producer {
+		let (origin, driver) = origin::Producer::new(origin::Info::new(Origin::random()));
+		tokio::spawn(driver);
+		origin
+	}
+
 	fn test_producer() -> (Producer, origin::Producer) {
-		let origin = Origin::random().produce();
+		let origin = spawn_origin();
 		let producer = Producer::new(
 			ProducerConfig::new()
 				.with_origin(origin.clone())
@@ -143,7 +149,7 @@ mod tests {
 
 	async fn feed(producer: &Producer, tier: Tier, root: &str, path: &str) -> Feed {
 		let ctx = producer.registry().tier(tier).session(root);
-		let feed_origin = Origin::random().produce();
+		let feed_origin = spawn_origin();
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
 		let mut announced = egress.announced();

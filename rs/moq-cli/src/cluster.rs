@@ -453,18 +453,22 @@ mod tests {
 		assert_eq!(split_credential("/.clusterish/abc"), ("/.clusterish/abc", None));
 	}
 
-	fn lan(credential: &str) -> Lan {
-		Lan {
-			origin: moq_net::Origin::random().produce(),
-			credential: credential.to_string(),
-			client: moq_native::connect::Config::default(),
-		}
+	fn lan(credential: &str) -> (Lan, moq_net::origin::Driver) {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Info::new(moq_net::Origin::random()));
+		(
+			Lan {
+				origin,
+				credential: credential.to_string(),
+				client: moq_native::connect::Config::default(),
+			},
+			driver,
+		)
 	}
 
 	/// Only this listener's per-advertisement credential gets in.
 	#[test]
 	fn authorized_requires_the_advertised_credential() {
-		let closed = lan("expected-proof");
+		let (closed, _driver) = lan("expected-proof");
 		assert!(closed.authorized("/.cluster/expected-proof"));
 		assert!(!closed.authorized(MESH_PATH), "a missing proof must be rejected");
 		assert!(!closed.authorized("/.cluster/other-proof"));
@@ -476,7 +480,7 @@ mod tests {
 	/// advertisement, at every address the peer offered.
 	#[test]
 	fn dial_urls_carry_the_proof_to_every_address() {
-		let lan = lan("ours");
+		let (lan, _driver) = lan("ours");
 
 		let socket = DialTarget {
 			urls: ["moqt://192.168.1.5:4443", "moqt://127.0.0.1:4443"]
@@ -514,7 +518,7 @@ mod tests {
 	async fn pinning_a_peer_drops_the_relay_roots() {
 		let mut client = moq_native::connect::Config::default();
 		client.tls.root = vec!["ca.pem".into()];
-		let mut lan = lan("ours");
+		let (mut lan, _driver) = lan("ours");
 		lan.client = client;
 
 		let peer = DialTarget {
@@ -597,8 +601,8 @@ mod tests {
 	/// so the test needs no multicast and stays CI-safe.
 	#[tokio::test]
 	async fn session_shares_origin_bidirectionally() {
-		let origin_a = moq_net::Origin::random().produce();
-		let origin_b = moq_net::Origin::random().produce();
+		let origin_a = moq_native::origin::spawn(moq_net::origin::Info::new(moq_net::Origin::random()));
+		let origin_b = moq_native::origin::spawn(moq_net::origin::Info::new(moq_net::Origin::random()));
 
 		// Published before the session exists; announcements flow once it connects.
 		let _from_a = origin_a
@@ -607,7 +611,7 @@ mod tests {
 
 		let (server, peer) = listener();
 		let server = server.listen().await.expect("listen");
-		let mut accept = lan("listener-proof");
+		let (mut accept, _accept_driver) = lan("listener-proof");
 		accept.origin = origin_b.clone();
 		// The mesh shares the listener with ordinary clients, so go through the
 		// same dispatch `--cluster-lan` installs rather than calling `accept`.
@@ -622,7 +626,7 @@ mod tests {
 			false,
 		));
 
-		let mut dialer = lan("dialer-proof");
+		let (mut dialer, _dialer_driver) = lan("dialer-proof");
 		dialer.origin = origin_a.clone();
 		let _dial = dialer.dial_target(&peer).expect("dial");
 
@@ -654,15 +658,15 @@ mod tests {
 	/// origin is attached: reaching the listener is not membership.
 	#[tokio::test]
 	async fn mesh_rejects_a_dial_without_the_proof() {
-		let origin_a = moq_net::Origin::random().produce();
-		let origin_b = moq_net::Origin::random().produce();
+		let origin_a = moq_native::origin::spawn(moq_net::origin::Info::new(moq_net::Origin::random()));
+		let origin_b = moq_native::origin::spawn(moq_net::origin::Info::new(moq_net::Origin::random()));
 		let _from_b = origin_b
 			.create_broadcast("from-b", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("failed to create broadcast");
 
 		let (server, peer) = listener();
 		let server = server.listen().await.expect("listen");
-		let mut accept = lan("the-real-proof");
+		let (mut accept, _accept_driver) = lan("the-real-proof");
 		accept.origin = origin_b.clone();
 		tokio::spawn(serve(
 			server,
@@ -676,7 +680,7 @@ mod tests {
 		));
 
 		// A peer that reached the port but never saw a verifiable advertisement.
-		let mut dialer = lan("dialer-proof");
+		let (mut dialer, _dialer_driver) = lan("dialer-proof");
 		dialer.origin = origin_a.clone();
 		let _dial = dialer.dial_target(&peer).expect("dial");
 
@@ -695,14 +699,14 @@ mod tests {
 	/// user who passed `--listen` did ask to serve, so that case still does.
 	#[tokio::test]
 	async fn a_mesh_only_listener_refuses_ordinary_clients() {
-		let origin = moq_net::Origin::random().produce();
+		let origin = moq_native::origin::spawn(moq_net::origin::Info::new(moq_net::Origin::random()));
 		let _published = origin
 			.create_broadcast("secret-stream", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("failed to create broadcast");
 
 		let (server, peer) = listener();
 		let server = server.listen().await.expect("listen");
-		let mut accept = lan("the-real-proof");
+		let (mut accept, _accept_driver) = lan("the-real-proof");
 		accept.origin = origin.clone();
 		// `public_quic: false` is what `--cluster-lan` passes with no `--listen`.
 		tokio::spawn(serve(
@@ -721,7 +725,7 @@ mod tests {
 		config.tls = moq_native::tls::Connect::default();
 		config.tls.fingerprint = vec![peer.fingerprint.clone().expect("fingerprint")];
 		config.once = Some(true);
-		let stolen = moq_net::Origin::random().produce();
+		let stolen = moq_native::origin::spawn(moq_net::origin::Info::new(moq_net::Origin::random()));
 		let url = peer.urls.into_iter().next().expect("an address");
 		let connection = config
 			.init(Default::default())

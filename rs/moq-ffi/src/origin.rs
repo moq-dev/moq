@@ -166,7 +166,9 @@ impl MoqOriginProducer {
 			info = info.with_pool(moq_net::cache::Pool::new(capacity));
 		}
 
-		Self { inner: info.produce() }
+		Self {
+			inner: moq_native::origin::spawn(info),
+		}
 	}
 }
 
@@ -187,14 +189,14 @@ pub(crate) fn resolve_pair(
 ) -> (moq_net::origin::Producer, moq_net::origin::Producer) {
 	if publish.is_none() && consume.is_none() {
 		// Clones of a Producer share the underlying origin, so this is one origin, not two.
-		let shared = moq_net::Origin::random().produce();
+		let shared = moq_native::origin::spawn(moq_net::origin::Info::new(moq_net::Origin::random()));
 		return (shared.clone(), shared);
 	}
 
 	let resolve = |origin: Option<&Arc<MoqOriginProducer>>| {
 		origin
 			.map(|o| o.inner().clone())
-			.unwrap_or_else(|| moq_net::Origin::random().produce())
+			.unwrap_or_else(|| moq_native::origin::spawn(moq_net::origin::Info::new(moq_net::Origin::random())))
 	};
 	(resolve(publish), resolve(consume))
 }

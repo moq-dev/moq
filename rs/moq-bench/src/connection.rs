@@ -79,9 +79,9 @@ pub async fn run(ctx: Connection) {
 	let url = config.client.url.clone().expect("url required");
 
 	// Publish side: an origin we fill with our broadcasts and hand to the session.
-	let publish = Origin::random().produce();
+	let publish = moq_native::origin::spawn(moq_net::origin::Info::new(Origin::random()));
 	// Consume side: the session fills this with peer announcements.
-	let consume = Origin::random().produce();
+	let consume = moq_native::origin::spawn(moq_net::origin::Info::new(Origin::random()));
 	let announced = consume.consume().announced();
 
 	let name = config.name();

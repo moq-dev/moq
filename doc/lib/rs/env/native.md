@@ -82,12 +82,14 @@ See the [Authentication guide](/bin/relay/auth) for how to generate tokens.
 
 The [video example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) demonstrates publishing end-to-end.
 
-Wire an [`origin::Producer`](https://docs.rs/moq-net/latest/moq_net/origin/struct.Producer.html) into the client before connecting and publish your broadcasts into that. The origin outlives any single session, so a reconnect resumes where it left off; reaching for the session's own [`publisher()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.publisher) instead ties your broadcasts to one transport.
+Wire an [`origin::Producer`](https://docs.rs/moq-net/latest/moq_net/origin/struct.Producer.html) into the client before connecting and publish your broadcasts into that. The origin outlives any single session, so a reconnect resumes where it left off; reaching for the session's own [`publisher()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.publisher) instead ties your broadcasts to one transport. The native `origin::spawn` helper runs the origin driver on Tokio. Direct `moq-net` users must retain and poll the driver returned by `origin::Producer::new` for the origin's entire lifetime; dropping it tears the origin down.
 
 ```rust
 // Publish into an origin wired before connecting: it outlives any one session,
 // so the broadcast survives a reconnect. Hold the connection to keep redialing.
-let origin = moq_net::Origin::random().produce();
+let origin = moq_native::origin::spawn(moq_net::origin::Info::new(
+    moq_net::Origin::random(),
+));
 let _connection = client.with_publisher(origin.consume()).connect(url);
 
 let route = moq_net::broadcast::Route::new().with_announce(true);
@@ -106,7 +108,9 @@ Subscribing works the same way round: wire an origin in before connecting and re
 ```rust
 // Consume into an origin wired before connecting, so announcements keep flowing
 // across a reconnect. Hold the connection to keep redialing.
-let origin = moq_net::Origin::random().produce();
+let origin = moq_native::origin::spawn(moq_net::origin::Info::new(
+    moq_net::Origin::random(),
+));
 let mut announced = origin.consume().announced();
 let _connection = client.with_subscriber(origin).connect(url);
 

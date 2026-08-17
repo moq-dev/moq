@@ -15,6 +15,12 @@ use support::mock::create_mock_session_pair;
 /// Maximum time any single test may run before being treated as a deadlock.
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+fn spawn_origin() -> moq_net::origin::Producer {
+	let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Info::new(Origin::random()));
+	tokio::spawn(driver);
+	origin
+}
+
 /// Every version with GOAWAY support, across both wires and their distinct
 /// channels: the lite Goaway control stream, the IETF draft-14-16 shared
 /// control stream, and the IETF draft-17+ SETUP uni streams.
@@ -310,7 +316,7 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 		let version: Version = "moq-lite-04".parse().unwrap();
 
 		// Server publishes a broadcast with one live track.
-		let pub_origin = Origin::random().produce();
+		let pub_origin = spawn_origin();
 		let mut broadcast = pub_origin
 			.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("create broadcast");
@@ -325,7 +331,7 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 		audio_group.finish().expect("finish group");
 
 		// Client consumes into its own origin.
-		let sub_origin = Origin::random().produce();
+		let sub_origin = spawn_origin();
 
 		let mut opts = MockConnectOptions::new(version);
 		opts.server_publish = Some(pub_origin.clone());
@@ -410,12 +416,12 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 /// draining peer has no reason to send.
 async fn goaway_drains_routes(version: Version) {
 	tokio::time::timeout(TEST_TIMEOUT, async {
-		let pub_origin = Origin::random().produce();
+		let pub_origin = spawn_origin();
 		let _broadcast = pub_origin
 			.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("create broadcast");
 
-		let sub_origin = Origin::random().produce();
+		let sub_origin = spawn_origin();
 
 		let mut opts = MockConnectOptions::new(version);
 		opts.server_publish = Some(pub_origin.clone());

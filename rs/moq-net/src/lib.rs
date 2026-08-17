@@ -49,12 +49,13 @@
 //! ## Async
 //! This library is async-first. [`Client::connect`] and [`Server::accept`] return a
 //! `(Session, Driver)` pair: the [`Session`] is the handle, and the [`Driver`] is
-//! the future that runs all of its protocol work. Nothing is spawned behind your
-//! back: spawn the driver on your executor, await it in place, or step
-//! [`Driver::poll`] with a [`kio::Waiter`] from your own `poll_*` function. The
-//! driver holds no session handle, so the transport still closes when the last
-//! [`Session`] clone drops (or on [`Session::abort`]), which in turn finishes the
-//! driver.
+//! the future that runs all of its protocol work. Origins follow the same shape:
+//! [`origin::Producer::new`] returns an [`origin::Producer`] and
+//! [`origin::Driver`]. Nothing is spawned behind your back: spawn each driver on
+//! your executor, await it in place, or step its `poll` method with a
+//! [`kio::Waiter`] from your own `poll_*` function. Drivers hold no corresponding
+//! producer or session handle, so they finish after the handles and submitted
+//! work drain.
 //!
 //! The crate has no direct tokio dependency: every future is built on [`kio`]
 //! (plain [`std::task::Waker`] plumbing) and `futures`, so any executor can poll
@@ -64,10 +65,10 @@
 //! The one remaining runtime tie is time. Timers go through `web_async::time`,
 //! which is backed by tokio's time driver on native (and `wasmtimer` in the
 //! browser), and those timers panic when polled outside a tokio runtime. So on
-//! native you still need a tokio runtime to poll a [`Driver`] (bandwidth sampling,
-//! the control stream timeout, and subscription linger all sleep); purely
-//! model-layer methods (tracks, groups, frames, origins) never touch a timer and
-//! run on any executor.
+//! native you still need a tokio runtime with time enabled to poll work that uses
+//! a timer (bandwidth sampling, control stream timeouts, and subscription linger).
+//! Synchronous model-layer operations can run without an executor, but lifecycle
+//! progress still requires the relevant driver to be polled.
 
 #![warn(missing_docs)]
 // The browser transport is `!Send`, so on wasm the shared state behind these `Arc`s is

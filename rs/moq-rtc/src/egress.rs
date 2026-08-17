@@ -304,7 +304,7 @@ mod tests {
 
 	#[test]
 	fn catalog_codecs_ignores_codecs_available_only_via_escaping_references() {
-		let origin = Origin::random().produce();
+		let (origin, _driver) = moq_net::origin::Producer::new(moq_net::origin::Info::new(Origin::random()));
 		let source = moq_mux::Source::new(origin.consume(), "a/pub");
 		let mut catalog = Catalog::default();
 

@@ -144,6 +144,12 @@ mod tests {
 	use super::*;
 	use crate::server::{Request, Server};
 
+	fn spawn_origin() -> moq_net::origin::Producer {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Info::new(Origin::random()));
+		tokio::spawn(driver);
+		origin
+	}
+
 	/// Grab a free UDP port by binding `:0` and releasing it. Racy in principle, but
 	/// the window before the SRT server rebinds it is tiny; good enough for a test.
 	async fn free_udp_addr() -> SocketAddr {
@@ -163,7 +169,7 @@ mod tests {
 
 		// Server accepts the publish so the caller's handshake completes; it ingests into
 		// a throwaway origin and returns the routed direction + resource.
-		let origin = Origin::random().produce();
+		let origin = spawn_origin();
 		let server_task = tokio::spawn(async move {
 			let request = server.accept().await.expect("a request");
 			let resource = request.resource().to_string();
@@ -203,7 +209,7 @@ mod tests {
 
 		// Empty origin: the subscribe accept parks waiting for the broadcast, which is
 		// fine -- the caller still connects, and the test aborts the wait.
-		let origin = Origin::random().produce();
+		let origin = spawn_origin();
 		let consumer = origin.consume();
 		let server_task = tokio::spawn(async move {
 			let request = server.accept().await.expect("a request");

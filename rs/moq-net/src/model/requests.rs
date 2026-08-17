@@ -149,6 +149,12 @@ impl<K: Clone + Eq + Hash, V> Requests<K, V> {
 			.filter_map(|key| self.pending.remove(&key))
 			.collect()
 	}
+
+	/// Remove and return every request, including requests already handed to a handler.
+	pub fn drain(&mut self) -> Vec<V> {
+		self.order.clear();
+		self.pending.drain().map(|(_, value)| value).collect()
+	}
 }
 
 #[cfg(test)]

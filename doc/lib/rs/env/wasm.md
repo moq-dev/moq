@@ -76,19 +76,22 @@ let url = url::Url::parse("https://cdn.moq.dev/anon")?;
 let transport = moq_wasm::transport::connect(url, Default::default()).await?;
 
 // Hand the transport to moq-net and run the MoQ handshake.
-let origin = moq_net::Origin::random().produce();
+let (origin, origin_driver) = moq_net::origin::Producer::new(
+    moq_net::origin::Info::new(moq_net::Origin::random()),
+);
 let mut consumer = origin.consume();
 let (session, driver) = moq_net::Client::new()
     .with_subscriber(origin)
     .connect(transport)
     .await?;
 
-// Nothing drives the protocol but the driver, so run it for as long as you hold
-// the session. It holds no session clone, so dropping your last `session` still
-// closes the transport, which in turn ends the spawned task.
+// Nothing drives the protocol or origin lifecycle but these drivers, so run
+// them for as long as their handles are in use. Neither driver retains its
+// corresponding handle.
 wasm_bindgen_futures::spawn_local(async move {
     let _ = driver.await;
 });
+wasm_bindgen_futures::spawn_local(origin_driver);
 
 // Read announcements off `consumer` exactly as on native...
 ```

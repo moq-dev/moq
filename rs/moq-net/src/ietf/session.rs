@@ -884,7 +884,7 @@ mod tests {
 		// bound it: paused time makes the deadline fire the moment nothing else can run.
 		tokio::time::pause();
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let session = crate::lite::test_transport::ScriptedSession::new(namespace_without_hop_path(VERSION).await);
 		let log = session.log.clone();
 
@@ -932,7 +932,7 @@ mod tests {
 	/// called `run_subscribe_namespace` itself.
 	#[tokio::test]
 	async fn every_permitted_prefix_gets_its_own_subscribe_namespace() {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let scoped = origin
 			.with_root("rootns")
 			.and_then(|rooted| rooted.scope(&[crate::Path::new("cam"), crate::Path::new("mic")]))
@@ -983,7 +983,7 @@ mod tests {
 	/// The scripted peer answers nothing, so an advertisement parks after writing. That is
 	/// enough: the question is only whether the bytes went out unasked.
 	async fn announce_occurrences(peer_declared: Option<peer::Peer>) -> usize {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let _cam = origin
 			.create_broadcast("solo-cam", crate::broadcast::Route::new().with_announce(true))
 			.unwrap();
@@ -1070,14 +1070,14 @@ mod tests {
 	fn the_hop_id_comes_from_whichever_origin_the_caller_set() {
 		let ours = crate::Origin::new(42).unwrap();
 
-		let publish = crate::origin::Info::new(ours).produce();
+		let (publish, _publish_driver) = crate::origin::Producer::new(crate::origin::Info::new(ours));
 		assert_eq!(self_origin(Some(&publish.consume()), None), ours, "the publish half");
 
-		let subscribe = crate::origin::Info::new(ours).produce();
+		let (subscribe, _subscribe_driver) = crate::origin::Producer::new(crate::origin::Info::new(ours));
 		assert_eq!(self_origin(None, Some(&subscribe)), ours, "the subscribe half alone");
 
 		// Neither half: nothing to route, so any id will do as long as it is ours.
-		let publish = crate::origin::Info::new(ours).produce();
+		let (publish, _other_driver) = crate::origin::Producer::new(crate::origin::Info::new(ours));
 		assert_eq!(self_origin(Some(&publish.consume()), Some(&subscribe)), ours);
 	}
 
@@ -1096,7 +1096,7 @@ mod tests {
 		// deadline fire the moment nothing else can run.
 		tokio::time::pause();
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let log = session.log.clone();
 
 		let (driver, _goaway) = start(Config {

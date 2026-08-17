@@ -239,11 +239,11 @@ impl MoqSide {
 	/// when set, otherwise fresh and random.
 	pub fn origin(&self) -> anyhow::Result<moq_net::origin::Producer> {
 		use anyhow::Context;
-		Ok(match self.origin {
+		let id = match self.origin {
 			Some(id) => moq_net::Origin::new(id).with_context(|| format!("invalid --origin {id}"))?,
 			None => moq_net::Origin::random(),
-		}
-		.produce())
+		};
+		Ok(moq_native::origin::spawn(moq_net::origin::Info::new(id)))
 	}
 
 	/// Whether `--cluster-lan` asked this process to mesh over the LAN.

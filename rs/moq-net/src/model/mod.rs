@@ -33,7 +33,9 @@ pub use time::*;
 
 /// Publishing and consuming the set of broadcasts routed through an origin.
 pub mod origin {
-	pub use super::origin_impl::{Consumer, Dynamic, Info, Producer, Request, Requesting};
+	#[cfg(test)]
+	pub(crate) use super::origin_impl::spawn_test;
+	pub use super::origin_impl::{Consumer, Driver, Dynamic, Info, Producer, Request, Requesting};
 }
 
 /// Subscribing to broadcast (un)announcements from an origin.

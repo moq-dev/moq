@@ -512,7 +512,7 @@ mod tests {
 		// The passthrough reference (`..`) resolves against the output broadcast's path, so
 		// the output must be minted through an origin: a standalone producer has no path, and
 		// `..` from it would escape, failing the catalog read below.
-		let origin = moq_net::Origin::random().produce();
+		let origin = moq_native::origin::spawn(moq_net::origin::Info::new(moq_net::Origin::random()));
 		let output = origin
 			.create_broadcast("room/transcode", moq_net::broadcast::Route::new())
 			.unwrap();

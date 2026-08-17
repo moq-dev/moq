@@ -37,7 +37,9 @@ pub struct Origin {
 
 impl Origin {
 	pub fn create(&mut self) -> Result<Id, Error> {
-		self.active.insert(moq_net::Origin::random().produce())
+		self.active.insert(moq_native::origin::spawn(moq_net::origin::Info::new(
+			moq_net::Origin::random(),
+		)))
 	}
 
 	pub fn get(&self, id: Id) -> Result<&moq_net::origin::Producer, Error> {

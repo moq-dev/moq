@@ -124,6 +124,12 @@ impl Subscriber {
 mod tests {
 	use super::*;
 
+	fn spawn_origin() -> moq_net::origin::Producer {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Info::new(moq_net::Origin::random()));
+		tokio::spawn(driver);
+		origin
+	}
+
 	/// One payload-only TS packet carrying a complete PSI section (PUSI + pointer_field
 	/// 0), padded to 188 with stuffing.
 	fn psi_packet(pid: u16, section: &[u8]) -> Vec<u8> {
@@ -172,7 +178,7 @@ mod tests {
 	/// mints off the PMT, not stop at the catalog producer it was set on.
 	#[tokio::test]
 	async fn publisher_declares_the_configured_retention() {
-		let origin = moq_net::Origin::random().produce();
+		let origin = spawn_origin();
 		let mut publisher = Publisher::new(&origin, "live/cam0", Some(Duration::from_secs(3))).unwrap();
 
 		let mut ts = psi_packet(0x0000, &pat(0x0100));

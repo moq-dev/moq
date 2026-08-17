@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
 
 	let track = config.track;
 
-	let origin = moq_net::Origin::random().produce();
+	let origin = moq_native::origin::spawn(moq_net::origin::Info::new(moq_net::Origin::random()));
 
 	match config.role {
 		Command::Publish => {

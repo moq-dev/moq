@@ -1327,7 +1327,7 @@ mod tests {
 		let gate = kio::Producer::new(false);
 		let session = SinkSession::gated_bi(gate.consume());
 
-		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(origin::Info::new(crate::Origin::new(1).unwrap()));
 		let subscriber = Subscriber::new(SubscriberConfig {
 			session: session.clone(),
 			origin,
@@ -1399,7 +1399,7 @@ mod tests {
 			// what was true at the instant it would.
 			let gate = kio::Producer::new(true);
 			let session = SinkSession::gated_bi(gate.consume());
-			let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+			let origin = crate::origin::spawn_test(origin::Info::new(crate::Origin::new(1).unwrap()));
 			let subscriber = Subscriber::new(SubscriberConfig {
 				session: session.clone(),
 				origin,
@@ -1823,7 +1823,7 @@ mod tests {
 		let session = SinkSession::new(Default::default());
 		let assigned = crate::Origin::new(777).unwrap();
 
-		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(origin::Info::new(crate::Origin::new(1).unwrap()));
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			session,
@@ -1885,7 +1885,7 @@ mod tests {
 	}
 
 	fn restart_subscriber(session: SinkSession) -> (Subscriber<SinkSession>, crate::origin::Consumer) {
-		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(origin::Info::new(crate::Origin::new(1).unwrap()));
 		let consumer = origin.consume();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			session,
@@ -1991,7 +1991,7 @@ mod tests {
 	/// to the session (outliving the stream) would leak the announcement instead.
 	#[tokio::test(start_paused = true)]
 	async fn a_lost_announce_stream_closes_the_broadcast() {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let origin = crate::origin::spawn_test(crate::origin::Info::new(crate::Origin::new(1).unwrap()));
 		let consumer = origin.consume();
 		let mut subscriber = Subscriber::new(SubscriberConfig {
 			session: SinkSession::new(Default::default()),

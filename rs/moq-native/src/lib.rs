@@ -28,6 +28,7 @@ pub mod listen;
 mod log;
 #[cfg(feature = "noq")]
 pub mod noq;
+pub mod origin;
 pub mod quic;
 #[cfg(feature = "quinn")]
 pub mod quinn;
