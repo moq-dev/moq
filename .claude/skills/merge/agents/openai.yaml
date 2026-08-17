@@ -1,0 +1,4 @@
+interface:
+  display_name: "Merge"
+  short_description: "Review, fix, verify, and merge a PR"
+  default_prompt: "Use $merge to create or inspect this PR, address blockers when confident, ask me when not, verify it, and merge it."
