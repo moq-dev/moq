@@ -4288,16 +4288,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kio"
-version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdaadab1a06c04819b8f7cabe4ead8c9f1e86016c4c2a9384829bbc555f477a7"
-dependencies = [
- "loom",
- "smallvec",
-]
-
-[[package]]
 name = "kqueue"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4806,7 +4796,7 @@ dependencies = [
  "bytes",
  "hang",
  "humantime",
- "kio 0.5.4",
+ "kio",
  "m3u8-rs",
  "moq-mux",
  "moq-net",
@@ -4827,7 +4817,7 @@ dependencies = [
  "bytes",
  "criterion",
  "json-patch",
- "kio 0.5.4",
+ "kio",
  "moq-flate",
  "moq-net",
  "serde",
@@ -4865,7 +4855,7 @@ dependencies = [
  "futures",
  "h264-parser",
  "hang",
- "kio 0.5.4",
+ "kio",
  "memchr",
  "moq-json",
  "moq-loc",
@@ -4898,7 +4888,7 @@ dependencies = [
  "criterion",
  "futures",
  "getrandom 0.4.3",
- "kio 0.5.4",
+ "kio",
  "loom",
  "num_enum",
  "rand 0.10.2",
@@ -10415,7 +10405,7 @@ dependencies = [
  "bytes",
  "http",
  "iroh",
- "kio 0.5.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "kio",
  "n0-error",
  "n0-future",
  "tokio",
@@ -10434,7 +10424,7 @@ dependencies = [
  "bytes",
  "futures",
  "http",
- "kio 0.5.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "kio",
  "noq",
  "rustls",
  "rustls-native-certs",
@@ -10471,7 +10461,7 @@ dependencies = [
  "flume",
  "futures",
  "http",
- "kio 0.5.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "kio",
  "rustls-pki-types",
  "thiserror 2.0.20",
  "tokio",
@@ -10491,7 +10481,7 @@ dependencies = [
  "bytes",
  "futures",
  "http",
- "kio 0.5.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "kio",
  "quinn",
  "rustls",
  "rustls-native-certs",
