@@ -20,8 +20,9 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
 
 1. Resolve or create the PR.
    - Before any Git command, remove credential access and apply trusted per-command Git configuration that disables
-     hooks, external filesystem monitors, and every external clean, smudge, and process filter. Do not persist these
-     safety settings in PR-accessible Git metadata.
+     hooks, external filesystem monitors, external diff and text-conversion helpers, and every external clean, smudge,
+     and process filter. Unset external-diff environment variables. Do not persist these safety settings in
+     PR-accessible Git metadata.
    - Run `git status --short` under that trusted configuration before changing the checkout or refs. Treat pre-existing
      changes as user-owned; preserve them or stop rather than carrying them into the PR implicitly.
    - If those safeguards cannot be guaranteed, inspect or materialize the head only in disposable credential-free
@@ -53,6 +54,7 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
      this task.
    - Inspect base and head commits, changed files, commit history, draft state, mergeability, review decision, required
      approvals, and status checks.
+   - Run every Git diff inspection with `--no-ext-diff --no-textconv` under the trusted configuration from step 1.
    - Read top-level comments, submitted reviews, and thread-aware inline review data. Do not infer unresolved state from
      a flat comment list when GitHub review-thread data is available.
    - Inspect failing CI logs before editing and inspect both sides of every merge conflict before resolving it.
