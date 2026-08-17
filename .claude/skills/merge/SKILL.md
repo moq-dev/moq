@@ -19,9 +19,12 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
 ## Workflow
 
 1. Resolve or create the PR.
-   - Prefer an explicit PR number or URL. Otherwise inspect the current branch.
-   - Select the base branch and require a current head branch distinct from it before any push. If the checkout is
-     detached or on the selected base, create a scoped head branch at the current commit first.
+   - Prefer an explicit PR number or URL. Bind the checkout to that PR's exact head branch and commit before editing or
+     pushing; check out the exact head or stop if local and remote identities differ. Otherwise inspect the current branch.
+   - Target `main` for fixes, features, additive APIs, documentation, refactors, and wire changes. Use `dev` only for a
+     semver-breaking rename, removal, or signature change to a published API in a core library or language wrapper.
+   - Require a current head branch distinct from the selected base before any push. If the checkout is detached or on
+     the selected base, create a scoped head branch at the current commit first.
    - Point the head branch's upstream at the freshly fetched selected remote base so diff-scoped checks use the correct
      comparison. Push with `git push origin HEAD`, never `git push -u`.
    - If the current branch has no PR, confirm it has committed work against an unambiguous base, preserves unrelated
