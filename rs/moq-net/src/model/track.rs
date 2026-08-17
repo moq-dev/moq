@@ -4144,6 +4144,42 @@ mod test {
 	}
 
 	#[tokio::test]
+	async fn a_handed_out_partial_frame_expires_while_its_payload_is_stalled() {
+		tokio::time::pause();
+
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(None);
+		let mut source = producer.append_group().unwrap();
+		let mut writing = source
+			.create_frame(frame::Info {
+				size: 6,
+				timestamp: Timestamp::ZERO,
+			})
+			.unwrap();
+		writing.write(bytes::Bytes::from_static(b"old")).unwrap();
+
+		let mut group = subscriber.recv_group().await.unwrap().expect("partial group");
+		let mut frame = group.next_frame().await.unwrap().expect("partial frame");
+		assert_eq!(
+			frame.read_chunk().await.unwrap(),
+			Some(bytes::Bytes::from_static(b"old"))
+		);
+		let pending = tokio::spawn(async move { frame.read_chunk().await });
+		tokio::task::yield_now().await;
+		assert!(!pending.is_finished(), "the partial payload is still stalled");
+
+		tokio::time::advance(Duration::from_secs(1)).await;
+		append_at(&mut producer, 1000);
+
+		let result = pending.await.unwrap();
+		assert!(
+			matches!(result, Err(Error::Old)),
+			"the in-flight frame expires: {result:?}"
+		);
+		writing.abort(Error::Cancel).unwrap();
+	}
+
+	#[tokio::test]
 	async fn widening_latency_wakes_a_pending_frame_read() {
 		tokio::time::pause();
 

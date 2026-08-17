@@ -152,7 +152,7 @@ impl GroupState {
 	}
 
 	/// Content in the half-open frame range that is still cached here.
-	fn content_range(&self, start: usize, end: usize) -> stats::Content {
+	pub(crate) fn content_range(&self, start: usize, end: usize) -> stats::Content {
 		let start = start.max(self.offset);
 		let end = end.min(self.next_index);
 		if start >= end {
@@ -1120,8 +1120,12 @@ impl Consumer {
 			return Poll::Ready(Err(Error::Old));
 		}
 		let stats = self.stats.clone();
+		let expiry = self
+			.expiry
+			.as_ref()
+			.map(|policy| frame::Expiry::new(policy.clone(), self.stale_stats.clone(), self.stale_counted.clone()));
 		match &mut self.inner {
-			ConsumerKind::Plain(plain) => plain.poll_next_frame(waiter, &stats),
+			ConsumerKind::Plain(plain) => plain.poll_next_frame(waiter, &stats, expiry),
 			ConsumerKind::Spliced(spliced) => {
 				// The per-route copies underneath are untagged, so meter the spliced
 				// stream here: it is the one the subscriber actually reads.
@@ -1223,22 +1227,33 @@ impl Plain {
 		self.prefetch = Prefetch::default();
 	}
 
-	fn poll_next_frame(&mut self, waiter: &kio::Waiter, stats: &stats::Meter) -> Poll<Result<Option<frame::Consumer>>> {
+	fn poll_next_frame(
+		&mut self,
+		waiter: &kio::Waiter,
+		stats: &stats::Meter,
+		expiry: Option<frame::Expiry>,
+	) -> Poll<Result<Option<frame::Consumer>>> {
 		if self.capped() {
 			return Poll::Ready(Ok(None));
 		}
+		let end = self.end.map_or(usize::MAX, |end| end.saturating_add(1));
 
 		// Hand out any frames a prior read_frame prefetched before touching the tail.
 		// Their bytes were already counted at the batch fill, so the frame::Consumer
 		// carries no meter.
 		if let Some(frame) = self.prefetch.pop() {
 			self.index += 1;
+			let tail = self.index.saturating_add(self.prefetch.buffered().0 as usize)..end;
 			let info = frame::Info {
 				size: frame.payload.len() as u64,
 				timestamp: frame.timestamp,
 			};
 			let source = frame::Source::Complete(frame.payload);
-			return Poll::Ready(Ok(Some(frame::Consumer::new(self.state.clone(), info, source))));
+			let frame = frame::Consumer::new(self.state.clone(), info, source);
+			return Poll::Ready(Ok(Some(match expiry {
+				Some(expiry) => frame.with_expiry(expiry.for_frame(tail, false)),
+				None => frame,
+			})));
 		}
 
 		let index = self.index;
@@ -1250,9 +1265,11 @@ impl Plain {
 		// A direct read (not prefetched): count the frame here; the frame::Consumer
 		// counts its bytes per chunk as they're read out.
 		stats.frames(1);
-		Poll::Ready(Ok(Some(
-			frame::Consumer::new(self.state.clone(), info, source).with_meter(stats.clone()),
-		)))
+		let frame = frame::Consumer::new(self.state.clone(), info, source).with_meter(stats.clone());
+		Poll::Ready(Ok(Some(match expiry {
+			Some(expiry) => frame.with_expiry(expiry.for_frame(self.index..end, true)),
+			None => frame,
+		})))
 	}
 
 	fn poll_read_frame(&mut self, waiter: &kio::Waiter, stats: &stats::Meter) -> Poll<Result<Option<frame::Frame>>> {

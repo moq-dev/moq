@@ -5,9 +5,10 @@
 //! through [`Producer`], which borrows its parent [`group::Producer`] exclusively so
 //! the borrow checker enforces that only one frame is open at a time. A [`Consumer`]
 //! reads one frame, sharing the group's channel rather than a per-frame one.
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Poll, ready};
 
 use bytes::Bytes;
@@ -414,6 +415,38 @@ pub(crate) enum Source {
 	Partial(FrameBuf),
 }
 
+/// Subscriber expiry state carried across the group-to-frame handoff.
+#[derive(Clone)]
+pub(crate) struct Expiry {
+	policy: Arc<dyn group::Expiry>,
+	stale_stats: stats::Meter,
+	stale_counted: Arc<AtomicBool>,
+	tail: Range<usize>,
+	count_payload: bool,
+}
+
+impl Expiry {
+	pub(crate) fn new(
+		policy: Arc<dyn group::Expiry>,
+		stale_stats: stats::Meter,
+		stale_counted: Arc<AtomicBool>,
+	) -> Self {
+		Self {
+			policy,
+			stale_stats,
+			stale_counted,
+			tail: 0..0,
+			count_payload: false,
+		}
+	}
+
+	pub(crate) fn for_frame(mut self, tail: Range<usize>, count_payload: bool) -> Self {
+		self.tail = tail;
+		self.count_payload = count_payload;
+		self
+	}
+}
+
 /// Reads one frame's payload, streaming as bytes arrive for the in-flight tail.
 ///
 /// Owns a handle to the parent group's channel (not a per-frame one), so a group with
@@ -431,6 +464,9 @@ pub struct Consumer {
 	// from the prefetch batch, whose bytes were already counted at fill), so chunks
 	// bump `bytes` exactly once. Empty (no-op) otherwise.
 	stats: stats::Meter,
+	// The parent subscription can expire after this frame handle is returned.
+	expiry: Option<Expiry>,
+	expired: bool,
 }
 
 impl std::ops::Deref for Consumer {
@@ -449,6 +485,8 @@ impl Consumer {
 			source,
 			read_idx: 0,
 			stats: stats::Meter::default(),
+			expiry: None,
+			expired: false,
 		}
 	}
 
@@ -459,10 +497,47 @@ impl Consumer {
 		self
 	}
 
+	pub(crate) fn with_expiry(mut self, expiry: Expiry) -> Self {
+		self.expiry = Some(expiry);
+		self
+	}
+
+	fn size(&self) -> usize {
+		match &self.source {
+			Source::Complete(bytes) => bytes.len(),
+			Source::Partial(_) => self.info.size as usize,
+		}
+	}
+
+	fn poll_expired(&mut self, waiter: &kio::Waiter) -> bool {
+		if self.expired || self.read_idx >= self.size() {
+			return self.expired;
+		}
+		let Some(expiry) = &self.expiry else {
+			return false;
+		};
+		if !expiry.policy.is_expired(waiter) {
+			return false;
+		}
+
+		self.expired = true;
+		if !expiry.stale_counted.swap(true, Ordering::Relaxed) {
+			let mut stale = self.state.read().content_range(expiry.tail.start, expiry.tail.end);
+			if expiry.count_payload {
+				stale.bytes += self.size().saturating_sub(self.read_idx) as u64;
+			}
+			expiry.stale_stats.stale(stale);
+		}
+		true
+	}
+
 	/// Poll for the next chunk of bytes since the last read.
 	///
 	/// Returns `None` once the frame is finished and all bytes have been consumed.
 	pub fn poll_read_chunk(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
+		if self.poll_expired(waiter) {
+			return Poll::Ready(Err(Error::Old));
+		}
 		match &self.source {
 			Source::Complete(bytes) => {
 				if self.read_idx >= bytes.len() {
@@ -513,6 +588,9 @@ impl Consumer {
 
 	/// Poll for all remaining bytes, resolving once the frame is finished.
 	pub fn poll_read_all(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes>> {
+		if self.poll_expired(waiter) {
+			return Poll::Ready(Err(Error::Old));
+		}
 		match &self.source {
 			Source::Complete(bytes) => {
 				let out = bytes.slice(self.read_idx..);
