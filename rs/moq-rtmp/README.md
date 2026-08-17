@@ -49,7 +49,7 @@ To gate access, drive the `Server` directly. `accept` runs the handshake and the
 connect exchange, then yields a `Request` once the client wants to publish or
 play. The `Request` is either a `Publish` or a `Play`; you inspect the app and
 stream key, make a decision, and `accept` or `reject` it. This mirrors
-`moq-native`'s `Server` / `Request`, so there's no callback: the auth policy lives
+`moq-tokio`'s `Server` / `Request`, so there's no callback: the auth policy lives
 in your loop.
 
 ```rust
@@ -84,13 +84,13 @@ Two ways to serve `rtmps://`:
 
 - **Let the gateway terminate TLS.** Set `Config::tls` (or call
   `Server::with_tls`) with a `rustls::ServerConfig`, and the listener speaks
-  RTMPS with no other change. Build the config from a `moq_native::tls::Listen`
+  RTMPS with no other change. Build the config from a `moq_tokio::tls::Listen`
   instance (RTMPS has no ALPN), or supply any `rustls::ServerConfig`. To serve
   both RTMP and RTMPS, clone one base config so duplicate-publish rejection is
   shared across both listeners, then call `run` with a cloned origin.
 
   ```rust
-  let mut tls = moq_native::tls::Listen::default();
+  let mut tls = moq_tokio::tls::Listen::default();
   tls.generate = vec!["your-domain.com".to_string()]; // or set tls.cert / tls.key
   let server_config = tls.server_config(vec![])?; // RTMPS has no ALPN
 

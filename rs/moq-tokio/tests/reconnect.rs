@@ -9,8 +9,8 @@
 use std::time::Duration;
 
 /// A client whose reconnect loop escalates fast enough to assert on inside a test.
-fn client(backoff: moq_native::Backoff) -> moq_native::Client {
-	let mut config = moq_native::connect::Config::default();
+fn client(backoff: moq_tokio::Backoff) -> moq_tokio::Client {
+	let mut config = moq_tokio::connect::Config::default();
 	config.backoff = backoff;
 	config.init(Default::default()).expect("failed to init client")
 }
@@ -19,7 +19,7 @@ fn client(backoff: moq_native::Backoff) -> moq_native::Client {
 /// the underlying cause so an operator sees why rather than just "timed out".
 #[tokio::test]
 async fn a_transient_failure_retries_until_the_budget_runs_out() {
-	let mut backoff = moq_native::Backoff::default();
+	let mut backoff = moq_tokio::Backoff::default();
 	backoff.initial = Some(Duration::from_millis(20));
 	backoff.max = Some(Duration::from_millis(40));
 	backoff.timeout = Some(Duration::from_millis(200));
@@ -35,7 +35,7 @@ async fn a_transient_failure_retries_until_the_budget_runs_out() {
 		.expect_err("reconnect loop stopped without an error");
 
 	assert!(
-		matches!(err, moq_native::Error::Reconnect(_)),
+		matches!(err, moq_tokio::Error::Reconnect(_)),
 		"stopped with {err} rather than exhausting the budget"
 	);
 	assert_ne!(

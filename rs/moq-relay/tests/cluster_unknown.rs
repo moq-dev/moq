@@ -56,8 +56,8 @@ async fn spawn_relay(
 	(port, handle)
 }
 
-fn client(version: Option<moq_net::Version>) -> moq_native::Client {
-	let mut config = moq_native::connect::Config::default();
+fn client(version: Option<moq_net::Version>) -> moq_tokio::Client {
+	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.websocket.delay = Some(std::time::Duration::ZERO);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
@@ -67,7 +67,7 @@ fn client(version: Option<moq_net::Version>) -> moq_native::Client {
 
 struct Publisher {
 	_broadcast: moq_net::broadcast::Producer,
-	_session: moq_native::Connection,
+	_session: moq_tokio::Connection,
 	streamer: tokio::task::AbortHandle,
 }
 

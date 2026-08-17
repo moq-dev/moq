@@ -70,17 +70,17 @@ pub struct Config {
 	/// The MoQ client (QUIC/TLS) configuration.
 	#[command(flatten)]
 	#[serde(default)]
-	pub client: moq_native::connect::Config,
+	pub client: moq_tokio::connect::Config,
 
 	/// QUIC transport tuning (`--quic-*`).
 	#[command(flatten)]
 	#[serde(default)]
-	pub quic: moq_native::quic::Config,
+	pub quic: moq_tokio::quic::Config,
 
 	/// Log configuration.
 	#[command(flatten)]
 	#[serde(default)]
-	pub log: moq_native::Log,
+	pub log: moq_tokio::Log,
 
 	/// Load configuration from this TOML file. CLI flags still take precedence.
 	#[arg(long)]

@@ -1299,7 +1299,7 @@ mod tests {
 
 		// macOS caps AF_UNIX paths near 104 bytes and the system temp dir is long,
 		// so bind under /tmp with a name unique to this process.
-		let path = PathBuf::from(format!("/tmp/moq-native-publish-{}.sock", std::process::id()));
+		let path = PathBuf::from(format!("/tmp/moq-tokio-publish-{}.sock", std::process::id()));
 		let _ = std::fs::remove_file(&path);
 
 		let origin = moq_net::Origin::random().produce();
@@ -1465,7 +1465,7 @@ mod tests {
 	#[tokio::test]
 	async fn certificates_are_empty_without_a_tls_backend() {
 		let mut config = crate::listen::Config::default();
-		config.unix.bind = Some(PathBuf::from("/tmp/moq-native-certificates-test.sock"));
+		config.unix.bind = Some(PathBuf::from("/tmp/moq-tokio-certificates-test.sock"));
 
 		let server = config.init(Default::default()).expect("server init");
 		assert!(server.certificates().fingerprints().is_empty());

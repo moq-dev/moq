@@ -1,7 +1,7 @@
 use crate::{Auth, AuthError, AuthParams, AuthToken, Cluster};
 
 use axum::http;
-use moq_native::Request;
+use moq_tokio::Request;
 
 /// An error carrying the HTTP status to send when closing the request.
 ///

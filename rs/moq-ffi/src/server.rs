@@ -7,10 +7,10 @@ use crate::origin::MoqOriginProducer;
 use crate::session::MoqSession;
 
 struct ServerState {
-	config: moq_native::listen::Config,
+	config: moq_tokio::listen::Config,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
-	server: Option<moq_native::Listener>,
+	server: Option<moq_tokio::Listener>,
 }
 
 impl ServerState {
@@ -62,7 +62,7 @@ impl MoqServer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		Arc::new(Self {
 			task: Task::new(ServerState {
-				config: moq_native::listen::Config::default(),
+				config: moq_tokio::listen::Config::default(),
 				publish: None,
 				consume: None,
 				server: None,
@@ -166,7 +166,7 @@ impl MoqServer {
 }
 
 struct RequestState {
-	request: Option<moq_native::Request>,
+	request: Option<moq_tokio::Request>,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 }
@@ -183,7 +183,7 @@ pub struct MoqRequest {
 
 impl MoqRequest {
 	fn new(
-		request: moq_native::Request,
+		request: moq_tokio::Request,
 		publish: Option<Arc<MoqOriginProducer>>,
 		consume: Option<Arc<MoqOriginProducer>>,
 	) -> Arc<Self> {

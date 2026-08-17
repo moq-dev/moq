@@ -4,7 +4,7 @@
 //! Each test is gated with `#[cfg(feature = "...")]` so it only compiles when the
 //! corresponding backend is enabled. Running `cargo test --all-features` exercises all.
 
-use moq_native::moq_net::{self, Origin};
+use moq_tokio::moq_net::{self, Origin};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -24,7 +24,7 @@ struct ConnectTest<'a> {
 	path: &'a str,
 	/// The request path the server must observe, when the test cares.
 	expect_path: Option<&'a str>,
-	backend: moq_native::QuicBackend,
+	backend: moq_tokio::QuicBackend,
 	/// Capture qlog traces from both ends into this directory.
 	qlog: Option<&'a std::path::Path>,
 }
@@ -35,7 +35,7 @@ struct ConnectTest<'a> {
 /// Dials `localhost`, so the client sends an SNI. Use [`no_sni_test`] to cover
 /// the SNI-less path.
 #[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
-async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
+async fn backend_test(scheme: &str, backend: moq_tokio::QuicBackend) {
 	connect_test(ConnectTest {
 		scheme,
 		bind: "[::]:0",
@@ -53,9 +53,9 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 ///
 /// Raw QUIC (`moqt`/`moql`) has no request URI, so the whole request target has to
 /// ride the SETUP; WebTransport carries it in the CONNECT URL instead. Either way the
-/// server reports the same route and query through [`moq_native::Request`].
+/// server reports the same route and query through [`moq_tokio::Request`].
 #[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
-async fn path_test(scheme: &str, backend: moq_native::QuicBackend) {
+async fn path_test(scheme: &str, backend: moq_tokio::QuicBackend) {
 	connect_test(ConnectTest {
 		scheme,
 		bind: "[::]:0",
@@ -74,7 +74,7 @@ async fn path_test(scheme: &str, backend: moq_native::QuicBackend) {
 /// the accept path with an empty server name, which must still establish rather
 /// than reject. Binds the loopback IP directly to avoid dual-stack flakiness.
 #[cfg(any(feature = "quinn", feature = "noq"))]
-async fn no_sni_test(scheme: &str, backend: moq_native::QuicBackend) {
+async fn no_sni_test(scheme: &str, backend: moq_tokio::QuicBackend) {
 	connect_test(ConnectTest {
 		scheme,
 		bind: "127.0.0.1:0",
@@ -112,15 +112,15 @@ async fn connect_test(config: ConnectTest<'_>) {
 
 	let mut group = track.append_group().expect("failed to append group");
 	group
-		.write_frame(moq_native::moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
 		.expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
-	let mut server_config = moq_native::listen::Config::default();
+	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some(bind.to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.backend = Some(backend.clone());
-	let mut quic = moq_native::quic::Config::default();
+	let mut quic = moq_tokio::quic::Config::default();
 	quic.qlog = qlog.map(Into::into);
 
 	let server = server_config.init(quic.clone()).expect("failed to init server");
@@ -131,10 +131,10 @@ async fn connect_test(config: ConnectTest<'_>) {
 	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume().announced();
 
-	let mut client_config = moq_native::connect::Config::default();
+	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	client_config.backend = Some(backend);
-	let mut quic = moq_native::quic::Config::default();
+	let mut quic = moq_tokio::quic::Config::default();
 	quic.qlog = qlog.map(Into::into);
 	// Bind the client to the same address family as the server so an IPv4 dial
 	// doesn't try to egress from an IPv6 socket (and vice versa).
@@ -151,7 +151,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 		// The client wired only a subscriber, so its advertised role reaches the server
 		// over every transport, now that the SETUP is read before the caller authorizes
 		// rather than deferred to `ok()`.
-		assert_eq!(request.role(), Some(moq_native::moq_net::Role::Subscriber));
+		assert_eq!(request.role(), Some(moq_tokio::moq_net::Role::Subscriber));
 		if let Some(expect_path) = expect_path {
 			assert_eq!(request.path(), expect_path);
 		}
@@ -171,7 +171,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let moq_native::moq_net::announce::Update { path, broadcast: bc } =
+	let moq_tokio::moq_net::announce::Update { path, broadcast: bc } =
 		tokio::time::timeout(TIMEOUT, announcements.next())
 			.await
 			.expect("announce timed out")
@@ -276,19 +276,19 @@ struct MtlsPaths {
 /// Connect with a client certificate signed by a CA the server trusts, and
 /// assert the server observes the validated peer certificate via mTLS.
 #[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
-async fn mtls_test(scheme: &str, backend: moq_native::QuicBackend, reject: bool) {
+async fn mtls_test(scheme: &str, backend: moq_tokio::QuicBackend, reject: bool) {
 	let (_dir, paths) = generate_mtls_certs();
 
 	let pub_origin = Origin::random().produce();
 
-	let mut server_config = moq_native::listen::Config::default();
+	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("127.0.0.1:0".to_string());
 	server_config.tls.cert = vec![paths.server_cert.clone()];
 	server_config.tls.key = vec![paths.server_key.clone()];
 	server_config.tls.root = vec![paths.ca.clone()];
 	server_config.backend = Some(backend.clone());
 	// One shared tuning, handed to both roles the way a binary would.
-	let mut quic = moq_native::quic::Config::default();
+	let mut quic = moq_tokio::quic::Config::default();
 	quic.gso = Some(false);
 	quic.keep_alive = Some(Duration::from_secs(1));
 
@@ -296,7 +296,7 @@ async fn mtls_test(scheme: &str, backend: moq_native::QuicBackend, reject: bool)
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
-	let mut client_config = moq_native::connect::Config::default();
+	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.root = vec![paths.ca.clone()];
 	client_config.tls.system_roots = Some(false);
 	client_config.tls.cert = Some(paths.client_cert.clone());
@@ -356,21 +356,21 @@ async fn mtls_test(scheme: &str, backend: moq_native::QuicBackend, reject: bool)
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn quinn_raw_quic() {
-	backend_test("moqt", moq_native::QuicBackend::Quinn).await;
+	backend_test("moqt", moq_tokio::QuicBackend::Quinn).await;
 }
 
 #[cfg(feature = "quinn")]
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn quinn_raw_quic_no_sni() {
-	no_sni_test("moqt", moq_native::QuicBackend::Quinn).await;
+	no_sni_test("moqt", moq_tokio::QuicBackend::Quinn).await;
 }
 
 #[cfg(feature = "quinn")]
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn quinn_raw_quic_path() {
-	path_test("moqt", moq_native::QuicBackend::Quinn).await;
+	path_test("moqt", moq_tokio::QuicBackend::Quinn).await;
 }
 
 /// `moql://` derives its SETUP path exactly like `moqt://`; only the scheme differs.
@@ -378,28 +378,28 @@ async fn quinn_raw_quic_path() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn quinn_raw_quic_moql_path() {
-	path_test("moql", moq_native::QuicBackend::Quinn).await;
+	path_test("moql", moq_tokio::QuicBackend::Quinn).await;
 }
 
 #[cfg(feature = "quinn")]
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn quinn_webtransport_path() {
-	path_test("https", moq_native::QuicBackend::Quinn).await;
+	path_test("https", moq_tokio::QuicBackend::Quinn).await;
 }
 
 #[cfg(feature = "quinn")]
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn quinn_mtls() {
-	mtls_test("https", moq_native::QuicBackend::Quinn, false).await;
+	mtls_test("https", moq_tokio::QuicBackend::Quinn, false).await;
 }
 
 #[cfg(feature = "quinn")]
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn quinn_webtransport() {
-	backend_test("https", moq_native::QuicBackend::Quinn).await;
+	backend_test("https", moq_tokio::QuicBackend::Quinn).await;
 }
 
 // ── Quiche backend ──────────────────────────────────────────────────
@@ -408,14 +408,14 @@ async fn quinn_webtransport() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn quiche_raw_quic() {
-	backend_test("moqt", moq_native::QuicBackend::Quiche).await;
+	backend_test("moqt", moq_tokio::QuicBackend::Quiche).await;
 }
 
 #[cfg(feature = "quiche")]
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn quiche_raw_quic_path() {
-	path_test("moqt", moq_native::QuicBackend::Quiche).await;
+	path_test("moqt", moq_tokio::QuicBackend::Quiche).await;
 }
 
 #[cfg(feature = "quiche")]
@@ -429,7 +429,7 @@ async fn quiche_dual_stack_ipv4() {
 		authority: "127.0.0.1",
 		path: "",
 		expect_path: None,
-		backend: moq_native::QuicBackend::Quiche,
+		backend: moq_tokio::QuicBackend::Quiche,
 		qlog: None,
 	})
 	.await;
@@ -440,7 +440,7 @@ async fn quiche_dual_stack_ipv4() {
 #[tokio::test]
 async fn quiche_mtls() {
 	// Avoid waiting on the separately tracked quiche WebTransport teardown bug.
-	mtls_test("https", moq_native::QuicBackend::Quiche, true).await;
+	mtls_test("https", moq_tokio::QuicBackend::Quiche, true).await;
 }
 
 #[cfg(feature = "quiche")]
@@ -454,7 +454,7 @@ async fn quiche_mtls() {
             stream) and the quinn backend both work. Re-enable once the quiche backend handles the \
             early stream drop."]
 async fn quiche_webtransport() {
-	backend_test("https", moq_native::QuicBackend::Quiche).await;
+	backend_test("https", moq_tokio::QuicBackend::Quiche).await;
 }
 
 // ── Iroh backend ────────────────────────────────────────────────────
@@ -463,7 +463,7 @@ async fn quiche_webtransport() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn iroh_connect() {
-	use moq_native::iroh::EndpointConfig;
+	use moq_tokio::iroh::EndpointConfig;
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
@@ -474,7 +474,7 @@ async fn iroh_connect() {
 
 	let mut group = track.append_group().expect("failed to append group");
 	group
-		.write_frame(moq_native::moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"hello".as_ref())
 		.expect("failed to write frame");
 	group.finish().expect("failed to finish group");
 
@@ -482,7 +482,7 @@ async fn iroh_connect() {
 	let mut server_iroh_config = EndpointConfig::default();
 	server_iroh_config.enabled = Some(true);
 	let server_endpoint = server_iroh_config
-		.bind(&moq_native::quic::Config::default())
+		.bind(&moq_tokio::quic::Config::default())
 		.await
 		.expect("failed to bind server iroh endpoint")
 		.expect("server iroh endpoint not enabled");
@@ -494,7 +494,7 @@ async fn iroh_connect() {
 	let server_endpoint_id = server_endpoint.id();
 
 	// Server still needs a QUIC bind for init, but we'll connect via iroh
-	let mut server_config = moq_native::listen::Config::default();
+	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 
@@ -512,12 +512,12 @@ async fn iroh_connect() {
 	let mut client_iroh_config = EndpointConfig::default();
 	client_iroh_config.enabled = Some(true);
 	let client_endpoint = client_iroh_config
-		.bind(&moq_native::quic::Config::default())
+		.bind(&moq_tokio::quic::Config::default())
 		.await
 		.expect("failed to bind client iroh endpoint")
 		.expect("client iroh endpoint not enabled");
 
-	let mut client_config = moq_native::connect::Config::default();
+	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 
 	let client = client_config
@@ -534,10 +534,10 @@ async fn iroh_connect() {
 		// The client wired only a subscriber, so its advertised role reaches the server
 		// over every transport, now that the SETUP is read before the caller authorizes
 		// rather than deferred to `ok()`.
-		assert_eq!(request.role(), Some(moq_native::moq_net::Role::Subscriber));
+		assert_eq!(request.role(), Some(moq_tokio::moq_net::Role::Subscriber));
 		// iroh offers the moq ALPNs ahead of H3, so this lands on raw QUIC: no request
 		// URL, leaving the SETUP as the only place for the request target.
-		assert_eq!(request.transport(), moq_native::Transport::Iroh);
+		assert_eq!(request.transport(), moq_tokio::Transport::Iroh);
 		assert_eq!(request.url(), None);
 		assert_eq!(request.path(), "/room");
 		assert_eq!(request.query(), Some("jwt=abc"));
@@ -556,7 +556,7 @@ async fn iroh_connect() {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let moq_native::moq_net::announce::Update { path, broadcast: bc } =
+	let moq_tokio::moq_net::announce::Update { path, broadcast: bc } =
 		tokio::time::timeout(TIMEOUT, announcements.next())
 			.await
 			.expect("announce timed out")
@@ -599,35 +599,35 @@ async fn iroh_connect() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn noq_raw_quic() {
-	backend_test("moqt", moq_native::QuicBackend::Noq).await;
+	backend_test("moqt", moq_tokio::QuicBackend::Noq).await;
 }
 
 #[cfg(feature = "noq")]
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn noq_raw_quic_no_sni() {
-	no_sni_test("moqt", moq_native::QuicBackend::Noq).await;
+	no_sni_test("moqt", moq_tokio::QuicBackend::Noq).await;
 }
 
 #[cfg(feature = "noq")]
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn noq_raw_quic_path() {
-	path_test("moqt", moq_native::QuicBackend::Noq).await;
+	path_test("moqt", moq_tokio::QuicBackend::Noq).await;
 }
 
 #[cfg(feature = "noq")]
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn noq_webtransport() {
-	backend_test("https", moq_native::QuicBackend::Noq).await;
+	backend_test("https", moq_tokio::QuicBackend::Noq).await;
 }
 
 #[cfg(feature = "noq")]
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn noq_mtls() {
-	mtls_test("https", moq_native::QuicBackend::Noq, false).await;
+	mtls_test("https", moq_tokio::QuicBackend::Noq, false).await;
 }
 
 // ── qlog ────────────────────────────────────────────────────────────
@@ -639,7 +639,7 @@ async fn noq_mtls() {
 /// at once. The layout differs per backend (one file per endpoint for quinn, one per
 /// connection for noq and quiche), so callers only assert on the count they expect.
 #[cfg(all(feature = "qlog", any(feature = "quinn", feature = "quiche", feature = "noq")))]
-async fn qlog_test(scheme: &str, backend: moq_native::QuicBackend) -> Vec<std::path::PathBuf> {
+async fn qlog_test(scheme: &str, backend: moq_tokio::QuicBackend) -> Vec<std::path::PathBuf> {
 	let dir = tempfile::tempdir().expect("failed to create tempdir");
 
 	connect_test(ConnectTest {
@@ -692,7 +692,7 @@ async fn qlog_test(scheme: &str, backend: moq_native::QuicBackend) -> Vec<std::p
 #[cfg(all(feature = "qlog", feature = "quinn"))]
 #[tokio::test]
 async fn quinn_qlog() {
-	let traces = qlog_test("moqt", moq_native::QuicBackend::Quinn).await;
+	let traces = qlog_test("moqt", moq_tokio::QuicBackend::Quinn).await;
 	assert_eq!(traces.len(), 2, "expected one trace per endpoint, got {traces:?}");
 }
 
@@ -701,7 +701,7 @@ async fn quinn_qlog() {
 #[cfg(all(feature = "qlog", feature = "noq"))]
 #[tokio::test]
 async fn noq_qlog() {
-	let traces = qlog_test("moqt", moq_native::QuicBackend::Noq).await;
+	let traces = qlog_test("moqt", moq_tokio::QuicBackend::Noq).await;
 	assert!(!traces.is_empty(), "expected at least one trace");
 }
 
@@ -710,7 +710,7 @@ async fn noq_qlog() {
 #[tokio::test]
 #[ignore = "shares the connect path that quiche_webtransport is ignored for; the qlog plumbing itself is verified by running this locally"]
 async fn quiche_qlog() {
-	let traces = qlog_test("https", moq_native::QuicBackend::Quiche).await;
+	let traces = qlog_test("https", moq_tokio::QuicBackend::Quiche).await;
 	assert!(!traces.is_empty(), "expected at least one trace");
 }
 
@@ -723,9 +723,9 @@ async fn quiche_qlog() {
 /// The client comes back because it owns the transport endpoint (iroh's dies with
 /// it), and the caller has to outlive the connection it just got.
 async fn connect_once(
-	client: moq_native::Client,
+	client: moq_tokio::Client,
 	url: url::Url,
-) -> moq_native::Result<(moq_native::Client, moq_native::Connection)> {
+) -> moq_tokio::Result<(moq_tokio::Client, moq_tokio::Connection)> {
 	let connection = client.clone().with_reconnect(false).connect(url).established().await?;
 	Ok((client, connection))
 }

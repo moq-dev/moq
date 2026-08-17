@@ -32,20 +32,20 @@ use tokio::task::JoinSet;
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
-static ALLOC: moq_native::jemalloc::tikv_jemallocator::Jemalloc = moq_native::jemalloc::tikv_jemallocator::Jemalloc;
+static ALLOC: moq_tokio::jemalloc::tikv_jemallocator::Jemalloc = moq_tokio::jemalloc::tikv_jemallocator::Jemalloc;
 
 /// Everything needed to build MoQ clients/servers, encapsulating the optional
 /// iroh endpoint so the rest of the code is feature-agnostic.
 #[derive(Clone)]
 struct Net {
 	/// The shared QUIC tuning, handed to whichever roles this process builds.
-	quic: moq_native::quic::Config,
+	quic: moq_tokio::quic::Config,
 	#[cfg(feature = "iroh")]
-	iroh: Option<moq_native::iroh::Endpoint>,
+	iroh: Option<moq_tokio::iroh::Endpoint>,
 }
 
 impl Net {
-	fn client(&self, config: moq_native::connect::Config) -> anyhow::Result<moq_native::Client> {
+	fn client(&self, config: moq_tokio::connect::Config) -> anyhow::Result<moq_tokio::Client> {
 		let client = config.init(self.quic.clone())?;
 		#[cfg(feature = "iroh")]
 		let client = match self.iroh.clone() {
@@ -55,7 +55,7 @@ impl Net {
 		Ok(client)
 	}
 
-	fn server(&self, config: moq_native::listen::Config) -> anyhow::Result<moq_native::Server> {
+	fn server(&self, config: moq_tokio::listen::Config) -> anyhow::Result<moq_tokio::Server> {
 		let server = config.init(self.quic.clone())?;
 		#[cfg(feature = "iroh")]
 		let server = match self.iroh.clone() {
@@ -129,10 +129,10 @@ async fn spawn_server(
 
 /// Attach the requested directions before stream accept loops capture the server.
 fn route_server(
-	server: moq_native::Server,
+	server: moq_tokio::Server,
 	origin: &moq_net::origin::Producer,
 	directions: Directions,
-) -> moq_native::Server {
+) -> moq_tokio::Server {
 	match directions {
 		Directions {
 			publish: true,
@@ -154,7 +154,7 @@ fn route_server(
 }
 
 /// Serve ordinary clients from an already-bound listener.
-fn spawn_serve(tasks: &mut JoinSet<anyhow::Result<()>>, mut listener: moq_native::Listener) {
+fn spawn_serve(tasks: &mut JoinSet<anyhow::Result<()>>, mut listener: moq_tokio::Listener) {
 	if let Ok(addr) = listener.local_addr() {
 		tracing::info!(%addr, "listening");
 	}
@@ -213,7 +213,7 @@ async fn main() -> anyhow::Result<()> {
 	};
 
 	#[cfg(feature = "jemalloc")]
-	let jemalloc = moq_native::jemalloc::run();
+	let jemalloc = moq_tokio::jemalloc::run();
 	#[cfg(not(feature = "jemalloc"))]
 	let jemalloc = std::future::pending::<anyhow::Result<()>>();
 

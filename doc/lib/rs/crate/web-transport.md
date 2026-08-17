@@ -50,7 +50,7 @@ web-transport-quinn = "0.1"
 
 See the [web-transport repository](https://github.com/moq-dev/web-transport) for client and server examples.
 
-For a real-world example of using `web-transport` with MoQ, see the [`rs/moq-native/examples/chat.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-native/examples/chat.rs) example which demonstrates connection setup, publishing, and session management.
+For a real-world example of using `web-transport` with MoQ, see the [`rs/moq-tokio/examples/chat.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-tokio/examples/chat.rs) example which demonstrates connection setup, publishing, and session management.
 
 ## Features
 
@@ -62,7 +62,7 @@ For a real-world example of using `web-transport` with MoQ, see the [`rs/moq-nat
 
 ## Integration with MoQ
 
-The `moq-net` crate uses `web-transport` internally. See the [moq-native examples](https://github.com/moq-dev/moq/tree/main/rs/moq-native/examples) for how connections are established.
+The `moq-net` crate uses `web-transport` internally. See the [moq-tokio examples](https://github.com/moq-dev/moq/tree/main/rs/moq-tokio/examples) for how connections are established.
 
 ## Next Steps
 

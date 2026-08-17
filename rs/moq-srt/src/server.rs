@@ -14,7 +14,7 @@
 //!   [`Subscribe::reject`]. This is the egress path: a player (VLC, ffmpeg) pulls
 //!   `srt://host:port?streamid=#!::r=<broadcast>,m=request`.
 //!
-//! This mirrors `moq-native`'s `Server` / `Request`, so the gateway stays
+//! This mirrors `moq-tokio`'s `Server` / `Request`, so the gateway stays
 //! unopinionated about auth: the embedder (e.g. a relay verifying the stream id
 //! as a JWT) owns that policy. For the unauthenticated convenience that accepts
 //! everything and routes by prefix, use [`crate::run`].

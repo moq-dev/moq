@@ -126,7 +126,7 @@ pub(crate) struct WebState {
 	/// The cluster state for resolving origins.
 	pub(crate) cluster: Cluster,
 	/// TLS certificate information served at `/certificate.sha256`.
-	pub(crate) certificates: moq_native::tls::Certificates,
+	pub(crate) certificates: moq_tokio::tls::Certificates,
 	/// Monotonically increasing connection counter for WebSocket sessions.
 	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
 	pub(crate) conn_id: AtomicU64,
@@ -141,14 +141,14 @@ pub struct Web {
 	state: Arc<WebState>,
 	config: WebConfig,
 	versions: moq_net::Versions,
-	health: moq_native::accept::Health,
+	health: moq_tokio::accept::Health,
 }
 
 impl Web {
 	/// Build a web server from its parts. `certificates` is the relay's TLS
 	/// certificate handle (e.g. `server.certificates()`), whose fingerprints are
 	/// served at `/certificate.sha256`.
-	pub fn new(auth: Auth, cluster: Cluster, certificates: moq_native::tls::Certificates, config: WebConfig) -> Self {
+	pub fn new(auth: Auth, cluster: Cluster, certificates: moq_tokio::tls::Certificates, config: WebConfig) -> Self {
 		let state = Arc::new(WebState {
 			auth,
 			cluster,
@@ -160,7 +160,7 @@ impl Web {
 			state,
 			config,
 			versions: moq_net::Versions::all(),
-			health: moq_native::accept::Health::new("web"),
+			health: moq_tokio::accept::Health::new("web"),
 		}
 	}
 
@@ -171,7 +171,7 @@ impl Web {
 	}
 
 	/// A live handle to the accept-loop health of the HTTP/HTTPS listeners, for an
-	/// embedder that publishes it (see [`moq_native::accept`]).
+	/// embedder that publishes it (see [`moq_tokio::accept`]).
 	///
 	/// This is the one signal that leaves the process when the public listener goes
 	/// dark: [`serve`](Self::serve) never gives up, so a node can be unable to accept
@@ -186,7 +186,7 @@ impl Web {
 	/// on are process- or host-wide (out of descriptors, out of kernel memory), so an
 	/// HTTP accept that succeeds is real evidence that the HTTPS one is not stalled
 	/// either.
-	pub fn accept_health(&self) -> Option<moq_native::accept::Health> {
+	pub fn accept_health(&self) -> Option<moq_tokio::accept::Health> {
 		let configured = self.config.http.listen.is_some() || self.config.https.listen.is_some();
 		configured.then(|| self.health.clone())
 	}
@@ -255,7 +255,7 @@ impl Web {
 		let http = if let Some(listen) = config.http.listen {
 			// Dual-stack so the cert endpoint + WebSocket fallback answer over IPv4
 			// too, even on Windows where `[::]` is IPv6-only by default.
-			let listener = moq_native::bind::tcp(listen).context("failed to bind HTTP listener")?;
+			let listener = moq_tokio::bind::tcp(listen).context("failed to bind HTTP listener")?;
 			let server = crate::listener::server(listener, self.health.clone())?;
 			Some(server.serve(app.clone()))
 		} else {
@@ -279,7 +279,7 @@ impl Web {
 			let acceptor = MtlsAcceptor {
 				inner: RustlsAcceptor::new(rustls_config),
 			};
-			let listener = moq_native::bind::tcp(listen).context("failed to bind HTTPS listener")?;
+			let listener = moq_tokio::bind::tcp(listen).context("failed to bind HTTPS listener")?;
 			let server = crate::listener::server(listener, self.health.clone())?.acceptor(acceptor);
 			Some(server.serve(app))
 		} else {
@@ -322,7 +322,7 @@ fn build_https_config(
 		"web.https.cert and web.https.key must have the same number of entries"
 	);
 
-	let mut tls = moq_native::tls::Listen::default();
+	let mut tls = moq_tokio::tls::Listen::default();
 	tls.cert = cert.to_vec();
 	tls.key = key.to_vec();
 	tls.root = root.to_vec();
@@ -348,7 +348,7 @@ fn https_watch_paths(cert: &[PathBuf], key: &[PathBuf], root: &[PathBuf]) -> Vec
 async fn reload_https_config(config: RustlsConfig, cert: Vec<PathBuf>, key: Vec<PathBuf>, root: Vec<PathBuf>) {
 	let paths = https_watch_paths(&cert, &key, &root);
 
-	let mut watcher = match moq_native::watch::FileWatcher::new(&paths) {
+	let mut watcher = match moq_tokio::watch::FileWatcher::new(&paths) {
 		Ok(watcher) => watcher,
 		Err(err) => {
 			tracing::error!(%err, "failed to watch web certificate files; hot reload disabled");

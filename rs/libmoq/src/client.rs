@@ -4,13 +4,13 @@ use crate::{Error, ffi, moq_client_config};
 
 /// One client configuration: the dial config plus the QUIC tuning it dials with.
 ///
-/// They are separate types in `moq-native` (the tuning is shared by the dial and
+/// They are separate types in `moq-tokio` (the tuning is shared by the dial and
 /// accept sides of an endpoint), but a C caller configures one client, so this
 /// carries both and [`parse_client`] fills whichever owns each knob.
 #[derive(Clone, Default)]
 pub struct Config {
-	pub connect: moq_native::connect::Config,
-	pub quic: moq_native::quic::Config,
+	pub connect: moq_tokio::connect::Config,
+	pub quic: moq_tokio::quic::Config,
 }
 
 /// Build a client configuration from what C handed us.
@@ -44,7 +44,7 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 
 	// Transport
 	if let Some(backend) = unsafe { ffi::parse_str_optional(config.backend, config.backend_len)? } {
-		out.connect.backend = Some(moq_native::QuicBackend::from_str(backend).map_err(Error::InvalidConfig)?);
+		out.connect.backend = Some(moq_tokio::QuicBackend::from_str(backend).map_err(Error::InvalidConfig)?);
 	}
 	if let Some(bind) = unsafe { ffi::parse_str_optional(config.bind, config.bind_len)? } {
 		let addr: std::net::SocketAddr = bind
@@ -122,7 +122,7 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 		unsafe { ffi::parse_str_optional(config.quic_congestion_control, config.quic_congestion_control_len)? }
 	{
 		out.quic.congestion_control =
-			Some(moq_native::quic::CongestionControl::from_str(family).map_err(Error::InvalidConfig)?);
+			Some(moq_tokio::quic::CongestionControl::from_str(family).map_err(Error::InvalidConfig)?);
 	}
 	out.quic.qlog = unsafe { ffi::parse_str_optional(config.quic_qlog, config.quic_qlog_len)? }.map(Into::into);
 

@@ -4,8 +4,8 @@ use anyhow::Context;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-	// Optional: Use moq_native to configure a logger.
-	moq_native::Log::new(tracing::Level::DEBUG).init()?;
+	// Optional: Use moq_tokio to configure a logger.
+	moq_tokio::Log::new(tracing::Level::DEBUG).init()?;
 
 	// Create an origin that we can publish to and the session can consume from.
 	let origin = moq_net::Origin::random().produce();
@@ -21,8 +21,8 @@ async fn main() -> anyhow::Result<()> {
 
 // Connect to the server and publish our origin of broadcasts.
 async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
-	// Optional: Use moq_native to make a QUIC client.
-	let client = moq_native::connect::Config::default().init(Default::default())?;
+	// Optional: Use moq_tokio to make a QUIC client.
+	let client = moq_tokio::connect::Config::default().init(Default::default())?;
 
 	// For local development, use: http://localhost:4443
 	// The "anon" path is usually configured to bypass authentication; be careful!
@@ -58,11 +58,11 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	// Write frames to the group.
 	// Each frame is dependent on the previous frame, so older frames are prioritized.
 	group.write_frame(
-		moq_native::moq_net::Timestamp::now(),
+		moq_tokio::moq_net::Timestamp::now(),
 		bytes::Bytes::from_static(b"Hello"),
 	)?;
 	group.write_frame(
-		moq_native::moq_net::Timestamp::now(),
+		moq_tokio::moq_net::Timestamp::now(),
 		bytes::Bytes::from_static(b"World"),
 	)?;
 	group.finish()?;
@@ -74,7 +74,7 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 
 	// There's also a helper method to create a group with a single frame.
 	track.write_frame(
-		moq_native::moq_net::Timestamp::now(),
+		moq_tokio::moq_net::Timestamp::now(),
 		bytes::Bytes::from_static(b"foobarbaz"),
 	)?;
 	tracing::info!("wrote foobarbaz");

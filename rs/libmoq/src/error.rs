@@ -19,9 +19,9 @@ pub enum Error {
 	#[error("moq error: {0}")]
 	Moq(#[from] moq_net::Error),
 
-	/// Error from the native helper layer (moq-native).
+	/// Error from the native helper layer (moq-tokio).
 	#[error("native error: {0}")]
-	Native(#[from] moq_native::Error),
+	Native(#[from] moq_tokio::Error),
 
 	/// URL parsing error.
 	#[error("url error: {0}")]

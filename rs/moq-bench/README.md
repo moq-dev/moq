@@ -75,7 +75,7 @@ table (`fps = { min = 24, max = 60 }`).
 | `--report` | | How often to log throughput stats |
 
 Client TLS/QUIC flags (`--connect-tls-insecure`, `--connect-bind`, ...) come from
-`moq-native` and behave the same as in `moq-cli` and `moq-relay`.
+`moq-tokio` and behave the same as in `moq-cli` and `moq-relay`.
 
 ## Presets
 

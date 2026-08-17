@@ -27,7 +27,7 @@ Both elements support the following properties:
 | `tls-disable-verify` | bool   | Disable TLS certificate validation (rarely needed, default false) |
 
 ::: info
-For `http://` URLs, `moq-native` automatically fetches the server's certificate fingerprint from `/certificate.sha256` and verifies TLS against it. You don't need `tls-disable-verify` for local development.
+For `http://` URLs, `moq-tokio` automatically fetches the server's certificate fingerprint from `/certificate.sha256` and verifies TLS against it. You don't need `tls-disable-verify` for local development.
 :::
 
 `moqsink` additionally exposes these read-only properties for monitoring. Each emits a `notify`

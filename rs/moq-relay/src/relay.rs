@@ -40,11 +40,11 @@ use crate::{Auth, Cluster, Config, Connection, DEFAULT_DRAIN_TIMEOUT, Internal, 
 #[non_exhaustive]
 pub struct Relay {
 	/// The QUIC/WebTransport server, already bound. Feed it to [`serve`].
-	pub server: moq_native::Server,
+	pub server: moq_tokio::Server,
 
 	/// The client used to dial cluster peers. Already handed to [`Self::cluster`];
 	/// clone it for your own outbound dials so they share the connection config.
-	pub client: moq_native::Client,
+	pub client: moq_tokio::Client,
 
 	/// The resolved auth policy (JWT/public sources, or mTLS-only).
 	pub auth: Auth,
@@ -96,7 +96,7 @@ impl Relay {
 		// `None` for a stream-only server (no QUIC); any other error is real.
 		let addr = match server.local_addr() {
 			Ok(addr) => Some(addr),
-			Err(moq_native::Error::NoBackend(_)) => None,
+			Err(moq_tokio::Error::NoBackend(_)) => None,
 			Err(err) => return Err(err).context("failed to resolve the QUIC bind address"),
 		};
 
@@ -201,7 +201,7 @@ impl Relay {
 		let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
 		#[cfg(feature = "jemalloc")]
-		let jemalloc = moq_native::jemalloc::run();
+		let jemalloc = moq_tokio::jemalloc::run();
 		#[cfg(not(feature = "jemalloc"))]
 		let jemalloc = std::future::pending::<anyhow::Result<()>>();
 
@@ -266,7 +266,7 @@ async fn shutdown_signal() -> anyhow::Result<()> {
 /// Public because an embedder running its own `select!` still needs the accept
 /// loop, and reimplementing it means re-deriving details like where a `conn` id
 /// comes from.
-pub async fn serve(server: moq_native::Server, cluster: Cluster, auth: Auth, shutdown: Shutdown) -> anyhow::Result<()> {
+pub async fn serve(server: moq_tokio::Server, cluster: Cluster, auth: Auth, shutdown: Shutdown) -> anyhow::Result<()> {
 	// Binds whatever is still unbound (the `tcp`/`unix` listeners), so a bind
 	// failure is reported here rather than as an immediate stop.
 	let mut server = server.listen().await.context("failed to bind listeners")?;

@@ -30,7 +30,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-	moq_native::Log::new(tracing::Level::INFO).init()?;
+	moq_tokio::Log::new(tracing::Level::INFO).init()?;
 	let args = Args::parse();
 	let source_path = moq_net::PathOwned::from(args.source);
 	let output_path = moq_net::PathOwned::from(
@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
 	let publish = moq_net::Origin::random().produce();
 	let remote = moq_net::Origin::random().produce();
 
-	let client = moq_native::connect::Config::default().init(Default::default())?;
+	let client = moq_tokio::connect::Config::default().init(Default::default())?;
 	let session = client
 		.with_publisher(&publish)
 		.with_subscriber(remote.clone())

@@ -3,9 +3,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use moq_native::Status;
-use moq_native::moq_net::{self, Origin, bytes::Bytes};
-use moq_native::moq_net::{broadcast, track};
+use moq_tokio::Status;
+use moq_tokio::moq_net::{self, Origin, bytes::Bytes};
+use moq_tokio::moq_net::{broadcast, track};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
@@ -58,7 +58,7 @@ pub struct Connection {
 	pub run_id: u64,
 	pub rolled: Rolled,
 	pub config: Arc<crate::Config>,
-	pub client: moq_native::Client,
+	pub client: moq_tokio::Client,
 	pub stats: Arc<Stats>,
 }
 

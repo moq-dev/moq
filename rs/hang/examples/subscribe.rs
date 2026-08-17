@@ -6,8 +6,8 @@ use anyhow::Context;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-	// Optional: Use moq_native to configure a logger.
-	moq_native::Log::new(tracing::Level::DEBUG).init()?;
+	// Optional: Use moq_tokio to configure a logger.
+	moq_tokio::Log::new(tracing::Level::DEBUG).init()?;
 
 	// Create an origin that the session can publish incoming broadcasts to.
 	let origin = moq_net::Origin::random().produce();
@@ -23,8 +23,8 @@ async fn main() -> anyhow::Result<()> {
 // Connect to the server and subscribe to broadcasts.
 // Automatically reconnects if the connection drops.
 async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
-	// Optional: Use moq_native to make a QUIC client.
-	let client = moq_native::connect::Config::default().init(Default::default())?;
+	// Optional: Use moq_tokio to make a QUIC client.
+	let client = moq_tokio::connect::Config::default().init(Default::default())?;
 
 	// For local development, use: http://localhost:4443/video-example
 	// The "anon" path is usually configured to bypass authentication; be careful!

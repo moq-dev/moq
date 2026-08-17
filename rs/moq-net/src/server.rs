@@ -275,7 +275,7 @@ impl Server {
 /// [`path`](Self::path) is known but before the session is granted anything. Set
 /// the origins to serve, then call [`ok`](Self::ok) to complete the handshake, or
 /// [`close`](Self::close) to reject it. Modeled on the WebTransport `Request` in
-/// moq-native.
+/// moq-tokio.
 pub struct Request<S: crate::transport::poll::Session> {
 	path: Option<String>,
 	role: Option<Role>,

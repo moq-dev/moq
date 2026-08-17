@@ -7,7 +7,7 @@ use crate::ffi::Task;
 use crate::origin::{MoqOriginConsumer, MoqOriginProducer};
 
 struct Client {
-	config: moq_native::connect::Config,
+	config: moq_tokio::connect::Config,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 }
@@ -38,10 +38,10 @@ impl Client {
 	}
 }
 
-fn map_connect_error(err: moq_native::Error) -> MoqError {
+fn map_connect_error(err: moq_tokio::Error) -> MoqError {
 	match err.connect_error() {
-		Some(moq_native::ConnectError::Unauthorized) => MoqError::Unauthorized,
-		Some(moq_native::ConnectError::Forbidden) => MoqError::Forbidden,
+		Some(moq_tokio::ConnectError::Unauthorized) => MoqError::Unauthorized,
+		Some(moq_tokio::ConnectError::Forbidden) => MoqError::Forbidden,
 		_ => MoqError::Connect(format!("{err}")),
 	}
 }
@@ -58,13 +58,13 @@ fn map_connect_error(err: moq_native::Error) -> MoqError {
 /// another handle shuts the connection down underneath it, and reporting that as a
 /// connect error would make every status watcher treat an expected teardown as a
 /// broken connection.
-fn map_closed_error(err: moq_native::Error) -> MoqError {
+fn map_closed_error(err: moq_tokio::Error) -> MoqError {
 	match err.connect_error() {
-		Some(moq_native::ConnectError::Unauthorized) => MoqError::Unauthorized,
-		Some(moq_native::ConnectError::Forbidden) => MoqError::Forbidden,
+		Some(moq_tokio::ConnectError::Unauthorized) => MoqError::Unauthorized,
+		Some(moq_tokio::ConnectError::Forbidden) => MoqError::Forbidden,
 		_ => match err {
-			moq_native::Error::Stopped => MoqError::Closed,
-			moq_native::Error::MoqNet(err) => err.into(),
+			moq_tokio::Error::Stopped => MoqError::Closed,
+			moq_tokio::Error::MoqNet(err) => err.into(),
 			err => MoqError::Connect(format!("{err}")),
 		},
 	}
@@ -77,11 +77,11 @@ mod tests {
 	#[test]
 	fn maps_native_auth_connect_errors() {
 		assert!(matches!(
-			map_connect_error(moq_native::ConnectError::Unauthorized.into()),
+			map_connect_error(moq_tokio::ConnectError::Unauthorized.into()),
 			MoqError::Unauthorized
 		));
 		assert!(matches!(
-			map_connect_error(moq_native::ConnectError::Forbidden.into()),
+			map_connect_error(moq_tokio::ConnectError::Forbidden.into()),
 			MoqError::Forbidden
 		));
 	}
@@ -103,7 +103,7 @@ mod tests {
 
 		// A local stop is an expected teardown, not a failed connection: the bindings'
 		// `is_shutdown` reads `Closed`, and `Connect` would read as a broken dial.
-		assert!(matches!(map_closed_error(moq_native::Error::Stopped), MoqError::Closed));
+		assert!(matches!(map_closed_error(moq_tokio::Error::Stopped), MoqError::Closed));
 
 		// Auth still wins, so `is_auth` keeps working on a rejection delivered as a close.
 		assert!(matches!(
@@ -111,7 +111,7 @@ mod tests {
 			MoqError::Unauthorized
 		));
 		assert!(matches!(
-			map_closed_error(moq_native::ConnectError::Forbidden.into()),
+			map_closed_error(moq_tokio::ConnectError::Forbidden.into()),
 			MoqError::Forbidden
 		));
 	}
@@ -186,7 +186,7 @@ impl MoqClient {
 		let _guard = crate::ffi::RUNTIME.enter();
 		Arc::new(Self {
 			task: Task::new(Client {
-				config: moq_native::connect::Config::default(),
+				config: moq_tokio::connect::Config::default(),
 				publish: None,
 				consume: None,
 			}),
@@ -283,7 +283,7 @@ impl MoqClient {
 	/// Configure retry pacing for the automatic reconnect (see [`MoqBackoff`]).
 	pub fn set_backoff(&self, backoff: MoqBackoff) {
 		if let Some(mut state) = self.task.lock() {
-			let mut out = moq_native::Backoff::default();
+			let mut out = moq_tokio::Backoff::default();
 			out.initial = Some(std::time::Duration::from_millis(backoff.initial_ms));
 			out.multiplier = Some(backoff.multiplier);
 			out.max = Some(std::time::Duration::from_millis(backoff.max_ms));
@@ -390,11 +390,11 @@ pub enum MoqConnectionStatus {
 	Migrating,
 }
 
-impl From<moq_native::Status> for MoqConnectionStatus {
-	fn from(status: moq_native::Status) -> Self {
+impl From<moq_tokio::Status> for MoqConnectionStatus {
+	fn from(status: moq_tokio::Status) -> Self {
 		match status {
-			moq_native::Status::Connected => Self::Connected,
-			moq_native::Status::Disconnected => Self::Disconnected,
+			moq_tokio::Status::Connected => Self::Connected,
+			moq_tokio::Status::Disconnected => Self::Disconnected,
 			// A future unknown status means the loop is between the known states;
 			// Migrating is the "still served, in flux" bucket.
 			_ => Self::Migrating,
@@ -407,7 +407,7 @@ impl From<moq_native::Status> for MoqConnectionStatus {
 /// `accept()`).
 #[derive(Clone)]
 enum Inner {
-	Connection(moq_native::Connection),
+	Connection(moq_tokio::Connection),
 	Session(moq_net::Session),
 }
 
@@ -426,7 +426,7 @@ pub struct MoqSession {
 impl MoqSession {
 	/// Wrap a client connection (see [`MoqClient::connect`]).
 	pub(crate) fn connected(
-		connection: moq_native::Connection,
+		connection: moq_tokio::Connection,
 		publish: moq_net::origin::Producer,
 		subscribe: moq_net::origin::Producer,
 	) -> Self {

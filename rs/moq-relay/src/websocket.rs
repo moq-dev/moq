@@ -39,7 +39,7 @@ pub(crate) async fn serve_ws(
 		.or_else(|| headers.get(HOST).and_then(|value| value.to_str().ok()))
 		.ok_or(StatusCode::BAD_REQUEST)?;
 	let mut params = request_auth_params(&state.auth, host, &uri)?;
-	params.transport = Some(moq_native::Transport::WebSocket);
+	params.transport = Some(moq_tokio::Transport::WebSocket);
 	let token = if mtls.is_some() {
 		// mTLS peers: the API returns the canonical root and the billing tier.
 		state.auth.verify_mtls(&params.path, params.transport).await?
@@ -141,7 +141,7 @@ where
 		server = server.with_subscriber(publish);
 	}
 	// Hold the session so it doesn't close early; the driver serves it in place.
-	let (session, mut driver) = server.accept(moq_native::transport::Async::new(ws)).await?;
+	let (session, mut driver) = server.accept(moq_tokio::transport::Async::new(ws)).await?;
 
 	tokio::select! {
 		res = &mut driver => res.map_err(Into::into),
@@ -214,7 +214,7 @@ fn subprotocols_acceptable<'a>(requested: impl IntoIterator<Item = &'a [u8]>, su
 const QMUX_VERSIONS: &[qmux::Version] = &[qmux::Version::QMux01, qmux::Version::QMux00];
 
 /// moq-transport-18 and -19 require qmux-01, so we never pair them with qmux-00.
-/// Mirrors `js/net`'s `connect.ts` and moq-native's `websocket_subprotocols`.
+/// Mirrors `js/net`'s `connect.ts` and moq-tokio's `websocket_subprotocols`.
 const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-19"];
 
 /// Subprotocols to advertise on the WebSocket upgrade.

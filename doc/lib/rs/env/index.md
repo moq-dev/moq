@@ -14,7 +14,7 @@ so the only thing that changes between environments is which transport you hand 
 ## [Native](/lib/rs/env/native) <Badge type="tip" text="server, desktop, mobile" />
 
 Servers, CLIs, desktop apps, and mobile (via the [FFI bindings](/lib/)). Uses
-[`moq-native`](/lib/rs/crate/moq-native) to stand up a QUIC endpoint with
+[`moq-tokio`](/lib/rs/crate/moq-tokio) to stand up a QUIC endpoint with
 [quinn](https://crates.io/crates/quinn) and [rustls](https://crates.io/crates/rustls),
 with automatic WebSocket fallback. This is the common case.
 

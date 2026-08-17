@@ -2718,7 +2718,7 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	let config = moq_client_defaults();
 
 	let expected = crate::client::Config::default();
-	let quic = moq_native::quic::Resolved::default();
+	let quic = moq_tokio::quic::Resolved::default();
 
 	assert!(config.has_connect_timeout);
 	assert_eq!(

@@ -6,15 +6,15 @@
 //! with no relay involved. Loop prevention comes from each broadcast's route,
 //! like a relay cluster.
 //!
-//! Discovery and the membership proofs live in [`moq_native::mdns`] and the
-//! dials are plain [`moq_native::Connection`] loops, so this module is only the
+//! Discovery and the membership proofs live in [`moq_tokio::mdns`] and the
+//! dials are plain [`moq_tokio::Connection`] loops, so this module is only the
 //! policy: who to dial, and who is allowed in.
 
 use std::collections::HashMap;
 
 use anyhow::Context;
 use hang::moq_net;
-use moq_native::mdns;
+use moq_tokio::mdns;
 use url::Url;
 
 /// The request path prefix a mesh dial presents, marking it as a peer rather
@@ -28,8 +28,8 @@ fn carries_request_path(version: &moq_net::Version) -> bool {
 
 /// Reject version restrictions that leave the mesh with no request path.
 pub(crate) fn validate_versions(
-	client: &moq_native::connect::Config,
-	server: &moq_native::listen::Config,
+	client: &moq_tokio::connect::Config,
+	server: &moq_tokio::listen::Config,
 ) -> anyhow::Result<()> {
 	let client = client.versions();
 	let server = server.versions();
@@ -56,7 +56,7 @@ pub struct Lan {
 	credential: String,
 
 	/// The dial template, per-peer fingerprint applied on top.
-	client: moq_native::connect::Config,
+	client: moq_tokio::connect::Config,
 }
 
 /// The discovered details needed to open one LAN dial.
@@ -88,8 +88,8 @@ impl Lan {
 	pub async fn start(
 		args: &Args,
 		origin: moq_net::origin::Producer,
-		server: &moq_native::Server,
-		mut client: moq_native::connect::Config,
+		server: &moq_tokio::Server,
+		mut client: moq_tokio::connect::Config,
 	) -> anyhow::Result<(Self, mdns::Discovery)> {
 		let port = server
 			.local_addr()
@@ -144,13 +144,13 @@ impl Lan {
 	}
 
 	/// Whether `request` is a mesh dial rather than an ordinary client.
-	pub fn is_peer(&self, request: &moq_native::Request) -> bool {
+	pub fn is_peer(&self, request: &moq_tokio::Request) -> bool {
 		self.authorized(request.path())
 	}
 
 	/// Authorize an inbound mesh dial and attach it to the origin in both
 	/// directions, returning once the session closes.
-	pub async fn accept(&self, request: moq_native::Request) -> anyhow::Result<()> {
+	pub async fn accept(&self, request: moq_tokio::Request) -> anyhow::Result<()> {
 		if !self.authorized(request.path()) {
 			request.close(403).await.ok();
 			anyhow::bail!("LAN peer did not present this listener's membership proof");
@@ -226,17 +226,17 @@ impl Lan {
 	}
 
 	/// Start a reconnecting session to one peer.
-	fn dial(&self, peer: &mdns::Peer) -> anyhow::Result<moq_native::Connection> {
+	fn dial(&self, peer: &mdns::Peer) -> anyhow::Result<moq_tokio::Connection> {
 		self.dial_target(&peer.into())
 	}
 
 	/// Start a reconnecting session from the discovered details needed by a dial.
-	fn dial_target(&self, peer: &DialTarget) -> anyhow::Result<moq_native::Connection> {
+	fn dial_target(&self, peer: &DialTarget) -> anyhow::Result<moq_tokio::Connection> {
 		// Every advertised address is a candidate: only the peer's own routing table
 		// knows which of them reaches it from here. A peer that advertised nothing
 		// reachable has nothing to dial, which `Addrs` makes us handle here rather
 		// than inside a connection that would retry an empty list.
-		let addrs = moq_native::Addrs::collect(self.dial_urls(peer)).context("peer advertised no reachable address")?;
+		let addrs = moq_tokio::Addrs::collect(self.dial_urls(peer)).context("peer advertised no reachable address")?;
 
 		let mut config = self.client.clone();
 		// A peer that advertised a fingerprint serves a generated certificate, so
@@ -244,7 +244,7 @@ impl Lan {
 		// the advertised fingerprint is the whole trust decision, and combining it
 		// with roots is rejected outright, so start from a clean TLS config.
 		if let Some(fingerprint) = &peer.fingerprint {
-			config.tls = moq_native::tls::Connect::default();
+			config.tls = moq_tokio::tls::Connect::default();
 			config.tls.fingerprint = vec![fingerprint.clone()];
 		}
 
@@ -295,10 +295,10 @@ fn split_credential(request: &str) -> (&str, Option<&str>) {
 ///
 /// Both share one listener, so a peer and a viewer reach this process the same
 /// way; only the request path tells them apart. Without a mesh,
-/// [`moq_native::Server::serve_publish`] and its sibling already do the ordinary
+/// [`moq_tokio::Server::serve_publish`] and its sibling already do the ordinary
 /// half, so this exists only to interleave the two.
 pub async fn serve(
-	mut server: moq_native::Listener,
+	mut server: moq_tokio::Listener,
 	lan: Lan,
 	origin: moq_net::origin::Producer,
 	directions: crate::Directions,
@@ -361,7 +361,7 @@ pub async fn serve(
 struct Dial {
 	/// Dropped when the peer is lost or re-advertises, which closes the session.
 	#[allow(dead_code, reason = "held to keep the reconnect loop alive")]
-	connection: moq_native::Connection,
+	connection: moq_tokio::Connection,
 	peer: mdns::Peer,
 }
 
@@ -427,11 +427,11 @@ impl Args {
 }
 
 /// Whether ordinary clients may use this transport on the shared LAN server.
-fn is_public_transport(transport: moq_native::Transport, public_quic: bool) -> bool {
+fn is_public_transport(transport: moq_tokio::Transport, public_quic: bool) -> bool {
 	match transport {
 		// Stream listeners exist only when explicitly configured, while the LAN mesh
 		// can add its own QUIC listener that must remain private.
-		moq_native::Transport::Tcp | moq_native::Transport::Unix => true,
+		moq_tokio::Transport::Tcp | moq_tokio::Transport::Unix => true,
 		_ => public_quic,
 	}
 }
@@ -457,7 +457,7 @@ mod tests {
 		Lan {
 			origin: moq_net::Origin::random().produce(),
 			credential: credential.to_string(),
-			client: moq_native::connect::Config::default(),
+			client: moq_tokio::connect::Config::default(),
 		}
 	}
 
@@ -512,7 +512,7 @@ mod tests {
 	/// generated certificate anyway.
 	#[tokio::test]
 	async fn pinning_a_peer_drops_the_relay_roots() {
-		let mut client = moq_native::connect::Config::default();
+		let mut client = moq_tokio::connect::Config::default();
 		client.tls.root = vec!["ca.pem".into()];
 		let mut lan = lan("ours");
 		lan.client = client;
@@ -568,10 +568,10 @@ mod tests {
 
 	/// Bind a listener the way `--cluster-lan` does, returning it plus the peer
 	/// record mDNS would have produced for it.
-	fn listener() -> (moq_native::Server, DialTarget) {
+	fn listener() -> (moq_tokio::Server, DialTarget) {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-		let mut config = moq_native::listen::Config::default();
+		let mut config = moq_tokio::listen::Config::default();
 		config.bind = Some("127.0.0.1:0".to_string());
 		config.tls.generate = vec!["moq-cluster-lan".to_string()];
 		let server = config.init(Default::default()).expect("failed to bind listener");
@@ -717,8 +717,8 @@ mod tests {
 		));
 
 		// An ordinary client: no mesh marker, no proof, just the advertised port.
-		let mut config = moq_native::connect::Config::default();
-		config.tls = moq_native::tls::Connect::default();
+		let mut config = moq_tokio::connect::Config::default();
+		config.tls = moq_tokio::tls::Connect::default();
 		config.tls.fingerprint = vec![peer.fingerprint.clone().expect("fingerprint")];
 		config.once = Some(true);
 		let stolen = moq_net::Origin::random().produce();
@@ -741,9 +741,9 @@ mod tests {
 
 	#[test]
 	fn explicit_stream_listeners_are_public_without_exposing_mesh_quic() {
-		assert!(is_public_transport(moq_native::Transport::Tcp, false));
-		assert!(is_public_transport(moq_native::Transport::Unix, false));
-		assert!(!is_public_transport(moq_native::Transport::Quic, false));
-		assert!(is_public_transport(moq_native::Transport::Quic, true));
+		assert!(is_public_transport(moq_tokio::Transport::Tcp, false));
+		assert!(is_public_transport(moq_tokio::Transport::Unix, false));
+		assert!(!is_public_transport(moq_tokio::Transport::Quic, false));
+		assert!(is_public_transport(moq_tokio::Transport::Quic, true));
 	}
 }

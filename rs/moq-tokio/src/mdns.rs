@@ -1172,7 +1172,7 @@ mod tests {
 
 	/// Ignored because it multicasts on the host network, which CI runners may
 	/// block; run it by hand when touching discovery:
-	/// `just rs test -p moq-native --features mdns --run-ignored ignored-only`.
+	/// `just rs test -p moq-tokio --features mdns --run-ignored ignored-only`.
 	#[tokio::test]
 	#[ignore = "needs multicast on the host network; run manually"]
 	async fn a_shared_secret_carries_through_real_mdns() {

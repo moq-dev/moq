@@ -24,21 +24,21 @@ doc = false
 
 [features]
 default = ["iroh", "cluster-lan", "quinn", "websocket", "uds"]
-iroh = ["moq-native/iroh"]
+iroh = ["moq-tokio/iroh"]
 # Discover cluster peers on the LAN with mDNS (`--cluster-lan`).
-cluster-lan = ["moq-native/mdns"]
-jemalloc = ["moq-native/jemalloc"]
-noq = ["moq-native/noq"]
-quinn = ["moq-native/quinn"]
-quiche = ["moq-native/quiche"]
+cluster-lan = ["moq-tokio/mdns"]
+jemalloc = ["moq-tokio/jemalloc"]
+noq = ["moq-tokio/noq"]
+quinn = ["moq-tokio/quinn"]
+quiche = ["moq-tokio/quiche"]
 # qlog trace capture (`--server-quic-qlog <DIR>`). Off by default: it compiles the
 # qlog machinery into the enabled backends and is only wanted for debugging or
 # congestion-control testing.
-qlog = ["moq-native/qlog"]
-websocket = ["moq-native/websocket", "dep:qmux", "axum/ws"]
+qlog = ["moq-tokio/qlog"]
+websocket = ["moq-tokio/websocket", "dep:qmux", "axum/ws"]
 # Unix-domain-socket stream listener (`--server-unix-bind`), unix-only. In the
 # default set; drop via --no-default-features on platforms without Unix sockets.
-uds = ["moq-native/uds"]
+uds = ["moq-tokio/uds"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
@@ -53,10 +53,10 @@ http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "u
 humantime = "2.3"
 humantime-serde = "1.1"
 jsonwebtoken = "11"
-moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch", "tcp"] }
 moq-net = { workspace = true }
 moq-stats = { workspace = true }
 moq-token = { workspace = true, features = ["tokio"] }
+moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch", "tcp"] }
 qmux = { workspace = true, features = ["ws"], optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 reqwest-middleware = "0.5"

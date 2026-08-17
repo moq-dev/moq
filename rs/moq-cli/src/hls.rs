@@ -27,7 +27,7 @@ pub struct ExportArgs {
 
 	/// TLS certificates, keys, self-signed generation, and optional mTLS roots.
 	#[command(flatten)]
-	pub tls: moq_native::tls::Listen,
+	pub tls: moq_tokio::tls::Listen,
 
 	/// Minimum media listed in each rendition's playlist window. Keep it within the
 	/// relay's group-cache retention, since segments are fetched from there on request.
@@ -84,7 +84,7 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 		Some(args.tls.server_config(alpn)?)
 	};
 
-	let listener = moq_native::bind::tcp(args.listen)?;
+	let listener = moq_tokio::bind::tcp(args.listen)?;
 
 	tracing::info!(listen = %args.listen, "serving HLS");
 	notify_ready();

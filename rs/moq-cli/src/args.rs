@@ -49,7 +49,7 @@ use crate::subscribe::{CatalogFormatArg, SubscribeFormat};
 pub struct Cli {
 	/// Logging configuration.
 	#[command(flatten)]
-	pub log: moq_native::Log,
+	pub log: moq_tokio::Log,
 
 	/// The MoQ attachment, shared by both directions.
 	#[command(flatten)]
@@ -76,7 +76,7 @@ pub struct Stage {
 /// The whole command line: the globals plus one or more `--`-separated stages.
 pub struct Invocation {
 	/// Logging configuration.
-	pub log: moq_native::Log,
+	pub log: moq_tokio::Log,
 
 	/// The MoQ attachment, shared by every stage.
 	pub moq: MoqSide,
@@ -212,21 +212,21 @@ pub struct MoqSide {
 
 	/// MoQ client config (`--connect`, `--connect-bind`, `--connect-tls-*`, ...).
 	#[command(flatten)]
-	pub client: moq_native::connect::Config,
+	pub client: moq_tokio::connect::Config,
 
 	/// QUIC transport tuning (`--quic-*`), shared by the dial and accept sides.
 	#[command(flatten)]
-	pub quic: moq_native::quic::Config,
+	pub quic: moq_tokio::quic::Config,
 
 	/// MoQ server transport config (`--listen`, `--listen-tcp-bind`,
 	/// `--listen-unix-bind`, `--listen-tls-*`).
 	#[command(flatten)]
-	pub server: moq_native::listen::Config,
+	pub server: moq_tokio::listen::Config,
 
 	/// Iroh transport config (`--iroh-*`), used by both the client and server.
 	#[cfg(feature = "iroh")]
 	#[command(flatten)]
-	pub iroh: moq_native::iroh::EndpointConfig,
+	pub iroh: moq_tokio::iroh::EndpointConfig,
 
 	/// LAN clustering config (`--cluster-lan`, `--cluster-lan-secret`).
 	#[cfg(feature = "cluster-lan")]
@@ -260,7 +260,7 @@ impl MoqSide {
 	/// things the user would otherwise have to spell out: an ephemeral port and a
 	/// generated certificate. An explicit `--listen` or `--listen-tls-*` wins, which
 	/// is what puts the mesh on the same port and certificate as everything else.
-	pub fn server_config(&self) -> moq_native::listen::Config {
+	pub fn server_config(&self) -> moq_tokio::listen::Config {
 		let mut config = self.server.resolved();
 		if self.lan() {
 			config.bind.get_or_insert_with(|| "[::]:0".to_string());

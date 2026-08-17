@@ -36,7 +36,7 @@ fn apply_qlog(transport: &mut quinn::TransportConfig, quic: &Resolved, role: &st
 		// until the endpoint drops and lose the lot if the process is killed. Killing a
 		// stuck process is exactly when these traces are worth having.
 		let mut config = quinn::QlogConfig::default();
-		config.writer(Box::new(file)).title(Some(format!("moq-native {role}")));
+		config.writer(Box::new(file)).title(Some(format!("moq-tokio {role}")));
 
 		transport.qlog_stream(config.into_stream());
 		tracing::info!(path = %path.display(), "writing qlog");

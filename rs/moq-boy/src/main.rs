@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
-static ALLOC: moq_native::jemalloc::tikv_jemallocator::Jemalloc = moq_native::jemalloc::tikv_jemallocator::Jemalloc;
+static ALLOC: moq_tokio::jemalloc::tikv_jemallocator::Jemalloc = moq_tokio::jemalloc::tikv_jemallocator::Jemalloc;
 
 mod audio;
 mod emulator;
@@ -71,15 +71,15 @@ pub struct Config {
 
 	/// The MoQ client configuration.
 	#[command(flatten)]
-	pub client: moq_native::connect::Config,
+	pub client: moq_tokio::connect::Config,
 
 	/// QUIC transport tuning (`--quic-*`).
 	#[command(flatten)]
-	pub quic: moq_native::quic::Config,
+	pub quic: moq_tokio::quic::Config,
 
 	/// The log configuration.
 	#[command(flatten)]
-	pub log: moq_native::Log,
+	pub log: moq_tokio::Log,
 }
 
 /// Shared state for a game session, accessible from multiple threads/tasks.
@@ -450,7 +450,7 @@ async fn main() -> Result<()> {
 	config.log.init()?;
 
 	#[cfg(feature = "jemalloc")]
-	let jemalloc = moq_native::jemalloc::run();
+	let jemalloc = moq_tokio::jemalloc::run();
 	#[cfg(not(feature = "jemalloc"))]
 	let jemalloc = std::future::pending::<anyhow::Result<()>>();
 

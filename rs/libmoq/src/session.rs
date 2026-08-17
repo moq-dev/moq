@@ -15,7 +15,7 @@ struct TaskEntry {
 	close: Option<oneshot::Sender<()>>,
 	callback: ffi::OnStatus,
 	/// Reads live connection stats, reporting `None` while reconnecting.
-	stats: moq_native::ConnectionStatsReader,
+	stats: moq_tokio::ConnectionStatsReader,
 }
 
 /// Everything needed to prepare a session without holding the global state lock.
@@ -55,7 +55,7 @@ impl Connect {
 
 /// A validated session request ready for insertion into global state.
 pub(crate) struct PreparedConnect {
-	client: moq_native::Client,
+	client: moq_tokio::Client,
 	url: Url,
 	publish: Option<moq_net::origin::Producer>,
 	consume: Option<moq_net::origin::Producer>,
@@ -133,10 +133,10 @@ impl Session {
 	///
 	/// Returns the terminal error via `?`. Disconnects aren't reported: status 0 is reserved for a
 	/// clean close (delivered as the terminal callback once the task ends).
-	async fn report(callback: ffi::OnStatus, mut reconnect: moq_native::Connection) -> Result<(), Error> {
+	async fn report(callback: ffi::OnStatus, mut reconnect: moq_tokio::Connection) -> Result<(), Error> {
 		let mut connects: u64 = 0;
 		loop {
-			if let moq_native::Status::Connected = reconnect.status().await.map_err(map_connect_error)? {
+			if let moq_tokio::Status::Connected = reconnect.status().await.map_err(map_connect_error)? {
 				connects += 1;
 				// Positive status carries the connection epoch, so callers can tell a
 				// reconnect (>1) from the first connect (1). No lock is held, so the C
@@ -162,10 +162,10 @@ impl Session {
 	}
 }
 
-fn map_connect_error(err: moq_native::Error) -> Error {
+fn map_connect_error(err: moq_tokio::Error) -> Error {
 	match err.connect_error() {
-		Some(moq_native::ConnectError::Unauthorized) => Error::Unauthorized,
-		Some(moq_native::ConnectError::Forbidden) => Error::Forbidden,
+		Some(moq_tokio::ConnectError::Unauthorized) => Error::Unauthorized,
+		Some(moq_tokio::ConnectError::Forbidden) => Error::Forbidden,
 		_ => Error::Connect(Arc::new(err.into())),
 	}
 }
@@ -178,11 +178,11 @@ mod tests {
 	#[test]
 	fn maps_native_auth_connect_errors() {
 		assert!(matches!(
-			map_connect_error(moq_native::ConnectError::Unauthorized.into()),
+			map_connect_error(moq_tokio::ConnectError::Unauthorized.into()),
 			Error::Unauthorized
 		));
 		assert!(matches!(
-			map_connect_error(moq_native::ConnectError::Forbidden.into()),
+			map_connect_error(moq_tokio::ConnectError::Forbidden.into()),
 			Error::Forbidden
 		));
 		assert!(matches!(
@@ -190,11 +190,11 @@ mod tests {
 			Error::Unauthorized
 		));
 		assert!(matches!(
-			map_connect_error(moq_native::Error::ConnectFailed),
+			map_connect_error(moq_tokio::Error::ConnectFailed),
 			Error::Connect(_)
 		));
 		assert_eq!(Error::Unauthorized.code(), -34);
 		assert_eq!(Error::Forbidden.code(), -35);
-		assert_eq!(map_connect_error(moq_native::Error::ConnectFailed).code(), -5);
+		assert_eq!(map_connect_error(moq_tokio::Error::ConnectFailed).code(), -5);
 	}
 }

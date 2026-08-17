@@ -1,6 +1,6 @@
 [package]
 name = "moq-native"
-description = "Media over QUIC - Helper library for native applications"
+description = "Deprecated: use moq-tokio instead"
 authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
@@ -14,107 +14,17 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
 default = ["quinn", "aws-lc-rs", "websocket", "tcp", "uds"]
-quinn = ["dep:quinn", "dep:web-transport-quinn", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch", "dep:dns-lookup"]
-noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "watch", "dep:dns-lookup"]
-quiche = ["dep:web-transport-quiche", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "dep:rustls-native-certs", "dep:dns-lookup", "watch"]
-# Filesystem watcher for hot-reloading on-disk TLS certs, keys, and root CAs.
-watch = ["dep:notify"]
-# Capture qlog traces (`--*-quic-qlog <DIR>`). Off by default: quinn and noq pull in
-# the qlog crate and its serde_json encoder, which a production build has no use for.
-# quiche compiles its qlog support in unconditionally, so this is empty for a
-# quiche-only build; it still gates the flag there, so one feature means one thing
-# across every backend.
-qlog = ["quinn?/qlog", "web-transport-noq?/qlog"]
-# The QUIC backends pull in their crypto provider from these features (default-features
-# are off on each backend dep), so a backend without aws-lc-rs/ring has no initial cipher.
-aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs", "web-transport-noq?/aws-lc-rs"]
-iroh = ["dep:web-transport-iroh", "dep:web-transport-proto", "dep:noq-proto"]
-# LAN peer discovery over mDNS (the `mdns` module).
-mdns = ["dep:mdns-sd", "dep:hmac", "dep:sha2", "dep:subtle"]
-jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
-websocket = ["dep:qmux", "watch"]
-# Plain-TCP qmux transport (`tcp://`), no TLS. Server-side and client-side.
-tcp = ["dep:qmux", "dep:dns-lookup"]
-# Unix-domain-socket qmux transport (`unix://`), unix-only. Adds peer-credential
-# inspection on accept. Pulls in `tcp` (shares qmux's stream transport).
-uds = ["tcp", "qmux/uds"]
-ring = ["rustls/ring", "rcgen?/ring", "quinn?/rustls-ring", "web-transport-noq?/ring"]
-android-logcat = ["dep:tracing-android"]
-
-[dependencies]
-bytes = "1"
-clap = { version = "4", features = ["derive", "env"] }
-# Family-restricted `getaddrinfo`, so the AAAA and A queries can be issued separately
-# (RFC 8305 section 3) while still going through the system resolver.
-dns-lookup = { version = "3", optional = true }
-futures = "0.3"
-hex = "0.4"
-hmac = { workspace = true, optional = true }
-humantime = "2.3"
-humantime-serde = "1.1"
-mdns-sd = { workspace = true, optional = true }
-
-moq-net = { workspace = true }
-# iroh runs on noq but re-exports only the ControllerFactory trait, not the concrete
-# congestion configs. Version matched to the copy iroh pulls in.
-noq-proto = { version = "1", default-features = false, optional = true }
-notify = { version = "8", optional = true }
-parking_lot = { version = "0.12", features = ["deadlock_detection"] }
-qmux = { workspace = true, features = ["wss", "tls", "tcp"], optional = true }
-quinn = { version = "0.11", default-features = false, features = ["platform-verifier", "runtime-tokio", "bloom"], optional = true }
-rand = "0.10.1"
-rcgen = { version = "0.14", default-features = false, optional = true }
-reqwest = { version = "0.13", default-features = false, optional = true }
-rustls = "0.23"
-rustls-native-certs = { version = "0.8", optional = true }
-# OS-native server-cert verifier for the rustls backends. Version matched to the
-# copy quinn-proto already pulls in, to avoid duplication.
-rustls-platform-verifier = "0.7"
-rustls-webpki = { version = "0.103", features = ["aws-lc-rs"], optional = true }
-serde = { version = "1", features = ["derive"] }
-serde_with = { version = "3", features = ["hex"] }
-sha2 = { workspace = true, optional = true }
-socket2 = "0.6"
-subtle = { workspace = true, optional = true }
-thiserror = "2"
-tikv-jemalloc-ctl = { version = "0.6", optional = true }
-tikv-jemallocator = { version = "0.6", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
-time = "0.3"
-tokio = { workspace = true, features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-url = { version = "2", features = ["serde"] }
-web-transport-iroh = { workspace = true, optional = true }
-web-transport-noq = { workspace = true, optional = true }
-web-transport-proto = { workspace = true, optional = true }
-web-transport-quiche = { workspace = true, optional = true }
-web-transport-quinn = { workspace = true, optional = true }
-web-transport-trait = { workspace = true }
-x509-parser = "0.18"
-
-[target.'cfg(target_os = "android")'.dependencies]
-# Android's platform verifier needs a JNI handle to the app Context (see
-# `tls::init_android`); jni is the bridge. Until init runs, verification falls
-# back to the bundled Mozilla roots.
-jni = "0.22"
-tracing-android = { version = "0.2", optional = true }
-webpki-roots = "1"
-
-[target.'cfg(unix)'.dependencies]
-# Errno constants for classifying an `accept(2)` failure (`accept::Failure`).
-# Their numeric values differ across unix platforms, so they can't be spelled out.
-libc = "0.2"
-
-[dev-dependencies]
-anyhow = "1"
-bytes = "1"
-chrono = "0.4"
-# Use the channel type behind `mdns_sd::Receiver` so the mDNS readiness gate can
-# be driven with synthetic daemon events.
-flume = "0.12"
-rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
-tempfile = "3"
-# test-util adds tokio::time::pause/auto-advance for the time-dependent tests.
-tokio = { workspace = true, features = ["test-util"] }
-toml = "1.1"
-tracing-test = "0.2"
+quinn = []
+noq = []
+quiche = []
+watch = []
+qlog = []
+aws-lc-rs = []
+iroh = []
+mdns = []
+jemalloc = []
+websocket = []
+tcp = []
+uds = []
+ring = []
+android-logcat = []

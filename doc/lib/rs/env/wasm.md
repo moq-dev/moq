@@ -30,7 +30,7 @@ poll-based transport interface.
   `@moq/wasm` package); depend on `moq-wasm` from git until
   `web-transport-wasm` implements the poll interface natively.
 
-On wasm you skip [`moq-native`](/lib/rs/crate/moq-native) entirely (it's
+On wasm you skip [`moq-tokio`](/lib/rs/crate/moq-tokio) entirely (it's
 quinn-only).
 
 ::: warning No `Send` on wasm

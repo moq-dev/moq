@@ -159,7 +159,7 @@ std::vector<Option> AutoOnOff()
 }
 
 // libmoq's own defaults, so the table below doesn't repeat numbers that live in
-// moq-native and drift the moment one is retuned. Same reason Fields() reads the
+// moq-tokio and drift the moment one is retuned. Same reason Fields() reads the
 // version list from moq_versions instead of listing drafts.
 //
 // moq_client_defaults reports them in one shot. Local to the plugin rather than a

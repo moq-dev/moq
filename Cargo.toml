@@ -25,6 +25,7 @@ members = [
     "rs/moq-stats",
     "rs/moq-token",
     "rs/moq-token-cli",
+    "rs/moq-tokio",
     "rs/moq-transcode",
     "rs/moq-video",
     "rs/moq-wasm",
@@ -55,6 +56,7 @@ default-members = [
     "rs/moq-stats",
     "rs/moq-token",
     "rs/moq-token-cli",
+    "rs/moq-tokio",
     "rs/moq-transcode",
     "rs/moq-video",
     # "rs/moq-wasm",  # wasm32-unknown-unknown target only
@@ -62,8 +64,8 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-# Floor for the library surface: iroh 1.0 (via moq-native) needs 1.91. This is
-# what consumers of moq-net / hang / moq-native / etc. see. moq-relay overrides
+# Floor for the library surface: iroh 1.0 (via moq-tokio) needs 1.91. This is
+# what consumers of moq-net / hang / moq-tokio / etc. see. moq-relay overrides
 # it to 1.95 (sysinfo 0.39). moq-relay is lib+bin, so 1.95 does apply to its
 # own library target, but that crate is an application with no external
 # consumers; the point of the override is to keep the bump off the libraries
@@ -75,13 +77,13 @@ rust-version = "1.91"
 [workspace.dependencies]
 flate2 = "1.1"
 hang = { version = "0.20", path = "rs/hang" }
-# HMAC-SHA256 for the mDNS membership proofs (moq-native's `mdns` feature).
+# HMAC-SHA256 for the mDNS membership proofs (moq-tokio's `mdns` feature).
 hmac = "0.13"
 kio = { version = "0.5", path = "rs/kio" }
 # Permutation testing for the kio primitives (and everything built on them).
 # Only compiled under `--cfg loom`; see `just rs loom`.
 loom = { version = "0.7.2", features = ["futures"] }
-# DNS-SD advertisement and browsing for LAN peer discovery (moq-native's `mdns` feature).
+# DNS-SD advertisement and browsing for LAN peer discovery (moq-tokio's `mdns` feature).
 # `async` awaits the event channel instead of blocking a thread on it.
 mdns-sd = { version = "0.20", features = ["async"] }
 moq-audio = { version = "0.0.17", path = "rs/moq-audio" }
@@ -91,7 +93,6 @@ moq-json = { version = "0.3.3", path = "rs/moq-json" }
 moq-loc = { version = "0.2", path = "rs/moq-loc" }
 moq-msf = { version = "0.4", path = "rs/moq-msf" }
 moq-mux = { version = "0.9", path = "rs/moq-mux" }
-moq-native = { version = "0.19", path = "rs/moq-native", default-features = false }
 moq-net = { version = "0.2", path = "rs/moq-net" }
 # NVENC bindings, forked from ViliamVadocz/nvidia-video-codec-sdk to dlopen the
 # driver at runtime. Compiles on any platform (macOS included) but only actually
@@ -103,6 +104,7 @@ moq-srt = { version = "0.2.3", path = "rs/moq-srt" }
 moq-stats = { version = "0.1.4", path = "rs/moq-stats" }
 moq-token = { version = "0.7", path = "rs/moq-token" }
 moq-token-cli = { version = "0.5", path = "rs/moq-token-cli" }
+moq-tokio = { version = "0.19", path = "rs/moq-tokio", default-features = false }
 # default-features off (the NVIDIA hardware codecs) on moq-transcode and
 # moq-video so each consumer opts in. Binaries enable them, but a self-compiler
 # can leave them off to drop the CUDA dependencies. Both crates still default
@@ -127,9 +129,9 @@ tempfile = "3"
 tokio = "1.48"
 web-async = { version = "0.1.5", features = ["tracing"] }
 web-transport-iroh = "0.7"
-# default-features off so the QUIC crypto provider is chosen by moq-native's
+# default-features off so the QUIC crypto provider is chosen by moq-tokio's
 # aws-lc-rs / ring features (mirroring how the quinn dependency is wired).
-# 0.3 for the `qlog` passthrough feature moq-native's `qlog` forwards to.
+# 0.3 for the `qlog` passthrough feature moq-tokio's `qlog` forwards to.
 web-transport-noq = { version = "0.3", default-features = false }
 web-transport-proto = "0.6"
 web-transport-quiche = "0.6"

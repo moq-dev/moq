@@ -127,7 +127,7 @@ async fn serve(router: axum::Router, role: &str, listen: Listen) -> anyhow::Resu
 		.cors
 		.layer([Method::POST, Method::PATCH, Method::DELETE, Method::OPTIONS])?;
 	let app = router.layer(cors);
-	let listener = moq_native::bind::tcp(listen.addr)?;
+	let listener = moq_tokio::bind::tcp(listen.addr)?;
 
 	tracing::info!(listen = %listen.addr, role, "serving WebRTC");
 	notify_ready();

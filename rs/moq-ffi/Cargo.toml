@@ -20,7 +20,7 @@ name = "uniffi-bindgen"
 path = "./uniffi-bindgen.rs"
 
 [features]
-android-logcat = ["moq-native/android-logcat"]
+android-logcat = ["moq-tokio/android-logcat"]
 
 [dependencies]
 bytes = "1"
@@ -28,8 +28,8 @@ hang = { workspace = true }
 moq-audio = { workspace = true }
 moq-json = { workspace = true }
 moq-mux = { workspace = true }
-moq-native = { workspace = true, default-features = true }
 moq-net = { workspace = true }
+moq-tokio = { workspace = true, default-features = true }
 # Default features only: the Linux hardware codecs stay off so the wrappers'
 # cross-compiled targets (Android, iOS) don't pull a CUDA graph.
 moq-video = { workspace = true }

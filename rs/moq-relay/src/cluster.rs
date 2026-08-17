@@ -588,7 +588,7 @@ struct Work {
 	token: String,
 	/// The live mDNS advertisement, bound by [`Cluster::start`].
 	#[cfg(feature = "cluster-lan")]
-	discovery: Option<moq_native::mdns::Discovery>,
+	discovery: Option<moq_tokio::mdns::Discovery>,
 }
 
 /// A relay cluster built around a single [`origin::Producer`].
@@ -604,7 +604,7 @@ struct Work {
 #[derive(Clone)]
 pub struct Cluster {
 	config: ClusterConfig,
-	client: Option<moq_native::Client>,
+	client: Option<moq_tokio::Client>,
 	pub(crate) nodes: crate::nodes::Nodes,
 
 	/// Hands out the `conn` id every session logs under, inbound and outbound
@@ -704,7 +704,7 @@ impl Cluster {
 	///
 	/// Required when `config.connect` is non-empty; [`start`](Self::start) returns
 	/// an error otherwise.
-	pub fn with_client(mut self, client: moq_native::Client) -> Self {
+	pub fn with_client(mut self, client: moq_tokio::Client) -> Self {
 		self.client = Some(client);
 		self
 	}
@@ -1129,9 +1129,9 @@ impl Cluster {
 		self_url: String,
 		token: String,
 		dialed: DialMap,
-		mut discovery: moq_native::mdns::Discovery,
+		mut discovery: moq_tokio::mdns::Discovery,
 	) -> anyhow::Result<()> {
-		use moq_native::mdns::Event;
+		use moq_tokio::mdns::Event;
 
 		// Logged by key, never by the target's URL, so an inline query stays out of
 		// the logs.
@@ -1242,13 +1242,13 @@ impl Cluster {
 	}
 
 	/// Watch a local peer-list file, reconciling whenever it changes. Backed by
-	/// [`moq_native::watch::FileWatcher`] (OS notifications with a polling fallback).
+	/// [`moq_tokio::watch::FileWatcher`] (OS notifications with a polling fallback).
 	/// Fails static: a missing or malformed file keeps the current dials, and the
 	/// next change triggers a fresh attempt.
 	async fn run_connect_api_file(&self, path: PathBuf, node: Option<String>, token: String, dialed: DialMap) {
 		self.reload_connect_api_file(&path, &node, &token, &dialed);
 
-		let mut watcher = match moq_native::watch::FileWatcher::new(std::slice::from_ref(&path)) {
+		let mut watcher = match moq_tokio::watch::FileWatcher::new(std::slice::from_ref(&path)) {
 			Ok(watcher) => watcher,
 			Err(err) => {
 				tracing::error!(%err, ?path, "failed to watch cluster.connect_api file; updates disabled");
@@ -1263,7 +1263,7 @@ impl Cluster {
 	}
 
 	/// Re-read the peer-list file and reconcile. Any read/parse error keeps the
-	/// current dials; the [`FileWatcher`](moq_native::watch::FileWatcher) only
+	/// current dials; the [`FileWatcher`](moq_tokio::watch::FileWatcher) only
 	/// re-invokes this on a real change, so a malformed file isn't re-warned on a
 	/// loop.
 	fn reload_connect_api_file(&self, path: &std::path::Path, node: &Option<String>, token: &str, dialed: &DialMap) {
@@ -1412,11 +1412,11 @@ impl Cluster {
 		let mut connection = None;
 		loop {
 			match reconnect.status().await? {
-				moq_native::Status::Connected if connection.is_none() => {
+				moq_tokio::Status::Connected if connection.is_none() => {
 					connection = Some(self.nodes.connect_outbound(id, log_url.to_string()));
 				}
-				moq_native::Status::Disconnected => connection = None,
-				moq_native::Status::Migrating => {}
+				moq_tokio::Status::Disconnected => connection = None,
+				moq_tokio::Status::Migrating => {}
 				_ => {}
 			}
 		}
@@ -1429,7 +1429,7 @@ impl Cluster {
 /// URL itself, which is what keeps the relay's normal name-and-certificate path
 /// intact. The key is what makes the advertised URL trustworthy enough to dial.
 #[cfg(feature = "cluster-lan")]
-async fn lan_discovery(node: &str, secret: &str) -> anyhow::Result<moq_native::mdns::Discovery> {
+async fn lan_discovery(node: &str, secret: &str) -> anyhow::Result<moq_tokio::mdns::Discovery> {
 	let url = peer_url(node)?;
 	// The advertisement is multicast in the clear. The secret authenticates the
 	// record, it does not hide it, so anything in the query is handed to every
@@ -1451,8 +1451,8 @@ async fn lan_discovery(node: &str, secret: &str) -> anyhow::Result<moq_native::m
 		published.join(", ")
 	);
 	let port = url.port_or_known_default().unwrap_or(443);
-	let secret = moq_native::mdns::Secret::load(secret).context("invalid --cluster-lan-secret")?;
-	Ok(moq_native::mdns::Config::new(port)
+	let secret = moq_tokio::mdns::Secret::load(secret).context("invalid --cluster-lan-secret")?;
+	Ok(moq_tokio::mdns::Config::new(port)
 		.with_node(url)
 		.with_secret(secret)
 		.advertise()
@@ -2287,7 +2287,7 @@ mod tests {
 	}
 
 	/// What a discovering relay reads off an mDNS record for this node, mirroring
-	/// [`lan_discovery`] and `moq_native::mdns::Config::with_node`.
+	/// [`lan_discovery`] and `moq_tokio::mdns::Config::with_node`.
 	fn advertised_lan(node: &str) -> String {
 		let mut url = peer_url(node).expect("valid node");
 		url.set_fragment(None);

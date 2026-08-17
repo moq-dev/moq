@@ -301,7 +301,7 @@ export class Reload {
 		// An auth rejection is terminal however long the session lived. UNAUTHORIZED is a
 		// specified code rather than one we guessed at, so this is the peer saying these
 		// credentials will never work; retrying them just burns the window. Matches
-		// moq-native's reconnect loop, which stops on the same close.
+		// moq-tokio's reconnect loop, which stops on the same close.
 		if (cause instanceof RemoteError && cause.code === SessionCode.Unauthorized) {
 			console.warn("session rejected as unauthorized, not retrying");
 			this.#expected?.();

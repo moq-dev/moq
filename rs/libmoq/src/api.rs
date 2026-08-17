@@ -489,8 +489,8 @@ impl From<&moq_net::ConnectionStats> for moq_connection_stats {
 pub unsafe extern "C" fn moq_log_level(level: *const c_char, level_len: usize) -> i32 {
 	ffi::enter(move || {
 		match unsafe { ffi::parse_str(level, level_len)? } {
-			"" => moq_native::Log::default(),
-			level => moq_native::Log::new(Level::from_str(level)?),
+			"" => moq_tokio::Log::default(),
+			level => moq_tokio::Log::new(Level::from_str(level)?),
 		}
 		.init()?;
 
@@ -555,7 +555,7 @@ pub unsafe extern "C" fn moq_versions(dst: *mut moq_string, count: usize) -> i32
 /// The QUIC backend names this build offers, spelled the way [moq_client_config]'s `backend`
 /// expects. Built once; the slices are valid for the life of the process.
 static BACKEND_NAMES: std::sync::LazyLock<Vec<&'static str>> =
-	std::sync::LazyLock::new(|| moq_native::QuicBackend::compiled().iter().map(|b| b.as_str()).collect());
+	std::sync::LazyLock::new(|| moq_tokio::QuicBackend::compiled().iter().map(|b| b.as_str()).collect());
 
 /// List the QUIC backends this build was compiled with.
 ///
@@ -596,7 +596,7 @@ pub unsafe extern "C" fn moq_backends(dst: *mut moq_string, count: usize) -> i32
 /// knob should hide it rather than surface an option that cannot work.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_qlog_supported() -> bool {
-	moq_native::qlog_supported()
+	moq_tokio::qlog_supported()
 }
 
 /// A duration as the milliseconds the setters take, saturating rather than wrapping.

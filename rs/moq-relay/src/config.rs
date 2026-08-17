@@ -16,24 +16,24 @@ pub struct Config {
 	#[command(flatten)]
 	#[serde(default)]
 	#[serde(alias = "server")]
-	pub listen: moq_native::listen::Config,
+	pub listen: moq_tokio::listen::Config,
 
 	/// The QUIC/TLS configuration for the client. (clustering only)
 	#[command(flatten)]
 	#[serde(default)]
 	#[serde(alias = "client")]
-	pub connect: moq_native::connect::Config,
+	pub connect: moq_tokio::connect::Config,
 
 	/// QUIC transport tuning (`--quic-*`), shared by the dial and accept sides:
 	/// these knobs mean the same thing whichever way the connection was opened.
 	#[command(flatten)]
 	#[serde(default)]
-	pub quic: moq_native::quic::Config,
+	pub quic: moq_tokio::quic::Config,
 
 	/// Log configuration.
 	#[command(flatten)]
 	#[serde(default)]
-	pub log: moq_native::Log,
+	pub log: moq_tokio::Log,
 
 	/// Cluster configuration.
 	#[command(flatten)]
@@ -89,7 +89,7 @@ pub struct Config {
 	#[command(flatten)]
 	#[serde(default)]
 	#[cfg(feature = "iroh")]
-	pub iroh: moq_native::iroh::EndpointConfig,
+	pub iroh: moq_tokio::iroh::EndpointConfig,
 }
 
 impl Config {
@@ -447,7 +447,7 @@ linger = "30s"
 	}
 
 	/// Regression test for the same clap+TOML clobber bug applied to the
-	/// `preferred_v4` / `preferred_v6` fields on `moq_native::listen::Config`.
+	/// `preferred_v4` / `preferred_v6` fields on `moq_tokio::listen::Config`.
 	/// If either field is ever re-typed as a bare `SocketAddrV4` / `SocketAddrV6`
 	/// (without `Option<>`), the CLI re-parse will overwrite the TOML value
 	/// with `Default::default()` and silently disable the
@@ -511,7 +511,7 @@ qlog = "/tmp/moq-qlog"
 
 	/// Regression test for the clap+TOML clobber bug applied to the
 	/// `congestion_control` fields on the quic sections of
-	/// `moq-native::ServerConfig` / `ClientConfig`. The fields must stay
+	/// `moq-tokio::ServerConfig` / `ClientConfig`. The fields must stay
 	/// `Option<CongestionControl>` so a TOML-selected family survives the
 	/// CLI re-parse when no `--*-quic-congestion-control` flag is passed.
 	#[test]
@@ -537,7 +537,7 @@ congestion_control = "delay"
 		// thing whichever way the connection was opened.
 		assert_eq!(
 			config.quic.congestion_control,
-			Some(moq_native::quic::CongestionControl::Delay),
+			Some(moq_tokio::quic::CongestionControl::Delay),
 			"TOML's quic.congestion_control must not be clobbered by the CLI re-parse"
 		);
 	}

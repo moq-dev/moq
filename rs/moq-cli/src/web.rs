@@ -60,7 +60,7 @@ pub async fn serve(
 
 /// Serve the `/certificate.sha256` self-signed fingerprint over HTTP, so an
 /// `http://` client can pin a `--listen` server's generated cert.
-pub async fn run_web(bind: &str, certificates: moq_native::tls::Certificates) -> anyhow::Result<()> {
+pub async fn run_web(bind: &str, certificates: moq_tokio::tls::Certificates) -> anyhow::Result<()> {
 	let listen = tokio::net::lookup_host(bind)
 		.await
 		.context("invalid listen address")?
@@ -88,7 +88,7 @@ pub async fn run_web(bind: &str, certificates: moq_native::tls::Certificates) ->
 
 	// Dual-stack so the cert endpoint answers over IPv4 too, even on Windows
 	// where `[::]` is IPv6-only by default.
-	let listener = moq_native::bind::tcp(listen).context("failed to bind web listener")?;
+	let listener = moq_tokio::bind::tcp(listen).context("failed to bind web listener")?;
 	let server = axum_server::from_tcp(listener)?;
 	server.serve(app.into_make_service()).await?;
 

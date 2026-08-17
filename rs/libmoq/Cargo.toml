@@ -23,8 +23,8 @@ hang = { workspace = true }
 moq-audio = { workspace = true }
 moq-json = { workspace = true }
 moq-mux = { workspace = true }
-moq-native = { workspace = true, default-features = true }
 moq-net = { workspace = true }
+moq-tokio = { workspace = true, features = ["quinn", "aws-lc-rs", "websocket", "tcp", "uds"] }
 # Enable the NVIDIA hardware codecs (default-off at the workspace level).
 moq-video = { workspace = true, features = ["nvenc", "nvdec"] }
 # Blocking on `encode::Sink` from the synchronous C entry points; see

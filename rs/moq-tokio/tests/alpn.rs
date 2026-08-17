@@ -11,10 +11,10 @@
 /// Spin up a server and client both restricted to the given version,
 /// and verify the handshake completes over raw QUIC (moqt:// URL).
 async fn connect_with_version(version: &str) {
-	let version: moq_native::moq_net::Version = version.parse().expect("invalid version");
+	let version: moq_tokio::moq_net::Version = version.parse().expect("invalid version");
 
 	// ── server ──────────────────────────────────────────────────────
-	let mut server_config = moq_native::listen::Config::default();
+	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec![version];
@@ -24,10 +24,10 @@ async fn connect_with_version(version: &str) {
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	// Provide a dummy origin so the MoQ handshake has something to negotiate.
-	let origin = moq_native::moq_net::Origin::random().produce();
+	let origin = moq_tokio::moq_net::Origin::random().produce();
 
 	// ── client ──────────────────────────────────────────────────────
-	let mut client_config = moq_native::connect::Config::default();
+	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.version = vec![version];
 	client_config.tls.insecure = Some(true);
 
@@ -61,10 +61,10 @@ async fn connect_with_version(version: &str) {
 /// Sub-protocols in the HTTP CONNECT request serve the same role as ALPN.
 /// If a version is specified, both client and server are restricted to it.
 async fn connect_with_webtransport(version: Option<&str>) {
-	let version: Option<moq_native::moq_net::Version> = version.map(|v| v.parse().expect("invalid version"));
+	let version: Option<moq_tokio::moq_net::Version> = version.map(|v| v.parse().expect("invalid version"));
 
 	// ── server ──────────────────────────────────────────────────────
-	let mut server_config = moq_native::listen::Config::default();
+	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	if let Some(v) = version {
@@ -75,10 +75,10 @@ async fn connect_with_webtransport(version: Option<&str>) {
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
-	let origin = moq_native::moq_net::Origin::random().produce();
+	let origin = moq_tokio::moq_net::Origin::random().produce();
 
 	// ── client ──────────────────────────────────────────────────────
-	let mut client_config = moq_native::connect::Config::default();
+	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	if let Some(v) = version {
 		client_config.version = vec![v];

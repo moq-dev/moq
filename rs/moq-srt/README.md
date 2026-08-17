@@ -71,7 +71,7 @@ a path, so any number of players can pull the same broadcast.
 `run` is unauthenticated: anyone who can reach the UDP port can publish or
 request any broadcast. Gate it with a host firewall or a private network, or
 bring your own auth by driving `Server` / `Request` directly, mirroring
-`moq-native`'s `Server` / `Request`:
+`moq-tokio`'s `Server` / `Request`:
 
 ```rust
 let mut server = moq_srt::Server::bind("0.0.0.0:9000".parse()?, None).await?;
