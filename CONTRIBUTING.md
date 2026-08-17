@@ -53,7 +53,7 @@ The marker never goes in the codebase itself: no code comments, doc comments, or
 
 ## Reviews
 
-CodeRabbit reviews PRs automatically, but it has an hourly quota and runs out of org credits. If a PR shows a "Review limit reached" / "out of usage credits" message instead of an actual review (or CodeRabbit otherwise fails to produce one), run the `/review` skill locally against the PR. Then act on the findings the same way you would CodeRabbit's: push the high-confidence, unambiguous fixes directly, and escalate anything ambiguous, architectural, or open to interpretation by asking first rather than guessing.
+Codex and CodeRabbit review PRs automatically, but either can skip or fail to produce a review. Treat a substantive review as current only when it covers the present head or no material code has changed since it ran. If either reviewer produces a current review, act on its findings. If both skip or fail to produce one, run the `/review` skill locally against the PR. Push high-confidence, unambiguous fixes directly, and escalate anything ambiguous, architectural, or open to interpretation by asking first rather than guessing.
 
 Reply to review comments as you address them, saying what changed or why you disagree, so the reviewer doesn't have to diff the branch to find out. Replies are GitHub prose like any other, so they carry the [AI Contributions](#ai-contributions) marker.
 
