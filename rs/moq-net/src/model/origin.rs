@@ -3902,6 +3902,65 @@ mod tests {
 		assert_eq!(entry.subscriber.groups, 3);
 	}
 
+	/// Expiry after handoff writes off only the unread tail. The group itself and
+	/// the frame already returned stay solely in the delivered counters, and a
+	/// cloned cursor cannot report the same tail again.
+	#[tokio::test]
+	async fn test_stats_handed_out_expiry_counts_the_unread_tail_once() {
+		use crate::Timestamp;
+		use crate::stats::{Config, Registry, Tier};
+		use bytes::Bytes;
+
+		tokio::time::pause();
+
+		let registry = Registry::new(Config::new());
+		let ctx = registry.tier(Tier::default()).session("acme");
+
+		let origin = Origin::random().produce();
+		let ingress = origin.clone().with_stats(ctx.clone());
+		let egress = origin.consume().with_stats(ctx.clone());
+
+		let mut announced = egress.announced();
+		let source = ingress.create_broadcast("demo", announce()).unwrap();
+		let mut dynamic = source.dynamic();
+		settle().await;
+		settle().await;
+
+		let broadcast = announced.next().await.unwrap().broadcast.unwrap();
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		let mut sub = subscribing.await.unwrap();
+
+		let mut group = producer.append_group().unwrap();
+		for payload in [b"aa", b"bb", b"cc"] {
+			group.write_frame(Timestamp::ZERO, Bytes::from_static(payload)).unwrap();
+		}
+		group.finish().unwrap();
+
+		let mut reading = sub.recv_group().await.unwrap().expect("first group");
+		let mut first = reading.next_frame().await.unwrap().expect("first frame");
+		assert_eq!(first.read_all().await.unwrap(), Bytes::from_static(b"aa"));
+		let mut clone = reading.clone();
+
+		let mut edge = producer.append_group().unwrap();
+		edge.write_frame(Timestamp::from_millis(1000).unwrap(), Bytes::from_static(b"edge"))
+			.unwrap();
+		edge.finish().unwrap();
+
+		assert!(matches!(reading.next_frame().await, Err(crate::Error::Old)));
+		assert!(matches!(clone.next_frame().await, Err(crate::Error::Old)));
+
+		let report = registry.report();
+		let entry = report.traffic.iter().find(|e| e.path.as_str() == "demo").unwrap();
+		assert_eq!(entry.publisher.groups, 1, "the handed-out group was delivered");
+		assert_eq!(entry.publisher.frames, 1, "the returned frame was delivered");
+		assert_eq!(entry.publisher.bytes, 2, "the returned payload was delivered");
+		assert_eq!(entry.publisher.stale.groups, 0, "the group is not counted twice");
+		assert_eq!(entry.publisher.stale.frames, 2, "only the unread frames are stale");
+		assert_eq!(entry.publisher.stale.bytes, 4, "only the unread payload is stale");
+	}
+
 	/// `Subscriber::read_frame` collapses a group to its first frame. The paths it
 	/// delegates to (plain and spliced) build their own *unmetered* group consumers,
 	/// so the wrapper is the only place that can attribute the read: exactly one
