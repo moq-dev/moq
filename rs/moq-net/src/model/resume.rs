@@ -469,6 +469,7 @@ impl Consumer {
 			min_sequence: 0,
 			end_sequence: None,
 			drift_cap: kio::Producer::new(None),
+			stale_stats: Default::default(),
 			reading: None,
 		}
 	}
@@ -775,6 +776,7 @@ impl Group {
 		}
 	}
 
+	/// Attribute expiry for route-specific copies behind this logical group.
 	pub(crate) fn set_stale_meter(&mut self, meter: crate::stats::Meter) {
 		if let Some(current) = &mut self.current {
 			current.group.set_stale_meter(meter.clone());
@@ -1232,6 +1234,8 @@ pub struct Subscriber {
 	end_sequence: Option<u64>,
 	/// Shared copy of [`Self::end_sequence`] for groups that outlive this cursor poll.
 	drift_cap: kio::Producer<Option<u64>>,
+	/// Logical subscriber meter for groups drained internally by [`Self::poll_read_frame`].
+	stale_stats: crate::stats::Meter,
 
 	/// The group currently being drained by [`Self::read_frame`].
 	reading: Option<group::Consumer>,
@@ -1243,6 +1247,14 @@ impl Subscriber {
 	fn poll_sync(&mut self, waiter: &kio::Waiter) {
 		self.sync(waiter);
 		self.reap();
+	}
+
+	/// Attribute expiry for the group this frame helper drains internally.
+	pub(crate) fn set_stale_meter(&mut self, meter: crate::stats::Meter) {
+		if let Some(reading) = &mut self.reading {
+			reading.set_stale_meter(meter.clone());
+		}
+		self.stale_stats = meter;
 	}
 
 	/// Reap retired cursors, then bound the live stragglers: a pruned segment's
@@ -1699,7 +1711,10 @@ impl Subscriber {
 			}
 
 			match ready!(self.poll_next_group(waiter))? {
-				Some(group) => self.reading = Some(group),
+				Some(mut group) => {
+					group.set_stale_meter(self.stale_stats.clone());
+					self.reading = Some(group);
+				}
 				None => return Poll::Ready(Ok(None)),
 			}
 		}

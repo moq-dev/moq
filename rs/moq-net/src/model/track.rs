@@ -3156,7 +3156,10 @@ impl Subscriber {
 		let meter = self.stats.meter();
 		let res = match &mut self.inner {
 			SubscriberKind::Plain(plain) => plain.poll_read_frame(waiter),
-			SubscriberKind::Spliced(spliced) => spliced.poll_read_frame(waiter),
+			SubscriberKind::Spliced(spliced) => {
+				spliced.set_stale_meter(meter.clone());
+				spliced.poll_read_frame(waiter)
+			}
 		};
 		self.count_stale(&meter);
 		// This helper collapses a group to its first frame: count the group, the one
