@@ -2655,20 +2655,45 @@ impl group::Expiry for GroupExpiry {
 		let mut expired = false;
 		let _ = self.state.poll(waiter, |state| {
 			let budget = clamp_latency(latency, state.latency_bound()).max;
-			let edge = state.live_edge(cap);
-			expired = state.is_stale(self.sequence, edge, budget);
-
-			if !expired {
-				// A first timestamp can change the presentation-time verdict without
-				// mutating the track. Register on both the candidate and the current
-				// presentation edge so either first frame wakes the held reader.
-				if let Some(slot) = state.lookup.get(&self.sequence) {
-					let _ = slot.group.poll_timestamp(waiter);
+			loop {
+				let edge = state.live_edge(cap);
+				expired = state.is_stale(self.sequence, edge, budget);
+				if expired {
+					break;
 				}
-				if let Some(edge) = edge.and_then(|edge| edge.presentation)
-					&& let Some(slot) = state.lookup.get(&edge.sequence)
-				{
-					let _ = slot.group.poll_timestamp(waiter);
+
+				// A first timestamp can change the presentation-time verdict without
+				// mutating the track. Register on the candidate and every unstamped
+				// group that could supersede the current presentation edge. If one
+				// raced this scan, resolve the edge again before returning Pending.
+				let mut timestamp_raced = false;
+				if let Some(slot) = state.lookup.get(&self.sequence) {
+					let group = &slot.group;
+					if group.timestamp().is_none()
+						&& group.poll_timestamp(waiter).is_ready()
+						&& group.timestamp().is_some()
+					{
+						timestamp_raced = true;
+					}
+				}
+				let presentation_sequence = edge
+					.and_then(|edge| edge.presentation)
+					.map_or(self.sequence, |edge| edge.sequence.max(self.sequence));
+				for slot in state.lookup.values() {
+					let group = &slot.group;
+					if slot.visible
+						&& group.sequence > presentation_sequence
+						&& cap.is_none_or(|cap| group.sequence <= cap)
+						&& !group.is_aborted()
+						&& group.poll_timestamp(waiter).is_ready()
+						&& group.timestamp().is_some()
+					{
+						timestamp_raced = true;
+						break;
+					}
+				}
+				if !timestamp_raced {
+					break;
 				}
 			}
 
@@ -4152,6 +4177,34 @@ mod test {
 		tokio::time::advance(Duration::from_secs(1)).await;
 		append_at(&mut producer, 1000);
 
+		let result = pending.await.unwrap();
+		assert!(matches!(result, Err(Error::Old)), "the held group expires: {result:?}");
+	}
+
+	#[tokio::test]
+	async fn a_handed_out_group_wakes_when_a_newer_group_gets_its_first_timestamp() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_millis(500))));
+		let mut old = producer.append_group().unwrap();
+		old.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"old"))
+			.unwrap();
+
+		let mut held = subscriber.recv_group().await.unwrap().expect("old group");
+		assert!(held.read_frame().await.unwrap().is_some());
+		let mut live = producer.append_group().unwrap();
+		let pending = tokio::spawn(async move { held.read_frame().await });
+		tokio::task::yield_now().await;
+		assert!(!pending.is_finished(), "the newer group has no timestamp yet");
+
+		live.write_frame(
+			Timestamp::from_millis(1000).unwrap(),
+			bytes::Bytes::from_static(b"live"),
+		)
+		.unwrap();
+		tokio::task::yield_now().await;
+
+		assert!(pending.is_finished(), "the new presentation edge wakes the held reader");
 		let result = pending.await.unwrap();
 		assert!(matches!(result, Err(Error::Old)), "the held group expires: {result:?}");
 	}
