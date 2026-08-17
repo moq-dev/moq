@@ -94,8 +94,9 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
 
 7. Verify the final head.
    - Execute PR-controlled code only in a credential-free isolated environment. Remove secret-bearing environment
-     variables and credential access, avoid writable host mounts outside the checkout, and restrict network access to
-     what validation requires. If safe local isolation cannot be established, do not run the code locally; rely on the
+     variables and credential access, and restrict network access to what validation requires. Use a disposable source
+     copy without `.git`, or mount both the checkout and Git metadata read-only while writing build outputs to separate
+     disposable storage. If safe local isolation cannot be established, do not run the code locally; rely on the
      repository's trusted required CI instead.
    - Run the repository's documented full merge gate in its documented environment. If none exists, run the most
      relevant checks and tests.
