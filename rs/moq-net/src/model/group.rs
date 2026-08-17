@@ -693,6 +693,22 @@ impl Producer {
 			// Untagged: a tagged track attaches the egress meter via `with_meter`
 			// when it hands the consumer to a subscriber/fetch.
 			stats: stats::Meter::default(),
+			expiry: None,
+			expired: false,
+		}
+	}
+
+	/// Register for the first-frame timestamp while the group is still unstamped.
+	pub(crate) fn poll_timestamp(&self, waiter: &kio::Waiter) -> Poll<()> {
+		match self.state.poll(waiter, |state| {
+			if state.timestamp.is_some() || state.fin.is_some() || state.abort.is_some() {
+				Poll::Ready(())
+			} else {
+				Poll::Pending
+			}
+		}) {
+			Poll::Ready(_) => Poll::Ready(()),
+			Poll::Pending => Poll::Pending,
 		}
 	}
 
@@ -818,6 +834,18 @@ pub struct Consumer {
 	// Egress payload meter, set by a tagged track via [`Self::with_meter`]. Empty
 	// (no-op) for an untagged group.
 	stats: stats::Meter,
+
+	// Subscriber-specific drift policy. A group can become stale after the track
+	// hands it out, while its reader is waiting for the first or next frame.
+	expiry: Option<Arc<dyn Expiry>>,
+	expired: bool,
+}
+
+/// Subscriber-specific policy for expiring a group after it was handed out.
+pub(crate) trait Expiry: Send + Sync {
+	/// Return whether the group is stale, registering `waiter` for anything that
+	/// could change the answer while it remains live.
+	fn is_expired(&self, waiter: &kio::Waiter) -> bool;
 }
 
 // `Plain` is the hot path and carries an inline frame prefetch, so boxing it to even the
@@ -870,6 +898,8 @@ impl Clone for Consumer {
 			// Inherit the meter without re-counting the group: the original already
 			// counted it when the track handed it out.
 			stats: self.stats.clone(),
+			expiry: self.expiry.clone(),
+			expired: self.expired,
 		}
 	}
 }
@@ -904,6 +934,11 @@ impl Consumer {
 			info: self.info,
 			track: self.track,
 			stats: self.stats,
+			// Each segment keeps its own route-specific expiry policy. Applying the
+			// head segment's policy to the assembled group would use the wrong edge
+			// after a takeover.
+			expiry: None,
+			expired: false,
 		}
 	}
 
@@ -913,6 +948,20 @@ impl Consumer {
 		meter.group();
 		self.stats = meter;
 		self
+	}
+
+	/// Keep applying this subscription's drift budget while the group is read.
+	pub(crate) fn with_expiry(mut self, expiry: Arc<dyn Expiry>) -> Self {
+		self.expiry = Some(expiry);
+		self
+	}
+
+	fn poll_expired(&mut self, waiter: &kio::Waiter) -> bool {
+		if !self.expired && self.expiry.as_ref().is_some_and(|expiry| expiry.is_expired(waiter)) {
+			self.expired = true;
+			self.stats.stale(self.content());
+		}
+		self.expired
 	}
 
 	/// Whether the group has been aborted (including pool eviction); the abort
@@ -998,6 +1047,9 @@ impl Consumer {
 	/// Returns None if the group is finished and the index is out of range, or the cursor
 	/// passed the [`Self::end_at`] cap.
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
+		if self.poll_expired(waiter) {
+			return Poll::Ready(Err(Error::Old));
+		}
 		let stats = self.stats.clone();
 		match &mut self.inner {
 			ConsumerKind::Plain(plain) => plain.poll_next_frame(waiter, &stats),
@@ -1015,6 +1067,9 @@ impl Consumer {
 
 	/// Read the next frame (timestamp and payload) all at once, without blocking.
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
+		if self.poll_expired(waiter) {
+			return Poll::Ready(Err(Error::Old));
+		}
 		let stats = self.stats.clone();
 		match &mut self.inner {
 			ConsumerKind::Plain(plain) => plain.poll_read_frame(waiter, &stats),
@@ -1031,7 +1086,9 @@ impl Consumer {
 
 	/// Read the next frame (timestamp and payload) all at once.
 	pub async fn read_frame(&mut self) -> Result<Option<frame::Frame>> {
-		if let ConsumerKind::Plain(plain) = &mut self.inner {
+		if self.expiry.is_none()
+			&& let ConsumerKind::Plain(plain) = &mut self.inner
+		{
 			// Serve from the prefetched batch without building a future or allocating a waker.
 			if !plain.capped()
 				&& let Some(frame) = plain.prefetch.pop()
@@ -1045,6 +1102,9 @@ impl Consumer {
 
 	/// Poll for the final number of frames in the group.
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
+		if self.poll_expired(waiter) {
+			return Poll::Ready(Err(Error::Old));
+		}
 		match &mut self.inner {
 			ConsumerKind::Plain(plain) => plain.poll(waiter, |state| state.poll_finished()),
 			ConsumerKind::Spliced(spliced) => spliced.poll_finished(waiter),

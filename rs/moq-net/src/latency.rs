@@ -28,14 +28,11 @@ use std::time::Duration;
 ///
 /// # How drift is measured
 ///
-/// In presentation time: a group's timestamp against the newest one above it. Both are
-/// stamped once, when a group's first frame is created, so a backlog delivered as a burst
-/// still reads as its true age rather than as the few seconds it took to arrive.
-///
-/// A group that has yet to present a frame is never skipped, and neither is one on a track
-/// where nothing newer has: with no timestamp there is nothing to measure, and the frames
-/// may simply not have arrived yet. Such a group is bounded by the publisher's retention
-/// window instead, which aborts it once it ages out.
+/// By both presentation time and wall-clock arrival time, with either age able to expire
+/// the group. Presentation time compares a group's first timestamp against the newest one
+/// above it, so a backlog delivered as a burst still reads as its true age. Wall-clock time
+/// compares when each group entered this hop, which backstops an empty or stalled group that
+/// has not supplied a first-frame timestamp.
 ///
 /// Protocols whose wire can't carry a timestamp (pre-Lite05 moq-lite, moq-transport without
 /// the Timestamp property) have their frames stamped on receipt instead, which makes the
