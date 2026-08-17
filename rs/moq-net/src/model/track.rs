@@ -538,10 +538,18 @@ impl TrackState {
 	/// Capped because a group can only be late relative to data that would actually be
 	/// served in its place: a subscription ending at a takeover boundary can't jump past
 	/// it, so the groups it still wants aren't stale just because the route ran on.
+	/// Fetched backfill is absent from `arrival`, so it cannot age subscription content
+	/// as though it were a live replacement.
 	fn live_edge(&self, cap: Option<u64>) -> Option<Edge> {
 		let mut wall: Option<WallEdge> = None;
 		let mut presentation: Option<PresentationEdge> = None;
-		for slot in self.lookup.values() {
+		for (sequence, stamp) in &self.arrival {
+			let Some(slot) = self.lookup.get(sequence) else {
+				continue;
+			};
+			if slot.stamp != *stamp {
+				continue;
+			}
 			let group = &slot.group;
 			if cap.is_some_and(|cap| group.sequence > cap) || group.is_aborted() {
 				continue;
@@ -4304,6 +4312,46 @@ mod test {
 			subscriber.read_frame().now_or_never().is_none(),
 			"the skipped groups are gone, not queued"
 		);
+	}
+
+	/// A one-shot fetch populates the shared cache but never the live arrival cursor,
+	/// so it cannot make content available to a subscription look stale.
+	#[tokio::test]
+	async fn fetched_group_is_not_a_live_drift_edge() {
+		let mut producer = track_producer("test", None);
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		append_at(&mut producer, 0);
+
+		let pending = consumer.fetch_group(100, None);
+		let req = dynamic
+			.requested_group()
+			.now_or_never()
+			.expect("fetch request is ready")
+			.unwrap();
+		let mut fetched = req.accept(None).unwrap();
+		fetched
+			.write_frame(
+				Timestamp::from_millis(100_000).unwrap(),
+				bytes::Bytes::from_static(b"fetched"),
+			)
+			.unwrap();
+		fetched.finish().unwrap();
+		pending.await.unwrap();
+
+		let mut groups = producer.subscribe(None);
+		assert_eq!(groups.assert_group().sequence, 0);
+		groups.assert_no_group();
+
+		let mut frames = producer.subscribe(None);
+		let frame = frames
+			.read_frame()
+			.now_or_never()
+			.expect("live frame is ready")
+			.unwrap()
+			.expect("live frame");
+		assert_eq!(frame.timestamp.as_millis(), 0);
+		assert!(frames.read_frame().now_or_never().is_none());
 	}
 
 	/// The live edge is resolved once per poll and applied to every group that poll
