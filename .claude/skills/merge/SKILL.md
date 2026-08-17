@@ -26,6 +26,8 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
      exact head cannot be checked out safely. Otherwise inspect the current branch.
    - Target `main` for fixes, features, additive APIs, documentation, refactors, and wire changes. Use `dev` only for a
      semver-breaking rename, removal, or signature change to a published API in a core library or language wrapper.
+   - For an existing PR, verify its GitHub base matches the selected base. Retarget it only when the correct target is
+     unambiguous and the change is authorized; otherwise stop for direction. Re-read the PR metadata after retargeting.
    - Require a current head branch distinct from the selected base before any push. If the checkout is detached or on
      the selected base, create a scoped head branch at the current commit first.
    - Point the head branch's upstream at the freshly fetched selected remote base so diff-scoped checks use the correct
@@ -83,11 +85,13 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
      supportable. Do not present a guess as a completed fix.
 
 6. Fix confident blockers.
-   - Diagnose root cause before changing code. Inspect CI logs and reproduce locally when practical.
+   - Diagnose root cause before changing code. Inspect CI logs and reproduce locally when practical. Before any local
+     reproduction or retry that may execute PR-controlled code, first apply the trusted-policy selection and
+     credential-free isolation requirements in step 7. If that isolation is unavailable, rely on trusted CI evidence.
    - Use the repository's established patterns and keep the change scoped. Add regression coverage for behavior fixes.
    - Resolve clear conflicts against the latest base while preserving both sides' intended behavior.
-   - If a local failure may be a toolchain or environment mismatch, retry in the repository's documented or pinned
-     environment before changing unrelated source code.
+   - If a local failure may be a toolchain or environment mismatch, retry in the trusted-policy environment before
+     changing unrelated source code, while preserving the isolation requirements above.
    - Seek a fresh Codex or CodeRabbit review after material fixes. Self-review only under the fallback rule in step 3.
      Commit and push only task-owned changes after proportionate verification.
    - Resolve addressed review threads only after the fixing commit is pushed. Leave ambiguous or rejected feedback open
