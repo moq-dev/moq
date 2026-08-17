@@ -22,6 +22,8 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
    - Prefer an explicit PR number or URL. Otherwise inspect the current branch.
    - Select the base branch and require a current head branch distinct from it before any push. If the checkout is
      detached or on the selected base, create a scoped head branch at the current commit first.
+   - Point the head branch's upstream at the freshly fetched selected remote base so diff-scoped checks use the correct
+     comparison. Push with `git push origin HEAD`, never `git push -u`.
    - If the current branch has no PR, confirm it has committed work against an unambiguous base, preserves unrelated
      user changes, and can be pushed. Push it and create a draft PR with an accurate title and body, then continue.
    - Stop for direction if more than one PR or base is plausible, there is no committed work to propose, ownership of
