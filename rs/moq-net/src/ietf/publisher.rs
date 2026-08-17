@@ -1556,9 +1556,10 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					};
 				}
 				GroupState::Serve { writer, frame, chunk } => {
-					// Keep the group guard live while the transport owns a detached
-					// frame chunk and may be blocked on flow control.
-					if self.group.poll_expired(waiter) {
+					// Keep the group guard live while the transport owns buffered data,
+					// including a final frame already removed from the group cursor.
+					let pending = writer.has_pending() || frame.is_some() || chunk.is_some();
+					if self.group.poll_expired_while_pending(waiter, pending) {
 						self.state = GroupState::Done;
 						return Poll::Ready(Err(Error::Old));
 					}
@@ -1755,6 +1756,67 @@ mod group_priority_test {
 		assert!(
 			futures::poll!(serving.as_mut()).is_pending(),
 			"stream credit is exhausted"
+		);
+
+		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		let mut edge = track.append_group().unwrap();
+		edge.write_frame(crate::Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
+			.unwrap();
+		edge.finish().unwrap();
+
+		assert!(matches!(serving.await, Err(Error::Old)));
+	}
+
+	/// The final payload remains guarded after its frame has advanced the group cursor.
+	#[tokio::test]
+	async fn blocked_final_transport_chunk_expires_with_the_group() {
+		tokio::time::pause();
+
+		let gate = kio::Producer::new(true);
+		let session = SinkSession::gated_uni(gate.consume());
+		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let mut subscriber = track.subscribe(None);
+		let mut old = track.append_group().unwrap();
+		let mut frame = old
+			.create_frame(frame::Info {
+				timestamp: crate::Timestamp::ZERO,
+				size: 2,
+			})
+			.unwrap();
+		frame.write(b"a".as_slice()).unwrap();
+		let group = subscriber.recv_group().await.unwrap().expect("old group");
+		let mut serve = GroupServe {
+			session,
+			msg: ietf::GroupHeader {
+				track_alias: 0,
+				group_id: 0,
+				sub_group_id: 0,
+				publisher_priority: 0,
+				flags: Default::default(),
+			},
+			priority: 0,
+			group,
+			timescale: Timescale::default(),
+			version: Version::Draft19,
+			state: GroupState::Open,
+		};
+		let mut serving = std::pin::pin!(kio::wait(|waiter| serve.poll_serve(waiter)));
+		assert!(
+			futures::poll!(serving.as_mut()).is_pending(),
+			"waiting for the final byte"
+		);
+
+		let Ok(mut open) = gate.write() else {
+			panic!("transport gate closed");
+		};
+		*open = false;
+		drop(open);
+		frame.write(b"b".as_slice()).unwrap();
+		frame.finish().unwrap();
+		old.finish().unwrap();
+		assert!(
+			futures::poll!(serving.as_mut()).is_pending(),
+			"the final byte is transport-blocked"
 		);
 
 		tokio::time::advance(std::time::Duration::from_secs(1)).await;
