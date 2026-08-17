@@ -249,7 +249,7 @@ impl ExportSource {
 				.media
 				.take()
 				.expect("media present until the subscription resolves");
-			self.state = SourceState::Active(Box::new(Consumer::new(track, media).with_latency(self.latency)));
+			self.state = SourceState::Active(Box::new(Consumer::new(track, media)));
 		}
 
 		loop {

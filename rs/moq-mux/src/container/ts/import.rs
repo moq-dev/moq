@@ -2657,7 +2657,7 @@ mod test {
 		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
 		import.finish().unwrap();
 		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
-		let mut reader = Consumer::new(track, Container::Legacy).with_latency(Latency::max(RECORDING_LATENCY));
+		let mut reader = Consumer::new(track, Container::Legacy).with_test_latency(Latency::max(RECORDING_LATENCY));
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
 			.await
 			.expect("cue read timed out")
@@ -2890,7 +2890,7 @@ mod test {
 			.clone();
 		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy)
-			.with_latency(Latency::max(RECORDING_LATENCY));
+			.with_test_latency(Latency::max(RECORDING_LATENCY));
 		let mut frames = Vec::new();
 		while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await
 		{
@@ -3701,7 +3701,7 @@ mod test {
 			.await
 			.unwrap();
 		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy)
-			.with_latency(Latency::max(RECORDING_LATENCY));
+			.with_test_latency(Latency::max(RECORDING_LATENCY));
 		let published = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await;
 		assert!(
 			matches!(published, Ok(Ok(Some(_)))),
@@ -3956,7 +3956,7 @@ mod test {
 
 		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
 		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
-		let mut reader = Consumer::new(track, Container::Legacy).with_latency(Latency::max(RECORDING_LATENCY));
+		let mut reader = Consumer::new(track, Container::Legacy).with_test_latency(Latency::max(RECORDING_LATENCY));
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
 			.await
 			.expect("cue read timed out")
@@ -4101,7 +4101,7 @@ mod test {
 		assert_eq!(track.pid, DATA_PID, "recorded the original PID");
 
 		let track = consumer.track(name.as_str()).unwrap().subscribe(None).await.unwrap();
-		let mut reader = Consumer::new(track, Container::Legacy).with_latency(Latency::max(RECORDING_LATENCY));
+		let mut reader = Consumer::new(track, Container::Legacy).with_test_latency(Latency::max(RECORDING_LATENCY));
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
 			.await
 			.expect("verbatim read timed out")

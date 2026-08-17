@@ -152,7 +152,7 @@ async fn import_opus_frames() {
 
 	let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
 	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy)
-		.with_latency(crate::Latency::max(RECORDING_LATENCY));
+		.with_test_latency(crate::Latency::max(RECORDING_LATENCY));
 	let mut frames = Vec::new();
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		let Some(frame) = res.unwrap() else { break };
@@ -348,7 +348,7 @@ async fn survives_midstream_join() {
 	// anchors the one and only group.
 	let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
 	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy)
-		.with_latency(crate::Latency::max(RECORDING_LATENCY));
+		.with_test_latency(crate::Latency::max(RECORDING_LATENCY));
 	let mut frames = Vec::new();
 	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		frames.push(frame);
@@ -393,7 +393,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 		.expect("scte35 track");
 	let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
 	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy)
-		.with_latency(crate::Latency::max(RECORDING_LATENCY));
+		.with_test_latency(crate::Latency::max(RECORDING_LATENCY));
 	let mut cues = Vec::new();
 	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		cues.push((frame.payload.to_vec(), frame.timestamp));

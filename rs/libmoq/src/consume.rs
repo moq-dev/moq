@@ -385,7 +385,7 @@ impl Consume {
 							.with_latency(latency),
 					)
 					.await?;
-				let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
+				let track = moq_mux::container::Consumer::new(track, container);
 				Self::run_track(on_frame, track, channel.1).await
 			}
 			.await;
@@ -438,7 +438,7 @@ impl Consume {
 							.with_latency(latency),
 					)
 					.await?;
-				let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
+				let track = moq_mux::container::Consumer::new(track, container);
 				Self::run_track(on_frame, track, channel.1).await
 			}
 			.await;
