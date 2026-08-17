@@ -256,6 +256,10 @@ struct Slot {
 	// backfill) gets a fresh stamp, so a historical arrival entry can't resolve to
 	// the replacement and deliver it twice or at the wrong position.
 	stamp: u32,
+
+	// Whether this incarnation came from the live publisher and can replace older
+	// subscription content. Fetch-only backfill stays cached but never anchors drift.
+	visible: bool,
 }
 
 /// The registered subscriptions, aggregated by the producer.
@@ -543,11 +547,8 @@ impl TrackState {
 	fn live_edge(&self, cap: Option<u64>) -> Option<Edge> {
 		let mut wall: Option<WallEdge> = None;
 		let mut presentation: Option<PresentationEdge> = None;
-		for (sequence, stamp) in &self.arrival {
-			let Some(slot) = self.lookup.get(sequence) else {
-				continue;
-			};
-			if slot.stamp != *stamp {
+		for slot in self.lookup.values() {
+			if !slot.visible {
 				continue;
 			}
 			let group = &slot.group;
@@ -806,6 +807,7 @@ impl TrackState {
 				group: group.clone(),
 				arrived: web_async::time::Instant::now(),
 				stamp,
+				visible,
 			},
 		);
 		if visible {
