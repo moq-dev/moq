@@ -1020,13 +1020,25 @@ impl Consumer {
 
 	/// Check the parent subscription while a wire publisher drains detached payload.
 	pub(crate) fn poll_expired(&mut self, waiter: &kio::Waiter) -> bool {
-		if !self.expired && self.expiry.as_ref().is_some_and(|expiry| expiry.is_expired(waiter)) {
+		if !self.expired
+			&& self.expiry_pending()
+			&& self.expiry.as_ref().is_some_and(|expiry| expiry.is_expired(waiter))
+		{
 			self.expired = true;
 			if !self.stale_counted.swap(true, Ordering::Relaxed) {
 				self.stale_stats.stale(self.unread_content());
 			}
 		}
 		self.expired
+	}
+
+	/// Whether expiry can still discard content or unblock a group that may grow.
+	fn expiry_pending(&self) -> bool {
+		match &self.inner {
+			ConsumerKind::Plain(plain) => plain.expiry_pending(),
+			// The route-specific plain cursors own expiry for a spliced group.
+			ConsumerKind::Spliced(_) => false,
+		}
 	}
 
 	/// Whether this cursor failed because its subscription latency budget expired.
@@ -1192,6 +1204,16 @@ impl Consumer {
 }
 
 impl Plain {
+	/// Whether this cursor still has unread content or may receive another frame.
+	fn expiry_pending(&self) -> bool {
+		if self.capped() {
+			return false;
+		}
+
+		let state = self.state.read();
+		state.abort.is_none() && state.fin.is_none_or(|fin| self.index < fin)
+	}
+
 	/// Content this cursor has neither returned nor already counted in a prefetch batch.
 	fn unread_content(&self) -> stats::Content {
 		let prefetched = self.prefetch.buffered().0 as usize;

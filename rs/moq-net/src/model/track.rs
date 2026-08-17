@@ -4157,6 +4157,21 @@ mod test {
 	}
 
 	#[tokio::test]
+	async fn a_drained_group_finishes_cleanly_after_the_live_edge_advances() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(None);
+		append_at(&mut producer, 0);
+
+		let mut group = subscriber.recv_group().await.unwrap().expect("first group");
+		assert!(group.read_frame().await.unwrap().is_some());
+
+		append_at(&mut producer, 1000);
+
+		assert!(group.read_frame().await.unwrap().is_none());
+		assert!(!group.latency_expired());
+	}
+
+	#[tokio::test]
 	async fn a_handed_out_partial_frame_expires_while_its_payload_is_stalled() {
 		tokio::time::pause();
 
