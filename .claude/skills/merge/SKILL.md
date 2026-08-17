@@ -113,6 +113,8 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
 8. Merge and verify.
    - Merge only when the PR is open, non-draft, mergeable, sufficiently reviewed, free of unresolved actionable
      feedback, approved where required, and verified.
+   - Record the verified head OID and require it as a merge precondition, using `--match-head-commit` or the equivalent
+     API expected-head field. Abort and return to verification if the PR head moved.
    - Use the repository's established merge style. Otherwise prefer squash merge for an ordinary feature or fix PR.
    - Verify GitHub reports the PR merged and the base branch contains the resulting commit.
 
