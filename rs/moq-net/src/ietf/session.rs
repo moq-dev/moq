@@ -842,6 +842,7 @@ async fn run_goaway<R: crate::transport::poll::RecvStream>(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::model::ProduceTest;
 
 	fn occurrences(log: &crate::lite::test_transport::Log, needle: &[u8]) -> usize {
 		let writes = log.writes.lock().unwrap();

@@ -41,8 +41,8 @@ async fn main() -> anyhow::Result<()> {
 
 	// Publish the derivative through one origin and consume the source through
 	// another, over a single auto-reconnecting session.
-	let publish = moq_net::Origin::random().produce();
-	let remote = moq_net::Origin::random().produce();
+	let publish = moq_tokio::origin::spawn(moq_net::Origin::random());
+	let remote = moq_tokio::origin::spawn(moq_net::Origin::random());
 
 	let client = moq_tokio::connect::Config::default().init(Default::default())?;
 	let session = client

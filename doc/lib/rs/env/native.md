@@ -87,7 +87,7 @@ Wire an [`origin::Producer`](https://docs.rs/moq-net/latest/moq_net/origin/struc
 ```rust
 // Publish into an origin wired before connecting: it outlives any one session,
 // so the broadcast survives a reconnect. Hold the connection to keep redialing.
-let origin = moq_net::Origin::random().produce();
+let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 let _connection = client.with_publisher(origin.consume()).connect(url);
 
 let route = moq_net::broadcast::Route::new().with_announce(true);
@@ -106,7 +106,7 @@ Subscribing works the same way round: wire an origin in before connecting and re
 ```rust
 // Consume into an origin wired before connecting, so announcements keep flowing
 // across a reconnect. Hold the connection to keep redialing.
-let origin = moq_net::Origin::random().produce();
+let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 let mut announced = origin.consume().announced();
 let _connection = client.with_subscriber(origin).connect(url);
 

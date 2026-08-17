@@ -334,9 +334,22 @@ fn terminate<V: Mergeable>(node: &mut Node<V>, changed: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+	/// Build an origin producer, spawning its driver on the ambient runtime.
+	fn produce_origin() -> moq_net::origin::Producer {
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		if tokio::runtime::Handle::try_current().is_ok() {
+			tokio::spawn(driver);
+		} else {
+			// A sync test: nothing polls the driver, and dropping it would tear
+			// the origin down, so leak it and rely on the synchronous half.
+			std::mem::forget(driver);
+		}
+		producer
+	}
+
 	use std::time::Duration;
 
-	use moq_net::{Origin, PathOwned, Timestamp, announce, broadcast, origin, track};
+	use moq_net::{PathOwned, Timestamp, announce, broadcast, origin, track};
 
 	use crate::{Producer, ProducerConfig};
 
@@ -370,7 +383,7 @@ mod tests {
 	/// on its own origin so it never lands on the stats origin.
 	async fn feed(producer: &Producer, tier: Tier, root: &str, path: &str, bytes: usize) -> Feed {
 		let ctx = producer.registry().tier(tier).session(root);
-		let feed_origin = Origin::random().produce();
+		let feed_origin = produce_origin();
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
 		let mut announced = egress.announced();
@@ -425,7 +438,7 @@ mod tests {
 	async fn merges_traffic_across_nodes() {
 		// Two nodes each serve the same broadcast; the merged view sums their
 		// cumulative counters per path.
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 		let node_a = node_producer(&origin, "a");
 		let node_b = node_producer(&origin, "b");
 
@@ -447,7 +460,7 @@ mod tests {
 	async fn node_drop_regresses_the_merged_view() {
 		// Dropping a node unannounces its broadcast; its contribution leaves the
 		// sum, so the merged counter regresses (a fresh segment downstream).
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 		let node_a = node_producer(&origin, "a");
 		let node_b = node_producer(&origin, "b");
 
@@ -476,7 +489,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn merges_sessions_across_nodes() {
 		// Session presence sums per auth root across nodes.
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 		let node_a = node_producer(&origin, "a");
 		let node_b = node_producer(&origin, "b");
 

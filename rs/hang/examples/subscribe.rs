@@ -10,7 +10,7 @@ async fn main() -> anyhow::Result<()> {
 	moq_tokio::Log::new(tracing::Level::DEBUG).init()?;
 
 	// Create an origin that the session can publish incoming broadcasts to.
-	let origin = moq_net::Origin::random().produce();
+	let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 	let consumer = origin.consume();
 
 	// Run the subscription and the session in parallel.

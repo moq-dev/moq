@@ -1453,6 +1453,7 @@ impl GroupIngest {
 
 #[cfg(test)]
 mod tests {
+	use crate::model::ProduceTest;
 	use futures::poll;
 
 	use super::*;

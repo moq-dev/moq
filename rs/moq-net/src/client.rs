@@ -435,6 +435,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::model::ProduceTest;
 	use std::{
 		collections::VecDeque,
 		sync::{Arc, Mutex},

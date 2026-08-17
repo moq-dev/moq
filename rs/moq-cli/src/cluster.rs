@@ -455,15 +455,15 @@ mod tests {
 
 	fn lan(credential: &str) -> Lan {
 		Lan {
-			origin: moq_net::Origin::random().produce(),
+			origin: moq_tokio::origin::spawn(moq_net::Origin::random()),
 			credential: credential.to_string(),
 			client: moq_tokio::connect::Config::default(),
 		}
 	}
 
 	/// Only this listener's per-advertisement credential gets in.
-	#[test]
-	fn authorized_requires_the_advertised_credential() {
+	#[tokio::test]
+	async fn authorized_requires_the_advertised_credential() {
 		let closed = lan("expected-proof");
 		assert!(closed.authorized("/.cluster/expected-proof"));
 		assert!(!closed.authorized(MESH_PATH), "a missing proof must be rejected");
@@ -474,8 +474,8 @@ mod tests {
 
 	/// The dial presents the proof discovery derived from that peer's own
 	/// advertisement, at every address the peer offered.
-	#[test]
-	fn dial_urls_carry_the_proof_to_every_address() {
+	#[tokio::test]
+	async fn dial_urls_carry_the_proof_to_every_address() {
 		let lan = lan("ours");
 
 		let socket = DialTarget {
@@ -597,8 +597,8 @@ mod tests {
 	/// so the test needs no multicast and stays CI-safe.
 	#[tokio::test]
 	async fn session_shares_origin_bidirectionally() {
-		let origin_a = moq_net::Origin::random().produce();
-		let origin_b = moq_net::Origin::random().produce();
+		let origin_a = moq_tokio::origin::spawn(moq_net::Origin::random());
+		let origin_b = moq_tokio::origin::spawn(moq_net::Origin::random());
 
 		// Published before the session exists; announcements flow once it connects.
 		let _from_a = origin_a
@@ -654,8 +654,8 @@ mod tests {
 	/// origin is attached: reaching the listener is not membership.
 	#[tokio::test]
 	async fn mesh_rejects_a_dial_without_the_proof() {
-		let origin_a = moq_net::Origin::random().produce();
-		let origin_b = moq_net::Origin::random().produce();
+		let origin_a = moq_tokio::origin::spawn(moq_net::Origin::random());
+		let origin_b = moq_tokio::origin::spawn(moq_net::Origin::random());
 		let _from_b = origin_b
 			.create_broadcast("from-b", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("failed to create broadcast");
@@ -695,7 +695,7 @@ mod tests {
 	/// user who passed `--listen` did ask to serve, so that case still does.
 	#[tokio::test]
 	async fn a_mesh_only_listener_refuses_ordinary_clients() {
-		let origin = moq_net::Origin::random().produce();
+		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 		let _published = origin
 			.create_broadcast("secret-stream", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("failed to create broadcast");
@@ -721,7 +721,7 @@ mod tests {
 		config.tls = moq_tokio::tls::Connect::default();
 		config.tls.fingerprint = vec![peer.fingerprint.clone().expect("fingerprint")];
 		config.once = Some(true);
-		let stolen = moq_net::Origin::random().produce();
+		let stolen = moq_tokio::origin::spawn(moq_net::Origin::random());
 		let url = peer.urls.into_iter().next().expect("an address");
 		let connection = config
 			.init(Default::default())

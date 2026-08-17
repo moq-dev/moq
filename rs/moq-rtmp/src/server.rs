@@ -1586,7 +1586,7 @@ mod tests {
 		vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
 		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
 
-		let origin = moq_net::Origin::random().produce();
+		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 		let mut publisher = Publisher::new(&origin, "live/cam0", Some(Duration::from_secs(3))).unwrap();
 		publisher.push(flv::TAG_VIDEO, 0, &vseq).unwrap();
 
@@ -1616,7 +1616,7 @@ mod tests {
 		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
 
 		// Publish the broadcast at `live/cam0` by feeding synthetic FLV to the importer.
-		let origin = moq_net::Origin::random().produce();
+		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 		let mut broadcast = origin
 			.create_broadcast("live/cam0", broadcast::Route::new().with_announce(true))
 			.unwrap();
@@ -1665,7 +1665,7 @@ mod tests {
 	async fn play_enhanced_codec_rejects_legacy_client() {
 		const VP9_KEYFRAME_320X240: &[u8] = &[0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00];
 
-		let origin = moq_net::Origin::random().produce();
+		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 		let mut broadcast = origin
 			.create_broadcast("live/cam0", broadcast::Route::new().with_announce(true))
 			.unwrap();
@@ -1788,7 +1788,7 @@ mod tests {
 		let nalu = |b: u8| vec![0, 0, 0, 0, 0, 5, 0x65, b, 0x84, 0x21, 0x00];
 		let frames = multitrack_body(CODED_FRAMES, &[(0, nalu(0x88)), (1, nalu(0x99))]);
 
-		let origin = moq_net::Origin::random().produce();
+		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 		let mut broadcast = origin
 			.create_broadcast("live/cam0", broadcast::Route::new().with_announce(true))
 			.unwrap();
@@ -1850,7 +1850,7 @@ mod tests {
 		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
 		let addr = server.local_addr().unwrap();
 
-		let origin = moq_net::Origin::random().produce();
+		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 		let consumer = origin.consume();
 
 		let stream = TcpStream::connect(addr).await.unwrap();

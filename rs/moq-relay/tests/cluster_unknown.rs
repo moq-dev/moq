@@ -82,7 +82,7 @@ impl Drop for Publisher {
 
 async fn publish_version(port: u16, version: &str) -> Publisher {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
-	let origin = Origin::random().produce();
+	let origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = origin
 		.create_broadcast(PATH, moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -133,7 +133,7 @@ async fn publish_unknown(port: u16) -> Publisher {
 /// broke rather than just "no frame".
 async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
-	let origin = Origin::random().produce();
+	let origin = moq_tokio::origin::spawn(Origin::random());
 	let consumer = origin.consume();
 	let session = tokio::time::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
 		.await
@@ -172,7 +172,7 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 
 async fn watch_announces(port: u16, window: Duration) -> Vec<(String, bool)> {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
-	let origin = Origin::random().produce();
+	let origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announced = origin.consume().announced();
 	let _session = tokio::time::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
 		.await

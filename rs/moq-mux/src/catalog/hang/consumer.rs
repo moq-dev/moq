@@ -158,7 +158,7 @@ mod test {
 	/// [`broadcast::Info::path`](moq_net::broadcast::Info::path), the base the consumer
 	/// resolves against.
 	fn publish_catalog(published: Catalog<()>) -> Result<Option<Catalog>> {
-		let origin = moq_net::Origin::random().produce();
+		let origin = crate::source::produce_origin();
 		let mut broadcast = origin
 			.create_broadcast("a/pub", moq_net::broadcast::Route::new())
 			.expect("broadcast should create");
@@ -199,7 +199,7 @@ mod test {
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.expect("catalog track should create");
 
-		let origin = moq_net::Origin::random().produce();
+		let origin = crate::source::produce_origin();
 		let mut dynamic = origin.dynamic();
 		let requesting = origin.consume().request_broadcast("a/pub");
 		let served = broadcast.consume();

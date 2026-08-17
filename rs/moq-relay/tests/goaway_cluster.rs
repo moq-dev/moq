@@ -94,7 +94,7 @@ fn drain_session_with_zero_timeout_closes_at_once() {
 async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	let origin = Origin::random().produce();
+	let origin = moq_tokio::origin::spawn(Origin::random());
 	let (port, mut accepted, _handle) = spawn_upstream(origin);
 	wait_listening(port).await;
 
@@ -144,7 +144,7 @@ fn spawn_upstream(
 		let mut server = server.listen().await.expect("listen");
 		while let Some(request) = server.accept().await {
 			// Serve the shared origin bidirectionally, like a relay peer would.
-			let scratch = Origin::random().produce();
+			let scratch = moq_tokio::origin::spawn(Origin::random());
 			let session = match request.with_publisher(&origin).with_subscriber(scratch).ok().await {
 				Ok(session) => session,
 				Err(err) => {
@@ -181,7 +181,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 
 	tokio::time::timeout(TEST_TIMEOUT, async {
 		// ── the shared "live" broadcast both siblings can serve ─────────
-		let upstream_origin = Origin::random().produce();
+		let upstream_origin = moq_tokio::origin::spawn(Origin::random());
 		let mut broadcast = upstream_origin
 			.create_broadcast("cam", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("create broadcast");
@@ -368,7 +368,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	// ── TOP: origin server serving the same broadcast to both mids ──────
-	let top_origin = Origin::random().produce();
+	let top_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = top_origin
 		.create_broadcast("diamond", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -387,7 +387,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		.expect("TOP accept channel closed");
 
 	// ── MID-A: mini-relay consuming TOP, serving BOTTOM, drains later ───
-	let mid_a_origin = Origin::random().produce();
+	let mid_a_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// Short handover so the test observes the old session close quickly.
@@ -419,7 +419,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		.expect("MID-A accept channel closed");
 
 	// ── SUBSCRIBER: connects to BOTTOM ───────────────────────────────────
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut sub_client_config = moq_tokio::connect::Config::default();
 	sub_client_config.tls.insecure = Some(true);
 	let sub_client = sub_client_config
@@ -598,7 +598,7 @@ async fn verify_group(sub: &mut moq_net::track::Subscriber, expected_seq: u64, f
 async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	let upstream_origin = Origin::random().produce();
+	let upstream_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = upstream_origin
 		.create_broadcast("cam", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -714,7 +714,7 @@ fn goaway_handover_is_enforced_while_the_replacement_dial_hangs() {
 async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	let upstream_origin = Origin::random().produce();
+	let upstream_origin = moq_tokio::origin::spawn(Origin::random());
 	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin);
 	wait_listening(port).await;
 

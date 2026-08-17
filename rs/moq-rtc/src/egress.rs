@@ -298,13 +298,26 @@ pub fn dispatch(rtc: &mut str0m::Rtc, request: WriteRequest, wallclock: Instant)
 
 #[cfg(test)]
 mod tests {
+	/// Build an origin producer, spawning its driver on the ambient runtime.
+	fn produce_origin() -> moq_net::origin::Producer {
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		if tokio::runtime::Handle::try_current().is_ok() {
+			tokio::spawn(driver);
+		} else {
+			// A sync test: nothing polls the driver, and dropping it would tear
+			// the origin down, so leak it and rely on the synchronous half.
+			std::mem::forget(driver);
+		}
+		producer
+	}
+
 	use super::*;
 	use hang::catalog::{AudioConfig, H264, VideoCodec, VideoConfig};
-	use moq_net::{Origin, PathRelative};
+	use moq_net::PathRelative;
 
 	#[test]
 	fn catalog_codecs_ignores_codecs_available_only_via_escaping_references() {
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 		let source = moq_mux::Source::new(origin.consume(), "a/pub");
 		let mut catalog = Catalog::default();
 

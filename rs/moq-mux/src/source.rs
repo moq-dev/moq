@@ -213,13 +213,27 @@ impl BroadcastConfig for hang::catalog::TextConfig {
 	}
 }
 
+/// Test helper: build an origin producer, spawning its driver on the ambient runtime.
+#[cfg(test)]
+pub(crate) fn produce_origin() -> moq_net::origin::Producer {
+	let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+	if tokio::runtime::Handle::try_current().is_ok() {
+		tokio::spawn(driver);
+	} else {
+		// A sync test: nothing polls the driver, and dropping it would tear
+		// the origin down, so leak it and rely on the synchronous half.
+		std::mem::forget(driver);
+	}
+	producer
+}
+
 /// Test helper: serve `broadcast` on a throwaway origin's dynamic handler and return a
 /// [`Source`] rooted at it, so exporter tests that build a local broadcast can still resolve
 /// it by path. The origin is leaked so the broadcast stays reachable for the source's
 /// lifetime (harmless in a test binary).
 #[cfg(test)]
 pub(crate) fn announced(broadcast: &moq_net::broadcast::Consumer) -> Source {
-	let origin = moq_net::Origin::random().produce();
+	let origin = produce_origin();
 	let mut dynamic = origin.dynamic();
 	let served = broadcast.clone();
 	tokio::spawn(async move {
@@ -236,7 +250,7 @@ pub(crate) fn announced(broadcast: &moq_net::broadcast::Consumer) -> Source {
 mod tests {
 	use super::*;
 	use hang::catalog::{H264, VideoConfig};
-	use moq_net::{Origin, PathRelative};
+	use moq_net::PathRelative;
 
 	/// Let the origin's spawned attach task run: a created broadcast becomes
 	/// routable asynchronously, shortly after `create_broadcast` returns.
@@ -248,7 +262,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn no_override_targets_catalog_broadcast() {
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 		let _producer = origin
 			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
 			.unwrap();
@@ -272,7 +286,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn subscribe_track_resolves_catalog_broadcast() {
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 		let mut producer = origin
 			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
 			.unwrap();
@@ -289,7 +303,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn self_reference_targets_catalog_broadcast() {
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 		let mut producer = origin
 			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
 			.unwrap();
@@ -308,7 +322,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn escaping_reference_is_rejected() {
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 
 		let mut catalog = origin
 			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
@@ -352,7 +366,7 @@ mod tests {
 
 	#[test]
 	fn escaping_rendition_is_removed_while_valid_sibling_remains() {
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 		let source = Source::new(origin.consume(), "a/pub");
 		let mut escaped = VideoConfig::new(H264 {
 			profile: 0x42,
@@ -378,7 +392,7 @@ mod tests {
 	/// it is the one that silently goes unchecked when the two sides drift.
 	#[test]
 	fn escaping_text_rendition_is_removed() {
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 		let source = Source::new(origin.consume(), "a/pub");
 
 		let mut escaped = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
@@ -397,7 +411,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn subscribe_track_resolves_referenced_broadcast() {
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 
 		let _catalog = origin
 			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
@@ -421,7 +435,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn dot_resolves_output_parent() {
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 
 		let _catalog = origin
 			.create_broadcast(
@@ -446,7 +460,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn dot_resolves_one_segment_catalog_to_root() {
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 
 		let _catalog = origin
 			.create_broadcast("top", moq_net::broadcast::Route::new().with_announce(true))

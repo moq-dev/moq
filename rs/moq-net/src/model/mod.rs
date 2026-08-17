@@ -33,7 +33,7 @@ pub use time::*;
 
 /// Publishing and consuming the set of broadcasts routed through an origin.
 pub mod origin {
-	pub use super::origin_impl::{Consumer, Dynamic, Info, Producer, Request, Requesting};
+	pub use super::origin_impl::{Consumer, Driver, Dynamic, Info, Producer, Request, Requesting};
 }
 
 /// Subscribing to broadcast (un)announcements from an origin.
@@ -46,3 +46,6 @@ pub mod announce {
 // Origin identity and the `Consume` conversion trait aren't part of a role
 // module; keep them flat at the crate root.
 pub use origin_impl::{Consume, InvalidOrigin, Origin, OriginList, TooManyOrigins};
+
+#[cfg(test)]
+pub(crate) use origin_impl::ProduceTest;

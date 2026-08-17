@@ -1310,6 +1310,7 @@ mod tests {
 	use super::*;
 	use crate::coding::Decode;
 	use crate::lite::test_transport::SinkSession;
+	use crate::model::ProduceTest;
 
 	const VERSION: Version = Version::Lite05;
 

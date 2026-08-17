@@ -72,7 +72,8 @@ impl Session {
 	async fn handshake(transport: transport::Session) -> Result<Session, JsValue> {
 		// Wire a subscribe origin so the session has somewhere to insert the
 		// broadcasts the remote announces; keep a consumer to read them.
-		let origin = moq_net::Origin::random().produce();
+		let (origin, origin_driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		web_async::spawn(origin_driver);
 		let consumer = origin.consume();
 		let client = moq_net::Client::new().with_subscriber(origin);
 		let (inner, driver) = client.connect(transport).await.map_err(js_err)?;

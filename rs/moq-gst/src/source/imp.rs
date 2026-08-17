@@ -283,7 +283,7 @@ async fn run_session(
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(settings.tls_disable_verify);
 
-	let origin = moq_net::Origin::random().produce();
+	let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 	let origin_consumer = origin.consume();
 	let client = config.init(Default::default())?.with_subscriber(origin);
 

@@ -37,7 +37,9 @@ pub struct Origin {
 
 impl Origin {
 	pub fn create(&mut self) -> Result<Id, Error> {
-		self.active.insert(moq_net::Origin::random().produce())
+		// Every FFI entry point runs inside `RUNTIME.enter()`, so the driver
+		// lands on the dedicated libmoq runtime.
+		self.active.insert(moq_tokio::origin::spawn(moq_net::Origin::random()))
 	}
 
 	pub fn get(&self, id: Id) -> Result<&moq_net::origin::Producer, Error> {

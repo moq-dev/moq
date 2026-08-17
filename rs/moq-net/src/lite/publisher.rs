@@ -1750,6 +1750,7 @@ mod announce_test {
 	use super::*;
 	use crate::coding::{Decode, Reader};
 	use crate::lite::test_transport::*;
+	use crate::model::ProduceTest;
 	use std::sync::Mutex;
 
 	const VERSION: Version = Version::Lite06Wip;
@@ -3254,6 +3255,7 @@ mod serve_group_test {
 mod tests {
 	use super::*;
 	use crate::lite::test_transport::SinkSession;
+	use crate::model::ProduceTest;
 
 	/// Lite01/02 send the initial active set as ANNOUNCE_INIT. It must apply the
 	/// same per-peer route selection as the live loop: a broadcast whose only

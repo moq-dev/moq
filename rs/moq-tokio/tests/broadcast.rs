@@ -23,7 +23,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	let server_version: Option<moq_net::Version> = server_version.map(|v| v.parse().expect("invalid server version"));
 
 	// ── publisher (server) ──────────────────────────────────────────
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("failed to create broadcast");
@@ -48,7 +48,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	// ── subscriber (client) ─────────────────────────────────────────
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -127,7 +127,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 async fn lite05_timestamp_roundtrip(scheme: &str) {
 	use moq_tokio::moq_net::{Timescale, Timestamp};
 
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("failed to create broadcast");
@@ -166,7 +166,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -247,7 +247,7 @@ async fn broadcast_moq_lite_05_timestamps_webtransport() {
 async fn lite05_fetch_roundtrip(scheme: &str) {
 	use moq_tokio::moq_net::{Timescale, Timestamp};
 
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("failed to create broadcast");
@@ -284,7 +284,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -376,7 +376,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 		}
 	}
 
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("failed to create broadcast");
@@ -409,7 +409,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -497,7 +497,7 @@ async fn broadcast_moq_lite_05_fetch_during_subscribe_webtransport() {
 async fn broadcast_moq_lite_05_default_timescale() {
 	use moq_tokio::moq_net::Timescale;
 
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -517,7 +517,7 @@ async fn broadcast_moq_lite_05_default_timescale() {
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("local addr");
 
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -592,7 +592,7 @@ async fn next_announce(announcements: &mut moq_net::announce::Consumer) -> moq_n
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_06_announce_lifecycle() {
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 
 	// Announced before the client connects, so it rides the initial set.
 	let mut first = pub_origin
@@ -607,7 +607,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("local addr");
 
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -730,7 +730,7 @@ async fn broadcast_route_migration() {
 	let publisher = Origin::new(0x42).unwrap();
 
 	// ── publisher A: the preferred route (shorter hop chain) ────────
-	let origin_a = Origin::random().produce();
+	let origin_a = moq_tokio::origin::spawn(Origin::random());
 	let mut hops_a = moq_net::OriginList::new();
 	hops_a.push(publisher).unwrap();
 	let mut broadcast_a = origin_a
@@ -751,7 +751,7 @@ async fn broadcast_route_migration() {
 	}
 
 	// ── publisher B: the standby, carrying an extra hop so A wins ───
-	let origin_b = Origin::random().produce();
+	let origin_b = moq_tokio::origin::spawn(Origin::random());
 	let mut hops_b = moq_net::OriginList::new();
 	hops_b.push(publisher).unwrap();
 	hops_b.push(Origin::new(0x1234).unwrap()).unwrap();
@@ -809,7 +809,7 @@ async fn broadcast_route_migration() {
 	});
 
 	// ── one subscriber origin fed by both sessions ───────────────────
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 
 	let connect = |port: u16, sub: moq_net::origin::Producer| {
@@ -890,7 +890,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 	let version: Option<moq_net::Version> = version.map(|v| v.parse().expect("invalid version"));
 
 	// ── publisher (server) ──────────────────────────────────────────
-	let origin = Origin::random().produce();
+	let origin = moq_tokio::origin::spawn(Origin::random());
 	// The original publisher: the first hop of every advertised chain. Keeping
 	// it stable across the update is what makes the restart an in-place route
 	// change rather than a broadcast replacement.
@@ -935,7 +935,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 	});
 
 	// ── subscriber (client) ─────────────────────────────────────────
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -1033,7 +1033,7 @@ async fn route_replaced_test(version: Option<&str>) {
 	let version: Option<moq_net::Version> = version.map(|v| v.parse().expect("invalid version"));
 
 	// ── publisher (server) ──────────────────────────────────────────
-	let origin = Origin::random().produce();
+	let origin = moq_tokio::origin::spawn(Origin::random());
 	let mut hops_a = moq_net::OriginList::new();
 	hops_a.push(Origin::new(0x1111).unwrap()).unwrap();
 	let mut producer = origin
@@ -1071,7 +1071,7 @@ async fn route_replaced_test(version: Option<&str>) {
 	});
 
 	// ── subscriber (client) ─────────────────────────────────────────
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -1331,7 +1331,7 @@ async fn latency_max_test(version: &str) -> Duration {
 	let version: moq_net::Version = version.parse().expect("invalid version");
 
 	// ── publisher (server) ──────────────────────────────────────────
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -1358,9 +1358,8 @@ async fn latency_max_test(version: &str) -> Duration {
 	// ── subscriber (client) ─────────────────────────────────────────
 	// The origin the session writes remote broadcasts into decides the window for
 	// tracks whose protocol can't carry the publisher's.
-	let sub_origin = moq_net::origin::Info::new(Origin::random())
-		.with_latency_default(LATENCY_DEFAULT)
-		.produce();
+	let sub_origin =
+		moq_tokio::origin::spawn(moq_net::origin::Info::new(Origin::random()).with_latency_default(LATENCY_DEFAULT));
 	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -1612,7 +1611,7 @@ async fn broadcast_websocket() {
 	use moq_tokio::moq_net::Origin;
 
 	// ── publisher (server) ──────────────────────────────────────────
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("failed to create broadcast");
@@ -1641,7 +1640,7 @@ async fn broadcast_websocket() {
 	let mut server = server.listen().await.expect("failed to listen");
 
 	// ── subscriber (client) ─────────────────────────────────────────
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -1724,7 +1723,7 @@ async fn broadcast_websocket_fallback() {
 	use moq_tokio::moq_net::Origin;
 
 	// ── publisher (server) ──────────────────────────────────────────
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("failed to create broadcast");
@@ -1753,7 +1752,7 @@ async fn broadcast_websocket_fallback() {
 	let mut server = server.listen().await.expect("failed to listen");
 
 	// ── subscriber (client) ─────────────────────────────────────────
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -1847,7 +1846,7 @@ const NEWEST_LITE: &str = "moq-lite-05";
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_websocket_uses_newest_version() {
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("failed to create broadcast");
@@ -1873,7 +1872,7 @@ async fn broadcast_websocket_uses_newest_version() {
 		.with_websocket(ws_listener);
 	let mut server = server.listen().await.expect("failed to listen");
 
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	client_config.websocket.delay = Some(std::time::Duration::ZERO);
@@ -1918,7 +1917,7 @@ async fn broadcast_websocket_uses_newest_version() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_race_quic_wins() {
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("failed to create broadcast");
@@ -1947,7 +1946,7 @@ async fn broadcast_race_quic_wins() {
 		.with_websocket(ws_listener);
 	let mut server = server.listen().await.expect("failed to listen");
 
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// Zero head start: QUIC has to win on its own merit, not by penalising WS.
@@ -2001,7 +2000,7 @@ async fn broadcast_race_quic_wins() {
 /// consumer.
 #[tokio::test]
 async fn resubscribe_keeps_flowing_moq_lite_03() {
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -2021,7 +2020,7 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("server addr");
 
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -2133,7 +2132,7 @@ fn active_viewers(registry: &moq_net::stats::Registry) -> u64 {
 /// viewer nobody is watching (chained through relays, one phantom per hop).
 #[tokio::test]
 async fn idle_subscription_releases_the_viewer_count() {
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -2156,7 +2155,7 @@ async fn idle_subscription_releases_the_viewer_count() {
 	let registry = moq_net::stats::Registry::new(moq_net::stats::Config::new());
 	let stats = registry.tier(moq_net::stats::Tier::default()).session("");
 
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -2358,7 +2357,7 @@ async fn one_shot_connect_surfaces_the_session_close() {
 	// close each session as soon as it lands.
 	let accepts = Arc::new(AtomicUsize::new(0));
 	let server_accepts = accepts.clone();
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let server_handle = tokio::spawn(async move {
 		while let Some(request) = server.accept().await {
 			server_accepts.fetch_add(1, Ordering::SeqCst);
@@ -2410,7 +2409,7 @@ async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 	let (mut server, addr) = test_server().await;
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let _broadcast = pub_origin
 		.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -2428,7 +2427,7 @@ async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 		Ok::<_, anyhow::Error>(())
 	});
 
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -2472,7 +2471,7 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 	use moq_tokio::moq_net::Origin;
 
 	// ── publisher (server): only allowed to announce under "allowed" ──
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("allowed/test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("failed to create broadcast");
@@ -2492,7 +2491,7 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 
 	// ── subscriber (client): interested in both "allowed" and "denied" ──
 	// "denied" is disjoint from the publisher's scope, so its announce stream is FINed.
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let consume = sub_origin
 		.scope(&["allowed".into(), "denied".into()])
 		.expect("failed to scope consume origin");
@@ -2550,7 +2549,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 	use moq_tokio::moq_net::Origin;
 
 	// ── subscriber (server): interested in both "allowed" and "denied" ──
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let consume = sub_origin
 		.scope(&["allowed".into(), "denied".into()])
 		.expect("failed to scope consume origin");
@@ -2608,7 +2607,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 	});
 
 	// ── publisher (client): only allowed to serve under "allowed" ──
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("allowed/test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("failed to create broadcast");
@@ -2681,7 +2680,7 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 	let version: moq_net::Version = version.parse().expect("invalid version");
 
 	// ── publisher (server) ──────────────────────────────────────────
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("failed to create broadcast");
@@ -2703,7 +2702,7 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	// ── subscriber (client) ─────────────────────────────────────────
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -2829,7 +2828,7 @@ async fn goaway_moq_transport_19_quic() {
 async fn goaway_timeout_force_close_moq_transport_19_quic() {
 	let version: moq_net::Version = "moq-transport-19".parse().unwrap();
 
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".to_string());
@@ -2858,7 +2857,7 @@ async fn goaway_timeout_force_close_moq_transport_19_quic() {
 		Ok::<_, anyhow::Error>(())
 	});
 
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client.with_subscriber(sub_origin), url))
 		.await
 		.expect("client connect timed out")
@@ -2916,7 +2915,7 @@ async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 	let (mut server, addr) = test_server().await;
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let server_handle = tokio::spawn(async move {
 		// Accept and immediately sever, over and over.
 		while let Some(request) = server.accept().await {

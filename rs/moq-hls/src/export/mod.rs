@@ -350,6 +350,19 @@ async fn watch(
 
 #[cfg(test)]
 mod tests {
+	/// Build an origin producer, spawning its driver on the ambient runtime.
+	fn produce_origin() -> moq_net::origin::Producer {
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		if tokio::runtime::Handle::try_current().is_ok() {
+			tokio::spawn(driver);
+		} else {
+			// A sync test: nothing polls the driver, and dropping it would tear
+			// the origin down, so leak it and rely on the synchronous half.
+			std::mem::forget(driver);
+		}
+		producer
+	}
+
 	use super::*;
 
 	fn frame(micros: u64, keyframe: bool) -> moq_mux::container::Frame {
@@ -397,7 +410,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn escaping_broadcast_reference_is_not_advertised() {
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let _broadcast = origin
 			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
@@ -423,7 +436,7 @@ mod tests {
 	// timeline alone, and a segment request fetches and transmuxes exactly its groups.
 	#[tokio::test]
 	async fn serves_playlist_and_segments_from_the_timeline() {
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let mut broadcast = origin
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
@@ -500,7 +513,7 @@ mod tests {
 	// and $Time$ addressing resolves a segment's pts to the same bytes its number does.
 	#[tokio::test]
 	async fn serves_dash_manifest_and_time_addressed_segments() {
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let mut broadcast = origin
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
@@ -581,7 +594,7 @@ mod tests {
 	// A finished broadcast renders a static presentation, offset to its first listed segment.
 	#[tokio::test]
 	async fn dash_manifest_turns_static_when_finished() {
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let mut broadcast = origin
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
@@ -642,7 +655,7 @@ mod tests {
 	// EXTINF exceeds its target duration is invalid.
 	#[tokio::test]
 	async fn target_duration_covers_the_window_without_a_declared_bound() {
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let mut broadcast = origin
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
@@ -679,7 +692,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn audio_and_video_segments_are_aligned() {
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let mut broadcast = origin
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
@@ -764,7 +777,7 @@ mod tests {
 	// drop the last segment of every recording.
 	#[tokio::test]
 	async fn dropping_the_broadcaster_keeps_a_cursor_drainable() {
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let mut broadcast = origin
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
@@ -879,7 +892,7 @@ mod tests {
 			(rendition, watcher)
 		}
 
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let (old, config) = publish(&origin, OLD);
 		settle().await;
 
@@ -943,7 +956,7 @@ mod tests {
 	// subscription) would stay alive and the cursor would park at the live edge forever.
 	#[tokio::test]
 	async fn removing_a_rendition_ends_its_segment_cursor() {
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let broadcast = origin
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
@@ -986,7 +999,7 @@ mod tests {
 	// source subscription it holds -- for as long as the consumer lived.
 	#[tokio::test]
 	async fn dropping_the_broadcaster_releases_its_renditions() {
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let mut broadcast = origin
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
@@ -1043,7 +1056,7 @@ mod tests {
 	// segment and then ends both cursors.
 	#[tokio::test]
 	async fn record_cursors_yield_renditions_and_segments() {
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let mut broadcast = origin
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");

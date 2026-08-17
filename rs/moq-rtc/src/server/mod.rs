@@ -293,11 +293,24 @@ pub(crate) async fn delete(State(server): State<Server>, Path(path): Path<String
 
 #[cfg(test)]
 mod tests {
+	/// Build an origin producer, spawning its driver on the ambient runtime.
+	fn produce_origin() -> moq_net::origin::Producer {
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		if tokio::runtime::Handle::try_current().is_ok() {
+			tokio::spawn(driver);
+		} else {
+			// A sync test: nothing polls the driver, and dropping it would tear
+			// the origin down, so leak it and rely on the synchronous half.
+			std::mem::forget(driver);
+		}
+		producer
+	}
+
 	use super::*;
 
 	fn server() -> Server {
-		let publisher = moq_net::Origin::random().produce();
-		let subscriber = moq_net::Origin::random().produce().consume();
+		let publisher = produce_origin();
+		let subscriber = produce_origin().consume();
 		Server::new(Config::default(), publisher, subscriber)
 	}
 

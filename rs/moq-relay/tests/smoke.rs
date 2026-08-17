@@ -176,7 +176,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	let expected_version = newest_lite_version();
 
 	// ── publisher ───────────────────────────────────────────────────
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -199,7 +199,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	);
 
 	// ── subscriber ──────────────────────────────────────────────────
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 
 	let (_client, sub_connection) =
@@ -369,7 +369,7 @@ async fn relay_websocket_root_path_upgrades() {
 	let url: url::Url = format!("ws://127.0.0.1:{port}").parse().expect("parse url");
 
 	// ── publisher ───────────────────────────────────────────────────
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -389,7 +389,7 @@ async fn relay_websocket_root_path_upgrades() {
 	.expect("publisher connect failed (root-path WS upgrade)");
 
 	// ── subscriber ──────────────────────────────────────────────────
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 	let (_client, sub_connection) =
 		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
@@ -436,7 +436,7 @@ async fn two_publish_only_clients_coexist() {
 	let url: url::Url = format!("ws://127.0.0.1:{port}/smoke").parse().expect("parse url");
 
 	// ── two publish-only publishers, each serving a distinct broadcast ──
-	let pub_a = Origin::random().produce();
+	let pub_a = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast_a = pub_a
 		.create_broadcast("alpha", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast a");
@@ -447,7 +447,7 @@ async fn two_publish_only_clients_coexist() {
 		.write_frame(moq_net::Timestamp::ZERO, b"a".as_ref())
 		.expect("write frame a");
 
-	let pub_b = Origin::random().produce();
+	let pub_b = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast_b = pub_b
 		.create_broadcast("beta", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast b");
@@ -474,7 +474,7 @@ async fn two_publish_only_clients_coexist() {
 	.expect("publisher b connect failed");
 
 	// ── one subscriber should see broadcasts from both publish-only clients ──
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 	let (_client, sub_connection) =
 		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
@@ -594,7 +594,7 @@ async fn internal_tcp_round_trip() {
 	let expected_version = newest_lite_version();
 
 	// ── publisher ───────────────────────────────────────────────────
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -619,7 +619,7 @@ async fn internal_tcp_round_trip() {
 	);
 
 	// ── subscriber ──────────────────────────────────────────────────
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 	let (_client, sub_connection) =
 		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
@@ -707,7 +707,7 @@ async fn internal_unix_round_trip() {
 	let expected_version = newest_lite_version();
 
 	// ── publisher ───────────────────────────────────────────────────
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -732,7 +732,7 @@ async fn internal_unix_round_trip() {
 	);
 
 	// ── subscriber ──────────────────────────────────────────────────
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 	let (_client, sub_connection) =
 		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
@@ -795,7 +795,7 @@ fn path_versions() -> Vec<moq_net::Version> {
 /// whether the request path reached the server (it scopes the publisher's grant
 /// to that root).
 async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: url::Url, broadcast: &str) -> String {
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut bc = pub_origin
 		.create_broadcast(broadcast, moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -812,7 +812,7 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 		.expect("publisher connect timeout")
 		.expect("publisher connect failed");
 
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 	let sub_client = client_version(Some(version)).with_subscriber(sub_origin);
 	let (_client, sub_connection) = tokio::time::timeout(TIMEOUT, connect_once(sub_client, sub_url))
@@ -980,7 +980,7 @@ async fn subscribe_only_public_rejects_publisher_role() {
 	let (port, handle) = spawn_subscribe_only_relay().await;
 	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 
 	// The lite-05 client resolves `connect()` optimistically, so it may return Ok
 	// before the relay's verdict lands. Either the connect fails outright, or the
@@ -1012,7 +1012,7 @@ async fn subscribe_only_public_accepts_subscriber_role() {
 	let (port, handle) = spawn_subscribe_only_relay().await;
 	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 		.await
 		.expect("subscriber connect timeout")
@@ -1068,7 +1068,7 @@ async fn publish_only_public_rejects_subscriber_role() {
 	let (port, handle) = spawn_publish_only_relay().await;
 	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 
 	// Like the publisher case, `connect()` may resolve optimistically; either it fails
 	// outright, or the session the relay hands back closes shortly after.

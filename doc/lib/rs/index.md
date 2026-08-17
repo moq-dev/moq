@@ -290,7 +290,7 @@ your broadcasts and subscriptions carry across reconnects:
 
 ```rust
 // Subscribe: wait for broadcasts to be announced.
-let origin = moq_net::Origin::random().produce();
+let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 let mut announced = origin.consume().announced();
 let _connection = client.with_subscriber(origin).connect(url);
 

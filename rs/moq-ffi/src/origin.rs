@@ -166,8 +166,18 @@ impl MoqOriginProducer {
 			info = info.with_pool(moq_net::cache::Pool::new(capacity));
 		}
 
-		Self { inner: info.produce() }
+		Self { inner: spawn(info) }
 	}
+}
+
+/// Build an origin producer, spawning its driver on the FFI runtime.
+///
+/// Uses the runtime handle directly (rather than `tokio::spawn`) because
+/// constructors are called from foreign threads with no runtime entered.
+pub(crate) fn spawn(info: moq_net::origin::Info) -> moq_net::origin::Producer {
+	let (producer, driver) = moq_net::origin::Producer::new(info);
+	crate::ffi::RUNTIME.spawn(driver);
+	producer
 }
 
 impl MoqOriginConsumer {
@@ -187,14 +197,14 @@ pub(crate) fn resolve_pair(
 ) -> (moq_net::origin::Producer, moq_net::origin::Producer) {
 	if publish.is_none() && consume.is_none() {
 		// Clones of a Producer share the underlying origin, so this is one origin, not two.
-		let shared = moq_net::Origin::random().produce();
+		let shared = spawn(moq_net::Origin::random().into());
 		return (shared.clone(), shared);
 	}
 
 	let resolve = |origin: Option<&Arc<MoqOriginProducer>>| {
 		origin
 			.map(|o| o.inner().clone())
-			.unwrap_or_else(|| moq_net::Origin::random().produce())
+			.unwrap_or_else(|| spawn(moq_net::Origin::random().into()))
 	};
 	(resolve(publish), resolve(consume))
 }

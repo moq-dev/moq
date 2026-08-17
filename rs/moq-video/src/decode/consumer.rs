@@ -82,6 +82,19 @@ impl Consumer {
 
 #[cfg(test)]
 mod tests {
+	/// Build an origin producer, spawning its driver on the ambient runtime.
+	fn produce_origin() -> moq_net::origin::Producer {
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		if tokio::runtime::Handle::try_current().is_ok() {
+			tokio::spawn(driver);
+		} else {
+			// A sync test: nothing polls the driver, and dropping it would tear
+			// the origin down, so leak it and rely on the synchronous half.
+			std::mem::forget(driver);
+		}
+		producer
+	}
+
 	use super::*;
 	use crate::decode::Kind;
 	use crate::encode::{Config as EncodeConfig, Encoder, Kind as EncodeKind, Producer as EncodeProducer};
@@ -106,7 +119,7 @@ mod tests {
 			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
 		}
 
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let mut requests = origin.dynamic();
 		let served = source_subscriber.clone();
 		tokio::spawn(async move {

@@ -1734,6 +1734,7 @@ mod subscribe_cursor_test {
 mod tests {
 	use super::*;
 	use crate::lite::test_transport::SinkSession;
+	use crate::model::ProduceTest;
 
 	async fn settle() {
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
