@@ -53,7 +53,7 @@ The marker never goes in the codebase itself: no code comments, doc comments, or
 
 ## Reviews
 
-Codex and CodeRabbit review PRs automatically. If either reviewer is still pending, wait for its outcome. Treat a review as current only when it is substantive and covers the present head, or when no material code has changed since it ran. Triage every credible current review either reviewer provides. Run the `/review` skill locally against the PR only when both reviewers skip or fail to provide a current, substantive review. Push high-confidence, unambiguous fixes directly, and escalate anything ambiguous, architectural, or open to interpretation by asking first rather than guessing.
+Codex and CodeRabbit review PRs automatically. If either reviewer is still pending, poll with capped exponential backoff for at most 10 minutes; budget expiry counts as a failed review. Treat a review as current only when it is substantive and covers the present head, or when no material code has changed since it ran. Triage every credible current review either reviewer provides. Run the `/review` skill locally against the PR only when both reviewers skip or fail to provide a current, substantive review. Push high-confidence, unambiguous fixes directly, and escalate anything ambiguous, architectural, or open to interpretation by asking first rather than guessing.
 
 Reply to review comments as you address them, saying what changed or why you disagree, so the reviewer doesn't have to diff the branch to find out. Replies are GitHub prose like any other, so they carry the [AI Contributions](#ai-contributions) marker.
 

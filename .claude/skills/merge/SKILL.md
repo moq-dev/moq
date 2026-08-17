@@ -26,7 +26,10 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
    - Require a current head branch distinct from the selected base before any push. If the checkout is detached or on
      the selected base, create a scoped head branch at the current commit first.
    - Point the head branch's upstream at the freshly fetched selected remote base so diff-scoped checks use the correct
-     comparison. Push with `git push origin HEAD`, never `git push -u`.
+     comparison. Never use `git push -u`.
+   - For an existing PR, resolve and verify `headRepository.fullName` and `headRefName`, select the local remote matching
+     that head repository, and push `HEAD:<headRefName>` there. For a new PR, push the new head branch to a confirmed
+     writable remote. Stop if the intended head repository or write target cannot be established confidently.
    - If the current branch has no PR, confirm it has committed work against an unambiguous base, preserves unrelated
      user changes, and can be pushed. Push it and create a draft PR with an accurate title and body, then continue.
    - Stop for direction if more than one PR or base is plausible, there is no committed work to propose, ownership of
@@ -50,8 +53,9 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
      it ran.
    - If either Codex or CodeRabbit supplies a credible current-head review, triage that review and do not duplicate it
      with a self-review.
-   - If either reviewer is still pending, wait for its outcome. A quota message, explicit skip, failure to start, or
-     completion without a substantive review counts as skipped, not as a review.
+   - If either reviewer is still pending, poll with capped exponential backoff for at most 10 minutes. A quota message,
+     explicit skip, failure to start, budget expiry, or completion without a substantive review counts as skipped, not
+     as a review.
    - Self-review the full diff and nearby code only when both Codex and CodeRabbit skip or fail to provide a current,
      substantive review. Review for correctness, regressions, security, data loss, compatibility breaks, races, missing
      tests, and likely deployment or CI failures. Separate blockers from optional polish.
