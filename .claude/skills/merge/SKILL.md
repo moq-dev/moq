@@ -19,13 +19,13 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
 ## Workflow
 
 1. Resolve or create the PR.
-   - Before any Git command, remove credential access and apply trusted per-command Git configuration that disables hooks
-     and external filesystem monitors. Do not persist these safety settings in PR-accessible Git metadata.
+   - Before any Git command, remove credential access and apply trusted per-command Git configuration that disables
+     hooks, external filesystem monitors, and every external clean, smudge, and process filter. Do not persist these
+     safety settings in PR-accessible Git metadata.
    - Run `git status --short` under that trusted configuration before changing the checkout or refs. Treat pre-existing
      changes as user-owned; preserve them or stop rather than carrying them into the PR implicitly.
-   - Before materializing an untrusted PR head, also disable every external clean, smudge, and process filter. If that
-     cannot be guaranteed, materialize the head only in disposable credential-free isolation that cannot write host Git
-     metadata.
+   - If those safeguards cannot be guaranteed, inspect or materialize the head only in disposable credential-free
+     isolation that cannot write host Git metadata.
    - Prefer an explicit PR number or URL. Resolve its `headRepository.fullName`, `headRefName`, and `headRefOid`, then
      bind the checkout to that exact head before editing or pushing. Stop if local and remote identities differ and the
      exact head cannot be checked out safely. Otherwise inspect the current branch.
