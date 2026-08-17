@@ -12,9 +12,10 @@ use crate::catalog::VideoHint;
 /// from the stream, and a [`video`](Self::video) hint can pin fields the stream can't reveal
 /// (bitrate) or publish the catalog before the first keyframe. See [`VideoHint`].
 ///
-/// [`label`](Self::label) and [`video`](Self::video) describe one rendition, so they apply only to a
-/// codec format. A container publishes its own tracks and describes each from its own metadata:
-/// [`Container::new`](crate::import::Container::new) rejects either field rather than dropping it.
+/// Each optional field applies to a subset of formats, and a format that cannot honor one rejects it
+/// rather than dropping it. [`label`](Self::label) describes one rendition, so a container, which
+/// publishes and describes its own tracks, refuses it. [`video`](Self::video) seeds a video config,
+/// so an audio format, which reads its whole config from [`data`](Self::data), refuses that too.
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Init {
@@ -22,10 +23,8 @@ pub struct Init {
 	pub format: String,
 	/// Codec init bytes. Required for audio; may be empty for a video format that resolves in band.
 	pub data: Bytes,
-	/// Human-readable rendition name for a track picker.
-	///
-	/// For a video format this is the default for [`VideoHint::label`]: an explicit hint label wins,
-	/// so set one or the other rather than both.
+	/// Human-readable rendition name for a track picker. The single source: a label can never be
+	/// detected from the stream, so nothing else sets one.
 	pub label: Option<String>,
 	/// Caller-provided fields for a video track.
 	pub video: Option<VideoHint>,
@@ -48,14 +47,54 @@ impl Init {
 		self
 	}
 
-	/// Error if a field describing a single rendition was set, for a container that has many.
-	pub(crate) fn reject_container_fields(&self) -> crate::Result<()> {
-		if self.label.is_some() {
-			return Err(crate::Error::UnsupportedByContainer("label"));
+	/// Error if a field was set that this kind of format cannot honor.
+	pub(crate) fn reject_unsupported(&self, kind: Kind) -> crate::Result<()> {
+		let unsupported = |field| {
+			Err(crate::Error::UnsupportedField {
+				field,
+				kind: kind.name(),
+			})
+		};
+
+		match kind {
+			// A container names and describes each track it publishes, so neither field has a single
+			// rendition to land on.
+			Kind::Container => {
+				if self.label.is_some() {
+					return unsupported("label");
+				}
+				if self.video.is_some() {
+					return unsupported("video hint");
+				}
+			}
+			// An audio importer builds its whole config from the init bytes; only the label rides along.
+			Kind::Audio => {
+				if self.video.is_some() {
+					return unsupported("video hint");
+				}
+			}
+			// Video honors everything.
+			Kind::Video => {}
 		}
-		if self.video.is_some() {
-			return Err(crate::Error::UnsupportedByContainer("video hint"));
-		}
+
 		Ok(())
+	}
+}
+
+/// What an [`Init`] format resolves to, which decides the fields it can honor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Kind {
+	Audio,
+	Video,
+	Container,
+}
+
+impl Kind {
+	fn name(self) -> &'static str {
+		match self {
+			Kind::Audio => "audio",
+			Kind::Video => "video",
+			Kind::Container => "container",
+		}
 	}
 }

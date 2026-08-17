@@ -204,8 +204,8 @@ media, err := broadcast.PublishMedia("avc3", nil, moq.WithVideoHint(moq.VideoHin
 `WithLabel` stores a human-readable rendition name in the catalog without
 changing the generated transport track name. Labels do not need to be unique.
 It names one rendition, so a container format (`fmp4`, `mkv`, `ts`, `flv`) returns
-an error rather than ignoring it: those describe their own tracks. The same goes
-for `WithVideoHint`.
+an error rather than ignoring it: those describe their own tracks. `WithVideoHint`
+is likewise an error on a container or an audio format.
 
 Each catalog `Video` has a `Stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
 

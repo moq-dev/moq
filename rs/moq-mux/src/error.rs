@@ -99,12 +99,18 @@ pub enum Error {
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
 
-	/// A single-rendition [`Init`](crate::import::Init) field was set on a container format.
+	/// A caller-supplied [`Init`](crate::import::Init) field does not apply to the chosen format.
 	///
-	/// A container publishes its own tracks and describes each one from the container's metadata, so
-	/// there is no single rendition for the field to apply to.
-	#[error("container format does not support {0}")]
-	UnsupportedByContainer(&'static str),
+	/// A container publishes and describes its own tracks, so no single rendition is there to
+	/// configure. An audio importer reads its whole config out of the init bytes, so there is nothing
+	/// for a video hint to seed. Either way the field would be ignored, which is worse than an error.
+	#[error("a {kind} format does not support the {field}")]
+	UnsupportedField {
+		/// The field that was set.
+		field: &'static str,
+		/// The kind of format that cannot honor it.
+		kind: &'static str,
+	},
 
 	/// A non-keyframe frame was received before any keyframe opened a group.
 	/// A track joining mid-stream should skip frames until the first keyframe.

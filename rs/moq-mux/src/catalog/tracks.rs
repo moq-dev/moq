@@ -96,8 +96,11 @@ pub trait RenditionConfig<E: CatalogExt>: Sized + 'static {
 #[derive(Clone, Default, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct VideoHint {
-	/// Human-readable rendition name for track pickers.
-	pub label: Option<String>,
+	/// Human-readable rendition name, plumbed through from [`Init::label`](crate::import::Init::label).
+	///
+	/// Not a hint: every other field here seeds something the stream may also reveal, while a label
+	/// can only ever come from the caller. It rides along so one `apply` writes the whole config.
+	pub(crate) label: Option<String>,
 	/// The video codec.
 	pub codec: Option<hang::catalog::VideoCodec>,
 	/// The encoded width in pixels.
@@ -509,7 +512,6 @@ mod tests {
 		let (_broadcast, catalog, mut rendition) = video_track();
 
 		let hint = VideoHint {
-			label: Some("Main camera".to_string()),
 			bitrate: Some(456),
 			..Default::default()
 		};
@@ -521,7 +523,6 @@ mod tests {
 
 		let snapshot = catalog.snapshot();
 		let config = snapshot.video.renditions.get("v").unwrap();
-		assert_eq!(config.label.as_deref(), Some("Main camera"));
 		assert_eq!(config.bitrate, Some(456), "a hinted bitrate must not be overwritten");
 		assert!(config.jitter.is_some(), "the unhinted jitter should still be detected");
 	}

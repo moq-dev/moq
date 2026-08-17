@@ -5,7 +5,7 @@
 //! track, so neither exposes a single-track demand/name handle. Today every
 //! container supports both; both wrap the same [`ContainerImpl`] dispatch.
 
-use super::Init;
+use super::{Init, init::Kind};
 use crate::Result;
 
 /// The concrete container importers, shared by [`Container`] and
@@ -107,7 +107,7 @@ impl<E: crate::container::ts::Catalog> Container<E> {
 			"flv" => ContainerImpl::flv(broadcast, reserved),
 			_ => return Err(crate::Error::UnknownFormat(init.format.clone())),
 		};
-		init.reject_container_fields()?;
+		init.reject_unsupported(Kind::Container)?;
 		inner.decode(&init.data)?;
 		Ok(Self { inner })
 	}
@@ -170,7 +170,7 @@ impl<E: crate::container::ts::Catalog> ContainerStream<E> {
 			"flv" => ContainerImpl::flv(broadcast, reserved),
 			_ => return Err(crate::Error::UnknownFormat(init.format.clone())),
 		};
-		init.reject_container_fields()?;
+		init.reject_unsupported(Kind::Container)?;
 		Ok(Self { inner })
 	}
 
@@ -236,14 +236,14 @@ mod tests {
 			let (broadcast, catalog) = new_broadcast();
 			let err = Container::<()>::new(broadcast, catalog.reserve(), &init).err();
 			assert!(
-				matches!(err, Some(crate::Error::UnsupportedByContainer(field)) if field == expected),
+				matches!(err, Some(crate::Error::UnsupportedField { field, kind: "container" }) if field == expected),
 				"expected {expected} to be rejected, got {err:?}"
 			);
 
 			let (broadcast, catalog) = new_broadcast();
 			let err = ContainerStream::<()>::new(broadcast, catalog.reserve(), &init).err();
 			assert!(
-				matches!(err, Some(crate::Error::UnsupportedByContainer(field)) if field == expected),
+				matches!(err, Some(crate::Error::UnsupportedField { field, kind: "container" }) if field == expected),
 				"expected {expected} to be rejected on a stream, got {err:?}"
 			);
 		}
