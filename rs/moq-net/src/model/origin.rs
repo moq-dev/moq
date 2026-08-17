@@ -4015,6 +4015,76 @@ mod tests {
 		);
 	}
 
+	/// A spliced `read_frame` holds its group internally while a partial frame fills.
+	/// If that group expires, its unread content still belongs to the logical
+	/// subscriber's stale counters even though the helper skips to the live edge.
+	#[tokio::test]
+	async fn test_stats_spliced_read_frame_counts_internal_expiry() {
+		use crate::Timestamp;
+		use crate::frame;
+		use crate::stats::{Config, Registry, Tier};
+		use bytes::Bytes;
+
+		tokio::time::pause();
+
+		let registry = Registry::new(Config::new());
+		let ctx = registry.tier(Tier::default()).session("acme");
+
+		let origin = Origin::random().produce();
+		let ingress = origin.clone().with_stats(ctx.clone());
+		let egress = origin.consume().with_stats(ctx.clone());
+
+		let mut announced = egress.announced();
+		let source = ingress.create_broadcast("demo", announce()).unwrap();
+		let mut dynamic = source.dynamic();
+		settle().await;
+		settle().await;
+
+		let broadcast = announced.next().await.unwrap().broadcast.unwrap();
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		let mut subscriber = subscribing.await.unwrap();
+
+		let mut old = producer.append_group().unwrap();
+		let mut writing = old
+			.create_frame(frame::Info {
+				size: 6,
+				timestamp: Timestamp::ZERO,
+			})
+			.unwrap();
+		writing.write(Bytes::from_static(b"old")).unwrap();
+
+		let pending = tokio::spawn(async move { subscriber.read_frame().await });
+		tokio::task::yield_now().await;
+		assert!(!pending.is_finished(), "the partial frame should still be pending");
+
+		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		let mut edge = producer.append_group().unwrap();
+		edge.write_frame(Timestamp::from_millis(1000).unwrap(), Bytes::from_static(b"edge"))
+			.unwrap();
+		edge.finish().unwrap();
+
+		let frame = pending.await.unwrap().unwrap().expect("live edge frame");
+		assert_eq!(frame.payload, Bytes::from_static(b"edge"));
+		writing.abort(crate::Error::Cancel).unwrap();
+		settle().await;
+
+		let report = registry.report();
+		let traffic = &report
+			.traffic
+			.iter()
+			.find(|entry| entry.path.as_str() == "demo")
+			.expect("demo tracked")
+			.publisher;
+		assert_eq!(traffic.groups, 1, "only the live edge group was delivered");
+		assert_eq!(traffic.frames, 1, "only the live edge frame was delivered");
+		assert_eq!(traffic.bytes, 4, "only the live edge payload was delivered");
+		assert_eq!(traffic.stale.groups, 0, "the internal group was never handed out");
+		assert_eq!(traffic.stale.frames, 1, "the expired partial frame was discarded");
+		assert_eq!(traffic.stale.bytes, 6, "the declared partial payload was discarded");
+	}
+
 	/// Datagrams bypass the group/frame handles entirely, so they're metered at the
 	/// producer (ingress write) and the subscriber (egress read). Each one counts as
 	/// the single-frame group it stands in for, plus the `datagrams` breakout.

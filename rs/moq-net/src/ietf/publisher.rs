@@ -1,7 +1,8 @@
-use crate::{frame, group, origin, track};
+use crate::{Latency, frame, group, origin, track};
 use std::{
 	collections::HashMap,
 	task::{Poll, ready},
+	time::Duration,
 };
 
 use web_transport_trait::poll::SendStream as _;
@@ -15,6 +16,16 @@ use crate::{
 };
 
 use super::{Message, Version, cluster, peer};
+
+/// Build the serving-side subscription for a peer whose wire protocol carries no
+/// latency preference. The receiver applies its own budget after the transfer.
+fn serving_subscription(subscriber_priority: u8) -> Subscription {
+	Subscription {
+		priority: super::priority::from_wire(subscriber_priority),
+		latency: Latency::max(Duration::MAX),
+		..Default::default()
+	}
+}
 
 /// A broadcast whose route table is watched for changes in what we advertise: the
 /// namespace becoming (un)advertisable, or its path or cost moving.
@@ -537,10 +548,9 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 			}
 		};
 
-		let subscription = Subscription {
-			priority: super::priority::from_wire(msg.subscriber_priority),
-			..Default::default()
-		};
+		// moq-transport has no subscriber latency parameter. Keep everything the
+		// producer retained and let the receiving subscriber enforce its own budget.
+		let subscription = serving_subscription(msg.subscriber_priority);
 
 		let track = match async { broadcast.track(&msg.track_name)?.subscribe(subscription).await }.await {
 			Ok(track) => track,
@@ -1736,6 +1746,7 @@ mod tests {
 	use super::*;
 	use crate::lite::test_transport::SinkSession;
 	use crate::model::ProduceTest;
+	use futures::FutureExt;
 
 	async fn settle() {
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -1755,6 +1766,31 @@ mod tests {
 			..Default::default()
 		});
 		slot
+	}
+
+	/// moq-transport cannot carry the receiver's latency budget, so the serving
+	/// subscription must preserve everything the producer still retains.
+	#[test]
+	fn serving_subscription_keeps_retained_backlog() {
+		let mut producer = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		for millis in [0, 1000] {
+			let mut group = producer.append_group().unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(millis).unwrap(), b"frame".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+		}
+
+		let mut subscriber = producer.subscribe(serving_subscription(128));
+		for sequence in [0, 1] {
+			let group = subscriber
+				.recv_group()
+				.now_or_never()
+				.expect("retained group should be ready")
+				.unwrap()
+				.expect("track should remain open");
+			assert_eq!(group.sequence, sequence);
+		}
 	}
 
 	/// A peer that requires solicitation, which is what hands the advertisements to the
