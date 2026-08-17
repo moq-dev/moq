@@ -247,6 +247,10 @@ struct FrameHit {
 struct Slot {
 	group: group::Producer,
 
+	// When this group entered the track at this hop. This is the wall-clock
+	// backstop for groups whose first frame has not supplied a timestamp yet.
+	arrived: web_async::time::Instant,
+
 	// Incarnation stamp, echoed by this slot's arrival entry (if any). A re-served
 	// sequence (an aborted group re-created by the publisher or re-fetched as
 	// backfill) gets a fresh stamp, so a historical arrival entry can't resolve to
@@ -523,49 +527,51 @@ impl TrackState {
 		self.info.as_ref().map(|info| info.latency_max)
 	}
 
-	/// The live edge a subscription bounded at `cap` measures drift against: the
-	/// highest-sequence group at or below it that has presented a frame, and that
-	/// frame's timestamp.
+	/// The live edges a subscription bounded at `cap` measures drift against: the
+	/// highest-sequence group for wall-clock age, plus the highest one that has
+	/// presented a frame for timestamp age.
 	///
-	/// One scan answers a whole poll. The anchor for any candidate is "the newest
-	/// stamped group above it", and the highest-sequence stamped group in range is above
-	/// every candidate below it and above none at or past it, so it is that anchor for
-	/// all of them. Recomputing per candidate would make walking a backlog of N groups
-	/// off in one poll cost O(N^2).
+	/// One scan answers a whole poll. Each highest-sequence anchor in range is above
+	/// every candidate below it and above none at or past it. Recomputing per candidate
+	/// would make walking a backlog of N groups off in one poll cost O(N^2).
 	///
 	/// Capped because a group can only be late relative to data that would actually be
 	/// served in its place: a subscription ending at a takeover boundary can't jump past
 	/// it, so the groups it still wants aren't stale just because the route ran on.
 	fn live_edge(&self, cap: Option<u64>) -> Option<Edge> {
-		let mut edge: Option<Edge> = None;
+		let mut wall: Option<WallEdge> = None;
+		let mut presentation: Option<PresentationEdge> = None;
 		for slot in self.lookup.values() {
 			let group = &slot.group;
 			if cap.is_some_and(|cap| group.sequence > cap) || group.is_aborted() {
 				continue;
 			}
+			if wall.is_none_or(|edge| group.sequence > edge.sequence) {
+				wall = Some(WallEdge {
+					sequence: group.sequence,
+					stamp: slot.stamp,
+					arrived: slot.arrived,
+				});
+			}
 			if let Some(timestamp) = group.timestamp()
-				&& edge.is_none_or(|edge| group.sequence > edge.sequence)
+				&& presentation.is_none_or(|edge| group.sequence > edge.sequence)
 			{
-				edge = Some(Edge {
+				presentation = Some(PresentationEdge {
 					sequence: group.sequence,
 					stamp: slot.stamp,
 					timestamp,
 				});
 			}
 		}
-		edge
+		wall.map(|wall| Edge { wall, presentation })
 	}
 
 	/// Whether the group at `sequence` has drifted further behind `edge` than `budget`
 	/// tolerates, so a subscriber should skip it rather than hand it over.
 	///
-	/// Measured in presentation time: both ends are stamped once, when a group's first
-	/// frame is created, so a backlog delivered as a burst still reads as its true age
-	/// rather than as the moment it happened to arrive. A group that has presented
-	/// nothing is never stale, and neither is one with nothing newer stamped above it:
-	/// with no timestamp there is nothing to measure, and the frames may simply not have
-	/// arrived yet. Such a group is bounded by the publisher's retention window instead,
-	/// which aborts it once it ages out (see [`Self::evict_expired`]).
+	/// Presentation time distinguishes a backlog delivered as a burst from live content.
+	/// Wall-clock arrival time backstops it, including for an empty or stalled group that
+	/// has no first-frame timestamp. Either age exceeding the budget makes the group stale.
 	///
 	/// The edge must sit strictly above the candidate. The live edge is never late
 	/// against itself, and backfill or the tail of a rewound timeline can carry a high
@@ -574,29 +580,36 @@ impl TrackState {
 		let Some(edge) = edge else {
 			return false;
 		};
-		if edge.sequence <= sequence {
-			return false;
-		}
-		// The anchor was resolved under an earlier lock, so confirm it is still the
-		// group it was: an eviction or a re-served sequence in between would otherwise
-		// convict a candidate on content that is no longer servable. Failing safe
-		// (delivering) is right, since the next poll resolves a fresh anchor.
-		let live = self
-			.lookup
-			.get(&edge.sequence)
-			.is_some_and(|slot| slot.stamp == edge.stamp && !slot.group.is_aborted());
-		if !live {
-			return false;
-		}
 		let Some(slot) = self.lookup.get(&sequence) else {
 			return false;
 		};
-		let Some(timestamp) = slot.group.timestamp() else {
-			return false;
-		};
-		// Newer data below this group's timestamp isn't drift, and a scale that can't
-		// subtract carries no information either way.
-		matches!(edge.timestamp.checked_sub(timestamp), Ok(age) if Duration::from(age) > budget)
+
+		// The anchors were resolved under an earlier lock, so confirm each still names
+		// the same servable incarnation before it convicts a candidate. Failing safe
+		// (delivering) is right, since the next poll resolves fresh anchors.
+		let wall_stale = edge.wall.sequence > sequence
+			&& self
+				.lookup
+				.get(&edge.wall.sequence)
+				.is_some_and(|live| live.stamp == edge.wall.stamp && !live.group.is_aborted())
+			&& edge
+				.wall
+				.arrived
+				.checked_duration_since(slot.arrived)
+				.is_some_and(|age| age > budget);
+
+		let presentation_stale = edge.presentation.is_some_and(|edge| {
+			edge.sequence > sequence
+				&& self
+					.lookup
+					.get(&edge.sequence)
+					.is_some_and(|live| live.stamp == edge.stamp && !live.group.is_aborted())
+				&& slot.group.timestamp().is_some_and(
+					|timestamp| matches!(edge.timestamp.checked_sub(timestamp), Ok(age) if Duration::from(age) > budget),
+				)
+		});
+
+		wall_stale || presentation_stale
 	}
 
 	/// Resolve a one-shot fetch from the track side: the cached group, or an [`Error`]
@@ -782,6 +795,7 @@ impl TrackState {
 			sequence,
 			Slot {
 				group: group.clone(),
+				arrived: web_async::time::Instant::now(),
 				stamp,
 			},
 		);
@@ -2582,6 +2596,23 @@ struct Drift {
 /// from whatever may occupy its sequence by the time a candidate is judged.
 #[derive(Clone, Copy)]
 struct Edge {
+	wall: WallEdge,
+	presentation: Option<PresentationEdge>,
+}
+
+/// The newest servable group, including an empty group with no media timestamp.
+#[derive(Clone, Copy)]
+struct WallEdge {
+	sequence: u64,
+	/// The slot incarnation this arrival time was read from, so an eviction or a re-served
+	/// sequence between resolving the anchor and using it is detectable.
+	stamp: u32,
+	arrived: web_async::time::Instant,
+}
+
+/// The newest servable group that has presented at least one frame.
+#[derive(Clone, Copy)]
+struct PresentationEdge {
 	sequence: u64,
 	/// The slot incarnation this timestamp was read from, so an eviction or a re-served
 	/// sequence between resolving the anchor and using it is detectable.
@@ -3350,6 +3381,11 @@ mod test {
 		Producer::new(Arc::new(broadcast::Info::default()), name, info)
 	}
 
+	/// A bounded replay window for tests whose subject requires every buffered group.
+	fn replay() -> Subscription {
+		Subscription::default().with_latency(Latency::max(Duration::from_secs(30)))
+	}
+
 	/// Helper: count live cached groups in state.
 	fn live_groups(state: &TrackState) -> usize {
 		state.lookup.len()
@@ -3961,6 +3997,21 @@ mod test {
 		assert_eq!(drain(&mut subscriber), vec![2, 3]);
 	}
 
+	#[tokio::test]
+	async fn wall_clock_expires_an_unstamped_group() {
+		tokio::time::pause();
+
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(None);
+		producer.append_group().unwrap(); // seq 0 stalls before its first frame
+
+		tokio::time::advance(Duration::from_secs(1)).await;
+		append_at(&mut producer, 1000); // seq 1 proves the live feed moved on
+
+		// With the real-time budget, wall-clock age backstops the missing timestamp.
+		assert_eq!(drain(&mut subscriber), vec![1]);
+	}
+
 	#[test]
 	fn latency_max_bounds_the_budget() {
 		// The publisher only keeps a group around for 500ms, so a subscriber asking to
@@ -4024,21 +4075,6 @@ mod test {
 		let consumer = producer.consume();
 		let group = consumer.fetch_group(0, None).now_or_never().unwrap().unwrap();
 		assert_eq!(group.sequence, 0);
-	}
-
-	#[test]
-	fn a_group_that_has_presented_nothing_is_never_stale() {
-		let mut producer = track_producer("test", None);
-		let mut stalled = producer.append_group().unwrap();
-		append_at(&mut producer, 10_000);
-
-		// The stalled group has no timestamp, so there is nothing to measure and no
-		// reason to assume it is old. It is still handed over, and the reader (or the
-		// publisher's own retention window) decides how long to wait on it.
-		let mut subscriber = producer.subscribe(None);
-		assert_eq!(drain(&mut subscriber), vec![0, 1]);
-
-		stalled.finish().unwrap();
 	}
 
 	#[tokio::test]
@@ -4128,8 +4164,9 @@ mod test {
 		assert_eq!(stale.frames, 2);
 	}
 
-	#[test]
-	fn a_lower_sequence_is_never_the_live_edge() {
+	#[tokio::test]
+	async fn a_lower_sequence_is_never_the_live_edge() {
+		tokio::time::pause();
 		let mut producer = track_producer("test", None);
 		// A high timestamp on a lower sequence is not a live edge: backfill served on
 		// demand sits there, and so does the tail of a timeline the publisher rewound.
@@ -4607,7 +4644,7 @@ mod test {
 	#[tokio::test]
 	async fn next_group_returns_arrivals_in_order() {
 		let mut producer = track_producer("test", None);
-		let mut consumer = producer.subscribe(None);
+		let mut consumer = producer.subscribe(replay());
 
 		// Seq 3 arrives first, then seq 5. Both should be returned in arrival order.
 		producer.create_group(group::Info { sequence: 3 }).unwrap();
@@ -4657,7 +4694,7 @@ mod test {
 	#[tokio::test]
 	async fn end_at_caps_next_group() {
 		let mut producer = track_producer("test", None);
-		let mut consumer = producer.subscribe(None);
+		let mut consumer = producer.subscribe(replay());
 
 		for s in 0..6 {
 			producer.create_group(group::Info { sequence: s }).unwrap();
@@ -4689,7 +4726,7 @@ mod test {
 	#[tokio::test]
 	async fn end_at_release_drains_cached_groups() {
 		let mut producer = track_producer("test", None);
-		let mut consumer = producer.subscribe(None);
+		let mut consumer = producer.subscribe(replay());
 
 		for s in 0..6 {
 			producer.create_group(group::Info { sequence: s }).unwrap();
@@ -4734,7 +4771,7 @@ mod test {
 	#[tokio::test]
 	async fn end_at_lower_than_cursor_parks_consumer() {
 		let mut producer = track_producer("test", None);
-		let mut consumer = producer.subscribe(None);
+		let mut consumer = producer.subscribe(replay());
 
 		for s in 0..3 {
 			producer.create_group(group::Info { sequence: s }).unwrap();
@@ -4778,7 +4815,7 @@ mod test {
 	#[tokio::test]
 	async fn end_at_toggling_around_late_arrivals() {
 		let mut producer = track_producer("test", None);
-		let mut consumer = producer.subscribe(None);
+		let mut consumer = producer.subscribe(replay());
 
 		consumer.end_at(5);
 
@@ -4824,7 +4861,7 @@ mod test {
 	#[tokio::test]
 	async fn end_at_parks_recv_group() {
 		let mut producer = track_producer("test", None);
-		let mut consumer = producer.subscribe(None);
+		let mut consumer = producer.subscribe(replay());
 
 		for s in 0..3 {
 			producer.create_group(group::Info { sequence: s }).unwrap();
@@ -4864,7 +4901,7 @@ mod test {
 	#[tokio::test]
 	async fn recv_group_serves_arrivals_behind_the_cap() {
 		let mut producer = track_producer("test", None);
-		let mut consumer = producer.subscribe(None);
+		let mut consumer = producer.subscribe(replay());
 
 		consumer.end_at(1);
 
@@ -4994,7 +5031,7 @@ mod test {
 	#[tokio::test]
 	async fn read_frame_returns_single_frame_per_group() {
 		let mut producer = track_producer("test", None);
-		let mut consumer = producer.subscribe(None);
+		let mut consumer = producer.subscribe(replay());
 
 		producer.write_frame(Timestamp::ZERO, b"hello".as_slice()).unwrap();
 		producer.write_frame(Timestamp::ZERO, b"world".as_slice()).unwrap();
@@ -5061,7 +5098,7 @@ mod test {
 	#[tokio::test]
 	async fn read_frame_discards_rest_of_multi_frame_group() {
 		let mut producer = track_producer("test", None);
-		let mut consumer = producer.subscribe(None);
+		let mut consumer = producer.subscribe(replay());
 
 		// Group 0 has two frames; only the first is returned.
 		let mut g0 = producer.create_group(group::Info { sequence: 0 }).unwrap();
@@ -5550,7 +5587,7 @@ mod test {
 		assert!(pool.used() <= 21_000, "usage hovers near capacity: {}", pool.used());
 
 		// A fresh subscriber skips the evicted groups entirely.
-		let mut subscriber = producer.subscribe(None);
+		let mut subscriber = producer.subscribe(replay());
 		assert!(subscriber.assert_group().sequence > 0, "evicted group is not delivered");
 	}
 
@@ -5994,7 +6031,7 @@ mod test {
 		producer.create_group(2u64.into()).unwrap().finish().unwrap();
 		producer.create_group(1u64.into()).unwrap().finish().unwrap();
 
-		let mut subscriber = producer.subscribe(None);
+		let mut subscriber = producer.subscribe(replay());
 		assert_eq!(subscriber.assert_group().sequence, 0);
 		assert_eq!(subscriber.assert_group().sequence, 2);
 		assert_eq!(
@@ -6115,7 +6152,7 @@ mod test {
 
 		// The backfill serves by sequence, but never in arrival order.
 		assert!(consumer.peek_group(1).is_some());
-		let mut subscriber = producer.subscribe(None);
+		let mut subscriber = producer.subscribe(replay());
 		assert_eq!(subscriber.assert_group().sequence, 0);
 		assert_eq!(subscriber.assert_group().sequence, 2);
 		subscriber.assert_no_group();
@@ -6288,7 +6325,7 @@ mod test {
 		assert!(consumer.peek_group(2).is_some(), "backfill is cached for later fetches");
 
 		// ...but an arrival-order subscriber only sees the live groups.
-		let mut subscriber = producer.subscribe(None);
+		let mut subscriber = producer.subscribe(replay());
 		assert_eq!(subscriber.assert_group().sequence, 5);
 		assert_eq!(subscriber.assert_group().sequence, 6);
 		subscriber.assert_no_group();

@@ -1817,6 +1817,11 @@ mod test {
 		(producer, consumer)
 	}
 
+	/// A bounded replay window for tests whose subject requires every buffered group.
+	fn replay() -> Subscription {
+		Subscription::default().with_latency(Latency::max(Duration::from_secs(30)))
+	}
+
 	fn write_group(producer: &mut track::Producer, sequence: u64, payload: &str) {
 		let mut group = producer.create_group(group::Info { sequence }).unwrap();
 		group.write_frame(Timestamp::ZERO, payload.as_bytes().to_vec()).unwrap();
@@ -1825,8 +1830,8 @@ mod test {
 
 	/// Like [`write_group`], but placing the group on a real media timeline so the
 	/// drift budget has something to measure. Most tests here are about splicing
-	/// mechanics and use [`write_group`], which leaves every group at the same instant
-	/// and therefore never stale.
+	/// mechanics and use [`write_group`], paired with [`replay`] when they need every
+	/// buffered group rather than the real-time live edge.
 	fn write_group_at(producer: &mut track::Producer, sequence: u64, payload: &str, at: Duration) {
 		let mut group = producer.create_group(group::Info { sequence }).unwrap();
 		group
@@ -1888,7 +1893,7 @@ mod test {
 		let mut producer = Producer::new();
 		producer.switch(&consumer_a, None).unwrap();
 
-		let mut sub = producer.consume().subscribe(None);
+		let mut sub = producer.consume().subscribe(replay());
 
 		write_group(&mut track_a, 0, "a0");
 		write_group(&mut track_a, 1, "a1");
@@ -1976,7 +1981,7 @@ mod test {
 
 		// No segments yet: the takeover is unbounded.
 		producer.takeover(&consumer_a).unwrap();
-		let mut sub = producer.consume().subscribe(None);
+		let mut sub = producer.consume().subscribe(replay());
 		write_group(&mut track_a, 0, "a0");
 		write_group(&mut track_a, 1, "a1");
 		assert_eq!(recv(&mut sub), 0);
@@ -2330,7 +2335,7 @@ mod test {
 
 		let mut producer = Producer::new();
 		producer.switch(&consumer_a, None).unwrap();
-		let mut sub = producer.consume().subscribe(None);
+		let mut sub = producer.consume().subscribe(replay());
 
 		sub.end_at(1);
 
@@ -2379,7 +2384,7 @@ mod test {
 
 		let mut producer = Producer::new();
 		producer.switch(&consumer_a, None).unwrap();
-		let mut sub = producer.consume().subscribe(None);
+		let mut sub = producer.consume().subscribe(replay());
 
 		let next = |sub: &mut Subscriber| {
 			kio::wait(|waiter| sub.poll_next_group(waiter))
@@ -2867,7 +2872,7 @@ mod test {
 
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
-		let mut sub = producer.consume().subscribe(None);
+		let mut sub = producer.consume().subscribe(replay());
 		recv_pending(&mut sub);
 		assert_eq!(track_a.subscription().unwrap().start, None);
 

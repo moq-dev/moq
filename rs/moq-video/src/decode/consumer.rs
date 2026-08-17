@@ -40,7 +40,11 @@ impl Consumer {
 		let name = name.into();
 		let track = broadcast
 			.track(&name)?
-			.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_priority(hang::catalog::PRIORITY.video)
+					.with_latency(config.latency),
+			)
 			.await?;
 		// The catalog says how the track is framed, and it is not always the legacy
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
