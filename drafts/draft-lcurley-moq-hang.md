@@ -526,14 +526,14 @@ A pacing track that has produced nothing for the span holds the record back; a p
 
 A pacing track is one whose groups arrive continuously, which is what makes them usable as boundaries.
 A track that publishes on its own schedule cannot pace: a catalog emits a group only when the renditions change, so a timeline waiting for it would stall the moment it went quiet.
-Such a track is *passive*: its groups are listed in whichever segment is open when they arrive, but it never determines a boundary and never holds a record back.
+Such a track is *non-pacing*: its groups are listed in whichever segment is open when they arrive, but it never determines a boundary and never holds a record back.
 A publisher SHOULD record its catalog this way, so a recording can resolve the renditions in effect at any segment.
 
-Placement of a passive track's groups is therefore by arrival rather than by content time: nothing waits for them, so a group that arrives after its segment has already been published is listed in the next one.
-When a segment closes, every passive group that arrived while it was open belongs to that segment regardless of the timestamp basis carried by the passive track.
+Placement of a non-pacing track's groups is therefore by arrival rather than by content time: nothing waits for them, so a group that arrives after its segment has already been published is listed in the next one.
+When a segment closes, every non-pacing group that arrived while it was open belongs to that segment regardless of the timestamp basis carried by the non-pacing track.
 The frames still carry their own timestamps, so no timing information is lost.
-A passive track's timestamps do not extend the final segment's duration.
-A passive track whose group never closes (an append-log such as a `moq-json` stream) is listed once, in the segment its group opened in.
+A non-pacing track's timestamps do not extend the final segment's duration.
+A non-pacing track whose group never closes (an append-log such as a `moq-json` stream) is listed once, in the segment its group opened in.
 A publisher that needs such content addressable per segment SHOULD roll the group at segment boundaries, which costs the shared compression window but makes each segment self-contained.
 
 A group that starts before the first boundary belongs to the first segment.

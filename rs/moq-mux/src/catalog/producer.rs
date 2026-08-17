@@ -228,7 +228,7 @@ impl<E: CatalogExt> Producer<E> {
 
 		let timeline = crate::timeline::Producer::new(broadcast, crate::timeline::Config::default());
 		let catalog_timeline = Arc::new(Mutex::new(CatalogTimeline {
-			recorder: timeline.passive(hang::Catalog::DEFAULT_NAME),
+			recorder: timeline.track(hang::Catalog::DEFAULT_NAME),
 			last_sequence: None,
 		}));
 
@@ -299,7 +299,7 @@ impl<E: CatalogExt> Producer<E> {
 	pub fn with_timeline(mut self, broadcast: &moq_net::broadcast::Producer, config: crate::timeline::Config) -> Self {
 		self.timeline = crate::timeline::Producer::new(broadcast, config);
 		self.outputs.catalog_timeline = Arc::new(Mutex::new(CatalogTimeline {
-			recorder: self.timeline.passive(hang::Catalog::DEFAULT_NAME),
+			recorder: self.timeline.track(hang::Catalog::DEFAULT_NAME),
 			last_sequence: None,
 		}));
 		self
@@ -375,7 +375,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// that isn't built through a [`container::Producer`](crate::container::Producer) (an fMP4
 	/// passthrough writing groups by hand).
 	pub fn enroll(&mut self, track: &str) -> crate::Result<crate::timeline::Recorder> {
-		let recorder = self.timeline.track(track)?;
+		let recorder = self.timeline.pacing_track(track)?;
 
 		let section = self.timeline.section();
 		let mut catalog = self.lock();
