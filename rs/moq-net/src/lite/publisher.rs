@@ -2962,6 +2962,11 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					}
 
 					let outcome = 'serve: {
+						// Keep the group guard live while the transport owns a detached
+						// frame chunk and may be blocked on flow control.
+						if self.group.poll_expired(waiter) {
+							break 'serve Err(Error::Old);
+						}
 						// The peer closing first cancels the group.
 						if writer.poll_closed(&mut cx).is_ready() {
 							break 'serve Err(Error::Cancel);
@@ -3205,6 +3210,52 @@ mod serve_group_test {
 
 		// The group is dropped from the cache mid-stream: a truncated group, not a cancel.
 		group.abort(Error::Old).unwrap();
+
+		assert!(matches!(serve.await, Err(Error::Old)));
+		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
+	}
+
+	/// A subscription group keeps checking latency while a transport write is
+	/// flow-control blocked, so a stalled send cannot pin the stream indefinitely.
+	#[tokio::test]
+	async fn blocked_transport_write_expires_with_the_group() {
+		tokio::time::pause();
+
+		let gate = kio::Producer::new(false);
+		let session = SinkSession::gated_uni(gate.consume());
+		let log = session.log.clone();
+		let track_priority = kio::Producer::new(0u8);
+		let subscription = Subscription {
+			session,
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			ordered: false,
+			version: Version::Lite06Wip,
+			timescale: Some(crate::Timescale::default()),
+		};
+
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut subscriber = track.subscribe(None);
+		let mut old = track.append_group().unwrap();
+		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
+		old.finish().unwrap();
+		let group = subscriber.recv_group().await.unwrap().expect("old group");
+
+		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group));
+		assert!(
+			futures::poll!(serve.as_mut()).is_pending(),
+			"transport write is blocked"
+		);
+
+		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		let mut edge = track.append_group().unwrap();
+		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
+			.unwrap();
+		edge.finish().unwrap();
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
