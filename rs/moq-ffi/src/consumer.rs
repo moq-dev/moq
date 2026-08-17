@@ -289,9 +289,8 @@ impl MoqBroadcastConsumer {
 		// subscription if init parsing fails.
 		let media = media_container(container)?;
 		let subscription = subscription.map(moq_net::track::Subscription::from).unwrap_or_default();
-		let latency = subscription.latency;
 		let track = self.inner.track(&name)?.subscribe(subscription).await?;
-		let consumer = moq_mux::container::Consumer::new(track, media).with_latency(latency);
+		let consumer = moq_mux::container::Consumer::new(track, media);
 		Ok(Arc::new(MoqMediaConsumer {
 			task: Task::new(Media { inner: consumer }),
 		}))

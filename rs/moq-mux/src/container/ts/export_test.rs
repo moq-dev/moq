@@ -650,7 +650,7 @@ async fn export_scte35_roundtrip() {
 
 	let track = consumer2.track(&name).unwrap().subscribe(None).await.unwrap();
 	let mut scte_reader = crate::container::Consumer::new(track, HangContainer::Legacy)
-		.with_latency(crate::Latency::max(RECORDING_LATENCY));
+		.with_test_latency(crate::Latency::max(RECORDING_LATENCY));
 	let frame = scte_reader
 		.read()
 		.await
@@ -746,7 +746,7 @@ async fn export_pes_verbatim_roundtrip() {
 
 	let track = consumer2.track(&name).unwrap().subscribe(None).await.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy)
-		.with_latency(crate::Latency::max(RECORDING_LATENCY));
+		.with_test_latency(crate::Latency::max(RECORDING_LATENCY));
 	let frame = reader
 		.read()
 		.await
@@ -815,7 +815,7 @@ async fn scte35_without_video_export_is_rejected() {
 async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<Vec<u8>> {
 	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy)
-		.with_latency(crate::Latency::max(RECORDING_LATENCY));
+		.with_test_latency(crate::Latency::max(RECORDING_LATENCY));
 	let mut frames = Vec::new();
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		let Some(frame) = res.unwrap() else { break };
@@ -1132,7 +1132,7 @@ fn scte_track(snap: &crate::catalog::hang::Catalog<tscat::Ext>) -> Option<String
 async fn read_cues(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(Vec<u8>, Timestamp)> {
 	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy)
-		.with_latency(crate::Latency::max(RECORDING_LATENCY));
+		.with_test_latency(crate::Latency::max(RECORDING_LATENCY));
 	let mut cues = Vec::new();
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		let Some(frame) = res.unwrap() else { break };

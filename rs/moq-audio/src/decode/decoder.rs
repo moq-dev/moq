@@ -33,8 +33,8 @@ pub struct Config {
 	pub channels: Option<u32>,
 	/// How far playback may drift from the live edge before skipping a stalled group.
 	///
-	/// Applied to the initial transport subscription and
-	/// [`moq_mux::container::Consumer::with_latency`]. Defaults to
+	/// Applied to the initial transport subscription and inherited by
+	/// [`moq_mux::container::Consumer`]. Defaults to
 	/// [`Latency::REAL_TIME`](moq_mux::Latency::REAL_TIME), which skips aggressively.
 	/// Set [`Latency::max`](moq_mux::Latency::max) to the playout buffer you can
 	/// tolerate (typically tens to a few hundred ms) for the best

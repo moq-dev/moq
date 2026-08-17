@@ -167,8 +167,8 @@ impl<S: Stream> Export<S> {
 
 	/// Set the latency tolerance for each per-track source.
 	///
-	/// See [`Consumer::with_latency`](crate::container::Consumer::with_latency) for the
-	/// per-track skip behavior. Defaults to
+	/// See [`Consumer`](crate::container::Consumer) for the per-track skip behavior.
+	/// Defaults to
 	/// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) (skip aggressively).
 	pub fn with_latency(mut self, latency: crate::Latency) -> Self {
 		self.latency = latency;
