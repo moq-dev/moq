@@ -379,7 +379,11 @@ impl Consume {
 			let res = async move {
 				let track = broadcast
 					.track(&name)?
-					.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video))
+					.subscribe(
+						moq_net::track::Subscription::default()
+							.with_priority(hang::catalog::PRIORITY.video)
+							.with_latency(latency),
+					)
 					.await?;
 				let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
 				Self::run_track(on_frame, track, channel.1).await
@@ -428,7 +432,11 @@ impl Consume {
 			let res = async move {
 				let track = broadcast
 					.track(&name)?
-					.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio))
+					.subscribe(
+						moq_net::track::Subscription::default()
+							.with_priority(hang::catalog::PRIORITY.audio)
+							.with_latency(latency),
+					)
 					.await?;
 				let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
 				Self::run_track(on_frame, track, channel.1).await
