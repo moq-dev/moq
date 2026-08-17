@@ -21,8 +21,8 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
 1. Resolve or create the PR.
    - Before any Git command, remove credential access and apply trusted per-command Git configuration that disables
      hooks, external filesystem monitors, external diff and text-conversion helpers, and every external clean, smudge,
-     and process filter. Unset external-diff environment variables. Do not persist these safety settings in
-     PR-accessible Git metadata.
+     and process filter. Unset external-diff environment variables, set trusted non-interactive pager overrides, and
+     invoke every Git command with `--no-pager`. Do not persist these safety settings in PR-accessible Git metadata.
    - Run `git status --short` under that trusted configuration before changing the checkout or refs. Treat pre-existing
      changes as user-owned; preserve them or stop rather than carrying them into the PR implicitly.
    - If those safeguards cannot be guaranteed, inspect or materialize the head only in disposable credential-free
