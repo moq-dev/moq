@@ -1018,7 +1018,8 @@ impl Consumer {
 		self
 	}
 
-	fn poll_expired(&mut self, waiter: &kio::Waiter) -> bool {
+	/// Check the parent subscription while a wire publisher drains detached payload.
+	pub(crate) fn poll_expired(&mut self, waiter: &kio::Waiter) -> bool {
 		if !self.expired && self.expiry.as_ref().is_some_and(|expiry| expiry.is_expired(waiter)) {
 			self.expired = true;
 			if !self.stale_counted.swap(true, Ordering::Relaxed) {

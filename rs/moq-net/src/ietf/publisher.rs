@@ -1552,6 +1552,12 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					};
 				}
 				GroupState::Serve { writer, frame, chunk } => {
+					// Keep the group guard live while the transport owns a detached
+					// frame chunk and may be blocked on flow control.
+					if self.group.poll_expired(waiter) {
+						self.state = GroupState::Done;
+						return Poll::Ready(Err(Error::Old));
+					}
 					// The peer closing first cancels the group.
 					if writer.poll_closed(&mut cx).is_ready() {
 						self.state = GroupState::Done;

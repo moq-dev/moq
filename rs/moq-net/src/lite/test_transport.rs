@@ -313,6 +313,8 @@ pub struct SinkSession {
 	/// Set by [`Self::gated_bi`]. `None` parks `open_bi` itself forever, which is all
 	/// a test driving only uni streams needs.
 	bi_gate: Option<kio::Consumer<bool>>,
+	/// Set by [`Self::gated_uni`] to hold unidirectional stream writes.
+	uni_gate: Option<kio::Consumer<bool>>,
 	/// The ALPN to report, for a test that needs a specific negotiated version rather
 	/// than the SETUP-negotiated fallback an absent one selects.
 	protocol: Option<&'static str>,
@@ -323,6 +325,7 @@ impl SinkSession {
 		Self {
 			log,
 			bi_gate: None,
+			uni_gate: None,
 			protocol: None,
 		}
 	}
@@ -342,6 +345,17 @@ impl SinkSession {
 		Self {
 			log: Log::default(),
 			bi_gate: Some(gate),
+			uni_gate: None,
+			protocol: None,
+		}
+	}
+
+	/// Open unidirectional streams immediately, holding their writes until `gate` opens.
+	pub fn gated_uni(gate: kio::Consumer<bool>) -> Self {
+		Self {
+			log: Log::default(),
+			bi_gate: None,
+			uni_gate: Some(gate),
 			protocol: None,
 		}
 	}
@@ -376,7 +390,10 @@ impl poll::Session for SinkSession {
 	}
 
 	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
-		Poll::Ready(Ok(SinkSend::new(self.log.clone())))
+		Poll::Ready(Ok(match &self.uni_gate {
+			Some(gate) => SinkSend::gated(self.log.clone(), gate.clone()),
+			None => SinkSend::new(self.log.clone()),
+		}))
 	}
 
 	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
