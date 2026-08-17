@@ -163,3 +163,29 @@ fn close_wakes_value_closed_and_consumer() {
 	assert!(matches!(closed_fut.as_mut().poll(&mut closed_cx), Poll::Ready(())));
 	assert!(matches!(unused_fut.as_mut().poll(&mut unused_cx), Poll::Ready(Err(_))));
 }
+
+/// `Producer::poll` runs the predicate before reporting closure, so state
+/// buffered inside the value drains first and `Err` is terminal: unsatisfied
+/// *and* no more updates coming. Mirrors `Consumer::poll` / `poll_ref`.
+#[test]
+fn producer_poll_drains_before_reporting_closure() {
+	let producer = Producer::new(vec![1u32, 2]);
+	assert!(producer.close().is_ok());
+
+	let waiter = crate::Waiter::noop();
+	let ready = |value: &crate::Ref<'_, Vec<u32>>| match value.is_empty() {
+		true => Poll::Pending,
+		false => Poll::Ready(()),
+	};
+
+	// Both buffered items drain through the satisfied predicate.
+	for expected in [1, 2] {
+		match producer.poll(&waiter, ready) {
+			Poll::Ready(Ok(mut value)) => assert_eq!(value.remove(0), expected),
+			_ => panic!("expected a drained value"),
+		}
+	}
+
+	// Empty and closed: now the closure is reported.
+	assert!(matches!(producer.poll(&waiter, ready), Poll::Ready(Err(_))));
+}

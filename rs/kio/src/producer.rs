@@ -90,25 +90,29 @@ impl<T> Producer<T> {
 	/// the predicate, then mutate through the returned `Mut`. Registers `waiter`
 	/// while pending.
 	///
-	/// Returns `Poll::Ready(Err(`[`Ref`]`))` if the channel is closed.
+	/// The predicate runs before closure is reported, matching [`Consumer::poll`]
+	/// and [`Self::poll_ref`]: buffered state drains first, so
+	/// `Poll::Ready(Err(`[`Ref`]`))` means the predicate is unsatisfied *and* no
+	/// more updates can arrive. A satisfied poll on a closed channel still yields
+	/// the [`Mut`], letting the caller take what remains.
 	pub fn poll<F>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<Mut<'_, T>, Ref<'_, T>>>
 	where
 		F: FnMut(&Ref<'_, T>) -> Poll<()>,
 	{
-		let state = self.state.lock();
-		if state.closed {
-			return Poll::Ready(Err(Ref { state }));
+		let mut guard = Ref {
+			state: self.state.lock(),
+		};
+		if f(&guard).is_ready() {
+			// Upgrade the Ref to a Mut, keeping the same lock guard.
+			return Poll::Ready(Ok(Mut::new(guard.state)));
 		}
 
-		let mut guard = Ref { state };
-		match f(&guard) {
-			// Upgrade the Ref to a Mut, keeping the same lock guard.
-			Poll::Ready(()) => Poll::Ready(Ok(Mut::new(guard.state))),
-			Poll::Pending => {
-				waiter.register(&mut guard.state.waiters_value);
-				Poll::Pending
-			}
+		if guard.state.closed {
+			return Poll::Ready(Err(guard));
 		}
+
+		waiter.register(&mut guard.state.waiters_value);
+		Poll::Pending
 	}
 
 	/// Poll read-only access with waker registration.
@@ -139,7 +143,8 @@ impl<T> Producer<T> {
 	/// Wait until the read-only predicate holds, then acquire write access.
 	///
 	/// The async sibling of [`poll`](Self::poll): returns `Ok(Mut)` once `f` returns
-	/// [`Poll::Ready`], or [`Closed`] if the channel closes first. The `Ok` guard is the
+	/// [`Poll::Ready`], or [`Closed`] once the channel is closed with the predicate
+	/// still unsatisfied (buffered state drains first). The `Ok` guard is the
 	/// write access you asked for, so it's yours to hold; the `Err` case hands back no
 	/// guard at all. Call [`read`](Self::read) if you need the final state.
 	pub async fn wait<F>(&self, mut f: F) -> Result<Mut<'_, T>, Closed>
@@ -342,10 +347,11 @@ impl<'a, T> Mut<'a, T> {
 		}
 	}
 
-	/// NOTE: This takes self so it's impossible to be in a closed state.
+	/// Close the channel. Takes `self`, so the guard can't be used afterwards.
 	pub fn close(mut self) {
 		let state = self.state.as_mut().unwrap();
-		// We don't need to check for state.closed because we checked when making Mut
+		// Idempotent: a drain-after-close poll can hand out a Mut on an already
+		// closed channel (see [`Producer::poll`]).
 		state.closed = true;
 		self.modified = true;
 	}

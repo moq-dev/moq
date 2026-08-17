@@ -186,3 +186,10 @@ opt-level = "z"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+# External crates (web-transport-iroh) depend on the published kio, which
+# otherwise coexists with the workspace copy at the same version and makes
+# `--package kio` ambiguous the moment the crate changes. Point everyone at the
+# workspace copy so exactly one kio is built.
+[patch.crates-io]
+kio = { path = "rs/kio" }
