@@ -89,7 +89,7 @@ Publishers and subscribers SHOULD terminate any subscriptions once a participant
 ANNOUNCE suffix=alice.hang active=false
 ~~~
 
-# Catalog
+# Catalog {#catalog}
 The catalog describes the available media tracks for a single participant.
 It's a JSON document that extends the W3C WebCodecs specification {{webcodecs}}.
 
@@ -261,15 +261,15 @@ Unlike audio and video there is no WebCodecs decoder for text, so a consumer par
 
 ~~~
 type TextSchema = {
-	"renditions": Map<TrackName, TextConfig>,
+  "renditions": Map<TrackName, TextConfig>,
 }
 
 type TextConfig = {
-	"format": "vtt" | "ttml" | "utf8" | string,
-	"role": "subtitle" | "caption" | string | undefined,
-	"lang": string | undefined,
-	"label": string | undefined,
-	// plus the common rendition fields
+  "format": "vtt" | "ttml" | "utf8" | string,
+  "role": "subtitle" | "caption" | string | undefined,
+  "lang": string | undefined,
+  "label": string | undefined,
+  // plus the common rendition fields
 }
 ~~~
 
@@ -302,21 +302,21 @@ For example:
 
 ~~~
 {
-	"renditions": {
-		"captions.en": {
-			"format": "vtt",
-			"container": { "kind": "legacy" },
-			"role": "caption",
-			"lang": "en",
-			"label": "English"
-		},
-		"subtitles.es": {
-			"format": "vtt",
-			"container": { "kind": "legacy" },
-			"role": "subtitle",
-			"lang": "es"
-		}
-	}
+  "renditions": {
+    "captions.en": {
+      "format": "vtt",
+      "container": { "kind": "legacy" },
+      "role": "caption",
+      "lang": "en",
+      "label": "English"
+    },
+    "subtitles.es": {
+      "format": "vtt",
+      "container": { "kind": "legacy" },
+      "role": "subtitle",
+      "lang": "es"
+    }
+  }
 }
 ~~~
 
@@ -437,10 +437,10 @@ The catalog's root `timeline` field advertises the track:
 
 ~~~
 type TimelineSchema = {
-	"track": string,
-	"timescale": number | undefined,
-	"durationMax": number | undefined,
-	"wall": number | undefined,
+  "track": string,
+  "timescale": number | undefined,
+  "durationMax": number | undefined,
+  "wall": number | undefined,
 }
 ~~~
 
@@ -478,16 +478,16 @@ Each record describes one complete segment:
 
 ~~~
 type TimelineRecord = {
-	"segment": number,
-	"pts": number,
-	"duration": number,
-	"tracks": Map<TrackName, TimelineRange[]> | undefined,
+  "segment": number,
+  "pts": number,
+  "duration": number,
+  "tracks": Map<TrackName, TimelineRange[]> | undefined,
 }
 
 type TimelineRange = {
-	"start": number,
-	"end": number,
-	"keyframe": boolean | undefined,
+  "start": number,
+  "end": number,
+  "keyframe": boolean | undefined,
 }
 ~~~
 
@@ -497,10 +497,14 @@ Numbers are consecutive within a broadcast, anchoring HLS `EXT-X-MEDIA-SEQUENCE`
 The `pts` field is the segment's start and `duration` its length, both in the timeline's timescale.
 The next record's `pts` equals `pts + duration` unless content time itself jumped; a consumer SHOULD treat such a jump as a discontinuity.
 
-The `tracks` field maps each participating media track name to the group ranges it contributes.
+The `tracks` field maps each participating track name to the group ranges it contributes.
 Each range covers groups `start` through `end` inclusive, as used by moq-lite FETCH and SUBSCRIBE.
 More than one range means the group sequence is discontinuous inside the segment: the skipped groups never existed.
 A track absent from the map has no content for the span (a gap; HLS `EXT-X-GAP`).
+
+Participating tracks need not be audio or video.
+A catalog, or an application's own metadata track such as a chat log, is listed exactly like a media track, which is what lets a recording ({{recording}}) address all of them the same way.
+A consumer that only wants renditions therefore MUST select tracks by consulting the catalog rather than by assuming every name in the map is media.
 A record MUST tolerate and SHOULD preserve unknown fields, like the catalog.
 
 The `keyframe` field states whether the range's first group starts with a keyframe, i.e. whether a player can join or switch renditions there.
@@ -516,13 +520,183 @@ A publisher pacing itself SHOULD end a segment at the earliest point that is a g
 A minimum is always satisfiable, whereas a maximum is not: a single group longer than it cannot be divided.
 Where no such point exists because two tracks have different coarse cadences, a publisher MUST choose one of them rather than a point interior to any track's group.
 
-Whatever the policy, a publisher MUST NOT emit a record until the segment is complete: every participating track's groups for the span are known.
+Whatever the policy, a publisher MUST NOT emit a record until the segment is complete: every *pacing* track's groups for the span are known.
 Records are therefore self-contained and immediately servable, and the newest record is the live edge.
-An enrolled track that has produced nothing for the span holds the record back; a publisher that knows a track has stopped for good closes it, and the record then simply omits it (a gap).
+A pacing track that has produced nothing for the span holds the record back; a publisher that knows a track has stopped for good closes it, and the record then simply omits it (a gap).
+
+A pacing track is one whose groups arrive continuously, which is what makes them usable as boundaries.
+A track that publishes on its own schedule cannot pace: a catalog emits a group only when the renditions change, so a timeline waiting for it would stall the moment it went quiet.
+Such a track is *non-pacing*: its groups are listed in whichever segment is open when they arrive, but it never determines a boundary and never holds a record back.
+A publisher SHOULD record its catalog this way, so a recording can resolve the renditions in effect at any segment.
+
+Placement of a non-pacing track's groups is therefore by arrival rather than by content time: nothing waits for them, so a group that arrives after its segment has already been published is listed in the next one.
+When a segment closes, every non-pacing group that arrived while it was open belongs to that segment regardless of the timestamp basis carried by the non-pacing track.
+The frames still carry their own timestamps, so no timing information is lost.
+A non-pacing track's timestamps do not extend the final segment's duration.
+A non-pacing track whose group never closes (an append-log such as a `moq-json` stream) is listed once, in the segment its group opened in.
+A publisher that needs such content addressable per segment SHOULD roll the group at segment boundaries, which costs the shared compression window but makes each segment self-contained.
 
 A group that starts before the first boundary belongs to the first segment.
 The final segment of an ended broadcast has no closing boundary; its `duration` runs to the newest known content.
 A publisher SHOULD carry the end of the last group's content into that value, since a publisher that knows only where each group *started* would report a duration one group short, and zero for a final segment that is a single group.
+
+
+# Recording {#recording}
+A live broadcast is bounded history: moq-lite {{moql}} serves the present with SUBSCRIBE and the recent past with FETCH, both ending at the publisher's cache.
+A *recording* is the persistent tier, writing a broadcast to a filesystem or object store so it can be served back long after the live session ended.
+
+A recording is addressed by segment.
+The timeline ({{timeline}}) already names every segment and the groups that carry it, so it is the recording's only index: the segment number names the object, and no separate index needs to be stored, refreshed, or kept consistent with the media.
+A reader that wants segment N of a track issues one whole-object GET, with no range header and no second request, which is what both an HLS or DASH origin and a player seeking a VOD recording need.
+
+A recording covers the tracks the timeline describes, plus the catalog and the timeline itself.
+A broadcast with no timeline has no segments and cannot be recorded this way.
+
+## Layout {#recording-layout}
+A recording is a set of objects under a common prefix:
+
+~~~
+<prefix>/.timeline
+<prefix>/<track>/.track
+<prefix>/<track>/<segment>
+~~~
+
+`<track>` is the track's name with every byte outside `A-Z a-z 0-9 _ -` percent-encoded as `%` followed by two uppercase hexadecimal digits.
+For example, `catalog.json` becomes `catalog%2Ejson`.
+An encoded name therefore never contains `/` and never begins with `.`, so a track can neither collide with the reserved `.timeline` name nor address anything outside the prefix.
+
+`.track` stores the immutable properties of its parent track ({{recording-track}}).
+The name is reserved within an encoded track directory and cannot collide with a decimal segment number.
+
+Every track the timeline lists is stored the same way, including a passively enrolled catalog or metadata track ({{timeline-segmentation}}).
+There is no separate rule for non-media content: the catalog in effect at segment N is the newest catalog object numbered at or before N, found the same way a player finds the media.
+
+`<segment>` is the timeline record's `segment` value in decimal without leading zeros, so an object name is computed from a record rather than discovered by listing.
+
+Each media track gets its own objects so a consumer can fetch one rendition without paying for the others, which is the point of publishing switchable renditions at all.
+For the same reason a publisher SHOULD NOT combine tracks into a single object, even when they are always played together: doing so forces every consumer to fetch the highest rendition it does not want.
+
+## Track Objects {#recording-track}
+`<track>/.track` stores the immutable publisher properties needed to interpret and replay that track:
+
+~~~
+Track Object {
+  Publisher Priority (8)
+  Publisher Ordered (8)
+  Timescale (i)
+}
+~~~
+
+The fields have the meanings and encodings defined by moq-lite `TRACK_INFO` {{moql}}.
+The source broadcast's epoch and `Publisher Max Latency` are not stored because the recording is a new generation with its own epoch and retention policy.
+A reader reconstructing `TRACK_INFO` uses the recording's resolved epoch and serving policy together with the stored fields.
+
+The track object MUST be durable before any timeline record referencing that track is written.
+It is immutable for the lifetime of the recording.
+In particular, the `Timescale` is required to decode the timestamp deltas in the track's recorded FRAME messages.
+
+## Segment Objects {#recording-segments}
+A segment object holds one track's content for one segment, as a sequence of groups:
+
+~~~
+Segment Object {
+  Group {
+    Sequence (i)
+    Length (i)
+    Frame (..) ...
+  } ...
+}
+~~~
+
+Fields annotated `(i)` are variable-length integers using the QUIC encoding ({{!RFC9000}}, Section 16).
+
+**Sequence** is the group's sequence number, matching the range that listed it in the timeline record.
+Groups appear in ascending sequence order.
+
+**Length** is the byte length of the group's frames, so a reader skips a group it does not want without parsing it.
+
+**Frame** is the moq-lite FRAME encoding {{moql}}: a zigzag `Timestamp Delta`, a `Message Length`, and the payload, exactly as the group was delivered.
+A group's frames are therefore byte-identical to the body of a FETCH response for that group, and a recording never re-encodes media.
+
+A segment object MUST contain whole groups.
+Segmentation already forbids a boundary interior to any track's group ({{timeline-segmentation}}), so a group is never split across two segments and a reader never has to stitch one back together.
+
+Because the object carries its own group boundaries it is parseable on its own, without the timeline.
+The timeline is needed to *find* an object, not to read one.
+
+Segment objects are immutable once written.
+
+## The Timeline Object {#recording-metadata}
+`.timeline` holds the timeline records in order, using the track's framing ({{timeline-framing}}).
+It is the one track not addressed by segment, because it is the index that names the segments.
+
+An unbounded archive re-encodes each source record into a recording-owned timeline stream.
+The object grows as the broadcast does, and its content is append-only: bytes once written never change.
+Re-encoding lets the writer replace a source record with an atomic gap ({{recording-writer}}) while keeping one coherent compression window for the recording.
+
+A reader starting fresh reads the object from the beginning, which the shared DEFLATE window requires anyway.
+A reader following a live recording issues a ranged GET from the offset it last read and feeds the new bytes to the decompressor it already holds: each frame's sync-flush block terminates its own compressed data, so the appended bytes decode without re-reading earlier ones.
+
+A duration-bounded recording instead stores a complete encoding of its current retained timeline suffix.
+When the oldest segment expires, the writer atomically replaces `.timeline` with a new standalone encoding that starts at the oldest retained record.
+The explicit `segment` field preserves numbering when the retained suffix does not start at zero.
+A reader uses an entity validator such as an ETag and restarts from byte zero when the object is replaced; it MUST NOT apply a byte range from one entity to another.
+
+Re-encoding the timeline metadata for bounded retention does not re-encode any recorded media frame.
+The per-track segment objects remain byte-identical in both modes.
+
+## Writer Behavior {#recording-writer}
+A writer subscribes to the broadcast and buffers the in-progress segment independently of the publisher or relay cache.
+It writes a track's segment object once that track's groups for the span are known.
+Per-track objects are written independently: a track whose content is complete does not wait for a slower one.
+The recording contract MUST NOT depend on a relay retaining those groups while storage catches up.
+
+A writer MUST make a segment's track objects and segment objects durable before appending the timeline record that references them, so a reader following `.timeline` never sees a record naming an object that does not yet exist.
+Since the timeline record itself is only published once the segment is complete on every track ({{timeline-segmentation}}), this orders the whole recording: objects, then the record that indexes them.
+
+If any object for a segment cannot be made durable, the writer MUST record an atomic gap for that segment rather than publish a partial set of tracks.
+The gap is the same timeline record with `tracks` absent or empty, so it preserves the segment number and timing but references no objects.
+The writer encodes that gap and every subsequent record through the recording's own DEFLATE encoder, whose shared dictionary therefore contains the gap rather than the source record it replaced.
+It MUST NOT append a later source frame compressed against the source timeline's different dictionary.
+The writer then continues with the next segment.
+
+A group that arrives after its segment object has been written is not recorded.
+A writer SHOULD wait for the segment to be complete rather than write early, and MAY bound that wait so a track that has stopped without closing cannot stall the recording indefinitely.
+This is a deliberate trade: addressing content by segment is what makes a segment retrievable in one request, and it costs the ability to append a late group to an object already written.
+
+A writer SHOULD record the broadcast's final state on a clean end, so a reader can distinguish an ended recording from one whose writer died.
+Once ended, every object in the recording is immutable.
+
+## Retention {#recording-retention}
+A recording has one of two retention modes:
+
+- An *archive* is unbounded and retains every complete segment until explicitly deleted.
+- A *DVR* retains a configured duration of complete segments and expires the oldest whole segments as newer ones become durable.
+
+An application offering DVR without an explicit retention value SHOULD default to at least 30 seconds.
+The writer removes the oldest segment only when the remaining complete segments still cover the configured duration.
+Retention is measured from timeline records, not from wall-clock arrival or relay cache state.
+
+Expiration first makes a replacement `.timeline` durable that omits the expired record, then deletes that segment's per-track objects.
+The index therefore never advertises media the retention process has already deleted, although media objects MAY temporarily outlive the index.
+Relay cache eviction does not change the recording timeline.
+
+## Reader Behavior {#recording-reader}
+Reading segment N of track T is: resolve T's object name from N, GET it, and parse the groups.
+Nothing on that path reads media the consumer did not ask for, and nothing requires a second request.
+
+Segment objects and track objects are immutable and SHOULD be served with long-lived caching.
+`.timeline` changes while the recording is live and SHOULD be served with a short lifetime and an entity validator.
+All objects in an unbounded recording become immutable once the recording has ended.
+A bounded recording's timeline can continue to change while retention is active.
+
+A reader MAY serve moq-lite FETCH from a recording.
+Given a group, the timeline record whose range covers it names the segment; the object's group headers locate the group within it; and its frames are the FETCH response body unchanged.
+A FETCH bounded to a frame range {{moql}} is served by counting frames within that group.
+A group absent from the recording is a normal FETCH failure.
+
+A reader deriving a presentation-ordered format renders it from the timeline and transmuxes segment objects on demand.
+Nothing derived needs to be stored: the playlist or manifest is a function of the timeline, and a media segment is a function of one recorded object.
 
 
 # Security Considerations
@@ -530,6 +704,12 @@ A rendition's `broadcast` reference ({{field-broadcast}}) resolves against the c
 Clamping a reference that escapes above that root would silently redirect the subscription to an unrelated broadcast, so a consumer rejects the catalog instead.
 
 TODO Security
+
+A consumer parsing a recording ({{recording}}) is parsing data at rest that it did not necessarily write.
+It MUST bounds-check a segment object's group `Length` and each frame's `Message Length` against the bytes actually retrieved, rather than trusting either to describe the object, and it MUST treat a malformed object as a missing segment rather than letting it invalidate the recording.
+It MUST reject a track object with an invalid `Publisher Ordered` value or a zero `Timescale`.
+Varint fields are subject to the same limits as moq-lite {{moql}}.
+A recording inherits the confidentiality and integrity properties of the storage holding it; encryption at rest is transparent to the format and out of scope.
 
 
 # IANA Considerations

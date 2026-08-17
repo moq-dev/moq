@@ -305,7 +305,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// (no `container::Producer`), so the recorder is fed directly at each group open.
 			// Enrolling on the timeline directly rather than through `catalog::Producer::enroll`,
 			// because the catalog is already locked here; the root section is advertised below.
-			let recorder = timeline.track(track.name())?;
+			let recorder = timeline.pacing_track(track.name())?;
 
 			let detect_bitrate = match kind {
 				TrackKind::Video => {

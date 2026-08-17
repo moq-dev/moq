@@ -4,13 +4,12 @@
  * track. A consumer can seek (or build an HLS/DASH playlist) without downloading the media.
  * See the catalog's root {@link Catalog.Timeline} section that advertises it.
  *
- * Facts flow up and policy flows down, meeting in the shared {@link Producer}: each media
- * track enrolls with {@link Producer.track} and reports every group open through its
+ * Facts flow up and policy flows down, meeting in the shared {@link Producer}: each continuous
+ * media track enrolls with {@link Producer.pacingTrack} and reports every group open through its
  * {@link Recorder}. A segment ends at the first group boundary that gives it at least
- * {@link ProducerProps.durationMin} on every enrolled track, unless the application declares
- * its own with {@link Producer.cut}. A segment's record is published only once every enrolled
- * track has reported past its end (or closed), so records are self-contained and immediately
- * servable.
+ * {@link ProducerProps.durationMin} on every pacing track, unless the application declares its
+ * own with {@link Producer.cut}. A segment's record is published only once every pacing track
+ * has reported past its end (or closed), so records are self-contained and immediately servable.
  *
  * @module
  */
@@ -114,6 +113,8 @@ interface TrackState {
 	// group starts there) and by Recorder.end (the content stops there).
 	frontier?: Time.Micro;
 	closed: boolean;
+	// Whether this track paces boundaries and gates completeness while open.
+	pacing: boolean;
 }
 
 /**
@@ -121,9 +122,10 @@ interface TrackState {
  * DEFLATE-compressed (a `@moq/json` stream), plus the shared boundary list every media track's
  * groups map onto.
  *
- * One per broadcast. Media tracks enroll with {@link track} and report group opens through the
- * returned {@link Recorder}; an application with its own boundaries overrides the pacing with
- * {@link cut}. Advertise it in the catalog's root `timeline` section via {@link section}.
+ * One per broadcast. Tracks enroll with {@link track}; continuous media explicitly opts into
+ * segmentation through {@link pacingTrack}. Both report group opens through the returned
+ * {@link Recorder}. An application with its own boundaries overrides pacing with {@link cut}.
+ * Advertise it in the catalog's root `timeline` section via {@link section}.
  */
 export class Producer {
 	#stream: Json.Stream.Producer<Record>;
@@ -161,16 +163,33 @@ export class Producer {
 	}
 
 	/**
-	 * Enroll the media track `name`, returning the {@link Recorder} it reports through.
+	 * Enroll `name` without letting it influence segmentation, returning its {@link Recorder}.
 	 *
-	 * The segment records key ranges by this name, and the track paces boundaries and gates
-	 * completeness until its recorder closes. Enroll a track when it is about to produce: an
-	 * enrolled but silent track holds every record back, by design, since a segment isn't
-	 * complete until every track's content is known. One recorder per track: enrolling the same
-	 * name again resets its state.
+	 * Its groups are recorded into whichever segment is open when they arrive, but the track never
+	 * votes on where a boundary falls and never holds a record back. This safe default is for a
+	 * catalog that emits only when renditions change, or an application's metadata track.
+	 *
+	 * Placement is by arrival rather than by content time: nothing waits for the track, so a group
+	 * that arrives after its segment flushed is recorded in the next one. Frames still carry their
+	 * own timestamps. One recorder per track: enrolling the same name again resets its state.
 	 */
 	track(name: string): Recorder {
-		this.#tracks.set(name, { pending: [], frontier: undefined, closed: false });
+		this.#tracks.set(name, { pending: [], frontier: undefined, closed: false, pacing: false });
+		return new Recorder(this, name);
+	}
+
+	/**
+	 * Enroll the media track `name` as a pacing track, returning its {@link Recorder}.
+	 *
+	 * The track votes on boundaries and gates completeness until its recorder closes. Enroll it
+	 * when it is about to produce: an enrolled but silent pacing track holds every record back,
+	 * since a segment is not complete until every pacing track's content is known.
+	 *
+	 * This opt-in is for continuously publishing media. A sparse track belongs in {@link track},
+	 * otherwise it can stall the timeline when it goes quiet.
+	 */
+	pacingTrack(name: string): Recorder {
+		this.#tracks.set(name, { pending: [], frontier: undefined, closed: false, pacing: true });
 		return new Recorder(this, name);
 	}
 
@@ -295,9 +314,11 @@ export class Producer {
 	#advance(track: TrackState, pts: Time.Micro): void {
 		if (track.frontier === undefined || pts > track.frontier) track.frontier = pts;
 
-		// The first thing anybody reports anchors the first segment, so content produced before
-		// any boundary exists belongs to the oldest segment rather than to nowhere.
-		if (this.#start === undefined) this.#start = pts;
+		// The first thing a pacing track reports anchors the first segment, so content produced
+		// before any boundary exists belongs to the oldest segment rather than to nowhere. A
+		// non-pacing track must not anchor it: a catalog published while the encoder is still warming
+		// up would otherwise stretch segment 0 across the whole startup gap.
+		if (this.#start === undefined && track.pacing) this.#start = pts;
 
 		this.#pump(false);
 	}
@@ -326,12 +347,13 @@ export class Producer {
 		if (!boundary) return false;
 		const [end, cut] = boundary;
 
-		// Every open track has to have reported at or past the boundary, proving its ranges for
-		// this segment are final. The track that voted for `end` has by construction; a track
-		// with shorter groups can still be behind it.
+		// Every open pacing track has to have reported at or past the boundary, proving its ranges
+		// for this segment are final. The track that voted for `end` has by construction; a track
+		// with shorter groups can still be behind it. A non-pacing track is excluded: it may publish
+		// rarely or never again, so waiting on it would stall the timeline for good.
 		if (!finished) {
 			for (const track of this.#tracks.values()) {
-				if (track.closed) continue;
+				if (track.closed || !track.pacing) continue;
 				if (track.frontier === undefined || track.frontier < end) return false;
 			}
 		}
@@ -357,6 +379,7 @@ export class Producer {
 
 		let end: Time.Micro | undefined;
 		for (const track of this.#tracks.values()) {
+			if (!track.pacing) continue;
 			const candidate = track.pending.find((group) => group.pts >= threshold)?.pts;
 			if (candidate === undefined) {
 				// This track has produced nothing past the minimum yet, so ending the segment
@@ -387,6 +410,7 @@ export class Producer {
 			// it opened, which undercounts that group's tail.
 			let max = start;
 			for (const track of this.#tracks.values()) {
+				if (!track.pacing) continue;
 				if (track.frontier !== undefined && track.frontier > max) max = track.frontier;
 			}
 			endUnits = Math.floor((max * DEFAULT_TIMESCALE) / 1_000_000);
@@ -418,7 +442,10 @@ export class Producer {
 			const ranges: Range[] = [];
 			while (track.pending.length > 0) {
 				const group = track.pending[0];
-				if (end !== undefined && group.pts >= end) break;
+				// A pacing track is assigned by content time. A non-pacing track is assigned by
+				// arrival, so every group pending when the segment closes belongs to it regardless
+				// of the timestamp basis carried by that track.
+				if (track.pacing && end !== undefined && group.pts >= end) break;
 				track.pending.shift();
 				const last = ranges.at(-1);
 				// Contiguous sequences extend the run; a skip starts a new range (a gap: groups
