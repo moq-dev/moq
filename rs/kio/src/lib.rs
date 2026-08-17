@@ -54,7 +54,7 @@ pub use pollable::{Pending, Pollable};
 pub use producer::{Mut, Producer, Ref};
 pub use queue::{PushError, Queue};
 pub use shared::Shared;
-pub use task::{Spawner, Task, TaskSet};
+pub use task::{BoxTask, LocalBoxTask, Spawner, TaskSet};
 pub use waiter::{Fan, Hold, Park, Waiter, WaiterList, wait};
 pub use weak::{ConsumerWeak, ProducerWeak, Weak};
 

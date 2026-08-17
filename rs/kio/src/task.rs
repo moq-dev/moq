@@ -6,6 +6,18 @@
 //! task it was aimed at. A driver serving hundreds of children steps one machine
 //! per event, not all of them.
 //!
+//! A task is a plain poll closure, the same `FnMut(&Waiter) -> Poll<()>` shape
+//! [`wait`](crate::wait) takes: no trait to implement, state lives in the
+//! captures. One set holds one closure type, which one construction site
+//! provides naturally; a set that must mix shapes boxes them ([`BoxTask`] /
+//! [`LocalBoxTask`]), and a future adapts with one line:
+//!
+//! ```
+//! # let (_, mut set) = kio::TaskSet::<kio::LocalBoxTask>::new();
+//! let mut fut = Box::pin(async { /* .. */ });
+//! set.push(Box::new(move |waiter: &kio::Waiter| waiter.poll_future(fut.as_mut())));
+//! ```
+//!
 //! Work arrives two ways: the owner pushes directly ([`TaskSet::push`]), or
 //! anyone holding a cloneable [`Spawner`] submits from outside (including from
 //! inside a running task, so nested work needs no executor). The set resolves
@@ -14,8 +26,6 @@
 
 use std::{
 	collections::VecDeque,
-	future::Future,
-	pin::Pin,
 	sync::{
 		Arc, Mutex,
 		atomic::{AtomicBool, Ordering},
@@ -25,25 +35,13 @@ use std::{
 
 use crate::waiter::{Park, Waiter};
 
-/// Work drivable by a [`TaskSet`]: a poll function stepped with a [`Waiter`].
-///
-/// Implemented for every `Future<Output = ()> + Unpin` (so `Pin<Box<dyn Future>>`
-/// works directly), letting a set mix boxed futures with hand-rolled machines.
-pub trait Task {
-	/// Drive the task one step; `Ready` retires it from the set.
-	///
-	/// The task owns its outcome: log or record errors before returning
-	/// `Ready`, the set only removes the entry.
-	fn poll(&mut self, waiter: &Waiter) -> Poll<()>;
-}
+/// A boxed task, for a set mixing closure shapes across threads.
+pub type BoxTask = Box<dyn FnMut(&Waiter) -> Poll<()> + Send>;
 
-impl<F: Future<Output = ()> + Unpin> Task for F {
-	fn poll(&mut self, waiter: &Waiter) -> Poll<()> {
-		waiter.poll_future(Pin::new(self))
-	}
-}
+/// The single-threaded [`BoxTask`], for tasks that are not `Send` (wasm).
+pub type LocalBoxTask = Box<dyn FnMut(&Waiter) -> Poll<()>>;
 
-/// A set of [`Task`]s polled by their owner with per-task granularity.
+/// A set of poll-closure tasks polled by their owner with per-task granularity.
 ///
 /// Created empty via [`TaskSet::new`] (paired with a [`Spawner`]) or
 /// [`TaskSet::owned`] (owner-push only). Dropping the set cancels every queued
@@ -250,9 +248,9 @@ impl<T> TaskSet<T> {
 	}
 }
 
-impl<T: Task> TaskSet<T> {
+impl<T: FnMut(&Waiter) -> Poll<()>> TaskSet<T> {
 	/// Adopt queued submissions, then poll every task woken since the last call,
-	/// retiring the finished ones.
+	/// retiring the ones that return `Ready`.
 	///
 	/// `Ready` once every [`Spawner`] has dropped and the tasks drain; an
 	/// owner-only set ([`Self::owned`]) reaches it whenever the tasks drain.
@@ -295,7 +293,7 @@ impl<T: Task> TaskSet<T> {
 			child.flag.dirty.store(false, Ordering::Release);
 			let cx = Context::from_waker(&child.waker);
 			let child_waiter = child.park.hold(&cx);
-			if child.task.poll(child_waiter).is_ready() {
+			if (child.task)(child_waiter).is_ready() {
 				self.children[index] = None;
 				self.free.push(index);
 				self.len -= 1;
@@ -323,16 +321,13 @@ mod tests {
 	use super::*;
 	use std::sync::atomic::AtomicUsize;
 
-	/// Counts its polls; finishes when its gate opens.
-	struct Gated {
-		gate: crate::Consumer<bool>,
-		polls: Arc<AtomicUsize>,
-	}
-
-	impl Task for Gated {
-		fn poll(&mut self, waiter: &Waiter) -> Poll<()> {
-			self.polls.fetch_add(1, Ordering::SeqCst);
-			match self.gate.poll(waiter, |open| match **open {
+	/// A task counting its polls, finishing when its gate opens. A factory
+	/// returning `impl FnMut` mints one closure type, so every task from it
+	/// shares a set without boxing.
+	fn gated(gate: crate::Consumer<bool>, polls: Arc<AtomicUsize>) -> impl FnMut(&Waiter) -> Poll<()> {
+		move |waiter| {
+			polls.fetch_add(1, Ordering::SeqCst);
+			match gate.poll(waiter, |open| match **open {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			}) {
@@ -340,16 +335,6 @@ mod tests {
 				Poll::Pending => Poll::Pending,
 			}
 		}
-	}
-
-	fn gated(set: &mut TaskSet<Gated>) -> (crate::Producer<bool>, Arc<AtomicUsize>) {
-		let gate = crate::Producer::new(false);
-		let polls = Arc::new(AtomicUsize::new(0));
-		set.push(Gated {
-			gate: gate.consume(),
-			polls: polls.clone(),
-		});
-		(gate, polls)
 	}
 
 	fn open(gate: &crate::Producer<bool>) {
@@ -363,8 +348,10 @@ mod tests {
 	#[test]
 	fn a_wake_polls_only_its_task() {
 		let mut set = TaskSet::owned();
-		let (a_gate, a_polls) = gated(&mut set);
-		let (_b_gate, b_polls) = gated(&mut set);
+		let (a_gate, a_polls) = (crate::Producer::new(false), Arc::new(AtomicUsize::new(0)));
+		set.push(gated(a_gate.consume(), a_polls.clone()));
+		let (_b_gate, b_polls) = (crate::Producer::new(false), Arc::new(AtomicUsize::new(0)));
+		set.push(gated(_b_gate.consume(), b_polls.clone()));
 
 		let waiter = Waiter::noop();
 		assert!(set.poll(&waiter).is_pending());
@@ -382,8 +369,10 @@ mod tests {
 	#[test]
 	fn finished_tasks_retire_and_slots_recycle() {
 		let mut set = TaskSet::owned();
-		let (a_gate, _) = gated(&mut set);
-		let (b_gate, _) = gated(&mut set);
+		let a_gate = crate::Producer::new(false);
+		set.push(gated(a_gate.consume(), Arc::new(AtomicUsize::new(0))));
+		let b_gate = crate::Producer::new(false);
+		set.push(gated(b_gate.consume(), Arc::new(AtomicUsize::new(0))));
 		assert_eq!(set.len(), 2);
 
 		let waiter = Waiter::noop();
@@ -392,7 +381,8 @@ mod tests {
 		assert_eq!(set.len(), 1);
 
 		// The freed slot is reused without growing the slab.
-		let (c_gate, _) = gated(&mut set);
+		let c_gate = crate::Producer::new(false);
+		set.push(gated(c_gate.consume(), Arc::new(AtomicUsize::new(0))));
 		assert_eq!(set.children.len(), 2);
 
 		open(&b_gate);
@@ -404,7 +394,7 @@ mod tests {
 	/// The set resolves only after the last spawner drops, even with no tasks.
 	#[test]
 	fn spawners_keep_the_set_alive() {
-		let (spawner, mut set) = TaskSet::<Gated>::new();
+		let (spawner, mut set) = TaskSet::<BoxTask>::new();
 		let waiter = Waiter::noop();
 		assert!(set.poll(&waiter).is_pending(), "a live spawner may still submit");
 
@@ -420,29 +410,22 @@ mod tests {
 	/// running task (nested spawn) runs without an executor.
 	#[test]
 	fn spawner_submissions_run_nested() {
-		struct Once {
-			ran: Arc<AtomicUsize>,
-			nested: Option<Spawner<Once>>,
-		}
-		impl Task for Once {
-			fn poll(&mut self, _waiter: &Waiter) -> Poll<()> {
-				self.ran.fetch_add(1, Ordering::SeqCst);
-				if let Some(spawner) = self.nested.take() {
-					let ran = self.ran.clone();
-					let _ = spawner.push(Once { ran, nested: None });
-				}
-				Poll::Ready(())
-			}
-		}
-
-		let (spawner, mut set) = TaskSet::new();
+		let (spawner, mut set) = TaskSet::<BoxTask>::new();
 		let ran = Arc::new(AtomicUsize::new(0));
+
+		let outer_ran = ran.clone();
+		let nested = spawner.clone();
 		assert!(
 			spawner
-				.push(Once {
-					ran: ran.clone(),
-					nested: Some(spawner.clone()),
-				})
+				.push(Box::new(move |_waiter| {
+					outer_ran.fetch_add(1, Ordering::SeqCst);
+					let inner_ran = outer_ran.clone();
+					let _ = nested.push(Box::new(move |_waiter| {
+						inner_ran.fetch_add(1, Ordering::SeqCst);
+						Poll::Ready(())
+					}));
+					Poll::Ready(())
+				}))
 				.is_ok()
 		);
 		drop(spawner);
@@ -459,32 +442,37 @@ mod tests {
 	/// Dropping the set refuses later submissions and hands the task back.
 	#[test]
 	fn dropping_the_set_closes_spawners() {
-		let (spawner, set) = TaskSet::new();
+		let (spawner, set) = TaskSet::<BoxTask>::new();
 		assert!(!spawner.is_closed());
 		drop(set);
 		assert!(spawner.is_closed());
-
-		let ran = Arc::new(AtomicUsize::new(0));
-		let task = Gated {
-			gate: crate::Producer::new(false).consume(),
-			polls: ran,
-		};
-		assert!(spawner.push(task).is_err(), "the set is gone");
+		assert!(
+			spawner.push(Box::new(|_waiter| Poll::Ready(()))).is_err(),
+			"the set is gone"
+		);
 	}
 
-	/// Boxed futures are tasks: the blanket impl covers `Pin<Box<dyn Future>>`.
+	/// A boxed set mixes shapes: a plain closure and an adapted future.
 	#[test]
-	fn boxed_futures_are_tasks() {
+	fn boxed_tasks_mix_closures_and_futures() {
 		let ran = Arc::new(AtomicUsize::new(0));
-		let mut set: TaskSet<Pin<Box<dyn Future<Output = ()>>>> = TaskSet::owned();
+		let mut set: TaskSet<LocalBoxTask> = TaskSet::owned();
+
 		let counted = ran.clone();
-		set.push(Box::pin(async move {
+		set.push(Box::new(move |_waiter| {
 			counted.fetch_add(1, Ordering::SeqCst);
+			Poll::Ready(())
 		}));
+
+		let counted = ran.clone();
+		let mut fut = Box::pin(async move {
+			counted.fetch_add(1, Ordering::SeqCst);
+		});
+		set.push(Box::new(move |waiter: &Waiter| waiter.poll_future(fut.as_mut())));
 
 		let waiter = Waiter::noop();
 		assert!(set.poll(&waiter).is_ready());
-		assert_eq!(ran.load(Ordering::SeqCst), 1);
+		assert_eq!(ran.load(Ordering::SeqCst), 2);
 	}
 
 	/// The owner is woken by a task wake, a direct push, a spawner submission,
@@ -498,8 +486,12 @@ mod tests {
 			}
 		}
 
-		let (spawner, mut set) = TaskSet::new();
-		let (gate, _) = gated(&mut set);
+		let (spawner, mut set) = TaskSet::<BoxTask>::new();
+		let gate = crate::Producer::new(false);
+		{
+			let mut task = gated(gate.consume(), Arc::new(AtomicUsize::new(0)));
+			set.push(Box::new(move |waiter: &Waiter| task(waiter)));
+		}
 
 		let flag = Arc::new(Flag(AtomicBool::new(false)));
 		let waiter = Waiter::new(Waker::from(flag.clone()));
@@ -508,17 +500,10 @@ mod tests {
 		open(&gate);
 		assert!(flag.0.swap(false, Ordering::SeqCst), "the task wake missed the owner");
 
-		let _ = gated(&mut set);
+		set.push(Box::new(|_waiter| Poll::Ready(())));
 		assert!(flag.0.swap(false, Ordering::SeqCst), "the push missed the owner");
 
-		assert!(
-			spawner
-				.push(Gated {
-					gate: crate::Producer::new(false).consume(),
-					polls: Arc::new(AtomicUsize::new(0)),
-				})
-				.is_ok()
-		);
+		assert!(spawner.push(Box::new(|_waiter| Poll::Ready(()))).is_ok());
 		assert!(flag.0.swap(false, Ordering::SeqCst), "the submission missed the owner");
 
 		drop(spawner);
@@ -541,20 +526,14 @@ mod tests {
 			}
 		}
 
-		struct SelfWaking {
-			polls: Arc<AtomicUsize>,
-		}
-		impl Task for SelfWaking {
-			fn poll(&mut self, waiter: &Waiter) -> Poll<()> {
-				self.polls.fetch_add(1, Ordering::SeqCst);
-				waiter.waker().wake_by_ref();
-				Poll::Pending
-			}
-		}
-
 		let mut set = TaskSet::owned();
 		let polls = Arc::new(AtomicUsize::new(0));
-		set.push(SelfWaking { polls: polls.clone() });
+		let counted = polls.clone();
+		set.push(move |waiter: &Waiter| {
+			counted.fetch_add(1, Ordering::SeqCst);
+			waiter.waker().wake_by_ref();
+			Poll::Pending
+		});
 
 		let flag = Arc::new(Flag(AtomicBool::new(false)));
 		let waiter = Waiter::new(Waker::from(flag.clone()));
