@@ -19,11 +19,13 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
 ## Workflow
 
 1. Resolve or create the PR.
-   - Run `git status --short` before changing the checkout or refs. Treat pre-existing changes as user-owned; preserve
-     them or stop rather than carrying them into the PR implicitly.
-   - Before materializing an untrusted PR head, remove credential access and use trusted Git configuration to disable
-     hooks and every external clean, smudge, and process filter. If that cannot be guaranteed, materialize the head only
-     in disposable credential-free isolation that cannot write host Git metadata.
+   - Before any Git command, remove credential access and apply trusted per-command Git configuration that disables hooks
+     and external filesystem monitors. Do not persist these safety settings in PR-accessible Git metadata.
+   - Run `git status --short` under that trusted configuration before changing the checkout or refs. Treat pre-existing
+     changes as user-owned; preserve them or stop rather than carrying them into the PR implicitly.
+   - Before materializing an untrusted PR head, also disable every external clean, smudge, and process filter. If that
+     cannot be guaranteed, materialize the head only in disposable credential-free isolation that cannot write host Git
+     metadata.
    - Prefer an explicit PR number or URL. Resolve its `headRepository.fullName`, `headRefName`, and `headRefOid`, then
      bind the checkout to that exact head before editing or pushing. Stop if local and remote identities differ and the
      exact head cannot be checked out safely. Otherwise inspect the current branch.
@@ -129,6 +131,9 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
      feedback, approved where required, and verified.
    - Record the verified head OID and require it as a merge precondition, using `--match-head-commit` or the equivalent
      API expected-head field. Abort and return to verification if the PR head moved.
+   - Require atomic base freshness as well, using a merge queue, up-to-date branch protection, or an equivalent merge
+     precondition covering the verified base OID. If the base can move between verification and merge without invalidating
+     the operation, stop for direction rather than accepting the race.
    - Use the repository's established merge style. Otherwise prefer squash merge for an ordinary feature or fix PR.
    - Verify GitHub reports the PR merged and the base branch contains the resulting commit.
 
