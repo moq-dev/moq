@@ -1,31 +1,28 @@
-//! A driver-owned set of poll-driven tasks with per-task wakeups.
+//! A set of poll-driven tasks with per-task wakeups.
 //!
-//! The poll-native alternative to spawning on an executor or collecting boxed
-//! futures in a `FuturesUnordered`: the owner polls the set, each task owns a
-//! waker that marks it ready and wakes the owner, so a wakeup re-polls only the
-//! task it was aimed at. A driver serving hundreds of children steps one machine
-//! per event, not all of them.
+//! The poll-native `FuturesUnordered`: the owner polls the set, each task owns
+//! a waker that marks it ready and wakes the owner, so a wakeup re-polls only
+//! the task it was aimed at (plus any newly pushed ones). A driver serving
+//! hundreds of children steps one machine per event, not all of them.
 //!
 //! A task is a plain poll closure, the same `FnMut(&Waiter) -> Poll<()>` shape
 //! [`wait`](crate::wait) takes: no trait to implement, state lives in the
-//! captures. One set holds one closure type, which one construction site
-//! provides naturally; a set that must mix shapes boxes them ([`BoxTask`] /
-//! [`LocalBoxTask`]), and a future adapts with one line:
+//! captures. `Send` is therefore purely inferred: a [`Tasks`] of `Send`
+//! closures is `Send` and drives from any thread, one capturing an `Rc` is not
+//! and drives locally, and the same code compiles either way. One set holds one
+//! closure type, which one construction site provides naturally; a set that
+//! must mix shapes boxes them (`Box<dyn FnMut(&Waiter) -> Poll<()>>`, adding
+//! `+ Send` only if it crosses threads), and a future adapts with one line:
 //!
 //! ```
-//! # let (_, mut set) = kio::TaskSet::<kio::LocalBoxTask>::new();
+//! let mut tasks = kio::Tasks::new();
 //! let mut fut = Box::pin(async { /* .. */ });
-//! set.push(Box::new(move |waiter: &kio::Waiter| waiter.poll_future(fut.as_mut())));
+//! tasks.push(move |waiter: &kio::Waiter| waiter.poll_future(fut.as_mut()));
 //! ```
 //!
-//! Work arrives two ways: the owner pushes directly ([`TaskSet::push`]), or
-//! anyone holding a cloneable [`Spawner`] submits from outside (including from
-//! inside a running task, so nested work needs no executor). The set resolves
-//! once every spawner has dropped and the remaining tasks finish; dropping the
-//! set instead cancels everything, queued and running.
+//! Dropping the set cancels every remaining task.
 
 use std::{
-	collections::VecDeque,
 	sync::{
 		Arc, Mutex,
 		atomic::{AtomicBool, Ordering},
@@ -35,34 +32,18 @@ use std::{
 
 use crate::waiter::{Park, Waiter};
 
-/// A boxed task, for a set mixing closure shapes across threads.
-pub type BoxTask = Box<dyn FnMut(&Waiter) -> Poll<()> + Send>;
-
-/// The single-threaded [`BoxTask`], for tasks that are not `Send` (wasm).
-pub type LocalBoxTask = Box<dyn FnMut(&Waiter) -> Poll<()>>;
-
 /// A set of poll-closure tasks polled by their owner with per-task granularity.
 ///
-/// Created empty via [`TaskSet::new`] (paired with a [`Spawner`]) or
-/// [`TaskSet::owned`] (owner-push only). Dropping the set cancels every queued
-/// and running task and closes the spawners.
-pub struct TaskSet<T> {
+/// [`poll`](Self::poll) drives the tasks that are new or woken and reports
+/// `Ready` when the set is empty; [`push`](Self::push) wakes the owner, so a
+/// task added between polls gets started. Dropping the set cancels every
+/// remaining task.
+pub struct Tasks<T> {
 	/// Slab of tasks; `None` slots are free and listed in `free`.
 	children: Vec<Option<Child<T>>>,
 	free: Vec<usize>,
 	len: usize,
 	shared: Arc<Shared>,
-	submit: Arc<Submit<T>>,
-}
-
-/// The submitting half of a [`TaskSet`]: clone it into whoever spawns work.
-///
-/// The set resolves only after every spawner has dropped, so holding one is a
-/// promise that more work may still arrive. A task that needs to spawn nested
-/// work keeps a clone of its own set's spawner.
-pub struct Spawner<T> {
-	shared: Arc<Shared>,
-	submit: Arc<Submit<T>>,
 }
 
 struct Child<T> {
@@ -81,20 +62,6 @@ struct Shared {
 	ready: Mutex<Vec<usize>>,
 	/// The waker of whoever polls the set, re-registered on every poll.
 	parent: Mutex<Option<Waker>>,
-}
-
-/// Submissions from [`Spawner`]s, adopted into the slab on the next poll.
-struct Submit<T> {
-	state: Mutex<SubmitState<T>>,
-}
-
-struct SubmitState<T> {
-	queued: VecDeque<T>,
-	/// Live [`Spawner`] handles; the set resolves once this reaches zero and
-	/// the queued plus running tasks drain.
-	spawners: usize,
-	/// The set dropped: submissions are refused.
-	closed: bool,
 }
 
 impl Shared {
@@ -129,68 +96,9 @@ impl Wake for ChildWaker {
 	}
 }
 
-impl<T> Spawner<T> {
-	/// Submit a task, handing it back if the set has been dropped.
-	pub fn push(&self, task: T) -> Result<(), T> {
-		{
-			let mut state = self.submit.state.lock().unwrap();
-			if state.closed {
-				return Err(task);
-			}
-			state.queued.push_back(task);
-		}
-		self.shared.wake_parent();
-		Ok(())
-	}
-
-	/// Whether the set has been dropped, so a push would be refused.
-	pub fn is_closed(&self) -> bool {
-		self.submit.state.lock().unwrap().closed
-	}
-}
-
-impl<T> Clone for Spawner<T> {
-	fn clone(&self) -> Self {
-		self.submit.state.lock().unwrap().spawners += 1;
-		Self {
-			shared: self.shared.clone(),
-			submit: self.submit.clone(),
-		}
-	}
-}
-
-impl<T> Drop for Spawner<T> {
-	fn drop(&mut self) {
-		let last = {
-			let mut state = self.submit.state.lock().unwrap();
-			state.spawners -= 1;
-			state.spawners == 0
-		};
-		// The last spawner leaving may be what lets the set resolve.
-		if last {
-			self.shared.wake_parent();
-		}
-	}
-}
-
-impl<T> TaskSet<T> {
-	/// Create an empty set and the [`Spawner`] that submits into it.
-	pub fn new() -> (Spawner<T>, Self) {
-		let set = Self::with_spawners(1);
-		let spawner = Spawner {
-			shared: set.shared.clone(),
-			submit: set.submit.clone(),
-		};
-		(spawner, set)
-	}
-
-	/// Create a set only its owner can push to, for a loop that accepts work and
-	/// drives each unit as a task. Resolves whenever the tasks drain.
-	pub fn owned() -> Self {
-		Self::with_spawners(0)
-	}
-
-	fn with_spawners(spawners: usize) -> Self {
+impl<T> Tasks<T> {
+	/// Create an empty set.
+	pub fn new() -> Self {
 		Self {
 			children: Vec::new(),
 			free: Vec::new(),
@@ -199,17 +107,10 @@ impl<T> TaskSet<T> {
 				ready: Mutex::new(Vec::new()),
 				parent: Mutex::new(None),
 			}),
-			submit: Arc::new(Submit {
-				state: Mutex::new(SubmitState {
-					queued: VecDeque::new(),
-					spawners,
-					closed: false,
-				}),
-			}),
 		}
 	}
 
-	/// The number of running tasks (queued submissions not yet adopted excluded).
+	/// The number of tasks still running.
 	pub fn len(&self) -> usize {
 		self.len
 	}
@@ -219,10 +120,10 @@ impl<T> TaskSet<T> {
 		self.len == 0
 	}
 
-	/// Add a task directly, queued for its first poll on the next [`poll`](Self::poll).
+	/// Add a task, queued for its first poll.
 	///
-	/// Wakes the owner, so a push from outside its poll still gets the task
-	/// started.
+	/// Wakes the owner, so a task pushed between polls (from another arm of the
+	/// owner's own poll, say) still gets started.
 	pub fn push(&mut self, task: T) {
 		let index = match self.free.pop() {
 			Some(index) => index,
@@ -248,14 +149,14 @@ impl<T> TaskSet<T> {
 	}
 }
 
-impl<T: FnMut(&Waiter) -> Poll<()>> TaskSet<T> {
-	/// Adopt queued submissions, then poll every task woken since the last call,
-	/// retiring the ones that return `Ready`.
+impl<T: FnMut(&Waiter) -> Poll<()>> Tasks<T> {
+	/// Poll every task that is new or was woken since the last call, retiring
+	/// the ones that return `Ready`.
 	///
-	/// `Ready` once every [`Spawner`] has dropped and the tasks drain; an
-	/// owner-only set ([`Self::owned`]) reaches it whenever the tasks drain.
-	/// `waiter` is registered for the next task wake, submission, or the last
-	/// spawner leaving; the tasks themselves park on their own wakers.
+	/// `Ready` when the set is empty, like `FuturesUnordered` reporting `None`.
+	/// For a long-lived driver arm that keeps pushing, treat it as "drained for
+	/// now" rather than an exit condition. `waiter` is registered for the next
+	/// task wake or push; the tasks themselves park on their own wakers.
 	pub fn poll(&mut self, waiter: &Waiter) -> Poll<()> {
 		{
 			let mut parent = self.shared.parent.lock().unwrap();
@@ -264,17 +165,6 @@ impl<T: FnMut(&Waiter) -> Poll<()>> TaskSet<T> {
 				*parent = Some(waker.clone());
 			}
 		}
-
-		let spawners = {
-			let mut submit = self.submit.state.lock().unwrap();
-			let queued = std::mem::take(&mut submit.queued);
-			let spawners = submit.spawners;
-			drop(submit);
-			for task in queued {
-				self.push(task);
-			}
-			spawners
-		};
 
 		// One snapshot per owner poll: a task woken during the pass (including a
 		// self-wake before returning Pending) re-queues itself and has already
@@ -300,19 +190,16 @@ impl<T: FnMut(&Waiter) -> Poll<()>> TaskSet<T> {
 			}
 		}
 
-		match self.len == 0 && spawners == 0 && self.submit.state.lock().unwrap().queued.is_empty() {
-			true => Poll::Ready(()),
-			false => Poll::Pending,
+		match self.len {
+			0 => Poll::Ready(()),
+			_ => Poll::Pending,
 		}
 	}
 }
 
-impl<T> Drop for TaskSet<T> {
-	fn drop(&mut self) {
-		// Refuse and discard submissions; the running tasks drop with the slab.
-		let mut state = self.submit.state.lock().unwrap();
-		state.closed = true;
-		state.queued.clear();
+impl<T> Default for Tasks<T> {
+	fn default() -> Self {
+		Self::new()
 	}
 }
 
@@ -347,119 +234,59 @@ mod tests {
 	/// A wake aimed at one task polls only that task.
 	#[test]
 	fn a_wake_polls_only_its_task() {
-		let mut set = TaskSet::owned();
+		let mut tasks = Tasks::new();
 		let (a_gate, a_polls) = (crate::Producer::new(false), Arc::new(AtomicUsize::new(0)));
-		set.push(gated(a_gate.consume(), a_polls.clone()));
+		tasks.push(gated(a_gate.consume(), a_polls.clone()));
 		let (_b_gate, b_polls) = (crate::Producer::new(false), Arc::new(AtomicUsize::new(0)));
-		set.push(gated(_b_gate.consume(), b_polls.clone()));
+		tasks.push(gated(_b_gate.consume(), b_polls.clone()));
 
 		let waiter = Waiter::noop();
-		assert!(set.poll(&waiter).is_pending());
+		assert!(tasks.poll(&waiter).is_pending());
 		assert_eq!((a_polls.load(Ordering::SeqCst), b_polls.load(Ordering::SeqCst)), (1, 1));
 
 		// Waking a's gate must re-poll a alone.
 		open(&a_gate);
-		assert!(set.poll(&waiter).is_pending(), "b is still live");
+		assert!(tasks.poll(&waiter).is_pending(), "b is still live");
 		assert_eq!(a_polls.load(Ordering::SeqCst), 2, "a was woken");
 		assert_eq!(b_polls.load(Ordering::SeqCst), 1, "b was not");
 	}
 
-	/// Finished tasks retire, their slots are reused, and a drained owned set is
-	/// Ready.
+	/// Finished tasks retire, their slots are reused, and an empty set is Ready.
 	#[test]
 	fn finished_tasks_retire_and_slots_recycle() {
-		let mut set = TaskSet::owned();
+		let mut tasks = Tasks::new();
 		let a_gate = crate::Producer::new(false);
-		set.push(gated(a_gate.consume(), Arc::new(AtomicUsize::new(0))));
+		tasks.push(gated(a_gate.consume(), Arc::new(AtomicUsize::new(0))));
 		let b_gate = crate::Producer::new(false);
-		set.push(gated(b_gate.consume(), Arc::new(AtomicUsize::new(0))));
-		assert_eq!(set.len(), 2);
+		tasks.push(gated(b_gate.consume(), Arc::new(AtomicUsize::new(0))));
+		assert_eq!(tasks.len(), 2);
 
 		let waiter = Waiter::noop();
 		open(&a_gate);
-		assert!(set.poll(&waiter).is_pending());
-		assert_eq!(set.len(), 1);
+		assert!(tasks.poll(&waiter).is_pending());
+		assert_eq!(tasks.len(), 1);
 
 		// The freed slot is reused without growing the slab.
 		let c_gate = crate::Producer::new(false);
-		set.push(gated(c_gate.consume(), Arc::new(AtomicUsize::new(0))));
-		assert_eq!(set.children.len(), 2);
+		tasks.push(gated(c_gate.consume(), Arc::new(AtomicUsize::new(0))));
+		assert_eq!(tasks.children.len(), 2);
 
 		open(&b_gate);
 		open(&c_gate);
-		assert!(set.poll(&waiter).is_ready(), "a drained owned set is Ready");
-		assert!(set.is_empty());
-	}
-
-	/// The set resolves only after the last spawner drops, even with no tasks.
-	#[test]
-	fn spawners_keep_the_set_alive() {
-		let (spawner, mut set) = TaskSet::<BoxTask>::new();
-		let waiter = Waiter::noop();
-		assert!(set.poll(&waiter).is_pending(), "a live spawner may still submit");
-
-		let clone = spawner.clone();
-		drop(spawner);
-		assert!(set.poll(&waiter).is_pending(), "a cloned spawner counts too");
-
-		drop(clone);
-		assert!(set.poll(&waiter).is_ready(), "no spawner, no tasks");
-	}
-
-	/// A spawner submission runs on the next poll, and a submission from inside a
-	/// running task (nested spawn) runs without an executor.
-	#[test]
-	fn spawner_submissions_run_nested() {
-		let (spawner, mut set) = TaskSet::<BoxTask>::new();
-		let ran = Arc::new(AtomicUsize::new(0));
-
-		let outer_ran = ran.clone();
-		let nested = spawner.clone();
-		assert!(
-			spawner
-				.push(Box::new(move |_waiter| {
-					outer_ran.fetch_add(1, Ordering::SeqCst);
-					let inner_ran = outer_ran.clone();
-					let _ = nested.push(Box::new(move |_waiter| {
-						inner_ran.fetch_add(1, Ordering::SeqCst);
-						Poll::Ready(())
-					}));
-					Poll::Ready(())
-				}))
-				.is_ok()
-		);
-		drop(spawner);
-
-		// The task's clone of the spawner dropped when it finished, so the drain
-		// resolves the set: first poll runs the outer (queuing the nested), the
-		// second runs the nested and resolves.
-		let waiter = Waiter::noop();
-		assert!(set.poll(&waiter).is_pending());
-		assert!(set.poll(&waiter).is_ready());
-		assert_eq!(ran.load(Ordering::SeqCst), 2);
-	}
-
-	/// Dropping the set refuses later submissions and hands the task back.
-	#[test]
-	fn dropping_the_set_closes_spawners() {
-		let (spawner, set) = TaskSet::<BoxTask>::new();
-		assert!(!spawner.is_closed());
-		drop(set);
-		assert!(spawner.is_closed());
-		assert!(
-			spawner.push(Box::new(|_waiter| Poll::Ready(()))).is_err(),
-			"the set is gone"
-		);
+		assert!(tasks.poll(&waiter).is_ready(), "an empty set is Ready");
+		assert!(tasks.is_empty());
 	}
 
 	/// A boxed set mixes shapes: a plain closure and an adapted future.
 	#[test]
 	fn boxed_tasks_mix_closures_and_futures() {
+		type Boxed = Box<dyn FnMut(&Waiter) -> Poll<()>>;
+
 		let ran = Arc::new(AtomicUsize::new(0));
-		let mut set: TaskSet<LocalBoxTask> = TaskSet::owned();
+		let mut tasks: Tasks<Boxed> = Tasks::new();
 
 		let counted = ran.clone();
-		set.push(Box::new(move |_waiter| {
+		tasks.push(Box::new(move |_waiter| {
 			counted.fetch_add(1, Ordering::SeqCst);
 			Poll::Ready(())
 		}));
@@ -468,17 +295,17 @@ mod tests {
 		let mut fut = Box::pin(async move {
 			counted.fetch_add(1, Ordering::SeqCst);
 		});
-		set.push(Box::new(move |waiter: &Waiter| waiter.poll_future(fut.as_mut())));
+		tasks.push(Box::new(move |waiter: &Waiter| waiter.poll_future(fut.as_mut())));
 
 		let waiter = Waiter::noop();
-		assert!(set.poll(&waiter).is_ready());
+		assert!(tasks.poll(&waiter).is_ready());
 		assert_eq!(ran.load(Ordering::SeqCst), 2);
 	}
 
-	/// The owner is woken by a task wake, a direct push, a spawner submission,
-	/// and the last spawner leaving, so none of them is lost between polls.
+	/// The owner is woken by a task wake and by a push, so neither is lost when
+	/// it happens between polls.
 	#[test]
-	fn every_edge_wakes_the_owner() {
+	fn task_wakes_and_pushes_reach_the_owner() {
 		struct Flag(AtomicBool);
 		impl Wake for Flag {
 			fn wake(self: Arc<Self>) {
@@ -486,31 +313,22 @@ mod tests {
 			}
 		}
 
-		let (spawner, mut set) = TaskSet::<BoxTask>::new();
+		let mut tasks = Tasks::new();
 		let gate = crate::Producer::new(false);
-		{
-			let mut task = gated(gate.consume(), Arc::new(AtomicUsize::new(0)));
-			set.push(Box::new(move |waiter: &Waiter| task(waiter)));
-		}
+		tasks.push(gated(gate.consume(), Arc::new(AtomicUsize::new(0))));
 
 		let flag = Arc::new(Flag(AtomicBool::new(false)));
 		let waiter = Waiter::new(Waker::from(flag.clone()));
-		assert!(set.poll(&waiter).is_pending());
+		assert!(tasks.poll(&waiter).is_pending());
 
 		open(&gate);
 		assert!(flag.0.swap(false, Ordering::SeqCst), "the task wake missed the owner");
 
-		set.push(Box::new(|_waiter| Poll::Ready(())));
-		assert!(flag.0.swap(false, Ordering::SeqCst), "the push missed the owner");
-
-		assert!(spawner.push(Box::new(|_waiter| Poll::Ready(()))).is_ok());
-		assert!(flag.0.swap(false, Ordering::SeqCst), "the submission missed the owner");
-
-		drop(spawner);
-		assert!(
-			flag.0.load(Ordering::SeqCst),
-			"the last spawner leaving missed the owner"
-		);
+		tasks.push(gated(
+			crate::Producer::new(false).consume(),
+			Arc::new(AtomicUsize::new(0)),
+		));
+		assert!(flag.0.load(Ordering::SeqCst), "the push missed the owner");
 	}
 
 	/// A task is allowed to self-wake before returning Pending. Such a task must
@@ -526,10 +344,10 @@ mod tests {
 			}
 		}
 
-		let mut set = TaskSet::owned();
+		let mut tasks = Tasks::new();
 		let polls = Arc::new(AtomicUsize::new(0));
 		let counted = polls.clone();
-		set.push(move |waiter: &Waiter| {
+		tasks.push(move |waiter: &Waiter| {
 			counted.fetch_add(1, Ordering::SeqCst);
 			waiter.waker().wake_by_ref();
 			Poll::Pending
@@ -538,15 +356,63 @@ mod tests {
 		let flag = Arc::new(Flag(AtomicBool::new(false)));
 		let waiter = Waiter::new(Waker::from(flag.clone()));
 
-		assert!(set.poll(&waiter).is_pending());
+		assert!(tasks.poll(&waiter).is_pending());
 		assert_eq!(polls.load(Ordering::SeqCst), 1, "one poll per owner poll");
 		assert!(flag.0.swap(false, Ordering::SeqCst), "the re-queue must wake the owner");
 
-		assert!(set.poll(&waiter).is_pending());
+		assert!(tasks.poll(&waiter).is_pending());
 		assert_eq!(
 			polls.load(Ordering::SeqCst),
 			2,
 			"the next owner poll runs the task again"
 		);
+	}
+
+	/// Drive a set to completion as a future. Generic on purpose: the two tests
+	/// below hand this same code to `tokio::spawn` (which demands `Send`) and to
+	/// `spawn_local` with `!Send` tasks. Send-ness is inferred from the task
+	/// type, never demanded by kio; if either test stops compiling, we failed.
+	async fn drive<T: FnMut(&Waiter) -> Poll<()> + Unpin>(mut tasks: Tasks<T>) {
+		crate::wait(move |waiter| tasks.poll(waiter)).await
+	}
+
+	/// `Send` tasks make a `Send` set: `tokio::spawn` accepts it.
+	#[tokio::test]
+	async fn send_tasks_drive_on_spawn() {
+		let done = Arc::new(AtomicUsize::new(0));
+
+		let mut tasks = Tasks::new();
+		let counted = done.clone();
+		tasks.push(move |_: &Waiter| {
+			counted.fetch_add(1, Ordering::SeqCst);
+			Poll::Ready(())
+		});
+
+		tokio::spawn(drive(tasks)).await.unwrap();
+		assert_eq!(done.load(Ordering::SeqCst), 1);
+	}
+
+	/// `!Send` tasks (an `Rc` capture) make a `!Send` set: `spawn_local` drives
+	/// the exact same code.
+	#[tokio::test]
+	async fn local_tasks_drive_on_spawn_local() {
+		use std::{cell::Cell, rc::Rc};
+
+		let local = tokio::task::LocalSet::new();
+		local
+			.run_until(async {
+				let done = Rc::new(Cell::new(0));
+
+				let mut tasks = Tasks::new();
+				let counted = done.clone();
+				tasks.push(move |_: &Waiter| {
+					counted.set(counted.get() + 1);
+					Poll::Ready(())
+				});
+
+				tokio::task::spawn_local(drive(tasks)).await.unwrap();
+				assert_eq!(done.get(), 1);
+			})
+			.await;
 	}
 }
