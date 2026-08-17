@@ -22,7 +22,9 @@ use super::{Message, Version, cluster, peer};
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	Subscription {
 		priority: super::priority::from_wire(subscriber_priority),
-		latency: Latency::max(Duration::MAX),
+		// Demand can cross a Lite hop before the producer's retention bound is
+		// known, so use the largest duration that remains wire-encodable.
+		latency: Latency::max(Duration::from_millis(crate::coding::VarInt::MAX.into_inner())),
 		..Default::default()
 	}
 }
@@ -1781,7 +1783,12 @@ mod tests {
 			group.finish().unwrap();
 		}
 
-		let mut subscriber = producer.subscribe(serving_subscription(128));
+		let subscription = serving_subscription(128);
+		assert!(
+			crate::coding::VarInt::try_from(subscription.latency.max.as_millis()).is_ok(),
+			"fallback must remain encodable across a Lite relay hop"
+		);
+		let mut subscriber = producer.subscribe(subscription);
 		for sequence in [0, 1] {
 			let group = subscriber
 				.recv_group()
