@@ -19,10 +19,12 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
 ## Workflow
 
 1. Resolve or create the PR.
-   - Before any Git command, remove credential access and apply trusted per-command Git configuration that disables
-     hooks, external filesystem monitors, external diff and text-conversion helpers, and every external clean, smudge,
-     and process filter. Unset external-diff environment variables, set trusted non-interactive pager overrides, and
-     invoke every Git command with `--no-pager`. Do not persist these safety settings in PR-accessible Git metadata.
+   - Before any Git command, remove credential access. Treat repository and worktree Git configuration and attributes as
+     untrusted executable policy. Use either disposable credential-free isolation or a separately verified minimal Git
+     metadata and configuration context that cannot load PR-controlled configuration or attributes. In that context,
+     disable hooks, filesystem monitors, filters, diff and text-conversion helpers, merge drivers, pagers, editors, and
+     other external helpers. Unset related environment overrides and invoke every Git command with `--no-pager`. Do not
+     persist safety settings in PR-accessible Git metadata.
    - Run `git status --short` under that trusted configuration before changing the checkout or refs. Treat pre-existing
      changes as user-owned; preserve them or stop rather than carrying them into the PR implicitly.
    - If those safeguards cannot be guaranteed, inspect or materialize the head only in disposable credential-free
@@ -42,6 +44,9 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
      that head repository, and push `HEAD:<headRefName>` there. For a new PR, select a confirmed writable head remote and
      explicit head ref, then push `<head-remote> HEAD:<head-ref>`. Stop if the intended head repository or write target
      cannot be established confidently.
+   - Perform authenticated fetches, pushes, and merges through a GitHub-specific API or a separate verified Git context
+     that never loads PR-controlled configuration or attributes. Clear SSH-command overrides and pin a trusted transport
+     and credential mechanism before any authenticated operation.
    - If the current branch has no PR, confirm it has committed work against an unambiguous base, preserves unrelated
      user changes, and can be pushed. Create a draft PR explicitly targeting the selected base and the same pushed head
      repository and ref, then verify the created PR's base and head metadata before continuing.
@@ -97,7 +102,8 @@ supports a clear solution, and ask the user to decide when it does not. Never tr
      reproduction or retry that may execute PR-controlled code, first apply the trusted-policy selection and
      credential-free isolation requirements in step 7. If that isolation is unavailable, rely on trusted CI evidence.
    - Use the repository's established patterns and keep the change scoped. Add regression coverage for behavior fixes.
-   - Resolve clear conflicts against the latest base while preserving both sides' intended behavior.
+   - Resolve clear conflicts against the latest base while preserving both sides' intended behavior. Perform every
+     merge, rebase, and conflict-resolution operation in disposable isolation, with custom merge drivers disabled.
    - If a local failure may be a toolchain or environment mismatch, retry in the trusted-policy environment before
      changing unrelated source code, while preserving the isolation requirements above.
    - Seek a fresh Codex or CodeRabbit review after material fixes. Self-review only under the fallback rule in step 3.
