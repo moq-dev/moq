@@ -574,8 +574,9 @@ Each group is a snapshot: reading its frames in order yields the table's complet
 A joiner reads only the newest group and is current; older groups never need to be fetched.
 A writer MAY append a frame to an open group to revise one sub-table incrementally; a writer that only ever cuts complete groups is trivially conformant.
 
-A publisher MUST NOT publish a partially-acquired sub-table: sections of one version are buffered until the generation is complete and committed atomically.
-A torn set (sections disagreeing about their version, or a section set that a receiver cannot complete) is not something a conformant multiplexer emits, and the group boundary makes it unrepresentable here.
+A publisher MUST NOT mix versions within a sub-table's frame: sections of one version are buffered until the generation is judged complete and committed atomically.
+Completeness is contiguity (all of `0..=last_section_number` present) or one observed full transmission cycle, whichever comes first: some tables number their sections sparsely (DVB EIT schedule skips unused numbers per segment), so a repeated section within the pending generation proves the cycle wrapped and the set is complete as transmitted.
+A section lost before the cycle wraps is indistinguishable from a legitimately skipped number, so a committed set can transiently omit it until the next cycle re-supplies it; no section-counting receiver can do better.
 A publisher SHOULD carry only sections whose `current_next_indicator` is set.
 
 Tables that are clocks rather than state (TDT/TOT, PID 0x0014) SHOULD NOT be carried: every section is new content, and an exporter's own clock is a better source than a time relayed from an upstream multiplexer of unknown delay.

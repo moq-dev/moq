@@ -45,6 +45,12 @@ const PMT_PID: u16 = 0x1000;
 const FIRST_ES_PID: u16 = 0x1001;
 /// Re-emit PAT/PMT at least this often (wall-clock of the media) for tune-in.
 const PSI_INTERVAL: Duration = Duration::from_millis(500);
+/// How long the first output frame waits for the catalog's SI entries to deliver
+/// their first snapshot. A healthy entry resolves in one round-trip; an entry that
+/// never will (a stale announce naming a track whose publisher is gone) must not
+/// hold the programme dark, so expiry proceeds without it, exactly as a failed
+/// track is treated. Late snapshots still fold in and start emitting.
+const SI_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Subscribe to a broadcast and produce an MPEG-TS byte stream.
 ///
@@ -71,6 +77,14 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// re-emitted verbatim on its PID at its own cadence. Opaque: export never
 	/// parses a table it carries.
 	si: BTreeMap<(u16, u8), SiTrack>,
+	/// Deadline for the SI half of the first-frame gate ([`SI_READY_TIMEOUT`]),
+	/// armed the first time an entry blocks output and cleared if they all deliver
+	/// first. `None` also when no tokio runtime is present to drive it, in which
+	/// case the gate is unbounded as before.
+	si_gate: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+	/// The deadline expired: stop gating on SI (entries keep resolving in the
+	/// background and emit once they do).
+	si_expired: bool,
 
 	/// Program tables, built once the track layout is known.
 	psi: Option<Psi>,
@@ -347,6 +361,8 @@ impl<E: catalog::Catalog> Export<E> {
 			program_descriptors: Vec::new(),
 			program: None,
 			si: BTreeMap::new(),
+			si_gate: None,
+			si_expired: false,
 			psi: None,
 			last_psi: None,
 			video_start: None,
@@ -392,6 +408,27 @@ impl<E: catalog::Catalog> Export<E> {
 		// entry's active set (emission happens on cadence in `write_frame`).
 		for si in self.si.values_mut() {
 			si.poll(waiter);
+		}
+
+		// Bound the SI half of the first-frame gate. Without a deadline, an entry
+		// that never delivers (a stale announce) would hold all output dark forever,
+		// and by this point every media source can have a frame buffered, leaving
+		// the stuck subscription as the only registered waker. Polling the sleep
+		// registers the timer as a wake source, so expiry actually re-runs us.
+		if self.psi.is_none() && !self.si_expired {
+			if self.si_delivered() {
+				self.si_gate = None;
+			} else if tokio::runtime::Handle::try_current().is_ok() {
+				let gate = self
+					.si_gate
+					.get_or_insert_with(|| Box::pin(tokio::time::sleep(SI_READY_TIMEOUT)));
+				if waiter.poll_future(gate.as_mut()).is_ready() {
+					let stuck = self.si.values().filter(|si| si.active.is_empty()).count();
+					tracing::warn!(stuck, "SI first-snapshot wait expired; starting without");
+					self.si_expired = true;
+					self.si_gate = None;
+				}
+			}
 		}
 
 		// 2. Pull a frame into every idle track. ExportSource has already
@@ -694,13 +731,20 @@ impl<E: catalog::Catalog> Export<E> {
 			.all(|t| t.pending.is_some() || t.finished)
 	}
 
-	/// Every SI entry named by the catalog has reduced its first snapshot (or
-	/// terminally failed), so the first output frame already carries the service
-	/// layer. Entries appearing later (a table acquired mid-stream) don't re-gate.
-	fn si_ready(&self) -> bool {
+	/// Every SI entry named by the catalog has reduced its first snapshot or
+	/// terminally failed.
+	fn si_delivered(&self) -> bool {
 		self.si
 			.values()
 			.all(|si| !si.active.is_empty() || matches!(si.state, SiState::Done))
+	}
+
+	/// The SI half of the first-frame gate: every entry delivered, so the first
+	/// output frame already carries the service layer, or the wait expired
+	/// ([`SI_READY_TIMEOUT`]) and output proceeds without the stragglers. Entries
+	/// appearing later (a table acquired mid-stream) don't re-gate.
+	fn si_ready(&self) -> bool {
+		self.si_expired || self.si_delivered()
 	}
 
 	/// The smallest timestamp among the video tracks' buffered frames: the first

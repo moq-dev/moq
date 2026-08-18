@@ -1814,42 +1814,189 @@ async fn sdt_other_networks_do_not_collide() {
 }
 
 /// A next-version section (current_next_indicator clear) describes a future state
-/// and is dropped: only what is currently in force is carried.
+/// and is dropped: only what is currently in force is carried. The current NIT is
+/// the positive control proving the pipeline ran; a lone dropped packet would pass
+/// vacuously, since sync lock needs a second packet before anything routes.
 #[tokio::test(start_paused = true)]
 async fn next_version_sections_are_dropped() {
 	let mut next = make_long_section(0x42, 1, 3, 0, 0, &[0xaa; 4]);
 	next[5] &= !0x01;
+	let nit = make_long_section(0x40, 1, 0, 0, 0, &[0xbb; 4]);
 
+	let mut input = si_packet(0x0011, &next);
+	input.extend_from_slice(&si_packet_cc(0x0011, &next, 1));
+	input.extend_from_slice(&si_packet(0x0010, &nit));
+	input.extend_from_slice(&si_packet_cc(0x0010, &nit, 1));
 	let mut rig = si_rig();
-	rig.import
-		.decode(&BytesMut::from(&si_packet(0x0011, &next)[..]))
-		.unwrap();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	rig.import.finish().unwrap();
 
-	assert!(
-		rig.catalog.snapshot().mpegts.si.is_empty(),
-		"a next-version section creates no entry"
-	);
+	let si = rig.catalog.snapshot().mpegts.si.clone();
+	assert!(si.contains_key(&0x0010), "the current NIT was captured (control)");
+	assert!(!si.contains_key(&0x0011), "a next-version section creates no entry");
 }
 
 /// TDT/TOT (0x0014) stays out by policy: it is a clock, not state, so every
 /// section is new content, and an exporter's own clock beats a time relayed from
-/// an upstream multiplexer of unknown delay.
+/// an upstream multiplexer of unknown delay. The SDT is the positive control
+/// proving the pipeline ran.
 #[tokio::test(start_paused = true)]
 async fn tdt_is_not_captured() {
 	// A short-form TDT: table_id 0x70, no long-form header.
-	let tdt = make_section(0x70, &[0xc0, 0x79, 0x12, 0x34, 0x56]);
+	let tdt = make_short_section(0x70, &[0xc0, 0x79, 0x12, 0x34, 0x56]);
+	let sdt = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 4]);
 
+	let mut input = si_packet(0x0014, &tdt);
+	input.extend_from_slice(&si_packet_cc(0x0014, &tdt, 1));
+	input.extend_from_slice(&si_packet(0x0011, &sdt));
+	input.extend_from_slice(&si_packet_cc(0x0011, &sdt, 1));
 	let mut rig = si_rig();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	rig.import.finish().unwrap();
+
+	let si = rig.catalog.snapshot().mpegts.si.clone();
+	assert!(si.contains_key(&0x0011), "the SDT was captured (control)");
+	assert!(
+		!si.contains_key(&0x0014),
+		"TDT is not captured; the omission is policy, not oversight"
+	);
+}
+
+/// Build a well-formed short-form section (syntax indicator clear): header + body,
+/// no extension, versioning, or CRC.
+fn make_short_section(table_id: u8, body: &[u8]) -> Vec<u8> {
+	let mut s = vec![
+		table_id,
+		0x30 | ((body.len() >> 8) as u8 & 0x0f),
+		(body.len() & 0xff) as u8,
+	];
+	s.extend_from_slice(body);
+	s
+}
+
+/// Aborting the importer must remove the advertised SI entries from the catalog:
+/// a map naming aborted tracks would strand every later exporter on subscriptions
+/// that can never deliver.
+#[tokio::test(start_paused = true)]
+async fn abort_removes_si_catalog_entries() {
+	let sdt = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 4]);
+	// Twice: sync lock needs a second packet before the first routes at all.
+	let mut input = si_packet(0x0011, &sdt);
+	input.extend_from_slice(&si_packet_cc(0x0011, &sdt, 1));
+	let mut rig = si_rig();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	assert!(
+		!rig.catalog.snapshot().mpegts.si.is_empty(),
+		"the SDT entry was advertised"
+	);
+
+	rig.import.abort(moq_net::Error::Cancel);
+	assert!(
+		rig.catalog.snapshot().mpegts.si.is_empty(),
+		"abort removed the advertised entries"
+	);
+}
+
+/// Content-identified sections (short-form: no version, nothing to revise in
+/// place) are retained up to a cap, and churn at the cap is not a change: a
+/// clock-like table whose every repetition differs would otherwise cut a group
+/// per debounce forever, carrying the cap's worth of stale sections.
+#[tokio::test(start_paused = true)]
+async fn content_section_churn_at_the_cap_cuts_no_group() {
+	let section = |i: u8| make_short_section(0x72, &[i, 0x00, 0xee]);
+
+	// One over the cap in one batch: the 33rd evicts the 1st.
+	let mut input = Vec::new();
+	for i in 0..33u8 {
+		input.extend_from_slice(&si_packet_cc(0x0011, &section(i), i & 0x0f));
+	}
+	let mut rig = si_rig();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	// Another distinct section, pure rotation at the cap: must not re-dirty.
 	rig.import
-		.decode(&BytesMut::from(&si_packet(0x0014, &tdt)[..]))
+		.decode(&BytesMut::from(&si_packet_cc(0x0011, &section(33), 1)[..]))
 		.unwrap();
 	rig.import.finish().unwrap();
 
+	let si = rig.catalog.snapshot().mpegts.si.clone();
+	let groups = read_si_groups(&rig.consumer, &si[&0x0011][&0x72].track).await;
+	assert_eq!(groups.len(), 1, "rotation at the cap cut no further group");
+	assert_eq!(groups[0].len(), 32, "the snapshot holds the cap's worth of sections");
+}
+
+/// The first-frame SI gate must have a deadline: an advertised entry whose track
+/// resolves but never delivers a snapshot (a stale announce) must not hold the
+/// whole programme dark. After [`SI_READY_TIMEOUT`] the export starts without it.
+#[tokio::test(start_paused = true)]
+async fn si_gate_expires_on_a_stale_entry() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	// A track that exists (the subscription resolves) but never produces a group.
+	let ghost = broadcast.create_track("ghost.si", None).unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
+	let track = broadcast
+		.create_track(broadcast.unique_name(".avc1"), hang::container::track_info())
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		let mut guard = catalog.lock();
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		cfg.container = Container::Legacy;
+		cfg.description = Some(avcc);
+		guard.video.renditions.insert(name.clone(), cfg);
+		guard.mpegts.si.entry(0x0011).or_default().insert(
+			0x42,
+			tscat::SiEntry {
+				track: "ghost.si".to_string(),
+				interval: Some(Duration::from_secs(2)),
+				..Default::default()
+			},
+		);
+	}
+
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 64));
+	producer
+		.write(Frame {
+			timestamp: Timestamp::ZERO,
+			duration: None,
+			payload: length_prefixed(&[&idr]),
+			keyframe: true,
+		})
+		.unwrap();
+	producer.cut(None).unwrap();
+	producer.finish().unwrap();
+
+	let mut exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap();
+	// Paused time auto-advances to the gate's deadline; a generous outer timeout
+	// distinguishes "expired and produced output" from "held dark forever".
+	let frame = tokio::time::timeout(Duration::from_secs(60), exporter.next())
+		.await
+		.expect("the SI gate must expire rather than hold output dark")
+		.unwrap()
+		.expect("a muxed frame");
+	assert!(!frame.payload.is_empty());
 	assert!(
-		rig.catalog.snapshot().mpegts.si.is_empty(),
-		"TDT is not captured; the omission is policy, not oversight"
+		!frame
+			.payload
+			.chunks_exact(188)
+			.any(|p| ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == 0x0011),
+		"nothing was emitted for the undelivered entry"
 	);
+	drop(ghost);
 }
 
 /// A raw Opus packet: a one-byte TOC (config 1 = SILK NB 20 ms, stereo, code 0) plus

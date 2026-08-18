@@ -127,8 +127,12 @@ struct Pending {
 }
 
 impl Pending {
-	/// All of 0..=last present. Sufficient for a complete commit, but not necessary:
-	/// a sparse table (EIT schedule) commits on cycle wrap instead.
+	/// All of 0..=last present: the fast path for densely-numbered tables (SDT, NIT,
+	/// EIT now/next), committing the moment the last section lands. EIT schedule
+	/// never satisfies this: its numbering is deliberately sparse (a real 8-day
+	/// guide declares `last_section_number` 248 and transmits 32 sections), so the
+	/// cycle-wrap path in [`Entry::section`] is its *only* commit path, not a
+	/// fallback.
 	fn contiguous(&self) -> bool {
 		self.sections.len() == self.last as usize + 1
 	}
@@ -176,6 +180,11 @@ impl Entry {
 			if self.content_order.len() > MAX_CONTENT_SECTIONS {
 				let evict = self.content_order.remove(0);
 				self.active.remove(&evict);
+				// At the cap the set is churning, not growing: a clock-like table whose
+				// every repetition differs would otherwise mint a key per arrival and
+				// cut a group per debounce forever, carrying the cap's worth of stale
+				// sections. Rotation without net growth is not worth republishing.
+				return;
 			}
 			self.dirty = true;
 			return;
@@ -202,9 +211,12 @@ impl Entry {
 			if *prior == section {
 				// The same section came round again before the set completed: the
 				// transmission cycle wrapped, so what we hold is the whole sub-table as
-				// this mux transmits it. EIT schedule is deliberately sparse (segments
-				// skip unused section numbers), so this, not contiguity, is its commit
-				// path.
+				// this mux transmits it. For EIT schedule this is the *only* commit
+				// path (see [`Pending::contiguous`]). The limit: a section lost before
+				// the wrap is indistinguishable from a legitimately skipped number, so
+				// the committed set is complete-as-observed, self-healing on the next
+				// cycle. No section-counting receiver can do better; version mixing is
+				// still unrepresentable either way.
 				let sections = std::mem::take(&mut pending.sections);
 				self.commit(id, version, sections);
 				return;
@@ -375,17 +387,19 @@ impl<E: catalog::Catalog> Capture<E> {
 		Ok(())
 	}
 
-	/// Abort every track with `err` instead of finishing. The catalog entries are
-	/// removed by `Drop`.
+	/// Abort every track with `err` instead of finishing, removing their catalog
+	/// entries so the map never names an aborted track.
 	pub fn abort(mut self, err: moq_net::Error) {
+		self.unadvertise();
 		for (_, entry) in std::mem::take(&mut self.entries) {
 			let _ = entry.track.abort(err.clone());
 		}
 	}
-}
 
-impl<E: catalog::Catalog> Drop for Capture<E> {
-	fn drop(&mut self) {
+	/// Remove every advertised entry from the catalog's `si` map, once (idempotent:
+	/// entries are marked unadvertised as they go, so the `Drop` after an `abort`
+	/// finds nothing left to do).
+	fn unadvertise(&mut self) {
 		if !self.entries.values().any(|e| e.advertised) {
 			return;
 		}
@@ -393,10 +407,11 @@ impl<E: catalog::Catalog> Drop for Capture<E> {
 		let Some(mpegts) = guard.mpegts_mut() else {
 			return;
 		};
-		for ((pid, table_id), entry) in self.entries.iter() {
+		for ((pid, table_id), entry) in self.entries.iter_mut() {
 			if !entry.advertised {
 				continue;
 			}
+			entry.advertised = false;
 			if let Some(tables) = mpegts.si.get_mut(pid) {
 				tables.remove(table_id);
 				if tables.is_empty() {
@@ -404,6 +419,12 @@ impl<E: catalog::Catalog> Drop for Capture<E> {
 				}
 			}
 		}
+	}
+}
+
+impl<E: catalog::Catalog> Drop for Capture<E> {
+	fn drop(&mut self) {
+		self.unadvertise();
 	}
 }
 
