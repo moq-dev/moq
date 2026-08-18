@@ -3,9 +3,15 @@
 use moq_net::{AsPath, PathRelativeOwned};
 
 #[doc(hidden)]
-#[deprecated(note = "use moq_net::Path::relative, filtered with PathRelative::is_ancestor")]
+#[deprecated(note = "use moq_net::Path::relative")]
 pub fn source_reference(source: impl AsPath, output: impl AsPath) -> Option<PathRelativeOwned> {
-	source.as_path().relative(output).filter(|rel| rel.is_ancestor())
+	let source = source.as_path();
+	let output = output.as_path();
+	if output.strip_prefix(&source)?.is_empty() {
+		return None;
+	}
+
+	source.relative(&output)
 }
 
 /// One candidate output rendition: a target resolution (by height) and bitrate.

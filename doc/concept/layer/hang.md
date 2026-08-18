@@ -90,7 +90,6 @@ A viewer of `room/transcode` then pulls `480p` from the transcoder and `1080p` d
 
 Publishers author the reference with the inverse operation, so the two stay in step: `Path::relative` in Rust (`moq-net`) and `Path.relative` in TypeScript (`@moq/net`), each taking the target broadcast and the catalog broadcast it is named from.
 Both refuse a target no reference can name, since a path segment may itself be called `.` or `..`.
-A publisher that only wants to point at an enclosing broadcast, rather than into a sibling subtree, can gate on the reference with `PathRelative::is_ancestor` / `Path.isAncestor`.
 
 `@moq/watch` resolves the reference automatically. In Rust, the `moq-mux` exporters do the same: they take a `Source::new(origin, path)`, and both the catalog broadcast and any referenced broadcast resolve through the origin over the same connection.
 
