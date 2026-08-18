@@ -3,7 +3,8 @@
  *
  * @module
  */
-import { type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import { hooks } from "./internal.ts";
 import { Timestamp } from "./time.ts";
 
 /** Maximum bytes of frames cached in a group before old frames are evicted from the front. */
@@ -26,6 +27,17 @@ export interface Frame {
 	 * (a JSON catalog, control state) pass {@link Timestamp.now} explicitly.
 	 */
 	timestamp: Timestamp;
+}
+
+/**
+ * Where a group cursor sits, for a subscription's drift budget to measure it against
+ * the live edge. Undefined fields mean the group has presented nothing yet.
+ *
+ * @internal
+ */
+export interface Position {
+	presentation?: Timestamp;
+	activity?: number;
 }
 
 /** Immutable group metadata. */
@@ -56,6 +68,13 @@ class GroupState {
 	// them has a gap, so its next read throws Lagged rather than skipping silently.
 	offset = 0;
 	cacheBytes = 0;
+	// The first frame's timestamp, retained after reads and front eviction.
+	timestamp?: Timestamp;
+	// The newest frame's timestamp: where a reader that has taken every frame sits.
+	latest?: Timestamp;
+	// When the group last accepted a frame. A group is silent from here, not from
+	// whenever it was created.
+	activity?: number;
 
 	constructor(sequence: number) {
 		this.sequence = sequence;
@@ -65,6 +84,9 @@ class GroupState {
 function appendFrame(state: GroupState, frame: Frame) {
 	if (state.closed.peek() !== undefined) throw new Error("group is closed");
 
+	state.timestamp ??= frame.timestamp;
+	state.latest = frame.timestamp;
+	state.activity = performance.now();
 	state.cacheBytes += frame.payload.byteLength;
 	state.frames.mutate((frames) => {
 		frames.push(frame);
@@ -125,6 +147,9 @@ export class Producer {
 	 */
 	mirror(): Consumer {
 		const dst = new GroupState(this.sequence);
+		dst.timestamp = this.#state.timestamp;
+		dst.latest = this.#state.latest;
+		dst.activity = this.#state.activity;
 		for (const frame of this.#state.frames.peek()) appendFrame(dst, frame);
 		dst.offset = this.#state.offset;
 
@@ -235,6 +260,15 @@ export class Consumer {
 	readonly sequence: number;
 
 	#state: GroupState;
+	#expiry?: { expired: (at: Position) => boolean; changed: readonly Getter<unknown>[] };
+	// Sticky verdicts, set once. `#ended` is a drained group the budget gave up on,
+	// which is indistinguishable from one that ended: nothing was lost, so it reads as
+	// the end of the group. `#terminal` is a failure, including a budget that gave up
+	// while content was still unread.
+	#ended = false;
+	#terminal?: Error;
+	#closed = new Once<Error | null>();
+	#watchingClosed = false;
 
 	private constructor(state: GroupState) {
 		this.#state = state;
@@ -246,11 +280,130 @@ export class Consumer {
 	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
 	 */
 	get closed(): GetPromise<Error | null> {
-		return this.#state.closed;
+		this.#watchClosed();
+		return this.#closed;
 	}
 
 	static {
 		makeConsumer = (state) => new Consumer(state);
+		hooks.groupTimestamp = (group) => group.#state.timestamp;
+		hooks.expireGroup = (group, expiry) => {
+			group.#expiry = expiry;
+		};
+		hooks.guardGroup = (group, operation) => group.#guard(operation);
+		hooks.evictGroup = (group) => {
+			group.#evict();
+		};
+	}
+
+	/// Where this cursor sits, for the budget to measure against the live edge.
+	//
+	// A group is not late because it *started* long ago; what can be late is the content
+	// its reader has yet to take. So a reader that has drained the group sits at the
+	// group's newest frame, not its first.
+	#position(): Position {
+		return {
+			presentation: this.#state.frames.peek()[0]?.timestamp ?? this.#state.latest,
+			activity: this.#state.activity,
+		};
+	}
+
+	// Evaluate the drift budget for a read that has nothing buffered and is about to
+	// wait. A group with frames in hand is always drained: the budget bounds a group
+	// that has stalled while the live edge moved on, not a reader slower than the wire.
+	// Returns true if a verdict was just reached, so the caller re-checks.
+	//
+	// `unread` is for a caller that still holds content the reader has not seen (a
+	// publisher part-way through writing a frame): giving up there is a truncation, so
+	// it fails rather than ending.
+	#expire(unread = false): boolean {
+		if (this.#terminal || this.#ended) return false;
+		if (this.#state.closed.peek() instanceof Error) return false;
+		if (!this.#expiry?.expired(this.#position())) return false;
+
+		if (unread) {
+			this.#terminal = new Error("group exceeded the subscription latency budget");
+		} else {
+			this.#ended = true;
+		}
+		if (this.#closed.peek() === undefined) this.#closed.set(this.#terminal ?? null);
+		return true;
+	}
+
+	#guard<T>(operation: Promise<T>): Promise<T> {
+		if (this.#expire(true)) return Promise.reject(this.#terminal);
+		if (this.#terminal) return Promise.reject(this.#terminal);
+		const expiry = this.#expiry;
+		if (!expiry) return operation;
+
+		return new Promise<T>((resolve, reject) => {
+			let settled = false;
+			const disposes: Dispose[] = [];
+			const finish = (fn: () => void) => {
+				if (settled) return;
+				settled = true;
+				for (const dispose of disposes) dispose();
+				fn();
+			};
+			const check = () => {
+				this.#expire(true);
+				if (this.#terminal) {
+					const error = this.#terminal;
+					finish(() => reject(error));
+				}
+			};
+
+			for (const changed of expiry.changed) disposes.push(changed.subscribe(check));
+			operation.then(
+				(value) => finish(() => resolve(value)),
+				(error: unknown) => finish(() => reject(error)),
+			);
+			check();
+		});
+	}
+
+	#evict() {
+		const frames = this.#state.frames.peek();
+		if (frames.length > 0) {
+			// Unread content is going away either way. If the budget had already given up
+			// on this group that is the more specific reason, so ask it first; otherwise
+			// the reader simply lagged behind the cache.
+			this.#expire(true);
+			if (!this.#terminal && !this.#ended) {
+				this.#terminal = new Lagged();
+				if (this.#closed.peek() === undefined) this.#closed.set(this.#terminal);
+			}
+		}
+		this.#state.offset += frames.length;
+		this.#state.cacheBytes = 0;
+		this.#state.frames.set([]);
+	}
+
+	#watchClosed() {
+		if (this.#watchingClosed) return;
+		this.#watchingClosed = true;
+		void this.#runClosed();
+	}
+
+	async #runClosed() {
+		for (;;) {
+			if (this.#terminal || this.#ended) return;
+			const closed = this.#state.closed.peek();
+			if (closed !== undefined) {
+				this.#closed.set(closed);
+				return;
+			}
+			if (this.#expire()) return;
+			await this.#changed();
+		}
+	}
+
+	async #changed(): Promise<void> {
+		if (!this.#expiry) {
+			await Signal.race(this.#state.frames, this.#state.closed);
+			return;
+		}
+		await Signal.race(this.#state.frames, this.#state.closed, ...this.#expiry.changed);
 	}
 
 	#readBufferedFrame(): { sequence: number; frame: Frame } | undefined {
@@ -264,12 +417,16 @@ export class Consumer {
 
 	/** True once no further frames can be read: the group has closed and every buffered frame is read. */
 	get done(): boolean {
-		return this.#state.frames.peek().length === 0 && this.#state.closed.peek() !== undefined;
+		return (
+			this.#terminal !== undefined ||
+			this.#ended ||
+			(this.#state.frames.peek().length === 0 && this.#state.closed.peek() !== undefined)
+		);
 	}
 
 	/** True once the group has been closed, regardless of whether buffered frames remain unread. Synchronous complement to the {@link closed} promise. */
 	get isClosed(): boolean {
-		return this.#state.closed.peek() !== undefined;
+		return this.#terminal !== undefined || this.#ended || this.#state.closed.peek() !== undefined;
 	}
 
 	/** True if frames were evicted from the front of this group before being read. */
@@ -285,12 +442,14 @@ export class Consumer {
 	 * end-of-group: check {@link done} to tell "no frame buffered yet" from "finished".
 	 */
 	tryReadFrame(): Frame | undefined {
+		if (this.#terminal || this.#ended) return undefined;
 		const read = this.#readBufferedFrame();
 		return read?.frame;
 	}
 
 	/** Like {@link tryReadFrame} but also reports the frame's sequence number within the group. */
 	tryReadFrameSequence(): ({ sequence: number } & Frame) | undefined {
+		if (this.#terminal || this.#ended) return undefined;
 		const read = this.#readBufferedFrame();
 		if (!read) return undefined;
 		return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };
@@ -299,9 +458,11 @@ export class Consumer {
 	/** Resolves once {@link readFrame} would not block. */
 	async readable(): Promise<void> {
 		for (;;) {
+			if (this.#terminal || this.#ended) return;
 			if (this.#state.frames.peek().length > 0) return;
 			if (this.#state.closed.peek() !== undefined) return;
-			await Signal.race(this.#state.frames, this.#state.closed);
+			if (this.#expire()) return;
+			await this.#changed();
 		}
 	}
 
@@ -311,6 +472,8 @@ export class Consumer {
 	 */
 	async readFrame(): Promise<Frame | undefined> {
 		for (;;) {
+			if (this.#terminal) throw this.#terminal;
+			if (this.#ended) return;
 			if (this.#state.offset > 0) throw new Lagged();
 
 			const read = this.#readBufferedFrame();
@@ -320,7 +483,10 @@ export class Consumer {
 			if (closed instanceof Error) throw closed;
 			if (closed !== undefined) return;
 
-			await Signal.race(this.#state.frames, this.#state.closed);
+			// Nothing buffered and the group is still open: this wait is the stall the
+			// drift budget bounds, and the only place it applies.
+			if (this.#expire()) continue;
+			await this.#changed();
 		}
 	}
 
@@ -330,6 +496,8 @@ export class Consumer {
 	 */
 	async readFrameSequence(): Promise<({ sequence: number } & Frame) | undefined> {
 		for (;;) {
+			if (this.#terminal) throw this.#terminal;
+			if (this.#ended) return;
 			if (this.#state.offset > 0) throw new Lagged();
 
 			const read = this.#readBufferedFrame();
@@ -339,7 +507,10 @@ export class Consumer {
 			if (closed instanceof Error) throw closed;
 			if (closed !== undefined) return;
 
-			await Signal.race(this.#state.frames, this.#state.closed);
+			// Nothing buffered and the group is still open: this wait is the stall the
+			// drift budget bounds, and the only place it applies.
+			if (this.#expire()) continue;
+			await this.#changed();
 		}
 	}
 

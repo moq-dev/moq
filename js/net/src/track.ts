@@ -5,7 +5,13 @@
  */
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type { Datagram } from "./datagram.ts";
-import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer, Lagged } from "./group.ts";
+import {
+	type Frame,
+	type Consumer as GroupConsumer,
+	Producer as GroupProducer,
+	Lagged,
+	type Position,
+} from "./group.ts";
 import { hooks, type Recv } from "./internal.ts";
 import { Timescale, type Timestamp } from "./time.ts";
 
@@ -234,6 +240,13 @@ export class Consumer {
 // wiring, unexported so it never appears in the published type declarations.
 class TrackState {
 	groups = new Signal<GroupConsumer[]>([]);
+	// Every group still in the producer's replay cache, including groups this
+	// subscriber already consumed, paired with its source queue time. Drift anchors
+	// have the same lifetime as content.
+	timeline = new Map<number, { group: GroupConsumer; time: number }>();
+	// First timestamps mutate group state rather than track state, so held groups
+	// watch this revision as well as arrivals when enforcing latency after handoff.
+	timelineChanged = new Signal(0);
 	/** Best-effort datagram channel, parallel to {@link groups}; an age-evicted send buffer per subscriber. */
 	datagrams = new Signal<BufferedDatagram[]>([]);
 	latest?: number;
@@ -449,6 +462,8 @@ export class Producer {
 	#mirror(entry: CachedGroup, sink: TrackState): void {
 		const dst = entry.group.mirror();
 		entry.mirrors.set(sink, dst);
+		sink.timeline.set(dst.sequence, { group: dst, time: entry.time });
+		void dst.readable().then(() => sink.timelineChanged.update((revision) => revision + 1));
 		sink.latest = Math.max(sink.latest ?? 0, dst.sequence);
 		sink.groups.mutate((groups) => {
 			groups.push(dst);
@@ -459,10 +474,12 @@ export class Producer {
 	// Drop a cached group's mirror from every sink so no consumer can pin it.
 	#evict(entry: CachedGroup): void {
 		for (const [sink, mirror] of entry.mirrors) {
+			hooks.evictGroup(mirror);
 			sink.groups.mutate((groups) => {
 				const i = groups.indexOf(mirror);
 				if (i >= 0) groups.splice(i, 1);
 			});
+			if (sink.timeline.get(mirror.sequence)?.group === mirror) sink.timeline.delete(mirror.sequence);
 			mirror.close();
 		}
 		entry.mirrors.clear();
@@ -471,11 +488,11 @@ export class Producer {
 	// Evict cached groups that are closed and older than the cache window.
 	#prune(): void {
 		const latencyMaxMs = this.#state.info.peek()?.latencyMax ?? DEFAULT_LATENCY_MAX_MS;
-		const cutoff = Date.now() - latencyMaxMs;
+		const cutoff = performance.now() - latencyMaxMs;
 
 		const retained: CachedGroup[] = [];
 		for (const entry of this.#cache) {
-			if (entry.time > cutoff || entry.group.closed.peek() === undefined) {
+			if (entry.time >= cutoff || entry.group.closed.peek() === undefined) {
 				retained.push(entry);
 				continue;
 			}
@@ -486,10 +503,12 @@ export class Producer {
 
 	// Retain a source group and fan it out to every live sink.
 	#publish(group: GroupProducer): void {
-		const entry: CachedGroup = { group, time: Date.now(), mirrors: new Map<TrackState, GroupConsumer>() };
+		const entry: CachedGroup = { group, time: performance.now(), mirrors: new Map<TrackState, GroupConsumer>() };
 		this.#cache.push(entry);
-		this.#prune();
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
+		// Give held mirrors the new live edge before pruning their timeline entry,
+		// so their latency guard can preserve a terminal expiry verdict.
+		this.#prune();
 	}
 
 	/** Append a new group with the next sequence number. */
@@ -643,6 +662,86 @@ export class Subscriber {
 	#state: TrackState;
 	#nextSequence = 0;
 	#cursor = new Signal<{ start: number; end?: number }>({ start: 0 });
+	#enforceLatency = true;
+
+	#drift(): {
+		budget: number;
+		wall?: { sequence: number; time: number };
+		presentation?: { sequence: number; timestamp: Timestamp };
+	} {
+		const { end } = this.#cursor.peek();
+		let wall: { sequence: number; time: number } | undefined;
+		let presentation: { sequence: number; timestamp: Timestamp } | undefined;
+		for (const { group, time } of this.#state.timeline.values()) {
+			if (end !== undefined && group.sequence > end) continue;
+			if (group.closed.peek() instanceof Error) continue;
+			if (!wall || group.sequence > wall.sequence) wall = { sequence: group.sequence, time };
+			const timestamp = hooks.groupTimestamp(group);
+			if (timestamp !== undefined && (!presentation || group.sequence > presentation.sequence)) {
+				presentation = { sequence: group.sequence, timestamp };
+			}
+		}
+
+		const requested = this.#state.update.peek()?.latencyMax ?? 0;
+		const retained = this.#state.info.peek()?.latencyMax;
+		return {
+			budget: this.#enforceLatency
+				? retained === undefined
+					? requested
+					: Math.min(requested, retained)
+				: Number.POSITIVE_INFINITY,
+			wall,
+			presentation,
+		};
+	}
+
+	// `at` is where a handed-out group's reader stands. A group nobody has started
+	// reading sits at its own start, which is what selection measures; one already
+	// handed out sits wherever its reader got to, so a reader keeping pace is not
+	// convicted by how long ago its group opened. Measuring from the group's first
+	// frame instead makes a GOP one GOP-duration behind by construction.
+	#isStale(
+		group: GroupConsumer,
+		drift: {
+			budget: number;
+			wall?: { sequence: number; time: number };
+			presentation?: { sequence: number; timestamp: Timestamp };
+		},
+		at?: Position,
+	): boolean {
+		const candidate = this.#state.timeline.get(group.sequence);
+		if (candidate?.group !== group) return false;
+
+		const time = at?.activity ?? candidate.time;
+		const wallStale =
+			drift.wall !== undefined &&
+			drift.wall.sequence > group.sequence &&
+			(drift.budget === 0 || drift.wall.time - time > drift.budget);
+
+		const timestamp = at?.presentation ?? hooks.groupTimestamp(group);
+		const presentationStale =
+			drift.presentation !== undefined &&
+			drift.presentation.sequence > group.sequence &&
+			timestamp !== undefined &&
+			drift.presentation.timestamp.asMillis() - timestamp.asMillis() > drift.budget;
+
+		return wallStale || presentationStale;
+	}
+
+	#guard(group: GroupConsumer): GroupConsumer {
+		if (!this.#enforceLatency) return group;
+		hooks.expireGroup(group, {
+			expired: (at) => this.#isStale(group, this.#drift(), at),
+			changed: [
+				this.#state.groups,
+				this.#state.timelineChanged,
+				this.#state.update,
+				this.#cursor,
+				this.#state.closed,
+			],
+		});
+		return group;
+	}
 
 	private constructor(name: string, state: TrackState) {
 		this.name = name;
@@ -653,6 +752,9 @@ export class Subscriber {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
 		hooks.tryRecvGroup = (subscriber) => subscriber.#tryRecvGroup();
 		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
+		hooks.ignoreLatency = (subscriber) => {
+			subscriber.#enforceLatency = false;
+		};
 	}
 
 	/**
@@ -716,6 +818,7 @@ export class Subscriber {
 			for (const group of groups) group.close(abort);
 			groups.length = 0;
 		});
+		this.#state.timeline.clear();
 	}
 
 	/**
@@ -729,6 +832,10 @@ export class Subscriber {
 	 * Honors the floor set by {@link startAt} and the cap set by {@link endAt}: a group
 	 * beyond the cap stays buffered (not dropped) and is offered once the cap rises, even
 	 * after a clean close, without blocking in-range groups that arrive behind it.
+	 * A group whose presentation time or wall-clock arrival is further behind the live edge
+	 * than this subscriber's `latencyMax` is skipped. The default of zero takes the live edge.
+	 * The budget remains attached after return, so a pending frame read rejects if a stalled
+	 * group becomes stale while newer data advances.
 	 */
 	async recvGroup(): Promise<GroupConsumer | undefined> {
 		for (;;) {
@@ -753,15 +860,22 @@ export class Subscriber {
 		const groups = this.#state.groups.peek();
 		const { start, end } = this.#cursor.peek();
 		while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
+		const drift = this.#drift();
 
-		// The buffer is sequence-sorted, so an in-range group that arrives behind a
-		// beyond-cap one sorts in front of it and is never blocked by it.
-		const group = groups[0];
-		if (group && (end === undefined || group.sequence <= end)) {
+		for (;;) {
+			// The buffer is sequence-sorted, so an in-range group that arrives behind a
+			// beyond-cap one sorts in front of it and is never blocked by it.
+			const group = groups[0];
+			if (!group || (end !== undefined && group.sequence > end)) break;
 			groups.shift();
-			return { kind: "group", group };
+			if (this.#isStale(group, drift)) {
+				group.close();
+				continue;
+			}
+			return { kind: "group", group: this.#guard(group) };
 		}
 
+		const group = groups[0];
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
 		if (closed === undefined) return { kind: "idle" };
@@ -818,6 +932,7 @@ export class Subscriber {
 	 *
 	 * Late arrivals (sequence at or below the last returned) are silently skipped.
 	 * Use {@link recvGroup} to see every group in arrival order instead.
+	 * The subscription's `latencyMax` also skips groups that drift behind the live edge.
 	 */
 	async nextGroup(): Promise<GroupConsumer | undefined> {
 		for (;;) {
@@ -825,12 +940,18 @@ export class Subscriber {
 			const cursor = this.#cursor.peek();
 			const start = Math.max(cursor.start, this.#nextSequence);
 			while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
+			const drift = this.#drift();
 
-			const group = groups[0];
-			if (group && (cursor.end === undefined || group.sequence <= cursor.end)) {
+			let group = groups[0];
+			while (group && (cursor.end === undefined || group.sequence <= cursor.end)) {
 				groups.shift();
 				this.#nextSequence = group.sequence + 1;
-				return group;
+				if (this.#isStale(group, drift)) {
+					group.close();
+					group = groups[0];
+					continue;
+				}
+				return this.#guard(group);
 			}
 
 			const closed = this.#state.closed.peek();
@@ -856,15 +977,28 @@ export class Subscriber {
 	/**
 	 * Reads the next frame along with its group and frame sequence numbers.
 	 * Treat the returned frame bytes as read-only; they are shared with other consumers.
+	 * Groups outside the subscription's `latencyMax` budget are discarded before reading.
 	 */
 	async readFrameSequence(): Promise<({ group: number; frame: number } & Frame) | undefined> {
 		for (;;) {
 			const groups = this.#state.groups.peek();
 			const { start } = this.#cursor.peek();
 			while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
+			const drift = this.#drift();
+			for (let i = 0; i < groups.length; ) {
+				const group = groups[i];
+				if (!this.#isStale(group, drift)) {
+					i++;
+					continue;
+				}
+				groups.splice(i, 1);
+				group.close();
+			}
+
+			let readable = groups.length;
 
 			// Drain older groups first, dropping each once empty.
-			while (groups.length > 1) {
+			while (readable > 1) {
 				if (groups[0].skipped) {
 					// The reader fell behind this group's eviction window. Drop it and
 					// signal the gap; the next read resyncs from the following group.
@@ -881,12 +1015,17 @@ export class Subscriber {
 					};
 				}
 				groups.shift()?.close();
+				readable--;
 			}
 
-			if (groups.length === 0) {
+			if (readable === 0) {
 				const closed = this.#state.closed.peek();
 				if (closed instanceof Error) throw closed;
-				if (closed !== undefined) return undefined;
+				if (closed !== undefined && groups.length === 0) return undefined;
+				if (closed !== undefined) {
+					await Signal.race(this.#cursor);
+					continue;
+				}
 				await Signal.race(this.#state.groups, this.#cursor, this.#state.closed);
 				continue;
 			}

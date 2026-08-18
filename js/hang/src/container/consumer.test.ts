@@ -35,6 +35,12 @@ function settle(ms = 20): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Keep transport drift filtering out of container-consumer tests. These cases
+// exercise the consumer's own latency policy against a complete retained track.
+function subscribeAll(track: Track.Producer): Track.Subscriber {
+	return track.subscribe({ latencyMax: 30_000 });
+}
+
 // --- LegacyFormat ---
 
 test("LegacyFormat decodes a valid frame", () => {
@@ -183,7 +189,7 @@ async function drainFrames(
 
 test("Consumer delivers frames from a single group", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro, 33_000 as Time.Micro]);
 	track.close();
@@ -197,7 +203,7 @@ test("Consumer delivers frames from a single group", async () => {
 
 test("Consumer forces keyframe true at index 0", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro, 33_000 as Time.Micro]);
 	track.close();
@@ -221,7 +227,7 @@ test("Consumer index spans MoQ frames for keyframe detection", async () => {
 	};
 
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: multiFormat, latency: 500 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), { format: multiFormat, latency: 500 as Time.Milli });
 
 	const group = new Group.Producer(0);
 	group.writeFrame({ payload: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() }); // first MoQ frame → 3 samples
@@ -249,7 +255,7 @@ test("Consumer keeps frames decoded before an error (truncated GoP)", async () =
 	};
 
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: truncatingFormat, latency: 500 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), { format: truncatingFormat, latency: 500 as Time.Milli });
 
 	// Group.Producer 0: 2 valid frames then a tail-truncating error.
 	const g0 = new Group.Producer(0);
@@ -276,7 +282,7 @@ test("Consumer keeps frames decoded before an error (truncated GoP)", async () =
 
 test("Consumer close returns undefined from next()", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
 	const promise = consumer.next();
 	consumer.close();
@@ -287,7 +293,7 @@ test("Consumer close returns undefined from next()", async () => {
 
 test("Consumer throws on concurrent next() calls", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
 	// First call blocks waiting for data
 	void consumer.next();
@@ -300,7 +306,7 @@ test("Consumer throws on concurrent next() calls", async () => {
 test("Consumer skips groups via PTS-span when over latency", async () => {
 	const track = new Track.Producer("test");
 	// Zero latency = skip everything that's not the latest
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 0 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), { format: new LegacyFormat(), latency: 0 as Time.Milli });
 
 	// Write groups with increasing timestamps. With 0 latency, any PTS span > 0 triggers skip.
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro]);
@@ -319,7 +325,7 @@ test("Consumer skips groups via PTS-span when over latency", async () => {
 
 test("Consumer delivers groups in sequence order regardless of arrival order", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
 	writeGroupWithLegacyFrames(track, 2, [60_000 as Time.Micro]);
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro]);
@@ -338,7 +344,7 @@ test("Consumer delivers groups in sequence order regardless of arrival order", a
 
 test("Consumer rejects stale groups", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
 	// Group.Producer 5 arrives first (sets active = 5)
 	writeGroupWithLegacyFrames(track, 5, [0 as Time.Micro]);
@@ -363,7 +369,7 @@ test("Consumer rejects stale groups", async () => {
 
 test("Consumer next() returns group-done signals", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro, 33_000 as Time.Micro]);
 	writeGroupWithLegacyFrames(track, 1, [66_000 as Time.Micro]);
@@ -394,7 +400,7 @@ test("Consumer next() returns group-done signals", async () => {
 
 test("Consumer buffered signal updates as frames arrive", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
 	expect(consumer.buffered.peek()).toEqual([]);
 
@@ -416,7 +422,7 @@ test("Consumer buffered signal updates as frames arrive", async () => {
 
 test("Consumer recovers from gap in group sequence numbers", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 100 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), { format: new LegacyFormat(), latency: 100 as Time.Milli });
 
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro, 20_000 as Time.Micro]);
 	writeGroupWithLegacyFrames(track, 1, [40_000 as Time.Micro, 60_000 as Time.Micro]);
@@ -446,7 +452,7 @@ test("Consumer handles empty decode result without deadlock", async () => {
 	};
 
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: emptyThenValid, latency: 500 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), { format: emptyThenValid, latency: 500 as Time.Milli });
 
 	const group = new Group.Producer(0);
 	group.writeFrame({ payload: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() }); // empty decode
@@ -469,7 +475,7 @@ test("Consumer handles empty decode result without deadlock", async () => {
 
 test("Consumer with CmafFormat delivers correct timestamps", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), {
+	const consumer = new Consumer(subscribeAll(track), {
 		format: new CmafFormat(TEST_INIT),
 		latency: 500 as Time.Milli,
 	});
@@ -542,7 +548,7 @@ const durationFormat: ContainerFormat = {
 test("Consumer duration-skips a stalled group once it is covered", async () => {
 	const track = new Track.Producer("test");
 	// Latency dwarfs the gap, so only duration coverage can trigger the skip.
-	const consumer = new Consumer(track.subscribe(), { format: durationFormat, latency: 10_000 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), { format: durationFormat, latency: 10_000 as Time.Milli });
 
 	// Group.Producer 0: one frame at ts=0 lasting 33ms, never closed (stalled).
 	const g0 = new Group.Producer(0);
@@ -579,7 +585,7 @@ test("Consumer does not duration-skip when the gap is not covered", async () => 
 	};
 
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: shortFormat, latency: 10_000 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), { format: shortFormat, latency: 10_000 as Time.Milli });
 
 	// Group.Producer 0 stays open and later receives a second frame; nothing covers the gap,
 	// so that late frame must survive rather than being skipped.
@@ -612,7 +618,10 @@ test("Consumer does not duration-skip when the gap is not covered", async () => 
 // surface immediately, even while still open.
 test("Consumer delivers a PTS-contiguous next group whose sequence jumped (CMAF)", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new CmafFormat(TEST_INIT), latency: 500 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), {
+		format: new CmafFormat(TEST_INIT),
+		latency: 500 as Time.Milli,
+	});
 
 	// Group A (seq 1_000_000): one 3000-tick sample, so its content ends at 33_333µs (3000/90000 * 1e6).
 	const a = new Group.Producer(1_000_000);
@@ -668,7 +677,7 @@ test("Consumer delivers a PTS-contiguous next group whose sequence jumped (CMAF)
 test("Consumer waits on a PTS gap instead of skipping to a later buffered group (CMAF)", async () => {
 	const track = new Track.Producer("test");
 	// Large latency so the gap can't be latency-skipped during the test window.
-	const consumer = new Consumer(track.subscribe(), {
+	const consumer = new Consumer(subscribeAll(track), {
 		format: new CmafFormat(TEST_INIT),
 		latency: 10_000 as Time.Milli,
 	});
@@ -742,7 +751,7 @@ test("Consumer waits on a PTS gap instead of skipping to a later buffered group 
 // blocks every later contiguous group.
 test("Consumer delivers a contiguous group after one that completed out of order (CMAF)", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), {
+	const consumer = new Consumer(subscribeAll(track), {
 		format: new CmafFormat(TEST_INIT),
 		latency: 10_000 as Time.Milli,
 	});
@@ -790,7 +799,10 @@ test("Consumer delivers a contiguous group after one that completed out of order
 // that check is the only thing left that can break the stall.
 test("Consumer latency-skips a waited-out gap when only the head receives frames (CMAF)", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new CmafFormat(TEST_INIT), latency: 100 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), {
+		format: new CmafFormat(TEST_INIT),
+		latency: 100 as Time.Milli,
+	});
 
 	// A (seq 1000): one frame, ends at 3000 ticks (33_333µs).
 	const a = new Group.Producer(1000);
@@ -840,7 +852,7 @@ test("Consumer latency-skips a waited-out gap when only the head receives frames
 // sequential, and adjacency doesn't rule out a group the latency check dropped on the way past.
 test("Consumer reports continuity while nothing is dropped", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 100 as Time.Milli });
+	const consumer = new Consumer(subscribeAll(track), { format: new LegacyFormat(), latency: 100 as Time.Milli });
 
 	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro, 33_000 as Time.Micro]);
 	await settle();
@@ -859,7 +871,7 @@ test("Consumer reports continuity while nothing is dropped", async () => {
 // The case the group-number heuristic got backwards: ids jump, but the PTS timeline is unbroken.
 test("Consumer reports continuity across a PTS-contiguous group id jump (CMAF)", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), {
+	const consumer = new Consumer(subscribeAll(track), {
 		format: new CmafFormat(TEST_INIT),
 		latency: 10_000 as Time.Milli,
 	});

@@ -5,6 +5,7 @@ import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import { base64ToBytes } from "../base64";
+import { subscribeMedia } from "../media";
 
 import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
@@ -272,8 +273,12 @@ export class Decoder {
 		const active = broadcast.relativeBroadcast(effect, config.broadcast);
 		if (!active) return;
 
-		const sub = active.track(track).subscribe({ priority: Catalog.PRIORITY.audio });
-		effect.cleanup(() => sub.close());
+		const sub = subscribeMedia(effect, {
+			broadcast: active,
+			track,
+			priority: Catalog.PRIORITY.audio,
+			latency: this.#consumerLatency,
+		});
 
 		if (config.container.kind === "cmaf") {
 			this.#runCmafDecoder(effect, sub, config);

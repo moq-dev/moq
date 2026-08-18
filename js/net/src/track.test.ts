@@ -1,10 +1,30 @@
-import { expect, test } from "bun:test";
-import { Producer as GroupProducer } from "./group.ts";
+import { expect, setSystemTime, test } from "bun:test";
+import { Producer as GroupProducer, Lagged } from "./group.ts";
+import { hooks } from "./internal.ts";
 import { Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
+
+/** Let every pending microtask and timer callback run, so a parked read gets a turn. */
+function settle(): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function mockMonotonicTime(initial: number) {
+	let now = initial;
+	const real = performance.now.bind(performance);
+	performance.now = () => now;
+	return {
+		set: (value: number) => {
+			now = value;
+		},
+		restore: () => {
+			performance.now = real;
+		},
+	};
+}
 
 test("used reflects subscriber demand and unused resolves when the last one leaves", async () => {
 	const producer = new TrackProducer("test");
@@ -189,7 +209,7 @@ test("nextGroup skips late arrivals", async () => {
 
 test("nextGroup returns buffered groups in sequence", async () => {
 	const producer = new TrackProducer("test");
-	const track = producer.subscribe();
+	const track = producer.subscribe({ latencyMax: 5000 });
 
 	producer.writeGroup(new GroupProducer(3));
 	producer.writeGroup(new GroupProducer(5));
@@ -198,9 +218,378 @@ test("nextGroup returns buffered groups in sequence", async () => {
 	expect((await track.nextGroup())?.sequence).toBe(5);
 });
 
+test("latency budget skips a buffered timeline in every group read", async () => {
+	const producer = new TrackProducer("test").accept({ latencyMax: 5000 });
+	const arrival = producer.subscribe();
+	const ordered = producer.subscribe();
+	const frames = producer.subscribe();
+
+	for (const timestamp of [0, 1000, 2000]) {
+		producer.writeFrame({ payload: enc.encode(`${timestamp}`), timestamp: Timestamp.fromMillis(timestamp) });
+	}
+
+	expect((await arrival.recvGroup())?.sequence).toBe(2);
+	expect((await ordered.nextGroup())?.sequence).toBe(2);
+	expect((await frames.readFrameSequence())?.group).toBe(2);
+});
+
+test("zero latency takes the latest group when ages are equal", async () => {
+	const clock = mockMonotonicTime(10_000);
+	try {
+		const producer = new TrackProducer("test").accept({ latencyMax: 5000 });
+		const track = producer.subscribe();
+		producer.writeString("old");
+		producer.writeString("new");
+
+		expect((await track.recvGroup())?.sequence).toBe(1);
+	} finally {
+		clock.restore();
+	}
+});
+
+test("latency budget admits groups within its presentation-time window", async () => {
+	const producer = new TrackProducer("test").accept({ latencyMax: 5000 });
+	const track = producer.subscribe({ latencyMax: 1500 });
+
+	for (const timestamp of [0, 1000, 2000]) {
+		producer.writeFrame({ payload: enc.encode(`${timestamp}`), timestamp: Timestamp.fromMillis(timestamp) });
+	}
+
+	expect((await track.recvGroup())?.sequence).toBe(1);
+	expect((await track.recvGroup())?.sequence).toBe(2);
+});
+
+test("wall-clock age expires a group stalled before its first frame", async () => {
+	const clock = mockMonotonicTime(10_000);
+	try {
+		const producer = new TrackProducer("test").accept({ latencyMax: 5000 });
+		const track = producer.subscribe();
+		producer.appendGroup(); // seq 0 has no timestamp
+
+		clock.set(11_000);
+		producer.writeFrame({ payload: enc.encode("edge"), timestamp: Timestamp.fromMillis(1000) });
+		producer.close();
+
+		expect((await track.recvGroup())?.sequence).toBe(1);
+		expect(track.recvGroup()).resolves.toBeUndefined();
+	} finally {
+		clock.restore();
+	}
+});
+
+test("real time reads a live stream without truncating it", async () => {
+	// 2s GOPs produced one at a time and read as they arrive, at the default (zero)
+	// budget. Taking the live edge must not shorten the group the reader is already on,
+	// so every frame of every group arrives and each group *ends* at its boundary.
+	//
+	// The reader is always a little behind the edge (that is what reading live means),
+	// and it is parked at its group's end when the next one opens, because a group's
+	// close and the next group's first frame are separate events.
+	const producer = new TrackProducer("test").accept({ latencyMax: 60_000 });
+	const track = producer.subscribe();
+
+	let open = producer.appendGroup();
+	open.writeFrame({ payload: enc.encode("key"), timestamp: Timestamp.fromMillis(0) });
+	open.writeFrame({ payload: enc.encode("tail"), timestamp: Timestamp.fromMillis(1900) });
+
+	let reading = await track.recvGroup();
+	const read: Array<[number, number]> = [];
+
+	for (let n = 1; n < 5; n++) {
+		if (!reading) throw new Error("missing live group");
+		const sequence = reading.sequence;
+
+		let frames = 0;
+		while (reading.tryReadFrame()) frames++;
+		read.push([sequence, frames]);
+
+		// Parked at the end of the current group, with no close yet.
+		const end = reading.readFrame();
+
+		// The next keyframe opens its group. The verdict is taken in this window, before
+		// the previous group's close lands: give the parked read a real turn to run.
+		const next = producer.appendGroup();
+		next.writeFrame({ payload: enc.encode("key"), timestamp: Timestamp.fromMillis(n * 2000) });
+		await settle();
+		open.close();
+		next.writeFrame({ payload: enc.encode("tail"), timestamp: Timestamp.fromMillis(n * 2000 + 1900) });
+
+		await expect(end).resolves.toBeUndefined();
+
+		reading = await track.recvGroup();
+		open = next;
+	}
+
+	expect(read).toEqual([
+		[0, 2],
+		[1, 2],
+		[2, 2],
+		[3, 2],
+	]);
+});
+
+test("a budget is measured from the reader's position", async () => {
+	// A 2s GOP with a 1s budget: the reader has drained to 1900ms when the next group
+	// opens at 2000ms, so it is 100ms behind the live edge and well inside what it asked
+	// for. A straggling frame of the old group must still reach it. Measuring from the
+	// group's first frame instead makes the drift 2000ms, so a budget shorter than one
+	// GOP would drop the tail of every GOP.
+	const producer = new TrackProducer("test").accept({ latencyMax: 60_000 });
+	const track = producer.subscribe({ latencyMax: 1000 });
+
+	const open = producer.appendGroup();
+	open.writeFrame({ payload: enc.encode("key"), timestamp: Timestamp.fromMillis(0) });
+	open.writeFrame({ payload: enc.encode("tail"), timestamp: Timestamp.fromMillis(1900) });
+
+	const reading = await track.recvGroup();
+	if (!reading) throw new Error("missing group");
+	expect(reading.tryReadFrame()).toBeDefined();
+	expect(reading.tryReadFrame()).toBeDefined();
+
+	// Parked at 1900ms, then the next GOP opens 100ms ahead of it.
+	const late = reading.readFrame();
+	const next = producer.appendGroup();
+	next.writeFrame({ payload: enc.encode("key"), timestamp: Timestamp.fromMillis(2000) });
+	await settle();
+
+	// A straggler from the old group, still inside the budget.
+	open.writeFrame({ payload: enc.encode("late"), timestamp: Timestamp.fromMillis(1950) });
+	const frame = await late;
+	expect(frame?.timestamp.asMillis()).toBe(1950);
+});
+
+test("a handed-out group still expires while its first frame is stalled", async () => {
+	const clock = mockMonotonicTime(10_000);
+	try {
+		const producer = new TrackProducer("test").accept({ latencyMax: 5000 });
+		const track = producer.subscribe();
+		producer.appendGroup();
+
+		const stalled = await track.recvGroup();
+		expect(stalled?.sequence).toBe(0);
+		if (!stalled) throw new Error("missing stalled group");
+		const pending = stalled.readFrame();
+		const closed = stalled.closed;
+
+		clock.set(11_000);
+		producer.writeFrame({ payload: enc.encode("edge"), timestamp: Timestamp.fromMillis(1000) });
+
+		// It ends rather than fails: the reader took every frame the group ever had
+		// (none), so nothing was truncated. What it was waiting for was the producer,
+		// and a group abandoned where its reader stands looks like one that ended there.
+		await expect(pending).resolves.toBeUndefined();
+		expect(await closed).toBeNull();
+	} finally {
+		clock.restore();
+	}
+});
+
+test("a handed-out frame cancels its in-flight operation when it expires", async () => {
+	const producer = new TrackProducer("test").accept({ latencyMax: 5000 });
+	const track = producer.subscribe();
+	producer.writeString("old");
+
+	const group = await track.recvGroup();
+	if (!group) throw new Error("missing group");
+	expect(await group.readString()).toBe("old");
+
+	let release!: () => void;
+	const operation = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const guarded = hooks.guardGroup(group, operation);
+	producer.writeString("new");
+
+	await expect(guarded).rejects.toThrow("latency budget");
+	release();
+});
+
+test("a drained group finishes cleanly after the live edge advances", async () => {
+	const producer = new TrackProducer("test").accept({ latencyMax: 5000 });
+	const track = producer.subscribe();
+	producer.writeString("old");
+
+	const group = await track.recvGroup();
+	if (!group) throw new Error("missing group");
+	expect(await group.readString()).toBe("old");
+
+	producer.writeString("new");
+
+	expect(await group.readFrame()).toBeUndefined();
+	expect(group.done).toBe(true);
+});
+
+test("retention eviction preserves expiry for a handed-out group", async () => {
+	const clock = mockMonotonicTime(10_000);
+	try {
+		const producer = new TrackProducer("test").accept({ latencyMax: 100 });
+		const track = producer.subscribe({ latencyMax: 100 });
+		const source = producer.appendGroup();
+		source.writeString("first");
+		source.writeString("tail");
+		source.close();
+
+		const group = await track.recvGroup();
+		if (!group) throw new Error("missing group");
+		expect(new TextDecoder().decode((await group.readFrame())?.payload)).toBe("first");
+
+		clock.set(10_200);
+		producer.appendGroup();
+
+		await expect(group.readFrame()).rejects.toThrow("latency budget");
+	} finally {
+		clock.restore();
+	}
+});
+
+test("retention pruning aborts a held mirror without a new live edge", async () => {
+	const clock = mockMonotonicTime(10_000);
+	try {
+		const producer = new TrackProducer("test").accept({ latencyMax: 100 });
+		const track = producer.subscribe({ latencyMax: 100 });
+		const source = producer.appendGroup();
+		source.writeString("first");
+		source.writeString("tail");
+		source.close();
+
+		const group = await track.recvGroup();
+		if (!group) throw new Error("missing group");
+		expect(new TextDecoder().decode((await group.readFrame())?.payload)).toBe("first");
+
+		clock.set(10_200);
+		producer.subscribe({ latencyMax: 100 });
+
+		await expect(group.readFrame()).rejects.toBeInstanceOf(Lagged);
+	} finally {
+		clock.restore();
+	}
+});
+
+test("retention pruning preserves clean EOF for a drained mirror", async () => {
+	const clock = mockMonotonicTime(10_000);
+	try {
+		const producer = new TrackProducer("test").accept({ latencyMax: 100 });
+		const track = producer.subscribe({ latencyMax: 100 });
+		const source = producer.appendGroup();
+		source.writeString("only");
+		source.close();
+
+		const group = await track.recvGroup();
+		if (!group) throw new Error("missing group");
+		expect(await group.readString()).toBe("only");
+		expect(await group.readFrame()).toBeUndefined();
+
+		clock.set(10_200);
+		producer.subscribe({ latencyMax: 100 });
+
+		expect(await group.readFrame()).toBeUndefined();
+		expect(await group.closed).toBeNull();
+	} finally {
+		clock.restore();
+	}
+});
+
+test("system clock changes do not affect wall-clock latency", async () => {
+	const clock = mockMonotonicTime(10_000);
+	setSystemTime(new Date(10_000));
+	try {
+		const producer = new TrackProducer("test").accept({ latencyMax: 100 });
+		const track = producer.subscribe({ latencyMax: 100 });
+		producer.writeString("old");
+
+		setSystemTime(new Date(20_000));
+		producer.writeString("new");
+
+		expect((await track.recvGroup())?.sequence).toBe(0);
+		expect((await track.recvGroup())?.sequence).toBe(1);
+	} finally {
+		setSystemTime();
+		clock.restore();
+	}
+});
+
+test("frame readiness cancels the losing latency waiter", async () => {
+	const producer = new TrackProducer("test").accept({ latencyMax: 5000 });
+	const track = producer.subscribe({ latencyMax: 5000 });
+	const source = producer.appendGroup();
+	const group = await track.recvGroup();
+	if (!group) throw new Error("missing group");
+
+	for (let i = 0; i < 110; i++) {
+		const pending = group.readFrame();
+		source.writeString(`${i}`);
+		expect(new TextDecoder().decode((await pending)?.payload)).toBe(`${i}`);
+	}
+});
+
+test("latency budget retains a consumed live-edge anchor", async () => {
+	const producer = new TrackProducer("test").accept({ latencyMax: 5000 });
+	const track = producer.subscribe();
+
+	const edge = new GroupProducer(2);
+	edge.writeFrame({ payload: enc.encode("edge"), timestamp: Timestamp.fromMillis(2000) });
+	edge.close();
+	producer.writeGroup(edge);
+	expect((await track.recvGroup())?.sequence).toBe(2);
+
+	const late = new GroupProducer(1);
+	late.writeFrame({ payload: enc.encode("late"), timestamp: Timestamp.fromMillis(0) });
+	late.close();
+	producer.writeGroup(late);
+	producer.close();
+
+	expect(track.recvGroup()).resolves.toBeUndefined();
+});
+
+test("an aborted live-edge anchor does not make older content stale", async () => {
+	const producer = new TrackProducer("test").accept({ latencyMax: 5000 });
+	const track = producer.subscribe();
+
+	const edge = new GroupProducer(2);
+	edge.writeFrame({ payload: enc.encode("edge"), timestamp: Timestamp.fromMillis(2000) });
+	edge.close(new Error("aborted"));
+	producer.writeGroup(edge);
+
+	const older = new GroupProducer(1);
+	older.writeFrame({ payload: enc.encode("older"), timestamp: Timestamp.fromMillis(0) });
+	older.close();
+	producer.writeGroup(older);
+
+	expect((await track.recvGroup())?.sequence).toBe(1);
+	track.close();
+});
+
+test("endAt caps the live edge used by the latency budget", async () => {
+	const producer = new TrackProducer("test").accept({ latencyMax: 5000 });
+	const track = producer.subscribe();
+	track.endAt(1);
+
+	for (const timestamp of [0, 1000, 2000]) {
+		producer.writeFrame({ payload: enc.encode(`${timestamp}`), timestamp: Timestamp.fromMillis(timestamp) });
+	}
+
+	expect((await track.recvGroup())?.sequence).toBe(1);
+	track.endAt(undefined);
+	expect((await track.recvGroup())?.sequence).toBe(2);
+});
+
+test("endAt does not cap frame-level reads", async () => {
+	const producer = new TrackProducer("test").accept({ latencyMax: 5000 });
+	const track = producer.subscribe({ latencyMax: 5000 });
+	track.endAt(0);
+
+	producer.writeFrame({ payload: enc.encode("zero"), timestamp: Timestamp.fromMillis(0) });
+	producer.writeFrame({ payload: enc.encode("one"), timestamp: Timestamp.fromMillis(1) });
+	producer.close();
+
+	expect((await track.readFrameSequence())?.group).toBe(0);
+	expect((await track.readFrameSequence())?.group).toBe(1);
+	expect(await track.readFrameSequence()).toBeUndefined();
+});
+
 test("local cursor bounds can skip, pause, and release buffered groups", async () => {
 	const producer = new TrackProducer("test");
-	const track = producer.subscribe();
+	const track = producer.subscribe({ latencyMax: 5000 });
 
 	for (let sequence = 0; sequence < 5; sequence++) producer.writeGroup(new GroupProducer(sequence));
 
@@ -223,7 +612,7 @@ test("local cursor bounds can skip, pause, and release buffered groups", async (
 // deliver it; a sequence cursor would skip it permanently.
 test("recvGroup serves a late arrival after a newer group", async () => {
 	const producer = new TrackProducer("test");
-	const track = producer.subscribe();
+	const track = producer.subscribe({ latencyMax: 5000 });
 
 	producer.writeGroup(new GroupProducer(2));
 	expect((await track.recvGroup())?.sequence).toBe(2);
@@ -242,7 +631,7 @@ test("recvGroup serves a late arrival after a newer group", async () => {
 // held, not dropped, and a raised cap re-offers them, even after a clean close.
 test("endAt parks recvGroup beyond the cap and a raised cap re-offers", async () => {
 	const producer = new TrackProducer("test");
-	const track = producer.subscribe();
+	const track = producer.subscribe({ latencyMax: 5000 });
 
 	for (let sequence = 0; sequence < 3; sequence++) producer.writeGroup(new GroupProducer(sequence));
 
@@ -268,7 +657,7 @@ test("endAt parks recvGroup beyond the cap and a raised cap re-offers", async ()
 // a relay can ingest a burst micro-reordered (newest first).
 test("recvGroup serves in-range groups that arrive behind a capped one", async () => {
 	const producer = new TrackProducer("test");
-	const track = producer.subscribe();
+	const track = producer.subscribe({ latencyMax: 5000 });
 
 	track.endAt(1);
 
@@ -373,7 +762,7 @@ test("closing the subscriber releases a recvGroup parked while the producer is l
 
 test("recvGroup after nextGroup still returns late arrivals", async () => {
 	const producer = new TrackProducer("test");
-	const track = producer.subscribe();
+	const track = producer.subscribe({ latencyMax: 5000 });
 
 	producer.writeGroup(new GroupProducer(5));
 
@@ -399,7 +788,7 @@ test("nextGroup returns undefined when track closes", async () => {
 // the data (mirrors the Rust subscriber). Only a drained closed track reports finished.
 test("a closed track still delivers a group parked above the cap once the cap is raised", async () => {
 	const producer = new TrackProducer("test");
-	const track = producer.subscribe();
+	const track = producer.subscribe({ latencyMax: 5000 });
 
 	for (let sequence = 0; sequence < 3; sequence++) {
 		const group = new GroupProducer(sequence);

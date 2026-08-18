@@ -7,6 +7,7 @@ import { CaptionsRenderer, parseText, VTTCue, type VTTRegion } from "media-capti
 // attributes and CSS variables it sets); without them the overlay renders nothing visible.
 import captionsCss from "media-captions/styles/captions.css?inline";
 import regionsCss from "media-captions/styles/regions.css?inline";
+import { subscribeMedia } from "../media";
 import type { Sync } from "../sync";
 import type { Source } from "./source";
 
@@ -245,8 +246,12 @@ export class Renderer {
 		// does not), so a track switch or reconnect doesn't leak an observer.
 		effect.cleanup(() => renderer.destroy());
 
-		const sub = active.track(track).subscribe({ priority: Catalog.PRIORITY.text });
-		effect.cleanup(() => sub.close());
+		const sub = subscribeMedia(effect, {
+			broadcast: active,
+			track,
+			priority: Catalog.PRIORITY.text,
+			latency: this.sync.out.maxBuffer,
+		});
 		const store: CueStore = { cues: [], regions: new Map(), clears: [] };
 		const commit = () => renderer.changeTrack({ cues: [...store.cues], regions: [...store.regions.values()] });
 
