@@ -257,6 +257,27 @@ export function tryResolve(base: Valid, rel: string): Valid | undefined {
 }
 
 /**
+ * Whether a relative reference names an ancestor of its base rather than descending
+ * somewhere else.
+ *
+ * True when every segment walks up (`.` or `..`). The empty reference names the base itself,
+ * so it is not an ancestor. Resolution clamps at the root, so a reference with more `..` than
+ * the base has segments still lands on the root.
+ *
+ * Mirrors the Rust `PathRelative::is_ancestor`.
+ *
+ * @example
+ * ```typescript
+ * Path.isAncestor("..");        // true
+ * Path.isAncestor("./sibling"); // false
+ * Path.isAncestor("");          // false, that names the base itself
+ * ```
+ */
+export function isAncestor(rel: string): boolean {
+	return rel !== "" && rel.split("/").every((seg) => seg === "." || seg === "..");
+}
+
+/**
  * Express `target` relative to `base`: the inverse of {@link resolve}.
  *
  * The result round-trips (`resolve(base, relative(target, base)) === target`) and never

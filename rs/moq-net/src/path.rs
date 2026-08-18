@@ -656,6 +656,29 @@ impl<'a> PathRelative<'a> {
 	pub fn borrow(&'a self) -> PathRelative<'a> {
 		PathRelative(Cow::Borrowed(&self.0))
 	}
+
+	/// Whether this reference names an ancestor of its base rather than descending
+	/// somewhere else.
+	///
+	/// True when every segment walks up (`.` or `..`). The empty reference names the base
+	/// itself, so it is not an ancestor. Resolution clamps at the root, so a reference with
+	/// more `..` than the base has segments still lands on the root.
+	///
+	/// # Examples
+	/// ```
+	/// use moq_net::{Path, PathRelative};
+	///
+	/// // A broadcast published beneath another names it by walking up.
+	/// let rel = Path::new("room").relative("room/transcode.hang").unwrap();
+	/// assert!(rel.is_ancestor());
+	///
+	/// // A sibling subtree does not.
+	/// let rel = Path::new("other").relative("room/transcode.hang").unwrap();
+	/// assert!(!rel.is_ancestor());
+	/// ```
+	pub fn is_ancestor(&self) -> bool {
+		!self.is_empty() && self.0.split('/').all(|seg| seg == "." || seg == "..")
+	}
 }
 
 impl<'a> From<&'a str> for PathRelative<'a> {
@@ -1597,6 +1620,28 @@ mod tests {
 		let rel = Path::new("a/../b/x").relative("a/../b/c").unwrap();
 		assert_eq!(rel.as_str(), "x");
 		assert_eq!(Path::new("a/../b/c").resolve(&rel).as_str(), "a/../b/x");
+	}
+
+	#[test]
+	fn test_relative_is_ancestor() {
+		assert!(PathRelative::new(".").is_ancestor());
+		assert!(PathRelative::new("..").is_ancestor());
+		assert!(PathRelative::new("../..").is_ancestor());
+		// The empty reference names the base itself, which is not an ancestor of itself.
+		assert!(!PathRelative::empty().is_ancestor());
+		assert!(!PathRelative::new("./sibling").is_ancestor());
+		assert!(!PathRelative::new("../other/deep").is_ancestor());
+
+		// It answers exactly "is the target an ancestor of the base", so a caller can gate on
+		// the reference instead of re-deriving the relationship from the two paths.
+		for (target, base) in [("a", "a/b"), ("a/b", "a/b/c/d"), ("", "a")] {
+			let rel = Path::new(target).relative(base).unwrap();
+			assert!(rel.is_ancestor(), "{target} is an ancestor of {base}, got {rel}");
+		}
+		for (target, base) in [("a/c", "a/b"), ("a/b", "a/b"), ("x", "a/b")] {
+			let rel = Path::new(target).relative(base).unwrap();
+			assert!(!rel.is_ancestor(), "{target} is not an ancestor of {base}, got {rel}");
+		}
 	}
 
 	#[test]
