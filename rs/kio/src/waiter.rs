@@ -111,21 +111,35 @@ impl WaiterList {
 		}
 	}
 
-	/// Register a waiter.
+	/// Register a waiter. Idempotent: a waiter already in the list stays as one entry.
 	///
-	/// Performs a small, bounded amount of garbage collection: probes the
-	/// slot at the rotating cursor, replacing it in place if dead. The
-	/// cursor advances on each append so the probe window covers the
-	/// whole list over time.
+	/// The dedup scan compares allocation addresses only. A `Weak` in the list keeps
+	/// its allocation alive even after the owner drops, so an address can never be
+	/// recycled out from under an entry, and equal pointers always mean the same
+	/// waiter. No refcounts are touched and no foreign cache lines are read, which is
+	/// what makes the steady-state re-register (the hot path) a short scan over
+	/// contiguous memory.
+	///
+	/// A miss also performs a small, bounded amount of garbage collection: probes the
+	/// slot at the rotating cursor, replacing it in place if dead. The cursor advances
+	/// on each append so the probe window covers the whole list over time.
 	pub fn register(&mut self, waiter: &Waiter) {
-		let new_weak = Arc::downgrade(waiter.shared());
+		let shared = waiter.shared();
+		let ptr = Arc::as_ptr(shared);
+
+		// Already registered: nothing to do. This is what lets `Park` keep reusing a
+		// still-registered waiter instead of retiring it every poll.
+		if self.entries.iter().any(|entry| std::ptr::eq(entry.as_ptr(), ptr)) {
+			return;
+		}
+
+		let new_weak = Arc::downgrade(shared);
 
 		for _ in 0..self.entries.len().min(2) {
 			if self.entries[self.cursor].strong_count() == 0 {
 				// Reuse the dead slot in place. Each Waiter owns a
 				// unique Arc<Waker>, so strong_count == 0 uniquely
 				// identifies a slot whose owner has been dropped.
-				// No will_wake / pointer comparison needed.
 				self.entries[self.cursor] = new_weak;
 				return;
 			}
@@ -215,19 +229,18 @@ impl Park {
 	/// (the usual `ready!` on a nested poll) still leaves its registrations live.
 	/// There is no second call to forget.
 	///
-	/// The held waiter is reused when it would wake the same task *and* has no live
-	/// list registrations (the usual case after a wakeup, which drains every entry),
-	/// so a steady-state park allocates nothing. Otherwise it is retired for a fresh
-	/// one: a still-registered waiter must not be registered again, because
-	/// [`WaiterList`] reclaims a slot only once its `Arc` dies, so reusing one with
-	/// live entries would stack duplicates the list could never collect.
+	/// The held waiter is reused whenever it would wake the same task, so a
+	/// steady-state park allocates nothing. Live registrations are no obstacle: a poll
+	/// that waits on several lists is re-woken by one while still parked on the rest,
+	/// and re-registering there is a no-op because [`WaiterList::register`] is
+	/// idempotent. Only a waker for a *different* task retires the waiter, dropping
+	/// its registrations so the lists can reclaim those slots.
 	pub fn hold(&mut self, cx: &Context<'_>) -> &Waiter {
-		let reuse = self.0.as_ref().is_some_and(|waiter| {
-			cx.waker().will_wake(&waiter.waker) && waiter.shared.get().is_none_or(|shared| Arc::weak_count(shared) == 0)
-		});
+		let reuse = self
+			.0
+			.as_ref()
+			.is_some_and(|waiter| cx.waker().will_wake(&waiter.waker));
 		if !reuse {
-			// The outgoing waiter drops here, killing its registrations so the lists
-			// can reclaim those slots.
 			self.0 = Some(Waiter::new(cx.waker().clone()));
 		}
 		self.0.as_ref().unwrap()
@@ -729,30 +742,99 @@ mod tests {
 	}
 
 	#[test]
-	fn park_reuses_a_drained_waiter_and_retires_a_registered_one() {
+	fn park_reuses_a_still_registered_waiter() {
 		let waker = Waker::noop().clone();
 		let cx = Context::from_waker(&waker);
 		let mut park = Park::default();
 		let mut list = WaiterList::new();
 
-		// Poll 1 parks with a live registration. Hold the Arc so a pointer comparison
-		// can't alias a recycled allocation.
+		// Poll 1 parks with a live registration.
 		let waiter = park.hold(&cx);
 		waiter.register(&mut list);
 		let first = waiter.shared().clone();
 
-		// Poll 2 with that registration still live must retire the waiter: reusing it
-		// would stack a duplicate entry the list could never reclaim.
+		// Poll 2 with that registration still live (a wake from some other list, say)
+		// reuses the waiter without allocating, and re-registering it dedups rather
+		// than stacking a duplicate.
 		let waiter = park.hold(&cx);
-		assert!(!Arc::ptr_eq(&first, waiter.shared()), "a registered waiter was reused");
+		assert!(
+			Arc::ptr_eq(&first, waiter.shared()),
+			"a still-registered waiter was retired"
+		);
 		waiter.register(&mut list);
-		let second = waiter.shared().clone();
+		assert_eq!(list.entries.len(), 1, "re-registration stacked a duplicate");
 
-		// The wake drains the list, so poll 3 reuses: same task, nothing left to
-		// duplicate, and no allocation.
+		// The wake drains the list; poll 3 reuses the same waiter and registers anew.
 		list.wake();
 		let waiter = park.hold(&cx);
-		assert!(Arc::ptr_eq(&second, waiter.shared()), "a drained waiter was not reused");
+		assert!(Arc::ptr_eq(&first, waiter.shared()), "a drained waiter was not reused");
+		waiter.register(&mut list);
+		assert_eq!(list.entries.len(), 1);
+		assert!(list.entries[0].strong_count() > 0, "the registration must stay live");
+	}
+
+	#[test]
+	fn register_is_idempotent_per_identity() {
+		let mut list = WaiterList::new();
+
+		// Repeat registrations of one identity, directly or via a clone, are one entry.
+		let waiter = Waiter::new(Waker::noop().clone());
+		waiter.register(&mut list);
+		waiter.register(&mut list);
+		waiter.clone().register(&mut list);
+		assert_eq!(list.entries.len(), 1, "one identity must occupy one slot");
+
+		// A distinct waiter is a distinct entry, even for the same task.
+		let other = Waiter::new(Waker::noop().clone());
+		other.register(&mut list);
+		assert_eq!(list.entries.len(), 2);
+	}
+
+	#[test]
+	fn abandoned_waiters_do_not_grow_the_list() {
+		let mut list = WaiterList::new();
+
+		// Register-and-drop, over and over, without a single wake. The rotating probe
+		// must keep reclaiming the dead slots, or the list grows by one per waiter.
+		for _ in 0..1_000 {
+			Waiter::new(Waker::noop().clone()).register(&mut list);
+		}
+		assert!(list.entries.len() <= 2, "the list grew to {}", list.entries.len());
+	}
+
+	/// The steady state this shape exists for: a poll waiting on several lists is
+	/// re-woken by one while still parked on the others, and the re-poll must not
+	/// allocate a new waiter or stack duplicate registrations.
+	#[test]
+	fn a_multi_list_poll_reuses_across_a_partial_wake() {
+		let waker = Waker::noop().clone();
+		let cx = Context::from_waker(&waker);
+		let mut park = Park::default();
+		let mut first = WaiterList::new();
+		let mut second = WaiterList::new();
+
+		// Poll 1 waits on both lists.
+		let waiter = park.hold(&cx);
+		waiter.register(&mut first);
+		waiter.register(&mut second);
+		let shared = waiter.shared().clone();
+
+		// One list wakes; the other still holds a live registration.
+		first.wake();
+
+		// Poll 2 reuses the waiter and re-registers with both: an append into the
+		// drained list, a no-op in the still-parked one.
+		let waiter = park.hold(&cx);
+		assert!(
+			Arc::ptr_eq(&shared, waiter.shared()),
+			"the waiter was retired mid-operation"
+		);
+		waiter.register(&mut first);
+		waiter.register(&mut second);
+
+		assert_eq!(first.entries.len(), 1);
+		assert_eq!(second.entries.len(), 1, "re-registration stacked a duplicate");
+		assert!(second.entries[0].strong_count() > 0, "the registration must stay live");
 	}
 
 	#[test]

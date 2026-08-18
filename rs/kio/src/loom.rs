@@ -253,6 +253,45 @@ fn queue_close_wakes_a_parked_pop() {
 	});
 }
 
+/// A poll parked on two lists is re-woken by one while still registered with the
+/// other. The re-poll reuses the parked waiter, so its re-registration must dedup
+/// rather than stack, and the second list's wake must still reach it.
+#[test]
+fn a_reused_waiter_hears_the_second_list() {
+	loom::model(|| {
+		let first = Fan::new();
+		let second = Fan::new();
+		let done = Arc::new(AtomicBool::new(false));
+
+		let waker = {
+			let first = first.clone();
+			let second = second.clone();
+			let done = done.clone();
+
+			thread::spawn(move || {
+				first.wake();
+				done.store(true, Ordering::SeqCst);
+				second.wake();
+			})
+		};
+
+		// Register with both before reading `done`, as in `a_held_wake_is_never_lost`:
+		// a re-poll triggered by `first` re-registers a waiter that is still parked on
+		// `second`.
+		block_on(wait(|waiter| {
+			first.register(waiter);
+			second.register(waiter);
+
+			match done.load(Ordering::SeqCst) {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}
+		}));
+
+		waker.join().unwrap();
+	});
+}
+
 /// `Fan` holds wakes back while a guard is out and delivers them when the last
 /// one drops. A wake racing that window must still reach the parked waiter, whichever
 /// side of the hold it lands on.
