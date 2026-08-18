@@ -186,10 +186,27 @@ pub struct WaiterList {
 impl WaiterList {
 	/// Create an empty list, allocating nothing until the first [`register`](Self::register).
 	pub fn new() -> Self {
+		// A CAS loop rather than fetch_add, so exhaustion fails closed instead of
+		// wrapping into reissued ids (a reissued id could fake presence). List
+		// creation is cold, and the loop is contention-free in practice.
+		let mut id = NEXT_LIST_ID.load(std::sync::atomic::Ordering::Relaxed);
+		loop {
+			assert_ne!(id, u64::MAX, "waiter list id space exhausted");
+			match NEXT_LIST_ID.compare_exchange_weak(
+				id,
+				id + 1,
+				std::sync::atomic::Ordering::Relaxed,
+				std::sync::atomic::Ordering::Relaxed,
+			) {
+				Ok(_) => break,
+				Err(current) => id = current,
+			}
+		}
+
 		Self {
 			entries: SmallVec::new(),
 			cursor: 0,
-			id: NEXT_LIST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+			id,
 			epoch: 0,
 		}
 	}
