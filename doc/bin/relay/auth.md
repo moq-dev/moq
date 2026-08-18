@@ -170,9 +170,10 @@ Full publish path = root + "/" + put
 Full subscribe path = root + "/" + get
 ```
 
-Both claims are lists, and the two kinds of empty mean opposite things:
+Each claim is one suffix or a list of them, and the two kinds of empty mean
+opposite things:
 
-- **A list holding the empty suffix** (`[""]`) grants everything under the root.
+- **The empty suffix** (`""`, or `[""]`) grants everything under the root.
 - **An empty list** (`[]`), or the claim omitted entirely, grants nothing in that
   role. That is how you mint a read-only token (no `put`) or a write-only one
   (no `get`).
@@ -181,16 +182,18 @@ Suffixes match on path boundaries, so `foo` grants `foo` and `foo/bar` but never
 `foobar`. A token that grants neither role is useless, and is rejected both when
 signing and when verifying.
 
-**Examples:**
+**Examples**, written in the list form. A bare string is the same claim, so
+`"put": "alice"` and `"put": ["alice"]` produce the same token, and `[]` is the
+same as leaving the claim out:
 
 | root | put | get | Can publish | Can subscribe |
 |------|-----|-----|-------------|---------------|
 | `demo` | `["my-stream"]` | `[""]` | `demo/my-stream` | `demo/*` |
 | `rooms/123` | `["alice"]` | `[""]` | `rooms/123/alice` | `rooms/123/*` |
 | `""` | `[""]` | `[""]` | Everything | Everything |
-| `""` | empty | `[""]` | Nothing | Everything |
-| `""` | `[""]` | empty | Everything | Nothing |
-| `demo` | empty | `[""]` | Nothing | `demo/*` |
+| `""` | `[]` | `[""]` | Nothing | Everything |
+| `""` | `[""]` | `[]` | Everything | Nothing |
+| `demo` | `[]` | `[""]` | Nothing | `demo/*` |
 
 On the CLI the difference is simply whether the flag appears at all. `--publish ""`
 grants everything under the root; dropping `--publish` grants no publish access:
