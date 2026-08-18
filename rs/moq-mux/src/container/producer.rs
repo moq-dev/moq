@@ -398,13 +398,13 @@ mod tests {
 			.unwrap()
 	}
 
-	/// Subscribe with a budget wide enough to read a whole batch.
+	/// A replay window wide enough to read a whole batch back.
 	///
 	/// These tests write every group up front and only then read, which the default
 	/// [`Latency::REAL_TIME`](moq_net::Latency::REAL_TIME) budget collapses to the live
-	/// edge: completeness has to be asked for.
-	fn subscribe_all(track: &moq_net::track::Producer) -> moq_net::track::Subscriber {
-		track.subscribe(moq_net::track::Subscription::default().with_latency(moq_net::Latency::max(RECORDING_LATENCY)))
+	/// edge: history has to be asked for.
+	fn replay() -> moq_net::track::Subscription {
+		moq_net::track::Subscription::default().with_latency(moq_net::Latency::max(RECORDING_LATENCY))
 	}
 
 	/// The media track's full retention window, so readers started after publishing
@@ -600,7 +600,7 @@ mod tests {
 	#[tokio::test]
 	async fn keyframe_closes_group_immediately() {
 		let track = track_producer("test", hang::container::track_info());
-		let consumer = subscribe_all(&track);
+		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap(); // first frame must be a keyframe
@@ -619,7 +619,7 @@ mod tests {
 	#[tokio::test]
 	async fn needs_keyframe_drives_audio_grouping() {
 		let track = track_producer("test", hang::container::track_info());
-		let consumer = subscribe_all(&track);
+		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		// Drive grouping off `needs_keyframe`, as the audio importers do: the first frame of each
@@ -643,7 +643,7 @@ mod tests {
 	#[tokio::test]
 	async fn cut_closes_immediately() {
 		let track = track_producer("test", hang::container::track_info());
-		let consumer = subscribe_all(&track);
+		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap();
@@ -661,7 +661,7 @@ mod tests {
 	#[allow(deprecated)]
 	async fn deprecated_finish_group_still_closes() {
 		let track = track_producer("test", hang::container::track_info());
-		let consumer = subscribe_all(&track);
+		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap();
@@ -696,7 +696,7 @@ mod tests {
 	#[tokio::test]
 	async fn seek_uses_explicit_sequence() {
 		let track = track_producer("test", hang::container::track_info());
-		let consumer = subscribe_all(&track);
+		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap(); // seq 0
@@ -711,7 +711,7 @@ mod tests {
 	#[tokio::test]
 	async fn seek_clears_pending_after_use() {
 		let track = track_producer("test", hang::container::track_info());
-		let consumer = subscribe_all(&track);
+		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.seek(5).unwrap();
