@@ -109,7 +109,9 @@ fn bench_cancel(c: &mut Criterion) {
 /// the other lists, which is exactly the case `Park` must not retire on.
 fn bench_park_cycle(c: &mut Criterion) {
 	let mut g = c.benchmark_group("waiter_park_cycle");
-	for &lists in &[1usize, 2, 4, 8] {
+	// 16 lists overflow the waiter's record table, exercising eviction and the
+	// scan fallback rather than the pure record fast path.
+	for &lists in &[1usize, 2, 4, 8, 16] {
 		g.bench_with_input(BenchmarkId::from_parameter(lists), &lists, |b, &n| {
 			let cx = Context::from_waker(Waker::noop());
 			let mut park = Park::default();

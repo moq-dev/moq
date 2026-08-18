@@ -30,13 +30,27 @@ struct Identity {
 	/// The task waker the lists deliver to.
 	waker: Waker,
 
-	/// Registrations this identity has made, as `(list id, list epoch)` pairs. A
-	/// pair matching a list's current epoch proves the registration is still in
-	/// place, and a stale pair proves it is gone: live entries only leave through a
-	/// drain, every drain bumps the epoch, and every registration refreshes the
-	/// pair. Either way membership is settled in O(1); only a missing pair (never
-	/// registered, or evicted) needs the scan.
-	recorded: Mutex<SmallVec<[(u64, u64); RECORDED_LISTS]>>,
+	/// Registrations this identity has made. A record matching a list's current
+	/// epoch proves the registration is still in place, and a stale one proves it
+	/// is gone: live entries only leave through a drain, every drain bumps the
+	/// epoch, and every registration refreshes the record. Either way membership is
+	/// settled in O(1); only a missing record (never registered, or evicted) needs
+	/// the scan.
+	recorded: Mutex<Records>,
+}
+
+/// The record table behind an [`Identity`].
+#[derive(Default)]
+struct Records {
+	/// `(list id, list epoch)` pairs, at most [`RECORDED_LISTS`] of them.
+	entries: SmallVec<[(u64, u64); RECORDED_LISTS]>,
+
+	/// State for choosing an eviction victim pseudo-randomly. Deterministic
+	/// policies (FIFO, LRU) evict exactly the next-needed record when a poll
+	/// cycles through more lists than the cap, degrading every registration to the
+	/// scan; a random victim keeps an expected `cap / lists` fraction of hits
+	/// instead.
+	seed: u64,
 }
 
 /// What an identity's records prove about its membership in one list.
@@ -60,7 +74,7 @@ impl Identity {
 	fn presume(&self, id: u64, epoch: u64) -> Presence {
 		let mut recorded = self.recorded.lock().expect("mutex poisoned");
 
-		if let Some(entry) = recorded.iter_mut().find(|entry| entry.0 == id) {
+		if let Some(entry) = recorded.entries.iter_mut().find(|entry| entry.0 == id) {
 			let presence = match entry.1 == epoch {
 				true => Presence::Present,
 				false => Presence::Absent,
@@ -69,11 +83,18 @@ impl Identity {
 			return presence;
 		}
 
-		// Evict the oldest record when full: eviction only costs a scan later.
-		if recorded.len() == RECORDED_LISTS {
-			recorded.remove(0);
+		if recorded.entries.len() < RECORDED_LISTS {
+			recorded.entries.push((id, epoch));
+			return Presence::Unknown;
 		}
-		recorded.push((id, epoch));
+
+		// Evict a pseudo-random record (a Weyl-style step, no external RNG):
+		// eviction only ever costs a scan later, and a random victim avoids the
+		// deterministic worst case where a cyclic visit pattern one list wider
+		// than the cap evicts exactly the record it needs next, every time.
+		recorded.seed = recorded.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+		let victim = (recorded.seed >> 33) as usize % RECORDED_LISTS;
+		recorded.entries[victim] = (id, epoch);
 		Presence::Unknown
 	}
 }
@@ -129,7 +150,7 @@ impl Waiter {
 		self.shared.get_or_init(|| {
 			Arc::new(Identity {
 				waker: self.waker.clone(),
-				recorded: Mutex::new(SmallVec::new()),
+				recorded: Mutex::new(Records::default()),
 			})
 		})
 	}
