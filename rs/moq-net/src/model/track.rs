@@ -2049,7 +2049,7 @@ impl Consumer {
 		};
 		let sequence = group.sequence;
 		group.with_expiry(Arc::new(GroupExpiry {
-			state: state.clone(),
+			state: state.weak(),
 			subscription,
 			cap,
 			bound,
@@ -2630,7 +2630,12 @@ struct Drift {
 
 /// Keeps one handed-out group tied to the subscription whose cursor selected it.
 struct GroupExpiry {
-	state: kio::Consumer<TrackState>,
+	/// Weak so a handed-out group never joins the track's consumer count, which is what
+	/// [`crate::broadcast::Demand`] reads to decide the track still has readers. A group
+	/// outlives the cursor that produced it (a relay serves one for the life of its
+	/// stream), and pinning demand on that would hold an upstream subscription open past
+	/// the last real subscriber.
+	state: kio::ConsumerWeak<TrackState>,
 	subscription: kio::Consumer<Subscription>,
 	cap: kio::Consumer<Option<u64>>,
 	bound: Option<u64>,
@@ -2836,7 +2841,7 @@ impl PlainSubscriber {
 	fn with_expiry(&self, group: group::Consumer) -> group::Consumer {
 		let sequence = group.sequence;
 		group.with_expiry(Arc::new(GroupExpiry {
-			state: self.state.clone(),
+			state: self.state.weak(),
 			subscription: self.subscription.consume(),
 			cap: self.drift_cap.consume(),
 			bound: None,
@@ -3529,7 +3534,7 @@ mod test {
 
 	/// A bounded replay window for tests whose subject requires every buffered group.
 	fn replay() -> Subscription {
-		Subscription::default().with_latency(Latency::max(Duration::from_secs(30)))
+		Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(30)))
 	}
 
 	/// Helper: count live cached groups in state.
@@ -3976,13 +3981,13 @@ mod test {
 		// waited for longer than the publisher keeps it. The subscriber's own preference
 		// is stored verbatim, so what it asked for stays readable.
 		let mut subscriber =
-			producer.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_secs(10))));
+			producer.subscribe(Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(10))));
 		assert_eq!(subscriber.subscription().latency.max, Duration::from_secs(10));
 		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_secs(2));
 
 		// A budget within the cache is left alone, and ZERO (skip immediately) stays ZERO.
 		subscriber
-			.update(Subscription::default().with_latency(Latency::max(Duration::from_millis(500))))
+			.update(Subscription::default().with_latency(crate::Latency::max(Duration::from_millis(500))))
 			.unwrap();
 		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_millis(500));
 
@@ -4050,7 +4055,7 @@ mod test {
 	#[test]
 	fn latency_max_clamped_via_every_update_path() {
 		let producer = track_producer("test", Info::default().with_latency_max(Duration::from_secs(2)));
-		let over = Subscription::default().with_latency(Latency::max(Duration::from_secs(10)));
+		let over = Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(10)));
 
 		// The clamp lives in the aggregation, so it applies no matter which entry point
 		// wrote the raw preference. Previously only `Subscriber::update` clamped.
@@ -4070,8 +4075,9 @@ mod test {
 
 		// The aggregate takes the max, then clamps once. Equivalent to clamping each
 		// subscriber first, since `min` distributes over `max`.
-		let _a = producer.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_millis(500))));
-		let _b = producer.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_secs(10))));
+		let _a =
+			producer.subscribe(Subscription::default().with_latency(crate::Latency::max(Duration::from_millis(500))));
+		let _b = producer.subscribe(Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(10))));
 
 		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_secs(2));
 	}
@@ -4124,7 +4130,7 @@ mod test {
 		// Two seconds of tolerance keeps the groups presenting within 2s of the live
 		// edge (2s, 3s, 4s) and drops the two below it.
 		let mut subscriber =
-			producer.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_secs(2))));
+			producer.subscribe(Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(2))));
 		assert_eq!(drain(&mut subscriber), vec![2, 3, 4]);
 	}
 
@@ -4139,7 +4145,7 @@ mod test {
 		}
 
 		let mut subscriber =
-			producer.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_millis(1500))));
+			producer.subscribe(Subscription::default().with_latency(crate::Latency::max(Duration::from_millis(1500))));
 		assert_eq!(drain(&mut subscriber), vec![2, 3]);
 	}
 
@@ -4185,7 +4191,7 @@ mod test {
 	async fn a_handed_out_group_wakes_when_a_newer_group_gets_its_first_timestamp() {
 		let mut producer = track_producer("test", None);
 		let mut subscriber =
-			producer.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_millis(500))));
+			producer.subscribe(Subscription::default().with_latency(crate::Latency::max(Duration::from_millis(500))));
 		let mut old = producer.append_group().unwrap();
 		old.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"old"))
 			.unwrap();
@@ -4277,7 +4283,7 @@ mod test {
 		assert!(!pending.is_finished(), "the real-time budget skips the old frame");
 
 		control
-			.update(Subscription::default().with_latency(Latency::max(Duration::from_secs(2))))
+			.update(Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(2))))
 			.unwrap();
 
 		let frame = pending
@@ -4298,7 +4304,7 @@ mod test {
 		append_at(&mut producer, 1000);
 
 		let mut subscriber =
-			producer.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_secs(10))));
+			producer.subscribe(Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(10))));
 		assert_eq!(drain(&mut subscriber), vec![1]);
 	}
 
@@ -4318,7 +4324,7 @@ mod test {
 		let mut patient = producer.subscribe(
 			Subscription::default()
 				.with_start(Position::group(0))
-				.with_latency(Latency::max(Duration::from_secs(10))),
+				.with_latency(crate::Latency::max(Duration::from_secs(10))),
 		);
 		patient.start_at(0);
 		assert_eq!(drain(&mut patient), vec![0, 1, 2, 3]);

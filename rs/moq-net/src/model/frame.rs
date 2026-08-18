@@ -509,6 +509,11 @@ impl Consumer {
 		}
 	}
 
+	/// Evaluate the parent subscription's drift budget.
+	///
+	/// Only called once a read has nothing buffered to return: the budget bounds a
+	/// *stalled* payload, so bytes already in hand are always drained rather than
+	/// truncated. `self.expired` is sticky, so the answer is only ever computed once.
 	fn poll_expired(&mut self, waiter: &kio::Waiter) -> bool {
 		if self.expired || self.read_idx >= self.size() {
 			return self.expired;
@@ -535,10 +540,10 @@ impl Consumer {
 	///
 	/// Returns `None` once the frame is finished and all bytes have been consumed.
 	pub fn poll_read_chunk(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
-		if self.poll_expired(waiter) {
+		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
-		match &self.source {
+		let buf = match &self.source {
 			Source::Complete(bytes) => {
 				if self.read_idx >= bytes.len() {
 					return Poll::Ready(Ok(None));
@@ -546,38 +551,42 @@ impl Consumer {
 				let out = bytes.slice(self.read_idx..);
 				self.read_idx = bytes.len();
 				self.stats.bytes(out.len() as u64);
-				Poll::Ready(Ok(Some(out)))
+				return Poll::Ready(Ok(Some(out)));
 			}
-			Source::Partial(buf) => {
-				let buf = buf.clone();
-				let size = self.info.size as usize;
-				loop {
-					let written = buf.written(Ordering::Acquire);
-					if written > self.read_idx {
-						let out = buf.slice(self.read_idx, written);
-						self.read_idx = written;
-						self.stats.bytes(out.len() as u64);
-						return Poll::Ready(Ok(Some(out)));
-					}
-					if written >= size {
-						return Poll::Ready(Ok(None));
-					}
-					let read_idx = self.read_idx;
-					// Park on the group's channel; the producer notifies it on each write and
-					// on abort. Re-check the atomic on wake.
-					ready!(poll_state(&self.state, waiter, |state| {
-						if let Some(err) = &state.abort {
-							return Poll::Ready(Err(err.clone()));
-						}
-						let w = buf.written(Ordering::Acquire);
-						if w > read_idx || w >= size {
-							Poll::Ready(Ok(()))
-						} else {
-							Poll::Pending
-						}
-					})?);
+			Source::Partial(buf) => buf.clone(),
+		};
+
+		let size = self.info.size as usize;
+		loop {
+			let written = buf.written(Ordering::Acquire);
+			if written > self.read_idx {
+				let out = buf.slice(self.read_idx, written);
+				self.read_idx = written;
+				self.stats.bytes(out.len() as u64);
+				return Poll::Ready(Ok(Some(out)));
+			}
+			if written >= size {
+				return Poll::Ready(Ok(None));
+			}
+			// Nothing buffered and the frame isn't finished: this park is the stall the
+			// drift budget exists to bound, and the only place it can apply.
+			if self.poll_expired(waiter) {
+				return Poll::Ready(Err(Error::Old));
+			}
+			let read_idx = self.read_idx;
+			// Park on the group's channel; the producer notifies it on each write and
+			// on abort. Re-check the atomic on wake.
+			ready!(poll_state(&self.state, waiter, |state| {
+				if let Some(err) = &state.abort {
+					return Poll::Ready(Err(err.clone()));
 				}
-			}
+				let w = buf.written(Ordering::Acquire);
+				if w > read_idx || w >= size {
+					Poll::Ready(Ok(()))
+				} else {
+					Poll::Pending
+				}
+			})?);
 		}
 	}
 
@@ -588,36 +597,39 @@ impl Consumer {
 
 	/// Poll for all remaining bytes, resolving once the frame is finished.
 	pub fn poll_read_all(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes>> {
-		if self.poll_expired(waiter) {
+		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
-		match &self.source {
+		let buf = match &self.source {
 			Source::Complete(bytes) => {
 				let out = bytes.slice(self.read_idx..);
 				self.read_idx = bytes.len();
 				self.stats.bytes(out.len() as u64);
-				Poll::Ready(Ok(out))
+				return Poll::Ready(Ok(out));
 			}
-			Source::Partial(buf) => {
-				let buf = buf.clone();
-				let size = self.info.size as usize;
-				let read_idx = self.read_idx;
-				ready!(poll_state(&self.state, waiter, |state| {
-					if let Some(err) = &state.abort {
-						return Poll::Ready(Err(err.clone()));
-					}
-					if buf.written(Ordering::Acquire) >= size {
-						Poll::Ready(Ok(()))
-					} else {
-						Poll::Pending
-					}
-				})?);
-				let out = buf.slice(read_idx, size);
-				self.read_idx = size;
-				self.stats.bytes(out.len() as u64);
-				Poll::Ready(Ok(out))
-			}
+			Source::Partial(buf) => buf.clone(),
+		};
+
+		let size = self.info.size as usize;
+		let read_idx = self.read_idx;
+		// Waiting on the rest of the payload is a stall; see `poll_read_chunk`.
+		if buf.written(Ordering::Acquire) < size && self.poll_expired(waiter) {
+			return Poll::Ready(Err(Error::Old));
 		}
+		ready!(poll_state(&self.state, waiter, |state| {
+			if let Some(err) = &state.abort {
+				return Poll::Ready(Err(err.clone()));
+			}
+			if buf.written(Ordering::Acquire) >= size {
+				Poll::Ready(Ok(()))
+			} else {
+				Poll::Pending
+			}
+		})?);
+		let out = buf.slice(read_idx, size);
+		self.read_idx = size;
+		self.stats.bytes(out.len() as u64);
+		Poll::Ready(Ok(out))
 	}
 
 	/// Return all remaining bytes, blocking until the frame is finished.

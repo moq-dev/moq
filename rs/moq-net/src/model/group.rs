@@ -1023,6 +1023,24 @@ impl Consumer {
 		self.poll_expired_while_pending(waiter, false)
 	}
 
+	/// Apply the drift budget to a read that found nothing and is about to park.
+	///
+	/// A group with frames in hand is always drained to its end: the budget bounds a
+	/// group that has *stalled* while the live edge moved on, not one whose reader is
+	/// merely slower than the wire. Judging every read instead would truncate the tail
+	/// of every group under the default real-time budget, since the arrival of the next
+	/// group is exactly what makes the current one no longer newest.
+	///
+	/// Keeping it off the ready path also keeps it off the hot path: evaluating the
+	/// policy walks the track's group cache under its lock, which is shared by every
+	/// subscriber of that track.
+	fn poll_expired_if_blocked<T>(&mut self, waiter: &kio::Waiter, res: Poll<Result<T>>) -> Poll<Result<T>> {
+		if res.is_pending() && self.poll_expired(waiter) {
+			return Poll::Ready(Err(Error::Old));
+		}
+		res
+	}
+
 	/// Keep checking expiry while a wire publisher still owns buffered group data.
 	pub(crate) fn poll_expired_while_pending(&mut self, waiter: &kio::Waiter, pending: bool) -> bool {
 		if !self.expired
@@ -1134,7 +1152,7 @@ impl Consumer {
 	/// Returns None if the group is finished and the index is out of range, or the cursor
 	/// passed the [`Self::end_at`] cap.
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
-		if self.poll_expired(waiter) {
+		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
 		let stats = self.stats.clone();
@@ -1142,7 +1160,7 @@ impl Consumer {
 			.expiry
 			.as_ref()
 			.map(|policy| frame::Expiry::new(policy.clone(), self.stale_stats.clone(), self.stale_counted.clone()));
-		match &mut self.inner {
+		let res = match &mut self.inner {
 			ConsumerKind::Plain(plain) => plain.poll_next_frame(waiter, &stats, expiry),
 			ConsumerKind::Spliced(spliced) => {
 				// The per-route copies underneath are untagged, so meter the spliced
@@ -1153,16 +1171,17 @@ impl Consumer {
 				}
 				Poll::Ready(Ok(res.map(|frame| frame.with_meter(stats))))
 			}
-		}
+		};
+		self.poll_expired_if_blocked(waiter, res)
 	}
 
 	/// Read the next frame (timestamp and payload) all at once, without blocking.
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
-		if self.poll_expired(waiter) {
+		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
 		let stats = self.stats.clone();
-		match &mut self.inner {
+		let res = match &mut self.inner {
 			ConsumerKind::Plain(plain) => plain.poll_read_frame(waiter, &stats),
 			ConsumerKind::Spliced(spliced) => {
 				let res = ready!(spliced.poll_read_frame(waiter))?;
@@ -1172,12 +1191,15 @@ impl Consumer {
 				}
 				Poll::Ready(Ok(res))
 			}
-		}
+		};
+		self.poll_expired_if_blocked(waiter, res)
 	}
 
 	/// Read the next frame (timestamp and payload) all at once.
 	pub async fn read_frame(&mut self) -> Result<Option<frame::Frame>> {
-		if self.expiry.is_none()
+		// A prefetched frame is already buffered, so the drift budget (which only judges
+		// a read that would park) can never apply to it.
+		if !self.expired
 			&& let ConsumerKind::Plain(plain) = &mut self.inner
 		{
 			// Serve from the prefetched batch without building a future or allocating a waker.
@@ -1193,13 +1215,14 @@ impl Consumer {
 
 	/// Poll for the final number of frames in the group.
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
-		if self.poll_expired(waiter) {
+		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
-		match &mut self.inner {
+		let res = match &mut self.inner {
 			ConsumerKind::Plain(plain) => plain.poll(waiter, |state| state.poll_finished()),
 			ConsumerKind::Spliced(spliced) => spliced.poll_finished(waiter),
-		}
+		};
+		self.poll_expired_if_blocked(waiter, res)
 	}
 
 	/// Block until the group is finished, returning the number of frames in the group.
