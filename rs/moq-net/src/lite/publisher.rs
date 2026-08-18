@@ -15,7 +15,6 @@ use crate::{
 		self,
 		priority::{Priority, PriorityHandle, PriorityQueue},
 	},
-	poll_set::{Machine, PollSet},
 };
 
 use super::Version;
@@ -123,7 +122,7 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	// A dedicated accept handle: the poll interface takes `&mut self`, and the
 	// shared context stays behind the Arc for the per-stream children.
 	accept: S,
-	children: PollSet<Control<S>>,
+	children: kio::Tasks<crate::util::MaybeSendTask>,
 }
 
 impl<S: crate::transport::poll::Session> Publisher<S> {
@@ -146,7 +145,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				goaway: config.goaway,
 			}),
 			accept,
-			children: PollSet::new(),
+			children: kio::Tasks::new(),
 		}
 	}
 
@@ -156,10 +155,14 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		let mut cx = Context::from_waker(waiter.waker());
 		loop {
 			match Stream::poll_accept(&mut self.accept, self.shared.version, &mut cx) {
-				Poll::Ready(Ok(stream)) => self.children.push(Control {
-					shared: self.shared.clone(),
-					state: ControlState::Start { stream },
-				}),
+				Poll::Ready(Ok(stream)) => {
+					let mut child = Control {
+						shared: self.shared.clone(),
+						state: ControlState::Start { stream },
+					};
+					self.children
+						.push(crate::util::poll_task(move |waiter| child.poll(waiter)));
+				}
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 				Poll::Pending => break,
 			}
@@ -214,7 +217,7 @@ enum ControlState<S: crate::transport::poll::Session> {
 	Done,
 }
 
-impl<S: crate::transport::poll::Session> Machine for Control<S> {
+impl<S: crate::transport::poll::Session> Control<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		if let Err(err) = ready!(self.poll_serve(waiter)) {
 			tracing::warn!(%err, "control stream error");
@@ -1203,7 +1206,7 @@ enum SubscribeState<S: crate::transport::poll::Session> {
 	Run(TrackRun<S>),
 	/// The track finished: draining the in-flight group streams before the FIN.
 	Drain {
-		children: PollSet<GroupServe<S>>,
+		children: kio::Tasks<crate::util::MaybeSendTask>,
 	},
 	/// FIN and wait for the acknowledgement.
 	Finish {
@@ -2689,7 +2692,7 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	// datagram-capable transport (qmux/WebSocket/TCP/UDS report size 0). No group
 	// fallback: otherwise off.
 	datagrams: bool,
-	children: PollSet<GroupServe<S>>,
+	children: kio::Tasks<crate::util::MaybeSendTask>,
 }
 
 impl<S: crate::transport::poll::Session> TrackRun<S> {
@@ -2721,7 +2724,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			start_sent: false,
 			end_sent: false,
 			datagrams,
-			children: PollSet::new(),
+			children: kio::Tasks::new(),
 		}
 	}
 
@@ -2823,8 +2826,9 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 							false => Priority::new(current_priority, self.ctx.id, sequence),
 						};
 						let handle = self.ctx.priority.insert(priority);
+						let mut serve = GroupServe::new(self.ctx.clone(), sequence, frame_start, handle, group);
 						self.children
-							.push(GroupServe::new(self.ctx.clone(), sequence, frame_start, handle, group));
+							.push(crate::util::poll_task(move |waiter| serve.poll(waiter)));
 					}
 					Recv::Datagram(datagram) => self.ctx.serve_datagram(datagram),
 					Recv::Boundary(group) => {
@@ -3041,7 +3045,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> Machine for GroupServe<S> {
+impl<S: crate::transport::poll::Session> GroupServe<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		// The machine owns its outcome: the stream was aborted with the reason (or
 		// reset by the writer's Drop), which is all the subscriber sees.

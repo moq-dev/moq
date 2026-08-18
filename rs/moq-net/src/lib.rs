@@ -90,7 +90,6 @@ mod latency;
 mod lite;
 mod model;
 mod path;
-mod poll_set;
 mod server;
 mod session;
 mod setup;

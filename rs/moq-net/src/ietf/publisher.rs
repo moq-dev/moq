@@ -10,7 +10,6 @@ use crate::{
 	AsPath, Error, Timescale,
 	coding::{Stream, Writer},
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
-	poll_set::{Machine, PollSet},
 	track::Subscription,
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
@@ -1392,7 +1391,7 @@ struct TrackServe<S: crate::transport::poll::Session> {
 	track: track::Subscriber,
 	request_id: RequestId,
 	version: Version,
-	children: PollSet<GroupServe<S>>,
+	children: kio::Tasks<crate::util::MaybeSendTask>,
 	/// The track finished: the in-flight group machines drain, then FIN.
 	draining: bool,
 }
@@ -1411,7 +1410,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			track,
 			request_id,
 			version,
-			children: PollSet::new(),
+			children: kio::Tasks::new(),
 			draining: false,
 		}
 	}
@@ -1442,7 +1441,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						},
 					};
 
-					self.children.push(GroupServe {
+					let mut serve = GroupServe {
 						session: self.session.clone(),
 						msg,
 						priority: self.track.subscription().priority,
@@ -1450,7 +1449,9 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						timescale: self.track.info().timescale,
 						version: self.version,
 						state: GroupState::Open,
-					});
+					};
+					self.children
+						.push(crate::util::poll_task(move |waiter| serve.poll(waiter)));
 				}
 				Poll::Ready(Ok(None)) => {
 					self.draining = true;
@@ -1499,7 +1500,7 @@ enum GroupState<S: crate::transport::poll::Session> {
 	Done,
 }
 
-impl<S: crate::transport::poll::Session> Machine for GroupServe<S> {
+impl<S: crate::transport::poll::Session> GroupServe<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		// Errors just drop the writer, whose Drop resets the stream, exactly like
 		// the old future being discarded.

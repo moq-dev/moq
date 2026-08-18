@@ -1,23 +1,27 @@
-//! Send-agnostic future boxing.
+//! Send-agnostic future boxing and the driver-owned task set.
 //!
-//! Native transports (Quinn) are `Send`, so boxed futures use the usual
-//! `Send`-bound `BoxFuture`. Browser WebTransport is `!Send`, so on wasm we box
-//! without the bound via `LocalBoxFuture`. `MaybeSendBox` resolves to the right
-//! one per target, and `.maybe_boxed()` picks `boxed()` vs `boxed_local()`.
+//! Native transports (Quinn) are `Send`, so boxed futures and tasks carry the
+//! `Send` bound. Browser WebTransport is `!Send`, so on wasm we box without it.
+//! `MaybeSendBox` / `MaybeSendTask` resolve to the right form per target, and
+//! `.maybe_boxed()` / [`poll_task`] pick the matching constructor.
 
-use std::{future::Future, task::Poll};
-
-use futures::{FutureExt, StreamExt, channel::mpsc, stream::FuturesUnordered};
+use std::{collections::VecDeque, future::Future, pin::Pin, task::Poll};
 
 #[cfg(not(target_family = "wasm"))]
-pub(crate) type MaybeSendBox<'a, T> = futures::future::BoxFuture<'a, T>;
+pub(crate) type MaybeSendBox<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[cfg(target_family = "wasm")]
-pub(crate) type MaybeSendBox<'a, T> = futures::future::LocalBoxFuture<'a, T>;
+pub(crate) type MaybeSendBox<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
+/// A boxed [`kio::Tasks`] task: hand-rolled machines and adapted futures alike.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) type MaybeSendTask = Box<dyn FnMut(&kio::Waiter) -> Poll<()> + Send>;
+#[cfg(target_family = "wasm")]
+pub(crate) type MaybeSendTask = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;
 
 #[cfg(not(target_family = "wasm"))]
 pub(crate) trait MaybeBoxedExt<'a>: Future + Send + Sized + 'a {
 	fn maybe_boxed(self) -> MaybeSendBox<'a, Self::Output> {
-		self.boxed()
+		Box::pin(self)
 	}
 }
 #[cfg(not(target_family = "wasm"))]
@@ -26,11 +30,27 @@ impl<'a, F: Future + Send + 'a> MaybeBoxedExt<'a> for F {}
 #[cfg(target_family = "wasm")]
 pub(crate) trait MaybeBoxedExt<'a>: Future + Sized + 'a {
 	fn maybe_boxed(self) -> MaybeSendBox<'a, Self::Output> {
-		self.boxed_local()
+		Box::pin(self)
 	}
 }
 #[cfg(target_family = "wasm")]
 impl<'a, F: Future + 'a> MaybeBoxedExt<'a> for F {}
+
+/// Box a poll closure into a [`MaybeSendTask`], for pushing a hand-rolled
+/// machine into a [`kio::Tasks`] stored behind the type-erased alias.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn poll_task(task: impl FnMut(&kio::Waiter) -> Poll<()> + Send + 'static) -> MaybeSendTask {
+	Box::new(task)
+}
+#[cfg(target_family = "wasm")]
+pub(crate) fn poll_task(task: impl FnMut(&kio::Waiter) -> Poll<()> + 'static) -> MaybeSendTask {
+	Box::new(task)
+}
+
+/// Adapt a boxed future into a [`kio::Tasks`] task.
+fn future_task(mut task: MaybeSendBox<'static, ()>) -> MaybeSendTask {
+	Box::new(move |waiter| waiter.poll_future(task.as_mut()))
+}
 
 /// Resolve with the error of a fallible future, parking forever on success.
 ///
@@ -44,9 +64,23 @@ pub(crate) async fn err_only<E>(fut: impl Future<Output = Result<(), E>>) -> E {
 }
 
 /// Cloneable handle for submitting futures to a driver-owned [`TaskSet`].
-#[derive(Clone)]
 pub(crate) struct Tasks {
-	tx: mpsc::UnboundedSender<MaybeSendBox<'static, ()>>,
+	state: kio::Shared<Submissions>,
+}
+
+/// The submission queue between [`Tasks`] handles and their [`TaskSet`],
+/// following kio's convention for [`kio::Shared`] liveness: the handle count
+/// and the set's closure are plain fields maintained under the same lock that
+/// queues the work.
+#[derive(Default)]
+struct Submissions {
+	queued: VecDeque<MaybeSendBox<'static, ()>>,
+	/// Live [`Tasks`] handles; the set finishes once this reaches zero and the
+	/// remaining work drains.
+	senders: usize,
+	/// The set dropped: submissions are discarded, as the driver that would
+	/// have polled them has torn down.
+	closed: bool,
 }
 
 impl Tasks {
@@ -55,29 +89,54 @@ impl Tasks {
 	/// A task submitted after the set is gone is dropped: the driver has torn down,
 	/// so the task would have been cancelled anyway.
 	pub fn push(&self, task: impl MaybeBoxedExt<'static, Output = ()>) {
-		let _ = self.tx.unbounded_send(task.maybe_boxed());
+		let mut state = self.state.lock();
+		if !state.closed {
+			state.queued.push_back(task.maybe_boxed());
+		}
 	}
 }
 
-/// A dynamic set of child futures polled by its parent driver.
+impl Clone for Tasks {
+	fn clone(&self) -> Self {
+		self.state.lock().senders += 1;
+		Self {
+			state: self.state.clone(),
+		}
+	}
+}
+
+impl Drop for Tasks {
+	fn drop(&mut self) {
+		// The mutation wakes a parked set, which may be what lets it finish.
+		self.state.lock().senders -= 1;
+	}
+}
+
+/// A dynamic set of child tasks polled by its parent driver, built on
+/// [`kio::Tasks`] (per-child wakeups, drop cancels).
 ///
 /// Unlike an executor spawn, dropping this value cancels every queued and active
 /// child. [`Tasks`] handles may be cloned into those children so nested protocol
 /// state can submit more work without choosing an async runtime.
 pub(crate) struct TaskSet {
-	rx: mpsc::UnboundedReceiver<MaybeSendBox<'static, ()>>,
-	active: FuturesUnordered<MaybeSendBox<'static, ()>>,
+	state: kio::Shared<Submissions>,
+	active: kio::Tasks<MaybeSendTask>,
 }
 
 impl TaskSet {
-	/// Create a task submission handle and its driver-owned receiver.
+	/// Create a task submission handle and its driver-owned set.
 	pub fn new() -> (Tasks, Self) {
-		let (tx, rx) = mpsc::unbounded();
+		let state = kio::Shared::new(Submissions {
+			queued: VecDeque::new(),
+			senders: 1,
+			closed: false,
+		});
+		let tasks = Tasks { state: state.clone() };
 		(
-			Tasks { tx },
+			tasks,
 			Self {
-				rx,
-				active: FuturesUnordered::new(),
+				state,
+				active: kio::Tasks::new(),
 			},
 		)
 	}
@@ -85,42 +144,48 @@ impl TaskSet {
 	/// Create a set that only its owner can push to, for a loop that accepts streams
 	/// and serves each one as a child.
 	pub fn owned() -> Self {
-		let (_, set) = Self::new();
-		set
+		Self {
+			state: kio::Shared::default(),
+			active: kio::Tasks::new(),
+		}
 	}
 
 	/// Queue a future for polling by this set.
 	pub fn push(&mut self, task: impl MaybeBoxedExt<'static, Output = ()>) {
-		self.active.push(task.maybe_boxed());
+		self.active.push(future_task(task.maybe_boxed()));
 	}
 
-	/// Poll every queued submission into the active set, then poll the children.
+	/// Adopt every queued submission into the active set, then poll the children.
 	///
 	/// `Ready` once every submission handle is dropped and all children finish;
 	/// an owner-only set ([`Self::owned`]) reaches it when its children drain.
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
-
+		// Adopt submissions until the queue reports Pending, which is what
+		// registers `waiter` on it. The registration must land before the
+		// children run below: a child pushing through a `Tasks` clone mid-pass
+		// wakes whoever is registered, and without it that push would be lost.
 		let mut submissions_done = false;
-		loop {
-			match self.rx.poll_next_unpin(&mut cx) {
-				Poll::Ready(Some(task)) => self.active.push(task),
-				Poll::Ready(None) => {
-					submissions_done = true;
-					break;
-				}
-				Poll::Pending => break,
+		while let Poll::Ready(mut state) = self.state.poll(waiter, |state| {
+			if state.queued.is_empty() && state.senders > 0 {
+				Poll::Pending
+			} else {
+				Poll::Ready(())
+			}
+		}) {
+			while let Some(task) = state.queued.pop_front() {
+				self.active.push(future_task(task));
+			}
+			// No handles left: nothing can ever submit again, so no
+			// registration is needed.
+			if state.senders == 0 {
+				submissions_done = true;
+				break;
 			}
 		}
 
-		// Finished children just drop; `Ready(None)` means the set is empty, which
-		// only ends the poll once no new submissions can arrive.
-		loop {
-			match self.active.poll_next_unpin(&mut cx) {
-				Poll::Ready(Some(())) => {}
-				Poll::Ready(None) if submissions_done => return Poll::Ready(()),
-				Poll::Ready(None) | Poll::Pending => return Poll::Pending,
-			}
+		match self.active.poll(waiter) {
+			Poll::Ready(()) if submissions_done => Poll::Ready(()),
+			_ => Poll::Pending,
 		}
 	}
 
@@ -148,6 +213,20 @@ impl TaskSet {
 	#[cfg(test)]
 	pub async fn run(mut self) {
 		kio::wait(|waiter| self.poll(waiter)).await
+	}
+}
+
+impl Drop for TaskSet {
+	fn drop(&mut self) {
+		// Refuse and discard submissions; the running children drop with the set.
+		// The queue is taken out and dropped after the lock releases: a queued
+		// future may itself hold a `Tasks` clone, whose Drop takes this lock.
+		let queued = {
+			let mut state = self.state.lock();
+			state.closed = true;
+			std::mem::take(&mut state.queued)
+		};
+		drop(queued);
 	}
 }
 

@@ -6,7 +6,7 @@ use std::{
 	time::Duration,
 };
 
-use crate::poll_set::{Machine, PollSet};
+use crate::util::poll_task;
 
 use crate::{
 	AsPath, Error, Path, PathOwned, Timescale, Timestamp, bandwidth,
@@ -469,7 +469,7 @@ pub(super) struct SubscriberDriver<S: crate::transport::poll::Session> {
 	/// Datagram receive; inert on a version or transport without datagrams.
 	datagrams: Option<DatagramRecv<S>>,
 	/// One machine per announced source, serving the origin's track requests.
-	sources: PollSet<SourceServe<S>>,
+	sources: kio::Tasks<crate::util::MaybeSendTask>,
 }
 
 impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
@@ -488,7 +488,7 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 			uni: UniAccept::new(subscriber.clone()),
 			bandwidth: Some(RecvBandwidth::new(subscriber.clone())),
 			datagrams: Some(DatagramRecv::new(subscriber.clone())),
-			sources: PollSet::new(),
+			sources: kio::Tasks::new(),
 			subscriber,
 		}
 	}
@@ -525,8 +525,8 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 		// Sources created by the announce half; their completion never ends the
 		// session (the origin delivers the unannounce itself).
 		while let Poll::Ready(Ok((path, dynamic))) = self.subscriber.sources.poll_pop(waiter) {
-			self.sources
-				.push(SourceServe::new(self.subscriber.clone(), path, dynamic));
+			let mut serve = SourceServe::new(self.subscriber.clone(), path, dynamic);
+			self.sources.push(poll_task(move |waiter| serve.poll(waiter)));
 		}
 		let _ = self.sources.poll(waiter);
 
@@ -540,7 +540,7 @@ struct UniAccept<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	// A dedicated accept handle: the poll interface takes `&mut self`.
 	accept: S,
-	children: PollSet<UniServe<S>>,
+	children: kio::Tasks<crate::util::MaybeSendTask>,
 }
 
 impl<S: crate::transport::poll::Session> UniAccept<S> {
@@ -549,7 +549,7 @@ impl<S: crate::transport::poll::Session> UniAccept<S> {
 		Self {
 			subscriber,
 			accept,
-			children: PollSet::new(),
+			children: kio::Tasks::new(),
 		}
 	}
 
@@ -559,12 +559,15 @@ impl<S: crate::transport::poll::Session> UniAccept<S> {
 		let mut cx = std::task::Context::from_waker(waiter.waker());
 		loop {
 			match self.accept.poll_accept_uni(&mut cx) {
-				Poll::Ready(Ok(stream)) => self.children.push(UniServe {
-					subscriber: self.subscriber.clone(),
-					state: UniState::Start {
-						reader: Reader::new(stream, self.subscriber.version),
-					},
-				}),
+				Poll::Ready(Ok(stream)) => {
+					let mut child = UniServe {
+						subscriber: self.subscriber.clone(),
+						state: UniState::Start {
+							reader: Reader::new(stream, self.subscriber.version),
+						},
+					};
+					self.children.push(poll_task(move |waiter| child.poll(waiter)));
+				}
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(Error::from_transport(err))),
 				Poll::Pending => break,
 			}
@@ -599,7 +602,7 @@ enum UniState<S: crate::transport::poll::Session> {
 	Done,
 }
 
-impl<S: crate::transport::poll::Session> Machine for UniServe<S> {
+impl<S: crate::transport::poll::Session> UniServe<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		if let Err(err) = ready!(self.poll_serve(waiter)) {
 			tracing::debug!(%err, "error running uni stream");
@@ -1246,7 +1249,7 @@ struct SourceServe<S: crate::transport::poll::Session> {
 	dynamic: crate::broadcast::Dynamic,
 	// A dedicated close-watch handle, since each pending operation needs its own.
 	closed: S,
-	tracks: PollSet<TrackServeRun<S>>,
+	tracks: kio::Tasks<crate::util::MaybeSendTask>,
 }
 
 impl<S: crate::transport::poll::Session> SourceServe<S> {
@@ -1257,12 +1260,12 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {
 			path,
 			dynamic,
 			closed,
-			tracks: PollSet::new(),
+			tracks: kio::Tasks::new(),
 		}
 	}
 }
 
-impl<S: crate::transport::poll::Session> Machine for SourceServe<S> {
+impl<S: crate::transport::poll::Session> SourceServe<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let _ = self.tracks.poll(waiter);
 
@@ -1288,7 +1291,8 @@ impl<S: crate::transport::poll::Session> Machine for SourceServe<S> {
 					};
 					// One machine per track serves its lone subscription and any number
 					// of fetches concurrently.
-					self.tracks.push(TrackServeRun::new(serve, request));
+					let mut run = TrackServeRun::new(serve, request);
+					self.tracks.push(poll_task(move |waiter| run.poll(waiter)));
 				}
 				// The source was finished (unannounced) or aborted.
 				Poll::Ready(Err(err)) => {
@@ -2536,7 +2540,7 @@ impl<S: crate::transport::poll::Session> TrackServeRun<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> Machine for TrackServeRun<S> {
+impl<S: crate::transport::poll::Session> TrackServeRun<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
 			match &mut self.state {
@@ -2685,7 +2689,7 @@ struct ServeLoop<S: crate::transport::poll::Session> {
 	/// Serve on-demand fetches of uncached groups from this session.
 	dynamic: track::Dynamic,
 	sub: Sub<S>,
-	fetches: PollSet<FetchServeRun<S>>,
+	fetches: kio::Tasks<crate::util::MaybeSendTask>,
 	// A dedicated close-watch handle for the session-died arm.
 	closed: S,
 	// SUBSCRIBE_UPDATE only exists on Lite03+, so older peers can't carry a
@@ -2715,7 +2719,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 			serving,
 			dynamic,
 			sub: Sub::None,
-			fetches: PollSet::new(),
+			fetches: kio::Tasks::new(),
 			closed: serve.subscriber.session.clone(),
 			supports_update: !matches!(serve.subscriber.version, Version::Lite01 | Version::Lite02),
 			supports_fetch: serve.subscriber.version.has_track_stream(),
@@ -2769,8 +2773,8 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					match self.dynamic.poll_requested_group(waiter) {
 						Poll::Ready(Ok(req)) => {
 							if self.supports_fetch {
-								self.fetches
-									.push(FetchServeRun::new(serve.clone(), req, self.timescale));
+								let mut run = FetchServeRun::new(serve.clone(), req, self.timescale);
+								self.fetches.push(poll_task(move |waiter| run.poll(waiter)));
 							} else {
 								req.reject(Error::Version);
 							}
@@ -2934,7 +2938,7 @@ impl<S: crate::transport::poll::Session> FetchServeRun<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> Machine for FetchServeRun<S> {
+impl<S: crate::transport::poll::Session> FetchServeRun<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let mut cx = std::task::Context::from_waker(waiter.waker());
 		loop {
