@@ -56,15 +56,22 @@ pub(crate) struct Legacy {
 }
 
 impl Config {
-	/// Fold the released spelling into the canonical field. Idempotent.
+	/// One warning line if the released spelling is in use.
+	///
+	/// Collected rather than logged so the caller picks the moment; see
+	/// [`crate::listen::Config::deprecations`].
+	pub(crate) fn deprecations(&self) -> Vec<String> {
+		match self.bind.is_none() && self.legacy.bind.is_some() {
+			true => vec!["--server-tcp-bind is deprecated; use --listen-tcp-bind".to_string()],
+			false => Vec::new(),
+		}
+	}
+
+	/// Fold the released spelling into the canonical field. Idempotent and silent;
+	/// [`crate::listen::Config::deprecations`] reports what contributed.
 	pub fn resolved(&self) -> Self {
 		let mut resolved = self.clone();
-		if self.bind.is_none()
-			&& let Some(bind) = self.legacy.bind
-		{
-			tracing::warn!("--server-tcp-bind is deprecated; use --listen-tcp-bind");
-			resolved.bind = Some(bind);
-		}
+		resolved.bind = self.bind.or(self.legacy.bind);
 		resolved.legacy = Legacy::default();
 		resolved
 	}

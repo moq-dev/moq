@@ -182,6 +182,10 @@ async fn main() -> anyhow::Result<()> {
 
 	let cli = Invocation::parse();
 	cli.log.init()?;
+	// Parsing folded the deprecated spellings in but had nowhere to report them yet.
+	for deprecation in &cli.deprecations {
+		tracing::warn!("{deprecation}");
+	}
 	cli.validate()?;
 
 	// The local verbs never touch the network, so answer them before binding any

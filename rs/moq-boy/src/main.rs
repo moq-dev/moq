@@ -82,6 +82,21 @@ pub struct Config {
 	pub log: moq_tokio::Log,
 }
 
+impl Config {
+	/// Fold every deprecated spelling into its canonical field, reporting each once.
+	///
+	/// Called right after `Log::init` and before anything reads the config, so a
+	/// released `--client-*` spelling reaches the dial instead of being parsed and
+	/// dropped. The folds are silent, hence the separate report.
+	fn resolve(&mut self) {
+		for deprecation in self.client.deprecations().into_iter().chain(self.quic.deprecations()) {
+			tracing::warn!("{deprecation}");
+		}
+		self.client = self.client.resolved();
+		self.quic = self.quic.resolved();
+	}
+}
+
 /// Shared state for a game session, accessible from multiple threads/tasks.
 ///
 /// Everything here is either atomic, behind a mutex, or immutable —
@@ -446,8 +461,9 @@ fn run_emulator(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-	let config = Config::parse();
+	let mut config = Config::parse();
 	config.log.init()?;
+	config.resolve();
 
 	#[cfg(feature = "jemalloc")]
 	let jemalloc = moq_tokio::jemalloc::run();
@@ -485,7 +501,7 @@ mod tests {
 	/// binary's flag surface rather than the two staying in sync.
 	#[test]
 	fn matches_demo_invocation() {
-		let config = Config::try_parse_from([
+		let mut config = Config::try_parse_from([
 			"moq-boy",
 			"--client-connect",
 			"http://localhost:4443",
@@ -496,11 +512,12 @@ mod tests {
 		])
 		.expect("demo/boy/justfile invocation should parse");
 
-		let connect = config
-			.client
-			.resolved()
-			.url
-			.expect("the connect URL should reach the dial config");
+		// Through the same fold `main` runs, not a `resolved()` of its own: `run`
+		// reads `client.url` as a plain field, so a test that folds on its way to the
+		// assertion would pass while the binary dialed nothing.
+		config.resolve();
+
+		let connect = config.client.url.expect("the connect URL should reach the dial config");
 		assert_eq!(connect.scheme(), "http");
 		assert_eq!(connect.host_str(), Some("localhost"));
 		assert_eq!(connect.port(), Some(4443));

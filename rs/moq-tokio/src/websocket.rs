@@ -142,21 +142,27 @@ pub(crate) struct Legacy {
 const DEFAULT_DELAY: time::Duration = time::Duration::from_millis(200);
 
 impl Config {
-	/// Fold the released env vars into the canonical fields. Idempotent.
+	/// One warning line per released spelling in use.
+	///
+	/// Collected rather than logged so the caller picks the moment; see
+	/// [`crate::connect::Config::deprecations`].
+	pub(crate) fn deprecations(&self) -> Vec<String> {
+		let mut messages = Vec::new();
+		if self.enabled.is_none() && self.legacy.enabled.is_some() {
+			messages.push("--websocket-enabled is deprecated; use --connect-websocket-enabled".to_string());
+		}
+		if self.delay.is_none() && self.legacy.delay.is_some() {
+			messages.push("--websocket-delay is deprecated; use --connect-websocket-delay".to_string());
+		}
+		messages
+	}
+
+	/// Fold the released env vars into the canonical fields. Idempotent and silent;
+	/// [`crate::connect::Config::deprecations`] reports what contributed.
 	pub fn resolved(&self) -> Self {
 		let mut resolved = self.clone();
-		if self.enabled.is_none()
-			&& let Some(enabled) = self.legacy.enabled
-		{
-			tracing::warn!("--websocket-enabled is deprecated; use --connect-websocket-enabled");
-			resolved.enabled = Some(enabled);
-		}
-		if self.delay.is_none()
-			&& let Some(delay) = self.legacy.delay
-		{
-			tracing::warn!("--websocket-delay is deprecated; use --connect-websocket-delay");
-			resolved.delay = Some(delay);
-		}
+		resolved.enabled = self.enabled.or(self.legacy.enabled);
+		resolved.delay = self.delay.or(self.legacy.delay);
 		resolved.legacy = Legacy::default();
 		resolved
 	}

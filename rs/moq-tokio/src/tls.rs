@@ -552,9 +552,13 @@ pub(crate) enum Verification {
 }
 
 impl Connect {
-	/// Log a warning for each deprecated `--tls-*` flag in use. Called once from
-	/// [`Self::verification`], which every backend runs, so a deprecated flag warns once.
-	pub(crate) fn warn_deprecated(&self) {
+	/// One warning line per deprecated `--tls-*` flag in use.
+	///
+	/// Collected rather than logged so the caller picks the moment: a binary folds
+	/// while parsing, before it has a subscriber to warn to, and emits these once
+	/// logging is up. Reached through [`crate::connect::Config::deprecations`].
+	pub(crate) fn deprecations(&self) -> Vec<String> {
+		let mut messages = Vec::new();
 		for (used, deprecated, canonical) in [
 			(!self.deprecated.root.is_empty(), "--tls-root", "--connect-tls-root"),
 			(
@@ -609,9 +613,10 @@ impl Connect {
 			),
 		] {
 			if used {
-				tracing::warn!("{deprecated} is deprecated; use {canonical}");
+				messages.push(format!("{deprecated} is deprecated; use {canonical}"));
 			}
 		}
+		messages
 	}
 
 	/// Roots from the canonical field plus the released spellings it replaced.
@@ -662,13 +667,12 @@ impl Connect {
 			.or_else(|| self.deprecated.client_host_name.clone())
 	}
 
-	/// Fold every released spelling into the canonical fields, warning once for each.
+	/// Fold every released spelling into the canonical fields.
 	///
 	/// Applied by [`crate::connect::Config::resolved`], so the backends read plain
-	/// fields and can't each forget a fold. Idempotent.
+	/// fields and can't each forget a fold. Idempotent and silent;
+	/// [`crate::connect::Config::deprecations`] reports what contributed.
 	pub fn resolved(&self) -> Self {
-		self.warn_deprecated();
-
 		let (cert, key) = self.effective_identity();
 		Self {
 			root: self.effective_root(),
@@ -699,8 +703,6 @@ impl Connect {
 	/// `insecure` by adding a fingerprint would otherwise still accept every
 	/// certificate, with the UI showing the pin as configured.
 	pub(crate) fn verification(&self) -> Result<Verification> {
-		self.warn_deprecated();
-
 		let fingerprints = self.fingerprints()?;
 		let roots = self.effective_root();
 		let system_roots = self.effective_system_roots();
@@ -1046,12 +1048,13 @@ pub(crate) struct ListenDeprecated {
 }
 
 impl Listen {
-	/// Fold every released `--server-tls-*` spelling into the canonical fields.
+	/// One warning line per deprecated `--tls-*` / `--server-tls-*` flag in use.
 	///
-	/// Applied by [`crate::listen::Config::resolved`]. Lists concatenate, since each
-	/// spelling names its own files and dropping one would stop serving (or trusting)
-	/// a certificate. Idempotent.
-	pub fn resolved(&self) -> Self {
+	/// Collected rather than logged, for the reason in
+	/// [`Connect::deprecations`]. Reached through
+	/// [`crate::listen::Config::deprecations`].
+	pub(crate) fn deprecations(&self) -> Vec<String> {
+		let mut messages = Vec::new();
 		for (used, deprecated, canonical) in [
 			(!self.deprecated.cert.is_empty(), "--tls-cert", "--listen-tls-cert"),
 			(!self.deprecated.key.is_empty(), "--tls-key", "--listen-tls-key"),
@@ -1067,10 +1070,19 @@ impl Listen {
 			),
 		] {
 			if used {
-				tracing::warn!("{deprecated} is deprecated; use {canonical}");
+				messages.push(format!("{deprecated} is deprecated; use {canonical}"));
 			}
 		}
+		messages
+	}
 
+	/// Fold every released `--server-tls-*` spelling into the canonical fields.
+	///
+	/// Applied by [`crate::listen::Config::resolved`]. Lists concatenate, since each
+	/// spelling names its own files and dropping one would stop serving (or trusting)
+	/// a certificate. Idempotent and silent;
+	/// [`crate::listen::Config::deprecations`] reports what contributed.
+	pub fn resolved(&self) -> Self {
 		let concat = |canonical: &[PathBuf], legacy: &[PathBuf]| -> Vec<PathBuf> {
 			canonical.iter().chain(legacy).cloned().collect()
 		};

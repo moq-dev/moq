@@ -140,6 +140,19 @@ impl Config {
 	/// filling in [`crate::DEFAULT_MAX_STREAMS`] first would give the fold a canonical
 	/// value to prefer, silently discarding what the deployment asked for.
 	pub(crate) fn resolve(&mut self) {
+		// Reported here rather than from the folds themselves, which are silent so
+		// they can run anywhere. This is the one call, and `Config::load` has already
+		// brought logging up.
+		for deprecation in self
+			.quic
+			.deprecations()
+			.into_iter()
+			.chain(self.listen.deprecations())
+			.chain(self.connect.deprecations())
+		{
+			tracing::warn!("{deprecation}");
+		}
+
 		// The released config file spelled this per role, under `[client.quic]` and
 		// `[server.quic]`. Both now feed the one shared section, as the lowest
 		// precedence source: a flag or env var has to outrank a config file, so the

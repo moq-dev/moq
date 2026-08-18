@@ -491,7 +491,8 @@ pub struct Config {
 	pub websocket: crate::websocket::Config,
 
 	/// The released `--client-*` spellings and their env vars, kept parsing but
-	/// hidden. Folded into the canonical fields by [`Config::resolved`].
+	/// hidden. Folded into the canonical fields by [`Config::resolved`], which
+	/// clears them, so [`Config::deprecations`] has to be read first.
 	#[command(flatten)]
 	#[serde(skip)]
 	pub(crate) legacy: Legacy,
@@ -504,19 +505,34 @@ pub struct Config {
 }
 
 impl Config {
-	/// Fold every released `--client-*` spelling into the canonical fields.
+	/// One warning line per released spelling in use, across this section and the
+	/// TLS and WebSocket ones it owns.
 	///
-	/// The canonical spelling wins. Warns once when a legacy spelling contributed.
-	/// Idempotent, and applied automatically by [`init`](Self::init), so calling it
-	/// yourself is only needed to inspect the folded values.
-	pub fn resolved(&self) -> Self {
+	/// Collected rather than logged, and separate from [`resolved`](Self::resolved),
+	/// so the fold stays a pure transform a caller can apply the moment it parses,
+	/// before it has a subscriber to warn to. Read these off the config as parsed:
+	/// the fold clears what they are derived from.
+	pub fn deprecations(&self) -> Vec<String> {
 		let used = self.legacy.used();
-		if !used.is_empty() {
-			tracing::warn!(
+		let mut messages = match used.is_empty() {
+			true => Vec::new(),
+			false => vec![format!(
 				"deprecated --client-* flags in use; the dial side is now --connect-*: {}",
 				used.join(", ")
-			);
-		}
+			)],
+		};
+		messages.extend(self.tls.deprecations());
+		#[cfg(feature = "websocket")]
+		messages.extend(self.websocket.deprecations());
+		messages
+	}
+
+	/// Fold every released `--client-*` spelling into the canonical fields.
+	///
+	/// The canonical spelling wins. Idempotent and silent, and applied automatically
+	/// by [`init`](Self::init), so calling it yourself is only needed to inspect the
+	/// folded values. [`deprecations`](Self::deprecations) reports what contributed.
+	pub fn resolved(&self) -> Self {
 		let legacy = &self.legacy;
 
 		let mut resolved = self.clone();

@@ -343,23 +343,34 @@ impl Legacy {
 }
 
 impl Config {
+	/// One warning line if any legacy role-prefixed spelling is in use.
+	///
+	/// Collected rather than logged, and separate from [`resolved`](Self::resolved),
+	/// so the fold stays a pure transform a caller can apply the moment it parses,
+	/// before it has a subscriber to warn to. Read these off the config as parsed:
+	/// the fold clears what they are derived from.
+	pub fn deprecations(&self) -> Vec<String> {
+		let used = self.legacy.used();
+		match used.is_empty() {
+			true => Vec::new(),
+			// Name the consequence, not just the rename: these knobs used to apply to
+			// one direction, so a value that only ever bounded outbound connections
+			// now bounds accepted ones too.
+			false => vec![format!(
+				"deprecated --client-quic-*/--server-quic-* flags in use; QUIC tuning is now one shared section applied to dialed and accepted connections alike, so these values now apply to both directions: {}",
+				used.join(", ")
+			)],
+		}
+	}
+
 	/// Fold the legacy role-prefixed spellings into the canonical fields.
 	///
 	/// The canonical spelling wins; between the legacy pair, the client spelling
 	/// wins (the roles now share one value, so a config that set both to
 	/// different values was relying on a distinction that no longer exists).
-	/// Warns once when any legacy spelling contributed. Idempotent.
+	/// Idempotent, and silent: [`deprecations`](Self::deprecations) reports what
+	/// contributed.
 	pub fn resolved(&self) -> Self {
-		let used = self.legacy.used();
-		if !used.is_empty() {
-			// Name the consequence, not just the rename: these knobs used to apply to
-			// one direction, so a value that only ever bounded outbound connections
-			// now bounds accepted ones too.
-			tracing::warn!(
-				"deprecated --client-quic-*/--server-quic-* flags in use; QUIC tuning is now one shared section applied to dialed and accepted connections alike, so these values now apply to both directions: {}",
-				used.join(", ")
-			);
-		}
 		let legacy = &self.legacy;
 		Self {
 			max_streams: self
@@ -421,23 +432,29 @@ impl Config {
 	}
 
 	/// The per-connection knobs with defaults applied, ready to hand to a backend.
+	///
+	/// Folds first, so a caller handing over a freshly parsed config can't lose the
+	/// legacy spellings. Every backend reads the knobs through here, which makes this
+	/// the one place the fold has to happen for all of them.
 	pub fn resolve(&self) -> Resolved {
+		let this = self.resolved();
+
 		// A zero keep-alive means "disabled"; anything else (including unset) keeps
 		// the connection warm, defaulting to 5s.
-		let keep_alive = match self.keep_alive {
+		let keep_alive = match this.keep_alive {
 			Some(d) if d.is_zero() => None,
 			Some(d) => Some(d),
 			None => Some(DEFAULT_KEEP_ALIVE),
 		};
 
 		Resolved {
-			max_streams: self.max_streams.unwrap_or(DEFAULT_MAX_STREAMS),
-			gso: self.gso,
-			idle_timeout: self.idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT),
+			max_streams: this.max_streams.unwrap_or(DEFAULT_MAX_STREAMS),
+			gso: this.gso,
+			idle_timeout: this.idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT),
 			keep_alive,
-			mtu_discovery: self.mtu_discovery.unwrap_or(false),
-			congestion_control: self.congestion_control,
-			qlog: self.qlog.clone(),
+			mtu_discovery: this.mtu_discovery.unwrap_or(false),
+			congestion_control: this.congestion_control,
+			qlog: this.qlog.clone(),
 		}
 	}
 }
@@ -530,6 +547,16 @@ mod tests {
 		let mut full = vec!["test"];
 		full.extend_from_slice(args);
 		Cli::parse_from(full).quic
+	}
+
+	/// Every backend reads the knobs through `resolve`, so the fold has to happen
+	/// there: `--client-quic-gso=false` reached `iroh::EndpointConfig::bind` as "GSO
+	/// on" while the flag itself parsed and warned about the rename.
+	#[test]
+	fn resolve_folds_the_released_spellings() {
+		let quic = parse(&["--client-quic-gso=false", "--server-quic-max-streams", "4096"]).resolve();
+		assert_eq!(quic.gso, Some(false));
+		assert_eq!(quic.max_streams, 4096);
 	}
 
 	#[test]

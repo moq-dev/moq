@@ -78,8 +78,14 @@ pub struct Invocation {
 	/// Logging configuration.
 	pub log: moq_tokio::Log,
 
-	/// The MoQ attachment, shared by every stage.
+	/// The MoQ attachment, shared by every stage. Already folded, so every read of
+	/// it sees what a deprecated spelling asked for.
 	pub moq: MoqSide,
+
+	/// One line per deprecated spelling the invocation used, for the caller to log
+	/// once [`log`](Self::log) is initialized. The fold clears what these are
+	/// derived from, so they are collected while parsing.
+	pub deprecations: Vec<String>,
 
 	/// The stages, in the order given. Never empty.
 	pub stages: Vec<Command>,
@@ -105,7 +111,14 @@ impl Invocation {
 
 		// `split` always yields at least one chunk, even for an empty argv; clap then
 		// reports the missing subcommand as usual.
-		let cli = Cli::try_parse_from(chunks.next().unwrap_or_default())?;
+		let mut cli = Cli::try_parse_from(chunks.next().unwrap_or_default())?;
+
+		// Fold here rather than at each read: a deprecated spelling lands on a hidden
+		// field, and every `--connect` / `--listen` / `--quic-*` read past this point
+		// would otherwise see the canonical field still unset. The warnings can't be
+		// logged yet (no subscriber until `Log::init`), so they ride along instead.
+		let deprecations = cli.moq.deprecations();
+		cli.moq.resolve();
 
 		let mut stages = vec![cli.command];
 		for chunk in chunks {
@@ -124,6 +137,7 @@ impl Invocation {
 		Ok(Self {
 			log: cli.log,
 			moq: cli.moq,
+			deprecations,
 			stages,
 		})
 	}
@@ -180,6 +194,10 @@ impl Invocation {
 /// The group is not `required`, because the local verbs (`token`, `devices`) run
 /// without a MoQ side. Every verb that does need one calls
 /// [`validate`](Self::validate).
+///
+/// The three transport sections are read as plain fields: [`Invocation`] folds
+/// every deprecated spelling into them while parsing, so nothing downstream has to
+/// remember to.
 #[derive(Args, Clone)]
 #[cfg_attr(
 	feature = "cluster-lan",
@@ -235,6 +253,25 @@ pub struct MoqSide {
 }
 
 impl MoqSide {
+	/// One line per deprecated spelling in use, across all three sections.
+	///
+	/// Read before [`resolve`](Self::resolve), which clears what they are derived
+	/// from.
+	fn deprecations(&self) -> Vec<String> {
+		let mut messages = self.client.deprecations();
+		messages.extend(self.quic.deprecations());
+		messages.extend(self.server.deprecations());
+		messages
+	}
+
+	/// Fold every deprecated spelling into its canonical field, so the rest of the
+	/// process reads plain values and can't each forget a fold.
+	fn resolve(&mut self) {
+		self.client = self.client.resolved();
+		self.quic = self.quic.resolved();
+		self.server = self.server.resolved();
+	}
+
 	/// Mint the origin all broadcasts route through: the pinned `--origin` id
 	/// when set, otherwise fresh and random.
 	pub fn origin(&self) -> anyhow::Result<moq_net::origin::Producer> {
@@ -260,7 +297,7 @@ impl MoqSide {
 	/// generated certificate. An explicit `--listen` or `--listen-tls-*` wins, which
 	/// is what puts the mesh on the same port and certificate as everything else.
 	pub fn server_config(&self) -> moq_tokio::listen::Config {
-		let mut config = self.server.resolved();
+		let mut config = self.server.clone();
 		if self.lan() {
 			config.bind.get_or_insert_with(|| "[::]:0".to_string());
 			if config.tls.generate.is_empty() && config.tls.cert.is_empty() {
@@ -280,14 +317,14 @@ impl MoqSide {
 	/// `devices` is exempt.
 	pub fn validate(&self) -> anyhow::Result<()> {
 		anyhow::ensure!(
-			self.client.resolved().url.is_some() || self.serves(),
+			self.client.url.is_some() || self.serves(),
 			"a MoQ side is required: pass --connect <url> to dial a relay, a --listen option to self-host, or --cluster-lan to mesh over the LAN"
 		);
 		#[cfg(feature = "cluster-lan")]
 		{
 			self.cluster.validate()?;
 			if self.lan() {
-				crate::cluster::validate_versions(&self.client.resolved(), &self.server_config())?;
+				crate::cluster::validate_versions(&self.client, &self.server_config())?;
 			}
 		}
 		Ok(())
@@ -306,14 +343,12 @@ impl MoqSide {
 		#[cfg(not(feature = "cluster-lan"))]
 		let cluster_secret = false;
 
-		// Read through the fold: a legacy `--client-connect` must be rejected here
-		// too, and it only lands in `url` once resolved.
-		let connect = self.client.resolved();
-		let listen = self.server.resolved();
+		// A legacy `--client-connect` must be rejected here too; the fold has already
+		// landed it in `url`.
 		let ignored = [
-			("--connect", connect.url.is_some()),
-			("--listen", listen.bind.is_some()),
-			("--listen-tcp-bind", listen.tcp.bind.is_some()),
+			("--connect", self.client.url.is_some()),
+			("--listen", self.server.bind.is_some()),
+			("--listen-tcp-bind", self.server.tcp.bind.is_some()),
 			("--cluster-lan", self.lan()),
 			("--cluster-lan-secret", cluster_secret),
 			("--broadcast", self.broadcast.is_some()),
@@ -321,9 +356,9 @@ impl MoqSide {
 		let ignored = ignored.into_iter().find(|(_, given)| *given).map(|(flag, _)| flag);
 		#[cfg(unix)]
 		let ignored = ignored
-			.or_else(|| listen.unix.bind.is_some().then_some("--listen-unix-bind"))
+			.or_else(|| self.server.unix.bind.is_some().then_some("--listen-unix-bind"))
 			.or_else(|| {
-				let allow = listen.unix.allow.as_ref()?;
+				let allow = self.server.unix.allow.as_ref()?;
 				[
 					("--listen-unix-allow-uid", !allow.uid.is_empty()),
 					("--listen-unix-allow-gid", !allow.gid.is_empty()),
@@ -604,6 +639,58 @@ mod tests {
 		assert!(cli.validate().is_ok());
 	}
 
+	/// A released spelling has to reach the field the process actually reads.
+	///
+	/// Parsing it and leaving the canonical field unset is worse than refusing it:
+	/// `--client-connect` left `--connect` unset, so the client warned about the
+	/// rename and then dialed nothing, without saying so.
+	#[test]
+	fn released_spellings_reach_the_canonical_fields() {
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--client-connect",
+			"http://relay/anon",
+			"--client-connect-timeout",
+			"9s",
+			"--client-tls-fingerprint",
+			"abcd1234",
+			"--client-quic-gso=false",
+			"--server-bind",
+			"[::]:4443",
+			"--server-tcp-bind",
+			"127.0.0.1:4444",
+			"export",
+			"ts",
+		])
+		.expect("parse");
+
+		assert_eq!(
+			cli.moq.client.url.map(String::from).as_deref(),
+			Some("http://relay/anon")
+		);
+		assert_eq!(cli.moq.client.timeout, Some(Duration::from_secs(9)));
+		assert_eq!(cli.moq.client.tls.fingerprint, ["abcd1234"]);
+		assert_eq!(cli.moq.quic.gso, Some(false));
+		assert_eq!(cli.moq.server.bind.as_deref(), Some("[::]:4443"));
+		assert_eq!(cli.moq.server.tcp.bind, Some("127.0.0.1:4444".parse().unwrap()));
+
+		// Every one of them is still reported, just from the caller rather than the
+		// fold, which runs before there is a subscriber to warn to.
+		let reported = cli.deprecations.join("\n");
+		for flag in [
+			"--client-connect",
+			"--client-connect-timeout",
+			"--client-tls-fingerprint",
+			// The QUIC section names the replacement rather than the old spelling,
+			// since both role prefixes fold into the same flag.
+			"--quic-gso",
+			"--server-bind",
+			"--server-tcp-bind",
+		] {
+			assert!(reported.contains(flag), "{flag} went unreported in {reported:?}");
+		}
+	}
+
 	#[test]
 	fn tcp_only_listener_is_a_moq_side() {
 		let cli =
@@ -841,8 +928,6 @@ mod tests {
 	#[cfg(feature = "capture")]
 	#[test]
 	fn an_adaptive_capture_must_be_the_only_import() {
-		// The canonical spellings: `validate` reads the folded fields, which the
-		// released `--client-*` aliases only reach through `resolved()`.
 		let client: &[&str] = &["--connect", "http://relay"];
 		let server: &[&str] = &["--listen", "[::]:4443"];
 
@@ -916,20 +1001,20 @@ mod tests {
 		// Unset rather than defaulted to hang's constant, so the publisher's own default is
 		// what every source falls back to. A `default_value` here would put the number in the
 		// CLI as well, and the two would drift.
-		let cli = Cli::try_parse_from(["moq", "import", "ts"]).unwrap();
-		let Command::Import(import) = cli.command else {
+		let cli = Invocation::try_parse_from(["moq", "import", "ts"]).unwrap();
+		let Command::Import(import) = &cli.stages[0] else {
 			panic!("expected import")
 		};
 		assert_eq!(import.latency_max, None);
 
 		// It sits on the parent `import`, so it parses ahead of any source, gateway or not.
-		let cli = Cli::try_parse_from(["moq", "import", "--latency-max", "5s", "ts"]).unwrap();
-		let Command::Import(import) = cli.command else {
+		let cli = Invocation::try_parse_from(["moq", "import", "--latency-max", "5s", "ts"]).unwrap();
+		let Command::Import(import) = &cli.stages[0] else {
 			panic!("expected import")
 		};
 		assert_eq!(import.latency_max, Some(std::time::Duration::from_secs(5)));
 
-		let cli = Cli::try_parse_from([
+		let cli = Invocation::try_parse_from([
 			"moq",
 			"import",
 			"--latency-max",
@@ -939,7 +1024,7 @@ mod tests {
 			"127.0.0.1:1935",
 		])
 		.unwrap();
-		let Command::Import(import) = cli.command else {
+		let Command::Import(import) = &cli.stages[0] else {
 			panic!("expected import")
 		};
 		assert_eq!(import.latency_max, Some(std::time::Duration::from_secs(5)));
@@ -947,8 +1032,8 @@ mod tests {
 
 	#[test]
 	fn token_verb() {
-		let cli = Cli::try_parse_from(["moq", "token", "generate", "--algorithm", "ES256"]).unwrap();
-		assert!(matches!(cli.command, Command::Token(_)));
+		let cli = Invocation::try_parse_from(["moq", "token", "generate", "--algorithm", "ES256"]).unwrap();
+		assert!(matches!(cli.stages[0], Command::Token(_)));
 		// Local verb: it needs no MoQ side, so what every other verb demands...
 		assert!(cli.moq.validate().is_err());
 		assert!(cli.moq.reject("token").is_ok());
@@ -962,7 +1047,7 @@ mod tests {
 			("--listen-tcp-bind", "127.0.0.1:0", "--listen-tcp-bind"),
 			("--broadcast", "room", "--broadcast"),
 		] {
-			let cli = Cli::try_parse_from(["moq", flag, value, "token", "generate"]).unwrap();
+			let cli = Invocation::try_parse_from(["moq", flag, value, "token", "generate"]).unwrap();
 			let err = cli.moq.reject("token").unwrap_err().to_string();
 			assert!(err.contains(reported), "{err}");
 		}
@@ -976,7 +1061,7 @@ mod tests {
 				("--listen-unix-allow-pid", "1000", "--listen-unix-allow-pid"),
 				("--server-unix-allow-uid", "1000", "--listen-unix-allow-uid"),
 			] {
-				let cli = Cli::try_parse_from(["moq", flag, value, "token", "generate"]).unwrap();
+				let cli = Invocation::try_parse_from(["moq", flag, value, "token", "generate"]).unwrap();
 				let err = cli.moq.reject("token").unwrap_err().to_string();
 				assert!(err.contains(reported), "{err}");
 			}
@@ -984,14 +1069,14 @@ mod tests {
 
 		#[cfg(feature = "cluster-lan")]
 		{
-			let cli = Cli::try_parse_from(["moq", "--cluster-lan", "token", "generate"]).unwrap();
+			let cli = Invocation::try_parse_from(["moq", "--cluster-lan", "token", "generate"]).unwrap();
 			let err = cli.moq.reject("token").unwrap_err().to_string();
 			assert!(err.contains("--cluster-lan"), "{err}");
 
 			// Clap considers the secret's `requires` satisfied when the boolean flag
 			// is explicitly present but false. The local verb still has to reject the
 			// otherwise silently ignored secret.
-			let cli = Cli::try_parse_from([
+			let cli = Invocation::try_parse_from([
 				"moq",
 				"--cluster-lan=false",
 				"--cluster-lan-secret",
@@ -1010,7 +1095,7 @@ mod tests {
 	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cluster_lan_is_a_moq_side_and_fills_in_a_listener() {
-		let cli = Cli::try_parse_from(["moq", "--cluster-lan", "import", "ts"]).expect("parse");
+		let cli = Invocation::try_parse_from(["moq", "--cluster-lan", "import", "ts"]).expect("parse");
 		assert!(cli.moq.lan());
 		assert!(cli.moq.validate().is_ok(), "the LAN mesh is a MoQ side on its own");
 
@@ -1020,7 +1105,7 @@ mod tests {
 
 		// An explicit listener wins, so the mesh shares one port and certificate
 		// with ordinary clients.
-		let cli = Cli::try_parse_from([
+		let cli = Invocation::try_parse_from([
 			"moq",
 			"--cluster-lan",
 			"--server-bind",
@@ -1036,7 +1121,7 @@ mod tests {
 		assert_eq!(server.tls.generate, ["localhost"]);
 
 		// Without the mesh, nothing is filled in.
-		let cli = Cli::try_parse_from(["moq", "--client-connect", "https://relay.example.com", "import", "ts"])
+		let cli = Invocation::try_parse_from(["moq", "--client-connect", "https://relay.example.com", "import", "ts"])
 			.expect("parse");
 		assert!(!cli.moq.lan());
 		assert_eq!(cli.moq.server_config().bind, None);
@@ -1047,7 +1132,7 @@ mod tests {
 	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cluster_lan_secret_requires_the_mesh() {
-		let err = Cli::try_parse_from(["moq", "--cluster-lan-secret", "cluster.key", "import", "ts"])
+		let err = Invocation::try_parse_from(["moq", "--cluster-lan-secret", "cluster.key", "import", "ts"])
 			.err()
 			.expect("the secret must require --cluster-lan")
 			.to_string();
@@ -1055,7 +1140,7 @@ mod tests {
 
 		// `--cluster-lan=false` satisfies clap's `requires` (the flag is present),
 		// so the real check lives in `validate`.
-		let cli = Cli::try_parse_from([
+		let cli = Invocation::try_parse_from([
 			"moq",
 			"--cluster-lan=false",
 			"--cluster-lan-secret",
@@ -1069,7 +1154,7 @@ mod tests {
 		let err = cli.moq.validate().unwrap_err().to_string();
 		assert!(err.contains("--cluster-lan=true"), "{err}");
 
-		let cli = Cli::try_parse_from([
+		let cli = Invocation::try_parse_from([
 			"moq",
 			"--cluster-lan",
 			"--cluster-lan-secret",
@@ -1094,13 +1179,13 @@ mod tests {
 			("--client-version", "--connect-version"),
 			("--server-version", "--listen-version"),
 		] {
-			let cli =
-				Cli::try_parse_from(["moq", "--cluster-lan", flag, "moq-lite-04", "import", "ts"]).expect("parse");
+			let cli = Invocation::try_parse_from(["moq", "--cluster-lan", flag, "moq-lite-04", "import", "ts"])
+				.expect("parse");
 			let err = cli.moq.validate().unwrap_err().to_string();
 			assert!(err.contains(reported), "{flag}: {err}");
 		}
 
-		let cli = Cli::try_parse_from([
+		let cli = Invocation::try_parse_from([
 			"moq",
 			"--cluster-lan",
 			"--client-version",
@@ -1119,7 +1204,7 @@ mod tests {
 	#[cfg(feature = "play")]
 	#[test]
 	fn play_verb() {
-		let cli = Cli::try_parse_from([
+		let cli = Invocation::try_parse_from([
 			"moq",
 			"--connect",
 			"https://relay.example.com/anon",
@@ -1130,7 +1215,7 @@ mod tests {
 			"hd",
 		])
 		.unwrap();
-		let Command::Play(play) = cli.command else {
+		let Command::Play(play) = &cli.stages[0] else {
 			panic!("expected play")
 		};
 		assert_eq!(play.latency_max, Duration::from_millis(500));
@@ -1146,7 +1231,7 @@ mod tests {
 	#[test]
 	fn play_rejects_undecodable_codecs() {
 		for flag in [["--video-codec", "vp9"], ["--audio-codec", "aac"]] {
-			let cli = Cli::try_parse_from([
+			let cli = Invocation::try_parse_from([
 				"moq",
 				"--connect",
 				"https://relay.example.com/anon",
@@ -1155,7 +1240,7 @@ mod tests {
 				flag[1],
 			])
 			.unwrap();
-			let Command::Play(play) = cli.command else {
+			let Command::Play(play) = &cli.stages[0] else {
 				panic!("expected play")
 			};
 			let err = play.validate().unwrap_err().to_string();

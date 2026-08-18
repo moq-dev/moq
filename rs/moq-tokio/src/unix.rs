@@ -88,10 +88,13 @@ pub(crate) struct Legacy {
 }
 
 impl Config {
-	/// Fold the released spellings into the canonical fields. Idempotent.
-	pub fn resolved(&self) -> Self {
+	/// One warning line per released spelling in use.
+	///
+	/// Collected rather than logged so the caller picks the moment; see
+	/// [`crate::listen::Config::deprecations`].
+	pub(crate) fn deprecations(&self) -> Vec<String> {
 		let legacy = &self.legacy;
-		let mut resolved = self.clone();
+		let mut messages = Vec::new();
 
 		for (used, deprecated, canonical) in [
 			(legacy.bind.is_some(), "--server-unix-bind", "--listen-unix-bind"),
@@ -112,9 +115,17 @@ impl Config {
 			),
 		] {
 			if used {
-				tracing::warn!("{deprecated} is deprecated; use {canonical}");
+				messages.push(format!("{deprecated} is deprecated; use {canonical}"));
 			}
 		}
+		messages
+	}
+
+	/// Fold the released spellings into the canonical fields. Idempotent and silent;
+	/// [`crate::listen::Config::deprecations`] reports what contributed.
+	pub fn resolved(&self) -> Self {
+		let legacy = &self.legacy;
+		let mut resolved = self.clone();
 
 		if resolved.bind.is_none() {
 			resolved.bind = legacy.bind.clone();

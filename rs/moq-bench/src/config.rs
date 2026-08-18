@@ -91,10 +91,24 @@ pub struct Config {
 impl Config {
 	/// Parse from CLI args, optionally merging a TOML file, then init the logger.
 	pub fn load() -> anyhow::Result<Self> {
-		let config = Self::parse_and_merge(std::env::args_os())?;
+		let mut config = Self::parse_and_merge(std::env::args_os())?;
 		config.log.init()?;
+		config.resolve();
 		tracing::trace!(?config, "final config");
 		Ok(config)
+	}
+
+	/// Fold every deprecated spelling into its canonical field, reporting each once.
+	///
+	/// Called right after `Log::init` and before anything reads the config, so a
+	/// released `--client-*` spelling reaches the dial instead of being parsed and
+	/// dropped. The folds are silent, hence the separate report.
+	pub(crate) fn resolve(&mut self) {
+		for deprecation in self.client.deprecations().into_iter().chain(self.quic.deprecations()) {
+			tracing::warn!("{deprecation}");
+		}
+		self.client = self.client.resolved();
+		self.quic = self.quic.resolved();
 	}
 
 	/// Merge order mirrors moq-relay: CLI args (including `--file`) -> TOML file
@@ -207,6 +221,20 @@ tls.insecure = true
 		// A zero report interval would panic `tokio::time::interval`; reject it early.
 		let err = Config::parse_and_merge(["moq-bench", "--report", "0s"]).unwrap_err();
 		assert!(err.to_string().contains("report"), "unexpected error: {err}");
+	}
+
+	/// `main` reads `client.url` as a plain field, so a released `--client-connect`
+	/// has to land there. Left unfolded it parses, warns about the rename, and then
+	/// fails the `--connect is required` check it just satisfied.
+	#[test]
+	fn released_connect_spelling_reaches_the_dial() {
+		let mut config =
+			Config::parse_and_merge(["moq-bench", "--client-connect", "https://relay.example.com"]).expect("parse");
+		config.resolve();
+		assert_eq!(
+			config.client.url.as_ref().map(ToString::to_string).as_deref(),
+			Some("https://relay.example.com/")
+		);
 	}
 
 	#[test]
