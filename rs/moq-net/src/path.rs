@@ -406,11 +406,15 @@ impl<'a> Path<'a> {
 
 	/// Express this path relative to `base`: the inverse of [`Path::resolve`].
 	///
-	/// The result always round-trips (`base.resolve(&target.relative_to(base)) == target`)
-	/// and never walks above the root, so [`Path::try_resolve`] accepts it too.
+	/// The result round-trips (`base.resolve(&rel) == self`) and never walks above the
+	/// root, so [`Path::try_resolve`] accepts it too.
 	///
 	/// A relative reference replaces the last segment of the base, matching relative URL
 	/// resolution, so a target nested under the base repeats the base's own last segment.
+	///
+	/// Returns `None` for a target no reference can name: a path segment may literally be
+	/// `.` or `..`, which resolution reads as navigation instead of as a name. Only the
+	/// segments past the shared prefix matter, since the rest are never emitted.
 	///
 	/// # Examples
 	/// ```
@@ -418,14 +422,17 @@ impl<'a> Path<'a> {
 	///
 	/// // The base names a broadcast, so its last segment is replaced, not descended into.
 	/// let base = Path::new("a/b");
-	/// assert_eq!(Path::new("a/b/c").relative_to(&base).as_str(), "b/c");
-	/// assert_eq!(Path::new("a/c").relative_to(&base).as_str(), "c");
-	/// assert_eq!(Path::new("c").relative_to(&base).as_str(), "../c");
+	/// assert_eq!(Path::new("a/b/c").relative_to(&base).unwrap().as_str(), "b/c");
+	/// assert_eq!(Path::new("a/c").relative_to(&base).unwrap().as_str(), "c");
+	/// assert_eq!(Path::new("c").relative_to(&base).unwrap().as_str(), "../c");
 	///
 	/// // The lone `.` names the base's parent, which the empty reference cannot.
-	/// assert_eq!(Path::new("a").relative_to(&base).as_str(), ".");
+	/// assert_eq!(Path::new("a").relative_to(&base).unwrap().as_str(), ".");
+	///
+	/// // A segment named `..` is a legal path component but an unnameable target.
+	/// assert!(Path::new("a/..").relative_to(&base).is_none());
 	/// ```
-	pub fn relative_to(&self, base: impl AsPath) -> PathRelativeOwned {
+	pub fn relative_to(&self, base: impl AsPath) -> Option<PathRelativeOwned> {
 		let base = base.as_path();
 
 		// Resolution replaces the base's last segment, so walk from its parent.
@@ -435,15 +442,21 @@ impl<'a> Path<'a> {
 		let target: Vec<&str> = self.parts().collect();
 		let common = dir.iter().zip(&target).take_while(|(a, b)| a == b).count();
 
+		let down = &target[common..];
+		if down.iter().any(|part| *part == "." || *part == "..") {
+			// Resolution would walk on these instead of naming them.
+			return None;
+		}
+
 		let mut rel: Vec<&str> = vec![".."; dir.len() - common];
-		rel.extend(&target[common..]);
+		rel.extend(down);
 
 		if rel.is_empty() {
 			// An empty reference resolves to the base itself, so name the parent explicitly.
-			return PathRelative::new(".");
+			return Some(PathRelative::new("."));
 		}
 
-		PathRelativeOwned::from(rel.join("/"))
+		Some(PathRelativeOwned::from(rel.join("/")))
 	}
 }
 
@@ -1537,38 +1550,57 @@ mod tests {
 
 	#[test]
 	fn test_relative_to() {
+		let rel = |target: &str, base: &str| Path::new(target).relative_to(base).unwrap();
+
 		// Nested under the base: the base's own last segment is replaced, so it repeats.
-		assert_eq!(Path::new("foo/bar/baz").relative_to("foo/bar").as_str(), "bar/baz");
+		assert_eq!(rel("foo/bar/baz", "foo/bar").as_str(), "bar/baz");
 		// Sibling.
-		assert_eq!(Path::new("foo/baz").relative_to("foo/bar").as_str(), "baz");
+		assert_eq!(rel("foo/baz", "foo/bar").as_str(), "baz");
 		// Different subtree.
-		assert_eq!(
-			Path::new("foo/baz/bar").relative_to("foo/bar/baz").as_str(),
-			"../baz/bar"
-		);
+		assert_eq!(rel("foo/baz/bar", "foo/bar/baz").as_str(), "../baz/bar");
 		// The base's parent, which only `.` can name.
-		assert_eq!(Path::new("a/b").relative_to("a/b/transcode.hang").as_str(), ".");
-		assert_eq!(
-			Path::new("a/b").relative_to("a/b/one/two/transcode.hang").as_str(),
-			"../.."
-		);
+		assert_eq!(rel("a/b", "a/b/transcode.hang").as_str(), ".");
+		assert_eq!(rel("a/b", "a/b/one/two/transcode.hang").as_str(), "../..");
 		// Roots.
-		assert_eq!(Path::new("foo/bar").relative_to("").as_str(), "foo/bar");
-		assert_eq!(Path::new("").relative_to("foo").as_str(), ".");
-		assert_eq!(Path::new("").relative_to("").as_str(), ".");
+		assert_eq!(rel("foo/bar", "").as_str(), "foo/bar");
+		assert_eq!(rel("", "foo").as_str(), ".");
+		assert_eq!(rel("", "").as_str(), ".");
 		// Slashes are normalized first.
-		assert_eq!(Path::new("/a//b/").relative_to("//a/b/dir//").as_str(), ".");
+		assert_eq!(rel("/a//b/", "//a/b/dir//").as_str(), ".");
+	}
+
+	#[test]
+	fn test_relative_to_rejects_unnameable_targets() {
+		// A segment literally named `.` or `..` is a legal path component, but resolution
+		// would walk on it instead of naming it.
+		assert!(Path::new("a/../b").relative_to("").is_none());
+		assert!(Path::new("x/./y").relative_to("x/z").is_none());
+		assert!(Path::new("a/..").relative_to("a/b").is_none());
+
+		// Dot segments inside the shared prefix are never emitted, so they are fine.
+		let rel = Path::new("a/../b/x").relative_to("a/../b/c").unwrap();
+		assert_eq!(rel.as_str(), "x");
+		assert_eq!(Path::new("a/../b/c").resolve(&rel).as_str(), "a/../b/x");
 	}
 
 	#[test]
 	fn test_relative_to_round_trips() {
-		let paths = ["", "a", "b", "a/b", "a/c", "a/b/c", "a/b/c/d", "x/y/z"];
+		let paths = [
+			"", "a", "b", "a/b", "a/c", "a/b/c", "a/b/c/d", "x/y/z", "a/../b", "a/./b",
+		];
 
 		for base in paths {
 			for target in paths {
 				let base = Path::new(base);
 				let target = Path::new(target);
-				let rel = target.relative_to(&base);
+				let Some(rel) = target.relative_to(&base) else {
+					// Only an unnameable target may be refused.
+					assert!(
+						target.parts().any(|part| part == "." || part == ".."),
+						"{base} -> {target} refused a nameable target"
+					);
+					continue;
+				};
 
 				assert_eq!(base.resolve(&rel), target, "{base} -> {target} via {rel}");
 				// The reference is derived from a real target, so it never escapes the root.

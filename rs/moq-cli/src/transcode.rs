@@ -140,10 +140,10 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	// Reference the source renditions only when the output nests beneath the source, so a
 	// player that can reach the output can reach the source too. Otherwise the derivative
 	// catalog advertises the rungs alone.
-	config.source = output_path
-		.strip_prefix(&source_path)
-		.is_some_and(|rest| !rest.is_empty())
-		.then(|| source_path.relative_to(&output_path));
+	config.source = match output_path.strip_prefix(&source_path) {
+		Some(rest) if !rest.is_empty() => source_path.relative_to(&output_path),
+		_ => None,
+	};
 
 	let output = publish
 		.create_broadcast(&output_path, moq_net::broadcast::Route::new().with_announce(true))

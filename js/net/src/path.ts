@@ -259,11 +259,15 @@ export function tryResolve(base: Valid, rel: string): Valid | undefined {
 /**
  * Express `target` relative to `base`: the inverse of {@link resolve}.
  *
- * The result always round-trips (`resolve(base, relativeTo(target, base)) === target`)
- * and never walks above the root, so {@link tryResolve} accepts it too.
+ * The result round-trips (`resolve(base, relativeTo(target, base)) === target`) and never
+ * walks above the root, so {@link tryResolve} accepts it too.
  *
  * A relative reference replaces the last segment of the base, matching relative URL
  * resolution, so a target nested under the base repeats the base's own last segment.
+ *
+ * Returns `undefined` for a target no reference can name: a path segment may literally be
+ * `.` or `..`, which resolution reads as navigation instead of as a name. Only the segments
+ * past the shared prefix matter, since the rest are never emitted.
  *
  * Mirrors the Rust `Path::relative_to`, used to author the cross-broadcast track
  * references a hang catalog carries.
@@ -273,9 +277,10 @@ export function tryResolve(base: Valid, rel: string): Valid | undefined {
  * Path.relativeTo(Path.from("a/b/c"), Path.from("a/b")); // "b/c"
  * Path.relativeTo(Path.from("a/c"), Path.from("a/b"));   // "c"
  * Path.relativeTo(Path.from("a"), Path.from("a/b"));     // "."
+ * Path.relativeTo(Path.from("a/.."), Path.from("a/b"));  // undefined
  * ```
  */
-export function relativeTo(target: Valid, base: Valid): string {
+export function relativeTo(target: Valid, base: Valid): string | undefined {
 	// Resolution replaces the base's last segment, so walk from its parent.
 	const dir = base === "" ? [] : base.split("/");
 	dir.pop();
@@ -287,9 +292,13 @@ export function relativeTo(target: Valid, base: Valid): string {
 		common += 1;
 	}
 
+	const down = parts.slice(common);
+	// Resolution would walk on these instead of naming them.
+	if (down.some((part) => part === "." || part === "..")) return undefined;
+
 	const rel = Array(dir.length - common)
 		.fill("..")
-		.concat(parts.slice(common));
+		.concat(down);
 
 	// An empty reference resolves to the base itself, so name the parent explicitly.
 	return rel.length === 0 ? "." : rel.join("/");

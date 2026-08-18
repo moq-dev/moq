@@ -233,12 +233,31 @@ test("relativeTo inverts resolve", () => {
 	expect(Path.relativeTo(Path.empty(), Path.empty())).toBe(".");
 });
 
+test("relativeTo rejects unnameable targets", () => {
+	// A segment literally named `.` or `..` is a legal path component, but resolution
+	// would walk on it instead of naming it.
+	expect(Path.relativeTo(Path.from("a/../b"), Path.empty())).toBeUndefined();
+	expect(Path.relativeTo(Path.from("x/./y"), Path.from("x/z"))).toBeUndefined();
+	expect(Path.relativeTo(Path.from("a/.."), Path.from("a/b"))).toBeUndefined();
+
+	// Dot segments inside the shared prefix are never emitted, so they are fine.
+	const rel = Path.relativeTo(Path.from("a/../b/x"), Path.from("a/../b/c"));
+	expect(rel).toBe("x");
+	expect(Path.resolve(Path.from("a/../b/c"), rel as string)).toBe(Path.from("a/../b/x"));
+});
+
 test("relativeTo round trips through resolve", () => {
-	const paths = ["", "a", "b", "a/b", "a/c", "a/b/c", "a/b/c/d", "x/y/z"].map((p) => Path.from(p));
+	const paths = ["", "a", "b", "a/b", "a/c", "a/b/c", "a/b/c/d", "x/y/z", "a/../b", "a/./b"].map((p) => Path.from(p));
 
 	for (const base of paths) {
 		for (const target of paths) {
 			const rel = Path.relativeTo(target, base);
+			if (rel === undefined) {
+				// Only an unnameable target may be refused.
+				expect(target.split("/").some((part) => part === "." || part === "..")).toBe(true);
+				continue;
+			}
+
 			expect(Path.resolve(base, rel)).toBe(target);
 			// The reference is derived from a real target, so it never escapes the root.
 			expect(Path.tryResolve(base, rel)).toBe(target);
