@@ -44,6 +44,11 @@ pub enum Error {
 	#[error(transparent)]
 	Io(#[from] std::io::Error),
 
+	/// The QUIC config was parsed from released spellings that no longer work. The
+	/// payload is the migration to print.
+	#[error("{0}")]
+	Deprecated(crate::Deprecated),
+
 	/// The configured secret was neither a valid hex key nor a readable key file.
 	#[error("invalid iroh secret key")]
 	Secret(#[source] iroh::KeyParsingError),
@@ -171,6 +176,15 @@ impl EndpointConfig {
 	pub async fn bind(self, quic: &crate::quic::Config) -> Result<Option<Endpoint>> {
 		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
+		}
+
+		// Public, and takes a config this crate did not necessarily check, so it
+		// refuses rather than trusting the caller: `resolve` reads the canonical
+		// fields, and a released `--client-quic-gso=false` would arrive here as "GSO
+		// on" and bind an endpoint the caller asked not to have.
+		let deprecated = quic.deprecated();
+		if !deprecated.is_empty() {
+			return Err(Error::Deprecated(deprecated));
 		}
 
 		let quic = quic.resolve();

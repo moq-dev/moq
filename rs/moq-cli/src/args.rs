@@ -107,14 +107,6 @@ impl Invocation {
 		// reports the missing subcommand as usual.
 		let cli = Cli::try_parse_from(chunks.next().unwrap_or_default())?;
 
-		// Before anything reads the config: a released spelling parses into a hidden
-		// field that nothing honors, so continuing would run on settings the command
-		// line never asked for. A clap error, since that is what this is.
-		let deprecated = cli.moq.deprecated();
-		if !deprecated.is_empty() {
-			return Err(Cli::command().error(clap::error::ErrorKind::ValueValidation, deprecated.to_string()));
-		}
-
 		let mut stages = vec![cli.command];
 		for chunk in chunks {
 			// A trailing or doubled `--` leaves an empty chunk, which clap would report as a
@@ -127,6 +119,18 @@ impl Invocation {
 			}
 
 			stages.push(Stage::try_parse_from(chunk)?.command);
+		}
+
+		// Before anything reads the config: a released spelling parses into a hidden
+		// field that nothing honors, so continuing would run on settings the command
+		// line never asked for. Every stage is in by now, since a stage can carry a
+		// config of its own. A clap error, since that is what this is.
+		let mut deprecated = cli.moq.deprecated();
+		for stage in &stages {
+			deprecated.extend(stage.deprecated());
+		}
+		if !deprecated.is_empty() {
+			return Err(Cli::command().error(clap::error::ErrorKind::ValueValidation, deprecated.to_string()));
 		}
 
 		Ok(Self {
@@ -384,6 +388,23 @@ pub enum Command {
 }
 
 impl Command {
+	/// Every released spelling this stage's own args were parsed from.
+	///
+	/// The globals are only half the command line: a stage can flatten a
+	/// `moq-tokio` config of its own, and `export hls` does. Its TLS section is the
+	/// sharp case, because the listener decides whether to serve TLS at all from the
+	/// canonical `cert`/`generate` fields, so a released `--tls-cert` would leave it
+	/// serving plaintext rather than reaching the builder that refuses.
+	fn deprecated(&self) -> moq_tokio::Deprecated {
+		match self {
+			Self::Export(export) => match &export.sink {
+				ExportSink::Hls(hls) => hls.tls.deprecated(),
+				_ => moq_tokio::Deprecated::default(),
+			},
+			_ => moq_tokio::Deprecated::default(),
+		}
+	}
+
 	/// The verb as typed, for error messages.
 	pub fn name(&self) -> &'static str {
 		match self {
@@ -659,6 +680,36 @@ mod tests {
 		] {
 			assert!(reported.contains(line), "missing {line:?} from {reported}");
 		}
+	}
+
+	/// A stage carries config of its own, and the check has to reach it.
+	///
+	/// `export hls` flattens `tls::Listen`. Its listener decides whether to serve
+	/// TLS at all from the canonical `cert`/`generate` fields, so a released
+	/// `--tls-cert` left it serving plaintext HTTP without ever reaching the builder
+	/// that refuses: the certificate and the mTLS roots both silently gone.
+	#[test]
+	fn a_stage_local_released_spelling_is_refused() {
+		let Err(err) = Invocation::try_parse_from([
+			"moq",
+			"--connect",
+			"http://relay/anon",
+			"--broadcast",
+			"room",
+			"export",
+			"hls",
+			"--tls-cert",
+			"/tmp/cert.pem",
+			"--server-tls-root",
+			"/tmp/ca.pem",
+		]) else {
+			panic!("a released spelling on a stage must not start a run");
+		};
+
+		let reported = err.to_string();
+		assert!(reported.contains("--tls-cert"), "{reported}");
+		assert!(reported.contains("--listen-tls-cert"), "{reported}");
+		assert!(reported.contains("--listen-tls-root"), "{reported}");
 	}
 
 	/// One released spelling stops the run even when the rest of the command line is

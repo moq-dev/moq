@@ -414,6 +414,10 @@ impl Config {
 	}
 
 	/// The per-connection knobs with defaults applied, ready to hand to a backend.
+	///
+	/// Reads the canonical fields only, so check [`deprecated`](Self::deprecated)
+	/// first when the config came from a parser: a released spelling would show up
+	/// here as the default rather than the value that was written.
 	pub fn resolve(&self) -> Resolved {
 		// A zero keep-alive means "disabled"; anything else (including unset) keeps
 		// the connection warm, defaulting to 5s.
@@ -600,6 +604,50 @@ mod tests {
 		);
 		// The rename also widened what the knob covers, which the line has to say.
 		assert!(reported.contains("dialed and accepted"), "{reported}");
+	}
+
+	/// The QUIC replacements are built from the flag name rather than written out,
+	/// so a knob whose canonical spelling drifts would send someone to a flag that
+	/// does not exist. Check every one against the parser.
+	#[test]
+	fn every_replacement_is_a_real_flag() {
+		let canonical: std::collections::HashSet<String> =
+			<Config as clap::Args>::augment_args(clap::Command::new("test"))
+				.get_arguments()
+				.filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+				.collect();
+		let envs: std::collections::HashSet<String> = <Config as clap::Args>::augment_args(clap::Command::new("test"))
+			.get_arguments()
+			.filter_map(|arg| arg.get_env().map(|env| env.to_string_lossy().to_string()))
+			.collect();
+
+		for args in [
+			["--client-quic-max-streams", "1"],
+			["--server-quic-max-streams", "1"],
+			["--client-quic-gso", "false"],
+			["--server-quic-gso", "false"],
+			["--client-quic-idle-timeout", "1s"],
+			["--server-quic-idle-timeout", "1s"],
+			["--client-quic-keep-alive", "1s"],
+			["--server-quic-keep-alive", "1s"],
+			["--client-quic-mtu-discovery", "false"],
+			["--server-quic-mtu-discovery", "false"],
+			["--client-quic-congestion-control", "loss"],
+			["--server-quic-congestion-control", "loss"],
+			["--client-quic-qlog", "/tmp/qlog"],
+			["--server-quic-qlog", "/tmp/qlog"],
+		] {
+			// The booleans take `=`; the rest take a separate value.
+			let spelled = format!("{}={}", args[0], args[1]);
+			let reported = parse(&[&spelled]).deprecated().to_string();
+
+			let (_, replacement) = reported.split_once(" -> ").expect("a migration line");
+			let (flag, rest) = replacement.split_once(" / ").expect("flag and env");
+			let env = rest.split_whitespace().next().expect("env");
+
+			assert!(canonical.contains(flag), "{flag} is not a flag ({reported})");
+			assert!(envs.contains(env), "{env} is not an env var ({reported})");
+		}
 	}
 
 	/// Both role prefixes map onto the one shared knob, and each is named.
