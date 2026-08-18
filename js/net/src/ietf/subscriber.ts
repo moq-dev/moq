@@ -293,6 +293,15 @@ export class Subscriber {
 					}
 				})();
 
+				// The race below can end through the consumer's close while a message that
+				// already arrived is still decoding, which leaves the loop with nothing
+				// awaiting it: a violation decoded after that would land nowhere, and its
+				// rejection would go unhandled. Idempotent with the catch below, which is
+				// what runs when the loop is the one that ends the race.
+				readLoop.catch((err: unknown) => {
+					if (err instanceof ProtocolViolation) this.#session.close();
+				});
+
 				// Wait for either the read loop or the announced to close
 				await Promise.race([readLoop, announced.closed]);
 
