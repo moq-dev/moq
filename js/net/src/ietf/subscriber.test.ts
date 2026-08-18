@@ -53,7 +53,7 @@ test("every peer is asked", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
 
-	const subscriber = new Subscriber(session);
+	const subscriber = new Subscriber({ session });
 	subscriber.announced(Path.empty());
 
 	expect(await nextStream(pair.client)).toBeDefined();
@@ -66,7 +66,7 @@ test("every peer is asked", async () => {
 test("an unsolicited announcement lands", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
-	const subscriber = new Subscriber(session);
+	const subscriber = new Subscriber({ session });
 
 	const announced = subscriber.announced(Path.empty());
 
@@ -137,7 +137,7 @@ async function syncInline(stream: Stream, announced: announce.Consumer, cluster?
 test("an announcement survives the first of its two sources ending", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
-	const subscriber = new Subscriber(session);
+	const subscriber = new Subscriber({ session });
 
 	const announced = subscriber.announced(Path.empty());
 	const subscription = await acceptSubscribeNamespace(pair.client);
@@ -174,7 +174,7 @@ test("an announcement survives the first of its two sources ending", async () =>
 test("an announcement ends once its last source does", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
-	const subscriber = new Subscriber(session);
+	const subscriber = new Subscriber({ session });
 
 	const announced = subscriber.announced(Path.empty());
 	const subscription = await acceptSubscribeNamespace(pair.client);
@@ -210,7 +210,7 @@ test("an announcement ends once its last source does", async () => {
 test("a subscription that dies releases what it advertised", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
-	const subscriber = new Subscriber(session);
+	const subscriber = new Subscriber({ session });
 
 	// Two feeds, so one outlives the stream that carries the advertisement.
 	const doomed = subscriber.announced(Path.empty());
@@ -238,7 +238,7 @@ test("a subscription that dies releases what it advertised", async () => {
 test("a duplicate legacy publish_namespace is still refused", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, Version.DRAFT_15, true);
-	const subscriber = new Subscriber(session);
+	const subscriber = new Subscriber({ session });
 
 	const announced = subscriber.announced(Path.empty());
 
@@ -274,7 +274,7 @@ test("a duplicate legacy publish_namespace is still refused", async () => {
 test("an entry buffered past a consumer close does not pin the path", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
-	const subscriber = new Subscriber(session);
+	const subscriber = new Subscriber({ session });
 
 	const announced = subscriber.announced(Path.empty());
 	const subscription = await acceptSubscribeNamespace(pair.client);
@@ -305,7 +305,7 @@ test("an entry buffered past a consumer close does not pin the path", async () =
 test("concurrent legacy publish_namespace requests take one reference", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, Version.DRAFT_15, true);
-	const subscriber = new Subscriber(session);
+	const subscriber = new Subscriber({ session });
 
 	const announced = subscriber.announced(Path.empty());
 
@@ -345,7 +345,7 @@ const PEER: Origin = OriginSchema.parse(9n);
 test("an inline NAMESPACE that looped back through us is dropped", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
-	const subscriber = new Subscriber(session, { self: SELF, peer: PEER });
+	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
 
 	const announced = subscriber.announced(Path.empty());
 	const subscription = await acceptSubscribeNamespace(pair.client);
@@ -363,7 +363,7 @@ test("an inline NAMESPACE that looped back through us is dropped", async () => {
 test("an inline NAMESPACE that starts looping back is retracted", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
-	const subscriber = new Subscriber(session, { self: SELF, peer: PEER });
+	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
 
 	const announced = subscriber.announced(Path.empty());
 	const subscription = await acceptSubscribeNamespace(pair.client);
@@ -379,7 +379,7 @@ test("an inline NAMESPACE that starts looping back is retracted", async () => {
 test("a PUBLISH_NAMESPACE that looped back through us is refused", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
-	const subscriber = new Subscriber(session, { self: SELF, peer: PEER });
+	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
 
 	const announced = subscriber.announced(Path.empty());
 	const subscription = await acceptSubscribeNamespace(pair.client);
@@ -402,4 +402,27 @@ test("a PUBLISH_NAMESPACE that looped back through us is refused", async () => {
 
 	// Refused, so nothing was announced: the sentinel is the first thing a consumer hears.
 	await syncInline(subscription, announced, { hops: [PEER], cost: 0n });
+});
+
+/**
+ * The cluster draft requires closing the session over an advertisement missing its HOP_PATH,
+ * not just the stream that carried it: a peer that broke the protocol once would otherwise
+ * repeat it on the next SUBSCRIBE_NAMESPACE.
+ */
+test("a NAMESPACE missing its hop path closes the session", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
+
+	subscriber.announced(Path.empty());
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	// The base form, which a negotiated session must never send.
+	await subscription.writer.u53(SubscribeNamespaceEntry.id);
+	await new SubscribeNamespaceEntry({ suffix: Path.from("nohops") }).encode(subscription.writer, VERSION);
+
+	await Promise.race([
+		pair.server.closed,
+		new Promise((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), STREAM_WAIT)),
+	]);
 });

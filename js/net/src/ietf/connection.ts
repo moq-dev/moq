@@ -4,6 +4,7 @@ import type * as broadcast from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
+import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
@@ -124,10 +125,15 @@ export class Connection implements Established {
 			});
 		}
 
-		this.#publisher = new Publisher(this.#quic, this.#session, solicit ?? false, cluster);
+		this.#publisher = new Publisher({
+			quic: this.#quic,
+			session: this.#session,
+			requiresSolicitation: solicit ?? false,
+			cluster,
+		});
 		this.#solicit = solicit;
 		this.#cluster = cluster;
-		this.#subscriber = new Subscriber(this.#session, cluster);
+		this.#subscriber = new Subscriber({ session: this.#session, cluster });
 
 		void this.#run();
 	}
@@ -219,6 +225,10 @@ export class Connection implements Established {
 			void this.#runBidi(stream).catch((err: unknown) => {
 				console.error("error processing bidi stream", err);
 				stream.abort(new Error("bidi stream error"));
+
+				// The peer broke the protocol, so losing the stream is not enough: nothing
+				// stops it repeating the violation on the next one.
+				if (err instanceof ProtocolViolation) this.close();
 			});
 		}
 	}

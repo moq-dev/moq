@@ -23,7 +23,9 @@
  * @internal
  */
 
+import { ProtocolViolation, reason } from "../error.ts";
 import { MAX_HOPS, type Origin, OriginSchema, UNKNOWN_ORIGIN } from "../origin.ts";
+import type { Reader } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { Parameters, SetupOption, type SetupOptions } from "./parameters.ts";
 import { type IetfVersion, Version } from "./version.ts";
@@ -175,32 +177,58 @@ export function intoParams(advert: Advert): Parameters {
 }
 
 /**
+ * Read the parameters a negotiated session puts on every advertisement.
+ *
+ * The parameter block is mandatory there, so a message that ends before it (the base form)
+ * or one whose block does not parse is the peer's violation, same as a block that parses but
+ * carries no HOP_PATH.
+ *
+ * @internal
+ */
+export async function decodeParams(r: Reader, version: IetfVersion): Promise<Advert> {
+	let params: Parameters;
+	try {
+		params = await Parameters.decode(r, version);
+	} catch (err) {
+		throw new ProtocolViolation(reason(err), { cause: err });
+	}
+
+	return fromParams(params);
+}
+
+/**
  * Read an advertisement out of a decoded parameter block.
  *
- * A negotiated session that omits HOP_PATH is a protocol violation, as is a path that
- * cannot have come from a conforming sender, so both throw.
+ * Every way this fails is one the draft says to close the session over: a negotiated session
+ * that omits HOP_PATH, entries that do not exactly fill the parameter, an empty list, or a
+ * non-zero Hop ID appearing twice. So they all surface as one {@link ProtocolViolation},
+ * which the session dispatch acts on.
  *
  * @internal
  */
 export function fromParams(params: Parameters): Advert {
-	const value = params.hopPath;
-	if (value === undefined) throw new Error("advertisement is missing HOP_PATH");
+	try {
+		const value = params.hopPath;
+		if (value === undefined) throw new Error("advertisement is missing HOP_PATH");
 
-	const hops: Origin[] = [];
-	let rest = value;
-	while (rest.length > 0) {
-		// A short read here means the entries did not exactly fill the length.
-		const [hop, remain] = Varint.decodeLeadingOnes(rest);
-		hops.push(OriginSchema.parse(hop));
-		rest = remain;
+		const hops: Origin[] = [];
+		let rest = value;
+		while (rest.length > 0) {
+			// A short read here means the entries did not exactly fill the length.
+			const [hop, remain] = Varint.decodeLeadingOnes(rest);
+			hops.push(OriginSchema.parse(hop));
+			rest = remain;
 
-		// Bail before the buffer does: a hostile length would otherwise cost us one
-		// allocation per entry all the way to 64KB of parameter value.
-		if (hops.length > MAX_HOPS) throw new Error(`hop count exceeds maximum ${MAX_HOPS}`);
+			// Bail before the buffer does: a hostile length would otherwise cost us one
+			// allocation per entry all the way to 64KB of parameter value.
+			if (hops.length > MAX_HOPS) throw new Error(`hop count exceeds maximum ${MAX_HOPS}`);
+		}
+
+		validate(hops);
+		return { hops, cost: params.routeCost ?? 0n };
+	} catch (err) {
+		throw new ProtocolViolation(reason(err), { cause: err });
 	}
-
-	validate(hops);
-	return { hops, cost: params.routeCost ?? 0n };
 }
 
 /**

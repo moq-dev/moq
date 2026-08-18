@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { ProtocolViolation } from "../error.ts";
 import { type Origin, OriginSchema, UNKNOWN_ORIGIN } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
@@ -98,6 +99,18 @@ test("Cluster: a repeated zero is not a loop", async () => {
 	expect(Cluster.fromParams(decoded)).toEqual(advert);
 });
 
+test("Cluster: a malformed advertisement is a session-fatal violation", () => {
+	// The draft says a receiver MUST close the session over each of these, so they arrive
+	// as one error the session dispatch can act on, not a stream-local decode failure.
+	const missing = new Parameters();
+	const empty = new Parameters();
+	empty.hopPath = new Uint8Array();
+
+	for (const params of [missing, empty]) {
+		expect(() => Cluster.fromParams(params)).toThrow(ProtocolViolation);
+	}
+});
+
 test("Cluster: a path that cannot have come from a conforming sender is rejected", () => {
 	// A non-zero id appearing twice is a loop.
 	expect(() => Cluster.intoParams({ hops: hops(4n, 8n, 4n), cost: 0n })).toThrow();
@@ -186,9 +199,10 @@ test("Cluster: PUBLISH_NAMESPACE carries the parameters only once negotiated", a
 	// reads the same bytes and ignores what it did not ask for.
 	expect((await PublishNamespace.decode(reader(encoded), VERSION)).cluster).toBeUndefined();
 
-	// A negotiated session that omits HOP_PATH is a protocol violation.
+	// A negotiated session that omits HOP_PATH is a protocol violation, which the session
+	// dispatch closes over rather than losing only the stream.
 	const bare = new PublishNamespace({ requestId: 1n, trackNamespace: Path.from("alice.hang") });
-	await expect(PublishNamespace.decode(reader(await encode(bare)), VERSION, true)).rejects.toThrow();
+	await expect(PublishNamespace.decode(reader(await encode(bare)), VERSION, true)).rejects.toThrow(ProtocolViolation);
 });
 
 test("Cluster: NAMESPACE grows a parameters field only once negotiated", async () => {
@@ -208,4 +222,8 @@ test("Cluster: NAMESPACE grows a parameters field only once negotiated", async (
 	// Reading the extended form as the base one leaves the parameters behind rather than
 	// silently absorbing them.
 	await expect(SubscribeNamespaceEntry.decode(reader(extended), VERSION)).rejects.toThrow();
+
+	// The base form on a negotiated session ends before the parameters the peer owed us,
+	// which is the same violation as sending them without a HOP_PATH.
+	await expect(SubscribeNamespaceEntry.decode(reader(base), VERSION, true)).rejects.toThrow(ProtocolViolation);
 });

@@ -86,7 +86,7 @@ async function declinePublishNamespace(stream: Stream, retryInterval = 1n): Prom
 
 function publisher(transport: WebTransport, cluster?: Cluster.Hops): Publisher {
 	const session = new NativeSession(transport, VERSION, true);
-	return new Publisher(transport, session, false, cluster);
+	return new Publisher({ quic: transport, session, requiresSolicitation: false, cluster });
 }
 
 /**
@@ -183,7 +183,7 @@ test("a failed stream open does not kill the announce loop", async () => {
 		},
 	};
 
-	const pub = new Publisher(pair.server, session, false);
+	const pub = new Publisher({ quic: pair.server, session, requiresSolicitation: false });
 	pub.publish(Path.from("first"), new BroadcastProducer());
 
 	void pub.runPublishNamespaces();
@@ -228,7 +228,7 @@ test("a namespace refused once is retried without anything else changing", async
 		},
 	};
 
-	const pub = new Publisher(pair.server, session, false);
+	const pub = new Publisher({ quic: pair.server, session, requiresSolicitation: false });
 	pub.publish(Path.from("lonely"), new BroadcastProducer());
 
 	void pub.runPublishNamespaces();
@@ -266,7 +266,7 @@ test("a solicited legacy advertisement refused once is retried", async () => {
 
 	// The peer declared that advertisements to it must be solicited, so this is the loop
 	// that answers its SUBSCRIBE_NAMESPACE.
-	const pub = new Publisher(pair.server, session, true);
+	const pub = new Publisher({ quic: pair.server, session, requiresSolicitation: true });
 	pub.publish(Path.from("lonely"), new BroadcastProducer());
 
 	const subscription = await Stream.open(pair.client, { version: Version.DRAFT_15 });

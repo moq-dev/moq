@@ -236,18 +236,22 @@ export class UnsubscribeNamespace {
 	}
 }
 
-/// NAMESPACE message (0x08) — v16+, sent on the SUBSCRIBE_NAMESPACE bidi stream.
-///
-/// The base message carries only the suffix. A session that negotiated the MoQ Cluster
-/// extension uses the extended form instead, which appends a Parameters field so the
-/// advertisement can carry its HOP_PATH and ROUTE_COST (see `cluster.ts`).
+/**
+ * NAMESPACE message (0x08), v16+, sent on the SUBSCRIBE_NAMESPACE bidi stream.
+ *
+ * The base message carries only the suffix. A session that negotiated the MoQ Cluster
+ * extension uses the extended form instead, which appends a Parameters field so the
+ * advertisement can carry its HOP_PATH and ROUTE_COST (see `cluster.ts`).
+ */
 export class SubscribeNamespaceEntry {
 	static id = 0x08;
 
 	suffix: Path.Valid;
 
-	/// The MoQ Cluster parameters. Set selects the extended form, `undefined` the base one.
-	/// An endpoint must not append them on a session that did not negotiate.
+	/**
+	 * The MoQ Cluster parameters. Set selects the extended form, `undefined` the base one.
+	 * An endpoint must not append them on a session that did not negotiate.
+	 */
 	cluster?: Cluster.Advert;
 
 	constructor({ suffix, cluster }: { suffix: Path.Valid; cluster?: Cluster.Advert }) {
@@ -265,8 +269,10 @@ export class SubscribeNamespaceEntry {
 		return Message.encode(w, (wr) => this.#encode(wr, version));
 	}
 
-	/// Decode the message, expecting the extended form when the session negotiated the MoQ
-	/// Cluster extension. See {@link PublishNamespace.decode}.
+	/**
+	 * Decode the message, expecting the extended form when the session negotiated the MoQ
+	 * Cluster extension. See {@link PublishNamespace.decode}.
+	 */
 	static async decode(r: Reader, version: IetfVersion, negotiated = false): Promise<SubscribeNamespaceEntry> {
 		return Message.decode(r, (rd) => SubscribeNamespaceEntry.#decode(rd, version, negotiated));
 	}
@@ -275,8 +281,7 @@ export class SubscribeNamespaceEntry {
 		const suffix = await Namespace.decode(r);
 		if (!negotiated) return new SubscribeNamespaceEntry({ suffix });
 
-		const params = await Parameters.decode(r, version);
-		return new SubscribeNamespaceEntry({ suffix, cluster: Cluster.fromParams(params) });
+		return new SubscribeNamespaceEntry({ suffix, cluster: await Cluster.decodeParams(r, version) });
 	}
 }
 

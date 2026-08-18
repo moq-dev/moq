@@ -1,7 +1,7 @@
 import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
-import { error, reason } from "../error.ts";
+import { error, ProtocolViolation, reason } from "../error.ts";
 import * as netGroup from "../group.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
@@ -85,12 +85,18 @@ export class Subscriber {
 
 	/**
 	 * Creates a new Subscriber instance.
-	 * @param session - The session abstraction for bidi streams and request IDs
-	 * @param cluster - The Hop IDs the SETUP exchange settled (MoQ Cluster)
 	 *
 	 * @internal
 	 */
-	constructor(session: Session, cluster?: Cluster.Hops) {
+	constructor({
+		session,
+		cluster,
+	}: {
+		/** The session abstraction for bidi streams and request IDs. */
+		session: Session;
+		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
+		cluster?: Cluster.Hops;
+	}) {
 		this.#session = session;
 		this.#cluster = cluster;
 	}
@@ -304,6 +310,12 @@ export class Subscriber {
 		} catch (err: unknown) {
 			const e = error(err);
 			console.warn(`subscribe_namespace error: ${reason(e)}`);
+
+			// An advertisement is decoded here rather than in the session dispatch, so this
+			// is the only place a malformed one surfaces. The cluster draft requires closing
+			// the session over those, and the stream alone is not enough: the peer would
+			// just repeat it on the next SUBSCRIBE_NAMESPACE.
+			if (e instanceof ProtocolViolation) this.#session.close();
 
 			// Abort the stream rather than letting the caller's `finally` close it cleanly.
 			// A rejected namespace subscription is a failure, and a consumer that can't tell

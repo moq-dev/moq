@@ -60,9 +60,13 @@ export class PublishNamespace {
 			await r.u62(); // required_request_id_delta
 		}
 		const trackNamespace = await Namespace.decode(r);
-		const params = await Parameters.decode(r, version);
-		const cluster = negotiated ? Cluster.fromParams(params) : undefined;
-		return new PublishNamespace({ requestId, trackNamespace, cluster });
+		if (negotiated) {
+			const cluster = await Cluster.decodeParams(r, version);
+			return new PublishNamespace({ requestId, trackNamespace, cluster });
+		}
+
+		await Parameters.decode(r, version); // ignore parameters
+		return new PublishNamespace({ requestId, trackNamespace });
 	}
 }
 

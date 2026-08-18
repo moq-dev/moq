@@ -88,14 +88,24 @@ export class Publisher {
 
 	/**
 	 * Creates a new Publisher instance.
-	 * @param quic - The WebTransport session (for uni streams)
-	 * @param session - The session abstraction for bidi streams and request IDs
-	 * @param requiresSolicitation - Whether the peer's SETUP asked to be told on request
-	 * @param cluster - The Hop IDs the SETUP exchange settled (MoQ Cluster)
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, session: Session, requiresSolicitation: boolean, cluster?: Cluster.Hops) {
+	constructor({
+		quic,
+		session,
+		requiresSolicitation,
+		cluster,
+	}: {
+		/** The WebTransport session, for uni streams. */
+		quic: WebTransport;
+		/** The session abstraction for bidi streams and request IDs. */
+		session: Session;
+		/** Whether the peer's SETUP asked to be told on request (MoQ Solicit). */
+		requiresSolicitation: boolean;
+		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
+		cluster?: Cluster.Hops;
+	}) {
 		this.#quic = quic;
 		this.#session = session;
 		this.#requiresSolicitation = requiresSolicitation;
