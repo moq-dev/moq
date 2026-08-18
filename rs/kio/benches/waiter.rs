@@ -57,9 +57,9 @@ fn bench_register(c: &mut Criterion) {
 	g.finish();
 }
 
-/// Re-register a waiter already in a list of N live entries. The scan hits the
-/// worst-case entry (the last one registered), which is the steady-state cost of a
-/// poll that re-runs while still parked.
+/// Re-register a waiter already in a list of N live entries: the record fast path,
+/// which is the steady-state cost of a poll that re-runs while still parked. Flat
+/// in N, since membership is settled by the waiter's own record, not a scan.
 fn bench_reregister(c: &mut Criterion) {
 	let mut g = c.benchmark_group("waiter_reregister");
 	for &n in &SIZES {
@@ -109,7 +109,7 @@ fn bench_cancel(c: &mut Criterion) {
 /// the other lists, which is exactly the case `Park` must not retire on.
 fn bench_park_cycle(c: &mut Criterion) {
 	let mut g = c.benchmark_group("waiter_park_cycle");
-	for &lists in &[1usize, 2, 4] {
+	for &lists in &[1usize, 2, 4, 8] {
 		g.bench_with_input(BenchmarkId::from_parameter(lists), &lists, |b, &n| {
 			let cx = Context::from_waker(Waker::noop());
 			let mut park = Park::default();
@@ -143,7 +143,8 @@ fn bench_fanout_cycle(c: &mut Criterion) {
 				for waiter in &waiters {
 					waiter.register(&mut list);
 				}
-				list.wake();
+				// Drain the production way: snapshot under the lock, wake outside.
+				list.take().wake();
 			});
 		});
 	}
@@ -173,7 +174,8 @@ fn bench_fanout_cycle_parked(c: &mut Criterion) {
 					waiter.register(&mut list);
 					waiter.register(&mut parked);
 				}
-				list.wake();
+				// Drain the production way: snapshot under the lock, wake outside.
+				list.take().wake();
 			});
 		});
 	}

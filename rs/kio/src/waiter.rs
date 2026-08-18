@@ -20,9 +20,10 @@ use crate::{
 const INLINE_WAITERS: usize = 32;
 
 /// Registrations remembered per waiter identity for O(1) dedup. A poll typically
-/// parks on a small handful of lists; overflow falls back to the scan, so this
-/// bounds memory, never correctness.
-const RECORDED_LISTS: usize = 4;
+/// parks on a small handful of lists; a poll cycling through more than this many
+/// evicts its own records and falls back to the scan, so the cap bounds memory,
+/// never correctness.
+const RECORDED_LISTS: usize = 8;
 
 /// The shared identity behind a [`Waiter`], referenced weakly by every list entry.
 struct Identity {
@@ -154,8 +155,16 @@ impl Clone for Waiter {
 }
 
 /// Source of unique [`WaiterList`] ids, so a waiter's recorded registrations can
-/// never confuse two lists (ids are handed out once and never reused).
-static NEXT_LIST_ID: AtomicU64 = AtomicU64::new(0);
+/// never confuse two lists (ids are handed out once and never reused). Exhausting
+/// it would take 2^64 list creations, centuries at one per nanosecond, so wraparound
+/// is unreachable in any process lifetime.
+static NEXT_LIST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// The id of a list that opts out of record-keeping: [`WaiterList::take`] snapshots,
+/// which exist to be woken, not registered with. Never handed out by
+/// [`NEXT_LIST_ID`], so no record can ever match one, and registering into such a
+/// list just uses the scan fallback.
+const UNTRACKED: u64 = 0;
 
 /// A list of weak wakers waiting for notification.
 ///
@@ -202,7 +211,12 @@ impl WaiterList {
 	pub fn register(&mut self, waiter: &Waiter) {
 		let shared = waiter.shared();
 
-		match shared.presume(self.id, self.epoch) {
+		let presence = match self.id {
+			UNTRACKED => Presence::Unknown,
+			id => shared.presume(id, self.epoch),
+		};
+
+		match presence {
 			// Still registered since the last drain: nothing to do. This is what
 			// lets `Park` keep reusing a still-registered waiter instead of
 			// retiring it every poll.
@@ -242,13 +256,15 @@ impl WaiterList {
 	/// Drain all entries into a new [`WaiterList`], leaving this one empty.
 	pub fn take(&mut self) -> Self {
 		self.cursor = 0;
-		self.epoch += 1;
+		self.epoch = self.epoch.checked_add(1).expect("waiter list epoch overflow");
 		Self {
 			entries: std::mem::take(&mut self.entries),
 			cursor: 0,
-			// The drained snapshot is only ever woken, never registered with, so it
-			// gets an id of its own rather than impersonating this list.
-			id: NEXT_LIST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+			// This runs on every notification, so the snapshot must not touch the
+			// global id counter (a shared cache line across all channels). It is
+			// untracked instead: it exists to be woken, and registering into it
+			// falls back to the scan rather than impersonating this list.
+			id: UNTRACKED,
 			epoch: 0,
 		}
 	}
@@ -256,7 +272,9 @@ impl WaiterList {
 	/// Wake all live waiters, draining the list.
 	pub fn wake(&mut self) {
 		self.cursor = 0;
-		self.epoch += 1;
+		// Fail closed rather than wrap: a wrapped epoch would let a stale record
+		// claim presence. Unreachable in practice (2^64 drains of one list).
+		self.epoch = self.epoch.checked_add(1).expect("waiter list epoch overflow");
 		for identity in self.entries.drain(..).filter_map(|w| w.upgrade()) {
 			identity.waker.wake_by_ref();
 		}
@@ -924,6 +942,25 @@ mod tests {
 		waiter.register(&mut list);
 		assert_eq!(list.entries.len(), 1);
 		assert!(list.entries[0].strong_count() > 0, "the registration must be live");
+	}
+
+	#[test]
+	fn a_taken_snapshot_tracks_nothing() {
+		let waiter = Waiter::new(Waker::noop().clone());
+		let mut list = WaiterList::new();
+		waiter.register(&mut list);
+
+		// The snapshot inherits the entries but no identity of its own, so a
+		// register against it must settle membership by scan: the entry moved with
+		// the snapshot, so this dedups rather than stacking.
+		let mut taken = list.take();
+		waiter.register(&mut taken);
+		assert_eq!(taken.entries.len(), 1, "the snapshot register stacked a duplicate");
+
+		// And a second waiter still gets in; untracked means unproven, not closed.
+		let other = Waiter::new(Waker::noop().clone());
+		other.register(&mut taken);
+		assert_eq!(taken.entries.len(), 2);
 	}
 
 	#[test]
