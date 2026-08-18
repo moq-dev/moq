@@ -15,7 +15,7 @@
 
 use std::task::{Context, Waker};
 
-use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use kio::{Park, Waiter, WaiterList};
 
 /// Live-waiter populations to sweep. The top end is the inline capacity, past which
@@ -126,12 +126,68 @@ fn bench_park_cycle(c: &mut Criterion) {
 	g.finish();
 }
 
+/// Fan-out sizes to sweep, crossing the inline capacity into heap spill.
+const FANOUT: [usize; 4] = [8, 32, 128, 512];
+
+/// The fan-out cycle: N waiters all parked on one list, a wake drains it, and every
+/// waiter re-registers. Throughput is per registration, so a super-linear per-cycle
+/// cost shows up as falling throughput at higher N.
+fn bench_fanout_cycle(c: &mut Criterion) {
+	let mut g = c.benchmark_group("waiter_fanout_cycle");
+	for &n in &FANOUT {
+		g.throughput(Throughput::Elements(n as u64));
+		g.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
+			let mut list = WaiterList::new();
+			let waiters: Vec<_> = (0..n).map(|_| Waiter::new(Waker::noop().clone())).collect();
+			b.iter(|| {
+				for waiter in &waiters {
+					waiter.register(&mut list);
+				}
+				list.wake();
+			});
+		});
+	}
+	g.finish();
+}
+
+/// The fan-out cycle when every waiter is also parked on a second, never-woken list
+/// (a value list and a closed list under one lock, say). The live second
+/// registration is what forecloses the registered-nowhere fast path, so this is the
+/// worst case for rebuilding the drained list.
+fn bench_fanout_cycle_parked(c: &mut Criterion) {
+	let mut g = c.benchmark_group("waiter_fanout_cycle_parked");
+	for &n in &FANOUT {
+		g.throughput(Throughput::Elements(n as u64));
+		g.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
+			let mut list = WaiterList::new();
+			let mut parked = WaiterList::new();
+			let waiters: Vec<_> = (0..n)
+				.map(|_| {
+					let waiter = Waiter::new(Waker::noop().clone());
+					waiter.register(&mut parked);
+					waiter
+				})
+				.collect();
+			b.iter(|| {
+				for waiter in &waiters {
+					waiter.register(&mut list);
+					waiter.register(&mut parked);
+				}
+				list.wake();
+			});
+		});
+	}
+	g.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_register,
 	bench_reregister,
 	bench_register_dead,
 	bench_cancel,
-	bench_park_cycle
+	bench_park_cycle,
+	bench_fanout_cycle,
+	bench_fanout_cycle_parked
 );
 criterion_main!(benches);

@@ -5,7 +5,7 @@ use std::{
 	pin::Pin,
 	// std, not `crate::sync`: loom's Arc has no `downgrade`, and `Waker::from` takes
 	// std's. See `sync.rs`.
-	sync::{Arc, OnceLock, Weak},
+	sync::{Arc, OnceLock, Weak, atomic::AtomicU64},
 	task::{Context, Poll, Wake, Waker},
 };
 
@@ -19,13 +19,71 @@ use crate::{
 /// Number of slots stored inline before spilling to the heap.
 const INLINE_WAITERS: usize = 32;
 
+/// Registrations remembered per waiter identity for O(1) dedup. A poll typically
+/// parks on a small handful of lists; overflow falls back to the scan, so this
+/// bounds memory, never correctness.
+const RECORDED_LISTS: usize = 4;
+
+/// The shared identity behind a [`Waiter`], referenced weakly by every list entry.
+struct Identity {
+	/// The task waker the lists deliver to.
+	waker: Waker,
+
+	/// Registrations this identity has made, as `(list id, list epoch)` pairs. A
+	/// pair matching a list's current epoch proves the registration is still in
+	/// place, and a stale pair proves it is gone: live entries only leave through a
+	/// drain, every drain bumps the epoch, and every registration refreshes the
+	/// pair. Either way membership is settled in O(1); only a missing pair (never
+	/// registered, or evicted) needs the scan.
+	recorded: Mutex<SmallVec<[(u64, u64); RECORDED_LISTS]>>,
+}
+
+/// What an identity's records prove about its membership in one list.
+enum Presence {
+	/// Recorded at the list's current epoch: still registered.
+	Present,
+	/// Recorded at an older epoch: the drain that bumped it removed every entry,
+	/// and registering again would have refreshed the record, so: not registered.
+	Absent,
+	/// No record (never registered, or evicted): membership must be checked.
+	Unknown,
+}
+
+impl Identity {
+	/// What the records prove about membership in list `id` at `epoch`.
+	///
+	/// Also refreshes the record to `(id, epoch)` before returning. That is sound
+	/// even though the caller has not registered yet: every path out of
+	/// [`WaiterList::register`] leaves the waiter registered, and folding the write
+	/// into the lookup keeps registration at one lock round-trip.
+	fn presume(&self, id: u64, epoch: u64) -> Presence {
+		let mut recorded = self.recorded.lock().expect("mutex poisoned");
+
+		if let Some(entry) = recorded.iter_mut().find(|entry| entry.0 == id) {
+			let presence = match entry.1 == epoch {
+				true => Presence::Present,
+				false => Presence::Absent,
+			};
+			entry.1 = epoch;
+			return presence;
+		}
+
+		// Evict the oldest record when full: eviction only costs a scan later.
+		if recorded.len() == RECORDED_LISTS {
+			recorded.remove(0);
+		}
+		recorded.push((id, epoch));
+		Presence::Unknown
+	}
+}
+
 /// Handle passed to poll functions for registering with [`WaiterList`]s.
 ///
-/// Holds the task's [`Waker`] by value and, lazily, a shared `Arc<Waker>` that list
-/// entries reference weakly. The `Arc` is allocated on the first [`Self::register`],
-/// so a poll that resolves without ever parking never touches the heap. Its `Weak`s
-/// go dead the moment the owning [`Waiter`] drops, which is how a [`WaiterList`]
-/// reclaims slots with no explicit deregister.
+/// Holds the task's [`Waker`] by value and, lazily, a shared identity that list
+/// entries reference weakly. The identity is allocated on the first
+/// [`Self::register`], so a poll that resolves without ever parking never touches
+/// the heap. Its `Weak`s go dead the moment the owning [`Waiter`] drops, which is
+/// how a [`WaiterList`] reclaims slots with no explicit deregister.
 ///
 /// A clone shares this identity: it wakes the same task, its registrations count as
 /// the original's, and they all stay live until every clone drops.
@@ -36,7 +94,7 @@ pub struct Waiter {
 	// The shared handle downgraded into every list this waiter registers with. Created on the
 	// first `register` (a poll that never parks never allocates it), then reused so multiple
 	// lists in one poll share a single allocation whose `Weak`s die together when the waiter drops.
-	shared: OnceLock<Arc<Waker>>,
+	shared: OnceLock<Arc<Identity>>,
 }
 
 impl Waiter {
@@ -64,10 +122,15 @@ impl Waiter {
 		&self.waker
 	}
 
-	/// The shared waker handle downgraded into lists, allocated on first use and cached so
+	/// The shared identity downgraded into lists, allocated on first use and cached so
 	/// repeat registrations (across polls, or across lists in one poll) share one allocation.
-	fn shared(&self) -> &Arc<Waker> {
-		self.shared.get_or_init(|| Arc::new(self.waker.clone()))
+	fn shared(&self) -> &Arc<Identity> {
+		self.shared.get_or_init(|| {
+			Arc::new(Identity {
+				waker: self.waker.clone(),
+				recorded: Mutex::new(SmallVec::new()),
+			})
+		})
 	}
 
 	/// Poll a foreign [`Future`] against this waiter, so it re-wakes the enclosing
@@ -90,6 +153,10 @@ impl Clone for Waiter {
 	}
 }
 
+/// Source of unique [`WaiterList`] ids, so a waiter's recorded registrations can
+/// never confuse two lists (ids are handed out once and never reused).
+static NEXT_LIST_ID: AtomicU64 = AtomicU64::new(0);
+
 /// A list of weak wakers waiting for notification.
 ///
 /// Slots live inline (up to `INLINE_WAITERS`) and only spill to the heap
@@ -97,9 +164,14 @@ impl Clone for Waiter {
 /// collection across many `register` calls so the list doesn't grow
 /// unboundedly while keeping per-call cost O(1).
 pub struct WaiterList {
-	entries: SmallVec<[Weak<Waker>; INLINE_WAITERS]>,
+	entries: SmallVec<[Weak<Identity>; INLINE_WAITERS]>,
 	/// Rotating cursor for opportunistic GC on `register`.
 	cursor: usize,
+	/// Never-reused identity for this list, paired with `epoch` in waiter records.
+	id: u64,
+	/// Bumped on every drain. A waiter whose record carries the current epoch is
+	/// still registered: live entries only ever leave through a drain.
+	epoch: u64,
 }
 
 impl WaiterList {
@@ -108,37 +180,55 @@ impl WaiterList {
 		Self {
 			entries: SmallVec::new(),
 			cursor: 0,
+			id: NEXT_LIST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+			epoch: 0,
 		}
 	}
 
 	/// Register a waiter. Idempotent: a waiter already in the list stays as one entry.
 	///
-	/// The dedup scan compares allocation addresses only. A `Weak` in the list keeps
-	/// its allocation alive even after the owner drops, so an address can never be
-	/// recycled out from under an entry, and equal pointers always mean the same
-	/// waiter. No refcounts are touched and no foreign cache lines are read, which is
-	/// what makes the steady-state re-register (the hot path) a short scan over
-	/// contiguous memory.
+	/// The cost is O(1) whenever the waiter's own records settle membership, which is
+	/// every steady state: still registered since the last drain (a re-poll while
+	/// parked) returns immediately, and registered before the last drain (rebuilding
+	/// after a wake) appends immediately. Only a waiter with no record of this list
+	/// falls back to a membership scan: pointer equality over contiguous entries,
+	/// exact because a `Weak` pins its allocation's address, so an equal pointer
+	/// always means the same waiter. The scan too is skipped when the waiter is
+	/// registered nowhere at all (one atomic load on its own allocation).
 	///
-	/// A miss also performs a small, bounded amount of garbage collection: probes the
-	/// slot at the rotating cursor, replacing it in place if dead. The cursor advances
-	/// on each append so the probe window covers the whole list over time.
+	/// An append also performs a small, bounded amount of garbage collection: probes
+	/// the slot at the rotating cursor, replacing it in place if dead. The cursor
+	/// advances on each append so the probe window covers the whole list over time.
 	pub fn register(&mut self, waiter: &Waiter) {
 		let shared = waiter.shared();
-		let ptr = Arc::as_ptr(shared);
 
-		// Already registered: nothing to do. This is what lets `Park` keep reusing a
-		// still-registered waiter instead of retiring it every poll.
-		if self.entries.iter().any(|entry| std::ptr::eq(entry.as_ptr(), ptr)) {
-			return;
+		match shared.presume(self.id, self.epoch) {
+			// Still registered since the last drain: nothing to do. This is what
+			// lets `Park` keep reusing a still-registered waiter instead of
+			// retiring it every poll.
+			Presence::Present => return,
+
+			// Provably not in the list: straight to the append.
+			Presence::Absent => {}
+
+			// No record either way, so membership needs the scan, except when the
+			// waiter is registered nowhere at all.
+			Presence::Unknown => {
+				if Arc::weak_count(shared) > 0 {
+					let ptr = Arc::as_ptr(shared);
+					if self.entries.iter().any(|entry| std::ptr::eq(entry.as_ptr(), ptr)) {
+						return;
+					}
+				}
+			}
 		}
 
 		let new_weak = Arc::downgrade(shared);
 
 		for _ in 0..self.entries.len().min(2) {
 			if self.entries[self.cursor].strong_count() == 0 {
-				// Reuse the dead slot in place. Each Waiter owns a
-				// unique Arc<Waker>, so strong_count == 0 uniquely
+				// Reuse the dead slot in place. Each Waiter owns a unique
+				// identity allocation, so strong_count == 0 uniquely
 				// identifies a slot whose owner has been dropped.
 				self.entries[self.cursor] = new_weak;
 				return;
@@ -152,17 +242,23 @@ impl WaiterList {
 	/// Drain all entries into a new [`WaiterList`], leaving this one empty.
 	pub fn take(&mut self) -> Self {
 		self.cursor = 0;
+		self.epoch += 1;
 		Self {
 			entries: std::mem::take(&mut self.entries),
 			cursor: 0,
+			// The drained snapshot is only ever woken, never registered with, so it
+			// gets an id of its own rather than impersonating this list.
+			id: NEXT_LIST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+			epoch: 0,
 		}
 	}
 
 	/// Wake all live waiters, draining the list.
 	pub fn wake(&mut self) {
 		self.cursor = 0;
-		for waker in self.entries.drain(..).filter_map(|w| w.upgrade()) {
-			waker.wake_by_ref();
+		self.epoch += 1;
+		for identity in self.entries.drain(..).filter_map(|w| w.upgrade()) {
+			identity.waker.wake_by_ref();
 		}
 	}
 }
@@ -788,6 +884,46 @@ mod tests {
 		let other = Waiter::new(Waker::noop().clone());
 		other.register(&mut list);
 		assert_eq!(list.entries.len(), 2);
+	}
+
+	#[test]
+	fn dedup_survives_record_eviction() {
+		// More lists than the identity keeps records for: the evicted ones fall back
+		// to the scan, which must still find the registration.
+		let waiter = Waiter::new(Waker::noop().clone());
+		let mut lists: Vec<_> = (0..2 * RECORDED_LISTS).map(|_| WaiterList::new()).collect();
+		for list in &mut lists {
+			waiter.register(list);
+		}
+
+		// Re-registering must not stack anywhere, recorded or evicted alike.
+		for list in lists.iter_mut().rev() {
+			waiter.register(list);
+			assert_eq!(list.entries.len(), 1, "re-registration stacked a duplicate");
+		}
+	}
+
+	#[test]
+	fn a_drain_invalidates_the_record() {
+		let waiter = Waiter::new(Waker::noop().clone());
+		let mut list = WaiterList::new();
+
+		// A wake drains the registration; the stale record must not convince the
+		// next register that it is still present, or its wakeup is lost.
+		waiter.register(&mut list);
+		list.wake();
+		assert_eq!(list.entries.len(), 0);
+		waiter.register(&mut list);
+		assert_eq!(list.entries.len(), 1);
+		assert!(list.entries[0].strong_count() > 0, "the registration must be live");
+
+		// Same for a drain via take.
+		let taken = list.take();
+		assert_eq!(list.entries.len(), 0);
+		drop(taken);
+		waiter.register(&mut list);
+		assert_eq!(list.entries.len(), 1);
+		assert!(list.entries[0].strong_count() > 0, "the registration must be live");
 	}
 
 	#[test]

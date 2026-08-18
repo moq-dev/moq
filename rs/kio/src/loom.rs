@@ -254,39 +254,58 @@ fn queue_close_wakes_a_parked_pop() {
 }
 
 /// A poll parked on two lists is re-woken by one while still registered with the
-/// other. The re-poll reuses the parked waiter, so its re-registration must dedup
-/// rather than stack, and the second list's wake must still reach it.
+/// other. The re-poll reuses the parked waiter, so re-registering into the drained
+/// list must actually land (not be skipped as a false duplicate), and re-registering
+/// into the still-parked list must dedup rather than stack.
+///
+/// The terminal wake is on the *drained* list, so an execution whose re-poll fails
+/// to re-register there parks forever, which loom reports as a deadlock. `parked` is
+/// never woken at all: it exists to keep the waiter's registrations live across
+/// re-polls, which is exactly the state the old code retired on.
 #[test]
-fn a_reused_waiter_hears_the_second_list() {
+fn a_reused_waiter_hears_the_drained_list_again() {
 	loom::model(|| {
-		let first = Fan::new();
-		let second = Fan::new();
+		let woken = Fan::new();
+		let parked = Fan::new();
 		let done = Arc::new(AtomicBool::new(false));
 
 		let waker = {
-			let first = first.clone();
-			let second = second.clone();
+			let woken = woken.clone();
 			let done = done.clone();
 
 			thread::spawn(move || {
-				first.wake();
+				// Drains `woken`; a re-poll now re-registers while still parked on
+				// `parked`.
+				woken.wake();
 				done.store(true, Ordering::SeqCst);
-				second.wake();
+				// Must reach the re-registered waiter, or the model deadlocks.
+				woken.wake();
 			})
 		};
 
-		// Register with both before reading `done`, as in `a_held_wake_is_never_lost`:
-		// a re-poll triggered by `first` re-registers a waiter that is still parked on
-		// `second`.
-		block_on(wait(|waiter| {
-			first.register(waiter);
-			second.register(waiter);
+		// Register before reading `done`, as in `a_held_wake_is_never_lost`: the
+		// other order has a window where the store and both wakes land between the
+		// read and the registration.
+		//
+		// The closure holds its own waiter rather than using the parked one: loom's
+		// `block_on` waker fails `will_wake` between polls (its vtable is a
+		// const-promoted static, duplicated across codegen units in release builds),
+		// so `Park` retires every poll under loom and would never model the reuse
+		// this test exists for. Waking the first poll's waker still unparks the
+		// task, so a stable identity is safe here.
+		block_on({
+			let mut stable = None;
+			wait(move |parked_waiter| {
+				let waiter = stable.get_or_insert_with(|| Waiter::new(parked_waiter.waker().clone()));
+				woken.register(waiter);
+				parked.register(waiter);
 
-			match done.load(Ordering::SeqCst) {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
-			}
-		}));
+				match done.load(Ordering::SeqCst) {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				}
+			})
+		});
 
 		waker.join().unwrap();
 	});
