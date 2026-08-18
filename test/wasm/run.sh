@@ -65,6 +65,7 @@ FLAVOURS=(
 TMP=$(mktemp -d)
 RELAY_PIDS=()
 
+# shellcheck disable=SC2329  # invoked indirectly via 'trap cleanup EXIT'
 cleanup() {
     local pid
     for pid in ${RELAY_PIDS[@]+"${RELAY_PIDS[@]}"}; do
@@ -137,9 +138,11 @@ for flavour in "${FLAVOURS[@]}"; do
     "$RELAY" "${args[@]}" >"$TMP/relay-$name.log" 2>&1 &
     RELAY_PIDS+=($!)
 
-    for _ in $(seq 1 60); do
+    # Polled tight rather than on a half-second tick: a relay binds in about
+    # 130ms, so a coarse interval spends most of the wait asleep, three times over.
+    for _ in $(seq 1 600); do
         curl -sf "$url/certificate.sha256" >/dev/null 2>&1 && break
-        sleep 0.5
+        sleep 0.05
     done
     if ! curl -sf "$url/certificate.sha256" >/dev/null 2>&1; then
         echo "$name relay never became ready" >&2
