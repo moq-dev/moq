@@ -51,7 +51,7 @@ export interface CaseResult {
 	ok: boolean;
 	/** The failure message, when it didn't. */
 	error?: string;
-	/** Set when this case is a known failure here, naming the issue that tracks it. */
+	/** Set when this failure is the known one for this relay, naming its issue. */
 	known?: string;
 }
 
@@ -237,14 +237,29 @@ function expectBytes(got: Uint8Array, want: Uint8Array, where: string): void {
 	}
 }
 
+/** An expected failure: the issue that tracks it, and how to recognize it. */
+interface Known {
+	/** The issue tracking the bug, e.g. "#2903". */
+	issue: string;
+	/**
+	 * Substring the failure has to contain to count as this bug.
+	 *
+	 * Excusing a whole case by name would excuse every future failure of it too,
+	 * which would quietly retire the coverage: an unrelated regression in
+	 * `consume`, `subscribe`, or frame copying would land green under the same
+	 * marker. Anything that doesn't match is reported as the new failure it is.
+	 */
+	error: string;
+}
+
 interface Case {
 	name: string;
 	/**
-	 * Relay flavours where this case is expected to fail, mapped to the issue that
-	 * tracks why. The driver reports those as `known`, and reports a pass as a
-	 * failure, so the marker has to be removed once the bug is fixed.
+	 * Relay flavours where this case is expected to fail. The driver reports a
+	 * matching failure as `known`, and reports a pass as a failure, so the marker
+	 * has to be removed once the bug is fixed.
 	 */
-	known?: Record<string, string>;
+	known?: Record<string, Known>;
 	run: (wasm: Wasm, relay: RelayFixture) => Promise<void>;
 }
 
@@ -269,8 +284,9 @@ const CASES: Case[] = [
 		// for that path then reads as a new publisher and detaches the live source,
 		// killing the subscription mid-read. moq-lite has the same rule but stamps the
 		// upstream session's id when the chain has none, so it never reaches it.
-		// See https://github.com/moq-dev/moq/issues/2903.
-		known: { ietf: "#2903" },
+		// See https://github.com/moq-dev/moq/issues/2903. The detached source surfaces
+		// as the recv stream being dropped mid-read, which is the signature below.
+		known: { ietf: { issue: "#2903", error: "dropped" } },
 		run: async (wasm, relay) => {
 			const path = `wasm-test/${relay.name}`;
 			await withPublisher(relay, path, async () => {
@@ -343,10 +359,12 @@ async function run(config: Config): Promise<CaseResult[]> {
 						);
 					}),
 				]);
-				results.push({ name, ok: true, ...(known ? { known } : {}) });
+				// A pass still carries the marker, so the driver can fail on it.
+				results.push({ name, ok: true, ...(known ? { known: known.issue } : {}) });
 			} catch (err) {
 				const error = err instanceof Error ? err.message : String(err);
-				results.push({ name, ok: false, error, ...(known ? { known } : {}) });
+				const expected = known !== undefined && error.includes(known.error);
+				results.push({ name, ok: false, error, ...(expected ? { known: known.issue } : {}) });
 			} finally {
 				clearTimeout(timer);
 			}

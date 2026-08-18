@@ -84,8 +84,17 @@ try {
 
 	await page.goto(`http://127.0.0.1:${server.port}/`, { waitUntil: "load" });
 
-	// The page bounds each case itself; this only catches a wedged evaluate.
-	const results: CaseResult[] = await page.evaluate((cfg) => window.moqWasmTest(cfg), config);
+	// The page bounds each case itself, so this only covers a wedge outside that
+	// loop: the wasm module never loading, or evaluate never returning. Generous
+	// on purpose, since the per-case budget is the tight one and a whole suite is
+	// seconds. Without it the job would sit until the workflow's own timeout.
+	const suiteTimeoutMs = timeoutMs * 10;
+	const results: CaseResult[] = await Promise.race([
+		page.evaluate((cfg) => window.moqWasmTest(cfg), config),
+		new Promise<never>((_resolve, reject) =>
+			setTimeout(() => reject(new Error(`suite did not finish within ${suiteTimeoutMs}ms`)), suiteTimeoutMs),
+		),
+	]);
 
 	let failed = 0;
 	let known = 0;
@@ -112,6 +121,8 @@ try {
 	if (fatal.length > 0) summary.push(`${fatal.length} fatal`);
 	console.log(summary.join(", "));
 	code = failed === 0 && fatal.length === 0 ? 0 : 1;
+} catch (err) {
+	console.log(`  FAIL  ${err instanceof Error ? err.message : String(err)}`);
 } finally {
 	await browser.close().catch(() => {});
 	server.stop(true);

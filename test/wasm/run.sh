@@ -45,14 +45,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ "$TIMEOUT" =~ ^[0-9]+(\.[0-9]+)?$ ]] || {
+# Zero is rejected along with the non-numeric: it parses, but every case then
+# times out on the first tick, which reads as nine broken bindings.
+if [[ ! "$TIMEOUT" =~ ^[0-9]+(\.[0-9]+)?$ ]] || [[ "$TIMEOUT" =~ ^0+(\.0+)?$ ]]; then
     echo "error: timeout must be a positive number (got '$TIMEOUT')" >&2
     exit 2
-}
-[[ "$PORT" =~ ^[0-9]+$ ]] || {
-    echo "error: port must be numeric (got '$PORT')" >&2
-    exit 2
-}
+fi
 
 # name:version-flag:expected-version. An empty flag leaves the relay at its
 # defaults, which is the ALPN both sides prefer.
@@ -61,6 +59,14 @@ FLAVOURS=(
     "ietf:moq-transport-19:moq-transport-19"
     "setup:moq-lite-02:moq-lite-02"
 )
+
+# The relays take PORT and the next few, so the whole span has to be bindable.
+# Port 0 is the trap worth naming: the relay would bind an arbitrary port while
+# this script polls 0 forever.
+if [[ ! "$PORT" =~ ^[0-9]+$ ]] || ((PORT < 1024 || PORT + ${#FLAVOURS[@]} - 1 > 65535)); then
+    echo "error: port must be 1024..$((65535 - ${#FLAVOURS[@]} + 1)) (got '$PORT')" >&2
+    exit 2
+fi
 
 TMP=$(mktemp -d)
 RELAY_PIDS=()

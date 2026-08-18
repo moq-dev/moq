@@ -6,16 +6,20 @@ name: WASM
 # compile gate: it catches a moq-net change that stops the bindings building,
 # never one that stops them working. See test/wasm/README.md.
 #
-# Narrow trigger, like obs.yml and swift.yml. moq-net is in the filter because
-# that is the break this exists to catch in review: the bindings are a thin
-# wrapper over it, and every other gate compiles them to nothing. js/net is
-# deliberately out, even though the harness publishes with it: it is a fixture
-# with its own unit tests, and naming it would run a browser on nearly every
-# JS pull request.
+# Narrow trigger, like obs.yml and swift.yml. The filter covers what the bindings
+# are built out of: moq-net, because that is the break this exists to catch in
+# review (they are a thin wrapper over it, and every other gate compiles them to
+# nothing), and kio underneath it, because a lost wakeup or a timer regression
+# reaches the browser through moq-net without touching a file named here
+# otherwise. Those two are the whole in-repo dependency graph of the crate.
 #
-# No nightly counterpart. Unlike obs.yml, whose linked inputs a path list can't
-# enumerate, everything that can break these bindings is a file under one of
-# the paths below.
+# Two things the harness needs are deliberately out, because they are fixtures
+# rather than the code under test, and both are already gated elsewhere:
+# `js/net/**` (the publisher; its own unit tests plus the smoke matrix) and
+# `rs/moq-relay/**` (the server; the Rust test suite plus smoke). Naming either
+# would launch a browser on a large share of pull requests. The cost is that a
+# break arriving through one of them lands on `main` and shows up the next time
+# this runs.
 
 permissions:
   contents: read
@@ -28,6 +32,7 @@ on:
     paths:
       - "rs/moq-wasm/**"
       - "rs/moq-net/**"
+      - "rs/kio/**"
       - "js/wasm/**"
       - "test/wasm/**"
       - "test/justfile"

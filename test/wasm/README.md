@@ -76,8 +76,14 @@ uncovered here.
 ### Known failures
 
 A case can name relay flavours where it is expected to fail, with the issue that
-tracks why. Those print as `known` and do not fail the run; a case that starts
-passing does, so the marker has to be removed with the fix.
+tracks why and a substring the failure has to contain. A matching failure prints
+as `known` and does not fail the run. Anything else does: a failure that doesn't
+match the signature is reported as the new regression it is, and so is a case
+that starts passing, so the marker has to be removed with the fix.
+
+The signature is the point. Excusing a case by name alone would retire its
+coverage, since an unrelated break in `consume`, `subscribe`, or frame copying
+would land green under the same marker.
 
 ## Not covered
 
