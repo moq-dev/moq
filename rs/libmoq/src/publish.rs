@@ -3,22 +3,19 @@ use moq_mux::import;
 
 use crate::{Error, Id, NonZeroSlab};
 
-/// A media importer fed whole chunks: either a single codec track or a container
-/// that may publish several tracks. The format string picks which at creation.
-enum Media {
-	// Boxed because the codec splitters/imports make this variant much larger
-	// than the (already boxed) container one.
-	Track(Box<import::Track<Extra>>),
-	Container(import::Container<Extra>),
-}
-
 #[derive(Default)]
 pub struct Publish {
 	/// Active broadcast producers for publishing.
 	broadcasts: NonZeroSlab<(moq_net::broadcast::Producer, moq_mux::catalog::Producer<Extra>)>,
 
-	/// Active media encoders/decoders for publishing.
-	media: NonZeroSlab<Media>,
+	/// Single-codec media importers, fed timestamped frames.
+	// Boxed because the codec splitters/imports are much larger than the container ones.
+	media: NonZeroSlab<Box<import::Track<Extra>>>,
+
+	/// Container importers, fed whole chunks. A separate space from `media` because a
+	/// container publishes several tracks and carries its own timing, so it takes no
+	/// per-frame timestamp.
+	containers: NonZeroSlab<import::Container<Extra>>,
 
 	/// Raw track producers (no media/container/catalog framing).
 	tracks: NonZeroSlab<moq_net::track::Producer>,
@@ -81,60 +78,50 @@ impl Publish {
 		Ok(())
 	}
 
-	pub fn media(&mut self, broadcast: Id, format: &str, init: &[u8], label: Option<&str>) -> Result<Id, Error> {
+	pub fn audio(&mut self, broadcast: Id, init: import::AudioInit) -> Result<Id, Error> {
 		let (broadcast, catalog) = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let mut broadcast = broadcast.clone();
+		let name = broadcast.unique_name(&format!(".{}", init.format));
+		let request = broadcast.reserve_track(name)?;
 
-		let mut media_init = import::Init::new(format, init.to_vec());
-		media_init.label = label.map(str::to_string);
+		let track = import::Track::audio(request, catalog.reserve(), init)?;
+		let id = self.media.insert(Box::new(track))?;
+		Ok(id)
+	}
 
-		// A container may publish several tracks; a single codec fills one reserved
-		// track. Try the container first so a codec format doesn't reserve a stray
-		// track on the way to being recognized.
-		let media = match import::Container::new(broadcast.clone(), catalog.reserve(), &media_init) {
-			Ok(container) => Media::Container(container),
-			Err(moq_mux::Error::UnknownFormat(_)) => {
-				let mut broadcast = broadcast.clone();
-				let name = broadcast.unique_name(&format!(".{format}"));
-				let request = broadcast.reserve_track(name)?;
-				match import::Track::new(request, catalog.reserve(), media_init) {
-					Ok(track) => Media::Track(Box::new(track)),
-					Err(moq_mux::Error::UnknownFormat(_)) => return Err(Error::UnknownFormat(format.to_string())),
-					Err(err) => return Err(err.into()),
-				}
-			}
-			Err(err) => return Err(err.into()),
-		};
+	pub fn video(&mut self, broadcast: Id, init: import::VideoInit) -> Result<Id, Error> {
+		let (broadcast, catalog) = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let mut broadcast = broadcast.clone();
+		let name = broadcast.unique_name(&format!(".{}", init.format));
+		let request = broadcast.reserve_track(name)?;
 
-		let id = self.media.insert(media)?;
+		let track = import::Track::video(request, catalog.reserve(), init)?;
+		let id = self.media.insert(Box::new(track))?;
+		Ok(id)
+	}
+
+	pub fn container(&mut self, broadcast: Id, init: import::ContainerInit) -> Result<Id, Error> {
+		let (broadcast, catalog) = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let container = import::Container::new(broadcast.clone(), catalog.reserve(), &init)?;
+		let id = self.containers.insert(container)?;
 		Ok(id)
 	}
 
 	pub fn media_frame(&mut self, media: Id, data: &[u8], timestamp: hang::container::Timestamp) -> Result<(), Error> {
-		let media = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
-
-		match media {
-			Media::Track(track) => track.decode(data, Some(timestamp))?,
-			Media::Container(container) => container.decode(data)?,
-		}
-
+		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
+		track.decode(data, Some(timestamp))?;
 		Ok(())
 	}
 
 	/// Draw a group boundary on this media importer.
 	///
-	/// On a codec track this ends the open group; the next frame starts a new one. Audio has no
-	/// boundary of its own (every frame is independently decodable), so this is the only thing
-	/// that gives it groups: call it per frame for one group (one QUIC stream) forwarded without
-	/// waiting, or at a segment cadence to align with video.
-	///
-	/// On a container importer this declares the start of a new segment, which rolls a group on
-	/// every track the container publishes.
+	/// This ends the open group; the next frame starts a new one. Audio has no boundary of its own
+	/// (every frame is independently decodable), so this is the only thing that gives it groups:
+	/// call it per frame for one group (one QUIC stream) forwarded without waiting, or at a segment
+	/// cadence to align with video.
 	pub fn media_cut(&mut self, media: Id) -> Result<(), Error> {
-		let media = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
-		match media {
-			Media::Track(track) => track.cut(None)?,
-			Media::Container(container) => container.cut(),
-		}
+		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
+		track.cut(None)?;
 		Ok(())
 	}
 
@@ -144,20 +131,43 @@ impl Publish {
 	/// have to be deterministic: two encoders publishing the same content align per GOP so a
 	/// consumer can fail over between them.
 	pub fn media_seek(&mut self, media: Id, sequence: u64) -> Result<(), Error> {
-		let media = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
-		match media {
-			Media::Track(track) => track.seek(sequence)?,
-			Media::Container(container) => container.seek(sequence)?,
-		}
+		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
+		track.seek(sequence)?;
 		Ok(())
 	}
 
 	pub fn media_finish(&mut self, media: Id) -> Result<(), Error> {
-		let mut media = self.media.remove(media).ok_or(Error::MediaNotFound)?;
-		match &mut media {
-			Media::Track(track) => track.finish()?,
-			Media::Container(container) => container.finish()?,
-		}
+		let mut track = self.media.remove(media).ok_or(Error::MediaNotFound)?;
+		track.finish()?;
+		Ok(())
+	}
+
+	/// Write a whole chunk of container bytes.
+	///
+	/// No timestamp: a container carries its tracks' timing itself.
+	pub fn container_write(&mut self, container: Id, data: &[u8]) -> Result<(), Error> {
+		let container = self.containers.get_mut(container).ok_or(Error::MediaNotFound)?;
+		container.decode(data)?;
+		Ok(())
+	}
+
+	/// Declare that the next chunk starts a new segment, rolling a group on every track.
+	pub fn container_cut(&mut self, container: Id) -> Result<(), Error> {
+		let container = self.containers.get_mut(container).ok_or(Error::MediaNotFound)?;
+		container.cut();
+		Ok(())
+	}
+
+	/// Start a new segment and number its groups `sequence`.
+	pub fn container_seek(&mut self, container: Id, sequence: u64) -> Result<(), Error> {
+		let container = self.containers.get_mut(container).ok_or(Error::MediaNotFound)?;
+		container.seek(sequence)?;
+		Ok(())
+	}
+
+	pub fn container_finish(&mut self, container: Id) -> Result<(), Error> {
+		let mut container = self.containers.remove(container).ok_or(Error::MediaNotFound)?;
+		container.finish()?;
 		Ok(())
 	}
 

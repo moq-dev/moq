@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `moq_publish_media` splits into `moq_publish_audio`, `moq_publish_video`, and
+  `moq_publish_container`, taking `moq_audio_init`, `moq_video_init`, and `moq_container_init`.
+  Each carries only the fields its kind can honor, so a label on a container no longer compiles.
+- Formats are enums (`moq_audio_format`, `moq_video_format`, `moq_container_format`) rather than
+  strings. As with `moq_audio_sample_format`, the struct field is a `u32` and an out-of-range code
+  is rejected, since matching an invalid discriminant as a Rust enum would be undefined behavior.
+- A container has its own handle space and `moq_publish_container_write` / `_cut` / `_seek` /
+  `_finish`. `write` takes no timestamp: a container carries its tracks' timing itself, and
+  `moq_publish_media_frame` used to accept one and drop it. A handle from one family is rejected by
+  the other's calls.
+- The raw encoder entry points are `moq_encode_audio*` and `moq_encode_video*`, matching their
+  existing `moq_video_encoder_frame` naming and freeing `moq_publish_audio` / `moq_publish_video`
+  for the encoded path.
+- `moq_audio_format` (the PCM sample layout) is now `moq_audio_sample_format`, matching
+  `moq_video_pixel_format`.
+
 ### Added
 
 - Publish and consume human-readable audio and video rendition labels.

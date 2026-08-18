@@ -22,7 +22,7 @@ use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
 
 // ---- C-visible types ----
 
-/// Pixel layout of the raw frames handed to [`moq_publish_video_raw_frame`].
+/// Pixel layout of the raw frames handed to [`moq_encode_video_frame`].
 ///
 /// The enum is exposed in the C header for readability, but ABI fields that
 /// carry it are typed `u32`. A C caller passing an unknown discriminant gets
@@ -39,7 +39,7 @@ pub enum moq_video_pixel_format {
 	MOQ_VIDEO_PIXEL_FORMAT_RGBA = 1,
 }
 
-/// Output video codec for [`moq_publish_video_raw`].
+/// Output video codec for [`moq_encode_video`].
 ///
 /// Not every codec has a backend on every machine: H.265 is hardware-only, so
 /// publishing it fails where no hardware encoder is available.
@@ -53,7 +53,7 @@ pub enum moq_video_codec {
 	MOQ_VIDEO_CODEC_H265 = 1,
 }
 
-/// Which encoder implementation [`moq_publish_video_raw`] should use.
+/// Which encoder implementation [`moq_encode_video`] should use.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
@@ -68,7 +68,7 @@ pub enum moq_video_encoder_kind {
 	MOQ_VIDEO_ENCODER_KIND_NAMED = 3,
 }
 
-/// Raw frame layout the caller hands to [`moq_publish_video_raw_frame`], plus
+/// Raw frame layout the caller hands to [`moq_encode_video_frame`], plus
 /// the resolution and rate the encoder is opened at. Every published frame must
 /// match `width` x `height`; scale before publishing if your source moves.
 #[repr(C)]
@@ -85,7 +85,7 @@ pub struct moq_video_encoder_input {
 	pub framerate: u32,
 }
 
-/// Codec-side configuration for [`moq_publish_video_raw`]. Every knob spells
+/// Codec-side configuration for [`moq_encode_video`]. Every knob spells
 /// "unset" as 0.
 #[repr(C)]
 #[allow(non_camel_case_types)]
@@ -106,7 +106,7 @@ pub struct moq_video_encoder_output {
 	pub encoder_len: usize,
 }
 
-/// One raw frame handed to [`moq_publish_video_raw_frame`].
+/// One raw frame handed to [`moq_encode_video_frame`].
 ///
 /// Pixel format and resolution are fixed by [`moq_video_encoder_input`] at
 /// publish time, so a frame carries neither: `data` is exactly one picture in
@@ -475,7 +475,7 @@ unsafe fn encoder_kind(output: &moq_video_encoder_output) -> Result<moq_video::e
 /// - `output->encoder` must point to `output->encoder_len` bytes of UTF-8 when
 ///   `output->kind` is `MOQ_VIDEO_ENCODER_KIND_NAMED`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_video_raw(
+pub unsafe extern "C" fn moq_encode_video(
 	broadcast: u32,
 	input: *const moq_video_encoder_input,
 	output: *const moq_video_encoder_output,
@@ -523,7 +523,7 @@ pub unsafe extern "C" fn moq_publish_video_raw(
 /// - `frame` must point to a valid [`moq_video_encoder_frame`].
 /// - `frame->data` must point to `frame->data_size` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_video_raw_frame(producer: u32, frame: *const moq_video_encoder_frame) -> i32 {
+pub unsafe extern "C" fn moq_encode_video_frame(producer: u32, frame: *const moq_video_encoder_frame) -> i32 {
 	ffi::enter(move || {
 		let producer = ffi::parse_id(producer)?;
 		let frame = unsafe { frame.as_ref() }.ok_or(Error::InvalidPointer)?;
@@ -550,7 +550,7 @@ pub unsafe extern "C" fn moq_publish_video_raw_frame(producer: u32, frame: *cons
 /// starts a new one at it. Calling this repeatedly before that frame arrives cuts
 /// once, not several times.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_video_raw_cut(producer: u32) -> i32 {
+pub extern "C" fn moq_encode_video_cut(producer: u32) -> i32 {
 	ffi::enter(move || {
 		let producer = ffi::parse_id(producer)?;
 		let producer = State::lock().video.producer(producer)?;
@@ -571,7 +571,7 @@ pub extern "C" fn moq_publish_video_raw_cut(producer: u32) -> i32 {
 /// not fatal: the encoder keeps running at its current rate, so stop adapting
 /// rather than stop publishing.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_video_raw_bitrate(producer: u32, bitrate: u64) -> i32 {
+pub extern "C" fn moq_encode_video_bitrate(producer: u32, bitrate: u64) -> i32 {
 	ffi::enter(move || {
 		let producer = ffi::parse_id(producer)?;
 		let producer = State::lock().video.producer(producer)?;
@@ -587,7 +587,7 @@ pub extern "C" fn moq_publish_video_raw_bitrate(producer: u32, bitrate: u64) -> 
 ///
 /// The handle is released, so nothing can be published to it afterwards.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_video_raw_finish(producer: u32) -> i32 {
+pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 	ffi::enter(move || {
 		let producer = ffi::parse_id(producer)?;
 		// The id is dropped first, so nothing new queues behind the drain; whatever
