@@ -83,17 +83,16 @@ pub struct Config {
 }
 
 impl Config {
-	/// Fold every deprecated spelling into its canonical field, reporting each once.
+	/// Refuse a config parsed from released spellings, naming what replaced each.
 	///
-	/// Called right after `Log::init` and before anything reads the config, so a
-	/// released `--client-*` spelling reaches the dial instead of being parsed and
-	/// dropped. The folds are silent, hence the separate report.
-	fn resolve(&mut self) {
-		for deprecation in self.client.deprecations().into_iter().chain(self.quic.deprecations()) {
-			tracing::warn!("{deprecation}");
-		}
-		self.client = self.client.resolved();
-		self.quic = self.quic.resolved();
+	/// Checked before anything reads the config: those spellings land on hidden
+	/// fields that nothing honors, so continuing would dial with settings the
+	/// command line never asked for.
+	fn check_deprecated(&self) -> Result<()> {
+		let mut deprecated = self.client.deprecated();
+		deprecated.extend(self.quic.deprecated());
+		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
+		Ok(())
 	}
 }
 
@@ -461,9 +460,9 @@ fn run_emulator(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-	let mut config = Config::parse();
+	let config = Config::parse();
 	config.log.init()?;
-	config.resolve();
+	config.check_deprecated()?;
 
 	#[cfg(feature = "jemalloc")]
 	let jemalloc = moq_tokio::jemalloc::run();
@@ -499,11 +498,13 @@ mod tests {
 	///
 	/// The argv is a copy of `demo/boy/justfile`, not a read of it, so this pins the
 	/// binary's flag surface rather than the two staying in sync.
+	/// `--connect` is the only spelling that reaches the dial, and the URL has to
+	/// land where `run` reads it. A second required flag would leave it inert.
 	#[test]
 	fn matches_demo_invocation() {
-		let mut config = Config::try_parse_from([
+		let config = Config::try_parse_from([
 			"moq-boy",
-			"--client-connect",
+			"--connect",
 			"http://localhost:4443",
 			"--rom",
 			"rom/big2small.gb",
@@ -511,15 +512,33 @@ mod tests {
 			"localhost",
 		])
 		.expect("demo/boy/justfile invocation should parse");
-
-		// Through the same fold `main` runs, not a `resolved()` of its own: `run`
-		// reads `client.url` as a plain field, so a test that folds on its way to the
-		// assertion would pass while the binary dialed nothing.
-		config.resolve();
+		config.check_deprecated().expect("the demo uses current spellings");
 
 		let connect = config.client.url.expect("the connect URL should reach the dial config");
 		assert_eq!(connect.scheme(), "http");
 		assert_eq!(connect.host_str(), Some("localhost"));
 		assert_eq!(connect.port(), Some(4443));
+	}
+
+	/// The spelling the demo used to pass. It still parses, so the process can name
+	/// `--connect` rather than leave clap reporting an unexpected argument, but it
+	/// configures nothing and must stop the run.
+	#[test]
+	fn the_released_connect_spelling_is_refused() {
+		let config = Config::try_parse_from([
+			"moq-boy",
+			"--client-connect",
+			"http://localhost:4443",
+			"--rom",
+			"rom/big2small.gb",
+		])
+		.expect("the released spelling still parses");
+		assert_eq!(config.client.url, None);
+
+		let err = config.check_deprecated().expect_err("must refuse").to_string();
+		assert!(
+			err.contains("--client-connect / MOQ_CLIENT_CONNECT -> --connect / MOQ_CONNECT"),
+			"{err}"
+		);
 	}
 }

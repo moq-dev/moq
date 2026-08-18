@@ -142,29 +142,25 @@ pub(crate) struct Legacy {
 const DEFAULT_DELAY: time::Duration = time::Duration::from_millis(200);
 
 impl Config {
-	/// One warning line per released spelling in use.
-	///
-	/// Collected rather than logged so the caller picks the moment; see
-	/// [`crate::connect::Config::deprecations`].
-	pub(crate) fn deprecations(&self) -> Vec<String> {
-		let mut messages = Vec::new();
-		if self.enabled.is_none() && self.legacy.enabled.is_some() {
-			messages.push("--websocket-enabled is deprecated; use --connect-websocket-enabled".to_string());
+	/// The released spellings in use, each paired with what replaced it. Reached
+	/// through [`crate::connect::Config::deprecated`].
+	pub(crate) fn deprecated(&self) -> crate::Deprecated {
+		let mut found = crate::Deprecated::default();
+		if self.legacy.enabled.is_some() {
+			found.flag(
+				"--websocket-enabled",
+				Some("MOQ_CLIENT_WEBSOCKET_ENABLED"),
+				"--connect-websocket-enabled / MOQ_CONNECT_WEBSOCKET_ENABLED",
+			);
 		}
-		if self.delay.is_none() && self.legacy.delay.is_some() {
-			messages.push("--websocket-delay is deprecated; use --connect-websocket-delay".to_string());
+		if self.legacy.delay.is_some() {
+			found.flag(
+				"--websocket-delay",
+				Some("MOQ_CLIENT_WEBSOCKET_DELAY"),
+				"--connect-websocket-delay / MOQ_CONNECT_WEBSOCKET_DELAY",
+			);
 		}
-		messages
-	}
-
-	/// Fold the released env vars into the canonical fields. Idempotent and silent;
-	/// [`crate::connect::Config::deprecations`] reports what contributed.
-	pub fn resolved(&self) -> Self {
-		let mut resolved = self.clone();
-		resolved.enabled = self.enabled.or(self.legacy.enabled);
-		resolved.delay = self.delay.or(self.legacy.delay);
-		resolved.legacy = Legacy::default();
-		resolved
+		found
 	}
 
 	/// Whether the fallback runs at all, resolving the default.
@@ -572,21 +568,31 @@ mod legacy_tests {
 		Cli::parse_from(argv).websocket
 	}
 
-	/// The released env vars have hidden flags of their own; both spellings feed the
-	/// same fields once folded.
+	/// The released env vars have hidden flags of their own, so they are recognized
+	/// and reported rather than silently ignored.
 	#[test]
-	fn released_spellings_fold_in() {
-		let config = parse(&["--websocket-enabled=false", "--client-websocket-delay", "1s"]).resolved();
-		assert!(!config.resolved_enabled());
-		assert_eq!(config.resolved_delay(), time::Duration::from_secs(1));
+	fn released_spellings_are_reported_not_applied() {
+		let config = parse(&["--websocket-enabled=false", "--websocket-delay", "1s"]);
+		assert!(config.resolved_enabled(), "the released spelling must not turn it off");
+		assert_eq!(config.resolved_delay(), DEFAULT_DELAY);
 
-		// The canonical spelling wins.
-		let config = parse(&["--connect-websocket-delay", "2s", "--websocket-delay", "1s"]).resolved();
+		let reported = config.deprecated().to_string();
+		assert!(
+			reported.contains("--websocket-enabled / MOQ_CLIENT_WEBSOCKET_ENABLED -> --connect-websocket-enabled"),
+			"{reported}"
+		);
+		assert!(reported.contains("--websocket-delay"), "{reported}");
+	}
+
+	#[test]
+	fn canonical_spellings_apply() {
+		let config = parse(&["--connect-websocket-enabled=false", "--connect-websocket-delay", "2s"]);
+		assert!(config.deprecated().is_empty());
+		assert!(!config.resolved_enabled());
 		assert_eq!(config.resolved_delay(), time::Duration::from_secs(2));
-		assert!(config.resolved_enabled(), "unset means the default (enabled)");
 
 		// Neither given: the defaults, which no config file can be clobbered out of.
-		let config = parse(&[]).resolved();
+		let config = parse(&[]);
 		assert_eq!(config.delay, None);
 		assert_eq!(config.resolved_delay(), DEFAULT_DELAY);
 	}

@@ -163,9 +163,10 @@ pub struct Config {
 	#[arg(id = "quic-qlog", long = "quic-qlog", env = "MOQ_QUIC_QLOG")]
 	pub qlog: Option<PathBuf>,
 
-	/// The old role-prefixed spellings, kept parsing but hidden. Folded into the
-	/// canonical fields by [`Config::resolved`]. Not a TOML surface (config files
-	/// use the canonical names).
+	/// The old role-prefixed spellings, kept parsing but hidden. Never read as
+	/// settings: [`Config::deprecated`] names what replaced each one so a process
+	/// can say so and stop. Not a TOML surface (config files use the canonical
+	/// names).
 	#[command(flatten)]
 	#[serde(skip)]
 	pub(crate) legacy: Legacy,
@@ -314,93 +315,91 @@ pub(crate) struct Legacy {
 }
 
 impl Legacy {
-	/// The legacy flags in use, by canonical replacement, for one deprecation warning.
-	fn used(&self) -> Vec<&'static str> {
-		let mut used = Vec::new();
-		if self.client_max_streams.is_some() || self.server_max_streams.is_some() {
-			used.push("--quic-max-streams");
+	/// The released spellings in use, each paired with what replaced it.
+	///
+	/// The note is the same on every line and is the point of the message: these
+	/// knobs used to bound one direction, so a deployment moving to the shared
+	/// section is also widening what the value applies to.
+	fn deprecated(&self) -> crate::Deprecated {
+		const SHARED: &str = "now applies to dialed and accepted connections alike";
+
+		let mut found = crate::Deprecated::default();
+		for (used, old, env) in [
+			(
+				self.client_max_streams.is_some(),
+				"--client-quic-max-streams",
+				"MOQ_CLIENT_QUIC_MAX_STREAMS",
+			),
+			(
+				self.server_max_streams.is_some(),
+				"--server-quic-max-streams",
+				"MOQ_SERVER_QUIC_MAX_STREAMS",
+			),
+			(self.client_gso.is_some(), "--client-quic-gso", "MOQ_CLIENT_QUIC_GSO"),
+			(self.server_gso.is_some(), "--server-quic-gso", "MOQ_SERVER_QUIC_GSO"),
+			(
+				self.client_idle_timeout.is_some(),
+				"--client-quic-idle-timeout",
+				"MOQ_CLIENT_QUIC_IDLE_TIMEOUT",
+			),
+			(
+				self.server_idle_timeout.is_some(),
+				"--server-quic-idle-timeout",
+				"MOQ_SERVER_QUIC_IDLE_TIMEOUT",
+			),
+			(
+				self.client_keep_alive.is_some(),
+				"--client-quic-keep-alive",
+				"MOQ_CLIENT_QUIC_KEEP_ALIVE",
+			),
+			(
+				self.server_keep_alive.is_some(),
+				"--server-quic-keep-alive",
+				"MOQ_SERVER_QUIC_KEEP_ALIVE",
+			),
+			(
+				self.client_mtu_discovery.is_some(),
+				"--client-quic-mtu-discovery",
+				"MOQ_CLIENT_QUIC_MTU_DISCOVERY",
+			),
+			(
+				self.server_mtu_discovery.is_some(),
+				"--server-quic-mtu-discovery",
+				"MOQ_SERVER_QUIC_MTU_DISCOVERY",
+			),
+			(
+				self.client_congestion_control.is_some(),
+				"--client-quic-congestion-control",
+				"MOQ_CLIENT_QUIC_CONGESTION_CONTROL",
+			),
+			(
+				self.server_congestion_control.is_some(),
+				"--server-quic-congestion-control",
+				"MOQ_SERVER_QUIC_CONGESTION_CONTROL",
+			),
+			(self.client_qlog.is_some(), "--client-quic-qlog", "MOQ_CLIENT_QUIC_QLOG"),
+			(self.server_qlog.is_some(), "--server-quic-qlog", "MOQ_SERVER_QUIC_QLOG"),
+		] {
+			if used {
+				// `--client-quic-gso` -> `--quic-gso`, and the env var alongside it.
+				let (_, knob) = old.split_once("-quic-").expect("a --<role>-quic-* spelling");
+				let new = format!("--quic-{knob} / MOQ_QUIC_{}", knob.to_uppercase().replace('-', "_"));
+				found.changed(old, Some(env), &new, SHARED);
+			}
 		}
-		if self.client_gso.is_some() || self.server_gso.is_some() {
-			used.push("--quic-gso");
-		}
-		if self.client_idle_timeout.is_some() || self.server_idle_timeout.is_some() {
-			used.push("--quic-idle-timeout");
-		}
-		if self.client_keep_alive.is_some() || self.server_keep_alive.is_some() {
-			used.push("--quic-keep-alive");
-		}
-		if self.client_mtu_discovery.is_some() || self.server_mtu_discovery.is_some() {
-			used.push("--quic-mtu-discovery");
-		}
-		if self.client_congestion_control.is_some() || self.server_congestion_control.is_some() {
-			used.push("--quic-congestion-control");
-		}
-		if self.client_qlog.is_some() || self.server_qlog.is_some() {
-			used.push("--quic-qlog");
-		}
-		used
+		found
 	}
 }
 
 impl Config {
-	/// One warning line if any legacy role-prefixed spelling is in use.
+	/// Every released role-prefixed spelling this config was parsed from, each
+	/// paired with what replaced it.
 	///
-	/// Collected rather than logged, and separate from [`resolved`](Self::resolved),
-	/// so the fold stays a pure transform a caller can apply the moment it parses,
-	/// before it has a subscriber to warn to. Read these off the config as parsed:
-	/// the fold clears what they are derived from.
-	pub fn deprecations(&self) -> Vec<String> {
-		let used = self.legacy.used();
-		match used.is_empty() {
-			true => Vec::new(),
-			// Name the consequence, not just the rename: these knobs used to apply to
-			// one direction, so a value that only ever bounded outbound connections
-			// now bounds accepted ones too.
-			false => vec![format!(
-				"deprecated --client-quic-*/--server-quic-* flags in use; QUIC tuning is now one shared section applied to dialed and accepted connections alike, so these values now apply to both directions: {}",
-				used.join(", ")
-			)],
-		}
-	}
-
-	/// Fold the legacy role-prefixed spellings into the canonical fields.
-	///
-	/// The canonical spelling wins; between the legacy pair, the client spelling
-	/// wins (the roles now share one value, so a config that set both to
-	/// different values was relying on a distinction that no longer exists).
-	/// Idempotent, and silent: [`deprecations`](Self::deprecations) reports what
-	/// contributed.
-	pub fn resolved(&self) -> Self {
-		let legacy = &self.legacy;
-		Self {
-			max_streams: self
-				.max_streams
-				.or(legacy.client_max_streams)
-				.or(legacy.server_max_streams),
-			gso: self.gso.or(legacy.client_gso).or(legacy.server_gso),
-			idle_timeout: self
-				.idle_timeout
-				.or(legacy.client_idle_timeout)
-				.or(legacy.server_idle_timeout),
-			keep_alive: self
-				.keep_alive
-				.or(legacy.client_keep_alive)
-				.or(legacy.server_keep_alive),
-			mtu_discovery: self
-				.mtu_discovery
-				.or(legacy.client_mtu_discovery)
-				.or(legacy.server_mtu_discovery),
-			congestion_control: self
-				.congestion_control
-				.or(legacy.client_congestion_control)
-				.or(legacy.server_congestion_control),
-			qlog: self
-				.qlog
-				.clone()
-				.or(legacy.client_qlog.clone())
-				.or(legacy.server_qlog.clone()),
-			legacy: Legacy::default(),
-		}
+	/// A binary checks this before anything else and exits when it isn't empty. The
+	/// old spellings are parsed so the process can name their replacement, not so it
+	/// can honor them.
+	pub fn deprecated(&self) -> crate::Deprecated {
+		self.legacy.deprecated()
 	}
 
 	/// Reject knobs this build can't honor. Called when the endpoint is built.
@@ -414,47 +413,24 @@ impl Config {
 		validate_idle_timeout(self.idle_timeout)
 	}
 
-	/// Fill every unset knob from `fallback`, keeping the ones this config sets.
-	///
-	/// For merging a lower-precedence source, such as the released per-role
-	/// `[client.quic]` / `[server.quic]` tables into the shared section.
-	pub fn or(&self, fallback: &Self) -> Self {
-		Self {
-			max_streams: self.max_streams.or(fallback.max_streams),
-			gso: self.gso.or(fallback.gso),
-			idle_timeout: self.idle_timeout.or(fallback.idle_timeout),
-			keep_alive: self.keep_alive.or(fallback.keep_alive),
-			mtu_discovery: self.mtu_discovery.or(fallback.mtu_discovery),
-			congestion_control: self.congestion_control.or(fallback.congestion_control),
-			qlog: self.qlog.clone().or_else(|| fallback.qlog.clone()),
-			legacy: self.legacy.clone(),
-		}
-	}
-
 	/// The per-connection knobs with defaults applied, ready to hand to a backend.
-	///
-	/// Folds first, so a caller handing over a freshly parsed config can't lose the
-	/// legacy spellings. Every backend reads the knobs through here, which makes this
-	/// the one place the fold has to happen for all of them.
 	pub fn resolve(&self) -> Resolved {
-		let this = self.resolved();
-
 		// A zero keep-alive means "disabled"; anything else (including unset) keeps
 		// the connection warm, defaulting to 5s.
-		let keep_alive = match this.keep_alive {
+		let keep_alive = match self.keep_alive {
 			Some(d) if d.is_zero() => None,
 			Some(d) => Some(d),
 			None => Some(DEFAULT_KEEP_ALIVE),
 		};
 
 		Resolved {
-			max_streams: this.max_streams.unwrap_or(DEFAULT_MAX_STREAMS),
-			gso: this.gso,
-			idle_timeout: this.idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT),
+			max_streams: self.max_streams.unwrap_or(DEFAULT_MAX_STREAMS),
+			gso: self.gso,
+			idle_timeout: self.idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT),
 			keep_alive,
-			mtu_discovery: this.mtu_discovery.unwrap_or(false),
-			congestion_control: this.congestion_control,
-			qlog: this.qlog.clone(),
+			mtu_discovery: self.mtu_discovery.unwrap_or(false),
+			congestion_control: self.congestion_control,
+			qlog: self.qlog.clone(),
 		}
 	}
 }
@@ -549,16 +525,6 @@ mod tests {
 		Cli::parse_from(full).quic
 	}
 
-	/// Every backend reads the knobs through `resolve`, so the fold has to happen
-	/// there: `--client-quic-gso=false` reached `iroh::EndpointConfig::bind` as "GSO
-	/// on" while the flag itself parsed and warned about the rename.
-	#[test]
-	fn resolve_folds_the_released_spellings() {
-		let quic = parse(&["--client-quic-gso=false", "--server-quic-max-streams", "4096"]).resolve();
-		assert_eq!(quic.gso, Some(false));
-		assert_eq!(quic.max_streams, 4096);
-	}
-
 	#[test]
 	fn defaults_apply_when_unset() {
 		let quic = Config::default().resolve();
@@ -616,29 +582,36 @@ mod tests {
 		assert_eq!(quic.qlog.as_deref(), Some(std::path::Path::new("/tmp/qlog")));
 	}
 
-	/// Every old role-prefixed spelling still parses and folds into the
-	/// canonical field.
+	/// Every old role-prefixed spelling parses into a hidden field and is reported,
+	/// never applied. The canonical knob stays unset, so a caller that skipped the
+	/// check gets the default rather than a value it can't see.
 	#[test]
-	fn legacy_spellings_fold_into_canonical() {
-		let quic = parse(&["--client-quic-max-streams", "2048"]).resolved();
-		assert_eq!(quic.max_streams, Some(2048));
+	fn released_spellings_are_reported_not_applied() {
+		let quic = parse(&["--client-quic-max-streams", "2048"]);
+		assert_eq!(quic.max_streams, None);
+		assert_eq!(quic.resolve().max_streams, DEFAULT_MAX_STREAMS);
 
-		let quic = parse(&["--server-quic-max-streams", "4096"]).resolved();
-		assert_eq!(quic.max_streams, Some(4096));
-
-		let quic = parse(&["--client-max-streams", "1", "--server-quic-gso=false"]).resolved();
-		assert_eq!(quic.max_streams, Some(1));
-		assert_eq!(quic.gso, Some(false));
+		let reported = quic.deprecated().to_string();
+		assert!(
+			reported.contains(
+				"--client-quic-max-streams / MOQ_CLIENT_QUIC_MAX_STREAMS -> --quic-max-streams / MOQ_QUIC_MAX_STREAMS"
+			),
+			"{reported}"
+		);
+		// The rename also widened what the knob covers, which the line has to say.
+		assert!(reported.contains("dialed and accepted"), "{reported}");
 	}
 
-	/// The canonical spelling wins; between the legacy pair, client wins.
+	/// Both role prefixes map onto the one shared knob, and each is named.
 	#[test]
-	fn canonical_wins_over_legacy() {
-		let quic = parse(&["--quic-max-streams", "10", "--client-quic-max-streams", "20"]).resolved();
-		assert_eq!(quic.max_streams, Some(10));
-
-		let quic = parse(&["--client-quic-max-streams", "20", "--server-quic-max-streams", "30"]).resolved();
-		assert_eq!(quic.max_streams, Some(20));
+	fn both_role_prefixes_are_reported() {
+		let reported = parse(&["--client-quic-gso=false", "--server-quic-qlog", "/tmp/qlog"])
+			.deprecated()
+			.to_string();
+		assert!(reported.contains("--client-quic-gso"), "{reported}");
+		assert!(reported.contains("--quic-gso / MOQ_QUIC_GSO"), "{reported}");
+		assert!(reported.contains("--server-quic-qlog"), "{reported}");
+		assert!(reported.contains("--quic-qlog / MOQ_QUIC_QLOG"), "{reported}");
 	}
 
 	/// A build that can't capture must reject the flag rather than ignore it, so an

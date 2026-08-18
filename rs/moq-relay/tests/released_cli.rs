@@ -1,9 +1,10 @@
 //! The released command line, frozen.
 //!
 //! Every flag and environment variable a published `moq-relay` accepted, checked
-//! against the parser this build actually has. Renaming a flag is fine, and so is
-//! moving it to another section; dropping the released spelling is not, because a
-//! deployment's command line or environment goes on using it.
+//! against the parser this build actually has. A renamed spelling must keep
+//! *parsing* even though it no longer configures anything: that is what lets the
+//! relay name its replacement and stop, instead of clap reporting an unexpected
+//! argument or, worse, the value being read from the environment and ignored.
 //!
 //! Environment variables are the half a clap `alias` silently misses: an alias
 //! renames the flag but leaves the variable behind, so a renamed arg keeps parsing
@@ -171,7 +172,7 @@ fn released_flags_still_parse() {
 
 	assert!(
 		missing.is_empty(),
-		"released flags no longer parse: {missing:?}\nKeep the old spelling as a clap alias, or as a hidden arg when it also needs its original env var."
+		"released flags no longer parse: {missing:?}\nKeep the old spelling as a hidden arg, so the process can name what replaced it rather than leaving clap to report an unexpected argument."
 	);
 }
 
@@ -188,6 +189,6 @@ fn released_env_vars_are_still_read() {
 
 	assert!(
 		missing.is_empty(),
-		"released env vars are silently ignored: {missing:?}\nA clap alias carries the flag name only; give the old variable a hidden arg of its own and fold it in."
+		"released env vars are silently ignored: {missing:?}\nA clap alias carries the flag name only; give the old variable a hidden arg of its own so it reaches the deprecation check."
 	);
 }

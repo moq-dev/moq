@@ -78,14 +78,8 @@ pub struct Invocation {
 	/// Logging configuration.
 	pub log: moq_tokio::Log,
 
-	/// The MoQ attachment, shared by every stage. Already folded, so every read of
-	/// it sees what a deprecated spelling asked for.
+	/// The MoQ attachment, shared by every stage.
 	pub moq: MoqSide,
-
-	/// One line per deprecated spelling the invocation used, for the caller to log
-	/// once [`log`](Self::log) is initialized. The fold clears what these are
-	/// derived from, so they are collected while parsing.
-	pub deprecations: Vec<String>,
 
 	/// The stages, in the order given. Never empty.
 	pub stages: Vec<Command>,
@@ -111,14 +105,15 @@ impl Invocation {
 
 		// `split` always yields at least one chunk, even for an empty argv; clap then
 		// reports the missing subcommand as usual.
-		let mut cli = Cli::try_parse_from(chunks.next().unwrap_or_default())?;
+		let cli = Cli::try_parse_from(chunks.next().unwrap_or_default())?;
 
-		// Fold here rather than at each read: a deprecated spelling lands on a hidden
-		// field, and every `--connect` / `--listen` / `--quic-*` read past this point
-		// would otherwise see the canonical field still unset. The warnings can't be
-		// logged yet (no subscriber until `Log::init`), so they ride along instead.
-		let deprecations = cli.moq.deprecations();
-		cli.moq.resolve();
+		// Before anything reads the config: a released spelling parses into a hidden
+		// field that nothing honors, so continuing would run on settings the command
+		// line never asked for. A clap error, since that is what this is.
+		let deprecated = cli.moq.deprecated();
+		if !deprecated.is_empty() {
+			return Err(Cli::command().error(clap::error::ErrorKind::ValueValidation, deprecated.to_string()));
+		}
 
 		let mut stages = vec![cli.command];
 		for chunk in chunks {
@@ -137,7 +132,6 @@ impl Invocation {
 		Ok(Self {
 			log: cli.log,
 			moq: cli.moq,
-			deprecations,
 			stages,
 		})
 	}
@@ -195,9 +189,9 @@ impl Invocation {
 /// without a MoQ side. Every verb that does need one calls
 /// [`validate`](Self::validate).
 ///
-/// The three transport sections are read as plain fields: [`Invocation`] folds
-/// every deprecated spelling into them while parsing, so nothing downstream has to
-/// remember to.
+/// The three transport sections are read as plain fields. [`Invocation`] refuses a
+/// released spelling while parsing, so a field left unset here means the command
+/// line really did leave it unset.
 #[derive(Args, Clone)]
 #[cfg_attr(
 	feature = "cluster-lan",
@@ -253,23 +247,12 @@ pub struct MoqSide {
 }
 
 impl MoqSide {
-	/// One line per deprecated spelling in use, across all three sections.
-	///
-	/// Read before [`resolve`](Self::resolve), which clears what they are derived
-	/// from.
-	fn deprecations(&self) -> Vec<String> {
-		let mut messages = self.client.deprecations();
-		messages.extend(self.quic.deprecations());
-		messages.extend(self.server.deprecations());
-		messages
-	}
-
-	/// Fold every deprecated spelling into its canonical field, so the rest of the
-	/// process reads plain values and can't each forget a fold.
-	fn resolve(&mut self) {
-		self.client = self.client.resolved();
-		self.quic = self.quic.resolved();
-		self.server = self.server.resolved();
+	/// Every released spelling this invocation used, across all three sections.
+	fn deprecated(&self) -> moq_tokio::Deprecated {
+		let mut found = self.client.deprecated();
+		found.extend(self.quic.deprecated());
+		found.extend(self.server.deprecated());
+		found
 	}
 
 	/// Mint the origin all broadcasts route through: the pinned `--origin` id
@@ -639,14 +622,14 @@ mod tests {
 		assert!(cli.validate().is_ok());
 	}
 
-	/// A released spelling has to reach the field the process actually reads.
+	/// A released spelling is refused, and the error names what to write instead.
 	///
-	/// Parsing it and leaving the canonical field unset is worse than refusing it:
-	/// `--client-connect` left `--connect` unset, so the client warned about the
-	/// rename and then dialed nothing, without saying so.
+	/// The alternative is what this replaced: the flag parsed onto a hidden field,
+	/// warned about the rename, and then went unread, so `moq --client-connect ...`
+	/// dialed nothing and neither errored nor exited.
 	#[test]
-	fn released_spellings_reach_the_canonical_fields() {
-		let cli = Invocation::try_parse_from([
+	fn released_spellings_are_refused_with_a_migration() {
+		let Err(err) = Invocation::try_parse_from([
 			"moq",
 			"--client-connect",
 			"http://relay/anon",
@@ -661,34 +644,39 @@ mod tests {
 			"127.0.0.1:4444",
 			"export",
 			"ts",
-		])
-		.expect("parse");
+		]) else {
+			panic!("a released spelling must not start a run");
+		};
 
-		assert_eq!(
-			cli.moq.client.url.map(String::from).as_deref(),
-			Some("http://relay/anon")
-		);
-		assert_eq!(cli.moq.client.timeout, Some(Duration::from_secs(9)));
-		assert_eq!(cli.moq.client.tls.fingerprint, ["abcd1234"]);
-		assert_eq!(cli.moq.quic.gso, Some(false));
-		assert_eq!(cli.moq.server.bind.as_deref(), Some("[::]:4443"));
-		assert_eq!(cli.moq.server.tcp.bind, Some("127.0.0.1:4444".parse().unwrap()));
-
-		// Every one of them is still reported, just from the caller rather than the
-		// fold, which runs before there is a subscriber to warn to.
-		let reported = cli.deprecations.join("\n");
-		for flag in [
-			"--client-connect",
-			"--client-connect-timeout",
-			"--client-tls-fingerprint",
-			// The QUIC section names the replacement rather than the old spelling,
-			// since both role prefixes fold into the same flag.
-			"--quic-gso",
-			"--server-bind",
-			"--server-tcp-bind",
+		let reported = err.to_string();
+		for line in [
+			"--client-connect / MOQ_CLIENT_CONNECT -> --connect / MOQ_CONNECT",
+			"--client-connect-timeout / MOQ_CLIENT_CONNECT_TIMEOUT -> --connect-timeout / MOQ_CONNECT_TIMEOUT",
+			"--client-tls-fingerprint / MOQ_CLIENT_TLS_FINGERPRINT -> --connect-tls-fingerprint / MOQ_CONNECT_TLS_FINGERPRINT",
+			"--client-quic-gso / MOQ_CLIENT_QUIC_GSO -> --quic-gso / MOQ_QUIC_GSO",
+			"--server-bind / MOQ_SERVER_BIND -> --listen / MOQ_LISTEN",
+			"--server-tcp-bind / MOQ_SERVER_TCP_BIND -> --listen-tcp-bind / MOQ_LISTEN_TCP_BIND",
 		] {
-			assert!(reported.contains(flag), "{flag} went unreported in {reported:?}");
+			assert!(reported.contains(line), "missing {line:?} from {reported}");
 		}
+	}
+
+	/// One released spelling stops the run even when the rest of the command line is
+	/// current: honoring the half it understands is how a process ends up serving on
+	/// settings nobody wrote.
+	#[test]
+	fn one_released_spelling_is_enough_to_refuse() {
+		let Err(err) = Invocation::try_parse_from([
+			"moq",
+			"--connect",
+			"http://relay/anon",
+			"--client-quic-gso=false",
+			"export",
+			"ts",
+		]) else {
+			panic!("a current spelling alongside a released one must not excuse it");
+		};
+		assert!(err.to_string().contains("--quic-gso"), "{err}");
 	}
 
 	#[test]
@@ -1041,9 +1029,6 @@ mod tests {
 		// ...these it refuses, rather than accepting the flag and ignoring it.
 		for (flag, value, reported) in [
 			("--connect", "https://relay.example.com", "--connect"),
-			// The released spelling folds in, so it is rejected under its
-			// canonical name rather than silently ignored.
-			("--client-connect", "https://relay.example.com", "--connect"),
 			("--listen-tcp-bind", "127.0.0.1:0", "--listen-tcp-bind"),
 			("--broadcast", "room", "--broadcast"),
 		] {
@@ -1059,7 +1044,6 @@ mod tests {
 				("--listen-unix-allow-uid", "1000", "--listen-unix-allow-uid"),
 				("--listen-unix-allow-gid", "1000", "--listen-unix-allow-gid"),
 				("--listen-unix-allow-pid", "1000", "--listen-unix-allow-pid"),
-				("--server-unix-allow-uid", "1000", "--listen-unix-allow-uid"),
 			] {
 				let cli = Invocation::try_parse_from(["moq", flag, value, "token", "generate"]).unwrap();
 				let err = cli.moq.reject("token").unwrap_err().to_string();
@@ -1108,9 +1092,9 @@ mod tests {
 		let cli = Invocation::try_parse_from([
 			"moq",
 			"--cluster-lan",
-			"--server-bind",
+			"--listen",
 			"[::]:4443",
-			"--tls-generate",
+			"--listen-tls-generate",
 			"localhost",
 			"import",
 			"ts",
@@ -1121,7 +1105,7 @@ mod tests {
 		assert_eq!(server.tls.generate, ["localhost"]);
 
 		// Without the mesh, nothing is filled in.
-		let cli = Invocation::try_parse_from(["moq", "--client-connect", "https://relay.example.com", "import", "ts"])
+		let cli = Invocation::try_parse_from(["moq", "--connect", "https://relay.example.com", "import", "ts"])
 			.expect("parse");
 		assert!(!cli.moq.lan());
 		assert_eq!(cli.moq.server_config().bind, None);
@@ -1172,12 +1156,9 @@ mod tests {
 	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cluster_lan_requires_a_path_capable_version() {
-		// Both the canonical spellings and the released ones, which fold in.
 		for (flag, reported) in [
 			("--connect-version", "--connect-version"),
 			("--listen-version", "--listen-version"),
-			("--client-version", "--connect-version"),
-			("--server-version", "--listen-version"),
 		] {
 			let cli = Invocation::try_parse_from(["moq", "--cluster-lan", flag, "moq-lite-04", "import", "ts"])
 				.expect("parse");
@@ -1188,11 +1169,11 @@ mod tests {
 		let cli = Invocation::try_parse_from([
 			"moq",
 			"--cluster-lan",
-			"--client-version",
+			"--connect-version",
 			"moq-lite-04",
-			"--client-version",
+			"--connect-version",
 			"moq-lite-05",
-			"--server-version",
+			"--listen-version",
 			"moq-lite-05",
 			"import",
 			"ts",

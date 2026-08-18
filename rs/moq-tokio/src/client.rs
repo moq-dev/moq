@@ -84,10 +84,13 @@ impl Client {
 		feature = "uds"
 	))]
 	pub fn new(config: crate::connect::Config, quic: crate::quic::Config) -> crate::Result<Self> {
-		// Resolve here rather than in `init`, so a caller that builds the config by hand
-		// gets the released spellings folded in too.
-		let config = config.resolved();
-		let quic = quic.resolved();
+		// Refuse here rather than in `init`, so a caller that skipped its own check
+		// can't reach a dial that quietly ignored half of what it was given.
+		let mut deprecated = config.deprecated();
+		deprecated.extend(quic.deprecated());
+		if !deprecated.is_empty() {
+			return Err(Error::Deprecated(deprecated));
+		}
 
 		#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 		let backend = config.backend.clone().unwrap_or_else(crate::default_quic_backend);
@@ -757,34 +760,60 @@ mod tests {
 		assert_eq!(config.tls.insecure, Some(true));
 	}
 
+	/// A released spelling parses into a hidden field and is never read as a
+	/// setting: the canonical field stays unset, and the config reports the
+	/// migration instead. Honoring it silently is what this replaced, since a
+	/// warning leaves the process running on trust settings it dropped.
 	#[test]
-	fn test_cli_deprecated_tls_flags_fold_into_canonical() {
-		// The bare --tls-* forms are deprecated. They parse into a hidden field and
-		// fold into the canonical values via the effective_* accessors build() uses,
-		// so they keep working without touching the public Client fields.
+	fn deprecated_tls_flags_are_reported_not_applied() {
 		let config = Cli::config_from(["test", "--tls-disable-verify=true", "--tls-fingerprint", "abcd1234"]);
-		assert_eq!(
-			config.tls.insecure, None,
-			"deprecated flag must not set the canonical field"
+		assert_eq!(config.tls.insecure, None);
+		assert!(config.tls.fingerprint.is_empty());
+
+		let reported = config.deprecated().to_string();
+		assert!(
+			reported.contains("--tls-disable-verify -> --connect-tls-insecure"),
+			"{reported}"
 		);
-		assert_eq!(config.tls.effective_disable_verify(), Some(true));
-		assert_eq!(config.tls.effective_fingerprint(), vec!["abcd1234"]);
+		assert!(
+			reported.contains("--tls-fingerprint -> --connect-tls-fingerprint"),
+			"{reported}"
+		);
 	}
 
+	/// The message has to name the environment variable too. A deployment
+	/// configured through the environment never typed the flag, so a line naming
+	/// only the flag reads as unrelated to why it stopped booting.
 	#[test]
-	fn test_canonical_tls_flag_wins_over_deprecated() {
-		// Both spellings given: canonical wins for scalar options, vecs concatenate.
-		let config = Cli::config_from([
-			"test",
-			"--connect-tls-insecure=false",
-			"--tls-disable-verify=true",
-			"--client-tls-fingerprint",
-			"aaaa",
-			"--tls-fingerprint",
-			"bbbb",
-		]);
-		assert_eq!(config.tls.effective_disable_verify(), Some(false));
-		assert_eq!(config.tls.effective_fingerprint(), vec!["bbbb", "aaaa"]);
+	fn the_migration_names_both_spellings() {
+		let config = Cli::config_from(["test", "--client-connect", "https://relay.example.com/anon"]);
+		let reported = config.deprecated().to_string();
+		assert!(
+			reported.contains("--client-connect / MOQ_CLIENT_CONNECT -> --connect / MOQ_CONNECT"),
+			"{reported}"
+		);
+	}
+
+	/// `--client-reconnect` means the opposite of the flag that replaced it, so the
+	/// line has to say so: carried across unchanged it would silently invert.
+	#[test]
+	fn an_inverted_replacement_says_so() {
+		let config = Cli::config_from(["test", "--client-reconnect=false"]);
+		let reported = config.deprecated().to_string();
+		assert!(reported.contains("--connect-once"), "{reported}");
+		assert!(reported.contains("inverted"), "{reported}");
+	}
+
+	/// Building a client is the backstop: a caller that skipped its own check must
+	/// not reach a dial that ignored half of what it was given.
+	#[test]
+	fn building_a_client_refuses_a_released_spelling() {
+		let config = Cli::config_from(["test", "--client-connect", "https://relay.example.com/anon"]);
+		let Err(err) = crate::Client::new(config, crate::quic::Config::default()) else {
+			panic!("building a client must refuse a released spelling");
+		};
+		assert!(matches!(err, Error::Deprecated(_)), "{err}");
+		assert!(err.to_string().contains("--connect / MOQ_CONNECT"), "{err}");
 	}
 
 	#[test]
@@ -813,10 +842,6 @@ mod tests {
 	fn test_cli_failover_delay() {
 		let config = Cli::config_from(["test", "--connect-race", "50ms"]);
 		assert_eq!(config.race, Some(std::time::Duration::from_millis(50)));
-
-		// The released spelling folds in on resolve.
-		let config = Cli::config_from(["test", "--client-failover-delay", "50ms"]).resolved();
-		assert_eq!(config.race, Some(std::time::Duration::from_millis(50)));
 	}
 
 	#[test]
@@ -839,13 +864,6 @@ mod tests {
 		let config = Cli::config_from(["test", "--connect-resolution-delay", "0s"]);
 		assert_eq!(config.resolution_delay, Some(std::time::Duration::ZERO));
 		assert_eq!(config.resolved_resolution_delay(), std::time::Duration::ZERO);
-	}
-
-	/// The released `--client-resolution-delay` spelling still lands on the field.
-	#[test]
-	fn test_cli_resolution_delay_legacy() {
-		let config = Cli::config_from(["test", "--client-resolution-delay", "10ms"]).resolved();
-		assert_eq!(config.resolution_delay, Some(std::time::Duration::from_millis(10)));
 	}
 
 	#[test]
@@ -883,7 +901,7 @@ mod tests {
 
 	#[test]
 	fn test_cli_fingerprint() {
-		let config = Cli::config_from(["test", "--client-tls-fingerprint", "abcd1234"]).resolved();
+		let config = Cli::config_from(["test", "--connect-tls-fingerprint", "abcd1234"]);
 		assert_eq!(config.tls.fingerprint, vec!["abcd1234"]);
 	}
 
@@ -907,10 +925,6 @@ mod tests {
 	fn test_cli_version() {
 		let config = Cli::config_from(["test", "--connect-version", "moq-lite-03"]);
 		assert_eq!(config.version, vec!["moq-lite-03".parse::<moq_net::Version>().unwrap()]);
-
-		// The released spelling folds in on resolve.
-		let config = Cli::config_from(["test", "--client-version", "moq-lite-03"]).resolved();
-		assert_eq!(config.version, vec!["moq-lite-03".parse::<moq_net::Version>().unwrap()]);
 	}
 
 	#[test]
@@ -919,7 +933,7 @@ mod tests {
 			.render_long_help()
 			.to_string();
 		for name in moq_net::Version::names() {
-			assert!(help.contains(name), "missing {name} from --client-version help");
+			assert!(help.contains(name), "missing {name} from --connect-version help");
 		}
 	}
 
@@ -943,10 +957,6 @@ mod tests {
 	fn test_cli_connect() {
 		let config = Cli::config_from(["test", "--connect", "https://relay.example.com/anon"]);
 		assert_eq!(config.url.as_ref().unwrap().as_str(), "https://relay.example.com/anon");
-
-		// The released spelling folds in on resolve.
-		let config = Cli::config_from(["test", "--client-connect", "https://relay.example.com/anon"]).resolved();
-		assert_eq!(config.url.as_ref().unwrap().as_str(), "https://relay.example.com/anon");
 	}
 
 	#[test]
@@ -965,39 +975,34 @@ mod tests {
 		assert_eq!(config.once, Some(true));
 	}
 
-	/// The released TOML said `reconnect = false`; the flag it became says the
-	/// opposite thing, so the value has to flip on the way in.
+	/// The released TOML said `reconnect = false`; `once` says the opposite thing.
+	///
+	/// Still parsed, because `deny_unknown_fields` would otherwise reject the file
+	/// with no hint of what to write instead, and the inversion is the whole reason
+	/// this can't be a rename someone applies mechanically.
 	#[test]
-	fn test_toml_reconnect_inverts_into_once() {
+	fn test_toml_reconnect_is_reported_not_inverted() {
 		let config: crate::connect::Config = toml::from_str("reconnect = false").unwrap();
-		let config = config.resolved();
-		assert_eq!(config.once, Some(true));
-		assert_eq!(config.reconnect, None, "the shim is consumed by the fold");
+		assert_eq!(config.once, None);
 
-		let config: crate::connect::Config = toml::from_str("reconnect = true").unwrap();
-		assert_eq!(config.resolved().once, Some(false));
-
-		// A canonical `once` wins over the legacy spelling it replaced.
-		let config: crate::connect::Config = toml::from_str("once = false\nreconnect = false").unwrap();
-		assert_eq!(config.resolved().once, Some(false));
+		let reported = config.deprecated().to_string();
+		assert!(reported.contains("reconnect -> once"), "{reported}");
+		assert!(reported.contains("inverted"), "{reported}");
 	}
 
 	/// An explicit canonical bind wins even when it equals the default, which a
 	/// `default_value` would have made indistinguishable from "unset".
 	#[test]
 	fn test_cli_bind_prefers_canonical() {
-		let config = Cli::config_from(["test"]).resolved();
+		let config = Cli::config_from(["test"]);
 		assert_eq!(config.bind, None, "unset means the default");
 		assert_eq!(config.resolved_bind(), "[::]:0".parse().unwrap());
 
-		let config = Cli::config_from(["test", "--client-bind", "127.0.0.1:0"]).resolved();
-		assert_eq!(config.bind, Some("127.0.0.1:0".parse().unwrap()));
-
-		let config = Cli::config_from(["test", "--connect-bind", "[::]:0", "--client-bind", "127.0.0.1:0"]).resolved();
+		let config = Cli::config_from(["test", "--connect-bind", "[::]:0"]);
 		assert_eq!(
 			config.bind,
 			Some("[::]:0".parse().unwrap()),
-			"an explicit canonical bind wins even when it is the default"
+			"an explicit bind is kept even when it is the default"
 		);
 	}
 
@@ -1013,17 +1018,16 @@ mod tests {
 		assert_eq!(cli.config.bind, Some("127.0.0.1:1234".parse().unwrap()));
 	}
 
-	/// Both spellings name versions to offer, so neither list may be dropped.
+	/// Several versions offered at once, which the canonical flag takes by repeating.
 	#[test]
-	fn test_version_lists_concatenate() {
+	fn test_version_list() {
 		let config = Cli::config_from([
 			"test",
 			"--connect-version",
 			"moq-lite-03",
-			"--client-version",
+			"--connect-version",
 			"moq-lite-02",
-		])
-		.resolved();
+		]);
 		assert_eq!(
 			config.version,
 			vec![
@@ -1042,13 +1046,6 @@ mod tests {
 		assert_eq!(config.once, Some(true));
 
 		let config = Cli::config_from(["test", "--connect-once=false"]);
-		assert_eq!(config.once, Some(false));
-
-		// The released spelling folds in on resolve, inverted.
-		let config = Cli::config_from(["test", "--client-reconnect=false"]).resolved();
-		assert_eq!(config.once, Some(true));
-
-		let config = Cli::config_from(["test", "--client-reconnect=true"]).resolved();
 		assert_eq!(config.once, Some(false));
 	}
 
@@ -1070,7 +1067,7 @@ mod tests {
 
 	#[test]
 	fn test_cli_host_name() {
-		let config = Cli::config_from(["test", "--client-tls-host-name", "override.example"]).resolved();
+		let config = Cli::config_from(["test", "--connect-tls-host-name", "override.example"]);
 		assert_eq!(config.tls.host_name.as_deref(), Some("override.example"));
 	}
 
