@@ -30,6 +30,7 @@ Keep the body short and structured, not narrated:
 
 - **Summary**: a few bullets on what changed and why. For a bug fix, state the root cause (see Root Cause First in [CLAUDE.md](CLAUDE.md)).
 - **Public API changes**: every new/renamed/removed/signature-changed `pub` item in `rs/moq-*` and `js/*`, with breaking ones called out per [Branch Targeting](#branch-targeting). Distinguish genuinely public surface from `pub(crate)`/private.
+- **Wire behavior changes**: what a *peer* observes differently, even when no signature moved and the encoding is byte-identical. A change to which content gets delivered, when a stream is reset rather than FIN'd (and with which error code), what a default now implies, or when a message is sent, is something another implementation has to match, and it is invisible in an API diff. Say what the old and new behavior are and which side decides. New/changed encodings additionally need the matching `drafts/` update in the same PR, per [Cross-Package Sync](CLAUDE.md#cross-package-sync).
 - **Test plan**: what was run and verified.
 - If you skip a [Cross-Package Sync](CLAUDE.md#cross-package-sync) row, say why.
 
@@ -57,7 +58,7 @@ CodeRabbit reviews PRs automatically, but it has an hourly quota and runs out of
 
 Reply to review comments as you address them, saying what changed or why you disagree, so the reviewer doesn't have to diff the branch to find out. Replies are GitHub prose like any other, so they carry the [AI Contributions](#ai-contributions) marker.
 
-When reviewing a PR, always include the same public API changes list described above, and call out anything breaking per [Branch Targeting](#branch-targeting).
+When reviewing a PR, always include the same public API and wire behavior lists described above, and call out anything breaking per [Branch Targeting](#branch-targeting). Wire behavior is the easier of the two to miss, since nothing in the diff's signatures flags it: read for what a peer would now see, not just for what the types say.
 
 ## Releases
 
