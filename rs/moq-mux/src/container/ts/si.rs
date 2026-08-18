@@ -434,7 +434,13 @@ impl<E: catalog::Catalog> Capture<E> {
 			}
 			entry.advertised = false;
 			if let Some(tables) = mpegts.si.get_mut(pid) {
-				tables.remove(table_id);
+				// Remove only a mapping this capture still owns: a second capture on
+				// the same broadcast (same key, unique fallback track name) may have
+				// overwritten it, and it will not re-advertise, so blindly removing
+				// here would strip the live capture's table for good.
+				if tables.get(table_id).is_some_and(|e| e.track == entry.name) {
+					tables.remove(table_id);
+				}
 				if tables.is_empty() {
 					mpegts.si.remove(pid);
 				}

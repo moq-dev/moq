@@ -2569,3 +2569,37 @@ async fn si_revision_after_final_media_frame_is_flushed() {
 		.unwrap();
 	assert!(end.is_none(), "end of stream after the trailing flush");
 }
+
+/// Two captures overlapping on one broadcast (a supervisor restarting its
+/// importer before the old one is dropped) contend for the same `(PID, table_id)`
+/// key: the newer one wins the catalog mapping under a fallback track name, and
+/// the older one's teardown must not strip it, since the survivor never
+/// re-advertises.
+#[tokio::test(start_paused = true)]
+async fn overlapping_capture_teardown_keeps_the_survivors_mapping() {
+	let sdt = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 4]);
+	let mut input = si_packet(0x0011, &sdt);
+	input.extend_from_slice(&si_packet_cc(0x0011, &sdt, 1));
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let _consumer = broadcast.consume();
+	let catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+	let mut old = crate::container::ts::Import::new(broadcast.clone(), catalog.reserve());
+	old.decode(&BytesMut::from(&input[..])).unwrap();
+
+	// The replacement importer captures the same table; its deterministic track
+	// name is taken, so it advertises under a fallback name, overwriting the key.
+	let mut new = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	new.decode(&BytesMut::from(&input[..])).unwrap();
+	let survivor = catalog.snapshot().mpegts.si[&0x0011][&0x42].track.clone();
+	assert_ne!(survivor, "0x0011-0x42.si", "the replacement fell back to a unique name");
+
+	drop(old);
+	assert_eq!(
+		catalog.snapshot().mpegts.si[&0x0011][&0x42].track,
+		survivor,
+		"the old capture's teardown left the survivor's mapping in place"
+	);
+}
