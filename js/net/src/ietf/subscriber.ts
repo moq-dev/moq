@@ -10,6 +10,7 @@ import type * as track from "../track.ts";
 import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
 import { TrackAliases } from "./aliases.ts";
+import * as Cluster from "./cluster.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
 import { toWire } from "./priority.ts";
 import { type Publish, PublishError } from "./publish.ts";
@@ -49,6 +50,11 @@ type SubscribeSetupState = {
 export class Subscriber {
 	#session: Session;
 
+	// The Hop IDs this session declared; see {@link Cluster}. What the peer declared is what
+	// says whether an advertisement carries a hop path, and ours is what a path looping back
+	// to us contains.
+	#cluster?: Cluster.Hops;
+
 	// Publisher-chosen aliases used by incoming group streams.
 	#aliases = new TrackAliases<track.Producer>();
 
@@ -80,11 +86,25 @@ export class Subscriber {
 	/**
 	 * Creates a new Subscriber instance.
 	 * @param session - The session abstraction for bidi streams and request IDs
+	 * @param cluster - The Hop IDs the SETUP exchange settled (MoQ Cluster)
 	 *
 	 * @internal
 	 */
-	constructor(session: Session) {
+	constructor(session: Session, cluster?: Cluster.Hops) {
 		this.#session = session;
+		this.#cluster = cluster;
+	}
+
+	/**
+	 * Whether an advertisement is ours coming back: its hop path already ran through us, so
+	 * subscribing via it would route us back to ourselves.
+	 *
+	 * A conforming peer withholds these (it knows our Hop ID), so this is the backstop that
+	 * keeps a mesh working when one member does not. A session that negotiated nothing
+	 * carries no path, and there is nothing to check.
+	 */
+	#reflected(advert: Cluster.Advert | undefined): boolean {
+		return advert !== undefined && this.#cluster !== undefined && Cluster.loops(advert, this.#cluster.self);
 	}
 
 	/**
@@ -221,9 +241,22 @@ export class Subscriber {
 
 						const msgType = await stream.reader.u53();
 						if (msgType === SubscribeNamespaceEntry.id) {
-							const entry = await SubscribeNamespaceEntry.decode(stream.reader, version);
+							const entry = await SubscribeNamespaceEntry.decode(
+								stream.reader,
+								version,
+								Cluster.negotiated(this.#cluster),
+							);
 							if (released) break;
 							const path = Path.join(prefix, entry.suffix);
+
+							// A repeat updates the advertisement in place, so one that now
+							// loops back through us has taken a route we can't subscribe
+							// over: the path is gone even though the message says active.
+							if (this.#reflected(entry.cluster)) {
+								console.debug(`dropping reflected namespace: broadcast=${path}`);
+								if (live.delete(path)) this.#detachAnnounce(path);
+								continue;
+							}
 
 							// A repeat updates the advertisement; only the first is news.
 							if (!live.has(path)) {
@@ -476,6 +509,21 @@ export class Subscriber {
 	async runPublishNamespace(msg: PublishNamespace, stream: Stream) {
 		const version = this.#session.version;
 		const path = msg.trackNamespace;
+
+		// A path that already ran through us looped back. Refuse it rather than holding an
+		// advertisement we could never subscribe through. The peer knows our Hop ID, so a
+		// conforming one never offers it; 0 as the retry interval says not to come back.
+		if (this.#reflected(msg.cluster)) {
+			console.debug(`dropping reflected publish_namespace: broadcast=${path}`);
+			await stream.writer.u53(RequestError.id);
+			await new RequestError({
+				requestId: msg.requestId,
+				errorCode: 400,
+				reasonPhrase: "route loops back",
+			}).encode(stream.writer, version);
+			stream.close();
+			return;
+		}
 
 		// Draft-14/15 key their namespace-scoped messages by name, not request ID, so the
 		// adapter can hold only one request per namespace: a second would overwrite the

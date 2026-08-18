@@ -10,6 +10,10 @@ export const SetupOption = {
 	MaxAuthTokenCacheSize: 4n,
 	Authority: 5n,
 	Implementation: 7n,
+	/// RELAY_HOPS, from the MoQ Cluster extension. See `cluster.ts`.
+	RelayHops: 0x40b55n,
+	/// RELAY_COST, from the MoQ Cluster extension. See `cluster.ts`.
+	RelayCost: 0x40b56n,
 	/// SOLICIT, from the MoQ Solicit extension. See `solicit.ts`.
 	Solicit: 0x40b5an,
 } as const;
@@ -194,10 +198,14 @@ const MSG_PARAM_PUBLISHER_PRIORITY = 0x0en;
 const MSG_PARAM_FORWARD = 0x10n;
 const MSG_PARAM_SUBSCRIBER_PRIORITY = 0x20n;
 const MSG_PARAM_GROUP_ORDER = 0x22n;
+/// ROUTE_COST, from the MoQ Cluster extension. See `cluster.ts`.
+const MSG_PARAM_ROUTE_COST = 0x40b58n;
 
 // Bytes parameter IDs (odd)
 const MSG_PARAM_LARGEST_OBJECT = 0x09n;
 const MSG_PARAM_SUBSCRIPTION_FILTER = 0x21n;
+/// HOP_PATH, from the MoQ Cluster extension. See `cluster.ts`.
+const MSG_PARAM_HOP_PATH = 0x40b57n;
 
 type MessageParamKind = "varint" | "uint8" | "bool" | "location" | "bytes";
 type MessageLocation = { groupId: bigint; objectId: bigint };
@@ -207,6 +215,7 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 		case MSG_PARAM_DELIVERY_TIMEOUT:
 		case MSG_PARAM_MAX_CACHE_DURATION:
 		case MSG_PARAM_EXPIRES:
+		case MSG_PARAM_ROUTE_COST:
 			return "varint";
 		case MSG_PARAM_PUBLISHER_PRIORITY:
 		case MSG_PARAM_SUBSCRIBER_PRIORITY:
@@ -217,6 +226,7 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 		case MSG_PARAM_LARGEST_OBJECT:
 			return "location";
 		case MSG_PARAM_SUBSCRIPTION_FILTER:
+		case MSG_PARAM_HOP_PATH:
 			return "bytes";
 		default:
 			throw new Error(`unknown message parameter id: ${id.toString()}`);
@@ -335,6 +345,24 @@ export class Parameters {
 
 	set subscriptionFilter(v: number) {
 		this.bytes.set(MSG_PARAM_SUBSCRIPTION_FILTER, new Uint8Array([v]));
+	}
+
+	/** HOP_PATH: the hop chain an advertisement traversed, as its raw parameter value. */
+	get hopPath(): Uint8Array | undefined {
+		return this.bytes.get(MSG_PARAM_HOP_PATH);
+	}
+
+	set hopPath(v: Uint8Array) {
+		this.bytes.set(MSG_PARAM_HOP_PATH, v);
+	}
+
+	/** ROUTE_COST: the accumulated cost of that path. Absent means 0. */
+	get routeCost(): bigint | undefined {
+		return this.vars.get(MSG_PARAM_ROUTE_COST);
+	}
+
+	set routeCost(v: bigint) {
+		this.vars.set(MSG_PARAM_ROUTE_COST, v);
 	}
 
 	async encode(w: Writer, version: IetfVersion) {

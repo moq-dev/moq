@@ -7,6 +7,7 @@ import { type Stream, Writer } from "../stream.ts";
 import type { Timescale } from "../time.ts";
 import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
+import * as Cluster from "./cluster.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { fromWire } from "./priority.ts";
 import { PublishDone } from "./publish.ts";
@@ -76,6 +77,11 @@ export class Publisher {
 	#session: Session;
 	#requiresSolicitation: boolean;
 
+	// What every advertisement carries on a session that negotiated the MoQ Cluster
+	// extension: a hop path holding our own id, so the peer can tell that what it hears
+	// back came from us. `undefined` when nothing negotiated it.
+	#advert?: Cluster.Advert;
+
 	// Our published broadcasts.
 	// It's a signal so we can live update any subscribe_namespace streams.
 	#broadcasts = new Signal<Map<Path.Valid, broadcast.Producer> | undefined>(new Map());
@@ -85,13 +91,15 @@ export class Publisher {
 	 * @param quic - The WebTransport session (for uni streams)
 	 * @param session - The session abstraction for bidi streams and request IDs
 	 * @param requiresSolicitation - Whether the peer's SETUP asked to be told on request
+	 * @param cluster - The Hop IDs the SETUP exchange settled (MoQ Cluster)
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, session: Session, requiresSolicitation: boolean) {
+	constructor(quic: WebTransport, session: Session, requiresSolicitation: boolean, cluster?: Cluster.Hops) {
 		this.#quic = quic;
 		this.#session = session;
 		this.#requiresSolicitation = requiresSolicitation;
+		this.#advert = Cluster.advertise(cluster);
 	}
 
 	/**
@@ -327,7 +335,7 @@ export class Publisher {
 				}
 
 				await stream.writer.u53(SubscribeNamespaceEntry.id);
-				await new SubscribeNamespaceEntry({ suffix }).encode(stream.writer, version);
+				await new SubscribeNamespaceEntry({ suffix, cluster: this.#advert }).encode(stream.writer, version);
 				return true;
 			};
 			const withdraw = async (suffix: Path.Valid) => {
@@ -566,7 +574,7 @@ export class Publisher {
 			await withTimeout(
 				(async () => {
 					await stream.writer.u53(PublishNamespace.id);
-					const msg = new PublishNamespace({ requestId, trackNamespace: path });
+					const msg = new PublishNamespace({ requestId, trackNamespace: path, cluster: this.#advert });
 					await msg.encode(stream.writer, this.#session.version);
 
 					// Read response (RequestOk and PublishNamespaceOk share 0x07)

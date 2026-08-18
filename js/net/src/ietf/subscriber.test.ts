@@ -1,11 +1,13 @@
 import { expect, test } from "bun:test";
 import type * as announce from "../announced.ts";
 import { createMockTransportPair } from "../mock.ts";
+import { type Origin, OriginSchema } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
 import { NativeSession } from "./adapter.ts";
+import type * as Cluster from "./cluster.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
-import { RequestOk } from "./request.ts";
+import { RequestError, RequestOk } from "./request.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, Version } from "./version.ts";
@@ -109,9 +111,9 @@ async function acceptSubscribeNamespace(transport: WebTransport): Promise<Stream
 }
 
 /** Advertise `path` inline on a SUBSCRIBE_NAMESPACE stream. */
-async function inlineNamespace(stream: Stream, path: Path.Valid): Promise<void> {
+async function inlineNamespace(stream: Stream, path: Path.Valid, cluster?: Cluster.Advert): Promise<void> {
 	await stream.writer.u53(SubscribeNamespaceEntry.id);
-	await new SubscribeNamespaceEntry({ suffix: path }).encode(stream.writer, VERSION);
+	await new SubscribeNamespaceEntry({ suffix: path, cluster }).encode(stream.writer, VERSION);
 }
 
 /**
@@ -119,8 +121,8 @@ async function inlineNamespace(stream: Stream, path: Path.Valid): Promise<void> 
  * before it on the same stream have been read. Announcing an already-announced path is
  * silent by design, so it cannot be waited on directly.
  */
-async function syncInline(stream: Stream, announced: announce.Consumer): Promise<void> {
-	await inlineNamespace(stream, Path.from("sentinel"));
+async function syncInline(stream: Stream, announced: announce.Consumer, cluster?: Cluster.Advert): Promise<void> {
+	await inlineNamespace(stream, Path.from("sentinel"), cluster);
 	expect(await announced.next()).toMatchObject({ path: Path.from("sentinel"), active: true });
 }
 
@@ -329,4 +331,75 @@ test("concurrent legacy publish_namespace requests take one reference", async ()
 	await one;
 
 	expect(await announced.next()).toMatchObject({ path: Path.from("raced"), active: false });
+});
+
+/** The Hop IDs a cluster-negotiated session declared, ours first. */
+const SELF: Origin = OriginSchema.parse(7n);
+const PEER: Origin = OriginSchema.parse(9n);
+
+/**
+ * A peer that knows our Hop ID never advertises a path that already ran through us, so
+ * this is the backstop for one that does not conform: subscribing via such a path would
+ * route us back to ourselves, so the advertisement is dropped rather than announced.
+ */
+test("an inline NAMESPACE that looped back through us is dropped", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber(session, { self: SELF, peer: PEER });
+
+	const announced = subscriber.announced(Path.empty());
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	// Ours coming back, then someone else's. Only the second is news.
+	await inlineNamespace(subscription, Path.from("mine"), { hops: [SELF, PEER], cost: 0n });
+	await syncInline(subscription, announced, { hops: [PEER], cost: 0n });
+});
+
+/**
+ * An advertisement is updated in place, by re-sending it on the stream that carries it. One
+ * that now loops back has re-parented onto a route we cannot subscribe over, so the path is
+ * gone even though the message says active.
+ */
+test("an inline NAMESPACE that starts looping back is retracted", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber(session, { self: SELF, peer: PEER });
+
+	const announced = subscriber.announced(Path.empty());
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	await inlineNamespace(subscription, Path.from("theirs"), { hops: [PEER], cost: 0n });
+	expect(await announced.next()).toMatchObject({ path: Path.from("theirs"), active: true });
+
+	await inlineNamespace(subscription, Path.from("theirs"), { hops: [SELF, PEER], cost: 0n });
+	expect(await announced.next()).toMatchObject({ path: Path.from("theirs"), active: false });
+});
+
+/** The same rule on the other kind of advertisement, which is a request we can refuse. */
+test("a PUBLISH_NAMESPACE that looped back through us is refused", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber(session, { self: SELF, peer: PEER });
+
+	const announced = subscriber.announced(Path.empty());
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	const request = await Stream.open(pair.server, { version: VERSION });
+	await subscriber.runPublishNamespace(
+		new PublishNamespace({
+			requestId: 0n,
+			trackNamespace: Path.from("mine"),
+			cluster: { hops: [SELF, PEER], cost: 0n },
+		}),
+		request,
+	);
+
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
+	expect(await peer.reader.u53()).toBe(RequestError.id);
+	const err = await RequestError.decode(peer.reader, VERSION);
+	expect(err.errorCode).toBe(400);
+
+	// Refused, so nothing was announced: the sentinel is the first thing a consumer hears.
+	await syncInline(subscription, announced, { hops: [PEER], cost: 0n });
 });

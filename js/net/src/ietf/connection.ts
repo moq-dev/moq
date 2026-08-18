@@ -7,6 +7,7 @@ import { type Transport, transportOf } from "../connection/transport.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
+import * as Cluster from "./cluster.ts";
 import { GoAway } from "./goaway.ts";
 import { Group } from "./object.ts";
 import { Publish } from "./publish.ts";
@@ -54,6 +55,9 @@ export class Connection implements Established {
 	// What the peer declared about being solicited; see {@link Ietf.solicitFromSetup}.
 	#solicit: boolean | undefined;
 
+	// The Hop IDs this session declared; see {@link Cluster}.
+	#cluster?: Cluster.Hops;
+
 	// Just to avoid logging when `close()` is called.
 	#closed = false;
 
@@ -65,6 +69,7 @@ export class Connection implements Established {
 	 * @param maxRequestId - The initial max request ID
 	 * @param version - The negotiated protocol version
 	 * @param solicit - What the peer's SETUP declared (undefined when it declared nothing)
+	 * @param cluster - The Hop IDs the SETUP exchange settled, on the versions that negotiate them
 	 *
 	 * @internal
 	 */
@@ -77,6 +82,7 @@ export class Connection implements Established {
 		client,
 		discovery = true,
 		solicit,
+		cluster,
 	}: {
 		url: URL;
 		quic: WebTransport;
@@ -91,6 +97,11 @@ export class Connection implements Established {
 		 * nothing, which is the one case where announcing at us unasked is not a bug.
 		 */
 		solicit?: boolean;
+		/**
+		 * The Hop IDs this session declared (MoQ Cluster). `undefined` on a version that
+		 * cannot negotiate the extension, as is a `peer` the peer never declared.
+		 */
+		cluster?: Cluster.Hops;
 	}) {
 		this.url = url;
 		this.discovery = discovery;
@@ -113,9 +124,10 @@ export class Connection implements Established {
 			});
 		}
 
-		this.#publisher = new Publisher(this.#quic, this.#session, solicit ?? false);
+		this.#publisher = new Publisher(this.#quic, this.#session, solicit ?? false, cluster);
 		this.#solicit = solicit;
-		this.#subscriber = new Subscriber(this.#session);
+		this.#cluster = cluster;
+		this.#subscriber = new Subscriber(this.#session, cluster);
 
 		void this.#run();
 	}
@@ -251,7 +263,11 @@ export class Connection implements Established {
 
 			// Subscriber handles incoming notifications
 			case PublishNamespace.id: {
-				const msg = await PublishNamespace.decode(stream.reader, this.#session.version);
+				const msg = await PublishNamespace.decode(
+					stream.reader,
+					this.#session.version,
+					Cluster.negotiated(this.#cluster),
+				);
 
 				// We always declare that advertisements to us must be solicited (MoQ
 				// Solicit), and writing the option at all proves the peer implements the

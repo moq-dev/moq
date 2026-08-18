@@ -1,9 +1,11 @@
 import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { createMockTransportPair } from "../mock.ts";
+import { type Origin, OriginSchema } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
 import { NativeSession, type Session } from "./adapter.ts";
+import type * as Cluster from "./cluster.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
@@ -82,9 +84,9 @@ async function declinePublishNamespace(stream: Stream, retryInterval = 1n): Prom
 	}
 }
 
-function publisher(transport: WebTransport): Publisher {
+function publisher(transport: WebTransport, cluster?: Cluster.Hops): Publisher {
 	const session = new NativeSession(transport, VERSION, true);
-	return new Publisher(transport, session, false);
+	return new Publisher(transport, session, false, cluster);
 }
 
 /**
@@ -336,4 +338,39 @@ test("re-announcing a path clears a refusal that forbade retrying", async () => 
 	await acceptPublishNamespace(retried);
 
 	pub.close();
+});
+
+/**
+ * A peer that declared a Hop ID gets one on every advertisement: it is what lets the peer
+ * tell that an advertisement it hears back came from us. A peer that declared nothing has
+ * not read ours either, so sending it the parameters would be a protocol violation.
+ */
+test("an advertisement carries our hop id once the peer declared one", async () => {
+	const self: Origin = OriginSchema.parse(7n);
+
+	for (const peer of [OriginSchema.parse(9n), undefined]) {
+		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const pub = publisher(pair.server, { self, peer });
+		pub.publish(Path.from("mine"), new BroadcastProducer());
+		void pub.runPublishNamespaces();
+
+		const stream = await nextStream(pair.client);
+		if (!stream) throw new Error("no PUBLISH_NAMESPACE for the broadcast");
+		expect(await stream.reader.u53()).toBe(PublishNamespace.id);
+
+		if (peer === undefined) {
+			// Nothing negotiated, so the parameters are absent: reading the message as a
+			// negotiated one finds no HOP_PATH and rejects.
+			await expect(PublishNamespace.decode(stream.reader, VERSION, true)).rejects.toThrow();
+		} else {
+			// Our own Hop ID is the last entry, and we originate everything we advertise,
+			// so it is the only one. The cost is 0: we are already producing the content.
+			const msg = await PublishNamespace.decode(stream.reader, VERSION, true);
+			expect(msg.trackNamespace).toBe(Path.from("mine"));
+			expect(msg.cluster).toEqual({ hops: [self], cost: 0n });
+			await acceptPublishNamespace(stream);
+		}
+
+		pub.close();
+	}
 });
