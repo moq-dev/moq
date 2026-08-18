@@ -48,7 +48,7 @@ impl Estimate {
 /// # ) -> moq_mux::Result<()> {
 /// use moq_mux::catalog::hang::Container;
 /// let mut track = catalog.media_producer(net, Container::Legacy)?;
-/// let mut rendition = reserved.video(track.name());
+/// let mut rendition = reserved.video(track.name())?;
 /// rendition.set(config);
 ///
 /// track.write(frame)?;

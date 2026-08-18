@@ -314,7 +314,7 @@ impl Pad {
 
 		// Go through the reservation like every codec pad, so the first catalog snapshot waits for
 		// this track and dropping the rendition removes it again.
-		let mut rendition = catalog.reserve().text(name);
+		let mut rendition = catalog.reserve().text(name)?;
 		rendition.set(config);
 
 		Ok(Text {

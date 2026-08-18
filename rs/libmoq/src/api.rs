@@ -1583,10 +1583,11 @@ pub unsafe extern "C" fn moq_publish_video_properties(broadcast: u32, properties
 /// This is the producer counterpart to [moq_consume_video_config]: instead of
 /// reading a rendition out of a catalog, it writes one into the catalog of a
 /// broadcast created with [moq_origin_publish]. The rendition is keyed by
-/// `config.name`, which must not already exist in this broadcast's catalog:
-/// re-declaring one fails rather than replacing it. Remove it first with
-/// [moq_publish_video_remove] to change a rendition. The updated catalog is
-/// published to subscribers automatically.
+/// `config.name`; calling this again with the same name replaces the rendition
+/// you declared, so a config can be refined in place. It fails only when a
+/// [moq_publish_video] track owns the name, since that track publishes and
+/// retires its own rendition. The updated catalog is published to subscribers
+/// automatically.
 ///
 /// The struct fields are read as inputs:
 /// - `name` / `codec` are required (NOT NULL terminated) string slices.
@@ -1594,7 +1595,7 @@ pub unsafe extern "C" fn moq_publish_video_properties(broadcast: u32, properties
 /// - `description` may be NULL to omit it.
 /// - `coded_width` / `coded_height` may be zero to omit them.
 /// - `container` describes how the frames written to the track are wrapped. A
-///   zeroed one declares the legacy container, which is what [moq_publish_audio]
+///   zeroed one declares the legacy container, which is what [moq_publish_video]
 ///   writes; declare CMAF or LOC for a [moq_publish_track] whose frames you
 ///   already encode that way.
 ///
@@ -1631,10 +1632,10 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 /// Add or replace an audio rendition in a broadcast's catalog.
 ///
 /// This is the producer counterpart to [moq_consume_audio_config]. The rendition
-/// is keyed by `config.name`, which must not already exist in this broadcast's
-/// catalog: re-declaring one fails rather than replacing it. Remove it first with
-/// [moq_publish_audio_remove] to change a rendition. The updated catalog is
-/// published to subscribers automatically.
+/// is keyed by `config.name`, on the same terms as [moq_publish_video_config]:
+/// a repeat call replaces your own rendition, and a name a [moq_publish_audio]
+/// track owns is refused. The updated catalog is published to subscribers
+/// automatically.
 ///
 /// The struct fields are read as inputs:
 /// - `name` / `codec` are required (NOT NULL terminated) string slices.
@@ -1674,8 +1675,10 @@ pub unsafe extern "C" fn moq_publish_audio_config(broadcast: u32, config: *const
 
 /// Remove a video rendition from a broadcast's catalog by name.
 ///
-/// This is a no-op if no rendition with that name exists. The updated catalog is
-/// published to subscribers automatically.
+/// Removes a rendition added by [moq_publish_video_config]. Any other name is a
+/// no-op, including one a [moq_publish_video] track owns, which is retired by
+/// [moq_publish_media_finish] instead. The updated catalog is published to
+/// subscribers automatically.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -1692,8 +1695,7 @@ pub unsafe extern "C" fn moq_publish_video_remove(broadcast: u32, name: *const c
 
 /// Remove an audio rendition from a broadcast's catalog by name.
 ///
-/// This is a no-op if no rendition with that name exists. The updated catalog is
-/// published to subscribers automatically.
+/// Same rules as [moq_publish_video_remove].
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///

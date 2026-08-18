@@ -444,7 +444,7 @@ mod tests {
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut registration = reserved.video("video0");
+		let mut registration = reserved.video("video0").unwrap();
 		let mut config = video_config();
 		config.coded_width = None;
 		config.coded_height = None;
@@ -521,9 +521,9 @@ mod tests {
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut video_registration = reserved.video("video0");
+		let mut video_registration = reserved.video("video0").unwrap();
 		video_registration.set(video_config());
-		let mut audio_registration = reserved.audio("audio0");
+		let mut audio_registration = reserved.audio("audio0").unwrap();
 		let audio_config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 		audio_registration.set(audio_config);
 		drop(reserved);
@@ -602,7 +602,7 @@ mod tests {
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut registration = reserved.video("video0");
+		let mut registration = reserved.video("video0").unwrap();
 		registration.set(video_config());
 		drop(reserved);
 
@@ -663,7 +663,7 @@ mod tests {
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut registration = reserved.video("video0");
+		let mut registration = reserved.video("video0").unwrap();
 		registration.set(hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8));
 		drop(reserved);
 
@@ -700,9 +700,9 @@ mod tests {
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut video_registration = reserved.video("video0");
+		let mut video_registration = reserved.video("video0").unwrap();
 		video_registration.set(video_config());
-		let mut audio_registration = reserved.audio("audio0");
+		let mut audio_registration = reserved.audio("audio0").unwrap();
 		let audio_config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 		audio_registration.set(audio_config);
 		drop(reserved);
@@ -785,7 +785,7 @@ mod tests {
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut registration = reserved.video("video0");
+		let mut registration = reserved.video("video0").unwrap();
 		let config = video_config();
 		registration.set(config);
 		drop(reserved);
@@ -854,7 +854,7 @@ mod tests {
 			let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 			let reserved = catalog.reserve();
-			let mut registration = reserved.video("video0");
+			let mut registration = reserved.video("video0").unwrap();
 			let config = video_config();
 			registration.set(config.clone());
 			drop(reserved);
@@ -1007,7 +1007,7 @@ mod tests {
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut registration = reserved.video("video0");
+		let mut registration = reserved.video("video0").unwrap();
 		let config = video_config();
 		registration.set(config);
 		drop(reserved);
@@ -1064,7 +1064,7 @@ mod tests {
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
-		let mut registration = reserved.video("video0");
+		let mut registration = reserved.video("video0").unwrap();
 		let config = video_config();
 		registration.set(config);
 		drop(reserved);

@@ -266,22 +266,26 @@ impl<E: CatalogExt> Reserved<E> {
 		self.catalog.track_info()
 	}
 
-	/// Reserve a rendition of config type `C` under `name`, returning a guard to fill it in.
+	/// Reserve a rendition of config type `C` under `name`, returning the handle that owns it.
 	///
-	/// The guard holds its own `Reserved` clone, so the catalog stays withheld until the returned
+	/// The handle holds its own `Reserved` clone, so the catalog stays withheld until the returned
 	/// [`Rendition`] is [`set`](Rendition::set) (or dropped). Prefer [`video`](Self::video) /
 	/// [`audio`](Self::audio) for the built-in media configs.
-	pub fn init<C: RenditionConfig<E>>(&self, name: impl Into<String>) -> Rendition<E, C> {
-		Rendition::new(self.clone(), name)
+	///
+	/// Errors if the name is already taken in this section, whether by a live rendition or by an
+	/// entry in the catalog. Sections are independent, so the same name in `video` and `audio` is
+	/// two unrelated renditions.
+	pub fn init<C: RenditionConfig<E>>(&self, name: impl Into<String>) -> crate::Result<Rendition<E, C>> {
+		Rendition::new(self.clone(), name.into())
 	}
 
 	/// Reserve a video rendition; shorthand for [`init`](Self::init).
-	pub fn video(&self, name: impl Into<String>) -> VideoTrack<E> {
+	pub fn video(&self, name: impl Into<String>) -> crate::Result<VideoTrack<E>> {
 		self.init(name)
 	}
 
 	/// Reserve an audio rendition; shorthand for [`init`](Self::init).
-	pub fn audio(&self, name: impl Into<String>) -> AudioTrack<E> {
+	pub fn audio(&self, name: impl Into<String>) -> crate::Result<AudioTrack<E>> {
 		self.init(name)
 	}
 
@@ -289,7 +293,7 @@ impl<E: CatalogExt> Reserved<E> {
 	///
 	/// Nothing about a cue track is detected from its payload, so the caller [`set`](Rendition::set)s
 	/// a complete config up front rather than waiting on a bitstream.
-	pub fn text(&self, name: impl Into<String>) -> TextTrack<E> {
+	pub fn text(&self, name: impl Into<String>) -> crate::Result<TextTrack<E>> {
 		self.init(name)
 	}
 
@@ -329,6 +333,14 @@ impl<E: CatalogExt> Drop for Reserved<E> {
 /// it in with [`set`](Self::set) and refine it in place with [`update`](Self::update). Until it's
 /// set (or dropped) it holds a [`Reserved`] clone, so an unresolved rendition keeps the initial
 /// catalog publish gated. On drop the rendition is removed from the shared catalog.
+///
+/// It owns its name for its whole lifetime, from reservation rather than from `set`, so nothing
+/// else can reserve that name in the same section meanwhile. That's what a lazily-configured
+/// importer needs: an H.264 track publishes no config until its first SPS, and the name has to be
+/// unavailable through that window or an entry written into it is overwritten by `set` and then
+/// deleted by this `Drop`. Author a rendition by holding one of these, not by writing to
+/// `catalog.video` / `catalog.audio` through a [`Guard`](super::Guard), which is raw access to the
+/// catalog document and enforces nothing.
 pub struct Rendition<E: CatalogExt, C: RenditionConfig<E>> {
 	catalog: Producer<E>,
 	name: String,
@@ -357,17 +369,21 @@ pub type AudioTrack<E = ()> = Rendition<E, hang::catalog::AudioConfig>;
 pub type TextTrack<E = ()> = Rendition<E, hang::catalog::TextConfig>;
 
 impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
-	fn new(reserved: Reserved<E>, name: impl Into<String>) -> Self {
-		Self {
+	fn new(reserved: Reserved<E>, name: String) -> crate::Result<Self> {
+		// Take the name now, not at `set`: a lazily-configured importer (H.264 before its first SPS)
+		// has no catalog entry until much later, and the name has to be ours for that whole window.
+		reserved.catalog.acquire::<C>(&name)?;
+
+		Ok(Self {
 			catalog: reserved.catalog.clone(),
 			gate: Some(reserved),
-			name: name.into(),
+			name,
 			present: false,
 			supplied: Estimate::default(),
 			detected: Estimate::default(),
 			published: None,
 			_config: PhantomData,
-		}
+		})
 	}
 
 	/// The track name this rendition is keyed by.
@@ -449,14 +465,23 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	}
 }
 
+// Manual so a config that isn't `Debug` doesn't cost the handle its own, and because the interesting
+// state is the name and whether it has published yet, not the estimate bookkeeping.
+impl<E: CatalogExt, C: RenditionConfig<E>> std::fmt::Debug for Rendition<E, C> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Rendition")
+			.field("name", &self.name)
+			.field("published", &self.present)
+			.finish_non_exhaustive()
+	}
+}
+
 impl<E: CatalogExt, C: RenditionConfig<E>> Drop for Rendition<E, C> {
 	fn drop(&mut self) {
-		if self.present {
-			// Removing mutates the catalog, so the guard publishes it (immediately if live, else it
-			// accumulates until the gate opens).
-			let mut guard = self.catalog.lock();
-			C::remove(&mut guard, &self.name);
-		}
+		// The entry and the name it holds are released together under one lock. Removing mutates the
+		// catalog, so the guard publishes it (immediately if live, else it accumulates until the gate
+		// opens).
+		self.catalog.lock().release::<C>(&self.name, self.present);
 		// Our reservation (`gate`) drops here. If still held (never set), its release flushes any
 		// staged change; if already released by `set`, this is a no-op.
 	}
@@ -470,7 +495,7 @@ mod tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = super::super::Producer::new(&mut broadcast).unwrap();
 		let reserved = catalog.reserve();
-		let rendition = reserved.video("v");
+		let rendition = reserved.video("v").unwrap();
 		// Drop the standalone reservation so only the rendition's own gate remains, which `set`
 		// clears; the broadcast handle is returned so the produced tracks outlive the catalog.
 		drop(reserved);
@@ -627,6 +652,89 @@ mod tests {
 		assert_eq!(config.bitrate, Some(789), "the re-set bitrate is now authoritative");
 	}
 
+	/// A rendition owns its name from the moment it's reserved, not from `set`. H.264 publishes
+	/// frames before its first SPS resolves the config, and the name has to be unavailable through
+	/// that window: an entry written into the gap used to be overwritten by `set` and then deleted
+	/// by the importer's `Drop`, taking the caller's rendition with it.
+	#[test]
+	fn an_unresolved_rendition_still_owns_its_name() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		assert!(
+			catalog.snapshot().video.renditions.is_empty(),
+			"nothing is published until the config resolves"
+		);
+
+		let err = catalog
+			.reserve()
+			.video("v")
+			.expect_err("an unresolved rendition still owns its name");
+		assert!(matches!(err, crate::Error::Hang(hang::Error::Duplicate(name)) if name == "v"));
+
+		// The refusal left nothing behind, so the importer's own config is what lands.
+		rendition.set(config(Some(123), None));
+		assert_eq!(
+			catalog.snapshot().video.renditions.get("v").unwrap().bitrate,
+			Some(123),
+			"the importer's config owns the rendition"
+		);
+	}
+
+	/// A resolved rendition still owns its name, now backed by a catalog entry.
+	#[test]
+	fn a_resolved_rendition_still_owns_its_name() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		rendition.set(config(Some(789), None));
+
+		assert!(catalog.reserve().video("v").is_err(), "owned by the live rendition");
+		assert_eq!(
+			catalog.snapshot().video.renditions.get("v").unwrap().bitrate,
+			Some(789),
+			"the refused reservation left the rendition intact"
+		);
+	}
+
+	/// Ownership lasts exactly as long as the rendition, so the name is free again once it drops
+	/// and the entry it published goes with it.
+	#[test]
+	fn dropping_a_rendition_frees_its_name() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		rendition.set(config(None, None));
+		drop(rendition);
+		assert!(
+			catalog.snapshot().video.renditions.is_empty(),
+			"the entry is retired with its owner"
+		);
+
+		let mut replacement = catalog
+			.reserve()
+			.video("v")
+			.expect("the name is free once the rendition drops");
+		replacement.set(config(Some(456), None));
+		assert_eq!(catalog.snapshot().video.renditions.get("v").unwrap().bitrate, Some(456));
+	}
+
+	/// Sections are independent maps, so a video rendition says nothing about the same name in
+	/// audio.
+	#[test]
+	fn a_name_is_owned_per_section() {
+		let (_broadcast, catalog, _video) = video_track();
+		catalog
+			.reserve()
+			.audio("v")
+			.expect("an audio rendition is a different section from a video one");
+	}
+
+	/// An entry already in the catalog is taken too, even with no rendition behind it: a caller
+	/// that hand-wrote one through the guard still gets to keep it.
+	#[test]
+	fn an_existing_entry_owns_its_name() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = super::super::Producer::new(&mut broadcast).unwrap();
+		catalog.lock().video.insert("v", config(None, None)).unwrap();
+
+		assert!(catalog.reserve().video("v").is_err(), "the catalog already carries it");
+	}
+
 	/// The broadcast has one timeline: every rendition's groups index into the same track, so
 	/// an aligned ladder (source + rung) shares it by construction.
 	#[test]
@@ -704,7 +812,7 @@ mod tests {
 		fn detects_and_advertises() {
 			let (_broadcast, catalog) = produce();
 			let reserved = catalog.reserve();
-			let mut rendition = reserved.init::<Telemetry>("gps");
+			let mut rendition = reserved.init::<Telemetry>("gps").unwrap();
 			drop(reserved);
 
 			rendition.set(telemetry(None));
@@ -728,7 +836,7 @@ mod tests {
 		fn measures_a_custom_track() {
 			let (mut broadcast, mut catalog) = produce();
 			let reserved = catalog.reserve();
-			let mut rendition = reserved.init::<Telemetry>("gps");
+			let mut rendition = reserved.init::<Telemetry>("gps").unwrap();
 			drop(reserved);
 			rendition.set(telemetry(None));
 
@@ -760,7 +868,7 @@ mod tests {
 		fn keeps_supplied_bitrate() {
 			let (_broadcast, catalog) = produce();
 			let reserved = catalog.reserve();
-			let mut rendition = reserved.init::<Telemetry>("gps");
+			let mut rendition = reserved.init::<Telemetry>("gps").unwrap();
 			drop(reserved);
 
 			rendition.set(telemetry(Some(4_200)));
@@ -777,8 +885,8 @@ mod tests {
 			let mut consumer = catalog.consume().unwrap();
 
 			let reserved = catalog.reserve();
-			let mut video = reserved.video("v");
-			let mut gps = reserved.init::<Telemetry>("gps");
+			let mut video = reserved.video("v").unwrap();
+			let mut gps = reserved.init::<Telemetry>("gps").unwrap();
 			drop(reserved);
 
 			let waiter = kio::Waiter::noop();

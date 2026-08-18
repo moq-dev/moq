@@ -418,6 +418,112 @@ fn publish_catalog_config_invalid_broadcast() {
 	assert!(unsafe { moq_publish_audio_remove(0, name.as_ptr() as *const c_char, name.len()) } < 0);
 }
 
+/// An avc3 track has no catalog rendition until its first SPS arrives, but it owns the name from
+/// the moment it's published. Writing into that gap used to succeed, then get overwritten by the
+/// importer and deleted when the media handle finished, silently taking the caller's entry with it.
+#[test]
+fn publish_media_owns_its_rendition_before_the_first_keyframe() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"media-owns-its-rendition");
+
+	// Annex-B with an empty init, so the parameter sets arrive in band and the importer publishes
+	// nothing until a keyframe lands.
+	let media = id(publish_video(
+		broadcast,
+		moq_video_format::MOQ_VIDEO_FORMAT_AVC3,
+		&[],
+		None,
+	));
+
+	let name = "0.avc3";
+	let codec = "avc1.42c01e";
+	let video = moq_video_config {
+		name: name.as_ptr() as *const c_char,
+		name_len: name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		codec: codec.as_ptr() as *const c_char,
+		codec_len: codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: 0,
+		coded_height: 0,
+		container: moq_container::default(),
+	};
+	assert_eq!(
+		unsafe { moq_publish_video_config(broadcast, &video) },
+		-18,
+		"the media track owns 0.avc3 even before its config resolves"
+	);
+	assert_eq!(
+		unsafe { moq_publish_video_remove(broadcast, name.as_ptr() as *const c_char, name.len()) },
+		0,
+		"removing a name the caller never authored is a no-op"
+	);
+	assert_eq!(
+		unsafe { moq_publish_video_config(broadcast, &video) },
+		-18,
+		"and the no-op left the media track's rendition alone"
+	);
+
+	// Once the media handle is gone the name is free again.
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(
+		unsafe { moq_publish_video_config(broadcast, &video) },
+		0,
+		"finishing the media track releases its rendition name"
+	);
+
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A caller owns the renditions it authored, so re-declaring one refines it in place rather than
+/// failing, and removing one actually retires it.
+#[test]
+fn publish_video_config_replaces_its_own_rendition() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"catalog-config-replace");
+
+	let name = "authored";
+	let codec = "vp8";
+	let mut video = moq_video_config {
+		name: name.as_ptr() as *const c_char,
+		name_len: name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		codec: codec.as_ptr() as *const c_char,
+		codec_len: codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: 640,
+		coded_height: 360,
+		container: moq_container::default(),
+	};
+
+	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
+	video.coded_width = 1920;
+	video.coded_height = 1080;
+	assert_eq!(
+		unsafe { moq_publish_video_config(broadcast, &video) },
+		0,
+		"a caller can refine a rendition it owns"
+	);
+
+	assert_eq!(
+		unsafe { moq_publish_video_remove(broadcast, name.as_ptr() as *const c_char, name.len()) },
+		0
+	);
+	assert_eq!(
+		unsafe { moq_publish_video_config(broadcast, &video) },
+		0,
+		"the name is free once the caller removes its rendition"
+	);
+
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn publish_catalog_config_null_pointer() {
 	let origin = id(moq_origin_create());
@@ -446,7 +552,7 @@ fn publish_catalog_roundtrip() {
 	let path = b"catalog-producer";
 	let broadcast = publish_broadcast(origin, path);
 
-	// Author the catalog directly instead of via moq_publish_media.
+	// Author the catalog directly instead of via moq_publish_video.
 	let video_name = "video";
 	let video_label = "Main camera";
 	let video_codec = "vp8";
