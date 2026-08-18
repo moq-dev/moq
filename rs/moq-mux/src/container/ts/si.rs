@@ -27,8 +27,10 @@ use super::catalog;
 
 /// Coalesce snapshot cuts: a junction revises many sub-tables inside a second
 /// (every service's now/next rolls on the hour), and one group carrying all of them
-/// beats a burst of near-identical groups. Measured on the media clock, like the
-/// export cadence, and the first snapshot is never delayed.
+/// beats a burst of near-identical groups. Measured on the host clock, not the
+/// media clock: bursts arrive in real time, and an audio-only stream never
+/// advances the media clock at all (which would wedge every revision behind the
+/// debounce forever). The first snapshot is never delayed.
 const DEBOUNCE: Duration = Duration::from_secs(1);
 
 /// Keep at most this many sections without any parseable identity (short-form or
@@ -154,6 +156,7 @@ struct Entry {
 	/// The entry appears in the catalog's `mpegts.si` map (deferred until the first
 	/// snapshot group exists, so a subscriber never finds an empty track).
 	advertised: bool,
+	/// Host-clock micros of the last cut ([`DEBOUNCE`]); `None` until the first.
 	last_cut: Option<u128>,
 }
 
@@ -214,9 +217,9 @@ impl Entry {
 				// this mux transmits it. For EIT schedule this is the *only* commit
 				// path (see [`Pending::contiguous`]). The limit: a section lost before
 				// the wrap is indistinguishable from a legitimately skipped number, so
-				// the committed set is complete-as-observed, self-healing on the next
-				// cycle. No section-counting receiver can do better; version mixing is
-				// still unrepresentable either way.
+				// the committed set is complete-as-observed; the same-version merge in
+				// [`Self::commit`] fills it in on the next cycle. No section-counting
+				// receiver can do better; version mixing is still unrepresentable.
 				let sections = std::mem::take(&mut pending.sections);
 				self.commit(id, version, sections);
 				return;
@@ -235,11 +238,25 @@ impl Entry {
 		}
 	}
 
-	/// Replace the sub-table's generation atomically and retire everything pending
-	/// for it. Repetition of an unchanged set refreshes the version without
-	/// marking the entry dirty.
-	fn commit(&mut self, id: Identity, version: u8, sections: BTreeMap<u8, Bytes>) {
+	/// Commit the sub-table's generation atomically and retire everything pending
+	/// for it. A new version replaces the old wholesale; the *same* version merges
+	/// into what is already active. The merge is what makes a loss recoverable: a
+	/// section lost before the cycle wrapped commits an observed subset, and on the
+	/// next cycle the already-committed sections short-circuit as repetitions, so
+	/// the wrap only ever carries the stragglers. Replacing would flip-flop between
+	/// incomplete subsets forever; merging converges to the full set. Sound because
+	/// one version is one logical content: a mux removing a section must bump the
+	/// version, which takes the replace path. Repetition of an unchanged set is not
+	/// a change.
+	fn commit(&mut self, id: Identity, version: u8, mut sections: BTreeMap<u8, Bytes>) {
 		self.pending.retain(|(pid, _), _| *pid != id);
+		if let Some(current) = self.active.get(&id)
+			&& current.version == Some(version)
+		{
+			for (number, section) in current.sections.iter() {
+				sections.entry(*number).or_insert_with(|| section.clone());
+			}
+		}
 		let changed = self.active.get(&id).is_none_or(|current| current.sections != sections);
 		self.active.insert(
 			id,
@@ -254,7 +271,8 @@ impl Entry {
 	}
 
 	/// Cut a snapshot group: the complete active set, one frame per sub-table.
-	fn cut(&mut self, pts: Timestamp) -> anyhow::Result<()> {
+	/// `pts` stamps the frames; `now` is the host clock for the debounce.
+	fn cut(&mut self, pts: Timestamp, now: u128) -> anyhow::Result<()> {
 		let mut group = self.track.append_group()?;
 		for generation in self.active.values() {
 			let mut payload = Vec::new();
@@ -265,7 +283,7 @@ impl Entry {
 		}
 		group.finish()?;
 		self.dirty = false;
-		self.last_cut = Some(pts.as_micros());
+		self.last_cut = Some(now);
 		Ok(())
 	}
 }
@@ -280,6 +298,8 @@ pub(super) struct Capture<E: catalog::Catalog> {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
 	entries: BTreeMap<(u16, u8), Entry>,
+	/// Host clock driving the cut debounce (see [`DEBOUNCE`]).
+	clock: crate::Clock,
 }
 
 impl<E: catalog::Catalog> Capture<E> {
@@ -288,6 +308,7 @@ impl<E: catalog::Catalog> Capture<E> {
 			broadcast,
 			catalog,
 			entries: BTreeMap::new(),
+			clock: crate::Clock::new(),
 		}
 	}
 
@@ -337,11 +358,11 @@ impl<E: catalog::Catalog> Capture<E> {
 	/// Cut snapshot groups for the dirty entries and advertise any entry with its
 	/// first snapshot in the catalog (one lock for the whole batch).
 	///
-	/// `pts` is the media clock, used both to stamp the frames and to coalesce cuts
-	/// ([`DEBOUNCE`]); a first snapshot is never delayed. `force` overrides the
-	/// debounce, for end of stream.
+	/// `pts` is the media clock, used to stamp the frames; the cut debounce runs on
+	/// the host clock ([`DEBOUNCE`]), and a first snapshot is never delayed. `force`
+	/// overrides the debounce, for end of stream.
 	pub fn flush(&mut self, pts: Timestamp, force: bool) -> anyhow::Result<()> {
-		let now = pts.as_micros();
+		let now = u128::from(self.clock.micros());
 		for entry in self.entries.values_mut() {
 			if !entry.dirty {
 				continue;
@@ -352,7 +373,7 @@ impl<E: catalog::Catalog> Capture<E> {
 			{
 				continue;
 			}
-			entry.cut(pts)?;
+			entry.cut(pts, now)?;
 		}
 
 		if self.entries.values().any(|e| !e.advertised && e.last_cut.is_some()) {

@@ -2333,3 +2333,239 @@ async fn late_join_matches_a_running_exporter_without_video() {
 	// rendering the same stream.
 	assert_only_continuity_differs(&a, &b, b[1].timestamp);
 }
+
+/// A section lost before the cycle wraps commits an observed subset; the next
+/// cycle must *converge* to the full set rather than flip-flop between subsets.
+/// The repetition fast-path skips sections already active, so without the
+/// same-version merge in `commit` the stragglers would replace the subset instead
+/// of completing it, oscillating forever.
+#[tokio::test(start_paused = true)]
+async fn lost_dense_section_recovers_on_the_next_cycle() {
+	let sdt = |number: u8, fill: u8| make_long_section(0x42, 1, 0, number, 2, &[fill; 4]);
+	let s0 = sdt(0, 0xa0);
+	let s1 = sdt(1, 0xa1);
+	let s2 = sdt(2, 0xa2);
+
+	// Cycle 1 loses section 1; the repeat of section 0 wraps and commits {0, 2}.
+	let mut input = si_packet(0x0011, &s0);
+	input.extend_from_slice(&si_packet_cc(0x0011, &s2, 1));
+	input.extend_from_slice(&si_packet_cc(0x0011, &s0, 2));
+	// Cycle 2 supplies section 1; sections 0 and 2 short-circuit as repetitions,
+	// so the wrap carries only the straggler, which must merge, not replace.
+	input.extend_from_slice(&si_packet_cc(0x0011, &s1, 3));
+	input.extend_from_slice(&si_packet_cc(0x0011, &s1, 4));
+	let mut rig = si_rig();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	rig.import.finish().unwrap();
+
+	let si = rig.catalog.snapshot().mpegts.si.clone();
+	assert_eq!(
+		read_si_sections(&rig.consumer, &si[&0x0011][&0x42].track).await,
+		vec![Bytes::from(s0), Bytes::from(s1), Bytes::from(s2)],
+		"the lost section joined the committed generation instead of replacing it"
+	);
+}
+
+/// A catalog update that keeps the `(PID, table_id)` key but repoints it at a new
+/// track (a restarted publisher) must rebuild the subscription: staying attached
+/// to the old track would repeat its stale sections forever.
+#[tokio::test(start_paused = true)]
+async fn repointed_si_entry_resubscribes() {
+	let sdt_a = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8]);
+	let sdt_b = make_long_section(0x42, 1, 1, 0, 0, &[0xbb; 8]);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	let mut track_a = broadcast.create_track("a.si", None).unwrap();
+	track_a
+		.write_frame(Timestamp::ZERO, Bytes::from(sdt_a.clone()))
+		.unwrap();
+	let mut track_b = broadcast.create_track("b.si", None).unwrap();
+	track_b
+		.write_frame(Timestamp::ZERO, Bytes::from(sdt_b.clone()))
+		.unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
+	let track = broadcast
+		.create_track(broadcast.unique_name(".avc1"), hang::container::track_info())
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		let mut guard = catalog.lock();
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		cfg.container = Container::Legacy;
+		cfg.description = Some(avcc);
+		guard.video.renditions.insert(name.clone(), cfg);
+		guard.mpegts.si.entry(0x0011).or_default().insert(
+			0x42,
+			tscat::SiEntry {
+				track: "a.si".to_string(),
+				interval: Some(Duration::from_secs(2)),
+				..Default::default()
+			},
+		);
+	}
+
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 64));
+	let write_key = |producer: &mut Producer<HangContainer>, sec: u64| {
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_micros(sec * 1_000_000).unwrap(),
+				duration: None,
+				payload: length_prefixed(&[&idr]),
+				keyframe: true,
+			})
+			.unwrap();
+		producer.cut(None).unwrap();
+	};
+
+	let mut exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap();
+	let mut before = BytesMut::new();
+	write_key(&mut producer, 0);
+	write_key(&mut producer, 1);
+	for _ in 0..2 {
+		let frame = tokio::time::timeout(Duration::from_secs(1), exporter.next())
+			.await
+			.expect("a frame before the switch")
+			.unwrap()
+			.unwrap();
+		before.extend_from_slice(&frame.payload);
+	}
+
+	// Repoint the entry at the replacement track.
+	catalog.lock().mpegts.si.get_mut(&0x0011).unwrap().insert(
+		0x42,
+		tscat::SiEntry {
+			track: "b.si".to_string(),
+			interval: Some(Duration::from_secs(2)),
+			..Default::default()
+		},
+	);
+
+	write_key(&mut producer, 2);
+	write_key(&mut producer, 3);
+	write_key(&mut producer, 4);
+	producer.finish().unwrap();
+	let mut after = BytesMut::new();
+	while let Ok(res) = tokio::time::timeout(Duration::from_secs(1), exporter.next()).await {
+		let Some(frame) = res.unwrap() else { break };
+		after.extend_from_slice(&frame.payload);
+	}
+
+	let contains = |haystack: &[u8], needle: &[u8]| haystack.windows(needle.len()).any(|w| w == needle);
+	assert!(
+		contains(&before, &sdt_a),
+		"the original track's SDT was emitted (control)"
+	);
+	assert!(
+		contains(&after, &sdt_b),
+		"the replacement track's SDT is emitted after the repoint"
+	);
+}
+
+/// An SI revision that lands after the final media frame still reaches the TS:
+/// emission rides media frames, so end of stream flushes every entry's current
+/// sections in one trailing frame before yielding `None`.
+#[tokio::test(start_paused = true)]
+async fn si_revision_after_final_media_frame_is_flushed() {
+	let sdt_v1 = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8]);
+	let sdt_v2 = make_long_section(0x42, 1, 1, 0, 0, &[0xbb; 8]);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	let mut si_track = broadcast.create_track("0x0011-0x42.si", None).unwrap();
+	si_track
+		.write_frame(Timestamp::ZERO, Bytes::from(sdt_v1.clone()))
+		.unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
+	let track = broadcast
+		.create_track(broadcast.unique_name(".avc1"), hang::container::track_info())
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		let mut guard = catalog.lock();
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		cfg.container = Container::Legacy;
+		cfg.description = Some(avcc);
+		guard.video.renditions.insert(name.clone(), cfg);
+		guard.mpegts.si.entry(0x0011).or_default().insert(
+			0x42,
+			tscat::SiEntry {
+				track: "0x0011-0x42.si".to_string(),
+				interval: Some(Duration::from_secs(2)),
+				..Default::default()
+			},
+		);
+	}
+
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 64));
+	producer
+		.write(Frame {
+			timestamp: Timestamp::ZERO,
+			duration: None,
+			payload: length_prefixed(&[&idr]),
+			keyframe: true,
+		})
+		.unwrap();
+	producer.cut(None).unwrap();
+	producer.finish().unwrap();
+
+	let mut exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap();
+	let first = tokio::time::timeout(Duration::from_secs(1), exporter.next())
+		.await
+		.expect("the only media frame")
+		.unwrap()
+		.unwrap();
+	let contains = |haystack: &[u8], needle: &[u8]| haystack.windows(needle.len()).any(|w| w == needle);
+	assert!(contains(&first.payload, &sdt_v1), "v1 rode the media frame (control)");
+
+	// The revision lands after the last media frame; only the trailing flush can
+	// carry it. Closing the catalog lets the exporter reach end of stream.
+	si_track
+		.write_frame(Timestamp::ZERO, Bytes::from(sdt_v2.clone()))
+		.unwrap();
+	catalog.finish().unwrap();
+
+	let tail = tokio::time::timeout(Duration::from_secs(1), exporter.next())
+		.await
+		.expect("a trailing SI frame rather than an immediate end")
+		.unwrap()
+		.expect("the trailing SI frame");
+	assert_packet_aligned(&tail.payload);
+	assert!(
+		contains(&tail.payload, &sdt_v2),
+		"the trailing flush carries the revision"
+	);
+	let end = tokio::time::timeout(Duration::from_secs(1), exporter.next())
+		.await
+		.expect("the stream ends after the flush")
+		.unwrap();
+	assert!(end.is_none(), "end of stream after the trailing flush");
+}

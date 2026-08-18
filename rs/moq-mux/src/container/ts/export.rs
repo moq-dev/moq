@@ -71,6 +71,10 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// re-emitted verbatim on its PID at its own cadence. Opaque: export never
 	/// parses a table it carries.
 	si: BTreeMap<(u16, u8), SiTrack>,
+	/// Timestamp of the last emitted frame, stamped onto the trailing SI flush.
+	last_timestamp: Option<Timestamp>,
+	/// The trailing SI flush ran (once, just before end of stream).
+	si_flushed: bool,
 
 	/// Program tables, built once the track layout is known.
 	psi: Option<Psi>,
@@ -168,6 +172,10 @@ struct PesUnit {
 /// reduces its newest complete group into the current section set, and remembers
 /// when it last hit the wire so it re-emits on its own cadence.
 struct SiTrack {
+	/// The catalog's track name for this entry, so a catalog update that repoints
+	/// the entry at a different track (a restarted publisher) is detected and the
+	/// subscription rebuilt rather than left repeating the old track's sections.
+	track: String,
 	interval: Option<Duration>,
 	state: SiState,
 	/// The reduced newest *complete* group: what emission re-transmits.
@@ -197,6 +205,7 @@ enum SiState {
 impl SiTrack {
 	fn new(source: &crate::Source, track: &str, interval: Option<Duration>) -> Self {
 		Self {
+			track: track.to_string(),
 			interval,
 			state: SiState::Requesting(source.request_catalog(), track.to_string()),
 			active: Default::default(),
@@ -347,6 +356,8 @@ impl<E: catalog::Catalog> Export<E> {
 			program_descriptors: Vec::new(),
 			program: None,
 			si: BTreeMap::new(),
+			last_timestamp: None,
+			si_flushed: false,
 			psi: None,
 			last_psi: None,
 			video_start: None,
@@ -484,11 +495,22 @@ impl<E: catalog::Catalog> Export<E> {
 		if let Some(name) = self.pick_next_track() {
 			let frame = self.tracks.get_mut(&name).unwrap().pending.take().unwrap();
 			let out = self.write_frame(&name, frame)?;
+			self.last_timestamp = Some(out.timestamp);
 			return Poll::Ready(Ok(Some(out)));
 		}
 
 		// 5. End of stream once every track has drained and the catalog is closed.
+		// SI emission rides media frames, so a snapshot that arrived (or was
+		// revised) behind the last one would otherwise never reach the TS; flush
+		// every entry's current sections in one trailing frame first. Entries still
+		// resolving are not waited for: media is done, and a wait could be unbounded.
 		if self.catalog.is_none() && !self.tracks.is_empty() && self.tracks.values().all(|t| t.finished) {
+			if !self.si_flushed {
+				self.si_flushed = true;
+				if let Some(out) = self.write_si_tail()? {
+					return Poll::Ready(Ok(Some(out)));
+				}
+			}
 			return Poll::Ready(Ok(None));
 		}
 		if self.catalog.is_none() && self.tracks.is_empty() {
@@ -496,6 +518,37 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 
 		Poll::Pending
+	}
+
+	/// The trailing SI frame for end of stream: every entry's current sections,
+	/// re-emitted once. Duplicates of already-emitted sections are harmless
+	/// repetitions; `None` when there are no tables or no program was ever built.
+	fn write_si_tail(&mut self) -> anyhow::Result<Option<Frame>> {
+		if self.psi.is_none() {
+			return Ok(None);
+		}
+		let pending: Vec<(u16, Vec<Bytes>)> = self
+			.si
+			.iter()
+			.filter(|(_, si)| !si.active.is_empty())
+			.map(|((pid, _), si)| (*pid, si.active.sections().cloned().collect()))
+			.collect();
+		if pending.is_empty() {
+			return Ok(None);
+		}
+		let timestamp = self.last_timestamp.unwrap_or(Timestamp::ZERO);
+		let mut out = Vec::new();
+		for (pid, sections) in pending {
+			for section in &sections {
+				self.write_section(&mut out, pid, section)?;
+			}
+		}
+		Ok(Some(Frame {
+			timestamp,
+			duration: None,
+			payload: Bytes::from(out),
+			keyframe: false,
+		}))
 	}
 
 	fn update_catalog(&mut self, mut catalog: Catalog<E>) -> anyhow::Result<()> {
@@ -517,6 +570,16 @@ impl<E: catalog::Catalog> Export<E> {
 		for (pid, tables) in mpegts.si.iter() {
 			for (table_id, entry) in tables.iter() {
 				match self.si.get_mut(&(*pid, *table_id)) {
+					// A repointed entry (same key, new track) rebuilds the subscription:
+					// the old track is a restarted or replaced publisher's leftover, and
+					// staying attached would repeat its stale sections forever. The last
+					// snapshot carries across so emission never goes dark mid-swap.
+					Some(existing) if existing.track != entry.track => {
+						let mut replacement = SiTrack::new(&self.source, &entry.track, entry.interval);
+						replacement.active = std::mem::take(&mut existing.active);
+						replacement.last_emit = existing.last_emit;
+						*existing = replacement;
+					}
 					Some(existing) => existing.interval = entry.interval,
 					None => {
 						self.si.insert(
