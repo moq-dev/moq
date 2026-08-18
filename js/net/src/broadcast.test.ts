@@ -234,8 +234,8 @@ test("two subscribers to one inserted track each get a full copy", async () => {
 	const broadcast = new BroadcastProducer();
 	const producer = broadcast.createTrack("video");
 
-	const a = broadcast.track("video").subscribe();
-	const b = broadcast.track("video").subscribe();
+	const a = broadcast.track("video").subscribe({ maxAge: 5000 });
+	const b = broadcast.track("video").subscribe({ maxAge: 5000 });
 
 	producer.writeString("hello");
 	producer.writeString("world");
@@ -264,7 +264,7 @@ test("a late subscriber replays the cached window", async () => {
 test("a read throws Lagged on a gap, then resyncs to the next group", async () => {
 	const broadcast = new BroadcastProducer();
 	const producer = broadcast.createTrack("video");
-	const sub = broadcast.track("video").subscribe();
+	const sub = broadcast.track("video").subscribe({ maxAge: 5000 });
 
 	// Group 0 overflows its frame cap without being read, evicting the front: a gap.
 	const g0 = producer.appendGroup();

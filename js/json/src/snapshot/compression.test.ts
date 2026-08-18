@@ -8,6 +8,7 @@ type Value = Record<string, unknown>;
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
+const REPLAY_LATENCY = 30_000;
 
 // Reconstruct every value a compressed consumer yields, in order.
 async function drainCompressed(track: Track.Subscriber): Promise<Value[]> {
@@ -44,7 +45,7 @@ test("compressed snapshot per group round-trips", async () => {
 	producer.finish();
 
 	// Deltas off: one compressed snapshot per group, reconstructed in order.
-	expect(await drainCompressed(track.subscribe())).toEqual([{ a: 1 }, { a: 2 }]);
+	expect(await drainCompressed(track.subscribe({ maxAge: REPLAY_LATENCY }))).toEqual([{ a: 1 }, { a: 2 }]);
 });
 
 test("compressed live consumer sees each update in order", async () => {
@@ -139,7 +140,7 @@ test("compressed deltas roll on the compressed budget", async () => {
 	};
 
 	const layout = new Track.Producer("layout");
-	const layoutSub = layout.subscribe();
+	const layoutSub = layout.subscribe({ maxAge: REPLAY_LATENCY });
 	fill(layout);
 	expect(await groupCount(layoutSub)).toBeGreaterThan(1);
 

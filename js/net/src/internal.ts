@@ -5,8 +5,9 @@
  *
  * @module
  */
-import type { Dispose } from "@moq/signals";
-import type { Consumer as GroupConsumer } from "./group.ts";
+import type { Dispose, Getter } from "@moq/signals";
+import type { Consumer as GroupConsumer, Position } from "./group.ts";
+import type { Timestamp } from "./time.ts";
 import type { Producer, Request, Subscriber } from "./track.ts";
 
 /**
@@ -56,6 +57,19 @@ export const hooks: {
 	tryRecvGroup: (subscriber: Subscriber) => Recv;
 	/** Wake once a subscriber's group cursor may read differently; assigned by `track.ts`. */
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
+	/** Disable subscription drift filtering for a one-shot FETCH scan. */
+	ignoreLatency: (subscriber: Subscriber) => void;
+	/** Return a group's first timestamp, retained even after its first frame is read. */
+	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
+	/** Keep applying a subscription's drift policy after it hands a group out. */
+	expireGroup: (
+		group: GroupConsumer,
+		expiry: { expired: (at: Position) => boolean; changed: readonly Getter<unknown>[] },
+	) => void;
+	/** Stop an in-flight group operation if the handed-out group expires. */
+	guardGroup: <T>(group: GroupConsumer, operation: Promise<T>) => Promise<T>;
+	/** Make an evicted mirror terminal while its track timeline still contains it. */
+	evictGroup: (group: GroupConsumer) => void;
 } = {
 	makeRequest: () => {
 		throw new Error("track.ts not loaded");
@@ -65,5 +79,20 @@ export const hooks: {
 	},
 	groupChanged: () => {
 		throw new Error("track.ts not loaded");
+	},
+	ignoreLatency: () => {
+		throw new Error("track.ts not loaded");
+	},
+	groupTimestamp: () => {
+		throw new Error("group.ts not loaded");
+	},
+	expireGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	guardGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	evictGroup: () => {
+		throw new Error("group.ts not loaded");
 	},
 };

@@ -1,14 +1,17 @@
 import { expect, test } from "bun:test";
+import { Producer as GroupProducer } from "../group.ts";
 import { type Origin, OriginSchema } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
+import { Timestamp } from "../time.ts";
 import { NativeSession, type Session } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
+import { Subscribe } from "./subscribe.ts";
 import { SubscribeNamespace } from "./subscribe_namespace.ts";
 import { ALPN, Version } from "./version.ts";
 
@@ -110,6 +113,82 @@ function publisher(
 		origin,
 	};
 }
+
+// The header is part of the group's lifetime too. If it blocks on flow control, advancing
+// the live edge must reset the stream without waiting for that write to finish.
+test("a blocked group header is reset when the group expires", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+
+	let started!: () => void;
+	const headerStarted = new Promise<void>((resolve) => {
+		started = resolve;
+	});
+	let release!: () => void;
+	const blocked = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	let reset!: () => void;
+	const streamReset = new Promise<void>((resolve) => {
+		reset = resolve;
+	});
+	const closed = new Promise<void>(() => {});
+	const writable = {
+		getWriter: () => ({
+			closed,
+			write: async () => {
+				started();
+				await blocked;
+			},
+			close: async () => {},
+			abort: async () => {
+				reset();
+			},
+		}),
+		abort: async () => {},
+	} as unknown as WritableStream<Uint8Array>;
+	pair.server.createUnidirectionalStream = async () => writable;
+
+	const { pub, origin } = publisher(pair.server);
+	const broadcast = origin.publish(Path.from("test"));
+	const track = broadcast.createTrack("video");
+	const client = await Stream.open(pair.client, { version: VERSION });
+	const server = await Stream.accept(pair.server, VERSION);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	try {
+		void pub.runSubscribe(
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+			}),
+			server,
+		);
+
+		const old = new GroupProducer(0);
+		old.writeFrame({ payload: new TextEncoder().encode("old"), timestamp: Timestamp.fromMillis(0) });
+		old.close();
+		track.writeGroup(old);
+		await headerStarted;
+
+		const edge = new GroupProducer(1);
+		edge.writeFrame({ payload: new TextEncoder().encode("edge"), timestamp: Timestamp.fromMillis(10_000) });
+		edge.close();
+		track.writeGroup(edge);
+
+		const resetBeforeRelease = await Promise.race([
+			streamReset.then(() => true),
+			new Promise<false>((resolve) => setTimeout(() => resolve(false), 500)),
+		]);
+		expect(resetBeforeRelease).toBe(true);
+	} finally {
+		release();
+		client.close();
+		broadcast.close();
+		origin.close();
+	}
+});
 
 /**
  * Every advertisement waits a round trip for the peer's reply. A broadcast published in

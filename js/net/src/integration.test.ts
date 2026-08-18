@@ -176,6 +176,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 	const INITIAL_START_GROUP = 1;
 	const INITIAL_END_GROUP = 2;
 	const UPDATED_GROUP = 4;
+	const REPLAY_LATENCY_MS = 5000;
 	const PENDING_ASSERT_MS = 20;
 	const UPDATE_TIMEOUT_MS = 1000;
 
@@ -191,9 +192,11 @@ test("integration: lite applies initial and updated group bounds", async () => {
 	for (let sequence = 0; sequence < GROUP_COUNT; sequence++) producer.appendGroup().close();
 
 	const remote = client.consume(Path.from("test"));
-	const subscriber = remote
-		.track("video")
-		.subscribe({ startGroup: INITIAL_START_GROUP, endGroup: INITIAL_END_GROUP });
+	const subscriber = remote.track("video").subscribe({
+		maxAge: REPLAY_LATENCY_MS,
+		startGroup: INITIAL_START_GROUP,
+		endGroup: INITIAL_END_GROUP,
+	});
 	try {
 		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_START_GROUP);
 		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_END_GROUP);
@@ -201,7 +204,11 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		const pending = subscriber.nextGroup();
 		expect(await Promise.race([pending, sleep(PENDING_ASSERT_MS).then(() => "pending")])).toBe("pending");
 
-		subscriber.update({ startGroup: UPDATED_GROUP, endGroup: UPDATED_GROUP });
+		subscriber.update({
+			maxAge: REPLAY_LATENCY_MS,
+			startGroup: UPDATED_GROUP,
+			endGroup: UPDATED_GROUP,
+		});
 		expect((await withTimeout(pending, UPDATE_TIMEOUT_MS, "updated group bound timed out"))?.sequence).toBe(
 			UPDATED_GROUP,
 		);

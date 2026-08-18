@@ -5,6 +5,10 @@ import { Producer } from "./producer.ts";
 
 type Value = Record<string, unknown>;
 
+// These tests inspect complete finished timelines, so request a replay window
+// instead of the transport's live-edge default.
+const REPLAY_LATENCY = 30_000;
+
 // Reconstruct every value a consumer yields, in order.
 async function drain(track: Track.Subscriber): Promise<Value[]> {
 	const out: Value[] = [];
@@ -35,7 +39,7 @@ test("deltas off: a snapshot group per change", async () => {
 	producer.finish();
 
 	// Two changes => two single-frame snapshot groups, reconstructed in order.
-	expect(await drain(track.subscribe())).toEqual([{ a: 1 }, { a: 2 }]);
+	expect(await drain(track.subscribe({ maxAge: REPLAY_LATENCY }))).toEqual([{ a: 1 }, { a: 2 }]);
 });
 
 test("deltaRatio 0 disables deltas, like off", async () => {
@@ -47,7 +51,7 @@ test("deltaRatio 0 disables deltas, like off", async () => {
 
 	// `0` is treated as off, not a degenerate "enabled" value that keeps the group open: each change
 	// is its own single-frame snapshot group.
-	expect(await structure(track.subscribe())).toEqual([1, 1]);
+	expect(await structure(track.subscribe({ maxAge: REPLAY_LATENCY }))).toEqual([1, 1]);
 });
 
 test("live consumer sees each update", async () => {
@@ -161,7 +165,7 @@ test("tight ratio rolls snapshots", async () => {
 	producer.update({ a: 4 }); // budget already exceeded, rolls group 1
 	producer.finish();
 
-	expect(await structure(track.subscribe())).toEqual([3, 1]);
+	expect(await structure(track.subscribe({ maxAge: REPLAY_LATENCY }))).toEqual([3, 1]);
 });
 
 test("deltas stay within ratio times snapshot", async () => {
@@ -175,7 +179,7 @@ test("deltas stay within ratio times snapshot", async () => {
 	for (let n = 0; n <= 10; n++) producer.update({ n });
 	producer.finish();
 
-	expect(await structure(track.subscribe())).toEqual([10, 1]);
+	expect(await structure(track.subscribe({ maxAge: REPLAY_LATENCY }))).toEqual([10, 1]);
 });
 
 test("array change is a wholesale delta", async () => {
@@ -212,5 +216,5 @@ test("frame cap rolls snapshot", async () => {
 	}
 	producer.finish();
 
-	expect(await structure(track.subscribe())).toEqual([256, 1]);
+	expect(await structure(track.subscribe({ maxAge: REPLAY_LATENCY }))).toEqual([256, 1]);
 });
