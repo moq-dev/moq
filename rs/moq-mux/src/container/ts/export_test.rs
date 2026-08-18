@@ -1261,26 +1261,10 @@ async fn scte35_fixtures_survive_roundtrip() {
 	}
 }
 
-/// Build a PSI section: `table_id`, the 12-bit `section_length` (covering `body` plus a
-/// 4-byte CRC), then `body` and a dummy CRC. The reassembler carries it verbatim and
-/// never validates the CRC, so the bytes only need a self-consistent length.
-fn make_section(table_id: u8, body: &[u8]) -> Vec<u8> {
-	let section_length = body.len() + 4;
-	let mut s = vec![
-		table_id,
-		0xb0 | ((section_length >> 8) as u8 & 0x0f),
-		(section_length & 0xff) as u8,
-	];
-	s.extend_from_slice(body);
-	s.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
-	s
-}
-
 /// Build a well-formed long-form section: the full generic header (extension,
 /// current version, `number` of `last`), then `body` and a CRC placeholder
 /// (capture is verbatim, nothing checks it). The SI store buffers a sub-table
-/// until its generation completes, so unlike [`make_section`] the header fields
-/// here must be coherent.
+/// until its generation completes, so the header fields must be coherent.
 fn make_long_section(table_id: u8, ext: u16, version: u8, number: u8, last: u8, body: &[u8]) -> Vec<u8> {
 	let section_length = 5 + body.len() + 4;
 	let mut s = vec![
@@ -1924,11 +1908,11 @@ async fn content_section_churn_at_the_cap_cuts_no_group() {
 	assert_eq!(groups[0].len(), 32, "the snapshot holds the cap's worth of sections");
 }
 
-/// The first-frame SI gate must have a deadline: an advertised entry whose track
-/// resolves but never delivers a snapshot (a stale announce) must not hold the
-/// whole programme dark. After [`SI_READY_TIMEOUT`] the export starts without it.
+/// SI never gates output: an advertised entry whose track resolves but never
+/// delivers a snapshot (a stale announce) must not hold the programme dark.
+/// Media flows immediately and the entry simply emits nothing.
 #[tokio::test(start_paused = true)]
-async fn si_gate_expires_on_a_stale_entry() {
+async fn stale_si_entry_does_not_block_output() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog =
@@ -1981,11 +1965,11 @@ async fn si_gate_expires_on_a_stale_entry() {
 	let mut exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
 		.await
 		.unwrap();
-	// Paused time auto-advances to the gate's deadline; a generous outer timeout
-	// distinguishes "expired and produced output" from "held dark forever".
-	let frame = tokio::time::timeout(Duration::from_secs(60), exporter.next())
+	// The timeout distinguishes "produced output promptly" from "held dark";
+	// under paused time a wedged exporter would hit it instantly.
+	let frame = tokio::time::timeout(Duration::from_secs(1), exporter.next())
 		.await
-		.expect("the SI gate must expire rather than hold output dark")
+		.expect("a stale SI entry must not hold output dark")
 		.unwrap()
 		.expect("a muxed frame");
 	assert!(!frame.payload.is_empty());
