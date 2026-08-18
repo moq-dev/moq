@@ -1202,8 +1202,9 @@ enum SubscribeState<S: crate::transport::poll::Session> {
 		msg: lite::Subscribe<'static>,
 		subscribing: track::Subscribing,
 	},
-	/// Streaming groups and datagrams.
-	Run(TrackRun<S>),
+	/// Streaming groups and datagrams. Boxed: by far the largest state, and the enum
+	/// is moved on every transition.
+	Run(Box<TrackRun<S>>),
 	/// The track finished: draining the in-flight group streams before the FIN.
 	Drain {
 		children: kio::Tasks<crate::util::MaybeSendTask>,
@@ -1358,7 +1359,7 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 					};
 
 					let run = TrackRun::new(sub, track, Bounds::from(&msg), track_priority_tx);
-					self.state = SubscribeState::Run(run);
+					self.state = SubscribeState::Run(Box::new(run));
 				}
 				SubscribeState::Run(run) => {
 					let stream = self.stream.as_mut().expect("stream present");
