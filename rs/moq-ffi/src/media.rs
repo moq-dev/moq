@@ -167,25 +167,100 @@ pub struct MoqVideoHint {
 	pub optimize_for_latency: Option<bool>,
 }
 
-/// What a single-track media publish needs: a format, its init bytes, an optional label, and
-/// optional video fields.
+/// A single audio codec an importer can parse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MoqAudioFormat {
+	/// Advanced Audio Coding, configured by an AudioSpecificConfig.
+	Aac,
+	/// Opus, configured by an OpusHead.
+	Opus,
+	/// FLAC, configured by the `fLaC` marker plus its STREAMINFO block.
+	Flac,
+	/// MPEG-1/2 Audio Layer III.
+	Mp3,
+}
+
+/// A single video codec an importer can parse.
 ///
-/// `format` selects the codec (e.g. `"opus"`, `"avc3"`); `data` carries the codec init bytes (an
-/// OpusHead, an avcC, an AudioSpecificConfig, ...). Audio formats need those bytes up front; video
-/// formats may resolve in band, and a [`video`](Self::video) hint pins catalog fields the stream
-/// can't reveal (bitrate) or publishes the catalog before the first keyframe. See
-/// [`MoqBroadcastProducer::publish_media`](crate::producer::MoqBroadcastProducer::publish_media).
+/// H.264 and H.265 appear twice each because the framing differs, not just the codec: `Avc1`/`Hvc1`
+/// are length-prefixed with an out-of-band config record, while `Avc3`/`Hev1` are Annex-B with the
+/// parameter sets inline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MoqVideoFormat {
+	/// H.264, length-prefixed NALUs with an out-of-band avcC.
+	Avc1,
+	/// H.264, Annex-B with inline SPS/PPS.
+	Avc3,
+	/// H.265, length-prefixed NALUs with an out-of-band hvcC.
+	Hvc1,
+	/// H.265, Annex-B with inline parameter sets.
+	Hev1,
+	/// AV1.
+	Av01,
+	/// VP8.
+	Vp8,
+	/// VP9.
+	Vp9,
+}
+
+/// A container that publishes its own tracks, which may be more than one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MoqContainerFormat {
+	/// Fragmented MP4 / CMAF.
+	Fmp4,
+	/// Matroska / WebM.
+	Mkv,
+	/// MPEG-2 transport stream.
+	Ts,
+	/// Flash Video, as used by RTMP.
+	Flv,
+}
+
+/// What an audio publish needs: a format, its codec init bytes, and an optional label.
+///
+/// `data` is required: an audio importer cannot resolve its config from frames, so it needs the
+/// OpusHead / AudioSpecificConfig / STREAMINFO up front.
 #[derive(Clone, uniffi::Record)]
-pub struct MoqInit {
-	/// The media format, e.g. `"opus"`, `"avc3"`, or `"aac"`.
-	pub format: String,
-	/// Codec init bytes. Required for audio; may be empty for a video format that resolves in band.
+pub struct MoqAudioInit {
+	/// The audio codec.
+	pub format: MoqAudioFormat,
+	/// Codec init bytes. Required: audio has no in-band config.
 	pub data: Vec<u8>,
-	/// Human-readable rendition name for a single-codec track picker entry.
+	/// Human-readable rendition name for a track picker.
 	#[uniffi(default = None)]
 	pub label: Option<String>,
-	/// Caller-provided fields for a video track.
-	pub video: Option<MoqVideoHint>,
+}
+
+/// What a video publish needs: a format, optional init bytes, a label, and hints.
+///
+/// `data` may be empty for a format that resolves in band. A [`hint`](Self::hint) pins catalog
+/// fields the stream never reveals (bitrate) or publishes the catalog before the first keyframe.
+#[derive(Clone, uniffi::Record)]
+pub struct MoqVideoInit {
+	/// The video codec.
+	pub format: MoqVideoFormat,
+	/// Codec init bytes (an avcC, an hvcC, ...). May be empty for a format that resolves in band.
+	#[uniffi(default = [])]
+	pub data: Vec<u8>,
+	/// Human-readable rendition name for a track picker.
+	#[uniffi(default = None)]
+	pub label: Option<String>,
+	/// Catalog fields the stream cannot reveal itself.
+	#[uniffi(default = None)]
+	pub hint: Option<MoqVideoHint>,
+}
+
+/// What a container publish needs: a format and its leading bytes.
+///
+/// A container publishes and describes its own tracks, so there is no label or hint here: a
+/// rendition field would have no single track to land on.
+#[derive(Clone, uniffi::Record)]
+pub struct MoqContainerInit {
+	/// The container format.
+	pub format: MoqContainerFormat,
+	/// The leading chunk of the container, decoded immediately. May be empty.
+	#[uniffi(default = [])]
+	pub data: Vec<u8>,
 }
 
 impl From<MoqVideoHint> for moq_mux::catalog::VideoHint {
@@ -202,12 +277,64 @@ impl From<MoqVideoHint> for moq_mux::catalog::VideoHint {
 	}
 }
 
-impl From<MoqInit> for moq_mux::import::Init {
-	fn from(init: MoqInit) -> Self {
-		let mut out = moq_mux::import::Init::new(init.format, init.data);
+impl From<MoqAudioFormat> for moq_mux::import::AudioFormat {
+	fn from(format: MoqAudioFormat) -> Self {
+		match format {
+			MoqAudioFormat::Aac => Self::Aac,
+			MoqAudioFormat::Opus => Self::Opus,
+			MoqAudioFormat::Flac => Self::Flac,
+			MoqAudioFormat::Mp3 => Self::Mp3,
+		}
+	}
+}
+
+impl From<MoqVideoFormat> for moq_mux::import::VideoFormat {
+	fn from(format: MoqVideoFormat) -> Self {
+		match format {
+			MoqVideoFormat::Avc1 => Self::Avc1,
+			MoqVideoFormat::Avc3 => Self::Avc3,
+			MoqVideoFormat::Hvc1 => Self::Hvc1,
+			MoqVideoFormat::Hev1 => Self::Hev1,
+			MoqVideoFormat::Av01 => Self::Av01,
+			MoqVideoFormat::Vp8 => Self::Vp8,
+			MoqVideoFormat::Vp9 => Self::Vp9,
+		}
+	}
+}
+
+impl From<MoqContainerFormat> for moq_mux::import::ContainerFormat {
+	fn from(format: MoqContainerFormat) -> Self {
+		match format {
+			MoqContainerFormat::Fmp4 => Self::Fmp4,
+			MoqContainerFormat::Mkv => Self::Mkv,
+			MoqContainerFormat::Ts => Self::Ts,
+			MoqContainerFormat::Flv => Self::Flv,
+		}
+	}
+}
+
+impl From<MoqAudioInit> for moq_mux::import::AudioInit {
+	fn from(init: MoqAudioInit) -> Self {
+		let mut out = moq_mux::import::AudioInit::new(init.format.into(), init.data);
 		out.label = init.label;
-		out.video = init.video.map(Into::into);
 		out
+	}
+}
+
+impl From<MoqVideoInit> for moq_mux::import::VideoInit {
+	fn from(init: MoqVideoInit) -> Self {
+		let mut out = moq_mux::import::VideoInit::new(init.format.into(), init.data);
+		out.label = init.label;
+		if let Some(hint) = init.hint {
+			out.hint = hint.into();
+		}
+		out
+	}
+}
+
+impl From<MoqContainerInit> for moq_mux::import::ContainerInit {
+	fn from(init: MoqContainerInit) -> Self {
+		moq_mux::import::ContainerInit::new(init.format.into(), init.data)
 	}
 }
 

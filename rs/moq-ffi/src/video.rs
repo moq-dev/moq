@@ -283,7 +283,7 @@ impl MoqBroadcastProducer {
 	/// codec (`.avc3` / `.hev1`) and its catalog rendition is published
 	/// immediately, read out of the encoder rather than guessed, so a subscriber
 	/// can find the track before a frame is written to it.
-	pub fn publish_video(
+	pub fn encode_video(
 		&self,
 		input: MoqVideoEncoderInput,
 		output: MoqVideoEncoderOutput,

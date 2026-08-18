@@ -8,7 +8,7 @@ use crate::consumer::MoqRouteWatch;
 use crate::consumer::MoqSubscription;
 use crate::error::MoqError;
 use crate::json::{MoqJsonSnapshotConfig, MoqJsonStreamConfig};
-use crate::media::{MoqFrame, MoqInit};
+use crate::media::{MoqAudioFormat, MoqAudioInit, MoqFrame, MoqVideoFormat, MoqVideoInit};
 use crate::session::{MoqBackoff, MoqConnectionStatus};
 
 use std::time::Duration;
@@ -16,12 +16,20 @@ use std::time::Duration;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A bare [`MoqInit`] with a format and init bytes, no catalog hints.
-fn media_init(format: &str, data: Vec<u8>) -> MoqInit {
-	MoqInit {
-		format: format.to_string(),
+fn audio_init(format: MoqAudioFormat, data: Vec<u8>) -> MoqAudioInit {
+	MoqAudioInit {
+		format,
 		data,
 		label: None,
-		video: None,
+	}
+}
+
+fn video_init(format: MoqVideoFormat, data: Vec<u8>) -> MoqVideoInit {
+	MoqVideoInit {
+		format,
+		data,
+		label: None,
+		hint: None,
 	}
 }
 
@@ -71,7 +79,7 @@ fn origin_options_set_cache_capacity() {
 fn publish_media_lifecycle() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
+	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 	media
 		.write_frame(MoqFrame {
 			payload: b"opus frame".to_vec(),
@@ -726,7 +734,7 @@ async fn dynamic_track_request_can_publish_media() {
 	assert_eq!(track.name().unwrap(), "requested-audio");
 
 	let media = broadcast
-		.publish_media_on_track(&track, media_init("opus", opus_head()))
+		.publish_audio_on_track(&track, audio_init(MoqAudioFormat::Opus, opus_head()))
 		.unwrap();
 	assert_eq!(media.name().unwrap(), "requested-audio");
 	assert!(matches!(track.name(), Err(MoqError::Closed)));
@@ -773,7 +781,7 @@ async fn dynamic_track_request_can_publish_media() {
 async fn media_track_activity_and_name() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
+	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 	let track_name = media.name().unwrap();
 	assert_eq!(track_name, "0.opus");
 
@@ -808,7 +816,9 @@ async fn publish_media_aac_populates_description() {
 		channel_count: 2,
 	};
 	let init = config.encode();
-	let _media = broadcast.publish_media(media_init("aac", init.to_vec())).unwrap();
+	let _media = broadcast
+		.publish_audio(audio_init(MoqAudioFormat::Aac, init.to_vec()))
+		.unwrap();
 
 	let consumer = broadcast.consume().unwrap();
 	let catalog_consumer = consumer.subscribe_catalog().await.unwrap();
@@ -826,13 +836,16 @@ async fn publish_media_aac_populates_description() {
 	assert_eq!(audio.description.as_deref(), Some(init.as_ref()));
 }
 
+/// Audio resolves its rendition from the init bytes, so bad ones fail here rather than surfacing
+/// as a decode error on the first frame. (An unrecognized *format* can no longer be expressed: it
+/// is an enum, and moq-mux owns the string boundary where that check still means something.)
 #[test]
-fn unknown_format() {
+fn audio_rejects_bad_init_bytes() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let err = broadcast
-		.publish_media(media_init("nope", vec![]))
+		.publish_audio(audio_init(MoqAudioFormat::Opus, vec![]))
 		.err()
-		.expect("unknown format should fail");
+		.expect("an OpusHead-less opus track should fail");
 	assert!(
 		matches!(err, crate::error::MoqError::Codec(_)),
 		"expected Codec error, got {err}"
@@ -955,7 +968,7 @@ async fn local_publish_consume_audio() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let broadcast = origin.create_broadcast("live".into()).unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
+	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -1014,7 +1027,7 @@ async fn video_publish_consume() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let broadcast = origin.create_broadcast("video-test".into()).unwrap();
 	let init = h264_init();
-	let media = broadcast.publish_media(media_init("avc3", init)).unwrap();
+	let media = broadcast.publish_video(video_init(MoqVideoFormat::Avc3, init)).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -1082,7 +1095,7 @@ async fn video_raw_publish_consume() {
 	let broadcast = origin.create_broadcast("video-raw-test".into()).unwrap();
 
 	let video = broadcast
-		.publish_video(
+		.encode_video(
 			MoqVideoEncoderInput {
 				format: MoqVideoPixelFormat::Rgba,
 				width: 320,
@@ -1184,7 +1197,7 @@ async fn video_raw_publish_from_many_threads() {
 	let broadcast = origin.create_broadcast("video-raw-threads".into()).unwrap();
 
 	let video = broadcast
-		.publish_video(
+		.encode_video(
 			MoqVideoEncoderInput {
 				format: MoqVideoPixelFormat::Rgba,
 				width: 320,
@@ -1274,7 +1287,7 @@ async fn video_raw_publish_rejects_bad_frames() {
 	// A zero framerate is rejected before any track is advertised.
 	assert!(
 		broadcast
-			.publish_video(
+			.encode_video(
 				MoqVideoEncoderInput {
 					framerate: 0,
 					..input(320, 240)
@@ -1284,7 +1297,7 @@ async fn video_raw_publish_rejects_bad_frames() {
 			.is_err()
 	);
 
-	let video = broadcast.publish_video(input(320, 240), output()).unwrap();
+	let video = broadcast.encode_video(input(320, 240), output()).unwrap();
 
 	// A 640x480 buffer against a 320x240 encoder: the frame carries no dimensions
 	// of its own, so this is caught as a wrong-sized picture.
@@ -1314,7 +1327,7 @@ async fn multiple_frames_ordering() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let broadcast = origin.create_broadcast("ordering-test".into()).unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
+	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -1369,9 +1382,9 @@ async fn catalog_update_on_new_track() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let broadcast = origin.create_broadcast("catalog-update".into()).unwrap();
 	let init = opus_head();
-	let mut first = media_init("opus", init.clone());
+	let mut first = audio_init(MoqAudioFormat::Opus, init.clone());
 	first.label = Some("English".to_string());
-	let _media1 = broadcast.publish_media(first).unwrap();
+	let _media1 = broadcast.publish_audio(first).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -1392,7 +1405,7 @@ async fn catalog_update_on_new_track() {
 	assert_eq!(catalog1.audio.len(), 1);
 	assert_eq!(catalog1.audio["0.opus"].label.as_deref(), Some("English"));
 
-	let _media2 = broadcast.publish_media(media_init("opus", init)).unwrap();
+	let _media2 = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 
 	let catalog2 = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -1410,7 +1423,7 @@ async fn catalog_update_on_new_track() {
 fn finish_closes_producer() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let _media = broadcast.publish_media(media_init("opus", init)).unwrap();
+	let _media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 	broadcast.finish().unwrap();
 
 	let err = broadcast.finish().unwrap_err();
@@ -1525,7 +1538,7 @@ fn without_runtime() {
 
 		let broadcast = origin.create_broadcast("test".into()).unwrap();
 		let init = opus_head();
-		let media = broadcast.publish_media(media_init("opus", init)).unwrap();
+		let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 		media
 			.write_frame(MoqFrame {
 				payload: b"hello".to_vec(),
@@ -1601,7 +1614,7 @@ async fn server_client_roundtrip() {
 	// Publish a broadcast on the server side.
 	let broadcast = server_origin.create_broadcast("hello".into()).unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
+	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 
 	// Receive the announcement on the client side via the consume origin.
 	let consumer = client_origin.consume();
@@ -1699,7 +1712,7 @@ async fn server_client_roundtrip_auto_origin() {
 	// Server publishes; client receives via the auto consumer.
 	let broadcast = server_origin.create_broadcast("hello".into()).unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
+	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 
 	let announced = consumer.announced("".into()).unwrap();
 	let announcement = tokio::time::timeout(TIMEOUT, announced.next())

@@ -17,7 +17,7 @@ use crate::producer::MoqBroadcastProducer;
 ///
 /// <https://developer.mozilla.org/en-US/docs/Web/API/AudioData/format>
 #[derive(Clone, Copy, uniffi::Enum)]
-pub enum MoqAudioFormat {
+pub enum MoqAudioSampleFormat {
 	U8,
 	S16,
 	S32,
@@ -28,17 +28,17 @@ pub enum MoqAudioFormat {
 	F32Planar,
 }
 
-impl From<MoqAudioFormat> for moq_audio::Format {
-	fn from(f: MoqAudioFormat) -> Self {
+impl From<MoqAudioSampleFormat> for moq_audio::Format {
+	fn from(f: MoqAudioSampleFormat) -> Self {
 		match f {
-			MoqAudioFormat::U8 => Self::U8,
-			MoqAudioFormat::S16 => Self::S16,
-			MoqAudioFormat::S32 => Self::S32,
-			MoqAudioFormat::F32 => Self::F32,
-			MoqAudioFormat::U8Planar => Self::U8Planar,
-			MoqAudioFormat::S16Planar => Self::S16Planar,
-			MoqAudioFormat::S32Planar => Self::S32Planar,
-			MoqAudioFormat::F32Planar => Self::F32Planar,
+			MoqAudioSampleFormat::U8 => Self::U8,
+			MoqAudioSampleFormat::S16 => Self::S16,
+			MoqAudioSampleFormat::S32 => Self::S32,
+			MoqAudioSampleFormat::F32 => Self::F32,
+			MoqAudioSampleFormat::U8Planar => Self::U8Planar,
+			MoqAudioSampleFormat::S16Planar => Self::S16Planar,
+			MoqAudioSampleFormat::S32Planar => Self::S32Planar,
+			MoqAudioSampleFormat::F32Planar => Self::F32Planar,
 		}
 	}
 }
@@ -60,7 +60,7 @@ impl From<MoqAudioCodec> for moq_audio::encode::Codec {
 /// PCM layout the caller will pass to [`MoqAudioProducer::write`].
 #[derive(uniffi::Record)]
 pub struct MoqAudioEncoderInput {
-	pub format: MoqAudioFormat,
+	pub format: MoqAudioSampleFormat,
 	pub sample_rate: u32,
 	pub channels: u32,
 }
@@ -82,7 +82,7 @@ pub struct MoqAudioEncoderOutput {
 /// PCM layout the caller wants out of [`MoqAudioConsumer::next`].
 #[derive(uniffi::Record)]
 pub struct MoqAudioDecoderOutput {
-	pub format: MoqAudioFormat,
+	pub format: MoqAudioSampleFormat,
 	/// `None` delivers samples at the codec's native rate.
 	pub sample_rate: Option<u32>,
 	/// `None` delivers samples at the codec's native channel count.
@@ -172,7 +172,7 @@ impl MoqBroadcastProducer {
 	/// Open an audio track on this broadcast. The catalog rendition is
 	/// registered immediately so subscribers can find the track even
 	/// before the first frame is written.
-	pub fn publish_audio(
+	pub fn encode_audio(
 		&self,
 		name: String,
 		input: MoqAudioEncoderInput,
