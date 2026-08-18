@@ -202,13 +202,13 @@ impl MoqOriginProducer {
 	/// Create a new origin for publishing and/or consuming broadcasts.
 	#[uniffi::constructor]
 	pub fn new(options: MoqOriginOptions) -> Arc<Self> {
-		let _guard = crate::ffi::RUNTIME.enter();
+		let _guard = crate::ffi::enter();
 		Arc::new(Self::from_options(options))
 	}
 
 	/// Create a consumer for this origin.
 	pub fn consume(&self) -> Arc<MoqOriginConsumer> {
-		let _guard = crate::ffi::RUNTIME.enter();
+		let _guard = crate::ffi::enter();
 		Arc::new(MoqOriginConsumer {
 			inner: self.inner.consume(),
 		})
@@ -219,7 +219,7 @@ impl MoqOriginProducer {
 	/// Hold the returned object while missing broadcast requests should be accepted.
 	/// Dropping it makes future requests to unknown broadcasts fail.
 	pub fn dynamic(&self) -> Arc<MoqOriginDynamic> {
-		let _guard = crate::ffi::RUNTIME.enter();
+		let _guard = crate::ffi::enter();
 		Arc::new(MoqOriginDynamic {
 			task: Task::new(OriginDynamic {
 				inner: self.inner.dynamic(),
@@ -238,7 +238,7 @@ impl MoqOriginProducer {
 	/// without finishing is treated as a failure: the path lingers briefly so a
 	/// replacement publisher can take over without subscribers noticing.
 	pub fn create_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
-		let _guard = crate::ffi::RUNTIME.enter();
+		let _guard = crate::ffi::enter();
 		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.
 		let broadcast = self
 			.inner
@@ -251,7 +251,7 @@ impl MoqOriginProducer {
 impl MoqOriginConsumer {
 	/// Subscribe to all broadcast announcements under a prefix.
 	pub fn announced(&self, prefix: String) -> Result<Arc<MoqAnnounced>, MoqError> {
-		let _guard = crate::ffi::RUNTIME.enter();
+		let _guard = crate::ffi::enter();
 		let origin = self.inner.with_root(prefix).ok_or(MoqError::Unauthorized)?;
 		Ok(Arc::new(MoqAnnounced {
 			task: Task::new(Announced {
@@ -265,7 +265,7 @@ impl MoqOriginConsumer {
 	/// This is how you resolve a path right after connecting: announcements arrive over the
 	/// session after it opens, so `request_broadcast` on its own races them.
 	pub fn announced_broadcast(&self, path: String) -> Result<Arc<MoqAnnouncedBroadcast>, MoqError> {
-		let _guard = crate::ffi::RUNTIME.enter();
+		let _guard = crate::ffi::enter();
 		let origin = self.inner.with_root(path).ok_or(MoqError::Unauthorized)?;
 		Ok(Arc::new(MoqAnnouncedBroadcast {
 			task: Task::new(Announced {
@@ -335,7 +335,7 @@ impl MoqBroadcastRequest {
 
 	/// Accept the request with an unannounced broadcast.
 	pub fn accept(&self, broadcast: &MoqBroadcastProducer) -> Result<(), MoqError> {
-		let _guard = crate::ffi::RUNTIME.enter();
+		let _guard = crate::ffi::enter();
 		let consumer = broadcast.consume_inner()?;
 		let request = self.take()?;
 		request.accept(&consumer);
@@ -344,7 +344,7 @@ impl MoqBroadcastRequest {
 
 	/// Abort the request with an application error code.
 	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
-		let _guard = crate::ffi::RUNTIME.enter();
+		let _guard = crate::ffi::enter();
 		let request = self.take()?;
 		request.reject(moq_net::Error::App(error_code));
 		Ok(())

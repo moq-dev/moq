@@ -209,23 +209,24 @@ macos *args:
 # which builds the shippable `@moq/wasm` package (wasm-bindgen, release profile);
 # this is the compile gate.
 
-# `moq-mux` rides along in the same invocation on purpose: it needs `getrandom`'s
-# `wasm_js` backend, which only `moq-wasm` declares, and feature unification only
-# happens within one cargo invocation. Splitting these into two fails on getrandom.
-# `--lib` rather than `--all-targets` because moq-mux's tests use tokio's native
-# timers; moq-wasm has no test targets, so it loses no coverage.
+# `moq-mux` and `moq-ffi` ride along in the same invocation on purpose: `moq-mux`
+# needs `getrandom`'s `wasm_js` backend that only its siblings declare, and feature
+# unification only happens within one cargo invocation. Splitting them fails on
+# getrandom. `--lib` rather than `--all-targets` because moq-mux's tests use tokio's
+# native timers and moq-ffi's drive a native relay; moq-wasm has no test targets, so
+# it loses no coverage.
 
 # Compile and lint the browser/WASM bindings, which the host-target check skips.
 wasm *args:
-    cargo clippy -p moq-wasm -p moq-mux --target wasm32-unknown-unknown --lib {{ args }} -- -D warnings
+    cargo clippy -p moq-wasm -p moq-mux -p moq-ffi --target wasm32-unknown-unknown --lib {{ args }} -- -D warnings
 
 # The `fix` counterpart to `wasm`. `cargo fmt` is scoped rather than `--all`
 # because this runs alongside `fix`, which already formats everything else.
 
 # Auto-fix the browser/WASM bindings.
 wasm-fix *args:
-    cargo clippy --fix --allow-staged --allow-dirty -p moq-wasm -p moq-mux --target wasm32-unknown-unknown --lib {{ args }}
-    cargo fmt -p moq-wasm -p moq-mux
+    cargo clippy --fix --allow-staged --allow-dirty -p moq-wasm -p moq-mux -p moq-ffi --target wasm32-unknown-unknown --lib {{ args }}
+    cargo fmt -p moq-wasm -p moq-mux -p moq-ffi
 
 # Dependency advisories plus the license/ban policy. Time-based rather than
 # diff-based: an advisory lands without this repo changing, so a per-PR run both

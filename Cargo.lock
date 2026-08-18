@@ -4729,7 +4729,9 @@ name = "moq-ffi"
 version = "0.3.11"
 dependencies = [
  "bytes",
+ "getrandom 0.4.3",
  "hang",
+ "kio 0.5.4",
  "moq-audio",
  "moq-json",
  "moq-mux",
@@ -4743,6 +4745,9 @@ dependencies = [
  "tracing",
  "uniffi",
  "url",
+ "web-async",
+ "web-transport-trait",
+ "web-transport-wasm",
 ]
 
 [[package]]
