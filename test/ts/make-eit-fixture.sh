@@ -340,6 +340,70 @@ if expected not in observed:
     sys.exit(1)
 PY
 
+if [[ -z "$PF_ONLY" ]]; then
+    python3 - "$OUT" "$EVENTS" <<'PY'
+import collections, sys
+
+path, events = sys.argv[1:3]
+packet_size = 188
+
+
+def fail(message):
+    print(f"error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+try:
+    with open(path, "rb") as stream:
+        data = stream.read()
+except OSError as error:
+    fail(f"cannot read generated transport stream: {error}")
+
+if not data or len(data) % packet_size:
+    fail("generated output is not a 188-byte-aligned transport stream")
+
+schedule = collections.defaultdict(set)
+last_sections = collections.defaultdict(set)
+for off in range(0, len(data), packet_size):
+    packet = data[off : off + packet_size]
+    if packet[0] != 0x47:
+        fail(f"generated output lost packet sync at byte {off}")
+    if ((packet[1] & 0x1F) << 8 | packet[2]) != 0x0012 or not packet[1] & 0x40:
+        continue
+    if not packet[3] & 0x10:
+        continue
+    body = 4 + (1 + packet[4] if packet[3] & 0x20 else 0)
+    if body >= packet_size:
+        continue
+    section = body + 1 + packet[body]
+    while section + 3 <= packet_size and packet[section] != 0xFF:
+        table_id = packet[section]
+        length = 3 + ((packet[section + 1] & 0x0F) << 8 | packet[section + 2])
+        # A start whose 8-byte header crosses into the next packet is legal;
+        # skipping it undercounts distinct sections, which only makes the
+        # sparseness check below more conservative.
+        if 0x50 <= table_id <= 0x6F and section + 8 <= packet_size:
+            schedule[table_id].add(packet[section + 6])
+            last_sections[table_id].add(packet[section + 7])
+        if section + length > packet_size:
+            break
+        section += length
+
+if not schedule:
+    fail("generated output has no EIT schedule section on PID 0x0012")
+if int(events) > 48 and not any(
+    last > len(schedule[table_id])
+    for table_id, declared in last_sections.items()
+    for last in declared
+):
+    census = ", ".join(
+        f"0x{table_id:02X}: {len(sections)} distinct, last {sorted(last_sections[table_id])}"
+        for table_id, sections in sorted(schedule.items())
+    )
+    fail(f"multi-day EIT schedule is not sparse: {census}")
+PY
+fi
+
 EIT_PKTS=$(tsp -I file "$OUT" -P count --pid 0x0012 --total -O drop 2>&1 |
     sed -n 's/.*counted \([0-9,]*\) packets.*/\1/p' | head -1)
 

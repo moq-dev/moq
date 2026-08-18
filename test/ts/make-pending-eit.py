@@ -49,6 +49,25 @@ def parse_int(value: str) -> int:
     return int(value, 0)
 
 
+def section_starts(ts: bytes | bytearray, pid: int):
+    for off in range(0, len(ts) - PACKET + 1, PACKET):
+        pkt = ts[off : off + PACKET]
+        if pkt[0] != SYNC or ((pkt[1] & 0x1F) << 8 | pkt[2]) != pid or not pkt[1] & 0x40:
+            continue
+        if not pkt[3] & 0x10:
+            continue
+        body = 4 + (1 + pkt[4] if pkt[3] & 0x20 else 0)
+        if body >= PACKET:
+            continue
+        sec = body + 1 + pkt[body]  # past the pointer_field
+        while sec + 3 <= PACKET and pkt[sec] != 0xFF:
+            length = 3 + ((pkt[sec + 1] & 0x0F) << 8 | pkt[sec + 2])
+            yield off, sec, length
+            if sec + length > PACKET:
+                break
+            sec += length
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("--pid", type=parse_int, default=0x0012)
@@ -69,32 +88,27 @@ def main() -> int:
 
     with open(opts.args[0], "rb") as fh:
         ts = bytearray(fh.read())
-    if len(ts) < PACKET or ts[0] != SYNC:
+    if len(ts) < PACKET or len(ts) % PACKET or ts[0] != SYNC:
         print(f"error: {opts.args[0]} is not a 188-byte-aligned transport stream", file=sys.stderr)
         return 1
 
     start = int(len(ts) // PACKET * opts.from_fraction) * PACKET
     patched = spanning = matched = 0
 
-    for off in range(0, len(ts) - PACKET + 1, PACKET):
-        pkt = memoryview(ts)[off : off + PACKET]
-        if pkt[0] != SYNC or ((pkt[1] & 0x1F) << 8 | pkt[2]) != opts.pid or not pkt[1] & 0x40:
-            continue
-        body = 4 + (1 + pkt[4] if pkt[3] & 0x20 else 0)
-        if body >= PACKET:
-            continue
-        sec = body + 1 + pkt[body]  # past the pointer_field
-        if sec + 8 > PACKET or pkt[sec] != opts.table_id:
+    for off, sec, length in section_starts(ts, opts.pid):
+        i = off + sec
+        if ts[i] != opts.table_id:
             continue
         matched += 1
         if off < start:
             continue
-        length = 3 + ((pkt[sec + 1] & 0x0F) << 8 | pkt[sec + 2])
         if sec + length > PACKET:
             spanning += 1
             continue
+        if length < 8:
+            print(f"error: malformed table 0x{opts.table_id:02X} section at byte {i}", file=sys.stderr)
+            return 1
 
-        i = off + sec
         version = (ts[i + 5] >> 1) & 0x1F
         ts[i + 5] = (ts[i + 5] & 0xC0) | (((version + opts.version_bump) % 32) << 1)  # current_next = 0
         crc = crc32_mpeg(bytes(ts[i : i + length - 4]))
@@ -118,6 +132,31 @@ def main() -> int:
 
     with open(opts.args[1], "wb") as fh:
         fh.write(ts)
+
+    with open(opts.args[1], "rb") as fh:
+        output = fh.read()
+    current = bad_crc = verify_spanning = 0
+    for off, sec, length in section_starts(output, opts.pid):
+        i = off + sec
+        if off < start or output[i] != opts.table_id:
+            continue
+        if sec + length > PACKET:
+            verify_spanning += 1
+            continue
+        if length < 8:
+            print(f"error: malformed output table 0x{opts.table_id:02X} section at byte {i}", file=sys.stderr)
+            return 1
+        current += output[i + 5] & 1
+        bad_crc += crc32_mpeg(output[i : i + length]) != 0
+    if verify_spanning or current or bad_crc:
+        print(
+            f"error: output verification failed for table 0x{opts.table_id:02X} after "
+            f"{opts.from_fraction:.0%}: {current} current, {bad_crc} bad CRC, "
+            f"{verify_spanning} spanning",
+            file=sys.stderr,
+        )
+        return 1
+
     if not opts.quiet:
         print(
             f"### pending-version fixture: {patched} of {matched} section(s) of table "
