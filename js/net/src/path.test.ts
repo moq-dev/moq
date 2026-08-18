@@ -230,7 +230,9 @@ test("relativeTo inverts resolve", () => {
 	// Roots.
 	expect(Path.relativeTo(Path.from("foo/bar"), Path.empty())).toBe("foo/bar");
 	expect(Path.relativeTo(Path.empty(), Path.from("foo"))).toBe(".");
-	expect(Path.relativeTo(Path.empty(), Path.empty())).toBe(".");
+	// The base itself, which only the empty reference names.
+	expect(Path.relativeTo(Path.from("a/b"), Path.from("a/b"))).toBe("");
+	expect(Path.relativeTo(Path.empty(), Path.empty())).toBe("");
 });
 
 test("relativeTo rejects unnameable targets", () => {
@@ -240,6 +242,9 @@ test("relativeTo rejects unnameable targets", () => {
 	expect(Path.relativeTo(Path.from("x/./y"), Path.from("x/z"))).toBeUndefined();
 	expect(Path.relativeTo(Path.from("a/.."), Path.from("a/b"))).toBeUndefined();
 
+	// A base is always nameable by itself, however its last segment is spelled.
+	expect(Path.relativeTo(Path.from("a/.."), Path.from("a/.."))).toBe("");
+
 	// Dot segments inside the shared prefix are never emitted, so they are fine.
 	const rel = Path.relativeTo(Path.from("a/../b/x"), Path.from("a/../b/c"));
 	expect(rel).toBe("x");
@@ -247,14 +252,16 @@ test("relativeTo rejects unnameable targets", () => {
 });
 
 test("relativeTo round trips through resolve", () => {
-	const paths = ["", "a", "b", "a/b", "a/c", "a/b/c", "a/b/c/d", "x/y/z", "a/../b", "a/./b"].map((p) => Path.from(p));
+	const paths = ["", "a", "b", "a/b", "a/c", "a/b/c", "a/b/c/d", "x/y/z", "a/../b", "a/./b", "a/..", "a/."].map((p) =>
+		Path.from(p),
+	);
 
 	for (const base of paths) {
 		for (const target of paths) {
 			const rel = Path.relativeTo(target, base);
 			if (rel === undefined) {
-				// Only an unnameable target may be refused.
-				expect(target.split("/").some((part) => part === "." || part === "..")).toBe(true);
+				// Only an unnameable target may be refused, and never the base itself.
+				expect(target !== base && target.split("/").some((part) => part === "." || part === "..")).toBe(true);
 				continue;
 			}
 

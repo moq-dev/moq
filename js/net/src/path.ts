@@ -265,6 +265,8 @@ export function tryResolve(base: Valid, rel: string): Valid | undefined {
  * A relative reference replaces the last segment of the base, matching relative URL
  * resolution, so a target nested under the base repeats the base's own last segment.
  *
+ * The empty reference names the base itself, so that is what a self-reference returns.
+ *
  * Returns `undefined` for a target no reference can name: a path segment may literally be
  * `.` or `..`, which resolution reads as navigation instead of as a name. Only the segments
  * past the shared prefix matter, since the rest are never emitted.
@@ -277,10 +279,15 @@ export function tryResolve(base: Valid, rel: string): Valid | undefined {
  * Path.relativeTo(Path.from("a/b/c"), Path.from("a/b")); // "b/c"
  * Path.relativeTo(Path.from("a/c"), Path.from("a/b"));   // "c"
  * Path.relativeTo(Path.from("a"), Path.from("a/b"));     // "."
+ * Path.relativeTo(Path.from("a/b"), Path.from("a/b"));   // ""
  * Path.relativeTo(Path.from("a/.."), Path.from("a/b"));  // undefined
  * ```
  */
 export function relativeTo(target: Valid, base: Valid): string | undefined {
+	// Only the empty reference can name a base whose last segment is itself `.` or `..`,
+	// since resolution replaces that segment rather than emitting it.
+	if (target === base) return "";
+
 	// Resolution replaces the base's last segment, so walk from its parent.
 	const dir = base === "" ? [] : base.split("/");
 	dir.pop();

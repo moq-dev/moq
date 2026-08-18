@@ -412,6 +412,8 @@ impl<'a> Path<'a> {
 	/// A relative reference replaces the last segment of the base, matching relative URL
 	/// resolution, so a target nested under the base repeats the base's own last segment.
 	///
+	/// The empty reference names the base itself, so that is what a self-reference returns.
+	///
 	/// Returns `None` for a target no reference can name: a path segment may literally be
 	/// `.` or `..`, which resolution reads as navigation instead of as a name. Only the
 	/// segments past the shared prefix matter, since the rest are never emitted.
@@ -429,11 +431,20 @@ impl<'a> Path<'a> {
 	/// // The lone `.` names the base's parent, which the empty reference cannot.
 	/// assert_eq!(Path::new("a").relative_to(&base).unwrap().as_str(), ".");
 	///
+	/// // The base itself.
+	/// assert_eq!(Path::new("a/b").relative_to(&base).unwrap().as_str(), "");
+	///
 	/// // A segment named `..` is a legal path component but an unnameable target.
 	/// assert!(Path::new("a/..").relative_to(&base).is_none());
 	/// ```
 	pub fn relative_to(&self, base: impl AsPath) -> Option<PathRelativeOwned> {
 		let base = base.as_path();
+
+		// Only the empty reference can name a base whose last segment is itself `.` or `..`,
+		// since resolution replaces that segment rather than emitting it.
+		if *self == base {
+			return Some(PathRelative::empty());
+		}
 
 		// Resolution replaces the base's last segment, so walk from its parent.
 		let mut dir: Vec<&str> = base.parts().collect();
@@ -1564,7 +1575,9 @@ mod tests {
 		// Roots.
 		assert_eq!(rel("foo/bar", "").as_str(), "foo/bar");
 		assert_eq!(rel("", "foo").as_str(), ".");
-		assert_eq!(rel("", "").as_str(), ".");
+		// The base itself, which only the empty reference names.
+		assert_eq!(rel("a/b", "a/b").as_str(), "");
+		assert_eq!(rel("", "").as_str(), "");
 		// Slashes are normalized first.
 		assert_eq!(rel("/a//b/", "//a/b/dir//").as_str(), ".");
 	}
@@ -1577,6 +1590,9 @@ mod tests {
 		assert!(Path::new("x/./y").relative_to("x/z").is_none());
 		assert!(Path::new("a/..").relative_to("a/b").is_none());
 
+		// A base is always nameable by itself, however its last segment is spelled.
+		assert_eq!(Path::new("a/..").relative_to("a/..").unwrap().as_str(), "");
+
 		// Dot segments inside the shared prefix are never emitted, so they are fine.
 		let rel = Path::new("a/../b/x").relative_to("a/../b/c").unwrap();
 		assert_eq!(rel.as_str(), "x");
@@ -1586,7 +1602,7 @@ mod tests {
 	#[test]
 	fn test_relative_to_round_trips() {
 		let paths = [
-			"", "a", "b", "a/b", "a/c", "a/b/c", "a/b/c/d", "x/y/z", "a/../b", "a/./b",
+			"", "a", "b", "a/b", "a/c", "a/b/c", "a/b/c/d", "x/y/z", "a/../b", "a/./b", "a/..", "a/.",
 		];
 
 		for base in paths {
@@ -1594,9 +1610,9 @@ mod tests {
 				let base = Path::new(base);
 				let target = Path::new(target);
 				let Some(rel) = target.relative_to(&base) else {
-					// Only an unnameable target may be refused.
+					// Only an unnameable target may be refused, and never the base itself.
 					assert!(
-						target.parts().any(|part| part == "." || part == ".."),
+						target != base && target.parts().any(|part| part == "." || part == ".."),
 						"{base} -> {target} refused a nameable target"
 					);
 					continue;
