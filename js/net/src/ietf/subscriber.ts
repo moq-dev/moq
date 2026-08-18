@@ -14,7 +14,12 @@ import * as Cluster from "./cluster.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
 import { toWire } from "./priority.ts";
 import { type Publish, PublishError } from "./publish.ts";
-import { type PublishNamespace, PublishNamespaceError, PublishNamespaceOk } from "./publish_namespace.ts";
+import {
+	PublishNamespace,
+	PublishNamespaceDone,
+	PublishNamespaceError,
+	PublishNamespaceOk,
+} from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
@@ -593,10 +598,51 @@ export class Subscriber {
 			attached = true;
 			this.#attachAnnounce(path);
 
-			// Wait for stream close (= PublishNamespaceDone)
-			console.debug(`runPublishNamespace: awaiting stream.reader.closed for ${path}`);
-			await stream.reader.closed;
-			console.debug(`runPublishNamespace: stream.reader.closed resolved for ${path}`);
+			// An advertisement is updated in place, by repeating PUBLISH_NAMESPACE on the
+			// stream that already carries it, so read until the stream ends rather than
+			// waiting on the close. Nothing else would deliver a re-parented route.
+			const done = version === Version.DRAFT_16 || legacy;
+			for (;;) {
+				if (await stream.reader.done()) break;
+
+				const typeId = await stream.reader.u53();
+				if (done && typeId === PublishNamespaceDone.id) {
+					await PublishNamespaceDone.decode(stream.reader, version);
+					break;
+				}
+				if (typeId !== PublishNamespace.id) {
+					throw new ProtocolViolation(
+						`unexpected message on publish_namespace stream: 0x${typeId.toString(16)}`,
+					);
+				}
+
+				const update = await PublishNamespace.decode(stream.reader, version, Cluster.negotiated(this.#cluster));
+
+				// The stream is the advertisement, so an update on it must name the same
+				// one. Applying a mismatched update would retarget this path with metadata
+				// meant for a different request.
+				if (update.requestId !== msg.requestId || update.trackNamespace !== path) {
+					throw new ProtocolViolation("publish_namespace update does not match its stream");
+				}
+
+				// A path that now runs through us is unusable, so give it back. Keep
+				// reading: this stream is the advertisement's only channel, so a later
+				// clean path arrives here or nowhere.
+				if (this.#reflected(update.cluster)) {
+					if (attached) {
+						attached = false;
+						console.debug(`publish_namespace now loops back, detaching: broadcast=${path}`);
+						this.#detachAnnounce(path);
+					}
+					continue;
+				}
+
+				// Re-attach: a clean path replaced the reflected one we detached from.
+				if (!attached) {
+					attached = true;
+					this.#attachAnnounce(path);
+				}
+			}
 		} finally {
 			if (legacy) this.#legacyRequests.delete(path);
 

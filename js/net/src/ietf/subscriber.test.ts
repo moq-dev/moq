@@ -426,3 +426,39 @@ test("a NAMESPACE missing its hop path closes the session", async () => {
 		new Promise((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), STREAM_WAIT)),
 	]);
 });
+
+/**
+ * An advertisement is updated in place, by repeating PUBLISH_NAMESPACE on the stream that
+ * carries it. One re-parented onto a route through us is unusable, so the announcement has
+ * to go even though the stream stays open.
+ */
+test("a PUBLISH_NAMESPACE update that starts looping back is detached", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
+
+	const announced = subscriber.announced(Path.empty());
+	await acceptSubscribeNamespace(pair.client);
+
+	const advert = (hops: Origin[]) =>
+		new PublishNamespace({
+			requestId: 0n,
+			trackNamespace: Path.from("theirs"),
+			cluster: { hops, cost: 0n },
+		});
+
+	const request = await Stream.open(pair.server, { version: VERSION });
+	const handler = subscriber.runPublishNamespace(advert([PEER]), request);
+	expect(await announced.next()).toMatchObject({ path: Path.from("theirs"), active: true });
+
+	// The peer re-parents the namespace onto a route that runs back through us.
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
+	await peer.writer.u53(PublishNamespace.id);
+	await advert([SELF, PEER]).encode(peer.writer, VERSION);
+
+	expect(await announced.next()).toMatchObject({ path: Path.from("theirs"), active: false });
+
+	peer.close();
+	await handler;
+});
