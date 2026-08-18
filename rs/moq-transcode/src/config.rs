@@ -2,9 +2,6 @@
 
 use moq_net::{AsPath, PathRelativeOwned};
 
-// Superseded by `moq_net::Path::relative_to` plus the caller's own nesting check, which is
-// what the moq-cli verb and the example now do. Kept as a hidden shim so an external caller
-// keeps compiling; drop it on the next `dev` cycle.
 #[doc(hidden)]
 #[deprecated(note = "use moq_net::Path::relative_to, guarded by your own nesting check")]
 pub fn source_reference(source: impl AsPath, output: impl AsPath) -> Option<PathRelativeOwned> {
