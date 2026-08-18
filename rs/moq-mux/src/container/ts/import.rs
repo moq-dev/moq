@@ -292,7 +292,7 @@ impl<E: catalog::Catalog> Import<E> {
 
 		self.scratch.drain(..off);
 		// Cut the snapshot groups for whatever SI committed in this batch. Batching per
-		// decode call (plus the store's own media-clock debounce) coalesces a junction's
+		// decode call (plus the store's own host-clock debounce) coalesces a junction's
 		// burst of sub-table commits into few groups instead of one per commit.
 		self.si.flush(self.last_pts.unwrap_or(Timestamp::ZERO), false)?;
 		Ok(())

@@ -128,6 +128,16 @@ struct Pending {
 	sections: BTreeMap<u8, Bytes>,
 }
 
+/// How a generation was judged complete, deciding whether the commit replaces or
+/// merges (see [`Entry::commit`]).
+enum Complete {
+	/// Every section of the declaration is present.
+	Contiguous,
+	/// The transmission cycle wrapped: complete as observed, bounded by the
+	/// highest `last_section_number` seen.
+	Wrapped { last: u8 },
+}
+
 impl Pending {
 	/// All of 0..=last present: the fast path for densely-numbered tables (SDT, NIT,
 	/// EIT now/next), committing the moment the last section lands. EIT schedule
@@ -220,8 +230,9 @@ impl Entry {
 				// the committed set is complete-as-observed; the same-version merge in
 				// [`Self::commit`] fills it in on the next cycle. No section-counting
 				// receiver can do better; version mixing is still unrepresentable.
+				let last = pending.last;
 				let sections = std::mem::take(&mut pending.sections);
-				self.commit(id, version, sections);
+				self.commit(id, version, sections, Complete::Wrapped { last });
 				return;
 			}
 			// Same version, new bytes: non-conformant (a revision must bump the
@@ -234,27 +245,34 @@ impl Entry {
 		pending.sections.insert(number, section);
 		if pending.contiguous() {
 			let sections = std::mem::take(&mut pending.sections);
-			self.commit(id, version, sections);
+			self.commit(id, version, sections, Complete::Contiguous);
 		}
 	}
 
 	/// Commit the sub-table's generation atomically and retire everything pending
-	/// for it. A new version replaces the old wholesale; the *same* version merges
-	/// into what is already active. The merge is what makes a loss recoverable: a
-	/// section lost before the cycle wrapped commits an observed subset, and on the
-	/// next cycle the already-committed sections short-circuit as repetitions, so
-	/// the wrap only ever carries the stragglers. Replacing would flip-flop between
-	/// incomplete subsets forever; merging converges to the full set. Sound because
-	/// one version is one logical content: a mux removing a section must bump the
-	/// version, which takes the replace path. Repetition of an unchanged set is not
-	/// a change.
-	fn commit(&mut self, id: Identity, version: u8, mut sections: BTreeMap<u8, Bytes>) {
+	/// for it.
+	///
+	/// A contiguous commit replaces the old generation wholesale: it holds every
+	/// section its declaration promises, so anything else active is stale, even
+	/// under the same version number (versions are five bits, so a reception gap
+	/// can bring the same value back with different content). A wrap commit is
+	/// complete-as-observed, not complete, so it *merges* into a same-version
+	/// active generation instead: a section lost before the cycle wrapped
+	/// short-circuits as a repetition on the next cycle and the wrap only ever
+	/// carries the stragglers, so replacing would flip-flop between incomplete
+	/// subsets forever while merging converges. The merge is bounded by the new
+	/// declaration's `last_section_number`, so a shrunken table cannot resurrect
+	/// sections past its own end. Repetition of an unchanged set is not a change.
+	fn commit(&mut self, id: Identity, version: u8, mut sections: BTreeMap<u8, Bytes>, complete: Complete) {
 		self.pending.retain(|(pid, _), _| *pid != id);
-		if let Some(current) = self.active.get(&id)
+		if let Complete::Wrapped { last } = complete
+			&& let Some(current) = self.active.get(&id)
 			&& current.version == Some(version)
 		{
 			for (number, section) in current.sections.iter() {
-				sections.entry(*number).or_insert_with(|| section.clone());
+				if *number <= last {
+					sections.entry(*number).or_insert_with(|| section.clone());
+				}
 			}
 		}
 		let changed = self.active.get(&id).is_none_or(|current| current.sections != sections);

@@ -2603,3 +2603,62 @@ async fn overlapping_capture_teardown_keeps_the_survivors_mapping() {
 		"the old capture's teardown left the survivor's mapping in place"
 	);
 }
+
+/// A contiguous commit replaces even a same-version active generation: versions
+/// are five bits, so a reception gap can bring the same value back with fewer
+/// sections, and merging would resurrect the removed one forever.
+#[tokio::test(start_paused = true)]
+async fn contiguous_same_version_commit_replaces_stale_sections() {
+	let sdt = |number: u8, last: u8, fill: u8| make_long_section(0x42, 1, 0, number, last, &[fill; 4]);
+
+	// Three sections at v0, committed contiguously.
+	let mut input = si_packet(0x0011, &sdt(0, 2, 0xa0));
+	input.extend_from_slice(&si_packet_cc(0x0011, &sdt(1, 2, 0xa1), 1));
+	input.extend_from_slice(&si_packet_cc(0x0011, &sdt(2, 2, 0xa2), 2));
+	// After a gap the table comes back at v0 again (wrapped), now two sections.
+	let b0 = sdt(0, 1, 0xb0);
+	let b1 = sdt(1, 1, 0xb1);
+	input.extend_from_slice(&si_packet_cc(0x0011, &b0, 3));
+	input.extend_from_slice(&si_packet_cc(0x0011, &b1, 4));
+	let mut rig = si_rig();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	rig.import.finish().unwrap();
+
+	let si = rig.catalog.snapshot().mpegts.si.clone();
+	assert_eq!(
+		read_si_sections(&rig.consumer, &si[&0x0011][&0x42].track).await,
+		vec![Bytes::from(b0), Bytes::from(b1)],
+		"the complete new generation retired the stale third section"
+	);
+}
+
+/// The cut debounce runs on the host clock, so a revision publishes even when no
+/// media ever advances a PTS (an audio-only or SI-only input). This test spends
+/// real wall time on the debounce window; media timestamps stay pinned at zero
+/// throughout, which is exactly the case a media-clock debounce wedges on.
+#[tokio::test(start_paused = true)]
+async fn debounce_opens_without_a_media_clock() {
+	let sdt = |version: u8, fill: u8| make_long_section(0x42, 1, version, 0, 0, &[fill; 4]);
+	let mut rig = si_rig();
+
+	let mut input = si_packet(0x0011, &sdt(0, 0xaa));
+	input.extend_from_slice(&si_packet_cc(0x0011, &sdt(0, 0xaa), 1));
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+
+	let name = rig.catalog.snapshot().mpegts.si[&0x0011][&0x42].track.clone();
+	let track = rig.consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+	assert_eq!(track.latest(), Some(0), "the first snapshot cut immediately");
+
+	// A revision inside the window is coalesced...
+	rig.import
+		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(1, 0xbb), 2)[..]))
+		.unwrap();
+	assert_eq!(track.latest(), Some(0), "a revision inside the window is held");
+
+	// ...and publishes once the window passes in *real* time, no finish, no PTS.
+	std::thread::sleep(std::time::Duration::from_millis(1200));
+	rig.import
+		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(1, 0xbb), 3)[..]))
+		.unwrap();
+	assert_eq!(track.latest(), Some(1), "the held revision cut after the window");
+}
