@@ -2627,7 +2627,7 @@ impl Request {
 		// (and subscribe upstream) again. Re-check under the lock: if a live broadcast was already
 		// served for this path while we were fetching upstream, dedup onto it and drop ours rather
 		// than replace a good entry with a duplicate subscription.
-		let resolved = {
+		{
 			let mut state = self.state.lock();
 			// The origin tore down and already rejected this request; keep the
 			// served cache untouched so nothing outlives the teardown.
@@ -2638,32 +2638,35 @@ impl Request {
 			state
 				.requests
 				.remove_if(&self.path, |producer| producer.same_channel(&self.producer));
-			existing.map(|weak| weak.consume()).unwrap_or(broadcast)
-		};
+			let resolved = existing.map(|weak| weak.consume()).unwrap_or(broadcast);
 
-		if let Ok(mut pending) = self.producer.write() {
-			// First write wins: the origin's teardown may have already rejected
-			// this request, and a late accept must not overturn that.
-			pending.resolved.get_or_insert(Ok(resolved));
+			// Resolved while the state lock is still held, so this linearizes
+			// with the driver's teardown: either the teardown ran first and the
+			// closed check above returned, or this resolution lands first and
+			// the teardown finds the entry already gone. Releasing the lock
+			// before the write would let the teardown slip between the removal
+			// and the write, delivering `Ok` from an origin that already ended.
+			if let Ok(mut pending) = self.producer.write() {
+				pending.resolved.get_or_insert(Ok(resolved));
+			}
 		}
 		// `self.producer` drops here, closing the channel; the value is still observable.
 	}
 
 	/// Reject the request, resolving every awaiting requester with `err`.
 	pub fn reject(self, err: Error) {
-		{
-			let mut state = self.state.lock();
-			// Already rejected by the origin's teardown.
-			if state.closed {
-				return;
-			}
-			state
-				.requests
-				.remove_if(&self.path, |producer| producer.same_channel(&self.producer));
+		let mut state = self.state.lock();
+		// Already rejected by the origin's teardown.
+		if state.closed {
+			return;
 		}
-		if let Ok(mut state) = self.producer.write() {
-			// First write wins, matching `accept`.
-			state.resolved.get_or_insert(Err(err));
+		state
+			.requests
+			.remove_if(&self.path, |producer| producer.same_channel(&self.producer));
+		// Under the state lock, matching `accept`: the resolution linearizes
+		// with the driver's teardown.
+		if let Ok(mut pending) = self.producer.write() {
+			pending.resolved.get_or_insert(Err(err));
 		}
 	}
 }

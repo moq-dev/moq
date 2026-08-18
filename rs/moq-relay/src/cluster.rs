@@ -648,6 +648,10 @@ impl Cluster {
 	/// (required when `config.connect` is non-empty), and
 	/// [`with_stats`](Self::with_stats) to enable metrics publishing.
 	///
+	/// Must be called within a tokio runtime: the origin's lifecycle driver is
+	/// spawned here, so the origin serves sessions whether or not
+	/// [`start`](Self::start) (the mesh half) is ever called.
+	///
 	/// Errors if `config.id` is set but invalid: it must be non-zero and below
 	/// 2^62 (the wire varint limit). An unset id picks a fresh random origin.
 	pub fn new(config: ClusterConfig) -> anyhow::Result<Self> {
