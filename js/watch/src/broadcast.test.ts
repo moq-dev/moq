@@ -85,3 +85,24 @@ describe("Broadcast cross-broadcast renditions", () => {
 		broadcast.close();
 	});
 });
+
+describe("Broadcast manual catalog", () => {
+	it("republishes a manual catalog mutated in place", async () => {
+		const catalog = new Signal<Catalog.Root>({
+			video: { renditions: { one: video("avc1.64001e") } },
+		});
+		const broadcast = new Broadcast({ enabled: true, catalogFormat: "manual", catalog });
+
+		await settle();
+		expect(renditions(broadcast)).toEqual(["one"]);
+
+		// The input is a signal the caller owns, so it can be updated in place.
+		catalog.mutate((c) => {
+			if (c.video) c.video.renditions.two = video("avc1.640028");
+		});
+		await settle();
+		expect(renditions(broadcast)).toEqual(["one", "two"]);
+
+		broadcast.close();
+	});
+});

@@ -96,7 +96,9 @@ type BroadcastOutput = {
 	status: Signal<Status>;
 	active: Signal<Moq.Broadcast.Consumer | undefined>;
 
-	// The effective catalog: the fetched one, or a copy of input.catalog in manual mode.
+	// The effective catalog: the fetched one, or a copy of input.catalog in manual mode, minus
+	// any rendition this consumer can't use (see `#runFiltered`). A rendition referencing another
+	// broadcast appears once that broadcast is announced, so this can change without a new catalog.
 	catalog: Signal<Catalog.Root | undefined>;
 };
 
@@ -123,6 +125,10 @@ export class Broadcast {
 
 	// The catalog as published, before renditions this consumer cannot use are dropped. Kept
 	// separate so the effective catalog can be re-derived when a reference becomes reachable.
+	//
+	// Writes notify unconditionally. A manual catalog can be mutated in place, and the rerun that
+	// delivers it lands inside the same flush, where a value-compare coalesces the write away and
+	// strands the filtered copy on the previous contents.
 	readonly #raw = new Signal<Catalog.Root | undefined>(undefined);
 
 	#signals = new Effect();
@@ -243,7 +249,8 @@ export class Broadcast {
 		if (format === "manual") {
 			// Mirror the caller-supplied catalog into the effective output.
 			const catalog = effect.get(this.in.catalog);
-			effect.set(this.#raw, catalog, undefined);
+			this.#raw.set(catalog, true);
+			effect.cleanup(() => this.#raw.set(undefined, true));
 			this.#out.status.set(catalog ? "live" : "loading");
 			return;
 		}
@@ -281,7 +288,7 @@ export class Broadcast {
 
 					console.debug("received catalog", format, this.in.name.peek(), update);
 
-					this.#raw.set(update);
+					this.#raw.set(update, true);
 					this.#out.status.set("live");
 				}
 			} catch (err) {
