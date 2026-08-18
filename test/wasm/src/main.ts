@@ -278,15 +278,6 @@ const CASES: Case[] = [
 	},
 	{
 		name: "reads a published broadcast",
-		// The IETF subscriber takes the publisher's identity straight off the hop
-		// chain, so an advert from a publisher that has none (@moq/net speaks no
-		// cluster extension) is attributed to Origin::UNKNOWN. Every repeat NAMESPACE
-		// for that path then reads as a new publisher and detaches the live source,
-		// killing the subscription mid-read. moq-lite has the same rule but stamps the
-		// upstream session's id when the chain has none, so it never reaches it.
-		// See https://github.com/moq-dev/moq/issues/2903. The detached source surfaces
-		// as the recv stream being dropped mid-read, which is the signature below.
-		known: { ietf: { issue: "#2903", error: "dropped" } },
 		run: async (wasm, relay) => {
 			const path = `wasm-test/${relay.name}`;
 			await withPublisher(relay, path, async () => {
