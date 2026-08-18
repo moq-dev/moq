@@ -28,25 +28,24 @@ type ReferencedRendition = {
 	broadcast?: string;
 };
 
+// Either the catalog's own broadcast, or a sibling to consume by path.
+type RelativeTarget = { local: true } | { local: false; path: Moq.Path.Valid };
+
 function filterRenditions<T extends ReferencedRendition>(
-	base: Moq.Path.Valid,
 	renditions: Record<string, T>,
+	usable: (rel: string | undefined) => boolean,
 ): Record<string, T> {
-	return Object.fromEntries(
-		Object.entries(renditions).filter(([, config]) =>
-			config.broadcast === undefined ? true : Path.tryResolve(base, config.broadcast) !== undefined,
-		),
-	);
+	return Object.fromEntries(Object.entries(renditions).filter(([, config]) => usable(config.broadcast)));
 }
 
-function filterCatalog(base: Moq.Path.Valid, catalog: Catalog.Root): Catalog.Root {
+function filterCatalog(catalog: Catalog.Root, usable: (rel: string | undefined) => boolean): Catalog.Root {
 	return {
 		...catalog,
 		video: catalog.video
-			? { ...catalog.video, renditions: filterRenditions(base, catalog.video.renditions) }
+			? { ...catalog.video, renditions: filterRenditions(catalog.video.renditions, usable) }
 			: undefined,
 		audio: catalog.audio
-			? { ...catalog.audio, renditions: filterRenditions(base, catalog.audio.renditions) }
+			? { ...catalog.audio, renditions: filterRenditions(catalog.audio.renditions, usable) }
 			: undefined,
 	};
 }
@@ -122,6 +121,10 @@ export class Broadcast {
 	// no cross-broadcast renditions never opens the (broad) connection-scoped announcement stream.
 	readonly #wantAnnounced = new Signal(false);
 
+	// The catalog as published, before renditions this consumer cannot use are dropped. Kept
+	// separate so the effective catalog can be re-derived when a reference becomes reachable.
+	readonly #raw = new Signal<Catalog.Root | undefined>(undefined);
+
 	#signals = new Effect();
 
 	constructor(props?: Inputs<BroadcastInput>) {
@@ -137,6 +140,7 @@ export class Broadcast {
 		this.#signals.run(this.#runAnnounced.bind(this));
 		this.#signals.run(this.#runBroadcast.bind(this));
 		this.#signals.run(this.#runCatalog.bind(this));
+		this.#signals.run(this.#runFiltered.bind(this));
 	}
 
 	// Maintain the set of announced paths used by `relativeBroadcast`, by draining a connection-scoped
@@ -168,6 +172,16 @@ export class Broadcast {
 		});
 	}
 
+	// Publish the catalog minus every rendition this consumer cannot use: one whose reference
+	// escapes above the root, or names a broadcast that isn't announced to us. Selecting one of
+	// those would render nothing, since `relativeBroadcast` resolves it to no broadcast at all.
+	// Reruns as announcements arrive, so a rendition appears once its broadcast does.
+	#runFiltered(effect: Effect): void {
+		const raw = effect.get(this.#raw);
+		const usable = (rel: string | undefined) => this.#relativeTarget(effect, rel) !== undefined;
+		effect.set(this.#out.catalog, raw ? filterCatalog(raw, usable) : undefined);
+	}
+
 	// Whether `path` is currently announced, for `relativeBroadcast`'s cross-broadcast refs. Returns
 	// true (subscribe immediately) when the gate can't apply: reload is off, or the relay doesn't
 	// support discovery. Opens the announcement stream on first use.
@@ -175,7 +189,10 @@ export class Broadcast {
 		if (!effect.get(this.in.reload)) return true;
 
 		const conn = effect.get(this.in.connection);
-		if (conn && skipDiscovery(conn)) return true;
+		// Nothing to ask yet. `relativeBroadcast` still bails on the missing connection, and this
+		// keeps a reconnect from briefly hiding every cross-broadcast rendition from selection.
+		if (!conn) return true;
+		if (skipDiscovery(conn)) return true;
 
 		this.#wantAnnounced.set(true);
 
@@ -226,7 +243,7 @@ export class Broadcast {
 		if (format === "manual") {
 			// Mirror the caller-supplied catalog into the effective output.
 			const catalog = effect.get(this.in.catalog);
-			effect.set(this.#out.catalog, catalog ? filterCatalog(name, catalog) : undefined, undefined);
+			effect.set(this.#raw, catalog, undefined);
 			this.#out.status.set(catalog ? "live" : "loading");
 			return;
 		}
@@ -264,13 +281,13 @@ export class Broadcast {
 
 					console.debug("received catalog", format, this.in.name.peek(), update);
 
-					this.#out.catalog.set(filterCatalog(name, update));
+					this.#raw.set(update);
 					this.#out.status.set("live");
 				}
 			} catch (err) {
 				console.warn("error fetching catalog", this.in.name.peek(), err);
 			} finally {
-				this.#out.catalog.set(undefined);
+				this.#raw.set(undefined);
 				this.#out.status.set("offline");
 			}
 		});
@@ -287,8 +304,11 @@ export class Broadcast {
 	 * reference resolves lazily and reacts to `enabled` / connection / announcement
 	 * changes exactly like the catalog broadcast.
 	 */
-	relativeBroadcast(effect: Effect, rel: string | undefined): Moq.Broadcast.Consumer | undefined {
-		if (!rel) return effect.get(this.out.active);
+	// Where a rendition's `broadcast` reference points once resolved and gated on the announcement
+	// stream, or `undefined` when it names nothing consumable right now. Playback and rendition
+	// selection both go through this so they cannot disagree about what is reachable.
+	#relativeTarget(effect: Effect, rel: string | undefined): RelativeTarget | undefined {
+		if (!rel) return { local: true };
 
 		const base = effect.get(this.in.name);
 		const resolved = Path.tryResolve(base, rel);
@@ -296,16 +316,25 @@ export class Broadcast {
 		// Ignore a rendition whose reference escapes above the root. A valid empty result
 		// names the root broadcast, while a reference back to the catalog uses its active handle.
 		if (resolved === undefined) return undefined;
-		if (resolved === base) return effect.get(this.out.active);
+		if (resolved === base) return { local: true };
+
+		if (!this.#isPathAnnounced(effect, resolved)) return undefined;
+
+		return { local: false, path: resolved };
+	}
+
+	/** Resolve a rendition's `broadcast` reference to a consumer, or `undefined` if unreachable. */
+	relativeBroadcast(effect: Effect, rel: string | undefined): Moq.Broadcast.Consumer | undefined {
+		const target = this.#relativeTarget(effect, rel);
+		if (!target) return undefined;
+		if (target.local) return effect.get(this.out.active);
 
 		if (!effect.get(this.in.enabled)) return undefined;
 
 		const conn = effect.get(this.in.connection);
 		if (!conn) return undefined;
 
-		if (!this.#isPathAnnounced(effect, resolved)) return undefined;
-
-		const broadcast = conn.consume(resolved);
+		const broadcast = conn.consume(target.path);
 		effect.cleanup(() => broadcast.close());
 		return broadcast;
 	}
