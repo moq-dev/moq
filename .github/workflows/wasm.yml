@@ -1,0 +1,93 @@
+name: WASM
+
+# Runs the @moq/wasm bindings in a real browser, which nothing in `just check`
+# can do. rs/moq-wasm is `#![cfg(target_arch = "wasm32")]`, so a host-target
+# `cargo check --workspace` compiles it to nothing, and `just rs wasm` is a
+# compile gate: it catches a moq-net change that stops the bindings building,
+# never one that stops them working. See test/wasm/README.md.
+#
+# Narrow trigger, like obs.yml and swift.yml. moq-net is in the filter because
+# that is the break this exists to catch in review: the bindings are a thin
+# wrapper over it, and every other gate compiles them to nothing. js/net is
+# deliberately out, even though the harness publishes with it: it is a fixture
+# with its own unit tests, and naming it would run a browser on nearly every
+# JS pull request.
+#
+# No nightly counterpart. Unlike obs.yml, whose linked inputs a path list can't
+# enumerate, everything that can break these bindings is a file under one of
+# the paths below.
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    # `closed` is here only so merging/closing a PR cancels its in-flight run
+    # via the concurrency group below; the job itself is skipped on close.
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - "rs/moq-wasm/**"
+      - "rs/moq-net/**"
+      - "js/wasm/**"
+      - "test/wasm/**"
+      - "test/justfile"
+      - "package.json"
+      - "bun.lock"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/wasm.yml"
+
+concurrency:
+  group: wasm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wasm:
+    name: WASM
+    if: github.event.action != 'closed'
+    # x64, not the arm runner the other jobs use: this is the configuration
+    # smoke.yml already launches Playwright's Chromium on.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
+        with:
+          tool-cache: false
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+        with:
+          determinate: false
+          # Trust the flake's cachix substituter, so the dev shell substitutes
+          # instead of building from source. See check.yml for the full story.
+          extra-conf: |
+            extra-substituters = https://kixelated.cachix.org
+            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+
+      # Restore only. cache.yml is the single writer, on `main`; see the comment
+      # there for why. `shared-key` has to match the one it saves under.
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          shared-key: rust
+          save-if: false
+
+      # Playwright's Chromium isn't in the nix devShell. Install it plus its apt
+      # runtime libs (`--with-deps` needs the host package manager); run.sh's own
+      # `playwright install` then no-ops.
+      - name: Playwright Chromium
+        run: nix develop --command bash -c "bun install && bunx playwright install --with-deps chromium"
+        shell: bash -leo pipefail {0}
+
+      - name: WASM
+        run: nix develop --command just test wasm
+        shell: bash -leo pipefail {0}

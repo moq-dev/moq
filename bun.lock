@@ -307,6 +307,16 @@
         "tsx": "^4.23.11",
       },
     },
+    "test/wasm": {
+      "name": "@moq/wasm-test",
+      "dependencies": {
+        "@moq/net": "workspace:*",
+        "@moq/wasm": "workspace:*",
+      },
+      "devDependencies": {
+        "playwright": "^1.62.1",
+      },
+    },
   },
   "trustedDependencies": [
     "@fails-components/webtransport-transport-http3-quiche",
@@ -597,6 +607,8 @@
     "@moq/token": ["@moq/token@workspace:js/token"],
 
     "@moq/wasm": ["@moq/wasm@workspace:js/wasm"],
+
+    "@moq/wasm-test": ["@moq/wasm-test@workspace:test/wasm"],
 
     "@moq/watch": ["@moq/watch@workspace:js/watch"],
 

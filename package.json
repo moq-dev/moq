@@ -42,6 +42,7 @@
 		"demo/web",
 		"js/moq-boy",
 		"test/smoke/clients/js",
-		"test/smoke/clients/js-native"
+		"test/smoke/clients/js-native",
+		"test/wasm"
 	]
 }

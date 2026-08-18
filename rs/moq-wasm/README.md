@@ -30,6 +30,12 @@ What works today:
   methods, `.d.ts`).
 - Scope is the consume path (connect -> broadcast -> track -> group -> frame),
   the `@moq/watch` use case. The publish path follows the same shape.
+- **It is tested in a browser**: `just test wasm` runs the built package in
+  headless Chromium against a real relay, one per protocol flavour, publishing
+  with `@moq/net` and subscribing with these bindings
+  ([`test/wasm/`](../../test/wasm)). `just rs wasm` only compiles the crate, so
+  that harness is the only thing that can tell a working binding from one that
+  merely builds.
 
 ### Three moq-net changes this requires
 

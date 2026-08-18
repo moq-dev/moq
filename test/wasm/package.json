@@ -1,0 +1,12 @@
+{
+	"name": "@moq/wasm-test",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"@moq/net": "workspace:*",
+		"@moq/wasm": "workspace:*"
+	},
+	"devDependencies": {
+		"playwright": "^1.62.1"
+	}
+}
