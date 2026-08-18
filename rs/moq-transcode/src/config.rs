@@ -3,7 +3,7 @@
 use moq_net::{AsPath, PathRelativeOwned};
 
 #[doc(hidden)]
-#[deprecated(note = "use moq_net::Path::relative_to, guarded by your own nesting check")]
+#[deprecated(note = "use moq_net::Path::relative, guarded by your own nesting check")]
 pub fn source_reference(source: impl AsPath, output: impl AsPath) -> Option<PathRelativeOwned> {
 	let source = source.as_path();
 	let output = output.as_path();
@@ -11,7 +11,7 @@ pub fn source_reference(source: impl AsPath, output: impl AsPath) -> Option<Path
 		return None;
 	}
 
-	source.relative_to(&output)
+	source.relative(&output)
 }
 
 /// One candidate output rendition: a target resolution (by height) and bitrate.

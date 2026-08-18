@@ -424,20 +424,20 @@ impl<'a> Path<'a> {
 	///
 	/// // The base names a broadcast, so its last segment is replaced, not descended into.
 	/// let base = Path::new("a/b");
-	/// assert_eq!(Path::new("a/b/c").relative_to(&base).unwrap().as_str(), "b/c");
-	/// assert_eq!(Path::new("a/c").relative_to(&base).unwrap().as_str(), "c");
-	/// assert_eq!(Path::new("c").relative_to(&base).unwrap().as_str(), "../c");
+	/// assert_eq!(Path::new("a/b/c").relative(&base).unwrap().as_str(), "b/c");
+	/// assert_eq!(Path::new("a/c").relative(&base).unwrap().as_str(), "c");
+	/// assert_eq!(Path::new("c").relative(&base).unwrap().as_str(), "../c");
 	///
 	/// // The lone `.` names the base's parent, which the empty reference cannot.
-	/// assert_eq!(Path::new("a").relative_to(&base).unwrap().as_str(), ".");
+	/// assert_eq!(Path::new("a").relative(&base).unwrap().as_str(), ".");
 	///
 	/// // The base itself.
-	/// assert_eq!(Path::new("a/b").relative_to(&base).unwrap().as_str(), "");
+	/// assert_eq!(Path::new("a/b").relative(&base).unwrap().as_str(), "");
 	///
 	/// // A segment named `..` is a legal path component but an unnameable target.
-	/// assert!(Path::new("a/..").relative_to(&base).is_none());
+	/// assert!(Path::new("a/..").relative(&base).is_none());
 	/// ```
-	pub fn relative_to(&self, base: impl AsPath) -> Option<PathRelativeOwned> {
+	pub fn relative(&self, base: impl AsPath) -> Option<PathRelativeOwned> {
 		let base = base.as_path();
 
 		// Only the empty reference can name a base whose last segment is itself `.` or `..`,
@@ -1560,8 +1560,8 @@ mod tests {
 	}
 
 	#[test]
-	fn test_relative_to() {
-		let rel = |target: &str, base: &str| Path::new(target).relative_to(base).unwrap();
+	fn test_relative() {
+		let rel = |target: &str, base: &str| Path::new(target).relative(base).unwrap();
 
 		// Nested under the base: the base's own last segment is replaced, so it repeats.
 		assert_eq!(rel("foo/bar/baz", "foo/bar").as_str(), "bar/baz");
@@ -1583,24 +1583,24 @@ mod tests {
 	}
 
 	#[test]
-	fn test_relative_to_rejects_unnameable_targets() {
+	fn test_relative_rejects_unnameable_targets() {
 		// A segment literally named `.` or `..` is a legal path component, but resolution
 		// would walk on it instead of naming it.
-		assert!(Path::new("a/../b").relative_to("").is_none());
-		assert!(Path::new("x/./y").relative_to("x/z").is_none());
-		assert!(Path::new("a/..").relative_to("a/b").is_none());
+		assert!(Path::new("a/../b").relative("").is_none());
+		assert!(Path::new("x/./y").relative("x/z").is_none());
+		assert!(Path::new("a/..").relative("a/b").is_none());
 
 		// A base is always nameable by itself, however its last segment is spelled.
-		assert_eq!(Path::new("a/..").relative_to("a/..").unwrap().as_str(), "");
+		assert_eq!(Path::new("a/..").relative("a/..").unwrap().as_str(), "");
 
 		// Dot segments inside the shared prefix are never emitted, so they are fine.
-		let rel = Path::new("a/../b/x").relative_to("a/../b/c").unwrap();
+		let rel = Path::new("a/../b/x").relative("a/../b/c").unwrap();
 		assert_eq!(rel.as_str(), "x");
 		assert_eq!(Path::new("a/../b/c").resolve(&rel).as_str(), "a/../b/x");
 	}
 
 	#[test]
-	fn test_relative_to_round_trips() {
+	fn test_relative_round_trips() {
 		let paths = [
 			"", "a", "b", "a/b", "a/c", "a/b/c", "a/b/c/d", "x/y/z", "a/../b", "a/./b", "a/..", "a/.",
 		];
@@ -1609,7 +1609,7 @@ mod tests {
 			for target in paths {
 				let base = Path::new(base);
 				let target = Path::new(target);
-				let Some(rel) = target.relative_to(&base) else {
+				let Some(rel) = target.relative(&base) else {
 					// Only an unnameable target may be refused, and never the base itself.
 					assert!(
 						target != base && target.parts().any(|part| part == "." || part == ".."),

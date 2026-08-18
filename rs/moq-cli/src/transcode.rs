@@ -141,7 +141,7 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	// player that can reach the output can reach the source too. Otherwise the derivative
 	// catalog advertises the rungs alone.
 	config.source = match output_path.strip_prefix(&source_path) {
-		Some(rest) if !rest.is_empty() => source_path.relative_to(&output_path),
+		Some(rest) if !rest.is_empty() => source_path.relative(&output_path),
 		_ => None,
 	};
 

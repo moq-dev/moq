@@ -88,7 +88,7 @@ This lets a transcoder publish a sidecar catalog that adds new renditions while 
 For example, a transcoder consuming `room/source` can publish `room/transcode` whose catalog contains a downscaled `480p` rendition plus the original `1080p` rendition marked `"broadcast": "./source"`.
 A viewer of `room/transcode` then pulls `480p` from the transcoder and `1080p` directly from the source, and the relay dedupes the source subscription with the transcoder's own.
 
-Publishers author the reference with the inverse operation, so the two stay in step: `Path::relative_to` in Rust (`moq-net`) and `Path.relativeTo` in TypeScript (`@moq/net`), each taking the target broadcast and the catalog broadcast it is named from.
+Publishers author the reference with the inverse operation, so the two stay in step: `Path::relative` in Rust (`moq-net`) and `Path.relative` in TypeScript (`@moq/net`), each taking the target broadcast and the catalog broadcast it is named from.
 Both refuse a target no reference can name, since a path segment may itself be called `.` or `..`.
 
 `@moq/watch` resolves the reference automatically. In Rust, the `moq-mux` exporters do the same: they take a `Source::new(origin, path)`, and both the catalog broadcast and any referenced broadcast resolve through the origin over the same connection.

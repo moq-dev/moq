@@ -259,7 +259,7 @@ export function tryResolve(base: Valid, rel: string): Valid | undefined {
 /**
  * Express `target` relative to `base`: the inverse of {@link resolve}.
  *
- * The result round-trips (`resolve(base, relativeTo(target, base)) === target`) and never
+ * The result round-trips (`resolve(base, relative(target, base)) === target`) and never
  * walks above the root, so {@link tryResolve} accepts it too.
  *
  * A relative reference replaces the last segment of the base, matching relative URL
@@ -271,19 +271,20 @@ export function tryResolve(base: Valid, rel: string): Valid | undefined {
  * `.` or `..`, which resolution reads as navigation instead of as a name. Only the segments
  * past the shared prefix matter, since the rest are never emitted.
  *
- * Mirrors the Rust `Path::relative_to`, used to author the cross-broadcast track
- * references a hang catalog carries.
+ * Mirrors the Rust `Path::relative`, used to author the cross-broadcast track
+ * references a hang catalog carries. Note the argument order: the target comes first,
+ * the opposite of Node's `path.relative(from, to)`.
  *
  * @example
  * ```typescript
- * Path.relativeTo(Path.from("a/b/c"), Path.from("a/b")); // "b/c"
- * Path.relativeTo(Path.from("a/c"), Path.from("a/b"));   // "c"
- * Path.relativeTo(Path.from("a"), Path.from("a/b"));     // "."
- * Path.relativeTo(Path.from("a/b"), Path.from("a/b"));   // ""
- * Path.relativeTo(Path.from("a/.."), Path.from("a/b"));  // undefined
+ * Path.relative(Path.from("a/b/c"), Path.from("a/b")); // "b/c"
+ * Path.relative(Path.from("a/c"), Path.from("a/b"));   // "c"
+ * Path.relative(Path.from("a"), Path.from("a/b"));     // "."
+ * Path.relative(Path.from("a/b"), Path.from("a/b"));   // ""
+ * Path.relative(Path.from("a/.."), Path.from("a/b"));  // undefined
  * ```
  */
-export function relativeTo(target: Valid, base: Valid): string | undefined {
+export function relative(target: Valid, base: Valid): string | undefined {
 	// Only the empty reference can name a base whose last segment is itself `.` or `..`,
 	// since resolution replaces that segment rather than emitting it.
 	if (target === base) return "";
