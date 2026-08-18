@@ -13,6 +13,12 @@ name: WASM
 # reaches the browser through moq-net without touching a file named here
 # otherwise. Those two are the whole in-repo dependency graph of the crate.
 #
+# The rest of the filter is the machinery that turns the crate into the package
+# under test, which is just as able to break it: the root `justfile` owns the
+# `wasm` recipe, and `.cargo/config.toml` carries the wasm32 rustflags
+# (`getrandom_backend`, `web_sys_unstable_apis`) without which it does not
+# compile at all.
+#
 # Two things the harness needs are deliberately out, because they are fixtures
 # rather than the code under test, and both are already gated elsewhere:
 # `js/net/**` (the publisher; its own unit tests plus the smoke matrix) and
@@ -35,7 +41,9 @@ on:
       - "rs/kio/**"
       - "js/wasm/**"
       - "test/wasm/**"
+      - "justfile"
       - "test/justfile"
+      - ".cargo/config.toml"
       - "package.json"
       - "bun.lock"
       - "Cargo.toml"
