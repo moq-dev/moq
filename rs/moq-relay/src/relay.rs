@@ -24,7 +24,9 @@
 
 use anyhow::Context;
 
-use crate::{Auth, Cluster, Config, Connection, DEFAULT_DRAIN_TIMEOUT, Internal, Shutdown, ShutdownTrigger, Web};
+use crate::{
+	Auth, Cluster, Config, Connection, DEFAULT_DRAIN_TIMEOUT, Internal, Shutdown, ShutdownTrigger, Web, Workers,
+};
 
 /// A fully assembled relay: the listeners and the shared cluster behind them.
 ///
@@ -35,8 +37,10 @@ use crate::{Auth, Cluster, Config, Connection, DEFAULT_DRAIN_TIMEOUT, Internal, 
 ///
 /// `#[non_exhaustive]`, so destructure with a trailing `..` (a pattern naming
 /// every field does not compile outside this crate) or move out the fields you
-/// need one at a time. Dropping any field you do not name is safe: the pieces
-/// that must outlive setup are owned by [`Self::cluster`].
+/// need one at a time. Dropping a field you do not name is safe for all but
+/// [`Self::workers`]: the rest of what must outlive setup is owned by
+/// [`Self::cluster`], while the workers own their threads and sockets, so
+/// dropping them un-binds QUIC.
 #[non_exhaustive]
 pub struct Relay {
 	/// The QUIC/WebTransport server, already bound. Feed it to [`serve`].
@@ -73,6 +77,11 @@ pub struct Relay {
 
 	/// Starts graceful shutdown for [`Self::shutdown`].
 	pub shutdown_trigger: ShutdownTrigger,
+
+	/// The thread-per-core QUIC workers, already bound. Drive them with
+	/// [`Workers::serve`]; inert unless `runtime.workers` is configured, in which
+	/// case [`Self::server`] carries no QUIC listener of its own.
+	pub workers: Workers,
 }
 
 impl Relay {
@@ -89,15 +98,27 @@ impl Relay {
 		let mtls_enabled = !config.listen.tls.root.is_empty();
 		let server_versions = config.listen.versions();
 
+		// Bind the QUIC workers first: they own the listen address when configured,
+		// so the server below must not also try to bind it.
+		let workers = Workers::bind(&config).context("failed to start the QUIC workers")?;
+
+		let mut listen = config.listen.clone();
+		if workers.enabled() {
+			listen.listeners = moq_tokio::listen::Listeners::Stream;
+		}
+
 		#[allow(unused_mut)]
-		let mut server = config.listen.init(config.quic.clone())?;
+		let mut server = listen.init(config.quic.clone())?;
 		let client = config.connect.clone().init(config.quic.clone())?;
 
 		// `None` for a stream-only server (no QUIC); any other error is real.
-		let addr = match server.local_addr() {
-			Ok(addr) => Some(addr),
-			Err(moq_tokio::Error::NoBackend(_)) => None,
-			Err(err) => return Err(err).context("failed to resolve the QUIC bind address"),
+		let addr = match workers.local_addr() {
+			Some(addr) => Some(addr),
+			None => match server.local_addr() {
+				Ok(addr) => Some(addr),
+				Err(moq_tokio::Error::NoBackend(_)) => None,
+				Err(err) => return Err(err).context("failed to resolve the QUIC bind address"),
+			},
 		};
 
 		#[cfg(feature = "iroh")]
@@ -140,7 +161,9 @@ impl Relay {
 		let drain_timeout = config.drain_timeout.unwrap_or(DEFAULT_DRAIN_TIMEOUT);
 		let (shutdown_trigger, shutdown) = Shutdown::new(drain_timeout);
 		// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
-		let web = Web::new(auth.clone(), cluster.clone(), server.certificates(), config.web)
+		// The workers hold the certificates when they own QUIC; the server has none.
+		let certificates = workers.certificates().unwrap_or_else(|| server.certificates());
+		let web = Web::new(auth.clone(), cluster.clone(), certificates, config.web)
 			.with_shutdown(shutdown.clone())
 			.with_versions(server_versions);
 
@@ -170,6 +193,7 @@ impl Relay {
 			addr,
 			shutdown,
 			shutdown_trigger,
+			workers,
 		})
 	}
 
@@ -187,6 +211,7 @@ impl Relay {
 			web,
 			shutdown,
 			shutdown_trigger,
+			workers,
 			..
 		} = self;
 
@@ -209,7 +234,8 @@ impl Relay {
 			Err(err) = started.run() => Err(err).context("cluster failed"),
 			Err(err) = web.run() => Err(err).context("web server failed"),
 			Err(err) = internal.run() => Err(err).context("internal server failed"),
-			Err(err) = serve(server, cluster, auth, shutdown.clone()) => Err(err).context("server failed"),
+			Err(err) = serve(server, cluster.clone(), auth.clone(), shutdown.clone()) => Err(err).context("server failed"),
+			Err(err) = workers.serve(cluster, auth, shutdown.clone()) => Err(err).context("QUIC workers failed"),
 			Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
 			res = drain_on_signal(shutdown_trigger, shutdown.drain_timeout) => res,
 			else => Ok(()),

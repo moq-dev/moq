@@ -115,7 +115,7 @@ impl Server {
 		// `--listen`) doesn't also open UDP/443.
 		quic.validate()?;
 
-		let build_quic = config.bind.is_some() || !config.has_stream_listener();
+		let build_quic = config.listeners.quic() && (config.bind.is_some() || !config.has_stream_listener());
 		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
 		if config.bind.is_some() {
 			return Err(Error::NoBackend(
@@ -169,11 +169,11 @@ impl Server {
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		let mut stream_binds = Vec::new();
 		#[cfg(feature = "tcp")]
-		if let Some(addr) = config.tcp.bind {
+		if let Some(addr) = config.tcp.bind.filter(|_| config.listeners.stream()) {
 			stream_binds.push(StreamBind::Tcp(addr));
 		}
 		#[cfg(all(feature = "uds", unix))]
-		if let Some(path) = config.unix.bind.clone() {
+		if let Some(path) = config.unix.bind.clone().filter(|_| config.listeners.stream()) {
 			stream_binds.push(StreamBind::Unix(path));
 		}
 		// `None` (or an all-empty allowlist) means the listener enforces nothing.

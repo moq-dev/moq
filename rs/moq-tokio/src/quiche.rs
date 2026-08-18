@@ -322,7 +322,7 @@ impl QuicheClient {
 		// Bind the first attempt now so candidate selection uses the socket's actual
 		// family and dual-stack state. Later attempts bind their own ephemeral
 		// sockets because each quiche connection must own its socket.
-		let socket = crate::bind::udp(self.bind)?;
+		let socket = crate::bind::udp(crate::bind::Udp::new(self.bind))?;
 		let local = socket.local_addr()?;
 		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
 
@@ -359,7 +359,7 @@ impl QuicheClient {
 			async move {
 				let socket = match socket {
 					Some(socket) => socket,
-					None => crate::bind::udp(this.bind)?,
+					None => crate::bind::udp(crate::bind::Udp::new(this.bind))?,
 				};
 				let builder = this.builder(socket, alpns, &verification, roots, &host)?;
 				let conn = builder
@@ -566,7 +566,7 @@ impl QuicheServer {
 
 		let listen =
 			crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND).map_err(Error::ResolveBind)?;
-		let socket = crate::bind::udp(listen)?;
+		let socket = crate::bind::udp(crate::bind::Udp::new(listen).with_reuse_port(config.shard.is_some()))?;
 
 		let (chain, key) = if !config.tls.generate.is_empty() {
 			generate_quiche_cert(&config.tls.generate)?

@@ -35,6 +35,12 @@ pub struct Config {
 	#[serde(default)]
 	pub log: moq_tokio::Log,
 
+	/// How QUIC work is laid out over threads. One shared runtime unless
+	/// `runtime.workers` is set.
+	#[command(flatten)]
+	#[serde(default)]
+	pub runtime: crate::RuntimeConfig,
+
 	/// Cluster configuration.
 	#[command(flatten)]
 	#[serde(default)]
@@ -305,6 +311,31 @@ depth = 2
 	/// Regression test for the clap+TOML clobber bug applied to `[cache]`. Both
 	/// fields are `Option<String>` so a TOML-configured cache size survives the
 	/// CLI re-parse when no `--cache-*` flag is passed.
+	#[test]
+	fn cli_does_not_clobber_toml_runtime() {
+		let _env = EnvGuard::clear(&["MOQ_RUNTIME_WORKERS", "MOQ_RUNTIME_PIN"]);
+
+		let toml = r#"
+[runtime]
+workers = 8
+pin = false
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("runtime-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(config.runtime.workers, Some(8));
+		assert_eq!(
+			config.runtime.pin,
+			Some(false),
+			"TOML's runtime.pin=false must survive the CLI re-parse"
+		);
+	}
+
 	#[test]
 	fn cli_does_not_clobber_toml_cache() {
 		let _env = EnvGuard::clear(&["MOQ_CACHE_CAPACITY", "MOQ_CACHE_HEADROOM", "MOQ_CACHE_DURATION"]);

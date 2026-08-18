@@ -269,7 +269,7 @@ pub(crate) struct QuinnClient {
 
 impl QuinnClient {
 	pub fn new(config: &connect::Config, quic: &crate::quic::Config) -> Result<Self> {
-		let socket = crate::bind::udp(config.resolved_bind()).map_err(Error::BindSocket)?;
+		let socket = crate::bind::udp(crate::bind::Udp::new(config.resolved_bind())).map_err(Error::BindSocket)?;
 		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
 
 		let quic = quic.resolve();
@@ -564,7 +564,8 @@ impl QuinnServer {
 			endpoint_config.cid_generator(move || Box::new(ServerIdGenerator::new(server_id.clone(), nonce_len)));
 		}
 
-		let socket = crate::bind::udp(listen).map_err(Error::BindSocket)?;
+		let socket = crate::bind::udp(crate::bind::Udp::new(listen).with_reuse_port(config.shard.is_some()))
+			.map_err(Error::BindSocket)?;
 
 		// Create the generic QUIC endpoint.
 		let quic = quinn::Endpoint::new(endpoint_config, Some(tls), socket, runtime).map_err(Error::CreateEndpoint)?;

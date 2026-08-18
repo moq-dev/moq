@@ -20,6 +20,7 @@ mod internal;
 mod listener;
 mod nodes;
 mod relay;
+mod runtime;
 mod shutdown;
 mod stats;
 #[cfg(test)]
@@ -50,6 +51,7 @@ pub use config::*;
 pub use connection::*;
 pub use internal::*;
 pub use relay::*;
+pub use runtime::*;
 pub use shutdown::*;
 pub use stats::*;
 pub use web::*;

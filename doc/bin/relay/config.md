@@ -45,6 +45,37 @@ Logging configuration.
 level = "info"
 ```
 
+### \[runtime]
+
+How the relay lays its QUIC work out over threads. By default one work-stealing
+runtime serves every connection off one UDP socket.
+
+```toml
+[runtime]
+# Serve QUIC from this many single-threaded workers instead of the shared
+# runtime. Each worker is a thread with its own socket on the listen address
+# (SO_REUSEPORT), and a connection is handled start to finish by one worker, so
+# its packets never cross threads. Everything else (HTTP, WebSocket, tcp/unix,
+# clustering) stays on the shared runtime. Omit to keep QUIC there too.
+#
+# Linux only, and incompatible with listen.tls.generate: each worker would
+# generate a certificate of its own. Point at real certificate files instead.
+#
+# The kernel steers a packet to a worker by hashing its source address and port,
+# so a client that changes address mid-connection (a NAT rebinding, a network
+# change) lands on a worker that has never seen it and loses the connection.
+# Treat this as a benchmarking knob until steering follows the connection ID.
+workers = 8
+
+# Pin each worker to a CPU core. Default: true.
+pin = true
+```
+
+The shared runtime is still there for everything that is not QUIC, and it still
+sizes its thread pool to the machine. Set `TOKIO_WORKER_THREADS` in the
+environment to bound it, so the workers are not competing with a full second
+pool for the same cores.
+
 ### \[listen]
 
 QUIC/WebTransport server settings. Optionally add plaintext qmux stream

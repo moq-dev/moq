@@ -10,6 +10,7 @@
 //! See <https://github.com/moq-dev/moq/issues/1375>.
 
 use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
+use std::io;
 use std::net::{SocketAddr, TcpListener, UdpSocket};
 use std::sync::Once;
 use std::time::Duration;
@@ -68,15 +69,57 @@ const SEND_SYSCTL: Option<&str> = Some("net.core.wmem_max");
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 const SEND_SYSCTL: Option<&str> = RECV_SYSCTL;
 
+/// What to bind a UDP socket to, and how.
+///
+/// [`Udp::new`] takes the address and leaves everything else at the platform
+/// defaults; reach for the `with_*` methods for the rest.
+#[derive(Clone, Copy, Debug)]
+pub struct Udp {
+	addr: SocketAddr,
+	reuse_port: bool,
+}
+
+impl Udp {
+	/// Bind this address, with the platform defaults for everything else.
+	pub fn new(addr: SocketAddr) -> Self {
+		Self {
+			addr,
+			reuse_port: false,
+		}
+	}
+
+	/// Share the port with the other sockets bound this way (`SO_REUSEPORT`).
+	///
+	/// Linux spreads inbound datagrams across every socket in the group, which is
+	/// what lets one worker per core own a socket on the same port instead of
+	/// funnelling every packet through one. Enable it on *every* member: the first
+	/// socket to bind without it owns the port outright and the rest fail.
+	///
+	/// Linux-only, and [`udp`] fails with [`io::ErrorKind::Unsupported`] elsewhere
+	/// rather than binding a group the platform does not balance. macOS and the
+	/// BSDs accept the option and then deliver a unicast flow to a single member,
+	/// so the workers would come up looking healthy with one of them serving
+	/// everything.
+	pub fn with_reuse_port(mut self, enabled: bool) -> Self {
+		self.reuse_port = enabled;
+		self
+	}
+}
+
 /// Bind a UDP socket, making an IPv6 socket dual-stack so it also serves IPv4.
 ///
 /// The socket buffers are grown to 8 MiB where the OS allows it, and a warning
 /// names the sysctl to raise where it doesn't.
-pub fn udp(addr: SocketAddr) -> std::io::Result<UdpSocket> {
+pub fn udp(options: Udp) -> io::Result<UdpSocket> {
+	let addr = options.addr;
+
 	let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
 	let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
 	make_dual_stack(&socket, addr);
 	grow_buffers(&socket);
+	if options.reuse_port {
+		set_reuse_port(&socket)?;
+	}
 	socket.bind(&addr.into())?;
 	Ok(socket.into())
 }
@@ -206,6 +249,24 @@ fn granted(reported: usize) -> usize {
 	}
 }
 
+/// Set `SO_REUSEPORT`, or report that this platform cannot load-balance a port.
+///
+/// Not best-effort like the other socket options here: a caller asking for this
+/// is building a group of sockets that only works if the kernel spreads traffic
+/// over it, so a silent no-op would leave one member serving everything.
+#[cfg(target_os = "linux")]
+fn set_reuse_port(socket: &Socket) -> io::Result<()> {
+	socket.set_reuse_port(true)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_reuse_port(_socket: &Socket) -> io::Result<()> {
+	Err(io::Error::new(
+		io::ErrorKind::Unsupported,
+		"SO_REUSEPORT load balancing is Linux-only",
+	))
+}
+
 /// Whether `socket` also reaches IPv4, through IPv4-mapped addresses.
 ///
 /// [`udp`] clears `IPV6_V6ONLY` best-effort, so this reads back what the
@@ -225,7 +286,7 @@ pub(crate) fn udp_is_dual_stack(socket: &UdpSocket) -> bool {
 ///
 /// The returned listener is non-blocking, ready to be adopted by an async runtime
 /// (`tokio::net::TcpListener::from_std`, `axum_server::from_tcp`).
-pub fn tcp(addr: SocketAddr) -> std::io::Result<TcpListener> {
+pub fn tcp(addr: SocketAddr) -> io::Result<TcpListener> {
 	let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
 	let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
 	make_dual_stack(&socket, addr);
@@ -289,7 +350,7 @@ mod tests {
 	fn udp_ipv6_is_dual_stack() {
 		// An IPv6 wildcard bind should come back dual-stack so IPv4 traffic
 		// reaches it. socket2 lets us read the option back to confirm.
-		let socket = match udp("[::]:0".parse().unwrap()) {
+		let socket = match udp(Udp::new("[::]:0".parse().unwrap())) {
 			Ok(socket) => socket,
 			Err(err) if skip_if_no_ipv6(&err) => return,
 			Err(err) => panic!("failed to bind IPv6 UDP socket: {err}"),
@@ -304,7 +365,7 @@ mod tests {
 			let plain = Socket::from(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
 			let before = direction.size(&plain).unwrap();
 
-			let tuned = Socket::from(udp("127.0.0.1:0".parse().unwrap()).unwrap());
+			let tuned = Socket::from(udp(Udp::new("127.0.0.1:0".parse().unwrap())).unwrap());
 			let after = direction.size(&tuned).unwrap();
 
 			// A host whose default already covers UDP_BUFFER is left alone. Anywhere
@@ -341,8 +402,83 @@ mod tests {
 
 	#[test]
 	fn udp_ipv4_still_binds() {
-		let socket = udp("127.0.0.1:0".parse().unwrap()).unwrap();
+		let socket = udp(Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
 		assert!(socket.local_addr().unwrap().is_ipv4());
+	}
+
+	/// A reuseport group is only useful if every member can hold the same port,
+	/// so bind a second socket to the first one's address and check it takes.
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn udp_reuse_port_shares_a_port() {
+		let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+		let first = udp(Udp::new(addr).with_reuse_port(true)).unwrap();
+		let bound = first.local_addr().unwrap();
+		let second = udp(Udp::new(bound).with_reuse_port(true)).unwrap();
+		assert_eq!(second.local_addr().unwrap(), bound);
+	}
+
+	/// Without the option the second bind must lose the port, which is what makes
+	/// a missed `with_reuse_port` on one member a startup failure rather than a
+	/// silently lopsided group.
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn udp_without_reuse_port_keeps_the_port() {
+		let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+		let first = udp(Udp::new(addr)).unwrap();
+		let bound = first.local_addr().unwrap();
+		assert!(udp(Udp::new(bound).with_reuse_port(true)).is_err());
+	}
+
+	/// The point of the option is that the kernel spreads traffic over the group,
+	/// which is what a worker-per-core listener is built on. Send from a spread of
+	/// source ports and check that more than one member is fed.
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn udp_reuse_port_spreads_datagrams() {
+		const MEMBERS: usize = 4;
+		const SENDERS: usize = 64;
+
+		let mut group = Vec::with_capacity(MEMBERS);
+		let mut addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+		for _ in 0..MEMBERS {
+			let socket = udp(Udp::new(addr).with_reuse_port(true)).unwrap();
+			addr = socket.local_addr().unwrap();
+			socket.set_nonblocking(true).unwrap();
+			group.push(socket);
+		}
+
+		// Each sender gets its own ephemeral source port, which is what the
+		// kernel hashes on.
+		for _ in 0..SENDERS {
+			let sender = udp(Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
+			sender.send_to(b"quic", addr).unwrap();
+		}
+
+		let mut fed = 0;
+		let mut total = 0;
+		for socket in &group {
+			let mut received = 0;
+			let mut buf = [0u8; 8];
+			while socket.recv_from(&mut buf).is_ok() {
+				received += 1;
+			}
+			total += received;
+			fed += usize::from(received > 0);
+		}
+
+		assert_eq!(total, SENDERS, "every datagram reached exactly one member");
+		assert!(fed > 1, "only {fed} of {MEMBERS} members were fed");
+	}
+
+	/// Elsewhere the request fails loudly instead of binding a group the kernel
+	/// won't balance.
+	#[test]
+	#[cfg(not(target_os = "linux"))]
+	fn udp_reuse_port_is_linux_only() {
+		let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+		let err = udp(Udp::new(addr).with_reuse_port(true)).unwrap_err();
+		assert_eq!(err.kind(), io::ErrorKind::Unsupported);
 	}
 
 	#[test]

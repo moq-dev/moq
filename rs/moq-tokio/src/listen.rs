@@ -121,6 +121,94 @@ pub struct Config {
 	#[arg(skip)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub quic: Option<crate::quic::Config>,
+
+	/// Which of the configured listeners this server opens.
+	///
+	/// Programmatic only: there is no flag or TOML key, because splitting the
+	/// listeners across servers is a decision about which threads run what, not
+	/// about what the process listens on.
+	#[arg(skip)]
+	#[serde(skip)]
+	pub listeners: Listeners,
+
+	/// This server's slot in a `SO_REUSEPORT` group, when several share a port.
+	///
+	/// Programmatic only, for the same reason as [`Self::listeners`]: the group is
+	/// a set of sockets one process binds itself, not something an operator names.
+	#[arg(skip)]
+	#[serde(skip)]
+	pub shard: Option<Shard>,
+}
+
+/// Which listeners a [`Server`](crate::Server) opens out of the ones configured.
+///
+/// [`All`](Self::All) is the default and what a single-threaded process wants.
+/// The split exists so a process can run QUIC on dedicated threads (one
+/// [`Quic`](Self::Quic) server per [`Shard`]) while a [`Stream`](Self::Stream)
+/// server keeps `tcp`/`unix` on its main runtime.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Listeners {
+	/// Every listener the config asks for.
+	#[default]
+	All,
+
+	/// The QUIC (UDP) listener only, even when a `tcp`/`unix` listener is configured.
+	Quic,
+
+	/// The stream (`tcp`/`unix`) listeners only, and no QUIC even when nothing else
+	/// is configured. A server with neither accepts nothing, which is the honest
+	/// outcome rather than a surprise UDP bind.
+	Stream,
+}
+
+impl Listeners {
+	/// Whether a QUIC backend should be built.
+	pub(crate) fn quic(self) -> bool {
+		matches!(self, Self::All | Self::Quic)
+	}
+
+	/// Whether the `tcp`/`unix` listeners should be opened.
+	#[cfg_attr(
+		not(any(feature = "tcp", all(feature = "uds", unix))),
+		expect(dead_code, reason = "no stream listener is compiled in")
+	)]
+	pub(crate) fn stream(self) -> bool {
+		matches!(self, Self::All | Self::Stream)
+	}
+}
+
+/// One server's slot in a group of sockets sharing a port via `SO_REUSEPORT`.
+///
+/// Every member binds the same address and the kernel spreads inbound
+/// connections across the group, so N servers on N threads can serve one port
+/// without a shared socket between them. [`index`](Self::index) names this
+/// member and is stable for the life of the group, so an owner can attribute a
+/// per-thread measurement back to a socket.
+///
+/// Membership is fixed once the group is bound: the kernel picks a member by
+/// position, so a socket joining or leaving reshuffles every mapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shard {
+	index: u16,
+	count: u16,
+}
+
+impl Shard {
+	/// Slot `index` of a group of `count` sockets, or `None` if that slot does not
+	/// exist (`count` of zero, or an `index` at or past the end).
+	pub fn new(index: u16, count: u16) -> Option<Self> {
+		(index < count).then_some(Self { index, count })
+	}
+
+	/// This member's position in the group, from zero.
+	pub fn index(self) -> u16 {
+		self.index
+	}
+
+	/// How many sockets share the port.
+	pub fn count(self) -> u16 {
+		self.count
+	}
 }
 
 /// The `--server-*` flags from before the accept side was named `listen`.
@@ -353,6 +441,49 @@ mod tests {
 
 		let config = config_from(["test", "--listen-quic-lb-id", "ab", "--listen-quic-lb-nonce", "8"]);
 		assert!(config.validate().is_ok());
+	}
+
+	/// A slot has to exist in the group it names.
+	#[test]
+	fn shard_slots_are_bounded() {
+		assert_eq!(Shard::new(0, 1).map(|shard| shard.count()), Some(1));
+		assert_eq!(Shard::new(3, 4).map(|shard| shard.index()), Some(3));
+		assert!(Shard::new(4, 4).is_none());
+		assert!(Shard::new(0, 0).is_none());
+	}
+
+	/// A stream-only server opens no QUIC listener even with a bind configured,
+	/// which is what lets another thread hold that address.
+	#[tokio::test]
+	async fn stream_listeners_leave_quic_alone() {
+		let config = Config {
+			bind: Some("127.0.0.1:0".to_string()),
+			listeners: Listeners::Stream,
+			..Default::default()
+		};
+
+		let server = config.init(Default::default()).unwrap();
+		assert!(matches!(server.local_addr(), Err(crate::Error::NoBackend(_))));
+	}
+
+	/// The mirror image: a QUIC-only server ignores a configured stream listener,
+	/// so N of them can share one config without N tcp binds fighting over a port.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn quic_listeners_leave_streams_alone() {
+		let mut config = Config {
+			bind: Some("127.0.0.1:0".to_string()),
+			listeners: Listeners::Quic,
+			..Default::default()
+		};
+		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.tls.generate = vec!["localhost".to_string()];
+
+		let server = config.init(Default::default()).unwrap();
+		assert!(server.local_addr().is_ok());
+		// Only the stream listeners report accept(2) health, so an empty set is
+		// how a server with none of them reads.
+		assert!(server.accept_health().is_empty());
 	}
 
 	/// The canonical spellings, which is what `--help` teaches.
