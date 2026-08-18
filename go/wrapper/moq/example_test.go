@@ -53,7 +53,7 @@ func ExampleClient_CreateBroadcast() {
 	// Finishing unpublishes the broadcast immediately.
 	defer broadcast.Finish()
 
-	media, err := broadcast.PublishMedia("opus", opusHead())
+	media, err := broadcast.PublishAudio(moq.AudioFormatOpus, opusHead())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -82,14 +82,14 @@ func ExampleClient_Session_stats() {
 }
 
 // Publish a video track with catalog hints known before the first keyframe.
-func ExampleBroadcastProducer_PublishMedia_videoHint() {
+func ExampleBroadcastProducer_PublishVideo_videoHint() {
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer broadcast.Finish()
 
-	media, err := broadcast.PublishMedia("avc3", nil, moq.WithVideoHint(moq.VideoHint{}))
+	media, err := broadcast.PublishVideo(moq.VideoFormatAvc3, nil, moq.WithVideoHint(moq.VideoHint{}))
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -553,7 +553,7 @@ impl<E: CatalogExt> TrackStream<E> {
 	/// [`BroadcastProducer::reserve_track`](moq_net::broadcast::Producer::reserve_track);
 	/// the importer accepts it here at the legacy microsecond timescale (where a codec-specific
 	/// timescale would be chosen). A [`VideoHint`] carrying a codec publishes the catalog before the
-	/// first frame; any [`Init::data`] seeds the stream (as a call to [`initialize`](Self::initialize)).
+	/// first frame; any [`VideoInit::data`] seeds the stream (as a call to [`initialize`](Self::initialize)).
 	pub fn video(
 		request: moq_net::track::Request,
 		reserved: crate::catalog::Reserved<E>,

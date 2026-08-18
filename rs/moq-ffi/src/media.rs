@@ -148,11 +148,11 @@ pub struct MoqDatagram {
 	pub payload: Vec<u8>,
 }
 
-/// Caller-provided video catalog fields for [`MoqInit`].
+/// Caller-provided video catalog fields for [`MoqVideoInit`].
 ///
 /// Every field is optional and fills only a gap the stream leaves; a value the stream detects wins.
 /// Publishing the catalog before the first keyframe needs at least the codec, which comes from the
-/// [`MoqInit`] format. Audio has no equivalent: an audio format resolves entirely from its init bytes.
+/// [`MoqVideoInit`] format. Audio has no equivalent: it resolves entirely from its init bytes.
 #[derive(Clone, Default, uniffi::Record)]
 pub struct MoqVideoHint {
 	/// The encoded pixel dimensions.
@@ -240,7 +240,6 @@ pub struct MoqVideoInit {
 	/// The video codec.
 	pub format: MoqVideoFormat,
 	/// Codec init bytes (an avcC, an hvcC, ...). May be empty for a format that resolves in band.
-	#[uniffi(default = [])]
 	pub data: Vec<u8>,
 	/// Human-readable rendition name for a track picker.
 	#[uniffi(default = None)]
@@ -259,7 +258,6 @@ pub struct MoqContainerInit {
 	/// The container format.
 	pub format: MoqContainerFormat,
 	/// The leading chunk of the container, decoded immediately. May be empty.
-	#[uniffi(default = [])]
 	pub data: Vec<u8>,
 }
 

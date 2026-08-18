@@ -488,7 +488,7 @@ impl MoqBroadcastDynamic {
 	///
 	/// Returns a [`MoqTrackRequest`]: accept it for raw writes with
 	/// [`MoqTrackRequest::accept`], publish media onto it with
-	/// [`MoqBroadcastProducer::publish_media_on_track`], or reject it with
+	/// [`MoqBroadcastProducer::publish_audio_on_track`], or reject it with
 	/// [`MoqTrackRequest::abort`]. The requesting subscriber stays pending until then.
 	///
 	/// Returns an error once the broadcast is closed or aborted.
@@ -581,7 +581,7 @@ impl MoqGroupRequest {
 /// A track requested by a subscriber that hasn't been accepted yet.
 ///
 /// Mirrors [`moq_net::track::Request`]: [`accept`](Self::accept) it to start producing raw
-/// frames, hand it to [`MoqBroadcastProducer::publish_media_on_track`] to publish media,
+/// frames, hand it to [`MoqBroadcastProducer::publish_audio_on_track`] to publish media,
 /// or [`abort`](Self::abort) it to reject the waiting subscriber.
 #[derive(uniffi::Object)]
 pub struct MoqTrackRequest {
@@ -596,7 +596,7 @@ impl MoqTrackRequest {
 	}
 
 	/// Take the inner request so an importer can accept it (setting the timescale). Used by
-	/// [`MoqBroadcastProducer::publish_media_on_track`].
+	/// [`MoqBroadcastProducer::publish_audio_on_track`].
 	pub(crate) fn take(&self) -> Result<moq_net::track::Request, MoqError> {
 		self.inner.lock().unwrap().take().ok_or(MoqError::Closed)
 	}
@@ -625,7 +625,7 @@ impl MoqTrackRequest {
 
 	/// Accept the request as a raw track, fixing its [`MoqTrackInfo`] (timescale, etc.).
 	///
-	/// For media use [`MoqBroadcastProducer::publish_media_on_track`] instead, which lets
+	/// For media use [`MoqBroadcastProducer::publish_audio_on_track`] instead, which lets
 	/// the importer pick the timescale.
 	pub fn accept(&self, info: Option<MoqTrackInfo>) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();

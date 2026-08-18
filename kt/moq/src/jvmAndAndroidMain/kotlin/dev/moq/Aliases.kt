@@ -97,10 +97,20 @@ typealias MediaFrame = uniffi.moq.MoqMediaFrame
 typealias Video = uniffi.moq.MoqVideo
 /** Caller-provided catalog fields for a video track. */
 typealias VideoHint = uniffi.moq.MoqVideoHint
+/** A single audio codec an importer can parse. */
+typealias AudioFormat = uniffi.moq.MoqAudioFormat
+/** A single video codec an importer can parse. */
+typealias VideoFormat = uniffi.moq.MoqVideoFormat
+/** A container that publishes its own tracks. */
+typealias ContainerFormat = uniffi.moq.MoqContainerFormat
 /** Catalog properties shared by every video rendition; absent fields clear those properties. */
 typealias VideoProperties = uniffi.moq.MoqVideoProperties
-/** Media format, initialization bytes, and optional video hints. */
-typealias Init = uniffi.moq.MoqInit
+/** An audio codec, its required init bytes, and an optional label. */
+typealias AudioInit = uniffi.moq.MoqAudioInit
+/** A video codec, optional init bytes, a label, and catalog hints. */
+typealias VideoInit = uniffi.moq.MoqVideoInit
+/** A container format and its leading bytes. */
+typealias ContainerInit = uniffi.moq.MoqContainerInit
 /** The catalog description of an audio track: codec, sample rate, channels, and container. */
 typealias Audio = uniffi.moq.MoqAudio
 /** A width and height pair, in pixels. */
@@ -118,7 +128,7 @@ typealias AudioFrame = uniffi.moq.MoqAudioFrame
 /** An audio codec identifier. */
 typealias AudioCodec = uniffi.moq.MoqAudioCodec
 /** A raw PCM sample format, mirroring WebCodecs `AudioData.format`. */
-typealias AudioFormat = uniffi.moq.MoqAudioFormat
+typealias AudioSampleFormat = uniffi.moq.MoqAudioSampleFormat
 /** The PCM layout an [AudioConsumer] should decode to. */
 typealias AudioDecoderOutput = uniffi.moq.MoqAudioDecoderOutput
 /** The PCM layout the caller feeds an [AudioProducer]. */

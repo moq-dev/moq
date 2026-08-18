@@ -77,11 +77,11 @@ pub enum Format {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Kind {
-	/// A single audio codec, imported by [`Track::audio`](super::Track::audio).
+	/// A single audio codec, imported by [`Track::audio`](crate::import::Track::audio).
 	Audio,
-	/// A single video codec, imported by [`Track::video`](super::Track::video).
+	/// A single video codec, imported by [`Track::video`](crate::import::Track::video).
 	Video,
-	/// A container that publishes its own tracks, imported by [`Container`](super::Container).
+	/// A container that publishes its own tracks, imported by [`Container`](crate::import::Container).
 	Container,
 }
 

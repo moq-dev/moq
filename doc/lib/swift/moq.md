@@ -132,7 +132,7 @@ track.update(subscription: Subscription(priority: 20, ordered: false))
 
 ```swift
 let broadcast = try session.publisher.createBroadcast(path: "my-stream")
-let audio = try broadcast.publishMedia(format: "opus", initData: opusInitBytes, label: "English")
+let audio = try broadcast.publishAudio(format: .opus, initData: opusInitBytes, label: "English")
 
 // Audio has no keyframes, so `cut` is what gives it group boundaries. Once per
 // frame is the lowest latency; a segment cadence suits HLS/DASH.
@@ -145,13 +145,13 @@ try broadcast.finish()
 ```
 
 The optional `label` is presentation metadata for a track picker and does not
-change the generated transport track name. It names one rendition, so a container
-format (`fmp4`, `mkv`, `ts`, `flv`) throws rather than ignoring it: those describe
-their own tracks, and `video:` throws on a container or an audio format for the same
-reason. Video publishers can pass
-`video: VideoHint(...)` to seed catalog fields before the stream reveals them.
-Use `publishMedia(on:format:initData:label:video:)` to accept a media track
-obtained from `BroadcastDynamic`.
+change the generated transport track name. `publishContainer` takes neither a
+label nor a hint: a container describes each track it publishes from its own
+metadata, so there is no single rendition for either to name. Video publishers
+can pass `hint: VideoHint(...)` to seed catalog fields before the stream reveals
+them. Use `publishAudio(on:format:initData:label:)` or
+`publishVideo(on:format:initData:label:hint:)` to accept a media track obtained
+from `BroadcastDynamic`.
 
 Each catalog `Video` has a `stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
 
@@ -310,7 +310,7 @@ The served broadcast is not announced. It only resolves consumers that call `req
 
 ### Raw media
 
-`publishMedia` above takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `publishVideo` / `publishAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
+`publishAudio` / `publishVideo` take frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `encodeVideo` / `encodeAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
 
 ```swift
 let video = try broadcast.publishVideo(

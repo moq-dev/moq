@@ -16,8 +16,8 @@ type (
 	AudioEncoderInput = ffi.MoqAudioEncoderInput
 	// AudioEncoderOutput configures the Opus encoder: codec, optional sample rate, channels, bitrate, and frame duration.
 	AudioEncoderOutput = ffi.MoqAudioEncoderOutput
-	// AudioFormat is a raw PCM sample layout, mirroring WebCodecs AudioData.format.
-	AudioFormat = ffi.MoqAudioFormat
+	// AudioSampleFormat is a raw PCM sample layout, mirroring WebCodecs AudioData.format.
+	AudioSampleFormat = ffi.MoqAudioSampleFormat
 	// AudioFrame is one audio frame: PCM payload plus a presentation timestamp in microseconds.
 	AudioFrame = ffi.MoqAudioFrame
 	// Catalog is a broadcast's manifest: its video and audio renditions plus display metadata.
@@ -48,6 +48,12 @@ type (
 	Video = ffi.MoqVideo
 	// VideoHint supplies catalog fields a video stream can't reveal itself, such as bitrate, filling only the gaps.
 	VideoHint = ffi.MoqVideoHint
+	// AudioFormat is a single audio codec an importer can parse.
+	AudioFormat = ffi.MoqAudioFormat
+	// VideoFormat is a single video codec an importer can parse.
+	VideoFormat = ffi.MoqVideoFormat
+	// ContainerFormat is a container that publishes its own tracks.
+	ContainerFormat = ffi.MoqContainerFormat
 	// VideoProperties holds catalog properties shared by every video rendition; nil fields clear those properties.
 	VideoProperties = ffi.MoqVideoProperties
 	// VideoCodec identifies a published video track's codec: H.264 or H.265.
@@ -99,25 +105,69 @@ func LocContainer() Container {
 	return ContainerLoc{}
 }
 
-// AudioFormat values: the raw PCM sample layout fed to or returned from the
+// AudioFormat values: a single audio codec an importer can parse.
+const (
+	// AudioFormatAac is Advanced Audio Coding, configured by an AudioSpecificConfig.
+	AudioFormatAac = ffi.MoqAudioFormatAac
+	// AudioFormatOpus is Opus, configured by an OpusHead.
+	AudioFormatOpus = ffi.MoqAudioFormatOpus
+	// AudioFormatFlac is FLAC, configured by its STREAMINFO block.
+	AudioFormatFlac = ffi.MoqAudioFormatFlac
+	// AudioFormatMp3 is MPEG-1/2 Audio Layer III.
+	AudioFormatMp3 = ffi.MoqAudioFormatMp3
+)
+
+// VideoFormat values: a single video codec an importer can parse. The two H.26x pairs
+// differ by framing, not codec: Avc1/Hvc1 are length-prefixed with an out-of-band config
+// record, Avc3/Hev1 are Annex-B with the parameter sets inline.
+const (
+	// VideoFormatAvc1 is H.264 with length-prefixed NALUs and an out-of-band avcC.
+	VideoFormatAvc1 = ffi.MoqVideoFormatAvc1
+	// VideoFormatAvc3 is H.264 in Annex-B with inline SPS/PPS.
+	VideoFormatAvc3 = ffi.MoqVideoFormatAvc3
+	// VideoFormatHvc1 is H.265 with length-prefixed NALUs and an out-of-band hvcC.
+	VideoFormatHvc1 = ffi.MoqVideoFormatHvc1
+	// VideoFormatHev1 is H.265 in Annex-B with inline parameter sets.
+	VideoFormatHev1 = ffi.MoqVideoFormatHev1
+	// VideoFormatAv01 is AV1.
+	VideoFormatAv01 = ffi.MoqVideoFormatAv01
+	// VideoFormatVp8 is VP8.
+	VideoFormatVp8 = ffi.MoqVideoFormatVp8
+	// VideoFormatVp9 is VP9.
+	VideoFormatVp9 = ffi.MoqVideoFormatVp9
+)
+
+// ContainerFormat values: a container that publishes its own tracks.
+const (
+	// ContainerFormatFmp4 is fragmented MP4 / CMAF.
+	ContainerFormatFmp4 = ffi.MoqContainerFormatFmp4
+	// ContainerFormatMkv is Matroska / WebM.
+	ContainerFormatMkv = ffi.MoqContainerFormatMkv
+	// ContainerFormatTs is an MPEG-2 transport stream.
+	ContainerFormatTs = ffi.MoqContainerFormatTs
+	// ContainerFormatFlv is Flash Video, as used by RTMP.
+	ContainerFormatFlv = ffi.MoqContainerFormatFlv
+)
+
+// AudioSampleFormat values: the raw PCM sample layout fed to or returned from the
 // in-process Opus codec.
 const (
-	// AudioFormatU8 is unsigned 8-bit interleaved PCM.
-	AudioFormatU8 = ffi.MoqAudioFormatU8
-	// AudioFormatS16 is signed 16-bit interleaved PCM.
-	AudioFormatS16 = ffi.MoqAudioFormatS16
-	// AudioFormatS32 is signed 32-bit interleaved PCM.
-	AudioFormatS32 = ffi.MoqAudioFormatS32
-	// AudioFormatF32 is 32-bit float interleaved PCM.
-	AudioFormatF32 = ffi.MoqAudioFormatF32
-	// AudioFormatU8Planar is unsigned 8-bit planar PCM, one buffer per channel.
-	AudioFormatU8Planar = ffi.MoqAudioFormatU8Planar
-	// AudioFormatS16Planar is signed 16-bit planar PCM, one buffer per channel.
-	AudioFormatS16Planar = ffi.MoqAudioFormatS16Planar
-	// AudioFormatS32Planar is signed 32-bit planar PCM, one buffer per channel.
-	AudioFormatS32Planar = ffi.MoqAudioFormatS32Planar
-	// AudioFormatF32Planar is 32-bit float planar PCM, one buffer per channel.
-	AudioFormatF32Planar = ffi.MoqAudioFormatF32Planar
+	// AudioSampleFormatU8 is unsigned 8-bit interleaved PCM.
+	AudioSampleFormatU8 = ffi.MoqAudioSampleFormatU8
+	// AudioSampleFormatS16 is signed 16-bit interleaved PCM.
+	AudioSampleFormatS16 = ffi.MoqAudioSampleFormatS16
+	// AudioSampleFormatS32 is signed 32-bit interleaved PCM.
+	AudioSampleFormatS32 = ffi.MoqAudioSampleFormatS32
+	// AudioSampleFormatF32 is 32-bit float interleaved PCM.
+	AudioSampleFormatF32 = ffi.MoqAudioSampleFormatF32
+	// AudioSampleFormatU8Planar is unsigned 8-bit planar PCM, one buffer per channel.
+	AudioSampleFormatU8Planar = ffi.MoqAudioSampleFormatU8Planar
+	// AudioSampleFormatS16Planar is signed 16-bit planar PCM, one buffer per channel.
+	AudioSampleFormatS16Planar = ffi.MoqAudioSampleFormatS16Planar
+	// AudioSampleFormatS32Planar is signed 32-bit planar PCM, one buffer per channel.
+	AudioSampleFormatS32Planar = ffi.MoqAudioSampleFormatS32Planar
+	// AudioSampleFormatF32Planar is 32-bit float planar PCM, one buffer per channel.
+	AudioSampleFormatF32Planar = ffi.MoqAudioSampleFormatF32Planar
 )
 
 // AudioCodecOpus is the only codec currently supported for raw audio tracks.

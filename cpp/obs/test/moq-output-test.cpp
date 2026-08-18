@@ -195,7 +195,12 @@ int32_t moq_publish_finish(uint32_t)
 	return 0;
 }
 
-int32_t moq_publish_media(uint32_t, const moq_media_config *)
+int32_t moq_publish_video(uint32_t, const moq_video_init *)
+{
+	return 7;
+}
+
+int32_t moq_publish_audio(uint32_t, const moq_audio_init *)
 {
 	return 7;
 }

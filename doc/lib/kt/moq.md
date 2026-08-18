@@ -122,8 +122,8 @@ import dev.moq.*
 
 Moq.connect("https://relay.example.com").use { moq ->
     val broadcast = moq.createBroadcast("my-stream")
-    val audio = broadcast.publishMedia(
-        Init(format = "opus", data = opusInitBytes, label = "English", video = null)
+    val audio = broadcast.publishAudio(
+        AudioInit(format = AudioFormat.OPUS, data = opusInitBytes, label = "English")
     )
 
     // Audio has no keyframes, so `cut` is what gives it group boundaries. Once
@@ -138,10 +138,9 @@ Moq.connect("https://relay.example.com").use { moq ->
 ```
 
 `label` is presentation metadata for a track picker and does not change the
-generated transport track name. Labels do not need to be unique. It names one
-rendition, so a container format (`fmp4`, `mkv`, `ts`, `flv`) throws rather than
-ignoring it: those describe their own tracks. `video` throws on a container or an
-audio format for the same reason.
+generated transport track name. Labels do not need to be unique.
+`publishContainer` takes neither a label nor a hint: a container describes each
+track it publishes from its own metadata.
 
 Each catalog `Video` has a `stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
 
@@ -159,7 +158,7 @@ broadcast.setVideoProperties(
 
 ### Raw media
 
-`publishMedia` above takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `publishVideo` / `publishAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
+`publishAudio` / `publishVideo` take frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `encodeVideo` / `encodeAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
 
 ```kotlin
 val video = broadcast.publishVideo(

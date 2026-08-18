@@ -28,7 +28,7 @@ A **broadcast** is a collection of tracks identified by a path. A **track** is a
 
 `create_broadcast(path)` creates an announced broadcast on the origin and returns its producer. Toggle discoverability with `set_announce(False)` (the broadcast stays reachable by exact path), and call `finish()` to unpublish it.
 
-For unstructured byte streams (status, commands, sensor data), use `publish_track` / `subscribe_track`. For media with a known container format (audio/video), use `publish_media` / `subscribe_media` and the catalog will be populated automatically.
+For unstructured byte streams (status, commands, sensor data), use `publish_track` / `subscribe_track`. For media with a known container format (audio/video), use `publish_audio` / `publish_video` / `publish_container` and `subscribe_media`, and the catalog will be populated automatically.
 
 ## API summary
 
@@ -87,7 +87,7 @@ except moq.Error as err:
 
 ```python
 broadcast = client.create_broadcast("my-stream")
-audio = broadcast.publish_media("opus", opus_init_bytes, label="English")
+audio = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_init_bytes, label="English")
 
 # Audio has no keyframes, so `cut` is what gives it group boundaries. Once per
 # frame is the lowest latency; a segment cadence suits HLS/DASH.
@@ -100,13 +100,12 @@ broadcast.finish()
 Supported codec formats include `opus`, `avc3`, `hev1`, `av01`, `vp09`, and others. See [`hang`](/lib/rs/crate/hang) for the full list.
 The optional `label` is presentation metadata for a track picker. The transport
 track name remains generated from the format and labels do not need to be unique.
-It names one rendition, so a container format (`fmp4`, `mkv`, `ts`, `flv`) raises
-rather than ignoring it: those describe their own tracks. `video` raises on a
-container or an audio format for the same reason.
+`publish_container` takes neither a label nor a hint: a container describes each
+track it publishes from its own metadata.
 
 ### Publishing raw media
 
-`publish_media` above takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `publish_video` / `publish_audio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
+The calls above take frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `encode_video` / `encode_audio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
 
 ```python
 video = broadcast.publish_video(
@@ -130,10 +129,10 @@ video.finish()
 
 The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition is published immediately, read out of the encoder itself, so subscribers discover it through the catalog rather than a name you pick, and can find it before the first frame exists. `cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group.
 
-`publish_media` fills the catalog by parsing the codec bitstream. For a video format you can pass a `VideoHint` to supply fields the stream can't reveal (such as `bitrate`), or to publish the catalog before the first keyframe:
+The catalog is filled by parsing the codec bitstream. `publish_video` takes an optional `hint` to supply fields the stream can't reveal (such as `bitrate`), or to publish the catalog before the first keyframe:
 
 ```python
-video = broadcast.publish_media(
+video = broadcast.publish_video(
     "avc3",
     avc_init_bytes,
     video=moq.VideoHint(bitrate=4_000_000),

@@ -131,8 +131,6 @@ public final class MediaProducer: Sendable {
     /// only thing that gives it groups: call it after every frame for one group (one QUIC stream)
     /// the relay forwards without waiting, or at a segment cadence to align with video. Video
     /// groups at its own keyframes and needs this only to override that.
-    ///
-    /// On a container this declares a new segment, rolling a group on every track it publishes.
     public func cut() throws {
         try ffi.cut()
     }
@@ -146,6 +144,60 @@ public final class MediaProducer: Sendable {
     }
 
     /// Finish the track and finalize encoding.
+    public func finish() throws {
+        try ffi.finish()
+    }
+}
+
+/// Write side of a container, which demuxes and publishes its own tracks.
+public final class ContainerProducer: Sendable {
+    let ffi: MoqContainerProducer
+
+    init(_ ffi: MoqContainerProducer) {
+        self.ffi = ffi
+    }
+
+    /// Write a whole chunk of container bytes.
+    ///
+    /// No timestamp: a container carries its tracks' timing itself, and the importer reads it out
+    /// rather than taking the caller's word for it.
+    public func write(_ payload: Data) throws {
+        try ffi.write(payload: payload)
+    }
+
+    /// Declare that the next chunk starts a new segment, rolling a group on every track.
+    ///
+    /// An fMP4 source carrying `styp` atoms declares its own, so this is only needed when it
+    /// doesn't; formats with no segment concept (MKV, TS, FLV) ignore it.
+    public func cut() throws {
+        try ffi.cut()
+    }
+
+    /// Start a new segment and number its groups `sequence`.
+    public func seek(_ sequence: UInt64) throws {
+        try ffi.seek(sequence: sequence)
+    }
+
+    /// Finish every track this container publishes.
+    public func finish() throws {
+        try ffi.finish()
+    }
+}
+
+/// Write side of a container fed a raw byte stream, which recovers its own framing.
+public final class ContainerStreamProducer: Sendable {
+    let ffi: MoqContainerStreamProducer
+
+    init(_ ffi: MoqContainerStreamProducer) {
+        self.ffi = ffi
+    }
+
+    /// Push raw container bytes; chunk boundaries don't matter.
+    public func write(_ payload: Data) throws {
+        try ffi.write(payload: payload)
+    }
+
+    /// Finish every track this container publishes.
     public func finish() throws {
         try ffi.finish()
     }

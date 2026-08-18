@@ -15,7 +15,7 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A bare [`MoqInit`] with a format and init bytes, no catalog hints.
+/// A bare [`MoqAudioInit`] with a format and its init bytes.
 fn audio_init(format: MoqAudioFormat, data: Vec<u8>) -> MoqAudioInit {
 	MoqAudioInit {
 		format,

@@ -78,7 +78,7 @@ def test_origin_lifecycle():
 
 def test_publish_media_lifecycle():
     broadcast = moq.BroadcastProducer()
-    media = broadcast.publish_media("opus", opus_head())
+    media = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head())
     media.write_frame(b"opus frame", 1000)
     media.finish()
     broadcast.finish()
@@ -91,7 +91,7 @@ def test_publish_media_cut_and_seek():
     late subscribers and the timeline alike.
     """
     broadcast = moq.BroadcastProducer()
-    media = broadcast.publish_media("opus", opus_head())
+    media = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head())
 
     for i in range(3):
         media.write_frame(b"opus frame", i * 20_000)
@@ -114,16 +114,18 @@ def test_video_properties_use_defaulted_fields():
     broadcast.finish()
 
 
-def test_unknown_format():
+def test_audio_rejects_bad_init_bytes():
+    # A bad format is no longer expressible: it is an enum. What can still go wrong here is
+    # init bytes that aren't an OpusHead, which must fail at publish rather than on a frame.
     broadcast = moq.BroadcastProducer()
     with pytest.raises(Exception):
-        broadcast.publish_media("nope", b"")
+        broadcast.publish_audio(moq.AudioFormat.OPUS, b"")
 
 
 async def test_local_publish_consume_audio():
     origin = moq.OriginProducer()
     broadcast = origin.create_broadcast("live")
-    media = broadcast.publish_media("opus", opus_head())
+    media = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head())
 
     consumer = origin.consume()
 
@@ -157,7 +159,7 @@ async def test_local_publish_consume_audio():
 async def test_video_publish_consume():
     origin = moq.OriginProducer()
     broadcast = origin.create_broadcast("video-test")
-    media = broadcast.publish_media("avc3", h264_init())
+    media = broadcast.publish_video(moq.VideoFormat.AVC3, h264_init())
 
     consumer = origin.consume()
 
@@ -190,7 +192,7 @@ async def test_video_publish_consume():
 async def test_multiple_frames_ordering():
     origin = moq.OriginProducer()
     broadcast = origin.create_broadcast("ordering-test")
-    media = broadcast.publish_media("opus", opus_head())
+    media = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head())
 
     consumer = origin.consume()
 
@@ -216,7 +218,7 @@ async def test_multiple_frames_ordering():
 async def test_catalog_update_on_new_track():
     origin = moq.OriginProducer()
     broadcast = origin.create_broadcast("catalog-update")
-    _media1 = broadcast.publish_media("opus", opus_head())
+    _media1 = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head())
 
     consumer = origin.consume()
 
@@ -228,7 +230,7 @@ async def test_catalog_update_on_new_track():
         assert len(catalog1.audio) == 1
 
         # Add a second audio track, which triggers a catalog update.
-        _media2 = broadcast.publish_media("opus", opus_head())
+        _media2 = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head())
 
         catalog2 = await anext(cat_consumer)
         assert len(catalog2.audio) == 2
@@ -238,7 +240,7 @@ async def test_catalog_update_on_new_track():
 
 def test_finish_closes_producer():
     broadcast = moq.BroadcastProducer()
-    _media = broadcast.publish_media("opus", opus_head())
+    _media = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head())
     broadcast.finish()
 
     with pytest.raises(Exception):
@@ -376,7 +378,7 @@ async def test_dynamic_track_request_can_publish_media():
     track = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
     assert track.name == "requested-audio"
 
-    media = broadcast.publish_media_on_track(track, "opus", opus_head())
+    media = broadcast.publish_audio_on_track(track, moq.AudioFormat.OPUS, opus_head())
     assert media.name == "requested-audio"
     with pytest.raises(Exception):
         _ = track.name
@@ -569,7 +571,7 @@ async def test_subscribe_media_default_latency_and_context_manager():
     latency; the returned consumer is also an async context manager."""
     origin = moq.OriginProducer()
     broadcast = origin.create_broadcast("live")
-    media = broadcast.publish_media("opus", opus_head())
+    media = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head())
 
     consumer = origin.consume()
 

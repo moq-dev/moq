@@ -182,7 +182,7 @@ request, err := dynamic.RequestedTrack(ctx)
 if err != nil {
     log.Fatal(err)
 }
-media, err := broadcast.PublishMediaOnTrack(request, "opus", opusInit)
+media, err := broadcast.PublishAudioOnTrack(request, moq.AudioFormatOpus, opusInit)
 if err != nil {
     log.Fatal(err)
 }
@@ -196,16 +196,15 @@ Video catalog fields that are known before the first keyframe can be supplied
 with `WithVideoHint`:
 
 ```go
-media, err := broadcast.PublishMedia("avc3", nil, moq.WithVideoHint(moq.VideoHint{
+media, err := broadcast.PublishVideo(moq.VideoFormatAvc3, nil, moq.WithVideoHint(moq.VideoHint{
     Coded: &moq.Dimensions{Width: 1920, Height: 1080},
 }), moq.WithLabel("Main camera"))
 ```
 
-`WithLabel` stores a human-readable rendition name in the catalog without
-changing the generated transport track name. Labels do not need to be unique.
-It names one rendition, so a container format (`fmp4`, `mkv`, `ts`, `flv`) returns
-an error rather than ignoring it: those describe their own tracks. `WithVideoHint`
-is likewise an error on a container or an audio format.
+`WithAudioLabel` / `WithVideoLabel` store a human-readable rendition name in the
+catalog without changing the generated transport track name. Labels do not need
+to be unique. `PublishContainer` takes no options at all: a container describes
+each track it publishes from its own metadata.
 
 Each catalog `Video` has a `Stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
 
@@ -243,7 +242,7 @@ broadcast, err := origin.CreateBroadcast("my-broadcast.hang")
 if err != nil {
     // handle error
 }
-mediaProducer, err := broadcast.PublishMedia("aac", asc)
+mediaProducer, err := broadcast.PublishAudio(moq.AudioFormatAac, asc)
 if err != nil {
     // handle error
 }
@@ -261,7 +260,7 @@ If a producer is collected without `Finish()`, the underlying library logs a war
 
 ## Raw media
 
-`PublishMedia` takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `PublishVideo` / `PublishAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
+`PublishAudio` / `PublishVideo` take frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `EncodeVideo` / `EncodeAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
 
 ```go
 video, err := broadcast.PublishVideo(

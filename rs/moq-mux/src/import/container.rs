@@ -90,11 +90,8 @@ pub struct Container<E: crate::container::ts::Catalog = ()> {
 }
 
 impl<E: crate::container::ts::Catalog> Container<E> {
-	/// Create a new container importer, decoding [`Init::data`] as the initial chunk.
+	/// Create a new container importer, decoding [`ContainerInit::data`] as the initial chunk.
 	///
-	/// The format is matched before anything else, so a codec format still reports
-	/// [`UnknownFormat`](crate::Error::UnknownFormat) and a caller can fall back to
-	/// [`Track::new`](super::Track::new).
 	pub fn new(
 		broadcast: moq_net::broadcast::Producer,
 		reserved: crate::catalog::Reserved<E>,
@@ -150,7 +147,7 @@ pub struct ContainerStream<E: crate::container::ts::Catalog = ()> {
 }
 
 impl<E: crate::container::ts::Catalog> ContainerStream<E> {
-	/// Create a new container stream importer. [`Init::data`] is unused: the stream carries its own
+	/// Create a new container stream importer. [`ContainerInit::data`] is unused: the stream carries its own
 	/// framing.
 	pub fn new(
 		broadcast: moq_net::broadcast::Producer,

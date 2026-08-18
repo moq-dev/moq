@@ -24,7 +24,7 @@ async def test_server_client_roundtrip():
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         # Publish a broadcast on the server side.
         broadcast = server.create_broadcast("hello")
-        media = broadcast.publish_media("opus", opus_head())
+        media = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head())
 
         # Auto-accept incoming sessions in the background so the handshake
         # completes from the server side. Hold references so the sessions

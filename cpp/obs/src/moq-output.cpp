@@ -469,23 +469,23 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 
 	const char *codec = obs_encoder_get_codec(encoder);
 
-	// Transform codec string for MoQ
-	const char *moq_codec = codec;
+	// Map the OBS codec name onto a MoQ format. Both H.26x entries are the Annex-B framing
+	// with inline parameter sets, which is what OBS hands us.
+	moq_video_init config{};
 	if (strcmp(codec, "h264") == 0) {
-		// H.264 with inline SPS/PPS
-		moq_codec = "avc3";
+		config.format = MOQ_VIDEO_FORMAT_AVC3;
 	} else if (strcmp(codec, "hevc") == 0) {
-		// H.265 with inline VPS/SPS/PPS
-		moq_codec = "hev1";
+		config.format = MOQ_VIDEO_FORMAT_HEV1;
+	} else if (strcmp(codec, "av1") == 0) {
+		config.format = MOQ_VIDEO_FORMAT_AV01;
+	} else {
+		LOG_ERROR("Unsupported video codec: %s", codec);
+		return;
 	}
 
-	// Initialize the media import module with the codec and initialization data.
-	moq_media_config config{};
-	config.format = moq_codec;
-	config.format_len = strlen(moq_codec);
 	config.init = extra_data;
 	config.init_len = extra_size;
-	int handle = moq_publish_media(broadcast, &config);
+	int handle = moq_publish_video(broadcast, &config);
 	video_tracks[encoder] = handle;
 	if (handle < 0) {
 		LOG_ERROR("Failed to initialize video track: %d", handle);
@@ -524,12 +524,23 @@ void MoQOutput::AudioInit(obs_encoder_t *encoder)
 
 	const char *codec = obs_encoder_get_codec(encoder);
 
-	moq_media_config config{};
-	config.format = codec;
-	config.format_len = strlen(codec);
+	// The codec string used to go straight through, so an unsupported one failed deep in the
+	// importer. Mapping it here means OBS says which codec it was.
+	moq_audio_init config{};
+	if (strcmp(codec, "opus") == 0) {
+		config.format = MOQ_AUDIO_FORMAT_OPUS;
+	} else if (strcmp(codec, "aac") == 0) {
+		config.format = MOQ_AUDIO_FORMAT_AAC;
+	} else if (strcmp(codec, "flac") == 0) {
+		config.format = MOQ_AUDIO_FORMAT_FLAC;
+	} else {
+		LOG_ERROR("Unsupported audio codec: %s", codec);
+		return;
+	}
+
 	config.init = extra_data;
 	config.init_len = extra_size;
-	int handle = moq_publish_media(broadcast, &config);
+	int handle = moq_publish_audio(broadcast, &config);
 	audio_tracks[encoder] = handle;
 	if (handle < 0) {
 		LOG_ERROR("Failed to initialize audio track: %d", handle);

@@ -32,7 +32,7 @@ pub enum moq_container_kind {
 /// needs to describe itself.
 ///
 /// Zeroing this struct means `MOQ_CONTAINER_KIND_LEGACY` with no init segment,
-/// which is what a rendition written by [moq_publish_media] carries.
+/// which is what a rendition written by [moq_publish_audio] or [moq_publish_video] carries.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
@@ -1434,9 +1434,8 @@ pub unsafe extern "C" fn moq_publish_container(broadcast: u32, config: *const mo
 /// forwards without waiting, or at a segment cadence to align with video for HLS/DASH. Video
 /// groups at its own keyframes and needs this only to override that.
 ///
-/// For a container importer ([moq_publish_media] with a container format) this declares the start
-/// of a new segment, rolling a group on every track the container publishes. An fMP4 source
-/// carrying `styp` atoms declares its own segments, so this is only needed when it doesn't.
+/// A container has its own [moq_publish_container_cut], since it rolls a group on every track it
+/// publishes rather than ending one group.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -1595,7 +1594,7 @@ pub unsafe extern "C" fn moq_publish_video_properties(broadcast: u32, properties
 /// - `description` may be NULL to omit it.
 /// - `coded_width` / `coded_height` may be zero to omit them.
 /// - `container` describes how the frames written to the track are wrapped. A
-///   zeroed one declares the legacy container, which is what [moq_publish_media]
+///   zeroed one declares the legacy container, which is what [moq_publish_audio]
 ///   writes; declare CMAF or LOC for a [moq_publish_track] whose frames you
 ///   already encode that way.
 ///
@@ -1766,7 +1765,7 @@ pub unsafe extern "C" fn moq_publish_catalog_section_remove(
 
 /// Create a raw track on a broadcast for arbitrary byte payloads.
 ///
-/// Unlike [moq_publish_media], this is the bare moq-net primitive: no
+/// Unlike [moq_publish_audio] and [moq_publish_video], this is the bare moq-net primitive: no
 /// codec, container, or catalog framing. Frames written to it are delivered
 /// as-is to subscribers using [moq_consume_track]. Use it for non-media tracks
 /// (control channels, JSON metadata, etc.), or pair it with
