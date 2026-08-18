@@ -1,9 +1,13 @@
-//! [`kio::Tasks`] against `futures::stream::FuturesUnordered`, on the set
-//! machinery alone.
+//! [`kio::Tasks`] against `futures::stream::FuturesUnordered`.
 //!
 //! Both contestants drive the same hand-rolled [`Gate`] primitive with
-//! identical poll bodies, so the difference is pure bookkeeping: storage
-//! layout, the wake queue, and poll dispatch. Two scenarios:
+//! identical poll bodies, so what differs is each set's own machinery plus its
+//! API contract. The contracts are not identical, and the churn scenarios
+//! include that difference deliberately: `Tasks::poll` retires any number of
+//! tasks in one call, while `FuturesUnordered` is a `Stream` that must hand
+//! back every completion as an item (one `poll_next` call each), a per-item
+//! cost its real consumers pay too. The sparse-wake scenario is contract-free
+//! (nothing completes) and compares the wake/dispatch machinery alone.
 //!
 //! - `wake_16_of_1000`: steady state. 1000 parked tasks, each iteration fires
 //!   16 gates and polls the set once; the woken tasks consume the fire and
@@ -162,8 +166,9 @@ fn spawn_drain(c: &mut Criterion) {
 				set.push(std::future::ready(()));
 			}
 			let mut cx = Context::from_waker(waker);
-			// Drain to completion; the yield cap makes poll_next return Pending
-			// (with a self-wake) every 32 completions, so keep polling.
+			// Drain to completion. A Stream returns one completion per
+			// poll_next call, so this is N+1 calls; that per-item delivery is
+			// part of the FuturesUnordered contract (see the module doc).
 			while !matches!(set.poll_next_unpin(&mut cx), Poll::Ready(None)) {}
 			black_box(&set);
 		});
