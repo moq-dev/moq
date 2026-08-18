@@ -2642,12 +2642,14 @@ impl Request {
 
 			// Resolved while the state lock is still held, so this linearizes
 			// with the driver's teardown: either the teardown ran first and the
-			// closed check above returned, or this resolution lands first and
-			// the teardown finds the entry already gone. Releasing the lock
-			// before the write would let the teardown slip between the removal
-			// and the write, delivering `Ok` from an origin that already ended.
+			// closed check above returned, or this write lands first and the
+			// teardown finds the entry already gone. The state lock is released
+			// before the channel guard drops, so the requester wakes outside it:
+			// an inline executor re-entering `request_broadcast` from the wake
+			// must not find this non-reentrant lock still held.
 			if let Ok(mut pending) = self.producer.write() {
 				pending.resolved.get_or_insert(Ok(resolved));
+				drop(state);
 			}
 		}
 		// `self.producer` drops here, closing the channel; the value is still observable.
@@ -2663,10 +2665,10 @@ impl Request {
 		state
 			.requests
 			.remove_if(&self.path, |producer| producer.same_channel(&self.producer));
-		// Under the state lock, matching `accept`: the resolution linearizes
-		// with the driver's teardown.
+		// Written under the state lock, woken outside it, matching `accept`.
 		if let Ok(mut pending) = self.producer.write() {
 			pending.resolved.get_or_insert(Err(err));
+			drop(state);
 		}
 	}
 }
