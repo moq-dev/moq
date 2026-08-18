@@ -244,6 +244,12 @@ test("isAncestor tells an enclosing reference from a descending one", () => {
 	expect(Path.isAncestor("./sibling")).toBe(false);
 	expect(Path.isAncestor("../other/deep")).toBe(false);
 
+	// Loose input is normalized first, so this agrees with resolve and with Rust.
+	expect(Path.isAncestor("../")).toBe(true);
+	expect(Path.isAncestor("..//..")).toBe(true);
+	expect(Path.isAncestor("./.")).toBe(true);
+	expect(Path.isAncestor("/")).toBe(false);
+
 	// It answers exactly "is the target an ancestor of the base".
 	expect(Path.isAncestor(Path.relative(Path.from("a"), Path.from("a/b")) as string)).toBe(true);
 	expect(Path.isAncestor(Path.relative(Path.from("a/c"), Path.from("a/b")) as string)).toBe(false);

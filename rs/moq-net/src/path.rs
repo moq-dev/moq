@@ -1632,6 +1632,12 @@ mod tests {
 		assert!(!PathRelative::new("./sibling").is_ancestor());
 		assert!(!PathRelative::new("../other/deep").is_ancestor());
 
+		// Loose input is normalized on construction, so this agrees with resolve.
+		assert!(PathRelative::new("../").is_ancestor());
+		assert!(PathRelative::new("..//..").is_ancestor());
+		assert!(PathRelative::new("./.").is_ancestor());
+		assert!(!PathRelative::new("/").is_ancestor());
+
 		// It answers exactly "is the target an ancestor of the base", so a caller can gate on
 		// the reference instead of re-deriving the relationship from the two paths.
 		for (target, base) in [("a", "a/b"), ("a/b", "a/b/c/d"), ("", "a")] {

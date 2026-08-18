@@ -264,7 +264,8 @@ export function tryResolve(base: Valid, rel: string): Valid | undefined {
  * so it is not an ancestor. Resolution clamps at the root, so a reference with more `..` than
  * the base has segments still lands on the root.
  *
- * Mirrors the Rust `PathRelative::is_ancestor`.
+ * Mirrors the Rust `PathRelative::is_ancestor`. The reference is normalized first, since
+ * Rust normalizes on construction and {@link resolve} accepts the same loose input.
  *
  * @example
  * ```typescript
@@ -274,7 +275,8 @@ export function tryResolve(base: Valid, rel: string): Valid | undefined {
  * ```
  */
 export function isAncestor(rel: string): boolean {
-	return rel !== "" && rel.split("/").every((seg) => seg === "." || seg === "..");
+	const normalized = normalizeRelative(rel);
+	return normalized !== "" && normalized.split("/").every((seg) => seg === "." || seg === "..");
 }
 
 /**
