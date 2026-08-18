@@ -24,7 +24,15 @@ name = "uniffi-bindgen"
 path = "./uniffi-bindgen.rs"
 
 [features]
+# On by default so every existing consumer (the language wrappers, `build.sh`)
+# keeps the surface it has. Opt out with `default-features = false` to skip the
+# ~40 crates that only the codecs pull in, including openh264's vendored C++.
+# They are unavailable on wasm32 regardless: the browser encodes via WebCodecs.
+default = ["audio", "video"]
+
 android-logcat = ["moq-native/android-logcat"]
+audio = ["dep:moq-audio"]
+video = ["dep:moq-video", "dep:pollster"]
 
 [dependencies]
 bytes = "1"
@@ -43,14 +51,14 @@ tracing = "0.1"
 url = "2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-moq-audio = { workspace = true }
+moq-audio = { workspace = true, optional = true }
 moq-native = { workspace = true, default-features = true }
 # Default features only: the Linux hardware codecs stay off so the wrappers'
 # cross-compiled targets (Android, iOS) don't pull a CUDA graph.
-moq-video = { workspace = true }
+moq-video = { workspace = true, optional = true }
 # Blocking on `encode::Sink` from the synchronous producer exports; see
 # `video::block_on` for why not a tokio helper.
-pollster = "1.0"
+pollster = { version = "1.0", optional = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 uniffi = { version = "0.31", features = ["cli"] }
 
@@ -68,3 +76,7 @@ web-transport-wasm = "0.5"
 
 [build-dependencies]
 uniffi = { version = "0.31", features = ["build"] }
+
+[dev-dependencies]
+# One non-codec test blocks on a future; the main dep is `video`-only.
+pollster = "1.0"

@@ -15,12 +15,12 @@ pub enum MoqError {
 	#[error(transparent)]
 	JsonTrack(#[from] moq_json::Error),
 
-	// Native codec errors; the browser encodes and decodes through WebCodecs.
-	#[cfg(not(target_arch = "wasm32"))]
+	// Native codec errors, behind the optional `audio`/`video` features.
+	#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
 	#[error(transparent)]
 	Audio(#[from] moq_audio::Error),
 
-	#[cfg(not(target_arch = "wasm32"))]
+	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
 	#[error(transparent)]
 	Video(#[from] moq_video::Error),
 

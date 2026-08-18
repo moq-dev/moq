@@ -11,9 +11,10 @@
 
 #[cfg(target_os = "android")]
 mod android;
-// Native codecs, the QUIC server, and moq-native's logger have no browser
-// equivalent: the browser encodes through WebCodecs and logs through tracing-web.
-#[cfg(not(target_arch = "wasm32"))]
+// The QUIC server and moq-native's logger have no browser equivalent, and the
+// native codecs are both browser-inapplicable (WebCodecs does this) and optional,
+// since they are the heaviest thing in the dependency graph.
+#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
 pub mod audio;
 pub mod consumer;
 pub mod error;
@@ -29,7 +30,7 @@ pub mod server;
 pub mod session;
 #[cfg(target_arch = "wasm32")]
 mod transport;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
 pub mod video;
 
 uniffi::setup_scaffolding!("moq");
