@@ -82,6 +82,26 @@ pub struct Config {
 	pub log: moq_tokio::Log,
 }
 
+impl Config {
+	/// Parse the command line, folding the released `--client-*` spellings into the
+	/// canonical fields before anything can read them.
+	///
+	/// The only way in, rather than clap's own `parse`: the fold is invisible at the
+	/// use site, so a reader that skips it sees the canonical field still unset and
+	/// acts as if the flag were never passed. `--client-connect` would warn by name
+	/// and then bail as though no relay had been named.
+	fn parse_argv<I, T>(argv: I) -> Result<Self, clap::Error>
+	where
+		I: IntoIterator<Item = T>,
+		T: Into<std::ffi::OsString> + Clone,
+	{
+		let mut config = Self::try_parse_from(argv)?;
+		config.client = config.client.resolved();
+		config.quic = config.quic.resolved();
+		Ok(config)
+	}
+}
+
 /// Shared state for a game session, accessible from multiple threads/tasks.
 ///
 /// Everything here is either atomic, behind a mutex, or immutable —
@@ -446,7 +466,7 @@ fn run_emulator(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-	let config = Config::parse();
+	let config = Config::parse_argv(std::env::args_os()).unwrap_or_else(|err| err.exit());
 	config.log.init()?;
 
 	#[cfg(feature = "jemalloc")]
@@ -477,15 +497,13 @@ async fn main() -> Result<()> {
 mod tests {
 	use super::*;
 
-	/// `--connect` is the only way to reach the relay: it must parse without
-	/// a connect flag of our own alongside it, and the URL must land where `run`
-	/// reads it. A second required flag would leave `--connect` inert.
-	///
-	/// The argv is a copy of `demo/boy/justfile`, not a read of it, so this pins the
-	/// binary's flag surface rather than the two staying in sync.
+	/// `--connect` is the only way to reach the relay, so its released
+	/// `--client-connect` spelling has to land where `run` reads it. Folding only
+	/// where a check happens to look leaves the flag warning by its replacement's
+	/// name and then bailing as though no relay had been named.
 	#[test]
-	fn matches_demo_invocation() {
-		let config = Config::try_parse_from([
+	fn released_connect_spelling_reaches_the_dial() {
+		let config = Config::parse_argv([
 			"moq-boy",
 			"--client-connect",
 			"http://localhost:4443",
@@ -496,11 +514,9 @@ mod tests {
 		])
 		.expect("demo/boy/justfile invocation should parse");
 
-		let connect = config
-			.client
-			.resolved()
-			.url
-			.expect("the connect URL should reach the dial config");
+		// The raw field, which is what `run` dials from: a fold applied only here
+		// would leave the released spelling warning by name and then bailing.
+		let connect = config.client.url.expect("the connect URL should reach the dial config");
 		assert_eq!(connect.scheme(), "http");
 		assert_eq!(connect.host_str(), Some("localhost"));
 		assert_eq!(connect.port(), Some(4443));
