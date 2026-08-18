@@ -2264,7 +2264,7 @@ mod tests {
 	/// relay signals that it started carrying the namespace), so the source and every
 	/// live subscription on it must survive. Reading the repeat as a new publisher
 	/// detached the source milliseconds after SUBSCRIBE went out.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn anonymous_publisher_survives_a_repricing_update() {
 		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
 		let consumer = origin.consume();
@@ -2321,7 +2321,7 @@ mod tests {
 	/// Two *separate* advertisements have nothing linking them but the publisher, and
 	/// `Origin::UNKNOWN` links nothing: any number of unrelated publishers present it.
 	/// So the later one replaces the earlier, unlike the repeat above.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn separate_anonymous_adverts_replace_the_source() {
 		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
 		let consumer = origin.consume();
