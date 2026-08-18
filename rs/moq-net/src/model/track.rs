@@ -394,7 +394,7 @@ impl TrackState {
 			// The drift budget bounds this the same as the group-level reads: a frame
 			// from a group the subscription has given up on is no fresher for being
 			// read one frame at a time.
-			if self.is_stale(*sequence, drift.edge, drift.budget) {
+			if self.is_stale(*sequence, None, drift.edge, drift.budget) {
 				stale.add(slot.group.content());
 				continue;
 			}
@@ -585,13 +585,20 @@ impl TrackState {
 	/// The edge must sit strictly above the candidate. The live edge is never late
 	/// against itself, and backfill or the tail of a rewound timeline can carry a high
 	/// timestamp on a low sequence without being an edge at all.
-	fn is_stale(&self, sequence: u64, edge: Option<Edge>, budget: Duration) -> bool {
+	fn is_stale(&self, sequence: u64, at: Option<group::Position>, edge: Option<Edge>, budget: Duration) -> bool {
 		let Some(edge) = edge else {
 			return false;
 		};
 		let Some(slot) = self.lookup.get(&sequence) else {
 			return false;
 		};
+
+		// Where the candidate sits. A group nobody has started reading sits at its own
+		// start; one already handed out sits wherever its reader got to, so a reader
+		// that has kept up is not convicted by how long ago its group opened.
+		let at = at.unwrap_or_default();
+		let presentation = at.presentation.or_else(|| slot.group.timestamp());
+		let arrived = at.activity.unwrap_or(slot.arrived);
 
 		// The anchors were resolved under an earlier lock, so confirm each still names
 		// the same servable incarnation before it convicts a candidate. Failing safe
@@ -605,7 +612,7 @@ impl TrackState {
 				|| edge
 					.wall
 					.arrived
-					.checked_duration_since(slot.arrived)
+					.checked_duration_since(arrived)
 					.is_some_and(|age| age > budget));
 
 		let presentation_stale = edge.presentation.is_some_and(|edge| {
@@ -614,7 +621,7 @@ impl TrackState {
 					.lookup
 					.get(&edge.sequence)
 					.is_some_and(|live| live.stamp == edge.stamp && !live.group.is_aborted())
-				&& slot.group.timestamp().is_some_and(
+				&& presentation.is_some_and(
 					|timestamp| matches!(edge.timestamp.checked_sub(timestamp), Ok(age) if Duration::from(age) > budget),
 				)
 		});
@@ -2643,7 +2650,7 @@ struct GroupExpiry {
 }
 
 impl group::Expiry for GroupExpiry {
-	fn is_expired(&self, waiter: &kio::Waiter) -> bool {
+	fn is_expired(&self, waiter: &kio::Waiter, at: group::Position) -> bool {
 		let mut latency = Latency::default();
 		let _ = self.subscription.poll(waiter, |subscription| {
 			latency = subscription.latency;
@@ -2662,7 +2669,7 @@ impl group::Expiry for GroupExpiry {
 			let budget = clamp_latency(latency, state.latency_bound()).max;
 			loop {
 				let edge = state.live_edge(cap);
-				expired = state.is_stale(self.sequence, edge, budget);
+				expired = state.is_stale(self.sequence, Some(at), edge, budget);
 				if expired {
 					break;
 				}
@@ -2834,7 +2841,7 @@ impl PlainSubscriber {
 	/// for this poll.
 	fn poll_stale(&self, group: &group::Consumer, drift: Drift, waiter: &kio::Waiter) -> Poll<Result<bool>> {
 		self.poll(waiter, move |state| {
-			Poll::Ready(Ok(state.is_stale(group.sequence, drift.edge, drift.budget)))
+			Poll::Ready(Ok(state.is_stale(group.sequence, None, drift.edge, drift.budget)))
 		})
 	}
 
@@ -4183,8 +4190,12 @@ mod test {
 		tokio::time::advance(Duration::from_secs(1)).await;
 		append_at(&mut producer, 1000);
 
+		// It ends rather than fails: the reader took every frame the group ever had
+		// (none), so nothing was truncated. What it was waiting for was the producer,
+		// and a group abandoned where its reader stands looks exactly like one that
+		// ended there.
 		let result = pending.await.unwrap();
-		assert!(matches!(result, Err(Error::Old)), "the held group expires: {result:?}");
+		assert!(matches!(result, Ok(None)), "the held group ends: {result:?}");
 	}
 
 	#[tokio::test]
@@ -4211,8 +4222,137 @@ mod test {
 		tokio::task::yield_now().await;
 
 		assert!(pending.is_finished(), "the new presentation edge wakes the held reader");
+		// Drained, so the budget ends the group rather than truncating it.
 		let result = pending.await.unwrap();
-		assert!(matches!(result, Err(Error::Old)), "the held group expires: {result:?}");
+		assert!(matches!(result, Ok(None)), "the held group ends: {result:?}");
+	}
+
+	/// The ordinary live case, at the default real-time budget: 2s GOPs produced one at
+	/// a time and read as they arrive. The budget must take the live edge without
+	/// shortening the group the reader is already on, so every frame of every group is
+	/// delivered and each group *ends* rather than fails at its boundary.
+	///
+	/// Two things would break this. Measuring drift from a group's first frame rather
+	/// than its reader's position convicts every group the moment its successor opens,
+	/// since a live reader is always a little behind the edge. And the reader is parked
+	/// at its group's end when that happens, because the FIN and the next group's first
+	/// frame are separate events and the wire does not order them.
+	#[tokio::test]
+	async fn real_time_reads_a_live_stream_without_truncating_it() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(None);
+
+		let gop = |n: u64| {
+			[
+				Timestamp::from_millis(n * 2000).unwrap(),
+				Timestamp::from_millis(n * 2000 + 1900).unwrap(),
+			]
+		};
+		let write = |group: &mut group::Producer, timestamp| {
+			group.write_frame(timestamp, bytes::Bytes::from_static(b"x")).unwrap();
+		};
+
+		let mut open = producer.append_group().unwrap();
+		write(&mut open, gop(0)[0]);
+		write(&mut open, gop(0)[1]);
+		let mut reading = subscriber.recv_group().await.unwrap().expect("the live group");
+
+		let mut read = Vec::new();
+		for n in 1..5u64 {
+			let sequence = reading.sequence;
+			let mut frames = 0;
+			while let Some(res) = reading.read_frame().now_or_never() {
+				match res.expect("no truncation while draining") {
+					Some(_) => frames += 1,
+					None => panic!("group {sequence} ended early"),
+				}
+			}
+			read.push((sequence, frames));
+
+			let next = {
+				// Parked at the end of the current group: every frame is read and no FIN
+				// has landed.
+				let mut end = std::pin::pin!(reading.read_frame());
+				assert!(futures::poll!(end.as_mut()).is_pending(), "parked on the FIN");
+
+				// The next keyframe opens its group. The verdict is taken here, in the
+				// window before the previous group's FIN arrives.
+				let mut opened = producer.append_group().unwrap();
+				write(&mut opened, gop(n)[0]);
+				let verdict = futures::poll!(end.as_mut());
+
+				open.finish().unwrap();
+				let res = match verdict {
+					Poll::Ready(res) => res,
+					Poll::Pending => end.await,
+				};
+				assert!(
+					matches!(res, Ok(None)),
+					"group {sequence} ends at the boundary rather than failing: {res:?}"
+				);
+				opened
+			};
+			let mut next = next;
+			write(&mut next, gop(n)[1]);
+
+			reading = subscriber.recv_group().await.unwrap().expect("the next live group");
+			open = next;
+		}
+
+		assert_eq!(read, vec![(0, 2), (1, 2), (2, 2), (3, 2)], "every frame of every group");
+	}
+
+	/// A budget is spent from where the reader stands, not from where its group opened.
+	///
+	/// A 2s GOP with a 1s budget: the reader has drained to 1900ms when the next group
+	/// opens at 2000ms, so it is 100ms behind the live edge and well inside what it
+	/// asked for. A straggling frame of the old group arriving after the new one opened
+	/// (which is ordinary, the two are separate streams) must still reach it.
+	///
+	/// Measuring from the group's first frame instead makes the drift 2000ms, so a
+	/// budget shorter than one GOP would drop the tail of every GOP.
+	#[tokio::test]
+	async fn a_budget_is_measured_from_the_readers_position() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_secs(1))));
+
+		let mut open = producer.append_group().unwrap();
+		open.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"key"))
+			.unwrap();
+		open.write_frame(
+			Timestamp::from_millis(1900).unwrap(),
+			bytes::Bytes::from_static(b"tail"),
+		)
+		.unwrap();
+
+		let mut reading = subscriber.recv_group().await.unwrap().expect("the live group");
+		assert!(reading.read_frame().await.unwrap().is_some());
+		assert!(reading.read_frame().await.unwrap().is_some());
+
+		let mut end = std::pin::pin!(reading.read_frame());
+		assert!(futures::poll!(end.as_mut()).is_pending(), "parked at 1900ms");
+
+		// The next GOP opens. The reader is 100ms behind it, inside its 1s budget.
+		let mut next = producer.append_group().unwrap();
+		next.write_frame(Timestamp::from_millis(2000).unwrap(), bytes::Bytes::from_static(b"key"))
+			.unwrap();
+		assert!(
+			futures::poll!(end.as_mut()).is_pending(),
+			"a reader inside its budget is not expired by the next group opening"
+		);
+
+		// A straggler from the old group, still within the budget.
+		open.write_frame(
+			Timestamp::from_millis(1950).unwrap(),
+			bytes::Bytes::from_static(b"late"),
+		)
+		.unwrap();
+		let late = end.await.expect("the straggler is not truncated");
+		assert_eq!(
+			late.map(|frame| frame.timestamp),
+			Some(Timestamp::from_millis(1950).unwrap())
+		);
 	}
 
 	#[tokio::test]
@@ -4445,7 +4585,10 @@ mod test {
 			budget: Duration::ZERO,
 			edge: state.live_edge(None),
 		};
-		assert!(state.is_stale(0, drift.edge, drift.budget), "stale against a live edge");
+		assert!(
+			state.is_stale(0, None, drift.edge, drift.budget),
+			"stale against a live edge"
+		);
 		drop(state);
 
 		// The edge dies between resolving it and judging the candidate.
@@ -4454,7 +4597,7 @@ mod test {
 
 		let state = producer.state.read();
 		assert!(
-			!state.is_stale(0, drift.edge, drift.budget),
+			!state.is_stale(0, None, drift.edge, drift.budget),
 			"a vanished edge is no reason to drop what is left"
 		);
 	}
