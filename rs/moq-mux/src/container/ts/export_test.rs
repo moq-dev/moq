@@ -648,9 +648,13 @@ async fn export_scte35_roundtrip() {
 	assert_eq!(verbatim, 1, "round-trip lost the SCTE-35 track");
 	let name = scte_track(&snapshot).expect("a scte35 track");
 
-	let track = consumer2.track(&name).unwrap().subscribe(None).await.unwrap();
-	let mut scte_reader = crate::container::Consumer::new(track, HangContainer::Legacy)
-		.with_test_latency(crate::Latency::max(RECORDING_LATENCY));
+	let track = consumer2
+		.track(&name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.await
+		.unwrap();
+	let mut scte_reader = crate::container::Consumer::new(track, HangContainer::Legacy);
 	let frame = scte_reader
 		.read()
 		.await
@@ -744,9 +748,13 @@ async fn export_pes_verbatim_roundtrip() {
 	assert_eq!(verbatim.stream_id, Some(STREAM_ID), "PES stream_id preserved");
 	let name = name.clone();
 
-	let track = consumer2.track(&name).unwrap().subscribe(None).await.unwrap();
-	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy)
-		.with_test_latency(crate::Latency::max(RECORDING_LATENCY));
+	let track = consumer2
+		.track(&name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.await
+		.unwrap();
+	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
 	let frame = reader
 		.read()
 		.await
@@ -813,9 +821,13 @@ async fn scte35_without_video_export_is_rejected() {
 
 /// Subscribe to a track and read every retained frame payload it holds.
 async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<Vec<u8>> {
-	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
-	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy)
-		.with_test_latency(crate::Latency::max(RECORDING_LATENCY));
+	let track = consumer
+		.track(name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.await
+		.unwrap();
+	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
 	let mut frames = Vec::new();
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		let Some(frame) = res.unwrap() else { break };
@@ -1130,9 +1142,13 @@ fn scte_track(snap: &crate::catalog::hang::Catalog<tscat::Ext>) -> Option<String
 
 /// Subscribe to a cue track and read every retained `splice_info_section` it holds.
 async fn read_cues(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(Vec<u8>, Timestamp)> {
-	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
-	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy)
-		.with_test_latency(crate::Latency::max(RECORDING_LATENCY));
+	let track = consumer
+		.track(name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.await
+		.unwrap();
+	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
 	let mut cues = Vec::new();
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		let Some(frame) = res.unwrap() else { break };

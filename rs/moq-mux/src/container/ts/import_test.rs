@@ -150,9 +150,13 @@ async fn import_opus_frames() {
 		.expect("an Opus track")
 		.clone();
 
-	let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
-	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy)
-		.with_test_latency(crate::Latency::max(RECORDING_LATENCY));
+	let track = consumer
+		.track(&name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.await
+		.unwrap();
+	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
 	let mut frames = Vec::new();
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		let Some(frame) = res.unwrap() else { break };
@@ -346,9 +350,13 @@ async fn survives_midstream_join() {
 
 	// The track resumes at the keyframe: the leading delta was dropped, the IDR
 	// anchors the one and only group.
-	let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
-	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy)
-		.with_test_latency(crate::Latency::max(RECORDING_LATENCY));
+	let track = consumer
+		.track(&name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.await
+		.unwrap();
+	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
 	let mut frames = Vec::new();
 	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		frames.push(frame);
@@ -391,9 +399,13 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 		.find(|(_, t)| t.verbatim.as_ref().is_some_and(|v| v.stream_type == 0x86))
 		.map(|(name, _)| name.clone())
 		.expect("scte35 track");
-	let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
-	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy)
-		.with_test_latency(crate::Latency::max(RECORDING_LATENCY));
+	let track = consumer
+		.track(&name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.await
+		.unwrap();
+	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
 	let mut cues = Vec::new();
 	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 		cues.push((frame.payload.to_vec(), frame.timestamp));
