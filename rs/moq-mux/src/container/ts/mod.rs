@@ -9,21 +9,26 @@
 //! Elementary streams we don't decode (SCTE-35, teletext, DVB subtitles, private
 //! data, ...) are carried verbatim, one MoQ track per PID, described in the
 //! [`Mpegts`] catalog section. SCTE-35 is just one such stream (`stream_type` 0x86).
-//! The service layer rides the same section: the transport/service identity as a
-//! [`Program`] record, and the standalone SI tables (SDT, NIT, ...) as opaque [`Si`]
-//! sections re-emitted on their original PIDs, so the service name, provider, and
-//! network survive the round-trip without anything parsing them.
+//! The service layer rides alongside: the transport/service identity as a
+//! [`Program`] record, and the standalone SI tables (SDT, NIT, EIT, ...) as opaque
+//! sections on per-`(PID, table_id)` snapshot tracks mapped by [`SiEntry`] and
+//! re-emitted on their original PIDs, so the service name, provider, network, and
+//! EPG survive the round-trip without anything parsing them. Each SI track group is
+//! a complete snapshot (one frame per sub-table, sections concatenated verbatim);
+//! frames apply in order with later-wins by sub-table identity, and a joiner reads
+//! only the newest group.
 
 mod adts;
 mod export;
 mod import;
+mod si;
 
 // The `mpegts` catalog section (per-track PID + descriptors plus verbatim carriage
 // of undecoded elementary streams) and the `Catalog` capability, re-exported flat so
 // they read as `ts::Catalog`, `ts::Mpegts`, ... instead of stuttering under `catalog`.
 mod catalog;
 
-pub use catalog::{Catalog, Descriptor, Ext, Framing, Mpegts, Program, Si, Track, Verbatim};
+pub use catalog::{Catalog, Descriptor, Ext, Framing, Mpegts, Program, SiEntry, Track, Verbatim};
 pub use export::*;
 pub use import::*;
 

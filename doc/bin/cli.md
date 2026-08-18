@@ -637,13 +637,17 @@ cues, teletext, DVB subtitles, ...) are carried verbatim too, one MoQ track per
 PID, described in the catalog `mpegts` section, and survive `import ts` /
 `export ts` end-to-end.
 
-The service layer rides the same `mpegts` section. The program identity
-(transport stream ID, service number, PMT PID) is captured from the PAT and used to
-rebuild a matching PAT/PMT, while the standalone SI tables (SDT, NIT) are carried as
-opaque sections and re-emitted byte-for-byte on their original PIDs, each at its own
-repetition interval. So the service name, provider, type, and network survive the
-round-trip without being parsed. Regenerated tables (TDT/TOT) and EPG (EIT) are not
-captured: they are live or bulky rather than static identity.
+The service layer survives too. The program identity (transport stream ID,
+service number, PMT PID) is captured from the PAT into the catalog `mpegts`
+section and used to rebuild a matching PAT/PMT. The standalone SI tables (SDT,
+NIT, BAT, EIT now/next and schedule, and any table the CLI does not recognize)
+are carried as opaque sections on dedicated snapshot tracks, one per PID and
+table, and re-emitted byte-for-byte on their original PIDs, each at its own
+repetition interval. So the service name, provider, type, network, and EPG
+survive the round-trip without being parsed, and only TS exporters pay for
+them. TDT/TOT is the one exception: it is a clock rather than state, so the
+exporter's own clock beats a time relayed from an upstream multiplexer of
+unknown delay.
 
 ### FLV
 

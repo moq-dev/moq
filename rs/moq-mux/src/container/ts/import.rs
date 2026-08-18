@@ -9,11 +9,12 @@
 //! other private sections, which are not PES) are intercepted before the mpeg2ts
 //! reader and reassembled. TS adds PAT/PMT discovery, PES reassembly, the
 //! private-section path, and the 90 kHz -> microsecond PTS conversion. The service
-//! layer is captured into the `mpegts` catalog too: the identity parsed from the PAT
-//! as a [`Program`](catalog::Program) record, and the standalone SI PIDs as opaque
-//! [`Si`](catalog::Si) sections, so both survive the round-trip.
+//! layer is captured too: the identity parsed from the PAT as a
+//! [`Program`](catalog::Program) record in the `mpegts` catalog section, and the
+//! standalone SI PIDs as opaque sections on per-`(PID, table_id)` snapshot tracks
+//! (see [`si`](super::si)), so both survive the round-trip.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
@@ -106,10 +107,9 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// Intercepted before the reader (like SCTE-35 sections) so the service layer
 	/// survives the round-trip. Only populated with `mpegts` catalog support.
 	si_sections: HashMap<u16, SectionReassembler>,
-	/// The SI sections currently published, keyed by PID. Kept alongside the catalog
-	/// so a repetition can be recognized without taking the catalog's write lock,
-	/// which would mark it modified and republish it every couple of seconds.
-	si: BTreeMap<u16, catalog::Si>,
+	/// The SI store: buffers each sub-table to a complete generation, publishes the
+	/// per-`(PID, table_id)` snapshot tracks, and advertises them in the catalog.
+	si: super::si::Capture<E>,
 	/// Whether the service identity (TSID/service_id/PMT PID) has been captured from
 	/// the PAT into the catalog service record yet (set once; the PAT is stable).
 	identity_recorded: bool,
@@ -131,6 +131,7 @@ impl<E: catalog::Catalog> Import<E> {
 		// may carry the section by value, and a snapshot clones under the mutex (no publish).
 		let mut snapshot = catalog.snapshot();
 		let supports_mpegts = snapshot.mpegts_mut().is_some();
+		let si = super::si::Capture::new(broadcast.clone(), catalog.clone());
 		Self {
 			broadcast,
 			catalog,
@@ -151,7 +152,7 @@ impl<E: catalog::Catalog> Import<E> {
 			recorded_media: HashSet::new(),
 			program_recorded: false,
 			si_sections: HashMap::new(),
-			si: BTreeMap::new(),
+			si,
 			identity_recorded: false,
 			last_pts: None,
 			media_unwrap: PtsUnwrap::default(),
@@ -218,8 +219,8 @@ impl<E: catalog::Catalog> Import<E> {
 			// Intercept the standalone SI PIDs before the routing gate below drops them:
 			// they carry the service layer, not media, and are not fed to the reader
 			// (which only routes the PAT/PMT/ES PIDs it learns).
-			if self.supports_mpegts && catalog::SI_PIDS.iter().any(|(p, _)| *p == pid) {
-				self.si_section(pid, &pkt);
+			if self.supports_mpegts && catalog::SI_PIDS.contains(&pid) {
+				self.si_section(pid, &pkt)?;
 				continue;
 			}
 			// An elementary stream's PES is as vulnerable to a break as a section is. A
@@ -290,6 +291,10 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 
 		self.scratch.drain(..off);
+		// Cut the snapshot groups for whatever SI committed in this batch. Batching per
+		// decode call (plus the store's own media-clock debounce) coalesces a junction's
+		// burst of sub-table commits into few groups instead of one per commit.
+		self.si.flush(self.last_pts.unwrap_or(Timestamp::ZERO), false)?;
 		Ok(())
 	}
 
@@ -652,43 +657,22 @@ impl<E: catalog::Catalog> Import<E> {
 		self.identity_recorded = true;
 	}
 
-	/// Feed one TS packet on a standalone SI PID to its reassembler, recording each
-	/// completed section verbatim into that PID's catalog entry.
+	/// Feed one TS packet on a standalone SI PID to its reassembler, folding each
+	/// completed section into the SI store.
 	///
 	/// Every section is captured, whatever its `table_id`: the SDT PID also carries
-	/// the BAT, an SDT can describe several services across several sections, and a
-	/// table we don't recognize is exactly as worth preserving as one we do. The
-	/// catalog holds a *set* per PID, so these coexist instead of overwriting each
-	/// other, and a plain repetition (SI repeats every couple of seconds) leaves the
-	/// set untouched rather than republishing the catalog.
-	fn si_section(&mut self, pid: u16, pkt: &[u8]) {
+	/// the BAT, the EIT PID carries now/next and the schedule, and a table we don't
+	/// recognize is exactly as worth preserving as one we do. The store buffers each
+	/// sub-table to a complete generation and commits it atomically, so a plain
+	/// repetition (SI repeats every couple of seconds) publishes nothing and a torn
+	/// multi-section transition is never visible.
+	fn si_section(&mut self, pid: u16, pkt: &[u8]) -> anyhow::Result<()> {
 		let mut sections = Vec::new();
 		self.si_sections.entry(pid).or_default().push(pkt, &mut sections);
-		if sections.is_empty() {
-			return;
+		for section in sections {
+			self.si.section(pid, section)?;
 		}
-
-		// Apply to the local copy first and bail on a repetition. Taking the catalog's
-		// write lock marks it modified even when the value is unchanged, so doing this
-		// the other way round would republish the catalog on every SI cycle.
-		let updated = {
-			let si = self.si.entry(pid).or_insert_with(|| catalog::Si {
-				interval: catalog::SI_PIDS.iter().find(|(p, _)| *p == pid).map(|(_, i)| *i),
-				..Default::default()
-			});
-			let mut changed = false;
-			for section in sections {
-				changed |= si.upsert(bytes::Bytes::from(section));
-			}
-			changed.then(|| si.clone())
-		};
-		let Some(updated) = updated else {
-			return;
-		};
-
-		if let Some(mpegts) = self.catalog.lock().mpegts_mut() {
-			mpegts.si.insert(pid, updated);
-		}
+		Ok(())
 	}
 
 	/// Close the current group on every track and reopen at `sequence`.
@@ -714,6 +698,7 @@ impl<E: catalog::Catalog> Import<E> {
 		for section in self.sections.values_mut() {
 			section.finish()?;
 		}
+		self.si.finish(self.last_pts.unwrap_or(Timestamp::ZERO))?;
 		Ok(())
 	}
 
@@ -727,6 +712,11 @@ impl<E: catalog::Catalog> Import<E> {
 		for section in std::mem::take(&mut self.sections).into_values() {
 			section.abort(err.clone());
 		}
+		let si = std::mem::replace(
+			&mut self.si,
+			super::si::Capture::new(self.broadcast.clone(), self.catalog.clone()),
+		);
+		si.abort(err);
 	}
 }
 

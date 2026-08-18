@@ -532,6 +532,55 @@ The final segment of an ended broadcast has no closing boundary; its `duration` 
 A publisher SHOULD carry the end of the last group's content into that value, since a publisher that knows only where each group *started* would report a duration one group short, and zero for a final segment that is a single group.
 
 
+# MPEG-TS Service Information {#mpegts-si}
+A broadcast imported from an MPEG-TS multiplex can carry the multiplex's standalone service-information tables (ISO/IEC 13818-1 program-specific information and ETSI EN 300 468 DVB SI: SDT, NIT, BAT, EIT, and any table the publisher does not recognize) so an exporter can re-emit them byte-for-byte.
+The sections are opaque: nothing in this mechanism parses a table, so an unrecognized table round-trips exactly like a known one.
+
+The tables are state, not events: a transport stream retransmits them continuously only because a TS receiver can tune in at any moment, so the repetition rate is a property of the unreliable transport, not of the data.
+Here each table rides a dedicated snapshot track, delivered once at join and republished on change, per the root catalog's guidance that dynamic content is delegated to other tracks.
+Consumers that are not TS exporters never pay for it.
+
+## Catalog Section {#mpegts-si-catalog}
+The catalog's `mpegts` section maps each carried table to its track under an `si` field, keyed by the PID the sections ride on and then by `table_id`:
+
+~~~
+type Mpegts = {
+  // ... other MPEG-TS carriage fields ...
+  "si": { [pid: string]: { [tableId: string]: SiEntry } } | undefined,
+}
+
+type SiEntry = {
+  "track": string,
+  "interval": number | undefined,
+}
+~~~
+
+Both keys are written in decimal, since JSON object keys are strings.
+`table_id` is byte 0 of generic section syntax, so the key is no less generic than the PID; which table_id ranges mean what is a DVB convention that appears nowhere in the schema.
+
+* `track`: the name of the snapshot track carrying this table's sections, on the same broadcast as the catalog.
+* `interval`: how often an exporter MUST re-emit the sections at most, in milliseconds. A hint carrying the table's own repetition requirement (for DVB, the ETSI TS 101 211 maxima). When absent, an exporter SHOULD fall back to a fast cadence of its own choosing, so an unknown table degrades to a safe rate rather than being dropped.
+
+Entries are added when a table is first observed, which is acquisition-time traffic; steady-state table revisions touch only the named track, never the catalog.
+
+## Track Format {#mpegts-si-track}
+An SI track is binary, without the media container framing ({{container}}).
+
+Each frame is one sub-table: its complete current sections, concatenated verbatim in `section_number` order, each including its header and CRC.
+Sections are self-delimiting via `section_length`, so the frame needs no framing of its own.
+A sub-table's identity is its generic section header (`table_id`, `table_id_extension`) extended by the documented disambiguators for two DVB table families: `original_network_id` (bytes 8..10) for SDT other (`table_id` 0x46), and `transport_stream_id` plus `original_network_id` (bytes 8..12) for EIT (0x4E..0x6F), whose generic identities are only unique within one network or transport stream.
+
+Each group is a snapshot: reading its frames in order yields the table's complete current state, where a later frame replaces an earlier one with the same sub-table identity.
+A joiner reads only the newest group and is current; older groups never need to be fetched.
+A writer MAY append a frame to an open group to revise one sub-table incrementally; a writer that only ever cuts complete groups is trivially conformant.
+
+A publisher MUST NOT publish a partially-acquired sub-table: sections of one version are buffered until the generation is complete and committed atomically.
+A torn set (sections disagreeing about their version, or a section set that a receiver cannot complete) is not something a conformant multiplexer emits, and the group boundary makes it unrepresentable here.
+A publisher SHOULD carry only sections whose `current_next_indicator` is set.
+
+Tables that are clocks rather than state (TDT/TOT, PID 0x0014) SHOULD NOT be carried: every section is new content, and an exporter's own clock is a better source than a time relayed from an upstream multiplexer of unknown delay.
+
+
 # Security Considerations
 A rendition's `broadcast` reference ({{field-broadcast}}) resolves against the consumer's root, which is the subtree it is authorized for.
 Clamping a reference that escapes above that root would silently redirect the subscription to an unrelated broadcast, so a consumer rejects the catalog instead.
