@@ -3932,33 +3932,43 @@ mod tests {
 		settle().await;
 		let mut sub = subscribing.await.unwrap();
 
+		// A frame whose payload is still in flight: the readers drain what has landed
+		// and then park on the rest, which is the stall the drift budget bounds. A
+		// group whose frames are all in hand is drained instead, so it would never
+		// reach expiry here.
 		let mut group = producer.append_group().unwrap();
-		for payload in [b"aa", b"bb", b"cc"] {
-			group.write_frame(Timestamp::ZERO, Bytes::from_static(payload)).unwrap();
-		}
-		group.finish().unwrap();
+		let mut writing = group
+			.create_frame(crate::frame::Info {
+				timestamp: Timestamp::ZERO,
+				size: 4,
+			})
+			.unwrap();
+		writing.write(Bytes::from_static(b"aa")).unwrap();
 
 		let mut reading = sub.recv_group().await.unwrap().expect("first group");
-		let mut first = reading.next_frame().await.unwrap().expect("first frame");
-		assert_eq!(first.read_all().await.unwrap(), Bytes::from_static(b"aa"));
 		let mut clone = reading.clone();
+		let mut first = reading.next_frame().await.unwrap().expect("first frame");
+		let mut second = clone.next_frame().await.unwrap().expect("cloned frame");
+		assert_eq!(first.read_chunk().await.unwrap(), Some(Bytes::from_static(b"aa")));
+		assert_eq!(second.read_chunk().await.unwrap(), Some(Bytes::from_static(b"aa")));
 
 		let mut edge = producer.append_group().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), Bytes::from_static(b"edge"))
 			.unwrap();
 		edge.finish().unwrap();
 
-		assert!(matches!(reading.next_frame().await, Err(crate::Error::Old)));
-		assert!(matches!(clone.next_frame().await, Err(crate::Error::Old)));
+		assert!(matches!(first.read_chunk().await, Err(crate::Error::Old)));
+		assert!(matches!(second.read_chunk().await, Err(crate::Error::Old)));
 
 		let report = registry.report();
 		let entry = report.traffic.iter().find(|e| e.path.as_str() == "demo").unwrap();
 		assert_eq!(entry.publisher.groups, 1, "the handed-out group was delivered");
-		assert_eq!(entry.publisher.frames, 1, "the returned frame was delivered");
-		assert_eq!(entry.publisher.bytes, 2, "the returned payload was delivered");
 		assert_eq!(entry.publisher.stale.groups, 0, "the group is not counted twice");
-		assert_eq!(entry.publisher.stale.frames, 2, "only the unread frames are stale");
-		assert_eq!(entry.publisher.stale.bytes, 4, "only the unread payload is stale");
+		assert_eq!(entry.publisher.stale.frames, 0, "no whole frame went unread");
+		assert_eq!(
+			entry.publisher.stale.bytes, 2,
+			"the undelivered half of the payload is stale, counted by one reader only"
+		);
 	}
 
 	/// `Subscriber::read_frame` collapses a group to its first frame. The paths it

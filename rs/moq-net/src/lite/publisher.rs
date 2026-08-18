@@ -2966,12 +2966,6 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					}
 
 					let outcome = 'serve: {
-						// Keep the group guard live while the transport owns buffered data,
-						// including a final frame already removed from the group cursor.
-						let pending = writer.has_pending() || frame.is_some() || chunk.is_some();
-						if self.group.poll_expired_while_pending(waiter, pending) {
-							break 'serve Err(Error::Old);
-						}
 						// The peer closing first cancels the group.
 						if writer.poll_closed(&mut cx).is_ready() {
 							break 'serve Err(Error::Cancel);
@@ -2980,7 +2974,16 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 							match writer.poll_flush(&mut cx) {
 								Poll::Ready(Ok(())) => {}
 								Poll::Ready(Err(err)) => break 'serve Err(err),
-								Poll::Pending => return Poll::Pending,
+								// Parking on the transport is the one stall the group cursor cannot
+								// see, and the only place a served group applies the drift budget:
+								// flow control must not pin a stream that has gone stale. `true`
+								// because the transport still owns bytes the cursor has released.
+								Poll::Pending => {
+									if self.group.poll_expired_while_pending(waiter, true) {
+										break 'serve Err(Error::Old);
+									}
+									return Poll::Pending;
+								}
 							}
 							if let Some(pending) = chunk {
 								match writer.poll_write(&mut cx, pending) {
@@ -2990,7 +2993,16 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 										}
 									}
 									Poll::Ready(Err(err)) => break 'serve Err(err),
-									Poll::Pending => return Poll::Pending,
+									// Parking on the transport is the one stall the group cursor cannot
+									// see, and the only place a served group applies the drift budget:
+									// flow control must not pin a stream that has gone stale. `true`
+									// because the transport still owns bytes the cursor has released.
+									Poll::Pending => {
+										if self.group.poll_expired_while_pending(waiter, true) {
+											break 'serve Err(Error::Old);
+										}
+										return Poll::Pending;
+									}
 								}
 							} else if let Some(pending) = frame {
 								match pending.poll_read_chunk(waiter) {
