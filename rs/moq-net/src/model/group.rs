@@ -132,6 +132,16 @@ pub(crate) struct GroupState {
 	// empty group has not presented anything yet.
 	timestamp: Option<Timestamp>,
 
+	// The newest frame's timestamp: the group's presentation end so far. A reader
+	// that has taken every frame sits here, which is what a drift budget measures it
+	// against. Kept alongside `timestamp` for the same reasons.
+	latest: Option<Timestamp>,
+
+	// When the group last accepted a frame. The wall-clock half of the same question:
+	// a group is silent from here, not from whenever it was created. `None` while it
+	// has produced nothing, where the track's arrival time is the only thing to go on.
+	pub(crate) activity: Option<web_async::time::Instant>,
+
 	// Once finalized, the total number of frames the group will ever contain. Recorded
 	// at finish so the count outlives an abort that clears the cache.
 	pub(crate) fin: Option<usize>,
@@ -235,9 +245,24 @@ impl GroupState {
 		}
 	}
 
-	/// Record where the group starts in presentation time, on the first frame only.
+	/// Record where the group starts and currently ends in presentation time, plus
+	/// when it last produced. `timestamp` is the first frame only; the rest track
+	/// every frame, so a reader that has caught up can be measured where it sits.
 	fn stamp(&mut self, timestamp: Timestamp) {
 		self.timestamp.get_or_insert(timestamp);
+		self.latest = Some(timestamp);
+		self.activity = Some(web_async::time::Instant::now());
+	}
+
+	/// Where a cursor at `index` sits in presentation time: the next frame it would
+	/// read, or the newest frame in the group once it has taken them all.
+	///
+	/// `None` only while the group has presented nothing at all.
+	fn position(&self, index: usize) -> Option<Timestamp> {
+		self.frames
+			.get(index.saturating_sub(self.offset))
+			.map(|frame| frame.timestamp)
+			.or(self.latest)
 	}
 
 	/// Evict completed frames from the front until within the byte budget.
@@ -882,9 +907,9 @@ pub struct Consumer {
 
 /// Subscriber-specific policy for expiring a group after it was handed out.
 pub(crate) trait Expiry: Send + Sync {
-	/// Return whether the group is stale, registering `waiter` for anything that
-	/// could change the answer while it remains live.
-	fn is_expired(&self, waiter: &kio::Waiter) -> bool;
+	/// Return whether a reader sitting at `at` is stale, registering `waiter` for
+	/// anything that could change the answer while the group remains live.
+	fn is_expired(&self, waiter: &kio::Waiter, at: Position) -> bool;
 }
 
 // `Plain` is the hot path and carries an inline frame prefetch, so boxing it to even the
@@ -1028,28 +1053,43 @@ impl Consumer {
 	/// A group with frames in hand is always drained to its end: the budget bounds a
 	/// group that has *stalled* while the live edge moved on, not one whose reader is
 	/// merely slower than the wire. Judging every read instead would truncate the tail
-	/// of every group under the default real-time budget, since the arrival of the next
-	/// group is exactly what makes the current one no longer newest.
+	/// of every group, since the arrival of the next group is exactly what makes the
+	/// current one no longer newest.
 	///
 	/// Keeping it off the ready path also keeps it off the hot path: evaluating the
 	/// policy walks the track's group cache under its lock, which is shared by every
 	/// subscriber of that track.
-	fn poll_expired_if_blocked<T>(&mut self, waiter: &kio::Waiter, res: Poll<Result<T>>) -> Poll<Result<T>> {
-		if res.is_pending() && self.poll_expired(waiter) {
-			return Poll::Ready(Err(Error::Old));
-		}
-		res
+	///
+	/// `Some(false)` ends the group cleanly and `Some(true)` fails it with
+	/// [`Error::Old`]; see [`Self::expired_truncates`].
+	fn poll_expired_if_blocked(&mut self, waiter: &kio::Waiter) -> Option<bool> {
+		self.poll_expired(waiter).then(|| self.expired_truncates())
+	}
+
+	/// Whether giving up on this group now loses the reader anything.
+	///
+	/// A frame-level read only parks once the cursor has taken every frame the group
+	/// holds, so expiring there costs nothing: the reader got everything that exists,
+	/// and the group ends rather than fails. What it was still waiting for was the
+	/// producer's FIN, and a group abandoned at its own end is indistinguishable from
+	/// one that ended. A cursor that still holds unread content (a wire publisher with
+	/// buffered frames, a half-read payload) is genuinely truncated and reports it.
+	fn expired_truncates(&self) -> bool {
+		let unread = self.unread_content();
+		unread.frames > 0 || unread.bytes > 0
 	}
 
 	/// Keep checking expiry while a wire publisher still owns buffered group data.
 	pub(crate) fn poll_expired_while_pending(&mut self, waiter: &kio::Waiter, pending: bool) -> bool {
-		if !self.expired
-			&& (pending || self.expiry_pending())
-			&& self.expiry.as_ref().is_some_and(|expiry| expiry.is_expired(waiter))
-		{
-			self.expired = true;
-			if !self.stale_counted.swap(true, Ordering::Relaxed) {
-				self.stale_stats.stale(self.unread_content());
+		if !self.expired && (pending || self.expiry_pending()) {
+			// Resolved here rather than up front: the sticky flag above answers most
+			// calls without touching the group's state at all.
+			let at = self.position();
+			if self.expiry.as_ref().is_some_and(|expiry| expiry.is_expired(waiter, at)) {
+				self.expired = true;
+				if !self.stale_counted.swap(true, Ordering::Relaxed) {
+					self.stale_stats.stale(self.unread_content());
+				}
 			}
 		}
 		self.expired
@@ -1067,6 +1107,20 @@ impl Consumer {
 	/// Whether this cursor failed because its subscription latency budget expired.
 	pub(crate) fn latency_expired(&self) -> bool {
 		self.expired
+	}
+
+	/// Where this cursor sits, for a drift budget to measure it against the live edge.
+	///
+	/// A group is not late because it *started* long ago. What is late is the content
+	/// its reader has yet to take, so a reader that has drained a group sits at the
+	/// group's newest frame, not its first. Measuring from the first would make every
+	/// group one group-duration behind by construction.
+	pub(crate) fn position(&self) -> Position {
+		match &self.inner {
+			ConsumerKind::Plain(plain) => plain.position(),
+			// A spliced group's route-specific cursors carry their own policy.
+			ConsumerKind::Spliced(_) => Position::default(),
+		}
 	}
 
 	/// Whether the group has been aborted (including pool eviction); the abort
@@ -1172,7 +1226,11 @@ impl Consumer {
 				Poll::Ready(Ok(res.map(|frame| frame.with_meter(stats))))
 			}
 		};
-		self.poll_expired_if_blocked(waiter, res)
+		match res.is_pending().then(|| self.poll_expired_if_blocked(waiter)).flatten() {
+			Some(true) => Poll::Ready(Err(Error::Old)),
+			Some(false) => Poll::Ready(Ok(None)),
+			None => res,
+		}
 	}
 
 	/// Read the next frame (timestamp and payload) all at once, without blocking.
@@ -1192,7 +1250,11 @@ impl Consumer {
 				Poll::Ready(Ok(res))
 			}
 		};
-		self.poll_expired_if_blocked(waiter, res)
+		match res.is_pending().then(|| self.poll_expired_if_blocked(waiter)).flatten() {
+			Some(true) => Poll::Ready(Err(Error::Old)),
+			Some(false) => Poll::Ready(Ok(None)),
+			None => res,
+		}
 	}
 
 	/// Read the next frame (timestamp and payload) all at once.
@@ -1222,7 +1284,12 @@ impl Consumer {
 			ConsumerKind::Plain(plain) => plain.poll(waiter, |state| state.poll_finished()),
 			ConsumerKind::Spliced(spliced) => spliced.poll_finished(waiter),
 		};
-		self.poll_expired_if_blocked(waiter, res)
+		match res.is_pending().then(|| self.poll_expired_if_blocked(waiter)).flatten() {
+			Some(true) => Poll::Ready(Err(Error::Old)),
+			// The group ended where the cursor stands, so that is its frame count.
+			Some(false) => Poll::Ready(Ok(self.index())),
+			None => res,
+		}
 	}
 
 	/// Block until the group is finished, returning the number of frames in the group.
@@ -1231,7 +1298,28 @@ impl Consumer {
 	}
 }
 
+/// Where a group cursor sits in presentation and wall-clock time.
+///
+/// `None` fields mean the group has presented nothing (an empty or stalled group),
+/// where the track falls back to when the group arrived.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Position {
+	pub(crate) presentation: Option<Timestamp>,
+	pub(crate) activity: Option<web_async::time::Instant>,
+}
+
 impl Plain {
+	fn position(&self) -> Position {
+		// The prefetch batch was drained under an earlier lock, so the cursor's real
+		// position is past it.
+		let index = self.index.saturating_add(self.prefetch.buffered().0 as usize);
+		let state = self.state.read();
+		Position {
+			presentation: state.position(index),
+			activity: state.activity,
+		}
+	}
+
 	/// Whether this cursor still has unread content or may receive another frame.
 	fn expiry_pending(&self) -> bool {
 		if self.capped() {

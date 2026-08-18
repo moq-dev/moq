@@ -2618,7 +2618,8 @@ mod test {
 			.read_frame()
 			.now_or_never()
 			.expect("the newer group changes the verdict");
-		assert!(matches!(result, Err(Error::Old)), "the replacement expires: {result:?}");
+		// Drained, so the budget ends the replacement rather than truncating it.
+		assert!(matches!(result, Ok(None)), "the replacement ends: {result:?}");
 	}
 
 	/// A replacement that serves the whole group instead of the requested tail still
