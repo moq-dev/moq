@@ -5,7 +5,7 @@
 //! track, so neither exposes a single-track demand/name handle. Today every
 //! container supports both; both wrap the same [`ContainerImpl`] dispatch.
 
-use super::ContainerInit;
+use super::{ContainerFormat, ContainerInit};
 use crate::Result;
 
 /// The concrete container importers, shared by [`Container`] and
@@ -100,12 +100,11 @@ impl<E: crate::container::ts::Catalog> Container<E> {
 		reserved: crate::catalog::Reserved<E>,
 		init: &ContainerInit,
 	) -> Result<Self> {
-		let mut inner = match init.format.as_str() {
-			"fmp4" | "cmaf" => ContainerImpl::fmp4(broadcast, reserved),
-			"mkv" | "webm" | "matroska" => ContainerImpl::mkv(broadcast, reserved),
-			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => ContainerImpl::ts(broadcast, reserved),
-			"flv" => ContainerImpl::flv(broadcast, reserved),
-			_ => return Err(super::init::wrong_kind(&init.format, super::init::Kind::Container)),
+		let mut inner = match init.format {
+			ContainerFormat::Fmp4 => ContainerImpl::fmp4(broadcast, reserved),
+			ContainerFormat::Mkv => ContainerImpl::mkv(broadcast, reserved),
+			ContainerFormat::Ts => ContainerImpl::ts(broadcast, reserved),
+			ContainerFormat::Flv => ContainerImpl::flv(broadcast, reserved),
 		};
 		inner.decode(&init.data)?;
 		Ok(Self { inner })
@@ -162,12 +161,11 @@ impl<E: crate::container::ts::Catalog> ContainerStream<E> {
 		// recovered from a raw byte stream belong here. Today that's all of them,
 		// but a non-streamable container (e.g. RTP) would be added to `Container`
 		// alone.
-		let inner = match init.format.as_str() {
-			"fmp4" | "cmaf" => ContainerImpl::fmp4(broadcast, reserved),
-			"mkv" | "webm" | "matroska" => ContainerImpl::mkv(broadcast, reserved),
-			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => ContainerImpl::ts(broadcast, reserved),
-			"flv" => ContainerImpl::flv(broadcast, reserved),
-			_ => return Err(super::init::wrong_kind(&init.format, super::init::Kind::Container)),
+		let inner = match init.format {
+			ContainerFormat::Fmp4 => ContainerImpl::fmp4(broadcast, reserved),
+			ContainerFormat::Mkv => ContainerImpl::mkv(broadcast, reserved),
+			ContainerFormat::Ts => ContainerImpl::ts(broadcast, reserved),
+			ContainerFormat::Flv => ContainerImpl::flv(broadcast, reserved),
 		};
 		Ok(Self { inner })
 	}
@@ -200,31 +198,5 @@ impl<E: crate::container::ts::Catalog> ContainerStream<E> {
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.inner.seek(sequence)
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	fn new_broadcast() -> (moq_net::broadcast::Producer, crate::catalog::Producer) {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-		(broadcast, catalog)
-	}
-
-	/// A codec format names its real kind rather than reporting "unknown", so a caller that picked
-	/// the wrong entry point is told which one to use.
-	#[tokio::test(start_paused = true)]
-	async fn a_codec_format_reports_the_kind_that_handles_it() {
-		for (format, actual) in [("opus", "audio"), ("avc3", "video")] {
-			let (broadcast, catalog) = new_broadcast();
-			let init = ContainerInit::new(format, Vec::new());
-			let err = Container::<()>::new(broadcast, catalog.reserve(), &init).err();
-			assert!(
-				matches!(&err, Some(crate::Error::WrongKind { actual: a, wanted: "container", .. }) if *a == actual),
-				"got {err:?}"
-			);
-		}
 	}
 }

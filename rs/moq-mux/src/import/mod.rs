@@ -20,11 +20,13 @@
 //! declares reaches the track.
 
 mod container;
+mod format;
 mod init;
 mod track;
 
 pub use container::*;
-pub use init::{AudioInit, ContainerInit, Kind, VideoInit};
+pub use format::{AudioFormat, ContainerFormat, Format, Kind, VideoFormat};
+pub use init::{AudioInit, ContainerInit, VideoInit};
 pub use track::*;
 
 #[doc(hidden)]

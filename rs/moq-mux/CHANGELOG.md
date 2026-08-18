@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Import formats are typed: `import::{AudioFormat, VideoFormat, ContainerFormat}` replace the format
+  string on each `Init`, so a format of the wrong kind no longer compiles. `FromStr` accepts every
+  alias and is where a caller crossing a string boundary finds out, reporting `Error::WrongKind`
+  with the kind that does take it. `Display` gives the canonical name, so aliases like `h264` and
+  `avc3` no longer produce differently named tracks.
+- `Error::NotSelfDescribing` replaces the unknown-format error `TrackStream::video` raised for a
+  video codec a raw byte stream cannot be split into.
 - `import::Track::new` splits into `Track::audio` and `Track::video`, `import::TrackStream::new`
   becomes `TrackStream::video`, and `import::Init` splits into `AudioInit`, `VideoInit`, and
   `ContainerInit`. Each entry point takes only the fields its kind can honor, so a video hint on an
