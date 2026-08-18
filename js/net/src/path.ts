@@ -255,3 +255,42 @@ export function tryResolve(base: Valid, rel: string): Valid | undefined {
 
 	return segments.join("/") as Valid;
 }
+
+/**
+ * Express `target` relative to `base`: the inverse of {@link resolve}.
+ *
+ * The result always round-trips (`resolve(base, relativeTo(target, base)) === target`)
+ * and never walks above the root, so {@link tryResolve} accepts it too.
+ *
+ * A relative reference replaces the last segment of the base, matching relative URL
+ * resolution, so a target nested under the base repeats the base's own last segment.
+ *
+ * Mirrors the Rust `Path::relative_to`, used to author the cross-broadcast track
+ * references a hang catalog carries.
+ *
+ * @example
+ * ```typescript
+ * Path.relativeTo(Path.from("a/b/c"), Path.from("a/b")); // "b/c"
+ * Path.relativeTo(Path.from("a/c"), Path.from("a/b"));   // "c"
+ * Path.relativeTo(Path.from("a"), Path.from("a/b"));     // "."
+ * ```
+ */
+export function relativeTo(target: Valid, base: Valid): string {
+	// Resolution replaces the base's last segment, so walk from its parent.
+	const dir = base === "" ? [] : base.split("/");
+	dir.pop();
+
+	const parts = target === "" ? [] : target.split("/");
+
+	let common = 0;
+	while (common < dir.length && common < parts.length && dir[common] === parts[common]) {
+		common += 1;
+	}
+
+	const rel = Array(dir.length - common)
+		.fill("..")
+		.concat(parts.slice(common));
+
+	// An empty reference resolves to the base itself, so name the parent explicitly.
+	return rel.length === 0 ? "." : rel.join("/");
+}

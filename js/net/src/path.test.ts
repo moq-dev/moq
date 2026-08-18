@@ -217,6 +217,35 @@ test("resolve excess dotdot clamps at empty", () => {
 	expect(Path.resolve(Path.from("a"), "..")).toBe(Path.from(""));
 });
 
+test("relativeTo inverts resolve", () => {
+	// Nested under the base: the base's own last segment is replaced, so it repeats.
+	expect(Path.relativeTo(Path.from("foo/bar/baz"), Path.from("foo/bar"))).toBe("bar/baz");
+	// Sibling.
+	expect(Path.relativeTo(Path.from("foo/baz"), Path.from("foo/bar"))).toBe("baz");
+	// Different subtree.
+	expect(Path.relativeTo(Path.from("foo/baz/bar"), Path.from("foo/bar/baz"))).toBe("../baz/bar");
+	// The base's parent, which only `.` can name.
+	expect(Path.relativeTo(Path.from("a/b"), Path.from("a/b/transcode.hang"))).toBe(".");
+	expect(Path.relativeTo(Path.from("a/b"), Path.from("a/b/one/two/transcode.hang"))).toBe("../..");
+	// Roots.
+	expect(Path.relativeTo(Path.from("foo/bar"), Path.empty())).toBe("foo/bar");
+	expect(Path.relativeTo(Path.empty(), Path.from("foo"))).toBe(".");
+	expect(Path.relativeTo(Path.empty(), Path.empty())).toBe(".");
+});
+
+test("relativeTo round trips through resolve", () => {
+	const paths = ["", "a", "b", "a/b", "a/c", "a/b/c", "a/b/c/d", "x/y/z"].map((p) => Path.from(p));
+
+	for (const base of paths) {
+		for (const target of paths) {
+			const rel = Path.relativeTo(target, base);
+			expect(Path.resolve(base, rel)).toBe(target);
+			// The reference is derived from a real target, so it never escapes the root.
+			expect(Path.tryResolve(base, rel)).toBe(target);
+		}
+	}
+});
+
 test("resolve with empty base", () => {
 	expect(Path.resolve(Path.empty(), "foo")).toBe(Path.from("foo"));
 	expect(Path.resolve(Path.empty(), "..")).toBe(Path.from(""));

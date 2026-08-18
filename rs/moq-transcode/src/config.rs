@@ -6,21 +6,17 @@ use moq_net::{AsPath, PathRelativeOwned};
 ///
 /// Both paths are normalized before comparison. Returns `None` when `output` is
 /// not a descendant of `source`, so callers can omit passthrough renditions.
+///
+/// This is [`moq_net::Path::relative_to`] plus that nesting policy; reach for the
+/// path method directly to reference a source anywhere in the namespace.
 pub fn source_reference(source: impl AsPath, output: impl AsPath) -> Option<PathRelativeOwned> {
 	let source = source.as_path();
 	let output = output.as_path();
-	let rest = output.strip_prefix(&source)?;
-	if rest.is_empty() {
+	if output.strip_prefix(&source)?.is_empty() {
 		return None;
 	}
 
-	let parents = rest.parts().count().saturating_sub(1);
-	let rel = if parents == 0 {
-		".".to_string()
-	} else {
-		vec![".."; parents].join("/")
-	};
-	Some(PathRelativeOwned::from(rel))
+	Some(source.relative_to(&output))
 }
 
 /// One candidate output rendition: a target resolution (by height) and bitrate.
