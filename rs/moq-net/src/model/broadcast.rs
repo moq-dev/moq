@@ -65,10 +65,10 @@ impl Info {
 	}
 }
 
-/// The highest value [`Route::cost`] can take, and where cost accumulation
-/// saturates.
+/// The highest value either half of a [`Cost`] can take, and where cost
+/// accumulation saturates.
 ///
-/// The ceiling is the wire's, not the model's: lite-06 carries the cost as a QUIC
+/// The ceiling is the wire's, not the model's: lite-06 carries each cost as a QUIC
 /// varint, which tops out at 2^62-1, so a larger value could be selected on but
 /// never forwarded.
 pub const MAX_COST: u64 = (1 << 62) - 1;
@@ -85,6 +85,100 @@ pub const MAX_COST: u64 = (1 << 62) - 1;
 /// draining route is still announced downstream, so its cost has to fit the wire.
 pub const DRAIN_COST: u64 = MAX_COST;
 
+/// What pulling a broadcast via a route costs, in two magnitudes that accumulate
+/// together and are compared in that order: lower [`warm`](Self::warm) wins, and
+/// [`cold`](Self::cold) breaks the tie.
+///
+/// Both are the same path priced against different cache states. `warm` is what one
+/// more subscription would actually cost the mesh *right now*, so it collapses to
+/// zero at any relay already carrying the broadcast: those upstream legs exist and
+/// nobody re-pays for them. `cold` prices the identical path as if nothing were
+/// cached, so it keeps flowing through a warm relay unchanged.
+///
+/// Routing optimizes `warm`, which is what deduplicates a cluster onto one copy. But
+/// once two relays are both warm they both advertise zero, and `warm` alone can no
+/// longer say which of them should be the one that pulls: `cold` does, by naming the
+/// relay whose own upstream is cheapest. It is also the stable quantity the origin's
+/// handover gate descends, since adopting a parent adds a link to your own cold cost
+/// and so can never leave you outranking it. Compare EIGRP's reported vs feasible
+/// distance, which splits the same job the same way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub struct Cost {
+	/// The cost of pulling the broadcast via this route as the mesh stands today,
+	/// accumulated per link and discounted to zero at every relay already carrying
+	/// it. Lower wins.
+	///
+	/// The original publisher seeds it with its production cost (zero for a live
+	/// publish, something large for a standby that would have to start working, like
+	/// a cold transcoder), and each link adds its own configured price as the
+	/// announcement crosses it, so a route over a metered backbone ranks worse than
+	/// an equal-length one within a datacenter.
+	pub warm: u64,
+
+	/// The same path with every warm discount removed: what pulling the broadcast
+	/// would cost if no relay along it were carrying anything.
+	///
+	/// Accumulates exactly like [`warm`](Self::warm) but never restarts, so it stays
+	/// meaningful after the discount has flattened `warm` to zero. [`MAX_COST`] when
+	/// the peer's wire cannot express it (pre-lite-06, or the MoQ Cluster extension),
+	/// which ranks last rather than pretending the path is free.
+	pub cold: u64,
+}
+
+impl Cost {
+	/// Both magnitudes at `cost`: an undiscounted route, which is what a publisher
+	/// seeding its production cost means.
+	pub const fn new(cost: u64) -> Self {
+		Self { warm: cost, cold: cost }
+	}
+
+	/// The cost of a draining route: the ceiling in both magnitudes, so every other
+	/// candidate outranks it. See [`DRAIN_COST`].
+	pub const DRAIN: Self = Self::new(DRAIN_COST);
+
+	/// What a peer advertises when its wire has no room for a cost at all: free to
+	/// reach (leaving hop count as the effective metric, exactly as before route
+	/// cost existed) with an unknown cold path.
+	pub(crate) const UNKNOWN: Self = Self {
+		warm: 0,
+		cold: MAX_COST,
+	};
+
+	/// Add a link's price to both magnitudes, saturating at the largest cost the
+	/// wire can carry so a huge cost sorts last instead of wrapping around to best.
+	pub(crate) fn charged(self, link_cost: u64) -> Self {
+		Self {
+			warm: self.warm.saturating_add(link_cost).min(MAX_COST),
+			cold: self.cold.saturating_add(link_cost).min(MAX_COST),
+		}
+	}
+
+	/// The cost to advertise from a relay that is actively carrying the broadcast:
+	/// nothing extra to serve one more subscriber, on the same cold path as before.
+	pub(crate) fn discounted(self) -> Self {
+		Self {
+			warm: 0,
+			cold: self.cold,
+		}
+	}
+
+	/// Clamp both magnitudes to what a varint can carry, since a locally created
+	/// route can name an arbitrary `u64`.
+	pub(crate) fn clamped(self) -> Self {
+		Self {
+			warm: self.warm.min(MAX_COST),
+			cold: self.cold.min(MAX_COST),
+		}
+	}
+}
+
+impl From<u64> for Cost {
+	fn from(cost: u64) -> Self {
+		Self::new(cost)
+	}
+}
+
 /// The path a broadcast takes to reach this origin, and how preferable it is.
 ///
 /// Unlike [`Info`], the route is dynamic: it changes when the serving session fails
@@ -100,32 +194,26 @@ pub struct Route {
 	/// and as the selection tie-break.
 	pub hops: OriginList,
 
-	/// The cost of pulling the broadcast via this route, accumulated per link:
+	/// What pulling the broadcast via this route costs, accumulated per link:
 	/// lower wins, with ties broken by hop length, then a deterministic hash, and
-	/// finally the most recently attached route.
+	/// finally the most recently attached route. See [`Cost`].
 	///
 	/// Selection accepts any value, but only [`MAX_COST`] of it survives a hop:
 	/// forwarding clamps to what a varint can carry, so a cost set beyond the
 	/// ceiling ranks last locally and is advertised as the ceiling.
 	///
-	/// The original publisher seeds it with its production cost (zero for a live
-	/// publish, something large for a standby that would have to start working,
-	/// like a cold transcoder), and each link adds its own configured price as
-	/// the announcement crosses it, so a route over a metered backbone ranks
-	/// worse than an equal-length one within a datacenter. The accumulation
-	/// restarts at zero at any node actively carrying the broadcast: those
-	/// upstream legs already exist and are not re-paid by one more subscriber,
-	/// so the sum is the cost of the transfers a subscription would newly cause.
-	///
-	/// Carried on the wire from lite-06; older peers always report zero, leaving
-	/// the hop-count tie-break as the effective metric exactly as before.
-	pub cost: u64,
+	/// Carried on the wire from lite-06. Older peers report neither magnitude, which
+	/// reads as free to reach with an unknown cold path, leaving the hop-count
+	/// tie-break as the effective metric exactly as before.
+	pub cost: Cost,
 
-	/// The cost as the announcing peer advertised it, before this link's charge
-	/// was added to [`Self::cost`]. Local bookkeeping, never forwarded: zero on a
-	/// chain of two or more hops means the announcing relay is actively carrying
-	/// the broadcast, which is what the origin's handover gate keys on.
-	pub(crate) advertised: u64,
+	/// The cost as the announcing peer advertised it, before this link's charge was
+	/// added to [`Self::cost`]. Local bookkeeping, never forwarded.
+	///
+	/// A zero [`warm`](Cost::warm) on a chain of two or more hops means the
+	/// announcing relay is actively carrying the broadcast, and its
+	/// [`cold`](Cost::cold) is then the rank the origin's handover gate descends.
+	pub(crate) advertised: Cost,
 
 	/// Whether the broadcast should be announced: advertised to consumers via
 	/// [`crate::origin::Consumer::announced`] while this is the best route. A
@@ -173,8 +261,11 @@ impl Route {
 	}
 
 	/// Set the cost: lower wins among routes serving the same broadcast.
-	pub fn with_cost(mut self, cost: u64) -> Self {
-		self.cost = cost;
+	///
+	/// A bare `u64` prices the route undiscounted (both halves of [`Cost`] alike),
+	/// which is what a publisher seeding its production cost means.
+	pub fn with_cost(mut self, cost: impl Into<Cost>) -> Self {
+		self.cost = cost.into();
 		self
 	}
 
@@ -241,13 +332,18 @@ pub(crate) fn advertisable_routes(
 /// about to vanish. The rule keys on the value because the reason does not travel on
 /// the wire, and a cost that saturated through charges is a last-resort path too.
 ///
+/// Only [`Cost::warm`] is discounted. [`Cost::cold`] prices the same path against an
+/// empty cache, so it flows through unchanged and keeps saying which warm relay sits
+/// closest to the publisher once every discount has flattened `warm` to zero.
+///
 /// The receiving side adds its own link price on top, so this never accounts for the
 /// link we are sending over. The result is clamped to the largest wire varint because
 /// locally created routes can name an arbitrary `u64`.
-pub(crate) fn outgoing_cost(demand: &Demand, route: &Route, serving: bool) -> u64 {
-	match serving && demand.is_used() && route.cost < DRAIN_COST {
-		true => 0,
-		false => route.cost.min(MAX_COST),
+pub(crate) fn outgoing_cost(demand: &Demand, route: &Route, serving: bool) -> Cost {
+	let cost = route.cost.clamped();
+	match serving && demand.is_used() && cost.warm < DRAIN_COST {
+		true => cost.discounted(),
+		false => cost,
 	}
 }
 
@@ -805,7 +901,7 @@ impl Dynamic {
 		&self.info
 	}
 
-	/// Bump this source's route to [`DRAIN_COST`], keeping its hop chain and
+	/// Bump this source's route to [`Cost::DRAIN`], keeping its hop chain and
 	/// announce flag.
 	///
 	/// Called when the session feeding the source receives a GOAWAY, so the origin
@@ -821,11 +917,11 @@ impl Dynamic {
 	/// Idempotent: the signal stays set, so a task may call this on every wakeup.
 	pub(crate) fn drain(&mut self) {
 		let mut state = self.state.lock();
-		if state.route.cost == DRAIN_COST {
+		if state.route.cost == Cost::DRAIN {
 			return;
 		}
 
-		state.route.cost = DRAIN_COST;
+		state.route.cost = Cost::DRAIN;
 		state.route_epoch += 1;
 
 		// An ordinary source's table is just its own route, and the origin reads the
@@ -1715,12 +1811,12 @@ mod test {
 			.unwrap();
 
 		let before = consumer.route_changed().await.unwrap();
-		assert_eq!(before.cost, 42);
+		assert_eq!(before.cost, Cost::new(42));
 
 		dynamic.drain();
 
 		let after = consumer.route_changed().await.unwrap();
-		assert_eq!(after.cost, DRAIN_COST);
+		assert_eq!(after.cost, Cost::DRAIN);
 		assert_eq!(after.hops, hops, "draining must not change the path");
 		assert!(after.announce, "a draining route stays advertised");
 
@@ -1738,13 +1834,35 @@ mod test {
 		let mut dynamic = producer.dynamic();
 
 		dynamic.drain();
-		assert_eq!(consumer.route_changed().await.unwrap().cost, DRAIN_COST);
+		assert_eq!(consumer.route_changed().await.unwrap().cost, Cost::DRAIN);
 
 		dynamic.drain();
 		assert!(
 			consumer.route_changed().now_or_never().is_none(),
 			"a redundant drain must not look like a route change"
 		);
+	}
+
+	/// Charging a link accumulates onto both halves, saturating rather than wrapping
+	/// so a bogus peer sorts last, not first. The ceiling is the largest cost a
+	/// varint can carry, so whatever a peer advertises, the sum we forward still
+	/// encodes (see `charged_cost_stays_encodable`).
+	#[test]
+	fn cost_charge_saturates() {
+		assert_eq!(Cost { warm: 4, cold: 6 }.charged(5), Cost { warm: 9, cold: 11 });
+		assert_eq!(Cost::new(u64::MAX).charged(10), Cost::new(MAX_COST));
+
+		// An unknown cold path stays unknown however many links it crosses, so it
+		// can never accumulate its way into outranking a path we actually know.
+		assert_eq!(Cost::UNKNOWN.charged(3).cold, MAX_COST);
+	}
+
+	/// The carrying discount is the whole warm/cold split: it zeroes what one more
+	/// subscriber pays and leaves the cold path intact, which is what still ranks
+	/// two relays that have both discounted to zero.
+	#[test]
+	fn cost_discount_keeps_the_cold_path() {
+		assert_eq!(Cost { warm: 6, cold: 6 }.discounted(), Cost { warm: 0, cold: 6 });
 	}
 
 	/// A draining cost still has to fit the wire, since the route keeps being
@@ -1754,7 +1872,7 @@ mod test {
 		use crate::coding::Encode;
 
 		let mut buf = Vec::new();
-		DRAIN_COST
+		Cost::DRAIN
 			.encode(&mut buf, crate::lite::Version::Lite06Wip)
 			.expect("a draining route is still forwarded, so its cost must encode");
 	}

@@ -23,7 +23,9 @@ pub struct MoqRoute {
 	/// Origin ids of the relay hops the broadcast traversed, oldest first.
 	#[uniffi(default = [])]
 	pub hops: Vec<u64>,
-	/// Preference among routes serving the same broadcast: lower wins.
+	/// Preference among routes serving the same broadcast: lower wins. A publisher
+	/// sets its production cost here: zero for content it is already producing,
+	/// larger for content it would have to start producing on demand.
 	#[uniffi(default = 0)]
 	pub cost: u64,
 	/// Whether the broadcast is announced: advertised to subscribers via the origin.
@@ -36,7 +38,9 @@ impl From<moq_net::broadcast::Route> for MoqRoute {
 	fn from(route: moq_net::broadcast::Route) -> Self {
 		Self {
 			hops: route.hops.iter().map(|origin| origin.id()).collect(),
-			cost: route.cost,
+			// The relay mesh prices a route twice (see `broadcast::Cost`); an
+			// application only ever wants what pulling it costs today.
+			cost: route.cost.warm,
 			announce: route.announce,
 		}
 	}

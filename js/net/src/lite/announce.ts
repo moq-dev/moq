@@ -31,10 +31,28 @@ const ANNOUNCE_RESTART = 2;
  * that id instead of repeating the path. Older versions send a single ANNOUNCE_BROADCAST
  * message that retracts by path (`ended`).
  */
+/**
+ * What pulling a broadcast via a route costs, in two magnitudes accumulated together
+ * and compared in that order: lower `warm` wins, and `cold` breaks the tie.
+ *
+ * Both price the same path against different cache states. `warm` is what one more
+ * subscription would cost the mesh right now, so it collapses to zero at any relay
+ * already carrying the broadcast. `cold` prices the identical path as if nothing were
+ * cached, so it keeps flowing through a warm relay unchanged and still says which of
+ * two warm relays sits closer to the publisher.
+ */
+export interface Cost {
+	/** The cost as the mesh stands today, discounted to zero at every carrying relay. */
+	warm: bigint;
+	/** The same path with every warm discount removed. */
+	cold: bigint;
+}
+
 export type AnnounceBroadcast =
 	/** A broadcast is now available, carrying the path suffix, the hop chain, and
-	 * (lite-06+) the route cost. An absent cost encodes as zero. */
-	| { status: "active"; suffix: Path.Valid; hops: Origin[]; cost?: bigint }
+	 * (lite-06+) the route cost. An absent cost encodes as zero; it decodes as
+	 * `undefined` on a wire with no room for one. */
+	| { status: "active"; suffix: Path.Valid; hops: Origin[]; cost?: Cost }
 	/** Pre-lite-06: a broadcast is no longer available, retracted by path. */
 	| { status: "ended"; suffix: Path.Valid }
 	/** Lite06+: a broadcast is no longer available, retracted by announce id.
@@ -42,7 +60,7 @@ export type AnnounceBroadcast =
 	| { status: "endedId"; id: bigint }
 	/** Lite06+: atomically replace the announcement with this id (e.g. a new hop
 	 * chain after a relay failover, or a route whose cost moved). The id stays live. */
-	| { status: "restart"; id: bigint; hops: Origin[]; cost?: bigint };
+	| { status: "restart"; id: bigint; hops: Origin[]; cost?: Cost };
 
 function checkHops(hops: Origin[]) {
 	if (hops.length > MAX_HOPS) {
@@ -95,16 +113,17 @@ async function decodeHops(r: Reader, version: Version): Promise<Origin[]> {
 	}
 }
 
-// The route cost rides lite-06+ announcements as a single varint; older
-// versions carry nothing and decode as zero.
-async function encodeRouteCost(w: Writer, version: Version, cost: bigint | undefined) {
+// The route cost rides lite-06+ announcements as two varints, warm then cold; older
+// versions carry neither.
+async function encodeRouteCost(w: Writer, version: Version, cost: Cost | undefined) {
 	if (!hasRouteCost(version)) return;
-	await w.u62(cost ?? 0n);
+	await w.u62(cost?.warm ?? 0n);
+	await w.u62(cost?.cold ?? 0n);
 }
 
-async function decodeRouteCost(r: Reader, version: Version): Promise<bigint> {
-	if (!hasRouteCost(version)) return 0n;
-	return await r.u62();
+async function decodeRouteCost(r: Reader, version: Version): Promise<Cost | undefined> {
+	if (!hasRouteCost(version)) return undefined;
+	return { warm: await r.u62(), cold: await r.u62() };
 }
 
 // lite-06 message body (no discriminator; the type is carried outside the length prefix).

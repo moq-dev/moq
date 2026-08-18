@@ -15,7 +15,7 @@ use crate::{
 	track::{Position, Subscription},
 };
 
-use super::{RouteCost, Version};
+use super::Version;
 
 use web_async::Lock;
 
@@ -244,9 +244,10 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		&mut self,
 		path: PathOwned,
 		mut hops: crate::OriginList,
-		// The route cost off the wire, i.e. as the peer advertised it. Zero before
-		// lite-06, leaving the hop chain as the only routing input as before.
-		cost: RouteCost,
+		// The route cost off the wire, i.e. as the peer advertised it.
+		// [`Cost::UNKNOWN`] before lite-06, leaving the hop chain as the only
+		// routing input as before.
+		cost: crate::broadcast::Cost,
 		// This link's price, added to the wire cost; the pre-charge value is kept
 		// on the route so the origin's handover gate can tell a warm peer apart.
 		link_cost: u64,
@@ -334,15 +335,20 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// Once the peer has sent a GOAWAY every route it announces starts out draining,
 	/// including a restart of one already attached: a connection on its way out must
 	/// not win selection, however good the path it advertises looks.
-	fn announced_route(&self, hops: crate::OriginList, cost: RouteCost, link_cost: u64) -> crate::broadcast::Route {
+	fn announced_route(
+		&self,
+		hops: crate::OriginList,
+		cost: crate::broadcast::Cost,
+		link_cost: u64,
+	) -> crate::broadcast::Route {
 		let mut route = crate::broadcast::Route::new()
 			.with_hops(hops)
-			.with_cost(cost.charged(link_cost).0)
+			.with_cost(cost.charged(link_cost))
 			.with_announce(true);
-		route.advertised = cost.0;
+		route.advertised = cost;
 
 		if self.going_away.is_set() {
-			route.cost = crate::broadcast::DRAIN_COST;
+			route.cost = crate::broadcast::Cost::DRAIN;
 		}
 
 		route
@@ -365,7 +371,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		path: PathOwned,
 		mut hops: crate::OriginList,
 		// The route cost off the wire and this link's price. See `start_announce`.
-		cost: RouteCost,
+		cost: crate::broadcast::Cost,
 		link_cost: u64,
 		// Lite05+: the announce sender's origin id (from AnnounceOk), appended here to
 		// rebuild the full chain since the sender no longer stamps itself. None for older
@@ -1206,7 +1212,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 						self.subscriber.start_announce(
 							path.clone(),
 							crate::OriginList::new(),
-							RouteCost::default(),
+							crate::broadcast::Cost::UNKNOWN,
 							0,
 							run.responder_origin,
 							&mut run.routes,
@@ -1848,7 +1854,7 @@ mod tests {
 			.start_announce(
 				Path::new("room/host").to_owned(),
 				crate::OriginList::new(),
-				RouteCost::default(),
+				crate::broadcast::Cost::UNKNOWN,
 				0,
 				None,
 				&mut routes,
@@ -1876,7 +1882,7 @@ mod tests {
 			.start_announce(
 				Path::new("room/host").to_owned(),
 				crate::OriginList::new(),
-				RouteCost::default(),
+				crate::broadcast::Cost::UNKNOWN,
 				0,
 				None,
 				&mut routes,
@@ -1919,7 +1925,7 @@ mod tests {
 			.start_announce(
 				path.clone(),
 				crate::OriginList::new(),
-				RouteCost::default(),
+				crate::broadcast::Cost::UNKNOWN,
 				0,
 				Some(crate::Origin::UNKNOWN),
 				&mut routes,
@@ -1932,7 +1938,7 @@ mod tests {
 			.restart_announce(
 				path,
 				crate::OriginList::new(),
-				RouteCost::default(),
+				crate::broadcast::Cost::UNKNOWN,
 				0,
 				Some(crate::Origin::UNKNOWN),
 				&mut routes,
@@ -1960,7 +1966,7 @@ mod tests {
 			.start_announce(
 				path.clone(),
 				crate::OriginList::new(),
-				RouteCost::default(),
+				crate::broadcast::Cost::UNKNOWN,
 				0,
 				Some(publisher),
 				&mut routes,
@@ -1973,7 +1979,7 @@ mod tests {
 			.restart_announce(
 				path,
 				crate::OriginList::new(),
-				RouteCost(5),
+				crate::broadcast::Cost::new(5),
 				0,
 				Some(publisher),
 				&mut routes,
@@ -2013,7 +2019,14 @@ mod tests {
 		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
 		let mut routes = HashMap::new();
 		subscriber
-			.start_announce(path.clone(), hops, RouteCost(0), 1, None, &mut routes)
+			.start_announce(
+				path.clone(),
+				hops,
+				crate::broadcast::Cost::default(),
+				1,
+				None,
+				&mut routes,
+			)
 			.unwrap();
 		tokio::time::sleep(Duration::from_millis(1)).await;
 		assert!(consumer.get_broadcast("room/host").is_some());
@@ -2031,7 +2044,14 @@ mod tests {
 		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
 		let mut routes = HashMap::new();
 		subscriber
-			.start_announce(path.clone(), hops, RouteCost(0), 1, None, &mut routes)
+			.start_announce(
+				path.clone(),
+				hops,
+				crate::broadcast::Cost::default(),
+				1,
+				None,
+				&mut routes,
+			)
 			.unwrap();
 		tokio::time::sleep(Duration::from_millis(1)).await;
 		routes.remove(&path).expect("announced").finish();

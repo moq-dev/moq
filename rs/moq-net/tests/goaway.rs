@@ -409,7 +409,7 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 	.expect("test timed out (likely a mock deadlock)");
 }
 
-/// A GOAWAY costs the peer's routes at [`DRAIN_COST`] so the origin stops
+/// A GOAWAY costs the peer's routes at [`Cost::DRAIN`] so the origin stops
 /// preferring a connection that is about to close.
 ///
 /// The peer sends nothing after the GOAWAY, which is the case that matters: the
@@ -436,7 +436,7 @@ async fn goaway_drains_routes(version: Version) {
 			.expect("broadcast announced");
 		assert_ne!(
 			announced.route().cost,
-			moq_net::broadcast::DRAIN_COST,
+			moq_net::broadcast::Cost::DRAIN,
 			"a healthy route must not start out draining"
 		);
 
@@ -447,7 +447,7 @@ async fn goaway_drains_routes(version: Version) {
 		// subscriber acted on the GOAWAY rather than on another message.
 		loop {
 			let route = announced.route_changed().await.expect("route");
-			if route.cost == moq_net::broadcast::DRAIN_COST {
+			if route.cost == moq_net::broadcast::Cost::DRAIN {
 				assert!(route.announce, "a draining route stays announced");
 				break;
 			}

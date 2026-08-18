@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{Origin, OriginList, Path, coding::*};
+use crate::{Origin, OriginList, Path, broadcast::Cost, coding::*};
 
 use super::{Message, Version};
 
@@ -37,12 +37,12 @@ pub fn restart_supported(version: Version) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnnounceBroadcast<'a> {
 	/// ANNOUNCE_START (lite-06) / active (older): a broadcast is now available.
-	/// Carries the path suffix, the hop chain, and (lite-06+) the route cost, and
-	/// assigns the next announce id.
+	/// Carries the path suffix, the hop chain, and (lite-06+) the warm and cold
+	/// route costs, and assigns the next announce id.
 	Active {
 		suffix: Path<'a>,
 		hops: OriginList,
-		cost: RouteCost,
+		cost: Cost,
 	},
 	/// Pre-lite-06: a broadcast is no longer available, retracted by path.
 	Ended { suffix: Path<'a>, hops: OriginList },
@@ -54,54 +54,28 @@ pub enum AnnounceBroadcast<'a> {
 	/// The id stays live.
 	///
 	/// Only ever received: we advertise a replacement as an `EndedId` + `Active` pair.
-	Restart { id: u64, hops: OriginList, cost: RouteCost },
+	Restart { id: u64, hops: OriginList, cost: Cost },
 }
 
-/// The marginal cost of pulling the broadcast via this route, carried on lite-06
-/// announcements as a single varint.
-///
-/// The original publisher seeds it with its production cost: zero for a live
-/// publish, something large for a standby that would have to start working (a
-/// cold transcoder). Each link adds its own price when the announcement crosses
-/// it, and a node actively carrying the broadcast re-announces zero instead: its
-/// ingress is already paid for, so a peer should pull the copy that exists rather
-/// than open a second one all the way back. The sum is what routing minimizes:
-/// what one more subscription would actually cost the mesh.
-///
-/// Pre-lite-06 peers don't carry it, so it stays zero and routing falls back to
-/// the hop-count tie-break.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RouteCost(pub u64);
-
-impl RouteCost {
-	/// Add a link's price, saturating so a hostile or buggy peer advertising a
-	/// huge cost sorts last instead of wrapping around to best.
-	///
-	/// Saturates at [`crate::broadcast::MAX_COST`] rather than `u64::MAX`: the
-	/// sum is re-encoded as a varint when we forward the announcement, and a
-	/// varint cannot carry more than 2^62-1. Clamping past `u64::MAX` alone would
-	/// leave a peer able to fail our downstream encode by advertising the largest
-	/// cost the wire can express.
-	pub fn charged(self, link_cost: u64) -> Self {
-		Self(self.0.saturating_add(link_cost).min(crate::broadcast::MAX_COST))
-	}
-}
-
-impl Encode<Version> for RouteCost {
+impl Encode<Version> for Cost {
 	fn encode<W: BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		if !version.has_route_cost() {
 			return Ok(());
 		}
-		self.0.encode(w, version)
+		self.warm.encode(w, version)?;
+		self.cold.encode(w, version)
 	}
 }
 
-impl Decode<Version> for RouteCost {
+impl Decode<Version> for Cost {
 	fn decode<B: Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_route_cost() {
-			return Ok(Self::default());
+			return Ok(Cost::UNKNOWN);
 		}
-		Ok(Self(u64::decode(buf, version)?))
+		Ok(Cost {
+			warm: u64::decode(buf, version)?,
+			cold: u64::decode(buf, version)?,
+		})
 	}
 }
 
@@ -176,7 +150,7 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 				ANNOUNCE_START => Self::Active {
 					suffix: Path::decode(&mut body, version)?,
 					hops: OriginList::decode(&mut body, version)?,
-					cost: RouteCost::decode(&mut body, version)?,
+					cost: Cost::decode(&mut body, version)?,
 				},
 				ANNOUNCE_END => Self::EndedId {
 					id: u64::decode(&mut body, version)?,
@@ -184,7 +158,7 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 				ANNOUNCE_RESTART => Self::Restart {
 					id: u64::decode(&mut body, version)?,
 					hops: OriginList::decode(&mut body, version)?,
-					cost: RouteCost::decode(&mut body, version)?,
+					cost: Cost::decode(&mut body, version)?,
 				},
 				_ => return Err(DecodeError::InvalidMessage(typ)),
 			};
@@ -233,7 +207,7 @@ impl AnnounceBroadcast<'_> {
 			AnnounceStatus::Active => Self::Active {
 				suffix,
 				hops,
-				cost: RouteCost::default(),
+				cost: Cost::UNKNOWN,
 			},
 			AnnounceStatus::Ended => Self::Ended { suffix, hops },
 			// On lite-05 a restart travels as a duplicate ANNOUNCE (a second `Active`), so accept
@@ -244,7 +218,7 @@ impl AnnounceBroadcast<'_> {
 			AnnounceStatus::Restart if restart_supported(version) => Self::Active {
 				suffix,
 				hops,
-				cost: RouteCost::default(),
+				cost: Cost::UNKNOWN,
 			},
 			AnnounceStatus::Restart => return Err(DecodeError::InvalidValue),
 		})
@@ -410,7 +384,7 @@ mod tests {
 		AnnounceBroadcast::Active {
 			suffix: Path::new("foo/bar"),
 			hops: OriginList::new(),
-			cost: RouteCost::default(),
+			cost: Cost::default(),
 		}
 		.encode(&mut buf, version)
 		.expect("encode");
@@ -510,7 +484,7 @@ mod tests {
 		let msg = AnnounceBroadcast::Active {
 			suffix: Path::new("room/cam"),
 			hops: hops.clone(),
-			cost: RouteCost::default(),
+			cost: Cost::UNKNOWN,
 		};
 		assert_eq!(broadcast_round_trip(&msg, Version::Lite05), msg);
 
@@ -526,7 +500,9 @@ mod tests {
 		let mut hops = OriginList::new();
 		hops.push(Origin::new(7).unwrap()).unwrap();
 
-		let cost = RouteCost(12);
+		// Asymmetric on purpose: the two magnitudes travel independently, so a
+		// swapped or shared encode would round-trip a symmetric pair unnoticed.
+		let cost = Cost { warm: 12, cold: 30 };
 
 		let active = AnnounceBroadcast::Active {
 			suffix: Path::new("room/cam"),
@@ -554,7 +530,7 @@ mod tests {
 			AnnounceBroadcast::Restart {
 				id: 1,
 				hops: OriginList::new(),
-				cost: RouteCost::default()
+				cost: Cost::default()
 			}
 			.encode(&mut buf, Version::Lite05),
 			Err(EncodeError::Version)
@@ -570,14 +546,15 @@ mod tests {
 	}
 
 	// Pre-lite-06 has no room for a cost on the wire, so one set locally is simply
-	// not sent and the peer decodes the default. This is what keeps a mixed-version
-	// mesh ranking those routes on hop count exactly as it did before.
+	// not sent and the peer decodes [`Cost::UNKNOWN`]: free to reach, which keeps a
+	// mixed-version mesh ranking those routes on hop count exactly as it did before,
+	// with a cold path that ranks last rather than pretending to be the publisher's.
 	#[test]
 	fn route_cost_is_dropped_before_lite06() {
 		let msg = AnnounceBroadcast::Active {
 			suffix: Path::new("room/cam"),
 			hops: OriginList::new(),
-			cost: RouteCost(9),
+			cost: Cost { warm: 9, cold: 9 },
 		};
 		let got = broadcast_round_trip(&msg, Version::Lite05);
 		assert_eq!(
@@ -585,23 +562,17 @@ mod tests {
 			AnnounceBroadcast::Active {
 				suffix: Path::new("room/cam"),
 				hops: OriginList::new(),
-				cost: RouteCost::default(),
+				cost: Cost::UNKNOWN,
 			}
 		);
 	}
 
-	// Charging a link accumulates, saturating rather than wrapping so a bogus peer
-	// sorts last, not first. The ceiling is the largest cost a varint can carry, so
-	// whatever a peer advertises, the sum we forward still encodes.
+	// A peer may legally advertise the largest varint there is, and adding this
+	// link's price to it must not push the result out of range.
 	#[test]
-	fn route_cost_charge_saturates() {
-		assert_eq!(RouteCost(4).charged(5), RouteCost(9));
-		assert_eq!(RouteCost(u64::MAX).charged(10), RouteCost(crate::broadcast::MAX_COST));
-
-		// The regression: a peer may legally advertise the largest varint there is,
-		// and adding this link's price to it must not push the result out of range.
+	fn charged_cost_stays_encodable() {
 		let mut buf = Vec::new();
-		RouteCost(crate::broadcast::MAX_COST)
+		Cost::new(crate::broadcast::MAX_COST)
 			.charged(1)
 			.encode(&mut buf, Version::Lite06Wip)
 			.expect("a charged cost must stay encodable");

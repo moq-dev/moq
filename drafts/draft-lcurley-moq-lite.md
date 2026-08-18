@@ -351,7 +351,7 @@ Path prefix matching and equality is done on a byte-by-byte basis.
 There MAY be multiple Announce Streams, potentially containing overlapping prefixes, that get their own ANNOUNCE_OK + announcements.
 
 #### Routing {#routing}
-Each advertisement carries an `Epoch` identifying the generation of content at the path, the path of Hop IDs it traversed, and an accumulated Route Cost (see [ANNOUNCE_START](#announce-start)), which relays use to build a loop-free mesh.
+Each advertisement carries an `Epoch` identifying the generation of content at the path, the path of Hop IDs it traversed, and an accumulated Warm and Cold Route Cost (see [ANNOUNCE_START](#announce-start)), which relays use to build a loop-free mesh.
 
 A receiver MUST discard an announcement whose reconstructed path contains its own Hop ID: it has looped back, so forwarding it would extend the loop and subscribing through it would route the receiver back to itself.
 This is the only loop defense moq-lite requires, and it catches loops of any length.
@@ -368,7 +368,8 @@ When serving a subscription, a publisher MUST select the source by that same exc
 Applying one rule to both advertisement and dispatch keeps advertised paths truthful, which is what prevents subscription cycles of any length.
 
 A subscriber that sees the same broadcast advertised across multiple streams MUST prefer the highest `Epoch` (any non-zero value outranks 0): a lower Epoch never displaces a higher one, regardless of cost or arrival order.
-Among interchangeable advertisements, the subscriber SHOULD route subscriptions to the lowest Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the shortest path and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
+Among interchangeable advertisements, the subscriber SHOULD route subscriptions to the lowest Warm Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the lowest Cold Route Cost, then toward the shortest path, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
+The Cold tie-break matters exactly where the Warm one runs out: two relays that both carry the broadcast both advertise a Warm cost of 0, and only their Cold costs say which of them sits closer to the publisher.
 
 Advertisements with the same non-zero `Epoch` carry interchangeable content: a relay MAY hold them as redundant routes for one broadcast and splice a live subscription across them at a [Position](#positions).
 If a route ends partway through a Group, the replacement continues from the next frame instead of abandoning the rest of the Group.
@@ -707,10 +708,10 @@ The role is a hint that only ever narrows the session: a server MUST still enfor
 Only the client sends it; a client that receives one MUST close the session with a PROTOCOL_VIOLATION. A relay MUST NOT forward it.
 
 ### Cost Parameter {#cost-parameter}
-The Cost Parameter declares what subscribing from this endpoint costs: a receiver adds the value the sender declared to the Route Cost of every announcement that sender forwards (see [Routing](#routing)).
+The Cost Parameter declares what subscribing from this endpoint costs: a receiver adds the value the sender declared to both Route Costs of every announcement that sender forwards (see [Routing](#routing)).
 
-The Parameter Value is a variable-length integer in deployment-chosen units, the same units as the Route Cost.
-An absent parameter means the default cost of 1, under which the accumulated Route Cost equals the hop count and routing degenerates to shortest-path.
+The Parameter Value is a variable-length integer in deployment-chosen units, the same units as the Route Costs.
+An absent parameter means the default cost of 1, under which the accumulated Route Costs equal the hop count and routing degenerates to shortest-path.
 A value of 0 is meaningful and distinct from absent: it makes that direction free, e.g. between two relays in the same datacenter.
 
 Both endpoints send it and the two values need not match: the parameter prices the sender's own egress. A relay MUST NOT forward it.
@@ -790,7 +791,8 @@ ANNOUNCE_START Message {
   Ended (i),
   Hop Count (i),
   Hop ID (i) ...,
-  Route Cost (i),
+  Warm Route Cost (i),
+  Cold Route Cost (i),
 }
 ~~~
 
@@ -827,15 +829,20 @@ When forwarding an announcement received from an upstream peer, a relay MUST app
 The first entry of the reconstructed path identifies the original publisher of the broadcast; it is the fallback content identity when `Epoch` is 0 (see [Routing](#routing)).
 A Hop ID value of 0 means the hop is unknown: either it was never assigned or a relay deliberately withholds it (see [Routing](#routing)).
 
-**Route Cost**:
-The marginal cost of subscribing to the broadcast via this advertisement, in units chosen by the deployment.
-The original publisher seeds the value with its production cost: 0 for content it is already producing, larger for content it would have to start producing on demand (e.g. a standby transcoder that advertises every broadcast it could serve, at a cost reflecting the work of actually serving it).
-When forwarding an announcement received from an upstream peer, a relay adds the cost that peer declared (see [Cost Parameter](#cost-parameter)), saturating rather than wrapping so an absurd upstream value ranks last instead of overflowing to best.
-Saturation MUST cap the sum at the largest value a variable-length integer can carry, since the sum is re-encoded when forwarded: a peer may legally advertise that largest value, and a wider ceiling would leave the relay unable to encode what it just computed.
+**Warm Route Cost** and **Cold Route Cost**:
+What subscribing to the broadcast via this advertisement costs, in units chosen by the deployment, priced against two different cache states.
+The Warm cost is what one more subscription would cost the mesh as it stands, and is what routing minimizes.
+The Cold cost prices the identical path as if no relay along it were carrying anything, and exists to rank two relays that both discounted their Warm cost to 0.
+The original publisher seeds both with its production cost: 0 for content it is already producing, larger for content it would have to start producing on demand (e.g. a standby transcoder that advertises every broadcast it could serve, at a cost reflecting the work of actually serving it).
+When forwarding an announcement received from an upstream peer, a relay adds the cost that peer declared (see [Cost Parameter](#cost-parameter)) to both, saturating rather than wrapping so an absurd upstream value ranks last instead of overflowing to best.
+Saturation MUST cap each sum at the largest value a variable-length integer can carry, since the sums are re-encoded when forwarded: a peer may legally advertise that largest value, and a wider ceiling would leave the relay unable to encode what it just computed.
 
-A relay that is actively carrying the broadcast (a live subscription exists for at least one of its tracks) SHOULD advertise 0 instead of the accumulated value: its ingress is already paid for, which is what lets a cluster deduplicate onto a warm copy.
-The discount applies only to the path the relay actually serves from; a standby path keeps its accumulated value, since serving from it means opening a fresh ingest.
+A relay that is actively carrying the broadcast (a live subscription exists for at least one of its tracks) SHOULD advertise a Warm cost of 0 instead of the accumulated value: its ingress is already paid for, which is what lets a cluster deduplicate onto a warm copy.
+The discount applies to the Warm cost only; the Cold cost is forwarded accumulated, since it prices the path the relay would have to open if it were not already carrying it.
+The discount applies only to the path the relay actually serves from; a standby path keeps its accumulated Warm value, since serving from it means opening a fresh ingest.
 When the relay stops carrying the broadcast it SHOULD restore the accumulated value via ANNOUNCE_UPDATE, optionally after a grace period so brief churn does not flap routing.
+
+A relay whose wire cannot express a Cold cost (an endpoint bridging from another protocol, or a peer that predates this field) advertises nothing, and a receiver SHOULD treat the missing value as the saturation ceiling rather than as 0: an unknown path ranks last instead of impersonating the publisher's own.
 
 A carrying relay whose serving path costs the saturation ceiling SHOULD forgo the discount and advertise the ceiling instead.
 Draining is the ceiling's primary producer: a session that received a GOAWAY (see [GOAWAY](#goaway-message)) prices its routes there, since the ingress the discount priced in is going away and a zero-cost advertisement would keep attracting subscribers to a path that a subscriber with any alternative should leave while the handover window is open.
@@ -843,8 +850,10 @@ The rule is deliberately keyed on the value rather than on why it was reached: a
 Forgoing the discount is also what carries a drain across a mesh: each carrying relay along the path repeats it, so the ceiling survives hops that would otherwise re-mask it as 0.
 
 Two relays that independently begin carrying the same broadcast would each see the other's 0 as cheaper than its own source, and both switching at once would leave the broadcast with no source.
-Before re-parenting onto a 0-cost advertisement from another actively-carrying relay (one whose path has two or more entries), a relay SHOULD apply a deterministic tie-break, such as comparing a hash of the broadcast path and each Hop ID, so exactly one side moves.
-Equal Hop IDs (including two relays that both declared 0) cannot be ordered, and neither side SHOULD move.
+Before re-parenting onto a 0-cost advertisement from another actively-carrying relay (one whose path has two or more entries), a relay SHOULD require that relay's rank to be strictly lower than its own, where a relay's rank is the Cold Route Cost of the path it serves from, followed by a hash of the broadcast path and its Hop ID.
+Adopting a parent adds that link's cost to the adopting relay's own Cold cost, so after the move it ranks strictly above the relay it adopted: the order descends, which is what forbids a cycle of any length rather than only the two-relay case.
+Ranking on Cold cost first also puts the aggregation point at the relay with the cheapest path to the publisher, instead of wherever a hash happens to fall; the hash only separates relays that are equally far from it.
+Equal ranks (including two relays that both declared Hop ID 0) cannot be ordered, and neither side SHOULD move.
 Cheaper advertisements from anything else carry no such hazard and SHOULD be adopted immediately.
 
 
@@ -893,7 +902,8 @@ ANNOUNCE_UPDATE Message {
   Ended (i),
   Hop Count (i),
   Hop ID (i) ...,
-  Route Cost (i),
+  Warm Route Cost (i),
+  Cold Route Cost (i),
 }
 ~~~
 
@@ -904,9 +914,9 @@ Set to 0x2 to indicate an ANNOUNCE_UPDATE message.
 The ordinal implicitly assigned by a prior ANNOUNCE_START on this stream.
 Referencing an id that was never assigned, or one already retired by an ANNOUNCE_END, is a protocol violation.
 
-**Epoch**, **Ended**, **Hop Count**, **Hop ID**, and **Route Cost**:
+**Epoch**, **Ended**, **Hop Count**, **Hop ID**, **Warm Route Cost**, and **Cold Route Cost**:
 As defined for [ANNOUNCE_START](#announce-start).
-An update whose only change is the Route Cost is valid: it is how a relay advertises that it started or stopped actively carrying the broadcast.
+An update whose only change is a Route Cost is valid: it is how a relay advertises that it started or stopped actively carrying the broadcast.
 An update whose only change is the `Ended` flag is likewise valid: it is how a live broadcast ends into a recording without retiring its Announce ID.
 
 
@@ -1321,7 +1331,7 @@ The `Message Length` describes the payload size on the wire.
 - Added an `Epoch` to ANNOUNCE_START and ANNOUNCE_UPDATE: a per-path content generation minted by the original publisher and forwarded unchanged, 0 meaning unspecified. The highest Epoch wins (non-zero outranks 0) and replacement is decided by value rather than arrival order; equal non-zero Epochs splice, and the first entry of the path remains the identity only when both are 0. That fallback identity requires a non-zero first entry: 0 identifies nothing, so it never proves continuity, and publishers SHOULD assign themselves a Hop ID (a random per-session value suffices).
 - Added an `Ended` flag to ANNOUNCE_START and ANNOUNCE_UPDATE, and as an opt-in filter on ANNOUNCE_REQUEST: ended broadcasts reject SUBSCRIBE, are read via FETCH, and are only announced to subscribers that asked for them.
 - Added an `Epoch` to SUBSCRIBE, FETCH, and TRACK (0 = current, mismatch = reset) and the resolved `Epoch` to TRACK_INFO, so metadata and groups always come from the same generation and requests cannot race a replacement.
-- Added a `Route Cost` field to ANNOUNCE_START and ANNOUNCE_UPDATE: the accumulated cost of the transfers a subscription via this advertisement would newly cause. Route selection prefers the lowest cost, with path length as the tie-break, and the most recently received advertisement below that.
+- Added `Warm Route Cost` and `Cold Route Cost` fields to ANNOUNCE_START and ANNOUNCE_UPDATE: the same path priced against two cache states. Warm is the accumulated cost of the transfers a subscription via this advertisement would newly cause, and is what route selection minimizes; Cold prices the path as if nothing along it were carrying, and breaks a Warm tie before path length, with the most recently received advertisement below that. Only Warm takes the actively-carrying discount, so Cold still ranks two relays that both advertise 0, and a relay adopts another carrying relay only when that relay's `(Cold cost, hash)` rank is strictly lower. A wire that cannot express Cold is read as the saturation ceiling, not as 0.
 - Added a SETUP `Cost` parameter (0x4) declaring what subscribing from the sender costs, added by the receiver to every announcement that sender forwards. Both endpoints send their own, so the two directions are priced independently, and a receiver MAY charge a locally configured value instead. Unpriced directions default to 1, degrading to shortest-path routing.
 - Removed `Exclude Hop` from ANNOUNCE_REQUEST. The receiver's hop-based loop check already discards a looped announcement, so the field only saved the wasted send.
 - Stated the receiver's loop check normatively in ANNOUNCE_START: an announcement whose reconstructed path contains the receiver's own Hop ID is neither forwarded nor selected as a route.

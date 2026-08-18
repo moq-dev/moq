@@ -66,8 +66,12 @@ pub(crate) struct Announcement {
 	pub hops: Vec<String>,
 	/// Number of hops in the selected route.
 	pub hop_count: usize,
-	/// Accumulated cost of the selected route.
+	/// Accumulated cost of the selected route as the mesh stands: zero at any relay
+	/// already carrying the broadcast.
 	pub cost: u64,
+	/// The same route priced with every warm discount removed, which is what ranks
+	/// two relays that both discounted to zero.
+	pub cold_cost: u64,
 }
 
 /// An established direct cluster connection.
@@ -193,7 +197,8 @@ impl Nodes {
 					announced: Some(Announcement {
 						hop_count: hop_ids.len(),
 						hops: hop_ids.into_iter().map(|origin| origin.to_string()).collect(),
-						cost: route.cost,
+						cost: route.cost.warm,
+						cold_cost: route.cost.cold,
 					}),
 					connections: Vec::new(),
 				},
@@ -314,6 +319,7 @@ mod tests {
 		assert_eq!(node.announced.as_ref().unwrap().hops, vec!["9007199254740993"]);
 		assert_eq!(node.announced.as_ref().unwrap().hop_count, 1);
 		assert_eq!(node.announced.as_ref().unwrap().cost, 7);
+		assert_eq!(node.announced.as_ref().unwrap().cold_cost, 7);
 		assert_eq!(node.connections.len(), 2);
 		assert_eq!(node.connections[0].direction, Direction::Outbound);
 		assert_eq!(node.connections[1].direction, Direction::Inbound);
@@ -323,7 +329,7 @@ mod tests {
 				"nodes": [{
 					"node": "https://relay-b.example/",
 					"origin_id": "9007199254740993",
-					"announced": { "hops": ["9007199254740993"], "hop_count": 1, "cost": 7 },
+					"announced": { "hops": ["9007199254740993"], "hop_count": 1, "cost": 7, "cold_cost": 7 },
 					"connections": [
 						{ "id": 0, "direction": "outbound" },
 						{ "id": 1, "direction": "inbound" }

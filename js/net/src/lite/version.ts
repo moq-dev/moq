@@ -95,10 +95,10 @@ export function hasExcludeHop(version: Version): boolean {
 	}
 }
 
-/** Whether announcements carry a route cost varint alongside the hop chain: the
- * marginal cost of pulling the broadcast via this route, accumulated per link.
- * Added in lite-06. Older versions carry nothing, so a received route stays at
- * zero and routing falls back to the hop-count tie-break. */
+/** Whether announcements carry the route cost varints alongside the hop chain: the
+ * warm and cold cost of pulling the broadcast via this route, accumulated per link.
+ * Added in lite-06. Older versions carry neither, so a received route has no cost
+ * at all and routing falls back to the hop-count tie-break. */
 export function hasRouteCost(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-06+ behavior.
 	switch (version) {

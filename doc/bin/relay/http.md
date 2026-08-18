@@ -162,7 +162,8 @@ without a unique match are omitted.
       "announced": {
         "hops": ["200"],
         "hop_count": 1,
-        "cost": 1
+        "cost": 1,
+        "cold_cost": 1
       },
       "connections": [
         { "id": 3, "direction": "inbound" }
@@ -173,7 +174,10 @@ without a unique match are omitted.
 ```
 
 `announced` describes the selected route for the node's discovery
-advertisement, not every physical link in the cluster. A node can be visible
+advertisement, not every physical link in the cluster. `cost` prices the route
+as the cluster stands, so it reads 0 through a relay already carrying the
+broadcast; `cold_cost` prices the same route with those discounts removed, which
+is what tells two warm relays apart. A node can be visible
 without a direct connection, directly connected without an advertisement, or
 both. Origin ids are decimal strings because the wire supports values larger
 than JavaScript's precise integer range.
