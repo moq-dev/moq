@@ -84,8 +84,16 @@ mod tests {
 
 	#[test]
 	fn rejects_non_hex_digits() {
-		let bad = format!("zz{}", &VALID[2..]);
-		assert!(decode_hex(&bad).is_err());
+		for bad in [
+			format!("zz{}", &VALID[2..]),
+			// `u8::from_str_radix` accepts a leading sign, so an unchecked chunk would
+			// decode "+a" to 10 and silently yield a fingerprint matching no certificate.
+			format!("+0{}", &VALID[2..]),
+			format!("{}+0", &VALID[..62]),
+			format!(" 0{}", &VALID[2..]),
+		] {
+			assert!(matches!(decode_hex(&bad), Err(MoqError::Connect(_))), "{bad}");
+		}
 	}
 
 	#[test]
@@ -185,9 +193,10 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>, MoqError> {
 
 	let hex = hex.replace(':', "");
 
-	// This string comes straight from the caller. Rejecting non-ASCII up front is what
-	// keeps the 2-byte chunks below aligned with characters rather than splitting one.
-	if !hex.is_ascii() {
+	// This string comes straight from the caller, and one check covers two hazards:
+	// non-ASCII would let a 2-byte chunk split a character, and `from_str_radix` accepts
+	// a leading sign, so an unchecked "+a" would decode to 10 rather than erroring.
+	if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
 		return Err(MoqError::Connect(format!("fingerprint is not hex: {hex}")));
 	}
 
