@@ -138,6 +138,11 @@ pub enum Error {
 	/// The crate was built without a crypto provider, so no TLS is possible.
 	#[error("no crypto provider available; enable aws-lc-rs or ring feature")]
 	NoCryptoProvider,
+
+	/// The section was parsed from released spellings that no longer work. The
+	/// payload is the migration to print.
+	#[error("{0}")]
+	Deprecated(crate::Deprecated),
 }
 
 /// Convenience alias for results produced by this module.
@@ -552,12 +557,17 @@ pub(crate) enum Verification {
 }
 
 impl Connect {
-	/// The released spellings in use, each paired with what replaced it. Reached
-	/// through [`crate::connect::Config::deprecated`].
+	/// The released spellings in use, each paired with what replaced it.
 	///
 	/// Two generations of them: the bare `--tls-*` flags, which split by role, and
 	/// the `--client-tls-*` pair that replaced those before `connect` did.
-	pub(crate) fn deprecated(&self) -> crate::Deprecated {
+	///
+	/// Public because this type is flattened into parsers of its own, not only
+	/// through [`crate::connect::Config`]. Such a caller should report this and stop
+	/// while it still can; [`build`](Self::build) refuses either way, since a
+	/// released `--client-tls-root` silently falling back to the system store is a
+	/// downgrade of exactly the setting that was meant to restrict trust.
+	pub fn deprecated(&self) -> crate::Deprecated {
 		let old = &self.deprecated;
 		let mut found = crate::Deprecated::default();
 
@@ -653,6 +663,12 @@ impl Connect {
 	/// `insecure` by adding a fingerprint would otherwise still accept every
 	/// certificate, with the UI showing the pin as configured.
 	pub(crate) fn verification(&self) -> Result<Verification> {
+		// Every path that resolves a trust policy comes through here, which is what
+		// makes this the one place a released spelling has to be caught: the fields
+		// below are the canonical ones, so an unrefused `--client-tls-root` would
+		// read as "no custom roots" and quietly widen trust to the system store.
+		self.refuse_deprecated()?;
+
 		let fingerprints = self.fingerprints()?;
 		let roots = self.root.clone();
 		let system_roots = self.system_roots;
@@ -706,10 +722,21 @@ impl Connect {
 		self.fingerprint.iter().map(|fp| parse_fingerprint(fp)).collect()
 	}
 
+	/// Refuse a section parsed from released spellings, naming what replaced each.
+	fn refuse_deprecated(&self) -> Result<()> {
+		let deprecated = self.deprecated();
+		match deprecated.is_empty() {
+			true => Ok(()),
+			false => Err(Error::Deprecated(deprecated)),
+		}
+	}
+
 	/// Build a [`rustls::ClientConfig`] from this configuration.
 	///
 	/// Resolves the verification policy, optionally attaches a client identity
-	/// for mTLS, and installs the matching verifier.
+	/// for mTLS, and installs the matching verifier. Refuses a section parsed from
+	/// released `--tls-*` / `--client-tls-*` spellings rather than building one that
+	/// silently ignored them.
 	pub fn build(&self) -> Result<rustls::ClientConfig> {
 		let provider = crypto::provider();
 		let verification = self.verification()?;
@@ -995,9 +1022,14 @@ pub(crate) struct ListenDeprecated {
 }
 
 impl Listen {
-	/// The released spellings in use, each paired with what replaced it. Reached
-	/// through [`crate::listen::Config::deprecated`].
-	pub(crate) fn deprecated(&self) -> crate::Deprecated {
+	/// The released spellings in use, each paired with what replaced it.
+	///
+	/// Public for the same reason as [`Connect::deprecated`]: this type is flattened
+	/// into parsers of its own (moq-cli's `export hls` is one), not only through
+	/// [`crate::listen::Config`]. The methods that build a server config refuse
+	/// anyway, since a dropped `--server-tls-root` would take the mTLS client CAs
+	/// with it and leave the listener accepting unauthenticated peers.
+	pub fn deprecated(&self) -> crate::Deprecated {
 		let old = &self.deprecated;
 		let mut found = crate::Deprecated::default();
 
@@ -1043,8 +1075,18 @@ impl Listen {
 		}
 	}
 
+	/// Refuse a section parsed from released spellings, naming what replaced each.
+	fn refuse_deprecated(&self) -> Result<()> {
+		let deprecated = self.deprecated();
+		match deprecated.is_empty() {
+			true => Ok(()),
+			false => Err(Error::Deprecated(deprecated)),
+		}
+	}
+
 	/// Load all configured root CAs into a [`rustls::RootCertStore`].
 	pub fn load_roots(&self) -> Result<rustls::RootCertStore> {
+		self.refuse_deprecated()?;
 		root_store(&read_roots(&self.root)?)
 	}
 
@@ -1054,6 +1096,7 @@ impl Listen {
 		&self,
 		provider: crypto::Provider,
 	) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> {
+		self.refuse_deprecated()?;
 		let initial = Self::build_client_verifier(&self.root, &provider)?;
 
 		#[cfg(feature = "watch")]
@@ -1093,6 +1136,7 @@ impl Listen {
 	/// protocol like RTMPS that doesn't use ALPN.
 	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub fn server_config(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
+		self.refuse_deprecated()?;
 		server_config(self, alpn)
 	}
 }
@@ -2276,6 +2320,43 @@ mod legacy_tests {
 		] {
 			assert!(reported.contains(line), "missing {line:?} from {reported}");
 		}
+	}
+
+	/// The public builders refuse too, not just the configs that own this section.
+	///
+	/// This type derives `Args`, so a consumer can flatten it into a parser of its
+	/// own and call `build()` without ever going through `connect::Config`. On that
+	/// path an unrefused `--client-tls-root` reads as "no custom roots" and falls
+	/// back to the system store: the trust setting is not merely dropped, it is
+	/// widened to the thing it was written to replace.
+	#[test]
+	fn the_client_builder_refuses_a_released_spelling() {
+		let tls = parse(&["--client-tls-root", "/tmp/ca.pem"]).connect;
+
+		let Err(err) = tls.build() else {
+			panic!("building a client config must refuse a released spelling");
+		};
+		assert!(matches!(err, Error::Deprecated(_)), "{err}");
+		assert!(err.to_string().contains("--connect-tls-root"), "{err}");
+	}
+
+	/// The accept side, where a dropped `--server-tls-root` takes the mTLS client
+	/// CAs with it and leaves the listener accepting unauthenticated peers.
+	/// moq-cli's `export hls` flattens this type directly, so it is a live path.
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[test]
+	fn the_server_builders_refuse_a_released_spelling() {
+		let tls = parse(&["--server-tls-root", "/tmp/ca.pem"]).listen;
+
+		let Err(err) = tls.load_roots() else {
+			panic!("loading roots must refuse a released spelling");
+		};
+		assert!(matches!(err, Error::Deprecated(_)), "{err}");
+
+		let Err(err) = tls.server_config(Vec::new()) else {
+			panic!("building a server config must refuse a released spelling");
+		};
+		assert!(err.to_string().contains("--listen-tls-root"), "{err}");
 	}
 
 	/// Trust material is where silently dropping half a command line does the most
