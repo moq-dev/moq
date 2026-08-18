@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `import::Track::new` splits into `Track::audio` and `Track::video`, `import::TrackStream::new`
+  becomes `TrackStream::video`, and `import::Init` splits into `AudioInit`, `VideoInit`, and
+  `ContainerInit`. Each entry point takes only the fields its kind can honor, so a video hint on an
+  audio import or a label on a container is no longer expressible.
+- `Error::UnsupportedField` becomes `Error::WrongKind`, which names the kind that does handle the
+  format rather than reporting it as unknown. `import::Kind::of` exposes the same classification.
+
 ### Added
 
 - Propagate rendition labels through single-track media imports.

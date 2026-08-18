@@ -9,35 +9,24 @@ use crate::Result;
 use crate::catalog::VideoHint;
 use crate::catalog::hang::CatalogExt;
 
-pub use super::Init;
-use super::init::Kind;
+use super::init::{Kind, wrong_kind};
+pub use super::{AudioInit, VideoInit};
 
-/// The caller-provided video fields for `init`, defaulting the codec from the format when the codec
-/// carries no extra parameters (VP8), so a hint with a codec can publish before the first frame.
-///
-/// The label is plumbed in rather than merged: [`Init::label`] is its only source.
-///
-/// Fallible for the same reason [`audio_config`] is: every arm of [`Track::new`] runs the field
-/// check, so a format added later cannot quietly skip it. Video honors every field today.
-fn video_hint(init: &Init, default_codec: Option<hang::catalog::VideoCodec>) -> Result<VideoHint> {
-	init.reject_unsupported(Kind::Video)?;
-
-	let mut hint = init.video.clone().unwrap_or_default();
+/// The caller's video fields, defaulting the codec from the format when the codec carries no extra
+/// parameters (VP8), so a hint with a codec can publish before the first frame.
+fn video_hint(init: &VideoInit, default_codec: Option<hang::catalog::VideoCodec>) -> VideoHint {
+	let mut hint = init.hint.clone();
 	hint.label = init.label.clone();
 	if hint.codec.is_none() {
 		hint.codec = default_codec;
 	}
-	Ok(hint)
+	hint
 }
 
-/// Apply the import's caller-provided catalog fields to a parsed audio config.
-///
-/// Audio has no hint type: the codec parser fills everything else from the init bytes, so the label
-/// is the only field the caller supplies. A video hint is rejected here rather than ignored.
-fn audio_config(init: &Init, mut config: hang::catalog::AudioConfig) -> Result<hang::catalog::AudioConfig> {
-	init.reject_unsupported(Kind::Audio)?;
+/// The codec parser fills everything from the init bytes, so the label is all the caller adds.
+fn with_label(init: &AudioInit, mut config: hang::catalog::AudioConfig) -> hang::catalog::AudioConfig {
 	config.label = init.label.clone();
-	Ok(config)
+	config
 }
 
 /// Build an H.264 avc3 split + import pair.
@@ -195,73 +184,92 @@ pub struct Track<E: CatalogExt = ()> {
 const AUDIO_GROUP_WARN_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl<E: CatalogExt> Track<E> {
-	/// Create an importer that publishes a single codec onto a reserved track.
+	/// Create an importer that publishes a single audio codec onto a reserved track.
 	///
 	/// The caller reserves the track (by name) with
-	/// [`BroadcastProducer::reserve_track`](moq_net::broadcast::Producer::reserve_track);
-	/// the importer accepts it here, which is where the track's timescale is set. An audio format
-	/// publishes its rendition from the init bytes; a video format resolves in band, publishing up
-	/// front when the [`Init`] video hint carries enough (see [`VideoHint`]).
-	pub fn new(request: moq_net::track::Request, reserved: crate::catalog::Reserved<E>, init: Init) -> Result<Self> {
-		use hang::catalog::VideoCodec;
-
-		// Accept at the legacy microsecond timescale, matching the frame timestamps
-		// the container stamps. A codec-specific timescale (e.g. the opus sample
-		// rate) would be chosen here instead.
+	/// [`BroadcastProducer::reserve_track`](moq_net::broadcast::Producer::reserve_track); the
+	/// importer accepts it here, which is where the track's timescale is set. The rendition is
+	/// published from the init bytes, since audio has no in-band config to wait for.
+	pub fn audio(
+		request: moq_net::track::Request,
+		reserved: crate::catalog::Reserved<E>,
+		init: AudioInit,
+	) -> Result<Self> {
+		// Accept at the legacy microsecond timescale, matching the frame timestamps the container
+		// stamps. A codec-specific timescale (e.g. the opus sample rate) would be chosen here.
 		let track = request.accept(reserved.track_info());
 		let data = init.data.as_ref();
 		let kind = match init.format.as_str() {
-			"avc1" | "avcc" => {
-				let (length_size, import) = build_h264_avc1(track, reserved, data, video_hint(&init, None)?)?;
-				TrackKind::Avc1 { length_size, import }
-			}
-			"avc3" | "h264" => {
-				let (split, import) = build_h264_avc3(track, reserved, data, video_hint(&init, None)?)?;
-				TrackKind::Avc3 { split, import }
-			}
-			"hvc1" | "hvcc" => {
-				let (length_size, import) = build_h265_hvc1(track, reserved, data, video_hint(&init, None)?)?;
-				TrackKind::Hvc1 { length_size, import }
-			}
-			"hev1" => {
-				let (split, import) = build_h265(track, reserved, data, video_hint(&init, None)?)?;
-				TrackKind::Hev1 { split, import }
-			}
-			"av01" | "av1" | "av1c" | "av1C" => {
-				let (split, import) = build_av1(track, reserved, data, video_hint(&init, None)?)?;
-				TrackKind::Av01 { split, import }
-			}
-			"vp8" | "vp08" => {
-				let mut import =
-					crate::codec::vp8::Import::new(track, reserved, video_hint(&init, Some(VideoCodec::VP8))?)?;
-				import.initialize(data)?;
-				TrackKind::Vp8(import)
-			}
-			"vp9" | "vp09" => {
-				let mut import = crate::codec::vp9::Import::new(track, reserved, video_hint(&init, None)?)?;
-				import.initialize(data)?;
-				TrackKind::Vp9(import)
-			}
-			// Audio can't resolve its config from frames, so it needs the init bytes up front (an
-			// OpusHead, AudioSpecificConfig, ...); `codec::config` errors when they're missing or bad.
 			"aac" => {
-				let config = audio_config(&init, crate::codec::aac::config(data)?)?;
+				let config = with_label(&init, crate::codec::aac::config(data)?);
 				TrackKind::Aac(crate::codec::aac::Import::new(track, reserved, config)?)
 			}
 			"opus" => {
-				let config = audio_config(&init, crate::codec::opus::config(data)?)?;
+				let config = with_label(&init, crate::codec::opus::config(data)?);
 				TrackKind::Opus(crate::codec::opus::Import::new(track, reserved, config)?)
 			}
 			"flac" => {
 				// `data` is a FLAC header: the `fLaC` marker plus the STREAMINFO block.
-				let config = audio_config(&init, crate::codec::flac::config(data)?)?;
+				let config = with_label(&init, crate::codec::flac::config(data)?);
 				TrackKind::Flac(crate::codec::flac::Import::new(track, reserved, config)?)
 			}
 			"mp3" => {
-				let config = audio_config(&init, crate::codec::mp3::config(data)?)?;
+				let config = with_label(&init, crate::codec::mp3::config(data)?);
 				TrackKind::Mp3(crate::codec::mp3::Import::new(track, reserved, config)?)
 			}
-			_ => return Err(crate::Error::UnknownFormat(init.format)),
+			_ => return Err(wrong_kind(&init.format, Kind::Audio)),
+		};
+
+		Ok(Self::from_kind(kind))
+	}
+
+	/// Create an importer that publishes a single video codec onto a reserved track.
+	///
+	/// The caller reserves the track as in [`audio`](Self::audio). A video format resolves its
+	/// rendition in band, publishing up front when [`VideoInit::hint`] already carries enough
+	/// (see [`VideoHint`]).
+	pub fn video(
+		request: moq_net::track::Request,
+		reserved: crate::catalog::Reserved<E>,
+		init: VideoInit,
+	) -> Result<Self> {
+		use hang::catalog::VideoCodec;
+
+		let track = request.accept(reserved.track_info());
+		let data = init.data.as_ref();
+		let kind = match init.format.as_str() {
+			"avc1" | "avcc" => {
+				let (length_size, import) = build_h264_avc1(track, reserved, data, video_hint(&init, None))?;
+				TrackKind::Avc1 { length_size, import }
+			}
+			"avc3" | "h264" => {
+				let (split, import) = build_h264_avc3(track, reserved, data, video_hint(&init, None))?;
+				TrackKind::Avc3 { split, import }
+			}
+			"hvc1" | "hvcc" => {
+				let (length_size, import) = build_h265_hvc1(track, reserved, data, video_hint(&init, None))?;
+				TrackKind::Hvc1 { length_size, import }
+			}
+			"hev1" => {
+				let (split, import) = build_h265(track, reserved, data, video_hint(&init, None))?;
+				TrackKind::Hev1 { split, import }
+			}
+			"av01" | "av1" | "av1c" | "av1C" => {
+				let (split, import) = build_av1(track, reserved, data, video_hint(&init, None))?;
+				TrackKind::Av01 { split, import }
+			}
+			"vp8" | "vp08" => {
+				let mut import =
+					crate::codec::vp8::Import::new(track, reserved, video_hint(&init, Some(VideoCodec::VP8)))?;
+				import.initialize(data)?;
+				TrackKind::Vp8(import)
+			}
+			"vp9" | "vp09" => {
+				let mut import = crate::codec::vp9::Import::new(track, reserved, video_hint(&init, None))?;
+				import.initialize(data)?;
+				TrackKind::Vp9(import)
+			}
+			_ => return Err(wrong_kind(&init.format, Kind::Video)),
 		};
 
 		Ok(Self::from_kind(kind))
@@ -548,9 +556,13 @@ impl<E: CatalogExt> TrackStream<E> {
 	/// the importer accepts it here at the legacy microsecond timescale (where a codec-specific
 	/// timescale would be chosen). A [`VideoHint`] carrying a codec publishes the catalog before the
 	/// first frame; any [`Init::data`] seeds the stream (as a call to [`initialize`](Self::initialize)).
-	pub fn new(request: moq_net::track::Request, reserved: crate::catalog::Reserved<E>, init: Init) -> Result<Self> {
+	pub fn video(
+		request: moq_net::track::Request,
+		reserved: crate::catalog::Reserved<E>,
+		init: VideoInit,
+	) -> Result<Self> {
 		let track = request.accept(reserved.track_info());
-		let hint = video_hint(&init, None)?;
+		let hint = video_hint(&init, None);
 		// Only the self-delimiting codecs can be recovered from a raw byte stream.
 		let kind = match init.format.as_str() {
 			"avc3" | "h264" => TrackStreamKind::Avc3 {
@@ -565,7 +577,7 @@ impl<E: CatalogExt> TrackStream<E> {
 				split: crate::codec::av1::Split::new(),
 				import: crate::codec::av1::Import::new(track, reserved, hint)?,
 			},
-			_ => return Err(crate::Error::UnknownFormat(init.format)),
+			_ => return Err(wrong_kind(&init.format, Kind::Video)),
 		};
 
 		let mut stream = Self { kind };
@@ -775,7 +787,7 @@ mod tests {
 		let (mut broadcast, catalog) = new_broadcast();
 		// The importer accepts the reserved track, setting its (microsecond) timescale.
 		let request = broadcast.reserve_track("requested-audio").unwrap();
-		let mut import = Track::new(request, catalog.reserve(), Init::new("opus", opus_head())).unwrap();
+		let mut import = Track::audio(request, catalog.reserve(), AudioInit::new("opus", opus_head())).unwrap();
 
 		assert_eq!(import.name(), "requested-audio");
 		let snapshot = catalog.snapshot();
@@ -800,12 +812,12 @@ mod tests {
 		let init = config.encode();
 		let request = broadcast.reserve_track("audio").unwrap();
 
-		let import = Track::new(
+		let import = Track::audio(
 			request,
 			catalog.reserve(),
-			Init {
+			AudioInit {
 				label: Some("English".to_string()),
-				..Init::new("aac", init.clone())
+				..AudioInit::new("aac", init.clone())
 			},
 		)
 		.unwrap();
@@ -827,7 +839,7 @@ mod tests {
 		// A freshly reserved track attaches its catalog rendition on init.
 		let name = broadcast.unique_name(".opus");
 		let request = broadcast.reserve_track(name).unwrap();
-		let mut import = Track::new(request, catalog.reserve(), Init::new("opus", opus_head())).unwrap();
+		let mut import = Track::audio(request, catalog.reserve(), AudioInit::new("opus", opus_head())).unwrap();
 
 		assert_eq!(import.name(), "0.opus");
 		assert!(catalog.snapshot().audio.renditions.contains_key("0.opus"));
@@ -986,7 +998,7 @@ mod tests {
 		let (mut broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("camera").unwrap();
 
-		let import = Track::new(request, catalog.reserve(), Init::new("avc3", h264_init())).unwrap();
+		let import = Track::video(request, catalog.reserve(), VideoInit::new("avc3", h264_init())).unwrap();
 
 		assert_eq!(import.name(), "camera");
 		let snapshot = catalog.snapshot();
@@ -1002,7 +1014,7 @@ mod tests {
 	async fn reconfiguration_updates_in_place() {
 		let (mut broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("video").unwrap();
-		let mut import = Track::new(request, catalog.reserve(), Init::new("vp8", Vec::new())).unwrap();
+		let mut import = Track::video(request, catalog.reserve(), VideoInit::new("vp8", Vec::new())).unwrap();
 
 		import
 			.decode(
@@ -1024,7 +1036,7 @@ mod tests {
 	async fn audio_publishes_from_init() {
 		let (mut broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("audio").unwrap();
-		let _import = Track::new(request, catalog.reserve(), Init::new("opus", opus_head())).unwrap();
+		let _import = Track::audio(request, catalog.reserve(), AudioInit::new("opus", opus_head())).unwrap();
 
 		let audio = catalog.snapshot().audio.renditions.get("audio").cloned().unwrap();
 		assert_eq!(audio.codec.to_string(), "opus");
@@ -1038,7 +1050,7 @@ mod tests {
 	async fn audio_without_init_errors() {
 		let (mut broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("audio").unwrap();
-		let result = Track::new(request, catalog.reserve(), Init::new("opus", Vec::new()));
+		let result = Track::audio(request, catalog.reserve(), AudioInit::new("opus", Vec::new()));
 		assert!(result.is_err(), "opus with no OpusHead should error, not hang");
 	}
 
@@ -1047,12 +1059,12 @@ mod tests {
 	async fn video_publishes_before_first_frame() {
 		let (mut broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("video").unwrap();
-		let _import = Track::new(
+		let _import = Track::video(
 			request,
 			catalog.reserve(),
-			Init {
+			VideoInit {
 				label: Some("Main camera".to_string()),
-				..Init::new("vp8", Vec::new())
+				..VideoInit::new("vp8", Vec::new())
 			},
 		)
 		.unwrap();
@@ -1062,23 +1074,34 @@ mod tests {
 		assert_eq!(video.label.as_deref(), Some("Main camera"));
 	}
 
-	/// A video hint has nothing to seed on an audio track, so report it rather than ignore it.
+	/// A caller that picks the wrong entry point is told which one handles the format, rather than
+	/// getting a bare "unknown format".
 	#[tokio::test(start_paused = true)]
-	async fn audio_rejects_a_video_hint() {
+	async fn a_constructor_reports_a_format_of_the_other_kind() {
 		let (mut broadcast, catalog) = new_broadcast();
-		let request = broadcast.reserve_track("audio").unwrap();
-		let init = Init::new("opus", opus_head()).with_video(VideoHint {
-			bitrate: Some(128_000),
-			..Default::default()
-		});
-
-		let err = Track::new(request, catalog.reserve(), init).err();
+		let request = broadcast.reserve_track("t").unwrap();
+		let err = Track::audio(request, catalog.reserve(), AudioInit::new("avc3", Vec::new())).err();
 		assert!(
 			matches!(
 				err,
-				Some(crate::Error::UnsupportedField {
-					field: "video hint",
-					kind: "audio"
+				Some(crate::Error::WrongKind {
+					actual: "video",
+					wanted: "audio",
+					..
+				})
+			),
+			"got {err:?}"
+		);
+
+		let request = broadcast.reserve_track("t2").unwrap();
+		let err = Track::video(request, catalog.reserve(), VideoInit::new("opus", Vec::new())).err();
+		assert!(
+			matches!(
+				err,
+				Some(crate::Error::WrongKind {
+					actual: "audio",
+					wanted: "video",
+					..
 				})
 			),
 			"got {err:?}"
@@ -1093,7 +1116,7 @@ mod tests {
 		let (mut broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("camera").unwrap();
 
-		let import = Track::new(request, catalog.reserve(), Init::new("hvc1", hvcc.clone())).unwrap();
+		let import = Track::video(request, catalog.reserve(), VideoInit::new("hvc1", hvcc.clone())).unwrap();
 
 		assert_eq!(import.name(), "camera");
 		let snapshot = catalog.snapshot();
@@ -1112,7 +1135,7 @@ mod tests {
 		let (mut broadcast, catalog) = new_broadcast();
 		let consumer = broadcast.consume();
 		let request = broadcast.reserve_track("video").unwrap();
-		let mut import = Track::new(request, catalog.reserve(), Init::new("hvc1", hvcc)).unwrap();
+		let mut import = Track::video(request, catalog.reserve(), VideoInit::new("hvc1", hvcc)).unwrap();
 
 		let track = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut media = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);

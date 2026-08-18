@@ -24,7 +24,7 @@ mod init;
 mod track;
 
 pub use container::*;
-pub use init::Init;
+pub use init::{AudioInit, ContainerInit, Kind, VideoInit};
 pub use track::*;
 
 #[doc(hidden)]

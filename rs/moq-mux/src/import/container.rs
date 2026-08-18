@@ -5,7 +5,7 @@
 //! track, so neither exposes a single-track demand/name handle. Today every
 //! container supports both; both wrap the same [`ContainerImpl`] dispatch.
 
-use super::{Init, init::Kind};
+use super::ContainerInit;
 use crate::Result;
 
 /// The concrete container importers, shared by [`Container`] and
@@ -98,16 +98,15 @@ impl<E: crate::container::ts::Catalog> Container<E> {
 	pub fn new(
 		broadcast: moq_net::broadcast::Producer,
 		reserved: crate::catalog::Reserved<E>,
-		init: &Init,
+		init: &ContainerInit,
 	) -> Result<Self> {
 		let mut inner = match init.format.as_str() {
 			"fmp4" | "cmaf" => ContainerImpl::fmp4(broadcast, reserved),
 			"mkv" | "webm" | "matroska" => ContainerImpl::mkv(broadcast, reserved),
 			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => ContainerImpl::ts(broadcast, reserved),
 			"flv" => ContainerImpl::flv(broadcast, reserved),
-			_ => return Err(crate::Error::UnknownFormat(init.format.clone())),
+			_ => return Err(super::init::wrong_kind(&init.format, super::init::Kind::Container)),
 		};
-		init.reject_unsupported(Kind::Container)?;
 		inner.decode(&init.data)?;
 		Ok(Self { inner })
 	}
@@ -157,7 +156,7 @@ impl<E: crate::container::ts::Catalog> ContainerStream<E> {
 	pub fn new(
 		broadcast: moq_net::broadcast::Producer,
 		reserved: crate::catalog::Reserved<E>,
-		init: &Init,
+		init: &ContainerInit,
 	) -> Result<Self> {
 		// A separate list from [`Container::new`]: only containers that can be
 		// recovered from a raw byte stream belong here. Today that's all of them,
@@ -168,9 +167,8 @@ impl<E: crate::container::ts::Catalog> ContainerStream<E> {
 			"mkv" | "webm" | "matroska" => ContainerImpl::mkv(broadcast, reserved),
 			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => ContainerImpl::ts(broadcast, reserved),
 			"flv" => ContainerImpl::flv(broadcast, reserved),
-			_ => return Err(crate::Error::UnknownFormat(init.format.clone())),
+			_ => return Err(super::init::wrong_kind(&init.format, super::init::Kind::Container)),
 		};
-		init.reject_unsupported(Kind::Container)?;
 		Ok(Self { inner })
 	}
 
@@ -208,7 +206,6 @@ impl<E: crate::container::ts::Catalog> ContainerStream<E> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::catalog::VideoHint;
 
 	fn new_broadcast() -> (moq_net::broadcast::Producer, crate::catalog::Producer) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -216,50 +213,18 @@ mod tests {
 		(broadcast, catalog)
 	}
 
-	/// A container describes each of its own tracks, so a caller-supplied rendition field has nowhere
-	/// to go. Reject it instead of accepting the call and dropping the field.
+	/// A codec format names its real kind rather than reporting "unknown", so a caller that picked
+	/// the wrong entry point is told which one to use.
 	#[tokio::test(start_paused = true)]
-	async fn a_container_rejects_single_rendition_fields() {
-		for (init, expected) in [
-			(
-				Init {
-					label: Some("English".to_string()),
-					..Init::new("fmp4", Vec::new())
-				},
-				"label",
-			),
-			(
-				Init::new("fmp4", Vec::new()).with_video(VideoHint::default()),
-				"video hint",
-			),
-		] {
+	async fn a_codec_format_reports_the_kind_that_handles_it() {
+		for (format, actual) in [("opus", "audio"), ("avc3", "video")] {
 			let (broadcast, catalog) = new_broadcast();
+			let init = ContainerInit::new(format, Vec::new());
 			let err = Container::<()>::new(broadcast, catalog.reserve(), &init).err();
 			assert!(
-				matches!(err, Some(crate::Error::UnsupportedField { field, kind: "container" }) if field == expected),
-				"expected {expected} to be rejected, got {err:?}"
-			);
-
-			let (broadcast, catalog) = new_broadcast();
-			let err = ContainerStream::<()>::new(broadcast, catalog.reserve(), &init).err();
-			assert!(
-				matches!(err, Some(crate::Error::UnsupportedField { field, kind: "container" }) if field == expected),
-				"expected {expected} to be rejected on a stream, got {err:?}"
+				matches!(&err, Some(crate::Error::WrongKind { actual: a, wanted: "container", .. }) if *a == actual),
+				"got {err:?}"
 			);
 		}
-	}
-
-	/// The format is matched first, so a labelled codec format still falls through to `Track::new`
-	/// rather than reporting the label as the problem.
-	#[tokio::test(start_paused = true)]
-	async fn a_codec_format_still_reports_an_unknown_format() {
-		let init = Init {
-			label: Some("English".to_string()),
-			..Init::new("opus", Vec::new())
-		};
-
-		let (broadcast, catalog) = new_broadcast();
-		let err = Container::<()>::new(broadcast, catalog.reserve(), &init).err();
-		assert!(matches!(err, Some(crate::Error::UnknownFormat(_))), "got {err:?}");
 	}
 }
