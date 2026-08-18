@@ -137,9 +137,13 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		name => moq_video::decode::Kind::Named(name.to_string()),
 	};
 	config.resize.acceleration = args.resize_acceleration;
-	// Reference the source renditions relatively when the output nests under it;
-	// otherwise the derivative catalog advertises only the rungs.
-	config.source = moq_transcode::source_reference(&source_path, &output_path);
+	// Reference the source renditions only when the output nests beneath the source, so a
+	// player that can reach the output can reach the source too. Otherwise the derivative
+	// catalog advertises the rungs alone.
+	config.source = output_path
+		.strip_prefix(&source_path)
+		.is_some_and(|rest| !rest.is_empty())
+		.then(|| source_path.relative_to(&output_path));
 
 	let output = publish
 		.create_broadcast(&output_path, moq_net::broadcast::Route::new().with_announce(true))

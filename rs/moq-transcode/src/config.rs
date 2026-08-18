@@ -1,23 +1,6 @@
 //! Transcoder configuration: the rung ladder and catalog wiring.
 
-use moq_net::{AsPath, PathRelativeOwned};
-
-/// Compute the source broadcast reference for an output nested beneath it.
-///
-/// Both paths are normalized before comparison. Returns `None` when `output` is
-/// not a descendant of `source`, so callers can omit passthrough renditions.
-///
-/// This is [`moq_net::Path::relative_to`] plus that nesting policy; reach for the
-/// path method directly to reference a source anywhere in the namespace.
-pub fn source_reference(source: impl AsPath, output: impl AsPath) -> Option<PathRelativeOwned> {
-	let source = source.as_path();
-	let output = output.as_path();
-	if output.strip_prefix(&source)?.is_empty() {
-		return None;
-	}
-
-	Some(source.relative_to(&output))
-}
+use moq_net::PathRelativeOwned;
 
 /// One candidate output rendition: a target resolution (by height) and bitrate.
 ///
@@ -94,26 +77,5 @@ impl Default for Config {
 			decoder: moq_video::decode::Kind::default(),
 			resize: moq_video::resize::Config::default(),
 		}
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn source_reference_normalizes_and_counts_output_depth() {
-		assert_eq!(source_reference("a/b", "a/b/transcode.hang").unwrap().as_str(), ".");
-		assert_eq!(source_reference("/a//b/", "a/b/dir/").unwrap().as_str(), ".");
-		assert_eq!(
-			source_reference("a/b", "a/b/dir/transcode.hang").unwrap().as_str(),
-			".."
-		);
-		assert_eq!(
-			source_reference("a/b", "a/b/one/two/transcode.hang").unwrap().as_str(),
-			"../.."
-		);
-		assert!(source_reference("a/b", "other/transcode.hang").is_none());
-		assert!(source_reference("a/b", "a/b").is_none());
 	}
 }
