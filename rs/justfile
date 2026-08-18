@@ -129,10 +129,13 @@ check-changed $FILES:
 
     # moq-wasm's crate root is entirely `#![cfg(target_arch = "wasm32")]`, so
     # however it got selected the host-target pass above compiled it to nothing
-    # and saw no errors in it. This wasm32 pass is what actually checks it, and
-    # the selection already says whether moq-wasm or anything it depends on
-    # changed.
-    if [[ "$packages" == "ALL" ]] || grep -q -- '--package moq-wasm' <<< "$packages"; then
+    # and saw no errors in it. This wasm32 pass is what actually checks it.
+    #
+    # The alternation must list every package `wasm` compiles, not just moq-wasm:
+    # nothing in the workspace depends on moq-ffi, so an moq-ffi-only diff selects
+    # only itself and would never reach the gate that exists to cover it. moq-mux
+    # is selected by its dependents, none of which are moq-wasm.
+    if [[ "$packages" == "ALL" ]] || grep -qE -- '--package (moq-wasm|moq-mux|moq-ffi)' <<< "$packages"; then
     	just rs wasm
     fi
 
@@ -147,9 +150,9 @@ fix-changed $FILES:
     	*)     echo "rs: fixing ${packages//--package /}"; just rs fix $packages ;;
     esac
 
-    # Mirrors `check-changed`'s gate: without this a moq-wasm lint is never
-    # auto-fixed, and `check`'s wasm32 clippy pass fails on it later.
-    if [[ "$packages" == "ALL" ]] || grep -q -- '--package moq-wasm' <<< "$packages"; then
+    # Mirrors `check-changed`'s gate, alternation included: without this a wasm32
+    # lint is never auto-fixed, and `check`'s wasm32 clippy pass fails on it later.
+    if [[ "$packages" == "ALL" ]] || grep -qE -- '--package (moq-wasm|moq-mux|moq-ffi)' <<< "$packages"; then
     	just rs wasm-fix
     fi
 

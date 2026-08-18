@@ -47,6 +47,47 @@ fn map_connect_error(err: moq_native::Error) -> MoqError {
 mod tests {
 	use super::*;
 
+	const VALID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+	#[test]
+	fn decodes_a_sha256_fingerprint() {
+		let bytes = decode_hex(VALID).unwrap();
+		assert_eq!(bytes.len(), 32);
+		assert_eq!(bytes[0], 0x01);
+
+		// Colons are the other shape `MoqServer::cert_fingerprints` and openssl print.
+		let colons = VALID
+			.as_bytes()
+			.chunks(2)
+			.map(|c| std::str::from_utf8(c).unwrap())
+			.collect::<Vec<_>>()
+			.join(":");
+		assert_eq!(decode_hex(&colons).unwrap(), bytes);
+	}
+
+	/// Byte-index slicing used to land inside a multi-byte character and panic, which an
+	/// FFI caller could reach with any non-ASCII string of even byte length.
+	#[test]
+	fn rejects_non_ascii_instead_of_panicking() {
+		for input in ["aéa", "é", "ééééééééééééééééééééééééééééééé"] {
+			assert!(matches!(decode_hex(input), Err(MoqError::Connect(_))), "{input}");
+		}
+	}
+
+	#[test]
+	fn rejects_a_wrong_length_fingerprint() {
+		assert!(decode_hex("").is_err());
+		assert!(decode_hex("abcd").is_err());
+		assert!(decode_hex(&VALID[..62]).is_err());
+		assert!(decode_hex(&format!("{VALID}ab")).is_err());
+	}
+
+	#[test]
+	fn rejects_non_hex_digits() {
+		let bad = format!("zz{}", &VALID[2..]);
+		assert!(decode_hex(&bad).is_err());
+	}
+
 	#[test]
 	fn maps_native_auth_connect_errors() {
 		assert!(matches!(
@@ -134,18 +175,46 @@ impl Client {
 }
 
 /// Decode a hex-encoded SHA-256 certificate fingerprint into raw bytes.
-#[cfg(target_arch = "wasm32")]
+///
+/// Not gated on wasm alone so the native test suite covers it: this parses a string an
+/// FFI caller controls, and nothing in this repo runs a wasm test.
+#[cfg(any(target_arch = "wasm32", test))]
 fn decode_hex(hex: &str) -> Result<Vec<u8>, MoqError> {
+	/// A sha-256 digest is 32 bytes, so 64 hex characters.
+	const LEN: usize = 64;
+
 	let hex = hex.replace(':', "");
-	if !hex.len().is_multiple_of(2) {
-		return Err(MoqError::Connect(format!("odd-length fingerprint: {hex}")));
+
+	// This string comes straight from the caller. Rejecting non-ASCII up front is what
+	// keeps the 2-byte chunks below aligned with characters rather than splitting one.
+	if !hex.is_ascii() {
+		return Err(MoqError::Connect(format!("fingerprint is not hex: {hex}")));
 	}
-	(0..hex.len())
-		.step_by(2)
-		.map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|err| MoqError::Connect(format!("{err}"))))
+
+	// WebTransport's `serverCertificateHashes` only accepts a 32-byte sha-256, so a
+	// different length can never match a certificate. Rejecting here beats failing
+	// opaquely inside the browser.
+	if hex.len() != LEN {
+		return Err(MoqError::Connect(format!(
+			"expected a {LEN}-character sha-256 fingerprint, got {}",
+			hex.len()
+		)));
+	}
+
+	hex.as_bytes()
+		.chunks(2)
+		.map(|pair| {
+			let pair = std::str::from_utf8(pair).expect("checked ascii above");
+			u8::from_str_radix(pair, 16).map_err(|err| MoqError::Connect(format!("{err}")))
+		})
 		.collect()
 }
 
+/// Builds a [`MoqSession`]: configure it, then [`connect`](Self::connect).
+///
+/// The configuration differs by target, because the transport does. Native builds expose
+/// the QUIC socket and TLS trust store; the browser owns both, so a wasm build exposes
+/// only the certificate hashes WebTransport accepts.
 #[derive(uniffi::Object)]
 pub struct MoqClient {
 	task: Task<Client>,

@@ -36,7 +36,9 @@ pub async fn connect_with_hashes(url: Url, hashes: Vec<Vec<u8>>) -> Result<Sessi
 	Ok(Session(session))
 }
 
+/// The writable half of a browser WebTransport stream.
 pub struct SendStream(web_transport_wasm::SendStream);
+/// The readable half of a browser WebTransport stream.
 pub struct RecvStream(web_transport_wasm::RecvStream);
 
 /// Wraps `web_transport_wasm::Error` so we can implement the foreign error trait.

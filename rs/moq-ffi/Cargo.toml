@@ -65,14 +65,14 @@ uniffi = { version = "0.31", features = ["cli"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Enables the `wasm_js` backend for rand-via-moq-net; the cfg flag lives in
 # `.cargo/config.toml`. Referenced only as a feature enabler, hence the shear ignore.
-getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom = { workspace = true }
 # `wasm-unstable-single-threaded` drops the `Send`/`Sync` bounds on
 # `UniffiCompatibleFuture` and `FfiConverterArc`, which moq-net's wasm futures
 # (LocalBoxFuture) and Rc-backed handles cannot satisfy.
 uniffi = { version = "0.31", features = ["wasm-unstable-single-threaded"] }
 web-async = { workspace = true }
 web-transport-trait = { workspace = true }
-web-transport-wasm = "0.5"
+web-transport-wasm = { workspace = true }
 
 [build-dependencies]
 uniffi = { version = "0.31", features = ["build"] }
