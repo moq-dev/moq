@@ -295,8 +295,9 @@ pub struct SinkSession {
 	/// than the SETUP-negotiated fallback an absent one selects.
 	protocol: Option<&'static str>,
 	/// What the transport claims to measure. Defaults to nothing, like a transport
-	/// with no congestion controller exposed.
-	stats: SinkStats,
+	/// with no congestion controller exposed. Shared and mutable so a test can
+	/// change it mid-session, the way a real transport's figures move.
+	stats: Arc<Mutex<SinkStats>>,
 }
 
 impl SinkSession {
@@ -305,14 +306,19 @@ impl SinkSession {
 			log,
 			bi_gate: None,
 			protocol: None,
-			stats: SinkStats::default(),
+			stats: Arc::new(Mutex::new(SinkStats::default())),
 		}
 	}
 
 	/// Report these connection statistics, as a real transport would.
-	pub fn with_stats(mut self, stats: SinkStats) -> Self {
-		self.stats = stats;
+	pub fn with_stats(self, stats: SinkStats) -> Self {
+		self.set_stats(stats);
 		self
+	}
+
+	/// Change what the transport reports, mid-session.
+	pub fn set_stats(&self, stats: SinkStats) {
+		*self.stats.lock().unwrap() = stats;
 	}
 
 	/// Report `protocol` as the negotiated ALPN.
@@ -331,7 +337,7 @@ impl SinkSession {
 			log: Log::default(),
 			bi_gate: Some(gate),
 			protocol: None,
-			stats: SinkStats::default(),
+			stats: Arc::new(Mutex::new(SinkStats::default())),
 		}
 	}
 }
@@ -392,7 +398,7 @@ impl web_transport_trait::Session for SinkSession {
 	}
 
 	fn stats(&self) -> impl web_transport_trait::Stats {
-		self.stats
+		*self.stats.lock().unwrap()
 	}
 }
 

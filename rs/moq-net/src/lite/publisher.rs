@@ -175,7 +175,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 	}
 
-	async fn run_probe(session: &S, stream: &mut Stream<S, Version>, _version: Version) -> Result<(), Error> {
+	async fn run_probe(session: &S, stream: &mut Stream<S, Version>, version: Version) -> Result<(), Error> {
 		const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 		const PROBE_MAX_AGE: Duration = Duration::from_secs(10);
 		const PROBE_MAX_DELTA: f64 = 0.25;
@@ -228,20 +228,31 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 			// The two fields are independent on the wire, each using 0 for unknown,
 			// so a transport that exposes only one still has something to report.
+			// Anything this version can't carry is dropped here rather than by the
+			// encoder, so it reads as unknown to every check below.
 			// Scoped so the borrowed stats handle is dropped before the encode
 			// below awaits; it isn't `Send`.
 			let report = {
 				let stats = session.stats();
 				lite::Probe {
 					bitrate: stats.estimated_send_rate(),
-					rtt: stats.rtt().map(|d| d.as_millis() as u64),
+					rtt: version
+						.has_probe_rtt()
+						.then(|| stats.rtt().map(|d| d.as_millis() as u64))
+						.flatten(),
 				}
 			};
 
-			// Neither metric is measurable. A publisher in that position shouldn't
-			// have advertised Report at all, so there is nothing to say.
+			// Nothing left to report. Say so once if it retracts a value the peer is
+			// still holding, then stay quiet rather than repeating "unknown" every
+			// time the max age comes around.
 			if report.bitrate.is_none() && report.rtt.is_none() {
-				continue;
+				let retracts = last_sent
+					.as_ref()
+					.is_some_and(|(prev, _)| prev.bitrate.is_some() || prev.rtt.is_some());
+				if !retracts {
+					continue;
+				}
 			}
 
 			let should_send = match &last_sent {
@@ -2456,11 +2467,15 @@ mod tests {
 	/// Decode the PROBE messages the publisher wrote. The publisher only replies on
 	/// a stream the subscriber opened, so there is no leading ControlType here.
 	fn decode_probes(bytes: &[u8]) -> Vec<lite::Probe> {
+		decode_probes_version(bytes, Version::Lite05)
+	}
+
+	fn decode_probes_version(bytes: &[u8], version: Version) -> Vec<lite::Probe> {
 		use crate::coding::Decode as _;
 		let mut slice = bytes;
 		let mut out = Vec::new();
 		while bytes::Buf::remaining(&slice) > 0 {
-			out.push(lite::Probe::decode(&mut slice, Version::Lite05).unwrap());
+			out.push(lite::Probe::decode(&mut slice, version).unwrap());
 		}
 		out
 	}
@@ -2468,16 +2483,17 @@ mod tests {
 	/// Drive `run_probe` against a transport reporting `stats`, and return whatever
 	/// it wrote before parking.
 	async fn probe_writes(stats: crate::lite::test_transport::SinkStats) -> Vec<lite::Probe> {
+		probe_writes_version(stats, Version::Lite05).await
+	}
+
+	/// As above, on a specific negotiated version.
+	async fn probe_writes_version(stats: crate::lite::test_transport::SinkStats, version: Version) -> Vec<lite::Probe> {
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume()).with_stats(stats);
 		let log = session.log.clone();
-		let mut stream = Stream::open(&session, Version::Lite05).await.unwrap();
+		let mut stream = Stream::open(&session, version).await.unwrap();
 
-		let mut run = std::pin::pin!(Publisher::<SinkSession>::run_probe(
-			&session,
-			&mut stream,
-			Version::Lite05
-		));
+		let mut run = std::pin::pin!(Publisher::<SinkSession>::run_probe(&session, &mut stream, version));
 		// The loop reports on a 100ms cadence, so let the first tick land before
 		// reading what it wrote. It parks on the next tick either way.
 		assert!(futures::poll!(run.as_mut()).is_pending());
@@ -2485,7 +2501,7 @@ mod tests {
 		assert!(futures::poll!(run.as_mut()).is_pending());
 
 		let writes = log.writes.lock().unwrap().clone();
-		decode_probes(&writes)
+		decode_probes_version(&writes, version)
 	}
 
 	/// A transport that exposes an RTT but no send-rate estimate must still report.
@@ -2520,5 +2536,67 @@ mod tests {
 	async fn reports_nothing_when_nothing_is_measurable() {
 		let probes = probe_writes(crate::lite::test_transport::SinkStats::default()).await;
 		assert!(probes.is_empty(), "expected no report, got {probes:?}");
+	}
+
+	/// Lite03's PROBE carries no RTT field, so an RTT-only report has nothing to
+	/// say there. Sending one anyway would serialize as a bare "bitrate unknown"
+	/// and, worse, fire again on every RTT movement.
+	#[tokio::test(start_paused = true)]
+	async fn lite03_sends_nothing_for_an_rtt_only_report() {
+		let stats = crate::lite::test_transport::SinkStats::default().with_rtt(std::time::Duration::from_millis(40));
+		let probes = probe_writes_version(stats, Version::Lite03).await;
+		assert!(probes.is_empty(), "expected no report on lite-03, got {probes:?}");
+	}
+
+	/// Lite03 still reports the half it can carry.
+	#[tokio::test(start_paused = true)]
+	async fn lite03_reports_the_bitrate() {
+		let stats = crate::lite::test_transport::SinkStats::default()
+			.with_send_rate(1_000_000)
+			.with_rtt(std::time::Duration::from_millis(40));
+		let probes = probe_writes_version(stats, Version::Lite03).await;
+
+		assert_eq!(probes.len(), 1);
+		assert_eq!(probes[0].bitrate, Some(1_000_000));
+		assert_eq!(probes[0].rtt, None, "lite-03 carries no RTT field");
+	}
+
+	/// A bitrate that becomes unknown is worth one report: the peer is still
+	/// holding the last value we sent. But only one, however long the stream runs.
+	#[tokio::test(start_paused = true)]
+	async fn a_bitrate_going_unknown_is_retracted_once() {
+		let gate = kio::Producer::new(true);
+		let stats = crate::lite::test_transport::SinkStats::default().with_send_rate(1_000_000);
+		let session = SinkSession::gated_bi(gate.consume()).with_stats(stats);
+		let log = session.log.clone();
+		let mut stream = Stream::open(&session, Version::Lite05).await.unwrap();
+
+		let mut run = std::pin::pin!(Publisher::<SinkSession>::run_probe(
+			&session,
+			&mut stream,
+			Version::Lite05
+		));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+		tokio::time::sleep(Duration::from_millis(150)).await;
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		// The transport stops measuring. Everything after this is unknown.
+		session.set_stats(crate::lite::test_transport::SinkStats::default());
+
+		// Well past PROBE_MAX_AGE, so a stale-report timer would have fired repeatedly.
+		for _ in 0..3 {
+			tokio::time::sleep(Duration::from_secs(11)).await;
+			assert!(futures::poll!(run.as_mut()).is_pending());
+		}
+
+		let writes = log.writes.lock().unwrap().clone();
+		let probes = decode_probes(&writes);
+		assert_eq!(
+			probes.len(),
+			2,
+			"the measurement then one retraction, not a repeating 'unknown': {probes:?}"
+		);
+		assert_eq!(probes[0].bitrate, Some(1_000_000));
+		assert_eq!(probes[1].bitrate, None);
 	}
 }

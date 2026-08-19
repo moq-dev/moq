@@ -27,9 +27,9 @@ impl Message for Probe {
 			0 => None,
 			v => Some(v),
 		};
-		let rtt = match version {
-			Version::Lite03 => None,
-			_ => match u64::decode(r, version)? {
+		let rtt = match version.has_probe_rtt() {
+			false => None,
+			true => match u64::decode(r, version)? {
 				0 => None,
 				v => Some(v),
 			},
@@ -49,12 +49,9 @@ impl Message for Probe {
 		// 0 means unknown; round Some(0) up to 1.
 		let wire = self.bitrate.map(|v| v.max(1)).unwrap_or(0);
 		wire.encode(w, version)?;
-		match version {
-			Version::Lite03 => {}
-			_ => {
-				let wire = self.rtt.map(|v| v.max(1)).unwrap_or(0);
-				wire.encode(w, version)?;
-			}
+		if version.has_probe_rtt() {
+			let wire = self.rtt.map(|v| v.max(1)).unwrap_or(0);
+			wire.encode(w, version)?;
 		}
 		Ok(())
 	}

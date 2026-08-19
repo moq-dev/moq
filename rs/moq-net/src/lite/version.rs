@@ -36,6 +36,18 @@ impl Version {
 		}
 	}
 
+	/// Whether the PROBE message carries the RTT field. Added in lite-04; lite-03
+	/// carries the bitrate alone, so a report with only an RTT to give says nothing
+	/// there and must not be sent.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_probe_rtt(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether the session opens a unidirectional Setup Stream carrying a single SETUP
 	/// message (capabilities + optional Path). Added in lite-05; the older bidirectional
 	/// setup exchange (Lite01/02) and the no-setup drafts (Lite03/04) don't use it.

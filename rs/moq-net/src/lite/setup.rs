@@ -34,7 +34,9 @@ pub enum ProbeLevel {
 	/// No probing. Equivalent to omitting the parameter.
 	#[default]
 	None,
-	/// The publisher can measure and periodically report its estimated bitrate.
+	/// The publisher can measure and periodically report at least one of the PROBE
+	/// metrics: its estimated bitrate, its round-trip time, or both. Either may be
+	/// unknown in any given report, since the two are independent on the wire.
 	Report,
 	/// The publisher can additionally pad the connection (or send redundant data).
 	Increase,

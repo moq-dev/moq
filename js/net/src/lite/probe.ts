@@ -1,6 +1,6 @@
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
-import { Version } from "./version.ts";
+import { hasProbeRtt, Version } from "./version.ts";
 
 function guardProbe(version: Version) {
 	switch (version) {
@@ -12,13 +12,23 @@ function guardProbe(version: Version) {
 	}
 }
 
+/** The metrics a PROBE message carries. Each is independently optional. */
+export interface ProbeInit {
+	/** Estimated send bitrate in bits per second. Omit if unknown. */
+	bitrate?: number;
+	/** Smoothed round-trip time in milliseconds. Omit if unknown. */
+	rtt?: number;
+}
+
 export class Probe {
 	/** Estimated send bitrate in bits per second, or undefined if unknown. */
 	bitrate?: number;
 	/** Smoothed round-trip time in milliseconds, or undefined if unknown. */
 	rtt?: number;
 
-	constructor(bitrate?: number, rtt?: number) {
+	// Named rather than positional: the two fields share a type, so positional
+	// arguments could be swapped without a type error.
+	constructor({ bitrate, rtt }: ProbeInit = {}) {
 		this.bitrate = bitrate;
 		this.rtt = rtt;
 	}
@@ -26,14 +36,8 @@ export class Probe {
 	async #encode(w: Writer, version: Version) {
 		// 0 means unknown; round a measured 0 up to 1.
 		await w.u53(this.bitrate !== undefined ? Math.max(this.bitrate, 1) : 0);
-		switch (version) {
-			case Version.DRAFT_03:
-				break;
-			default: {
-				const wire = this.rtt !== undefined ? Math.max(this.rtt, 1) : 0;
-				await w.u53(wire);
-				break;
-			}
+		if (hasProbeRtt(version)) {
+			await w.u53(this.rtt !== undefined ? Math.max(this.rtt, 1) : 0);
 		}
 	}
 
@@ -42,16 +46,11 @@ export class Probe {
 		const bitrateWire = await r.u53();
 		const bitrate = bitrateWire === 0 ? undefined : bitrateWire;
 		let rtt: number | undefined;
-		switch (version) {
-			case Version.DRAFT_03:
-				break;
-			default: {
-				const wire = await r.u53();
-				rtt = wire === 0 ? undefined : wire;
-				break;
-			}
+		if (hasProbeRtt(version)) {
+			const wire = await r.u53();
+			rtt = wire === 0 ? undefined : wire;
 		}
-		return new Probe(bitrate, rtt);
+		return new Probe({ bitrate, rtt });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

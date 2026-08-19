@@ -23,7 +23,7 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
-import { hasAnnounceId, hasAnnounceOk, hasDatagrams, Version } from "./version.ts";
+import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, Version } from "./version.ts";
 
 const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
@@ -696,12 +696,22 @@ export class Publisher {
 
 				// The two fields are independent on the wire, each using 0 for
 				// unknown, so a transport exposing only one still has something to
-				// report.
+				// report. Anything this version can't carry is dropped here rather
+				// than by the encoder, so it reads as unknown to every check below.
 				const stats = await quic.getStats();
-				const report = new Probe(stats.estimatedSendRate ?? undefined, stats.smoothedRtt ?? undefined);
+				const report = new Probe({
+					bitrate: stats.estimatedSendRate ?? undefined,
+					rtt: hasProbeRtt(this.version) ? (stats.smoothedRtt ?? undefined) : undefined,
+				});
 
-				// Neither metric is measurable, so there is nothing to say.
-				if (report.bitrate === undefined && report.rtt === undefined) continue;
+				// Nothing left to report. Say so once if it retracts a value the peer
+				// is still holding, then stay quiet rather than repeating "unknown"
+				// every time the max age comes around.
+				if (report.bitrate === undefined && report.rtt === undefined) {
+					const retracts =
+						lastSent !== undefined && (lastSent.bitrate !== undefined || lastSent.rtt !== undefined);
+					if (!retracts) continue;
+				}
 
 				let shouldSend: boolean;
 				if (lastSent === undefined || lastSentTime === undefined) {
