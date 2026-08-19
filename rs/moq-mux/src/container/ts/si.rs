@@ -40,8 +40,11 @@ const DEBOUNCE: Duration = Duration::from_secs(1);
 /// (see [`scope`]). A section with no long-form header has no extension, version,
 /// or numbering, so its table is a single latest-value slot: each arrival replaces
 /// the last. That is exactly right for the short-form tables DVB defines (TDT/TOT
-/// are clocks; ST is stuffing), and it is what lets a time table be proxied at all
-/// (#2914): content-keyed identity would mint a fresh key per tick.
+/// are clocks; ST is stuffing receivers discard), and it is what lets a time table
+/// be proxied at all (#2914): content-keyed identity would mint a fresh key per
+/// tick. A hypothetical multi-section *static* short-form table would collapse to
+/// its most recent section and alternate; the debounce bounds that at one small
+/// group per second, which is the acceptable cost of not parsing tables.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum Identity {
 	/// A long-form sub-table: `table_id_extension` plus any table-specific scope.
