@@ -46,6 +46,15 @@ impl<T: Send + 'static> Task<T> {
 	/// Try to lock the state synchronously. Returns `None` if a task is running or it was cancelled.
 	pub fn lock(&self) -> Option<Guard<T>> {
 		let guard = self.state.clone().try_lock_owned().ok()?;
+
+		// The state is still `Some` between a cancel and the take it schedules, so ask the flag
+		// rather than the state. Reading it under the lock is what makes that answer stable:
+		// `cancel` publishes the flag before it queues for this same lock, so a cancel we don't
+		// see here cannot have taken the state either.
+		if *self.cancel.borrow() {
+			return None;
+		}
+
 		tokio::sync::OwnedMutexGuard::try_map(guard, Option::as_mut).ok()
 	}
 
@@ -222,13 +231,16 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn lock_is_empty_after_cancel() {
+	async fn lock_is_empty_from_the_moment_cancel_returns() {
 		let (task, dropped) = tracked();
 		assert!(task.lock().is_some());
 
+		// No await in between: the answer can't depend on whether the scheduled take has run,
+		// or a caller could still reach the state it is about to drop.
 		task.cancel();
-		soon(dropped).await.expect("state should be dropped");
+		assert!(task.lock().is_none());
 
+		soon(dropped).await.expect("state should be dropped");
 		assert!(task.lock().is_none());
 	}
 

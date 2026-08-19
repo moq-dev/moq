@@ -489,7 +489,7 @@ impl MoqTrackConsumer {
 		let _ = self.control.update(subscription.into());
 	}
 
-	/// Cancel all current and future group reads.
+	/// Cancel all current and future reads.
 	///
 	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
