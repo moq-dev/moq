@@ -284,8 +284,10 @@ never meshes, even though a dial in the other direction would have worked.
 Which side waits is a coin flip on a random id, so the same two machines can
 mesh on one run and not the next.
 
-If a pair won't come up, check `--listen` (and 5353) against the firewall on
-*both* hosts, not just the one that looks stuck.
+If a pair won't come up, check the firewall on *both* hosts, not just the one
+that looks stuck. Pass `--listen` yourself first: the port it fills in is
+ephemeral and changes every run, so there is nothing stable to allow until you
+pin it. Then allow that port and UDP 5353 on both.
 
 ### Multiple Stages
 
