@@ -36,6 +36,7 @@ pub mod quinn;
 #[cfg(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "tcp"))]
 mod resolve;
 mod server;
+mod steer;
 #[cfg(feature = "tcp")]
 pub mod tcp;
 pub mod tls;

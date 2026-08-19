@@ -40,7 +40,9 @@ use crate::{
 /// need one at a time. Dropping a field you do not name is safe for all but
 /// [`Self::workers`]: the rest of what must outlive setup is owned by
 /// [`Self::cluster`], while the workers own their threads and sockets, so
-/// dropping them un-binds QUIC.
+/// dropping them stops serving QUIC and releases the port. Keep the pool alive
+/// for as long as you want it served, including while [`Workers::serve`] runs,
+/// which borrows rather than consuming it for exactly that reason.
 #[non_exhaustive]
 pub struct Relay {
 	/// The QUIC/WebTransport server, already bound. Feed it to [`serve`].
@@ -211,7 +213,7 @@ impl Relay {
 			web,
 			shutdown,
 			shutdown_trigger,
-			workers,
+			mut workers,
 			..
 		} = self;
 

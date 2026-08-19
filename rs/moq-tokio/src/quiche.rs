@@ -96,6 +96,11 @@ pub enum Error {
 	#[error("failed to get local address")]
 	NoLocalAddr,
 
+	/// This backend cannot encode the owning worker in its connection IDs, so a
+	/// reuseport group built on it would have no way to steer packets back.
+	#[error("the quiche backend cannot serve per-core workers; use the quinn backend")]
+	ShardUnsupported,
+
 	/// The server was given neither a certificate pair nor hostnames to generate one from.
 	#[error("--tls-cert and --tls-key are required with the quiche backend")]
 	CertRequired,
@@ -562,11 +567,19 @@ impl QuicheServer {
 			tracing::warn!("QUIC-LB is not supported with the quiche backend; ignoring server ID");
 		}
 
+		// Refused rather than degraded: without connection-ID steering the kernel
+		// falls back to hashing addresses, and a client that changes address lands
+		// on a worker that has never seen its connection. `web-transport-quiche`
+		// exposes no connection ID hook to encode the owner with.
+		if config.shard.is_some() {
+			return Err(Error::ShardUnsupported);
+		}
+
 		let quic = quic.resolve();
 
 		let listen =
 			crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND).map_err(Error::ResolveBind)?;
-		let socket = crate::bind::udp(crate::bind::Udp::new(listen).with_reuse_port(config.shard.is_some()))?;
+		let socket = crate::bind::udp(crate::bind::Udp::new(listen))?;
 
 		let (chain, key) = if !config.tls.generate.is_empty() {
 			generate_quiche_cert(&config.tls.generate)?

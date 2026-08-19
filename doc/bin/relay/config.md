@@ -58,13 +58,23 @@ runtime serves every connection off one UDP socket.
 # its packets never cross threads. Everything else (HTTP, WebSocket, tcp/unix,
 # clustering) stays on the shared runtime. Omit to keep QUIC there too.
 #
-# Linux only, and incompatible with listen.tls.generate: each worker would
-# generate a certificate of its own. Point at real certificate files instead.
+# Packets are steered to their worker by connection ID, not by address, so a
+# client that migrates (a NAT rebinding, a network change) stays with the worker
+# that owns its connection.
 #
-# The kernel steers a packet to a worker by hashing its source address and port,
-# so a client that changes address mid-connection (a NAT rebinding, a network
-# change) lands on a worker that has never seen it and loses the connection.
-# Treat this as a benchmarking knob until steering follows the connection ID.
+# Linux only. Needs a backend whose connection IDs can name the owning worker,
+# so listen.backend must be quinn (the default) or noq; quiche refuses to start.
+# Cannot be combined with listen.quic_lb_id, which wants the same bytes of the
+# connection ID.
+#
+# The listen address needs an explicit non-zero port: an ephemeral bind gives
+# each worker a port of its own instead of a shared one.
+#
+# Incompatible with listen.tls.generate, since each worker would generate a
+# certificate of its own. Point at real certificate files instead. Each worker
+# loads and watches those files itself, so a rotation is not atomic across the
+# group: for as long as the reloads take, two workers can be serving different
+# certificates. See https://github.com/moq-dev/moq/issues/2924.
 workers = 8
 
 # Pin each worker to a CPU core. Default: true.

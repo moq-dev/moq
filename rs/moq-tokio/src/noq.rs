@@ -553,8 +553,7 @@ impl NoqServer {
 			}));
 		}
 
-		let socket = crate::bind::udp(crate::bind::Udp::new(listen).with_reuse_port(config.shard.is_some()))
-			.map_err(Error::BindSocket)?;
+		let socket = crate::steer::bind(listen, config.shard).map_err(Error::BindSocket)?;
 
 		// Create the generic QUIC endpoint.
 		let quic = noq::Endpoint::new(endpoint_config, Some(tls), socket, runtime).map_err(Error::CreateEndpoint)?;
@@ -650,6 +649,41 @@ pub(crate) async fn accept(
 			Ok((session, None, identity))
 		}
 		_ => Err(Error::UnsupportedAlpn(alpn)),
+	}
+}
+
+// ── ShardIdGenerator ────────────────────────────────────────────────
+
+/// Connection IDs whose first byte names the reuseport member that owns them,
+/// so the group's steering filter can route later packets back to it.
+struct ShardIdGenerator {
+	shard: crate::listen::Shard,
+}
+
+impl ShardIdGenerator {
+	/// Only the first byte is spoken for; the rest stays random.
+	const LEN: usize = 8;
+
+	fn new(shard: crate::listen::Shard) -> Self {
+		Self { shard }
+	}
+}
+
+impl noq::ConnectionIdGenerator for ShardIdGenerator {
+	fn generate_cid(&mut self) -> noq::ConnectionId {
+		use rand::RngExt;
+		let mut cid = Vec::with_capacity(Self::LEN);
+		cid.push(crate::steer::cid_prefix(self.shard));
+		cid.extend(rand::rng().random_iter::<u8>().take(Self::LEN - 1));
+		noq::ConnectionId::new(cid.as_slice())
+	}
+
+	fn cid_len(&self) -> usize {
+		Self::LEN
+	}
+
+	fn cid_lifetime(&self) -> Option<Duration> {
+		None
 	}
 }
 

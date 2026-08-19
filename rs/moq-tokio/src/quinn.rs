@@ -182,6 +182,11 @@ pub enum Error {
 	#[error("connection ID length ({0}) exceeds maximum of 20")]
 	QuicLbCidTooLong(usize),
 
+	/// Both QUIC-LB and reuseport steering want to own the connection ID, and
+	/// each reads back only its own encoding.
+	#[error("QUIC-LB connection IDs cannot be combined with per-core workers")]
+	ShardWithQuicLb,
+
 	/// The mTLS client verifier couldn't be built from the configured roots.
 	#[error("failed to build client certificate verifier")]
 	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
@@ -545,7 +550,17 @@ impl QuinnServer {
 
 		// Configure connection ID generator with server ID if provided
 		let mut endpoint_config = quinn::EndpointConfig::default();
-		if let Some(server_id) = config.lb_id {
+		if let Some(shard) = config.shard {
+			if config.lb_id.is_some() {
+				return Err(Error::ShardWithQuicLb);
+			}
+			tracing::debug!(
+				index = shard.index(),
+				count = shard.count(),
+				"encoding the shard in connection IDs"
+			);
+			endpoint_config.cid_generator(move || Box::new(ShardIdGenerator::new(shard)));
+		} else if let Some(server_id) = config.lb_id {
 			let nonce_len = config.lb_nonce.unwrap_or(8);
 			if nonce_len < 4 {
 				return Err(Error::QuicLbNonceTooSmall);
@@ -564,8 +579,7 @@ impl QuinnServer {
 			endpoint_config.cid_generator(move || Box::new(ServerIdGenerator::new(server_id.clone(), nonce_len)));
 		}
 
-		let socket = crate::bind::udp(crate::bind::Udp::new(listen).with_reuse_port(config.shard.is_some()))
-			.map_err(Error::BindSocket)?;
+		let socket = crate::steer::bind(listen, config.shard).map_err(Error::BindSocket)?;
 
 		// Create the generic QUIC endpoint.
 		let quic = quinn::Endpoint::new(endpoint_config, Some(tls), socket, runtime).map_err(Error::CreateEndpoint)?;
@@ -662,6 +676,41 @@ pub(crate) async fn accept(
 			Ok((session, None, identity))
 		}
 		_ => Err(Error::UnsupportedAlpn(alpn)),
+	}
+}
+
+// ── ShardIdGenerator ────────────────────────────────────────────────
+
+/// Connection IDs whose first byte names the reuseport member that owns them,
+/// so the group's steering filter can route later packets back to it.
+struct ShardIdGenerator {
+	shard: crate::listen::Shard,
+}
+
+impl ShardIdGenerator {
+	/// Matches quinn's own default length. Only the first byte is spoken for.
+	const LEN: usize = 8;
+
+	fn new(shard: crate::listen::Shard) -> Self {
+		Self { shard }
+	}
+}
+
+impl quinn::ConnectionIdGenerator for ShardIdGenerator {
+	fn generate_cid(&mut self) -> quinn::ConnectionId {
+		use rand::RngExt;
+		let mut cid = Vec::with_capacity(Self::LEN);
+		cid.push(crate::steer::cid_prefix(self.shard));
+		cid.extend(rand::rng().random_iter::<u8>().take(Self::LEN - 1));
+		quinn::ConnectionId::new(&cid)
+	}
+
+	fn cid_len(&self) -> usize {
+		Self::LEN
+	}
+
+	fn cid_lifetime(&self) -> Option<Duration> {
+		None
 	}
 }
 
