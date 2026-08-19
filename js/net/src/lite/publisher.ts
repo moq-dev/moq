@@ -25,7 +25,7 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
-import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, Version } from "./version.ts";
+import { carriesMaxAge, hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, Version } from "./version.ts";
 
 const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
@@ -262,6 +262,18 @@ function waitForSubscription(controls: SubscriptionControls, subscriber: track.S
 }
 
 /**
+ * The budget to serve a peer with, given what its wire could tell us.
+ *
+ * A version without the field decodes as `0`, which is indistinguishable from a peer
+ * genuinely asking for the live edge. Serving that as real time would discard backlog
+ * a legacy subscriber never declined, so fall back to a window wide enough not to drop
+ * and leave enforcement to the receiver, as the IETF path does for the same reason.
+ */
+function servingMaxAge(version: Version, requested: number | undefined): number {
+	return carriesMaxAge(version) ? (requested ?? 0) : Number.MAX_SAFE_INTEGER;
+}
+
+/**
  * Handles publishing broadcasts and managing their lifecycle.
  *
  * @internal
@@ -454,7 +466,7 @@ export class Publisher {
 		const track = broadcast.subscribe(msg.track, {
 			priority: msg.priority,
 			ordered: msg.ordered,
-			maxAge: msg.maxAge,
+			maxAge: servingMaxAge(this.version, msg.maxAge),
 			startGroup: msg.startGroup,
 			endGroup: msg.endGroup,
 		});
@@ -511,7 +523,7 @@ export class Publisher {
 					track.update({
 						priority: update.priority,
 						ordered: update.ordered,
-						maxAge: update.maxAge,
+						maxAge: servingMaxAge(this.version, update.maxAge),
 						startGroup: update.startGroup,
 						endGroup: update.endGroup,
 					});

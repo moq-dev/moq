@@ -13,17 +13,17 @@ import { sendOrder } from "./priority.ts";
 import { Probe as ProbeMessage } from "./probe.ts";
 import { Publisher } from "./publisher.ts";
 import { decodeSubscribeResponse, Subscribe, SubscribeUpdate } from "./subscribe.ts";
-import { ALPN_05, ALPN_06_WIP, Version } from "./version.ts";
+import { ALPN_05, ALPN_06_WIP, carriesMaxAge, Version } from "./version.ts";
 
 // Scheduling tests intentionally stall groups, so keep latency enforcement out of their scope.
-const TEST_LATENCY_MAX_MS = 30_000;
+const TEST_MAX_AGE_MS = 30_000;
 
 function replaySubscribe(props: ConstructorParameters<typeof Subscribe>[0]) {
-	return new Subscribe({ ...props, maxAge: TEST_LATENCY_MAX_MS });
+	return new Subscribe({ ...props, maxAge: TEST_MAX_AGE_MS });
 }
 
 function replayUpdate(props: ConstructorParameters<typeof SubscribeUpdate>[0]) {
-	return new SubscribeUpdate({ ...props, maxAge: TEST_LATENCY_MAX_MS });
+	return new SubscribeUpdate({ ...props, maxAge: TEST_MAX_AGE_MS });
 }
 
 // Delivers `sequences` in the given order, finishes the track, and returns the
@@ -818,7 +818,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 		expect(sub.track.subscription.peek()).toEqual({
 			priority: 9,
 			ordered: true,
-			maxAge: TEST_LATENCY_MAX_MS,
+			maxAge: TEST_MAX_AGE_MS,
 			startGroup: undefined,
 			endGroup: 5,
 		});
@@ -1296,4 +1296,18 @@ test("runProbe rounds a fractional smoothedRtt instead of killing the stream", a
 		client.close();
 		await probing;
 	}
+});
+
+test("a version without the latency field serves a non-dropping budget", () => {
+	// Drafts 01/02 have no latency field, so a SUBSCRIBE from one decodes as 0.
+	// Serving that as a real-time budget would hold every legacy peer to the live edge
+	// and discard backlog it never declined, so those versions get a non-dropping
+	// window and leave enforcement to the receiver. They are the two most-preferred
+	// negotiated versions, so this is the common wire, not an edge case.
+	for (const version of [Version.DRAFT_01, Version.DRAFT_02]) {
+		expect(carriesMaxAge(version)).toBe(false);
+	}
+
+	// A version that does carry it is taken at its word, zero included.
+	expect(carriesMaxAge(Version.DRAFT_05)).toBe(true);
 });
