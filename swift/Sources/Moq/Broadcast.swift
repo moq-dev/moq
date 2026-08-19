@@ -76,8 +76,8 @@ public final class BroadcastConsumer: Sendable {
 
     /// Subscribe to a raw-audio track, decoding to PCM in the layout `output`
     /// declares. `catalogAudio` is the matching rendition from the catalog.
-    public func subscribeAudio(name: String, catalogAudio: Audio, output: AudioDecoderOutput) async throws -> AudioConsumer {
-        AudioConsumer(try await ffi.subscribeAudio(name: name, catalogAudio: catalogAudio, output: output))
+    public func decodeAudio(name: String, catalogAudio: Audio, output: AudioDecoderOutput) async throws -> AudioConsumer {
+        AudioConsumer(try await ffi.decodeAudio(name: name, catalogAudio: catalogAudio, output: output))
     }
 
     /// Subscribe to a JSON snapshot track (lossy latest-value), decoding each value as `Value`.

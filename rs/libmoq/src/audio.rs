@@ -90,7 +90,7 @@ pub struct moq_audio_encoder_output {
 	pub frame_duration_ms: u32,
 }
 
-/// PCM layout the caller wants out of [`moq_consume_audio_raw`].
+/// PCM layout the caller wants out of [`moq_decode_audio`].
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_audio_decoder_output {
@@ -112,7 +112,7 @@ pub struct moq_audio_decoder_output {
 /// One audio frame: payload bytes plus a presentation timestamp.
 ///
 /// `data` is owned by the consume slab (see
-/// [`moq_consume_audio_raw_frame_free`]) or borrowed by the publish call
+/// [`moq_decode_audio_frame_free`]) or borrowed by the publish call
 /// (the publisher copies before returning).
 #[repr(C)]
 #[allow(non_camel_case_types)]
@@ -379,13 +379,13 @@ pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 /// more with a terminal code: `0` (closed cleanly) or a negative error. After
 /// the terminal (`<= 0`) callback, `on_frame` is never called again and
 /// `user_data` is never touched again, so release `user_data` there. The
-/// terminal callback fires even after [`moq_consume_audio_raw_close`].
+/// terminal callback fires even after [`moq_decode_audio_close`].
 ///
 /// # Safety
 /// - `output` must point to a valid [`moq_audio_decoder_output`].
 /// - `user_data` must stay valid until the terminal (`<= 0`) `on_frame` callback.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_consume_audio_raw(
+pub unsafe extern "C" fn moq_decode_audio(
 	catalog: u32,
 	index: u32,
 	output: *const moq_audio_decoder_output,
@@ -418,9 +418,9 @@ pub unsafe extern "C" fn moq_consume_audio_raw(
 /// Does NOT free `user_data`; the on-frame callback still fires once more with a
 /// terminal `0` (or a negative error), which is where `user_data` should be
 /// released. Frame IDs already delivered to the callback are likewise not freed;
-/// release each with [`moq_consume_audio_raw_frame_free`].
+/// release each with [`moq_decode_audio_frame_free`].
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_audio_raw_close(consumer: u32) -> i32 {
+pub extern "C" fn moq_decode_audio_close(consumer: u32) -> i32 {
 	ffi::enter(move || {
 		let consumer = ffi::parse_id(consumer)?;
 		State::lock().audio.consume_close(consumer)
@@ -430,12 +430,12 @@ pub extern "C" fn moq_consume_audio_raw_close(consumer: u32) -> i32 {
 /// Copy a delivered frame's metadata into `dst`.
 ///
 /// The written `dst->data` pointer remains valid until the same `id`
-/// is released with [`moq_consume_audio_raw_frame_free`].
+/// is released with [`moq_decode_audio_frame_free`].
 ///
 /// # Safety
 /// - `dst` must point to a writable [`moq_audio_frame`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_consume_audio_raw_frame(id: u32, dst: *mut moq_audio_frame) -> i32 {
+pub unsafe extern "C" fn moq_decode_audio_frame(id: u32, dst: *mut moq_audio_frame) -> i32 {
 	ffi::enter(move || {
 		let id = ffi::parse_id(id)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
@@ -447,7 +447,7 @@ pub unsafe extern "C" fn moq_consume_audio_raw_frame(id: u32, dst: *mut moq_audi
 /// Required for every delivered frame ID; closing the parent consumer
 /// is not enough.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_audio_raw_frame_free(id: u32) -> i32 {
+pub extern "C" fn moq_decode_audio_frame_free(id: u32) -> i32 {
 	ffi::enter(move || {
 		let id = ffi::parse_id(id)?;
 		State::lock().audio.frame_free(id)

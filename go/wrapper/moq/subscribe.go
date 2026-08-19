@@ -92,10 +92,10 @@ func (b *BroadcastConsumer) SubscribeMedia(name string, container Container, sub
 	return &MediaConsumer{inner: inner}, nil
 }
 
-// SubscribeAudio subscribes to a raw-audio track; samples come back in the
+// DecodeAudio subscribes to a raw-audio track; samples come back in the
 // format declared by output. catalogAudio comes from the catalog.
-func (b *BroadcastConsumer) SubscribeAudio(name string, catalogAudio Audio, output AudioDecoderOutput) (*AudioConsumer, error) {
-	inner, err := b.inner.SubscribeAudio(name, catalogAudio, output)
+func (b *BroadcastConsumer) DecodeAudio(name string, catalogAudio Audio, output AudioDecoderOutput) (*AudioConsumer, error) {
+	inner, err := b.inner.DecodeAudio(name, catalogAudio, output)
 	if err != nil {
 		return nil, err
 	}

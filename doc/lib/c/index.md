@@ -172,7 +172,7 @@ info.priority = 3;
 
 ## Callback lifetime
 
-Any function that registers a callback (`moq_session_connect`, `moq_origin_announced`, `moq_origin_consume_announced`, `moq_origin_request`, `moq_consume_catalog`, `moq_consume_video`, `moq_consume_audio`, `moq_consume_track`, `moq_consume_datagrams`, `moq_consume_video_raw`, `moq_consume_audio_raw`, `moq_consume_json_snapshot`, `moq_consume_json_stream`) takes a `void *user_data` pointer that libmoq passes back to every callback invocation. The status code carries the lifecycle:
+Any function that registers a callback (`moq_session_connect`, `moq_origin_announced`, `moq_origin_consume_announced`, `moq_origin_request`, `moq_consume_catalog`, `moq_consume_video`, `moq_consume_audio`, `moq_consume_track`, `moq_consume_datagrams`, `moq_decode_video`, `moq_decode_audio`, `moq_consume_json_snapshot`, `moq_consume_json_stream`) takes a `void *user_data` pointer that libmoq passes back to every callback invocation. The status code carries the lifecycle:
 
 - **`> 0`**: a live result you can use: a frame, catalog, or announce ID (or `1` to mean "session connected"). May fire any number of times.
 - **`0`**: closed cleanly. **Terminal.**
@@ -311,7 +311,7 @@ The track is named after the codec (`.avc3` / `.hev1`), and its catalog renditio
 
 Two knobs run the live encoder. `moq_encode_video_bitrate` retunes it without forcing a keyframe, which is cheap enough to drive from a congestion controller; a negative return means this backend can't retune while running, so stop adapting rather than stop publishing. `moq_encode_video_cut` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group, so a subscriber can always join without it. Reach for it only when you want to place the boundaries yourself, aligning groups with something the encoder can't see such as a scene change or a source switch. Call `moq_encode_video_finish` to flush the codec and end the track.
 
-`moq_publish_audio_raw` is the same shape for PCM in and Opus out, and `moq_consume_video_raw` / `moq_consume_audio_raw` are the decode-side mirrors, delivering I420 frames and PCM through the usual callback contract.
+`moq_encode_audio` is the same shape for PCM in and Opus out, and `moq_decode_video` / `moq_decode_audio` are the decode-side mirrors, delivering I420 frames and PCM through the usual callback contract.
 
 ## Raw Tracks
 

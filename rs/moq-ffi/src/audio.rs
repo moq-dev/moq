@@ -255,7 +255,7 @@ impl MoqBroadcastConsumer {
 	/// the catalog (see
 	/// [`MoqCatalogConsumer::next`](crate::consumer::MoqCatalogConsumer::next));
 	/// the codec is inferred from it. Only Opus is currently supported.
-	pub async fn subscribe_audio(
+	pub async fn decode_audio(
 		&self,
 		name: String,
 		catalog_audio: crate::media::MoqAudio,

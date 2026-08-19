@@ -233,7 +233,7 @@ class TrackConsumer:
 class AudioConsumer:
     """Async iterator of decoded audio frames.
 
-    Built via :meth:`BroadcastConsumer.subscribe_audio`. The PCM layout
+    Built via :meth:`BroadcastConsumer.decode_audio`. The PCM layout
     is fixed by the :class:`AudioDecoderOutput` passed at subscribe
     time; each frame's ``data`` is raw bytes in that format.
     """
@@ -447,7 +447,7 @@ class BroadcastConsumer:
         container = track if isinstance(track, Container) else track.container
         return MediaConsumer(await self._inner.subscribe_media(name, container, subscription))
 
-    async def subscribe_audio(
+    async def decode_audio(
         self,
         name: str,
         catalog_audio: Audio,
@@ -464,7 +464,7 @@ class BroadcastConsumer:
         the congestion-control knob. (Named ``_max`` to leave room for
         a future ``latency_min_ms`` jitter-buffer floor.)
         """
-        return AudioConsumer(await self._inner.subscribe_audio(name, catalog_audio, output))
+        return AudioConsumer(await self._inner.decode_audio(name, catalog_audio, output))
 
     async def catalog(self) -> Catalog:
         """Convenience: subscribe and return the first catalog."""

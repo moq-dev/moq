@@ -10,7 +10,7 @@ type (
 	Audio = ffi.MoqAudio
 	// AudioCodec identifies an audio track's codec; Opus is currently the only value.
 	AudioCodec = ffi.MoqAudioCodec
-	// AudioDecoderOutput configures the PCM format, sample rate, and channels SubscribeAudio delivers.
+	// AudioDecoderOutput configures the PCM format, sample rate, and channels DecodeAudio delivers.
 	AudioDecoderOutput = ffi.MoqAudioDecoderOutput
 	// AudioEncoderInput declares the PCM sample format, sample rate, and channel count of frames written to an audio producer.
 	AudioEncoderInput = ffi.MoqAudioEncoderInput

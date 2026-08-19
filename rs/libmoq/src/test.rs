@@ -2135,7 +2135,7 @@ fn gray_rgba(width: u32, height: u32) -> Vec<u8> {
 
 /// The publish-side mirror of [`video_raw_decode`]: hand raw RGBA to
 /// `moq_encode_video` and read decoded I420 back out of
-/// `moq_consume_video_raw`, so the encode and decode halves meet on the wire.
+/// `moq_decode_video`, so the encode and decode halves meet on the wire.
 #[test]
 fn video_raw_publish_consume() {
 	let origin = id(moq_origin_create());
@@ -2184,7 +2184,7 @@ fn video_raw_publish_consume() {
 
 	let decoder = moq_video_decoder_output { latency_max_ms: 10_000 };
 	let frame_cb = Callback::new();
-	let consumer = id(unsafe { moq_consume_video_raw(catalog_id, 0, &decoder, Some(channel_callback), frame_cb.ptr) });
+	let consumer = id(unsafe { moq_decode_video(catalog_id, 0, &decoder, Some(channel_callback), frame_cb.ptr) });
 
 	// Keep feeding the encoder so the subscriber has frames to decode after it
 	// joins, whatever the group boundary it landed on.
@@ -2200,17 +2200,17 @@ fn video_raw_publish_consume() {
 		data: std::ptr::null(),
 		data_size: 0,
 	};
-	assert_eq!(unsafe { moq_consume_video_raw_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(frame.width, 320);
 	assert_eq!(frame.height, 240);
 	assert_eq!(frame.data_size, 320 * 240 * 3 / 2, "tightly-packed I420");
 
-	assert_eq!(moq_consume_video_raw_frame_free(frame_id), 0);
-	assert_eq!(moq_consume_video_raw_close(consumer), 0);
+	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
+	assert_eq!(moq_decode_video_close(consumer), 0);
 	loop {
 		let code = frame_cb.recv();
 		if code > 0 {
-			assert_eq!(moq_consume_video_raw_frame_free(id(code)), 0);
+			assert_eq!(moq_decode_video_frame_free(id(code)), 0);
 		} else {
 			assert_eq!(code, 0, "raw video close delivers terminal 0");
 			break;
@@ -2509,7 +2509,7 @@ fn video_raw_publish_rejects_invalid_config() {
 }
 
 /// End-to-end native decode: publish real H.264 (encoded by moq-video) and
-/// consume it through `moq_consume_video_raw`, asserting decoded I420 frames.
+/// consume it through `moq_decode_video`, asserting decoded I420 frames.
 #[test]
 fn video_raw_decode() {
 	// Encode a few gray frames to Annex-B (avc3, SPS/PPS inline on the keyframe).
@@ -2547,7 +2547,7 @@ fn video_raw_decode() {
 	// Subscribe + decode before publishing frames so the keyframe group is delivered.
 	let output = moq_video_decoder_output { latency_max_ms: 10_000 };
 	let frame_cb = Callback::new();
-	let consumer = id(unsafe { moq_consume_video_raw(catalog_id, 0, &output, Some(channel_callback), frame_cb.ptr) });
+	let consumer = id(unsafe { moq_decode_video(catalog_id, 0, &output, Some(channel_callback), frame_cb.ptr) });
 
 	for (i, frame) in frames.iter().enumerate() {
 		assert_eq!(
@@ -2565,20 +2565,20 @@ fn video_raw_decode() {
 		data: std::ptr::null(),
 		data_size: 0,
 	};
-	assert_eq!(unsafe { moq_consume_video_raw_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(frame.width, 320);
 	assert_eq!(frame.height, 240);
 	assert_eq!(frame.data_size, 320 * 240 * 3 / 2, "tightly-packed I420");
 	assert!(!frame.data.is_null());
 
-	assert_eq!(moq_consume_video_raw_frame_free(frame_id), 0);
-	assert_eq!(moq_consume_video_raw_close(consumer), 0);
+	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
+	assert_eq!(moq_decode_video_close(consumer), 0);
 
 	// Drain any other decoded frames already queued, then expect the terminal 0.
 	loop {
 		let code = frame_cb.recv();
 		if code > 0 {
-			assert_eq!(moq_consume_video_raw_frame_free(id(code)), 0);
+			assert_eq!(moq_decode_video_frame_free(id(code)), 0);
 		} else {
 			assert_eq!(code, 0, "raw video close delivers terminal 0");
 			break;

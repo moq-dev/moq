@@ -32,7 +32,7 @@ use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
 #[derive(Clone, Copy, Debug)]
 pub enum moq_video_pixel_format {
 	/// Tightly-packed planar I420: Y, then U, then V, no row padding.
-	/// `width * height * 3 / 2` bytes, the same layout [`moq_consume_video_raw`]
+	/// `width * height * 3 / 2` bytes, the same layout [`moq_decode_video`]
 	/// hands back.
 	MOQ_VIDEO_PIXEL_FORMAT_I420 = 0,
 	/// Tightly-packed RGBA, `width * height * 4` bytes, no row padding.
@@ -122,7 +122,7 @@ pub struct moq_video_encoder_frame {
 	pub data_size: usize,
 }
 
-/// Decode-side configuration the caller passes to [`moq_consume_video_raw`].
+/// Decode-side configuration the caller passes to [`moq_decode_video`].
 ///
 /// Output is always tightly-packed I420 (see [`moq_video_frame`]); there is no
 /// format/resolution knob yet. The struct exists so future options (a pixel
@@ -137,13 +137,13 @@ pub struct moq_video_decoder_output {
 	pub latency_max_ms: u64,
 }
 
-/// One decoded video frame from [`moq_consume_video_raw`]: packed I420 plus a
+/// One decoded video frame from [`moq_decode_video`]: packed I420 plus a
 /// presentation timestamp.
 ///
 /// `data` is the Y plane (`width * height`), then U, then V (`width/2 *
 /// height/2` each), no row padding, BT.601 limited range, with `width` and
 /// `height` even. It's owned by the consume slab and stays valid until the same
-/// id is released with [`moq_consume_video_raw_frame_free`].
+/// id is released with [`moq_decode_video_frame_free`].
 ///
 /// The publish side has its own [`moq_video_encoder_frame`], which carries no
 /// dimensions because the encoder already fixed them.
@@ -609,13 +609,13 @@ pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 /// once more with a terminal code: `0` (closed cleanly) or a negative error.
 /// After the terminal (`<= 0`) callback, `on_frame` is never called again and
 /// `user_data` is never touched again, so release `user_data` there. The terminal
-/// callback fires even after [`moq_consume_video_raw_close`].
+/// callback fires even after [`moq_decode_video_close`].
 ///
 /// # Safety
 /// - `output` must point to a valid [`moq_video_decoder_output`].
 /// - `user_data` must stay valid until the terminal (`<= 0`) `on_frame` callback.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_consume_video_raw(
+pub unsafe extern "C" fn moq_decode_video(
 	catalog: u32,
 	index: u32,
 	output: *const moq_video_decoder_output,
@@ -644,9 +644,9 @@ pub unsafe extern "C" fn moq_consume_video_raw(
 /// Does NOT free `user_data`; the on-frame callback still fires once more with a
 /// terminal `0` (or a negative error), which is where `user_data` should be
 /// released. Frame ids already delivered are likewise not freed; release each
-/// with [`moq_consume_video_raw_frame_free`].
+/// with [`moq_decode_video_frame_free`].
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_video_raw_close(consumer: u32) -> i32 {
+pub extern "C" fn moq_decode_video_close(consumer: u32) -> i32 {
 	ffi::enter(move || {
 		let consumer = ffi::parse_id(consumer)?;
 		State::lock().video.consume_close(consumer)
@@ -656,12 +656,12 @@ pub extern "C" fn moq_consume_video_raw_close(consumer: u32) -> i32 {
 /// Copy a delivered frame's metadata into `dst`.
 ///
 /// The written `dst->data` pointer remains valid until the same `id` is released
-/// with [`moq_consume_video_raw_frame_free`].
+/// with [`moq_decode_video_frame_free`].
 ///
 /// # Safety
 /// - `dst` must point to a writable [`moq_video_frame`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_consume_video_raw_frame(id: u32, dst: *mut moq_video_frame) -> i32 {
+pub unsafe extern "C" fn moq_decode_video_frame(id: u32, dst: *mut moq_video_frame) -> i32 {
 	ffi::enter(move || {
 		let id = ffi::parse_id(id)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
@@ -672,7 +672,7 @@ pub unsafe extern "C" fn moq_consume_video_raw_frame(id: u32, dst: *mut moq_vide
 /// Free a frame previously delivered through the consume callback. Required for
 /// every delivered frame id; closing the parent consumer is not enough.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_video_raw_frame_free(id: u32) -> i32 {
+pub extern "C" fn moq_decode_video_frame_free(id: u32) -> i32 {
 	ffi::enter(move || {
 		let id = ffi::parse_id(id)?;
 		State::lock().video.frame_free(id)
