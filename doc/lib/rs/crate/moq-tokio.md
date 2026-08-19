@@ -18,6 +18,7 @@ Tokio-based connection helpers for native Rust applications. Provides TLS config
 - QUIC connection setup via a pluggable backend, defaulting to [quinn](https://crates.io/crates/quinn), with noq and quiche available through features
 - WebTransport session management
 - Development certificate generation for local testing
+- Thread-per-core QUIC workers (`worker::Workers`): a pinned thread and socket per core, sharing one port and steered by connection ID
 
 ## Installation
 

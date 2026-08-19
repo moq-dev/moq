@@ -32,7 +32,9 @@
 //! index. That is the whole rule in seven instructions, with no `CAP_BPF`, no
 //! BPF toolchain in the build, and no map to keep alive across restarts. The
 //! cost is that the kernel selects by *position*, so the group has to be built
-//! once, in order, and never resized. [`bind`] is what guarantees that.
+//! once, in order, and never resized. [`crate::worker::Workers`] is what
+//! guarantees that, which is why [`crate::listen::Shard`] cannot be minted from
+//! outside this crate.
 
 use std::io;
 use std::net::{SocketAddr, UdpSocket};

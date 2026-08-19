@@ -24,9 +24,7 @@
 
 use anyhow::Context;
 
-use crate::{
-	Auth, Cluster, Config, Connection, DEFAULT_DRAIN_TIMEOUT, Internal, Shutdown, ShutdownTrigger, Web, Workers,
-};
+use crate::{Auth, Cluster, Config, Connection, DEFAULT_DRAIN_TIMEOUT, Internal, Shutdown, ShutdownTrigger, Web};
 
 /// A fully assembled relay: the listeners and the shared cluster behind them.
 ///
@@ -39,10 +37,8 @@ use crate::{
 /// every field does not compile outside this crate) or move out the fields you
 /// need one at a time. Dropping a field you do not name is safe for all but
 /// [`Self::workers`]: the rest of what must outlive setup is owned by
-/// [`Self::cluster`], while the workers own their threads and sockets, so
-/// dropping them stops serving QUIC and releases the port. Keep the pool alive
-/// for as long as you want it served, including while [`Workers::serve`] runs,
-/// which borrows rather than consuming it for exactly that reason.
+/// [`Self::cluster`], while each worker owns a thread and a bound socket, so
+/// dropping them releases the QUIC port.
 #[non_exhaustive]
 pub struct Relay {
 	/// The QUIC/WebTransport server, already bound. Feed it to [`serve`].
@@ -80,10 +76,10 @@ pub struct Relay {
 	/// Starts graceful shutdown for [`Self::shutdown`].
 	pub shutdown_trigger: ShutdownTrigger,
 
-	/// The thread-per-core QUIC workers, already bound. Drive them with
-	/// [`Workers::serve`]; inert unless `runtime.workers` is configured, in which
-	/// case [`Self::server`] carries no QUIC listener of its own.
-	pub workers: Workers,
+	/// The thread-per-core QUIC workers, already bound and waiting to be split
+	/// and run. Empty unless `runtime.workers` is configured, in which case
+	/// [`Self::server`] carries no QUIC listener of its own.
+	pub workers: Vec<moq_tokio::worker::Worker>,
 }
 
 impl Relay {
@@ -102,20 +98,24 @@ impl Relay {
 
 		// Bind the QUIC workers first: they own the listen address when configured,
 		// so the server below must not also try to bind it.
-		let workers = Workers::bind(&config).context("failed to start the QUIC workers")?;
-
-		let mut listen = config.listen.clone();
-		if workers.enabled() {
-			listen.listeners = moq_tokio::listen::Listeners::Stream;
-		}
+		let workers = match config.runtime.workers() {
+			Some(worker) => Some(
+				moq_tokio::worker::Workers::bind(config.listen.clone(), config.quic.clone(), worker)
+					.context("failed to start the QUIC workers")?,
+			),
+			None => None,
+		};
 
 		#[allow(unused_mut)]
-		let mut server = listen.init(config.quic.clone())?;
+		let mut server = match &workers {
+			Some(_) => config.listen.clone().init_streams()?,
+			None => config.listen.clone().init(config.quic.clone())?,
+		};
 		let client = config.connect.clone().init(config.quic.clone())?;
 
 		// `None` for a stream-only server (no QUIC); any other error is real.
-		let addr = match workers.local_addr() {
-			Some(addr) => Some(addr),
+		let addr = match &workers {
+			Some(workers) => Some(workers.local_addr()),
 			None => match server.local_addr() {
 				Ok(addr) => Some(addr),
 				Err(moq_tokio::Error::NoBackend(_)) => None,
@@ -164,7 +164,10 @@ impl Relay {
 		let (shutdown_trigger, shutdown) = Shutdown::new(drain_timeout);
 		// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
 		// The workers hold the certificates when they own QUIC; the server has none.
-		let certificates = workers.certificates().unwrap_or_else(|| server.certificates());
+		let certificates = match &workers {
+			Some(workers) => workers.certificates(),
+			None => server.certificates(),
+		};
 		let web = Web::new(auth.clone(), cluster.clone(), certificates, config.web)
 			.with_shutdown(shutdown.clone())
 			.with_versions(server_versions);
@@ -195,7 +198,7 @@ impl Relay {
 			addr,
 			shutdown,
 			shutdown_trigger,
-			workers,
+			workers: workers.map(Vec::from_iter).unwrap_or_default(),
 		})
 	}
 
@@ -213,7 +216,7 @@ impl Relay {
 			web,
 			shutdown,
 			shutdown_trigger,
-			mut workers,
+			workers,
 			..
 		} = self;
 
@@ -232,12 +235,41 @@ impl Relay {
 		#[cfg(not(feature = "jemalloc"))]
 		let jemalloc = std::future::pending::<anyhow::Result<()>>();
 
+		// Each worker serves from its own thread, so the future built here only
+		// reports the outcome. The runners are what own the threads: they have to
+		// outlive the loop below, or the sockets go away with them.
+		let mut runners = Vec::with_capacity(workers.len());
+		let mut running = futures::stream::FuturesUnordered::new();
+		for worker in workers {
+			let index = worker.index();
+			let (server, runner) = worker.split();
+			let task = runner.run(serve(server, cluster.clone(), auth.clone(), shutdown.clone()));
+			running.push(async move {
+				match task.await {
+					Ok(res) => res.with_context(|| format!("QUIC worker {index} failed")),
+					Err(err) => Err(anyhow::Error::new(err).context(format!("QUIC worker {index} stopped"))),
+				}
+			});
+			runners.push(runner);
+		}
+
+		// Pends forever with no workers, so it composes into the `select!` either
+		// way. A worker only stops on error or on shutdown, so the first one to
+		// finish ends the relay the same way the shared accept loop does.
+		let quic_workers = async move {
+			use futures::StreamExt;
+			match running.next().await {
+				Some(res) => res,
+				None => std::future::pending().await,
+			}
+		};
+
 		tokio::select! {
 			Err(err) = started.run() => Err(err).context("cluster failed"),
 			Err(err) = web.run() => Err(err).context("web server failed"),
 			Err(err) = internal.run() => Err(err).context("internal server failed"),
 			Err(err) = serve(server, cluster.clone(), auth.clone(), shutdown.clone()) => Err(err).context("server failed"),
-			Err(err) = workers.serve(cluster, auth, shutdown.clone()) => Err(err).context("QUIC workers failed"),
+			Err(err) = quic_workers => Err(err).context("QUIC workers failed"),
 			Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
 			res = drain_on_signal(shutdown_trigger, shutdown.drain_timeout) => res,
 			else => Ok(()),

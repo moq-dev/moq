@@ -490,7 +490,7 @@ pub(crate) struct QuinnServer {
 }
 
 impl QuinnServer {
-	pub fn new(config: listen::Config, quic: &crate::quic::Config) -> Result<Self> {
+	pub fn new(config: listen::Config, quic: &crate::quic::Config, shard: Option<listen::Shard>) -> Result<Self> {
 		let quic = quic.resolve();
 		let mut transport = quinn::TransportConfig::default();
 		apply_transport(&mut transport, &quic);
@@ -550,7 +550,7 @@ impl QuinnServer {
 
 		// Configure connection ID generator with server ID if provided
 		let mut endpoint_config = quinn::EndpointConfig::default();
-		if let Some(shard) = config.shard {
+		if let Some(shard) = shard {
 			if config.lb_id.is_some() {
 				return Err(Error::ShardWithQuicLb);
 			}
@@ -579,7 +579,7 @@ impl QuinnServer {
 			endpoint_config.cid_generator(move || Box::new(ServerIdGenerator::new(server_id.clone(), nonce_len)));
 		}
 
-		let socket = crate::steer::bind(listen, config.shard).map_err(Error::BindSocket)?;
+		let socket = crate::steer::bind(listen, shard).map_err(Error::BindSocket)?;
 
 		// Create the generic QUIC endpoint.
 		let quic = quinn::Endpoint::new(endpoint_config, Some(tls), socket, runtime).map_err(Error::CreateEndpoint)?;
@@ -833,7 +833,7 @@ mod tests {
 			..Default::default()
 		};
 
-		let server = QuinnServer::new(server_config, &quic).expect("server init");
+		let server = QuinnServer::new(server_config, &quic, None).expect("server init");
 		let addr = server.local_addr().expect("local addr");
 
 		let accepted = tokio::spawn(async move {

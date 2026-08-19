@@ -95,6 +95,33 @@ pub enum Error {
 	#[error("--listen-quic-lb-nonce needs --listen-quic-lb-id")]
 	LbNonceWithoutId,
 
+	/// A worker group was asked to generate its own certificate, which would give
+	/// every member a different one.
+	#[error("QUIC workers cannot generate certificates; configure a certificate and key instead")]
+	WorkerTlsGenerate,
+
+	/// A worker group was pointed at an ephemeral port, so each member bound a
+	/// port of its own instead of sharing one.
+	#[error("QUIC workers need an explicit non-zero listen port; worker {index} bound {addr} instead of {first}")]
+	WorkerPortMismatch {
+		/// The member that disagreed.
+		index: u16,
+		/// What it bound.
+		addr: std::net::SocketAddr,
+		/// What the first member bound, which the rest must match.
+		first: std::net::SocketAddr,
+	},
+
+	/// A worker thread could not be spawned, or died before it finished binding.
+	#[error("QUIC worker {index} failed to start")]
+	WorkerStart {
+		/// The member that failed.
+		index: u16,
+		/// Why, when the thread got far enough to say.
+		#[source]
+		source: Arc<std::io::Error>,
+	},
+
 	/// The server's WebTransport response carried a status outside the valid HTTP range.
 	#[error("invalid status code")]
 	InvalidStatusCode,

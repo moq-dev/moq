@@ -28,6 +28,21 @@ impl crate::listen::Config {
 		Server::new(self, quic)
 	}
 
+	/// Build a server with only the `tcp`/`unix` listeners, leaving the QUIC
+	/// (UDP) bind to someone else.
+	///
+	/// For a process whose QUIC lives on other threads: a
+	/// [`worker::Workers`](crate::worker::Workers) group holds the UDP port from
+	/// its own pinned threads while this server keeps the stream listeners on the
+	/// caller's runtime. A server with no stream listener configured accepts
+	/// nothing, which is the honest outcome rather than a surprise UDP bind.
+	///
+	/// Distinct from clearing [`bind`](crate::listen::Config::bind), which still
+	/// opens the default QUIC listener when nothing else is configured.
+	pub fn init_streams(self) -> crate::Result<Server> {
+		Server::build(self, crate::quic::Config::default(), Parts::Streams)
+	}
+
 	/// Returns the configured versions, defaulting to all if none specified.
 	pub fn versions(&self) -> moq_net::Versions {
 		if self.version.is_empty() {
@@ -65,6 +80,56 @@ impl crate::listen::Config {
 #[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 pub(crate) const DEFAULT_BIND: &str = "[::]:443";
 
+/// Which listeners a [`Server`] opens, out of the ones its config describes.
+///
+/// Not configuration, which is why it is a constructor argument rather than a
+/// field on [`crate::listen::Config`]: it says how *one process* splits its
+/// listeners across threads, not what the process listens on. Keeping it out of
+/// the config also keeps it off the clap and serde surface, where it would be a
+/// flag nobody can set and a field every round-trip drops.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) enum Parts {
+	/// Every listener the config asks for.
+	#[default]
+	All,
+
+	/// The stream (`tcp`/`unix`) listeners only.
+	Streams,
+
+	/// The QUIC listener only, as one member of a `SO_REUSEPORT` group. Folding
+	/// the slot in here is what stops a shard and a stream-only server from being
+	/// asked for at once.
+	Shard(crate::listen::Shard),
+}
+
+impl Parts {
+	/// Whether a QUIC backend should be built.
+	fn quic(self) -> bool {
+		matches!(self, Self::All | Self::Shard(_))
+	}
+
+	/// Whether the `tcp`/`unix` listeners should be opened.
+	#[cfg_attr(
+		not(any(feature = "tcp", all(feature = "uds", unix))),
+		expect(dead_code, reason = "no stream listener is compiled in")
+	)]
+	fn streams(self) -> bool {
+		matches!(self, Self::All | Self::Streams)
+	}
+
+	/// This server's slot in the group, when it is a member of one.
+	#[cfg_attr(
+		not(any(feature = "noq", feature = "quinn", feature = "quiche")),
+		expect(dead_code, reason = "no QUIC backend is compiled in")
+	)]
+	fn shard(self) -> Option<crate::listen::Shard> {
+		match self {
+			Self::Shard(shard) => Some(shard),
+			_ => None,
+		}
+	}
+}
+
 /// Server for accepting MoQ connections.
 ///
 /// Accepts QUIC (and optionally WebSocket), plus plaintext qmux over TCP
@@ -94,6 +159,11 @@ impl Server {
 	/// The stream (`tcp`/`unix`) listeners need a runtime, so they wait for
 	/// [`listen`](Self::listen).
 	pub fn new(config: crate::listen::Config, quic: crate::quic::Config) -> crate::Result<Self> {
+		Self::build(config, quic, Parts::All)
+	}
+
+	/// [`Self::new`], for a caller that opens only some of the config's listeners.
+	pub(crate) fn build(config: crate::listen::Config, quic: crate::quic::Config, parts: Parts) -> crate::Result<Self> {
 		// Refuse here rather than in `init`, so a caller that skipped its own check
 		// can't reach a listener that quietly ignored half of what it was given.
 		let mut deprecated = config.deprecated();
@@ -101,6 +171,9 @@ impl Server {
 		if !deprecated.is_empty() {
 			return Err(Error::Deprecated(deprecated));
 		}
+
+		// Resolve here rather than in `init`, so a caller that builds the config by hand
+		// gets the released spellings folded in too.
 		config.validate()?;
 
 		// `default_quic_backend` panics when no backend is compiled, so a WebSocket- or
@@ -115,7 +188,7 @@ impl Server {
 		// `--listen`) doesn't also open UDP/443.
 		quic.validate()?;
 
-		let build_quic = config.listeners.quic() && (config.bind.is_some() || !config.has_stream_listener());
+		let build_quic = parts.quic() && (config.bind.is_some() || !config.has_stream_listener());
 		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
 		if config.bind.is_some() {
 			return Err(Error::NoBackend(
@@ -148,20 +221,24 @@ impl Server {
 		#[cfg(feature = "noq")]
 		#[allow(unreachable_patterns)]
 		let noq = match backend {
-			QuicBackend::Noq if build_quic => Some(crate::noq::NoqServer::new(config.clone(), &quic)?),
+			QuicBackend::Noq if build_quic => Some(crate::noq::NoqServer::new(config.clone(), &quic, parts.shard())?),
 			_ => None,
 		};
 
 		#[cfg(feature = "quinn")]
 		#[allow(unreachable_patterns)]
 		let quinn = match backend {
-			QuicBackend::Quinn if build_quic => Some(crate::quinn::QuinnServer::new(config.clone(), &quic)?),
+			QuicBackend::Quinn if build_quic => {
+				Some(crate::quinn::QuinnServer::new(config.clone(), &quic, parts.shard())?)
+			}
 			_ => None,
 		};
 
 		#[cfg(feature = "quiche")]
 		let quiche = match backend {
-			QuicBackend::Quiche if build_quic => Some(crate::quiche::QuicheServer::new(config.clone(), &quic)?),
+			QuicBackend::Quiche if build_quic => {
+				Some(crate::quiche::QuicheServer::new(config.clone(), &quic, parts.shard())?)
+			}
 			_ => None,
 		};
 
@@ -169,11 +246,11 @@ impl Server {
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		let mut stream_binds = Vec::new();
 		#[cfg(feature = "tcp")]
-		if let Some(addr) = config.tcp.bind.filter(|_| config.listeners.stream()) {
+		if let Some(addr) = config.tcp.bind.filter(|_| parts.streams()) {
 			stream_binds.push(StreamBind::Tcp(addr));
 		}
 		#[cfg(all(feature = "uds", unix))]
-		if let Some(path) = config.unix.bind.clone().filter(|_| config.listeners.stream()) {
+		if let Some(path) = config.unix.bind.clone().filter(|_| parts.streams()) {
 			stream_binds.push(StreamBind::Unix(path));
 		}
 		// `None` (or an all-empty allowlist) means the listener enforces nothing.

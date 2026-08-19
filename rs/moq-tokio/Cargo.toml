@@ -44,6 +44,7 @@ android-logcat = ["dep:tracing-android"]
 [dependencies]
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
+core_affinity = "0.8"
 # Family-restricted `getaddrinfo`, so the AAAA and A queries can be issued separately
 # (RFC 8305 section 3) while still going through the system resolver.
 dns-lookup = { version = "3", optional = true }

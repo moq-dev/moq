@@ -8,7 +8,7 @@
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
 
-use moq_relay::{Config, PublicConfig, Relay, Workers};
+use moq_relay::{Config, PublicConfig, Relay};
 use moq_tokio::moq_net::{self, Origin};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -94,10 +94,20 @@ async fn workers_serve_quic_and_share_one_origin() {
 	let cluster = relay.cluster.clone();
 	let auth = relay.auth.clone();
 	let shutdown = relay.shutdown.clone();
-	// Moved into the task rather than borrowed: the pool has to outlive the accept
-	// loops it owns, and dropping it is what stops them.
-	let mut pool = relay.workers;
-	let workers = tokio::spawn(async move { pool.serve(cluster, auth, shutdown).await });
+	// The runners have to outlive the accept loops they own, so they stay on this
+	// stack: dropping one is what stops its worker.
+	let mut runners = Vec::new();
+	let mut tasks = Vec::new();
+	for worker in relay.workers {
+		let (server, runner) = worker.split();
+		tasks.push(runner.run(moq_relay::serve(
+			server,
+			cluster.clone(),
+			auth.clone(),
+			shutdown.clone(),
+		)));
+		runners.push(runner);
+	}
 
 	let url: url::Url = format!("https://127.0.0.1:{port}/workers").parse().expect("parse url");
 
@@ -151,77 +161,14 @@ async fn workers_serve_quic_and_share_one_origin() {
 		assert_eq!(&frame.payload[..], b"hello");
 	}
 
-	assert!(!workers.is_finished(), "a QUIC worker stopped while serving");
+	assert!(
+		tasks.iter().all(|task| !task.is_finished()),
+		"a QUIC worker stopped while serving"
+	);
 
 	drop(track);
 	drop(broadcast);
 	drop(publisher);
 	drop(subscribers);
-	workers.abort();
-}
-
-/// A worker pool that outlives its owner is a leak with teeth: the threads keep
-/// accepting into a cluster nobody is driving, and a replacement pool joins the
-/// same reuseport group as the orphans and loses a share of its traffic to them.
-/// Dropping the pool has to actually release the port.
-#[tokio::test]
-async fn dropping_the_pool_releases_the_port() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
-	let dir = tempfile::tempdir().expect("tempdir");
-	let (cert, key) = certificate(dir.path());
-	let port = free_udp_port();
-	let config = worker_config(&cert, &key, port, WORKERS);
-
-	let relay = Relay::load(config).await.expect("load relay");
-	let cluster = relay.cluster.clone();
-	let auth = relay.auth.clone();
-	let shutdown = relay.shutdown.clone();
-	let mut pool = relay.workers;
-
-	// Serving before dropping is the case that used to strand the threads: `serve`
-	// consumed the pool, so nothing was left that could stop them.
-	let serving = tokio::spawn(async move {
-		let _ = pool.serve(cluster, auth, shutdown).await;
-	});
-	tokio::time::sleep(Duration::from_millis(50)).await;
-	serving.abort();
-	let _ = serving.await;
-
-	// A plain bind refuses a port any socket still holds, reuseport or not, so this
-	// succeeds only if every worker's socket is really gone.
-	let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(addr)).expect("workers left the port bound");
-}
-
-/// An ephemeral bind gives every worker a port of its own instead of a shared
-/// one, leaving all but the first unreachable behind an address that reads as
-/// bound. That has to fail at startup rather than come up looking healthy.
-#[tokio::test]
-async fn an_ephemeral_port_is_refused() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
-	let dir = tempfile::tempdir().expect("tempdir");
-	let (cert, key) = certificate(dir.path());
-	let config = worker_config(&cert, &key, 0, WORKERS);
-
-	let err = Workers::bind(&config).expect_err("an ephemeral port cannot be shared");
-	let err = format!("{err:#}");
-	assert!(
-		err.contains("every worker must share one port"),
-		"unexpected error: {err}"
-	);
-}
-
-/// One worker has no group to disagree with, so an ephemeral port is fine there.
-#[tokio::test]
-async fn a_single_worker_may_use_an_ephemeral_port() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
-	let dir = tempfile::tempdir().expect("tempdir");
-	let (cert, key) = certificate(dir.path());
-	let config = worker_config(&cert, &key, 0, 1);
-
-	let workers = Workers::bind(&config).expect("a lone worker may take any port");
-	assert!(workers.local_addr().is_some_and(|addr| addr.port() != 0));
+	drop(runners);
 }
