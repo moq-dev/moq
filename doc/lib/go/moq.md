@@ -310,7 +310,7 @@ The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition
 
 ## Cross-broadcast renditions
 
-A catalog rendition may name a *different* broadcast: `Video.Broadcast` / `Audio.Broadcast` is a path relative to the broadcast the catalog came from, so a transcode output at `live/hd` can describe a track that actually lives in `live/source`. `DecodeAudio` and `DecodeVideo` follow it for you. `SubscribeMedia`, `SubscribeTrack`, and `FetchGroup` take a track name rather than a rendition, so resolve first:
+A catalog rendition may name a *different* broadcast: `Video.Broadcast` / `Audio.Broadcast` is a path relative to the broadcast the catalog came from, so a transcode output at `live/hd` can describe a track that actually lives in `live/source`. `DecodeAudio` and `DecodeVideo` follow it for you. `SubscribeMedia`, `SubscribeTrack`, `FetchGroup`, and `FetchMediaGroup` take a track name rather than a rendition, so resolve first:
 
 ```go
 source, err := broadcast.Resolve(rendition.Broadcast)

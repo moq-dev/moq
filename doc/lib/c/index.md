@@ -249,7 +249,7 @@ if (moq_consume_video_stalled(catalog, index, &stalled) < 0) {
 
 A catalog rendition may name a *different* broadcast than the one whose catalog you subscribed to, so a transcode output at `live/hd` can describe a track that actually lives in `live/source`. `moq_consume_video` and `moq_consume_audio` take a catalog snapshot and a rendition index, so they follow that reference for you and subscribe wherever the track really is. Nothing to pass.
 
-The reference is resolved through the origin the broadcast came from, so it only works for a broadcast obtained via `moq_origin_request` or `moq_origin_consume_announced`.
+Only a rendition that actually names another broadcast needs an origin to fetch it from, and the origin used is the one the broadcast came from: `moq_origin_request` or `moq_origin_consume_announced`. A rendition with no reference is served by the broadcast you already hold, so it works the same either way.
 
 ## Raw media
 

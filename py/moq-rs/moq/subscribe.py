@@ -488,10 +488,11 @@ class BroadcastConsumer:
 
         ``reference`` is ``catalog.video[name].broadcast`` /
         ``catalog.audio[name].broadcast``: ``None`` or empty names this broadcast,
-        anything else names a sibling relative to it (e.g. ``./source``). Call it
-        before :meth:`subscribe_media`, :meth:`subscribe_track`, or
-        :meth:`fetch_group` on a rendition that carries one; :meth:`decode_audio`
-        and :meth:`decode_video` resolve it themselves.
+        anything else names a sibling relative to it (e.g. ``./source``). Call it on
+        a rendition that carries one before :meth:`subscribe_media`,
+        :meth:`subscribe_track`, :meth:`fetch_group`, or :meth:`fetch_media_group`,
+        which take a track name rather than a rendition; :meth:`decode_audio` and
+        :meth:`decode_video` resolve it themselves.
 
         Raises if this broadcast came from a local producer rather than an origin,
         since a standalone broadcast has no sibling to name.

@@ -248,9 +248,10 @@ impl MoqBroadcastConsumer {
 	/// Resolve a catalog rendition's `broadcast` reference to the broadcast serving its track.
 	///
 	/// `reference` is [`MoqVideo::broadcast`] / [`MoqAudio::broadcast`]: absent or empty names
-	/// this broadcast, anything else names a sibling relative to it (e.g. `./source`). Call it
-	/// before [`Self::subscribe_media`], [`Self::subscribe_track`], or [`Self::fetch_group`] on
-	/// a rendition that carries one; `decode_video` and `decode_audio` resolve it themselves.
+	/// this broadcast, anything else names a sibling relative to it (e.g. `./source`). Call it on a
+	/// rendition that carries one before [`Self::subscribe_media`], [`Self::subscribe_track`],
+	/// [`Self::fetch_group`], or [`Self::fetch_media_group`], which take a track name rather than a
+	/// rendition; `decode_video` and `decode_audio` resolve it themselves.
 	///
 	/// Errors if this broadcast came from a local producer rather than an origin, since a
 	/// standalone broadcast has no sibling to name.

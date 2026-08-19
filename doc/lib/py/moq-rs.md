@@ -185,7 +185,8 @@ async for announcement in client.announced("prefix/"):
 A catalog rendition may name a *different* broadcast: `track.broadcast` is a path relative to the
 broadcast the catalog came from, so a transcode output at `live/hd` can describe a track that
 actually lives in `live/source`. `decode_audio` and `decode_video` follow it for you. `subscribe_media`,
-`subscribe_track`, and `fetch_group` take a track name rather than a rendition, so resolve first:
+`subscribe_track`, `fetch_group`, and `fetch_media_group` take a track name rather than a rendition,
+so resolve first:
 
 ```python
 catalog = await announcement.broadcast.catalog()

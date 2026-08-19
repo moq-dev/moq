@@ -115,7 +115,7 @@ track.update(Subscription(priority = 20u.toUByte(), ordered = false))
 
 `ordered` controls prioritization only. When true, groups are prioritized in sequence order. Groups may always arrive out-of-order (or not at all) over the network.
 
-A catalog rendition may name a *different* broadcast: `MoqVideo.broadcast` / `MoqAudio.broadcast` is a path relative to the broadcast the catalog came from, so a transcode output at `live/hd` can describe a track that actually lives in `live/source`. `decodeAudio` and `decodeVideo` follow it for you. `subscribeMedia`, `subscribeTrack`, and `fetchGroup` take a track name rather than a rendition, so resolve first:
+A catalog rendition may name a *different* broadcast: `MoqVideo.broadcast` / `MoqAudio.broadcast` is a path relative to the broadcast the catalog came from, so a transcode output at `live/hd` can describe a track that actually lives in `live/source`. `decodeAudio` and `decodeVideo` follow it for you. `subscribeMedia`, `subscribeTrack`, `fetchGroup`, and `fetchMediaGroup` take a track name rather than a rendition, so resolve first:
 
 ```kotlin
 val source = announcement.broadcast().resolve(rendition.broadcast)

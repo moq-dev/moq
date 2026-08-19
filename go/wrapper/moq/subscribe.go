@@ -94,9 +94,10 @@ func (b *BroadcastConsumer) SubscribeMedia(name string, container Container, sub
 
 // Resolve returns the broadcast serving a catalog rendition, honoring its broadcast
 // reference: Video.Broadcast / Audio.Broadcast. A nil or empty reference names this
-// broadcast, anything else names a sibling relative to it (e.g. "./source"). Call it
-// before SubscribeMedia, SubscribeTrack, or FetchGroup on a rendition that carries one;
-// DecodeAudio and DecodeVideo resolve it themselves.
+// broadcast, anything else names a sibling relative to it (e.g. "./source"). Call it on a
+// rendition that carries one before SubscribeMedia, SubscribeTrack, FetchGroup, or
+// FetchMediaGroup, which take a track name rather than a rendition; DecodeAudio and
+// DecodeVideo resolve it themselves.
 //
 // Errors if this broadcast came from a local producer rather than an origin, since a
 // standalone broadcast has no sibling to name.
