@@ -38,6 +38,15 @@ Everybody else can use QUIC directly instead.
 MoQ clients will automatically race the QUIC and WebSocket connections in parallel, using whatever wins the race.
 It sucks but sometimes *media over QUIC* isn't actually an option.
 
+## iroh (optional)
+
+[iroh](/concept/layer/iroh) is a peer-to-peer alternative to dialing a server.
+
+You dial a public key instead of a hostname, and iroh handles discovery, hole punching, and
+a relay fallback when a direct path can't be established.
+It's still QUIC underneath, so nothing above this layer changes.
+Native only, since a browser can't hole punch.
+
 ## MoQ Transport
 
 [moq-lite](/concept/layer/moq-lite) is a forwards-compatible subset of the [MoqTransport](/concept/standard/moq-transport) specification.

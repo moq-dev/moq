@@ -522,16 +522,29 @@ All three flags also accept CLI arguments (`--cache-capacity`,
 
 ### \[iroh]
 
-Experimental P2P support via iroh.
+Experimental P2P support via [iroh](/concept/layer/iroh). Clients dial the relay's
+endpoint id (`iroh://<endpoint-id>/<path>`) instead of a hostname, with hole punching
+and a relay fallback for peers that can't be reached directly.
 
 ```toml
 [iroh]
 # Enable iroh for P2P connections
 enabled = false
 
-# Path to persist the iroh secret key
+# Path to persist the iroh secret key, so the endpoint id survives a restart.
+# Generated on first run if the file does not exist.
 secret = "./relay-iroh-secret.key"
+
+# UDP bind addresses. Default to an ephemeral port on both families.
+# bind_v4 = "0.0.0.0:4444"
+# bind_v6 = "[::]:4444"
+
+# Require a direct path, skipping the iroh relay fallback.
+# disable_relay = false
 ```
+
+The endpoint id is logged at startup (`iroh listening endpoint_id=...`). Without `secret`
+a fresh key is generated on every start, so the id changes each restart.
 
 ## Example Configurations
 

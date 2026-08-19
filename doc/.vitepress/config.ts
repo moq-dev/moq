@@ -98,6 +98,7 @@ export default defineConfig({
 								{ text: "quic", link: "/concept/layer/quic" },
 								{ text: "web-transport", link: "/concept/layer/web-transport" },
 								{ text: "web-socket", link: "/concept/layer/web-socket" },
+								{ text: "iroh", link: "/concept/layer/iroh" },
 								{ text: "moq-lite", link: "/concept/layer/moq-lite" },
 								{ text: "hang", link: "/concept/layer/hang" },
 							],
