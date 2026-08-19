@@ -5171,6 +5171,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "tracing-test",
  "v4l",
  "wgpu",
  "windows",

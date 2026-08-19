@@ -390,7 +390,9 @@ dependency. The codec is chosen with `--codec` (`h264` default, or `h265`). For
 H.264 it picks a hardware encoder (VideoToolbox on macOS, NVENC on Linux NVIDIA,
 or VAAPI on Linux Intel/AMD when built with the `vaapi` feature) when one is
 present, falling back to the built-in software encoder (openh264); force either
-with `--hardware` / `--software`. H.265 is hardware-only (VideoToolbox on macOS,
+with `--hardware` / `--software`. A hardware encoder that was compiled in but
+can't open, typically because its driver libraries aren't on the loader path,
+warns rather than falling back quietly. H.265 is hardware-only (VideoToolbox on macOS,
 Media Foundation on Windows). `--camera` takes a bare integer as a device index,
 otherwise a device path (Linux) or name (a friendly-name substring on Windows, the
 AVFoundation `uniqueID` on macOS). Microphone capture uses cpal (CoreAudio /

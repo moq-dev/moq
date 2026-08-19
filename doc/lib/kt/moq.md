@@ -158,7 +158,7 @@ video.write(VideoFrame(timestampUs = ptsUs, data = rgba))
 video.finish()
 ```
 
-`autoEncoder` prefers a hardware encoder and falls back to software; `softwareEncoder`, `hardwareEncoder`, and `namedEncoder("videotoolbox")` pin the choice. The bindings compile VideoToolbox (macOS), Media Foundation (Windows), and openh264 (software, everywhere); the Linux hardware codecs are a libmoq-only build option. `setBitrate` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
+`autoEncoder` prefers a hardware encoder and falls back to software; `softwareEncoder`, `hardwareEncoder`, and `namedEncoder("videotoolbox")` pin the choice. The bindings compile VideoToolbox (macOS), Media Foundation (Windows), NVENC (Linux, NVIDIA), and openh264 (software, everywhere). A hardware encoder that is compiled in but can't open, because there is no GPU or because its driver libraries aren't on the loader path, logs a warning naming the reason and falls through to software, so a host that quietly encodes on the CPU says so. `setBitrate` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
 
 The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition is published immediately, read out of the encoder itself, so subscribers discover it through the catalog rather than a name you pick, and can find it before the first frame exists. `cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group.
 
