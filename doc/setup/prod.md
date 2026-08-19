@@ -54,7 +54,7 @@ A relay multiplexes every connection over a single UDP socket, so a burst that d
 `moq-relay` and `moq-cli` request an 8 MiB socket buffer in each direction, but Linux silently clamps the request to `net.core.rmem_max` and `net.core.wmem_max`, which default to 208 KiB.
 You'll get a warning on startup when that happens:
 
-```
+```text
 WARN moq_native::bind: UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load wanted=8388608 granted=212992
 ```
 

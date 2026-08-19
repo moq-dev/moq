@@ -83,70 +83,108 @@ pub fn udp(addr: SocketAddr) -> std::io::Result<UdpSocket> {
 
 /// Request [`UDP_BUFFER`] in both directions, best-effort.
 fn grow_buffers(socket: &Socket) {
-	// One warning per direction per process: a client that reconnects rebinds, and
-	// the operator only needs telling once.
-	static RECV: Once = Once::new();
-	static SEND: Once = Once::new();
-
-	grow_buffer(
-		"receive",
-		RECV_SYSCTL,
-		&RECV,
-		|| socket.recv_buffer_size(),
-		|size| socket.set_recv_buffer_size(size),
-	);
-	grow_buffer(
-		"send",
-		SEND_SYSCTL,
-		&SEND,
-		|| socket.send_buffer_size(),
-		|size| socket.set_send_buffer_size(size),
-	);
+	for direction in [Direction::Recv, Direction::Send] {
+		direction.grow(socket);
+	}
 }
 
-/// Raise one direction's buffer to [`UDP_BUFFER`], then read back what the kernel
-/// actually granted and warn through `warned` when it fell short.
-///
-/// Reading back is the whole point: Linux silently clamps the request to its
-/// sysctl, so `setsockopt` returning `Ok` says nothing about the size we ended up
-/// with, and `SO_RCVBUFFORCE` (the clamp-free version) needs `CAP_NET_ADMIN` that
-/// a relay shouldn't be asking for.
-fn grow_buffer(
-	direction: &str,
-	sysctl: Option<&str>,
-	warned: &Once,
-	get: impl Fn() -> std::io::Result<usize>,
-	set: impl Fn(usize) -> std::io::Result<()>,
-) {
-	// Never shrink a system that's already tuned above our default.
-	if get().is_ok_and(|size| granted(size) >= UDP_BUFFER) {
-		return;
-	}
+/// One direction of a socket's buffering, owning everything that differs between
+/// the two: the socket options, the sysctl to name, and the warning.
+#[derive(Clone, Copy)]
+enum Direction {
+	Recv,
+	Send,
+}
 
-	let size = match set(UDP_BUFFER).and_then(|()| get()) {
-		Ok(size) => granted(size),
-		Err(err) => {
-			warned.call_once(|| tracing::warn!(%err, "failed to set the UDP {direction} buffer size"));
+impl Direction {
+	/// Raise this direction's buffer to [`UDP_BUFFER`], then read back what the
+	/// kernel actually granted and warn once when it fell short.
+	///
+	/// Reading back is the whole point: Linux silently clamps the request to its
+	/// sysctl, so `setsockopt` returning `Ok` says nothing about the size we ended
+	/// up with, and `SO_RCVBUFFORCE` (the clamp-free version) needs `CAP_NET_ADMIN`
+	/// that a relay shouldn't be asking for.
+	fn grow(self, socket: &Socket) {
+		// Never shrink a system that's already tuned above our default.
+		if self.size(socket).is_ok_and(sufficient) {
 			return;
 		}
-	};
 
-	if size >= UDP_BUFFER {
-		return;
+		match self.set_size(socket, UDP_BUFFER).and_then(|()| self.size(socket)) {
+			Ok(reported) if sufficient(reported) => {}
+			Ok(reported) => self.warn_short(granted(reported)),
+			Err(err) => self.warn_failed(&err),
+		}
 	}
 
-	warned.call_once(|| match sysctl {
-		Some(sysctl) => tracing::warn!(
-			wanted = UDP_BUFFER,
-			granted = size,
-			"UDP {direction} buffer is smaller than requested; raise `{sysctl}` or expect packet loss under load"
-		),
-		None => tracing::warn!(
-			wanted = UDP_BUFFER,
-			granted = size,
-			"UDP {direction} buffer is smaller than requested; expect packet loss under load"
-		),
-	});
+	fn size(self, socket: &Socket) -> std::io::Result<usize> {
+		match self {
+			Self::Recv => socket.recv_buffer_size(),
+			Self::Send => socket.send_buffer_size(),
+		}
+	}
+
+	fn set_size(self, socket: &Socket, size: usize) -> std::io::Result<()> {
+		match self {
+			Self::Recv => socket.set_recv_buffer_size(size),
+			Self::Send => socket.set_send_buffer_size(size),
+		}
+	}
+
+	fn name(self) -> &'static str {
+		match self {
+			Self::Recv => "receive",
+			Self::Send => "send",
+		}
+	}
+
+	fn sysctl(self) -> Option<&'static str> {
+		match self {
+			Self::Recv => RECV_SYSCTL,
+			Self::Send => SEND_SYSCTL,
+		}
+	}
+
+	/// One warning per direction per process: a client that reconnects rebinds, and
+	/// the operator only needs telling once.
+	fn warned(self) -> &'static Once {
+		static RECV: Once = Once::new();
+		static SEND: Once = Once::new();
+
+		match self {
+			Self::Recv => &RECV,
+			Self::Send => &SEND,
+		}
+	}
+
+	/// The kernel accepted the request and quietly handed back `granted` instead.
+	fn warn_short(self, granted: usize) {
+		let name = self.name();
+		self.warned().call_once(|| match self.sysctl() {
+			Some(sysctl) => tracing::warn!(
+				wanted = UDP_BUFFER,
+				granted,
+				"UDP {name} buffer is smaller than requested; raise `{sysctl}` or expect packet loss under load"
+			),
+			None => tracing::warn!(
+				wanted = UDP_BUFFER,
+				granted,
+				"UDP {name} buffer is smaller than requested; expect packet loss under load"
+			),
+		});
+	}
+
+	/// The option itself was rejected, so we don't even know what we're running with.
+	fn warn_failed(self, err: &std::io::Error) {
+		let name = self.name();
+		self.warned()
+			.call_once(|| tracing::warn!(%err, "failed to set the UDP {name} buffer size"));
+	}
+}
+
+/// Whether a buffer size the kernel reported already covers [`UDP_BUFFER`].
+fn sufficient(reported: usize) -> bool {
+	granted(reported) >= UDP_BUFFER
 }
 
 /// The usable size behind a buffer size the kernel reported.
@@ -256,56 +294,43 @@ mod tests {
 
 	#[test]
 	fn udp_buffers_grow() {
-		// The exact size depends on the host's sysctls, but a tuned socket should
-		// never come back smaller than an untuned one.
-		let tuned = Socket::from(udp("127.0.0.1:0".parse().unwrap()).unwrap());
-		let plain = Socket::from(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+		fn check(direction: Direction) {
+			let plain = Socket::from(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+			let before = direction.size(&plain).unwrap();
 
-		assert!(tuned.recv_buffer_size().unwrap() >= plain.recv_buffer_size().unwrap());
-		assert!(tuned.send_buffer_size().unwrap() >= plain.send_buffer_size().unwrap());
+			let tuned = Socket::from(udp("127.0.0.1:0".parse().unwrap()).unwrap());
+			let after = direction.size(&tuned).unwrap();
+
+			// A host whose default already covers UDP_BUFFER is left alone. Anywhere
+			// else the bind has to have actually raised it, whatever the sysctls
+			// clamped it to.
+			if sufficient(before) {
+				assert_eq!(after, before, "{} buffer should be left alone", direction.name());
+			} else {
+				assert!(after > before, "{} buffer should grow past {before}", direction.name());
+			}
+		}
+
+		check(Direction::Recv);
+		check(Direction::Send);
+	}
+
+	#[test]
+	fn sufficient_accounts_for_the_doubled_report() {
+		// Doubled, since that's how Linux reports back a buffer it granted.
+		assert!(sufficient(UDP_BUFFER * 2));
+		assert!(!sufficient(512 * 1024));
 	}
 
 	#[tracing_test::traced_test]
 	#[test]
-	fn udp_buffer_warns_when_the_kernel_clamps() {
-		// Stand in for a kernel that accepts the request and quietly hands back
-		// less, which is what a small `net.core.rmem_max` does.
-		let current = std::cell::Cell::new(0);
-		let warned = Once::new();
-		grow_buffer(
-			"receive",
-			Some("net.core.rmem_max"),
-			&warned,
-			|| Ok(current.get()),
-			|_| {
-				current.set(512 * 1024);
-				Ok(())
-			},
-		);
+	fn a_clamped_buffer_warns_and_names_the_sysctl() {
+		Direction::Recv.warn_short(512 * 1024);
 
-		assert!(warned.is_completed());
-		assert!(logs_contain("net.core.rmem_max"));
-	}
-
-	#[test]
-	fn udp_buffer_keeps_a_larger_existing_size() {
-		// Doubled, so this reads as already-larger on Linux too.
-		let reported = UDP_BUFFER * 2;
-		let touched = std::cell::Cell::new(false);
-		let warned = Once::new();
-		grow_buffer(
-			"receive",
-			None,
-			&warned,
-			|| Ok(reported),
-			|_| {
-				touched.set(true);
-				Ok(())
-			},
-		);
-
-		assert!(!touched.get(), "should not shrink a tuned socket");
-		assert!(!warned.is_completed());
+		assert!(logs_contain("UDP receive buffer is smaller than requested"));
+		if let Some(sysctl) = Direction::Recv.sysctl() {
+			assert!(logs_contain(sysctl));
+		}
 	}
 
 	#[test]
