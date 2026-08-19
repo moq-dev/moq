@@ -159,8 +159,14 @@ impl Direction {
 
 	/// The kernel accepted the request and quietly handed back `granted` instead.
 	fn warn_short(self, granted: usize) {
+		self.warned().call_once(|| self.emit_short(granted));
+	}
+
+	/// The warning itself, minus the once-guard, so a test can read it back
+	/// whatever a previous bind on this host already consumed.
+	fn emit_short(self, granted: usize) {
 		let name = self.name();
-		self.warned().call_once(|| match self.sysctl() {
+		match self.sysctl() {
 			Some(sysctl) => tracing::warn!(
 				wanted = UDP_BUFFER,
 				granted,
@@ -171,7 +177,7 @@ impl Direction {
 				granted,
 				"UDP {name} buffer is smaller than requested; expect packet loss under load"
 			),
-		});
+		}
 	}
 
 	/// The option itself was rejected, so we don't even know what we're running with.
@@ -325,7 +331,7 @@ mod tests {
 	#[tracing_test::traced_test]
 	#[test]
 	fn a_clamped_buffer_warns_and_names_the_sysctl() {
-		Direction::Recv.warn_short(512 * 1024);
+		Direction::Recv.emit_short(512 * 1024);
 
 		assert!(logs_contain("UDP receive buffer is smaller than requested"));
 		if let Some(sysctl) = Direction::Recv.sysctl() {
