@@ -109,6 +109,21 @@ multicast is blocked fails the relay rather than releasing the units that depend
 on it. One working interface is enough: a down VPN adapter or a container bridge
 with multicast off doesn't hold startup back.
 
+`lan` is for relays sharing a link, and only that. Peers off the network are
+gossiped, listed by `connect_api`, or seeded in `connect`, and they reach each
+other over their `node` URLs like any other cluster link. A relay is already the
+public address both sides can reach, so there is nothing for peer-to-peer to
+save there; on one link it saves the round trip out and back.
+
+Both hosts need inbound packets for this to work, in two places. mDNS is inbound
+multicast UDP on port 5353, and a host that blocks it still multicasts its own
+announcements out, so peers discover it while it discovers nobody. The session
+is then one dial per pair, taken by whichever side loses the `node` URL
+tiebreaker, so the other side has to accept an inbound connection on its `node`
+port. Startup readiness only proves an interface announced, not that anything
+answered, so a firewall shows up as a pair that never meshes rather than as a
+relay that fails to start.
+
 ## Origin id
 
 Each relay has an origin id: the value it adds to a broadcast's hop list for loop detection and shortest-path routing. On `moq-lite`, and on a `moqt-17`-or-later session that negotiated the cluster extension, each end declares it at setup so the other can avoid announcing (or serving) a path that already flows through it. Older sessions carry no identity, so a peer only has one if you assign it. By default a fresh random id is picked on every start, which is fine for loop detection but means a relay looks like a brand-new node each time it restarts.
