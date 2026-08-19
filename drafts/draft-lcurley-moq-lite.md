@@ -858,8 +858,9 @@ Cheaper advertisements from anything else carry no such hazard and SHOULD be ado
 
 This ordering is only shared between two relays while the costs behind it are.
 A relay reports its own Cold Route Cost, and a report still crossing the mesh can be lower than the value its sender would report now, so while costs are rising three or more relays can each rank a stale neighbour below themselves and all re-parent at once, leaving the broadcast with no source until the real advertisements arrive.
-A relay SHOULD therefore delay adopting a warm relay, re-evaluating when the delay expires rather than acting on the decision that started it, so the advertisements the decision rests on are refreshed before it takes effect.
-The delay MUST exceed the time an advertisement takes to cross the mesh, and applies only to this adoption: leaving a route that is draining or has disappeared MUST NOT be delayed, and a relay whose serving path costs the saturation ceiling advertises the ceiling, so it cannot be one end of such a pair anyway.
+A relay SHOULD therefore delay re-parenting onto another relay while it is serving the broadcast, re-evaluating when the delay expires rather than acting on the decision that started it, so the advertisements the decision rests on are refreshed before it takes effect.
+The delay MUST exceed the time an advertisement takes to cross the mesh, and SHOULD carry a spread that is stable per relay and broadcast, so that a group of relays reconsidering the same broadcast does not do so on a single instant.
+It applies only to re-parenting onto a path of two or more entries while serving: a relay with no subscribers is pulling nothing and cannot be part of such a ring, a path of one entry is the original publisher, which never re-parents onto its own broadcast, and leaving a route that is draining or has disappeared MUST NOT be delayed, since a relay whose serving path costs the saturation ceiling advertises the ceiling and so cannot be one end of such a ring anyway.
 
 
 ## ANNOUNCE_END {#announce-end}

@@ -371,14 +371,20 @@ struct OriginBroadcast {
 	announced: bool,
 }
 
-/// How long a carrying relay waits before adopting a warm sibling.
+/// How long a serving relay waits before re-parenting onto another relay.
 ///
-/// Adoption is the one move that can cycle: two relays that each decide to adopt
-/// the other leave the broadcast with no source at all. The handover gate orders
-/// them so only one moves, but the gate compares a cost the peer *reported*, and
-/// a report that is still in flight can be lower than what the peer would say
-/// now. Three relays acting on stale reports in the same instant can each defer
-/// to the next and all let go together.
+/// Re-parenting is the one move that can cycle: relays that each decide to pull
+/// from the next leave the broadcast with no source at all. A truthful hop chain
+/// makes that impossible, because the loop would be visible in the chain and
+/// dropped. What defeats the chain is simultaneity: relays deciding inside one
+/// propagation window all read chains and costs that predate every one of those
+/// decisions, so no advertisement yet contains the loop they are about to form.
+///
+/// Costs make it worse rather than causing it. A relay reports its own cost, and
+/// a report still in flight can be lower than what its sender would say now, so a
+/// ring of relays can each rank a stale neighbour below themselves. Rising costs
+/// are the whole hazard: if costs only fell, a stale value would only ever make a
+/// peer look worse than it is, which is safe.
 ///
 /// So a relay sits on the decision instead of acting on it, and re-evaluates when
 /// the wait expires. The wait is not there to stagger the relays, which a uniform
@@ -1658,7 +1664,8 @@ impl FrontState {
 		// Leaving a drain is exempt on principle, not just for latency: a draining
 		// route makes us advertise the ceiling, so no peer can prefer us, so we
 		// cannot be one end of a mutual adoption. There is no cycle to hold off.
-		let held = target != self.active
+		let held = carrying
+			&& target != self.active
 			&& self.active.is_some_and(|id| {
 				self.routes
 					.iter()
@@ -1668,7 +1675,7 @@ impl FrontState {
 			self.routes
 				.iter()
 				.find(|r| r.id == id)
-				.is_some_and(|r| r.route.advertised.warm == 0 && r.route.hops.len() >= 2)
+				.is_some_and(|r| r.route.hops.len() >= 2)
 		});
 
 		if !held {
@@ -1685,7 +1692,8 @@ impl FrontState {
 			_ => now,
 		};
 
-		match now.checked_duration_since(since) >= Some(HANDOVER_HOLD) {
+		let deadline = self.hold_deadline(since);
+		match deadline.is_some_and(|at| now >= at) {
 			true => {
 				self.active = Some(target);
 				self.pending = None;
@@ -1693,9 +1701,24 @@ impl FrontState {
 			}
 			false => {
 				self.pending = Some((target, since));
-				since.checked_add(HANDOVER_HOLD)
+				deadline
 			}
 		}
+	}
+
+	/// When a hold started at `since` comes due: [`HANDOVER_HOLD`] plus a spread of
+	/// up to half as much again, fixed per relay and broadcast.
+	///
+	/// The hold works by outlasting propagation, so it does not need the spread to
+	/// be correct. The spread is there so a datacenter re-evaluating the same
+	/// broadcast does not do it on a single instant, and it reuses the key the
+	/// handover order already computes, so it costs nothing and stays put across
+	/// restarts. Added rather than subtracted, so the floor is still
+	/// [`HANDOVER_HOLD`].
+	fn hold_deadline(&self, since: web_async::time::Instant) -> Option<web_async::time::Instant> {
+		let spread = (HANDOVER_HOLD / 2).as_millis() as u64;
+		let key = fnv_key(&self.path.as_path(), [self.self_origin]);
+		since.checked_add(HANDOVER_HOLD + Duration::from_millis(key % spread.max(1)))
 	}
 
 	/// The source [`Self::reselect`] would pick, before the hold-down: the best
@@ -2246,15 +2269,6 @@ async fn run_front(
 	let mut deadline = kio::time::Deadline::new();
 
 	loop {
-		// Re-read every turn: the hold is armed and disarmed by the source tasks
-		// under the state lock, and each of those writes wakes this poll.
-		deadline.set(
-			state
-				.read()
-				.pending
-				.and_then(|(_, since)| since.checked_add(HANDOVER_HOLD)),
-		);
-
 		let step = {
 			kio::wait(|waiter| {
 				if let Poll::Ready((name, resume)) = broadcast.poll_spliced_assigned(waiter) {
@@ -2266,6 +2280,15 @@ async fn run_front(
 					Poll::Ready(_) => return Poll::Ready(Step::Closed),
 					Poll::Pending => {}
 				}
+
+				// Re-armed on every poll rather than once per turn: a source task
+				// arms the hold under the state lock, and that write wakes this
+				// closure without leaving the wait. Setting the instant it already
+				// holds is a no-op, so the countdown is not restarted.
+				deadline.set({
+					let s = state.read();
+					s.pending.and_then(|(_, since)| s.hold_deadline(since))
+				});
 				deadline.poll(waiter).map(|_| Step::Held)
 			})
 			.await
@@ -3760,8 +3783,35 @@ mod tests {
 		);
 	}
 
-	/// The hold defers the adoption; it does not cancel it. Once [`HANDOVER_HOLD`]
-	/// has passed and the candidate is still preferred, the handover happens.
+	/// The same ring, built out of relays forwarding their accumulated cost rather
+	/// than warm copies advertising zero. The handover gate never inspects these at
+	/// all, so the hold is the only thing standing between them and a cycle.
+	#[test]
+	fn test_handover_hold_blocks_a_forwarder_ring() {
+		let ids = [1u64, 2, 3];
+		let now = web_async::time::Instant::now();
+
+		let moved: Vec<bool> = (0..3)
+			.map(|i| {
+				let next = Origin::new(ids[(i + 1) % 3]).unwrap();
+				let hops = OriginList::try_from(vec![Origin::new(90).unwrap(), next]).unwrap();
+				let mut view = front_state(
+					Origin::new(ids[i]).unwrap(),
+					vec![upstream_route(10), forwarder_route(hops, 1)],
+				);
+				view.reselect(true, now);
+				view.active == Some(1)
+			})
+			.collect();
+
+		assert!(
+			moved.iter().all(|m| !*m),
+			"every adoption in the ring must be held: {moved:?}"
+		);
+	}
+
+	/// The hold defers the adoption; it does not cancel it. Once the deadline has
+	/// passed and the candidate is still preferred, the handover happens.
 	#[test]
 	fn test_handover_hold_expires() {
 		let peer = Origin::new(3).unwrap();
@@ -3771,27 +3821,50 @@ mod tests {
 			vec![upstream_route(10), sibling_route(peer, 4)],
 		);
 
-		let deadline = state.reselect(true, start);
+		let deadline = state.reselect(true, start).expect("the hold must report a deadline");
 		assert_eq!(state.active, Some(0), "the adoption must not apply immediately");
-		assert_eq!(
-			deadline,
-			start.checked_add(HANDOVER_HOLD),
-			"the front task needs the deadline to wake on"
+		assert!(
+			deadline >= start.checked_add(HANDOVER_HOLD).unwrap()
+				&& deadline < start.checked_add(HANDOVER_HOLD + HANDOVER_HOLD / 2).unwrap(),
+			"the spread must sit above the floor and below half again"
 		);
 
 		// Re-running inside the window keeps waiting from the original start, so
 		// unrelated table churn cannot postpone the handover indefinitely.
 		let mid = start.checked_add(HANDOVER_HOLD / 2).unwrap();
-		state.reselect(true, mid);
+		assert_eq!(state.reselect(true, mid), Some(deadline), "the deadline must not move");
 		assert_eq!(
 			state.active,
 			Some(0),
 			"the hold must survive a re-run inside the window"
 		);
 
-		let after = start.checked_add(HANDOVER_HOLD).unwrap();
-		assert_eq!(state.reselect(true, after), None, "an applied hold clears the deadline");
+		assert_eq!(
+			state.reselect(true, deadline),
+			None,
+			"an applied hold clears the deadline"
+		);
 		assert_eq!(state.active, Some(1), "the handover must happen once the hold expires");
+	}
+
+	/// The spread is fixed per relay and broadcast, so a relay picks the same
+	/// deadline every time rather than re-rolling it and drifting.
+	#[test]
+	fn test_handover_hold_spread_is_stable() {
+		let peer = Origin::new(3).unwrap();
+		let now = web_async::time::Instant::now();
+		let build = || {
+			front_state(
+				origin_keyed("test", peer, false),
+				vec![upstream_route(10), sibling_route(peer, 4)],
+			)
+		};
+		assert_eq!(build().hold_deadline(now), build().hold_deadline(now));
+
+		// Different relays land on different instants, which is the point.
+		let a = front_state(Origin::new(11).unwrap(), vec![upstream_route(10)]);
+		let b = front_state(Origin::new(12).unwrap(), vec![upstream_route(10)]);
+		assert_ne!(a.hold_deadline(now), b.hold_deadline(now));
 	}
 
 	/// Leaving a draining route is never held: the drain makes us advertise the
@@ -3810,26 +3883,28 @@ mod tests {
 		assert_eq!(state.active, Some(1), "leaving a drain must be immediate");
 	}
 
-	/// Only the adoption is held. Every other move keeps its current latency, so
-	/// ordinary failover and repricing are unaffected.
+	/// The hold covers re-parenting onto another relay while we are serving. Moves
+	/// that cannot close a loop, and repairs that must not wait, are not held.
 	#[test]
-	fn test_handover_hold_ignores_ordinary_moves() {
+	fn test_handover_hold_ignores_moves_that_cannot_cycle() {
 		let peer = Origin::new(3).unwrap();
 		let now = web_async::time::Instant::now();
+		let keyed = || origin_keyed("test", peer, false);
 
-		// A plain forwarder undercutting us: not a warm sibling, so not held.
-		let mut state = front_state(
-			origin_keyed("test", peer, false),
-			vec![upstream_route(10), forwarder_route(sibling_route(peer, 4).hops, 4)],
-		);
+		// An idle front is not pulling anything, so it cannot be a link in a cycle.
+		let mut idle = front_state(keyed(), vec![upstream_route(10), sibling_route(peer, 4)]);
+		assert_eq!(idle.reselect(false, now), None);
+		assert_eq!(idle.active, Some(1), "an idle front must re-parent immediately");
+
+		// Straight from the original publisher: a one-hop chain, and a publisher
+		// never adopts a route to its own broadcast.
+		let direct = announce().with_hops(OriginList::try_from(vec![peer]).unwrap());
+		let mut state = front_state(keyed(), vec![upstream_route(10), direct]);
 		assert_eq!(state.reselect(true, now), None);
-		assert_eq!(state.active, Some(1), "a forwarder must be adopted immediately");
+		assert_eq!(state.active, Some(1), "a direct publisher route must be immediate");
 
 		// Losing the incumbent entirely: never held, or the front strands itself.
-		let mut state = front_state(
-			origin_keyed("test", peer, false),
-			vec![upstream_route(10), sibling_route(peer, 4)],
-		);
+		let mut state = front_state(keyed(), vec![upstream_route(10), sibling_route(peer, 4)]);
 		state.routes.retain(|r| r.id != 0);
 		assert_eq!(state.reselect(true, now), None);
 		assert_eq!(state.active, Some(1), "a lost incumbent must be replaced immediately");
@@ -4926,8 +5001,6 @@ mod tests {
 		let mut watch = broadcast.clone();
 		assert_eq!(watch.route_changed().await.unwrap().hops, hops_a);
 
-		// A plain forwarder, not a warm sibling: this test is about a route repricing,
-		// so the adoption hold-down is deliberately out of the picture.
 		let mut source_b = origin
 			.create_broadcast("test", forwarder_route(hops_b.clone(), 1))
 			.unwrap();
@@ -4952,7 +5025,15 @@ mod tests {
 			.set_route(announce().with_hops(hops_a.clone()).with_cost(10))
 			.unwrap();
 		settle().await;
-		assert_eq!(watch.route_changed().await.unwrap().hops, hops_b);
+
+		// Re-parenting onto another relay while serving is held down first: the
+		// advert follows A's new cost, but the front is still served by A. Only the
+		// front task's deadline wakes it out of that, which is what the advance
+		// exercises.
+		assert_eq!(watch.route().hops, hops_a, "the handover must wait out the hold");
+		tokio::time::advance(HANDOVER_HOLD * 2).await;
+		settle().await;
+		assert_eq!(watch.route().hops, hops_b, "the hold must expire into the handover");
 		announced.assert_next_wait();
 
 		let mut producer_b = accept_track(&mut dynamic_b, "video").await;
