@@ -752,6 +752,7 @@ impl Producer {
 			stale_stats: stats::Meter::default(),
 			expiry: None,
 			expired: false,
+			ended: false,
 			stale_counted: Arc::default(),
 		}
 	}
@@ -900,6 +901,11 @@ pub struct Consumer {
 	// hands it out, while its reader is waiting for the first or next frame.
 	expiry: Option<Arc<dyn Expiry>>,
 	expired: bool,
+	// Sticky: the budget gave up on a cursor that had already taken every frame, so
+	// the group ends rather than fails. Recorded because `expired` alone would turn a
+	// clean end into `Error::Old` on the next poll, and a caller is allowed to probe
+	// again after the end.
+	ended: bool,
 	// Cloned cursors are parallel views of one handed-out delivery. Whichever
 	// observes expiry first records its unread tail; the others must not repeat it.
 	stale_counted: Arc<AtomicBool>,
@@ -965,6 +971,7 @@ impl Clone for Consumer {
 			stale_stats: self.stale_stats.clone(),
 			expiry: self.expiry.clone(),
 			expired: self.expired,
+			ended: self.ended,
 			stale_counted: self.stale_counted.clone(),
 		}
 	}
@@ -1016,6 +1023,7 @@ impl Consumer {
 			// after a takeover.
 			expiry: None,
 			expired: false,
+			ended: false,
 			stale_counted: self.stale_counted,
 		}
 	}
@@ -1063,7 +1071,15 @@ impl Consumer {
 	/// `Some(false)` ends the group cleanly and `Some(true)` fails it with
 	/// [`Error::Old`]; see [`Self::expired_truncates`].
 	fn poll_expired_if_blocked(&mut self, waiter: &kio::Waiter) -> Option<bool> {
-		self.poll_expired(waiter).then(|| self.expired_truncates())
+		if self.ended {
+			return Some(false);
+		}
+		if !self.poll_expired(waiter) {
+			return None;
+		}
+		let truncates = self.expired_truncates();
+		self.ended = !truncates;
+		Some(truncates)
 	}
 
 	/// Whether giving up on this group now loses the reader anything.
@@ -1206,6 +1222,9 @@ impl Consumer {
 	/// Returns None if the group is finished and the index is out of range, or the cursor
 	/// passed the [`Self::end_at`] cap.
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
+		if self.ended {
+			return Poll::Ready(Ok(None));
+		}
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
@@ -1235,6 +1254,9 @@ impl Consumer {
 
 	/// Read the next frame (timestamp and payload) all at once, without blocking.
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
+		if self.ended {
+			return Poll::Ready(Ok(None));
+		}
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
@@ -1277,6 +1299,9 @@ impl Consumer {
 
 	/// Poll for the final number of frames in the group.
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
+		if self.ended {
+			return Poll::Ready(Ok(self.index()));
+		}
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}

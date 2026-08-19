@@ -4355,6 +4355,35 @@ mod test {
 		);
 	}
 
+	/// A group the budget ends rather than fails stays ended. `expired` alone would
+	/// turn the clean answer into [`Error::Old`] on the next poll, and a caller is
+	/// allowed to probe again past the end of a group.
+	#[tokio::test]
+	async fn an_ended_group_stays_ended_when_probed_again() {
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(None);
+		let mut open = producer.append_group().unwrap();
+		open.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"a")).unwrap();
+
+		let mut group = subscriber.recv_group().await.unwrap().expect("group");
+		assert!(group.read_frame().await.unwrap().is_some());
+
+		let probes = tokio::spawn(async move {
+			let first = group.read_frame().await;
+			let second = group.read_frame().await;
+			let finished = group.finished().await;
+			(first, second, finished)
+		});
+		tokio::task::yield_now().await;
+
+		append_at(&mut producer, 1000);
+
+		let (first, second, finished) = probes.await.unwrap();
+		assert!(matches!(first, Ok(None)), "the group ends: {first:?}");
+		assert!(matches!(second, Ok(None)), "and stays ended: {second:?}");
+		assert!(matches!(finished, Ok(1)), "reporting what it delivered: {finished:?}");
+	}
+
 	#[tokio::test]
 	async fn a_drained_group_finishes_cleanly_after_the_live_edge_advances() {
 		let mut producer = track_producer("test", None);
@@ -6857,3 +6886,4 @@ mod test {
 		drop(dynamic);
 	}
 }
+
