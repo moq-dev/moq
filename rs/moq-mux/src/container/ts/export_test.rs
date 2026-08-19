@@ -1313,11 +1313,21 @@ fn make_long_section(table_id: u8, ext: u16, version: u8, number: u8, last: u8, 
 }
 
 /// Read an SI snapshot track from the start: every group, as its frames' payloads.
+///
+/// Starting at group 0 only asks the publisher to send from there; the default
+/// [`moq_net::Latency::REAL_TIME`] budget then skips every group the live edge has
+/// already passed, which is all of them once the importer has finished. A budget
+/// wider than the test's wall-clock span (every cut lands within microseconds) is
+/// what actually delivers the history, so a count of groups counts cuts.
 async fn read_si_groups(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<Vec<Bytes>> {
 	let mut track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_start(moq_net::track::Position::group(0))
+				.with_latency(moq_net::Latency::max(moq_net::track::DEFAULT_LATENCY_MAX)),
+		)
 		.await
 		.unwrap();
 	let mut groups = Vec::new();
