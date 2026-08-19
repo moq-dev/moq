@@ -28,6 +28,7 @@ import { hasAnnounceId, hasAnnounceOk, hasDatagrams, Version } from "./version.t
 const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
 const PROBE_MAX_DELTA = 0.25;
+const PROBE_RTT_DELTA = 0.25;
 
 /** Map a signed delta to an unsigned zigzag varint value (mirrors Rust `VarInt::from_zigzag`). */
 function zigzag(delta: bigint): bigint {
@@ -664,7 +665,7 @@ export class Publisher {
 	async runProbe(stream: Stream) {
 		// getStats is not yet in the TypeScript WebTransport type definitions.
 		const quic = this.#quic as unknown as {
-			getStats?: () => Promise<{ estimatedSendRate: number | null }>;
+			getStats?: () => Promise<{ estimatedSendRate: number | null; smoothedRtt?: number | null }>;
 		};
 		if (!quic.getStats) {
 			// Best-effort: we can't supply bandwidth estimates, so close the
@@ -673,8 +674,17 @@ export class Publisher {
 			return;
 		}
 
-		let lastSentBitrate: number | undefined;
+		let lastSent: Probe | undefined;
 		let lastSentTime: number | undefined;
+
+		// Whether a metric moved enough to be worth another report. Gaining or
+		// losing a value always counts; both unknown never does.
+		const moved = (prev?: number, next?: number, threshold = 0): boolean => {
+			if (prev === undefined && next === undefined) return false;
+			if (prev === undefined || next === undefined) return true;
+			if (prev === 0) return next !== 0;
+			return Math.abs(next - prev) / prev >= threshold;
+		};
 
 		try {
 			for (;;) {
@@ -684,27 +694,34 @@ export class Publisher {
 				const result = await Promise.race([timeout, stream.reader.closed]);
 				if (result !== "timeout") break;
 
+				// The two fields are independent on the wire, each using 0 for
+				// unknown, so a transport exposing only one still has something to
+				// report.
 				const stats = await quic.getStats();
-				const bitrate = stats.estimatedSendRate;
-				if (bitrate == null) continue;
+				const report = new Probe(stats.estimatedSendRate ?? undefined, stats.smoothedRtt ?? undefined);
+
+				// Neither metric is measurable, so there is nothing to say.
+				if (report.bitrate === undefined && report.rtt === undefined) continue;
 
 				let shouldSend: boolean;
-				if (lastSentBitrate === undefined || lastSentTime === undefined) {
+				if (lastSent === undefined || lastSentTime === undefined) {
 					shouldSend = true;
-				} else if (lastSentBitrate === 0) {
-					shouldSend = bitrate > 0;
 				} else {
 					const elapsed = performance.now() - lastSentTime;
+					// The bitrate threshold decays to zero as the last report ages: a
+					// stale estimate is worth refreshing for a smaller move.
 					const t = Math.max(PROBE_INTERVAL, Math.min(PROBE_MAX_AGE, elapsed));
 					const range = PROBE_MAX_AGE - PROBE_INTERVAL;
 					const threshold = (PROBE_MAX_DELTA * (PROBE_MAX_AGE - t)) / range;
-					const change = Math.abs(bitrate - lastSentBitrate) / lastSentBitrate;
-					shouldSend = change >= threshold;
+					shouldSend =
+						elapsed >= PROBE_MAX_AGE ||
+						moved(lastSent.bitrate, report.bitrate, threshold) ||
+						moved(lastSent.rtt, report.rtt, PROBE_RTT_DELTA);
 				}
 
 				if (shouldSend) {
-					await new Probe(bitrate).encode(stream.writer, this.version);
-					lastSentBitrate = bitrate;
+					await report.encode(stream.writer, this.version);
+					lastSent = report;
 					lastSentTime = performance.now();
 				}
 			}

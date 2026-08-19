@@ -13,21 +13,23 @@ function guardProbe(version: Version) {
 }
 
 export class Probe {
-	bitrate: number;
+	/** Estimated send bitrate in bits per second, or undefined if unknown. */
+	bitrate?: number;
+	/** Smoothed round-trip time in milliseconds, or undefined if unknown. */
 	rtt?: number;
 
-	constructor(bitrate: number, rtt?: number) {
+	constructor(bitrate?: number, rtt?: number) {
 		this.bitrate = bitrate;
 		this.rtt = rtt;
 	}
 
 	async #encode(w: Writer, version: Version) {
-		await w.u53(this.bitrate);
+		// 0 means unknown; round a measured 0 up to 1.
+		await w.u53(this.bitrate !== undefined ? Math.max(this.bitrate, 1) : 0);
 		switch (version) {
 			case Version.DRAFT_03:
 				break;
 			default: {
-				// 0 means unknown; round Some(0) up to 1.
 				const wire = this.rtt !== undefined ? Math.max(this.rtt, 1) : 0;
 				await w.u53(wire);
 				break;
@@ -36,7 +38,9 @@ export class Probe {
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Probe> {
-		const bitrate = await r.u53();
+		// 0 means unknown, the same as the RTT below.
+		const bitrateWire = await r.u53();
+		const bitrate = bitrateWire === 0 ? undefined : bitrateWire;
 		let rtt: number | undefined;
 		switch (version) {
 			case Version.DRAFT_03:

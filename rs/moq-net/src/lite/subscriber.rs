@@ -431,7 +431,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream.writer.encode(&lite::ControlType::Probe).await?;
 
 		while let Some(probe) = stream.reader.decode_maybe::<lite::Probe>().await? {
-			bandwidth.set(Some(probe.bitrate))?;
+			// `None` is the publisher reporting "unknown", not an estimate of zero.
+			bandwidth.set(probe.bitrate)?;
 		}
 
 		Ok(())

@@ -41,6 +41,26 @@ pub enum ProbeLevel {
 }
 
 impl ProbeLevel {
+	/// The level to advertise for `session`, from what its transport actually exposes.
+	///
+	/// [`Report`](Self::Report) claims the publisher can measure and periodically
+	/// report. A transport that exposes neither a send-rate estimate nor an RTT can
+	/// honour neither, and the draft requires such a publisher to reset any Probe
+	/// Stream a subscriber opens. Advertising [`None`](Self::None) instead stops the
+	/// subscriber opening one at all.
+	///
+	/// Both metrics are sampled rather than declared, so this only works for a
+	/// transport whose figures exist by the time the session starts. QUIC and TCP
+	/// both qualify: their RTT comes from the handshake, which has already happened.
+	pub fn detect<S: web_transport_trait::Session>(session: &S) -> Self {
+		use web_transport_trait::Stats as _;
+		let stats = session.stats();
+		match stats.estimated_send_rate().is_some() || stats.rtt().is_some() {
+			true => Self::Report,
+			false => Self::None,
+		}
+	}
+
 	/// Map the wire value to a level, saturating unknown values to [`Increase`](Self::Increase).
 	fn from_code(code: u64) -> Self {
 		match code {
@@ -295,6 +315,31 @@ mod tests {
 	fn empty_round_trip() {
 		let msg = Setup::default();
 		assert_eq!(round_trip(&msg), msg);
+	}
+
+	/// A transport exposing neither metric can't honour a `Report` claim, and the
+	/// draft makes such a publisher reset any Probe Stream a subscriber opens. It
+	/// must advertise `None` so the subscriber never opens one.
+	#[test]
+	fn detect_reports_nothing_without_stats() {
+		use crate::lite::test_transport::{SinkSession, SinkStats};
+		let session = SinkSession::new(Default::default()).with_stats(SinkStats::default());
+		assert_eq!(ProbeLevel::detect(&session), ProbeLevel::None);
+	}
+
+	/// Either metric alone is enough to report, since the two PROBE fields are
+	/// independent on the wire.
+	#[test]
+	fn detect_reports_with_either_metric() {
+		use crate::lite::test_transport::{SinkSession, SinkStats};
+
+		let rtt_only = SinkStats::default().with_rtt(std::time::Duration::from_millis(40));
+		let session = SinkSession::new(Default::default()).with_stats(rtt_only);
+		assert_eq!(ProbeLevel::detect(&session), ProbeLevel::Report);
+
+		let rate_only = SinkStats::default().with_send_rate(1_000_000);
+		let session = SinkSession::new(Default::default()).with_stats(rate_only);
+		assert_eq!(ProbeLevel::detect(&session), ProbeLevel::Report);
 	}
 
 	#[test]

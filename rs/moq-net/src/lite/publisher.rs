@@ -179,8 +179,34 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 		const PROBE_MAX_AGE: Duration = Duration::from_secs(10);
 		const PROBE_MAX_DELTA: f64 = 0.25;
+		const PROBE_RTT_DELTA: f64 = 0.25;
 
-		let mut last_sent: Option<(u64, web_async::time::Instant)> = None;
+		/// Whether a metric moved enough to be worth another report. Gaining or
+		/// losing a value always counts; both unknown never does.
+		fn moved(prev: Option<u64>, next: Option<u64>, threshold: f64) -> bool {
+			match (prev, next) {
+				(None, None) => false,
+				(Some(prev), Some(next)) => {
+					if prev == 0 {
+						return next != 0;
+					}
+					(next as f64 - prev as f64).abs() / prev as f64 >= threshold
+				}
+				_ => true,
+			}
+		}
+
+		/// The bitrate change worth reporting, decaying to zero as the last report
+		/// ages: a stale estimate is worth refreshing for a smaller move.
+		fn bitrate_threshold(elapsed: Duration) -> f64 {
+			let t = elapsed
+				.as_secs_f64()
+				.clamp(PROBE_INTERVAL.as_secs_f64(), PROBE_MAX_AGE.as_secs_f64());
+			let range = PROBE_MAX_AGE.as_secs_f64() - PROBE_INTERVAL.as_secs_f64();
+			PROBE_MAX_DELTA * (PROBE_MAX_AGE.as_secs_f64() - t) / range
+		}
+
+		let mut last_sent: Option<(lite::Probe, web_async::time::Instant)> = None;
 		let mut interval = web_async::time::interval(PROBE_INTERVAL);
 
 		loop {
@@ -200,27 +226,37 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				return res;
 			}
 
-			let Some(bitrate) = session.stats().estimated_send_rate() else {
-				continue;
+			// The two fields are independent on the wire, each using 0 for unknown,
+			// so a transport that exposes only one still has something to report.
+			// Scoped so the borrowed stats handle is dropped before the encode
+			// below awaits; it isn't `Send`.
+			let report = {
+				let stats = session.stats();
+				lite::Probe {
+					bitrate: stats.estimated_send_rate(),
+					rtt: stats.rtt().map(|d| d.as_millis() as u64),
+				}
 			};
 
-			let should_send = match last_sent {
+			// Neither metric is measurable. A publisher in that position shouldn't
+			// have advertised Report at all, so there is nothing to say.
+			if report.bitrate.is_none() && report.rtt.is_none() {
+				continue;
+			}
+
+			let should_send = match &last_sent {
 				None => true,
-				Some((0, _)) => bitrate > 0,
 				Some((prev, at)) => {
-					let elapsed = at.elapsed().as_secs_f64();
-					let t = elapsed.clamp(PROBE_INTERVAL.as_secs_f64(), PROBE_MAX_AGE.as_secs_f64());
-					let range = PROBE_MAX_AGE.as_secs_f64() - PROBE_INTERVAL.as_secs_f64();
-					let threshold = PROBE_MAX_DELTA * (PROBE_MAX_AGE.as_secs_f64() - t) / range;
-					let change = (bitrate as f64 - prev as f64).abs() / prev as f64;
-					change >= threshold
+					let elapsed = at.elapsed();
+					elapsed >= PROBE_MAX_AGE
+						|| moved(prev.bitrate, report.bitrate, bitrate_threshold(elapsed))
+						|| moved(prev.rtt, report.rtt, PROBE_RTT_DELTA)
 				}
 			};
 
 			if should_send {
-				let rtt = session.stats().rtt().map(|d| d.as_millis() as u64);
-				stream.writer.encode(&lite::Probe { bitrate, rtt }).await?;
-				last_sent = Some((bitrate, web_async::time::Instant::now()));
+				stream.writer.encode(&report).await?;
+				last_sent = Some((report, web_async::time::Instant::now()));
 			}
 		}
 	}
@@ -2415,5 +2451,74 @@ mod tests {
 			!writes.windows(b"echoed".len()).any(|w| w == b"echoed"),
 			"echoed broadcast filtered from ANNOUNCE_INIT"
 		);
+	}
+
+	/// Decode the PROBE messages the publisher wrote. The publisher only replies on
+	/// a stream the subscriber opened, so there is no leading ControlType here.
+	fn decode_probes(bytes: &[u8]) -> Vec<lite::Probe> {
+		use crate::coding::Decode as _;
+		let mut slice = bytes;
+		let mut out = Vec::new();
+		while bytes::Buf::remaining(&slice) > 0 {
+			out.push(lite::Probe::decode(&mut slice, Version::Lite05).unwrap());
+		}
+		out
+	}
+
+	/// Drive `run_probe` against a transport reporting `stats`, and return whatever
+	/// it wrote before parking.
+	async fn probe_writes(stats: crate::lite::test_transport::SinkStats) -> Vec<lite::Probe> {
+		let gate = kio::Producer::new(true);
+		let session = SinkSession::gated_bi(gate.consume()).with_stats(stats);
+		let log = session.log.clone();
+		let mut stream = Stream::open(&session, Version::Lite05).await.unwrap();
+
+		let mut run = std::pin::pin!(Publisher::<SinkSession>::run_probe(
+			&session,
+			&mut stream,
+			Version::Lite05
+		));
+		// The loop reports on a 100ms cadence, so let the first tick land before
+		// reading what it wrote. It parks on the next tick either way.
+		assert!(futures::poll!(run.as_mut()).is_pending());
+		tokio::time::sleep(Duration::from_millis(150)).await;
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		let writes = log.writes.lock().unwrap().clone();
+		decode_probes(&writes)
+	}
+
+	/// A transport that exposes an RTT but no send-rate estimate must still report.
+	///
+	/// The two PROBE fields are independent, each using 0 for unknown, so discarding
+	/// the whole message for want of a bitrate leaves a subscriber with no RTT at
+	/// all. That is what pins a qmux viewer to its fallback jitter buffer.
+	#[tokio::test(start_paused = true)]
+	async fn reports_rtt_without_a_bitrate() {
+		let stats = crate::lite::test_transport::SinkStats::default().with_rtt(std::time::Duration::from_millis(40));
+		let probes = probe_writes(stats).await;
+
+		assert_eq!(probes.len(), 1, "expected exactly one report");
+		assert_eq!(probes[0].rtt, Some(40));
+		assert_eq!(probes[0].bitrate, None, "unknown bitrate, not a measured zero");
+	}
+
+	/// The mirror case: a send rate with no RTT still reports.
+	#[tokio::test(start_paused = true)]
+	async fn reports_bitrate_without_an_rtt() {
+		let stats = crate::lite::test_transport::SinkStats::default().with_send_rate(1_000_000);
+		let probes = probe_writes(stats).await;
+
+		assert_eq!(probes.len(), 1);
+		assert_eq!(probes[0].bitrate, Some(1_000_000));
+		assert_eq!(probes[0].rtt, None);
+	}
+
+	/// A transport measuring neither has nothing to say, and must not emit a report
+	/// claiming two zeroes.
+	#[tokio::test(start_paused = true)]
+	async fn reports_nothing_when_nothing_is_measurable() {
+		let probes = probe_writes(crate::lite::test_transport::SinkStats::default()).await;
+		assert!(probes.is_empty(), "expected no report, got {probes:?}");
 	}
 }

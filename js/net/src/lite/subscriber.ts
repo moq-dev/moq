@@ -892,7 +892,9 @@ export class Subscriber {
 				// bitrate-only report doesn't blank it.
 				const prev = this.#probe.peek();
 				this.#probe.set({
-					estimatedRecvRate: probe.bitrate ?? undefined,
+					// `undefined` is the peer reporting "unknown", not an estimate of
+					// zero; letting it through would become a real 0 bps ABR target.
+					estimatedRecvRate: probe.bitrate,
 					rtt: probe.rtt !== undefined ? Time.Milli(probe.rtt) : prev.rtt,
 				});
 			}
