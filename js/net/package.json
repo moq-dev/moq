@@ -19,7 +19,8 @@
 	"dependencies": {
 		"@moq/qmux": "^0.3.3",
 		"@moq/signals": "workspace:*",
-		"async-mutex": "^0.5.0"
+		"async-mutex": "^0.5.0",
+		"bowser": "^2.14.1"
 	},
 	"peerDependencies": {
 		"zod": "^4.0.0"
