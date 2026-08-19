@@ -226,10 +226,14 @@ pub struct MoqAudioConsumer {
 
 #[uniffi::export]
 impl MoqAudioConsumer {
+	/// The next decoded frame, or `None` once the track ends.
 	pub async fn next(&self) -> Result<Option<MoqAudioFrame>, MoqError> {
 		self.task.run(|mut state| async move { state.next().await }).await
 	}
 
+	/// Make current and future reads return `Cancelled`.
+	///
+	/// Terminal: the decoder session is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}

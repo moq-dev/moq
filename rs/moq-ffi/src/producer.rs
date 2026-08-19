@@ -499,6 +499,9 @@ impl MoqBroadcastDynamic {
 	}
 
 	/// Cancel all current and future `requested_track()` calls.
+	///
+	/// Terminal: the dynamic broadcast is released here, not when the handle is, so any pending
+	/// request is rejected.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
@@ -519,6 +522,9 @@ impl MoqTrackDynamic {
 	}
 
 	/// Cancel all current and future `requested_group()` calls.
+	///
+	/// Terminal: the dynamic track is released here, not when the handle is, so any pending
+	/// fetch is rejected.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}

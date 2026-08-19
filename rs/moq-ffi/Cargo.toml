@@ -38,7 +38,7 @@ moq-video = { workspace = true }
 pollster = "1.0"
 serde_json = "1"
 thiserror = "2"
-tokio = { workspace = true, features = ["macros"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 tracing = "0.1"
 uniffi = { version = "0.31", features = ["cli"] }
 url = "2"

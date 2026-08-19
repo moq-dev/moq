@@ -404,8 +404,7 @@ impl MoqVideoConsumer {
 
 	/// Make current and future reads return `Cancelled`.
 	///
-	/// The decoder backend is released when this object is dropped, not here: a cancelled consumer
-	/// that stays reachable keeps its codec session. Drop it to free one.
+	/// Terminal: the decoder session is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}

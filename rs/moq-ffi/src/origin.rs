@@ -331,6 +331,9 @@ impl MoqOriginDynamic {
 	}
 
 	/// Cancel all current and future `requested_broadcast()` calls.
+	///
+	/// Terminal: the dynamic origin is released here, not when the handle is, so any pending
+	/// request is rejected.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
@@ -389,6 +392,8 @@ impl MoqAnnounced {
 	}
 
 	/// Cancel all current and future `next()` calls.
+	///
+	/// Terminal: the announcement stream is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
@@ -419,6 +424,8 @@ impl MoqAnnouncedBroadcast {
 	}
 
 	/// Cancel all current and future `available()` calls.
+	///
+	/// Terminal: the announcement watch is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
