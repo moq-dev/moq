@@ -185,6 +185,11 @@ struct SiTrack {
 	pending: Option<(moq_net::group::Consumer, super::si::Snapshot)>,
 	/// Media timestamp of the last emission ([`due`]).
 	last_emit: Option<Timestamp>,
+	/// The same budget the media sources use. SI carries table snapshots at a low
+	/// rate, so the real-time default would take only the newest group and drop
+	/// the revisions between: an SI track needs the export's replay window as much
+	/// as the media it describes.
+	latency: crate::Latency,
 }
 
 /// The SI subscription's lifecycle, mirroring `ExportSource`'s but reading raw
@@ -203,7 +208,7 @@ enum SiState {
 }
 
 impl SiTrack {
-	fn new(source: &crate::Source, track: &str, interval: Option<Duration>) -> Self {
+	fn new(source: &crate::Source, track: &str, interval: Option<Duration>, latency: crate::Latency) -> Self {
 		Self {
 			track: track.to_string(),
 			interval,
@@ -211,6 +216,7 @@ impl SiTrack {
 			active: Default::default(),
 			pending: None,
 			last_emit: None,
+			latency,
 		}
 	}
 
@@ -232,7 +238,9 @@ impl SiTrack {
 			};
 			self.state = match resolved {
 				Ok((broadcast, name)) => match broadcast.track(&name) {
-					Ok(track) => SiState::Subscribing(track.subscribe(None)),
+					Ok(track) => SiState::Subscribing(
+						track.subscribe(moq_net::track::Subscription::default().with_latency(self.latency)),
+					),
 					Err(err) => {
 						tracing::warn!(%err, track = %name, "SI track unavailable; carrying the last snapshot");
 						SiState::Done
@@ -575,7 +583,7 @@ impl<E: catalog::Catalog> Export<E> {
 					// staying attached would repeat its stale sections forever. The last
 					// snapshot carries across so emission never goes dark mid-swap.
 					Some(existing) if existing.track != entry.track => {
-						let mut replacement = SiTrack::new(&self.source, &entry.track, entry.interval);
+						let mut replacement = SiTrack::new(&self.source, &entry.track, entry.interval, self.latency);
 						replacement.active = std::mem::take(&mut existing.active);
 						replacement.last_emit = existing.last_emit;
 						*existing = replacement;
@@ -584,7 +592,7 @@ impl<E: catalog::Catalog> Export<E> {
 					None => {
 						self.si.insert(
 							(*pid, *table_id),
-							SiTrack::new(&self.source, &entry.track, entry.interval),
+							SiTrack::new(&self.source, &entry.track, entry.interval, self.latency),
 						);
 					}
 				}

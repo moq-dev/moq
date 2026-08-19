@@ -2460,9 +2460,12 @@ async fn repointed_si_entry_resubscribes() {
 		producer.cut(None).unwrap();
 	};
 
+	// Writes both GOPs up front and only then reads, so it needs a replay window:
+	// the real-time default would take the live edge and skip the first.
 	let mut exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
 		.await
-		.unwrap();
+		.unwrap()
+		.with_latency(crate::Latency::max(RECORDING_LATENCY));
 	let mut before = BytesMut::new();
 	write_key(&mut producer, 0);
 	write_key(&mut producer, 1);
