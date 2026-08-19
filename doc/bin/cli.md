@@ -645,9 +645,10 @@ are carried as opaque sections on dedicated snapshot tracks, one per PID and
 table, and re-emitted byte-for-byte on their original PIDs, each at its own
 repetition interval. So the service name, provider, type, network, and EPG
 survive the round-trip without being parsed, and only TS exporters pay for
-them. TDT/TOT is the one exception: it is a clock rather than state, so the
-exporter's own clock beats a time relayed from an upstream multiplexer of
-unknown delay.
+them. TDT/TOT rides along as a latest-value slot, each tick replacing the
+last: the EPG's event times are on the source's clock, so the source's own
+time table is the one that stays consistent with it, and TOT's local-time
+offsets (DST transitions) are operator data no exporter could invent.
 
 ### FLV
 

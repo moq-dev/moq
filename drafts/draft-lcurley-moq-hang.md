@@ -579,7 +579,9 @@ Completeness is contiguity (all of `0..=last_section_number` present) or one obs
 A section lost before the cycle wraps is indistinguishable from a legitimately skipped number, so a committed set can transiently omit it until the next cycle re-supplies it; no section-counting receiver can do better.
 A publisher SHOULD carry only sections whose `current_next_indicator` is set.
 
-Tables that are clocks rather than state (TDT/TOT, PID 0x0014) SHOULD NOT be carried: every section is new content, and an exporter's own clock is a better source than a time relayed from an upstream multiplexer of unknown delay.
+A section without a long-form header (short-form syntax: TDT/TOT and similar) has no extension, version, or numbering, so its table is a single latest-value slot: each arrival replaces the last, and a byte-identical repetition is not a change.
+This is what makes a time table proxyable: each tick republishes a small snapshot, a joiner reads the newest, and staleness is bounded by the source's own repetition interval plus path latency, the same bound a receiver of the original multiplex has.
+Carrying the source's time rather than synthesizing one keeps the clock consistent with the EPG (event times are expressed on the source's clock) and preserves TOT's local-time-offset descriptors, which are operator policy a re-multiplexer cannot invent.
 
 
 # Security Considerations

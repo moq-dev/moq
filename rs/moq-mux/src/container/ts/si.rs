@@ -17,7 +17,6 @@
 //! reduces a track's frames back into the current section set.
 
 use std::collections::{BTreeMap, HashMap};
-use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -33,32 +32,28 @@ use super::catalog;
 /// debounce forever). The first snapshot is never delayed.
 const DEBOUNCE: Duration = Duration::from_secs(1);
 
-/// Keep at most this many sections without any parseable identity (short-form or
-/// runt) per entry. They can only be deduplicated by content, never replaced, so a
-/// broken source could otherwise accumulate without bound.
-const MAX_CONTENT_SECTIONS: usize = 32;
-
 /// A sub-table's identity within its `(PID, table_id)` entry: what a revised
 /// generation replaces.
 ///
 /// Generic section syntax carries `table_id_extension`; for two documented table
 /// families that alone is ambiguous, so the spec-fixed scope bytes join the key
-/// (see [`scope`]). A section with no long-form header has no identity at all and
-/// is tracked by content: it can be deduplicated but never revised in place.
+/// (see [`scope`]). A section with no long-form header has no extension, version,
+/// or numbering, so its table is a single latest-value slot: each arrival replaces
+/// the last. That is exactly right for the short-form tables DVB defines (TDT/TOT
+/// are clocks; ST is stuffing), and it is what lets a time table be proxied at all
+/// (#2914): content-keyed identity would mint a fresh key per tick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum Identity {
 	/// A long-form sub-table: `table_id_extension` plus any table-specific scope.
 	Sub { ext: u16, scope: u32 },
-	/// A short-form or runt section, identified by a hash of its bytes.
-	Content(u64),
+	/// A short-form or runt section: one slot for the whole table, latest wins.
+	Table,
 }
 
 /// Compute a section's sub-table identity.
 pub(super) fn identity(section: &[u8]) -> Identity {
 	if !long_form(section) {
-		let mut hasher = std::collections::hash_map::DefaultHasher::new();
-		section.hash(&mut hasher);
-		return Identity::Content(hasher.finish());
+		return Identity::Table;
 	}
 	let ext = u16::from_be_bytes([section[3], section[4]]);
 	Identity::Sub {
@@ -159,8 +154,6 @@ struct Entry {
 	active: BTreeMap<Identity, Generation>,
 	/// In-flight generations, keyed by sub-table and version.
 	pending: HashMap<(Identity, u8), Pending>,
-	/// Insertion order of content-identified sections, for bounded retention.
-	content_order: Vec<Identity>,
 	/// A commit changed `active` since the last cut.
 	dirty: bool,
 	/// The entry appears in the catalog's `mpegts.si` map (deferred until the first
@@ -178,28 +171,23 @@ impl Entry {
 		let id = identity(&section);
 
 		let Identity::Sub { .. } = id else {
-			// No identity to revise under: dedupe by content and retain a bounded set.
-			if self.active.contains_key(&id) {
-				return;
+			// Latest-value slot: a short-form table has no version to buffer under, so
+			// each arrival replaces the last (a TDT ticks ~every 30s and every section
+			// is new bytes). A byte-identical repetition is not a change.
+			let changed = self
+				.active
+				.get(&id)
+				.is_none_or(|current| current.sections.get(&0) != Some(&section));
+			if changed {
+				self.active.insert(
+					id,
+					Generation {
+						version: None,
+						sections: BTreeMap::from([(0u8, section)]),
+					},
+				);
+				self.dirty = true;
 			}
-			self.active.insert(
-				id,
-				Generation {
-					version: None,
-					sections: BTreeMap::from([(0u8, section)]),
-				},
-			);
-			self.content_order.push(id);
-			if self.content_order.len() > MAX_CONTENT_SECTIONS {
-				let evict = self.content_order.remove(0);
-				self.active.remove(&evict);
-				// At the cap the set is churning, not growing: a clock-like table whose
-				// every repetition differs would otherwise mint a key per arrival and
-				// cut a group per debounce forever, carrying the cap's worth of stale
-				// sections. Rotation without net growth is not worth republishing.
-				return;
-			}
-			self.dirty = true;
 			return;
 		};
 
@@ -361,7 +349,6 @@ impl<E: catalog::Catalog> Capture<E> {
 					interval: catalog::si_interval(table_id),
 					active: BTreeMap::new(),
 					pending: HashMap::new(),
-					content_order: Vec::new(),
 					dirty: false,
 					advertised: false,
 					last_cut: None,

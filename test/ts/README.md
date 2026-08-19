@@ -107,7 +107,7 @@ range and transmits only the segment-boundary sections that hold events, so
 **completeness cannot be decided by counting sections**. `--days 8` reaches that
 shape; the default twelve events does not. Censused with `--all-sections`:
 
-| table_id | distinct sections | declared `last_section_number` |
+| table\_id | distinct sections | declared `last_section_number` |
 |---|---:|---:|
 | 0x4E p/f | 2 | 1 |
 | 0x50 schedule, days 0-3 | 32 | 248 |

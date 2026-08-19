@@ -24,14 +24,18 @@ use crate::catalog::hang::CatalogExt;
 /// both now/next and the full schedule, and a table we've never heard of is exactly
 /// as worth preserving as one we have.
 ///
-/// TDT/TOT (0x0014) is deliberately absent: it is a clock, not state, so every
-/// section is new content, and it is the table with the least to gain from being
-/// relayed. An exporter's own clock is a better source than a time forwarded from
-/// an upstream multiplexer of unknown delay.
+/// TDT/TOT (0x0014) is proxied, not synthesized (#2914): EIT event times are
+/// expressed on the source's clock, so a locally-minted time next to a relayed
+/// schedule can disagree with it, and TOT's `local_time_offset` descriptors (DST
+/// transitions, per-country offsets) are operator data an exporter cannot invent.
+/// Each tick replaces the last on its latest-value slot, so staleness is bounded by
+/// the source's own repetition interval plus path latency, the same class a TS
+/// receiver already lives with.
 pub(super) const SI_PIDS: &[u16] = &[
 	0x0010, // NIT (network description)
 	0x0011, // SDT and BAT (service and bouquet description)
 	0x0012, // EIT (event information: now/next and schedule)
+	0x0014, // TDT and TOT (time and local-time offset)
 ];
 
 /// The DVB maximum repetition interval for a known `table_id` (ETSI TS 101 211).
@@ -60,6 +64,8 @@ pub(super) fn si_interval(table_id: u8) -> Option<Duration> {
 		0x50..=0x5F => Some(Duration::from_secs(10)),
 		// EIT schedule other.
 		0x60..=0x6F => Some(Duration::from_secs(30)),
+		// TDT and TOT.
+		0x70 | 0x73 => Some(Duration::from_secs(30)),
 		_ => None,
 	}
 }

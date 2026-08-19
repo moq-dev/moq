@@ -1820,30 +1820,41 @@ async fn next_version_sections_are_dropped() {
 	assert!(!si.contains_key(&0x0011), "a next-version section creates no entry");
 }
 
-/// TDT/TOT (0x0014) stays out by policy: it is a clock, not state, so every
-/// section is new content, and an exporter's own clock beats a time relayed from
-/// an upstream multiplexer of unknown delay. The SDT is the positive control
-/// proving the pipeline ran.
+/// TDT/TOT (0x0014) is proxied as a latest-value slot (#2914): each tick replaces
+/// the last, so the newest snapshot is the source's most recent time, never an
+/// accumulation of stale ones. The SDT is the positive control proving the
+/// pipeline ran.
 #[tokio::test(start_paused = true)]
-async fn tdt_is_not_captured() {
-	// A short-form TDT: table_id 0x70, no long-form header.
-	let tdt = make_short_section(0x70, &[0xc0, 0x79, 0x12, 0x34, 0x56]);
+async fn tdt_round_trips_as_latest_value() {
+	let tick = |mjd: u8| make_short_section(0x70, &[0xc0, mjd, 0x12, 0x34, 0x56]);
 	let sdt = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 4]);
 
-	let mut input = si_packet(0x0014, &tdt);
-	input.extend_from_slice(&si_packet_cc(0x0014, &tdt, 1));
+	let mut rig = si_rig();
+	let mut input = si_packet(0x0014, &tick(1));
+	input.extend_from_slice(&si_packet_cc(0x0014, &tick(1), 1));
 	input.extend_from_slice(&si_packet(0x0011, &sdt));
 	input.extend_from_slice(&si_packet_cc(0x0011, &sdt, 1));
-	let mut rig = si_rig();
 	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	// The clock ticks: the new section replaces the old slot.
+	rig.import
+		.decode(&BytesMut::from(&si_packet_cc(0x0014, &tick(2), 2)[..]))
+		.unwrap();
 	rig.import.finish().unwrap();
 
 	let si = rig.catalog.snapshot().mpegts.si.clone();
 	assert!(si.contains_key(&0x0011), "the SDT was captured (control)");
-	assert!(
-		!si.contains_key(&0x0014),
-		"TDT is not captured; the omission is policy, not oversight"
+	let entry = si
+		.get(&0x0014)
+		.and_then(|tables| tables.get(&0x70))
+		.expect("a TDT entry");
+	assert_eq!(entry.interval, Some(Duration::from_secs(30)), "the TDT/TOT 30s maximum");
+	assert_eq!(
+		read_si_sections(&rig.consumer, &entry.track).await,
+		vec![Bytes::from(tick(2))],
+		"the newest snapshot is the latest tick alone"
 	);
+	let groups = read_si_groups(&rig.consumer, &entry.track).await;
+	assert_eq!(groups.len(), 2, "one group per tick, no accumulation");
 }
 
 /// Build a well-formed short-form section (syntax indicator clear): header + body,
@@ -1881,31 +1892,24 @@ async fn abort_removes_si_catalog_entries() {
 	);
 }
 
-/// Content-identified sections (short-form: no version, nothing to revise in
-/// place) are retained up to a cap, and churn at the cap is not a change: a
-/// clock-like table whose every repetition differs would otherwise cut a group
-/// per debounce forever, carrying the cap's worth of stale sections.
+/// A byte-identical short-form repetition is not a change: the latest-value slot
+/// only cuts a group when the bytes actually differ.
 #[tokio::test(start_paused = true)]
-async fn content_section_churn_at_the_cap_cuts_no_group() {
-	let section = |i: u8| make_short_section(0x72, &[i, 0x00, 0xee]);
+async fn short_form_repetition_cuts_no_group() {
+	let tdt = make_short_section(0x70, &[0xc0, 0x79, 0x12, 0x34, 0x56]);
 
-	// One over the cap in one batch: the 33rd evicts the 1st.
-	let mut input = Vec::new();
-	for i in 0..33u8 {
-		input.extend_from_slice(&si_packet_cc(0x0011, &section(i), i & 0x0f));
-	}
 	let mut rig = si_rig();
+	let mut input = si_packet(0x0014, &tdt);
+	input.extend_from_slice(&si_packet_cc(0x0014, &tdt, 1));
 	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
-	// Another distinct section, pure rotation at the cap: must not re-dirty.
 	rig.import
-		.decode(&BytesMut::from(&si_packet_cc(0x0011, &section(33), 1)[..]))
+		.decode(&BytesMut::from(&si_packet_cc(0x0014, &tdt, 2)[..]))
 		.unwrap();
 	rig.import.finish().unwrap();
 
 	let si = rig.catalog.snapshot().mpegts.si.clone();
-	let groups = read_si_groups(&rig.consumer, &si[&0x0011][&0x72].track).await;
-	assert_eq!(groups.len(), 1, "rotation at the cap cut no further group");
-	assert_eq!(groups[0].len(), 32, "the snapshot holds the cap's worth of sections");
+	let groups = read_si_groups(&rig.consumer, &si[&0x0014][&0x70].track).await;
+	assert_eq!(groups.len(), 1, "a repetition cut no further group");
 }
 
 /// SI never gates output: an advertised entry whose track resolves but never
