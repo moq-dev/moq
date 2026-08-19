@@ -88,65 +88,44 @@ pub(crate) struct Legacy {
 }
 
 impl Config {
-	/// Fold the released spellings into the canonical fields. Idempotent.
-	pub fn resolved(&self) -> Self {
+	/// The released spellings in use, each paired with what replaced it. Reached
+	/// through [`crate::listen::Config::deprecated`].
+	pub(crate) fn deprecated(&self) -> crate::Deprecated {
 		let legacy = &self.legacy;
-		let mut resolved = self.clone();
+		let mut found = crate::Deprecated::default();
 
-		for (used, deprecated, canonical) in [
-			(legacy.bind.is_some(), "--server-unix-bind", "--listen-unix-bind"),
+		for (used, old, env, new) in [
+			(
+				legacy.bind.is_some(),
+				"--server-unix-bind",
+				"MOQ_SERVER_UNIX_BIND",
+				"--listen-unix-bind / MOQ_LISTEN_UNIX_BIND",
+			),
 			(
 				!legacy.uid.is_empty(),
 				"--server-unix-allow-uid",
-				"--listen-unix-allow-uid",
+				"MOQ_SERVER_UNIX_ALLOW_UID",
+				"--listen-unix-allow-uid / MOQ_LISTEN_UNIX_ALLOW_UID",
 			),
 			(
 				!legacy.gid.is_empty(),
 				"--server-unix-allow-gid",
-				"--listen-unix-allow-gid",
+				"MOQ_SERVER_UNIX_ALLOW_GID",
+				"--listen-unix-allow-gid / MOQ_LISTEN_UNIX_ALLOW_GID",
 			),
 			(
 				!legacy.pid.is_empty(),
 				"--server-unix-allow-pid",
-				"--listen-unix-allow-pid",
+				"MOQ_SERVER_UNIX_ALLOW_PID",
+				"--listen-unix-allow-pid / MOQ_LISTEN_UNIX_ALLOW_PID",
 			),
 		] {
 			if used {
-				tracing::warn!("{deprecated} is deprecated; use {canonical}");
+				found.flag(old, Some(env), new);
 			}
 		}
-
-		if resolved.bind.is_none() {
-			resolved.bind = legacy.bind.clone();
-		}
-
-		// Merge per credential rather than letting either allowlist win whole. The
-		// three lists are ANDed, so taking the canonical one entire would drop a
-		// legacy `uid` next to a canonical `gid` and *widen* access from "that user"
-		// to "anyone in that group".
-		let allow = resolved.allow.take().unwrap_or_default();
-		let merged = Allow {
-			uid: concat(&allow.uid, &legacy.uid),
-			gid: concat(&allow.gid, &legacy.gid),
-			pid: concat(&allow.pid, &legacy.pid),
-		};
-		// Clap materializes a flattened `Option<Args>` to `Some(default)` even when no
-		// flag was given, so an empty allowlist means unset, not "allow nothing".
-		resolved.allow = Some(merged).filter(|allow| !allow.is_empty());
-		resolved.legacy = Legacy::default();
-		resolved
+		found
 	}
-}
-
-/// Both spellings of one credential, in canonical-then-legacy order, deduplicated.
-fn concat<T: Clone + PartialEq>(canonical: &[T], legacy: &[T]) -> Vec<T> {
-	let mut out = canonical.to_vec();
-	for value in legacy {
-		if !out.contains(value) {
-			out.push(value.clone());
-		}
-	}
-	out
 }
 
 /// Peer-credential allowlist for a `unix://` listener.
@@ -419,56 +398,55 @@ mod legacy_tests {
 		Cli::parse_from(argv).unix
 	}
 
-	/// The released `--server-unix-*` spellings still land in the canonical fields,
-	/// allowlist included: clap materializes the flattened `Allow` even when unset,
-	/// so a naive "already Some" check would drop the legacy credentials.
+	/// The released `--server-unix-*` spellings parse so the process can name their
+	/// replacements, and configure nothing.
+	///
+	/// The allowlist is the sharp one: the three credential lists are ANDed, so a
+	/// released `uid` quietly dropped next to a canonical `gid` would *widen* access
+	/// from one user to a whole group. Refusing the command line outright is the
+	/// only answer that can't get that wrong.
 	#[test]
-	fn released_spellings_fold_in() {
-		let config = parse(&["--server-unix-bind", "/tmp/moq.sock", "--server-unix-allow-uid", "501"]).resolved();
+	fn released_spellings_are_reported_not_applied() {
+		let config = parse(&["--server-unix-bind", "/tmp/moq.sock", "--server-unix-allow-uid", "501"]);
+		assert_eq!(config.bind, None);
+		assert!(config.allow.as_ref().is_none_or(|allow| allow.uid.is_empty()));
 
-		assert_eq!(config.bind, Some(PathBuf::from("/tmp/moq.sock")));
-		assert_eq!(config.allow.as_ref().map(|allow| allow.uid.clone()), Some(vec![501]));
+		let reported = config.deprecated().to_string();
+		assert!(
+			reported.contains("--server-unix-bind / MOQ_SERVER_UNIX_BIND -> --listen-unix-bind / MOQ_LISTEN_UNIX_BIND"),
+			"{reported}"
+		);
+		assert!(reported.contains("--server-unix-allow-uid"), "{reported}");
 	}
 
-	/// The canonical bind wins, and folding twice changes nothing.
+	/// A canonical flag next to a released one does not excuse it.
 	#[test]
-	fn canonical_wins_over_legacy() {
+	fn a_canonical_spelling_does_not_excuse_a_released_one() {
 		let config = parse(&[
 			"--listen-unix-bind",
 			"/tmp/new.sock",
 			"--server-unix-bind",
 			"/tmp/old.sock",
-		])
-		.resolved();
-
+		]);
 		assert_eq!(config.bind, Some(PathBuf::from("/tmp/new.sock")));
-		assert_eq!(config.resolved().bind, config.bind);
+		assert!(config.deprecated().to_string().contains("--server-unix-bind"));
 	}
 
-	/// The allowlist merges per credential instead of letting one spelling win
-	/// whole. The three lists are ANDed, so dropping the legacy `uid` next to a
-	/// canonical `gid` would widen access from one user to a whole group.
+	/// The canonical allowlist, which is what `--help` teaches.
 	#[test]
-	fn allowlist_merges_across_spellings() {
-		let config = parse(&["--listen-unix-allow-gid", "20", "--server-unix-allow-uid", "501"]).resolved();
+	fn canonical_allowlist_applies() {
+		let config = parse(&["--listen-unix-allow-gid", "20", "--listen-unix-allow-uid", "501"]);
+		assert!(config.deprecated().is_empty());
 		let allow = config.allow.as_ref().expect("allowlist");
 		assert_eq!(allow.uid, vec![501]);
 		assert_eq!(allow.gid, vec![20]);
-
-		// Same credential from both spellings: canonical first, no duplicates.
-		let config = parse(&["--listen-unix-allow-uid", "1000", "--server-unix-allow-uid", "501,1000"]).resolved();
-		assert_eq!(config.allow.as_ref().expect("allowlist").uid, vec![1000, 501]);
-
-		// Folding twice changes nothing.
-		let once = config.resolved();
-		assert_eq!(once.resolved().allow.map(|a| a.uid), once.allow.map(|a| a.uid));
 	}
 
 	/// No flag at all leaves the allowlist unset, so the parent directory's
 	/// permissions stay the only filesystem gate.
 	#[test]
 	fn no_allowlist_stays_unset() {
-		let config = parse(&["--listen-unix-bind", "/tmp/moq.sock"]).resolved();
-		assert!(config.allow.is_none());
+		let config = parse(&["--listen-unix-bind", "/tmp/moq.sock"]);
+		assert!(config.allow.as_ref().is_none_or(|allow| allow.is_empty()));
 	}
 }

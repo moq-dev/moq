@@ -74,6 +74,9 @@ fn default_bind() -> net::SocketAddr {
 }
 
 /// The `--client-*` flags from before the dial side was named `connect`.
+///
+/// Still parsed, and still carrying their original env vars, so a process can name
+/// the replacement and stop. Nothing reads the values: see [`Config::deprecated`].
 #[derive(Clone, Debug, Default, clap::Args)]
 #[group(id = "connect-legacy")]
 pub(crate) struct Legacy {
@@ -146,38 +149,70 @@ pub(crate) struct Legacy {
 }
 
 impl Legacy {
-	/// The legacy flags in use, each paired with its replacement, for one warning.
-	///
-	/// Spelled out rather than listing only the new names: `--client-reconnect` maps
-	/// to a flag that means the opposite, so a bare list would send someone to a flag
-	/// whose value they'd have to invert without being told.
-	fn used(&self) -> Vec<&'static str> {
-		let mut used = Vec::new();
+	/// The released spellings in use, each paired with what replaced it.
+	fn deprecated(&self) -> crate::Deprecated {
+		let mut found = crate::Deprecated::default();
 		if self.url.is_some() {
-			used.push("--client-connect -> --connect");
+			found.flag(
+				"--client-connect",
+				Some("MOQ_CLIENT_CONNECT"),
+				"--connect / MOQ_CONNECT",
+			);
 		}
 		if self.bind.is_some() {
-			used.push("--client-bind -> --connect-bind");
+			found.flag(
+				"--client-bind",
+				Some("MOQ_CLIENT_BIND"),
+				"--connect-bind / MOQ_CONNECT_BIND",
+			);
 		}
 		if self.backend.is_some() {
-			used.push("--client-backend -> --connect-backend");
+			found.flag(
+				"--client-backend",
+				Some("MOQ_CLIENT_BACKEND"),
+				"--connect-backend / MOQ_CONNECT_BACKEND",
+			);
 		}
 		if self.timeout.is_some() {
-			used.push("--client-connect-timeout -> --connect-timeout");
+			found.flag(
+				"--client-connect-timeout",
+				Some("MOQ_CLIENT_CONNECT_TIMEOUT"),
+				"--connect-timeout / MOQ_CONNECT_TIMEOUT",
+			);
 		}
 		if self.race.is_some() {
-			used.push("--client-failover-delay -> --connect-race");
+			found.flag(
+				"--client-failover-delay",
+				Some("MOQ_CLIENT_FAILOVER_DELAY"),
+				"--connect-race / MOQ_CONNECT_RACE",
+			);
 		}
 		if self.resolution_delay.is_some() {
-			used.push("--client-resolution-delay -> --connect-resolution-delay");
+			found.flag(
+				"--client-resolution-delay",
+				Some("MOQ_CLIENT_RESOLUTION_DELAY"),
+				"--connect-resolution-delay / MOQ_CONNECT_RESOLUTION_DELAY",
+			);
 		}
 		if self.reconnect.is_some() {
-			used.push("--client-reconnect -> --connect-once (inverted)");
+			// Named as a change rather than a rename: the replacement means the
+			// opposite, so a bare mapping would have someone carry the value across
+			// unchanged and get the behavior they were trying to keep, inverted.
+			found.changed(
+				"--client-reconnect",
+				Some("MOQ_CLIENT_RECONNECT"),
+				"--connect-once / MOQ_CONNECT_ONCE",
+				"inverted: --client-reconnect=false is --connect-once=true",
+			);
 		}
 		if !self.version.is_empty() {
-			used.push("--client-version -> --connect-version");
+			found.flag(
+				"--client-version",
+				Some("MOQ_CLIENT_VERSION"),
+				"--connect-version / MOQ_CONNECT_VERSION",
+			);
 		}
-		used
+		found
 	}
 }
 
@@ -465,10 +500,12 @@ pub struct Config {
 	)]
 	pub once: Option<bool>,
 
-	/// The released `reconnect` spelling, which said the same thing the other way
-	/// around. Inverted into [`once`](Self::once) by [`resolved`](Self::resolved).
+	/// The released `reconnect` key, which said the same thing the other way around.
 	///
-	/// TOML-only: the `--client-reconnect` flag lives on [`Legacy`] with the rest.
+	/// Parsed only so [`deprecated`](Self::deprecated) can name [`once`](Self::once)
+	/// and the inversion; `deny_unknown_fields` would otherwise reject the file with
+	/// nothing to migrate to. TOML-only: the `--client-reconnect` flag lives on
+	/// [`Legacy`] with the rest.
 	#[serde(default, skip_serializing)]
 	#[arg(skip)]
 	pub(crate) reconnect: Option<bool>,
@@ -491,68 +528,41 @@ pub struct Config {
 	pub websocket: crate::websocket::Config,
 
 	/// The released `--client-*` spellings and their env vars, kept parsing but
-	/// hidden. Folded into the canonical fields by [`Config::resolved`].
+	/// hidden. Never read as settings: [`Config::deprecated`] names what replaced
+	/// each one so a process can say so and stop.
 	#[command(flatten)]
 	#[serde(skip)]
 	pub(crate) legacy: Legacy,
 
 	/// The released `[client.quic]` table, which is now the shared top-level
 	/// `[quic]`. See [`crate::listen::Config::quic`].
+	///
+	/// Parsed only so [`deprecated`](Self::deprecated) can name the replacement.
 	#[arg(skip)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub quic: Option<crate::quic::Config>,
 }
 
 impl Config {
-	/// Fold every released `--client-*` spelling into the canonical fields.
+	/// Every released spelling this config was parsed from, across this section and
+	/// the TLS and WebSocket ones it owns, each paired with what replaced it.
 	///
-	/// The canonical spelling wins. Warns once when a legacy spelling contributed.
-	/// Idempotent, and applied automatically by [`init`](Self::init), so calling it
-	/// yourself is only needed to inspect the folded values.
-	pub fn resolved(&self) -> Self {
-		let used = self.legacy.used();
-		if !used.is_empty() {
-			tracing::warn!(
-				"deprecated --client-* flags in use; the dial side is now --connect-*: {}",
-				used.join(", ")
-			);
+	/// A binary checks this before anything else and exits when it isn't empty. The
+	/// old spellings are parsed so the process can name their replacement, not so it
+	/// can honor them: [`crate::Client::new`] rejects them too, so a config that
+	/// skipped the check can't reach a dial that quietly ignored half of it.
+	pub fn deprecated(&self) -> crate::Deprecated {
+		let mut found = self.legacy.deprecated();
+		if self.reconnect.is_some() {
+			found.toml("reconnect", "once", Some("inverted: reconnect = false is once = true"));
 		}
-		let legacy = &self.legacy;
-
-		let mut resolved = self.clone();
-		resolved.url = self.url.clone().or(legacy.url.clone());
-		resolved.bind = self.bind.or(legacy.bind);
-		resolved.backend = self.backend.clone().or(legacy.backend.clone());
-		resolved.timeout = self.timeout.or(legacy.timeout);
-		resolved.race = self.race.or(legacy.race);
-		resolved.resolution_delay = self.resolution_delay.or(legacy.resolution_delay);
-		// The two legacy spellings say "keep reconnecting", so they invert.
-		resolved.once = self
-			.once
-			.or(self.reconnect.map(|reconnect| !reconnect))
-			.or(legacy.reconnect.map(|reconnect| !reconnect));
-		resolved.reconnect = None;
-		// Concatenated, not replaced: each spelling is its own list of versions to
-		// offer, and dropping one would narrow the offer behind the user's back.
-		for version in &legacy.version {
-			if !resolved.version.contains(version) {
-				resolved.version.push(*version);
-			}
+		if self.quic.is_some() {
+			found.toml("[client.quic]", "[quic]", Some("now applies to both directions"));
 		}
-		resolved.tls = self.tls.resolved();
+		found.extend(self.tls.deprecated());
 		#[cfg(feature = "websocket")]
-		{
-			resolved.websocket = self.websocket.resolved();
-		}
-		resolved.legacy = Legacy::default();
-		resolved
-	}
-
-	/// Take the released `[client.quic]` table, if a config file carried one.
-	pub fn take_quic(&mut self) -> Option<crate::quic::Config> {
-		self.quic.take().inspect(|_| {
-			tracing::warn!("[client.quic] is deprecated; QUIC tuning is now the shared top-level [quic]");
-		})
+		found.extend(self.websocket.deprecated());
+		found
 	}
 
 	/// Build the [`crate::Client`] this config describes.

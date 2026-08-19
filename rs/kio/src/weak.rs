@@ -275,6 +275,32 @@ impl<T> ConsumerWeak<T> {
 		}
 	}
 
+	/// Poll the shared state with a closure, exactly as [`Consumer::poll`] does.
+	///
+	/// Available here so a watcher can register for changes without joining the
+	/// consumer count, which is what [`Producer::unused`](crate::Producer::unused)
+	/// keys off.
+	pub fn poll<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<R, Ref<'_, T>>>
+	where
+		F: FnMut(&Ref<'_, T>) -> Poll<R>,
+	{
+		let state = self.state.lock();
+		let consumer_state = Ref { state };
+
+		if let Poll::Ready(res) = f(&consumer_state) {
+			return Poll::Ready(Ok(res));
+		}
+
+		if consumer_state.state.closed {
+			return Poll::Ready(Err(consumer_state));
+		}
+
+		let mut state = consumer_state.state;
+		waiter.register(&mut state.waiters_value);
+
+		Poll::Pending
+	}
+
 	/// Returns `true` if the channel has been closed.
 	pub fn is_closed(&self) -> bool {
 		self.state.lock().closed

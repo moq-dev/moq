@@ -89,6 +89,23 @@ struct Shared<S: crate::transport::poll::Session> {
 	goaway: crate::goaway::Protocol,
 }
 
+/// Largest millisecond duration every implementation can carry losslessly.
+const MAX_SAFE_LATENCY_MS: u64 = (1_u64 << 53) - 1;
+
+/// The budget to serve a peer with, given what its wire could tell us.
+///
+/// A version without the field decodes as [`Duration::ZERO`], which is
+/// indistinguishable from a peer genuinely asking for the live edge. Serving that
+/// as real time would discard backlog a legacy subscriber never declined, so fall
+/// back to a window wide enough not to drop and leave enforcement to the receiver,
+/// exactly as the IETF path does for the same reason.
+fn serving_latency(version: Version, requested: Duration) -> crate::Latency {
+	match version.carries_latency() {
+		true => crate::Latency::max(requested),
+		false => crate::Latency::max(Duration::from_millis(MAX_SAFE_LATENCY_MS)),
+	}
+}
+
 impl<S: crate::transport::poll::Session> Shared<S> {
 	/// The origin to resolve a peer-requested broadcast from: excludes routes
 	/// through the peer when its SETUP declared an origin id, so a subscription
@@ -1202,8 +1219,9 @@ enum SubscribeState<S: crate::transport::poll::Session> {
 		msg: lite::Subscribe<'static>,
 		subscribing: track::Subscribing,
 	},
-	/// Streaming groups and datagrams.
-	Run(TrackRun<S>),
+	/// Streaming groups and datagrams. Boxed: by far the largest state, and the enum
+	/// is moved on every transition.
+	Run(Box<TrackRun<S>>),
 	/// The track finished: draining the in-flight group streams before the FIN.
 	Drain {
 		children: kio::Tasks<crate::util::MaybeSendTask>,
@@ -1292,7 +1310,7 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 					let subscription = crate::track::Subscription {
 						priority: msg.priority,
 						ordered: msg.ordered,
-						latency: crate::Latency::max(msg.latency_max),
+						latency: serving_latency(self.shared.version, msg.latency_max),
 						..Bounds::from(&msg).positions()
 					};
 
@@ -1358,7 +1376,7 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 					};
 
 					let run = TrackRun::new(sub, track, Bounds::from(&msg), track_priority_tx);
-					self.state = SubscribeState::Run(run);
+					self.state = SubscribeState::Run(Box::new(run));
 				}
 				SubscribeState::Run(run) => {
 					let stream = self.stream.as_mut().expect("stream present");
@@ -1718,7 +1736,8 @@ mod test {
 		use futures::FutureExt;
 
 		let mut producer = track_producer("test");
-		let mut subscriber = producer.subscribe(None);
+		let mut subscriber = producer
+			.subscribe(track::Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(5))));
 
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
 		match recv_next(&mut subscriber, false, false).await.unwrap() {
@@ -2775,7 +2794,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 				let _ = self.track.update(crate::track::Subscription {
 					priority: upd.priority,
 					ordered: upd.ordered,
-					latency: crate::Latency::max(upd.latency_max),
+					latency: serving_latency(self.ctx.version, upd.latency_max),
 					..bounds.positions()
 				});
 				if let Some(start_group) = upd.start_group {
@@ -2917,6 +2936,10 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		loop {
 			match &mut self.state {
 				GroupState::Open => {
+					if self.group.poll_expired(waiter) {
+						self.state = GroupState::Done;
+						return Poll::Ready(Err(Error::Old));
+					}
 					let mut cx = Context::from_waker(waiter.waker());
 					let stream = match ready!(self.ctx.session.poll_open_uni(&mut cx)) {
 						Ok(stream) => stream,
@@ -2976,7 +2999,16 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 							match writer.poll_flush(&mut cx) {
 								Poll::Ready(Ok(())) => {}
 								Poll::Ready(Err(err)) => break 'serve Err(err),
-								Poll::Pending => return Poll::Pending,
+								// Parking on the transport is the one stall the group cursor cannot
+								// see, and the only place a served group applies the drift budget:
+								// flow control must not pin a stream that has gone stale. `true`
+								// because the transport still owns bytes the cursor has released.
+								Poll::Pending => {
+									if self.group.poll_expired_while_pending(waiter, true) {
+										break 'serve Err(Error::Old);
+									}
+									return Poll::Pending;
+								}
 							}
 							if let Some(pending) = chunk {
 								match writer.poll_write(&mut cx, pending) {
@@ -2986,7 +3018,16 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 										}
 									}
 									Poll::Ready(Err(err)) => break 'serve Err(err),
-									Poll::Pending => return Poll::Pending,
+									// Parking on the transport is the one stall the group cursor cannot
+									// see, and the only place a served group applies the drift budget:
+									// flow control must not pin a stream that has gone stale. `true`
+									// because the transport still owns bytes the cursor has released.
+									Poll::Pending => {
+										if self.group.poll_expired_while_pending(waiter, true) {
+											break 'serve Err(Error::Old);
+										}
+										return Poll::Pending;
+									}
 								}
 							} else if let Some(pending) = frame {
 								match pending.poll_read_chunk(waiter) {
@@ -3214,6 +3255,184 @@ mod serve_group_test {
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
+	}
+
+	/// A subscription group keeps checking latency while a transport write is
+	/// flow-control blocked, so a stalled send cannot pin the stream indefinitely.
+	#[tokio::test]
+	async fn blocked_transport_write_expires_with_the_group() {
+		tokio::time::pause();
+
+		let gate = kio::Producer::new(false);
+		let session = SinkSession::gated_uni(gate.consume());
+		let log = session.log.clone();
+		let track_priority = kio::Producer::new(0u8);
+		let subscription = Subscription {
+			session,
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			ordered: false,
+			version: Version::Lite06Wip,
+			timescale: Some(crate::Timescale::default()),
+		};
+
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut subscriber = track.subscribe(None);
+		let mut old = track.append_group().unwrap();
+		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
+		old.finish().unwrap();
+		let group = subscriber.recv_group().await.unwrap().expect("old group");
+
+		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group));
+		assert!(
+			futures::poll!(serve.as_mut()).is_pending(),
+			"transport write is blocked"
+		);
+
+		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		let mut edge = track.append_group().unwrap();
+		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
+			.unwrap();
+		edge.finish().unwrap();
+
+		assert!(matches!(serve.await, Err(Error::Old)));
+		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
+	}
+
+	/// The final payload remains guarded after its frame has advanced the group cursor.
+	#[tokio::test]
+	async fn blocked_final_transport_chunk_expires_with_the_group() {
+		tokio::time::pause();
+
+		let gate = kio::Producer::new(true);
+		let session = SinkSession::gated_uni(gate.consume());
+		let log = session.log.clone();
+		let track_priority = kio::Producer::new(0u8);
+		let subscription = Subscription {
+			session,
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			ordered: false,
+			version: Version::Lite06Wip,
+			timescale: Some(crate::Timescale::default()),
+		};
+
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut subscriber = track.subscribe(None);
+		let mut old = track.append_group().unwrap();
+		let mut frame = old
+			.create_frame(frame::Info {
+				timestamp: Timestamp::ZERO,
+				size: 2,
+			})
+			.unwrap();
+		frame.write(b"a".as_slice()).unwrap();
+		let group = subscriber.recv_group().await.unwrap().expect("old group");
+
+		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group));
+		assert!(
+			futures::poll!(serve.as_mut()).is_pending(),
+			"waiting for the final byte"
+		);
+
+		let Ok(mut open) = gate.write() else {
+			panic!("transport gate closed");
+		};
+		*open = false;
+		drop(open);
+		frame.write(b"b".as_slice()).unwrap();
+		frame.finish().unwrap();
+		old.finish().unwrap();
+		assert!(
+			futures::poll!(serve.as_mut()).is_pending(),
+			"the final byte is transport-blocked"
+		);
+
+		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		let mut edge = track.append_group().unwrap();
+		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
+			.unwrap();
+		edge.finish().unwrap();
+
+		assert!(matches!(serve.await, Err(Error::Old)));
+		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
+	}
+
+	/// A subscription group keeps checking latency while transport stream credit is
+	/// exhausted, so returning credit is reserved for content that is still live.
+	#[tokio::test]
+	async fn blocked_transport_open_expires_with_the_group() {
+		tokio::time::pause();
+
+		let gate = kio::Producer::new(false);
+		let session = SinkSession::gated_open_uni(gate.consume());
+		let track_priority = kio::Producer::new(0u8);
+		let subscription = Subscription {
+			session,
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			ordered: false,
+			version: Version::Lite06Wip,
+			timescale: Some(crate::Timescale::default()),
+		};
+
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut subscriber = track.subscribe(None);
+		let mut old = track.append_group().unwrap();
+		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
+		old.finish().unwrap();
+		let group = subscriber.recv_group().await.unwrap().expect("old group");
+
+		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group));
+		assert!(
+			futures::poll!(serve.as_mut()).is_pending(),
+			"stream credit is exhausted"
+		);
+
+		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		let mut edge = track.append_group().unwrap();
+		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
+			.unwrap();
+		edge.finish().unwrap();
+
+		assert!(matches!(serve.await, Err(Error::Old)));
+	}
+
+	/// Lite01/02 have no latency field, so a SUBSCRIBE from one decodes as
+	/// `Duration::ZERO`. Serving that as a real-time budget would hold every legacy
+	/// peer to the live edge and discard backlog it never declined, so those versions
+	/// get a non-dropping window and leave enforcement to the receiver.
+	///
+	/// These are the two most-preferred negotiated versions, so this is the common
+	/// wire, not an edge case.
+	#[test]
+	fn a_version_without_the_field_serves_a_non_dropping_budget() {
+		for version in [Version::Lite01, Version::Lite02] {
+			let latency = serving_latency(version, Duration::ZERO);
+			assert!(
+				latency.max >= Duration::from_secs(86_400),
+				"{version:?} must not be served as real time: {latency:?}"
+			);
+		}
+
+		// A version that does carry it is taken at its word, zero included.
+		assert_eq!(serving_latency(Version::Lite05, Duration::ZERO).max, Duration::ZERO);
+		assert_eq!(
+			serving_latency(Version::Lite05, Duration::from_secs(3)).max,
+			Duration::from_secs(3)
+		);
 	}
 
 	/// A group that completes cleanly must not reset at all. The completion path

@@ -2,26 +2,72 @@ use super::origin::*;
 use super::producer::*;
 use super::server::MoqServer;
 use super::session::MoqClient;
+use crate::audio::{MoqAudioDecoderOutput, MoqAudioSampleFormat};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqRouteWatch;
 use crate::consumer::MoqSubscription;
 use crate::error::MoqError;
 use crate::json::{MoqJsonSnapshotConfig, MoqJsonStreamConfig};
-use crate::media::{MoqFrame, MoqInit};
+use crate::media::{MoqAudio, MoqAudioFormat, MoqAudioInit, MoqContainer, MoqFrame, MoqVideoFormat, MoqVideoInit};
 use crate::session::{MoqBackoff, MoqConnectionStatus};
 
+use std::sync::Arc;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A bare [`MoqInit`] with a format and init bytes, no catalog hints.
-fn media_init(format: &str, data: Vec<u8>) -> MoqInit {
-	MoqInit {
-		format: format.to_string(),
+/// A bare [`MoqAudioInit`] with a format and its init bytes.
+fn audio_init(format: MoqAudioFormat, data: Vec<u8>) -> MoqAudioInit {
+	MoqAudioInit {
+		format,
 		data,
 		label: None,
-		video: None,
+	}
+}
+
+fn video_init(format: MoqVideoFormat, data: Vec<u8>) -> MoqVideoInit {
+	MoqVideoInit {
+		format,
+		data,
+		label: None,
+		hint: None,
+	}
+}
+
+/// Wait for `path` to be announced on `origin` and return its consumer.
+///
+/// A created broadcast becomes routable asynchronously, and resolving a reference goes through
+/// `request_broadcast`, which reports a not-yet-announced path as unroutable rather than waiting.
+/// So every broadcast a test resolves has to be awaited, not just the one it starts from.
+async fn await_announced(consumer: &MoqOriginConsumer, path: &str) -> Arc<MoqBroadcastConsumer> {
+	let announced = consumer.announced_broadcast(path.into()).unwrap();
+	tokio::time::timeout(TIMEOUT, announced.available())
+		.await
+		.unwrap_or_else(|_| panic!("timed out waiting for {path} to be announced"))
+		.unwrap()
+}
+
+/// An Opus rendition whose catalog `broadcast` field names `reference`.
+fn sibling_audio(reference: &str) -> MoqAudio {
+	MoqAudio {
+		label: None,
+		broadcast: Some(reference.to_string()),
+		codec: "opus".to_string(),
+		description: None,
+		sample_rate: 48_000,
+		channel_count: 2,
+		bitrate: None,
+		container: MoqContainer::Legacy,
+	}
+}
+
+fn audio_output() -> MoqAudioDecoderOutput {
+	MoqAudioDecoderOutput {
+		format: MoqAudioSampleFormat::F32,
+		sample_rate: None,
+		channels: None,
+		latency_max_ms: None,
 	}
 }
 
@@ -71,7 +117,7 @@ fn origin_options_set_cache_capacity() {
 fn publish_media_lifecycle() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
+	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 	media
 		.write_frame(MoqFrame {
 			payload: b"opus frame".to_vec(),
@@ -726,7 +772,7 @@ async fn dynamic_track_request_can_publish_media() {
 	assert_eq!(track.name().unwrap(), "requested-audio");
 
 	let media = broadcast
-		.publish_media_on_track(&track, media_init("opus", opus_head()))
+		.publish_audio_on_track(&track, audio_init(MoqAudioFormat::Opus, opus_head()))
 		.unwrap();
 	assert_eq!(media.name().unwrap(), "requested-audio");
 	assert!(matches!(track.name(), Err(MoqError::Closed)));
@@ -773,7 +819,7 @@ async fn dynamic_track_request_can_publish_media() {
 async fn media_track_activity_and_name() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
+	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 	let track_name = media.name().unwrap();
 	assert_eq!(track_name, "0.opus");
 
@@ -808,7 +854,9 @@ async fn publish_media_aac_populates_description() {
 		channel_count: 2,
 	};
 	let init = config.encode();
-	let _media = broadcast.publish_media(media_init("aac", init.to_vec())).unwrap();
+	let _media = broadcast
+		.publish_audio(audio_init(MoqAudioFormat::Aac, init.to_vec()))
+		.unwrap();
 
 	let consumer = broadcast.consume().unwrap();
 	let catalog_consumer = consumer.subscribe_catalog().await.unwrap();
@@ -826,13 +874,16 @@ async fn publish_media_aac_populates_description() {
 	assert_eq!(audio.description.as_deref(), Some(init.as_ref()));
 }
 
+/// Audio resolves its rendition from the init bytes, so bad ones fail here rather than surfacing
+/// as a decode error on the first frame. (An unrecognized *format* can no longer be expressed: it
+/// is an enum, and moq-mux owns the string boundary where that check still means something.)
 #[test]
-fn unknown_format() {
+fn audio_rejects_bad_init_bytes() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let err = broadcast
-		.publish_media(media_init("nope", vec![]))
+		.publish_audio(audio_init(MoqAudioFormat::Opus, vec![]))
 		.err()
-		.expect("unknown format should fail");
+		.expect("an OpusHead-less opus track should fail");
 	assert!(
 		matches!(err, crate::error::MoqError::Codec(_)),
 		"expected Codec error, got {err}"
@@ -880,6 +931,147 @@ async fn announced_broadcast_keeps_the_requested_path() {
 	assert_eq!(requested.inner().info().path.as_str(), "a/pub");
 
 	broadcast.finish().unwrap();
+}
+
+/// A catalog rendition may name a sibling broadcast (`./source`), and the track then lives
+/// there, not on the broadcast the catalog came from. Dropping the reference either fails to
+/// find the track or silently decodes a same-named local one with mismatched metadata.
+#[tokio::test]
+async fn decode_audio_follows_a_sibling_broadcast_reference() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+
+	// The catalog's broadcast deliberately has no "audio" track: only the sibling serves it.
+	let catalog = origin.create_broadcast("a/pub".into()).unwrap();
+	let source = origin.create_broadcast("a/source".into()).unwrap();
+	let _audio = source.publish_track("audio".into(), None).unwrap();
+
+	// Both, not just the catalog broadcast: the reference resolves against `a/source`.
+	let broadcast = await_announced(&consumer, "a/pub").await;
+	await_announced(&consumer, "a/source").await;
+
+	let decoded = tokio::time::timeout(
+		TIMEOUT,
+		broadcast.decode_audio("audio".into(), sibling_audio("./source"), audio_output()),
+	)
+	.await
+	.expect("timed out subscribing to the referenced track");
+	decoded.expect("the rendition's broadcast reference should resolve to the sibling");
+
+	// Without the reference the same call has nowhere to find the track.
+	let missing = tokio::time::timeout(
+		TIMEOUT,
+		broadcast.decode_audio("audio".into(), sibling_audio(""), audio_output()),
+	)
+	.await
+	.expect("timed out subscribing to the catalog broadcast");
+	assert!(
+		missing.is_err(),
+		"the catalog broadcast does not serve the track itself"
+	);
+
+	catalog.finish().unwrap();
+	source.finish().unwrap();
+}
+
+/// An announcement stream is drawn from a cursor rooted at the prefix, and the broadcast it hands
+/// out is named relative to that root. Resolving against a differently-rooted origin would read a
+/// legal reference as escaping, or land on the wrong broadcast entirely.
+#[tokio::test]
+async fn announced_broadcasts_resolve_siblings_under_the_prefix() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+	let announced = consumer.announced("a/".into()).unwrap();
+
+	let catalog = origin.create_broadcast("a/pub".into()).unwrap();
+	let source = origin.create_broadcast("a/source".into()).unwrap();
+	let _video = source.publish_track("video".into(), None).unwrap();
+
+	// `a/source` may be announced first, so keep reading until the catalog broadcast arrives.
+	let broadcast = loop {
+		let announcement = tokio::time::timeout(TIMEOUT, announced.next())
+			.await
+			.expect("timed out waiting for the announcement")
+			.unwrap()
+			.expect("the origin should keep announcing");
+		if announcement.path() == "pub" {
+			break announcement.broadcast();
+		}
+	};
+
+	await_announced(&consumer, "a/source").await;
+
+	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into())))
+		.await
+		.expect("timed out resolving the reference")
+		.unwrap();
+	tokio::time::timeout(TIMEOUT, sibling.subscribe_track("video".into(), None))
+		.await
+		.expect("timed out subscribing on the resolved broadcast")
+		.unwrap();
+
+	catalog.finish().unwrap();
+	source.finish().unwrap();
+}
+
+/// A broadcast consumed straight from a local producer has no origin, so a rendition naming a
+/// sibling names nothing. Reporting that beats silently reading the catalog's own broadcast.
+#[tokio::test]
+async fn resolve_rejects_a_reference_without_an_origin() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let _audio = broadcast.create_track("audio", None).unwrap();
+	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
+
+	// An absent or empty reference still names this broadcast, so it needs no origin. A reference
+	// made only of slashes normalizes to the empty one, so it must be treated the same rather than
+	// looking like a cross-broadcast reference.
+	consumer.resolve(None).await.unwrap();
+	consumer.resolve(Some(String::new())).await.unwrap();
+	consumer.resolve(Some("/".into())).await.unwrap();
+
+	// Reported in normalized form, matching `EscapingBroadcast` and libmoq: it names what the
+	// resolver actually tried to reach, not the caller's spelling of it.
+	match consumer.resolve(Some("./source".into())).await {
+		Err(MoqError::UnresolvableBroadcast(reference)) => assert_eq!(reference, "source"),
+		Err(err) => panic!("wrong error for an unresolvable reference: {err:?}"),
+		Ok(_) => panic!("a standalone broadcast cannot resolve a sibling"),
+	}
+}
+
+/// A resolved sibling carries the origin too, so its own catalog's references keep resolving.
+#[tokio::test]
+async fn resolve_returns_a_broadcast_that_resolves_further_references() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+
+	let catalog = origin.create_broadcast("a/pub".into()).unwrap();
+	let source = origin.create_broadcast("a/source".into()).unwrap();
+	let _video = source.publish_track("video".into(), None).unwrap();
+
+	let broadcast = await_announced(&consumer, "a/pub").await;
+	await_announced(&consumer, "a/source").await;
+
+	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into())))
+		.await
+		.expect("timed out resolving the reference")
+		.unwrap();
+	assert_eq!(sibling.inner().info().path.as_str(), "a/source");
+
+	// The sibling is a full consumer: the referenced track subscribes on it directly.
+	tokio::time::timeout(TIMEOUT, sibling.subscribe_track("video".into(), None))
+		.await
+		.expect("timed out subscribing on the resolved broadcast")
+		.unwrap();
+
+	// And it can follow a reference of its own, back to where we started.
+	let back = tokio::time::timeout(TIMEOUT, sibling.resolve(Some("./pub".into())))
+		.await
+		.expect("timed out resolving back")
+		.unwrap();
+	assert_eq!(back.inner().info().path.as_str(), "a/pub");
+
+	catalog.finish().unwrap();
+	source.finish().unwrap();
 }
 
 #[tokio::test]
@@ -955,7 +1147,7 @@ async fn local_publish_consume_audio() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let broadcast = origin.create_broadcast("live".into()).unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
+	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -1014,7 +1206,7 @@ async fn video_publish_consume() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let broadcast = origin.create_broadcast("video-test".into()).unwrap();
 	let init = h264_init();
-	let media = broadcast.publish_media(media_init("avc3", init)).unwrap();
+	let media = broadcast.publish_video(video_init(MoqVideoFormat::Avc3, init)).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -1082,7 +1274,7 @@ async fn video_raw_publish_consume() {
 	let broadcast = origin.create_broadcast("video-raw-test".into()).unwrap();
 
 	let video = broadcast
-		.publish_video(
+		.encode_video(
 			MoqVideoEncoderInput {
 				format: MoqVideoPixelFormat::Rgba,
 				width: 320,
@@ -1184,7 +1376,7 @@ async fn video_raw_publish_from_many_threads() {
 	let broadcast = origin.create_broadcast("video-raw-threads".into()).unwrap();
 
 	let video = broadcast
-		.publish_video(
+		.encode_video(
 			MoqVideoEncoderInput {
 				format: MoqVideoPixelFormat::Rgba,
 				width: 320,
@@ -1274,7 +1466,7 @@ async fn video_raw_publish_rejects_bad_frames() {
 	// A zero framerate is rejected before any track is advertised.
 	assert!(
 		broadcast
-			.publish_video(
+			.encode_video(
 				MoqVideoEncoderInput {
 					framerate: 0,
 					..input(320, 240)
@@ -1284,7 +1476,7 @@ async fn video_raw_publish_rejects_bad_frames() {
 			.is_err()
 	);
 
-	let video = broadcast.publish_video(input(320, 240), output()).unwrap();
+	let video = broadcast.encode_video(input(320, 240), output()).unwrap();
 
 	// A 640x480 buffer against a 320x240 encoder: the frame carries no dimensions
 	// of its own, so this is caught as a wrong-sized picture.
@@ -1314,7 +1506,7 @@ async fn multiple_frames_ordering() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let broadcast = origin.create_broadcast("ordering-test".into()).unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
+	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -1369,9 +1561,9 @@ async fn catalog_update_on_new_track() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let broadcast = origin.create_broadcast("catalog-update".into()).unwrap();
 	let init = opus_head();
-	let mut first = media_init("opus", init.clone());
+	let mut first = audio_init(MoqAudioFormat::Opus, init.clone());
 	first.label = Some("English".to_string());
-	let _media1 = broadcast.publish_media(first).unwrap();
+	let _media1 = broadcast.publish_audio(first).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -1392,7 +1584,7 @@ async fn catalog_update_on_new_track() {
 	assert_eq!(catalog1.audio.len(), 1);
 	assert_eq!(catalog1.audio["0.opus"].label.as_deref(), Some("English"));
 
-	let _media2 = broadcast.publish_media(media_init("opus", init)).unwrap();
+	let _media2 = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 
 	let catalog2 = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -1410,7 +1602,7 @@ async fn catalog_update_on_new_track() {
 fn finish_closes_producer() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let init = opus_head();
-	let _media = broadcast.publish_media(media_init("opus", init)).unwrap();
+	let _media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 	broadcast.finish().unwrap();
 
 	let err = broadcast.finish().unwrap_err();
@@ -1525,7 +1717,7 @@ fn without_runtime() {
 
 		let broadcast = origin.create_broadcast("test".into()).unwrap();
 		let init = opus_head();
-		let media = broadcast.publish_media(media_init("opus", init)).unwrap();
+		let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 		media
 			.write_frame(MoqFrame {
 				payload: b"hello".to_vec(),
@@ -1601,7 +1793,7 @@ async fn server_client_roundtrip() {
 	// Publish a broadcast on the server side.
 	let broadcast = server_origin.create_broadcast("hello".into()).unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
+	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 
 	// Receive the announcement on the client side via the consume origin.
 	let consumer = client_origin.consume();
@@ -1699,7 +1891,7 @@ async fn server_client_roundtrip_auto_origin() {
 	// Server publishes; client receives via the auto consumer.
 	let broadcast = server_origin.create_broadcast("hello".into()).unwrap();
 	let init = opus_head();
-	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
+	let media = broadcast.publish_audio(audio_init(MoqAudioFormat::Opus, init)).unwrap();
 
 	let announced = consumer.announced("".into()).unwrap();
 	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
@@ -1761,6 +1953,28 @@ async fn server_cert_fingerprints_available_after_listen() {
 	// Hex-encoded SHA-256 is 64 chars.
 	assert_eq!(fps[0].len(), 64, "fingerprint should be hex SHA-256");
 	assert!(fps[0].chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+#[tokio::test]
+async fn server_cert_fingerprints_rejected_after_cancel() {
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]);
+
+	tokio::time::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	server.cert_fingerprints().expect("fingerprints available");
+
+	// The listener is dropped off-thread, so this must not depend on that landing first:
+	// cancel is terminal the moment it returns. `Cancelled`, not `Bind`: the wrappers'
+	// `is_shutdown` helpers read the variant to tell a teardown from a real bind failure.
+	server.cancel();
+	assert!(matches!(
+		server.cert_fingerprints(),
+		Err(crate::error::MoqError::Cancelled)
+	));
 }
 
 #[tokio::test]

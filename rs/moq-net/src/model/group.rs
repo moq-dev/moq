@@ -21,6 +21,7 @@ use crate::{Timescale, stats, track};
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Poll, ready};
 
 use crate::{Error, IntoBytes, Result, Timestamp};
@@ -124,6 +125,23 @@ pub(crate) struct GroupState {
 	// against the byte budget tracks evict toward.
 	charge: cache::Charge,
 
+	// The first frame's timestamp, recorded once and never revised: the group's
+	// presentation start. Kept here rather than read off `frames` so it survives a
+	// front eviction, and so an abort doesn't erase where the group sat in time.
+	// `None` until the first frame is written, which is the only honest answer: an
+	// empty group has not presented anything yet.
+	timestamp: Option<Timestamp>,
+
+	// The newest frame's timestamp: the group's presentation end so far. A reader
+	// that has taken every frame sits here, which is what a drift budget measures it
+	// against. Kept alongside `timestamp` for the same reasons.
+	latest: Option<Timestamp>,
+
+	// When the group last accepted a frame. The wall-clock half of the same question:
+	// a group is silent from here, not from whenever it was created. `None` while it
+	// has produced nothing, where the track's arrival time is the only thing to go on.
+	pub(crate) activity: Option<web_async::time::Instant>,
+
 	// Once finalized, the total number of frames the group will ever contain. Recorded
 	// at finish so the count outlives an abort that clears the cache.
 	pub(crate) fin: Option<usize>,
@@ -133,6 +151,46 @@ pub(crate) struct GroupState {
 }
 
 impl GroupState {
+	/// Content still available to a reader of this group.
+	fn content(&self) -> stats::Content {
+		stats::Content {
+			bytes: self.cache,
+			frames: self.next_index.saturating_sub(self.offset) as u64,
+			groups: 1,
+			datagrams: 0,
+		}
+	}
+
+	/// Content in the half-open frame range that is still cached here.
+	pub(crate) fn content_range(&self, start: usize, end: usize) -> stats::Content {
+		let start = start.max(self.offset);
+		let end = end.min(self.next_index);
+		if start >= end {
+			return stats::Content::default();
+		}
+
+		let local_start = start.saturating_sub(self.offset).min(self.frames.len());
+		let local_end = end.saturating_sub(self.offset).min(self.frames.len());
+		let mut bytes = self
+			.frames
+			.range(local_start..local_end)
+			.map(|frame| frame.payload.len() as u64)
+			.sum();
+		if start <= self.committed
+			&& self.committed < end
+			&& let Some(partial) = &self.partial
+		{
+			bytes += partial.buf.capacity() as u64;
+		}
+
+		stats::Content {
+			bytes,
+			frames: (end - start) as u64,
+			groups: 0,
+			datagrams: 0,
+		}
+	}
+
 	/// Resolve the source for the frame at `index`: a completed frame (whole) or the
 	/// in-flight tail (streamed). Used by [`Consumer::poll_next_frame`].
 	fn poll_frame_source(&self, index: usize) -> Poll<Result<Option<(frame::Info, frame::Source)>>> {
@@ -185,6 +243,26 @@ impl GroupState {
 		} else {
 			Poll::Pending
 		}
+	}
+
+	/// Record where the group starts and currently ends in presentation time, plus
+	/// when it last produced. `timestamp` is the first frame only; the rest track
+	/// every frame, so a reader that has caught up can be measured where it sits.
+	fn stamp(&mut self, timestamp: Timestamp) {
+		self.timestamp.get_or_insert(timestamp);
+		self.latest = Some(timestamp);
+		self.activity = Some(web_async::time::Instant::now());
+	}
+
+	/// Where a cursor at `index` sits in presentation time: the next frame it would
+	/// read, or the newest frame in the group once it has taken them all.
+	///
+	/// `None` only while the group has presented nothing at all.
+	fn position(&self, index: usize) -> Option<Timestamp> {
+		self.frames
+			.get(index.saturating_sub(self.offset))
+			.map(|frame| frame.timestamp)
+			.or(self.latest)
 	}
 
 	/// Evict completed frames from the front until within the byte budget.
@@ -405,6 +483,7 @@ impl Producer {
 		state.frames.push_back(Frame { timestamp, payload });
 		state.next_index = next_index;
 		state.committed = state.next_index;
+		state.stamp(timestamp);
 		state.evict();
 		drop(state);
 
@@ -452,6 +531,9 @@ impl Producer {
 			buf: buf.clone(),
 		});
 		state.next_index = next_index;
+		// Opening the frame is enough: the header carries the timestamp, so the group's
+		// place in time is known before a single payload byte streams in.
+		state.stamp(timestamp);
 		state.evict();
 		drop(state);
 
@@ -501,6 +583,9 @@ impl Producer {
 			buf: buf.clone(),
 		});
 		state.next_index = next_index;
+		// Opening the frame is enough: the header carries the timestamp, so the group's
+		// place in time is known before a single payload byte streams in.
+		state.stamp(timestamp);
 		state.evict();
 		drop(state);
 
@@ -603,6 +688,24 @@ impl Producer {
 		self.state.read().committed
 	}
 
+	/// Where the group starts in presentation time: its first frame's timestamp,
+	/// or `None` while no frame has been opened.
+	///
+	/// Stamped once, when the group's first frame arrives, so it measures the group's
+	/// place in the media timeline rather than when it happened to be delivered. That
+	/// is what lets the track tell a burst of old content apart from live content (see
+	/// [`track::Subscriber`]). On protocols whose wire can't carry a timestamp the
+	/// receiver stamps frames with [`Timestamp::now`], which makes this the local
+	/// receive time instead: an estimate that a burst compresses.
+	pub(crate) fn timestamp(&self) -> Option<Timestamp> {
+		self.state.read().timestamp
+	}
+
+	/// Snapshot the content a subscriber would discard by skipping this group.
+	pub(crate) fn content(&self) -> stats::Content {
+		self.state.read().content()
+	}
+
 	/// The group's full cached footprint (payload plus fixed overhead), used by the
 	/// track to size this group as an eviction victim.
 	pub(crate) fn cache_size(&self) -> u64 {
@@ -646,6 +749,25 @@ impl Producer {
 			// Untagged: a tagged track attaches the egress meter via `with_meter`
 			// when it hands the consumer to a subscriber/fetch.
 			stats: stats::Meter::default(),
+			stale_stats: stats::Meter::default(),
+			expiry: None,
+			expired: false,
+			ended: false,
+			stale_counted: Arc::default(),
+		}
+	}
+
+	/// Register for the first-frame timestamp while the group is still unstamped.
+	pub(crate) fn poll_timestamp(&self, waiter: &kio::Waiter) -> Poll<()> {
+		match self.state.poll(waiter, |state| {
+			if state.timestamp.is_some() || state.fin.is_some() || state.abort.is_some() {
+				Poll::Ready(())
+			} else {
+				Poll::Pending
+			}
+		}) {
+			Poll::Ready(_) => Poll::Ready(()),
+			Poll::Pending => Poll::Pending,
 		}
 	}
 
@@ -771,6 +893,29 @@ pub struct Consumer {
 	// Egress payload meter, set by a tagged track via [`Self::with_meter`]. Empty
 	// (no-op) for an untagged group.
 	stats: stats::Meter,
+	// The meter that owns unread content discarded by expiry. Route-specific
+	// cursors inside a spliced group inherit this without metering delivery twice.
+	stale_stats: stats::Meter,
+
+	// Subscriber-specific drift policy. A group can become stale after the track
+	// hands it out, while its reader is waiting for the first or next frame.
+	expiry: Option<Arc<dyn Expiry>>,
+	expired: bool,
+	// Sticky: the budget gave up on a cursor that had already taken every frame, so
+	// the group ends rather than fails. Recorded because `expired` alone would turn a
+	// clean end into `Error::Old` on the next poll, and a caller is allowed to probe
+	// again after the end.
+	ended: bool,
+	// Cloned cursors are parallel views of one handed-out delivery. Whichever
+	// observes expiry first records its unread tail; the others must not repeat it.
+	stale_counted: Arc<AtomicBool>,
+}
+
+/// Subscriber-specific policy for expiring a group after it was handed out.
+pub(crate) trait Expiry: Send + Sync {
+	/// Return whether a reader sitting at `at` is stale, registering `waiter` for
+	/// anything that could change the answer while the group remains live.
+	fn is_expired(&self, waiter: &kio::Waiter, at: Position) -> bool;
 }
 
 // `Plain` is the hot path and carries an inline frame prefetch, so boxing it to even the
@@ -823,6 +968,11 @@ impl Clone for Consumer {
 			// Inherit the meter without re-counting the group: the original already
 			// counted it when the track handed it out.
 			stats: self.stats.clone(),
+			stale_stats: self.stale_stats.clone(),
+			expiry: self.expiry.clone(),
+			expired: self.expired,
+			ended: self.ended,
+			stale_counted: self.stale_counted.clone(),
 		}
 	}
 }
@@ -836,14 +986,45 @@ impl std::ops::Deref for Consumer {
 }
 
 impl Consumer {
+	/// Snapshot the content this cursor would discard if its group were skipped.
+	pub(crate) fn content(&self) -> stats::Content {
+		match &self.inner {
+			ConsumerKind::Plain(plain) => plain.state.read().content(),
+			// Drift is evaluated before a segment copy is wrapped as a spliced group.
+			// Keep the group count honest if a future caller reaches this fallback.
+			ConsumerKind::Spliced(_) => stats::Content {
+				groups: 1,
+				..Default::default()
+			},
+		}
+	}
+
+	/// Content not already attributed as delivered by this handed-out cursor.
+	fn unread_content(&self) -> stats::Content {
+		match &self.inner {
+			ConsumerKind::Plain(plain) => plain.unread_content(),
+			// Each route-specific plain cursor enforces expiry inside a spliced group.
+			ConsumerKind::Spliced(_) => stats::Content::default(),
+		}
+	}
+
 	/// Rebuild this consumer as the head of a group assembled across route changes,
 	/// keeping the group's identity and its track's properties. See [`super::resume`].
-	pub(crate) fn into_spliced(self, spliced: super::resume::Group) -> Self {
+	pub(crate) fn into_spliced(self, mut spliced: super::resume::Group) -> Self {
+		spliced.set_stale_meter(self.stale_stats.clone());
 		Self {
 			inner: ConsumerKind::Spliced(Box::new(spliced)),
 			info: self.info,
 			track: self.track,
 			stats: self.stats,
+			stale_stats: self.stale_stats,
+			// Each segment keeps its own route-specific expiry policy. Applying the
+			// head segment's policy to the assembled group would use the wrong edge
+			// after a takeover.
+			expiry: None,
+			expired: false,
+			ended: false,
+			stale_counted: self.stale_counted,
 		}
 	}
 
@@ -851,8 +1032,111 @@ impl Consumer {
 	/// Called by a tagged track when it hands the consumer to a subscriber or fetch.
 	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
 		meter.group();
-		self.stats = meter;
+		self.stats = meter.clone();
+		self.set_stale_meter(meter);
 		self
+	}
+
+	/// Attach only the meter that owns content discarded by expiry.
+	pub(crate) fn set_stale_meter(&mut self, meter: stats::Meter) {
+		if let ConsumerKind::Spliced(spliced) = &mut self.inner {
+			spliced.set_stale_meter(meter.clone());
+		}
+		self.stale_stats = meter;
+	}
+
+	/// Keep applying this subscription's drift budget while the group is read.
+	pub(crate) fn with_expiry(mut self, expiry: Arc<dyn Expiry>) -> Self {
+		self.expiry = Some(expiry);
+		self
+	}
+
+	/// Check the parent subscription while a wire publisher drains detached payload.
+	pub(crate) fn poll_expired(&mut self, waiter: &kio::Waiter) -> bool {
+		self.poll_expired_while_pending(waiter, false)
+	}
+
+	/// Apply the drift budget to a read that found nothing and is about to park.
+	///
+	/// A group with frames in hand is always drained to its end: the budget bounds a
+	/// group that has *stalled* while the live edge moved on, not one whose reader is
+	/// merely slower than the wire. Judging every read instead would truncate the tail
+	/// of every group, since the arrival of the next group is exactly what makes the
+	/// current one no longer newest.
+	///
+	/// Keeping it off the ready path also keeps it off the hot path: evaluating the
+	/// policy walks the track's group cache under its lock, which is shared by every
+	/// subscriber of that track.
+	///
+	/// `Some(false)` ends the group cleanly and `Some(true)` fails it with
+	/// [`Error::Old`]; see [`Self::expired_truncates`].
+	fn poll_expired_if_blocked(&mut self, waiter: &kio::Waiter) -> Option<bool> {
+		if self.ended {
+			return Some(false);
+		}
+		if !self.poll_expired(waiter) {
+			return None;
+		}
+		let truncates = self.expired_truncates();
+		self.ended = !truncates;
+		Some(truncates)
+	}
+
+	/// Whether giving up on this group now loses the reader anything.
+	///
+	/// A frame-level read only parks once the cursor has taken every frame the group
+	/// holds, so expiring there costs nothing: the reader got everything that exists,
+	/// and the group ends rather than fails. What it was still waiting for was the
+	/// producer's FIN, and a group abandoned at its own end is indistinguishable from
+	/// one that ended. A cursor that still holds unread content (a wire publisher with
+	/// buffered frames, a half-read payload) is genuinely truncated and reports it.
+	fn expired_truncates(&self) -> bool {
+		let unread = self.unread_content();
+		unread.frames > 0 || unread.bytes > 0
+	}
+
+	/// Keep checking expiry while a wire publisher still owns buffered group data.
+	pub(crate) fn poll_expired_while_pending(&mut self, waiter: &kio::Waiter, pending: bool) -> bool {
+		if !self.expired && (pending || self.expiry_pending()) {
+			// Resolved here rather than up front: the sticky flag above answers most
+			// calls without touching the group's state at all.
+			let at = self.position();
+			if self.expiry.as_ref().is_some_and(|expiry| expiry.is_expired(waiter, at)) {
+				self.expired = true;
+				if !self.stale_counted.swap(true, Ordering::Relaxed) {
+					self.stale_stats.stale(self.unread_content());
+				}
+			}
+		}
+		self.expired
+	}
+
+	/// Whether expiry can still discard content or unblock a group that may grow.
+	fn expiry_pending(&self) -> bool {
+		match &self.inner {
+			ConsumerKind::Plain(plain) => plain.expiry_pending(),
+			// The route-specific plain cursors own expiry for a spliced group.
+			ConsumerKind::Spliced(_) => false,
+		}
+	}
+
+	/// Whether this cursor failed because its subscription latency budget expired.
+	pub(crate) fn latency_expired(&self) -> bool {
+		self.expired
+	}
+
+	/// Where this cursor sits, for a drift budget to measure it against the live edge.
+	///
+	/// A group is not late because it *started* long ago. What is late is the content
+	/// its reader has yet to take, so a reader that has drained a group sits at the
+	/// group's newest frame, not its first. Measuring from the first would make every
+	/// group one group-duration behind by construction.
+	pub(crate) fn position(&self) -> Position {
+		match &self.inner {
+			ConsumerKind::Plain(plain) => plain.position(),
+			// A spliced group's route-specific cursors carry their own policy.
+			ConsumerKind::Spliced(_) => Position::default(),
+		}
 	}
 
 	/// Whether the group has been aborted (including pool eviction); the abort
@@ -938,9 +1222,19 @@ impl Consumer {
 	/// Returns None if the group is finished and the index is out of range, or the cursor
 	/// passed the [`Self::end_at`] cap.
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
+		if self.ended {
+			return Poll::Ready(Ok(None));
+		}
+		if self.expired {
+			return Poll::Ready(Err(Error::Old));
+		}
 		let stats = self.stats.clone();
-		match &mut self.inner {
-			ConsumerKind::Plain(plain) => plain.poll_next_frame(waiter, &stats),
+		let expiry = self
+			.expiry
+			.as_ref()
+			.map(|policy| frame::Expiry::new(policy.clone(), self.stale_stats.clone(), self.stale_counted.clone()));
+		let res = match &mut self.inner {
+			ConsumerKind::Plain(plain) => plain.poll_next_frame(waiter, &stats, expiry),
 			ConsumerKind::Spliced(spliced) => {
 				// The per-route copies underneath are untagged, so meter the spliced
 				// stream here: it is the one the subscriber actually reads.
@@ -950,13 +1244,24 @@ impl Consumer {
 				}
 				Poll::Ready(Ok(res.map(|frame| frame.with_meter(stats))))
 			}
+		};
+		match res.is_pending().then(|| self.poll_expired_if_blocked(waiter)).flatten() {
+			Some(true) => Poll::Ready(Err(Error::Old)),
+			Some(false) => Poll::Ready(Ok(None)),
+			None => res,
 		}
 	}
 
 	/// Read the next frame (timestamp and payload) all at once, without blocking.
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
+		if self.ended {
+			return Poll::Ready(Ok(None));
+		}
+		if self.expired {
+			return Poll::Ready(Err(Error::Old));
+		}
 		let stats = self.stats.clone();
-		match &mut self.inner {
+		let res = match &mut self.inner {
 			ConsumerKind::Plain(plain) => plain.poll_read_frame(waiter, &stats),
 			ConsumerKind::Spliced(spliced) => {
 				let res = ready!(spliced.poll_read_frame(waiter))?;
@@ -966,12 +1271,21 @@ impl Consumer {
 				}
 				Poll::Ready(Ok(res))
 			}
+		};
+		match res.is_pending().then(|| self.poll_expired_if_blocked(waiter)).flatten() {
+			Some(true) => Poll::Ready(Err(Error::Old)),
+			Some(false) => Poll::Ready(Ok(None)),
+			None => res,
 		}
 	}
 
 	/// Read the next frame (timestamp and payload) all at once.
 	pub async fn read_frame(&mut self) -> Result<Option<frame::Frame>> {
-		if let ConsumerKind::Plain(plain) = &mut self.inner {
+		// A prefetched frame is already buffered, so the drift budget (which only judges
+		// a read that would park) can never apply to it.
+		if !self.expired
+			&& let ConsumerKind::Plain(plain) = &mut self.inner
+		{
 			// Serve from the prefetched batch without building a future or allocating a waker.
 			if !plain.capped()
 				&& let Some(frame) = plain.prefetch.pop()
@@ -985,9 +1299,21 @@ impl Consumer {
 
 	/// Poll for the final number of frames in the group.
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
-		match &mut self.inner {
+		if self.ended {
+			return Poll::Ready(Ok(self.index()));
+		}
+		if self.expired {
+			return Poll::Ready(Err(Error::Old));
+		}
+		let res = match &mut self.inner {
 			ConsumerKind::Plain(plain) => plain.poll(waiter, |state| state.poll_finished()),
 			ConsumerKind::Spliced(spliced) => spliced.poll_finished(waiter),
+		};
+		match res.is_pending().then(|| self.poll_expired_if_blocked(waiter)).flatten() {
+			Some(true) => Poll::Ready(Err(Error::Old)),
+			// The group ended where the cursor stands, so that is its frame count.
+			Some(false) => Poll::Ready(Ok(self.index())),
+			None => res,
 		}
 	}
 
@@ -997,7 +1323,46 @@ impl Consumer {
 	}
 }
 
+/// Where a group cursor sits in presentation and wall-clock time.
+///
+/// `None` fields mean the group has presented nothing (an empty or stalled group),
+/// where the track falls back to when the group arrived.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Position {
+	pub(crate) presentation: Option<Timestamp>,
+	pub(crate) activity: Option<web_async::time::Instant>,
+}
+
 impl Plain {
+	fn position(&self) -> Position {
+		// The prefetch batch was drained under an earlier lock, so the cursor's real
+		// position is past it.
+		let index = self.index.saturating_add(self.prefetch.buffered().0 as usize);
+		let state = self.state.read();
+		Position {
+			presentation: state.position(index),
+			activity: state.activity,
+		}
+	}
+
+	/// Whether this cursor still has unread content or may receive another frame.
+	fn expiry_pending(&self) -> bool {
+		if self.capped() {
+			return false;
+		}
+
+		let state = self.state.read();
+		state.abort.is_none() && state.fin.is_none_or(|fin| self.index < fin)
+	}
+
+	/// Content this cursor has neither returned nor already counted in a prefetch batch.
+	fn unread_content(&self) -> stats::Content {
+		let prefetched = self.prefetch.buffered().0 as usize;
+		let start = self.index.saturating_add(prefetched);
+		let end = self.end.map_or(usize::MAX, |end| end.saturating_add(1));
+		self.state.read().content_range(start, end)
+	}
+
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where
@@ -1026,22 +1391,33 @@ impl Plain {
 		self.prefetch = Prefetch::default();
 	}
 
-	fn poll_next_frame(&mut self, waiter: &kio::Waiter, stats: &stats::Meter) -> Poll<Result<Option<frame::Consumer>>> {
+	fn poll_next_frame(
+		&mut self,
+		waiter: &kio::Waiter,
+		stats: &stats::Meter,
+		expiry: Option<frame::Expiry>,
+	) -> Poll<Result<Option<frame::Consumer>>> {
 		if self.capped() {
 			return Poll::Ready(Ok(None));
 		}
+		let end = self.end.map_or(usize::MAX, |end| end.saturating_add(1));
 
 		// Hand out any frames a prior read_frame prefetched before touching the tail.
 		// Their bytes were already counted at the batch fill, so the frame::Consumer
 		// carries no meter.
 		if let Some(frame) = self.prefetch.pop() {
 			self.index += 1;
+			let tail = self.index.saturating_add(self.prefetch.buffered().0 as usize)..end;
 			let info = frame::Info {
 				size: frame.payload.len() as u64,
 				timestamp: frame.timestamp,
 			};
 			let source = frame::Source::Complete(frame.payload);
-			return Poll::Ready(Ok(Some(frame::Consumer::new(self.state.clone(), info, source))));
+			let frame = frame::Consumer::new(self.state.clone(), info, source);
+			return Poll::Ready(Ok(Some(match expiry {
+				Some(expiry) => frame.with_expiry(expiry.for_frame(tail, false)),
+				None => frame,
+			})));
 		}
 
 		let index = self.index;
@@ -1053,9 +1429,11 @@ impl Plain {
 		// A direct read (not prefetched): count the frame here; the frame::Consumer
 		// counts its bytes per chunk as they're read out.
 		stats.frames(1);
-		Poll::Ready(Ok(Some(
-			frame::Consumer::new(self.state.clone(), info, source).with_meter(stats.clone()),
-		)))
+		let frame = frame::Consumer::new(self.state.clone(), info, source).with_meter(stats.clone());
+		Poll::Ready(Ok(Some(match expiry {
+			Some(expiry) => frame.with_expiry(expiry.for_frame(self.index..end, true)),
+			None => frame,
+		})))
 	}
 
 	fn poll_read_frame(&mut self, waiter: &kio::Waiter, stats: &stats::Meter) -> Poll<Result<Option<frame::Frame>>> {

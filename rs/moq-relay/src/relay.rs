@@ -84,7 +84,7 @@ impl Relay {
 	/// ready to serve; nothing accepts a connection until [`Self::run`] (or
 	/// [`serve`]) drives it.
 	pub async fn load(mut config: Config) -> anyhow::Result<Self> {
-		config.resolve();
+		config.resolve()?;
 
 		let mtls_enabled = !config.listen.tls.root.is_empty();
 		let server_versions = config.listen.versions();

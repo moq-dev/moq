@@ -175,7 +175,7 @@ impl Origin {
 		};
 
 		// Hold the lock only to buffer the broadcast; release it before the callback.
-		let broadcast_id = State::lock().consume.start(broadcast)?;
+		let broadcast_id = State::lock().consume.start(broadcast, Some(consumer))?;
 		callback.call(broadcast_id);
 		Ok(())
 	}
@@ -230,7 +230,7 @@ impl Origin {
 		};
 
 		// Hold the lock only to buffer the broadcast; release it before the callback.
-		let broadcast_id = State::lock().consume.start(broadcast)?;
+		let broadcast_id = State::lock().consume.start(broadcast, Some(consumer))?;
 		callback.call(broadcast_id);
 		Ok(())
 	}

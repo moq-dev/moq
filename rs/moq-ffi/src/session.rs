@@ -329,6 +329,9 @@ impl MoqClient {
 	}
 
 	/// Cancel all current and future `connect()` calls.
+	///
+	/// Terminal: the client's configuration and wired origins are released here, not when the
+	/// handle is, so this client can't dial again.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}

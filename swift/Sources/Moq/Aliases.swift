@@ -19,6 +19,12 @@ public typealias Catalog = MoqFFI.MoqCatalog
 public typealias Video = MoqFFI.MoqVideo
 /// Caller-provided catalog fields for a video track.
 public typealias VideoHint = MoqFFI.MoqVideoHint
+/// A single audio codec an importer can parse.
+public typealias AudioFormat = MoqFFI.MoqAudioFormat
+/// A single video codec an importer can parse.
+public typealias VideoFormat = MoqFFI.MoqVideoFormat
+/// A container that publishes its own tracks.
+public typealias ContainerFormat = MoqFFI.MoqContainerFormat
 /// Catalog properties shared by every video rendition. A `nil` field clears
 /// that property from the next catalog snapshot.
 public typealias VideoProperties = MoqFFI.MoqVideoProperties
@@ -35,10 +41,14 @@ public typealias AudioEncoderInput = MoqFFI.MoqAudioEncoderInput
 /// The encoder-side config for a published audio track: codec, rate, channels,
 /// bitrate, and frame duration.
 public typealias AudioEncoderOutput = MoqFFI.MoqAudioEncoderOutput
+/// What a `VideoConsumer` decodes to: an optional resize plus a latency budget.
+public typealias VideoDecoderOutput = MoqVideoDecoderOutput
+/// One decoded video frame: packed I420, its dimensions, and a timestamp.
+public typealias VideoDecodedFrame = MoqVideoDecodedFrame
 /// The PCM layout an `AudioConsumer` decodes to, plus its latency budget.
 public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
 /// A raw PCM sample format, mirroring WebCodecs `AudioData.format`.
-public typealias AudioFormat = MoqFFI.MoqAudioFormat
+public typealias AudioSampleFormat = MoqFFI.MoqAudioSampleFormat
 /// An audio codec identifier (e.g. Opus).
 public typealias AudioCodec = MoqFFI.MoqAudioCodec
 /// One raw video frame: pixels in the configured layout plus a presentation

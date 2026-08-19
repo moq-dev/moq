@@ -400,14 +400,16 @@ counterpart no traffic can flow, so the entry is dropped:
     "broadcasts": 1, "broadcasts_closed": 0,
     "subscriptions": 5, "subscriptions_closed": 2,
     "fetches": 3,
-    "bytes": 12345, "frames": 678, "groups": 9, "datagrams": 2
+    "bytes": 12345, "frames": 678, "groups": 9, "datagrams": 2,
+    "stale": { "bytes": 456, "frames": 23, "groups": 4, "datagrams": 0 }
   },
   "anon/foo": {
     "announced": 1, "announced_closed": 0, "announced_bytes": 8,
     "broadcasts": 1, "broadcasts_closed": 0,
     "subscriptions": 2, "subscriptions_closed": 0,
     "fetches": 0,
-    "bytes": 234, "frames": 12, "groups": 1, "datagrams": 0
+    "bytes": 234, "frames": 12, "groups": 1, "datagrams": 0,
+    "stale": { "bytes": 0, "frames": 0, "groups": 0, "datagrams": 0 }
   }
 }
 ```
@@ -417,6 +419,7 @@ Field semantics:
 - `announced` / `announced_closed`: cumulative count of every broadcast
   announce/unannounce event on this `(tier, role)` slot, regardless of
   whether any subscription happened. Use this for "all known broadcasts".
+
 - `announced_bytes`: cumulative broadcast-name length summed over each
   model-visible announce and unannounce of this broadcast. It counts the name,
   not the encoded message size, so a broadcast isn't charged for hop chains or
@@ -424,6 +427,7 @@ Field semantics:
   Separate from `bytes`, which is media payload. Announce control traffic that
   never enters the model (auth-rejected or unmatched-prefix announcements) is
   not counted.
+
 - `broadcasts` / `broadcasts_closed`: per-(broadcast, session)
   subscription sentinel. The first active subscription a peer session
   opens for a broadcast bumps `broadcasts`; the last one it closes bumps
@@ -431,13 +435,16 @@ Field semantics:
   broadcasts_closed` is the number of distinct sessions currently
   subscribed to the broadcast (i.e. viewers on the egress side), which is
   typically what billing and UI want.
+
 - `subscriptions` / `subscriptions_closed`: cumulative count of
   track-level subscriptions opened and dropped.
+
 - `fetches`: cumulative one-shot group fetches requested by a calling session,
   counted once per coalesced fetch when the request is issued, so a fetch that
   resolves to "not found" still counts. It is separate from `subscriptions` and
   the viewer sentinel; the fetched payload still flows into `bytes` / `frames` /
   `groups`.
+
 - `bytes` / `frames` / `groups`: cumulative payload counters, bumped as
   groups/frames are read out of the model on the egress side and written into
   it on the ingress side. Egress bytes are counted when read out of the model
@@ -445,11 +452,20 @@ Field semantics:
   still count. For a fan-out egress reader (e.g. an HLS/DASH muxer) this is
   bytes read once per segment at the broadcast origin, not per downstream HTTP
   client.
+
 - `datagrams`: cumulative single-frame groups delivered over an unreliable QUIC
   datagram (moq-lite-05+ on a datagram-capable transport). A subset of `groups`:
   each datagram also counts there, and its payload in `frames` / `bytes`. Counted
   when the datagram enters or leaves the model, so an egress datagram dropped by
   congestion or an oversized body still counts.
+
+- `stale`: cumulative `{ bytes, frames, groups, datagrams }` skipped because the
+  content drifted further behind the live edge than the subscriber's latency
+  budget allows, so the relay never put it on the wire. These are disjoint from
+  the top-level payload counters, which remain the backwards-compatible shape for
+  delivered content. A steady rate here means subscribers are consistently behind
+  the live edge, which is normal for a real-time subscription during congestion
+  and a problem for one that asked to tolerate more.
 
 The session tracks (`sessions.json` and any `<tier>/sessions.json`) instead map
 each auth root to a `{ sessions, sessions_closed }` snapshot. `sessions`

@@ -151,6 +151,36 @@ pub(crate) struct Counters {
 	groups: AtomicU64,
 	// Subset of `groups` carried over an unreliable QUIC datagram.
 	datagrams: AtomicU64,
+	// Content the drift budget gave up on before delivery. Disjoint from the
+	// top-level payload counters, which count only what was handed over.
+	stale: ContentCounters,
+}
+
+/// Atomic backing for one [`Content`] readout.
+#[derive(Default, Debug)]
+struct ContentCounters {
+	bytes: AtomicU64,
+	frames: AtomicU64,
+	groups: AtomicU64,
+	datagrams: AtomicU64,
+}
+
+impl ContentCounters {
+	fn snapshot(&self) -> Content {
+		Content {
+			bytes: self.bytes.load(Ordering::Relaxed),
+			frames: self.frames.load(Ordering::Relaxed),
+			groups: self.groups.load(Ordering::Relaxed),
+			datagrams: self.datagrams.load(Ordering::Relaxed),
+		}
+	}
+
+	fn add(&self, content: Content) {
+		self.bytes.fetch_add(content.bytes, Ordering::Relaxed);
+		self.frames.fetch_add(content.frames, Ordering::Relaxed);
+		self.groups.fetch_add(content.groups, Ordering::Relaxed);
+		self.datagrams.fetch_add(content.datagrams, Ordering::Relaxed);
+	}
 }
 
 impl Counters {
@@ -174,6 +204,7 @@ impl Counters {
 		let frames = self.frames.load(Ordering::Relaxed);
 		let groups = self.groups.load(Ordering::Relaxed);
 		let datagrams = self.datagrams.load(Ordering::Relaxed);
+		let stale = self.stale.snapshot();
 		Traffic {
 			announced,
 			announced_closed,
@@ -187,7 +218,37 @@ impl Counters {
 			frames,
 			groups,
 			datagrams,
+			stale,
 		}
+	}
+}
+
+/// Payload-volume counters for content with the same delivery outcome.
+///
+/// This is the nested shape used by [`Traffic::stale`]. The successfully
+/// delivered equivalents remain as top-level [`Traffic`] fields for wire
+/// compatibility with existing stats consumers.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct Content {
+	/// Cumulative payload bytes.
+	pub bytes: u64,
+	/// Cumulative frames.
+	pub frames: u64,
+	/// Cumulative groups.
+	pub groups: u64,
+	/// Cumulative single-frame groups carried as unreliable datagrams.
+	pub datagrams: u64,
+}
+
+impl Content {
+	/// Fold another readout into this one, counter by counter.
+	pub(crate) fn add(&mut self, other: Self) {
+		self.bytes += other.bytes;
+		self.frames += other.frames;
+		self.groups += other.groups;
+		self.datagrams += other.datagrams;
 	}
 }
 
@@ -257,6 +318,11 @@ pub struct Traffic {
 	/// A subset of `groups`: each one also counts there and its payload in
 	/// `frames` / `bytes`.
 	pub datagrams: u64,
+	/// Content skipped because it drifted past a subscriber's
+	/// [`Latency`](crate::Latency) budget. Disjoint from the top-level payload
+	/// counters: skipped content is never handed over. A steady rate here means
+	/// subscribers are consistently behind the live edge.
+	pub stale: Content,
 }
 
 impl Traffic {
@@ -274,6 +340,7 @@ impl Traffic {
 		self.frames += other.frames;
 		self.groups += other.groups;
 		self.datagrams += other.datagrams;
+		self.stale.add(other.stale);
 	}
 
 	/// True while the broadcast is announced (an announce guard is open).
@@ -994,6 +1061,20 @@ impl Meter {
 			counters.groups.fetch_add(1, Ordering::Relaxed);
 			counters.frames.fetch_add(1, Ordering::Relaxed);
 			counters.bytes.fetch_add(n, Ordering::Relaxed);
+		}
+	}
+
+	/// Whether this meter attributes anything, i.e. the broadcast is tracked and the
+	/// handle was tagged. A caller holding a count that has to land exactly once can
+	/// keep it rather than drop it into an untagged meter.
+	pub(crate) fn is_tracked(&self) -> bool {
+		self.counters.is_some()
+	}
+
+	/// Record content skipped before delivery by the drift budget.
+	pub(crate) fn stale(&self, content: Content) {
+		if let Some(counters) = self.counters() {
+			counters.stale.add(content);
 		}
 	}
 

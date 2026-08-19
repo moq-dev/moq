@@ -90,6 +90,9 @@ pub struct MoqBroadcastRequest {
 
 struct Announced {
 	inner: moq_net::announce::Consumer,
+	/// The same rooted cursor `inner` was drawn from, so an announced broadcast can resolve a
+	/// catalog reference to a sibling under that root.
+	origin: moq_net::origin::Consumer,
 }
 
 struct OriginDynamic {
@@ -116,7 +119,7 @@ impl Announced {
 					};
 					return Ok(Some(Arc::new(MoqAnnouncement {
 						path: path.to_string(),
-						broadcast: Arc::new(MoqBroadcastConsumer::new(broadcast)),
+						broadcast: Arc::new(MoqBroadcastConsumer::routed(broadcast, self.origin.clone())),
 					})));
 				}
 				None => return Ok(None),
@@ -134,7 +137,7 @@ struct AnnouncedBroadcast {
 impl AnnouncedBroadcast {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		match self.origin.announced_broadcast(&self.path).await {
-			Some(broadcast) => Ok(Arc::new(MoqBroadcastConsumer::new(broadcast))),
+			Some(broadcast) => Ok(Arc::new(MoqBroadcastConsumer::routed(broadcast, self.origin.clone()))),
 			None => Err(MoqError::Closed),
 		}
 	}
@@ -272,6 +275,7 @@ impl MoqOriginConsumer {
 		Ok(Arc::new(MoqAnnounced {
 			task: Task::new(Announced {
 				inner: origin.announced(),
+				origin,
 			}),
 		}))
 	}
@@ -312,7 +316,7 @@ impl MoqOriginConsumer {
 	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first.
 	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		let broadcast = self.inner.request_broadcast(path.as_str()).await?;
-		Ok(Arc::new(MoqBroadcastConsumer::new(broadcast)))
+		Ok(Arc::new(MoqBroadcastConsumer::routed(broadcast, self.inner.clone())))
 	}
 }
 
@@ -331,6 +335,9 @@ impl MoqOriginDynamic {
 	}
 
 	/// Cancel all current and future `requested_broadcast()` calls.
+	///
+	/// Terminal: the dynamic origin is released here, not when the handle is, so any pending
+	/// request is rejected.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
@@ -389,6 +396,8 @@ impl MoqAnnounced {
 	}
 
 	/// Cancel all current and future `next()` calls.
+	///
+	/// Terminal: the announcement stream is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
@@ -419,6 +428,8 @@ impl MoqAnnouncedBroadcast {
 	}
 
 	/// Cancel all current and future `available()` calls.
+	///
+	/// Terminal: the announcement watch is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}

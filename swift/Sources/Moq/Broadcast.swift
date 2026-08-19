@@ -74,10 +74,36 @@ public final class BroadcastConsumer: Sendable {
                 name: name, container: container, subscription: subscription))
     }
 
+    /// Resolve a catalog rendition's `broadcast` reference to the broadcast serving its track.
+    ///
+    /// `reference` is `Video.broadcast` / `Audio.broadcast`: `nil` or empty names this
+    /// broadcast, anything else names a sibling relative to it (e.g. `./source`). Call it on a
+    /// rendition that carries one before `subscribeMedia`, `subscribeTrack`, `fetchGroup`, or
+    /// `fetchMediaGroup`, which take a track name rather than a rendition; `decodeAudio` and
+    /// `decodeVideo` resolve it themselves.
+    ///
+    /// Throws if this broadcast came from a local producer rather than an origin, since a
+    /// standalone broadcast has no sibling to name.
+    public func resolve(_ reference: String?) async throws -> BroadcastConsumer {
+        BroadcastConsumer(try await ffi.resolve(reference: reference))
+    }
+
     /// Subscribe to a raw-audio track, decoding to PCM in the layout `output`
     /// declares. `catalogAudio` is the matching rendition from the catalog.
-    public func subscribeAudio(name: String, catalogAudio: Audio, output: AudioDecoderOutput) async throws -> AudioConsumer {
-        AudioConsumer(try await ffi.subscribeAudio(name: name, catalogAudio: catalogAudio, output: output))
+    public func decodeAudio(name: String, catalogAudio: Audio, output: AudioDecoderOutput) async throws -> AudioConsumer {
+        AudioConsumer(try await ffi.decodeAudio(name: name, catalogAudio: catalogAudio, output: output))
+    }
+
+    /// Subscribe to a video track and decode it inside the bindings, yielding
+    /// packed I420. `catalogVideo` is the matching rendition from the catalog.
+    ///
+    /// `output.resize` is best effort, so read each frame's own dimensions.
+    public func decodeVideo(
+        name: String,
+        catalogVideo: Video,
+        output: VideoDecoderOutput = VideoDecoderOutput()
+    ) async throws -> VideoConsumer {
+        VideoConsumer(try await ffi.decodeVideo(name: name, catalogVideo: catalogVideo, output: output))
     }
 
     /// Subscribe to a JSON snapshot track (lossy latest-value), decoding each value as `Value`.
@@ -191,40 +217,87 @@ public final class BroadcastProducer: Sendable {
     /// Open a media track. `format` controls how `initData` and frame payloads
     /// are interpreted (e.g. `"opus"`, `"avc3"`). `video` seeds catalog fields
     /// that the stream cannot reveal before its first keyframe.
-    public func publishMedia(
-        format: String,
-        initData: Data = Data(),
-        label: String? = nil,
-        video: VideoHint? = nil
+    /// Publish one audio codec as a new track. `initData` is required: audio resolves its whole
+    /// rendition from those bytes.
+    public func publishAudio(
+        format: AudioFormat,
+        initData: Data,
+        label: String? = nil
     ) throws -> MediaProducer {
-        MediaProducer(try ffi.publishMedia(init: MoqInit(format: format, data: initData, label: label, video: video)))
+        MediaProducer(try ffi.publishAudio(init: MoqAudioInit(format: format, data: initData, label: label)))
     }
 
-    /// Publish a single media track requested through `BroadcastDynamic`.
-    public func publishMedia(
-        on request: TrackRequest,
-        format: String,
+    /// Publish one video codec as a new track. `initData` may be empty for a format that resolves
+    /// in band; `hint` seeds catalog fields the stream can't reveal.
+    public func publishVideo(
+        format: VideoFormat,
         initData: Data = Data(),
         label: String? = nil,
-        video: VideoHint? = nil
+        hint: VideoHint? = nil
     ) throws -> MediaProducer {
         MediaProducer(
-            try ffi.publishMediaOnTrack(
+            try ffi.publishVideo(init: MoqVideoInit(format: format, data: initData, label: label, hint: hint))
+        )
+    }
+
+    /// Publish a container, which demuxes and publishes its own tracks. There is no label or hint:
+    /// a container describes each track it publishes from its own metadata.
+    public func publishContainer(
+        format: ContainerFormat,
+        initData: Data = Data()
+    ) throws -> ContainerProducer {
+        ContainerProducer(try ffi.publishContainer(init: MoqContainerInit(format: format, data: initData)))
+    }
+
+    /// Publish one audio codec onto a track requested through `BroadcastDynamic`.
+    public func publishAudio(
+        on request: TrackRequest,
+        format: AudioFormat,
+        initData: Data,
+        label: String? = nil
+    ) throws -> MediaProducer {
+        MediaProducer(
+            try ffi.publishAudioOnTrack(
                 request: request.ffi,
-                init: MoqInit(format: format, data: initData, label: label, video: video)
+                init: MoqAudioInit(format: format, data: initData, label: label)
             )
         )
     }
 
-    /// Open a media track fed by a raw byte stream with inferred frame boundaries
-    /// (e.g. piped Annex-B H.264). Only self-describing formats are supported.
-    public func publishMediaStream(
-        format: String,
+    /// Publish one video codec onto a track requested through `BroadcastDynamic`.
+    public func publishVideo(
+        on request: TrackRequest,
+        format: VideoFormat,
+        initData: Data = Data(),
         label: String? = nil,
-        video: VideoHint? = nil
+        hint: VideoHint? = nil
+    ) throws -> MediaProducer {
+        MediaProducer(
+            try ffi.publishVideoOnTrack(
+                request: request.ffi,
+                init: MoqVideoInit(format: format, data: initData, label: label, hint: hint)
+            )
+        )
+    }
+
+    /// Open a video track fed by a raw byte stream with inferred frame boundaries (e.g. piped
+    /// Annex-B H.264). Only the self-delimiting formats work: `.avc3`, `.hev1`, `.av01`. Audio has
+    /// no counterpart, having no frame boundaries to infer.
+    public func publishVideoStream(
+        format: VideoFormat,
+        label: String? = nil,
+        hint: VideoHint? = nil
     ) throws -> MediaStreamProducer {
         MediaStreamProducer(
-            try ffi.publishMediaStream(init: MoqInit(format: format, data: Data(), label: label, video: video)))
+            try ffi.publishVideoStream(init: MoqVideoInit(format: format, data: Data(), label: label, hint: hint))
+        )
+    }
+
+    /// Open a container fed by a raw byte stream, which recovers its own framing.
+    public func publishContainerStream(format: ContainerFormat) throws -> ContainerStreamProducer {
+        ContainerStreamProducer(
+            try ffi.publishContainerStream(format: format)
+        )
     }
 
     /// Open a track for arbitrary byte payloads, with no codec or container.
@@ -235,8 +308,8 @@ public final class BroadcastProducer: Sendable {
 
     /// Open a raw-audio track. PCM written via `AudioProducer.write` is encoded
     /// (e.g. to Opus) inside the FFI boundary per `input`/`output`.
-    public func publishAudio(name: String, input: AudioEncoderInput, output: AudioEncoderOutput) throws -> AudioProducer {
-        AudioProducer(try ffi.publishAudio(name: name, input: input, output: output))
+    public func encodeAudio(name: String, input: AudioEncoderInput, output: AudioEncoderOutput) throws -> AudioProducer {
+        AudioProducer(try ffi.encodeAudio(name: name, input: input, output: output))
     }
 
     /// Open a raw-video track. Pixels written via `VideoProducer.write` are
@@ -246,8 +319,8 @@ public final class BroadcastProducer: Sendable {
     /// rendition is published immediately, read out of the encoder itself, so
     /// subscribers discover it through the catalog rather than a name you pick,
     /// and can find it before the first frame exists.
-    public func publishVideo(input: VideoEncoderInput, output: VideoEncoderOutput) throws -> VideoProducer {
-        VideoProducer(try ffi.publishVideo(input: input, output: output))
+    public func encodeVideo(input: VideoEncoderInput, output: VideoEncoderOutput) throws -> VideoProducer {
+        VideoProducer(try ffi.encodeVideo(input: input, output: output))
     }
 
     /// Open a JSON snapshot track (lossy latest-value), encoding each value from `Value`.

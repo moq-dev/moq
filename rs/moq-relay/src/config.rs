@@ -134,28 +134,20 @@ impl Config {
 }
 
 impl Config {
-	/// Fold every released spelling in, then apply the relay's own defaults.
+	/// Refuse a config parsed from released spellings, then apply the relay's own
+	/// defaults.
 	///
-	/// Order matters: `--server-quic-max-streams` lands on the hidden legacy arg, and
-	/// filling in [`crate::DEFAULT_MAX_STREAMS`] first would give the fold a canonical
-	/// value to prefer, silently discarding what the deployment asked for.
-	pub(crate) fn resolve(&mut self) {
-		// The released config file spelled this per role, under `[client.quic]` and
-		// `[server.quic]`. Both now feed the one shared section, as the lowest
-		// precedence source: a flag or env var has to outrank a config file, so the
-		// legacy flags fold into the canonical fields *first* and these only fill
-		// what is still unset. Between the two roles the dial side wins, matching
-		// how the `--client-quic-*` / `--server-quic-*` flags fold.
-		let per_role = [self.connect.take_quic(), self.listen.take_quic()];
-
-		self.quic = self.quic.resolved();
-		for legacy in per_role.into_iter().flatten() {
-			self.quic = self.quic.or(&legacy);
-		}
-		self.listen = self.listen.resolved();
-		self.connect = self.connect.resolved();
+	/// The check comes first because those spellings configure nothing: a relay that
+	/// booted anyway would be serving on defaults, with the deployment's own
+	/// `--server-bind` and TLS material silently absent.
+	pub(crate) fn resolve(&mut self) -> anyhow::Result<()> {
+		let mut deprecated = self.quic.deprecated();
+		deprecated.extend(self.listen.deprecated());
+		deprecated.extend(self.connect.deprecated());
+		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 
 		self.quic.max_streams.get_or_insert(crate::DEFAULT_MAX_STREAMS);
+		Ok(())
 	}
 }
 
@@ -164,27 +156,27 @@ mod tests {
 	use super::*;
 	use crate::test_env::EnvGuard;
 
-	/// A released `--server-quic-max-streams` must survive the relay's own default.
-	///
-	/// The fold prefers the canonical field, so defaulting before folding would pin
-	/// every deployment that still uses the old spelling to 10,000 streams.
+	/// The relay's own default still applies once the released spellings are gone.
 	#[test]
-	fn released_max_streams_survives_the_relay_default() {
+	fn the_relay_default_applies() {
 		let _env = EnvGuard::clear(&["MOQ_QUIC_MAX_STREAMS", "MOQ_SERVER_QUIC_MAX_STREAMS"]);
 
-		let mut config = Config::parse_from(["moq-relay", "--server-quic-max-streams", "4096"]);
-		config.resolve();
+		let mut config = Config::parse_from(["moq-relay", "--quic-max-streams", "4096"]);
+		config.resolve().expect("current spellings");
 		assert_eq!(config.quic.max_streams, Some(4096));
 
 		let mut config = Config::parse_from(["moq-relay"]);
-		config.resolve();
+		config.resolve().expect("current spellings");
 		assert_eq!(config.quic.max_streams, Some(crate::DEFAULT_MAX_STREAMS));
 	}
 
-	/// The released `--server-*` accept-side spellings reach the fields the
-	/// listeners actually read.
+	/// A released `--server-*` spelling stops the relay and names its replacement.
+	///
+	/// Booting anyway is the failure this replaced: those flags land on hidden
+	/// fields nothing reads, so the relay would come up on the default bind with the
+	/// deployment's certificate silently absent.
 	#[test]
-	fn released_listen_spellings_reach_the_listener() {
+	fn released_listen_spellings_refuse_to_boot() {
 		let _env = EnvGuard::clear(&[
 			"MOQ_LISTEN",
 			"MOQ_SERVER_BIND",
@@ -201,104 +193,48 @@ mod tests {
 			"--server-tls-key",
 			"/tmp/cert.key",
 		]);
-		config.resolve();
+		assert_eq!(config.listen.bind, None, "the released flag configures nothing");
 
-		assert_eq!(config.listen.bind.as_deref(), Some("[::]:4443"));
-		assert_eq!(config.listen.tls.cert, vec![std::path::PathBuf::from("/tmp/cert.pem")]);
-		assert_eq!(config.listen.tls.key, vec![std::path::PathBuf::from("/tmp/cert.key")]);
+		let err = config.resolve().expect_err("must refuse").to_string();
+		for line in [
+			"--server-bind / MOQ_SERVER_BIND -> --listen / MOQ_LISTEN",
+			"--tls-cert / MOQ_SERVER_TLS_CERT -> --listen-tls-cert / MOQ_LISTEN_TLS_CERT",
+			"--tls-key / MOQ_SERVER_TLS_KEY -> --listen-tls-key / MOQ_LISTEN_TLS_KEY",
+		] {
+			assert!(err.contains(line), "missing {line:?} from {err}");
+		}
 	}
 
-	/// A released config file that spelled QUIC tuning per role still boots.
-	///
-	/// A move across tables is the one thing serde aliases cannot express, so
-	/// `[client.quic]` / `[server.quic]` are parsed where they used to live and
-	/// folded into the shared section, rather than failing at startup with
-	/// `unknown field quic`.
+	/// A released config file is parsed where the tables used to live, so the relay
+	/// can name `[quic]` instead of failing with `unknown field quic`, which is what
+	/// `deny_unknown_fields` would say on its own.
 	#[test]
-	fn released_per_role_quic_tables_fold_into_the_shared_one() {
+	fn released_per_role_quic_tables_refuse_to_boot() {
 		let toml = r#"
 [server]
 listen = "[::]:443"
 
 [server.quic]
 max_streams = 4096
-keep_alive = "9s"
 
 [client.quic]
 max_streams = 64
 "#;
 		let mut config: Config = toml::from_str(toml).expect("released config must still parse");
-		config.resolve();
-
-		// The dial side wins where both set a knob, as the flags do; the accept side
-		// still contributes what only it set.
-		assert_eq!(config.quic.max_streams, Some(64));
-		assert_eq!(config.quic.keep_alive, Some(Duration::from_secs(9)));
+		// The section renames are plain serde aliases, so those keep working.
 		assert_eq!(config.listen.bind.as_deref(), Some("[::]:443"));
+
+		let err = config.resolve().expect_err("must refuse").to_string();
+		assert!(err.contains("[server.quic] -> [quic]"), "{err}");
+		assert!(err.contains("[client.quic] -> [quic]"), "{err}");
+		assert!(err.contains("both directions"), "{err}");
 	}
 
-	/// A released config survives a serialize/deserialize round trip before it is
-	/// resolved, so a caller that normalizes a config file does not silently drop
-	/// the per-role tables. Once resolved they are `None`, and nothing re-emits a
-	/// deprecated table.
+	/// The canonical top-level table, which is what the demo configs use.
 	#[test]
-	fn released_quic_tables_survive_a_round_trip() {
-		let config: Config = toml::from_str("[client.quic]\nmax_streams = 64\n").expect("parse");
-
-		let round_tripped: Config = toml::from_str(&toml::to_string(&config).expect("serialize")).expect("reparse");
-		let mut round_tripped = round_tripped;
-		round_tripped.resolve();
-		assert_eq!(round_tripped.quic.max_streams, Some(64));
-
-		// Resolving first drops the deprecated table rather than re-emitting it.
-		let mut config = config;
-		config.resolve();
-		assert!(config.connect.quic.is_none());
-		assert!(!toml::to_string(&config).expect("serialize").contains("[client.quic]"));
-	}
-
-	/// A flag outranks a config file, including when both are the released spelling.
-	#[test]
-	fn released_quic_flag_beats_the_released_quic_table() {
-		let _env = EnvGuard::clear(&["MOQ_QUIC_MAX_STREAMS", "MOQ_CLIENT_QUIC_MAX_STREAMS"]);
-
-		let toml = r#"
-[client.quic]
-max_streams = 64
-"#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("legacy-quic.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![
-			std::ffi::OsString::from("moq-relay"),
-			std::ffi::OsString::from(&path),
-			std::ffi::OsString::from("--client-quic-max-streams"),
-			std::ffi::OsString::from("128"),
-		];
-		let mut config = Config::parse_and_merge(args).expect("config load");
-		config.resolve();
-
-		assert_eq!(
-			config.quic.max_streams,
-			Some(128),
-			"the flag must win over the config file it shares a spelling with"
-		);
-	}
-
-	/// The canonical top-level table wins over a released per-role one.
-	#[test]
-	fn shared_quic_table_wins_over_the_released_tables() {
-		let toml = r#"
-[quic]
-max_streams = 128
-
-[server.quic]
-max_streams = 4096
-"#;
-		let mut config: Config = toml::from_str(toml).expect("parse");
-		config.resolve();
+	fn the_shared_quic_table_applies() {
+		let mut config: Config = toml::from_str("[quic]\nmax_streams = 128\n").expect("parse");
+		config.resolve().expect("current spellings");
 		assert_eq!(config.quic.max_streams, Some(128));
 	}
 

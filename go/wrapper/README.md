@@ -59,10 +59,12 @@ is consistent across transports and returns an empty string for the root or
 missing path. `Query()` returns the encoded query and may contain credentials.
 
 `BroadcastProducer.Dynamic()` accepts subscriber-requested tracks. Call
-`TrackRequest.Accept()` for raw tracks, or `BroadcastProducer.PublishMediaOnTrack()`
+`TrackRequest.Accept()` for raw tracks, or `BroadcastProducer.PublishAudioOnTrack()` /
+`PublishVideoOnTrack()`
 for media tracks whose timescale should be selected by the importer.
 
-`PublishMedia`, `PublishMediaOnTrack`, and `PublishMediaStream` accept
+`PublishAudio`, `PublishVideo`, `PublishContainer`, their `OnTrack` variants, and
+`PublishVideoStream` / `PublishContainerStream` accept
 `WithVideoHint(moq.VideoHint{...})` for video catalog fields that are known
 before the stream reveals them.
 

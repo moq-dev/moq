@@ -39,8 +39,7 @@ impl crate::listen::Config {
 
 	/// Whether a QUIC, TCP, or Unix bind is explicitly configured.
 	pub fn has_explicit_bind(&self) -> bool {
-		let config = self.resolved();
-		config.bind.is_some() || config.has_stream_listener()
+		self.bind.is_some() || self.has_stream_listener()
 	}
 
 	/// Whether a `tcp`/`unix` stream listener is configured.
@@ -95,11 +94,14 @@ impl Server {
 	/// The stream (`tcp`/`unix`) listeners need a runtime, so they wait for
 	/// [`listen`](Self::listen).
 	pub fn new(config: crate::listen::Config, quic: crate::quic::Config) -> crate::Result<Self> {
-		// Resolve here rather than in `init`, so a caller that builds the config by hand
-		// gets the released spellings folded in too.
+		// Refuse here rather than in `init`, so a caller that skipped its own check
+		// can't reach a listener that quietly ignored half of what it was given.
+		let mut deprecated = config.deprecated();
+		deprecated.extend(quic.deprecated());
+		if !deprecated.is_empty() {
+			return Err(Error::Deprecated(deprecated));
+		}
 		config.validate()?;
-		let config = config.resolved();
-		let quic = quic.resolved();
 
 		// `default_quic_backend` panics when no backend is compiled, so a WebSocket- or
 		// stream-only build must not ask it.

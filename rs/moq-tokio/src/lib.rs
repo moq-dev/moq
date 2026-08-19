@@ -19,6 +19,7 @@ mod client;
 pub mod connect;
 mod connection;
 mod crypto;
+mod deprecated;
 mod error;
 #[cfg(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "tcp"))]
 pub mod failover;
@@ -55,6 +56,7 @@ pub mod websocket;
 pub use client::Client;
 pub use connect::{Addrs, ConnectError};
 pub use connection::{Backoff, Connection, ConnectionStatsReader, GoawayConfig, Redirect, Status};
+pub use deprecated::Deprecated;
 pub use error::{Error, Result};
 pub use log::Log;
 pub use server::{Listener, Request, Server, Transport};

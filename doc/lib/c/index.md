@@ -172,7 +172,7 @@ info.priority = 3;
 
 ## Callback lifetime
 
-Any function that registers a callback (`moq_session_connect`, `moq_origin_announced`, `moq_origin_consume_announced`, `moq_origin_request`, `moq_consume_catalog`, `moq_consume_video`, `moq_consume_audio`, `moq_consume_track`, `moq_consume_datagrams`, `moq_consume_video_raw`, `moq_consume_audio_raw`, `moq_consume_json_snapshot`, `moq_consume_json_stream`) takes a `void *user_data` pointer that libmoq passes back to every callback invocation. The status code carries the lifecycle:
+Any function that registers a callback (`moq_session_connect`, `moq_origin_announced`, `moq_origin_consume_announced`, `moq_origin_request`, `moq_consume_catalog`, `moq_consume_video`, `moq_consume_audio`, `moq_consume_track`, `moq_consume_datagrams`, `moq_decode_video`, `moq_decode_audio`, `moq_consume_json_snapshot`, `moq_consume_json_stream`) takes a `void *user_data` pointer that libmoq passes back to every callback invocation. The status code carries the lifecycle:
 
 - **`> 0`**: a live result you can use: a frame, catalog, or announce ID (or `1` to mean "session connected"). May fire any number of times.
 - **`0`**: closed cleanly. **Terminal.**
@@ -190,7 +190,7 @@ Because the terminal callback runs on libmoq's thread, bindings that own thread-
 
 Every function may be called from any thread, and a handle is not tied to the thread that created it.
 
-The raw publish functions (`moq_publish_video_raw_frame`, `moq_publish_audio_raw_frame`) block the caller until the codec has taken the frame, which is what paces a publisher against its encoder. Calls on the same producer are serialized, but concurrent calls have no defined order, so use one thread when frame, cut, or bitrate order matters. A second producer keeps encoding, and consume callbacks, frees, and shutdown are unaffected.
+The raw publish functions (`moq_encode_video_frame`, `moq_encode_audio_frame`) block the caller until the codec has taken the frame, which is what paces a publisher against its encoder. Calls on the same producer are serialized, but concurrent calls have no defined order, so use one thread when frame, cut, or bitrate order matters. A second producer keeps encoding, and consume callbacks, frees, and shutdown are unaffected.
 
 ## Error handling
 
@@ -245,35 +245,46 @@ if (moq_consume_video_stalled(catalog, index, &stalled) < 0) {
 }
 ```
 
+## Cross-broadcast renditions
+
+A catalog rendition may name a *different* broadcast than the one whose catalog you subscribed to, so a transcode output at `live/hd` can describe a track that actually lives in `live/source`. `moq_consume_video` and `moq_consume_audio` take a catalog snapshot and a rendition index, so they follow that reference for you and subscribe wherever the track really is. Nothing to pass.
+
+Only a rendition that actually names another broadcast needs an origin to fetch it from, and the origin used is the one the broadcast came from: `moq_origin_request` or `moq_origin_consume_announced`. A rendition with no reference is served by the broadcast you already hold, so it works the same either way. A referenced broadcast that exists but has not been announced yet is reported as unroutable rather than waited for, so wait for its announcement first if you may be racing it.
+
 ## Raw media
 
-The `moq_publish_media_*` and `moq_consume_video` / `moq_consume_audio` calls carry already-encoded frames, for a caller that brings its own codec. The `_raw` calls carry uncompressed media instead and run the codec inside libmoq, so a C application can publish pixels and PCM without linking one.
+The `moq_publish_audio` / `moq_publish_video` / `moq_publish_container` calls carry already-encoded frames, for a caller that brings its own codec. The `moq_encode_*` calls carry uncompressed media instead and run the codec inside libmoq, so a C application can publish pixels and PCM without linking one.
 
-`moq_publish_media` takes a `moq_media_config` so publishing options can grow
-without adding positional arguments. Zero the struct, then set its required
-`format` / `format_len` pair and any optional fields:
+Media publishing splits by kind, so each call takes only what it can honor:
 
 ```c
-moq_media_config config = {0};
-config.format = "opus";
-config.format_len = 4;
-config.init = opus_head;
-config.init_len = opus_head_len;
-config.label = "English";
-config.label_len = 7;
+moq_audio_init audio = {0};
+audio.format = MOQ_AUDIO_FORMAT_OPUS;
+audio.init = opus_head;
+audio.init_len = opus_head_len;
+audio.label = "English";
+audio.label_len = 7;
 
-int32_t media = moq_publish_media(broadcast, &config);
+int32_t media = moq_publish_audio(broadcast, &audio);
 ```
 
-The transport track name is generated from the codec format. `label` is an
-optional human-readable rendition name stored in the audio or video catalog
-configuration, and leaving it zero omits it. It names one rendition, so a
-container format (`fmp4`, `mkv`, `ts`, `flv`) returns an error rather than
-ignoring it: those publish and describe their own tracks. The same optional pair
-is available on `moq_video_config` and `moq_audio_config`; pointers returned by
-the consume APIs borrow the catalog snapshot just like `name` and `codec`.
+`moq_publish_video` takes a `moq_video_init`, which adds nothing but the same
+optional label; `moq_publish_container` takes a `moq_container_init`, which has
+no label at all, since a container describes each track it publishes from its own
+metadata. Formats are enums rather than strings, so a codec name of the wrong
+kind will not compile.
 
-`moq_publish_video_raw` opens an encoder and a video track together. Resolution, framerate, and pixel layout are fixed there, so each `moq_video_encoder_frame` carries only pixels and a timestamp:
+The transport track name is generated from the format. `label` is an optional
+human-readable rendition name stored in the audio or video catalog
+configuration, and leaving it zero omits it. The same optional pair is available
+on `moq_video_config` and `moq_audio_config`; pointers returned by the consume
+APIs borrow the catalog snapshot just like `name` and `codec`.
+
+Feed a media handle with `moq_publish_media_frame`, which carries a timestamp. A
+container handle takes `moq_publish_container_write` instead, with no timestamp:
+a container carries its tracks' timing itself.
+
+`moq_encode_video` opens an encoder and a video track together. Resolution, framerate, and pixel layout are fixed there, so each `moq_video_encoder_frame` carries only pixels and a timestamp:
 
 ```c
 struct moq_video_encoder_input input = {
@@ -287,7 +298,7 @@ struct moq_video_encoder_output output = {
     .kind = MOQ_VIDEO_ENCODER_KIND_AUTO,  // hardware if available, software otherwise
 };
 
-int32_t video = moq_publish_video_raw(broadcast, &input, &output);
+int32_t video = moq_encode_video(broadcast, &input, &output);
 if (video < 0) {
     fprintf(stderr, "publish video failed: %s\n", moq_error());
 }
@@ -297,16 +308,16 @@ struct moq_video_encoder_frame frame = {
     .data = rgba,
     .data_size = 1280 * 720 * 4,
 };
-moq_publish_video_raw_frame(video, &frame);
+moq_encode_video_frame(video, &frame);
 ```
 
 Every zero in the output config means "pick a default": `bitrate` derives one from the resolution and framerate, `gop` uses roughly two seconds. `data` is borrowed only for the call, and must be exactly one picture at the configured resolution: the frame carries no dimensions of its own, so a wrong-sized buffer is rejected rather than reinterpreted. (The decode side's `moq_video_frame` does carry dimensions, since there they are whatever the stream turned out to be.) A hardware encoder pipelines, so a call that puts nothing on the wire is normal rather than an error.
 
 The track is named after the codec (`.avc3` / `.hev1`), and its catalog rendition is published immediately, read out of the encoder itself (which is opened once up front for exactly that), so a subscriber discovers the track through the catalog rather than a name you chose, and can find it before the first frame exists.
 
-Two knobs run the live encoder. `moq_publish_video_raw_bitrate` retunes it without forcing a keyframe, which is cheap enough to drive from a congestion controller; a negative return means this backend can't retune while running, so stop adapting rather than stop publishing. `moq_publish_video_raw_cut` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group, so a subscriber can always join without it. Reach for it only when you want to place the boundaries yourself, aligning groups with something the encoder can't see such as a scene change or a source switch. Call `moq_publish_video_raw_finish` to flush the codec and end the track.
+Two knobs run the live encoder. `moq_encode_video_bitrate` retunes it without forcing a keyframe, which is cheap enough to drive from a congestion controller; a negative return means this backend can't retune while running, so stop adapting rather than stop publishing. `moq_encode_video_cut` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group, so a subscriber can always join without it. Reach for it only when you want to place the boundaries yourself, aligning groups with something the encoder can't see such as a scene change or a source switch. Call `moq_encode_video_finish` to flush the codec and end the track.
 
-`moq_publish_audio_raw` is the same shape for PCM in and Opus out, and `moq_consume_video_raw` / `moq_consume_audio_raw` are the decode-side mirrors, delivering I420 frames and PCM through the usual callback contract.
+`moq_encode_audio` is the same shape for PCM in and Opus out, and `moq_decode_video` / `moq_decode_audio` are the decode-side mirrors, delivering I420 frames and PCM through the usual callback contract.
 
 ## Raw Tracks
 

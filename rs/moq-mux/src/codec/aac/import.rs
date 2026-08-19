@@ -29,7 +29,7 @@ impl<E: CatalogExt> Import<E> {
 		config: hang::catalog::AudioConfig,
 	) -> crate::Result<Self> {
 		tracing::debug!(name = ?track.name(), ?config, "starting track");
-		let mut rendition = reserved.audio(track.name());
+		let mut rendition = reserved.audio(track.name())?;
 		rendition.set(config);
 		Ok(Self {
 			track: reserved

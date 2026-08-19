@@ -219,6 +219,8 @@ impl MoqJsonSnapshotConsumer {
 	}
 
 	/// Cancel all current and future `next()` calls.
+	///
+	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
@@ -280,6 +282,8 @@ impl MoqJsonStreamConsumer {
 	}
 
 	/// Cancel all current and future `next()` calls.
+	///
+	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}

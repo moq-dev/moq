@@ -67,8 +67,8 @@ impl<S: Stream> Export<S> {
 
 	/// Set the latency tolerance for the per-track source.
 	///
-	/// See [`Consumer::with_latency`](crate::container::Consumer::with_latency) for the
-	/// per-track skip behavior. Defaults to
+	/// See [`Consumer`](crate::container::Consumer) for the per-track skip behavior.
+	/// Defaults to
 	/// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) (skip aggressively).
 	pub fn with_latency(mut self, latency: crate::Latency) -> Self {
 		self.latency = latency;
@@ -293,7 +293,10 @@ mod tests {
 
 		// Consumer side: run the exporter.
 		let consumer = broadcast.consume();
-		let mut export = Export::new(crate::source::announced(&consumer), Once(Some(catalog)));
+		// The whole track is written before the exporter runs, so it needs a budget
+		// wide enough to read it: the default skips everything but the live edge.
+		let mut export = Export::new(crate::source::announced(&consumer), Once(Some(catalog)))
+			.with_latency(crate::Latency::max(std::time::Duration::from_secs(30)));
 
 		let frame0 = export.next().await.unwrap().expect("first frame");
 		let frame1 = export.next().await.unwrap().expect("second frame");

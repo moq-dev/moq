@@ -21,6 +21,7 @@ WORKSPACE=$(cd "$DIR/../.." && pwd)
 
 SOURCE=""       # real capture to publish instead of a generated clip
 ANALYZE_ONLY="" # existing TS to analyze without a round-trip
+CAPTURE_OUT=""  # keep the subscriber capture here (for callers asserting on it)
 DURATION="${TSC_DURATION:-20}"
 BITRATE="${TSC_BITRATE:-10000000}"
 PORT="${TSC_PORT:-4443}"
@@ -53,6 +54,10 @@ while [[ $# -gt 0 ]]; do
         --strict)
             STRICT="--strict"
             shift
+            ;;
+        --capture-out)
+            CAPTURE_OUT="$2"
+            shift 2
             ;;
         *)
             PASSTHRU+=("$1")
@@ -222,6 +227,10 @@ if [[ ! -s "$SUB_TS" ]]; then
     echo "error: subscriber captured no data" >&2
     dump_logs
     exit 1
+fi
+
+if [[ -n "$CAPTURE_OUT" ]]; then
+    cp "$SUB_TS" "$CAPTURE_OUT"
 fi
 
 echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') bytes -> analyzing"

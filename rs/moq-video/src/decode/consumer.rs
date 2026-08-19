@@ -40,13 +40,17 @@ impl Consumer {
 		let name = name.into();
 		let track = broadcast
 			.track(&name)?
-			.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_priority(hang::catalog::PRIORITY.video)
+					.with_latency(config.latency),
+			)
 			.await?;
 		// The catalog says how the track is framed, and it is not always the legacy
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
 		let container = moq_mux::catalog::hang::Container::try_from(&catalog.container)?;
-		let track = moq_mux::container::Consumer::new(track, container).with_latency(config.latency);
+		let track = moq_mux::container::Consumer::new(track, container);
 
 		Ok(Self {
 			decoder,
@@ -131,7 +135,12 @@ mod tests {
 			.await
 			.unwrap();
 		let source = moq_mux::Source::new(origin.consume(), "test");
-		let mut export = moq_mux::container::fmp4::Export::new(source, catalog);
+		// Both frames are encoded before the export runs, so the exporter needs a budget
+		// wide enough to read them: its REAL_TIME default keeps only the live edge, and
+		// the second `next()` would then block forever waiting for a group that was
+		// skipped.
+		let mut export = moq_mux::container::fmp4::Export::new(source, catalog)
+			.with_latency(moq_mux::Latency::max(std::time::Duration::from_secs(30)));
 		let init = export.next().await.unwrap().expect("CMAF init");
 		let fragment = export.next().await.unwrap().expect("CMAF fragment");
 

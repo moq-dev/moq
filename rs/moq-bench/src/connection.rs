@@ -412,6 +412,10 @@ mod tests {
 		}
 	}
 
+	fn replay() -> track::Subscription {
+		track::Subscription::default().with_latency(moq_net::Latency::max(Duration::from_secs(30)))
+	}
+
 	/// A produced group must start with the JSON keyframe describing the rolled
 	/// parameters, followed by `group_size` zeroed payload frames.
 	#[tokio::test]
@@ -429,7 +433,7 @@ mod tests {
 		// Advance past one full group (keyframe + 2 payload) into the next.
 		tokio::time::advance(Duration::from_millis(350)).await;
 
-		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap();
+		let mut sub = consumer.track(TRACK).unwrap().subscribe(replay()).await.unwrap();
 		let mut group = sub.next_group().await.unwrap().expect("a group");
 
 		let keyframe = group.read_frame().await.unwrap().expect("keyframe");
@@ -464,7 +468,7 @@ mod tests {
 		let task = tokio::spawn(produce(0, "bench/test".into(), rolled(10, 4, 0), track, stats.clone()));
 		tokio::time::advance(Duration::from_millis(250)).await;
 
-		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap();
+		let mut sub = consumer.track(TRACK).unwrap().subscribe(replay()).await.unwrap();
 		let mut group = sub.next_group().await.unwrap().expect("a group");
 
 		// Just the keyframe, then the group ends.

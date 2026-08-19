@@ -138,6 +138,11 @@ pub enum Error {
 	/// The crate was built without a crypto provider, so no TLS is possible.
 	#[error("no crypto provider available; enable aws-lc-rs or ring feature")]
 	NoCryptoProvider,
+
+	/// The section was parsed from released spellings that no longer work. The
+	/// payload is the migration to print.
+	#[error("{0}")]
+	Deprecated(crate::Deprecated),
 }
 
 /// Convenience alias for results produced by this module.
@@ -276,25 +281,25 @@ pub struct Connect {
 	)]
 	pub host_name: Option<String>,
 
-	/// Deprecated `--tls-*` spellings, folded into the canonical fields above with
-	/// a warning. Private and hidden so they stay off the public surface; not a
-	/// TOML field (config files use the canonical names).
+	/// Released `--tls-*` spellings, never read as settings. Private and hidden so
+	/// they stay off the public surface; not a TOML field (config files use the
+	/// canonical names).
 	#[command(flatten)]
 	#[serde(skip)]
-	deprecated: Deprecated,
+	deprecated: ConnectDeprecated,
 }
 
 /// Holds the released spellings this section replaced: the bare `--tls-*` flags and
 /// the `--client-tls-*` pair of flag and env var.
 ///
-/// Flattened into [`Connect`] so they keep parsing; folded into the canonical fields
-/// by the `effective_*` accessors, with a deprecation warning. Each carries its
-/// original env var, since a clap alias renames the flag but not the variable, and a
-/// deployment that configures a relay through the environment would otherwise find
-/// its TLS settings silently ignored. Not TOML fields: config files use the
-/// canonical names.
+/// Flattened into [`Connect`] so they keep parsing, which is what lets
+/// [`Connect::deprecated`] name their replacement instead of clap reporting an
+/// unexpected argument. Each carries its original env var, since a clap alias renames
+/// the flag but not the variable, and a deployment that configures a relay through
+/// the environment would otherwise slip past the check entirely. Not TOML fields:
+/// config files use the canonical names.
 #[derive(Clone, Default, Debug, clap::Args)]
-struct Deprecated {
+struct ConnectDeprecated {
 	#[arg(long = "tls-root", hide = true)]
 	root: Vec<PathBuf>,
 
@@ -552,134 +557,93 @@ pub(crate) enum Verification {
 }
 
 impl Connect {
-	/// Log a warning for each deprecated `--tls-*` flag in use. Called once from
-	/// [`Self::verification`], which every backend runs, so a deprecated flag warns once.
-	pub(crate) fn warn_deprecated(&self) {
-		for (used, deprecated, canonical) in [
-			(!self.deprecated.root.is_empty(), "--tls-root", "--connect-tls-root"),
+	/// The released spellings in use, each paired with what replaced it.
+	///
+	/// Two generations of them: the bare `--tls-*` flags, which split by role, and
+	/// the `--client-tls-*` pair that replaced those before `connect` did.
+	///
+	/// Public because this type is flattened into parsers of its own, not only
+	/// through [`crate::connect::Config`]. Such a caller should report this and stop
+	/// while it still can; [`build`](Self::build) refuses either way, since a
+	/// released `--client-tls-root` silently falling back to the system store is a
+	/// downgrade of exactly the setting that was meant to restrict trust.
+	pub fn deprecated(&self) -> crate::Deprecated {
+		let old = &self.deprecated;
+		let mut found = crate::Deprecated::default();
+
+		for (used, flag, env, new) in [
 			(
-				self.deprecated.system_roots.is_some(),
+				!old.root.is_empty(),
+				"--tls-root",
+				None,
+				"--connect-tls-root / MOQ_CONNECT_TLS_ROOT",
+			),
+			(
+				old.system_roots.is_some(),
 				"--tls-system-roots",
-				"--connect-tls-system-roots",
+				None,
+				"--connect-tls-system-roots / MOQ_CONNECT_TLS_SYSTEM_ROOTS",
 			),
 			(
-				!self.deprecated.fingerprint.is_empty(),
+				!old.fingerprint.is_empty(),
 				"--tls-fingerprint",
-				"--connect-tls-fingerprint",
+				None,
+				"--connect-tls-fingerprint / MOQ_CONNECT_TLS_FINGERPRINT",
 			),
 			(
-				self.deprecated.insecure.is_some(),
+				old.insecure.is_some(),
 				"--tls-disable-verify",
-				"--connect-tls-insecure",
+				None,
+				"--connect-tls-insecure / MOQ_CONNECT_TLS_INSECURE",
 			),
 			(
-				!self.deprecated.client_root.is_empty(),
+				!old.client_root.is_empty(),
 				"--client-tls-root",
-				"--connect-tls-root",
+				Some("MOQ_CLIENT_TLS_ROOT"),
+				"--connect-tls-root / MOQ_CONNECT_TLS_ROOT",
 			),
 			(
-				self.deprecated.client_system_roots.is_some(),
+				old.client_system_roots.is_some(),
 				"--client-tls-system-roots",
-				"--connect-tls-system-roots",
+				Some("MOQ_CLIENT_TLS_SYSTEM_ROOTS"),
+				"--connect-tls-system-roots / MOQ_CONNECT_TLS_SYSTEM_ROOTS",
 			),
 			(
-				!self.deprecated.client_fingerprint.is_empty(),
+				!old.client_fingerprint.is_empty(),
 				"--client-tls-fingerprint",
-				"--connect-tls-fingerprint",
+				Some("MOQ_CLIENT_TLS_FINGERPRINT"),
+				"--connect-tls-fingerprint / MOQ_CONNECT_TLS_FINGERPRINT",
 			),
 			(
-				self.deprecated.client_cert.is_some(),
+				old.client_cert.is_some(),
 				"--client-tls-cert",
-				"--connect-tls-cert",
+				Some("MOQ_CLIENT_TLS_CERT"),
+				"--connect-tls-cert / MOQ_CONNECT_TLS_CERT",
 			),
 			(
-				self.deprecated.client_key.is_some(),
+				old.client_key.is_some(),
 				"--client-tls-key",
-				"--connect-tls-key",
+				Some("MOQ_CLIENT_TLS_KEY"),
+				"--connect-tls-key / MOQ_CONNECT_TLS_KEY",
 			),
 			(
-				self.deprecated.client_insecure.is_some(),
+				old.client_insecure.is_some(),
 				"--client-tls-disable-verify",
-				"--connect-tls-insecure",
+				Some("MOQ_CLIENT_TLS_DISABLE_VERIFY"),
+				"--connect-tls-insecure / MOQ_CONNECT_TLS_INSECURE",
 			),
 			(
-				self.deprecated.client_host_name.is_some(),
+				old.client_host_name.is_some(),
 				"--client-tls-host-name",
-				"--connect-tls-host-name",
+				Some("MOQ_CLIENT_TLS_HOST_NAME"),
+				"--connect-tls-host-name / MOQ_CONNECT_TLS_HOST_NAME",
 			),
 		] {
 			if used {
-				tracing::warn!("{deprecated} is deprecated; use {canonical}");
+				found.flag(flag, env, new);
 			}
 		}
-	}
-
-	/// Roots from the canonical field plus the released spellings it replaced.
-	///
-	/// Concatenated rather than "first non-empty wins": each spelling is a separate
-	/// list of roots, and dropping one would silently stop trusting a CA.
-	pub(crate) fn effective_root(&self) -> Vec<PathBuf> {
-		let mut root = self.root.clone();
-		root.extend(self.deprecated.root.iter().cloned());
-		root.extend(self.deprecated.client_root.iter().cloned());
-		root
-	}
-
-	/// Fingerprints from the canonical field plus the released spellings it replaced.
-	pub(crate) fn effective_fingerprint(&self) -> Vec<String> {
-		let mut fp = self.fingerprint.clone();
-		fp.extend(self.deprecated.fingerprint.iter().cloned());
-		fp.extend(self.deprecated.client_fingerprint.iter().cloned());
-		fp
-	}
-
-	/// `system_roots`, preferring the canonical flag over the deprecated spellings.
-	pub(crate) fn effective_system_roots(&self) -> Option<bool> {
-		self.system_roots
-			.or(self.deprecated.system_roots)
-			.or(self.deprecated.client_system_roots)
-	}
-
-	/// `insecure`, preferring the canonical flag over the deprecated spellings.
-	pub(crate) fn effective_disable_verify(&self) -> Option<bool> {
-		self.insecure
-			.or(self.deprecated.insecure)
-			.or(self.deprecated.client_insecure)
-	}
-
-	/// The mTLS identity, preferring the canonical flags over `--client-tls-cert`/`-key`.
-	pub(crate) fn effective_identity(&self) -> (Option<PathBuf>, Option<PathBuf>) {
-		(
-			self.cert.clone().or_else(|| self.deprecated.client_cert.clone()),
-			self.key.clone().or_else(|| self.deprecated.client_key.clone()),
-		)
-	}
-
-	/// The SNI override, preferring the canonical flag over `--client-tls-host-name`.
-	pub(crate) fn effective_host_name(&self) -> Option<String> {
-		self.host_name
-			.clone()
-			.or_else(|| self.deprecated.client_host_name.clone())
-	}
-
-	/// Fold every released spelling into the canonical fields, warning once for each.
-	///
-	/// Applied by [`crate::connect::Config::resolved`], so the backends read plain
-	/// fields and can't each forget a fold. Idempotent.
-	pub fn resolved(&self) -> Self {
-		self.warn_deprecated();
-
-		let (cert, key) = self.effective_identity();
-		Self {
-			root: self.effective_root(),
-			system_roots: self.effective_system_roots(),
-			fingerprint: self.effective_fingerprint(),
-			cert,
-			key,
-			insecure: self.effective_disable_verify(),
-			host_name: self.effective_host_name(),
-			deprecated: Deprecated::default(),
-		}
+		found
 	}
 
 	/// Resolve the verification policy from the configured flags.
@@ -699,13 +663,17 @@ impl Connect {
 	/// `insecure` by adding a fingerprint would otherwise still accept every
 	/// certificate, with the UI showing the pin as configured.
 	pub(crate) fn verification(&self) -> Result<Verification> {
-		self.warn_deprecated();
+		// Every path that resolves a trust policy comes through here, which is what
+		// makes this the one place a released spelling has to be caught: the fields
+		// below are the canonical ones, so an unrefused `--client-tls-root` would
+		// read as "no custom roots" and quietly widen trust to the system store.
+		self.refuse_deprecated()?;
 
 		let fingerprints = self.fingerprints()?;
-		let roots = self.effective_root();
-		let system_roots = self.effective_system_roots();
+		let roots = self.root.clone();
+		let system_roots = self.system_roots;
 
-		if self.effective_disable_verify().unwrap_or_default() {
+		if self.insecure.unwrap_or_default() {
 			if !fingerprints.is_empty() || !roots.is_empty() || system_roots == Some(true) {
 				return Err(Error::DisableVerifyWithTrust);
 			}
@@ -746,21 +714,29 @@ impl Connect {
 	/// per-connection way to pin a self-signed relay, so it is allowed.
 	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub(crate) fn allows_http_bootstrap(&self) -> bool {
-		self.effective_fingerprint().is_empty() && !self.effective_disable_verify().unwrap_or_default()
+		self.fingerprint.is_empty() && !self.insecure.unwrap_or_default()
 	}
 
 	/// Parse the configured fingerprints into fixed-size SHA-256 digests.
 	fn fingerprints(&self) -> Result<Vec<[u8; 32]>> {
-		self.effective_fingerprint()
-			.iter()
-			.map(|fp| parse_fingerprint(fp))
-			.collect()
+		self.fingerprint.iter().map(|fp| parse_fingerprint(fp)).collect()
+	}
+
+	/// Refuse a section parsed from released spellings, naming what replaced each.
+	fn refuse_deprecated(&self) -> Result<()> {
+		let deprecated = self.deprecated();
+		match deprecated.is_empty() {
+			true => Ok(()),
+			false => Err(Error::Deprecated(deprecated)),
+		}
 	}
 
 	/// Build a [`rustls::ClientConfig`] from this configuration.
 	///
 	/// Resolves the verification policy, optionally attaches a client identity
-	/// for mTLS, and installs the matching verifier.
+	/// for mTLS, and installs the matching verifier. Refuses a section parsed from
+	/// released `--tls-*` / `--client-tls-*` spellings rather than building one that
+	/// silently ignored them.
 	pub fn build(&self) -> Result<rustls::ClientConfig> {
 		let provider = crypto::provider();
 		let verification = self.verification()?;
@@ -1046,42 +1022,48 @@ pub(crate) struct ListenDeprecated {
 }
 
 impl Listen {
-	/// Fold every released `--server-tls-*` spelling into the canonical fields.
+	/// The released spellings in use, each paired with what replaced it.
 	///
-	/// Applied by [`crate::listen::Config::resolved`]. Lists concatenate, since each
-	/// spelling names its own files and dropping one would stop serving (or trusting)
-	/// a certificate. Idempotent.
-	pub fn resolved(&self) -> Self {
-		for (used, deprecated, canonical) in [
-			(!self.deprecated.cert.is_empty(), "--tls-cert", "--listen-tls-cert"),
-			(!self.deprecated.key.is_empty(), "--tls-key", "--listen-tls-key"),
+	/// Public for the same reason as [`Connect::deprecated`]: this type is flattened
+	/// into parsers of its own (moq-cli's `export hls` is one), not only through
+	/// [`crate::listen::Config`]. The methods that build a server config refuse
+	/// anyway, since a dropped `--server-tls-root` would take the mTLS client CAs
+	/// with it and leave the listener accepting unauthenticated peers.
+	pub fn deprecated(&self) -> crate::Deprecated {
+		let old = &self.deprecated;
+		let mut found = crate::Deprecated::default();
+
+		for (used, flag, env, new) in [
 			(
-				!self.deprecated.generate.is_empty(),
-				"--tls-generate",
-				"--listen-tls-generate",
+				!old.cert.is_empty(),
+				"--tls-cert",
+				Some("MOQ_SERVER_TLS_CERT"),
+				"--listen-tls-cert / MOQ_LISTEN_TLS_CERT",
 			),
 			(
-				!self.deprecated.root.is_empty(),
+				!old.key.is_empty(),
+				"--tls-key",
+				Some("MOQ_SERVER_TLS_KEY"),
+				"--listen-tls-key / MOQ_LISTEN_TLS_KEY",
+			),
+			(
+				!old.generate.is_empty(),
+				"--tls-generate",
+				Some("MOQ_SERVER_TLS_GENERATE"),
+				"--listen-tls-generate / MOQ_LISTEN_TLS_GENERATE",
+			),
+			(
+				!old.root.is_empty(),
 				"--server-tls-root",
-				"--listen-tls-root",
+				Some("MOQ_SERVER_TLS_ROOT"),
+				"--listen-tls-root / MOQ_LISTEN_TLS_ROOT",
 			),
 		] {
 			if used {
-				tracing::warn!("{deprecated} is deprecated; use {canonical}");
+				found.flag(flag, env, new);
 			}
 		}
-
-		let concat = |canonical: &[PathBuf], legacy: &[PathBuf]| -> Vec<PathBuf> {
-			canonical.iter().chain(legacy).cloned().collect()
-		};
-
-		Self {
-			cert: concat(&self.cert, &self.deprecated.cert),
-			key: concat(&self.key, &self.deprecated.key),
-			generate: self.generate.iter().chain(&self.deprecated.generate).cloned().collect(),
-			root: concat(&self.root, &self.deprecated.root),
-			deprecated: ListenDeprecated::default(),
-		}
+		found
 	}
 
 	/// Disable cached client authentication when client roots can reload.
@@ -1093,8 +1075,18 @@ impl Listen {
 		}
 	}
 
+	/// Refuse a section parsed from released spellings, naming what replaced each.
+	fn refuse_deprecated(&self) -> Result<()> {
+		let deprecated = self.deprecated();
+		match deprecated.is_empty() {
+			true => Ok(()),
+			false => Err(Error::Deprecated(deprecated)),
+		}
+	}
+
 	/// Load all configured root CAs into a [`rustls::RootCertStore`].
 	pub fn load_roots(&self) -> Result<rustls::RootCertStore> {
+		self.refuse_deprecated()?;
 		root_store(&read_roots(&self.root)?)
 	}
 
@@ -1104,6 +1096,7 @@ impl Listen {
 		&self,
 		provider: crypto::Provider,
 	) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> {
+		self.refuse_deprecated()?;
 		let initial = Self::build_client_verifier(&self.root, &provider)?;
 
 		#[cfg(feature = "watch")]
@@ -1143,6 +1136,7 @@ impl Listen {
 	/// protocol like RTMPS that doesn't use ALPN.
 	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub fn server_config(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
+		self.refuse_deprecated()?;
 		server_config(self, alpn)
 	}
 }
@@ -2293,9 +2287,10 @@ mod legacy_tests {
 		Cli::parse_from(argv)
 	}
 
-	/// The released `--client-tls-*` spellings still land in the canonical fields.
+	/// The released `--client-tls-*` spellings parse so the process can name their
+	/// replacements, and configure nothing.
 	#[test]
-	fn released_connect_spellings_fold_in() {
+	fn released_connect_spellings_are_reported_not_applied() {
 		let tls = parse(&[
 			"--client-tls-root",
 			"/tmp/ca.pem",
@@ -2307,47 +2302,87 @@ mod legacy_tests {
 			"relay.example.com",
 			"--client-tls-disable-verify=true",
 		])
-		.connect
-		.resolved();
+		.connect;
 
-		assert_eq!(tls.root, vec![PathBuf::from("/tmp/ca.pem")]);
-		assert_eq!(tls.cert, Some(PathBuf::from("/tmp/client.pem")));
-		assert_eq!(tls.key, Some(PathBuf::from("/tmp/client.key")));
-		assert_eq!(tls.host_name.as_deref(), Some("relay.example.com"));
-		assert_eq!(tls.insecure, Some(true));
+		assert!(tls.root.is_empty());
+		assert_eq!(tls.cert, None);
+		assert_eq!(tls.key, None);
+		assert_eq!(tls.host_name, None);
+		assert_eq!(tls.insecure, None);
+
+		let reported = tls.deprecated().to_string();
+		for line in [
+			"--client-tls-root / MOQ_CLIENT_TLS_ROOT -> --connect-tls-root / MOQ_CONNECT_TLS_ROOT",
+			"--client-tls-cert / MOQ_CLIENT_TLS_CERT -> --connect-tls-cert / MOQ_CONNECT_TLS_CERT",
+			"--client-tls-key / MOQ_CLIENT_TLS_KEY -> --connect-tls-key / MOQ_CONNECT_TLS_KEY",
+			"--client-tls-host-name / MOQ_CLIENT_TLS_HOST_NAME -> --connect-tls-host-name / MOQ_CONNECT_TLS_HOST_NAME",
+			"--client-tls-disable-verify / MOQ_CLIENT_TLS_DISABLE_VERIFY -> --connect-tls-insecure / MOQ_CONNECT_TLS_INSECURE",
+		] {
+			assert!(reported.contains(line), "missing {line:?} from {reported}");
+		}
 	}
 
-	/// The canonical flag wins, and roots from both spellings are kept: each names
-	/// its own CA, so dropping either would stop trusting one.
+	/// The public builders refuse too, not just the configs that own this section.
+	///
+	/// This type derives `Args`, so a consumer can flatten it into a parser of its
+	/// own and call `build()` without ever going through `connect::Config`. On that
+	/// path an unrefused `--client-tls-root` reads as "no custom roots" and falls
+	/// back to the system store: the trust setting is not merely dropped, it is
+	/// widened to the thing it was written to replace.
 	#[test]
-	fn canonical_wins_and_roots_concatenate() {
+	fn the_client_builder_refuses_a_released_spelling() {
+		let tls = parse(&["--client-tls-root", "/tmp/ca.pem"]).connect;
+
+		let Err(err) = tls.build() else {
+			panic!("building a client config must refuse a released spelling");
+		};
+		assert!(matches!(err, Error::Deprecated(_)), "{err}");
+		assert!(err.to_string().contains("--connect-tls-root"), "{err}");
+	}
+
+	/// The accept side, where a dropped `--server-tls-root` takes the mTLS client
+	/// CAs with it and leaves the listener accepting unauthenticated peers.
+	/// moq-cli's `export hls` flattens this type directly, so it is a live path.
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[test]
+	fn the_server_builders_refuse_a_released_spelling() {
+		let tls = parse(&["--server-tls-root", "/tmp/ca.pem"]).listen;
+
+		let Err(err) = tls.load_roots() else {
+			panic!("loading roots must refuse a released spelling");
+		};
+		assert!(matches!(err, Error::Deprecated(_)), "{err}");
+
+		let Err(err) = tls.server_config(Vec::new()) else {
+			panic!("building a server config must refuse a released spelling");
+		};
+		assert!(err.to_string().contains("--listen-tls-root"), "{err}");
+	}
+
+	/// Trust material is where silently dropping half a command line does the most
+	/// damage, so a canonical root next to a released one is still refused rather
+	/// than quietly narrowing what the process trusts.
+	#[test]
+	fn a_canonical_root_does_not_excuse_a_released_one() {
 		let tls = parse(&[
 			"--connect-tls-root",
 			"/tmp/new.pem",
 			"--client-tls-root",
 			"/tmp/old.pem",
-			"--connect-tls-host-name",
-			"new.example.com",
-			"--client-tls-host-name",
-			"old.example.com",
 		])
-		.connect
-		.resolved();
+		.connect;
 
-		assert_eq!(
-			tls.root,
-			vec![PathBuf::from("/tmp/new.pem"), PathBuf::from("/tmp/old.pem")]
-		);
-		assert_eq!(tls.host_name.as_deref(), Some("new.example.com"));
+		assert_eq!(tls.root, vec![PathBuf::from("/tmp/new.pem")]);
+		assert!(tls.deprecated().to_string().contains("--client-tls-root"));
 
-		// Folding an already-folded config changes nothing.
-		assert_eq!(tls.resolved().root, tls.root);
+		let tls = parse(&["--connect-tls-root", "/tmp/new.pem"]).connect;
+		assert!(tls.deprecated().is_empty());
 	}
 
 	/// The released served-identity spellings: the bare `--tls-*` flags and the
 	/// `--server-tls-*` pair, both carrying `MOQ_SERVER_TLS_*`.
 	#[test]
-	fn released_listen_spellings_fold_in() {
+	fn released_listen_spellings_are_reported_not_applied() {
 		let tls = parse(&[
 			"--tls-cert",
 			"/tmp/server.pem",
@@ -2356,11 +2391,19 @@ mod legacy_tests {
 			"--server-tls-generate",
 			"localhost",
 		])
-		.listen
-		.resolved();
+		.listen;
 
-		assert_eq!(tls.cert, vec![PathBuf::from("/tmp/server.pem")]);
-		assert_eq!(tls.key, vec![PathBuf::from("/tmp/server.key")]);
-		assert_eq!(tls.generate, vec!["localhost".to_string()]);
+		assert!(tls.cert.is_empty());
+		assert!(tls.key.is_empty());
+		assert!(tls.generate.is_empty());
+
+		let reported = tls.deprecated().to_string();
+		for line in [
+			"--tls-cert / MOQ_SERVER_TLS_CERT -> --listen-tls-cert / MOQ_LISTEN_TLS_CERT",
+			"--tls-key / MOQ_SERVER_TLS_KEY -> --listen-tls-key / MOQ_LISTEN_TLS_KEY",
+			"--tls-generate / MOQ_SERVER_TLS_GENERATE -> --listen-tls-generate / MOQ_LISTEN_TLS_GENERATE",
+		] {
+			assert!(reported.contains(line), "missing {line:?} from {reported}");
+		}
 	}
 }

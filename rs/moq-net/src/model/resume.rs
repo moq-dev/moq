@@ -468,6 +468,8 @@ impl Consumer {
 			next_sequence: 0,
 			min_sequence: 0,
 			end_sequence: None,
+			drift_cap: kio::Producer::new(None),
+			stale_stats: Default::default(),
 			reading: None,
 		}
 	}
@@ -667,6 +669,11 @@ fn frames(start: Option<Position>, end: Option<Position>, sequence: u64) -> Opti
 	Some((start, end))
 }
 
+/// The last group a half-open segment can serve, or no bound for the newest segment.
+fn last_group(end: Option<Position>) -> Option<u64> {
+	end?.before().map(|position| position.group)
+}
+
 /// A group assembled from several routes' copies, joined at frame boundaries.
 ///
 /// Rather than being fed, it pulls: on every frame it asks the segment list which route
@@ -679,6 +686,10 @@ fn frames(start: Option<Position>, end: Option<Position>, sequence: u64) -> Opti
 /// replacement can arrive.
 pub(crate) struct Group {
 	state: kio::Consumer<ResumeState>,
+	/// The logical subscription's live latency budget.
+	subscription: kio::Consumer<Subscription>,
+	/// The logical reader's group cap, used only to bound each route's drift anchor.
+	cap: kio::Consumer<Option<u64>>,
 
 	/// The logical group being assembled.
 	sequence: u64,
@@ -695,18 +706,22 @@ pub(crate) struct Group {
 
 	/// The segment whose copy died under us, and why.
 	dead: Option<(u64, Error)>,
+
+	/// The tagged logical subscriber's meter for route-copy expiry only.
+	stale_stats: crate::stats::Meter,
 }
 
 struct Current {
 	segment: u64,
 	cap: Option<u64>,
+	bound: Option<u64>,
 	group: group::Consumer,
 }
 
 /// A route covering one position: the segment id, its track, and the segment's
 /// exclusive frame bound on the group (outer `None` when the group escapes the
 /// segment's range entirely, from [`frames`]).
-type Covering = (u64, track::Consumer, Option<Option<u64>>);
+type Covering = (u64, track::Consumer, Option<Option<u64>>, Option<u64>);
 
 impl Clone for Group {
 	fn clone(&self) -> Self {
@@ -722,30 +737,51 @@ impl Clone for Group {
 			(group.index() == self.index).then_some(Current {
 				segment: current.segment,
 				cap: current.cap,
+				bound: current.bound,
 				group,
 			})
 		});
 		Self {
 			state: self.state.clone(),
+			subscription: self.subscription.clone(),
+			cap: self.cap.clone(),
 			sequence: self.sequence,
 			index: self.index,
 			end: self.end,
 			current,
 			dead: self.dead.clone(),
+			stale_stats: self.stale_stats.clone(),
 		}
 	}
 }
 
 impl Group {
-	fn new(state: kio::Consumer<ResumeState>, sequence: u64, index: u64) -> Self {
+	fn new(
+		state: kio::Consumer<ResumeState>,
+		subscription: kio::Consumer<Subscription>,
+		cap: kio::Consumer<Option<u64>>,
+		sequence: u64,
+		index: u64,
+	) -> Self {
 		Self {
 			state,
+			subscription,
+			cap,
 			sequence,
 			index,
 			end: None,
 			current: None,
 			dead: None,
+			stale_stats: Default::default(),
 		}
+	}
+
+	/// Attribute expiry for route-specific copies behind this logical group.
+	pub(crate) fn set_stale_meter(&mut self, meter: crate::stats::Meter) {
+		if let Some(current) = &mut self.current {
+			current.group.set_stale_meter(meter.clone());
+		}
+		self.stale_stats = meter;
 	}
 
 	/// Pre-latch the delivering route's own copy, so the payload it already
@@ -758,12 +794,18 @@ impl Group {
 	/// latched, since the reuse path trusts the latch's alignment and would
 	/// misnumber its frames. The reader re-resolves instead, and the peek path's
 	/// own check buries the copy as lagged.
-	fn latched(mut self, segment: u64, cap: Option<u64>, mut group: group::Consumer) -> Self {
+	fn latched(mut self, segment: u64, cap: Option<u64>, bound: Option<u64>, mut group: group::Consumer) -> Self {
 		// The segment bound is exclusive; a group consumer's cap is inclusive.
 		group.end_at(cap.map(|cap| cap.saturating_sub(1)));
 		group.start_at(self.index);
+		group.set_stale_meter(self.stale_stats.clone());
 		if group.index() == self.index {
-			self.current = Some(Current { segment, cap, group });
+			self.current = Some(Current {
+				segment,
+				cap,
+				bound,
+				group,
+			});
 		}
 		self
 	}
@@ -833,6 +875,7 @@ impl Group {
 							segment.id,
 							segment.track.clone(),
 							frames(segment.start, segment.end, sequence).map(|(_, end)| end),
+							last_group(segment.end),
 						))),
 						Poll::Pending => match terminal {
 							true => Poll::Ready(None),
@@ -844,6 +887,7 @@ impl Group {
 					segment.id,
 					segment.track.clone(),
 					frames(segment.start, segment.end, sequence).map(|(_, end)| end),
+					last_group(segment.end),
 				))),
 				// No route owns them yet; park unless none is coming.
 				None if terminal => Poll::Ready(None),
@@ -873,7 +917,7 @@ impl Group {
 			let sequence = self.sequence;
 			let found = ready!(self.poll_covering(position, dead, waiter));
 
-			let Some((segment, track, Some(cap))) = found else {
+			let Some((segment, track, Some(cap), bound)) = found else {
 				// No segment covers the position, but a latched copy still drains:
 				// a pruned segment's cursor holds exactly the frames it owned (its
 				// cap was its produced edge), so read it dry before giving up. Once
@@ -889,13 +933,13 @@ impl Group {
 			if self
 				.current
 				.as_ref()
-				.is_some_and(|current| current.segment == segment && current.cap == cap)
+				.is_some_and(|current| current.segment == segment && current.cap == cap && current.bound == bound)
 			{
 				return Poll::Ready(Ok(true));
 			}
 
 			// The route may not have delivered this group yet, so wait on its cache.
-			let Some(mut group) = ready!(track.poll_peek_group(sequence, waiter)) else {
+			let Some(group) = ready!(track.poll_peek_group(sequence, waiter)) else {
 				// This route will never have it; fall back to whichever segment replaces it.
 				self.dead = Some((segment, Error::NotFound));
 				continue;
@@ -904,6 +948,8 @@ impl Group {
 			// `start_at` clamps up to the first frame the copy still holds, so landing
 			// higher than asked means this route can't cover the seam after all. Treat it
 			// like a dead copy and wait for one that can.
+			let mut group = track.guard_group(group, self.subscription.clone(), self.cap.clone(), bound);
+			group.set_stale_meter(self.stale_stats.clone());
 			group.start_at(self.index);
 			if group.index() != self.index {
 				self.dead = Some((segment, Error::Lagged));
@@ -912,7 +958,12 @@ impl Group {
 
 			// The segment bound is exclusive; a group consumer's cap is inclusive.
 			group.end_at(cap.map(|cap| cap.saturating_sub(1)));
-			self.current = Some(Current { segment, cap, group });
+			self.current = Some(Current {
+				segment,
+				cap,
+				bound,
+				group,
+			});
 			self.dead = None;
 			return Poll::Ready(Ok(true));
 		}
@@ -970,14 +1021,22 @@ impl Group {
 			if !ready!(self.poll_current(waiter))? {
 				return Poll::Ready(Ok(None));
 			}
-			let current = self.current.as_mut().expect("resolved above");
-			match ready!(current.group.poll_read_frame(waiter)) {
+			let result = {
+				let current = self.current.as_mut().expect("resolved above");
+				ready!(current.group.poll_read_frame(waiter))
+			};
+			let latency_expired = self
+				.current
+				.as_ref()
+				.is_some_and(|current| current.group.latency_expired());
+			match result {
 				Ok(Some(frame)) => {
 					self.index += 1;
 					return Poll::Ready(Ok(Some(frame)));
 				}
 				Ok(None) if self.roll() => continue,
 				Ok(None) => return Poll::Ready(Ok(None)),
+				Err(err) if latency_expired => return Poll::Ready(Err(err)),
 				Err(err) => self.bury(err),
 			}
 		}
@@ -991,14 +1050,22 @@ impl Group {
 			if !ready!(self.poll_current(waiter))? {
 				return Poll::Ready(Ok(None));
 			}
-			let current = self.current.as_mut().expect("resolved above");
-			match ready!(current.group.poll_next_frame(waiter)) {
+			let result = {
+				let current = self.current.as_mut().expect("resolved above");
+				ready!(current.group.poll_next_frame(waiter))
+			};
+			let latency_expired = self
+				.current
+				.as_ref()
+				.is_some_and(|current| current.group.latency_expired());
+			match result {
 				Ok(Some(frame)) => {
 					self.index += 1;
 					return Poll::Ready(Ok(Some(frame)));
 				}
 				Ok(None) if self.roll() => continue,
 				Ok(None) => return Poll::Ready(Ok(None)),
+				Err(err) if latency_expired => return Poll::Ready(Err(err)),
 				Err(err) => self.bury(err),
 			}
 		}
@@ -1029,13 +1096,18 @@ impl Group {
 		};
 		loop {
 			let dead = self.dead.as_ref().map(|(segment, _)| *segment);
-			let Some((segment, track, _)) = ready!(self.poll_covering(seam, dead, waiter)) else {
+			let Some((segment, track, _, bound)) = ready!(self.poll_covering(seam, dead, waiter)) else {
 				return Poll::Ready(Ok(cap));
 			};
 			match ready!(track.poll_peek_group(self.sequence, waiter)) {
 				// The continuation's copy declares the count: its own count
 				// already includes the frames it skipped.
-				Some(mut continuation) => return continuation.poll_finished(waiter),
+				Some(continuation) => {
+					let mut continuation =
+						track.guard_group(continuation, self.subscription.clone(), self.cap.clone(), bound);
+					continuation.set_stale_meter(self.stale_stats.clone());
+					return continuation.poll_finished(waiter);
+				}
 				// This route will never have it; wait for whatever replaces it.
 				None => self.dead = Some((segment, Error::NotFound)),
 			}
@@ -1049,6 +1121,9 @@ struct SegmentSub {
 	start: Option<Position>,
 	end: Option<Position>,
 	sub: SubState,
+	/// A completed segment's cursor, retained while parked groups may need their
+	/// latency budget re-evaluated after the outer cap rises.
+	terminal: Option<track::Subscriber>,
 	/// The producer dropped this segment (pruned, or replaced before producing).
 	/// The cursor drains what it already holds, then retires; see
 	/// [`Self::retired`].
@@ -1062,6 +1137,23 @@ struct SegmentSub {
 }
 
 impl SegmentSub {
+	/// The cursor that can evaluate staleness, whether the segment is live or has
+	/// already completed.
+	fn stale_sub_mut(&mut self) -> Option<&mut track::Subscriber> {
+		match &mut self.sub {
+			SubState::Active(sub) => Some(sub),
+			_ => self.terminal.as_mut(),
+		}
+	}
+
+	/// Move an active cursor into terminal retention and mark the segment done.
+	fn complete(&mut self, count: Option<u64>) {
+		let previous = std::mem::replace(&mut self.sub, SubState::Done(count));
+		if let SubState::Active(sub) = previous {
+			self.terminal = Some(sub);
+		}
+	}
+
 	/// The first group this segment can serve, for the underlying read cursor.
 	fn first_group(&self) -> u64 {
 		self.start.map_or(0, |start| start.group)
@@ -1070,17 +1162,16 @@ impl SegmentSub {
 	/// The last group this segment can serve (inclusive), for the underlying read
 	/// cursor. `None` while it is the newest segment.
 	fn last_group(&self) -> Option<u64> {
-		let end = self.end?;
 		// An empty segment would serve nothing, and no switch produces one: every
 		// boundary comes from `resume_position`, which sits at or above the first frame.
 		// `None` here reads as "no cap", which is why it is asserted rather than relied
 		// on; the authoritative filter is `Segment::covers`, which uses the exclusive
 		// bound directly.
 		debug_assert!(
-			end != Position::default(),
+			self.end != Some(Position::default()),
 			"a segment cannot end at the start of the track"
 		);
-		Some(end.before()?.group)
+		last_group(self.end)
 	}
 
 	/// Whether a producer-dropped segment is spent and can be removed. A capped
@@ -1141,6 +1232,10 @@ pub struct Subscriber {
 	min_sequence: u64,
 	/// Inclusive cap for [`Self::next_group`], set by [`Self::end_at`].
 	end_sequence: Option<u64>,
+	/// Shared copy of [`Self::end_sequence`] for groups that outlive this cursor poll.
+	drift_cap: kio::Producer<Option<u64>>,
+	/// Logical subscriber meter for groups drained internally by [`Self::poll_read_frame`].
+	stale_stats: crate::stats::Meter,
 
 	/// The group currently being drained by [`Self::read_frame`].
 	reading: Option<group::Consumer>,
@@ -1152,6 +1247,14 @@ impl Subscriber {
 	fn poll_sync(&mut self, waiter: &kio::Waiter) {
 		self.sync(waiter);
 		self.reap();
+	}
+
+	/// Attribute expiry for the group this frame helper drains internally.
+	pub(crate) fn set_stale_meter(&mut self, meter: crate::stats::Meter) {
+		if let Some(reading) = &mut self.reading {
+			reading.set_stale_meter(meter.clone());
+		}
+		self.stale_stats = meter;
 	}
 
 	/// Reap retired cursors, then bound the live stragglers: a pruned segment's
@@ -1178,6 +1281,7 @@ impl Subscriber {
 				}
 				if seg.pruned {
 					seg.sub = SubState::Done(None);
+					seg.terminal = None;
 					seg.parked.clear();
 					cut -= 1;
 				}
@@ -1203,8 +1307,9 @@ impl Subscriber {
 			};
 			self.last_prefs = prefs;
 			for seg in &mut self.segments {
-				if let SubState::Active(sub) = &mut seg.sub {
-					let _ = sub.update(slice(&self.last_prefs, seg.start, seg.end));
+				let prefs = slice(&self.last_prefs, seg.start, seg.end);
+				if let Some(sub) = seg.stale_sub_mut() {
+					let _ = sub.update(prefs);
 				}
 			}
 		}
@@ -1273,7 +1378,10 @@ impl Subscriber {
 				Some(existing) => {
 					if existing.end != segment.end {
 						existing.end = segment.end;
-						if let SubState::Active(sub) = &mut existing.sub {
+						let cap = Self::stale_cap(existing, self.end_sequence);
+						if let Some(sub) = existing.stale_sub_mut() {
+							// The boundary bounds the drift anchor as well as the demand.
+							sub.set_stale_cap(cap);
 							// Shrink the demand so the session can cap upstream. The
 							// read bounds stay on this subscriber (see `poll_recv_group`):
 							// an inner `end_at` would park boundary-crossing groups in the
@@ -1295,6 +1403,7 @@ impl Subscriber {
 						start: segment.start,
 						end: segment.end,
 						sub: SubState::Pending(sub),
+						terminal: None,
 						pruned: false,
 						parked: BTreeMap::new(),
 					});
@@ -1321,14 +1430,39 @@ impl Subscriber {
 		// through the segment list, which forgets this route the moment its
 		// segment is pruned, turning a group the cursor already delivered into an
 		// empty husk.
-		let spliced = Group::new(self.state.clone(), sequence, 0).latched(seg.id, end, group.clone());
+		let spliced = Group::new(
+			self.state.clone(),
+			self.prefs.consume(),
+			self.drift_cap.consume(),
+			sequence,
+			0,
+		)
+		.latched(seg.id, end, seg.last_group(), group.clone());
 		Some(group.into_spliced(spliced))
+	}
+
+	/// The highest sequence a segment could hand its reader: the reader's own cap and
+	/// the segment's boundary, whichever is lower.
+	///
+	/// A segment's inner cursor is deliberately left uncapped (an inner `end_at` would
+	/// park boundary-crossing groups where its completion can't be seen), so this is how
+	/// both bounds reach the drift anchor. Without them a segment measures staleness
+	/// against groups it will never surface: the route running past the boundary, or the
+	/// reader's own cap holding content back.
+	fn stale_cap(seg: &SegmentSub, end_sequence: Option<u64>) -> Option<u64> {
+		min_some(end_sequence, seg.last_group())
 	}
 
 	/// Resolve a segment's pending subscription, if any. Ready once the segment is
 	/// `Active` or `Done`; a rejected or closed track becomes `Done` (stall, not
 	/// error). Never consumes groups, so terminal-state pollers can share it.
-	fn poll_activate(seg: &mut SegmentSub, prefs: &Subscription, min_sequence: u64, waiter: &kio::Waiter) -> Poll<()> {
+	fn poll_activate(
+		seg: &mut SegmentSub,
+		prefs: &Subscription,
+		min_sequence: u64,
+		end_sequence: Option<u64>,
+		waiter: &kio::Waiter,
+	) -> Poll<()> {
 		if let SubState::Pending(pending) = &mut seg.sub {
 			match pending.poll_ok(waiter) {
 				Poll::Ready(Ok(mut sub)) => {
@@ -1338,6 +1472,7 @@ impl Subscriber {
 					// this subscriber, never on the inner cursor: an inner cap would
 					// park groups there and hide the segment's completion.
 					sub.start_at(seg.first_group().max(min_sequence));
+					sub.set_stale_cap(Self::stale_cap(seg, end_sequence));
 					let _ = sub.update(slice(prefs, seg.start, seg.end));
 					seg.sub = SubState::Active(sub);
 				}
@@ -1355,12 +1490,13 @@ impl Subscriber {
 		seg: &mut SegmentSub,
 		prefs: &Subscription,
 		min_sequence: u64,
+		end_sequence: Option<u64>,
 		waiter: &kio::Waiter,
 	) -> Poll<Option<group::Consumer>> {
 		loop {
 			match &mut seg.sub {
 				SubState::Pending(_) => {
-					ready!(Self::poll_activate(seg, prefs, min_sequence, waiter));
+					ready!(Self::poll_activate(seg, prefs, min_sequence, end_sequence, waiter));
 				}
 				SubState::Active(sub) => match sub.poll_recv_group(waiter) {
 					Poll::Ready(Ok(Some(group))) => {
@@ -1379,13 +1515,13 @@ impl Subscriber {
 							Poll::Ready(count) => count,
 							Poll::Pending => None,
 						};
-						seg.sub = SubState::Done(count);
+						seg.complete(count);
 						return Poll::Ready(None);
 					}
 					// A dead segment stalls the logical track rather than erroring;
 					// the next switch resumes it.
 					Poll::Ready(Err(_)) => {
-						seg.sub = SubState::Done(None);
+						seg.complete(None);
 						return Poll::Ready(None);
 					}
 					// An empty cursor on a pruned segment is NOT proof it drained:
@@ -1450,6 +1586,14 @@ impl Subscriber {
 					.parked
 					.remove(&sequence)
 					.expect("parked key just observed");
+				// The cap rising widens the live edge too, so a group parked while it
+				// was current can be a backlog by the time it is owed again. Re-check it
+				// rather than hand back content the budget has since given up on.
+				if let Some(sub) = self.segments[index].stale_sub_mut()
+					&& matches!(sub.poll_stale(&group, waiter), Poll::Ready(Ok(true)))
+				{
+					continue;
+				}
 				// Folded into a group already handed out: try the next parked one.
 				if let Some(group) = self.hand_out(index, group) {
 					self.next_sequence = self.next_sequence.max(sequence.saturating_add(1));
@@ -1458,7 +1602,13 @@ impl Subscriber {
 			}
 
 			loop {
-				let polled = Self::poll_segment(&mut self.segments[index], &self.last_prefs, min_sequence, waiter);
+				let polled = Self::poll_segment(
+					&mut self.segments[index],
+					&self.last_prefs,
+					min_sequence,
+					end_sequence,
+					waiter,
+				);
 				match polled {
 					Poll::Ready(Some(group)) => {
 						if beyond_cap(group.sequence) {
@@ -1561,7 +1711,10 @@ impl Subscriber {
 			}
 
 			match ready!(self.poll_next_group(waiter))? {
-				Some(group) => self.reading = Some(group),
+				Some(mut group) => {
+					group.set_stale_meter(self.stale_stats.clone());
+					self.reading = Some(group);
+				}
 				None => return Poll::Ready(Ok(None)),
 			}
 		}
@@ -1583,7 +1736,7 @@ impl Subscriber {
 		// be woken when it activates.
 		let mut pending_activation = false;
 		if let Some(seg) = self.segments.last_mut() {
-			if Self::poll_activate(seg, &self.last_prefs, self.min_sequence, waiter).is_pending() {
+			if Self::poll_activate(seg, &self.last_prefs, self.min_sequence, self.end_sequence, waiter).is_pending() {
 				pending_activation = true;
 			} else if let SubState::Active(sub) = &mut seg.sub {
 				match sub.poll_recv_datagram(waiter) {
@@ -1638,16 +1791,22 @@ impl Subscriber {
 		let Some(seg) = self.segments.last_mut() else {
 			return Poll::Ready(Ok(0));
 		};
-		ready!(Self::poll_activate(seg, &self.last_prefs, self.min_sequence, waiter));
+		ready!(Self::poll_activate(
+			seg,
+			&self.last_prefs,
+			self.min_sequence,
+			self.end_sequence,
+			waiter
+		));
 		match &mut seg.sub {
 			SubState::Done(count) => Poll::Ready(Ok(count.unwrap_or(0))),
 			SubState::Active(sub) => match ready!(sub.poll_finished(waiter)) {
 				Ok(count) => {
-					seg.sub = SubState::Done(Some(count));
+					seg.complete(Some(count));
 					Poll::Ready(Ok(count))
 				}
 				Err(_) => {
-					seg.sub = SubState::Done(None);
+					seg.complete(None);
 					Poll::Ready(Ok(0))
 				}
 			},
@@ -1679,11 +1838,38 @@ impl Subscriber {
 	/// re-offers it.
 	pub fn end_at(&mut self, sequence: impl Into<Option<u64>>) {
 		self.end_sequence = sequence.into();
+		if let Ok(mut cap) = self.drift_cap.write() {
+			*cap = self.end_sequence;
+		}
+		// The cap bounds each segment's drift anchor as well as this reader's own
+		// delivery: a segment must not measure against groups this cap hides.
+		let end_sequence = self.end_sequence;
+		for seg in &mut self.segments {
+			let cap = Self::stale_cap(seg, end_sequence);
+			if let Some(sub) = seg.stale_sub_mut() {
+				sub.set_stale_cap(cap);
+			}
+		}
 	}
 
 	/// The shared preferences channel, so `track::SubscriberControl` can wrap it.
 	pub(crate) fn prefs(&self) -> kio::Producer<Subscription> {
 		self.prefs.clone()
+	}
+
+	/// Take the groups every segment's drift budget skipped since the last call.
+	///
+	/// The segments are subscribed untagged, so their skips have nowhere to be counted
+	/// until they reach the [`track::Subscriber`] that owns the stats scope. A retired
+	/// segment's tail is lost with it, which is the same bound its groups already had.
+	pub(crate) fn take_stale(&mut self) -> crate::stats::Content {
+		let mut stale = crate::stats::Content::default();
+		for seg in &mut self.segments {
+			if let Some(sub) = seg.stale_sub_mut() {
+				stale.add(sub.take_stale());
+			}
+		}
+		stale
 	}
 
 	/// Replace this subscriber's preferences; each segment's demand is re-derived
@@ -1708,9 +1894,10 @@ impl Subscriber {
 #[cfg(test)]
 mod test {
 	use super::*;
-	use crate::{Timestamp, broadcast};
+	use crate::{Latency, Timestamp, broadcast};
 	use futures::FutureExt;
 	use std::sync::Arc;
+	use std::time::Duration;
 
 	fn track_pair(name: &str) -> (track::Producer, track::Consumer) {
 		let producer = track::Producer::new(Arc::new(broadcast::Info::default()), name, None);
@@ -1718,9 +1905,34 @@ mod test {
 		(producer, consumer)
 	}
 
+	/// [`track_pair`] with explicit publisher properties, for tests that care about the
+	/// retention window a subscriber's drift budget is clamped to.
+	fn track_pair_with(name: &str, info: track::Info) -> (track::Producer, track::Consumer) {
+		let producer = track::Producer::new(Arc::new(broadcast::Info::default()), name, info);
+		let consumer = producer.consume();
+		(producer, consumer)
+	}
+
+	/// A bounded replay window for tests whose subject requires every buffered group.
+	fn replay() -> Subscription {
+		Subscription::default().with_latency(Latency::max(Duration::from_secs(30)))
+	}
+
 	fn write_group(producer: &mut track::Producer, sequence: u64, payload: &str) {
 		let mut group = producer.create_group(group::Info { sequence }).unwrap();
 		group.write_frame(Timestamp::ZERO, payload.as_bytes().to_vec()).unwrap();
+		group.finish().unwrap();
+	}
+
+	/// Like [`write_group`], but placing the group on a real media timeline so the
+	/// drift budget has something to measure. Most tests here are about splicing
+	/// mechanics and use [`write_group`], paired with [`replay`] when they need every
+	/// buffered group rather than the real-time live edge.
+	fn write_group_at(producer: &mut track::Producer, sequence: u64, payload: &str, at: Duration) {
+		let mut group = producer.create_group(group::Info { sequence }).unwrap();
+		group
+			.write_frame(at.try_into().unwrap(), payload.as_bytes().to_vec())
+			.unwrap();
 		group.finish().unwrap();
 	}
 
@@ -1777,7 +1989,7 @@ mod test {
 		let mut producer = Producer::new();
 		producer.switch(&consumer_a, None).unwrap();
 
-		let mut sub = producer.consume().subscribe(None);
+		let mut sub = producer.consume().subscribe(replay());
 
 		write_group(&mut track_a, 0, "a0");
 		write_group(&mut track_a, 1, "a1");
@@ -1865,7 +2077,7 @@ mod test {
 
 		// No segments yet: the takeover is unbounded.
 		producer.takeover(&consumer_a).unwrap();
-		let mut sub = producer.consume().subscribe(None);
+		let mut sub = producer.consume().subscribe(replay());
 		write_group(&mut track_a, 0, "a0");
 		write_group(&mut track_a, 1, "a1");
 		assert_eq!(recv(&mut sub), 0);
@@ -1878,6 +2090,125 @@ mod test {
 		producer.takeover(&consumer_b).unwrap();
 		write_group(&mut track_b, 2, "b2");
 		assert_eq!(recv(&mut sub), 2);
+	}
+
+	/// A route that stalls while a replacement runs on leaves the boundary trailing,
+	/// so the takeover asks the new route to replay a backlog. That backlog is bounded
+	/// by the drift budget and nothing else: a REAL_TIME subscriber jumps to the live
+	/// edge, while one that declared a budget covering the gap reads it whole.
+	#[tokio::test]
+	async fn a_takeover_backlog_is_bounded_by_the_budget() {
+		// Both routes retain a minute, so the budget is the only thing bounding the
+		// backlog (a budget past the publisher's window is clamped to it).
+		let retain = track::Info::default().with_latency_max(Duration::from_secs(60));
+		let (mut track_a, consumer_a) = track_pair_with("a", retain.clone());
+		let (mut track_b, consumer_b) = track_pair_with("b", retain);
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut live = producer.consume().subscribe(None);
+		let mut patient = producer
+			.consume()
+			.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_secs(60))));
+
+		write_group_at(&mut track_a, 0, "a0", Duration::ZERO);
+		assert_eq!(recv(&mut live), 0);
+		assert_eq!(recv(&mut patient), 0);
+
+		// The old route stalls; the replacement resumes at the boundary and replays
+		// half a minute of media as fast as the wire allows.
+		track_a.abort(Error::Dropped).unwrap();
+		producer.takeover(&consumer_b).unwrap();
+		recv_pending(&mut live);
+		for second in 1..=30 {
+			write_group_at(&mut track_b, second, "b", Duration::from_secs(second));
+		}
+
+		// The live subscriber takes the edge and writes the backlog off; the patient
+		// one asked to tolerate it and gets every group.
+		assert_eq!(recv(&mut live), 30);
+		recv_pending(&mut live);
+
+		let mut backfill = Vec::new();
+		while let Some(Ok(Some(group))) = patient.recv_group().now_or_never() {
+			backfill.push(group.sequence);
+		}
+		assert_eq!(backfill, (1..=30).collect::<Vec<_>>());
+	}
+
+	/// A capped spliced subscriber measures drift against its cap, exactly like a plain
+	/// one. The segment is deliberately left uncapped so its completion stays visible, so
+	/// the cap has to reach its drift anchor by another route or the groups the reader
+	/// still wants read as ancient.
+	#[tokio::test]
+	async fn a_capped_spliced_subscriber_measures_drift_against_its_cap() {
+		let retain = track::Info::default().with_latency_max(Duration::from_secs(60));
+		let (mut track_a, consumer_a) = track_pair_with("a", retain);
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		sub.end_at(0);
+
+		write_group_at(&mut track_a, 0, "a0", Duration::ZERO);
+		write_group_at(&mut track_a, 1, "a1", Duration::from_secs(30));
+
+		// Group 1 is past the cap, so it is not a live edge this reader can jump to.
+		assert_eq!(recv(&mut sub), 0);
+	}
+
+	/// A group parked above the cap is re-checked when the cap rises: the live edge moved
+	/// while it waited, so handing it back unconditionally would deliver a backlog the
+	/// budget has already given up on.
+	#[tokio::test]
+	async fn a_raised_cap_rechecks_parked_groups() {
+		let retain = track::Info::default().with_latency_max(Duration::from_secs(60));
+		let (mut track_a, consumer_a) = track_pair_with("a", retain);
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		sub.end_at(0);
+
+		write_group_at(&mut track_a, 0, "a0", Duration::ZERO);
+		assert_eq!(recv(&mut sub), 0);
+
+		// Group 1 parks above the cap; group 2 lands half a minute further on.
+		write_group_at(&mut track_a, 1, "a1", Duration::from_secs(1));
+		recv_pending(&mut sub);
+		write_group_at(&mut track_a, 2, "a2", Duration::from_secs(30));
+
+		// Raising the cap owes the reader group 1 again, but by now it is a backlog.
+		sub.end_at(None);
+		assert_eq!(recv(&mut sub), 2);
+		recv_pending(&mut sub);
+	}
+
+	/// Completing the segment must not discard the cursor that evaluates parked
+	/// groups. A later cap increase still uses the terminal track's live edge.
+	#[tokio::test]
+	async fn a_raised_cap_rechecks_parked_groups_after_segment_finish() {
+		let retain = track::Info::default().with_latency_max(Duration::from_secs(60));
+		let (mut track_a, consumer_a) = track_pair_with("a", retain);
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		sub.end_at(0);
+
+		write_group_at(&mut track_a, 0, "a0", Duration::ZERO);
+		assert_eq!(recv(&mut sub), 0);
+
+		write_group_at(&mut track_a, 1, "a1", Duration::from_secs(1));
+		write_group_at(&mut track_a, 2, "a2", Duration::from_secs(30));
+		track_a.finish().unwrap();
+		// Drive the inner cursor through its clean end while both newer groups are
+		// parked above the cap.
+		recv_pending(&mut sub);
+
+		sub.end_at(None);
+		assert_eq!(recv(&mut sub), 2, "the stale parked group is skipped after finish");
+		recv_pending(&mut sub);
 	}
 
 	#[tokio::test]
@@ -2100,7 +2431,7 @@ mod test {
 
 		let mut producer = Producer::new();
 		producer.switch(&consumer_a, None).unwrap();
-		let mut sub = producer.consume().subscribe(None);
+		let mut sub = producer.consume().subscribe(replay());
 
 		sub.end_at(1);
 
@@ -2149,7 +2480,7 @@ mod test {
 
 		let mut producer = Producer::new();
 		producer.switch(&consumer_a, None).unwrap();
-		let mut sub = producer.consume().subscribe(None);
+		let mut sub = producer.consume().subscribe(replay());
 
 		let next = |sub: &mut Subscriber| {
 			kio::wait(|waiter| sub.poll_next_group(waiter))
@@ -2248,6 +2579,47 @@ mod test {
 		assert_eq!(read(&mut reading), b"b2");
 		assert!(reading.read_frame().now_or_never().unwrap().unwrap().is_none());
 		recv_pending(&mut sub);
+	}
+
+	#[tokio::test]
+	async fn a_replacement_copy_keeps_the_handed_out_group_latency_budget() {
+		tokio::time::pause();
+
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		let mut head = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		head.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().expect("head group");
+		assert_eq!(read(&mut reading), b"a0");
+
+		producer.takeover(&consumer_b).unwrap();
+		track_a.abort(Error::Dropped).unwrap();
+		recv_pending(&mut sub);
+
+		let mut continuation = track_b.create_group(group::Info { sequence: 0 }).unwrap();
+		continuation.start_at(1).unwrap();
+		continuation.write_frame(Timestamp::ZERO, b"b1".to_vec()).unwrap();
+		assert_eq!(read(&mut reading), b"b1");
+
+		assert!(
+			reading.read_frame().now_or_never().is_none(),
+			"the replacement group is still the live edge"
+		);
+
+		tokio::time::advance(Duration::from_secs(1)).await;
+		write_group_at(&mut track_b, 1, "edge", Duration::from_secs(1));
+
+		let result = reading
+			.read_frame()
+			.now_or_never()
+			.expect("the newer group changes the verdict");
+		// Drained, so the budget ends the replacement rather than truncating it.
+		assert!(matches!(result, Ok(None)), "the replacement ends: {result:?}");
 	}
 
 	/// A replacement that serves the whole group instead of the requested tail still
@@ -2500,7 +2872,7 @@ mod test {
 
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
-		let mut sub = producer.consume().subscribe(None);
+		let mut sub = producer.consume().subscribe(replay());
 
 		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
 		group.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
@@ -2637,7 +3009,7 @@ mod test {
 
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
-		let mut sub = producer.consume().subscribe(None);
+		let mut sub = producer.consume().subscribe(replay());
 		recv_pending(&mut sub);
 		assert_eq!(track_a.subscription().unwrap().start, None);
 
@@ -2673,9 +3045,13 @@ mod test {
 
 		let mut producer = Producer::new();
 		producer.takeover(&consumer_a).unwrap();
-		let mut sub = producer
-			.consume()
-			.subscribe(Subscription::default().with_start(Position::group(0)));
+		// The budget is what makes the backfill readable: an explicit start says which
+		// groups the publisher should send, not that the subscriber will wait for them.
+		let mut sub = producer.consume().subscribe(
+			Subscription::default()
+				.with_start(Position::group(0))
+				.with_latency(Latency::max(Duration::from_secs(60))),
+		);
 		recv_pending(&mut sub);
 		assert_eq!(track_a.subscription().unwrap().start, Some(Position::group(0)));
 
@@ -3071,7 +3447,7 @@ mod test {
 	#[tokio::test]
 	async fn late_group_drains_from_a_pruned_cursor() {
 		let mut producer = Producer::new();
-		let mut sub = producer.consume().subscribe(None);
+		let mut sub = producer.consume().subscribe(replay());
 
 		// A delivers group 1 first; group 0 is still in flight when A is outranked
 		// and enough failovers prune its segment.

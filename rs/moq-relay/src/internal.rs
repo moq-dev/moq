@@ -265,6 +265,30 @@ fn render_metrics(snap: &moq_net::stats::Snapshot, listeners: &[moq_tokio::accep
 	);
 	counter(
 		&mut out,
+		"moq_relay_stale_bytes_total",
+		"Media payload bytes skipped after drifting beyond a subscriber's latency budget.",
+		|c| c.stale.bytes,
+	);
+	counter(
+		&mut out,
+		"moq_relay_stale_frames_total",
+		"Media frames skipped after drifting beyond a subscriber's latency budget.",
+		|c| c.stale.frames,
+	);
+	counter(
+		&mut out,
+		"moq_relay_stale_groups_total",
+		"Media groups skipped after drifting beyond a subscriber's latency budget.",
+		|c| c.stale.groups,
+	);
+	counter(
+		&mut out,
+		"moq_relay_stale_datagrams_total",
+		"Media datagrams skipped after drifting beyond a subscriber's latency budget.",
+		|c| c.stale.datagrams,
+	);
+	counter(
+		&mut out,
 		"moq_relay_fetches_total",
 		"One-shot group fetches requested.",
 		|c| c.fetches,
@@ -580,12 +604,21 @@ mod tests {
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
-		// Read 1234 egress bytes out of the default-tier broadcast.
+		// Leave 46 bytes across two frames behind the live edge, then read 1234
+		// egress bytes out of the default-tier broadcast.
 		let bc = announced.next().await.unwrap().broadcast.unwrap();
 		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();
 		{
 			let mut group = pub_track.append_group().unwrap();
-			group.write_frame(Timestamp::ZERO, vec![0u8; 1234]).unwrap();
+			group.write_frame(Timestamp::ZERO, vec![0u8; 12]).unwrap();
+			group.write_frame(Timestamp::ZERO, vec![0u8; 34]).unwrap();
+			group.finish().unwrap();
+		}
+		{
+			let mut group = pub_track.append_group().unwrap();
+			group
+				.write_frame(Timestamp::from_millis(10_000).unwrap(), vec![0u8; 1234])
+				.unwrap();
 			group.finish().unwrap();
 		}
 		let mut group = egress_sub.recv_group().await.unwrap().unwrap();
@@ -611,6 +644,22 @@ mod tests {
 		assert!(
 			body.contains("moq_relay_bytes_total{tier=\"region/sjc\",role=\"subscriber\"} 56"),
 			"named tier gets its own row:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_stale_bytes_total{tier=\"\",role=\"publisher\"} 46"),
+			"stale egress bytes:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_stale_frames_total{tier=\"\",role=\"publisher\"} 2"),
+			"stale egress frames:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_stale_groups_total{tier=\"\",role=\"publisher\"} 1"),
+			"stale egress groups:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_stale_datagrams_total{tier=\"\",role=\"publisher\"} 0"),
+			"stale egress datagrams:\n{body}"
 		);
 		assert!(
 			body.contains("moq_relay_sessions_opened_total{tier=\"\"} 1"),

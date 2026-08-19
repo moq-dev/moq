@@ -8,37 +8,49 @@ import (
 	ffi "github.com/moq-dev/moq-go-ffi/moq"
 )
 
-// MediaOption configures media tracks published by a BroadcastProducer.
-type MediaOption func(*mediaConfig)
+// AudioOption configures an audio publish.
+type AudioOption func(*ffi.MoqAudioInit)
 
-type mediaConfig struct {
-	label *string
-	video *VideoHint
-}
+// VideoOption configures a video publish.
+type VideoOption func(*ffi.MoqVideoInit)
 
 var errNilTrackRequest = errors.New("moq: nil track request")
 
-// WithLabel sets the human-readable rendition name stored in the catalog.
-func WithLabel(label string) MediaOption {
-	return func(c *mediaConfig) {
-		c.label = &label
+// WithAudioLabel sets the human-readable rendition name stored in the catalog.
+func WithAudioLabel(label string) AudioOption {
+	return func(init *ffi.MoqAudioInit) {
+		init.Label = &label
+	}
+}
+
+// WithVideoLabel sets the human-readable rendition name stored in the catalog.
+func WithVideoLabel(label string) VideoOption {
+	return func(init *ffi.MoqVideoInit) {
+		init.Label = &label
 	}
 }
 
 // WithVideoHint seeds catalog fields that a video stream cannot reveal itself.
-func WithVideoHint(hint VideoHint) MediaOption {
-	return func(c *mediaConfig) {
-		h := hint
-		c.video = &h
+func WithVideoHint(hint VideoHint) VideoOption {
+	return func(init *ffi.MoqVideoInit) {
+		init.Hint = &hint
 	}
 }
 
-func mediaInit(format string, init []byte, opts []MediaOption) ffi.MoqInit {
-	var cfg mediaConfig
+func audioInit(format AudioFormat, init []byte, opts []AudioOption) ffi.MoqAudioInit {
+	cfg := ffi.MoqAudioInit{Format: format, Data: init}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	return ffi.MoqInit{Format: format, Data: init, Label: cfg.label, Video: cfg.video}
+	return cfg
+}
+
+func videoInit(format VideoFormat, init []byte, opts []VideoOption) ffi.MoqVideoInit {
+	cfg := ffi.MoqVideoInit{Format: format, Data: init}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return cfg
 }
 
 // BroadcastProducer publishes a collection of tracks. Create one at a path with
@@ -89,57 +101,100 @@ func (b *BroadcastProducer) SetVideoProperties(properties VideoProperties) error
 	return b.inner.SetVideoProperties(properties)
 }
 
-// PublishMedia publishes a media track from an init segment, fed frame by
-// frame with explicit timestamps.
-func (b *BroadcastProducer) PublishMedia(format string, init []byte, opts ...MediaOption) (*MediaProducer, error) {
-	inner, err := b.inner.PublishMedia(mediaInit(format, init, opts))
+// PublishAudio publishes one audio codec as a new track, fed frame by frame with
+// explicit timestamps. init carries the codec init bytes, which audio requires.
+func (b *BroadcastProducer) PublishAudio(format AudioFormat, init []byte, opts ...AudioOption) (*MediaProducer, error) {
+	inner, err := b.inner.PublishAudio(audioInit(format, init, opts))
 	if err != nil {
 		return nil, err
 	}
 	return &MediaProducer{inner: inner}, nil
 }
 
-// PublishMediaOnTrack publishes media onto a subscriber-requested track.
-func (b *BroadcastProducer) PublishMediaOnTrack(request *TrackRequest, format string, init []byte, opts ...MediaOption) (*MediaProducer, error) {
+// PublishVideo publishes one video codec as a new track. init may be nil for a
+// format that resolves in band.
+func (b *BroadcastProducer) PublishVideo(format VideoFormat, init []byte, opts ...VideoOption) (*MediaProducer, error) {
+	inner, err := b.inner.PublishVideo(videoInit(format, init, opts))
+	if err != nil {
+		return nil, err
+	}
+	return &MediaProducer{inner: inner}, nil
+}
+
+// PublishContainer publishes a container, which demuxes and publishes its own
+// tracks. There is no label or hint: a container describes each track itself.
+func (b *BroadcastProducer) PublishContainer(format ContainerFormat, init []byte) (*ContainerProducer, error) {
+	inner, err := b.inner.PublishContainer(ffi.MoqContainerInit{Format: format, Data: init})
+	if err != nil {
+		return nil, err
+	}
+	return &ContainerProducer{inner: inner}, nil
+}
+
+// PublishAudioOnTrack publishes one audio codec onto a subscriber-requested track.
+func (b *BroadcastProducer) PublishAudioOnTrack(request *TrackRequest, format AudioFormat, init []byte, opts ...AudioOption) (*MediaProducer, error) {
 	if request == nil {
 		return nil, errNilTrackRequest
 	}
-	inner, err := b.inner.PublishMediaOnTrack(request.inner, mediaInit(format, init, opts))
+	inner, err := b.inner.PublishAudioOnTrack(request.inner, audioInit(format, init, opts))
 	if err != nil {
 		return nil, err
 	}
 	return &MediaProducer{inner: inner}, nil
 }
 
-// PublishMediaStream publishes a media track fed by a raw byte stream with
-// unknown frame boundaries (e.g. Annex-B H.264). format is a stream format:
-// avc3, hev1, av01, fmp4, or mkv.
-func (b *BroadcastProducer) PublishMediaStream(format string, opts ...MediaOption) (*MediaStreamProducer, error) {
-	inner, err := b.inner.PublishMediaStream(mediaInit(format, nil, opts))
+// PublishVideoOnTrack publishes one video codec onto a subscriber-requested track.
+func (b *BroadcastProducer) PublishVideoOnTrack(request *TrackRequest, format VideoFormat, init []byte, opts ...VideoOption) (*MediaProducer, error) {
+	if request == nil {
+		return nil, errNilTrackRequest
+	}
+	inner, err := b.inner.PublishVideoOnTrack(request.inner, videoInit(format, init, opts))
+	if err != nil {
+		return nil, err
+	}
+	return &MediaProducer{inner: inner}, nil
+}
+
+// PublishVideoStream publishes a video track fed by a raw byte stream with
+// unknown frame boundaries (e.g. Annex-B H.264). Only the self-delimiting
+// formats work: Avc3, Hev1, Av01. Audio has no counterpart, having no frame
+// boundaries to infer.
+func (b *BroadcastProducer) PublishVideoStream(format VideoFormat, opts ...VideoOption) (*MediaStreamProducer, error) {
+	inner, err := b.inner.PublishVideoStream(videoInit(format, nil, opts))
 	if err != nil {
 		return nil, err
 	}
 	return &MediaStreamProducer{inner: inner}, nil
 }
 
-// PublishAudio publishes a raw-audio track with an in-process Opus encoder.
-func (b *BroadcastProducer) PublishAudio(name string, input AudioEncoderInput, output AudioEncoderOutput) (*AudioProducer, error) {
-	inner, err := b.inner.PublishAudio(name, input, output)
+// PublishContainerStream publishes a container fed by a raw byte stream, which
+// recovers its own framing.
+func (b *BroadcastProducer) PublishContainerStream(format ContainerFormat) (*ContainerStreamProducer, error) {
+	inner, err := b.inner.PublishContainerStream(format)
+	if err != nil {
+		return nil, err
+	}
+	return &ContainerStreamProducer{inner: inner}, nil
+}
+
+// EncodeAudio publishes a raw-audio track with an in-process Opus encoder.
+func (b *BroadcastProducer) EncodeAudio(name string, input AudioEncoderInput, output AudioEncoderOutput) (*AudioProducer, error) {
+	inner, err := b.inner.EncodeAudio(name, input, output)
 	if err != nil {
 		return nil, err
 	}
 	return &AudioProducer{inner: inner}, nil
 }
 
-// PublishVideo publishes a raw-video track with an in-process H.264/H.265
+// EncodeVideo publishes a raw-video track with an in-process H.264/H.265
 // encoder.
 //
 // The track is named after the codec (.avc3 / .hev1) and its catalog rendition
 // is published immediately, read out of the encoder itself, so subscribers
 // discover it through the catalog rather than a name you pick, and can find it
 // before the first frame exists.
-func (b *BroadcastProducer) PublishVideo(input VideoEncoderInput, output VideoEncoderOutput) (*VideoProducer, error) {
-	inner, err := b.inner.PublishVideo(input, output)
+func (b *BroadcastProducer) EncodeVideo(input VideoEncoderInput, output VideoEncoderOutput) (*VideoProducer, error) {
+	inner, err := b.inner.EncodeVideo(input, output)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +283,7 @@ func (r *TrackRequest) Dynamic() (*TrackDynamic, error) {
 	return &TrackDynamic{inner: inner}, nil
 }
 
-// Accept accepts the request as a raw track. For media, use PublishMediaOnTrack.
+// Accept accepts the request as a raw track. For media, use PublishAudioOnTrack or PublishVideoOnTrack.
 func (r *TrackRequest) Accept(info *TrackInfo) (*TrackProducer, error) {
 	inner, err := r.inner.Accept(info)
 	if err != nil {
@@ -294,6 +349,51 @@ func (m *MediaProducer) Seek(sequence uint64) error {
 // Finish closes the media track.
 func (m *MediaProducer) Finish() error {
 	return m.inner.Finish()
+}
+
+// ContainerProducer publishes a container, which demuxes and publishes its own
+// tracks. Unlike MediaProducer there is no per-frame timestamp: a container
+// carries its tracks' timing itself.
+type ContainerProducer struct {
+	inner *ffi.MoqContainerProducer
+}
+
+// Write pushes a whole chunk of container bytes.
+func (c *ContainerProducer) Write(payload []byte) error {
+	return c.inner.Write(payload)
+}
+
+// Cut declares that the next chunk starts a new segment, rolling a group on
+// every track. An fMP4 source carrying styp atoms declares its own, so this is
+// only needed when it doesn't; MKV, TS, and FLV ignore it.
+func (c *ContainerProducer) Cut() error {
+	return c.inner.Cut()
+}
+
+// Seek starts a new segment and numbers its groups sequence.
+func (c *ContainerProducer) Seek(sequence uint64) error {
+	return c.inner.Seek(sequence)
+}
+
+// Finish finishes every track this container publishes.
+func (c *ContainerProducer) Finish() error {
+	return c.inner.Finish()
+}
+
+// ContainerStreamProducer publishes a container fed by a raw byte stream, which
+// recovers its own framing.
+type ContainerStreamProducer struct {
+	inner *ffi.MoqContainerStreamProducer
+}
+
+// Write pushes raw container bytes; chunk boundaries don't matter.
+func (c *ContainerStreamProducer) Write(payload []byte) error {
+	return c.inner.Write(payload)
+}
+
+// Finish finishes every track this container publishes.
+func (c *ContainerStreamProducer) Finish() error {
+	return c.inner.Finish()
 }
 
 // MediaStreamProducer feeds a raw encoder byte stream; whole frames are emitted

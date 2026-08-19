@@ -99,17 +99,26 @@ pub enum Error {
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
 
-	/// A caller-supplied [`Init`](crate::import::Init) field does not apply to the chosen format.
+	/// A video format that a raw byte stream cannot be split into.
 	///
-	/// A container publishes and describes its own tracks, so no single rendition is there to
-	/// configure. An audio importer reads its whole config out of the init bytes, so there is nothing
-	/// for a video hint to seed. Either way the field would be ignored, which is worse than an error.
-	#[error("a {kind} format does not support the {field}")]
-	UnsupportedField {
-		/// The field that was set.
-		field: &'static str,
-		/// The kind of format that cannot honor it.
-		kind: &'static str,
+	/// Only the self-delimiting codecs (Annex-B H.264/H.265, AV1 OBUs) carry their own frame
+	/// boundaries. The rest need length prefixes or an out-of-band config record, so they can only
+	/// be imported as whole frames via [`Track::video`](crate::import::Track::video).
+	#[error("{0} is not self-describing, so its frame boundaries can't be inferred from a stream")]
+	NotSelfDescribing(String),
+
+	/// A format was handed to a constructor for a different kind of import.
+	///
+	/// Each entry point takes only the fields its kind can honor, so the format has to match: an
+	/// audio format carries no video hint, and a container has no single rendition to label.
+	#[error("{format} is a {actual} format, not {wanted}")]
+	WrongKind {
+		/// The format string the caller passed.
+		format: String,
+		/// The kind that actually handles it.
+		actual: &'static str,
+		/// The kind the constructor expected.
+		wanted: &'static str,
 	},
 
 	/// A non-keyframe frame was received before any keyframe opened a group.

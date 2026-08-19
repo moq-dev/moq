@@ -182,7 +182,7 @@ request, err := dynamic.RequestedTrack(ctx)
 if err != nil {
     log.Fatal(err)
 }
-media, err := broadcast.PublishMediaOnTrack(request, "opus", opusInit)
+media, err := broadcast.PublishAudioOnTrack(request, moq.AudioFormatOpus, opusInit)
 if err != nil {
     log.Fatal(err)
 }
@@ -196,16 +196,15 @@ Video catalog fields that are known before the first keyframe can be supplied
 with `WithVideoHint`:
 
 ```go
-media, err := broadcast.PublishMedia("avc3", nil, moq.WithVideoHint(moq.VideoHint{
+media, err := broadcast.PublishVideo(moq.VideoFormatAvc3, nil, moq.WithVideoHint(moq.VideoHint{
     Coded: &moq.Dimensions{Width: 1920, Height: 1080},
 }), moq.WithLabel("Main camera"))
 ```
 
-`WithLabel` stores a human-readable rendition name in the catalog without
-changing the generated transport track name. Labels do not need to be unique.
-It names one rendition, so a container format (`fmp4`, `mkv`, `ts`, `flv`) returns
-an error rather than ignoring it: those describe their own tracks. `WithVideoHint`
-is likewise an error on a container or an audio format.
+`WithAudioLabel` / `WithVideoLabel` store a human-readable rendition name in the
+catalog without changing the generated transport track name. Labels do not need
+to be unique. `PublishContainer` takes no options at all: a container describes
+each track it publishes from its own metadata.
 
 Each catalog `Video` has a `Stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
 
@@ -243,7 +242,7 @@ broadcast, err := origin.CreateBroadcast("my-broadcast.hang")
 if err != nil {
     // handle error
 }
-mediaProducer, err := broadcast.PublishMedia("aac", asc)
+mediaProducer, err := broadcast.PublishAudio(moq.AudioFormatAac, asc)
 if err != nil {
     // handle error
 }
@@ -261,10 +260,10 @@ If a producer is collected without `Finish()`, the underlying library logs a war
 
 ## Raw media
 
-`PublishMedia` takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `PublishVideo` / `PublishAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
+`PublishAudio` / `PublishVideo` take frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `EncodeVideo` / `EncodeAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
 
 ```go
-video, err := broadcast.PublishVideo(
+video, err := broadcast.EncodeVideo(
     moq.VideoEncoderInput{
         Format:    moq.VideoPixelFormatRgba,
         Width:     1280,
@@ -285,9 +284,43 @@ err = video.Write(moq.VideoFrame{TimestampUs: ptsUs, Data: rgba})
 video.Finish()
 ```
 
+`DecodeVideo` and `DecodeAudio` are the mirrors: they run the codec inside the bindings on the way in, so a subscriber gets pixels and PCM without linking one. Video frames arrive as tightly-packed I420 and carry the size they actually decoded to, since `Resize` is only best effort:
+
+```go
+catalog, err := broadcast.Catalog(ctx)
+// pick a rendition from catalog.Video
+
+video, err := broadcast.DecodeVideo(name, rendition, moq.VideoDecoderOutput{})
+if err != nil {
+    // handle error
+}
+for frame, err := range video.Frames(ctx) {
+    if err != nil {
+        break
+    }
+    render(frame.Data, frame.Width, frame.Height)
+}
+```
+
+An unrecognized codec fails at `DecodeVideo` itself; a recognized one no native backend handles fails when the decoder opens. Either way you find out before the first frame.
+
 `AutoEncoder()` prefers a hardware encoder and falls back to software; `SoftwareEncoder()`, `HardwareEncoder()`, and `NamedEncoder("videotoolbox")` pin the choice. The bindings compile VideoToolbox (macOS), Media Foundation (Windows), and openh264 (software, everywhere); the Linux hardware codecs are a libmoq-only build option. `SetBitrate` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
 
 The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition is published immediately, read out of the encoder itself, so subscribers discover it through the catalog rather than a name you pick, and can find it before the first frame exists. `Cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `Gop` frames on its own, and each of those cuts a group.
+
+## Cross-broadcast renditions
+
+A catalog rendition may name a *different* broadcast: `Video.Broadcast` / `Audio.Broadcast` is a path relative to the broadcast the catalog came from, so a transcode output at `live/hd` can describe a track that actually lives in `live/source`. `DecodeAudio` and `DecodeVideo` follow it for you. `SubscribeMedia`, `SubscribeTrack`, `FetchGroup`, and `FetchMediaGroup` take a track name rather than a rendition, so resolve first:
+
+```go
+source, err := broadcast.Resolve(rendition.Broadcast)
+if err != nil {
+    // handle error
+}
+consumer, err := source.SubscribeMedia(name, rendition.Container, nil)
+```
+
+`Resolve(nil)` (or an empty reference) returns the same broadcast, so it is safe to call unconditionally. It needs an origin to fetch a sibling from, so it fails on a broadcast consumed straight from a local producer. `Resolve` reports a sibling that exists but has not been announced yet as unroutable rather than waiting for it, so await the referenced broadcast's announcement first if you may be racing it.
 
 ## Raw Track Controls
 

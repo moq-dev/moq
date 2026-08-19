@@ -45,8 +45,8 @@ pub struct Config {
 	/// How far playback may drift from the live edge before a stalled group is
 	/// skipped. Defaults to [`Latency::REAL_TIME`](moq_mux::Latency::REAL_TIME)
 	/// (skip aggressively); set [`Latency::max`](moq_mux::Latency::max) to your
-	/// playout buffer for a softer skip. Forwarded to
-	/// [`moq_mux::container::Consumer::with_latency`].
+	/// playout buffer for a softer skip. Applied to the initial transport
+	/// subscription and inherited by [`moq_mux::container::Consumer`].
 	pub latency: moq_mux::Latency,
 	/// Ask the decoder to emit frames at this size (both dimensions even) instead
 	/// of the stream's native one. Best effort: a hardware decoder with a

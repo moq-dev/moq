@@ -32,7 +32,7 @@ pub enum moq_container_kind {
 /// needs to describe itself.
 ///
 /// Zeroing this struct means `MOQ_CONTAINER_KIND_LEGACY` with no init segment,
-/// which is what a rendition written by [moq_publish_media] carries.
+/// which is what a rendition written by [moq_publish_audio] or [moq_publish_video] carries.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
@@ -101,20 +101,73 @@ pub(crate) fn borrow_container(container: &hang::catalog::Container) -> moq_cont
 	}
 }
 
-/// Configuration for [moq_publish_media].
-///
-/// `format` is required. Zero the struct and set only the fields the selected
-/// codec or container needs. New optional fields are appended so existing
-/// initializers keep their meaning.
+/// A single audio codec [moq_publish_audio] can parse.
 #[repr(C)]
 #[allow(non_camel_case_types)]
-pub struct moq_media_config {
-	/// Codec or container format, NOT NULL terminated.
-	pub format: *const c_char,
-	/// Length of `format` in bytes.
-	pub format_len: usize,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum moq_audio_format {
+	/// Advanced Audio Coding, configured by an AudioSpecificConfig.
+	MOQ_AUDIO_FORMAT_AAC = 0,
+	/// Opus, configured by an OpusHead.
+	MOQ_AUDIO_FORMAT_OPUS = 1,
+	/// FLAC, configured by the `fLaC` marker plus its STREAMINFO block.
+	MOQ_AUDIO_FORMAT_FLAC = 2,
+	/// MPEG-1/2 Audio Layer III.
+	MOQ_AUDIO_FORMAT_MP3 = 3,
+}
 
-	/// Codec or container initialization bytes, or NULL when none are needed.
+/// A single video codec [moq_publish_video] can parse.
+///
+/// H.264 and H.265 appear twice each because the framing differs, not just the
+/// codec: AVC1/HVC1 are length-prefixed with an out-of-band config record,
+/// while AVC3/HEV1 are Annex-B with the parameter sets inline.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum moq_video_format {
+	/// H.264, length-prefixed NALUs with an out-of-band avcC.
+	MOQ_VIDEO_FORMAT_AVC1 = 0,
+	/// H.264, Annex-B with inline SPS/PPS.
+	MOQ_VIDEO_FORMAT_AVC3 = 1,
+	/// H.265, length-prefixed NALUs with an out-of-band hvcC.
+	MOQ_VIDEO_FORMAT_HVC1 = 2,
+	/// H.265, Annex-B with inline parameter sets.
+	MOQ_VIDEO_FORMAT_HEV1 = 3,
+	/// AV1.
+	MOQ_VIDEO_FORMAT_AV01 = 4,
+	/// VP8.
+	MOQ_VIDEO_FORMAT_VP8 = 5,
+	/// VP9.
+	MOQ_VIDEO_FORMAT_VP9 = 6,
+}
+
+/// A container [moq_publish_container] can demux, which may publish several tracks.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum moq_container_format {
+	/// Fragmented MP4 / CMAF.
+	MOQ_CONTAINER_FORMAT_FMP4 = 0,
+	/// Matroska / WebM.
+	MOQ_CONTAINER_FORMAT_MKV = 1,
+	/// MPEG-2 transport stream.
+	MOQ_CONTAINER_FORMAT_TS = 2,
+	/// Flash Video, as used by RTMP.
+	MOQ_CONTAINER_FORMAT_FLV = 3,
+}
+
+/// Configuration for [moq_publish_audio].
+///
+/// Zero the struct, then set `format` and the required `init` bytes. New
+/// optional fields are appended so existing initializers keep their meaning.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_audio_init {
+	/// The audio codec, a [moq_audio_format] value.
+	pub format: u32,
+
+	/// Codec init bytes: an OpusHead, an AudioSpecificConfig, a STREAMINFO.
+	/// Required, since audio has no in-band config to resolve from frames.
 	pub init: *const u8,
 	/// Length of `init` in bytes.
 	pub init_len: usize,
@@ -123,6 +176,86 @@ pub struct moq_media_config {
 	pub label: *const c_char,
 	/// Length of `label` in bytes.
 	pub label_len: usize,
+}
+
+/// Configuration for [moq_publish_video].
+///
+/// Zero the struct, then set `format` and whatever else the codec needs. `init`
+/// may stay NULL for a format that resolves in band.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_video_init {
+	/// The video codec, a [moq_video_format] value.
+	pub format: u32,
+
+	/// Codec init bytes (an avcC, an hvcC), or NULL for a format that resolves
+	/// from the stream itself.
+	pub init: *const u8,
+	/// Length of `init` in bytes.
+	pub init_len: usize,
+
+	/// Human-readable rendition name for track pickers, or NULL if not used.
+	pub label: *const c_char,
+	/// Length of `label` in bytes.
+	pub label_len: usize,
+}
+
+/// Configuration for [moq_publish_container].
+///
+/// There is no label here: a container publishes and describes its own tracks,
+/// so a rendition name would have no single track to land on.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_container_init {
+	/// The container format, a [moq_container_format] value.
+	pub format: u32,
+
+	/// The leading chunk of the container, decoded immediately, or NULL.
+	pub init: *const u8,
+	/// Length of `init` in bytes.
+	pub init_len: usize,
+}
+
+/// Validate an audio format code from C.
+///
+/// The field is a `u32` rather than the enum: C can put any integer there, and matching an
+/// out-of-range discriminant as a Rust enum is UB. Same reason as [moq_audio_sample_format].
+fn audio_format_from_u32(value: u32) -> Result<moq_mux::import::AudioFormat, Error> {
+	use moq_mux::import::AudioFormat;
+	Ok(match value {
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_AAC as u32 => AudioFormat::Aac,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_OPUS as u32 => AudioFormat::Opus,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_FLAC as u32 => AudioFormat::Flac,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_MP3 as u32 => AudioFormat::Mp3,
+		_ => return Err(Error::InvalidCode),
+	})
+}
+
+/// Validate a video format code from C. See [audio_format_from_u32].
+fn video_format_from_u32(value: u32) -> Result<moq_mux::import::VideoFormat, Error> {
+	use moq_mux::import::VideoFormat;
+	Ok(match value {
+		v if v == moq_video_format::MOQ_VIDEO_FORMAT_AVC1 as u32 => VideoFormat::Avc1,
+		v if v == moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32 => VideoFormat::Avc3,
+		v if v == moq_video_format::MOQ_VIDEO_FORMAT_HVC1 as u32 => VideoFormat::Hvc1,
+		v if v == moq_video_format::MOQ_VIDEO_FORMAT_HEV1 as u32 => VideoFormat::Hev1,
+		v if v == moq_video_format::MOQ_VIDEO_FORMAT_AV01 as u32 => VideoFormat::Av01,
+		v if v == moq_video_format::MOQ_VIDEO_FORMAT_VP8 as u32 => VideoFormat::Vp8,
+		v if v == moq_video_format::MOQ_VIDEO_FORMAT_VP9 as u32 => VideoFormat::Vp9,
+		_ => return Err(Error::InvalidCode),
+	})
+}
+
+/// Validate a container format code from C. See [audio_format_from_u32].
+fn container_format_from_u32(value: u32) -> Result<moq_mux::import::ContainerFormat, Error> {
+	use moq_mux::import::ContainerFormat;
+	Ok(match value {
+		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_FMP4 as u32 => ContainerFormat::Fmp4,
+		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_MKV as u32 => ContainerFormat::Mkv,
+		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_TS as u32 => ContainerFormat::Ts,
+		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_FLV as u32 => ContainerFormat::Flv,
+		_ => return Err(Error::InvalidCode),
+	})
 }
 
 /// Information about a video rendition in the catalog.
@@ -1217,35 +1350,79 @@ pub extern "C" fn moq_publish_finish(broadcast: u32) -> i32 {
 	})
 }
 
-/// Create a new media track for a broadcast
+/// Publish one audio codec as a new media track.
 ///
-/// All frames in [moq_publish_media_frame] must be written in decode order.
-/// [moq_media_config::format] controls the encoding, both of
-/// [moq_media_config::init] and frame payloads.
-///
-/// [moq_media_config::label] is an optional human-readable name stored in the
-/// audio or video catalog configuration. The track name is generated from the
-/// format and remains an internal identifier. It names one rendition, so a
-/// container format (fmp4, mkv, ts, flv), which publishes and describes its own
-/// tracks, rejects a label rather than ignoring it.
+/// The track is named after the format (`0.opus`), so a subscriber finds it
+/// through the catalog rather than by a name you choose.
+/// [moq_audio_init::init] is required: audio resolves its whole rendition from
+/// those bytes. Frames written with [moq_publish_media_frame] must be in decode
+/// order.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
-/// - `config` must be NULL, or point to an aligned, readable
-///   [moq_media_config]. Every non-NULL pointer inside it must be valid for its
-///   paired length, and all of them must stay alive for the duration of this
-///   call. A NULL config is rejected with an ordinary error.
+/// - `config` must be NULL, or point to an aligned, readable [moq_audio_init].
+///   Every non-NULL pointer inside it must be valid for its paired length and
+///   stay alive for the duration of this call. A NULL config is rejected with an
+///   ordinary error.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_media(broadcast: u32, config: *const moq_media_config) -> i32 {
+pub unsafe extern "C" fn moq_publish_audio(broadcast: u32, config: *const moq_audio_init) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let format = unsafe { ffi::parse_str(config.format, config.format_len)? };
 		let init = unsafe { ffi::parse_slice(config.init, config.init_len)? };
 		let label = unsafe { ffi::parse_str_optional(config.label, config.label_len)? };
 
-		State::lock().publish.media(broadcast, format, init, label)
+		let mut audio = moq_mux::import::AudioInit::new(audio_format_from_u32(config.format)?, init.to_vec());
+		audio.label = label.map(str::to_string);
+
+		State::lock().publish.audio(broadcast, audio)
+	})
+}
+
+/// Publish one video codec as a new media track.
+///
+/// Named as in [moq_publish_audio]. [moq_video_init::init] may be NULL for a
+/// format that resolves in band.
+///
+/// Returns a non-zero handle to the track on success, or a negative code on failure.
+///
+/// # Safety
+/// - As [moq_publish_audio], for a [moq_video_init].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_video(broadcast: u32, config: *const moq_video_init) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let init = unsafe { ffi::parse_slice(config.init, config.init_len)? };
+		let label = unsafe { ffi::parse_str_optional(config.label, config.label_len)? };
+
+		let mut video = moq_mux::import::VideoInit::new(video_format_from_u32(config.format)?, init.to_vec());
+		video.label = label.map(str::to_string);
+
+		State::lock().publish.video(broadcast, video)
+	})
+}
+
+/// Publish a container, which demuxes and publishes its own tracks.
+///
+/// Feed it whole chunks with [moq_publish_container_write]. Unlike the codec
+/// entry points there is no label: a container describes each track it publishes
+/// from its own metadata.
+///
+/// Returns a non-zero handle to the container on success, or a negative code on failure.
+///
+/// # Safety
+/// - As [moq_publish_audio], for a [moq_container_init].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_container(broadcast: u32, config: *const moq_container_init) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let init = unsafe { ffi::parse_slice(config.init, config.init_len)? };
+
+		let container = moq_mux::import::ContainerInit::new(container_format_from_u32(config.format)?, init.to_vec());
+		State::lock().publish.container(broadcast, container)
 	})
 }
 
@@ -1257,9 +1434,8 @@ pub unsafe extern "C" fn moq_publish_media(broadcast: u32, config: *const moq_me
 /// forwards without waiting, or at a segment cadence to align with video for HLS/DASH. Video
 /// groups at its own keyframes and needs this only to override that.
 ///
-/// For a container importer ([moq_publish_media] with a container format) this declares the start
-/// of a new segment, rolling a group on every track the container publishes. An fMP4 source
-/// carrying `styp` atoms declares its own segments, so this is only needed when it doesn't.
+/// A container has its own [moq_publish_container_cut], since it rolls a group on every track it
+/// publishes rather than ending one group.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -1293,6 +1469,62 @@ pub extern "C" fn moq_publish_media_finish(export: u32) -> i32 {
 	ffi::enter(move || {
 		let export = ffi::parse_id(export)?;
 		State::lock().publish.media_finish(export)
+	})
+}
+
+/// Write a whole chunk of container bytes.
+///
+/// No timestamp: a container carries its tracks' timing itself, and the importer
+/// reads it out rather than taking the caller's word for it.
+///
+/// Returns zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure `payload` is valid for `payload_size` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_container_write(container: u32, payload: *const u8, payload_size: usize) -> i32 {
+	ffi::enter(move || {
+		let container = ffi::parse_id(container)?;
+		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
+		State::lock().publish.container_write(container, payload)
+	})
+}
+
+/// Declare that the next chunk starts a new segment, rolling a group on every
+/// track the container publishes.
+///
+/// An fMP4 source carrying `styp` atoms declares its own segments, so this is
+/// only needed when it doesn't. Formats with no segment concept (MKV, TS, FLV)
+/// ignore it.
+///
+/// Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_container_cut(container: u32) -> i32 {
+	ffi::enter(move || {
+		let container = ffi::parse_id(container)?;
+		State::lock().publish.container_cut(container)
+	})
+}
+
+/// Start a new segment and number its groups `sequence`.
+///
+/// Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_container_seek(container: u32, sequence: u64) -> i32 {
+	ffi::enter(move || {
+		let container = ffi::parse_id(container)?;
+		State::lock().publish.container_seek(container, sequence)
+	})
+}
+
+/// Finish every track the container publishes and release the handle.
+///
+/// Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_container_finish(container: u32) -> i32 {
+	ffi::enter(move || {
+		let container = ffi::parse_id(container)?;
+		State::lock().publish.container_finish(container)
 	})
 }
 
@@ -1351,10 +1583,11 @@ pub unsafe extern "C" fn moq_publish_video_properties(broadcast: u32, properties
 /// This is the producer counterpart to [moq_consume_video_config]: instead of
 /// reading a rendition out of a catalog, it writes one into the catalog of a
 /// broadcast created with [moq_origin_publish]. The rendition is keyed by
-/// `config.name`, which must not already exist in this broadcast's catalog:
-/// re-declaring one fails rather than replacing it. Remove it first with
-/// [moq_publish_video_remove] to change a rendition. The updated catalog is
-/// published to subscribers automatically.
+/// `config.name`; calling this again with the same name replaces the rendition
+/// you declared, so a config can be refined in place. It fails only when a
+/// [moq_publish_video] track owns the name, since that track publishes and
+/// retires its own rendition. The updated catalog is published to subscribers
+/// automatically.
 ///
 /// The struct fields are read as inputs:
 /// - `name` / `codec` are required (NOT NULL terminated) string slices.
@@ -1362,7 +1595,7 @@ pub unsafe extern "C" fn moq_publish_video_properties(broadcast: u32, properties
 /// - `description` may be NULL to omit it.
 /// - `coded_width` / `coded_height` may be zero to omit them.
 /// - `container` describes how the frames written to the track are wrapped. A
-///   zeroed one declares the legacy container, which is what [moq_publish_media]
+///   zeroed one declares the legacy container, which is what [moq_publish_video]
 ///   writes; declare CMAF or LOC for a [moq_publish_track] whose frames you
 ///   already encode that way.
 ///
@@ -1399,10 +1632,10 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 /// Add or replace an audio rendition in a broadcast's catalog.
 ///
 /// This is the producer counterpart to [moq_consume_audio_config]. The rendition
-/// is keyed by `config.name`, which must not already exist in this broadcast's
-/// catalog: re-declaring one fails rather than replacing it. Remove it first with
-/// [moq_publish_audio_remove] to change a rendition. The updated catalog is
-/// published to subscribers automatically.
+/// is keyed by `config.name`, on the same terms as [moq_publish_video_config]:
+/// a repeat call replaces your own rendition, and a name a [moq_publish_audio]
+/// track owns is refused. The updated catalog is published to subscribers
+/// automatically.
 ///
 /// The struct fields are read as inputs:
 /// - `name` / `codec` are required (NOT NULL terminated) string slices.
@@ -1442,8 +1675,10 @@ pub unsafe extern "C" fn moq_publish_audio_config(broadcast: u32, config: *const
 
 /// Remove a video rendition from a broadcast's catalog by name.
 ///
-/// This is a no-op if no rendition with that name exists. The updated catalog is
-/// published to subscribers automatically.
+/// Removes a rendition added by [moq_publish_video_config]. Any other name is a
+/// no-op, including one a [moq_publish_video] track owns, which is retired by
+/// [moq_publish_media_finish] instead. The updated catalog is published to
+/// subscribers automatically.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -1460,8 +1695,7 @@ pub unsafe extern "C" fn moq_publish_video_remove(broadcast: u32, name: *const c
 
 /// Remove an audio rendition from a broadcast's catalog by name.
 ///
-/// This is a no-op if no rendition with that name exists. The updated catalog is
-/// published to subscribers automatically.
+/// Same rules as [moq_publish_video_remove].
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -1533,7 +1767,7 @@ pub unsafe extern "C" fn moq_publish_catalog_section_remove(
 
 /// Create a raw track on a broadcast for arbitrary byte payloads.
 ///
-/// Unlike [moq_publish_media], this is the bare moq-net primitive: no
+/// Unlike [moq_publish_audio] and [moq_publish_video], this is the bare moq-net primitive: no
 /// codec, container, or catalog framing. Frames written to it are delivered
 /// as-is to subscribers using [moq_consume_track]. Use it for non-media tracks
 /// (control channels, JSON metadata, etc.), or pair it with

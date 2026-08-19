@@ -116,6 +116,12 @@ Each Subscription consists of a few properties:
 - **Group Order**: The order in which groups are delivered. Defaults to descending; higher IDs are delivered first.
 - **Subscriber Max Latency**: The maximum age of a non-latest group before it is skipped. Defaults to zero, so stale groups are skipped immediately.
 
+That age is measured both on the media timeline (a group's first timestamp against the newest stamped one) and by wall-clock arrival time, and either limit can expire the group.
+The media timeline keeps a backlog delivered as a burst old, while wall-clock time backstops stalled or empty groups that have no timestamp.
+Both ends apply it: the publisher skips a group rather than sending it, and the subscriber skips it again as it reads.
+The publisher only ever sees the most tolerant budget across its subscribers, which is why the subscriber applies it too.
+Asking for old groups with `Group Start` does not exempt them: a start bounds what you are sent, and a subscriber that wants history has to raise its budget to match.
+
 The publisher also keeps old groups around for a best-effort **Publisher Max Latency** cache window so relays and late subscribers can still fetch them. This defaults to 5 seconds.
 The subscriber's maximum latency is bounded by this window: a group can't be waited for longer than it's actually kept around.
 

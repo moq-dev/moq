@@ -5,7 +5,7 @@
 //! track, so neither exposes a single-track demand/name handle. Today every
 //! container supports both; both wrap the same [`ContainerImpl`] dispatch.
 
-use super::{Init, init::Kind};
+use super::{ContainerFormat, ContainerInit};
 use crate::Result;
 
 /// The concrete container importers, shared by [`Container`] and
@@ -90,24 +90,19 @@ pub struct Container<E: crate::container::ts::Catalog = ()> {
 }
 
 impl<E: crate::container::ts::Catalog> Container<E> {
-	/// Create a new container importer, decoding [`Init::data`] as the initial chunk.
+	/// Create a new container importer, decoding [`ContainerInit::data`] as the initial chunk.
 	///
-	/// The format is matched before anything else, so a codec format still reports
-	/// [`UnknownFormat`](crate::Error::UnknownFormat) and a caller can fall back to
-	/// [`Track::new`](super::Track::new).
 	pub fn new(
 		broadcast: moq_net::broadcast::Producer,
 		reserved: crate::catalog::Reserved<E>,
-		init: &Init,
+		init: &ContainerInit,
 	) -> Result<Self> {
-		let mut inner = match init.format.as_str() {
-			"fmp4" | "cmaf" => ContainerImpl::fmp4(broadcast, reserved),
-			"mkv" | "webm" | "matroska" => ContainerImpl::mkv(broadcast, reserved),
-			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => ContainerImpl::ts(broadcast, reserved),
-			"flv" => ContainerImpl::flv(broadcast, reserved),
-			_ => return Err(crate::Error::UnknownFormat(init.format.clone())),
+		let mut inner = match init.format {
+			ContainerFormat::Fmp4 => ContainerImpl::fmp4(broadcast, reserved),
+			ContainerFormat::Mkv => ContainerImpl::mkv(broadcast, reserved),
+			ContainerFormat::Ts => ContainerImpl::ts(broadcast, reserved),
+			ContainerFormat::Flv => ContainerImpl::flv(broadcast, reserved),
 		};
-		init.reject_unsupported(Kind::Container)?;
 		inner.decode(&init.data)?;
 		Ok(Self { inner })
 	}
@@ -152,25 +147,25 @@ pub struct ContainerStream<E: crate::container::ts::Catalog = ()> {
 }
 
 impl<E: crate::container::ts::Catalog> ContainerStream<E> {
-	/// Create a new container stream importer. [`Init::data`] is unused: the stream carries its own
-	/// framing.
+	/// Create a new container stream importer.
+	///
+	/// Takes a bare format rather than a [`ContainerInit`]: a stream recovers its own framing, so
+	/// there are no leading bytes to seed it with. Push everything through [`Self::decode`].
 	pub fn new(
 		broadcast: moq_net::broadcast::Producer,
 		reserved: crate::catalog::Reserved<E>,
-		init: &Init,
+		format: ContainerFormat,
 	) -> Result<Self> {
 		// A separate list from [`Container::new`]: only containers that can be
 		// recovered from a raw byte stream belong here. Today that's all of them,
 		// but a non-streamable container (e.g. RTP) would be added to `Container`
 		// alone.
-		let inner = match init.format.as_str() {
-			"fmp4" | "cmaf" => ContainerImpl::fmp4(broadcast, reserved),
-			"mkv" | "webm" | "matroska" => ContainerImpl::mkv(broadcast, reserved),
-			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => ContainerImpl::ts(broadcast, reserved),
-			"flv" => ContainerImpl::flv(broadcast, reserved),
-			_ => return Err(crate::Error::UnknownFormat(init.format.clone())),
+		let inner = match format {
+			ContainerFormat::Fmp4 => ContainerImpl::fmp4(broadcast, reserved),
+			ContainerFormat::Mkv => ContainerImpl::mkv(broadcast, reserved),
+			ContainerFormat::Ts => ContainerImpl::ts(broadcast, reserved),
+			ContainerFormat::Flv => ContainerImpl::flv(broadcast, reserved),
 		};
-		init.reject_unsupported(Kind::Container)?;
 		Ok(Self { inner })
 	}
 
@@ -208,58 +203,35 @@ impl<E: crate::container::ts::Catalog> ContainerStream<E> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::catalog::VideoHint;
 
-	fn new_broadcast() -> (moq_net::broadcast::Producer, crate::catalog::Producer) {
+	/// A stream recovers its own framing, which is why [`ContainerStream::new`] takes a bare format
+	/// with no leading bytes to seed it. Prove it: hand the whole file to `decode` in two chunks
+	/// split mid-header, and the tracks still land.
+	#[test]
+	fn a_split_stream_publishes_its_tracks() {
+		let data = include_bytes!("../container/fmp4/test_data/bbb.mp4");
+		let (head, tail) = data.split_at(100);
+
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-		(broadcast, catalog)
-	}
 
-	/// A container describes each of its own tracks, so a caller-supplied rendition field has nowhere
-	/// to go. Reject it instead of accepting the call and dropping the field.
-	#[tokio::test(start_paused = true)]
-	async fn a_container_rejects_single_rendition_fields() {
-		for (init, expected) in [
-			(
-				Init {
-					label: Some("English".to_string()),
-					..Init::new("fmp4", Vec::new())
-				},
-				"label",
-			),
-			(
-				Init::new("fmp4", Vec::new()).with_video(VideoHint::default()),
-				"video hint",
-			),
-		] {
-			let (broadcast, catalog) = new_broadcast();
-			let err = Container::<()>::new(broadcast, catalog.reserve(), &init).err();
-			assert!(
-				matches!(err, Some(crate::Error::UnsupportedField { field, kind: "container" }) if field == expected),
-				"expected {expected} to be rejected, got {err:?}"
-			);
+		let mut stream: ContainerStream =
+			ContainerStream::new(broadcast, catalog.reserve(), ContainerFormat::Fmp4).unwrap();
 
-			let (broadcast, catalog) = new_broadcast();
-			let err = ContainerStream::<()>::new(broadcast, catalog.reserve(), &init).err();
-			assert!(
-				matches!(err, Some(crate::Error::UnsupportedField { field, kind: "container" }) if field == expected),
-				"expected {expected} to be rejected on a stream, got {err:?}"
-			);
-		}
-	}
+		stream.decode(head).unwrap();
+		// The test file ends on a malformed fragment, so a trailing decode error is expected.
+		let _ = stream.decode(tail);
 
-	/// The format is matched first, so a labelled codec format still falls through to `Track::new`
-	/// rather than reporting the label as the problem.
-	#[tokio::test(start_paused = true)]
-	async fn a_codec_format_still_reports_an_unknown_format() {
-		let init = Init {
-			label: Some("English".to_string()),
-			..Init::new("opus", Vec::new())
-		};
-
-		let (broadcast, catalog) = new_broadcast();
-		let err = Container::<()>::new(broadcast, catalog.reserve(), &init).err();
-		assert!(matches!(err, Some(crate::Error::UnknownFormat(_))), "got {err:?}");
+		let snapshot = catalog.snapshot();
+		assert_eq!(
+			snapshot.video.renditions.len(),
+			1,
+			"video rendition missing from a split stream"
+		);
+		assert_eq!(
+			snapshot.audio.renditions.len(),
+			1,
+			"audio rendition missing from a split stream"
+		);
 	}
 }

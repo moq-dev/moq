@@ -228,7 +228,8 @@ impl ExportSource {
 					Poll::Pending => return Poll::Pending,
 				}
 			};
-			self.state = SourceState::Subscribing(broadcast.track(&name)?.subscribe(None));
+			let subscription = moq_net::track::Subscription::default().with_latency(self.latency);
+			self.state = SourceState::Subscribing(broadcast.track(&name)?.subscribe(subscription));
 		}
 
 		// Resolve the subscription before reading any frames.
@@ -248,7 +249,7 @@ impl ExportSource {
 				.media
 				.take()
 				.expect("media present until the subscription resolves");
-			self.state = SourceState::Active(Box::new(Consumer::new(track, media).with_latency(self.latency)));
+			self.state = SourceState::Active(Box::new(Consumer::new(track, media)));
 		}
 
 		loop {
@@ -435,5 +436,27 @@ mod tests {
 				.unwrap_or_else(|err| panic!("{reference:?} should keep the rendition: {err:?}"))
 				.unwrap_or_else(|| panic!("{reference:?} should keep the rendition"));
 		}
+	}
+
+	/// The requested budget must be present on the first SUBSCRIBE. Updating it
+	/// after SUBSCRIBE_OK cannot recover backlog the publisher already skipped.
+	#[tokio::test]
+	async fn latency_is_sent_with_the_initial_subscription() {
+		let live = Live::avc3();
+		let latency = crate::Latency::max(std::time::Duration::from_secs(10));
+		let mut export = ExportSource::for_video(&live.source(), live.track.name(), &video(None), latency)
+			.unwrap()
+			.expect("fixture should produce a video rendition");
+
+		let observed = kio::wait(|waiter| {
+			let _ = export.poll_read(waiter);
+			match live.track.subscription() {
+				Some(subscription) => Poll::Ready(subscription.latency),
+				None => Poll::Pending,
+			}
+		})
+		.await;
+
+		assert_eq!(observed, latency);
 	}
 }

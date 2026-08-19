@@ -66,11 +66,15 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// Transport/service identity captured on import, used to rebuild a consistent
 	/// PAT/PMT. `None` for a media-only source, so a minimal identity is synthesized.
 	program: Option<catalog::Program>,
-	/// Standalone SI sections captured on import, keyed by PID and re-emitted verbatim
-	/// on their own cadence. Opaque: export never parses a table it carries.
-	si: BTreeMap<u16, catalog::Si>,
-	/// When each SI PID was last emitted, so each honors its own interval ([`due`]).
-	last_si: HashMap<u16, Timestamp>,
+	/// Standalone SI subscriptions, keyed by `(PID, table_id)` from the catalog's
+	/// `mpegts.si` map. Each reduces its snapshot track into the section set
+	/// re-emitted verbatim on its PID at its own cadence. Opaque: export never
+	/// parses a table it carries.
+	si: BTreeMap<(u16, u8), SiTrack>,
+	/// Timestamp of the last emitted frame, stamped onto the trailing SI flush.
+	last_timestamp: Option<Timestamp>,
+	/// The trailing SI flush ran (once, just before end of stream).
+	si_flushed: bool,
 
 	/// Program tables, built once the track layout is known.
 	psi: Option<Psi>,
@@ -164,6 +168,162 @@ struct PesUnit {
 	stream_id: Option<u8>,
 }
 
+/// One SI entry's subscription: resolves the snapshot track named by the catalog,
+/// reduces its newest complete group into the current section set, and remembers
+/// when it last hit the wire so it re-emits on its own cadence.
+struct SiTrack {
+	/// The catalog's track name for this entry, so a catalog update that repoints
+	/// the entry at a different track (a restarted publisher) is detected and the
+	/// subscription rebuilt rather than left repeating the old track's sections.
+	track: String,
+	interval: Option<Duration>,
+	state: SiState,
+	/// The reduced newest *complete* group: what emission re-transmits.
+	active: super::si::Snapshot,
+	/// A group still being read; swapped into `active` when it ends, so a torn
+	/// half-received snapshot is never emitted.
+	pending: Option<(moq_net::group::Consumer, super::si::Snapshot)>,
+	/// Media timestamp of the last emission ([`due`]).
+	last_emit: Option<Timestamp>,
+	/// The same budget the media sources use. SI carries table snapshots at a low
+	/// rate, so the real-time default would take only the newest group and drop
+	/// the revisions between: an SI track needs the export's replay window as much
+	/// as the media it describes.
+	latency: crate::Latency,
+}
+
+/// The SI subscription's lifecycle, mirroring `ExportSource`'s but reading raw
+/// snapshot groups instead of timestamp-paced container frames.
+enum SiState {
+	/// Waiting for the catalog broadcast to resolve; the track (by name) is
+	/// subscribed once it does.
+	Requesting(kio::Pending<moq_net::origin::Requesting>, String),
+	/// Waiting for the subscription to resolve.
+	Subscribing(kio::Pending<moq_net::track::Subscribing>),
+	/// The resolved subscription, reading snapshot groups.
+	Active(moq_net::track::Subscriber),
+	/// The track ended or failed; the last complete snapshot keeps re-emitting,
+	/// mirroring how a real mux repeats its tables between (absent) revisions.
+	Done,
+}
+
+impl SiTrack {
+	fn new(source: &crate::Source, track: &str, interval: Option<Duration>, latency: crate::Latency) -> Self {
+		Self {
+			track: track.to_string(),
+			interval,
+			state: SiState::Requesting(source.request_catalog(), track.to_string()),
+			active: Default::default(),
+			pending: None,
+			last_emit: None,
+			latency,
+		}
+	}
+
+	/// Drive the subscription and fold arrived groups into `active`. Never returns
+	/// an error: SI is auxiliary, so a failed or ended track logs and keeps the last
+	/// snapshot rather than killing the mux.
+	fn poll(&mut self, waiter: &kio::Waiter) {
+		if matches!(self.state, SiState::Requesting(..)) {
+			// Scope the borrow of `self.state` so the transitions below can assign it.
+			let resolved = {
+				let SiState::Requesting(pending, name) = &self.state else {
+					unreachable!("just matched Requesting");
+				};
+				match pending.poll_ok(waiter) {
+					Poll::Ready(Ok(broadcast)) => Ok((broadcast, name.clone())),
+					Poll::Ready(Err(err)) => Err(err),
+					Poll::Pending => return,
+				}
+			};
+			self.state = match resolved {
+				Ok((broadcast, name)) => match broadcast.track(&name) {
+					Ok(track) => SiState::Subscribing(
+						track.subscribe(moq_net::track::Subscription::default().with_latency(self.latency)),
+					),
+					Err(err) => {
+						tracing::warn!(%err, track = %name, "SI track unavailable; carrying the last snapshot");
+						SiState::Done
+					}
+				},
+				Err(err) => {
+					tracing::warn!(%err, "SI broadcast unavailable; carrying the last snapshot");
+					SiState::Done
+				}
+			};
+		}
+
+		if matches!(self.state, SiState::Subscribing(_)) {
+			let resolved = {
+				let SiState::Subscribing(pending) = &self.state else {
+					unreachable!("just matched Subscribing");
+				};
+				match pending.poll_ok(waiter) {
+					Poll::Ready(result) => result,
+					Poll::Pending => return,
+				}
+			};
+			self.state = match resolved {
+				Ok(track) => SiState::Active(track),
+				Err(err) => {
+					tracing::warn!(%err, "SI subscription failed; carrying the last snapshot");
+					SiState::Done
+				}
+			};
+		}
+
+		let mut ended = false;
+		if let SiState::Active(track) = &mut self.state {
+			loop {
+				// Drain to the newest group first: a snapshot obsoletes every older
+				// one, including a partially-read pending group.
+				match track.poll_next_group(waiter) {
+					Poll::Ready(Ok(Some(group))) => {
+						self.pending = Some((group, Default::default()));
+					}
+					Poll::Ready(Ok(None)) => {
+						ended = true;
+						break;
+					}
+					Poll::Ready(Err(err)) => {
+						tracing::warn!(%err, "SI track failed; carrying the last snapshot");
+						ended = true;
+						break;
+					}
+					Poll::Pending => break,
+				}
+			}
+		}
+		if ended {
+			self.state = SiState::Done;
+		}
+
+		// Read the pending group to its end, then promote it wholesale: emitting a
+		// half-received snapshot would re-introduce the torn state the group
+		// boundary exists to prevent.
+		while let Some((group, snapshot)) = &mut self.pending {
+			let (promote, drop_pending) = match group.poll_read_frame(waiter) {
+				Poll::Ready(Ok(Some(frame))) => {
+					snapshot.apply(&frame.payload);
+					(false, false)
+				}
+				Poll::Ready(Ok(None)) => (true, false),
+				Poll::Ready(Err(err)) => {
+					tracing::warn!(%err, "SI group failed; carrying the last snapshot");
+					(false, true)
+				}
+				Poll::Pending => break,
+			};
+			if promote {
+				let (_, snapshot) = self.pending.take().unwrap();
+				self.active = snapshot;
+			} else if drop_pending {
+				self.pending = None;
+			}
+		}
+	}
+}
+
 impl Export {
 	/// Subscribe to `source`, using the default catalog format.
 	pub async fn new(source: crate::Source) -> Result<Self, crate::Error> {
@@ -204,7 +364,8 @@ impl<E: catalog::Catalog> Export<E> {
 			program_descriptors: Vec::new(),
 			program: None,
 			si: BTreeMap::new(),
-			last_si: HashMap::new(),
+			last_timestamp: None,
+			si_flushed: false,
 			psi: None,
 			last_psi: None,
 			video_start: None,
@@ -213,8 +374,8 @@ impl<E: catalog::Catalog> Export<E> {
 
 	/// Set the latency tolerance for each per-track source.
 	///
-	/// See [`Consumer::with_latency`](crate::container::Consumer::with_latency) for the
-	/// per-track skip behavior. Defaults to
+	/// See [`Consumer`](crate::container::Consumer) for the per-track skip behavior.
+	/// Defaults to
 	/// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) (skip aggressively).
 	pub fn with_latency(mut self, latency: crate::Latency) -> Self {
 		self.latency = latency;
@@ -244,6 +405,20 @@ impl<E: catalog::Catalog> Export<E> {
 				}
 				Poll::Pending => break,
 			}
+		}
+
+		// 1b. Drive the SI subscriptions, folding arrived snapshots into each
+		// entry's active set (emission happens on cadence in `write_frame`).
+		//
+		// Deliberately not part of the first-frame gate below: nothing in SI is
+		// something a TS stream cannot begin without (the PAT/PMT are built locally,
+		// and receivers acquire the service layer mid-stream by design), whereas
+		// gating on it would let a catalog entry that never delivers (a stale
+		// announce naming a dead track) hold the programme dark. An entry that
+		// resolves late simply starts emitting on its cadence from then on, at most
+		// one subscription round-trip behind the media.
+		for si in self.si.values_mut() {
+			si.poll(waiter);
 		}
 
 		// 2. Pull a frame into every idle track. ExportSource has already
@@ -328,11 +503,22 @@ impl<E: catalog::Catalog> Export<E> {
 		if let Some(name) = self.pick_next_track() {
 			let frame = self.tracks.get_mut(&name).unwrap().pending.take().unwrap();
 			let out = self.write_frame(&name, frame)?;
+			self.last_timestamp = Some(out.timestamp);
 			return Poll::Ready(Ok(Some(out)));
 		}
 
 		// 5. End of stream once every track has drained and the catalog is closed.
+		// SI emission rides media frames, so a snapshot that arrived (or was
+		// revised) behind the last one would otherwise never reach the TS; flush
+		// every entry's current sections in one trailing frame first. Entries still
+		// resolving are not waited for: media is done, and a wait could be unbounded.
 		if self.catalog.is_none() && !self.tracks.is_empty() && self.tracks.values().all(|t| t.finished) {
+			if !self.si_flushed {
+				self.si_flushed = true;
+				if let Some(out) = self.write_si_tail()? {
+					return Poll::Ready(Ok(Some(out)));
+				}
+			}
 			return Poll::Ready(Ok(None));
 		}
 		if self.catalog.is_none() && self.tracks.is_empty() {
@@ -340,6 +526,37 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 
 		Poll::Pending
+	}
+
+	/// The trailing SI frame for end of stream: every entry's current sections,
+	/// re-emitted once. Duplicates of already-emitted sections are harmless
+	/// repetitions; `None` when there are no tables or no program was ever built.
+	fn write_si_tail(&mut self) -> anyhow::Result<Option<Frame>> {
+		if self.psi.is_none() {
+			return Ok(None);
+		}
+		let pending: Vec<(u16, Vec<Bytes>)> = self
+			.si
+			.iter()
+			.filter(|(_, si)| !si.active.is_empty())
+			.map(|((pid, _), si)| (*pid, si.active.sections().cloned().collect()))
+			.collect();
+		if pending.is_empty() {
+			return Ok(None);
+		}
+		let timestamp = self.last_timestamp.unwrap_or(Timestamp::ZERO);
+		let mut out = Vec::new();
+		for (pid, sections) in pending {
+			for section in &sections {
+				self.write_section(&mut out, pid, section)?;
+			}
+		}
+		Ok(Some(Frame {
+			timestamp,
+			duration: None,
+			payload: Bytes::from(out),
+			keyframe: false,
+		}))
 	}
 
 	fn update_catalog(&mut self, mut catalog: Catalog<E>) -> anyhow::Result<()> {
@@ -351,7 +568,36 @@ impl<E: catalog::Catalog> Export<E> {
 		let mpegts = catalog.mpegts_mut().cloned().unwrap_or_default();
 		self.program_descriptors = mpegts.program_descriptors.clone();
 		self.program = mpegts.program.clone();
-		self.si = mpegts.si.clone();
+
+		// Reconcile the SI subscriptions with the catalog's map. Entries may appear
+		// after the PAT/PMT is built (a table acquired late): they ride standalone
+		// PIDs outside the program, so unlike the elementary tracks below they are
+		// not part of the latched layout.
+		self.si
+			.retain(|key, _| mpegts.si.get(&key.0).is_some_and(|t| t.contains_key(&key.1)));
+		for (pid, tables) in mpegts.si.iter() {
+			for (table_id, entry) in tables.iter() {
+				match self.si.get_mut(&(*pid, *table_id)) {
+					// A repointed entry (same key, new track) rebuilds the subscription:
+					// the old track is a restarted or replaced publisher's leftover, and
+					// staying attached would repeat its stale sections forever. The last
+					// snapshot carries across so emission never goes dark mid-swap.
+					Some(existing) if existing.track != entry.track => {
+						let mut replacement = SiTrack::new(&self.source, &entry.track, entry.interval, self.latency);
+						replacement.active = std::mem::take(&mut existing.active);
+						replacement.last_emit = existing.last_emit;
+						*existing = replacement;
+					}
+					Some(existing) => existing.interval = entry.interval,
+					None => {
+						self.si.insert(
+							(*pid, *table_id),
+							SiTrack::new(&self.source, &entry.track, entry.interval, self.latency),
+						);
+					}
+				}
+			}
+		}
 
 		// The desired track set: media renditions plus the verbatim streams.
 		let mut active: BTreeMap<String, ()> = BTreeMap::new();
@@ -763,25 +1009,28 @@ impl<E: catalog::Catalog> Export<E> {
 			self.last_psi = Some(frame.timestamp);
 		}
 
-		// Re-emit each SI PID's sections verbatim on its own cadence, which is the
-		// table's own repetition requirement rather than the PSI interval: an SDT wants
-		// 2s where the PSI wants 500ms, and an EPG table would want far less again.
-		// Unknown PIDs have no declared interval and fall back to the PSI cadence.
-		// `Bytes` clones are refcount bumps, and only a due PID is collected at all.
+		// Re-emit each SI entry's sections verbatim on its own cadence, which is the
+		// table's own repetition requirement rather than the PSI interval: an SDT
+		// wants 2s where the PSI wants 500ms, and an EPG schedule slice wants 30s.
+		// Unknown tables have no declared interval and fall back to the PSI cadence.
+		// `Bytes` clones are refcount bumps, and only a due entry is collected at all.
 		let pending: Vec<(u16, Vec<Bytes>)> = self
 			.si
-			.iter()
-			.filter(|(pid, si)| {
+			.iter_mut()
+			.filter(|(_, si)| !si.active.is_empty())
+			.filter(|(_, si)| {
 				let interval = si.interval.unwrap_or(PSI_INTERVAL);
-				due(frame.timestamp, self.last_si.get(*pid).copied(), interval)
+				due(frame.timestamp, si.last_emit, interval)
 			})
-			.map(|(pid, si)| (*pid, si.sections.clone()))
+			.map(|((pid, _), si)| {
+				si.last_emit = Some(frame.timestamp);
+				(*pid, si.active.sections().cloned().collect())
+			})
 			.collect();
 		for (pid, sections) in pending {
 			for section in &sections {
 				self.write_section(&mut out, pid, section)?;
 			}
-			self.last_si.insert(pid, frame.timestamp);
 		}
 
 		match es_payload {

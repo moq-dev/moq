@@ -5,7 +5,7 @@
 //! entry per track (its original PID and PMT descriptors), a `verbatim` carriage
 //! record for every elementary stream we don't decode (SCTE-35, teletext, DVB
 //! subtitles, private data, ...), the program-level PMT descriptors, the program
-//! identity ([`Program`]), and the standalone SI tables ([`Si`]).
+//! identity ([`Program`]), and the standalone SI table map ([`SiEntry`]).
 //! Demuxed media tracks keep their codec config in the base `video`/`audio`
 //! sections; only their MPEG-TS identity lands here.
 
@@ -19,19 +19,56 @@ use serde_with::{DisplayFromStr, DurationMilliSeconds, serde_as};
 
 use crate::catalog::hang::CatalogExt;
 
-/// A standalone SI PID we capture, and how often export must re-emit it.
+/// The standalone SI PIDs we capture. Everything on a captured PID is carried,
+/// whatever its `table_id`: the SDT PID also carries the BAT, the EIT PID carries
+/// both now/next and the full schedule, and a table we've never heard of is exactly
+/// as worth preserving as one we have.
 ///
-/// Intervals are the DVB maximum repetition intervals (ETSI TS 101 211); export
-/// treats them as an upper bound, not the source's observed cadence, which is a
-/// property of that multiplexer's bitrate shaping and means nothing downstream.
-/// Adding a table here is a one-line change: the sections themselves are opaque.
-pub(super) const SI_PIDS: &[(u16, Duration)] = &[
-	// NIT (network description): 10s.
-	(0x0010, Duration::from_secs(10)),
-	// SDT and BAT (service and bouquet description): 2s for SDT Actual, the tightest
-	// of the two, so one interval per PID stays conservative.
-	(0x0011, Duration::from_secs(2)),
+/// TDT/TOT (0x0014) is proxied, not synthesized (#2914): EIT event times are
+/// expressed on the source's clock, so a locally-minted time next to a relayed
+/// schedule can disagree with it, and TOT's `local_time_offset` descriptors (DST
+/// transitions, per-country offsets) are operator data an exporter cannot invent.
+/// Each tick replaces the last on its latest-value slot, so staleness is bounded by
+/// the source's own repetition interval plus path latency, the same class a TS
+/// receiver already lives with.
+pub(super) const SI_PIDS: &[u16] = &[
+	0x0010, // NIT (network description)
+	0x0011, // SDT and BAT (service and bouquet description)
+	0x0012, // EIT (event information: now/next and schedule)
+	0x0014, // TDT and TOT (time and local-time offset)
 ];
+
+/// The DVB maximum repetition interval for a known `table_id` (ETSI TS 101 211).
+///
+/// Export treats the interval as an upper bound, not the source's observed cadence,
+/// which is a property of that multiplexer's bitrate shaping and means nothing
+/// downstream. `None` for a table we don't recognize; export then falls back to its
+/// PSI cadence, so an unknown table degrades to a safe (fast) rate rather than being
+/// dropped. Keyed by `table_id` rather than PID because that is the granularity the
+/// spec defines: the EIT PID alone carries tables wanting 2s and 30s.
+pub(super) fn si_interval(table_id: u8) -> Option<Duration> {
+	match table_id {
+		// NIT actual/other.
+		0x40..=0x41 => Some(Duration::from_secs(10)),
+		// SDT actual.
+		0x42 => Some(Duration::from_secs(2)),
+		// SDT other.
+		0x46 => Some(Duration::from_secs(10)),
+		// BAT.
+		0x4A => Some(Duration::from_secs(10)),
+		// EIT now/next actual.
+		0x4E => Some(Duration::from_secs(2)),
+		// EIT now/next other.
+		0x4F => Some(Duration::from_secs(10)),
+		// EIT schedule actual.
+		0x50..=0x5F => Some(Duration::from_secs(10)),
+		// EIT schedule other.
+		0x60..=0x6F => Some(Duration::from_secs(30)),
+		// TDT and TOT.
+		0x70 | 0x73 => Some(Duration::from_secs(30)),
+		_ => None,
+	}
+}
 
 /// The `mpegts` catalog section.
 ///
@@ -58,17 +95,23 @@ pub struct Mpegts {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub program: Option<Program>,
 
-	/// Standalone SI tables carried verbatim, keyed by the PID they ride on (0x0011
-	/// SDT, 0x0010 NIT, ...). Export re-emits each PID's sections byte-for-byte on that
-	/// PID, so the service name, provider, and network survive without anyone parsing
-	/// them.
+	/// Standalone SI tables, keyed by the PID they ride on (0x0011 SDT, 0x0010 NIT,
+	/// 0x0012 EIT, ...) and then by `table_id`. The section bytes themselves live on
+	/// each entry's snapshot [track](SiEntry::track); the catalog only maps where they
+	/// are and how often export must re-emit them. Export re-emits each entry's
+	/// sections byte-for-byte on its PID, so the service name, provider, network, and
+	/// EPG survive without anyone parsing them.
 	///
-	/// JSON object keys are strings, so the PID is written in decimal (`"17"`) rather
-	/// than as a number. The catalog is parsed via `serde_json::Value`, which will not
-	/// coerce a string key back to an integer on its own.
+	/// `table_id` is byte 0 of generic section syntax (ISO 13818-1), so the key is no
+	/// less generic than the PID: which *ranges* mean what is a DVB convention, and
+	/// none appears here.
+	///
+	/// JSON object keys are strings, so both keys are written in decimal (`"17"`)
+	/// rather than as numbers. The catalog is parsed via `serde_json::Value`, which
+	/// will not coerce a string key back to an integer on its own.
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-	#[serde_as(as = "BTreeMap<DisplayFromStr, _>")]
-	pub si: BTreeMap<u16, Si>,
+	#[serde_as(as = "BTreeMap<DisplayFromStr, BTreeMap<DisplayFromStr, _>>")]
+	pub si: BTreeMap<u16, BTreeMap<u8, SiEntry>>,
 }
 
 impl Mpegts {
@@ -81,9 +124,9 @@ impl Mpegts {
 /// Program identity, from the PAT.
 ///
 /// The only part of the service layer we parse, because export has to: these three
-/// values rebuild a PAT/PMT consistent with the SI tables carried alongside in
-/// [`Si`]. Everything else about the program (its name, provider, type, network)
-/// stays opaque bytes. Named for the MPEG concept rather than the DVB one: DVB calls
+/// values rebuild a PAT/PMT consistent with the SI tables carried on the tracks
+/// [`SiEntry`] maps. Everything else about the program (its name, provider, type,
+/// network) stays opaque bytes. Named for the MPEG concept rather than the DVB one: DVB calls
 /// a program a service, but the same PAT fields carry an ATSC or ISDB stream too.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
@@ -101,68 +144,33 @@ pub struct Program {
 	pub pmt_pid: u16,
 }
 
-/// The standalone SI tables on one PID, carried verbatim.
+/// One standalone SI table's carriage: which track holds its sections, and how
+/// often export must re-emit them.
 ///
-/// Sections are opaque: nothing here parses a table, so an SDT, a NIT, a BAT, or a
-/// table we've never heard of all round-trip the same way. A PID carries a *set* of
-/// sections (a multi-service SDT is several, and the SDT PID also carries the BAT),
-/// so they are held together and replaced individually as each is re-signaled.
+/// The sections themselves ride the named snapshot track (see the `ts` module docs
+/// for the track format), not the catalog, so a table revision republishes a small
+/// track group instead of the whole catalog. Sections stay opaque: nothing here
+/// parses a table, so an SDT, a BAT, an EPG, or a table we've never heard of all
+/// round-trip the same way.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
-pub struct Si {
-	/// The current sections, in the order they were first seen. Each is a complete
-	/// section including its header and CRC, re-emitted byte-for-byte.
-	#[serde_as(as = "Vec<Base64>")]
-	pub sections: Vec<Bytes>,
+pub struct SiEntry {
+	/// Name of the snapshot track carrying this table's sections, on the same
+	/// broadcast as the catalog. Each group is a complete snapshot of the table's
+	/// current sections; a joiner reads only the newest group.
+	pub track: String,
 
 	/// Re-emit at least this often. A hint: import fills in the DVB maximum for the
-	/// PIDs it knows, and export is free to clamp it. Absent for an unrecognized PID,
-	/// which export then re-emits on its own PSI cadence, so an unknown table degrades
-	/// to a safe rate rather than being dropped.
+	/// tables it recognizes, and export is free to clamp it. Absent for an unknown
+	/// `table_id`, which export then re-emits on its own PSI cadence, so an unknown
+	/// table degrades to a safe rate rather than being dropped.
 	///
 	/// Serialized as an integer number of milliseconds (sub-ms precision is truncated).
 	#[serde_as(as = "Option<DurationMilliSeconds<u64>>")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub interval: Option<Duration>,
-}
-
-impl Si {
-	/// Add `section`, replacing an earlier one with the same identity. Returns whether
-	/// the set actually changed, so a caller can skip republishing on a repetition (SI
-	/// repeats every couple of seconds; almost every section is a repeat).
-	pub fn upsert(&mut self, section: Bytes) -> bool {
-		let key = section_key(&section);
-		match self.sections.iter_mut().find(|s| section_key(s) == key) {
-			Some(existing) if *existing == section => false,
-			Some(existing) => {
-				*existing = section;
-				true
-			}
-			None => {
-				self.sections.push(section);
-				true
-			}
-		}
-	}
-}
-
-/// Identify a section within its PID: `(table_id, table_id_extension, section_number)`.
-///
-/// Generic section syntax (ISO 13818-1 / EN 300 468), not table-specific: a long-form
-/// section (`section_syntax_indicator` set) is one part of one version of one table,
-/// while a short-form one (TDT and friends) has no extension or numbering and so is
-/// identified by its `table_id` alone. A runt is keyed by whatever it has, leaving the
-/// byte-equality check to decide.
-fn section_key(section: &[u8]) -> (u8, u16, u8) {
-	let table_id = section.first().copied().unwrap_or(0);
-	let long_form = section.get(1).is_some_and(|b| b & 0x80 != 0);
-	if !long_form || section.len() < 8 {
-		return (table_id, 0, 0);
-	}
-	let extension = ((section[3] as u16) << 8) | section[4] as u16;
-	(table_id, extension, section[6])
 }
 
 /// One track's MPEG-TS identity and signaling.
@@ -351,14 +359,11 @@ mod test {
 
 	#[test]
 	fn program_and_si_roundtrip() {
-		let mut si = Si {
+		let entry = SiEntry {
+			track: "0x0011-0x42.si".to_string(),
 			interval: Some(Duration::from_secs(2)),
 			..Default::default()
 		};
-		assert!(
-			si.upsert(Bytes::from_static(b"\x42\xf0\x25")),
-			"first section is a change"
-		);
 
 		let mpegts = Mpegts {
 			program: Some(Program {
@@ -367,17 +372,20 @@ mod test {
 				pmt_pid: 0x0064,
 				..Default::default()
 			}),
-			si: BTreeMap::from([(0x0011, si)]),
+			si: BTreeMap::from([(0x0011, BTreeMap::from([(0x42u8, entry)]))]),
 			..Default::default()
 		};
 		assert!(!mpegts.is_empty(), "a program record is not empty");
 
 		let json = serde_json::to_string(&Ext { mpegts: mpegts.clone() }).unwrap();
-		// Sections are base64 under their PID; the PMT PID is structured, not a section.
-		assert!(json.contains("\"sections\""), "sections present: {json}");
 		assert!(json.contains("\"pmtPid\":100"), "identity stays structured: {json}");
-		// The PID key is a decimal string, since JSON object keys are strings.
+		// Both keys are decimal strings, since JSON object keys are strings.
 		assert!(json.contains("\"17\":"), "PID key written as a string: {json}");
+		assert!(json.contains("\"66\":"), "table_id key written as a string: {json}");
+		assert!(
+			json.contains("\"track\":\"0x0011-0x42.si\""),
+			"the entry names its track: {json}"
+		);
 		// Lock in the interval's wire shape: a bare integer number of milliseconds.
 		// Without the `DurationMilliSeconds` adapter this regresses to serde's default
 		// `{secs, nanos}` object.
@@ -385,44 +393,5 @@ mod test {
 
 		let parsed: Ext = serde_json::from_str(&json).unwrap();
 		assert_eq!(parsed.mpegts, mpegts, "program and SI round-trip");
-	}
-
-	/// A repeated section must not count as a change: SI repeats every couple of
-	/// seconds, so treating a repeat as an update would republish the catalog forever.
-	/// A *revised* section (same identity, new bytes) replaces in place, and a sibling
-	/// section (same table, different `section_number`) is added alongside.
-	#[test]
-	fn si_upsert_dedupes_by_section_identity() {
-		// Long-form SDT Actual: table_id 0x42, syntax indicator set, extension 0x0001.
-		let section = |section_number: u8, fill: u8| {
-			Bytes::from(vec![
-				0x42,
-				0xf0,
-				0x0b,
-				0x00,
-				0x01,
-				0xc1,
-				section_number,
-				0x01,
-				fill,
-				fill,
-				fill,
-				fill,
-				fill,
-				fill,
-			])
-		};
-
-		let mut si = Si::default();
-		assert!(si.upsert(section(0, 0xaa)), "first section");
-		assert!(!si.upsert(section(0, 0xaa)), "a byte-identical repeat is not a change");
-		assert_eq!(si.sections.len(), 1);
-
-		assert!(si.upsert(section(0, 0xbb)), "revised section 0 is a change");
-		assert_eq!(si.sections.len(), 1, "the revision replaced in place");
-		assert_eq!(si.sections[0], section(0, 0xbb));
-
-		assert!(si.upsert(section(1, 0xcc)), "section 1 is a sibling, not a replacement");
-		assert_eq!(si.sections.len(), 2, "both sections of the table are held");
 	}
 }

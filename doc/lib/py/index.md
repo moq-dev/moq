@@ -72,7 +72,7 @@ import moq
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
         broadcast = client.create_broadcast("my-stream")
-        audio = broadcast.publish_media("opus", opus_init_bytes)
+        audio = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_init_bytes)
 
         # Audio has no keyframes, so `cut` is what gives it group boundaries.
         # Once per frame is the lowest latency; a segment cadence suits HLS/DASH.

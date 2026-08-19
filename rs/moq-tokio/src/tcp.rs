@@ -56,17 +56,18 @@ pub(crate) struct Legacy {
 }
 
 impl Config {
-	/// Fold the released spelling into the canonical field. Idempotent.
-	pub fn resolved(&self) -> Self {
-		let mut resolved = self.clone();
-		if self.bind.is_none()
-			&& let Some(bind) = self.legacy.bind
-		{
-			tracing::warn!("--server-tcp-bind is deprecated; use --listen-tcp-bind");
-			resolved.bind = Some(bind);
+	/// The released spelling, if in use, paired with what replaced it. Reached
+	/// through [`crate::listen::Config::deprecated`].
+	pub(crate) fn deprecated(&self) -> crate::Deprecated {
+		let mut found = crate::Deprecated::default();
+		if self.legacy.bind.is_some() {
+			found.flag(
+				"--server-tcp-bind",
+				Some("MOQ_SERVER_TCP_BIND"),
+				"--listen-tcp-bind / MOQ_LISTEN_TCP_BIND",
+			);
 		}
-		resolved.legacy = Legacy::default();
-		resolved
+		found
 	}
 }
 
@@ -307,25 +308,20 @@ mod legacy_tests {
 		tcp: Config,
 	}
 
-	/// The released `--server-tcp-bind` still lands in the canonical field.
+	/// The released `--server-tcp-bind` is recognized and reported, never bound.
 	#[test]
-	fn released_spelling_folds_in() {
-		let config = Cli::parse_from(["test", "--server-tcp-bind", "127.0.0.1:4443"])
-			.tcp
-			.resolved();
-		assert_eq!(config.bind, Some("127.0.0.1:4443".parse().unwrap()));
+	fn released_spelling_is_reported_not_applied() {
+		let config = Cli::parse_from(["test", "--server-tcp-bind", "127.0.0.1:4443"]).tcp;
+		assert_eq!(config.bind, None);
 
-		// The canonical spelling wins, and folding twice changes nothing.
-		let config = Cli::parse_from([
-			"test",
-			"--listen-tcp-bind",
-			"127.0.0.1:1",
-			"--server-tcp-bind",
-			"127.0.0.1:2",
-		])
-		.tcp
-		.resolved();
+		let reported = config.deprecated().to_string();
+		assert!(
+			reported.contains("--server-tcp-bind / MOQ_SERVER_TCP_BIND -> --listen-tcp-bind / MOQ_LISTEN_TCP_BIND"),
+			"{reported}"
+		);
+
+		let config = Cli::parse_from(["test", "--listen-tcp-bind", "127.0.0.1:1"]).tcp;
+		assert!(config.deprecated().is_empty());
 		assert_eq!(config.bind, Some("127.0.0.1:1".parse().unwrap()));
-		assert_eq!(config.resolved().bind, config.bind);
 	}
 }

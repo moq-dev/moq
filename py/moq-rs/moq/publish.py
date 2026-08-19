@@ -6,12 +6,17 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from moq_ffi import (
+    MoqAudioFormat,
+    MoqAudioInit,
     MoqAudioProducer,
     MoqBroadcastDynamic,
     MoqBroadcastProducer,
+    MoqContainerFormat,
+    MoqContainerInit,
+    MoqContainerProducer,
+    MoqContainerStreamProducer,
     MoqGroupProducer,
     MoqGroupRequest,
-    MoqInit,
     MoqJsonSnapshotConfig,
     MoqJsonSnapshotProducer,
     MoqJsonStreamConfig,
@@ -21,6 +26,8 @@ from moq_ffi import (
     MoqTrackDynamic,
     MoqTrackProducer,
     MoqTrackRequest,
+    MoqVideoFormat,
+    MoqVideoInit,
     MoqVideoProducer,
 )
 
@@ -43,15 +50,20 @@ if TYPE_CHECKING:
     from .subscribe import BroadcastConsumer, GroupConsumer, TrackConsumer
 
 
-def _media_init(format: str, init: bytes, video: VideoHint | None, label: str | None) -> MoqInit:
-    return MoqInit(format=format, data=init, label=label, video=video)
+def _audio_init(format: MoqAudioFormat, init: bytes, label: str | None) -> MoqAudioInit:
+    return MoqAudioInit(format=format, data=init, label=label)
+
+
+def _video_init(format: MoqVideoFormat, init: bytes, label: str | None, hint: VideoHint | None) -> MoqVideoInit:
+    return MoqVideoInit(format=format, data=init, label=label, hint=hint)
 
 
 class MediaProducer:
     """Publish encoded media frames on a single track, one payload at a time.
 
-    Built via :meth:`BroadcastProducer.publish_media`. Push each encoded frame
-    with :meth:`write_frame`, then :meth:`finish` when the stream ends.
+    Built via :meth:`BroadcastProducer.publish_audio` or
+    :meth:`BroadcastProducer.publish_video`. Push each encoded frame with
+    :meth:`write_frame`, then :meth:`finish` when the stream ends.
     """
 
     def __init__(self, inner: MoqMediaProducer) -> None:
@@ -82,9 +94,6 @@ class MediaProducer:
         after every frame for one group (one QUIC stream) the relay forwards
         without waiting, or at a segment cadence to align with video. Video
         groups at its own keyframes and needs this only to override that.
-
-        On a container this declares a new segment, rolling a group on every
-        track it publishes.
         """
         self._inner.cut()
 
@@ -99,6 +108,57 @@ class MediaProducer:
 
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers."""
+        self._inner.finish()
+
+
+class ContainerProducer:
+    """Publish a container, which demuxes and publishes its own tracks.
+
+    Built via :meth:`BroadcastProducer.publish_container`. Unlike
+    :class:`MediaProducer` there is no per-frame timestamp: a container carries
+    its tracks' timing itself.
+    """
+
+    def __init__(self, inner: MoqContainerProducer) -> None:
+        self._inner = inner
+
+    def write(self, payload: bytes) -> None:
+        """Write a whole chunk of container bytes."""
+        self._inner.write(payload)
+
+    def cut(self) -> None:
+        """Declare that the next chunk starts a new segment, rolling a group on every track.
+
+        An fMP4 source carrying ``styp`` atoms declares its own segments, so
+        this is only needed when it doesn't. Formats with no segment concept
+        (MKV, TS, FLV) ignore it.
+        """
+        self._inner.cut()
+
+    def seek(self, sequence: int) -> None:
+        """Start a new segment and number its groups ``sequence``."""
+        self._inner.seek(sequence)
+
+    def finish(self) -> None:
+        """Finish every track this container publishes."""
+        self._inner.finish()
+
+
+class ContainerStreamProducer:
+    """Publish a container fed by a raw byte stream, which recovers its own framing.
+
+    Built via :meth:`BroadcastProducer.publish_container_stream`.
+    """
+
+    def __init__(self, inner: MoqContainerStreamProducer) -> None:
+        self._inner = inner
+
+    def write(self, payload: bytes) -> None:
+        """Push raw container bytes; chunk boundaries don't matter."""
+        self._inner.write(payload)
+
+    def finish(self) -> None:
+        """Finish every track this container publishes."""
         self._inner.finish()
 
 
@@ -468,53 +528,89 @@ class BroadcastProducer:
         """Replace the catalog properties shared by every video rendition."""
         self._inner.set_video_properties(properties)
 
-    def publish_media(
+    def publish_audio(
         self,
-        format: str,
-        init: bytes = b"",
-        video: VideoHint | None = None,
+        format: MoqAudioFormat,
+        init: bytes,
+        *,
         label: str | None = None,
     ) -> MediaProducer:
-        """Publish a single media track. `format` selects the codec (e.g. "opus", "avc3"); `init` is
-        its codec init bytes (required for audio formats). `label` is the human-readable rendition
-        name stored in the catalog. `video` seeds fields the stream can't reveal (bitrate) or
-        publishes the catalog before the first keyframe. See :class:`VideoHint`."""
-        return MediaProducer(self._inner.publish_media(_media_init(format, init, video, label)))
+        """Publish one audio codec as a new track. `init` is required: audio resolves its whole
+        rendition from those bytes (an OpusHead, an AudioSpecificConfig, a STREAMINFO). `label` is
+        the human-readable rendition name stored in the catalog."""
+        return MediaProducer(self._inner.publish_audio(_audio_init(format, init, label)))
 
-    def publish_media_on_track(
+    def publish_video(
+        self,
+        format: MoqVideoFormat,
+        init: bytes = b"",
+        *,
+        label: str | None = None,
+        hint: VideoHint | None = None,
+    ) -> MediaProducer:
+        """Publish one video codec as a new track. `init` may be empty for a format that resolves in
+        band. `hint` seeds catalog fields the stream can't reveal (bitrate) or publishes the catalog
+        before the first keyframe. See :class:`VideoHint`."""
+        return MediaProducer(self._inner.publish_video(_video_init(format, init, label, hint)))
+
+    def publish_container(
+        self,
+        format: MoqContainerFormat,
+        init: bytes = b"",
+    ) -> ContainerProducer:
+        """Publish a container, which demuxes and publishes its own tracks. There is no label or
+        hint: a container describes each track it publishes from its own metadata."""
+        return ContainerProducer(self._inner.publish_container(MoqContainerInit(format=format, data=init)))
+
+    def publish_audio_on_track(
         self,
         request: TrackRequest,
-        format: str,
-        init: bytes = b"",
-        video: VideoHint | None = None,
+        format: MoqAudioFormat,
+        init: bytes,
+        *,
         label: str | None = None,
     ) -> MediaProducer:
-        """Publish media onto a requested track. See :meth:`publish_media` for the arguments."""
-        return MediaProducer(
-            self._inner.publish_media_on_track(request._inner, _media_init(format, init, video, label))
-        )
+        """Publish one audio codec onto a requested track. See :meth:`publish_audio`."""
+        return MediaProducer(self._inner.publish_audio_on_track(request._inner, _audio_init(format, init, label)))
 
-    def publish_media_stream(
+    def publish_video_on_track(
         self,
-        format: str,
-        video: VideoHint | None = None,
+        request: TrackRequest,
+        format: MoqVideoFormat,
+        init: bytes = b"",
+        *,
         label: str | None = None,
-    ) -> MediaStreamProducer:
-        """Publish a media track fed by a raw byte stream (unknown frame
-        boundaries). `format` is a stream format (avc3, hev1, av01, fmp4, mkv).
-        `label` and `video` seed catalog fields as in :meth:`publish_media`."""
-        return MediaStreamProducer(self._inner.publish_media_stream(_media_init(format, b"", video, label)))
+        hint: VideoHint | None = None,
+    ) -> MediaProducer:
+        """Publish one video codec onto a requested track. See :meth:`publish_video`."""
+        return MediaProducer(self._inner.publish_video_on_track(request._inner, _video_init(format, init, label, hint)))
 
-    def publish_audio(
+    def publish_video_stream(
+        self,
+        format: MoqVideoFormat,
+        *,
+        label: str | None = None,
+        hint: VideoHint | None = None,
+    ) -> MediaStreamProducer:
+        """Publish a video track fed by a raw byte stream (unknown frame boundaries). Only the
+        self-delimiting formats work: `AVC3`, `HEV1`, `AV01`. There is no audio counterpart, since
+        audio has no frame boundaries to infer."""
+        return MediaStreamProducer(self._inner.publish_video_stream(_video_init(format, b"", label, hint)))
+
+    def publish_container_stream(self, format: MoqContainerFormat) -> ContainerStreamProducer:
+        """Publish a container fed by a raw byte stream, which recovers its own framing."""
+        return ContainerStreamProducer(self._inner.publish_container_stream(format))
+
+    def encode_audio(
         self,
         name: str,
         input: AudioEncoderInput,
         output: AudioEncoderOutput,
     ) -> AudioProducer:
         """Publish a raw-audio track with an in-process Opus encoder."""
-        return AudioProducer(self._inner.publish_audio(name, input, output))
+        return AudioProducer(self._inner.encode_audio(name, input, output))
 
-    def publish_video(
+    def encode_video(
         self,
         input: VideoEncoderInput,
         output: VideoEncoderOutput,
@@ -526,7 +622,7 @@ class BroadcastProducer:
         itself, so subscribers discover it through the catalog rather than a
         name you pick, and can find it before the first frame exists.
         """
-        return VideoProducer(self._inner.publish_video(input, output))
+        return VideoProducer(self._inner.encode_video(input, output))
 
     def publish_track(self, name: str, info: TrackInfo | None = None) -> TrackProducer:
         """Create a track. Send any bytes, no codec validation. ``info`` sets track

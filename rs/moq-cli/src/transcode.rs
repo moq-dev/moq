@@ -85,7 +85,7 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	// another, over a single auto-reconnecting session.
 	let url = moq
 		.client
-		.connect
+		.url
 		.clone()
 		.context("`transcode` requires a relay: pass --connect <url>")?;
 	let publish = moq_tokio::origin::spawn(moq_net::Origin::random());

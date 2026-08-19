@@ -108,6 +108,10 @@ Don't document deprecated flags, options, or APIs. User-facing docs (`/doc`), `-
 
 The rename/removal rationale lives in the commit message and PR description, not in docs that users read. Warning someone who *uses* the deprecated path is not just fine but encouraged -- at compile time (Rust's `#[deprecated(note = "...")]`) or at runtime (a log line). Those fire on use, so they reach the one person who needs them and nobody else; they aren't documentation. A standing note in the docs that advertises the dead name is what's banned.
 
+**A runtime warning is only ever an addition to honoring the old spelling, never a substitute for it.** Each deprecated setting is either supported, in which case the value takes effect and a warning is optional, or refused, in which case the process fails immediately and prints the migration. Accepting a setting, naming it in a warning, and then not applying it is the one thing that is not allowed: the warning reads as advisory, so the deployment keeps running and stops working, and the message is exactly what convinces the reader nothing is wrong. When in doubt, refuse. An operator who has to edit a command line loses a minute; one who is silently running on defaults loses whatever the setting was protecting.
+
+Refusing means keeping the old spelling *parsable* -- a hidden arg, a still-deserialized field -- so the error can name its replacement. Dropping it outright gets you "unexpected argument `--client-connect`", which tells nobody what to write instead. The same goes for the environment variable behind a renamed flag: without it, a deployment configured through the environment slips past the check and lands in the silent case above.
+
 ## Retries
 
 Retry only operations that are safe to repeat and whose failure may clear without caller action. Use capped exponential backoff with jitter and normally stop after a short time or attempt budget, returning the last real error. Retry indefinitely only in process-lifetime supervisors waiting for external state; cap the delay and report failures.

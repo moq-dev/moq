@@ -44,6 +44,11 @@ pub enum Error {
 	#[error(transparent)]
 	Io(#[from] std::io::Error),
 
+	/// The QUIC config was parsed from released spellings that no longer work. The
+	/// payload is the migration to print.
+	#[error("{0}")]
+	Deprecated(crate::Deprecated),
+
 	/// The configured secret was neither a valid hex key nor a readable key file.
 	#[error("invalid iroh secret key")]
 	Secret(#[source] iroh::KeyParsingError),
@@ -171,6 +176,15 @@ impl EndpointConfig {
 	pub async fn bind(self, quic: &crate::quic::Config) -> Result<Option<Endpoint>> {
 		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
+		}
+
+		// Public, and takes a config this crate did not necessarily check, so it
+		// refuses rather than trusting the caller: `resolve` reads the canonical
+		// fields, and a released `--client-quic-gso=false` would arrive here as "GSO
+		// on" and bind an endpoint the caller asked not to have.
+		let deprecated = quic.deprecated();
+		if !deprecated.is_empty() {
+			return Err(Error::Deprecated(deprecated));
 		}
 
 		let quic = quic.resolve();
@@ -358,6 +372,36 @@ fn url_set_scheme(url: Url, scheme: &str) -> Result<Url> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A public builder taking a config this crate did not check, so it refuses
+	/// before it touches the key file or a socket.
+	///
+	/// Without this, `resolve()` reads the canonical fields, sees `gso = None`, and
+	/// binds an endpoint the caller asked not to have. The canonical spelling errors
+	/// with [`Error::GsoUnsupported`], so the released one silently getting an
+	/// endpoint is the accepted-and-ignored failure in miniature.
+	#[tokio::test]
+	async fn bind_refuses_a_released_quic_spelling() {
+		use clap::Parser;
+
+		#[derive(Parser)]
+		struct Cli {
+			#[command(flatten)]
+			quic: crate::quic::Config,
+		}
+
+		let quic = Cli::parse_from(["test", "--client-quic-gso=false"]).quic;
+		let config = EndpointConfig {
+			enabled: Some(true),
+			..Default::default()
+		};
+
+		let Err(err) = config.bind(&quic).await else {
+			panic!("binding must refuse a released spelling");
+		};
+		assert!(matches!(err, Error::Deprecated(_)), "{err}");
+		assert!(err.to_string().contains("--quic-gso / MOQ_QUIC_GSO"), "{err}");
+	}
 
 	/// Build a controller from each family's factory and downcast it to the
 	/// concrete implementation it must map to. iroh runs on noq, so this is the

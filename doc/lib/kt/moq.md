@@ -115,6 +115,15 @@ track.update(Subscription(priority = 20u.toUByte(), ordered = false))
 
 `ordered` controls prioritization only. When true, groups are prioritized in sequence order. Groups may always arrive out-of-order (or not at all) over the network.
 
+A catalog rendition may name a *different* broadcast: `MoqVideo.broadcast` / `MoqAudio.broadcast` is a path relative to the broadcast the catalog came from, so a transcode output at `live/hd` can describe a track that actually lives in `live/source`. `decodeAudio` and `decodeVideo` follow it for you. `subscribeMedia`, `subscribeTrack`, `fetchGroup`, and `fetchMediaGroup` take a track name rather than a rendition, so resolve first:
+
+```kotlin
+val source = announcement.broadcast().resolve(rendition.broadcast)
+val consumer = source.subscribeMedia(name, rendition.container)
+```
+
+`resolve(null)` (or an empty reference) returns the same broadcast, so it is safe to call unconditionally. It needs an origin to fetch a sibling from, so it throws on a broadcast consumed straight from a local producer. `resolve` reports a sibling that exists but has not been announced yet as unroutable rather than waiting for it, so await the referenced broadcast's announcement first if you may be racing it.
+
 ## Publish
 
 ```kotlin
@@ -122,8 +131,8 @@ import dev.moq.*
 
 Moq.connect("https://relay.example.com").use { moq ->
     val broadcast = moq.createBroadcast("my-stream")
-    val audio = broadcast.publishMedia(
-        Init(format = "opus", data = opusInitBytes, label = "English", video = null)
+    val audio = broadcast.publishAudio(
+        AudioInit(format = AudioFormat.OPUS, data = opusInitBytes, label = "English")
     )
 
     // Audio has no keyframes, so `cut` is what gives it group boundaries. Once
@@ -138,10 +147,9 @@ Moq.connect("https://relay.example.com").use { moq ->
 ```
 
 `label` is presentation metadata for a track picker and does not change the
-generated transport track name. Labels do not need to be unique. It names one
-rendition, so a container format (`fmp4`, `mkv`, `ts`, `flv`) throws rather than
-ignoring it: those describe their own tracks. `video` throws on a container or an
-audio format for the same reason.
+generated transport track name. Labels do not need to be unique.
+`publishContainer` takes neither a label nor a hint: a container describes each
+track it publishes from its own metadata.
 
 Each catalog `Video` has a `stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
 
@@ -159,10 +167,10 @@ broadcast.setVideoProperties(
 
 ### Raw media
 
-`publishMedia` above takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `publishVideo` / `publishAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
+`publishAudio` / `publishVideo` take frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `encodeVideo` / `encodeAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
 
 ```kotlin
-val video = broadcast.publishVideo(
+val video = broadcast.encodeVideo(
     VideoEncoderInput(
         format = VideoPixelFormat.RGBA,
         width = 1280u,
@@ -180,6 +188,21 @@ val video = broadcast.publishVideo(
 video.write(VideoFrame(timestampUs = ptsUs, data = rgba))
 video.finish()
 ```
+
+`decodeVideo` and `decodeAudio` are the mirrors: they run the codec inside the bindings on the way in, so a subscriber gets pixels and PCM without linking one. Video frames arrive as tightly-packed I420 and carry the size they actually decoded to, since `resize` is only best effort:
+
+```kotlin
+val catalog = broadcast.catalog()
+val (name, rendition) = catalog.video.entries.first()
+
+val video = broadcast.decodeVideo(name, rendition, VideoDecoderOutput())
+while (true) {
+    val frame = video.next() ?: break
+    render(frame.data, frame.width, frame.height)
+}
+```
+
+An unrecognized codec throws from `decodeVideo` itself; a recognized one no native backend handles throws when the decoder opens. Either way you find out before the first frame.
 
 `autoEncoder` prefers a hardware encoder and falls back to software; `softwareEncoder`, `hardwareEncoder`, and `namedEncoder("videotoolbox")` pin the choice. The bindings compile VideoToolbox (macOS), Media Foundation (Windows), and openh264 (software, everywhere); the Linux hardware codecs are a libmoq-only build option. `setBitrate` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
 

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `publish_container_stream` takes a `MoqContainerFormat` instead of a `MoqContainerInit`, which
+  carried leading bytes the stream importer discarded.
+
+- `publish_media`, `publish_media_on_track`, and `publish_media_stream` split by media kind:
+  `publish_audio`, `publish_video`, `publish_container`, `publish_audio_on_track`,
+  `publish_video_on_track`, `publish_video_stream`, and `publish_container_stream`. Each takes only
+  the fields its kind can honor, so a video hint on an audio track and a label on a container are no
+  longer expressible. There is no audio stream variant: audio has no frame boundaries to infer.
+- `MoqInit` splits into `MoqAudioInit`, `MoqVideoInit`, and `MoqContainerInit`, and the format is a
+  typed `MoqAudioFormat` / `MoqVideoFormat` / `MoqContainerFormat` rather than a string.
+- The raw encoder paths are `encode_audio` and `encode_video`, freeing `publish_audio` /
+  `publish_video` for the bring-your-own-encoder path. C already called these `_raw`.
+- `MoqAudioFormat` (the PCM sample layout) is now `MoqAudioSampleFormat`, matching the existing
+  `MoqVideoPixelFormat`.
+- A container gets its own `MoqContainerProducer` / `MoqContainerStreamProducer` rather than sharing
+  `MoqMediaProducer`. `write` takes no timestamp, since a container carries its own timing and the
+  shared type silently dropped it; and `name`/`used`/`unused` no longer have a container case to
+  fail on.
+
 ### Added
 
 - Publish and consume human-readable audio and video rendition labels.

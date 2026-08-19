@@ -75,6 +75,11 @@ pub enum MoqError {
 	#[error("invalid route: {0}")]
 	InvalidRoute(String),
 
+	/// A catalog rendition named another broadcast, but this consumer came from a standalone
+	/// broadcast rather than an origin, so there is nothing to resolve the reference against.
+	#[error("unresolvable broadcast reference: {0}")]
+	UnresolvableBroadcast(String),
+
 	#[error("log: {0}")]
 	Log(String),
 }

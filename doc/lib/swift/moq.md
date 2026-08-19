@@ -128,11 +128,28 @@ track.update(subscription: Subscription(priority: 20, ordered: false))
 
 `ordered` controls prioritization only. When true, groups are prioritized in sequence order. Groups may always arrive out-of-order (or not at all) over the network.
 
+A catalog rendition may name a *different* broadcast: `Video.broadcast` / `Audio.broadcast` is a path
+relative to the broadcast the catalog came from, so a transcode output at `live/hd` can describe a
+track that actually lives in `live/source`. `decodeAudio` and `decodeVideo` follow it for you.
+`subscribeMedia`, `subscribeTrack`, `fetchGroup`, and `fetchMediaGroup` take a track name rather than
+a rendition, so resolve first:
+
+```swift
+let source = try await announcement.broadcast.resolve(rendition.broadcast)
+let consumer = try await source.subscribeMedia(name: name, container: rendition.container)
+```
+
+`resolve(nil)` (or an empty reference) returns the same broadcast, so it is safe to call
+unconditionally. It needs an origin to fetch a sibling from, so it throws on a broadcast consumed
+straight from a local producer.
+`resolve` reports a sibling that exists but has not been announced yet as unroutable rather than
+waiting for it, so await the referenced broadcast's announcement first if you may be racing it.
+
 ## Publish
 
 ```swift
 let broadcast = try session.publisher.createBroadcast(path: "my-stream")
-let audio = try broadcast.publishMedia(format: "opus", initData: opusInitBytes, label: "English")
+let audio = try broadcast.publishAudio(format: .opus, initData: opusInitBytes, label: "English")
 
 // Audio has no keyframes, so `cut` is what gives it group boundaries. Once per
 // frame is the lowest latency; a segment cadence suits HLS/DASH.
@@ -145,13 +162,13 @@ try broadcast.finish()
 ```
 
 The optional `label` is presentation metadata for a track picker and does not
-change the generated transport track name. It names one rendition, so a container
-format (`fmp4`, `mkv`, `ts`, `flv`) throws rather than ignoring it: those describe
-their own tracks, and `video:` throws on a container or an audio format for the same
-reason. Video publishers can pass
-`video: VideoHint(...)` to seed catalog fields before the stream reveals them.
-Use `publishMedia(on:format:initData:label:video:)` to accept a media track
-obtained from `BroadcastDynamic`.
+change the generated transport track name. `publishContainer` takes neither a
+label nor a hint: a container describes each track it publishes from its own
+metadata, so there is no single rendition for either to name. Video publishers
+can pass `hint: VideoHint(...)` to seed catalog fields before the stream reveals
+them. Use `publishAudio(on:format:initData:label:)` or
+`publishVideo(on:format:initData:label:hint:)` to accept a media track obtained
+from `BroadcastDynamic`.
 
 Each catalog `Video` has a `stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
 
@@ -310,10 +327,10 @@ The served broadcast is not announced. It only resolves consumers that call `req
 
 ### Raw media
 
-`publishMedia` above takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `publishVideo` / `publishAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
+`publishAudio` / `publishVideo` take frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `encodeVideo` / `encodeAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
 
 ```swift
-let video = try broadcast.publishVideo(
+let video = try broadcast.encodeVideo(
     input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: 30),
     output: VideoEncoderOutput(codec: .h264, bitrate: nil, gop: nil, kind: .auto)
 )
@@ -321,6 +338,20 @@ let video = try broadcast.publishVideo(
 try video.write(VideoFrame(timestampUs: ptsUs, data: rgba))
 try video.finish()
 ```
+
+`decodeVideo` and `decodeAudio` are the mirrors: they run the codec inside the bindings on the way in, so a subscriber gets pixels and PCM without linking one. Video frames arrive as tightly-packed I420 and carry the size they actually decoded to, since `resize` is only best effort:
+
+```swift
+let catalog = try await broadcast.catalog()
+let (name, rendition) = catalog.video.first!
+
+let video = try await broadcast.decodeVideo(name: name, catalogVideo: rendition)
+for try await frame in video {
+    render(frame.data, frame.width, frame.height)
+}
+```
+
+An unrecognized codec throws from `decodeVideo` itself; a recognized one no native backend handles throws when the decoder opens. Either way you find out before the first frame.
 
 `kind: .auto` prefers a hardware encoder and falls back to software; `.software`, `.hardware`, and `.named(name: "videotoolbox")` pin the choice. The bindings compile VideoToolbox (macOS), Media Foundation (Windows), and openh264 (software, everywhere); the Linux hardware codecs are a libmoq-only build option. `setBitrate(_:)` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
 

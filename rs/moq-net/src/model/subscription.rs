@@ -20,9 +20,11 @@ pub struct Subscription {
 	/// skipped); a larger ceiling tolerates that much reordering before giving up on the
 	/// older group.
 	///
-	/// This is the `Subscriber Max Latency` on the wire, enforced by the publisher's
-	/// cache. Receivers that buffer (e.g. a jitter buffer) enforce the same budget
-	/// locally, and a group is skipped once either measure exceeds it.
+	/// This is the `Subscriber Max Latency` on the wire. It is enforced at both ends:
+	/// the publisher skips a group rather than sending it, and this subscriber skips it
+	/// again as it reads. Clamped to the publisher's
+	/// [`Info::latency_max`](crate::track::Info::latency_max) retention window; stored
+	/// here verbatim, so what was asked for stays readable.
 	pub latency: crate::Latency,
 	/// First [`Position`] the publisher should deliver, or `None` to start at the latest
 	/// group.

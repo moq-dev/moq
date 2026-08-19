@@ -92,7 +92,7 @@ pub struct Producer<E: CatalogExt = ()> {
 	resampler: Option<Resampler>,
 	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire>,
 	/// Owns the catalog rendition, retiring it when this producer goes away.
-	rendition: Rendition<E>,
+	rendition: moq_mux::catalog::AudioTrack<E>,
 	pending: Vec<f32>,
 	/// Samples emitted since the current epoch (reset by [`reset_epoch`](Self::reset_epoch)).
 	frames_produced: u64,
@@ -141,15 +141,16 @@ impl<E: CatalogExt> Producer<E> {
 		let name = track.name().to_string();
 		let track = catalog.media_producer(track, moq_mux::container::legacy::Wire)?;
 
-		let mut catalog_mut = catalog.clone();
-		let config = encoder.catalog();
-		catalog_mut.lock().audio.insert(&name, config)?;
+		// The rendition handle owns the name for as long as this producer lives, and retires the
+		// entry however the producer ends.
+		let mut rendition = catalog.reserve().audio(&name)?;
+		rendition.set(encoder.catalog());
 
 		Ok(Self {
 			encoder,
 			resampler,
 			track,
-			rendition: Rendition { catalog, name },
+			rendition,
 			pending: Vec::new(),
 			frames_produced: 0,
 			epoch_us: None,
@@ -158,7 +159,7 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// The name of the published track, which is [`Options::track`] resolved.
 	pub fn track_name(&self) -> &str {
-		&self.rendition.name
+		self.rendition.name()
 	}
 
 	/// The underlying track producer, e.g. to watch subscriber state via
@@ -282,21 +283,6 @@ impl<E: CatalogExt> Producer<E> {
 	/// real cause rather than [`moq_net::Error::Dropped`]. Pending samples are dropped.
 	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
-	}
-}
-
-/// The producer's catalog entry, removed however the producer ends.
-///
-/// A separate value rather than a `Drop` on [`Producer`] itself, so the terminal
-/// [`finish`](Producer::finish) / [`abort`](Producer::abort) can consume the track.
-struct Rendition<E: CatalogExt> {
-	catalog: moq_mux::catalog::Producer<E>,
-	name: String,
-}
-
-impl<E: CatalogExt> Drop for Rendition<E> {
-	fn drop(&mut self) {
-		self.catalog.lock().audio.remove(&self.name);
 	}
 }
 

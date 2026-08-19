@@ -137,24 +137,54 @@ fn h264_init() -> Vec<u8> {
 	init
 }
 
-fn publish_media(broadcast: u32, format: &[u8], init: &[u8], label: Option<&[u8]>) -> i32 {
-	let (label, label_len) = label
+fn label_ptr(label: Option<&[u8]>) -> (*const c_char, usize) {
+	label
 		.map(|label| (label.as_ptr() as *const c_char, label.len()))
-		.unwrap_or((std::ptr::null(), 0));
-	let config = moq_media_config {
-		format: format.as_ptr() as *const c_char,
-		format_len: format.len(),
-		init: if !init.is_empty() {
-			init.as_ptr()
-		} else {
-			std::ptr::null()
-		},
+		.unwrap_or((std::ptr::null(), 0))
+}
+
+fn init_ptr(init: &[u8]) -> *const u8 {
+	if init.is_empty() {
+		std::ptr::null()
+	} else {
+		init.as_ptr()
+	}
+}
+
+fn publish_audio(broadcast: u32, format: moq_audio_format, init: &[u8], label: Option<&[u8]>) -> i32 {
+	let (label, label_len) = label_ptr(label);
+	let config = moq_audio_init {
+		format: format as u32,
+		init: init_ptr(init),
 		init_len: init.len(),
 		label,
 		label_len,
 	};
 
-	unsafe { moq_publish_media(broadcast, &config) }
+	unsafe { moq_publish_audio(broadcast, &config) }
+}
+
+fn publish_video(broadcast: u32, format: moq_video_format, init: &[u8], label: Option<&[u8]>) -> i32 {
+	let (label, label_len) = label_ptr(label);
+	let config = moq_video_init {
+		format: format as u32,
+		init: init_ptr(init),
+		init_len: init.len(),
+		label,
+		label_len,
+	};
+
+	unsafe { moq_publish_video(broadcast, &config) }
+}
+
+fn publish_container(broadcast: u32, format: moq_container_format, init: &[u8]) -> i32 {
+	let config = moq_container_init {
+		format: format as u32,
+		init: init_ptr(init),
+		init_len: init.len(),
+	};
+
+	unsafe { moq_publish_container(broadcast, &config) }
 }
 
 #[test]
@@ -204,8 +234,8 @@ fn publish_media_lifecycle() {
 	}));
 
 	let init = opus_head();
-	let format = b"opus";
-	let media = id(publish_media(broadcast, format, &init, None));
+	let format = moq_audio_format::MOQ_AUDIO_FORMAT_OPUS;
+	let media = id(publish_audio(broadcast, format, &init, None));
 
 	let payload = b"opus frame";
 	let ret = unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), 1000) };
@@ -220,23 +250,42 @@ fn publish_media_rejects_a_null_config() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"publish-media-null-config");
 
-	assert!(unsafe { moq_publish_media(broadcast, std::ptr::null()) } < 0);
+	assert!(unsafe { moq_publish_audio(broadcast, std::ptr::null()) } < 0);
 
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A container publishes and describes its own tracks, so there is no single rendition for a label
-/// to name. Report that rather than accepting the call and dropping the label.
+/// A container gets its own handle space, so a handle from one entry point cannot be fed to the
+/// other's calls. That is what stops a container from being handed a frame timestamp it would drop.
 #[test]
-fn publish_media_rejects_a_label_on_a_container_format() {
+fn container_and_media_handles_are_not_interchangeable() {
 	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"publish-media-container-label");
+	let broadcast = publish_broadcast(origin, b"publish-container-handles");
 
-	assert!(publish_media(broadcast, b"fmp4", &[], Some(b"English")) < 0);
-	// The same container format is fine without one.
-	let media = id(publish_media(broadcast, b"fmp4", &[], None));
+	let container = id(publish_container(
+		broadcast,
+		moq_container_format::MOQ_CONTAINER_FORMAT_FMP4,
+		&[],
+	));
+	let media = id(publish_audio(
+		broadcast,
+		moq_audio_format::MOQ_AUDIO_FORMAT_OPUS,
+		&opus_head(),
+		None,
+	));
 
+	// Each handle is rejected by the other's calls rather than acted on.
+	assert!(
+		moq_publish_media_finish(container) < 0,
+		"a container is not a media track"
+	);
+	assert!(
+		moq_publish_container_finish(media) < 0,
+		"a media track is not a container"
+	);
+
+	assert_eq!(moq_publish_container_finish(container), 0);
 	assert_eq!(moq_publish_media_finish(media), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -263,10 +312,10 @@ fn publish_media_labels_config_without_naming_track() {
 	let broadcast = publish_broadcast(origin, path);
 
 	let init = opus_head();
-	let format = b"opus";
+	let format = moq_audio_format::MOQ_AUDIO_FORMAT_OPUS;
 	let label = b"English";
 
-	let media1 = id(publish_media(broadcast, format, &init, Some(label)));
+	let media1 = id(publish_audio(broadcast, format, &init, Some(label)));
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -296,7 +345,7 @@ fn publish_media_labels_config_without_naming_track() {
 		Some("English")
 	);
 
-	let media2 = id(publish_media(broadcast, format, &init, Some(label)));
+	let media2 = id(publish_audio(broadcast, format, &init, Some(label)));
 
 	let catalog_id2 = id(catalog_cb.recv());
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id2, 0, &mut audio_cfg) }, 0);
@@ -369,6 +418,112 @@ fn publish_catalog_config_invalid_broadcast() {
 	assert!(unsafe { moq_publish_audio_remove(0, name.as_ptr() as *const c_char, name.len()) } < 0);
 }
 
+/// An avc3 track has no catalog rendition until its first SPS arrives, but it owns the name from
+/// the moment it's published. Writing into that gap used to succeed, then get overwritten by the
+/// importer and deleted when the media handle finished, silently taking the caller's entry with it.
+#[test]
+fn publish_media_owns_its_rendition_before_the_first_keyframe() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"media-owns-its-rendition");
+
+	// Annex-B with an empty init, so the parameter sets arrive in band and the importer publishes
+	// nothing until a keyframe lands.
+	let media = id(publish_video(
+		broadcast,
+		moq_video_format::MOQ_VIDEO_FORMAT_AVC3,
+		&[],
+		None,
+	));
+
+	let name = "0.avc3";
+	let codec = "avc1.42c01e";
+	let video = moq_video_config {
+		name: name.as_ptr() as *const c_char,
+		name_len: name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		codec: codec.as_ptr() as *const c_char,
+		codec_len: codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: 0,
+		coded_height: 0,
+		container: moq_container::default(),
+	};
+	assert_eq!(
+		unsafe { moq_publish_video_config(broadcast, &video) },
+		-18,
+		"the media track owns 0.avc3 even before its config resolves"
+	);
+	assert_eq!(
+		unsafe { moq_publish_video_remove(broadcast, name.as_ptr() as *const c_char, name.len()) },
+		0,
+		"removing a name the caller never authored is a no-op"
+	);
+	assert_eq!(
+		unsafe { moq_publish_video_config(broadcast, &video) },
+		-18,
+		"and the no-op left the media track's rendition alone"
+	);
+
+	// Once the media handle is gone the name is free again.
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(
+		unsafe { moq_publish_video_config(broadcast, &video) },
+		0,
+		"finishing the media track releases its rendition name"
+	);
+
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A caller owns the renditions it authored, so re-declaring one refines it in place rather than
+/// failing, and removing one actually retires it.
+#[test]
+fn publish_video_config_replaces_its_own_rendition() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"catalog-config-replace");
+
+	let name = "authored";
+	let codec = "vp8";
+	let mut video = moq_video_config {
+		name: name.as_ptr() as *const c_char,
+		name_len: name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		codec: codec.as_ptr() as *const c_char,
+		codec_len: codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		coded_width: 640,
+		coded_height: 360,
+		container: moq_container::default(),
+	};
+
+	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
+	video.coded_width = 1920;
+	video.coded_height = 1080;
+	assert_eq!(
+		unsafe { moq_publish_video_config(broadcast, &video) },
+		0,
+		"a caller can refine a rendition it owns"
+	);
+
+	assert_eq!(
+		unsafe { moq_publish_video_remove(broadcast, name.as_ptr() as *const c_char, name.len()) },
+		0
+	);
+	assert_eq!(
+		unsafe { moq_publish_video_config(broadcast, &video) },
+		0,
+		"the name is free once the caller removes its rendition"
+	);
+
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn publish_catalog_config_null_pointer() {
 	let origin = id(moq_origin_create());
@@ -397,7 +552,7 @@ fn publish_catalog_roundtrip() {
 	let path = b"catalog-producer";
 	let broadcast = publish_broadcast(origin, path);
 
-	// Author the catalog directly instead of via moq_publish_media.
+	// Author the catalog directly instead of via moq_publish_video.
 	let video_name = "video";
 	let video_label = "Main camera";
 	let video_codec = "vp8";
@@ -1144,12 +1299,23 @@ fn raw_track_publish_consume() {
 	let consume = request_broadcast(origin, path);
 
 	let frame_cb = Callback::new();
+	// This round trip verifies every published frame. Allow the first group to
+	// finish draining if the second becomes visible while the callback runs.
+	let subscription = moq_subscription {
+		priority: 0,
+		ordered: false,
+		latency_max_ms: 1_000,
+		group_start: 0,
+		group_start_valid: false,
+		group_end: 0,
+		group_end_valid: false,
+	};
 	let consumer = id(unsafe {
 		moq_consume_track(
 			consume,
 			track_name.as_ptr() as *const c_char,
 			track_name.len(),
-			std::ptr::null(),
+			&subscription,
 			Some(channel_callback),
 			frame_cb.ptr,
 		)
@@ -1586,8 +1752,8 @@ fn double_close_all_resource_types() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"double-close-all-resource-types");
 	let init = opus_head();
-	let format = b"opus";
-	let media = id(publish_media(broadcast, format, &init, None));
+	let format = moq_audio_format::MOQ_AUDIO_FORMAT_OPUS;
+	let media = id(publish_audio(broadcast, format, &init, None));
 
 	assert_eq!(moq_publish_media_finish(media), 0);
 	assert!(moq_publish_media_finish(media) < 0);
@@ -1597,7 +1763,7 @@ fn double_close_all_resource_types() {
 	let path = b"double-close-test";
 	let broadcast = publish_broadcast(origin, path);
 	let init = opus_head();
-	let media = id(publish_media(broadcast, format, &init, None));
+	let media = id(publish_audio(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -1643,8 +1809,8 @@ fn media_cut_bounds_audio_groups() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"media-cut");
 	let init = opus_head();
-	let format = b"opus";
-	let media = id(publish_media(broadcast, format, &init, None));
+	let format = moq_audio_format::MOQ_AUDIO_FORMAT_OPUS;
+	let media = id(publish_audio(broadcast, format, &init, None));
 
 	let payload = b"test";
 	for i in 0..3u64 {
@@ -1679,9 +1845,17 @@ fn unknown_format() {
 		moq_publish_finish(broadcast);
 	}));
 
-	let format = b"nope";
-	let ret = publish_media(broadcast, format, &[], None);
-	assert!(ret < 0, "unknown format should fail");
+	// A format is an enum now, so the only bad value C can still supply is an out-of-range
+	// code. That must be an error rather than a transmute into an invalid discriminant.
+	let config = moq_audio_init {
+		format: 9999,
+		init: std::ptr::null(),
+		init_len: 0,
+		label: std::ptr::null(),
+		label_len: 0,
+	};
+	let ret = unsafe { moq_publish_audio(broadcast, &config) };
+	assert!(ret < 0, "an out-of-range format code should fail");
 }
 
 #[test]
@@ -1753,8 +1927,8 @@ fn local_publish_consume() {
 	let broadcast = publish_broadcast(origin, path);
 
 	let init = opus_head();
-	let format = b"opus";
-	let media = id(publish_media(broadcast, format, &init, None));
+	let format = moq_audio_format::MOQ_AUDIO_FORMAT_OPUS;
+	let media = id(publish_audio(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -1862,8 +2036,8 @@ fn consume_announced_local() {
 
 	let broadcast = publish_broadcast(origin, path);
 	let init = opus_head();
-	let format = b"opus";
-	let media = id(publish_media(broadcast, format, &init, None));
+	let format = moq_audio_format::MOQ_AUDIO_FORMAT_OPUS;
+	let media = id(publish_audio(broadcast, format, &init, None));
 
 	// First the broadcast handle, then a terminal 0 once the wait finishes.
 	let consume = id(cb.recv());
@@ -1900,6 +2074,103 @@ fn consume_announced_local() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A catalog rendition may name a sibling broadcast (`./source`), and the track then lives
+/// there, not on the broadcast the catalog came from. Ignoring the reference subscribes on the
+/// catalog's own broadcast: `NotFound`, or a same-named local track with mismatched metadata.
+#[test]
+fn consume_audio_follows_a_sibling_broadcast_reference() {
+	let origin = id(moq_origin_create());
+
+	// Only the sibling serves the track; the catalog broadcast just describes it.
+	let source = publish_broadcast(origin, b"a/source");
+	let init = opus_head();
+	let media = id(publish_audio(
+		source,
+		moq_audio_format::MOQ_AUDIO_FORMAT_OPUS,
+		&init,
+		None,
+	));
+
+	// The importer picks the track name, and the catalog rendition must key on the same one.
+	let name = {
+		let mut state = State::lock();
+		let (_, catalog) = state.publish.pair_mut(Id::try_from(source).unwrap()).unwrap();
+		let catalog = catalog.lock();
+		catalog
+			.audio
+			.renditions
+			.keys()
+			.next()
+			.expect("the importer publishes one audio rendition")
+			.clone()
+	};
+
+	let broadcast = publish_broadcast(origin, b"a/pub");
+	let codec = "opus";
+	let config = moq_audio_config {
+		name: name.as_ptr() as *const c_char,
+		name_len: name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		codec: codec.as_ptr() as *const c_char,
+		codec_len: codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		sample_rate: 48000,
+		channel_count: 2,
+		container: moq_container::default(),
+	};
+	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &config) }, 0);
+
+	// The C config struct has no broadcast field, so point the rendition at the sibling here.
+	{
+		let mut state = State::lock();
+		let (_, catalog) = state.publish.pair_mut(Id::try_from(broadcast).unwrap()).unwrap();
+		catalog.lock().audio.renditions.get_mut(&name).unwrap().broadcast =
+			Some(moq_net::PathRelative::new("./source").into_owned());
+	}
+
+	let consume = request_broadcast(origin, b"a/pub");
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+
+	let frame_cb = Callback::new();
+	let track = id(unsafe { moq_consume_audio(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
+
+	// Published on the sibling, so it only arrives if the reference was followed.
+	let payload = b"opus audio payload data";
+	let timestamp_us: u64 = 1_000_000;
+	assert_eq!(
+		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), timestamp_us) },
+		0
+	);
+
+	let frame_id = id(frame_cb.recv());
+	let mut frame = moq_frame {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp_us: 0,
+		keyframe: false,
+	};
+	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
+	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
+	assert_eq!(received, payload, "the sibling broadcast's frame should arrive");
+	assert_eq!(frame.timestamp_us, timestamp_us);
+
+	assert_eq!(moq_consume_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_audio_close(track), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_finish(source), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn consume_announced_close_cancels() {
 	let origin = id(moq_origin_create());
@@ -1931,8 +2202,8 @@ fn video_publish_consume() {
 	let broadcast = publish_broadcast(origin, path);
 
 	let init = h264_init();
-	let format = b"avc3";
-	let media = id(publish_media(broadcast, format, &init, None));
+	let format = moq_video_format::MOQ_VIDEO_FORMAT_AVC3;
+	let media = id(publish_video(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -2034,7 +2305,7 @@ fn audio_raw_publish() {
 
 	let name = b"audio";
 	let input = moq_audio_encoder_input {
-		format: moq_audio_format::MOQ_AUDIO_FORMAT_F32 as u32,
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
 		sample_rate: 48_000,
 		channels: 2,
 	};
@@ -2048,7 +2319,7 @@ fn audio_raw_publish() {
 		frame_duration_ms: 20,
 	};
 	let producer =
-		id(unsafe { moq_publish_audio_raw(broadcast, name.as_ptr() as *const c_char, name.len(), &input, &output) });
+		id(unsafe { moq_encode_audio(broadcast, name.as_ptr() as *const c_char, name.len(), &input, &output) });
 
 	// 20 ms of silence: interleaved stereo f32 at 48 kHz, one encoded frame's worth.
 	let samples = vec![0.0f32; 960 * 2];
@@ -2058,12 +2329,12 @@ fn audio_raw_publish() {
 		data: pcm.as_ptr(),
 		data_size: pcm.len(),
 	};
-	assert_eq!(unsafe { moq_publish_audio_raw_frame(producer, &frame) }, 0);
+	assert_eq!(unsafe { moq_encode_audio_frame(producer, &frame) }, 0);
 
-	assert_eq!(moq_publish_audio_raw_finish(producer), 0);
-	assert!(moq_publish_audio_raw_finish(producer) < 0, "double-finish should fail");
+	assert_eq!(moq_encode_audio_finish(producer), 0);
+	assert!(moq_encode_audio_finish(producer) < 0, "double-finish should fail");
 	assert!(
-		unsafe { moq_publish_audio_raw_frame(producer, &frame) } < 0,
+		unsafe { moq_encode_audio_frame(producer, &frame) } < 0,
 		"a finished producer should take no more frames"
 	);
 
@@ -2077,8 +2348,8 @@ fn gray_rgba(width: u32, height: u32) -> Vec<u8> {
 }
 
 /// The publish-side mirror of [`video_raw_decode`]: hand raw RGBA to
-/// `moq_publish_video_raw` and read decoded I420 back out of
-/// `moq_consume_video_raw`, so the encode and decode halves meet on the wire.
+/// `moq_encode_video` and read decoded I420 back out of
+/// `moq_decode_video`, so the encode and decode halves meet on the wire.
 #[test]
 fn video_raw_publish_consume() {
 	let origin = id(moq_origin_create());
@@ -2101,7 +2372,7 @@ fn video_raw_publish_consume() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_publish_video_raw(broadcast, &input, &output) });
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output) });
 
 	let rgba = gray_rgba(320, 240);
 	let publish = |index: u64| {
@@ -2110,12 +2381,12 @@ fn video_raw_publish_consume() {
 			data: rgba.as_ptr(),
 			data_size: rgba.len(),
 		};
-		assert_eq!(unsafe { moq_publish_video_raw_frame(producer, &frame) }, 0);
+		assert_eq!(unsafe { moq_encode_video_frame(producer, &frame) }, 0);
 	};
 
 	// The catalog rendition only exists once the importer has parsed the codec
 	// config out of an encoded keyframe, so publish before subscribing.
-	assert_eq!(moq_publish_video_raw_cut(producer), 0);
+	assert_eq!(moq_encode_video_cut(producer), 0);
 	for i in 0..5u64 {
 		publish(i);
 	}
@@ -2127,7 +2398,7 @@ fn video_raw_publish_consume() {
 
 	let decoder = moq_video_decoder_output { latency_max_ms: 10_000 };
 	let frame_cb = Callback::new();
-	let consumer = id(unsafe { moq_consume_video_raw(catalog_id, 0, &decoder, Some(channel_callback), frame_cb.ptr) });
+	let consumer = id(unsafe { moq_decode_video(catalog_id, 0, &decoder, Some(channel_callback), frame_cb.ptr) });
 
 	// Keep feeding the encoder so the subscriber has frames to decode after it
 	// joins, whatever the group boundary it landed on.
@@ -2143,17 +2414,17 @@ fn video_raw_publish_consume() {
 		data: std::ptr::null(),
 		data_size: 0,
 	};
-	assert_eq!(unsafe { moq_consume_video_raw_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(frame.width, 320);
 	assert_eq!(frame.height, 240);
 	assert_eq!(frame.data_size, 320 * 240 * 3 / 2, "tightly-packed I420");
 
-	assert_eq!(moq_consume_video_raw_frame_free(frame_id), 0);
-	assert_eq!(moq_consume_video_raw_close(consumer), 0);
+	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
+	assert_eq!(moq_decode_video_close(consumer), 0);
 	loop {
 		let code = frame_cb.recv();
 		if code > 0 {
-			assert_eq!(moq_consume_video_raw_frame_free(id(code)), 0);
+			assert_eq!(moq_decode_video_frame_free(id(code)), 0);
 		} else {
 			assert_eq!(code, 0, "raw video close delivers terminal 0");
 			break;
@@ -2164,7 +2435,7 @@ fn video_raw_publish_consume() {
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_video_raw_finish(producer), 0);
+	assert_eq!(moq_encode_video_finish(producer), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -2197,7 +2468,7 @@ fn video_raw_publish_from_many_threads() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_publish_video_raw(broadcast, &input, &output) });
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output) });
 
 	// A fresh caller thread per frame, never the one that published.
 	let rgba = std::sync::Arc::new(gray_rgba(320, 240));
@@ -2205,22 +2476,22 @@ fn video_raw_publish_from_many_threads() {
 		let rgba = rgba.clone();
 		std::thread::spawn(move || {
 			if i == 0 {
-				assert_eq!(moq_publish_video_raw_cut(producer), 0);
+				assert_eq!(moq_encode_video_cut(producer), 0);
 			}
 			let frame = moq_video_encoder_frame {
 				timestamp_us: i * 33_333,
 				data: rgba.as_ptr(),
 				data_size: rgba.len(),
 			};
-			assert_eq!(unsafe { moq_publish_video_raw_frame(producer, &frame) }, 0);
-			assert_eq!(moq_publish_video_raw_bitrate(producer, 900_000 - i), 0);
+			assert_eq!(unsafe { moq_encode_video_frame(producer, &frame) }, 0);
+			assert_eq!(moq_encode_video_bitrate(producer, 900_000 - i), 0);
 		})
 		.join()
 		.unwrap();
 	}
 
 	// ...and finished, so the encoder is drained and dropped, from yet another.
-	std::thread::spawn(move || assert_eq!(moq_publish_video_raw_finish(producer), 0))
+	std::thread::spawn(move || assert_eq!(moq_encode_video_finish(producer), 0))
 		.join()
 		.unwrap();
 
@@ -2235,7 +2506,7 @@ fn publish_gray(producer: u32, rgba: &[u8]) -> i32 {
 		data: rgba.as_ptr(),
 		data_size: rgba.len(),
 	};
-	unsafe { moq_publish_video_raw_frame(producer, &frame) }
+	unsafe { moq_encode_video_frame(producer, &frame) }
 }
 
 /// Regression: an encode is a round trip to the codec thread, and a wedged codec
@@ -2266,8 +2537,8 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let stalled = id(unsafe { moq_publish_video_raw(broadcast, &input, &output) });
-	let other = id(unsafe { moq_publish_video_raw(broadcast, &input, &output) });
+	let stalled = id(unsafe { moq_encode_video(broadcast, &input, &output) });
+	let other = id(unsafe { moq_encode_video(broadcast, &input, &output) });
 
 	// Hold the lock a publish takes for the duration of its encode.
 	let handle = State::lock().video.producer(Id::try_from(stalled).unwrap()).unwrap();
@@ -2318,8 +2589,8 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 	assert_eq!(stalling.join().unwrap(), 0);
 
 	assert_eq!(moq_origin_close(id(created)), 0);
-	assert_eq!(moq_publish_video_raw_finish(stalled), 0);
-	assert_eq!(moq_publish_video_raw_finish(other), 0);
+	assert_eq!(moq_encode_video_finish(stalled), 0);
+	assert_eq!(moq_encode_video_finish(other), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -2345,7 +2616,7 @@ fn video_raw_publish_rejects_frame_size_mismatch() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_publish_video_raw(broadcast, &input, &output) });
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output) });
 
 	// A 640x480 buffer against a 320x240 encoder: the frame carries no dimensions
 	// of its own, so this is caught as a wrong-sized picture.
@@ -2355,9 +2626,9 @@ fn video_raw_publish_rejects_frame_size_mismatch() {
 		data: rgba.as_ptr(),
 		data_size: rgba.len(),
 	};
-	assert!(unsafe { moq_publish_video_raw_frame(producer, &frame) } < 0);
+	assert!(unsafe { moq_encode_video_frame(producer, &frame) } < 0);
 
-	assert_eq!(moq_publish_video_raw_finish(producer), 0);
+	assert_eq!(moq_encode_video_finish(producer), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -2384,20 +2655,20 @@ fn video_raw_publish_rejects_invalid_config() {
 		encoder_len: 0,
 	};
 
-	assert!(unsafe { moq_publish_video_raw(broadcast, std::ptr::null(), &valid_output) } < 0);
-	assert!(unsafe { moq_publish_video_raw(broadcast, &valid_input, std::ptr::null()) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, std::ptr::null(), &valid_output) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &valid_input, std::ptr::null()) } < 0);
 
 	let bad_format = moq_video_encoder_input {
 		format: 99,
 		..valid_input
 	};
-	assert!(unsafe { moq_publish_video_raw(broadcast, &bad_format, &valid_output) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &bad_format, &valid_output) } < 0);
 
 	let zero_framerate = moq_video_encoder_input {
 		framerate: 0,
 		..valid_input
 	};
-	assert!(unsafe { moq_publish_video_raw(broadcast, &zero_framerate, &valid_output) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &zero_framerate, &valid_output) } < 0);
 
 	// Regression: dimensions arrive as a raw `u32` pair, and their product used to
 	// overflow the default-bitrate estimate inside the encoder. A panic here is an
@@ -2408,7 +2679,7 @@ fn video_raw_publish_rejects_invalid_config() {
 		height: u32::MAX - 1,
 		..valid_input
 	};
-	assert!(unsafe { moq_publish_video_raw(broadcast, &unrepresentable, &valid_output) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &unrepresentable, &valid_output) } < 0);
 
 	// A size no encoder can take, but whose arithmetic is fine, is the backend's
 	// call rather than the boundary's: it must not be swept up by the check above.
@@ -2419,9 +2690,9 @@ fn video_raw_publish_rejects_invalid_config() {
 		height: 65534,
 		..valid_input
 	};
-	let huge = unsafe { moq_publish_video_raw(broadcast, &merely_huge, &valid_output) };
+	let huge = unsafe { moq_encode_video(broadcast, &merely_huge, &valid_output) };
 	if huge > 0 {
-		assert_eq!(moq_publish_video_raw_finish(id(huge)), 0);
+		assert_eq!(moq_encode_video_finish(id(huge)), 0);
 	} else {
 		let reason = unsafe { std::ffi::CStr::from_ptr(moq_error()) }.to_str().unwrap();
 		assert!(
@@ -2434,25 +2705,25 @@ fn video_raw_publish_rejects_invalid_config() {
 		codec: 99,
 		..valid_output
 	};
-	assert!(unsafe { moq_publish_video_raw(broadcast, &valid_input, &bad_codec) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &valid_input, &bad_codec) } < 0);
 
 	let bad_kind = moq_video_encoder_output {
 		kind: 99,
 		..valid_output
 	};
-	assert!(unsafe { moq_publish_video_raw(broadcast, &valid_input, &bad_kind) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &valid_input, &bad_kind) } < 0);
 
 	// Handles for a producer that was never created.
-	assert!(moq_publish_video_raw_cut(0) < 0);
-	assert!(moq_publish_video_raw_bitrate(0, 1_000_000) < 0);
-	assert!(moq_publish_video_raw_finish(0) < 0);
+	assert!(moq_encode_video_cut(0) < 0);
+	assert!(moq_encode_video_bitrate(0, 1_000_000) < 0);
+	assert!(moq_encode_video_finish(0) < 0);
 
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
 /// End-to-end native decode: publish real H.264 (encoded by moq-video) and
-/// consume it through `moq_consume_video_raw`, asserting decoded I420 frames.
+/// consume it through `moq_decode_video`, asserting decoded I420 frames.
 #[test]
 fn video_raw_decode() {
 	// Encode a few gray frames to Annex-B (avc3, SPS/PPS inline on the keyframe).
@@ -2479,8 +2750,8 @@ fn video_raw_decode() {
 	// The init's SPS/PPS only seed catalog metadata; avc3 frames carry their own
 	// inline parameter sets, so the decoder reads the true 320x240 from the wire.
 	let init = h264_init();
-	let format = b"avc3";
-	let media = id(publish_media(broadcast, format, &init, None));
+	let format = moq_video_format::MOQ_VIDEO_FORMAT_AVC3;
+	let media = id(publish_video(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -2490,7 +2761,7 @@ fn video_raw_decode() {
 	// Subscribe + decode before publishing frames so the keyframe group is delivered.
 	let output = moq_video_decoder_output { latency_max_ms: 10_000 };
 	let frame_cb = Callback::new();
-	let consumer = id(unsafe { moq_consume_video_raw(catalog_id, 0, &output, Some(channel_callback), frame_cb.ptr) });
+	let consumer = id(unsafe { moq_decode_video(catalog_id, 0, &output, Some(channel_callback), frame_cb.ptr) });
 
 	for (i, frame) in frames.iter().enumerate() {
 		assert_eq!(
@@ -2508,20 +2779,20 @@ fn video_raw_decode() {
 		data: std::ptr::null(),
 		data_size: 0,
 	};
-	assert_eq!(unsafe { moq_consume_video_raw_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(frame.width, 320);
 	assert_eq!(frame.height, 240);
 	assert_eq!(frame.data_size, 320 * 240 * 3 / 2, "tightly-packed I420");
 	assert!(!frame.data.is_null());
 
-	assert_eq!(moq_consume_video_raw_frame_free(frame_id), 0);
-	assert_eq!(moq_consume_video_raw_close(consumer), 0);
+	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
+	assert_eq!(moq_decode_video_close(consumer), 0);
 
 	// Drain any other decoded frames already queued, then expect the terminal 0.
 	loop {
 		let code = frame_cb.recv();
 		if code > 0 {
-			assert_eq!(moq_consume_video_raw_frame_free(id(code)), 0);
+			assert_eq!(moq_decode_video_frame_free(id(code)), 0);
 		} else {
 			assert_eq!(code, 0, "raw video close delivers terminal 0");
 			break;
@@ -2553,8 +2824,8 @@ fn multiple_frames_ordering() {
 	let broadcast = publish_broadcast(origin, path);
 
 	let init = opus_head();
-	let format = b"opus";
-	let media = id(publish_media(broadcast, format, &init, None));
+	let format = moq_audio_format::MOQ_AUDIO_FORMAT_OPUS;
+	let media = id(publish_audio(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -2613,8 +2884,8 @@ fn catalog_update_on_new_track() {
 	let broadcast = publish_broadcast(origin, path);
 
 	let init = opus_head();
-	let format = b"opus";
-	let media1 = id(publish_media(broadcast, format, &init, None));
+	let format = moq_audio_format::MOQ_AUDIO_FORMAT_OPUS;
+	let media1 = id(publish_audio(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -2637,7 +2908,7 @@ fn catalog_update_on_new_track() {
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id1, 0, &mut audio_cfg) }, 0);
 	assert!(unsafe { moq_consume_audio_config(catalog_id1, 1, &mut audio_cfg) } < 0);
 
-	let media2 = id(publish_media(broadcast, format, &init, None));
+	let media2 = id(publish_audio(broadcast, format, &init, None));
 
 	let catalog_id2 = id(catalog_cb.recv());
 

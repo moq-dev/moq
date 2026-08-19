@@ -313,6 +313,11 @@ pub struct SinkSession {
 	/// Set by [`Self::gated_bi`]. `None` parks `open_bi` itself forever, which is all
 	/// a test driving only uni streams needs.
 	bi_gate: Option<kio::Consumer<bool>>,
+	/// Set by [`Self::gated_uni`] to hold unidirectional stream writes.
+	uni_gate: Option<kio::Consumer<bool>>,
+	/// Set by [`Self::gated_open_uni`] to withhold unidirectional stream credit.
+	uni_open_gate: Option<kio::Consumer<bool>>,
+	uni_open_park: kio::Park,
 	/// The ALPN to report, for a test that needs a specific negotiated version rather
 	/// than the SETUP-negotiated fallback an absent one selects.
 	protocol: Option<&'static str>,
@@ -323,6 +328,9 @@ impl SinkSession {
 		Self {
 			log,
 			bi_gate: None,
+			uni_gate: None,
+			uni_open_gate: None,
+			uni_open_park: kio::Park::default(),
 			protocol: None,
 		}
 	}
@@ -342,6 +350,33 @@ impl SinkSession {
 		Self {
 			log: Log::default(),
 			bi_gate: Some(gate),
+			uni_gate: None,
+			uni_open_gate: None,
+			uni_open_park: kio::Park::default(),
+			protocol: None,
+		}
+	}
+
+	/// Open unidirectional streams immediately, holding their writes until `gate` opens.
+	pub fn gated_uni(gate: kio::Consumer<bool>) -> Self {
+		Self {
+			log: Log::default(),
+			bi_gate: None,
+			uni_gate: Some(gate),
+			uni_open_gate: None,
+			uni_open_park: kio::Park::default(),
+			protocol: None,
+		}
+	}
+
+	/// Hold unidirectional stream opens until `gate` grants stream credit.
+	pub fn gated_open_uni(gate: kio::Consumer<bool>) -> Self {
+		Self {
+			log: Log::default(),
+			bi_gate: None,
+			uni_gate: None,
+			uni_open_gate: Some(gate),
+			uni_open_park: kio::Park::default(),
 			protocol: None,
 		}
 	}
@@ -375,8 +410,18 @@ impl poll::Session for SinkSession {
 		Poll::Ready(Ok((send, PendingRecv)))
 	}
 
-	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
-		Poll::Ready(Ok(SinkSend::new(self.log.clone())))
+	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+		if let Some(gate) = &self.uni_open_gate {
+			let waiter = self.uni_open_park.hold(cx);
+			match gate.poll(waiter, |open| (**open).then_some(()).map_or(Poll::Pending, Poll::Ready)) {
+				Poll::Ready(Ok(())) => {}
+				Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
+			}
+		}
+		Poll::Ready(Ok(match &self.uni_gate {
+			Some(gate) => SinkSend::gated(self.log.clone(), gate.clone()),
+			None => SinkSend::new(self.log.clone()),
+		}))
 	}
 
 	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {

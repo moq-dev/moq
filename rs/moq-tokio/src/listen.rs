@@ -106,18 +106,18 @@ pub struct Config {
 	pub lb_nonce: Option<usize>,
 
 	/// The released `--server-*` spellings and their env vars, kept parsing but
-	/// hidden. Folded into the canonical fields by [`Config::resolved`].
+	/// hidden. Never read as settings: [`Config::deprecated`] names what replaced
+	/// each one so a process can say so and stop.
 	#[command(flatten)]
 	#[serde(skip)]
 	pub(crate) legacy: Legacy,
 
 	/// The released `[server.quic]` table, which is now the shared top-level
-	/// `[quic]`. Parse-only: a caller folds it in (moq-relay's `Config::resolve`
-	/// does), since this side no longer owns transport tuning.
+	/// `[quic]`.
 	///
-	/// Kept as a field rather than dropped because `deny_unknown_fields` would
-	/// otherwise refuse a released config file outright, at startup, with nothing
-	/// running.
+	/// Parsed only so [`deprecated`](Self::deprecated) can name the replacement;
+	/// `deny_unknown_fields` would otherwise refuse the file with nothing to
+	/// migrate to.
 	#[arg(skip)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub quic: Option<crate::quic::Config>,
@@ -185,92 +185,85 @@ pub(crate) struct Legacy {
 }
 
 impl Legacy {
-	/// The legacy flags in use, each paired with its replacement, for one warning.
-	fn used(&self) -> Vec<&'static str> {
-		let mut used = Vec::new();
+	/// The released spellings in use, each paired with what replaced it.
+	fn deprecated(&self) -> crate::Deprecated {
+		let mut found = crate::Deprecated::default();
 		if self.bind.is_some() {
-			used.push("--server-bind -> --listen");
+			found.flag("--server-bind", Some("MOQ_SERVER_BIND"), "--listen / MOQ_LISTEN");
 		}
 		if self.backend.is_some() {
-			used.push("--server-backend -> --listen-backend");
+			found.flag(
+				"--server-backend",
+				Some("MOQ_SERVER_BACKEND"),
+				"--listen-backend / MOQ_LISTEN_BACKEND",
+			);
 		}
 		if !self.version.is_empty() {
-			used.push("--server-version -> --listen-version");
+			found.flag(
+				"--server-version",
+				Some("MOQ_SERVER_VERSION"),
+				"--listen-version / MOQ_LISTEN_VERSION",
+			);
 		}
 		if self.preferred_v4.is_some() {
-			used.push("--server-preferred-v4 -> --listen-preferred-v4");
+			found.flag(
+				"--server-preferred-v4",
+				Some("MOQ_SERVER_PREFERRED_V4"),
+				"--listen-preferred-v4 / MOQ_LISTEN_PREFERRED_V4",
+			);
 		}
 		if self.preferred_v6.is_some() {
-			used.push("--server-preferred-v6 -> --listen-preferred-v6");
+			found.flag(
+				"--server-preferred-v6",
+				Some("MOQ_SERVER_PREFERRED_V6"),
+				"--listen-preferred-v6 / MOQ_LISTEN_PREFERRED_V6",
+			);
 		}
 		if self.lb_id.is_some() {
-			used.push("--server-quic-lb-id -> --listen-quic-lb-id");
+			found.flag(
+				"--server-quic-lb-id",
+				Some("MOQ_SERVER_QUIC_LB_ID"),
+				"--listen-quic-lb-id / MOQ_LISTEN_QUIC_LB_ID",
+			);
 		}
 		if self.lb_nonce.is_some() {
-			used.push("--server-quic-lb-nonce -> --listen-quic-lb-nonce");
+			found.flag(
+				"--server-quic-lb-nonce",
+				Some("MOQ_SERVER_QUIC_LB_NONCE"),
+				"--listen-quic-lb-nonce / MOQ_LISTEN_QUIC_LB_NONCE",
+			);
 		}
-		used
+		found
 	}
 }
 
 impl Config {
-	/// Fold every released `--server-*` spelling into the canonical fields.
+	/// Every released spelling this config was parsed from, across this section and
+	/// the TLS, TCP, and Unix ones it owns, each paired with what replaced it.
 	///
-	/// The canonical spelling wins. Warns once when a legacy spelling contributed.
-	/// Idempotent, and applied automatically by [`init`](Self::init), so calling it
-	/// yourself is only needed to inspect the folded values.
-	pub fn resolved(&self) -> Self {
-		let used = self.legacy.used();
-		if !used.is_empty() {
-			tracing::warn!(
-				"deprecated --server-* flags in use; the accept side is now --listen-*: {}",
-				used.join(", ")
-			);
+	/// A binary checks this before anything else and exits when it isn't empty. The
+	/// old spellings are parsed so the process can name their replacement, not so it
+	/// can honor them: [`crate::Server::new`] rejects them too, so a config that
+	/// skipped the check can't reach a listener that quietly ignored half of it.
+	pub fn deprecated(&self) -> crate::Deprecated {
+		let mut found = self.legacy.deprecated();
+		if self.quic.is_some() {
+			found.toml("[server.quic]", "[quic]", Some("now applies to both directions"));
 		}
-		let legacy = &self.legacy;
-
-		let mut resolved = self.clone();
-		resolved.bind = self.bind.clone().or(legacy.bind.clone());
-		resolved.backend = self.backend.clone().or(legacy.backend.clone());
-		// Concatenated, not replaced: each spelling is its own list of versions to
-		// accept, and dropping one would narrow what the listener takes.
-		for version in &legacy.version {
-			if !resolved.version.contains(version) {
-				resolved.version.push(*version);
-			}
-		}
-		resolved.preferred_v4 = self.preferred_v4.or(legacy.preferred_v4);
-		resolved.preferred_v6 = self.preferred_v6.or(legacy.preferred_v6);
-		resolved.lb_id = self.lb_id.clone().or(legacy.lb_id.clone());
-		resolved.lb_nonce = self.lb_nonce.or(legacy.lb_nonce);
-		resolved.tls = self.tls.resolved();
+		found.extend(self.tls.deprecated());
 		#[cfg(feature = "tcp")]
-		{
-			resolved.tcp = self.tcp.resolved();
-		}
+		found.extend(self.tcp.deprecated());
 		#[cfg(all(feature = "uds", unix))]
-		{
-			resolved.unix = self.unix.resolved();
-		}
-		resolved.legacy = Legacy::default();
-		resolved
-	}
-
-	/// Take the released `[server.quic]` table, if a config file carried one.
-	pub fn take_quic(&mut self) -> Option<crate::quic::Config> {
-		self.quic.take().inspect(|_| {
-			tracing::warn!("[server.quic] is deprecated; QUIC tuning is now the shared top-level [quic]");
-		})
+		found.extend(self.unix.deprecated());
+		found
 	}
 
 	/// Reject a QUIC-LB nonce with no server id to pair it with.
 	///
 	/// Checked here rather than with clap's `requires`, which can only name one arg
-	/// id: the two knobs each have a released spelling of their own, so any mix of
-	/// the four has to be judged after the fold.
+	/// id, and the nonce reaches this config from a TOML file as well as the flag.
 	pub(crate) fn validate(&self) -> crate::Result<()> {
-		let resolved = self.resolved();
-		match (resolved.lb_id.is_some(), resolved.lb_nonce.is_some()) {
+		match (self.lb_id.is_some(), self.lb_nonce.is_some()) {
 			(false, true) => Err(crate::Error::LbNonceWithoutId),
 			_ => Ok(()),
 		}
@@ -298,10 +291,11 @@ mod tests {
 		Cli::parse_from(args).config
 	}
 
-	/// Every released `--server-*` spelling keeps parsing, so an existing
-	/// deployment's command line still boots.
+	/// Every released `--server-*` spelling keeps parsing, so the process can name
+	/// its replacement rather than leave clap reporting an unexpected argument.
+	/// None of them configure anything.
 	#[test]
-	fn released_server_spellings_still_parse() {
+	fn released_server_spellings_are_reported_not_applied() {
 		let config = config_from([
 			"test",
 			"--server-bind",
@@ -316,53 +310,48 @@ mod tests {
 			"/tmp/cert.pem",
 			"--server-tls-root",
 			"/tmp/ca.pem",
-		])
-		.resolved();
-		assert_eq!(config.bind.as_deref(), Some("[::]:4443"));
-		assert_eq!(config.version, vec!["moq-lite-03".parse::<moq_net::Version>().unwrap()]);
-		assert_eq!(config.preferred_v4, Some("192.0.2.1:443".parse().unwrap()));
-		assert!(config.lb_id.is_some());
-		assert_eq!(config.tls.cert, vec![std::path::PathBuf::from("/tmp/cert.pem")]);
-		assert_eq!(config.tls.root, vec![std::path::PathBuf::from("/tmp/ca.pem")]);
+		]);
+		assert_eq!(config.bind, None);
+		assert!(config.version.is_empty());
+		assert_eq!(config.preferred_v4, None);
+		assert!(config.lb_id.is_none());
+		assert!(config.tls.cert.is_empty());
+		assert!(config.tls.root.is_empty());
+
+		let reported = config.deprecated().to_string();
+		for line in [
+			"--server-bind / MOQ_SERVER_BIND -> --listen / MOQ_LISTEN",
+			"--server-version / MOQ_SERVER_VERSION -> --listen-version / MOQ_LISTEN_VERSION",
+			"--server-preferred-v4 / MOQ_SERVER_PREFERRED_V4 -> --listen-preferred-v4 / MOQ_LISTEN_PREFERRED_V4",
+			"--server-quic-lb-id / MOQ_SERVER_QUIC_LB_ID -> --listen-quic-lb-id / MOQ_LISTEN_QUIC_LB_ID",
+			"--tls-cert / MOQ_SERVER_TLS_CERT -> --listen-tls-cert / MOQ_LISTEN_TLS_CERT",
+			"--server-tls-root / MOQ_SERVER_TLS_ROOT -> --listen-tls-root / MOQ_LISTEN_TLS_ROOT",
+		] {
+			assert!(reported.contains(line), "missing {line:?} from {reported}");
+		}
 	}
 
-	/// The canonical spelling wins, and folding twice changes nothing.
+	/// A `--listen` next to the spelling it replaced is still refused: honoring one
+	/// half of a command line and refusing the other is how a deployment ends up
+	/// running on settings nobody wrote.
 	#[test]
-	fn canonical_wins_over_legacy() {
+	fn a_canonical_spelling_does_not_excuse_a_released_one() {
 		let config = config_from(["test", "--listen", "[::]:443", "--server-bind", "[::]:4443"]);
-		let once = config.resolved();
-		assert_eq!(once.bind.as_deref(), Some("[::]:443"));
-		assert_eq!(once.resolved().bind.as_deref(), Some("[::]:443"));
+		assert_eq!(config.bind.as_deref(), Some("[::]:443"));
+		assert!(config.deprecated().to_string().contains("--server-bind"));
+
+		let config = config_from(["test", "--listen", "[::]:443"]);
+		assert!(config.deprecated().is_empty());
 	}
 
-	/// Both spellings name their own files, so neither list may be dropped.
-	#[test]
-	fn tls_lists_concatenate_across_spellings() {
-		let config = config_from([
-			"test",
-			"--listen-tls-root",
-			"/tmp/new.pem",
-			"--server-tls-root",
-			"/tmp/old.pem",
-		])
-		.resolved();
-		assert_eq!(
-			config.tls.root,
-			vec![
-				std::path::PathBuf::from("/tmp/new.pem"),
-				std::path::PathBuf::from("/tmp/old.pem")
-			]
-		);
-	}
-
-	/// A nonce with no server id is meaningless, whichever spelling each came from.
+	/// A nonce with no server id is meaningless. Checked here rather than with a
+	/// clap `requires`, which can only name one arg id and never sees a TOML file.
 	#[test]
 	fn lb_nonce_needs_an_id() {
 		let config = config_from(["test", "--listen-quic-lb-nonce", "8"]);
 		assert!(matches!(config.validate(), Err(crate::Error::LbNonceWithoutId)));
 
-		// Mixed spellings still pair up, which is what clap `requires` could not do.
-		let config = config_from(["test", "--server-quic-lb-id", "ab", "--listen-quic-lb-nonce", "8"]);
+		let config = config_from(["test", "--listen-quic-lb-id", "ab", "--listen-quic-lb-nonce", "8"]);
 		assert!(config.validate().is_ok());
 	}
 

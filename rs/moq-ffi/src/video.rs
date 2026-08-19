@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
 use crate::producer::MoqBroadcastProducer;
 
@@ -283,7 +284,7 @@ impl MoqBroadcastProducer {
 	/// codec (`.avc3` / `.hev1`) and its catalog rendition is published
 	/// immediately, read out of the encoder rather than guessed, so a subscriber
 	/// can find the track before a frame is written to it.
-	pub fn publish_video(
+	pub fn encode_video(
 		&self,
 		input: MoqVideoEncoderInput,
 		output: MoqVideoEncoderOutput,
@@ -319,5 +320,199 @@ impl MoqBroadcastProducer {
 				size: config.size(),
 			})),
 		}))
+	}
+}
+
+/// How a subscriber wants decoded video delivered.
+///
+/// Frames always arrive as tightly-packed I420 (Y, then U, then V, no row
+/// padding), so there is no pixel format to choose: a decoder's native output is
+/// flattened to CPU I420 at delivery, since the FFI boundary can't hand back a
+/// GPU surface.
+#[derive(Clone, uniffi::Record)]
+pub struct MoqVideoDecoderOutput {
+	/// Ask the decoder to emit frames at this size instead of the stream's
+	/// native one. Best effort: a backend with a built-in scaler honors it for
+	/// free, others ignore it, so read each frame's own dimensions rather than
+	/// assuming this took. Both dimensions must be even.
+	#[uniffi(default = None)]
+	pub resize: Option<crate::media::MoqDimensions>,
+	/// Upper bound on buffering before skipping a stalled group, in
+	/// milliseconds. Same knob as
+	/// [`MoqAudioDecoderOutput::latency_max_ms`](crate::audio::MoqAudioDecoderOutput::latency_max_ms).
+	/// `None` keeps the moq-mux default of zero (skip aggressively).
+	#[uniffi(default = None)]
+	pub latency_max_ms: Option<u64>,
+}
+
+/// One decoded video frame: packed I420 plus the size it actually decoded to.
+///
+/// Unlike [`MoqVideoFrame`] on the publish side, this carries dimensions: there
+/// they are fixed by the encoder config, here they are whatever the stream
+/// turned out to be, and `resize` is only best effort.
+#[derive(uniffi::Record)]
+pub struct MoqVideoDecodedFrame {
+	/// Presentation timestamp, in microseconds.
+	pub timestamp_us: u64,
+	/// Frame width in pixels.
+	pub width: u32,
+	/// Frame height in pixels.
+	pub height: u32,
+	/// Tightly-packed I420: Y, then U, then V.
+	pub data: Vec<u8>,
+}
+
+struct VideoConsumerInner {
+	consumer: moq_video::decode::Consumer,
+}
+
+impl VideoConsumerInner {
+	async fn next(&mut self) -> Result<Option<MoqVideoDecodedFrame>, MoqError> {
+		let Some(frame) = self.consumer.read().await? else {
+			return Ok(None);
+		};
+
+		let size = frame.size();
+		// The surface may still live on the GPU, so flatten before crossing the
+		// boundary: uniffi has no handle type to hand back a texture with.
+		let data = frame
+			.surface
+			.into_i420()
+			.map_err(|err| MoqError::Codec(err.to_string()))?;
+
+		Ok(Some(MoqVideoDecodedFrame {
+			timestamp_us: frame.timestamp.as_micros() as u64,
+			width: size.width,
+			height: size.height,
+			data: data.to_vec(),
+		}))
+	}
+}
+
+/// Consumer for a video track decoded inside the bindings.
+#[derive(uniffi::Object)]
+pub struct MoqVideoConsumer {
+	task: crate::ffi::Task<VideoConsumerInner>,
+}
+
+#[uniffi::export]
+impl MoqVideoConsumer {
+	/// The next decoded frame, or `None` once the track ends.
+	pub async fn next(&self) -> Result<Option<MoqVideoDecodedFrame>, MoqError> {
+		self.task.run(|mut state| async move { state.next().await }).await
+	}
+
+	/// Make current and future reads return `Cancelled`.
+	///
+	/// Terminal: the decoder session is released here, not when the handle is.
+	pub fn cancel(&self) {
+		self.task.cancel();
+	}
+}
+
+/// Rebuild the catalog rendition the decoder needs from what the FFI catalog handed out.
+///
+/// The inverse of the conversion in [`crate::media::convert_catalog`]. An unrecognized codec name
+/// is rejected here; a recognized one the native backends can't open is rejected when the decoder
+/// opens, which is still before the first frame.
+fn video_config(catalog_video: crate::media::MoqVideo) -> Result<hang::catalog::VideoConfig, MoqError> {
+	let codec: hang::catalog::VideoCodec = catalog_video.codec.parse().map_err(|_| MoqError::Unsupported)?;
+	// Parsing is total: an unrecognized name becomes `Unknown` rather than failing. Reject it here
+	// so a typo in the catalog is an error at subscribe, not an opaque backend failure later.
+	if matches!(codec, hang::catalog::VideoCodec::Unknown(_)) {
+		return Err(MoqError::Unsupported);
+	}
+
+	let mut config = hang::catalog::VideoConfig::new(codec);
+	config.label = catalog_video.label;
+	config.description = catalog_video.description.map(Into::into);
+	if let Some(coded) = catalog_video.coded {
+		config.coded_width = Some(coded.width);
+		config.coded_height = Some(coded.height);
+	}
+	if let Some(aspect) = catalog_video.display_aspect {
+		config.display_aspect_width = Some(aspect.width);
+		config.display_aspect_height = Some(aspect.height);
+	}
+	config.bitrate = catalog_video.bitrate;
+	config.framerate = catalog_video.framerate;
+	config.stalled = Some(catalog_video.stalled);
+	config.container = catalog_video.container.into();
+	Ok(config)
+}
+
+#[uniffi::export]
+impl MoqBroadcastConsumer {
+	/// Subscribe to a video track and decode it inside the bindings.
+	///
+	/// `catalog_video` comes from the catalog (see
+	/// [`MoqCatalogConsumer::next`](crate::consumer::MoqCatalogConsumer::next)); the codec is read
+	/// from it. Errors if no native backend handles that codec, rather than failing on the first
+	/// frame.
+	///
+	/// A rendition whose [`broadcast`](crate::media::MoqVideo::broadcast) names another broadcast
+	/// is subscribed there, so `name` is always read from the broadcast the catalog points at.
+	pub async fn decode_video(
+		&self,
+		name: String,
+		catalog_video: crate::media::MoqVideo,
+		output: MoqVideoDecoderOutput,
+	) -> Result<Arc<MoqVideoConsumer>, MoqError> {
+		// Reject the codec before resolving: resolving reaches the origin, which can invoke a
+		// dynamic handler and open an upstream subscription we would immediately drop.
+		let reference = catalog_video.broadcast.clone();
+		let cfg = video_config(catalog_video)?;
+		let broadcast = self.resolve_inner(reference.as_deref()).await?;
+
+		let mut config = moq_video::decode::Config::default();
+		config.resize = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
+		config.latency = output
+			.latency_max_ms
+			.map(|ms| moq_mux::Latency::max(std::time::Duration::from_millis(ms)))
+			.unwrap_or_default();
+
+		let consumer = moq_video::decode::Consumer::new(&broadcast, &cfg, name, config).await?;
+
+		Ok(Arc::new(MoqVideoConsumer {
+			task: crate::ffi::Task::new(VideoConsumerInner { consumer }),
+		}))
+	}
+}
+
+#[cfg(test)]
+mod decode_tests {
+	use super::*;
+	use crate::media::{MoqContainer, MoqDimensions, MoqVideo};
+
+	fn catalog_video(codec: &str) -> MoqVideo {
+		MoqVideo {
+			label: None,
+			broadcast: None,
+			codec: codec.to_string(),
+			description: None,
+			coded: Some(MoqDimensions {
+				width: 1280,
+				height: 720,
+			}),
+			display_aspect: None,
+			bitrate: None,
+			stalled: false,
+			framerate: Some(30.0),
+			container: MoqContainer::Legacy,
+		}
+	}
+
+	#[test]
+	fn video_config_round_trips_the_catalog_fields() {
+		let config = video_config(catalog_video("avc1.64001f")).unwrap();
+		assert_eq!(config.coded_width, Some(1280));
+		assert_eq!(config.coded_height, Some(720));
+		assert_eq!(config.framerate, Some(30.0));
+	}
+
+	#[test]
+	fn video_config_rejects_an_unknown_codec() {
+		let error = video_config(catalog_video("nope")).unwrap_err();
+		assert!(matches!(error, MoqError::Unsupported));
 	}
 }

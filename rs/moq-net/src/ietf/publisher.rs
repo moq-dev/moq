@@ -1,7 +1,8 @@
-use crate::{frame, group, origin, track};
+use crate::{Latency, frame, group, origin, track};
 use std::{
 	collections::HashMap,
 	task::{Poll, ready},
+	time::Duration,
 };
 
 use web_transport_trait::poll::SendStream as _;
@@ -15,6 +16,21 @@ use crate::{
 };
 
 use super::{Message, Version, cluster, peer};
+
+/// Largest millisecond duration every implementation can carry losslessly.
+const MAX_SAFE_LATENCY_MS: u64 = (1_u64 << 53) - 1;
+
+/// Build the serving-side subscription for a peer whose wire protocol carries no
+/// latency preference. The receiver applies its own budget after the transfer.
+fn serving_subscription(subscriber_priority: u8) -> Subscription {
+	Subscription {
+		priority: super::priority::from_wire(subscriber_priority),
+		// Demand can cross a Lite hop before the producer's retention bound is
+		// known, so use the largest duration that remains wire-encodable.
+		latency: Latency::max(Duration::from_millis(MAX_SAFE_LATENCY_MS)),
+		..Default::default()
+	}
+}
 
 /// A broadcast whose route table is watched for changes in what we advertise: the
 /// namespace becoming (un)advertisable, or its path or cost moving.
@@ -539,10 +555,9 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 			}
 		};
 
-		let subscription = Subscription {
-			priority: super::priority::from_wire(msg.subscriber_priority),
-			..Default::default()
-		};
+		// moq-transport has no subscriber latency parameter. Keep everything the
+		// producer retained and let the receiving subscriber enforce its own budget.
+		let subscription = serving_subscription(msg.subscriber_priority);
 
 		let track = match async { broadcast.track(&msg.track_name)?.subscribe(subscription).await }.await {
 			Ok(track) => track,
@@ -1517,6 +1532,10 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		loop {
 			match &mut self.state {
 				GroupState::Open => {
+					if self.group.poll_expired(waiter) {
+						self.state = GroupState::Done;
+						return Poll::Ready(Err(Error::Old));
+					}
 					let stream = match ready!(self.session.poll_open_uni(&mut cx)) {
 						Ok(stream) => stream,
 						Err(err) => {
@@ -1549,7 +1568,16 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 							match writer.poll_flush(&mut cx) {
 								Poll::Ready(Ok(())) => {}
 								Poll::Ready(Err(err)) => break 'serve Err(err),
-								Poll::Pending => return Poll::Pending,
+								// Parking on the transport is the one stall the group cursor cannot
+								// see, and the only place a served group applies the drift budget:
+								// flow control must not pin a stream that has gone stale. `true`
+								// because the transport still owns bytes the cursor has released.
+								Poll::Pending => {
+									if self.group.poll_expired_while_pending(waiter, true) {
+										break 'serve Err(Error::Old);
+									}
+									return Poll::Pending;
+								}
 							}
 							if let Some(pending) = chunk {
 								match writer.poll_write(&mut cx, pending) {
@@ -1559,7 +1587,16 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 										}
 									}
 									Poll::Ready(Err(err)) => break 'serve Err(err),
-									Poll::Pending => return Poll::Pending,
+									// Parking on the transport is the one stall the group cursor cannot
+									// see, and the only place a served group applies the drift budget:
+									// flow control must not pin a stream that has gone stale. `true`
+									// because the transport still owns bytes the cursor has released.
+									Poll::Pending => {
+										if self.group.poll_expired_while_pending(waiter, true) {
+											break 'serve Err(Error::Old);
+										}
+										return Poll::Pending;
+									}
 								}
 							} else if let Some(pending) = frame {
 								match pending.poll_read_chunk(waiter) {
@@ -1698,6 +1735,111 @@ mod group_priority_test {
 			"model priority must pass through unchanged"
 		);
 	}
+
+	/// A subgroup waiting for stream credit keeps its subscription expiry armed.
+	#[tokio::test]
+	async fn group_waiting_for_stream_credit_expires() {
+		tokio::time::pause();
+
+		let gate = kio::Producer::new(false);
+		let session = SinkSession::gated_open_uni(gate.consume());
+		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let mut subscriber = track.subscribe(None);
+		let mut old = track.append_group().unwrap();
+		old.write_frame(crate::Timestamp::ZERO, b"old".as_slice()).unwrap();
+		old.finish().unwrap();
+		let group = subscriber.recv_group().await.unwrap().expect("old group");
+
+		let mut serve = GroupServe {
+			session,
+			msg: ietf::GroupHeader {
+				track_alias: 0,
+				group_id: 0,
+				sub_group_id: 0,
+				publisher_priority: 0,
+				flags: Default::default(),
+			},
+			priority: 0,
+			group,
+			timescale: Timescale::default(),
+			version: Version::Draft19,
+			state: GroupState::Open,
+		};
+		let mut serving = std::pin::pin!(kio::wait(|waiter| serve.poll_serve(waiter)));
+		assert!(
+			futures::poll!(serving.as_mut()).is_pending(),
+			"stream credit is exhausted"
+		);
+
+		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		let mut edge = track.append_group().unwrap();
+		edge.write_frame(crate::Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
+			.unwrap();
+		edge.finish().unwrap();
+
+		assert!(matches!(serving.await, Err(Error::Old)));
+	}
+
+	/// The final payload remains guarded after its frame has advanced the group cursor.
+	#[tokio::test]
+	async fn blocked_final_transport_chunk_expires_with_the_group() {
+		tokio::time::pause();
+
+		let gate = kio::Producer::new(true);
+		let session = SinkSession::gated_uni(gate.consume());
+		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let mut subscriber = track.subscribe(None);
+		let mut old = track.append_group().unwrap();
+		let mut frame = old
+			.create_frame(frame::Info {
+				timestamp: crate::Timestamp::ZERO,
+				size: 2,
+			})
+			.unwrap();
+		frame.write(b"a".as_slice()).unwrap();
+		let group = subscriber.recv_group().await.unwrap().expect("old group");
+		let mut serve = GroupServe {
+			session,
+			msg: ietf::GroupHeader {
+				track_alias: 0,
+				group_id: 0,
+				sub_group_id: 0,
+				publisher_priority: 0,
+				flags: Default::default(),
+			},
+			priority: 0,
+			group,
+			timescale: Timescale::default(),
+			version: Version::Draft19,
+			state: GroupState::Open,
+		};
+		let mut serving = std::pin::pin!(kio::wait(|waiter| serve.poll_serve(waiter)));
+		assert!(
+			futures::poll!(serving.as_mut()).is_pending(),
+			"waiting for the final byte"
+		);
+
+		let Ok(mut open) = gate.write() else {
+			panic!("transport gate closed");
+		};
+		*open = false;
+		drop(open);
+		frame.write(b"b".as_slice()).unwrap();
+		frame.finish().unwrap();
+		old.finish().unwrap();
+		assert!(
+			futures::poll!(serving.as_mut()).is_pending(),
+			"the final byte is transport-blocked"
+		);
+
+		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		let mut edge = track.append_group().unwrap();
+		edge.write_frame(crate::Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
+			.unwrap();
+		edge.finish().unwrap();
+
+		assert!(matches!(serving.await, Err(Error::Old)));
+	}
 }
 
 #[cfg(test)]
@@ -1738,6 +1880,7 @@ mod tests {
 	use super::*;
 	use crate::lite::test_transport::SinkSession;
 	use crate::model::ProduceTest;
+	use futures::FutureExt;
 
 	async fn settle() {
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -1757,6 +1900,33 @@ mod tests {
 			..Default::default()
 		});
 		slot
+	}
+
+	/// moq-transport cannot carry the receiver's latency budget, so the serving
+	/// subscription must preserve everything the producer still retains.
+	#[test]
+	fn serving_subscription_keeps_retained_backlog() {
+		let mut producer = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", None);
+		for millis in [0, 1000] {
+			let mut group = producer.append_group().unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(millis).unwrap(), b"frame".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+		}
+
+		let subscription = serving_subscription(128);
+		assert_eq!(subscription.latency.max.as_millis(), MAX_SAFE_LATENCY_MS as u128);
+		let mut subscriber = producer.subscribe(subscription);
+		for sequence in [0, 1] {
+			let group = subscriber
+				.recv_group()
+				.now_or_never()
+				.expect("retained group should be ready")
+				.unwrap()
+				.expect("track should remain open");
+			assert_eq!(group.sequence, sequence);
+		}
 	}
 
 	/// A peer that requires solicitation, which is what hands the advertisements to the

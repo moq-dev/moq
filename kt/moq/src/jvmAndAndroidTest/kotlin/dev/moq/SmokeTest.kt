@@ -119,8 +119,8 @@ class SmokeTest {
     @Test
     fun `media group helper streams fetched frames`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val media = broadcast.publishMedia(
-                Init(format = "opus", data = opusHead(), video = null),
+            val media = broadcast.publishAudio(
+                AudioInit(format = AudioFormat.OPUS, data = opusHead()),
             )
             val consumer = broadcast.consume()
             val (name, audio) = consumer.catalog().audio.entries.single()

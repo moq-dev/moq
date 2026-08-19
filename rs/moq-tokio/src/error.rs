@@ -45,6 +45,11 @@ pub enum Error {
 	#[error("qlog capture requires the 'qlog' feature")]
 	QlogUnsupported,
 
+	/// The config was parsed from released spellings that no longer work. The
+	/// payload is the migration to print.
+	#[error("{0}")]
+	Deprecated(crate::Deprecated),
+
 	/// The idle timeout is longer than QUIC's millisecond varint can carry.
 	#[error("idle timeout must be under 2^62 milliseconds")]
 	IdleTimeoutRange,
