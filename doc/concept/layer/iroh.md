@@ -177,9 +177,10 @@ transport config, so a few of the shared QUIC knobs behave differently:
 - **The client QUIC settings apply to both roles.** One endpoint serves both, and the
   per-connection knobs are symmetric, so `[client.quic]` (`--client-quic-*`) is what it
   reads. The `[server.quic]` section doesn't reach it.
-- **Congestion control defaults to CUBIC**, unlike every other backend, which defaults to
-  BBR. noq's BBRv3 can underflow and panic on a packet loss, so delay-based control stays
-  reachable only when an operator asks for it by name. See the
+- **Congestion control defaults to CUBIC**, unlike the quinn and quiche backends, which
+  default to BBR. iroh shares noq's BBRv3, which can underflow and panic on a packet loss,
+  so delay-based control stays reachable only when an operator asks for it by name. The
+  noq backend defaults to CUBIC for the same reason. See the
   [relay config](/bin/relay/config).
 - **GSO can't be disabled.** `--client-quic-gso=false` is refused rather than ignored.
 - **No keep-alive knob.** Stream limits, idle timeout, MTU discovery, and congestion
