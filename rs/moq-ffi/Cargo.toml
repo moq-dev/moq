@@ -60,7 +60,7 @@ moq-video = { workspace = true, optional = true }
 # `video::block_on` for why not a tokio helper.
 pollster = { version = "1.0", optional = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }
-uniffi = { version = "0.31", features = ["cli"] }
+uniffi = { version = "0.32", features = ["cli"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Enables the `wasm_js` backend for rand-via-moq-net; the cfg flag lives in
@@ -69,13 +69,13 @@ getrandom = { workspace = true }
 # `wasm-unstable-single-threaded` drops the `Send`/`Sync` bounds on
 # `UniffiCompatibleFuture` and `FfiConverterArc`, which moq-net's wasm futures
 # (LocalBoxFuture) and Rc-backed handles cannot satisfy.
-uniffi = { version = "0.31", features = ["wasm-unstable-single-threaded"] }
+uniffi = { version = "0.32", features = ["wasm-unstable-single-threaded"] }
 web-async = { workspace = true }
 web-transport-trait = { workspace = true }
 web-transport-wasm = { workspace = true }
 
 [build-dependencies]
-uniffi = { version = "0.31", features = ["build"] }
+uniffi = { version = "0.32", features = ["build"] }
 
 [dev-dependencies]
 # One non-codec test blocks on a future; the main dep is `video`-only.
