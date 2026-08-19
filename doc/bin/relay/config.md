@@ -523,15 +523,25 @@ All three flags also accept CLI arguments (`--cache-capacity`,
 ### \[iroh]
 
 Experimental P2P support via [iroh](/concept/layer/iroh). Clients dial the relay's
-endpoint id (`iroh://<endpoint-id>/<path>`) instead of a hostname, with hole punching
-for peers that can't be reached directly.
+endpoint id (`iroh://<endpoint-id>/<path>`) instead of a hostname, with hole punching and an
+n0 relay for clients that can't be reached directly.
 
-Meant for peers on the local network. A client that can't be reached directly should fall
-back to this relay over `https://`, not to the iroh relay: forwarding opaque packets through
-an n0 server buys a hop that caches nothing and fans out to nobody, which is the job this
-process is already doing. Set `disable_relay = true` so a failed hole punch fails instead.
-Note that it only turns off packet forwarding. Discovery still publishes this endpoint's
-addresses to n0's `iroh.link` DNS server and resolves peers from it either way.
+Prefer `https://` for anything off this relay's own network. A client reaching this relay
+over the internet gains nothing from iroh (this process is already the public address, and it
+caches and fans out, which an n0 relay forwarding opaque packets does not), and there's no
+automatic relationship between the two: `iroh://` and `https://` are separate MoQ connections
+to this relay, and dialing one never falls back to the other. That choice belongs to whoever
+writes the URL.
+
+`disable_relay = true` keeps an n0 relay out of the media path entirely. Read
+[Connectivity](/concept/layer/iroh#connectivity) first: it also removes hole punching and the
+probes an endpoint uses to learn its own public address, so it suits a relay meeting peers on
+its own network and breaks one that clients dial over `iroh://` from elsewhere. On a cloud VM
+behind 1:1 NAT it is the difference between advertising your public address and advertising a
+private one nobody can route to.
+
+Either way, discovery still publishes this endpoint's addresses to n0's `iroh.link` DNS
+server, so enabling iroh at all is visible off the network.
 
 ```toml
 [iroh]
@@ -546,8 +556,10 @@ secret = "./relay-iroh-secret.key"
 # bind_v4 = "0.0.0.0:4444"
 # bind_v6 = "[::]:4444"
 
-# Require a direct path, skipping the iroh relay fallback. Recommended.
-disable_relay = true
+# Direct addresses only: no n0 relay, and no hole punching either.
+# Right for peers on this relay's network; see the note above before
+# enabling it on a relay that clients dial from the internet.
+# disable_relay = false
 ```
 
 The endpoint id is logged at startup (`iroh listening endpoint_id=...`). Without `secret`

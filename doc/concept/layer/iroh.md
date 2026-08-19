@@ -25,29 +25,33 @@ The usual MoQ deployment is a [relay](/bin/relay/) with a public IP, a DNS name,
 certificate. That's the right answer at scale, but it's a lot of ceremony when:
 
 - Two machines on the same LAN want to exchange media and neither is a server.
-- Neither of them has a public address, a stable one, or any address you can write down.
 - You want a stable identity for a node whose IP address keeps changing.
 - You don't want to own a domain or provision a certificate just to move some frames.
 
-iroh solves all four with the same mechanism: the endpoint's key **is** its address.
+iroh solves all three with the same mechanism: the endpoint's key **is** its address.
 
 ## Scope
 
 Peer-to-peer is a **local network** feature. Keep it there.
 
-- **On one network**, peers dial each other directly and nothing but the media crosses the
-  link. That's the case iroh is for here.
+- **On one network**, peers dial each other directly and the media never leaves the link.
+  That's the case iroh is for here. (The addressing still does; see
+  [Connectivity](#connectivity).)
 - **Across the internet**, run a [MoQ relay](/bin/relay/). It has an address both sides can
   already reach, it caches and fans out, and it's the only shape that scales past two peers.
 
-The iroh relay fallback is the part to be careful with. When hole punching fails it forwards
-your packets through an n0 server, which is the same shape as WebRTC's TURN: a third party in
-the media path that has no idea what it's carrying, can't cache a group, can't serve the
-second viewer from the first one's fetch, and adds however many milliseconds its location
-costs. If media has to cross a server anyway, that server should be a MoQ relay.
+The iroh relay is the part to be careful with. When hole punching fails it forwards your
+packets through an n0 server, which is the same shape as WebRTC's TURN: a third party in the
+media path that has no idea what it's carrying, can't cache a group, can't serve the second
+viewer from the first one's fetch, and adds however many milliseconds its location costs. If
+media has to cross a server anyway, that server should be a MoQ relay.
 
-So pass `--iroh-disable-relay`, let a failed hole punch be a failed connection, and put a
-relay you chose behind it.
+`--iroh-disable-relay` takes that off the table, but read [Connectivity](#connectivity)
+before reaching for it: an iroh relay is not only the fallback path, it is also how two peers
+coordinate a hole punch and how an endpoint learns its own public address. Turning it off
+leaves direct addresses and nothing else, which is exactly right on one link and not much use
+across the internet. That is the trade this page is recommending, not a way to keep NAT
+traversal while dropping the forwarding.
 
 ## Addressing
 
@@ -80,20 +84,27 @@ which is what makes a true peer-to-peer topology possible.
 Getting a packet to a peer behind a NAT happens in stages:
 
 1. **Discovery** finds the peer's candidate addresses from its endpoint id.
-2. **Hole punching** tries to establish a direct path between the two hosts.
-3. **iroh relay** carries the traffic when a direct path can't be established.
+2. **iroh relay** carries the connection immediately, so there's no connect-time stall.
+3. **Hole punching** then tries to open a direct path, and the connection migrates onto it.
 
-The connection starts over the iroh relay and upgrades to a direct path once hole punching
-succeeds, so there's no connect-time stall while the two sides negotiate.
-`--iroh-disable-relay` drops that first stage, so a peer is reachable only once a direct path
-opens and an unreachable one stays unreachable. That's the [recommended](#scope) setting.
+The relay does more than carry the traffic. It's the rendezvous both sides reach first, so
+it's also how they coordinate the punch, and its probes are how an endpoint learns the public
+address to advertise in the first place. Only once the direct path is up does it drop out,
+and it stays in the path as a fallback if the punch never succeeds.
 
-Both stages use the public servers operated by [n0](https://n0.computer/), and **discovery
-runs either way**. An endpoint publishes its own addressing record to n0's `iroh.link` DNS
-server whenever its addresses change, and resolves its peers from the same place, so turning
-iroh on tells a third party which endpoint ids are live and where they are. Disabling the
-relay doesn't opt out of that; it only changes what the record holds, since with no relay URL
-to publish it carries direct IP addresses instead.
+So `--iroh-disable-relay` is not "punch, but don't fall back". It removes stages 2 and 3
+together and leaves stage 1: a peer is reachable if its advertised addresses reach you, and
+unreachable otherwise. On one link that's all you need, and it's the [recommended](#scope)
+setting there. Across a NAT it mostly means no connection, and an endpoint that can't see its
+own public address advertises only its local ones.
+
+**Discovery runs either way.** An endpoint publishes its own addressing record to n0's
+`iroh.link` DNS server whenever its addresses change, so turning iroh on tells a third party
+which endpoint ids are live and where they are, whatever the relay setting. Disabling the
+relay doesn't opt out; it only changes what the record holds, since with no relay URL to
+publish it carries direct IP addresses instead. Resolution is the half you can avoid:
+`Client::with_iroh_addrs` seeds a peer's addresses so a LAN dial needs no lookup. Publishing
+has no such escape hatch.
 
 Weigh that before enabling iroh for something that has to stay local. The media can be pinned
 to a direct path, the addressing can't.
@@ -134,6 +145,11 @@ enabled = true
 # Persist the key so the endpoint id survives a restart.
 # Generated on first run if the file doesn't exist.
 secret = "./iroh-secret.key"
+
+# Peers on this relay's own network, and no n0 relay in the media path.
+# Leave it out if clients dial this relay over iroh:// from elsewhere;
+# see the note in the relay config reference.
+disable_relay = true
 ```
 
 Without `secret` the relay generates a fresh key on every start, which means a new
@@ -150,17 +166,20 @@ The CLI takes the same settings as flags. `--iroh-enabled` binds the endpoint, a
 `iroh://` URL works anywhere an `https://` one would:
 
 ```bash
-# Publish to a peer.
+# Publish to a peer on this network.
 ffmpeg -i video.mp4 -c copy -f mpegts - | \
-    moq --iroh-enabled \
+    moq --iroh-enabled --iroh-disable-relay \
         --client-connect "iroh://k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa/anon" \
         --broadcast my-stream.hang import ts
 
-# Play it back from another machine.
-moq --iroh-enabled \
+# Play it back from another machine on the same network.
+moq --iroh-enabled --iroh-disable-relay \
     --client-connect "iroh://k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa/anon" \
     --broadcast my-stream.hang play
 ```
+
+Drop `--iroh-disable-relay` and the two machines can be anywhere, at the cost of an n0 relay
+in the media path until a punch succeeds. Prefer a [MoQ relay](/bin/relay/) for that case.
 
 Dialing an `iroh://` URL without `--iroh-enabled` is an error, not a silent fallback.
 
@@ -170,7 +189,7 @@ Dialing an `iroh://` URL without `--iroh-enabled` is an error, not a silent fall
 | `--iroh-secret` | `MOQ_IROH_SECRET` | Hex key or a path to persist one. |
 | `--iroh-bind-v4` | `MOQ_IROH_BIND_V4` | UDP bind address, default `0.0.0.0:0`. |
 | `--iroh-bind-v6` | `MOQ_IROH_BIND_V6` | UDP bind address, default `[::]:0`. |
-| `--iroh-disable-relay` | `MOQ_IROH_DISABLE_RELAY` | Direct paths only, no relay fallback. Recommended. |
+| `--iroh-disable-relay` | `MOQ_IROH_DISABLE_RELAY` | Direct addresses only: no fallback, and no hole punching. Recommended on a LAN. |
 
 The endpoint is shared by the client and server halves of a process, so one set of flags
 covers both dialing out and accepting in.
@@ -212,8 +231,8 @@ transport config, so a few of the shared QUIC knobs behave differently:
 - **GSO can't be disabled.** `--client-quic-gso=false` is refused rather than ignored.
 - **No keep-alive knob.** Stream limits, idle timeout, MTU discovery, and congestion
   control carry over; nothing else does.
-- **Discovery is not local.** Publishing and resolving go through n0's servers whatever the
-  relay setting, as above.
+- **Publishing is not local.** An endpoint's addressing record goes to n0's servers whatever
+  the relay setting, as above. Resolution can be skipped, publishing can't.
 - **No browser support**, as above.
 
 ## More Info

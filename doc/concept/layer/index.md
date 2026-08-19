@@ -47,9 +47,12 @@ It's still QUIC underneath, so nothing above this layer changes.
 Native only, since a browser can't hole punch.
 
 Reach for it on a local network, where two peers can talk without anything in the middle.
-Across the internet, run a [MoQ relay](/bin/relay/) instead: iroh's own relay fallback forwards
-opaque packets like WebRTC's TURN, so it costs you a hop without the caching and fanout that
-hop should be buying.
+Across the internet, run a [MoQ relay](/bin/relay/) instead: iroh's own relay forwards opaque
+packets like WebRTC's TURN, so it costs you a hop without the caching and fanout that hop
+should be buying.
+
+Note that only the media path can be kept local. An endpoint publishes its address to n0's
+discovery servers whichever way it's configured.
 
 ## MoQ Transport
 
