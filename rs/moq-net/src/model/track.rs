@@ -4363,7 +4363,8 @@ mod test {
 		let mut producer = track_producer("test", None);
 		let mut subscriber = producer.subscribe(None);
 		let mut open = producer.append_group().unwrap();
-		open.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"a")).unwrap();
+		open.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"a"))
+			.unwrap();
 
 		let mut group = subscriber.recv_group().await.unwrap().expect("group");
 		assert!(group.read_frame().await.unwrap().is_some());
@@ -6886,4 +6887,3 @@ mod test {
 		drop(dynamic);
 	}
 }
-

@@ -89,6 +89,23 @@ struct Shared<S: crate::transport::poll::Session> {
 	goaway: crate::goaway::Protocol,
 }
 
+/// Largest millisecond duration every implementation can carry losslessly.
+const MAX_SAFE_LATENCY_MS: u64 = (1_u64 << 53) - 1;
+
+/// The budget to serve a peer with, given what its wire could tell us.
+///
+/// A version without the field decodes as [`Duration::ZERO`], which is
+/// indistinguishable from a peer genuinely asking for the live edge. Serving that
+/// as real time would discard backlog a legacy subscriber never declined, so fall
+/// back to a window wide enough not to drop and leave enforcement to the receiver,
+/// exactly as the IETF path does for the same reason.
+fn serving_latency(version: Version, requested: Duration) -> crate::Latency {
+	match version.carries_latency() {
+		true => crate::Latency::max(requested),
+		false => crate::Latency::max(Duration::from_millis(MAX_SAFE_LATENCY_MS)),
+	}
+}
+
 impl<S: crate::transport::poll::Session> Shared<S> {
 	/// The origin to resolve a peer-requested broadcast from: excludes routes
 	/// through the peer when its SETUP declared an origin id, so a subscription
@@ -1293,7 +1310,7 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 					let subscription = crate::track::Subscription {
 						priority: msg.priority,
 						ordered: msg.ordered,
-						latency: crate::Latency::max(msg.latency_max),
+						latency: serving_latency(self.shared.version, msg.latency_max),
 						..Bounds::from(&msg).positions()
 					};
 
@@ -2770,7 +2787,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 				let _ = self.track.update(crate::track::Subscription {
 					priority: upd.priority,
 					ordered: upd.ordered,
-					latency: crate::Latency::max(upd.latency_max),
+					latency: serving_latency(self.ctx.version, upd.latency_max),
 					..bounds.positions()
 				});
 				if let Some(start_group) = upd.start_group {
@@ -3384,6 +3401,31 @@ mod serve_group_test {
 		edge.finish().unwrap();
 
 		assert!(matches!(serve.await, Err(Error::Old)));
+	}
+
+	/// Lite01/02 have no latency field, so a SUBSCRIBE from one decodes as
+	/// `Duration::ZERO`. Serving that as a real-time budget would hold every legacy
+	/// peer to the live edge and discard backlog it never declined, so those versions
+	/// get a non-dropping window and leave enforcement to the receiver.
+	///
+	/// These are the two most-preferred negotiated versions, so this is the common
+	/// wire, not an edge case.
+	#[test]
+	fn a_version_without_the_field_serves_a_non_dropping_budget() {
+		for version in [Version::Lite01, Version::Lite02] {
+			let latency = serving_latency(version, Duration::ZERO);
+			assert!(
+				latency.max >= Duration::from_secs(86_400),
+				"{version:?} must not be served as real time: {latency:?}"
+			);
+		}
+
+		// A version that does carry it is taken at its word, zero included.
+		assert_eq!(serving_latency(Version::Lite05, Duration::ZERO).max, Duration::ZERO);
+		assert_eq!(
+			serving_latency(Version::Lite05, Duration::from_secs(3)).max,
+			Duration::from_secs(3)
+		);
 	}
 
 	/// A group that completes cleanly must not reset at all. The completion path
