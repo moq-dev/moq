@@ -34,17 +34,18 @@ iroh solves all three with the same mechanism: the endpoint's key **is** its add
 
 Peer-to-peer is a **local network** feature. Keep it there.
 
-- **On one network**, peers dial each other directly and the media never leaves the link.
-  That's the case iroh is for here. (The addressing still does; see
-  [Connectivity](#connectivity).)
+- **On one network**, peers dial each other directly, and with `--iroh-disable-relay` the
+  media never leaves the link. That's the case iroh is for here. (The addressing leaves
+  either way; see [Connectivity](#connectivity).)
 - **Across the internet**, run a [MoQ relay](/bin/relay/). It has an address both sides can
   already reach, it caches and fans out, and it's the only shape that scales past two peers.
 
-The iroh relay is the part to be careful with. When hole punching fails it forwards your
-packets through an n0 server, which is the same shape as WebRTC's TURN: a third party in the
-media path that has no idea what it's carrying, can't cache a group, can't serve the second
-viewer from the first one's fetch, and adds however many milliseconds its location costs. If
-media has to cross a server anyway, that server should be a MoQ relay.
+The iroh relay is the part to be careful with. By default your packets go through an n0
+server from the first byte, and stay there for good if the hole punch never lands. That's the
+same shape as WebRTC's TURN: a third party in the media path that has no idea what it's
+carrying, can't cache a group, can't serve the second viewer from the first one's fetch, and
+adds however many milliseconds its location costs. If media has to cross a server anyway,
+that server should be a MoQ relay.
 
 `--iroh-disable-relay` takes that off the table, but read [Connectivity](#connectivity)
 before reaching for it: an iroh relay is not only the fallback path, it is also how two peers
@@ -145,12 +146,12 @@ enabled = true
 # Persist the key so the endpoint id survives a restart.
 # Generated on first run if the file doesn't exist.
 secret = "./iroh-secret.key"
-
-# Peers on this relay's own network, and no n0 relay in the media path.
-# Leave it out if clients dial this relay over iroh:// from elsewhere;
-# see the note in the relay config reference.
-disable_relay = true
 ```
+
+Whether to add `disable_relay` depends on where this relay's iroh clients are, and the
+[relay config reference](/bin/relay/config#iroh) has the trade. It keeps n0 out of the media
+path, and it breaks a relay that clients dial over `iroh://` from anywhere but its own
+network.
 
 Without `secret` the relay generates a fresh key on every start, which means a new
 endpoint id and a stale URL for everyone who wrote the old one down.

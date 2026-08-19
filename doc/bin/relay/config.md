@@ -523,8 +523,9 @@ All three flags also accept CLI arguments (`--cache-capacity`,
 ### \[iroh]
 
 Experimental P2P support via [iroh](/concept/layer/iroh). Clients dial the relay's
-endpoint id (`iroh://<endpoint-id>/<path>`) instead of a hostname, with hole punching and an
-n0 relay for clients that can't be reached directly.
+endpoint id (`iroh://<endpoint-id>/<path>`) instead of a hostname. An n0 relay carries the
+connection from the start and hole punching moves it onto a direct path, or fails and leaves
+it there.
 
 Prefer `https://` for anything off this relay's own network. A client reaching this relay
 over the internet gains nothing from iroh (this process is already the public address, and it
@@ -556,10 +557,11 @@ secret = "./relay-iroh-secret.key"
 # bind_v4 = "0.0.0.0:4444"
 # bind_v6 = "[::]:4444"
 
-# Direct addresses only: no n0 relay, and no hole punching either.
-# Right for peers on this relay's network; see the note above before
-# enabling it on a relay that clients dial from the internet.
-# disable_relay = false
+# Uncomment for direct addresses only: no n0 relay, and no hole
+# punching either. Right for peers on this relay's own network; see
+# the note above before enabling it on a relay that clients dial
+# over iroh:// from the internet.
+# disable_relay = true
 ```
 
 The endpoint id is logged at startup (`iroh listening endpoint_id=...`). Without `secret`
