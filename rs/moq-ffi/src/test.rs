@@ -1956,6 +1956,28 @@ async fn server_cert_fingerprints_available_after_listen() {
 }
 
 #[tokio::test]
+async fn server_cert_fingerprints_rejected_after_cancel() {
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]);
+
+	tokio::time::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	server.cert_fingerprints().expect("fingerprints available");
+
+	// The listener is dropped off-thread, so this must not depend on that landing first:
+	// cancel is terminal the moment it returns. `Cancelled`, not `Bind`: the wrappers'
+	// `is_shutdown` helpers read the variant to tell a teardown from a real bind failure.
+	server.cancel();
+	assert!(matches!(
+		server.cert_fingerprints(),
+		Err(crate::error::MoqError::Cancelled)
+	));
+}
+
+#[tokio::test]
 async fn request_double_respond_returns_already_responded() {
 	use crate::error::MoqError;
 

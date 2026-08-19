@@ -187,6 +187,8 @@ impl MoqRouteWatch {
 	}
 
 	/// Cancel all current and future `next()` calls.
+	///
+	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
@@ -487,6 +489,9 @@ impl MoqTrackConsumer {
 		let _ = self.control.update(subscription.into());
 	}
 
+	/// Cancel all current and future reads.
+	///
+	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
@@ -549,6 +554,8 @@ impl MoqMediaGroupConsumer {
 	}
 
 	/// Cancel all current and future `next()` calls.
+	///
+	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
@@ -577,6 +584,9 @@ impl MoqGroupConsumer {
 		self.task.run(|mut state| async move { state.read_frame().await }).await
 	}
 
+	/// Cancel all current and future `read_frame()` calls.
+	///
+	/// Terminal: the group and whatever it still buffers are released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
@@ -592,6 +602,8 @@ impl MoqCatalogConsumer {
 	}
 
 	/// Cancel all current and future `next()` calls.
+	///
+	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
@@ -607,6 +619,8 @@ impl MoqMediaConsumer {
 	}
 
 	/// Cancel all current and future `next()` calls.
+	///
+	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}

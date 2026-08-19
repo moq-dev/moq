@@ -104,10 +104,26 @@ cannot be copied into someone else's, and a relay only dials peers whose proof
 verifies.
 
 Startup waits for the mesh to come up before the relay reports itself ready
-(`READY=1` under systemd), so a bad key, a missing `node`, or a host where
-multicast is blocked fails the relay rather than releasing the units that depend
-on it. One working interface is enough: a down VPN adapter or a container bridge
-with multicast off doesn't hold startup back.
+(`READY=1` under systemd), so a bad key, a missing `node`, or a host that cannot
+announce on any interface fails the relay rather than releasing the units that
+depend on it. One working interface is enough: a down VPN adapter or a container
+bridge with multicast off doesn't hold startup back. It only proves this host
+can send, though, so see below for what it doesn't catch.
+
+`lan` is for relays sharing a link, and only that. Peers off the network are
+gossiped, listed by `connect_api`, or seeded in `connect`, and they reach each
+other over their `node` URLs like any other cluster link. A relay is already the
+public address both sides can reach, so there is nothing for peer-to-peer to
+save there; on one link it saves the round trip out and back.
+
+Both hosts need inbound packets for this to work, in two places. mDNS is inbound
+multicast UDP on port 5353, and a host that blocks it still multicasts its own
+announcements out, so peers discover it while it discovers nobody. The session
+is then one dial per pair, taken by the side whose `node` URL sorts first, so the
+*other* side is the one that has to accept an inbound connection on its `node`
+port. Startup readiness only proves an interface announced, not that anything
+answered, so a firewall shows up as a pair that never meshes rather than as a
+relay that fails to start.
 
 ## Origin id
 
