@@ -21,6 +21,7 @@ pub(crate) async fn serve_ws(
 	OriginalUri(uri): OriginalUri,
 	headers: HeaderMap,
 	mtls: Option<Extension<MtlsPeer>>,
+	socket_stats: Option<Extension<crate::web::SocketStats>>,
 	Extension(versions): Extension<moq_net::Versions>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
@@ -72,6 +73,7 @@ pub(crate) async fn serve_ws(
 			publish,
 			subscribe,
 			stats,
+			socket_stats: socket_stats.map(|Extension(s)| s),
 		};
 		let _ = handle_socket(socket, session).await;
 	}))
@@ -91,6 +93,8 @@ struct SessionInputs {
 	publish: Option<origin::Producer>,
 	subscribe: Option<origin::Producer>,
 	stats: Session,
+	/// The kernel's view of the socket under the upgrade, captured at accept time.
+	socket_stats: Option<crate::web::SocketStats>,
 }
 
 #[tracing::instrument("ws", err, skip_all, fields(id = session.id))]
@@ -109,6 +113,7 @@ where
 		publish,
 		subscribe,
 		stats,
+		socket_stats,
 	} = session;
 
 	// Wrap the WebSocket in a WebTransport compatibility layer. We have to
@@ -121,7 +126,14 @@ where
 	// broadcast it published stays announced for that entire window and the
 	// announce propagates to the rest of the cluster. QUIC gets this from its
 	// idle timeout; WebSocket has no equivalent of its own.
-	let upgraded = qmux::ws::Upgraded::new(socket).with_keep_alive(qmux::ws::KeepAlive::default());
+	let mut upgraded = qmux::ws::Upgraded::new(socket).with_keep_alive(qmux::ws::KeepAlive::default());
+	// Hand qmux the socket we captured before the upgrade erased it, so the session
+	// reports the kernel's RTT (and, on Linux, its delivery rate) from the start
+	// rather than only what QX_PING can measure a round trip later. This is what
+	// fills in the moq-lite PROBE for a WebSocket viewer.
+	if let Some(crate::web::SocketStats(stats)) = socket_stats {
+		upgraded = upgraded.with_socket_stats(stats);
+	}
 	let upgraded = match alpn.as_deref() {
 		Some(alpn) => upgraded.with_alpn(alpn),
 		None => upgraded,
@@ -807,6 +819,9 @@ mod tests {
 			publish: None,
 			subscribe: None,
 			stats: Session::default(),
+			// No descriptor to hand over: this drives the transport directly rather
+			// than through an accepted socket.
+			socket_stats: None,
 		};
 		let server = tokio::spawn(handle_socket(
 			Pipe::new(server_incoming, server_to_client, frozen.clone()),

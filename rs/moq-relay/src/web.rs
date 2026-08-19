@@ -354,6 +354,18 @@ async fn reload_https_config(config: RustlsConfig, cert: Vec<PathBuf>, key: Vec<
 	}
 }
 
+/// The kernel's view of the TCP connection a request arrived on.
+///
+/// An HTTP upgrade hands the WebSocket a type-erased stream, so qmux can't find the
+/// socket underneath it and would otherwise report no RTT until its own `QX_PING`
+/// completes a round trip. Capturing the descriptor at accept time, before TLS and
+/// hyper take ownership, lets the MoQ session report latency from the first moment.
+///
+/// Absent on platforms with no readable TCP info, and on any socket the read fails
+/// for; handlers extract `Option<Extension<SocketStats>>` accordingly.
+#[derive(Clone)]
+pub struct SocketStats(pub(crate) qmux::SharedSocketStats);
+
 /// Marker inserted as a request extension after HTTPS mTLS verifies a client certificate.
 ///
 /// Embedded routes can extract `Option<Extension<MtlsPeer>>` to mirror the
@@ -370,9 +382,26 @@ struct MtlsAcceptor {
 	inner: RustlsAcceptor<DefaultAcceptor>,
 }
 
+/// The connection [`MtlsAcceptor`] accepts: a byte stream, plus a descriptor to
+/// read socket statistics from on platforms that expose them.
+///
+/// The concrete stream is always the `TcpStream` from [`crate::listener::Peer`], so
+/// the extra bound narrows nothing; it exists because a `cfg` can't be written on a
+/// `where` clause directly.
+#[cfg(unix)]
+pub(crate) trait AcceptStream: AsyncRead + AsyncWrite + Unpin + Send + std::os::fd::AsFd + 'static {}
+#[cfg(unix)]
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + std::os::fd::AsFd + 'static> AcceptStream for T {}
+
+/// As above, where no descriptor is available.
+#[cfg(not(unix))]
+pub(crate) trait AcceptStream: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
+#[cfg(not(unix))]
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> AcceptStream for T {}
+
 impl<I, S> Accept<I, S> for MtlsAcceptor
 where
-	I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+	I: AcceptStream,
 	S: Send + 'static,
 {
 	type Stream = TlsStream<I>;
@@ -380,6 +409,9 @@ where
 	type Future = BoxFuture<'static, std::io::Result<(Self::Stream, Self::Service)>>;
 
 	fn accept(&self, stream: I, service: S) -> Self::Future {
+		// Read the socket here, while it is still a plain `TcpStream`. Once TLS and
+		// then hyper's upgrade have wrapped it there is no descriptor left to find.
+		let socket = socket_stats(&stream);
 		let inner = self.inner.accept(stream, service);
 		async move {
 			let (tls, service) = inner.await?;
@@ -389,10 +421,30 @@ where
 				.peer_certificates()
 				.filter(|certs| !certs.is_empty())
 				.map(|_| MtlsPeer);
-			Ok((tls, SetMtlsExtension { inner: service, peer }))
+			Ok((
+				tls,
+				SetMtlsExtension {
+					inner: service,
+					peer,
+					socket,
+				},
+			))
 		}
 		.boxed()
 	}
+}
+
+/// The kernel's view of `stream`, when this platform exposes one.
+#[cfg(unix)]
+fn socket_stats<I: AcceptStream>(stream: &I) -> Option<SocketStats> {
+	qmux::TcpStats::new(stream)
+		.ok()
+		.map(|s| SocketStats(std::sync::Arc::new(s)))
+}
+
+#[cfg(not(unix))]
+fn socket_stats<I: AcceptStream>(_stream: &I) -> Option<SocketStats> {
+	None
 }
 
 /// Per-connection tower service that injects `Extension<Option<MtlsPeer>>` on
@@ -401,6 +453,7 @@ where
 struct SetMtlsExtension<S> {
 	inner: S,
 	peer: Option<MtlsPeer>,
+	socket: Option<SocketStats>,
 }
 
 impl<S, B> Service<http::Request<B>> for SetMtlsExtension<S>
@@ -420,6 +473,9 @@ where
 		// `Option<Extension<MtlsPeer>>` so absence is the no-cert case.
 		if let Some(peer) = self.peer.clone() {
 			req.extensions_mut().insert(peer);
+		}
+		if let Some(socket) = self.socket.clone() {
+			req.extensions_mut().insert(socket);
 		}
 		self.inner.call(req)
 	}
@@ -860,13 +916,17 @@ mod tests {
 			}
 		}
 
+		// This test is about the mTLS marker; the socket handle rides the same
+		// per-connection service but is independent of it.
 		let mut with_peer = SetMtlsExtension {
 			inner: EchoExt,
 			peer: Some(MtlsPeer),
+			socket: None,
 		};
 		let mut no_peer = SetMtlsExtension {
 			inner: EchoExt,
 			peer: None,
+			socket: None,
 		};
 
 		let req = Request::builder().body(()).unwrap();
