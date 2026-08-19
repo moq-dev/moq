@@ -158,6 +158,11 @@ pub enum Error {
 	/// A client configuration value could not be parsed or initialized.
 	#[error("invalid config: {0}")]
 	InvalidConfig(String),
+
+	/// A catalog rendition named another broadcast, but the broadcast it came from was not
+	/// resolved through an origin, so there is nothing to resolve the reference against.
+	#[error("unresolvable broadcast reference: {0}")]
+	UnresolvableBroadcast(String),
 }
 
 impl From<moq_json::Error> for Error {
@@ -236,6 +241,7 @@ impl ffi::ReturnCode for Error {
 			Error::Json(_) => -37,
 			Error::JsonTrack(_) => -38,
 			Error::InvalidConfig(_) => -40,
+			Error::UnresolvableBroadcast(_) => -41,
 		}
 	}
 }

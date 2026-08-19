@@ -255,12 +255,16 @@ impl MoqBroadcastConsumer {
 	/// the catalog (see
 	/// [`MoqCatalogConsumer::next`](crate::consumer::MoqCatalogConsumer::next));
 	/// the codec is inferred from it. Only Opus is currently supported.
+	///
+	/// A rendition whose [`broadcast`](crate::media::MoqAudio::broadcast) names another broadcast
+	/// is subscribed there, so `name` is always read from the broadcast the catalog points at.
 	pub async fn decode_audio(
 		&self,
 		name: String,
 		catalog_audio: crate::media::MoqAudio,
 		output: MoqAudioDecoderOutput,
 	) -> Result<Arc<MoqAudioConsumer>, MoqError> {
+		let broadcast = self.resolve_inner(catalog_audio.broadcast.as_deref()).await?;
 		let cfg = audio_config(catalog_audio)?;
 
 		let mut config = moq_audio::decode::Config::default();
@@ -272,7 +276,7 @@ impl MoqBroadcastConsumer {
 			.map(|ms| moq_mux::Latency::max(Duration::from_millis(ms)))
 			.unwrap_or_default();
 
-		let consumer = moq_audio::decode::Consumer::new(self.inner(), &cfg, name, config).await?;
+		let consumer = moq_audio::decode::Consumer::new(&broadcast, &cfg, name, config).await?;
 
 		Ok(Arc::new(MoqAudioConsumer {
 			task: Task::new(ConsumerInner { consumer }),
@@ -288,6 +292,7 @@ mod tests {
 	fn catalog_audio(codec: &str) -> MoqAudio {
 		MoqAudio {
 			label: None,
+			broadcast: None,
 			codec: codec.to_string(),
 			description: None,
 			sample_rate: 48_000,

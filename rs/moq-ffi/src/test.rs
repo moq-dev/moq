@@ -2,13 +2,14 @@ use super::origin::*;
 use super::producer::*;
 use super::server::MoqServer;
 use super::session::MoqClient;
+use crate::audio::{MoqAudioDecoderOutput, MoqAudioSampleFormat};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqRouteWatch;
 use crate::consumer::MoqSubscription;
 use crate::error::MoqError;
 use crate::json::{MoqJsonSnapshotConfig, MoqJsonStreamConfig};
-use crate::media::{MoqAudioFormat, MoqAudioInit, MoqFrame, MoqVideoFormat, MoqVideoInit};
+use crate::media::{MoqAudio, MoqAudioFormat, MoqAudioInit, MoqContainer, MoqFrame, MoqVideoFormat, MoqVideoInit};
 use crate::session::{MoqBackoff, MoqConnectionStatus};
 
 use std::time::Duration;
@@ -30,6 +31,29 @@ fn video_init(format: MoqVideoFormat, data: Vec<u8>) -> MoqVideoInit {
 		data,
 		label: None,
 		hint: None,
+	}
+}
+
+/// An Opus rendition whose catalog `broadcast` field names `reference`.
+fn sibling_audio(reference: &str) -> MoqAudio {
+	MoqAudio {
+		label: None,
+		broadcast: Some(reference.to_string()),
+		codec: "opus".to_string(),
+		description: None,
+		sample_rate: 48_000,
+		channel_count: 2,
+		bitrate: None,
+		container: MoqContainer::Legacy,
+	}
+}
+
+fn audio_output() -> MoqAudioDecoderOutput {
+	MoqAudioDecoderOutput {
+		format: MoqAudioSampleFormat::F32,
+		sample_rate: None,
+		channels: None,
+		latency_max_ms: None,
 	}
 }
 
@@ -893,6 +917,145 @@ async fn announced_broadcast_keeps_the_requested_path() {
 	assert_eq!(requested.inner().info().path.as_str(), "a/pub");
 
 	broadcast.finish().unwrap();
+}
+
+/// A catalog rendition may name a sibling broadcast (`./source`), and the track then lives
+/// there, not on the broadcast the catalog came from. Dropping the reference either fails to
+/// find the track or silently decodes a same-named local one with mismatched metadata.
+#[tokio::test]
+async fn decode_audio_follows_a_sibling_broadcast_reference() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+
+	// The catalog's broadcast deliberately has no "audio" track: only the sibling serves it.
+	let catalog = origin.create_broadcast("a/pub".into()).unwrap();
+	let source = origin.create_broadcast("a/source".into()).unwrap();
+	let _audio = source.publish_track("audio".into(), None).unwrap();
+
+	let announced = consumer.announced_broadcast("a/pub".into()).unwrap();
+	let broadcast = tokio::time::timeout(TIMEOUT, announced.available())
+		.await
+		.expect("timed out waiting for the announcement")
+		.unwrap();
+
+	let decoded = tokio::time::timeout(
+		TIMEOUT,
+		broadcast.decode_audio("audio".into(), sibling_audio("./source"), audio_output()),
+	)
+	.await
+	.expect("timed out subscribing to the referenced track");
+	decoded.expect("the rendition's broadcast reference should resolve to the sibling");
+
+	// Without the reference the same call has nowhere to find the track.
+	let missing = tokio::time::timeout(
+		TIMEOUT,
+		broadcast.decode_audio("audio".into(), sibling_audio(""), audio_output()),
+	)
+	.await
+	.expect("timed out subscribing to the catalog broadcast");
+	assert!(
+		missing.is_err(),
+		"the catalog broadcast does not serve the track itself"
+	);
+
+	catalog.finish().unwrap();
+	source.finish().unwrap();
+}
+
+/// An announcement stream is drawn from a cursor rooted at the prefix, and the broadcast it hands
+/// out is named relative to that root. Resolving against a differently-rooted origin would read a
+/// legal reference as escaping, or land on the wrong broadcast entirely.
+#[tokio::test]
+async fn announced_broadcasts_resolve_siblings_under_the_prefix() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+	let announced = consumer.announced("a/".into()).unwrap();
+
+	let catalog = origin.create_broadcast("a/pub".into()).unwrap();
+	let source = origin.create_broadcast("a/source".into()).unwrap();
+	let _video = source.publish_track("video".into(), None).unwrap();
+
+	// `a/source` may be announced first, so keep reading until the catalog broadcast arrives.
+	let broadcast = loop {
+		let announcement = tokio::time::timeout(TIMEOUT, announced.next())
+			.await
+			.expect("timed out waiting for the announcement")
+			.unwrap()
+			.expect("the origin should keep announcing");
+		if announcement.path() == "pub" {
+			break announcement.broadcast();
+		}
+	};
+
+	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into())))
+		.await
+		.expect("timed out resolving the reference")
+		.unwrap();
+	tokio::time::timeout(TIMEOUT, sibling.subscribe_track("video".into(), None))
+		.await
+		.expect("timed out subscribing on the resolved broadcast")
+		.unwrap();
+
+	catalog.finish().unwrap();
+	source.finish().unwrap();
+}
+
+/// A broadcast consumed straight from a local producer has no origin, so a rendition naming a
+/// sibling names nothing. Reporting that beats silently reading the catalog's own broadcast.
+#[tokio::test]
+async fn resolve_rejects_a_reference_without_an_origin() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let _audio = broadcast.create_track("audio", None).unwrap();
+	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
+
+	// An absent or empty reference still names this broadcast, so it needs no origin.
+	consumer.resolve(None).await.unwrap();
+	consumer.resolve(Some(String::new())).await.unwrap();
+
+	match consumer.resolve(Some("./source".into())).await {
+		Err(MoqError::UnresolvableBroadcast(reference)) => assert_eq!(reference, "./source"),
+		Err(err) => panic!("wrong error for an unresolvable reference: {err:?}"),
+		Ok(_) => panic!("a standalone broadcast cannot resolve a sibling"),
+	}
+}
+
+/// A resolved sibling carries the origin too, so its own catalog's references keep resolving.
+#[tokio::test]
+async fn resolve_returns_a_broadcast_that_resolves_further_references() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+
+	let catalog = origin.create_broadcast("a/pub".into()).unwrap();
+	let source = origin.create_broadcast("a/source".into()).unwrap();
+	let _video = source.publish_track("video".into(), None).unwrap();
+
+	let announced = consumer.announced_broadcast("a/pub".into()).unwrap();
+	let broadcast = tokio::time::timeout(TIMEOUT, announced.available())
+		.await
+		.expect("timed out waiting for the announcement")
+		.unwrap();
+
+	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into())))
+		.await
+		.expect("timed out resolving the reference")
+		.unwrap();
+	assert_eq!(sibling.inner().info().path.as_str(), "a/source");
+
+	// The sibling is a full consumer: the referenced track subscribes on it directly.
+	tokio::time::timeout(TIMEOUT, sibling.subscribe_track("video".into(), None))
+		.await
+		.expect("timed out subscribing on the resolved broadcast")
+		.unwrap();
+
+	// And it can follow a reference of its own, back to where we started.
+	let back = tokio::time::timeout(TIMEOUT, sibling.resolve(Some("./pub".into())))
+		.await
+		.expect("timed out resolving back")
+		.unwrap();
+	assert_eq!(back.inner().info().path.as_str(), "a/pub");
+
+	catalog.finish().unwrap();
+	source.finish().unwrap();
 }
 
 #[tokio::test]

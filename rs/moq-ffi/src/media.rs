@@ -82,6 +82,10 @@ pub struct MoqVideo {
 	/// Human-readable rendition name for track pickers.
 	#[uniffi(default = None)]
 	pub label: Option<String>,
+	/// The broadcast serving this rendition's track, relative to the catalog's own broadcast
+	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
+	#[uniffi(default = None)]
+	pub broadcast: Option<String>,
 	pub codec: String,
 	pub description: Option<Vec<u8>>,
 	pub coded: Option<MoqDimensions>,
@@ -99,6 +103,10 @@ pub struct MoqAudio {
 	/// Human-readable rendition name for track pickers.
 	#[uniffi(default = None)]
 	pub label: Option<String>,
+	/// The broadcast serving this rendition's track, relative to the catalog's own broadcast
+	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
+	#[uniffi(default = None)]
+	pub broadcast: Option<String>,
 	pub codec: String,
 	pub description: Option<Vec<u8>>,
 	pub sample_rate: u32,
@@ -346,6 +354,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 				name.clone(),
 				MoqVideo {
 					label: config.label.clone(),
+					broadcast: config.broadcast.as_ref().map(|path| path.as_str().to_string()),
 					codec: config.codec.to_string(),
 					description: config.description.as_ref().map(|d| d.to_vec()),
 					coded: match (config.coded_width, config.coded_height) {
@@ -374,6 +383,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 				name.clone(),
 				MoqAudio {
 					label: config.label.clone(),
+					broadcast: config.broadcast.as_ref().map(|path| path.as_str().to_string()),
 					codec: config.codec.to_string(),
 					description: config.description.as_ref().map(|d| d.to_vec()),
 					sample_rate: config.sample_rate,
@@ -421,6 +431,32 @@ mod test {
 		let converted = convert_catalog(&catalog);
 		assert!(!converted.video["active"].stalled);
 		assert!(converted.video["video"].stalled);
+	}
+
+	/// A rendition may name a sibling broadcast, and the track then lives there. Dropping the
+	/// reference here loses it for every binding, which then opens the track on the wrong
+	/// broadcast: `NotFound`, or a same-named local track with mismatched metadata.
+	#[test]
+	fn catalog_exposes_rendition_broadcast_references() {
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+
+		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		video.broadcast = Some(moq_net::PathRelative::new("./source").into_owned());
+		catalog.video.renditions.insert("video".to_string(), video);
+		let local = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		catalog.video.renditions.insert("local".to_string(), local);
+
+		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		audio.broadcast = Some(moq_net::PathRelative::new("../elsewhere").into_owned());
+		catalog.audio.renditions.insert("audio".to_string(), audio);
+
+		let converted = convert_catalog(&catalog);
+		// `PathRelative` strips redundant `.` segments on creation, so the reference crosses as
+		// the normalized form the catalog itself holds. It round-trips: rebuilding a
+		// `PathRelative` from it is a no-op.
+		assert_eq!(converted.video["video"].broadcast.as_deref(), Some("source"));
+		assert_eq!(converted.video["local"].broadcast, None);
+		assert_eq!(converted.audio["audio"].broadcast.as_deref(), Some("../elsewhere"));
 	}
 
 	#[test]

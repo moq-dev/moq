@@ -74,6 +74,19 @@ public final class BroadcastConsumer: Sendable {
                 name: name, container: container, subscription: subscription))
     }
 
+    /// Resolve a catalog rendition's `broadcast` reference to the broadcast serving its track.
+    ///
+    /// `reference` is `Video.broadcast` / `Audio.broadcast`: `nil` or empty names this
+    /// broadcast, anything else names a sibling relative to it (e.g. `./source`). Call it
+    /// before `subscribeMedia`, `subscribeTrack`, or `fetchGroup` on a rendition that carries
+    /// one; `decodeAudio` and `decodeVideo` resolve it themselves.
+    ///
+    /// Throws if this broadcast came from a local producer rather than an origin, since a
+    /// standalone broadcast has no sibling to name.
+    public func resolve(_ reference: String?) async throws -> BroadcastConsumer {
+        BroadcastConsumer(try await ffi.resolve(reference: reference))
+    }
+
     /// Subscribe to a raw-audio track, decoding to PCM in the layout `output`
     /// declares. `catalogAudio` is the matching rendition from the catalog.
     public func decodeAudio(name: String, catalogAudio: Audio, output: AudioDecoderOutput) async throws -> AudioConsumer {

@@ -2074,6 +2074,103 @@ fn consume_announced_local() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A catalog rendition may name a sibling broadcast (`./source`), and the track then lives
+/// there, not on the broadcast the catalog came from. Ignoring the reference subscribes on the
+/// catalog's own broadcast: `NotFound`, or a same-named local track with mismatched metadata.
+#[test]
+fn consume_audio_follows_a_sibling_broadcast_reference() {
+	let origin = id(moq_origin_create());
+
+	// Only the sibling serves the track; the catalog broadcast just describes it.
+	let source = publish_broadcast(origin, b"a/source");
+	let init = opus_head();
+	let media = id(publish_audio(
+		source,
+		moq_audio_format::MOQ_AUDIO_FORMAT_OPUS,
+		&init,
+		None,
+	));
+
+	// The importer picks the track name, and the catalog rendition must key on the same one.
+	let name = {
+		let mut state = State::lock();
+		let (_, catalog) = state.publish.pair_mut(Id::try_from(source).unwrap()).unwrap();
+		let catalog = catalog.lock();
+		catalog
+			.audio
+			.renditions
+			.keys()
+			.next()
+			.expect("the importer publishes one audio rendition")
+			.clone()
+	};
+
+	let broadcast = publish_broadcast(origin, b"a/pub");
+	let codec = "opus";
+	let config = moq_audio_config {
+		name: name.as_ptr() as *const c_char,
+		name_len: name.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		codec: codec.as_ptr() as *const c_char,
+		codec_len: codec.len(),
+		description: std::ptr::null(),
+		description_len: 0,
+		sample_rate: 48000,
+		channel_count: 2,
+		container: moq_container::default(),
+	};
+	assert_eq!(unsafe { moq_publish_audio_config(broadcast, &config) }, 0);
+
+	// The C config struct has no broadcast field, so point the rendition at the sibling here.
+	{
+		let mut state = State::lock();
+		let (_, catalog) = state.publish.pair_mut(Id::try_from(broadcast).unwrap()).unwrap();
+		catalog.lock().audio.renditions.get_mut(&name).unwrap().broadcast =
+			Some(moq_net::PathRelative::new("./source").into_owned());
+	}
+
+	let consume = request_broadcast(origin, b"a/pub");
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+
+	let frame_cb = Callback::new();
+	let track = id(unsafe { moq_consume_audio(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
+
+	// Published on the sibling, so it only arrives if the reference was followed.
+	let payload = b"opus audio payload data";
+	let timestamp_us: u64 = 1_000_000;
+	assert_eq!(
+		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), timestamp_us) },
+		0
+	);
+
+	let frame_id = id(frame_cb.recv());
+	let mut frame = moq_frame {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp_us: 0,
+		keyframe: false,
+	};
+	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
+	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
+	assert_eq!(received, payload, "the sibling broadcast's frame should arrive");
+	assert_eq!(frame.timestamp_us, timestamp_us);
+
+	assert_eq!(moq_consume_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_audio_close(track), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_finish(source), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn consume_announced_close_cancels() {
 	let origin = id(moq_origin_create());

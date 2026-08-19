@@ -304,10 +304,23 @@ for frame, err := range video.Frames(ctx) {
 
 An unrecognized codec fails at `DecodeVideo` itself; a recognized one no native backend handles fails when the decoder opens. Either way you find out before the first frame.
 
-
 `AutoEncoder()` prefers a hardware encoder and falls back to software; `SoftwareEncoder()`, `HardwareEncoder()`, and `NamedEncoder("videotoolbox")` pin the choice. The bindings compile VideoToolbox (macOS), Media Foundation (Windows), and openh264 (software, everywhere); the Linux hardware codecs are a libmoq-only build option. `SetBitrate` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
 
 The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition is published immediately, read out of the encoder itself, so subscribers discover it through the catalog rather than a name you pick, and can find it before the first frame exists. `Cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `Gop` frames on its own, and each of those cuts a group.
+
+## Cross-broadcast renditions
+
+A catalog rendition may name a *different* broadcast: `Video.Broadcast` / `Audio.Broadcast` is a path relative to the broadcast the catalog came from, so a transcode output at `live/hd` can describe a track that actually lives in `live/source`. `DecodeAudio` and `DecodeVideo` follow it for you. `SubscribeMedia`, `SubscribeTrack`, and `FetchGroup` take a track name rather than a rendition, so resolve first:
+
+```go
+source, err := broadcast.Resolve(rendition.Broadcast)
+if err != nil {
+    // handle error
+}
+consumer, err := source.SubscribeMedia(name, rendition.Container, nil)
+```
+
+`Resolve(nil)` (or an empty reference) returns the same broadcast, so it is safe to call unconditionally. It needs an origin to fetch a sibling from, so it fails on a broadcast consumed straight from a local producer.
 
 ## Raw Track Controls
 

@@ -92,6 +92,22 @@ func (b *BroadcastConsumer) SubscribeMedia(name string, container Container, sub
 	return &MediaConsumer{inner: inner}, nil
 }
 
+// Resolve returns the broadcast serving a catalog rendition, honoring its broadcast
+// reference: Video.Broadcast / Audio.Broadcast. A nil or empty reference names this
+// broadcast, anything else names a sibling relative to it (e.g. "./source"). Call it
+// before SubscribeMedia, SubscribeTrack, or FetchGroup on a rendition that carries one;
+// DecodeAudio and DecodeVideo resolve it themselves.
+//
+// Errors if this broadcast came from a local producer rather than an origin, since a
+// standalone broadcast has no sibling to name.
+func (b *BroadcastConsumer) Resolve(reference *string) (*BroadcastConsumer, error) {
+	inner, err := b.inner.Resolve(reference)
+	if err != nil {
+		return nil, err
+	}
+	return &BroadcastConsumer{inner: inner}, nil
+}
+
 // DecodeAudio subscribes to a raw-audio track; samples come back in the
 // format declared by output. catalogAudio comes from the catalog.
 func (b *BroadcastConsumer) DecodeAudio(name string, catalogAudio Audio, output AudioDecoderOutput) (*AudioConsumer, error) {

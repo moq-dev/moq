@@ -180,6 +180,25 @@ async for announcement in client.announced("prefix/"):
         ...
 ```
 
+### Cross-broadcast renditions
+
+A catalog rendition may name a *different* broadcast: `track.broadcast` is a path relative to the
+broadcast the catalog came from, so a transcode output at `live/hd` can describe a track that
+actually lives in `live/source`. `decode_audio` and `decode_video` follow it for you. `subscribe_media`,
+`subscribe_track`, and `fetch_group` take a track name rather than a rendition, so resolve first:
+
+```python
+catalog = await announcement.broadcast.catalog()
+track_name, track = next(iter(catalog.video.items()))
+
+source = await announcement.broadcast.resolve(track.broadcast)
+consumer = await source.subscribe_media(track_name, track)
+```
+
+`resolve(None)` (or an empty reference) returns the same broadcast, so it is safe to call
+unconditionally. It needs an origin to fetch a sibling from, so it raises on a broadcast consumed
+straight from a local producer.
+
 ### Catalog extensions
 
 Advertise application-specific metadata (for example a side-channel transcript track) as an untyped catalog section. The value is any JSON-serializable object; it rides alongside `video`/`audio` and reaches subscribers as `Catalog.sections`.

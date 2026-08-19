@@ -128,6 +128,21 @@ track.update(subscription: Subscription(priority: 20, ordered: false))
 
 `ordered` controls prioritization only. When true, groups are prioritized in sequence order. Groups may always arrive out-of-order (or not at all) over the network.
 
+A catalog rendition may name a *different* broadcast: `Video.broadcast` / `Audio.broadcast` is a path
+relative to the broadcast the catalog came from, so a transcode output at `live/hd` can describe a
+track that actually lives in `live/source`. `decodeAudio` and `decodeVideo` follow it for you.
+`subscribeMedia`, `subscribeTrack`, and `fetchGroup` take a track name rather than a rendition, so
+resolve first:
+
+```swift
+let source = try await announcement.broadcast.resolve(rendition.broadcast)
+let consumer = try await source.subscribeMedia(name: name, container: rendition.container)
+```
+
+`resolve(nil)` (or an empty reference) returns the same broadcast, so it is safe to call
+unconditionally. It needs an origin to fetch a sibling from, so it throws on a broadcast consumed
+straight from a local producer.
+
 ## Publish
 
 ```swift

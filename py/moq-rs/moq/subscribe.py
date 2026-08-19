@@ -482,6 +482,22 @@ class BroadcastConsumer:
         container = track if isinstance(track, Container) else track.container
         return MediaConsumer(await self._inner.subscribe_media(name, container, subscription))
 
+    async def resolve(self, reference: str | None) -> "BroadcastConsumer":
+        """Resolve a catalog rendition's ``broadcast`` reference to the broadcast
+        serving its track.
+
+        ``reference`` is ``catalog.video[name].broadcast`` /
+        ``catalog.audio[name].broadcast``: ``None`` or empty names this broadcast,
+        anything else names a sibling relative to it (e.g. ``./source``). Call it
+        before :meth:`subscribe_media`, :meth:`subscribe_track`, or
+        :meth:`fetch_group` on a rendition that carries one; :meth:`decode_audio`
+        and :meth:`decode_video` resolve it themselves.
+
+        Raises if this broadcast came from a local producer rather than an origin,
+        since a standalone broadcast has no sibling to name.
+        """
+        return BroadcastConsumer(await self._inner.resolve(reference))
+
     async def decode_audio(
         self,
         name: str,

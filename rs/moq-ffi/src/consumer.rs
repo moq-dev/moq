@@ -100,17 +100,55 @@ impl From<MoqSubscription> for moq_net::track::Subscription {
 #[derive(Clone, uniffi::Object)]
 pub struct MoqBroadcastConsumer {
 	inner: moq_net::broadcast::Consumer,
+	/// The origin this broadcast was resolved through, if any. A catalog rendition may name a
+	/// sibling broadcast, and only an origin can fetch one; a standalone broadcast (a local
+	/// producer's `consume`) has none, so such a rendition is unresolvable rather than wrong.
+	origin: Option<moq_net::origin::Consumer>,
 }
 
 impl MoqBroadcastConsumer {
+	/// Wrap a standalone broadcast, with no origin to resolve cross-broadcast references against.
 	pub(crate) fn new(inner: moq_net::broadcast::Consumer) -> Self {
-		Self { inner }
+		Self { inner, origin: None }
+	}
+
+	/// Wrap a broadcast the origin handed out, so a rendition referencing a sibling broadcast
+	/// resolves through the same origin (which deduplicates the shared subscription).
+	///
+	/// `origin` must be the cursor that named `inner`: the broadcast's path is stamped per
+	/// cursor, and a reference resolves against that path, so an origin rooted elsewhere would
+	/// read a legal reference as escaping (or worse, resolve it to the wrong broadcast).
+	pub(crate) fn routed(inner: moq_net::broadcast::Consumer, origin: moq_net::origin::Consumer) -> Self {
+		Self {
+			inner,
+			origin: Some(origin),
+		}
 	}
 
 	/// Access the underlying `moq_net::broadcast::Consumer` for sibling
 	/// modules (e.g. `audio`) that need to subscribe a typed track.
 	pub(crate) fn inner(&self) -> &moq_net::broadcast::Consumer {
 		&self.inner
+	}
+
+	/// Resolve a catalog rendition's `broadcast` reference to the broadcast serving its track.
+	pub(crate) async fn resolve_inner(
+		&self,
+		reference: Option<&str>,
+	) -> Result<moq_net::broadcast::Consumer, MoqError> {
+		// An absent or empty reference names the catalog's own broadcast, which we already hold.
+		// Short-circuiting also keeps a standalone broadcast usable: the common case needs no origin.
+		let Some(reference) = reference.filter(|reference| !reference.is_empty()) else {
+			return Ok(self.inner.clone());
+		};
+
+		let origin = self
+			.origin
+			.clone()
+			.ok_or_else(|| MoqError::UnresolvableBroadcast(reference.to_string()))?;
+
+		let source = moq_mux::Source::new(origin, &self.inner.info().path);
+		Ok(source.resolve(Some(&moq_net::PathRelative::new(reference))).await?)
 	}
 }
 
@@ -205,6 +243,23 @@ impl MoqBroadcastConsumer {
 				inner: self.inner.clone(),
 			}),
 		})
+	}
+
+	/// Resolve a catalog rendition's `broadcast` reference to the broadcast serving its track.
+	///
+	/// `reference` is [`MoqVideo::broadcast`] / [`MoqAudio::broadcast`]: absent or empty names
+	/// this broadcast, anything else names a sibling relative to it (e.g. `./source`). Call it
+	/// before [`Self::subscribe_media`], [`Self::subscribe_track`], or [`Self::fetch_group`] on
+	/// a rendition that carries one; `decode_video` and `decode_audio` resolve it themselves.
+	///
+	/// Errors if this broadcast came from a local producer rather than an origin, since a
+	/// standalone broadcast has no sibling to name.
+	pub async fn resolve(&self, reference: Option<String>) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+		let broadcast = self.resolve_inner(reference.as_deref()).await?;
+		Ok(Arc::new(match self.origin.clone() {
+			Some(origin) => Self::routed(broadcast, origin),
+			None => Self::new(broadcast),
+		}))
 	}
 
 	/// Subscribe to the catalog for this broadcast.

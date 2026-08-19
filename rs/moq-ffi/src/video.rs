@@ -450,12 +450,16 @@ impl MoqBroadcastConsumer {
 	/// [`MoqCatalogConsumer::next`](crate::consumer::MoqCatalogConsumer::next)); the codec is read
 	/// from it. Errors if no native backend handles that codec, rather than failing on the first
 	/// frame.
+	///
+	/// A rendition whose [`broadcast`](crate::media::MoqVideo::broadcast) names another broadcast
+	/// is subscribed there, so `name` is always read from the broadcast the catalog points at.
 	pub async fn decode_video(
 		&self,
 		name: String,
 		catalog_video: crate::media::MoqVideo,
 		output: MoqVideoDecoderOutput,
 	) -> Result<Arc<MoqVideoConsumer>, MoqError> {
+		let broadcast = self.resolve_inner(catalog_video.broadcast.as_deref()).await?;
 		let cfg = video_config(catalog_video)?;
 
 		let mut config = moq_video::decode::Config::default();
@@ -465,7 +469,7 @@ impl MoqBroadcastConsumer {
 			.map(|ms| moq_mux::Latency::max(std::time::Duration::from_millis(ms)))
 			.unwrap_or_default();
 
-		let consumer = moq_video::decode::Consumer::new(self.inner(), &cfg, name, config).await?;
+		let consumer = moq_video::decode::Consumer::new(&broadcast, &cfg, name, config).await?;
 
 		Ok(Arc::new(MoqVideoConsumer {
 			task: crate::ffi::Task::new(VideoConsumerInner { consumer }),
@@ -481,6 +485,7 @@ mod decode_tests {
 	fn catalog_video(codec: &str) -> MoqVideo {
 		MoqVideo {
 			label: None,
+			broadcast: None,
 			codec: codec.to_string(),
 			description: None,
 			coded: Some(MoqDimensions {
