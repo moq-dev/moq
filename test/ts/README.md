@@ -149,10 +149,14 @@ once:
 
 ## CI
 
-`.github/workflows/smoke.yml` runs `just test ts` after the interop
-matrix (nightly, on demand, and on PRs touching `test/ts/`). TSDuck
-comes from the `nix develop` shell, so the run uses the same `tsp`/`tsanalyze` a
-local developer would.
+`.github/workflows/smoke.yml` runs `just test ts` and then `just test ts-eit`
+after the interop matrix (nightly, on demand, and on PRs touching `test/ts/`).
+The second recipe is `eit-roundtrip.sh`: it builds the sparse-schedule and
+pending-version fixtures from a generated clip, round-trips them through a
+relay, and censuses the capture, so a break in the generators or in the SI
+carriage they pin fails a PR instead of landing silently. TSDuck comes from the
+`nix develop` shell, so the run uses the same `tsp`/`tsanalyze` a local
+developer would.
 
 ## Caveats
 

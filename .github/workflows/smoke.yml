@@ -82,3 +82,9 @@ jobs:
       - name: TS compliance
         run: nix develop --command just test ts
         shell: bash -leo pipefail {0}
+
+      # Builds the sparse-EPG and pending-version fixtures and round-trips
+      # them, asserting the schedule survives and pending sections are dropped.
+      - name: EIT fixtures
+        run: nix develop --command just test ts-eit
+        shell: bash -leo pipefail {0}

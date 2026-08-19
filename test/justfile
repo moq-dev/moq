@@ -88,3 +88,8 @@ smoke-negative *args:
 # Check the subscriber's MPEG-TS output for IRD compliance.
 ts *args:
     ./ts/run.sh {{ args }}
+
+# Round-trip the EIT fixtures: the sparse schedule must survive and
+# pending-version sections must be dropped at import.
+ts-eit *args:
+    ./ts/eit-roundtrip.sh {{ args }}
