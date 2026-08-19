@@ -419,14 +419,16 @@ fn fnv_key(name: &Path, origins: impl IntoIterator<Item = Origin>) -> u64 {
 ///
 /// Cost is a pair, so this is really two comparisons: the warm cost, then the cold
 /// one. The second matters exactly when the first ties, which is what happens once
-/// two relays both carry the broadcast and both advertise zero: their cold costs
-/// then say which of them sits closer to the publisher, so a subscriber joins the
-/// cheaper-rooted copy instead of opening an equally priced direct pull.
+/// two relays both carry the broadcast and both advertise zero. Their cold costs
+/// then say which of them sits closer to the publisher, and the subscriber takes
+/// that one.
 ///
-/// Hop length stays the tie-break below cost, so peers that never carry a cost
-/// (pre-lite-06, or a plain local publish) rank exactly as they did before route
-/// cost existed, and equal-cost warm copies resolve to the closest one, which
-/// bounds same-datacenter chains to a single hop.
+/// Hop length stays the tie-break below both, and it is measuring the same thing
+/// the cold cost measures, just without the prices: how far away the content is.
+/// So the cold cost is strictly the better answer and goes first. Peers that never
+/// carry a cost (pre-lite-06, or a plain local publish) share one cold value, so
+/// they tie there and rank exactly as they did before route cost existed, on hop
+/// length, which bounds same-datacenter chains to a single hop.
 ///
 /// Recency is the last word, so it only separates routes that are identical in
 /// every advertised respect: same hop chain, same cost. That is a publisher
@@ -3530,15 +3532,22 @@ mod tests {
 	/// then turns on the cold rank, which is what the tests are about.
 	const SIBLING_LINK: u64 = 1;
 
-	/// A route as a warm sibling would announce it: warm cost discounted to zero
-	/// with `cold` still flowing, charged this link, chain ending at the announcing
-	/// peer.
-	fn sibling_route(peer: Origin, cold: u64) -> broadcast::Route {
-		let hops = OriginList::try_from(vec![Origin::new(90).unwrap(), peer]).unwrap();
+	/// A route as a warm relay would announce it: warm cost discounted to zero with
+	/// `cold` still flowing, charged `link` on arrival. `hops` is the chain it
+	/// advertised, which ends at the announcing relay.
+	fn warm_route(hops: &[u64], cold: u64, link: u64) -> broadcast::Route {
+		let hops = hops.iter().map(|id| Origin::new(*id).unwrap()).collect::<Vec<_>>();
 		let advertised = broadcast::Cost { warm: 0, cold };
-		let mut route = announce().with_hops(hops).with_cost(advertised.charged(SIBLING_LINK));
+		let mut route = announce()
+			.with_hops(OriginList::try_from(hops).unwrap())
+			.with_cost(advertised.charged(link));
 		route.advertised = advertised;
 		route
+	}
+
+	/// A warm relay one hop past the publisher, on the standard test link.
+	fn sibling_route(peer: Origin, cold: u64) -> broadcast::Route {
+		warm_route(&[90, peer.id()], cold, SIBLING_LINK)
 	}
 
 	/// A route as the upstream announces it: priced, one hop.
@@ -3730,20 +3739,31 @@ mod tests {
 	}
 
 	/// Warm cost stays the primary metric, but where it ties the cold cost breaks
-	/// the tie before hop count. Otherwise a direct route would bypass an
-	/// equally-priced warm relay purely for having a shorter chain, and a third
-	/// relay could never join an existing aggregation tree.
+	/// the tie before hop count.
+	///
+	/// The two tie-breaks answer the same question, "how far away is this content",
+	/// and the cold cost answers it in the operator's own prices while hop count
+	/// only counts relays. Putting the priced answer first is what stops an
+	/// expensive two-link path from outranking a cheap three-link one.
 	#[test]
 	fn test_equal_warm_cost_prefers_the_cheaper_root() {
-		let peer = Origin::new(3).unwrap();
-		// Both cost 1 to reach: the publisher over a pricey link, or a warm sibling
-		// over a cheap one. The sibling's chain is longer, so hop count would pick
-		// the direct route.
-		let direct = upstream_route(1).with_cost(broadcast::Cost { warm: 1, cold: 9 });
-		let warm = sibling_route(peer, 0);
-		assert_eq!(warm.cost.warm, 1, "the two candidates must tie on warm cost");
+		// Two warm relays, each one link away, so the warm comparison ties. The one
+		// rooted nearer the publisher advertises the *longer* chain, since it sits
+		// deeper in an aggregation tree, which is exactly the case hop count reads
+		// backwards: a chain is only a guess at how far the content is, and the cold
+		// cost is that same distance actually priced.
+		let shallow = warm_route(&[90, 4], 5, 1);
+		let deep = warm_route(&[90, 91, 3], 1, 1);
+		assert_eq!(
+			shallow.cost.warm, deep.cost.warm,
+			"the candidates must tie on warm cost"
+		);
+		assert!(
+			shallow.hops.len() < deep.hops.len(),
+			"hop count must favor the wrong one"
+		);
 
-		let mut state = front_state(Origin::new(4).unwrap(), vec![direct, warm]);
+		let mut state = front_state(Origin::new(7).unwrap(), vec![shallow, deep]);
 		state.reselect(true);
 		assert_eq!(state.active, Some(1), "hop count bypassed the cheaper-rooted warm copy");
 	}
