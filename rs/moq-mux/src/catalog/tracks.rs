@@ -413,9 +413,11 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		// the reservation. If this was the last one, the release flushes a complete snapshot.
 		{
 			let mut guard = self.catalog.lock();
+			// Mark the slot filled before the write, not after. `insert` is caller code that can panic
+			// partway, and whatever it managed to write still has to be retired when we drop.
+			self.present = true;
 			config.insert(&mut guard, &self.name);
 		}
-		self.present = true;
 		self.gate = None;
 	}
 
@@ -763,6 +765,10 @@ mod tests {
 		struct TelemetryExt {
 			#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 			telemetry: BTreeMap<String, Telemetry>,
+			#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+			exploding: BTreeMap<String, Exploding>,
+			#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+			stubborn: BTreeMap<String, Stubborn>,
 		}
 
 		impl CatalogExt for TelemetryExt {}
@@ -805,6 +811,115 @@ mod tests {
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::default()).unwrap();
 			(broadcast, catalog)
+		}
+
+		/// A config whose `insert` panics, to poison the catalog lock the way any third-party
+		/// [`RenditionConfig`] can: `set` runs it while holding that lock.
+		#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
+		struct Exploding {
+			/// Write the entry before panicking, leaving a partially applied config behind.
+			wrote: bool,
+		}
+
+		impl RenditionConfig<TelemetryExt> for Exploding {
+			fn insert(self, catalog: &mut Catalog<TelemetryExt>, name: &str) {
+				if self.wrote {
+					catalog.exploding.insert(name.to_string(), self);
+				}
+				panic!("insert exploded");
+			}
+			fn get_mut<'a>(catalog: &'a mut Catalog<TelemetryExt>, name: &str) -> Option<&'a mut Self> {
+				catalog.exploding.get_mut(name)
+			}
+			fn remove(catalog: &mut Catalog<TelemetryExt>, name: &str) {
+				catalog.exploding.remove(name);
+			}
+		}
+
+		/// A panicking `insert` poisons the catalog lock while `set` holds it. The producer has to
+		/// survive that: an unwinding `Rendition::drop` takes the same lock to release its name, and
+		/// a panic there would be a panic during a panic, which aborts the process rather than
+		/// failing a test.
+		#[test]
+		fn a_poisoned_lock_does_not_take_the_producer_down() {
+			let (_broadcast, catalog) = produce();
+			let reserved = catalog.reserve();
+
+			let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+				let mut boom = reserved.init::<Exploding>("gps").unwrap();
+				boom.set(Exploding { wrote: false });
+			}))
+			.expect_err("the config's insert panics");
+			assert!(
+				err.downcast_ref::<&str>().is_some_and(|msg| *msg == "insert exploded"),
+				"the panic is the one the config raised, not a lock failure"
+			);
+
+			// The rendition unwound, so it released its name and the catalog is still usable.
+			assert!(catalog.snapshot().telemetry.is_empty());
+			reserved
+				.init::<Exploding>("gps")
+				.expect("the unwound rendition released its name");
+		}
+
+		/// A config whose cleanup hook panics after mutating, the other half of untrusted caller code:
+		/// `Drop` runs `remove` while holding the catalog lock.
+		#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
+		struct Stubborn;
+
+		impl RenditionConfig<TelemetryExt> for Stubborn {
+			fn insert(self, catalog: &mut Catalog<TelemetryExt>, name: &str) {
+				catalog.stubborn.insert(name.to_string(), self);
+			}
+			fn get_mut<'a>(catalog: &'a mut Catalog<TelemetryExt>, name: &str) -> Option<&'a mut Self> {
+				catalog.stubborn.get_mut(name)
+			}
+			fn remove(catalog: &mut Catalog<TelemetryExt>, name: &str) {
+				catalog.stubborn.remove(name);
+				panic!("remove exploded");
+			}
+		}
+
+		/// A panicking `remove` must not cost the rendition its name. The name is released before any
+		/// caller code runs, so the slot is reservable again even though the hook blew up on the way
+		/// out.
+		#[test]
+		fn a_panicking_remove_still_frees_the_name() {
+			let (_broadcast, catalog) = produce();
+			let reserved = catalog.reserve();
+
+			let mut rendition = reserved.init::<Stubborn>("gps").unwrap();
+			rendition.set(Stubborn);
+
+			std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(rendition)))
+				.expect_err("the config's remove panics");
+
+			reserved
+				.init::<Stubborn>("gps")
+				.expect("a name held by a blown-up cleanup hook would be lost forever");
+		}
+
+		/// The partial-application case: `insert` writes its entry and then panics, so `set` never
+		/// reaches `present = true`. The entry still has to go when the rendition unwinds, or it sits
+		/// in the catalog under a name no handle owns and every later reservation of it is refused.
+		#[test]
+		fn an_unwinding_rendition_retires_a_partially_written_entry() {
+			let (_broadcast, catalog) = produce();
+			let reserved = catalog.reserve();
+
+			std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+				let mut boom = reserved.init::<Exploding>("gps").unwrap();
+				boom.set(Exploding { wrote: true });
+			}))
+			.expect_err("the config's insert panics after writing");
+
+			assert!(
+				catalog.snapshot().exploding.is_empty(),
+				"the entry the panicking insert wrote is retired with its owner"
+			);
+			reserved
+				.init::<Exploding>("gps")
+				.expect("a stranded entry would refuse this forever");
 		}
 
 		/// A custom kind gets the same detection and drop-removal as video/audio.
