@@ -11,6 +11,7 @@
 
 use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
 use std::net::{SocketAddr, TcpListener, UdpSocket};
+use std::sync::Once;
 use std::time::Duration;
 
 /// TCP keepalive idle period before the kernel starts probing a silent peer, and
@@ -23,13 +24,142 @@ use std::time::Duration;
 const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
+/// UDP socket buffer size requested in each direction, in bytes.
+///
+/// A QUIC stack absorbs bursts in the kernel socket buffer: whatever doesn't fit
+/// while the process is off the CPU is dropped before quinn ever sees it, and
+/// congestion control reads those drops as congestion. The OS defaults are sized
+/// for a chatty TCP-era socket (208 KiB on Linux), which a single relay socket
+/// carrying every connection blows through in milliseconds. 8 MiB is roughly 64ms
+/// of a saturated 1Gbps link, generous next to a scheduler delay and cheap next to
+/// what a relay already spends per connection. quic-go asks for 7 MiB.
+///
+/// Compiled in rather than derived from the NIC: the buffer is a ceiling on queued
+/// bytes rather than an allocation, so an oversized request costs an idle socket
+/// nothing, while a link's nominal speed says little about the path it feeds (a
+/// VM's virtio NIC reports 10Gbps through a 100Mbps uplink).
+const UDP_BUFFER: usize = 8 * 1024 * 1024;
+
+/// The sysctl capping `SO_RCVBUF`, named in the warning so an operator knows what
+/// to raise. `None` on platforms that size socket buffers per socket only.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const RECV_SYSCTL: Option<&str> = Some("net.core.rmem_max");
+#[cfg(any(
+	target_vendor = "apple",
+	target_os = "freebsd",
+	target_os = "netbsd",
+	target_os = "openbsd"
+))]
+const RECV_SYSCTL: Option<&str> = Some("kern.ipc.maxsockbuf");
+#[cfg(not(any(
+	target_os = "linux",
+	target_os = "android",
+	target_vendor = "apple",
+	target_os = "freebsd",
+	target_os = "netbsd",
+	target_os = "openbsd"
+)))]
+const RECV_SYSCTL: Option<&str> = None;
+
+/// The sysctl capping `SO_SNDBUF`. See [`RECV_SYSCTL`]; the BSDs cap both
+/// directions with the same knob.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const SEND_SYSCTL: Option<&str> = Some("net.core.wmem_max");
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const SEND_SYSCTL: Option<&str> = RECV_SYSCTL;
+
 /// Bind a UDP socket, making an IPv6 socket dual-stack so it also serves IPv4.
+///
+/// The socket buffers are grown to 8 MiB where the OS allows it, and a warning
+/// names the sysctl to raise where it doesn't.
 pub fn udp(addr: SocketAddr) -> std::io::Result<UdpSocket> {
 	let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
 	let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
 	make_dual_stack(&socket, addr);
+	grow_buffers(&socket);
 	socket.bind(&addr.into())?;
 	Ok(socket.into())
+}
+
+/// Request [`UDP_BUFFER`] in both directions, best-effort.
+fn grow_buffers(socket: &Socket) {
+	// One warning per direction per process: a client that reconnects rebinds, and
+	// the operator only needs telling once.
+	static RECV: Once = Once::new();
+	static SEND: Once = Once::new();
+
+	grow_buffer(
+		"receive",
+		RECV_SYSCTL,
+		&RECV,
+		|| socket.recv_buffer_size(),
+		|size| socket.set_recv_buffer_size(size),
+	);
+	grow_buffer(
+		"send",
+		SEND_SYSCTL,
+		&SEND,
+		|| socket.send_buffer_size(),
+		|size| socket.set_send_buffer_size(size),
+	);
+}
+
+/// Raise one direction's buffer to [`UDP_BUFFER`], then read back what the kernel
+/// actually granted and warn through `warned` when it fell short.
+///
+/// Reading back is the whole point: Linux silently clamps the request to its
+/// sysctl, so `setsockopt` returning `Ok` says nothing about the size we ended up
+/// with, and `SO_RCVBUFFORCE` (the clamp-free version) needs `CAP_NET_ADMIN` that
+/// a relay shouldn't be asking for.
+fn grow_buffer(
+	direction: &str,
+	sysctl: Option<&str>,
+	warned: &Once,
+	get: impl Fn() -> std::io::Result<usize>,
+	set: impl Fn(usize) -> std::io::Result<()>,
+) {
+	// Never shrink a system that's already tuned above our default.
+	if get().is_ok_and(|size| granted(size) >= UDP_BUFFER) {
+		return;
+	}
+
+	let size = match set(UDP_BUFFER).and_then(|()| get()) {
+		Ok(size) => granted(size),
+		Err(err) => {
+			warned.call_once(|| tracing::warn!(%err, "failed to set the UDP {direction} buffer size"));
+			return;
+		}
+	};
+
+	if size >= UDP_BUFFER {
+		return;
+	}
+
+	warned.call_once(|| match sysctl {
+		Some(sysctl) => tracing::warn!(
+			wanted = UDP_BUFFER,
+			granted = size,
+			"UDP {direction} buffer is smaller than requested; raise `{sysctl}` or expect packet loss under load"
+		),
+		None => tracing::warn!(
+			wanted = UDP_BUFFER,
+			granted = size,
+			"UDP {direction} buffer is smaller than requested; expect packet loss under load"
+		),
+	});
+}
+
+/// The usable size behind a buffer size the kernel reported.
+///
+/// Linux reports back double what it granted, reserving the other half for
+/// per-packet bookkeeping, so halving keeps the numbers we compare and log in the
+/// same units an operator writes into the sysctl.
+fn granted(reported: usize) -> usize {
+	if cfg!(any(target_os = "linux", target_os = "android")) {
+		reported / 2
+	} else {
+		reported
+	}
 }
 
 /// Whether `socket` also reaches IPv4, through IPv4-mapped addresses.
@@ -122,6 +252,60 @@ mod tests {
 		};
 		let socket = Socket::from(socket);
 		assert!(!socket.only_v6().unwrap(), "IPv6 socket should be dual-stack");
+	}
+
+	#[test]
+	fn udp_buffers_grow() {
+		// The exact size depends on the host's sysctls, but a tuned socket should
+		// never come back smaller than an untuned one.
+		let tuned = Socket::from(udp("127.0.0.1:0".parse().unwrap()).unwrap());
+		let plain = Socket::from(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+
+		assert!(tuned.recv_buffer_size().unwrap() >= plain.recv_buffer_size().unwrap());
+		assert!(tuned.send_buffer_size().unwrap() >= plain.send_buffer_size().unwrap());
+	}
+
+	#[tracing_test::traced_test]
+	#[test]
+	fn udp_buffer_warns_when_the_kernel_clamps() {
+		// Stand in for a kernel that accepts the request and quietly hands back
+		// less, which is what a small `net.core.rmem_max` does.
+		let current = std::cell::Cell::new(0);
+		let warned = Once::new();
+		grow_buffer(
+			"receive",
+			Some("net.core.rmem_max"),
+			&warned,
+			|| Ok(current.get()),
+			|_| {
+				current.set(512 * 1024);
+				Ok(())
+			},
+		);
+
+		assert!(warned.is_completed());
+		assert!(logs_contain("net.core.rmem_max"));
+	}
+
+	#[test]
+	fn udp_buffer_keeps_a_larger_existing_size() {
+		// Doubled, so this reads as already-larger on Linux too.
+		let reported = UDP_BUFFER * 2;
+		let touched = std::cell::Cell::new(false);
+		let warned = Once::new();
+		grow_buffer(
+			"receive",
+			None,
+			&warned,
+			|| Ok(reported),
+			|_| {
+				touched.set(true);
+				Ok(())
+			},
+		);
+
+		assert!(!touched.get(), "should not shrink a tuned socket");
+		assert!(!warned.is_completed());
 	}
 
 	#[test]
