@@ -58,6 +58,12 @@ impl<T: Send + 'static> Task<T> {
 		tokio::sync::OwnedMutexGuard::try_map(guard, Option::as_mut).ok()
 	}
 
+	/// Whether [Self::cancel] has run, which [Self::lock] folds into the same `None` as a busy
+	/// state. The state may still be a moment away from being dropped.
+	pub fn is_cancelled(&self) -> bool {
+		*self.cancel.borrow()
+	}
+
 	/// Spawn an async closure on the runtime.
 	///
 	/// The closure receives a [Guard] which derefs to `T`.

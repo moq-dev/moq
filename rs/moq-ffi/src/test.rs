@@ -1968,11 +1968,12 @@ async fn server_cert_fingerprints_rejected_after_cancel() {
 	server.cert_fingerprints().expect("fingerprints available");
 
 	// The listener is dropped off-thread, so this must not depend on that landing first:
-	// cancel is terminal the moment it returns.
+	// cancel is terminal the moment it returns. `Cancelled`, not `Bind`: the wrappers'
+	// `is_shutdown` helpers read the variant to tell a teardown from a real bind failure.
 	server.cancel();
 	assert!(matches!(
 		server.cert_fingerprints(),
-		Err(crate::error::MoqError::Bind(_))
+		Err(crate::error::MoqError::Cancelled)
 	));
 }
 

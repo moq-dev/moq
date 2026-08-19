@@ -148,10 +148,14 @@ impl MoqServer {
 	/// WebTransport's `serverCertificateHashes`. Returns an error if called
 	/// before `listen()`.
 	pub fn cert_fingerprints(&self) -> Result<Vec<String>, MoqError> {
-		let state = self
-			.task
-			.lock()
-			.ok_or_else(|| MoqError::Bind("server is busy or cancelled".into()))?;
+		// `lock` folds "busy" and "cancelled" into one `None`, so ask which. A cancelled server
+		// is a shutdown, and the wrappers' `is_shutdown` helpers only recognize it by variant.
+		let Some(state) = self.task.lock() else {
+			return Err(match self.task.is_cancelled() {
+				true => MoqError::Cancelled,
+				false => MoqError::Bind("server is busy".into()),
+			});
+		};
 		let server = state
 			.server
 			.as_ref()
@@ -162,7 +166,7 @@ impl MoqServer {
 	/// Cancel any in-flight `listen()` or `accept()` call.
 	///
 	/// Terminal: the listening socket is closed here, not when the handle is, and
-	/// `cert_fingerprints()` errors afterwards.
+	/// `cert_fingerprints()` returns `Cancelled` afterwards.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
