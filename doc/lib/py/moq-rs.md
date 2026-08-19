@@ -28,7 +28,7 @@ A **broadcast** is a collection of tracks identified by a path. A **track** is a
 
 `create_broadcast(path)` creates an announced broadcast on the origin and returns its producer. Toggle discoverability with `set_announce(False)` (the broadcast stays reachable by exact path), and call `finish()` to unpublish it.
 
-For unstructured byte streams (status, commands, sensor data), use `publish_track` / `subscribe_track`. For media with a known container format (audio/video), use `publish_audio` / `publish_video` / `publish_container` and `subscribe_media`, and the catalog will be populated automatically.
+For unstructured byte streams (status, commands, sensor data), use `publish_track` / `subscribe_track`. For encoded media, use `publish_audio` or `publish_video` to publish one rendition, or `publish_container` to hand over a container (fMP4, MKV, TS, FLV) that describes its own tracks. Either way the catalog is populated automatically, and `subscribe_media` reads it back.
 
 ## API summary
 
