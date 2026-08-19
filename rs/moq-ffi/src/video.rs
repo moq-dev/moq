@@ -402,7 +402,10 @@ impl MoqVideoConsumer {
 		self.task.run(|mut state| async move { state.next().await }).await
 	}
 
-	/// Stop decoding and release the backend.
+	/// Make current and future reads return `Cancelled`.
+	///
+	/// The decoder backend is released when this object is dropped, not here: a cancelled consumer
+	/// that stays reachable keeps its codec session. Drop it to free one.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
