@@ -66,6 +66,8 @@ The first picks where a relay fetches from. The second picks which relay does th
 
 Both matter. Without the warm price every relay opens its own fetch and the backbone carries N copies. Without the cold price the relays that are already carrying cannot be told apart, so the aggregation point lands wherever a coin flip puts it, which can leave a relay one cheap link from the publisher pulling through a relay several expensive links away.
 
+A relay waits half a second before consolidating onto a warm peer, and re-checks when the wait is up. Costs are reported, not observed, so a report still crossing the mesh can be cheaper than what its sender would say now, and during a reprice a ring of relays could otherwise each defer to a stale neighbour and all let go at once. The wait outlasts that propagation, so the re-check runs on current prices. It applies only to consolidating onto a warm peer: leaving a draining or vanished route is always immediate.
+
 `moq-transport` has nowhere to carry the cold price, so those routes keep the older coin-flip behavior.
 
 ## Auto-discovery

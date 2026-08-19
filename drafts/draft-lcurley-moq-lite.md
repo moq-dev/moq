@@ -851,10 +851,15 @@ Forgoing the discount is also what carries a drain across a mesh: each carrying 
 
 Two relays that independently begin carrying the same broadcast would each see the other's 0 as cheaper than its own source, and both switching at once would leave the broadcast with no source.
 Before re-parenting onto a 0-cost advertisement from another actively-carrying relay (one whose path has two or more entries), a relay SHOULD require that relay's rank to be strictly lower than its own, where a relay's rank is the Cold Route Cost of the path it serves from, followed by a hash of the broadcast path and its Hop ID.
-Adopting a parent adds that link's cost to the adopting relay's own Cold cost, so after the move it ranks strictly above the relay it adopted: the order descends, which is what forbids a cycle of any length rather than only the two-relay case.
+Adopting a parent adds that link's cost to the adopting relay's own Cold cost, so once the move lands it ranks above the relay it adopted, and the two cannot adopt each other.
 Ranking on Cold cost first also puts the aggregation point at the relay with the cheapest path to the publisher, instead of wherever a hash happens to fall; the hash only separates relays that are equally far from it.
 Equal ranks (including two relays that both declared Hop ID 0) cannot be ordered, and neither side SHOULD move.
 Cheaper advertisements from anything else carry no such hazard and SHOULD be adopted immediately.
+
+This ordering is only shared between two relays while the costs behind it are.
+A relay reports its own Cold Route Cost, and a report still crossing the mesh can be lower than the value its sender would report now, so while costs are rising three or more relays can each rank a stale neighbour below themselves and all re-parent at once, leaving the broadcast with no source until the real advertisements arrive.
+A relay SHOULD therefore delay adopting a warm relay, re-evaluating when the delay expires rather than acting on the decision that started it, so the advertisements the decision rests on are refreshed before it takes effect.
+The delay MUST exceed the time an advertisement takes to cross the mesh, and applies only to this adoption: leaving a route that is draining or has disappeared MUST NOT be delayed, and a relay whose serving path costs the saturation ceiling advertises the ceiling, so it cannot be one end of such a pair anyway.
 
 
 ## ANNOUNCE_END {#announce-end}
