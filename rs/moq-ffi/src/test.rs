@@ -12,6 +12,7 @@ use crate::json::{MoqJsonSnapshotConfig, MoqJsonStreamConfig};
 use crate::media::{MoqAudio, MoqAudioFormat, MoqAudioInit, MoqContainer, MoqFrame, MoqVideoFormat, MoqVideoInit};
 use crate::session::{MoqBackoff, MoqConnectionStatus};
 
+use std::sync::Arc;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -32,6 +33,19 @@ fn video_init(format: MoqVideoFormat, data: Vec<u8>) -> MoqVideoInit {
 		label: None,
 		hint: None,
 	}
+}
+
+/// Wait for `path` to be announced on `origin` and return its consumer.
+///
+/// A created broadcast becomes routable asynchronously, and resolving a reference goes through
+/// `request_broadcast`, which reports a not-yet-announced path as unroutable rather than waiting.
+/// So every broadcast a test resolves has to be awaited, not just the one it starts from.
+async fn await_announced(consumer: &MoqOriginConsumer, path: &str) -> Arc<MoqBroadcastConsumer> {
+	let announced = consumer.announced_broadcast(path.into()).unwrap();
+	tokio::time::timeout(TIMEOUT, announced.available())
+		.await
+		.unwrap_or_else(|_| panic!("timed out waiting for {path} to be announced"))
+		.unwrap()
 }
 
 /// An Opus rendition whose catalog `broadcast` field names `reference`.
@@ -932,11 +946,9 @@ async fn decode_audio_follows_a_sibling_broadcast_reference() {
 	let source = origin.create_broadcast("a/source".into()).unwrap();
 	let _audio = source.publish_track("audio".into(), None).unwrap();
 
-	let announced = consumer.announced_broadcast("a/pub".into()).unwrap();
-	let broadcast = tokio::time::timeout(TIMEOUT, announced.available())
-		.await
-		.expect("timed out waiting for the announcement")
-		.unwrap();
+	// Both, not just the catalog broadcast: the reference resolves against `a/source`.
+	let broadcast = await_announced(&consumer, "a/pub").await;
+	await_announced(&consumer, "a/source").await;
 
 	let decoded = tokio::time::timeout(
 		TIMEOUT,
@@ -987,6 +999,8 @@ async fn announced_broadcasts_resolve_siblings_under_the_prefix() {
 		}
 	};
 
+	await_announced(&consumer, "a/source").await;
+
 	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into())))
 		.await
 		.expect("timed out resolving the reference")
@@ -1008,12 +1022,17 @@ async fn resolve_rejects_a_reference_without_an_origin() {
 	let _audio = broadcast.create_track("audio", None).unwrap();
 	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
 
-	// An absent or empty reference still names this broadcast, so it needs no origin.
+	// An absent or empty reference still names this broadcast, so it needs no origin. A reference
+	// made only of slashes normalizes to the empty one, so it must be treated the same rather than
+	// looking like a cross-broadcast reference.
 	consumer.resolve(None).await.unwrap();
 	consumer.resolve(Some(String::new())).await.unwrap();
+	consumer.resolve(Some("/".into())).await.unwrap();
 
+	// Reported in normalized form, matching `EscapingBroadcast` and libmoq: it names what the
+	// resolver actually tried to reach, not the caller's spelling of it.
 	match consumer.resolve(Some("./source".into())).await {
-		Err(MoqError::UnresolvableBroadcast(reference)) => assert_eq!(reference, "./source"),
+		Err(MoqError::UnresolvableBroadcast(reference)) => assert_eq!(reference, "source"),
 		Err(err) => panic!("wrong error for an unresolvable reference: {err:?}"),
 		Ok(_) => panic!("a standalone broadcast cannot resolve a sibling"),
 	}
@@ -1029,11 +1048,8 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 	let source = origin.create_broadcast("a/source".into()).unwrap();
 	let _video = source.publish_track("video".into(), None).unwrap();
 
-	let announced = consumer.announced_broadcast("a/pub".into()).unwrap();
-	let broadcast = tokio::time::timeout(TIMEOUT, announced.available())
-		.await
-		.expect("timed out waiting for the announcement")
-		.unwrap();
+	let broadcast = await_announced(&consumer, "a/pub").await;
+	await_announced(&consumer, "a/source").await;
 
 	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into())))
 		.await

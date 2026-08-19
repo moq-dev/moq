@@ -459,8 +459,11 @@ impl MoqBroadcastConsumer {
 		catalog_video: crate::media::MoqVideo,
 		output: MoqVideoDecoderOutput,
 	) -> Result<Arc<MoqVideoConsumer>, MoqError> {
-		let broadcast = self.resolve_inner(catalog_video.broadcast.as_deref()).await?;
+		// Reject the codec before resolving: resolving reaches the origin, which can invoke a
+		// dynamic handler and open an upstream subscription we would immediately drop.
+		let reference = catalog_video.broadcast.clone();
 		let cfg = video_config(catalog_video)?;
+		let broadcast = self.resolve_inner(reference.as_deref()).await?;
 
 		let mut config = moq_video::decode::Config::default();
 		config.resize = output.resize.map(|size| moq_video::Size::new(size.width, size.height));

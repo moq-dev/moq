@@ -264,8 +264,11 @@ impl MoqBroadcastConsumer {
 		catalog_audio: crate::media::MoqAudio,
 		output: MoqAudioDecoderOutput,
 	) -> Result<Arc<MoqAudioConsumer>, MoqError> {
-		let broadcast = self.resolve_inner(catalog_audio.broadcast.as_deref()).await?;
+		// Reject the codec before resolving: resolving reaches the origin, which can invoke a
+		// dynamic handler and open an upstream subscription we would immediately drop.
+		let reference = catalog_audio.broadcast.clone();
 		let cfg = audio_config(catalog_audio)?;
+		let broadcast = self.resolve_inner(reference.as_deref()).await?;
 
 		let mut config = moq_audio::decode::Config::default();
 		config.format = output.format.into();

@@ -142,6 +142,8 @@ let consumer = try await source.subscribeMedia(name: name, container: rendition.
 `resolve(nil)` (or an empty reference) returns the same broadcast, so it is safe to call
 unconditionally. It needs an origin to fetch a sibling from, so it throws on a broadcast consumed
 straight from a local producer.
+`resolve` reports a sibling that exists but has not been announced yet as unroutable rather than
+waiting for it, so await the referenced broadcast's announcement first if you may be racing it.
 
 ## Publish
 

@@ -136,6 +136,10 @@ impl MoqBroadcastConsumer {
 		&self,
 		reference: Option<&str>,
 	) -> Result<moq_net::broadcast::Consumer, MoqError> {
+		// Normalize before testing emptiness: this is a caller-supplied string, and one made only
+		// of slashes normalizes to the empty reference, which names this broadcast.
+		let reference = reference.map(moq_net::PathRelative::new);
+
 		// An absent or empty reference names the catalog's own broadcast, which we already hold.
 		// Short-circuiting also keeps a standalone broadcast usable: the common case needs no origin.
 		let Some(reference) = reference.filter(|reference| !reference.is_empty()) else {
@@ -145,10 +149,10 @@ impl MoqBroadcastConsumer {
 		let origin = self
 			.origin
 			.clone()
-			.ok_or_else(|| MoqError::UnresolvableBroadcast(reference.to_string()))?;
+			.ok_or_else(|| MoqError::UnresolvableBroadcast(reference.as_str().to_string()))?;
 
 		let source = moq_mux::Source::new(origin, &self.inner.info().path);
-		Ok(source.resolve(Some(&moq_net::PathRelative::new(reference))).await?)
+		Ok(source.resolve(Some(&reference)).await?)
 	}
 }
 
@@ -254,7 +258,9 @@ impl MoqBroadcastConsumer {
 	/// rendition; `decode_video` and `decode_audio` resolve it themselves.
 	///
 	/// Errors if this broadcast came from a local producer rather than an origin, since a
-	/// standalone broadcast has no sibling to name.
+	/// standalone broadcast has no sibling to name, and reports a sibling that exists but is not
+	/// announced yet as unroutable rather than waiting for it (see
+	/// [`MoqOriginConsumer::request_broadcast`](crate::origin::MoqOriginConsumer::request_broadcast)).
 	pub async fn resolve(&self, reference: Option<String>) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		let broadcast = self.resolve_inner(reference.as_deref()).await?;
 		Ok(Arc::new(match self.origin.clone() {
