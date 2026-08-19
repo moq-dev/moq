@@ -36,7 +36,7 @@ iroh solves all four with the same mechanism: the endpoint's key **is** its addr
 An iroh endpoint is an ed25519 keypair.
 The public half is the **endpoint id**, and that's what you dial:
 
-```
+```text
 iroh://k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa/room?jwt=...
 ```
 
@@ -115,7 +115,7 @@ endpoint id and a stale URL for everyone who wrote the old one down.
 
 Both the relay and the [CLI](/bin/cli) log the endpoint id at startup:
 
-```
+```text
 INFO iroh listening endpoint_id=k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa
 ```
 
