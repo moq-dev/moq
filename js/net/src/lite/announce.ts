@@ -22,16 +22,6 @@ const ANNOUNCE_END = 1;
 const ANNOUNCE_RESTART = 2;
 
 /**
- * An announcement on the Announce Stream, advertising or retracting a broadcast.
- *
- * On lite-06+ these are three independently-typed messages (`ANNOUNCE_START`,
- * `ANNOUNCE_END`, `ANNOUNCE_RESTART`), each framed as `Type | Length | Body` like the
- * subscribe stream's responses. Each `active` (ANNOUNCE_START) implicitly assigns the
- * next announce id (a per-stream ordinal starting at 0); `endedId`/`restart` reference
- * that id instead of repeating the path. Older versions send a single ANNOUNCE_BROADCAST
- * message that retracts by path (`ended`).
- */
-/**
  * What pulling a broadcast via a route costs, in two magnitudes accumulated together
  * and compared in that order: lower `warm` wins, and `cold` breaks the tie.
  *
@@ -48,6 +38,16 @@ export interface Cost {
 	cold: bigint;
 }
 
+/**
+ * An announcement on the Announce Stream, advertising or retracting a broadcast.
+ *
+ * On lite-06+ these are three independently-typed messages (`ANNOUNCE_START`,
+ * `ANNOUNCE_END`, `ANNOUNCE_RESTART`), each framed as `Type | Length | Body` like the
+ * subscribe stream's responses. Each `active` (ANNOUNCE_START) implicitly assigns the
+ * next announce id (a per-stream ordinal starting at 0); `endedId`/`restart` reference
+ * that id instead of repeating the path. Older versions send a single ANNOUNCE_BROADCAST
+ * message that retracts by path (`ended`).
+ */
 export type AnnounceBroadcast =
 	/** A broadcast is now available, carrying the path suffix, the hop chain, and
 	 * (lite-06+) the route cost. An absent cost encodes as zero; it decodes as
