@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `publish_container_stream` takes a `MoqContainerFormat` instead of a `MoqContainerInit`, which
+  carried leading bytes the stream importer discarded.
+
 - `publish_media`, `publish_media_on_track`, and `publish_media_stream` split by media kind:
   `publish_audio`, `publish_video`, `publish_container`, `publish_audio_on_track`,
   `publish_video_on_track`, `publish_video_stream`, and `publish_container_stream`. Each takes only

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `import::ContainerStream::new` takes a bare `ContainerFormat` instead of a `ContainerInit`. It
+  only ever read the format, so the init's leading bytes were accepted and dropped. A stream
+  recovers its own framing, so push everything through `decode` instead.
+
 - Import formats are typed: `import::{AudioFormat, VideoFormat, ContainerFormat}` replace the format
   string on each `Init`, so a format of the wrong kind no longer compiles. `FromStr` accepts every
   alias and is where a caller crossing a string boundary finds out, reporting `Error::WrongKind`

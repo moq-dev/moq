@@ -599,7 +599,7 @@ class BroadcastProducer:
 
     def publish_container_stream(self, format: MoqContainerFormat) -> ContainerStreamProducer:
         """Publish a container fed by a raw byte stream, which recovers its own framing."""
-        return ContainerStreamProducer(self._inner.publish_container_stream(MoqContainerInit(format=format, data=b"")))
+        return ContainerStreamProducer(self._inner.publish_container_stream(format))
 
     def encode_audio(
         self,

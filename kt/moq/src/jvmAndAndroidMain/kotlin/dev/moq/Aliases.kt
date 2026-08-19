@@ -63,6 +63,10 @@ typealias GroupConsumer = uniffi.moq.MoqGroupConsumer
 typealias MediaProducer = uniffi.moq.MoqMediaProducer
 /** The write side of a media track fed a raw byte stream, with frame boundaries inferred. */
 typealias MediaStreamProducer = uniffi.moq.MoqMediaStreamProducer
+/** The write side of a container, which publishes each track it describes. */
+typealias ContainerProducer = uniffi.moq.MoqContainerProducer
+/** The write side of a container fed a raw byte stream. */
+typealias ContainerStreamProducer = uniffi.moq.MoqContainerStreamProducer
 /** The read side of a media track: yields frames with codec metadata in decode order. */
 typealias MediaConsumer = uniffi.moq.MoqMediaConsumer
 /** A finite fetched media group: yields container-decoded frames until the group ends. */

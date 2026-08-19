@@ -270,7 +270,7 @@ public final class BroadcastProducer: Sendable {
     /// Open a container fed by a raw byte stream, which recovers its own framing.
     public func publishContainerStream(format: ContainerFormat) throws -> ContainerStreamProducer {
         ContainerStreamProducer(
-            try ffi.publishContainerStream(init: MoqContainerInit(format: format, data: Data()))
+            try ffi.publishContainerStream(format: format)
         )
     }
 

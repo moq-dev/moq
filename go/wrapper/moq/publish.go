@@ -170,7 +170,7 @@ func (b *BroadcastProducer) PublishVideoStream(format VideoFormat, opts ...Video
 // PublishContainerStream publishes a container fed by a raw byte stream, which
 // recovers its own framing.
 func (b *BroadcastProducer) PublishContainerStream(format ContainerFormat) (*ContainerStreamProducer, error) {
-	inner, err := b.inner.PublishContainerStream(ffi.MoqContainerInit{Format: format})
+	inner, err := b.inner.PublishContainerStream(format)
 	if err != nil {
 		return nil, err
 	}

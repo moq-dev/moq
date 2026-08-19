@@ -147,18 +147,20 @@ pub struct ContainerStream<E: crate::container::ts::Catalog = ()> {
 }
 
 impl<E: crate::container::ts::Catalog> ContainerStream<E> {
-	/// Create a new container stream importer. [`ContainerInit::data`] is unused: the stream carries its own
-	/// framing.
+	/// Create a new container stream importer.
+	///
+	/// Takes a bare format rather than a [`ContainerInit`]: a stream recovers its own framing, so
+	/// there are no leading bytes to seed it with. Push everything through [`Self::decode`].
 	pub fn new(
 		broadcast: moq_net::broadcast::Producer,
 		reserved: crate::catalog::Reserved<E>,
-		init: &ContainerInit,
+		format: ContainerFormat,
 	) -> Result<Self> {
 		// A separate list from [`Container::new`]: only containers that can be
 		// recovered from a raw byte stream belong here. Today that's all of them,
 		// but a non-streamable container (e.g. RTP) would be added to `Container`
 		// alone.
-		let inner = match init.format {
+		let inner = match format {
 			ContainerFormat::Fmp4 => ContainerImpl::fmp4(broadcast, reserved),
 			ContainerFormat::Mkv => ContainerImpl::mkv(broadcast, reserved),
 			ContainerFormat::Ts => ContainerImpl::ts(broadcast, reserved),
@@ -195,5 +197,41 @@ impl<E: crate::container::ts::Catalog> ContainerStream<E> {
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.inner.seek(sequence)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A stream recovers its own framing, which is why [`ContainerStream::new`] takes a bare format
+	/// with no leading bytes to seed it. Prove it: hand the whole file to `decode` in two chunks
+	/// split mid-header, and the tracks still land.
+	#[test]
+	fn a_split_stream_publishes_its_tracks() {
+		let data = include_bytes!("../container/fmp4/test_data/bbb.mp4");
+		let (head, tail) = data.split_at(100);
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+		let mut stream: ContainerStream =
+			ContainerStream::new(broadcast, catalog.reserve(), ContainerFormat::Fmp4).unwrap();
+
+		stream.decode(head).unwrap();
+		// The test file ends on a malformed fragment, so a trailing decode error is expected.
+		let _ = stream.decode(tail);
+
+		let snapshot = catalog.snapshot();
+		assert_eq!(
+			snapshot.video.renditions.len(),
+			1,
+			"video rendition missing from a split stream"
+		);
+		assert_eq!(
+			snapshot.audio.renditions.len(),
+			1,
+			"audio rendition missing from a split stream"
+		);
 	}
 }

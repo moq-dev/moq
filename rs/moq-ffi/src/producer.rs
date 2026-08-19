@@ -5,7 +5,7 @@ use moq_mux::catalog::hang::Extra;
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, MoqTrackConsumer};
 use crate::error::MoqError;
 use crate::ffi::Task;
-use crate::media::{MoqAudioInit, MoqContainerInit, MoqFrame, MoqVideoInit, MoqVideoProperties};
+use crate::media::{MoqAudioInit, MoqContainerFormat, MoqContainerInit, MoqFrame, MoqVideoInit, MoqVideoProperties};
 use crate::origin::MoqRoute;
 
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
@@ -433,15 +433,15 @@ impl MoqBroadcastProducer {
 	/// Publish a container fed by a raw byte stream, which recovers its own framing.
 	pub fn publish_container_stream(
 		&self,
-		init: MoqContainerInit,
+		format: MoqContainerFormat,
 	) -> Result<Arc<MoqContainerStreamProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
 
-		let init: moq_mux::import::ContainerInit = init.into();
-		let import = moq_mux::import::ContainerStream::new(state.broadcast.clone(), state.catalog.reserve(), &init)
-			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
+		let import =
+			moq_mux::import::ContainerStream::new(state.broadcast.clone(), state.catalog.reserve(), format.into())
+				.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
 
 		Ok(Arc::new(MoqContainerStreamProducer {
 			inner: std::sync::Mutex::new(Some(ContainerStreamProducer { import })),
