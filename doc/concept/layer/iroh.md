@@ -25,11 +25,29 @@ The usual MoQ deployment is a [relay](/bin/relay/) with a public IP, a DNS name,
 certificate. That's the right answer at scale, but it's a lot of ceremony when:
 
 - Two machines on the same LAN want to exchange media and neither is a server.
-- A laptop behind a NAT wants to publish, and you'd rather not run a relay in the middle.
+- Neither of them has a public address, a stable one, or any address you can write down.
 - You want a stable identity for a node whose IP address keeps changing.
 - You don't want to own a domain or provision a certificate just to move some frames.
 
 iroh solves all four with the same mechanism: the endpoint's key **is** its address.
+
+## Scope
+
+Peer-to-peer is a **local network** feature. Keep it there.
+
+- **On one network**, peers dial each other directly and nothing but the media crosses the
+  link. That's the case iroh is for here.
+- **Across the internet**, run a [MoQ relay](/bin/relay/). It has an address both sides can
+  already reach, it caches and fans out, and it's the only shape that scales past two peers.
+
+The iroh relay fallback is the part to be careful with. When hole punching fails it forwards
+your packets through an n0 server, which is the same shape as WebRTC's TURN: a third party in
+the media path that has no idea what it's carrying, can't cache a group, can't serve the
+second viewer from the first one's fetch, and adds however many milliseconds its location
+costs. If media has to cross a server anyway, that server should be a MoQ relay.
+
+So pass `--iroh-disable-relay`, let a failed hole punch be a failed connection, and put a
+relay you chose behind it.
 
 ## Addressing
 
@@ -67,16 +85,25 @@ Getting a packet to a peer behind a NAT happens in stages:
 
 The connection starts over the iroh relay and upgrades to a direct path once hole punching
 succeeds, so there's no connect-time stall while the two sides negotiate.
-By default this uses the public discovery and relay servers operated by
-[n0](https://n0.computer/). Pass `--iroh-disable-relay` to require a direct path and skip
-the fallback entirely.
+`--iroh-disable-relay` drops that first stage, so a peer is reachable only once a direct path
+opens and an unreachable one stays unreachable. That's the [recommended](#scope) setting.
+
+Both stages use the public servers operated by [n0](https://n0.computer/), and **discovery
+runs either way**. An endpoint publishes its own addressing record to n0's `iroh.link` DNS
+server whenever its addresses change, and resolves its peers from the same place, so turning
+iroh on tells a third party which endpoint ids are live and where they are. Disabling the
+relay doesn't opt out of that; it only changes what the record holds, since with no relay URL
+to publish it carries direct IP addresses instead.
+
+Weigh that before enabling iroh for something that has to stay local. The media can be pinned
+to a direct path, the addressing can't.
 
 ::: tip Two different things called "relay"
 An **iroh relay** forwards opaque UDP packets between two peers that can't reach each
 other. It doesn't speak MoQ and doesn't know a track from a group.
 A [**MoQ relay**](/bin/relay/) is a CDN node that understands broadcasts, fans them out,
 and caches groups.
-They're unrelated, and you can use either, both, or neither.
+They're unrelated, and when media has to cross a server, it should be the second one.
 :::
 
 ## Binding
@@ -143,7 +170,7 @@ Dialing an `iroh://` URL without `--iroh-enabled` is an error, not a silent fall
 | `--iroh-secret` | `MOQ_IROH_SECRET` | Hex key or a path to persist one. |
 | `--iroh-bind-v4` | `MOQ_IROH_BIND_V4` | UDP bind address, default `0.0.0.0:0`. |
 | `--iroh-bind-v6` | `MOQ_IROH_BIND_V6` | UDP bind address, default `[::]:0`. |
-| `--iroh-disable-relay` | `MOQ_IROH_DISABLE_RELAY` | Direct paths only, no relay fallback. |
+| `--iroh-disable-relay` | `MOQ_IROH_DISABLE_RELAY` | Direct paths only, no relay fallback. Recommended. |
 
 The endpoint is shared by the client and server halves of a process, so one set of flags
 covers both dialing out and accepting in.
@@ -185,6 +212,8 @@ transport config, so a few of the shared QUIC knobs behave differently:
 - **GSO can't be disabled.** `--client-quic-gso=false` is refused rather than ignored.
 - **No keep-alive knob.** Stream limits, idle timeout, MTU discovery, and congestion
   control carry over; nothing else does.
+- **Discovery is not local.** Publishing and resolving go through n0's servers whatever the
+  relay setting, as above.
 - **No browser support**, as above.
 
 ## More Info
