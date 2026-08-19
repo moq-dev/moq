@@ -73,6 +73,12 @@ from moq_ffi import (
     MoqVideoCodec as VideoCodec,
 )
 from moq_ffi import (
+    MoqVideoDecodedFrame as VideoDecodedFrame,
+)
+from moq_ffi import (
+    MoqVideoDecoderOutput as VideoDecoderOutput,
+)
+from moq_ffi import (
     MoqVideoEncoderInput as VideoEncoderInput,
 )
 from moq_ffi import (
@@ -130,6 +136,8 @@ __all__ = [
     "VideoEncoderKind",
     "VideoEncoderOutput",
     "VideoFrame",
+    "VideoDecodedFrame",
+    "VideoDecoderOutput",
     "VideoHint",
     "VideoPixelFormat",
     "VideoProperties",

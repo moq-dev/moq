@@ -75,6 +75,8 @@ typealias MediaGroupConsumer = uniffi.moq.MoqMediaGroupConsumer
 typealias AudioProducer = uniffi.moq.MoqAudioProducer
 /** The read side of a raw-audio track: yields decoded PCM frames. */
 typealias AudioConsumer = uniffi.moq.MoqAudioConsumer
+/** The read side of a video track decoded inside the bindings: yields packed I420 frames. */
+typealias VideoConsumer = uniffi.moq.MoqVideoConsumer
 /** The write side of a raw-video track; pixels written here are encoded inside the FFI boundary. */
 typealias VideoProducer = uniffi.moq.MoqVideoProducer
 /** The read side of a broadcast's catalog: yields updates as the set of tracks changes. */
@@ -135,6 +137,10 @@ typealias AudioCodec = uniffi.moq.MoqAudioCodec
 typealias AudioSampleFormat = uniffi.moq.MoqAudioSampleFormat
 /** The PCM layout an [AudioConsumer] should decode to. */
 typealias AudioDecoderOutput = uniffi.moq.MoqAudioDecoderOutput
+/** What a [VideoConsumer] decodes to: an optional resize plus a latency budget. */
+typealias VideoDecoderOutput = uniffi.moq.MoqVideoDecoderOutput
+/** One decoded video frame: packed I420, its dimensions, and a timestamp. */
+typealias VideoDecodedFrame = uniffi.moq.MoqVideoDecodedFrame
 /** The PCM layout the caller feeds an [AudioProducer]. */
 typealias AudioEncoderInput = uniffi.moq.MoqAudioEncoderInput
 /** The codec-side encoder configuration: codec, output rate/channels, bitrate, and frame duration. */

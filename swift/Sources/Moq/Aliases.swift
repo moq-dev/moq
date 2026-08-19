@@ -41,6 +41,10 @@ public typealias AudioEncoderInput = MoqFFI.MoqAudioEncoderInput
 /// The encoder-side config for a published audio track: codec, rate, channels,
 /// bitrate, and frame duration.
 public typealias AudioEncoderOutput = MoqFFI.MoqAudioEncoderOutput
+/// What a `VideoConsumer` decodes to: an optional resize plus a latency budget.
+public typealias VideoDecoderOutput = MoqVideoDecoderOutput
+/// One decoded video frame: packed I420, its dimensions, and a timestamp.
+public typealias VideoDecodedFrame = MoqVideoDecodedFrame
 /// The PCM layout an `AudioConsumer` decodes to, plus its latency budget.
 public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
 /// A raw PCM sample format, mirroring WebCodecs `AudioData.format`.

@@ -102,6 +102,17 @@ func (b *BroadcastConsumer) DecodeAudio(name string, catalogAudio Audio, output 
 	return &AudioConsumer{inner: inner}, nil
 }
 
+// DecodeVideo subscribes to a video track and decodes it inside the bindings,
+// yielding packed I420. catalogVideo comes from the catalog. output.Resize is
+// best effort, so read each frame's own dimensions.
+func (b *BroadcastConsumer) DecodeVideo(name string, catalogVideo Video, output VideoDecoderOutput) (*VideoConsumer, error) {
+	inner, err := b.inner.DecodeVideo(name, catalogVideo, output)
+	if err != nil {
+		return nil, err
+	}
+	return &VideoConsumer{inner: inner}, nil
+}
+
 // Catalog subscribes and returns the first catalog. It reports ErrClosed if the
 // catalog track ends before any catalog arrives.
 func (b *BroadcastConsumer) Catalog(ctx context.Context) (*Catalog, error) {
@@ -286,6 +297,26 @@ func (a *AudioConsumer) Frames(ctx context.Context) iter.Seq2[*AudioFrame, error
 // Cancel stops the stream.
 func (a *AudioConsumer) Cancel() {
 	a.inner.Cancel()
+}
+
+// VideoConsumer is a stream of decoded video frames.
+type VideoConsumer struct {
+	inner *ffi.MoqVideoConsumer
+}
+
+// Next returns the next decoded frame, or (nil, nil) when the track ends.
+func (v *VideoConsumer) Next(ctx context.Context) (*VideoDecodedFrame, error) {
+	return runCancellable(ctx, v.inner.Cancel, v.inner.Next)
+}
+
+// Frames ranges over decoded frames until the track ends or the loop breaks.
+func (v *VideoConsumer) Frames(ctx context.Context) iter.Seq2[*VideoDecodedFrame, error] {
+	return streamSeq(ctx, v.Next)
+}
+
+// Cancel stops the stream.
+func (v *VideoConsumer) Cancel() {
+	v.inner.Cancel()
 }
 
 // CatalogConsumer is a stream of catalog updates.

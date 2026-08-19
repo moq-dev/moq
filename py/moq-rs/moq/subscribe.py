@@ -18,6 +18,7 @@ from moq_ffi import (
     MoqMediaConsumer,
     MoqMediaGroupConsumer,
     MoqTrackConsumer,
+    MoqVideoConsumer,
 )
 
 from .types import (
@@ -34,6 +35,8 @@ from .types import (
     Subscription,
     TrackInfo,
     Video,
+    VideoDecodedFrame,
+    VideoDecoderOutput,
 )
 
 
@@ -261,6 +264,38 @@ class AudioConsumer:
         self._inner.cancel()
 
 
+class VideoConsumer:
+    """Async iterator of decoded video frames.
+
+    Built via :meth:`BroadcastConsumer.decode_video`. Each frame is
+    tightly-packed I420 and carries its own ``width`` and ``height``:
+    ``output.resize`` is best effort, so read the frame rather than
+    assuming it took.
+    """
+
+    def __init__(self, inner: MoqVideoConsumer) -> None:
+        self._inner = inner
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> VideoDecodedFrame:
+        frame = await self._inner.next()
+        if frame is None:
+            raise StopAsyncIteration
+        return frame
+
+    def cancel(self) -> None:
+        """Cancel the subscription and stop delivering video frames."""
+        self._inner.cancel()
+
+
 class JsonSnapshotConsumer:
     """Async iterator over a JSON snapshot track, yielding the latest value (lossy).
 
@@ -465,6 +500,25 @@ class BroadcastConsumer:
         a future ``latency_min_ms`` jitter-buffer floor.)
         """
         return AudioConsumer(await self._inner.decode_audio(name, catalog_audio, output))
+
+    async def decode_video(
+        self,
+        name: str,
+        catalog_video: Video,
+        output: VideoDecoderOutput | None = None,
+    ) -> VideoConsumer:
+        """Subscribe to a video track and decode it inside the bindings.
+
+        ``catalog_video`` comes from the catalog (e.g.
+        ``await broadcast.catalog()`` followed by ``catalog.video[name]``).
+        Frames arrive as tightly-packed I420. An unrecognized codec raises
+        here; a recognized one no native backend handles raises when the
+        decoder opens, both before the first frame.
+
+        ``output.resize`` asks the decoder for a different size and is best
+        effort, so read each frame's own dimensions.
+        """
+        return VideoConsumer(await self._inner.decode_video(name, catalog_video, output or VideoDecoderOutput()))
 
     async def catalog(self) -> Catalog:
         """Convenience: subscribe and return the first catalog."""

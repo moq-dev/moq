@@ -46,6 +46,7 @@ from .subscribe import (
     MediaConsumer,
     MediaGroupConsumer,
     TrackConsumer,
+    VideoConsumer,
 )
 from .types import (
     Audio,
@@ -72,6 +73,8 @@ from .types import (
     TrackInfo,
     Video,
     VideoCodec,
+    VideoDecodedFrame,
+    VideoDecoderOutput,
     VideoEncoderInput,
     VideoEncoderKind,
     VideoEncoderOutput,
@@ -148,6 +151,9 @@ __all__ = [
     "VideoEncoderKind",
     "VideoEncoderOutput",
     "VideoFrame",
+    "VideoConsumer",
+    "VideoDecodedFrame",
+    "VideoDecoderOutput",
     "VideoHint",
     "VideoPixelFormat",
     "VideoProducer",

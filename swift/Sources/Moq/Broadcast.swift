@@ -80,6 +80,18 @@ public final class BroadcastConsumer: Sendable {
         AudioConsumer(try await ffi.decodeAudio(name: name, catalogAudio: catalogAudio, output: output))
     }
 
+    /// Subscribe to a video track and decode it inside the bindings, yielding
+    /// packed I420. `catalogVideo` is the matching rendition from the catalog.
+    ///
+    /// `output.resize` is best effort, so read each frame's own dimensions.
+    public func decodeVideo(
+        name: String,
+        catalogVideo: Video,
+        output: VideoDecoderOutput = VideoDecoderOutput()
+    ) async throws -> VideoConsumer {
+        VideoConsumer(try await ffi.decodeVideo(name: name, catalogVideo: catalogVideo, output: output))
+    }
+
     /// Subscribe to a JSON snapshot track (lossy latest-value), decoding each value as `Value`.
     ///
     /// Yields only the newest value, collapsing the backlog for a reader that has fallen behind.

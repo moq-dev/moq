@@ -108,7 +108,7 @@ track it publishes from its own metadata.
 The calls above take frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `encode_video` / `encode_audio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
 
 ```python
-video = broadcast.publish_video(
+video = broadcast.encode_video(
     moq.VideoEncoderInput(
         format=moq.VideoPixelFormat.RGBA,
         width=1280,
@@ -128,6 +128,19 @@ video.finish()
 `VideoEncoderKind.AUTO()` prefers a hardware encoder and falls back to software; `SOFTWARE()`, `HARDWARE()`, and `NAMED("videotoolbox")` pin the choice (each variant is a class, so call it). The bindings compile VideoToolbox (macOS), Media Foundation (Windows), and openh264 (software, everywhere); the Linux hardware codecs are a libmoq-only build option. `set_bitrate` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
 
 The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition is published immediately, read out of the encoder itself, so subscribers discover it through the catalog rather than a name you pick, and can find it before the first frame exists. `cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group.
+
+`decode_video` and `decode_audio` are the mirrors: they run the codec inside the bindings on the way in, so a subscriber gets pixels and PCM without linking one. Video frames arrive as tightly-packed I420 and carry the size they actually decoded to, since `resize` is only best effort:
+
+```python
+catalog = await broadcast.catalog()
+name, rendition = next(iter(catalog.video.items()))
+
+async with await broadcast.decode_video(name, rendition) as video:
+    async for frame in video:
+        render(frame.data, frame.width, frame.height)
+```
+
+An unrecognized codec raises from `decode_video` itself; a recognized one no native backend handles raises when the decoder opens. Either way you find out before the first frame.
 
 The catalog is filled by parsing the codec bitstream. `publish_video` takes an optional `hint` to supply fields the stream can't reveal (such as `bitrate`), or to publish the catalog before the first keyframe:
 

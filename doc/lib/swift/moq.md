@@ -313,7 +313,7 @@ The served broadcast is not announced. It only resolves consumers that call `req
 `publishAudio` / `publishVideo` take frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `encodeVideo` / `encodeAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
 
 ```swift
-let video = try broadcast.publishVideo(
+let video = try broadcast.encodeVideo(
     input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: 30),
     output: VideoEncoderOutput(codec: .h264, bitrate: nil, gop: nil, kind: .auto)
 )
@@ -321,6 +321,20 @@ let video = try broadcast.publishVideo(
 try video.write(VideoFrame(timestampUs: ptsUs, data: rgba))
 try video.finish()
 ```
+
+`decodeVideo` and `decodeAudio` are the mirrors: they run the codec inside the bindings on the way in, so a subscriber gets pixels and PCM without linking one. Video frames arrive as tightly-packed I420 and carry the size they actually decoded to, since `resize` is only best effort:
+
+```swift
+let catalog = try await broadcast.catalog()
+let (name, rendition) = catalog.video.first!
+
+let video = try await broadcast.decodeVideo(name: name, catalogVideo: rendition)
+for try await frame in video {
+    render(frame.data, frame.width, frame.height)
+}
+```
+
+An unrecognized codec throws from `decodeVideo` itself; a recognized one no native backend handles throws when the decoder opens. Either way you find out before the first frame.
 
 `kind: .auto` prefers a hardware encoder and falls back to software; `.software`, `.hardware`, and `.named(name: "videotoolbox")` pin the choice. The bindings compile VideoToolbox (macOS), Media Foundation (Windows), and openh264 (software, everywhere); the Linux hardware codecs are a libmoq-only build option. `setBitrate(_:)` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
 
