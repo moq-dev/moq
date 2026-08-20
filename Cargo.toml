@@ -77,7 +77,7 @@ criterion = "0.8"
 flate2 = "1.1"
 getrandom = { version = "0.4", features = ["wasm_js"] }
 hang = { version = "0.20", path = "rs/hang" }
-kio = { version = "0.5", path = "rs/kio" }
+kio = { version = "0.5.5", path = "rs/kio" }
 libc = "0.2"
 linux-raw-sys = { version = "0.12.1", features = ["ioctl"] }
 # Permutation testing for the kio primitives (and everything built on them).
