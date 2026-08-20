@@ -8,6 +8,7 @@ import { Reader, Stream } from "../stream.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { sendOrder } from "./priority.ts";
+import { Probe as ProbeMessage } from "./probe.ts";
 import { Publisher } from "./publisher.ts";
 import { decodeSubscribeResponse, Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { ALPN_05, Version } from "./version.ts";
@@ -589,4 +590,27 @@ test("lite draft-05: a group waiting for a stream slot survives the track finish
 	expect(await outcome).toBe("sent");
 
 	close();
+});
+
+// `smoothedRtt` is a DOMHighResTimeStamp, so a real browser hands back a fractional
+// millisecond. The varint encoder converts with `BigInt`, which throws on a fraction,
+// and `runProbe`'s catch would then close the probe stream for the rest of the
+// session. Drive the real loop so removing the rounding fails this test.
+test("runProbe rounds a fractional smoothedRtt instead of killing the stream", async () => {
+	const pair = createMockTransportPair(ALPN_05, {
+		stats: { estimatedSendRate: 1_000_000, smoothedRtt: 12.34 },
+	});
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+
+	// The subscriber opens the probe stream; the publisher only replies on it.
+	const client = await Stream.open(pair.client);
+	const server = await Stream.accept(pair.server);
+	if (!server) throw new Error("publisher never accepted the probe stream");
+
+	void publisher.runProbe(server);
+
+	const probe = await ProbeMessage.decodeMaybe(client.reader, Version.DRAFT_05);
+	expect(probe).toBeDefined();
+	expect(probe?.rtt).toBe(12);
+	expect(probe?.bitrate).toBe(1_000_000);
 });

@@ -319,8 +319,10 @@ export class Connection implements Established {
  *
  * Mirrors `ProbeLevel::detect` in `moq-net`, including its limitation: a metric
  * that only appears after SETUP reads as unsupported here.
+ *
+ * @internal
  */
-async function probeLevel(quic: WebTransport, version: Version): Promise<ProbeLevel> {
+export async function probeLevel(quic: WebTransport, version: Version): Promise<ProbeLevel> {
 	const getStats = (
 		quic as unknown as {
 			getStats?: () => Promise<{ estimatedSendRate: number | null; smoothedRtt?: number | null }>;
