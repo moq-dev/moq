@@ -246,10 +246,11 @@ impl Server {
 	/// Accept sessions until the listener stops, serving `origin` to each subscriber.
 	///
 	/// Spawns a task per session and logs (rather than propagates) per-session
-	/// errors, so one bad peer never tears down the listener. Returns when
-	/// interrupted (Ctrl-C) or on a fatal bind failure. For per-session auth or
-	/// routing, [`listen`](Self::listen) and drive [`Listener::accept`] yourself
-	/// instead.
+	/// errors, so one bad peer never tears down the listener. Returns on a fatal
+	/// bind failure, or once every listener has stopped; no process signal ends it,
+	/// so race it against your own ctrl-C future to stop on one. For per-session
+	/// auth or routing, [`listen`](Self::listen) and drive [`Listener::accept`]
+	/// yourself instead.
 	pub async fn serve_publish(self, origin: moq_net::origin::Consumer) -> crate::Result<()> {
 		self.with_publisher(origin).serve().await
 	}
@@ -531,10 +532,10 @@ impl Server {
 						Err(err) => tracing::debug!(%err, "failed to accept session"),
 					}
 				}
-				_ = tokio::signal::ctrl_c() => {
-					self.shutdown().await;
-					return None;
-				}
+				// Every listener has stopped, so nothing more can arrive. Process signals
+				// are the owner's: an accept loop that consumes a global ctrl-C leaves no
+				// way to sequence shutdown around it (moq-relay drains sessions first).
+				else => return None,
 			}
 		}
 	}
@@ -621,8 +622,10 @@ impl Listener {
 	/// rejected early on an invalid path or missing auth. Call [Request::ok] or
 	/// [Request::close] to complete the handshake.
 	///
-	/// `None` means the server stopped, which at this point means it was interrupted
-	/// (Ctrl-C): everything is already bound, so a bind failure cannot arrive here.
+	/// `None` means every listener has stopped; everything is already bound, so a
+	/// bind failure cannot arrive here. No process signal is watched: race this
+	/// against your own ctrl-C future and drop the listener if you want one to stop
+	/// the loop.
 	pub async fn accept(&mut self) -> Option<Request> {
 		self.server.accept_next().await
 	}
@@ -631,8 +634,6 @@ impl Listener {
 	/// shutdown.
 	///
 	/// Consumes the listener so its bound sockets are released before this returns.
-	///
-	/// [`accept`](Self::accept) calls this for you on Ctrl-C.
 	pub async fn close(mut self) {
 		self.server.shutdown().await;
 	}
