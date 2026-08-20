@@ -42,7 +42,7 @@ if(BUILD_RUST_LIB)
     set(RUST_HEADER "${RUST_TARGET_DIR}/include/moq.h")
 
     add_custom_target(rust_build ALL
-        COMMAND cargo build ${CARGO_BUILD_FLAG}
+        COMMAND cargo build --locked ${CARGO_BUILD_FLAG}
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         BYPRODUCTS ${RUST_LIB} ${RUST_HEADER}
         COMMENT "Building Rust library with cargo"
