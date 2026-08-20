@@ -95,6 +95,14 @@ test("the code types reject the other registry", () => {
 	new StreamError(SessionCode.Unauthorized);
 	// @ts-expect-error Raw numbers have not been decoded against either registry.
 	new StreamError(2);
+
+	const mutateRegistry = () => {
+		// @ts-expect-error Registry constants are readonly.
+		SessionCode.Cancel = SessionCode(64);
+		// @ts-expect-error Registry constants are readonly.
+		StreamCode.Cancel = StreamCode(64);
+	};
+	expect(mutateRegistry).toBeDefined();
 });
 
 test("application code constructors validate the application range", () => {
@@ -105,6 +113,13 @@ test("application code constructors validate the application range", () => {
 		expect(() => StreamCode(code)).toThrow(RangeError);
 		expect(() => SessionCode(code)).toThrow(RangeError);
 	}
+});
+
+test("code registries cannot be mutated at runtime", () => {
+	expect(Object.isFrozen(SessionCode)).toBe(true);
+	expect(Object.isFrozen(StreamCode)).toBe(true);
+	expect(() => Object.assign(SessionCode, { Cancel: SessionCode(64) })).toThrow(TypeError);
+	expect(() => Object.assign(StreamCode, { Cancel: StreamCode(64) })).toThrow(TypeError);
 });
 
 test("fromTransport: code 0 is a code like any other", () => {
