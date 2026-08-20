@@ -34,5 +34,3 @@ pub mod timeline;
 pub use clock::Clock;
 pub use error::*;
 pub use source::Source;
-/// Re-export of [`std::time::Duration`], the drift budget every consumer-side knob here takes.
-pub use std::time::Duration;

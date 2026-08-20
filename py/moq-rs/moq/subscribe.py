@@ -514,7 +514,9 @@ class BroadcastConsumer:
         Use ``output.max_age_ms`` to
         control how aggressively stalled groups get skipped. That's
         the congestion-control knob. (Named ``_max`` to leave room for
-        a future ``latency_min_ms`` jitter-buffer floor.)
+        a future ``min_buffer_ms`` jitter-buffer floor, which is a
+        distinct knob: this one bounds how stale a group may be, that
+        one how much to hold before presenting.)
         """
         return AudioConsumer(await self._inner.decode_audio(name, catalog_audio, output))
 
