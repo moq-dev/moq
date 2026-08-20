@@ -310,22 +310,23 @@ fn reassemble_video(ts: &[u8], expected_stream_type: StreamType) -> Vec<u8> {
 				video_pid = Some(pmt.es_info[0].elementary_pid);
 			}
 			Some(TsPayload::PesStart(pes)) => {
-				// The first packet of a keyframe must signal random access and carry a PCR.
+				// The first packet of a keyframe must signal random access.
 				if let Some(af) = &packet.adaptation_field {
 					saw_random_access |= af.random_access_indicator;
-					saw_pcr |= af.pcr.is_some();
 				}
 				unbounded = pes.pes_packet_len == 0;
 				reassembled.extend_from_slice(&pes.data);
 			}
 			Some(TsPayload::PesContinuation(bytes)) => reassembled.extend_from_slice(&bytes),
+			// The clock rides adaptation-field-only packets on the PCR PID.
+			None => saw_pcr |= packet.adaptation_field.as_ref().is_some_and(|af| af.pcr.is_some()),
 			_ => {}
 		}
 	}
 
 	assert!(video_pid.is_some(), "missing video PMT entry");
 	assert!(saw_random_access, "keyframe should set random_access_indicator");
-	assert!(saw_pcr, "PCR pid should carry a PCR on the keyframe");
+	assert!(saw_pcr, "PCR pid should carry the clock");
 	assert!(unbounded, "video PES should be unbounded");
 	reassembled
 }
@@ -540,6 +541,60 @@ async fn export_bframe_video_authors_dts() {
 	}
 	for (i, (&d, &p)) in effective.iter().zip(pts.iter()).enumerate() {
 		assert!(d <= p, "DTS {d} after PTS {p} at frame {i}");
+	}
+}
+
+/// #2937: the PCR must be a uniform bounded-interval ramp, not a sample of the
+/// per-unit decode clock. On a reordered (B-frame) capture the authored DTS is a
+/// saw (reference frames leap a reorder span, B-frames nudge one tick), so a PCR
+/// taken from it froze and jumped: most intervals landed within microseconds of
+/// each other, the rest collected into gaps far over TR 101 290's 40 ms gate.
+#[tokio::test(start_paused = true)]
+async fn export_pcr_is_a_uniform_ramp() {
+	let data = include_bytes!("test_data/scte35/kyrion_dirtystart.ts");
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	import.decode(&BytesMut::from(&data[..])).unwrap();
+	import.finish().unwrap();
+
+	let ts = drain(consumer).await;
+	assert_packet_aligned(&ts);
+
+	// Walk the output in transport order: PCR values (90 kHz) as they appear, and
+	// every PES unit's effective decode time against the clock preceding it.
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	let mut pcr_pid = None;
+	let mut pcrs: Vec<u64> = Vec::new();
+	let mut units = 0usize;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(pcr) = packet.adaptation_field.as_ref().and_then(|af| af.pcr) {
+			assert_eq!(Some(packet.header.pid), pcr_pid, "PCR must ride the announced PID");
+			assert!(packet.payload.is_none(), "PCR rides adaptation-field-only packets");
+			pcrs.push(pcr.as_u64() / 300);
+		}
+		match packet.payload {
+			Some(TsPayload::Pmt(pmt)) if pcr_pid.is_none() => pcr_pid = pmt.pcr_pid,
+			Some(TsPayload::PesStart(pes)) => {
+				units += 1;
+				let pts = pes.header.pts.expect("PES carried no PTS").as_u64();
+				let decode = pes.header.dts.map(|t| t.as_u64()).unwrap_or(pts);
+				if let Some(&pcr) = pcrs.last() {
+					assert!(decode >= pcr, "unit decodes at {decode}, before the clock at {pcr}");
+				}
+			}
+			_ => {}
+		}
+	}
+
+	assert!(units > 50, "expected the full feed, got {units} PES units");
+	assert!(pcrs.len() > 50, "expected a dense clock, got {} PCRs", pcrs.len());
+	// One grid step apart, exactly: uniform, monotonic, and far under the 40 ms gate.
+	let step = Duration::from_millis(25).as_micros() as u64 * 90 / 1_000;
+	for (i, w) in pcrs.windows(2).enumerate() {
+		assert_eq!(w[1] - w[0], step, "PCR interval off the grid at {i}: {w:?}");
 	}
 }
 
