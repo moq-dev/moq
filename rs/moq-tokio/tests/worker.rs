@@ -131,6 +131,25 @@ async fn a_single_worker_may_use_an_ephemeral_port() {
 	assert_ne!(workers.local_addr().port(), 0);
 }
 
+/// The steering filter picks a member with one byte of the connection ID, so a
+/// group past 256 has members it could never name. Refused at bind rather than
+/// panicking later, when the first server-issued connection ID has no stride
+/// left to spend.
+#[tokio::test]
+async fn an_unaddressable_group_is_refused() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+
+	let err = Workers::bind(listen_config(&cert, &key, 0), Default::default(), config(257))
+		.expect_err("a group larger than the prefix can name");
+	assert!(
+		matches!(err, moq_tokio::Error::WorkerCount { count: 257, max: 256 }),
+		"unexpected error: {err}"
+	);
+}
+
 /// Generating a certificate would give every member a different identity, so it
 /// is refused rather than silently served.
 #[tokio::test]

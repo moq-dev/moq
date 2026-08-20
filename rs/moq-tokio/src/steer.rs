@@ -68,12 +68,19 @@ pub(crate) fn bind(addr: SocketAddr, shard: Option<Shard>) -> io::Result<UdpSock
 /// bytes of the ID stay fully random either way. Connection IDs are not secrets,
 /// but they are unlinkable only while they look random, which is why this spends
 /// as little of that byte as it can.
+/// The largest group the steering filter can address.
+///
+/// It selects with one byte of the connection ID, so a member past 255 could
+/// never be named: [`cid_prefix`] would have no stride to spend and the filter's
+/// `byte % count` could never return that index.
+pub(crate) const MAX_SHARDS: u16 = 256;
+
 pub(crate) fn cid_prefix(shard: Shard) -> u8 {
 	use rand::RngExt;
 
 	let count = u32::from(shard.count());
 	// The number of whole strides of `count` that fit in a byte. At least one,
-	// since a group cannot have more than 256 members.
+	// because `Workers::bind` refuses a group larger than `MAX_SHARDS`.
 	let strides = 256 / count;
 	let stride = rand::rng().random_range(0..strides);
 
@@ -180,7 +187,9 @@ mod tests {
 	/// reduce back to that member.
 	#[test]
 	fn a_prefix_reduces_to_its_own_shard() {
-		for count in [1u16, 2, 3, 4, 7, 8, 16, 64, 255] {
+		// `MAX_SHARDS` is the interesting end: one stride per member, so the prefix
+		// is the index itself and there is no randomness left to spend.
+		for count in [1u16, 2, 3, 4, 7, 8, 16, 64, 255, MAX_SHARDS] {
 			for index in 0..count {
 				let shard = Shard::new(index, count).unwrap();
 				// Sampled, since the prefix is randomized within the member's stride.

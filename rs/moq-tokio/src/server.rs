@@ -189,8 +189,11 @@ impl Server {
 		quic.validate()?;
 
 		let build_quic = parts.quic() && (config.bind.is_some() || !config.has_stream_listener());
+		// `parts.quic()` and not `build_quic`: a caller that asked for streams only
+		// is not asking for a backend, while leaving everything else configured is
+		// still the error it always was.
 		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
-		if config.bind.is_some() {
+		if config.bind.is_some() && parts.quic() {
 			return Err(Error::NoBackend(
 				"--listen requires a noq, quinn, or quiche backend feature",
 			));

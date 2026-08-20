@@ -95,6 +95,16 @@ pub enum Error {
 	#[error("--listen-quic-lb-nonce needs --listen-quic-lb-id")]
 	LbNonceWithoutId,
 
+	/// A worker group was asked for more members than the connection ID's one-byte
+	/// steering prefix can name.
+	#[error("QUIC workers cannot exceed {max}; {count} were requested")]
+	WorkerCount {
+		/// What was asked for.
+		count: u16,
+		/// The ceiling, set by the byte the steering filter reads.
+		max: u16,
+	},
+
 	/// A worker group was asked to generate its own certificate, which would give
 	/// every member a different one.
 	#[error("QUIC workers cannot generate certificates; configure a certificate and key instead")]

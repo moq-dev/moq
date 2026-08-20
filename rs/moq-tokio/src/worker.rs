@@ -100,6 +100,13 @@ impl Workers {
 		}
 
 		let count = config.count.max(1);
+		if count > crate::steer::MAX_SHARDS {
+			return Err(Error::WorkerCount {
+				count,
+				max: crate::steer::MAX_SHARDS,
+			});
+		}
+
 		let cores = config.pin.then(cores).unwrap_or_default();
 
 		let mut workers = Vec::with_capacity(count as usize);
@@ -212,10 +219,16 @@ impl Worker {
 
 		// A worker that fails to bind drops its sender, so a recv error and a bind
 		// error are the same event; report the bind error when there is one.
-		let ready = ready_rx.recv().map_err(|_| Error::WorkerStart {
-			index,
-			source: Arc::new(std::io::Error::other("worker exited before binding")),
-		})?;
+		let ready = match ready_rx.recv() {
+			Ok(ready) => ready,
+			Err(_) => {
+				let _ = thread.join();
+				return Err(Error::WorkerStart {
+					index,
+					source: Arc::new(std::io::Error::other("worker exited before binding")),
+				});
+			}
+		};
 
 		let Ready { server, addr, handle } = match ready {
 			Ok(ready) => ready,
