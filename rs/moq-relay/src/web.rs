@@ -992,12 +992,17 @@ mod tests {
 		);
 
 		// The kernel measured this during the handshake, so it is readable already --
-		// which is what lets the Probe capability be decided at SETUP.
-		let stats = service.socket.as_ref().unwrap();
-		assert!(
-			qmux::SocketStats::rtt(&*stats.0).is_some(),
-			"a connected TCP socket must report an RTT immediately"
-		);
+		// which is what lets the Probe capability be decided at SETUP. Only where
+		// qmux actually reads a TCP info struct: elsewhere on unix it supplies an
+		// empty implementation and every metric is `None`, which is not a failure.
+		#[cfg(any(target_os = "linux", target_os = "macos"))]
+		{
+			let stats = service.socket.as_ref().unwrap();
+			assert!(
+				qmux::SocketStats::rtt(&*stats.0).is_some(),
+				"a connected TCP socket must report an RTT immediately"
+			);
+		}
 
 		drop(stream);
 	}
