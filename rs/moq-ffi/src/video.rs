@@ -466,9 +466,9 @@ impl MoqBroadcastConsumer {
 
 		let mut config = moq_video::decode::Config::default();
 		config.resize = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
-		config.latency = output
+		config.max_age = output
 			.latency_max_ms
-			.map(|ms| moq_mux::Latency::max(std::time::Duration::from_millis(ms)))
+			.map(std::time::Duration::from_millis)
 			.unwrap_or_default();
 
 		let consumer = moq_video::decode::Consumer::new(&broadcast, &cfg, name, config).await?;

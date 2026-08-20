@@ -58,7 +58,7 @@ pub struct Listen {
 pub async fn listen_import(target: ImportTarget, listen: Listen) -> anyhow::Result<()> {
 	let publisher = scope_producer(&target.origin, &target.name)?;
 	let mut config = server_config(&listen);
-	config.latency_max = target.latency_max;
+	config.max_age = target.max_age;
 	let server = moq_rtc::Server::new(config, publisher, target.origin.consume());
 	serve(server.publish_router(), "WHIP", listen).await
 }
@@ -94,7 +94,7 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 	notify_ready();
 
 	let mut config = moq_rtc::client::Config::default();
-	config.latency_max = target.latency_max;
+	config.max_age = target.max_age;
 	let client = moq_rtc::Client::new(config);
 	Ok(client.subscribe(url, producer).await?)
 }

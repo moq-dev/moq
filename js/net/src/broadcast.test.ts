@@ -54,14 +54,14 @@ test("consumer dedupes repeat subscriptions onto one upstream request", async ()
 test("a request exposes the aggregate subscription options", async () => {
 	const consumer = new TestConsumer();
 
-	consumer.subscribe("video", { priority: 3, ordered: true, latencyMax: 100, startGroup: 10, endGroup: 20 });
-	consumer.subscribe("video", { priority: 7, ordered: true, latencyMax: 250, startGroup: 0, endGroup: 30 });
+	consumer.subscribe("video", { priority: 3, ordered: true, maxAge: 100, startGroup: 10, endGroup: 20 });
+	consumer.subscribe("video", { priority: 7, ordered: true, maxAge: 250, startGroup: 0, endGroup: 30 });
 
 	const request = await pendingRequest(consumer);
 	expect(request?.subscription).toEqual({
 		priority: 7,
 		ordered: true,
-		latencyMax: 250,
+		maxAge: 250,
 		startGroup: 0,
 		endGroup: 30,
 	});
@@ -213,7 +213,7 @@ test("a stalled consumer does not pin evicted groups", async () => {
 		setSystemTime(new Date(10_000));
 
 		const broadcast = new BroadcastProducer();
-		const producer = broadcast.createTrack("video", { latencyMax: 1000 });
+		const producer = broadcast.createTrack("video", { maxAge: 1000 });
 
 		// A subscriber that never reads. Its sink must not grow without bound.
 		const stalled = broadcast.track("video").subscribe();
@@ -242,11 +242,11 @@ test("a stalled consumer does not pin evicted groups", async () => {
 test("createTrack commits info up front", async () => {
 	const broadcast = new BroadcastProducer();
 
-	const producer = broadcast.createTrack("video", { latencyMax: 2000, priority: 3 });
+	const producer = broadcast.createTrack("video", { maxAge: 2000, priority: 3 });
 	expect(producer.name).toBe("video");
 
 	const info = await broadcast.track("video").info();
-	expect(info.latencyMax).toBe(2000);
+	expect(info.maxAge).toBe(2000);
 	expect(info.priority).toBe(3);
 });
 

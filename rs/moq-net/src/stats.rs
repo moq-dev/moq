@@ -318,8 +318,8 @@ pub struct Traffic {
 	/// A subset of `groups`: each one also counts there and its payload in
 	/// `frames` / `bytes`.
 	pub datagrams: u64,
-	/// Content skipped because it drifted past a subscriber's
-	/// [`Latency`](crate::Latency) budget. Disjoint from the top-level payload
+	/// Content skipped because it aged past a subscriber's
+	/// [`max_age`](crate::track::Subscription::max_age) budget. Disjoint from the top-level payload
 	/// counters: skipped content is never handed over. A steady rate here means
 	/// subscribers are consistently behind the live edge.
 	pub stale: Content,

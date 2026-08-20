@@ -484,8 +484,8 @@ pub struct Publish<S = Conn> {
 	stream_key: String,
 	peer: SocketAddr,
 	/// Retention declared on the media tracks this publish mints, or `None` for hang's
-	/// own default. Override with [`with_latency_max`](Self::with_latency_max).
-	latency_max: Option<Duration>,
+	/// own default. Override with [`with_max_age`](Self::with_max_age).
+	max_age: Option<Duration>,
 }
 
 impl<S: Stream> Publish<S> {
@@ -515,8 +515,8 @@ impl<S: Stream> Publish<S> {
 	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
 	/// advertise segments that are still fetchable. Lower it when nothing reads history
 	/// and the memory matters.
-	pub fn with_latency_max(mut self, latency_max: impl Into<Option<Duration>>) -> Self {
-		self.latency_max = latency_max.into();
+	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
+		self.max_age = max_age.into();
 		self
 	}
 
@@ -532,7 +532,7 @@ impl<S: Stream> Publish<S> {
 		// Reserve the broadcast path before telling the client the publish succeeded:
 		// if the origin refuses `path`, reject cleanly instead of accepting and then
 		// dropping the connection a moment later.
-		let mut publisher = match Publisher::new(origin, path.as_str(), self.latency_max) {
+		let mut publisher = match Publisher::new(origin, path.as_str(), self.max_age) {
 			Ok(publisher) => publisher,
 			Err(err) => {
 				tracing::warn!(peer = %self.peer, %path, %err, "rejecting RTMP publish: broadcast unavailable");
@@ -622,9 +622,9 @@ pub struct Play<S = Conn> {
 	stream_key: String,
 	peer: SocketAddr,
 	/// How long the FLV muxer waits for a stalled group before skipping to a newer
-	/// one. Defaults to [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY); override with
-	/// [`with_latency`](Self::with_latency).
-	latency: moq_mux::Latency,
+	/// one. Defaults to [`DEFAULT_MAX_AGE`](crate::DEFAULT_MAX_AGE); override with
+	/// [`with_max_age`](Self::with_max_age).
+	latency: Duration,
 	/// Enhanced-RTMP capabilities advertised by the player in its connect object.
 	capabilities: ClientCapabilities,
 }
@@ -650,11 +650,11 @@ impl<S: Stream> Play<S> {
 
 	/// Set how long the FLV muxer waits for a stalled group before skipping to a
 	/// newer one (the moq-level frame-drop latency). Defaults to
-	/// [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY). RTMP is unpaced (tags go out as
+	/// [`DEFAULT_MAX_AGE`](crate::DEFAULT_MAX_AGE). RTMP is unpaced (tags go out as
 	/// fast as the socket accepts them), so this bounds buffering, not the wire
-	/// rate. Pass [`Latency::REAL_TIME`](moq_mux::Latency::REAL_TIME) to drop stale groups
+	/// rate. Pass [`Duration::ZERO`] to drop stale groups
 	/// aggressively.
-	pub fn with_latency(mut self, latency: moq_mux::Latency) -> Self {
+	pub fn with_max_age(mut self, latency: Duration) -> Self {
 		self.latency = latency;
 		self
 	}
@@ -730,7 +730,7 @@ impl<S: Stream> Play<S> {
 		let mut export = FlvExport::new(moq_mux::Source::new(origin.consume(), path.as_str()))
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
-			.with_latency(self.latency)
+			.with_max_age(self.latency)
 			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
@@ -940,7 +940,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							app: app_name,
 							stream_key,
 							peer,
-							latency_max: None,
+							max_age: None,
 						})));
 					}
 					// The client wants to play: hand control back to the caller.
@@ -960,7 +960,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							app: app_name,
 							stream_key,
 							peer,
-							latency: crate::DEFAULT_LATENCY,
+							latency: crate::DEFAULT_MAX_AGE,
 							capabilities: client_capabilities.clone(),
 						})));
 					}
@@ -1249,9 +1249,9 @@ struct Publisher {
 impl Publisher {
 	/// Open a broadcast at `path` and prime the importer with the FLV file
 	/// header, so subsequent tags decode against an initialized demuxer.
-	fn new(origin: &origin::Producer, path: &str, latency_max: Option<Duration>) -> anyhow::Result<Self> {
+	fn new(origin: &origin::Producer, path: &str, max_age: Option<Duration>) -> anyhow::Result<Self> {
 		let mut broadcast = origin.create_broadcast(path, broadcast::Route::new().with_announce(true))?;
-		let config = moq_mux::catalog::Config::default().with_latency_max(latency_max);
+		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 		let handle = broadcast.clone();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
@@ -1592,7 +1592,7 @@ mod tests {
 
 		let broadcast = origin.consume().announced_broadcast("live/cam0").await.unwrap();
 		let info = broadcast.track("0.flv-v").unwrap().info().await.unwrap();
-		assert_eq!(info.latency_max, Duration::from_secs(3));
+		assert_eq!(info.max_age, Duration::from_secs(3));
 	}
 
 	/// End-to-end play: publish a real broadcast into an origin (via the FLV importer, so it

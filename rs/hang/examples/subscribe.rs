@@ -74,13 +74,13 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 	);
 
 	// Subscribe to the video track.
-	let latency = moq_mux::Latency::max(Duration::from_millis(500));
+	let latency = Duration::from_millis(500);
 	let track_consumer = broadcast
 		.track(name)?
 		.subscribe(
 			moq_net::track::Subscription::default()
 				.with_priority(1)
-				.with_latency(latency),
+				.with_max_age(latency),
 		)
 		.await?;
 	let mut ordered = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy);

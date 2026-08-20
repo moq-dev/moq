@@ -11,8 +11,8 @@ import { Timescale, type Timestamp } from "./time.ts";
 
 export type { Datagram } from "./datagram.ts";
 
-/** Default {@link Info.latencyMax} window (milliseconds) when the publisher does not set one. */
-export const DEFAULT_LATENCY_MAX_MS = 5000;
+/** Default {@link Info.maxAge} window (milliseconds) when the publisher does not set one. */
+export const DEFAULT_MAX_AGE_MS = 5000;
 
 /**
  * How long (milliseconds) a datagram stays in the per-subscriber buffer before it is dropped.
@@ -48,11 +48,11 @@ export interface Info {
 	 */
 	timescale: Timescale;
 	/**
-	 * Publisher Max Latency: the maximum age (milliseconds) of a non-latest group before
+	 * Publisher Max Age: the maximum age (milliseconds) of a non-latest group before
 	 * the publisher evicts it. Reported in TRACK_INFO (Lite05+) so relays re-serve with the
 	 * same bound. The publisher-side half of the budget a subscriber sets for itself.
 	 */
-	latencyMax: number;
+	maxAge: number;
 	/** Tie-break priority between subscriptions of equal subscriber priority. */
 	priority: number;
 	/**
@@ -66,7 +66,7 @@ export interface Info {
 export function infoDefaults(info: Partial<Info> = {}): Info {
 	return {
 		timescale: info.timescale ?? Timescale.MILLI,
-		latencyMax: info.latencyMax ?? DEFAULT_LATENCY_MAX_MS,
+		maxAge: info.maxAge ?? DEFAULT_MAX_AGE_MS,
 		priority: info.priority ?? 0,
 		ordered: info.ordered ?? false,
 	};
@@ -82,7 +82,7 @@ export interface Subscription {
 	/** Whether groups are prioritized in sequence order. Defaults to `false` (newest-first). */
 	ordered?: boolean;
 	/** Maximum age (milliseconds) of a non-latest group before it is skipped. Defaults to `0`. */
-	latencyMax?: number;
+	maxAge?: number;
 	/** First group the publisher should deliver, or omit to start at the latest group. */
 	startGroup?: number;
 	/** Last group the publisher should deliver (inclusive), or omit for no end. */
@@ -95,7 +95,7 @@ function subscriptionDefaults(subscription: Subscription = {}): Subscription {
 	return {
 		priority: subscription.priority ?? 0,
 		ordered: subscription.ordered ?? false,
-		latencyMax: subscription.latencyMax ?? 0,
+		maxAge: subscription.maxAge ?? 0,
 		startGroup: subscription.startGroup,
 		endGroup: subscription.endGroup,
 	};
@@ -114,7 +114,7 @@ function combineSubscriptions(states: Iterable<TrackState>): Subscription | unde
 
 		combined.priority = Math.max(combined.priority ?? 0, subscription.priority ?? 0);
 		combined.ordered = (combined.ordered ?? false) && (subscription.ordered ?? false);
-		combined.latencyMax = Math.max(combined.latencyMax ?? 0, subscription.latencyMax ?? 0);
+		combined.maxAge = Math.max(combined.maxAge ?? 0, subscription.maxAge ?? 0);
 
 		if (subscription.startGroup !== undefined) {
 			combined.startGroup =
@@ -295,7 +295,7 @@ let makeSubscriber: (name: string, state: TrackState) => Subscriber;
  * subscription the publisher serves from it) gets an independent
  * {@link Subscriber} that receives a full copy of the groups, each with its own
  * read cursor. Groups are mirrored into every live subscriber and retained for the
- * track's `latencyMax` window so a late subscriber replays the recent groups.
+ * track's `maxAge` window so a late subscriber replays the recent groups.
  *
  * Obtained from {@link Request.accept} (the wire asks the application for a track to
  * serve) or constructed directly for an in-process track.
@@ -470,8 +470,8 @@ export class Producer {
 
 	// Evict cached groups that are closed and older than the cache window.
 	#prune(): void {
-		const latencyMaxMs = this.#state.info.peek()?.latencyMax ?? DEFAULT_LATENCY_MAX_MS;
-		const cutoff = Date.now() - latencyMaxMs;
+		const maxAgeMs = this.#state.info.peek()?.maxAge ?? DEFAULT_MAX_AGE_MS;
+		const cutoff = Date.now() - maxAgeMs;
 
 		const retained: CachedGroup[] = [];
 		for (const entry of this.#cache) {

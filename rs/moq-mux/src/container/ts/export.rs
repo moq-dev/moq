@@ -56,7 +56,7 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 pub struct Export<E: catalog::Catalog = ()> {
 	source: crate::Source,
 	catalog: Option<crate::catalog::Consumer<E>>,
-	latency: crate::Latency,
+	max_age: Duration,
 
 	tracks: HashMap<String, Track>,
 	/// Continuity counter per PID (PAT, PMT, and each elementary stream).
@@ -189,7 +189,7 @@ struct SiTrack {
 	/// rate, so the real-time default would take only the newest group and drop
 	/// the revisions between: an SI track needs the export's replay window as much
 	/// as the media it describes.
-	latency: crate::Latency,
+	max_age: Duration,
 }
 
 /// The SI subscription's lifecycle, mirroring `ExportSource`'s but reading raw
@@ -208,7 +208,7 @@ enum SiState {
 }
 
 impl SiTrack {
-	fn new(source: &crate::Source, track: &str, interval: Option<Duration>, latency: crate::Latency) -> Self {
+	fn new(source: &crate::Source, track: &str, interval: Option<Duration>, max_age: Duration) -> Self {
 		Self {
 			track: track.to_string(),
 			interval,
@@ -216,7 +216,7 @@ impl SiTrack {
 			active: Default::default(),
 			pending: None,
 			last_emit: None,
-			latency,
+			max_age,
 		}
 	}
 
@@ -239,7 +239,7 @@ impl SiTrack {
 			self.state = match resolved {
 				Ok((broadcast, name)) => match broadcast.track(&name) {
 					Ok(track) => SiState::Subscribing(
-						track.subscribe(moq_net::track::Subscription::default().with_latency(self.latency)),
+						track.subscribe(moq_net::track::Subscription::default().with_max_age(self.max_age)),
 					),
 					Err(err) => {
 						tracing::warn!(%err, track = %name, "SI track unavailable; carrying the last snapshot");
@@ -358,7 +358,7 @@ impl<E: catalog::Catalog> Export<E> {
 		Ok(Self {
 			source,
 			catalog: Some(catalog),
-			latency: crate::Latency::REAL_TIME,
+			max_age: Duration::ZERO,
 			tracks: HashMap::new(),
 			counters: HashMap::new(),
 			program_descriptors: Vec::new(),
@@ -372,13 +372,13 @@ impl<E: catalog::Catalog> Export<E> {
 		})
 	}
 
-	/// Set the latency tolerance for each per-track source.
+	/// Set the max age for each per-track source.
 	///
 	/// See [`Consumer`](crate::container::Consumer) for the per-track skip behavior.
 	/// Defaults to
-	/// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) (skip aggressively).
-	pub fn with_latency(mut self, latency: crate::Latency) -> Self {
-		self.latency = latency;
+	/// [`Duration::ZERO`] (skip aggressively).
+	pub fn with_max_age(mut self, max_age: Duration) -> Self {
+		self.max_age = max_age;
 		self
 	}
 
@@ -583,7 +583,7 @@ impl<E: catalog::Catalog> Export<E> {
 					// staying attached would repeat its stale sections forever. The last
 					// snapshot carries across so emission never goes dark mid-swap.
 					Some(existing) if existing.track != entry.track => {
-						let mut replacement = SiTrack::new(&self.source, &entry.track, entry.interval, self.latency);
+						let mut replacement = SiTrack::new(&self.source, &entry.track, entry.interval, self.max_age);
 						replacement.active = std::mem::take(&mut existing.active);
 						replacement.last_emit = existing.last_emit;
 						*existing = replacement;
@@ -592,7 +592,7 @@ impl<E: catalog::Catalog> Export<E> {
 					None => {
 						self.si.insert(
 							(*pid, *table_id),
-							SiTrack::new(&self.source, &entry.track, entry.interval, self.latency),
+							SiTrack::new(&self.source, &entry.track, entry.interval, self.max_age),
 						);
 					}
 				}
@@ -675,7 +675,7 @@ impl<E: catalog::Catalog> Export<E> {
 					self.tracks.insert(name.clone(), track);
 				}
 				None => {
-					let Some(source) = ExportSource::for_video(&self.source, name, config, self.latency)? else {
+					let Some(source) = ExportSource::for_video(&self.source, name, config, self.max_age)? else {
 						continue;
 					};
 					self.insert_track(name, source, pid, kind, descriptors, reserve);
@@ -694,7 +694,7 @@ impl<E: catalog::Catalog> Export<E> {
 					self.tracks.insert(name.clone(), track);
 				}
 				None => {
-					let Some(source) = ExportSource::for_audio(&self.source, name, config, self.latency)? else {
+					let Some(source) = ExportSource::for_audio(&self.source, name, config, self.max_age)? else {
 						continue;
 					};
 					self.insert_track(name, source, pid, kind, descriptors, DEFAULT_DTS_RESERVE);
@@ -720,7 +720,7 @@ impl<E: catalog::Catalog> Export<E> {
 					self.tracks.insert(name.clone(), existing);
 				}
 				None => {
-					let source = ExportSource::for_stream(&self.source, name, self.latency)?;
+					let source = ExportSource::for_stream(&self.source, name, self.max_age)?;
 					self.insert_track(name, source, pid, kind, descriptors, DEFAULT_DTS_RESERVE);
 				}
 			}

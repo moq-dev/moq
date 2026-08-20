@@ -132,7 +132,7 @@ Both bounds may be refined to a Frame within their Group, so a subscription can 
 The subscriber and publisher both indicate their delivery preference:
 - `Priority` indicates if Track A should be transmitted instead of Track B.
 - `Ordered` indicates if the Groups within a Track should be transmitted in order.
-- `Subscriber Max Latency` indicates the maximum age before a non-latest Group is dropped from live delivery; `Publisher Max Latency` indicates the maximum age before a non-latest Group is dropped from the publisher's cache.
+- `Subscriber Max Age` indicates the maximum age before a non-latest Group is dropped from live delivery; `Publisher Max Age` indicates the maximum age before a non-latest Group is dropped from the publisher's cache.
 
 The combination of these preferences enables the most important content to arrive during network degradation while still respecting encoding dependencies.
 
@@ -496,20 +496,20 @@ An application SHOULD use `ordered` when it wants to provide a VOD-like experien
 An application SHOULD NOT use `ordered` when it wants to provide a live experience, preferring to skip old groups rather than buffer them.
 
 Note that [expiration](#expiration) is not affected by `ordered`.
-An old group may still be cancelled/skipped if it exceeds the `Subscriber Max Latency`.
+An old group may still be cancelled/skipped if it exceeds the `Subscriber Max Age`.
 An application MUST support gaps and out-of-order delivery even when `ordered` is true.
 
 
 ## Expiration
 Expiration governs when an older group is dropped.
-The publisher SHOULD reset Group Streams for non-latest groups whose age relative to the latest group exceeds `Subscriber Max Latency` (see [SUBSCRIBE](#subscribe)); the subscriber MAY also locally drop such groups.
-Expiration only removes the group from live delivery; the publisher MAY still retain it for FETCH or new subscriptions until its age exceeds `Publisher Max Latency` (see [TRACK_INFO](#track-info)).
+The publisher SHOULD reset Group Streams for non-latest groups whose age relative to the latest group exceeds `Subscriber Max Age` (see [SUBSCRIBE](#subscribe)); the subscriber MAY also locally drop such groups.
+Expiration only removes the group from live delivery; the publisher MAY still retain it for FETCH or new subscriptions until its age exceeds `Publisher Max Age` (see [TRACK_INFO](#track-info)).
 
 It is not crucial to aggressively expire groups thanks to [prioritization](#prioritization), but a lower priority group still consumes RAM, bandwidth, and potentially flow control.
 It is RECOMMENDED that an application set conservative limits and only resort to expiration when data is absolutely no longer needed.
 
 A group is never expired until at least the next group (by sequence number) has been received or queued.
-Once a newer group exists, the group's age is measured two ways, and it is expired once **either** measure exceeds the relevant `Max Latency`:
+Once a newer group exists, the group's age is measured two ways, and it is expired once **either** measure exceeds the relevant `Max Age`:
 
 - **Timestamp age**: the difference between this group's first frame timestamp and the first frame timestamp of the latest group that has at least one frame. This measure is consistent across relays and unaffected by buffering or jitter.
 - **Wall-clock age**: the difference between when this group's first byte arrived (subscriber) or was queued (publisher) and the same instant for the latest group.
@@ -922,7 +922,7 @@ SUBSCRIBE Message {
   Epoch (i)
   Subscriber Priority (8)
   Subscriber Ordered (8)
-  Subscriber Max Latency (i)
+  Subscriber Max Age (i)
   Group Start (i)
   Group End (i)
   Frame Start (i)
@@ -948,12 +948,12 @@ A single byte representing whether groups are transmitted in ascending (0x1) or 
 The publisher SHOULD transmit *older* groups first during congestion if true.
 See the [Prioritization](#prioritization) section for more information.
 
-**Subscriber Max Latency**:
+**Subscriber Max Age**:
 The subscriber's preference, in milliseconds, for how long a non-latest group may remain in flight before being considered stale and dropped from live delivery.
 The publisher SHOULD reset (at the QUIC level) Group Streams for groups whose age relative to the latest group exceeds this duration.
 Applies only to non-latest groups; the latest group is never dropped on staleness grounds.
 A value of `0` means the subscriber wants only the latest group in live delivery (older groups are immediately stale once a newer group arrives).
-This is a delivery-time preference, not a retention rule: the publisher MAY still hold these groups for FETCH or future subscriptions (see `Publisher Max Latency` in [TRACK_INFO](#track-info)).
+This is a delivery-time preference, not a retention rule: the publisher MAY still hold these groups for FETCH or future subscriptions (see `Publisher Max Age` in [TRACK_INFO](#track-info)).
 See the [Expiration](#expiration) section for more information.
 
 **Group Start**:
@@ -991,7 +991,7 @@ SUBSCRIBE_UPDATE Message {
   Message Length (i)
   Subscriber Priority (8)
   Subscriber Ordered (8)
-  Subscriber Max Latency (i)
+  Subscriber Max Age (i)
   Group Start (i)
   Group End (i)
   Frame Start (i)
@@ -1035,7 +1035,7 @@ TRACK_INFO Message {
   Epoch (i)
   Publisher Priority (8)
   Publisher Ordered (8)
-  Publisher Max Latency (i)
+  Publisher Max Age (i)
   Timescale (i)
 }
 ~~~
@@ -1056,16 +1056,16 @@ See the [Prioritization](#prioritization) section for more information.
 The publisher's group ordering preference (ascending `0x1` or descending `0x0`), used only to resolve ties.
 See the [Prioritization](#prioritization) section for more information.
 
-**Publisher Max Latency**:
+**Publisher Max Age**:
 The maximum age, in milliseconds, that the publisher caches a non-latest group past the arrival of a newer group.
 Applies only to non-latest groups; the latest group is always retained.
 It is an upper bound on retention, the inverse of an HTTP `Cache-Control: max-age` guarantee:
 
-- A subscriber MAY issue a SUBSCRIBE or FETCH with an older `Group Start`, but the publisher MAY have already dropped any group whose age exceeds `Publisher Max Latency`.
-- The publisher MAY drop groups sooner than `Publisher Max Latency` under resource pressure; subscribers MUST NOT assume older groups within the bound are still available.
+- A subscriber MAY issue a SUBSCRIBE or FETCH with an older `Group Start`, but the publisher MAY have already dropped any group whose age exceeds `Publisher Max Age`.
+- The publisher MAY drop groups sooner than `Publisher Max Age` under resource pressure; subscribers MUST NOT assume older groups within the bound are still available.
 
 A value of `0` means the publisher caches only the latest group (older groups MAY be dropped as soon as a newer group arrives).
-The unit is milliseconds, matching `Subscriber Max Latency`.
+The unit is milliseconds, matching `Subscriber Max Age`.
 See the [Expiration](#expiration) section for more information.
 
 **Timescale**:
@@ -1336,6 +1336,7 @@ The `Message Length` describes the payload size on the wire.
 - Restricted the GOAWAY New Session URI to servers, specified a duplicate GOAWAY as a protocol violation, and recommended scheme continuity and sticky redirects.
 - Exempted a ceiling-cost serving path from the actively-carrying cost discount: a relay whose serving path costs the saturation ceiling (primarily a session that received a GOAWAY) advertises the ceiling instead of 0, so the drain propagates downstream instead of being re-masked by each carrying hop. Keyed on the value, not the reason, which does not travel on the wire.
 - Added the Error Codes section, defining separate session and stream code spaces and listing the codes moq-lite uses, reused unchanged from moq-transport. Codes 64+ are the application's; 32-63 are reserved and MUST NOT be interpreted, pending a future revision. Previously the codes were unspecified, so an endpoint could neither send one a peer would understand nor safely interpret one it received. Note this renumbers every code an existing implementation sent, and that a stream reset of 0x0 is now INTERNAL_ERROR rather than a cancellation (CANCELLED is 0x1).
+- Renamed `Subscriber Max Latency` to `Subscriber Max Age` and `Publisher Max Latency` to `Publisher Max Age`. Both already measured a group's age, and neither bounds end-to-end latency: a subscriber's total is the publisher's emission cadence plus this budget, so the old name promised something the field does not carry.
 
 ## moq-lite-05
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.

@@ -53,7 +53,7 @@ pub struct Config {
 	/// advertise segments that are still fetchable. Lower it when nothing reads history
 	/// and the memory matters. [`pull`] only; [`publish`] reads a broadcast someone else
 	/// declared.
-	pub latency_max: Option<Duration>,
+	pub max_age: Option<Duration>,
 }
 
 impl Config {
@@ -64,7 +64,7 @@ impl Config {
 			addr,
 			resource: resource.into(),
 			latency: DEFAULT_LATENCY,
-			latency_max: None,
+			max_age: None,
 		}
 	}
 }
@@ -90,7 +90,7 @@ pub async fn publish(config: &Config, origin: &origin::Consumer, path: impl moq_
 pub async fn pull(config: &Config, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
 	let path = path.as_path();
 	let socket = call(config, Mode::Request).await?;
-	serve_publish(origin, path.as_str(), socket, config.latency_max).await
+	serve_publish(origin, path.as_str(), socket, config.max_age).await
 }
 
 /// Dial as an SRT caller, sending the standard `#!::r=<resource>,m=<mode>` stream id

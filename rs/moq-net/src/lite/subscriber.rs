@@ -1857,7 +1857,7 @@ mod tests {
 		assert!(accepted);
 
 		// Broadcast visibility is deferred until the executor ticks.
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 
 		let broadcast = consumer.get_broadcast("room/host").unwrap();
 		let hops: Vec<_> = broadcast.routes()[0].hops.iter().copied().collect();
@@ -2092,7 +2092,7 @@ struct SubStream<S: crate::transport::poll::Session> {
 	/// Original SUBSCRIBE params, echoed in every SUBSCRIBE_UPDATE; refreshed as the
 	/// downstream aggregate changes.
 	ordered: bool,
-	latency_max: Duration,
+	max_age: Duration,
 	start: Option<Position>,
 	priority: u8,
 	/// The start the SUBSCRIBE itself carried, fixed for the stream's life. A
@@ -2228,7 +2228,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						let start_moved = active.start != subscription.start;
 						active.priority = subscription.priority;
 						active.ordered = subscription.ordered;
-						active.latency_max = subscription.latency.max;
+						active.max_age = subscription.max_age;
 						active.start = subscription.start;
 						if supports_update {
 							// The floor follows the requested start, in both directions:
@@ -2393,7 +2393,7 @@ fn buffer_update<S: crate::transport::poll::Session>(
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
 		priority: active.priority,
 		ordered: active.ordered,
-		latency_max: active.latency_max,
+		max_age: active.max_age,
 		start_group: bounds.start_group,
 		end_group: bounds.end_group,
 		start_frame: bounds.start_frame,
@@ -2448,7 +2448,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 						track: self.serve.name.as_str().into(),
 						priority: self.subscription.priority,
 						ordered: self.subscription.ordered,
-						latency_max: self.subscription.latency.max,
+						max_age: self.subscription.max_age,
 						start_group: bounds.start_group,
 						end_group: bounds.end_group,
 						start_frame: bounds.start_frame,
@@ -2493,7 +2493,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 			stream,
 			id: self.id,
 			ordered: self.subscription.ordered,
-			latency_max: self.subscription.latency.max,
+			max_age: self.subscription.max_age,
 			start: self.subscription.start,
 			priority: self.subscription.priority,
 			requested: self.subscription.start,
@@ -2532,8 +2532,8 @@ impl<S: crate::transport::poll::Session> TrackServeRun<S> {
 			}
 		} else {
 			// No TRACK stream, so the publisher's retention window never reaches us:
-			// the accepting side picks it (see `origin::Info::latency_default`).
-			let info = track::Info::default().with_latency_max(serve.subscriber.origin.latency_default());
+			// the accepting side picks it (see `origin::Info::default_max_age`).
+			let info = track::Info::default().with_max_age(serve.subscriber.origin.default_max_age());
 			TrackRunState::Serve(ServeLoop::new(&serve, request, info, None))
 		};
 		Self { serve, state }
@@ -2660,13 +2660,13 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 					// stream drop.
 					let _ = stream.writer.finish();
 
-					// Publisher Max Latency rides on the wire, so the local retention
+					// Publisher Max Age rides on the wire, so the local retention
 					// window matches what the upstream advertises (relays re-serve with
 					// the same bound). `broadcast` is left at its default here;
 					// `track::Request::accept` stamps the track's real broadcast.
 					let model = track::Info::default()
 						.with_timescale(info.timescale)
-						.with_latency_max(info.latency_max)
+						.with_max_age(info.max_age)
 						.with_priority(info.priority)
 						.with_ordered(info.ordered);
 					return Poll::Ready(Ok(model));
@@ -3036,7 +3036,7 @@ impl<S: crate::transport::poll::Session> FetchServeRun<S> {
 					// panicking.
 					let group_info = track::Info::default()
 						.with_timescale(self.timescale.unwrap_or_default())
-						.with_latency_max(self.serve.subscriber.origin.latency_default());
+						.with_max_age(self.serve.subscriber.origin.default_max_age());
 					let mut producer = match request.accept(group_info) {
 						Ok(producer) => producer,
 						Err(err) => {

@@ -1,4 +1,4 @@
-use crate::{Latency, frame, group, origin, track};
+use crate::{frame, group, origin, track};
 use std::{
 	collections::HashMap,
 	task::{Poll, ready},
@@ -18,16 +18,16 @@ use crate::{
 use super::{Message, Version, cluster, peer};
 
 /// Largest millisecond duration every implementation can carry losslessly.
-const MAX_SAFE_LATENCY_MS: u64 = (1_u64 << 53) - 1;
+const MAX_SAFE_AGE_MS: u64 = (1_u64 << 53) - 1;
 
 /// Build the serving-side subscription for a peer whose wire protocol carries no
-/// latency preference. The receiver applies its own budget after the transfer.
+/// max age preference. The receiver applies its own budget after the transfer.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	Subscription {
 		priority: super::priority::from_wire(subscriber_priority),
 		// Demand can cross a Lite hop before the producer's retention bound is
 		// known, so use the largest duration that remains wire-encodable.
-		latency: Latency::max(Duration::from_millis(MAX_SAFE_LATENCY_MS)),
+		max_age: Duration::from_millis(MAX_SAFE_AGE_MS),
 		..Default::default()
 	}
 }
@@ -169,18 +169,18 @@ enum Watch {
 /// Only reached when the peer has granted no more, which on this path means it is holding
 /// every advertisement we already sent. Long enough that a merely slow peer is not given
 /// up on, short enough that the loop resumes and can retire something.
-const ADVERTISE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const ADVERTISE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// First wait before re-offering a namespace we could not get up.
-const RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(100);
+const RETRY_BASE: Duration = Duration::from_millis(100);
 
 /// Ceiling on that wait. The loop retries for the life of the session, so it must settle
 /// into a slow poll rather than a spin.
-const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+const RETRY_MAX: Duration = Duration::from_secs(5);
 
 /// Spread a retry over half its window, so every namespace on a busy relay does not come
 /// back at the same instant.
-fn jitter(delay: std::time::Duration) -> std::time::Duration {
+fn jitter(delay: Duration) -> Duration {
 	use rand::RngExt;
 	delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)
 }
@@ -553,7 +553,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 			}
 		};
 
-		// moq-transport has no subscriber latency parameter. Keep everything the
+		// moq-transport has no subscriber max age parameter. Keep everything the
 		// producer retained and let the receiving subscriber enforce its own budget.
 		let subscription = serving_subscription(msg.subscriber_priority);
 
@@ -1033,7 +1033,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		match (self.version, retry_interval) {
 			(Version::Draft14 | Version::Draft15, _) => Refused::No,
 			(_, 0) => Refused::Never,
-			(_, ms) => Refused::Until(web_async::time::Instant::now() + std::time::Duration::from_millis(ms)),
+			(_, ms) => Refused::Until(web_async::time::Instant::now() + Duration::from_millis(ms)),
 		}
 	}
 
@@ -1769,7 +1769,7 @@ mod group_priority_test {
 			"stream credit is exhausted"
 		);
 
-		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		tokio::time::advance(Duration::from_secs(1)).await;
 		let mut edge = track.append_group().unwrap();
 		edge.write_frame(crate::Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
@@ -1830,7 +1830,7 @@ mod group_priority_test {
 			"the final byte is transport-blocked"
 		);
 
-		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		tokio::time::advance(Duration::from_secs(1)).await;
 		let mut edge = track.append_group().unwrap();
 		edge.write_frame(crate::Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
@@ -1881,7 +1881,7 @@ mod tests {
 	use futures::FutureExt;
 
 	async fn settle() {
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 	}
 
 	fn occurrences(log: &crate::lite::test_transport::Log, needle: &[u8]) -> usize {
@@ -1900,7 +1900,7 @@ mod tests {
 		slot
 	}
 
-	/// moq-transport cannot carry the receiver's latency budget, so the serving
+	/// moq-transport cannot carry the receiver's max age budget, so the serving
 	/// subscription must preserve everything the producer still retains.
 	#[test]
 	fn serving_subscription_keeps_retained_backlog() {
@@ -1914,7 +1914,7 @@ mod tests {
 		}
 
 		let subscription = serving_subscription(128);
-		assert_eq!(subscription.latency.max.as_millis(), MAX_SAFE_LATENCY_MS as u128);
+		assert_eq!(subscription.max_age.as_millis(), MAX_SAFE_AGE_MS as u128);
 		let mut subscriber = producer.subscribe(subscription);
 		for sequence in [0, 1] {
 			let group = subscriber
@@ -1976,7 +1976,7 @@ mod tests {
 			.unwrap();
 
 		// Broadcast visibility is deferred until the executor ticks.
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 
 		let peer = cluster::Peer::default();
 
@@ -2782,7 +2782,7 @@ mod tests {
 	/// Advance far enough that a parked open gives up and its retry comes due, without
 	/// making the test wait: time is paused, so this only moves the clock the loop reads.
 	async fn tick() {
-		tokio::time::advance(std::time::Duration::from_millis(200)).await;
+		tokio::time::advance(Duration::from_millis(200)).await;
 	}
 
 	fn set_gate(gate: &kio::Producer<bool>, open: bool) {

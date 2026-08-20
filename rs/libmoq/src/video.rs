@@ -627,7 +627,7 @@ pub unsafe extern "C" fn moq_decode_video(
 		let raw = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
 
 		let mut config = moq_video::decode::Config::new();
-		config.latency = moq_mux::Latency::max(Duration::from_millis(raw.latency_max_ms));
+		config.max_age = Duration::from_millis(raw.latency_max_ms);
 		let on_frame = unsafe { OnStatus::new(user_data, on_frame) };
 
 		let mut state = State::lock();

@@ -52,8 +52,8 @@ pub struct Args {
 	pub catalog_format: Option<CatalogFormatArg>,
 
 	/// Maximum media buffering before skipping a stalled group.
-	#[arg(long, default_value = "500ms", value_parser = humantime::parse_duration)]
-	pub latency_max: Duration,
+	#[arg(long = "latency-max", default_value = "500ms", value_parser = humantime::parse_duration)]
+	pub max_age: Duration,
 
 	/// Rendition selection by track name or codec.
 	#[command(flatten)]
@@ -276,7 +276,7 @@ impl Media {
 								}
 							};
 							let mut decode = moq_video::decode::Config::new();
-							decode.latency = moq_mux::Latency::max(self.args.latency_max);
+							decode.max_age = self.args.max_age;
 							match moq_video::decode::Consumer::new(&rendition, &config, &name, decode).await {
 								Ok(consumer) => {
 									tracing::info!(track = name, decoder = consumer.name(), "playing video rendition");
@@ -308,7 +308,7 @@ impl Media {
 								}
 							};
 							let mut decode = moq_audio::decode::Config::new();
-							decode.latency = moq_mux::Latency::max(self.args.latency_max);
+							decode.max_age = self.args.max_age;
 							// The sink and the frame-duration math below both assume f32,
 							// so ask for it rather than inheriting the decoder default.
 							decode.format = moq_audio::Format::F32;

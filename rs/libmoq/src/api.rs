@@ -454,7 +454,7 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 			.with_priority(info.priority)
 			.with_ordered(info.ordered);
 		if info.latency_max_valid {
-			out = out.with_latency_max(std::time::Duration::from_millis(info.latency_max_ms));
+			out = out.with_max_age(std::time::Duration::from_millis(info.latency_max_ms));
 		}
 		if info.timescale_valid {
 			out = out.with_timescale(moq_net::Timescale::new(info.timescale)?);
@@ -497,9 +497,7 @@ impl From<&moq_subscription> for moq_net::track::Subscription {
 		let mut out = moq_net::track::Subscription::default()
 			.with_priority(subscription.priority)
 			.with_ordered(subscription.ordered)
-			.with_latency(moq_net::Latency::max(std::time::Duration::from_millis(
-				subscription.latency_max_ms,
-			)));
+			.with_max_age(std::time::Duration::from_millis(subscription.latency_max_ms));
 		if subscription.group_start_valid {
 			out = out.with_start(moq_net::track::Position::group(subscription.group_start));
 		}
@@ -2290,7 +2288,7 @@ pub unsafe extern "C" fn moq_consume_video(
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let latency = moq_mux::Latency::max(std::time::Duration::from_millis(latency_max_ms));
+		let latency = std::time::Duration::from_millis(latency_max_ms);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
 		State::lock().consume.video(catalog, index, latency, on_frame)
 	})
@@ -2334,7 +2332,7 @@ pub unsafe extern "C" fn moq_consume_audio(
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let latency = moq_mux::Latency::max(std::time::Duration::from_millis(latency_max_ms));
+		let latency = std::time::Duration::from_millis(latency_max_ms);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
 		State::lock().consume.audio(catalog, index, latency, on_frame)
 	})

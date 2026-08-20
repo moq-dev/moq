@@ -137,7 +137,7 @@ pub struct SubscribeArgs {
 	pub format: SubscribeFormat,
 
 	/// How far playback may drift from the live edge before skipping groups.
-	pub latency: moq_mux::Latency,
+	pub max_age: Duration,
 
 	/// Cap the output fragment duration (default: one GOP). Applies to fmp4 / mkv.
 	pub fragment_duration: Option<Duration>,
@@ -230,7 +230,7 @@ impl Subscribe {
 		// yields moof+mdat fragments in timestamp order across tracks.
 		let stream = self.stream().await?;
 		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.source, stream)
-			.with_latency(self.args.latency)
+			.with_max_age(self.args.max_age)
 			.with_fragment_duration(self.args.fragment_duration);
 
 		while let Some(chunk) = fmp4.next().await? {
@@ -249,7 +249,7 @@ impl Subscribe {
 		// shape internally (synthesizing avcC/hvcC from inline parameter sets).
 		let stream = self.stream().await?;
 		let mut mkv = moq_mux::container::mkv::Export::new(self.source, stream)
-			.with_latency(self.args.latency)
+			.with_max_age(self.args.max_age)
 			.with_fragment_duration(self.args.fragment_duration);
 
 		while let Some(chunk) = mkv.next().await? {
@@ -264,7 +264,7 @@ impl Subscribe {
 		let mut stdout = tokio::io::stdout();
 
 		let stream = self.stream().await?;
-		let mut h264 = moq_mux::codec::h264::Export::new(self.source, stream).with_latency(self.args.latency);
+		let mut h264 = moq_mux::codec::h264::Export::new(self.source, stream).with_max_age(self.args.max_age);
 
 		while let Some(chunk) = h264.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -278,7 +278,7 @@ impl Subscribe {
 		let mut stdout = tokio::io::stdout();
 
 		let stream = self.stream().await?;
-		let mut h265 = moq_mux::codec::h265::Export::new(self.source, stream).with_latency(self.args.latency);
+		let mut h265 = moq_mux::codec::h265::Export::new(self.source, stream).with_max_age(self.args.max_age);
 
 		while let Some(chunk) = h265.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -298,7 +298,7 @@ impl Subscribe {
 		// (SCTE-35, teletext, DVB AC-3, ...) are re-emitted verbatim on their PIDs.
 		let mut ts = moq_mux::container::ts::Export::with_ts(self.source, self.catalog)
 			.await?
-			.with_latency(self.args.latency);
+			.with_max_age(self.args.max_age);
 
 		while let Some(frame) = ts.next().await? {
 			stdout.write_all(&frame.payload).await?;
@@ -317,7 +317,7 @@ impl Subscribe {
 		// and AAC audio are supported; `fragment_duration` does not apply to FLV.
 		let mut flv = moq_mux::container::flv::Export::with_catalog_format(self.source, self.catalog)
 			.await?
-			.with_latency(self.args.latency);
+			.with_max_age(self.args.max_age);
 
 		while let Some(chunk) = flv.next().await? {
 			stdout.write_all(&chunk).await?;

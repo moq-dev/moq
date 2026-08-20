@@ -52,9 +52,9 @@ pub struct TrackInfo {
 	/// Whether groups are prioritized in sequence order. Groups may always arrive
 	/// out-of-order (or not at all) over the network.
 	pub ordered: bool,
-	/// Publisher Max Latency: an upper bound on how long the publisher caches a
+	/// Publisher Max Age: an upper bound on how long the publisher caches a
 	/// non-latest group past the arrival of a newer one. Encoded as milliseconds.
-	pub latency_max: Duration,
+	pub max_age: Duration,
 	/// Per-frame timestamp scale (units per second). Mandatory on Lite05+: every track
 	/// is timed, so this is always a real scale on the wire (never zero).
 	pub timescale: Timescale,
@@ -68,13 +68,13 @@ impl Message for TrackInfo {
 
 		let priority = u8::decode(r, version)?;
 		let ordered = u8::decode(r, version)? != 0;
-		let latency_max = Duration::decode(r, version)?;
+		let max_age = Duration::decode(r, version)?;
 		let timescale = Timescale::new(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)?;
 
 		Ok(Self {
 			priority,
 			ordered,
-			latency_max,
+			max_age,
 			timescale,
 		})
 	}
@@ -86,7 +86,7 @@ impl Message for TrackInfo {
 
 		self.priority.encode(w, version)?;
 		(self.ordered as u8).encode(w, version)?;
-		self.latency_max.encode(w, version)?;
+		self.max_age.encode(w, version)?;
 		u64::from(self.timescale).encode(w, version)?;
 		Ok(())
 	}
@@ -100,7 +100,7 @@ mod test {
 		TrackInfo {
 			priority: 7,
 			ordered: false,
-			latency_max: Duration::from_millis(2000),
+			max_age: Duration::from_millis(2000),
 			timescale: Timescale::MICRO,
 		}
 	}
@@ -117,7 +117,7 @@ mod test {
 		let got = info_roundtrip(Version::Lite05, &info_sample());
 		assert_eq!(got.priority, 7);
 		assert!(!got.ordered);
-		assert_eq!(got.latency_max, Duration::from_millis(2000));
+		assert_eq!(got.max_age, Duration::from_millis(2000));
 		assert_eq!(got.timescale, Timescale::MICRO);
 	}
 
@@ -134,7 +134,7 @@ mod test {
 		let info = TrackInfo {
 			priority: info.priority,
 			ordered: info.ordered,
-			latency_max: info.latency_max,
+			max_age: info.max_age,
 			timescale: info.timescale,
 		};
 		let mut buf = Vec::new();

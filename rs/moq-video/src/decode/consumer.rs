@@ -43,7 +43,7 @@ impl Consumer {
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.video)
-					.with_latency(config.latency),
+					.with_max_age(config.max_age),
 			)
 			.await?;
 		// The catalog says how the track is framed, and it is not always the legacy
@@ -139,8 +139,8 @@ mod tests {
 		// wide enough to read them: its REAL_TIME default keeps only the live edge, and
 		// the second `next()` would then block forever waiting for a group that was
 		// skipped.
-		let mut export = moq_mux::container::fmp4::Export::new(source, catalog)
-			.with_latency(moq_mux::Latency::max(std::time::Duration::from_secs(30)));
+		let mut export =
+			moq_mux::container::fmp4::Export::new(source, catalog).with_max_age(std::time::Duration::from_secs(30));
 		let init = export.next().await.unwrap().expect("CMAF init");
 		let fragment = export.next().await.unwrap().expect("CMAF fragment");
 

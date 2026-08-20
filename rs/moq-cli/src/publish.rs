@@ -220,13 +220,13 @@ impl Publish {
 	pub fn new(
 		mut broadcast: moq_net::broadcast::Producer,
 		format: &PublishFormat,
-		latency_max: Option<std::time::Duration>,
+		max_age: Option<std::time::Duration>,
 	) -> anyhow::Result<Self> {
 		// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
 		// verbatim, so it uses the `mpegts` catalog extension rather than the media-only
 		// `()`. The catalog producer owns the broadcast's catalog tracks, so each broadcast
 		// gets exactly one; TS builds its `Ext` catalog here instead of the shared `()` below.
-		let config = moq_mux::catalog::Config::default().with_latency_max(latency_max);
+		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 
 		if let PublishFormat::Ts = format {
 			let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
@@ -274,9 +274,9 @@ impl Publish {
 		mut broadcast: moq_net::broadcast::Producer,
 		args: &CaptureArgs,
 		bandwidth: Option<moq_net::bandwidth::Consumer>,
-		latency_max: Option<std::time::Duration>,
+		max_age: Option<std::time::Duration>,
 	) -> anyhow::Result<Self> {
-		let config = moq_mux::catalog::Config::default().with_latency_max(latency_max);
+		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 
 		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode(bandwidth)));
@@ -560,7 +560,7 @@ mod tests {
 			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), CatalogFormat::Hang)
 				.await
 				.unwrap()
-				.with_latency(moq_mux::Latency::max(RECORDING_LATENCY)),
+				.with_max_age(RECORDING_MAX_AGE),
 		)
 		.await
 	}
@@ -568,9 +568,9 @@ mod tests {
 	/// The media track's full retention window, so an exporter started after publishing
 	/// can still read every retained group. These tests publish a whole feed before
 	/// exporting it, which the default
-	/// [`Latency::REAL_TIME`](moq_mux::Latency::REAL_TIME) collapses to the live edge:
+	/// [`Duration::ZERO`] collapses to the live edge:
 	/// completeness has to be asked for, exactly as a real recorder does.
-	const RECORDING_LATENCY: std::time::Duration = std::time::Duration::from_secs(30);
+	const RECORDING_MAX_AGE: std::time::Duration = Duration::from_secs(30);
 
 	/// Full CLI round-trip: a TS feed with undecoded streams goes through `Publish`
 	/// (which selects the `mpegts` catalog) and the subscribe-side `Export::with_ts`,
@@ -604,7 +604,7 @@ mod tests {
 			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), CatalogFormat::Hang)
 				.await
 				.unwrap()
-				.with_latency(moq_mux::Latency::max(RECORDING_LATENCY)),
+				.with_max_age(RECORDING_MAX_AGE),
 		)
 		.await;
 

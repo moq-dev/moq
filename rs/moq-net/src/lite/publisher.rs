@@ -90,7 +90,7 @@ struct Shared<S: crate::transport::poll::Session> {
 }
 
 /// Largest millisecond duration every implementation can carry losslessly.
-const MAX_SAFE_LATENCY_MS: u64 = (1_u64 << 53) - 1;
+const MAX_SAFE_AGE_MS: u64 = (1_u64 << 53) - 1;
 
 /// The budget to serve a peer with, given what its wire could tell us.
 ///
@@ -99,10 +99,10 @@ const MAX_SAFE_LATENCY_MS: u64 = (1_u64 << 53) - 1;
 /// as real time would discard backlog a legacy subscriber never declined, so fall
 /// back to a window wide enough not to drop and leave enforcement to the receiver,
 /// exactly as the IETF path does for the same reason.
-fn serving_latency(version: Version, requested: Duration) -> crate::Latency {
-	match version.carries_latency() {
-		true => crate::Latency::max(requested),
-		false => crate::Latency::max(Duration::from_millis(MAX_SAFE_LATENCY_MS)),
+fn serving_max_age(version: Version, requested: Duration) -> Duration {
+	match version.carries_max_age() {
+		true => requested,
+		false => Duration::from_millis(MAX_SAFE_AGE_MS),
 	}
 }
 
@@ -1171,7 +1171,7 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 					stream.writer.buffer(&lite::TrackInfo {
 						priority: info.priority,
 						ordered: info.ordered,
-						latency_max: info.latency_max,
+						max_age: info.max_age,
 						timescale: info.timescale,
 					})?;
 					self.state = TrackInfoState::Finish { finished: false };
@@ -1310,7 +1310,7 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 					let subscription = crate::track::Subscription {
 						priority: msg.priority,
 						ordered: msg.ordered,
-						latency: serving_latency(self.shared.version, msg.latency_max),
+						max_age: serving_max_age(self.shared.version, msg.max_age),
 						..Bounds::from(&msg).positions()
 					};
 
@@ -1350,7 +1350,7 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 						let info = lite::SubscribeOk {
 							priority: msg.priority,
 							ordered: false,
-							latency_max: std::time::Duration::ZERO,
+							max_age: Duration::ZERO,
 							start_group: None,
 							end_group: None,
 						};
@@ -1736,8 +1736,7 @@ mod test {
 		use futures::FutureExt;
 
 		let mut producer = track_producer("test");
-		let mut subscriber = producer
-			.subscribe(track::Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(5))));
+		let mut subscriber = producer.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(5)));
 
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
 		match recv_next(&mut subscriber, false, false).await.unwrap() {
@@ -1753,7 +1752,7 @@ mod test {
 			None => panic!("the late-arriving group was skipped"),
 		}
 
-		// Staleness is the latency window's job, not arrival order's: the track
+		// Staleness is the max age window's job, not arrival order's: the track
 		// still finishes normally afterward.
 		producer.finish_at(3).unwrap();
 		match recv_next(&mut subscriber, false, false).await.unwrap() {
@@ -2457,7 +2456,7 @@ enum Recv {
 /// Groups are served in arrival order (`poll_recv_group`), not sequence order: on a relay, a
 /// burst can be ingested micro-reordered by the upstream leg, and a sequence cursor would then
 /// permanently skip the older group even though it is cached and in demand. Staleness is
-/// governed by the latency window (cache expiry), not arrival raciness.
+/// governed by the max age window (cache expiry), not arrival raciness.
 ///
 /// When `emit_boundary` is set, a declared-but-not-yet-reached final sequence surfaces as
 /// [`Recv::Boundary`] in an idle moment (after groups and datagrams), so the caller can send
@@ -2787,7 +2786,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 				let _ = self.track.update(crate::track::Subscription {
 					priority: upd.priority,
 					ordered: upd.ordered,
-					latency: serving_latency(self.ctx.version, upd.latency_max),
+					max_age: serving_max_age(self.ctx.version, upd.max_age),
 					..bounds.positions()
 				});
 				if let Some(start_group) = upd.start_group {
@@ -3250,7 +3249,7 @@ mod serve_group_test {
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
 	}
 
-	/// A subscription group keeps checking latency while a transport write is
+	/// A subscription group keeps checking the max age while a transport write is
 	/// flow-control blocked, so a stalled send cannot pin the stream indefinitely.
 	#[tokio::test]
 	async fn blocked_transport_write_expires_with_the_group() {
@@ -3286,7 +3285,7 @@ mod serve_group_test {
 			"transport write is blocked"
 		);
 
-		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		tokio::time::advance(Duration::from_secs(1)).await;
 		let mut edge = track.append_group().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
@@ -3349,7 +3348,7 @@ mod serve_group_test {
 			"the final byte is transport-blocked"
 		);
 
-		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		tokio::time::advance(Duration::from_secs(1)).await;
 		let mut edge = track.append_group().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
@@ -3359,7 +3358,7 @@ mod serve_group_test {
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
 	}
 
-	/// A subscription group keeps checking latency while transport stream credit is
+	/// A subscription group keeps checking the max age while transport stream credit is
 	/// exhausted, so returning credit is reserved for content that is still live.
 	#[tokio::test]
 	async fn blocked_transport_open_expires_with_the_group() {
@@ -3394,7 +3393,7 @@ mod serve_group_test {
 			"stream credit is exhausted"
 		);
 
-		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		tokio::time::advance(Duration::from_secs(1)).await;
 		let mut edge = track.append_group().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
@@ -3403,7 +3402,7 @@ mod serve_group_test {
 		assert!(matches!(serve.await, Err(Error::Old)));
 	}
 
-	/// Lite01/02 have no latency field, so a SUBSCRIBE from one decodes as
+	/// Lite01/02 have no max age field, so a SUBSCRIBE from one decodes as
 	/// `Duration::ZERO`. Serving that as a real-time budget would hold every legacy
 	/// peer to the live edge and discard backlog it never declined, so those versions
 	/// get a non-dropping window and leave enforcement to the receiver.
@@ -3413,17 +3412,17 @@ mod serve_group_test {
 	#[test]
 	fn a_version_without_the_field_serves_a_non_dropping_budget() {
 		for version in [Version::Lite01, Version::Lite02] {
-			let latency = serving_latency(version, Duration::ZERO);
+			let max_age = serving_max_age(version, Duration::ZERO);
 			assert!(
-				latency.max >= Duration::from_secs(86_400),
-				"{version:?} must not be served as real time: {latency:?}"
+				max_age >= Duration::from_secs(86_400),
+				"{version:?} must not be served as real time: {max_age:?}"
 			);
 		}
 
 		// A version that does carry it is taken at its word, zero included.
-		assert_eq!(serving_latency(Version::Lite05, Duration::ZERO).max, Duration::ZERO);
+		assert_eq!(serving_max_age(Version::Lite05, Duration::ZERO), Duration::ZERO);
 		assert_eq!(
-			serving_latency(Version::Lite05, Duration::from_secs(3)).max,
+			serving_max_age(Version::Lite05, Duration::from_secs(3)),
 			Duration::from_secs(3)
 		);
 	}
@@ -3512,7 +3511,7 @@ mod tests {
 			.unwrap();
 
 		// Broadcast visibility is deferred until the executor ticks.
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 
 		let gate = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(gate.consume());

@@ -66,7 +66,7 @@ async function encodeMessage(
 
 test("SubscribeOk round-trips priority/ordered/groups on draft-04", async () => {
 	const got = await responseRoundtrip(Version.DRAFT_04, {
-		ok: new SubscribeOk({ priority: 7, ordered: true, latencyMax: 250, startGroup: 3 }),
+		ok: new SubscribeOk({ priority: 7, ordered: true, maxAge: 250, startGroup: 3 }),
 	});
 	expect("ok" in got).toBe(true);
 	if (!("ok" in got)) throw new Error("expected ok");
@@ -82,7 +82,7 @@ test("Subscribe round-trips every option including startGroup 0", async () => {
 		track: "video",
 		priority: 7,
 		ordered: true,
-		latencyMax: 250,
+		maxAge: 250,
 		startGroup: 0,
 		endGroup: 9,
 	});
@@ -92,7 +92,7 @@ test("Subscribe round-trips every option including startGroup 0", async () => {
 	);
 	expect(got.priority).toBe(7);
 	expect(got.ordered).toBe(true);
-	expect(got.latencyMax).toBe(250);
+	expect(got.maxAge).toBe(250);
 	expect(got.startGroup).toBe(0);
 	expect(got.endGroup).toBe(9);
 });
@@ -101,7 +101,7 @@ test("SubscribeUpdate round-trips every option including startGroup 0", async ()
 	const message = new SubscribeUpdate({
 		priority: 8,
 		ordered: true,
-		latencyMax: 500,
+		maxAge: 500,
 		startGroup: 0,
 		endGroup: 12,
 	});
@@ -111,7 +111,7 @@ test("SubscribeUpdate round-trips every option including startGroup 0", async ()
 	);
 	expect(got.priority).toBe(8);
 	expect(got.ordered).toBe(true);
-	expect(got.latencyMax).toBe(500);
+	expect(got.maxAge).toBe(500);
 	expect(got.startGroup).toBe(0);
 	expect(got.endGroup).toBe(12);
 });

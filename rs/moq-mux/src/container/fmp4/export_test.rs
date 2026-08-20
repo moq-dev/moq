@@ -10,9 +10,9 @@ use crate::container::test_util::{Live, PPS, SPS, raw_frame, video_frame};
 /// The media track's full retention window, so an exporter started after publishing
 /// can still read every retained group. These tests write or import a whole broadcast
 /// and only then export it, which the
-/// exporter's default [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) collapses to the
+/// exporter's default [`std::time::Duration::ZERO`](std::time::Duration::ZERO) collapses to the
 /// live edge: completeness has to be asked for, exactly as a real recorder does.
-const RECORDING_LATENCY: std::time::Duration = std::time::Duration::from_secs(30);
+const RECORDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Avc3-shape source (catalog `Container::Legacy`, `H264 { inline: true }`,
 /// `description: None`) → fMP4 / CMAF export must synthesize a valid init
@@ -538,7 +538,7 @@ async fn next_chunk_reports_segment_metadata() {
 	// Sub-GOP cap so GOP 0 splits into two parts (the trailing part non-independent).
 	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await)
 		.with_fragment_duration(std::time::Duration::from_millis(20))
-		.with_latency(crate::Latency::max(RECORDING_LATENCY));
+		.with_max_age(RECORDING_MAX_AGE);
 
 	// First emit is the init segment, which carries no segmenting metadata to assert on.
 	chunk_now(&mut exporter)

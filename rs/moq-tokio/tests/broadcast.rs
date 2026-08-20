@@ -834,8 +834,7 @@ async fn broadcast_route_migration() {
 
 	// Subscribe once, with a generous stale window so the continuation B already holds
 	// is served rather than aged out.
-	let subscription =
-		moq_net::track::Subscription::default().with_latency(moq_net::Latency::max(Duration::from_secs(10)));
+	let subscription = moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10));
 	let mut sub = broadcast
 		.track("video")
 		.unwrap()
@@ -1092,7 +1091,7 @@ async fn route_replaced_test(version: Option<&str>) {
 	let mut sub = broadcast
 		.track("video")
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_latency(moq_net::Latency::max(Duration::from_secs(10))))
+		.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10)))
 		.await
 		.expect("subscribe failed");
 	assert_eq!(read_payloads(&mut sub, 1).await, ["g0"]);
@@ -1116,7 +1115,7 @@ async fn route_replaced_test(version: Option<&str>) {
 	let mut sub = replacement
 		.track("video")
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_latency(moq_net::Latency::max(Duration::from_secs(10))))
+		.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10)))
 		.await
 		.expect("subscribe to the replacement failed");
 	assert_eq!(read_payloads(&mut sub, 1).await, ["g0"]);
@@ -1313,21 +1312,21 @@ async fn broadcast_negotiate_client_all_server_transport_19() {
 	broadcast_test("moqt", None, Some("moq-transport-19")).await;
 }
 
-// ── Retention window (track::Info::latency_max) ─────────────────────
+// ── Retention window (track::Info::max_age) ─────────────────────
 
 /// The window the publisher advertises, distinct from both the model default and
-/// the accepting side's [`LATENCY_DEFAULT`] so the assertions can tell them apart.
-const LATENCY_PUBLISHED: Duration = Duration::from_secs(2);
+/// the accepting side's [`MAX_AGE_DEFAULT`] so the assertions can tell them apart.
+const MAX_AGE_PUBLISHED: Duration = Duration::from_secs(2);
 
 /// The window the subscribing origin assigns to a track whose publisher advertises
 /// none. Deliberately longer than the publisher's, like a relay fronting a
 /// segmented egress that serves a playlist window's worth of history.
-const LATENCY_DEFAULT: Duration = Duration::from_secs(30);
+const MAX_AGE_DEFAULT: Duration = Duration::from_secs(30);
 
-/// Publish a track advertising [`LATENCY_PUBLISHED`], subscribe to it through an
-/// origin configured with [`LATENCY_DEFAULT`], and return the window the subscriber
+/// Publish a track advertising [`MAX_AGE_PUBLISHED`], subscribe to it through an
+/// origin configured with [`MAX_AGE_DEFAULT`], and return the window the subscriber
 /// ends up with.
-async fn latency_max_test(version: &str) -> Duration {
+async fn max_age_test(version: &str) -> Duration {
 	let version: moq_net::Version = version.parse().expect("invalid version");
 
 	// ── publisher (server) ──────────────────────────────────────────
@@ -1335,7 +1334,7 @@ async fn latency_max_test(version: &str) -> Duration {
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
-	let info = moq_net::track::Info::default().with_latency_max(LATENCY_PUBLISHED);
+	let info = moq_net::track::Info::default().with_max_age(MAX_AGE_PUBLISHED);
 	let track = broadcast.create_track("video", info).expect("create track");
 
 	let mut server_config = moq_tokio::listen::Config::default();
@@ -1359,7 +1358,7 @@ async fn latency_max_test(version: &str) -> Duration {
 	// The origin the session writes remote broadcasts into decides the window for
 	// tracks whose protocol can't carry the publisher's.
 	let sub_origin =
-		moq_tokio::origin::spawn(moq_net::origin::Info::new(Origin::random()).with_latency_default(LATENCY_DEFAULT));
+		moq_tokio::origin::spawn(moq_net::origin::Info::new(Origin::random()).with_default_max_age(MAX_AGE_DEFAULT));
 	let mut announcements = sub_origin.consume().announced();
 
 	let mut client_config = moq_tokio::connect::Config::default();
@@ -1391,29 +1390,29 @@ async fn latency_max_test(version: &str) -> Duration {
 		.subscribe(None)
 		.await
 		.expect("subscribe failed");
-	let latency_max = sub.info().latency_max;
+	let max_age = sub.info().max_age;
 
 	drop(sub);
 	drop(session);
 	handle.await.expect("server panicked").expect("server failed");
 
-	latency_max
+	max_age
 }
 
 /// moq-lite-05 carries the publisher's window in TRACK_INFO, so it wins over the
 /// subscribing origin's default.
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn broadcast_latency_max_lite_05() {
-	assert_eq!(latency_max_test("moq-lite-05").await, LATENCY_PUBLISHED);
+async fn broadcast_max_age_lite_05() {
+	assert_eq!(max_age_test("moq-lite-05").await, MAX_AGE_PUBLISHED);
 }
 
 /// moq-lite-01 has no TRACK stream, so the publisher's window never reaches us and
 /// the subscribing origin's default applies.
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn broadcast_latency_max_lite_01() {
-	assert_eq!(latency_max_test("moq-lite-01").await, LATENCY_DEFAULT);
+async fn broadcast_max_age_lite_01() {
+	assert_eq!(max_age_test("moq-lite-01").await, MAX_AGE_DEFAULT);
 }
 
 /// moq-transport carries no publisher retention property at all, so an IETF-relayed
@@ -1421,8 +1420,8 @@ async fn broadcast_latency_max_lite_01() {
 /// configured (issue #2645).
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn broadcast_latency_max_transport_18() {
-	assert_eq!(latency_max_test("moq-transport-18").await, LATENCY_DEFAULT);
+async fn broadcast_max_age_transport_18() {
+	assert_eq!(max_age_test("moq-transport-18").await, MAX_AGE_DEFAULT);
 }
 
 // ── WebTransport (https://) – same version on both sides ────────────
@@ -1646,7 +1645,7 @@ async fn broadcast_websocket() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// Disable WebSocket delay so client connects immediately via ws://
-	client_config.websocket.delay = Some(std::time::Duration::ZERO);
+	client_config.websocket.delay = Some(Duration::ZERO);
 
 	let client = client_config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("ws://localhost:{}", ws_addr.port()).parse().unwrap();
@@ -1758,7 +1757,7 @@ async fn broadcast_websocket_fallback() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// No delay. Race QUIC and WebSocket simultaneously.
-	client_config.websocket.delay = Some(std::time::Duration::ZERO);
+	client_config.websocket.delay = Some(Duration::ZERO);
 
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
@@ -1875,7 +1874,7 @@ async fn broadcast_websocket_uses_newest_version() {
 	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	client_config.websocket.delay = Some(std::time::Duration::ZERO);
+	client_config.websocket.delay = Some(Duration::ZERO);
 
 	let client = client_config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("ws://localhost:{}", ws_addr.port()).parse().unwrap();
@@ -1950,7 +1949,7 @@ async fn broadcast_race_quic_wins() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// Zero head start: QUIC has to win on its own merit, not by penalising WS.
-	client_config.websocket.delay = Some(std::time::Duration::ZERO);
+	client_config.websocket.delay = Some(Duration::ZERO);
 
 	let client = client_config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("https://localhost:{port}").parse().unwrap();
@@ -2244,7 +2243,7 @@ async fn websocket_unauthorized_handshake_is_explicit() {
 	});
 
 	let mut client_config = moq_tokio::connect::Config::default();
-	client_config.websocket.delay = Some(std::time::Duration::ZERO);
+	client_config.websocket.delay = Some(Duration::ZERO);
 	let client = client_config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("ws://{addr}").parse().unwrap();
 
@@ -2281,7 +2280,7 @@ async fn reconnect_stops_on_websocket_unauthorized() {
 	});
 
 	let mut client_config = moq_tokio::connect::Config::default();
-	client_config.websocket.delay = Some(std::time::Duration::ZERO);
+	client_config.websocket.delay = Some(Duration::ZERO);
 	let client = client_config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("ws://{addr}").parse().unwrap();
 

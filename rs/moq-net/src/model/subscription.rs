@@ -1,4 +1,4 @@
-use std::task::Poll;
+use std::{task::Poll, time::Duration};
 
 /// Subscriber-side preferences for receiving a track.
 ///
@@ -15,17 +15,44 @@ pub struct Subscription {
 	/// out-of-order (or not at all) over the network. Defaults to `false`; the
 	/// aggregate is ordered only when every live subscriber asks for it.
 	pub ordered: bool,
-	/// How far this subscriber may drift from the live edge before a group is skipped.
-	/// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) skips immediately (e.g. group 8 arriving means group 7 is
-	/// skipped); a larger ceiling tolerates that much reordering before giving up on the
-	/// older group.
+	/// How old a group may get before this subscriber gives up on it.
 	///
-	/// This is the `Subscriber Max Latency` on the wire. It is enforced at both ends:
-	/// the publisher skips a group rather than sending it, and this subscriber skips it
-	/// again as it reads. Clamped to the publisher's
-	/// [`Info::latency_max`](crate::track::Info::latency_max) retention window; stored
-	/// here verbatim, so what was asked for stays readable.
-	pub latency: crate::Latency,
+	/// [`Duration::ZERO`] (the default) skips immediately: group 8 arriving means group 7
+	/// is abandoned. A larger budget tolerates that much reordering before giving up.
+	/// This never *adds* delay, since the bound is only reached once newer data is
+	/// already that far ahead.
+	///
+	/// This is the `Subscriber Max Age` on the wire, and it is stored here verbatim so
+	/// what was asked for stays readable. Clamped to the publisher's
+	/// [`Info::max_age`](crate::track::Info::max_age), since waiting for a group longer
+	/// than it is kept around cannot produce it.
+	///
+	/// # Where it is enforced
+	///
+	/// At both ends, and neither alone is enough. The publisher skips a group that has
+	/// aged out instead of putting it on the wire, which bounds a backlog before it
+	/// costs bandwidth. But what reaches the publisher is the aggregate across every
+	/// subscriber, resolved in favor of the most tolerant one, so that gate is only ever
+	/// as tight as the most patient viewer. The subscriber applies the same budget again
+	/// as it reads, where its own is the only one in play.
+	///
+	/// This bounds a *subscription*.
+	/// [`track::Consumer::fetch_group`](crate::track::Consumer::fetch_group) is exempt:
+	/// it names one old group explicitly, so there is no live edge to be late against.
+	///
+	/// # How age is measured
+	///
+	/// By both presentation time and wall-clock arrival, with either able to expire the
+	/// group. Presentation time compares a group's first timestamp against the newest
+	/// one above it, so a backlog delivered as a burst still reads as its true age.
+	/// Wall-clock backstops an empty or stalled group that has supplied no timestamp.
+	///
+	/// Protocols whose wire can't carry a timestamp (pre-Lite05 moq-lite, moq-transport
+	/// without the Timestamp property) have their frames stamped on receipt, which makes
+	/// the measure burst-blind on the receiving side: thirty seconds of backlog delivered
+	/// in three reads as three. The publisher's copy is stamped as it produces, so the
+	/// gate there still holds; it is just the coarser of the two.
+	pub max_age: Duration,
 	/// First [`Position`] the publisher should deliver, or `None` to start at the latest
 	/// group.
 	///
@@ -57,7 +84,7 @@ impl Default for Subscription {
 		Self {
 			priority: 0,
 			ordered: false,
-			latency: crate::Latency::REAL_TIME,
+			max_age: Duration::ZERO,
 			start: None,
 			end: None,
 		}
@@ -78,10 +105,9 @@ impl Subscription {
 		self
 	}
 
-	/// Set how far this subscriber may drift from the live edge before a group is
-	/// skipped, returning `self` for chaining.
-	pub fn with_latency(mut self, latency: crate::Latency) -> Self {
-		self.latency = latency;
+	/// Set how old a group may get before it is skipped, returning `self` for chaining.
+	pub fn with_max_age(mut self, max_age: Duration) -> Self {
+		self.max_age = max_age;
 		self
 	}
 
@@ -117,7 +143,7 @@ impl Subscription {
 			priority: self.priority.max(combined.priority),
 			// Sequence-first prioritization is enabled only when every subscriber wants it.
 			ordered: self.ordered && combined.ordered,
-			latency: self.latency.merge(combined.latency),
+			max_age: self.max_age.max(combined.max_age),
 			// Bounds fold as whole positions. Two subscribers starting in the same group
 			// are separated only by their frame, so folding group and frame independently
 			// would invent a bound neither asked for.

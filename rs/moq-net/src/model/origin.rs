@@ -105,7 +105,7 @@ pub struct Info {
 	pub pool: cache::Pool,
 
 	/// Ceiling on how long any non-latest group under this origin is retained. Each
-	/// track's own [`latency_max`](track::Info::latency_max) window is clamped down to
+	/// track's own [`max_age`](track::Info::max_age) window is clamped down to
 	/// this when the track binds, so a group is never held longer than this regardless
 	/// of what a publisher advertises. The age budget alongside [`Self::pool`]'s byte
 	/// budget: a relay bounds memory by both. [`Duration::MAX`] (the default) imposes no
@@ -114,14 +114,14 @@ pub struct Info {
 
 	/// The retention window given to a track whose publisher advertises none.
 	///
-	/// moq-lite 05+ carries [`latency_max`](track::Info::latency_max) in TRACK_INFO, so a
+	/// moq-lite 05+ carries [`max_age`](track::Info::max_age) in TRACK_INFO, so a
 	/// track relayed over it keeps the window its publisher chose. Every moq-transport
 	/// draft and moq-lite 01-04 have no such wire property, so a track arriving over one
 	/// of them lands here instead. Raise it on a relay fronting a segmented egress
 	/// (HLS/DASH), which needs a playlist window's worth of history rather than the live
-	/// edge. Defaults to [`track::DEFAULT_LATENCY_MAX`], and [`Self::cache_duration`]
+	/// edge. Defaults to [`track::DEFAULT_MAX_AGE`], and [`Self::cache_duration`]
 	/// still caps it.
-	pub latency_default: Duration,
+	pub default_max_age: Duration,
 }
 
 impl Default for Info {
@@ -132,7 +132,7 @@ impl Default for Info {
 			id: Origin::UNKNOWN,
 			pool: cache::Pool::default(),
 			cache_duration: Duration::MAX,
-			latency_default: track::DEFAULT_LATENCY_MAX,
+			default_max_age: track::DEFAULT_MAX_AGE,
 		}
 	}
 }
@@ -156,10 +156,10 @@ impl Info {
 		self
 	}
 
-	/// Set the retention window (see [`Self::latency_default`]) used for tracks whose
+	/// Set the retention window (see [`Self::default_max_age`]) used for tracks whose
 	/// publisher advertises none, returning `self` for chaining.
-	pub fn with_latency_default(mut self, latency_default: Duration) -> Self {
-		self.latency_default = latency_default;
+	pub fn with_default_max_age(mut self, default_max_age: Duration) -> Self {
+		self.default_max_age = default_max_age;
 		self
 	}
 }
@@ -935,8 +935,8 @@ pub struct Producer {
 	cache_duration: Duration,
 
 	// Retention window for a track whose publisher advertises none (see
-	// [`Info::latency_default`]).
-	latency_default: Duration,
+	// [`Info::default_max_age`]).
+	default_max_age: Duration,
 
 	// Ingress stats context. Broadcasts created through this producer are attributed
 	// to it (writes counted on the subscriber/ingress side). Empty (no-op) unless a
@@ -976,7 +976,7 @@ impl Producer {
 			dynamic: dynamic.clone(),
 			pool: info.pool,
 			cache_duration: info.cache_duration,
-			latency_default: info.latency_default,
+			default_max_age: info.default_max_age,
 			stats: stats::Session::default(),
 			tasks,
 		};
@@ -1007,14 +1007,14 @@ impl Producer {
 			id: self.info,
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
-			latency_default: self.latency_default,
+			default_max_age: self.default_max_age,
 		}
 	}
 
 	// The retention window for a track whose publisher advertises none (see
-	// [`Info::latency_default`]). Cheaper than `info()`, which clones the pool.
-	pub(crate) fn latency_default(&self) -> Duration {
-		self.latency_default
+	// [`Info::default_max_age`]). Cheaper than `info()`, which clones the pool.
+	pub(crate) fn default_max_age(&self) -> Duration {
+		self.default_max_age
 	}
 
 	/// A producer with *no* allowed prefixes: it can't publish anything and
@@ -1032,7 +1032,7 @@ impl Producer {
 			dynamic: kio::Shared::default(),
 			pool: cache::Pool::default(),
 			cache_duration: Duration::MAX,
-			latency_default: track::DEFAULT_LATENCY_MAX,
+			default_max_age: track::DEFAULT_MAX_AGE,
 			stats: stats::Session::default(),
 			tasks,
 		}
@@ -1187,7 +1187,7 @@ impl Producer {
 			dynamic: self.dynamic.clone(),
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
-			latency_default: self.latency_default,
+			default_max_age: self.default_max_age,
 			stats: self.stats.clone(),
 			tasks: self.tasks.clone(),
 		})
@@ -1244,7 +1244,7 @@ impl Producer {
 			dynamic: self.dynamic.clone(),
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
-			latency_default: self.latency_default,
+			default_max_age: self.default_max_age,
 			stats: self.stats.clone(),
 			tasks: self.tasks.clone(),
 		})
@@ -3717,7 +3717,7 @@ mod tests {
 	/// Serve one requested track from a source like a session would: wait for the
 	/// origin to dispatch it, then accept with default info.
 	async fn accept_track(dynamic: &mut broadcast::Dynamic, name: &str) -> track::Producer {
-		let request = tokio::time::timeout(std::time::Duration::from_secs(1), dynamic.requested_track())
+		let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
 			.await
 			.expect("timed out waiting for a track request")
 			.expect("source closed");
@@ -3731,7 +3731,7 @@ mod tests {
 	async fn accept_tracks(dynamic: &mut broadcast::Dynamic, count: usize) -> HashMap<String, track::Producer> {
 		let mut accepted = HashMap::new();
 		for _ in 0..count {
-			let request = tokio::time::timeout(std::time::Duration::from_secs(1), dynamic.requested_track())
+			let request = tokio::time::timeout(Duration::from_secs(1), dynamic.requested_track())
 				.await
 				.expect("timed out waiting for a track request")
 				.expect("source closed");
@@ -4069,7 +4069,7 @@ mod tests {
 		tokio::task::yield_now().await;
 		assert!(!pending.is_finished(), "the partial frame should still be pending");
 
-		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		tokio::time::advance(Duration::from_secs(1)).await;
 		let mut edge = producer.append_group().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), Bytes::from_static(b"edge"))
 			.unwrap();
@@ -4486,7 +4486,7 @@ mod tests {
 		let subscribing = broadcast
 			.track("video")
 			.unwrap()
-			.subscribe(track::Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(5))));
+			.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(5)));
 		let mut producer = accept_track(&mut dynamic_a, "video").await;
 		settle().await;
 		dynamic_b.assert_no_request();
@@ -4872,7 +4872,7 @@ mod tests {
 		let subscribing = broadcast
 			.track("video")
 			.unwrap()
-			.subscribe(track::Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(5))));
+			.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(5)));
 		let mut producer_a = accept_track(&mut dynamic_a, "video").await;
 		settle().await;
 		let mut sub = subscribing.await.unwrap();
@@ -5773,7 +5773,7 @@ mod tests {
 
 		let mut producer_local = None;
 		for _ in 0..2 {
-			let request = tokio::time::timeout(std::time::Duration::from_secs(1), dynamic_local.requested_track())
+			let request = tokio::time::timeout(Duration::from_secs(1), dynamic_local.requested_track())
 				.await
 				.expect("timed out waiting for a track request")
 				.expect("source closed");
@@ -7819,7 +7819,7 @@ mod tests {
 			rt.block_on(scenario);
 			let _ = done_tx.send(());
 		});
-		match done_rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+		match done_rx.recv_timeout(Duration::from_secs(secs)) {
 			Ok(()) => {
 				let _ = handle.join();
 			}
@@ -8015,7 +8015,7 @@ mod tests {
 				// Drain: resolve pending subscriptions and read groups.
 				_ => {
 					for sub in pending_subs.drain(..) {
-						match ::tokio::time::timeout(std::time::Duration::from_millis(5), sub).await {
+						match ::tokio::time::timeout(Duration::from_millis(5), sub).await {
 							Ok(Ok(sub)) => subs.push(sub),
 							Ok(Err(_)) => {}
 							// Still pending: dropping unsubscribes.

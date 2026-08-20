@@ -53,7 +53,7 @@ impl Consumer {
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.audio)
-					.with_latency(config.latency),
+					.with_max_age(config.max_age),
 			)
 			.await?;
 		// The catalog says how the track is framed, and it is not always the legacy
@@ -181,20 +181,20 @@ mod tests {
 		catalog.container = hang::catalog::Container::Loc;
 
 		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Loc);
-		let latency = moq_mux::Latency::max(std::time::Duration::from_millis(250));
+		let max_age = std::time::Duration::from_millis(250);
 		let mut consumer = Consumer::new(
 			&subscriber,
 			&catalog,
 			"audio",
 			Config {
 				format: Format::F32,
-				latency,
+				max_age,
 				..Config::new()
 			},
 		)
 		.await
 		.unwrap();
-		assert_eq!(observed.subscription().unwrap().latency, latency);
+		assert_eq!(observed.subscription().unwrap().max_age, max_age);
 
 		let samples = [0.25f32, -0.5, 0.75, -1.0];
 		let payload: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();

@@ -35,26 +35,15 @@ pub struct ExportArgs {
 	#[command(flatten)]
 	pub endpoint: Args,
 
-	/// Maximum latency before skipping a stalled group. RTMP is unpaced, so this
+	/// Maximum age before skipping a stalled group. RTMP is unpaced, so this
 	/// bounds buffering, not the wire rate.
 	#[arg(long = "latency-max", default_value = "500ms", value_parser = humantime::parse_duration)]
-	pub latency_max: Duration,
-}
-
-impl ExportArgs {
-	/// The configured latency tolerance.
-	pub fn latency(&self) -> moq_mux::Latency {
-		moq_mux::Latency::max(self.latency_max)
-	}
+	pub max_age: Duration,
 }
 
 /// Accept incoming RTMP publishes into the Origin as `target.name`; reject plays (import).
 pub async fn listen_import(target: ImportTarget, addr: SocketAddr) -> anyhow::Result<()> {
-	let ImportTarget {
-		origin,
-		name,
-		latency_max,
-	} = target;
+	let ImportTarget { origin, name, max_age } = target;
 	let mut server = Server::bind(addr).await?;
 	tracing::info!(%addr, %name, "RTMP listening (import)");
 	notify_ready();
@@ -65,7 +54,7 @@ pub async fn listen_import(target: ImportTarget, addr: SocketAddr) -> anyhow::Re
 				let origin = origin.clone();
 				let name = name.clone();
 				tokio::spawn(async move {
-					if let Err(err) = publish.with_latency_max(latency_max).accept(&origin, &name).await {
+					if let Err(err) = publish.with_max_age(max_age).accept(&origin, &name).await {
 						tracing::warn!(%name, %err, "RTMP ingest ended with error");
 					}
 				});
@@ -87,7 +76,7 @@ pub async fn listen_export(
 	origin: moq_net::origin::Consumer,
 	addr: SocketAddr,
 	name: String,
-	latency: moq_mux::Latency,
+	max_age: Duration,
 ) -> anyhow::Result<()> {
 	let mut server = Server::bind(addr).await?;
 	tracing::info!(%addr, %name, "RTMP listening (export)");
@@ -99,7 +88,7 @@ pub async fn listen_export(
 				let origin = origin.clone();
 				let name = name.clone();
 				tokio::spawn(async move {
-					if let Err(err) = play.with_latency(latency).accept(&origin, &name).await {
+					if let Err(err) = play.with_max_age(max_age).accept(&origin, &name).await {
 						tracing::warn!(%name, %err, "RTMP play ended with error");
 					}
 				});
@@ -125,7 +114,7 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 	tracing::info!(%url, %name, "RTMP client pulling");
 	notify_ready();
 
-	let client = Client::connect(addr, &app).await?.with_latency_max(target.latency_max);
+	let client = Client::connect(addr, &app).await?.with_import_max_age(target.max_age);
 	Ok(client.pull(&key, &target.origin, name).await?)
 }
 
@@ -134,7 +123,7 @@ pub async fn connect_export(
 	origin: moq_net::origin::Consumer,
 	url: Url,
 	name: String,
-	latency: moq_mux::Latency,
+	max_age: Duration,
 ) -> anyhow::Result<()> {
 	let (addr, app, key) = parse_url(&url).await?;
 	// Confirm the broadcast is reachable (and wait for it to be announced) before dialing;
@@ -147,7 +136,7 @@ pub async fn connect_export(
 	tracing::info!(%url, %name, "RTMP client pushing");
 	notify_ready();
 
-	let client = Client::connect(addr, &app).await?.with_latency(latency);
+	let client = Client::connect(addr, &app).await?.with_export_max_age(max_age);
 	Ok(client.publish(&key, origin, &name).await?)
 }
 

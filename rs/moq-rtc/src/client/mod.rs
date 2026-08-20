@@ -22,12 +22,12 @@ pub struct Config {
 	pub ice_candidates: Vec<SocketAddr>,
 
 	/// How long relays keep a non-latest group of an ingested media track fetchable.
-	/// Same semantics as [`crate::server::Config::latency_max`].
+	/// Same semantics as [`crate::server::Config::max_age`].
 	///
 	/// Ingest only ([`subscribe`](Client::subscribe) / WHEP): a WHIP
 	/// [`publish`](Client::publish) reads a broadcast someone else declared, so it
 	/// ignores this.
-	pub latency_max: Option<Duration>,
+	pub max_age: Option<Duration>,
 }
 
 /// Outbound WHIP/WHEP dialer.

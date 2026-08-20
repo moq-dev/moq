@@ -453,7 +453,7 @@ export class Publisher {
 		const track = broadcast.subscribe(msg.track, {
 			priority: msg.priority,
 			ordered: msg.ordered,
-			latencyMax: msg.latencyMax,
+			maxAge: msg.maxAge,
 			startGroup: msg.startGroup,
 			endGroup: msg.endGroup,
 		});
@@ -487,7 +487,7 @@ export class Publisher {
 				const ok = new SubscribeOk({
 					priority: msg.priority,
 					ordered: msg.ordered,
-					latencyMax: msg.latencyMax,
+					maxAge: msg.maxAge,
 					startGroup: msg.startGroup,
 					endGroup: msg.endGroup,
 				});
@@ -510,7 +510,7 @@ export class Publisher {
 					track.update({
 						priority: update.priority,
 						ordered: update.ordered,
-						latencyMax: update.latencyMax,
+						maxAge: update.maxAge,
 						startGroup: update.startGroup,
 						endGroup: update.endGroup,
 					});
@@ -769,9 +769,9 @@ export class Publisher {
 			return new TrackInfoMessage({
 				priority: info.priority,
 				ordered: info.ordered,
-				// Publisher Max Latency: the publisher's retention bound, advertised so
+				// Publisher Max Age: the publisher's retention bound, advertised so
 				// relays re-serve with the same window.
-				latencyMax: info.latencyMax,
+				maxAge: info.maxAge,
 				// Lite05 mandates per-frame timestamps. Advertise the track's timescale;
 				// `#runGroup` emits each frame converted to it.
 				timescale: info.timescale,

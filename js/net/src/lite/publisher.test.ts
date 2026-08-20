@@ -802,7 +802,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 		expect(sub.track.subscription.peek()).toEqual({
 			priority: 9,
 			ordered: true,
-			latencyMax: 0,
+			maxAge: 0,
 			startGroup: undefined,
 			endGroup: 5,
 		});

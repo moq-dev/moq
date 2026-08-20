@@ -15,8 +15,8 @@ pub struct IngestSink {
 }
 
 impl IngestSink {
-	pub fn new(mut broadcast: moq_net::broadcast::Producer, latency_max: Option<std::time::Duration>) -> Result<Self> {
-		let config = moq_mux::catalog::Config::default().with_latency_max(latency_max);
+	pub fn new(mut broadcast: moq_net::broadcast::Producer, max_age: Option<std::time::Duration>) -> Result<Self> {
+		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 		Ok(Self {
 			broadcast,
@@ -97,6 +97,6 @@ mod tests {
 		.unwrap();
 
 		let info = broadcast.consume().track("0.avc3").unwrap().info().await.unwrap();
-		assert_eq!(info.latency_max, Duration::from_secs(3));
+		assert_eq!(info.max_age, Duration::from_secs(3));
 	}
 }

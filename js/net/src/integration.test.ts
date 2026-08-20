@@ -140,7 +140,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 	const subscriber = remote.track("video").subscribe({
 		priority: 3,
 		ordered: true,
-		latencyMax: 250,
+		maxAge: 250,
 		startGroup: 0,
 		endGroup: 9,
 	});
@@ -148,17 +148,17 @@ test("integration: lite subscription options and updates reach the publisher", a
 	expect(producer.subscription.peek()).toEqual({
 		priority: 3,
 		ordered: true,
-		latencyMax: 250,
+		maxAge: 250,
 		startGroup: 0,
 		endGroup: 9,
 	});
 
 	const updated = producer.subscription.changed();
-	subscriber.update({ priority: 8, ordered: false, latencyMax: 500, startGroup: 2, endGroup: 12 });
+	subscriber.update({ priority: 8, ordered: false, maxAge: 500, startGroup: 2, endGroup: 12 });
 	expect(await updated).toEqual({
 		priority: 8,
 		ordered: false,
-		latencyMax: 500,
+		maxAge: 500,
 		startGroup: 2,
 		endGroup: 12,
 	});

@@ -9,9 +9,9 @@
 import { Time, type Track } from "@moq/net";
 
 // How long a media track asks its publisher (and, through TRACK_INFO, every relay) to keep a
-// non-latest group fetchable. Must match `hang::container::LATENCY_MAX` in
+// non-latest group fetchable. Must match `hang::container::MAX_AGE` in
 // rs/hang/src/container/frame.rs.
-const LATENCY_MAX_MS = 30_000;
+const MAX_AGE_MS = 30_000;
 
 /**
  * Track properties for a track carrying media frames, for `Request.accept`.
@@ -24,10 +24,10 @@ const LATENCY_MAX_MS = 30_000;
  * read at the live edge, which is retained unconditionally, so neither pays for history it never
  * serves.
  *
- * Options override that retention; see {@link TrackInfoOptions.latencyMax}.
+ * Options override that retention; see {@link TrackInfoOptions.maxAge}.
  */
 export function trackInfo(options?: TrackInfoOptions): Partial<Track.Info> {
-	return { timescale: Time.Timescale.MICRO, latencyMax: options?.latencyMax ?? LATENCY_MAX_MS };
+	return { timescale: Time.Timescale.MICRO, maxAge: options?.maxAge ?? MAX_AGE_MS };
 }
 
 /** Overrides for {@link trackInfo}. */
@@ -39,5 +39,5 @@ export type TrackInfoOptions = {
 	 * A RETENTION budget, not a delivery one, so it never makes anyone play further behind live
 	 * and lowering it does not reduce latency: it only shortens how far back a fetch can reach.
 	 */
-	latencyMax?: number;
+	maxAge?: number;
 };

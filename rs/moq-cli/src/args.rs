@@ -462,8 +462,8 @@ pub struct Import {
 	/// advertise segments that are still fetchable; lower it when nothing reads history and the
 	/// memory matters. Media tracks only -- the catalog and timeline are read at the live edge,
 	/// which is retained unconditionally.
-	#[arg(long, value_parser = humantime::parse_duration)]
-	pub latency_max: Option<std::time::Duration>,
+	#[arg(long = "latency-max", value_parser = humantime::parse_duration)]
+	pub max_age: Option<std::time::Duration>,
 
 	/// The single source feeding the Origin.
 	#[command(subcommand)]
@@ -576,14 +576,14 @@ impl ExportSink {
 	/// The stdout container format plus its latency and fragment cap, when this
 	/// sink writes to stdout (the container formats). The fragment cap is
 	/// fmp4/mkv-only.
-	pub fn stdout(&self) -> Option<(SubscribeFormat, moq_mux::Latency, Option<Duration>)> {
+	pub fn stdout(&self) -> Option<(SubscribeFormat, std::time::Duration, Option<Duration>)> {
 		Some(match self {
-			Self::Fmp4(args) => (SubscribeFormat::Fmp4, args.container.latency(), args.fragment_duration),
-			Self::Mkv(args) => (SubscribeFormat::Mkv, args.container.latency(), args.fragment_duration),
-			Self::Ts(args) => (SubscribeFormat::Ts, args.latency(), None),
-			Self::Flv(args) => (SubscribeFormat::Flv, args.latency(), None),
-			Self::H264(args) => (SubscribeFormat::H264, args.latency(), None),
-			Self::H265(args) => (SubscribeFormat::H265, args.latency(), None),
+			Self::Fmp4(args) => (SubscribeFormat::Fmp4, args.container.max_age, args.fragment_duration),
+			Self::Mkv(args) => (SubscribeFormat::Mkv, args.container.max_age, args.fragment_duration),
+			Self::Ts(args) => (SubscribeFormat::Ts, args.max_age, None),
+			Self::Flv(args) => (SubscribeFormat::Flv, args.max_age, None),
+			Self::H264(args) => (SubscribeFormat::H264, args.max_age, None),
+			Self::H265(args) => (SubscribeFormat::H265, args.max_age, None),
 			_ => return None,
 		})
 	}
@@ -594,14 +594,7 @@ impl ExportSink {
 pub struct Container {
 	/// Maximum latency before skipping a stalled group (e.g. `500ms`, `1s`).
 	#[arg(long = "latency-max", default_value = "500ms", value_parser = humantime::parse_duration)]
-	pub latency_max: Duration,
-}
-
-impl Container {
-	/// The configured latency tolerance.
-	pub fn latency(&self) -> moq_mux::Latency {
-		moq_mux::Latency::max(self.latency_max)
-	}
+	pub max_age: Duration,
 }
 
 /// The fmp4 / mkv stdout containers: [`Container`] plus a fragment cap.
@@ -1036,7 +1029,7 @@ mod tests {
 	}
 
 	#[test]
-	fn latency_max_is_unset_unless_asked_for() {
+	fn max_age_is_unset_unless_asked_for() {
 		// Unset rather than defaulted to hang's constant, so the publisher's own default is
 		// what every source falls back to. A `default_value` here would put the number in the
 		// CLI as well, and the two would drift.
@@ -1044,14 +1037,14 @@ mod tests {
 		let Command::Import(import) = &cli.stages[0] else {
 			panic!("expected import")
 		};
-		assert_eq!(import.latency_max, None);
+		assert_eq!(import.max_age, None);
 
 		// It sits on the parent `import`, so it parses ahead of any source, gateway or not.
 		let cli = Invocation::try_parse_from(["moq", "import", "--latency-max", "5s", "ts"]).unwrap();
 		let Command::Import(import) = &cli.stages[0] else {
 			panic!("expected import")
 		};
-		assert_eq!(import.latency_max, Some(std::time::Duration::from_secs(5)));
+		assert_eq!(import.max_age, Some(Duration::from_secs(5)));
 
 		let cli = Invocation::try_parse_from([
 			"moq",
@@ -1066,7 +1059,7 @@ mod tests {
 		let Command::Import(import) = &cli.stages[0] else {
 			panic!("expected import")
 		};
-		assert_eq!(import.latency_max, Some(std::time::Duration::from_secs(5)));
+		assert_eq!(import.max_age, Some(Duration::from_secs(5)));
 	}
 
 	#[test]
@@ -1250,7 +1243,7 @@ mod tests {
 		let Command::Play(play) = &cli.stages[0] else {
 			panic!("expected play")
 		};
-		assert_eq!(play.latency_max, Duration::from_millis(500));
+		assert_eq!(play.max_age, Duration::from_millis(500));
 		assert_eq!(play.select.video_name.as_deref(), Some("hd"));
 		assert!(cli.moq.validate().is_ok());
 		assert!(play.validate().is_ok());

@@ -508,7 +508,7 @@ impl Producer {
 	///
 	/// Returns a fresh name like `0{suffix}`, `1{suffix}`, etc. Use this when
 	/// you need to set non-default Track properties (e.g. `with_timescale`,
-	/// `with_latency_max`) before handing the Track to [`Self::create_track`].
+	/// `with_max_age`) before handing the Track to [`Self::create_track`].
 	pub fn unique_name(&self, suffix: &str) -> String {
 		let state = self.state.read();
 		(0u16..)
@@ -1346,7 +1346,7 @@ mod test {
 	/// Await with a timeout so a missed demand wake fails the test instead of
 	/// hanging it (time is paused, so the timeout fires instantly when idle).
 	async fn expect<T>(fut: impl Future<Output = T>) -> T {
-		tokio::time::timeout(std::time::Duration::from_secs(1), fut)
+		tokio::time::timeout(Duration::from_secs(1), fut)
 			.await
 			.expect("timed out waiting for a demand edge")
 	}

@@ -37,7 +37,7 @@ use moq_net::Timestamp;
 pub struct Export<S: Stream> {
 	source: crate::Source,
 	catalog: Option<S>,
-	latency: crate::Latency,
+	max_age: Duration,
 	fragment_duration: Option<Duration>,
 
 	tracks: HashMap<String, Fmp4Track>,
@@ -157,7 +157,7 @@ impl<S: Stream> Export<S> {
 		Self {
 			source,
 			catalog: Some(catalog),
-			latency: crate::Latency::REAL_TIME,
+			max_age: Duration::ZERO,
 			fragment_duration: None,
 			tracks: HashMap::new(),
 			catalog_snapshot: None,
@@ -165,13 +165,13 @@ impl<S: Stream> Export<S> {
 		}
 	}
 
-	/// Set the latency tolerance for each per-track source.
+	/// Set the max age for each per-track source.
 	///
 	/// See [`Consumer`](crate::container::Consumer) for the per-track skip behavior.
 	/// Defaults to
-	/// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) (skip aggressively).
-	pub fn with_latency(mut self, latency: crate::Latency) -> Self {
-		self.latency = latency;
+	/// [`Duration::ZERO`] (skip aggressively).
+	pub fn with_max_age(mut self, max_age: Duration) -> Self {
+		self.max_age = max_age;
 		self
 	}
 
@@ -401,7 +401,7 @@ impl<S: Stream> Export<S> {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			let Some(source) = ExportSource::for_video(&self.source, name, config, self.latency)? else {
+			let Some(source) = ExportSource::for_video(&self.source, name, config, self.max_age)? else {
 				continue;
 			};
 			let timescale = catalog_timescale_video(config)?;
@@ -429,7 +429,7 @@ impl<S: Stream> Export<S> {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			let Some(source) = ExportSource::for_audio(&self.source, name, config, self.latency)? else {
+			let Some(source) = ExportSource::for_audio(&self.source, name, config, self.max_age)? else {
 				continue;
 			};
 			let timescale = catalog_timescale_audio(config)?;

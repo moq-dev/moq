@@ -113,8 +113,8 @@ impl<C: Container> Producer<C> {
 	/// it, or a keyframe arrives, packing multiple samples into one container frame (e.g. a CMAF
 	/// moof+mdat). Zero (the default) flushes each frame immediately.
 	///
-	/// This is the publisher-side counterpart to the consumer's
-	/// [`Latency`](crate::Latency), and the one knob here that genuinely *adds* delay.
+	/// This is the publisher-side counterpart to the consumer's max age, and the one
+	/// knob here that genuinely *adds* delay.
 	pub fn with_buffer(mut self, duration: std::time::Duration) -> Self {
 		self.buffer_duration = duration;
 		self
@@ -401,15 +401,15 @@ mod tests {
 	/// A replay window wide enough to read a whole batch back.
 	///
 	/// These tests write every group up front and only then read, which the default
-	/// [`Latency::REAL_TIME`](moq_net::Latency::REAL_TIME) budget collapses to the live
+	/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) budget collapses to the live
 	/// edge: history has to be asked for.
 	fn replay() -> moq_net::track::Subscription {
-		moq_net::track::Subscription::default().with_latency(moq_net::Latency::max(RECORDING_LATENCY))
+		moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE)
 	}
 
 	/// The media track's full retention window, so readers started after publishing
 	/// can still consume every retained group.
-	const RECORDING_LATENCY: std::time::Duration = std::time::Duration::from_secs(30);
+	const RECORDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
 	fn frame(timestamp_us: u64, keyframe: bool) -> Frame {
 		Frame {
@@ -559,12 +559,10 @@ mod tests {
 	async fn discontinuity_publishes_an_empty_group() {
 		// The resumed clock jumps forty minutes, so both the retention window and the
 		// drift budget have to cover it or the pre-discontinuity group reads as ancient.
-		let discontinuity_latency = std::time::Duration::from_secs(41 * 60);
-		let info = hang::container::track_info().with_latency_max(discontinuity_latency);
+		let discontinuity_max_age = std::time::Duration::from_secs(41 * 60);
+		let info = hang::container::track_info().with_max_age(discontinuity_max_age);
 		let track = track_producer("test", info);
-		let consumer = track.subscribe(
-			moq_net::track::Subscription::default().with_latency(moq_net::Latency::max(discontinuity_latency)),
-		);
+		let consumer = track.subscribe(moq_net::track::Subscription::default().with_max_age(discontinuity_max_age));
 		let mut producer = Producer::new(track, Container::Legacy);
 
 		producer.write(frame(0, true)).unwrap();

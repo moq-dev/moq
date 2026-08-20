@@ -2335,14 +2335,14 @@ mod test {
 	///
 	/// The media track's full retention window, so a reader started after importing can
 	/// still read every retained group. These tests import a whole file first, which the default
-	/// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) budget collapses to the live
+	/// [`Duration::ZERO`] budget collapses to the live
 	/// edge: completeness has to be asked for.
-	const RECORDING_LATENCY: std::time::Duration = std::time::Duration::from_secs(30);
+	const RECORDING_MAX_AGE: std::time::Duration = Duration::from_secs(30);
 	use mpeg2ts::es::StreamType;
 
 	use super::{Continuation, Continuity, SectionReassembler};
-	use crate::Latency;
 	use moq_net::Timestamp;
+	use std::time::Duration;
 
 	// libklvanc public-sample cue: table_id 0xFC, section_length 0x1b (27), 30 bytes total.
 	const CUE: [u8; 30] = [
@@ -2632,7 +2632,7 @@ mod test {
 		// SCTE detection takes no lock here (video/audio would still publish later): the old
 		// discarding ScteStream took the lock and republished an empty catalog on this path.
 		assert!(
-			tokio::time::timeout(std::time::Duration::from_millis(10), updates.next())
+			tokio::time::timeout(Duration::from_millis(10), updates.next())
 				.await
 				.is_err(),
 			"SCTE detection must not publish the base catalog"
@@ -2691,11 +2691,11 @@ mod test {
 		let track = consumer
 			.track(&name)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_latency(Latency::max(RECORDING_LATENCY)))
+			.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 			.await
 			.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy);
-		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
+		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read())
 			.await
 			.expect("cue read timed out")
 			.unwrap()
@@ -2907,7 +2907,7 @@ mod test {
 		// Anchored on its own PES: one 1024-sample frame at 48 kHz (~21 ms).
 		// Anchored on the MP2 PES it would be ~2 s.
 		assert!(
-			jitter <= std::time::Duration::from_millis(100),
+			jitter <= Duration::from_millis(100),
 			"AAC jitter anchored on a foreign PID: {jitter:?}"
 		);
 	}
@@ -2928,13 +2928,12 @@ mod test {
 		let track = consumer
 			.track(&name)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_latency(Latency::max(RECORDING_LATENCY)))
+			.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 			.await
 			.unwrap();
 		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
 		let mut frames = Vec::new();
-		while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await
-		{
+		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
 			frames.push(frame);
 		}
 		frames
@@ -3007,8 +3006,7 @@ mod test {
 		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
 		let mut frames = Vec::new();
-		while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await
-		{
+		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
 			frames.push(frame);
 		}
 		frames
@@ -3738,11 +3736,11 @@ mod test {
 		let track = consumer
 			.track(hang::catalog::Catalog::DEFAULT_NAME)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_latency(Latency::max(RECORDING_LATENCY)))
+			.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 			.await
 			.unwrap();
 		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
-		let published = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await;
+		let published = tokio::time::timeout(Duration::from_millis(50), reader.read()).await;
 		assert!(
 			matches!(published, Ok(Ok(Some(_)))),
 			"a PID that never published held the catalog shut: {published:?}"
@@ -3998,11 +3996,11 @@ mod test {
 		let track = consumer
 			.track(&name)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_latency(Latency::max(RECORDING_LATENCY)))
+			.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 			.await
 			.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy);
-		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
+		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read())
 			.await
 			.expect("cue read timed out")
 			.unwrap()
@@ -4013,8 +4011,8 @@ mod test {
 		// The legacy container normalizes the wire timestamp to microseconds, so compare the
 		// instant (not the raw scale) against the 90 kHz media clock the cue was stamped with.
 		assert_eq!(
-			std::time::Duration::from(frame.timestamp),
-			std::time::Duration::from(clock),
+			Duration::from(frame.timestamp),
+			Duration::from(clock),
 			"cue stamped with the video media clock"
 		);
 	}
@@ -4172,11 +4170,11 @@ mod test {
 		let track = consumer
 			.track(name.as_str())
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_latency(Latency::max(RECORDING_LATENCY)))
+			.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 			.await
 			.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy);
-		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
+		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read())
 			.await
 			.expect("verbatim read timed out")
 			.unwrap()

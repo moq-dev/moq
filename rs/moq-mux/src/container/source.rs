@@ -64,7 +64,7 @@ pub(crate) struct ExportSource {
 	state: SourceState,
 	/// Wire format, consumed when the subscription resolves into a consumer.
 	media: Option<HangContainer>,
-	latency: crate::Latency,
+	max_age: std::time::Duration,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
 	/// OpusHead). Some once the codec config is available — from the catalog
@@ -87,9 +87,9 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		latency: crate::Latency,
+		max_age: std::time::Duration,
 	) -> Result<Option<Self>, crate::Error> {
-		Self::video(source, name, config, latency, build_video_transform(config))
+		Self::video(source, name, config, max_age, build_video_transform(config))
 	}
 
 	/// Subscribe to a video rendition without attaching any codec-shape
@@ -102,16 +102,16 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		latency: crate::Latency,
+		max_age: std::time::Duration,
 	) -> Result<Option<Self>, crate::Error> {
-		Self::video(source, name, config, latency, None)
+		Self::video(source, name, config, max_age, None)
 	}
 
 	fn video(
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		latency: crate::Latency,
+		max_age: std::time::Duration,
 		transform: Option<VideoTransform>,
 	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
@@ -123,7 +123,7 @@ impl ExportSource {
 		let mut source = Self {
 			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
-			latency,
+			max_age,
 			transform,
 			description,
 			video_codec: Some(config.codec.clone()),
@@ -141,7 +141,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &AudioConfig,
-		latency: crate::Latency,
+		max_age: std::time::Duration,
 	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
@@ -152,7 +152,7 @@ impl ExportSource {
 		Ok(Some(Self {
 			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
-			latency,
+			max_age,
 			transform: None,
 			description,
 			video_codec: None,
@@ -166,11 +166,11 @@ impl ExportSource {
 	///
 	/// Such a rendition has no catalog `broadcast` field, so it always lives on the
 	/// catalog broadcast and can never carry an escaping reference.
-	pub fn for_stream(source: &crate::Source, name: &str, latency: crate::Latency) -> Result<Self, crate::Error> {
+	pub fn for_stream(source: &crate::Source, name: &str, max_age: std::time::Duration) -> Result<Self, crate::Error> {
 		Ok(Self {
 			state: SourceState::Requesting(source.request_catalog(), name.to_string()),
 			media: Some(HangContainer::Legacy),
-			latency,
+			max_age,
 			transform: None,
 			description: None,
 			video_codec: None,
@@ -228,7 +228,7 @@ impl ExportSource {
 					Poll::Pending => return Poll::Pending,
 				}
 			};
-			let subscription = moq_net::track::Subscription::default().with_latency(self.latency);
+			let subscription = moq_net::track::Subscription::default().with_max_age(self.max_age);
 			self.state = SourceState::Subscribing(broadcast.track(&name)?.subscribe(subscription));
 		}
 
@@ -396,7 +396,7 @@ mod tests {
 	async fn escaping_reference_skips_the_rendition() {
 		let live = Live::avc3();
 		let source = live.source();
-		let latency = crate::Latency::REAL_TIME;
+		let max_age = std::time::Duration::ZERO;
 
 		let escaping = |result: Result<Option<ExportSource>, crate::Error>, what: &str| match result {
 			Ok(None) => {}
@@ -408,13 +408,13 @@ mod tests {
 		// single-segment path, so its parent is the root and any `..` walks above it.
 		for reference in ["..", "../source", "../../elsewhere"] {
 			let config = video(Some(reference));
-			escaping(ExportSource::for_video(&source, "video", &config, latency), reference);
+			escaping(ExportSource::for_video(&source, "video", &config, max_age), reference);
 			escaping(
-				ExportSource::for_video_raw(&source, "video", &config, latency),
+				ExportSource::for_video_raw(&source, "video", &config, max_age),
 				reference,
 			);
 			escaping(
-				ExportSource::for_audio(&source, "audio", &audio(Some(reference)), latency),
+				ExportSource::for_audio(&source, "audio", &audio(Some(reference)), max_age),
 				reference,
 			);
 		}
@@ -426,13 +426,13 @@ mod tests {
 	async fn legal_reference_keeps_the_rendition() {
 		let live = Live::avc3();
 		let source = live.source();
-		let latency = crate::Latency::REAL_TIME;
+		let max_age = std::time::Duration::ZERO;
 
 		for reference in [None, Some(""), Some("./source"), Some("sub"), Some(".")] {
-			ExportSource::for_video(&source, "video", &video(reference), latency)
+			ExportSource::for_video(&source, "video", &video(reference), max_age)
 				.unwrap_or_else(|err| panic!("{reference:?} should keep the rendition: {err:?}"))
 				.unwrap_or_else(|| panic!("{reference:?} should keep the rendition"));
-			ExportSource::for_audio(&source, "audio", &audio(reference), latency)
+			ExportSource::for_audio(&source, "audio", &audio(reference), max_age)
 				.unwrap_or_else(|err| panic!("{reference:?} should keep the rendition: {err:?}"))
 				.unwrap_or_else(|| panic!("{reference:?} should keep the rendition"));
 		}
@@ -443,20 +443,20 @@ mod tests {
 	#[tokio::test]
 	async fn latency_is_sent_with_the_initial_subscription() {
 		let live = Live::avc3();
-		let latency = crate::Latency::max(std::time::Duration::from_secs(10));
-		let mut export = ExportSource::for_video(&live.source(), live.track.name(), &video(None), latency)
+		let max_age = std::time::Duration::from_secs(10);
+		let mut export = ExportSource::for_video(&live.source(), live.track.name(), &video(None), max_age)
 			.unwrap()
 			.expect("fixture should produce a video rendition");
 
 		let observed = kio::wait(|waiter| {
 			let _ = export.poll_read(waiter);
 			match live.track.subscription() {
-				Some(subscription) => Poll::Ready(subscription.latency),
+				Some(subscription) => Poll::Ready(subscription.max_age),
 				None => Poll::Pending,
 			}
 		})
 		.await;
 
-		assert_eq!(observed, latency);
+		assert_eq!(observed, max_age);
 	}
 }

@@ -65,9 +65,9 @@ fn length_prefixed(nals: &[&[u8]]) -> Bytes {
 /// The media track's full retention window, so an exporter started after publishing
 /// can still read every retained group. These tests write a whole broadcast up front
 /// and only then export it, which the
-/// exporter's default [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) collapses to the
+/// exporter's default [`Duration::ZERO`] collapses to the
 /// live edge: completeness has to be asked for, exactly as a real recorder does.
-const RECORDING_LATENCY: std::time::Duration = std::time::Duration::from_secs(30);
+const RECORDING_MAX_AGE: Duration = Duration::from_secs(30);
 
 async fn drain(consumer: moq_net::broadcast::Consumer) -> BytesMut {
 	drain_with(Export::new(crate::source::announced(&consumer)).await.unwrap()).await
@@ -75,10 +75,10 @@ async fn drain(consumer: moq_net::broadcast::Consumer) -> BytesMut {
 
 /// `drain` for an exporter built with an explicit catalog extension.
 async fn drain_with<E: tscat::Catalog>(exporter: Export<E>) -> BytesMut {
-	let mut exporter = exporter.with_latency(crate::Latency::max(RECORDING_LATENCY));
+	let mut exporter = exporter.with_max_age(RECORDING_MAX_AGE);
 	let mut out = BytesMut::new();
 	// `while let Ok` stops on the first timeout (`Pending`: no more output).
-	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
+	while let Ok(res) = tokio::time::timeout(Duration::from_secs(1), exporter.next()).await {
 		let Some(frame) = res.expect("exporter error") else {
 			break;
 		};
@@ -651,7 +651,7 @@ async fn export_scte35_roundtrip() {
 	let track = consumer2
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut scte_reader = crate::container::Consumer::new(track, HangContainer::Legacy);
@@ -751,7 +751,7 @@ async fn export_pes_verbatim_roundtrip() {
 	let track = consumer2
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
@@ -806,7 +806,7 @@ async fn scte35_without_video_export_is_rejected() {
 		.await
 		.unwrap();
 	let err = loop {
-		match tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
+		match tokio::time::timeout(Duration::from_secs(1), exporter.next()).await {
 			Ok(Ok(Some(_))) => continue,
 			Ok(Ok(None)) => panic!("export completed; a cue program without video must be rejected"),
 			Ok(Err(e)) => break e,
@@ -824,12 +824,12 @@ async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
 	let mut frames = Vec::new();
-	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
+	while let Ok(res) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
 		let Some(frame) = res.unwrap() else { break };
 		frames.push(frame.payload.to_vec());
 	}
@@ -1145,12 +1145,12 @@ async fn read_cues(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
 	let mut cues = Vec::new();
-	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
+	while let Ok(res) = tokio::time::timeout(Duration::from_millis(50), reader.read()).await {
 		let Some(frame) = res.unwrap() else { break };
 		cues.push((frame.payload.to_vec(), frame.timestamp));
 	}
@@ -1315,7 +1315,7 @@ fn make_long_section(table_id: u8, ext: u16, version: u8, number: u8, last: u8, 
 /// Read an SI snapshot track from the start: every group, as its frames' payloads.
 ///
 /// Starting at group 0 only asks the publisher to send from there; the default
-/// [`moq_net::Latency::REAL_TIME`] budget then skips every group the live edge has
+/// [`Duration::ZERO`] budget then skips every group the live edge has
 /// already passed, which is all of them once the importer has finished. A budget
 /// wider than the test's wall-clock span (every cut lands within microseconds) is
 /// what actually delivers the history, so a count of groups counts cuts.
@@ -1326,7 +1326,7 @@ async fn read_si_groups(consumer: &moq_net::broadcast::Consumer, name: &str) -> 
 		.subscribe(
 			moq_net::track::Subscription::default()
 				.with_start(moq_net::track::Position::group(0))
-				.with_latency(moq_net::Latency::max(moq_net::track::DEFAULT_LATENCY_MAX)),
+				.with_max_age(moq_net::track::DEFAULT_MAX_AGE),
 		)
 		.await
 		.unwrap();
@@ -1472,7 +1472,7 @@ async fn service_layer_survives_roundtrip() {
 	let sdt_entry = entry(0x0011, 0x42);
 	assert_eq!(
 		sdt_entry.interval,
-		Some(std::time::Duration::from_secs(2)),
+		Some(Duration::from_secs(2)),
 		"the DVB SDT interval was filled in"
 	);
 	let sdt_sections = read_si_sections(&consumer, &sdt_entry.track).await;
@@ -1488,7 +1488,7 @@ async fn service_layer_survives_roundtrip() {
 	let nit_entry = entry(0x0010, 0x40);
 	assert_eq!(
 		nit_entry.interval,
-		Some(std::time::Duration::from_secs(10)),
+		Some(Duration::from_secs(10)),
 		"the DVB NIT interval was filled in"
 	);
 	let nit_groups = read_si_groups(&consumer, &nit_entry.track).await;
@@ -2479,7 +2479,7 @@ async fn repointed_si_entry_resubscribes() {
 	let mut exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
 		.await
 		.unwrap()
-		.with_latency(crate::Latency::max(RECORDING_LATENCY));
+		.with_max_age(RECORDING_MAX_AGE);
 	let mut before = BytesMut::new();
 	write_key(&mut producer, 0);
 	write_key(&mut producer, 1);
@@ -2703,7 +2703,7 @@ async fn debounce_opens_without_a_media_clock() {
 	assert_eq!(track.latest(), Some(0), "a revision inside the window is held");
 
 	// ...and publishes once the window passes in *real* time, no finish, no PTS.
-	std::thread::sleep(std::time::Duration::from_millis(1200));
+	std::thread::sleep(Duration::from_millis(1200));
 	rig.import
 		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(1, 0xbb), 3)[..]))
 		.unwrap();

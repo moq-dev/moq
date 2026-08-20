@@ -47,9 +47,9 @@ pub struct Config {
 
 	/// How long a play's FLV muxer waits for a stalled group before skipping to a
 	/// newer one (the moq-level frame-drop latency). Defaults to
-	/// [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY); set [`Latency::REAL_TIME`](moq_mux::Latency::REAL_TIME)
+	/// [`DEFAULT_MAX_AGE`](crate::DEFAULT_MAX_AGE); set [`Duration::ZERO`]
 	/// to drop stale groups aggressively. Only affects egress (plays); ingest ignores it.
-	pub latency: moq_mux::Latency,
+	pub export_max_age: Duration,
 
 	/// How long relays keep a non-latest group of an ingested media track fetchable, or
 	/// `None` for hang's own default.
@@ -59,7 +59,7 @@ pub struct Config {
 	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
 	/// advertise segments that are still fetchable. Lower it when nothing reads history
 	/// and the memory matters. Only affects ingest (publishes); egress ignores it.
-	pub latency_max: Option<Duration>,
+	pub import_max_age: Option<Duration>,
 
 	/// TLS configuration for RTMPS (RTMP over TLS). When set, the
 	/// [`listen`](Self::listen) address speaks RTMPS instead of plaintext RTMP,
@@ -80,8 +80,8 @@ impl Default for Config {
 		Self {
 			listen: None,
 			prefix: String::new(),
-			latency: crate::DEFAULT_LATENCY,
-			latency_max: None,
+			export_max_age: crate::DEFAULT_MAX_AGE,
+			import_max_age: None,
 			#[cfg(feature = "tls")]
 			tls: None,
 			active: ActivePaths::default(),
@@ -131,8 +131,8 @@ pub async fn run(origin: origin::Producer, config: Config) -> Result<()> {
 	// listeners share the same claim table.
 	let active = config.active.clone();
 	let prefix = Arc::new(config.prefix);
-	let latency = config.latency;
-	let latency_max = config.latency_max;
+	let export_max_age = config.export_max_age;
+	let import_max_age = config.import_max_age;
 	// Players are served out of the same origin the publishers write into.
 	let consumer = origin.consume();
 
@@ -159,7 +159,7 @@ pub async fn run(origin: origin::Producer, config: Config) -> Result<()> {
 						let _ = publish.reject("path already being published").await;
 						return;
 					};
-					if let Err(err) = publish.with_latency_max(latency_max).accept(&origin, &path).await {
+					if let Err(err) = publish.with_max_age(import_max_age).accept(&origin, &path).await {
 						tracing::warn!(%peer, %path, %err, "RTMP ingest ended with error");
 					}
 				});
@@ -175,7 +175,7 @@ pub async fn run(origin: origin::Producer, config: Config) -> Result<()> {
 						let _ = play.reject("missing broadcast path (RTMP app/key)").await;
 						return;
 					};
-					if let Err(err) = play.with_latency(latency).accept(&consumer, &path).await {
+					if let Err(err) = play.with_max_age(export_max_age).accept(&consumer, &path).await {
 						tracing::warn!(%peer, %path, %err, "RTMP play ended with error");
 					}
 				});

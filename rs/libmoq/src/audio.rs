@@ -400,7 +400,7 @@ pub unsafe extern "C" fn moq_decode_audio(
 		config.format = audio_format_from_u32(raw.format)?;
 		config.sample_rate = zeroable(raw.sample_rate);
 		config.channels = zeroable(raw.channels);
-		config.latency = moq_mux::Latency::max(Duration::from_millis(raw.latency_max_ms));
+		config.max_age = Duration::from_millis(raw.latency_max_ms);
 
 		let on_frame = unsafe { OnStatus::new(user_data, on_frame) };
 

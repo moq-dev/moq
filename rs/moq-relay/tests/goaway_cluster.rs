@@ -463,7 +463,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		bc.track("video").expect("track handle").subscribe(
 			moq_net::track::Subscription::default()
 				.with_ordered(true)
-				.with_latency(moq_net::Latency::max(Duration::from_secs(60))),
+				.with_max_age(Duration::from_secs(60)),
 		),
 	)
 	.await

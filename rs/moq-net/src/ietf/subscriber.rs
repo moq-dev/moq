@@ -1100,11 +1100,11 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// Accepting at milliseconds (the default) would truncate microsecond precision.
 		//
 		// moq-transport carries no publisher retention property, so the window comes
-		// from the accepting side (see `origin::Info::latency_default`) rather than
+		// from the accepting side (see `origin::Info::default_max_age`) rather than
 		// from the peer.
 		let info = track::Info::default()
 			.with_timescale(crate::Timescale::MICRO)
-			.with_latency_max(self.origin.latency_default());
+			.with_max_age(self.origin.default_max_age());
 		let mut track = request.accept(info);
 
 		// A peer that sent GOAWAY told us to stop opening streams on this session.
@@ -1513,7 +1513,7 @@ mod tests {
 	}
 
 	async fn settle() {
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 	}
 
 	fn occurrences(log: &crate::lite::test_transport::Log, needle: &[u8]) -> usize {
@@ -1754,7 +1754,7 @@ mod tests {
 			.unwrap();
 
 		// Broadcast visibility is deferred until the executor ticks.
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 
 		let broadcast = consumer.get_broadcast("room/host").unwrap();
 		let hops: Vec<_> = broadcast.routes()[0].hops.iter().copied().collect();
@@ -1792,7 +1792,7 @@ mod tests {
 					.with_announce(true),
 			)
 			.unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 		announced.assert_next_some("room/host");
 		// Held for as long as the path is advertised, exactly as the publisher holds
 		// it in its `Watched` entry. The exclusion lives on this handle.
@@ -1817,7 +1817,7 @@ mod tests {
 		let _reflected = subscriber
 			.start_announce(crate::Path::new("room/host").to_owned(), advert)
 			.unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 
 		// No announce churn, and the path still resolves to the upstream route, which
 		// is the one the publish direction can advertise back to the peer.
@@ -1865,12 +1865,12 @@ mod tests {
 		};
 
 		let _first = connect();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 		announced.assert_next_some("room/host");
 
 		// The peer reconnects before the old session is retired.
 		let _second = connect();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 
 		// It joined: no announce churn, and both routes are in the table so the front
 		// can fail over the moment the stale one dies.
@@ -1945,7 +1945,7 @@ mod tests {
 		subscriber
 			.start_announce(crate::Path::new("room/host").to_owned(), advertised)
 			.unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 
 		let broadcast = consumer.get_broadcast("room/host").unwrap();
 		let hops: Vec<_> = broadcast.routes()[0].hops.iter().map(|h| h.id()).collect();
@@ -2260,7 +2260,7 @@ mod tests {
 			publisher: Some(crate::Origin::new(7).unwrap()),
 		};
 		subscriber.start_announce(path.clone(), first).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 		let original = consumer.get_broadcast("room/host").unwrap();
 
 		// Same publisher (hop 7), new path and cost: the route updates in place.
@@ -2273,7 +2273,7 @@ mod tests {
 			publisher: Some(crate::Origin::new(7).unwrap()),
 		};
 		subscriber.update_announce(path.clone(), rerouted).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 
 		let broadcast = consumer.get_broadcast("room/host").unwrap();
 		let hops: Vec<_> = broadcast.routes()[0].hops.iter().map(|h| h.id()).collect();
@@ -2284,7 +2284,7 @@ mod tests {
 		// One advertisement, so one unannounce detaches it. If the update had bumped the
 		// refcount, this would leave the source stranded.
 		subscriber.stop_announce(path, Detach::Graceful).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 		assert!(consumer.get_broadcast("room/host").is_none());
 	}
 
@@ -2305,7 +2305,7 @@ mod tests {
 			publisher: Some(crate::Origin::new(7).unwrap()),
 		};
 		subscriber.start_announce(path.clone(), first).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 		let original = consumer.get_broadcast("room/host").unwrap();
 
 		let taken_over = crate::broadcast::Route::new()
@@ -2316,7 +2316,7 @@ mod tests {
 			publisher: Some(crate::Origin::new(8).unwrap()),
 		};
 		subscriber.update_announce(path.clone(), taken_over).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 
 		assert!(original.is_closed(), "the old source was detached");
 		let broadcast = consumer.get_broadcast("room/host").unwrap();
@@ -2325,7 +2325,7 @@ mod tests {
 
 		// Still one advertisement, so one unannounce is all it takes.
 		subscriber.stop_announce(path, Detach::Graceful).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 		assert!(consumer.get_broadcast("room/host").is_none());
 	}
 
@@ -2443,23 +2443,23 @@ mod tests {
 		let first = subscriber.route(None, &peer).expect("route");
 		assert_eq!(first.publisher, None, "no path means no identity to compare");
 		subscriber.start_announce(path.clone(), first).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 		let original = consumer.get_broadcast("room/host").unwrap();
 
 		// The NAMESPACE for the same namespace arrives second.
 		let second = subscriber.route(None, &peer).expect("route");
 		subscriber.start_announce(path.clone(), second).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 
 		assert!(!original.is_closed(), "the source survived the second advertisement");
 		assert!(consumer.get_broadcast("room/host").is_some());
 
 		// Two advertisements, so it takes two unannounces to detach.
 		subscriber.stop_announce(path.clone(), Detach::Graceful).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 		assert!(consumer.get_broadcast("room/host").is_some());
 		subscriber.stop_announce(path, Detach::Graceful).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 		assert!(consumer.get_broadcast("room/host").is_none());
 	}
 
@@ -2483,7 +2483,7 @@ mod tests {
 		};
 		let advert = subscriber.route(Some(&clean), &peer).expect("route");
 		subscriber.start_announce(path.clone(), advert).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 		assert!(consumer.get_broadcast("room/host").is_some());
 
 		// The peer re-advertises the namespace over a path that now flows through us.
@@ -2498,7 +2498,7 @@ mod tests {
 
 		// That supersedes the advertisement it repeats, so the old route is retired.
 		subscriber.stop_announce(path, Detach::Graceful).unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 		assert!(
 			consumer.get_broadcast("room/host").is_none(),
 			"the superseded route must not stay attached"
@@ -2707,7 +2707,7 @@ mod tests {
 			subscriber.start_announce(path.clone(), advert).unwrap();
 			live.insert(path);
 		}
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 		assert!(consumer.get_broadcast("room/a").is_some());
 		assert!(consumer.get_broadcast("room/b").is_some());
 
@@ -2715,7 +2715,7 @@ mod tests {
 		for path in live {
 			subscriber.stop_announce(path, Detach::Graceful).unwrap();
 		}
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 
 		assert!(consumer.get_broadcast("room/a").is_none(), "room/a leaked a refcount");
 		assert!(consumer.get_broadcast("room/b").is_none(), "room/b leaked a refcount");
@@ -2760,7 +2760,7 @@ mod tests {
 
 		// Errors are surfaced to the peer on the stream, not raised as a session error.
 		subscriber.run_publish_stream(stream, msg).await.unwrap();
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
 
 		assert!(
 			consumer.get_broadcast("room/host").is_none(),

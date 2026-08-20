@@ -9,9 +9,9 @@ use bytes::BytesMut;
 ///
 /// The media track's full retention window, so a reader started after importing can
 /// still read every retained group. These tests import a whole file first, which the default
-/// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) budget collapses to the live edge:
+/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) budget collapses to the live edge:
 /// completeness has to be asked for.
-const RECORDING_LATENCY: std::time::Duration = std::time::Duration::from_secs(30);
+const RECORDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Decode a whole TS buffer into a fresh broadcast and return the catalog.
 fn import_ts(data: &[u8]) -> crate::catalog::hang::Catalog {
@@ -153,7 +153,7 @@ async fn import_opus_frames() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
@@ -298,7 +298,7 @@ async fn import_export_import_roundtrip() {
 	let mut exporter = crate::container::ts::Export::new(crate::source::announced(&consumer))
 		.await
 		.unwrap()
-		.with_latency(crate::Latency::max(RECORDING_LATENCY));
+		.with_max_age(RECORDING_MAX_AGE);
 	let mut out = BytesMut::new();
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
 		match res.expect("exporter error") {
@@ -353,7 +353,7 @@ async fn survives_midstream_join() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
@@ -402,7 +402,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	let track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.subscribe(moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE))
 		.await
 		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);

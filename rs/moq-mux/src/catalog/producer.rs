@@ -93,8 +93,8 @@ pub struct Producer<E: CatalogExt = ()> {
 	/// Retention override for the media tracks minted under this catalog, or `None` to keep
 	/// hang's default. Fixed at construction, so every clone and every
 	/// [`Reserved`](super::Reserved) mints tracks under one policy. See
-	/// [`Config::with_latency_max`].
-	latency_max: Option<std::time::Duration>,
+	/// [`Config::with_max_age`].
+	max_age: Option<std::time::Duration>,
 }
 
 // Manual Clone so a producer is cheaply clonable regardless of whether `E` is.
@@ -107,7 +107,7 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			current: self.current.clone(),
 			clock: self.clock,
 			timeline: self.timeline.clone(),
-			latency_max: self.latency_max,
+			max_age: self.max_age,
 		}
 	}
 }
@@ -122,14 +122,14 @@ impl<E: CatalogExt> Clone for Producer<E> {
 #[derive(Clone)]
 pub struct Config<E: CatalogExt = ()> {
 	catalog: Catalog<E>,
-	latency_max: Option<std::time::Duration>,
+	max_age: Option<std::time::Duration>,
 }
 
 impl Default for Config<()> {
 	fn default() -> Self {
 		Self {
 			catalog: Catalog::default(),
-			latency_max: None,
+			max_age: None,
 		}
 	}
 }
@@ -141,7 +141,7 @@ impl<E: CatalogExt> Config<E> {
 	pub fn with_catalog<F: CatalogExt>(self, catalog: Catalog<F>) -> Config<F> {
 		Config {
 			catalog,
-			latency_max: self.latency_max,
+			max_age: self.max_age,
 		}
 	}
 
@@ -156,8 +156,8 @@ impl<E: CatalogExt> Config<E> {
 	///
 	/// Applies to the media tracks the catalog mints. The catalog and timeline tracks keep
 	/// moq-net's default: both are read at the live edge, which is retained unconditionally.
-	pub fn with_latency_max(mut self, latency_max: impl Into<Option<std::time::Duration>>) -> Self {
-		self.latency_max = latency_max.into();
+	pub fn with_max_age(mut self, max_age: impl Into<Option<std::time::Duration>>) -> Self {
+		self.max_age = max_age.into();
 		self
 	}
 }
@@ -216,19 +216,19 @@ impl<E: CatalogExt> Producer<E> {
 			})),
 			clock: crate::Clock::new(),
 			timeline: crate::timeline::Producer::new(broadcast, crate::timeline::Config::default()),
-			latency_max: config.latency_max,
+			max_age: config.max_age,
 		})
 	}
 
 	/// Track properties for a media track under this catalog: hang's media defaults, plus any
-	/// [`Config::with_latency_max`] override.
+	/// [`Config::with_max_age`] override.
 	///
 	/// Chain [`with_timescale`](moq_net::track::Info::with_timescale) for a container that
 	/// carries the source's own scale (CMAF and Matroska both do).
 	pub fn track_info(&self) -> moq_net::track::Info {
 		let info = hang::container::track_info();
-		match self.latency_max {
-			Some(latency_max) => info.with_latency_max(latency_max),
+		match self.max_age {
+			Some(max_age) => info.with_max_age(max_age),
 			None => info,
 		}
 	}
@@ -644,36 +644,30 @@ mod test {
 		// Unset, a catalog mints hang's media defaults, sized so a segmented egress can serve a
 		// full playlist window rather than moq-net's live-edge default.
 		let catalog = Producer::new(&mut broadcast).unwrap();
-		assert_eq!(
-			catalog.track_info().latency_max,
-			hang::container::track_info().latency_max
-		);
-		assert!(catalog.track_info().latency_max > moq_net::track::DEFAULT_LATENCY_MAX);
+		assert_eq!(catalog.track_info().max_age, hang::container::track_info().max_age);
+		assert!(catalog.track_info().max_age > moq_net::track::DEFAULT_MAX_AGE);
 
 		// An override reaches every media track this catalog mints, and does NOT disturb the
 		// timescale hang pins (or survive a retimescale for a source-scale container).
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let config = Config::default().with_latency_max(std::time::Duration::from_secs(3));
+		let config = Config::default().with_max_age(std::time::Duration::from_secs(3));
 		let catalog = Producer::with_config(&mut broadcast, config).unwrap();
 
 		let info = catalog.track_info();
-		assert_eq!(info.latency_max, std::time::Duration::from_secs(3));
+		assert_eq!(info.max_age, std::time::Duration::from_secs(3));
 		assert_eq!(info.timescale, hang::container::TIMESCALE);
 
 		let at = info.with_timescale(moq_net::Timescale::MILLI);
-		assert_eq!(at.latency_max, std::time::Duration::from_secs(3));
+		assert_eq!(at.max_age, std::time::Duration::from_secs(3));
 		assert_eq!(at.timescale, moq_net::Timescale::MILLI);
 
 		// Every handle mints under the same policy, whatever order it was taken in: the codec
 		// paths hold a reservation and the container paths hold a clone.
 		assert_eq!(
-			catalog.reserve().track_info().latency_max,
+			catalog.reserve().track_info().max_age,
 			std::time::Duration::from_secs(3)
 		);
-		assert_eq!(
-			catalog.clone().track_info().latency_max,
-			std::time::Duration::from_secs(3)
-		);
+		assert_eq!(catalog.clone().track_info().max_age, std::time::Duration::from_secs(3));
 	}
 
 	#[test]

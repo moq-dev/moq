@@ -24,7 +24,7 @@ pub const TIMESCALE: Timescale = Timescale::MICRO;
 /// Declared per track rather than by raising that default, so the tracks that do NOT index history
 /// keep the cheap default: the catalog is snapshot mode and the timeline is a single never-rolled
 /// group, and in both the useful value is the live edge, which is retained unconditionally.
-const LATENCY_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Track properties for creating a track that carries [`Frame`]s, via
 /// [`create_track`](moq_net::broadcast::Producer::create_track) or
@@ -40,12 +40,12 @@ const LATENCY_MAX: std::time::Duration = std::time::Duration::from_secs(30);
 /// which is why every media track should start here rather than at `Info::default()`. It is a
 /// retention budget and a CEILING on what a subscriber may ask to wait for, so it never makes
 /// anyone play further behind live: a subscriber's own
-/// [`Subscription::latency`](moq_net::track::Subscription::latency) defaults to
-/// [`Latency::REAL_TIME`](moq_net::Latency::REAL_TIME) (skip the moment a newer group arrives).
+/// [`Subscription::max_age`](moq_net::track::Subscription::max_age) defaults to
+/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) (skip the moment a newer group arrives).
 pub fn track_info() -> moq_net::track::Info {
 	moq_net::track::Info::default()
 		.with_timescale(TIMESCALE)
-		.with_latency_max(LATENCY_MAX)
+		.with_max_age(MAX_AGE)
 }
 
 /// A media frame with a timestamp and codec-specific payload.
@@ -174,14 +174,14 @@ mod test {
 	fn media_tracks_declare_their_retention() {
 		// A media track is read as history (a segmented egress FETCHes segments a playlist
 		// advertised), so it declares a retention rather than inheriting the live-edge default.
-		assert_eq!(track_info().latency_max, LATENCY_MAX);
-		assert!(LATENCY_MAX > moq_net::track::DEFAULT_LATENCY_MAX);
+		assert_eq!(track_info().max_age, MAX_AGE);
+		assert!(MAX_AGE > moq_net::track::DEFAULT_MAX_AGE);
 
 		// Retimescaling for a container that carries the source's own scale keeps it, since that
 		// is the shape that would otherwise reach for `Info::default()` and lose the retention.
 		let at = track_info().with_timescale(Timescale::MILLI);
 		assert_eq!(at.timescale, Timescale::MILLI);
-		assert_eq!(at.latency_max, LATENCY_MAX);
+		assert_eq!(at.max_age, MAX_AGE);
 	}
 
 	#[test]
@@ -190,8 +190,8 @@ mod test {
 		// the useful value is the live edge, which is retained unconditionally, so neither pays
 		// for history it never serves.
 		assert_eq!(
-			crate::Catalog::default_track_info().latency_max,
-			moq_net::track::DEFAULT_LATENCY_MAX
+			crate::Catalog::default_track_info().max_age,
+			moq_net::track::DEFAULT_MAX_AGE
 		);
 	}
 }

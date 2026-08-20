@@ -107,7 +107,7 @@ impl Server {
 				stream_id,
 				peer,
 				latency: self.latency,
-				latency_max: None,
+				max_age: None,
 			};
 
 			// `m=request` reads a broadcast out; everything else publishes one in.
@@ -135,8 +135,8 @@ struct Pending {
 	/// The SRT receive latency, reused as the egress skip threshold on a subscribe.
 	latency: Duration,
 	/// Retention declared on the media tracks an ingest mints, or `None` for hang's own
-	/// default. Override with [`Publish::with_latency_max`].
-	latency_max: Option<Duration>,
+	/// default. Override with [`Publish::with_max_age`].
+	max_age: Option<Duration>,
 }
 
 /// What an accepted SRT connection wants: to contribute media ([`Publish`]) or to
@@ -220,8 +220,8 @@ impl Publish {
 	///
 	/// Unrelated to the SRT receive latency [`Server::bind`] negotiates, which is a
 	/// transport buffer on this hop.
-	pub fn with_latency_max(mut self, latency_max: impl Into<Option<Duration>>) -> Self {
-		self.0.latency_max = latency_max.into();
+	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
+		self.0.max_age = max_age.into();
 		self
 	}
 
@@ -236,7 +236,7 @@ impl Publish {
 		let path = path.as_path();
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT publish accepted");
-		serve_publish(origin, path.as_str(), socket, self.0.latency_max).await
+		serve_publish(origin, path.as_str(), socket, self.0.max_age).await
 	}
 
 	/// Reject the publish, sending the client a `Forbidden` rejection.
@@ -313,11 +313,11 @@ pub(crate) async fn serve_publish(
 	origin: &origin::Producer,
 	path: &str,
 	mut socket: SrtSocket,
-	latency_max: Option<Duration>,
+	max_age: Option<Duration>,
 ) -> Result<()> {
 	use futures::TryStreamExt;
 
-	let mut publisher = crate::ts::Publisher::new(origin, path, latency_max)?;
+	let mut publisher = crate::ts::Publisher::new(origin, path, max_age)?;
 
 	// Run the read/feed loop so an error surfaces here instead of unwinding past
 	// the publisher, which would drop it (and its tracks) with a bare Error::Dropped.

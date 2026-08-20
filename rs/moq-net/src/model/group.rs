@@ -221,7 +221,7 @@ impl GroupState {
 	/// Resolve the group's terminal state for a reader positioned at `index`.
 	///
 	/// A finished group is still aborted once its frames are released to free memory
-	/// (aged out of the track's latency window, or evicted by the cache pool). A reader
+	/// (aged out of the track's max age window, or evicted by the cache pool). A reader
 	/// that already consumed every frame is missing nothing, so it gets the clean end of
 	/// group; one that fell short sees the abort rather than a silently truncated stream.
 	fn poll_terminal(&self, index: usize) -> Poll<Result<()>> {
@@ -1120,7 +1120,7 @@ impl Consumer {
 		}
 	}
 
-	/// Whether this cursor failed because its subscription latency budget expired.
+	/// Whether this cursor failed because its subscription max age budget expired.
 	pub(crate) fn latency_expired(&self) -> bool {
 		self.expired
 	}
@@ -1839,7 +1839,7 @@ mod test {
 	}
 
 	/// A finished group is still aborted once its frames are released to free memory (the
-	/// track's latency window, or the cache pool). A reader that already drained every frame
+	/// track's max age window, or the cache pool). A reader that already drained every frame
 	/// is missing nothing, so it must see the clean end of group rather than the abort.
 	#[test]
 	fn abort_after_finish_keeps_the_clean_end_for_a_drained_reader() {

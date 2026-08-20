@@ -130,26 +130,26 @@ test("subscriber options and updates are forwarded to the producer's aggregate",
 	expect(producer.subscription.peek()).toEqual({
 		priority: 0,
 		ordered: false,
-		latencyMax: 0,
+		maxAge: 0,
 		startGroup: 0,
 		endGroup: undefined,
 	});
 
 	// The wire layer watches the producer's signal to emit SUBSCRIBE_UPDATE.
 	const next = producer.subscription.changed();
-	track.update({ priority: 7, ordered: true, latencyMax: 250, startGroup: 2, endGroup: 9 });
-	expect(await next).toEqual({ priority: 7, ordered: true, latencyMax: 250, startGroup: 2, endGroup: 9 });
+	track.update({ priority: 7, ordered: true, maxAge: 250, startGroup: 2, endGroup: 9 });
+	expect(await next).toEqual({ priority: 7, ordered: true, maxAge: 250, startGroup: 2, endGroup: 9 });
 });
 
 test("multiple subscriber options aggregate like Rust", async () => {
 	const producer = new TrackProducer("test");
-	const bounded = producer.subscribe({ priority: 2, ordered: true, latencyMax: 100, startGroup: 10, endGroup: 20 });
-	const live = producer.subscribe({ priority: 7, ordered: false, latencyMax: 250, startGroup: 5 });
+	const bounded = producer.subscribe({ priority: 2, ordered: true, maxAge: 100, startGroup: 10, endGroup: 20 });
+	const live = producer.subscribe({ priority: 7, ordered: false, maxAge: 250, startGroup: 5 });
 
 	expect(producer.subscription.peek()).toEqual({
 		priority: 7,
 		ordered: false,
-		latencyMax: 250,
+		maxAge: 250,
 		startGroup: 5,
 		endGroup: undefined,
 	});
@@ -159,7 +159,7 @@ test("multiple subscriber options aggregate like Rust", async () => {
 	expect(await narrowed).toEqual({
 		priority: 2,
 		ordered: true,
-		latencyMax: 100,
+		maxAge: 100,
 		startGroup: 10,
 		endGroup: 20,
 	});

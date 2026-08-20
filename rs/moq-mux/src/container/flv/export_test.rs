@@ -15,9 +15,9 @@ use super::{Export, Import};
 /// The media track's full retention window, so an exporter started after publishing
 /// can still read every retained group. These tests write or import a whole broadcast
 /// and only then export it, which the
-/// exporter's default [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) collapses to the
+/// exporter's default [`Duration::ZERO`] collapses to the
 /// live edge: completeness has to be asked for, exactly as a real recorder does.
-const RECORDING_LATENCY: std::time::Duration = std::time::Duration::from_secs(30);
+const RECORDING_MAX_AGE: Duration = Duration::from_secs(30);
 
 /// A minimal `AVCDecoderConfigurationRecord` (profile 0x42, level 0x1f, one SPS + PPS).
 fn avcc() -> Vec<u8> {
@@ -181,7 +181,7 @@ async fn export_emits_sequence_headers_and_frames() {
 	let exporter = Export::new(crate::source::announced(&consumer))
 		.await
 		.unwrap()
-		.with_latency(crate::Latency::max(RECORDING_LATENCY));
+		.with_max_age(RECORDING_MAX_AGE);
 	let exported = drain_export(exporter, importer).await;
 
 	let tags = parse_tags(&exported);

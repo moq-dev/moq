@@ -90,10 +90,10 @@ fn slice(prefs: &Subscription, start: Option<Position>, end: Option<Position>) -
 /// A takeover boundary therefore becomes demand even for a live-edge subscriber, so the
 /// replacement resumes exactly where the dead route stopped and the splice loses nothing.
 /// The catch-up that buys is bounded by how far the boundary trails the replacement's live
-/// edge, which is failover latency: a broadcast closes with its last source (there is no
+/// edge, which is failover max_age: a broadcast closes with its last source (there is no
 /// linger), so a takeover only happens between overlapping routes. A consumer that would
-/// rather skip even that much drops it downstream on its own latency budget, which is what
-/// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) means.
+/// rather skip even that much drops it downstream on its own max age budget, which is what
+/// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) means.
 fn max_unbounded_start(prefs: Option<Position>, segment: Option<Position>) -> Option<Position> {
 	match (prefs, segment) {
 		(Some(a), Some(b)) => Some(a.max(b)),
@@ -686,7 +686,7 @@ fn last_group(end: Option<Position>) -> Option<u64> {
 /// replacement can arrive.
 pub(crate) struct Group {
 	state: kio::Consumer<ResumeState>,
-	/// The logical subscription's live latency budget.
+	/// The logical subscription's live max age budget.
 	subscription: kio::Consumer<Subscription>,
 	/// The logical reader's group cap, used only to bound each route's drift anchor.
 	cap: kio::Consumer<Option<u64>>,
@@ -1122,7 +1122,7 @@ struct SegmentSub {
 	end: Option<Position>,
 	sub: SubState,
 	/// A completed segment's cursor, retained while parked groups may need their
-	/// latency budget re-evaluated after the outer cap rises.
+	/// max age budget re-evaluated after the outer cap rises.
 	terminal: Option<track::Subscriber>,
 	/// The producer dropped this segment (pruned, or replaced before producing).
 	/// The cursor drains what it already holds, then retires; see
@@ -1894,7 +1894,7 @@ impl Subscriber {
 #[cfg(test)]
 mod test {
 	use super::*;
-	use crate::{Latency, Timestamp, broadcast};
+	use crate::{Timestamp, broadcast};
 	use futures::FutureExt;
 	use std::sync::Arc;
 	use std::time::Duration;
@@ -1915,7 +1915,7 @@ mod test {
 
 	/// A bounded replay window for tests whose subject requires every buffered group.
 	fn replay() -> Subscription {
-		Subscription::default().with_latency(Latency::max(Duration::from_secs(30)))
+		Subscription::default().with_max_age(std::time::Duration::from_secs(30))
 	}
 
 	fn write_group(producer: &mut track::Producer, sequence: u64, payload: &str) {
@@ -2100,7 +2100,7 @@ mod test {
 	async fn a_takeover_backlog_is_bounded_by_the_budget() {
 		// Both routes retain a minute, so the budget is the only thing bounding the
 		// backlog (a budget past the publisher's window is clamped to it).
-		let retain = track::Info::default().with_latency_max(Duration::from_secs(60));
+		let retain = track::Info::default().with_max_age(std::time::Duration::from_secs(60));
 		let (mut track_a, consumer_a) = track_pair_with("a", retain.clone());
 		let (mut track_b, consumer_b) = track_pair_with("b", retain);
 
@@ -2109,9 +2109,9 @@ mod test {
 		let mut live = producer.consume().subscribe(None);
 		let mut patient = producer
 			.consume()
-			.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_secs(60))));
+			.subscribe(Subscription::default().with_max_age(std::time::Duration::from_secs(60)));
 
-		write_group_at(&mut track_a, 0, "a0", Duration::ZERO);
+		write_group_at(&mut track_a, 0, "a0", std::time::Duration::ZERO);
 		assert_eq!(recv(&mut live), 0);
 		assert_eq!(recv(&mut patient), 0);
 
@@ -2121,7 +2121,7 @@ mod test {
 		producer.takeover(&consumer_b).unwrap();
 		recv_pending(&mut live);
 		for second in 1..=30 {
-			write_group_at(&mut track_b, second, "b", Duration::from_secs(second));
+			write_group_at(&mut track_b, second, "b", std::time::Duration::from_secs(second));
 		}
 
 		// The live subscriber takes the edge and writes the backlog off; the patient
@@ -2142,7 +2142,7 @@ mod test {
 	/// still wants read as ancient.
 	#[tokio::test]
 	async fn a_capped_spliced_subscriber_measures_drift_against_its_cap() {
-		let retain = track::Info::default().with_latency_max(Duration::from_secs(60));
+		let retain = track::Info::default().with_max_age(std::time::Duration::from_secs(60));
 		let (mut track_a, consumer_a) = track_pair_with("a", retain);
 
 		let mut producer = Producer::new();
@@ -2150,8 +2150,8 @@ mod test {
 		let mut sub = producer.consume().subscribe(None);
 		sub.end_at(0);
 
-		write_group_at(&mut track_a, 0, "a0", Duration::ZERO);
-		write_group_at(&mut track_a, 1, "a1", Duration::from_secs(30));
+		write_group_at(&mut track_a, 0, "a0", std::time::Duration::ZERO);
+		write_group_at(&mut track_a, 1, "a1", std::time::Duration::from_secs(30));
 
 		// Group 1 is past the cap, so it is not a live edge this reader can jump to.
 		assert_eq!(recv(&mut sub), 0);
@@ -2162,7 +2162,7 @@ mod test {
 	/// budget has already given up on.
 	#[tokio::test]
 	async fn a_raised_cap_rechecks_parked_groups() {
-		let retain = track::Info::default().with_latency_max(Duration::from_secs(60));
+		let retain = track::Info::default().with_max_age(std::time::Duration::from_secs(60));
 		let (mut track_a, consumer_a) = track_pair_with("a", retain);
 
 		let mut producer = Producer::new();
@@ -2170,13 +2170,13 @@ mod test {
 		let mut sub = producer.consume().subscribe(None);
 		sub.end_at(0);
 
-		write_group_at(&mut track_a, 0, "a0", Duration::ZERO);
+		write_group_at(&mut track_a, 0, "a0", std::time::Duration::ZERO);
 		assert_eq!(recv(&mut sub), 0);
 
 		// Group 1 parks above the cap; group 2 lands half a minute further on.
-		write_group_at(&mut track_a, 1, "a1", Duration::from_secs(1));
+		write_group_at(&mut track_a, 1, "a1", std::time::Duration::from_secs(1));
 		recv_pending(&mut sub);
-		write_group_at(&mut track_a, 2, "a2", Duration::from_secs(30));
+		write_group_at(&mut track_a, 2, "a2", std::time::Duration::from_secs(30));
 
 		// Raising the cap owes the reader group 1 again, but by now it is a backlog.
 		sub.end_at(None);
@@ -2188,7 +2188,7 @@ mod test {
 	/// groups. A later cap increase still uses the terminal track's live edge.
 	#[tokio::test]
 	async fn a_raised_cap_rechecks_parked_groups_after_segment_finish() {
-		let retain = track::Info::default().with_latency_max(Duration::from_secs(60));
+		let retain = track::Info::default().with_max_age(std::time::Duration::from_secs(60));
 		let (mut track_a, consumer_a) = track_pair_with("a", retain);
 
 		let mut producer = Producer::new();
@@ -2196,11 +2196,11 @@ mod test {
 		let mut sub = producer.consume().subscribe(None);
 		sub.end_at(0);
 
-		write_group_at(&mut track_a, 0, "a0", Duration::ZERO);
+		write_group_at(&mut track_a, 0, "a0", std::time::Duration::ZERO);
 		assert_eq!(recv(&mut sub), 0);
 
-		write_group_at(&mut track_a, 1, "a1", Duration::from_secs(1));
-		write_group_at(&mut track_a, 2, "a2", Duration::from_secs(30));
+		write_group_at(&mut track_a, 1, "a1", std::time::Duration::from_secs(1));
+		write_group_at(&mut track_a, 2, "a2", std::time::Duration::from_secs(30));
 		track_a.finish().unwrap();
 		// Drive the inner cursor through its clean end while both newer groups are
 		// parked above the cap.
@@ -2616,8 +2616,8 @@ mod test {
 			"the replacement group is still the live edge"
 		);
 
-		tokio::time::advance(Duration::from_secs(1)).await;
-		write_group_at(&mut track_b, 1, "edge", Duration::from_secs(1));
+		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		write_group_at(&mut track_b, 1, "edge", std::time::Duration::from_secs(1));
 
 		let result = reading
 			.read_frame()
@@ -3030,7 +3030,7 @@ mod test {
 		// A live-edge subscriber resumes at the boundary rather than at B's own live
 		// edge, so the splice loses nothing. What that can replay is bounded by how
 		// far the boundary trails B, which is failover latency; a consumer that wants
-		// none of it skips on its own latency budget downstream.
+		// none of it skips on its own max age budget downstream.
 		assert_eq!(track_b.subscription().unwrap().start, Some(Position::group(2)));
 
 		// The segment range still filters a group below the boundary, so a replacement
@@ -3055,7 +3055,7 @@ mod test {
 		let mut sub = producer.consume().subscribe(
 			Subscription::default()
 				.with_start(Position::group(0))
-				.with_latency(Latency::max(Duration::from_secs(60))),
+				.with_max_age(std::time::Duration::from_secs(60)),
 		);
 		recv_pending(&mut sub);
 		assert_eq!(track_a.subscription().unwrap().start, Some(Position::group(0)));

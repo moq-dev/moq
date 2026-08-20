@@ -6,13 +6,13 @@ use mp4_atom::{Decode, Encode};
 ///
 /// The media track's full retention window, so a reader started after publishing can
 /// still read every retained group. These tests write every group up front, which the
-/// default [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) budget collapses to the live
+/// default [`std::time::Duration::ZERO`](std::time::Duration::ZERO) budget collapses to the live
 /// edge: completeness has to be asked for.
-const RECORDING_LATENCY: std::time::Duration = std::time::Duration::from_secs(30);
+const RECORDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// A replay window with that budget, for a test asserting every group is delivered.
 fn replay() -> moq_net::track::Subscription {
-	moq_net::track::Subscription::default().with_latency(moq_net::Latency::max(RECORDING_LATENCY))
+	moq_net::track::Subscription::default().with_max_age(RECORDING_MAX_AGE)
 }
 
 /// Drain every group currently buffered on the consumer without waiting for new ones.

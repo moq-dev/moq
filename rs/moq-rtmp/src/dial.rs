@@ -66,11 +66,11 @@ pub struct Client<S = TcpStream> {
 	/// Session results queued during connect, drained by the first publish/pull.
 	work: VecDeque<ClientSessionResult>,
 	/// How long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
-	/// before skipping. Defaults to [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY).
-	latency: moq_mux::Latency,
+	/// before skipping. Defaults to [`DEFAULT_MAX_AGE`](crate::DEFAULT_MAX_AGE).
+	export_max_age: Duration,
 	/// Retention declared on the media tracks [`pull`](Self::pull) publishes, or `None`
 	/// for hang's own default.
-	latency_max: Option<Duration>,
+	import_max_age: Option<Duration>,
 }
 
 impl Client<TcpStream> {
@@ -148,17 +148,17 @@ impl<S: Stream> Client<S> {
 			stream,
 			session,
 			work,
-			latency: crate::DEFAULT_LATENCY,
-			latency_max: None,
+			export_max_age: crate::DEFAULT_MAX_AGE,
+			import_max_age: None,
 		})
 	}
 
 	/// Set how long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
 	/// before skipping to a newer one (the moq-level frame-drop latency). Defaults
-	/// to [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY); pass
-	/// [`Latency::REAL_TIME`](moq_mux::Latency::REAL_TIME) to drop stale groups aggressively.
-	pub fn with_latency(mut self, latency: moq_mux::Latency) -> Self {
-		self.latency = latency;
+	/// to [`DEFAULT_MAX_AGE`](crate::DEFAULT_MAX_AGE); pass
+	/// [`Duration::ZERO`] to drop stale groups aggressively.
+	pub fn with_export_max_age(mut self, max_age: Duration) -> Self {
+		self.export_max_age = max_age;
 		self
 	}
 
@@ -172,9 +172,9 @@ impl<S: Stream> Client<S> {
 	/// and the memory matters.
 	///
 	/// The pull (ingest) direction only; [`publish`](Self::publish) reads a broadcast
-	/// someone else declared, and takes [`with_latency`](Self::with_latency) instead.
-	pub fn with_latency_max(mut self, latency_max: impl Into<Option<Duration>>) -> Self {
-		self.latency_max = latency_max.into();
+	/// someone else declared, and takes [`with_export_max_age`](Self::with_export_max_age) instead.
+	pub fn with_import_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
+		self.import_max_age = max_age.into();
 		self
 	}
 
@@ -208,7 +208,7 @@ impl<S: Stream> Client<S> {
 		let mut export = FlvExport::new(moq_mux::Source::new(origin, path))
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
-			.with_latency(self.latency);
+			.with_max_age(self.export_max_age);
 		let mut tags = flv::TagReader::new();
 		let mut buffer = [0u8; READ_BUFFER];
 
@@ -270,7 +270,7 @@ impl<S: Stream> Client<S> {
 
 		tracing::info!(%stream_key, %path, "rtmp play accepted by remote");
 
-		let mut publisher = Publisher::new(origin, path.as_str(), self.latency_max)?;
+		let mut publisher = Publisher::new(origin, path.as_str(), self.import_max_age)?;
 
 		let result = self.pull_media(&mut publisher).await;
 		match &result {
@@ -467,11 +467,11 @@ struct Publisher {
 }
 
 impl Publisher {
-	fn new(origin: &origin::Producer, path: &str, latency_max: Option<Duration>) -> anyhow::Result<Self> {
+	fn new(origin: &origin::Producer, path: &str, max_age: Option<Duration>) -> anyhow::Result<Self> {
 		let mut broadcast = origin
 			.create_broadcast(path, broadcast::Route::new().with_announce(true))
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
-		let config = moq_mux::catalog::Config::default().with_latency_max(latency_max);
+		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 		let handle = broadcast.clone();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());

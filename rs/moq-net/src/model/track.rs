@@ -13,7 +13,7 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
-use crate::{Error, Latency, Result, Timescale, Timestamp, coding};
+use crate::{Error, Result, Timescale, Timestamp, coding};
 use crate::{broadcast, cache, frame, group, stats};
 
 use super::{Datagram, Requests};
@@ -29,8 +29,8 @@ use std::{
 	time::Duration,
 };
 
-/// Default [`Info::latency_max`] age when the publisher doesn't set one.
-pub const DEFAULT_LATENCY_MAX: Duration = Duration::from_secs(5);
+/// Default [`Info::max_age`] when the publisher doesn't set one.
+pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(5);
 
 /// How long a datagram stays in the per-track buffer before it is dropped.
 ///
@@ -68,15 +68,17 @@ pub struct Info {
 	/// timestamps at this scale on the wire. Protocols whose wire can't carry it
 	/// (pre-Lite05 moq-lite, IETF moq-transport) fall back to local monotonic milliseconds.
 	pub timescale: Timescale,
-	/// The maximum age of a non-latest group before the publisher evicts it (the
-	/// newest group is always retained). A subscriber's
-	/// [`Subscription::latency`] window is clamped to this, since a group can't be
-	/// waited for longer than it's kept around. Reported in TRACK_INFO so
-	/// relays re-serve with the same window. Defaults to [`DEFAULT_LATENCY_MAX`].
+	/// How old a non-latest group may get before the publisher evicts it. The newest
+	/// group is always retained.
 	///
-	/// This is the `Publisher Max Latency` on the wire, the publisher-side half of
-	/// the same budget [`Subscription::latency`] sets for a subscriber.
-	pub latency_max: Duration,
+	/// A retention bound rather than a delivery one, the inverse of an HTTP
+	/// `Cache-Control: max-age`. [`Subscription::max_age`] is clamped to this, since a
+	/// group can't be waited for longer than it's kept around. Reported in TRACK_INFO so
+	/// relays re-serve with the same window. Defaults to [`DEFAULT_MAX_AGE`].
+	///
+	/// This is the `Publisher Max Age` on the wire, the publisher-side half of the
+	/// budget [`Subscription::max_age`] sets for a subscriber.
+	pub max_age: Duration,
 	/// The publisher's priority for this track, used only to break ties between
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
 	pub priority: u8,
@@ -90,7 +92,7 @@ impl Default for Info {
 	fn default() -> Self {
 		Self {
 			timescale: Timescale::default(),
-			latency_max: DEFAULT_LATENCY_MAX,
+			max_age: DEFAULT_MAX_AGE,
 			priority: 0,
 			ordered: false,
 		}
@@ -107,9 +109,9 @@ impl Info {
 		self
 	}
 
-	/// Set the maximum age of a non-latest group before eviction, returning `self` for chaining.
-	pub fn with_latency_max(mut self, latency_max: Duration) -> Self {
-		self.latency_max = latency_max;
+	/// Set how old a non-latest group may get before eviction, returning `self` for chaining.
+	pub fn with_max_age(mut self, max_age: Duration) -> Self {
+		self.max_age = max_age;
 		self
 	}
 
@@ -135,7 +137,7 @@ pub(crate) struct TrackState {
 	info: Option<Info>,
 
 	// The broadcast this track belongs to. Supplies the cache pool its groups charge
-	// into and the `cache_duration` ceiling clamping `Info::latency_max`.
+	// into and the `cache_duration` ceiling clamping `Info::max_age`.
 	broadcast: Arc<broadcast::Info>,
 
 	// This track's account against the shared cache pool, shared with every group it
@@ -525,10 +527,10 @@ impl TrackState {
 		Some(&slot.group)
 	}
 
-	/// The publisher's latency window, or `None` while the info is unknown (an
+	/// The publisher's max age window, or `None` while the info is unknown (an
 	/// unaccepted [`Request`]). Bounds the aggregate subscription; see [`clamp_combined`].
-	fn latency_bound(&self) -> Option<Duration> {
-		self.info.as_ref().map(|info| info.latency_max)
+	fn max_age_bound(&self) -> Option<Duration> {
+		self.info.as_ref().map(|info| info.max_age)
 	}
 
 	/// The live edges a subscription bounded at `cap` measures drift against: the
@@ -739,7 +741,7 @@ impl TrackState {
 	/// info to a track funnels through here, covering local publishers and relayed
 	/// (lite / IETF) tracks alike.
 	fn install(&mut self, mut info: Info) {
-		info.latency_max = info.latency_max.min(self.broadcast.origin.cache_duration);
+		info.max_age = info.max_age.min(self.broadcast.origin.cache_duration);
 		self.info = Some(info);
 	}
 
@@ -825,10 +827,10 @@ impl TrackState {
 	/// Admit a freshly-created group: settle eviction debt first (so the newcomer
 	/// can never be a victim of the very write that created it), insert it, then
 	/// expire by age.
-	fn commit_group(&mut self, group: &group::Producer, visible: bool, latency_max: Duration) {
+	fn commit_group(&mut self, group: &group::Producer, visible: bool, max_age: Duration) {
 		self.charge_debt();
 		self.insert_group(group, visible);
-		self.evict_expired(latency_max);
+		self.evict_expired(max_age);
 	}
 
 	/// Accrue and pay eviction debt for everything written since the last charge:
@@ -1053,14 +1055,14 @@ impl TrackState {
 		// An evicted sequence can be re-fetched; a live one is a duplicate.
 		self.claim_sequence(sequence, frame_start)?;
 
-		let latency_max = info.latency_max;
+		let max_age = info.max_age;
 		let group = group::Producer::new(group::Info { sequence }, info, self.cache.clone());
 		// A backfill exists because someone is fetching it right now: stamp that
 		// access so the eviction walk can't kill it before the fetch resolves.
 		// It is also invisible to arrival-order subscribers: fetched on demand,
 		// not produced live by the publisher.
 		group.cache_refresh();
-		self.commit_group(&group, false, latency_max);
+		self.commit_group(&group, false, max_age);
 		Ok(group)
 	}
 }
@@ -1142,13 +1144,13 @@ impl Producer {
 			return Err(Error::Closed);
 		}
 		let track = state.info.clone().unwrap();
-		let latency_max = track.latency_max;
+		let max_age = track.max_age;
 
 		// An evicted sequence can be re-created; a live one is a duplicate.
 		state.claim_sequence(group.sequence, 0)?;
 
 		let group = group::Producer::new(group, track, state.cache.clone()).with_meter(self.stats.meter());
-		state.commit_group(&group, true, latency_max);
+		state.commit_group(&group, true, max_age);
 
 		Ok(group)
 	}
@@ -1167,11 +1169,11 @@ impl Producer {
 		}
 
 		let track = state.info.clone().unwrap();
-		let latency_max = track.latency_max;
+		let max_age = track.max_age;
 
 		let group =
 			group::Producer::new(group::Info { sequence }, track, state.cache.clone()).with_meter(self.stats.meter());
-		state.commit_group(&group, true, latency_max);
+		state.commit_group(&group, true, max_age);
 
 		Ok(group)
 	}
@@ -1463,12 +1465,12 @@ impl Producer {
 	/// when there are no live subscribers. Unlike [`Self::subscription`], this
 	/// doesn't wait for a change or advance the change cursor.
 	///
-	/// The aggregate's [`Subscription::latency`] is clamped to this track's
-	/// [`Info::latency_max`]: no subscriber can wait for a late group longer than the
+	/// The aggregate's [`Subscription::max_age`] is clamped to this track's
+	/// [`Info::max_age`]: no subscriber can wait for a late group longer than the
 	/// publisher keeps it.
 	pub fn subscription(&self) -> Option<Subscription> {
 		let state = self.state.read();
-		let (subs, bound) = (state.subscriptions.clone(), state.latency_bound());
+		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 		snapshot_subscription(&subs, bound)
 	}
@@ -1486,7 +1488,7 @@ impl Producer {
 
 		// Read the bound before locking `subs`, so the aggregation never nests the two locks.
 		let state = self.state.read();
-		let (subs, bound) = (state.subscriptions.clone(), state.latency_bound());
+		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 
 		let prev = &self.prev_subscription;
@@ -1810,17 +1812,17 @@ fn servable_cap(cursor: Option<u64>, outer: Option<u64>) -> Option<u64> {
 /// budget when it decides a group is stale ([`TrackState::is_stale`]). Those agree because
 /// `min` distributes over the `max` that combines them. `bound` is `None` on a track whose
 /// info isn't known yet (an unaccepted [`Request`]), which imposes no window.
-fn clamp_latency(mut latency: crate::Latency, bound: Option<Duration>) -> crate::Latency {
+fn clamp_max_age(mut max_age: Duration, bound: Option<Duration>) -> Duration {
 	if let Some(bound) = bound {
-		latency.max = latency.max.min(bound);
+		max_age = max_age.min(bound);
 	}
-	latency
+	max_age
 }
 
-/// Clamp the aggregate's latency budget to the publisher's window; see [`clamp_latency`].
+/// Clamp the aggregate's max age budget to the publisher's window; see [`clamp_max_age`].
 fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Option<Subscription> {
 	let mut combined = combined?;
-	combined.latency = clamp_latency(combined.latency, bound);
+	combined.max_age = clamp_max_age(combined.max_age, bound);
 	Some(combined)
 }
 
@@ -2332,7 +2334,7 @@ impl Subscribing {
 				}))
 			}
 			SubscribingKind::Spliced(resume) => {
-				// Resolved from the first segment's track. The publisher's latency
+				// Resolved from the first segment's track. The publisher's max age
 				// window is applied to each per-session aggregate, not here.
 				let info = ready!(resume.poll_info(waiter))?;
 
@@ -2651,9 +2653,9 @@ struct GroupExpiry {
 
 impl group::Expiry for GroupExpiry {
 	fn is_expired(&self, waiter: &kio::Waiter, at: group::Position) -> bool {
-		let mut latency = Latency::default();
+		let mut max_age = Duration::default();
 		let _ = self.subscription.poll(waiter, |subscription| {
-			latency = subscription.latency;
+			max_age = subscription.max_age;
 			Poll::<()>::Pending
 		});
 
@@ -2666,7 +2668,7 @@ impl group::Expiry for GroupExpiry {
 
 		let mut expired = false;
 		let _ = self.state.poll(waiter, |state| {
-			let budget = clamp_latency(latency, state.latency_bound()).max;
+			let budget = clamp_max_age(max_age, state.max_age_bound());
 			loop {
 				let edge = state.live_edge(cap);
 				expired = state.is_stale(self.sequence, Some(at), edge, budget);
@@ -2823,15 +2825,15 @@ impl PlainSubscriber {
 	/// [`Poll::Ready`]; the track ending surfaces as the error the caller was going to
 	/// get anyway.
 	fn poll_drift(&self, waiter: &kio::Waiter) -> Poll<Result<Drift>> {
-		let mut latency = Latency::default();
+		let mut max_age = Duration::default();
 		let _ = self.subscription.poll(waiter, |subscription| {
-			latency = subscription.latency;
+			max_age = subscription.max_age;
 			Poll::<()>::Pending
 		});
 		let cap = servable_cap(self.end_sequence, self.stale_cap);
 		self.poll(waiter, move |state| {
 			Poll::Ready(Ok(Drift {
-				budget: clamp_latency(latency, state.latency_bound()).max,
+				budget: clamp_max_age(max_age, state.max_age_bound()),
 				edge: state.live_edge(cap),
 			}))
 		})
@@ -3091,11 +3093,11 @@ impl Subscriber {
 	/// [`Self::poll_next_group`] if you only want groups whose sequence number is higher
 	/// than any previously returned.
 	///
-	/// Groups are semi-reliable, and the [`Subscription::latency`] budget is the other
+	/// Groups are semi-reliable, and the [`Subscription::max_age`] budget is the other
 	/// thing (alongside eviction and a moving start) that decides which of them arrive:
 	/// one that has drifted further behind the live edge than the budget tolerates is
 	/// skipped rather than handed over, so a single poll walks off a whole backlog. The
-	/// default is [`Latency::REAL_TIME`](crate::Latency::REAL_TIME), which takes the live
+	/// default is [`Duration::ZERO`], which takes the live
 	/// edge and writes the rest off; raise it to read history. [`Self::start_at`] and
 	/// [`Subscription::start`] are filters, not exemptions: backfill needs a budget that
 	/// covers it. [`Consumer::fetch_group`] is the way to ask for one old group outright.
@@ -3172,7 +3174,7 @@ impl Subscriber {
 	/// produces a monotonically increasing sequence at the cost of dropping out-of-order
 	/// groups. Use [`Self::poll_recv_group`] to see every group in arrival order instead.
 	///
-	/// The [`Subscription::latency`] budget applies here too, on the same terms; see
+	/// The [`Subscription::max_age`] budget applies here too, on the same terms; see
 	/// [`Self::poll_recv_group`].
 	///
 	/// Honors the cap set by [`Self::end_at`]: groups with sequence past the cap are left
@@ -3297,7 +3299,7 @@ impl Subscriber {
 
 	/// Replace this subscriber's delivery preferences.
 	///
-	/// Stored verbatim; the publisher's latency window is applied to the aggregate, not
+	/// Stored verbatim; the publisher's max age window is applied to the aggregate, not
 	/// here (see [`Producer::subscription`]). Returns [`Error::Closed`] if the track
 	/// already ended; the update is meaningless at that point and can usually be ignored.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
@@ -3438,7 +3440,7 @@ impl Request {
 	/// or `None` if nobody is waiting. Useful for sizing the track before accepting.
 	pub fn subscription(&self) -> Option<Subscription> {
 		let state = self.state.read();
-		let (subs, bound) = (state.subscriptions.clone(), state.latency_bound());
+		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 		snapshot_subscription(&subs, bound)
 	}
@@ -3452,7 +3454,7 @@ impl Request {
 	/// Poll counterpart to [`subscription_changed`](Self::subscription_changed).
 	pub fn poll_subscription_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<Subscription>> {
 		let state = self.state.read();
-		let (subs, bound) = (state.subscriptions.clone(), state.latency_bound());
+		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 
 		let prev = &self.prev_subscription;
@@ -3530,8 +3532,8 @@ impl Subscriber {
 #[cfg(test)]
 mod test {
 	use super::*;
-	use crate::Latency;
 	use crate::model::test_tracing::count_drop_warnings;
+	use std::time::Duration;
 
 	/// Mint a track for tests with a default parent broadcast, since tracks are
 	/// normally born from a [`broadcast::Producer`].
@@ -3541,7 +3543,7 @@ mod test {
 
 	/// A bounded replay window for tests whose subject requires every buffered group.
 	fn replay() -> Subscription {
-		Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(30)))
+		Subscription::default().with_max_age(Duration::from_secs(30))
 	}
 
 	/// Helper: count live cached groups in state.
@@ -3864,7 +3866,7 @@ mod test {
 		}
 
 		// Advance time past the eviction threshold.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
 
 		// Append a new group to trigger eviction.
 		producer.append_group().unwrap(); // seq 3
@@ -3884,7 +3886,7 @@ mod test {
 		}
 	}
 
-	/// A group whose frames outlive `latency_max` is aged out when the next group starts, but
+	/// A group whose frames outlive `max_age` is aged out when the next group starts, but
 	/// a subscriber that already drained it must still see the clean end of group. Otherwise a
 	/// track with long groups (a per-minute rollup, say) fails its readers at every boundary.
 	#[tokio::test]
@@ -3900,8 +3902,8 @@ mod test {
 			.unwrap();
 		assert_eq!(consumer.next_frame().await.unwrap().unwrap().size, 5);
 
-		// The group stays open well past latency_max, then the next period starts.
-		tokio::time::advance(DEFAULT_LATENCY_MAX * 12).await;
+		// The group stays open well past the max age, then the next period starts.
+		tokio::time::advance(DEFAULT_MAX_AGE * 12).await;
 		group.finish().unwrap();
 		let _next = producer.create_group(group::Info { sequence: 1 }).unwrap();
 
@@ -3916,7 +3918,7 @@ mod test {
 		producer.append_group().unwrap(); // seq 0
 
 		// Advance time past threshold.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
 
 		// Append another group; seq 0 is expired and evicted.
 		producer.append_group().unwrap(); // seq 1
@@ -3954,7 +3956,7 @@ mod test {
 
 		let mut consumer = producer.subscribe(None);
 
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
 		producer.append_group().unwrap(); // seq 1
 
 		// Group 0 was evicted. Consumer should get group 1.
@@ -3967,10 +3969,10 @@ mod test {
 		tokio::time::pause();
 
 		// A shorter cache evicts sooner than the default.
-		let mut producer = track_producer("test", Info::default().with_latency_max(Duration::from_secs(1)));
+		let mut producer = track_producer("test", Info::default().with_max_age(Duration::from_secs(1)));
 		producer.append_group().unwrap(); // seq 0
 
-		// Past the custom budget but well within DEFAULT_LATENCY_MAX.
+		// Past the custom budget but well within DEFAULT_MAX_AGE.
 		tokio::time::advance(Duration::from_secs(2)).await;
 		producer.append_group().unwrap(); // seq 1
 
@@ -3981,27 +3983,26 @@ mod test {
 	}
 
 	#[test]
-	fn latency_max_clamped_to_cache() {
-		let producer = track_producer("test", Info::default().with_latency_max(Duration::from_secs(2)));
+	fn max_age_clamped_to_cache() {
+		let producer = track_producer("test", Info::default().with_max_age(Duration::from_secs(2)));
 
-		// A latency budget beyond the cache is capped in the aggregate; a group can't be
+		// A max age budget beyond the cache is capped in the aggregate; a group can't be
 		// waited for longer than the publisher keeps it. The subscriber's own preference
 		// is stored verbatim, so what it asked for stays readable.
-		let mut subscriber =
-			producer.subscribe(Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(10))));
-		assert_eq!(subscriber.subscription().latency.max, Duration::from_secs(10));
-		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_secs(2));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)));
+		assert_eq!(subscriber.subscription().max_age, Duration::from_secs(10));
+		assert_eq!(producer.subscription().unwrap().max_age, Duration::from_secs(2));
 
 		// A budget within the cache is left alone, and ZERO (skip immediately) stays ZERO.
 		subscriber
-			.update(Subscription::default().with_latency(crate::Latency::max(Duration::from_millis(500))))
+			.update(Subscription::default().with_max_age(Duration::from_millis(500)))
 			.unwrap();
-		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_millis(500));
+		assert_eq!(producer.subscription().unwrap().max_age, Duration::from_millis(500));
 
 		subscriber
-			.update(Subscription::default().with_latency(Latency::REAL_TIME))
+			.update(Subscription::default().with_max_age(Duration::ZERO))
 			.unwrap();
-		assert_eq!(producer.subscription().unwrap().latency.max, Duration::ZERO);
+		assert_eq!(producer.subscription().unwrap().max_age, Duration::ZERO);
 	}
 
 	/// Mint a track under an origin whose retention ceiling is `cap`, so the
@@ -4019,22 +4020,22 @@ mod test {
 	}
 
 	#[test]
-	fn origin_cache_duration_clamps_latency_max() {
+	fn origin_cache_duration_clamps_max_age() {
 		// A publisher asking to keep groups for a minute is capped to the origin's 1s
 		// ceiling; a publisher already below the ceiling is left alone (it's a min).
 		let capped = track_producer_capped(
 			"test",
-			Info::default().with_latency_max(Duration::from_secs(60)),
+			Info::default().with_max_age(Duration::from_secs(60)),
 			Duration::from_secs(1),
 		);
-		assert_eq!(capped.state.read().latency_bound(), Some(Duration::from_secs(1)));
+		assert_eq!(capped.state.read().max_age_bound(), Some(Duration::from_secs(1)));
 
 		let under = track_producer_capped(
 			"test",
-			Info::default().with_latency_max(Duration::from_millis(500)),
+			Info::default().with_max_age(Duration::from_millis(500)),
 			Duration::from_secs(1),
 		);
-		assert_eq!(under.state.read().latency_bound(), Some(Duration::from_millis(500)));
+		assert_eq!(under.state.read().max_age_bound(), Some(Duration::from_millis(500)));
 	}
 
 	#[tokio::test]
@@ -4044,7 +4045,7 @@ mod test {
 		// The publisher wants a 60s window, but the origin caps retention at 1s.
 		let mut producer = track_producer_capped(
 			"test",
-			Info::default().with_latency_max(Duration::from_secs(60)),
+			Info::default().with_max_age(Duration::from_secs(60)),
 			Duration::from_secs(1),
 		);
 		producer.append_group().unwrap(); // seq 0
@@ -4060,33 +4061,32 @@ mod test {
 	}
 
 	#[test]
-	fn latency_max_clamped_via_every_update_path() {
-		let producer = track_producer("test", Info::default().with_latency_max(Duration::from_secs(2)));
-		let over = Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(10)));
+	fn max_age_clamped_via_every_update_path() {
+		let producer = track_producer("test", Info::default().with_max_age(Duration::from_secs(2)));
+		let over = Subscription::default().with_max_age(Duration::from_secs(10));
 
 		// The clamp lives in the aggregation, so it applies no matter which entry point
 		// wrote the raw preference. Previously only `Subscriber::update` clamped.
 		let mut subscriber = producer.subscribe(over.clone());
-		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().max_age, Duration::from_secs(2));
 
 		subscriber.control().update(over.clone()).unwrap();
-		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().max_age, Duration::from_secs(2));
 
 		subscriber.update(over).unwrap();
-		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().max_age, Duration::from_secs(2));
 	}
 
 	#[test]
-	fn latency_max_aggregate_clamps_the_max_across_subscribers() {
-		let producer = track_producer("test", Info::default().with_latency_max(Duration::from_secs(2)));
+	fn max_age_aggregate_clamps_across_subscribers() {
+		let producer = track_producer("test", Info::default().with_max_age(Duration::from_secs(2)));
 
 		// The aggregate takes the max, then clamps once. Equivalent to clamping each
 		// subscriber first, since `min` distributes over `max`.
-		let _a =
-			producer.subscribe(Subscription::default().with_latency(crate::Latency::max(Duration::from_millis(500))));
-		let _b = producer.subscribe(Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(10))));
+		let _a = producer.subscribe(Subscription::default().with_max_age(Duration::from_millis(500)));
+		let _b = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)));
 
-		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().max_age, Duration::from_secs(2));
 	}
 
 	/// Append a finished group presenting at `millis`, so the track carries a media
@@ -4136,8 +4136,7 @@ mod test {
 
 		// Two seconds of tolerance keeps the groups presenting within 2s of the live
 		// edge (2s, 3s, 4s) and drops the two below it.
-		let mut subscriber =
-			producer.subscribe(Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(2))));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(2)));
 		assert_eq!(drain(&mut subscriber), vec![2, 3, 4]);
 	}
 
@@ -4151,8 +4150,7 @@ mod test {
 			append_at(&mut producer, second * 1000);
 		}
 
-		let mut subscriber =
-			producer.subscribe(Subscription::default().with_latency(crate::Latency::max(Duration::from_millis(1500))));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_millis(1500)));
 		assert_eq!(drain(&mut subscriber), vec![2, 3]);
 	}
 
@@ -4201,8 +4199,7 @@ mod test {
 	#[tokio::test]
 	async fn a_handed_out_group_wakes_when_a_newer_group_gets_its_first_timestamp() {
 		let mut producer = track_producer("test", None);
-		let mut subscriber =
-			producer.subscribe(Subscription::default().with_latency(crate::Latency::max(Duration::from_millis(500))));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_millis(500)));
 		let mut old = producer.append_group().unwrap();
 		old.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"old"))
 			.unwrap();
@@ -4314,8 +4311,7 @@ mod test {
 	#[tokio::test]
 	async fn a_budget_is_measured_from_the_readers_position() {
 		let mut producer = track_producer("test", None);
-		let mut subscriber =
-			producer.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_secs(1))));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(1)));
 
 		let mut open = producer.append_group().unwrap();
 		open.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"key"))
@@ -4453,7 +4449,7 @@ mod test {
 		assert!(!pending.is_finished(), "the real-time budget skips the old frame");
 
 		control
-			.update(Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(2))))
+			.update(Subscription::default().with_max_age(Duration::from_secs(2)))
 			.unwrap();
 
 		let frame = pending
@@ -4465,16 +4461,15 @@ mod test {
 	}
 
 	#[test]
-	fn latency_max_bounds_the_budget() {
+	fn max_age_bounds_the_budget() {
 		// The publisher only keeps a group around for 500ms, so a subscriber asking to
 		// wait ten seconds for one still gives up at 500ms: the same clamp the aggregate
 		// applies, on the subscriber's own side of it.
-		let mut producer = track_producer("test", Info::default().with_latency_max(Duration::from_millis(500)));
+		let mut producer = track_producer("test", Info::default().with_max_age(Duration::from_millis(500)));
 		append_at(&mut producer, 0);
 		append_at(&mut producer, 1000);
 
-		let mut subscriber =
-			producer.subscribe(Subscription::default().with_latency(crate::Latency::max(Duration::from_secs(10))));
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_secs(10)));
 		assert_eq!(drain(&mut subscriber), vec![1]);
 	}
 
@@ -4494,7 +4489,7 @@ mod test {
 		let mut patient = producer.subscribe(
 			Subscription::default()
 				.with_start(Position::group(0))
-				.with_latency(crate::Latency::max(Duration::from_secs(10))),
+				.with_max_age(Duration::from_secs(10)),
 		);
 		patient.start_at(0);
 		assert_eq!(drain(&mut patient), vec![0, 1, 2, 3]);
@@ -4841,7 +4836,7 @@ mod test {
 		}
 
 		// Expire all three groups.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
 
 		// Append seq 6 (becomes new max_sequence).
 		producer.append_group().unwrap(); // seq 6
@@ -4868,7 +4863,7 @@ mod test {
 		// Arrive: seq 5, then seq 3.
 		producer.create_group(group::Info { sequence: 5 }).unwrap();
 
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
 
 		// Seq 3 arrives late; max_sequence is still 5 (at front).
 		producer.create_group(group::Info { sequence: 3 }).unwrap();
@@ -4882,7 +4877,7 @@ mod test {
 		}
 
 		// Expire seq 3 as well.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
 
 		// Seq 2 arrives late, triggering eviction.
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
@@ -6470,7 +6465,7 @@ mod test {
 		producer.append_group().unwrap().finish().unwrap(); // seq 1 demotes seq 0
 
 		// Idle past the window, then the straggler receives a late frame.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
 		straggler
 			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 100]))
 			.unwrap();
@@ -6480,7 +6475,7 @@ mod test {
 		assert!(consumer.peek_group(0).is_some(), "the write restarted the clock");
 
 		// Once the writes stop, the group ages out normally.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
 		producer.append_group().unwrap().finish().unwrap(); // seq 3 runs expiry
 		assert!(consumer.peek_group(0).is_none(), "idle content still expires");
 	}
@@ -6513,7 +6508,7 @@ mod test {
 
 		// Age everything out, then refresh the first four backfills so they sit
 		// fresh at the front of the eviction order, hiding the expired fifth.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
 		for sequence in 1..=4u64 {
 			consumer.fetch_group(sequence, None).await.unwrap();
 		}
@@ -6694,7 +6689,7 @@ mod test {
 		// Keep seq 2 fresh while seq 3 (behind it in eviction order) expires.
 		tokio::time::advance(Duration::from_secs(4)).await;
 		consumer.fetch_group(2, None).await.unwrap();
-		tokio::time::advance(DEFAULT_LATENCY_MAX - Duration::from_secs(2)).await;
+		tokio::time::advance(DEFAULT_MAX_AGE - Duration::from_secs(2)).await;
 		producer.create_group(6u64.into()).unwrap().finish().unwrap();
 
 		let consumer = producer.consume();
@@ -6866,7 +6861,7 @@ mod test {
 		let used = pool.used();
 
 		// Age past the track window; the next write reclaims the backfill.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
 		producer.create_group(6u64.into()).unwrap().finish().unwrap();
 
 		assert!(consumer.peek_group(2).is_none(), "expired backfill is reclaimed");

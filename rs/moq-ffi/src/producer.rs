@@ -40,7 +40,7 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 			.with_priority(info.priority)
 			.with_ordered(info.ordered);
 		if let Some(ms) = info.latency_max_ms {
-			out = out.with_latency_max(std::time::Duration::from_millis(ms));
+			out = out.with_max_age(std::time::Duration::from_millis(ms));
 		}
 		if let Some(ticks) = info.timescale {
 			let scale =
@@ -61,8 +61,8 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 	type Error = MoqError;
 
 	fn try_from(info: &moq_net::track::Info) -> Result<Self, MoqError> {
-		let latency_max_ms = u64::try_from(info.latency_max.as_millis())
-			.map_err(|_| MoqError::Codec("track latency_max duration overflow".into()))?;
+		let latency_max_ms = u64::try_from(info.max_age.as_millis())
+			.map_err(|_| MoqError::Codec("track max_age duration overflow".into()))?;
 		Ok(Self {
 			priority: info.priority,
 			ordered: info.ordered,
@@ -452,7 +452,7 @@ impl MoqBroadcastProducer {
 	///
 	/// Same pattern as moq-boy's `status` and `command` tracks: raw UTF-8/JSON
 	/// bytes written directly to moq-lite groups with no media framing. `info` sets
-	/// track properties (priority, latency_max, timescale); omit for defaults.
+	/// track properties (priority, max age, timescale); omit for defaults.
 	pub fn publish_track(&self, name: String, info: Option<MoqTrackInfo>) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.state.lock().unwrap();

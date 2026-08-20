@@ -157,7 +157,7 @@ pub struct Config {
 	///
 	/// Ingest only (`server publish` / WHIP): WHEP egress reads a broadcast someone else
 	/// declared, so it ignores this.
-	pub latency_max: Option<Duration>,
+	pub max_age: Option<Duration>,
 }
 
 impl Default for Config {
@@ -165,7 +165,7 @@ impl Default for Config {
 		Self {
 			ice_candidates: Vec::new(),
 			udp_bind: SocketAddr::from(([0, 0, 0, 0], 0)),
-			latency_max: None,
+			max_age: None,
 		}
 	}
 }

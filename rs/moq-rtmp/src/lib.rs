@@ -80,8 +80,9 @@ mod server;
 /// bounds buffering rather than the wire rate. Zero would drop stale groups the
 /// instant a newer one arrives, which is too aggressive for RTMP's typical jitter,
 /// so the default holds a couple of seconds. Override per request with
-/// [`Play::with_latency`] / [`Client::with_latency`] or via [`Config::latency`].
-pub const DEFAULT_LATENCY: moq_mux::Latency = moq_mux::Latency::max(Duration::from_secs(2));
+/// [`Play::with_max_age`] / [`Client::with_export_max_age`] or via
+/// [`Config::export_max_age`].
+pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(2);
 
 pub use dial::Client;
 pub use error::{Error, Result};
