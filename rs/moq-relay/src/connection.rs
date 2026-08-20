@@ -128,14 +128,9 @@ impl Connection {
 		// The credential (JWT `exp` or client cert `notAfter`) is only checked at
 		// connect time, so hold the session open no longer than the credential is
 		// valid. Without an expiry, just wait for the session to close.
-		let Some(expires) = token.expires else {
-			return Err(session.closed().await.into());
-		};
-
-		let remaining = expires.duration_since(std::time::SystemTime::now()).unwrap_or_default();
-		match tokio::time::timeout(remaining, session.closed()).await {
-			Ok(err) => Err(err.into()),
-			Err(_) => {
+		tokio::select! {
+			err = session.closed() => Err(err.into()),
+			_ = self.auth.expired(&token) => {
 				tracing::info!("credential expired, closing session");
 				session.abort(moq_net::Error::Unauthorized);
 				Ok(())

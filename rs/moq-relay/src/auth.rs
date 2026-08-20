@@ -1107,6 +1107,18 @@ impl Auth {
 		Self::finalize(&params.path, &params.path, claims)
 	}
 
+	/// Wait until `token`'s credential stops being valid: its JWT `exp` or client
+	/// cert `notAfter` passes. Pends forever for a token without an expiry.
+	pub async fn expired(&self, token: &AuthToken) {
+		match token.expires {
+			Some(expires) => {
+				let remaining = expires.duration_since(std::time::SystemTime::now()).unwrap_or_default();
+				tokio::time::sleep(remaining).await
+			}
+			None => std::future::pending().await,
+		}
+	}
+
 	/// Reduce verified `claims` into an [`AuthToken`].
 	///
 	/// [`Claims::authorize`](moq_token::Claims::authorize) does the overlap check and
@@ -3339,5 +3351,30 @@ api = "https://api.example.com/access"
 		})
 		.await;
 		assert!(result.is_err());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn expired_resolves_at_credential_expiry() {
+		let auth = Auth::default();
+		let mut token = AuthToken::unrestricted(Path::new("").to_owned());
+		token.expires = Some(std::time::SystemTime::now() + std::time::Duration::from_millis(100));
+
+		let start = tokio::time::Instant::now();
+		tokio::time::timeout(std::time::Duration::from_secs(5), auth.expired(&token))
+			.await
+			.expect("an expiring credential must resolve the bound");
+		assert!(
+			start.elapsed() >= std::time::Duration::from_millis(100),
+			"resolved before expiry"
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn expired_pends_without_an_expiry() {
+		let auth = Auth::default();
+		let token = AuthToken::unrestricted(Path::new("").to_owned());
+
+		let bounded = tokio::time::timeout(std::time::Duration::from_millis(200), auth.expired(&token)).await;
+		assert!(bounded.is_err(), "a token without exp must never expire");
 	}
 }
