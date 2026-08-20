@@ -620,3 +620,40 @@ test("runProbe rounds a fractional smoothedRtt instead of killing the stream", a
 		await probing;
 	}
 });
+
+test("a same-tick republish survives its predecessor closing", async () => {
+	const pair = createMockTransportPair(ALPN_05);
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+	const path = Path.from("test");
+
+	const first = new BroadcastProducer();
+	publisher.publish(path, first);
+	first.close();
+
+	const second = new BroadcastProducer();
+	const track = second.createTrack("video");
+	publisher.publish(path, second);
+
+	await first.closed;
+
+	const client = await Stream.open(pair.client);
+	const server = await Stream.accept(pair.server);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	const msg = new Subscribe({ id: 0n, broadcast: path, track: "video", priority: 0 });
+	void publisher.runSubscribe(msg, server);
+
+	const group = new GroupProducer(0);
+	group.writeString("hello");
+	group.close();
+	track.writeGroup(group);
+	track.close();
+
+	try {
+		const resp = await decodeSubscribeResponse(client.reader, Version.DRAFT_05);
+		expect("start" in resp || "end" in resp).toBe(true);
+	} finally {
+		publisher.close();
+		client.close();
+	}
+});
