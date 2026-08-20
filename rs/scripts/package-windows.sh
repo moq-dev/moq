@@ -75,7 +75,7 @@ if [[ -z "$VERSION" ]]; then
 fi
 
 echo "Building $CRATE for $TARGET..."
-cargo build --release --target "$TARGET" -p "$CRATE"
+cargo build --locked --release --target "$TARGET" -p "$CRATE"
 
 # The command name is the crate's `[[bin]]` name (usually the crate name; the
 # `moq-cli` crate ships as `moq`), matching `cargo install` and the other packages.

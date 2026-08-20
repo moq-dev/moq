@@ -54,7 +54,7 @@ CARGO_PROFILE=()
 [[ "$PROFILE" == "release" ]] && CARGO_PROFILE=(--release)
 
 echo "swift check: building moq-ffi for $HOST_TARGET..."
-cargo build ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi \
+cargo build --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |
@@ -70,7 +70,7 @@ STATIC="$TARGET_BASE/$PROFILE/libmoq_ffi.a"
 # Generate bindings.
 BINDGEN_OUT=$(mktemp -d)
 trap 'rm -rf "$BINDGEN_OUT"' EXIT
-cargo run ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi --bin uniffi-bindgen \
+cargo run --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi --bin uniffi-bindgen \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml" -- \
     generate --library "$CDYLIB" --language swift --out-dir "$BINDGEN_OUT"
 

@@ -125,7 +125,7 @@ TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE/Carg
 echo "### building moq-relay + moq-cli ($PROFILE)"
 flag=()
 [[ "$PROFILE" == "release" ]] && flag=(--release)
-(cd "$WORKSPACE" && cargo build ${flag[@]+"${flag[@]}"} -p moq-relay -p moq-cli)
+(cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-relay -p moq-cli)
 RELAY="$TARGET_BASE/$PROFILE/moq-relay"
 MOQ="$TARGET_BASE/$PROFILE/moq"
 

@@ -27,7 +27,7 @@ default:
 
 # keeps uv from fetching moq-ffi off PyPI; maturin just installed it locally.
 _develop:
-    cd moq-ffi && uv run --no-sync maturin develop --uv
+    cd moq-ffi && uv run --no-sync maturin develop --locked --uv
     uv pip install --no-deps -e moq-rs
 
 # Lint + format + editable build + pyright + docs. `--no-install-workspace`

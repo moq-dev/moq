@@ -75,7 +75,7 @@ mkdir -p "$PACKAGE_DIR/include" "$PACKAGE_DIR/lib"
 
 if [[ "$TARGET" == *"-windows-"* ]]; then
     echo "Building libmoq for $TARGET via cargo (Windows path)..."
-    cargo build --release --package libmoq --target "$TARGET" --manifest-path "$WORKSPACE_DIR/Cargo.toml"
+    cargo build --locked --release --package libmoq --target "$TARGET" --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 
     TARGET_DIR="$WORKSPACE_DIR/target/$TARGET/release"
     LIB_FILE="moq.lib"
