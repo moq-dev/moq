@@ -201,9 +201,24 @@ impl Workers {
 	/// [`Spawner::run`].
 	///
 	/// The spawners borrow the group rather than owning their threads, so the
-	/// membership the steering filter was built against cannot be broken up: the
-	/// sockets are released together, by [`Workers::shutdown`] or by dropping the
+	/// threads are released together, by [`Workers::shutdown`] or by dropping the
 	/// group. Empty after the first call, since a worker serves one server.
+	///
+	/// # Run every server, and stop the group when one stops
+	///
+	/// Each [`Server`] owns its socket, and a socket leaving a reuseport group is
+	/// not a local event: the kernel moves the last socket into the vacated slot,
+	/// so connection IDs encoding the moved member now steer out of range and fall
+	/// back to the address hash. Live sessions on a worker that is still healthy
+	/// break.
+	///
+	/// So dropping one of these servers, or letting the future built from it
+	/// return while its siblings serve, corrupts steering for the rest. Run all of
+	/// them, and treat the first one that finishes as the end of the group. The
+	/// type system does not enforce this yet, because doing so means handing the
+	/// group a closure to build each future from, and this crate keeps callbacks
+	/// out of its public API. Tracked in
+	/// <https://github.com/moq-dev/moq/issues/2964>.
 	pub fn split(&mut self) -> Vec<(Server, Spawner<'_>)> {
 		self.workers
 			.iter_mut()
