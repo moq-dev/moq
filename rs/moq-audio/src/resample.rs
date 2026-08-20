@@ -66,6 +66,14 @@ impl Resampler {
 		})
 	}
 
+	/// Input frames buffered from earlier calls, waiting for enough to fill a chunk.
+	///
+	/// The next output starts with these, so a caller stamping its output has to
+	/// reach back this far.
+	pub fn pending_frames(&self) -> usize {
+		self.pending.len() / self.channels
+	}
+
 	/// Resample interleaved `f32` input into interleaved `f32` output.
 	///
 	/// Returns whatever the resampler can produce given the input and
