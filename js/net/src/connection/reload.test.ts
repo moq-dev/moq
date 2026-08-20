@@ -337,14 +337,6 @@ test("an unauthorized session close during setup stops retrying", async () => {
 		attempts++;
 		if (attempts > 1) retried.resolve(new Error("retried a terminal session close"));
 		const pair = createMockTransportPair("");
-		const transportClosed = pair.client.closed;
-		const delayed = Promise.withResolvers<WebTransportCloseInfo>();
-		Object.defineProperty(pair.client, "closed", { value: delayed.promise });
-		const close = pair.client.close.bind(pair.client);
-		pair.client.close = (info?: WebTransportCloseInfo) => {
-			close(info);
-			void transportClosed.then(delayed.resolve, delayed.reject);
-		};
 		void (async () => {
 			const incoming = pair.server.incomingBidirectionalStreams.getReader();
 			const accepted = await incoming.read();
@@ -352,8 +344,10 @@ test("an unauthorized session close during setup stops retrying", async () => {
 			if (accepted.done) return;
 
 			// Some transports reject the SETUP stream before publishing the close info.
+			setTimeout(() => {
+				pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+			}, 0);
 			await accepted.value.writable.abort(toTransport(StreamCode.DeliveryTimeout, "session closing"));
-			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
 		})();
 		return pair.client;
 	};

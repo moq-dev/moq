@@ -234,11 +234,17 @@ async function connectTransport(url: URL, session: WebTransport, wiring: Session
 		return await Promise.race([terminal, negotiate(url, session, wiring)]);
 	} catch (cause) {
 		// A session shutdown can reject its SETUP stream before `closed` publishes the
-		// peer's close code. Closing is idempotent, and makes an independent stream failure
-		// settle `closed` cleanly, so the terminal session result can take precedence.
+		// peer's close code. Give that transport notification its next task before cleanup,
+		// since a local clean close could otherwise replace the peer's terminal result.
+		const pending = Symbol("session close pending");
+		const final = await Promise.race([
+			closed,
+			new Promise<typeof pending>((resolve) => setTimeout(() => resolve(pending), 0)),
+		]);
+		if (final !== pending) throw final ?? new Error("session closed during SETUP");
+
+		// An independent stream failure leaves the session open, so close it before retrying.
 		session.close();
-		const final = await closed;
-		if (final) throw final;
 		throw cause;
 	}
 }
