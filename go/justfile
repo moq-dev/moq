@@ -42,5 +42,4 @@ package-wrapper *args:
 
 # Remove the generated bindings, native libs, and vendoring from go/.
 clean:
-    rm -rf ffi/moq/moq.go ffi/moq/moq.h ffi/moq/lib \
-    	ffi/go.sum ffi/vendor wrapper/go.sum wrapper/vendor
+    rm -rf ffi/moq/moq.go ffi/moq/moq.h ffi/moq/lib ffi/go.sum ffi/vendor wrapper/go.sum wrapper/vendor
