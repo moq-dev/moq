@@ -50,7 +50,7 @@ check $FILES="":
     	echo "py: uv not on PATH, skipping" >&2
     	exit 0
     fi
-    uv sync --no-install-workspace
+    uv sync --locked --no-install-workspace
     uv run --no-sync ruff check .
     uv run --no-sync ruff format --check .
     just _develop
@@ -85,7 +85,7 @@ test $FILES="":
     	echo "py: uv not on PATH, skipping" >&2
     	exit 0
     fi
-    uv sync --no-install-workspace
+    uv sync --locked --no-install-workspace
     just _develop
     uv run --no-sync pytest moq-rs/tests/ moq-ffi/tests/
 
@@ -93,7 +93,7 @@ test $FILES="":
 
 # bindings) and the moq-rs wrapper into the workspace venv.
 build:
-    uv sync --no-install-workspace
+    uv sync --locked --no-install-workspace
     just _develop
 
 # Remove the virtualenv, release dist, bytecode caches, and the uniffi
@@ -121,7 +121,7 @@ package:
 # native moq_ffi is mocked (autodoc_mock_imports in docs/conf.py), so this needs
 # no Rust build: install the pure-python wrapper metadata and render.
 docs:
-    uv sync --no-install-workspace
+    uv sync --locked --no-install-workspace
     uv pip install --no-deps -e moq-rs
     rm -rf dist/docs
     uv run --no-sync --with sphinx --with myst-parser --with furo \

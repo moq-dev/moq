@@ -320,7 +320,7 @@ build:
 
 # Build browser/WASM bindings into @moq/wasm using the pinned wasm-bindgen toolchain.
 wasm:
-    cargo build -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
+    cargo build --locked -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
     wasm-bindgen --target web --out-name moq \
     	--out-dir js/wasm/dist "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/wasm-release/moq_wasm.wasm"
 

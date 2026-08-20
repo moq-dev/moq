@@ -144,7 +144,7 @@ jobs:
         # libgobject-2.0.so.
         env:
           PKG_CONFIG_ALLOW_SYSTEM_LIBS: "1"
-        run: cargo zigbuild --release --target ${{ matrix.target }}.2.34 -p moq-gst
+        run: cargo zigbuild --locked --release --target ${{ matrix.target }}.2.34 -p moq-gst
 
       - name: Package .deb
         shell: bash

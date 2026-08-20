@@ -81,7 +81,7 @@ jobs:
 
       - name: Install cargo-ndk (Android)
         if: contains(matrix.target, 'android')
-        run: cargo install cargo-ndk
+        run: cargo install --locked cargo-ndk
 
       - name: Build
         shell: bash

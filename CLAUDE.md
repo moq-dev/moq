@@ -88,6 +88,9 @@ This root file holds only cross-cutting rules that apply everywhere (writing sty
 
 - When adding new dependencies, always use the **newest stable version** available.
 - **Prefer a maintained third-party crate over hand-rolling non-core functionality** (standard container/codec parsers, compression, serialization, etc.). Reserve bespoke code for the wire/protocol layers where we need full control or no suitable crate exists.
+- **Every build resolves from the committed lockfile.** The cargo, uv, and bun invocations in the justfiles and workflows pass `--locked` / `--frozen-lockfile`, so a manifest that has drifted from its lockfile is a hard error instead of a silent re-resolution against whatever is newest on the registry. That drift is the window a compromised release would come through, so the failure is the point.
+- Because of that, editing a `Cargo.toml` / `pyproject.toml` / `package.json` dependency and running `just check` will fail until you regenerate the lockfile. Commit the lockfile change alongside the manifest change: `cargo update -p <crate> --precise <version>` (or a bare `cargo check`), `uv lock`, `bun install`.
+- Dependabot holds newly published versions for 7 days before proposing them (`cooldown` in [.github/dependabot.yml](.github/dependabot.yml)), which buys time for a compromised release to be yanked. That gate only covers Dependabot; a hand-run `cargo update` / `bun update` / `uv lock` bypasses it, so prefer letting Dependabot drive routine bumps.
 
 ## Package Versions
 

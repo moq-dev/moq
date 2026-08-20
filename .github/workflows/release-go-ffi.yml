@@ -134,7 +134,7 @@ jobs:
 
       - name: Install uniffi-bindgen-go
         run: |
-          cargo install uniffi-bindgen-go \
+          cargo install --locked uniffi-bindgen-go \
             --git https://github.com/NordSecurity/uniffi-bindgen-go \
             --tag "$UNIFFI_BINDGEN_GO_TAG"
 
