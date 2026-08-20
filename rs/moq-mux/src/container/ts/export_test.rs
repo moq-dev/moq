@@ -77,6 +77,11 @@ async fn drain_with<E: tscat::Catalog>(mut exporter: Export<E>) -> BytesMut {
 	out
 }
 
+/// An adaptation-field-only single-packet frame: the exporter's PCR carriage.
+fn is_pcr_frame(frame: &Frame) -> bool {
+	frame.payload.len() == 188 && frame.payload[3] & 0x30 == 0x20
+}
+
 fn assert_packet_aligned(ts: &[u8]) {
 	assert!(!ts.is_empty(), "no TS output");
 	assert_eq!(ts.len() % 188, 0, "output not a whole number of 188-byte packets");
@@ -567,11 +572,14 @@ async fn export_pcr_is_a_uniform_ramp() {
 	// every PES unit's effective decode time against the clock preceding it.
 	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
 	let mut pcr_pid = None;
+	let mut pcr_pids = Vec::new();
 	let mut pcrs: Vec<u64> = Vec::new();
 	let mut units = 0usize;
 	while let Some(packet) = reader.read_ts_packet().unwrap() {
 		if let Some(pcr) = packet.adaptation_field.as_ref().and_then(|af| af.pcr) {
-			assert_eq!(Some(packet.header.pid), pcr_pid, "PCR must ride the announced PID");
+			// The clock leads the stream, so the first PCR precedes the PMT that
+			// names its PID; collect and check at the end.
+			pcr_pids.push(packet.header.pid);
 			assert!(packet.payload.is_none(), "PCR rides adaptation-field-only packets");
 			pcrs.push(pcr.as_u64() / 300);
 		}
@@ -591,11 +599,162 @@ async fn export_pcr_is_a_uniform_ramp() {
 
 	assert!(units > 50, "expected the full feed, got {units} PES units");
 	assert!(pcrs.len() > 50, "expected a dense clock, got {} PCRs", pcrs.len());
+	let pcr_pid = pcr_pid.expect("PMT must announce a PCR PID");
+	assert!(
+		pcr_pids.iter().all(|&pid| pid == pcr_pid),
+		"PCR must ride the announced PID"
+	);
 	// One grid step apart, exactly: uniform, monotonic, and far under the 40 ms gate.
 	let step = Duration::from_millis(25).as_micros() as u64 * 90 / 1_000;
 	for (i, w) in pcrs.windows(2).enumerate() {
 		assert_eq!(w[1] - w[0], step, "PCR interval off the grid at {i}: {w:?}");
 	}
+}
+
+/// A timeline that starts inside the decode-clock reserve backs the PCR off
+/// through the 33-bit wrap instead of saturating at zero: the grid step stays
+/// uniform from the very first slot (saturation would emit 0 then 2234, and a
+/// large catalog jitter would freeze several leading PCRs at zero).
+#[tokio::test(start_paused = true)]
+async fn export_pcr_wraps_below_the_reserve_at_start() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+	let track = broadcast
+		.create_track(broadcast.unique_name(".aac"), hang::container::track_info())
+		.unwrap();
+	{
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		catalog.lock().audio.renditions.insert(track.name().to_string(), cfg);
+	}
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+	for i in 0..4u64 {
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_micros(i * 20_000).unwrap(),
+				duration: None,
+				payload: Bytes::from_static(&[0x01, 0x02, 0x03, 0x04]),
+				keyframe: true,
+			})
+			.unwrap();
+	}
+	producer.finish().unwrap();
+
+	let mut exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	let frames = drain_frames(&mut exporter).await;
+
+	// Each PCR is its own single-packet frame, stamped at its slot boundary so the
+	// caller's pacer delivers the clock at the time it asserts.
+	let mut pcrs: Vec<u64> = Vec::new();
+	for (i, frame) in frames.iter().enumerate() {
+		assert_packet_aligned(&frame.payload);
+		let packet = &frame.payload[..188];
+		// adaptation-field-only packets (adaptation_field_control == 0b10) are the clock.
+		if packet[3] & 0x30 != 0x20 {
+			continue;
+		}
+		assert_eq!(frame.payload.len(), 188, "a PCR frame is one packet, at {i}");
+		assert_eq!(packet[5], 0x10, "PCR_flag alone, at {i}");
+		// The six reserved bits between base and extension are ones (ISO 13818-1);
+		// the crate's serializer writes zeros here, which is why the packet is
+		// laid out by hand.
+		assert_eq!(packet[10] & 0x7e, 0x7e, "reserved bits must be ones, at {i}");
+		let base = (u64::from(packet[6]) << 25)
+			| (u64::from(packet[7]) << 17)
+			| (u64::from(packet[8]) << 9)
+			| (u64::from(packet[9]) << 1)
+			| u64::from(packet[10] >> 7);
+		// The frame is paced at the slot the value asserts (plus the reserve).
+		let slot_ticks = frame.timestamp.as_micros() * 90_000 / 1_000_000;
+		assert_eq!(
+			base,
+			(slot_ticks as u64).wrapping_sub(16) & WIRE,
+			"pacing off value, at {i}"
+		);
+		pcrs.push(base);
+	}
+
+	const WIRE: u64 = (1 << 33) - 1;
+	assert!(pcrs.len() >= 2, "expected at least two grid slots, got {pcrs:?}");
+	// Slot 0 minus the 16-tick default reserve, mod 2^33.
+	assert_eq!(pcrs[0], WIRE - 15, "slot 0 backs off through the wrap: {pcrs:?}");
+	// Every step is exactly one 25 ms slot (2250 ticks) in the circular clock.
+	for (i, w) in pcrs.windows(2).enumerate() {
+		assert_eq!(w[1].wrapping_sub(w[0]) & WIRE, 2250, "step off the grid at {i}: {w:?}");
+	}
+}
+
+/// The clock backs off by the largest reserve of any track, not just the PCR
+/// track's: a second rendition with a deeper reorder (catalog `jitter`) authors
+/// its DTS further behind the PTS, and a clock respecting only the PCR track's
+/// reserve would run ahead of those frames' decode times.
+#[tokio::test(start_paused = true)]
+async fn export_pcr_respects_every_renditions_reserve() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
+	let mut make = |name: &str, jitter: Option<Duration>| {
+		let track = broadcast.create_track(name, hang::container::track_info()).unwrap();
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: false,
+		});
+		cfg.container = Container::Legacy;
+		cfg.description = Some(avcc.clone());
+		cfg.jitter = jitter;
+		catalog.lock().video.renditions.insert(name.to_string(), cfg);
+		Producer::new(track, HangContainer::Legacy)
+	};
+	// "a" gets the lowest PID and so carries the PCR, with the tiny default
+	// reserve; "b" declares a 100 ms reorder depth.
+	let mut a = make("a.avc1", None);
+	let mut b = make("b.avc1", Some(Duration::from_millis(100)));
+
+	let idr = [0x65u8; 32];
+	for i in 0..25u64 {
+		let timestamp = Timestamp::from_millis(10_000 + i * 40).unwrap();
+		for video in [&mut a, &mut b] {
+			video
+				.write(Frame {
+					timestamp,
+					duration: None,
+					payload: length_prefixed(&[&idr]),
+					keyframe: true,
+				})
+				.unwrap();
+		}
+	}
+	a.finish().unwrap();
+	b.finish().unwrap();
+
+	let ts = drain(consumer).await;
+	assert_packet_aligned(&ts);
+
+	// In transport order, every PES unit (either rendition) decodes at or after
+	// the last PCR preceding it.
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	let mut last_pcr = None;
+	let mut units = 0usize;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(pcr) = packet.adaptation_field.as_ref().and_then(|af| af.pcr) {
+			last_pcr = Some(pcr.as_u64() / 300);
+		}
+		if let Some(TsPayload::PesStart(pes)) = packet.payload {
+			units += 1;
+			let pts = pes.header.pts.expect("PES carried no PTS").as_u64();
+			let decode = pes.header.dts.map(|t| t.as_u64()).unwrap_or(pts);
+			if let Some(pcr) = last_pcr {
+				assert!(decode >= pcr, "unit decodes at {decode}, before the clock at {pcr}");
+			}
+		}
+	}
+	assert!(units >= 50, "expected both renditions' units, got {units}");
 }
 
 /// Full SCTE-35 round-trip: import `bbb.ts` (real H.264 + AAC) into a broadcast
@@ -1964,8 +2123,12 @@ async fn late_join_matches_a_running_exporter() {
 async fn late_join_matches_a_running_exporter_without_video() {
 	let (a, b) = export_twice(false).await;
 
-	// The joiner leads with PAT/PMT on its very first frame so a receiver can tune in; the
-	// running exporter has no reason to repeat them there. From the next frame on the two are
-	// rendering the same stream.
-	assert_only_continuity_differs(&a, &b, b[1].timestamp);
+	// The joiner leads with its own PCR and a PAT/PMT-carrying tune-in frame so a receiver
+	// can start; the running exporter has no reason to repeat those there. From the first
+	// timestamp after the tune-in frame the two are rendering the same stream. (The joiner's
+	// leading PCR is stamped at a slot boundary at or before the tune-in frame, so comparing
+	// strictly after the tune-in excludes both.)
+	let tune_in = b.iter().find(|f| !is_pcr_frame(f)).expect("a tune-in frame").timestamp;
+	let from = b.iter().map(|f| f.timestamp).filter(|&t| t > tune_in).min().unwrap();
+	assert_only_continuity_differs(&a, &b, from);
 }

@@ -85,8 +85,8 @@ pub struct Export<E: catalog::Catalog = ()> {
 	psi: Option<Psi>,
 	/// Media timestamp of the last PAT/PMT emission ([`due`]).
 	last_psi: Option<Timestamp>,
-	/// Media timestamp of the last PCR grid emission ([`Self::write_pcr`]).
-	last_pcr: Option<Timestamp>,
+	/// Grid slot of the last PCR emission ([`Self::write_pcr`]).
+	last_pcr: Option<u128>,
 	/// Tune-in point: the first video keyframe's timestamp, captured when the program
 	/// tables are built. Non-video frames before it are dropped so the keyframe leads
 	/// the stream.
@@ -332,8 +332,15 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 
 		// 4. Emit the smallest-timestamp pending frame as a PES packet (the first
-		// one carries the buffered PAT/PMT).
+		// one carries the buffered PAT/PMT). The program clock leads it: each grid
+		// slot the frame's timestamp has crossed goes out first as its own frame,
+		// stamped at the slot boundary, so the caller's pacer places the PCR at the
+		// time it asserts instead of bunching it with the frame that revealed it.
 		if let Some(name) = self.pick_next_track() {
+			let timestamp = self.tracks[&name].pending.as_ref().unwrap().timestamp;
+			if let Some(out) = self.write_pcr(timestamp)? {
+				return Poll::Ready(Ok(Some(out)));
+			}
 			let frame = self.tracks.get_mut(&name).unwrap().pending.take().unwrap();
 			let out = self.write_frame(&name, frame)?;
 			return Poll::Ready(Ok(Some(out)));
@@ -791,10 +798,6 @@ impl<E: catalog::Catalog> Export<E> {
 			self.last_si.insert(pid, frame.timestamp);
 		}
 
-		// The program clock, on its own packets rather than the PES units (see
-		// `write_pcr` for why the units can't carry it).
-		self.write_pcr(&mut out, frame.timestamp)?;
-
 		match es_payload {
 			// Section-framed verbatim (SCTE-35, ...) rides in private sections, not PES;
 			// carry the bytes verbatim.
@@ -829,7 +832,9 @@ impl<E: catalog::Catalog> Export<E> {
 	}
 
 	/// Emit the program clock: one adaptation-field-only packet on the PCR PID per
-	/// [`PCR_INTERVAL`] slot the media timeline has crossed since the last emission.
+	/// [`PCR_INTERVAL`] slot of the media timeline, each returned as its own
+	/// [`Frame`] stamped at its slot boundary so the caller's pacer delivers the
+	/// packet at the time it asserts.
 	///
 	/// The PES units cannot carry the clock. Frames arrive in decode order, so the
 	/// authored DTS is a saw: a reference frame leaps a whole reorder span ahead and
@@ -839,69 +844,90 @@ impl<E: catalog::Catalog> Export<E> {
 	/// because a groomer can only place the clock samples it receives. So the PCR
 	/// asserts its own uniform ramp instead: absolute grid slots on the media
 	/// timeline (shared by every exporter of the broadcast, like [`due`]), each
-	/// backed off by the PCR track's decode-clock reserve so every PES unit still
-	/// decodes at or after the clock that precedes it.
-	fn write_pcr(&mut self, out: &mut Vec<u8>, timestamp: Timestamp) -> anyhow::Result<()> {
+	/// backed off by the largest decode-clock reserve of any track so every PES
+	/// unit, whichever rendition it belongs to, decodes at or after the clock that
+	/// precedes it.
+	///
+	/// `timestamp` is the next media frame's; `None` when its slot has already been
+	/// served (the caller then emits the media frame itself). One slot per call:
+	/// missed slots drain over successive polls, each at its own boundary, capped at
+	/// [`PCR_BACKFILL`]. The clock always leads, including ahead of the very first
+	/// frame's PAT/PMT: a receiver joins a TS mid-stream at an arbitrary packet, so
+	/// there is no "first" on the wire, and holding the clock back would leave the
+	/// leading PES without one.
+	fn write_pcr(&mut self, timestamp: Timestamp) -> anyhow::Result<Option<Frame>> {
 		let pcr_pid = self.psi.as_ref().context("PSI not built")?.pcr_pid;
 		let current = slot(timestamp, PCR_INTERVAL);
-		let start = match self.last_pcr {
+		let index = match self.last_pcr {
 			None => current,
 			Some(last) => {
-				let last = slot(last, PCR_INTERVAL);
 				// A reordered (B-frame) timestamp steps backwards into a slot already
 				// served; the clock only ever moves forward.
 				if current <= last {
-					return Ok(());
+					return Ok(None);
 				}
+				// Backfill every missed slot so the ramp stays uniform when frames are
+				// coarser than the grid, but cap it: past the cap the media itself
+				// gapped, and a dense clock history for a span that carried no bytes
+				// helps nobody.
 				(last + 1).max(current.saturating_sub(PCR_BACKFILL - 1))
 			}
 		};
+		// The largest reserve of any track, not just the PCR track's: every
+		// rendition's PES must decode at or after the clock, and each video track
+		// backs its DTS off by its own catalog jitter.
 		let reserve = self
 			.tracks
 			.values()
-			.find(|t| t.pid == pcr_pid)
 			.map(|t| t.dts_reserve)
+			.max()
 			.unwrap_or(DEFAULT_DTS_RESERVE);
-		for index in start..=current {
-			let ticks = slot_ticks(index, PCR_INTERVAL).saturating_sub(reserve);
-			self.write_pcr_packet(out, pcr_pid, ticks)?;
-		}
-		self.last_pcr = Some(timestamp);
-		Ok(())
+		// Back off through the 33-bit wrap rather than saturating: a timeline that
+		// starts inside the reserve would otherwise clamp its first slots to zero
+		// and break the uniform step. The wire field is a circular clock, so the
+		// masked wrapped value is the correct mod-2^33 back-off.
+		let ticks = slot_ticks(index, PCR_INTERVAL).wrapping_sub(reserve);
+		let payload = self.pcr_packet(pcr_pid, ticks)?;
+		self.last_pcr = Some(index);
+		Ok(Some(Frame {
+			timestamp: Timestamp::from_micros((index * PCR_INTERVAL.as_micros()) as u64)?,
+			duration: None,
+			payload: Bytes::from(payload),
+			keyframe: false,
+		}))
 	}
 
 	/// One adaptation-field-only TS packet carrying `ticks` (continuous 90 kHz) as
-	/// its PCR; stuffing fills the rest. A packet without a payload does not
-	/// increment the continuity counter (ISO 13818-1 2.4.3.3): it repeats the
-	/// previous packet's value, which is one behind the stored next-to-use value.
-	fn write_pcr_packet(&mut self, out: &mut Vec<u8>, pid: u16, ticks: u64) -> anyhow::Result<()> {
-		let next = self.counters.entry(pid).or_default().as_u8();
-		let continuity_counter =
-			ContinuityCounter::from_u8(next.wrapping_sub(1) & ContinuityCounter::MAX).map_err(anyhow::Error::msg)?;
-		let pcr = TsTimestamp::new(ticks & TS_TIMESTAMP_MASK).map_err(anyhow::Error::msg)?;
-		let packet = TsPacket {
-			header: TsHeader {
-				transport_error_indicator: false,
-				transport_priority: false,
-				pid: Pid::new(pid)?,
-				transport_scrambling_control: TransportScramblingControl::NotScrambled,
-				continuity_counter,
-			},
-			adaptation_field: Some(AdaptationField {
-				discontinuity_indicator: false,
-				random_access_indicator: false,
-				es_priority_indicator: false,
-				pcr: Some(pcr.into()),
-				opcr: None,
-				splice_countdown: None,
-				transport_private_data: Vec::new(),
-				extension: None,
-			}),
-			payload: None,
-		};
-		let mut writer = TsPacketWriter::new(out);
-		writer.write_ts_packet(&packet).map_err(anyhow::Error::msg)?;
-		Ok(())
+	/// its PCR, laid out by hand: the `mpeg2ts` serializer writes the six reserved
+	/// bits between PCR base and extension as zeros where ISO 13818-1 requires
+	/// ones, and strict analyzers flag that. There is no payload, so the field's
+	/// stuffing fills the packet and the continuity counter is not incremented
+	/// (ISO 13818-1 2.4.3.3): it repeats the previous packet's value, one behind
+	/// the stored next-to-use value.
+	fn pcr_packet(&mut self, pid: u16, ticks: u64) -> anyhow::Result<Vec<u8>> {
+		anyhow::ensure!(pid <= 0x1FFF, "PID out of range: {pid}");
+		let cc = self.counters.entry(pid).or_default().as_u8().wrapping_sub(1) & ContinuityCounter::MAX;
+		let base = ticks & TS_TIMESTAMP_MASK;
+		let mut p = Vec::with_capacity(TsPacket::SIZE);
+		p.push(0x47);
+		p.push((pid >> 8) as u8);
+		p.push(pid as u8);
+		// adaptation_field_control = adaptation field only, no scrambling.
+		p.push(0x20 | cc);
+		// adaptation_field_length covers the rest of the packet.
+		p.push(183);
+		// PCR_flag alone.
+		p.push(0x10);
+		// program_clock_reference_base (33 bits), 6 reserved '1' bits, and a zero
+		// 9-bit extension (the grid is 90 kHz-exact, so there is nothing sub-tick).
+		p.push((base >> 25) as u8);
+		p.push((base >> 17) as u8);
+		p.push((base >> 9) as u8);
+		p.push((base >> 1) as u8);
+		p.push(((base as u8) << 7) | 0x7e);
+		p.push(0x00);
+		p.resize(TsPacket::SIZE, 0xff);
+		Ok(p)
 	}
 
 	/// Packetize a PES payload into 188-byte TS packets.
