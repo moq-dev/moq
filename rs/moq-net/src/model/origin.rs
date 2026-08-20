@@ -1669,21 +1669,25 @@ impl FrontState {
 		// however deep the chain behind it really is. Only a local publish, which
 		// reaches no session at all, is structurally unable to close a loop.
 		//
-		// Three exemptions, all repairs rather than improvements. Losing the
-		// incumbent has to apply at once or the front strands itself on a source it
-		// cannot use. Leaving a drain is exempt on principle as well as for latency:
-		// a draining route makes us advertise the ceiling, so no peer can prefer us,
-		// so we cannot be one end of a mutual adoption. An incumbent that taints a
-		// reader goes the same way: `serve_route` already refuses to serve from it,
-		// so we are not pulling through that peer and there is no mutual adoption to
-		// hold off, while keeping it active would leave `routes_snapshot` advertising
-		// a chain the front does not actually serve from.
+		// Two exemptions. Losing the incumbent has to apply at once, or the front
+		// strands itself with nothing to serve from at all. An incumbent that taints
+		// a reader is the same: `serve_route` already refuses it, so keeping it
+		// active would only leave `routes_snapshot` advertising a chain the front
+		// does not serve from.
+		//
+		// A drain is deliberately NOT exempt. It reads like an emergency, but a
+		// GOAWAY keeps working for many seconds, so waiting costs a little
+		// optimality rather than any availability, and a correlated drain is exactly
+		// when several relays re-parent at once off prices that have not landed yet.
+		// The two remaining exemptions also compose: if the drain does become a
+		// death, the route leaves the table and the lost-incumbent path applies
+		// immediately, so the wait is bounded by the session it is waiting on.
 		let held = target != self.active
 			&& self.active.is_some_and(|id| {
 				self.routes
 					.iter()
 					.find(|r| r.id == id)
-					.is_some_and(|r| r.route.cost.warm < broadcast::DRAIN_COST && !self.taints_a_reader(&r.route))
+					.is_some_and(|r| !self.taints_a_reader(&r.route))
 			}) && target.is_some_and(|id| {
 			let last = |id: u64| {
 				self.routes
@@ -3892,11 +3896,12 @@ mod tests {
 		assert_ne!(a.hold_deadline(now), b.hold_deadline(now));
 	}
 
-	/// Leaving a draining route is never held: the drain makes us advertise the
-	/// ceiling, so no peer can prefer us and we cannot be one end of a mutual
-	/// adoption. Waiting would only burn the graceful-handover window.
+	/// A drain is held like any other move. It reads like an emergency, but a GOAWAY
+	/// keeps serving for many seconds, so the wait costs optimality rather than
+	/// availability, and a fleet draining together is precisely when several relays
+	/// re-parent at once off prices that have not landed yet.
 	#[test]
-	fn test_handover_hold_exempts_a_drain() {
+	fn test_handover_hold_covers_a_drain() {
 		let peer = Origin::new(3).unwrap();
 		let now = web_async::time::Instant::now();
 		let mut state = front_state(
@@ -3904,8 +3909,15 @@ mod tests {
 			vec![upstream_route(broadcast::DRAIN_COST), sibling_route(peer, 4)],
 		);
 
-		assert_eq!(state.reselect(true, now), None, "a drain must not arm the hold");
-		assert_eq!(state.active, Some(1), "leaving a drain must be immediate");
+		assert!(state.reselect(true, now).is_some(), "a drain must still arm the hold");
+		assert_eq!(state.active, Some(0), "leaving a drain must not apply yet");
+
+		// If the drain becomes a death the route leaves the table, and the
+		// lost-incumbent exemption applies at once: the wait is bounded by the
+		// session it is waiting on.
+		state.routes.retain(|r| r.id != 0);
+		assert_eq!(state.reselect(true, now), None);
+		assert_eq!(state.active, Some(1), "a drain that dies must fail over immediately");
 	}
 
 	/// The hold covers re-parenting onto anything reached through a session. Only
@@ -8422,6 +8434,9 @@ mod tests {
 		draining.drain();
 		settle().await;
 
+		// A GOAWAY keeps serving for many seconds, so the migration waits out the
+		// re-parent hold like any other move rather than racing off stale prices.
+		settle_handover().await;
 		let migrated = broadcast.route_changed().await.unwrap();
 		assert_eq!(
 			migrated.cost,

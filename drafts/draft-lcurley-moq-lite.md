@@ -862,7 +862,15 @@ A relay SHOULD therefore delay re-parenting onto a route learned from a peer, re
 The delay MUST exceed the time an advertisement takes to cross the mesh, and SHOULD carry a spread that is stable per relay and broadcast, so that a group of relays reconsidering the same broadcast does not do so on a single instant.
 Having no subscribers does not exempt a relay: the choice it records is the one it will pull down when a subscriber does arrive, so an unserved relay is a ring that starts later rather than one that cannot form.
 Neither does a short path, since a peer that does not carry Hop IDs is indistinguishable from the original publisher however deep the chain behind it is.
-Three cases are exempt, all of them repairs or non-edges: a fresh session from the peer already being pulled from, which is the same dependency rather than a new one; a route that has disappeared, since waiting strands the relay on nothing; and a route that is draining, since a relay whose serving path costs the saturation ceiling advertises the ceiling and a subscriber with any alternative should leave while the handover window is open.
+Two cases are exempt: a fresh session from the peer already being pulled from, which is the same dependency rather than a new one, and a route that has disappeared, since waiting strands the relay with nothing to serve from at all.
+
+The second exemption is a deliberate residual rather than a proof.
+Relays that lose their routes together can each re-parent onto a neighbour whose advertised cost has not yet caught up, forming the same ring the delay exists to prevent.
+It is accepted because the alternative is worse in the common case: an isolated relay that waits has no source for the length of the delay, isolated losses far outnumber correlated ones, and a ring that does form is broken by the hop chain once the real paths propagate.
+
+A draining route is deliberately not exempt, even though leaving one is urgent.
+A session that received a GOAWAY keeps serving until its handover window closes, so the delay costs a relay some optimality rather than any availability, while a fleet draining together is exactly the case where several relays re-parent at once off costs that have not yet propagated.
+The exemptions also compose: should the drain become a disconnection, the route leaves the relay's table and the disappeared-route case applies immediately, so the delay is bounded by the session it is waiting on.
 
 
 ## ANNOUNCE_END {#announce-end}
