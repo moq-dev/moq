@@ -5,7 +5,7 @@ import (
 	"iter"
 	"sync"
 
-	ffi "github.com/moq-dev/moq-go-ffi/moq"
+	ffi "moq.dev/moq-ffi/moq"
 )
 
 // Transport is the wire transport an incoming session arrived over.

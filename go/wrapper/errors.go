@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	ffi "github.com/moq-dev/moq-go-ffi/moq"
+	ffi "moq.dev/moq-ffi/moq"
 )
 
 // Error is the error type returned across the FFI boundary. Compare against the

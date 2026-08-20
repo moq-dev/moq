@@ -183,7 +183,7 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 
 | Change in | Also update |
 |---|---|
-| `rs/moq-ffi` | `rs/libmoq`, `{py,swift,kt}/`, `go/wrapper/moq/*.go` (the `go/ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs`), `doc/lib/{py,swift,kt,go,c}` |
+| `rs/moq-ffi` | `rs/libmoq`, `{py,swift,kt}/`, `go/wrapper/*.go` (the `go/ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs`), `doc/lib/{py,swift,kt,go,c}` |
 | `rs/moq-net` wire/API | `js/net`, `doc/concept`, `drafts/draft-lcurley-moq-lite.md` (if the wire spec changes) |
 | `rs/hang` catalog/container | `js/hang`, `doc/concept`, `drafts/draft-lcurley-moq-hang.md` (if the format spec changes) |
 | `rs/moq-token` | `js/token` |

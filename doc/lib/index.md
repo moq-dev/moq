@@ -51,7 +51,7 @@ Async sequences and structured concurrency for iOS, iPadOS, and macOS. Distribut
 
 ### [Go](/lib/go/)
 
-cgo bindings with prebuilt static libraries per platform. Published as [`github.com/moq-dev/moq-go`](https://github.com/moq-dev/moq-go) (the ergonomic wrapper, imported as `moq`), atop the raw [`github.com/moq-dev/moq-go-ffi`](https://github.com/moq-dev/moq-go-ffi) bindings.
+cgo bindings with prebuilt static libraries per platform. Published as [`moq.dev/moq`](https://pkg.go.dev/moq.dev/moq) (the ergonomic wrapper), atop the raw [`moq.dev/moq-ffi`](https://pkg.go.dev/moq.dev/moq-ffi) bindings.
 
 ## Picking a language
 

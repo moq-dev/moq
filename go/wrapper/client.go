@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	ffi "github.com/moq-dev/moq-go-ffi/moq"
+	ffi "moq.dev/moq-ffi/moq"
 )
 
 // ClientOption configures a client created with Dial.

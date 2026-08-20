@@ -9,18 +9,18 @@ The ergonomic Go module for [Media over QUIC](/). This is the package most calle
 
 It wraps the raw [moq-ffi](/lib/go/moq-ffi) bindings in idiomatic Go: `context.Context` cancellation, Go `error` returns (with an `IsShutdown` helper for graceful Cancelled/Closed), and Go 1.23 range-over-func iterators (`iter.Seq2`) for live streams. The record and enum types are re-exported without the `Moq` prefix, so most programs never import the ffi package directly.
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/moq-dev/moq-go.svg)](https://pkg.go.dev/github.com/moq-dev/moq-go)
+[![Go Reference](https://pkg.go.dev/badge/moq.dev/moq.svg)](https://pkg.go.dev/moq.dev/moq)
 
-Full API reference: [pkg.go.dev/github.com/moq-dev/moq-go](https://pkg.go.dev/github.com/moq-dev/moq-go), generated automatically from the godoc.
+Full API reference: [pkg.go.dev/moq.dev/moq](https://pkg.go.dev/moq.dev/moq), generated automatically from the godoc.
 
 ## Install
 
 ```bash
-go get github.com/moq-dev/moq-go@latest
+go get moq.dev/moq@latest
 ```
 
 ```go
-import "github.com/moq-dev/moq-go/moq"
+import "moq.dev/moq"
 ```
 
 `CGO_ENABLED=1` is required (the default on Unix). The prebuilt `libmoq_ffi.a` comes transitively from [moq-ffi](/lib/go/moq-ffi), which the wrapper requires; cgo selects the right archive automatically, so there's no Rust toolchain or shared-library setup.
@@ -539,11 +539,11 @@ just go check
 
 This runs `go/scripts/check.sh`, which builds `moq-ffi` for the host arch, regenerates the bindings with `uniffi-bindgen-go`, stages both the ffi and wrapper modules into `dist/` (wiring the wrapper to the freshly-built ffi via a local `replace`), and runs `go vet`/`go build`/`go test`. Requires `cargo`, `go`, and `uniffi-bindgen-go` on the path; see [moq-ffi](/lib/go/moq-ffi) for the install.
 
-The committed `go/wrapper/go.mod` carries a `require github.com/moq-dev/moq-go-ffi v0.0.0` placeholder; the local `replace` and CI's release-time rewrite supply the real version. Don't "fix" it by hand.
+The committed `go/wrapper/go.mod` carries a `require moq.dev/moq-ffi v0.0.0` placeholder; the local `replace` and CI's release-time rewrite supply the real version. Don't "fix" it by hand.
 
 ## See also
 
-- API reference: [pkg.go.dev/github.com/moq-dev/moq-go](https://pkg.go.dev/github.com/moq-dev/moq-go)
+- API reference: [pkg.go.dev/moq.dev/moq](https://pkg.go.dev/moq.dev/moq)
 - Source: [go/wrapper](https://github.com/moq-dev/moq/tree/main/go/wrapper)
 - Mirror repo: [moq-dev/moq-go](https://github.com/moq-dev/moq-go)
 - Raw bindings it builds on: [moq-ffi](/lib/go/moq-ffi)

@@ -14,8 +14,8 @@ name: Release Go
 #                           release is mid-flight), the job skips: the
 #                           workflow_run below republishes once the ffi lands.
 #   * Release Go FFI done  — a new ffi just published to the moq-go-ffi mirror.
-#                           Re-cut the wrapper so `moq-go@latest` floats to the
-#                           newest native core (Go MVS won't float on its own).
+#                           Re-cut the wrapper so `moq.dev/moq@latest` floats to
+#                           the newest native core (Go MVS won't float on its own).
 #                           Chaining off the upstream run guarantees the mirror
 #                           tag is already present, so there is nothing to poll.
 #

@@ -1,6 +1,6 @@
 // Package moq is the raw UniFFI binding layer for Media over QUIC, published as
-// github.com/moq-dev/moq-go-ffi. Most callers want the ergonomic
-// github.com/moq-dev/moq-go wrapper, which builds on this package.
+// moq.dev/moq-ffi. Most callers want the ergonomic
+// moq.dev/moq wrapper, which builds on this package.
 //
 // The exported API is generated from rs/moq-ffi via uniffi-bindgen-go and
 // dropped in alongside this file (moq.go) by scripts/package-ffi.sh; the in-tree

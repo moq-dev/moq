@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Assemble the moq-go ergonomic wrapper module: copy the in-tree wrapper
-# skeleton, rewrite its github.com/moq-dev/moq-go-ffi `require` to the target
-# ffi version, generate go.sum, and tar the result.
+# Assemble the moq.dev/moq ergonomic wrapper module: copy the in-tree wrapper
+# skeleton, rewrite its moq.dev/moq-ffi `require` to the target ffi version,
+# generate go.sum, and tar the result.
 #
 # The staged tree is deliberately PATCH-INDEPENDENT: it carries the MAJOR.MINOR
 # line (VERSION), the ffi require, and the hand-written source, but nothing that
@@ -99,13 +99,15 @@ OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 PKG_NAME="moq-go-${LINE}-wrapper"
 PKG_STAGE="$OUTPUT_DIR/$PKG_NAME"
 rm -rf "$PKG_STAGE"
-mkdir -p "$PKG_STAGE/moq"
+mkdir -p "$PKG_STAGE"
 
 # --- 1. Copy in-tree source ---
+# The package sits at the module root, so the import path is the module path:
+# `import "moq.dev/moq"` binds `moq` with no alias.
 cp "$SOURCE_DIR/go.mod" "$PKG_STAGE/"
 cp "$SOURCE_DIR/VERSION" "$PKG_STAGE/"
-for f in "$SOURCE_DIR"/moq/*.go; do
-    cp "$f" "$PKG_STAGE/moq/"
+for f in "$SOURCE_DIR"/*.go; do
+    cp "$f" "$PKG_STAGE/"
 done
 
 # Dual-license files lifted from the workspace root.
@@ -124,13 +126,13 @@ done
 # none, but `just go check` adds one locally).
 (
     cd "$PKG_STAGE"
-    go mod edit -require="github.com/moq-dev/moq-go-ffi@v${FFI_VERSION}"
-    go mod edit -dropreplace="github.com/moq-dev/moq-go-ffi"
+    go mod edit -require="moq.dev/moq-ffi@v${FFI_VERSION}"
+    go mod edit -dropreplace="moq.dev/moq-ffi"
 )
 
 # --- 3. Thin consumer-facing README (full dev README lives in the monorepo) ---
 cat >"$PKG_STAGE/README.md" <<EOF
-# moq-go (Go module)
+# moq.dev/moq (Go module)
 
 Auto-generated mirror of the ergonomic Go wrapper for [Media over QUIC](https://github.com/moq-dev/moq).
 
@@ -139,14 +141,17 @@ Source, issues, and pull requests live in [moq-dev/moq](https://github.com/moq-d
 ## Install
 
 \`\`\`bash
-go get github.com/moq-dev/moq-go@latest
+go get moq.dev/moq@latest
 \`\`\`
 
 \`\`\`go
-import "github.com/moq-dev/moq-go/moq"
+import "moq.dev/moq"
 \`\`\`
 
-Hand-written Go on top of the raw [github.com/moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) bindings, which carry the prebuilt native libraries. \`CGO_ENABLED=1\` is required (the default on Unix).
+The import path is served by moq.dev, which points the go command back at this
+repo, so the module can move without breaking anyone.
+
+Hand-written Go on top of the raw [moq.dev/moq-ffi](https://pkg.go.dev/moq.dev/moq-ffi) bindings, which carry the prebuilt native libraries. \`CGO_ENABLED=1\` is required (the default on Unix).
 
 See [moq-dev/moq/go/wrapper/README.md](https://github.com/moq-dev/moq/blob/main/go/wrapper/README.md) for usage and the release process.
 

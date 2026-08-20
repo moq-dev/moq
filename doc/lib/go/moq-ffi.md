@@ -14,11 +14,11 @@ It is released lockstep with the `moq-ffi` crate: every `moq-ffi-v*` tag publish
 ## Install
 
 ```bash
-go get github.com/moq-dev/moq-go-ffi@latest
+go get moq.dev/moq-ffi@latest
 ```
 
 ```go
-import moqffi "github.com/moq-dev/moq-go-ffi/moq"
+import moqffi "moq.dev/moq-ffi/moq"
 ```
 
 The module bundles prebuilt `libmoq_ffi.a` for `linux/amd64`, `linux/arm64`, `darwin/arm64`, and `windows/amd64`. The Darwin archive needs macOS 12.3+, since the video backend links ScreenCaptureKit. cgo selects the right archive at link time via build tags; `CGO_ENABLED=1` is required (the default on Unix).
@@ -35,7 +35,7 @@ cargo install uniffi-bindgen-go \
 
 ## See also
 
-- API reference: pkg.go.dev can't build this cgo module, so it isn't rendered there; the ergonomic [moq](/lib/go/moq) package (also cgo, but buildable) is the documented surface at [pkg.go.dev/github.com/moq-dev/moq-go](https://pkg.go.dev/github.com/moq-dev/moq-go)
+- API reference: pkg.go.dev can't build this cgo module, so it isn't rendered there; the ergonomic [moq](/lib/go/moq) package (also cgo, but buildable) is the documented surface at [pkg.go.dev/moq.dev/moq](https://pkg.go.dev/moq.dev/moq)
 - Source: [go/ffi](https://github.com/moq-dev/moq/tree/main/go/ffi)
 - Mirror repo: [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi)
 - Ergonomic wrapper: [moq](/lib/go/moq)

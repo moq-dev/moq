@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/moq-dev/moq-go/moq"
+	"moq.dev/moq"
 )
 
 // Subscribe to a broadcast and print its catalog. These examples have no Output

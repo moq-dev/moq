@@ -4,7 +4,7 @@ import (
 	"context"
 	"iter"
 
-	ffi "github.com/moq-dev/moq-go-ffi/moq"
+	ffi "moq.dev/moq-ffi/moq"
 )
 
 // BroadcastConsumer reads tracks from a broadcast.
