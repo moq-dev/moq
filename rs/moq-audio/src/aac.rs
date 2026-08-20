@@ -8,16 +8,28 @@ use crate::Error;
 /// The audioObjectType of AAC-LC (ISO 14496-3 Table 1.17), the one profile we decode.
 const PROFILE_LC: u8 = 2;
 
-/// Reject what the decoder can't open, by the numbers the config actually carries.
-fn validate(profile: u8, channel_count: u32) -> Result<(), Error> {
-	if profile != PROFILE_LC {
+/// The widest sample rate an AudioSpecificConfig can name: the escape from the
+/// frequency table is a 24-bit field.
+const MAX_SAMPLE_RATE: u32 = 0xFF_FFFF;
+
+/// Reject what the decoder can't open, by the numbers a config actually carries.
+fn validate(config: &moq_mux::codec::aac::Config) -> Result<(), Error> {
+	if config.profile != PROFILE_LC {
 		return Err(Error::Unsupported(format!(
-			"only AAC-LC is supported (got mp4a.40.{profile})"
+			"only AAC-LC is supported (got mp4a.40.{})",
+			config.profile
 		)));
 	}
-	if !matches!(channel_count, 1 | 2) {
+	if !matches!(config.channel_count, 1 | 2) {
 		return Err(Error::Unsupported(format!(
-			"aac decoding is limited to mono and stereo (got {channel_count} channels)"
+			"aac decoding is limited to mono and stereo (got {} channels)",
+			config.channel_count
+		)));
+	}
+	if config.sample_rate > MAX_SAMPLE_RATE {
+		return Err(Error::Unsupported(format!(
+			"aac sample rate must fit 24 bits (got {})",
+			config.sample_rate
 		)));
 	}
 	Ok(())
@@ -53,23 +65,25 @@ pub(crate) fn description(catalog: &hang::catalog::AudioConfig, profile: u8) -> 
 				));
 			}
 
-			// Synthesis is lossy: the encoder masks the object type to the five bits
-			// the field has and rewrites a channel count the config table can't name.
-			// A rendition we can't decode would come back out of it looking like
-			// decodable stereo, so check the catalog's own numbers first.
-			validate(profile, catalog.channel_count)?;
-
-			moq_mux::codec::aac::Config {
+			let config = moq_mux::codec::aac::Config {
 				profile,
 				sample_rate: catalog.sample_rate,
 				channel_count: catalog.channel_count,
-			}
-			.encode()
+			};
+
+			// Synthesis is lossy in every field: the encoder masks the object type to
+			// the five bits it has, rewrites a channel count the config table can't
+			// name, and drops the sample rate's bits past 24. A rendition we can't
+			// decode would come back out of it looking like decodable stereo, so
+			// check the catalog's own numbers before encoding them.
+			validate(&config)?;
+
+			config.encode()
 		}
 	};
 
 	let parsed = moq_mux::codec::aac::Config::parse(&mut description.as_ref()).map_err(moq_mux::Error::from)?;
-	validate(parsed.profile, parsed.channel_count)?;
+	validate(&parsed)?;
 
 	Ok(description)
 }
@@ -128,6 +142,14 @@ mod tests {
 			description(&catalog(2, 48_000, 6), 2),
 			Err(Error::Unsupported(_))
 		));
+	}
+
+	#[test]
+	fn rejects_a_sample_rate_the_config_cannot_hold() {
+		// Past 24 bits the encoder keeps the low bits and drops the rest, so this
+		// would synthesize a plausible 44100 Hz config.
+		let err = description(&catalog(2, 0x0100_AC44, 2), 2).unwrap_err();
+		assert!(matches!(err, Error::Unsupported(msg) if msg.contains("24 bits")));
 	}
 
 	#[test]
