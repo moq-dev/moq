@@ -105,4 +105,4 @@ The committed `go.mod` carries a `require github.com/moq-dev/moq-go-ffi v0.0.0` 
 
 ## Local development
 
-Run `just go check`: it builds `moq-ffi` for the host, regenerates the bindings, stages both modules into `dist/` with a `replace` wiring the wrapper to the local ffi, and runs `go build`/`go vet`/`go test`. See [../ffi/README.md](../ffi/README.md) for the `uniffi-bindgen-go` install.
+Run `just go check`: it builds `moq-ffi` for the host, regenerates the bindings, stages both modules into `dist/` with a `replace` wiring the wrapper to the local ffi, and runs `go build`/`go vet`/`go test`. It also runs `scripts/publish-wrapper.test.sh`, which exercises the publisher's release/no-op/recovery paths against a scratch bare repo standing in for the mirror. See [../ffi/README.md](../ffi/README.md) for the `uniffi-bindgen-go` install.

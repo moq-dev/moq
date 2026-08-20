@@ -21,6 +21,10 @@ if ! command -v go >/dev/null 2>&1; then
     echo "go check: no go on PATH, skipping" >&2
     exit 0
 fi
+# The publish state machine needs neither cargo nor generated bindings, so it
+# runs ahead of the gates that skip a partial toolchain.
+bash "$SCRIPT_DIR/publish-wrapper.test.sh"
+
 if ! command -v cargo >/dev/null 2>&1; then
     echo "go check: no cargo on PATH, skipping" >&2
     exit 0
