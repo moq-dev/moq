@@ -4,6 +4,7 @@ import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { OriginSchema } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Writer } from "../stream.ts";
+import * as Time from "../time.ts";
 import { AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
 import { Probe } from "./probe.ts";
 import { Subscriber } from "./subscriber.ts";
@@ -158,35 +159,47 @@ async function probeBytes(probes: Probe[], version: Version): Promise<Uint8Array
 	return out;
 }
 
+/** Bound on the microtask turns we will spend waiting for the decode loop. */
+const MAX_DRAIN_TURNS = 1000;
+
+/** Yield until `predicate` holds, rather than guessing a fixed number of turns. */
+async function drainUntil(predicate: () => boolean): Promise<void> {
+	for (let i = 0; i < MAX_DRAIN_TURNS; i++) {
+		if (predicate()) return;
+		await Promise.resolve();
+	}
+	throw new Error("probe messages never drained");
+}
+
 /**
  * Drive `Subscriber.runProbe` over a canned script and return what the probe signal
  * held once the last message had been applied.
  *
  * Snapshotted before the stream is closed: `runProbe`'s `finally` blanks the signal
- * on exit, so reading afterwards would report `{}` no matter what the loop did.
+ * on exit, so reading afterwards would report `{}` no matter what the loop did. The
+ * wait keys off the final message's bitrate, so give the script a distinct one.
  */
-async function runProbeScript(version: Version, probes: Probe[]): Promise<ProbeStats> {
-	let readable!: ReadableStreamDefaultController<Uint8Array>;
+async function runProbeScript(version: Version, probes: Probe[], initial: ProbeStats = {}): Promise<ProbeStats> {
+	let readableController!: ReadableStreamDefaultController<Uint8Array>;
 	const quic = {
 		createBidirectionalStream: async () => ({
-			readable: new ReadableStream<Uint8Array>({ start: (controller) => (readable = controller) }),
+			readable: new ReadableStream<Uint8Array>({ start: (controller) => (readableController = controller) }),
 			writable: new WritableStream<Uint8Array>(),
 		}),
 	} as unknown as WebTransport;
 
-	const signal = new Signal<ProbeStats>({});
+	const signal = new Signal<ProbeStats>(initial);
 	const subscriber = new Subscriber(quic, version, OriginSchema.parse(1n), signal);
 	const running = subscriber.runProbe();
 
 	await Promise.resolve();
-	readable.enqueue(await probeBytes(probes, version));
-	// Each message costs several awaits to decode, so drain generously rather than
-	// guessing an exact count.
-	for (let i = 0; i < 200; i++) await Promise.resolve();
+	readableController.enqueue(await probeBytes(probes, version));
 
+	const last = probes[probes.length - 1];
+	await drainUntil(() => signal.peek().estimatedRecvRate === last.bitrate);
 	const snapshot = signal.peek();
 
-	readable.close();
+	readableController.close();
 	await running.catch(() => {});
 	return snapshot;
 }
@@ -198,24 +211,21 @@ async function runProbeScript(version: Version, probes: Probe[]): Promise<ProbeS
 test("an RTT retraction clears the reading on lite-04+", async () => {
 	const got = await runProbeScript(Version.DRAFT_05, [
 		new Probe({ bitrate: 1_000_000, rtt: 40 }),
-		new Probe({ bitrate: 1_000_000, rtt: undefined }),
+		new Probe({ bitrate: 2_000_000, rtt: undefined }),
 	]);
-	// The bitrate proves both messages were applied, so an undefined RTT here is the
-	// retraction landing rather than the loop never having run.
-	expect(got.estimatedRecvRate).toBe(1_000_000);
+	// The second bitrate proves the retracting message was applied, so an undefined
+	// RTT here is the retraction landing rather than the loop never having run.
+	expect(got.estimatedRecvRate).toBe(2_000_000);
 	expect(got.rtt).toBeUndefined();
 });
 
-// lite-03's PROBE carries no RTT field at all, so an absent value there means "not
-// carried" and the last reading must stand.
-test("lite-03 keeps the last RTT, since its PROBE cannot carry one", async () => {
-	const got = await runProbeScript(Version.DRAFT_03, [
-		new Probe({ bitrate: 1_000_000, rtt: 40 }),
-		new Probe({ bitrate: 2_000_000 }),
-	]);
+// lite-03's PROBE carries no RTT field at all, so an absent value there is "not
+// carried" rather than a retraction, and a reading already on the signal must stand.
+// Seeded rather than sent, because lite-03 has no way to put one on the wire.
+test("lite-03 keeps an existing RTT, since its PROBE cannot carry one", async () => {
+	const got = await runProbeScript(Version.DRAFT_03, [new Probe({ bitrate: 2_000_000 })], {
+		rtt: Time.Milli(40),
+	});
 	expect(got.estimatedRecvRate).toBe(2_000_000);
-	// lite-03 never carried the 40 on the wire, so there is nothing to retract and
-	// nothing to preserve; what matters is that the absent field is not mistaken for
-	// a retraction the way it is from lite-04 on.
-	expect(got.rtt).toBeUndefined();
+	expect(got.rtt).toBe(Time.Milli(40));
 });

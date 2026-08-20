@@ -607,10 +607,16 @@ test("runProbe rounds a fractional smoothedRtt instead of killing the stream", a
 	const server = await Stream.accept(pair.server);
 	if (!server) throw new Error("publisher never accepted the probe stream");
 
-	void publisher.runProbe(server);
-
-	const probe = await ProbeMessage.decodeMaybe(client.reader, Version.DRAFT_05);
-	expect(probe).toBeDefined();
-	expect(probe?.rtt).toBe(12);
-	expect(probe?.bitrate).toBe(1_000_000);
+	// `runProbe` loops until the stream closes, so close it rather than leaving the
+	// task running past the end of the test.
+	const probing = publisher.runProbe(server);
+	try {
+		const probe = await ProbeMessage.decodeMaybe(client.reader, Version.DRAFT_05);
+		expect(probe).toBeDefined();
+		expect(probe?.rtt).toBe(12);
+		expect(probe?.bitrate).toBe(1_000_000);
+	} finally {
+		client.close();
+		await probing;
+	}
 });

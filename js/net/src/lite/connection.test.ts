@@ -30,6 +30,13 @@ test("either metric alone is enough to advertise Report", async () => {
 	expect(await probeLevel(rttOnly, Version.DRAFT_05)).toBe(ProbeLevel.Report);
 });
 
+// lite-03's PROBE has no RTT field, so an RTT is not something we could report
+// there even though we can measure it.
+test("an RTT alone is not reportable on a version that cannot carry one", async () => {
+	const rttOnly = transport(async () => ({ estimatedSendRate: null, smoothedRtt: 12.34 }));
+	expect(await probeLevel(rttOnly, Version.DRAFT_03)).toBe(ProbeLevel.None);
+});
+
 // A transport that cannot answer tells us nothing, which is itself an answer. A
 // throwing getStats must not escape into the SETUP path.
 test("a throwing getStats advertises None rather than propagating", async () => {
