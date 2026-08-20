@@ -11,6 +11,13 @@ members = ["py/moq-ffi", "py/moq-rs"]
 
 [dependency-groups]
 dev = ["ruff", "maturin", "pyright", "pytest", "pytest-asyncio"]
+docs = ["furo>=2025.12.19", "myst-parser>=5.1.0", "sphinx>=9.1.0"]
+
+[tool.uv]
+build-constraint-dependencies = ["hatchling==1.32.0", "maturin==1.14.1"]
+
+[tool.uv.dependency-groups]
+docs = { requires-python = ">=3.12" }
 
 # Tests span both workspace members (py/moq-rs, py/moq-ffi). pytest resolves
 # its rootdir to this workspace root, so the shared asyncio config lives here.

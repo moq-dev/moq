@@ -5,13 +5,19 @@ native moq_ffi extension is mocked, so the pure-python wrapper documents
 without a Rust build. `just py docs` renders the same config locally.
 """
 
+import sys
 from pathlib import Path
 
 import tomllib
 
+# Autodoc reads the wrapper directly so documentation builds never install its
+# mocked native dependency.
+_package_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_package_root))
+
 # Pull name/version straight from the wrapper's pyproject so the docs never
 # drift from the released metadata.
-_pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+_pyproject = _package_root / "pyproject.toml"
 _meta = tomllib.loads(_pyproject.read_text())["project"]
 
 project = "moq"
