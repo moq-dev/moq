@@ -70,6 +70,10 @@ pub struct Config {
 
 	/// Frame resize behavior. Automatic mode keeps GPU-backed frames on the GPU.
 	pub resize: moq_video::resize::Config,
+
+	/// Where to report which rungs are encoding, for a caller that meters or
+	/// prices the work. `None` (the default) reports nothing. See [`Active`].
+	pub active: Option<crate::Active>,
 }
 
 impl Default for Config {
@@ -88,6 +92,7 @@ impl Default for Config {
 			encoder: moq_video::encode::Kind::default(),
 			decoder: moq_video::decode::Kind::default(),
 			resize: moq_video::resize::Config::default(),
+			active: None,
 		}
 	}
 }
