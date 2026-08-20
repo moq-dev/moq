@@ -243,7 +243,9 @@ impl Web {
 			// Dual-stack so the cert endpoint + WebSocket fallback answer over IPv4
 			// too, even on Windows where `[::]` is IPv6-only by default.
 			let listener = moq_native::bind::tcp(listen).context("failed to bind HTTP listener")?;
-			let server = crate::listener::server(listener, self.health.clone())?;
+			// Same socket capture the HTTPS path gets from `MtlsAcceptor`: without it
+			// a `ws://` session reaches qmux with no descriptor and reports no RTT.
+			let server = crate::listener::server(listener, self.health.clone())?.acceptor(SocketAcceptor);
 			Some(server.serve(app.clone()))
 		} else {
 			None
@@ -363,8 +365,16 @@ async fn reload_https_config(config: RustlsConfig, cert: Vec<PathBuf>, key: Vec<
 ///
 /// Absent on platforms with no readable TCP info, and on any socket the read fails
 /// for; handlers extract `Option<Extension<SocketStats>>` accordingly.
+#[cfg(feature = "websocket")]
 #[derive(Clone)]
 pub struct SocketStats(pub(crate) qmux::SharedSocketStats);
+
+/// Without the `websocket` feature there is no qmux to hand a socket to, so this
+/// carries nothing and is never constructed. Keeping the type present either way
+/// lets the acceptor and its service stay free of feature gates.
+#[cfg(not(feature = "websocket"))]
+#[derive(Clone)]
+pub struct SocketStats(std::convert::Infallible);
 
 /// Marker inserted as a request extension after HTTPS mTLS verifies a client certificate.
 ///
@@ -399,13 +409,47 @@ pub(crate) trait AcceptStream: AsyncRead + AsyncWrite + Unpin + Send + 'static {
 #[cfg(not(unix))]
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> AcceptStream for T {}
 
+/// Captures the socket for a plain-HTTP connection.
+///
+/// [`MtlsAcceptor`] does this for HTTPS on its way through the TLS handshake, but
+/// the HTTP listener has no acceptor of its own, so a `ws://` session would reach
+/// qmux with no descriptor and report no RTT. This is the same capture without the
+/// TLS half.
+#[derive(Clone, Copy)]
+struct SocketAcceptor;
+
+impl<I, S> Accept<I, S> for SocketAcceptor
+where
+	I: AcceptStream,
+	S: Send + 'static,
+{
+	type Stream = I;
+	type Service = SetConnectionExtensions<S>;
+	type Future = BoxFuture<'static, std::io::Result<(Self::Stream, Self::Service)>>;
+
+	fn accept(&self, stream: I, service: S) -> Self::Future {
+		let socket = socket_stats(&stream);
+		async move {
+			Ok((
+				stream,
+				SetConnectionExtensions {
+					inner: service,
+					peer: None,
+					socket,
+				},
+			))
+		}
+		.boxed()
+	}
+}
+
 impl<I, S> Accept<I, S> for MtlsAcceptor
 where
 	I: AcceptStream,
 	S: Send + 'static,
 {
 	type Stream = TlsStream<I>;
-	type Service = SetMtlsExtension<S>;
+	type Service = SetConnectionExtensions<S>;
 	type Future = BoxFuture<'static, std::io::Result<(Self::Stream, Self::Service)>>;
 
 	fn accept(&self, stream: I, service: S) -> Self::Future {
@@ -423,7 +467,7 @@ where
 				.map(|_| MtlsPeer);
 			Ok((
 				tls,
-				SetMtlsExtension {
+				SetConnectionExtensions {
 					inner: service,
 					peer,
 					socket,
@@ -434,29 +478,32 @@ where
 	}
 }
 
-/// The kernel's view of `stream`, when this platform exposes one.
-#[cfg(unix)]
+/// The kernel's view of `stream`, when this platform exposes one and there is a
+/// qmux session that could use it.
+#[cfg(all(unix, feature = "websocket"))]
 fn socket_stats<I: AcceptStream>(stream: &I) -> Option<SocketStats> {
 	qmux::TcpStats::new(stream)
 		.ok()
 		.map(|s| SocketStats(std::sync::Arc::new(s)))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(all(unix, feature = "websocket")))]
 fn socket_stats<I: AcceptStream>(_stream: &I) -> Option<SocketStats> {
 	None
 }
 
-/// Per-connection tower service that injects `Extension<Option<MtlsPeer>>` on
-/// every request before forwarding to the inner service.
+/// Per-connection tower service that injects the connection's extensions -- the
+/// mTLS marker and the captured socket -- on every request before forwarding to the
+/// inner service. Both are per-connection facts, so they are attached once at accept
+/// and replayed onto each request that arrives on it.
 #[derive(Clone)]
-struct SetMtlsExtension<S> {
+struct SetConnectionExtensions<S> {
 	inner: S,
 	peer: Option<MtlsPeer>,
 	socket: Option<SocketStats>,
 }
 
-impl<S, B> Service<http::Request<B>> for SetMtlsExtension<S>
+impl<S, B> Service<http::Request<B>> for SetConnectionExtensions<S>
 where
 	S: Service<http::Request<B>>,
 {
@@ -893,7 +940,7 @@ mod tests {
 		);
 	}
 
-	/// Confirm `SetMtlsExtension` injects the marker into request extensions
+	/// Confirm `SetConnectionExtensions` injects the marker into request extensions
 	/// when a peer cert was presented, and leaves them untouched otherwise.
 	#[tokio::test]
 	async fn set_mtls_extension_injects_marker() {
@@ -918,12 +965,12 @@ mod tests {
 
 		// This test is about the mTLS marker; the socket handle rides the same
 		// per-connection service but is independent of it.
-		let mut with_peer = SetMtlsExtension {
+		let mut with_peer = SetConnectionExtensions {
 			inner: EchoExt,
 			peer: Some(MtlsPeer),
 			socket: None,
 		};
-		let mut no_peer = SetMtlsExtension {
+		let mut no_peer = SetConnectionExtensions {
 			inner: EchoExt,
 			peer: None,
 			socket: None,
@@ -932,13 +979,13 @@ mod tests {
 		let req = Request::builder().body(()).unwrap();
 		assert!(
 			with_peer.call(req).await.unwrap(),
-			"SetMtlsExtension(Some) must surface MtlsPeer"
+			"SetConnectionExtensions(Some) must surface MtlsPeer"
 		);
 
 		let req = Request::builder().body(()).unwrap();
 		assert!(
 			!no_peer.call(req).await.unwrap(),
-			"SetMtlsExtension(None) must NOT surface MtlsPeer"
+			"SetConnectionExtensions(None) must NOT surface MtlsPeer"
 		);
 	}
 }
