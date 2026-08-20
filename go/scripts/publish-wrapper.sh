@@ -105,9 +105,17 @@ echo "--- diff against ${MIRROR_REPO} HEAD ---"
 git -C "$WORK/mirror" diff --cached --stat
 echo "---"
 
-# --- 4. Derive the next patch on this line from the mirror's tags ---
-# The registry, not the staged tree, decides the patch number, so the release
-# path and the recovery path below ask the same question the same way.
+# --- 4. Snapshot the mirror's tags on this line ---
+# One lookup, read twice, and a failed lookup is fatal rather than an empty
+# answer. Both questions below ("is HEAD released?" and "what is the next
+# patch?") read a missing tag as a reason to publish, so a transport error that
+# quietly returned nothing would mint a version over the top of a real one.
+if ! REMOTE_TAGS=$(git -C "$WORK/mirror" ls-remote --tags origin "refs/tags/v${LINE}.*"); then
+    echo "Error: failed to list ${MIRROR_REPO} tags on line ${LINE}" >&2
+    exit 1
+fi
+
+# Highest existing patch + 1, or .0 for a fresh line.
 next_release_tag() {
     local max=-1 ref patch
     while read -r ref; do
@@ -116,30 +124,51 @@ next_release_tag() {
         if [[ "$patch" =~ ^[0-9]+$ ]] && ((patch > max)); then
             max="$patch"
         fi
-    done < <(git -C "$WORK/mirror" ls-remote --tags origin "refs/tags/v${LINE}.*" |
-        sed -n "s#.*refs/tags/\(v${LINE}\.[0-9][0-9]*\)\$#\1#p")
+    done < <(sed -n "s#.*refs/tags/\(v${LINE}\.[0-9][0-9]*\)\$#\1#p" <<<"$REMOTE_TAGS")
 
     echo "v${LINE}.$((max + 1))"
 }
 
+# Annotated tags list twice, as the tag object and as a peeled "^{}" commit, so
+# matching the sha at the start of a line covers both shapes.
+tagged_on_line() {
+    grep -q "^$1[[:space:]]" <<<"$REMOTE_TAGS"
+}
+
 # --- 5. Identical tree usually means there is nothing to release ---
 if git -C "$WORK/mirror" diff --cached --quiet; then
-    # Usually, but not always: an untagged HEAD is a half-finished release, not a
-    # finished one. Publishing pushes the branch and the tag, and the patch
-    # number is only derived when there is a diff, so a tag that never landed
-    # used to strand that content forever -- every retry matched HEAD and
-    # stopped here without ever asking which tag was missing. Tag what is
-    # already there instead.
     HEAD_SHA=$(git -C "$WORK/mirror" rev-parse HEAD)
-    if git -C "$WORK/mirror" ls-remote --tags origin "refs/tags/v${LINE}.*" |
-        grep -q "^${HEAD_SHA}[[:space:]]"; then
+    if tagged_on_line "$HEAD_SHA"; then
         echo "Staged wrapper tree is identical to ${MIRROR_REPO} HEAD. Nothing to publish."
         exit 0
     fi
 
-    MIRROR_TAG=$(next_release_tag)
-    echo "::warning::${MIRROR_REPO} HEAD matches the staged tree but carries no v${LINE}.* tag;"
-    echo "::warning::a previous run pushed the tree without its tag. Tagging HEAD as ${MIRROR_TAG}."
+    # An untagged HEAD is only ours to fix if we made it. Publishing pushes the
+    # branch and the tag together, but that used to be two pushes, and a tag
+    # that never landed strands its content: the patch number is derived from a
+    # diff, so every retry matched HEAD and stopped above. The stranded commit
+    # names the version it was meant to carry, so restore exactly that rather
+    # than inventing the next one, and leave anything we didn't write alone.
+    HEAD_SUBJECT=$(git -C "$WORK/mirror" log -1 --format=%s)
+    LINE_RE="${LINE//./\\.}"
+    if [[ ! "$HEAD_SUBJECT" =~ ^Release\ (v${LINE_RE}\.[0-9]+)$ ]]; then
+        echo "Staged wrapper tree is identical to ${MIRROR_REPO} HEAD. Nothing to publish."
+        echo "::warning::HEAD carries no v${LINE}.* tag and is not a release commit (${HEAD_SUBJECT});"
+        echo "::warning::leaving it alone. Tag it by hand if it should have been released."
+        exit 0
+    fi
+    MIRROR_TAG="${BASH_REMATCH[1]}"
+
+    # Whatever that tag names today, it isn't this commit, or we'd have returned
+    # above. Reusing the subject's version would mean moving someone else's tag.
+    if grep -q "refs/tags/${MIRROR_TAG}\$" <<<"$REMOTE_TAGS"; then
+        echo "Error: ${MIRROR_TAG} already exists on ${MIRROR_REPO} and points elsewhere." >&2
+        echo "       ${MIRROR_REPO} HEAD claims to be that release; resolve by hand." >&2
+        exit 1
+    fi
+
+    echo "::warning::${MIRROR_REPO} HEAD is ${MIRROR_TAG} with no tag; a previous run pushed the tree without it."
+    echo "Restoring ${MIRROR_TAG} on the existing HEAD."
 
     if [[ "$DRY_RUN" == true ]]; then
         echo "Dry-run: not tagging or pushing."

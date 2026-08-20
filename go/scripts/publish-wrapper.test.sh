@@ -121,6 +121,41 @@ publish >"$WORK/run3.log" 2>&1 || {
 expect "re-cut v${LINE}.0 for the existing HEAD" "$(tags)" "v${LINE}.0 "
 expect_tagged "the tag points at the published HEAD" "$(head_tags)"
 
+echo "publish-wrapper test: recognises an annotated tag"
+# The publisher writes lightweight tags, but a hand-cut one is annotated, and
+# ls-remote then lists it twice: the tag object, and the peeled commit.
+git -C "$MIRROR" tag --delete "v${LINE}.0" >/dev/null
+git -C "$MIRROR" tag --annotate --message "by hand" "v${LINE}.0" refs/heads/main
+publish >"$WORK/run4.log" 2>&1 || {
+    cat "$WORK/run4.log" >&2
+    fail "publish against an annotated tag exited non-zero"
+}
+if grep -q "Nothing to publish" "$WORK/run4.log"; then
+    echo "  ok: read the peeled tag as released"
+else
+    fail "did not recognise the annotated tag; would have minted a duplicate"
+fi
+expect "left the annotated tag alone" "$(tags)" "v${LINE}.0 "
+
+echo "publish-wrapper test: leaves a HEAD it did not write alone"
+# Only a stranded publisher commit is ours to tag. Anything else with a
+# matching tree gets a warning, not a version.
+git -C "$MIRROR" tag --delete "v${LINE}.0" >/dev/null
+git -C "$SEED" fetch --quiet "$MIRROR" main
+git -C "$SEED" checkout --quiet FETCH_HEAD
+git -C "$SEED" -c user.email=t@example.com -c user.name=t commit --quiet --allow-empty -m "a human was here"
+git -C "$SEED" push --quiet --force "$MIRROR" HEAD:refs/heads/main
+publish >"$WORK/run5.log" 2>&1 || {
+    cat "$WORK/run5.log" >&2
+    fail "publish against an unrelated HEAD exited non-zero"
+}
+expect "minted no version for it" "$(tags)" ""
+if grep -q "is not a release commit" "$WORK/run5.log"; then
+    echo "  ok: said why it stopped"
+else
+    fail "no warning explaining the skip"
+fi
+
 if ((FAILED)); then
     echo "publish-wrapper test: FAILED" >&2
     exit 1
