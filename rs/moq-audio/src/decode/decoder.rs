@@ -147,10 +147,11 @@ impl Decoder {
 
 	/// AAC-LC only, which is what every gateway that feeds this crate publishes.
 	///
-	/// HE-AAC is rejected: symphonia decodes no SBR, so the alternative is
-	/// half-rate audio that sounds like a fault in the network. A stream that
-	/// signals SBR implicitly (an LC config, SBR data mid-packet) is
-	/// indistinguishable from LC here and does decode at the core rate.
+	/// An AudioSpecificConfig that leads with SBR or PS (mp4a.40.5 / .29) is
+	/// rejected, since symphonia decodes neither. One that leads with LC decodes
+	/// as its LC core, at the core's own sample rate, and that is what a listener
+	/// gets whether the SBR is signaled by a trailing sync extension or only in
+	/// band: neither this gate nor symphonia's reads that far.
 	#[cfg(feature = "aac")]
 	fn new_aac(catalog: &hang::catalog::AudioConfig, profile: u8) -> Result<Self, Error> {
 		use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;

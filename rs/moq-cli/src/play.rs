@@ -389,7 +389,30 @@ async fn play_audio(
 	// own ceiling.
 	let chunk = (sample_rate as usize * stride).max(stride);
 
-	while let Some(frame) = consumer.read().await? {
+	// Tracks whether the last read failed, so a stream the decoder can't read at
+	// all logs once rather than once per packet.
+	let mut dropping = false;
+
+	loop {
+		let frame = match consumer.read().await {
+			Ok(Some(frame)) => frame,
+			Ok(None) => break,
+			// One bad packet is that packet's problem: the decoder stays usable, so
+			// skip it rather than ending playback and taking the video window down
+			// with it.
+			Err(err @ moq_audio::Error::Decode(_)) => {
+				if dropping {
+					tracing::debug!(%err, "dropping an audio frame");
+				} else {
+					tracing::warn!(%err, "dropping an audio frame");
+					dropping = true;
+				}
+				continue;
+			}
+			Err(err) => return Err(err.into()),
+		};
+		dropping = false;
+
 		let samples = frame.data.len() / size_of::<f32>() / channels as usize;
 		let end =
 			timestamp(frame.timestamp).saturating_add(Duration::from_secs_f64(samples as f64 / sample_rate as f64));

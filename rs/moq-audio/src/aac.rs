@@ -86,8 +86,8 @@ mod tests {
 
 	#[test]
 	fn rejects_he_aac() {
-		// HE-AAC (5), 44100 Hz, stereo: SBR is not implemented, and decoding the
-		// core at half the rate would sound like a fault.
+		// HE-AAC (5), 44100 Hz, stereo. Only this leading-object-type form is
+		// caught: an LC-leading config that declares SBR further in reads as LC.
 		let err = description(&catalog(5, 44_100, 2), 5).unwrap_err();
 		assert!(matches!(err, Error::Unsupported(msg) if msg.contains("mp4a.40.5")));
 	}

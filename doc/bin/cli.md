@@ -171,7 +171,8 @@ Escape, the close button, or Ctrl-C.
 Playback decodes h264, h265, and av1 video, and opus, pcm, and AAC-LC audio, so
 `--video-codec vp8` and `--video-codec vp9` are rejected up front. AAC is the one
 it reads without being able to publish it, since that is what an RTMP or SRT
-ingest produces; HE-AAC is not decoded, and such a rendition fails when it opens.
+ingest produces. A rendition that declares HE-AAC up front fails when it opens;
+one that declares AAC-LC plays as its LC core even if it carries SBR.
 `--latency-max` controls how far a stalled media group may lag before it is
 skipped and defaults to `500ms`. These flags all follow the `play` verb:
 
