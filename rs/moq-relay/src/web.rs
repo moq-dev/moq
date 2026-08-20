@@ -940,6 +940,68 @@ mod tests {
 		);
 	}
 
+	/// A real accepted socket must reach the request as an extension.
+	///
+	/// This is the whole point of the plain-HTTP path: `MtlsAcceptor` captures the
+	/// descriptor on its way through the TLS handshake, and `SocketAcceptor` has to
+	/// do the same for `ws://`. Without a capture the handle is `None`, qmux gets no
+	/// socket, and the session advertises no Probe capability -- silently, which is
+	/// why this drives an actual `TcpStream` rather than constructing the service by
+	/// hand.
+	#[cfg(all(unix, feature = "websocket"))]
+	#[tokio::test]
+	async fn socket_acceptor_surfaces_the_accepted_socket() {
+		use axum::http::Request;
+		use std::convert::Infallible;
+
+		/// Reports whether the socket extension arrived on the request.
+		#[derive(Clone)]
+		struct EchoSocket;
+		impl Service<Request<()>> for EchoSocket {
+			type Response = bool;
+			type Error = Infallible;
+			type Future = std::pin::Pin<Box<dyn Future<Output = Result<bool, Infallible>> + Send>>;
+			fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+				Poll::Ready(Ok(()))
+			}
+			fn call(&mut self, req: Request<()>) -> Self::Future {
+				let has = req.extensions().get::<SocketStats>().is_some();
+				Box::pin(async move { Ok(has) })
+			}
+		}
+
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		let connecting = tokio::spawn(async move { tokio::net::TcpStream::connect(addr).await.unwrap() });
+		let (accepted, _) = listener.accept().await.unwrap();
+		let _client = connecting.await.unwrap();
+
+		let (stream, mut service) = Accept::<_, EchoSocket>::accept(&SocketAcceptor, accepted, EchoSocket)
+			.await
+			.unwrap();
+
+		assert!(
+			service.socket.is_some(),
+			"the acceptor must capture the descriptor of the socket it accepted"
+		);
+
+		let req = Request::builder().body(()).unwrap();
+		assert!(
+			service.call(req).await.unwrap(),
+			"the captured socket must reach the request, or qmux never sees it"
+		);
+
+		// The kernel measured this during the handshake, so it is readable already --
+		// which is what lets the Probe capability be decided at SETUP.
+		let stats = service.socket.as_ref().unwrap();
+		assert!(
+			qmux::SocketStats::rtt(&*stats.0).is_some(),
+			"a connected TCP socket must report an RTT immediately"
+		);
+
+		drop(stream);
+	}
+
 	/// Confirm `SetConnectionExtensions` injects the marker into request extensions
 	/// when a peer cert was presented, and leaves them untouched otherwise.
 	#[tokio::test]
