@@ -79,7 +79,7 @@ try {
 
 The code arrives the same way whether the session negotiated WebTransport or the WebSocket fallback, so nothing has to feature-detect `WebTransportError`.
 
-Session and stream codes use distinct branded types and error classes. A stream reset throws `Moq.StreamError` with a `Moq.StreamCode`; a session close returns `Moq.SessionError` with a `Moq.SessionCode`. The registries are disjoint, so the same number means different things in each: `0` ends a session cleanly but is an internal error on a stream, where a cancellation is `1`, and `2` is `Unauthorized` for a session but `DeliveryTimeout` for a stream. Both tables reuse moq-transport's codes unchanged, and 64 and up are yours.
+Session and stream codes use distinct branded types and error classes. A stream reset throws `Moq.StreamError` with a `Moq.StreamCode`; a session close returns `Moq.SessionError` with a `Moq.SessionCode`. The registries are disjoint, so the same number means different things in each: `0` ends a session cleanly but is an internal error on a stream, where a cancellation is `1`, and `2` is `Unauthorized` for a session but `DeliveryTimeout` for a stream. Both tables reuse moq-transport's codes unchanged. Codes 64 and up are yours; construct one with `Moq.StreamCode(64)` or `Moq.SessionCode(64)` before passing it to the matching error class.
 
 Anything outside those tables is an unspecified error, so treat it as opaque rather than guessing. That includes 32-63, which the draft reserves: an implementation may send a code there for a condition the shared ones don't cover, but it carries no agreed meaning yet.
 

@@ -4,12 +4,18 @@
  * @module
  */
 
+/** The nominal brand for session termination codes. */
+declare const SESSION_CODE: unique symbol;
+
+/** A code from the session termination registry. */
+export type SessionCode = number & { readonly [SESSION_CODE]: true };
+
 /**
  * Codes a peer sends when terminating the session, mirroring the Rust `SessionError`.
  *
- * Specified by moq-lite, which reuses moq-transport's codes unchanged; 64 and up are the
- * application's. {@link StreamCode} is the other registry, and the two are disjoint, so the
- * same integer means different things in each.
+ * Specified by moq-lite, which reuses moq-transport's codes unchanged. Call `SessionCode(code)`
+ * to construct an application code in the 64+ range. {@link StreamCode} is the other registry,
+ * and the two are disjoint, so the same integer means different things in each.
  *
  * Codes 32-63 are reserved rather than assigned. An implementation may send one for a
  * condition with no code here, but the draft gives it no meaning, so treat anything not
@@ -17,61 +23,71 @@
  *
  * @public
  */
-declare const SESSION_CODE: unique symbol;
+export const SessionCode = Object.assign(
+	(code: number): SessionCode => applicationCode(code) as SessionCode,
+	{
+		/** Ending the session normally, with no error. */
+		Cancel: 0x0 as SessionCode,
+		/** Something went wrong that isn't worth a dedicated code. */
+		Internal: 0x1 as SessionCode,
+		/** The credentials don't grant the requested path or operation. Retrying will fail again. */
+		Unauthorized: 0x2 as SessionCode,
+		/** A protocol rule was broken; the session is unusable. */
+		ProtocolViolation: 0x3 as SessionCode,
+		/** A key-value pair was malformed or repeated more than allowed. */
+		KeyValueFormatting: 0x6 as SessionCode,
+		/** The peer did not close within the GOAWAY drain deadline. */
+		GoawayTimeout: 0x10 as SessionCode,
+		/** A control message took too long. */
+		Timeout: 0x11 as SessionCode,
+		/** No version could be negotiated. */
+		Version: 0x15 as SessionCode,
+	},
+);
 
-/** A code from the session termination registry. */
-export type SessionCode = number & { readonly [SESSION_CODE]: true };
-
-export const SessionCode = {
-	/** Ending the session normally, with no error. */
-	Cancel: 0x0 as SessionCode,
-	/** Something went wrong that isn't worth a dedicated code. */
-	Internal: 0x1 as SessionCode,
-	/** The credentials don't grant the requested path or operation. Retrying will fail again. */
-	Unauthorized: 0x2 as SessionCode,
-	/** A protocol rule was broken; the session is unusable. */
-	ProtocolViolation: 0x3 as SessionCode,
-	/** A key-value pair was malformed or repeated more than allowed. */
-	KeyValueFormatting: 0x6 as SessionCode,
-	/** The peer did not close within the GOAWAY drain deadline. */
-	GoawayTimeout: 0x10 as SessionCode,
-	/** A control message took too long. */
-	Timeout: 0x11 as SessionCode,
-	/** No version could be negotiated. */
-	Version: 0x15 as SessionCode,
-} as const;
-
-/**
- * Codes a peer sends when resetting a stream, mirroring the Rust `StreamError`.
- *
- * The counterpart to {@link SessionCode}, and a disjoint space: a stream reset of 0 is
- * {@link StreamCode.Internal}, not a cancellation ({@link StreamCode.Cancel} is 1).
- *
- * Codes 32-63 are reserved rather than assigned, same as {@link SessionCode}.
- *
- * @public
- */
+/** The nominal brand for stream reset codes. */
 declare const STREAM_CODE: unique symbol;
 
 /** A code from the stream reset registry. */
 export type StreamCode = number & { readonly [STREAM_CODE]: true };
 
-export const StreamCode = {
-	/** Something went wrong that isn't worth a dedicated code. */
-	Internal: 0x0 as StreamCode,
-	/** The sender is done with this stream, not failing. A routine unsubscribe. */
-	Cancel: 0x1 as StreamCode,
-	/** The content missed its delivery deadline. */
-	DeliveryTimeout: 0x2 as StreamCode,
-	/** The session ended, taking this stream with it. */
-	SessionClosed: 0x3 as StreamCode,
-	/** The session is going away (a GOAWAY was received). */
-	GoingAway: 0x4 as StreamCode,
-	/** The reader fell too far behind and content was dropped to catch up. */
-	TooFarBehind: 0x5 as StreamCode,
-	/** The track's content could not be parsed. */
-	MalformedTrack: 0x12 as StreamCode,
-} as const;
+/**
+ * Codes a peer sends when resetting a stream, mirroring the Rust `StreamError`.
+ *
+ * The counterpart to {@link SessionCode}, and a disjoint space: a stream reset of 0 is
+ * {@link StreamCode.Internal}, not a cancellation ({@link StreamCode.Cancel} is 1). Call
+ * `StreamCode(code)` to construct an application code in the 64+ range.
+ *
+ * Codes 32-63 are reserved rather than assigned, same as {@link SessionCode}.
+ *
+ * @public
+ */
+export const StreamCode = Object.assign(
+	(code: number): StreamCode => applicationCode(code) as StreamCode,
+	{
+		/** Something went wrong that isn't worth a dedicated code. */
+		Internal: 0x0 as StreamCode,
+		/** The sender is done with this stream, not failing. A routine unsubscribe. */
+		Cancel: 0x1 as StreamCode,
+		/** The content missed its delivery deadline. */
+		DeliveryTimeout: 0x2 as StreamCode,
+		/** The session ended, taking this stream with it. */
+		SessionClosed: 0x3 as StreamCode,
+		/** The session is going away (a GOAWAY was received). */
+		GoingAway: 0x4 as StreamCode,
+		/** The reader fell too far behind and content was dropped to catch up. */
+		TooFarBehind: 0x5 as StreamCode,
+		/** The track's content could not be parsed. */
+		MalformedTrack: 0x12 as StreamCode,
+	},
+);
+
+function applicationCode(code: number): number {
+	if (!Number.isInteger(code) || code < 64 || code > 0xffffffff) {
+		throw new RangeError(`invalid application error code: ${code}`);
+	}
+	return code;
+}
 
 /**
  * An error the peer reported by closing the session, carrying its {@link SessionCode}.

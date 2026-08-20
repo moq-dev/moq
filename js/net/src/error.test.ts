@@ -86,6 +86,8 @@ test("the error type names the registry the code came from", () => {
 test("the code types reject the other registry", () => {
 	new StreamError(StreamCode.DeliveryTimeout);
 	new SessionError(SessionCode.Unauthorized);
+	new StreamError(StreamCode(64));
+	new SessionError(SessionCode(64));
 
 	// @ts-expect-error A session error cannot carry a stream code.
 	new SessionError(StreamCode.DeliveryTimeout);
@@ -93,6 +95,16 @@ test("the code types reject the other registry", () => {
 	new StreamError(SessionCode.Unauthorized);
 	// @ts-expect-error Raw numbers have not been decoded against either registry.
 	new StreamError(2);
+});
+
+test("application code constructors validate the application range", () => {
+	expect(Number(StreamCode(64))).toBe(64);
+	expect(Number(SessionCode(0xffffffff))).toBe(0xffffffff);
+
+	for (const code of [63, 1.5, -1, 0x100000000, Number.NaN]) {
+		expect(() => StreamCode(code)).toThrow(RangeError);
+		expect(() => SessionCode(code)).toThrow(RangeError);
+	}
 });
 
 test("fromTransport: code 0 is a code like any other", () => {
