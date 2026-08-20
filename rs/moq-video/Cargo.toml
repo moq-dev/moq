@@ -30,6 +30,11 @@ capture = ["dep:v4l", "dep:zune-jpeg"]
 # this on still links GPU-less and starts driverless, falling back to the next
 # encoder or decoder.
 nvidia = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
+# Compatibility aliases for the pre-consolidation names, kept so a manifest that
+# already asks for the old split still resolves. Undocumented on purpose: the
+# feature tables name only `nvidia`.
+nvenc = ["nvidia"]
+nvdec = ["nvidia"]
 # Intel/AMD VAAPI hardware encoder (Linux). Off by default because the backend has
 # never been validated on real hardware, not because of anything it costs the
 # build: moq-vaapi dlopen's libva, so an enabled-vaapi build needs no libva at

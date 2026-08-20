@@ -50,6 +50,11 @@ play = ["dep:moq-video", "moq-video/render", "dep:moq-audio", "moq-audio/playbac
 # dependencies, drop it:
 #   cargo build -p moq-cli --no-default-features --features "iroh quinn websocket capture"
 nvidia = ["moq-video?/nvidia", "moq-transcode?/nvidia"]
+# Compatibility aliases for the pre-consolidation names, kept so a manifest that
+# already asks for the old split still resolves. Undocumented on purpose: the
+# feature tables name only `nvidia`.
+nvenc = ["nvidia"]
+nvdec = ["nvidia"]
 # Intel/AMD VAAPI hardware encoding (Linux). Off by default because the backend is
 # unvalidated on hardware; enable it explicitly alongside `capture` or `transcode`.
 vaapi = ["moq-video?/vaapi", "moq-transcode?/vaapi"]
