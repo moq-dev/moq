@@ -76,7 +76,7 @@ function subscribe(
 	}
 
 	state.requested.mutate((requested) => {
-		requested.push(hooks.makeRequest(name, producer, state.sequences));
+		requested.push(hooks.makeRequest({ name, producer, sequences: state.sequences }));
 	});
 
 	return subscriber;
@@ -94,7 +94,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string): Promise<tr
 
 	const producer = new track.Producer(name);
 	state.requested.mutate((requested) => {
-		requested.push(hooks.makeRequest(name, producer, state.sequences));
+		requested.push(hooks.makeRequest({ name, producer, sequences: state.sequences }));
 	});
 
 	try {

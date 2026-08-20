@@ -6,7 +6,7 @@
 import { type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type { Datagram } from "./datagram.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer, Lagged } from "./group.ts";
-import { hooks, type TrackSequence, type TrackSequences } from "./internal.ts";
+import { hooks, type TrackRequestOptions, type TrackSequence, type TrackSequences } from "./internal.ts";
 import { Timescale, type Timestamp } from "./time.ts";
 
 export type { Datagram } from "./datagram.ts";
@@ -147,14 +147,14 @@ export class Request {
 	#producer: Producer;
 	#sequences: TrackSequences;
 
-	private constructor(name: string, producer: Producer, sequences: TrackSequences) {
-		this.name = name;
-		this.#producer = producer;
-		this.#sequences = sequences;
+	private constructor(options: TrackRequestOptions) {
+		this.name = options.name;
+		this.#producer = options.producer;
+		this.#sequences = options.sequences;
 	}
 
 	static {
-		hooks.makeRequest = (name, producer, sequences) => new Request(name, producer, sequences);
+		hooks.makeRequest = (options) => new Request(options);
 	}
 
 	/** The aggregate subscription requested for this track. */
