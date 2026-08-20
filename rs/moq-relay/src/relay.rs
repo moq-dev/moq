@@ -37,7 +37,7 @@ use crate::{Auth, Cluster, Config, Connection, DEFAULT_DRAIN_TIMEOUT, Internal, 
 /// every field does not compile outside this crate) or move out the fields you
 /// need one at a time. Dropping a field you do not name is safe for all but
 /// [`Self::workers`]: the rest of what must outlive setup is owned by
-/// [`Self::cluster`], while each worker owns a thread and a bound socket, so
+/// [`Self::cluster`], while the workers own their threads and bound sockets, so
 /// dropping them releases the QUIC port.
 #[non_exhaustive]
 pub struct Relay {
@@ -77,9 +77,9 @@ pub struct Relay {
 	pub shutdown_trigger: ShutdownTrigger,
 
 	/// The thread-per-core QUIC workers, already bound and waiting to be split
-	/// and run. Empty unless `runtime.workers` is configured, in which case
+	/// and run. `None` unless `runtime.workers` is configured, in which case
 	/// [`Self::server`] carries no QUIC listener of its own.
-	pub workers: Vec<moq_tokio::worker::Worker>,
+	pub workers: Option<moq_tokio::worker::Workers>,
 }
 
 impl Relay {
@@ -198,7 +198,7 @@ impl Relay {
 			addr,
 			shutdown,
 			shutdown_trigger,
-			workers: workers.map(Vec::from_iter).unwrap_or_default(),
+			workers,
 		})
 	}
 
@@ -236,21 +236,22 @@ impl Relay {
 		let jemalloc = std::future::pending::<anyhow::Result<()>>();
 
 		// Each worker serves from its own thread, so the future built here only
-		// reports the outcome. The runners are what own the threads: they have to
-		// outlive the loop below, or the sockets go away with them.
-		let mut runners = Vec::with_capacity(workers.len());
+		// reports the outcome. The group is what owns those threads, so it has to
+		// outlive the loop below: the borrow ends here, and the group is torn down
+		// after it.
+		let mut workers = workers;
 		let mut running = futures::stream::FuturesUnordered::new();
-		for worker in workers {
-			let index = worker.index();
-			let (server, runner) = worker.split();
-			let task = runner.run(serve(server, cluster.clone(), auth.clone(), shutdown.clone()));
-			running.push(async move {
-				match task.await {
-					Ok(res) => res.with_context(|| format!("QUIC worker {index} failed")),
-					Err(err) => Err(anyhow::Error::new(err).context(format!("QUIC worker {index} stopped"))),
-				}
-			});
-			runners.push(runner);
+		if let Some(workers) = workers.as_mut() {
+			for (server, spawner) in workers.split() {
+				let index = spawner.index();
+				let task = spawner.run(serve(server, cluster.clone(), auth.clone(), shutdown.clone()));
+				running.push(async move {
+					match task.await {
+						Ok(res) => res.with_context(|| format!("QUIC worker {index} failed")),
+						Err(err) => Err(anyhow::Error::new(err).context(format!("QUIC worker {index} stopped"))),
+					}
+				});
+			}
 		}
 
 		// Pends forever with no workers, so it composes into the `select!` either
@@ -264,7 +265,7 @@ impl Relay {
 			}
 		};
 
-		tokio::select! {
+		let result = tokio::select! {
 			Err(err) = started.run() => Err(err).context("cluster failed"),
 			Err(err) = web.run() => Err(err).context("web server failed"),
 			Err(err) = internal.run() => Err(err).context("internal server failed"),
@@ -273,7 +274,15 @@ impl Relay {
 			Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
 			res = drain_on_signal(shutdown_trigger, shutdown.drain_timeout) => res,
 			else => Ok(()),
+		};
+
+		// Explicitly, so the joins land on the blocking pool rather than on the
+		// executor thread this future happens to be running on.
+		if let Some(workers) = workers {
+			workers.shutdown().await;
 		}
+
+		result
 	}
 }
 

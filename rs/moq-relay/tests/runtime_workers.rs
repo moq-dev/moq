@@ -94,19 +94,17 @@ async fn workers_serve_quic_and_share_one_origin() {
 	let cluster = relay.cluster.clone();
 	let auth = relay.auth.clone();
 	let shutdown = relay.shutdown.clone();
-	// The runners have to outlive the accept loops they own, so they stay on this
-	// stack: dropping one is what stops its worker.
-	let mut runners = Vec::new();
+	// The group has to outlive the accept loops it owns, so it stays on this
+	// stack: stopping it is what stops the workers.
+	let mut workers = relay.workers.expect("workers configured");
 	let mut tasks = Vec::new();
-	for worker in relay.workers {
-		let (server, runner) = worker.split();
-		tasks.push(runner.run(moq_relay::serve(
+	for (server, spawner) in workers.split() {
+		tasks.push(spawner.run(moq_relay::serve(
 			server,
 			cluster.clone(),
 			auth.clone(),
 			shutdown.clone(),
 		)));
-		runners.push(runner);
 	}
 
 	let url: url::Url = format!("https://127.0.0.1:{port}/workers").parse().expect("parse url");
@@ -170,5 +168,5 @@ async fn workers_serve_quic_and_share_one_origin() {
 	drop(broadcast);
 	drop(publisher);
 	drop(subscribers);
-	drop(runners);
+	workers.shutdown().await;
 }

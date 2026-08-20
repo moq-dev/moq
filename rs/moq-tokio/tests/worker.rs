@@ -61,20 +61,17 @@ async fn dropping_the_workers_releases_the_port() {
 	let (cert, key) = certificate(dir.path());
 	let port = free_udp_port();
 
-	let workers =
+	let mut workers =
 		Workers::bind(listen_config(&cert, &key, port), Default::default(), config(WORKERS)).expect("bind workers");
 	assert_eq!(workers.len(), usize::from(WORKERS));
 
 	// Serving first is the case that used to strand the threads.
-	let mut runners = Vec::new();
-	for worker in workers {
-		let (server, runner) = worker.split();
-		runner.run(async move {
+	for (server, spawner) in workers.split() {
+		spawner.run(async move {
 			let _ = server.listen().await;
 		});
-		runners.push(runner);
 	}
-	drop(runners);
+	workers.shutdown().await;
 
 	// A plain bind refuses a port any socket still holds, reuseport or not, so this
 	// succeeds only if every worker's socket is really gone.
@@ -83,7 +80,8 @@ async fn dropping_the_workers_releases_the_port() {
 }
 
 /// Never splitting them has to release the port too, or a failure between bind
-/// and serve strands the group.
+/// and serve strands the group. Dropping is the path `shutdown` is the async
+/// alternative to, so both are covered.
 #[tokio::test]
 async fn dropping_unserved_workers_releases_the_port() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();

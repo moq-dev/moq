@@ -17,18 +17,17 @@
 //! # async fn example(listen: moq_tokio::listen::Config) -> anyhow::Result<()> {
 //! use moq_tokio::worker;
 //!
-//! let workers = worker::Workers::bind(listen, Default::default(), worker::Config::new(8))?;
+//! let mut workers = worker::Workers::bind(listen, Default::default(), worker::Config::new(8))?;
 //! println!("listening on {}", workers.local_addr());
 //!
-//! // Keep the runners alive for as long as you want the port served.
-//! let mut runners = Vec::new();
-//! for worker in workers {
-//!     let (server, runner) = worker.split();
-//!     runner.run(async move {
+//! // The group owns the threads, so keep it alive as long as you want the
+//! // port served.
+//! for (server, spawner) in workers.split() {
+//!     spawner.run(async move {
 //!         let _ = server.listen().await;
 //!     });
-//!     runners.push(runner);
 //! }
+//! workers.shutdown().await;
 //! # Ok(())
 //! # }
 //! ```
@@ -72,15 +71,26 @@ impl Config {
 ///
 /// [`Workers::bind`] opens every socket, so a returned value is already
 /// listening and a port conflict is an error here rather than a worker that
-/// quietly died. Nothing is accepted until each [`Worker`] is split and run.
+/// quietly died. Nothing is accepted until [`Workers::split`] hands each
+/// worker's server to the caller and its spawner runs an accept loop.
 ///
 /// Iterate to take the workers out. The group is what guarantees they were bound
 /// once, in index order, which is what the steering filter selects on.
-#[derive(Debug)]
 pub struct Workers {
 	workers: Vec<Worker>,
 	certificates: crate::tls::Certificates,
 	addr: SocketAddr,
+}
+
+impl std::fmt::Debug for Workers {
+	/// Hand-written because the bound []s are opaque; the member count and
+	/// the shared address is what identifies a group anyway.
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Workers")
+			.field("workers", &self.workers.len())
+			.field("addr", &self.addr)
+			.finish()
+	}
 }
 
 impl Workers {
@@ -136,7 +146,13 @@ impl Workers {
 				None => addr = Some(worker.addr),
 			}
 
-			certificates.get_or_insert_with(|| worker.server.certificates());
+			certificates.get_or_insert_with(|| {
+				worker
+					.server
+					.as_ref()
+					.expect("a freshly bound worker holds its server")
+					.certificates()
+			});
 			workers.push(worker);
 		}
 
@@ -175,24 +191,132 @@ impl Workers {
 	pub fn is_empty(&self) -> bool {
 		self.workers.is_empty()
 	}
+
+	/// Each worker's bound server, paired with a handle onto the thread that has
+	/// to drive it.
+	///
+	/// Split rather than served directly because only the caller knows what to do
+	/// with an accepted connection, and a worker only pays off if that work runs
+	/// on its own thread: build a future from the [`Server`] and hand it to
+	/// [`Spawner::run`].
+	///
+	/// The spawners borrow the group rather than owning their threads, so the
+	/// membership the steering filter was built against cannot be broken up: the
+	/// sockets are released together, by [`Workers::shutdown`] or by dropping the
+	/// group. Empty after the first call, since a worker serves one server.
+	pub fn split(&mut self) -> Vec<(Server, Spawner<'_>)> {
+		self.workers
+			.iter_mut()
+			.filter_map(|worker| {
+				let server = worker.server.take()?;
+				Some((
+					server,
+					Spawner {
+						index: worker.index,
+						handle: &worker.handle,
+					},
+				))
+			})
+			.collect()
+	}
+
+	/// Stop every worker and wait for its threads, off the caller's runtime.
+	///
+	/// Dropping the group does the same thing, but joins on the calling thread,
+	/// which inside an async task is a shared executor thread. Prefer this
+	/// wherever there is a runtime to hand the joins to.
+	pub async fn shutdown(mut self) {
+		let threads = self.signal();
+		if threads.is_empty() {
+			return;
+		}
+
+		// Joining blocks, so it goes to the pool that exists for that rather than
+		// stalling whichever executor thread happened to run this.
+		let _ = tokio::task::spawn_blocking(move || join(threads)).await;
+	}
+
+	/// Tell every worker to stop and take its thread, leaving nothing for a later
+	/// [`Self::shutdown`] or [`Drop`] to join twice.
+	fn signal(&mut self) -> Vec<(u16, std::thread::JoinHandle<()>)> {
+		// Every signal first, then the joins: a worker cannot exit while it still
+		// holds a live sender, so joining as we go would serialize the teardown.
+		for worker in &mut self.workers {
+			worker.stop.take();
+		}
+
+		self.workers
+			.iter_mut()
+			.filter_map(|worker| Some((worker.index, worker.thread.take()?)))
+			.collect()
+	}
 }
 
-impl IntoIterator for Workers {
-	type Item = Worker;
-	type IntoIter = std::vec::IntoIter<Worker>;
+impl Drop for Workers {
+	/// Stop every worker and wait for its thread, so the sockets are released
+	/// before the group is gone.
+	///
+	/// Detaching instead would leave threads accepting into a cluster their owner
+	/// has finished with, and a replacement group would join the same reuseport
+	/// group as the orphans and lose a share of its traffic to them. A no-op after
+	/// [`Self::shutdown`], which is the same teardown without the blocking join.
+	fn drop(&mut self) {
+		join(self.signal());
+	}
+}
 
-	fn into_iter(self) -> Self::IntoIter {
-		self.workers.into_iter()
+/// Wait for every worker thread, reporting the ones that panicked.
+fn join(threads: Vec<(u16, std::thread::JoinHandle<()>)>) {
+	for (index, thread) in threads {
+		if thread.join().is_err() {
+			tracing::error!(index, "QUIC worker panicked");
+		}
+	}
+}
+
+/// Spawns onto one worker's thread, for as long as its group is alive.
+///
+/// The lifetime is the point: it ties what a caller runs to the [`Workers`] that
+/// owns the thread, so the group is still what starts and stops every member.
+#[derive(Clone, Copy, Debug)]
+pub struct Spawner<'a> {
+	index: u16,
+	handle: &'a tokio::runtime::Handle,
+}
+
+impl Spawner<'_> {
+	/// Drive `future` on this worker's thread, where its QUIC driver lives.
+	///
+	/// The returned handle reports what the future returned, so a caller can end
+	/// the process on a worker that fails. Dropping the handle does *not* stop the
+	/// future, since it runs on a thread of its own; stopping the group does.
+	pub fn run<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+	where
+		F: Future + Send + 'static,
+		F::Output: Send + 'static,
+	{
+		self.handle.spawn(future)
+	}
+
+	/// This worker's position in the group, from zero.
+	pub fn index(&self) -> u16 {
+		self.index
 	}
 }
 
 /// One worker: a bound [`Server`] and the thread that has to drive it.
 ///
-/// Dropping one releases its socket, so a group that is never served un-binds
-/// the port rather than leaving threads accepting into nothing.
-pub struct Worker {
-	server: Server,
-	runner: Runner,
+/// Only ever reached through [`Workers::split`], and never owned by the caller.
+/// A member that could be dropped on its own would leave the group: the kernel
+/// numbers a reuseport group by position and moves the last socket into any slot
+/// a `close` vacates, so one member leaving renumbers a sibling out from under
+/// every connection ID already issued against it.
+struct Worker {
+	server: Option<Server>,
+	index: u16,
+	handle: tokio::runtime::Handle,
+	thread: Option<std::thread::JoinHandle<()>>,
+	stop: Option<tokio::sync::oneshot::Sender<()>>,
 	addr: SocketAddr,
 }
 
@@ -243,94 +367,13 @@ impl Worker {
 		tracing::debug!(index, %addr, "QUIC worker listening");
 
 		Ok(Self {
-			server,
+			server: Some(server),
+			index,
+			handle,
+			thread: Some(thread),
+			stop: Some(stop_tx),
 			addr,
-			runner: Runner {
-				index,
-				handle,
-				thread: Some(thread),
-				stop: Some(stop_tx),
-			},
 		})
-	}
-
-	/// This worker's position in the group, from zero.
-	pub fn index(&self) -> u16 {
-		self.runner.index
-	}
-
-	/// The address this worker is bound to, shared with the rest of the group.
-	pub fn local_addr(&self) -> SocketAddr {
-		self.addr
-	}
-
-	/// The bound server and the thread it must be driven on.
-	///
-	/// Split rather than served directly because only the caller knows what to do
-	/// with an accepted connection, and a worker only pays off if that work runs
-	/// on its own thread: build the future from `server` and hand it to
-	/// [`Runner::run`].
-	pub fn split(self) -> (Server, Runner) {
-		(self.server, self.runner)
-	}
-}
-
-impl std::fmt::Debug for Worker {
-	/// Hand-written because the bound [`Server`] is opaque; the index and the
-	/// shared address is what identifies a worker anyway.
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("Worker")
-			.field("index", &self.runner.index)
-			.field("addr", &self.addr)
-			.finish()
-	}
-}
-
-/// The thread one [`Worker`] owns, and the only place its server should be driven.
-///
-/// Dropping it stops the worker and joins the thread, so the socket is provably
-/// released rather than left to a thread that outlives its owner. Detaching
-/// instead would let a replacement group join the same reuseport group as the
-/// orphans and lose a share of its traffic to them.
-#[derive(Debug)]
-pub struct Runner {
-	index: u16,
-	handle: tokio::runtime::Handle,
-	thread: Option<std::thread::JoinHandle<()>>,
-	stop: Option<tokio::sync::oneshot::Sender<()>>,
-}
-
-impl Runner {
-	/// Drive `future` on this worker's thread, where its QUIC driver lives.
-	///
-	/// The returned handle reports what the future returned, so a caller can end
-	/// the process on a worker that fails. Dropping the handle does *not* stop the
-	/// future, since it runs on a thread of its own; dropping the [`Runner`] does.
-	pub fn run<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
-	where
-		F: Future + Send + 'static,
-		F::Output: Send + 'static,
-	{
-		self.handle.spawn(future)
-	}
-
-	/// This worker's position in the group, from zero.
-	pub fn index(&self) -> u16 {
-		self.index
-	}
-}
-
-impl Drop for Runner {
-	fn drop(&mut self) {
-		// Dropping the sender is the stop signal, which is what makes the worker
-		// cancellable from a thread that is not its own.
-		self.stop.take();
-
-		if let Some(thread) = self.thread.take()
-			&& thread.join().is_err()
-		{
-			tracing::error!(index = self.index, "QUIC worker panicked");
-		}
 	}
 }
 
@@ -347,7 +390,7 @@ struct Ready {
 /// inside it on purpose: the QUIC backend spawns its socket driver where it is
 /// built, which is what keeps this worker's packets on this thread. The server
 /// is handed back for the owner to build an accept loop from, which
-/// [`Runner::run`] spawns onto this same runtime.
+/// [`Spawner::run`] spawns onto this same runtime.
 fn run(
 	shard: Shard,
 	core: Option<CoreId>,
