@@ -444,22 +444,25 @@ impl Server {
 			let ws_accept = async {
 				match ws_ref {
 					Some(ws) => ws.accept_with_url().await,
-					None => std::future::pending().await,
+					None => None,
 				}
 			};
 			#[cfg(not(feature = "websocket"))]
-			let ws_accept = std::future::pending::<Option<crate::Result<()>>>();
+			let ws_accept = std::future::ready(None::<crate::Result<()>>);
 
 			#[allow(unused_variables)]
 			let server = self.moq.clone();
 			#[allow(unused_variables)]
 			let versions = self.versions.clone();
 
-			// No streams configured: never resolves, so it doesn't disturb select!.
+			// An absent transport resolves `None` rather than parking, so its arm is
+			// disabled instead of holding the `select!` open. That is what lets `else`
+			// mean "nothing is left that could accept" instead of "the one transport
+			// nobody configured is still notionally pending".
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 			let stream_accept = self.streams.recv();
 			#[cfg(not(any(feature = "tcp", all(feature = "uds", unix))))]
-			let stream_accept = std::future::pending::<Option<Request>>();
+			let stream_accept = std::future::ready(None::<Request>);
 
 			tokio::select! {
 				Some(request) = stream_accept => {
@@ -532,9 +535,10 @@ impl Server {
 						Err(err) => tracing::debug!(%err, "failed to accept session"),
 					}
 				}
-				// Every listener has stopped, so nothing more can arrive. Process signals
-				// are the owner's: an accept loop that consumes a global ctrl-C leaves no
-				// way to sequence shutdown around it (moq-relay drains sessions first).
+				// Nothing is left that could accept: every configured listener has stopped
+				// and no handshake is still in flight. Process signals are the owner's; an
+				// accept loop that consumes a global ctrl-C leaves no way to sequence
+				// shutdown around it (moq-relay drains sessions first).
 				else => return None,
 			}
 		}
@@ -622,10 +626,10 @@ impl Listener {
 	/// rejected early on an invalid path or missing auth. Call [Request::ok] or
 	/// [Request::close] to complete the handshake.
 	///
-	/// `None` means every listener has stopped; everything is already bound, so a
-	/// bind failure cannot arrive here. No process signal is watched: race this
-	/// against your own ctrl-C future and drop the listener if you want one to stop
-	/// the loop.
+	/// `None` means every configured listener has stopped and no handshake is still
+	/// in flight, so nothing can arrive again. Everything is already bound, so a bind
+	/// failure cannot arrive here. No process signal is watched: race this against
+	/// your own ctrl-C future and drop the listener if you want one to stop the loop.
 	pub async fn accept(&mut self) -> Option<Request> {
 		self.server.accept_next().await
 	}
@@ -830,11 +834,12 @@ impl StreamListeners {
 		Ok(())
 	}
 
-	/// Yield the next stream [`Request`], or pend forever if none are running.
+	/// Yield the next stream [`Request`], or `None` if no listener is running:
+	/// either none was configured, or every accept loop has ended.
 	async fn recv(&mut self) -> Option<Request> {
 		match self.rx.as_mut() {
 			Some(rx) => rx.recv().await,
-			None => std::future::pending().await,
+			None => None,
 		}
 	}
 
