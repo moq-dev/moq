@@ -8,6 +8,21 @@ use crate::Error;
 /// The audioObjectType of AAC-LC (ISO 14496-3 Table 1.17), the one profile we decode.
 const PROFILE_LC: u8 = 2;
 
+/// Reject what the decoder can't open, by the numbers the config actually carries.
+fn validate(profile: u8, channel_count: u32) -> Result<(), Error> {
+	if profile != PROFILE_LC {
+		return Err(Error::Unsupported(format!(
+			"only AAC-LC is supported (got mp4a.40.{profile})"
+		)));
+	}
+	if !matches!(channel_count, 1 | 2) {
+		return Err(Error::Unsupported(format!(
+			"aac decoding is limited to mono and stereo (got {channel_count} channels)"
+		)));
+	}
+	Ok(())
+}
+
 /// The AudioSpecificConfig to open a decoder with, validated as AAC-LC.
 ///
 /// Prefers the catalog `description` verbatim, since re-encoding the parsed
@@ -38,6 +53,12 @@ pub(crate) fn description(catalog: &hang::catalog::AudioConfig, profile: u8) -> 
 				));
 			}
 
+			// Synthesis is lossy: the encoder masks the object type to the five bits
+			// the field has and rewrites a channel count the config table can't name.
+			// A rendition we can't decode would come back out of it looking like
+			// decodable stereo, so check the catalog's own numbers first.
+			validate(profile, catalog.channel_count)?;
+
 			moq_mux::codec::aac::Config {
 				profile,
 				sample_rate: catalog.sample_rate,
@@ -48,12 +69,7 @@ pub(crate) fn description(catalog: &hang::catalog::AudioConfig, profile: u8) -> 
 	};
 
 	let parsed = moq_mux::codec::aac::Config::parse(&mut description.as_ref()).map_err(moq_mux::Error::from)?;
-	if parsed.profile != PROFILE_LC {
-		return Err(Error::Unsupported(format!(
-			"only AAC-LC is supported (got mp4a.40.{})",
-			parsed.profile
-		)));
-	}
+	validate(parsed.profile, parsed.channel_count)?;
 
 	Ok(description)
 }
@@ -90,6 +106,28 @@ mod tests {
 		// caught: an LC-leading config that declares SBR further in reads as LC.
 		let err = description(&catalog(5, 44_100, 2), 5).unwrap_err();
 		assert!(matches!(err, Error::Unsupported(msg) if msg.contains("mp4a.40.5")));
+	}
+
+	#[test]
+	fn rejects_an_extended_profile_before_synthesis_masks_it() {
+		// mp4a.40.34 is MP3-in-MP4. The 5-bit object type field can't hold 34, so
+		// synthesizing a config would mask it down to 2 and read back as AAC-LC.
+		let err = description(&catalog(34, 44_100, 2), 34).unwrap_err();
+		assert!(matches!(err, Error::Unsupported(msg) if msg.contains("mp4a.40.34")));
+	}
+
+	#[test]
+	fn rejects_more_than_stereo() {
+		// Synthesis would rewrite an unnameable count to stereo; 6 is nameable but
+		// still past what the decoder opens.
+		assert!(matches!(
+			description(&catalog(2, 48_000, 12), 2),
+			Err(Error::Unsupported(_))
+		));
+		assert!(matches!(
+			description(&catalog(2, 48_000, 6), 2),
+			Err(Error::Unsupported(_))
+		));
 	}
 
 	#[test]
