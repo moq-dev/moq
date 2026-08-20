@@ -225,16 +225,22 @@ async function connectInner(url: URL, props: ConnectProps | undefined, abort: Pr
 }
 
 async function connectTransport(url: URL, session: WebTransport, wiring: SessionProps): Promise<Established> {
-	const closed = session.closed.then(
-		(info) => {
-			throw fromClose(info) ?? new Error("session closed during SETUP");
-		},
-		(err: unknown) => {
-			throw error(err);
-		},
-	);
+	const closed = session.closed.then(fromClose, error);
+	const terminal = closed.then((cause) => {
+		throw cause ?? new Error("session closed during SETUP");
+	});
 
-	return await Promise.race([closed, negotiate(url, session, wiring)]);
+	try {
+		return await Promise.race([terminal, negotiate(url, session, wiring)]);
+	} catch (cause) {
+		// A session shutdown can reject its SETUP stream before `closed` publishes the
+		// peer's close code. Closing is idempotent, and makes an independent stream failure
+		// settle `closed` cleanly, so the terminal session result can take precedence.
+		session.close();
+		const final = await closed;
+		if (final) throw final;
+		throw cause;
+	}
 }
 
 // Negotiate the MoQ protocol over an established transport. The caller races this against

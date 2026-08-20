@@ -332,15 +332,27 @@ test("an unauthorized session close during setup stops retrying", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 	let attempts = 0;
+	const retried = Promise.withResolvers<Error>();
 	const stub = function StubWebTransport() {
 		attempts++;
+		if (attempts > 1) retried.resolve(new Error("retried a terminal session close"));
 		const pair = createMockTransportPair("");
+		const transportClosed = pair.client.closed;
+		const delayed = Promise.withResolvers<WebTransportCloseInfo>();
+		Object.defineProperty(pair.client, "closed", { value: delayed.promise });
+		const close = pair.client.close.bind(pair.client);
+		pair.client.close = (info?: WebTransportCloseInfo) => {
+			close(info);
+			void transportClosed.then(delayed.resolve, delayed.reject);
+		};
 		void (async () => {
 			const incoming = pair.server.incomingBidirectionalStreams.getReader();
 			const accepted = await incoming.read();
 			incoming.releaseLock();
 			if (accepted.done) return;
 
+			// Some transports reject the SETUP stream before publishing the close info.
+			await accepted.value.writable.abort(toTransport(StreamCode.DeliveryTimeout, "session closing"));
 			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
 		})();
 		return pair.client;
@@ -356,10 +368,13 @@ test("an unauthorized session close during setup stops retrying", async () => {
 	});
 
 	try {
-		const err = await reload.closed.then(
-			() => undefined,
-			(err: unknown) => err,
-		);
+		const err = await Promise.race([
+			reload.closed.then(
+				() => undefined,
+				(err: unknown) => err,
+			),
+			retried.promise,
+		]);
 		expect(err).toBeInstanceOf(SessionError);
 		expect((err as SessionError).code).toBe(SessionCode.Unauthorized);
 		expect(attempts).toBe(1);
