@@ -465,7 +465,8 @@ impl<E: catalog::Catalog> Drop for Capture<E> {
 
 /// Export-side reduction of a snapshot track: frames apply in order, later-wins
 /// by sub-table identity. Reset per group (a group is a complete snapshot).
-#[derive(Default)]
+/// Equality is by content, so a re-published identical snapshot is not a change.
+#[derive(Default, PartialEq)]
 pub(super) struct Snapshot {
 	subs: BTreeMap<Identity, Vec<Bytes>>,
 }

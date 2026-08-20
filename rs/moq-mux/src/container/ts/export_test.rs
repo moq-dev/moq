@@ -2617,6 +2617,138 @@ async fn si_revision_after_final_media_frame_is_flushed() {
 	assert!(end.is_none(), "end of stream after the trailing flush");
 }
 
+/// A broadcast with one avc1 video track and one SI entry, for driving SI emission
+/// frame by frame: `media(millis, pid)` writes one keyframe group and reports how
+/// many packets of `pid` ride the output it produced.
+struct SiCadenceRig {
+	producer: Producer<HangContainer>,
+	si_track: moq_net::track::Producer,
+	exporter: Export<tscat::Ext>,
+	_catalog: crate::catalog::Producer<tscat::Ext>,
+}
+
+async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadenceRig {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	let si_name = format!("{pid:#06x}-{table_id:#04x}.si");
+	let si_track = broadcast.create_track(si_name.as_str(), None).unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
+	let track = broadcast
+		.create_track(broadcast.unique_name(".avc1"), hang::container::track_info())
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		let mut guard = catalog.lock();
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		cfg.container = Container::Legacy;
+		cfg.description = Some(avcc);
+		guard.video.renditions.insert(name, cfg);
+		guard.mpegts.si.entry(pid).or_default().insert(
+			table_id,
+			tscat::SiEntry {
+				track: si_name,
+				interval: Some(interval),
+				..Default::default()
+			},
+		);
+	}
+
+	let producer = Producer::new(track, HangContainer::Legacy);
+	let exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap();
+	SiCadenceRig {
+		producer,
+		si_track,
+		exporter,
+		_catalog: catalog,
+	}
+}
+
+impl SiCadenceRig {
+	async fn media(&mut self, millis: u64, pid: u16) -> usize {
+		let mut idr = vec![0x65u8];
+		idr.extend(std::iter::repeat_n(0xAB, 64));
+		self.producer
+			.write(Frame {
+				timestamp: Timestamp::from_millis(millis).unwrap(),
+				duration: None,
+				payload: length_prefixed(&[&idr]),
+				keyframe: true,
+			})
+			.unwrap();
+		self.producer.cut(None).unwrap();
+
+		let mut count = 0;
+		for frame in drain_frames(&mut self.exporter).await {
+			assert_packet_aligned(&frame.payload);
+			count += frame
+				.payload
+				.chunks_exact(188)
+				.filter(|p| ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == pid)
+				.count();
+		}
+		count
+	}
+}
+
+/// #2934: a revised SI snapshot rides the next media frame instead of waiting out
+/// the repetition interval. For a clock table (TDT/TOT) the old interval-grid hold
+/// delivered the asserted time up to a whole 30 s slot late, and a source ticking
+/// slower than the grid had its stale value re-sent, stepping receivers backwards.
+#[tokio::test(start_paused = true)]
+async fn si_revision_rides_the_next_frame() {
+	let tick = |mjd: u8| make_short_section(0x70, &[0xc0, mjd, 0x12, 0x34, 0x56]);
+	let mut rig = si_cadence_rig(0x0014, 0x70, Duration::from_secs(30)).await;
+
+	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(tick(1))).unwrap();
+	assert_eq!(rig.media(0, 0x0014).await, 1, "a fresh exporter leads with the table");
+	assert_eq!(rig.media(1_000, 0x0014).await, 0, "unchanged: held by the 30s floor");
+	assert_eq!(rig.media(2_000, 0x0014).await, 0, "unchanged: still held");
+
+	// The clock ticks. Nothing about the 30 s interval has elapsed, but the value
+	// changed: it must go out with the very next frame.
+	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(tick(2))).unwrap();
+	assert_eq!(rig.media(3_000, 0x0014).await, 1, "the revision rides the next frame");
+	assert_eq!(rig.media(4_000, 0x0014).await, 0, "emitted once, then floored again");
+}
+
+/// #2934, the repeat half: an *unchanged* snapshot repeats only once its interval
+/// has elapsed since the entry last hit the wire, not on an absolute grid slot. A
+/// grid boundary shortly after a change emission would re-send the section as a
+/// near-immediate stale repeat, which for a clock table re-asserts an old time.
+#[tokio::test(start_paused = true)]
+async fn si_repeats_are_floored_from_the_last_emission() {
+	let sdt_v1 = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8]);
+	let sdt_v2 = make_long_section(0x42, 1, 1, 0, 0, &[0xbb; 8]);
+	let mut rig = si_cadence_rig(0x0011, 0x42, Duration::from_secs(2)).await;
+
+	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(sdt_v1)).unwrap();
+	assert_eq!(rig.media(0, 0x0011).await, 1, "lead emission");
+	assert_eq!(rig.media(1_000, 0x0011).await, 0, "within the floor");
+	assert_eq!(rig.media(2_000, 0x0011).await, 1, "repeat once 2s elapsed");
+
+	// A revision lands mid-interval and goes out immediately (at 2.5s)...
+	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(sdt_v2)).unwrap();
+	assert_eq!(rig.media(2_500, 0x0011).await, 1, "the revision goes out immediately");
+
+	// ...so the next repeat is due at 4.5s. The absolute grid would have re-sent at
+	// the 4s boundary, 1.5s after the wire last carried the identical sections.
+	assert_eq!(rig.media(3_000, 0x0011).await, 0, "within the floor of the revision");
+	assert_eq!(rig.media(4_000, 0x0011).await, 0, "the old grid slot must not fire");
+	assert_eq!(rig.media(4_500, 0x0011).await, 1, "repeat 2s after the revision");
+}
+
 /// Two captures overlapping on one broadcast (a supervisor restarting its
 /// importer before the old one is dropped) contend for the same `(PID, table_id)`
 /// key: the newer one wins the catalog mapping under a fallback track name, and

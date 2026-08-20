@@ -183,7 +183,13 @@ struct SiTrack {
 	/// A group still being read; swapped into `active` when it ends, so a torn
 	/// half-received snapshot is never emitted.
 	pending: Option<(moq_net::group::Consumer, super::si::Snapshot)>,
-	/// Media timestamp of the last emission ([`due`]).
+	/// A promoted snapshot changed `active` and has not hit the wire yet: emit with
+	/// the next frame instead of waiting out the repetition interval. For a clock
+	/// table (TDT/TOT) the cadence is the content, so holding a revision to the
+	/// interval delivers the time seconds late and can re-assert an already-sent
+	/// value (#2934).
+	dirty: bool,
+	/// Media timestamp of the last emission ([`Export::write_frame`]).
 	last_emit: Option<Timestamp>,
 	/// The same budget the media sources use. SI carries table snapshots at a low
 	/// rate, so the real-time default would take only the newest group and drop
@@ -215,6 +221,7 @@ impl SiTrack {
 			state: SiState::Requesting(source.request_catalog(), track.to_string()),
 			active: Default::default(),
 			pending: None,
+			dirty: false,
 			last_emit: None,
 			latency,
 		}
@@ -316,6 +323,10 @@ impl SiTrack {
 			};
 			if promote {
 				let (_, snapshot) = self.pending.take().unwrap();
+				// A repeated group (the same section set re-published) is not a change:
+				// treating it as one would turn the source's snapshot cadence into extra
+				// wire repetitions.
+				self.dirty |= snapshot != self.active;
 				self.active = snapshot;
 			} else if drop_pending {
 				self.pending = None;
@@ -585,6 +596,7 @@ impl<E: catalog::Catalog> Export<E> {
 					Some(existing) if existing.track != entry.track => {
 						let mut replacement = SiTrack::new(&self.source, &entry.track, entry.interval, self.latency);
 						replacement.active = std::mem::take(&mut existing.active);
+						replacement.dirty = existing.dirty;
 						replacement.last_emit = existing.last_emit;
 						*existing = replacement;
 					}
@@ -1009,20 +1021,25 @@ impl<E: catalog::Catalog> Export<E> {
 			self.last_psi = Some(frame.timestamp);
 		}
 
-		// Re-emit each SI entry's sections verbatim on its own cadence, which is the
-		// table's own repetition requirement rather than the PSI interval: an SDT
-		// wants 2s where the PSI wants 500ms, and an EPG schedule slice wants 30s.
-		// Unknown tables have no declared interval and fall back to the PSI cadence.
-		// `Bytes` clones are refcount bumps, and only a due entry is collected at all.
+		// Emit each SI entry's sections verbatim: immediately when the snapshot
+		// changed (`dirty`), else once its own repetition interval has elapsed since
+		// the entry last hit the wire. The interval is the table's repetition
+		// requirement, a *floor* between unchanged repeats rather than an emission
+		// grid: an SDT wants 2s where the PSI wants 500ms, and a TDT/TOT revision
+		// held to a 30s grid would deliver the clock up to a whole slot late and
+		// re-assert an already-sent time (#2934). Unknown tables have no declared
+		// interval and fall back to the PSI cadence. `Bytes` clones are refcount
+		// bumps, and only a due entry is collected at all.
 		let pending: Vec<(u16, Vec<Bytes>)> = self
 			.si
 			.iter_mut()
 			.filter(|(_, si)| !si.active.is_empty())
 			.filter(|(_, si)| {
 				let interval = si.interval.unwrap_or(PSI_INTERVAL);
-				due(frame.timestamp, si.last_emit, interval)
+				si.dirty || si_due(frame.timestamp, si.last_emit, interval)
 			})
 			.map(|((pid, _), si)| {
+				si.dirty = false;
 				si.last_emit = Some(frame.timestamp);
 				(*pid, si.active.sections().cloned().collect())
 			})
@@ -1259,6 +1276,27 @@ fn due(timestamp: Timestamp, last: Option<Timestamp>, interval: Duration) -> boo
 	slot(timestamp, interval) > slot(last, interval)
 }
 
+/// Whether an unchanged SI entry owes a repeat: `interval` has elapsed on the media
+/// timeline since it last hit the wire.
+///
+/// A floor measured from the entry's own last emission, unlike [`due`]'s absolute
+/// grid, because SI emission is content-driven: a changed snapshot goes out with
+/// the next frame (`SiTrack::dirty`) whenever that lands, and a grid boundary
+/// shortly after would re-send it as a near-immediate stale repeat. For a clock
+/// table that repeat asserts an already-sent time and steps a receiver backwards
+/// (#2934). The cost is that *unchanged* repeats are phased by each exporter's own
+/// emission history rather than shared slots; the emissions that carry information
+/// (the revisions) stay driven by the broadcast alone. `None` (never emitted) is
+/// always due, so a fresh exporter leads with the tables.
+fn si_due(timestamp: Timestamp, last: Option<Timestamp>, interval: Duration) -> bool {
+	let Some(last) = last else {
+		return true;
+	};
+	// Reordered (B-frame) timestamps step backwards; saturate rather than wrap so a
+	// dip never counts as elapsed time (a zero interval still means "every frame").
+	Duration::from(timestamp).saturating_sub(Duration::from(last)) >= interval
+}
+
 /// Index of `timestamp`'s repetition slot: how many whole `interval`s fit under it.
 ///
 /// Nanoseconds, so the divisor is zero only for a genuinely zero `interval`, which [`due`]
@@ -1470,7 +1508,7 @@ mod tests {
 
 	use moq_net::Timestamp;
 
-	use super::{DEFAULT_DTS_RESERVE, PSI_INTERVAL, author_dts, due, is_complete_section, slot};
+	use super::{DEFAULT_DTS_RESERVE, PSI_INTERVAL, author_dts, due, is_complete_section, si_due, slot};
 
 	fn ms(value: u64) -> Timestamp {
 		Timestamp::from_millis(value).unwrap()
@@ -1607,17 +1645,35 @@ mod tests {
 		// fire on every B-frame that steps back across a boundary (see `due_ignores_reorder`).
 		assert!(!due(ms(750), Some(ms(1_000)), PSI_INTERVAL));
 
-		// A per-PID SI interval is honored independently of the PSI cadence: an SDT at
-		// 2s is not due when the 500ms PSI would be.
-		let sdt = Duration::from_millis(2_000);
-		assert!(!due(ms(1_500), Some(ms(1_000)), sdt));
-		assert!(due(ms(3_000), Some(ms(1_000)), sdt));
+		// The slot grid honors whatever interval it is given, not just the PSI's own.
+		let coarse = Duration::from_millis(2_000);
+		assert!(!due(ms(1_500), Some(ms(1_000)), coarse));
+		assert!(due(ms(3_000), Some(ms(1_000)), coarse));
 	}
 
-	/// Drive a run of timestamps through the interval cadence, advancing the stored emission
-	/// only when one fires, and return how many tables it emitted. That is the whole of the SI
-	/// path; PSI additionally emits (and re-anchors) at every video keyframe, which is what
-	/// keeps two exporters of a program *with* video in step even before this.
+	#[test]
+	fn si_due_floors_repeats_from_the_last_emission() {
+		// Never emitted: always due, so a fresh exporter leads with the tables.
+		assert!(si_due(ms(1_000), None, PSI_INTERVAL));
+
+		// The interval is measured from the entry's own last emission, not an absolute
+		// grid: an emission at 1.4s holds the next repeat to 3.4s, where the grid
+		// would have re-sent at 2s.
+		let interval = Duration::from_millis(2_000);
+		assert!(!si_due(ms(2_000), Some(ms(1_400)), interval));
+		assert!(!si_due(ms(3_399), Some(ms(1_400)), interval));
+		assert!(si_due(ms(3_400), Some(ms(1_400)), interval));
+
+		// A reordered (B-frame) timestamp behind the last emission is not elapsed time.
+		assert!(!si_due(ms(1_000), Some(ms(1_400)), interval));
+		// A zero interval means every frame, even one sharing the last timestamp.
+		assert!(si_due(ms(1_400), Some(ms(1_400)), Duration::ZERO));
+	}
+
+	/// Drive a run of timestamps through the slot cadence, advancing the stored emission
+	/// only when one fires, and return how many tables it emitted. PSI additionally emits
+	/// (and re-anchors) at every video keyframe; SI does not use the grid at all
+	/// ([`si_due`] floors unchanged repeats from the last emission instead).
 	fn run_cadence(stamps: &[Timestamp], interval: Duration) -> usize {
 		let mut last = None;
 		let mut emissions = 0;
