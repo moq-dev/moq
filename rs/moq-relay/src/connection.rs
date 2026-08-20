@@ -127,11 +127,11 @@ impl Connection {
 
 		// The credential (JWT `exp` or client cert `notAfter`) is only checked at
 		// connect time, so hold the session open no longer than the credential is
-		// valid. Without an expiry, just wait for the session to close.
+		// valid. Without any bound, just wait for the session to close.
 		tokio::select! {
 			err = session.closed() => Err(err.into()),
-			_ = token.expired() => {
-				tracing::info!("credential expired, closing session");
+			reason = self.auth.expired(&token) => {
+				tracing::info!(%reason, "credential no longer valid, closing session");
 				session.abort(moq_net::Error::Unauthorized);
 				Ok(())
 			}
