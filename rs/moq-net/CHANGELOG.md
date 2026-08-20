@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.13](https://github.com/moq-dev/moq/compare/moq-net-v0.2.12...moq-net-v0.2.13) - 2026-08-20
+
+### Added
+
+- *(moq-net)* add Path::relative, replacing moq_transcode::source_reference ([#2906](https://github.com/moq-dev/moq/pull/2906))
+
+### Fixed
+
+- *(moq-net)* report PROBE partially, and only advertise Probe we can honour ([#2945](https://github.com/moq-dev/moq/pull/2945))
+- *(moq-net)* keep an anonymous publisher's source across a NAMESPACE update ([#2908](https://github.com/moq-dev/moq/pull/2908))
+- *(net)* encode draft 17 message parameters by type ([#2884](https://github.com/moq-dev/moq/pull/2884))
+
+### Other
+
+- *(kio)* dedup waiter registration so Park can reuse a parked waiter ([#2905](https://github.com/moq-dev/moq/pull/2905))
+
 ## [0.2.12](https://github.com/moq-dev/moq/compare/moq-net-v0.2.11...moq-net-v0.2.12) - 2026-08-14
 
 ### Fixed

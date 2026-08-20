@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.6](https://github.com/moq-dev/moq/compare/hang-v0.20.5...hang-v0.20.6) - 2026-08-20
+
+### Added
+
+- *(hang)* signal stalled video renditions ([#2865](https://github.com/moq-dev/moq/pull/2865))
+
 ## [0.20.5](https://github.com/moq-dev/moq/compare/hang-v0.20.4...hang-v0.20.5) - 2026-08-14
 
 ### Fixed

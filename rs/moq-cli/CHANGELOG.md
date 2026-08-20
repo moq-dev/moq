@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.12](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.11...moq-cli-v0.9.12) - 2026-08-20
+
+### Added
+
+- *(video)* give the bindings the NVIDIA codecs, and warn when Auto falls to software ([#2950](https://github.com/moq-dev/moq/pull/2950))
+- *(moq-net)* add Path::relative, replacing moq_transcode::source_reference ([#2906](https://github.com/moq-dev/moq/pull/2906))
+
 ## [0.9.11](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.10...moq-cli-v0.9.11) - 2026-08-14
 
 ### Added

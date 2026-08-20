@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.9](https://github.com/moq-dev/moq/compare/moq-boy-v0.4.8...moq-boy-v0.4.9) - 2026-08-20
+
+### Added
+
+- *(video)* give the bindings the NVIDIA codecs, and warn when Auto falls to software ([#2950](https://github.com/moq-dev/moq/pull/2950))
+
 ## [0.4.8](https://github.com/moq-dev/moq/compare/moq-boy-v0.4.7...moq-boy-v0.4.8) - 2026-08-14
 
 ### Other

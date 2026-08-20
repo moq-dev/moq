@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.12](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.11...moq-relay-v0.14.12) - 2026-08-20
+
+### Fixed
+
+- *(relay)* redial reconfigured cluster peers ([#2874](https://github.com/moq-dev/moq/pull/2874))
+
+### Other
+
+- *(deps)* bump the cargo group with 7 updates ([#2888](https://github.com/moq-dev/moq/pull/2888))
+
 ## [0.14.11](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.10...moq-relay-v0.14.11) - 2026-08-14
 
 ### Fixed

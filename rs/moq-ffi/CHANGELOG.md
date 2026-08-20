@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.12](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.11...moq-ffi-v0.3.12) - 2026-08-20
+
+### Added
+
+- *(video)* give the bindings the NVIDIA codecs, and warn when Auto falls to software ([#2950](https://github.com/moq-dev/moq/pull/2950))
+- *(moq-ffi)* compile for wasm32 ([#2911](https://github.com/moq-dev/moq/pull/2911))
+- *(hang)* signal stalled video renditions ([#2865](https://github.com/moq-dev/moq/pull/2865))
+
 ## [0.3.11](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.10...moq-ffi-v0.3.11) - 2026-08-14
 
 ### Added

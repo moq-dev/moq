@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.12](https://github.com/moq-dev/moq/compare/moq-native-v0.19.11...moq-native-v0.19.12) - 2026-08-20
+
+### Added
+
+- *(moq-native)* size the UDP socket buffers, warning when the kernel clamps ([#2940](https://github.com/moq-dev/moq/pull/2940))
+- *(video)* render PipeWire DMA-BUF frames ([#2839](https://github.com/moq-dev/moq/pull/2839))
+
+### Fixed
+
+- *(native)* restore nightly checks ([#2954](https://github.com/moq-dev/moq/pull/2954))
+
+### Other
+
+- *(deps)* bump the cargo group with 7 updates ([#2888](https://github.com/moq-dev/moq/pull/2888))
+
 ## [0.19.11](https://github.com/moq-dev/moq/compare/moq-native-v0.19.10...moq-native-v0.19.11) - 2026-08-14
 
 ### Added

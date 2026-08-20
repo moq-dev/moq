@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5](https://github.com/moq-dev/moq/compare/kio-v0.5.4...kio-v0.5.5) - 2026-08-20
+
+### Fixed
+
+- *(moq-mux)* compile on wasm32, and gate it so it stays that way
+
+### Other
+
+- *(kio)* dedup waiter registration so Park can reuse a parked waiter ([#2905](https://github.com/moq-dev/moq/pull/2905))
+
 ## [0.5.4](https://github.com/moq-dev/moq/compare/kio-v0.5.3...kio-v0.5.4) - 2026-08-05
 
 ### Added
