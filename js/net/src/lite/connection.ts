@@ -204,8 +204,8 @@ export class Connection implements Established {
 
 	// Open the unidirectional Setup Stream, send our single SETUP, and FIN (lite-05+).
 	// The browser uses WebTransport, which carries the request URI, so we advertise no
-	// path and leave routing to the URL. We advertise probe = Report (we measure and
-	// report bitrate over the PROBE stream, but don't actively pad the connection).
+	// path and leave routing to the URL. The probe level reflects what this transport
+	// can actually measure; we never pad, so we never advertise Increase.
 	// Role stays Both: publish/consume are called after this point, so there is nothing
 	// to narrow yet. The origin declares our session identity so the peer can filter
 	// reflected announcements (lite-06 removed ANNOUNCE_REQUEST's exclude_hop for it).
@@ -213,7 +213,7 @@ export class Connection implements Established {
 		const writer = await Writer.open(this.#quic);
 		try {
 			await writer.u53(DataType.Setup);
-			await new Setup({ probe: ProbeLevel.Report, origin: this.origin }).encode(writer, this.#version);
+			await new Setup({ probe: probeLevel(this.#quic), origin: this.origin }).encode(writer, this.#version);
 			writer.close();
 		} catch (err: unknown) {
 			writer.reset(err);
@@ -304,4 +304,17 @@ export class Connection implements Established {
 	get closed(): Promise<void> {
 		return this.#quic.closed.then(() => undefined);
 	}
+}
+
+/**
+ * The probe level to advertise in SETUP, from what the transport can measure.
+ *
+ * `Report` claims we can measure and periodically report. The qmux/WebSocket
+ * fallback implements no `getStats()`, so a publisher there has nothing to send;
+ * advertising `Report` and then resetting the stream the subscriber opens is not a
+ * conformant state, and the subscriber's own gate skips a stream it can't use.
+ */
+function probeLevel(quic: WebTransport): ProbeLevel {
+	const getStats = (quic as unknown as { getStats?: unknown }).getStats;
+	return typeof getStats === "function" ? ProbeLevel.Report : ProbeLevel.None;
 }
