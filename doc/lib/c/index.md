@@ -157,8 +157,10 @@ the right shape for configuration, and it grows under two rules:
 
 - **New fields are appended**, never inserted, so existing field offsets never move.
 - **Zero always means the previous behavior.** A knob whose default is not zero gets
-  a `has_*` / `*_valid` companion flag rather than a sentinel, so a zeroed struct
-  reads as "not set" and the library keeps doing what it did before.
+  a `*_present` companion flag rather than a sentinel, so a zeroed struct reads as
+  "not set" and the library keeps doing what it did before. (`*_valid` on the
+  read-back structs is the mirror image: there the library sets it to say whether a
+  metric it reports is meaningful.)
 
 Together those make an added field invisible to code that doesn't want it: you
 recompile against the new header and nothing changes. Always zero a struct before
@@ -325,7 +327,7 @@ Raw tracks carry arbitrary byte payloads without catalog or codec parsing. Use
 `moq_publish_track_frame` / `moq_publish_group_frame` to provide presentation
 timestamps in microseconds.
 libmoq creates raw tracks with a microsecond timescale by default (used when
-`moq_track_info.timescale_valid` is false or no info is given), matching the C
+`moq_track_info.timescale_present` is false or no info is given), matching the C
 ABI's timestamp units.
 
 Use `moq_publish_track_group_at` to create sparse or replayed groups at an
@@ -351,9 +353,9 @@ struct moq_track_info info = {0};
 info.priority = 3;
 info.ordered = true;
 info.max_age_ms = 1000;
-info.max_age_valid = true;
+info.max_age_present = true;
 info.timescale = 1000000;
-info.timescale_valid = true;
+info.timescale_present = true;
 
 int track = moq_publish_track(
     broadcast,
@@ -364,7 +366,7 @@ int track = moq_publish_track(
 
 `moq_consume_track` accepts optional subscriber delivery preferences.
 `moq_consume_track_update` changes them while the callback task is running.
-Fields ending in `_valid` decide whether the matching optional value is present:
+Fields ending in `_present` decide whether the matching optional value is set:
 
 ```c
 struct moq_subscription sub = {0};
@@ -372,7 +374,7 @@ sub.priority = 5;
 sub.ordered = true;
 sub.max_age_ms = 25;
 sub.group_start = 10;
-sub.group_start_valid = true;
+sub.group_start_present = true;
 
 int consumer = moq_consume_track(
     broadcast,
@@ -383,7 +385,7 @@ int consumer = moq_consume_track(
     user_data);
 
 sub.group_end = 20;
-sub.group_end_valid = true;
+sub.group_end_present = true;
 moq_consume_track_update(consumer, &sub);
 ```
 

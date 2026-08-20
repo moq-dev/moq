@@ -433,14 +433,14 @@ pub struct moq_track_info {
 	/// Maximum age of a non-latest group before the publisher evicts it, in milliseconds.
 	/// The publisher-side half of `moq_subscription.max_age_ms`.
 	pub max_age_ms: u64,
-	/// Whether `max_age_ms` should override the default.
-	pub max_age_valid: bool,
+	/// Whether `max_age_ms` is set. When false, the publisher's default applies.
+	pub max_age_present: bool,
 
 	/// Per-frame timescale in ticks per second.
 	pub timescale: u64,
-	/// Whether `timescale` should override the default microsecond timescale,
-	/// which matches the `timestamp_us` units used everywhere else in this ABI.
-	pub timescale_valid: bool,
+	/// Whether `timescale` is set. When false, the default microsecond timescale
+	/// applies, matching the `timestamp_us` units used everywhere else in this ABI.
+	pub timescale_present: bool,
 }
 
 impl TryFrom<&moq_track_info> for moq_net::track::Info {
@@ -453,10 +453,10 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 			.with_timescale(moq_net::Timescale::MICRO)
 			.with_priority(info.priority)
 			.with_ordered(info.ordered);
-		if info.max_age_valid {
+		if info.max_age_present {
 			out = out.with_max_age(std::time::Duration::from_millis(info.max_age_ms));
 		}
-		if info.timescale_valid {
+		if info.timescale_present {
 			out = out.with_timescale(moq_net::Timescale::new(info.timescale)?);
 		}
 		Ok(out)
@@ -484,12 +484,12 @@ pub struct moq_subscription {
 	/// First group to deliver.
 	pub group_start: u64,
 	/// Whether `group_start` is present. When false, delivery starts at the latest group.
-	pub group_start_valid: bool,
+	pub group_start_present: bool,
 
 	/// Last group to deliver, inclusive.
 	pub group_end: u64,
 	/// Whether `group_end` is present. When false, there is no end cap.
-	pub group_end_valid: bool,
+	pub group_end_present: bool,
 }
 
 impl From<&moq_subscription> for moq_net::track::Subscription {
@@ -498,10 +498,10 @@ impl From<&moq_subscription> for moq_net::track::Subscription {
 			.with_priority(subscription.priority)
 			.with_ordered(subscription.ordered)
 			.with_max_age(std::time::Duration::from_millis(subscription.max_age_ms));
-		if subscription.group_start_valid {
+		if subscription.group_start_present {
 			out = out.with_start(moq_net::track::Position::group(subscription.group_start));
 		}
-		if subscription.group_end_valid {
+		if subscription.group_end_present {
 			out = out.with_end(moq_net::track::Position::after_group(subscription.group_end));
 		}
 		out

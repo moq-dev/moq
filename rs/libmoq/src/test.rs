@@ -1208,9 +1208,9 @@ fn publish_track_invalid_broadcast() {
 		priority: 1,
 		ordered: true,
 		max_age_ms: 0,
-		max_age_valid: false,
+		max_age_present: false,
 		timescale: 0,
-		timescale_valid: false,
+		timescale_present: false,
 	};
 	assert!(unsafe { moq_publish_track(0, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
 	assert!(moq_publish_track_group(9999) < 0);
@@ -1224,9 +1224,9 @@ fn publish_track_invalid_broadcast() {
 		ordered: true,
 		max_age_ms: 0,
 		group_start: 0,
-		group_start_valid: false,
+		group_start_present: false,
 		group_end: 0,
-		group_end_valid: false,
+		group_end_present: false,
 	};
 	assert!(unsafe { moq_consume_track_update(9999, &subscription) } < 0);
 }
@@ -1240,9 +1240,9 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 		priority: 0,
 		ordered: false,
 		max_age_ms: 0,
-		max_age_valid: false,
+		max_age_present: false,
 		timescale: 0,
-		timescale_valid: true,
+		timescale_present: true,
 	};
 
 	assert!(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
@@ -1255,9 +1255,9 @@ fn raw_track_options_preserve_ordering_priority() {
 		priority: 0,
 		ordered: false,
 		max_age_ms: 0,
-		max_age_valid: false,
+		max_age_present: false,
 		timescale: 0,
-		timescale_valid: false,
+		timescale_present: false,
 	};
 
 	assert!(!moq_net::track::Info::try_from(&info).unwrap().ordered);
@@ -1269,9 +1269,9 @@ fn raw_track_options_preserve_ordering_priority() {
 		ordered: false,
 		max_age_ms: 0,
 		group_start: 0,
-		group_start_valid: false,
+		group_start_present: false,
 		group_end: 0,
-		group_end_valid: false,
+		group_end_present: false,
 	};
 
 	assert!(!moq_net::track::Subscription::from(&subscription).ordered);
@@ -1306,9 +1306,9 @@ fn raw_track_publish_consume() {
 		ordered: false,
 		max_age_ms: 1_000,
 		group_start: 0,
-		group_start_valid: false,
+		group_start_present: false,
 		group_end: 0,
-		group_end_valid: false,
+		group_end_present: false,
 	};
 	let consumer = id(unsafe {
 		moq_consume_track(
@@ -1487,9 +1487,9 @@ fn raw_track_subscription_options_and_update() {
 		priority: 3,
 		ordered: false,
 		max_age_ms: 1_000,
-		max_age_valid: true,
+		max_age_present: true,
 		timescale: 1_000_000,
-		timescale_valid: true,
+		timescale_present: true,
 	};
 	let track =
 		id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len(), &info) });
@@ -1510,9 +1510,9 @@ fn raw_track_subscription_options_and_update() {
 		ordered: true,
 		max_age_ms: 25,
 		group_start: 1,
-		group_start_valid: true,
+		group_start_present: true,
 		group_end: 1,
-		group_end_valid: true,
+		group_end_present: true,
 	};
 	let consumer = id(unsafe {
 		moq_consume_track(
