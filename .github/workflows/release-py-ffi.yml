@@ -87,7 +87,7 @@ jobs:
           # py/moq-ffi/pyproject.toml drives the build; its [tool.maturin]
           # block points at rs/moq-ffi/Cargo.toml.
           working-directory: py/moq-ffi
-          args: --release --out dist
+          args: --locked --release --out dist
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
           before-script-linux: ${{ matrix.before-script-linux || '' }}

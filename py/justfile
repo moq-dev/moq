@@ -113,6 +113,10 @@ clean:
 
 # pure python so it needs no compilation, just a metadata-correct wheel.
 package:
+    # `uv build` has no --locked, and this is the recipe release-py.yml
+    # publishes from, so validate the lock explicitly rather than inheriting it
+    # from a sync that never runs here.
+    uv lock --check
     rm -rf dist
     uv build --package moq-rs --out-dir dist
 
