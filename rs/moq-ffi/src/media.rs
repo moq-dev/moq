@@ -24,6 +24,33 @@ pub struct MoqVideoProperties {
 	pub flip: Option<bool>,
 }
 
+/// A media track's companion timestamp-to-group index.
+#[derive(Clone, uniffi::Record)]
+pub struct MoqTimeline {
+	pub track: String,
+	pub timescale: u32,
+	pub wall: Option<u64>,
+}
+
+impl From<hang::catalog::Timeline> for MoqTimeline {
+	fn from(timeline: hang::catalog::Timeline) -> Self {
+		Self {
+			track: timeline.track,
+			timescale: timeline.timescale,
+			wall: timeline.wall,
+		}
+	}
+}
+
+impl From<MoqTimeline> for hang::catalog::Timeline {
+	fn from(timeline: MoqTimeline) -> Self {
+		let mut out = Self::new(timeline.track);
+		out.timescale = timeline.timescale;
+		out.wall = timeline.wall;
+		out
+	}
+}
+
 /// How a track's frames are packaged, as advertised in the catalog.
 #[derive(Clone, uniffi::Enum)]
 pub enum MoqContainer {
@@ -89,6 +116,7 @@ pub struct MoqVideo {
 	pub stalled: bool,
 	pub framerate: Option<f64>,
 	pub container: MoqContainer,
+	pub timeline: Option<MoqTimeline>,
 }
 
 #[derive(Clone, uniffi::Record)]
@@ -99,6 +127,14 @@ pub struct MoqAudio {
 	pub channel_count: u32,
 	pub bitrate: Option<u64>,
 	pub container: MoqContainer,
+	pub timeline: Option<MoqTimeline>,
+}
+
+/// One timestamp-to-group mapping read from a media timeline track.
+#[derive(Clone, uniffi::Record)]
+pub struct MoqTimelineEntry {
+	pub group: u64,
+	pub timestamp_us: u64,
 }
 
 /// A payload and the time it should be presented.
@@ -223,6 +259,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 					stalled: config.stalled.unwrap_or(false),
 					framerate: config.framerate,
 					container: MoqContainer::from_catalog(&config.container)?,
+					timeline: config.timeline.clone().map(Into::into),
 				},
 			))
 		})
@@ -242,6 +279,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 					channel_count: config.channel_count,
 					bitrate: config.bitrate,
 					container: MoqContainer::from_catalog(&config.container)?,
+					timeline: config.timeline.clone().map(Into::into),
 				},
 			))
 		})

@@ -580,6 +580,39 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 }
 
 #[tokio::test]
+async fn subscribes_to_timeline_group_mappings() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let mut timeline = moq_mux::timeline::Producer::new(&mut broadcast, "video").unwrap();
+	let section = timeline.section();
+	let track = broadcast.create_track("video", None).unwrap();
+	let consumer = MoqBroadcastConsumer::new(broadcast.consume());
+	let mut media = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy)
+		.with_recorder(timeline.recorder());
+
+	for timestamp_us in [5_000_000, 7_000_000] {
+		media
+			.write(moq_mux::container::Frame {
+				timestamp: moq_net::Timestamp::from_micros(timestamp_us).unwrap(),
+				payload: bytes::Bytes::from_static(b"video"),
+				keyframe: true,
+				duration: None,
+			})
+			.unwrap();
+	}
+	media.finish().unwrap();
+	timeline.finish().unwrap();
+
+	let timeline = consumer.subscribe_timeline(section.into()).await.unwrap();
+	let first = timeline.next().await.unwrap().expect("first timeline entry");
+	assert_eq!(first.group, 0);
+	assert_eq!(first.timestamp_us, 5_000_000);
+	let second = timeline.next().await.unwrap().expect("second timeline entry");
+	assert_eq!(second.group, 1);
+	assert_eq!(second.timestamp_us, 7_000_000);
+	assert!(timeline.next().await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn dynamic_track_serves_fetch_miss_and_priority() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("events".into(), None).unwrap();

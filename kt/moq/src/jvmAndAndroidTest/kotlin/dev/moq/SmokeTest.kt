@@ -104,15 +104,16 @@ class SmokeTest {
         }
     }
 
-    /** A fetched media group streams its decoded frames and then completes. */
     @Test
-    fun `media group helper streams fetched frames`() = runTest {
+    fun `media group and timeline helpers stream fetched data`() = runTest {
         BroadcastProducer().use { broadcast ->
             val media = broadcast.publishMedia(
                 Init(format = "opus", data = opusHead(), video = null),
             )
             val consumer = broadcast.consume()
             val (name, audio) = consumer.catalog().audio.entries.single()
+            val timeline = checkNotNull(audio.timeline)
+            val timelineConsumer: TimelineConsumer = consumer.subscribeTimeline(timeline)
 
             media.writeFrame(Frame(payload = "opus frame".encodeToByteArray(), timestampUs = 5_000_000uL))
 
@@ -124,7 +125,6 @@ class SmokeTest {
                 audio.container,
                 FetchGroupOptions(priority = 3u),
             )
-
             // Close the group so the fetched stream terminates instead of waiting for more.
             media.finish()
 
@@ -135,6 +135,15 @@ class SmokeTest {
                 val frame = frames.single()
                 assertEquals("opus frame", frame.payload.decodeToString())
                 assertEquals(5_000_000uL, frame.timestampUs)
+            }
+
+            broadcast.finish()
+            timelineConsumer.use {
+                val entries = it.entries().toList()
+                assertEquals(1, entries.size)
+                val entry = entries.single()
+                assertEquals(0uL, entry.group)
+                assertEquals(5_000_000uL, entry.timestampUs)
             }
         }
     }

@@ -228,24 +228,28 @@ Call `request.abort(code)` when the requested group cannot be produced. Fetch is
 
 ### Fetching media groups
 
-`fetchGroup` hands back raw payloads. `fetchMediaGroup` decodes the same group through the rendition's advertised container, so you get timestamped frames without opening a live subscription:
+Catalog audio and video renditions include an optional timeline that maps presentation timestamps to retained group sequences. Subscribe to that index, then fetch and decode a specific group with the rendition's advertised container:
 
 ```kotlin
-val (name, audio) = consumer.catalog().audio.entries.first()
+val catalog = consumer.catalog()
+val (name, audio) = catalog.audio.entries.first()
+val timeline = requireNotNull(audio.timeline)
 
-consumer.fetchMediaGroup(
-    name,
-    42uL,
-    audio.container,
-    FetchGroupOptions(priority = 10u),
-).use { group ->
-    group.frames().collect { frame ->
-        println("${frame.timestampUs}: ${frame.payload.size} bytes")
+consumer.subscribeTimeline(timeline).entries().collect { entry ->
+    consumer.fetchMediaGroup(
+        name,
+        entry.group,
+        audio.container,
+        FetchGroupOptions(priority = 10u),
+    ).use { group ->
+        group.frames().collect { frame ->
+            println("${frame.timestampUs}: ${frame.payload.size} bytes")
+        }
     }
 }
 ```
 
-`frames()` is a cancellation-aware `Flow`. A fetched media group is finite: it completes after the group's last decoded frame, unlike the live `subscribeMedia` stream. Latency-based group skipping does not apply, so you always get every frame in the group.
+`entries()` and `frames()` are cancellation-aware `Flow` helpers. A fetched media group is finite: it completes after the group's last decoded frame, unlike the live `subscribeMedia` stream. Latency-based group skipping does not apply, so you always get every frame in the group.
 
 ### On-demand raw tracks
 
