@@ -13,6 +13,10 @@ import { exchangeSetup } from "./handshake.ts";
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = 500;
 
+// RESET_STREAM and CONNECTION_CLOSE are separate transport notifications. Give the latter
+// time to surface its authoritative code without letting a reset-only peer stall SETUP forever.
+const SETUP_CLOSE_GRACE_MS = 100;
+
 /** Tuning for the WebSocket fallback used when WebTransport is unavailable or loses the connect race. */
 export interface WebSocketOptions {
 	/** Enable the WebSocket fallback. Defaults to `true`. */
@@ -234,11 +238,19 @@ async function connectTransport(url: URL, session: WebTransport, wiring: Session
 		return await Promise.race([terminal, negotiate(url, session, wiring)]);
 	} catch (cause) {
 		// A session shutdown can reject its SETUP stream before `closed` publishes the
-		// peer's close code. Wait for that terminal result without closing locally, since a
-		// local clean close could overwrite the code. The caller's abort still closes a peer
-		// that resets SETUP without ending its invalid session.
-		const final = await closed;
-		if (final) throw final;
+		// peer's close code. Wait briefly without closing locally, since a local clean close
+		// could overwrite that code. A reset-only peer is cleaned up after the grace period.
+		const pending = Symbol("session close pending");
+		const final = await Promise.race([
+			closed,
+			new Promise<typeof pending>((resolve) => setTimeout(() => resolve(pending), SETUP_CLOSE_GRACE_MS)),
+		]);
+		if (final !== pending) {
+			if (final) throw final;
+			throw cause;
+		}
+
+		session.close();
 		throw cause;
 	}
 }

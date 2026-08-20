@@ -396,9 +396,6 @@ test("a setup stream reset is not mistaken for an unauthorized session", async (
 
 			attempts++;
 			await accepted.value.writable.abort(toTransport(StreamCode.DeliveryTimeout, "delivery timeout"));
-			await settle();
-			await settle();
-			pair.server.close();
 		})();
 		return pair.client;
 	};
