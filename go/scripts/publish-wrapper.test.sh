@@ -27,7 +27,27 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 FAILED=0
-ok() { echo "  ok: $1"; }
+
+# expect <description> <actual> <expected>
+expect() {
+    if [[ "$2" == "$3" ]]; then
+        echo "  ok: $1"
+    else
+        echo "  FAIL: $1 (expected '$3', got '$2')" >&2
+        FAILED=1
+    fi
+}
+
+# expect_tagged <description> <tags pointing at the mirror HEAD>
+expect_tagged() {
+    if [[ -n "$2" ]]; then
+        echo "  ok: $1"
+    else
+        echo "  FAIL: $1 (HEAD carries no tag)" >&2
+        FAILED=1
+    fi
+}
+
 fail() {
     echo "  FAIL: $1" >&2
     FAILED=1
@@ -68,24 +88,28 @@ publish() {
     )
 }
 
-tags() { git -C "$MIRROR" tag --list "v${LINE}.*" | sort; }
-head_tags() { git -C "$MIRROR" tag --points-at "refs/heads/main" | sort; }
+tags() { git -C "$MIRROR" tag --list "v${LINE}.*" | sort | tr '\n' ' '; }
+head_tags() { git -C "$MIRROR" tag --points-at "refs/heads/main" | sort | tr '\n' ' '; }
 
 echo "publish-wrapper test: first release"
 publish >"$WORK/run1.log" 2>&1 || {
     cat "$WORK/run1.log" >&2
     fail "first publish exited non-zero"
 }
-[[ "$(tags)" == "v${LINE}.0" ]] && ok "cut v${LINE}.0" || fail "expected v${LINE}.0, got: $(tags | tr '\n' ' ')"
-[[ -n "$(head_tags)" ]] && ok "tagged the pushed HEAD" || fail "HEAD carries no tag"
+expect "cut v${LINE}.0" "$(tags)" "v${LINE}.0 "
+expect_tagged "tagged the pushed HEAD" "$(head_tags)"
 
 echo "publish-wrapper test: unchanged tree is a no-op"
 publish >"$WORK/run2.log" 2>&1 || {
     cat "$WORK/run2.log" >&2
     fail "second publish exited non-zero"
 }
-grep -q "Nothing to publish" "$WORK/run2.log" && ok "reported nothing to publish" || fail "expected a no-op"
-[[ "$(tags)" == "v${LINE}.0" ]] && ok "burned no patch number" || fail "unexpected tags: $(tags | tr '\n' ' ')"
+if grep -q "Nothing to publish" "$WORK/run2.log"; then
+    echo "  ok: reported nothing to publish"
+else
+    fail "expected a no-op"
+fi
+expect "burned no patch number" "$(tags)" "v${LINE}.0 "
 
 echo "publish-wrapper test: recovers a release whose tag never landed"
 # Exactly what a failed tag push leaves behind: the tree is on main, untagged.
@@ -94,8 +118,8 @@ publish >"$WORK/run3.log" 2>&1 || {
     cat "$WORK/run3.log" >&2
     fail "recovery publish exited non-zero"
 }
-[[ "$(tags)" == "v${LINE}.0" ]] && ok "re-cut v${LINE}.0 for the existing HEAD" || fail "expected v${LINE}.0 restored, got: $(tags | tr '\n' ' ')"
-[[ -n "$(head_tags)" ]] && ok "the tag points at the published HEAD" || fail "restored tag is not on HEAD"
+expect "re-cut v${LINE}.0 for the existing HEAD" "$(tags)" "v${LINE}.0 "
+expect_tagged "the tag points at the published HEAD" "$(head_tags)"
 
 if ((FAILED)); then
     echo "publish-wrapper test: FAILED" >&2
