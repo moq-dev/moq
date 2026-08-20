@@ -168,8 +168,10 @@ pick a specific rung of a ladder. Audio drives the video clock when both are
 present. The window preserves the video's aspect ratio and can be closed with
 Escape, the close button, or Ctrl-C.
 
-Playback decodes h264, h265, and av1 video, and opus and pcm audio, so
-`--video-codec` / `--audio-codec` are rejected up front for anything else.
+Playback decodes h264, h265, and av1 video, and opus, pcm, and AAC-LC audio, so
+`--video-codec vp8` and `--video-codec vp9` are rejected up front. AAC is the one
+it reads without being able to publish it, since that is what an RTMP or SRT
+ingest produces; HE-AAC is not decoded, and such a rendition fails when it opens.
 `--latency-max` controls how far a stalled media group may lag before it is
 skipped and defaults to `500ms`. These flags all follow the `play` verb:
 

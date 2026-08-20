@@ -111,6 +111,17 @@ impl Resampler {
 	}
 }
 
+/// Whether [`remix`] can produce this channel count, checked up front so a
+/// consumer fails at construction rather than on its first frame.
+pub(crate) fn validate_channels(count: u32) -> Result<(), Error> {
+	match count {
+		1 | 2 => Ok(()),
+		other => Err(Error::Unsupported(format!(
+			"channel remix only supports mono and stereo (got {other})"
+		))),
+	}
+}
+
 /// Remix interleaved mono/stereo PCM into the requested channel count.
 pub(crate) fn remix(samples: &[f32], input_channels: u32, output_channels: u32) -> Result<Vec<f32>, Error> {
 	match (input_channels, output_channels) {

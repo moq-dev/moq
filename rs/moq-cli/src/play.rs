@@ -75,15 +75,11 @@ impl Args {
 	/// those here would filter the catalog down to a rendition that then fails to
 	/// decode, leaving a blank window rather than an error.
 	pub fn validate(&self) -> anyhow::Result<()> {
-		use crate::subscribe::{AudioCodecArg, VideoCodecArg};
+		use crate::subscribe::VideoCodecArg;
 
 		anyhow::ensure!(
 			!matches!(self.select.video_codec, Some(VideoCodecArg::Vp8 | VideoCodecArg::Vp9)),
 			"`play` cannot decode vp8 or vp9; pass --video-codec h264, h265, or av1"
-		);
-		anyhow::ensure!(
-			!matches!(self.select.audio_codec, Some(AudioCodecArg::Aac)),
-			"`play` cannot decode aac; pass --audio-codec opus or pcm"
 		);
 		Ok(())
 	}
