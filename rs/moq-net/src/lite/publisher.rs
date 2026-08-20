@@ -1,7 +1,6 @@
 use crate::{announce, frame, group, origin, track};
 use std::{sync::Arc, task::Poll, time::Duration};
 
-use bytes::Buf;
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_transport_trait::Stats;
 
@@ -2285,18 +2284,15 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		self.track_priority_seen
 	}
 
-	/// Write a whole chunk, applying priority changes between partial writes.
+	/// Write a whole chunk at the current priority.
 	async fn write_chunk(
 		&mut self,
 		stream: &mut Writer<S::SendStream, Version>,
 		priority: &mut PriorityHandle,
-		mut chunk: bytes::Bytes,
+		chunk: bytes::Bytes,
 	) -> Result<(), Error> {
-		while chunk.has_remaining() {
-			self.apply_priority(stream, priority);
-			stream.write(&mut chunk).await?;
-		}
-		Ok(())
+		self.apply_priority(stream, priority);
+		stream.write_chunk(chunk).await
 	}
 
 	fn apply_priority(&mut self, stream: &mut Writer<S::SendStream, Version>, priority: &mut PriorityHandle) {
