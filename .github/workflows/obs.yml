@@ -1,0 +1,100 @@
+name: OBS
+
+# Compiles and links the OBS plugin, which nothing else does: `just check`
+# lints cpp/obs but never builds it, and a local build needs the
+# multi-hundred-MB obs-deps bundle on macOS and Windows.
+#
+# Linux is the platform that needs no bundle at all -- nixpkgs has obs-studio,
+# Qt6 and ffmpeg, so the dev shell is the whole dependency set. The plugin is
+# platform-independent C++ over libmoq's C ABI, so a Linux compile catches the
+# breakage a macOS developer would otherwise ship uncompiled.
+#
+# Narrow trigger, like swift.yml: the plugin's own sources, the libmoq header
+# they call through, and the flake that supplies the toolchain.
+#
+# The manifests and Cargo.lock are in there for the one way a crate the plugin
+# never names can break it: linking libmoq.a from outside cargo needs the native
+# libraries in `rs/libmoq/native-libs/*.txt`, which are maintained by hand. A
+# dependency that starts pulling in a new one leaves that list stale, and every
+# Rust gate stays green, because cargo passes the flag itself and only this job
+# links without it.
+#
+# Manifests and build scripts rather than Cargo.lock alone, because neither a
+# feature toggle nor a build script has to touch the lockfile. libmoq takes
+# moq-native with default features, so flipping one of those defaults on
+# (`jemalloc` gates `dep:tikv-jemallocator`) changes what libmoq.a needs at link
+# time while Cargo.lock stays byte-identical, since moq-relay already put that
+# package in the graph; a build.rs emitting `cargo::rustc-link-lib` needs no
+# manifest change at all.
+#
+# A list of paths still can't be complete here -- a vendored C source or a
+# .cargo/config.toml could do it too -- and `rs/**` would run this on nearly
+# every PR, which is the cost that removed the Windows and macOS gates (#2600).
+# So this filter covers the likely inputs at PR time and nightly.yml runs the
+# same recipe diff-independently to cover the rest.
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    # `closed` is here only so merging/closing a PR cancels its in-flight run
+    # via the concurrency group below; the job itself is skipped on close.
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - "cpp/obs/**"
+      - "rs/libmoq/**"
+      - "rs/**/Cargo.toml"
+      - "rs/**/build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/obs.yml"
+
+concurrency:
+  group: obs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: OBS
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
+        with:
+          tool-cache: false
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+        with:
+          determinate: false
+          # Trust the flake's cachix substituter, so the dev shell substitutes
+          # instead of building from source. See check.yml for the full story.
+          extra-conf: |
+            extra-substituters = https://kixelated.cachix.org
+            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+
+      # Restore only. cache.yml is the single writer, on `main`; see the comment
+      # there for why. `shared-key` has to match the one it saves under. It
+      # holds dev-profile artifacts, which is why `just obs ci` builds libmoq in
+      # debug rather than the preset's release.
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          shared-key: rust
+          save-if: false
+
+      # The same recipe a developer runs on Linux. Warnings are errors here, via
+      # the platform's CI preset.
+      - name: Build
+        run: nix develop --command just obs ci

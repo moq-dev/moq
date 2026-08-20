@@ -995,14 +995,13 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 struct Continuity {
 	/// Last continuity_counter seen on a packet with payload, to spot gaps.
 	last_cc: Option<u8>,
-	/// Last payload packet, to skip ISO 13818-1 duplicates (same cc, identical bytes).
+	/// Last payload packet, to identify ISO 13818-1 retransmissions.
 	last_pkt: Option<[u8; 188]>,
 }
 
 /// What one packet says about the bytes already accumulated for its PID.
 enum Continuation {
-	/// An exact retransmission, which ISO 13818-1 permits once. Ignore the packet entirely:
-	/// processing it would duplicate its bytes.
+	/// A retransmission, which may refresh PCR/OPCR. Ignore it entirely to avoid duplicate bytes.
 	Duplicate,
 	/// Contiguous with the previous payload packet.
 	Contiguous,
@@ -1012,6 +1011,32 @@ enum Continuation {
 	/// The demodulator flagged this packet corrupt. The partial is lost like [`Broken`], and
 	/// so is the packet: nothing in it can be trusted.
 	Corrupt,
+}
+
+/// Whether two packets differ only in the clock fields a retransmission may refresh.
+fn is_duplicate(last: &[u8; 188], pkt: &[u8; 188]) -> bool {
+	if last == pkt {
+		return true;
+	}
+
+	// A refreshed clock requires the same adaptation-field shape in both packets. Comparing
+	// through the flags byte also pins the PID, payload-unit start, counter, length, and every
+	// other header bit before any bytes are ignored.
+	let afc = (last[3] >> 4) & 0x3;
+	if afc & 0x2 == 0 || last[..6] != pkt[..6] {
+		return false;
+	}
+
+	let af_len = last[4] as usize;
+	let flags = last[5];
+	let clock_len = usize::from(flags & 0x10 != 0) * 6 + usize::from(flags & 0x08 != 0) * 6;
+	let clock_end = 6 + clock_len;
+	let adaptation_end = 5 + af_len;
+	if clock_len == 0 || clock_end > adaptation_end || adaptation_end > last.len() {
+		return false;
+	}
+
+	last[clock_end..] == pkt[clock_end..]
 }
 
 impl Continuity {
@@ -1050,7 +1075,7 @@ impl Continuity {
 		// Only the bytes tell them apart, which is why the counter alone can't decide: taking
 		// every repeat for a duplicate would carry a partial straight across that loss and
 		// join it to unrelated bytes.
-		if self.last_pkt.as_ref().is_some_and(|last| last == pkt) {
+		if self.last_pkt.as_ref().is_some_and(|last| is_duplicate(last, pkt)) {
 			return Continuation::Duplicate;
 		}
 		self.last_pkt = Some(*pkt);
@@ -2315,7 +2340,7 @@ mod test {
 	const RECORDING_LATENCY: std::time::Duration = std::time::Duration::from_secs(30);
 	use mpeg2ts::es::StreamType;
 
-	use super::SectionReassembler;
+	use super::{Continuation, Continuity, SectionReassembler};
 	use crate::Latency;
 	use moq_net::Timestamp;
 
@@ -2346,6 +2371,23 @@ mod test {
 	fn discontinuity_packet(cc: u8, body: &[u8]) -> Vec<u8> {
 		// afc 0b11 (adaptation + payload); adaptation_field_length 1, flags 0x80.
 		let mut p = vec![0x47, 0x00, 0x21, 0x30 | (cc & 0x0f), 0x01, 0x80];
+		p.extend_from_slice(body);
+		assert!(p.len() <= 188, "test packet body overflows 188 bytes");
+		p.resize(188, 0xff);
+		p
+	}
+
+	/// A continuation packet carrying PCR and/or OPCR in its adaptation field.
+	fn clock_packet(cc: u8, pcr: Option<[u8; 6]>, opcr: Option<[u8; 6]>, body: &[u8]) -> Vec<u8> {
+		let flags = if pcr.is_some() { 0x10 } else { 0 } | if opcr.is_some() { 0x08 } else { 0 };
+		let length = 1 + usize::from(pcr.is_some()) * 6 + usize::from(opcr.is_some()) * 6;
+		let mut p = vec![0x47, 0x00, 0x21, 0x30 | (cc & 0x0f), length as u8, flags];
+		if let Some(pcr) = pcr {
+			p.extend_from_slice(&pcr);
+		}
+		if let Some(opcr) = opcr {
+			p.extend_from_slice(&opcr);
+		}
 		p.extend_from_slice(body);
 		assert!(p.len() <= 188, "test packet body overflows 188 bytes");
 		p.resize(188, 0xff);
@@ -4040,6 +4082,30 @@ mod test {
 		let p2 = packet(false, 1, 0, &section[183..367]);
 		let p3 = packet(false, 2, 0, &section[367..]);
 		assert_eq!(run(&[p1, p2.clone(), p2, p3]), vec![section]);
+	}
+
+	#[test]
+	fn duplicate_with_refreshed_clock_is_skipped() {
+		let old = [0x00, 0x00, 0x00, 0x00, 0x7e, 0x00];
+		let refreshed = [0x00, 0x00, 0x00, 0x01, 0x7e, 0x00];
+		for (name, pcr, opcr) in [("PCR", Some(old), None), ("OPCR", None, Some(old))] {
+			let section = fake_section(0xfc, 390);
+			let p1 = packet(true, 0, 0, &section[..183]);
+			let p2 = clock_packet(1, pcr, opcr, &section[183..359]);
+			let duplicate = clock_packet(1, pcr.map(|_| refreshed), opcr.map(|_| refreshed), &section[183..359]);
+			let p3 = packet(false, 2, 0, &section[359..]);
+			assert_eq!(run(&[p1, p2, duplicate, p3]), vec![section], "refreshed {name}");
+		}
+	}
+
+	#[test]
+	fn repeated_counter_after_fifteen_lost_packets_is_broken() {
+		let mut continuity = Continuity::default();
+		let previous: [u8; 188] = packet(false, 5, 0, &[0x11; 184]).try_into().unwrap();
+		let after_loss: [u8; 188] = packet(false, 5, 0, &[0x22; 184]).try_into().unwrap();
+
+		assert!(matches!(continuity.observe(&previous), Continuation::Contiguous));
+		assert!(matches!(continuity.observe(&after_loss), Continuation::Broken));
 	}
 
 	#[test]

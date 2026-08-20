@@ -82,3 +82,8 @@ sd-notify = "0.5"
 rcgen = "0.14"
 tempfile = "3"
 wiremock = "0.6"
+
+# `raise(SIGINT)` at ourselves, so the shutdown test exercises the real signal
+# path rather than the trigger behind it.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

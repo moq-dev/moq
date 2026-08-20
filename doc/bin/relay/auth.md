@@ -152,8 +152,8 @@ The JWT payload contains these claims:
 | Claim | Description |
 |-------|-------------|
 | `root` | Base path for publish/subscribe permissions. Optional, defaulting to the top-level path |
-| `put` | Suffix, or list of suffixes, appended to root for publish permission |
-| `get` | Suffix, or list of suffixes, appended to root for subscribe permission |
+| `put` | Suffix, or list of suffixes, appended to root for publish permission. Omit for a token that cannot publish |
+| `get` | Suffix, or list of suffixes, appended to root for subscribe permission. Omit for a token that cannot subscribe |
 | `exp` | Expiration time (Unix timestamp) |
 | `iat` | Issued-at time (Unix timestamp) |
 
@@ -170,16 +170,44 @@ Full publish path = root + "/" + put
 Full subscribe path = root + "/" + get
 ```
 
-An empty suffix (`""`) allows access to anything under the root. Suffixes match on
-path boundaries, so `foo` grants `foo` and `foo/bar` but never `foobar`.
+Each claim is one suffix or a list of them, and the two kinds of empty mean
+opposite things:
 
-**Examples:**
+- **The empty suffix** (`""`, or `[""]`) grants everything under the root.
+- **An empty list** (`[]`), or the claim omitted entirely, grants nothing in that
+  role. That is how you mint a read-only token (no `put`) or a write-only one
+  (no `get`).
+
+Suffixes match on path boundaries, so `foo` grants `foo` and `foo/bar` but never
+`foobar`. A token that grants neither role is useless, and is rejected both when
+signing and when verifying.
+
+**Examples**, written in the list form. A bare string is the same claim, so
+`"put": "alice"` and `"put": ["alice"]` produce the same token, and `[]` is the
+same as leaving the claim out:
 
 | root | put | get | Can publish | Can subscribe |
 |------|-----|-----|-------------|---------------|
 | `demo` | `["my-stream"]` | `[""]` | `demo/my-stream` | `demo/*` |
 | `rooms/123` | `["alice"]` | `[""]` | `rooms/123/alice` | `rooms/123/*` |
 | `""` | `[""]` | `[""]` | Everything | Everything |
+| `""` | `[]` | `[""]` | Nothing | Everything |
+| `""` | `[""]` | `[]` | Everything | Nothing |
+| `demo` | `[]` | `[""]` | Nothing | `demo/*` |
+
+On the CLI the difference is simply whether the flag appears at all. `--publish ""`
+grants everything under the root; dropping `--publish` grants no publish access:
+
+```bash
+# Read-only: watch anything under demo/, publish nothing.
+moq-token sign --key my-key.jwk --root demo --subscribe ""
+
+# Write-only: publish demo/my-stream, subscribe to nothing.
+moq-token sign --key my-key.jwk --root demo --publish my-stream
+```
+
+The same split applies to a [key scope](#scope-a-key): a key generated with only
+`--subscribe` can never sign a token that publishes.
 
 ### Connection Path
 
@@ -189,7 +217,7 @@ The client's connection URL path does **not** need to match the token's `root` e
 - If the connection path is a **parent** of the root (e.g., token root=`demo`, connect to `/`), permissions still apply but are scoped to the token's root. You can only access paths under `demo/`.
 - If the connection path is **unrelated** to the root (e.g., token root=`demo`, connect to `/other`), the connection is rejected.
 
-The connection is also rejected if the resulting permissions are empty (no publish or subscribe paths remain after scoping).
+The connection is also rejected when scoping leaves *both* roles empty, i.e. no publish and no subscribe path survives. Losing just one role is fine: that is what a read-only or write-only token looks like.
 
 ### Unified Auth API (`--auth-api`)
 

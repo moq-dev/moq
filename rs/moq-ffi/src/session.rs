@@ -6,12 +6,15 @@ use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::origin::{MoqOriginConsumer, MoqOriginProducer};
 
+/// Native QUIC/WebTransport client configuration.
+#[cfg(not(target_arch = "wasm32"))]
 struct Client {
 	config: moq_tokio::connect::Config,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Client {
 	async fn connect(&self, url: Url) -> Result<Arc<MoqSession>, MoqError> {
 		let client = self
@@ -38,6 +41,7 @@ impl Client {
 	}
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn map_connect_error(err: moq_tokio::Error) -> MoqError {
 	match err.connect_error() {
 		Some(moq_tokio::ConnectError::Unauthorized) => MoqError::Unauthorized,
@@ -58,6 +62,7 @@ fn map_connect_error(err: moq_tokio::Error) -> MoqError {
 /// another handle shuts the connection down underneath it, and reporting that as a
 /// connect error would make every status watcher treat an expected teardown as a
 /// broken connection.
+#[cfg(not(target_arch = "wasm32"))]
 fn map_closed_error(err: moq_tokio::Error) -> MoqError {
 	match err.connect_error() {
 		Some(moq_tokio::ConnectError::Unauthorized) => MoqError::Unauthorized,
@@ -70,9 +75,58 @@ fn map_closed_error(err: moq_tokio::Error) -> MoqError {
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
 	use super::*;
+
+	const VALID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+	#[test]
+	fn decodes_a_sha256_fingerprint() {
+		let bytes = decode_hex(VALID).unwrap();
+		assert_eq!(bytes.len(), 32);
+		assert_eq!(bytes[0], 0x01);
+
+		// Colons are the other shape `MoqServer::cert_fingerprints` and openssl print.
+		let colons = VALID
+			.as_bytes()
+			.chunks(2)
+			.map(|c| std::str::from_utf8(c).unwrap())
+			.collect::<Vec<_>>()
+			.join(":");
+		assert_eq!(decode_hex(&colons).unwrap(), bytes);
+	}
+
+	/// Byte-index slicing used to land inside a multi-byte character and panic, which an
+	/// FFI caller could reach with any non-ASCII string of even byte length.
+	#[test]
+	fn rejects_non_ascii_instead_of_panicking() {
+		for input in ["aéa", "é", "ééééééééééééééééééééééééééééééé"] {
+			assert!(matches!(decode_hex(input), Err(MoqError::Connect(_))), "{input}");
+		}
+	}
+
+	#[test]
+	fn rejects_a_wrong_length_fingerprint() {
+		assert!(decode_hex("").is_err());
+		assert!(decode_hex("abcd").is_err());
+		assert!(decode_hex(&VALID[..62]).is_err());
+		assert!(decode_hex(&format!("{VALID}ab")).is_err());
+	}
+
+	#[test]
+	fn rejects_non_hex_digits() {
+		for bad in [
+			format!("zz{}", &VALID[2..]),
+			// `u8::from_str_radix` accepts a leading sign, so an unchecked chunk would
+			// decode "+a" to 10 and silently yield a fingerprint matching no certificate.
+			format!("+0{}", &VALID[2..]),
+			format!("{}+0", &VALID[..62]),
+			format!(" 0{}", &VALID[2..]),
+		] {
+			assert!(matches!(decode_hex(&bad), Err(MoqError::Connect(_))), "{bad}");
+		}
+	}
 
 	#[test]
 	fn maps_native_auth_connect_errors() {
@@ -157,6 +211,7 @@ mod tests {
 /// attempt, and caps at `max_ms`. After `timeout_ms` of consecutive failures the
 /// connection gives up for good (0 retries forever); the window resets whenever a
 /// session stays up past `initial_ms`.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct MoqBackoff {
 	/// Delay before the first reconnect attempt, in milliseconds.
@@ -173,17 +228,157 @@ pub struct MoqBackoff {
 	pub timeout_ms: u64,
 }
 
+/// Browser WebTransport client configuration.
+///
+/// The browser owns the socket and the trust store, so none of the native TLS knobs
+/// (roots, mTLS, bind address) have an equivalent. Certificate hashes are the one
+/// thing WebTransport does expose.
+#[cfg(target_arch = "wasm32")]
+struct Client {
+	fingerprints: Vec<Vec<u8>>,
+	publish: Option<Arc<MoqOriginProducer>>,
+	consume: Option<Arc<MoqOriginProducer>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Client {
+	async fn connect(&self, url: Url) -> Result<Arc<MoqSession>, MoqError> {
+		let (publish, subscribe) = crate::origin::resolve_pair(self.publish.as_ref(), self.consume.as_ref());
+
+		let transport = match self.fingerprints.is_empty() {
+			true => crate::transport::connect(url).await,
+			false => crate::transport::connect_with_hashes(url, self.fingerprints.clone()).await,
+		}
+		.map_err(|err| MoqError::Connect(format!("{err}")))?;
+
+		let (session, driver) = moq_net::Client::new()
+			.with_publisher(&publish)
+			.with_subscriber(subscribe.clone())
+			.connect(transport)
+			.await?;
+
+		// The session only progresses while the driver runs. The driver holds no session
+		// clone, so dropping the last handle still closes the transport and ends this task.
+		web_async::spawn(async move {
+			let _ = driver.await;
+		});
+
+		Ok(Arc::new(MoqSession::accepted(session, publish, subscribe)))
+	}
+}
+
+/// Decode a hex-encoded SHA-256 certificate fingerprint into raw bytes.
+///
+/// Not gated on wasm alone so the native test suite covers it: this parses a string an
+/// FFI caller controls, and nothing in this repo runs a wasm test.
+#[cfg(any(target_arch = "wasm32", test))]
+fn decode_hex(hex: &str) -> Result<Vec<u8>, MoqError> {
+	/// A sha-256 digest is 32 bytes, so 64 hex characters.
+	const LEN: usize = 64;
+
+	let hex = hex.replace(':', "");
+
+	// This string comes straight from the caller, and one check covers two hazards:
+	// non-ASCII would let a 2-byte chunk split a character, and `from_str_radix` accepts
+	// a leading sign, so an unchecked "+a" would decode to 10 rather than erroring.
+	if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+		return Err(MoqError::Connect(format!("fingerprint is not hex: {hex}")));
+	}
+
+	// WebTransport's `serverCertificateHashes` only accepts a 32-byte sha-256, so a
+	// different length can never match a certificate. Rejecting here beats failing
+	// opaquely inside the browser.
+	if hex.len() != LEN {
+		return Err(MoqError::Connect(format!(
+			"expected a {LEN}-character sha-256 fingerprint, got {}",
+			hex.len()
+		)));
+	}
+
+	hex.as_bytes()
+		.chunks(2)
+		.map(|pair| {
+			let pair = std::str::from_utf8(pair).expect("checked ascii above");
+			u8::from_str_radix(pair, 16).map_err(|err| MoqError::Connect(format!("{err}")))
+		})
+		.collect()
+}
+
+/// Builds a [`MoqSession`]: configure it, then [`connect`](Self::connect).
+///
+/// The configuration differs by target, because the transport does. Native builds expose
+/// the QUIC socket and TLS trust store; the browser owns both, so a wasm build exposes
+/// only the certificate hashes WebTransport accepts.
 #[derive(uniffi::Object)]
 pub struct MoqClient {
 	task: Task<Client>,
 }
 
+#[cfg(target_arch = "wasm32")]
 #[uniffi::export]
 impl MoqClient {
 	/// Create a new MoQ client with default configuration.
 	#[uniffi::constructor]
 	pub fn new() -> Arc<Self> {
-		let _guard = crate::ffi::RUNTIME.enter();
+		Arc::new(Self {
+			task: Task::new(Client {
+				fingerprints: Vec::new(),
+				publish: None,
+				consume: None,
+			}),
+		})
+	}
+
+	/// Pin the peer to a certificate with one of these SHA-256 fingerprints, encoded as hex.
+	///
+	/// Passed through to WebTransport's `serverCertificateHashes`. An empty list restores
+	/// the browser's normal certificate verification.
+	pub fn set_tls_fingerprints(&self, fingerprints: Vec<String>) -> Result<(), MoqError> {
+		let parsed = fingerprints
+			.iter()
+			.map(|hex| decode_hex(hex))
+			.collect::<Result<Vec<_>, _>>()?;
+		if let Some(mut state) = self.task.lock() {
+			state.fingerprints = parsed;
+		}
+		Ok(())
+	}
+
+	/// Set the origin to publish local broadcasts to the remote.
+	pub fn set_publish(&self, origin: Option<Arc<MoqOriginProducer>>) {
+		if let Some(mut state) = self.task.lock() {
+			state.publish = origin;
+		}
+	}
+
+	/// Set the origin to consume remote broadcasts from the remote.
+	pub fn set_consume(&self, origin: Option<Arc<MoqOriginProducer>>) {
+		if let Some(mut state) = self.task.lock() {
+			state.consume = origin;
+		}
+	}
+
+	/// Connect to a MoQ server and wait for the session to be established.
+	///
+	/// Can be cancelled by calling `cancel()`.
+	pub async fn connect(&self, url: String) -> Result<Arc<MoqSession>, MoqError> {
+		let url = Url::parse(&url)?;
+		self.task.run(|state| async move { state.connect(url).await }).await
+	}
+
+	/// Cancel all current and future `connect()` calls.
+	pub fn cancel(&self) {
+		self.task.cancel();
+	}
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[uniffi::export]
+impl MoqClient {
+	/// Create a new MoQ client with default configuration.
+	#[uniffi::constructor]
+	pub fn new() -> Arc<Self> {
+		let _guard = crate::ffi::enter();
 		Arc::new(Self {
 			task: Task::new(Client {
 				config: moq_tokio::connect::Config::default(),
@@ -393,6 +588,7 @@ pub enum MoqConnectionStatus {
 	Migrating,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<moq_tokio::Status> for MoqConnectionStatus {
 	fn from(status: moq_tokio::Status) -> Self {
 		match status {
@@ -410,6 +606,7 @@ impl From<moq_tokio::Status> for MoqConnectionStatus {
 /// `accept()`).
 #[derive(Clone)]
 enum Inner {
+	#[cfg(not(target_arch = "wasm32"))]
 	Connection(moq_tokio::Connection),
 	Session(moq_net::Session),
 }
@@ -428,6 +625,7 @@ pub struct MoqSession {
 
 impl MoqSession {
 	/// Wrap a client connection (see [`MoqClient::connect`]).
+	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) fn connected(
 		connection: moq_tokio::Connection,
 		publish: moq_net::origin::Producer,
@@ -463,6 +661,7 @@ impl MoqSession {
 	/// Abort the live transport (if any) with `err` and stop any reconnect loop.
 	fn teardown(&self, err: moq_net::Error) {
 		match &self.inner {
+			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Connection(connection) => connection.abort(err),
 			Inner::Session(session) => session.abort(err),
 		}
@@ -471,7 +670,7 @@ impl MoqSession {
 
 impl Drop for MoqSession {
 	fn drop(&mut self) {
-		let _guard = crate::ffi::RUNTIME.enter();
+		let _guard = crate::ffi::enter();
 		// Close the transport while the runtime is entered. The backend spawns a
 		// lingering CLOSE task, which panics (aborting under panic=abort) if no reactor
 		// is in context. We can't leave this to the last `Session` clone's drop: clones
@@ -496,6 +695,7 @@ impl MoqSession {
 		self.closed
 			.run(|inner| async move {
 				match &*inner {
+					#[cfg(not(target_arch = "wasm32"))]
 					Inner::Connection(connection) => connection.closed().await.map_err(map_closed_error),
 					Inner::Session(session) => Err(session.closed().await.into()),
 				}
@@ -519,6 +719,7 @@ impl MoqSession {
 		self.status
 			.run(|mut inner| async move {
 				match &mut *inner {
+					#[cfg(not(target_arch = "wasm32"))]
 					Inner::Connection(connection) => Ok(connection.status().await.map_err(map_closed_error)?.into()),
 					Inner::Session(session) => Err(session.closed().await.into()),
 				}
@@ -528,7 +729,7 @@ impl MoqSession {
 
 	/// Close the session with the given error code, stopping any reconnect loop.
 	pub fn cancel(&self, code: u32) {
-		let _guard = crate::ffi::RUNTIME.enter();
+		let _guard = crate::ffi::enter();
 		self.teardown(moq_net::Error::Remote(code));
 		// NOTE: we don't abort the closed Task; the teardown above resolves it
 		// (with the close reason, or Ok once the connection loop stops).
@@ -567,8 +768,9 @@ impl MoqSession {
 	/// them, or (on a client session) while the connection is between sessions;
 	/// see [`MoqConnectionStats`].
 	pub fn stats(&self) -> MoqConnectionStats {
-		let _guard = crate::ffi::RUNTIME.enter();
+		let _guard = crate::ffi::enter();
 		match &self.inner {
+			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Connection(connection) => connection.stats().stats(),
 			Inner::Session(session) => Some(session.stats()),
 		}

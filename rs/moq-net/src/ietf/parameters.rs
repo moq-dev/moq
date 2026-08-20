@@ -527,7 +527,7 @@ macro_rules! decode_params {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use bytes::{Buf, BytesMut};
+	use bytes::{Buf, Bytes, BytesMut};
 
 	// ---- Setup Parameters tests (unchanged) ----
 
@@ -643,6 +643,30 @@ mod tests {
 	}
 
 	#[test]
+	fn test_param_u8_wire_vectors() -> Result<(), EncodeError> {
+		for (version, expected) in [
+			(Version::Draft16, &[0x01, 0x20, 0x40, 0xff][..]),
+			(Version::Draft17, &[0x01, 0x20, 0xff][..]),
+			(Version::Draft18, &[0x01, 0x20, 0xff][..]),
+			(Version::Draft19, &[0x01, 0x20, 0xff][..]),
+		] {
+			let mut buf = BytesMut::new();
+			encode_params!(&mut buf, version, 0x20 => u8::MAX);
+			assert_eq!(&buf[..], expected, "{version}");
+
+			let mut encoded = Bytes::copy_from_slice(expected);
+			let decoded = (|| -> Result<Option<u8>, DecodeError> {
+				decode_params!(&mut encoded, version, 0x20 => value: Option<u8>);
+				Ok(value)
+			})()
+			.expect("fixed uint8 vector should decode");
+			assert_eq!(decoded, Some(u8::MAX), "{version}");
+			assert!(!encoded.has_remaining(), "{version}");
+		}
+		Ok(())
+	}
+
+	#[test]
 	fn test_param_bool_all_versions() {
 		for version in [
 			Version::Draft14,
@@ -689,6 +713,34 @@ mod tests {
 				},
 			);
 		}
+	}
+
+	#[test]
+	fn test_param_location_wire_vectors() -> Result<(), EncodeError> {
+		let location = Location {
+			group: 255,
+			object: 128,
+		};
+		for (version, expected) in [
+			(Version::Draft16, &[0x01, 0x09, 0x04, 0x40, 0xff, 0x40, 0x80][..]),
+			(Version::Draft17, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
+			(Version::Draft18, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
+			(Version::Draft19, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
+		] {
+			let mut buf = BytesMut::new();
+			encode_params!(&mut buf, version, 0x09 => location.clone());
+			assert_eq!(&buf[..], expected, "{version}");
+
+			let mut encoded = Bytes::copy_from_slice(expected);
+			let decoded = (|| -> Result<Option<Location>, DecodeError> {
+				decode_params!(&mut encoded, version, 0x09 => value: Option<Location>);
+				Ok(value)
+			})()
+			.expect("fixed Location vector should decode");
+			assert_eq!(decoded, Some(location.clone()), "{version}");
+			assert!(!encoded.has_remaining(), "{version}");
+		}
+		Ok(())
 	}
 
 	#[test]

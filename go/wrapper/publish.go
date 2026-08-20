@@ -5,7 +5,7 @@ import (
 	"errors"
 	"iter"
 
-	ffi "github.com/moq-dev/moq-go-ffi/moq"
+	ffi "moq.dev/moq-ffi/moq"
 )
 
 // AudioOption configures an audio publish.

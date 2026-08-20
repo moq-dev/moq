@@ -456,6 +456,10 @@ impl Producer {
 	/// The MoQ track itself is created when the first media track enrolls, so a broadcast that
 	/// never segments never publishes (or advertises) one.
 	pub fn new(broadcast: &moq_net::broadcast::Producer, config: Config) -> Self {
+		// The contents are `Send + Sync` natively; on wasm moq-net's handles are
+		// `Rc`-backed, so clippy sees a pointlessly atomic `Arc`. Keeping one type for
+		// both targets is worth the unused atomics on the single-threaded one.
+		#[allow(clippy::arc_with_non_send_sync)]
 		Self {
 			state: Arc::new(Mutex::new(State {
 				config,

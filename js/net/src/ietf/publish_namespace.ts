@@ -1,5 +1,6 @@
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import * as Cluster from "./cluster.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Parameters } from "./parameters.ts";
@@ -12,9 +13,19 @@ export class PublishNamespace {
 	requestId: bigint;
 	trackNamespace: Path.Valid;
 
-	constructor({ requestId, trackNamespace }: { requestId: bigint; trackNamespace: Path.Valid }) {
+	/** The MoQ Cluster parameters (see {@link Cluster}). Set on a session that negotiated
+	 * the extension and `undefined` on one that did not, which is what decides whether they
+	 * appear on the wire at all. */
+	cluster?: Cluster.Advert;
+
+	constructor({
+		requestId,
+		trackNamespace,
+		cluster,
+	}: { requestId: bigint; trackNamespace: Path.Valid; cluster?: Cluster.Advert }) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
+		this.cluster = cluster;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -23,23 +34,37 @@ export class PublishNamespace {
 			await w.u62(0n); // required_request_id_delta: only 0 supported until stream-per-request
 		}
 		await Namespace.encode(w, this.trackNamespace);
-		await new Parameters().encode(w, version);
+		const params = this.cluster ? Cluster.intoParams(this.cluster) : new Parameters();
+		await params.encode(w, version);
 	}
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
 		return Message.encode(w, (wr) => this.#encode(wr, version));
 	}
 
-	static async decode(r: Reader, version: IetfVersion): Promise<PublishNamespace> {
-		return Message.decode(r, (rd) => PublishNamespace.#decode(rd, version));
+	/**
+	 * Decode the message, expecting the cluster parameters when the session negotiated the
+	 * extension.
+	 *
+	 * The negotiation is session state rather than anything in the message, so the caller
+	 * supplies it. A negotiated session that omits HOP_PATH is a protocol violation, which
+	 * surfaces here as a throw.
+	 */
+	static async decode(r: Reader, version: IetfVersion, negotiated = false): Promise<PublishNamespace> {
+		return Message.decode(r, (rd) => PublishNamespace.#decode(rd, version, negotiated));
 	}
 
-	static async #decode(r: Reader, version: IetfVersion): Promise<PublishNamespace> {
+	static async #decode(r: Reader, version: IetfVersion, negotiated: boolean): Promise<PublishNamespace> {
 		const requestId = await r.u62();
 		if (version === Version.DRAFT_17) {
 			await r.u62(); // required_request_id_delta
 		}
 		const trackNamespace = await Namespace.decode(r);
+		if (negotiated) {
+			const cluster = await Cluster.decodeParams(r, version);
+			return new PublishNamespace({ requestId, trackNamespace, cluster });
+		}
+
 		await Parameters.decode(r, version); // ignore parameters
 		return new PublishNamespace({ requestId, trackNamespace });
 	}

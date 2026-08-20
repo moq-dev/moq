@@ -4,7 +4,7 @@
 # of viewers per connection. Roughly 4-29 Mbps per track depending on the roll.
 #
 # Override the target on the CLI:
-#   moq-bench --file rs/moq-bench/config/hd.toml --client-connect https://relay.example.com
+#   moq-bench --file rs/moq-bench/config/hd.toml --connect https://relay.example.com
 
 # [client]
 # connect = "https://relay.example.com"

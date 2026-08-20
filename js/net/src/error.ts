@@ -101,6 +101,22 @@ export class RemoteError extends Error {
 	}
 }
 
+/**
+ * A peer broke the protocol in a way the spec says must end the session.
+ *
+ * Thrown where the violation is detected, rather than handled there: a decoder has no session
+ * to close. The dispatch that owns the session watches for it and closes, so a nonconforming
+ * peer cannot repeat the violation on the next stream.
+ *
+ * @internal
+ */
+export class ProtocolViolation extends Error {
+	constructor(message: string, options?: { cause?: unknown }) {
+		super(message, options);
+		this.name = "ProtocolViolation";
+	}
+}
+
 /** The WebTransport-shaped fields a stream reset code arrives in. */
 type StreamErrorLike = { source?: unknown; streamErrorCode?: unknown };
 

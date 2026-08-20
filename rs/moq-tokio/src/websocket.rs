@@ -274,7 +274,7 @@ pub(crate) async fn connect(
 	Ok(session)
 }
 
-/// The QMux drafts a moq ALPN is allowed to ride on, for `qmux::*::with_protocols`.
+/// The QMux drafts a moq ALPN is allowed to ride on, for `qmux::ws::Client::with_protocols`.
 ///
 /// moq-transport-18 and -19 require qmux-01, so we never pair them with qmux-00.
 /// This mirrors the policy in `js/net`'s `connect.ts`. Every other ALPN returns

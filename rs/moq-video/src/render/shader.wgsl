@@ -1,5 +1,5 @@
-// YUV 4:2:0 -> RGB, for the two plane layouts the renderer feeds it: NV12 (luma
-// plane + interleaved chroma plane) and I420 (three separate planes).
+// The renderer feeds this shader packed RGBA, NV12 (luma plus interleaved
+// chroma), or I420 (three separate planes).
 //
 // Chroma is sampled with a linear filter, so the half-resolution planes are
 // upsampled by the texture unit rather than in here. Output is gamma-encoded
@@ -41,6 +41,11 @@ fn vertex(@builtin(vertex_index) index: u32) -> Vertex {
 fn convert(yuv: vec3<f32>) -> vec4<f32> {
 	let rgb = params.matrix * (yuv - params.offset.xyz);
 	return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
+
+@fragment
+fn rgba(in: Vertex) -> @location(0) vec4<f32> {
+	return vec4<f32>(textureSample(plane0, samp, in.uv).rgb, 1.0);
 }
 
 @fragment

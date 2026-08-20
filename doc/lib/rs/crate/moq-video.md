@@ -28,7 +28,7 @@ Four role modules, symmetric on both ends of the wire:
 | `capture` | Camera, display, window, or application frames | AVFoundation + ScreenCaptureKit (macOS), V4L2 + PipeWire (Linux), Media Foundation + DXGI (Windows) |
 | `encode` | Raw frames to H.264/H.265, published through `moq-mux` | VideoToolbox, Media Foundation, NVENC, VAAPI, openh264 |
 | `decode` | A subscribed track back to raw frames | VideoToolbox, Media Foundation/DXVA, NVDEC, openh264 |
-| `render` | A frame drawn on the GPU, handed back as a `wgpu` texture | wgpu, with a zero-copy Metal import on macOS |
+| `render` | A frame drawn on the GPU, handed back as a `wgpu` texture | wgpu, with zero-copy Metal and Vulkan imports |
 
 A picture is a `Frame` wherever it crosses the API: a `moq_net::Timestamp` and a
 `Surface` holding the pixels. Capture and decode produce them, encode and render
@@ -66,8 +66,8 @@ cargo add moq-video --features render,pipewire
 | `capture` | yes | Native device capture (`v4l` and `zune-jpeg` on Linux) |
 | `nvenc` / `nvdec` | yes | NVIDIA encode/decode on Linux (`cudarc`, `moq-nvenc`) |
 | `vaapi` | no | Intel/AMD encode on Linux (`moq-vaapi`), unvalidated on hardware |
-| `render` | no | `wgpu` and the GPU renderer |
-| `pipewire` | no | Wayland/X11 screen capture via xdg-desktop-portal |
+| `render` | no | `wgpu`, the GPU renderer, and Linux DMA-BUF support |
+| `pipewire` | no | Wayland/X11 screen capture via xdg-desktop-portal and DMA-BUF |
 
 `--no-default-features` gives a codec-only build that still encodes and decodes
 H.264 with openh264 but omits native capture and the Linux GPU dependencies. A
@@ -133,9 +133,9 @@ while let Some(frame) = video.read().await? {
 ## Zero-copy
 
 `Surface` is a `#[non_exhaustive]` enum naming what actually holds a frame's
-pixels: a `CVPixelBuffer` on macOS, a Direct3D 11 texture on Windows, CUDA memory
-on Linux, or plain I420 anywhere. Keeping a decoded frame in the first three
-avoids a round trip through system memory on every frame.
+pixels: a `CVPixelBuffer` on macOS, a Direct3D 11 texture on Windows, CUDA or a
+DMA-BUF on Linux, or plain I420 anywhere. Keeping a frame in one of the native
+representations avoids a round trip through system memory on every frame.
 
 How far that gets today depends on the platform, so here is the honest matrix
 rather than a blanket promise:
@@ -143,15 +143,16 @@ rather than a blanket promise:
 | Platform | Decode output | Zero-copy transcode | Zero-copy render |
 | --- | --- | --- | --- |
 | macOS | `PixelBuffer` (VideoToolbox) | yes | yes, via `CVMetalTextureCache` |
-| Linux | `Cuda` (NVDEC) | yes, straight into NVENC | no, downloaded to I420 first |
+| Linux | `Cuda` (NVDEC) | yes, straight into NVENC | decoded CUDA frames: no; packed PipeWire DMA-BUF capture: yes, via Vulkan |
 | Windows | `Texture` (Media Foundation / DXVA) | yes, through the Direct3D11 video processor | no, downloaded to I420 first |
 
 `Frame::resize` stays on the GPU through a `VTPixelTransferSession`, CUDA kernel,
 or Direct3D11 video processor. Call `Frame::resize_with` with
 `resize::Acceleration::Cpu` to force a download and CPU resize. A driver that
-rejects GPU resizing returns to CPU scaling and warns once. Rendering is
-zero-copy on macOS only; the Vulkan and EGL importers that would extend it are
-tracked in [#2481](https://github.com/moq-dev/moq/issues/2481).
+rejects GPU resizing returns to CPU scaling and warns once. Linux Vulkan can
+import packed RGB DMA-BUF screen frames. Multi-plane NV12 import and retiling a
+modifier that Vulkan rejects remain tracked in
+[#2819](https://github.com/moq-dev/moq/issues/2819).
 
 Matching on `Surface` stays portable because every variant has a universal
 fallback in `Surface::into_i420()`: take the fast path you recognize and let the
@@ -181,6 +182,10 @@ while let Some(frame) = video.read().await? {
 The `wgpu` version this was built against is re-exported as
 `moq_video::render::wgpu`, so you name the exact version rather than guessing at
 a compatible one.
+
+On Linux, request `wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF` when creating
+the device to activate the PipeWire DMA-BUF fast path. The renderer still works
+without it and falls back to a CPU upload for linear allocations.
 
 `Color` names the matrix and range (BT.601 or BT.709, limited or full), and the
 shader converts per frame rather than assuming one space. A capture labels what it

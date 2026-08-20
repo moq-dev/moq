@@ -1,0 +1,23 @@
+# Chat message bus, 1:1. Every connection is one "user": it publishes a single
+# broadcast and follows one peer, so egress is tiny and the cost is per-message
+# overhead, not bandwidth. Each group is a lone JSON keyframe (group_size = 0),
+# so every message pays a full group/stream open, the worst case per message.
+
+startup = "30s"
+report = "5s"
+
+# A: number of connections (users)
+connections = 1000
+# B: one broadcast per user
+broadcasts = 1
+# C: each user follows one peer
+subscribe = 1
+# D: one message per second per user. Hotter than real chat on purpose: it makes
+# the CPU-per-message signal easier to read, and the math normalizes by message
+# count rather than wall clock anyway.
+fps = 1
+# E: bytes per message. The floor sits above the JSON keyframe header (roughly
+# 170 bytes), so every rolled size is delivered exactly.
+frame_size = "200:400"
+# F: each group is a lone JSON keyframe
+group_size = 0

@@ -286,6 +286,11 @@ impl FrameStream {
 		self.framerate
 	}
 
+	/// The first frame's declared color space, when its capture backend knows it.
+	pub(crate) fn color(&self) -> Option<crate::Color> {
+		self.pending.as_ref().and_then(Surface::color)
+	}
+
 	pub(crate) fn device(&self) -> &str {
 		&self.device
 	}

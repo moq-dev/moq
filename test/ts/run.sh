@@ -14,6 +14,7 @@
 #   ./run.sh --source cap.ts       # round-trip a real capture instead
 #   ./run.sh --analyze-only cap.ts # skip the round-trip, just analyze a file
 #   ./run.sh --strict              # fail on broadcast-shape warnings too
+#   ./run.sh --with-eit            # add a synthetic EPG first, report which SI survived
 set -euo pipefail
 
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -27,6 +28,7 @@ BITRATE="${TSC_BITRATE:-10000000}"
 PORT="${TSC_PORT:-4443}"
 PROFILE="${TSC_PROFILE:-debug}"
 STRICT=""
+WITH_EIT="" # add a synthetic EPG to the source and report which SI survived
 PASSTHRU=() # forwarded to compliance.py (thresholds, --report-json, ...)
 
 while [[ $# -gt 0 ]]; do
@@ -59,6 +61,10 @@ while [[ $# -gt 0 ]]; do
             CAPTURE_OUT="$2"
             shift 2
             ;;
+        --with-eit)
+            WITH_EIT=1
+            shift
+            ;;
         *)
             PASSTHRU+=("$1")
             shift
@@ -79,6 +85,11 @@ require_tools() {
     # pgrep backs kill_tree; without it grandchild tsp/moq processes would leak.
     if [[ -z "$ANALYZE_ONLY" ]]; then
         for t in cargo ffmpeg curl timeout pgrep; do have "$t" || missing+=("$t"); done
+    fi
+    # The EIT fixture reads the service triplet out of the stream and may need to pad a
+    # stuffing-free clip to make room for the table.
+    if [[ -n "$WITH_EIT" ]]; then
+        for t in tstables tsstuff; do have "$t" || missing+=("$t"); done
     fi
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo "error: missing required tools: ${missing[*]}" >&2
@@ -171,6 +182,13 @@ else
         -f mpegts -pes_payload_size 0 "$SRC_TS"
 fi
 
+# No capture in this repository carries EIT, so the import path's EIT handling is
+# otherwise untestable. Synthesise one, and report below which SI PIDs came back.
+if [[ -n "$WITH_EIT" ]]; then
+    "$DIR/make-eit-fixture.sh" "$SRC_TS" "$TMP/source-eit.ts"
+    mv "$TMP/source-eit.ts" "$SRC_TS"
+fi
+
 echo "### starting relay on 127.0.0.1:${PORT}"
 sed "s/4443/${PORT}/g" "$DIR/../smoke/smoke.toml" >"$TMP/relay.toml"
 "$RELAY" "$TMP/relay.toml" >"$TMP/relay.log" 2>&1 &
@@ -234,6 +252,24 @@ if [[ -n "$CAPTURE_OUT" ]]; then
 fi
 
 echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') bytes -> analyzing"
+
+# Which SI survived the round-trip. Informational: the exporter rebuilds SI from the
+# catalog, so a PID the import path does not route simply is not there, and that is a
+# statement about SI_PIDS rather than a malformed stream. compliance.py grades the stream
+# an IRD receives; this says what it was carrying on the way in.
+if [[ -n "$WITH_EIT" ]]; then
+    echo
+    echo "### SI round-trip (source -> capture)"
+    count_pid() {
+        tsp -I file "$1" -P count --pid "$2" --total -O drop 2>&1 |
+            sed -n 's/.*counted \([0-9,]*\) packets.*/\1/p' | head -1
+    }
+    printf '  %-10s %-8s %12s %12s\n' TABLE PID SOURCE CAPTURE
+    for spec in "NIT:0x0010" "SDT:0x0011" "EIT:0x0012" "TDT/TOT:0x0014"; do
+        printf '  %-10s %-8s %12s %12s\n' "${spec%%:*}" "${spec##*:}" \
+            "$(count_pid "$SRC_TS" "${spec##*:}")" "$(count_pid "$SUB_TS" "${spec##*:}")"
+    done
+fi
 echo
 # Pass the source so duration-fidelity can pin the exported stream's rate. A tiny
 # capture still parses, so the round-trip can fail here with a non-empty file;

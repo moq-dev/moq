@@ -114,6 +114,11 @@ A viewer of `room/transcode` then pulls `480p` from the transcoder and `1080p` d
 
 Rejection happens where the catalog is read, not where a track is subscribed: the rendition set drives track layouts, playlists, codec lists, and quality selectors, so a reference caught any later would already have been offered and chosen. In Rust the `moq-mux` catalog stream rejects it and every exporter reads through that stream; `@moq/watch` rejects the catalog it would otherwise publish.
 
+Publishers author the reference with the inverse operation, so the two stay in step: `Path::relative` in Rust (`moq-net`) and `Path.relative` in TypeScript (`@moq/net`), each taking the target broadcast and the catalog broadcast it is named from.
+Both refuse a target no reference can name, since a path segment may itself be called `.` or `..`.
+
+`@moq/watch` resolves the reference automatically. In Rust, the `moq-mux` exporters do the same: they take a `Source::new(origin, path)`, and both the catalog broadcast and any referenced broadcast resolve through the origin over the same connection.
+
 ### Extensions
 
 The base catalog carries only the media sections (`video` and `audio`).

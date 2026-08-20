@@ -2,9 +2,9 @@
 	"name": "moq",
 	"version": "0.0.0",
 	"devDependencies": {
-		"@biomejs/biome": "^2.5.6",
+		"@biomejs/biome": "^2.5.7",
 		"concurrently": "^10.0.4",
-		"publint": "^0.3.22",
+		"publint": "^0.3.23",
 		"remark-cli": "^12.0.1",
 		"remark-frontmatter": "^5.0.0",
 		"remark-lint-list-item-indent": "^4.0.1",
@@ -42,6 +42,7 @@
 		"demo/web",
 		"js/moq-boy",
 		"test/smoke/clients/js",
-		"test/smoke/clients/js-native"
+		"test/smoke/clients/js-native",
+		"test/wasm"
 	]
 }

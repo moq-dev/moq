@@ -30,18 +30,22 @@ The raw UniFFI bindings (`MoqClient`, `MoqSession`, etc.) with blocking methods,
 ## Installation
 
 ```bash
-go get github.com/moq-dev/moq-go@latest
+go get moq.dev/moq@latest
 ```
 
 ```go
-import "github.com/moq-dev/moq-go/moq"
+import "moq.dev/moq"
 ```
 
 cgo picks the right `libmoq_ffi.a` automatically via build tags; no `LD_LIBRARY_PATH` or extra setup required. Building requires `CGO_ENABLED=1` (the default on Unix). `@latest` always pulls the newest native core: CI re-publishes the wrapper with its `moq-ffi` require bumped on every release.
 
+`moq.dev/moq` is a vanity import path: moq.dev tells the go command which repo to
+clone, so the code can move without changing anyone's imports. The package sits at
+the module root, so the import binds `moq` with no alias.
+
 ## Source and issues
 
-- API reference: [pkg.go.dev/github.com/moq-dev/moq-go](https://pkg.go.dev/github.com/moq-dev/moq-go)
+- API reference: [pkg.go.dev/moq.dev/moq](https://pkg.go.dev/moq.dev/moq)
 - Source: [go/](https://github.com/moq-dev/moq/tree/main/go) (in the monorepo)
-- Wrapper mirror (what `go get` resolves): [moq-dev/moq-go](https://github.com/moq-dev/moq-go)
+- Wrapper mirror (what the vanity path resolves to): [moq-dev/moq-go](https://github.com/moq-dev/moq-go)
 - Raw bindings mirror: [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi)

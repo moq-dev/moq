@@ -1266,6 +1266,7 @@ async fn video_publish_consume() {
 /// The raw-video publish path: hand mid-gray RGBA to `publish_video` and check
 /// that the encoder's own output reaches a subscriber, described by a catalog
 /// rendition the importer built from the encoded keyframe.
+#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_raw_publish_consume() {
 	use crate::video::*;
@@ -1368,6 +1369,7 @@ async fn video_raw_publish_consume() {
 /// whichever thread dropped the object. The confinement itself is asserted in
 /// moq-video (`encode::sink`); this pins that the binding supports the usage
 /// end to end, including the drain on `finish`.
+#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_raw_publish_from_many_threads() {
 	use crate::video::*;
@@ -1443,6 +1445,7 @@ async fn video_raw_publish_from_many_threads() {
 /// A raw video producer rejects a buffer that isn't one picture at the
 /// configured resolution, rather than reinterpreting it, and rejects any write
 /// after `finish`.
+#[cfg(feature = "video")]
 #[tokio::test]
 async fn video_raw_publish_rejects_bad_frames() {
 	use crate::video::*;

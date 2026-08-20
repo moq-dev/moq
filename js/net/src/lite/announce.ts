@@ -1,13 +1,8 @@
+import { MAX_HOPS, type Origin, OriginSchema, UNKNOWN_ORIGIN } from "../hop.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
-import { type Origin, OriginSchema } from "./origin.ts";
 import { hasAnnounceId, hasAnnounceOk, hasExcludeHop, hasRouteCost, Version } from "./version.ts";
-
-// Must match the MAX_HOPS in Rust's model/origin.rs. Broadcasts with longer
-// hop chains are rejected; this keeps loop-detection bounded and rejects
-// pathological announcements across clusters with unbounded forwarding.
-export const MAX_HOPS = 32;
 
 // Pre-lite-06 inner status values, carried inside the single ANNOUNCE_BROADCAST body.
 const STATUS_ENDED = 0;
@@ -95,10 +90,9 @@ async function decodeHops(r: Reader, version: Version): Promise<Origin[]> {
 		case Version.DRAFT_03: {
 			const count = await r.u53();
 			if (count > MAX_HOPS) throw new Error(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
-			// Lite03 carries only a hop count, not individual ids. Fill with
-			// the zero placeholder (OriginSchema accepts 0 as valid on-wire).
-			const placeholder = OriginSchema.parse(0n);
-			return new Array<Origin>(count).fill(placeholder);
+			// Lite03 carries only a hop count, not individual ids, so every entry is
+			// the reserved "no identity" id.
+			return new Array<Origin>(count).fill(UNKNOWN_ORIGIN);
 		}
 		default: {
 			// Lite04+: hop count + individual Origin varints.

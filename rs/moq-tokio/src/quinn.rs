@@ -379,15 +379,16 @@ impl QuinnClient {
 		.await?;
 		tracing::Span::current().record("id", connection.stable_id());
 
-		let mut request = web_transport_quinn::proto::ConnectRequest::new(url.clone());
-		for alpn in versions.alpns() {
-			request = request.with_protocol(alpn.to_string());
-		}
-
 		let session = match url.scheme() {
-			"https" => web_transport_quinn::Session::connect(connection, request)
-				.await
-				.map_err(map_client_error)?,
+			"https" => {
+				let mut request = web_transport_quinn::proto::ConnectRequest::new(url.clone());
+				for alpn in versions.alpns() {
+					request = request.with_protocol(alpn.to_string());
+				}
+				web_transport_quinn::Session::connect(connection, request)
+					.await
+					.map_err(map_client_error)?
+			}
 			"moqt" | "moql" => web_transport_quinn::Session::raw(connection),
 			_ => return Err(Error::UnsupportedScheme(url.scheme().to_string())),
 		};

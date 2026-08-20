@@ -36,6 +36,7 @@ thiserror = "2"
 tokio = { workspace = true, features = ["macros"] }
 tracing = "0.1"
 url = "2"
+web-async = { workspace = true }
 webm-iterable = "0.6"
 
 [dev-dependencies]

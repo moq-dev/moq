@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { OriginSchema } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import {
@@ -7,7 +8,6 @@ import {
 	decodeAnnounceBroadcast,
 	encodeAnnounceBroadcast,
 } from "./announce.ts";
-import { OriginSchema } from "./origin.ts";
 import { Version } from "./version.ts";
 
 function concat(chunks: Uint8Array[]): Uint8Array {

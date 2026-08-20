@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/moq-dev/moq-go/moq"
+	"moq.dev/moq"
 )
 
 // testTimeout bounds the blocking stream calls so a regression fails the test

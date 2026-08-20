@@ -140,9 +140,10 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		name => moq_video::decode::Kind::Named(name.to_string()),
 	};
 	config.resize.acceleration = args.resize_acceleration;
-	// Reference the source renditions relatively when the output nests under it;
-	// otherwise the derivative catalog advertises only the rungs.
-	config.source = moq_transcode::source_reference(&source_path, &output_path);
+	// Point the derivative catalog at the source renditions so players fetch them from the
+	// source directly. An empty reference would name the derivative broadcast itself, which
+	// publishes the rungs and nothing else.
+	config.source = source_path.relative(&output_path).filter(|rel| !rel.is_empty());
 
 	let output = publish
 		.create_broadcast(&output_path, moq_net::broadcast::Route::new().with_announce(true))

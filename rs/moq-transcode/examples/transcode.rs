@@ -74,10 +74,13 @@ async fn main() -> anyhow::Result<()> {
 		.await
 		.context("source broadcast unavailable")?;
 
+	// The default ladder and encoder (hardware first: NVENC on Linux) apply.
 	let mut config = moq_transcode::Config::default();
-	// Reference the source when the normalized output is nested beneath it. The
-	// default ladder and encoder (hardware first: NVENC on Linux) apply.
-	config.source = moq_transcode::source_reference(&source_path, &output_path);
+
+	// Point the derivative catalog at the source renditions so players fetch them from the
+	// source directly. An empty reference would name the derivative broadcast itself, which
+	// publishes the rungs and nothing else.
+	config.source = source_path.relative(&output_path).filter(|rel| !rel.is_empty());
 
 	let output = publish
 		.create_broadcast(&output_path, moq_net::broadcast::Route::new().with_announce(true))

@@ -265,6 +265,7 @@ pub async fn publish_capture<E: CatalogExt>(
 		probe_config.bitrate = encode.bitrate;
 		probe_config.codec = encode.codec;
 		probe_config.kind = encode.kind.clone();
+		probe_config.color = camera.color();
 		probe_config.probe().await?
 	};
 
@@ -411,6 +412,7 @@ async fn capture_loop<E: CatalogExt>(
 		encoder_config.bitrate = encode.bitrate;
 		encoder_config.codec = encode.codec;
 		encoder_config.kind = encode.kind.clone();
+		encoder_config.color = camera.color();
 		// Off macOS this opens the encoder on a dedicated thread; see `sink`.
 		let mut encoder = Sink::open(&encoder_config).await?;
 		// Force an IDR on the first frame of each (re)open so a viewer subscribing

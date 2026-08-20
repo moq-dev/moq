@@ -219,11 +219,9 @@
             gzip
           ];
 
-        # Developer workflow tooling not needed for builds: the GitHub CLI
-        # for opening/reviewing PRs, plus jq to read `cargo metadata` in
-        # `just rs check-changed`.
+        # Developer workflow tooling not needed for builds: jq reads
+        # `cargo metadata` in `just rs check-changed`.
         devTools = with pkgs; [
-          gh
           jq
         ];
 
@@ -292,19 +290,62 @@
           uniffi-bindgen-go
         ];
 
-        # Dependencies for building the OBS plugin (`just obs build`).
-        # Linux-only: nixpkgs marks obs-studio broken on Darwin, so macOS
-        # and Windows fetch libobs/Qt6 via the OBS buildspec instead (see
-        # cpp/obs/buildspec.json and doc/bin/obs.md). ffmpeg + cmake come from
-        # rustDeps. clang-tools/gersemi back `just obs check`.
+        # The libobs headers, unpacked from the same OBS release
+        # cpp/obs/buildspec.json downloads. Headers only: nothing here links, so
+        # it works on Darwin even though obs-studio itself does not build there,
+        # and it costs ~2 MB of store instead of the multi-hundred-MB obs-deps
+        # bundle. `just obs compile` type-checks the plugin against it.
+        #
+        # Keep `version` equal to buildspec.json's obs-studio version; `just obs
+        # check` fails when the two drift.
+        obs-headers = pkgs.stdenvNoCC.mkDerivation rec {
+          pname = "libobs-headers";
+          version = "31.1.1";
+
+          src = pkgs.fetchzip {
+            url = "https://github.com/obsproject/obs-studio/archive/refs/tags/${version}.tar.gz";
+            hash = "sha256-ycfROxgm3wUVyC2d1r3vIr7yWb6ErYIoDZX8xZrc+Vk=";
+          };
+
+          dontBuild = true;
+
+          # The layout matches a real OBS install (everything flat under
+          # include/obs, frontend API included), so a plugin's include paths are
+          # the same here as against the system package on Linux.
+          installPhase = ''
+            runHook preInstall
+            (cd libobs && find . \( -name '*.h' -o -name '*.hpp' \) -exec install -Dm444 {} $out/include/obs/{} \;)
+            install -Dm444 frontend/api/obs-frontend-api.h $out/include/obs/obs-frontend-api.h
+            # obs.h includes obsconfig.h, which the OBS build generates. Only the
+            # two version macros have to hold a value; everything else it
+            # configures is internal to libobs, so leave the #cmakedefines unset.
+            sed -e 's/^#cmakedefine.*$//' -e 's/@OBS_RELEASE_CANDIDATE@/0/' -e 's/@OBS_BETA@/0/' \
+              libobs/obsconfig.h.in > $out/include/obs/obsconfig.h
+            runHook postInstall
+          '';
+        };
+
+        # Dependencies for the OBS plugin (`just obs build`, `just obs compile`,
+        # `just obs check`). ffmpeg + cmake come from rustDeps.
+        #
+        # Only the *build* is Linux-only: nixpkgs marks obs-studio broken on
+        # Darwin, so macOS and Windows link libobs/Qt6 from the OBS buildspec
+        # bundle instead (see cpp/obs/buildspec.json and doc/bin/obs.md).
+        # Type-checking needs headers rather than libraries, and those are
+        # cross-platform -- obs-headers above, plus qt6.qtbase, which does build
+        # on Darwin. So `just obs compile` and the lints run everywhere while
+        # `just obs build` stays native.
         obsDeps =
           with pkgs;
-          lib.optionals (!stdenv.isDarwin) [
-            obs-studio
+          [
+            obs-headers
             qt6.qtbase
-            ninja
             clang-tools
             gersemi
+          ]
+          ++ lib.optionals (!stdenv.isDarwin) [
+            obs-studio
+            ninja
           ];
 
         # Apply our overlay to get the package definitions
@@ -372,7 +413,13 @@
           # Nix's _FORTIFY_SOURCE hardening (requires -O).
           hardeningDisable = [ "fortify" ];
 
-          env = pkgs.lib.optionalAttrs (!pkgs.stdenv.isDarwin) {
+          env = {
+            # Where `just obs compile` and `just obs test` look for libobs. Set
+            # on every platform so the plugin type-checks against the pinned OBS
+            # release everywhere, rather than whatever the host happens to have.
+            OBS_INCLUDE_DIR = "${obs-headers}/include/obs";
+          }
+          // pkgs.lib.optionalAttrs (!pkgs.stdenv.isDarwin) {
             ALSA_PLUGIN_DIR = "${alsaPlugins}/lib/alsa-lib";
           };
         };

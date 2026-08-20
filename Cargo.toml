@@ -75,11 +75,15 @@ resolver = "2"
 rust-version = "1.91"
 
 [workspace.dependencies]
+criterion = "0.8"
 flate2 = "1.1"
+getrandom = { version = "0.4", features = ["wasm_js"] }
 hang = { version = "0.20", path = "rs/hang" }
 # HMAC-SHA256 for the mDNS membership proofs (moq-tokio's `mdns` feature).
 hmac = "0.13"
 kio = { version = "0.5", path = "rs/kio" }
+libc = "0.2"
+linux-raw-sys = { version = "0.12.1", features = ["ioctl"] }
 # Permutation testing for the kio primitives (and everything built on them).
 # Only compiled under `--cfg loom`; see `just rs loom`.
 loom = { version = "0.7.2", features = ["futures"] }
@@ -137,6 +141,7 @@ web-transport-proto = "0.6"
 web-transport-quiche = "0.6"
 web-transport-quinn = "0.12"
 web-transport-trait = "0.4"
+web-transport-wasm = "0.6"
 
 [profile.dev]
 panic = "abort"

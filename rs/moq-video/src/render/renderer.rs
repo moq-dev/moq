@@ -12,6 +12,18 @@ use crate::{Color, Error, Frame, Size};
 /// frame rate, so the path is retired and the CPU fallback takes over.
 const ZERO_COPY_STRIKES: u32 = 3;
 
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+fn dma_buf_import_timed_out(error: &Error) -> bool {
+	let Error::Render(error) = error else {
+		return false;
+	};
+	error.chain().any(|cause| {
+		cause
+			.downcast_ref::<std::io::Error>()
+			.is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut)
+	})
+}
+
 /// Renderer configuration.
 ///
 /// `#[non_exhaustive]`: build via [`Config::new`] (or `default()`) and set the
@@ -100,6 +112,8 @@ impl Config {
 pub struct Renderer {
 	device: wgpu::Device,
 	queue: wgpu::Queue,
+	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	completion: Completion,
 	config: Config,
 
 	shader: Pipelines,
@@ -125,7 +139,68 @@ struct Pipelines {
 	/// everywhere, so it stays validated on every platform either way.
 	#[cfg(target_os = "macos")]
 	nv12: wgpu::RenderPipeline,
+	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	/// Packed RGB or BGR imported from a Linux DMA-BUF.
+	rgba: wgpu::RenderPipeline,
 	i420: wgpu::RenderPipeline,
+}
+
+/// Waits for submitted GPU work before releasing its producer-owned surfaces.
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+struct Completion {
+	device: wgpu::Device,
+	tx: Option<std::sync::mpsc::Sender<(wgpu::SubmissionIndex, Box<dyn Send + Sync>)>>,
+	thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+impl Completion {
+	fn new(device: &wgpu::Device) -> Result<Self, Error> {
+		let (tx, rx) = std::sync::mpsc::channel();
+		let worker_device = device.clone();
+		let thread = std::thread::Builder::new()
+			.name("moq-video-gpu-completion".into())
+			.spawn(move || {
+				while let Ok((submission, keepalive)) = rx.recv() {
+					if let Err(err) = worker_device.poll(wgpu::PollType::Wait {
+						submission_index: Some(submission),
+						timeout: None,
+					}) {
+						tracing::warn!(%err, "waiting for imported GPU surface failed");
+					}
+					drop(keepalive);
+				}
+			})
+			.map_err(|err| Error::Render(anyhow::anyhow!("start GPU completion worker: {err}")))?;
+
+		Ok(Self {
+			device: device.clone(),
+			tx: Some(tx),
+			thread: Some(thread),
+		})
+	}
+
+	fn submit(&self, submission: wgpu::SubmissionIndex, keepalive: Box<dyn Send + Sync>) {
+		let tx = self.tx.as_ref().expect("completion sender lives until drop");
+		if let Err(err) = tx.send((submission, keepalive)) {
+			let (submission, keepalive) = err.0;
+			let _ = self.device.poll(wgpu::PollType::Wait {
+				submission_index: Some(submission),
+				timeout: None,
+			});
+			drop(keepalive);
+		}
+	}
+}
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+impl Drop for Completion {
+	fn drop(&mut self) {
+		drop(self.tx.take());
+		if let Some(thread) = self.thread.take() {
+			let _ = thread.join();
+		}
+	}
 }
 
 impl Renderer {
@@ -133,7 +208,9 @@ impl Renderer {
 	///
 	/// The device and queue are the application's: the renderer draws into
 	/// textures that application already owns, so it never creates a device of
-	/// its own. Both handles are cheap to clone and are kept.
+	/// its own. Both handles are cheap to clone and are kept. On Linux, request
+	/// [`wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF`] on the device to import
+	/// PipeWire DMA-BUFs instead of downloading them.
 	pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, config: Config) -> Result<Self, Error> {
 		if let Some(size) = config.size {
 			size.validate_nonzero("render output")?;
@@ -150,6 +227,8 @@ impl Renderer {
 		Ok(Self {
 			device: device.clone(),
 			queue: queue.clone(),
+			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			completion: Completion::new(device)?,
 			config,
 			shader,
 			uniform,
@@ -167,12 +246,14 @@ impl Renderer {
 	/// call overwrites what you are holding. Present or copy it before rendering
 	/// again.
 	pub fn render(&mut self, frame: &Frame) -> Result<wgpu::Texture, Error> {
-		let source = self.source(frame)?;
-		let color = self.config.color.unwrap_or(source.color);
-		if self.color != Some(color) {
-			self.queue
-				.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&uniform(color)));
-			self.color = Some(color);
+		let mut source = self.source(frame)?;
+		if let Some(source_color) = source.color {
+			let color = self.config.color.unwrap_or(source_color);
+			if self.color != Some(color) {
+				self.queue
+					.write_buffer(&self.uniform, 0, bytemuck::cast_slice(&uniform(color)));
+				self.color = Some(color);
+			}
 		}
 
 		let output = self.output(frame.size())?;
@@ -206,6 +287,8 @@ impl Renderer {
 		});
 
 		let pipeline = match source.layout {
+			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			Layout::Rgba => &self.shader.rgba,
 			#[cfg(target_os = "macos")]
 			Layout::Nv12 => &self.shader.nv12,
 			Layout::I420 => &self.shader.i420,
@@ -236,7 +319,13 @@ impl Renderer {
 			pass.set_bind_group(0, &bind, &[]);
 			pass.draw(0..3, 0..1);
 		}
-		self.queue.submit([encoder.finish()]);
+		let submission = self.queue.submit([encoder.finish()]);
+		if let Some(keepalive) = source.keepalive.take() {
+			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			self.completion.submit(submission, keepalive);
+			#[cfg(not(all(target_os = "linux", feature = "dmabuf")))]
+			drop((submission, keepalive));
+		}
 
 		Ok(output)
 	}
@@ -254,6 +343,8 @@ impl Renderer {
 				// failure, so it costs no strike: the CPU path is the answer
 				// for this surface and always will be.
 				Ok(None) => {}
+				#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+				Err(err) if dma_buf_import_timed_out(&err) => return Err(err),
 				Err(err) => {
 					self.strikes += 1;
 					self.retired = self.strikes >= ZERO_COPY_STRIKES;
@@ -406,6 +497,8 @@ impl Pipelines {
 		});
 
 		Ok(Self {
+			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			rgba: pipeline("rgba"),
 			#[cfg(target_os = "macos")]
 			nv12: pipeline("nv12"),
 			i420: pipeline("i420"),
@@ -421,6 +514,18 @@ mod tests {
 
 	use super::*;
 	use crate::Surface;
+
+	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	#[test]
+	fn dma_buf_fence_timeout_is_terminal_for_the_frame() {
+		let timed_out = Error::Render(anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::TimedOut)));
+		let other = Error::Render(anyhow::Error::new(std::io::Error::from(
+			std::io::ErrorKind::PermissionDenied,
+		)));
+
+		assert!(dma_buf_import_timed_out(&timed_out));
+		assert!(!dma_buf_import_timed_out(&other));
+	}
 
 	/// Every test here draws on a real GPU, which a headless CI runner does not
 	/// have (wgpu finds no adapter and `Renderer::new` never gets built). The

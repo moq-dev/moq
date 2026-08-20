@@ -14,8 +14,8 @@ name: Release Go
 #                           release is mid-flight), the job skips: the
 #                           workflow_run below republishes once the ffi lands.
 #   * Release Go FFI done  — a new ffi just published to the moq-go-ffi mirror.
-#                           Re-cut the wrapper so `moq-go@latest` floats to the
-#                           newest native core (Go MVS won't float on its own).
+#                           Re-cut the wrapper so `moq.dev/moq@latest` floats to
+#                           the newest native core (Go MVS won't float on its own).
 #                           Chaining off the upstream run guarantees the mirror
 #                           tag is already present, so there is nothing to poll.
 #
@@ -114,10 +114,26 @@ jobs:
             echo "::error::failed to query the moq-go-ffi mirror for tags"
             exit 1
           fi
-          if [[ -n "$TAGS" ]]; then
-            echo "moq-go-ffi v${FFI_VERSION} is published; proceeding."
-          else
+          if [[ -z "$TAGS" ]]; then
             echo "::warning::moq-go-ffi v${FFI_VERSION} not on the mirror yet; deferring to the Release Go FFI chain."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Existing is not the same as usable. The wrapper pins moq.dev/moq-ffi,
+          # so a tag published before the module was renamed still declares
+          # github.com/moq-dev/moq-go-ffi and `go mod tidy` below would abort on
+          # the path mismatch. Defer to the same chain: the next ffi release
+          # republishes the mirror under the new path and re-cuts the wrapper.
+          MOD_URL="https://raw.githubusercontent.com/moq-dev/moq-go-ffi/v${FFI_VERSION}/go.mod"
+          if ! MOD=$(curl -fsSL "$MOD_URL"); then
+            echo "::error::failed to read go.mod from the moq-go-ffi mirror at v${FFI_VERSION}"
+            exit 1
+          fi
+          if grep -qE '^module[[:space:]]+moq\.dev/moq-ffi$' <<< "$MOD"; then
+            echo "moq-go-ffi v${FFI_VERSION} is published and declares moq.dev/moq-ffi; proceeding."
+          else
+            echo "::warning::moq-go-ffi v${FFI_VERSION} predates the module rename; deferring to the Release Go FFI chain."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
 

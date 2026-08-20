@@ -1,3 +1,3 @@
-module github.com/moq-dev/moq-go-ffi
+module moq.dev/moq-ffi
 
 go 1.21

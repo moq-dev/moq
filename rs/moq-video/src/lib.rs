@@ -84,6 +84,8 @@ mod mf;
 
 pub use color::Color;
 pub use error::Error;
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+pub use frame::{DmaBuf, DmaBufExport, DmaBufPlane, DrmFormat};
 pub use frame::{Frame, I420, Surface};
 pub use size::Size;
 

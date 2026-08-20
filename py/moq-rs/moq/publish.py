@@ -166,7 +166,7 @@ class MediaStreamProducer:
     """Wraps MoqMediaStreamProducer: feed a raw byte stream (e.g. Annex-B
     H.264) and let the importer infer frame boundaries.
 
-    Built via :meth:`BroadcastProducer.publish_media_stream`. Unlike
+    Built via :meth:`BroadcastProducer.publish_video_stream`. Unlike
     :class:`MediaProducer`, no per-frame timestamps are needed; just push
     encoder bytes as they arrive.
     """

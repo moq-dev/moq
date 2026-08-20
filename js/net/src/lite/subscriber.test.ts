@@ -1,10 +1,10 @@
 import { expect, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Probe } from "../connection/stats.ts";
+import { OriginSchema } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Writer } from "../stream.ts";
 import { AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
-import { OriginSchema } from "./origin.ts";
 import { Subscriber } from "./subscriber.ts";
 import { Version } from "./version.ts";
 

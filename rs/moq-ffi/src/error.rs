@@ -15,9 +15,12 @@ pub enum MoqError {
 	#[error(transparent)]
 	JsonTrack(#[from] moq_json::Error),
 
+	// Native codec errors, behind the optional `audio`/`video` features.
+	#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
 	#[error(transparent)]
 	Audio(#[from] moq_audio::Error),
 
+	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
 	#[error(transparent)]
 	Video(#[from] moq_video::Error),
 
@@ -30,6 +33,8 @@ pub enum MoqError {
 	#[error(transparent)]
 	LogLevel(#[from] tracing::metadata::ParseLevelError),
 
+	// Only the native path spawns onto a runtime, so only it can fail to join.
+	#[cfg(not(target_arch = "wasm32"))]
 	#[error(transparent)]
 	Task(#[from] tokio::task::JoinError),
 

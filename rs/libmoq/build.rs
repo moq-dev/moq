@@ -8,6 +8,8 @@ const LIB_NAME: &str = "moq";
 const ENUMS: &[&str] = &[
 	"moq_container_kind",
 	"moq_audio_format",
+	"moq_video_format",
+	"moq_container_format",
 	"moq_video_pixel_format",
 	"moq_video_codec",
 	"moq_video_encoder_kind",

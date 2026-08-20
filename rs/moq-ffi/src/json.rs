@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
-use crate::ffi::{RUNTIME, Task};
+use crate::ffi::Task;
 use crate::producer::MoqBroadcastProducer;
 
 /// Options for a JSON snapshot track (lossy latest-value mode).
@@ -100,7 +100,7 @@ impl MoqBroadcastProducer {
 		name: String,
 		config: MoqJsonSnapshotConfig,
 	) -> Result<Arc<MoqJsonSnapshotProducer>, MoqError> {
-		let _guard = RUNTIME.enter();
+		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
 			let mut broadcast = state.broadcast.clone();
 			let track = broadcast.create_track(name, None)?;
@@ -117,7 +117,7 @@ impl MoqBroadcastProducer {
 		name: String,
 		config: MoqJsonStreamConfig,
 	) -> Result<Arc<MoqJsonStreamProducer>, MoqError> {
-		let _guard = RUNTIME.enter();
+		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
 			let mut broadcast = state.broadcast.clone();
 			let track = broadcast.create_track(name, None)?;
@@ -173,7 +173,7 @@ impl MoqJsonSnapshotProducer {
 	/// Publish a new value, encoded as a snapshot or delta automatically. `value` is a JSON
 	/// document. A no-op if unchanged from the previous update.
 	pub fn update(&self, value: String) -> Result<(), MoqError> {
-		let _guard = RUNTIME.enter();
+		let _guard = crate::ffi::enter();
 		let value: Value = serde_json::from_str(&value)?;
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
@@ -183,7 +183,7 @@ impl MoqJsonSnapshotProducer {
 
 	/// Finish the track, closing any open group.
 	pub fn finish(&self) -> Result<(), MoqError> {
-		let _guard = RUNTIME.enter();
+		let _guard = crate::ffi::enter();
 		let mut producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		producer.finish()?;
 		Ok(())
@@ -238,7 +238,7 @@ pub struct MoqJsonStreamProducer {
 impl MoqJsonStreamProducer {
 	/// Append one record to the log. `value` is a JSON document.
 	pub fn append(&self, value: String) -> Result<(), MoqError> {
-		let _guard = RUNTIME.enter();
+		let _guard = crate::ffi::enter();
 		let value: Value = serde_json::from_str(&value)?;
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
@@ -248,7 +248,7 @@ impl MoqJsonStreamProducer {
 
 	/// Finish the track, closing the group.
 	pub fn finish(&self) -> Result<(), MoqError> {
-		let _guard = RUNTIME.enter();
+		let _guard = crate::ffi::enter();
 		let mut producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		producer.finish()?;
 		Ok(())

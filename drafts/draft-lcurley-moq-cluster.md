@@ -104,11 +104,11 @@ It is used for an endpoint that did not negotiate this extension, and an endpoin
 Because any number of endpoints can be 0, it identifies nothing, which constrains all three uses:
 
 - **Loop detection**: 0 in a HOP_PATH is never a loop. A receiver whose own Hop ID is 0 cannot detect loops through itself, and MUST NOT discard an advertisement merely because the path contains 0.
-- **Origin identity**: an advertisement whose first entry is 0 has an unknown origin. A receiver MUST NOT treat two such advertisements as interchangeable ({{selection}}).
+- **Origin identity**: an advertisement whose first entry is 0 has an unknown origin. A receiver MUST NOT treat two such advertisements as interchangeable ({{selection}}). Updating one advertisement is not two ({{updating}}).
 - **Filtering**: a peer that declared 0 excludes nothing, so the sender applies no filter to that session.
 
 Duplicate *non-zero* Hop IDs in one HOP_PATH are a loop; duplicate zeros are not.
-Declaring 0 therefore trades loop detection, failover, and update continuity ({{updating}}) for anonymity.
+Declaring 0 therefore trades loop detection and failover for anonymity.
 
 
 # Namespace Advertisements {#namespace}
@@ -192,7 +192,10 @@ In {{moqt}} an advertisement lives for the lifetime of its stream, so an update 
 An endpoint MUST NOT open a second stream for a namespace it already advertises on this session.
 
 Replacement is atomic, so a receiver MUST NOT tear down subscriptions or drop cached state merely because an update arrived.
-What it means for existing subscriptions follows the first HOP_PATH entry ({{selection}}): unchanged and non-zero, the content is continuous and subscriptions MAY resume on the new route at a group boundary; changed or 0 ({{zero}}), a different publisher may have taken over and they do not carry over.
+What it means for existing subscriptions follows the first HOP_PATH entry ({{selection}}): unchanged, the content is continuous and subscriptions MAY resume on the new route at a group boundary; changed, a different publisher has taken over and they do not carry over.
+
+This is the one comparison 0 ({{zero}}) does not decide: it identifies nothing, but there is one advertisement here and the stream carrying it is the continuity.
+An endpoint whose publisher did change MUST withdraw the advertisement (NAMESPACE_DONE or PUBLISH_NAMESPACE_DONE) and advertise again rather than update in place.
 
 The expected case is a ROUTE_COST-only change, which is how a relay signals that it started or stopped carrying the namespace.
 

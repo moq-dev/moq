@@ -1,0 +1,14 @@
+# Chat rooms, audience half of the 1:N fanout pair (see chat-pub.toml).
+# Subscriber-only: publishes nothing and follows a few of the announced rooms.
+# Scale --connections, or run several instances, to push the fanout: 10 rooms
+# with 2000 subscribers at 1 to 3 rooms each is roughly 1:400 per room.
+
+startup = "60s"
+report = "5s"
+
+# A: audience size
+connections = 2000
+# B: the audience publishes nothing
+broadcasts = 0
+# C: rooms followed per audience member
+subscribe = "1:3"

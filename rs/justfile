@@ -129,10 +129,13 @@ check-changed $FILES:
 
     # moq-wasm's crate root is entirely `#![cfg(target_arch = "wasm32")]`, so
     # however it got selected the host-target pass above compiled it to nothing
-    # and saw no errors in it. This wasm32 pass is what actually checks it, and
-    # the selection already says whether moq-wasm or anything it depends on
-    # changed.
-    if [[ "$packages" == "ALL" ]] || grep -q -- '--package moq-wasm' <<< "$packages"; then
+    # and saw no errors in it. This wasm32 pass is what actually checks it.
+    #
+    # The alternation must list every package `wasm` compiles, not just moq-wasm:
+    # nothing in the workspace depends on moq-ffi, so an moq-ffi-only diff selects
+    # only itself and would never reach the gate that exists to cover it. moq-mux
+    # is selected by its dependents, none of which are moq-wasm.
+    if [[ "$packages" == "ALL" ]] || grep -qE -- '--package (moq-wasm|moq-mux|moq-ffi)' <<< "$packages"; then
     	just rs wasm
     fi
 
@@ -147,9 +150,9 @@ fix-changed $FILES:
     	*)     echo "rs: fixing ${packages//--package /}"; just rs fix $packages ;;
     esac
 
-    # Mirrors `check-changed`'s gate: without this a moq-wasm lint is never
-    # auto-fixed, and `check`'s wasm32 clippy pass fails on it later.
-    if [[ "$packages" == "ALL" ]] || grep -q -- '--package moq-wasm' <<< "$packages"; then
+    # Mirrors `check-changed`'s gate, alternation included: without this a wasm32
+    # lint is never auto-fixed, and `check`'s wasm32 clippy pass fails on it later.
+    if [[ "$packages" == "ALL" ]] || grep -qE -- '--package (moq-wasm|moq-mux|moq-ffi)' <<< "$packages"; then
     	just rs wasm-fix
     fi
 
@@ -209,17 +212,24 @@ macos *args:
 # which builds the shippable `@moq/wasm` package (wasm-bindgen, release profile);
 # this is the compile gate.
 
+# `moq-mux` and `moq-ffi` ride along in the same invocation on purpose: `moq-mux`
+# needs `getrandom`'s `wasm_js` backend that only its siblings declare, and feature
+# unification only happens within one cargo invocation. Splitting them fails on
+# getrandom. `--lib` rather than `--all-targets` because moq-mux's tests use tokio's
+# native timers and moq-ffi's drive a native relay; moq-wasm has no test targets, so
+# it loses no coverage.
+
 # Compile and lint the browser/WASM bindings, which the host-target check skips.
 wasm *args:
-    cargo clippy -p moq-wasm --target wasm32-unknown-unknown --all-targets {{ args }} -- -D warnings
+    cargo clippy -p moq-wasm -p moq-mux -p moq-ffi --target wasm32-unknown-unknown --lib {{ args }} -- -D warnings
 
 # The `fix` counterpart to `wasm`. `cargo fmt` is scoped rather than `--all`
 # because this runs alongside `fix`, which already formats everything else.
 
 # Auto-fix the browser/WASM bindings.
 wasm-fix *args:
-    cargo clippy --fix --allow-staged --allow-dirty -p moq-wasm --target wasm32-unknown-unknown --all-targets {{ args }}
-    cargo fmt -p moq-wasm
+    cargo clippy --fix --allow-staged --allow-dirty -p moq-wasm -p moq-mux -p moq-ffi --target wasm32-unknown-unknown --lib {{ args }}
+    cargo fmt -p moq-wasm -p moq-mux -p moq-ffi
 
 # Dependency advisories plus the license/ban policy. Time-based rather than
 # diff-based: an advisory lands without this repo changing, so a per-PR run both
@@ -325,6 +335,16 @@ loom *args:
 
 build:
     cargo build
+
+# Run a moq-bench preset against a relay, e.g. `just rs bench chat https://relay.example.com`.
+# Extra args pass through, so `--connections 500 --output stats.jsonl` work as-is.
+bench preset url *args:
+    cargo run --release -p moq-bench -- --file 'rs/moq-bench/config/{{ preset }}.toml' --connect '{{ url }}' {{ args }}
+
+# Sample a process's CPU/memory/context switches on this host (run it where the
+# relay runs; it only reads /proc). E.g. `just rs bench-host --name moq-relay`.
+bench-host *args:
+    cargo run --release -p moq-bench --bin moq-bench-host -- {{ args }}
 
 # Remove the Rust target directory.
 clean:

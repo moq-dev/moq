@@ -98,6 +98,7 @@ export default defineConfig({
 								{ text: "quic", link: "/concept/layer/quic" },
 								{ text: "web-transport", link: "/concept/layer/web-transport" },
 								{ text: "web-socket", link: "/concept/layer/web-socket" },
+								{ text: "iroh", link: "/concept/layer/iroh" },
 								{ text: "moq-lite", link: "/concept/layer/moq-lite" },
 								{ text: "hang", link: "/concept/layer/hang" },
 							],
@@ -184,7 +185,7 @@ export default defineConfig({
 									link: "/lib/rs/crate",
 									items: [
 										{ text: "moq-net", link: "/lib/rs/crate/moq-net" },
-										{ text: "moq-native", link: "/lib/rs/crate/moq-native" },
+										{ text: "moq-tokio", link: "/lib/rs/crate/moq-tokio" },
 										{ text: "moq-token", link: "/lib/rs/crate/moq-token" },
 										{ text: "hang", link: "/lib/rs/crate/hang" },
 										{ text: "moq-video", link: "/lib/rs/crate/moq-video" },

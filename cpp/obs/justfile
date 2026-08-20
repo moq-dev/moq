@@ -1,6 +1,9 @@
 #!/usr/bin/env just --justfile
 # OBS Studio plugin for MoQ. See doc/bin/obs.md for the full build guide.
 #
+# `just obs compile` type-checks the sources on any platform with nothing to
+# download. The recipes below build a loadable plugin, which is a bigger ask:
+#
 # Linux:   `nix develop` provides obs-studio/qt6/ffmpeg/cmake, then `just obs build`.
 # macOS:   native, NOT nix. Needs full Xcode; run outside `nix develop` (its
 #          toolchain breaks the Xcode build). `just obs setup` downloads
@@ -58,39 +61,97 @@ run:
     cp -a build_macos/RelWithDebInfo/obs-moq.plugin "$dest/"
     RUST_LOG=debug RUST_BACKTRACE=1 OBS_LOG_LEVEL=debug /Applications/OBS.app/Contents/MacOS/OBS
 
-# Unit-test the plugin sources against stubbed libobs/libmoq, under ThreadSanitizer.
+# Type-check every plugin source, without linking or an obs-deps download.
 #
-# Manual, like `just rs macos` and `just rs windows`: PR CI never compiles this
-# plugin, and the libobs headers come from the multi-hundred-MB obs-deps download
-# that `just obs setup` performs. Run it whenever you touch src/, especially the
-# session callback plumbing, whose orderings the build can't check.
-test:
+# This is the gate to run in a worktree. `just obs build` needs the
+# multi-hundred-MB obs-deps bundle (macOS/Windows) and a full cargo build, per
+# worktree; this needs neither, because the dev shell carries all three header
+# sets: libobs pinned to the same OBS release buildspec.json downloads (see
+# `obs-headers` in flake.nix), Qt6, and ffmpeg. CI links the real thing on Linux
+# (.github/workflows/obs.yml).
+#
+# It compiles the Qt sources too, which the CMake build only does when
+# ENABLE_QT and ENABLE_FRONTEND_API are on, so the definitions they gate on are
+# set here to match.
+compile:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Unlike the lint recipes, this one never skips: a test gate that reports
-    # success without running anything is worse than no gate, and nothing else
-    # covers this code.
+    # Never skips, for the reason `test` doesn't: a compile gate that reports
+    # success without compiling is worse than no gate. Everything it needs is in
+    # the dev shell, so the fix is always to enter it.
     cxx="${CXX:-c++}"
-    unsupported="'$cxx' cannot build with -fsanitize=thread. These tests need a Clang or GCC
-    compiler that supports ThreadSanitizer: set CXX, or on Windows run them from WSL, since
-    neither MSVC nor Clang on Windows implements ThreadSanitizer."
     if ! command -v "$cxx" >/dev/null; then
-        echo "no C++ compiler at '$cxx'." >&2
-        echo "$unsupported" >&2
+        echo "no C++ compiler at '$cxx'" >&2
         exit 1
     fi
-    if ! printf 'int main(){}\n' | "$cxx" -x c++ -fsanitize=thread -o /dev/null - >/dev/null 2>&1; then
-        echo "$unsupported" >&2
-        exit 1
-    fi
+    for pkgs in "Qt6Widgets Qt6Gui Qt6Core" "libavcodec libavutil libswscale libswresample"; do
+        # shellcheck disable=SC2086
+        if ! pkg-config --exists $pkgs; then
+            echo "missing headers for: $pkgs" >&2
+            echo "run inside 'nix develop', which supplies Qt6 and ffmpeg on every platform" >&2
+            exit 1
+        fi
+    done
 
-    # libobs headers: the obs-deps framework (macOS/Windows), the OBS sources
-    # CMake unpacks beside it, or a system install (Linux/nix).
+    # Assign first so a failure in `_includes` still aborts under `set -e`,
+    # then split on newlines only: an include path may contain spaces.
+    includes_raw=$(just _includes)
+    includes=()
+    while IFS= read -r flag; do includes+=("$flag"); done <<< "$includes_raw"
+
+    qt=$(pkg-config --cflags Qt6Widgets Qt6Gui Qt6Core)
+    ffmpeg=$(pkg-config --cflags libavcodec libavutil libswscale libswresample)
+
+    # MOQ_VERSION_STRING only reaches a label in the dock, so any value
+    # type-checks the same; CMake stamps the real libmoq version.
+    status=0
+    for source in src/*.cpp; do
+        # shellcheck disable=SC2086
+        # -Wno-unused-command-line-argument: the nix compiler wrapper injects
+        # link flags, which a syntax-only run reports as unused, once per file.
+        # $qt and $ffmpeg stay unquoted on purpose: pkg-config hands back one
+        # space-separated string, and splitting it is the intended reading.
+        if ! "$cxx" -std=c++17 -fsyntax-only -Wno-unused-command-line-argument \
+            "${includes[@]}" $qt $ffmpeg \
+            -DMOQ_FRONTEND_ENABLED -DMOQ_VERSION_STRING='"0.0.0"' "$source"; then
+            status=1
+        fi
+    done
+    exit $status
+
+# Compile and link the plugin the way CI does, against the dev shell's own
+# libobs/Qt6/ffmpeg. Linux-only in practice: it's the one platform where nixpkgs
+# has obs-studio, so nothing has to be downloaded. Manual elsewhere, like
+# `just rs macos`.
+#
+# CMAKE_BUILD_TYPE overrides the preset's RelWithDebInfo because the Rust cache
+# CI restores holds dev-profile artifacts. A release build of libmoq would
+# rebuild its whole dependency tree on every run, and the gate is about whether
+# the plugin compiles, which the profile doesn't change.
+ci preset="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PRESET=$(just preset "{{ preset }}" ci)
+    cmake --preset "$PRESET" -DCMAKE_BUILD_TYPE=Debug
+    cmake --build --preset "$PRESET"
+
+# Print the -I flags for libobs and libmoq, shared by `compile` and `test`.
+#
+# moq.h is generated by cbindgen from rs/libmoq/src, so regenerate rather than
+# just locating it: a stale header is how a plugin call to a since-changed
+# libmoq function type-checks anyway.
+[private]
+_includes:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # The dev shell's pinned headers first, so every platform checks against the
+    # same libobs. Then the obs-deps framework (macOS/Windows), the OBS sources
+    # CMake unpacks beside it, and a system install (Linux without nix).
     obs_include=""
     for candidate in \
+        "${OBS_INCLUDE_DIR:-}" \
         .deps/Frameworks/libobs.framework/Versions/A/Headers \
-        .deps/obs-studio-*/libobs \
-        "${OBS_INCLUDE_DIR:-}"; do
+        .deps/obs-studio-*/libobs; do
         if [ -n "$candidate" ] && [ -f "$candidate/obs.h" ]; then
             obs_include="$candidate"
             break
@@ -100,22 +161,78 @@ test:
         obs_include=$(pkg-config --variable=includedir libobs)/obs
     fi
     if [ -z "$obs_include" ]; then
-        echo "libobs headers not found; run 'just obs setup' (or set OBS_INCLUDE_DIR)" >&2
+        echo "libobs headers not found; run inside 'nix develop' (or set OBS_INCLUDE_DIR)" >&2
         exit 1
     fi
 
-    # moq.h is generated by cbindgen when libmoq builds.
-    moq_include="../../target/include"
+    (cd ../.. && cargo check --quiet -p libmoq)
+
+    # Ask cargo where its build script ran rather than reconstructing the path.
+    # CARGO_TARGET_DIR, a `--target` triple and a custom profile each move the
+    # generated header, and guessing wrong doesn't fail: it type-checks against
+    # whatever stale copy the default directory still holds. Replays the check
+    # above from cache, so it costs a process rather than a compile.
+    out_dir=$(cd ../.. && cargo check -p libmoq --message-format=json |
+        jq -r 'select(.reason == "build-script-executed") | select(.package_id | tostring | test("libmoq")) | .out_dir' |
+        tail -1)
+    if [ -z "$out_dir" ]; then
+        echo "cargo reported no build script output for libmoq" >&2
+        exit 1
+    fi
+    # <target>/<profile>/build/libmoq-<hash>/out, and the header sits beside the
+    # profile directory. rs/libmoq/build.rs derives it from OUT_DIR the same way.
+    moq_include="$(dirname "$(dirname "$(dirname "$(dirname "$out_dir")")")")/include"
     if [ ! -f "$moq_include/moq.h" ]; then
-        echo "$moq_include/moq.h missing; run 'just obs build' or 'cargo build -p libmoq' first" >&2
+        echo "$moq_include/moq.h missing after 'cargo check -p libmoq'" >&2
+        exit 1
+    fi
+
+    # One flag per line, path glued to the -I, so a caller can rebuild the
+    # arguments without splitting on the spaces in a path.
+    printf -- '-I%s\n' src "$obs_include" "$moq_include"
+
+# Unit-test the plugin sources against stubbed libobs/libmoq, under ThreadSanitizer.
+#
+# Manual, like `just rs macos` and `just rs windows`: PR CI links the plugin but
+# doesn't run this, since ThreadSanitizer needs its own build. Run it whenever
+# you touch src/, especially the session callback plumbing, whose orderings the
+# build can't check.
+test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Unlike the lint recipes, this one never skips: a test gate that reports
+    # success without running anything is worse than no gate, and nothing else
+    # covers this code.
+    cxx="${CXX:-c++}"
+    unsupported="'$cxx' cannot build and run -fsanitize=thread binaries. These tests need a
+    Clang or GCC whose ThreadSanitizer runtime works on this host: set CXX, or on Windows run
+    them from WSL, since neither MSVC nor Clang on Windows implements ThreadSanitizer."
+    if ! command -v "$cxx" >/dev/null; then
+        echo "no C++ compiler at '$cxx'." >&2
+        echo "$unsupported" >&2
         exit 1
     fi
 
     out=$(mktemp -d)
     trap 'rm -rf "$out"' EXIT
-    echo "Building tests against $obs_include"
-    "$cxx" -std=c++17 -g -O0 -fsanitize=thread \
-        -I "$obs_include" -I src -I "$moq_include" \
+
+    # Run the probe, don't just link it: a mismatch between the compiler's TSan
+    # runtime and the host kernel (macOS is where this shows up) links fine and
+    # then segfaults before main, which is an unreadable way for the real test
+    # to fail.
+    # The subshell keeps bash's own "Segmentation fault" job message out of the
+    # output, so the explanation below is all the reader gets.
+    if ! printf 'int main(){}\n' | "$cxx" -x c++ -fsanitize=thread -o "$out/probe" - >/dev/null 2>&1 \
+        || ! ("$out/probe" >/dev/null 2>&1) 2>/dev/null; then
+        echo "$unsupported" >&2
+        exit 1
+    fi
+
+    includes_raw=$(just _includes)
+    includes=()
+    while IFS= read -r flag; do includes+=("$flag"); done <<< "$includes_raw"
+
+    "$cxx" -std=c++17 -g -O0 -fsanitize=thread "${includes[@]}" \
         -o "$out/moq-output-test" test/moq-output-test.cpp src/moq-output.cpp
     TSAN_OPTIONS="halt_on_error=1" "$out/moq-output-test"
 
@@ -125,6 +242,22 @@ check:
     set -euo pipefail
     if grep -Fq '"MOQ_VERSION"' CMakePresets.json; then
         echo "CMakePresets.json must not pin MOQ_VERSION" >&2
+        exit 1
+    fi
+    # The headers `just obs compile` type-checks against are a second copy of
+    # the OBS version this spec downloads, so a bump here has to reach flake.nix
+    # or the two gates check different libobs.
+    spec_obs=$(jq -r '.dependencies["obs-studio"].version // ""' buildspec.json)
+    flake_obs=$(sed -n '/pname = "libobs-headers"/,/}/p' ../../flake.nix | sed -n 's/.*version = "\([^"]*\)".*/\1/p')
+    # Both are pattern matches against files this recipe doesn't own the shape
+    # of. An empty parse compares equal to an empty parse, so the guard would
+    # pass by reporting nothing rather than by finding the versions in sync.
+    if [ -z "$spec_obs" ] || [ -z "$flake_obs" ]; then
+        echo "couldn't read the obs-studio version: '$spec_obs' from buildspec.json, '$flake_obs' from flake.nix" >&2
+        exit 1
+    fi
+    if [ "$spec_obs" != "$flake_obs" ]; then
+        echo "obs-studio is $spec_obs in buildspec.json but $flake_obs in flake.nix (libobs-headers)" >&2
         exit 1
     fi
     if command -v cmake >/dev/null; then
@@ -158,17 +291,19 @@ fix:
     fi
 
 # Detect the CMake preset for the current platform (or use the override).
-preset override="":
+# Pass `ci` as the second argument for the warnings-as-errors variant, whose
+# name upstream spells differently on each platform.
+preset override="" variant="":
     #!/usr/bin/env bash
     set -euo pipefail
     if [[ -n "{{ override }}" ]]; then
         echo "{{ override }}"
     elif [[ "$OSTYPE" == "darwin"* ]]; then
-        echo "macos"
+        [[ "{{ variant }}" == "ci" ]] && echo "macos-ci" || echo "macos"
     elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        echo "ubuntu-x86_64"
+        [[ "{{ variant }}" == "ci" ]] && echo "ubuntu-ci-x86_64" || echo "ubuntu-x86_64"
     elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
-        echo "windows-x64"
+        [[ "{{ variant }}" == "ci" ]] && echo "windows-ci-x64" || echo "windows-x64"
     else
         echo "Unknown platform: $OSTYPE" >&2
         exit 1

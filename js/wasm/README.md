@@ -40,6 +40,7 @@ That compiles `rs/moq-wasm` for `wasm32-unknown-unknown`, runs `wasm-bindgen`
 
 Compiles and produces a typed, importable package. The consume path is
 runtime-portable: `moq-net`'s timers and `Instant` go through `web_async::time`
-(wasmtimer on wasm), so they no longer panic. Not yet exercised end-to-end in a
-browser against a relay, and media muxing (`moq-mux`) is still out. See
+(wasmtimer on wasm), so they no longer panic. `just test wasm` exercises the
+built package end-to-end in headless Chromium against a real relay
+([`test/wasm/`](../../test/wasm)). Media muxing (`moq-mux`) is still out. See
 [`rs/moq-wasm/README.md`](../../rs/moq-wasm/README.md) for details.

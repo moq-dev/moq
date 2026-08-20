@@ -157,10 +157,11 @@ impl Import {
 
 		Ok(Source {
 			layout,
-			color,
+			color: Some(color),
 			plane0,
 			plane1,
 			plane2,
+			keepalive: None,
 		})
 	}
 

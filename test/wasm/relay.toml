@@ -1,0 +1,24 @@
+# Relay config for the @moq/wasm browser harness.
+# Anonymous access, self-signed localhost cert, QUIC + HTTP on 127.0.0.1.
+#
+# run.sh starts one relay per protocol flavour, overriding the ports on the
+# command line (`--listen` / `--web-http-listen`) and, for the non-default
+# flavours, the version (`--listen-version`). Only the settings every flavour
+# shares live here.
+
+[log]
+level = "info"
+
+[server]
+# QUIC on UDP. 127.0.0.1 avoids IPv6 flakiness on CI runners.
+listen = "127.0.0.1:4460"
+tls.generate = ["localhost", "127.0.0.1"]
+
+[web.http]
+# HTTP on TCP, serving /certificate.sha256 so the browser can pin the
+# self-signed cert via WebTransport's serverCertificateHashes.
+listen = "127.0.0.1:4460"
+
+[auth]
+# Allow anonymous access to everything.
+public = ""

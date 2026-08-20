@@ -18,6 +18,7 @@ just test ts                    # generate a clip, round-trip, analyze
 just test ts --source cap.ts    # round-trip a real capture instead
 just test ts --analyze-only x.ts # skip the round-trip, analyze a file
 just test ts --strict           # also fail on broadcast-shape warnings
+just test ts --with-eit         # add a synthetic EPG first, report which SI survived
 ```
 
 `--analyze-only` needs only TSDuck + Python, so you can point it at any captured
@@ -146,6 +147,26 @@ once:
   successor before it will emit anything, so a Rust-level test that feeds one
   packet passes whatever the code does. Feed at least a pair, and include a
   positive control that would fail if the assertion were vacuous.
+
+### Round-tripping a fixture
+
+`--with-eit` wires this into the round-trip and prints which SI PIDs came back:
+
+```text
+### SI round-trip (source -> capture)
+  TABLE      PID           SOURCE      CAPTURE
+  NIT        0x0010             7            5
+  SDT        0x0011            31           21
+  EIT        0x0012         1,007            0
+  TDT/TOT    0x0014            40            0
+```
+
+This is a report, not a gate. `SI_PIDS` in
+[`catalog.rs`](../../rs/moq-mux/src/container/ts/catalog.rs) is the allowlist of
+PIDs the import path routes, and a table outside it is dropped by design rather
+than by malfunction; the census makes that visible instead of leaving it to be
+inferred from the code. Counts differ for a table that *did* survive because the
+exporter re-emits SI on its own repetition cadence rather than the source's.
 
 ## CI
 

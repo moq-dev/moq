@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
+import { OriginSchema } from "../hop.ts";
 import { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
-import { OriginSchema } from "./origin.ts";
 import { ProbeLevel, Role, Setup } from "./setup.ts";
 import { Version } from "./version.ts";
 

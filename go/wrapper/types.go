@@ -1,6 +1,6 @@
 package moq
 
-import ffi "github.com/moq-dev/moq-go-ffi/moq"
+import ffi "moq.dev/moq-ffi/moq"
 
 // Record and enum types re-exported from the ffi layer without the Moq prefix.
 // These are plain data, so type aliases are exact: a moq.AudioFrame is an

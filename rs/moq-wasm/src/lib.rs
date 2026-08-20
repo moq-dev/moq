@@ -3,7 +3,7 @@
 //! This is an experiment: rather than reimplementing the moq-lite wire protocol
 //! in TypeScript (as `@moq/net` does today), compile the real `moq-net` Rust
 //! implementation to WebAssembly and drive the browser's WebTransport from
-//! inside it. See `transport.rs` for the WebTransport adapter.
+//! inside it. See `transport.rs` for the dial.
 //!
 //! Scope: the consume path (connect -> broadcast -> track -> group -> frame),
 //! which is the highest-value target (the `@moq/watch` use case). The publish

@@ -11,6 +11,10 @@ edition = "2024"
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
+[package.metadata.cargo-shear]
+# Required indirectly (a feature enabler with no `use`), so cargo-shear can't see it.
+ignored = ["getrandom"]
+
 [lib]
 name = "moq_ffi"
 crate-type = ["staticlib", "cdylib"]
@@ -20,30 +24,58 @@ name = "uniffi-bindgen"
 path = "./uniffi-bindgen.rs"
 
 [features]
+# On by default so every existing consumer (the language wrappers, `build.sh`)
+# keeps the surface it has. Opt out with `default-features = false` to skip the
+# ~40 crates that only the codecs pull in, including openh264's vendored C++.
+# They are unavailable on wasm32 regardless: the browser encodes via WebCodecs.
+default = ["audio", "video"]
+
 android-logcat = ["moq-tokio/android-logcat"]
+audio = ["dep:moq-audio"]
+video = ["dep:moq-video", "dep:pollster"]
 
 [dependencies]
 bytes = "1"
 hang = { workspace = true }
-moq-audio = { workspace = true }
+# `kio::MaybeSend` is the `Send` bound that vanishes on wasm; see `ffi::Task`.
+kio = { workspace = true }
 moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
+serde_json = "1"
+thiserror = "2"
+# `sync` (Mutex, watch) and `macros` (select!) are the only tokio pieces that build
+# on wasm32; the runtime and its drivers are native-only.
+tokio = { workspace = true, features = ["macros", "sync"] }
+tracing = "0.1"
+url = "2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+moq-audio = { workspace = true, optional = true }
 moq-tokio = { workspace = true, default-features = true }
 # Default features only: the Linux hardware codecs stay off so the wrappers'
 # cross-compiled targets (Android, iOS) don't pull a CUDA graph.
-moq-video = { workspace = true }
+moq-video = { workspace = true, optional = true }
 # Blocking on `encode::Sink` from the synchronous producer exports; see
 # `video::block_on` for why not a tokio helper.
-pollster = "1.0"
-serde_json = "1"
-thiserror = "2"
+pollster = { version = "1.0", optional = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
-tracing = "0.1"
 uniffi = { version = "0.31", features = ["cli"] }
-url = "2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Enables the `wasm_js` backend for rand-via-moq-net; the cfg flag lives in
+# `.cargo/config.toml`. Referenced only as a feature enabler, hence the shear ignore.
+getrandom = { workspace = true }
+# `wasm-unstable-single-threaded` drops the `Send`/`Sync` bounds on
+# `UniffiCompatibleFuture` and `FfiConverterArc`, which moq-net's wasm futures
+# (LocalBoxFuture) and Rc-backed handles cannot satisfy.
+uniffi = { version = "0.31", features = ["wasm-unstable-single-threaded"] }
+web-async = { workspace = true }
+web-transport-wasm = { workspace = true }
 
 [build-dependencies]
 uniffi = { version = "0.31", features = ["build"] }
 
 [dev-dependencies]
+# One non-codec test blocks on a future; the main dep is `video`-only.
+pollster = "1.0"

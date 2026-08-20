@@ -35,8 +35,8 @@ For a complete working example covering key loading, signing, and verification, 
 | Claim | Type | Description |
 |-------|------|-------------|
 | `root` | string? | Root path for operations, defaulting to the top-level path |
-| `put` | `string \| string[]?` | Publishing permission paths, relative to `root` |
-| `get` | `string \| string[]?` | Subscription permission paths, relative to `root` |
+| `put` | `string \| string[]?` | Publishing permission paths, relative to `root`. `""` or `[""]` is everything under the root; `[]` or omitted grants no publish access, i.e. a read-only token |
+| `get` | `string \| string[]?` | Subscription permission paths, relative to `root`. `""` or `[""]` is everything under the root; `[]` or omitted grants no subscribe access, i.e. a write-only token |
 | `exp` | number? | Expiration timestamp |
 | `iat` | number? | Issued at timestamp |
 

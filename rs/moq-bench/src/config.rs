@@ -67,6 +67,12 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub group_size: Option<Range>,
 
+	/// Write machine-readable stats to this file: one JSON line of cumulative
+	/// counters per report interval. Truncates on start.
+	#[arg(long, env = "MOQ_BENCH_OUTPUT")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub output: Option<std::path::PathBuf>,
+
 	/// The MoQ client (QUIC/TLS) configuration.
 	#[command(flatten)]
 	#[serde(default)]
@@ -213,6 +219,30 @@ tls.insecure = true
 		assert_eq!(config.connections(), Range::new(5, 10));
 		// Untouched TOML field is still intact.
 		assert_eq!(config.fps(), Range::new(24, 60));
+	}
+
+	#[test]
+	fn output_survives_toml_merge() {
+		// The TOML->CLI merge re-applies clap defaults, which clobbers bare fields;
+		// `output` must stay Option so an absent flag leaves the TOML value alone.
+		let toml = r#"
+output = "stats.jsonl"
+
+[client]
+connect = "https://example.com"
+"#;
+		let dir = std::env::temp_dir().join("moq-bench-output-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("bench.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![
+			std::ffi::OsString::from("moq-bench"),
+			std::ffi::OsString::from("--file"),
+			path.into(),
+		];
+		let config = Config::parse_and_merge(args).unwrap();
+		assert_eq!(config.output.as_deref(), Some(std::path::Path::new("stats.jsonl")));
 	}
 
 	#[test]

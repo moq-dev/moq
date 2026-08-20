@@ -3,7 +3,7 @@ package moq
 import (
 	"context"
 
-	ffi "github.com/moq-dev/moq-go-ffi/moq"
+	ffi "moq.dev/moq-ffi/moq"
 )
 
 // Session is an established MoQ connection. Hold it (or the Client/Server that

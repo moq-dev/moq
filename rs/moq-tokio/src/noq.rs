@@ -366,15 +366,16 @@ impl NoqClient {
 		.await?;
 		tracing::Span::current().record("id", connection.stable_id());
 
-		let mut request = web_transport_noq::proto::ConnectRequest::new(url.clone());
-		for alpn in versions.alpns() {
-			request = request.with_protocol(alpn.to_string());
-		}
-
 		let session = match url.scheme() {
-			"https" => web_transport_noq::Session::connect(connection, request)
-				.await
-				.map_err(map_client_error)?,
+			"https" => {
+				let mut request = web_transport_noq::proto::ConnectRequest::new(url.clone());
+				for alpn in versions.alpns() {
+					request = request.with_protocol(alpn.to_string());
+				}
+				web_transport_noq::Session::connect(connection, request)
+					.await
+					.map_err(map_client_error)?
+			}
 			"moqt" | "moql" => web_transport_noq::Session::raw(connection),
 			_ => return Err(Error::UnsupportedScheme(url.scheme().to_string())),
 		};

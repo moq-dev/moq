@@ -31,12 +31,16 @@ loom = { workspace = true }
 
 [dev-dependencies]
 # Bench-only: the FuturesUnordered comparison in benches/tasks.rs.
-criterion = "0.8"
+criterion = { workspace = true }
 futures = "0.3"
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
 
 [[bench]]
 name = "tasks"
+harness = false
+
+[[bench]]
+name = "waiter"
 harness = false
 
 [lints.rust]

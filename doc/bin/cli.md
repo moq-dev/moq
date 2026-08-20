@@ -234,6 +234,14 @@ https://relay.example.com/anon` serves viewers on the same network directly
 while the relay serves external ones, all from one process and one set of
 broadcasts. With `--cluster-lan` alone nothing leaves the local network.
 
+That pairing is the recommended shape, and the split is deliberate. Peer-to-peer
+is a local network feature: peers are on one link, so a direct session is the
+shortest path there is and no third party sees anything. A viewer somewhere else
+should come through a [relay](/bin/relay/), which has an address both sides can
+already reach and which caches and fans out, so the second viewer costs nothing
+extra. Punching a hole to a peer across the internet buys you the same hop
+without any of that.
+
 By default anyone who can reach the listener joins, exactly like a bare
 `--listen`, so use it on networks you trust. On a network you don't
 control, generate a key and give the same one to every peer:
@@ -256,6 +264,30 @@ the network, and peers with different keys (or none) are mutually invisible.
 Because the proofs are HMACs over a public nonce, a weak key can be brute-forced
 offline by anyone watching the network. Generate 32 random bytes as above rather
 than choosing something memorable.
+
+#### Firewalls
+
+Both halves of the mesh need inbound packets, and a host firewall that drops
+them fails in ways worth recognizing.
+
+mDNS is inbound multicast UDP on port 5353. A host that blocks it still
+multicasts its own announcements out, so peers discover *it* while it discovers
+nobody. Startup won't catch this: readiness waits for an interface to announce,
+which proves the socket opened, not that anything answered.
+
+The session itself is one dial per pair, and only one side makes it. Both peers
+see each other and a MoQ session carries both directions, so the lower peer id
+dials and the higher one waits, which means the higher one has to accept an
+inbound QUIC connection on its `--listen` port. If that side is the one behind
+the firewall, the dial retries until the peer stops advertising and the pair
+never meshes, even though a dial in the other direction would have worked.
+Which side waits is a coin flip on a random id, so the same two machines can
+mesh on one run and not the next.
+
+If a pair won't come up, check the firewall on *both* hosts, not just the one
+that looks stuck. Pass `--listen` yourself first: the port it fills in is
+ephemeral and changes every run, so there is nothing stable to allow until you
+pin it. Then allow that port and UDP 5353 on both.
 
 ### Multiple Stages
 

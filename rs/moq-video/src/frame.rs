@@ -13,6 +13,9 @@
 //!   `PixelBuffer` but has no Direct3D11 path yet.
 // `render` is deliberately not a doc link: the module sits behind a non-default
 // feature, so linking it fails the `-D warnings` rustdoc build of a plain build.
+//! - `Surface::DmaBuf` is a Linux DRM allocation, produced by PipeWire capture.
+//!   The Vulkan renderer imports supported packed formats directly, while CPU
+//!   consumers map linear allocations only.
 //! - `Surface::I420` is CPU-resident planar I420, for the CPU encode path and
 //!   platforms without a zero-copy capture.
 //!
@@ -21,6 +24,11 @@
 //! needed.
 
 use std::borrow::Cow;
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+use std::sync::Arc;
 
 use bytes::Bytes;
 use moq_net::Timestamp;
@@ -74,6 +82,259 @@ impl Frame {
 	}
 }
 
+/// A DRM pixel format code carried by a Linux DMA-BUF.
+///
+/// The four bytes are the kernel DRM fourcc, kept as a newtype so a stride,
+/// PipeWire format id, or another bare integer cannot be passed accidentally.
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DrmFormat(u32);
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+impl DrmFormat {
+	/// Semi-planar 8-bit 4:2:0 YUV.
+	pub const NV12: Self = Self::from_bytes(*b"NV12");
+	/// Packed BGRx8888 as named by DRM (`XR24`).
+	pub const XRGB8888: Self = Self::from_bytes(*b"XR24");
+	/// Packed BGRA8888 as named by DRM (`AR24`).
+	pub const ARGB8888: Self = Self::from_bytes(*b"AR24");
+	/// Packed RGBx8888 as named by DRM (`XB24`).
+	pub const XBGR8888: Self = Self::from_bytes(*b"XB24");
+	/// Packed RGBA8888 as named by DRM (`AB24`).
+	pub const ABGR8888: Self = Self::from_bytes(*b"AB24");
+
+	/// Build a DRM fourcc from its four ASCII bytes.
+	pub const fn from_bytes(bytes: [u8; 4]) -> Self {
+		Self(u32::from_le_bytes(bytes))
+	}
+
+	/// The integer value used by DRM, Vulkan, EGL, and VAAPI descriptors.
+	pub const fn as_raw(self) -> u32 {
+		self.0
+	}
+}
+
+/// One plane within a Linux DMA-BUF allocation.
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DmaBufPlane {
+	offset: u32,
+	stride: u32,
+}
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+impl DmaBufPlane {
+	#[cfg(feature = "pipewire")]
+	pub(crate) const fn new(offset: u32, stride: u32) -> Self {
+		Self { offset, stride }
+	}
+
+	/// Byte offset of this plane from the start of the exported allocation.
+	pub const fn offset(&self) -> u32 {
+		self.offset
+	}
+
+	/// Bytes between adjacent rows in this plane.
+	pub const fn stride(&self) -> u32 {
+		self.stride
+	}
+}
+
+/// An exported Linux DMA-BUF descriptor and its producer lease.
+///
+/// Keep this value alive for as long as an external device may read from the
+/// descriptor returned by [`as_fd`](Self::as_fd). Dropping it releases the
+/// producer's buffer when no other frame or export still owns that lease.
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+pub struct DmaBufExport {
+	fd: OwnedFd,
+	inner: Arc<dyn DmaBufFrame>,
+}
+
+/// How long to wait on a producer's write fence before giving up.
+///
+/// Vulkan does not adopt a DMA-BUF's implicit fence, so a reader has to wait for
+/// it here. A screen frame's fence signals within a frame time; anything past
+/// this is a wedged compositor, and the caller's CPU fallback beats blocking a
+/// render thread forever.
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+const DMA_BUF_FENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+pub(crate) fn wait_dma_buf_readable(fd: BorrowedFd<'_>) -> std::io::Result<()> {
+	let mut event = libc::pollfd {
+		fd: fd.as_raw_fd(),
+		events: libc::POLLIN,
+		revents: 0,
+	};
+	let deadline = std::time::Instant::now() + DMA_BUF_FENCE_TIMEOUT;
+	loop {
+		// A signal restarts the wait against the same deadline rather than
+		// granting a fresh budget, so the total stall stays bounded.
+		let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+		if remaining.is_zero() {
+			return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+		}
+		// SAFETY: `event` is valid for this call and `fd` remains borrowed until
+		// the producer's current write fence has completed.
+		let result = unsafe {
+			libc::poll(
+				&mut event,
+				1,
+				remaining.as_millis().min(i32::MAX as u128) as libc::c_int,
+			)
+		};
+		if result > 0 && event.revents & libc::POLLIN != 0 {
+			return Ok(());
+		}
+		if result == 0 {
+			return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+		}
+		if result < 0 {
+			let error = std::io::Error::last_os_error();
+			if error.kind() == std::io::ErrorKind::Interrupted {
+				continue;
+			}
+			return Err(error);
+		}
+		return Err(std::io::Error::other(format!(
+			"DMA-BUF poll returned events {:#x}",
+			event.revents
+		)));
+	}
+}
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+impl DmaBufExport {
+	/// Borrow the exported descriptor without separating it from its producer lease.
+	pub fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+		std::os::fd::AsFd::as_fd(&self.fd)
+	}
+
+	pub(crate) fn into_parts(self) -> (OwnedFd, Arc<dyn DmaBufFrame>) {
+		(self.fd, self.inner)
+	}
+}
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+impl std::os::fd::AsFd for DmaBufExport {
+	fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+		std::os::fd::AsFd::as_fd(&self.fd)
+	}
+}
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+impl std::fmt::Debug for DmaBufExport {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("DmaBufExport").finish_non_exhaustive()
+	}
+}
+
+/// A Linux DMA-BUF surface with an on-demand exported descriptor.
+///
+/// Cloning this value retains the producer's surface but opens no file
+/// descriptor. [`export`](Self::export) duplicates the descriptor only when a
+/// consumer is ready to import it, avoiding one open fd for every buffered
+/// frame. Dropping the last clone or [`DmaBufExport`] releases the producer's
+/// buffer.
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+#[derive(Clone)]
+pub struct DmaBuf {
+	format: DrmFormat,
+	modifier: u64,
+	width: u32,
+	height: u32,
+	planes: Vec<DmaBufPlane>,
+	color: Option<Color>,
+	inner: Arc<dyn DmaBufFrame>,
+}
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+impl std::fmt::Debug for DmaBuf {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("DmaBuf")
+			.field("format", &self.format)
+			.field("modifier", &format_args!("{:#x}", self.modifier))
+			.field("width", &self.width)
+			.field("height", &self.height)
+			.field("planes", &self.planes)
+			.finish_non_exhaustive()
+	}
+}
+
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+impl DmaBuf {
+	#[cfg(feature = "pipewire")]
+	pub(crate) fn new(
+		format: DrmFormat,
+		modifier: u64,
+		width: u32,
+		height: u32,
+		planes: Vec<DmaBufPlane>,
+		color: Option<Color>,
+		inner: Arc<dyn DmaBufFrame>,
+	) -> Result<Self, Error> {
+		Size::new(width, height).validate("DMA-BUF")?;
+		if planes.is_empty() {
+			return Err(Error::Codec(anyhow::anyhow!("DMA-BUF has no planes")));
+		}
+		Ok(Self {
+			format,
+			modifier,
+			width,
+			height,
+			planes,
+			color,
+			inner,
+		})
+	}
+
+	/// Wait for producer writes, then export the descriptor with its producer lease.
+	pub fn export(&self) -> std::io::Result<DmaBufExport> {
+		let fd = self.inner.export()?;
+		wait_dma_buf_readable(fd.as_fd())?;
+		Ok(DmaBufExport {
+			fd,
+			inner: self.inner.clone(),
+		})
+	}
+
+	/// DRM fourcc describing the plane layout.
+	pub const fn format(&self) -> DrmFormat {
+		self.format
+	}
+
+	/// DRM format modifier describing the allocation's tiling.
+	pub const fn modifier(&self) -> u64 {
+		self.modifier
+	}
+
+	/// Width of the coded allocation in pixels.
+	pub const fn width(&self) -> u32 {
+		self.width
+	}
+
+	/// Height of the coded allocation in pixels.
+	pub const fn height(&self) -> u32 {
+		self.height
+	}
+
+	/// Plane offsets and row strides, in format order.
+	pub fn planes(&self) -> &[DmaBufPlane] {
+		&self.planes
+	}
+}
+
+/// The producer-owned half of a DMA-BUF surface.
+///
+/// Kept private to the crate so backend lifetimes and download mechanisms do
+/// not become public implementable API. [`DmaBuf`] is the stable consumer seam.
+#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+pub(crate) trait DmaBufFrame: Send + Sync {
+	fn export(&self) -> std::io::Result<OwnedFd>;
+	fn download_i420(&self) -> Result<I420, Error>;
+}
+
 /// Where a frame's pixels currently live.
 ///
 /// Decoders and capture sources hand these out; encoders and renderers consume
@@ -105,6 +366,9 @@ pub enum Surface {
 	/// decoder, consumed in place by the NVENC encoder.
 	#[cfg(all(target_os = "linux", feature = "nvdec"))]
 	Cuda(cuda::Frame),
+	/// Linux DMA-BUF, exported on access and retained until the last clone drops.
+	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	DmaBuf(DmaBuf),
 	/// CPU-resident planar I420.
 	I420(I420),
 }
@@ -119,6 +383,8 @@ impl Surface {
 			Surface::Texture(t) => t.width,
 			#[cfg(all(target_os = "linux", feature = "nvdec"))]
 			Surface::Cuda(c) => c.width,
+			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			Surface::DmaBuf(d) => d.width,
 			Surface::I420(i) => i.width,
 		}
 	}
@@ -132,6 +398,8 @@ impl Surface {
 			Surface::Texture(t) => t.height,
 			#[cfg(all(target_os = "linux", feature = "nvdec"))]
 			Surface::Cuda(c) => c.height,
+			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			Surface::DmaBuf(d) => d.height,
 			Surface::I420(i) => i.height,
 		}
 	}
@@ -288,6 +556,8 @@ impl Surface {
 			Surface::Texture(_) => None,
 			#[cfg(all(target_os = "linux", feature = "nvdec"))]
 			Surface::Cuda(_) => None,
+			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			Surface::DmaBuf(d) => d.color,
 			Surface::I420(i) => i.color(),
 		}
 	}
@@ -301,6 +571,8 @@ impl Surface {
 			Surface::Texture(t) => Ok(Cow::Owned(t.download_i420()?)),
 			#[cfg(all(target_os = "linux", feature = "nvdec"))]
 			Surface::Cuda(c) => Ok(Cow::Owned(c.download_i420()?)),
+			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			Surface::DmaBuf(d) => Ok(Cow::Owned(d.inner.download_i420()?)),
 			Surface::I420(i) => Ok(Cow::Borrowed(i)),
 		}
 	}
@@ -489,9 +761,9 @@ impl I420 {
 
 	/// Split tightly-packed NV12 (Y plane `width * height`, then interleaved UV
 	/// `width/2 * height/2` pairs) into planar I420. A chroma deinterleave, no
-	/// color-space conversion. Used for the Windows Media Foundation capture path,
-	/// whose source reader hands us NV12.
-	#[cfg(target_os = "windows")]
+	/// color-space conversion. Used by the Windows Media Foundation and Linux
+	/// PipeWire capture paths.
+	#[cfg(any(target_os = "windows", all(target_os = "linux", feature = "pipewire")))]
 	pub(crate) fn from_nv12(nv12: &[u8], width: u32, height: u32) -> Result<Self, Error> {
 		let (w, h) = (width as usize, height as usize);
 		let luma = w * h;
@@ -631,7 +903,7 @@ pub(crate) fn interleave_uv(u: &[u8], v: &[u8], uv: &mut [u8]) {
 
 /// Split a packed NV12 chroma plane into separate U and V planes, the inverse of
 /// [`interleave_uv`].
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", all(target_os = "linux", feature = "pipewire")))]
 pub(crate) fn deinterleave_uv(uv: &[u8], u: &mut [u8], v: &mut [u8]) {
 	for (pair, (u, v)) in uv.chunks_exact(2).zip(u.iter_mut().zip(v)) {
 		*u = pair[0];

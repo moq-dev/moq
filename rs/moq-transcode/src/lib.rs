@@ -27,7 +27,10 @@ mod error;
 mod feed;
 mod rung;
 
-pub use config::{Config, Rung, source_reference};
+pub use config::{Config, Rung};
+
+#[allow(deprecated)]
+pub use config::source_reference;
 pub use error::Error;
 
 /// Transcode `source` into `output` until the source broadcast ends.

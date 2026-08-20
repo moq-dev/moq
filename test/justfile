@@ -93,3 +93,11 @@ ts *args:
 # pending-version sections must be dropped at import.
 ts-eit *args:
     ./ts/eit-roundtrip.sh {{ args }}
+
+# Runs the @moq/wasm bindings in headless Chromium against a real relay, one per
+# protocol flavour. The crate is `#![cfg(target_arch = "wasm32")]`, so nothing in
+# `just check` or `just rs wasm` gets past compiling it. See wasm/README.md.
+
+# Browser coverage for the @moq/wasm bindings.
+wasm *args:
+    ./wasm/run.sh {{ args }}

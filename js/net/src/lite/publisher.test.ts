@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Producer as GroupProducer } from "../group.ts";
+import { randomOrigin } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -7,7 +8,6 @@ import { Reader, Stream, Writer } from "../stream.ts";
 import { Subscriber as TrackSubscriber } from "../track.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
-import { randomOrigin } from "./origin.ts";
 import { sendOrder } from "./priority.ts";
 import { Publisher } from "./publisher.ts";
 import { decodeSubscribeResponse, Subscribe, SubscribeUpdate } from "./subscribe.ts";

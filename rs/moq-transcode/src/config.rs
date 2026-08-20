@@ -2,25 +2,16 @@
 
 use moq_net::{AsPath, PathRelativeOwned};
 
-/// Compute the source broadcast reference for an output nested beneath it.
-///
-/// Both paths are normalized before comparison. Returns `None` when `output` is
-/// not a descendant of `source`, so callers can omit passthrough renditions.
+#[doc(hidden)]
+#[deprecated(note = "use moq_net::Path::relative")]
 pub fn source_reference(source: impl AsPath, output: impl AsPath) -> Option<PathRelativeOwned> {
 	let source = source.as_path();
 	let output = output.as_path();
-	let rest = output.strip_prefix(&source)?;
-	if rest.is_empty() {
+	if output.strip_prefix(&source)?.is_empty() {
 		return None;
 	}
 
-	let parents = rest.parts().count().saturating_sub(1);
-	let rel = if parents == 0 {
-		".".to_string()
-	} else {
-		vec![".."; parents].join("/")
-	};
-	Some(PathRelativeOwned::from(rel))
+	source.relative(&output)
 }
 
 /// One candidate output rendition: a target resolution (by height) and bitrate.
@@ -102,6 +93,7 @@ impl Default for Config {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
 	use super::*;
 

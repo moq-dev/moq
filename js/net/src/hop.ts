@@ -1,3 +1,12 @@
+/**
+ * Endpoint identity within a hop chain, shared by both wire protocols.
+ *
+ * moq-lite carries these natively on every announcement; moq-transport carries them
+ * via the MoQ Cluster extension (see `ietf/cluster.ts`). Mirrors `Origin` in
+ * `rs/moq-net`.
+ *
+ * @module
+ */
 import * as z from "zod/mini";
 
 /**
@@ -14,6 +23,23 @@ export const OriginSchema = z
 	.brand("Origin");
 
 export type Origin = z.infer<typeof OriginSchema>;
+
+/**
+ * The reserved id 0, meaning "no identity".
+ *
+ * It stands in for an endpoint that never declared one, and any number of endpoints can
+ * be 0, so it identifies nothing: it is never a loop, never a publisher two chains have
+ * in common, and never excluded from an advertisement.
+ */
+export const UNKNOWN_ORIGIN: Origin = OriginSchema.parse(0n);
+
+/**
+ * Maximum length of a hop chain. Must match `MAX_HOPS` in Rust's `model/origin.rs`.
+ *
+ * Broadcasts with longer chains are rejected, which bounds loop detection and rejects
+ * pathological announcements across clusters with unbounded forwarding.
+ */
+export const MAX_HOPS = 32;
 
 /**
  * Generate a fresh origin with a random non-zero id.

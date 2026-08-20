@@ -9,7 +9,7 @@ set working-directory := '.'
 # Paths a JS check depends on: every bun workspace (they are not all under js/,
 # see the root package.json) plus the config shared by all of them. `check`,
 # `fix`, and `ci` all skip themselves when a diff misses this.
-scope := '^(js/|doc/|demo/(boy|web)/|test/smoke/clients/js|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
+scope := '^(js/|doc/|demo/(boy|web)/|test/smoke/clients/js|test/wasm/|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
 
 # Run all checks by default.
 default:

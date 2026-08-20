@@ -39,6 +39,10 @@ struct GroupHeader<'a> {
 	subscribe: u64,
 	/// Wall-clock milliseconds, handy for rough one-way latency when clocks agree.
 	timestamp_ms: u128,
+	/// Zero padding sizing the keyframe up to the rolled frame size, so a
+	/// lone-keyframe group (`group_size = 0`, the chat shape) still costs
+	/// `frame_size` bytes on the wire.
+	pad: String,
 }
 
 /// The subset of [`GroupHeader`] a subscriber reads back to learn the shape of a
@@ -82,15 +86,19 @@ pub async fn run(ctx: Connection) {
 	let publish = moq_tokio::origin::spawn(Origin::random());
 	// Consume side: the session fills this with peer announcements.
 	let consume = moq_tokio::origin::spawn(Origin::random());
-	let announced = consume.consume().announced();
 
 	let name = config.name();
+	let announced = discover(&consume, name);
+
 	let mut broadcasts = Vec::new();
 	let mut own = HashSet::new();
 	let mut tasks = JoinSet::new();
 
 	for index in 0..rolled.broadcasts {
-		let path = format!("{name}/{run_id:08x}/{connection}/{index}");
+		// The announce consumer is rooted at `name`, so `own` (compared against
+		// announced paths) stays relative while the full path goes on the wire.
+		let relative = format!("{run_id:08x}/{connection}/{index}");
+		let path = format!("{name}/{relative}");
 
 		let mut broadcast = match publish.create_broadcast(&path, broadcast::Route::new().with_announce(true)) {
 			Ok(broadcast) => broadcast,
@@ -106,7 +114,7 @@ pub async fn run(ctx: Connection) {
 				continue;
 			}
 		};
-		own.insert(path.clone());
+		own.insert(relative);
 		// Hold the broadcast producer for the connection's lifetime so it stays announced.
 		broadcasts.push(broadcast);
 
@@ -195,7 +203,7 @@ async fn produce(
 
 		// Keyframe: the JSON header describing this connection's rolled parameters.
 		ticker.tick().await;
-		let header = GroupHeader {
+		let mut header = GroupHeader {
 			connection,
 			broadcast: &path,
 			group: sequence,
@@ -208,8 +216,19 @@ async fn produce(
 				.duration_since(UNIX_EPOCH)
 				.unwrap_or_default()
 				.as_millis(),
+			pad: String::new(),
 		};
-		let header = Bytes::from(serde_json::to_vec(&header)?);
+		let mut payload = serde_json::to_vec(&header)?;
+		// Pad the keyframe up to the rolled frame size, so `frame_size` holds even
+		// when the keyframe is the only frame (`group_size = 0`, the chat shape).
+		// A header already at or past the target is sent as-is.
+		if let Some(n) = (rolled.frame_size as usize).checked_sub(payload.len())
+			&& n > 0
+		{
+			header.pad = "0".repeat(n);
+			payload = serde_json::to_vec(&header)?;
+		}
+		let header = Bytes::from(payload);
 		group.write_frame(moq_net::Timestamp::now(), header.clone())?;
 		stats.frame_sent(header.len());
 
@@ -225,8 +244,31 @@ async fn produce(
 	}
 }
 
-/// Watch announcements and drain up to `want` peer broadcasts (excluding our own),
-/// spreading each subscription's start over `startup` to avoid a thundering herd.
+/// Announce consumer scoped to the bench namespace, emitting paths relative to it.
+///
+/// The relay announces its own broadcasts too (`.stats/...` when stats publishing
+/// is on, which production relays enable), and a subscription slot burned on one
+/// of those is never retried, so an unscoped consumer starves the subscribe side.
+fn discover(consume: &moq_net::origin::Producer, name: &str) -> moq_net::announce::Consumer {
+	consume
+		.consume()
+		.with_root(name)
+		.expect("origin must permit the bench namespace")
+		.announced()
+}
+
+/// Watch announcements and drain up to `want` peer broadcasts (excluding our own).
+///
+/// Candidates are gathered over the `startup` window and picked at random. The
+/// relay replays existing announcements in deterministic path order, so a
+/// first-come pick would put every subscriber on the same first few broadcasts
+/// and collapse the 1:N presets into hotspots. Announcements arriving after the
+/// window fill any remaining slots in arrival order.
+///
+/// The gather window is the only delay added here: connections are already
+/// staggered across `startup` by main, so subscriptions land spread over the
+/// second startup window of the run, and the whole swarm is subscribed within
+/// two of them.
 async fn subscribe(
 	mut announced: moq_net::announce::Consumer,
 	own: HashSet<String>,
@@ -236,38 +278,81 @@ async fn subscribe(
 ) -> anyhow::Result<()> {
 	let mut tasks = JoinSet::new();
 	let mut seen: HashSet<String> = HashSet::new();
+	let mut pool = Vec::new();
+	let mut eligible = 0;
 
-	while (seen.len() as u64) < want {
+	// Gather candidates until the startup window closes (or the announce stream ends).
+	let deadline = tokio::time::sleep(startup);
+	tokio::pin!(deadline);
+	loop {
+		tokio::select! {
+			// Deadline first: with random polling, a stream that always has another
+			// announcement ready could keep gathering past the startup window.
+			biased;
+			_ = &mut deadline => break,
+			update = announced.next() => {
+				let Some(moq_net::announce::Update { path, broadcast }) = update else { break };
+				let Some(broadcast) = broadcast else { continue };
+				let path = path.as_str().to_string();
+				if own.contains(&path) || !seen.insert(path.clone()) {
+					continue;
+				}
+				eligible += 1;
+				reservoir_push(&mut pool, want as usize, eligible, (path, broadcast));
+			}
+		}
+	}
+
+	let mut selected = pool.len() as u64;
+	for (path, broadcast) in pool {
+		spawn_drain(&mut tasks, path, broadcast, stats.clone());
+	}
+
+	// Top up from late announcements, first-come: the pool was too small, so
+	// there is nothing to spread over.
+	while selected < want {
 		let Some(moq_net::announce::Update { path, broadcast }) = announced.next().await else {
 			break;
 		};
 		let Some(broadcast) = broadcast else {
 			continue;
 		};
-
 		let path = path.as_str().to_string();
 		if own.contains(&path) || !seen.insert(path.clone()) {
 			continue;
 		}
-
-		// Stagger the subscription start somewhere within the startup window.
-		let delay = {
-			let mut rng = rand::rng();
-			startup.mul_f64(rng.random_range(0.0..1.0))
-		};
-
-		let stats = stats.clone();
-		tasks.spawn(async move {
-			tokio::time::sleep(delay).await;
-			if let Err(err) = drain(broadcast, &stats).await {
-				tracing::debug!(%path, %err, "subscription ended");
-			}
-		});
+		selected += 1;
+		spawn_drain(&mut tasks, path, broadcast, stats.clone());
 	}
 
 	// Keep the drain tasks alive; they run until their broadcasts close.
 	while tasks.join_next().await.is_some() {}
 	Ok(())
+}
+
+/// Reservoir-sample (Algorithm R): offer the `eligible`-th stream item (1-based)
+/// to a pool holding at most `want` uniform picks. Bounded memory, so a big
+/// namespace never piles a copy of itself into every subscriber; dropped
+/// candidates release their broadcast handles immediately.
+fn reservoir_push<T>(pool: &mut Vec<T>, want: usize, eligible: usize, item: T) {
+	if pool.len() < want {
+		pool.push(item);
+		return;
+	}
+	let slot = rand::rng().random_range(0..eligible);
+	if slot < want {
+		pool[slot] = item;
+	}
+}
+
+/// Queue one broadcast for draining. No extra delay: the caller's gather window
+/// and main's connection stagger already spread subscription starts.
+fn spawn_drain(tasks: &mut JoinSet<()>, path: String, broadcast: broadcast::Consumer, stats: Arc<Stats>) {
+	tasks.spawn(async move {
+		if let Err(err) = drain(broadcast, &stats).await {
+			tracing::debug!(%path, %err, "subscription ended");
+		}
+	});
 }
 
 /// Subscribe to the broadcast's track, counting every frame received and tracking
@@ -476,6 +561,136 @@ mod tests {
 		assert!(group.read_frame().await.unwrap().is_none(), "no payload frames");
 
 		task.abort();
+	}
+
+	/// A lone-keyframe group (`group_size = 0`) must still cost `frame_size`
+	/// bytes: the keyframe is padded via its `pad` field, and stays valid JSON.
+	/// Without this, the chat presets' frame_size setting had no effect at all.
+	#[tokio::test]
+	async fn keyframe_padded_to_frame_size() {
+		tokio::time::pause();
+
+		let stats = Arc::new(Stats::default());
+		let mut broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track(TRACK, None).unwrap();
+		let consumer = broadcast.consume();
+
+		// 10fps, 300-byte messages, lone-keyframe groups (the chat shape).
+		let task = tokio::spawn(produce(
+			3,
+			"bench/test".into(),
+			rolled(10, 300, 0),
+			track,
+			stats.clone(),
+		));
+		tokio::time::advance(Duration::from_millis(250)).await;
+
+		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap();
+		let mut group = sub.next_group().await.unwrap().expect("a group");
+		let keyframe = group.read_frame().await.unwrap().expect("keyframe").payload;
+
+		assert_eq!(keyframe.len(), 300, "keyframe padded to the rolled frame size");
+		let header: serde_json::Value = serde_json::from_slice(&keyframe).expect("padded keyframe is valid JSON");
+		assert_eq!(header["frame_size"], 300);
+
+		task.abort();
+	}
+
+	/// A frame size below the JSON header's own length is a floor, not an error:
+	/// the keyframe goes out at its natural size and still parses. The chat
+	/// presets stay above the floor so their configured sizes hold exactly.
+	#[tokio::test]
+	async fn keyframe_below_header_floor_is_unpadded() {
+		tokio::time::pause();
+
+		let stats = Arc::new(Stats::default());
+		let mut broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track(TRACK, None).unwrap();
+		let consumer = broadcast.consume();
+
+		// 50 bytes is well under the serialized header (roughly 170 bytes).
+		let task = tokio::spawn(produce(3, "bench/test".into(), rolled(10, 50, 0), track, stats.clone()));
+		tokio::time::advance(Duration::from_millis(250)).await;
+
+		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap();
+		let mut group = sub.next_group().await.unwrap().expect("a group");
+		let keyframe = group.read_frame().await.unwrap().expect("keyframe").payload;
+
+		assert!(keyframe.len() > 50, "header is the floor; no truncation to fit");
+		let header: serde_json::Value = serde_json::from_slice(&keyframe).expect("unpadded keyframe is valid JSON");
+		assert_eq!(header["pad"], "");
+
+		task.abort();
+	}
+
+	/// Discovery must skip broadcasts outside the bench namespace: a relay with
+	/// stats publishing enabled announces `.stats/...` too, and a subscription
+	/// slot burned on it is never retried, so a chat-shaped run (`subscribe = 1`)
+	/// used to end up with zero working subscriptions.
+	#[tokio::test]
+	async fn subscribe_ignores_relay_internal_broadcasts() {
+		tokio::time::pause();
+
+		let stats = Arc::new(Stats::default());
+		let origin = moq_tokio::origin::spawn(Origin::random());
+
+		// The relay-internal broadcast: announced, but with no bench data track.
+		let _internal = origin
+			.create_broadcast(".stats/node/host", broadcast::Route::new().with_announce(true))
+			.unwrap();
+
+		// Our own broadcast: in the namespace, but excluded via the `own` set
+		// (paths relative to the namespace, matching the scoped announce consumer).
+		let _own = origin
+			.create_broadcast("bench/00000000/9/9", broadcast::Route::new().with_announce(true))
+			.unwrap();
+		let own = HashSet::from(["00000000/9/9".to_string()]);
+
+		// One legitimate peer under the bench namespace with a single finished group.
+		let mut peer = origin
+			.create_broadcast("bench/00000000/0/0", broadcast::Route::new().with_announce(true))
+			.unwrap();
+		let mut track = peer.create_track(TRACK, None).unwrap();
+		let mut group = track.append_group().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
+			.unwrap();
+		group.finish().unwrap();
+		track.finish().unwrap();
+
+		let announced = discover(&origin, "bench");
+		subscribe(announced, own, 1, Duration::ZERO, stats.clone())
+			.await
+			.unwrap();
+
+		// The one wanted slot went to the peer, not `.stats` and not our own.
+		assert_eq!(stats.frames_recv.load(Ordering::Relaxed), 1);
+		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 1);
+	}
+
+	/// Subscription targets must be picked at random from the announced stream.
+	/// Announcements replay in deterministic path order, so a first-come pick
+	/// put every subscriber on the same first rooms and turned the 1:N presets
+	/// into hotspots on one or two broadcasts.
+	#[test]
+	fn reservoir_spreads_selections() {
+		let mut distinct = HashSet::new();
+		for _ in 0..64 {
+			let mut pool = Vec::new();
+			for item in 0..8 {
+				reservoir_push(&mut pool, 1, item + 1, item);
+			}
+			distinct.insert(pool[0]);
+		}
+		// First-come always yields element 0. Randomness missing this over 64
+		// draws from 8 elements has probability (1/8)^63, i.e. never.
+		assert!(distinct.len() > 1, "selection must not be deterministic");
+
+		// Fewer eligible items than want: everything survives.
+		let mut pool = Vec::new();
+		reservoir_push(&mut pool, 5, 1, 1);
+		reservoir_push(&mut pool, 5, 2, 2);
+		assert_eq!(pool, vec![1, 2]);
 	}
 
 	fn lost(stats: &Stats) -> u64 {

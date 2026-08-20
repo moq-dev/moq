@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	ffi "github.com/moq-dev/moq-go-ffi/moq"
+	ffi "moq.dev/moq-ffi/moq"
 )
 
 // The conversion is where Go's zero value meets the native encoding, and the two

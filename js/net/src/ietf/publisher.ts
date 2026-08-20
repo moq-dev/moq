@@ -8,6 +8,7 @@ import { type Stream, Writer } from "../stream.ts";
 import type { Timescale } from "../time.ts";
 import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
+import * as Cluster from "./cluster.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { fromWire } from "./priority.ts";
 import { PublishDone } from "./publish.ts";
@@ -84,25 +85,39 @@ export class Publisher {
 	// request if the peer asked for that (see {@link runSubscribeNamespace}).
 	#broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
 
+	// What every advertisement carries on a session that negotiated the MoQ Cluster
+	// extension: a hop path holding our own id, so the peer can tell that what it hears
+	// back came from us. `undefined` when nothing negotiated it.
+	#advert?: Cluster.Advert;
+
 	/**
 	 * Creates a new Publisher instance.
-	 * @param quic - The WebTransport session (for uni streams)
-	 * @param session - The session abstraction for bidi streams and request IDs
-	 * @param publish - The origin whose broadcasts this session serves; omit to publish nothing
-	 * @param requiresSolicitation - Whether the peer's SETUP asked to be told on request
 	 *
 	 * @internal
 	 */
-	constructor(
-		quic: WebTransport,
-		session: Session,
-		publish: OriginConsumer | undefined,
-		requiresSolicitation: boolean,
-	) {
+	constructor({
+		quic,
+		session,
+		publish,
+		requiresSolicitation,
+		cluster,
+	}: {
+		/** The WebTransport session, for uni streams. */
+		quic: WebTransport;
+		/** The session abstraction for bidi streams and request IDs. */
+		session: Session;
+		/** The origin whose broadcasts this session serves; omit to publish nothing. */
+		publish?: OriginConsumer;
+		/** Whether the peer's SETUP asked to be told on request (MoQ Solicit). */
+		requiresSolicitation: boolean;
+		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
+		cluster?: Cluster.Hops;
+	}) {
 		this.#quic = quic;
 		this.#session = session;
 		this.#broadcasts = publish?.broadcasts ?? new Signal(new Map());
 		this.#requiresSolicitation = requiresSolicitation;
+		this.#advert = Cluster.advertise(cluster);
 	}
 
 	/**
@@ -319,7 +334,7 @@ export class Publisher {
 				}
 
 				await stream.writer.u53(SubscribeNamespaceEntry.id);
-				await new SubscribeNamespaceEntry({ suffix }).encode(stream.writer, version);
+				await new SubscribeNamespaceEntry({ suffix, cluster: this.#advert }).encode(stream.writer, version);
 				return true;
 			};
 			const withdraw = async (suffix: Path.Valid) => {
@@ -603,7 +618,7 @@ export class Publisher {
 			await withTimeout(
 				(async () => {
 					await stream.writer.u53(PublishNamespace.id);
-					const msg = new PublishNamespace({ requestId, trackNamespace: path });
+					const msg = new PublishNamespace({ requestId, trackNamespace: path, cluster: this.#advert });
 					await msg.encode(stream.writer, this.#session.version);
 
 					// Read response (RequestOk and PublishNamespaceOk share 0x07)

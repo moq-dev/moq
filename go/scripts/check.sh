@@ -140,7 +140,7 @@ bash "$GO_DIR/scripts/package-wrapper.sh" \
 WRAPPER_PKG="$STAGE_WRAPPER/moq-go-${WRAPPER_LINE}-wrapper"
 (
     cd "$WRAPPER_PKG"
-    go mod edit -replace="github.com/moq-dev/moq-go-ffi=$FFI_PKG"
+    go mod edit -replace="moq.dev/moq-ffi=$FFI_PKG"
 )
 
 cd "$WRAPPER_PKG"

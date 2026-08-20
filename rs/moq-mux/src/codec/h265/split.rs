@@ -36,7 +36,7 @@ pub struct Split {
 	/// Retained PPS NALs. A keyframe may carry several (slices reference them by
 	/// id); all are kept and re-injected, but a new GOP's set supersedes them.
 	pps: Vec<Bytes>,
-	zero: Option<tokio::time::Instant>,
+	zero: Option<web_async::time::Instant>,
 	pending: Vec<crate::container::Frame>,
 }
 
@@ -235,7 +235,7 @@ impl Split {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
-		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
+		let zero = self.zero.get_or_insert_with(web_async::time::Instant::now);
 		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
 }

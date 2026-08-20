@@ -2527,9 +2527,14 @@ mod test {
 		assert_eq!(track_a.subscription().unwrap().priority, 1);
 
 		// The poll that consumed the change must have re-registered: a second
-		// update, with no other activity in between, still wakes.
+		// update, with no other activity in between, still wakes. Count the delta
+		// rather than the total: `kio::Park` reuses a waiter that still holds
+		// registrations, so applying the change above notifies a list this poll is
+		// itself parked on and self-wakes once. That extra wake costs a redundant
+		// poll and nothing else, while a lost wakeup parks the task forever.
+		let before = counter.count();
 		*prefs.write().ok().unwrap() = Subscription::default().with_priority(2);
-		assert_eq!(counter.count(), 2, "second update lost its wakeup");
+		assert!(counter.count() > before, "second update lost its wakeup");
 		assert!(fut.as_mut().poll(&mut cx).is_pending());
 		assert_eq!(track_a.subscription().unwrap().priority, 2);
 	}

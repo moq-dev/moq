@@ -201,6 +201,10 @@ impl<E: CatalogExt> Producer<E> {
 		json_config.compression = true;
 		let hangz = moq_json::snapshot::Producer::new(hangz_track, json_config);
 
+		// The contents are `Send + Sync` natively; on wasm moq-net's handles are
+		// `Rc`-backed, so clippy sees a pointlessly atomic `Arc`. Keeping one type for
+		// both targets is worth the unused atomics on the single-threaded one.
+		#[allow(clippy::arc_with_non_send_sync)]
 		Ok(Self {
 			hang,
 			hangz,

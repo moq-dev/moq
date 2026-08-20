@@ -23,7 +23,7 @@ async def publish(url: str, broadcast: str) -> None:
     async with moq.Client(url, tls_verify=False) as client:
         # Hold the producer for the lifetime of the publish loop; finish() unpublishes.
         producer = client.create_broadcast(broadcast)
-        media = producer.publish_media_stream("avc3")
+        media = producer.publish_video_stream(moq.VideoFormat.AVC3)
         print(f"publishing {broadcast!r} (Annex-B H.264 from stdin) to {url}")
 
         loop = asyncio.get_running_loop()

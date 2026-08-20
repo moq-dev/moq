@@ -23,7 +23,7 @@ hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
-str0m = "0.21"
+str0m = "0.22"
 thiserror = "2"
 tokio = { workspace = true, features = ["full"] }
 tracing = "0.1"

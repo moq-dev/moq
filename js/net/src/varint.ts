@@ -251,18 +251,18 @@ export function encodeTo(dst: ArrayBuffer, v: number | bigint): Uint8Array {
 }
 
 /**
- * Encodes a number as a QUIC variable-length integer.
+ * Encodes a number or bigint as a QUIC variable-length integer.
  * Returns a new Uint8Array containing the encoded bytes.
  */
-export function encode(v: number): Uint8Array {
+export function encode(v: number | bigint): Uint8Array {
 	return encodeTo(new ArrayBuffer(8), v);
 }
 
 /**
- * Decodes a QUIC variable-length integer from a buffer.
+ * Decodes a QUIC variable-length integer exactly from a buffer.
  * Returns a tuple of [value, remaining buffer].
  */
-export function decode(buf: Uint8Array): [number, Uint8Array] {
+export function decodeBigInt(buf: Uint8Array): [bigint, Uint8Array] {
 	if (buf.length === 0) {
 		throw new Error("buffer is empty");
 	}
@@ -276,20 +276,28 @@ export function decode(buf: Uint8Array): [number, Uint8Array] {
 	const view = new DataView(buf.buffer, buf.byteOffset, size);
 	const remain = buf.subarray(size);
 
-	let v: number;
+	let value: bigint;
 
 	if (size === 1) {
-		v = buf[0] & 0x3f;
+		value = BigInt(buf[0] & 0x3f);
 	} else if (size === 2) {
-		v = view.getUint16(0) & 0x3fff;
+		value = BigInt(view.getUint16(0) & 0x3fff);
 	} else if (size === 4) {
-		v = view.getUint32(0) & 0x3fffffff;
+		value = BigInt(view.getUint32(0) & 0x3fffffff);
 	} else if (size === 8) {
-		// NOTE: Precision loss above 2^53, but we're using number type
-		v = Number(view.getBigUint64(0) & 0x3fffffffffffffffn);
+		value = view.getBigUint64(0) & 0x3fffffffffffffffn;
 	} else {
 		throw new Error("impossible");
 	}
 
-	return [v, remain];
+	return [value, remain];
+}
+
+/**
+ * Decodes a QUIC variable-length integer from a buffer.
+ * Values above 53 bits lose precision; use {@link decodeBigInt} for exact decoding.
+ */
+export function decode(buf: Uint8Array): [number, Uint8Array] {
+	const [value, remain] = decodeBigInt(buf);
+	return [Number(value), remain];
 }

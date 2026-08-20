@@ -5,10 +5,10 @@
  * @module
  */
 
+import { type Origin, OriginSchema } from "../hop.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import * as Message from "./message.ts";
-import { type Origin, OriginSchema } from "./origin.ts";
 import { hasSetupStream, type Version } from "./version.ts";
 
 /** Setup Parameter id for the Probe capability level. */

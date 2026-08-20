@@ -110,11 +110,10 @@ _tools $FILES="":
     # cargo because `go check` builds moq-ffi for the host, and skips on a
     # missing cargo the same way it skips on a missing go.
     scoped '^(go/|rs/moq-ffi/)'                                && tools+=(go uniffi-bindgen-go cargo)
-    # The OBS lints ship only in the Linux dev shell; nixpkgs marks obs-studio
-    # broken on Darwin.
-    if [[ "$(uname -s)" == "Linux" ]] && scoped '^cpp/obs/'; then
-    	tools+=(clang-format gersemi)
-    fi
+    # cargo regenerates moq.h for the type-check; pkg-config locates Qt6 and
+    # ffmpeg. Every platform: the plugin type-checks against headers, and the
+    # dev shell ships those even on Darwin, where obs-studio can't build.
+    scoped '^(cpp/obs/|rs/libmoq/)' && tools+=(clang-format gersemi pkg-config cargo)
 
     # Scopes overlap (rs/moq-ffi/ is in four of them), so the same tool can land
     # in the list twice and be reported missing twice. Splitting on whitespace is
@@ -162,9 +161,18 @@ check $BASE="":
     	just kt check "$files"
     	just swift check "$files"
     	just go check "$files"
-    	# The OBS plugin has no compile job in PR CI, so its lint + CMake
-    	# guards are the only automated coverage it gets.
-    	if echo "$files" | grep -q '^cpp/obs/'; then
+    	# Type-checking the plugin needs only headers, so it runs here rather
+    	# than waiting for obs.yml to link it on Linux. libmoq is in scope
+    	# because the plugin calls through its generated C header, and flake.nix
+    	# because it owns the libobs headers this compiles against -- obs.yml
+    	# links against nixpkgs' obs-studio instead, so nothing else would notice
+    	# that package going bad.
+    	if echo "$files" | grep -qE '^(cpp/obs/|rs/libmoq/|flake\.nix$)'; then
+    		just obs compile
+    	fi
+    	# flake.nix is in scope because `just obs check` is what compares the OBS
+    	# version pinned there against buildspec.json, and either side can move.
+    	if echo "$files" | grep -qE '^(cpp/obs/|flake\.nix$)'; then
     		just obs check
     	fi
     	# Validates flake eval + dev shell build; it no longer compiles the
@@ -191,6 +199,7 @@ check-all *args:
     just swift check
     just go check
     just obs check
+    just obs compile
     just _flake
     just _check-common
 

@@ -37,13 +37,18 @@ nvdec = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
 # build: moq-vaapi dlopen's libva, so an enabled-vaapi build needs no libva at
 # build time and still starts on a libva-less host, where automatic backend
 # selection falls back to the next encoder like the NVENC backend does.
-vaapi = ["dep:moq-vaapi"]
+vaapi = ["dmabuf", "dep:moq-vaapi"]
+# Linux DMA-BUF surface vocabulary and CPU fallback support. Enabled by every
+# backend that can produce or consume one. It pulls no graphics API by itself.
+dmabuf = ["dep:libc", "dep:linux-raw-sys"]
 # GPU rendering of decoded frames (the `render` module): a wgpu pipeline that
 # converts a frame to RGBA and hands back a texture the caller presents. Off by
 # default because wgpu pulls a graphics stack (and its backend drivers) that a
 # relay or a headless publisher has no use for; only an application that actually
-# draws video turns it on.
+# draws video turns it on. `dmabuf` adds the Linux surface vocabulary; Vulkan
+# itself still comes from wgpu.
 render = [
+    "dmabuf",
     "dep:bytemuck",
     "dep:wgpu",
     "dep:objc2-metal",
@@ -55,7 +60,7 @@ render = [
 # Off by default because the `pipewire` crate links libpipewire-0.3 via pkg-config
 # at build time (and its bindgen needs libclang), so it only belongs in builds
 # that actually capture displays. Camera capture (V4L2) needs nothing extra.
-pipewire = ["capture", "dep:pipewire", "dep:ashpd"]
+pipewire = ["capture", "dmabuf", "dep:pipewire", "dep:ashpd"]
 
 [dependencies]
 anyhow = "1"
@@ -106,10 +111,16 @@ ashpd = { version = "0.13", optional = true, default-features = false, features 
 # extra dependencies); libnvrtc itself is never loaded since we ship pre-built PTX
 # (see frame/nv12_resize.ptx) that the driver JIT-compiles.
 cudarc = { version = "0.19", optional = true, default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020", "nvrtc"] }
+# Mapping a linear DMA-BUF for the universal CPU I420 fallback. Non-linear
+# modifiers stay GPU-only and return an honest error instead of treating tiled
+# memory as rows.
+libc = { workspace = true, optional = true }
 # Probe for the NVIDIA driver libraries before calling cudarc / the NVENC SDK,
 # which panic (process-abort under release `panic = "abort"`) if their library is
 # absent. Lets a GPU-less host fall back to the next encoder instead of crashing.
 libloading = { version = "0.9", optional = true }
+# Architecture-correct DMA_BUF_IOCTL_SYNC request values for CPU access.
+linux-raw-sys = { workspace = true, optional = true }
 moq-nvenc = { workspace = true, optional = true }
 # Intel/AMD VAAPI hardware encoder, behind the opt-in `vaapi` feature. As of
 # moq-vaapi 0.0.3 libva is dlopen'd at runtime, so the binary carries no NEEDED
