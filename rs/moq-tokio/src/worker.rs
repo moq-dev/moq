@@ -122,6 +122,18 @@ impl Workers {
 
 		let cores = config.pin.then(cores).unwrap_or_default();
 
+		// One resolution for the whole group. Each worker resolves its own config
+		// otherwise, so a DNS answer that rotates between queries would hand
+		// members different addresses and fail the bind on whichever member drew a
+		// fresh one. An unset `bind` stays unset: the backends fall back to a
+		// literal default, and `Some` here would flip a stream-only config into
+		// opening a QUIC listener.
+		let mut listen = listen;
+		if let Some(bind) = listen.bind.as_deref() {
+			let addr = crate::util::resolve(Some(bind), bind).map_err(|err| Error::WorkerResolve(Arc::new(err)))?;
+			listen.bind = Some(addr.to_string());
+		}
+
 		let mut workers = Vec::with_capacity(count as usize);
 		let mut certificates = None;
 		let mut addr: Option<SocketAddr> = None;
@@ -392,6 +404,26 @@ impl Worker {
 			stop: Some(stop_tx),
 			addr,
 		})
+	}
+}
+
+impl Drop for Worker {
+	/// Stop this member and wait for its thread, so it is fully gone before its
+	/// owner moves on.
+	///
+	/// A whole group is torn down by [`Workers`], which takes the threads first
+	/// and leaves this a no-op. What this covers is partial construction: a
+	/// [`Workers::bind`] that fails midway drops the members it already spawned,
+	/// and without the join here its error would return while their sockets were
+	/// still closing, so an immediate rebind of the same address could join the
+	/// half-dead reuseport group and be renumbered when it finished dying.
+	fn drop(&mut self) {
+		self.stop.take();
+		if let Some(thread) = self.thread.take()
+			&& thread.join().is_err()
+		{
+			tracing::error!(index = self.index, "QUIC worker panicked");
+		}
 	}
 }
 

@@ -116,6 +116,30 @@ async fn an_ephemeral_port_is_refused() {
 	);
 }
 
+/// A bind that fails midway drops the members it already spawned, and the error
+/// must not return before their sockets are closed: an owner that immediately
+/// rebinds the address would otherwise join the half-dead reuseport group and be
+/// renumbered when it finished dying.
+#[tokio::test]
+async fn a_failed_bind_releases_its_port_first() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+
+	// Ephemeral, so the first member binds a port of its own and the second
+	// fails the group: a real partial construction, deterministically.
+	let err = Workers::bind(listen_config(&cert, &key, 0), Default::default(), config(2))
+		.expect_err("an ephemeral port cannot be shared");
+	let moq_tokio::Error::WorkerPortMismatch { first, .. } = err else {
+		panic!("unexpected error: {err}");
+	};
+
+	// A plain bind refuses a port any socket still holds, so this succeeds only
+	// if the first member was joined before `bind` returned its error.
+	moq_tokio::bind::udp(moq_tokio::bind::Udp::new(first)).expect("a failed bind left its port held");
+}
+
 /// One worker has no group to disagree with, so an ephemeral port is fine there.
 #[tokio::test]
 async fn a_single_worker_may_use_an_ephemeral_port() {

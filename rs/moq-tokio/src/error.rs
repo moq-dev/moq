@@ -122,6 +122,13 @@ pub enum Error {
 		first: std::net::SocketAddr,
 	},
 
+	/// The worker group's listen address did not resolve.
+	///
+	/// Resolved once for the whole group, so a DNS answer that rotates between
+	/// queries cannot hand members different addresses.
+	#[error("QUIC workers failed to resolve the listen address")]
+	WorkerResolve(#[source] Arc<std::io::Error>),
+
 	/// A worker thread could not be spawned, or died before it finished binding.
 	#[error("QUIC worker {index} failed to start")]
 	WorkerStart {
