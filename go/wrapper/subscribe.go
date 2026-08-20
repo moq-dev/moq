@@ -82,7 +82,7 @@ func (b *BroadcastConsumer) FetchMediaGroup(name string, sequence uint64, contai
 
 // SubscribeMedia subscribes to a media track, decoded with the given container.
 // subscription tunes delivery priority, group ordering priority, group range, and
-// the latency budget; pass nil for defaults. Raise Subscription.LatencyMaxMs to
+// the max age; pass nil for defaults. Raise Subscription.MaxAgeMs to
 // buffer instead of skipping a stalled group.
 func (b *BroadcastConsumer) SubscribeMedia(name string, container Container, subscription *Subscription) (*MediaConsumer, error) {
 	inner, err := b.inner.SubscribeMedia(name, container, subscription)

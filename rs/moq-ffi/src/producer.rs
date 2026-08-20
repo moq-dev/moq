@@ -11,7 +11,7 @@ use crate::origin::MoqRoute;
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
 /// Construct with the fields you care about; the rest use raw-track defaults
-/// (priority 0, unordered, default latency budget, microsecond timescale).
+/// (priority 0, unordered, the publisher's default max age, microsecond timescale).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqTrackInfo {
 	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
@@ -23,9 +23,9 @@ pub struct MoqTrackInfo {
 	pub ordered: bool,
 	/// Maximum age of a non-latest group before the publisher evicts it, in
 	/// milliseconds. Null uses the default. This is the publisher-side half of
-	/// [`MoqSubscription::latency_max_ms`](crate::consumer::MoqSubscription::latency_max_ms).
+	/// [`MoqSubscription::max_age_ms`](crate::consumer::MoqSubscription::max_age_ms).
 	#[uniffi(default = None)]
-	pub latency_max_ms: Option<u64>,
+	pub max_age_ms: Option<u64>,
 	/// Per-frame timescale in ticks per second. Null uses microseconds.
 	#[uniffi(default = None)]
 	pub timescale: Option<u64>,
@@ -39,7 +39,7 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 			.with_timescale(moq_net::Timescale::MICRO)
 			.with_priority(info.priority)
 			.with_ordered(info.ordered);
-		if let Some(ms) = info.latency_max_ms {
+		if let Some(ms) = info.max_age_ms {
 			out = out.with_max_age(std::time::Duration::from_millis(ms));
 		}
 		if let Some(ticks) = info.timescale {
@@ -61,12 +61,12 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 	type Error = MoqError;
 
 	fn try_from(info: &moq_net::track::Info) -> Result<Self, MoqError> {
-		let latency_max_ms = u64::try_from(info.max_age.as_millis())
+		let max_age_ms = u64::try_from(info.max_age.as_millis())
 			.map_err(|_| MoqError::Codec("track max_age duration overflow".into()))?;
 		Ok(Self {
 			priority: info.priority,
 			ordered: info.ordered,
-			latency_max_ms: Some(latency_max_ms),
+			max_age_ms: Some(max_age_ms),
 			timescale: Some(info.timescale.as_u64()),
 		})
 	}

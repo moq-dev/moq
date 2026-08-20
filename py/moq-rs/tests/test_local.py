@@ -270,7 +270,7 @@ def test_publish_lifecycle():
 async def test_publish_track_info_and_subscription():
     """Raw track published with explicit TrackInfo, consumed with a Subscription."""
     broadcast = moq.BroadcastProducer()
-    info = moq.TrackInfo(priority=5, latency_max_ms=2_000)
+    info = moq.TrackInfo(priority=5, max_age_ms=2_000)
     track = broadcast.publish_track("status", info)
 
     consumer = track.consume(moq.Subscription(priority=3))
@@ -623,7 +623,7 @@ async def test_raw_multiple_frames():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        raw_consumer = await announcement.broadcast.subscribe_track("commands", moq.Subscription(latency_max_ms=1_000))
+        raw_consumer = await announcement.broadcast.subscribe_track("commands", moq.Subscription(max_age_ms=1_000))
 
         messages = [
             b'{"cmd": "led", "arm": "left", "led": "THUMB", "state": 1}',
@@ -648,7 +648,7 @@ async def test_raw_producer_consume_direct():
     """Consume a raw track directly from the producer, no origin/broadcast plumbing."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("direct")
-    consumer = track.consume(moq.Subscription(latency_max_ms=1_000))
+    consumer = track.consume(moq.Subscription(max_age_ms=1_000))
 
     track.write_frame(b"hello", 0)
     track.write_frame(b"world", 0)
@@ -704,7 +704,7 @@ async def test_raw_group_sequence():
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        raw_consumer = await announcement.broadcast.subscribe_track("seq", moq.Subscription(latency_max_ms=1_000))
+        raw_consumer = await announcement.broadcast.subscribe_track("seq", moq.Subscription(max_age_ms=1_000))
 
         sent_sequences = []
         for i in range(3):
@@ -735,7 +735,7 @@ async def test_default_iteration_is_sequence_order():
     broadcast = origin.create_broadcast("track/ordering")
     raw = broadcast.publish_track("ordering")
 
-    subscription = moq.Subscription(latency_max_ms=1_000)
+    subscription = moq.Subscription(max_age_ms=1_000)
     seq_consumer = raw.consume(subscription)
     arr_consumer = raw.consume(subscription)
 
@@ -790,7 +790,7 @@ async def test_read_frame_one_per_group():
     """read_frame() returns the first frame of each successive group."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("status")
-    consumer = track.consume(moq.Subscription(latency_max_ms=1_000))
+    consumer = track.consume(moq.Subscription(max_age_ms=1_000))
 
     track.write_frame(b"ready", 0)
     track.write_frame(b"running", 0)
@@ -834,7 +834,7 @@ async def test_read_frame_skips_remaining_frames_in_group():
     """read_frame() only returns the first frame of a multi-frame group."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("mixed")
-    consumer = track.consume(moq.Subscription(latency_max_ms=1_000))
+    consumer = track.consume(moq.Subscription(max_age_ms=1_000))
 
     group = track.append_group()
     group.write_frame(b"first", 0)

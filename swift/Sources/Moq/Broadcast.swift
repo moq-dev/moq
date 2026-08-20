@@ -62,8 +62,8 @@ public final class BroadcastConsumer: Sendable {
 
     /// Subscribe to a media track, delivering frames in decode order. `container`
     /// comes from the catalog. `subscription` tunes delivery priority, group ordering
-    /// priority, group range, and the latency budget; omit for defaults. Raise
-    /// `Subscription.latencyMaxMs` to buffer instead of skipping a stalled group.
+    /// priority, group range, and the max age; omit for defaults. Raise
+    /// `Subscription.maxAgeMs` to buffer instead of skipping a stalled group.
     public func subscribeMedia(
         name: String,
         container: Container,

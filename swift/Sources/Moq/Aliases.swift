@@ -41,11 +41,11 @@ public typealias AudioEncoderInput = MoqFFI.MoqAudioEncoderInput
 /// The encoder-side config for a published audio track: codec, rate, channels,
 /// bitrate, and frame duration.
 public typealias AudioEncoderOutput = MoqFFI.MoqAudioEncoderOutput
-/// What a `VideoConsumer` decodes to: an optional resize plus a latency budget.
+/// What a `VideoConsumer` decodes to: an optional resize plus a max age.
 public typealias VideoDecoderOutput = MoqVideoDecoderOutput
 /// One decoded video frame: packed I420, its dimensions, and a timestamp.
 public typealias VideoDecodedFrame = MoqVideoDecodedFrame
-/// The PCM layout an `AudioConsumer` decodes to, plus its latency budget.
+/// The PCM layout an `AudioConsumer` decodes to, plus its max age.
 public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
 /// A raw PCM sample format, mirroring WebCodecs `AudioData.format`.
 public typealias AudioSampleFormat = MoqFFI.MoqAudioSampleFormat
@@ -79,7 +79,7 @@ public typealias Route = MoqFFI.MoqRoute
 public typealias Subscription = MoqFFI.MoqSubscription
 /// Options for fetching one complete group by sequence.
 public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions
-/// Publisher-side track properties: priority, group ordering, latency budget,
+/// Publisher-side track properties: priority, group ordering, max age,
 /// and timescale.
 public typealias TrackInfo = MoqFFI.MoqTrackInfo
 

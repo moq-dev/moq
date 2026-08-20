@@ -339,10 +339,10 @@ pub struct MoqVideoDecoderOutput {
 	pub resize: Option<crate::media::MoqDimensions>,
 	/// Upper bound on buffering before skipping a stalled group, in
 	/// milliseconds. Same knob as
-	/// [`MoqAudioDecoderOutput::latency_max_ms`](crate::audio::MoqAudioDecoderOutput::latency_max_ms).
+	/// [`MoqAudioDecoderOutput::max_age_ms`](crate::audio::MoqAudioDecoderOutput::max_age_ms).
 	/// `None` keeps the moq-mux default of zero (skip aggressively).
 	#[uniffi(default = None)]
-	pub latency_max_ms: Option<u64>,
+	pub max_age_ms: Option<u64>,
 }
 
 /// One decoded video frame: packed I420 plus the size it actually decoded to.
@@ -467,7 +467,7 @@ impl MoqBroadcastConsumer {
 		let mut config = moq_video::decode::Config::default();
 		config.resize = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
 		config.max_age = output
-			.latency_max_ms
+			.max_age_ms
 			.map(std::time::Duration::from_millis)
 			.unwrap_or_default();
 

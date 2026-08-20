@@ -61,7 +61,7 @@ pub struct MoqSubscription {
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
 	/// buffering, such as `subscribe_media`'s jitter buffer.
 	#[uniffi(default = 0)]
-	pub latency_max_ms: u64,
+	pub max_age_ms: u64,
 	/// First group to deliver, or null to start at the latest group.
 	#[uniffi(default = None)]
 	pub group_start: Option<u64>,
@@ -89,7 +89,7 @@ impl From<MoqSubscription> for moq_net::track::Subscription {
 		moq_net::track::Subscription::default()
 			.with_priority(s.priority)
 			.with_ordered(s.ordered)
-			.with_max_age(std::time::Duration::from_millis(s.latency_max_ms))
+			.with_max_age(std::time::Duration::from_millis(s.max_age_ms))
 			.with_start(s.group_start.map(moq_net::track::Position::group))
 			.with_end(s.group_end.and_then(moq_net::track::Position::after_group))
 	}
@@ -316,7 +316,7 @@ impl MoqBroadcastConsumer {
 	/// Fetch one group and decode its track container into media frames.
 	///
 	/// Unlike [`Self::subscribe_media`], this does not create a live subscription or apply
-	/// latency-based group skipping. The returned consumer reads exactly the requested group
+	/// age-based group skipping. The returned consumer reads exactly the requested group
 	/// until [`MoqMediaGroupConsumer::next`] returns `None`.
 	pub async fn fetch_media_group(
 		&self,
@@ -339,7 +339,7 @@ impl MoqBroadcastConsumer {
 	/// `container` is the track container from the catalog.
 	/// `subscription` tunes delivery priority, group ordering priority, and group range; omit for defaults.
 	///
-	/// [`MoqSubscription::latency_max_ms`] bounds the local jitter buffer as well as
+	/// [`MoqSubscription::max_age_ms`] bounds the local jitter buffer as well as
 	/// the publisher's cache, so both ends skip a stalled group on the same budget.
 	pub async fn subscribe_media(
 		&self,

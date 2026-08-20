@@ -67,7 +67,7 @@ fn audio_output() -> MoqAudioDecoderOutput {
 		format: MoqAudioSampleFormat::F32,
 		sample_rate: None,
 		channels: None,
-		latency_max_ms: None,
+		max_age_ms: None,
 	}
 }
 
@@ -156,7 +156,7 @@ async fn raw_track_datagram_roundtrip() {
 			Some(MoqTrackInfo {
 				priority: 0,
 				ordered: true,
-				latency_max_ms: None,
+				max_age_ms: None,
 				timescale: Some(1_000_000),
 			}),
 		)
@@ -187,7 +187,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	let info = MoqTrackInfo {
 		priority: 7,
 		ordered: false,
-		latency_max_ms: Some(2_500),
+		max_age_ms: Some(2_500),
 		timescale: Some(90_000),
 	};
 	let track = broadcast.publish_track("status".into(), Some(info)).unwrap();
@@ -196,7 +196,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	let got = consumer.info().unwrap();
 	assert_eq!(got.priority, 7);
 	assert!(!got.ordered);
-	assert_eq!(got.latency_max_ms, Some(2_500));
+	assert_eq!(got.max_age_ms, Some(2_500));
 	assert_eq!(got.timescale, Some(90_000));
 }
 
@@ -223,7 +223,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 	consumer.update(MoqSubscription {
 		priority: 10,
 		ordered: false,
-		latency_max_ms: 25,
+		max_age_ms: 25,
 		group_start: Some(0),
 		group_end: None,
 	});

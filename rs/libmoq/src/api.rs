@@ -431,10 +431,10 @@ pub struct moq_track_info {
 	pub ordered: bool,
 
 	/// Maximum age of a non-latest group before the publisher evicts it, in milliseconds.
-	/// The publisher-side half of `moq_subscription.latency_max_ms`.
-	pub latency_max_ms: u64,
-	/// Whether `latency_max_ms` should override the default.
-	pub latency_max_valid: bool,
+	/// The publisher-side half of `moq_subscription.max_age_ms`.
+	pub max_age_ms: u64,
+	/// Whether `max_age_ms` should override the default.
+	pub max_age_valid: bool,
 
 	/// Per-frame timescale in ticks per second.
 	pub timescale: u64,
@@ -453,8 +453,8 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 			.with_timescale(moq_net::Timescale::MICRO)
 			.with_priority(info.priority)
 			.with_ordered(info.ordered);
-		if info.latency_max_valid {
-			out = out.with_max_age(std::time::Duration::from_millis(info.latency_max_ms));
+		if info.max_age_valid {
+			out = out.with_max_age(std::time::Duration::from_millis(info.max_age_ms));
 		}
 		if info.timescale_valid {
 			out = out.with_timescale(moq_net::Timescale::new(info.timescale)?);
@@ -479,7 +479,7 @@ pub struct moq_subscription {
 
 	/// Maximum age of a non-latest group before it is skipped, in milliseconds.
 	/// Zero skips immediately. Enforced by the publisher's cache and by any local buffering.
-	pub latency_max_ms: u64,
+	pub max_age_ms: u64,
 
 	/// First group to deliver.
 	pub group_start: u64,
@@ -497,7 +497,7 @@ impl From<&moq_subscription> for moq_net::track::Subscription {
 		let mut out = moq_net::track::Subscription::default()
 			.with_priority(subscription.priority)
 			.with_ordered(subscription.ordered)
-			.with_max_age(std::time::Duration::from_millis(subscription.latency_max_ms));
+			.with_max_age(std::time::Duration::from_millis(subscription.max_age_ms));
 		if subscription.group_start_valid {
 			out = out.with_start(moq_net::track::Position::group(subscription.group_start));
 		}
@@ -2266,7 +2266,7 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 
 /// Consume a video track from a broadcast, delivering frames in order.
 ///
-/// - `latency_max_ms` controls the maximum amount of buffering allowed before skipping a GoP.
+/// - `max_age_ms` controls the maximum amount of buffering allowed before skipping a GoP.
 /// - `on_frame` is called with a positive frame ID per frame, then exactly once
 ///   more with a terminal code: `0` (closed cleanly) or a negative error. After
 ///   the terminal (`<= 0`) callback, `on_frame` is never called again and
@@ -2281,16 +2281,16 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 pub unsafe extern "C" fn moq_consume_video(
 	catalog: u32,
 	index: u32,
-	latency_max_ms: u64,
+	max_age_ms: u64,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let latency = std::time::Duration::from_millis(latency_max_ms);
+		let max_age = std::time::Duration::from_millis(max_age_ms);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
-		State::lock().consume.video(catalog, index, latency, on_frame)
+		State::lock().consume.video(catalog, index, max_age, on_frame)
 	})
 }
 
@@ -2315,7 +2315,7 @@ pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 /// the terminal (`<= 0`) callback, `on_frame` is never called again and
 /// `user_data` is never touched again, so release `user_data` there. The
 /// terminal callback fires even after [moq_consume_audio_close].
-/// The `latency_max_ms` parameter controls how long to wait before skipping frames.
+/// The `max_age_ms` parameter controls how long to wait before skipping frames.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
@@ -2325,16 +2325,16 @@ pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 pub unsafe extern "C" fn moq_consume_audio(
 	catalog: u32,
 	index: u32,
-	latency_max_ms: u64,
+	max_age_ms: u64,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let latency = std::time::Duration::from_millis(latency_max_ms);
+		let max_age = std::time::Duration::from_millis(max_age_ms);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
-		State::lock().consume.audio(catalog, index, latency, on_frame)
+		State::lock().consume.audio(catalog, index, max_age, on_frame)
 	})
 }
 

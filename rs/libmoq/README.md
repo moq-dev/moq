@@ -71,11 +71,11 @@ int32_t moq_consume_video_stalled(uint32_t catalog, uint32_t index, bool *dst);
 int32_t moq_consume_audio_config(uint32_t catalog, uint32_t index, moq_audio_config *dst);
 
 // Consuming: Video
-int32_t moq_consume_video(uint32_t catalog, uint32_t index, uint64_t latency_max_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
+int32_t moq_consume_video(uint32_t catalog, uint32_t index, uint64_t max_age_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
 int32_t moq_consume_video_close(uint32_t track);
 
 // Consuming: Audio
-int32_t moq_consume_audio(uint32_t catalog, uint32_t index, uint64_t latency_max_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
+int32_t moq_consume_audio(uint32_t catalog, uint32_t index, uint64_t max_age_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
 int32_t moq_consume_audio_close(uint32_t track);
 
 // Consuming: Frames

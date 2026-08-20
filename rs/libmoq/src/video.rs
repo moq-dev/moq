@@ -132,9 +132,9 @@ pub struct moq_video_encoder_frame {
 pub struct moq_video_decoder_output {
 	/// Upper bound on buffering before skipping a stalled group, in
 	/// milliseconds. Same congestion-control knob as
-	/// `moq_consume_video`'s `latency_max_ms`. 0 = skip aggressively
+	/// `moq_consume_video`'s `max_age_ms`. 0 = skip aggressively
 	/// (the moq-mux default); set to your playout buffer for a softer skip.
-	pub latency_max_ms: u64,
+	pub max_age_ms: u64,
 }
 
 /// One decoded video frame from [`moq_decode_video`]: packed I420 plus a
@@ -627,7 +627,7 @@ pub unsafe extern "C" fn moq_decode_video(
 		let raw = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
 
 		let mut config = moq_video::decode::Config::new();
-		config.max_age = Duration::from_millis(raw.latency_max_ms);
+		config.max_age = Duration::from_millis(raw.max_age_ms);
 		let on_frame = unsafe { OnStatus::new(user_data, on_frame) };
 
 		let mut state = State::lock();
