@@ -32,7 +32,7 @@ mod videotoolbox;
 #[cfg(target_os = "windows")]
 mod mediafoundation;
 
-#[cfg(all(target_os = "linux", feature = "nvenc"))]
+#[cfg(all(target_os = "linux", feature = "nvidia"))]
 mod nvenc;
 
 #[cfg(all(target_os = "linux", feature = "vaapi"))]
@@ -99,7 +99,7 @@ const HARDWARE: &[Candidate] = &[
 		codecs: &[Codec::H264, Codec::H265],
 		open: mediafoundation::MediaFoundation::open,
 	},
-	#[cfg(all(target_os = "linux", feature = "nvenc"))]
+	#[cfg(all(target_os = "linux", feature = "nvidia"))]
 	Candidate {
 		name: nvenc::NAME,
 		codecs: &[Codec::H264, Codec::H265],

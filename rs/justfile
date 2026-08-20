@@ -167,7 +167,7 @@ fix-changed $FILES:
 # someone runs this by hand on a Windows host.
 #
 # Default features rather than `--all-features`: jemalloc and the quiche
-# backend don't build on MSVC, while moq-video's Linux-only nvenc/nvdec defaults
+# backend don't build on MSVC, while moq-video's Linux-only `nvidia` default
 # are already no-ops off Linux. moq-gst is excluded because it links
 # GStreamer via pkg-config, which the Windows runner doesn't have.
 #
@@ -194,7 +194,7 @@ windows *args:
 # Swift/Kotlin/Go wrappers) already compiles on macOS in swift.yml.
 # `--all-features` is required, not just tidy: moq-audio's capture backend sits
 # behind an off-by-default feature, so a plain check would skip the very code
-# this recipe exists for. moq-video's Linux-only nvenc/vaapi/nvdec/pipewire
+# this recipe exists for. moq-video's Linux-only nvidia/vaapi/pipewire
 # deps are no-ops here.
 
 # Compile the Apple-only code paths. Must run ON macOS.

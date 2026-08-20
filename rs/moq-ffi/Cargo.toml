@@ -53,15 +53,14 @@ url = "2"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 moq-audio = { workspace = true, optional = true }
 moq-native = { workspace = true, default-features = true }
-# `nvenc` back on, matching rs/libmoq: the workspace turns moq-video's defaults
+# `nvidia` back on, matching rs/libmoq: the workspace turns moq-video's defaults
 # off for `capture` (V4L2, libclang), and the codecs are collateral rather than
 # the goal. Nothing is paid for it off Linux, since cudarc / moq-nvenc /
 # libloading sit behind `cfg(target_os = "linux")` and Android is
 # `target_os = "android"`, and nothing is paid at build time on Linux either:
 # all three are pure Rust and dlopen the driver, so the wrappers still link
-# GPU-less and start driverless. `nvdec` stays off until there is a video decode
-# export to use it, which today only libmoq has.
-moq-video = { workspace = true, optional = true, features = ["nvenc"] }
+# GPU-less and start driverless.
+moq-video = { workspace = true, optional = true, features = ["nvidia"] }
 # Blocking on `encode::Sink` from the synchronous producer exports; see
 # `video::block_on` for why not a tokio helper.
 pollster = { version = "1.0", optional = true }

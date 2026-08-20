@@ -258,7 +258,7 @@ impl Media {
 
 					// Why nothing started, so a catalog this build can't play reports the
 					// reason instead of leaving a blank window up forever. The decoders are
-					// gated by platform and cargo feature (no AV1 without nvdec, say), so
+					// gated by platform and cargo feature (no AV1 without `nvidia`, say), so
 					// this covers gaps the codec flags can't be validated against up front.
 					let mut rejected = Vec::new();
 

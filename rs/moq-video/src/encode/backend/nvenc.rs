@@ -30,13 +30,10 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cudarc::driver::CudaContext;
-// The CUDA zero-copy input path only exists when NVDEC (its producer) is on.
-#[cfg(feature = "nvdec")]
-use moq_nvenc::sys::nvEncodeAPI::NV_ENC_INPUT_RESOURCE_TYPE;
 use moq_nvenc::sys::nvEncodeAPI::{
-	GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_H264_GUID, NV_ENC_CODEC_HEVC_GUID, NV_ENC_PARAMS_RC_MODE,
-	NV_ENC_PRESET_P4_GUID, NV_ENC_TUNING_INFO, NV_ENC_VUI_COLOR_PRIMARIES, NV_ENC_VUI_MATRIX_COEFFS,
-	NV_ENC_VUI_TRANSFER_CHARACTERISTIC, NV_ENC_VUI_VIDEO_FORMAT,
+	GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_H264_GUID, NV_ENC_CODEC_HEVC_GUID, NV_ENC_INPUT_RESOURCE_TYPE,
+	NV_ENC_PARAMS_RC_MODE, NV_ENC_PRESET_P4_GUID, NV_ENC_TUNING_INFO, NV_ENC_VUI_COLOR_PRIMARIES,
+	NV_ENC_VUI_MATRIX_COEFFS, NV_ENC_VUI_TRANSFER_CHARACTERISTIC, NV_ENC_VUI_VIDEO_FORMAT,
 };
 use moq_nvenc::{Encoder, EncoderInitParams, Session};
 
@@ -218,7 +215,6 @@ impl Backend for Nvenc {
 			// A CUDA frame is already NV12 in device memory (NVDEC output):
 			// register its buffer as an external NVENC resource and encode in
 			// place, no CPU round trip and no GPU copy.
-			#[cfg(feature = "nvdec")]
 			Surface::Cuda(cuda) => {
 				// Registration keeps a raw pointer into the frame; the frame
 				// (borrowed) outlives the registration.

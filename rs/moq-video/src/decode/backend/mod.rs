@@ -30,7 +30,7 @@ mod videotoolbox;
 #[cfg(target_os = "windows")]
 mod mediafoundation;
 
-#[cfg(all(target_os = "linux", feature = "nvdec"))]
+#[cfg(all(target_os = "linux", feature = "nvidia"))]
 mod nvdec;
 
 /// The video codec a decoder handles. Derived from the catalog, not chosen by the
@@ -93,7 +93,7 @@ const HARDWARE: &[Candidate] = &[
 		supports: |c| matches!(c, Codec::H264 | Codec::H265),
 		open: mediafoundation::MediaFoundation::open,
 	},
-	#[cfg(all(target_os = "linux", feature = "nvdec"))]
+	#[cfg(all(target_os = "linux", feature = "nvidia"))]
 	Candidate {
 		name: nvdec::NAME,
 		supports: |c| matches!(c, Codec::H264 | Codec::H265 | Codec::Av1),

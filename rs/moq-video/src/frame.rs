@@ -364,7 +364,7 @@ pub enum Surface {
 	Texture(d3d11::Texture),
 	/// Zero-copy GPU buffer (Linux CUDA NV12). Produced only by the NVDEC
 	/// decoder, consumed in place by the NVENC encoder.
-	#[cfg(all(target_os = "linux", feature = "nvdec"))]
+	#[cfg(all(target_os = "linux", feature = "nvidia"))]
 	Cuda(cuda::Frame),
 	/// Linux DMA-BUF, exported on access and retained until the last clone drops.
 	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
@@ -381,7 +381,7 @@ impl Surface {
 			Surface::PixelBuffer(s) => s.width,
 			#[cfg(target_os = "windows")]
 			Surface::Texture(t) => t.width,
-			#[cfg(all(target_os = "linux", feature = "nvdec"))]
+			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(c) => c.width,
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(d) => d.width,
@@ -396,7 +396,7 @@ impl Surface {
 			Surface::PixelBuffer(s) => s.height,
 			#[cfg(target_os = "windows")]
 			Surface::Texture(t) => t.height,
-			#[cfg(all(target_os = "linux", feature = "nvdec"))]
+			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(c) => c.height,
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(d) => d.height,
@@ -463,11 +463,11 @@ impl Surface {
 					Surface::I420(pixels.download_i420()?.resize(width, height)?)
 				}
 			},
-			#[cfg(all(target_os = "linux", feature = "nvdec"))]
+			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(cuda) if config.acceleration == crate::resize::Acceleration::Cpu => {
 				Surface::I420(cuda.download_i420()?.resize(width, height)?)
 			}
-			#[cfg(all(target_os = "linux", feature = "nvdec"))]
+			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(cuda) => match cuda.resize(width, height) {
 				Ok(scaled) => Surface::Cuda(scaled),
 				// E.g. the driver rejected the vendored PTX: degrade to a CPU
@@ -554,7 +554,7 @@ impl Surface {
 			Surface::PixelBuffer(s) => s.color(),
 			#[cfg(target_os = "windows")]
 			Surface::Texture(_) => None,
-			#[cfg(all(target_os = "linux", feature = "nvdec"))]
+			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(_) => None,
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(d) => d.color,
@@ -569,7 +569,7 @@ impl Surface {
 			Surface::PixelBuffer(s) => Ok(Cow::Owned(s.download_i420()?)),
 			#[cfg(target_os = "windows")]
 			Surface::Texture(t) => Ok(Cow::Owned(t.download_i420()?)),
-			#[cfg(all(target_os = "linux", feature = "nvdec"))]
+			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(c) => Ok(Cow::Owned(c.download_i420()?)),
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(d) => Ok(Cow::Owned(d.inner.download_i420()?)),
@@ -893,7 +893,7 @@ impl I420 {
 
 /// Interleave separate U and V planes into a packed NV12 chroma plane
 /// (`u[i], v[i]` -> `uv[2i], uv[2i+1]`). `uv` must be twice the length of `u`.
-#[cfg(any(target_os = "windows", all(target_os = "linux", feature = "nvenc")))]
+#[cfg(any(target_os = "windows", all(target_os = "linux", feature = "nvidia")))]
 pub(crate) fn interleave_uv(u: &[u8], v: &[u8], uv: &mut [u8]) {
 	for (pair, (u, v)) in uv.chunks_exact_mut(2).zip(u.iter().zip(v)) {
 		pair[0] = *u;
@@ -1439,7 +1439,7 @@ pub mod macos {
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "nvdec"))]
+#[cfg(all(target_os = "linux", feature = "nvidia"))]
 pub mod cuda {
 	//! Linux CUDA device memory: the NV12 [`Frame`] behind `Surface::Cuda`, which
 	//! NVDEC produces and NVENC consumes in place.
@@ -2701,7 +2701,7 @@ mod tests {
 
 	/// GPU (box filter) and CPU (bilinear convolution) resizes agree on a
 	/// smooth gradient. Runs on real hardware; skips without the NVIDIA driver.
-	#[cfg(all(target_os = "linux", feature = "nvdec"))]
+	#[cfg(all(target_os = "linux", feature = "nvidia"))]
 	#[test]
 	fn cuda_resize_matches_cpu() {
 		use std::sync::Arc;

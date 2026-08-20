@@ -67,7 +67,7 @@ cargo add moq-video --features render,pipewire
 | Feature | Default | Pulls in |
 | --- | --- | --- |
 | `capture` | yes | Native device capture (`v4l` and `zune-jpeg` on Linux) |
-| `nvenc` / `nvdec` | yes | NVIDIA encode/decode on Linux (`cudarc`, `moq-nvenc`) |
+| `nvidia` | yes | NVENC encode and NVDEC decode on Linux (`cudarc`, `moq-nvenc`) |
 | `vaapi` | no | Intel/AMD encode on Linux (`moq-vaapi`), unvalidated on hardware |
 | `render` | no | `wgpu`, the GPU renderer, and Linux DMA-BUF support |
 | `pipewire` | no | Wayland/X11 screen capture via xdg-desktop-portal and DMA-BUF |
