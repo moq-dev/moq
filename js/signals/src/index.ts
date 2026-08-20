@@ -910,6 +910,84 @@ export class Computed<T> implements Getter<T | undefined> {
 	}
 }
 
+/** The values behind a tuple of readables, positionally. */
+export type GetterValues<S extends readonly Getter<unknown>[]> = { [K in keyof S]: GetterType<S[K]> };
+
+/**
+ * A read-only view over other readables, recomputed on every read.
+ *
+ * The lifecycle-free counterpart to {@link Computed}: it holds no {@link Effect} and needs no
+ * `close()`, its value is correct from the first `peek()` rather than `undefined` until a first
+ * run, and it reads synchronously. In exchange the sources are named up front instead of
+ * tracked automatically, and `fn` must be cheap and pure since it runs per read.
+ *
+ * Reach for it when a class wants to publish a small mapped view of its own state as part of
+ * its public surface. A hand-written object with the same three methods would work until a
+ * consumer passed it to {@link getter} or an {@link Inputs} field, which reject a readable
+ * this package did not create.
+ *
+ * It relays its sources rather than filtering them: every source notification becomes one
+ * here, even when the mapped value is unchanged. Deduplicating instead would have to compare
+ * against the value at subscribe time, which silently swallows two real edges: a source that
+ * already applied a change whose flush is still queued, and an in-place {@link Signal.mutate}
+ * of a value the mapping returns as-is. A redundant rerun is the cheaper failure.
+ *
+ * ```ts
+ * readonly online = new Derived([this.#peers], (peers) => peers.size > 0);
+ * ```
+ */
+export class Derived<const S extends readonly Getter<unknown>[], T> implements Getter<T> {
+	#sources: S;
+	#fn: (...values: GetterValues<S>) => T;
+
+	// Brand to identify this as a readable across package instances.
+	readonly [GETTER_BRAND] = true;
+
+	/** Creates a view deriving its value from `sources` via `fn`, recomputed on every read. */
+	constructor(sources: S, fn: (...values: GetterValues<S>) => T) {
+		this.#sources = sources;
+		this.#fn = fn;
+	}
+
+	/** Returns the current derived value without subscribing. */
+	peek(): T {
+		return this.#fn(...(this.#sources.map((source) => source.peek()) as unknown as GetterValues<S>));
+	}
+
+	/** Calls `fn` with the derived value every time any source notifies. */
+	subscribe(fn: Subscriber<T>): Dispose {
+		return this.#watch(fn);
+	}
+
+	/** Resolves the next time the derived value changes, or calls `fn` once on the next change. */
+	changed(): Promise<T>;
+	changed(fn: Subscriber<T>): Dispose;
+	changed(fn?: Subscriber<T>): Promise<T> | Dispose {
+		if (fn) return this.#once(fn);
+
+		return new Promise<T>((resolve) => {
+			this.#once(resolve);
+		});
+	}
+
+	// Calls `fn` with the derived value the first time it changes, then unsubscribes.
+	#once(fn: Subscriber<T>): Dispose {
+		const dispose = this.subscribe((value) => {
+			dispose();
+			fn(value);
+		});
+		return dispose;
+	}
+
+	// Subscribes to every source, recomputing on any notification.
+	#watch(fn: Subscriber<T>): Dispose {
+		const disposes = this.#sources.map((source) => source.subscribe(() => fn(this.peek())));
+		return () => {
+			for (const dispose of disposes) dispose();
+		};
+	}
+}
+
 // Deep equality for plain objects/arrays, === for class instances and primitives.
 // Class instances have identity semantics (e.g. two different Broadcast instances are never equal).
 function isEqual(a: unknown, b: unknown): boolean {

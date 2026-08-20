@@ -52,7 +52,7 @@ impl<E: CatalogExt> Import<E> {
 		reserved: crate::catalog::Reserved<E>,
 		hint: crate::catalog::VideoHint,
 	) -> crate::Result<Self> {
-		let rendition = reserved.video(track.name());
+		let rendition = reserved.video(track.name())?;
 		let catalog = crate::codec::video::Catalog::new(hint);
 		let mut import = Self {
 			hvc1: false,
@@ -180,27 +180,7 @@ impl<E: CatalogExt> Import<E> {
 		if self.last_sps.as_ref() == Some(sps_nal) {
 			return Ok(());
 		}
-
-		let sps = SpsNALUnit::parse(&mut &sps_nal[..]).map_err(|_| Error::SpsParse)?;
-		let profile = &sps.rbsp.profile_tier_level.general_profile;
-		let vui_data = sps.rbsp.vui_parameters.as_ref().map(VuiData::new).unwrap_or_default();
-
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
-			in_band: true, // An inline SPS is the hev1 shape; hvc1 configs come from `config_from_hvcc`.
-			profile_space: profile.profile_space,
-			profile_idc: profile.profile_idc,
-			profile_compatibility_flags: profile.profile_compatibility_flag.bits().to_be_bytes(),
-			tier_flag: profile.tier_flag,
-			level_idc: profile.level_idc.ok_or(Error::MissingLevelIdc)?,
-			constraint_flags: super::pack_constraint_flags(profile),
-		});
-		config.coded_width = Some(sps.rbsp.cropped_width() as u32);
-		config.coded_height = Some(sps.rbsp.cropped_height() as u32);
-		config.framerate = vui_data.framerate;
-		config.display_aspect_width = vui_data.display_ratio_width;
-		config.display_aspect_height = vui_data.display_ratio_height;
-		config.container = hang::catalog::Container::Legacy;
-
+		let config = config_from_sps(sps_nal)?;
 		self.last_sps = Some(sps_nal.clone());
 		self.apply_config(config);
 		Ok(())
@@ -247,6 +227,43 @@ impl<E: CatalogExt> Import<E> {
 	pub fn decode(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		self.write_frames(frames)
 	}
+}
+
+/// The catalog config a stream's codec bytes describe, resolved without publishing anything: an
+/// `HEVCDecoderConfigurationRecord` (the hvc1 shape) or Annex-B carrying an inline SPS (hev1).
+///
+/// The H.265 counterpart of [`h264::config`](crate::codec::h264::config).
+pub fn config(buf: &[u8]) -> Result<hang::catalog::VideoConfig> {
+	if crate::codec::annexb::is_config_record(buf) {
+		return Ok(super::config_from_hvcc(buf)?);
+	}
+	let sps = find_sps(buf).ok_or(Error::NotInitialized)?;
+	config_from_sps(&sps)
+}
+
+/// The config an inline SPS describes (`in_band: true`, the hev1 shape). No `description`: the
+/// parameter sets ride with every keyframe.
+fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
+	let sps = SpsNALUnit::parse(&mut &sps_nal[..]).map_err(|_| Error::SpsParse)?;
+	let profile = &sps.rbsp.profile_tier_level.general_profile;
+	let vui_data = sps.rbsp.vui_parameters.as_ref().map(VuiData::new).unwrap_or_default();
+
+	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
+		in_band: true, // An inline SPS is the hev1 shape; hvc1 configs come from `config_from_hvcc`.
+		profile_space: profile.profile_space,
+		profile_idc: profile.profile_idc,
+		profile_compatibility_flags: profile.profile_compatibility_flag.bits().to_be_bytes(),
+		tier_flag: profile.tier_flag,
+		level_idc: profile.level_idc.ok_or(Error::MissingLevelIdc)?,
+		constraint_flags: super::pack_constraint_flags(profile),
+	});
+	config.coded_width = Some(sps.rbsp.cropped_width() as u32);
+	config.coded_height = Some(sps.rbsp.cropped_height() as u32);
+	config.framerate = vui_data.framerate;
+	config.display_aspect_width = vui_data.display_ratio_width;
+	config.display_aspect_height = vui_data.display_ratio_height;
+	config.container = hang::catalog::Container::Legacy;
+	Ok(config)
 }
 
 fn is_sps(nal: &[u8]) -> bool {

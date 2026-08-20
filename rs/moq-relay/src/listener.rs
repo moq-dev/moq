@@ -9,7 +9,7 @@
 //!
 //! `axum_server`'s listener abstraction is the seam. Wrapping the socket in
 //! [`Listener`] puts the `accept(2)` call back under our own policy
-//! ([`moq_native::accept`]): a dead connection retries at once, an exhausted process
+//! ([`moq_tokio::accept`]): a dead connection retries at once, an exhausted process
 //! backs off and warns, and either way it is counted where an embedder can read it
 //! back. Because the wrapper never yields an error upward, `axum_server`'s flat
 //! sleep is unreachable.
@@ -18,7 +18,7 @@ use std::io;
 use std::net::SocketAddr;
 
 use axum_server::{AddrListener, Address};
-use moq_native::accept::Health;
+use moq_tokio::accept::Health;
 use tokio::net::{TcpListener, TcpStream};
 
 /// The peer address of an accepted connection.
@@ -42,7 +42,7 @@ pub(crate) struct Listener {
 }
 
 impl Listener {
-	/// Adopt an already-bound listener (from [`moq_native::bind::tcp`], which sets
+	/// Adopt an already-bound listener (from [`moq_tokio::bind::tcp`], which sets
 	/// the dual-stack and keepalive options), reporting into `health`.
 	pub(crate) fn new(listener: std::net::TcpListener, health: Health) -> io::Result<Self> {
 		Ok(Self {
@@ -100,13 +100,13 @@ impl AddrListener<TcpStream, Peer> for Listener {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_native::accept::Failure;
+	use moq_tokio::accept::Failure;
 
 	/// The wrapper has to survive a real accept, since everything above it is
 	/// generic over `Address` and a mismatch only shows up at the serve call.
 	#[tokio::test]
 	async fn accepts_a_connection_and_reports_health() {
-		let bound = moq_native::bind::tcp("127.0.0.1:0".parse().unwrap()).unwrap();
+		let bound = moq_tokio::bind::tcp("127.0.0.1:0".parse().unwrap()).unwrap();
 		let addr = bound.local_addr().unwrap();
 		let health = Health::new("test");
 		let listener = Listener::new(bound, health.clone()).unwrap();

@@ -160,7 +160,7 @@ export type RendererInput = {
 	// which positions it over the video canvas.
 	container: Getter<HTMLElement | undefined>;
 
-	// Whether to subscribe and render. The parent gates this (e.g. on connection).
+	// Whether to subscribe and render. Defaults to true; the parent may gate this (e.g. on connection).
 	enabled: Getter<boolean>;
 };
 
@@ -188,7 +188,7 @@ export class Renderer {
 		this.sync = sync;
 		this.in = {
 			container: getter(props?.container),
-			enabled: getter(props?.enabled ?? false),
+			enabled: getter(props?.enabled ?? true),
 		};
 
 		this.#signals.run(this.#run.bind(this));

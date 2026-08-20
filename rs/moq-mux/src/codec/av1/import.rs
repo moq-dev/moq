@@ -44,7 +44,7 @@ impl<E: CatalogExt> Import<E> {
 		reserved: crate::catalog::Reserved<E>,
 		hint: crate::catalog::VideoHint,
 	) -> crate::Result<Self> {
-		let rendition = reserved.video(track.name());
+		let rendition = reserved.video(track.name())?;
 		let catalog = crate::codec::video::Catalog::new(hint);
 		let mut import = Self {
 			track: reserved
@@ -184,17 +184,13 @@ impl<E: CatalogExt> Import<E> {
 		}
 		self.last_seq = Some(seq_obu.clone());
 
-		let mut reader = &seq_obu[..];
-		let header = ObuHeader::parse(&mut reader)?;
-		let payload_offset = seq_obu.len() - reader.len();
-
-		match SequenceHeaderObu::parse(header, &mut &seq_obu[payload_offset..]) {
-			Ok(seq_header) => self.init(&seq_header),
-			Err(_) if !self.catalog.configured() => {
+		match parse_sequence_header(seq_obu)? {
+			Some(seq_header) => self.init(&seq_header),
+			None if !self.catalog.configured() => {
 				tracing::debug!("sequence header parse failed, using minimal config");
 				self.init_minimal();
 			}
-			Err(_) => {}
+			None => {}
 		}
 		Ok(())
 	}
@@ -273,6 +269,26 @@ fn is_sequence_header(obu: &[u8]) -> bool {
 	ObuHeader::parse(&mut reader)
 		.map(|h| h.obu_type == ObuType::SequenceHeader)
 		.unwrap_or(false)
+}
+
+fn parse_sequence_header(obu: &[u8]) -> Result<Option<SequenceHeaderObu>> {
+	let mut reader = obu;
+	let header = ObuHeader::parse(&mut reader)?;
+	Ok(SequenceHeaderObu::parse(header, &mut reader).ok())
+}
+
+/// Read encoded dimensions from the first parseable sequence header in a frame.
+pub(crate) fn dimensions(payload: &[u8]) -> Result<Option<(u32, u32)>> {
+	let Some(sequence) = find_sequence_header(payload) else {
+		return Ok(None);
+	};
+	let Some(sequence) = parse_sequence_header(&sequence)? else {
+		return Ok(None);
+	};
+	Ok(Some((
+		sequence.max_frame_width as u32,
+		sequence.max_frame_height as u32,
+	)))
 }
 
 /// Find the first sequence-header OBU in a payload, if any.

@@ -7,16 +7,16 @@ license = "MIT OR Apache-2.0"
 keywords = ["moq", "gameboy", "streaming", "emulator", "live"]
 categories = ["multimedia::video", "emulators", "network-programming"]
 
-version = "0.4.6"
+version = "0.4.8"
 edition = "2024"
 rust-version.workspace = true
 
 [features]
 default = ["quinn", "websocket"]
-jemalloc = ["moq-native/jemalloc"]
-noq = ["moq-native/noq"]
-quinn = ["moq-native/quinn"]
-websocket = ["moq-native/websocket"]
+jemalloc = ["moq-tokio/jemalloc"]
+noq = ["moq-tokio/noq"]
+quinn = ["moq-tokio/quinn"]
+websocket = ["moq-tokio/websocket"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
@@ -27,8 +27,8 @@ hang = { workspace = true }
 moq-audio = { workspace = true }
 moq-json = { workspace = true }
 moq-mux = { workspace = true }
-moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 moq-net = { workspace = true }
+moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 # Enable the NVENC hardware encoder (default-off at the workspace level).
 moq-video = { workspace = true, features = ["nvenc"] }
 serde = { workspace = true }

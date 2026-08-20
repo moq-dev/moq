@@ -253,10 +253,32 @@ features:
 #
 # Takes cargo arguments, so `just rs test -p moq-net` works. `test-changed` is
 # the diff-scoped variant that `just test` dispatches to.
+#
+# clippy-driver as the compiler wrapper is rustc plus the lint passes, so this
+# one compilation both builds the test binaries and reports clippy findings.
+# `cargo clippy` can't be reused here: it asks cargo for metadata only, and a
+# metadata build and a codegen build have different fingerprints, so running
+# both compiles the dependency tree twice. Linting here is free, which makes
+# `just test` a single-compile substitute for `check` + `test` on a laptop.
+#
+# RUSTC_WORKSPACE_WRAPPER, not RUSTC_WRAPPER, for two reasons. Cargo folds it
+# into the fingerprint, so a crate already built by a plain `cargo test` is
+# rebuilt through clippy rather than silently reported as fresh with no
+# findings. And it applies to workspace crates only, so dependencies keep the
+# artifacts they share with plain cargo instead of duplicating the whole tree.
+# It is also what `cargo clippy` sets internally.
+#
+# Findings stay warnings rather than errors. `check` is the gate (it runs
+# `clippy -D warnings`), and a hard failure here would block running the tests
+# over an unused import while you are mid-edit.
+#
+# No RUSTFLAGS: it is part of cargo's fingerprint too, so setting it here would
+# split the artifact cache against every other cargo invocation, including CI's
+# warm cache. Skips the wrapper entirely when clippy-driver is absent.
 
-# Run the test suite.
+# Run the test suite, reporting clippy findings from the same compile.
 test *args:
-    cargo nextest run --all-targets {{ args }}
+    RUSTC_WORKSPACE_WRAPPER="$(command -v clippy-driver || true)" cargo nextest run --all-targets {{ args }}
 
 # Same selection as `check-changed`: compiling a crate's test binaries is the
 # expensive half of a test run, so scoping matters more here than anywhere else.

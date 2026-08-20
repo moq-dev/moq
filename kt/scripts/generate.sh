@@ -23,8 +23,21 @@ if ! command -v rustc >/dev/null 2>&1; then
 fi
 
 HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
+# Debug by default. This is a compile-and-test gate, not a benchmark, and a
+# release build of moq-ffi shares no artifacts with the debug ones `just check`
+# and `just test` already produce, so it was a third full compile of the
+# dependency tree (~5 min of CI on its own, plus a whole target/release tree on
+# a runner that was already tight on disk). Set MOQ_FFI_PROFILE=release for an
+# optimized cdylib; the shipped artifacts are built by rs/moq-ffi/build.sh,
+# which is release regardless.
+PROFILE="${MOQ_FFI_PROFILE:-debug}"
+# Expanded as ${CARGO_PROFILE[@]+...} at the use sites: macOS ships bash 3.2,
+# where expanding an empty array under `set -u` is an "unbound variable" error.
+CARGO_PROFILE=()
+[[ "$PROFILE" == "release" ]] && CARGO_PROFILE=(--release)
+
 echo "kt generate: building moq-ffi for $HOST_TARGET..."
-cargo build --release --package moq-ffi \
+cargo build ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |
@@ -32,15 +45,15 @@ TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/
 
 case "$HOST_TARGET" in
     *-apple-*)
-        CDYLIB="$TARGET_BASE/release/libmoq_ffi.dylib"
+        CDYLIB="$TARGET_BASE/$PROFILE/libmoq_ffi.dylib"
         OS_TAG="darwin"
         ;;
     *-windows-*)
-        CDYLIB="$TARGET_BASE/release/moq_ffi.dll"
+        CDYLIB="$TARGET_BASE/$PROFILE/moq_ffi.dll"
         OS_TAG="win32"
         ;;
     *)
-        CDYLIB="$TARGET_BASE/release/libmoq_ffi.so"
+        CDYLIB="$TARGET_BASE/$PROFILE/libmoq_ffi.so"
         OS_TAG="linux"
         ;;
 esac
@@ -64,7 +77,7 @@ cp "$CDYLIB" "$RES_DIR/"
 
 BINDGEN_OUT=$(mktemp -d)
 trap 'rm -rf "$BINDGEN_OUT"' EXIT
-cargo run --release --package moq-ffi --bin uniffi-bindgen \
+cargo run ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi --bin uniffi-bindgen \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml" -- \
     generate --library "$CDYLIB" --language kotlin --no-format --out-dir "$BINDGEN_OUT"
 

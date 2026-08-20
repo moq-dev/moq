@@ -250,6 +250,48 @@
           gradle_8
         ];
 
+        # uniffi-bindgen-go renders rs/moq-ffi into the generated half of
+        # go/ffi. Not in nixpkgs, so build it from NordSecurity's fork; without
+        # it `just go check` skips itself, which reads as a pass in CI.
+        #
+        # The tag pairs the generator's own version with the uniffi release it
+        # targets (v0.7.1+v0.31.0 -> uniffi 0.31), and it only understands
+        # metadata emitted by that uniffi, so it moves with the `uniffi`
+        # dependency in rs/moq-ffi/Cargo.toml. Three other places name the same
+        # tag and must be bumped together: UNIFFI_BINDGEN_GO_TAG in
+        # release-go-ffi.yml, and the `cargo install` line in go/ffi/README.md
+        # and go/scripts/check.sh.
+        uniffi-bindgen-go = pkgs.rustPlatform.buildRustPackage rec {
+          pname = "uniffi-bindgen-go";
+          version = "0.7.1+v0.31.0";
+
+          src = pkgs.fetchFromGitHub {
+            owner = "NordSecurity";
+            repo = "uniffi-bindgen-go";
+            rev = "v${version}";
+            hash = "sha256-ZoGxEWJKriGhe/nMpSbJF6pyyZQZLzdVervUrBzUM5k=";
+          };
+
+          cargoHash = "sha256-ctDBz0oE8+mkn7SJn2KGSb6P4LF8S5UC3XcjVHWApg4=";
+
+          # The tag is a virtual workspace whose other members are uniffi test
+          # fixtures. Building from the root would compile all of them, and CI
+          # has no Nix binary cache, so it would pay for that on every run.
+          buildAndTestSubdir = "bindgen";
+
+          # The upstream test suite generates fixtures and compiles them with a
+          # Go toolchain, which is a lot of build for a binary we only invoke.
+          doCheck = false;
+        };
+
+        # Go toolchain (go/) so `just go check` regenerates the bindings and
+        # runs `go test -race` on the wrapper instead of skipping. Cross-platform:
+        # the check builds moq-ffi for the host and runs on Linux and macOS.
+        goDeps = [
+          pkgs.go
+          uniffi-bindgen-go
+        ];
+
         # Dependencies for building the OBS plugin (`just obs build`).
         # Linux-only: nixpkgs marks obs-studio broken on Darwin, so macOS
         # and Windows fetch libobs/Qt6 via the OBS buildspec instead (see
@@ -323,6 +365,7 @@
             ++ lintDeps
             ++ obsDeps
             ++ ktDeps
+            ++ goDeps
             ++ devTools;
 
           # jemalloc's configure uses -O0 test builds, which conflict with

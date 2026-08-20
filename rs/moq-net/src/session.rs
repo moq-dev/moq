@@ -177,8 +177,7 @@ struct DriverState {
 	// transport reports no send-rate estimate), since a completed future must not be
 	// polled again.
 	maintenance: Option<MaybeSendBox<'static, ()>>,
-	// Cached so a poll after completion (e.g. after `wait_ready` consumed the
-	// result) doesn't re-poll a finished future.
+	// Cached so a poll after completion doesn't re-poll a finished future.
 	result: Option<Result<(), Error>>,
 }
 
@@ -189,23 +188,6 @@ impl Driver {
 	/// into their own [`kio`]-style poll functions.
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		self.state.poll(waiter)
-	}
-
-	/// Drive the session until the readiness condition resolves, so `connect` can block on the
-	/// initial announce set.
-	///
-	/// A session that dies first still resolves readiness: the connecting producers
-	/// live inside the driver, so its completion drops them and releases the barrier.
-	/// The error isn't lost, it's cached for whoever drives the session next.
-	pub(super) async fn wait_ready(&mut self, poll_ready: impl Fn(&kio::Waiter) -> Poll<()>) {
-		kio::wait(|waiter| {
-			if poll_ready(waiter).is_ready() {
-				return Poll::Ready(());
-			}
-			let _ = self.poll(waiter);
-			Poll::Pending
-		})
-		.await
 	}
 }
 
@@ -265,7 +247,7 @@ impl Drop for SessionShared {
 }
 
 impl Session {
-	pub(super) fn new<S: web_transport_trait::Session>(
+	pub(super) fn new<S: crate::transport::poll::Session>(
 		session: S,
 		version: Version,
 		recv_bandwidth: Option<bandwidth::Consumer>,
@@ -287,7 +269,7 @@ impl Session {
 
 		let session = Self {
 			shared: Arc::new(SessionShared {
-				inner: Box::new(session),
+				inner: Box::new(SessionInnerImpl(std::sync::Mutex::new(session))),
 				closed: std::sync::atomic::AtomicBool::new(false),
 			}),
 			version,
@@ -316,8 +298,9 @@ impl Session {
 struct SendBandwidth<S> {
 	session: S,
 	producer: bandwidth::Producer,
-	// The transport close, boxed once so it can be re-polled each step.
-	closed: MaybeSendBox<'static, ()>,
+	// A dedicated clone for the close watch, since each pending poll operation
+	// needs its own handle.
+	closed: S,
 	mode: SendBandwidthMode,
 }
 
@@ -328,18 +311,11 @@ enum SendBandwidthMode {
 	Polling { sleep: MaybeSendBox<'static, ()> },
 }
 
-impl<S: web_transport_trait::Session> SendBandwidth<S> {
+impl<S: crate::transport::poll::Session> SendBandwidth<S> {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	fn new(session: S, producer: bandwidth::Producer) -> Self {
-		let closed = {
-			let session = session.clone();
-			async move {
-				session.closed().await;
-			}
-		}
-		.maybe_boxed();
-
+		let closed = session.clone();
 		Self {
 			session,
 			producer,
@@ -360,7 +336,8 @@ impl<S: web_transport_trait::Session> SendBandwidth<S> {
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		if waiter.poll_future(self.closed.as_mut()).is_ready() {
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		if self.closed.poll_closed(&mut cx).is_ready() {
 			return Poll::Ready(());
 		}
 
@@ -406,23 +383,31 @@ impl<S: web_transport_trait::Session> SendBandwidth<S> {
 // allowing the !Send browser WebTransport on wasm.
 trait SessionInner: web_transport_trait::MaybeSend + web_transport_trait::MaybeSync {
 	fn close(&self, code: u32, reason: &str);
-	fn closed(&self) -> MaybeSendBox<'_, Error>;
+	fn closed(&self) -> MaybeSendBox<'static, Error>;
 	fn stats(&self) -> ConnectionStats;
 }
 
-impl<S: web_transport_trait::Session> SessionInner for S {
+// The poll interface takes `&mut self`, but the shared close-once state is
+// reached through `&self` from every clone, so the canonical handle lives
+// behind a Mutex. The lock is held only for the synchronous calls; `closed`
+// clones a handle out and polls that instead.
+struct SessionInnerImpl<S>(std::sync::Mutex<S>);
+
+impl<S: crate::transport::poll::Session> SessionInner for SessionInnerImpl<S> {
 	fn close(&self, code: u32, reason: &str) {
-		S::close(self, code, reason);
+		self.0.lock().unwrap().close(code, reason);
 	}
 
-	fn closed(&self) -> MaybeSendBox<'_, Error> {
-		Box::pin(async move { Error::from_transport(S::closed(self).await) })
+	fn closed(&self) -> MaybeSendBox<'static, Error> {
+		let mut session = self.0.lock().unwrap().clone();
+		Box::pin(async move { Error::from_transport(session.closed().await) })
 	}
 
 	fn stats(&self) -> ConnectionStats {
 		// estimated_recv_rate is filled in at the Session level (it comes from MoQ PROBE,
 		// not the transport), so leave it at the Default `None` here.
-		let stats = S::stats(self);
+		let session = self.0.lock().unwrap();
+		let stats = session.stats();
 		ConnectionStats {
 			rtt: stats.rtt(),
 			estimated_send_rate: stats.estimated_send_rate(),

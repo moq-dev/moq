@@ -3,9 +3,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use moq_native::Status;
-use moq_native::moq_net::{self, Origin, bytes::Bytes};
-use moq_native::moq_net::{broadcast, track};
+use moq_tokio::Status;
+use moq_tokio::moq_net::{self, Origin, bytes::Bytes};
+use moq_tokio::moq_net::{broadcast, track};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
@@ -58,7 +58,7 @@ pub struct Connection {
 	pub run_id: u64,
 	pub rolled: Rolled,
 	pub config: Arc<crate::Config>,
-	pub client: moq_native::Client,
+	pub client: moq_tokio::Client,
 	pub stats: Arc<Stats>,
 }
 
@@ -76,12 +76,12 @@ pub async fn run(ctx: Connection) {
 		stats,
 	} = ctx;
 
-	let url = config.client.connect.clone().expect("url required");
+	let url = config.client.url.clone().expect("url required");
 
 	// Publish side: an origin we fill with our broadcasts and hand to the session.
-	let publish = Origin::random().produce();
+	let publish = moq_tokio::origin::spawn(Origin::random());
 	// Consume side: the session fills this with peer announcements.
-	let consume = Origin::random().produce();
+	let consume = moq_tokio::origin::spawn(Origin::random());
 	let announced = consume.consume().announced();
 
 	let name = config.name();
@@ -412,6 +412,10 @@ mod tests {
 		}
 	}
 
+	fn replay() -> track::Subscription {
+		track::Subscription::default().with_latency(moq_net::Latency::max(Duration::from_secs(30)))
+	}
+
 	/// A produced group must start with the JSON keyframe describing the rolled
 	/// parameters, followed by `group_size` zeroed payload frames.
 	#[tokio::test]
@@ -429,7 +433,7 @@ mod tests {
 		// Advance past one full group (keyframe + 2 payload) into the next.
 		tokio::time::advance(Duration::from_millis(350)).await;
 
-		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap();
+		let mut sub = consumer.track(TRACK).unwrap().subscribe(replay()).await.unwrap();
 		let mut group = sub.next_group().await.unwrap().expect("a group");
 
 		let keyframe = group.read_frame().await.unwrap().expect("keyframe");
@@ -464,7 +468,7 @@ mod tests {
 		let task = tokio::spawn(produce(0, "bench/test".into(), rolled(10, 4, 0), track, stats.clone()));
 		tokio::time::advance(Duration::from_millis(250)).await;
 
-		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap();
+		let mut sub = consumer.track(TRACK).unwrap().subscribe(replay()).await.unwrap();
 		let mut group = sub.next_group().await.unwrap().expect("a group");
 
 		// Just the keyframe, then the group ends.

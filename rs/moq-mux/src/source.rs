@@ -2,7 +2,7 @@
 //!
 //! A hang catalog rendition may reference a track published in *another*
 //! broadcast via its `broadcast` field (a path relative to the catalog's
-//! broadcast, e.g. `../source`). Resolving that reference needs the catalog
+//! broadcast, e.g. `./source`). Resolving that reference needs the catalog
 //! broadcast's own path and an [`moq_net::origin::Consumer`] to fetch the
 //! referenced broadcast from. [`Source`] bundles the two, and resolves both the
 //! catalog broadcast and any referenced broadcast through the same origin so
@@ -62,18 +62,26 @@ impl Source {
 		self.origin.request_broadcast(&self.path)
 	}
 
+	/// Resolve a rendition's optional broadcast reference to an origin path.
+	///
+	/// A missing or empty reference returns the catalog broadcast path. A valid reference
+	/// may return the empty root path, which still names a broadcast. `None` means the
+	/// reference walked above the root and names nothing.
+	pub fn resolve_reference(&self, rel: Option<&moq_net::PathRelative<'_>>) -> Option<moq_net::PathOwned> {
+		match rel.filter(|rel| !rel.is_empty()) {
+			Some(rel) => self.path.try_resolve(rel),
+			None => Some(self.path.clone()),
+		}
+	}
+
 	/// The path of the broadcast a rendition's `broadcast` reference names.
 	///
-	/// A missing or empty `rel` names the catalog broadcast; anything else names the
-	/// resolved broadcast, which may be the catalog's own path again (`../pub` from
-	/// `a/pub`).
+	/// The erroring counterpart to [`Self::resolve_reference`], for the consumer side, where
+	/// an escaping reference is a fault to report rather than a rendition to drop.
 	fn target(&self, rel: Option<&moq_net::PathRelative<'_>>) -> crate::Result<moq_net::PathOwned> {
-		let Some(rel) = rel.filter(|rel| !rel.is_empty()) else {
-			return Ok(self.path.clone());
-		};
-
-		self.path.resolve(rel).ok_or_else(|| {
-			tracing::error!(%rel, catalog = %self.path, "broadcast reference escapes the root");
+		self.resolve_reference(rel).ok_or_else(|| {
+			let rel = rel.map_or("", |rel| rel.as_str());
+			tracing::error!(rel, catalog = %self.path, "broadcast reference escapes the root");
 			crate::Error::EscapingBroadcast(rel.to_string())
 		})
 	}
@@ -92,6 +100,57 @@ impl Source {
 		rel: Option<&moq_net::PathRelative<'_>>,
 	) -> crate::Result<kio::Pending<moq_net::origin::Requesting>> {
 		Ok(self.origin.request_broadcast(&self.target(rel)?))
+	}
+
+	/// The skipping counterpart to [`Self::request`], returning `None` when `rel` walks above
+	/// the origin root.
+	///
+	/// The exporters use it to drop a single bad rendition rather than fail the whole export.
+	/// [`Self::retain_valid`] already removes those renditions, so this is the second half of
+	/// the same policy rather than a different one.
+	pub(crate) fn try_request(
+		&self,
+		rel: Option<&moq_net::PathRelative<'_>>,
+	) -> Option<kio::Pending<moq_net::origin::Requesting>> {
+		Some(self.origin.request_broadcast(&self.resolve_reference(rel)?))
+	}
+
+	/// Remove renditions whose broadcast reference escapes above the origin root.
+	///
+	/// Every section carrying renditions must be listed here; one left out silently exempts
+	/// its renditions from the containment check, exactly as on the consumer side.
+	pub(crate) fn retain_valid<E: crate::catalog::hang::CatalogExt>(
+		&self,
+		catalog: &mut crate::catalog::hang::Catalog<E>,
+	) {
+		self.retain_valid_references("video", &mut catalog.video.renditions);
+		self.retain_valid_references("audio", &mut catalog.audio.renditions);
+		self.retain_valid_references("text", &mut catalog.text.renditions);
+	}
+
+	/// Remove media renditions whose broadcast reference escapes above the origin root.
+	pub(crate) fn retain_valid_media(&self, catalog: &mut hang::Catalog) {
+		self.retain_valid_references("video", &mut catalog.video.renditions);
+		self.retain_valid_references("audio", &mut catalog.audio.renditions);
+		self.retain_valid_references("text", &mut catalog.text.renditions);
+	}
+
+	fn retain_valid_references<C: BroadcastConfig>(
+		&self,
+		kind: &'static str,
+		renditions: &mut std::collections::BTreeMap<String, C>,
+	) {
+		renditions.retain(|name, config| {
+			let valid = self.resolve_reference(config.broadcast()).is_some();
+			if !valid {
+				tracing::warn!(
+					rendition = name,
+					kind,
+					"ignoring rendition whose broadcast escapes above the root"
+				);
+			}
+			valid
+		});
 	}
 
 	/// Resolve an optional cross-broadcast reference to its broadcast.
@@ -132,13 +191,49 @@ impl Source {
 	}
 }
 
+trait BroadcastConfig {
+	fn broadcast(&self) -> Option<&moq_net::PathRelativeOwned>;
+}
+
+impl BroadcastConfig for hang::catalog::VideoConfig {
+	fn broadcast(&self) -> Option<&moq_net::PathRelativeOwned> {
+		self.broadcast.as_ref()
+	}
+}
+
+impl BroadcastConfig for hang::catalog::AudioConfig {
+	fn broadcast(&self) -> Option<&moq_net::PathRelativeOwned> {
+		self.broadcast.as_ref()
+	}
+}
+
+impl BroadcastConfig for hang::catalog::TextConfig {
+	fn broadcast(&self) -> Option<&moq_net::PathRelativeOwned> {
+		self.broadcast.as_ref()
+	}
+}
+
+/// Test helper: build an origin producer, spawning its driver on the ambient runtime.
+#[cfg(test)]
+pub(crate) fn produce_origin() -> moq_net::origin::Producer {
+	let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+	if tokio::runtime::Handle::try_current().is_ok() {
+		tokio::spawn(driver);
+	} else {
+		// A sync test: nothing polls the driver, and dropping it would tear
+		// the origin down, so leak it and rely on the synchronous half.
+		std::mem::forget(driver);
+	}
+	producer
+}
+
 /// Test helper: serve `broadcast` on a throwaway origin's dynamic handler and return a
 /// [`Source`] rooted at it, so exporter tests that build a local broadcast can still resolve
 /// it by path. The origin is leaked so the broadcast stays reachable for the source's
 /// lifetime (harmless in a test binary).
 #[cfg(test)]
 pub(crate) fn announced(broadcast: &moq_net::broadcast::Consumer) -> Source {
-	let origin = moq_net::Origin::random().produce();
+	let origin = produce_origin();
 	let mut dynamic = origin.dynamic();
 	let served = broadcast.clone();
 	tokio::spawn(async move {
@@ -154,7 +249,8 @@ pub(crate) fn announced(broadcast: &moq_net::broadcast::Consumer) -> Source {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_net::{Origin, PathRelative};
+	use hang::catalog::{H264, VideoConfig};
+	use moq_net::PathRelative;
 
 	/// Let the origin's spawned attach task run: a created broadcast becomes
 	/// routable asynchronously, shortly after `create_broadcast` returns.
@@ -166,7 +262,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn no_override_targets_catalog_broadcast() {
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 		let _producer = origin
 			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
 			.unwrap();
@@ -190,7 +286,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn subscribe_track_resolves_catalog_broadcast() {
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 		let mut producer = origin
 			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
 			.unwrap();
@@ -207,7 +303,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn self_reference_targets_catalog_broadcast() {
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 		let mut producer = origin
 			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
 			.unwrap();
@@ -216,8 +312,8 @@ mod tests {
 
 		let source = Source::new(origin.consume(), "a/pub");
 
-		// Walks back to the catalog's own path.
-		let rel = PathRelative::new("../pub");
+		// Names the catalog within its own parent.
+		let rel = PathRelative::new("./pub");
 		source
 			.subscribe_track(Some(&rel), "video")
 			.await
@@ -226,7 +322,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn escaping_reference_is_rejected() {
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 
 		let mut catalog = origin
 			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
@@ -242,10 +338,15 @@ mod tests {
 
 		let source = Source::new(origin.consume(), "a/pub");
 
-		// `a/pub` has two segments, so a third `..` walks above the root. `../..` stops at
-		// the root, which still names a broadcast, so it is not in this set.
-		for reference in ["../../../elsewhere", "../../..", "../../../.."] {
+		// A reference resolves against the catalog's parent (`a`), so a second `..` walks
+		// above the root. A lone `..` stops at the root, which still names a broadcast, so
+		// it is not in this set.
+		for reference in ["../../elsewhere", "../..", "../../.."] {
 			let rel = PathRelative::new(reference);
+			assert!(
+				source.resolve_reference(Some(&rel)).is_none(),
+				"{reference} should escape"
+			);
 			assert!(source.request(Some(&rel)).is_err(), "{reference} should be rejected");
 
 			// Neither `elsewhere` nor the catalog broadcast answers it: the rendition names
@@ -263,9 +364,54 @@ mod tests {
 		}
 	}
 
+	#[test]
+	fn escaping_rendition_is_removed_while_valid_sibling_remains() {
+		let origin = produce_origin();
+		let source = Source::new(origin.consume(), "a/pub");
+		let mut escaped = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0,
+			level: 0x1e,
+			inline: false,
+		});
+		escaped.broadcast = Some(PathRelative::new("../../source").to_owned());
+		let mut sibling = escaped.clone();
+		sibling.broadcast = Some(PathRelative::new("./source").to_owned());
+
+		let mut catalog = hang::Catalog::default();
+		catalog.video.renditions.insert("escaped".to_string(), escaped);
+		catalog.video.renditions.insert("sibling".to_string(), sibling);
+		source.retain_valid_media(&mut catalog);
+
+		assert!(!catalog.video.renditions.contains_key("escaped"));
+		assert!(catalog.video.renditions.contains_key("sibling"));
+	}
+
+	/// The filter covers every section carrying renditions, not just the media ones. Text
+	/// is the section that only exists on one side of the containment check by default, so
+	/// it is the one that silently goes unchecked when the two sides drift.
+	#[test]
+	fn escaping_text_rendition_is_removed() {
+		let origin = produce_origin();
+		let source = Source::new(origin.consume(), "a/pub");
+
+		let mut escaped = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
+		escaped.broadcast = Some(PathRelative::new("../../source").to_owned());
+		let mut sibling = escaped.clone();
+		sibling.broadcast = Some(PathRelative::new("./source").to_owned());
+
+		let mut catalog = hang::Catalog::default();
+		catalog.text.renditions.insert("escaped".to_string(), escaped);
+		catalog.text.renditions.insert("sibling".to_string(), sibling);
+		source.retain_valid_media(&mut catalog);
+
+		assert!(!catalog.text.renditions.contains_key("escaped"));
+		assert!(catalog.text.renditions.contains_key("sibling"));
+	}
+
 	#[tokio::test]
 	async fn subscribe_track_resolves_referenced_broadcast() {
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 
 		let _catalog = origin
 			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
@@ -280,10 +426,57 @@ mod tests {
 		let source = Source::new(origin.consume(), "a/pub");
 
 		// The reference resolves to `a/source`, whose "video" track answers the subscribe.
-		let rel = PathRelative::new("../source");
+		let rel = PathRelative::new("./source");
 		source
 			.subscribe_track(Some(&rel), "video")
 			.await
 			.expect("referenced track should resolve");
+	}
+
+	#[tokio::test]
+	async fn dot_resolves_output_parent() {
+		let origin = produce_origin();
+
+		let _catalog = origin
+			.create_broadcast(
+				"a/source/transcode",
+				moq_net::broadcast::Route::new().with_announce(true),
+			)
+			.unwrap();
+
+		let mut referenced = origin
+			.create_broadcast("a/source", moq_net::broadcast::Route::new().with_announce(true))
+			.unwrap();
+		let _video = referenced.create_track("video", None).unwrap();
+		settle().await;
+
+		let source = Source::new(origin.consume(), "a/source/transcode");
+		let rel = PathRelative::new(".");
+		source
+			.subscribe_track(Some(&rel), "video")
+			.await
+			.expect("dot should resolve to the catalog broadcast's parent");
+	}
+
+	#[tokio::test]
+	async fn dot_resolves_one_segment_catalog_to_root() {
+		let origin = produce_origin();
+
+		let _catalog = origin
+			.create_broadcast("top", moq_net::broadcast::Route::new().with_announce(true))
+			.unwrap();
+
+		let mut root = origin
+			.create_broadcast("", moq_net::broadcast::Route::new().with_announce(true))
+			.unwrap();
+		let _video = root.create_track("video", None).unwrap();
+		settle().await;
+
+		let source = Source::new(origin.consume(), "top");
+		let rel = PathRelative::new(".");
+		source
+			.subscribe_track(Some(&rel), "video")
+			.await
+			.expect("dot should resolve to the empty root broadcast");
 	}
 }

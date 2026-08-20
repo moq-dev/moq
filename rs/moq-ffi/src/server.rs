@@ -7,10 +7,10 @@ use crate::origin::MoqOriginProducer;
 use crate::session::MoqSession;
 
 struct ServerState {
-	config: moq_native::ServerConfig,
+	config: moq_tokio::listen::Config,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
-	server: Option<moq_native::Listener>,
+	server: Option<moq_tokio::Listener>,
 }
 
 impl ServerState {
@@ -21,7 +21,7 @@ impl ServerState {
 		let server = self
 			.config
 			.clone()
-			.init()
+			.init(Default::default())
 			.map_err(|err| MoqError::Bind(format!("{err}")))?
 			.listen()
 			.await
@@ -62,7 +62,7 @@ impl MoqServer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		Arc::new(Self {
 			task: Task::new(ServerState {
-				config: moq_native::ServerConfig::default(),
+				config: moq_tokio::listen::Config::default(),
 				publish: None,
 				consume: None,
 				server: None,
@@ -148,10 +148,14 @@ impl MoqServer {
 	/// WebTransport's `serverCertificateHashes`. Returns an error if called
 	/// before `listen()`.
 	pub fn cert_fingerprints(&self) -> Result<Vec<String>, MoqError> {
-		let state = self
-			.task
-			.lock()
-			.ok_or_else(|| MoqError::Bind("server is busy".into()))?;
+		// `lock` folds "busy" and "cancelled" into one `None`, so ask which. A cancelled server
+		// is a shutdown, and the wrappers' `is_shutdown` helpers only recognize it by variant.
+		let Some(state) = self.task.lock() else {
+			return Err(match self.task.is_cancelled() {
+				true => MoqError::Cancelled,
+				false => MoqError::Bind("server is busy".into()),
+			});
+		};
 		let server = state
 			.server
 			.as_ref()
@@ -160,13 +164,16 @@ impl MoqServer {
 	}
 
 	/// Cancel any in-flight `listen()` or `accept()` call.
+	///
+	/// Terminal: the listening socket is closed here, not when the handle is, and
+	/// `cert_fingerprints()` returns `Cancelled` afterwards.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
 }
 
 struct RequestState {
-	request: Option<moq_native::Request>,
+	request: Option<moq_tokio::Request>,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 }
@@ -183,7 +190,7 @@ pub struct MoqRequest {
 
 impl MoqRequest {
 	fn new(
-		request: moq_native::Request,
+		request: moq_tokio::Request,
 		publish: Option<Arc<MoqOriginProducer>>,
 		consume: Option<Arc<MoqOriginProducer>>,
 	) -> Arc<Self> {
@@ -281,6 +288,9 @@ impl MoqRequest {
 	}
 
 	/// Cancel any in-flight `accept()` or `reject()` call.
+	///
+	/// Terminal: an unanswered request is dropped here rather than when the handle is, which
+	/// rejects the session.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}

@@ -71,23 +71,23 @@ The gateway ships as `moq import hls` / `moq export hls` (see
 
 ```bash
 # export: expose a MoQ broadcast as HLS over HTTP
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang \
     export hls --listen '[::]:8089'
 
 # then point a player at the broadcast:
 #   http://localhost:8089/my-stream.hang/master.m3u8
 
 # import: pull a remote HLS playlist into MoQ
-moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang \
     import hls https://example.com/live/master.m3u8
 ```
 
 ### `export hls` flags
 
 - `--listen`: HTTP bind address (default `[::]:8089`).
-- `--tls-cert` / `--tls-key`: serve HTTPS from a cert/key pair on disk. Most
-  players require HTTPS. `--tls-generate <hostname>` instead generates a
-  self-signed cert, and `--server-tls-root` enables optional mTLS client auth.
+- `--listen-tls-cert` / `--listen-tls-key`: serve HTTPS from a cert/key pair on disk. Most
+  players require HTTPS. `--listen-tls-generate <hostname>` instead generates a
+  self-signed cert, and `--listen-tls-root` enables optional mTLS client auth.
 - `--window`: minimum duration of media listed per rendition playlist (default
   `16s`, humantime syntax). Keep it within the relay's group-cache retention,
   since segments are fetched from there on request.

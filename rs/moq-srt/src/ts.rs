@@ -122,6 +122,19 @@ impl Subscriber {
 
 #[cfg(test)]
 mod tests {
+	/// Build an origin producer, spawning its driver on the ambient runtime.
+	fn produce_origin() -> moq_net::origin::Producer {
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		if tokio::runtime::Handle::try_current().is_ok() {
+			tokio::spawn(driver);
+		} else {
+			// A sync test: nothing polls the driver, and dropping it would tear
+			// the origin down, so leak it and rely on the synchronous half.
+			std::mem::forget(driver);
+		}
+		producer
+	}
+
 	use super::*;
 
 	/// One payload-only TS packet carrying a complete PSI section (PUSI + pointer_field
@@ -172,7 +185,7 @@ mod tests {
 	/// mints off the PMT, not stop at the catalog producer it was set on.
 	#[tokio::test]
 	async fn publisher_declares_the_configured_retention() {
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let mut publisher = Publisher::new(&origin, "live/cam0", Some(Duration::from_secs(3))).unwrap();
 
 		let mut ts = psi_packet(0x0000, &pat(0x0100));

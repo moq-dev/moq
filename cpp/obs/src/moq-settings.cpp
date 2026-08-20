@@ -75,14 +75,6 @@ uint64_t Amount(obs_data_t *settings, const char *key)
 	return 0;
 }
 
-// Report a failed libmoq call with the reason it recorded. moq_error() only describes
-// the most recent call on this thread, so read it before anything else runs.
-void LogFailure(const char *what, int code)
-{
-	const char *reason = moq_error();
-	LOG_ERROR("Advanced setting %s rejected (%d): %s", what, code, reason ? reason : "(no reason)");
-}
-
 // Enumerate a libmoq capability into menu options. The names live beside the caller's
 // static field table because Option borrows their pointers.
 std::vector<Option> CapabilityOptions(int (*enumerate)(moq_string *, size_t), const char *automatic,
@@ -111,7 +103,7 @@ std::vector<Option> CapabilityOptions(int (*enumerate)(moq_string *, size_t), co
 }
 
 // The protocol versions this build of libmoq offers, so the menu can't drift from what
-// moq_client_set_versions accepts.
+// a dial accepts.
 std::vector<Option> VersionOptions()
 {
 	static std::vector<std::string> names;
@@ -167,11 +159,11 @@ std::vector<Option> AutoOnOff()
 }
 
 // libmoq's own defaults, so the table below doesn't repeat numbers that live in
-// moq-native and drift the moment one is retuned. Same reason Fields() reads the
+// moq-tokio and drift the moment one is retuned. Same reason Fields() reads the
 // version list from moq_versions instead of listing drafts.
 //
-// A knob nobody has set reads back as its default, so a throwaway handle is the
-// defaults. Local to the plugin rather than a libmoq type: the ABI is the getters.
+// moq_client_defaults reports them in one shot. Local to the plugin rather than a
+// libmoq type, since the UI edits signed integers.
 struct DefaultValues {
 	long long connect_timeout_ms = 0;
 	long long failover_delay_ms = 0;
@@ -186,53 +178,36 @@ struct DefaultValues {
 	bool loaded = false;
 };
 
-// Read a uint64 knob into the signed integer the UI edits, tracking whether every
-// getter in the batch succeeded.
-void Read(int (*get)(uint32_t, uint64_t *), uint32_t client, long long *out, bool *ok, const char *what)
-{
-	uint64_t value = 0;
-	int ret = get(client, &value);
-	if (ret < 0) {
-		const char *reason = moq_error();
-		LOG_ERROR("Failed to read the %s default (%d): %s", what, ret, reason ? reason : "(no reason)");
-		*ok = false;
-		return;
-	}
-	*out = (long long)value;
-}
-
 // The library's defaults, read once. A failure leaves `loaded` false, which
-// CreateClient refuses on rather than writing zeros into a scene collection.
+// BuildConfig refuses on rather than writing zeros into a scene collection.
 const DefaultValues &LibraryDefaults()
 {
 	static const DefaultValues defaults = [] {
 		DefaultValues d;
-		int client = moq_client_create();
-		if (client < 0) {
-			LOG_ERROR("Failed to create a libmoq client to read defaults from: %d", client);
+
+		const moq_client_config config = moq_client_defaults();
+
+		// Every knob the UI edits must be one libmoq reports a default for, or the
+		// field would be built around a zero nobody chose.
+		if (!config.has_connect_timeout || !config.has_failover_delay || !config.has_backoff_initial ||
+		    !config.has_backoff_max || !config.has_backoff_timeout || !config.has_quic_max_streams ||
+		    !config.has_quic_idle_timeout || !config.has_websocket_enabled) {
+			LOG_ERROR("libmoq reported an incomplete set of defaults");
 			return d;
 		}
 
-		bool ok = true;
-		uint32_t handle = (uint32_t)client;
-		Read(moq_client_get_connect_timeout, handle, &d.connect_timeout_ms, &ok, "connect timeout");
-		Read(moq_client_get_failover_delay, handle, &d.failover_delay_ms, &ok, "Happy Eyeballs delay");
-		Read(moq_client_get_backoff_initial, handle, &d.backoff_initial_ms, &ok, "reconnect delay");
-		Read(moq_client_get_backoff_max, handle, &d.backoff_max_ms, &ok, "reconnect delay cap");
-		Read(moq_client_get_backoff_timeout, handle, &d.backoff_timeout_ms, &ok, "reconnect timeout");
-		Read(moq_client_get_quic_max_streams, handle, &d.quic_max_streams, &ok, "max concurrent streams");
-		Read(moq_client_get_quic_idle_timeout, handle, &d.quic_idle_timeout_ms, &ok, "idle timeout");
-		Read(moq_client_get_quic_keep_alive, handle, &d.quic_keep_alive_ms, &ok, "keep-alive interval");
-		Read(moq_client_get_websocket_delay, handle, &d.websocket_delay_ms, &ok, "WebSocket fallback delay");
-
-		int ret = moq_client_get_websocket_enabled(handle, &d.websocket_enabled);
-		if (ret < 0) {
-			LOG_ERROR("Failed to read the WebSocket fallback default: %d", ret);
-			ok = false;
-		}
-
-		moq_client_close(client);
-		d.loaded = ok;
+		d.connect_timeout_ms = (long long)config.connect_timeout_ms;
+		d.failover_delay_ms = (long long)config.failover_delay_ms;
+		d.backoff_initial_ms = (long long)config.backoff_initial_ms;
+		d.backoff_max_ms = (long long)config.backoff_max_ms;
+		d.backoff_timeout_ms = (long long)config.backoff_timeout_ms;
+		d.quic_max_streams = (long long)config.quic_max_streams;
+		d.quic_idle_timeout_ms = (long long)config.quic_idle_timeout_ms;
+		// Absent means "no keep-alive", which the UI shows as zero.
+		d.quic_keep_alive_ms = config.has_quic_keep_alive ? (long long)config.quic_keep_alive_ms : 0;
+		d.websocket_delay_ms = config.has_websocket_delay ? (long long)config.websocket_delay_ms : 0;
+		d.websocket_enabled = config.websocket_enabled;
+		d.loaded = true;
 		return d;
 	}();
 
@@ -387,148 +362,109 @@ void AddProperties(obs_properties_t *props)
 	obs_properties_add_group(props, ENABLED, "Advanced", OBS_GROUP_CHECKABLE, group);
 }
 
-int CreateClient(obs_data_t *settings)
+bool BuildConfig(obs_data_t *settings, Config *out)
 {
+	*out = Config{};
 	if (!settings || !obs_data_get_bool(settings, ENABLED))
-		return 0;
+		return true; // advanced off: Pointer() stays NULL, so the dial uses the defaults
 
 	// Every numeric field defaulted to zero, so the settings on hand describe a config
 	// nobody chose. Refusing beats dialing with a 0ms idle timeout the user never asked
-	// for. LibraryDefaults() already logged which getter failed. Plain -1 because
-	// libmoq's error codes are Rust-side only; moq.h exports no names for them.
+	// for. LibraryDefaults() already logged why.
 	if (!LibraryDefaults().loaded) {
 		LOG_ERROR("Advanced settings unavailable: libmoq did not report its defaults");
-		return -1;
+		return false;
 	}
 
-	int client = moq_client_create();
-	if (client < 0) {
-		LogFailure("client", client);
-		return client;
-	}
+	out->enabled = true;
+	moq_client_config &config = out->value;
 
-	// Any failure below aborts: the user opted into these settings explicitly, and a
-	// silently dropped version pin or fingerprint is the exact confusion the advanced
-	// settings exist to avoid.
-	int code = 0;
-	auto fail = [&](const char *what) {
-		LogFailure(what, code);
-		moq_client_close(client);
-		return code;
+	// Each string is copied into `out` first, so the pointer libmoq reads at dial
+	// time survives this function and the settings object it came from.
+	auto borrow = [](const char *value, std::string *storage, const char **ptr, uintptr_t *len) {
+		if (!value)
+			return;
+		*storage = value;
+		*ptr = storage->c_str();
+		*len = storage->size();
 	};
 
 	if (const char *version = OptionalString(settings, VERSION)) {
-		moq_string one = {version, strlen(version)};
-		code = moq_client_set_versions(client, &one, 1);
-		if (code < 0)
-			return fail("protocol version");
+		out->version = version;
+		out->version_item = {out->version.c_str(), out->version.size()};
+		config.versions = &out->version_item;
+		config.versions_len = 1;
 	}
 
-	if (const char *backend = OptionalString(settings, BACKEND)) {
-		code = moq_client_set_backend(client, backend, strlen(backend));
-		if (code < 0)
-			return fail("QUIC backend");
-	}
+	borrow(OptionalString(settings, BACKEND), &out->backend, &config.backend, &config.backend_len);
+	borrow(OptionalString(settings, BIND), &out->bind, &config.bind, &config.bind_len);
 
-	if (const char *bind = OptionalString(settings, BIND)) {
-		code = moq_client_set_bind(client, bind, strlen(bind));
-		if (code < 0)
-			return fail("bind address");
-	}
+	config.connect_timeout_ms = (uint64_t)Amount(settings, CONNECT_TIMEOUT);
+	config.has_connect_timeout = true;
+	config.failover_delay_ms = (uint64_t)Amount(settings, FAILOVER_DELAY);
+	config.has_failover_delay = true;
 
-	code = moq_client_set_connect_timeout(client, Amount(settings, CONNECT_TIMEOUT));
-	if (code < 0)
-		return fail("connect timeout");
-
-	code = moq_client_set_failover_delay(client, Amount(settings, FAILOVER_DELAY));
-	if (code < 0)
-		return fail("Happy Eyeballs delay");
-
-	code = moq_client_set_tls_disable_verify(client, obs_data_get_bool(settings, TLS_DISABLE_VERIFY));
-	if (code < 0)
-		return fail("certificate verification");
+	config.tls_disable_verify = obs_data_get_bool(settings, TLS_DISABLE_VERIFY);
 
 	if (const char *fingerprint = OptionalString(settings, TLS_FINGERPRINT)) {
-		moq_string one = {fingerprint, strlen(fingerprint)};
-		code = moq_client_set_tls_fingerprints(client, &one, 1);
-		if (code < 0)
-			return fail("certificate fingerprint");
+		out->fingerprint = fingerprint;
+		out->fingerprint_item = {out->fingerprint.c_str(), out->fingerprint.size()};
+		config.tls_fingerprints = &out->fingerprint_item;
+		config.tls_fingerprints_len = 1;
 	}
 
 	if (const char *root = OptionalString(settings, TLS_ROOT)) {
-		moq_string one = {root, strlen(root)};
-		code = moq_client_set_tls_roots(client, &one, 1);
-		if (code < 0)
-			return fail("root certificate");
+		out->root = root;
+		out->root_item = {out->root.c_str(), out->root.size()};
+		config.tls_roots = &out->root_item;
+		config.tls_roots_len = 1;
 	}
 
-	// NULL clears the override, so this one call covers both set and unset.
-	const char *host_name = OptionalString(settings, TLS_HOST_NAME);
-	code = moq_client_set_tls_host_name(client, host_name, host_name ? strlen(host_name) : 0);
-	if (code < 0)
-		return fail("server name override");
+	borrow(OptionalString(settings, TLS_HOST_NAME), &out->host_name, &config.tls_host_name,
+	       &config.tls_host_name_len);
 
-	code = moq_client_set_backoff_initial(client, Amount(settings, BACKOFF_INITIAL));
-	if (code < 0)
-		return fail("reconnect delay");
+	config.backoff_initial_ms = (uint64_t)Amount(settings, BACKOFF_INITIAL);
+	config.has_backoff_initial = true;
+	config.backoff_max_ms = (uint64_t)Amount(settings, BACKOFF_MAX);
+	config.has_backoff_max = true;
+	config.backoff_timeout_ms = (uint64_t)Amount(settings, BACKOFF_TIMEOUT);
+	config.has_backoff_timeout = true;
 
-	code = moq_client_set_backoff_max(client, Amount(settings, BACKOFF_MAX));
-	if (code < 0)
-		return fail("reconnect delay cap");
+	config.quic_max_streams = (uint64_t)Amount(settings, QUIC_MAX_STREAMS);
+	config.has_quic_max_streams = true;
+	config.quic_idle_timeout_ms = (uint64_t)Amount(settings, QUIC_IDLE_TIMEOUT);
+	config.has_quic_idle_timeout = true;
+	config.quic_keep_alive_ms = (uint64_t)Amount(settings, QUIC_KEEP_ALIVE);
+	config.has_quic_keep_alive = true;
 
-	code = moq_client_set_backoff_timeout(client, Amount(settings, BACKOFF_TIMEOUT));
-	if (code < 0)
-		return fail("reconnect give-up timeout");
-
-	code = moq_client_set_quic_max_streams(client, Amount(settings, QUIC_MAX_STREAMS));
-	if (code < 0)
-		return fail("max concurrent streams");
-
-	code = moq_client_set_quic_idle_timeout(client, Amount(settings, QUIC_IDLE_TIMEOUT));
-	if (code < 0)
-		return fail("idle timeout");
-
-	code = moq_client_set_quic_keep_alive(client, Amount(settings, QUIC_KEEP_ALIVE));
-	if (code < 0)
-		return fail("keep-alive interval");
-
-	// The tri-states stay untouched when the user left them on Automatic, which is what
-	// keeps the backend free to pick.
+	// The tri-states stay unset when the user left them on Automatic, which is what
+	// keeps the backend free to pick. That is exactly what the has_* flag carries.
 	bool toggle = false;
 	if (TriState(settings, QUIC_GSO, &toggle)) {
-		code = moq_client_set_quic_gso(client, toggle);
-		if (code < 0)
-			return fail("UDP segmentation offload");
+		config.quic_gso = toggle;
+		config.has_quic_gso = true;
 	}
 
 	if (TriState(settings, QUIC_MTU_DISCOVERY, &toggle)) {
-		code = moq_client_set_quic_mtu_discovery(client, toggle);
-		if (code < 0)
-			return fail("path MTU discovery");
+		config.quic_mtu_discovery = toggle;
+		config.has_quic_mtu_discovery = true;
 	}
 
-	const char *congestion = OptionalString(settings, QUIC_CONGESTION_CONTROL);
-	code = moq_client_set_quic_congestion_control(client, congestion, congestion ? strlen(congestion) : 0);
-	if (code < 0)
-		return fail("congestion control");
+	borrow(OptionalString(settings, QUIC_CONGESTION_CONTROL), &out->congestion, &config.quic_congestion_control,
+	       &config.quic_congestion_control_len);
 
 	// A scene collection written by a qlog-capable build keeps the key even where the
 	// field is hidden, and applying it there would fail the dial for a setting the user
 	// can no longer see, let alone clear.
-	const char *qlog = moq_qlog_supported() ? OptionalString(settings, QUIC_QLOG) : nullptr;
-	code = moq_client_set_quic_qlog(client, qlog, qlog ? strlen(qlog) : 0);
-	if (code < 0)
-		return fail("qlog directory");
+	borrow(moq_qlog_supported() ? OptionalString(settings, QUIC_QLOG) : nullptr, &out->qlog, &config.quic_qlog,
+	       &config.quic_qlog_len);
 
-	code = moq_client_set_websocket_enabled(client, obs_data_get_bool(settings, WEBSOCKET_ENABLED));
-	if (code < 0)
-		return fail("WebSocket fallback");
+	config.websocket_enabled = obs_data_get_bool(settings, WEBSOCKET_ENABLED);
+	config.has_websocket_enabled = true;
+	config.websocket_delay_ms = (uint64_t)Amount(settings, WEBSOCKET_DELAY);
+	config.has_websocket_delay = true;
 
-	code = moq_client_set_websocket_delay(client, Amount(settings, WEBSOCKET_DELAY));
-	if (code < 0)
-		return fail("WebSocket fallback delay");
-
-	return client;
+	return true;
 }
 
 } // namespace MoQSettings

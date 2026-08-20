@@ -10,6 +10,8 @@ export const SetupOption = {
 	MaxAuthTokenCacheSize: 4n,
 	Authority: 5n,
 	Implementation: 7n,
+	/// SOLICIT, from the MoQ Solicit extension. See `solicit.ts`.
+	Solicit: 0x40b5an,
 } as const;
 
 /// Setup Options — used in SETUP messages.

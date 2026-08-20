@@ -30,7 +30,14 @@ web-async = { workspace = true, optional = true }
 loom = { workspace = true }
 
 [dev-dependencies]
+# Bench-only: the FuturesUnordered comparison in benches/tasks.rs.
+criterion = "0.8"
+futures = "0.3"
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
+
+[[bench]]
+name = "tasks"
+harness = false
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

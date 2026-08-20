@@ -1,6 +1,7 @@
 package dev.moq
 
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.Serializable
 import uniffi.moq.MoqException
@@ -12,6 +13,21 @@ import kotlin.test.assertTrue
 
 @Serializable
 private data class Status(val state: String)
+
+private fun opusHead(): ByteArray =
+    "OpusHead".encodeToByteArray() + byteArrayOf(
+        1,
+        2,
+        0,
+        0,
+        0x80.toByte(),
+        0xbb.toByte(),
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
 
 class SmokeTest {
     /**
@@ -96,6 +112,41 @@ class SmokeTest {
             assertEquals(0uL, fetched.sequence())
             assertEquals("cached", fetched.readFrame()?.payload?.decodeToString())
             assertNull(fetched.readFrame())
+        }
+    }
+
+    /** A fetched media group streams its decoded frames and then completes. */
+    @Test
+    fun `media group helper streams fetched frames`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val media = broadcast.publishAudio(
+                AudioInit(format = AudioFormat.OPUS, data = opusHead()),
+            )
+            val consumer = broadcast.consume()
+            val (name, audio) = consumer.catalog().audio.entries.single()
+
+            media.writeFrame(Frame(payload = "opus frame".encodeToByteArray(), timestampUs = 5_000_000uL))
+
+            // Fetch while the track is still published: finishing the media producer
+            // unpublishes it, and the fetch would then miss with NotFound.
+            val fetched: MediaGroupConsumer = consumer.fetchMediaGroup(
+                name,
+                0uL,
+                audio.container,
+                FetchGroupOptions(priority = 3u),
+            )
+
+            // Close the group so the fetched stream terminates instead of waiting for more.
+            media.finish()
+
+            fetched.use {
+                assertEquals(0uL, it.sequence())
+                val frames = it.frames().toList()
+                assertEquals(1, frames.size)
+                val frame = frames.single()
+                assertEquals("opus frame", frame.payload.decodeToString())
+                assertEquals(5_000_000uL, frame.timestampUs)
+            }
         }
     }
 

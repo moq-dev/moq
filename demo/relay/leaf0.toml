@@ -3,10 +3,10 @@
 # The RUST_LOG environment variable will take precedence.
 level = "debug"
 
-[server]
+[listen]
 # Listen for QUIC connections on UDP:4444
 # Sometimes IPv6 causes issues; try 127.0.0.1:4444 instead.
-listen = "[::]:4444"
+bind = "[::]:4444"
 
 # Serve the same cluster-signed certificate that we present as a client,
 # so other leaves can verify us against `ca.pem`.
@@ -19,7 +19,7 @@ tls.key = ["leaf0.key"]
 # the JWT path and are rejected.
 tls.root = ["ca.pem"]
 
-[client]
+[connect]
 # Present this certificate and key on outbound cluster connections.
 # The root maps a valid cert to full access.
 tls.cert = "leaf0.crt"

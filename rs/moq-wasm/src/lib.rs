@@ -23,7 +23,7 @@ use std::rc::Rc;
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 
-mod transport;
+pub mod transport;
 
 /// Map any displayable error into a JS exception.
 fn js_err(e: impl std::fmt::Display) -> JsValue {
@@ -52,7 +52,7 @@ impl Session {
 	/// Connect to a relay over the browser's WebTransport, using the system roots.
 	pub async fn connect(url: String) -> Result<Session, JsValue> {
 		let url = url::Url::parse(&url).map_err(js_err)?;
-		let transport = transport::connect(url).await.map_err(js_err)?;
+		let transport = transport::connect(url, Default::default()).await.map_err(js_err)?;
 		Self::handshake(transport).await
 	}
 
@@ -61,14 +61,19 @@ impl Session {
 	pub async fn connect_with_hashes(url: String, hashes: Vec<Uint8Array>) -> Result<Session, JsValue> {
 		let url = url::Url::parse(&url).map_err(js_err)?;
 		let hashes = hashes.iter().map(|h| h.to_vec()).collect();
-		let transport = transport::connect_with_hashes(url, hashes).await.map_err(js_err)?;
+		let options = transport::Options {
+			server_certificate_hashes: hashes,
+			..Default::default()
+		};
+		let transport = transport::connect(url, options).await.map_err(js_err)?;
 		Self::handshake(transport).await
 	}
 
 	async fn handshake(transport: transport::Session) -> Result<Session, JsValue> {
 		// Wire a subscribe origin so the session has somewhere to insert the
 		// broadcasts the remote announces; keep a consumer to read them.
-		let origin = moq_net::Origin::random().produce();
+		let (origin, origin_driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		web_async::spawn(origin_driver);
 		let consumer = origin.consume();
 		let client = moq_net::Client::new().with_subscriber(origin);
 		let (inner, driver) = client.connect(transport).await.map_err(js_err)?;

@@ -124,6 +124,10 @@ pub enum Error {
 	#[error("video track {0} missing in catalog")]
 	MissingVideoTrack(String),
 
+	/// A synthesized video track has no usable encoded dimensions.
+	#[error("missing video dimensions for codec: {0}")]
+	MissingVideoDimensions(String),
+
 	#[error("audio track {0} missing in catalog")]
 	MissingAudioTrack(String),
 
@@ -533,8 +537,28 @@ pub(crate) fn synthesize_video_trak(
 	config: &VideoConfig,
 	description: Option<&[u8]>,
 ) -> Result<mp4_atom::Trak> {
-	let width = config.coded_width.unwrap_or(0) as u16;
-	let height = config.coded_height.unwrap_or(0) as u16;
+	if !matches!(
+		config.codec,
+		VideoCodec::H264(_) | VideoCodec::H265(_) | VideoCodec::AV1(_) | VideoCodec::VP8 | VideoCodec::VP9(_)
+	) {
+		return Err(Error::UnsupportedSynthesis(format!("video codec {:?}", config.codec)));
+	}
+
+	let width = u16::try_from(
+		config
+			.coded_width
+			.ok_or_else(|| Error::MissingVideoDimensions(config.codec.to_string()))?,
+	)
+	.map_err(|_| Error::MissingVideoDimensions(config.codec.to_string()))?;
+	let height = u16::try_from(
+		config
+			.coded_height
+			.ok_or_else(|| Error::MissingVideoDimensions(config.codec.to_string()))?,
+	)
+	.map_err(|_| Error::MissingVideoDimensions(config.codec.to_string()))?;
+	if width == 0 || height == 0 {
+		return Err(Error::MissingVideoDimensions(config.codec.to_string()));
+	}
 	let visual = mp4_atom::Visual {
 		data_reference_index: 1,
 		width,
@@ -588,7 +612,7 @@ pub(crate) fn synthesize_video_trak(
 			vpcc: crate::codec::vp9::vpcc(vp9),
 			..Default::default()
 		}),
-		other => return Err(Error::UnsupportedSynthesis(format!("video codec {:?}", other))),
+		other => unreachable!("unsupported codecs rejected before geometry synthesis: {other:?}"),
 	};
 
 	Ok(build_video_trak(
@@ -1119,6 +1143,8 @@ mod tests {
 	#[test]
 	fn synthesized_video_init_sets_the_track_flags() {
 		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
 		config.framerate = Some(30.0);
 		let video = synthesize_video_trak(1, 30_000, &config, None).unwrap();
 		let init = encode_init(None, vec![video], Vec::new()).unwrap();
@@ -1127,6 +1153,13 @@ mod tests {
 		let tkhd = &moov.trak[0].tkhd;
 		assert!(tkhd.enabled && tkhd.in_movie, "flags 0x000003");
 		assert_eq!(tkhd.volume.integer(), 0);
+	}
+
+	#[test]
+	fn synthesized_video_init_rejects_missing_dimensions() {
+		let config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		let error = synthesize_video_trak(1, 30_000, &config, None).unwrap_err();
+		assert!(matches!(error, Error::MissingVideoDimensions(_)));
 	}
 
 	#[test]

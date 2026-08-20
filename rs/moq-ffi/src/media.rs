@@ -79,17 +79,34 @@ pub struct MoqCatalog {
 
 #[derive(Clone, uniffi::Record)]
 pub struct MoqVideo {
+	/// Human-readable rendition name for track pickers.
+	#[uniffi(default = None)]
+	pub label: Option<String>,
+	/// The broadcast serving this rendition's track, relative to the catalog's own broadcast
+	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
+	#[uniffi(default = None)]
+	pub broadcast: Option<String>,
 	pub codec: String,
 	pub description: Option<Vec<u8>>,
 	pub coded: Option<MoqDimensions>,
 	pub display_aspect: Option<MoqDimensions>,
 	pub bitrate: Option<u64>,
+	/// Whether the publisher recommends temporarily avoiding this rendition.
+	#[uniffi(default = false)]
+	pub stalled: bool,
 	pub framerate: Option<f64>,
 	pub container: MoqContainer,
 }
 
 #[derive(Clone, uniffi::Record)]
 pub struct MoqAudio {
+	/// Human-readable rendition name for track pickers.
+	#[uniffi(default = None)]
+	pub label: Option<String>,
+	/// The broadcast serving this rendition's track, relative to the catalog's own broadcast
+	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
+	#[uniffi(default = None)]
+	pub broadcast: Option<String>,
 	pub codec: String,
 	pub description: Option<Vec<u8>>,
 	pub sample_rate: u32,
@@ -139,11 +156,11 @@ pub struct MoqDatagram {
 	pub payload: Vec<u8>,
 }
 
-/// Caller-provided video catalog fields for [`MoqInit`].
+/// Caller-provided video catalog fields for [`MoqVideoInit`].
 ///
 /// Every field is optional and fills only a gap the stream leaves; a value the stream detects wins.
 /// Publishing the catalog before the first keyframe needs at least the codec, which comes from the
-/// [`MoqInit`] format. Audio has no equivalent: an audio format resolves entirely from its init bytes.
+/// [`MoqVideoInit`] format. Audio has no equivalent: it resolves entirely from its init bytes.
 #[derive(Clone, Default, uniffi::Record)]
 pub struct MoqVideoHint {
 	/// The encoded pixel dimensions.
@@ -158,21 +175,98 @@ pub struct MoqVideoHint {
 	pub optimize_for_latency: Option<bool>,
 }
 
-/// What a single-track media publish needs: a format, its init bytes, and optional video fields.
+/// A single audio codec an importer can parse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MoqAudioFormat {
+	/// Advanced Audio Coding, configured by an AudioSpecificConfig.
+	Aac,
+	/// Opus, configured by an OpusHead.
+	Opus,
+	/// FLAC, configured by the `fLaC` marker plus its STREAMINFO block.
+	Flac,
+	/// MPEG-1/2 Audio Layer III.
+	Mp3,
+}
+
+/// A single video codec an importer can parse.
 ///
-/// `format` selects the codec (e.g. `"opus"`, `"avc3"`); `data` carries the codec init bytes (an
-/// OpusHead, an avcC, an AudioSpecificConfig, ...). Audio formats need those bytes up front; video
-/// formats may resolve in band, and a [`video`](Self::video) hint pins catalog fields the stream
-/// can't reveal (bitrate) or publishes the catalog before the first keyframe. See
-/// [`MoqBroadcastProducer::publish_media`](crate::producer::MoqBroadcastProducer::publish_media).
+/// H.264 and H.265 appear twice each because the framing differs, not just the codec: `Avc1`/`Hvc1`
+/// are length-prefixed with an out-of-band config record, while `Avc3`/`Hev1` are Annex-B with the
+/// parameter sets inline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MoqVideoFormat {
+	/// H.264, length-prefixed NALUs with an out-of-band avcC.
+	Avc1,
+	/// H.264, Annex-B with inline SPS/PPS.
+	Avc3,
+	/// H.265, length-prefixed NALUs with an out-of-band hvcC.
+	Hvc1,
+	/// H.265, Annex-B with inline parameter sets.
+	Hev1,
+	/// AV1.
+	Av01,
+	/// VP8.
+	Vp8,
+	/// VP9.
+	Vp9,
+}
+
+/// A container that publishes its own tracks, which may be more than one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MoqContainerFormat {
+	/// Fragmented MP4 / CMAF.
+	Fmp4,
+	/// Matroska / WebM.
+	Mkv,
+	/// MPEG-2 transport stream.
+	Ts,
+	/// Flash Video, as used by RTMP.
+	Flv,
+}
+
+/// What an audio publish needs: a format, its codec init bytes, and an optional label.
+///
+/// `data` is required: an audio importer cannot resolve its config from frames, so it needs the
+/// OpusHead / AudioSpecificConfig / STREAMINFO up front.
 #[derive(Clone, uniffi::Record)]
-pub struct MoqInit {
-	/// The media format, e.g. `"opus"`, `"avc3"`, or `"aac"`.
-	pub format: String,
-	/// Codec init bytes. Required for audio; may be empty for a video format that resolves in band.
+pub struct MoqAudioInit {
+	/// The audio codec.
+	pub format: MoqAudioFormat,
+	/// Codec init bytes. Required: audio has no in-band config.
 	pub data: Vec<u8>,
-	/// Caller-provided fields for a video track.
-	pub video: Option<MoqVideoHint>,
+	/// Human-readable rendition name for a track picker.
+	#[uniffi(default = None)]
+	pub label: Option<String>,
+}
+
+/// What a video publish needs: a format, optional init bytes, a label, and hints.
+///
+/// `data` may be empty for a format that resolves in band. A [`hint`](Self::hint) pins catalog
+/// fields the stream never reveals (bitrate) or publishes the catalog before the first keyframe.
+#[derive(Clone, uniffi::Record)]
+pub struct MoqVideoInit {
+	/// The video codec.
+	pub format: MoqVideoFormat,
+	/// Codec init bytes (an avcC, an hvcC, ...). May be empty for a format that resolves in band.
+	pub data: Vec<u8>,
+	/// Human-readable rendition name for a track picker.
+	#[uniffi(default = None)]
+	pub label: Option<String>,
+	/// Catalog fields the stream cannot reveal itself.
+	#[uniffi(default = None)]
+	pub hint: Option<MoqVideoHint>,
+}
+
+/// What a container publish needs: a format and its leading bytes.
+///
+/// A container publishes and describes its own tracks, so there is no label or hint here: a
+/// rendition field would have no single track to land on.
+#[derive(Clone, uniffi::Record)]
+pub struct MoqContainerInit {
+	/// The container format.
+	pub format: MoqContainerFormat,
+	/// The leading chunk of the container, decoded immediately. May be empty.
+	pub data: Vec<u8>,
 }
 
 impl From<MoqVideoHint> for moq_mux::catalog::VideoHint {
@@ -189,11 +283,64 @@ impl From<MoqVideoHint> for moq_mux::catalog::VideoHint {
 	}
 }
 
-impl From<MoqInit> for moq_mux::import::Init {
-	fn from(init: MoqInit) -> Self {
-		let mut out = moq_mux::import::Init::new(init.format, init.data);
-		out.video = init.video.map(Into::into);
+impl From<MoqAudioFormat> for moq_mux::import::AudioFormat {
+	fn from(format: MoqAudioFormat) -> Self {
+		match format {
+			MoqAudioFormat::Aac => Self::Aac,
+			MoqAudioFormat::Opus => Self::Opus,
+			MoqAudioFormat::Flac => Self::Flac,
+			MoqAudioFormat::Mp3 => Self::Mp3,
+		}
+	}
+}
+
+impl From<MoqVideoFormat> for moq_mux::import::VideoFormat {
+	fn from(format: MoqVideoFormat) -> Self {
+		match format {
+			MoqVideoFormat::Avc1 => Self::Avc1,
+			MoqVideoFormat::Avc3 => Self::Avc3,
+			MoqVideoFormat::Hvc1 => Self::Hvc1,
+			MoqVideoFormat::Hev1 => Self::Hev1,
+			MoqVideoFormat::Av01 => Self::Av01,
+			MoqVideoFormat::Vp8 => Self::Vp8,
+			MoqVideoFormat::Vp9 => Self::Vp9,
+		}
+	}
+}
+
+impl From<MoqContainerFormat> for moq_mux::import::ContainerFormat {
+	fn from(format: MoqContainerFormat) -> Self {
+		match format {
+			MoqContainerFormat::Fmp4 => Self::Fmp4,
+			MoqContainerFormat::Mkv => Self::Mkv,
+			MoqContainerFormat::Ts => Self::Ts,
+			MoqContainerFormat::Flv => Self::Flv,
+		}
+	}
+}
+
+impl From<MoqAudioInit> for moq_mux::import::AudioInit {
+	fn from(init: MoqAudioInit) -> Self {
+		let mut out = moq_mux::import::AudioInit::new(init.format.into(), init.data);
+		out.label = init.label;
 		out
+	}
+}
+
+impl From<MoqVideoInit> for moq_mux::import::VideoInit {
+	fn from(init: MoqVideoInit) -> Self {
+		let mut out = moq_mux::import::VideoInit::new(init.format.into(), init.data);
+		out.label = init.label;
+		if let Some(hint) = init.hint {
+			out.hint = hint.into();
+		}
+		out
+	}
+}
+
+impl From<MoqContainerInit> for moq_mux::import::ContainerInit {
+	fn from(init: MoqContainerInit) -> Self {
+		moq_mux::import::ContainerInit::new(init.format.into(), init.data)
 	}
 }
 
@@ -206,6 +353,8 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 			Some((
 				name.clone(),
 				MoqVideo {
+					label: config.label.clone(),
+					broadcast: config.broadcast.as_ref().map(|path| path.as_str().to_string()),
 					codec: config.codec.to_string(),
 					description: config.description.as_ref().map(|d| d.to_vec()),
 					coded: match (config.coded_width, config.coded_height) {
@@ -217,6 +366,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 						_ => None,
 					},
 					bitrate: config.bitrate,
+					stalled: config.stalled.unwrap_or(false),
 					framerate: config.framerate,
 					container: MoqContainer::from_catalog(&config.container)?,
 				},
@@ -232,6 +382,8 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 			Some((
 				name.clone(),
 				MoqAudio {
+					label: config.label.clone(),
+					broadcast: config.broadcast.as_ref().map(|path| path.as_str().to_string()),
 					codec: config.codec.to_string(),
 					description: config.description.as_ref().map(|d| d.to_vec()),
 					sample_rate: config.sample_rate,
@@ -260,5 +412,66 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 		rotation: catalog.video.rotation,
 		flip: catalog.video.flip,
 		sections,
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	#[test]
+	fn catalog_exposes_stalled_renditions() {
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		let active = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		catalog.video.renditions.insert("active".to_string(), active);
+		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		video.stalled = Some(true);
+		catalog.video.renditions.insert("video".to_string(), video);
+
+		let converted = convert_catalog(&catalog);
+		assert!(!converted.video["active"].stalled);
+		assert!(converted.video["video"].stalled);
+	}
+
+	/// A rendition may name a sibling broadcast, and the track then lives there. Dropping the
+	/// reference here loses it for every binding, which then opens the track on the wrong
+	/// broadcast: `NotFound`, or a same-named local track with mismatched metadata.
+	#[test]
+	fn catalog_exposes_rendition_broadcast_references() {
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+
+		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		video.broadcast = Some(moq_net::PathRelative::new("./source").into_owned());
+		catalog.video.renditions.insert("video".to_string(), video);
+		let local = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		catalog.video.renditions.insert("local".to_string(), local);
+
+		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		audio.broadcast = Some(moq_net::PathRelative::new("../elsewhere").into_owned());
+		catalog.audio.renditions.insert("audio".to_string(), audio);
+
+		let converted = convert_catalog(&catalog);
+		// `PathRelative` strips redundant `.` segments on creation, so the reference crosses as
+		// the normalized form the catalog itself holds. It round-trips: rebuilding a
+		// `PathRelative` from it is a no-op.
+		assert_eq!(converted.video["video"].broadcast.as_deref(), Some("source"));
+		assert_eq!(converted.video["local"].broadcast, None);
+		assert_eq!(converted.audio["audio"].broadcast.as_deref(), Some("../elsewhere"));
+	}
+
+	#[test]
+	fn catalog_exposes_rendition_labels() {
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		video.label = Some("Main camera".to_string());
+		catalog.video.renditions.insert("video".to_string(), video);
+
+		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		audio.label = Some("English".to_string());
+		catalog.audio.renditions.insert("audio".to_string(), audio);
+
+		let converted = convert_catalog(&catalog);
+		assert_eq!(converted.video["video"].label.as_deref(), Some("Main camera"));
+		assert_eq!(converted.audio["audio"].label.as_deref(), Some("English"));
 	}
 }

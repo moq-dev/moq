@@ -5,7 +5,7 @@ import { Retry } from "./retry";
 
 // Signals the microphone reads.
 export type MicrophoneInput = {
-	// Whether to hold the microphone open. When false the track is stopped and `out.source` clears.
+	// Whether to hold the microphone open. Defaults to true. When false the track is stopped and `out.source` clears.
 	enabled: Getter<boolean>;
 };
 
@@ -42,7 +42,7 @@ export class Microphone {
 
 	constructor(props?: MicrophoneProps) {
 		this.in = {
-			enabled: getter(props?.enabled ?? false),
+			enabled: getter(props?.enabled ?? true),
 		};
 		this.device = new Device("audio", props?.device);
 		this.constraints = Signal.from(props?.constraints);

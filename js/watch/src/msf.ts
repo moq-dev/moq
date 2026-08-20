@@ -52,6 +52,7 @@ function toVideoConfig(track: Msf.Track): Catalog.VideoConfig | undefined {
 		codedHeight: track.height != null ? u53(track.height) : undefined,
 		framerate: track.framerate,
 		bitrate: track.bitrate != null ? u53(track.bitrate) : undefined,
+		stalled: track.stalled,
 		jitter: track.jitter != null ? u53(track.jitter) : undefined,
 	};
 }

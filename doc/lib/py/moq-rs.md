@@ -28,7 +28,7 @@ A **broadcast** is a collection of tracks identified by a path. A **track** is a
 
 `create_broadcast(path)` creates an announced broadcast on the origin and returns its producer. Toggle discoverability with `set_announce(False)` (the broadcast stays reachable by exact path), and call `finish()` to unpublish it.
 
-For unstructured byte streams (status, commands, sensor data), use `publish_track` / `subscribe_track`. For media with a known container format (audio/video), use `publish_media` / `subscribe_media` and the catalog will be populated automatically.
+For unstructured byte streams (status, commands, sensor data), use `publish_track` / `subscribe_track`. For encoded media, use `publish_audio` or `publish_video` to publish one rendition, or `publish_container` to hand over a container (fMP4, MKV, TS, FLV) that describes its own tracks. Either way the catalog is populated automatically, and `subscribe_media` reads it back.
 
 ## API summary
 
@@ -87,7 +87,7 @@ except moq.Error as err:
 
 ```python
 broadcast = client.create_broadcast("my-stream")
-audio = broadcast.publish_media("opus", opus_init_bytes)
+audio = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_init_bytes, label="English")
 
 # Audio has no keyframes, so `cut` is what gives it group boundaries. Once per
 # frame is the lowest latency; a segment cadence suits HLS/DASH.
@@ -98,13 +98,17 @@ broadcast.finish()
 ```
 
 Supported codec formats include `opus`, `avc3`, `hev1`, `av01`, `vp09`, and others. See [`hang`](/lib/rs/crate/hang) for the full list.
+The optional `label` is presentation metadata for a track picker. The transport
+track name remains generated from the format and labels do not need to be unique.
+`publish_container` takes neither a label nor a hint: a container describes each
+track it publishes from its own metadata.
 
 ### Publishing raw media
 
-`publish_media` above takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `publish_video` / `publish_audio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
+The calls above take frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `encode_video` / `encode_audio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
 
 ```python
-video = broadcast.publish_video(
+video = broadcast.encode_video(
     moq.VideoEncoderInput(
         format=moq.VideoPixelFormat.RGBA,
         width=1280,
@@ -123,12 +127,25 @@ video.finish()
 
 `VideoEncoderKind.AUTO()` prefers a hardware encoder and falls back to software; `SOFTWARE()`, `HARDWARE()`, and `NAMED("videotoolbox")` pin the choice (each variant is a class, so call it). The bindings compile VideoToolbox (macOS), Media Foundation (Windows), and openh264 (software, everywhere); the Linux hardware codecs are a libmoq-only build option. `set_bitrate` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
 
-The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition appears once the first keyframe is encoded, so subscribers discover it through the catalog rather than a name you pick. `cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group.
+The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition is published immediately, read out of the encoder itself, so subscribers discover it through the catalog rather than a name you pick, and can find it before the first frame exists. `cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group.
 
-`publish_media` fills the catalog by parsing the codec bitstream. For a video format you can pass a `VideoHint` to supply fields the stream can't reveal (such as `bitrate`), or to publish the catalog before the first keyframe:
+`decode_video` and `decode_audio` are the mirrors: they run the codec inside the bindings on the way in, so a subscriber gets pixels and PCM without linking one. Video frames arrive as tightly-packed I420 and carry the size they actually decoded to, since `resize` is only best effort:
 
 ```python
-video = broadcast.publish_media(
+catalog = await broadcast.catalog()
+name, rendition = next(iter(catalog.video.items()))
+
+async with await broadcast.decode_video(name, rendition) as video:
+    async for frame in video:
+        render(frame.data, frame.width, frame.height)
+```
+
+An unrecognized codec raises from `decode_video` itself; a recognized one no native backend handles raises when the decoder opens. Either way you find out before the first frame.
+
+The catalog is filled by parsing the codec bitstream. `publish_video` takes an optional `hint` to supply fields the stream can't reveal (such as `bitrate`), or to publish the catalog before the first keyframe:
+
+```python
+video = broadcast.publish_video(
     "avc3",
     avc_init_bytes,
     video=moq.VideoHint(bitrate=4_000_000),
@@ -136,6 +153,8 @@ video = broadcast.publish_media(
 ```
 
 A value the stream later detects fills only a gap the hint left, so a detected value always wins. Audio formats resolve entirely from their init bytes, so they take no hint.
+
+Each catalog `Video` has a `stalled` boolean. A true value recommends temporarily avoiding that rendition, but the track remains directly usable. Existing catalogs default it to false.
 
 Properties that apply to every video rendition are updated together. Omitted fields clear the corresponding catalog property, and rotation is normalized to the nearest clockwise quarter turn:
 
@@ -160,6 +179,28 @@ async for announcement in client.announced("prefix/"):
     async for frame in consumer:
         ...
 ```
+
+### Cross-broadcast renditions
+
+A catalog rendition may name a *different* broadcast: `track.broadcast` is a path relative to the
+broadcast the catalog came from, so a transcode output at `live/hd` can describe a track that
+actually lives in `live/source`. `decode_audio` and `decode_video` follow it for you. `subscribe_media`,
+`subscribe_track`, `fetch_group`, and `fetch_media_group` take a track name rather than a rendition,
+so resolve first:
+
+```python
+catalog = await announcement.broadcast.catalog()
+track_name, track = next(iter(catalog.video.items()))
+
+source = await announcement.broadcast.resolve(track.broadcast)
+consumer = await source.subscribe_media(track_name, track)
+```
+
+`resolve(None)` (or an empty reference) returns the same broadcast, so it is safe to call
+unconditionally. It needs an origin to fetch a sibling from, so it raises on a broadcast consumed
+straight from a local producer.
+`resolve` reports a sibling that exists but has not been announced yet as unroutable rather than
+waiting for it, so await the referenced broadcast's announcement first if you may be racing it.
 
 ### Catalog extensions
 
@@ -233,6 +274,21 @@ async for request in dynamic:
 ```
 
 Call `request.abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
+
+### Fetching media groups
+
+`fetch_group` hands back raw payloads. `fetch_media_group` decodes the same group through the rendition's container, so you get timestamped frames without opening a live subscription:
+
+```python
+catalog = await broadcast_consumer.catalog()
+name, audio = next(iter(catalog.audio.items()))
+
+group = await broadcast_consumer.fetch_media_group(name, sequence=42, track=audio)
+async for frame in group:
+    print(frame.timestamp_us, len(frame.payload))
+```
+
+A fetched media group is finite: it ends after the group's last decoded frame, unlike the live `subscribe_media` stream. Latency-based group skipping does not apply, so you always get every frame in the group.
 
 ### Raw datagrams
 
@@ -321,6 +377,8 @@ broadcast = await client.announced_broadcast("live/cam1")
 # handler if the origin has one, else raises. Does not wait for a future announce.
 broadcast = await client.request_broadcast("live/cam1")
 ```
+
+Announcements arrive over the session after it connects, so `request_broadcast` on its own races them: right after connecting it can raise for a broadcast that is live. Await `announced_broadcast(path)` first when you know the path you want; `request_broadcast` is for a path a dynamic handler serves, or one you already know is announced.
 
 Each broadcast carries a `Route`: `route.hops` is the chain of relay origin ids (as `list[int]`) the broadcast passed through to reach you, oldest first, and `route.cost` is the publisher's advertised preference (lower wins). The route is dynamic; `await broadcast.route_changed()` returns the current route first, then blocks for each change (e.g. an upstream failover), and returns `None` once the broadcast ends. A publisher advertises its own route with `producer.set_route(moq.Route(hops=[], cost=10))`, for example a standby transcoder that lowers its cost to 0 once it is warm.
 

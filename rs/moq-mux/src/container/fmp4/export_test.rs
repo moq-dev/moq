@@ -7,6 +7,13 @@ use mp4_atom::{DecodeMaybe, Encode};
 
 use crate::container::test_util::{Live, PPS, SPS, raw_frame, video_frame};
 
+/// The media track's full retention window, so an exporter started after publishing
+/// can still read every retained group. These tests write or import a whole broadcast
+/// and only then export it, which the
+/// exporter's default [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) collapses to the
+/// live edge: completeness has to be asked for, exactly as a real recorder does.
+const RECORDING_LATENCY: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Avc3-shape source (catalog `Container::Legacy`, `H264 { inline: true }`,
 /// `description: None`) → fMP4 / CMAF export must synthesize a valid init
 /// segment from the codec config the Avc1 transform builds on the wire.
@@ -126,22 +133,27 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 	moov.encode(&mut buf).expect("encode synthesized moov");
 }
 
-/// VP8 source (catalog `Container::Legacy`, codec `vp8`, no `description`) →
-/// fMP4 export must synthesize a `vp08` sample entry. VP8 carries no out-of-band
-/// config, so this exercises the description-less synthesis path.
+/// VP8 source (catalog `Container::Legacy`, codec `vp8`, no dimensions or
+/// `description`) → fMP4 export derives geometry from the keyframe and
+/// synthesizes a `vp08` sample entry. VP8 carries no out-of-band config, so
+/// this exercises the dimensionless startup and description-less synthesis paths.
 #[tokio::test(start_paused = true)]
 async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 	use hang::catalog::{Container, VideoCodec, VideoConfig};
 
 	let mut live = Live::new(".vp8", |catalog, name| {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
-		config.coded_width = Some(320);
-		config.coded_height = Some(240);
 		config.container = Container::Legacy;
 		catalog.lock().video.renditions.insert(name, config);
 	});
+	// Geometry-less startup frames must not park the source before the keyframe.
+	live.track.write(raw_frame(0, &[0x31, 0x00, 0x00], true)).unwrap();
 	live.track
-		.write(raw_frame(0, &[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a], true))
+		.write(raw_frame(
+			33_000,
+			&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00],
+			true,
+		))
 		.unwrap();
 	live.track.finish().unwrap();
 
@@ -175,6 +187,80 @@ async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 	// The synthesized init (vpcC included) must round-trip through encode.
 	let mut buf = Vec::new();
 	moov.encode(&mut buf).expect("encode synthesized moov");
+}
+
+/// If codec data cannot reveal geometry yet, the exporter waits for a later
+/// catalog snapshot instead of freezing zero dimensions into the init segment.
+#[tokio::test(start_paused = true)]
+async fn dimensionless_video_waits_for_catalog_geometry() {
+	use hang::catalog::{Container, VideoCodec, VideoConfig};
+
+	let mut live = Live::new(".vp8", |catalog, name| {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.container = Container::Legacy;
+		catalog.lock().video.renditions.insert(name, config);
+	});
+	let name = live.track.name().to_string();
+	// A VP8 interframe carries no geometry. Mark it as the group boundary only
+	// so the synthetic producer accepts it before the catalog update arrives.
+	live.track.write(raw_frame(0, &[0x31, 0x00, 0x00], true)).unwrap();
+
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let pending = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await;
+	assert!(
+		pending.is_err(),
+		"exporter emitted an init without geometry: {pending:?}"
+	);
+
+	{
+		let mut catalog = live.catalog.lock();
+		let config = catalog.video.renditions.get_mut(&name).unwrap();
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+	}
+
+	let init = chunk_now(&mut exporter)
+		.await
+		.init()
+		.expect("the init segment comes first");
+	let mut cursor = Cursor::new(init.as_ref());
+	let mut moov = None;
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
+		if let mp4_atom::Any::Moov(value) = atom {
+			moov = Some(value);
+		}
+	}
+	let trak = &moov.expect("init segment missing moov").trak[0];
+	let mp4_atom::Codec::Vp08(vp08) = &trak.mdia.minf.stbl.stsd.codecs[0] else {
+		panic!("expected vp08 sample entry");
+	};
+	assert_eq!((vp08.visual.width, vp08.visual.height), (320, 240));
+}
+
+/// A fixed codec description cannot recover on a later frame, so malformed
+/// metadata must fail instead of leaving the exporter pending for geometry.
+#[tokio::test(start_paused = true)]
+async fn dimensionless_video_rejects_a_malformed_description() {
+	use hang::catalog::{Container, H264, VideoConfig};
+
+	let live = Live::new(".avc1", |catalog, name| {
+		let mut config = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		config.description = Some(bytes::Bytes::from_static(&[1]));
+		config.container = Container::Legacy;
+		catalog.lock().video.renditions.insert(name, config);
+	});
+
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	let error = exporter.next().await.expect_err("malformed fixed description");
+	assert!(matches!(
+		error,
+		crate::Error::H264(crate::codec::h264::Error::AvccTooShort)
+	));
 }
 
 /// VP9 source (catalog `Container::Legacy`, codec `vp09`, no `description`) →
@@ -451,7 +537,8 @@ async fn next_chunk_reports_segment_metadata() {
 
 	// Sub-GOP cap so GOP 0 splits into two parts (the trailing part non-independent).
 	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await)
-		.with_fragment_duration(std::time::Duration::from_millis(20));
+		.with_fragment_duration(std::time::Duration::from_millis(20))
+		.with_latency(crate::Latency::max(RECORDING_LATENCY));
 
 	// First emit is the init segment, which carries no segmenting metadata to assert on.
 	chunk_now(&mut exporter)
@@ -552,6 +639,8 @@ async fn unusable_framerate_uses_the_standard_fallback_rate() {
 
 	let mut live = Live::new(".vp8", |catalog, name| {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
 		config.framerate = Some(0.0005);
 		config.container = Container::Legacy;
 		catalog.lock().video.renditions.insert(name, config);

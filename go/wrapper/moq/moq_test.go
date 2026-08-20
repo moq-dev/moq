@@ -112,12 +112,12 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	}
 }
 
-func TestPublishMediaLifecycle(t *testing.T) {
+func TestPublishAudioLifecycle(t *testing.T) {
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {
 		t.Fatal(err)
 	}
-	media, err := broadcast.PublishMedia("opus", opusHead())
+	media, err := broadcast.PublishAudio(moq.AudioFormatOpus, opusHead())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,8 @@ func TestUnknownFormat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := broadcast.PublishMedia("nope", nil); err == nil {
+	// A bad format is no longer expressible: it is an enum. Bad init bytes still are.
+	if _, err := broadcast.PublishAudio(moq.AudioFormatOpus, nil); err == nil {
 		t.Fatal("expected error for unknown format")
 	}
 }
@@ -244,7 +245,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	media, err := broadcast.PublishMedia("opus", opusHead())
+	media, err := broadcast.PublishAudio(moq.AudioFormatOpus, opusHead())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -548,7 +549,7 @@ func TestDynamicTrackRequest(t *testing.T) {
 	}
 }
 
-func TestDynamicTrackRequestCanPublishMedia(t *testing.T) {
+func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
@@ -591,7 +592,7 @@ func TestDynamicTrackRequestCanPublishMedia(t *testing.T) {
 		t.Fatalf("request name = %q, want requested-audio", name)
 	}
 
-	media, err := broadcast.PublishMediaOnTrack(request, "opus", opusHead())
+	media, err := broadcast.PublishAudioOnTrack(request, moq.AudioFormatOpus, opusHead())
 	if err != nil {
 		t.Fatal(err)
 	}

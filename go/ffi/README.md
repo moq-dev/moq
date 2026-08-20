@@ -22,13 +22,15 @@ The published module ships prebuilt `libmoq_ffi.a` for `linux/amd64`, `linux/arm
 
 `go/scripts/check.sh` builds `moq-ffi` for the host, runs `uniffi-bindgen-go` to regenerate `moq.go`, stages this module plus the wrapper into `dist/`, and runs `go build`/`go vet`/`go test`. Run via `just go check`. Skips cleanly without `cargo`, `go`, or `uniffi-bindgen-go`.
 
-Install `uniffi-bindgen-go` once:
+The dev shell provides both `go` and `uniffi-bindgen-go`, so `nix develop --command just go check` needs no setup. Without Nix, install `uniffi-bindgen-go` once:
 
 ```bash
 cargo install uniffi-bindgen-go \
     --git https://github.com/NordSecurity/uniffi-bindgen-go \
     --tag v0.7.1+v0.31.0
 ```
+
+The tag pins the generator to the `uniffi` version `rs/moq-ffi` depends on; `flake.nix` pins the same one.
 
 ## Layout
 

@@ -24,10 +24,7 @@
 
 use anyhow::Context;
 
-use crate::{
-	Auth, Cluster, Config, Connection, DEFAULT_DRAIN_TIMEOUT, DEFAULT_MAX_STREAMS, Internal, Shutdown, ShutdownTrigger,
-	Web,
-};
+use crate::{Auth, Cluster, Config, Connection, DEFAULT_DRAIN_TIMEOUT, Internal, Shutdown, ShutdownTrigger, Web};
 
 /// A fully assembled relay: the listeners and the shared cluster behind them.
 ///
@@ -43,11 +40,11 @@ use crate::{
 #[non_exhaustive]
 pub struct Relay {
 	/// The QUIC/WebTransport server, already bound. Feed it to [`serve`].
-	pub server: moq_native::Server,
+	pub server: moq_tokio::Server,
 
 	/// The client used to dial cluster peers. Already handed to [`Self::cluster`];
 	/// clone it for your own outbound dials so they share the connection config.
-	pub client: moq_native::Client,
+	pub client: moq_tokio::Client,
 
 	/// The resolved auth policy (JWT/public sources, or mTLS-only).
 	pub auth: Auth,
@@ -87,24 +84,24 @@ impl Relay {
 	/// ready to serve; nothing accepts a connection until [`Self::run`] (or
 	/// [`serve`]) drives it.
 	pub async fn load(mut config: Config) -> anyhow::Result<Self> {
-		config.client.quic.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
-		config.server.quic.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
+		config.resolve()?;
 
-		let mtls_enabled = !config.server.tls.root.is_empty();
+		let mtls_enabled = !config.listen.tls.root.is_empty();
+		let server_versions = config.listen.versions();
 
 		#[allow(unused_mut)]
-		let mut server = config.server.init()?;
-		let client = config.client.clone().init()?;
+		let mut server = config.listen.init(config.quic.clone())?;
+		let client = config.connect.clone().init(config.quic.clone())?;
 
 		// `None` for a stream-only server (no QUIC); any other error is real.
 		let addr = match server.local_addr() {
 			Ok(addr) => Some(addr),
-			Err(moq_native::Error::NoBackend(_)) => None,
+			Err(moq_tokio::Error::NoBackend(_)) => None,
 			Err(err) => return Err(err).context("failed to resolve the QUIC bind address"),
 		};
 
 		#[cfg(feature = "iroh")]
-		let (server, client) = match config.iroh.bind(&config.client.quic).await? {
+		let (server, client) = match config.iroh.bind(&config.quic).await? {
 			Some(iroh) => (server.with_iroh(iroh.clone()), client.with_iroh(iroh)),
 			None => (server, client),
 		};
@@ -123,7 +120,7 @@ impl Relay {
 			// mTLS-only: no JWT/public source, but `--auth-mtls-tier` still applies.
 			Auth::default().with_mtls_tier(config.auth.mtls_tier.clone())
 		} else {
-			config.auth.init(&config.client.tls).await?
+			config.auth.init(&config.connect.tls).await?
 		};
 
 		// Before any origin handle is derived: `with_cache` rebuilds the origin, so a
@@ -132,7 +129,7 @@ impl Relay {
 		let cluster = Cluster::new(config.cluster)?
 			.with_cache(cache)
 			.with_client(client.clone())
-			.with_client_tls(config.client.tls.build()?);
+			.with_client_tls(config.connect.tls.build()?);
 		let stats = config.stats.build(cluster.origin.clone());
 		// The cluster takes over keeping the publish task alive, so an embedder that
 		// drops the producer keeps publishing for as long as it serves.
@@ -143,8 +140,9 @@ impl Relay {
 		let drain_timeout = config.drain_timeout.unwrap_or(DEFAULT_DRAIN_TIMEOUT);
 		let (shutdown_trigger, shutdown) = Shutdown::new(drain_timeout);
 		// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
-		let web =
-			Web::new(auth.clone(), cluster.clone(), server.certificates(), config.web).with_shutdown(shutdown.clone());
+		let web = Web::new(auth.clone(), cluster.clone(), server.certificates(), config.web)
+			.with_shutdown(shutdown.clone())
+			.with_versions(server_versions);
 
 		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
 		// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
@@ -203,7 +201,7 @@ impl Relay {
 		let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
 		#[cfg(feature = "jemalloc")]
-		let jemalloc = moq_native::jemalloc::run();
+		let jemalloc = moq_tokio::jemalloc::run();
 		#[cfg(not(feature = "jemalloc"))]
 		let jemalloc = std::future::pending::<anyhow::Result<()>>();
 
@@ -268,7 +266,7 @@ async fn shutdown_signal() -> anyhow::Result<()> {
 /// Public because an embedder running its own `select!` still needs the accept
 /// loop, and reimplementing it means re-deriving details like where a `conn` id
 /// comes from.
-pub async fn serve(server: moq_native::Server, cluster: Cluster, auth: Auth, shutdown: Shutdown) -> anyhow::Result<()> {
+pub async fn serve(server: moq_tokio::Server, cluster: Cluster, auth: Auth, shutdown: Shutdown) -> anyhow::Result<()> {
 	// Binds whatever is still unbound (the `tcp`/`unix` listeners), so a bind
 	// failure is reported here rather than as an immediate stop.
 	let mut server = server.listen().await.context("failed to bind listeners")?;

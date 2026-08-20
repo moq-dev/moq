@@ -148,12 +148,13 @@ Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}
 The `display` field is the size to render the video at, in pixels.
 It is separate from a rendition's `displayAspectWidth`/`displayAspectHeight` because changing it does not require reinitializing the decoder.
 
-In addition to the WebCodecs fields, each rendition MAY carry the fields common to audio and video ({{common}}) plus:
+In addition to the WebCodecs fields, each rendition MAY carry the common rendition fields ({{common}}) plus:
 
 ~~~
 type VideoDecoderConfigExtensions = {
   "displayAspectWidth": number | undefined,
   "displayAspectHeight": number | undefined,
+  "stalled": boolean | undefined,
 }
 ~~~
 
@@ -161,17 +162,24 @@ type VideoDecoderConfigExtensions = {
 A consumer that understands neither field MUST assume square pixels, a 1:1 ratio.
 Both MUST be present together; a consumer that sees only one MUST ignore it.
 
+`stalled` indicates that the publisher recommends temporarily avoiding the rendition.
+The track remains available when `stalled` is true.
+A consumer SHOULD select an unstalled rendition when it supports one, but MAY select a stalled rendition when no unstalled rendition is suitable.
+If absent, `stalled` defaults to false.
+
 For example:
 
 ~~~
 {
   "renditions": {
     "720p": {
+      "label": "HD",
       "codec": "avc1.64001f",
       "container": { "kind": "legacy" },
       "codedWidth": 1280,
       "codedHeight": 720,
       "bitrate": 6000000,
+      "stalled": true,
       "framerate": 30.0,
       "jitter": 33
     },
@@ -208,7 +216,7 @@ The `renditions` field contains a map of track names to audio decoder configurat
 See the [WebCodecs specification](https://www.w3.org/TR/webcodecs/#audio-decoder-config) for specifics and registered codecs.
 Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}).
 
-In addition to the WebCodecs fields, each rendition MAY carry the fields common to audio and video ({{common}}).
+In addition to the WebCodecs fields, each rendition MAY carry the common rendition fields ({{common}}).
 
 ### PCM {#audio-pcm}
 
@@ -229,6 +237,7 @@ For example:
 {
   "renditions": {
     "stereo": {
+      "label": "English stereo",
       "codec": "opus",
       "container": { "kind": "legacy" },
       "sampleRate": 48000,
@@ -261,7 +270,6 @@ type TextConfig = {
 	"format": "vtt" | "ttml" | "utf8" | string,
 	"role": "subtitle" | "caption" | string | undefined,
 	"lang": string | undefined,
-	"label": string | undefined,
 	// plus the common rendition fields
 }
 ~~~
@@ -286,7 +294,7 @@ It SHOULD keep such a rendition selectable and treat the role as `subtitle`, and
 Unlike `format`, an unrecognized `role` never prevents rendering: it describes intent, not the wire.
 
 The `lang` field is the BCP-47 {{!RFC5646}} language tag of the track, for example `en` or `es-419`.
-The `label` field is a human-readable name for a track picker, useful when `lang` alone is ambiguous (for example distinguishing subtitles from same-language captions).
+Two renditions sharing a `lang` are told apart by `label` ({{field-label}}), one of the common rendition fields ({{common}}).
 
 Regardless of `format`, each frame's timestamp ({{container}}) is the authoritative cue start time on the media clock, so a relay and a consumer can order and schedule cues without parsing the payload.
 A text track has no delta frames: every frame is a self-contained cue, so a group MAY consist of multiple frames, following the same rule as a codec that lacks delta frames ({{container}}).
@@ -326,6 +334,7 @@ Audio, video, and text renditions share the following fields, extending the WebC
 ~~~
 type CommonExtensions = {
   "broadcast": string | undefined,
+  "label": string | undefined,
   "container": Container,
   "jitter": number | undefined,
 }
@@ -336,7 +345,9 @@ By default a rendition's track lives in the same broadcast that served the catal
 The `broadcast` field overrides that, naming a different broadcast that publishes the track.
 
 The value is a relative path, resolved against the path of the broadcast that served the catalog.
-It uses the `.` and `..` semantics of a relative URL reference ({{!RFC3986, Section 5.2.4}}), for example `../source`.
+It uses relative reference resolution ({{!RFC3986, Section 5.2}}): a non-empty reference replaces the catalog broadcast's last path segment before applying `.` and `..` segments.
+For example, `./source` in a catalog served by `room/transcode` resolves to `room/source`, while `.` resolves to `room`.
+An empty reference resolves to the catalog broadcast itself.
 A publisher MUST NOT use an absolute path, nor a reference that escapes above the root.
 The root is the consumer's authorized subtree, so such a reference names content the consumer cannot reach.
 A consumer MUST reject a catalog containing one, rather than resolving the reference against a different broadcast or ignoring the rendition.
@@ -345,6 +356,11 @@ This lets a publisher author a catalog that points at tracks it does not republi
 For example, a transcoder produces a catalog listing its own downstream renditions alongside the untouched source rendition, referencing the latter in the source broadcast rather than copying the bytes through.
 
 A consumer subscribes to such a rendition in the referenced broadcast, using the rendition's track name unchanged.
+
+### label {#field-label}
+The `label` field is a human-readable rendition name for a track picker.
+It is presentation metadata, not the track name used to subscribe.
+Multiple renditions MAY use the same label.
 
 ### container {#field-container}
 The container used to frame this rendition's media, as described in {{container}}.
@@ -514,6 +530,59 @@ An enrolled track that has produced nothing for the span holds the record back; 
 A group that starts before the first boundary belongs to the first segment.
 The final segment of an ended broadcast has no closing boundary; its `duration` runs to the newest known content.
 A publisher SHOULD carry the end of the last group's content into that value, since a publisher that knows only where each group *started* would report a duration one group short, and zero for a final segment that is a single group.
+
+
+# MPEG-TS Service Information {#mpegts-si}
+A broadcast imported from an MPEG-TS multiplex can carry the multiplex's standalone service-information tables (ISO/IEC 13818-1 program-specific information and ETSI EN 300 468 DVB SI: SDT, NIT, BAT, EIT, and any table the publisher does not recognize) so an exporter can re-emit them byte-for-byte.
+The sections are opaque: nothing in this mechanism parses a table, so an unrecognized long-form table round-trips exactly like a known one.
+Short-form tables, recognized or not, are carried with latest-value semantics instead (see below): the short-form tables broadcast systems define are clocks and stuffing, and a hypothetical multi-section static one would collapse to its most recent section.
+
+The tables are state, not events: a transport stream retransmits them continuously only because a TS receiver can tune in at any moment, so the repetition rate is a property of the unreliable transport, not of the data.
+Here each table rides a dedicated snapshot track, delivered once at join and republished on change, per the root catalog's guidance that dynamic content is delegated to other tracks.
+Consumers that are not TS exporters never pay for it.
+
+## Catalog Section {#mpegts-si-catalog}
+The catalog's `mpegts` section maps each carried table to its track under an `si` field, keyed by the PID the sections ride on and then by `table_id`:
+
+~~~
+type Mpegts = {
+  // ... other MPEG-TS carriage fields ...
+  "si": { [pid: string]: { [tableId: string]: SiEntry } } | undefined,
+}
+
+type SiEntry = {
+  "track": string,
+  "interval": number | undefined,
+}
+~~~
+
+Both keys are written in decimal, since JSON object keys are strings.
+`table_id` is byte 0 of generic section syntax, so the key is no less generic than the PID; which table_id ranges mean what is a DVB convention that appears nowhere in the schema.
+
+* `track`: the name of the snapshot track carrying this table's sections, on the same broadcast as the catalog.
+* `interval`: how often an exporter MUST re-emit the sections at most, in milliseconds. A hint carrying the table's own repetition requirement (for DVB, the ETSI TS 101 211 maxima). When absent, an exporter SHOULD fall back to a fast cadence of its own choosing, so an unknown table degrades to a safe rate rather than being dropped.
+
+Entries are added when a table is first observed, which is acquisition-time traffic; steady-state table revisions touch only the named track, never the catalog.
+
+## Track Format {#mpegts-si-track}
+An SI track is binary, without the media container framing ({{container}}).
+
+Each frame is one sub-table: its complete current sections, concatenated verbatim in `section_number` order, each including its header and CRC.
+Sections are self-delimiting via `section_length`, so the frame needs no framing of its own.
+A sub-table's identity is its generic section header (`table_id`, `table_id_extension`) extended by the documented disambiguators for two DVB table families: `original_network_id` (bytes 8..10) for SDT other (`table_id` 0x46), and `transport_stream_id` plus `original_network_id` (bytes 8..12) for EIT (0x4E..0x6F), whose generic identities are only unique within one network or transport stream.
+
+Each group is a snapshot: reading its frames in order yields the table's complete current state, where a later frame replaces an earlier one with the same sub-table identity.
+A joiner reads only the newest group and is current; older groups never need to be fetched.
+A writer MAY append a frame to an open group to revise one sub-table incrementally; a writer that only ever cuts complete groups is trivially conformant.
+
+A publisher MUST NOT mix versions within a sub-table's frame: sections of one version are buffered until the generation is judged complete and committed atomically.
+Completeness is contiguity (all of `0..=last_section_number` present) or one observed full transmission cycle, whichever comes first: some tables number their sections sparsely (DVB EIT schedule skips unused numbers per segment), so a repeated section within the pending generation proves the cycle wrapped and the set is complete as transmitted.
+A section lost before the cycle wraps is indistinguishable from a legitimately skipped number, so a committed set can transiently omit it until the next cycle re-supplies it; no section-counting receiver can do better.
+A publisher SHOULD carry only sections whose `current_next_indicator` is set.
+
+A section without a long-form header (short-form syntax: TDT/TOT and similar) has no extension, version, or numbering, so its table is a single latest-value slot: each arrival replaces the last, and a byte-identical repetition is not a change.
+This is what makes a time table proxyable: each tick republishes a small snapshot, a joiner reads the newest, and staleness is bounded by the source's own repetition interval plus path latency, the same bound a receiver of the original multiplex has.
+Carrying the source's time rather than synthesizing one keeps the clock consistent with the EPG (event times are expressed on the source's clock) and preserves TOT's local-time-offset descriptors, which are operator policy a re-multiplexer cannot invent.
 
 
 # Security Considerations

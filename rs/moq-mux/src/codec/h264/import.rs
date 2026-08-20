@@ -47,7 +47,7 @@ impl<E: CatalogExt> Import<E> {
 		reserved: crate::catalog::Reserved<E>,
 		hint: crate::catalog::VideoHint,
 	) -> crate::Result<Self> {
-		let rendition = reserved.video(track.name());
+		let rendition = reserved.video(track.name())?;
 		let catalog = crate::codec::video::Catalog::new(hint);
 		let mut import = Self {
 			avc1: false,
@@ -86,20 +86,8 @@ impl<E: CatalogExt> Import<E> {
 	fn initialize_avc1(&mut self, avcc_bytes: &[u8]) -> Result<()> {
 		// Only switch to avc1 mode once the avcC actually parses, so a parse failure leaves the
 		// importer in avc3 mode where inline-SPS keyframes still self-initialize.
-		let avcc = super::Avcc::parse(avcc_bytes)?;
+		let config = config_from_avcc(avcc_bytes)?;
 		self.avc1 = true;
-
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
-			profile: avcc.profile,
-			constraints: avcc.constraints,
-			level: avcc.level,
-			inline: false,
-		});
-		config.coded_width = avcc.coded_width;
-		config.coded_height = avcc.coded_height;
-		config.description = Some(Bytes::copy_from_slice(avcc_bytes));
-		config.container = hang::catalog::Container::Legacy;
-
 		self.apply_config(config);
 		Ok(())
 	}
@@ -190,17 +178,7 @@ impl<E: CatalogExt> Import<E> {
 		if self.last_sps.as_ref() == Some(sps_nal) {
 			return Ok(());
 		}
-		let sps = Sps::parse(sps_nal)?;
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
-			profile: sps.profile,
-			constraints: sps.constraints,
-			level: sps.level,
-			inline: true,
-		});
-		config.coded_width = Some(sps.coded_width);
-		config.coded_height = Some(sps.coded_height);
-		config.container = hang::catalog::Container::Legacy;
-
+		let config = config_from_sps(sps_nal)?;
 		self.last_sps = Some(sps_nal.clone());
 		self.apply_config(config);
 		Ok(())
@@ -249,6 +227,55 @@ impl<E: CatalogExt> Import<E> {
 	pub fn decode(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		self.write_frames(frames)
 	}
+}
+
+/// The catalog config a stream's codec bytes describe, resolved without publishing anything: an
+/// `AVCDecoderConfigurationRecord` (the avc1 shape) or Annex-B carrying an inline SPS (avc3).
+///
+/// The video counterpart of [`opus::config`](crate::codec::opus::config), for a caller holding the
+/// bytes but no track: a publisher that wants its catalog rendition to say what its encoder really
+/// emits reads it out of one encoded keyframe rather than guessing.
+pub fn config(buf: &[u8]) -> Result<hang::catalog::VideoConfig> {
+	if crate::codec::annexb::is_config_record(buf) {
+		return config_from_avcc(buf);
+	}
+	let sps = find_sps(buf).ok_or(Error::NotInitialized)?;
+	config_from_sps(&sps)
+}
+
+/// The config an `AVCDecoderConfigurationRecord` describes, stored verbatim as the `description`
+/// (`inline: false`, the avc1 shape).
+fn config_from_avcc(avcc_bytes: &[u8]) -> Result<hang::catalog::VideoConfig> {
+	let avcc = super::Avcc::parse(avcc_bytes)?;
+
+	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+		profile: avcc.profile,
+		constraints: avcc.constraints,
+		level: avcc.level,
+		inline: false,
+	});
+	config.coded_width = avcc.coded_width;
+	config.coded_height = avcc.coded_height;
+	config.description = Some(Bytes::copy_from_slice(avcc_bytes));
+	config.container = hang::catalog::Container::Legacy;
+	Ok(config)
+}
+
+/// The config an inline SPS describes (`inline: true`, the avc3 shape). No `description`: the
+/// parameter sets ride with every keyframe.
+fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
+	let sps = Sps::parse(sps_nal)?;
+
+	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+		profile: sps.profile,
+		constraints: sps.constraints,
+		level: sps.level,
+		inline: true,
+	});
+	config.coded_width = Some(sps.coded_width);
+	config.coded_height = Some(sps.coded_height);
+	config.container = hang::catalog::Container::Legacy;
+	Ok(config)
 }
 
 fn is_sps(nal: &[u8]) -> bool {

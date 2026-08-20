@@ -14,6 +14,11 @@
 //!   that migrates between workers).
 //! - [`Producer`] alone publishes frames you already encoded.
 //!
+//! A [`Producer`] advertises its catalog rendition as soon as the track exists,
+//! resolved from the encoder itself via [`Config::probe`], so a subscriber can
+//! discover a track nothing has encoded yet. That's what makes on-demand
+//! encoding possible at all.
+//!
 //! [`Options`] / [`Kind`] / [`Config`] configure them. The decode/consume
 //! counterpart (mirror of `moq-audio`'s consumer) lives in the sibling
 //! [`decode`](crate::decode) module.

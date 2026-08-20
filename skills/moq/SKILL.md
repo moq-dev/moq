@@ -14,7 +14,7 @@ This skill is an index of the moq-dev monorepo (https://github.com/moq-dev/moq):
 
 The stack from the wire up. Reach for the highest layer that fits and drop down only when you need control:
 
-1. **QUIC**: does all the networking. Provided by the browser or a QUIC library (`moq-native` configures one for you in Rust).
+1. **QUIC**: does all the networking. Provided by the browser or a QUIC library (`moq-tokio` configures one for you in Rust).
 2. **WebTransport**: a thin layer over QUIC/HTTP3 so browsers can speak it. Provided by the browser or the `web-transport` crates.
 3. **moq-lite** (Rust `moq-net`, TypeScript `@moq/net`): generic real-time pub/sub. A *broadcast* contains named *tracks*; tracks carry *groups* of *frames*. Relays cache, deduplicate, and fan out without understanding the payload, so anything can be end-to-end encrypted. This is the layer CDNs implement.
 4. **hang** (Rust `hang`, TypeScript `@moq/hang`): media on top. A catalog track describes codecs/renditions; containers carry timestamped codec bitstream. Think of hang as HLS/DASH and moq-lite as HTTP.
@@ -44,7 +44,7 @@ Everything below builds on these layers.
 
 ## Repo map
 
-- `rs/` Rust: `moq-net` (pub/sub), `hang` (media), `moq-relay`, `moq-cli` (installs a `moq` binary), `moq-native` (QUIC/TLS setup), `moq-mux` (container muxing), `moq-token[-cli]` (auth), gateways (`moq-rtmp`, `moq-srt`, `moq-rtc`, `moq-hls`), native codecs (`moq-video`, `moq-audio`, `moq-nvenc`), `moq-ffi`/`libmoq` (bindings core).
+- `rs/` Rust: `moq-net` (pub/sub), `hang` (media), `moq-relay`, `moq-cli` (installs a `moq` binary), `moq-tokio` (QUIC/TLS setup), `moq-mux` (container muxing), `moq-token[-cli]` (auth), gateways (`moq-rtmp`, `moq-srt`, `moq-rtc`, `moq-hls`), native codecs (`moq-video`, `moq-audio`, `moq-nvenc`), `moq-ffi`/`libmoq` (bindings core).
 - `js/` TypeScript, published as `@moq/*`: `net`, `hang`, `watch`, `publish`, `token`, `json`, `signals`.
 - `py/`, `swift/`, `kt/`, `go/` bindings; `cpp/obs` OBS plugin; `demo/` runnable demos.
 

@@ -25,7 +25,8 @@ The library exposes the following C functions, see [api.rs](src/api.rs) for full
 int32_t moq_log_level(const char *level, uintptr_t level_len);
 
 // Session
-int32_t moq_session_connect(const char *url, uintptr_t url_len, uint32_t origin_publish, uint32_t origin_consume, void (*on_status)(void *user_data, int32_t code), void *user_data);
+int32_t moq_session_connect(const char *url, uintptr_t url_len, const moq_client_config *config, uint32_t origin_publish, uint32_t origin_consume, void (*on_status)(void *user_data, int32_t code), void *user_data);
+moq_client_config moq_client_defaults(void);
 int32_t moq_session_close(uint32_t session);
 
 // Origin
@@ -44,7 +45,11 @@ int32_t moq_origin_announced_close(uint32_t announced);
 // Publishing
 int32_t moq_publish_set_announce(uint32_t broadcast, bool announce);
 int32_t moq_publish_finish(uint32_t broadcast);
-int32_t moq_publish_media(uint32_t broadcast, const char *format, uintptr_t format_len, const uint8_t *init, uintptr_t init_size);
+int32_t moq_publish_audio(uint32_t broadcast, const moq_audio_init *config);
+int32_t moq_publish_video(uint32_t broadcast, const moq_video_init *config);
+int32_t moq_publish_container(uint32_t broadcast, const moq_container_init *config);
+int32_t moq_publish_container_write(uint32_t container, const uint8_t *payload, uintptr_t payload_size);
+int32_t moq_publish_container_finish(uint32_t container);
 int32_t moq_publish_media_finish(uint32_t media);
 int32_t moq_publish_media_frame(uint32_t media, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
 int32_t moq_publish_track(uint32_t broadcast, const char *name, uintptr_t name_len);
@@ -62,6 +67,7 @@ int32_t moq_consume_catalog(uint32_t broadcast, void (*on_catalog)(void *user_da
 int32_t moq_consume_catalog_close(uint32_t catalog);
 int32_t moq_consume_catalog_free(uint32_t catalog);
 int32_t moq_consume_video_config(uint32_t catalog, uint32_t index, moq_video_config *dst);
+int32_t moq_consume_video_stalled(uint32_t catalog, uint32_t index, bool *dst);
 int32_t moq_consume_audio_config(uint32_t catalog, uint32_t index, moq_audio_config *dst);
 
 // Consuming: Video

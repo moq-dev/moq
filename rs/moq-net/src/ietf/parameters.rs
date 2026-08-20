@@ -22,6 +22,8 @@ pub enum ParameterVarInt {
 	MaxAuthTokenCacheSize = 4,
 	/// RELAY_COST, from the MoQ Cluster extension.
 	RelayCost = super::cluster::RELAY_COST,
+	/// SOLICIT, from the MoQ Solicit extension.
+	Solicit = super::solicit::SOLICIT,
 	#[num_enum(catch_all)]
 	Unknown(u64),
 }

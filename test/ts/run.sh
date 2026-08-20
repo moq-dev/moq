@@ -21,6 +21,7 @@ WORKSPACE=$(cd "$DIR/../.." && pwd)
 
 SOURCE=""       # real capture to publish instead of a generated clip
 ANALYZE_ONLY="" # existing TS to analyze without a round-trip
+CAPTURE_OUT=""  # keep the subscriber capture here (for callers asserting on it)
 DURATION="${TSC_DURATION:-20}"
 BITRATE="${TSC_BITRATE:-10000000}"
 PORT="${TSC_PORT:-4443}"
@@ -53,6 +54,10 @@ while [[ $# -gt 0 ]]; do
         --strict)
             STRICT="--strict"
             shift
+            ;;
+        --capture-out)
+            CAPTURE_OUT="$2"
+            shift 2
             ;;
         *)
             PASSTHRU+=("$1")
@@ -185,7 +190,7 @@ fi
 # the start of the stream (or the whole thing for a short clip).
 echo "### capturing subscriber output (export ts)"
 timeout -k 3 $((DURATION + 20)) \
-    "$MOQ" --client-connect "$URL" --broadcast "$BROADCAST" export ts >"$SUB_TS" 2>"$TMP/sub.log" &
+    "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts >"$SUB_TS" 2>"$TMP/sub.log" &
 SUB_PID=$!
 sleep 1
 
@@ -198,7 +203,7 @@ echo "### publishing PCR-paced TS -> $BROADCAST"
 # shellcheck disable=SC2016  # $1..$4 are the child bash -c positionals, not ours.
 timeout -k 3 $((DURATION + 20)) bash -c '
     tsp -I file "$1" -P regulate --pcr-synchronous |
-        "$2" --client-connect "$3" --broadcast "$4" import ts
+        "$2" --connect "$3" --broadcast "$4" import ts
 ' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST" >"$TMP/pub.log" 2>&1 &
 PUB_PID=$!
 
@@ -222,6 +227,10 @@ if [[ ! -s "$SUB_TS" ]]; then
     echo "error: subscriber captured no data" >&2
     dump_logs
     exit 1
+fi
+
+if [[ -n "$CAPTURE_OUT" ]]; then
+    cp "$SUB_TS" "$CAPTURE_OUT"
 fi
 
 echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') bytes -> analyzing"

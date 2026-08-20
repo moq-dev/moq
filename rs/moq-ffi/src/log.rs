@@ -21,7 +21,7 @@ pub fn moq_log_level(level: String) -> Result<(), MoqError> {
 		return Err(MoqError::Log("logging already initialized".into()));
 	}
 
-	moq_native::Log::new(level)
+	moq_tokio::Log::new(level)
 		.init()
 		.inspect_err(|_| INITIALIZED.store(false, Ordering::SeqCst))
 		.map_err(|err| MoqError::Log(err.to_string()))?;

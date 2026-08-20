@@ -15,9 +15,12 @@ const TrackSchema = z.object({
  */
 export const AudioConfigSchema = z.object({
 	// Optional reference to another broadcast that publishes this track, expressed
-	// relative to the broadcast that served this catalog (e.g. "../source").
+	// relative to the broadcast that served this catalog (e.g. "./source").
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
+
+	// Human-readable rendition name for track pickers.
+	label: z.optional(z.string()),
 
 	// Registered WebCodecs codec string, or Hang's "pcm" extension for
 	// interleaved little-endian IEEE-754 binary32 samples.

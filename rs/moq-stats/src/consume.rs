@@ -101,16 +101,29 @@ impl SessionsConsumer {
 
 #[cfg(test)]
 mod tests {
+	/// Build an origin producer, spawning its driver on the ambient runtime.
+	fn produce_origin() -> moq_net::origin::Producer {
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		if tokio::runtime::Handle::try_current().is_ok() {
+			tokio::spawn(driver);
+		} else {
+			// A sync test: nothing polls the driver, and dropping it would tear
+			// the origin down, so leak it and rely on the synchronous half.
+			std::mem::forget(driver);
+		}
+		producer
+	}
+
 	use std::time::Duration;
 
-	use moq_net::{Consume, Origin, PathOwned, Timestamp, announce, broadcast, origin, track};
+	use moq_net::{Consume, PathOwned, Timestamp, announce, broadcast, origin, track};
 
 	use crate::{Producer, ProducerConfig, Tier};
 
 	use super::*;
 
 	fn test_producer() -> (Producer, origin::Producer) {
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 		let producer = Producer::new(
 			ProducerConfig::new()
 				.with_origin(origin.clone())
@@ -143,7 +156,7 @@ mod tests {
 
 	async fn feed(producer: &Producer, tier: Tier, root: &str, path: &str) -> Feed {
 		let ctx = producer.registry().tier(tier).session(root);
-		let feed_origin = Origin::random().produce();
+		let feed_origin = produce_origin();
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
 		let mut announced = egress.announced();

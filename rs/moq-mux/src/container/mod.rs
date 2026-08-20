@@ -15,6 +15,7 @@ use std::task::Poll;
 use bytes::Bytes;
 
 mod consumer;
+mod group;
 mod producer;
 mod source;
 #[cfg(test)]
@@ -28,6 +29,7 @@ pub mod mkv;
 pub mod ts;
 
 pub use consumer::Consumer;
+pub use group::GroupConsumer;
 pub use producer::Producer;
 pub(crate) use source::ExportSource;
 

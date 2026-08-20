@@ -9,8 +9,8 @@
 
 use std::{net::TcpListener, time::Duration};
 
-use moq_native::moq_net::{self, Origin};
-use moq_relay::{AuthConfig, Cluster, ClusterConfig, Connection, PublicConfig, Web, WebConfig};
+use moq_relay::{AuthConfig, Cluster, ClusterConfig, Config, Connection, PublicConfig, Relay, Web, WebConfig};
+use moq_tokio::moq_net::{self, Origin};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -50,19 +50,19 @@ async fn build_web_with(web_config: WebConfig) -> Web {
 	let mut auth_config = AuthConfig::default();
 	auth_config.public = Some(public);
 	let auth = auth_config
-		.init(&moq_native::tls::Client::default())
+		.init(&moq_tokio::tls::Connect::default())
 		.await
 		.expect("auth init");
 
 	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
 
-	// moq_native::Server is needed for `certificates`, even though we never
+	// moq_tokio::Server is needed for `certificates`, even though we never
 	// expose HTTPS or QUIC in this test. Binding QUIC to `[::]:0` picks an
 	// unused UDP port that we ignore.
-	let mut server_config = moq_native::ServerConfig::default();
+	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
-	let server = server_config.init().expect("server init");
+	let server = server_config.init(Default::default()).expect("server init");
 
 	Web::new(auth, cluster, server.certificates(), web_config)
 }
@@ -119,26 +119,51 @@ async fn spawn_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	(port, handle)
 }
 
-fn client() -> moq_native::Client {
+/// Stand up the assembled relay path with `--server-version` restricted.
+async fn spawn_versioned_relay(versions: Vec<moq_net::Version>) -> (u16, tokio::task::JoinHandle<()>) {
+	let port = free_tcp_port();
+	let mut config = Config::default();
+	config.listen.bind = Some("127.0.0.1:0".to_string());
+	config.listen.tls.generate = vec!["localhost".into()];
+	config.listen.version = versions;
+	config.web.ws = true;
+	config.web.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
+
+	#[allow(deprecated)]
+	let public = PublicConfig::Simple(vec![String::new()]);
+	config.auth.public = Some(public);
+
+	let relay = Relay::load(config).await.expect("load relay");
+	let web = relay.web;
+	let (server_result_tx, mut server_result_rx) = tokio::sync::oneshot::channel();
+	let handle = tokio::spawn(async move {
+		let _ = server_result_tx.send(web.run().await);
+	});
+
+	wait_for_http(port, &mut server_result_rx).await;
+	(port, handle)
+}
+
+fn client() -> moq_tokio::Client {
 	client_version(None)
 }
 
 /// A client pinned to a single MoQ version, or all versions when `None`.
-fn client_version(version: Option<moq_net::Version>) -> moq_native::Client {
-	let mut config = moq_native::ClientConfig::default();
-	config.tls.disable_verify = Some(true);
+fn client_version(version: Option<moq_net::Version>) -> moq_tokio::Client {
+	let mut config = moq_tokio::connect::Config::default();
+	config.tls.insecure = Some(true);
 	// One-shot: these tests were written against a single dial, and a background
 	// redial would re-register with the relay behind the assertions' back.
-	config.reconnect = Some(false);
+	config.once = Some(true);
 	// Zero head start so the WebSocket path runs immediately.
-	config.websocket.delay = None;
+	config.websocket.delay = Some(std::time::Duration::ZERO);
 	// Every relay in this file listens on IPv4 loopback, so bind the same family
 	// rather than egressing a QUIC dial from a dual-stack IPv6 socket.
-	config.bind = "127.0.0.1:0".parse().expect("parse bind");
+	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	if let Some(version) = version {
 		config.version = vec![version];
 	}
-	config.init().expect("client init")
+	config.init(Default::default()).expect("client init")
 }
 
 /// Connect a publisher and a subscriber to a real relay over `ws://`, push
@@ -151,7 +176,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	let expected_version = newest_lite_version();
 
 	// ── publisher ───────────────────────────────────────────────────
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -174,7 +199,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	);
 
 	// ── subscriber ──────────────────────────────────────────────────
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 
 	let (_client, sub_connection) =
@@ -217,6 +242,35 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 
 	drop(pub_connection);
 	drop(sub_connection);
+	web_handle.abort();
+}
+
+/// `--server-version` applies to the WebSocket fallback as well as QUIC.
+#[tokio::test]
+async fn relay_websocket_honors_server_version() {
+	let allowed: moq_net::Version = "moq-transport-16".parse().expect("parse allowed version");
+	let excluded = newest_lite_version();
+	let (port, web_handle) = spawn_versioned_relay(vec![allowed]).await;
+	let url: url::Url = format!("ws://127.0.0.1:{port}/smoke").parse().expect("parse url");
+
+	let excluded_result = tokio::time::timeout(
+		TIMEOUT,
+		client_version(Some(excluded)).connect(url.clone()).established(),
+	)
+	.await
+	.expect("excluded client connect timeout");
+	assert!(
+		excluded_result.is_err(),
+		"WebSocket accepted excluded version {excluded} despite --server-version {allowed}"
+	);
+
+	let session = tokio::time::timeout(TIMEOUT, client_version(Some(allowed)).connect(url).established())
+		.await
+		.expect("allowed client connect timeout")
+		.expect("allowed client connect failed");
+	assert_eq!(session.version(), Some(allowed));
+
+	drop(session);
 	web_handle.abort();
 }
 
@@ -298,7 +352,7 @@ async fn relay_https_terminates_tls() {
 	// A listener that just served a request is not stalled, and the connections it
 	// fielded were not junk.
 	assert_eq!(health.stalled(), None);
-	assert_eq!(health.failures(moq_native::accept::Failure::Exhausted), 0);
+	assert_eq!(health.failures(moq_tokio::accept::Failure::Exhausted), 0);
 
 	handle.abort();
 }
@@ -315,7 +369,7 @@ async fn relay_websocket_root_path_upgrades() {
 	let url: url::Url = format!("ws://127.0.0.1:{port}").parse().expect("parse url");
 
 	// ── publisher ───────────────────────────────────────────────────
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -335,7 +389,7 @@ async fn relay_websocket_root_path_upgrades() {
 	.expect("publisher connect failed (root-path WS upgrade)");
 
 	// ── subscriber ──────────────────────────────────────────────────
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 	let (_client, sub_connection) =
 		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
@@ -382,7 +436,7 @@ async fn two_publish_only_clients_coexist() {
 	let url: url::Url = format!("ws://127.0.0.1:{port}/smoke").parse().expect("parse url");
 
 	// ── two publish-only publishers, each serving a distinct broadcast ──
-	let pub_a = Origin::random().produce();
+	let pub_a = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast_a = pub_a
 		.create_broadcast("alpha", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast a");
@@ -393,7 +447,7 @@ async fn two_publish_only_clients_coexist() {
 		.write_frame(moq_net::Timestamp::ZERO, b"a".as_ref())
 		.expect("write frame a");
 
-	let pub_b = Origin::random().produce();
+	let pub_b = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast_b = pub_b
 		.create_broadcast("beta", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast b");
@@ -420,7 +474,7 @@ async fn two_publish_only_clients_coexist() {
 	.expect("publisher b connect failed");
 
 	// ── one subscriber should see broadcasts from both publish-only clients ──
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 	let (_client, sub_connection) =
 		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
@@ -462,16 +516,16 @@ async fn two_publish_only_clients_coexist() {
 /// Returns the QUIC socket the server bound, when it has one, so a caller that
 /// asked for an ephemeral port can dial it.
 async fn spawn_accept_relay(
-	config: moq_native::ServerConfig,
+	config: moq_tokio::listen::Config,
 	auth_config: AuthConfig,
 ) -> (Option<std::net::SocketAddr>, tokio::task::JoinHandle<()>) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	let server = config.init().expect("server init");
+	let server = config.init(Default::default()).expect("server init");
 	let addr = server.local_addr().ok();
 
 	let auth = auth_config
-		.init(&moq_native::tls::Client::default())
+		.init(&moq_tokio::tls::Connect::default())
 		.await
 		.expect("auth init");
 
@@ -504,7 +558,7 @@ async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	drop(probe);
 
 	// Stream-only: a TCP listener with no `--server-bind`, so no QUIC.
-	let mut config = moq_native::ServerConfig::default();
+	let mut config = moq_tokio::listen::Config::default();
 	config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 
 	// Public Simple([""]) lets any no-JWT stream client through at the root.
@@ -540,7 +594,7 @@ async fn internal_tcp_round_trip() {
 	let expected_version = newest_lite_version();
 
 	// ── publisher ───────────────────────────────────────────────────
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -565,7 +619,7 @@ async fn internal_tcp_round_trip() {
 	);
 
 	// ── subscriber ──────────────────────────────────────────────────
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 	let (_client, sub_connection) =
 		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
@@ -615,7 +669,7 @@ async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHa
 	let path = std::path::PathBuf::from(format!("/tmp/moq-internal-{}-{seq}.sock", std::process::id()));
 
 	// Stream-only: a Unix listener with no `--server-bind`, so no QUIC.
-	let mut config = moq_native::ServerConfig::default();
+	let mut config = moq_tokio::listen::Config::default();
 	config.unix.bind = Some(path.clone());
 
 	// Public Simple([""]) lets any no-JWT stream client through at the root.
@@ -653,7 +707,7 @@ async fn internal_unix_round_trip() {
 	let expected_version = newest_lite_version();
 
 	// ── publisher ───────────────────────────────────────────────────
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -678,7 +732,7 @@ async fn internal_unix_round_trip() {
 	);
 
 	// ── subscriber ──────────────────────────────────────────────────
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 	let (_client, sub_connection) =
 		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
@@ -741,7 +795,7 @@ fn path_versions() -> Vec<moq_net::Version> {
 /// whether the request path reached the server (it scopes the publisher's grant
 /// to that root).
 async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: url::Url, broadcast: &str) -> String {
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut bc = pub_origin
 		.create_broadcast(broadcast, moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -758,7 +812,7 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 		.expect("publisher connect timeout")
 		.expect("publisher connect failed");
 
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut announcements = sub_origin.consume().announced();
 	let sub_client = client_version(Some(version)).with_subscriber(sub_origin);
 	let (_client, sub_connection) = tokio::time::timeout(TIMEOUT, connect_once(sub_client, sub_url))
@@ -829,7 +883,7 @@ async fn internal_unix_path_reaches_server() {
 /// loopback port, with fully public auth (no-JWT => whole root). Returns the bound
 /// address and an abort handle.
 async fn spawn_quic_relay() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
-	let mut config = moq_native::ServerConfig::default();
+	let mut config = moq_tokio::listen::Config::default();
 	config.bind = Some("127.0.0.1:0".to_string());
 	config.tls.generate = vec!["localhost".into()];
 
@@ -890,7 +944,7 @@ async fn spawn_subscribe_only_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	let port = probe.local_addr().expect("local addr").port();
 	drop(probe);
 
-	let mut config = moq_native::ServerConfig::default();
+	let mut config = moq_tokio::listen::Config::default();
 	config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 
 	// Subscribe-only public access: the root is granted for subscribing, never publishing.
@@ -926,7 +980,7 @@ async fn subscribe_only_public_rejects_publisher_role() {
 	let (port, handle) = spawn_subscribe_only_relay().await;
 	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 
-	let pub_origin = Origin::random().produce();
+	let pub_origin = moq_tokio::origin::spawn(Origin::random());
 
 	// The lite-05 client resolves `connect()` optimistically, so it may return Ok
 	// before the relay's verdict lands. Either the connect fails outright, or the
@@ -958,7 +1012,7 @@ async fn subscribe_only_public_accepts_subscriber_role() {
 	let (port, handle) = spawn_subscribe_only_relay().await;
 	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 		.await
 		.expect("subscriber connect timeout")
@@ -981,7 +1035,7 @@ async fn spawn_publish_only_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	let port = probe.local_addr().expect("local addr").port();
 	drop(probe);
 
-	let mut config = moq_native::ServerConfig::default();
+	let mut config = moq_tokio::listen::Config::default();
 	config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 
 	// Publish-only public access: the root is granted for publishing, never subscribing.
@@ -1014,7 +1068,7 @@ async fn publish_only_public_rejects_subscriber_role() {
 	let (port, handle) = spawn_publish_only_relay().await;
 	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 
-	let sub_origin = Origin::random().produce();
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
 
 	// Like the publisher case, `connect()` may resolve optimistically; either it fails
 	// outright, or the session the relay hands back closes shortly after.
@@ -1040,9 +1094,9 @@ async fn publish_only_public_rejects_subscriber_role() {
 /// The client comes back because it owns the transport endpoint (iroh's dies with
 /// it), and the caller has to outlive the connection it just got.
 async fn connect_once(
-	client: moq_native::Client,
+	client: moq_tokio::Client,
 	url: url::Url,
-) -> moq_native::Result<(moq_native::Client, moq_native::Connection)> {
+) -> moq_tokio::Result<(moq_tokio::Client, moq_tokio::Connection)> {
 	let connection = client.clone().with_reconnect(false).connect(url).established().await?;
 	Ok((client, connection))
 }

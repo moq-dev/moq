@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `encode::Producer` carries a rendition's `label` into the catalog. It copied the config into hints
+  field by field and had no case for the new field.
+
+## [0.0.17](https://github.com/moq-dev/moq/compare/moq-video-v0.0.16...moq-video-v0.0.17) - 2026-08-14
+
+### Added
+
+- *(libmoq)* declare the catalog container for manually authored renditions ([#2805](https://github.com/moq-dev/moq/pull/2805))
+
+## [0.0.16](https://github.com/moq-dev/moq/compare/moq-video-v0.0.15...moq-video-v0.0.16) - 2026-08-13
+
+### Added
+
+- *(moq-video)* advertise the catalog rendition before the first keyframe ([#2768](https://github.com/moq-dev/moq/pull/2768))
+
+### Fixed
+
+- *(release)* repair native package releases ([#2731](https://github.com/moq-dev/moq/pull/2731))
+- *(moq-ffi)* support iOS simulator builds ([#2710](https://github.com/moq-dev/moq/pull/2710))
+
 ## [0.0.15](https://github.com/moq-dev/moq/compare/moq-video-v0.0.14...moq-video-v0.0.15) - 2026-08-07
 
 ### Added

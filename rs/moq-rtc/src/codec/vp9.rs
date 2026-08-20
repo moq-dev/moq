@@ -1,123 +1,61 @@
 //! VP9 bridge.
 //!
-//! Keyframes are detected from the frame_type bit (RFC 8741 §3 / VP9 spec §6.2:
-//! the second bit of the uncompressed header).
+//! str0m hands us complete VP9 frames, which is exactly the raw shape that
+//! [`moq_mux::codec::vp9::Import`] consumes. The shared importer parses keyframes
+//! so the catalog carries the encoded dimensions and stays in sync if they change.
 
 use crate::{Result, codec};
 
-/// Forwards str0m's VP9 frames to a `.vp9` track, detecting keyframes inline.
+/// Bridges str0m VP9 frames into a MoQ VP9 track.
 pub struct Bridge {
-	/// Owns the catalog rendition, retiring it when the bridge goes away.
-	rendition: codec::VideoRendition,
-	track: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
-	announced: bool,
+	import: codec::DeferredVideo<moq_mux::codec::vp9::Import>,
 }
 
 impl Bridge {
-	/// Publish a `.vp9` track on `broadcast`; the catalog rendition is added on the first frame.
-	pub fn new(mut broadcast: moq_net::broadcast::Producer, mut catalog: moq_mux::catalog::Producer) -> Result<Self> {
-		let track = broadcast.create_track(broadcast.unique_name(".vp9"), catalog.track_info())?;
-		let name = track.name().to_string();
-		let producer = catalog.media_producer(track, moq_mux::catalog::hang::Container::Legacy)?;
-		Ok(Self {
-			rendition: codec::VideoRendition { catalog, name },
-			track: producer,
-			announced: false,
-		})
-	}
-
-	fn announce(&mut self) -> Result<()> {
-		if self.announced {
-			return Ok(());
-		}
-		let name = self.rendition.name.clone();
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VP9::default());
-		config.container = hang::catalog::Container::Legacy;
-		// Publish explicitly rather than through the guard's drop, which only warns:
-		// marking the rendition announced when the catalog never took it would leave the
-		// media track advertised nowhere, and `announced` latches so we'd never retry.
-		let mut guard = self.rendition.catalog.lock();
-		guard.video.renditions.insert(name, config);
-		guard.commit()?;
-		self.announced = true;
-		Ok(())
+	/// Publish a `.vp9` track on `broadcast`, adding the catalog rendition once config is known.
+	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
+		let import = codec::DeferredVideo::new(broadcast, catalog, ".vp9")?;
+		Ok(Self { import })
 	}
 }
 
 impl codec::Bridge for Bridge {
 	fn push(&mut self, frame: codec::Frame) -> Result<()> {
-		self.announce()?;
 		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us)
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("invalid timestamp: {err}")))?;
-		let keyframe = is_keyframe(&frame.payload);
-		self.track
-			.write(moq_mux::container::Frame {
-				timestamp: pts,
-				payload: frame.payload,
-				keyframe,
-				duration: None,
-			})
-			.map_err(|err| crate::Error::Other(anyhow::anyhow!("vp9 track write failed: {err}")))?;
-		Ok(())
+		self.import.decode(frame.payload, pts)
 	}
 
 	fn abort(self: Box<Self>, err: moq_net::Error) {
-		self.track.abort(err);
+		self.import.abort(err);
 	}
-}
-
-/// Detect a VP9 keyframe from the uncompressed header's first byte (VP9 spec
-/// §6.2), reading bits MSB-first: `frame_marker(2)`, `profile_low(1)`,
-/// `profile_high(1)`, a `reserved(1)` bit only when profile == 3,
-/// `show_existing_frame(1)`, then `frame_type(1)` (0 == KEY_FRAME). A
-/// show-existing frame carries no frame_type and is never a keyframe.
-fn is_keyframe(payload: &[u8]) -> bool {
-	let Some(&b) = payload.first() else {
-		return false;
-	};
-	let profile = (((b >> 4) & 1) << 1) | ((b >> 5) & 1); // (high << 1) | low
-	// Bits consumed from the MSB: 2 (marker) + 2 (profile), plus profile 3's reserved bit.
-	let mut pos = 4;
-	if profile == 3 {
-		pos += 1;
-	}
-	let show_existing_frame = (b >> (7 - pos)) & 1;
-	if show_existing_frame == 1 {
-		return false;
-	}
-	pos += 1;
-	let frame_type = (b >> (7 - pos)) & 1;
-	frame_type == 0
 }
 
 #[cfg(test)]
 mod tests {
-	use super::is_keyframe;
+	use bytes::Bytes;
 
-	// frame_marker = 0b10 in the top two bits for every well-formed header.
-	#[test]
-	fn profile0_keyframe_and_interframe() {
-		// profile 0, show_existing_frame = 0, frame_type = 0 (key) / 1 (inter).
-		assert!(is_keyframe(&[0b1000_0010]));
-		assert!(!is_keyframe(&[0b1000_0110]));
-	}
+	use crate::codec::{self, Bridge as _};
 
 	#[test]
-	fn profile0_show_existing_frame_is_not_keyframe() {
-		// profile 0, show_existing_frame = 1: no frame_type follows.
-		assert!(!is_keyframe(&[0b1000_1000]));
-	}
+	fn keyframe_publishes_catalog_dimensions() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut bridge = super::Bridge::new(broadcast, catalog.clone()).unwrap();
 
-	#[test]
-	fn profile3_keyframe_and_interframe() {
-		// profile 3 (both profile bits set) inserts a reserved bit before
-		// show_existing_frame, shifting frame_type one position right.
-		assert!(is_keyframe(&[0b1011_0000])); // reserved=0, show=0, frame_type=0
-		assert!(!is_keyframe(&[0b1011_0010])); // frame_type=1
-	}
+		assert!(catalog.snapshot().video.renditions.is_empty());
 
-	#[test]
-	fn empty_payload_is_not_keyframe() {
-		assert!(!is_keyframe(&[]));
+		// VP9 profile 0 keyframe header for 320x240.
+		bridge
+			.push(codec::Frame {
+				timestamp_us: 0,
+				payload: Bytes::from_static(&[0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00]),
+			})
+			.unwrap();
+
+		let snapshot = catalog.snapshot();
+		let config = snapshot.video.renditions.values().next().unwrap();
+		assert_eq!(config.coded_width, Some(320));
+		assert_eq!(config.coded_height, Some(240));
 	}
 }

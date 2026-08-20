@@ -19,9 +19,9 @@ pub enum Error {
 	#[error("moq error: {0}")]
 	Moq(#[from] moq_net::Error),
 
-	/// Error from the native helper layer (moq-native).
+	/// Error from the native helper layer (moq-tokio).
 	#[error("native error: {0}")]
-	Native(#[from] moq_native::Error),
+	Native(#[from] moq_tokio::Error),
 
 	/// URL parsing error.
 	#[error("url error: {0}")]
@@ -155,13 +155,14 @@ pub enum Error {
 	#[error("json track error: {0}")]
 	JsonTrack(Arc<moq_json::Error>),
 
-	/// Client configuration handle not found.
-	#[error("client not found")]
-	ClientNotFound,
-
 	/// A client configuration value could not be parsed or initialized.
 	#[error("invalid config: {0}")]
 	InvalidConfig(String),
+
+	/// A catalog rendition named another broadcast, but the broadcast it came from was not
+	/// resolved through an origin, so there is nothing to resolve the reference against.
+	#[error("unresolvable broadcast reference: {0}")]
+	UnresolvableBroadcast(String),
 }
 
 impl From<moq_json::Error> for Error {
@@ -239,8 +240,8 @@ impl ffi::ReturnCode for Error {
 			Error::Video(_) => -36,
 			Error::Json(_) => -37,
 			Error::JsonTrack(_) => -38,
-			Error::ClientNotFound => -39,
 			Error::InvalidConfig(_) => -40,
+			Error::UnresolvableBroadcast(_) => -41,
 		}
 	}
 }

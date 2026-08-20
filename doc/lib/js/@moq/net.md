@@ -44,6 +44,37 @@ See [`js/net/examples/discovery.ts`](https://github.com/moq-dev/moq/blob/main/js
 
 ## Core Concepts
 
+### Origins
+
+A routing table of broadcasts by path, independent of any connection. Publishing goes through an origin, not a session: create one, publish broadcasts into it, and hand it to a connection via the `publish` option. The connection announces and serves the table for as long as the session lasts, and a reconnect re-announces whatever is still published.
+
+```ts
+const origin = new Moq.Origin.Producer();
+await Moq.Connection.connect(url, { publish: origin.consume() });
+
+const broadcast = origin.publish(Moq.Path.from("my-broadcast"));
+broadcast.createTrack("chat");
+```
+
+Closing the connection unannounces the broadcasts but does not close them; they stay in the origin for the next session. Closing a broadcast's producer unpublishes just that path.
+
+The other direction works the same way: pass an origin as the `subscribe` option and everything the peer announces appears in its table, gone when the session dies.
+
+`origin.request(path)` is how you consume by path, whether or not anything announced it:
+
+```ts
+// One origin can back both directions of the same connection.
+await Moq.Connection.connect(url, { publish: origin.consume(), subscribe: origin });
+
+const request = origin.request(Moq.Path.from("some-broadcast"));
+const broadcast = request.active.peek(); // or effect.get(request.active)
+request.close(); // when done
+```
+
+`request.active` follows whatever the table routes: a local publish first, so a page that publishes and watches the same broadcast reads its own copy with no round trip, then any session's announcement, swapping when a republish takes the path. When nothing routes it (a relay without discovery, or subscribing before the publisher exists on purpose), an attached session answers it blind instead. Either way the request stands across reconnects, so hold it for as long as you want the path, and close it when you don't.
+
+Use `origin.announced(prefix)` to discover what is available rather than asking for a path you already know.
+
 ### Broadcasts
 
 A collection of related tracks.

@@ -136,10 +136,21 @@ impl Mode {
 
 #[cfg(test)]
 mod tests {
+	/// Build an origin producer, spawning its driver on the ambient runtime.
+	fn produce_origin() -> moq_net::origin::Producer {
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		if tokio::runtime::Handle::try_current().is_ok() {
+			tokio::spawn(driver);
+		} else {
+			// A sync test: nothing polls the driver, and dropping it would tear
+			// the origin down, so leak it and rely on the synchronous half.
+			std::mem::forget(driver);
+		}
+		producer
+	}
+
 	use std::net::SocketAddr;
 	use std::time::Duration;
-
-	use moq_net::Origin;
 
 	use super::*;
 	use crate::server::{Request, Server};
@@ -163,7 +174,7 @@ mod tests {
 
 		// Server accepts the publish so the caller's handshake completes; it ingests into
 		// a throwaway origin and returns the routed direction + resource.
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 		let server_task = tokio::spawn(async move {
 			let request = server.accept().await.expect("a request");
 			let resource = request.resource().to_string();
@@ -203,7 +214,7 @@ mod tests {
 
 		// Empty origin: the subscribe accept parks waiting for the broadcast, which is
 		// fine -- the caller still connects, and the test aborts the wait.
-		let origin = Origin::random().produce();
+		let origin = produce_origin();
 		let consumer = origin.consume();
 		let server_task = tokio::spawn(async move {
 			let request = server.accept().await.expect("a request");

@@ -28,6 +28,17 @@ pub struct Subscribe<'a> {
 	pub end_frame: Option<u64>,
 }
 
+impl Version {
+	/// Whether this version's SUBSCRIBE carries the subscriber's latency preference.
+	///
+	/// Lite01/02 have no field for it, so a decoded `Duration::ZERO` there means
+	/// "not stated", not "real time". Callers that act on the budget must tell the
+	/// two apart or they will hold every legacy peer to the live edge.
+	pub(crate) fn carries_latency(self) -> bool {
+		!matches!(self, Version::Lite01 | Version::Lite02)
+	}
+}
+
 impl Message for Subscribe<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let id = u64::decode(r, version)?;

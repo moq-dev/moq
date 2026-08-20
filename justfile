@@ -90,13 +90,8 @@ _changed $BASE:
 # to invoke it. Takes the same file list as the dispatch, or `ALL` to require
 # everything (`check-all`).
 #
-# Two deliberate absences:
-#   - swift exists only on macOS, and `swift check` skips off-macOS by design;
-#     swift.yml is its real gate.
-#   - go and uniffi-bindgen-go are NOT in the dev shell (uniffi-bindgen-go isn't
-#     in nixpkgs; it installs from a NordSecurity git tag). Requiring them would
-#     fail every Go-scoped PR, so `just go check` still skips itself in CI, as it
-#     always has. Packaging them is what would close that hole.
+# One deliberate absence: swift exists only on macOS, and `swift check` skips
+# off-macOS by design; swift.yml is its real gate.
 
 # Fail when a tool the diff's scopes need is missing. No-op unless MOQ_STRICT.
 [private]
@@ -112,11 +107,19 @@ _tools $FILES="":
     scoped '^(rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)' && tools+=(cargo)
     scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'     && tools+=(uv)
     scoped '^(kt/|rs/moq-ffi/)'                                && tools+=(gradle java)
+    # cargo because `go check` builds moq-ffi for the host, and skips on a
+    # missing cargo the same way it skips on a missing go.
+    scoped '^(go/|rs/moq-ffi/)'                                && tools+=(go uniffi-bindgen-go cargo)
     # The OBS lints ship only in the Linux dev shell; nixpkgs marks obs-studio
     # broken on Darwin.
     if [[ "$(uname -s)" == "Linux" ]] && scoped '^cpp/obs/'; then
     	tools+=(clang-format gersemi)
     fi
+
+    # Scopes overlap (rs/moq-ffi/ is in four of them), so the same tool can land
+    # in the list twice and be reported missing twice. Splitting on whitespace is
+    # safe: every entry is a bare command name.
+    tools=($(printf '%s\n' "${tools[@]}" | sort -u))
 
     missing=()
     for tool in "${tools[@]}"; do

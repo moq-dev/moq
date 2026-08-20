@@ -69,6 +69,17 @@ func (b *BroadcastConsumer) FetchGroup(name string, sequence uint64, options *Fe
 	return &GroupConsumer{inner: inner}, nil
 }
 
+// FetchMediaGroup fetches one group by sequence and decodes it with the given
+// container. Unlike SubscribeMedia this holds no live subscription and applies no
+// latency-based group skipping, so every frame in the group is delivered.
+func (b *BroadcastConsumer) FetchMediaGroup(name string, sequence uint64, container Container, options *FetchGroupOptions) (*MediaGroupConsumer, error) {
+	inner, err := b.inner.FetchMediaGroup(name, sequence, container, options)
+	if err != nil {
+		return nil, err
+	}
+	return &MediaGroupConsumer{inner: inner}, nil
+}
+
 // SubscribeMedia subscribes to a media track, decoded with the given container.
 // subscription tunes delivery priority, group ordering priority, group range, and
 // the latency budget; pass nil for defaults. Raise Subscription.LatencyMaxMs to
@@ -81,14 +92,42 @@ func (b *BroadcastConsumer) SubscribeMedia(name string, container Container, sub
 	return &MediaConsumer{inner: inner}, nil
 }
 
-// SubscribeAudio subscribes to a raw-audio track; samples come back in the
+// Resolve returns the broadcast serving a catalog rendition, honoring its broadcast
+// reference: Video.Broadcast / Audio.Broadcast. A nil or empty reference names this
+// broadcast, anything else names a sibling relative to it (e.g. "./source"). Call it on a
+// rendition that carries one before SubscribeMedia, SubscribeTrack, FetchGroup, or
+// FetchMediaGroup, which take a track name rather than a rendition; DecodeAudio and
+// DecodeVideo resolve it themselves.
+//
+// Errors if this broadcast came from a local producer rather than an origin, since a
+// standalone broadcast has no sibling to name.
+func (b *BroadcastConsumer) Resolve(reference *string) (*BroadcastConsumer, error) {
+	inner, err := b.inner.Resolve(reference)
+	if err != nil {
+		return nil, err
+	}
+	return &BroadcastConsumer{inner: inner}, nil
+}
+
+// DecodeAudio subscribes to a raw-audio track; samples come back in the
 // format declared by output. catalogAudio comes from the catalog.
-func (b *BroadcastConsumer) SubscribeAudio(name string, catalogAudio Audio, output AudioDecoderOutput) (*AudioConsumer, error) {
-	inner, err := b.inner.SubscribeAudio(name, catalogAudio, output)
+func (b *BroadcastConsumer) DecodeAudio(name string, catalogAudio Audio, output AudioDecoderOutput) (*AudioConsumer, error) {
+	inner, err := b.inner.DecodeAudio(name, catalogAudio, output)
 	if err != nil {
 		return nil, err
 	}
 	return &AudioConsumer{inner: inner}, nil
+}
+
+// DecodeVideo subscribes to a video track and decodes it inside the bindings,
+// yielding packed I420. catalogVideo comes from the catalog. output.Resize is
+// best effort, so read each frame's own dimensions.
+func (b *BroadcastConsumer) DecodeVideo(name string, catalogVideo Video, output VideoDecoderOutput) (*VideoConsumer, error) {
+	inner, err := b.inner.DecodeVideo(name, catalogVideo, output)
+	if err != nil {
+		return nil, err
+	}
+	return &VideoConsumer{inner: inner}, nil
 }
 
 // Catalog subscribes and returns the first catalog. It reports ErrClosed if the
@@ -126,6 +165,32 @@ func (m *MediaConsumer) Frames(ctx context.Context) iter.Seq2[*MediaFrame, error
 
 // Cancel stops the stream.
 func (m *MediaConsumer) Cancel() {
+	m.inner.Cancel()
+}
+
+// MediaGroupConsumer is a finite stream of decoded media frames from one fetched
+// group. It ends after the group's last frame.
+type MediaGroupConsumer struct {
+	inner *ffi.MoqMediaGroupConsumer
+}
+
+// Sequence is this group's sequence number within the track.
+func (m *MediaGroupConsumer) Sequence() uint64 {
+	return m.inner.Sequence()
+}
+
+// Next returns the next decoded frame, or (nil, nil) when the group ends.
+func (m *MediaGroupConsumer) Next(ctx context.Context) (*MediaFrame, error) {
+	return runCancellable(ctx, m.inner.Cancel, m.inner.Next)
+}
+
+// Frames ranges over decoded frames until the group ends or the loop breaks.
+func (m *MediaGroupConsumer) Frames(ctx context.Context) iter.Seq2[*MediaFrame, error] {
+	return streamSeq(ctx, m.Next)
+}
+
+// Cancel stops the stream.
+func (m *MediaGroupConsumer) Cancel() {
 	m.inner.Cancel()
 }
 
@@ -249,6 +314,26 @@ func (a *AudioConsumer) Frames(ctx context.Context) iter.Seq2[*AudioFrame, error
 // Cancel stops the stream.
 func (a *AudioConsumer) Cancel() {
 	a.inner.Cancel()
+}
+
+// VideoConsumer is a stream of decoded video frames.
+type VideoConsumer struct {
+	inner *ffi.MoqVideoConsumer
+}
+
+// Next returns the next decoded frame, or (nil, nil) when the track ends.
+func (v *VideoConsumer) Next(ctx context.Context) (*VideoDecodedFrame, error) {
+	return runCancellable(ctx, v.inner.Cancel, v.inner.Next)
+}
+
+// Frames ranges over decoded frames until the track ends or the loop breaks.
+func (v *VideoConsumer) Frames(ctx context.Context) iter.Seq2[*VideoDecodedFrame, error] {
+	return streamSeq(ctx, v.Next)
+}
+
+// Cancel stops the stream.
+func (v *VideoConsumer) Cancel() {
+	v.inner.Cancel()
 }
 
 // CatalogConsumer is a stream of catalog updates.

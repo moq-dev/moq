@@ -189,8 +189,8 @@ impl Export {
 
 	/// Set the latency tolerance for each per-track source.
 	///
-	/// See [`Consumer::with_latency`](crate::container::Consumer::with_latency) for the
-	/// per-track skip behavior. Defaults to
+	/// See [`Consumer`](crate::container::Consumer) for the per-track skip behavior.
+	/// Defaults to
 	/// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) (skip aggressively).
 	pub fn with_latency(mut self, latency: crate::Latency) -> Self {
 		self.latency = latency;
@@ -303,7 +303,9 @@ impl Export {
 		!self.video.is_empty() || !self.audio.is_empty()
 	}
 
-	fn update_catalog(&mut self, catalog: Catalog) -> anyhow::Result<()> {
+	fn update_catalog(&mut self, mut catalog: Catalog) -> anyhow::Result<()> {
+		self.source.retain_valid_media(&mut catalog);
+
 		// A single-track FLV stream binds only the first rendition of each kind;
 		// multitrack binds them all. Bind newly-seen renditions in name order (the
 		// catalog is a BTreeMap) so each keeps a stable track id.
@@ -351,7 +353,9 @@ impl Export {
 				(VideoCodec::AV1(av1), None) => Some(Bytes::copy_from_slice(&av1c_bytes(av1))),
 				_ => None,
 			};
-			let source = ExportSource::for_video(&self.source, name, config, self.latency)?;
+			let Some(source) = ExportSource::for_video(&self.source, name, config, self.latency)? else {
+				continue;
+			};
 			let track_id = u8::try_from(self.video.len()).context("too many FLV video tracks")?;
 			self.video.push(FlvTrack {
 				name: name.clone(),
@@ -379,7 +383,9 @@ impl Export {
 			}
 			let flavor = audio_flavor(config)?;
 			ensure_legacy(&config.container, "audio", name)?;
-			let source = ExportSource::for_audio(&self.source, name, config, self.latency)?;
+			let Some(source) = ExportSource::for_audio(&self.source, name, config, self.latency)? else {
+				continue;
+			};
 			let track_id = u8::try_from(self.audio.len()).context("too many FLV audio tracks")?;
 			self.audio.push(FlvTrack {
 				name: name.clone(),

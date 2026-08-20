@@ -15,6 +15,27 @@ test("video config accepts canonical display aspect fields", () => {
 	expect("displayRatioHeight" in parsed).toBe(false);
 });
 
+test("video config accepts optional stalled state", () => {
+	const active = VideoConfigSchema.parse({
+		codec: "avc1.64001f",
+		container: { kind: "legacy" },
+	});
+	const stalled = VideoConfigSchema.parse({ ...active, stalled: true });
+
+	expect(active.stalled).toBeUndefined();
+	expect(stalled.stalled).toBe(true);
+});
+
+test("video config accepts a human-readable label", () => {
+	const config = VideoConfigSchema.parse({
+		label: "Main camera",
+		codec: "vp8",
+		container: { kind: "legacy" },
+	});
+
+	expect(config.label).toBe("Main camera");
+});
+
 test("legacy video arrays derive display size from display aspect fields", () => {
 	const parsed = VideoSchema.parse([
 		{

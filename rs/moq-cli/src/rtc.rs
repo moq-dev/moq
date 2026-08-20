@@ -70,7 +70,7 @@ pub async fn listen_export(origin: moq_net::origin::Consumer, name: String, list
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 	// A WHEP server only reads; it still needs a publisher handle for the shared
 	// glue, so hand it an unused, empty Origin producer.
-	let publisher = moq_net::Origin::random().produce();
+	let publisher = moq_tokio::origin::spawn(moq_net::Origin::random());
 	let server = moq_rtc::Server::new(server_config(&listen), publisher, subscriber);
 	serve(server.subscribe_router(), "WHEP", listen).await
 }
@@ -127,7 +127,7 @@ async fn serve(router: axum::Router, role: &str, listen: Listen) -> anyhow::Resu
 		.cors
 		.layer([Method::POST, Method::PATCH, Method::DELETE, Method::OPTIONS])?;
 	let app = router.layer(cors);
-	let listener = moq_native::bind::tcp(listen.addr)?;
+	let listener = moq_tokio::bind::tcp(listen.addr)?;
 
 	tracing::info!(listen = %listen.addr, role, "serving WebRTC");
 	notify_ready();

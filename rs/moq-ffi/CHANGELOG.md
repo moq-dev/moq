@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `publish_container_stream` takes a `MoqContainerFormat` instead of a `MoqContainerInit`, which
+  carried leading bytes the stream importer discarded.
+
+- `publish_media`, `publish_media_on_track`, and `publish_media_stream` split by media kind:
+  `publish_audio`, `publish_video`, `publish_container`, `publish_audio_on_track`,
+  `publish_video_on_track`, `publish_video_stream`, and `publish_container_stream`. Each takes only
+  the fields its kind can honor, so a video hint on an audio track and a label on a container are no
+  longer expressible. There is no audio stream variant: audio has no frame boundaries to infer.
+- `MoqInit` splits into `MoqAudioInit`, `MoqVideoInit`, and `MoqContainerInit`, and the format is a
+  typed `MoqAudioFormat` / `MoqVideoFormat` / `MoqContainerFormat` rather than a string.
+- The raw encoder paths are `encode_audio` and `encode_video`, freeing `publish_audio` /
+  `publish_video` for the bring-your-own-encoder path. C already called these `_raw`.
+- `MoqAudioFormat` (the PCM sample layout) is now `MoqAudioSampleFormat`, matching the existing
+  `MoqVideoPixelFormat`.
+- A container gets its own `MoqContainerProducer` / `MoqContainerStreamProducer` rather than sharing
+  `MoqMediaProducer`. `write` takes no timestamp, since a container carries its own timing and the
+  shared type silently dropped it; and `name`/`used`/`unused` no longer have a container case to
+  fail on.
+
+### Added
+
+- Publish and consume human-readable audio and video rendition labels.
+
+### Changed
+
+- `publish_media` and `publish_media_stream` reject a `MoqInit` label or video hint on a container
+  format, and an audio format rejects a video hint, instead of silently dropping either.
+
+## [0.3.11](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.10...moq-ffi-v0.3.11) - 2026-08-14
+
+### Added
+
+- *(bindings)* fetch and decode a retained media group ([#2827](https://github.com/moq-dev/moq/pull/2827))
+
+### Fixed
+
+- *(mux)* derive missing video geometry ([#2840](https://github.com/moq-dev/moq/pull/2840))
+- *(net)* stop blocking connect on the initial announce set ([#2856](https://github.com/moq-dev/moq/pull/2856))
+
+## [0.3.10](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.9...moq-ffi-v0.3.10) - 2026-08-13
+
+### Added
+
+- *(moq-video)* advertise the catalog rendition before the first keyframe ([#2768](https://github.com/moq-dev/moq/pull/2768))
+- *(bindings)* expose incoming request path and query ([#2738](https://github.com/moq-dev/moq/pull/2738))
+
+### Fixed
+
+- *(release)* repair native package releases ([#2731](https://github.com/moq-dev/moq/pull/2731))
+- *(moq-ffi)* support iOS simulator builds ([#2710](https://github.com/moq-dev/moq/pull/2710))
+
 ## [0.3.9](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.8...moq-ffi-v0.3.9) - 2026-08-07
 
 ### Other

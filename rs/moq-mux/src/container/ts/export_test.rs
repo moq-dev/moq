@@ -60,12 +60,22 @@ fn length_prefixed(nals: &[&[u8]]) -> Bytes {
 /// finished, retained tracks; that means it never reaches a hard end-of-stream,
 /// so we pull until a `next()` blocks (`Pending`, surfaced as a timeout under
 /// paused time) or the stream ends.
+/// A drift budget no test timeline comes close to, so the exporter reads every group.
+///
+/// The media track's full retention window, so an exporter started after publishing
+/// can still read every retained group. These tests write a whole broadcast up front
+/// and only then export it, which the
+/// exporter's default [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) collapses to the
+/// live edge: completeness has to be asked for, exactly as a real recorder does.
+const RECORDING_LATENCY: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn drain(consumer: moq_net::broadcast::Consumer) -> BytesMut {
 	drain_with(Export::new(crate::source::announced(&consumer)).await.unwrap()).await
 }
 
 /// `drain` for an exporter built with an explicit catalog extension.
-async fn drain_with<E: tscat::Catalog>(mut exporter: Export<E>) -> BytesMut {
+async fn drain_with<E: tscat::Catalog>(exporter: Export<E>) -> BytesMut {
+	let mut exporter = exporter.with_latency(crate::Latency::max(RECORDING_LATENCY));
 	let mut out = BytesMut::new();
 	// `while let Ok` stops on the first timeout (`Pending`: no more output).
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await {
@@ -638,7 +648,12 @@ async fn export_scte35_roundtrip() {
 	assert_eq!(verbatim, 1, "round-trip lost the SCTE-35 track");
 	let name = scte_track(&snapshot).expect("a scte35 track");
 
-	let track = consumer2.track(&name).unwrap().subscribe(None).await.unwrap();
+	let track = consumer2
+		.track(&name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.await
+		.unwrap();
 	let mut scte_reader = crate::container::Consumer::new(track, HangContainer::Legacy);
 	let frame = scte_reader
 		.read()
@@ -733,7 +748,12 @@ async fn export_pes_verbatim_roundtrip() {
 	assert_eq!(verbatim.stream_id, Some(STREAM_ID), "PES stream_id preserved");
 	let name = name.clone();
 
-	let track = consumer2.track(&name).unwrap().subscribe(None).await.unwrap();
+	let track = consumer2
+		.track(&name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.await
+		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
 	let frame = reader
 		.read()
@@ -801,7 +821,12 @@ async fn scte35_without_video_export_is_rejected() {
 
 /// Subscribe to a track and read every retained frame payload it holds.
 async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<Vec<u8>> {
-	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let track = consumer
+		.track(name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.await
+		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
 	let mut frames = Vec::new();
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
@@ -1117,7 +1142,12 @@ fn scte_track(snap: &crate::catalog::hang::Catalog<tscat::Ext>) -> Option<String
 
 /// Subscribe to a cue track and read every retained `splice_info_section` it holds.
 async fn read_cues(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<(Vec<u8>, Timestamp)> {
-	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let track = consumer
+		.track(name)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_latency(crate::Latency::max(RECORDING_LATENCY)))
+		.await
+		.unwrap();
 	let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy);
 	let mut cues = Vec::new();
 	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
@@ -1261,24 +1291,82 @@ async fn scte35_fixtures_survive_roundtrip() {
 	}
 }
 
-/// Build a PSI section: `table_id`, the 12-bit `section_length` (covering `body` plus a
-/// 4-byte CRC), then `body` and a dummy CRC. The reassembler carries it verbatim and
-/// never validates the CRC, so the bytes only need a self-consistent length.
-fn make_section(table_id: u8, body: &[u8]) -> Vec<u8> {
-	let section_length = body.len() + 4;
+/// Build a well-formed long-form section: the full generic header (extension,
+/// current version, `number` of `last`), then `body` and a CRC placeholder
+/// (capture is verbatim, nothing checks it). The SI store buffers a sub-table
+/// until its generation completes, so the header fields must be coherent.
+fn make_long_section(table_id: u8, ext: u16, version: u8, number: u8, last: u8, body: &[u8]) -> Vec<u8> {
+	let section_length = 5 + body.len() + 4;
 	let mut s = vec![
 		table_id,
 		0xb0 | ((section_length >> 8) as u8 & 0x0f),
 		(section_length & 0xff) as u8,
+		(ext >> 8) as u8,
+		(ext & 0xff) as u8,
+		0xc0 | (version << 1) | 0x01,
+		number,
+		last,
 	];
 	s.extend_from_slice(body);
 	s.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
 	s
 }
 
+/// Read an SI snapshot track from the start: every group, as its frames' payloads.
+///
+/// Starting at group 0 only asks the publisher to send from there; the default
+/// [`moq_net::Latency::REAL_TIME`] budget then skips every group the live edge has
+/// already passed, which is all of them once the importer has finished. A budget
+/// wider than the test's wall-clock span (every cut lands within microseconds) is
+/// what actually delivers the history, so a count of groups counts cuts.
+async fn read_si_groups(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<Vec<Bytes>> {
+	let mut track = consumer
+		.track(name)
+		.unwrap()
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_start(moq_net::track::Position::group(0))
+				.with_latency(moq_net::Latency::max(moq_net::track::DEFAULT_LATENCY_MAX)),
+		)
+		.await
+		.unwrap();
+	let mut groups = Vec::new();
+	while let Some(mut group) = track.recv_group().await.unwrap() {
+		let mut frames = Vec::new();
+		while let Some(frame) = kio::wait(|waiter| group.poll_read_frame(waiter)).await.unwrap() {
+			frames.push(frame.payload);
+		}
+		groups.push(frames);
+	}
+	groups
+}
+
+/// The newest snapshot of an SI track, reduced to its sections.
+async fn read_si_sections(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<Bytes> {
+	let groups = read_si_groups(consumer, name).await;
+	let frames = groups.last().expect("at least one snapshot group");
+	frames
+		.iter()
+		.flat_map(crate::container::ts::si::split_sections)
+		.collect()
+}
+
 /// Wrap a complete section in one PUSI TS packet on `pid` (pointer_field 0), padded to 188.
 fn si_packet(pid: u16, section: &[u8]) -> Vec<u8> {
-	let mut p = vec![0x47, 0x40 | ((pid >> 8) as u8 & 0x1f), (pid & 0xff) as u8, 0x10, 0x00];
+	si_packet_cc(pid, section, 0)
+}
+
+/// [`si_packet`] with an explicit continuity counter. A repetition must vary the
+/// counter to reach the SI store at all: a byte-identical packet is dropped as a TS
+/// duplicate before reassembly.
+fn si_packet_cc(pid: u16, section: &[u8], cc: u8) -> Vec<u8> {
+	let mut p = vec![
+		0x47,
+		0x40 | ((pid >> 8) as u8 & 0x1f),
+		(pid & 0xff) as u8,
+		0x10 | (cc & 0x0f),
+		0x00,
+	];
 	p.extend_from_slice(section);
 	assert!(p.len() <= 188, "section overflows one TS packet");
 	p.resize(188, 0xff);
@@ -1349,13 +1437,15 @@ fn parse_sdt_service(sec: &[u8]) -> (u8, String, String) {
 #[tokio::test(start_paused = true)]
 async fn service_layer_survives_roundtrip() {
 	let data = include_bytes!("test_data/bbb.ts");
-	let nit = make_section(0x40, &[0x12, 0x34, 0xff, 0x01]);
+	let nit = make_long_section(0x40, 0x1234, 1, 0, 0, &[0xff, 0x01]);
 
 	// Prepend a synthetic NIT Actual packet (0x0010); prepend keeps bbb's alignment.
 	// Twice, because real SI repeats every few seconds: the repetition must collapse
-	// into the same single section rather than accumulating a duplicate.
+	// into the same single committed section rather than cutting a second group. The
+	// repeat varies the continuity counter so it reaches the store (an identical
+	// packet would be dropped as a TS duplicate before reassembly).
 	let mut input = si_packet(0x0010, &nit);
-	input.extend_from_slice(&si_packet(0x0010, &nit));
+	input.extend_from_slice(&si_packet_cc(0x0010, &nit, 1));
 	input.extend_from_slice(&data[..]);
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -1373,25 +1463,44 @@ async fn service_layer_survives_roundtrip() {
 	assert_eq!(program.program_number, 1, "program number captured from the PAT");
 	assert_eq!(program.pmt_pid, 0x1000, "original PMT PID captured from the PAT");
 	let si = snapshot.mpegts.si.clone();
-	let entry = |pid: u16| si.get(&pid).expect("an SI entry for the PID");
+	let entry = |pid: u16, table_id: u8| {
+		si.get(&pid)
+			.and_then(|tables| tables.get(&table_id))
+			.expect("an SI entry for the (PID, table_id)")
+	};
 
-	assert_eq!(entry(0x0011).sections.len(), 1, "bbb.ts carries one SDT section");
-	let sdt = entry(0x0011).sections[0].clone();
-	assert_eq!(sdt.first(), Some(&0x42), "SDT Actual (table_id 0x42)");
+	let sdt_entry = entry(0x0011, 0x42);
 	assert_eq!(
-		entry(0x0011).interval,
+		sdt_entry.interval,
 		Some(std::time::Duration::from_secs(2)),
 		"the DVB SDT interval was filled in"
 	);
+	let sdt_sections = read_si_sections(&consumer, &sdt_entry.track).await;
+	assert_eq!(sdt_sections.len(), 1, "bbb.ts carries one SDT section");
+	let sdt = sdt_sections[0].clone();
+	assert_eq!(sdt.first(), Some(&0x42), "SDT Actual (table_id 0x42)");
 	let (service_type, provider, name) = parse_sdt_service(&sdt);
 	assert_eq!(
 		(service_type, provider.as_str(), name.as_str()),
 		(0x01, "FFmpeg", "Service01")
 	);
+
+	let nit_entry = entry(0x0010, 0x40);
 	assert_eq!(
-		entry(0x0010).sections,
-		vec![Bytes::from(make_section(0x40, &[0x12, 0x34, 0xff, 0x01]))],
-		"the repeated NIT deduped to one section"
+		nit_entry.interval,
+		Some(std::time::Duration::from_secs(10)),
+		"the DVB NIT interval was filled in"
+	);
+	let nit_groups = read_si_groups(&consumer, &nit_entry.track).await;
+	assert_eq!(
+		nit_groups.len(),
+		1,
+		"the repeated NIT committed once; a repetition cuts no group"
+	);
+	assert_eq!(
+		nit_groups[0],
+		vec![Bytes::from(nit.clone())],
+		"the NIT snapshot is the section, byte-for-byte"
 	);
 
 	// `import` and `catalog` stay alive: retained tracks the exporter subscribes to.
@@ -1420,7 +1529,7 @@ async fn service_layer_survives_roundtrip() {
 
 	// Re-import: the SDT and NIT must come back byte-for-byte.
 	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
-	let _consumer2 = broadcast2.consume();
+	let consumer2 = broadcast2.consume();
 	let catalog2 =
 		crate::catalog::Producer::with_catalog(&mut broadcast2, crate::catalog::hang::Catalog::<tscat::Ext>::default())
 			.unwrap();
@@ -1443,7 +1552,17 @@ async fn service_layer_survives_roundtrip() {
 		"program number survived"
 	);
 	assert_eq!(program2.pmt_pid, program.pmt_pid, "PMT PID survived");
-	assert_eq!(snapshot2.mpegts.si, si, "every SI PID survived byte-for-byte");
+	assert_eq!(snapshot2.mpegts.si, si, "every SI entry survived the round-trip");
+	assert_eq!(
+		read_si_sections(&consumer2, &snapshot2.mpegts.si[&0x0011][&0x42].track).await,
+		vec![sdt],
+		"the SDT survived byte-for-byte"
+	);
+	assert_eq!(
+		read_si_sections(&consumer2, &snapshot2.mpegts.si[&0x0010][&0x40].track).await,
+		vec![Bytes::from(nit)],
+		"the NIT survived byte-for-byte"
+	);
 }
 
 /// Each SI PID must be re-emitted on its own interval, independently of the PSI cadence
@@ -1464,6 +1583,23 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 		.create_track(broadcast.unique_name(".avc1"), hang::container::track_info())
 		.unwrap();
 	let name = track.name().to_string();
+
+	// SI snapshot tracks, one group each: an SDT (2s) and a NIT (10s).
+	let mut sdt_track = broadcast.create_track("0x0011-0x42.si", None).unwrap();
+	sdt_track
+		.write_frame(
+			Timestamp::ZERO,
+			Bytes::from(make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8])),
+		)
+		.unwrap();
+	let mut nit_track = broadcast.create_track("0x0010-0x40.si", None).unwrap();
+	nit_track
+		.write_frame(
+			Timestamp::ZERO,
+			Bytes::from(make_long_section(0x40, 1, 0, 0, 0, &[0xbb; 8])),
+		)
+		.unwrap();
+
 	{
 		let mut guard = catalog.lock();
 		let mut cfg = VideoConfig::new(H264 {
@@ -1477,18 +1613,18 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 		guard.video.renditions.insert(name.clone(), cfg);
 
 		// SDT every 2s, NIT every 10s: the DVB maxima import fills in.
-		guard.mpegts.si.insert(
-			0x0011,
-			tscat::Si {
-				sections: vec![Bytes::from(make_section(0x42, &[0xaa; 8]))],
+		guard.mpegts.si.entry(0x0011).or_default().insert(
+			0x42,
+			tscat::SiEntry {
+				track: "0x0011-0x42.si".to_string(),
 				interval: Some(Duration::from_secs(2)),
 				..Default::default()
 			},
 		);
-		guard.mpegts.si.insert(
-			0x0010,
-			tscat::Si {
-				sections: vec![Bytes::from(make_section(0x40, &[0xbb; 8]))],
+		guard.mpegts.si.entry(0x0010).or_default().insert(
+			0x40,
+			tscat::SiEntry {
+				track: "0x0010-0x40.si".to_string(),
 				interval: Some(Duration::from_secs(10)),
 				..Default::default()
 			},
@@ -1538,17 +1674,17 @@ async fn si_pids_are_re_emitted_on_their_own_interval() {
 /// A DVB SI section larger than one TS packet must be reassembled and captured verbatim.
 /// `si_packet` only covers a single-packet section; a real SDT with several services (or a
 /// NIT) spans packets, exercising the `SectionReassembler` PUSI + continuity path that
-/// feeds `service.sdt`. The body is arbitrary here (capture is verbatim, not parsed).
-#[test]
-fn multi_packet_si_section_is_captured() {
+/// feeds the SI store. The body is arbitrary here (capture is verbatim, not parsed).
+#[tokio::test(start_paused = true)]
+async fn multi_packet_si_section_is_captured() {
 	// 400-byte body forces the SDT Actual across three TS packets (183 + 184 + rest).
 	let body: Vec<u8> = (0..400u16).map(|i| i as u8).collect();
-	let sdt = make_section(0x42, &body);
+	let sdt = make_long_section(0x42, 1, 0, 0, 0, &body);
 	let input = si_packets_multi(0x0011, &sdt);
 	assert!(input.len() > 188, "the SDT must span more than one TS packet");
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let _consumer = broadcast.consume();
+	let consumer = broadcast.consume();
 	let catalog =
 		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
 			.unwrap();
@@ -1557,11 +1693,338 @@ fn multi_packet_si_section_is_captured() {
 	import.finish().unwrap();
 
 	let si = catalog.snapshot().mpegts.si.clone();
+	let entry = si
+		.get(&0x0011)
+		.and_then(|tables| tables.get(&0x42))
+		.expect("an SDT entry");
 	assert_eq!(
-		si.get(&0x0011).expect("an SDT entry").sections,
+		read_si_sections(&consumer, &entry.track).await,
 		vec![Bytes::from(sdt)],
 		"the multi-packet SDT was reassembled and captured byte-for-byte"
 	);
+}
+
+/// Import rig for SI-only fixtures: importer, catalog, and a consumer, all kept
+/// alive so the SI tracks stay readable after `finish`.
+struct SiRig {
+	import: crate::container::ts::Import<tscat::Ext>,
+	catalog: crate::catalog::Producer<tscat::Ext>,
+	consumer: moq_net::broadcast::Consumer,
+}
+
+fn si_rig() -> SiRig {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+	let import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	SiRig {
+		import,
+		catalog,
+		consumer,
+	}
+}
+
+/// #2881: a multi-section table revised one section at a time must never publish a
+/// torn set. The store buffers the incoming generation and commits it atomically,
+/// so every snapshot group holds a single version.
+#[tokio::test(start_paused = true)]
+async fn torn_transition_is_never_published() {
+	let sdt = |version: u8, number: u8, fill: u8| make_long_section(0x42, 1, version, number, 1, &[fill; 4]);
+	let mut rig = si_rig();
+
+	// Version 5 arrives complete in one batch.
+	let mut input = si_packet(0x0011, &sdt(5, 0, 0xaa));
+	input.extend_from_slice(&si_packet_cc(0x0011, &sdt(5, 1, 0xab), 1));
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	// Version 6 arrives torn across two batches; the intermediate state (section 0
+	// at v6, section 1 still v5) must never hit the track.
+	rig.import
+		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(6, 0, 0xba), 2)[..]))
+		.unwrap();
+	rig.import
+		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(6, 1, 0xbb), 3)[..]))
+		.unwrap();
+	rig.import.finish().unwrap();
+
+	let si = rig.catalog.snapshot().mpegts.si.clone();
+	let track = &si[&0x0011][&0x42].track;
+	let groups = read_si_groups(&rig.consumer, track).await;
+	assert!(!groups.is_empty(), "at least one snapshot group");
+	for (i, frames) in groups.iter().enumerate() {
+		let versions: Vec<u8> = frames
+			.iter()
+			.flat_map(crate::container::ts::si::split_sections)
+			.map(|section| (section[5] >> 1) & 0x1f)
+			.collect();
+		assert!(
+			versions.windows(2).all(|w| w[0] == w[1]),
+			"group {i} mixes versions: {versions:?}"
+		);
+	}
+	assert_eq!(
+		read_si_sections(&rig.consumer, track).await,
+		vec![Bytes::from(sdt(6, 0, 0xba)), Bytes::from(sdt(6, 1, 0xbb))],
+		"the newest snapshot is version 6, complete"
+	);
+}
+
+/// EIT rides per-table entries (#2800): now/next (0x4E) and schedule (0x50) each
+/// get their own track and their own cadence, and the schedule's deliberately
+/// sparse section numbering (segments skip unused numbers) commits on cycle wrap
+/// rather than waiting for a contiguity that never comes.
+#[tokio::test(start_paused = true)]
+async fn eit_now_next_and_schedule_are_captured() {
+	// Body layout past the generic header: TSID(2), ONID(2), then filler.
+	let pf0 = make_long_section(0x4E, 1, 0, 0, 1, &[0x00, 0x01, 0x00, 0x02, 0x01, 0x4E, 0xaa]);
+	let pf1 = make_long_section(0x4E, 1, 0, 1, 1, &[0x00, 0x01, 0x00, 0x02, 0x01, 0x4E, 0xbb]);
+	let sc0 = make_long_section(0x50, 1, 0, 0, 8, &[0x00, 0x01, 0x00, 0x02, 0x08, 0x50, 0xcc]);
+	let sc8 = make_long_section(0x50, 1, 0, 8, 8, &[0x00, 0x01, 0x00, 0x02, 0x08, 0x50, 0xdd]);
+
+	let mut input = Vec::new();
+	for (cc, section) in [&pf0, &pf1, &sc0, &sc8, &sc0].into_iter().enumerate() {
+		input.extend_from_slice(&si_packet_cc(0x0012, section, cc as u8));
+	}
+	let mut rig = si_rig();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	rig.import.finish().unwrap();
+
+	let si = rig.catalog.snapshot().mpegts.si.clone();
+	let eit = si.get(&0x0012).expect("EIT entries");
+
+	let pf = eit.get(&0x4E).expect("a now/next entry");
+	assert_eq!(pf.interval, Some(Duration::from_secs(2)), "now/next actual: 2s");
+	assert_eq!(
+		read_si_sections(&rig.consumer, &pf.track).await,
+		vec![Bytes::from(pf0), Bytes::from(pf1)],
+		"now/next committed on contiguity"
+	);
+
+	let sched = eit.get(&0x50).expect("a schedule entry");
+	assert_eq!(sched.interval, Some(Duration::from_secs(10)), "schedule actual: 10s");
+	assert_eq!(
+		read_si_sections(&rig.consumer, &sched.track).await,
+		vec![Bytes::from(sc0), Bytes::from(sc8)],
+		"the sparse schedule committed on cycle wrap"
+	);
+}
+
+/// #2842: SDT other sections from two networks that reuse a transport_stream_id
+/// must not collide. The identity reads original_network_id (bytes 8..10) for
+/// table_id 0x46, so both survive as separate sub-tables; a revision within one
+/// network still replaces in place.
+#[tokio::test(start_paused = true)]
+async fn sdt_other_networks_do_not_collide() {
+	// Same TSID (the extension), different ONID leading the body.
+	let net1 = make_long_section(0x46, 7, 0, 0, 0, &[0x00, 0x01, 0xaa]);
+	let net2 = make_long_section(0x46, 7, 0, 0, 0, &[0x00, 0x02, 0xbb]);
+	let net1v2 = make_long_section(0x46, 7, 1, 0, 0, &[0x00, 0x01, 0xcc]);
+
+	let mut input = si_packet(0x0011, &net1);
+	input.extend_from_slice(&si_packet_cc(0x0011, &net2, 1));
+	input.extend_from_slice(&si_packet_cc(0x0011, &net1v2, 2));
+	let mut rig = si_rig();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	rig.import.finish().unwrap();
+
+	let si = rig.catalog.snapshot().mpegts.si.clone();
+	let entry = &si[&0x0011][&0x46];
+	assert_eq!(
+		read_si_sections(&rig.consumer, &entry.track).await,
+		vec![Bytes::from(net1v2), Bytes::from(net2)],
+		"both networks survive; the revision replaced only its own network"
+	);
+}
+
+/// A next-version section (current_next_indicator clear) describes a future state
+/// and is dropped: only what is currently in force is carried. The current NIT is
+/// the positive control proving the pipeline ran; a lone dropped packet would pass
+/// vacuously, since sync lock needs a second packet before anything routes.
+#[tokio::test(start_paused = true)]
+async fn next_version_sections_are_dropped() {
+	let mut next = make_long_section(0x42, 1, 3, 0, 0, &[0xaa; 4]);
+	next[5] &= !0x01;
+	let nit = make_long_section(0x40, 1, 0, 0, 0, &[0xbb; 4]);
+
+	let mut input = si_packet(0x0011, &next);
+	input.extend_from_slice(&si_packet_cc(0x0011, &next, 1));
+	input.extend_from_slice(&si_packet(0x0010, &nit));
+	input.extend_from_slice(&si_packet_cc(0x0010, &nit, 1));
+	let mut rig = si_rig();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	rig.import.finish().unwrap();
+
+	let si = rig.catalog.snapshot().mpegts.si.clone();
+	assert!(si.contains_key(&0x0010), "the current NIT was captured (control)");
+	assert!(!si.contains_key(&0x0011), "a next-version section creates no entry");
+}
+
+/// TDT/TOT (0x0014) is proxied as a latest-value slot (#2914): each tick replaces
+/// the last, so the newest snapshot is the source's most recent time, never an
+/// accumulation of stale ones. The SDT is the positive control proving the
+/// pipeline ran.
+#[tokio::test(start_paused = true)]
+async fn tdt_round_trips_as_latest_value() {
+	let tick = |mjd: u8| make_short_section(0x70, &[0xc0, mjd, 0x12, 0x34, 0x56]);
+	let sdt = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 4]);
+
+	let mut rig = si_rig();
+	let mut input = si_packet(0x0014, &tick(1));
+	input.extend_from_slice(&si_packet_cc(0x0014, &tick(1), 1));
+	input.extend_from_slice(&si_packet(0x0011, &sdt));
+	input.extend_from_slice(&si_packet_cc(0x0011, &sdt, 1));
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	// The clock ticks: the new section replaces the old slot.
+	rig.import
+		.decode(&BytesMut::from(&si_packet_cc(0x0014, &tick(2), 2)[..]))
+		.unwrap();
+	rig.import.finish().unwrap();
+
+	let si = rig.catalog.snapshot().mpegts.si.clone();
+	assert!(si.contains_key(&0x0011), "the SDT was captured (control)");
+	let entry = si
+		.get(&0x0014)
+		.and_then(|tables| tables.get(&0x70))
+		.expect("a TDT entry");
+	assert_eq!(entry.interval, Some(Duration::from_secs(30)), "the TDT/TOT 30s maximum");
+	assert_eq!(
+		read_si_sections(&rig.consumer, &entry.track).await,
+		vec![Bytes::from(tick(2))],
+		"the newest snapshot is the latest tick alone"
+	);
+	let groups = read_si_groups(&rig.consumer, &entry.track).await;
+	assert_eq!(groups.len(), 2, "one group per tick, no accumulation");
+}
+
+/// Build a well-formed short-form section (syntax indicator clear): header + body,
+/// no extension, versioning, or CRC.
+fn make_short_section(table_id: u8, body: &[u8]) -> Vec<u8> {
+	let mut s = vec![
+		table_id,
+		0x30 | ((body.len() >> 8) as u8 & 0x0f),
+		(body.len() & 0xff) as u8,
+	];
+	s.extend_from_slice(body);
+	s
+}
+
+/// Aborting the importer must remove the advertised SI entries from the catalog:
+/// a map naming aborted tracks would strand every later exporter on subscriptions
+/// that can never deliver.
+#[tokio::test(start_paused = true)]
+async fn abort_removes_si_catalog_entries() {
+	let sdt = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 4]);
+	// Twice: sync lock needs a second packet before the first routes at all.
+	let mut input = si_packet(0x0011, &sdt);
+	input.extend_from_slice(&si_packet_cc(0x0011, &sdt, 1));
+	let mut rig = si_rig();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	assert!(
+		!rig.catalog.snapshot().mpegts.si.is_empty(),
+		"the SDT entry was advertised"
+	);
+
+	rig.import.abort(moq_net::Error::Cancel);
+	assert!(
+		rig.catalog.snapshot().mpegts.si.is_empty(),
+		"abort removed the advertised entries"
+	);
+}
+
+/// A byte-identical short-form repetition is not a change: the latest-value slot
+/// only cuts a group when the bytes actually differ.
+#[tokio::test(start_paused = true)]
+async fn short_form_repetition_cuts_no_group() {
+	let tdt = make_short_section(0x70, &[0xc0, 0x79, 0x12, 0x34, 0x56]);
+
+	let mut rig = si_rig();
+	let mut input = si_packet(0x0014, &tdt);
+	input.extend_from_slice(&si_packet_cc(0x0014, &tdt, 1));
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	rig.import
+		.decode(&BytesMut::from(&si_packet_cc(0x0014, &tdt, 2)[..]))
+		.unwrap();
+	rig.import.finish().unwrap();
+
+	let si = rig.catalog.snapshot().mpegts.si.clone();
+	let groups = read_si_groups(&rig.consumer, &si[&0x0014][&0x70].track).await;
+	assert_eq!(groups.len(), 1, "a repetition cut no further group");
+}
+
+/// SI never gates output: an advertised entry whose track resolves but never
+/// delivers a snapshot (a stale announce) must not hold the programme dark.
+/// Media flows immediately and the entry simply emits nothing.
+#[tokio::test(start_paused = true)]
+async fn stale_si_entry_does_not_block_output() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	// A track that exists (the subscription resolves) but never produces a group.
+	let ghost = broadcast.create_track("ghost.si", None).unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
+	let track = broadcast
+		.create_track(broadcast.unique_name(".avc1"), hang::container::track_info())
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		let mut guard = catalog.lock();
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		cfg.container = Container::Legacy;
+		cfg.description = Some(avcc);
+		guard.video.renditions.insert(name.clone(), cfg);
+		guard.mpegts.si.entry(0x0011).or_default().insert(
+			0x42,
+			tscat::SiEntry {
+				track: "ghost.si".to_string(),
+				interval: Some(Duration::from_secs(2)),
+				..Default::default()
+			},
+		);
+	}
+
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 64));
+	producer
+		.write(Frame {
+			timestamp: Timestamp::ZERO,
+			duration: None,
+			payload: length_prefixed(&[&idr]),
+			keyframe: true,
+		})
+		.unwrap();
+	producer.cut(None).unwrap();
+	producer.finish().unwrap();
+
+	let mut exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap();
+	// The timeout distinguishes "produced output promptly" from "held dark";
+	// under paused time a wedged exporter would hit it instantly.
+	let frame = tokio::time::timeout(Duration::from_secs(1), exporter.next())
+		.await
+		.expect("a stale SI entry must not hold output dark")
+		.unwrap()
+		.expect("a muxed frame");
+	assert!(!frame.payload.is_empty());
+	assert!(
+		!frame
+			.payload
+			.chunks_exact(188)
+			.any(|p| ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == 0x0011),
+		"nothing was emitted for the undelivered entry"
+	);
+	drop(ghost);
 }
 
 /// A raw Opus packet: a one-byte TOC (config 1 = SILK NB 20 ms, stereo, code 0) plus
@@ -1730,4 +2193,519 @@ async fn opus_export_import_roundtrip() {
 	for (orig, got) in packets.iter().zip(&recovered) {
 		assert_eq!(got.as_slice(), orig.as_ref(), "Opus packet survived the round-trip");
 	}
+}
+
+// Two exporters of one broadcast, started at different times, must render the same packets
+// from the moment they overlap. That is what a redundant (SMPTE ST 2022-7) pair compares, and
+// it is what lets a leg be restarted without the merge at the far end seeing the two disagree.
+// See moq-dev/moq#2779.
+
+/// 25 fps video.
+const VIDEO_US: u64 = 40_000;
+/// 48 kHz AAC, 1024 samples per frame.
+const AUDIO_US: u64 = 21_333;
+/// Video frames per group. Deliberately not a whole number of PSI intervals, so a table
+/// cadence anchored anywhere but the media timeline drifts against the keyframes.
+const GOP: u64 = 15;
+/// Audio frames per group, roughly matching the video group duration.
+const AUDIO_GROUP: u64 = 28;
+/// Video-frame ticks to produce, and the tick the second exporter joins at.
+const TICKS: u64 = 150;
+const JOIN: u64 = 75;
+
+/// Produce one broadcast and export it twice, the second exporter joining partway in, and
+/// return what each rendered.
+///
+/// Both exporters are drained after every write, so neither skips a group and the two see the
+/// same arrival order. That isolates the question under test (does the *rendering* depend on
+/// when the process started) from the separate question of whether two legs received the same
+/// groups in the same order.
+async fn export_twice(with_video: bool) -> (Vec<Frame>, Vec<Frame>) {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+	let mut video = with_video.then(|| {
+		let track = broadcast
+			.create_track(broadcast.unique_name(".avc1"), hang::container::track_info())
+			.unwrap();
+		// Out-of-band parameter sets (avc1), so the export source takes the catalog
+		// description as-is instead of parsing them out of the bitstream.
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: false,
+		});
+		cfg.container = Container::Legacy;
+		cfg.description =
+			Some(crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap());
+		catalog.lock().video.renditions.insert(track.name().to_string(), cfg);
+		Producer::new(track, HangContainer::Legacy)
+	});
+
+	let mut audio = {
+		let track = broadcast
+			.create_track(broadcast.unique_name(".aac"), hang::container::track_info())
+			.unwrap();
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		catalog.lock().audio.renditions.insert(track.name().to_string(), cfg);
+		Producer::new(track, HangContainer::Legacy)
+	};
+
+	let source = crate::source::announced(&consumer);
+	let mut a = Export::new(source.clone()).await.unwrap();
+	let mut b = None;
+	let (mut out_a, mut out_b) = (Vec::new(), Vec::new());
+
+	let mut audio_index = 0;
+	for tick in 0..TICKS {
+		if let Some(video) = video.as_mut() {
+			let keyframe = tick % GOP == 0;
+			let slice = if keyframe {
+				vec![0x65u8; 3_000]
+			} else {
+				vec![0x41u8; 400]
+			};
+			video
+				.write(Frame {
+					timestamp: Timestamp::from_micros(tick * VIDEO_US).unwrap(),
+					duration: None,
+					payload: length_prefixed(&[&slice]),
+					keyframe,
+				})
+				.unwrap();
+		}
+		// Every audio frame that starts before the next video tick.
+		while audio_index * AUDIO_US < (tick + 1) * VIDEO_US {
+			audio
+				.write(Frame {
+					timestamp: Timestamp::from_micros(audio_index * AUDIO_US).unwrap(),
+					duration: None,
+					payload: Bytes::from_iter((0..180u16).map(|i| (i ^ audio_index as u16) as u8)),
+					keyframe: audio_index % AUDIO_GROUP == 0,
+				})
+				.unwrap();
+			audio_index += 1;
+		}
+
+		out_a.extend(drain_frames(&mut a).await);
+		if let Some(b) = b.as_mut() {
+			out_b.extend(drain_frames(b).await);
+		}
+		if tick + 1 == JOIN {
+			b = Some(Export::new(source.clone()).await.unwrap());
+		}
+	}
+
+	(out_a, out_b)
+}
+
+/// Pull every frame an exporter can render right now, like `drain` but keeping the frames
+/// whole (this compares them one by one, not as one byte stream).
+async fn drain_frames<E: tscat::Catalog>(export: &mut Export<E>) -> Vec<Frame> {
+	let mut out = Vec::new();
+	while let Ok(res) = tokio::time::timeout(Duration::from_secs(1), export.next()).await {
+		match res.expect("exporter error") {
+			Some(frame) => out.push(frame),
+			None => break,
+		}
+	}
+	out
+}
+
+/// Compare the overlapping output of two exporters, starting at `from`, and assert the only
+/// bytes that disagree are continuity counters.
+///
+/// The counter is the known exception: it is numbered from process state, so two legs are
+/// offset by a constant. Fixing that needs the emitted packet count per group to be a function
+/// of the broadcast, which is a much larger change than this guards. Everything else has to
+/// match exactly, so this fails if any new field starts being minted per process.
+fn assert_only_continuity_differs(a: &[Frame], b: &[Frame], from: Timestamp) {
+	let a: Vec<&Frame> = a.iter().filter(|f| f.timestamp >= from).collect();
+	let b: Vec<&Frame> = b.iter().filter(|f| f.timestamp >= from).collect();
+	assert!(b.len() > 20, "not enough overlap to be worth comparing: {}", b.len());
+	assert_eq!(a.len(), b.len(), "exporters rendered a different number of frames");
+
+	for (a, b) in a.iter().zip(b.iter()) {
+		assert_eq!(a.timestamp, b.timestamp, "compared frames must be the same frame");
+		assert_eq!(
+			a.payload.len(),
+			b.payload.len(),
+			"same frame rendered to a different size"
+		);
+		assert_packet_aligned(&a.payload);
+
+		for (offset, (x, y)) in a.payload.iter().zip(b.payload.iter()).enumerate() {
+			if x == y {
+				continue;
+			}
+			// Byte 3 of a TS packet is `transport_scrambling_control | adaptation_field_control |
+			// continuity_counter`, and only the low nibble is the counter. A difference anywhere
+			// else is a value the exporter minted from its own state rather than from the broadcast.
+			assert_eq!(
+				(offset % 188, (x ^ y) & 0xf0),
+				(3, 0),
+				"frame at {:?} differs outside the continuity counter: offset {offset}, {x:#04x} vs {y:#04x}",
+				a.timestamp,
+			);
+		}
+	}
+}
+
+#[tokio::test(start_paused = true)]
+async fn late_join_matches_a_running_exporter() {
+	let (a, b) = export_twice(true).await;
+
+	// Skip to the joiner's second keyframe: its first group covers tune-in, where the two legs
+	// legitimately differ because only the joiner has to lead with the program tables.
+	let keyframes: Vec<Timestamp> = b.iter().filter(|f| f.keyframe).map(|f| f.timestamp).collect();
+	assert_only_continuity_differs(&a, &b, keyframes[1]);
+}
+
+/// The same property for a program with no video track. Worth its own case because the program
+/// tables are re-emitted at every video keyframe, a boundary both legs share, which hides a
+/// drifting cadence. Audio-only has no such boundary, so the cadence has to come from the media
+/// timeline on its own.
+#[tokio::test(start_paused = true)]
+async fn late_join_matches_a_running_exporter_without_video() {
+	let (a, b) = export_twice(false).await;
+
+	// The joiner leads with PAT/PMT on its very first frame so a receiver can tune in; the
+	// running exporter has no reason to repeat them there. From the next frame on the two are
+	// rendering the same stream.
+	assert_only_continuity_differs(&a, &b, b[1].timestamp);
+}
+
+/// A section lost before the cycle wraps commits an observed subset; the next
+/// cycle must *converge* to the full set rather than flip-flop between subsets.
+/// The repetition fast-path skips sections already active, so without the
+/// same-version merge in `commit` the stragglers would replace the subset instead
+/// of completing it, oscillating forever.
+#[tokio::test(start_paused = true)]
+async fn lost_dense_section_recovers_on_the_next_cycle() {
+	let sdt = |number: u8, fill: u8| make_long_section(0x42, 1, 0, number, 2, &[fill; 4]);
+	let s0 = sdt(0, 0xa0);
+	let s1 = sdt(1, 0xa1);
+	let s2 = sdt(2, 0xa2);
+
+	// Cycle 1 loses section 1; the repeat of section 0 wraps and commits {0, 2}.
+	let mut input = si_packet(0x0011, &s0);
+	input.extend_from_slice(&si_packet_cc(0x0011, &s2, 1));
+	input.extend_from_slice(&si_packet_cc(0x0011, &s0, 2));
+	// Cycle 2 supplies section 1; sections 0 and 2 short-circuit as repetitions,
+	// so the wrap carries only the straggler, which must merge, not replace.
+	input.extend_from_slice(&si_packet_cc(0x0011, &s1, 3));
+	input.extend_from_slice(&si_packet_cc(0x0011, &s1, 4));
+	let mut rig = si_rig();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	rig.import.finish().unwrap();
+
+	let si = rig.catalog.snapshot().mpegts.si.clone();
+	assert_eq!(
+		read_si_sections(&rig.consumer, &si[&0x0011][&0x42].track).await,
+		vec![Bytes::from(s0), Bytes::from(s1), Bytes::from(s2)],
+		"the lost section joined the committed generation instead of replacing it"
+	);
+}
+
+/// A catalog update that keeps the `(PID, table_id)` key but repoints it at a new
+/// track (a restarted publisher) must rebuild the subscription: staying attached
+/// to the old track would repeat its stale sections forever.
+#[tokio::test(start_paused = true)]
+async fn repointed_si_entry_resubscribes() {
+	let sdt_a = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8]);
+	let sdt_b = make_long_section(0x42, 1, 1, 0, 0, &[0xbb; 8]);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	let mut track_a = broadcast.create_track("a.si", None).unwrap();
+	track_a
+		.write_frame(Timestamp::ZERO, Bytes::from(sdt_a.clone()))
+		.unwrap();
+	let mut track_b = broadcast.create_track("b.si", None).unwrap();
+	track_b
+		.write_frame(Timestamp::ZERO, Bytes::from(sdt_b.clone()))
+		.unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
+	let track = broadcast
+		.create_track(broadcast.unique_name(".avc1"), hang::container::track_info())
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		let mut guard = catalog.lock();
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		cfg.container = Container::Legacy;
+		cfg.description = Some(avcc);
+		guard.video.renditions.insert(name.clone(), cfg);
+		guard.mpegts.si.entry(0x0011).or_default().insert(
+			0x42,
+			tscat::SiEntry {
+				track: "a.si".to_string(),
+				interval: Some(Duration::from_secs(2)),
+				..Default::default()
+			},
+		);
+	}
+
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 64));
+	let write_key = |producer: &mut Producer<HangContainer>, sec: u64| {
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_micros(sec * 1_000_000).unwrap(),
+				duration: None,
+				payload: length_prefixed(&[&idr]),
+				keyframe: true,
+			})
+			.unwrap();
+		producer.cut(None).unwrap();
+	};
+
+	// Writes both GOPs up front and only then reads, so it needs a replay window:
+	// the real-time default would take the live edge and skip the first.
+	let mut exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap()
+		.with_latency(crate::Latency::max(RECORDING_LATENCY));
+	let mut before = BytesMut::new();
+	write_key(&mut producer, 0);
+	write_key(&mut producer, 1);
+	for _ in 0..2 {
+		let frame = tokio::time::timeout(Duration::from_secs(1), exporter.next())
+			.await
+			.expect("a frame before the switch")
+			.unwrap()
+			.unwrap();
+		before.extend_from_slice(&frame.payload);
+	}
+
+	// Repoint the entry at the replacement track.
+	catalog.lock().mpegts.si.get_mut(&0x0011).unwrap().insert(
+		0x42,
+		tscat::SiEntry {
+			track: "b.si".to_string(),
+			interval: Some(Duration::from_secs(2)),
+			..Default::default()
+		},
+	);
+
+	write_key(&mut producer, 2);
+	write_key(&mut producer, 3);
+	write_key(&mut producer, 4);
+	producer.finish().unwrap();
+	let mut after = BytesMut::new();
+	while let Ok(res) = tokio::time::timeout(Duration::from_secs(1), exporter.next()).await {
+		let Some(frame) = res.unwrap() else { break };
+		after.extend_from_slice(&frame.payload);
+	}
+
+	let contains = |haystack: &[u8], needle: &[u8]| haystack.windows(needle.len()).any(|w| w == needle);
+	assert!(
+		contains(&before, &sdt_a),
+		"the original track's SDT was emitted (control)"
+	);
+	assert!(
+		contains(&after, &sdt_b),
+		"the replacement track's SDT is emitted after the repoint"
+	);
+}
+
+/// An SI revision that lands after the final media frame still reaches the TS:
+/// emission rides media frames, so end of stream flushes every entry's current
+/// sections in one trailing frame before yielding `None`.
+#[tokio::test(start_paused = true)]
+async fn si_revision_after_final_media_frame_is_flushed() {
+	let sdt_v1 = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8]);
+	let sdt_v2 = make_long_section(0x42, 1, 1, 0, 0, &[0xbb; 8]);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	let mut si_track = broadcast.create_track("0x0011-0x42.si", None).unwrap();
+	si_track
+		.write_frame(Timestamp::ZERO, Bytes::from(sdt_v1.clone()))
+		.unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
+	let track = broadcast
+		.create_track(broadcast.unique_name(".avc1"), hang::container::track_info())
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		let mut guard = catalog.lock();
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		cfg.container = Container::Legacy;
+		cfg.description = Some(avcc);
+		guard.video.renditions.insert(name.clone(), cfg);
+		guard.mpegts.si.entry(0x0011).or_default().insert(
+			0x42,
+			tscat::SiEntry {
+				track: "0x0011-0x42.si".to_string(),
+				interval: Some(Duration::from_secs(2)),
+				..Default::default()
+			},
+		);
+	}
+
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 64));
+	producer
+		.write(Frame {
+			timestamp: Timestamp::ZERO,
+			duration: None,
+			payload: length_prefixed(&[&idr]),
+			keyframe: true,
+		})
+		.unwrap();
+	producer.cut(None).unwrap();
+	producer.finish().unwrap();
+
+	let mut exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap();
+	let first = tokio::time::timeout(Duration::from_secs(1), exporter.next())
+		.await
+		.expect("the only media frame")
+		.unwrap()
+		.unwrap();
+	let contains = |haystack: &[u8], needle: &[u8]| haystack.windows(needle.len()).any(|w| w == needle);
+	assert!(contains(&first.payload, &sdt_v1), "v1 rode the media frame (control)");
+
+	// The revision lands after the last media frame; only the trailing flush can
+	// carry it. Closing the catalog lets the exporter reach end of stream.
+	si_track
+		.write_frame(Timestamp::ZERO, Bytes::from(sdt_v2.clone()))
+		.unwrap();
+	catalog.finish().unwrap();
+
+	let tail = tokio::time::timeout(Duration::from_secs(1), exporter.next())
+		.await
+		.expect("a trailing SI frame rather than an immediate end")
+		.unwrap()
+		.expect("the trailing SI frame");
+	assert_packet_aligned(&tail.payload);
+	assert!(
+		contains(&tail.payload, &sdt_v2),
+		"the trailing flush carries the revision"
+	);
+	let end = tokio::time::timeout(Duration::from_secs(1), exporter.next())
+		.await
+		.expect("the stream ends after the flush")
+		.unwrap();
+	assert!(end.is_none(), "end of stream after the trailing flush");
+}
+
+/// Two captures overlapping on one broadcast (a supervisor restarting its
+/// importer before the old one is dropped) contend for the same `(PID, table_id)`
+/// key: the newer one wins the catalog mapping under a fallback track name, and
+/// the older one's teardown must not strip it, since the survivor never
+/// re-advertises.
+#[tokio::test(start_paused = true)]
+async fn overlapping_capture_teardown_keeps_the_survivors_mapping() {
+	let sdt = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 4]);
+	let mut input = si_packet(0x0011, &sdt);
+	input.extend_from_slice(&si_packet_cc(0x0011, &sdt, 1));
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let _consumer = broadcast.consume();
+	let catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+	let mut old = crate::container::ts::Import::new(broadcast.clone(), catalog.reserve());
+	old.decode(&BytesMut::from(&input[..])).unwrap();
+
+	// The replacement importer captures the same table; its deterministic track
+	// name is taken, so it advertises under a fallback name, overwriting the key.
+	let mut new = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	new.decode(&BytesMut::from(&input[..])).unwrap();
+	let survivor = catalog.snapshot().mpegts.si[&0x0011][&0x42].track.clone();
+	assert_ne!(survivor, "0x0011-0x42.si", "the replacement fell back to a unique name");
+
+	drop(old);
+	assert_eq!(
+		catalog.snapshot().mpegts.si[&0x0011][&0x42].track,
+		survivor,
+		"the old capture's teardown left the survivor's mapping in place"
+	);
+}
+
+/// A contiguous commit replaces even a same-version active generation: versions
+/// are five bits, so a reception gap can bring the same value back with fewer
+/// sections, and merging would resurrect the removed one forever.
+#[tokio::test(start_paused = true)]
+async fn contiguous_same_version_commit_replaces_stale_sections() {
+	let sdt = |number: u8, last: u8, fill: u8| make_long_section(0x42, 1, 0, number, last, &[fill; 4]);
+
+	// Three sections at v0, committed contiguously.
+	let mut input = si_packet(0x0011, &sdt(0, 2, 0xa0));
+	input.extend_from_slice(&si_packet_cc(0x0011, &sdt(1, 2, 0xa1), 1));
+	input.extend_from_slice(&si_packet_cc(0x0011, &sdt(2, 2, 0xa2), 2));
+	// After a gap the table comes back at v0 again (wrapped), now two sections.
+	let b0 = sdt(0, 1, 0xb0);
+	let b1 = sdt(1, 1, 0xb1);
+	input.extend_from_slice(&si_packet_cc(0x0011, &b0, 3));
+	input.extend_from_slice(&si_packet_cc(0x0011, &b1, 4));
+	let mut rig = si_rig();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	rig.import.finish().unwrap();
+
+	let si = rig.catalog.snapshot().mpegts.si.clone();
+	assert_eq!(
+		read_si_sections(&rig.consumer, &si[&0x0011][&0x42].track).await,
+		vec![Bytes::from(b0), Bytes::from(b1)],
+		"the complete new generation retired the stale third section"
+	);
+}
+
+/// The cut debounce runs on the host clock, so a revision publishes even when no
+/// media ever advances a PTS (an audio-only or SI-only input). This test spends
+/// real wall time on the debounce window; media timestamps stay pinned at zero
+/// throughout, which is exactly the case a media-clock debounce wedges on.
+#[tokio::test(start_paused = true)]
+async fn debounce_opens_without_a_media_clock() {
+	let sdt = |version: u8, fill: u8| make_long_section(0x42, 1, version, 0, 0, &[fill; 4]);
+	let mut rig = si_rig();
+
+	let mut input = si_packet(0x0011, &sdt(0, 0xaa));
+	input.extend_from_slice(&si_packet_cc(0x0011, &sdt(0, 0xaa), 1));
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+
+	let name = rig.catalog.snapshot().mpegts.si[&0x0011][&0x42].track.clone();
+	let track = rig.consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+	assert_eq!(track.latest(), Some(0), "the first snapshot cut immediately");
+
+	// A revision inside the window is coalesced...
+	rig.import
+		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(1, 0xbb), 2)[..]))
+		.unwrap();
+	assert_eq!(track.latest(), Some(0), "a revision inside the window is held");
+
+	// ...and publishes once the window passes in *real* time, no finish, no PTS.
+	std::thread::sleep(std::time::Duration::from_millis(1200));
+	rig.import
+		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(1, 0xbb), 3)[..]))
+		.unwrap();
+	assert_eq!(track.latest(), Some(1), "the held revision cut after the window");
 }

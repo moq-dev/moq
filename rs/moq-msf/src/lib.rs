@@ -102,6 +102,11 @@ pub struct Track {
 	/// Bitrate in bits per second.
 	pub bitrate: Option<u64>,
 
+	/// Whether the publisher recommends temporarily avoiding this track.
+	///
+	/// This is a non-standard extension shared with the hang catalog.
+	pub stalled: Option<bool>,
+
 	/// Resolved base64 initialization data.
 	///
 	/// On the wire this is carried indirectly through draft-01's `initDataList` +
@@ -372,6 +377,7 @@ impl Track {
 			samplerate: None,
 			channel_config: None,
 			bitrate: None,
+			stalled: None,
 			init_data: None,
 			init_ref: None,
 			render_group: None,
@@ -522,6 +528,7 @@ mod test {
 			samplerate: None,
 			channel_config: None,
 			bitrate: Some(6_000_000),
+			stalled: Some(true),
 			init_data: None,
 			init_ref: None,
 			render_group: Some(1),
@@ -545,6 +552,7 @@ mod test {
 			samplerate: Some(48_000),
 			channel_config: Some("2".to_string()),
 			bitrate: Some(128_000),
+			stalled: None,
 			init_data: None,
 			init_ref: None,
 			render_group: Some(1),
@@ -568,6 +576,7 @@ mod test {
 			samplerate: None,
 			channel_config: None,
 			bitrate: Some(5_000_000),
+			stalled: None,
 			init_data: None,
 			init_ref: None,
 			render_group: Some(1),
@@ -596,6 +605,7 @@ mod test {
 		assert!(track.get("maxGrpSapStartingType").is_none());
 		assert!(track.get("maxObjSapStartingType").is_none());
 		assert!(track.get("jitter").is_none());
+		assert_eq!(track["stalled"], true);
 	}
 
 	#[test]

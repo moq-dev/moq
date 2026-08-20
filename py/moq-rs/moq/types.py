@@ -22,6 +22,9 @@ from moq_ffi import (
     MoqAudioFrame as AudioFrame,
 )
 from moq_ffi import (
+    MoqAudioSampleFormat as AudioSampleFormat,
+)
+from moq_ffi import (
     MoqBackoff as Backoff,
 )
 from moq_ffi import (
@@ -35,6 +38,9 @@ from moq_ffi import (
 )
 from moq_ffi import (
     MoqContainer as Container,
+)
+from moq_ffi import (
+    MoqContainerFormat as ContainerFormat,
 )
 from moq_ffi import (
     MoqDatagram as Datagram,
@@ -67,6 +73,12 @@ from moq_ffi import (
     MoqVideoCodec as VideoCodec,
 )
 from moq_ffi import (
+    MoqVideoDecodedFrame as VideoDecodedFrame,
+)
+from moq_ffi import (
+    MoqVideoDecoderOutput as VideoDecoderOutput,
+)
+from moq_ffi import (
     MoqVideoEncoderInput as VideoEncoderInput,
 )
 from moq_ffi import (
@@ -74,6 +86,9 @@ from moq_ffi import (
 )
 from moq_ffi import (
     MoqVideoEncoderOutput as VideoEncoderOutput,
+)
+from moq_ffi import (
+    MoqVideoFormat as VideoFormat,
 )
 from moq_ffi import (
     MoqVideoFrame as VideoFrame,
@@ -98,6 +113,9 @@ __all__ = [
     "AudioEncoderInput",
     "AudioEncoderOutput",
     "AudioFormat",
+    "AudioSampleFormat",
+    "VideoFormat",
+    "ContainerFormat",
     "AudioFrame",
     "Backoff",
     "Catalog",
@@ -118,6 +136,8 @@ __all__ = [
     "VideoEncoderKind",
     "VideoEncoderOutput",
     "VideoFrame",
+    "VideoDecodedFrame",
+    "VideoDecoderOutput",
     "VideoHint",
     "VideoPixelFormat",
     "VideoProperties",

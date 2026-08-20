@@ -63,12 +63,20 @@ typealias GroupConsumer = uniffi.moq.MoqGroupConsumer
 typealias MediaProducer = uniffi.moq.MoqMediaProducer
 /** The write side of a media track fed a raw byte stream, with frame boundaries inferred. */
 typealias MediaStreamProducer = uniffi.moq.MoqMediaStreamProducer
+/** The write side of a container, which publishes each track it describes. */
+typealias ContainerProducer = uniffi.moq.MoqContainerProducer
+/** The write side of a container fed a raw byte stream. */
+typealias ContainerStreamProducer = uniffi.moq.MoqContainerStreamProducer
 /** The read side of a media track: yields frames with codec metadata in decode order. */
 typealias MediaConsumer = uniffi.moq.MoqMediaConsumer
+/** A finite fetched media group: yields container-decoded frames until the group ends. */
+typealias MediaGroupConsumer = uniffi.moq.MoqMediaGroupConsumer
 /** The write side of a raw-audio track; PCM written here is encoded inside the FFI boundary. */
 typealias AudioProducer = uniffi.moq.MoqAudioProducer
 /** The read side of a raw-audio track: yields decoded PCM frames. */
 typealias AudioConsumer = uniffi.moq.MoqAudioConsumer
+/** The read side of a video track decoded inside the bindings: yields packed I420 frames. */
+typealias VideoConsumer = uniffi.moq.MoqVideoConsumer
 /** The write side of a raw-video track; pixels written here are encoded inside the FFI boundary. */
 typealias VideoProducer = uniffi.moq.MoqVideoProducer
 /** The read side of a broadcast's catalog: yields updates as the set of tracks changes. */
@@ -91,14 +99,24 @@ typealias Datagram = uniffi.moq.MoqDatagram
 typealias Frame = uniffi.moq.MoqFrame
 /** A [Frame] plus the codec metadata a media track carries. */
 typealias MediaFrame = uniffi.moq.MoqMediaFrame
-/** The catalog description of a video track: codec, dimensions, bitrate, and container. */
+/** The catalog description of a video track, including whether the publisher recommends temporarily avoiding it. */
 typealias Video = uniffi.moq.MoqVideo
 /** Caller-provided catalog fields for a video track. */
 typealias VideoHint = uniffi.moq.MoqVideoHint
+/** A single audio codec an importer can parse. */
+typealias AudioFormat = uniffi.moq.MoqAudioFormat
+/** A single video codec an importer can parse. */
+typealias VideoFormat = uniffi.moq.MoqVideoFormat
+/** A container that publishes its own tracks. */
+typealias ContainerFormat = uniffi.moq.MoqContainerFormat
 /** Catalog properties shared by every video rendition; absent fields clear those properties. */
 typealias VideoProperties = uniffi.moq.MoqVideoProperties
-/** Media format, initialization bytes, and optional video hints. */
-typealias Init = uniffi.moq.MoqInit
+/** An audio codec, its required init bytes, and an optional label. */
+typealias AudioInit = uniffi.moq.MoqAudioInit
+/** A video codec, optional init bytes, a label, and catalog hints. */
+typealias VideoInit = uniffi.moq.MoqVideoInit
+/** A container format and its leading bytes. */
+typealias ContainerInit = uniffi.moq.MoqContainerInit
 /** The catalog description of an audio track: codec, sample rate, channels, and container. */
 typealias Audio = uniffi.moq.MoqAudio
 /** A width and height pair, in pixels. */
@@ -116,9 +134,13 @@ typealias AudioFrame = uniffi.moq.MoqAudioFrame
 /** An audio codec identifier. */
 typealias AudioCodec = uniffi.moq.MoqAudioCodec
 /** A raw PCM sample format, mirroring WebCodecs `AudioData.format`. */
-typealias AudioFormat = uniffi.moq.MoqAudioFormat
+typealias AudioSampleFormat = uniffi.moq.MoqAudioSampleFormat
 /** The PCM layout an [AudioConsumer] should decode to. */
 typealias AudioDecoderOutput = uniffi.moq.MoqAudioDecoderOutput
+/** What a [VideoConsumer] decodes to: an optional resize plus a latency budget. */
+typealias VideoDecoderOutput = uniffi.moq.MoqVideoDecoderOutput
+/** One decoded video frame: packed I420, its dimensions, and a timestamp. */
+typealias VideoDecodedFrame = uniffi.moq.MoqVideoDecodedFrame
 /** The PCM layout the caller feeds an [AudioProducer]. */
 typealias AudioEncoderInput = uniffi.moq.MoqAudioEncoderInput
 /** The codec-side encoder configuration: codec, output rate/channels, bitrate, and frame duration. */

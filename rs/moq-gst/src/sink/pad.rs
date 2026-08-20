@@ -206,11 +206,26 @@ impl Pad {
 		}
 
 		let (track, audio): (import::Track, bool) = match structure.name().as_str() {
-			"video/x-h264" => (Self::reserve(&mut broadcast, catalog, ".avc3", "avc3", &[])?, false),
-			"video/x-h265" => (Self::reserve(&mut broadcast, catalog, ".hev1", "hev1", &[])?, false),
-			"video/x-av1" => (Self::reserve(&mut broadcast, catalog, ".av01", "av01", &[])?, false),
-			"video/x-vp8" => (Self::reserve(&mut broadcast, catalog, ".vp8", "vp8", &[])?, false),
-			"video/x-vp9" => (Self::reserve(&mut broadcast, catalog, ".vp9", "vp9", &[])?, false),
+			"video/x-h264" => (
+				Self::reserve_video(&mut broadcast, catalog, import::VideoFormat::Avc3, &[])?,
+				false,
+			),
+			"video/x-h265" => (
+				Self::reserve_video(&mut broadcast, catalog, import::VideoFormat::Hev1, &[])?,
+				false,
+			),
+			"video/x-av1" => (
+				Self::reserve_video(&mut broadcast, catalog, import::VideoFormat::Av01, &[])?,
+				false,
+			),
+			"video/x-vp8" => (
+				Self::reserve_video(&mut broadcast, catalog, import::VideoFormat::Vp8, &[])?,
+				false,
+			),
+			"video/x-vp9" => (
+				Self::reserve_video(&mut broadcast, catalog, import::VideoFormat::Vp9, &[])?,
+				false,
+			),
 			// MP3: no config blob to parse (the config lives in each frame header), so the importer is
 			// built straight from the caps rate/channels. Keyed on `layer == 3`, which positively
 			// identifies Layer III: AAC (`audio/mpeg`, no layer field) and MP2 (`layer=2`) fall through
@@ -241,7 +256,7 @@ impl Pad {
 					.context("AAC caps missing codec_data")?;
 				let map = codec_data.map_readable().context("failed to map AAC codec_data")?;
 				(
-					Self::reserve(&mut broadcast, catalog, ".aac", "aac", map.as_slice())?,
+					Self::reserve_audio(&mut broadcast, catalog, import::AudioFormat::Aac, map.as_slice())?,
 					true,
 				)
 			}
@@ -299,7 +314,7 @@ impl Pad {
 
 		// Go through the reservation like every codec pad, so the first catalog snapshot waits for
 		// this track and dropping the rendition removes it again.
-		let mut rendition = catalog.reserve().text(name);
+		let mut rendition = catalog.reserve().text(name)?;
 		rendition.set(config);
 
 		Ok(Text {
@@ -308,21 +323,39 @@ impl Pad {
 		})
 	}
 
-	/// Reserve a uniquely named track and hand it to the single-codec importer, which accepts the request
-	/// (setting the microsecond timescale) and registers the catalog rendition once the config resolves.
-	fn reserve(
+	/// Reserve a uniquely named track and hand it to the single-codec importer, which accepts the
+	/// request (setting the microsecond timescale) and registers the catalog rendition once the
+	/// config resolves.
+	///
+	/// The track suffix comes from the format itself, so the two can't disagree.
+	fn reserve_video(
 		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
-		suffix: &str,
-		format: &str,
+		format: import::VideoFormat,
 		init: &[u8],
 	) -> Result<import::Track> {
-		let name = broadcast.unique_name(suffix);
+		let name = broadcast.unique_name(&format!(".{format}"));
 		let request = broadcast.reserve_track(name)?;
-		Ok(import::Track::new(
+		Ok(import::Track::video(
 			request,
 			catalog.reserve(),
-			import::Init::new(format, init.to_vec()),
+			import::VideoInit::new(format, init.to_vec()),
+		)?)
+	}
+
+	/// Reserve a track for a single audio codec. See [`reserve_video`](Self::reserve_video).
+	fn reserve_audio(
+		broadcast: &mut moq_net::broadcast::Producer,
+		catalog: moq_mux::catalog::Producer,
+		format: import::AudioFormat,
+		init: &[u8],
+	) -> Result<import::Track> {
+		let name = broadcast.unique_name(&format!(".{format}"));
+		let request = broadcast.reserve_track(name)?;
+		Ok(import::Track::audio(
+			request,
+			catalog.reserve(),
+			import::AudioInit::new(format, init.to_vec()),
 		)?)
 	}
 

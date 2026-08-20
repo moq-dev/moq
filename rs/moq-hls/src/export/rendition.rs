@@ -10,6 +10,7 @@ use moq_mux::container::fmp4::Muxer;
 use moq_mux::timeline::Entry;
 
 use super::playlist::{Segment, Snapshot};
+use super::upstream::Upstream;
 use super::{mpd, segments};
 use crate::Result;
 
@@ -84,7 +85,8 @@ pub struct Rendition {
 	/// This rendition's window over the broadcast timeline, fed by the catalog watcher's
 	/// fan-out.
 	live: Arc<segments::Producer>,
-	/// The source and (possibly sibling) broadcast reference, resolved lazily for FETCH.
+	/// The source and sibling broadcast reference, for the cross-broadcast case: a rendition
+	/// served by the catalog's own broadcast already holds it (see [`Upstream::local`]).
 	source: moq_mux::Source,
 	sibling: Option<moq_net::PathRelativeOwned>,
 	/// The init segment, built on first request.
@@ -101,7 +103,7 @@ impl Rendition {
 	}
 
 	/// Build a video rendition over the broadcast's timeline `section`.
-	pub(crate) fn video(name: String, config: &VideoConfig, source: &moq_mux::Source, section: Timeline) -> Self {
+	pub(crate) fn video(name: String, config: &VideoConfig, upstream: &Upstream, section: Timeline) -> Self {
 		Self {
 			name,
 			kind: Kind::Video,
@@ -111,15 +113,15 @@ impl Rendition {
 			codec: config.codec.to_string(),
 			config: Config::Video(config.clone()),
 			section,
-			live: Arc::new(segments::Producer::new()),
-			source: source.clone(),
+			live: Arc::new(segments::Producer::new(upstream.local(config.broadcast.as_ref()))),
+			source: upstream.source.clone(),
 			sibling: config.broadcast.clone(),
 			init: tokio::sync::Mutex::new(None),
 		}
 	}
 
 	/// Build an audio rendition over the broadcast's timeline `section`.
-	pub(crate) fn audio(name: String, config: &AudioConfig, source: &moq_mux::Source, section: Timeline) -> Self {
+	pub(crate) fn audio(name: String, config: &AudioConfig, upstream: &Upstream, section: Timeline) -> Self {
 		Self {
 			name,
 			kind: Kind::Audio,
@@ -129,8 +131,8 @@ impl Rendition {
 			codec: config.codec.to_string(),
 			config: Config::Audio(config.clone()),
 			section,
-			live: Arc::new(segments::Producer::new()),
-			source: source.clone(),
+			live: Arc::new(segments::Producer::new(upstream.local(config.broadcast.as_ref()))),
+			source: upstream.source.clone(),
 			sibling: config.broadcast.clone(),
 			init: tokio::sync::Mutex::new(None),
 		}
@@ -328,8 +330,12 @@ impl Rendition {
 		})
 	}
 
-	/// The media track handle on its (possibly sibling) broadcast, resolved lazily on the
-	/// first fetch.
+	/// The media track handle on the broadcast serving this rendition.
+	///
+	/// Seeded at construction unless the catalog names a sibling, so the media comes from the
+	/// same broadcast the catalog did. Resolving the path again would not be idempotent: a
+	/// same-path republish installs a new broadcast at the leaf, whose group numbering restarts,
+	/// and its bytes would be served under the replaced broadcast's segment numbers.
 	async fn track(&self) -> Option<moq_net::track::Consumer> {
 		if self.live.broadcast.get().is_none() {
 			let broadcast = self.source.resolve(self.sibling.as_ref()).await.ok()?;

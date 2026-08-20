@@ -32,7 +32,7 @@
 //!   a [`Publish`] into an origin, or accept a [`Play`] out of one, at a path of
 //!   your choosing (or reject it). This is how an embedder (e.g. a relay verifying
 //!   a JWT and scoping the origin per token) plugs its policy in, with no
-//!   callback. It mirrors `moq-native`'s `Server` / `Request`.
+//!   callback. It mirrors `moq-tokio`'s `Server` / `Request`.
 //!
 //! Beyond the listener, [`Client`] is the *dial-out* (client) role: connect to a
 //! remote RTMP server and either [`publish`](Client::publish) a MoQ broadcast to

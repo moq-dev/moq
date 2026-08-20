@@ -50,7 +50,7 @@ pub struct InternalConfig {
 	/// intentional: on loopback there's nothing to encrypt, and a private
 	/// overlay (e.g. a mesh VPN) already provides transport encryption and peer
 	/// identity. Unset (the default) disables the listener entirely.
-	#[arg(long = "internal-listen", env = "MOQ_INTERNAL_LISTEN")]
+	#[arg(id = "internal-listen", long = "internal-listen", env = "MOQ_INTERNAL_LISTEN")]
 	pub listen: Option<net::SocketAddr>,
 }
 
@@ -60,15 +60,15 @@ pub struct Internal {
 	config: InternalConfig,
 	stats: moq_net::stats::Registry,
 	nodes: Option<crate::nodes::Nodes>,
-	health: moq_native::accept::Health,
-	listeners: Vec<moq_native::accept::Health>,
+	health: moq_tokio::accept::Health,
+	listeners: Vec<moq_tokio::accept::Health>,
 }
 
 #[derive(Clone)]
 struct InternalState {
 	stats: moq_net::stats::Registry,
 	nodes: Option<crate::nodes::Nodes>,
-	listeners: Vec<moq_native::accept::Health>,
+	listeners: Vec<moq_tokio::accept::Health>,
 }
 
 impl Internal {
@@ -80,7 +80,7 @@ impl Internal {
 		// though: `routes()` is public, so an embedder can merge this surface onto its
 		// own listener while `serve` stays disabled, and a zero series for a socket
 		// nobody opened is a watch that can never fire.
-		let health = moq_native::accept::Health::new("internal");
+		let health = moq_tokio::accept::Health::new("internal");
 		let listeners = match config.listen {
 			Some(_) => vec![health.clone()],
 			None => Vec::new(),
@@ -98,15 +98,15 @@ impl Internal {
 	///
 	/// Takes an iterator so the accessors feed it directly, however many listeners
 	/// they turn out to describe: [`Web::accept_health`](crate::Web::accept_health)
-	/// yields an `Option`, [`moq_native::Server::accept_health`] a `Vec`, and an
+	/// yields an `Option`, [`moq_tokio::Server::accept_health`] a `Vec`, and an
 	/// embedder can pass its own. Register every socket on the node, so a scrape
 	/// covers the one that actually went quiet.
 	///
 	/// Register nothing for a listener that isn't running. A permanently-zero series
 	/// is worse than an absent one: it reads as a watch that is passing. See
-	/// [`moq_native::accept`] for that argument, and for why no QUIC backend has
+	/// [`moq_tokio::accept`] for that argument, and for why no QUIC backend has
 	/// anything to register.
-	pub fn with_listeners(mut self, health: impl IntoIterator<Item = moq_native::accept::Health>) -> Self {
+	pub fn with_listeners(mut self, health: impl IntoIterator<Item = moq_tokio::accept::Health>) -> Self {
 		for health in health {
 			// Two handles under one name would emit the same `listener` label twice,
 			// which is a malformed exposition: a scraper is entitled to reject the whole
@@ -167,7 +167,7 @@ impl Internal {
 			return Ok(());
 		};
 
-		let listener = moq_native::bind::tcp(listen).context("failed to bind internal listener")?;
+		let listener = moq_tokio::bind::tcp(listen).context("failed to bind internal listener")?;
 		// No blanket "…server failed" context here: the caller (main.rs) adds
 		// that single top-level layer, matching `Web::serve` / `Cluster::run`.
 		crate::listener::server(listener, self.health)?
@@ -223,7 +223,7 @@ async fn serve_nodes(State(state): State<InternalState>) -> Json<crate::nodes::S
 /// already are the registry, and a snapshot is a fixed handful of labeled
 /// counters, so a registry would only add a second source of truth to keep in
 /// sync.
-fn render_metrics(snap: &moq_net::stats::Snapshot, listeners: &[moq_native::accept::Health]) -> String {
+fn render_metrics(snap: &moq_net::stats::Snapshot, listeners: &[moq_tokio::accept::Health]) -> String {
 	use std::fmt::Write as _;
 
 	let traffic = snap.traffic();
@@ -262,6 +262,30 @@ fn render_metrics(snap: &moq_net::stats::Snapshot, listeners: &[moq_native::acce
 		"moq_relay_datagrams_total",
 		"Single-frame groups carried over unreliable QUIC datagrams; a subset of groups.",
 		|c| c.datagrams,
+	);
+	counter(
+		&mut out,
+		"moq_relay_stale_bytes_total",
+		"Media payload bytes skipped after drifting beyond a subscriber's latency budget.",
+		|c| c.stale.bytes,
+	);
+	counter(
+		&mut out,
+		"moq_relay_stale_frames_total",
+		"Media frames skipped after drifting beyond a subscriber's latency budget.",
+		|c| c.stale.frames,
+	);
+	counter(
+		&mut out,
+		"moq_relay_stale_groups_total",
+		"Media groups skipped after drifting beyond a subscriber's latency budget.",
+		|c| c.stale.groups,
+	);
+	counter(
+		&mut out,
+		"moq_relay_stale_datagrams_total",
+		"Media datagrams skipped after drifting beyond a subscriber's latency budget.",
+		|c| c.stale.datagrams,
 	);
 	counter(
 		&mut out,
@@ -332,8 +356,8 @@ fn render_metrics(snap: &moq_net::stats::Snapshot, listeners: &[moq_native::acce
 /// paging on; `connection` is junk traffic the node is fielding, and `unknown` is an
 /// errno the classifier has never seen (worth a dashboard, never an escalation, since
 /// a remote peer could drive it).
-fn render_accepts(out: &mut String, listeners: &[moq_native::accept::Health]) {
-	use moq_native::accept::Failure;
+fn render_accepts(out: &mut String, listeners: &[moq_tokio::accept::Health]) {
+	use moq_tokio::accept::Failure;
 	use std::fmt::Write as _;
 
 	let _ = writeln!(
@@ -398,7 +422,7 @@ mod tests {
 		// What a stream-only relay looks like: no web, one tcp.
 		let stream_only = Internal::new(listening(), moq_net::stats::Registry::disabled())
 			.with_listeners(None)
-			.with_listeners([moq_native::accept::Health::new("tcp")]);
+			.with_listeners([moq_tokio::accept::Health::new("tcp")]);
 		let body = render_metrics(&moq_net::stats::Registry::disabled().snapshot(), &stream_only.listeners);
 		assert!(
 			body.contains("moq_relay_accept_failures_total{listener=\"tcp\",class=\"exhausted\"} 0"),
@@ -420,7 +444,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn accept_metrics_list_every_listener_from_zero() {
-		let web = moq_native::accept::Health::new("web");
+		let web = moq_tokio::accept::Health::new("web");
 		let internal = Internal::new(listening(), moq_net::stats::Registry::disabled()).with_listeners([web.clone()]);
 
 		let body = render_metrics(&moq_net::stats::Registry::disabled().snapshot(), &internal.listeners);
@@ -442,8 +466,8 @@ mod tests {
 		// Asserted rather than assumed: 24 is EMFILE on Linux and macOS, and the
 		// classification is what makes the rest of this meaningful.
 		assert_eq!(
-			moq_native::accept::Failure::classify(&emfile),
-			moq_native::accept::Failure::Exhausted
+			moq_tokio::accept::Failure::classify(&emfile),
+			moq_tokio::accept::Failure::Exhausted
 		);
 		let _ = web.failed(&emfile);
 		let body = render_metrics(&moq_net::stats::Registry::disabled().snapshot(), &internal.listeners);
@@ -534,7 +558,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn nodes_endpoint_uses_the_attached_cluster_registry() {
-		let origin = moq_net::Origin::new(100).unwrap().produce();
+		let origin = moq_tokio::origin::spawn(moq_net::Origin::new(100).unwrap());
 		let nodes = crate::nodes::Nodes::new(origin);
 		let _connection = nodes.connect_outbound(0, "https://relay-b.example/");
 		let state = InternalState {
@@ -560,7 +584,7 @@ mod tests {
 		// Default-tier egress: an untagged local publisher writes, a tagged egress
 		// consumer reads it out, so publisher `bytes` advance on the default tier.
 		let default_ctx = stats.tier(Tier::default()).session("acme");
-		let pub_origin = Origin::random().produce();
+		let pub_origin = moq_tokio::origin::spawn(Origin::random());
 		let egress = pub_origin.consume().with_stats(default_ctx.clone());
 		let mut announced = egress.announced();
 		let mut pub_source = pub_origin
@@ -571,7 +595,7 @@ mod tests {
 		// Named-tier ingress: a tagged ingress producer writes, so subscriber
 		// `bytes` advance on the regional tier.
 		let regional_ctx = stats.tier(Tier::new("region/sjc")).session("peer");
-		let sub_origin = Origin::random().produce().with_stats(regional_ctx.clone());
+		let sub_origin = moq_tokio::origin::spawn(Origin::random()).with_stats(regional_ctx.clone());
 		let mut sub_source = sub_origin
 			.create_broadcast("demo/x", broadcast::Route::announced())
 			.unwrap();
@@ -580,12 +604,21 @@ mod tests {
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
-		// Read 1234 egress bytes out of the default-tier broadcast.
+		// Leave 46 bytes across two frames behind the live edge, then read 1234
+		// egress bytes out of the default-tier broadcast.
 		let bc = announced.next().await.unwrap().broadcast.unwrap();
 		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();
 		{
 			let mut group = pub_track.append_group().unwrap();
-			group.write_frame(Timestamp::ZERO, vec![0u8; 1234]).unwrap();
+			group.write_frame(Timestamp::ZERO, vec![0u8; 12]).unwrap();
+			group.write_frame(Timestamp::ZERO, vec![0u8; 34]).unwrap();
+			group.finish().unwrap();
+		}
+		{
+			let mut group = pub_track.append_group().unwrap();
+			group
+				.write_frame(Timestamp::from_millis(10_000).unwrap(), vec![0u8; 1234])
+				.unwrap();
 			group.finish().unwrap();
 		}
 		let mut group = egress_sub.recv_group().await.unwrap().unwrap();
@@ -611,6 +644,22 @@ mod tests {
 		assert!(
 			body.contains("moq_relay_bytes_total{tier=\"region/sjc\",role=\"subscriber\"} 56"),
 			"named tier gets its own row:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_stale_bytes_total{tier=\"\",role=\"publisher\"} 46"),
+			"stale egress bytes:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_stale_frames_total{tier=\"\",role=\"publisher\"} 2"),
+			"stale egress frames:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_stale_groups_total{tier=\"\",role=\"publisher\"} 1"),
+			"stale egress groups:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_stale_datagrams_total{tier=\"\",role=\"publisher\"} 0"),
+			"stale egress datagrams:\n{body}"
 		);
 		assert!(
 			body.contains("moq_relay_sessions_opened_total{tier=\"\"} 1"),

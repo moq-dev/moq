@@ -142,6 +142,19 @@ async fn evict_closed(inner: Arc<Inner>, name: String, broadcaster: Arc<Broadcas
 
 #[cfg(test)]
 mod tests {
+	/// Build an origin producer, spawning its driver on the ambient runtime.
+	fn produce_origin() -> moq_net::origin::Producer {
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		if tokio::runtime::Handle::try_current().is_ok() {
+			tokio::spawn(driver);
+		} else {
+			// A sync test: nothing polls the driver, and dropping it would tear
+			// the origin down, so leak it and rely on the synchronous half.
+			std::mem::forget(driver);
+		}
+		producer
+	}
+
 	use super::*;
 
 	/// Let the origin's spawned attach/detach tasks run: a created broadcast
@@ -173,7 +186,7 @@ mod tests {
 
 		// An origin with no broadcasts: a request that reaches the handlers 404s after
 		// RESOLVE_TIMEOUT, so a 401 proves the middleware rejected it first.
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default());
 		let app = server.router().layer(middleware::from_fn(gate));
 
@@ -207,7 +220,7 @@ mod tests {
 		use axum::http::{StatusCode, header};
 		use tower::ServiceExt;
 
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default());
 		let app = Router::new().nest("/hls", server.router());
 
@@ -227,7 +240,7 @@ mod tests {
 	}
 
 	async fn closed_broadcaster() -> Arc<Broadcaster> {
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let mut producer = origin
 			.create_broadcast("gone", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
@@ -244,7 +257,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn broadcaster_replaces_finished_cached_instance() {
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default());
 		let stale = closed_broadcaster().await;
 
@@ -267,7 +280,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn eviction_keeps_newer_cached_instance() {
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default());
 		let old = closed_broadcaster().await;
 		let mut new_producer = origin

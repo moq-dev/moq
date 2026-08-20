@@ -300,7 +300,7 @@ mod tests {
 	async fn snapshot_combines_announcements_and_live_connections() {
 		const REMOTE_ID: u64 = 9_007_199_254_740_993;
 
-		let origin = Origin::new(100).unwrap().produce();
+		let origin = moq_tokio::origin::spawn(Origin::new(100).unwrap());
 		let nodes = Nodes::new(origin.clone());
 		let _remote = announced_node(&origin, "https://relay-b.example/", &[REMOTE_ID], 7).await;
 		let _outbound = nodes.connect_outbound(0, "https://relay-b.example/");
@@ -333,18 +333,18 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn snapshot_omits_unresolved_inbound_connections() {
-		let origin = Origin::new(100).unwrap().produce();
+	#[tokio::test]
+	async fn snapshot_omits_unresolved_inbound_connections() {
+		let origin = moq_tokio::origin::spawn(Origin::new(100).unwrap());
 		let nodes = Nodes::new(origin);
 		let _inbound = nodes.connect_inbound(0, Origin::new(200).unwrap());
 
 		assert!(nodes.snapshot().nodes.is_empty());
 	}
 
-	#[test]
-	fn snapshot_stops_reporting_closed_outbound_connections() {
-		let origin = Origin::new(100).unwrap().produce();
+	#[tokio::test]
+	async fn snapshot_stops_reporting_closed_outbound_connections() {
+		let origin = moq_tokio::origin::spawn(Origin::new(100).unwrap());
 		let nodes = Nodes::new(origin);
 		let connection = nodes.connect_outbound(0, "https://relay-b.example/");
 		assert_eq!(nodes.snapshot().nodes.len(), 1);
@@ -353,9 +353,9 @@ mod tests {
 		assert!(nodes.snapshot().nodes.is_empty());
 	}
 
-	#[test]
-	fn outbound_node_omits_credentials_from_url() {
-		let origin = Origin::new(100).unwrap().produce();
+	#[tokio::test]
+	async fn outbound_node_omits_credentials_from_url() {
+		let origin = moq_tokio::origin::spawn(Origin::new(100).unwrap());
 		let nodes = Nodes::new(origin);
 		let _connection = nodes.connect_outbound(0, "https://relay-b.example/?jwt=secret");
 
@@ -368,7 +368,7 @@ mod tests {
 	/// churned mid-request.
 	#[tokio::test(start_paused = true)]
 	async fn scan_skips_an_unannounce_queued_ahead_of_another_node() {
-		let origin = Origin::new(100).unwrap().produce();
+		let origin = moq_tokio::origin::spawn(Origin::new(100).unwrap());
 		let nodes = Nodes::new(origin.clone());
 		let mut first = announced_node(&origin, "https://relay-a.example/", &[200], 1).await;
 		let _second = announced_node(&origin, "https://relay-b.example/", &[300], 1).await;
@@ -397,7 +397,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn duplicate_origin_ids_do_not_resolve_inbound_connections() {
-		let origin = Origin::new(100).unwrap().produce();
+		let origin = moq_tokio::origin::spawn(Origin::new(100).unwrap());
 		let nodes = Nodes::new(origin.clone());
 		let _first = announced_node(&origin, "https://relay-b.example/", &[200], 1).await;
 		let _second = announced_node(&origin, "https://relay-c.example/", &[200], 1).await;

@@ -126,7 +126,7 @@ impl Session {
 		// Producer setup may touch tokio time (group eviction), so run it inside the runtime context.
 		let _rt = RUNTIME.enter();
 
-		let origin = moq_net::Origin::random().produce();
+		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 		let mut broadcast = origin.create_broadcast(
 			&settings.broadcast,
 			moq_net::broadcast::Route::new().with_announce(true),
@@ -144,10 +144,10 @@ impl Session {
 		// retry), posting the bus error below. During an outage the pad threads keep writing (bounded
 		// by moq-net's per-group eviction) and the relay catches up from a group boundary on
 		// reconnect. A bounded policy is available via `ClientConfig::backoff`.
-		let mut config = moq_native::ClientConfig::default();
-		config.tls.disable_verify = Some(settings.tls_disable_verify);
+		let mut config = moq_tokio::connect::Config::default();
+		config.tls.insecure = Some(settings.tls_disable_verify);
 		config.backoff.timeout = Some(std::time::Duration::ZERO);
-		let client = config.init()?.with_publisher(origin.consume());
+		let client = config.init(Default::default())?.with_publisher(origin.consume());
 		let reconnect = client.connect(settings.url.clone());
 		// Persistent handles that survive reconnects; the getters read them without touching the loop.
 		let send_bandwidth = reconnect.send_bandwidth();
@@ -204,7 +204,7 @@ impl Drop for Session {
 /// Track the reconnect loop's observable state into the element's [`Status`] and fire GObject
 /// notifications until the loop stops.
 ///
-/// The reconnect loop owns the session; this task follows [`moq_native::Connection`] to mirror
+/// The reconnect loop owns the session; this task follows [`moq_tokio::Connection`] to mirror
 /// status/version into the `Status` the getters read, and watches the persistent bandwidth consumers
 /// only to `notify` the bitrate properties (the getters read the estimates directly). Each source is
 /// notified on its own change: a status edge notifies `status`/`connected`/`moq-version` together, a
@@ -213,7 +213,7 @@ impl Drop for Session {
 /// [`Session`]'s `Drop` aborts this task, which drops the `Connection` handle and quietly tears the loop
 /// down.
 async fn forward(
-	mut reconnect: moq_native::Connection,
+	mut reconnect: moq_tokio::Connection,
 	origin: moq_net::origin::Producer,
 	status: Arc<Status>,
 	errored: Arc<AtomicBool>,
@@ -237,13 +237,13 @@ async fn forward(
 			result = reconnect.status() => match result {
 				Ok(state) => {
 					let connection = match state {
-						moq_native::Status::Connected => ConnectionStatus::Connected,
+						moq_tokio::Status::Connected => ConnectionStatus::Connected,
 						_ => ConnectionStatus::Disconnected,
 					};
 					status.set(connection, reconnect.version().map(|v| v.to_string()));
 					match state {
-						moq_native::Status::Connected => gst::info!(CAT, "session connected"),
-						moq_native::Status::Disconnected => gst::warning!(CAT, "session disconnected, reconnecting"),
+						moq_tokio::Status::Connected => gst::info!(CAT, "session connected"),
+						moq_tokio::Status::Disconnected => gst::warning!(CAT, "session disconnected, reconnecting"),
 						_ => {}
 					}
 					notify(&element, &["status", "connected", "moq-version"]);

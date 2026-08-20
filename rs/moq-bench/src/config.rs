@@ -70,12 +70,17 @@ pub struct Config {
 	/// The MoQ client (QUIC/TLS) configuration.
 	#[command(flatten)]
 	#[serde(default)]
-	pub client: moq_native::ClientConfig,
+	pub client: moq_tokio::connect::Config,
+
+	/// QUIC transport tuning (`--quic-*`).
+	#[command(flatten)]
+	#[serde(default)]
+	pub quic: moq_tokio::quic::Config,
 
 	/// Log configuration.
 	#[command(flatten)]
 	#[serde(default)]
-	pub log: moq_native::Log,
+	pub log: moq_tokio::Log,
 
 	/// Load configuration from this TOML file. CLI flags still take precedence.
 	#[arg(long)]
@@ -90,6 +95,18 @@ impl Config {
 		config.log.init()?;
 		tracing::trace!(?config, "final config");
 		Ok(config)
+	}
+
+	/// Refuse a config parsed from released spellings, naming what replaced each.
+	///
+	/// Checked in `parse_and_merge`, before anything reads the config: those
+	/// spellings land on hidden fields that nothing honors, so continuing would dial
+	/// with settings the command line never asked for.
+	fn check_deprecated(&self) -> anyhow::Result<()> {
+		let mut deprecated = self.client.deprecated();
+		deprecated.extend(self.quic.deprecated());
+		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
+		Ok(())
 	}
 
 	/// Merge order mirrors moq-relay: CLI args (including `--file`) -> TOML file
@@ -109,6 +126,7 @@ impl Config {
 			config = toml::from_str(&std::fs::read_to_string(file)?)?;
 			config.update_from(&args);
 		}
+		config.check_deprecated()?;
 		// `Stats::report` feeds this into `tokio::time::interval`, which panics on a
 		// zero period. Reject it up front with a clear message.
 		anyhow::ensure!(!config.report().is_zero(), "--report must be greater than 0s");
@@ -164,7 +182,7 @@ fps = "24:60"
 
 [client]
 connect = "https://example.com"
-tls.disable_verify = true
+tls.insecure = true
 "#;
 		let dir = std::env::temp_dir().join("moq-bench-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
@@ -180,8 +198,8 @@ tls.disable_verify = true
 		let config = Config::parse_and_merge(args).unwrap();
 		assert_eq!(config.connections(), Range::new(100, 100));
 		assert_eq!(config.fps(), Range::new(24, 60));
-		assert_eq!(config.client.connect.as_ref().unwrap().as_str(), "https://example.com/");
-		assert_eq!(config.client.tls.disable_verify, Some(true));
+		assert_eq!(config.client.url.as_ref().unwrap().as_str(), "https://example.com/");
+		assert_eq!(config.client.tls.insecure, Some(true));
 
 		// CLI flag wins over the TOML value.
 		let args = vec![
@@ -202,6 +220,20 @@ tls.disable_verify = true
 		// A zero report interval would panic `tokio::time::interval`; reject it early.
 		let err = Config::parse_and_merge(["moq-bench", "--report", "0s"]).unwrap_err();
 		assert!(err.to_string().contains("report"), "unexpected error: {err}");
+	}
+
+	/// `main` reads `client.url` as a plain field, which a released
+	/// `--client-connect` never reaches. Refuse the run and name `--connect`, rather
+	/// than fail the `--connect is required` check the operator thinks they passed.
+	#[test]
+	fn the_released_connect_spelling_is_refused() {
+		let err = Config::parse_and_merge(["moq-bench", "--client-connect", "https://relay.example.com"])
+			.expect_err("must refuse")
+			.to_string();
+		assert!(
+			err.contains("--client-connect / MOQ_CLIENT_CONNECT -> --connect / MOQ_CONNECT"),
+			"{err}"
+		);
 	}
 
 	#[test]

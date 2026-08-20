@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.11](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.10...moq-relay-v0.14.11) - 2026-08-14
+
+### Fixed
+
+- *(relay)* honor server version over WebSocket ([#2841](https://github.com/moq-dev/moq/pull/2841))
+- *(net)* stop blocking connect on the initial announce set ([#2856](https://github.com/moq-dev/moq/pull/2856))
+
+### Other
+
+- reload custom root CAs without restart ([#2863](https://github.com/moq-dev/moq/pull/2863))
+
+## [0.14.10](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.9...moq-relay-v0.14.10) - 2026-08-13
+
+### Added
+
+- *(bindings)* expose incoming request path and query ([#2738](https://github.com/moq-dev/moq/pull/2738))
+
 ## [0.14.9](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.8...moq-relay-v0.14.9) - 2026-08-07
 
 ### Fixed

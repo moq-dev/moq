@@ -17,7 +17,7 @@ import { Timeline } from "./timeline";
 
 // Signals the file source reads.
 export type FileInput = {
-	// Whether to decode the file. When false the decode stops and `out.source` clears.
+	// Whether to decode the file. Defaults to true. When false the decode stops and `out.source` clears.
 	enabled: Getter<boolean>;
 };
 
@@ -64,7 +64,7 @@ export class File {
 
 	constructor(props?: FileProps) {
 		this.in = {
-			enabled: getter(props?.enabled ?? false),
+			enabled: getter(props?.enabled ?? true),
 		};
 		this.file = Signal.from(props?.file);
 

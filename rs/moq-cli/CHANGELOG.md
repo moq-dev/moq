@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.11](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.10...moq-cli-v0.9.11) - 2026-08-14
+
+### Added
+
+- *(cli)* run multiple import/export stages over one connection ([#2809](https://github.com/moq-dev/moq/pull/2809))
+
+### Fixed
+
+- *(path)* resolve catalog references like URLs ([#2855](https://github.com/moq-dev/moq/pull/2855))
+- *(net)* stop blocking connect on the initial announce set ([#2856](https://github.com/moq-dev/moq/pull/2856))
+
+## [0.9.10](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.9...moq-cli-v0.9.10) - 2026-08-13
+
+### Fixed
+
+- *(release)* repair native package releases ([#2731](https://github.com/moq-dev/moq/pull/2731))
+
 ## [0.9.9](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.8...moq-cli-v0.9.9) - 2026-08-07
 
 ### Added

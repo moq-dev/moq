@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.0.9"
+version = "0.0.11"
 edition = "2024"
 rust-version.workspace = true
 
@@ -40,8 +40,7 @@ tracing = "0.1"
 [dev-dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-# Default features on (unlike the workspace entry) so the example gets a QUIC backend.
-moq-native = { path = "../moq-native" }
+moq-tokio = { workspace = true, features = ["quinn", "aws-lc-rs", "websocket"] }
 # test-util unlocks tokio::time::pause for the deterministic live-feed tests.
 tokio = { workspace = true, features = ["full", "test-util"] }
 url = "2"

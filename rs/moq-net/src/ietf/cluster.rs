@@ -219,46 +219,6 @@ pub fn link_cost(local: Option<u64>, peer: &Peer) -> u64 {
 	local.or(peer.cost).unwrap_or(DEFAULT_COST)
 }
 
-/// Shared slot for the peer's cluster options, filled when its SETUP is read.
-///
-/// The publisher blocks on this before its first advertisement: the extension changes
-/// the NAMESPACE encoding, so nothing can be sent until we know whether the peer speaks
-/// it. Cheap to clone; every handle shares the same slot.
-#[derive(Clone, Default)]
-pub(crate) struct PeerSetup(kio::Shared<Option<Peer>>);
-
-impl PeerSetup {
-	/// Record what the peer declared. A SETUP carrying neither option records the
-	/// default (not negotiated), which is what unblocks a waiter.
-	///
-	/// First write wins. The announce loops read this once and hold it for their
-	/// lifetime while subscription serving re-reads it, so letting a later SETUP
-	/// overwrite the identity would advertise under one exclusion and serve under
-	/// another, which is how a routing loop gets back in.
-	pub fn set(&self, peer: Peer) {
-		let mut slot = self.0.lock();
-		if slot.is_none() {
-			*slot = Some(peer);
-		}
-	}
-
-	/// Await the peer's SETUP.
-	///
-	/// The peer MUST send exactly one, so this resolves once that stream is read. Waits
-	/// forever if it never does; the caller is a session task, cancelled when the driver
-	/// drops.
-	pub async fn get(&self) -> Peer {
-		let slot = self
-			.0
-			.wait(|peer| match peer.is_some() {
-				true => std::task::Poll::Ready(()),
-				false => std::task::Poll::Pending,
-			})
-			.await;
-		(*slot).expect("waited for Some")
-	}
-}
-
 /// Read the cluster Setup Options out of a decoded SETUP parameter block.
 pub fn peer_from_setup(params: &super::Parameters, version: Version) -> Result<Peer, DecodeError> {
 	if !supported(version) {
@@ -509,26 +469,6 @@ mod tests {
 			assert_eq!(peer.origin, Some(self_origin));
 			assert_eq!(peer.cost, cost);
 		}
-	}
-
-	/// The announce loops read the peer's declaration once and hold it, while
-	/// subscription serving re-reads it. A second SETUP overwriting the identity would
-	/// split those two apart, so the first write is the one that counts.
-	#[tokio::test]
-	async fn peer_setup_first_write_wins() {
-		let slot = PeerSetup::default();
-		slot.set(Peer {
-			origin: Some(origin(42)),
-			cost: Some(3),
-		});
-		slot.set(Peer {
-			origin: Some(origin(99)),
-			cost: Some(0),
-		});
-
-		let peer = slot.get().await;
-		assert_eq!(peer.origin, Some(origin(42)));
-		assert_eq!(peer.cost, Some(3));
 	}
 
 	#[test]

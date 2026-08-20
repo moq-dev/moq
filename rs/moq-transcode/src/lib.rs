@@ -27,7 +27,7 @@ mod error;
 mod feed;
 mod rung;
 
-pub use config::{Config, Rung};
+pub use config::{Config, Rung, source_reference};
 pub use error::Error;
 
 /// Transcode `source` into `output` until the source broadcast ends.
@@ -81,10 +81,11 @@ pub async fn run(
 
 	// Publish the derivative catalog before any encoder exists, so subscribers
 	// can pick a rung immediately.
-	let entries: Vec<_> = rungs
-		.iter()
-		.map(|rung| (rung.name.clone(), catalog::rung_entry(rung, &source_config)))
-		.collect();
+	let mut entries = Vec::with_capacity(rungs.len());
+	for rung in &rungs {
+		let entry = catalog::rung_entry(rung, &source_config, &config.encoder).await?;
+		entries.push((rung.name.clone(), entry));
+	}
 	{
 		let mut guard = derived.lock();
 		catalog::populate(&mut guard, &snapshot, &entries, config.source.as_ref())?;
@@ -504,14 +505,14 @@ mod tests {
 			rungs: vec![Rung::new(120, 100_000)],
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
-			source: Some(moq_net::PathRelativeOwned::from("..".to_string())),
+			source: Some(moq_net::PathRelativeOwned::from(".".to_string())),
 			..Default::default()
 		};
 
 		// The passthrough reference (`..`) resolves against the output broadcast's path, so
 		// the output must be minted through an origin: a standalone producer has no path, and
 		// `..` from it would escape, failing the catalog read below.
-		let origin = moq_net::Origin::random().produce();
+		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 		let output = origin
 			.create_broadcast("room/transcode", moq_net::broadcast::Route::new())
 			.unwrap();
@@ -547,7 +548,7 @@ mod tests {
 		assert!(rung.codec.to_string().starts_with("avc3."));
 
 		let passthrough = derived.video.renditions.get("video").expect("passthrough missing");
-		assert_eq!(passthrough.broadcast.as_ref().map(|b| b.as_ref()), Some(".."));
+		assert_eq!(passthrough.broadcast.as_ref().map(|b| b.as_ref()), Some("."));
 
 		// Subscribing to the rung starts the live loop, which mirrors source
 		// group sequences 1:1.

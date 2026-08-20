@@ -1,5 +1,5 @@
 use std::{
-	collections::{HashMap, HashSet},
+	collections::HashMap,
 	path::PathBuf,
 	sync::{
 		Arc, Mutex,
@@ -44,6 +44,94 @@ fn should_dial(self_url: &str, peer: &str) -> bool {
 	peer > self_url
 }
 
+/// One peer's stable identity and the dial-affecting configuration currently
+/// supplied by a discovery source.
+#[derive(Clone, PartialEq, Eq)]
+struct DialTarget {
+	key: String,
+	url: Url,
+	cost: Option<u64>,
+}
+
+impl DialTarget {
+	fn parse(peer: &str) -> anyhow::Result<Self> {
+		let mut url = peer_url(peer)?;
+		let key = {
+			let mut identity = url.clone();
+			identity.set_query(None);
+			identity.into()
+		};
+		let cost = take_cost(&mut url)?;
+		Ok(Self { key, url, cost })
+	}
+}
+
+/// Every currently-live gossip path for a canonical peer, in announcement order.
+/// Query changes create a new path before the old path necessarily unannounces,
+/// so the latest live path owns the dial configuration.
+#[derive(Default)]
+struct GossipTargets {
+	by_key: HashMap<String, Vec<(String, DialTarget)>>,
+}
+
+enum GossipUpdate {
+	/// The current advertisement changed to this target.
+	Current(DialTarget),
+	/// A non-current or unknown advertisement disappeared.
+	Unchanged,
+	/// The peer has no live advertisements left.
+	Gone,
+}
+
+impl GossipTargets {
+	fn announce(&mut self, advertisement: String, target: DialTarget) -> DialTarget {
+		let targets = self.by_key.entry(target.key.clone()).or_default();
+		targets.retain(|(existing, _)| existing != &advertisement);
+		targets.push((advertisement, target.clone()));
+		target
+	}
+
+	fn unannounce(&mut self, advertisement: &str, key: &str) -> GossipUpdate {
+		let Some(targets) = self.by_key.get_mut(key) else {
+			return GossipUpdate::Unchanged;
+		};
+		let was_current = targets.last().is_some_and(|(current, _)| current == advertisement);
+		let previous_len = targets.len();
+		targets.retain(|(existing, _)| existing != advertisement);
+		if targets.len() == previous_len {
+			return GossipUpdate::Unchanged;
+		}
+		if targets.is_empty() {
+			self.by_key.remove(key);
+			return GossipUpdate::Gone;
+		}
+		if was_current {
+			return GossipUpdate::Current(targets.last().expect("live target exists").1.clone());
+		}
+		GossipUpdate::Unchanged
+	}
+}
+
+/// Parse a complete dynamic peer list before mutating the live dial set. A bad
+/// entry or conflicting duplicate rejects the whole update, preserving the
+/// last-known-good topology.
+fn parse_peer_list(list: Vec<String>, node: Option<&str>) -> anyhow::Result<HashMap<String, DialTarget>> {
+	let self_key = node.map(canonicalize_peer_key);
+	let mut desired = HashMap::new();
+	for (index, peer) in list.into_iter().enumerate() {
+		let target = DialTarget::parse(&peer).with_context(|| format!("invalid peer at index {index}"))?;
+		if Some(&target.key) == self_key.as_ref() {
+			continue;
+		}
+		if let Some(previous) = desired.insert(target.key.clone(), target.clone())
+			&& previous != target
+		{
+			anyhow::bail!("peer identity {} has conflicting configurations", target.key);
+		}
+	}
+	Ok(desired)
+}
+
 /// A mechanism that wants a dial kept alive. A single peer can be wanted by more
 /// than one at once (e.g. gossiped *and* listed by `--cluster-connect-api`), so
 /// [`DialEntry`] tracks a set of these and only tears the dial down when the last
@@ -67,42 +155,59 @@ enum DialSource {
 }
 
 /// The set of [`DialSource`]s currently keeping a dial alive.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct DialSources {
-	seeded: bool,
-	gossip: bool,
-	api: bool,
+	seeded: Option<DialTarget>,
+	gossip: Option<DialTarget>,
+	api: Option<DialTarget>,
 	#[cfg(feature = "cluster-lan")]
-	mdns: bool,
+	mdns: Option<DialTarget>,
 }
 
 impl DialSources {
-	fn set(&mut self, source: DialSource) {
+	fn get(&self, source: DialSource) -> Option<&DialTarget> {
 		match source {
-			DialSource::Static => self.seeded = true,
-			DialSource::Gossip => self.gossip = true,
-			DialSource::Api => self.api = true,
+			DialSource::Static => self.seeded.as_ref(),
+			DialSource::Gossip => self.gossip.as_ref(),
+			DialSource::Api => self.api.as_ref(),
 			#[cfg(feature = "cluster-lan")]
-			DialSource::Mdns => self.mdns = true,
+			DialSource::Mdns => self.mdns.as_ref(),
+		}
+	}
+
+	fn set(&mut self, source: DialSource, target: DialTarget) {
+		match source {
+			DialSource::Static => self.seeded = Some(target),
+			DialSource::Gossip => self.gossip = Some(target),
+			DialSource::Api => self.api = Some(target),
+			#[cfg(feature = "cluster-lan")]
+			DialSource::Mdns => self.mdns = Some(target),
 		}
 	}
 
 	fn clear(&mut self, source: DialSource) {
 		match source {
-			DialSource::Static => self.seeded = false,
-			DialSource::Gossip => self.gossip = false,
-			DialSource::Api => self.api = false,
+			DialSource::Static => self.seeded = None,
+			DialSource::Gossip => self.gossip = None,
+			DialSource::Api => self.api = None,
 			#[cfg(feature = "cluster-lan")]
-			DialSource::Mdns => self.mdns = false,
+			DialSource::Mdns => self.mdns = None,
 		}
 	}
 
-	fn any(&self) -> bool {
+	/// The source to fall back to when the active one is released, most durable
+	/// first: operator intent, then the API list, then the two discovery
+	/// mechanisms whose targets come and go on their own.
+	fn fallback(&self) -> Option<(DialSource, &DialTarget)> {
+		let fallback = self
+			.seeded
+			.as_ref()
+			.map(|target| (DialSource::Static, target))
+			.or_else(|| self.api.as_ref().map(|target| (DialSource::Api, target)))
+			.or_else(|| self.gossip.as_ref().map(|target| (DialSource::Gossip, target)));
 		#[cfg(feature = "cluster-lan")]
-		let extra = self.mdns;
-		#[cfg(not(feature = "cluster-lan"))]
-		let extra = false;
-		self.seeded || self.gossip || self.api || extra
+		let fallback = fallback.or_else(|| self.mdns.as_ref().map(|target| (DialSource::Mdns, target)));
+		fallback
 	}
 }
 
@@ -112,10 +217,11 @@ impl DialSources {
 struct DialEntry {
 	handle: AbortHandle,
 	sources: DialSources,
+	active: DialSource,
 	unannounced_at: Option<Instant>,
 }
 
-/// Map of in-flight cluster dials, keyed by peer URL. Cloneable: the inner
+/// Map of in-flight cluster dials, keyed by canonical peer identity. Cloneable: the inner
 /// map is shared via `Arc<Mutex<_>>` so the discovery task and the static-seed
 /// phase write to the same set of entries.
 #[derive(Clone, Default)]
@@ -129,43 +235,80 @@ impl DialMap {
 		self.inner.lock().expect("dial map poisoned").contains_key(peer)
 	}
 
-	/// Record a freshly-spawned dial for `peer` under `source`. If `peer` is
-	/// already dialed, add `source` to its set and abort the redundant `handle`
-	/// (the existing dial stands, since dialing dedupes by URL). Always spawn the
-	/// task first, then call this: it resolves the "two sources discover the same
-	/// peer at once" race without leaking a task.
-	fn insert(&self, peer: String, handle: AbortHandle, source: DialSource) {
-		let mut map = self.inner.lock().expect("dial map poisoned");
-		if let Some(entry) = map.get_mut(&peer) {
-			entry.sources.set(source);
-			if source == DialSource::Gossip {
-				entry.unannounced_at = None;
-			}
-			drop(map);
+	/// Record an already-spawned dial under `source`. If the source is redundant,
+	/// abort its task instead of leaking a second session.
+	fn insert(&self, target: DialTarget, handle: AbortHandle, source: DialSource) {
+		let mut handle = Some(handle);
+		self.upsert(target, source, &mut |_| handle.take().expect("dial handle used once"));
+		if let Some(handle) = handle {
 			handle.abort();
-		} else {
-			let mut sources = DialSources::default();
-			sources.set(source);
-			map.insert(
-				peer,
-				DialEntry {
-					handle,
-					sources,
-					unannounced_at: None,
-				},
-			);
 		}
 	}
 
-	/// Add `source` to an already-dialed `peer` (no-op if absent). Used when a
-	/// peer reached via one source is also discovered via another, without opening
-	/// a second dial. Adding [`DialSource::Gossip`] also clears any pending
-	/// unannounce; returns whether such a timestamp was cleared (a reannounce).
-	fn add_source(&self, peer: &str, source: DialSource) -> bool {
+	/// Add or update one source's target, replacing the live dial only when that
+	/// source already owns it. Other sources retain their latest target as a
+	/// fallback without changing the first source's active configuration.
+	fn upsert<F>(&self, target: DialTarget, source: DialSource, spawn: &mut F) -> bool
+	where
+		F: FnMut(DialTarget) -> AbortHandle,
+	{
 		let mut map = self.inner.lock().expect("dial map poisoned");
-		let Some(entry) = map.get_mut(peer) else { return false };
-		entry.sources.set(source);
-		source == DialSource::Gossip && entry.unannounced_at.take().is_some()
+		if let Some(entry) = map.get_mut(&target.key) {
+			let replace = entry.active == source && entry.sources.get(source) != Some(&target);
+			entry.sources.set(source, target.clone());
+			let reannounced = source == DialSource::Gossip && entry.unannounced_at.take().is_some();
+			if replace {
+				entry.handle.abort();
+				entry.handle = spawn(target);
+			}
+			return reannounced;
+		}
+
+		let key = target.key.clone();
+		let handle = spawn(target.clone());
+		let mut sources = DialSources::default();
+		sources.set(source, target);
+		map.insert(
+			key,
+			DialEntry {
+				handle,
+				sources,
+				active: source,
+				unannounced_at: None,
+			},
+		);
+		false
+	}
+
+	/// Release one source. If it owned the live dial, switch to a remaining
+	/// source's latest target or abandon the peer when no source remains.
+	fn release<F>(&self, peer: &str, source: DialSource, spawn: &mut F)
+	where
+		F: FnMut(DialTarget) -> AbortHandle,
+	{
+		let mut map = self.inner.lock().expect("dial map poisoned");
+		let Some(entry) = map.get_mut(peer) else { return };
+		if entry.sources.get(source).is_none() {
+			return;
+		}
+		let active_target = entry.sources.get(source).cloned();
+		entry.sources.clear(source);
+		if entry.active != source {
+			return;
+		}
+
+		if let Some((next_source, next_target)) = entry.sources.fallback() {
+			let next_target = next_target.clone();
+			entry.active = next_source;
+			if active_target.as_ref() != Some(&next_target) {
+				entry.handle.abort();
+				entry.handle = spawn(next_target);
+			}
+			return;
+		}
+
+		let entry = map.remove(peer).expect("entry exists");
+		entry.handle.abort();
 	}
 
 	/// Start the gossip stale timer on `peer` if it isn't already pending. No-op
@@ -174,7 +317,7 @@ impl DialMap {
 	fn mark_unannounced(&self, peer: &str, now: Instant) {
 		let mut map = self.inner.lock().expect("dial map poisoned");
 		if let Some(entry) = map.get_mut(peer)
-			&& entry.sources.gossip
+			&& entry.sources.gossip.is_some()
 		{
 			entry.unannounced_at.get_or_insert(now);
 		}
@@ -182,77 +325,49 @@ impl DialMap {
 
 	/// Release the gossip source from entries whose unannounce has stuck for at
 	/// least `threshold`, aborting the dial only if no other source still wants it.
-	fn sweep_stale(&self, now: Instant, threshold: Duration) {
+	fn sweep_stale<F>(&self, now: Instant, threshold: Duration, spawn: &mut F)
+	where
+		F: FnMut(DialTarget) -> AbortHandle,
+	{
 		let mut map = self.inner.lock().expect("dial map poisoned");
-		map.retain(|peer, entry| {
-			let Some(at) = entry.unannounced_at else { return true };
-			if now.duration_since(at) < threshold {
-				return true;
-			}
-			entry.unannounced_at = None;
-			entry.sources.clear(DialSource::Gossip);
-			if entry.sources.any() {
-				tracing::debug!(%peer, "peer no longer gossiped; still wanted by another source");
-				true
-			} else {
-				tracing::info!(%peer, "peer no longer gossiped; abandoning dial");
-				entry.handle.abort();
-				false
-			}
-		});
-	}
+		let expired: Vec<String> = map
+			.iter_mut()
+			.filter_map(|(peer, entry)| {
+				let at = entry.unannounced_at?;
+				(now.duration_since(at) >= threshold).then(|| {
+					entry.unannounced_at = None;
+					peer.clone()
+				})
+			})
+			.collect();
+		drop(map);
 
-	/// Release `source` from `peer`, aborting the dial only if no other source
-	/// still wants it. For a source whose "gone" signal is definite, unlike the
-	/// gossip unannounce that [`sweep_stale`](Self::sweep_stale) has to wait out.
-	#[cfg(feature = "cluster-lan")]
-	fn release(&self, peer: &str, source: DialSource) {
-		let mut map = self.inner.lock().expect("dial map poisoned");
-		let Some(entry) = map.get_mut(peer) else { return };
-		entry.sources.clear(source);
-		if entry.sources.any() {
-			tracing::debug!(%peer, "peer no longer discovered; still wanted by another source");
-			return;
+		for peer in expired {
+			self.release(&peer, DialSource::Gossip, spawn);
 		}
-		tracing::info!(%peer, "peer no longer discovered; abandoning dial");
-		entry.handle.abort();
-		map.remove(peer);
 	}
 
-	/// Reconcile the API source against `desired`: release [`DialSource::Api`] from
-	/// entries no longer listed (aborting only those nothing else wants), mark the
-	/// API source on already-dialed peers that are listed, and return the desired
-	/// peers not yet dialed (the caller spawns those and re-inserts them).
-	fn reconcile_api(&self, desired: &HashSet<String>) -> Vec<String> {
-		let mut map = self.inner.lock().expect("dial map poisoned");
+	/// Reconcile the API source against `desired`, including changes to a peer's
+	/// dial-affecting URL or link cost while its canonical identity stays fixed.
+	fn reconcile_api<F>(&self, desired: &HashMap<String, DialTarget>, mut spawn: F)
+	where
+		F: FnMut(DialTarget) -> AbortHandle,
+	{
+		for target in desired.values() {
+			self.upsert(target.clone(), DialSource::Api, &mut spawn);
+		}
 
-		// One mutable pass: set the API source on listed peers, release it from the
-		// rest (aborting only those nothing else wants).
-		map.retain(|peer, entry| {
-			if desired.contains(peer) {
-				entry.sources.set(DialSource::Api);
-				return true;
-			}
-			if !entry.sources.api {
-				return true;
-			}
-			entry.sources.clear(DialSource::Api);
-			if entry.sources.any() {
-				tracing::debug!(%peer, "peer dropped from cluster-connect-api; still wanted by another source");
-				true
-			} else {
-				tracing::info!(%peer, "peer dropped from cluster-connect-api; abandoning dial");
-				entry.handle.abort();
-				false
-			}
-		});
-
-		// Whatever's left in `desired` but absent from the map needs a fresh dial.
-		desired
+		let removed: Vec<String> = self
+			.inner
+			.lock()
+			.expect("dial map poisoned")
 			.iter()
-			.filter(|peer| !map.contains_key(*peer))
-			.cloned()
-			.collect()
+			.filter(|(peer, entry)| entry.sources.api.is_some() && !desired.contains_key(*peer))
+			.map(|(peer, _)| peer.clone())
+			.collect();
+		for peer in removed {
+			self.release(&peer, DialSource::Api, &mut spawn);
+		}
 	}
 }
 
@@ -305,7 +420,7 @@ pub struct ClusterConfig {
 
 	/// Fetch the list of peers to dial from an HTTP(S) URL or a local file,
 	/// reloading at runtime without a restart. The source returns a JSON array
-	/// of peer hostnames: `["a.pop.example", "b.pop.example"]`. An http(s) URL is
+	/// of peer URLs: `["https://a.pop.example/?cost=1", "b.pop.example"]`. An http(s) URL is
 	/// re-checked on a fixed cadence, with caching, conditional revalidation
 	/// (`ETag` / `Last-Modified`), and stale-if-error handled by the shared HTTP
 	/// cache client, so the response's `Cache-Control` controls how often a real
@@ -356,8 +471,9 @@ pub struct ClusterConfig {
 
 	/// JWT presented on outbound cluster dials, read from this file. Applied to
 	/// any peer whose URL doesn't already carry a `?jwt=` (so it authenticates
-	/// gossip- and `connect_api`-discovered peers, whose addresses can't embed a
-	/// token). For static `--cluster-connect` peers, prefer an inline `?jwt=`.
+	/// any peer whose URL has no inline token). An inline `?jwt=` can provide a
+	/// per-peer credential for static or `connect_api` peers. Gossip should use
+	/// this shared token or mTLS because the advertised node URL is public.
 	#[arg(id = "cluster-token", long = "cluster-token", env = "MOQ_CLUSTER_TOKEN")]
 	pub token: Option<PathBuf>,
 
@@ -472,7 +588,7 @@ struct Work {
 	token: String,
 	/// The live mDNS advertisement, bound by [`Cluster::start`].
 	#[cfg(feature = "cluster-lan")]
-	discovery: Option<moq_native::mdns::Discovery>,
+	discovery: Option<moq_tokio::mdns::Discovery>,
 }
 
 /// A relay cluster built around a single [`origin::Producer`].
@@ -488,7 +604,7 @@ struct Work {
 #[derive(Clone)]
 pub struct Cluster {
 	config: ClusterConfig,
-	client: Option<moq_native::Client>,
+	client: Option<moq_tokio::Client>,
 	pub(crate) nodes: crate::nodes::Nodes,
 
 	/// Hands out the `conn` id every session logs under, inbound and outbound
@@ -532,6 +648,10 @@ impl Cluster {
 	/// (required when `config.connect` is non-empty), and
 	/// [`with_stats`](Self::with_stats) to enable metrics publishing.
 	///
+	/// Must be called within a tokio runtime: the origin's lifecycle driver is
+	/// spawned here, so the origin serves sessions whether or not
+	/// [`start`](Self::start) (the mesh half) is ever called.
+	///
 	/// Errors if `config.id` is set but invalid: it must be non-zero and below
 	/// 2^62 (the wire varint limit). An unset id picks a fresh random origin.
 	pub fn new(config: ClusterConfig) -> anyhow::Result<Self> {
@@ -550,7 +670,7 @@ impl Cluster {
 			);
 		}
 		let info = origin::Info::new(id);
-		let origin = info.clone().produce();
+		let origin = moq_tokio::origin::spawn(info.clone());
 		let nodes = crate::nodes::Nodes::new(origin.clone());
 		tracing::info!(origin_id = %origin.id(), configured = config.id.is_some(), "cluster initialized");
 		Ok(Cluster {
@@ -579,7 +699,7 @@ impl Cluster {
 			.clone()
 			.with_pool(cache.pool)
 			.with_cache_duration(cache.duration);
-		self.origin = self.info.clone().produce();
+		self.origin = moq_tokio::origin::spawn(self.info.clone());
 		self.nodes = self.nodes.with_origin(self.origin.clone());
 		self
 	}
@@ -588,7 +708,7 @@ impl Cluster {
 	///
 	/// Required when `config.connect` is non-empty; [`start`](Self::start) returns
 	/// an error otherwise.
-	pub fn with_client(mut self, client: moq_native::Client) -> Self {
+	pub fn with_client(mut self, client: moq_tokio::Client) -> Self {
 		self.client = Some(client);
 		self
 	}
@@ -746,9 +866,8 @@ impl Cluster {
 		}
 
 		// Token presented on outbound dials whose URL doesn't already carry a
-		// `?jwt=`. This is how gossip- and connect_api-discovered peers (whose
-		// addresses can't carry an inline token) authenticate, so it isn't
-		// deprecated; for static `connect` peers, an inline `?jwt=` is preferred.
+		// `?jwt=`. This remains the shared credential for any peer without a
+		// per-peer inline token.
 		let token = match &self.config.token {
 			Some(path) => std::fs::read_to_string(path)
 				.context("failed to read cluster token")?
@@ -821,8 +940,8 @@ impl Cluster {
 		let mut supervised: tokio::task::JoinSet<anyhow::Result<()>> = tokio::task::JoinSet::new();
 
 		for peer in &self.config.connect {
-			let key = canonicalize_peer_key(peer);
-			if dialed.contains(&key) {
+			let target = DialTarget::parse(peer).context("invalid --cluster-connect peer URL")?;
+			if dialed.contains(&target.key) {
 				continue;
 			}
 			if is_legacy_peer(peer) {
@@ -834,13 +953,9 @@ impl Cluster {
 			}
 			let this = self.clone();
 			let token = token.clone();
-			let peer_for_task = peer.clone();
-			let handle = tasks.spawn(async move {
-				if let Err(err) = this.run_remote(&peer_for_task, token).await {
-					tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
-				}
-			});
-			dialed.insert(key, handle, DialSource::Static);
+			let peer_for_task = target.clone();
+			let handle = tasks.spawn(this.supervise_remote(peer_for_task, token));
+			dialed.insert(target, handle, DialSource::Static);
 		}
 
 		if let Some(source) = self.config.connect_api.clone() {
@@ -938,6 +1053,7 @@ impl Cluster {
 			return;
 		};
 		let mut announced = consumer.announced();
+		let mut live = GossipTargets::default();
 
 		let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
 		sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -951,41 +1067,50 @@ impl Cluster {
 					// The address to dial, which keeps its query: `run_remote` reads
 					// `?cost=` and `?jwt=` off it. The key is only its identity.
 					let peer = advertised_node_url(relative.as_str());
-					let key = canonicalize_peer_key(&peer);
+					let target = match DialTarget::parse(&peer) {
+						Ok(target) => target,
+						Err(err) => {
+							tracing::warn!(%err, "invalid gossiped cluster peer URL; ignoring update");
+							continue;
+						}
+					};
 					// Skip self and any peer we lose the tiebreaker to; that side
 					// dials us instead, so each pair forms a single session.
-					if !should_dial(&self_url, &key) {
+					if !should_dial(&self_url, &target.key) {
 						continue;
 					}
+					let advertisement = relative.as_str().to_owned();
 					match broadcast {
 						Some(_) => {
-							if dialed.contains(&key) {
-								// Already dialed (possibly via another source). Mark gossip as
-								// a wanter and cancel any pending stale-sweep.
-								if dialed.add_source(&key, DialSource::Gossip) {
-									tracing::debug!(peer = %key, "reannounce within sweep window; keeping dial");
-								}
-								continue;
+							let target = live.announce(advertisement, target);
+							let mut spawn = |target: DialTarget| {
+								tracing::info!(peer = %target.key, "discovered cluster peer; dialing");
+								tokio::spawn(self.clone().supervise_remote(target, token.clone())).abort_handle()
+							};
+							let key = target.key.clone();
+							if dialed.upsert(target, DialSource::Gossip, &mut spawn) {
+								tracing::debug!(peer = %key, "reannounce within sweep window; keeping dial");
 							}
-							tracing::info!(peer = %key, "discovered cluster peer; dialing");
-							let this = self.clone();
-							let token = token.clone();
-							// Logged by key, never `peer`, so an inline jwt stays out of the logs.
-							let log_peer = key.clone();
-							let handle = tokio::spawn(async move {
-								if let Err(err) = this.run_remote(&peer, token).await {
-									tracing::warn!(%err, peer = %log_peer, "cluster peer connection ended");
-								}
-							});
-							dialed.insert(key, handle.abort_handle(), DialSource::Gossip);
 						}
-						None => {
-							dialed.mark_unannounced(&key, Instant::now());
-						}
+						None => match live.unannounce(&advertisement, &target.key) {
+							GossipUpdate::Current(target) => {
+								let mut spawn = |target: DialTarget| {
+									tracing::info!(peer = %target.key, "cluster peer advertisement changed; redialing");
+									tokio::spawn(self.clone().supervise_remote(target, token.clone())).abort_handle()
+								};
+								dialed.upsert(target, DialSource::Gossip, &mut spawn);
+							}
+							GossipUpdate::Unchanged => {}
+							GossipUpdate::Gone => dialed.mark_unannounced(&target.key, Instant::now()),
+						},
 					}
 				}
 				_ = sweep.tick() => {
-					dialed.sweep_stale(Instant::now(), STALE_AFTER);
+					let mut spawn = |target: DialTarget| {
+						tracing::info!(peer = %target.key, "cluster peer source changed; redialing");
+						tokio::spawn(self.clone().supervise_remote(target, token.clone())).abort_handle()
+					};
+					dialed.sweep_stale(Instant::now(), STALE_AFTER, &mut spawn);
 				}
 			}
 		}
@@ -1008,9 +1133,16 @@ impl Cluster {
 		self_url: String,
 		token: String,
 		dialed: DialMap,
-		mut discovery: moq_native::mdns::Discovery,
+		mut discovery: moq_tokio::mdns::Discovery,
 	) -> anyhow::Result<()> {
-		use moq_native::mdns::Event;
+		use moq_tokio::mdns::Event;
+
+		// Logged by key, never by the target's URL, so an inline query stays out of
+		// the logs.
+		let mut spawn = |target: DialTarget| {
+			tracing::info!(peer = %target.key, "dialing LAN cluster peer");
+			tokio::spawn(self.clone().supervise_remote(target, token.clone())).abort_handle()
+		};
 
 		while let Some(event) = discovery.recv().await {
 			match event {
@@ -1022,29 +1154,20 @@ impl Cluster {
 					// The address to dial keeps its query, since `run_remote` reads
 					// `?cost=` off it. The key is only its identity, exactly as on the
 					// gossip path.
-					let peer = node.to_string();
-					let key = canonicalize_peer_key(&peer);
-					// Skip any peer we lose the tiebreaker to; that side dials us.
-					if !should_dial(&self_url, &key) {
-						continue;
-					}
-					if dialed.contains(&key) {
-						dialed.add_source(&key, DialSource::Mdns);
-						continue;
-					}
-					tracing::info!(peer = %key, "discovered LAN cluster peer; dialing");
-					let this = self.clone();
-					let token = token.clone();
-					// Logged by key, never `peer`, so an inline query stays out of the logs.
-					let log_peer = key.clone();
-					let handle = tokio::spawn(async move {
-						if let Err(err) = this.run_remote(&peer, token).await {
-							tracing::warn!(%err, peer = %log_peer, "cluster peer connection ended");
+					let target = match DialTarget::parse(node.as_ref()) {
+						Ok(target) => target,
+						Err(err) => {
+							tracing::warn!(%err, peer = %peer.id, "LAN peer advertised an invalid --cluster-node URL; skipping");
+							continue;
 						}
-					});
-					dialed.insert(key, handle.abort_handle(), DialSource::Mdns);
+					};
+					// Skip any peer we lose the tiebreaker to; that side dials us.
+					if !should_dial(&self_url, &target.key) {
+						continue;
+					}
+					dialed.upsert(target, DialSource::Mdns, &mut spawn);
 				}
-				Event::Lost(id) => dialed.release(&canonicalize_peer_key(&id), DialSource::Mdns),
+				Event::Lost(id) => dialed.release(&canonicalize_peer_key(&id), DialSource::Mdns, &mut spawn),
 				_ => continue,
 			}
 		}
@@ -1058,7 +1181,7 @@ impl Cluster {
 
 	/// Drive `--cluster-connect-api`: an http(s) URL is polled, a local path (or
 	/// `file://` URL) is watched for changes. Either way the source yields a JSON
-	/// array of peer hostnames that's reconciled into the shared dial map.
+	/// array of peer URLs that's reconciled into the shared dial map.
 	async fn run_connect_api(self, source: String, node: Option<String>, token: String, dialed: DialMap) {
 		match Url::parse(&source) {
 			Ok(url) if matches!(url.scheme(), "http" | "https") => {
@@ -1123,13 +1246,13 @@ impl Cluster {
 	}
 
 	/// Watch a local peer-list file, reconciling whenever it changes. Backed by
-	/// [`moq_native::watch::FileWatcher`] (OS notifications with a polling fallback).
+	/// [`moq_tokio::watch::FileWatcher`] (OS notifications with a polling fallback).
 	/// Fails static: a missing or malformed file keeps the current dials, and the
 	/// next change triggers a fresh attempt.
 	async fn run_connect_api_file(&self, path: PathBuf, node: Option<String>, token: String, dialed: DialMap) {
 		self.reload_connect_api_file(&path, &node, &token, &dialed);
 
-		let mut watcher = match moq_native::watch::FileWatcher::new(std::slice::from_ref(&path)) {
+		let mut watcher = match moq_tokio::watch::FileWatcher::new(std::slice::from_ref(&path)) {
 			Ok(watcher) => watcher,
 			Err(err) => {
 				tracing::error!(%err, ?path, "failed to watch cluster.connect_api file; updates disabled");
@@ -1144,7 +1267,7 @@ impl Cluster {
 	}
 
 	/// Re-read the peer-list file and reconcile. Any read/parse error keeps the
-	/// current dials; the [`FileWatcher`](moq_native::watch::FileWatcher) only
+	/// current dials; the [`FileWatcher`](moq_tokio::watch::FileWatcher) only
 	/// re-invokes this on a real change, so a malformed file isn't re-warned on a
 	/// loop.
 	fn reload_connect_api_file(&self, path: &std::path::Path, node: &Option<String>, token: &str, dialed: &DialMap) {
@@ -1174,50 +1297,45 @@ impl Cluster {
 			.await
 			.context("failed to read cluster.connect_api body")?;
 
-		serde_json::from_str(&body).context("cluster.connect_api response is not a JSON array of hostnames")
+		serde_json::from_str(&body).context("cluster.connect_api response is not a JSON array of peer URLs")
 	}
 
 	/// Reconcile a freshly fetched peer list into the dial map: dial peers that
 	/// are new and drop API peers that disappeared. The relay's own [`node`] URL
 	/// is filtered out so it never dials itself.
 	fn apply_peer_list(&self, list: Vec<String>, node: &Option<String>, token: &str, dialed: &DialMap) {
-		// Dedupe against the shared dial map (and filter out self) on the canonical
-		// key, so an API entry matches the same peer reached via `connect`/gossip
-		// regardless of how each spells it. reconcile_api then yields canonical keys.
-		let self_key = node.as_deref().map(canonicalize_peer_key);
-		let desired: HashSet<String> = list
-			.into_iter()
-			.map(|peer| canonicalize_peer_key(&peer))
-			.filter(|key| Some(key) != self_key.as_ref())
-			.collect();
+		// Dedupe against the shared dial map (and filter out self) on stable identity,
+		// while retaining the full dial configuration so a cost or credential update
+		// replaces the existing session.
+		let desired = match parse_peer_list(list, node.as_deref()) {
+			Ok(desired) => desired,
+			Err(err) => {
+				tracing::warn!(%err, "invalid cluster.connect_api peer list; keeping current peers");
+				return;
+			}
+		};
 
-		for peer in dialed.reconcile_api(&desired) {
-			tracing::info!(%peer, "cluster.connect_api peer; dialing");
-			let this = self.clone();
-			let token = token.to_string();
-			let peer_for_task = peer.clone();
-			let handle = tokio::spawn(async move {
-				if let Err(err) = this.run_remote(&peer_for_task, token).await {
-					tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
-				}
-			});
-			dialed.insert(peer, handle.abort_handle(), DialSource::Api);
+		dialed.reconcile_api(&desired, |target| {
+			tracing::info!(peer = %target.key, "cluster.connect_api peer; dialing");
+			let handle = tokio::spawn(self.clone().supervise_remote(target, token.to_string()));
+			handle.abort_handle()
+		});
+	}
+
+	async fn supervise_remote(self, target: DialTarget, token: String) {
+		let log_peer = target.key.clone();
+		if let Err(err) = self.run_remote(&target, token).await {
+			tracing::warn!(%err, peer = %log_peer, "cluster peer connection ended");
 		}
 	}
 
-	#[tracing::instrument("remote", skip_all, err, fields(%remote))]
-	async fn run_remote(self, remote: &str, token: String) -> anyhow::Result<()> {
-		let mut url = peer_url(remote)?;
-		// The link's price, declared by us as the dialing side and charged to
-		// every announcement crossing the connection (see
-		// `moq_net::Client::with_cost`). Carried as a `?cost=` query
-		// param on the peer URL so static lists, gossip, and connect-api feeds can
-		// each price their links: 0 for a same-datacenter sibling, higher for a
-		// metered backbone. Stripped here; the value rides SETUP, not the URL.
-		let cost = take_cost(&mut url)?;
+	#[tracing::instrument("remote", skip_all, err, fields(remote = %target.key))]
+	async fn run_remote(self, target: &DialTarget, token: String) -> anyhow::Result<()> {
+		let mut url = target.url.clone();
+		let cost = target.cost;
 		// Apply the shared cluster token unless the URL already carries its own
-		// non-empty `?jwt=` (an inline token on a static `connect` peer wins; the
-		// shared token still covers discovered peers that have none). An empty
+		// non-empty `?jwt=` (a per-peer inline token wins; the shared token still
+		// covers peers that have none). An empty
 		// `?jwt=` counts as absent, matching `AuthParams::from_url`.
 		if !token.is_empty() && !url.query_pairs().any(|(key, value)| key == "jwt" && !value.is_empty()) {
 			url.query_pairs_mut().append_pair("jwt", &token);
@@ -1298,11 +1416,11 @@ impl Cluster {
 		let mut connection = None;
 		loop {
 			match reconnect.status().await? {
-				moq_native::Status::Connected if connection.is_none() => {
+				moq_tokio::Status::Connected if connection.is_none() => {
 					connection = Some(self.nodes.connect_outbound(id, log_url.to_string()));
 				}
-				moq_native::Status::Disconnected => connection = None,
-				moq_native::Status::Migrating => {}
+				moq_tokio::Status::Disconnected => connection = None,
+				moq_tokio::Status::Migrating => {}
 				_ => {}
 			}
 		}
@@ -1315,7 +1433,7 @@ impl Cluster {
 /// URL itself, which is what keeps the relay's normal name-and-certificate path
 /// intact. The key is what makes the advertised URL trustworthy enough to dial.
 #[cfg(feature = "cluster-lan")]
-async fn lan_discovery(node: &str, secret: &str) -> anyhow::Result<moq_native::mdns::Discovery> {
+async fn lan_discovery(node: &str, secret: &str) -> anyhow::Result<moq_tokio::mdns::Discovery> {
 	let url = peer_url(node)?;
 	// The advertisement is multicast in the clear. The secret authenticates the
 	// record, it does not hide it, so anything in the query is handed to every
@@ -1337,8 +1455,8 @@ async fn lan_discovery(node: &str, secret: &str) -> anyhow::Result<moq_native::m
 		published.join(", ")
 	);
 	let port = url.port_or_known_default().unwrap_or(443);
-	let secret = moq_native::mdns::Secret::load(secret).context("invalid --cluster-lan-secret")?;
-	Ok(moq_native::mdns::Config::new(port)
+	let secret = moq_tokio::mdns::Secret::load(secret).context("invalid --cluster-lan-secret")?;
+	Ok(moq_tokio::mdns::Config::new(port)
 		.with_node(url)
 		.with_secret(secret)
 		.advertise()
@@ -1394,10 +1512,10 @@ fn peer_url(peer: &str) -> anyhow::Result<Url> {
 	// A full URL has a scheme separator; a bare host or `host:port` does not
 	// (and `Url::parse` would otherwise mis-read `host:port` as scheme `host`).
 	if peer.contains("://") {
-		return Url::parse(peer).with_context(|| format!("invalid cluster peer URL: {peer}"));
+		return Url::parse(peer).context("invalid cluster peer URL");
 	}
 
-	Url::parse(&format!("https://{peer}/")).with_context(|| format!("invalid cluster peer host: {peer}"))
+	Url::parse(&format!("https://{peer}/")).context("invalid cluster peer host")
 }
 
 /// The address to dial for a node advertised under `MESH_PREFIX`.
@@ -1439,10 +1557,28 @@ fn is_legacy_peer(peer: &str) -> bool {
 /// session. Drops the query (the jwt isn't part of a peer's identity) and lets
 /// `Url` normalize the scheme, host case, and default port. Falls back to the
 /// raw string if the peer can't be parsed.
+///
+/// It has to absorb every normalization a discovery path applies on the way in,
+/// or one relay gets two keys and is dialed twice.
 pub(crate) fn canonicalize_peer_key(peer: &str) -> String {
 	match peer_url(peer) {
 		Ok(mut url) => {
 			url.set_query(None);
+			// mDNS strips these before advertising, so a key that kept them would
+			// give one relay two identities.
+			url.set_fragment(None);
+			url.set_username("").ok();
+			url.set_password(None).ok();
+			// Gossip round-trips the URL through `Path`, which trims slashes and
+			// collapses runs of them, so the key normalizes the path the same way.
+			// A non-special scheme like `moqt` keeps its trailing slash otherwise,
+			// and `moqt://a.example:4443/` is an ordinary way to spell a node.
+			let segments: Vec<&str> = url.path().split('/').filter(|s| !s.is_empty()).collect();
+			let path = match segments.is_empty() {
+				true => String::new(),
+				false => format!("/{}", segments.join("/")),
+			};
+			url.set_path(&path);
 			url.into()
 		}
 		Err(_) => peer.to_string(),
@@ -1546,8 +1682,8 @@ mod tests {
 		assert!(take_cost(&mut url).is_err());
 	}
 
-	#[test]
-	fn cluster_tier_defaults_to_unprefixed() {
+	#[tokio::test]
+	async fn cluster_tier_defaults_to_unprefixed() {
 		let cluster = Cluster::new(ClusterConfig::default()).expect("cluster");
 		assert_eq!(cluster.cluster_tier(), Tier::default());
 
@@ -1564,16 +1700,64 @@ mod tests {
 		tokio::spawn(std::future::pending::<()>()).abort_handle()
 	}
 
+	fn target(key: &str) -> DialTarget {
+		DialTarget {
+			key: key.to_string(),
+			url: Url::parse(&format!("https://{key}/")).expect("test URL"),
+			cost: None,
+		}
+	}
+
+	fn desired(keys: &[&str]) -> HashMap<String, DialTarget> {
+		keys.iter().map(|key| ((*key).to_string(), target(key))).collect()
+	}
+
+	/// A query change creates a new gossip path before the old path necessarily
+	/// unannounces. Removing that old path must not stale the replacement.
+	#[test]
+	fn gossip_old_unannounce_keeps_new_target() {
+		let mut live = GossipTargets::default();
+		let old = DialTarget::parse("https://peer.example/?cost=1").unwrap();
+		let new = DialTarget::parse("https://peer.example/?cost=2").unwrap();
+		live.announce("peer.example/?cost=1".to_string(), old.clone());
+		live.announce("peer.example/?cost=2".to_string(), new.clone());
+
+		assert!(matches!(
+			live.unannounce("peer.example/?cost=1", &old.key),
+			GossipUpdate::Unchanged
+		));
+		assert!(matches!(
+			live.unannounce("peer.example/?cost=2", &new.key),
+			GossipUpdate::Gone
+		));
+	}
+
+	/// If the current gossip path disappears while an older one is still live,
+	/// the remaining target becomes current again.
+	#[test]
+	fn gossip_current_unannounce_restores_live_fallback() {
+		let mut live = GossipTargets::default();
+		let old = DialTarget::parse("https://peer.example/?cost=1").unwrap();
+		let new = DialTarget::parse("https://peer.example/?cost=2").unwrap();
+		live.announce("peer.example/?cost=1".to_string(), old.clone());
+		live.announce("peer.example/?cost=2".to_string(), new.clone());
+
+		let GossipUpdate::Current(current) = live.unannounce("peer.example/?cost=2", &new.key) else {
+			panic!("older live advertisement must become current");
+		};
+		assert!(current == old);
+	}
+
 	/// `mark_unannounced` is a no-op for static peers (operator intent says
 	/// "always dial"), so the sweep never has a stale timestamp to act on.
 	#[tokio::test]
 	async fn sweep_preserves_static_peer() {
 		let dialed = DialMap::default();
-		dialed.insert("static-peer:4443".into(), placeholder_handle(), DialSource::Static);
+		dialed.insert(target("static-peer:4443"), placeholder_handle(), DialSource::Static);
 
 		let long_ago = Instant::now() - Duration::from_secs(3600);
 		dialed.mark_unannounced("static-peer:4443", long_ago);
-		dialed.sweep_stale(Instant::now(), STALE_AFTER);
+		dialed.sweep_stale(Instant::now(), STALE_AFTER, &mut |_| panic!("must not redial"));
 
 		assert!(dialed.contains("static-peer:4443"));
 	}
@@ -1584,10 +1768,10 @@ mod tests {
 	async fn sweep_evicts_stale_gossip_peer() {
 		let dialed = DialMap::default();
 		let now = Instant::now();
-		dialed.insert("gone:4443".into(), placeholder_handle(), DialSource::Gossip);
+		dialed.insert(target("gone:4443"), placeholder_handle(), DialSource::Gossip);
 		dialed.mark_unannounced("gone:4443", now - STALE_AFTER - Duration::from_secs(1));
 
-		dialed.sweep_stale(now, STALE_AFTER);
+		dialed.sweep_stale(now, STALE_AFTER, &mut |_| panic!("must not redial"));
 
 		assert!(!dialed.contains("gone:4443"));
 	}
@@ -1600,10 +1784,10 @@ mod tests {
 	async fn sweep_keeps_recently_unannounced_peer() {
 		let dialed = DialMap::default();
 		let now = Instant::now();
-		dialed.insert("flapping:4443".into(), placeholder_handle(), DialSource::Gossip);
+		dialed.insert(target("flapping:4443"), placeholder_handle(), DialSource::Gossip);
 		dialed.mark_unannounced("flapping:4443", now - Duration::from_millis(50));
 
-		dialed.sweep_stale(now, STALE_AFTER);
+		dialed.sweep_stale(now, STALE_AFTER, &mut |_| panic!("must not redial"));
 
 		assert!(dialed.contains("flapping:4443"));
 	}
@@ -1612,10 +1796,10 @@ mod tests {
 	#[tokio::test]
 	async fn sweep_keeps_currently_announced_peer() {
 		let dialed = DialMap::default();
-		dialed.insert("healthy:4443".into(), placeholder_handle(), DialSource::Gossip);
+		dialed.insert(target("healthy:4443"), placeholder_handle(), DialSource::Gossip);
 		// No mark_unannounced -> stays announced.
 
-		dialed.sweep_stale(Instant::now(), STALE_AFTER);
+		dialed.sweep_stale(Instant::now(), STALE_AFTER, &mut |_| panic!("must not redial"));
 
 		assert!(dialed.contains("healthy:4443"));
 	}
@@ -1627,19 +1811,20 @@ mod tests {
 	async fn reannounce_cancels_pending_sweep() {
 		let dialed = DialMap::default();
 		let now = Instant::now();
-		dialed.insert("flap:4443".into(), placeholder_handle(), DialSource::Gossip);
+		let target = target("flap:4443");
+		dialed.insert(target.clone(), placeholder_handle(), DialSource::Gossip);
 		dialed.mark_unannounced("flap:4443", now - STALE_AFTER - Duration::from_secs(1));
 
 		// Re-adding the gossip source (a reannounce) clears the pending sweep.
 		assert!(
-			dialed.add_source("flap:4443", DialSource::Gossip),
+			dialed.upsert(target.clone(), DialSource::Gossip, &mut |_| panic!("must not redial")),
 			"should report a cleared pending-sweep"
 		);
-		dialed.sweep_stale(now, STALE_AFTER);
+		dialed.sweep_stale(now, STALE_AFTER, &mut |_| panic!("must not redial"));
 
 		assert!(dialed.contains("flap:4443"));
 		// A second reannounce has nothing to clear.
-		assert!(!dialed.add_source("flap:4443", DialSource::Gossip));
+		assert!(!dialed.upsert(target, DialSource::Gossip, &mut |_| panic!("must not redial")));
 	}
 
 	/// A peer wanted by both gossip and the API survives losing either source: the
@@ -1649,20 +1834,16 @@ mod tests {
 		let dialed = DialMap::default();
 		let now = Instant::now();
 		// Gossiped first, then also appears in the API list.
-		dialed.insert("both:4443".into(), placeholder_handle(), DialSource::Gossip);
-		let desired: HashSet<String> = ["both:4443".to_string()].into_iter().collect();
-		assert!(
-			dialed.reconcile_api(&desired).is_empty(),
-			"already dialed; no new spawn"
-		);
+		dialed.insert(target("both:4443"), placeholder_handle(), DialSource::Gossip);
+		dialed.reconcile_api(&desired(&["both:4443"]), |_| panic!("already dialed"));
 
 		// Dropped from the API list -> still wanted by gossip.
-		assert!(dialed.reconcile_api(&HashSet::new()).is_empty());
+		dialed.reconcile_api(&HashMap::new(), |_| panic!("gossip dial stays active"));
 		assert!(dialed.contains("both:4443"), "gossip still wants it");
 
 		// Now gossip goes stale too -> the dial is finally released.
 		dialed.mark_unannounced("both:4443", now - STALE_AFTER - Duration::from_secs(1));
-		dialed.sweep_stale(now, STALE_AFTER);
+		dialed.sweep_stale(now, STALE_AFTER, &mut |_| panic!("must not redial"));
 		assert!(!dialed.contains("both:4443"));
 	}
 
@@ -1671,11 +1852,11 @@ mod tests {
 	#[tokio::test]
 	async fn insert_merges_redundant_dial() {
 		let dialed = DialMap::default();
-		dialed.insert("p:4443".into(), placeholder_handle(), DialSource::Gossip);
-		dialed.insert("p:4443".into(), placeholder_handle(), DialSource::Api);
+		dialed.insert(target("p:4443"), placeholder_handle(), DialSource::Gossip);
+		dialed.insert(target("p:4443"), placeholder_handle(), DialSource::Api);
 
 		// Dropping the API source leaves the gossip source holding the dial.
-		assert!(dialed.reconcile_api(&HashSet::new()).is_empty());
+		dialed.reconcile_api(&HashMap::new(), |_| panic!("gossip dial stays active"));
 		assert!(dialed.contains("p:4443"), "gossip source still holds the dial");
 	}
 
@@ -1685,17 +1866,18 @@ mod tests {
 	#[tokio::test]
 	async fn reconcile_api_adds_and_removes_only_api() {
 		let dialed = DialMap::default();
-		dialed.insert("static:4443".into(), placeholder_handle(), DialSource::Static);
-		dialed.insert("gossip:4443".into(), placeholder_handle(), DialSource::Gossip);
-		dialed.insert("api-keep:4443".into(), placeholder_handle(), DialSource::Api);
-		dialed.insert("api-drop:4443".into(), placeholder_handle(), DialSource::Api);
+		dialed.insert(target("static:4443"), placeholder_handle(), DialSource::Static);
+		dialed.insert(target("gossip:4443"), placeholder_handle(), DialSource::Gossip);
+		dialed.insert(target("api-keep:4443"), placeholder_handle(), DialSource::Api);
+		dialed.insert(target("api-drop:4443"), placeholder_handle(), DialSource::Api);
 
 		// Desired: keep one existing API peer, drop the other, add a new one.
 		// Static/Gossip peers are not in the list but must survive.
-		let desired: HashSet<String> = ["api-keep:4443".to_string(), "api-new:4443".to_string()]
-			.into_iter()
-			.collect();
-		let mut to_add = dialed.reconcile_api(&desired);
+		let mut to_add = Vec::new();
+		dialed.reconcile_api(&desired(&["api-keep:4443", "api-new:4443"]), |target| {
+			to_add.push(target.key);
+			placeholder_handle()
+		});
 		to_add.sort();
 
 		assert_eq!(to_add, vec!["api-new:4443".to_string()]);
@@ -1710,14 +1892,171 @@ mod tests {
 	#[tokio::test]
 	async fn reconcile_api_dedupes_against_other_sources() {
 		let dialed = DialMap::default();
-		dialed.insert("shared:4443".into(), placeholder_handle(), DialSource::Static);
+		dialed.insert(target("shared:4443"), placeholder_handle(), DialSource::Static);
 
-		let desired: HashSet<String> = ["shared:4443".to_string()].into_iter().collect();
-		assert!(dialed.reconcile_api(&desired).is_empty());
+		dialed.reconcile_api(&desired(&["shared:4443"]), |_| panic!("already dialed"));
 		assert!(dialed.contains("shared:4443"));
 	}
 
-	/// The peer-list wire format is a bare JSON array of host strings.
+	/// A secondary source can update its target without disturbing the source that
+	/// opened the session. If the active source disappears, its latest fallback
+	/// configuration is used for the replacement.
+	#[tokio::test]
+	async fn inactive_source_update_applies_on_takeover() {
+		let dialed = DialMap::default();
+		let gossip = DialTarget::parse("https://peer.example/?cost=1").unwrap();
+		let api = DialTarget::parse("https://peer.example/?cost=3").unwrap();
+		let old_task = tokio::spawn(std::future::pending::<()>());
+		dialed.insert(gossip.clone(), old_task.abort_handle(), DialSource::Gossip);
+
+		let desired = [(api.key.clone(), api.clone())].into_iter().collect();
+		dialed.reconcile_api(&desired, |_| panic!("inactive source must not redial"));
+		assert!(!old_task.is_finished());
+
+		let now = Instant::now();
+		dialed.mark_unannounced(&gossip.key, now - STALE_AFTER - Duration::from_secs(1));
+		let mut spawned = Vec::new();
+		dialed.sweep_stale(now, STALE_AFTER, &mut |target| {
+			spawned.push(target);
+			placeholder_handle()
+		});
+
+		tokio::task::yield_now().await;
+		assert!(old_task.is_finished(), "old source must be aborted");
+		assert_eq!(spawned.len(), 1);
+		assert!(spawned[0] == api);
+	}
+
+	/// If the fallback source requests the same target, ownership transfers without
+	/// interrupting the healthy session.
+	#[tokio::test]
+	async fn identical_fallback_takeover_keeps_task() {
+		let dialed = DialMap::default();
+		let target = DialTarget::parse("https://peer.example/?cost=1").unwrap();
+		let task = tokio::spawn(std::future::pending::<()>());
+		dialed.insert(target.clone(), task.abort_handle(), DialSource::Gossip);
+
+		let desired = [(target.key.clone(), target.clone())].into_iter().collect();
+		dialed.reconcile_api(&desired, |_| panic!("inactive source must not redial"));
+
+		let now = Instant::now();
+		dialed.mark_unannounced(&target.key, now - STALE_AFTER - Duration::from_secs(1));
+		dialed.sweep_stale(now, STALE_AFTER, &mut |_| panic!("identical fallback must not redial"));
+
+		assert!(!task.is_finished(), "healthy dial must be preserved");
+		let map = dialed.inner.lock().expect("dial map");
+		let entry = map.get(&target.key).expect("current dial");
+		assert_eq!(entry.active, DialSource::Api);
+		assert!(entry.sources.get(entry.active) == Some(&target));
+		drop(map);
+		task.abort();
+	}
+
+	/// A cost-only API update has the same identity but different SETUP input, so
+	/// it must replace the live task instead of being mistaken for an unchanged
+	/// peer.
+	#[tokio::test]
+	async fn reconcile_api_replaces_cost_only_change() {
+		let dialed = DialMap::default();
+		let old = DialTarget::parse("https://peer.example/?cost=1").unwrap();
+		let new = DialTarget::parse("https://peer.example/?cost=2").unwrap();
+		assert_eq!(old.key, new.key);
+		assert!(old != new);
+
+		let old_task = tokio::spawn(std::future::pending::<()>());
+		dialed.insert(old, old_task.abort_handle(), DialSource::Api);
+		let desired = [(new.key.clone(), new.clone())].into_iter().collect();
+		let mut spawned = Vec::new();
+		dialed.reconcile_api(&desired, |target| {
+			spawned.push(target);
+			placeholder_handle()
+		});
+
+		tokio::task::yield_now().await;
+		assert!(old_task.is_finished(), "old dial must be aborted");
+		assert_eq!(spawned.len(), 1);
+		assert!(spawned[0] == new);
+	}
+
+	/// An identical API render keeps the live task, avoiding connection churn.
+	#[tokio::test]
+	async fn reconcile_api_identical_target_is_noop() {
+		let dialed = DialMap::default();
+		let target = DialTarget::parse("https://peer.example/?cost=2&jwt=secret").unwrap();
+		let task = tokio::spawn(std::future::pending::<()>());
+		dialed.insert(target.clone(), task.abort_handle(), DialSource::Api);
+		let desired = [(target.key.clone(), target)].into_iter().collect();
+
+		dialed.reconcile_api(&desired, |_| panic!("identical target must not redial"));
+		assert!(!task.is_finished(), "live dial must be preserved");
+		task.abort();
+	}
+
+	/// Inline credentials are dial-affecting even though they are excluded from
+	/// peer identity, so rotating one replaces the session too.
+	#[tokio::test]
+	async fn reconcile_api_replaces_inline_credential() {
+		let dialed = DialMap::default();
+		let old = DialTarget::parse("https://peer.example/?jwt=old").unwrap();
+		let new = DialTarget::parse("https://peer.example/?jwt=new").unwrap();
+		assert_eq!(old.key, new.key);
+
+		let old_task = tokio::spawn(std::future::pending::<()>());
+		dialed.insert(old, old_task.abort_handle(), DialSource::Api);
+		let desired = [(new.key.clone(), new.clone())].into_iter().collect();
+		let mut spawned = Vec::new();
+		dialed.reconcile_api(&desired, |target| {
+			spawned.push(target);
+			placeholder_handle()
+		});
+
+		tokio::task::yield_now().await;
+		assert!(old_task.is_finished(), "old dial must be aborted");
+		assert_eq!(spawned.len(), 1);
+		assert!(spawned[0] == new);
+	}
+
+	/// A malformed replacement is rejected before reconciliation, so it cannot
+	/// tear down or reconfigure the last-known-good dial set.
+	#[tokio::test]
+	async fn malformed_peer_list_preserves_current_dial() {
+		let cluster = Cluster::new(ClusterConfig::default()).expect("cluster");
+		let dialed = DialMap::default();
+		let current = DialTarget::parse("https://peer.example/?cost=1").unwrap();
+		let task = tokio::spawn(std::future::pending::<()>());
+		dialed.insert(current.clone(), task.abort_handle(), DialSource::Api);
+
+		cluster.apply_peer_list(
+			vec!["https://peer.example/?cost=invalid".to_string()],
+			&None,
+			"",
+			&dialed,
+		);
+
+		assert!(!task.is_finished(), "last-known-good dial must stay active");
+		let map = dialed.inner.lock().expect("dial map");
+		let entry = map.get(&current.key).expect("current dial");
+		assert!(entry.sources.get(entry.active) == Some(&current));
+		task.abort();
+	}
+
+	/// The same identity cannot appear twice with different SETUP inputs because
+	/// input ordering must not choose which configuration wins.
+	#[test]
+	fn peer_list_rejects_conflicting_duplicate() {
+		let Err(err) = parse_peer_list(
+			vec![
+				"https://peer.example/?cost=1".to_string(),
+				"https://peer.example/?cost=2".to_string(),
+			],
+			None,
+		) else {
+			panic!("conflicting duplicate must fail");
+		};
+		assert!(format!("{err:#}").contains("conflicting configurations"));
+	}
+
+	/// The peer-list wire format is a JSON array of URL strings.
 	#[test]
 	fn peer_list_parses_as_string_array() {
 		let body = r#"["a.pop.example", "b.pop.example:4443"]"#;
@@ -1756,8 +2095,8 @@ mod tests {
 
 	/// A valid `cluster.id` is used verbatim as the relay's origin id, giving the
 	/// node a stable identity across restarts.
-	#[test]
-	fn cluster_id_sets_origin() {
+	#[tokio::test]
+	async fn cluster_id_sets_origin() {
 		let cluster = Cluster::new(ClusterConfig {
 			id: Some(42),
 			..Default::default()
@@ -1847,8 +2186,8 @@ mod tests {
 
 	/// The legacy `--cluster-mesh <url>` form (now a boolean) is honored for
 	/// backwards compatibility: it enables gossip and supplies the node URL.
-	#[test]
-	fn legacy_mesh_url_enables_gossip_as_node() {
+	#[tokio::test]
+	async fn legacy_mesh_url_enables_gossip_as_node() {
 		let cluster = Cluster::new(ClusterConfig {
 			mesh: Some("rendezvous.example.com:4443".to_string()),
 			..Default::default()
@@ -1881,6 +2220,14 @@ mod tests {
 		assert!(!is_legacy_peer("https://cdn.example.com/?jwt=abc"));
 	}
 
+	/// A malformed URL may contain a credential, so parse errors must not echo the
+	/// raw input into logs.
+	#[test]
+	fn peer_url_error_redacts_inline_credential() {
+		let err = peer_url("https://peer.example:bad/?jwt=top-secret").unwrap_err();
+		assert!(!format!("{err:#}").contains("top-secret"));
+	}
+
 	/// What a discovering relay reads off `announced()` for this node.
 	fn advertised(node: &str) -> String {
 		Path::new(MESH_PREFIX)
@@ -1900,7 +2247,7 @@ mod tests {
 			"https://a.example/",
 			"https://b.example:4443/",
 			"tcp://c.example:4443",
-			"https://d.example/?jwt=abc",
+			"https://d.example/?cost=7",
 			"https://e.example/deep/path",
 			// Legacy bare forms, which carry no scheme and default to https.
 			"rendezvous.example.com:4443",
@@ -1920,13 +2267,13 @@ mod tests {
 	/// every gossip-discovered link silently at the default cost.
 	#[test]
 	fn an_advertised_url_keeps_the_query_it_is_dialed_with() {
-		let dialed = advertised_node_url(&advertised("https://a.example/?cost=10&jwt=abc"));
-		assert_eq!(dialed, "https://a.example/?cost=10&jwt=abc");
+		let dialed = advertised_node_url(&advertised("https://a.example/?cost=10"));
+		assert_eq!(dialed, "https://a.example/?cost=10");
 
 		// The value has to reach where `run_remote` reads it.
 		let mut url = peer_url(&dialed).unwrap();
 		assert_eq!(take_cost(&mut url).unwrap(), Some(10));
-		assert_eq!(url.as_str(), "https://a.example/?jwt=abc");
+		assert_eq!(url.as_str(), "https://a.example/");
 	}
 
 	/// The colon that ends a scheme is the only signal, so a bare `host:port` (whose
@@ -1941,6 +2288,44 @@ mod tests {
 			canonicalize_peer_key(&advertised_node_url("rendezvous.example.com:4443")),
 			"https://rendezvous.example.com:4443/"
 		);
+	}
+
+	/// What a discovering relay reads off an mDNS record for this node, mirroring
+	/// [`lan_discovery`] and `moq_tokio::mdns::Config::with_node`.
+	fn advertised_lan(node: &str) -> String {
+		let mut url = peer_url(node).expect("valid node");
+		url.set_fragment(None);
+		url.set_username("").ok();
+		url.set_password(None).ok();
+		url.to_string()
+	}
+
+	/// The two discovery paths must land on the same peer key, or one relay gets
+	/// two [`DialMap`] entries and is dialed twice. This is self-triggering: the
+	/// session the mDNS dial opens is what carries the peer's gossip
+	/// advertisement, so the second dial follows the first.
+	///
+	/// Gossip round-trips the node URL through a [`Path`] (slashes trimmed and
+	/// collapsed) while mDNS strips the fragment and userinfo, so the key has to
+	/// absorb both. The realistic trigger is a trailing slash: `moqt` is not a
+	/// special scheme, so `Url` keeps one that `Path` would have dropped.
+	#[test]
+	fn gossip_and_mdns_agree_on_a_peer_key() {
+		for node in [
+			"moqt://a.example:4443/",
+			"https://a.example/edge/",
+			"https://a.example/#pos",
+			"https://user:pw@a.example/",
+			// Controls: spellings both paths already agreed on.
+			"https://a.example/",
+			"https://b.example:4443/deep/path",
+			"tcp://c.example:4443",
+			"rendezvous.example.com:4443",
+		] {
+			let gossip = canonicalize_peer_key(&advertised_node_url(&advertised(node)));
+			let mdns = canonicalize_peer_key(&advertised_lan(node));
+			assert_eq!(gossip, mdns, "{node} has two peer keys, so it is dialed twice");
+		}
 	}
 
 	/// With both sides canonical, exactly one of a pair dials.
@@ -1966,7 +2351,7 @@ mod tests {
 		// A URL form and the legacy host:port form dedupe against each other.
 		let dialed = DialMap::default();
 		dialed.insert(
-			canonicalize_peer_key("https://host:4443/?jwt=abc"),
+			DialTarget::parse("https://host:4443/?jwt=abc").unwrap(),
 			placeholder_handle(),
 			DialSource::Static,
 		);
@@ -1978,8 +2363,8 @@ mod tests {
 
 	/// A legacy mesh URL that disagrees with an explicit `--cluster-node` is a
 	/// conflict, not a silent pick.
-	#[test]
-	fn legacy_mesh_url_conflicting_with_node_errors() {
+	#[tokio::test]
+	async fn legacy_mesh_url_conflicting_with_node_errors() {
 		let cluster = Cluster::new(ClusterConfig {
 			mesh: Some("a.example.com:4443".to_string()),
 			node: Some("b.example.com:4443".to_string()),
@@ -2091,17 +2476,19 @@ mod tests {
 	#[tokio::test]
 	async fn mdns_release_respects_the_other_sources() {
 		let dialed = DialMap::default();
-		dialed.insert("peer:4443".into(), placeholder_handle(), DialSource::Mdns);
-		dialed.add_source("peer:4443", DialSource::Static);
+		let peer = target("peer:4443");
+		dialed.insert(peer.clone(), placeholder_handle(), DialSource::Mdns);
+		dialed.insert(peer.clone(), placeholder_handle(), DialSource::Static);
 
-		dialed.release("peer:4443", DialSource::Mdns);
-		assert!(dialed.contains("peer:4443"), "the static seed still wants it");
+		// The static seed wants the same target, so the takeover reuses the dial.
+		dialed.release(&peer.key, DialSource::Mdns, &mut |_| panic!("must not redial"));
+		assert!(dialed.contains(&peer.key), "the static seed still wants it");
 
-		dialed.release("peer:4443", DialSource::Static);
-		assert!(!dialed.contains("peer:4443"), "the last release abandons the dial");
+		dialed.release(&peer.key, DialSource::Static, &mut |_| panic!("must not redial"));
+		assert!(!dialed.contains(&peer.key), "the last release abandons the dial");
 
 		// Releasing an unknown peer is a no-op, not a panic.
-		dialed.release("never-dialed", DialSource::Mdns);
+		dialed.release("never-dialed", DialSource::Mdns, &mut |_| panic!("must not redial"));
 	}
 
 	#[test]

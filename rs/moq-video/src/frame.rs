@@ -454,7 +454,7 @@ impl I420 {
 	/// Convert tightly-packed RGB (`width * height * 3` bytes) to I420 in
 	/// [`Color::infer`]'s color space for this size. Used for MJPEG capture
 	/// (Linux V4L2), which decodes to RGB.
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", feature = "capture"))]
 	pub(crate) fn from_rgb(rgb: &[u8], width: u32, height: u32) -> Result<Self, Error> {
 		use yuv::rgb_to_yuv420;
 
@@ -469,7 +469,7 @@ impl I420 {
 	/// Convert packed YUYV (YUV 4:2:2, `stride` bytes per row) to I420. A chroma
 	/// resample (4:2:2 -> 4:2:0), no color-space conversion. Used for the raw
 	/// V4L2 capture path (Linux).
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", feature = "capture"))]
 	pub(crate) fn from_yuyv(yuyv: &[u8], stride: u32, width: u32, height: u32) -> Result<Self, Error> {
 		use yuv::{YuvPackedImage, yuyv422_to_yuv420};
 
@@ -2081,7 +2081,7 @@ mod tests {
 	/// 4:2:0 chroma resample must not claim it is BT.601: a 720p camera is
 	/// usually BT.709, and mislabeling pins it to the wrong matrix instead of
 	/// letting the resolution heuristic get it right.
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", feature = "capture"))]
 	#[test]
 	fn yuyv_capture_keeps_its_color_space_open() {
 		let (width, height) = (1280, 720);

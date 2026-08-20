@@ -5,7 +5,12 @@ import type * as Path from "../path.ts";
 import type { Probe, Stats } from "./stats.ts";
 import type { Transport } from "./transport.ts";
 
-/** An established MoQ session, implemented by both the moq-lite and moq-ietf protocols. */
+/**
+ * An established MoQ session, implemented by both the moq-lite and moq-ietf protocols.
+ *
+ * Publishing goes through an origin, not the session: pass an `Origin.Consumer` as the
+ * `publish` connect option and the session announces and serves that origin's broadcasts.
+ */
 export interface Established {
 	/** URL of the connected server. */
 	readonly url: URL;
@@ -31,9 +36,6 @@ export interface Established {
 
 	/** Subscribe to broadcast announcements under an optional path prefix, returning paths relative to that prefix. */
 	announced(prefix?: Path.Valid): announce.Consumer;
-
-	/** Publish a broadcast at the given path. */
-	publish(path: Path.Valid, broadcast: broadcast.Producer): void;
 
 	/**
 	 * Consume the broadcast at the given path, immediately.

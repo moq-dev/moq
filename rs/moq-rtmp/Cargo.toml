@@ -54,7 +54,7 @@ tokio-rustls = { version = "0.26", default-features = false, optional = true }
 tracing = "0.1"
 
 [dev-dependencies]
-# The RTMPS test borrows moq-native's self-signed cert generation to build a
+# The RTMPS test borrows moq-tokio's self-signed cert generation to build a
 # `rustls::ServerConfig`; `quinn` pulls in a backend so `tls::Server` is built.
-moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs", "quinn"] }
+moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "quinn"] }
 tokio = { workspace = true, features = ["test-util"] }

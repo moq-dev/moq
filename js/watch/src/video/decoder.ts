@@ -3,10 +3,26 @@ import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import {
+	type Computed,
+	Effect,
+	type Getter,
+	getter,
+	type Inputs,
+	type Readonlys,
+	readonlys,
+	Signal,
+} from "@moq/signals";
 import { base64ToBytes } from "../base64";
 
 import type { Sync } from "../sync";
+import {
+	type DecoderConfig,
+	decoderConfigKey,
+	type PlaybackIdentity,
+	playbackIdentity,
+	supportCacheKey,
+} from "./config";
 import { caughtUp, renditionJitter, switchJitter } from "./playhead";
 import { rotateVideoDimensions } from "./presentation";
 import type { Source } from "./source";
@@ -15,7 +31,7 @@ import type { Source } from "./source";
 const BUFFERING = Time.Milli(500);
 
 export type DecoderInput = {
-	// Whether to download the video track. Wired from the renderer's output by the parent.
+	// Whether to download the video track. Defaults to true; the parent may wire it from the renderer's output.
 	enabled: Getter<boolean>;
 };
 
@@ -48,11 +64,6 @@ type DecoderOutput = {
 	buffered: Signal<Container.BufferedRanges>;
 };
 
-// The types in VideoDecoderConfig that cause a hard reload.
-// ex. codedWidth/Height are optional and can be changed in-band, so we don't want to trigger a reload.
-// This way we can keep the current subscription active.
-type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeight">;
-
 /** Downloads video from a track and decodes it into {@link VideoFrame}s with WebCodecs. */
 export class Decoder {
 	readonly in: Readonlys<DecoderInput>;
@@ -73,6 +84,7 @@ export class Decoder {
 	// The current track running, held so we can cancel it when the new track is ready.
 	#active = new Signal<DecoderTrack | undefined>(undefined);
 	#pendingJitter = new Signal<Time.Milli | undefined>(undefined);
+	readonly #identity: Computed<PlaybackIdentity | undefined>;
 
 	#signals = new Effect();
 
@@ -86,11 +98,15 @@ export class Decoder {
 
 	constructor(source: Source, sync: Sync, props?: Inputs<DecoderInput>) {
 		this.in = {
-			enabled: getter(props?.enabled ?? false),
+			enabled: getter(props?.enabled ?? true),
 		};
 
 		this.source = source;
 		this.sync = sync;
+		this.#identity = this.#signals.computed((effect) => {
+			const config = effect.get(this.source.out.config);
+			return config ? playbackIdentity(config) : undefined;
+		});
 
 		this.#signals.run(this.#runJitter.bind(this));
 		this.#signals.run(this.#runPending.bind(this));
@@ -110,7 +126,7 @@ export class Decoder {
 			this.in.enabled,
 			this.source.in.broadcast,
 			this.source.out.track,
-			this.source.out.config,
+			this.#identity,
 		]);
 		if (!values) {
 			// Close the active track when disabled (e.g. paused or not visible).
@@ -118,11 +134,11 @@ export class Decoder {
 			this.#active.set(undefined);
 			return;
 		}
-		const [_, broadcast, track, config] = values;
+		const [_, broadcast, track, identity] = values;
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
 		// broadcast instead of the catalog's own broadcast.
-		const active: Moq.Broadcast.Consumer | undefined = broadcast.relativeBroadcast(effect, config.broadcast);
+		const active: Moq.Broadcast.Consumer | undefined = broadcast.relativeBroadcast(effect, identity.broadcast);
 		if (!active) {
 			// Going offline should clear the last rendered frame.
 			this.#active.set(undefined);
@@ -136,7 +152,7 @@ export class Decoder {
 			sync: this.sync,
 			broadcast: active,
 			track,
-			config,
+			config: identity.decoder,
 			stats: this.#out.stats,
 		});
 		effect.set(this.#pendingJitter, pending.jitter);
@@ -240,7 +256,7 @@ interface DecoderTrackProps {
 	sync: Sync;
 	broadcast: Moq.Broadcast.Consumer;
 	track: string;
-	config: Catalog.VideoConfig;
+	config: DecoderConfig;
 
 	stats: Signal<Stats | undefined>;
 }
@@ -249,7 +265,7 @@ class DecoderTrack {
 	sync: Sync;
 	broadcast: Moq.Broadcast.Consumer;
 	track: string;
-	config: RequiredDecoderConfig;
+	config: DecoderConfig;
 	stats: Signal<Stats | undefined>;
 	jitter: Time.Milli | undefined;
 
@@ -269,13 +285,10 @@ class DecoderTrack {
 	#signals = new Effect();
 
 	constructor(props: DecoderTrackProps) {
-		// Remove the codedWidth/Height from the config to avoid a hard reload if nothing else has changed.
-		const { codedWidth: _, codedHeight: __, ...requiredConfig } = props.config;
-
 		this.sync = props.sync;
 		this.broadcast = props.broadcast;
 		this.track = props.track;
-		this.config = requiredConfig;
+		this.config = props.config;
 		this.stats = props.stats;
 		this.jitter = renditionJitter(props.config);
 
@@ -364,9 +377,11 @@ class DecoderTrack {
 		});
 
 		decoder.configure({
-			...this.config,
+			codec: this.config.codec,
 			description: this.config.description ? Util.Hex.toBytes(this.config.description) : undefined,
-			optimizeForLatency: this.config.optimizeForLatency ?? true,
+			displayAspectWidth: this.config.displayAspectWidth,
+			displayAspectHeight: this.config.displayAspectHeight,
+			optimizeForLatency: this.config.optimizeForLatency,
 			// @ts-expect-error Only supported by Chrome, so the renderer has to flip manually.
 			flip: false,
 		});
@@ -441,7 +456,9 @@ class DecoderTrack {
 		decoder.configure({
 			codec: this.config.codec,
 			description,
-			optimizeForLatency: this.config.optimizeForLatency ?? true,
+			displayAspectWidth: this.config.displayAspectWidth,
+			displayAspectHeight: this.config.displayAspectHeight,
+			optimizeForLatency: this.config.optimizeForLatency,
 			// @ts-expect-error Only supported by Chrome, so the renderer has to flip manually.
 			flip: false,
 		});
@@ -573,6 +590,8 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 	const { supported } = await VideoDecoder.isConfigSupported({
 		codec: config.codec,
 		description,
+		displayAspectWidth: config.displayAspectWidth,
+		displayAspectHeight: config.displayAspectHeight,
 		optimizeForLatency: config.optimizeForLatency ?? true,
 	});
 
@@ -586,6 +605,8 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 		const retry = await VideoDecoder.isConfigSupported({
 			codec: avc1,
 			description,
+			displayAspectWidth: config.displayAspectWidth,
+			displayAspectHeight: config.displayAspectHeight,
 			optimizeForLatency: config.optimizeForLatency ?? true,
 		});
 		if (retry.supported) {
@@ -596,3 +617,5 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 
 	return false;
 }
+
+Object.assign(supported, { [supportCacheKey]: decoderConfigKey });

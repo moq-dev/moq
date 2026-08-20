@@ -86,6 +86,9 @@ pub struct MoqBroadcastRequest {
 
 struct Announced {
 	inner: moq_net::announce::Consumer,
+	/// The same rooted cursor `inner` was drawn from, so an announced broadcast can resolve a
+	/// catalog reference to a sibling under that root.
+	origin: moq_net::origin::Consumer,
 }
 
 struct OriginDynamic {
@@ -112,7 +115,7 @@ impl Announced {
 					};
 					return Ok(Some(Arc::new(MoqAnnouncement {
 						path: path.to_string(),
-						broadcast: Arc::new(MoqBroadcastConsumer::new(broadcast)),
+						broadcast: Arc::new(MoqBroadcastConsumer::routed(broadcast, self.origin.clone())),
 					})));
 				}
 				None => return Ok(None),
@@ -130,7 +133,7 @@ struct AnnouncedBroadcast {
 impl AnnouncedBroadcast {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		match self.origin.announced_broadcast(&self.path).await {
-			Some(broadcast) => Ok(Arc::new(MoqBroadcastConsumer::new(broadcast))),
+			Some(broadcast) => Ok(Arc::new(MoqBroadcastConsumer::routed(broadcast, self.origin.clone()))),
 			None => Err(MoqError::Closed),
 		}
 	}
@@ -166,8 +169,18 @@ impl MoqOriginProducer {
 			info = info.with_pool(moq_net::cache::Pool::new(capacity));
 		}
 
-		Self { inner: info.produce() }
+		Self { inner: spawn(info) }
 	}
+}
+
+/// Build an origin producer, spawning its driver on the FFI runtime.
+///
+/// Uses the runtime handle directly (rather than `tokio::spawn`) because
+/// constructors are called from foreign threads with no runtime entered.
+pub(crate) fn spawn(info: moq_net::origin::Info) -> moq_net::origin::Producer {
+	let (producer, driver) = moq_net::origin::Producer::new(info);
+	crate::ffi::RUNTIME.spawn(driver);
+	producer
 }
 
 impl MoqOriginConsumer {
@@ -187,14 +200,14 @@ pub(crate) fn resolve_pair(
 ) -> (moq_net::origin::Producer, moq_net::origin::Producer) {
 	if publish.is_none() && consume.is_none() {
 		// Clones of a Producer share the underlying origin, so this is one origin, not two.
-		let shared = moq_net::Origin::random().produce();
+		let shared = spawn(moq_net::Origin::random().into());
 		return (shared.clone(), shared);
 	}
 
 	let resolve = |origin: Option<&Arc<MoqOriginProducer>>| {
 		origin
 			.map(|o| o.inner().clone())
-			.unwrap_or_else(|| moq_net::Origin::random().produce())
+			.unwrap_or_else(|| spawn(moq_net::Origin::random().into()))
 	};
 	(resolve(publish), resolve(consume))
 }
@@ -258,11 +271,15 @@ impl MoqOriginConsumer {
 		Ok(Arc::new(MoqAnnounced {
 			task: Task::new(Announced {
 				inner: origin.announced(),
+				origin,
 			}),
 		}))
 	}
 
 	/// Wait for a specific broadcast to be announced by path.
+	///
+	/// This is how you resolve a path right after connecting: announcements arrive over the
+	/// session after it opens, so `request_broadcast` on its own races them.
 	pub fn announced_broadcast(&self, path: String) -> Result<Arc<MoqAnnouncedBroadcast>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let path = moq_net::Path::new(&path).to_owned();
@@ -290,9 +307,12 @@ impl MoqOriginConsumer {
 	/// errors if nothing can serve it. Unlike `announced_broadcast`, this does *not* wait
 	/// indefinitely for a future announcement: it resolves or fails based on what is
 	/// announced now plus any dynamic fallback. Drop the returned future to cancel.
+	///
+	/// Calling this straight after connecting therefore races the session's announcements
+	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first.
 	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		let broadcast = self.inner.request_broadcast(path.as_str()).await?;
-		Ok(Arc::new(MoqBroadcastConsumer::new(broadcast)))
+		Ok(Arc::new(MoqBroadcastConsumer::routed(broadcast, self.inner.clone())))
 	}
 }
 
@@ -311,6 +331,9 @@ impl MoqOriginDynamic {
 	}
 
 	/// Cancel all current and future `requested_broadcast()` calls.
+	///
+	/// Terminal: the dynamic origin is released here, not when the handle is, so any pending
+	/// request is rejected.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
@@ -369,6 +392,8 @@ impl MoqAnnounced {
 	}
 
 	/// Cancel all current and future `next()` calls.
+	///
+	/// Terminal: the announcement stream is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
@@ -399,6 +424,8 @@ impl MoqAnnouncedBroadcast {
 	}
 
 	/// Cancel all current and future `available()` calls.
+	///
+	/// Terminal: the announcement watch is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}

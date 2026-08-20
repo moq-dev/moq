@@ -241,40 +241,37 @@ impl PeerSetup {
 		*self.0.lock() = Some(setup);
 	}
 
-	/// Await the peer's advertised probe level, blocking until its SETUP arrives.
-	pub async fn probe_level(&self) -> ProbeLevel {
-		self.wait(|setup| setup.probe).await
+	/// Poll for the peer's advertised probe level, waiting until its SETUP arrives.
+	pub fn poll_probe_level(&self, waiter: &kio::Waiter) -> std::task::Poll<ProbeLevel> {
+		self.poll_get(waiter, |setup| setup.probe)
 	}
 
-	/// Await the link cost the peer (the dialing side) declared in its SETUP.
+	/// Poll for the link cost the peer (the dialing side) declared in its SETUP.
 	/// `None` when it declared none, meaning the default cost of 1.
-	pub async fn cost(&self) -> Option<u64> {
-		self.wait(|setup| setup.cost).await
+	pub fn poll_cost(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<u64>> {
+		self.poll_get(waiter, |setup| setup.cost)
 	}
 
-	/// Await the origin (hop) id the peer declared in its SETUP. `None` when it
+	/// Poll for the origin (hop) id the peer declared in its SETUP. `None` when it
 	/// declared none: a leaf with no identity worth excluding.
-	pub async fn origin(&self) -> Option<crate::Origin> {
-		self.wait(|setup| setup.origin).await
+	pub fn poll_origin(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<crate::Origin>> {
+		self.poll_get(waiter, |setup| setup.origin)
 	}
 
-	/// Await the peer's SETUP and read a field out of it.
+	/// Poll for a field of the peer's SETUP.
 	///
 	/// The peer MUST send exactly one SETUP, so this resolves once that stream is read.
-	/// Waits forever if it never does; the caller is a session task, cancelled when the
-	/// driver drops.
-	async fn wait<T>(&self, f: impl FnOnce(&Setup) -> T) -> T {
-		let slot = self
-			.0
-			.wait(|setup| {
-				if setup.is_some() {
-					std::task::Poll::Ready(())
-				} else {
-					std::task::Poll::Pending
-				}
-			})
-			.await;
-		f(slot.as_ref().expect("waited for Some"))
+	/// Pends forever if it never does; the caller is session state, dropped with the
+	/// driver.
+	fn poll_get<T>(&self, waiter: &kio::Waiter, f: impl FnOnce(&Setup) -> T) -> std::task::Poll<T> {
+		let slot = std::task::ready!(self.0.poll(waiter, |setup| {
+			if setup.is_some() {
+				std::task::Poll::Ready(())
+			} else {
+				std::task::Poll::Pending
+			}
+		}));
+		std::task::Poll::Ready(f(slot.as_ref().expect("waited for Some")))
 	}
 }
 

@@ -25,6 +25,8 @@ extern "C" {
 #include "moq.h"
 }
 
+#include "moq-settings.h"
+
 // ------------------------------------------------------------- libobs stubs
 
 namespace {
@@ -43,7 +45,7 @@ std::mutex g_signals_mutex;
 std::vector<RecordedSignal> g_signals;
 std::string g_last_error;
 std::atomic<int> g_begin_capture{0};
-std::atomic<int> g_client_result{0};
+std::atomic<bool> g_settings_ok{true};
 // Lets a test run something inside obs_output_signal_stop, standing in for a
 // frontend that stops the output straight from the signal handler.
 std::function<void()> g_on_signal;
@@ -142,9 +144,10 @@ const char *obs_encoder_get_codec(const obs_encoder_t *)
 } // extern "C"
 
 namespace MoQSettings {
-int CreateClient(obs_data_t *)
+bool BuildConfig(obs_data_t *, Config *out)
 {
-	return g_client_result;
+	*out = Config{};
+	return g_settings_ok;
 }
 } // namespace MoQSettings
 
@@ -192,7 +195,12 @@ int32_t moq_publish_finish(uint32_t)
 	return 0;
 }
 
-int32_t moq_publish_media(uint32_t, const char *, size_t, const uint8_t *, size_t)
+int32_t moq_publish_video(uint32_t, const moq_video_init *)
+{
+	return 7;
+}
+
+int32_t moq_publish_audio(uint32_t, const moq_audio_init *)
 {
 	return 7;
 }
@@ -207,8 +215,13 @@ int32_t moq_publish_media_frame(uint32_t, const uint8_t *, uintptr_t, uint64_t)
 	return 0;
 }
 
-int32_t moq_session_connect(const char *, size_t, uint32_t, uint32_t, void (*on_status)(void *, int32_t),
-			    void *user_data)
+int32_t moq_publish_media_cut(uint32_t)
+{
+	return 0;
+}
+
+int32_t moq_session_connect(const char *, size_t, const moq_client_config *, uint32_t, uint32_t,
+			    void (*on_status)(void *, int32_t), void *user_data)
 {
 	g_on_status = on_status;
 	g_user_data = user_data;
@@ -228,17 +241,6 @@ int32_t moq_session_connect(const char *, size_t, uint32_t, uint32_t, void (*on_
 		g_connect_terminal_thread = std::thread([cb, ud] { cb(ud, -34); });
 	}
 	return handle;
-}
-
-int32_t moq_client_connect(const char *url, size_t url_len, uint32_t, uint32_t origin_publish, uint32_t origin_consume,
-			   void (*on_status)(void *, int32_t), void *user_data)
-{
-	return moq_session_connect(url, url_len, origin_publish, origin_consume, on_status, user_data);
-}
-
-int32_t moq_client_close(uint32_t)
-{
-	return 0;
 }
 
 int32_t moq_session_close(uint32_t session)
@@ -316,7 +318,7 @@ void reset()
 	g_on_status = nullptr;
 	g_closed_handle = 0;
 	g_begin_capture = 0;
-	g_client_result = 0;
+	g_settings_ok = true;
 	g_start_gate = nullptr;
 	g_connect_fires_terminal = false;
 	g_connect_fires_terminal_threaded = false;
@@ -340,7 +342,7 @@ int main()
 	// Invalid advanced settings stop before a session or capture is created.
 	{
 		reset();
-		g_client_result = -40;
+		g_settings_ok = false;
 		MoQOutput o(nullptr, out);
 		CHECK(!o.Start());
 		CHECK(g_on_status == nullptr);

@@ -8,7 +8,7 @@
 
 A [GStreamer](https://gstreamer.freedesktop.org/) plugin for [Media over QUIC](https://moq.dev), exposing `moqsink` (and friends) as native GStreamer elements.
 
-Uses [hang](https://github.com/moq-dev/moq/tree/main/rs/hang), [moq-mux](https://github.com/moq-dev/moq/tree/main/rs/moq-mux), and [moq-native](https://github.com/moq-dev/moq/tree/main/rs/moq-native) under the hood, so it can publish CMAF/fMP4 produced by any GStreamer pipeline directly to a MoQ relay.
+Uses [hang](https://github.com/moq-dev/moq/tree/main/rs/hang), [moq-mux](https://github.com/moq-dev/moq/tree/main/rs/moq-mux), and [moq-tokio](https://github.com/moq-dev/moq/tree/main/rs/moq-tokio) under the hood, so it can publish CMAF/fMP4 produced by any GStreamer pipeline directly to a MoQ relay.
 
 This crate is not published to crates.io. Pre-built binaries are attached to GitHub releases (see below) or you can build from source.
 

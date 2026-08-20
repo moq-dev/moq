@@ -1,13 +1,9 @@
 import { expect, test } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { type Connection, Path, Track } from "@moq/net";
+import { Origin, Path, Track } from "@moq/net";
 import { Effect } from "@moq/signals";
 import { Broadcast } from "./broadcast.ts";
-
-// The broadcast only opens its network producer once it has a connection, so tests that drive the
-// request loop hand it a stub whose publish() is a no-op; the internal producer is exposed via `net`.
-const stubConnection = () => ({ publish() {} }) as unknown as Connection.Established;
 
 // Effects and signal writes coalesce onto microtasks, so a chain of registration -> config -> catalog
 // needs a few flushes to settle.
@@ -108,7 +104,7 @@ test("rendition.close() unregisters the name and drops it from the catalog", asy
 });
 
 test("serving a subscription hands the producer to the rendition and clears it when the track closes", async () => {
-	const broadcast = new Broadcast({ enabled: true, connection: stubConnection(), name: Path.from("test.hang") });
+	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("test.hang") });
 	await settle();
 
 	const net = broadcast.net.peek();
@@ -133,7 +129,7 @@ test("serving a subscription hands the producer to the rendition and clears it w
 });
 
 test("serves the catalog through the request loop and releases the scope when the subscriber leaves", async () => {
-	const broadcast = new Broadcast({ enabled: true, connection: stubConnection(), name: Path.from("test.hang") });
+	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("test.hang") });
 	broadcast.video("video").config.set(videoConfig);
 	await settle();
 

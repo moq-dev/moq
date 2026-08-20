@@ -23,27 +23,24 @@ export type SessionCode = number & { readonly [SESSION_CODE]: true };
  *
  * @public
  */
-export const SessionCode = Object.assign(
-	(code: number): SessionCode => applicationCode(code) as SessionCode,
-	{
-		/** Ending the session normally, with no error. */
-		Cancel: 0x0 as SessionCode,
-		/** Something went wrong that isn't worth a dedicated code. */
-		Internal: 0x1 as SessionCode,
-		/** The credentials don't grant the requested path or operation. Retrying will fail again. */
-		Unauthorized: 0x2 as SessionCode,
-		/** A protocol rule was broken; the session is unusable. */
-		ProtocolViolation: 0x3 as SessionCode,
-		/** A key-value pair was malformed or repeated more than allowed. */
-		KeyValueFormatting: 0x6 as SessionCode,
-		/** The peer did not close within the GOAWAY drain deadline. */
-		GoawayTimeout: 0x10 as SessionCode,
-		/** A control message took too long. */
-		Timeout: 0x11 as SessionCode,
-		/** No version could be negotiated. */
-		Version: 0x15 as SessionCode,
-	},
-);
+export const SessionCode = Object.assign((code: number): SessionCode => applicationCode(code) as SessionCode, {
+	/** Ending the session normally, with no error. */
+	Cancel: 0x0 as SessionCode,
+	/** Something went wrong that isn't worth a dedicated code. */
+	Internal: 0x1 as SessionCode,
+	/** The credentials don't grant the requested path or operation. Retrying will fail again. */
+	Unauthorized: 0x2 as SessionCode,
+	/** A protocol rule was broken; the session is unusable. */
+	ProtocolViolation: 0x3 as SessionCode,
+	/** A key-value pair was malformed or repeated more than allowed. */
+	KeyValueFormatting: 0x6 as SessionCode,
+	/** The peer did not close within the GOAWAY drain deadline. */
+	GoawayTimeout: 0x10 as SessionCode,
+	/** A control message took too long. */
+	Timeout: 0x11 as SessionCode,
+	/** No version could be negotiated. */
+	Version: 0x15 as SessionCode,
+});
 
 /** The nominal brand for stream reset codes. */
 declare const STREAM_CODE: unique symbol;
@@ -62,25 +59,22 @@ export type StreamCode = number & { readonly [STREAM_CODE]: true };
  *
  * @public
  */
-export const StreamCode = Object.assign(
-	(code: number): StreamCode => applicationCode(code) as StreamCode,
-	{
-		/** Something went wrong that isn't worth a dedicated code. */
-		Internal: 0x0 as StreamCode,
-		/** The sender is done with this stream, not failing. A routine unsubscribe. */
-		Cancel: 0x1 as StreamCode,
-		/** The content missed its delivery deadline. */
-		DeliveryTimeout: 0x2 as StreamCode,
-		/** The session ended, taking this stream with it. */
-		SessionClosed: 0x3 as StreamCode,
-		/** The session is going away (a GOAWAY was received). */
-		GoingAway: 0x4 as StreamCode,
-		/** The reader fell too far behind and content was dropped to catch up. */
-		TooFarBehind: 0x5 as StreamCode,
-		/** The track's content could not be parsed. */
-		MalformedTrack: 0x12 as StreamCode,
-	},
-);
+export const StreamCode = Object.assign((code: number): StreamCode => applicationCode(code) as StreamCode, {
+	/** Something went wrong that isn't worth a dedicated code. */
+	Internal: 0x0 as StreamCode,
+	/** The sender is done with this stream, not failing. A routine unsubscribe. */
+	Cancel: 0x1 as StreamCode,
+	/** The content missed its delivery deadline. */
+	DeliveryTimeout: 0x2 as StreamCode,
+	/** The session ended, taking this stream with it. */
+	SessionClosed: 0x3 as StreamCode,
+	/** The session is going away (a GOAWAY was received). */
+	GoingAway: 0x4 as StreamCode,
+	/** The reader fell too far behind and content was dropped to catch up. */
+	TooFarBehind: 0x5 as StreamCode,
+	/** The track's content could not be parsed. */
+	MalformedTrack: 0x12 as StreamCode,
+});
 
 function applicationCode(code: number): number {
 	if (!Number.isInteger(code) || code < 64 || code > 0xffffffff) {

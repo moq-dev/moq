@@ -40,15 +40,28 @@ if [[ "${DEVELOPER_DIR:-}" == /nix/store/* ]]; then
 fi
 
 HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
+# Debug by default. This is a compile-and-test gate, not a benchmark, and a
+# release build of moq-ffi shares no artifacts with the debug ones `just check`
+# and `just test` already produce, so it was a third full compile of the
+# dependency tree (~5 min of CI on its own, plus a whole target/release tree on
+# a runner that was already tight on disk). Set MOQ_FFI_PROFILE=release for an
+# optimized cdylib; the shipped artifacts are built by rs/moq-ffi/build.sh,
+# which is release regardless.
+PROFILE="${MOQ_FFI_PROFILE:-debug}"
+# Expanded as ${CARGO_PROFILE[@]+...} at the use sites: macOS ships bash 3.2,
+# where expanding an empty array under `set -u` is an "unbound variable" error.
+CARGO_PROFILE=()
+[[ "$PROFILE" == "release" ]] && CARGO_PROFILE=(--release)
+
 echo "swift check: building moq-ffi for $HOST_TARGET..."
-cargo build --release --package moq-ffi \
+cargo build ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 
-CDYLIB="$TARGET_BASE/release/libmoq_ffi.dylib"
-STATIC="$TARGET_BASE/release/libmoq_ffi.a"
+CDYLIB="$TARGET_BASE/$PROFILE/libmoq_ffi.dylib"
+STATIC="$TARGET_BASE/$PROFILE/libmoq_ffi.a"
 [[ -f "$CDYLIB" && -f "$STATIC" ]] || {
     echo "swift check: missing $CDYLIB or $STATIC" >&2
     exit 1
@@ -57,7 +70,7 @@ STATIC="$TARGET_BASE/release/libmoq_ffi.a"
 # Generate bindings.
 BINDGEN_OUT=$(mktemp -d)
 trap 'rm -rf "$BINDGEN_OUT"' EXIT
-cargo run --release --package moq-ffi --bin uniffi-bindgen \
+cargo run ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi --bin uniffi-bindgen \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml" -- \
     generate --library "$CDYLIB" --language swift --out-dir "$BINDGEN_OUT"
 

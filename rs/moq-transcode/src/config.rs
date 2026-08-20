@@ -1,6 +1,27 @@
 //! Transcoder configuration: the rung ladder and catalog wiring.
 
-use moq_net::PathRelativeOwned;
+use moq_net::{AsPath, PathRelativeOwned};
+
+/// Compute the source broadcast reference for an output nested beneath it.
+///
+/// Both paths are normalized before comparison. Returns `None` when `output` is
+/// not a descendant of `source`, so callers can omit passthrough renditions.
+pub fn source_reference(source: impl AsPath, output: impl AsPath) -> Option<PathRelativeOwned> {
+	let source = source.as_path();
+	let output = output.as_path();
+	let rest = output.strip_prefix(&source)?;
+	if rest.is_empty() {
+		return None;
+	}
+
+	let parents = rest.parts().count().saturating_sub(1);
+	let rel = if parents == 0 {
+		".".to_string()
+	} else {
+		vec![".."; parents].join("/")
+	};
+	Some(PathRelativeOwned::from(rel))
+}
 
 /// One candidate output rendition: a target resolution (by height) and bitrate.
 ///
@@ -39,7 +60,7 @@ pub struct Config {
 	pub rungs: Vec<Rung>,
 
 	/// Where the source broadcast lives relative to the output broadcast, e.g.
-	/// `".."` when the output is published at `<source>/transcode.hang`. When
+	/// `"."` when the output is published at `<source>/transcode.hang`. When
 	/// set, the derivative catalog references the source renditions (all video
 	/// and audio) through this path so players fetch them from the source
 	/// directly; the transcoder never proxies or subscribes them. `None` omits
@@ -77,5 +98,26 @@ impl Default for Config {
 			decoder: moq_video::decode::Kind::default(),
 			resize: moq_video::resize::Config::default(),
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn source_reference_normalizes_and_counts_output_depth() {
+		assert_eq!(source_reference("a/b", "a/b/transcode.hang").unwrap().as_str(), ".");
+		assert_eq!(source_reference("/a//b/", "a/b/dir/").unwrap().as_str(), ".");
+		assert_eq!(
+			source_reference("a/b", "a/b/dir/transcode.hang").unwrap().as_str(),
+			".."
+		);
+		assert_eq!(
+			source_reference("a/b", "a/b/one/two/transcode.hang").unwrap().as_str(),
+			"../.."
+		);
+		assert!(source_reference("a/b", "other/transcode.hang").is_none());
+		assert!(source_reference("a/b", "a/b").is_none());
 	}
 }

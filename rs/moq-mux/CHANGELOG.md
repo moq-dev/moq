@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `import::ContainerStream::new` takes a bare `ContainerFormat` instead of a `ContainerInit`. It
+  only ever read the format, so the init's leading bytes were accepted and dropped. A stream
+  recovers its own framing, so push everything through `decode` instead.
+
+- Import formats are typed: `import::{AudioFormat, VideoFormat, ContainerFormat}` replace the format
+  string on each `Init`, so a format of the wrong kind no longer compiles. `FromStr` accepts every
+  alias and is where a caller crossing a string boundary finds out, reporting `Error::WrongKind`
+  with the kind that does take it. `Display` gives the canonical name, so aliases like `h264` and
+  `avc3` no longer produce differently named tracks.
+- `Error::NotSelfDescribing` replaces the unknown-format error `TrackStream::video` raised for a
+  video codec a raw byte stream cannot be split into.
+- `import::Track::new` splits into `Track::audio` and `Track::video`, `import::TrackStream::new`
+  becomes `TrackStream::video`, and `import::Init` splits into `AudioInit`, `VideoInit`, and
+  `ContainerInit`. Each entry point takes only the fields its kind can honor, so a video hint on an
+  audio import or a label on a container is no longer expressible.
+- `Error::UnsupportedField` becomes `Error::WrongKind`, which names the kind that does handle the
+  format rather than reporting it as unknown. `import::Kind::of` exposes the same classification.
+
+### Added
+
+- Propagate rendition labels through single-track media imports.
+- `From<hang::catalog::VideoConfig> for catalog::VideoHint`, a total conversion for a caller that
+  already has a whole rendition. Replaces the per-field copy in `moq-video`, which dropped the label.
+
+### Changed
+
+- `import::Container::new` and `import::ContainerStream::new` take an `import::Init` instead of a
+  format and buffer, and reject the single-rendition `label` and `video` fields rather than
+  dropping them.
+- An audio format rejects an `import::Init` video hint instead of dropping it.
+- `catalog::VideoHint::label` is no longer public. `import::Init::label` is the single source of a
+  rendition label, matching the hang draft, which classifies it as a common rendition field.
+
+## [0.9.7](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.6...moq-mux-v0.9.7) - 2026-08-14
+
+### Added
+
+- *(bindings)* fetch and decode a retained media group ([#2827](https://github.com/moq-dev/moq/pull/2827))
+
+### Fixed
+
+- *(mux)* derive missing video geometry ([#2840](https://github.com/moq-dev/moq/pull/2840))
+- *(path)* resolve catalog references like URLs ([#2855](https://github.com/moq-dev/moq/pull/2855))
+- *(moq-mux)* stop publishing audio spliced across a TS discontinuity ([#2823](https://github.com/moq-dev/moq/pull/2823))
+- *(moq-mux)* anchor the TS table cadence to the media timeline ([#2825](https://github.com/moq-dev/moq/pull/2825))
+
+## [0.9.6](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.5...moq-mux-v0.9.6) - 2026-08-13
+
+### Added
+
+- *(moq-video)* advertise the catalog rendition before the first keyframe ([#2768](https://github.com/moq-dev/moq/pull/2768))
+
+### Fixed
+
+- *(moq-mux)* resync TS audio instead of aborting the broadcast ([#2751](https://github.com/moq-dev/moq/pull/2751))
+
+### Other
+
+- *(deps)* bump cargo group and support mp4-atom 0.15 ([#2728](https://github.com/moq-dev/moq/pull/2728))
+
 ## [0.9.5](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.4...moq-mux-v0.9.5) - 2026-08-07
 
 ### Added

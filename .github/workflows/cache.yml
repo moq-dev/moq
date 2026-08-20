@@ -1,0 +1,110 @@
+name: Cache
+
+# Populates the Rust build cache that check.yml restores, and the dev shell
+# closure that every nix job substitutes.
+#
+# Actions scopes cache reads to the current branch plus the default branch, so
+# only a cache written here on `main` is reachable from a pull request. `main`
+# is therefore the single writer and pull requests are readers (`save-if` in
+# check.yml): one cache everyone can reach, rather than per-PR entries that fill
+# the repository's 10 GB budget while remaining private to the PR that wrote
+# them.
+#
+# This runs the unscoped suite rather than the diff-scoped one: the point is to
+# leave artifacts for whatever a future PR happens to touch, not to check `main`
+# (the PR that became `main` was already checked). It blocks nobody.
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    # A docs-only merge can't change the build graph, so don't spend a runner.
+    paths:
+      - "rs/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/cache.yml"
+  # Priming a cold cache by hand, e.g. after a toolchain bump evicts everything.
+  workflow_dispatch:
+
+# Newest `main` wins; an older warm is worth less than the runner it holds.
+concurrency:
+  group: cache-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    name: Warm
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
+        with:
+          tool-cache: false
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+        with:
+          determinate: false
+          # Trust the flake's cachix substituter. `nixConfig` in flake.nix is
+          # untrusted by default, so nix logs "ignoring untrusted flake
+          # configuration setting 'extra-substituters'" and rebuilds from
+          # source anything missing from the public nixpkgs cache. That was
+          # costing 678s per job for uniffi-bindgen-go alone, in every job that
+          # enters the dev shell.
+          extra-conf: |
+            extra-substituters = https://kixelated.cachix.org
+            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+
+      # cachix.yml only fires on release tags and only pushes the tagged
+      # package, so the dev shell itself was never cached. Anything in it that
+      # nixpkgs doesn't serve prebuilt (uniffi-bindgen-go, a
+      # buildRustPackage from a git tag) was therefore compiled from source by
+      # every job that entered the shell. Push it once here so pull requests
+      # substitute it instead.
+      - uses: cachix/cachix-action@5f2d7c5294214f71b873db4b969586b980625e71 # v17
+        with:
+          name: kixelated
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Cache the dev shell
+        run: |
+          # `--profile` realises the shell's full build closure, which is what
+          # the runners actually need; `nix build .#devShells...` alone leaves
+          # out the build-time inputs.
+          nix develop --profile /tmp/devshell --command true
+          cachix push kixelated /tmp/devshell
+
+      # `shared-key` replaces the automatic per-job key, which is what lets
+      # check.yml's differently-named jobs restore what this one saves.
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: rust
+          cache-on-failure: true
+
+      # Both halves, so the saved cache carries the lint artifacts (clippy rmeta)
+      # and the test artifacts (codegen + linked test binaries). They share
+      # little, and a PR usually needs both.
+      - name: Check
+        run: nix develop --command just check-all
+        env:
+          MOQ_STRICT: 1
+
+      - name: Test
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test all
+        env:
+          MOQ_STRICT: 1
+          NEXTEST_PROFILE: ci

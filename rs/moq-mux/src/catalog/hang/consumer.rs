@@ -97,7 +97,7 @@ fn check_resolvable<E: CatalogExt>(base: &PathOwned, catalog: &Catalog<E>) -> Re
 			continue;
 		};
 
-		if base.resolve(rel).is_none() {
+		if base.try_resolve(rel).is_none() {
 			tracing::error!(rendition, %rel, catalog = %base, "rejecting catalog: broadcast reference escapes the root");
 			return Err(crate::Error::EscapingBroadcast(rel.to_string()));
 		}
@@ -158,7 +158,7 @@ mod test {
 	/// [`broadcast::Info::path`](moq_net::broadcast::Info::path), the base the consumer
 	/// resolves against.
 	fn publish_catalog(published: Catalog<()>) -> Result<Option<Catalog>> {
-		let origin = moq_net::Origin::random().produce();
+		let origin = crate::source::produce_origin();
 		let mut broadcast = origin
 			.create_broadcast("a/pub", moq_net::broadcast::Route::new())
 			.expect("broadcast should create");
@@ -199,7 +199,7 @@ mod test {
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.expect("catalog track should create");
 
-		let origin = moq_net::Origin::random().produce();
+		let origin = crate::source::produce_origin();
 		let mut dynamic = origin.dynamic();
 		let requesting = origin.consume().request_broadcast("a/pub");
 		let served = broadcast.consume();
@@ -242,12 +242,13 @@ mod test {
 	}
 
 	/// A reference that stops at or below the root names a broadcast, so the catalog stands.
+	/// `a/pub` resolves against `a`, so `..` is what lands on the root itself.
 	#[tokio::test]
 	async fn accepts_references_within_the_root() {
 		let catalog = publish(vec![
 			("here", opus()),
-			("sibling", referencing("../source")),
-			("root", referencing("../..")),
+			("sibling", referencing("./source")),
+			("root", referencing("..")),
 		])
 		.expect("catalog should be accepted")
 		.expect("catalog should decode");

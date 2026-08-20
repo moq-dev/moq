@@ -60,6 +60,40 @@ public final class MediaConsumer: AsyncSequence, Sendable {
     }
 }
 
+/// A finite, container-decoded media group returned by ``BroadcastConsumer/fetchMediaGroup(name:sequence:container:options:)``.
+public final class MediaGroupConsumer: AsyncSequence, Sendable {
+    /// The decoded media frame emitted by this sequence.
+    public typealias Element = MediaFrame
+
+    let ffi: MoqMediaGroupConsumer
+
+    init(_ ffi: MoqMediaGroupConsumer) {
+        self.ffi = ffi
+    }
+
+    /// The sequence number of this group within the track.
+    public var sequence: UInt64 {
+        ffi.sequence()
+    }
+
+    /// The next frame, or `nil` once the group ends.
+    public func next() async throws -> MediaFrame? {
+        try await ffi.next()
+    }
+
+    /// Cancel all current and future reads.
+    public func cancel() {
+        ffi.cancel()
+    }
+
+    /// Create an iterator that cancels native reads when iteration ends.
+    public func makeAsyncIterator() -> AsyncThrowingStream<MediaFrame, Swift.Error>.Iterator {
+        moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
+            try await ffi.next()
+        }.makeAsyncIterator()
+    }
+}
+
 /// Write side of a media track fed pre-framed payloads.
 public final class MediaProducer: Sendable {
     let ffi: MoqMediaProducer
@@ -97,8 +131,6 @@ public final class MediaProducer: Sendable {
     /// only thing that gives it groups: call it after every frame for one group (one QUIC stream)
     /// the relay forwards without waiting, or at a segment cadence to align with video. Video
     /// groups at its own keyframes and needs this only to override that.
-    ///
-    /// On a container this declares a new segment, rolling a group on every track it publishes.
     public func cut() throws {
         try ffi.cut()
     }
@@ -112,6 +144,60 @@ public final class MediaProducer: Sendable {
     }
 
     /// Finish the track and finalize encoding.
+    public func finish() throws {
+        try ffi.finish()
+    }
+}
+
+/// Write side of a container, which demuxes and publishes its own tracks.
+public final class ContainerProducer: Sendable {
+    let ffi: MoqContainerProducer
+
+    init(_ ffi: MoqContainerProducer) {
+        self.ffi = ffi
+    }
+
+    /// Write a whole chunk of container bytes.
+    ///
+    /// No timestamp: a container carries its tracks' timing itself, and the importer reads it out
+    /// rather than taking the caller's word for it.
+    public func write(_ payload: Data) throws {
+        try ffi.write(payload: payload)
+    }
+
+    /// Declare that the next chunk starts a new segment, rolling a group on every track.
+    ///
+    /// An fMP4 source carrying `styp` atoms declares its own, so this is only needed when it
+    /// doesn't; formats with no segment concept (MKV, TS, FLV) ignore it.
+    public func cut() throws {
+        try ffi.cut()
+    }
+
+    /// Start a new segment and number its groups `sequence`.
+    public func seek(_ sequence: UInt64) throws {
+        try ffi.seek(sequence: sequence)
+    }
+
+    /// Finish every track this container publishes.
+    public func finish() throws {
+        try ffi.finish()
+    }
+}
+
+/// Write side of a container fed a raw byte stream, which recovers its own framing.
+public final class ContainerStreamProducer: Sendable {
+    let ffi: MoqContainerStreamProducer
+
+    init(_ ffi: MoqContainerStreamProducer) {
+        self.ffi = ffi
+    }
+
+    /// Push raw container bytes; chunk boundaries don't matter.
+    public func write(_ payload: Data) throws {
+        try ffi.write(payload: payload)
+    }
+
+    /// Finish every track this container publishes.
     public func finish() throws {
         try ffi.finish()
     }

@@ -25,7 +25,7 @@ async fn within<T>(step: &str, fut: impl std::future::Future<Output = T>) -> T {
 
 /// Run an integration-test future on a dedicated thread with a large stack.
 ///
-/// Under `--all-features`, `moq-native` compiles every transport backend
+/// Under `--all-features`, `moq-tokio` compiles every transport backend
 /// (quinn, quiche, noq, iroh, websocket) into its `Session`/`Client` types.
 /// These multi-relay tests hold several such values live across await points,
 /// so the single test future's state machine is large, and in an unoptimized
@@ -55,15 +55,15 @@ where
 /// port is claimed in the window between the free-port probe and the real bind.
 /// Returns the chosen port and the initialized server. Avoids the spurious
 /// `init()` panic that a probe/drop/bind race can cause under parallel tests.
-fn bind_free_tcp_server() -> (u16, moq_native::Server) {
+fn bind_free_tcp_server() -> (u16, moq_tokio::Server) {
 	for _ in 0..20 {
 		let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
 		let port = probe.local_addr().expect("local addr").port();
 		drop(probe);
 
-		let mut config = moq_native::ServerConfig::default();
+		let mut config = moq_tokio::listen::Config::default();
 		config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
-		if let Ok(server) = config.init() {
+		if let Ok(server) = config.init(Default::default()) {
 			return (port, server);
 		}
 	}
@@ -94,13 +94,13 @@ fn drain_session_with_zero_timeout_closes_at_once() {
 async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	let origin = Origin::random().produce();
+	let origin = moq_tokio::origin::spawn(Origin::random());
 	let (port, mut accepted, _handle) = spawn_upstream(origin);
 	wait_listening(port).await;
 
-	let mut client_config = moq_native::ClientConfig::default();
-	client_config.tls.disable_verify = Some(true);
-	let client = client_config.init().expect("client init");
+	let mut client_config = moq_tokio::connect::Config::default();
+	client_config.tls.insecure = Some(true);
+	let client = client_config.init(Default::default()).expect("client init");
 	let (_client_connection_client, client_connection) = within("client connects", async {
 		connect_once(client, format!("tcp://127.0.0.1:{port}/").parse().expect("parse url")).await
 	})
@@ -144,7 +144,7 @@ fn spawn_upstream(
 		let mut server = server.listen().await.expect("listen");
 		while let Some(request) = server.accept().await {
 			// Serve the shared origin bidirectionally, like a relay peer would.
-			let scratch = Origin::random().produce();
+			let scratch = moq_tokio::origin::spawn(Origin::random());
 			let session = match request.with_publisher(&origin).with_subscriber(scratch).ok().await {
 				Ok(session) => session,
 				Err(err) => {
@@ -181,7 +181,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 
 	tokio::time::timeout(TEST_TIMEOUT, async {
 		// ── the shared "live" broadcast both siblings can serve ─────────
-		let upstream_origin = Origin::random().produce();
+		let upstream_origin = moq_tokio::origin::spawn(Origin::random());
 		let mut broadcast = upstream_origin
 			.create_broadcast("cam", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("create broadcast");
@@ -193,11 +193,11 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		wait_listening(port_b).await;
 
 		// ── the relay cluster under test, dialing sibling A ─────────────
-		let mut client_config = moq_native::ClientConfig::default();
-		client_config.tls.disable_verify = Some(true);
+		let mut client_config = moq_tokio::connect::Config::default();
+		client_config.tls.insecure = Some(true);
 		// Short handover so the test observes the old session close quickly.
 		client_config.goaway.handover = Some(Duration::from_secs(2));
-		let client = client_config.init().expect("client init");
+		let client = client_config.init(Default::default()).expect("client init");
 
 		let mut cluster_config = ClusterConfig::default();
 		cluster_config.connect = vec![format!("tcp://127.0.0.1:{port_a}/")];
@@ -304,7 +304,7 @@ async fn spawn_relay_with_upstream(
 	let mut auth_config = AuthConfig::default();
 	auth_config.public = Some(public);
 	let auth = auth_config
-		.init(&moq_native::tls::Client::default())
+		.init(&moq_tokio::tls::Connect::default())
 		.await
 		.expect("auth init");
 
@@ -312,11 +312,11 @@ async fn spawn_relay_with_upstream(
 	cluster_config.connect = vec![upstream_url.to_string()];
 	// Short drain so the test observes teardown quickly.
 
-	let mut client_config = moq_native::ClientConfig::default();
-	client_config.tls.disable_verify = Some(true);
+	let mut client_config = moq_tokio::connect::Config::default();
+	client_config.tls.insecure = Some(true);
 	// Short handover so the test observes the old session close quickly.
 	client_config.goaway.handover = Some(Duration::from_secs(2));
-	let client = client_config.init().expect("client init");
+	let client = client_config.init(Default::default()).expect("client init");
 
 	let cluster = Cluster::new(cluster_config).expect("cluster init").with_client(client);
 
@@ -368,7 +368,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	// ── TOP: origin server serving the same broadcast to both mids ──────
-	let top_origin = Origin::random().produce();
+	let top_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = top_origin
 		.create_broadcast("diamond", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -387,12 +387,12 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		.expect("TOP accept channel closed");
 
 	// ── MID-A: mini-relay consuming TOP, serving BOTTOM, drains later ───
-	let mid_a_origin = Origin::random().produce();
-	let mut client_config = moq_native::ClientConfig::default();
-	client_config.tls.disable_verify = Some(true);
+	let mid_a_origin = moq_tokio::origin::spawn(Origin::random());
+	let mut client_config = moq_tokio::connect::Config::default();
+	client_config.tls.insecure = Some(true);
 	// Short handover so the test observes the old session close quickly.
 	client_config.goaway.handover = Some(Duration::from_secs(2));
-	let mid_a_client = client_config.init().expect("mid-a client init");
+	let mid_a_client = client_config.init(Default::default()).expect("mid-a client init");
 	let (_mid_a_upstream_client, mid_a_upstream) = within(
 		"MID-A connects to TOP",
 		connect_once(
@@ -419,10 +419,12 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		.expect("MID-A accept channel closed");
 
 	// ── SUBSCRIBER: connects to BOTTOM ───────────────────────────────────
-	let sub_origin = Origin::random().produce();
-	let mut sub_client_config = moq_native::ClientConfig::default();
-	sub_client_config.tls.disable_verify = Some(true);
-	let sub_client = sub_client_config.init().expect("subscriber client init");
+	let sub_origin = moq_tokio::origin::spawn(Origin::random());
+	let mut sub_client_config = moq_tokio::connect::Config::default();
+	sub_client_config.tls.insecure = Some(true);
+	let sub_client = sub_client_config
+		.init(Default::default())
+		.expect("subscriber client init");
 	let (_sub_connection_client, sub_connection) = within(
 		"subscriber connects to BOTTOM",
 		connect_once(
@@ -451,11 +453,18 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// A live (unordered) subscription transmits the newest group first, so a
 	// back-to-back burst legally arrives inverted; `ordered` is the protocol's
 	// way to ask every hop for sequence-order transmission instead.
+	//
+	// The latency budget is the other half of that ask: this test asserts every group
+	// arrives exactly once, which is more than the default REAL_TIME budget promises.
+	// A subscriber that wants completeness across a failover has to say how far behind
+	// the live edge it is willing to sit (clamped to what the publisher retains).
 	let mut sub = within(
 		"subscribe to the video track",
-		bc.track("video")
-			.expect("track handle")
-			.subscribe(moq_net::track::Subscription::default().with_ordered(true)),
+		bc.track("video").expect("track handle").subscribe(
+			moq_net::track::Subscription::default()
+				.with_ordered(true)
+				.with_latency(moq_net::Latency::max(Duration::from_secs(60))),
+		),
 	)
 	.await
 	.expect("subscribe");
@@ -596,7 +605,7 @@ async fn verify_group(sub: &mut moq_net::track::Subscriber, expected_seq: u64, f
 async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	let upstream_origin = Origin::random().produce();
+	let upstream_origin = moq_tokio::origin::spawn(Origin::random());
 	let mut broadcast = upstream_origin
 		.create_broadcast("cam", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
@@ -605,11 +614,11 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin.clone());
 	wait_listening(port).await;
 
-	let mut client_config = moq_native::ClientConfig::default();
-	client_config.tls.disable_verify = Some(true);
+	let mut client_config = moq_tokio::connect::Config::default();
+	client_config.tls.insecure = Some(true);
 	// Short handover so the test observes the old session close quickly.
 	client_config.goaway.handover = Some(Duration::from_secs(2));
-	let client = client_config.init().expect("client init");
+	let client = client_config.init(Default::default()).expect("client init");
 
 	let mut cluster_config = ClusterConfig::default();
 	cluster_config.connect = vec![format!("tcp://127.0.0.1:{port}/")];
@@ -690,9 +699,9 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 /// The client comes back because it owns the transport endpoint (iroh's dies with
 /// it), and the caller has to outlive the connection it just got.
 async fn connect_once(
-	client: moq_native::Client,
+	client: moq_tokio::Client,
 	url: url::Url,
-) -> moq_native::Result<(moq_native::Client, moq_native::Connection)> {
+) -> moq_tokio::Result<(moq_tokio::Client, moq_tokio::Connection)> {
 	let connection = client.clone().with_reconnect(false).connect(url).established().await?;
 	Ok((client, connection))
 }
@@ -712,7 +721,7 @@ fn goaway_handover_is_enforced_while_the_replacement_dial_hangs() {
 async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	let upstream_origin = Origin::random().produce();
+	let upstream_origin = moq_tokio::origin::spawn(Origin::random());
 	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin);
 	wait_listening(port).await;
 
@@ -728,14 +737,14 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	});
 
 	let handover = Duration::from_millis(200);
-	let mut client_config = moq_native::ClientConfig::default();
-	client_config.tls.disable_verify = Some(true);
+	let mut client_config = moq_tokio::connect::Config::default();
+	client_config.tls.insecure = Some(true);
 	client_config.goaway.handover = Some(handover);
 	// The GOAWAY has to land on a *healthy* session, which is the path that goes
 	// straight into the replacement dial. Below this bar it takes the immediate
 	// redirect path instead, whose sleep polls the drain either way.
 	client_config.backoff.initial = Some(Duration::from_millis(50));
-	let client = client_config.init().expect("client init");
+	let client = client_config.init(Default::default()).expect("client init");
 
 	let url: Url = format!("tcp://127.0.0.1:{port}/").parse().expect("parse url");
 	let connection = client.connect(url);

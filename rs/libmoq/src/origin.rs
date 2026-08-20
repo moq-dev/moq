@@ -37,7 +37,9 @@ pub struct Origin {
 
 impl Origin {
 	pub fn create(&mut self) -> Result<Id, Error> {
-		self.active.insert(moq_net::Origin::random().produce())
+		// Every FFI entry point runs inside `RUNTIME.enter()`, so the driver
+		// lands on the dedicated libmoq runtime.
+		self.active.insert(moq_tokio::origin::spawn(moq_net::Origin::random()))
 	}
 
 	pub fn get(&self, id: Id) -> Result<&moq_net::origin::Producer, Error> {
@@ -173,7 +175,7 @@ impl Origin {
 		};
 
 		// Hold the lock only to buffer the broadcast; release it before the callback.
-		let broadcast_id = State::lock().consume.start(broadcast)?;
+		let broadcast_id = State::lock().consume.start(broadcast, Some(consumer))?;
 		callback.call(broadcast_id);
 		Ok(())
 	}
@@ -228,7 +230,7 @@ impl Origin {
 		};
 
 		// Hold the lock only to buffer the broadcast; release it before the callback.
-		let broadcast_id = State::lock().consume.start(broadcast)?;
+		let broadcast_id = State::lock().consume.start(broadcast, Some(consumer))?;
 		callback.call(broadcast_id);
 		Ok(())
 	}

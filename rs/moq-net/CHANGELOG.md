@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.12](https://github.com/moq-dev/moq/compare/moq-net-v0.2.11...moq-net-v0.2.12) - 2026-08-14
+
+### Fixed
+
+- *(path)* resolve catalog references like URLs ([#2855](https://github.com/moq-dev/moq/pull/2855))
+- *(moq-net)* serve an IETF subscribe from the live edge ([#2862](https://github.com/moq-dev/moq/pull/2862))
+- *(net)* stop blocking connect on the initial announce set ([#2856](https://github.com/moq-dev/moq/pull/2856))
+- *(net)* wake a capped subscriber when its parked group is evicted ([#2844](https://github.com/moq-dev/moq/pull/2844))
+- *(net)* decode largest object in subscribe ok ([#2837](https://github.com/moq-dev/moq/pull/2837))
+
+## [0.2.11](https://github.com/moq-dev/moq/compare/moq-net-v0.2.10...moq-net-v0.2.11) - 2026-08-13
+
+### Added
+
+- *(net)* announce namespaces unasked, with a SETUP opt-out ([#2748](https://github.com/moq-dev/moq/pull/2748))
+
+### Fixed
+
+- *(net)* keep a live-edge subscriber at the live edge across a takeover ([#2785](https://github.com/moq-dev/moq/pull/2785))
+- *(net)* serve subscriptions in arrival order so reordered groups aren't dropped ([#2771](https://github.com/moq-dev/moq/pull/2771))
+- *(net)* only a new publisher re-arms the origin takeover gate ([#2746](https://github.com/moq-dev/moq/pull/2746))
+- *(native)* generate protocol version help ([#2719](https://github.com/moq-dev/moq/pull/2719))
+- *(net)* re-arm the takeover gate on every route observation ([#2742](https://github.com/moq-dev/moq/pull/2742))
+- *(net)* restore displaced broadcast publishers ([#2740](https://github.com/moq-dev/moq/pull/2740))
+- *(net)* invert stream priority to match transport send-order semantics ([#2720](https://github.com/moq-dev/moq/pull/2720))
+- *(net)* tolerate incoming streams that die before their first byte ([#2721](https://github.com/moq-dev/moq/pull/2721))
+
+### Other
+
+- *(net)* cover multi-track failover and a partial-list standby ([#2713](https://github.com/moq-dev/moq/pull/2713))
+
 ## [0.2.10](https://github.com/moq-dev/moq/compare/moq-net-v0.2.9...moq-net-v0.2.10) - 2026-08-07
 
 ### Fixed

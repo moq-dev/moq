@@ -50,13 +50,17 @@ impl Consumer {
 		let name = name.into();
 		let track = broadcast
 			.track(&name)?
-			.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_priority(hang::catalog::PRIORITY.audio)
+					.with_latency(config.latency),
+			)
 			.await?;
 		// The catalog says how the track is framed, and it is not always the legacy
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
 		let container = moq_mux::catalog::hang::Container::try_from(&catalog.container)?;
-		let track = moq_mux::container::Consumer::new(track, container).with_latency(config.latency);
+		let track = moq_mux::container::Consumer::new(track, container);
 
 		Ok(Self {
 			decoder,
@@ -170,23 +174,27 @@ mod tests {
 	async fn reads_the_container_the_catalog_declares() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("audio", hang::container::track_info()).unwrap();
+		let observed = track.clone();
 		let subscriber = broadcast.consume();
 
 		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
 		catalog.container = hang::catalog::Container::Loc;
 
 		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Loc);
+		let latency = moq_mux::Latency::max(std::time::Duration::from_millis(250));
 		let mut consumer = Consumer::new(
 			&subscriber,
 			&catalog,
 			"audio",
 			Config {
 				format: Format::F32,
+				latency,
 				..Config::new()
 			},
 		)
 		.await
 		.unwrap();
+		assert_eq!(observed.subscription().unwrap().latency, latency);
 
 		let samples = [0.25f32, -0.5, 0.75, -1.0];
 		let payload: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();

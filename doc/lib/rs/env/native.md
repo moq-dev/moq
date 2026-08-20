@@ -12,16 +12,16 @@ This guide covers connecting to a relay, discovering broadcasts, subscribing to 
 
 The key crates:
 
-- [moq-native](https://crates.io/crates/moq-native): Configures QUIC (via [quinn](https://crates.io/crates/quinn) by default, with [noq](https://crates.io/crates/noq) available through the `noq` feature) and TLS (via [rustls](https://crates.io/crates/rustls)) for you.
-- [moq-net](https://crates.io/crates/moq-net) — The core networking layer. Can be used directly with any `web_transport_trait::Session` implementation if you need full control over the QUIC endpoint.
-- [hang](https://crates.io/crates/hang) — Media-specific catalog and container format on top of `moq-net`.
+- [moq-tokio](https://crates.io/crates/moq-tokio): Configures QUIC (via [quinn](https://crates.io/crates/quinn) by default, with [noq](https://crates.io/crates/noq) available through the `noq` feature) and TLS (via [rustls](https://crates.io/crates/rustls)) for you.
+- [moq-net](https://crates.io/crates/moq-net): The core networking layer. Can be used directly with any `web_transport_trait::poll::Session` implementation if you need full control over the QUIC endpoint.
+- [hang](https://crates.io/crates/hang): Media-specific catalog and container format on top of `moq-net`.
 
 ## Connecting
 
-Create a [`ClientConfig`](https://docs.rs/moq-native/latest/moq_native/struct.ClientConfig.html) and connect to a relay:
+Create a [`ClientConfig`](https://docs.rs/moq-tokio/latest/moq_tokio/struct.ClientConfig.html) and connect to a relay:
 
 ```rust
-let client = moq_native::ClientConfig::default().init()?;
+let client = moq_tokio::connect::Config::default().init()?;
 let url = url::Url::parse("https://cdn.moq.dev/anon/my-broadcast")?;
 
 // A background task dials and redials with backoff if the session drops.
@@ -31,7 +31,7 @@ let connection = client.connect(url).established().await?;
 ```
 
 The default configuration uses system TLS roots, enables WebSocket fallback, and gives QUIC a 200ms head-start.
-Set [`ClientConfig::reconnect`](https://docs.rs/moq-native/latest/moq_native/struct.ClientConfig.html#structfield.reconnect) to `false` for a one-shot dial: the session's close then ends the connection instead of triggering a redial.
+Set [`ClientConfig::reconnect`](https://docs.rs/moq-tokio/latest/moq_tokio/struct.ClientConfig.html#structfield.reconnect) to `false` for a one-shot dial: the session's close then ends the connection instead of triggering a redial.
 
 ### URL Schemes
 
@@ -48,10 +48,10 @@ Raw QUIC has no request URI to put them in, so the client sends them in the MoQ 
 ### Several Addresses for One Peer
 
 `connect` takes a `Url` for the usual case of a peer at a known address.
-When the same peer has several candidate addresses and only some of them route from here, pass [`Addrs`](https://docs.rs/moq-native/latest/moq_native/struct.Addrs.html) instead: each attempt walks them in order and keeps the first that connects.
+When the same peer has several candidate addresses and only some of them route from here, pass [`Addrs`](https://docs.rs/moq-tokio/latest/moq_tokio/struct.Addrs.html) instead: each attempt walks them in order and keeps the first that connects.
 
 ```rust
-let addrs = moq_native::Addrs::new(primary).or(fallback);
+let addrs = moq_tokio::Addrs::new(primary).or(fallback);
 let connection = client.connect(addrs).established().await?;
 ```
 
@@ -87,7 +87,7 @@ Wire an [`origin::Producer`](https://docs.rs/moq-net/latest/moq_net/origin/struc
 ```rust
 // Publish into an origin wired before connecting: it outlives any one session,
 // so the broadcast survives a reconnect. Hold the connection to keep redialing.
-let origin = moq_net::Origin::random().produce();
+let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 let _connection = client.with_publisher(origin.consume()).connect(url);
 
 let route = moq_net::broadcast::Route::new().with_announce(true);
@@ -106,7 +106,7 @@ Subscribing works the same way round: wire an origin in before connecting and re
 ```rust
 // Consume into an origin wired before connecting, so announcements keep flowing
 // across a reconnect. Hold the connection to keep redialing.
-let origin = moq_net::Origin::random().produce();
+let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 let mut announced = origin.consume().announced();
 let _connection = client.with_subscriber(origin).connect(url);
 
@@ -222,7 +222,7 @@ Anything else decodes as `Container::Unknown`, which preserves the original JSON
 
 - [hang format](/concept/layer/hang) — Catalog schema and container details
 - [moq-net docs](https://docs.rs/moq-net) — Core networking API reference
-- [moq-native docs](https://docs.rs/moq-native) — Client configuration options
+- [moq-tokio docs](https://docs.rs/moq-tokio) — Client configuration options
 - [Relay HTTP endpoints](/bin/relay/http) — HTTP fetch for debugging and late-join
 - [video.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) — Complete publishing example
 - [subscribe.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs) — Complete subscribing example

@@ -103,7 +103,7 @@ pub async fn accept(
 	let offer = sdp::parse_offer(offer)?;
 
 	// Resolve the broadcast on the subscribe origin by path. The `Source` fetches it (and any
-	// sibling broadcast a rendition's catalog `broadcast` field references, e.g. `../source`)
+	// sibling broadcast a rendition's catalog `broadcast` field references, e.g. `./source`)
 	// via `request_broadcast`, which resolves an announced broadcast immediately and falls back
 	// to a dynamic handler; with neither it errors and the WHEP client retries (typical).
 	let broadcast = broadcast.as_path().to_string();

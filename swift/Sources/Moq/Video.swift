@@ -1,5 +1,35 @@
 import MoqFFI
 
+/// Read side of a video track decoded inside the bindings. Iterating yields
+/// tightly-packed I420 frames, each carrying the size it actually decoded to.
+public final class VideoConsumer: AsyncSequence, Sendable {
+    /// The decoded video frame emitted by this sequence.
+    public typealias Element = VideoDecodedFrame
+
+    let ffi: MoqVideoConsumer
+
+    init(_ ffi: MoqVideoConsumer) {
+        self.ffi = ffi
+    }
+
+    /// The next frame, or `nil` once the track ends or is closed.
+    public func next() async throws -> VideoDecodedFrame? {
+        try await ffi.next()
+    }
+
+    /// Cancel all current and future reads.
+    public func cancel() {
+        ffi.cancel()
+    }
+
+    /// Create an iterator that cancels native reads when iteration ends.
+    public func makeAsyncIterator() -> AsyncThrowingStream<VideoDecodedFrame, Swift.Error>.Iterator {
+        moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
+            try await ffi.next()
+        }.makeAsyncIterator()
+    }
+}
+
 /// Write side of a raw-video track. Pixels written here are encoded (H.264 or
 /// H.265) inside the FFI boundary per the `VideoEncoderInput`/`Output` from
 /// publish time.

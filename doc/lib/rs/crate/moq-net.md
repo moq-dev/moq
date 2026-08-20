@@ -58,7 +58,7 @@ See the [moq-lite specification](https://datatracker.ietf.org/doc/draft-lcurley-
 ## Next Steps
 
 - Build media apps with [hang](/lib/rs/crate/hang)
-- Use [moq-native](/lib/rs/crate/moq-native) for QUIC/WebTransport connection helpers
+- Use [moq-tokio](/lib/rs/crate/moq-tokio) for QUIC/WebTransport connection helpers
 - Deploy a [relay server](/bin/relay/)
 - Read the [Concepts guide](/concept/)
-- View [code examples](https://github.com/moq-dev/moq/tree/main/rs/moq-native/examples)
+- View [code examples](https://github.com/moq-dev/moq/tree/main/rs/moq-tokio/examples)

@@ -31,7 +31,7 @@ impl<E: CatalogExt> Import<E> {
 		reserved: crate::catalog::Reserved<E>,
 		hint: crate::catalog::VideoHint,
 	) -> crate::Result<Self> {
-		let rendition = reserved.video(track.name());
+		let rendition = reserved.video(track.name())?;
 		let catalog = crate::codec::video::Catalog::new(hint);
 		let mut import = Self {
 			track: reserved

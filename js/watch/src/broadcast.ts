@@ -2,27 +2,10 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
-import { Path } from "@moq/net";
+import { Announce, Path } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 
 import { toHang } from "./msf";
-
-// Connections already warned about missing broadcast-discovery support, so the
-// announcement check logs at most once per connection.
-const warnedNoDiscovery = new WeakSet<Moq.Connection.Established>();
-
-// Whether to skip the announcement gate for a cross-broadcast reference: without discovery,
-// waiting on an announcement would hang forever, so subscribe immediately and warn once per
-// connection. The main broadcast doesn't need this; @moq/net's `announcedBroadcast` falls back
-// on its own.
-function skipDiscovery(conn: Moq.Connection.Established): boolean {
-	if (conn.discovery) return false;
-	if (!warnedNoDiscovery.has(conn)) {
-		warnedNoDiscovery.add(conn);
-		console.warn("relay does not support broadcast discovery; subscribing to siblings blind.");
-	}
-	return true;
-}
 
 /**
  * The name of the first rendition whose `broadcast` reference walks above the root, if any.
@@ -42,7 +25,7 @@ function findEscaping(base: Moq.Path.Valid, catalog: Catalog.Root): string | und
 	];
 
 	for (const [name, config] of renditions) {
-		if (config.broadcast && Path.resolve(base, config.broadcast) === undefined) return name;
+		if (config.broadcast && Path.tryResolve(base, config.broadcast) === undefined) return name;
 	}
 
 	return undefined;
@@ -74,10 +57,11 @@ type Status = "offline" | "loading" | "live";
 // Signals the component reads. Whoever owns the backing Signal (the caller, or
 // another component whose output is wired in) does the writing.
 export type BroadcastInput = {
-	connection: Getter<Moq.Connection.Established | undefined>;
+	// The origin to consume from. Independent of any connection: whichever sessions feed
+	// the origin resolve the broadcast, and the handle spans their reconnects.
+	origin: Getter<Moq.Origin.Table | undefined>;
 
-	// Whether to start downloading the broadcast.
-	// Defaults to false so you can make sure everything is ready before starting.
+	// Whether to start downloading the broadcast. Defaults to true.
 	enabled: Getter<boolean>;
 
 	// The broadcast name.
@@ -132,9 +116,9 @@ export class Broadcast {
 
 	constructor(props?: Inputs<BroadcastInput>) {
 		this.in = {
-			connection: getter(props?.connection),
+			origin: getter(props?.origin),
 			name: getter(props?.name ?? Path.empty()),
-			enabled: getter(props?.enabled ?? false),
+			enabled: getter(props?.enabled ?? true),
 			reload: getter(props?.reload ?? true),
 			catalogFormat: getter<CatalogFormat | undefined>(props?.catalogFormat),
 			catalog: getter(props?.catalog),
@@ -145,19 +129,18 @@ export class Broadcast {
 		this.#signals.run(this.#runCatalog.bind(this));
 	}
 
-	// Maintain the set of announced paths used by `relativeBroadcast`, by draining a connection-scoped
-	// announcement stream. Only opened once a relative reference asks for it (see `#wantAnnounced`),
-	// and reopened per connection.
+	// Maintain the set of announced paths used by `relativeBroadcast`, by draining an origin-scoped
+	// announcement stream. Only opened once a relative reference asks for it (see `#wantAnnounced`).
 	#runAnnounced(effect: Effect): void {
 		this.#announced.set(undefined);
 
 		if (!effect.get(this.#wantAnnounced)) return;
 		if (!effect.get(this.in.reload)) return;
 
-		const conn = effect.get(this.in.connection);
-		if (!conn || skipDiscovery(conn)) return;
+		const origin = effect.get(this.in.origin);
+		if (!origin) return;
 
-		const announced = conn.announced(Path.empty());
+		const announced = origin.announced(Path.empty());
 		effect.cleanup(() => announced.close());
 		this.#announced.set(new Set());
 
@@ -174,20 +157,28 @@ export class Broadcast {
 		});
 	}
 
-	// Whether `path` is currently announced, for `relativeBroadcast`'s cross-broadcast refs. Returns
-	// true (subscribe immediately) when the gate can't apply: reload is off, or the relay doesn't
-	// support discovery. Opens the announcement stream on first use.
+	// Whether `path` is currently announced, for `relativeBroadcast`'s cross-broadcast refs.
+	// Opens the announcement stream on first use. The blind cases (reload off, no discovery)
+	// never reach here; see `relativeBroadcast`.
 	#isPathAnnounced(effect: Effect, path: Moq.Path.Valid): boolean {
-		if (!effect.get(this.in.reload)) return true;
-
-		const conn = effect.get(this.in.connection);
-		if (conn && skipDiscovery(conn)) return true;
-
 		this.#wantAnnounced.set(true);
 
 		const active = effect.get(this.#announced);
 		if (!active) return false; // stream not open yet: wait rather than subscribe to a maybe-absent path
 		return active.has(path);
+	}
+
+	// Resolve `path` without waiting for an announcement. The request is table-first, so a
+	// routed broadcast (a local publish, or anything announced) resolves synchronously and
+	// a blind session answer covers the rest, arriving on a later run.
+	#requestBroadcast(
+		effect: Effect,
+		origin: Moq.Origin.Table,
+		path: Moq.Path.Valid,
+	): Moq.Broadcast.Consumer | undefined {
+		const request = origin.request(path);
+		effect.cleanup(() => request.close());
+		return effect.get(request.active);
 	}
 
 	// Subscribe to the broadcast, waiting for its announcement so we never race a publisher that
@@ -197,20 +188,18 @@ export class Broadcast {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
 
-		const conn = effect.get(this.in.connection);
-		if (!conn) return;
+		const origin = effect.get(this.in.origin);
+		if (!origin) return;
 
 		const name = effect.get(this.in.name);
 
 		// No announcement gate: subscribe immediately.
 		if (!effect.get(this.in.reload)) {
-			const broadcast = conn.consume(name);
-			effect.cleanup(() => broadcast.close());
-			effect.set(this.#out.active, broadcast, undefined);
+			effect.set(this.#out.active, this.#requestBroadcast(effect, origin, name), undefined);
 			return;
 		}
 
-		const announced = conn.announcedBroadcast(name);
+		const announced = new Announce.Broadcast({ origin: this.in.origin, path: name });
 		effect.cleanup(() => announced.close());
 
 		effect.run((nested) => {
@@ -309,7 +298,7 @@ export class Broadcast {
 		if (!rel) return effect.get(this.out.active);
 
 		const base = effect.get(this.in.name);
-		const resolved = Path.resolve(base, rel);
+		const resolved = Path.tryResolve(base, rel);
 		if (resolved === undefined) {
 			console.warn("ignoring rendition: broadcast reference escapes the root", base, rel);
 			return undefined;
@@ -321,14 +310,18 @@ export class Broadcast {
 
 		if (!effect.get(this.in.enabled)) return undefined;
 
-		const conn = effect.get(this.in.connection);
-		if (!conn) return undefined;
+		const origin = effect.get(this.in.origin);
+		if (!origin) return undefined;
 
-		if (!this.#isPathAnnounced(effect, resolved)) return undefined;
+		// Without an announcement gate (reload off, or no session supports discovery),
+		// resolve blind rather than waiting for an announcement that never comes. With the
+		// gate, only stand the request once the path is announced: the request then
+		// resolves from the table, never blind.
+		if (effect.get(this.in.reload) && effect.get(origin.discovery) !== false) {
+			if (!this.#isPathAnnounced(effect, resolved)) return undefined;
+		}
 
-		const broadcast = conn.consume(resolved);
-		effect.cleanup(() => broadcast.close());
-		return broadcast;
+		return this.#requestBroadcast(effect, origin, resolved);
 	}
 
 	close() {

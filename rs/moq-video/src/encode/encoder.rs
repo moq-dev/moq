@@ -97,6 +97,66 @@ impl Config {
 		Size::new(self.width, self.height)
 	}
 
+	/// The catalog rendition an encoder for this config produces.
+	///
+	/// Resolved by opening a throwaway encoder and encoding one frame, so the profile, level, and
+	/// constraints are the ones this machine writes into the bitstream rather than a guess. The
+	/// backend picks all three itself (VideoToolbox asks for High, openh264 leaves it at Baseline,
+	/// VAAPI writes Main) and its choice depends on the config it opened with, so reading them back
+	/// is the only way to know.
+	///
+	/// This is what lets a track be advertised before it carries anything: a subscriber can only
+	/// discover a track the catalog names, and an on-demand encoder only encodes once a subscriber
+	/// arrives. Publishing the probed rendition breaks that cycle without publishing a claim that
+	/// has to be corrected later, since it already says what the first keyframe will say.
+	///
+	/// Costs an encoder open and a single frame, so call it once per track. Call it *before*
+	/// opening the encoder you will actually use, so the two never hold a codec session at once.
+	///
+	/// # Errors
+	///
+	/// Fails when this machine cannot encode the config at all, which makes it a fail-fast check:
+	/// better here than on the first frame of a track that is already advertised.
+	pub async fn probe(&self) -> Result<hang::catalog::VideoConfig, Error> {
+		// A `Sink` rather than an `Encoder`: this runs on whatever executor thread the caller is on,
+		// and the Windows backend's COM apartment has to be opened and closed on one thread.
+		let mut sink = super::Sink::open(self).await?;
+
+		// Mid-gray, since the picture only has to make the encoder emit its parameter sets.
+		let size = self.size();
+		let i420 = crate::I420::new(
+			size.width,
+			size.height,
+			vec![0x80u8; crate::I420::len(size.width, size.height)],
+		)?;
+		let frame = Frame::new(crate::Surface::I420(i420), moq_net::Timestamp::from_micros(0)?);
+
+		sink.keyframe();
+		let mut encoded = sink.encode(frame).await?;
+		// A backend that pipelines holds the first frame, so drain it rather than reading nothing.
+		if encoded.is_empty() {
+			encoded = sink.flush().await?;
+		}
+
+		let annexb: Vec<u8> = encoded.iter().flat_map(|frame| frame.payload.iter().copied()).collect();
+		let parsed = match self.codec {
+			Codec::H264 => moq_mux::codec::h264::config(&annexb),
+			Codec::H265 => moq_mux::codec::h265::config(&annexb),
+		};
+		let mut rendition = parsed.map_err(|err| {
+			Error::Codec(anyhow::anyhow!(
+				"{} emitted no usable parameter sets: {err}",
+				sink.name()
+			))
+		})?;
+
+		// Neither is in the bitstream: the target bitrate is nowhere in it, and the framerate only
+		// rides in an optional VUI. Fill them from the config that produced the rest.
+		rendition.bitrate.get_or_insert(self.resolved_bitrate());
+		rendition.framerate.get_or_insert(self.framerate.into());
+		Ok(rendition)
+	}
+
 	/// Resolved input color space: explicit override, or the size-based guess
 	/// every player makes for an untagged stream. Backends write this into the
 	/// VUI; the crate's RGB conversions pick the same answer for the same size,
@@ -107,12 +167,15 @@ impl Config {
 
 	/// Resolved bitrate: explicit override, or a pixels-per-second estimate.
 	pub(crate) fn resolved_bitrate(&self) -> u64 {
-		self.bitrate.unwrap_or_else(|| {
-			// 0.07 bits per pixel per second matches the JS publisher's
-			// default and lands ~4.4 Mbps for 1080p30.
-			((self.size().pixels() * self.framerate as u64) as f64 * 0.07) as u64
-		})
+		self.bitrate
+			.unwrap_or_else(|| default_bitrate(self.size(), self.framerate))
 	}
+}
+
+/// The bitrate an unconfigured encode resolves to: 0.07 bits per pixel per second, which matches
+/// the JS publisher's default and lands ~4.4 Mbps for 1080p30.
+pub(crate) fn default_bitrate(size: Size, framerate: u32) -> u64 {
+	((size.pixels() * framerate as u64) as f64 * 0.07) as u64
 }
 
 /// Video encoder. Build one with [`Encoder::new`], feed it raw [`Frame`]s via

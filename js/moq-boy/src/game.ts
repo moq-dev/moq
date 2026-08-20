@@ -18,6 +18,8 @@ export interface GameConfig {
 	sessionId: string;
 	/** MoQ connection to the relay. */
 	connection: Moq.Connection.Reload;
+	/** The origin viewer broadcasts are published into; the connection serves it. */
+	origin: Moq.Origin.Producer;
 	/** Shared signal tracking which game is currently expanded. */
 	expanded: Moq.Signals.Signal<string | undefined>;
 	/** MoQ path prefix for game broadcasts (e.g. "anon/boy/game"). */
@@ -114,7 +116,7 @@ export class Game {
 
 		// Video pipeline.
 		this.broadcast = new Watch.Broadcast({
-			connection: connection.established,
+			origin: config.origin,
 			name: Moq.Path.from(`${gamePrefix}/${sessionId}`),
 			enabled: true,
 		});
@@ -124,6 +126,7 @@ export class Game {
 			broadcast: this.broadcast,
 			target: this.#target,
 			supported: Watch.Video.Decoder.supported,
+			probe: connection.probe,
 		});
 		this.#signals.cleanup(() => this.videoSource.close());
 
@@ -138,7 +141,7 @@ export class Game {
 		const videoJitter = new Moq.Signals.Signal<Moq.Time.Milli | undefined>(undefined);
 		this.sync = new Watch.Sync({
 			latency: this.latency,
-			connection: connection.established,
+			probe: connection.probe,
 			video: videoJitter,
 			audio: this.audioSource.out.jitter,
 		});
@@ -160,7 +163,8 @@ export class Game {
 		this.#signals.run(this.#runVideoEnabled.bind(this, videoEnabled));
 
 		// Audio pipeline. The emitter stops the download when muted or paused.
-		this.audioDecoder = new Watch.Audio.Decoder(this.audioSource, this.sync);
+		const audioEnabled = new Moq.Signals.Signal(false);
+		this.audioDecoder = new Watch.Audio.Decoder(this.audioSource, this.sync, { enabled: audioEnabled });
 		this.#signals.cleanup(() => this.audioDecoder.close());
 
 		const audioPaused = new Moq.Signals.Signal(true);
@@ -172,6 +176,7 @@ export class Game {
 			paused: audioPaused,
 		});
 		this.#signals.cleanup(() => this.audioEmitter.close());
+		this.#signals.proxy(audioEnabled, this.audioEmitter.out.enabled);
 
 		// Resume AudioContext on first user interaction (browser autoplay policy).
 		for (const event of ["click", "touchstart", "touchend", "mousedown", "keydown"]) {
@@ -185,7 +190,7 @@ export class Game {
 		this.#signals.run(this.#runStatus.bind(this));
 
 		// Command publishing.
-		this.#signals.run(this.#runCommands.bind(this, connection));
+		this.#signals.run(this.#runCommands.bind(this, connection, config.origin));
 	}
 
 	/** Send a button state update. */
@@ -275,7 +280,9 @@ export class Game {
 		});
 	}
 
-	#runCommands(connection: Moq.Connection.Reload, effect: Moq.Signals.Effect) {
+	#runCommands(connection: Moq.Connection.Reload, origin: Moq.Origin.Producer, effect: Moq.Signals.Effect) {
+		// Publishing goes through the origin, but gate on a live connection anyway: a command
+		// broadcast for a game nobody is connected to is feedback into the void.
 		const conn = effect.get(connection.established);
 		if (!conn) return;
 
@@ -293,8 +300,7 @@ export class Game {
 		const viewerId = Math.random().toString(36).slice(2, 8);
 		this.viewerId.set(viewerId);
 
-		const viewerBroadcast = new Moq.Broadcast.Producer();
-		conn.publish(Moq.Path.from(`${this.#viewerPrefix}/${this.sessionId}/${viewerId}`), viewerBroadcast);
+		const viewerBroadcast = origin.publish(Moq.Path.from(`${this.#viewerPrefix}/${this.sessionId}/${viewerId}`));
 		effect.cleanup(() => {
 			viewerBroadcast.close();
 			this.viewerId.set(undefined);

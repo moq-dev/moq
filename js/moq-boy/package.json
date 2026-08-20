@@ -20,6 +20,7 @@
 	"scripts": {
 		"build": "rimraf dist && vite build && tsc -p tsconfig.build.json && bun ../common/package.ts",
 		"check": "tsc --noEmit",
+		"test": "bun test --only-failures",
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {

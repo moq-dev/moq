@@ -40,13 +40,17 @@ impl Consumer {
 		let name = name.into();
 		let track = broadcast
 			.track(&name)?
-			.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_priority(hang::catalog::PRIORITY.video)
+					.with_latency(config.latency),
+			)
 			.await?;
 		// The catalog says how the track is framed, and it is not always the legacy
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
 		let container = moq_mux::catalog::hang::Container::try_from(&catalog.container)?;
-		let track = moq_mux::container::Consumer::new(track, container).with_latency(config.latency);
+		let track = moq_mux::container::Consumer::new(track, container);
 
 		Ok(Self {
 			decoder,
@@ -82,21 +86,35 @@ impl Consumer {
 
 #[cfg(test)]
 mod tests {
+	/// Build an origin producer, spawning its driver on the ambient runtime.
+	fn produce_origin() -> moq_net::origin::Producer {
+		let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
+		if tokio::runtime::Handle::try_current().is_ok() {
+			tokio::spawn(driver);
+		} else {
+			// A sync test: nothing polls the driver, and dropping it would tear
+			// the origin down, so leak it and rely on the synchronous half.
+			std::mem::forget(driver);
+		}
+		producer
+	}
+
 	use super::*;
 	use crate::decode::Kind;
-	use crate::encode::{Codec, Config as EncodeConfig, Encoder, Kind as EncodeKind, Producer as EncodeProducer};
+	use crate::encode::{Config as EncodeConfig, Encoder, Kind as EncodeKind, Producer as EncodeProducer};
 
 	#[tokio::test]
 	async fn reads_cmaf_container_declared_by_catalog() {
 		let mut source_broadcast = moq_net::broadcast::Info::new().produce();
 		let source_subscriber = source_broadcast.consume();
 		let source_catalog = moq_mux::catalog::Producer::new(&mut source_broadcast).unwrap();
-		let mut producer = EncodeProducer::new(source_broadcast, source_catalog, Codec::H264).unwrap();
-		let mut encoder = Encoder::new(&EncodeConfig {
+		let config = EncodeConfig {
 			kind: EncodeKind::Software,
 			..EncodeConfig::new(320, 240, 30)
-		})
-		.unwrap();
+		};
+		let rendition = config.probe().await.unwrap();
+		let mut producer = EncodeProducer::new(source_broadcast, source_catalog, rendition).unwrap();
+		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		for index in 0..2 {
 			encoder.keyframe();
@@ -105,7 +123,7 @@ mod tests {
 			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
 		}
 
-		let origin = moq_net::Origin::random().produce();
+		let origin = produce_origin();
 		let mut requests = origin.dynamic();
 		let served = source_subscriber.clone();
 		tokio::spawn(async move {
@@ -117,7 +135,12 @@ mod tests {
 			.await
 			.unwrap();
 		let source = moq_mux::Source::new(origin.consume(), "test");
-		let mut export = moq_mux::container::fmp4::Export::new(source, catalog);
+		// Both frames are encoded before the export runs, so the exporter needs a budget
+		// wide enough to read them: its REAL_TIME default keeps only the live edge, and
+		// the second `next()` would then block forever waiting for a group that was
+		// skipped.
+		let mut export = moq_mux::container::fmp4::Export::new(source, catalog)
+			.with_latency(moq_mux::Latency::max(std::time::Duration::from_secs(30)));
 		let init = export.next().await.unwrap().expect("CMAF init");
 		let fragment = export.next().await.unwrap().expect("CMAF fragment");
 

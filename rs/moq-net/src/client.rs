@@ -125,7 +125,10 @@ impl Client {
 	/// Perform the MoQ handshake, returning the [`Session`] and the [`Driver`] that
 	/// runs its protocol work. The driver must be polled (spawned or awaited) for
 	/// the session to make progress.
-	pub async fn connect<S: web_transport_trait::Session>(&self, session: S) -> Result<(Session, Driver), Error> {
+	pub async fn connect<S: crate::transport::poll::Session>(
+		&self,
+		mut session: S,
+	) -> Result<(Session, Driver), Error> {
 		if self.publish.is_none() && self.subscribe.is_none() {
 			tracing::warn!("not publishing or consuming anything");
 		}
@@ -171,7 +174,7 @@ impl Client {
 					version: ietf::Version::Draft19,
 					path: self.setup_path.clone(),
 					peer_setup_stream: None,
-					peer_cluster: None,
+					peer_declared: None,
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -197,7 +200,7 @@ impl Client {
 					version: ietf::Version::Draft18,
 					path: self.setup_path.clone(),
 					peer_setup_stream: None,
-					peer_cluster: None,
+					peer_declared: None,
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -223,7 +226,7 @@ impl Client {
 					version: ietf::Version::Draft17,
 					path: self.setup_path.clone(),
 					peer_setup_stream: None,
-					peer_cluster: None,
+					peer_declared: None,
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -281,19 +284,13 @@ impl Client {
 					peer_setup: None,
 				})?;
 
-				// Block until the initial announce set has landed (Lite05+ reports it
-				// via AnnounceOk + N), so a `request_broadcast()` for a live path resolves
-				// immediately instead of racing announcement gossip.
-				let (session, mut driver) = Session::new(
+				return Ok(Session::new(
 					session,
 					version.into(),
 					start.recv_bandwidth,
 					start.driver,
 					start.goaway,
-				);
-				driver.wait_ready(|waiter| start.connecting.poll_ready(waiter)).await;
-
-				return Ok((session, driver));
+				));
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions
@@ -311,17 +308,13 @@ impl Client {
 					peer_setup: None,
 				})?;
 
-				// Lite04 has no initial-set boundary, so this resolves immediately.
-				let (session, mut driver) = Session::new(
+				return Ok(Session::new(
 					session,
 					lite::Version::Lite04.into(),
 					start.recv_bandwidth,
 					start.driver,
 					start.goaway,
-				);
-				driver.wait_ready(|waiter| start.connecting.poll_ready(waiter)).await;
-
-				return Ok((session, driver));
+				));
 			}
 			Some(ALPN_LITE_03) => {
 				self.versions
@@ -340,17 +333,13 @@ impl Client {
 					peer_setup: None,
 				})?;
 
-				// Lite03 has no initial-set boundary, so this resolves immediately.
-				let (session, mut driver) = Session::new(
+				return Ok(Session::new(
 					session,
 					lite::Version::Lite03.into(),
 					start.recv_bandwidth,
 					start.driver,
 					start.goaway,
-				);
-				driver.wait_ready(|waiter| start.connecting.poll_ready(waiter)).await;
-
-				return Ok((session, driver));
+				));
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -359,7 +348,7 @@ impl Client {
 			Some(p) => return Err(Error::UnknownAlpn(p.to_string())),
 		};
 
-		let mut stream = Stream::open(&session, encoding).await?;
+		let mut stream = Stream::open(&mut session, encoding).await?;
 
 		// The encoding is always an IETF version for SETUP negotiation.
 		let ietf_encoding = ietf::Version::try_from(encoding).map_err(|_| Error::Version)?;
@@ -371,6 +360,7 @@ impl Client {
 		if let Some(path) = &self.setup_path {
 			parameters.set_bytes(ietf::ParameterBytes::Path, path.clone().into_bytes());
 		}
+		ietf::solicit::into_setup(&mut parameters, ietf_encoding);
 		let parameters = parameters.encode_bytes(ietf_encoding)?;
 
 		let client = setup::Client {
@@ -388,7 +378,7 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		let (recv_bw, protocol, connecting, goaway) = match version {
+		let (recv_bw, protocol, goaway) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
@@ -404,14 +394,19 @@ impl Client {
 					peer_setup: None,
 				})?;
 
-				(start.recv_bandwidth, start.driver, Some(start.connecting), start.goaway)
+				(start.recv_bandwidth, start.driver, start.goaway)
 			}
 			Version::Ietf(v) => {
-				// Decode the parameters to get the initial request ID.
+				// Decode the parameters to get the initial request ID and what the server
+				// requires of us.
 				let parameters = ietf::Parameters::decode(&mut server.parameters, v)?;
 				let request_id_max = parameters
 					.get_varint(ietf::ParameterVarInt::MaxRequestId)
 					.map(ietf::RequestId);
+				let peer_declared = ietf::peer::Peer {
+					solicit: ietf::solicit::from_setup(&parameters, v)?,
+					..Default::default()
+				};
 
 				let stream = stream.with_version(v);
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
@@ -427,30 +422,26 @@ impl Client {
 					version: v,
 					path: None,
 					peer_setup_stream: None,
-					peer_cluster: None,
+					peer_declared: Some(peer_declared),
 				})?;
-				(None, protocol, None, goaway)
+				(None, protocol, goaway)
 			}
 		};
 
-		let (session, mut driver) = Session::new(session, version, recv_bw, protocol, goaway);
-		if let Some(connecting) = connecting {
-			// Block until the initial announce set has landed (for versions that
-			// report one); resolves immediately otherwise.
-			driver.wait_ready(|waiter| connecting.poll_ready(waiter)).await;
-		}
-
-		Ok((session, driver))
+		Ok(Session::new(session, version, recv_bw, protocol, goaway))
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::model::ProduceTest;
 	use std::{
 		collections::VecDeque,
 		sync::{Arc, Mutex},
 	};
+
+	use std::task::{Context, Poll};
 
 	use crate::SessionError;
 	use crate::coding::{Decode, Encode};
@@ -476,6 +467,8 @@ mod tests {
 	#[derive(Clone, Default)]
 	struct FakeSession {
 		state: Arc<FakeSessionState>,
+		// Per-clone, so each pending poll_closed keeps its own registration live.
+		park: kio::Park,
 	}
 
 	#[derive(Default)]
@@ -483,7 +476,7 @@ mod tests {
 		protocol: Option<&'static str>,
 		control_stream: Mutex<Option<(FakeSendStream, FakeRecvStream)>>,
 		close_events: Mutex<Vec<(u32, String)>>,
-		close_notify: tokio::sync::Notify,
+		closed: kio::Fan,
 		control_writes: Arc<Mutex<Vec<u8>>>,
 		send_rate: Mutex<Option<u64>>,
 	}
@@ -499,11 +492,14 @@ mod tests {
 				protocol,
 				control_stream: Mutex::new(Some((send, recv))),
 				close_events: Mutex::new(Vec::new()),
-				close_notify: tokio::sync::Notify::new(),
+				closed: kio::Fan::default(),
 				control_writes: writes,
 				send_rate: Mutex::new(None),
 			};
-			Self { state: Arc::new(state) }
+			Self {
+				state: Arc::new(state),
+				park: kio::Park::default(),
+			}
 		}
 
 		fn set_send_rate(&self, rate: Option<u64>) {
@@ -515,43 +511,50 @@ mod tests {
 		}
 
 		async fn wait_for_first_close(&self) -> (u32, String) {
-			loop {
-				let notified = self.state.close_notify.notified();
-				if let Some(close) = self.state.close_events.lock().unwrap().first().cloned() {
-					return close;
+			kio::wait(|waiter| {
+				self.state.closed.register(waiter);
+				match self.state.close_events.lock().unwrap().first().cloned() {
+					Some(close) => std::task::Poll::Ready(close),
+					None => std::task::Poll::Pending,
 				}
-				notified.await;
-			}
+			})
+			.await
 		}
 	}
 
-	impl web_transport_trait::Session for FakeSession {
+	impl web_transport_trait::poll::Session for FakeSession {
 		type SendStream = FakeSendStream;
 		type RecvStream = FakeRecvStream;
 		type Error = FakeError;
 
-		async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
-			std::future::pending().await
+		fn poll_accept_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+			Poll::Pending
 		}
 
-		async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-			std::future::pending().await
+		fn poll_accept_bi(
+			&mut self,
+			_cx: &mut Context<'_>,
+		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
+			Poll::Pending
 		}
 
-		async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-			self.state.control_stream.lock().unwrap().take().ok_or(FakeError)
+		fn poll_open_bi(
+			&mut self,
+			_cx: &mut Context<'_>,
+		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
+			Poll::Ready(self.state.control_stream.lock().unwrap().take().ok_or(FakeError))
 		}
 
-		async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
-			std::future::pending().await
+		fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+			Poll::Pending
 		}
 
-		fn send_datagram(&self, _payload: Bytes) -> Result<(), Self::Error> {
-			Ok(())
+		fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Ok(()))
 		}
 
-		async fn recv_datagram(&self) -> Result<Bytes, Self::Error> {
-			std::future::pending().await
+		fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
+			Poll::Pending
 		}
 
 		fn max_datagram_size(&self) -> usize {
@@ -562,18 +565,17 @@ mod tests {
 			self.state.protocol
 		}
 
-		fn close(&self, code: u32, reason: &str) {
+		fn close(&mut self, code: u32, reason: &str) {
 			self.state.close_events.lock().unwrap().push((code, reason.to_string()));
-			self.state.close_notify.notify_waiters();
+			self.state.closed.wake();
 		}
 
-		async fn closed(&self) -> Self::Error {
-			loop {
-				let notified = self.state.close_notify.notified();
-				if !self.state.close_events.lock().unwrap().is_empty() {
-					return FakeError;
-				}
-				notified.await;
+		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
+			// Register before checking so a close racing this poll still wakes it.
+			self.state.closed.register(self.park.hold(cx));
+			match self.state.close_events.lock().unwrap().is_empty() {
+				false => Poll::Ready(FakeError),
+				true => Poll::Pending,
 			}
 		}
 
@@ -599,12 +601,12 @@ mod tests {
 		writes: Arc<Mutex<Vec<u8>>>,
 	}
 
-	impl web_transport_trait::SendStream for FakeSendStream {
+	impl web_transport_trait::poll::SendStream for FakeSendStream {
 		type Error = FakeError;
 
-		async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+		fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 			self.writes.lock().unwrap().put_slice(buf);
-			Ok(buf.len())
+			Poll::Ready(Ok(buf.len()))
 		}
 
 		fn set_priority(&mut self, _order: u8) {}
@@ -615,8 +617,8 @@ mod tests {
 
 		fn reset(&mut self, _code: u32) {}
 
-		async fn closed(&mut self) -> Result<(), Self::Error> {
-			Ok(())
+		fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Ok(()))
 		}
 	}
 
@@ -624,25 +626,25 @@ mod tests {
 		data: VecDeque<u8>,
 	}
 
-	impl web_transport_trait::RecvStream for FakeRecvStream {
+	impl web_transport_trait::poll::RecvStream for FakeRecvStream {
 		type Error = FakeError;
 
-		async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+		fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
 			if self.data.is_empty() {
-				return Ok(None);
+				return Poll::Ready(Ok(None));
 			}
 
 			let size = dst.len().min(self.data.len());
 			for slot in dst.iter_mut().take(size) {
 				*slot = self.data.pop_front().unwrap();
 			}
-			Ok(Some(size))
+			Poll::Ready(Ok(Some(size)))
 		}
 
 		fn stop(&mut self, _code: u32) {}
 
-		async fn closed(&mut self) -> Result<(), Self::Error> {
-			Ok(())
+		fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Ok(()))
 		}
 	}
 
@@ -676,7 +678,10 @@ mod tests {
 			.into(),
 		);
 
-		let _connection = client.connect(fake.clone()).await.unwrap();
+		// `connect` returns as soon as the handshake completes and never polls the driver,
+		// so the session makes no progress (and never closes) unless we drive it here.
+		let (_session, driver) = client.connect(fake.clone()).await.unwrap();
+		let _driver = tokio::spawn(driver);
 
 		// Verify the client setup was encoded using Draft14 framing (ALPN_LITE fallback path).
 		let mut setup_bytes = Bytes::from(fake.control_writes());
@@ -701,6 +706,32 @@ mod tests {
 		// Session closes encode through the session registry, so compare against that one:
 		// `Error::Version.to_code()` is the local table's value and would never match.
 		assert_ne!(code, SessionError::Version.to_code(), "SessionInfo failed to decode");
+	}
+
+	/// `connect` must not depend on the peer answering. A peer that opens the announce
+	/// stream and then says nothing (or promises a count it never delivers) used to hold
+	/// `connect` for the life of the session, since it waited for the initial announce
+	/// set. Resolving a path you need is `announced_broadcast`'s job, which waits for
+	/// that path rather than for the peer to finish talking.
+	#[tokio::test(start_paused = true)]
+	async fn connect_does_not_wait_for_the_peer_to_announce() {
+		// Serves bidi streams, so the announce stream opens, and never answers on them.
+		let gate = kio::Producer::new(true);
+		let transport = crate::lite::test_transport::SinkSession::gated_bi(gate.consume())
+			.with_protocol(crate::version::ALPN_LITE_05);
+
+		// A subscribe origin is what makes the client open an announce stream at all.
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let client = Client::new()
+			.with_versions([Version::Lite(lite::Version::Lite05)].into())
+			.with_subscriber(origin);
+
+		// Paused time auto-advances while every task is idle, so a `connect` that waits
+		// on the silent peer trips this rather than hanging the suite.
+		tokio::time::timeout(std::time::Duration::from_secs(30), client.connect(transport))
+			.await
+			.expect("connect waited on a peer that never announced")
+			.expect("connect failed");
 	}
 
 	#[tokio::test(start_paused = true)]

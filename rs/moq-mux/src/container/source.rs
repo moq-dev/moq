@@ -70,6 +70,10 @@ pub(crate) struct ExportSource {
 	/// OpusHead). Some once the codec config is available — from the catalog
 	/// `description`, or synthesized by the transform.
 	description: Option<Bytes>,
+	/// Video codec used to derive geometry from its configuration or keyframes.
+	video_codec: Option<VideoCodec>,
+	/// Geometry resolved from the initial catalog or codec data received afterward.
+	video_dimensions: Option<(u32, u32)>,
 }
 
 impl ExportSource {
@@ -84,20 +88,8 @@ impl ExportSource {
 		name: &str,
 		config: &VideoConfig,
 		latency: crate::Latency,
-	) -> Result<Self, crate::Error> {
-		let media: HangContainer = (&config.container).try_into()?;
-		let transform = build_video_transform(config);
-		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
-
-		let request = source.request(config.broadcast.as_ref())?;
-
-		Ok(Self {
-			state: SourceState::Requesting(request, name.to_string()),
-			media: Some(media),
-			latency,
-			transform,
-			description,
-		})
+	) -> Result<Option<Self>, crate::Error> {
+		Self::video(source, name, config, latency, build_video_transform(config))
 	}
 
 	/// Subscribe to a video rendition without attaching any codec-shape
@@ -111,19 +103,34 @@ impl ExportSource {
 		name: &str,
 		config: &VideoConfig,
 		latency: crate::Latency,
-	) -> Result<Self, crate::Error> {
+	) -> Result<Option<Self>, crate::Error> {
+		Self::video(source, name, config, latency, None)
+	}
+
+	fn video(
+		source: &crate::Source,
+		name: &str,
+		config: &VideoConfig,
+		latency: crate::Latency,
+		transform: Option<VideoTransform>,
+	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
+		let Some(request) = source.try_request(config.broadcast.as_ref()) else {
+			return Ok(None);
+		};
 
-		let request = source.request(config.broadcast.as_ref())?;
-
-		Ok(Self {
+		let mut source = Self {
 			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
 			latency,
-			transform: None,
+			transform,
 			description,
-		})
+			video_codec: Some(config.codec.clone()),
+			video_dimensions: catalog_dimensions(config),
+		};
+		source.resolve_video_dimensions(&[])?;
+		Ok(Some(source))
 	}
 
 	/// Subscribe to an audio rendition. Audio has no codec-shape transform;
@@ -135,19 +142,22 @@ impl ExportSource {
 		name: &str,
 		config: &AudioConfig,
 		latency: crate::Latency,
-	) -> Result<Self, crate::Error> {
+	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
+		let Some(request) = source.try_request(config.broadcast.as_ref()) else {
+			return Ok(None);
+		};
 
-		let request = source.request(config.broadcast.as_ref())?;
-
-		Ok(Self {
+		Ok(Some(Self {
 			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
 			latency,
 			transform: None,
 			description,
-		})
+			video_codec: None,
+			video_dimensions: None,
+		}))
 	}
 
 	/// Subscribe to a verbatim `mpegts` stream rendition (SCTE-35, private PES, ...).
@@ -163,6 +173,8 @@ impl ExportSource {
 			latency,
 			transform: None,
 			description: None,
+			video_codec: None,
+			video_dimensions: None,
 		})
 	}
 
@@ -175,6 +187,27 @@ impl ExportSource {
 	/// no transform attached, or the transform has built its record).
 	pub fn header_ready(&self) -> bool {
 		self.transform.is_none() || self.description.is_some()
+	}
+
+	/// Combine the latest catalog config with geometry resolved from codec data.
+	pub fn video_config(&self, config: &VideoConfig) -> Option<VideoConfig> {
+		if catalog_dimensions(config).is_some() {
+			return Some(config.clone());
+		}
+
+		let (width, height) = self.video_dimensions?;
+		let mut config = config.clone();
+		config.coded_width = Some(width);
+		config.coded_height = Some(height);
+		Some(config)
+	}
+
+	/// True when this codec is unsupported or has enough geometry to build a video header.
+	pub fn video_geometry_ready(&self, config: &VideoConfig) -> bool {
+		!matches!(
+			config.codec,
+			VideoCodec::H264(_) | VideoCodec::H265(_) | VideoCodec::VP8 | VideoCodec::VP9(_) | VideoCodec::AV1(_)
+		) || self.video_config(config).is_some()
 	}
 
 	/// Pull the next normalized frame.
@@ -195,7 +228,8 @@ impl ExportSource {
 					Poll::Pending => return Poll::Pending,
 				}
 			};
-			self.state = SourceState::Subscribing(broadcast.track(&name)?.subscribe(None));
+			let subscription = moq_net::track::Subscription::default().with_latency(self.latency);
+			self.state = SourceState::Subscribing(broadcast.track(&name)?.subscribe(subscription));
 		}
 
 		// Resolve the subscription before reading any frames.
@@ -215,7 +249,7 @@ impl ExportSource {
 				.media
 				.take()
 				.expect("media present until the subscription resolves");
-			self.state = SourceState::Active(Box::new(Consumer::new(track, media).with_latency(self.latency)));
+			self.state = SourceState::Active(Box::new(Consumer::new(track, media)));
 		}
 
 		loop {
@@ -234,6 +268,7 @@ impl ExportSource {
 			};
 
 			let Some(transform) = self.transform.as_mut() else {
+				self.resolve_video_dimensions(&frame.payload)?;
 				return Poll::Ready(Ok(Some(frame)));
 			};
 
@@ -243,10 +278,12 @@ impl ExportSource {
 					// resolved description (it may have just become available)
 					// and pull the next frame.
 					self.refresh_description();
+					self.resolve_video_dimensions(&frame.payload)?;
 					continue;
 				}
 				Some(payload) => {
 					self.refresh_description();
+					self.resolve_video_dimensions(&payload)?;
 					return Poll::Ready(Ok(Some(Frame { payload, ..frame })));
 				}
 			}
@@ -265,6 +302,50 @@ impl ExportSource {
 			self.description = Some(d.clone());
 		}
 	}
+
+	fn resolve_video_dimensions(&mut self, payload: &[u8]) -> crate::Result<()> {
+		if self.video_dimensions.is_some() {
+			return Ok(());
+		}
+		let Some(codec) = self.video_codec.as_ref() else {
+			return Ok(());
+		};
+		self.video_dimensions = codec_dimensions(codec, self.description.as_deref(), payload)?;
+		Ok(())
+	}
+}
+
+pub(crate) fn catalog_dimensions(config: &VideoConfig) -> Option<(u32, u32)> {
+	let dimensions = (config.coded_width?, config.coded_height?);
+	(dimensions.0 > 0 && dimensions.1 > 0).then_some(dimensions)
+}
+
+/// Resolve encoded dimensions from codec configuration or an in-band keyframe.
+pub(crate) fn codec_dimensions(
+	codec: &VideoCodec,
+	description: Option<&[u8]>,
+	payload: &[u8],
+) -> crate::Result<Option<(u32, u32)>> {
+	let dimensions = match codec {
+		VideoCodec::H264(_) => match description {
+			Some(description) => catalog_dimensions(&crate::codec::h264::config(description)?),
+			None => None,
+		},
+		VideoCodec::H265(_) => match description {
+			Some(description) => catalog_dimensions(&crate::codec::h265::config(description)?),
+			None => None,
+		},
+		VideoCodec::VP8 if !payload.is_empty() => crate::codec::vp8::FrameHeader::parse(payload)?
+			.dimensions
+			.map(|(width, height)| (u32::from(width), u32::from(height))),
+		VideoCodec::VP9(_) if !payload.is_empty() => crate::codec::vp9::config_from_keyframe(payload)?
+			.as_ref()
+			.and_then(catalog_dimensions),
+		VideoCodec::AV1(_) if !payload.is_empty() => crate::codec::av1::dimensions(payload)?,
+		_ => None,
+	};
+
+	Ok(dimensions.filter(|(width, height)| *width > 0 && *height > 0))
 }
 
 /// Build a video transform for an Annex-B source, or `None` if the catalog
@@ -308,24 +389,24 @@ mod tests {
 		config
 	}
 
-	/// A rendition whose `broadcast` escapes the root fails, rather than resolving against
-	/// whatever broadcast the clamped path lands on. The test origin serves every path it
-	/// is asked for, so a clamped request would happily resolve.
+	/// A rendition whose `broadcast` escapes the root is skipped, rather than resolving
+	/// against whatever broadcast the clamped path lands on. The test origin serves every
+	/// path it is asked for, so a clamped request would happily resolve.
 	#[tokio::test]
-	async fn escaping_reference_fails_the_rendition() {
+	async fn escaping_reference_skips_the_rendition() {
 		let live = Live::avc3();
 		let source = live.source();
 		let latency = crate::Latency::REAL_TIME;
 
-		let escaping = |result: Result<ExportSource, crate::Error>, what: &str| match result {
-			Err(crate::Error::EscapingBroadcast(_)) => {}
-			Err(err) => panic!("{what} failed with the wrong error: {err:?}"),
-			Ok(_) => panic!("{what} should not resolve"),
+		let escaping = |result: Result<Option<ExportSource>, crate::Error>, what: &str| match result {
+			Ok(None) => {}
+			Err(err) => panic!("{what} failed instead of being skipped: {err:?}"),
+			Ok(Some(_)) => panic!("{what} should not resolve"),
 		};
 
-		// The source is rooted at a single-segment path, so two `..` walk above the root.
-		// A single `..` stops at the root, which still names a broadcast.
-		for reference in ["../../elsewhere", "../../.."] {
+		// A reference resolves against the catalog's parent, and the source is rooted at a
+		// single-segment path, so its parent is the root and any `..` walks above it.
+		for reference in ["..", "../source", "../../elsewhere"] {
 			let config = video(Some(reference));
 			escaping(ExportSource::for_video(&source, "video", &config, latency), reference);
 			escaping(
@@ -340,18 +421,42 @@ mod tests {
 	}
 
 	/// A legal reference still resolves, as does an absent or empty one (the catalog's own
-	/// broadcast).
+	/// broadcast). A lone `.` names the parent, which here is the root.
 	#[tokio::test]
 	async fn legal_reference_keeps_the_rendition() {
 		let live = Live::avc3();
 		let source = live.source();
 		let latency = crate::Latency::REAL_TIME;
 
-		for reference in [None, Some(""), Some("../source"), Some("sub"), Some("..")] {
+		for reference in [None, Some(""), Some("./source"), Some("sub"), Some(".")] {
 			ExportSource::for_video(&source, "video", &video(reference), latency)
-				.unwrap_or_else(|err| panic!("{reference:?} should keep the rendition: {err:?}"));
+				.unwrap_or_else(|err| panic!("{reference:?} should keep the rendition: {err:?}"))
+				.unwrap_or_else(|| panic!("{reference:?} should keep the rendition"));
 			ExportSource::for_audio(&source, "audio", &audio(reference), latency)
-				.unwrap_or_else(|err| panic!("{reference:?} should keep the rendition: {err:?}"));
+				.unwrap_or_else(|err| panic!("{reference:?} should keep the rendition: {err:?}"))
+				.unwrap_or_else(|| panic!("{reference:?} should keep the rendition"));
 		}
+	}
+
+	/// The requested budget must be present on the first SUBSCRIBE. Updating it
+	/// after SUBSCRIBE_OK cannot recover backlog the publisher already skipped.
+	#[tokio::test]
+	async fn latency_is_sent_with_the_initial_subscription() {
+		let live = Live::avc3();
+		let latency = crate::Latency::max(std::time::Duration::from_secs(10));
+		let mut export = ExportSource::for_video(&live.source(), live.track.name(), &video(None), latency)
+			.unwrap()
+			.expect("fixture should produce a video rendition");
+
+		let observed = kio::wait(|waiter| {
+			let _ = export.poll_read(waiter);
+			match live.track.subscription() {
+				Some(subscription) => Poll::Ready(subscription.latency),
+				None => Poll::Pending,
+			}
+		})
+		.await;
+
+		assert_eq!(observed, latency);
 	}
 }

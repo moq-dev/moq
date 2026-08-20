@@ -67,10 +67,10 @@ Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub
 Create a `relay.toml` configuration file:
 
 ```toml
-[server]
+[listen]
 bind = "[::]:4443"  # Listen on all interfaces, port 4443
 
-[server.tls]
+[listen.tls]
 cert = "/path/to/cert.pem"  # TLS certificate
 key = "/path/to/key.pem"    # TLS private key
 
@@ -109,7 +109,7 @@ sudo certbot certonly --standalone -d relay.example.com
 Update `relay.toml`:
 
 ```toml
-[server.tls]
+[listen.tls]
 cert = "/etc/letsencrypt/live/relay.example.com/fullchain.pem"
 key = "/etc/letsencrypt/live/relay.example.com/privkey.pem"
 ```

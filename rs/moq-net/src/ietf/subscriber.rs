@@ -1,6 +1,6 @@
 use std::{
 	collections::{HashMap, hash_map::Entry},
-	task::Poll,
+	task::{Poll, ready},
 	time::Duration,
 };
 
@@ -13,7 +13,7 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
-use super::{Message, Version, cluster};
+use super::{Message, Version, cluster, peer};
 
 use web_async::Lock;
 
@@ -133,7 +133,7 @@ struct Advertised {
 }
 
 #[derive(Clone)]
-pub(super) struct Subscriber<S: web_transport_trait::Session> {
+pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	session: S,
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Producer,
@@ -155,7 +155,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	// looped back through us.
 	self_origin: crate::Origin,
 	// What the peer declared in its SETUP.
-	peer_setup: cluster::PeerSetup,
+	peer_setup: peer::PeerSetup,
 	// Local policy for what pulling from this peer costs, overriding whatever it
 	// declared. See `cluster::link_cost`.
 	cost: Option<u64>,
@@ -185,14 +185,14 @@ async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, al
 	.await
 }
 
-impl<S: web_transport_trait::Session> Subscriber<S> {
+impl<S: crate::transport::poll::Session> Subscriber<S> {
 	#[allow(clippy::too_many_arguments)]
 	pub fn new(
 		session: S,
 		origin: origin::Producer,
 		control: Control,
 		peer_origin: Option<crate::Origin>,
-		peer_setup: cluster::PeerSetup,
+		peer_setup: peer::PeerSetup,
 		self_origin: crate::Origin,
 		cost: Option<u64>,
 		version: Version,
@@ -218,7 +218,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// that cannot negotiate it. See [`super::Publisher::peer`].
 	pub(super) async fn peer(&self) -> cluster::Peer {
 		match cluster::supported(self.version) {
-			true => self.peer_setup.get().await,
+			true => self.peer_setup.get().await.cluster,
 			false => cluster::Peer::default(),
 		}
 	}
@@ -315,6 +315,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// MOUNTS locally. Those are independent, and only coincide when the peer shares
 	/// our namespace -- a peer outside it has never heard of our root, so a rooted
 	/// subscriber asks for its scope and mounts the replies under the root.
+	///
+	/// Asked unconditionally, without waiting on the peer's SETUP: a peer with nothing to
+	/// advertise answers with an empty set, which costs one stream, while waiting to find
+	/// out costs a round trip on every session.
 	pub fn subscribe_prefixes(&self) -> Vec<PathOwned> {
 		self.origin.allowed().map(|p| p.to_owned()).collect()
 	}
@@ -326,7 +330,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// A failure here is per-prefix, so the caller decides what it means for the
 	/// session: [`is_protocol_violation`] separates the peer's fault (fatal) from a
 	/// stream of ours that simply died (survivable).
-	pub async fn run_subscribe_namespace<T: web_transport_trait::Session>(
+	pub async fn run_subscribe_namespace<T: crate::transport::poll::Session>(
 		&mut self,
 		mut stream: Stream<T, Version>,
 		prefix: PathOwned,
@@ -419,7 +423,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// `live` tracks the suffixes this stream has advertised, so a repeat is recognized
 	/// as an update rather than a second advertisement, and the caller can release
 	/// whatever is still held when the stream ends.
-	async fn run_namespace_entries<T: web_transport_trait::Session>(
+	async fn run_namespace_entries<T: crate::transport::poll::Session>(
 		&mut self,
 		stream: &mut Stream<T, Version>,
 		prefix: &PathOwned,
@@ -488,15 +492,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	/// Handle an incoming bidi stream dispatched by the session.
 	///
-	/// `peer` is what the peer declared in its SETUP, which the dispatcher awaited once
-	/// before accepting streams: PUBLISH_NAMESPACE cannot be parsed without knowing
-	/// whether the MoQ Cluster extension is on.
+	/// `peer` and `declared` are what the peer declared in its SETUP, which the dispatcher
+	/// awaited once before accepting streams: PUBLISH_NAMESPACE cannot be parsed without
+	/// knowing whether the MoQ Cluster extension is on, and `declared` says whether an
+	/// unsolicited one is a bug (MoQ Solicit).
 	pub fn handle_stream(
 		&mut self,
 		id: u64,
 		mut data: bytes::Bytes,
 		stream: Stream<S, Version>,
 		peer: cluster::Peer,
+		declared: Option<bool>,
 	) -> Result<MaybeSendBox<'static, ()>, Error> {
 		let mut this = self.clone();
 		let task = match id {
@@ -522,7 +528,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				}
 				tracing::debug!(message = ?msg, "received publish_namespace");
 				async move {
-					if let Err(err) = this.run_publish_namespace_stream(stream, msg, peer).await {
+					if let Err(err) = this.run_publish_namespace_stream(stream, msg, peer, declared).await {
 						// An advertisement update is decoded here rather than in the
 						// dispatcher, so nothing else would surface a malformed one. The
 						// cluster draft requires closing the session on those; a stream
@@ -544,15 +550,48 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(task)
 	}
 
+	/// What the peer declared about being solicited (MoQ Solicit).
+	///
+	/// Read once by the dispatch loop and handed to each stream rather than awaited per
+	/// stream: the slot is settled by the time streams are accepted, and a stream task
+	/// that waited on it would park forever if it never were.
+	pub(super) async fn solicit(&self) -> Option<bool> {
+		self.peer_setup.get().await.solicit
+	}
+
+	/// Whether an incoming PUBLISH_NAMESPACE means the peer ignored our SETUP.
+	///
+	/// We always declare that advertisements to us must be solicited (MoQ Solicit), and a
+	/// peer that wrote the option at all proves it implements the extension, whichever
+	/// value it chose. It also cannot have advertised before reading our SETUP, since our
+	/// SETUP is what says whether advertising unasked is allowed. So this is a bug in the
+	/// peer, and a silent one on both sides if we tolerate it.
+	///
+	/// Draft-14/15 are exempt: they have no inline NAMESPACE, so a PUBLISH_NAMESPACE
+	/// request is also how a peer answers our SUBSCRIBE_NAMESPACE there, and the message
+	/// alone does not say which it is.
+	fn unsolicited_is_a_violation(&self, declared: Option<bool>) -> bool {
+		match self.version {
+			Version::Draft14 | Version::Draft15 => false,
+			_ => declared.is_some(),
+		}
+	}
+
 	/// Handle an incoming PUBLISH_NAMESPACE on its bidi stream.
 	async fn run_publish_namespace_stream(
 		&mut self,
 		mut stream: Stream<S, Version>,
 		msg: ietf::PublishNamespace<'_>,
 		peer: cluster::Peer,
+		declared: Option<bool>,
 	) -> Result<(), Error> {
 		let request_id = msg.request_id;
 		let path = msg.track_namespace.to_owned();
+
+		if self.unsolicited_is_a_violation(declared) {
+			tracing::warn!(%path, "unsolicited publish_namespace from a peer that implements MoQ Solicit");
+			return Err(Error::ProtocolViolation);
+		}
 
 		// A path that already contains our own Hop ID looped back. Reject it rather
 		// than attaching a source we would then have to route around.
@@ -973,24 +1012,22 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: broadcast::Dynamic) -> Result<(), Error> {
 		let mut subscribes = TaskSet::owned();
+		let mut closed_session = self.session.clone();
 		loop {
 			let next = subscribes
-				.drive(async {
-					let mut closed = std::pin::pin!(self.session.closed());
-					kio::wait(|waiter| {
-						if waiter.poll_future(closed.as_mut()).is_ready() {
-							return Poll::Ready(None);
-						}
-						// A draining peer usually stops publishing namespaces, so react to
-						// the signal itself; waiting for another message would leave the
-						// route primary until the session finally closed. Idempotent, since
-						// the signal stays set and this task wakes for other reasons too.
-						if self.going_away.poll(waiter).is_ready() {
-							broadcast.drain();
-						}
-						broadcast.poll_requested_track(waiter).map(Some)
-					})
-					.await
+				.drive(|waiter| {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					if closed_session.poll_closed(&mut cx).is_ready() {
+						return Poll::Ready(None);
+					}
+					// A draining peer usually stops publishing namespaces, so react to
+					// the signal itself; waiting for another message would leave the
+					// route primary until the session finally closed. Idempotent, since
+					// the signal stays set and this task wakes for other reasons too.
+					if self.going_away.poll(waiter).is_ready() {
+						broadcast.drain();
+					}
+					broadcast.poll_requested_track(waiter).map(Some)
 				})
 				.await;
 
@@ -1052,7 +1089,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
-		let mut stream = match Stream::open(&self.session, self.version).await {
+		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
 			Ok(s) => s,
 			Err(err) => {
 				tracing::debug!(%err, "failed to open subscribe stream");
@@ -1122,19 +1159,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			StreamClosed(Result<(), Error>),
 		}
 
-		let end = {
-			let mut closed = std::pin::pin!(stream.reader.closed());
-			kio::wait(|waiter| {
-				if track.poll_unused(waiter).is_ready() {
-					return Poll::Ready(End::Unused);
-				}
-				if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
-					return Poll::Ready(End::BroadcastClosed(err));
-				}
-				waiter.poll_future(closed.as_mut()).map(End::StreamClosed)
-			})
-			.await
-		};
+		let end = kio::wait(|waiter| {
+			if track.poll_unused(waiter).is_ready() {
+				return Poll::Ready(End::Unused);
+			}
+			if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
+				return Poll::Ready(End::BroadcastClosed(err));
+			}
+			let mut cx = std::task::Context::from_waker(waiter.waker());
+			stream.reader.poll_closed(&mut cx).map(End::StreamClosed)
+		})
+		.await;
 
 		match end {
 			End::Unused => {
@@ -1243,7 +1278,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		};
 
 		let res = {
-			let mut serve = std::pin::pin!(self.run_group(group, stream, producer.clone(), timescale));
+			let mut ingest = GroupIngest::new(&group, timescale, self.version);
+			let mut writing = producer.clone();
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
@@ -1251,7 +1287,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				if let Poll::Ready(err) = producer.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
 				}
-				waiter.poll_future(serve.as_mut())
+				ingest.poll(stream, &mut writing, waiter)
 			})
 			.await
 		};
@@ -1271,87 +1307,153 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		Ok(())
 	}
+}
 
-	async fn run_group(
-		&mut self,
-		group: ietf::GroupHeader,
-		stream: &mut Reader<S::RecvStream, Version>,
-		mut producer: group::Producer,
-		timescale: Option<Timescale>,
-	) -> Result<(), Error> {
-		while let Some(id_delta) = stream.decode_maybe::<u64>().await? {
-			if id_delta != 0 {
-				tracing::warn!(id_delta = %id_delta, "object ID delta is not supported, dropping stream");
-				return Err(Error::Unsupported);
-			}
+/// Pumps moq-transport subgroup objects from a reader into a group producer:
+/// the id delta, the extension headers (carrying the timestamp), the size, the
+/// status for empty objects, and the streamed payload.
+struct GroupIngest {
+	has_extensions: bool,
+	has_end: bool,
+	timescale: Option<Timescale>,
+	version: Version,
+	phase: IngestPhase,
+}
 
-			// Per-object extension headers may carry the frame's presentation timestamp
-			// (the Timestamp Object Property), in the units the track declared. A track
-			// that declared no timescale opted out, so its objects are stamped on arrival
-			// even if one carries a Timestamp we could not interpret.
-			let timestamp = match (group.flags.has_extensions, timescale) {
-				(true, Some(timescale)) => {
-					let size: usize = stream.decode().await?;
-					let mut ext = stream.read_exact(size).await?;
-					ietf::decode_object_time(&mut ext, timescale, self.version)?
-				}
-				(true, None) => {
-					let size: usize = stream.decode().await?;
-					stream.read_exact(size).await?;
-					None
-				}
-				(false, _) => None,
-			};
+enum IngestPhase {
+	/// Reading the object id delta. Stream end here ends the group.
+	Delta,
+	/// Reading the extension block's size.
+	ExtSize,
+	/// Reading (and decoding or discarding) the extension block.
+	ExtBytes { size: usize },
+	/// Reading the object size.
+	Size { timestamp: Option<crate::Timestamp> },
+	/// Reading the status of an empty object.
+	Status { timestamp: Option<crate::Timestamp> },
+	/// Streaming the object payload.
+	Payload { frame: frame::ProducerOwned },
+	/// An explicit end-of-group status arrived.
+	Finished,
+}
 
-			let size: u64 = stream.decode().await?;
-			if size == 0 {
-				let status: u64 = stream.decode().await?;
-				if status == 0 {
-					let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-					let frame = producer.create_frame(frame::Info { size: 0, timestamp })?;
-					frame.finish()?;
-				} else if status == 3 && !group.flags.has_end {
-					break;
-				} else {
-					return Err(Error::Unsupported);
-				}
-			} else {
-				// `create_frame` is the allocation chokepoint and rejects an oversized
-				// `size` before allocating, so no pre-check is needed.
-				let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
-				let mut frame = producer.create_frame(frame::Info { size, timestamp })?;
-
-				if let Err(err) = self.run_frame(stream, &mut frame).await {
-					let _ = frame.abort(err.clone());
-					return Err(err);
-				}
-
-				frame.finish()?;
-			}
+impl GroupIngest {
+	fn new(group: &ietf::GroupHeader, timescale: Option<Timescale>, version: Version) -> Self {
+		Self {
+			has_extensions: group.flags.has_extensions,
+			has_end: group.flags.has_end,
+			timescale,
+			version,
+			phase: IngestPhase::Delta,
 		}
-
-		Ok(())
 	}
 
-	async fn run_frame(
+	/// `Ready(Ok(()))` once the stream FINs on an object boundary (or an explicit
+	/// end-of-group status arrives). The caller finishes or aborts the group; an
+	/// object cut short mid-payload was already aborted here with the reason.
+	fn poll<R: crate::transport::poll::RecvStream>(
 		&mut self,
-		stream: &mut Reader<S::RecvStream, Version>,
-		frame: &mut frame::Producer<'_>,
-	) -> Result<(), Error> {
-		while frame.remaining() > 0 {
-			match stream.read_chunk(frame.remaining()).await? {
-				Some(chunk) if !chunk.is_empty() => {
-					frame.write(chunk)?;
+		reader: &mut Reader<R, Version>,
+		group: &mut group::Producer,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<(), Error>> {
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		loop {
+			match &mut self.phase {
+				IngestPhase::Delta => {
+					let Some(id_delta) = ready!(reader.poll_decode_maybe::<u64>(&mut cx))? else {
+						return Poll::Ready(Ok(()));
+					};
+					if id_delta != 0 {
+						tracing::warn!(id_delta = %id_delta, "object ID delta is not supported, dropping stream");
+						return Poll::Ready(Err(Error::Unsupported));
+					}
+					self.phase = match self.has_extensions {
+						true => IngestPhase::ExtSize,
+						false => IngestPhase::Size { timestamp: None },
+					};
 				}
-				_ => return Err(Error::WrongSize),
+				IngestPhase::ExtSize => {
+					let size: usize = ready!(reader.poll_decode(&mut cx))?;
+					self.phase = IngestPhase::ExtBytes { size };
+				}
+				IngestPhase::ExtBytes { size } => {
+					// Per-object extension headers may carry the frame's presentation
+					// timestamp (the Timestamp Object Property), in the units the track
+					// declared. A track that declared no timescale opted out, so its
+					// objects are stamped on arrival even if one carries a Timestamp we
+					// could not interpret.
+					let mut ext = ready!(reader.poll_read_exact(&mut cx, *size))?;
+					let timestamp = match self.timescale {
+						Some(timescale) => ietf::decode_object_time(&mut ext, timescale, self.version)?,
+						None => None,
+					};
+					self.phase = IngestPhase::Size { timestamp };
+				}
+				IngestPhase::Size { timestamp } => {
+					let size: u64 = ready!(reader.poll_decode(&mut cx))?;
+					if size == 0 {
+						self.phase = IngestPhase::Status { timestamp: *timestamp };
+						continue;
+					}
+					// `create_frame_owned` is the allocation chokepoint and rejects an
+					// oversized `size` before allocating, so no pre-check is needed.
+					let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
+					let frame = group.create_frame_owned(frame::Info { size, timestamp })?;
+					self.phase = IngestPhase::Payload { frame };
+				}
+				IngestPhase::Status { timestamp } => {
+					let status: u64 = ready!(reader.poll_decode(&mut cx))?;
+					if status == 0 {
+						let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
+						let frame = group.create_frame_owned(frame::Info { size: 0, timestamp })?;
+						frame.finish()?;
+						self.phase = IngestPhase::Delta;
+					} else if status == 3 && !self.has_end {
+						self.phase = IngestPhase::Finished;
+					} else {
+						return Poll::Ready(Err(Error::Unsupported));
+					}
+				}
+				IngestPhase::Payload { frame } => {
+					let failed = loop {
+						if frame.remaining() == 0 {
+							break None;
+						}
+						match reader.poll_read_chunk(&mut cx, frame.remaining()) {
+							Poll::Pending => return Poll::Pending,
+							Poll::Ready(Ok(Some(chunk))) if !chunk.is_empty() => {
+								if let Err(err) = frame.write(chunk) {
+									break Some(err);
+								}
+							}
+							Poll::Ready(Ok(_)) => break Some(Error::WrongSize),
+							Poll::Ready(Err(err)) => break Some(err),
+						}
+					};
+
+					let IngestPhase::Payload { frame } = std::mem::replace(&mut self.phase, IngestPhase::Delta) else {
+						unreachable!()
+					};
+					match failed {
+						None => frame.finish()?,
+						Some(err) => {
+							// Fail the group with the reason, not the Drop fallback's
+							// generic `Dropped`.
+							let _ = frame.abort(err.clone());
+							return Poll::Ready(Err(err));
+						}
+					}
+				}
+				IngestPhase::Finished => return Poll::Ready(Ok(())),
 			}
 		}
-		Ok(())
 	}
 }
 
 #[cfg(test)]
 mod tests {
+	use crate::model::ProduceTest;
 	use futures::poll;
 
 	use super::*;
@@ -1387,6 +1489,72 @@ mod tests {
 		writes.windows(needle.len()).filter(|window| *window == needle).count()
 	}
 
+	/// What an unsolicited advertisement means to a subscriber on `version` whose peer
+	/// declared `solicit`.
+	fn unsolicited_is_a_violation(solicit: Option<bool>, version: Version) -> bool {
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer {
+			solicit,
+			..Default::default()
+		});
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+
+		Subscriber::new(
+			session,
+			origin,
+			Control::new(None, false),
+			None,
+			peer_setup,
+			crate::Origin::new(1).unwrap(),
+			None,
+			version,
+			tasks,
+			Default::default(),
+		)
+		.unsolicited_is_a_violation(solicit)
+	}
+
+	/// We always declare that advertisements to us must be solicited, so a peer that
+	/// implements the extension and announces anyway has a bug. Tolerating it is what
+	/// keeps that bug invisible on both sides, so the session goes.
+	///
+	/// Writing the option is the proof of support, whichever value it carries: an explicit
+	/// 0 says "no requirement of my own" and still says "I read yours".
+	#[tokio::test]
+	async fn an_announce_from_a_peer_that_implements_solicit_is_fatal() {
+		assert!(
+			unsolicited_is_a_violation(Some(true), Version::Draft17),
+			"a peer that requires solicitation itself"
+		);
+		assert!(
+			unsolicited_is_a_violation(Some(false), Version::Draft17),
+			"an explicit 0 declares support, so ours binds it too"
+		);
+	}
+
+	/// A peer that declared nothing has never heard of the extension, so it cannot have
+	/// honored ours. Announcing at us is what it is supposed to do, and #2730 is what
+	/// happens when nobody does.
+	#[tokio::test]
+	async fn an_announce_from_a_peer_that_declared_nothing_is_fine() {
+		assert!(!unsolicited_is_a_violation(None, Version::Draft17));
+	}
+
+	/// Draft-14/15 have no inline NAMESPACE, so a PUBLISH_NAMESPACE request is also how a
+	/// peer answers our own SUBSCRIBE_NAMESPACE. The message cannot say which it is, so
+	/// nothing there is enforceable: our own publisher advertises exactly this way.
+	#[tokio::test]
+	async fn a_legacy_announce_is_never_a_violation() {
+		for version in [Version::Draft14, Version::Draft15] {
+			assert!(
+				!unsolicited_is_a_violation(Some(true), version),
+				"{version:?} answers a subscription this way"
+			);
+		}
+	}
+
 	/// A rooted subscriber asks the peer for its permitted SCOPE. The root names where
 	/// replies mount on our side, which is meaningless to a peer outside our namespace,
 	/// so sending it asks for a prefix that matches nothing there.
@@ -1407,7 +1575,7 @@ mod tests {
 			scoped,
 			Control::new(None, false),
 			None,
-			cluster::PeerSetup::default(),
+			peer::PeerSetup::default(),
 			crate::Origin::new(1).unwrap(),
 			None,
 			Version::Draft16,
@@ -1421,7 +1589,7 @@ mod tests {
 			"one SUBSCRIBE_NAMESPACE per permitted prefix, relative to the root",
 		);
 
-		let stream = Stream::open(&session, Version::Draft16).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), Version::Draft16).await.unwrap();
 		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("cam").to_owned()));
 		// Parks awaiting the peer's response; the request is already on the wire.
 		assert!(futures::poll!(run.as_mut()).is_pending());
@@ -1473,8 +1641,8 @@ mod tests {
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		// Draft-18 can negotiate the cluster extension, so the subscriber waits for
 		// the peer's SETUP before resolving advertisements; settle it as extension-off.
-		let peer_setup = cluster::PeerSetup::default();
-		peer_setup.set(cluster::Peer::default());
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
 		let mut subscriber = Subscriber::new(
 			session.clone(),
 			scoped,
@@ -1489,7 +1657,7 @@ mod tests {
 		);
 
 		let prefix = subscriber.subscribe_prefixes().pop().expect("one prefix");
-		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		// Parks on the read after the scripted NAMESPACE is consumed.
 		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix));
 		for _ in 0..100 {
@@ -1540,7 +1708,7 @@ mod tests {
 			origin,
 			Control::new(None, false),
 			Some(assigned),
-			cluster::PeerSetup::default(),
+			peer::PeerSetup::default(),
 			crate::Origin::new(1).unwrap(),
 			None,
 			Version::Draft14,
@@ -1606,7 +1774,7 @@ mod tests {
 			origin,
 			Control::new(None, false),
 			Some(peer),
-			cluster::PeerSetup::default(),
+			peer::PeerSetup::default(),
 			self_origin,
 			None,
 			Version::Draft14,
@@ -1650,7 +1818,7 @@ mod tests {
 				origin.clone(),
 				Control::new(None, false),
 				Some(peer),
-				cluster::PeerSetup::default(),
+				peer::PeerSetup::default(),
 				self_origin,
 				None,
 				Version::Draft14,
@@ -1697,7 +1865,7 @@ mod tests {
 			origin.clone(),
 			Control::new(None, false),
 			None,
-			cluster::PeerSetup::default(),
+			peer::PeerSetup::default(),
 			self_origin,
 			None,
 			Version::Draft19,
@@ -1822,8 +1990,8 @@ mod tests {
 		std::mem::forget(task_set);
 		// Draft-18 can negotiate the extension, so the read loop waits for the peer's
 		// SETUP before parsing a NAMESPACE; settle it as extension-off.
-		let peer_setup = cluster::PeerSetup::default();
-		peer_setup.set(cluster::Peer::default());
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
 		let mut subscriber = Subscriber::new(
 			session.clone(),
 			origin,
@@ -1837,7 +2005,7 @@ mod tests {
 			Default::default(),
 		);
 
-		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		subscriber
 			.run_subscribe_namespace(stream, crate::Path::new("").to_owned())
 			.await
@@ -1899,7 +2067,7 @@ mod tests {
 			origin,
 			Control::new(None, false),
 			None,
-			cluster::PeerSetup::default(),
+			peer::PeerSetup::default(),
 			crate::Origin::new(1).unwrap(),
 			None,
 			VERSION,
@@ -1907,14 +2075,14 @@ mod tests {
 			Default::default(),
 		);
 
-		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		let msg = ietf::PublishNamespace {
 			request_id: RequestId(0),
 			track_namespace: path.borrow(),
 			cluster: None,
 		};
 		subscriber
-			.run_publish_namespace_stream(stream, msg, cluster::Peer::default())
+			.run_publish_namespace_stream(stream, msg, cluster::Peer::default(), None)
 			.await
 			.expect("a withdrawal is not a protocol violation");
 		settle().await;
@@ -1953,7 +2121,7 @@ mod tests {
 			origin,
 			Control::new(None, false),
 			None,
-			cluster::PeerSetup::default(),
+			peer::PeerSetup::default(),
 			crate::Origin::new(1).unwrap(),
 			None,
 			VERSION,
@@ -1962,14 +2130,14 @@ mod tests {
 		);
 
 		let path = crate::Path::new("room/host").to_owned();
-		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		let msg = ietf::PublishNamespace {
 			request_id: RequestId(0),
 			track_namespace: path.borrow(),
 			cluster: None,
 		};
 		subscriber
-			.run_publish_namespace_stream(stream, msg, cluster::Peer::default())
+			.run_publish_namespace_stream(stream, msg, cluster::Peer::default(), None)
 			.await
 			.expect_err("an unexpected message ends the stream");
 		settle().await;
@@ -2262,7 +2430,7 @@ mod tests {
 			origin,
 			Control::new(None, false),
 			None,
-			cluster::PeerSetup::default(),
+			peer::PeerSetup::default(),
 			self_origin,
 			None,
 			VERSION,
@@ -2276,7 +2444,7 @@ mod tests {
 		settle().await;
 		assert!(consumer.get_broadcast("room/host").is_some(), "attached to start with");
 
-		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		(subscriber, consumer, stream)
 	}
 
@@ -2441,7 +2609,7 @@ mod tests {
 			origin,
 			Control::new(None, false),
 			None,
-			cluster::PeerSetup::default(),
+			peer::PeerSetup::default(),
 			crate::Origin::new(1).unwrap(),
 			None,
 			Version::Draft19,
@@ -2449,7 +2617,7 @@ mod tests {
 			Default::default(),
 		);
 
-		let stream = Stream::open(&session, Version::Draft19).await.unwrap();
+		let stream = Stream::open(&mut session.clone(), Version::Draft19).await.unwrap();
 		let msg = ietf::Publish {
 			request_id: RequestId(1),
 			track_namespace: crate::Path::new("room/host"),

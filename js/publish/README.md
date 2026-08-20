@@ -78,14 +78,17 @@ The simplest way to publish a stream:
 
 For more control:
 
+Standalone components start enabled when `enabled` is omitted. Camera and microphone sources may
+request permission immediately. Create an enabled screen source during the user gesture that
+authorizes screen capture, or pass a live input that is false until that gesture.
+
 ```typescript
 import * as Publish from "@moq/publish";
 
 const publish = new Publish.Broadcast(connection, {
-    enabled: true,
-    name: "alice.hang",
-    video: { enabled: true },
-    audio: { enabled: true },
+	name: "alice.hang",
+	video: {},
+	audio: {},
 });
 
 // Change source at runtime

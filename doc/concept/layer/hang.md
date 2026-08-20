@@ -13,6 +13,11 @@ A simple, WebCodecs-based media format utilizing MoQ. See the [specification](ht
 This is how the viewer decides what it can decode and wants to receive.
 The catalog track is live updated as media tracks are added, removed, or changed.
 
+Each audio, video, or text rendition may carry a human-readable `label` for a
+track picker. The rendition map key remains the transport track name used to
+subscribe, so labels do not need to be unique and changing one does not rename
+the track.
+
 Each media track is described using the [WebCodecs specification](https://www.w3.org/TR/webcodecs/) and we plan to support every codec in the [WebCodecs registry](https://w3c.github.io/webcodecs/codec_registry.html).
 
 ### Example
@@ -24,6 +29,7 @@ Here is Big Buck Bunny's `catalog.json` as of 2026-02-02:
   "video": {
     "renditions": {
       "video0": {
+        "label": "HD",
         "codec": "avc1.64001f",
         "description": "0164001fffe100196764001fac2484014016ec0440000003004000000c23c60c9201000568ee32c8b0",
         "codedWidth": 1280,
@@ -35,6 +41,7 @@ Here is Big Buck Bunny's `catalog.json` as of 2026-02-02:
   "audio": {
     "renditions": {
       "audio1": {
+        "label": "English",
         "codec": "mp4a.40.2",
         "sampleRate": 44100,
         "numberOfChannels": 2,
@@ -89,17 +96,20 @@ The `role` field is `subtitle` (spoken dialogue) or `caption` (all audio, includ
 The frame timestamp carries the cue's start time on the same media clock as audio and video, so cues schedule against the same playhead with no separate pacing.
 The section is omitted entirely when a broadcast publishes no captions.
 
+A publisher can set a rendition's optional `stalled` field to recommend temporarily avoiding it without removing or closing the track.
+Players prefer decoder-supported unstalled renditions and can fall back to a stalled rendition when none remain.
+
 ### Cross-broadcast renditions
 
-A rendition may set an optional `broadcast` field: a path relative to the broadcast that served the catalog (e.g. `"../source"`), pointing at another broadcast that publishes the actual track.
-A consumer resolves the reference against the path it reached the catalog broadcast at (`..` pops a segment, other segments append) and subscribes to the track on the resolved broadcast over the same connection.
-That is the path the consumer asked for, not one the publisher declares, so a reference can only ever name a broadcast the consumer could have named itself.
+A rendition may set an optional `broadcast` field: a path relative to the broadcast that served the catalog (e.g. `"./source"`), pointing at another broadcast that publishes the actual track.
+A consumer resolves a non-empty reference like a relative URL: it replaces the catalog broadcast's last path segment, then applies `.` and `..` segments. An empty reference names the catalog broadcast itself.
+It resolves against the path it reached the catalog broadcast at, not one the publisher declares, so a reference can only ever name a broadcast the consumer could have named itself, and subscribes to the track there over the same connection.
 When the field is absent, the track lives in the same broadcast as the catalog.
 A reference that walks above the root (more `..` than the catalog path has segments) names no broadcast, so the whole catalog is rejected rather than pointed at whatever path the walk stops on.
 The root is the consumer's authorized subtree, so such a reference is an attempt to name content it cannot reach: a publisher emitting one has a bug, and quietly serving the remaining renditions would hide that.
 
 This lets a transcoder publish a sidecar catalog that adds new renditions while pointing unchanged ones at the original broadcast, instead of re-publishing those bytes through the transcoder.
-For example, a transcoder consuming `room/source` can publish `room/transcode` whose catalog contains a downscaled `480p` rendition plus the original `1080p` rendition marked `"broadcast": "../source"`.
+For example, a transcoder consuming `room/source` can publish `room/transcode` whose catalog contains a downscaled `480p` rendition plus the original `1080p` rendition marked `"broadcast": "./source"`.
 A viewer of `room/transcode` then pulls `480p` from the transcoder and `1080p` directly from the source, and the relay dedupes the source subscription with the transcoder's own.
 
 Rejection happens where the catalog is read, not where a track is subscribed: the rendition set drives track layouts, playlists, codec lists, and quality selectors, so a reference caught any later would already have been offered and chosen. In Rust the `moq-mux` catalog stream rejects it and every exporter reads through that stream; `@moq/watch` rejects the catalog it would otherwise publish.

@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.9.9"
+version = "0.9.11"
 edition = "2024"
 rust-version.workspace = true
 
@@ -19,18 +19,18 @@ path = "src/main.rs"
 
 [features]
 default = ["iroh", "cluster-lan", "quinn", "websocket", "nvenc", "nvdec", "pipewire"]
-iroh = ["moq-native/iroh"]
+iroh = ["moq-tokio/iroh"]
 # LAN discovery and meshing (`--cluster-lan`).
-cluster-lan = ["moq-native/mdns"]
-jemalloc = ["moq-native/jemalloc"]
-noq = ["moq-native/noq"]
-quinn = ["moq-native/quinn"]
-quiche = ["moq-native/quiche"]
+cluster-lan = ["moq-tokio/mdns"]
+jemalloc = ["moq-tokio/jemalloc"]
+noq = ["moq-tokio/noq"]
+quinn = ["moq-tokio/quinn"]
+quiche = ["moq-tokio/quiche"]
 # qlog trace capture (`--client-quic-qlog <DIR>`). Off by default: it compiles the
 # qlog machinery into the enabled backends and is only wanted for debugging or
 # congestion-control testing.
-qlog = ["moq-native/qlog"]
-websocket = ["moq-native/websocket"]
+qlog = ["moq-tokio/qlog"]
+websocket = ["moq-tokio/websocket"]
 # Device capture (camera + microphone) + encode/publish. Off by default because
 # it pulls in moq-video + moq-audio capture, which add system build deps on Linux
 # (camera: `v4l`/v4l2-sys-mit needs libclang + V4L2 headers via bindgen; mic: cpal
@@ -72,11 +72,12 @@ moq-audio = { workspace = true, optional = true }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
 moq-mux = { workspace = true }
-moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 moq-rtc = { workspace = true }
 moq-rtmp = { workspace = true }
 moq-srt = { workspace = true }
 moq-token-cli = { workspace = true }
+# Raw qmux listeners are part of the CLI surface. `uds` compiles only on Unix.
+moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "tcp", "uds"] }
 moq-transcode = { workspace = true, optional = true }
 moq-video = { workspace = true, optional = true }
 pollster = { version = "1.0", optional = true }

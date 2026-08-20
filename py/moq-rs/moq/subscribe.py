@@ -16,7 +16,9 @@ from moq_ffi import (
     MoqJsonStreamConfig,
     MoqJsonStreamConsumer,
     MoqMediaConsumer,
+    MoqMediaGroupConsumer,
     MoqTrackConsumer,
+    MoqVideoConsumer,
 )
 
 from .types import (
@@ -33,6 +35,8 @@ from .types import (
     Subscription,
     TrackInfo,
     Video,
+    VideoDecodedFrame,
+    VideoDecoderOutput,
 )
 
 
@@ -63,6 +67,42 @@ class MediaConsumer:
 
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering frames."""
+        self._inner.cancel()
+
+
+class MediaGroupConsumer:
+    """Async iterator of decoded :class:`MediaFrame` within a single fetched group.
+
+    Built via :meth:`BroadcastConsumer.fetch_media_group`. Finite: iteration ends
+    after the group's last frame. Usable as an async context manager that cancels
+    on exit.
+    """
+
+    def __init__(self, inner: MoqMediaGroupConsumer) -> None:
+        self._inner = inner
+
+    @property
+    def sequence(self) -> int:
+        """The sequence number of this group within the track."""
+        return self._inner.sequence()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> MediaFrame:
+        frame = await self._inner.next()
+        if frame is None:
+            raise StopAsyncIteration
+        return frame
+
+    def cancel(self) -> None:
+        """Cancel reading this group and stop delivering frames."""
         self._inner.cancel()
 
 
@@ -196,7 +236,7 @@ class TrackConsumer:
 class AudioConsumer:
     """Async iterator of decoded audio frames.
 
-    Built via :meth:`BroadcastConsumer.subscribe_audio`. The PCM layout
+    Built via :meth:`BroadcastConsumer.decode_audio`. The PCM layout
     is fixed by the :class:`AudioDecoderOutput` passed at subscribe
     time; each frame's ``data`` is raw bytes in that format.
     """
@@ -221,6 +261,38 @@ class AudioConsumer:
 
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering audio frames."""
+        self._inner.cancel()
+
+
+class VideoConsumer:
+    """Async iterator of decoded video frames.
+
+    Built via :meth:`BroadcastConsumer.decode_video`. Each frame is
+    tightly-packed I420 and carries its own ``width`` and ``height``:
+    ``output.resize`` is best effort, so read the frame rather than
+    assuming it took.
+    """
+
+    def __init__(self, inner: MoqVideoConsumer) -> None:
+        self._inner = inner
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> VideoDecodedFrame:
+        frame = await self._inner.next()
+        if frame is None:
+            raise StopAsyncIteration
+        return frame
+
+    def cancel(self) -> None:
+        """Cancel the subscription and stop delivering video frames."""
         self._inner.cancel()
 
 
@@ -373,6 +445,23 @@ class BroadcastConsumer:
         """
         return GroupConsumer(await self._inner.fetch_group(name, sequence, options))
 
+    async def fetch_media_group(
+        self,
+        name: str,
+        sequence: int,
+        track: Video | Audio | Container,
+        options: FetchGroupOptions | None = None,
+    ) -> MediaGroupConsumer:
+        """Fetch one group by sequence and decode it into media frames.
+
+        Unlike :meth:`subscribe_media` this holds no live subscription and applies
+        no latency-based group skipping, so every frame in the group is delivered.
+        ``track`` is either the catalog entry for this track (e.g.
+        ``catalog.video[name]``) or a :class:`Container` directly.
+        """
+        container = track if isinstance(track, Container) else track.container
+        return MediaGroupConsumer(await self._inner.fetch_media_group(name, sequence, container, options))
+
     async def subscribe_media(
         self,
         name: str,
@@ -393,7 +482,24 @@ class BroadcastConsumer:
         container = track if isinstance(track, Container) else track.container
         return MediaConsumer(await self._inner.subscribe_media(name, container, subscription))
 
-    async def subscribe_audio(
+    async def resolve(self, reference: str | None) -> "BroadcastConsumer":
+        """Resolve a catalog rendition's ``broadcast`` reference to the broadcast
+        serving its track.
+
+        ``reference`` is ``catalog.video[name].broadcast`` /
+        ``catalog.audio[name].broadcast``: ``None`` or empty names this broadcast,
+        anything else names a sibling relative to it (e.g. ``./source``). Call it on
+        a rendition that carries one before :meth:`subscribe_media`,
+        :meth:`subscribe_track`, :meth:`fetch_group`, or :meth:`fetch_media_group`,
+        which take a track name rather than a rendition; :meth:`decode_audio` and
+        :meth:`decode_video` resolve it themselves.
+
+        Raises if this broadcast came from a local producer rather than an origin,
+        since a standalone broadcast has no sibling to name.
+        """
+        return BroadcastConsumer(await self._inner.resolve(reference))
+
+    async def decode_audio(
         self,
         name: str,
         catalog_audio: Audio,
@@ -410,7 +516,26 @@ class BroadcastConsumer:
         the congestion-control knob. (Named ``_max`` to leave room for
         a future ``latency_min_ms`` jitter-buffer floor.)
         """
-        return AudioConsumer(await self._inner.subscribe_audio(name, catalog_audio, output))
+        return AudioConsumer(await self._inner.decode_audio(name, catalog_audio, output))
+
+    async def decode_video(
+        self,
+        name: str,
+        catalog_video: Video,
+        output: VideoDecoderOutput | None = None,
+    ) -> VideoConsumer:
+        """Subscribe to a video track and decode it inside the bindings.
+
+        ``catalog_video`` comes from the catalog (e.g.
+        ``await broadcast.catalog()`` followed by ``catalog.video[name]``).
+        Frames arrive as tightly-packed I420. An unrecognized codec raises
+        here; a recognized one no native backend handles raises when the
+        decoder opens, both before the first frame.
+
+        ``output.resize`` asks the decoder for a different size and is best
+        effort, so read each frame's own dimensions.
+        """
+        return VideoConsumer(await self._inner.decode_video(name, catalog_video, output or VideoDecoderOutput()))
 
     async def catalog(self) -> Catalog:
         """Convenience: subscribe and return the first catalog."""

@@ -54,7 +54,7 @@ final class SmokeTests: XCTestCase {
             framerate: 60,
             optimizeForLatency: true
         )
-        let media = try broadcast.publishMedia(format: "avc3", video: hint)
+        let media = try broadcast.publishVideo(format: .avc3, hint: hint)
         try media.finish()
         try broadcast.finish()
     }

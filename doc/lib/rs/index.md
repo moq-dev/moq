@@ -129,9 +129,9 @@ QUIC and WebTransport implementation for Rust.
 
 [Learn more](/lib/rs/crate/web-transport)
 
-### moq-native
+### moq-tokio
 
-[![docs.rs](https://docs.rs/moq-native/badge.svg)](https://docs.rs/moq-native)
+[![docs.rs](https://docs.rs/moq-tokio/badge.svg)](https://docs.rs/moq-tokio)
 
 Opinionated helpers to configure a Quinn QUIC endpoint.
 
@@ -140,6 +140,8 @@ Opinionated helpers to configure a Quinn QUIC endpoint.
 - TLS certificate management
 - QUIC transport configuration
 - Connection setup helpers
+
+[Learn more](/lib/rs/crate/moq-tokio)
 
 ## CLI Tools
 
@@ -164,11 +166,11 @@ cargo install moq-cli
 ```bash
 # Publish a video file (remux to MPEG-TS and pipe it in)
 ffmpeg -i input.mp4 -c copy -f mpegts - | \
-    moq --client-connect https://relay.example.com/anon --broadcast my-stream import ts
+    moq --connect https://relay.example.com/anon --broadcast my-stream import ts
 
 # Publish from FFmpeg
 ffmpeg -i input.mp4 -f mpegts - | \
-    moq --client-connect https://relay.example.com/anon --broadcast my-stream import ts
+    moq --connect https://relay.example.com/anon --broadcast my-stream import ts
 ```
 
 [Learn more](/bin/cli)
@@ -270,12 +272,12 @@ cargo build --release
 
 ## Quick Start
 
-[`moq-native`](/lib/rs/crate/moq-native) configures the QUIC endpoint and TLS for
+[`moq-tokio`](/lib/rs/crate/moq-tokio) configures the QUIC endpoint and TLS for
 you, then [`moq-net`](/lib/rs/crate/moq-net) handles the MoQ handshake. Connect to
 a relay with a few lines:
 
 ```rust
-let client = moq_native::ClientConfig::default().init()?;
+let client = moq_tokio::connect::Config::default().init()?;
 let url = url::Url::parse("https://cdn.moq.dev/anon")?;
 
 // The connection redials with backoff if it drops; drop the handle to disconnect.
@@ -288,7 +290,7 @@ your broadcasts and subscriptions carry across reconnects:
 
 ```rust
 // Subscribe: wait for broadcasts to be announced.
-let origin = moq_net::Origin::random().produce();
+let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
 let mut announced = origin.consume().announced();
 let _connection = client.with_subscriber(origin).connect(url);
 
@@ -314,7 +316,7 @@ Full API documentation is available on [docs.rs](https://docs.rs):
 - [moq-video API](https://docs.rs/moq-video)
 - [moq-audio API](https://docs.rs/moq-audio)
 - [moq-token API](https://docs.rs/moq-token)
-- [moq-native API](https://docs.rs/moq-native)
+- [moq-tokio API](https://docs.rs/moq-tokio)
 - [libmoq API](https://docs.rs/libmoq)
 
 ## Next Steps
