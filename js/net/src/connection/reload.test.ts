@@ -344,10 +344,10 @@ test("an unauthorized session close during setup stops retrying", async () => {
 			if (accepted.done) return;
 
 			// Some transports reject the SETUP stream before publishing the close info.
-			setTimeout(() => {
-				pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
-			}, 0);
 			await accepted.value.writable.abort(toTransport(StreamCode.DeliveryTimeout, "session closing"));
+			await settle();
+			await settle();
+			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
 		})();
 		return pair.client;
 	};
@@ -396,6 +396,9 @@ test("a setup stream reset is not mistaken for an unauthorized session", async (
 
 			attempts++;
 			await accepted.value.writable.abort(toTransport(StreamCode.DeliveryTimeout, "delivery timeout"));
+			await settle();
+			await settle();
+			pair.server.close();
 		})();
 		return pair.client;
 	};
