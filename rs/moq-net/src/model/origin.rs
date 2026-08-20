@@ -371,7 +371,8 @@ struct OriginBroadcast {
 	announced: bool,
 }
 
-/// How long a serving relay waits before re-parenting onto another relay.
+/// How long a relay waits before re-parenting onto a source reached through a
+/// session.
 ///
 /// Re-parenting is the one move that can cycle: relays that each decide to pull
 /// from the next leave the broadcast with no source at all. A truthful hop chain
@@ -1499,9 +1500,11 @@ struct FrontState {
 	/// the same rule the session layer applies to a restart whose first hop
 	/// changed.
 	publisher: Option<Origin>,
-	/// The warm-sibling adoption being held down, and when it was first
-	/// preferred. See [`HANDOVER_HOLD`]; the front task sleeps on the deadline.
-	pending: Option<(u64, web_async::time::Instant)>,
+	/// When this front first wanted to re-parent onto another relay, while the move
+	/// is still held down. Deliberately not tied to which candidate currently wins,
+	/// so a flapping choice cannot restart the wait. See [`HANDOVER_HOLD`]; the
+	/// front task sleeps on the deadline.
+	pending: Option<web_async::time::Instant>,
 
 	/// Attach counter, handed to each [`FrontRoute`] so [`route_order`] can break
 	/// an exact tie toward the newest source.
@@ -1657,25 +1660,43 @@ impl FrontState {
 	fn reselect(&mut self, carrying: bool, now: web_async::time::Instant) -> Option<web_async::time::Instant> {
 		let target = self.reselect_target(carrying);
 
-		// Nothing to hold: not a move, or the route we would leave is already gone
-		// (or on its way out) and waiting would strand the front on a source it
-		// cannot use.
+		// What can cycle is re-parenting onto a source reached through a session,
+		// since only something we can depend on can depend on us back. Demand is
+		// deliberately not part of that test: an idle front still records the choice,
+		// and nothing re-runs the selection when demand arrives, so a selection made
+		// while idle is simply a cycle that starts later. Nor is hop count, since a
+		// peer that does not speak the cluster extension is announced as one hop
+		// however deep the chain behind it really is. Only a local publish, which
+		// reaches no session at all, is structurally unable to close a loop.
 		//
-		// Leaving a drain is exempt on principle, not just for latency: a draining
-		// route makes us advertise the ceiling, so no peer can prefer us, so we
-		// cannot be one end of a mutual adoption. There is no cycle to hold off.
-		let held = carrying
-			&& target != self.active
+		// Three exemptions, all repairs rather than improvements. Losing the
+		// incumbent has to apply at once or the front strands itself on a source it
+		// cannot use. Leaving a drain is exempt on principle as well as for latency:
+		// a draining route makes us advertise the ceiling, so no peer can prefer us,
+		// so we cannot be one end of a mutual adoption. An incumbent that taints a
+		// reader goes the same way: `serve_route` already refuses to serve from it,
+		// so we are not pulling through that peer and there is no mutual adoption to
+		// hold off, while keeping it active would leave `routes_snapshot` advertising
+		// a chain the front does not actually serve from.
+		let held = target != self.active
 			&& self.active.is_some_and(|id| {
 				self.routes
 					.iter()
 					.find(|r| r.id == id)
-					.is_some_and(|r| r.route.cost.warm < broadcast::DRAIN_COST)
+					.is_some_and(|r| r.route.cost.warm < broadcast::DRAIN_COST && !self.taints_a_reader(&r.route))
 			}) && target.is_some_and(|id| {
-			self.routes
-				.iter()
-				.find(|r| r.id == id)
-				.is_some_and(|r| r.route.hops.len() >= 2)
+			let last = |id: u64| {
+				self.routes
+					.iter()
+					.find(|r| r.id == id)
+					.and_then(|r| r.route.hops.iter().last().copied())
+			};
+			// A fresh session from the relay we already depend on is not a new edge,
+			// so it cannot close a loop that the current route does not already
+			// close. Holding it would strand the front on a corpse until the
+			// transport finally timed it out, which is what the recency order in
+			// `route_order` exists to prevent.
+			last(id).is_some() && last(id) != self.active.and_then(last)
 		});
 
 		if !held {
@@ -1685,12 +1706,12 @@ impl FrontState {
 		}
 
 		let target = target.expect("a held target is always Some");
-		let since = match self.pending {
-			// Still waiting on the same candidate: keep the original start, so a
-			// stream of unrelated table churn cannot extend the hold forever.
-			Some((id, since)) if id == target => since,
-			_ => now,
-		};
+		// Timed from when we first wanted to move at all, not from when we first
+		// wanted *this* candidate. Costs that flap between two routes, or a peer
+		// that reconnects under a fresh route id, would otherwise restart the wait
+		// on every change and postpone the move forever. At expiry we apply
+		// whichever candidate wins then, which is the re-read the hold exists for.
+		let since = self.pending.unwrap_or(now);
 
 		let deadline = self.hold_deadline(since);
 		match deadline.is_some_and(|at| now >= at) {
@@ -1700,7 +1721,7 @@ impl FrontState {
 				None
 			}
 			false => {
-				self.pending = Some((target, since));
+				self.pending = Some(since);
 				deadline
 			}
 		}
@@ -1731,6 +1752,10 @@ impl FrontState {
 			&& let Some(candidate) = self.routes.iter().find(|r| r.id == best_id)
 			&& let Some(incumbent) = self.routes.iter().find(|r| r.id == cur_id)
 			&& incumbent.route.announce
+			// An incumbent flowing through a peer that reads this front is one
+			// `serve_route` refuses anyway, so keeping it only makes the advert
+			// disagree with dispatch. Same reasoning as the hold's exemption.
+			&& !self.taints_a_reader(&incumbent.route)
 			&& candidate.route.advertised.warm == 0
 			&& candidate.route.hops.len() >= 2
 			&& !self.handover_allowed(&candidate.route, &incumbent.route)
@@ -2287,7 +2312,7 @@ async fn run_front(
 				// holds is a no-op, so the countdown is not restarted.
 				deadline.set({
 					let s = state.read();
-					s.pending.and_then(|(_, since)| s.hold_deadline(since))
+					s.pending.and_then(|since| s.hold_deadline(since))
 				});
 				deadline.poll(waiter).map(|_| Step::Held)
 			})
@@ -3883,31 +3908,114 @@ mod tests {
 		assert_eq!(state.active, Some(1), "leaving a drain must be immediate");
 	}
 
-	/// The hold covers re-parenting onto another relay while we are serving. Moves
-	/// that cannot close a loop, and repairs that must not wait, are not held.
+	/// The hold covers re-parenting onto anything reached through a session. Only
+	/// moves that cannot close a loop, and repairs that must not wait, are exempt.
 	#[test]
 	fn test_handover_hold_ignores_moves_that_cannot_cycle() {
 		let peer = Origin::new(3).unwrap();
 		let now = web_async::time::Instant::now();
 		let keyed = || origin_keyed("test", peer, false);
 
-		// An idle front is not pulling anything, so it cannot be a link in a cycle.
-		let mut idle = front_state(keyed(), vec![upstream_route(10), sibling_route(peer, 4)]);
-		assert_eq!(idle.reselect(false, now), None);
-		assert_eq!(idle.active, Some(1), "an idle front must re-parent immediately");
-
-		// Straight from the original publisher: a one-hop chain, and a publisher
-		// never adopts a route to its own broadcast.
-		let direct = announce().with_hops(OriginList::try_from(vec![peer]).unwrap());
-		let mut state = front_state(keyed(), vec![upstream_route(10), direct]);
+		// A local publish reaches no session, so nothing can depend on us through it.
+		let mut state = front_state(keyed(), vec![upstream_route(10), announce()]);
 		assert_eq!(state.reselect(true, now), None);
-		assert_eq!(state.active, Some(1), "a direct publisher route must be immediate");
+		assert_eq!(state.active, Some(1), "a local publish must be immediate");
+
+		// A fresh session from the relay we already depend on is not a new edge, so
+		// it cannot close a loop the current route does not already close.
+		let mut state = front_state(keyed(), vec![sibling_route(peer, 4), sibling_route(peer, 4)]);
+		assert_eq!(state.reselect(true, now), None);
+		assert_eq!(state.active, Some(1), "a reconnect must be immediate");
 
 		// Losing the incumbent entirely: never held, or the front strands itself.
 		let mut state = front_state(keyed(), vec![upstream_route(10), sibling_route(peer, 4)]);
 		state.routes.retain(|r| r.id != 0);
 		assert_eq!(state.reselect(true, now), None);
 		assert_eq!(state.active, Some(1), "a lost incumbent must be replaced immediately");
+	}
+
+	/// Demand is deliberately not part of the hold. An idle front still records the
+	/// choice, nothing re-runs the selection when demand arrives, and `serve_route`
+	/// then dispatches down it, so a selection made while idle is a cycle that
+	/// starts later rather than one that cannot happen.
+	#[test]
+	fn test_handover_hold_covers_an_idle_front() {
+		let peer = Origin::new(3).unwrap();
+		let now = web_async::time::Instant::now();
+		let mut state = front_state(
+			origin_keyed("test", peer, false),
+			vec![upstream_route(10), sibling_route(peer, 4)],
+		);
+
+		assert!(state.reselect(false, now).is_some(), "an idle front must still hold");
+		assert_eq!(state.active, Some(0), "the idle re-parent must not apply yet");
+	}
+
+	/// Hop count cannot stand in for provenance: a peer that does not speak the
+	/// cluster extension is announced as a single hop however deep the chain behind
+	/// it really is (see `ietf::subscriber::session_route`), so a one-hop target is
+	/// not necessarily a publisher that never re-parents.
+	#[test]
+	fn test_handover_hold_covers_an_opaque_one_hop_peer() {
+		let peer = Origin::new(3).unwrap();
+		let now = web_async::time::Instant::now();
+		let opaque = announce()
+			.with_hops(OriginList::try_from(vec![peer]).unwrap())
+			.with_cost(broadcast::Cost::UNKNOWN.charged(1));
+		let mut state = front_state(origin_keyed("test", peer, false), vec![upstream_route(10), opaque]);
+
+		assert!(
+			state.reselect(true, now).is_some(),
+			"an opaque one-hop peer must be held"
+		);
+		assert_eq!(state.active, Some(0), "the re-parent must not apply yet");
+	}
+
+	/// Neither the gate nor the hold may keep an incumbent that flows through a peer
+	/// reading this front. `serve_route` refuses to serve from such a route, so
+	/// retaining it as `active` would leave `routes_snapshot` advertising (and
+	/// discounting) a chain the front does not actually serve from. Advertising one
+	/// path while dispatching down another is what lets a subscription cycle past
+	/// the hop-chain check, since the chain a peer inspects is no longer the chain
+	/// its bytes take.
+	#[test]
+	fn test_a_tainted_incumbent_is_never_retained() {
+		let reader = Origin::new(5).unwrap();
+		let clean_peer = Origin::new(3).unwrap();
+		let now = web_async::time::Instant::now();
+
+		// The incumbent runs through the reader and is cheaply rooted, so we outrank
+		// the clean alternative and would otherwise both veto and hold the move.
+		let mut state = front_state(
+			origin_keyed("test", clean_peer, false),
+			vec![
+				warm_route(&[90, reader.id()], 1, 1),
+				warm_route(&[90, clean_peer.id()], 4, 1),
+			],
+		);
+		state.excluded.insert(reader, 1);
+
+		assert_eq!(state.best_route(), Some(1), "the clean route must win selection");
+		assert_eq!(
+			state.reselect(true, now),
+			None,
+			"a tainted incumbent must not arm the hold"
+		);
+		assert_eq!(state.active, Some(1), "the tainted incumbent must not be retained");
+		assert_eq!(
+			state.serve_route(|_| false),
+			state.active,
+			"what we serve from and what we advertise as serving must agree"
+		);
+		assert_eq!(
+			state.routes_snapshot().first().map(|r| r.hops.clone()),
+			state
+				.routes
+				.iter()
+				.find(|r| Some(r.id) == state.active)
+				.map(|r| r.route.hops.clone()),
+			"the advertised serving chain must be the active one"
+		);
 	}
 
 	/// The simultaneous-activation race: two relays that each pulled the same
@@ -4231,6 +4339,13 @@ mod tests {
 
 	/// Let the spawned origin tasks (source watchers, front dispatch) run. The
 	/// tests pause tokio time, so this advances the clock instantly.
+	/// Wait out a held re-parent (see [`HANDOVER_HOLD`]) and let the front task's
+	/// deadline fire, for tests whose subject is which route wins rather than when.
+	async fn settle_handover() {
+		tokio::time::advance(HANDOVER_HOLD * 2).await;
+		settle().await;
+	}
+
 	async fn settle() {
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 	}
@@ -5736,6 +5851,7 @@ mod tests {
 			.create_broadcast("test", announce().with_hops(hops_b.clone()))
 			.unwrap();
 		settle().await;
+		settle_handover().await;
 		announced.assert_next_wait();
 		let current = origin.consume().get_broadcast("test").unwrap();
 		assert!(current.is_clone(&face), "the broadcast identity must not change");
@@ -6666,6 +6782,7 @@ mod tests {
 		bumped.advertised = broadcast::Cost::new(1);
 		source_tainted.set_route(bumped).unwrap();
 		settle().await;
+		settle_handover().await;
 		let plain = consumer.request_broadcast("test").await.unwrap();
 		let _plain_track = plain.track("video").unwrap().subscribe(None);
 		settle().await;
@@ -6851,6 +6968,7 @@ mod tests {
 				.create_broadcast("test", forwarder_route(hops(second), 1))
 				.unwrap();
 			settle().await;
+			settle_handover().await;
 			origin.consume().get_broadcast("test").unwrap().route().hops
 		}
 

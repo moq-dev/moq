@@ -858,9 +858,11 @@ Cheaper advertisements from anything else carry no such hazard and SHOULD be ado
 
 This ordering is only shared between two relays while the costs behind it are.
 A relay reports its own Cold Route Cost, and a report still crossing the mesh can be lower than the value its sender would report now, so while costs are rising three or more relays can each rank a stale neighbour below themselves and all re-parent at once, leaving the broadcast with no source until the real advertisements arrive.
-A relay SHOULD therefore delay re-parenting onto another relay while it is serving the broadcast, re-evaluating when the delay expires rather than acting on the decision that started it, so the advertisements the decision rests on are refreshed before it takes effect.
+A relay SHOULD therefore delay re-parenting onto a route learned from a peer, re-evaluating when the delay expires rather than acting on the decision that started it, so the advertisements the decision rests on are refreshed before it takes effect.
 The delay MUST exceed the time an advertisement takes to cross the mesh, and SHOULD carry a spread that is stable per relay and broadcast, so that a group of relays reconsidering the same broadcast does not do so on a single instant.
-It applies only to re-parenting onto a path of two or more entries while serving: a relay with no subscribers is pulling nothing and cannot be part of such a ring, a path of one entry is the original publisher, which never re-parents onto its own broadcast, and leaving a route that is draining or has disappeared MUST NOT be delayed, since a relay whose serving path costs the saturation ceiling advertises the ceiling and so cannot be one end of such a ring anyway.
+Having no subscribers does not exempt a relay: the choice it records is the one it will pull down when a subscriber does arrive, so an unserved relay is a ring that starts later rather than one that cannot form.
+Neither does a short path, since a peer that does not carry Hop IDs is indistinguishable from the original publisher however deep the chain behind it is.
+Three cases are exempt, all of them repairs or non-edges: a fresh session from the peer already being pulled from, which is the same dependency rather than a new one; a route that has disappeared, since waiting strands the relay on nothing; and a route that is draining, since a relay whose serving path costs the saturation ceiling advertises the ceiling and a subscriber with any alternative should leave while the handover window is open.
 
 
 ## ANNOUNCE_END {#announce-end}
