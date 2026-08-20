@@ -53,13 +53,22 @@ fail() {
     FAILED=1
 }
 
+# A CI runner has no global git identity, and both a commit and an annotated tag
+# refuse to be written without one, so give each scratch repo its own.
+identify() {
+    git -C "$1" config user.email test@example.com
+    git -C "$1" config user.name "publish-wrapper test"
+}
+
 MIRROR="$WORK/mirror.git"
 git init --quiet --bare --initial-branch=main "$MIRROR"
+identify "$MIRROR"
 
 # A mirror has to start somewhere: one empty commit so `git clone` has a HEAD.
 SEED="$WORK/seed"
 git init --quiet --initial-branch=main "$SEED"
-git -C "$SEED" -c user.email=t@example.com -c user.name=t commit --quiet --allow-empty -m "seed"
+identify "$SEED"
+git -C "$SEED" commit --quiet --allow-empty -m "seed"
 git -C "$SEED" push --quiet "$MIRROR" HEAD:refs/heads/main
 
 LINE=$(tr -d '[:space:]' <"$GO_DIR/wrapper/VERSION")
@@ -143,7 +152,7 @@ echo "publish-wrapper test: leaves a HEAD it did not write alone"
 git -C "$MIRROR" tag --delete "v${LINE}.0" >/dev/null
 git -C "$SEED" fetch --quiet "$MIRROR" main
 git -C "$SEED" checkout --quiet FETCH_HEAD
-git -C "$SEED" -c user.email=t@example.com -c user.name=t commit --quiet --allow-empty -m "a human was here"
+git -C "$SEED" commit --quiet --allow-empty -m "a human was here"
 git -C "$SEED" push --quiet --force "$MIRROR" HEAD:refs/heads/main
 publish >"$WORK/run5.log" 2>&1 || {
     cat "$WORK/run5.log" >&2

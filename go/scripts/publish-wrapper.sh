@@ -17,8 +17,10 @@ set -euo pipefail
 # after a real diff is confirmed, so no-ops never consume a patch number.
 #
 # One exception, since "identical tree" and "already released" are not the same
-# thing: a mirror HEAD carrying no tag on this line is a half-finished release,
-# and it gets tagged rather than skipped. See the recovery below.
+# thing: a mirror HEAD that is one of our own release commits but carries no tag
+# lost its tag on the way out, and gets the version its commit subject names
+# rather than being skipped. Anything else untagged is left alone. See the
+# recovery below.
 #
 # Required environment:
 #   GO_MIRROR_TOKEN  - PAT or GitHub App token with contents:write on $MIRROR_REPO
