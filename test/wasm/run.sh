@@ -100,12 +100,12 @@ echo "building @moq/wasm..."
 echo "building moq-relay ($PROFILE)..."
 flag=()
 [[ "$PROFILE" == "debug" ]] || flag=(--profile "$PROFILE")
-(cd "$WORKSPACE" && cargo build ${flag[@]+"${flag[@]}"} -p moq-relay)
+(cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-relay)
 TARGET_BASE="${CARGO_TARGET_DIR:-$WORKSPACE/target}"
 [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
 
 cd "$WASM_DIR"
-bun install
+bun install --frozen-lockfile
 # Playwright ships its own Chromium; PLAYWRIGHT_BROWSERS_PATH means CI installed
 # it already, in which case this is a no-op anyway.
 bunx playwright install chromium

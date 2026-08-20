@@ -122,14 +122,14 @@ build_target() {
     if is_android "$target"; then
         # Android targets use cargo-ndk
         cargo ndk --target "$target" --platform 24 -- \
-            build --release --package moq-ffi --manifest-path "$WORKSPACE_DIR/Cargo.toml"
+            build --locked --release --package moq-ffi --manifest-path "$WORKSPACE_DIR/Cargo.toml"
     else
         # Set up cross-compilation for Linux ARM64
         if [[ "$target" == "aarch64-unknown-linux-gnu" ]]; then
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
         fi
 
-        cargo build --release --package moq-ffi --target "$target" --manifest-path "$WORKSPACE_DIR/Cargo.toml"
+        cargo build --locked --release --package moq-ffi --target "$target" --manifest-path "$WORKSPACE_DIR/Cargo.toml"
     fi
 }
 
@@ -156,13 +156,13 @@ generate_bindings() {
 
     for lang in kotlin swift python; do
         echo "  Generating $lang bindings..."
-        cargo run --release --package moq-ffi --bin uniffi-bindgen --manifest-path "$WORKSPACE_DIR/Cargo.toml" -- \
+        cargo run --locked --release --package moq-ffi --bin uniffi-bindgen --manifest-path "$WORKSPACE_DIR/Cargo.toml" -- \
             generate --library "$lib_path" \
             --language "$lang" --out-dir "$OUTPUT_DIR/bindings/$lang"
     done
 
     # Go uses a separate, third-party bindgen (NordSecurity/uniffi-bindgen-go).
-    # Install with: cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.7.1+v0.31.0
+    # Install with: cargo install --locked uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.7.1+v0.31.0
     if command -v uniffi-bindgen-go >/dev/null 2>&1; then
         echo "  Generating go bindings..."
         uniffi-bindgen-go --library "$lib_path" --out-dir "$OUTPUT_DIR/bindings/go"
