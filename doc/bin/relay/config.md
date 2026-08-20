@@ -86,6 +86,13 @@ sizes its thread pool to the machine. Set `TOKIO_WORKER_THREADS` in the
 environment to bound it, so the workers are not competing with a full second
 pool for the same cores.
 
+Load is not perfectly even across workers. A connection is assigned to a worker
+by the kernel's hash of its first packet and stays there for life, so worker
+load carries the binomial spread of that assignment: with ~100 connections on 4
+workers, expect the busiest to carry 1.1-1.6x the idlest. Size `workers`
+expecting somewhat less than one full core of capacity per worker; the spread
+narrows as connection counts grow.
+
 ### \[listen]
 
 QUIC/WebTransport server settings. Optionally add plaintext qmux stream

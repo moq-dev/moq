@@ -26,10 +26,12 @@ pub struct RuntimeConfig {
 
 	/// Pin each worker to a CPU core, defaulting to on.
 	///
-	/// Pinning is the point of the mode: it keeps a connection's caches warm on
-	/// one core and stops the scheduler migrating a busy worker. Turn it off to
-	/// measure what pinning alone is worth, or when sharing the machine with
-	/// something that manages CPU placement itself.
+	/// The mode's measured win comes from each worker owning a socket and a
+	/// runtime, not from pinning: on a single-socket machine, pinned and unpinned
+	/// benchmark inside run-to-run noise of each other. Pinning stops the
+	/// scheduler migrating a busy worker, which should matter on a multi-socket
+	/// or NUMA machine, and costs nothing elsewhere. Turn it off when sharing
+	/// the machine with something that manages CPU placement itself.
 	#[arg(long = "runtime-pin", env = "MOQ_RUNTIME_PIN")]
 	pub pin: Option<bool>,
 }

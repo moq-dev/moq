@@ -47,10 +47,13 @@ pub struct Config {
 
 	/// Pin each worker to a CPU core.
 	///
-	/// Pinning is most of the point: it keeps a connection's caches warm on one
-	/// core and stops the scheduler migrating a busy worker. Turn it off to
-	/// measure what pinning alone is worth, or when sharing the machine with
-	/// something that manages CPU placement itself.
+	/// The mode's measured win comes from each worker owning a socket and a
+	/// runtime, not from pinning: on a single-socket machine, pinned and unpinned
+	/// benchmark inside run-to-run noise of each other. Pinning stops the
+	/// scheduler migrating a busy worker, which should matter on a multi-socket
+	/// or NUMA machine, and costs nothing elsewhere, so it defaults on. Turn it
+	/// off when sharing the machine with something that manages CPU placement
+	/// itself.
 	pub pin: bool,
 }
 
