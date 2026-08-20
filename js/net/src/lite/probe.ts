@@ -20,6 +20,13 @@ export interface ProbeInit {
 	rtt?: number;
 }
 
+/**
+ * A PROBE message: the publisher's current view of the connection.
+ *
+ * Both metrics are independently optional and travel as 0 for unknown, so a
+ * transport exposing only one still has something to report. A measured 0 is
+ * rounded up to 1, since the wire cannot tell it from unknown.
+ */
 export class Probe {
 	/** Estimated send bitrate in bits per second, or undefined if unknown. */
 	bitrate?: number;

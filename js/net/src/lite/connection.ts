@@ -18,7 +18,7 @@ import { DataType, StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { Track as TrackMessage } from "./track.ts";
-import { hasDatagrams, hasSetupStream, type Version, versionName } from "./version.ts";
+import { hasDatagrams, hasProbeRtt, hasSetupStream, type Version, versionName } from "./version.ts";
 
 /**
  * Constructor options for {@link Connection}.
@@ -213,7 +213,8 @@ export class Connection implements Established {
 		const writer = await Writer.open(this.#quic);
 		try {
 			await writer.u53(DataType.Setup);
-			await new Setup({ probe: probeLevel(this.#quic), origin: this.origin }).encode(writer, this.#version);
+			const probe = await probeLevel(this.#quic, this.#version);
+			await new Setup({ probe, origin: this.origin }).encode(writer, this.#version);
 			writer.close();
 		} catch (err: unknown) {
 			writer.reset(err);
@@ -309,12 +310,32 @@ export class Connection implements Established {
 /**
  * The probe level to advertise in SETUP, from what the transport can measure.
  *
- * `Report` claims we can measure and periodically report. The qmux/WebSocket
- * fallback implements no `getStats()`, so a publisher there has nothing to send;
- * advertising `Report` and then resetting the stream the subscriber opens is not a
- * conformant state, and the subscriber's own gate skips a stream it can't use.
+ * `Report` claims we can measure and periodically report, so it is only truthful
+ * when a metric this version can carry actually exists. The qmux/WebSocket fallback
+ * implements no `getStats()` at all, and even a transport that has one may report
+ * neither figure. Advertising `Report` and then holding the subscriber's PROBE
+ * stream open with nothing to send is the state this avoids; the subscriber's own
+ * gate then skips a stream it could not use.
+ *
+ * Mirrors `ProbeLevel::detect` in `moq-net`, including its limitation: a metric
+ * that only appears after SETUP reads as unsupported here.
  */
-function probeLevel(quic: WebTransport): ProbeLevel {
-	const getStats = (quic as unknown as { getStats?: unknown }).getStats;
-	return typeof getStats === "function" ? ProbeLevel.Report : ProbeLevel.None;
+async function probeLevel(quic: WebTransport, version: Version): Promise<ProbeLevel> {
+	const getStats = (
+		quic as unknown as {
+			getStats?: () => Promise<{ estimatedSendRate: number | null; smoothedRtt?: number | null }>;
+		}
+	).getStats;
+	if (typeof getStats !== "function") return ProbeLevel.None;
+
+	// A transport that can't answer tells us nothing, which is itself an answer.
+	let stats: { estimatedSendRate: number | null; smoothedRtt?: number | null };
+	try {
+		stats = await getStats.call(quic);
+	} catch {
+		return ProbeLevel.None;
+	}
+
+	const rtt = hasProbeRtt(version) ? stats.smoothedRtt : undefined;
+	return stats.estimatedSendRate != null || rtt != null ? ProbeLevel.Report : ProbeLevel.None;
 }

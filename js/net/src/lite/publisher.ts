@@ -699,9 +699,13 @@ export class Publisher {
 				// report. Anything this version can't carry is dropped here rather
 				// than by the encoder, so it reads as unknown to every check below.
 				const stats = await quic.getStats();
+				// `smoothedRtt` is a DOMHighResTimeStamp, i.e. a double, but the wire
+				// carries whole milliseconds and the varint encoder throws on a
+				// fractional value. Round before it ever reaches `Probe`.
+				const rtt = stats.smoothedRtt != null ? Math.round(stats.smoothedRtt) : undefined;
 				const report = new Probe({
 					bitrate: stats.estimatedSendRate ?? undefined,
-					rtt: hasProbeRtt(this.version) ? (stats.smoothedRtt ?? undefined) : undefined,
+					rtt: hasProbeRtt(this.version) ? rtt : undefined,
 				});
 
 				// Nothing left to report. Say so once if it retracts a value the peer

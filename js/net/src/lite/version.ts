@@ -12,8 +12,12 @@ export const Version = {
 
 export type Version = (typeof Version)[keyof typeof Version];
 
-/// Whether the PROBE message carries the RTT field. Added in lite-04; lite-03 carries the
-/// bitrate alone, so a report with only an RTT to give says nothing there and must not be sent.
+/**
+ * Whether the PROBE message carries the RTT field.
+ *
+ * Added in lite-04. Lite-03 carries the bitrate alone, so a report with only an RTT to
+ * give says nothing there and must not be sent.
+ */
 export function hasProbeRtt(version: Version): boolean {
 	// Explicitly list older versions so future versions default to carrying RTT.
 	switch (version) {
