@@ -2386,7 +2386,14 @@ mod tests {
 		let broadcast = consumer.get_broadcast("room/host").unwrap();
 		let routes = broadcast.routes();
 		assert_eq!(routes.len(), 1, "the update replaced the route, it did not add one");
-		assert_eq!(routes[0].cost, 1);
+		assert_eq!(
+			routes[0].cost,
+			crate::broadcast::Cost {
+				warm: 1,
+				..crate::broadcast::Cost::UNKNOWN
+			},
+			"the repriced warm cost arrives; the Cluster extension has nowhere to carry a cold cost, so it stays unknown rather than reading as the publisher's own zero"
+		);
 
 		// One advertisement, so one unannounce detaches it.
 		subscriber.stop_announce(path, Detach::Graceful).unwrap();
