@@ -81,10 +81,11 @@ for the lowest possible latency and no codec delay.
 whatever rate you ask for. Alongside the two codecs this crate encodes, it reads
 AAC-LC, which is what a broadcast that arrived through a gateway (RTMP, SRT, HLS,
 gstreamer) carries. That is decode only: there is no Rust AAC encoder, so publish
-Opus. A rendition whose config leads with HE-AAC (`mp4a.40.5` / `.29`) is
-rejected rather than half-decoded; one that leads with AAC-LC plays as its LC
-core even if SBR is signaled later. The `aac` feature (on by default) drops the
-decoder for a publish-only build. `playback::Engine` owns the output device, and each
+Opus. HE-AAC is rejected rather than half-decoded, whether its config says so up
+front (`mp4a.40.5` / `.29`) or hides the SBR in a sync extension after an AAC-LC
+header; only a stream that signals SBR in band alone slips through, and plays as
+its LC core. The `aac` feature (on by default) drops the decoder for a
+publish-only build. `playback::Engine` owns the output device, and each
 `playback::Sink` is one stream mixed into it:
 
 ```rust
