@@ -809,7 +809,11 @@ async fn export_pcr_backfills_a_coarse_cadence() {
 	}
 
 	// 9 inter-frame spans of 400 ms, 16 slots each: every one backfilled.
-	assert!(pcrs.len() > 100, "expected a dense backfilled clock, got {}", pcrs.len());
+	assert!(
+		pcrs.len() > 100,
+		"expected a dense backfilled clock, got {}",
+		pcrs.len()
+	);
 	for (i, w) in pcrs.windows(2).enumerate() {
 		assert_eq!(w[1] - w[0], 2250, "PCR interval off the grid at {i}: {w:?}");
 	}
