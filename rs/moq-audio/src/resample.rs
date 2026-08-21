@@ -76,6 +76,15 @@ impl Resampler {
 		})
 	}
 
+	/// Output frames dropped so far as the filter's startup silence.
+	///
+	/// The output runs that much shorter than the input it was built from, so a
+	/// caller stamping its output has to reach back over this as well as over what
+	/// is still buffered.
+	pub fn skipped(&self) -> usize {
+		self.delay - self.skip
+	}
+
 	/// Input frames buffered from earlier calls, waiting for enough to fill a chunk.
 	///
 	/// The next output starts with these, so a caller stamping its output has to
@@ -110,15 +119,25 @@ impl Resampler {
 		// `delay` frames earlier and it still holds that much real audio no amount of
 		// input has pushed out. Ask for that much beyond what the pending input
 		// earns, feeding silence until it arrives, or a track converts its own
-		// ending into frames nobody reads. This is the same amount `process` dropped
-		// off the front, so the stream still runs as long as its source did.
-		let wanted = ((pending as f64 * self.ratio).round() as usize + self.delay) * self.channels;
+		// ending into frames nobody reads.
+		//
+		// Only as much as `process` actually dropped off the front, though. That is
+		// the whole delay for a stream long enough to have emitted anything, and
+		// nothing at all for one that ended before it filled a chunk, where the skip
+		// still lies ahead and comes out of this call's own output.
+		let repaid = self.delay - self.skip;
+		let wanted = ((pending as f64 * self.ratio).round() as usize + repaid) * self.channels;
 
 		let mut out = Vec::new();
 		while out.len() < wanted {
+			// An empty result does not mean the filter is done: with a chunk smaller
+			// than the delay, a whole chunk's output can disappear into the skip while
+			// the audio behind it is still coming. Stop only when a chunk moves
+			// neither the output nor the skip, which cannot repeat.
+			let skip_before = self.skip;
 			self.pending.resize(self.chunk_frames * self.channels, 0.0);
 			let produced = self.process(&[])?;
-			if produced.is_empty() {
+			if produced.is_empty() && self.skip == skip_before {
 				break;
 			}
 			out.extend_from_slice(&produced);
@@ -273,6 +292,42 @@ mod tests {
 		assert!(peak(&tail) > 0.5, "the tail lost the sample: peak {}", peak(&tail));
 	}
 
+	/// A stream that ends before it fills a chunk never emitted anything, so the
+	/// filter's startup silence is still ahead of it and comes out of the flush's
+	/// own output. Repaying a skip that has not happened yet hands back a stream
+	/// longer than its source.
+	#[test]
+	fn flush_sizes_a_stream_shorter_than_a_chunk() {
+		let mut r = Resampler::new(44_100, 48_000, 1, 882).unwrap();
+
+		let body = r.process(&vec![0.25f32; 441]).unwrap();
+		let tail = r.flush().unwrap();
+
+		// 441 frames at 44.1 kHz is 480 at 48 kHz, and that is all it can be.
+		let total = body.len() + tail.len();
+		assert!((475..=485).contains(&total), "unexpected total: {total}");
+	}
+
+	/// `chunk_frames` is the caller's to choose, and a small one can be shorter
+	/// than the filter's delay. Then a whole chunk's output disappears into the
+	/// startup skip, which used to read as "the filter is done" and drop the
+	/// entire stream.
+	#[test]
+	fn flush_survives_a_chunk_smaller_than_the_delay() {
+		let mut r = Resampler::new(44_100, 48_000, 1, 32).unwrap();
+
+		let body = r.process(&vec![0.5f32; 20]).unwrap();
+		let tail = r.flush().unwrap();
+
+		let total = body.len() + tail.len();
+		assert!((18..=26).contains(&total), "unexpected total: {total}");
+		assert!(
+			tail.iter().any(|s| s.abs() > 0.25),
+			"the stream came back silent: peak {}",
+			tail.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+		);
+	}
+
 	#[test]
 	fn remix_mono_to_stereo_duplicates_samples() {
 		assert_eq!(remix(&[1.0, 2.0], 1, 2).unwrap(), [1.0, 1.0, 2.0, 2.0]);
@@ -283,3 +338,4 @@ mod tests {
 		assert_eq!(remix(&[1.0, 3.0, 2.0, 4.0], 2, 1).unwrap(), [2.0, 3.0]);
 	}
 }
+
