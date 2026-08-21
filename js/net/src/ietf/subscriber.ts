@@ -441,21 +441,33 @@ export class Subscriber {
 		}
 
 		try {
+			// Which terminal fired decides whether we owe the publisher a cancellation, so
+			// tag them rather than racing bare promises.
+			const publisherEnded = Symbol("publisher");
+			const localEnded = Symbol("local");
+			const idle = Symbol("idle");
+
 			// Terminal conditions settle at most once (stream close = PublishDone, track close =
 			// local unsubscribe); race them once so the demand loop doesn't re-subscribe each pass.
-			const done = Promise.race([stream.reader.closed, producer.closed]);
+			const done = Promise.race([
+				stream.reader.closed.then(() => publisherEnded),
+				producer.closed.then(() => localEnded),
+			]);
 
 			// Serve until a terminal condition fires or the last local subscriber leaves. The unused
 			// wake is level-triggered: re-check demand so a subscriber that returns before we tear
 			// down resumes on the same stream.
-			const idle = Symbol("idle");
+			let terminal = localEnded;
 			for (;;) {
 				const reason = await Promise.race([done, producer.unused().then(() => idle)]);
 				if (reason === idle && producer.closed.peek() === undefined && producer.used.peek()) continue;
+				terminal = reason;
 				break;
 			}
 
-			await this.#cancelSubscribe(stream, requestId);
+			// The publisher already ended the request, so there is nothing to cancel. Sending
+			// UNSUBSCRIBE here would name a request it has already torn down.
+			if (terminal !== publisherEnded) await this.#cancelSubscribe(stream, requestId);
 
 			producer.close();
 			stream.close();

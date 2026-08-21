@@ -1973,7 +1973,7 @@ mod tests {
 	/// until STOP_SENDING arrives on the direction it writes (sections 3.3.3 and 5.1.1),
 	/// so a subscriber that only finishes leaves it feeding an alias forever. That is what
 	/// turns a routine unsubscribe into an endless "unknown track alias" stream.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn cancelling_a_subscription_stops_the_publisher() {
 		for version in [Version::Draft16, Version::Draft19] {
 			let log = cancel_a_subscription(version).await;
@@ -1988,7 +1988,7 @@ mod tests {
 	/// Draft-14 through 16 have an UNSUBSCRIBE message, and draft-16 section 5.1.1 makes it
 	/// the thing that lets the publisher destroy the subscription. Resetting the stream
 	/// without it leaves a peer that predates draft-17 serving the track forever.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_legacy_cancel_sends_unsubscribe() {
 		let log = cancel_a_subscription(Version::Draft16).await;
 		assert!(
@@ -2016,7 +2016,7 @@ mod tests {
 	/// the new subscription. Those versions carry requests over the control stream adapter,
 	/// whose virtual streams drop silently, so UNSUBSCRIBE is the only way the publisher
 	/// ever learns to stop serving it.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_legacy_shared_alias_is_unsubscribed() {
 		let log = cancel_a_subscription_inner(Version::Draft16, true).await;
 
