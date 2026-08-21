@@ -9,7 +9,7 @@ import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
-import { TrackAliases } from "./aliases.ts";
+import { RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
 import { toWire } from "./priority.ts";
@@ -421,7 +421,7 @@ export class Subscriber {
 			// setup may resolve late, or reject (e.g. SUBSCRIBE error) after the
 			// stream is already open.
 			const cleanup = () => {
-				if (state.registeredAlias !== undefined) this.#aliases.delete(state.registeredAlias, producer);
+				if (state.registeredAlias !== undefined) this.#aliases.retire(state.registeredAlias, producer);
 				state.stream?.abort(e);
 			};
 			setup.then(cleanup, cleanup);
@@ -465,7 +465,7 @@ export class Subscriber {
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);
 		} finally {
-			this.#aliases.delete(trackAlias, producer);
+			this.#aliases.retire(trackAlias, producer);
 			this.#timescales.delete(trackAlias);
 		}
 	}
@@ -672,11 +672,18 @@ export class Subscriber {
 	async runPublish(msg: Publish, stream: Stream) {
 		const version = this.#session.version;
 
+		// NOT_SUPPORTED, from the PUBLISH error codes in draft-19 section 10.10. We decline
+		// the method itself rather than this particular track, which is UNINTERESTED (0x4).
+		//
+		// The alias the message carries is deliberately not recorded. Nothing will ever bind
+		// it, and a rejected request has no lifetime of ours to hang the cleanup on.
+		const NOT_SUPPORTED = 0x3;
+
 		if (version === Version.DRAFT_14) {
 			await stream.writer.u53(PublishError.id);
 			const err = new PublishError({
 				requestId: msg.requestId,
-				errorCode: 500,
+				errorCode: NOT_SUPPORTED,
 				reasonPhrase: "publish not supported",
 			});
 			await err.encode(stream.writer, version);
@@ -684,7 +691,7 @@ export class Subscriber {
 			await stream.writer.u53(RequestError.id);
 			const err = new RequestError({
 				requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
-				errorCode: 500,
+				errorCode: NOT_SUPPORTED,
 				reasonPhrase: "publish not supported",
 			});
 			await err.encode(stream.writer, version);
@@ -728,6 +735,12 @@ export class Subscriber {
 			producer.close();
 		} catch (err: unknown) {
 			const e = error(err);
+			// Ours: we cancelled the subscription and the publisher has not stopped yet.
+			// Anything else on this alias is the publisher sending data for a track it never
+			// acknowledged, which is worth seeing.
+			if (e instanceof RetiredTrackAlias) {
+				console.debug(`dropping group for a cancelled subscription: alias=${group.trackAlias}`);
+			}
 			producer.close(e);
 			stream.stop(e);
 		}
