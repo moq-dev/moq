@@ -1055,11 +1055,15 @@ impl<E: catalog::Catalog> Export<E> {
 			})
 			.map(|((pid, _), si)| {
 				si.dirty = false;
-				// This never moves the anchor backwards: `si_due` saturates elapsed
-				// time, so with a non-zero interval it only passes timestamps strictly
-				// above the anchor (a reordered B-frame earns no emission at all), and
-				// with a zero interval every frame emits regardless of the anchor.
-				si.last_emit = Some(frame.timestamp);
+				// The anchor never moves backwards. A non-zero interval cannot regress
+				// it on its own (`si_due` saturates, admitting only timestamps strictly
+				// above it), but a zero-interval entry emits on every frame including
+				// reordered (B-frame) timestamps below the anchor, and a catalog update
+				// can raise the interval later; a regressed anchor would then credit
+				// the reorder span against the floor.
+				if si.last_emit.is_none_or(|last| frame.timestamp > last) {
+					si.last_emit = Some(frame.timestamp);
+				}
 				(*pid, si.active.sections().cloned().collect())
 			})
 			.collect();

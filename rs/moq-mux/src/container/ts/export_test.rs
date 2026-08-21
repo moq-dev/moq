@@ -2624,7 +2624,7 @@ struct SiCadenceRig {
 	producer: Producer<HangContainer>,
 	si_track: moq_net::track::Producer,
 	exporter: Export<tscat::Ext>,
-	_catalog: crate::catalog::Producer<tscat::Ext>,
+	catalog: crate::catalog::Producer<tscat::Ext>,
 }
 
 async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadenceRig {
@@ -2671,7 +2671,7 @@ async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadence
 		producer,
 		si_track,
 		exporter,
-		_catalog: catalog,
+		catalog,
 	}
 }
 
@@ -2805,6 +2805,41 @@ async fn si_reordered_frames_earn_no_emission_credit() {
 		1,
 		"the deferred revision rides the floor"
 	);
+}
+
+/// The emission anchor never moves backwards, even where a zero-interval entry
+/// emits on a reordered (B-frame) timestamp below it: a catalog update can raise
+/// the interval afterwards, and a regressed anchor would then credit the reorder
+/// span against the floor. (Non-zero intervals cannot regress the anchor on their
+/// own, since `si_due` saturates; the zero-to-nonzero transition is the one
+/// reachable path.)
+#[tokio::test(start_paused = true)]
+async fn si_anchor_survives_a_zero_interval_reorder() {
+	let section = |version: u8| make_long_section(0x42, 1, version, 0, 0, &[version; 8]);
+	// Zero interval: the table rides every frame, whatever its timestamp.
+	let mut rig = si_cadence_rig(0x0011, 0x42, Duration::ZERO).await;
+
+	rig.si_track
+		.write_frame(Timestamp::ZERO, Bytes::from(section(0)))
+		.unwrap();
+	assert_eq!(rig.media(1_000, 0x0011).await, 1, "zero interval rides every frame");
+	assert_eq!(rig.media(2_500, 0x0011).await, 1, "the anchor advances to 2.5s");
+	// A reordered frame steps back behind the anchor; zero interval still emits.
+	assert_eq!(rig.media(2_400, 0x0011).await, 1, "and still rides a reordered frame");
+
+	// The catalog raises the interval to 1s. The floor must measure from the 2.5s
+	// anchor, not the reordered 2.4s emission.
+	rig.catalog
+		.lock()
+		.mpegts
+		.si
+		.get_mut(&0x0011)
+		.unwrap()
+		.get_mut(&0x42)
+		.unwrap()
+		.interval = Some(Duration::from_secs(1));
+	assert_eq!(rig.media(3_400, 0x0011).await, 0, "the reorder span is not credited");
+	assert_eq!(rig.media(3_500, 0x0011).await, 1, "due 1s after the true anchor");
 }
 
 /// A publisher revising its snapshot before every frame must not drive the mux at
