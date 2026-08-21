@@ -221,9 +221,17 @@ impl Audio {
 			let frame = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
-				frame = consumer.read() => match frame? {
-					Some(frame) => frame,
-					None => return Ok(()),
+				frame = consumer.read() => match frame {
+					Ok(Some(frame)) => frame,
+					Ok(None) => return Ok(()),
+					// One packet the codec rejected is that packet's problem: the
+					// decoder stays usable, so drop it and keep the subscription rather
+					// than ending the caller's stream over a single bad frame.
+					Err(moq_audio::Error::Decode(err)) => {
+						tracing::warn!(%err, "dropping an audio frame");
+						continue;
+					}
+					Err(err) => return Err(err.into()),
 				},
 			};
 
@@ -380,6 +388,9 @@ pub extern "C" fn moq_publish_audio_raw_finish(producer: u32) -> i32 {
 /// the terminal (`<= 0`) callback, `on_frame` is never called again and
 /// `user_data` is never touched again, so release `user_data` there. The
 /// terminal callback fires even after [`moq_consume_audio_raw_close`].
+///
+/// A packet the codec cannot decode is logged and skipped rather than ending
+/// the subscription, so a single bad frame costs that frame and not the stream.
 ///
 /// # Safety
 /// - `output` must point to a valid [`moq_audio_decoder_output`].

@@ -3,7 +3,8 @@
 //! Counterpart to [`moq-video`](https://crates.io/crates/moq-video) for audio
 //! tracks, and shaped the same way. Sits on top of [`moq_mux`] and [`hang`] and
 //! adds the missing piece for native callers: Rust-native Opus and uncompressed
-//! PCM codecs that turn raw samples into HANG audio tracks and back.
+//! PCM codecs that turn raw samples into HANG audio tracks and back, plus AAC-LC
+//! on the way in, which is what the gateways (RTMP, SRT, HLS, gstreamer) publish.
 //!
 //! - `capture` describes an audio source (`capture::Config`) and grabs buffers
 //!   per platform: a microphone via cpal (CoreAudio / WASAPI / ALSA) everywhere,
@@ -19,7 +20,9 @@
 //!     listening and is released when the last one leaves.
 //!   - [`encode::Producer`] publishes PCM you hand it.
 //! - [`decode`] subscribes to an encoded track and decodes it back to PCM.
-//!   [`decode::Consumer`] is the mirror of [`encode::Producer`].
+//!   [`decode::Consumer`] is the mirror of [`encode::Producer`]. It reads AAC-LC
+//!   too, behind the default-on `aac` feature, since a broadcast that came in
+//!   through a gateway is AAC rather than one of the two codecs we encode.
 //! - `playback` plays decoded PCM out a speaker. `playback::Engine` owns the
 //!   output device and mixes the `playback::Sink`s registered with it, so one
 //!   device serves every track in a call. Requires the `playback` feature, so
@@ -36,6 +39,8 @@
 //! layout lives on the producer / consumer via [`encode::Input`] /
 //! [`decode::Config`], not on each frame, so callers can't drift between calls.
 
+#[cfg(feature = "aac")]
+mod aac;
 mod error;
 mod format;
 mod frame;

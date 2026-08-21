@@ -239,6 +239,26 @@ The first pad of each kind is always `video_0` / `audio_0` regardless of catalog
 | Audio | MP3   | `audio/mpeg` (v1/v2, layer 3) |
 | Audio | Opus  | `audio/x-opus`        |
 
+Each `sink_%u` request pad publishes one track. By default the track is named after its codec
+(`0.avc3`, `0.aac`, and so on) and the catalog advertises that name. To choose the name, set the pad's
+`track` property through `GstChildProxy`:
+
+```bash
+gst-launch-1.0 -v -e \
+  multifilesrc location=bbb.mp4 loop=true ! parsebin name=parse \
+    parse. ! queue ! identity sync=true ! mux.sink_0 \
+    parse. ! queue ! identity sync=true ! mux.sink_1 \
+  moqsink name=mux url=http://localhost:4443 broadcast=bbb.hang \
+    sink_0::track=camera sink_1::track=commentary
+```
+
+`track` is writable in any state until the pad's CAPS event reserves the track, so a pad requested
+while the pipeline runs can still be named before its first buffer. From then on it reads back the
+reserved name, the generated one included, and further writes are ignored with a warning; stopping the
+element (back to `READY`) releases the reservation and makes it writable again. An empty string keeps
+the generated name. A name another pad already holds invalidates only that pad, so the rest of the
+broadcast keeps publishing.
+
 ### moqsrc (subscribe)
 
 Outputs the same caps based on the catalog, compatible with `decodebin3`.

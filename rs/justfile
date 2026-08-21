@@ -28,6 +28,7 @@ default:
 
 # Compile, lint, format-check, doc-check, and verify dependency hygiene.
 check *args:
+    just rs _select-test
     cargo clippy --locked --all-targets {{ args }} -- -D warnings
     cargo fmt --all --check
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps {{ args }}
@@ -98,7 +99,7 @@ _select $FILES:
 
     # A crate has to be rebuilt when anything it depends on changed, so walk the
     # edges backwards until the selection stops growing.
-    awk -v seeds="$seeds" '
+    selected=$(awk -v seeds="$seeds" '
     	BEGIN { split(seeds, s, "\n"); for (i in s) want[s[i]] = 1 }
     	{ pkg[NR] = $1; dep[NR] = $2 }
     	END {
@@ -107,9 +108,97 @@ _select $FILES:
     			for (i = 1; i <= NR; i++)
     				if (want[dep[i]] && !want[pkg[i]]) { want[pkg[i]] = 1; grew = 1 }
     		} while (grew)
-    		for (i = 1; i <= NR; i++) if (want[pkg[i]]) print pkg[i]
+    		# Every wanted crate, not just those that appear as an edge source: a
+    		# crate with no dependencies of its own emits no edge, so keying the
+    		# output on `pkg[i]` would drop it and select nothing for a direct
+    		# change to it. Test the VALUE, not the key -- awk creates a key on
+    		# every `want[dep[i]]` read above, so iterating keys alone would emit
+    		# every crate the workspace mentions. The lookup below drops names that
+    		# are not workspace crates, which is what keeps a seed like the
+    		# non-crate `rs/scripts` from reaching cargo.
+    		for (name in want) if (want[name]) print name
     	}
-    ' <<< "$edges" | sort -u | sed 's/^/--package /' | tr '\n' ' '
+    ' <<< "$edges" | sort -u)
+
+    [[ -n "$selected" ]] || exit 0
+
+    # Emit cargo's own package ids, not bare names. A workspace crate we also
+    # publish collides with its crates.io copy as soon as any dependency pulls
+    # that copy in (the web-transport-* crates depend on a published `kio`), and
+    # `--package kio` is then ambiguous: cargo refuses during package selection,
+    # before compiling anything, so the whole gate fails. Ids from `cargo
+    # metadata` carry the source, so they are unambiguous by construction.
+    jq -r --arg selected "$selected" '
+    	($selected | split("\n")) as $want
+    	| .packages[]
+    	| select(.name as $name | $want | index($name) != null)
+    	| "--package \(.id)"
+    ' <<< "$metadata" | sort -u | tr '\n' ' '
+
+# Bare crate names for the `--package <id>` flags `_select` emits, for log lines
+# and for the wasm gate's alternation below. Matching names rather than the flag
+# spelling keeps those call sites working whatever spec form `_select` uses; the
+# previous alternation matched `--package <name>` literally and silently stopped
+# firing the moment the spec form changed. Ids are `path+file://<dir>#<version>`
+# and `_select` has already verified every crate directory matches its crate
+# name, so the last path segment is the name.
+
+# True when a selection includes a crate the wasm32 pass covers. One predicate
+# rather than the same alternation in each gate, so the test below exercises what
+# the gates actually run instead of a copy of it.
+[private]
+_wants-wasm $PACKAGES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    grep -qwE '(moq-wasm|moq-mux|moq-ffi)' <<< "$(just rs _names "$PACKAGES")"
+
+# Print the crate names behind a list of `--package` flags.
+[private]
+_names $PACKAGES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tr ' ' '\n' <<< "$PACKAGES" | sed -n 's|.*/\([^/#]*\)#.*|\1|p' | sort -u | tr '\n' ' '
+
+# Guards the two things about selection that fail SILENTLY rather than loudly:
+# a `--package` spec cargo cannot resolve takes the gate down before it compiles
+# anything, and a wasm gate that stops matching skips the only pass that ever
+# looks at moq-wasm's code (its crate root is `#![cfg(target_arch = "wasm32")]`,
+# so the host pass sees an empty crate and reports success). Both have happened.
+
+# Check that selection emits resolvable specs and still drives the wasm gate.
+[private]
+_select-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    fail() { echo "rs: _select-test: $1" >&2; exit 1; }
+
+    # `kio` is published and pulled from crates.io by the web-transport-* crates,
+    # so the workspace copy and the registry copy share a name: a bare name is
+    # ambiguous and cargo refuses. Every emitted spec must name its source, and
+    # cargo must accept it.
+    packages=$(just rs _select "rs/kio/src/waiter.rs")
+    for spec in $(sed 's/--package //g' <<< "$packages"); do
+    	[[ "$spec" == *"file://"* ]] || fail "expected a source-qualified id, got: $spec"
+    	cargo pkgid --offline "$spec" > /dev/null 2>&1 || fail "cargo cannot resolve: $spec"
+    done
+
+    # The wasm gate keys on names, so it survives whatever spec form the ids use.
+    just rs _wants-wasm "$packages" \
+    	|| fail "a kio diff must still drive the wasm gate: $(just rs _names "$packages")"
+
+    # ...and it must still be able to say no, or it is not a gate.
+    relay=$(just rs _select "rs/moq-relay/src/web.rs")
+    if just rs _wants-wasm "$relay"; then
+    	fail "a moq-relay diff must not drive it: $(just rs _names "$relay")"
+    fi
+
+    # A non-crate directory under rs/ seeds a name that is not a package. It must
+    # select nothing rather than reach cargo as a bogus spec.
+    [[ -z "$(just rs _select "rs/scripts/package-binary.sh")" ]] \
+    	|| fail "a non-crate seed must select nothing"
+
+    echo "rs: selection ok"
 
 # Takes a newline-separated list of changed files; skips when no crate is
 # affected. The `just rs ...` calls below go through the root justfile's
@@ -124,7 +213,7 @@ check-changed $FILES:
     case "$packages" in
     	"")    echo "rs: no crates affected; skipping." ;;
     	ALL)   just rs check --workspace ;;
-    	*)     echo "rs: checking ${packages//--package /}"; just rs check $packages ;;
+    	*)     echo "rs: checking $(just rs _names "$packages")"; just rs check $packages ;;
     esac
 
     # moq-wasm's crate root is entirely `#![cfg(target_arch = "wasm32")]`, so
@@ -135,7 +224,7 @@ check-changed $FILES:
     # nothing in the workspace depends on moq-ffi, so an moq-ffi-only diff selects
     # only itself and would never reach the gate that exists to cover it. moq-mux
     # is selected by its dependents, none of which are moq-wasm.
-    if [[ "$packages" == "ALL" ]] || grep -qE -- '--package (moq-wasm|moq-mux|moq-ffi)' <<< "$packages"; then
+    if [[ "$packages" == "ALL" ]] || just rs _wants-wasm "$packages"; then
     	just rs wasm
     fi
 
@@ -147,12 +236,12 @@ fix-changed $FILES:
     case "$packages" in
     	"")    echo "rs: no crates affected; skipping." ;;
     	ALL)   just rs fix --workspace ;;
-    	*)     echo "rs: fixing ${packages//--package /}"; just rs fix $packages ;;
+    	*)     echo "rs: fixing $(just rs _names "$packages")"; just rs fix $packages ;;
     esac
 
     # Mirrors `check-changed`'s gate, alternation included: without this a wasm32
     # lint is never auto-fixed, and `check`'s wasm32 clippy pass fails on it later.
-    if [[ "$packages" == "ALL" ]] || grep -qE -- '--package (moq-wasm|moq-mux|moq-ffi)' <<< "$packages"; then
+    if [[ "$packages" == "ALL" ]] || just rs _wants-wasm "$packages"; then
     	just rs wasm-fix
     fi
 
@@ -306,7 +395,7 @@ test-changed $FILES:
     case "$packages" in
     	"")    echo "rs: no crates affected; skipping tests." ;;
     	ALL)   just rs test --workspace ;;
-    	*)     echo "rs: testing ${packages//--package /}"; just rs test --no-tests=pass $packages ;;
+    	*)     echo "rs: testing $(just rs _names "$packages")"; just rs test --no-tests=pass $packages ;;
     esac
 
 # Compile and run the `/// ```` examples, which nextest skips.

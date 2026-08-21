@@ -27,6 +27,12 @@ pub enum Error {
 	#[error("audio playback: {0}")]
 	Playback(String),
 
+	/// A packet could not be decoded: truncated, corrupt, or using a codec
+	/// feature this build doesn't implement. The stream itself may be fine, so a
+	/// consumer can log this one and read the next packet.
+	#[error("audio decode: {0}")]
+	Decode(String),
+
 	/// The input buffer was not aligned to the codec's frame size.
 	#[error("input buffer length {got} bytes does not match expected {expected}")]
 	Misaligned {

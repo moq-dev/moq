@@ -17,7 +17,10 @@ interface ContainerInfo {
 	description?: string;
 }
 
-function toContainer(track: Msf.Track): ContainerInfo {
+// `packaging` declares how the bytes are framed, not an optional capability, so every value maps to
+// its own container and an unrecognized one drops the rendition. Reading LOC's property block as
+// legacy's VarInt prefix is exactly what a permissive fallback caused.
+function toContainer(track: Msf.Track): ContainerInfo | undefined {
 	let initBytes: Uint8Array | undefined;
 	try {
 		initBytes = track.initData ? base64ToBytes(track.initData) : undefined;
@@ -25,25 +28,30 @@ function toContainer(track: Msf.Track): ContainerInfo {
 		initBytes = undefined;
 	}
 
-	if (track.packaging === "cmaf" && track.initData && initBytes) {
-		return {
-			container: { kind: "cmaf", init: track.initData },
-			// hang's CMAF path reads codec metadata from the init segment, so we
-			// don't need to surface a separate description here.
-			description: undefined,
-		};
-	}
+	const description = initBytes ? bytesToHex(initBytes) : undefined;
 
-	return {
-		container: { kind: "legacy" },
-		description: initBytes ? bytesToHex(initBytes) : undefined,
-	};
+	switch (track.packaging) {
+		case "cmaf":
+			// Unusable without its init segment, so a missing or malformed one drops the rendition rather
+			// than falling back to a different framing. hang's CMAF path reads the codec metadata from
+			// that segment, so there is no separate description to surface.
+			if (!track.initData || !initBytes) return undefined;
+			return { container: { kind: "cmaf", init: track.initData }, description: undefined };
+		case "loc":
+			return { container: { kind: "loc" }, description };
+		case "legacy":
+			return { container: { kind: "legacy" }, description };
+		default:
+			return undefined;
+	}
 }
 
 function toVideoConfig(track: Msf.Track): Catalog.VideoConfig | undefined {
 	if (!track.codec) return undefined;
 
-	const { container, description } = toContainer(track);
+	const info = toContainer(track);
+	if (!info) return undefined;
+	const { container, description } = info;
 	return {
 		codec: track.codec,
 		container,
@@ -66,7 +74,9 @@ function toAudioConfig(track: Msf.Track): Catalog.AudioConfig | undefined {
 		return Number.isFinite(parsed) ? parsed : DEFAULT_NUMBER_OF_CHANNELS;
 	})();
 
-	const { container, description } = toContainer(track);
+	const info = toContainer(track);
+	if (!info) return undefined;
+	const { container, description } = info;
 	return {
 		codec: track.codec,
 		container,

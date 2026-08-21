@@ -1,6 +1,6 @@
 import { expect, setSystemTime, test } from "bun:test";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import { Lagged, MAX_GROUP_FRAMES } from "./group.ts";
+import { Producer as GroupProducer, Lagged, MAX_GROUP_FRAMES } from "./group.ts";
 import { Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
 import { Producer as TrackProducer } from "./track.ts";
@@ -49,6 +49,81 @@ test("consumer dedupes repeat subscriptions onto one upstream request", async ()
 	producer.close();
 	consumer.subscribe("video");
 	expect((await pendingRequest(consumer))?.name).toBe("video");
+});
+
+test("dynamic track sequences continue across producer replacements", async () => {
+	const broadcast = new BroadcastProducer();
+
+	const firstSubscriber = broadcast.subscribe("media");
+	const firstRequest = await broadcast.requested();
+	if (!firstRequest) throw new Error("expected first request");
+	const firstProducer = firstRequest.accept();
+	expect(firstProducer.appendGroup().sequence).toBe(0);
+	expect(firstProducer.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toBe(1);
+	firstProducer.writeGroup(new GroupProducer(8));
+	firstProducer.writeDatagram({ sequence: 12, timestamp: Timestamp.fromMillis(0), payload: new Uint8Array() });
+	firstSubscriber.close();
+	firstProducer.close();
+
+	const secondSubscriber = broadcast.subscribe("media");
+	const secondRequest = await broadcast.requested();
+	if (!secondRequest) throw new Error("expected second request");
+	const secondProducer = secondRequest.accept();
+	expect(secondProducer.appendGroup().sequence).toBe(13);
+
+	const nextGeneration = new BroadcastProducer();
+	const nextSubscriber = nextGeneration.subscribe("media");
+	const nextRequest = await nextGeneration.requested();
+	if (!nextRequest) throw new Error("expected next-generation request");
+	expect(nextRequest.accept().appendGroup().sequence).toBe(0);
+
+	secondSubscriber.close();
+	secondProducer.close();
+	nextSubscriber.close();
+	broadcast.close();
+	nextGeneration.close();
+});
+
+test("concurrent dynamic producers share a sequence namespace", async () => {
+	const broadcast = new BroadcastProducer();
+	const firstSubscriber = broadcast.subscribe("media");
+	const secondSubscriber = broadcast.subscribe("media");
+	const firstRequest = await broadcast.requested();
+	const secondRequest = await broadcast.requested();
+	if (!firstRequest || !secondRequest) throw new Error("expected requests");
+	const firstProducer = firstRequest.accept();
+	const secondProducer = secondRequest.accept();
+
+	expect(firstProducer.appendGroup().sequence).toBe(0);
+	expect(secondProducer.appendGroup().sequence).toBe(1);
+	expect(firstProducer.appendGroup().sequence).toBe(2);
+
+	firstSubscriber.close();
+	secondSubscriber.close();
+	firstProducer.close();
+	secondProducer.close();
+	broadcast.close();
+});
+
+test("closing a broadcast preserves dequeued request sequences", async () => {
+	const broadcast = new BroadcastProducer();
+	const firstSubscriber = broadcast.subscribe("media");
+	const firstRequest = await broadcast.requested();
+	if (!firstRequest) throw new Error("expected first request");
+	const firstProducer = firstRequest.accept();
+	expect(firstProducer.appendGroup().sequence).toBe(0);
+
+	const secondSubscriber = broadcast.subscribe("media");
+	const secondRequest = await broadcast.requested();
+	if (!secondRequest) throw new Error("expected second request");
+	broadcast.close();
+	const secondProducer = secondRequest.accept();
+	expect(secondProducer.appendGroup().sequence).toBe(1);
+
+	firstSubscriber.close();
+	secondSubscriber.close();
+	firstProducer.close();
+	secondProducer.close();
 });
 
 test("a request exposes the aggregate subscription options", async () => {

@@ -53,6 +53,17 @@ pub(crate) fn error(code: i32, context: &str) -> Error {
 	Error::Unsupported(format!("libopus {context} failed (code {code})"))
 }
 
+/// A failed decode call, split by whose fault it is.
+///
+/// Only a rejected packet is the stream's problem and worth skipping; the rest
+/// mean we handed libopus something wrong, which no later packet fixes.
+pub(crate) fn decode_error(code: i32) -> Error {
+	if code == unsafe_libopus::OPUS_INVALID_PACKET {
+		return Error::Decode(format!("libopus rejected the packet (code {code})"));
+	}
+	error(code, "opus_decode_float")
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

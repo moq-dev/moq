@@ -3,7 +3,7 @@
 use bytes::Bytes;
 
 use super::decoder::{Config, Decoder};
-use crate::resample::{Resampler, remix};
+use crate::resample::{Resampler, remix, validate_channels};
 use crate::{Error, Frame};
 
 /// Subscribe to a moq-mux audio track and emit decoded PCM in the layout
@@ -36,7 +36,7 @@ impl Consumer {
 		let decoder = Decoder::new(catalog)?;
 		let sample_rate = config.sample_rate.unwrap_or_else(|| decoder.sample_rate());
 		let channels = config.channels.unwrap_or_else(|| decoder.channel_count());
-		crate::opus::validate_channels(channels)?;
+		validate_channels(channels)?;
 
 		let resampler = if sample_rate == decoder.sample_rate() {
 			None

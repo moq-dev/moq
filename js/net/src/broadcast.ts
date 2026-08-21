@@ -5,7 +5,7 @@
  */
 import { type GetPromise, Once, Signal } from "@moq/signals";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import { hooks } from "./internal.ts";
+import { hooks, type TrackSequence } from "./internal.ts";
 import * as track from "./track.ts";
 
 /** Reactive backing state shared by broadcast producers and consumers. */
@@ -13,6 +13,7 @@ class BroadcastState {
 	requested = new Signal<track.Request[]>([]);
 	closed = new Once<Error | null>();
 	tracks = new Map<string, track.Producer>();
+	sequences = new Map<string, TrackSequence>();
 	// Live consumer handles sharing this state (see {@link Consumer.clone}). The broadcast
 	// closes once the last one closes, so a shared consumer can be handed to several callers.
 	consumers = 0;
@@ -75,7 +76,7 @@ function subscribe(
 	}
 
 	state.requested.mutate((requested) => {
-		requested.push(hooks.makeRequest(name, producer));
+		requested.push(hooks.makeRequest({ name, producer, sequences: state.sequences }));
 	});
 
 	return subscriber;
@@ -93,7 +94,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string): Promise<tr
 
 	const producer = new track.Producer(name);
 	state.requested.mutate((requested) => {
-		requested.push(hooks.makeRequest(name, producer));
+		requested.push(hooks.makeRequest({ name, producer, sequences: state.sequences }));
 	});
 
 	try {
