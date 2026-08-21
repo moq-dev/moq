@@ -98,7 +98,7 @@ _select $FILES:
 
     # A crate has to be rebuilt when anything it depends on changed, so walk the
     # edges backwards until the selection stops growing.
-    awk -v seeds="$seeds" '
+    selected=$(awk -v seeds="$seeds" '
     	BEGIN { split(seeds, s, "\n"); for (i in s) want[s[i]] = 1 }
     	{ pkg[NR] = $1; dep[NR] = $2 }
     	END {
@@ -109,7 +109,22 @@ _select $FILES:
     		} while (grew)
     		for (i = 1; i <= NR; i++) if (want[pkg[i]]) print pkg[i]
     	}
-    ' <<< "$edges" | sort -u | sed 's/^/--package /' | tr '\n' ' '
+    ' <<< "$edges" | sort -u)
+
+    [[ -n "$selected" ]] || exit 0
+
+    # Emit cargo's own package ids, not bare names. A workspace crate we also
+    # publish collides with its crates.io copy as soon as any dependency pulls
+    # that copy in (the web-transport-* crates depend on a published `kio`), and
+    # `--package kio` is then ambiguous: cargo refuses during package selection,
+    # before compiling anything, so the whole gate fails. Ids from `cargo
+    # metadata` carry the source, so they are unambiguous by construction.
+    jq -r --arg selected "$selected" '
+    	($selected | split("\n")) as $want
+    	| .packages[]
+    	| select(.name as $name | $want | index($name) != null)
+    	| "--package \(.id)"
+    ' <<< "$metadata" | sort -u | tr '\n' ' '
 
 # Takes a newline-separated list of changed files; skips when no crate is
 # affected. The `just rs ...` calls below go through the root justfile's
