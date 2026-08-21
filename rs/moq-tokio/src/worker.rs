@@ -83,6 +83,11 @@ pub struct Workers {
 	workers: Vec<Worker>,
 	certificates: crate::tls::Certificates,
 	addr: SocketAddr,
+
+	/// Holds the listen port against a second group for as long as this one
+	/// lives. `None` for an ephemeral port, or when no lock directory was
+	/// available and the group started on probe-only protection.
+	_lock: Option<crate::steer::Lock>,
 }
 
 impl std::fmt::Debug for Workers {
@@ -125,14 +130,30 @@ impl Workers {
 		// One resolution for the whole group. Each worker resolves its own config
 		// otherwise, so a DNS answer that rotates between queries would hand
 		// members different addresses and fail the bind on whichever member drew a
-		// fresh one. An unset `bind` stays unset: the backends fall back to a
-		// literal default, and `Some` here would flip a stream-only config into
+		// fresh one. An unset `bind` stays unset: the backends fall back to the
+		// default literal, and `Some` here would flip a stream-only config into
 		// opening a QUIC listener.
 		let mut listen = listen;
-		if let Some(bind) = listen.bind.as_deref() {
-			let addr = crate::util::resolve(Some(bind), bind).map_err(|err| Error::WorkerResolve(Arc::new(err)))?;
-			listen.bind = Some(addr.to_string());
-		}
+		let requested = match listen.bind.as_deref() {
+			Some(bind) => {
+				let addr = crate::util::resolve(Some(bind), bind).map_err(|err| Error::WorkerResolve(Arc::new(err)))?;
+				listen.bind = Some(addr.to_string());
+				addr
+			}
+			None => crate::server::DEFAULT_BIND
+				.parse()
+				.expect("the default bind is a literal"),
+		};
+
+		// Two groups constructing concurrently would each pass the bind-time
+		// probe before either holds the port, then interleave into one reuseport
+		// group, so the port is locked before the first member binds and held
+		// until the group is gone. An ephemeral port has nothing to lock: only a
+		// lone worker may use one, and its port cannot be named in advance.
+		let lock = match requested.port() {
+			0 => None,
+			port => crate::steer::Lock::acquire(port).map_err(|_| Error::WorkerOverlap { addr: requested })?,
+		};
 
 		let mut workers = Vec::with_capacity(count as usize);
 		let mut certificates = None;
@@ -180,6 +201,7 @@ impl Workers {
 			// answers for the fingerprint endpoint.
 			certificates: certificates.expect("at least one worker"),
 			addr,
+			_lock: lock,
 		})
 	}
 

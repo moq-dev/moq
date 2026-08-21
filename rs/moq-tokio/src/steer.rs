@@ -48,6 +48,23 @@ use crate::listen::Shard;
 /// kernel identifies a member by its position in the group, which is the order
 /// the sockets bound. An unsharded bind is the plain one.
 pub(crate) fn bind(addr: SocketAddr, shard: Option<Shard>) -> io::Result<UdpSocket> {
+	// The first member probes with a plain bind before the group forms.
+	// `SO_REUSEPORT` groups by address and UID, so a member would otherwise
+	// *join* any group a same-UID process already has on the address, as two
+	// relays overlapping in a rolling restart do: the old group's filter keeps
+	// steering every packet to the old process, the new group reports ready
+	// while serving nothing, and the old process exiting renumbers the
+	// survivors. A plain bind refuses a held port outright, which turns that
+	// overlap back into the `AddrInUse` startup failure it is everywhere else.
+	//
+	// The probe only sees a group that is already bound. Two processes
+	// *constructing* concurrently could each probe while the other holds
+	// nothing yet, which is what [`Lock`] excludes; the probe's job is the
+	// holder the lock cannot see, one that predates it or never took it.
+	if shard.is_some_and(|shard| shard.index() == 0) {
+		drop(crate::bind::udp(crate::bind::Udp::new(addr))?);
+	}
+
 	let options = crate::bind::Udp::new(addr).with_reuse_port(shard.is_some());
 	let socket = crate::bind::udp(options)?;
 
@@ -59,6 +76,197 @@ pub(crate) fn bind(addr: SocketAddr, shard: Option<Shard>) -> io::Result<UdpSock
 	}
 
 	Ok(socket)
+}
+
+/// Holds a listen port for one worker group's lifetime.
+///
+/// The [`bind`] probe refuses an address whose group is already *bound*, but
+/// two processes constructing concurrently could each probe while the other
+/// holds nothing yet, then both join one interleaved reuseport group. This is
+/// the exclusion the probe cannot provide: an `flock`ed file named by the
+/// port, taken before the first member binds and released by the kernel with
+/// the file descriptor, so the lock cannot go stale and dies with its process.
+///
+/// Keyed by the port alone, because every address space that can overlap on a
+/// port must share one lock: `[::]` (dual-stack), `0.0.0.0`, and any specific
+/// address all conflict with each other, and giving each spelling a lock of
+/// its own would let two of them construct concurrently and race the probe.
+/// The price is over-exclusion: two same-UID groups on *distinct* specific
+/// addresses sharing a port, or in distinct network namespaces sharing this
+/// filesystem, are refused although they could coexist. That failure is loud
+/// and names the port; the alternative failure was silent traffic loss.
+///
+/// The file lives in a directory only this UID can write ([`dir`]), which is
+/// what makes the lock immune to other users: a reuseport group only admits
+/// same-UID sockets, so same-UID is exactly the set that must be excluded,
+/// and no other user can touch the lock to deny it. When no such directory
+/// can be had, the lock is skipped with a warning rather than refusing to
+/// start, and the probe carries the remaining risk.
+pub(crate) struct Lock {
+	#[cfg(target_os = "linux")]
+	_file: std::fs::File,
+}
+
+impl Lock {
+	/// Take the lock for `port`. An error always means another group holds it;
+	/// lock infrastructure that is missing or broken (no protected directory,
+	/// an unwritable file) skips the lock with a warning and returns `Ok(None)`,
+	/// preferring to start on probe-only protection over refusing to start.
+	///
+	/// Elsewhere than Linux this is a no-op: the platform refuses the reuseport
+	/// bind itself, so there is nothing to exclude.
+	pub(crate) fn acquire(port: u16) -> io::Result<Option<Self>> {
+		#[cfg(target_os = "linux")]
+		{
+			use std::os::unix::fs::OpenOptionsExt;
+
+			let Some(dir) = dir() else {
+				return Ok(None);
+			};
+
+			// Mode 0600 and O_NOFOLLOW are defense in depth: the directory is
+			// verified accessible to this UID alone, so nobody else can reach the
+			// file (an exclusive flock needs no write access, so a readable lock
+			// file would be deniable), and a symlink here would be our own doing.
+			// O_NONBLOCK keeps a planted FIFO from hanging the open; on a regular
+			// file it does nothing.
+			let path = dir.join(format!("quic-workers-{port}.lock"));
+			let file = match std::fs::OpenOptions::new()
+				.write(true)
+				.create(true)
+				.truncate(false)
+				.mode(0o600)
+				.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+				.open(&path)
+			{
+				Ok(file) => file,
+				Err(err) => {
+					tracing::warn!(?path, %err, "cannot open the lock file; worker overlap detection falls back to the bind probe");
+					return Ok(None);
+				}
+			};
+
+			// `mode` above only applies when the open creates the file, so verify
+			// and normalize what was actually opened, through the descriptor
+			// rather than the path: an inode that predates this directory's
+			// lockdown could still be reachable by another user, and an exclusive
+			// flock on it needs no write access.
+			{
+				use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+				let euid = unsafe { libc::geteuid() };
+				let trusted = file.metadata().is_ok_and(|meta| meta.is_file() && meta.uid() == euid);
+				if !trusted || file.set_permissions(std::fs::Permissions::from_mode(0o600)).is_err() {
+					tracing::warn!(
+						?path,
+						"the lock file is not exclusively ours; worker overlap detection falls back to the bind probe"
+					);
+					return Ok(None);
+				}
+			}
+
+			// SAFETY: `file` is an open descriptor for the duration of the call.
+			let res = unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX | libc::LOCK_NB) };
+			if res == 0 {
+				return Ok(Some(Self { _file: file }));
+			}
+
+			let err = io::Error::last_os_error();
+			if err.kind() == io::ErrorKind::WouldBlock {
+				return Err(err);
+			}
+			tracing::warn!(?path, %err, "cannot lock the lock file; worker overlap detection falls back to the bind probe");
+			Ok(None)
+		}
+		#[cfg(not(target_os = "linux"))]
+		{
+			let _ = port;
+			Ok(None)
+		}
+	}
+}
+
+/// A directory only this UID can write, for the group locks. `None` disables
+/// locking with a warning rather than trusting a directory another user could
+/// tamper with.
+///
+/// `XDG_RUNTIME_DIR` is preferred: per-UID, mode 0700, and living with the
+/// session is exactly the shape the lock wants. But it is an environment
+/// variable, not a guarantee, so its candidate is verified exactly like the
+/// temp-dir fallback rather than trusted, and a bad value falls through to
+/// the fallback instead of costing more protection than no value at all.
+#[cfg(target_os = "linux")]
+fn dir() -> Option<std::path::PathBuf> {
+	if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty())
+		&& let Some(dir) = prepare(std::path::PathBuf::from(runtime).join("moq"))
+	{
+		return Some(dir);
+	}
+
+	let euid = unsafe { libc::geteuid() };
+	prepare(std::env::temp_dir().join(format!("moq-{euid}")))
+}
+
+/// Create `dir` with mode 0700 if missing, then verify it is a directory this
+/// UID alone can reach. `/tmp` is world-writable and `XDG_RUNTIME_DIR` is only
+/// an environment variable, so the name could already be held by another
+/// user's file or symlink, and trusting it would hand them the lock.
+///
+/// The parent is checked first: it must be sticky (an entry in `/tmp` can only
+/// be renamed or unlinked by its owner) or writable by this UID alone, or
+/// another user could rename the verified directory out from under its path
+/// and split two groups onto different lock files. Components above the
+/// parent are the operator's: a runtime directory placed inside another
+/// user's tree is a misconfiguration no check here can launder.
+#[cfg(target_os = "linux")]
+fn prepare(dir: std::path::PathBuf) -> Option<std::path::PathBuf> {
+	use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+	let euid = unsafe { libc::geteuid() };
+	let parent = dir
+		.parent()
+		.and_then(|parent| std::fs::symlink_metadata(parent).ok())
+		.is_some_and(|meta| {
+			let mode = meta.permissions().mode();
+			// A trusted owner first: the parent's owner can rename entries
+			// regardless of the sticky bit, so an arbitrary user's 1777
+			// directory protects nothing while root's /tmp does. Then either
+			// sticky (other writers cannot touch entries they do not own) or
+			// no other writers at all.
+			let owner = meta.uid() == euid || meta.uid() == 0;
+			meta.is_dir() && owner && (mode & 0o1000 != 0 || mode & 0o022 == 0)
+		});
+	if !parent {
+		tracing::warn!(
+			?dir,
+			"the lock directory's parent cannot protect it; worker overlap detection falls back to the bind probe"
+		);
+		return None;
+	}
+
+	let created = std::fs::DirBuilder::new().mode(0o700).create(&dir);
+	if let Err(err) = &created
+		&& err.kind() != io::ErrorKind::AlreadyExists
+	{
+		tracing::warn!(?dir, %err, "cannot create a lock directory; worker overlap detection falls back to the bind probe");
+		return None;
+	}
+
+	// `symlink_metadata` so a symlink is seen as itself and fails `is_dir`,
+	// rather than being followed to wherever it points. No group or world
+	// access at all: an exclusive flock needs no write access, so even a
+	// readable lock file would let another user deny the port.
+	let safe = std::fs::symlink_metadata(&dir)
+		.map(|meta| meta.is_dir() && meta.uid() == euid && meta.permissions().mode() & 0o077 == 0)
+		.unwrap_or(false);
+	if !safe {
+		tracing::warn!(
+			?dir,
+			"lock directory is not exclusively ours; worker overlap detection falls back to the bind probe"
+		);
+		return None;
+	}
+	Some(dir)
 }
 
 /// The first byte of a connection ID issued by `shard`.

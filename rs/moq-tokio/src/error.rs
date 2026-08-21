@@ -122,6 +122,18 @@ pub enum Error {
 		first: std::net::SocketAddr,
 	},
 
+	/// Another worker group already holds this listen port.
+	///
+	/// A second group on an overlapping address would silently join the first's
+	/// `SO_REUSEPORT` group and break its steering, so the port is locked while
+	/// the first is alive, whatever the address: a group on a different address
+	/// sharing the port is refused too.
+	#[error("another QUIC worker group already holds port {}", addr.port())]
+	WorkerOverlap {
+		/// The address this group asked for.
+		addr: std::net::SocketAddr,
+	},
+
 	/// The worker group's listen address did not resolve.
 	///
 	/// Resolved once for the whole group, so a DNS answer that rotates between
