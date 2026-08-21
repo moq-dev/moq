@@ -9,7 +9,7 @@ import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
-import { RetiredTrackAlias, TrackAliases } from "./aliases.ts";
+import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
 import { toWire } from "./priority.ts";
@@ -514,12 +514,15 @@ export class Subscriber {
 
 		const ok = await SubscribeOk.decode(state.stream.reader, version);
 		try {
-			this.#aliases.set(ok.trackAlias, producer);
+			this.#aliases.set(ok.trackAlias, producer, `${broadcast}/${request.name}`);
 			if (ok.timescale !== undefined) {
 				this.#timescales.set(ok.trackAlias, ok.timescale);
 			}
 		} catch (err) {
-			this.#session.close();
+			// Only one alias naming two different tracks is the session's problem. A publisher
+			// sharing an alias between subscriptions to one track is allowed to do that, and
+			// disconnecting over it would drop every other broadcast on the session.
+			if (err instanceof DuplicateTrackAlias) this.#session.close();
 			throw err;
 		}
 		state.registeredAlias = ok.trackAlias;

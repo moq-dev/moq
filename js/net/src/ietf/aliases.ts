@@ -34,9 +34,37 @@ export class RetiredTrackAlias extends Error {
 	}
 }
 
+/**
+ * Thrown when a publisher gives one alias to two subscriptions of the same track.
+ *
+ * Draft-19 section 5.1 permits this and expects the subscriber to demux by re-applying
+ * each subscription's filter. Ours are all LargestObject, so they are indistinguishable and
+ * we cannot, which costs the one subscription. It is not a protocol error, so it must not
+ * take the session down with it.
+ * @internal
+ */
+export class SharedTrackAlias extends Error {
+	constructor(alias: bigint) {
+		super(`track alias shared by another subscription: ${alias}`);
+		this.name = "SharedTrackAlias";
+	}
+}
+
+/**
+ * Thrown when a publisher points one alias at two different tracks at once, which
+ * draft-19 section 11.1 makes fatal to the session.
+ * @internal
+ */
+export class DuplicateTrackAlias extends Error {
+	constructor(alias: bigint) {
+		super(`duplicate track alias: ${alias}`);
+		this.name = "DuplicateTrackAlias";
+	}
+}
+
 /** Resolves publisher-chosen track aliases after control/data stream reordering. @internal */
 export class TrackAliases<T> {
-	#active = new Map<bigint, T>();
+	#active = new Map<bigint, { value: T; track: string }>();
 	#pending = new Map<bigint, Set<Resolver<T>>>();
 
 	/** Aliases whose subscription we cancelled, in retirement order so the oldest is forgotten first. */
@@ -50,7 +78,8 @@ export class TrackAliases<T> {
 	 * waiting out the timeout for a binding that is never coming.
 	 */
 	async get(alias: bigint): Promise<T> {
-		if (this.#active.has(alias)) return this.#active.get(alias) as T;
+		const bound = this.#active.get(alias);
+		if (bound !== undefined) return bound.value;
 		if (this.#retiredSet.has(alias)) throw new RetiredTrackAlias(alias);
 
 		const { promise, resolve } = Promise.withResolvers<T>();
@@ -75,19 +104,26 @@ export class TrackAliases<T> {
 		}
 	}
 
-	/** Establishes an alias and releases any data streams waiting for it. */
-	set(alias: bigint, value: T) {
+	/**
+	 * Establishes an alias and releases any data streams waiting for it.
+	 *
+	 * `track` is the full track name the alias was bound to, which is what decides whether a
+	 * repeat is the legal sharing of an alias across subscriptions to one track
+	 * ({@link SharedTrackAlias}) or the collision that must fail the session
+	 * ({@link DuplicateTrackAlias}).
+	 */
+	set(alias: bigint, value: T, track: string) {
 		const active = this.#active.get(alias);
-		if (this.#active.has(alias)) {
-			if (active !== value) throw new Error(`duplicate track alias: ${alias}`);
-			return;
+		if (active !== undefined) {
+			if (active.value === value) return;
+			throw active.track === track ? new SharedTrackAlias(alias) : new DuplicateTrackAlias(alias);
 		}
 
 		// Our subscription is gone, so the publisher is free to point the alias somewhere
 		// new. Reclaiming it also drops the tombstone early.
 		this.#forget(alias);
 
-		this.#active.set(alias, value);
+		this.#active.set(alias, { value, track });
 		const resolvers = this.#pending.get(alias);
 		this.#pending.delete(alias);
 		for (const resolve of resolvers ?? []) resolve(value);
@@ -101,7 +137,7 @@ export class TrackAliases<T> {
 	 * may already have reclaimed it, and that binding outranks a departing owner.
 	 */
 	retire(alias: bigint, value: T) {
-		if (this.#active.get(alias) !== value) return;
+		if (this.#active.get(alias)?.value !== value) return;
 		this.#active.delete(alias);
 
 		if (this.#retiredSet.has(alias)) return;
