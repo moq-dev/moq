@@ -1279,7 +1279,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						// SUBSCRIBE_OK arrived, so the publisher considers this Established and
 						// will keep serving it. Dropping the stream says nothing on the versions
 						// that need UNSUBSCRIBE, so cancel it properly.
-						self.cancel_subscribe(&mut stream, request_id).await;
+						self.cancel_subscribe(stream, request_id).await;
 					}
 					self.remove_subscribe(request_id);
 					let _ = track.abort(err);
@@ -1350,7 +1350,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		self.remove_subscribe(request_id);
 
 		match cancelled {
-			true => self.cancel_subscribe(&mut stream, request_id).await,
+			true => self.cancel_subscribe(stream, request_id).await,
 			// The publisher already ended the request, so a FIN is all we owe it.
 			false => {
 				stream.writer.finish().ok();
@@ -1372,15 +1372,26 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// cancellation (draft-19 section 3.3.2), so section 3.3.3's pair applies, an endpoint
 	/// that has already FINed its sending direction cancels with STOP_SENDING on the
 	/// receiving one.
-	async fn cancel_subscribe(&self, stream: &mut Stream<S, Version>, request_id: RequestId) {
+	async fn cancel_subscribe(&self, stream: Stream<S, Version>, request_id: RequestId) {
+		let Stream { mut writer, mut reader } = stream;
+
 		if self.unsubscribes()
-			&& let Err(err) = self.write_unsubscribe(stream, request_id).await
+			&& let Err(err) = self.write_unsubscribe(&mut writer, request_id).await
 		{
 			tracing::debug!(%err, "failed to write unsubscribe");
 		}
 
-		stream.writer.finish().ok();
-		stream.reader.abort(&Error::Cancel);
+		// STOP_SENDING needs no acknowledgement, so it goes first and the wait below covers
+		// only what we still have to deliver.
+		reader.abort(&Error::Cancel);
+
+		// Finishing alone would leave the writer's Drop free to RESET_STREAM, and a stream
+		// that has sent its FIN is still retransmitting: the reset would discard the
+		// UNSUBSCRIBE before the peer ever read it, which is the whole message. Closing
+		// consumes the writer, removing that fallback, and waits for the acknowledgement.
+		if let Err(err) = writer.close().await {
+			tracing::debug!(%err, "failed to close the subscribe stream");
+		}
 	}
 
 	/// Whether this version cancels a subscription with an UNSUBSCRIBE message.
@@ -1390,9 +1401,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16)
 	}
 
-	async fn write_unsubscribe(&self, stream: &mut Stream<S, Version>, request_id: RequestId) -> Result<(), Error> {
-		stream.writer.encode(&ietf::Unsubscribe::ID).await?;
-		stream.writer.encode(&ietf::Unsubscribe { request_id }).await?;
+	async fn write_unsubscribe(
+		&self,
+		writer: &mut crate::coding::Writer<S::SendStream, Version>,
+		request_id: RequestId,
+	) -> Result<(), Error> {
+		writer.encode(&ietf::Unsubscribe::ID).await?;
+		writer.encode(&ietf::Unsubscribe { request_id }).await?;
 		Ok(())
 	}
 
@@ -2024,6 +2039,21 @@ mod tests {
 			occurrences(&log, &[ietf::Unsubscribe::ID as u8]) > 0,
 			"abandoning a shared alias must still tell the publisher to stop",
 		);
+	}
+
+	/// Writing the UNSUBSCRIBE is not the same as delivering it. A stream that has only been
+	/// finished is still retransmitting, so the writer's Drop reset would discard the message
+	/// before the peer read it. Closing consumes the writer, which is what removes that
+	/// fallback, so a reset here means the cancellation never landed.
+	#[tokio::test(start_paused = true)]
+	async fn cancelling_does_not_reset_away_the_unsubscribe() {
+		for version in [Version::Draft16, Version::Draft19] {
+			let log = cancel_a_subscription(version).await;
+			assert!(
+				log.resets().is_empty(),
+				"{version:?}: the send side must be closed, not reset out from under the cancellation",
+			);
+		}
 	}
 
 	/// When `conflict` is set, an alias-7 binding for the same full track name is seeded
