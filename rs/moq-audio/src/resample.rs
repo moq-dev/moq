@@ -23,6 +23,9 @@ pub struct Resampler {
 	/// Whether any caller input has gone in, since the filter only owes a tail
 	/// once it has actually run.
 	started: bool,
+	/// Leading output frames still to be dropped: the filter opens by emitting its
+	/// own centring delay as silence, which is not audio anyone sent.
+	skip: usize,
 	channels: usize,
 	input_planar: Vec<Vec<f32>>,
 	output_planar: Vec<Vec<f32>>,
@@ -64,6 +67,7 @@ impl Resampler {
 			ratio,
 			delay,
 			started: false,
+			skip: delay,
 			channels: channels as usize,
 			input_planar,
 			output_planar,
@@ -106,7 +110,8 @@ impl Resampler {
 		// `delay` frames earlier and it still holds that much real audio no amount of
 		// input has pushed out. Ask for that much beyond what the pending input
 		// earns, feeding silence until it arrives, or a track converts its own
-		// ending into frames nobody reads.
+		// ending into frames nobody reads. This is the same amount `process` dropped
+		// off the front, so the stream still runs as long as its source did.
 		let wanted = ((pending as f64 * self.ratio).round() as usize + self.delay) * self.channels;
 
 		let mut out = Vec::new();
@@ -163,6 +168,15 @@ impl Resampler {
 			}
 
 			self.pending.drain(..chunk_samples);
+		}
+
+		// Drop the filter's startup silence rather than passing it on as audio. What
+		// it costs is paid back by `flush`, which drains the same amount at the end,
+		// so the output keeps the duration of the input that produced it.
+		if self.skip > 0 {
+			let drop = self.skip.min(out.len() / self.channels) * self.channels;
+			out.drain(..drop);
+			self.skip -= drop / self.channels;
 		}
 
 		Ok(out)

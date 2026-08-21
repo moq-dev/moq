@@ -343,11 +343,11 @@ mod tests {
 			moq_net::Timestamp::from_scale(882, 44_100).unwrap().as_micros()
 		);
 
-		// Together they cover the packet (1024 frames at 44.1 kHz is ~1114 at 48 kHz)
-		// plus the filter's delay, which is the leading silence it emitted at the
-		// start now balanced by the tail it was holding at the end.
+		// Together they cover the packet and no more: 1024 frames at 44.1 kHz is
+		// ~1114 at 48 kHz. The filter's delay does not extend the stream, because
+		// what the drain adds here is what the start dropped off the front.
 		let total = first_frames + tail_frames;
-		assert!((1175..=1190).contains(&total), "unexpected total: {total}");
+		assert!((1105..=1120).contains(&total), "unexpected total: {total}");
 		assert!(consumer.read().await.unwrap().is_none());
 	}
 
