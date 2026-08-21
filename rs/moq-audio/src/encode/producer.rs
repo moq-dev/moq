@@ -216,6 +216,12 @@ impl<E: CatalogExt> Producer<E> {
 
 		self.pending.extend(pcm);
 
+		self.publish_full_frames(epoch_us)
+	}
+
+	/// Encode and publish every full frame in `pending`, keeping any partial
+	/// trailing frame for the next call.
+	fn publish_full_frames(&mut self, epoch_us: u64) -> Result<(), Error> {
 		let frame_samples = self.encoder.frame_size() * self.encoder.codec_channels() as usize;
 		while self.pending.len() >= frame_samples {
 			let chunk: Vec<f32> = self.pending.drain(..frame_samples).collect();
@@ -274,23 +280,17 @@ impl<E: CatalogExt> Producer<E> {
 			self.pending.extend(resampler.flush()?);
 		}
 
+		// The drained tail can be longer than one frame, and the `resize` below
+		// would truncate it rather than encode it.
+		let epoch_us = self.epoch_us.unwrap_or(0);
+		self.publish_full_frames(epoch_us)?;
+
 		let frame_samples = self.encoder.frame_size() * self.encoder.codec_channels() as usize;
-
-		// A loop, not a single frame: the drained tail can be longer than one frame,
-		// and `resize` below would truncate it rather than encode it.
-		while self.pending.len() >= frame_samples {
-			let chunk: Vec<f32> = self.pending.drain(..frame_samples).collect();
-			let packet = self.encoder.encode(&chunk)?;
-			let timestamp = self.timestamp(self.epoch_us.unwrap_or(0))?;
-			self.frames_produced += self.encoder.frame_size() as u64;
-			self.publish(packet, timestamp)?;
-		}
-
 		if !self.pending.is_empty() {
 			self.pending.resize(frame_samples, 0.0);
 			let chunk = std::mem::take(&mut self.pending);
 			let packet = self.encoder.encode(&chunk)?;
-			let timestamp = self.timestamp(self.epoch_us.unwrap_or(0))?;
+			let timestamp = self.timestamp(epoch_us)?;
 			self.publish(packet, timestamp)?;
 		}
 
@@ -325,8 +325,6 @@ mod tests {
 	use super::*;
 	use crate::Format;
 
-	// One 20 ms Opus frame at 48 kHz mono is exactly 960 f32 samples, so each
-	// `write` of this drains precisely one packet (no resampler, no leftover).
 	/// A resampled publisher used to end its track early: `finish` flushed the
 	/// encoder's own buffer but left the resampler holding its last partial chunk,
 	/// plus the audio its filter runs behind on.
@@ -377,6 +375,8 @@ mod tests {
 		assert_eq!(packets, 11);
 	}
 
+	// One 20 ms Opus frame at 48 kHz mono is exactly 960 f32 samples, so each
+	// `write` of this drains precisely one packet (no resampler, no leftover).
 	fn full_frame(timestamp_us: u64) -> Frame {
 		let mut data = Vec::with_capacity(960 * 4);
 		for _ in 0..960 {
