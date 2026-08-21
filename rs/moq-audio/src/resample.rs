@@ -236,9 +236,9 @@ mod tests {
 	}
 
 	/// The filter owes its tail whether or not anything is buffered, so a track
-	/// whose length lands exactly on a chunk boundary has to drain too. At 48 kHz
-	/// that is every fifteenth AAC packet, so it is not a corner a real stream
-	/// avoids.
+	/// whose length lands exactly on a chunk boundary has to drain too. With
+	/// 1024-sample frames at 48 kHz that lands every fifteenth one against the
+	/// 960-frame chunk, so it is not a corner a real stream avoids.
 	#[test]
 	fn flush_drains_on_an_exact_chunk_boundary() {
 		let mut r = Resampler::new(44_100, 48_000, 1, 882).unwrap();

@@ -241,9 +241,9 @@ mod tests {
 	/// A packet whose sample count isn't a multiple of the resampler's chunk leaves
 	/// samples buffered, and the next output starts with those. Stamping that
 	/// output with the packet that completed the chunk puts it up to a chunk late,
-	/// which is a sawtooth in A/V sync rather than a constant offset. AAC reaches
-	/// this on any resampled track: its frames are 1024 samples, and at 44.1 kHz
-	/// the chunk is 882.
+	/// which is a sawtooth in A/V sync rather than a constant offset. Any codec
+	/// whose frame is not a whole number of chunks reaches it: a 1024-sample frame
+	/// at 44.1 kHz never fills the 882-frame chunk evenly.
 	#[tokio::test]
 	async fn resampled_timestamps_follow_the_samples() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -291,8 +291,8 @@ mod tests {
 	}
 
 	/// The resampler only converts whole chunks, so the last partial one has to be
-	/// flushed at end of track or its audio is simply gone. AAC guarantees a
-	/// remainder: 1024-sample frames never fill the 882-frame chunk evenly.
+	/// flushed at end of track or its audio is simply gone. A 1024-sample frame at
+	/// 44.1 kHz guarantees a remainder, never filling the 882-frame chunk evenly.
 	#[tokio::test]
 	async fn resampled_tail_survives_the_end_of_the_track() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
