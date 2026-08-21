@@ -300,7 +300,7 @@ mod tests {
 	fn flush_sizes_a_stream_shorter_than_a_chunk() {
 		let mut r = Resampler::new(44_100, 48_000, 1, 882).unwrap();
 
-		let body = r.process(&vec![0.25f32; 441]).unwrap();
+		let body = r.process(&[0.25f32; 441]).unwrap();
 		let tail = r.flush().unwrap();
 
 		// 441 frames at 44.1 kHz is 480 at 48 kHz, and that is all it can be.
@@ -316,7 +316,7 @@ mod tests {
 	fn flush_survives_a_chunk_smaller_than_the_delay() {
 		let mut r = Resampler::new(44_100, 48_000, 1, 32).unwrap();
 
-		let body = r.process(&vec![0.5f32; 20]).unwrap();
+		let body = r.process(&[0.5f32; 20]).unwrap();
 		let tail = r.flush().unwrap();
 
 		let total = body.len() + tail.len();
@@ -338,4 +338,3 @@ mod tests {
 		assert_eq!(remix(&[1.0, 3.0, 2.0, 4.0], 2, 1).unwrap(), [2.0, 3.0]);
 	}
 }
-
