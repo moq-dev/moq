@@ -78,9 +78,13 @@ impl Resampler {
 	/// chunk of a track is never converted and its audio is simply lost. Pads the
 	/// chunk out with silence and keeps only the output the real input earned, so
 	/// the padding costs a filter tail on the final samples rather than extra
-	/// audio. Returns empty once drained, which is what makes it safe to call on
-	/// every end-of-track poll.
-	pub fn flush(&mut self) -> Result<Vec<f32>, Error> {
+	/// audio.
+	///
+	/// Takes `self` because that padding runs the filter through silence the
+	/// caller never supplied: resampling more afterwards would carry that state
+	/// into it, across a gap nothing reported. Ending the stream is the only thing
+	/// this can be used for, so that is the only thing it can express.
+	pub fn flush(mut self) -> Result<Vec<f32>, Error> {
 		let pending = self.pending_frames();
 		if pending == 0 {
 			return Ok(Vec::new());

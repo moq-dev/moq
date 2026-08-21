@@ -123,9 +123,11 @@ impl Consumer {
 	/// The tail the resampler is still holding when the track ends, once.
 	///
 	/// Without it the last partial chunk is dropped, which is up to a chunk of
-	/// audio missing from the end of every resampled track.
+	/// audio missing from the end of every resampled track. Flushing consumes the
+	/// resampler, which is what makes calling this on every later poll return
+	/// `None` rather than more tails.
 	fn flush(&mut self) -> Result<Option<Frame>, Error> {
-		let (Some(resampler), Some(tail)) = (self.resampler.as_mut(), self.tail) else {
+		let (Some(resampler), Some(tail)) = (self.resampler.take(), self.tail) else {
 			return Ok(None);
 		};
 
