@@ -109,8 +109,9 @@ impl Consumer {
 			// would place the audio late by up to a chunk, sawtoothing A/V sync.
 			Some(r) => {
 				let pending = r.pending_frames();
+				let skipped = r.skipped();
 				let pcm = r.process(&decoded)?;
-				(pcm, rewind(mux_frame.timestamp, pending, rate)?)
+				(pcm, self.starts_at(mux_frame.timestamp, pending, skipped, rate)?)
 			}
 			None => (decoded, mux_frame.timestamp),
 		};
@@ -132,13 +133,33 @@ impl Consumer {
 		};
 
 		let pending = resampler.pending_frames();
+		let skipped = resampler.skipped();
 		let pcm = resampler.flush()?;
 		if pcm.is_empty() {
 			return Ok(None);
 		}
 
-		let timestamp = rewind(tail, pending, self.decoder.sample_rate())?;
+		let timestamp = self.starts_at(tail, pending, skipped, self.decoder.sample_rate())?;
 		Ok(Some(self.frame(pcm, timestamp)?))
+	}
+
+	/// Where the output the resampler is about to hand back actually begins.
+	///
+	/// Two things sit between a packet's timestamp and the audio that comes out of
+	/// it. The resampler is holding `pending` input frames from before this packet,
+	/// which the output starts with. And it has dropped `skipped` output frames of
+	/// its own startup silence, so everything it emits from then on runs that much
+	/// short of the input it was built from. Reach back over both, each in its own
+	/// rate, or the output is stamped after the audio it contains.
+	fn starts_at(
+		&self,
+		timestamp: moq_net::Timestamp,
+		pending: usize,
+		skipped: usize,
+		rate: u32,
+	) -> Result<moq_net::Timestamp, Error> {
+		let timestamp = rewind(timestamp, pending, rate)?;
+		rewind(timestamp, skipped, self.resolved_sample_rate)
 	}
 
 	/// Remix and pack decoded PCM into an output frame.
@@ -282,12 +303,16 @@ mod tests {
 		let first = consumer.read().await.unwrap().expect("decoded frame");
 		assert_eq!(first.timestamp.as_micros(), 0);
 
-		// 882 of the first packet's 1024 samples filled a chunk, so 142 are still
-		// buffered when the second packet arrives. The output that follows starts at
-		// sample 882, not at 1024.
+		// Continuity, not a fixed number: the second frame starts where the first
+		// one's samples end, whatever they came to. Within a few frames rather than
+		// exactly, because the resampler emits whole frames and its count per chunk
+		// wobbles around the nominal ratio; a real hole (the samples it held back, or
+		// the startup silence it dropped) is twenty times this tolerance.
 		let second = consumer.read().await.unwrap().expect("decoded frame");
-		let expected = moq_net::Timestamp::from_scale(882, 44_100).unwrap();
-		assert_eq!(second.timestamp.as_micros(), expected.as_micros());
+		let first_frames = (first.data.len() / size_of::<f32>()) as u128;
+		let ends_at = first_frames * 1_000_000 / 48_000;
+		let gap = second.timestamp.as_micros().abs_diff(ends_at);
+		assert!(gap < 100, "expected the frames to meet, got a {gap} us gap");
 	}
 
 	/// The resampler only converts whole chunks, so the last partial one has to be
@@ -337,11 +362,11 @@ mod tests {
 		// sinc filter still owes: it runs centred, so the end of the track only
 		// emerges once the flush has fed it silence to push it out.
 		assert!((215..=230).contains(&tail_frames), "unexpected tail: {tail_frames}");
-		// It picks up where the first frame left off, not at the packet's start.
-		assert_eq!(
-			tail.timestamp.as_micros(),
-			moq_net::Timestamp::from_scale(882, 44_100).unwrap().as_micros()
-		);
+		// It picks up where the first frame's samples ended, within the same few
+		// frames of whole-frame rounding as above.
+		let ends_at = (first_frames as u128) * 1_000_000 / 48_000;
+		let gap = tail.timestamp.as_micros().abs_diff(ends_at);
+		assert!(gap < 100, "expected the tail to meet the body, got a {gap} us gap");
 
 		// Together they cover the packet and no more: 1024 frames at 44.1 kHz is
 		// ~1114 at 48 kHz. The filter's delay does not extend the stream, because
