@@ -40,6 +40,45 @@ pub(crate) const DEFAULT_LATENCY: Duration = Duration::from_millis(500);
 /// standard for TS-over-SRT and a clean fit under the typical SRT MTU.
 const SRT_PAYLOAD: usize = 7 * 188;
 
+/// Coalesce TS bytes that share one SRT pacing instant.
+#[derive(Default)]
+struct SrtChunker {
+	buffer: bytes::BytesMut,
+	send_at: Option<Instant>,
+}
+
+impl SrtChunker {
+	/// Add one muxer frame, flushing a partial chunk before its pacing instant changes.
+	fn push(&mut self, send_at: Instant, payload: &[u8]) -> Vec<(Instant, bytes::Bytes)> {
+		if payload.is_empty() {
+			return Vec::new();
+		}
+
+		let mut chunks = Vec::new();
+		if self.send_at.is_some_and(|buffered_at| buffered_at != send_at) {
+			chunks.extend(self.flush());
+		}
+
+		self.send_at = Some(send_at);
+		self.buffer.extend_from_slice(payload);
+		while self.buffer.len() >= SRT_PAYLOAD {
+			chunks.push((send_at, self.buffer.split_to(SRT_PAYLOAD).freeze()));
+		}
+
+		if self.buffer.is_empty() {
+			self.send_at = None;
+		}
+		chunks
+	}
+
+	/// Flush the final partial payload, if any.
+	fn flush(&mut self) -> Option<(Instant, bytes::Bytes)> {
+		let send_at = self.send_at.take()?;
+		debug_assert!(!self.buffer.is_empty());
+		Some((send_at, self.buffer.split().freeze()))
+	}
+}
+
 /// Match libsrt's standard send-buffer window.
 const SRT_BUFFER_PACKETS: PacketCount = PacketCount(8192);
 
@@ -343,8 +382,10 @@ pub(crate) async fn serve_subscribe(
 		return Ok(());
 	};
 
-	// MPEG-TS is a continuous byte stream, so we coalesce the muxer's per-frame
-	// output and slice it on a fixed boundary rather than preserving frames.
+	// MPEG-TS is a continuous byte stream, so coalesce bytes that share a pacing
+	// instant and slice them on a fixed boundary. Flush a partial payload before the
+	// instant changes: one SRT message has only one TSBPD timestamp, so mixing frames
+	// here would re-stamp the earlier bytes with the frame that completed the chunk.
 	//
 	// Pace each payload on the media clock: the Instant handed to `send` is the
 	// payload's origin time feeding the receiver's TSBPD, which reconstructs the
@@ -356,11 +397,10 @@ pub(crate) async fn serve_subscribe(
 	// carried across frames and moved forward by `pace`.
 	let mut anchor = Instant::now();
 	let mut base = None;
-	let mut send_at = anchor;
 	// The first payload's send instant, the floor every later one is clamped up to
 	// (see `clamp_to_floor`).
 	let mut floor = None;
-	let mut buffer = bytes::BytesMut::new();
+	let mut chunker = SrtChunker::default();
 	while let Some(frame) = subscriber.next().await? {
 		// The media zero-point the rest pace against; `pace` re-anchors it forward to
 		// the live edge whenever the media outruns wall-clock.
@@ -370,16 +410,15 @@ pub(crate) async fn serve_subscribe(
 		base = Some(paced.base);
 		// Preserve the media-clock anchor for future frames, but never transmit a
 		// timestamp below the first packet's (see `floor` above).
-		send_at = clamp_to_floor(paced.send_at, &mut floor);
+		let send_at = clamp_to_floor(paced.send_at, &mut floor);
 
-		buffer.extend_from_slice(&frame.payload);
-		while buffer.len() >= SRT_PAYLOAD {
-			socket.send((send_at, buffer.split_to(SRT_PAYLOAD).freeze())).await?;
+		for chunk in chunker.push(send_at, &frame.payload) {
+			socket.send(chunk).await?;
 		}
 	}
 
-	if !buffer.is_empty() {
-		socket.send((send_at, buffer.freeze())).await?;
+	if let Some(chunk) = chunker.flush() {
+		socket.send(chunk).await?;
 	}
 	socket.close().await?;
 
@@ -507,6 +546,28 @@ mod tests {
 			options.sender.buffer_size,
 			SRT_BUFFER_PACKETS * options.session.max_segment_size
 		);
+	}
+
+	/// Regression for #2978: a frame that completes a chunk must not re-stamp bytes
+	/// already buffered from an earlier pacing instant.
+	#[test]
+	fn chunker_flushes_before_the_pacing_instant_changes() {
+		let first = Instant::now();
+		let second = first + Duration::from_millis(25);
+		let mut chunker = SrtChunker::default();
+
+		assert!(chunker.push(first, &[1; 188]).is_empty());
+		let flushed = chunker.push(second, &[2; SRT_PAYLOAD - 188]);
+		assert_eq!(flushed.len(), 1);
+		assert_eq!(flushed[0].0, first);
+		assert_eq!(flushed[0].1.as_ref(), &[1; 188]);
+
+		let completed = chunker.push(second, &[3; 188]);
+		assert_eq!(completed.len(), 1);
+		assert_eq!(completed[0].0, second);
+		assert_eq!(&completed[0].1[..SRT_PAYLOAD - 188], &[2; SRT_PAYLOAD - 188]);
+		assert_eq!(&completed[0].1[SRT_PAYLOAD - 188..], &[3; 188]);
+		assert!(chunker.flush().is_none());
 	}
 
 	/// Regression: srt-tokio's 32-packet default sender buffer evicts unsent packets
