@@ -240,7 +240,7 @@ impl Decoder {
 					)
 				};
 				if samples < 0 {
-					return Err(crate::opus::error(samples, "opus_decode_float"));
+					return Err(crate::opus::decode_error(samples));
 				}
 				out.truncate(samples as usize * self.channel_count as usize);
 				let trim_frames = opus.pre_skip_remaining.min(samples as usize);
@@ -369,6 +369,21 @@ mod tests {
 		let mut decoder = Decoder::new(&catalog).unwrap();
 		assert_eq!(decoder.sample_rate(), 44_100);
 		assert_eq!(decoder.decode(AAC_FRAMES[0]).unwrap().len(), 1024);
+	}
+
+	/// A packet libopus rejects is that packet's problem, not the
+	/// configuration's. The distinction is what lets a consumer drop the frame and
+	/// keep the subscription instead of ending the stream over one bad packet.
+	#[test]
+	fn opus_reports_a_rejected_packet_as_decode() {
+		let head = moq_mux::codec::opus::Config::new(48_000, 2).encode().unwrap();
+		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		catalog.description = Some(head);
+
+		let mut decoder = Decoder::new(&catalog).unwrap();
+
+		// Not a valid TOC byte sequence: libopus reports OPUS_INVALID_PACKET.
+		assert!(matches!(decoder.decode(&[0xFF; 3]), Err(Error::Decode(_))));
 	}
 
 	#[test]
