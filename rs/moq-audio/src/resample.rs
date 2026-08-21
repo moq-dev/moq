@@ -16,6 +16,8 @@ use crate::Error;
 pub struct Resampler {
 	resampler: Async<f32>,
 	chunk_frames: usize,
+	/// Output frames per input frame, for sizing the flushed tail.
+	ratio: f64,
 	channels: usize,
 	input_planar: Vec<Vec<f32>>,
 	output_planar: Vec<Vec<f32>>,
@@ -42,14 +44,9 @@ impl Resampler {
 			oversampling_factor: 128,
 			window: WindowFunction::BlackmanHarris2,
 		};
-		let resampler = Async::<f32>::new_sinc(
-			output_rate as f64 / input_rate as f64,
-			1.0,
-			&params,
-			chunk_frames,
-			channels as usize,
-			FixedAsync::Input,
-		)?;
+		let ratio = output_rate as f64 / input_rate as f64;
+		let resampler =
+			Async::<f32>::new_sinc(ratio, 1.0, &params, chunk_frames, channels as usize, FixedAsync::Input)?;
 
 		let input_planar = (0..channels as usize).map(|_| vec![0.0f32; chunk_frames]).collect();
 		let output_frames_max = resampler.output_frames_max();
@@ -58,6 +55,7 @@ impl Resampler {
 		Ok(Self {
 			resampler,
 			chunk_frames,
+			ratio,
 			channels: channels as usize,
 			input_planar,
 			output_planar,
@@ -72,6 +70,28 @@ impl Resampler {
 	/// reach back this far.
 	pub fn pending_frames(&self) -> usize {
 		self.pending.len() / self.channels
+	}
+
+	/// Resample what is still buffered, ending the stream.
+	///
+	/// The resampler only consumes whole chunks, so without this the last partial
+	/// chunk of a track is never converted and its audio is simply lost. Pads the
+	/// chunk out with silence and keeps only the output the real input earned, so
+	/// the padding costs a filter tail on the final samples rather than extra
+	/// audio. Returns empty once drained, which is what makes it safe to call on
+	/// every end-of-track poll.
+	pub fn flush(&mut self) -> Result<Vec<f32>, Error> {
+		let pending = self.pending_frames();
+		if pending == 0 {
+			return Ok(Vec::new());
+		}
+
+		let wanted = (pending as f64 * self.ratio).round() as usize;
+		self.pending.resize(self.chunk_frames * self.channels, 0.0);
+
+		let mut out = self.process(&[])?;
+		out.truncate(wanted * self.channels);
+		Ok(out)
 	}
 
 	/// Resample interleaved `f32` input into interleaved `f32` output.
