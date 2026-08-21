@@ -45,6 +45,13 @@ const PMT_PID: u16 = 0x1000;
 const FIRST_ES_PID: u16 = 0x1001;
 /// Re-emit PAT/PMT at least this often (wall-clock of the media) for tune-in.
 const PSI_INTERVAL: Duration = Duration::from_millis(500);
+/// The floor between emissions of a *changed* SI snapshot, bounding how fast a
+/// revising publisher can make the mux re-emit its tables. The import side
+/// debounces its own snapshot cuts (`si::DEBOUNCE`), but export consumes any
+/// catalog-named snapshot track, so the bound cannot live only there; this one is
+/// enforced on the media timeline. Clamped to the entry's own interval, so a
+/// table asking for faster repetition than this still gets it.
+const SI_REVISION_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Subscribe to a broadcast and produce an MPEG-TS byte stream.
 ///
@@ -1021,26 +1028,40 @@ impl<E: catalog::Catalog> Export<E> {
 			self.last_psi = Some(frame.timestamp);
 		}
 
-		// Emit each SI entry's sections verbatim: immediately when the snapshot
-		// changed (`dirty`), else once its own repetition interval has elapsed since
-		// the entry last hit the wire. The interval is the table's repetition
-		// requirement, a *floor* between unchanged repeats rather than an emission
-		// grid: an SDT wants 2s where the PSI wants 500ms, and a TDT/TOT revision
-		// held to a 30s grid would deliver the clock up to a whole slot late and
-		// re-assert an already-sent time (#2934). Unknown tables have no declared
-		// interval and fall back to the PSI cadence. `Bytes` clones are refcount
-		// bumps, and only a due entry is collected at all.
+		// Emit each SI entry's sections verbatim: on the revision floor when the
+		// snapshot changed (`dirty`), else once its own repetition interval has
+		// elapsed since the entry last hit the wire. The interval is the table's
+		// repetition requirement, a *floor* between unchanged repeats rather than an
+		// emission grid: an SDT wants 2s where the PSI wants 500ms, and a TDT/TOT
+		// revision held to a 30s grid would deliver the clock up to a whole slot
+		// late and re-assert an already-sent time (#2934). Unknown tables have no
+		// declared interval and fall back to the PSI cadence. `Bytes` clones are
+		// refcount bumps, and only a due entry is collected at all.
 		let pending: Vec<(u16, Vec<Bytes>)> = self
 			.si
 			.iter_mut()
 			.filter(|(_, si)| !si.active.is_empty())
 			.filter(|(_, si)| {
 				let interval = si.interval.unwrap_or(PSI_INTERVAL);
-				si.dirty || si_due(frame.timestamp, si.last_emit, interval)
+				// A revision waits only for the revision floor; an unchanged snapshot
+				// waits for the full interval. A deferred revision stays dirty and
+				// carries whatever `active` holds when it finally rides.
+				let due = if si.dirty {
+					SI_REVISION_INTERVAL.min(interval)
+				} else {
+					interval
+				};
+				si_due(frame.timestamp, si.last_emit, due)
 			})
 			.map(|((pid, _), si)| {
 				si.dirty = false;
-				si.last_emit = Some(frame.timestamp);
+				// The anchor never moves backwards: a dirty emission can ride a
+				// reordered (B-frame) timestamp below the previous anchor, and
+				// re-anchoring there would credit the reorder span against the floor,
+				// repeating the unchanged snapshot early.
+				if si.last_emit.is_none_or(|last| frame.timestamp > last) {
+					si.last_emit = Some(frame.timestamp);
+				}
 				(*pid, si.active.sections().cloned().collect())
 			})
 			.collect();

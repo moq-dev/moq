@@ -2676,7 +2676,7 @@ async fn si_cadence_rig(pid: u16, table_id: u8, interval: Duration) -> SiCadence
 }
 
 impl SiCadenceRig {
-	async fn media(&mut self, millis: u64, pid: u16) -> usize {
+	async fn media_frames(&mut self, millis: u64) -> Vec<Frame> {
 		let mut idr = vec![0x65u8];
 		idr.extend(std::iter::repeat_n(0xAB, 64));
 		self.producer
@@ -2689,17 +2689,29 @@ impl SiCadenceRig {
 			.unwrap();
 		self.producer.cut(None).unwrap();
 
-		let mut count = 0;
-		for frame in drain_frames(&mut self.exporter).await {
+		let frames = drain_frames(&mut self.exporter).await;
+		for frame in &frames {
 			assert_packet_aligned(&frame.payload);
-			count += frame
-				.payload
+		}
+		frames
+	}
+
+	async fn media(&mut self, millis: u64, pid: u16) -> usize {
+		count_pid(&self.media_frames(millis).await, pid)
+	}
+}
+
+/// How many TS packets of `pid` ride the given frames.
+fn count_pid(frames: &[Frame], pid: u16) -> usize {
+	frames
+		.iter()
+		.map(|f| {
+			f.payload
 				.chunks_exact(188)
 				.filter(|p| ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == pid)
-				.count();
-		}
-		count
-	}
+				.count()
+		})
+		.sum()
 }
 
 /// #2934: a revised SI snapshot rides the next media frame instead of waiting out
@@ -2738,15 +2750,93 @@ async fn si_repeats_are_floored_from_the_last_emission() {
 	assert_eq!(rig.media(1_000, 0x0011).await, 0, "within the floor");
 	assert_eq!(rig.media(2_000, 0x0011).await, 1, "repeat once 2s elapsed");
 
-	// A revision lands mid-interval and goes out immediately (at 2.5s)...
+	// A revision lands mid-interval: it waits only for the 1s revision floor
+	// (measured from the 2s repeat), not for the 2s interval or a grid slot.
 	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(sdt_v2)).unwrap();
-	assert_eq!(rig.media(2_500, 0x0011).await, 1, "the revision goes out immediately");
+	assert_eq!(
+		rig.media(2_500, 0x0011).await,
+		0,
+		"a revision honors the revision floor"
+	);
+	assert_eq!(
+		rig.media(3_500, 0x0011).await,
+		1,
+		"the revision rides the floor, not the interval"
+	);
 
-	// ...so the next repeat is due at 4.5s. The absolute grid would have re-sent at
-	// the 4s boundary, 1.5s after the wire last carried the identical sections.
-	assert_eq!(rig.media(3_000, 0x0011).await, 0, "within the floor of the revision");
+	// The next repeat is due 2s after that. The absolute grid would have re-sent
+	// at the 4s boundary, 0.5s after the wire last carried the identical sections.
 	assert_eq!(rig.media(4_000, 0x0011).await, 0, "the old grid slot must not fire");
-	assert_eq!(rig.media(4_500, 0x0011).await, 1, "repeat 2s after the revision");
+	assert_eq!(rig.media(5_000, 0x0011).await, 0, "within the floor of the revision");
+	assert_eq!(rig.media(5_500, 0x0011).await, 1, "repeat 2s after the revision");
+}
+
+/// A reordered (B-frame) timestamp below the emission anchor earns no credit: a
+/// revision arriving there is deferred (elapsed time saturates at zero), and the
+/// anchor itself never moves backwards, so neither revisions nor repeats can fire
+/// early off the reorder span.
+#[tokio::test(start_paused = true)]
+async fn si_reordered_frames_earn_no_emission_credit() {
+	let section = |version: u8| make_long_section(0x42, 1, version, 0, 0, &[version; 8]);
+	let mut rig = si_cadence_rig(0x0011, 0x42, Duration::from_secs(10)).await;
+
+	rig.si_track
+		.write_frame(Timestamp::ZERO, Bytes::from(section(0)))
+		.unwrap();
+	assert_eq!(rig.media(1_000, 0x0011).await, 1, "lead emission");
+
+	rig.si_track
+		.write_frame(Timestamp::ZERO, Bytes::from(section(1)))
+		.unwrap();
+	assert_eq!(rig.media(2_500, 0x0011).await, 1, "revision after the floor");
+
+	// The next revision arrives on a frame stepping back behind the 2.5s anchor,
+	// like a B-frame emitted in decode order: no elapsed time, no emission.
+	rig.si_track
+		.write_frame(Timestamp::ZERO, Bytes::from(section(2)))
+		.unwrap();
+	assert_eq!(rig.media(2_400, 0x0011).await, 0, "a reordered frame earns no credit");
+
+	// The floor measures from the 2.5s anchor: not due at 3.4s, due at 3.5s.
+	assert_eq!(rig.media(3_400, 0x0011).await, 0, "still inside the floor");
+	assert_eq!(
+		rig.media(3_500, 0x0011).await,
+		1,
+		"the deferred revision rides the floor"
+	);
+}
+
+/// A publisher revising its snapshot before every frame must not drive the mux at
+/// that rate: revisions coalesce onto the revision floor, newest snapshot wins.
+/// The import side debounces its own cuts, but export consumes any catalog-named
+/// snapshot track, so the bound has to hold here too.
+#[tokio::test(start_paused = true)]
+async fn si_rapid_revisions_are_rate_bounded() {
+	let section = |version: u8| make_long_section(0x42, 1, version, 0, 0, &[version; 8]);
+	let mut rig = si_cadence_rig(0x0011, 0x42, Duration::from_secs(30)).await;
+
+	let mut emitted = 0;
+	for i in 0..13u8 {
+		rig.si_track
+			.write_frame(Timestamp::ZERO, Bytes::from(section(i)))
+			.unwrap();
+		let frames = rig.media_frames(u64::from(i) * 250).await;
+		let count = count_pid(&frames, 0x0011);
+		emitted += count;
+		if i == 4 {
+			// The 1s floor lapses here; the emission carries the newest revision,
+			// not the three that were coalesced over.
+			assert_eq!(count, 1, "the floored emission fires at 1s");
+			let needle = section(4);
+			assert!(
+				frames
+					.iter()
+					.any(|f| f.payload.windows(needle.len()).any(|w| w == needle)),
+				"the floored emission carries the newest revision"
+			);
+		}
+	}
+	assert_eq!(emitted, 4, "lead plus one per second, not one per revision");
 }
 
 /// Two captures overlapping on one broadcast (a supervisor restarting its
