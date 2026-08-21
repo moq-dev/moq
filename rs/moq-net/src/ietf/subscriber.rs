@@ -3211,10 +3211,34 @@ mod tests {
 			consumer.get_broadcast("room/host").is_none(),
 			"a rejected PUBLISH must not announce a broadcast"
 		);
+		// Encode the reply we expect rather than matching the reason alone, so the error code
+		// regressing to something outside draft-19 section 10.10's table cannot slip through.
+		let expected = {
+			const NOT_SUPPORTED: u64 = 0x3;
+
+			let log = crate::lite::test_transport::Log::default();
+			let mut writer = crate::coding::Writer::new(
+				crate::lite::test_transport::SinkSend::new(log.clone()),
+				Version::Draft19,
+			);
+			writer.encode(&ietf::RequestError::ID).await.unwrap();
+			writer
+				.encode(&ietf::RequestError {
+					request_id: None,
+					error_code: NOT_SUPPORTED,
+					reason_phrase: "PUBLISH is not supported".into(),
+					retry_interval: 0,
+				})
+				.await
+				.unwrap();
+
+			log.writes.lock().unwrap().clone()
+		};
+
 		assert_eq!(
-			occurrences(&session.log, b"PUBLISH is not supported"),
+			occurrences(&session.log, &expected),
 			1,
-			"the decline reaches the peer"
+			"the decline reaches the peer as NOT_SUPPORTED"
 		);
 	}
 }
