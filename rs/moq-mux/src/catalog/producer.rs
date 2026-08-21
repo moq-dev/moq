@@ -476,16 +476,30 @@ fn video_sap_type(codec: &hang::catalog::VideoCodec) -> Option<u8> {
 	}
 }
 
+/// The MSF packaging that announces `container`, or `None` to leave the rendition out of the catalog.
+///
+/// Exhaustive on purpose: a catch-all is what announced LOC as legacy, and it would do the same to the
+/// next container added. hang says an unrecognized one must be ignored, so it keeps its wire kind (no
+/// MSF consumer claims one it does not know) and is dropped when it does not even name one.
+fn packaging_of(container: &hang::catalog::Container) -> Option<moq_msf::Packaging> {
+	match container {
+		hang::catalog::Container::Cmaf { .. } => Some(moq_msf::Packaging::Cmaf),
+		hang::catalog::Container::Loc => Some(moq_msf::Packaging::Loc),
+		hang::catalog::Container::Legacy => Some(moq_msf::Packaging::Legacy),
+		hang::catalog::Container::Unknown(unknown) => {
+			unknown.kind().map(|kind| moq_msf::Packaging::Unknown(kind.to_string()))
+		}
+	}
+}
+
 /// Convert a hang catalog to an MSF catalog.
 fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 	let mut tracks = Vec::new();
 
 	let has_multiple_video = catalog.video.renditions.len() > 1;
 	for (name, config) in &catalog.video.renditions {
-		let packaging = match &config.container {
-			hang::catalog::Container::Cmaf { .. } => moq_msf::Packaging::Cmaf,
-			hang::catalog::Container::Loc => moq_msf::Packaging::Loc,
-			_ => moq_msf::Packaging::Legacy,
+		let Some(packaging) = packaging_of(&config.container) else {
+			continue;
 		};
 
 		let init_data = match &config.container {
@@ -517,10 +531,8 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 
 	let has_multiple_audio = catalog.audio.renditions.len() > 1;
 	for (name, config) in &catalog.audio.renditions {
-		let packaging = match &config.container {
-			hang::catalog::Container::Cmaf { .. } => moq_msf::Packaging::Cmaf,
-			hang::catalog::Container::Loc => moq_msf::Packaging::Loc,
-			_ => moq_msf::Packaging::Legacy,
+		let Some(packaging) = packaging_of(&config.container) else {
+			continue;
 		};
 
 		let init_data = match &config.container {
@@ -890,6 +902,30 @@ mod test {
 		let msf = to_msf(&catalog);
 		assert_eq!(msf.tracks.len(), 1);
 		assert_eq!(msf.tracks[0].packaging, moq_msf::Packaging::Loc);
+	}
+
+	// An unrecognized container keeps its wire kind instead of posing as legacy: hang says such a
+	// rendition must be ignored, and no MSF consumer claims an unknown packaging.
+	#[test]
+	fn convert_unknown_container_keeps_its_kind() {
+		let container: Container = serde_json::from_value(serde_json::json!({ "kind": "future" })).unwrap();
+		assert!(matches!(container, Container::Unknown(_)));
+
+		let mut audio_config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		audio_config.container = container;
+
+		let mut audio_renditions = BTreeMap::new();
+		audio_renditions.insert("audio0".to_string(), audio_config);
+
+		let mut catalog = hang::Catalog::default();
+		catalog.audio.renditions = audio_renditions;
+
+		let msf = to_msf(&catalog);
+		assert_eq!(msf.tracks.len(), 1);
+		assert_eq!(
+			msf.tracks[0].packaging,
+			moq_msf::Packaging::Unknown("future".to_string())
+		);
 	}
 
 	#[test]

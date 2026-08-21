@@ -47,3 +47,30 @@ test("keeps legacy packaging as the legacy container", () => {
 
 	expect(toHang(catalog).video?.renditions.video?.container).toEqual({ kind: "legacy" });
 });
+
+test("drops a cmaf rendition without a usable init segment", () => {
+	const track: Msf.Track = {
+		name: "video",
+		packaging: "cmaf",
+		role: "video",
+		codec: "vp09.00.10.08",
+	};
+
+	expect(toHang({ tracks: [track] }).video?.renditions.video).toBeUndefined();
+	expect(toHang({ tracks: [{ ...track, initData: "not base64!" }] }).video?.renditions.video).toBeUndefined();
+});
+
+test("drops a rendition whose packaging is unknown", () => {
+	const catalog: Msf.Catalog = {
+		tracks: [
+			{
+				name: "video",
+				packaging: "future",
+				role: "video",
+				codec: "vp09.00.10.08",
+			},
+		],
+	};
+
+	expect(toHang(catalog).video?.renditions.video).toBeUndefined();
+});
