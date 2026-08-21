@@ -28,6 +28,7 @@ default:
 
 # Compile, lint, format-check, doc-check, and verify dependency hygiene.
 check *args:
+    just rs _select-test
     cargo clippy --locked --all-targets {{ args }} -- -D warnings
     cargo fmt --all --check
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps {{ args }}
@@ -134,12 +135,57 @@ _select $FILES:
 # and `_select` has already verified every crate directory matches its crate
 # name, so the last path segment is the name.
 
+# True when a selection includes a crate the wasm32 pass covers. One predicate
+# rather than the same alternation in each gate, so the test below exercises what
+# the gates actually run instead of a copy of it.
+[private]
+_wants-wasm $PACKAGES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    grep -qwE '(moq-wasm|moq-mux|moq-ffi)' <<< "$(just rs _names "$PACKAGES")"
+
 # Print the crate names behind a list of `--package` flags.
 [private]
 _names $PACKAGES:
     #!/usr/bin/env bash
     set -euo pipefail
     tr ' ' '\n' <<< "$PACKAGES" | sed -n 's|.*/\([^/#]*\)#.*|\1|p' | sort -u | tr '\n' ' '
+
+# Guards the two things about selection that fail SILENTLY rather than loudly:
+# a `--package` spec cargo cannot resolve takes the gate down before it compiles
+# anything, and a wasm gate that stops matching skips the only pass that ever
+# looks at moq-wasm's code (its crate root is `#![cfg(target_arch = "wasm32")]`,
+# so the host pass sees an empty crate and reports success). Both have happened.
+
+# Check that selection emits resolvable specs and still drives the wasm gate.
+[private]
+_select-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    fail() { echo "rs: _select-test: $1" >&2; exit 1; }
+
+    # `kio` is published and pulled from crates.io by the web-transport-* crates,
+    # so the workspace copy and the registry copy share a name: a bare name is
+    # ambiguous and cargo refuses. Every emitted spec must name its source, and
+    # cargo must accept it.
+    packages=$(just rs _select "rs/kio/src/waiter.rs")
+    for spec in $(sed 's/--package //g' <<< "$packages"); do
+    	[[ "$spec" == *"file://"* ]] || fail "expected a source-qualified id, got: $spec"
+    	cargo pkgid --offline "$spec" > /dev/null 2>&1 || fail "cargo cannot resolve: $spec"
+    done
+
+    # The wasm gate keys on names, so it survives whatever spec form the ids use.
+    just rs _wants-wasm "$packages" \
+    	|| fail "a kio diff must still drive the wasm gate: $(just rs _names "$packages")"
+
+    # ...and it must still be able to say no, or it is not a gate.
+    relay=$(just rs _select "rs/moq-relay/src/web.rs")
+    if just rs _wants-wasm "$relay"; then
+    	fail "a moq-relay diff must not drive it: $(just rs _names "$relay")"
+    fi
+
+    echo "rs: selection ok"
 
 # Takes a newline-separated list of changed files; skips when no crate is
 # affected. The `just rs ...` calls below go through the root justfile's
@@ -165,7 +211,7 @@ check-changed $FILES:
     # nothing in the workspace depends on moq-ffi, so an moq-ffi-only diff selects
     # only itself and would never reach the gate that exists to cover it. moq-mux
     # is selected by its dependents, none of which are moq-wasm.
-    if [[ "$packages" == "ALL" ]] || grep -qwE '(moq-wasm|moq-mux|moq-ffi)' <<< "$(just rs _names "$packages")"; then
+    if [[ "$packages" == "ALL" ]] || just rs _wants-wasm "$packages"; then
     	just rs wasm
     fi
 
@@ -182,7 +228,7 @@ fix-changed $FILES:
 
     # Mirrors `check-changed`'s gate, alternation included: without this a wasm32
     # lint is never auto-fixed, and `check`'s wasm32 clippy pass fails on it later.
-    if [[ "$packages" == "ALL" ]] || grep -qwE '(moq-wasm|moq-mux|moq-ffi)' <<< "$(just rs _names "$packages")"; then
+    if [[ "$packages" == "ALL" ]] || just rs _wants-wasm "$packages"; then
     	just rs wasm-fix
     fi
 
