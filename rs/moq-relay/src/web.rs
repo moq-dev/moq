@@ -245,7 +245,8 @@ impl Web {
 			let listener = moq_native::bind::tcp(listen).context("failed to bind HTTP listener")?;
 			// Same socket capture the HTTPS path gets from `MtlsAcceptor`: without it
 			// a `ws://` session reaches qmux with no descriptor and reports no RTT.
-			let server = crate::listener::server(listener, self.health.clone())?.acceptor(SocketAcceptor);
+			let server =
+				crate::listener::server(listener, self.health.clone())?.acceptor(SocketAcceptor { ws: config.ws });
 			Some(server.serve(app.clone()))
 		} else {
 			None
@@ -267,6 +268,7 @@ impl Web {
 			// a near-no-op, but keeping a single path simplifies reload + serve.
 			let acceptor = MtlsAcceptor {
 				inner: RustlsAcceptor::new(rustls_config),
+				ws: config.ws,
 			};
 			let listener = moq_native::bind::tcp(listen).context("failed to bind HTTPS listener")?;
 			let server = crate::listener::server(listener, self.health.clone())?.acceptor(acceptor);
@@ -367,14 +369,14 @@ async fn reload_https_config(config: RustlsConfig, cert: Vec<PathBuf>, key: Vec<
 /// for; handlers extract `Option<Extension<SocketStats>>` accordingly.
 #[cfg(feature = "websocket")]
 #[derive(Clone)]
-pub struct SocketStats(pub(crate) qmux::SharedSocketStats);
+pub(crate) struct SocketStats(pub(crate) qmux::SharedSocketStats);
 
 /// Without the `websocket` feature there is no qmux to hand a socket to, so this
 /// carries nothing and is never constructed. Keeping the type present either way
 /// lets the acceptor and its service stay free of feature gates.
 #[cfg(not(feature = "websocket"))]
 #[derive(Clone)]
-pub struct SocketStats(std::convert::Infallible);
+pub(crate) struct SocketStats(std::convert::Infallible);
 
 /// Marker inserted as a request extension after HTTPS mTLS verifies a client certificate.
 ///
@@ -390,6 +392,8 @@ pub struct MtlsPeer;
 #[derive(Clone)]
 struct MtlsAcceptor {
 	inner: RustlsAcceptor<DefaultAcceptor>,
+	/// As [`SocketAcceptor::ws`].
+	ws: bool,
 }
 
 /// The connection [`MtlsAcceptor`] accepts: a byte stream, plus a descriptor to
@@ -416,7 +420,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> AcceptStream for T {}
 /// qmux with no descriptor and report no RTT. This is the same capture without the
 /// TLS half.
 #[derive(Clone, Copy)]
-struct SocketAcceptor;
+struct SocketAcceptor {
+	/// Whether a WebSocket route exists to use the handle. The capture holds a
+	/// duplicated descriptor for the life of the connection, so doing it when
+	/// nothing can read it would cost every API, HLS, and health-check connection a
+	/// second descriptor for nothing.
+	ws: bool,
+}
 
 impl<I, S> Accept<I, S> for SocketAcceptor
 where
@@ -428,7 +438,7 @@ where
 	type Future = BoxFuture<'static, std::io::Result<(Self::Stream, Self::Service)>>;
 
 	fn accept(&self, stream: I, service: S) -> Self::Future {
-		let socket = socket_stats(&stream);
+		let socket = self.ws.then(|| socket_stats(&stream)).flatten();
 		async move {
 			Ok((
 				stream,
@@ -455,7 +465,7 @@ where
 	fn accept(&self, stream: I, service: S) -> Self::Future {
 		// Read the socket here, while it is still a plain `TcpStream`. Once TLS and
 		// then hyper's upgrade have wrapped it there is no descriptor left to find.
-		let socket = socket_stats(&stream);
+		let socket = self.ws.then(|| socket_stats(&stream)).flatten();
 		let inner = self.inner.accept(stream, service);
 		async move {
 			let (tls, service) = inner.await?;
@@ -976,7 +986,7 @@ mod tests {
 		let (accepted, _) = listener.accept().await.unwrap();
 		let _client = connecting.await.unwrap();
 
-		let (stream, mut service) = Accept::<_, EchoSocket>::accept(&SocketAcceptor, accepted, EchoSocket)
+		let (stream, mut service) = Accept::<_, EchoSocket>::accept(&SocketAcceptor { ws: true }, accepted, EchoSocket)
 			.await
 			.unwrap();
 
@@ -1003,6 +1013,32 @@ mod tests {
 				"a connected TCP socket must report an RTT immediately"
 			);
 		}
+
+		drop(stream);
+	}
+
+	/// With no WebSocket route to read them, the capture is skipped.
+	///
+	/// The handle holds a duplicated descriptor for the life of the connection, so
+	/// capturing it for every API, HLS, and health-check connection would halve the
+	/// descriptors a relay can spend on connections, for nothing.
+	#[cfg(all(unix, feature = "websocket"))]
+	#[tokio::test]
+	async fn socket_acceptor_skips_capture_without_websockets() {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		let connecting = tokio::spawn(async move { tokio::net::TcpStream::connect(addr).await.unwrap() });
+		let (accepted, _) = listener.accept().await.unwrap();
+		let _client = connecting.await.unwrap();
+
+		let (stream, service) = Accept::<_, ()>::accept(&SocketAcceptor { ws: false }, accepted, ())
+			.await
+			.unwrap();
+
+		assert!(
+			service.socket.is_none(),
+			"no WebSocket route can use the handle, so it must not hold a descriptor"
+		);
 
 		drop(stream);
 	}
