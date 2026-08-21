@@ -2,8 +2,14 @@ const TRACK_ALIAS_TIMEOUT_MS = 1000;
 
 /**
  * How many cancelled aliases to remember. Objects keep arriving for about a round trip
- * after STOP_SENDING, so a handful covers the window, while the cap keeps a long session
- * with heavy subscription churn from accumulating tombstones for its whole lifetime.
+ * after we cancel, so a handful covers the window, while the cap keeps a long session with
+ * heavy subscription churn from accumulating tombstones for its whole lifetime.
+ *
+ * The bound is a count rather than a deadline, so eviction stays synchronous with
+ * retirement instead of needing a timer. The trade is that a session cancelling more than
+ * this many distinct aliases inside one round trip evicts a tombstone whose objects are
+ * still arriving; those fall back to the unknown-alias wait, which is the old behavior
+ * rather than a new failure.
  */
 const RETIRED_ALIAS_CAPACITY = 64;
 
@@ -12,9 +18,13 @@ type Resolver<T> = PromiseWithResolvers<T>["resolve"];
 /**
  * Thrown when a group arrives for a subscription we already cancelled.
  *
- * The publisher only stops once our STOP_SENDING reaches it, so objects keep arriving for
+ * The publisher only stops once our cancellation reaches it, so objects keep arriving for
  * at least a round trip afterwards. Draft-19 section 11.1 asks us to keep enough state to
  * discard them quickly "rather than treating them as belonging to an unknown Track Alias".
+ *
+ * This makes the window quiet, not safe. Once a publisher reassigns the alias the tombstone
+ * is reclaimed, and nothing on a group stream distinguishes the old subscription's objects
+ * from the new one's. Cancelling promptly is what bounds the exposure to a round trip.
  * @internal
  */
 export class RetiredTrackAlias extends Error {

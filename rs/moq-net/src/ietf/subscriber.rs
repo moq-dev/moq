@@ -20,8 +20,14 @@ use web_async::Lock;
 const TRACK_ALIAS_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How many cancelled aliases to remember. Objects keep arriving for about a round trip
-/// after STOP_SENDING, so a handful covers the window, while the cap keeps a long session
-/// with heavy subscription churn from accumulating tombstones for its whole lifetime.
+/// after we cancel, so a handful covers the window, while the cap keeps a long session with
+/// heavy subscription churn from accumulating tombstones for its whole lifetime.
+///
+/// The bound is a count rather than a deadline, which is what keeps eviction synchronous
+/// with retirement instead of needing a timer to sweep expired entries. The trade is that a
+/// session cancelling more than this many distinct aliases inside one round trip evicts a
+/// tombstone whose objects are still arriving; those groups fall back to the unknown-alias
+/// wait, which is the old behavior rather than a new failure.
 const RETIRED_ALIAS_CAPACITY: usize = 64;
 
 /// What a track alias currently refers to.
@@ -32,11 +38,19 @@ enum Alias {
 
 	/// A subscription we cancelled, whose publisher may still be feeding the alias.
 	///
-	/// The publisher only stops once our STOP_SENDING reaches it, so objects keep arriving
+	/// The publisher only stops once our cancellation reaches it, so objects keep arriving
 	/// for at least a round trip afterwards. Remembering the alias is what lets us discard
 	/// them immediately instead of stalling each one on [`TRACK_ALIAS_TIMEOUT`] and calling
-	/// it unknown. It also stops one of those late groups from being spliced into a later
-	/// subscription that reuses the alias.
+	/// it unknown.
+	///
+	/// It does not make that window safe, only quiet. A publisher that has processed the
+	/// cancellation may reassign the alias, and nothing on a group stream distinguishes the
+	/// old subscription's objects from the new one's, so a group still in flight when the
+	/// new SUBSCRIBE_OK binds the alias is delivered to the new track. The protocol offers
+	/// no way to tell them apart: the alias is the only identifier a group carries, and the
+	/// draft permits the reuse as long as the two tracks are not live at once. Cancelling
+	/// promptly is what bounds the exposure, since it caps the arrival window at a round
+	/// trip rather than leaving it open for the life of the session.
 	Retired,
 }
 
@@ -58,7 +72,9 @@ fn insert_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId)
 
 	match table.map.entry(alias) {
 		// Our subscription is gone, so the publisher is free to point the alias somewhere
-		// new. Reclaiming it also drops the tombstone early.
+		// new. Reclaiming it also drops the tombstone early, which reopens the window
+		// described on `Alias::Retired`: a group from the old subscription arriving after
+		// this lands is indistinguishable from one for the new track.
 		Entry::Occupied(mut entry) if *entry.get() == Alias::Retired => {
 			entry.insert(Alias::Active(request_id));
 			table.retired.retain(|&retired| retired != alias);
