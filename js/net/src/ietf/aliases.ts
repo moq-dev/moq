@@ -16,6 +16,20 @@ const RETIRED_ALIAS_CAPACITY = 64;
 type Resolver<T> = PromiseWithResolvers<T>["resolve"];
 
 /**
+ * The full track name an alias is bound to.
+ *
+ * Kept as two components rather than one joined string: a track name may contain the same
+ * separator a broadcast path uses, so `a` + `b/c` and `a/b` + `c` would otherwise compare
+ * equal and turn a genuine collision into apparent sharing.
+ * @internal
+ */
+export type TrackIdentity = { broadcast: string; name: string };
+
+function sameTrack(a: TrackIdentity, b: TrackIdentity): boolean {
+	return a.broadcast === b.broadcast && a.name === b.name;
+}
+
+/**
  * Thrown when a group arrives for a subscription we already cancelled.
  *
  * The publisher only stops once our cancellation reaches it, so objects keep arriving for
@@ -64,7 +78,7 @@ export class DuplicateTrackAlias extends Error {
 
 /** Resolves publisher-chosen track aliases after control/data stream reordering. @internal */
 export class TrackAliases<T> {
-	#active = new Map<bigint, { value: T; track: string }>();
+	#active = new Map<bigint, { value: T; track: TrackIdentity }>();
 	#pending = new Map<bigint, Set<Resolver<T>>>();
 
 	/** Aliases whose subscription we cancelled, in retirement order so the oldest is forgotten first. */
@@ -112,11 +126,11 @@ export class TrackAliases<T> {
 	 * ({@link SharedTrackAlias}) or the collision that must fail the session
 	 * ({@link DuplicateTrackAlias}).
 	 */
-	set(alias: bigint, value: T, track: string) {
+	set(alias: bigint, value: T, track: TrackIdentity) {
 		const active = this.#active.get(alias);
 		if (active !== undefined) {
 			if (active.value === value) return;
-			throw active.track === track ? new SharedTrackAlias(alias) : new DuplicateTrackAlias(alias);
+			throw sameTrack(active.track, track) ? new SharedTrackAlias(alias) : new DuplicateTrackAlias(alias);
 		}
 
 		// Our subscription is gone, so the publisher is free to point the alias somewhere

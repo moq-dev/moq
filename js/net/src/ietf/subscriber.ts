@@ -44,6 +44,12 @@ const SUBSCRIBE_OK_TIMEOUT_MS = 10_000;
 type SubscribeSetupState = {
 	stream?: Stream;
 	registeredAlias?: bigint;
+	/**
+	 * Whether SUBSCRIBE_OK arrived, meaning the publisher holds an Established subscription
+	 * and will keep serving it until told otherwise. Set before the alias is bound, since
+	 * binding is one of the things that can fail after the publisher has already accepted.
+	 */
+	established?: boolean;
 };
 
 /**
@@ -377,7 +383,6 @@ export class Subscriber {
 	}
 
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
-		const version = this.#session.version;
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) {
 			request.reject(new Error("session closed"));
@@ -420,9 +425,16 @@ export class Subscriber {
 			// and drop any registration so we don't leak. Cover both branches:
 			// setup may resolve late, or reject (e.g. SUBSCRIBE error) after the
 			// stream is already open.
-			const cleanup = () => {
+			const cleanup = async () => {
 				if (state.registeredAlias !== undefined) this.#aliases.retire(state.registeredAlias, producer);
-				state.stream?.abort(e);
+				// SUBSCRIBE_OK may already have arrived, in which case the publisher holds an
+				// Established subscription and keeps serving it. Aborting says nothing on
+				// v14-16, where the request rides a virtual stream whose reset is local, so
+				// the UNSUBSCRIBE has to go out explicitly.
+				if (state.stream) {
+					if (state.established) await this.#cancelSubscribe(state.stream, requestId);
+					state.stream.abort(e);
+				}
 			};
 			setup.then(cleanup, cleanup);
 			return;
@@ -443,16 +455,7 @@ export class Subscriber {
 				break;
 			}
 
-			// For v14-v16: send Unsubscribe before closing (removed in v17+)
-			if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-				try {
-					await stream.writer.u53(Unsubscribe.id);
-					const unsub = new Unsubscribe({ requestId });
-					await unsub.encode(stream.writer, version);
-				} catch {
-					// Stream might already be closed
-				}
-			}
+			await this.#cancelSubscribe(stream, requestId);
 
 			producer.close();
 			stream.close();
@@ -467,6 +470,27 @@ export class Subscriber {
 		} finally {
 			this.#aliases.retire(trackAlias, producer);
 			this.#timescales.delete(trackAlias);
+		}
+	}
+
+	/**
+	 * Tell the publisher to stop serving a subscription we are walking away from.
+	 *
+	 * v14-16 cancel with UNSUBSCRIBE (draft-16 section 9.12), which is what lets the
+	 * publisher destroy the subscription (section 5.1.1); v17+ removed the message and
+	 * rely on the stream reset instead. Every path that abandons an Established
+	 * subscription goes through here, because those versions carry the request over a
+	 * virtual stream whose reset never reaches the peer.
+	 */
+	async #cancelSubscribe(stream: Stream, requestId: bigint) {
+		const version = this.#session.version;
+		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) return;
+
+		try {
+			await stream.writer.u53(Unsubscribe.id);
+			await new Unsubscribe({ requestId }).encode(stream.writer, version);
+		} catch {
+			// The stream may already be gone; there is nothing further to tell the peer.
 		}
 	}
 
@@ -513,8 +537,10 @@ export class Subscriber {
 		}
 
 		const ok = await SubscribeOk.decode(state.stream.reader, version);
+		state.established = true;
+
 		try {
-			this.#aliases.set(ok.trackAlias, producer, `${broadcast}/${request.name}`);
+			this.#aliases.set(ok.trackAlias, producer, { broadcast, name: request.name });
 			if (ok.timescale !== undefined) {
 				this.#timescales.set(ok.trackAlias, ok.timescale);
 			}

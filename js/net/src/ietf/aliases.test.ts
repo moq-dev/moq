@@ -6,7 +6,7 @@ test("waits for the control message that establishes an alias", async () => {
 	const track = {};
 	const pending = aliases.get(7n);
 
-	aliases.set(7n, track, "cam/video");
+	aliases.set(7n, track, { broadcast: "cam", name: "video" });
 
 	expect(await pending).toBe(track);
 });
@@ -16,16 +16,26 @@ test("resolves every subgroup waiting for the same alias", async () => {
 	const track = {};
 	const pending = [aliases.get(7n), aliases.get(7n)];
 
-	aliases.set(7n, track, "cam/video");
+	aliases.set(7n, track, { broadcast: "cam", name: "video" });
 
 	expect(await Promise.all(pending)).toEqual([track, track]);
 });
 
 test("rejects an alias used by two active tracks", () => {
 	const aliases = new TrackAliases<object>();
-	aliases.set(7n, {}, "cam/video");
+	aliases.set(7n, {}, { broadcast: "cam", name: "video" });
 
-	expect(() => aliases.set(7n, {}, "cam/audio")).toThrow(DuplicateTrackAlias);
+	expect(() => aliases.set(7n, {}, { broadcast: "cam", name: "audio" })).toThrow(DuplicateTrackAlias);
+});
+
+// A track name may contain the separator a broadcast path uses, so identity has to keep the
+// two apart: "a" + "b/c" and "a/b" + "c" are different tracks, and a publisher pointing one
+// live alias at both is the collision section 11.1 makes fatal, not legal sharing.
+test("a track name containing a slash does not collide with a longer namespace", () => {
+	const aliases = new TrackAliases<object>();
+	aliases.set(7n, {}, { broadcast: "a", name: "b/c" });
+
+	expect(() => aliases.set(7n, {}, { broadcast: "a/b", name: "c" })).toThrow(DuplicateTrackAlias);
 });
 
 // Draft-19 section 5.1 lets a publisher give several subscriptions to one track the same
@@ -33,15 +43,15 @@ test("rejects an alias used by two active tracks", () => {
 // drop every other broadcast on the connection.
 test("sharing an alias across subscriptions to one track is not fatal", () => {
 	const aliases = new TrackAliases<object>();
-	aliases.set(7n, {}, "cam/video");
+	aliases.set(7n, {}, { broadcast: "cam", name: "video" });
 
-	expect(() => aliases.set(7n, {}, "cam/video")).toThrow(SharedTrackAlias);
+	expect(() => aliases.set(7n, {}, { broadcast: "cam", name: "video" })).toThrow(SharedTrackAlias);
 });
 
 test("does not let stale cleanup retire a reused alias", async () => {
 	const aliases = new TrackAliases<object>();
 	const active = {};
-	aliases.set(7n, active, "cam/video");
+	aliases.set(7n, active, { broadcast: "cam", name: "video" });
 
 	aliases.retire(7n, {});
 
@@ -53,7 +63,7 @@ test("does not let stale cleanup retire a reused alias", async () => {
 test("a retired alias rejects late groups immediately", async () => {
 	const aliases = new TrackAliases<object>();
 	const track = {};
-	aliases.set(7n, track, "cam/video");
+	aliases.set(7n, track, { broadcast: "cam", name: "video" });
 	aliases.retire(7n, track);
 
 	await expect(aliases.get(7n)).rejects.toBeInstanceOf(RetiredTrackAlias);
@@ -64,11 +74,11 @@ test("a retired alias rejects late groups immediately", async () => {
 test("a later subscribe reclaims a retired alias", async () => {
 	const aliases = new TrackAliases<object>();
 	const old = {};
-	aliases.set(7n, old, "cam/video");
+	aliases.set(7n, old, { broadcast: "cam", name: "video" });
 	aliases.retire(7n, old);
 
 	const fresh = {};
-	aliases.set(7n, fresh, "cam/video");
+	aliases.set(7n, fresh, { broadcast: "cam", name: "video" });
 
 	expect(await aliases.get(7n)).toBe(fresh);
 });
@@ -80,7 +90,7 @@ test("retired aliases are capped", async () => {
 
 	for (let i = 0n; i < 74n; i++) {
 		const track = {};
-		aliases.set(i, track, "cam/video");
+		aliases.set(i, track, { broadcast: "cam", name: "video" });
 		aliases.retire(i, track);
 	}
 
