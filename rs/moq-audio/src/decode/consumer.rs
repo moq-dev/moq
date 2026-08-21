@@ -333,17 +333,21 @@ mod tests {
 		let tail = consumer.read().await.unwrap().expect("flushed tail");
 		let tail_frames = tail.data.len() / size_of::<f32>();
 
-		// The 142 held-back frames at 44.1 kHz are ~155 at 48 kHz.
-		assert!((150..=160).contains(&tail_frames), "unexpected tail: {tail_frames}");
+		// The 142 held-back frames at 44.1 kHz are ~155 at 48 kHz, plus the 69 the
+		// sinc filter still owes: it runs centred, so the end of the track only
+		// emerges once the flush has fed it silence to push it out.
+		assert!((215..=230).contains(&tail_frames), "unexpected tail: {tail_frames}");
 		// It picks up where the first frame left off, not at the packet's start.
 		assert_eq!(
 			tail.timestamp.as_micros(),
 			moq_net::Timestamp::from_scale(882, 44_100).unwrap().as_micros()
 		);
 
-		// Together they cover the packet, and the track is done.
+		// Together they cover the packet (1024 frames at 44.1 kHz is ~1114 at 48 kHz)
+		// plus the filter's delay, which is the leading silence it emitted at the
+		// start now balanced by the tail it was holding at the end.
 		let total = first_frames + tail_frames;
-		assert!((1110..=1120).contains(&total), "unexpected total: {total}");
+		assert!((1175..=1190).contains(&total), "unexpected total: {total}");
 		assert!(consumer.read().await.unwrap().is_none());
 	}
 

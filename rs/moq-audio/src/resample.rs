@@ -18,6 +18,8 @@ pub struct Resampler {
 	chunk_frames: usize,
 	/// Output frames per input frame, for sizing the flushed tail.
 	ratio: f64,
+	/// Output frames the sinc filter holds behind what it has already emitted.
+	delay: usize,
 	channels: usize,
 	input_planar: Vec<Vec<f32>>,
 	output_planar: Vec<Vec<f32>>,
@@ -48,6 +50,7 @@ impl Resampler {
 		let resampler =
 			Async::<f32>::new_sinc(ratio, 1.0, &params, chunk_frames, channels as usize, FixedAsync::Input)?;
 
+		let delay = resampler.output_delay();
 		let input_planar = (0..channels as usize).map(|_| vec![0.0f32; chunk_frames]).collect();
 		let output_frames_max = resampler.output_frames_max();
 		let output_planar = vec![vec![0.0f32; output_frames_max]; channels as usize];
@@ -56,6 +59,7 @@ impl Resampler {
 			resampler,
 			chunk_frames,
 			ratio,
+			delay,
 			channels: channels as usize,
 			input_planar,
 			output_planar,
@@ -90,11 +94,24 @@ impl Resampler {
 			return Ok(Vec::new());
 		}
 
-		let wanted = (pending as f64 * self.ratio).round() as usize;
-		self.pending.resize(self.chunk_frames * self.channels, 0.0);
+		// The filter runs centred, so every output frame is built from input around
+		// `delay` frames earlier and it still holds that much real audio no amount of
+		// input has pushed out. Ask for that much beyond what the pending input
+		// earns, feeding silence until it arrives, or a track converts its own
+		// ending into frames nobody reads.
+		let wanted = ((pending as f64 * self.ratio).round() as usize + self.delay) * self.channels;
 
-		let mut out = self.process(&[])?;
-		out.truncate(wanted * self.channels);
+		let mut out = Vec::new();
+		while out.len() < wanted {
+			self.pending.resize(self.chunk_frames * self.channels, 0.0);
+			let produced = self.process(&[])?;
+			if produced.is_empty() {
+				break;
+			}
+			out.extend_from_slice(&produced);
+		}
+
+		out.truncate(wanted);
 		Ok(out)
 	}
 
@@ -184,6 +201,29 @@ mod tests {
 			"expected ~48k samples, got {}",
 			out.len()
 		);
+	}
+
+	/// The sinc filter is centred, so the end of a track only reaches the output
+	/// once further input has passed through it. Without draining that, a track
+	/// converts its own ending into frames nobody ever reads, and the tail comes
+	/// out silent however loud it was.
+	#[test]
+	fn flush_drains_the_delayed_tail() {
+		let mut r = Resampler::new(44_100, 48_000, 1, 882).unwrap();
+
+		// A full-scale sample near the end of the track, silence around it. Not the
+		// very last one: draining stops at the filter's centre rather than emitting
+		// its ringing past the end of the signal, so the final sample keeps only
+		// half its response however far this drains.
+		let mut input = vec![0.0f32; 1024];
+		input[1000] = 1.0;
+
+		let body = r.process(&input).unwrap();
+		let tail = r.flush().unwrap();
+
+		let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |max, s| max.max(s.abs()));
+		assert_eq!(peak(&body), 0.0, "the sample cannot have emerged this early");
+		assert!(peak(&tail) > 0.5, "the tail lost the sample: peak {}", peak(&tail));
 	}
 
 	#[test]
