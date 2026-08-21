@@ -5,8 +5,11 @@
 //! writes are synchronous (an in-memory append, bounded by group eviction), so the streaming thread
 //! never blocks on the network. A thin async task only owns connect and the session lifetime. Pads are
 //! fully independent: one pad's chain never waits on another's data.
+//!
+//! Locks are nested in one direction only: GStreamer's stream lock, then the element control, then a
+//! pad lifecycle, then an object lock. No path takes the element control while holding a pad lifecycle.
 
-use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
 use std::sync::{LazyLock, Mutex};
 
 use anyhow::{Context, Result};
@@ -16,8 +19,8 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use hang::moq_net;
 
-use super::pad::{Pad, caps_supported};
-use super::request_pad::MoqSinkPad;
+use super::pad::{CapsOutcome, PushOutcome, caps_supported};
+use super::request_pad::{MoqSinkPad, Notifications};
 use super::session::{CAT, ConnectionStatus, RUNTIME, ResolvedSettings, Session};
 
 #[derive(Debug, Clone, Default)]
@@ -43,67 +46,51 @@ impl TryFrom<Settings> for ResolvedSettings {
 	}
 }
 
-/// Live state, present only while started. The producers are created up front (so frames buffered
-/// before connect are sent once it completes); the catalog is `Option` because it is taken on the first
-/// finalize. Per-pad media lives in `pads`; `ended` tracks EOS for element-level EOS aggregation.
+/// Live state for one READY to PAUSED run.
 struct State {
 	session: Session,
 	broadcast: moq_net::broadcast::Producer,
 	catalog: Option<moq_mux::catalog::Producer>,
-	pads: HashMap<String, Pad>,
-	ended: HashSet<String>,
 	eos_posted: bool,
 }
 
-impl State {
-	/// Finalize every live producer once, catalog last; runs on EOS and on stop. Idempotent. The names of
-	/// the producers finalized are accumulated into the `Ok` order until the first error, which is logged
-	/// and then surfaced as the returned `Err`.
-	fn finalize_all(&mut self) -> Result<Vec<String>> {
-		let mut result: Result<Vec<String>> = Ok(Vec::new());
-		for (name, pad) in self.pads.iter_mut() {
-			match pad.finalize() {
-				Ok(true) => {
-					if let Ok(order) = result.as_mut() {
-						order.push(name.clone());
-					}
-				}
-				Ok(false) => {}
-				Err(err) => {
-					gst::warning!(CAT, "finalize {name}: {err:?}");
-					if result.is_ok() {
-						result = Err(err);
-					}
-				}
-			}
-		}
-		if let Some(mut catalog) = self.catalog.take() {
-			match catalog.finish().context("finalize catalog") {
-				Ok(()) => {
-					if let Ok(order) = result.as_mut() {
-						order.push("catalog".to_string());
-					}
-				}
-				Err(err) => {
-					if result.is_ok() {
-						result = Err(err);
-					}
-				}
-			}
-		}
-		result
-	}
+/// Element state that survives session replacement.
+#[derive(Default)]
+struct Control {
+	live: Option<State>,
+	admissions: usize,
+}
+
+/// A pad whose already-applied state change still needs GObject notification.
+struct PadUpdate {
+	pad: MoqSinkPad,
+	changes: Notifications,
+}
+
+/// What a finalize pass leaves for the caller to put on the bus, once it holds no pad lock.
+#[derive(Default)]
+enum Posted {
+	/// Nothing to post: the pass did not run.
+	#[default]
+	Nothing,
+	/// Every pad ended and the producers closed.
+	Eos,
+	/// A producer failed to close, already formatted for the bus.
+	Error(String),
+}
+
+/// The result of a finalize pass: which pads to report, and what the element owes the bus.
+#[derive(Default)]
+struct Finished {
+	updates: Vec<PadUpdate>,
+	message: Posted,
 }
 
 /// The `moqsink` element implementation: its GObject properties plus the live session state.
 #[derive(Default)]
 pub struct MoqSink {
 	settings: Mutex<Settings>,
-	/// Live state between Ready->Paused and Paused->Ready. One Mutex, not Arc<Mutex>: glib already owns
-	/// and shares the subclass instance across GStreamer's threads, so we need interior mutability but
-	/// not a second ownership layer. Held only briefly per buffer, so independent pad threads barely
-	/// contend.
-	state: Mutex<Option<State>>,
+	control: Mutex<Control>,
 }
 
 #[glib::object_subclass]
@@ -196,8 +183,8 @@ impl ObjectImpl for MoqSink {
 	fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
 		match pspec.name() {
 			"status" | "connected" | "moq-version" | "estimated-send-bitrate" | "estimated-recv-bitrate" => {
-				let state = self.state.lock().unwrap();
-				let session = state.as_ref().map(|s| &s.session);
+				let control = self.control.lock().unwrap();
+				let session = control.live.as_ref().map(|s| &s.session);
 				match pspec.name() {
 					"status" => session.map(|s| s.status().status()).unwrap_or_default().to_value(),
 					"connected" => session.is_some_and(|s| s.status().connected()).to_value(),
@@ -298,8 +285,12 @@ impl ElementImpl for MoqSink {
 			// Opaque application data: published byte for byte, so there is no structural field to pin.
 			caps.merge(gst::Caps::builder("application/octet-stream").build());
 
-			let sink =
-				gst::PadTemplate::new("sink_%u", gst::PadDirection::Sink, gst::PadPresence::Request, &caps).unwrap();
+			// The GType is what makes gst-inspect-1.0 list the pad's own properties; without it the
+			// template reports none, however many the pad declares.
+			let sink = gst::PadTemplate::builder("sink_%u", gst::PadDirection::Sink, gst::PadPresence::Request, &caps)
+				.gtype(MoqSinkPad::static_type())
+				.build()
+				.unwrap();
 			vec![sink]
 		});
 		PAD_TEMPLATES.as_ref()
@@ -334,41 +325,65 @@ impl ElementImpl for MoqSink {
 			Some(name) => pad_builder.name(name).build(),
 			None => pad_builder.generated_name().build(),
 		};
-		self.obj().add_pad(&pad).ok()?;
+		{
+			let mut control = self.control.lock().unwrap();
+			if control.live.as_ref().is_some_and(|state| state.eos_posted) {
+				gst::warning!(CAT, "refusing a pad after EOS: the session is finalized");
+				return None;
+			}
+			control.admissions += 1;
+		}
+
+		if self.obj().add_pad(&pad).is_err() {
+			self.cancel_admission(&pad);
+			return None;
+		}
+		if !self.owns_pad(&pad) {
+			self.cancel_admission(&pad);
+			return None;
+		}
 		self.obj().child_added(&pad, pad.name().as_str());
+		let finished = self.confirm_admission(&pad);
+		self.publish_finished(finished);
+		if !self.owns_pad(&pad) {
+			pad.reset_detached();
+			return None;
+		}
 		Some(pad.upcast())
 	}
 
 	fn release_pad(&self, pad: &gst::Pad) {
-		// CAPS takes the pad lock before the element state lock. Keep the same order here so a CAPS
-		// handler cannot insert a producer after this removal.
-		let sink_pad = pad.downcast_ref::<MoqSinkPad>();
-		let retirement = sink_pad.map(MoqSinkPad::retire_track);
-		{
+		let Some(sink_pad) = pad.downcast_ref::<MoqSinkPad>() else {
+			return;
+		};
+		if !self.owns_pad(sink_pad) {
+			sink_pad.reset_detached();
+			return;
+		}
+
+		let _ = pad.set_active(false);
+		let changes = {
 			let _rt = RUNTIME.enter();
-			if let Some(state) = self.state.lock().unwrap().as_mut() {
-				let name = pad.name();
-				if let Some(mut media) = state.pads.remove(name.as_str())
-					&& let Err(err) = media.finalize()
-				{
-					gst::warning!(CAT, "finalize on release {name}: {err:?}");
-				}
-				state.ended.remove(name.as_str());
+			let mut lifecycle = sink_pad.lifecycle();
+			if lifecycle.releasing {
+				return;
 			}
-		}
-		// The producer is gone, so the pad no longer holds a reservation: an application
-		// keeping the released pad reads what it asked for, not a name nothing publishes.
-		if let Some(retirement) = retirement {
-			retirement.release();
-		}
+			lifecycle.releasing = true;
+			if let Err(err) = lifecycle.media.finalize() {
+				gst::warning!(CAT, "finalize on release {}: {err:?}", pad.name());
+			}
+			lifecycle.reset()
+		};
 		if self.obj().remove_pad(pad).is_ok() {
 			self.obj().child_removed(pad, pad.name().as_str());
 		}
-		if let Some(sink_pad) = sink_pad {
-			sink_pad.finish_release();
-		}
-		// Removing a still-active pad can leave only already-ended pads, which now satisfies EOS.
-		self.maybe_post_eos();
+		sink_pad.lifecycle().releasing = false;
+		sink_pad.notify_changes(changes);
+		let finished = {
+			let mut control = self.control.lock().unwrap();
+			self.maybe_finish_locked(&mut control)
+		};
+		self.publish_finished(finished);
 	}
 
 	fn change_state(&self, transition: gst::StateChange) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
@@ -392,47 +407,89 @@ impl MoqSink {
 			gst::error!(CAT, obj = self.obj(), "failed to start session: {err:?}");
 			gst::StateChangeError
 		})?;
-		*self.state.lock().unwrap() = Some(State {
-			session,
-			broadcast,
-			catalog: Some(catalog),
-			pads: HashMap::new(),
-			ended: HashSet::new(),
-			eos_posted: false,
-		});
+		let error = session.error_flag();
+		let updates = {
+			let mut control = self.control.lock().unwrap();
+			control.live = Some(State {
+				session,
+				broadcast,
+				catalog: Some(catalog),
+				eos_posted: false,
+			});
+			self.obj()
+				.sink_pads()
+				.into_iter()
+				.filter_map(|pad| pad.downcast::<MoqSinkPad>().ok())
+				.map(|pad| {
+					let changes = {
+						let mut lifecycle = pad.lifecycle();
+						let changes = lifecycle.reset();
+						lifecycle.session_error = Some(error.clone());
+						changes
+					};
+					PadUpdate { pad, changes }
+				})
+				.collect::<Vec<_>>()
+		};
+		self.notify_updates(updates);
 		Ok(())
 	}
 
 	/// Finalize the producers (catalog last) and tear down the session. Finalize is best-effort: we are
 	/// tearing down regardless.
 	fn stop_session(&self) {
-		let Some(mut state) = self.state.lock().unwrap().take() else {
-			return;
+		let (mut state, updates, mut failure) = {
+			let mut control = self.control.lock().unwrap();
+			let Some(state) = control.live.take() else {
+				return;
+			};
+			let _rt = RUNTIME.enter();
+			let mut failure = None;
+			let updates = self
+				.obj()
+				.sink_pads()
+				.into_iter()
+				.filter_map(|pad| pad.downcast::<MoqSinkPad>().ok())
+				.map(|pad| {
+					let changes = {
+						let mut lifecycle = pad.lifecycle();
+						if let Err(err) = lifecycle.media.finalize() {
+							gst::warning!(CAT, "finalize {} on stop: {err:?}", pad.name());
+							if failure.is_none() {
+								failure = Some(err);
+							}
+						}
+						lifecycle.reset()
+					};
+					PadUpdate { pad, changes }
+				})
+				.collect::<Vec<_>>();
+			(state, updates, failure)
 		};
 		let _rt = RUNTIME.enter();
-		if let Err(err) = state.finalize_all() {
+		if let Some(mut catalog) = state.catalog.take()
+			&& let Err(err) = catalog.finish().context("finalize catalog")
+			&& failure.is_none()
+		{
+			failure = Some(err);
+		}
+		if let Some(err) = failure {
 			gst::warning!(CAT, "finalize on stop: {err:?}");
 		}
 		// Finish the broadcast (a deliberate end, so no dropped-without-finish
 		// warning) before reaping the session task.
 		state.broadcast.finish();
 		state.session.stop();
-		// The producers are gone, so each pad's name is configurable again for the next run.
-		for pad in self.obj().sink_pads() {
-			if let Some(pad) = pad.downcast_ref::<MoqSinkPad>() {
-				pad.release_track();
-			}
-		}
+		self.notify_updates(updates);
 	}
 
 	/// Write one buffer straight into its pad's producer. Per-pad failures (bad caps/bitstream) drop
 	/// quietly so the session and other pads keep going; an unmappable buffer or a dead session is a hard
 	/// error on this pad's streaming thread.
 	fn forward_buffer(&self, pad: &gst::Pad, buffer: gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
-		// Map and copy outside the lock: neither needs shared state, so the per-pad lock is held only for
-		// the producer write. An oversized buffer is still copied here (it already exists upstream), but
-		// moq-net rejects it (FrameTooLarge) before reserving its own group slot, and that error invalidates
-		// just this pad.
+		// Map and copy outside the lock so the per-pad lock covers only the producer write. Avoiding the
+		// copy for an oversized buffer needs a reliable, media-aware size heuristic; moq-net remains the
+		// authority and rejects FrameTooLarge before reserving its own group slot.
 		let pts = buffer.pts();
 		let map = buffer.map_readable().map_err(|_| {
 			gst::error!(CAT, "failed to map buffer on pad {}", pad.name());
@@ -440,34 +497,37 @@ impl MoqSink {
 		})?;
 		let data = Bytes::copy_from_slice(map.as_slice());
 		drop(map);
-		let Some(activity) = pad.downcast_ref::<MoqSinkPad>().and_then(MoqSinkPad::reserve_track) else {
+		let Some(pad) = pad.downcast_ref::<MoqSinkPad>() else {
 			return Err(gst::FlowError::Flushing);
 		};
 
-		// Producer writes can touch tokio time (group eviction), so hold the runtime context here.
 		let _rt = RUNTIME.enter();
-		let mut guard = self.state.lock().unwrap();
-		let Some(state) = guard.as_mut() else {
-			return Err(gst::FlowError::Flushing); // not started
+		let (outcome, changes) = {
+			let mut lifecycle = pad.lifecycle();
+			if lifecycle.releasing || lifecycle.session_error.is_none() {
+				return Err(gst::FlowError::Flushing);
+			}
+			if lifecycle
+				.session_error
+				.as_ref()
+				.is_some_and(|error| error.load(Ordering::Relaxed))
+			{
+				return Err(gst::FlowError::Error);
+			}
+			if lifecycle.media.is_failed() {
+				return Ok(gst::FlowSuccess::Ok);
+			}
+			let outcome = lifecycle.media.push_buffer(data, pts);
+			let changes = match &outcome {
+				PushOutcome::Failed(reason) => Some(lifecycle.fail(reason.clone())),
+				_ => None,
+			};
+			(outcome, changes)
 		};
-		if state.session.errored() {
-			return Err(gst::FlowError::Error);
+		let no_segment = outcome == PushOutcome::NoSegment;
+		if let Some(changes) = changes {
+			pad.notify_changes(changes);
 		}
-
-		// The pad almost always exists already (caps arrive before buffers), so look it up without
-		// allocating an owned name; only the rare first-buffer insert pays for the key.
-		let name = pad.name();
-		let media = match state.pads.get_mut(name.as_str()) {
-			Some(media) => media,
-			None => state.pads.entry(name.to_string()).or_insert_with(Pad::new),
-		};
-		if media.is_failed() {
-			return Ok(gst::FlowSuccess::Ok); // drop quietly; the pad already reported its failure
-		}
-
-		let no_segment = media.push_buffer(data, pts);
-		drop(guard);
-		drop(activity);
 
 		if no_segment {
 			gst::element_warning!(
@@ -483,108 +543,234 @@ impl MoqSink {
 	}
 
 	fn handle_event(&self, pad: &gst::Pad, event: gst::Event) -> bool {
-		let Some(reservation) = pad.downcast_ref::<MoqSinkPad>().and_then(MoqSinkPad::reserve_track) else {
+		let Some(sink_pad) = pad.downcast_ref::<MoqSinkPad>() else {
 			return false;
 		};
 		match event.view() {
 			gst::EventView::Caps(caps) => {
 				let caps = caps.caps().to_owned();
-				// Reject unsupported caps synchronously (NotNegotiated) before building a producer.
 				if !caps_supported(&caps) {
 					gst::warning!(CAT, "rejecting unsupported caps on pad {}", pad.name());
+					let changes = {
+						let _rt = RUNTIME.enter();
+						let mut lifecycle = sink_pad.lifecycle();
+						lifecycle.media.invalidate();
+						lifecycle.fail(format!("unsupported caps: {caps}"))
+					};
+					sink_pad.notify_changes(changes);
 					return false;
 				}
-				let reserved = {
+				let (changes, accepted) = {
 					let _rt = RUNTIME.enter();
-					let mut guard = self.state.lock().unwrap();
-					guard.as_mut().and_then(|state| {
-						let State {
-							broadcast,
-							catalog,
-							pads,
-							..
-						} = state;
-						let catalog = catalog.as_ref()?;
-						pads.entry(pad.name().to_string())
-							.or_insert_with(Pad::new)
-							.observe_caps(broadcast, catalog, &caps, reservation.requested())
-					})
+					let control = self.control.lock().unwrap();
+					let Some(state) = control.live.as_ref().filter(|state| !state.eos_posted) else {
+						return gst::Pad::event_default(pad, Some(&*self.obj()), event);
+					};
+					let Some(catalog) = state.catalog.as_ref() else {
+						return gst::Pad::event_default(pad, Some(&*self.obj()), event);
+					};
+					let error = state.session.error_flag();
+					let mut lifecycle = sink_pad.lifecycle();
+					if lifecycle.releasing {
+						return false;
+					}
+					let requested = lifecycle.requested().map(str::to_owned);
+					let outcome = lifecycle
+						.media
+						.observe_caps(&state.broadcast, catalog, &caps, requested.as_deref());
+					lifecycle.session_error = Some(error);
+					match outcome {
+						CapsOutcome::Active(track) => (Some(lifecycle.commit(track)), true),
+						CapsOutcome::Failed(reason) => (Some(lifecycle.fail(reason)), false),
+						CapsOutcome::Unchanged => (None, true),
+					}
 				};
-				if let Some(track) = reserved {
-					reservation.commit(track);
+				if let Some(changes) = changes {
+					sink_pad.notify_changes(changes);
 				}
-				gst::Pad::event_default(pad, Some(&*self.obj()), event)
+				accepted && gst::Pad::event_default(pad, Some(&*self.obj()), event)
 			}
 			gst::EventView::Segment(segment) => {
-				if let Some(state) = self.state.lock().unwrap().as_mut() {
-					state
-						.pads
-						.entry(pad.name().to_string())
-						.or_insert_with(Pad::new)
-						.observe_segment(segment.segment().to_owned());
+				let control = self.control.lock().unwrap();
+				let error = control
+					.live
+					.as_ref()
+					.filter(|state| !state.eos_posted)
+					.map(|state| state.session.error_flag());
+				let mut lifecycle = sink_pad.lifecycle();
+				if !lifecycle.releasing {
+					lifecycle.session_error = error;
+					if lifecycle.session_error.is_some() {
+						lifecycle.media.observe_segment(segment.segment().to_owned());
+					}
 				}
-				drop(reservation);
+				drop(lifecycle);
+				drop(control);
 				gst::Pad::event_default(pad, Some(&*self.obj()), event)
 			}
 			gst::EventView::Eos(_) => {
-				self.handle_eos(pad);
-				drop(reservation);
+				let finished = {
+					let mut control = self.control.lock().unwrap();
+					if control.live.as_ref().is_some_and(|state| !state.eos_posted) {
+						let mut lifecycle = sink_pad.lifecycle();
+						if !lifecycle.releasing {
+							lifecycle.ended = true;
+						}
+					}
+					self.maybe_finish_locked(&mut control)
+				};
+				self.publish_finished(finished);
 				gst::Pad::event_default(pad, Some(&*self.obj()), event)
 			}
-			// FLUSH_STOP re-anchors the timeline; the trailing SEGMENT is accepted fresh. The producer is
-			// kept (FLUSH is not EOS).
 			gst::EventView::FlushStop(_) => {
-				if let Some(state) = self.state.lock().unwrap().as_mut()
-					&& let Some(media) = state.pads.get_mut(pad.name().as_str())
-				{
-					media.flush();
+				let control = self.control.lock().unwrap();
+				if control.live.as_ref().is_some_and(|state| !state.eos_posted) {
+					let mut lifecycle = sink_pad.lifecycle();
+					if !lifecycle.releasing {
+						lifecycle.ended = false;
+						lifecycle.media.flush();
+					}
 				}
-				drop(reservation);
+				drop(control);
 				gst::Pad::event_default(pad, Some(&*self.obj()), event)
 			}
-			_ => {
-				let handled = gst::Pad::event_default(pad, Some(&*self.obj()), event);
-				drop(reservation);
-				handled
+			gst::EventView::StreamStart(_) => {
+				let control = self.control.lock().unwrap();
+				if control.live.as_ref().is_some_and(|state| !state.eos_posted) {
+					let mut lifecycle = sink_pad.lifecycle();
+					if !lifecycle.releasing {
+						lifecycle.ended = false;
+					}
+				}
+				drop(control);
+				gst::Pad::event_default(pad, Some(&*self.obj()), event)
+			}
+			_ => gst::Pad::event_default(pad, Some(&*self.obj()), event),
+		}
+	}
+
+	fn owns_pad(&self, pad: &MoqSinkPad) -> bool {
+		pad.parent().as_ref() == Some(self.obj().upcast_ref::<gst::Object>())
+	}
+
+	fn cancel_admission(&self, pad: &MoqSinkPad) {
+		let finished = self.finish_admission();
+		self.publish_finished(finished);
+		if self.owns_pad(pad) {
+			self.release_pad(pad.upcast_ref());
+		} else {
+			pad.reset_detached();
+		}
+	}
+
+	fn finish_admission(&self) -> Finished {
+		let mut control = self.control.lock().unwrap();
+		self.finish_admission_locked(&mut control)
+	}
+
+	fn finish_admission_locked(&self, control: &mut Control) -> Finished {
+		debug_assert!(control.admissions > 0);
+		control.admissions = control.admissions.saturating_sub(1);
+		self.maybe_finish_locked(control)
+	}
+
+	fn confirm_admission(&self, pad: &MoqSinkPad) -> Finished {
+		let mut control = self.control.lock().unwrap();
+		let error = control
+			.live
+			.as_ref()
+			.filter(|state| !state.eos_posted)
+			.map(|state| state.session.error_flag());
+		let mut lifecycle = pad.lifecycle();
+		if !lifecycle.releasing {
+			lifecycle.session_error = error;
+		}
+		drop(lifecycle);
+		self.finish_admission_locked(&mut control)
+	}
+
+	fn maybe_finish_locked(&self, control: &mut Control) -> Finished {
+		if control.admissions > 0 {
+			return Finished::default();
+		}
+		let Some(state) = control.live.as_mut() else {
+			return Finished::default();
+		};
+		let pads = self
+			.obj()
+			.sink_pads()
+			.into_iter()
+			.filter_map(|pad| pad.downcast::<MoqSinkPad>().ok())
+			.collect::<Vec<_>>();
+		let all_ended = !pads.is_empty() && pads.iter().all(|pad| pad.lifecycle().ended);
+		if !all_ended || state.eos_posted {
+			return Finished::default();
+		}
+
+		state.eos_posted = true;
+		let _rt = RUNTIME.enter();
+		let mut updates = Vec::new();
+		let mut failure = None;
+		for pad in pads {
+			let mut lifecycle = pad.lifecycle();
+			if lifecycle.releasing || !self.owns_pad(&pad) {
+				continue;
+			}
+			let result = lifecycle.media.finalize();
+			let changes = match result {
+				Ok(true) => Some(lifecycle.end()),
+				Ok(false) => None,
+				Err(err) => {
+					gst::warning!(CAT, "finalize {}: {err:?}", pad.name());
+					let reason = format!("{err:#}");
+					if failure.is_none() {
+						failure = Some(err);
+					}
+					Some(lifecycle.fail(reason))
+				}
+			};
+			drop(lifecycle);
+			if let Some(changes) = changes {
+				updates.push(PadUpdate { pad, changes });
 			}
 		}
-	}
-
-	/// Mark a pad ended, then post the element EOS if that was the last active pad.
-	fn handle_eos(&self, pad: &gst::Pad) {
-		if let Some(state) = self.state.lock().unwrap().as_mut() {
-			state.ended.insert(pad.name().to_string());
+		if let Some(mut catalog) = state.catalog.take()
+			&& let Err(err) = catalog.finish().context("finalize catalog")
+			&& failure.is_none()
+		{
+			failure = Some(err);
 		}
-		self.maybe_post_eos();
-	}
-
-	/// Finalize and post the element EOS once every active sink pad has ended. Locks internally and is
-	/// idempotent via `eos_posted`, so both the EOS handler and `release_pad` (releasing the last active
-	/// pad can satisfy aggregation for pads that already ended) can call it.
-	fn maybe_post_eos(&self) {
-		let _rt = RUNTIME.enter();
-		let mut guard = self.state.lock().unwrap();
-		let Some(state) = guard.as_mut() else {
-			return;
+		let message = match failure {
+			Some(err) => Posted::Error(format!("{err:?}")),
+			None => Posted::Eos,
 		};
-		let sink_pads = self.obj().sink_pads();
-		let all_ended = !sink_pads.is_empty() && sink_pads.iter().all(|p| state.ended.contains(p.name().as_str()));
-		if !all_ended || state.eos_posted {
-			return;
-		}
-		state.eos_posted = true;
-		let result = state.finalize_all();
-		drop(guard);
+		Finished { updates, message }
+	}
 
-		match result {
-			Ok(order) => {
-				gst::debug!(CAT, "finalized on EOS: {order:?}");
+	fn notify_updates(&self, updates: Vec<PadUpdate>) {
+		for update in updates {
+			update.pad.notify_changes(update.changes);
+		}
+	}
+
+	fn publish_finished(&self, finished: Finished) {
+		self.notify_updates(finished.updates);
+		self.post_finished(finished.message);
+	}
+
+	/// Put the finalize pass on the bus. Deliberately separate from the pass itself: `post_message` runs
+	/// the bus sync handlers on this thread, and one reading `status` or `track-error` (the reason they
+	/// exist) would take a pad's settings lock that the EOS path is still holding.
+	fn post_finished(&self, message: Posted) {
+		match message {
+			Posted::Nothing => {}
+			Posted::Eos => {
 				gst::info!(CAT, "all pads ended, posting EOS");
 				let obj = self.obj();
 				let _ = obj.post_message(gst::message::Eos::builder().src(&*obj).build());
 			}
-			Err(err) => {
-				gst::element_error!(self.obj(), gst::CoreError::Failed, ("finalize failed"), ["{err:?}"]);
+			Posted::Error(err) => {
+				gst::element_error!(self.obj(), gst::CoreError::Failed, ("finalize failed"), ["{err}"]);
 			}
 		}
 	}
@@ -592,6 +778,10 @@ impl MoqSink {
 
 #[cfg(test)]
 mod tests {
+	use std::sync::atomic::AtomicBool;
+	use std::sync::Arc;
+
+	use super::super::request_pad::Status;
 	use super::*;
 
 	fn sink() -> super::super::MoqSink {
@@ -600,6 +790,151 @@ mod tests {
 
 	fn spec(element: &super::super::MoqSink, name: &str) -> glib::ParamSpec {
 		element.find_property(name).unwrap()
+	}
+
+	#[test]
+	fn an_admission_defers_finalization_until_membership_is_stable() {
+		gst::init().unwrap();
+		let sink = sink();
+		sink.set_property("url", "https://127.0.0.1:1");
+		sink.set_property("broadcast", "test");
+		let element = sink.clone().upcast::<gst::Element>();
+		let pad = element.request_pad_simple("sink_0").expect("request sink_0");
+		element.set_state(gst::State::Paused).expect("start session");
+		assert!(pad.send_event(gst::event::StreamStart::new("test")));
+		let caps = gst::Caps::builder("video/x-h264")
+			.field("stream-format", "byte-stream")
+			.field("alignment", "au")
+			.build();
+		assert!(pad.send_event(gst::event::Caps::new(&caps)));
+
+		sink.imp().control.lock().unwrap().admissions += 1;
+		assert!(pad.send_event(gst::event::Eos::new()));
+		let pad = pad.downcast::<MoqSinkPad>().expect("MoqSinkPad");
+		assert_eq!(pad.property::<Status>("status"), Status::Active);
+
+		let finished = sink.imp().finish_admission();
+		sink.imp().publish_finished(finished);
+		assert_eq!(pad.property::<Status>("status"), Status::Ended);
+		let _ = element.set_state(gst::State::Null);
+	}
+
+	#[test]
+	fn confirming_an_admission_replaces_and_clears_stale_session_links() {
+		gst::init().unwrap();
+		let sink = sink();
+		sink.set_property("url", "https://127.0.0.1:1");
+		sink.set_property("broadcast", "test");
+		let element = sink.clone().upcast::<gst::Element>();
+		let pad = element
+			.request_pad_simple("sink_0")
+			.expect("request sink_0")
+			.downcast::<MoqSinkPad>()
+			.expect("MoqSinkPad");
+		element.set_state(gst::State::Paused).expect("start session");
+
+		let expected = sink
+			.imp()
+			.control
+			.lock()
+			.unwrap()
+			.live
+			.as_ref()
+			.expect("live session")
+			.session
+			.error_flag();
+		let stale = Arc::new(AtomicBool::new(true));
+		pad.lifecycle().session_error = Some(stale.clone());
+		sink.imp().control.lock().unwrap().admissions += 1;
+		let finished = sink.imp().confirm_admission(&pad);
+		sink.imp().publish_finished(finished);
+
+		let actual = pad.lifecycle().session_error.clone().expect("session link");
+		assert!(Arc::ptr_eq(&actual, &expected));
+		assert!(!Arc::ptr_eq(&actual, &stale));
+
+		element.set_state(gst::State::Ready).expect("stop session");
+		pad.lifecycle().session_error = Some(stale);
+		sink.imp().control.lock().unwrap().admissions += 1;
+		let finished = sink.imp().confirm_admission(&pad);
+		sink.imp().publish_finished(finished);
+		assert!(pad.lifecycle().session_error.is_none());
+		let _ = element.set_state(gst::State::Null);
+	}
+
+	#[test]
+	fn internal_release_tolerates_an_already_detached_pad() {
+		gst::init().unwrap();
+		let sink = sink();
+		let element = sink.clone().upcast::<gst::Element>();
+		let pad = element.request_pad_simple("sink_0").expect("request sink_0");
+
+		sink.imp().release_pad(&pad);
+		assert!(pad.parent().is_none());
+		sink.imp().release_pad(&pad);
+
+		let pad = pad.downcast::<MoqSinkPad>().expect("MoqSinkPad");
+		assert_eq!(pad.property::<Status>("status"), Status::Pending);
+		assert!(pad.parent().is_none());
+	}
+
+	/// A finalize pass can apply clean and failed outcomes before notifying either pad.
+	#[test]
+	fn a_partial_finalization_reports_both_outcomes() {
+		gst::init().unwrap();
+		let sink = sink();
+		let element = sink.clone().upcast::<gst::Element>();
+		let ended = element.request_pad_simple("sink_0").expect("request sink_0");
+		let failed = element.request_pad_simple("sink_1").expect("request sink_1");
+		let ended = ended.downcast::<MoqSinkPad>().expect("sink_0 is a MoqSinkPad");
+		let failed = failed.downcast::<MoqSinkPad>().expect("sink_1 is a MoqSinkPad");
+
+		let ended_changes = ended.lifecycle().end();
+		let failed_changes = failed.lifecycle().fail("finalize sink_1: closed".to_string());
+		sink.imp().notify_updates(vec![
+			PadUpdate {
+				pad: ended.clone(),
+				changes: ended_changes,
+			},
+			PadUpdate {
+				pad: failed.clone(),
+				changes: failed_changes,
+			},
+		]);
+
+		assert_eq!(ended.property::<Status>("status"), Status::Ended);
+		assert_eq!(ended.property::<Option<String>>("track-error"), None);
+		assert_eq!(
+			failed.property::<Status>("status"),
+			Status::Error,
+			"a producer that would not close leaves its pad in error, not ended"
+		);
+		assert_eq!(
+			failed.property::<Option<String>>("track-error").as_deref(),
+			Some("finalize sink_1: closed")
+		);
+	}
+
+	// The element still owes the bus a failure, even though each pad reported its own.
+	#[test]
+	fn a_finalize_failure_reaches_the_bus() {
+		gst::init().unwrap();
+		let sink = sink();
+		let element = sink.clone().upcast::<gst::Element>();
+		let bus = gst::Bus::new();
+		element.set_bus(Some(&bus));
+
+		sink.imp()
+			.post_finished(Posted::Error("finalize sink_1: closed".to_string()));
+
+		let message = bus.pop().expect("the element posted a message");
+		let gst::MessageView::Error(error) = message.view() else {
+			panic!("expected an error message, got {:?}", message.type_());
+		};
+		assert!(
+			error.debug().is_some_and(|debug| debug.contains("closed")),
+			"the reason travels with the message"
+		);
 	}
 
 	#[test]

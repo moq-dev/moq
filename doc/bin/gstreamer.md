@@ -260,6 +260,21 @@ element (back to `READY`) releases the reservation and makes it writable again. 
 the generated name. A name another pad already holds invalidates only that pad, so the rest of the
 broadcast keeps publishing.
 
+Each pad also reports what its track is doing, so a publication can be diagnosed without reading the
+logs or asking a consumer:
+
+| Property      | Type   | Description                                       |
+| ------------- | ------ | ------------------------------------------------- |
+| `status`      | enum   | `pending` until CAPS builds a producer, `active` once the broadcast reserved the track, `ended` when it was finalized, `error` when the pad was invalidated |
+| `track-error` | string | Why the pad was invalidated, null when it was not  |
+
+Both emit `notify`, so an application can connect to `notify::status` rather than poll. `active`
+means the producer exists and the track is registered, not merely that the pad was requested, and a
+pad that sent EOS stays `active` until every pad has ended and the producers are finalized. `error`
+is terminal: it survives EOS, and clears when the pad is released or the element goes back to
+`READY`. A pad still waiting for CAPS is `pending` with no error, because nothing has failed yet.
+Connection loss is the element's own `status`, not the pad's.
+
 A pad negotiated as `application/octet-stream` publishes application data instead of media. The bytes
 go out exactly as they arrive: no codec, no container, no interpretation.
 

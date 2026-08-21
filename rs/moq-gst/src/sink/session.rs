@@ -183,9 +183,9 @@ impl Session {
 		self.recv_bandwidth.peek().unwrap_or(0)
 	}
 
-	/// Whether the transport has hit a fatal error (the pad streaming threads stop feeding it on this).
-	pub fn errored(&self) -> bool {
-		self.errored.load(Ordering::Relaxed)
+	/// Share the fatal-session flag with a pad's buffer path.
+	pub fn error_flag(&self) -> Arc<AtomicBool> {
+		self.errored.clone()
 	}
 
 	/// Stop the session: a clean local close, never an error. [`Drop`] aborts the task, cancelling the
@@ -252,9 +252,9 @@ async fn forward(
 					// The reconnect loop stopped on a terminal error (a non-retryable auth failure, or a
 					// bounded backoff's give-up). Flag `errored` so the pad threads stop feeding a dead
 					// session, and post a fatal element error.
+					errored.store(true, Ordering::Relaxed);
 					status.set(ConnectionStatus::Failed, None);
 					notify(&element, &["status", "connected", "moq-version"]);
-					errored.store(true, Ordering::Relaxed);
 					if let Some(obj) = element.upgrade() {
 						gst::element_error!(obj, gst::CoreError::Failed, ("session error"), ["{err:?}"]);
 					}
