@@ -126,6 +126,21 @@ _select $FILES:
     	| "--package \(.id)"
     ' <<< "$metadata" | sort -u | tr '\n' ' '
 
+# Bare crate names for the `--package <id>` flags `_select` emits, for log lines
+# and for the wasm gate's alternation below. Matching names rather than the flag
+# spelling keeps those call sites working whatever spec form `_select` uses; the
+# previous alternation matched `--package <name>` literally and silently stopped
+# firing the moment the spec form changed. Ids are `path+file://<dir>#<version>`
+# and `_select` has already verified every crate directory matches its crate
+# name, so the last path segment is the name.
+
+# Print the crate names behind a list of `--package` flags.
+[private]
+_names $PACKAGES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tr ' ' '\n' <<< "$PACKAGES" | sed -n 's|.*/\([^/#]*\)#.*|\1|p' | sort -u | tr '\n' ' '
+
 # Takes a newline-separated list of changed files; skips when no crate is
 # affected. The `just rs ...` calls below go through the root justfile's
 # `mod rs` because these recipes run from the repo root, where a bare `check`
@@ -139,7 +154,7 @@ check-changed $FILES:
     case "$packages" in
     	"")    echo "rs: no crates affected; skipping." ;;
     	ALL)   just rs check --workspace ;;
-    	*)     echo "rs: checking ${packages//--package /}"; just rs check $packages ;;
+    	*)     echo "rs: checking $(just rs _names "$packages")"; just rs check $packages ;;
     esac
 
     # moq-wasm's crate root is entirely `#![cfg(target_arch = "wasm32")]`, so
@@ -150,7 +165,7 @@ check-changed $FILES:
     # nothing in the workspace depends on moq-ffi, so an moq-ffi-only diff selects
     # only itself and would never reach the gate that exists to cover it. moq-mux
     # is selected by its dependents, none of which are moq-wasm.
-    if [[ "$packages" == "ALL" ]] || grep -qE -- '--package (moq-wasm|moq-mux|moq-ffi)' <<< "$packages"; then
+    if [[ "$packages" == "ALL" ]] || grep -qwE '(moq-wasm|moq-mux|moq-ffi)' <<< "$(just rs _names "$packages")"; then
     	just rs wasm
     fi
 
@@ -162,12 +177,12 @@ fix-changed $FILES:
     case "$packages" in
     	"")    echo "rs: no crates affected; skipping." ;;
     	ALL)   just rs fix --workspace ;;
-    	*)     echo "rs: fixing ${packages//--package /}"; just rs fix $packages ;;
+    	*)     echo "rs: fixing $(just rs _names "$packages")"; just rs fix $packages ;;
     esac
 
     # Mirrors `check-changed`'s gate, alternation included: without this a wasm32
     # lint is never auto-fixed, and `check`'s wasm32 clippy pass fails on it later.
-    if [[ "$packages" == "ALL" ]] || grep -qE -- '--package (moq-wasm|moq-mux|moq-ffi)' <<< "$packages"; then
+    if [[ "$packages" == "ALL" ]] || grep -qwE '(moq-wasm|moq-mux|moq-ffi)' <<< "$(just rs _names "$packages")"; then
     	just rs wasm-fix
     fi
 
@@ -321,7 +336,7 @@ test-changed $FILES:
     case "$packages" in
     	"")    echo "rs: no crates affected; skipping tests." ;;
     	ALL)   just rs test --workspace ;;
-    	*)     echo "rs: testing ${packages//--package /}"; just rs test --no-tests=pass $packages ;;
+    	*)     echo "rs: testing $(just rs _names "$packages")"; just rs test --no-tests=pass $packages ;;
     esac
 
 # Compile and run the `/// ```` examples, which nextest skips.
