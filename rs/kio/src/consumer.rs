@@ -115,9 +115,11 @@ impl<T> Drop for Consumer<T> {
 		// We were the last consumer, so wake the `unused()` waiters. The value
 		// and closed waiters don't care about the consumer count, so leave
 		// them alone.
-		let mut waiters = {
+		let waiters = {
 			let mut state = self.state.lock();
-			state.waiters_consumer.take()
+			let mut batch = crate::WakeBatch::take();
+			state.waiters_consumer.drain_into(&mut batch);
+			batch
 		};
 
 		waiters.wake();

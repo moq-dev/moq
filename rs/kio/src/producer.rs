@@ -49,8 +49,11 @@ impl<T> Producer<T> {
 
 		// Wake `used()` waiters when the first consumer appears.
 		if prev == 0 {
-			let mut waiters = self.state.lock().waiters_consumer.take();
-			waiters.wake();
+			let mut batch = crate::WakeBatch::take();
+			let mut state = self.state.lock();
+			state.waiters_consumer.drain_into(&mut batch);
+			drop(state);
+			batch.wake();
 		}
 
 		Consumer {
@@ -297,7 +300,7 @@ impl<T> Clone for Producer<T> {
 
 impl<T> Drop for Producer<T> {
 	fn drop(&mut self) {
-		let mut waiters = {
+		let waiters = {
 			// The count moves under the state lock, in step with the closed flag it
 			// decides. Decrementing outside it would let `ProducerWeak::produce` slip
 			// between the decrement and the close, handing back a producer for a
@@ -314,12 +317,12 @@ impl<T> Drop for Producer<T> {
 			// (value/closed resolve, `used`/`unused` resolve to `None`), so drain
 			// every list and wake them once the lock is released.
 			state.closed = true;
-			state.take_close_waiters()
+			let mut batch = crate::WakeBatch::take();
+			state.drain_close_waiters(&mut batch);
+			batch
 		};
 
-		for list in &mut waiters {
-			list.wake();
-		}
+		waiters.wake();
 	}
 }
 
@@ -375,22 +378,20 @@ impl<T> Drop for Mut<'_, T> {
 			return;
 		}
 
-		// Drain wakers while holding lock, then wake after releasing.
-		// A modification that also closed the channel (e.g. `close()`) must
-		// wake the closed and consumer-count waiters too, since they resolve
-		// on closure. A plain modification touches only the value waiters.
-		let mut waiters_value = state.waiters_value.take();
-		let extra = state
-			.closed
-			.then(|| [state.waiters_closed.take(), state.waiters_consumer.take()]);
-		drop(state); // Release Mutex BEFORE waking
-
-		waiters_value.wake();
-		if let Some(mut extra) = extra {
-			for list in &mut extra {
-				list.wake();
-			}
+		// Drain wakers while holding the lock, wake after releasing it: a waker is
+		// arbitrary code and may re-enter. A modification that also closed the
+		// channel (e.g. `close()`) must wake the closed and consumer-count waiters
+		// too, since they resolve on closure. A plain modification touches only the
+		// value waiters.
+		let mut batch = crate::WakeBatch::take();
+		let inner = &mut *state;
+		inner.waiters_value.drain_into(&mut batch);
+		if inner.closed {
+			inner.waiters_closed.drain_into(&mut batch);
+			inner.waiters_consumer.drain_into(&mut batch);
 		}
+		drop(state); // Release Mutex BEFORE waking
+		batch.wake();
 	}
 }
 

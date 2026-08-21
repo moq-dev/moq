@@ -112,8 +112,11 @@ impl<T> ProducerWeak<T> {
 
 		// Wake `used()` waiters when the first consumer appears.
 		if prev == 0 {
-			let mut waiters = self.state.lock().waiters_consumer.take();
-			waiters.wake();
+			let mut batch = crate::WakeBatch::take();
+			let mut state = self.state.lock();
+			state.waiters_consumer.drain_into(&mut batch);
+			drop(state);
+			batch.wake();
 		}
 
 		Consumer {
@@ -258,8 +261,11 @@ impl<T> ConsumerWeak<T> {
 
 		// Wake `used()` waiters when the first consumer appears.
 		if prev == 0 {
-			let mut waiters = self.state.lock().waiters_consumer.take();
-			waiters.wake();
+			let mut batch = crate::WakeBatch::take();
+			let mut state = self.state.lock();
+			state.waiters_consumer.drain_into(&mut batch);
+			drop(state);
+			batch.wake();
 		}
 
 		Consumer {

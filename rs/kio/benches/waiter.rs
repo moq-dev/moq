@@ -16,7 +16,7 @@
 use std::task::{Context, Waker};
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use kio::{Park, Waiter, WaiterList};
+use kio::{Park, Waiter, WaiterList, WakeBatch};
 
 /// Live-waiter populations to sweep. The top end is the inline capacity, past which
 /// the list spills to the heap.
@@ -121,7 +121,9 @@ fn bench_park_cycle(c: &mut Criterion) {
 				for list in &mut lists {
 					waiter.register(list);
 				}
-				lists[0].wake();
+				let mut batch = WakeBatch::take();
+				lists[0].drain_into(&mut batch);
+				batch.wake();
 			});
 		});
 	}
@@ -145,8 +147,10 @@ fn bench_fanout_cycle(c: &mut Criterion) {
 				for waiter in &waiters {
 					waiter.register(&mut list);
 				}
-				// Drain the production way: snapshot under the lock, wake outside.
-				list.take().wake();
+				// Drain the production way: drain under the lock, wake outside.
+				let mut batch = WakeBatch::take();
+				list.drain_into(&mut batch);
+				batch.wake();
 			});
 		});
 	}
@@ -176,8 +180,10 @@ fn bench_fanout_cycle_parked(c: &mut Criterion) {
 					waiter.register(&mut list);
 					waiter.register(&mut parked);
 				}
-				// Drain the production way: snapshot under the lock, wake outside.
-				list.take().wake();
+				// Drain the production way: drain under the lock, wake outside.
+				let mut batch = WakeBatch::take();
+				list.drain_into(&mut batch);
+				batch.wake();
 			});
 		});
 	}

@@ -55,7 +55,7 @@ pub use producer::{Mut, Producer, Ref};
 pub use queue::{PushError, Queue};
 pub use send::MaybeSend;
 pub use shared::Shared;
-pub use waiter::{Fan, Hold, Park, Waiter, WaiterList, wait};
+pub use waiter::{Fan, Hold, Park, Waiter, WaiterList, WakeBatch, wait};
 pub use weak::{ConsumerWeak, ProducerWeak, Weak};
 
 /// The channel closed before the awaited condition held.
@@ -111,14 +111,12 @@ impl<T> State<T> {
 		}
 	}
 
-	/// Drain every waiter list. Used on close, which all waiters react to.
-	/// Caller wakes the returned lists after releasing the lock.
-	pub fn take_close_waiters(&mut self) -> [waiter::WaiterList; 3] {
-		[
-			self.waiters_value.take(),
-			self.waiters_closed.take(),
-			self.waiters_consumer.take(),
-		]
+	/// Drain every waiter list into `batch`. Used on close, which all waiters
+	/// react to. Caller wakes the batch after releasing the lock.
+	pub fn drain_close_waiters(&mut self, batch: &mut waiter::WakeBatch) {
+		self.waiters_value.drain_into(batch);
+		self.waiters_closed.drain_into(batch);
+		self.waiters_consumer.drain_into(batch);
 	}
 }
 

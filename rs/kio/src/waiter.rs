@@ -16,34 +16,6 @@ use crate::{
 	sync::Mutex,
 };
 
-/// Number of slots stored inline before spilling to the heap.
-///
-/// Sized for the common list, not the worst one. The array lives inside the
-/// enclosing `Arc<Mutex<State<T>>>`, so every list pays it whether or not
-/// anything ever parks, and a state cell holds three lists. At 32 that was 840 B
-/// of mostly-empty slots on every channel; downstream in moq-net a broadcast
-/// holds four to five cells and a cached group holds one, so it dominated their
-/// footprint.
-///
-/// It cannot go to zero, because `take()` moves the entries out to be woken
-/// outside the lock: a spilled list hands its heap buffer to the snapshot, which
-/// frees it, so the capacity does not survive a wake and the next registration
-/// re-allocates. Inline slots have no such cost. That makes this the count of
-/// waiters a list can hold without allocating once per wake, measured per
-/// take/wake cycle:
-///
-/// | inline | `WaiterList` | allocs/cycle at 2 / 4 / 8 waiters |
-/// |---|---|---|
-/// | 32 | 296 B | 0 / 0 / 0 |
-/// | 8 | 104 B | 0 / 0 / 0 |
-/// | 4 | 72 B | 0 / 0 / 1 |
-/// | 2 | 56 B | 0 / 1 / 2 |
-///
-/// 4 keeps the steady state allocation-free for the small lists that dominate
-/// while giving back most of the memory. A genuinely hot fan-out list spills
-/// under any of these; it did at 32 too.
-const INLINE_WAITERS: usize = 4;
-
 /// Registrations remembered per waiter identity for O(1) dedup. A poll typically
 /// parks on a small handful of lists; a poll cycling through more than this many
 /// evicts its own records and falls back to the scan, so the cap bounds memory,
@@ -206,20 +178,17 @@ impl Clone for Waiter {
 /// is unreachable in any process lifetime.
 static NEXT_LIST_ID: AtomicU64 = AtomicU64::new(1);
 
-/// The id of a list that opts out of record-keeping: [`WaiterList::take`] snapshots,
-/// which exist to be woken, not registered with. Never handed out by
-/// [`NEXT_LIST_ID`], so no record can ever match one, and registering into such a
-/// list just uses the scan fallback.
-const UNTRACKED: u64 = 0;
-
 /// A list of weak wakers waiting for notification.
 ///
-/// Slots live inline (up to `INLINE_WAITERS`) and only spill to the heap
-/// for unusually high concurrency. A rotating cursor amortizes garbage
-/// collection across many `register` calls so the list doesn't grow
-/// unboundedly while keeping per-call cost O(1).
+/// Entries live in a `Vec` that the list keeps across wakes: [`drain_into`] empties
+/// it without moving the allocation out, so a list that has spilled does not
+/// re-allocate on the next registration. A rotating cursor amortizes garbage
+/// collection across many `register` calls so the list doesn't grow unboundedly
+/// while keeping per-call cost O(1).
+///
+/// [`drain_into`]: Self::drain_into
 pub struct WaiterList {
-	entries: SmallVec<[Weak<Identity>; INLINE_WAITERS]>,
+	entries: Vec<Weak<Identity>>,
 	/// Rotating cursor for opportunistic GC on `register`.
 	cursor: usize,
 	/// Never-reused identity for this list, paired with `epoch` in waiter records.
@@ -227,6 +196,118 @@ pub struct WaiterList {
 	/// Bumped on every drain. A waiter whose record carries the current epoch is
 	/// still registered: live entries only ever leave through a drain.
 	epoch: u64,
+}
+
+/// Scratch buffer for waking outside the lock, kept per thread so the wake path
+/// allocates nothing in steady state.
+///
+/// Wakes cannot happen under the lock (a waker is arbitrary code and may re-enter),
+/// so the live waiters have to be carried out of the critical section somehow.
+/// Moving the list's own buffer out does that but hands the allocation to a
+/// temporary that frees it, so neither side keeps its capacity. Draining into this
+/// instead leaves the list's buffer in place, and this one is reused, so both sides
+/// keep theirs.
+///
+/// Taken out while waking rather than borrowed across it: a waker that re-enters
+/// kio and reaches another wake finds the slot empty and allocates its own buffer,
+/// which is slower but correct. Borrowing across the wake would panic instead.
+/// `SCRATCH_MAX` refuses to park a buffer one huge fan-out grew, so a
+/// 100k-subscriber broadcast cannot pin that allocation to a thread forever.
+const SCRATCH_MAX: usize = 256;
+
+thread_local! {
+	static SCRATCH: std::cell::Cell<Vec<Arc<Identity>>> = const { std::cell::Cell::new(Vec::new()) };
+}
+
+/// Live waiters pulled out of one or more [`WaiterList`]s, to be woken once the
+/// lock is released.
+///
+/// Wakes cannot happen under the lock (a waker is arbitrary code and may re-enter),
+/// so the live waiters have to be carried out of the critical section somehow.
+/// Moving a list's own buffer out does that, but hands the allocation to a
+/// temporary that frees it, so neither the list nor the wake path keeps its
+/// capacity. Draining into this leaves each list's buffer in place, and this one
+/// comes from a per-thread slot, so both sides keep theirs and the steady state
+/// allocates nothing.
+///
+/// Usage is drain, unlock, wake, in that order:
+///
+/// ```ignore
+/// let mut batch = WakeBatch::take();
+/// state.waiters_value.drain_into(&mut batch);
+/// drop(state); // release the lock
+/// batch.wake();
+/// ```
+///
+/// The buffer is taken out of the slot rather than borrowed across the wake: a
+/// waker that re-enters kio and reaches another wake finds the slot empty and
+/// allocates its own, which is slower but correct. Borrowing across the wake would
+/// panic instead.
+pub struct WakeBatch {
+	/// The overwhelmingly common wake: nobody parked, or one task did. Held inline
+	/// so that case never touches the thread-local slot, which costs more than the
+	/// copy it would save.
+	one: Option<Arc<Identity>>,
+	/// Everything past the first, borrowed from the thread-local slot on first use.
+	rest: Vec<Arc<Identity>>,
+}
+
+impl WakeBatch {
+	/// An empty batch. The thread-local buffer is claimed lazily, on the second
+	/// waiter, so a wake with none or one allocates and borrows nothing.
+	pub fn take() -> Self {
+		Self {
+			one: None,
+			rest: Vec::new(),
+		}
+	}
+
+	fn push(&mut self, identity: Arc<Identity>) {
+		if self.one.is_none() {
+			self.one = Some(identity);
+			return;
+		}
+
+		if self.rest.capacity() == 0 {
+			self.rest = SCRATCH.with(|slot| slot.take());
+		}
+		self.rest.push(identity);
+	}
+
+	/// Wake everything drained into this batch. The buffer goes back on drop.
+	pub fn wake(mut self) {
+		if let Some(identity) = self.one.take() {
+			identity.waker.wake_by_ref();
+		}
+
+		for identity in self.rest.drain(..) {
+			identity.waker.wake_by_ref();
+		}
+	}
+}
+
+impl Drop for WakeBatch {
+	/// Hand the buffer back, so an early return or an unwind between `take` and
+	/// `wake` costs the thread its buffer for one call rather than for good.
+	fn drop(&mut self) {
+		debug_assert!(
+			self.one.is_none() && self.rest.is_empty(),
+			"WakeBatch dropped with waiters still in it"
+		);
+		self.one = None;
+		self.rest.clear();
+
+		let buffer = std::mem::take(&mut self.rest);
+		if buffer.capacity() > 0 && buffer.capacity() <= SCRATCH_MAX {
+			SCRATCH.with(|slot| slot.set(buffer));
+		}
+	}
+}
+
+impl Default for WakeBatch {
+	fn default() -> Self {
+		Self::take()
+	}
 }
 
 impl WaiterList {
@@ -250,7 +331,7 @@ impl WaiterList {
 		}
 
 		Self {
-			entries: SmallVec::new(),
+			entries: Vec::new(),
 			cursor: 0,
 			id,
 			epoch: 0,
@@ -274,10 +355,7 @@ impl WaiterList {
 	pub fn register(&mut self, waiter: &Waiter) {
 		let shared = waiter.shared();
 
-		let presence = match self.id {
-			UNTRACKED => Presence::Unknown,
-			id => shared.presume(id, self.epoch),
-		};
+		let presence = shared.presume(self.id, self.epoch);
 
 		match presence {
 			// Still registered since the last drain: nothing to do. This is what
@@ -316,30 +394,25 @@ impl WaiterList {
 		self.entries.push(new_weak);
 	}
 
-	/// Drain all entries into a new [`WaiterList`], leaving this one empty.
-	pub fn take(&mut self) -> Self {
-		self.cursor = 0;
-		self.epoch = self.epoch.checked_add(1).expect("waiter list epoch overflow");
-		Self {
-			entries: std::mem::take(&mut self.entries),
-			cursor: 0,
-			// This runs on every notification, so the snapshot must not touch the
-			// global id counter (a shared cache line across all channels). It is
-			// untracked instead: it exists to be woken, and registering into it
-			// falls back to the scan rather than impersonating this list.
-			id: UNTRACKED,
-			epoch: 0,
-		}
+	/// Drain and wake in one step. Test-only: real callers must drain under the
+	/// lock and wake after releasing it, which is what [`WakeBatch`] is for.
+	#[cfg(test)]
+	fn wake_now(&mut self) {
+		let mut batch = WakeBatch::take();
+		self.drain_into(&mut batch);
+		batch.wake();
 	}
 
-	/// Wake all live waiters, draining the list.
-	pub fn wake(&mut self) {
+	/// Move live waiters into `out`, leaving this list empty but keeping its
+	/// buffer, so a list that has spilled does not re-allocate on the next
+	/// registration.
+	pub fn drain_into(&mut self, out: &mut WakeBatch) {
 		self.cursor = 0;
 		// Fail closed rather than wrap: a wrapped epoch would let a stale record
 		// claim presence. Unreachable in practice (2^64 drains of one list).
 		self.epoch = self.epoch.checked_add(1).expect("waiter list epoch overflow");
 		for identity in self.entries.drain(..).filter_map(|w| w.upgrade()) {
-			identity.waker.wake_by_ref();
+			out.push(identity);
 		}
 	}
 }
@@ -521,7 +594,7 @@ impl<T> FanInner<T> {
 			return;
 		};
 
-		let mut waiters = {
+		let waiters = {
 			let mut state = lock.lock();
 
 			// A wake can block on the target after the first check. Recheck while the
@@ -533,7 +606,9 @@ impl<T> FanInner<T> {
 				return;
 			}
 
-			(self.project)(&mut state).take()
+			let mut batch = WakeBatch::take();
+			(self.project)(&mut state).drain_into(&mut batch);
+			batch
 		};
 
 		// Outside both locks: a waker may resume its task inline, and a resumed waiter's
@@ -915,7 +990,7 @@ mod tests {
 		);
 
 		// The wakeup still reaches it.
-		list.wake();
+		list.wake_now();
 	}
 
 	#[test]
@@ -942,7 +1017,7 @@ mod tests {
 		assert_eq!(list.entries.len(), 1, "re-registration stacked a duplicate");
 
 		// The wake drains the list; poll 3 reuses the same waiter and registers anew.
-		list.wake();
+		list.wake_now();
 		let waiter = park.hold(&cx);
 		assert!(Arc::ptr_eq(&first, waiter.shared()), "a drained waiter was not reused");
 		waiter.register(&mut list);
@@ -992,38 +1067,11 @@ mod tests {
 		// A wake drains the registration; the stale record must not convince the
 		// next register that it is still present, or its wakeup is lost.
 		waiter.register(&mut list);
-		list.wake();
+		list.wake_now();
 		assert_eq!(list.entries.len(), 0);
 		waiter.register(&mut list);
 		assert_eq!(list.entries.len(), 1);
 		assert!(list.entries[0].strong_count() > 0, "the registration must be live");
-
-		// Same for a drain via take.
-		let taken = list.take();
-		assert_eq!(list.entries.len(), 0);
-		drop(taken);
-		waiter.register(&mut list);
-		assert_eq!(list.entries.len(), 1);
-		assert!(list.entries[0].strong_count() > 0, "the registration must be live");
-	}
-
-	#[test]
-	fn a_taken_snapshot_tracks_nothing() {
-		let waiter = Waiter::new(Waker::noop().clone());
-		let mut list = WaiterList::new();
-		waiter.register(&mut list);
-
-		// The snapshot inherits the entries but no identity of its own, so a
-		// register against it must settle membership by scan: the entry moved with
-		// the snapshot, so this dedups rather than stacking.
-		let mut taken = list.take();
-		waiter.register(&mut taken);
-		assert_eq!(taken.entries.len(), 1, "the snapshot register stacked a duplicate");
-
-		// And a second waiter still gets in; untracked means unproven, not closed.
-		let other = Waiter::new(Waker::noop().clone());
-		other.register(&mut taken);
-		assert_eq!(taken.entries.len(), 2);
 	}
 
 	#[test]
@@ -1056,7 +1104,7 @@ mod tests {
 		let shared = waiter.shared().clone();
 
 		// One list wakes; the other still holds a live registration.
-		first.wake();
+		first.wake_now();
 
 		// Poll 2 reuses the waiter and re-registers with both: an append into the
 		// drained list, a no-op in the still-parked one.
@@ -1109,7 +1157,7 @@ mod tests {
 		// A wakeup drains the entry, so the next poll picks that same waiter back up
 		// rather than allocating another.
 		let shared = park.0.as_ref().unwrap().shared().clone();
-		list.wake();
+		list.wake_now();
 		assert!(
 			Arc::ptr_eq(&shared, park.hold(&cx).shared()),
 			"the constructed waiter was not reused"

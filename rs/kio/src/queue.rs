@@ -107,7 +107,7 @@ impl<T> Queue<T> {
 
 	/// Push without waiting, or hand the item back when closed or (if bounded) full.
 	pub fn try_push(&self, item: T) -> Result<(), PushError<T>> {
-		let mut waiters = {
+		let waiters = {
 			let mut state = self.state.lock();
 			if state.closed {
 				return Err(PushError::Closed(item));
@@ -116,7 +116,9 @@ impl<T> Queue<T> {
 				return Err(PushError::Full(item));
 			}
 			state.queue.push_back(item);
-			state.waiters_pop.take()
+			let mut batch = crate::WakeBatch::take();
+			state.waiters_pop.drain_into(&mut batch);
+			batch
 		};
 		waiters.wake();
 		Ok(())
@@ -131,7 +133,7 @@ impl<T> Queue<T> {
 	///
 	/// Registers `waiter` while full; a pop or close re-polls it.
 	pub fn poll_push_with<F: FnOnce() -> T>(&self, waiter: &Waiter, make: F) -> Poll<Result<(), Closed>> {
-		let mut waiters = {
+		let waiters = {
 			let mut state = self.state.lock();
 			if state.closed {
 				return Poll::Ready(Err(Closed));
@@ -142,7 +144,9 @@ impl<T> Queue<T> {
 			}
 			let item = make();
 			state.queue.push_back(item);
-			state.waiters_pop.take()
+			let mut batch = crate::WakeBatch::take();
+			state.waiters_pop.drain_into(&mut batch);
+			batch
 		};
 		waiters.wake();
 		Poll::Ready(Ok(()))
@@ -164,10 +168,14 @@ impl<T> Queue<T> {
 	/// `Ok(None)` means the queue is empty but still open. Queued items drain
 	/// before closure is reported: [`Closed`] means empty *and* closed.
 	pub fn try_pop(&self) -> Result<Option<T>, Closed> {
-		let (item, mut waiters) = {
+		let (item, waiters) = {
 			let mut state = self.state.lock();
 			match state.queue.pop_front() {
-				Some(item) => (item, state.waiters_push.take()),
+				Some(item) => {
+					let mut batch = crate::WakeBatch::take();
+					state.waiters_push.drain_into(&mut batch);
+					(item, batch)
+				}
 				None if state.closed => return Err(Closed),
 				None => return Ok(None),
 			}
@@ -181,10 +189,14 @@ impl<T> Queue<T> {
 	/// Queued items drain before closure is reported, so [`Closed`] means empty
 	/// *and* closed. Registers `waiter` while empty; a push or close re-polls it.
 	pub fn poll_pop(&self, waiter: &Waiter) -> Poll<Result<T, Closed>> {
-		let (item, mut waiters) = {
+		let (item, waiters) = {
 			let mut state = self.state.lock();
 			match state.queue.pop_front() {
-				Some(item) => (item, state.waiters_push.take()),
+				Some(item) => {
+					let mut batch = crate::WakeBatch::take();
+					state.waiters_push.drain_into(&mut batch);
+					(item, batch)
+				}
 				None if state.closed => return Poll::Ready(Err(Closed)),
 				None => {
 					waiter.register(&mut state.waiters_pop);
@@ -206,18 +218,19 @@ impl<T> Queue<T> {
 	/// Close the queue: pushes fail from here on, pops drain what's queued and then
 	/// report [`Closed`]. Idempotent.
 	pub fn close(&self) {
-		let mut waiters = {
+		let waiters = {
 			let mut state = self.state.lock();
 			if state.closed {
 				return;
 			}
 			state.closed = true;
 			// Every waiter reacts to closure; wake both sides after unlocking.
-			[state.waiters_pop.take(), state.waiters_push.take()]
+			let mut batch = crate::WakeBatch::take();
+			state.waiters_pop.drain_into(&mut batch);
+			state.waiters_push.drain_into(&mut batch);
+			batch
 		};
-		for list in &mut waiters {
-			list.wake();
-		}
+		waiters.wake();
 	}
 
 	/// Whether [`close`](Self::close) has been called. Items may still be queued.
