@@ -2714,12 +2714,13 @@ fn count_pid(frames: &[Frame], pid: u16) -> usize {
 		.sum()
 }
 
-/// #2934: a revised SI snapshot rides the next media frame instead of waiting out
-/// the repetition interval. For a clock table (TDT/TOT) the old interval-grid hold
+/// #2934: a revised SI snapshot goes out on the revision floor instead of waiting
+/// out the repetition interval (here the floor has long elapsed, so it rides the
+/// very next frame). For a clock table (TDT/TOT) the old interval-grid hold
 /// delivered the asserted time up to a whole 30 s slot late, and a source ticking
 /// slower than the grid had its stale value re-sent, stepping receivers backwards.
 #[tokio::test(start_paused = true)]
-async fn si_revision_rides_the_next_frame() {
+async fn si_revision_does_not_wait_for_the_interval() {
 	let tick = |mjd: u8| make_short_section(0x70, &[0xc0, mjd, 0x12, 0x34, 0x56]);
 	let mut rig = si_cadence_rig(0x0014, 0x70, Duration::from_secs(30)).await;
 
@@ -2771,10 +2772,10 @@ async fn si_repeats_are_floored_from_the_last_emission() {
 	assert_eq!(rig.media(5_500, 0x0011).await, 1, "repeat 2s after the revision");
 }
 
-/// A reordered (B-frame) timestamp below the emission anchor earns no credit: a
-/// revision arriving there is deferred (elapsed time saturates at zero), and the
-/// anchor itself never moves backwards, so neither revisions nor repeats can fire
-/// early off the reorder span.
+/// A reordered (B-frame) timestamp below the emission anchor earns no credit:
+/// `si_due` saturates elapsed time, so a revision arriving there is deferred, the
+/// anchor never moves backwards, and neither revisions nor repeats can fire early
+/// off the reorder span.
 #[tokio::test(start_paused = true)]
 async fn si_reordered_frames_earn_no_emission_credit() {
 	let section = |version: u8| make_long_section(0x42, 1, version, 0, 0, &[version; 8]);

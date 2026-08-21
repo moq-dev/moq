@@ -190,11 +190,11 @@ struct SiTrack {
 	/// A group still being read; swapped into `active` when it ends, so a torn
 	/// half-received snapshot is never emitted.
 	pending: Option<(moq_net::group::Consumer, super::si::Snapshot)>,
-	/// A promoted snapshot changed `active` and has not hit the wire yet: emit with
-	/// the next frame instead of waiting out the repetition interval. For a clock
-	/// table (TDT/TOT) the cadence is the content, so holding a revision to the
-	/// interval delivers the time seconds late and can re-assert an already-sent
-	/// value (#2934).
+	/// A promoted snapshot changed `active` and has not hit the wire yet: emit on
+	/// the revision floor ([`SI_REVISION_INTERVAL`]) instead of waiting out the
+	/// repetition interval. For a clock table (TDT/TOT) the cadence is the content,
+	/// so holding a revision to the interval delivers the time seconds late and can
+	/// re-assert an already-sent value (#2934).
 	dirty: bool,
 	/// Media timestamp of the last emission ([`Export::write_frame`]).
 	last_emit: Option<Timestamp>,
@@ -1055,13 +1055,11 @@ impl<E: catalog::Catalog> Export<E> {
 			})
 			.map(|((pid, _), si)| {
 				si.dirty = false;
-				// The anchor never moves backwards: a dirty emission can ride a
-				// reordered (B-frame) timestamp below the previous anchor, and
-				// re-anchoring there would credit the reorder span against the floor,
-				// repeating the unchanged snapshot early.
-				if si.last_emit.is_none_or(|last| frame.timestamp > last) {
-					si.last_emit = Some(frame.timestamp);
-				}
+				// This never moves the anchor backwards: `si_due` saturates elapsed
+				// time, so with a non-zero interval it only passes timestamps strictly
+				// above the anchor (a reordered B-frame earns no emission at all), and
+				// with a zero interval every frame emits regardless of the anchor.
+				si.last_emit = Some(frame.timestamp);
 				(*pid, si.active.sections().cloned().collect())
 			})
 			.collect();
@@ -1301,8 +1299,8 @@ fn due(timestamp: Timestamp, last: Option<Timestamp>, interval: Duration) -> boo
 /// timeline since it last hit the wire.
 ///
 /// A floor measured from the entry's own last emission, unlike [`due`]'s absolute
-/// grid, because SI emission is content-driven: a changed snapshot goes out with
-/// the next frame (`SiTrack::dirty`) whenever that lands, and a grid boundary
+/// grid, because SI emission is content-driven: a changed snapshot goes out on the
+/// revision floor (`SiTrack::dirty`, [`SI_REVISION_INTERVAL`]), and a grid boundary
 /// shortly after would re-send it as a near-immediate stale repeat. For a clock
 /// table that repeat asserts an already-sent time and steps a receiver backwards
 /// (#2934). The cost is that *unchanged* repeats are phased by each exporter's own
