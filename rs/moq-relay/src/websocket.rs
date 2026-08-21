@@ -73,8 +73,7 @@ pub(crate) async fn serve_ws(
 			subscribe,
 			stats,
 		};
-		let auth = state.auth.clone();
-		let expired = async move { auth.expired(&token).await };
+		let expired = async move { token.expired().await };
 		let _ = handle_socket(socket, session, expired).await;
 	}))
 }
@@ -95,8 +94,7 @@ struct SessionInputs {
 	stats: Session,
 }
 
-/// Serve one upgraded WebSocket until it closes or `expired` (the session's
-/// credential bound, [`Auth::expired`]) resolves and aborts it with `Unauthorized`.
+/// Serve one upgraded WebSocket until it closes or its credential expires.
 #[tracing::instrument("ws", err, skip_all, fields(id = session.id))]
 async fn handle_socket<T>(socket: T, session: SessionInputs, expired: impl Future<Output = ()>) -> anyhow::Result<()>
 where

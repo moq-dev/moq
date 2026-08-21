@@ -130,7 +130,7 @@ impl Connection {
 		// valid. Without an expiry, just wait for the session to close.
 		tokio::select! {
 			err = session.closed() => Err(err.into()),
-			_ = self.auth.expired(&token) => {
+			_ = token.expired() => {
 				tracing::info!("credential expired, closing session");
 				session.abort(moq_net::Error::Unauthorized);
 				Ok(())
