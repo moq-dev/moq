@@ -72,7 +72,7 @@ pub struct Config {
 	pub resize: moq_video::resize::Config,
 
 	/// Where to report which rungs are encoding, for a caller that meters or
-	/// prices the work. `None` (the default) reports nothing. See [`Active`].
+	/// prices the work. `None` (the default) reports nothing. See [`crate::Active`].
 	pub active: Option<crate::Active>,
 }
 
