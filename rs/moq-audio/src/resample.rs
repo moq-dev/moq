@@ -93,6 +93,19 @@ impl Resampler {
 		self.pending.len() / self.channels
 	}
 
+	/// Drop everything held, buffered input and filter state alike, returning to
+	/// the just-constructed state.
+	///
+	/// The escape hatch for a *reported* discontinuity: where [`flush`](Self::flush)
+	/// ends the stream, this starts a new one in place, so audio from before the
+	/// gap can't bleed through the filter into audio from after it.
+	pub fn reset(&mut self) {
+		self.resampler.reset();
+		self.pending.clear();
+		self.skip = self.delay;
+		self.started = false;
+	}
+
 	/// Resample what is still buffered, ending the stream.
 	///
 	/// The resampler only consumes whole chunks, so without this the last partial

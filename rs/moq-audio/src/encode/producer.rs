@@ -188,6 +188,13 @@ impl<E: CatalogExt> Producer<E> {
 		self.epoch_us = None;
 		self.frames_produced = 0;
 		self.pending.clear();
+		// The resampler holds samples of its own, plus filter state primed by them.
+		// Left alone, `finish` would flush that pre-reset audio onto the track
+		// (stamped at an epoch that no longer exists), and the next write would run
+		// the new audio through a filter still ringing with the old.
+		if let Some(resampler) = self.resampler.as_mut() {
+			resampler.reset();
+		}
 	}
 
 	/// Push one [`Frame`] of PCM in the layout declared by [`Input`]. Encodes and
@@ -373,6 +380,52 @@ mod tests {
 			packets += 1;
 		}
 		assert_eq!(packets, 11);
+	}
+
+	/// `reset_epoch` promises to drop buffered samples, and the resampler buffers
+	/// samples of its own. Leaving those behind let `finish` flush pre-reset audio
+	/// onto the track, stamped at an epoch that no longer exists.
+	#[tokio::test]
+	async fn reset_epoch_drops_the_resampler_buffer_too() {
+		let input = Input {
+			format: Format::F32,
+			sample_rate: 44_100,
+			channels: 1,
+		};
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let consumer = broadcast.consume();
+		let options = Options {
+			track: Some("audio".to_string()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(&mut broadcast, catalog, input.clone(), &options).unwrap();
+
+		let mut track = moq_mux::container::Consumer::new(
+			consumer
+				.track("audio")
+				.unwrap()
+				.subscribe(moq_net::track::Subscription::default())
+				.await
+				.unwrap(),
+			moq_mux::catalog::hang::Container::Legacy,
+		);
+
+		// Too little to publish a packet, so it all sits in the resampler.
+		let data: Vec<u8> = vec![0.25f32; 441].iter().flat_map(|s| s.to_le_bytes()).collect();
+		producer
+			.write(&Frame {
+				timestamp: moq_net::Timestamp::ZERO,
+				data: data.into(),
+			})
+			.unwrap();
+
+		producer.reset_epoch();
+		producer.finish().unwrap();
+
+		// The reset dropped everything, so the track ends without a packet.
+		assert!(track.read().await.unwrap().is_none());
 	}
 
 	// One 20 ms Opus frame at 48 kHz mono is exactly 960 f32 samples, so each
