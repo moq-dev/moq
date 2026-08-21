@@ -1706,25 +1706,29 @@ impl FrontState {
 		// however deep the chain behind it really is. Only a local publish, which
 		// reaches no session at all, is structurally unable to close a loop.
 		//
-		// Two exemptions. Losing the incumbent has to apply at once, or the front
+		// Three exemptions. Losing the incumbent has to apply at once, or the front
 		// strands itself with nothing to serve from at all. An incumbent that taints
 		// a reader is the same: `serve_route` already refuses it, so keeping it
 		// active would only leave `routes_snapshot` advertising a chain the front
-		// does not serve from.
+		// does not serve from. An incumbent that stopped announcing is the same
+		// kind of repair: keeping it active keeps it first in `routes_snapshot`,
+		// which retracts the whole path for the hold window while a live route
+		// sits in the table. None of the three is one end of a mutual adoption,
+		// which needs both sides to be live parents worth adopting.
 		//
 		// A drain is deliberately NOT exempt. It reads like an emergency, but a
 		// GOAWAY keeps working for many seconds, so waiting costs a little
 		// optimality rather than any availability, and a correlated drain is exactly
 		// when several relays re-parent at once off prices that have not landed yet.
-		// The two remaining exemptions also compose: if the drain does become a
-		// death, the route leaves the table and the lost-incumbent path applies
+		// The exemptions also compose: if the drain does become a death, the
+		// route leaves the table and the lost-incumbent path applies
 		// immediately, so the wait is bounded by the session it is waiting on.
 		let held = target != self.active
 			&& self.active.is_some_and(|id| {
 				self.routes
 					.iter()
 					.find(|r| r.id == id)
-					.is_some_and(|r| !self.taints_a_reader(&r.route))
+					.is_some_and(|r| r.route.announce && !self.taints_a_reader(&r.route))
 			}) && target.is_some_and(|id| {
 			let last = |id: u64| {
 				self.routes
@@ -4054,6 +4058,25 @@ mod tests {
 		state.routes.retain(|r| r.id != 0);
 		assert_eq!(state.reselect(true, now), None);
 		assert_eq!(state.active, Some(1), "a lost incumbent must be replaced immediately");
+	}
+
+	/// An incumbent that stopped announcing is a repair target, not one end of a
+	/// mutual adoption. Holding the move would keep the unannounced route first
+	/// in `routes_snapshot`, retracting the whole path for the hold window while
+	/// a live route sits in the table.
+	#[test]
+	fn test_handover_hold_exempts_an_unannounced_incumbent() {
+		let peer = Origin::new(3).unwrap();
+		let now = web_async::time::Instant::now();
+		let offline = upstream_route(10).with_announce(false);
+		let mut state = front_state(origin_keyed("test", peer, false), vec![offline, sibling_route(peer, 4)]);
+
+		assert_eq!(
+			state.reselect(true, now),
+			None,
+			"leaving an offline incumbent must not wait"
+		);
+		assert_eq!(state.active, Some(1), "the live route must take over immediately");
 	}
 
 	/// An anonymous relay identifies nothing (lite: "a Hop ID of 0 never matches

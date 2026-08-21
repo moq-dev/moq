@@ -70,6 +70,12 @@ The [moq-relay clustering](/bin/relay/cluster) feature actually uses this to dis
 The peer first replies with the set of broadcasts that are currently live, then streams updates as they change.
 This initial set is a discrete batch: the latest draft reports how many entries to expect up front, so a freshly connected session can wait until that snapshot has fully arrived before listing what's available, rather than racing the gossip.
 
+Each announcement also describes the route it took: the chain of relay identities it passed through (which is how forwarding loops are caught) and what pulling the broadcast via that route would cost.
+The cost comes in two magnitudes, compared in order.
+The *warm* cost is what one more subscription would cost the mesh right now, so it collapses to zero at any relay already carrying the broadcast; that is what lets a cluster deduplicate onto a warm copy instead of opening a second ingest.
+The *cold* cost prices the same path as if nothing were cached, so when two warm relays tie at zero it still says which of them sits closer to the publisher.
+Subscribers route to the lowest warm cost and break ties on cold; [moq-relay clustering](/bin/relay/cluster) covers how relays use this to pick an aggregation point.
+
 ### Subscriptions
 
 All data transfers are initiated by subscriptions.
