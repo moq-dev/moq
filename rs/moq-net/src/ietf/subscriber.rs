@@ -30,6 +30,13 @@ const TRACK_ALIAS_TIMEOUT: Duration = Duration::from_secs(1);
 /// wait, which is the old behavior rather than a new failure.
 const RETIRED_ALIAS_CAPACITY: usize = 64;
 
+/// The stream reset code for a cancellation, from draft-19 section 3.3.4.
+///
+/// Not [`Error::Cancel`]'s code. That one belongs to the moq-lite space, where cancel is 0,
+/// and 0 here is INTERNAL_ERROR: a routine unsubscribe would reach the publisher looking
+/// like a failure on our side and be counted as one.
+const STREAM_CANCELLED: u32 = 0x1;
+
 /// What a track alias currently refers to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Alias {
@@ -1383,7 +1390,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		// STOP_SENDING needs no acknowledgement, so it goes first and the wait below covers
 		// only what we still have to deliver.
-		reader.abort(&Error::Cancel);
+		reader.stop(STREAM_CANCELLED);
 
 		// Finishing alone would leave the writer's Drop free to RESET_STREAM, and a stream
 		// that has sent its FIN is still retransmitting: the reset would discard the
@@ -1992,10 +1999,17 @@ mod tests {
 	async fn cancelling_a_subscription_stops_the_publisher() {
 		for version in [Version::Draft16, Version::Draft19] {
 			let log = cancel_a_subscription(version).await;
+			// CANCELLED, not the moq-lite cancel code: 0 on this wire is INTERNAL_ERROR, so a
+			// routine unsubscribe would read to the publisher as a fault on our side.
 			assert_eq!(
 				log.stops(),
-				vec![Error::Cancel.to_code()],
+				vec![STREAM_CANCELLED],
 				"{version:?}: cancelling must STOP_SENDING the publisher's direction, not just FIN ours",
+			);
+			assert_ne!(
+				STREAM_CANCELLED,
+				Error::Cancel.to_code(),
+				"the two error spaces disagree; that is why this code is named separately",
 			);
 		}
 	}
