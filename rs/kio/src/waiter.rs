@@ -17,7 +17,32 @@ use crate::{
 };
 
 /// Number of slots stored inline before spilling to the heap.
-const INLINE_WAITERS: usize = 32;
+///
+/// Sized for the common list, not the worst one. The array lives inside the
+/// enclosing `Arc<Mutex<State<T>>>`, so every list pays it whether or not
+/// anything ever parks, and a state cell holds three lists. At 32 that was 840 B
+/// of mostly-empty slots on every channel; downstream in moq-net a broadcast
+/// holds four to five cells and a cached group holds one, so it dominated their
+/// footprint.
+///
+/// It cannot go to zero, because `take()` moves the entries out to be woken
+/// outside the lock: a spilled list hands its heap buffer to the snapshot, which
+/// frees it, so the capacity does not survive a wake and the next registration
+/// re-allocates. Inline slots have no such cost. That makes this the count of
+/// waiters a list can hold without allocating once per wake, measured per
+/// take/wake cycle:
+///
+/// | inline | `WaiterList` | allocs/cycle at 2 / 4 / 8 waiters |
+/// |---|---|---|
+/// | 32 | 296 B | 0 / 0 / 0 |
+/// | 8 | 104 B | 0 / 0 / 0 |
+/// | 4 | 72 B | 0 / 0 / 1 |
+/// | 2 | 56 B | 0 / 1 / 2 |
+///
+/// 4 keeps the steady state allocation-free for the small lists that dominate
+/// while giving back most of the memory. A genuinely hot fan-out list spills
+/// under any of these; it did at 32 too.
+const INLINE_WAITERS: usize = 4;
 
 /// Registrations remembered per waiter identity for O(1) dedup. A poll typically
 /// parks on a small handful of lists; a poll cycling through more than this many
