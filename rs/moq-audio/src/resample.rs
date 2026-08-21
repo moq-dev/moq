@@ -20,6 +20,9 @@ pub struct Resampler {
 	ratio: f64,
 	/// Output frames the sinc filter holds behind what it has already emitted.
 	delay: usize,
+	/// Whether any caller input has gone in, since the filter only owes a tail
+	/// once it has actually run.
+	started: bool,
 	channels: usize,
 	input_planar: Vec<Vec<f32>>,
 	output_planar: Vec<Vec<f32>>,
@@ -60,6 +63,7 @@ impl Resampler {
 			chunk_frames,
 			ratio,
 			delay,
+			started: false,
 			channels: channels as usize,
 			input_planar,
 			output_planar,
@@ -89,10 +93,14 @@ impl Resampler {
 	/// into it, across a gap nothing reported. Ending the stream is the only thing
 	/// this can be used for, so that is the only thing it can express.
 	pub fn flush(mut self) -> Result<Vec<f32>, Error> {
-		let pending = self.pending_frames();
-		if pending == 0 {
+		// Not `pending == 0`: what the filter owes has nothing to do with what is
+		// buffered, so a stream that happens to end on a chunk boundary owes a tail
+		// just the same. Only one that never ran owes nothing.
+		if !self.started {
 			return Ok(Vec::new());
 		}
+
+		let pending = self.pending_frames();
 
 		// The filter runs centred, so every output frame is built from input around
 		// `delay` frames earlier and it still holds that much real audio no amount of
@@ -127,6 +135,7 @@ impl Resampler {
 			});
 		}
 
+		self.started |= !samples.is_empty();
 		self.pending.extend_from_slice(samples);
 
 		let chunk_samples = self.chunk_frames * self.channels;
@@ -222,7 +231,31 @@ mod tests {
 		let tail = r.flush().unwrap();
 
 		let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |max, s| max.max(s.abs()));
-		assert_eq!(peak(&body), 0.0, "the sample cannot have emerged this early");
+		assert!(peak(&body) < 0.01, "the sample emerged early: peak {}", peak(&body));
+		assert!(peak(&tail) > 0.5, "the tail lost the sample: peak {}", peak(&tail));
+	}
+
+	/// The filter owes its tail whether or not anything is buffered, so a track
+	/// whose length lands exactly on a chunk boundary has to drain too. At 48 kHz
+	/// that is every fifteenth AAC packet, so it is not a corner a real stream
+	/// avoids.
+	#[test]
+	fn flush_drains_on_an_exact_chunk_boundary() {
+		let mut r = Resampler::new(44_100, 48_000, 1, 882).unwrap();
+
+		// Exactly two chunks of input, so nothing is left pending.
+		let mut input = vec![0.0f32; 1764];
+		input[1750] = 1.0;
+
+		let body = r.process(&input).unwrap();
+		assert_eq!(r.pending_frames(), 0, "the input should divide evenly");
+
+		let tail = r.flush().unwrap();
+
+		// Not exactly zero: a centred sinc has a precursor, so a trace of the sample
+		// leads it into the body. The audio itself is still all in the tail.
+		let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |max, s| max.max(s.abs()));
+		assert!(peak(&body) < 0.01, "the sample emerged early: peak {}", peak(&body));
 		assert!(peak(&tail) > 0.5, "the tail lost the sample: peak {}", peak(&tail));
 	}
 
