@@ -1260,6 +1260,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						self.session.close(err.to_code(), err.to_string().as_ref());
 					} else {
 						tracing::warn!(track_alias = %alias, %err, "could not bind track alias");
+						// SUBSCRIBE_OK arrived, so the publisher considers this Established and
+						// will keep serving it. Dropping the stream says nothing on the versions
+						// that need UNSUBSCRIBE, so cancel it properly.
+						self.cancel_subscribe(&mut stream, request_id).await;
 					}
 					self.remove_subscribe(request_id);
 					let _ = track.abort(err);
@@ -1329,17 +1333,51 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Clean up
 		self.remove_subscribe(request_id);
 
-		// A FIN is not a cancellation: it only says we will send no more messages on our
-		// direction (draft-19 section 3.3.2). A publisher holding an Established subscription
-		// keeps serving it until STOP_SENDING arrives on the direction it is writing
-		// (sections 3.3.3 and 5.1.1), so finishing alone leaves it feeding an alias we just
-		// retired, forever. Section 3.3.3 spells out this pair: an endpoint that has already
-		// FINed its sending direction cancels by sending STOP_SENDING on the receiving one.
-		stream.writer.finish().ok();
-
-		if cancelled {
-			stream.reader.abort(&Error::Cancel);
+		match cancelled {
+			true => self.cancel_subscribe(&mut stream, request_id).await,
+			// The publisher already ended the request, so a FIN is all we owe it.
+			false => {
+				stream.writer.finish().ok();
+			}
 		}
+	}
+
+	/// Tell the publisher to stop serving a subscription we are walking away from.
+	///
+	/// Every path that abandons an Established subscription goes through here, because
+	/// staying silent is what leaves the publisher serving a track nobody is reading and
+	/// feeding an alias we already retired.
+	///
+	/// Two mechanisms, by version. Draft-14 through 16 carry requests over the control
+	/// stream adapter, whose virtual streams have no reset or stop of their own, so
+	/// UNSUBSCRIBE (draft-16 section 9.12) is the only thing the peer ever sees, and
+	/// draft-16 section 5.1.1 makes receiving it what frees the subscription. Draft-17
+	/// removed the message, leaving the stream itself: a FIN is explicitly not a
+	/// cancellation (draft-19 section 3.3.2), so section 3.3.3's pair applies, an endpoint
+	/// that has already FINed its sending direction cancels with STOP_SENDING on the
+	/// receiving one.
+	async fn cancel_subscribe(&self, stream: &mut Stream<S, Version>, request_id: RequestId) {
+		if self.unsubscribes()
+			&& let Err(err) = self.write_unsubscribe(stream, request_id).await
+		{
+			tracing::debug!(%err, "failed to write unsubscribe");
+		}
+
+		stream.writer.finish().ok();
+		stream.reader.abort(&Error::Cancel);
+	}
+
+	/// Whether this version cancels a subscription with an UNSUBSCRIBE message.
+	///
+	/// Draft-17 removed it, leaving the stream reset as the only signal.
+	fn unsubscribes(&self) -> bool {
+		matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+	}
+
+	async fn write_unsubscribe(&self, stream: &mut Stream<S, Version>, request_id: RequestId) -> Result<(), Error> {
+		stream.writer.encode(&ietf::Unsubscribe::ID).await?;
+		stream.writer.encode(&ietf::Unsubscribe { request_id }).await?;
+		Ok(())
 	}
 
 	async fn write_subscribe(
@@ -1921,17 +1959,72 @@ mod tests {
 	/// turns a routine unsubscribe into an endless "unknown track alias" stream.
 	#[tokio::test]
 	async fn cancelling_a_subscription_stops_the_publisher() {
-		const VERSION: Version = Version::Draft19;
+		for version in [Version::Draft16, Version::Draft19] {
+			let log = cancel_a_subscription(version).await;
+			assert_eq!(
+				log.stops(),
+				vec![Error::Cancel.to_code()],
+				"{version:?}: cancelling must STOP_SENDING the publisher's direction, not just FIN ours",
+			);
+		}
+	}
 
+	/// Draft-14 through 16 have an UNSUBSCRIBE message, and draft-16 section 5.1.1 makes it
+	/// the thing that lets the publisher destroy the subscription. Resetting the stream
+	/// without it leaves a peer that predates draft-17 serving the track forever.
+	#[tokio::test]
+	async fn a_legacy_cancel_sends_unsubscribe() {
+		let log = cancel_a_subscription(Version::Draft16).await;
+		assert!(
+			occurrences(&log, &[ietf::Unsubscribe::ID as u8]) > 0,
+			"draft-16 cancels with UNSUBSCRIBE",
+		);
+
+		// Draft-17 removed the message, so sending one would be a protocol violation.
+		let log = cancel_a_subscription(Version::Draft19).await;
+		assert_eq!(
+			occurrences(&log, &[ietf::Unsubscribe::ID as u8]),
+			0,
+			"draft-17+ has no UNSUBSCRIBE",
+		);
+	}
+
+	/// Establish a subscription on `version`, then drop its last consumer, and hand back
+	/// what the session recorded on the way out.
+	async fn cancel_a_subscription(version: Version) -> crate::lite::test_transport::Log {
+		cancel_a_subscription_inner(version, false).await
+	}
+
+	/// A publisher on draft-14 through 16 that legally hands a second subscription to one
+	/// track the alias the first already holds. We cannot demux that, so we walk away from
+	/// the new subscription. Those versions carry requests over the control stream adapter,
+	/// whose virtual streams drop silently, so UNSUBSCRIBE is the only way the publisher
+	/// ever learns to stop serving it.
+	#[tokio::test]
+	async fn a_legacy_shared_alias_is_unsubscribed() {
+		let log = cancel_a_subscription_inner(Version::Draft16, true).await;
+
+		assert!(
+			occurrences(&log, &[ietf::Unsubscribe::ID as u8]) > 0,
+			"abandoning a shared alias must still tell the publisher to stop",
+		);
+	}
+
+	/// When `conflict` is set, an alias-7 binding for the same full track name is seeded
+	/// first, so the subscription under test loses the race to bind it.
+	async fn cancel_a_subscription_inner(version: Version, conflict: bool) -> crate::lite::test_transport::Log {
 		// A peer that accepts the subscription, binding alias 7, then says nothing more.
 		let subscribe_ok = {
 			let log = crate::lite::test_transport::Log::default();
 			let mut writer =
-				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 			writer.encode(&ietf::SubscribeOk::ID).await.unwrap();
 			writer
 				.encode(&ietf::SubscribeOk {
-					request_id: None,
+					request_id: match version {
+						Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(RequestId(0)),
+						_ => None,
+					},
 					track_alias: 7,
 					properties: Default::default(),
 				})
@@ -1953,9 +2046,28 @@ mod tests {
 			peer::PeerSetup::default(),
 			crate::Origin::new(1).unwrap(),
 			None,
-			VERSION,
+			version,
 			tasks,
 		);
+
+		if conflict {
+			let holder = RequestId(999);
+			let mut state = subscriber.state.lock();
+			state.subscribes.insert(
+				holder,
+				TrackState {
+					producer: track::Producer::new(
+						std::sync::Arc::new(crate::broadcast::Info::default()),
+						"video",
+						None,
+					),
+					alias: Some(7),
+					broadcast: Path::new("broadcast").to_owned(),
+					timescale: None,
+				},
+			);
+			insert_track_alias(&state.aliases, 7, holder).unwrap();
+		}
 
 		// A consumer asking for a track is what dispatches a request to the session.
 		let producer = crate::broadcast::Info::default().produce();
@@ -1966,6 +2078,10 @@ mod tests {
 
 		let request = dynamic.requested_track().await.expect("no track requested");
 
+		// A handle on the same state the spawned task mutates, so the test can prove the
+		// subscription reached Established rather than assume it.
+		let probe = subscriber.clone();
+
 		let serving = tokio::spawn(async move {
 			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
 		});
@@ -1973,6 +2089,13 @@ mod tests {
 		// Let the SUBSCRIBE go out and the SUBSCRIBE_OK come back, so the subscription is
 		// Established when we walk away from it.
 		settle().await;
+
+		// Without this the test would still pass if SUBSCRIBE_OK never landed, and it would
+		// then be asserting against a subscription that was never established.
+		assert!(
+			matches!(probe.state.lock().aliases.read().map.get(&7), Some(Alias::Active(_))),
+			"{version:?}: alias 7 must be bound before we cancel",
+		);
 
 		// The last consumer leaves: nothing wants this track any more.
 		drop(subscription);
@@ -1984,11 +2107,7 @@ mod tests {
 			.expect("run_subscribe did not finish")
 			.unwrap();
 
-		assert_eq!(
-			log.stops(),
-			vec![Error::Cancel.to_code()],
-			"cancelling must STOP_SENDING the publisher's direction, not just FIN ours",
-		);
+		log
 	}
 
 	/// Tombstones are bounded: a session churning through subscriptions must not

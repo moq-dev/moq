@@ -47,6 +47,9 @@ impl Log {
 	/// The STOP_SENDING codes sent on the session's receive streams, in call order.
 	/// Cancelling a request is a reset of what we send plus one of these on what we
 	/// receive, so a test for a cancellation has to be able to see them.
+	///
+	/// Only [`ScriptedRecv`] records them. The other receive streams here discard the code,
+	/// so an empty result on those is not evidence that nothing was sent.
 	pub fn stops(&self) -> Vec<u32> {
 		self.stops.lock().unwrap().clone()
 	}
