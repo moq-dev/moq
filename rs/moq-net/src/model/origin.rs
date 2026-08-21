@@ -1514,6 +1514,21 @@ enum HoldKey {
 	Route(u64),
 }
 
+/// How [`FrontState::pick`] steers around routes tainted for a current reader.
+#[derive(Clone, Copy)]
+enum Steer {
+	/// No steering: the caller pins one requester to one source.
+	Ignore,
+	/// Prefer clean routes, falling back only when none exist. An offline clean
+	/// standby is worth trying for a track; one that refuses falls back through
+	/// the caller's skip set.
+	Clean,
+	/// Prefer clean routes only where that preserves an announced route. The
+	/// pick drives the front's advert, and steering it onto an offline standby
+	/// would retract the path (see [`FrontState::prefer_untainted`]).
+	KeepAnnounced,
+}
+
 /// Shared state behind a [`Front`]: the attached sources and which one is active.
 struct FrontState {
 	/// Absolute path of the broadcast, mixed into the route tie-break hash.
@@ -1570,16 +1585,14 @@ struct FrontState {
 
 impl FrontState {
 	/// The one selection primitive every picker goes through: the best route by
-	/// [`route_order`] among those surviving `keep`. With `untainted`, the pick
-	/// also steers away from routes that flow through a peer currently reading
-	/// the shared front, unless that leaves nothing (see
-	/// [`Self::prefer_untainted`]); it is off for [`Self::dispatch`], which pins
-	/// one requester to one source rather than serving the shared front.
-	fn pick(&self, keep: impl Fn(&FrontRoute) -> bool, untainted: bool) -> Option<u64> {
+	/// [`route_order`] among those surviving `keep`, steering around tainted
+	/// routes per `steer` (see [`Steer`] and [`Self::prefer_untainted`]).
+	fn pick(&self, keep: impl Fn(&FrontRoute) -> bool, steer: Steer) -> Option<u64> {
 		let candidates: Vec<&FrontRoute> = self.routes.iter().filter(|r| keep(r)).collect();
-		let candidates = match untainted {
-			true => self.prefer_untainted(&candidates),
-			false => candidates,
+		let candidates = match steer {
+			Steer::Ignore => candidates,
+			Steer::Clean => self.prefer_untainted(&candidates, false),
+			Steer::KeepAnnounced => self.prefer_untainted(&candidates, true),
 		};
 		candidates
 			.into_iter()
@@ -1590,9 +1603,10 @@ impl FrontState {
 	/// The source new track requests should dispatch to: live first, then lowest
 	/// cost, then shortest hop chain with a deterministic hash tie-break and the
 	/// newest source last, skipping routes that flow through a peer currently
-	/// reading the front while any other route remains.
+	/// reading the front while an announced alternative remains. This choice
+	/// drives the front's advert, so it never trades the announcement away.
 	fn best_route(&self) -> Option<u64> {
-		self.pick(|_| true, true)
+		self.pick(|_| true, Steer::KeepAnnounced)
 	}
 
 	/// The source a subscription from `exclude` should dispatch to: the best
@@ -1600,9 +1614,14 @@ impl FrontState {
 	/// selection a session uses to pick what it announces to that peer, and the
 	/// two being one computation is the loop-freedom invariant: chains stay
 	/// truthful, so any would-be cycle surfaces the requester's own origin in
-	/// the candidate chain and is filtered here, at any cycle length.
+	/// the candidate chain and is filtered here, at any cycle length. Taints are
+	/// ignored: this pins one requester to one source rather than serving the
+	/// shared front.
 	fn dispatch(&self, exclude: Option<Origin>) -> Option<u64> {
-		self.pick(|r| exclude.is_none_or(|origin| !r.route.hops.contains(&origin)), false)
+		self.pick(
+			|r| exclude.is_none_or(|origin| !r.route.hops.contains(&origin)),
+			Steer::Ignore,
+		)
 	}
 
 	/// Whether `route` flows back through a peer this front is exposed to, so serving
@@ -1616,21 +1635,26 @@ impl FrontState {
 	}
 
 	/// Narrow `candidates` to the routes clean for every peer currently reading the
-	/// shared front, unless that would leave nothing, or cost the front its
-	/// announcement.
+	/// shared front, unless that would leave nothing, or (with `keep_announced`)
+	/// cost the front its announcement.
 	///
 	/// Keeping the front off a tainted route is what makes the resolve-time
 	/// split-horizon check hold for the life of a subscription rather than just at
-	/// request time. Both fallbacks are deliberate. When every route is tainted,
-	/// the alternative is starving readers the route is perfectly good for, and a
-	/// peer whose only path runs back through itself has nothing to be served from
-	/// anyway; it re-resolves to [`Error::Unroutable`] on its next request. When
-	/// every clean route is an offline standby, steering onto one would retract
-	/// the path, and the retraction drops the very advertisement whose guard made
-	/// the route look tainted, re-running this selection with the taint gone and
-	/// oscillating the announcement. The taint picks among routes that serve; it
-	/// may not decide between serving and not serving.
-	fn prefer_untainted<'a>(&self, candidates: &[&'a FrontRoute]) -> Vec<&'a FrontRoute> {
+	/// request time. The taint-wide fallback is deliberate: when every route is
+	/// tainted, the alternative is starving readers the route is perfectly good
+	/// for, and a peer whose only path runs back through itself has nothing to be
+	/// served from anyway; it re-resolves to [`Error::Unroutable`] on its next
+	/// request.
+	///
+	/// `keep_announced` adds a second fallback for the pick that drives the
+	/// front's advert ([`Self::best_route`]): when every clean route is an offline
+	/// standby, steering the advert onto one would retract the path, and the
+	/// retraction drops the very advertisement whose guard made the route look
+	/// tainted, re-running this selection with the taint gone and oscillating the
+	/// announcement. Per-track dispatch ([`Self::serve_route`]) leaves it off: an
+	/// offline standby is worth trying for a track, and one that refuses falls
+	/// back through the caller's skip set instead.
+	fn prefer_untainted<'a>(&self, candidates: &[&'a FrontRoute], keep_announced: bool) -> Vec<&'a FrontRoute> {
 		if self.excluded.is_empty() {
 			return candidates.to_vec();
 		}
@@ -1639,7 +1663,7 @@ impl FrontState {
 			.copied()
 			.filter(|r| !self.taints_a_reader(&r.route))
 			.collect();
-		let keeps = match candidates.iter().any(|r| r.route.announce) {
+		let keeps = match keep_announced && candidates.iter().any(|r| r.route.announce) {
 			true => clean.iter().any(|r| r.route.announce),
 			false => !clean.is_empty(),
 		};
@@ -1665,7 +1689,7 @@ impl FrontState {
 		{
 			return Some(active);
 		}
-		self.pick(|r| !skip(r.id), true)
+		self.pick(|r| !skip(r.id), Steer::Clean)
 	}
 
 	/// Re-pick the active source after the table changed. Serve tasks watch
@@ -4254,9 +4278,27 @@ mod tests {
 			],
 		);
 		state.excluded.insert(reader, 1);
-		assert_eq!(state.best_route(), Some(0), "an offline standby must not win the steer");
+		assert_eq!(
+			state.best_route(),
+			Some(0),
+			"an offline standby must not win the advert"
+		);
 
-		// An announced clean route still wins it.
+		// Per-track dispatch still tries the clean standby first, so the reader
+		// is not handed its own bytes while the standby can serve; a track it
+		// refuses falls back through the skip set, the documented last resort.
+		assert_eq!(
+			state.serve_route(|_| false),
+			Some(1),
+			"a track must try the clean standby first"
+		);
+		assert_eq!(
+			state.serve_route(|id| id == 1),
+			Some(0),
+			"a track the standby refuses falls back to the tainted route"
+		);
+
+		// An announced clean route wins the advert too.
 		state.routes[1].route = upstream_route(10);
 		assert_eq!(
 			state.best_route(),
@@ -6576,14 +6618,16 @@ mod tests {
 		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
 		let clean = OriginList::try_from(vec![publisher]).unwrap();
 
-		let _source_a = origin
+		let source_a = origin
 			.create_broadcast("test", announce().with_hops(via_peer.clone()))
 			.unwrap();
+		let mut dynamic_a = source_a.dynamic();
 		settle().await;
 		// The clean alternative is an offline standby: joinable, never announced.
-		let _source_b = origin
+		let source_b = origin
 			.create_broadcast("test", broadcast::Route::new().with_hops(clean).with_cost(5))
 			.unwrap();
+		let mut dynamic_b = source_b.dynamic();
 		settle().await;
 		settle().await;
 
@@ -6603,6 +6647,14 @@ mod tests {
 			"the front must not steer onto an offline standby"
 		);
 		announced.assert_next_wait();
+
+		// Data still avoids the reader: a track on the shared front dispatches
+		// to the clean standby, not the tainted advertised route.
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let _producer_b = accept_track(&mut dynamic_b, "video").await;
+		settle().await;
+		subscribing.await.unwrap();
+		dynamic_a.assert_no_request();
 	}
 
 	/// Two publishers that never declared an identity both arrive with a first
