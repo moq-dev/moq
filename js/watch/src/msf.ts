@@ -34,6 +34,15 @@ function toContainer(track: Msf.Track): ContainerInfo {
 		};
 	}
 
+	// LOC and legacy carry the same codec payload but frame it differently, so the kind has to survive
+	// an MSF catalog the same way it survives a hang one.
+	if (track.packaging === "loc") {
+		return {
+			container: { kind: "loc" },
+			description: initBytes ? bytesToHex(initBytes) : undefined,
+		};
+	}
+
 	return {
 		container: { kind: "legacy" },
 		description: initBytes ? bytesToHex(initBytes) : undefined,

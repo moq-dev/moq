@@ -88,9 +88,10 @@ impl From<moq_net::track::Subscriber> for Consumer {
 /// description, custom roles), or with packaging other than [`moq_msf::Packaging::Loc`],
 /// [`moq_msf::Packaging::Cmaf`], or [`moq_msf::Packaging::Legacy`] are skipped with a warning.
 ///
-/// Both [`moq_msf::Packaging::Loc`] and [`moq_msf::Packaging::Legacy`] map to
-/// [`Container::Legacy`]. [`moq_msf::Packaging::Cmaf`] requires `init_data` to be present
-/// (base64-encoded ftyp+moov); a missing or malformed init segment is an error.
+/// [`moq_msf::Packaging::Loc`] and [`moq_msf::Packaging::Legacy`] map to their own containers:
+/// they carry the same codec payload but frame it differently.
+/// [`moq_msf::Packaging::Cmaf`] requires `init_data` to be present (base64-encoded ftyp+moov);
+/// a missing or malformed init segment is an error.
 ///
 /// Fields with no representation in `hang::Catalog` (`generated_at`, `is_complete`, `is_live`,
 /// `render_group`, `alt_group`, `max_grp_sap_starting_type`, `max_obj_sap_starting_type`) are
@@ -150,8 +151,10 @@ pub(crate) fn from_msf(msf: &moq_msf::Catalog) -> Result<hang::Catalog> {
 /// segment, and silently skipping it would mask a publisher bug.
 fn container_from_msf(track: &moq_msf::Track) -> Result<Option<Container>> {
 	match &track.packaging {
-		// Both LOC and Legacy represent raw payloads without ISO-BMFF boxing.
-		moq_msf::Packaging::Loc | moq_msf::Packaging::Legacy => Ok(Some(Container::Legacy)),
+		// Neither is ISO-BMFF boxed, but they frame differently: a LOC property block against a VarInt
+		// timestamp prefix. Reading one as the other misparses the head of every frame.
+		moq_msf::Packaging::Loc => Ok(Some(Container::Loc)),
+		moq_msf::Packaging::Legacy => Ok(Some(Container::Legacy)),
 		moq_msf::Packaging::Cmaf => {
 			let init = decode_init_data(track)?.ok_or_else(|| Error::MissingCmafInit(track.name.clone()))?;
 			Ok(Some(Container::Cmaf { init }))
@@ -429,13 +432,13 @@ mod test {
 	}
 
 	#[test]
-	fn loc_audio_yields_legacy_container() {
+	fn loc_audio_yields_loc_container() {
 		let msf = moq_msf::Catalog::new(vec![audio_track("audio0", moq_msf::Packaging::Loc)]);
 
 		let catalog = from_msf(&msf).expect("LOC audio should convert");
 		let audio = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
 
-		assert_eq!(audio.container, Container::Legacy);
+		assert_eq!(audio.container, Container::Loc);
 		assert_eq!(audio.codec, AudioCodec::Opus);
 		assert_eq!(audio.sample_rate, 48_000);
 		assert_eq!(audio.channel_count, 2);

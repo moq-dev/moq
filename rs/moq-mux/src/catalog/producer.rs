@@ -484,6 +484,7 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 	for (name, config) in &catalog.video.renditions {
 		let packaging = match &config.container {
 			hang::catalog::Container::Cmaf { .. } => moq_msf::Packaging::Cmaf,
+			hang::catalog::Container::Loc => moq_msf::Packaging::Loc,
 			_ => moq_msf::Packaging::Legacy,
 		};
 
@@ -518,6 +519,7 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 	for (name, config) in &catalog.audio.renditions {
 		let packaging = match &config.container {
 			hang::catalog::Container::Cmaf { .. } => moq_msf::Packaging::Cmaf,
+			hang::catalog::Container::Loc => moq_msf::Packaging::Loc,
 			_ => moq_msf::Packaging::Legacy,
 		};
 
@@ -849,6 +851,45 @@ mod test {
 		assert_eq!(audio.max_grp_sap_starting_type, Some(1));
 		assert_eq!(audio.max_obj_sap_starting_type, Some(1));
 		assert_eq!(audio.jitter, None);
+	}
+
+	// A LOC rendition must advertise `packaging: loc`. MSF-01 has no legacy packaging, so falling into
+	// the legacy arm published a catalog that named a container the receiver would not find on the wire.
+	#[test]
+	fn convert_video_loc_container() {
+		let mut video_config = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0x00,
+			level: 0x1f,
+			inline: true,
+		});
+		video_config.container = Container::Loc;
+
+		let mut video_renditions = BTreeMap::new();
+		video_renditions.insert("video0.avc3".to_string(), video_config);
+
+		let mut catalog = hang::Catalog::default();
+		catalog.video.renditions = video_renditions;
+
+		let msf = to_msf(&catalog);
+		assert_eq!(msf.tracks.len(), 1);
+		assert_eq!(msf.tracks[0].packaging, moq_msf::Packaging::Loc);
+	}
+
+	#[test]
+	fn convert_audio_loc_container() {
+		let mut audio_config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		audio_config.container = Container::Loc;
+
+		let mut audio_renditions = BTreeMap::new();
+		audio_renditions.insert("audio0".to_string(), audio_config);
+
+		let mut catalog = hang::Catalog::default();
+		catalog.audio.renditions = audio_renditions;
+
+		let msf = to_msf(&catalog);
+		assert_eq!(msf.tracks.len(), 1);
+		assert_eq!(msf.tracks[0].packaging, moq_msf::Packaging::Loc);
 	}
 
 	#[test]
