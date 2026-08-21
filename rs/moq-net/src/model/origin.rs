@@ -1616,14 +1616,20 @@ impl FrontState {
 	}
 
 	/// Narrow `candidates` to the routes clean for every peer currently reading the
-	/// shared front, unless that would leave nothing.
+	/// shared front, unless that would leave nothing, or cost the front its
+	/// announcement.
 	///
 	/// Keeping the front off a tainted route is what makes the resolve-time
 	/// split-horizon check hold for the life of a subscription rather than just at
-	/// request time. Falling back when every route is tainted is deliberate: the
-	/// alternative is starving readers the route is perfectly good for, and a peer
-	/// whose only path runs back through itself has nothing to be served from
-	/// anyway. It re-resolves to [`Error::Unroutable`] on its next request.
+	/// request time. Both fallbacks are deliberate. When every route is tainted,
+	/// the alternative is starving readers the route is perfectly good for, and a
+	/// peer whose only path runs back through itself has nothing to be served from
+	/// anyway; it re-resolves to [`Error::Unroutable`] on its next request. When
+	/// every clean route is an offline standby, steering onto one would retract
+	/// the path, and the retraction drops the very advertisement whose guard made
+	/// the route look tainted, re-running this selection with the taint gone and
+	/// oscillating the announcement. The taint picks among routes that serve; it
+	/// may not decide between serving and not serving.
 	fn prefer_untainted<'a>(&self, candidates: &[&'a FrontRoute]) -> Vec<&'a FrontRoute> {
 		if self.excluded.is_empty() {
 			return candidates.to_vec();
@@ -1633,9 +1639,13 @@ impl FrontState {
 			.copied()
 			.filter(|r| !self.taints_a_reader(&r.route))
 			.collect();
-		match clean.is_empty() {
-			true => candidates.to_vec(),
-			false => clean,
+		let keeps = match candidates.iter().any(|r| r.route.announce) {
+			true => clean.iter().any(|r| r.route.announce),
+			false => !clean.is_empty(),
+		};
+		match keeps {
+			true => clean,
+			false => candidates.to_vec(),
 		}
 	}
 
@@ -4230,6 +4240,31 @@ mod tests {
 		);
 	}
 
+	/// The taint steer may pick only among routes that serve: a clean offline
+	/// standby must not beat an announced route, or the steer retracts the path
+	/// and drops the very advertisement whose guard created the taint.
+	#[test]
+	fn test_taint_steer_keeps_the_announcement() {
+		let reader = Origin::new(5).unwrap();
+		let mut state = front_state(
+			Origin::new(7).unwrap(),
+			vec![
+				warm_route(&[90, reader.id()], 1, 1),
+				upstream_route(10).with_announce(false),
+			],
+		);
+		state.excluded.insert(reader, 1);
+		assert_eq!(state.best_route(), Some(0), "an offline standby must not win the steer");
+
+		// An announced clean route still wins it.
+		state.routes[1].route = upstream_route(10);
+		assert_eq!(
+			state.best_route(),
+			Some(1),
+			"an announced clean route must win the steer"
+		);
+	}
+
 	/// The simultaneous-activation race: two relays that each pulled the same
 	/// broadcast independently see each other's zero-cost route. Exactly one of
 	/// them re-parents; the other keeps its upstream, so the broadcast is never
@@ -6523,6 +6558,51 @@ mod tests {
 				.hops,
 			via_peer
 		);
+	}
+
+	/// The steer away from a tainted route must never cost the front its
+	/// announcement. The only clean route here is an offline standby; moving onto
+	/// it would retract the path, dropping the advertisement whose guard created
+	/// the taint, and then re-announce with the taint gone, forever.
+	#[tokio::test]
+	async fn test_reader_taint_does_not_retract_the_announcement() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+
+		let publisher = Origin::new(1).unwrap();
+		let peer = Origin::new(5).unwrap();
+		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
+		let clean = OriginList::try_from(vec![publisher]).unwrap();
+
+		let _source_a = origin
+			.create_broadcast("test", announce().with_hops(via_peer.clone()))
+			.unwrap();
+		settle().await;
+		// The clean alternative is an offline standby: joinable, never announced.
+		let _source_b = origin
+			.create_broadcast("test", broadcast::Route::new().with_hops(clean).with_cost(5))
+			.unwrap();
+		settle().await;
+		settle().await;
+
+		let mut broadcast = consumer.request_broadcast("test").await.unwrap();
+		assert_eq!(broadcast.route_changed().await.unwrap().hops, via_peer);
+
+		// Advertising to the peer registers the exclusion, tainting the active
+		// route. With no announced alternative, the front must stay put and the
+		// announcement must hold steady.
+		let scoped = consumer.clone().excluding(peer);
+		let mut announced = scoped.announced();
+		let _reading = announced.assert_next_some("test");
+		settle().await;
+		settle().await;
+		assert!(
+			broadcast.route_changed().now_or_never().is_none(),
+			"the front must not steer onto an offline standby"
+		);
+		announced.assert_next_wait();
 	}
 
 	/// Two publishers that never declared an identity both arrive with a first
