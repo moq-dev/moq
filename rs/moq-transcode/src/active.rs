@@ -1,176 +1,319 @@
-//! Which rungs are encoding right now.
+//! Which renditions are encoding, and for how long.
 //!
 //! Nothing is encoded until a consumer asks for a rung, so a transcoder that is
 //! publishing a catalog and a transcoder that is saturating a GPU look identical
 //! from the outside. Broadcast demand ([`moq_net::broadcast::Demand`]) closes
-//! half the gap: it says *someone* is watching. [`Active`] closes the other half
-//! by naming *which renditions* are being produced, which is what a caller
-//! pricing the work, metering it, or advertising a route's cost actually needs.
+//! half the gap: it says *someone* is watching. This module closes the other
+//! half by naming *which* renditions are being produced, and metering how long
+//! each one ran, which is what a caller pricing or admitting the work needs.
 //!
-//! Entries are reference counted, because the live path and any number of group
-//! fetches encode the same rung concurrently; a rung leaves the set once the
-//! last of them finishes. Watchers are only woken when the set of names changes,
-//! so a fetch overlapping a live session is not an edge.
+//! [`Consumer`] is a cursor shaped like [`moq_net::announce::Consumer`]: it
+//! reports the ladder as it resolves, then one rendition starting or stopping at
+//! a time. Each [`Rendition`] it hands over is a lasting handle, so a caller
+//! keeps them all and reads [`Rendition::encoded`] whenever it bills.
+//!
+//! The cursor cannot bill on its own. A rendition whose pipelines start and stop
+//! between two calls is never reported as an edge (the same is true of
+//! `announce`), and a group fetch is exactly that: one pipeline per group, alive
+//! for milliseconds. The clock behind the handle counts it anyway, which is why
+//! the ladder is delivered up front rather than on the first edge.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-
-use tokio::sync::watch;
+use std::task::{Poll, ready};
+use std::time::{Duration, Instant};
 
 use crate::catalog::Resolved;
 
-/// One rung currently being encoded.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Encoding {
-	/// The rendition/track name, e.g. `video/360p`.
-	pub name: String,
-	/// The output resolution, derived from the source aspect ratio.
-	pub size: moq_video::Size,
-	/// The target bitrate, in bits per second.
-	pub bitrate: u64,
-	/// The output framerate, inherited from the source.
-	pub framerate: u32,
+/// A rendition starting or stopping, delivered by [`Consumer`].
+///
+/// Also delivered once per rendition when the ladder resolves, with `encoding`
+/// false, so a caller has every handle before any encoding can be missed.
+pub struct Update {
+	/// The rendition this is about.
+	pub rendition: Rendition,
+
+	/// Whether it is encoding right now.
+	pub encoding: bool,
 }
 
-impl From<&Resolved> for Encoding {
-	fn from(rung: &Resolved) -> Self {
-		Self {
+/// A handle to one output rendition, holding the clock a caller bills against.
+///
+/// Cheap to clone, and it outlives the encode: the total stays readable while
+/// the rendition is idle, and keeps accumulating if it starts again. Obtained
+/// from [`Update::rendition`].
+#[derive(Clone)]
+pub struct Rendition(Arc<Meter>);
+
+impl Rendition {
+	fn new(rung: &Resolved) -> Self {
+		Self(Arc::new(Meter {
 			name: rung.name.clone(),
 			size: rung.size,
 			bitrate: rung.bitrate,
 			framerate: rung.framerate,
+			clock: kio::Lock::new(Clock::default()),
+		}))
+	}
+
+	/// The rendition/track name, e.g. `video/360p`.
+	pub fn name(&self) -> &str {
+		&self.0.name
+	}
+
+	/// The output resolution, derived from the source aspect ratio.
+	pub fn size(&self) -> moq_video::Size {
+		self.0.size
+	}
+
+	/// The target bitrate, in bits per second.
+	pub fn bitrate(&self) -> u64 {
+		self.0.bitrate
+	}
+
+	/// The output framerate, inherited from the source.
+	pub fn framerate(&self) -> u32 {
+		self.0.framerate
+	}
+
+	/// How long this rendition has spent encoding, including the interval still
+	/// in flight.
+	///
+	/// Monotonic and never reset, across an idle gap included, so subtracting
+	/// two reads bills the span between them. Pipelines encoding the same
+	/// rendition concurrently (a group fetch overlapping the live path) count
+	/// once: a rendition-second is one rendition-second however many encoders
+	/// produced it.
+	pub fn encoded(&self) -> Duration {
+		let clock = self.0.clock.lock();
+		match clock.started {
+			Some(started) => clock.elapsed + started.elapsed(),
+			None => clock.elapsed,
+		}
+	}
+
+	/// Start the clock. Called for the first pipeline, under the state lock.
+	fn start(&self) {
+		self.0.clock.lock().started = Some(Instant::now());
+	}
+
+	/// Stop the clock, banking the interval. Called for the last pipeline.
+	fn stop(&self) {
+		let mut clock = self.0.clock.lock();
+		if let Some(started) = clock.started.take() {
+			clock.elapsed += started.elapsed();
 		}
 	}
 }
 
-/// One entry in the set: the rung plus how many pipelines are encoding it.
-#[derive(Clone, Debug)]
+impl std::fmt::Debug for Rendition {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Rendition")
+			.field("name", &self.name())
+			.field("encoded", &self.encoded())
+			.finish()
+	}
+}
+
+struct Meter {
+	name: String,
+	size: moq_video::Size,
+	bitrate: u64,
+	framerate: u32,
+	clock: kio::Lock<Clock>,
+}
+
+#[derive(Default)]
+struct Clock {
+	/// Intervals that have finished.
+	elapsed: Duration,
+	/// When the current interval began, set while a pipeline is encoding.
+	started: Option<Instant>,
+}
+
+/// One rendition's entry in the shared ladder.
 struct Entry {
-	encoding: Encoding,
+	rendition: Rendition,
+	/// Pipelines encoding it right now. Lives here rather than behind the
+	/// handle so bumping it is the same mutation that wakes the cursors.
 	refs: usize,
 }
 
-/// A cloneable, watch-only view of which rungs are encoding right now.
-///
-/// Construct one, hand it to [`Config::active`](crate::Config::active), and read
-/// it with [`get`](Self::get) or [`changed`](Self::changed). It is inert until
-/// [`run`](crate::run) is driving it, and empty again once that future is
-/// dropped; it neither keeps the transcode alive nor counts as demand itself.
-///
-/// ```no_run
-/// # async fn example(active: &mut moq_transcode::Active) {
-/// loop {
-///     for (name, rung) in active.changed().await {
-///         println!("{name} is {}x{}", rung.size.width, rung.size.height);
-///     }
-/// }
-/// # }
-/// ```
-#[derive(Clone, Debug)]
-pub struct Active {
-	tx: Arc<watch::Sender<BTreeMap<String, Entry>>>,
-	rx: watch::Receiver<BTreeMap<String, Entry>>,
+#[derive(Default)]
+struct State {
+	/// The resolved ladder, by track name. Fixed once `run` resolves it, and
+	/// never pruned: a caller subtracting two [`Rendition::encoded`] reads needs
+	/// the clock to survive an idle gap.
+	ladder: BTreeMap<String, Entry>,
 }
 
-impl Default for Active {
-	fn default() -> Self {
-		Self::new()
-	}
+/// The writing half, held by the transcoder and every rung serving off it.
+#[derive(Clone, Default)]
+pub(crate) struct Producer {
+	state: kio::Producer<State>,
 }
 
-impl Active {
-	/// An empty set, to be filled in by the [`run`](crate::run) it is given to.
-	pub fn new() -> Self {
-		let (tx, rx) = watch::channel(BTreeMap::new());
-		Self { tx: Arc::new(tx), rx }
-	}
-
-	/// The rungs encoding right now, by track name.
-	///
-	/// A point-in-time snapshot with no registration; use [`changed`](Self::changed)
-	/// to wait for the next edge.
-	pub fn get(&self) -> BTreeMap<String, Encoding> {
-		Self::snapshot(&self.rx.borrow())
-	}
-
-	/// Wait until the set of encoding rungs differs from the last one this handle
-	/// returned, then return the new set.
-	///
-	/// Each clone tracks its own position, so cloning is how you get a second
-	/// independent watcher. Resolves immediately the first time if any rung is
-	/// already encoding. Pends forever once every [`run`](crate::run) holding the
-	/// other half is gone, since nothing can change the set after that.
-	pub async fn changed(&mut self) -> BTreeMap<String, Encoding> {
-		// A sender is held inside this handle, so `changed` only errors if the
-		// channel is closed, which cannot happen while `self` is alive.
-		if self.rx.changed().await.is_err() {
-			std::future::pending::<()>().await;
+impl Producer {
+	/// A fresh cursor, positioned before the ladder so it reports every
+	/// rendition once and everything already encoding.
+	pub(crate) fn consume(&self) -> Consumer {
+		Consumer {
+			state: self.state.consume(),
+			seen: BTreeMap::new(),
 		}
-		Self::snapshot(&self.rx.borrow_and_update())
 	}
 
-	fn snapshot(entries: &BTreeMap<String, Entry>) -> BTreeMap<String, Encoding> {
-		entries
-			.iter()
-			.map(|(name, entry)| (name.clone(), entry.encoding.clone()))
-			.collect()
+	/// Publish the resolved ladder, so a cursor holds every handle before any
+	/// rung can encode. Called once, before the first rung is served.
+	pub(crate) fn declare(&self, rungs: &[Resolved]) {
+		let Ok(mut state) = self.state.write() else { return };
+		for rung in rungs {
+			state.entry(rung);
+		}
 	}
 
-	/// Mark `rung` as encoding until the returned guard drops.
+	/// Mark a rendition as encoding until the returned guard drops.
 	pub(crate) fn enter(&self, rung: &Resolved) -> Guard {
-		let name = rung.name.clone();
-		self.tx.send_if_modified(|entries| match entries.get_mut(&name) {
-			// Already encoding on another pipeline: the set is unchanged, so
-			// don't wake watchers.
-			Some(entry) => {
-				entry.refs += 1;
-				false
+		// The guard holds a producer clone, so the channel stays open until the
+		// last of them is gone.
+		if let Ok(mut state) = self.state.write() {
+			let entry = state.entry(rung);
+			entry.refs += 1;
+			if entry.refs == 1 {
+				entry.rendition.start();
 			}
-			None => {
-				entries.insert(
-					name.clone(),
-					Entry {
-						encoding: rung.into(),
-						refs: 1,
-					},
-				);
-				true
-			}
-		});
+		}
 
 		Guard {
-			active: self.clone(),
-			name,
+			state: self.state.clone(),
+			name: rung.name.clone(),
 		}
 	}
 }
 
-/// Holds a rung in the [`Active`] set for as long as it is alive.
+impl State {
+	fn entry(&mut self, rung: &Resolved) -> &mut Entry {
+		self.ladder.entry(rung.name.clone()).or_insert_with(|| Entry {
+			rendition: Rendition::new(rung),
+			refs: 0,
+		})
+	}
+}
+
+/// Holds a rendition encoding, and its clock running, until dropped.
 ///
 /// RAII rather than an explicit release: every encode path is cancelled by being
 /// dropped (a rung whose demand goes away, a fetch aborted with its `JoinSet`),
-/// so a release call would be skipped exactly when it matters and leak the rung
-/// into the set forever.
+/// so a release call would be skipped exactly when it matters and leave the
+/// clock running forever.
 pub(crate) struct Guard {
-	active: Active,
+	state: kio::Producer<State>,
 	name: String,
 }
 
 impl Drop for Guard {
 	fn drop(&mut self) {
-		self.active.tx.send_if_modified(|entries| {
-			let Some(entry) = entries.get_mut(&self.name) else {
-				return false;
-			};
-			entry.refs -= 1;
-			if entry.refs > 0 {
-				return false;
-			}
-			entries.remove(&self.name);
-			true
-		});
+		let Ok(mut state) = self.state.write() else { return };
+		let Some(entry) = state.ladder.get_mut(&self.name) else {
+			return;
+		};
+		entry.refs -= 1;
+		if entry.refs == 0 {
+			entry.rendition.stop();
+		}
 	}
+}
+
+/// A cursor over the renditions this transcoder produces.
+///
+/// Shaped like [`moq_net::announce::Consumer`]: it yields one rendition at a
+/// time rather than a snapshot of the whole ladder, and it starts before the
+/// ladder, so it reports every rendition once (with [`Update::encoding`] false)
+/// and then every start and stop. Obtained from
+/// [`Transcoder::active`](crate::Transcoder::active).
+///
+/// It is a cursor, not a log: a rendition that starts and stops between two
+/// calls is reported neither time. Bill from [`Rendition::encoded`], which
+/// counts it regardless.
+///
+/// ```no_run
+/// # async fn example(active: &mut moq_transcode::active::Consumer) {
+/// while let Some(update) = active.next().await {
+///     match update.encoding {
+///         true => println!("{} started", update.rendition.name()),
+///         false => println!("{} idle after {:?}", update.rendition.name(), update.rendition.encoded()),
+///     }
+/// }
+/// # }
+/// ```
+pub struct Consumer {
+	state: kio::Consumer<State>,
+	/// What this cursor last reported for each rendition, which is its position.
+	/// A name absent from it has never been reported at all.
+	seen: BTreeMap<String, bool>,
+}
+
+impl Consumer {
+	/// The next rendition to report, or `None` once the transcoder is gone.
+	pub async fn next(&mut self) -> Option<Update> {
+		kio::wait(|waiter| self.poll_next(waiter)).await
+	}
+
+	/// Poll for the next rendition to report, without blocking.
+	///
+	/// Returns `Poll::Ready(Some(_))` for an update, `Poll::Ready(None)` once the
+	/// transcoder is gone, or `Poll::Pending` after registering `waiter`.
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<Update>> {
+		let update = {
+			let seen = &self.seen;
+			match ready!(self.state.poll(waiter, |state| match next_update(state, seen) {
+				Some(update) => Poll::Ready(update),
+				None => Poll::Pending,
+			})) {
+				Ok(update) => update,
+				// Closed: discard the Ref so its lock guard doesn't escape this call.
+				Err(_) => return Poll::Ready(None),
+			}
+		};
+		Poll::Ready(Some(self.advance(update)))
+	}
+
+	/// The next rendition to report, or `None` if there is nothing new.
+	///
+	/// `None` does NOT mean the cursor is closed; see [`is_closed`](Self::is_closed).
+	pub fn try_next(&mut self) -> Option<Update> {
+		let update = {
+			let seen = &self.seen;
+			next_update(&self.state.read(), seen)?
+		};
+		Some(self.advance(update))
+	}
+
+	/// True once the transcoder is gone: nothing will start encoding again.
+	pub fn is_closed(&self) -> bool {
+		self.state.is_closed()
+	}
+
+	/// Move the cursor past an update before handing it to the caller.
+	fn advance(&mut self, update: Update) -> Update {
+		self.seen.insert(update.rendition.name().to_string(), update.encoding);
+		update
+	}
+}
+
+/// The first rendition whose state differs from `seen`, in name order. A name
+/// missing from `seen` has never been reported, so the ladder lands first.
+fn next_update(state: &State, seen: &BTreeMap<String, bool>) -> Option<Update> {
+	state.ladder.iter().find_map(|(name, entry)| {
+		let encoding = entry.refs > 0;
+		if seen.get(name) == Some(&encoding) {
+			return None;
+		}
+		Some(Update {
+			rendition: entry.rendition.clone(),
+			encoding,
+		})
+	})
 }
 
 #[cfg(test)]
@@ -187,59 +330,150 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn tracks_entries_and_wakes_on_set_changes() {
-		let active = Active::new();
-		let mut watcher = active.clone();
-		assert!(active.get().is_empty());
+	async fn reports_the_ladder_then_each_edge() {
+		let active = Producer::default();
+		let rung = resolved("video/360p", 360);
+		let mut cursor = active.consume();
+		assert!(cursor.try_next().is_none());
 
-		let guard = active.enter(&resolved("video/360p", 360));
-		let seen = watcher.changed().await;
-		assert_eq!(seen.keys().collect::<Vec<_>>(), ["video/360p"]);
-		assert_eq!(seen["video/360p"].size.height, 360);
+		// The ladder lands before anything encodes, so a caller holds the handle
+		// even if the first pipeline is too short to be an edge.
+		active.declare(std::slice::from_ref(&rung));
+		let update = cursor.next().await.unwrap();
+		assert_eq!(update.rendition.name(), "video/360p");
+		assert_eq!(update.rendition.size().height, 360);
+		assert!(!update.encoding);
+		assert!(cursor.try_next().is_none());
+
+		let guard = active.enter(&rung);
+		assert!(cursor.next().await.unwrap().encoding);
+		assert!(cursor.try_next().is_none());
 
 		drop(guard);
-		assert!(watcher.changed().await.is_empty());
+		assert!(!cursor.next().await.unwrap().encoding);
 	}
 
-	/// A fetch overlapping a live session must not look like an edge: the set of
-	/// names is what a meter integrates, and flapping it would double-count.
+	/// A fetch overlapping the live session is one rendition, not two: the bill
+	/// is per rendition-second, so a second pipeline is not an edge and does not
+	/// start a second clock.
 	#[tokio::test]
-	async fn concurrent_pipelines_are_one_entry() {
-		let active = Active::new();
-		let mut watcher = active.clone();
+	async fn concurrent_pipelines_are_one_rendition() {
+		let active = Producer::default();
+		let low = resolved("video/240p", 240);
+		let high = resolved("video/360p", 360);
+		let mut cursor = active.consume();
 
-		let live = active.enter(&resolved("video/360p", 360));
-		watcher.changed().await;
+		let live = active.enter(&high);
+		let rendition = cursor.next().await.unwrap().rendition;
 
-		let fetch = active.enter(&resolved("video/360p", 360));
-		let other = active.enter(&resolved("video/240p", 240));
-		// Only the second NAME is an edge; the duplicate is not.
-		assert_eq!(watcher.changed().await.len(), 2);
+		let fetch = active.enter(&high);
+		let other = active.enter(&low);
+		// Only the second NAME is an edge.
+		let update = cursor.next().await.unwrap();
+		assert_eq!(update.rendition.name(), "video/240p");
+		assert!(update.encoding);
+		assert!(cursor.try_next().is_none());
 
 		drop(fetch);
-		// Still live, so still one entry for it and no edge from the release.
-		assert_eq!(active.get().len(), 2);
+		// Still live, so the release is not an edge either.
+		assert!(cursor.try_next().is_none());
+
 		drop(live);
-		assert_eq!(watcher.changed().await.keys().collect::<Vec<_>>(), ["video/240p"]);
+		let update = cursor.next().await.unwrap();
+		assert_eq!(update.rendition.name(), "video/360p");
+		assert!(!update.encoding);
 		drop(other);
-		assert!(watcher.changed().await.is_empty());
+		assert!(!cursor.next().await.unwrap().encoding);
+
+		// The handle outlives the encode, and the clock ran once.
+		assert!(rendition.encoded() > Duration::ZERO);
 	}
 
-	/// A clone must never miss what is already encoding: a metering loop that
-	/// only ever awaits `changed` still has to see a rung that started before it
-	/// existed, or that rung encodes for free.
+	/// A fresh cursor must report what is already encoding, or a caller that only
+	/// ever awaits `next` never learns about a rendition that started first.
 	#[tokio::test]
-	async fn clones_never_miss_the_current_set() {
-		let active = Active::new();
-		let _guard = active.enter(&resolved("video/480p", 480));
+	async fn a_fresh_cursor_reports_the_current_set() {
+		let active = Producer::default();
+		let rung = resolved("video/480p", 480);
+		let _guard = active.enter(&rung);
 
-		let mut fresh = active.clone();
-		assert_eq!(fresh.changed().await.len(), 1);
-		// Caught up: now it waits for a real change rather than spinning.
+		let mut cursor = active.consume();
+		let update = cursor.next().await.unwrap();
+		assert_eq!(update.rendition.name(), "video/480p");
+		assert!(update.encoding);
+		// Caught up: it waits for a real change rather than spinning.
+		assert!(cursor.try_next().is_none());
 		assert!(
-			tokio::time::timeout(std::time::Duration::from_millis(50), fresh.changed())
+			tokio::time::timeout(Duration::from_millis(50), cursor.next())
 				.await
 				.is_err()
 		);
+	}
+
+	/// The whole point of splitting the clock from the cursor: a pipeline that
+	/// starts and stops between two reads is invisible as an edge, but it still
+	/// encoded, so it still bills. This is the group-fetch path, which lives for
+	/// milliseconds. The caller can only bill it because the ladder handed it the
+	/// handle up front.
+	#[tokio::test]
+	async fn a_transient_pipeline_is_metered_without_an_edge() {
+		let active = Producer::default();
+		let rung = resolved("video/360p", 360);
+		active.declare(std::slice::from_ref(&rung));
+
+		let mut cursor = active.consume();
+		let rendition = cursor.next().await.unwrap().rendition;
+		assert_eq!(rendition.encoded(), Duration::ZERO);
+
+		let guard = active.enter(&rung);
+		tokio::time::sleep(Duration::from_millis(20)).await;
+		drop(guard);
+
+		// The cursor converged without ever reporting the start or the stop.
+		assert!(cursor.try_next().is_none());
+		// The clock did not miss it.
+		assert!(rendition.encoded() >= Duration::from_millis(20));
+	}
+
+	/// A caller bills by subtracting two reads, so the clock has to advance while
+	/// the rendition is still encoding rather than only when it stops, and it has
+	/// to keep its total across an idle gap.
+	#[tokio::test]
+	async fn the_clock_runs_in_flight_and_survives_an_idle_gap() {
+		let active = Producer::default();
+		let rung = resolved("video/360p", 360);
+		let mut cursor = active.consume();
+
+		let guard = active.enter(&rung);
+		let rendition = cursor.next().await.unwrap().rendition;
+
+		tokio::time::sleep(Duration::from_millis(20)).await;
+		let first = rendition.encoded();
+		assert!(first >= Duration::from_millis(20), "the clock stalled while encoding");
+
+		drop(guard);
+		cursor.next().await;
+		let idle = rendition.encoded();
+		assert!(idle >= first);
+
+		// A second session keeps accumulating rather than restarting at zero.
+		let guard = active.enter(&rung);
+		cursor.next().await;
+		tokio::time::sleep(Duration::from_millis(20)).await;
+		assert!(rendition.encoded() >= idle + Duration::from_millis(20));
+		drop(guard);
+	}
+
+	/// A cursor has to be able to tell "nothing is encoding" from "the transcoder
+	/// is gone", or a metering loop parks forever on a dead transcode.
+	#[tokio::test]
+	async fn the_cursor_closes_with_the_producer() {
+		let active = Producer::default();
+		let mut cursor = active.consume();
+		assert!(!cursor.is_closed());
+
+		drop(active);
+		assert!(cursor.is_closed());
+		assert!(cursor.next().await.is_none());
 	}
 }

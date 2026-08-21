@@ -50,8 +50,8 @@ pub(crate) struct Rung {
 	pub decoder: moq_video::decode::Kind,
 	/// How to resize decoded frames.
 	pub resize: moq_video::resize::Config,
-	/// Where to report that this rung is encoding, if the caller asked.
-	pub active: Option<crate::Active>,
+	/// Where to report that this rung is encoding.
+	pub active: crate::active::Producer,
 }
 
 impl Rung {
@@ -129,7 +129,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 
 		// Encoding starts here and stops when the session breaks, so this is
 		// exactly the interval a meter should charge for.
-		let _active = rung.active.as_ref().map(|active| active.enter(&rung.info));
+		let _active = rung.active.enter(&rung.info);
 
 		// One listener + encoder per demand session: rate control persists
 		// across groups, while every group still opens with a forced IDR.
@@ -332,8 +332,8 @@ async fn fetch(rung: Rung, request: moq_net::track::GroupRequest) -> Result<(), 
 	};
 	// A fetch builds its own pipeline, so it is billable work even when the
 	// live path is idle. Reference counted, so overlapping the live session
-	// doesn't double-report the rung.
-	let _active = rung.active.as_ref().map(|active| active.enter(&rung.info));
+	// bills the rendition once rather than twice.
+	let _active = rung.active.enter(&rung.info);
 	transcode_group(pipeline, &container, &mut source, output).await?;
 	Ok(())
 }

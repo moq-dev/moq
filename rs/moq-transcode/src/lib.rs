@@ -21,14 +21,14 @@
 //! GPU-resident: NVDEC decodes and scales in hardware and NVENC encodes the
 //! CUDA frame in place, with no CPU copies. Other decoders scale on the CPU.
 
-mod active;
+pub mod active;
+
 mod catalog;
 mod config;
 mod error;
 mod feed;
 mod rung;
 
-pub use active::{Active, Encoding};
 pub use config::{Config, Rung};
 
 #[allow(deprecated)]
@@ -37,128 +37,190 @@ pub use error::Error;
 
 /// Transcode `source` into `output` until the source broadcast ends.
 ///
+/// A shorthand for [`Transcoder::new`] followed by [`Transcoder::run`], for a
+/// caller with nothing to observe.
+pub async fn run(
+	source: moq_net::broadcast::Consumer,
+	output: moq_net::broadcast::Producer,
+	config: Config,
+) -> Result<(), Error> {
+	Transcoder::new(source, output, config)?.run().await
+}
+
+/// A transcoder, split from the future that drives it.
+///
 /// Reads the source catalog, publishes the derivative catalog (rungs strictly
 /// below the source, plus source renditions referenced via [`Config::source`]),
 /// and serves each rung just-in-time: a rung track only materializes when a
 /// consumer asks for it, and only encodes while consumed. Where `output` is
 /// announced (and how its path relates to the source) is the caller's business.
 ///
-/// The catalog tracks and the on-demand rung handler are registered
-/// synchronously, before the first `await`, so a consumer may race the rest of
-/// the setup safely: call `run` before announcing `output`.
-pub async fn run(
+/// The split exists so a caller can attach [`active`] before any encoding
+/// starts. [`run`](Self::run) consumes the transcoder, so take the cursors you
+/// want first.
+pub struct Transcoder {
 	source: moq_net::broadcast::Consumer,
-	mut output: moq_net::broadcast::Producer,
+	output: moq_net::broadcast::Producer,
 	config: Config,
-) -> Result<(), Error> {
-	// The catalog starts empty and fills in below, exactly like a media
-	// importer that hasn't seen parameter sets yet.
-	let mut derived = moq_mux::catalog::Producer::new(&mut output)?;
+	derived: moq_mux::catalog::Producer,
 	// Consumers asking for a rung before (or after) it exists queue here.
-	let mut dynamic = output.dynamic();
+	dynamic: moq_net::broadcast::Dynamic,
+	active: active::Producer,
+}
 
-	// The source catalog drives everything; wait for a snapshot with a usable
-	// video rendition (the first may precede the source publishing its video).
-	let track = source
-		.track(hang::Catalog::DEFAULT_NAME)?
-		.subscribe(hang::Catalog::default_subscription())
-		.await?;
-	let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track);
-	let (source_name, source_config, snapshot) = loop {
-		let Some(snapshot) = catalogs.next().await? else {
-			return Err(Error::NoSource);
+impl Transcoder {
+	/// Register the catalog tracks and the on-demand rung handler on `output`.
+	///
+	/// Synchronous, and everything a consumer can race is in place by the time
+	/// it returns, so announce `output` after this rather than before.
+	pub fn new(
+		source: moq_net::broadcast::Consumer,
+		mut output: moq_net::broadcast::Producer,
+		config: Config,
+	) -> Result<Self, Error> {
+		// The catalog starts empty and fills in during `run`, exactly like a
+		// media importer that hasn't seen parameter sets yet.
+		let derived = moq_mux::catalog::Producer::new(&mut output)?;
+		let dynamic = output.dynamic();
+
+		Ok(Self {
+			source,
+			output,
+			config,
+			derived,
+			dynamic,
+			active: active::Producer::default(),
+		})
+	}
+
+	/// A cursor over the renditions this transcoder produces.
+	///
+	/// Each call returns an independent cursor, positioned before the ladder so
+	/// it reports every rendition once and everything already encoding. See
+	/// [`active::Consumer`].
+	pub fn active(&self) -> active::Consumer {
+		self.active.consume()
+	}
+
+	/// Serve the ladder until the source broadcast ends.
+	pub async fn run(self) -> Result<(), Error> {
+		let Self {
+			source,
+			mut output,
+			config,
+			mut derived,
+			mut dynamic,
+			active,
+		} = self;
+
+		// The source catalog drives everything; wait for a snapshot with a usable
+		// video rendition (the first may precede the source publishing its video).
+		let track = source
+			.track(hang::Catalog::DEFAULT_NAME)?
+			.subscribe(hang::Catalog::default_subscription())
+			.await?;
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track);
+		let (source_name, source_config, snapshot) = loop {
+			let Some(snapshot) = catalogs.next().await? else {
+				return Err(Error::NoSource);
+			};
+			match catalog::choose_source(&snapshot.video) {
+				Ok((name, config)) => break (name, config, snapshot),
+				Err(_) => tracing::debug!("no transcodable rendition yet; waiting for a catalog update"),
+			}
 		};
-		match catalog::choose_source(&snapshot.video) {
-			Ok((name, config)) => break (name, config, snapshot),
-			Err(_) => tracing::debug!("no transcodable rendition yet; waiting for a catalog update"),
+		let rungs = catalog::resolve_rungs(&config.rungs, &source_name, &source_config)?;
+		tracing::info!(source = %source_name, rungs = rungs.len(), "transcoding");
+		// Publish the ladder before any rung can be asked for, so a cursor holds
+		// every handle and can bill a pipeline too short to show up as an edge.
+		active.declare(&rungs);
+
+		// One shared live decode for every rung of this source: N active rungs
+		// share one subscription and one decoder instead of N.
+		let feed = feed::Feed::new(
+			source.track(&source_name)?,
+			source_config.clone(),
+			config.decoder.clone(),
+		);
+
+		// Publish the derivative catalog before any encoder exists, so subscribers
+		// can pick a rung immediately.
+		let mut entries = Vec::with_capacity(rungs.len());
+		for rung in &rungs {
+			let entry = catalog::rung_entry(rung, &source_config, &config.encoder).await?;
+			entries.push((rung.name.clone(), entry));
 		}
-	};
-	let rungs = catalog::resolve_rungs(&config.rungs, &source_name, &source_config)?;
-	tracing::info!(source = %source_name, rungs = rungs.len(), "transcoding");
+		{
+			let mut guard = derived.lock();
+			catalog::populate(&mut guard, &snapshot, &entries, config.source.as_ref())?;
+		}
 
-	// One shared live decode for every rung of this source: N active rungs
-	// share one subscription and one decoder instead of N.
-	let feed = feed::Feed::new(
-		source.track(&source_name)?,
-		source_config.clone(),
-		config.decoder.clone(),
-	);
-
-	// Publish the derivative catalog before any encoder exists, so subscribers
-	// can pick a rung immediately.
-	let mut entries = Vec::with_capacity(rungs.len());
-	for rung in &rungs {
-		let entry = catalog::rung_entry(rung, &source_config, &config.encoder).await?;
-		entries.push((rung.name.clone(), entry));
-	}
-	{
-		let mut guard = derived.lock();
-		catalog::populate(&mut guard, &snapshot, &entries, config.source.as_ref())?;
-	}
-
-	// Serve rung requests and follow source catalog updates until the source
-	// ends. The rung set is fixed at startup: a source that changes resolution
-	// mid-stream keeps the ladder it started with, but the passthrough entries
-	// track the source.
-	let mut tasks = tokio::task::JoinSet::new();
-	loop {
-		tokio::select! {
-			request = dynamic.requested_track() => {
-				// Err means the broadcast closed; nothing left to serve.
-				let Ok(request) = request else { break };
-				match rungs.iter().find(|rung| rung.name == request.name()) {
-					Some(info) => {
-						let rung = rung::Rung {
-							source: source.track(&source_name)?,
-							feed: feed.clone(),
-							broadcast: source.clone(),
-							config: source_config.clone(),
-							encoder: config.encoder.clone(),
-							decoder: config.decoder.clone(),
-							resize: config.resize,
-							active: config.active.clone(),
-							info: info.clone(),
-						};
-						tasks.spawn(rung::serve(rung, request));
+		// Serve rung requests and follow source catalog updates until the source
+		// ends. The rung set is fixed at startup: a source that changes resolution
+		// mid-stream keeps the ladder it started with, but the passthrough entries
+		// track the source.
+		let mut tasks = tokio::task::JoinSet::new();
+		loop {
+			tokio::select! {
+				request = dynamic.requested_track() => {
+					// Err means the broadcast closed; nothing left to serve.
+					let Ok(request) = request else { break };
+					match rungs.iter().find(|rung| rung.name == request.name()) {
+						Some(info) => {
+							let rung = rung::Rung {
+								source: source.track(&source_name)?,
+								feed: feed.clone(),
+								broadcast: source.clone(),
+								config: source_config.clone(),
+								encoder: config.encoder.clone(),
+								decoder: config.decoder.clone(),
+								resize: config.resize,
+								active: active.clone(),
+								info: info.clone(),
+							};
+							tasks.spawn(rung::serve(rung, request));
+						}
+						None => request.reject(moq_net::Error::NotFound),
 					}
-					None => request.reject(moq_net::Error::NotFound),
+				},
+				update = catalogs.next() => match update {
+					Ok(Some(snapshot)) => {
+						let mut guard = derived.lock();
+						catalog::populate(&mut guard, &snapshot, &entries, config.source.as_ref())?;
+					}
+					// The source ended (or its catalog track died): wind down.
+					Ok(None) => break,
+					Err(err) => {
+						tracing::debug!(%err, "source catalog ended");
+						break;
+					}
+				},
+				Some(result) = tasks.join_next() => match result {
+					Ok(Ok(())) => {}
+					Ok(Err(err)) => tracing::warn!(%err, "rung failed"),
+					Err(err) => tracing::warn!(%err, "rung panicked"),
 				}
-			},
-			update = catalogs.next() => match update {
-				Ok(Some(snapshot)) => {
-					let mut guard = derived.lock();
-					catalog::populate(&mut guard, &snapshot, &entries, config.source.as_ref())?;
-				}
-				// The source ended (or its catalog track died): wind down.
-				Ok(None) => break,
-				Err(err) => {
-					tracing::debug!(%err, "source catalog ended");
-					break;
-				}
-			},
-			Some(result) = tasks.join_next() => match result {
-				Ok(Ok(())) => {}
-				Ok(Err(err)) => tracing::warn!(%err, "rung failed"),
-				Err(err) => tracing::warn!(%err, "rung panicked"),
 			}
 		}
+
+		// Wind the rungs down. On a clean source end they are already finishing on
+		// their own (the live path saw the source track end), so `shutdown` just
+		// joins them. But `run` also breaks on a catalog-track error while the
+		// source media and viewers are still live, and a rung task only self-ends on
+		// source-media-end or broadcast-close, not catalog-end. Aborting rather than
+		// awaiting keeps that case from hanging forever here.
+		tasks.shutdown().await;
+
+		derived.finish()?;
+		output.finish();
+		Ok(())
 	}
-
-	// Wind the rungs down. On a clean source end they are already finishing on
-	// their own (the live path saw the source track end), so `shutdown` just
-	// joins them. But `run` also breaks on a catalog-track error while the
-	// source media and viewers are still live, and a rung task only self-ends on
-	// source-media-end or broadcast-close, not catalog-end. Aborting rather than
-	// awaiting keeps that case from hanging forever here.
-	tasks.shutdown().await;
-
-	derived.finish()?;
-	output.finish();
-	Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+	use std::time::Duration;
+
 	use super::*;
 
 	/// A live source broadcast; the producers are kept so the tracks stay open
@@ -599,74 +661,58 @@ mod tests {
 		transcoder.abort();
 	}
 
-	/// The whole point of [`Active`]: a caller metering or pricing the work sees
-	/// which rungs are encoding, and sees the rung leave once nobody wants it.
-	/// Nothing else distinguishes a transcoder publishing a catalog from one
-	/// saturating a GPU.
+	/// The whole point of [`active`]: a caller metering or pricing the work is
+	/// handed the ladder, sees each rendition start and stop, and can bill the
+	/// seconds in between. Nothing else distinguishes a transcoder publishing a
+	/// catalog from one saturating a GPU.
 	#[tokio::test]
 	async fn reports_active_rungs() {
 		let source = source_broadcast(2, 5);
-		let active = Active::new();
 
 		let config = Config {
 			rungs: vec![Rung::new(120, 100_000)],
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
-			active: Some(active.clone()),
 			..Default::default()
 		};
 
 		let output = moq_net::broadcast::Info::default().produce();
 		let consumer = output.consume();
-		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+		let transcoder = Transcoder::new(source.broadcast.consume(), output, config).unwrap();
+		let mut active = transcoder.active();
+		let driver = tokio::spawn(transcoder.run());
 
-		// Wait for the derivative catalog, so the transcoder is past startup and
-		// the rung exists to be asked for.
-		let catalog = loop {
-			match consumer.track(hang::Catalog::DEFAULT_NAME) {
-				Ok(track) => break track,
-				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
-				Err(err) => panic!("catalog track: {err}"),
-			}
-		};
-		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
-		loop {
-			let snapshot = catalogs.next().await.unwrap().unwrap();
-			if snapshot.video.renditions.contains_key("video/120p") {
-				break;
-			}
-		}
-
-		let mut watcher = active.clone();
-		// The ladder is published, but just-in-time means nothing is encoding.
-		assert!(watcher.get().is_empty(), "encoding before anyone asked");
+		// The ladder arrives once resolved, before anyone has asked for a rung.
+		let update = active.next().await.unwrap();
+		let rendition = update.rendition;
+		assert_eq!(rendition.name(), "video/120p");
+		assert_eq!(rendition.size().height, 120);
+		assert_eq!(rendition.bitrate(), 100_000);
+		assert!(!update.encoding, "encoding before anyone asked");
+		assert_eq!(rendition.encoded(), Duration::ZERO);
 
 		let mut subscriber = consumer.track("video/120p").unwrap().subscribe(None).await.unwrap();
-		let seen = loop {
-			let seen = watcher.changed().await;
-			if !seen.is_empty() {
-				break seen;
-			}
-		};
-		assert_eq!(seen.keys().collect::<Vec<_>>(), ["video/120p"]);
-		assert_eq!(seen["video/120p"].size.height, 120);
-		assert_eq!(seen["video/120p"].bitrate, 100_000);
+		let update = active.next().await.unwrap();
+		assert_eq!(update.rendition.name(), "video/120p");
+		assert!(update.encoding);
 
-		// Real frames, so the entry is reporting encoding rather than intent.
+		// Real frames, so the clock is metering encoding rather than intent.
 		let mut group = subscriber.next_group().await.unwrap().unwrap();
 		group.read_frame().await.unwrap().unwrap();
+		assert!(rendition.encoded() > Duration::ZERO);
 
-		// Demand gone: the rung stops encoding and leaves the set.
+		// Demand gone: the rung stops encoding and the cursor reports the edge.
 		drop(group);
 		drop(subscriber);
-		loop {
-			if watcher.changed().await.is_empty() {
-				break;
-			}
-		}
+		let update = active.next().await.unwrap();
+		assert_eq!(update.rendition.name(), "video/120p");
+		assert!(!update.encoding);
 
-		transcoder.abort();
+		// The clock stopped, but the total survives for the final bill.
+		assert!(rendition.encoded() > Duration::ZERO);
+
+		driver.abort();
 	}
 
 	/// `run` must terminate (not hang in its shutdown drain) when the source
