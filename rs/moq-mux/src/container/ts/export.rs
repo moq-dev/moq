@@ -49,11 +49,13 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 /// Emit a PCR on every crossing of this media-time grid ([`Export::write_pcr`]).
 /// TR 101 290 flags a gap over 40 ms; broadcast muxes emit every 25-40 ms.
 const PCR_INTERVAL: Duration = Duration::from_millis(25);
-/// How many missed PCR slots to backfill at most. Frames coarser than the grid
-/// cross a few slots at a time and every one is filled so the ramp stays uniform;
-/// past this cap the media itself gapped, and a dense clock history for a span
-/// that carried no bytes helps nobody.
-const PCR_BACKFILL: u128 = 8;
+/// How many missed PCR slots to backfill at most: one second's worth. Frames
+/// coarser than the grid cross several slots at a time and every one is filled so
+/// the ramp stays uniform, down to a 1 fps cadence. Past this cap the media
+/// didn't have a coarse cadence, it had an outage, and reconstructing a dense
+/// clock history for a span that carried no bytes only stalls anything pacing on
+/// the asserted values.
+const PCR_BACKFILL: u128 = 40;
 
 /// Subscribe to a broadcast and produce an MPEG-TS byte stream.
 ///

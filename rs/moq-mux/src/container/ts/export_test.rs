@@ -757,6 +757,64 @@ async fn export_pcr_respects_every_renditions_reserve() {
 	assert!(units >= 50, "expected both renditions' units, got {units}");
 }
 
+/// A frame cadence coarser than the grid backfills every missed slot: low-rate
+/// video-only content (here 2.5 fps, 16 slots per frame) still asserts a uniform
+/// 25 ms ramp. A tight backfill cap would skip slots on every frame and re-create
+/// the clock jumps this grid exists to eliminate.
+#[tokio::test(start_paused = true)]
+async fn export_pcr_backfills_a_coarse_cadence() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
+	let track = broadcast
+		.create_track(broadcast.unique_name(".avc1"), hang::container::track_info())
+		.unwrap();
+	{
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: false,
+		});
+		cfg.container = Container::Legacy;
+		cfg.description = Some(avcc);
+		catalog.lock().video.renditions.insert(track.name().to_string(), cfg);
+	}
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+
+	let idr = [0x65u8; 32];
+	for i in 0..10u64 {
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_millis(10_000 + i * 400).unwrap(),
+				duration: None,
+				payload: length_prefixed(&[&idr]),
+				keyframe: true,
+			})
+			.unwrap();
+	}
+	producer.finish().unwrap();
+
+	let ts = drain(consumer).await;
+	assert_packet_aligned(&ts);
+
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	let mut pcrs: Vec<u64> = Vec::new();
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(pcr) = packet.adaptation_field.as_ref().and_then(|af| af.pcr) {
+			pcrs.push(pcr.as_u64() / 300);
+		}
+	}
+
+	// 9 inter-frame spans of 400 ms, 16 slots each: every one backfilled.
+	assert!(pcrs.len() > 100, "expected a dense backfilled clock, got {}", pcrs.len());
+	for (i, w) in pcrs.windows(2).enumerate() {
+		assert_eq!(w[1] - w[0], 2250, "PCR interval off the grid at {i}: {w:?}");
+	}
+}
+
 /// Full SCTE-35 round-trip: import `bbb.ts` (real H.264 + AAC) into a broadcast
 /// that also carries a `.scte35` cue track, export to TS, re-import, and assert
 /// the splice_info_section came back byte-for-byte. The PMT must advertise the
