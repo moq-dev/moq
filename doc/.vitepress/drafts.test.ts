@@ -112,20 +112,20 @@ describe("tables render as tables", () => {
 
 		const rendered = html(page as DraftPage);
 
-		// The Bidirectional Streams table: one header, six body rows, each
+		// The Bidirectional Streams table: one header, seven body rows, each
 		// separated by a kramdown rule in the source. Cells carry the source's
 		// alignment, so match around the style attribute.
 		const header = /<th[^>]*>Stream<\/th>/.exec(rendered);
 		expect(header).not.toBeNull();
 
-		for (const stream of ["Announce", "Subscribe", "Fetch", "Probe", "Goaway", "Track"]) {
+		for (const stream of ["Announce", "Subscribe", "Fetch", "Probe", "Goaway", "Track", "Dynamic"]) {
 			expect(rendered).toMatch(new RegExp(`<td[^>]*>${stream}</td>`));
 		}
 
-		// One header row plus six body rows, in a single table.
+		// One header row plus seven body rows, in a single table.
 		const start = rendered.lastIndexOf("<table", header?.index);
 		const rows = rendered.slice(start).split("</table>")[0];
-		expect(rows.match(/<tr>/g) ?? []).toHaveLength(7);
+		expect(rows.match(/<tr>/g) ?? []).toHaveLength(8);
 	});
 });
 
