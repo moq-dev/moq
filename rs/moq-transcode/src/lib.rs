@@ -21,12 +21,14 @@
 //! GPU-resident: NVDEC decodes and scales in hardware and NVENC encodes the
 //! CUDA frame in place, with no CPU copies. Other decoders scale on the CPU.
 
+mod active;
 mod catalog;
 mod config;
 mod error;
 mod feed;
 mod rung;
 
+pub use active::{Active, Encoding};
 pub use config::{Config, Rung};
 
 #[allow(deprecated)]
@@ -114,6 +116,7 @@ pub async fn run(
 							encoder: config.encoder.clone(),
 							decoder: config.decoder.clone(),
 							resize: config.resize,
+							active: config.active.clone(),
 							info: info.clone(),
 						};
 						tasks.spawn(rung::serve(rung, request));
@@ -592,6 +595,76 @@ mod tests {
 		// finished transcode carries them all through.
 		let total = fetched.finished().await.unwrap();
 		assert_eq!(total, 5);
+
+		transcoder.abort();
+	}
+
+	/// The whole point of [`Active`]: a caller metering or pricing the work sees
+	/// which rungs are encoding, and sees the rung leave once nobody wants it.
+	/// Nothing else distinguishes a transcoder publishing a catalog from one
+	/// saturating a GPU.
+	#[tokio::test]
+	async fn reports_active_rungs() {
+		let source = source_broadcast(2, 5);
+		let active = Active::new();
+
+		let config = Config {
+			rungs: vec![Rung::new(120, 100_000)],
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			active: Some(active.clone()),
+			..Default::default()
+		};
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		// Wait for the derivative catalog, so the transcoder is past startup and
+		// the rung exists to be asked for.
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+		loop {
+			let snapshot = catalogs.next().await.unwrap().unwrap();
+			if snapshot.video.renditions.contains_key("video/120p") {
+				break;
+			}
+		}
+
+		let mut watcher = active.clone();
+		// The ladder is published, but just-in-time means nothing is encoding.
+		assert!(watcher.get().is_empty(), "encoding before anyone asked");
+
+		let mut subscriber = consumer.track("video/120p").unwrap().subscribe(None).await.unwrap();
+		let seen = loop {
+			let seen = watcher.changed().await;
+			if !seen.is_empty() {
+				break seen;
+			}
+		};
+		assert_eq!(seen.keys().collect::<Vec<_>>(), ["video/120p"]);
+		assert_eq!(seen["video/120p"].size.height, 120);
+		assert_eq!(seen["video/120p"].bitrate, 100_000);
+
+		// Real frames, so the entry is reporting encoding rather than intent.
+		let mut group = subscriber.next_group().await.unwrap().unwrap();
+		group.read_frame().await.unwrap().unwrap();
+
+		// Demand gone: the rung stops encoding and leaves the set.
+		drop(group);
+		drop(subscriber);
+		loop {
+			if watcher.changed().await.is_empty() {
+				break;
+			}
+		}
 
 		transcoder.abort();
 	}
