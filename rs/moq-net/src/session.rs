@@ -1,12 +1,6 @@
-use std::{
-	future::Future,
-	pin::Pin,
-	sync::Arc,
-	task::{Context, Poll},
-	time::Duration,
-};
+use std::{sync::Arc, task::Poll, time::Duration};
 
-use web_transport_trait::Stats;
+use web_transport_trait::{MaybeSend, MaybeSync, Stats};
 
 use crate::{
 	Error, SessionError, Version, bandwidth, goaway,
@@ -54,14 +48,15 @@ pub struct ConnectionStats {
 
 /// A MoQ transport session, wrapping a WebTransport connection.
 ///
-/// Returned by [`crate::Client::connect`] and [`crate::Server::accept`], paired with
-/// the [`Driver`] that runs its protocol work. Nothing is spawned behind your back:
-/// the session makes no progress unless its driver is polled.
+/// Returned by [`crate::Client::connect`] and [`crate::Server::accept`], which hand
+/// the session's protocol [`runtime::Machine`](crate::runtime::Machine) to the
+/// [`Runtime`](crate::runtime::Runtime) they were given: that runtime is the only
+/// thing driving the session.
 ///
 /// Like every handle in this library, the lifecycle is reference counted: clones
 /// share the connection, the transport closes when the last clone drops, and
-/// [`abort`](Self::abort) closes it explicitly with an error. The [`Driver`] holds
-/// no `Session` clone, so handing it to an executor never keeps the session alive.
+/// [`abort`](Self::abort) closes it explicitly with an error. The machine holds
+/// no `Session` clone, so the runtime running it never keeps the session alive.
 #[derive(Clone)]
 pub struct Session {
 	shared: Arc<SessionShared>,
@@ -149,81 +144,6 @@ impl Session {
 	}
 }
 
-/// The future driving a [`Session`]'s protocol state.
-///
-/// Poll it for the lifetime of the session, either by `.await`ing it (typically
-/// spawned on an executor) or by stepping [`poll`](Self::poll) from inside another
-/// [`kio`]-style poll function. It holds no [`Session`] clone, so it never keeps
-/// the session alive: once the last session clone drops (or [`Session::abort`]
-/// fires), the transport closes and the driver finishes on its own. Dropping the
-/// driver cancels the protocol work without closing the session. It resolves when
-/// the session ends, and keeps returning that same result if polled again.
-///
-/// On native, driving requires a tokio runtime with a time driver (timers go
-/// through `kio::time`); see the crate-level Async docs.
-pub struct Driver {
-	state: DriverState,
-	// Retains the waiter across `Future` polls so its kio registrations stay live.
-	// Kept out of `DriverState` so the borrow `hold` hands back doesn't collide with
-	// the `&mut` that polling the state needs.
-	park: kio::Park,
-}
-
-/// Everything the driver polls, split from the park so the two borrow disjointly.
-struct DriverState {
-	protocol: MaybeSendBox<'static, Result<(), Error>>,
-	// Bandwidth sampling, polled alongside the protocol. Its completion never ends
-	// the driver: the protocol owns the teardown. `None` once finished (or when the
-	// transport reports no send-rate estimate), since a completed future must not be
-	// polled again.
-	maintenance: Option<MaybeSendBox<'static, ()>>,
-	// Cached so a poll after completion doesn't re-poll a finished future.
-	result: Option<Result<(), Error>>,
-}
-
-impl Driver {
-	/// Drive the protocol one step, registering `waiter` for the next wakeup.
-	///
-	/// The `poll_*` counterpart of `.await`ing the driver, for callers composing it
-	/// into their own [`kio`]-style poll functions.
-	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		self.state.poll(waiter)
-	}
-}
-
-impl DriverState {
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		if let Some(result) = &self.result {
-			return Poll::Ready(result.clone());
-		}
-
-		if let Some(maintenance) = &mut self.maintenance
-			&& waiter.poll_future(maintenance.as_mut()).is_ready()
-		{
-			self.maintenance = None;
-		}
-
-		let result = std::task::ready!(waiter.poll_future(self.protocol.as_mut()));
-		self.result = Some(result.clone());
-		// The session is over; release the maintenance future now rather than on
-		// Drop, since it holds a transport clone.
-		self.maintenance = None;
-		Poll::Ready(result)
-	}
-}
-
-impl Future for Driver {
-	type Output = Result<(), Error>;
-
-	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-		let this = &mut *self;
-		// Disjoint field borrows: `hold` borrows the park for as long as the waiter
-		// lives, while the state is polled through its own `&mut`.
-		let waiter = this.park.hold(cx);
-		this.state.poll(waiter)
-	}
-}
-
 // Close-once state shared by every [`Session`] clone: the first close wins,
 // whether it comes from an [`Session::abort`], the protocol teardown, or the
 // last clone dropping.
@@ -247,19 +167,25 @@ impl Drop for SessionShared {
 }
 
 impl Session {
-	pub(super) fn new<S: crate::transport::poll::Session>(
+	pub(super) fn new<S, R>(
+		runtime: R,
 		session: S,
 		version: Version,
 		recv_bandwidth: Option<bandwidth::Consumer>,
 		protocol: MaybeSendBox<'static, Result<(), Error>>,
 		goaway: goaway::Handle,
-	) -> (Self, Driver) {
+	) -> (Self, crate::runtime::Machine<R>)
+	where
+		S: crate::transport::poll::Session,
+		R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
+		R::Timer: MaybeSend,
+	{
 		// Send bandwidth is version-agnostic: it depends on QUIC backend support.
 		let (send_bandwidth, maintenance) = if session.stats().estimated_send_rate().is_some() {
 			let producer = bandwidth::Producer::new();
 			let consumer = producer.consume();
 
-			let mut monitor = SendBandwidth::new(session.clone(), producer);
+			let mut monitor = SendBandwidth::new(runtime, session.clone(), producer);
 			let maintenance = async move { kio::wait(|waiter| monitor.poll(waiter)).await }.maybe_boxed();
 
 			(Some(consumer), Some(maintenance))
@@ -277,16 +203,32 @@ impl Session {
 			recv_bandwidth,
 			goaway: Arc::new(goaway),
 		};
-		let driver = Driver {
-			state: DriverState {
-				protocol,
-				maintenance,
-				result: None,
-			},
-			park: kio::Park::default(),
-		};
+		let machine = crate::runtime::Machine::new(crate::runtime::MachineState {
+			protocol,
+			maintenance,
+			result: None,
+		});
 
-		(session, driver)
+		(session, machine)
+	}
+
+	/// Build the session, hand its machine to the runtime, and return the handle.
+	pub(super) fn spawn<S, R>(
+		runtime: R,
+		session: S,
+		version: Version,
+		recv_bandwidth: Option<bandwidth::Consumer>,
+		protocol: MaybeSendBox<'static, Result<(), Error>>,
+		goaway: goaway::Handle,
+	) -> Self
+	where
+		S: crate::transport::poll::Session,
+		R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
+		R::Timer: MaybeSend,
+	{
+		let (session, machine) = Self::new(runtime.clone(), session, version, recv_bandwidth, protocol, goaway);
+		runtime.spawn(machine);
+		session
 	}
 }
 
@@ -295,28 +237,30 @@ impl Session {
 ///
 /// Finishes as soon as the transport or the producer channel closes, so it doesn't
 /// pin the underlying connection after the wrapping [`Session`] is dropped.
-struct SendBandwidth<S> {
+struct SendBandwidth<S, R: crate::runtime::Runtime> {
+	runtime: R,
 	session: S,
 	producer: bandwidth::Producer,
 	// A dedicated clone for the close watch, since each pending poll operation
 	// needs its own handle.
 	closed: S,
-	mode: SendBandwidthMode,
+	mode: SendBandwidthMode<R>,
 }
 
-enum SendBandwidthMode {
+enum SendBandwidthMode<R: crate::runtime::Runtime> {
 	/// No consumers; sampling is paused.
 	Idle,
 	/// At least one consumer; sample when the deadline elapses.
-	Polling { deadline: kio::time::Deadline },
+	Polling { deadline: crate::runtime::Deadline<R> },
 }
 
-impl<S: crate::transport::poll::Session> SendBandwidth<S> {
+impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> SendBandwidth<S, R> {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-	fn new(session: S, producer: bandwidth::Producer) -> Self {
+	fn new(runtime: R, session: S, producer: bandwidth::Producer) -> Self {
 		let closed = session.clone();
 		Self {
+			runtime,
 			session,
 			producer,
 			closed,
@@ -330,7 +274,7 @@ impl<S: crate::transport::poll::Session> SendBandwidth<S> {
 		let bitrate = self.session.stats().estimated_send_rate();
 		self.producer.set(bitrate)?;
 		self.mode = SendBandwidthMode::Polling {
-			deadline: kio::time::Deadline::after(Self::POLL_INTERVAL),
+			deadline: crate::runtime::Deadline::after(&self.runtime, Self::POLL_INTERVAL),
 		};
 		Ok(())
 	}

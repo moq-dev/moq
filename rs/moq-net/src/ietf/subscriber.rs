@@ -16,6 +16,7 @@ use crate::{
 use super::{Message, Version, cluster, peer};
 
 use web_async::Lock;
+use web_transport_trait::{MaybeSend, MaybeSync};
 
 const TRACK_ALIAS_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -230,7 +231,9 @@ enum Arrival {
 }
 
 #[derive(Clone)]
-pub(super) struct Subscriber<S: crate::transport::poll::Session> {
+pub(super) struct Subscriber<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
+	// Arms the track-alias and request-id timeouts.
+	runtime: R,
 	session: S,
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Producer,
@@ -270,8 +273,12 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 /// seen is worth waiting on briefly (draft-19 section 11.4.2). Three outcomes:
 /// the subscription, [`Error::Cancel`] for an alias we retired, and [`Error::NotFound`]
 /// once the wait expires without any binding at all.
-async fn resolve_track_alias(aliases: kio::Consumer<AliasTable>, alias: u64) -> Result<RequestId, Error> {
-	let mut timeout = kio::time::Deadline::after(TRACK_ALIAS_TIMEOUT);
+async fn resolve_track_alias<R: crate::runtime::Runtime>(
+	runtime: &R,
+	aliases: kio::Consumer<AliasTable>,
+	alias: u64,
+) -> Result<RequestId, Error> {
+	let mut timeout = crate::runtime::Deadline::after(runtime, TRACK_ALIAS_TIMEOUT);
 	kio::wait(|waiter| {
 		let resolved = aliases.poll(waiter, |aliases| match aliases.map.get(&alias) {
 			Some(Alias::Active(request_id)) => Poll::Ready(Ok(*request_id)),
@@ -292,9 +299,15 @@ async fn resolve_track_alias(aliases: kio::Consumer<AliasTable>, alias: u64) -> 
 	.await
 }
 
-impl<S: crate::transport::poll::Session> Subscriber<S> {
+impl<S, R> Subscriber<S, R>
+where
+	S: crate::transport::poll::Session,
+	R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
+	R::Timer: MaybeSend,
+{
 	#[allow(clippy::too_many_arguments)]
 	pub fn new(
+		runtime: R,
 		session: S,
 		origin: origin::Producer,
 		control: Control,
@@ -307,6 +320,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		going_away: crate::goaway::GoingAway,
 	) -> Self {
 		Self {
+			runtime,
 			session,
 			origin,
 			control,
@@ -479,7 +493,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return Err(Error::GoingAway);
 		}
 
-		let request_id = self.control.next_request_id().await?;
+		let request_id = self.control.next_request_id(&self.runtime).await?;
 
 		// Draft-18+ uses SUBSCRIBE_NAMESPACE (0x50); earlier drafts use the legacy
 		// 0x11 message with a Subscribe Options field.
@@ -1243,7 +1257,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return;
 		}
 
-		let request_id = match self.control.next_request_id().await {
+		let request_id = match self.control.next_request_id(&self.runtime).await {
 			Ok(id) => id,
 			Err(err) => {
 				let _ = track.abort(err);
@@ -1556,7 +1570,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// SUBSCRIBE_OK or PUBLISH can be reordered behind this stream. Hold only the
 		// subgroup header while waiting so the data stream cannot consume flow control.
 		let aliases = self.state.lock().aliases.consume();
-		let request_id = match resolve_track_alias(aliases, group.track_alias).await {
+		let request_id = match resolve_track_alias(&self.runtime, aliases, group.track_alias).await {
 			Ok(request_id) => request_id,
 			// Ours: we cancelled the subscription and the publisher has not stopped yet.
 			Err(err @ Error::Cancel) => {
@@ -1769,10 +1783,15 @@ mod tests {
 
 	use super::*;
 
+	/// The tokio-backed test runtime. Its transport parameter is phantom, so one
+	/// type serves every fake session in this module.
+	type TestRuntime = crate::runtime::tokio_test::Tokio<crate::lite::test_transport::SinkSession>;
+
 	#[tokio::test(start_paused = true)]
 	async fn track_alias_waits_for_control_message() {
+		let runtime = TestRuntime::new();
 		let aliases = TrackAliases::default();
-		let pending = resolve_track_alias(aliases.consume(), 7);
+		let pending = resolve_track_alias(&runtime, aliases.consume(), 7);
 		tokio::pin!(pending);
 
 		assert!(poll!(&mut pending).is_pending());
@@ -1786,7 +1805,7 @@ mod tests {
 	async fn unknown_track_alias_times_out() {
 		let aliases = TrackAliases::default();
 		assert!(matches!(
-			resolve_track_alias(aliases.consume(), 7).await,
+			resolve_track_alias(&TestRuntime::new(), aliases.consume(), 7).await,
 			Err(Error::NotFound)
 		));
 	}
@@ -1813,6 +1832,7 @@ mod tests {
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 
 		Subscriber::new(
+			TestRuntime::new(),
 			session,
 			origin,
 			Control::new(None, false),
@@ -1882,6 +1902,7 @@ mod tests {
 		let log = session.log.clone();
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
+			TestRuntime::new(),
 			session.clone(),
 			scoped,
 			Control::new(None, false),
@@ -1955,6 +1976,7 @@ mod tests {
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer::default());
 		let mut subscriber = Subscriber::new(
+			TestRuntime::new(),
 			session.clone(),
 			scoped,
 			Control::new(None, false),
@@ -2010,7 +2032,8 @@ mod tests {
 		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
 		retire_track_alias(&aliases, 7, RequestId(11));
 
-		let resolve = resolve_track_alias(aliases.consume(), 7);
+		let runtime = TestRuntime::new();
+		let resolve = resolve_track_alias(&runtime, aliases.consume(), 7);
 		tokio::pin!(resolve);
 
 		assert!(
@@ -2033,7 +2056,7 @@ mod tests {
 		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
 		retire_track_alias(&aliases, 7, RequestId(11));
 
-		let err = resolve_track_alias(aliases.consume(), 7)
+		let err = resolve_track_alias(&TestRuntime::new(), aliases.consume(), 7)
 			.await
 			.expect_err("a retired alias resolves to a cancellation");
 
@@ -2078,13 +2101,14 @@ mod tests {
 	/// exercised without driving a whole SUBSCRIBE exchange.
 	fn subscriber_with_tracks(
 		tracks: &[(RequestId, &str, &str)],
-	) -> Subscriber<crate::lite::test_transport::SinkSession> {
+	) -> Subscriber<crate::lite::test_transport::SinkSession, TestRuntime> {
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		// The tests drive binding directly, so nothing spawns; leaking keeps the handle alive
 		// without a spawner.
 		std::mem::forget(task_set);
 
 		let subscriber = Subscriber::new(
+			TestRuntime::new(),
 			crate::lite::test_transport::SinkSession::new(Default::default()),
 			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
 			Control::new(None, false),
@@ -2238,6 +2262,7 @@ mod tests {
 
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
+			TestRuntime::new(),
 			session,
 			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
 			Control::new(None, false),
@@ -2293,6 +2318,7 @@ mod tests {
 
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
+			TestRuntime::new(),
 			session,
 			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
 			Control::new(None, false),
@@ -2397,6 +2423,7 @@ mod tests {
 
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
+			TestRuntime::new(),
 			adapter,
 			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
 			control,
@@ -2511,6 +2538,7 @@ mod tests {
 
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
+			TestRuntime::new(),
 			session,
 			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
 			Control::new(None, false),
@@ -2614,6 +2642,7 @@ mod tests {
 		let consumer = origin.consume();
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
+			TestRuntime::new(),
 			session,
 			origin,
 			Control::new(None, false),
@@ -2680,6 +2709,7 @@ mod tests {
 		// hop chain of its own.
 		let (tasks, _task_set) = crate::util::TaskSet::new();
 		let mut subscriber = Subscriber::new(
+			TestRuntime::new(),
 			session,
 			origin,
 			Control::new(None, false),
@@ -2724,6 +2754,7 @@ mod tests {
 			let (tasks, task_set) = crate::util::TaskSet::new();
 			std::mem::forget(task_set);
 			let mut subscriber = Subscriber::new(
+				TestRuntime::new(),
 				crate::lite::test_transport::SinkSession::new(Default::default()),
 				origin.clone(),
 				Control::new(None, false),
@@ -2760,7 +2791,7 @@ mod tests {
 	fn cluster_subscriber(
 		self_origin: crate::Origin,
 	) -> (
-		Subscriber<crate::lite::test_transport::SinkSession>,
+		Subscriber<crate::lite::test_transport::SinkSession, TestRuntime>,
 		crate::origin::Producer,
 	) {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
@@ -2771,6 +2802,7 @@ mod tests {
 		std::mem::forget(task_set);
 
 		let subscriber = Subscriber::new(
+			TestRuntime::new(),
 			session,
 			origin.clone(),
 			Control::new(None, false),
@@ -2903,6 +2935,7 @@ mod tests {
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer::default());
 		let mut subscriber = Subscriber::new(
+			TestRuntime::new(),
 			session.clone(),
 			origin,
 			Control::new(None, false),
@@ -2973,6 +3006,7 @@ mod tests {
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		std::mem::forget(task_set);
 		let mut subscriber = Subscriber::new(
+			TestRuntime::new(),
 			session.clone(),
 			origin,
 			Control::new(None, false),
@@ -3027,6 +3061,7 @@ mod tests {
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		std::mem::forget(task_set);
 		let mut subscriber = Subscriber::new(
+			TestRuntime::new(),
 			session.clone(),
 			origin,
 			Control::new(None, false),
@@ -3429,7 +3464,7 @@ mod tests {
 		attached: &cluster::Advert,
 		updates: &[Option<cluster::Advert>],
 	) -> (
-		Subscriber<crate::lite::test_transport::ScriptedSession>,
+		Subscriber<crate::lite::test_transport::ScriptedSession, TestRuntime>,
 		crate::origin::Consumer,
 		Stream<crate::lite::test_transport::ScriptedSession, Version>,
 	) {
@@ -3444,6 +3479,7 @@ mod tests {
 		std::mem::forget(task_set);
 
 		let mut subscriber = Subscriber::new(
+			TestRuntime::new(),
 			session.clone(),
 			origin,
 			Control::new(None, false),
@@ -3623,6 +3659,7 @@ mod tests {
 		std::mem::forget(task_set);
 
 		let mut subscriber = Subscriber::new(
+			TestRuntime::new(),
 			session.clone(),
 			origin,
 			Control::new(None, false),

@@ -47,33 +47,27 @@
 //! last producer signals consumers that no more updates are coming.
 //!
 //! ## Async
-//! This library is async-first. [`Client::connect`] and [`Server::accept`] return a
-//! `(Session, Driver)` pair: the [`Session`] is the handle, and the [`Driver`] is
-//! the future that runs all of its protocol work. Nothing is spawned behind your
-//! back: spawn the driver on your executor, await it in place, or step
-//! [`Driver::poll`] with a [`kio::Waiter`] from your own `poll_*` function. The
-//! driver holds no session handle, so the transport still closes when the last
-//! [`Session`] clone drops (or on [`Session::abort`]), which in turn finishes the
-//! driver.
+//! This library is async-first, but it never spawns onto a global executor and
+//! never reaches for ambient state. [`Client::connect`] and [`Server::accept`]
+//! take a [`Runtime`], which supplies the two things a session cannot do alone:
+//! run its protocol [`runtime::Machine`] to completion and arm its timers. The
+//! machine holds no session handle, so the transport still closes when the last
+//! [`Session`] clone drops (or on [`Session::abort`]), which in turn finishes
+//! the machine. Each transport ships its runtime (`moq-tokio`, `moq-wasm`, a
+//! thread-per-core io_uring runtime), and `runtime::Test` is the
+//! deterministic one for tests; see the [`runtime`] module.
 //!
-//! Origins follow the same pattern: [`origin::Producer::new`] returns a
+//! Origins follow the caller-driven pattern: [`origin::Producer::new`] returns a
 //! `(Producer, Driver)` pair, and the [`origin::Driver`] runs the origin's
 //! lifecycle work (route changes, track serving, teardown). Native tokio
 //! applications can use `moq_tokio::origin::spawn` instead of spawning the
 //! driver by hand.
 //!
-//! The crate has no direct tokio dependency: every future is built on [`kio`]
+//! The crate has no tokio dependency: every future is built on [`kio`]
 //! (plain [`std::task::Waker`] plumbing) and `futures`, so any executor can poll
 //! them, and the `poll_xxx` counterparts can be stepped synchronously with a
-//! [`kio::Waiter`].
-//!
-//! The one remaining runtime tie is time. Timers go through [`kio::time`], which
-//! is backed by tokio's time driver on native (and `wasmtimer` in the browser),
-//! and those timers panic when polled outside a tokio runtime. So on
-//! native you still need a tokio runtime to poll a [`Driver`] (bandwidth sampling,
-//! the control stream timeout, and subscription linger all sleep); purely
-//! model-layer methods (tracks, groups, frames, origins) never touch a timer and
-//! run on any executor.
+//! [`kio::Waiter`]. Purely model-layer methods (tracks, groups, frames,
+//! origins) never touch a timer and need no [`Runtime`] at all.
 
 #![warn(missing_docs)]
 // The browser transport is `!Send`, so on wasm the shared state behind these `Arc`s is
@@ -95,6 +89,7 @@ mod setup;
 mod util;
 mod version;
 
+pub mod runtime;
 pub mod stats;
 pub mod transport;
 
@@ -105,6 +100,7 @@ pub use error::*;
 pub use lite::Role;
 pub use model::*;
 pub use path::*;
+pub use runtime::Runtime;
 pub use server::*;
 pub use session::*;
 pub use version::*;

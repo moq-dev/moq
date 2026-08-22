@@ -4934,6 +4934,7 @@ dependencies = [
  "getrandom 0.4.3",
  "kio 0.5.6",
  "loom",
+ "moq-net",
  "num_enum",
  "rand 0.10.2",
  "serde",

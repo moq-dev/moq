@@ -273,12 +273,12 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 
 		let client = moq_net::Client::new().with_versions(version.into());
 		let server = moq_net::Server::new().with_versions(version.into());
-		let (client_result, server_result) =
-			tokio::join!(client.connect(client_transport), server.accept(server_transport));
-		let (client_session, client_driver) = client_result.expect("client handshake failed");
-		let (_server_session, server_driver) = server_result.expect("server handshake failed");
-		tokio::spawn(client_driver);
-		tokio::spawn(server_driver);
+		let (client_result, server_result) = tokio::join!(
+			client.connect(support::harness::TokioRuntime::new(), client_transport),
+			server.accept(support::harness::TokioRuntime::new(), server_transport)
+		);
+		let client_session = client_result.expect("client handshake failed");
+		let _server_session = server_result.expect("server handshake failed");
 
 		// First GOAWAY: observed with its URI. Waiting for the peer to close the
 		// stream guarantees the control message was fully processed.
