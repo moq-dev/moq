@@ -238,6 +238,7 @@ The first pad of each kind is always `video_0` / `audio_0` regardless of catalog
 | Audio | AAC   | `audio/mpeg` (v4)     |
 | Audio | MP3   | `audio/mpeg` (v1/v2, layer 3) |
 | Audio | Opus  | `audio/x-opus`        |
+| Data  | Opaque | `application/octet-stream` |
 
 Each `sink_%u` request pad publishes one track. By default the track is named after its codec
 (`0.avc3`, `0.aac`, and so on) and the catalog advertises that name. To choose the name, set the pad's
@@ -258,6 +259,45 @@ reserved name, the generated one included, and further writes are ignored with a
 element (back to `READY`) releases the reservation and makes it writable again. An empty string keeps
 the generated name. A name another pad already holds invalidates only that pad, so the rest of the
 broadcast keeps publishing.
+
+Each pad also reports what its track is doing, so a publication can be diagnosed without reading the
+logs or asking a consumer:
+
+| Property      | Type   | Description                                       |
+| ------------- | ------ | ------------------------------------------------- |
+| `status`      | enum   | `pending` until CAPS builds a producer, `active` once the broadcast reserved the track, `ended` when it was finalized, `error` when the pad was invalidated |
+| `track-error` | string | Why the pad was invalidated, null when it was not  |
+
+Both emit `notify`, so an application can connect to `notify::status` rather than poll. `active`
+means the producer exists and the track is registered, not merely that the pad was requested, and a
+pad that sent EOS stays `active` until every pad has ended and the producers are finalized. `error`
+is terminal: it survives EOS, and clears when the pad is released or the element goes back to
+`READY`. A pad still waiting for CAPS is `pending` with no error, because nothing has failed yet.
+Connection loss is the element's own `status`, not the pad's.
+
+A pad negotiated as `application/octet-stream` publishes application data instead of media. The bytes
+go out exactly as they arrive: no codec, no container, no interpretation.
+
+```bash
+gst-launch-1.0 -v -e \
+  appsrc name=levels format=time do-timestamp=true caps=application/octet-stream ! mux.sink_0 \
+  moqsink name=mux url=https://cdn.moq.dev/anon broadcast=bbb.hang \
+    sink_0::track=audiolevels
+```
+
+Such a pad requires `track`: an opaque track is advertised nowhere, so a generated name would be
+unreachable, and a pad without one is invalidated. It also requires a TIME segment: byte-oriented
+sources such as `filesrc` and `fdsrc` push a BYTES segment, and every buffer behind one is dropped
+with a single warning on the bus.
+
+Each buffer becomes one group holding one frame, stamped with the buffer's PTS mapped through that
+segment. A buffer that arrives with no segment or no PTS is dropped rather than stamped with a
+substitute: the track shares the timeline of the media it accompanies, and a wall-clock reading would
+belong to a different epoch.
+
+The track is deliberately absent from the catalog. MSF requires a `packaging` value on every declared
+track and defines none for raw bytes, so a consumer is told out of band, by configuration, which data
+tracks to subscribe to.
 
 ### moqsrc (subscribe)
 

@@ -1,13 +1,35 @@
 //! The `sink_%u` request pad as its own GObject, so the track it publishes can be named from a
 //! pipeline description through `GstChildProxy` (`moqsink sink_0::track=camera`).
 
-use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
 
+use super::pad::Pad;
 use super::session::CAT;
+
+/// What the pad's track is doing, as reported by the `status` property.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, glib::Enum)]
+#[repr(u32)]
+#[enum_type(name = "MoqSinkPadStatus")]
+pub enum Status {
+	/// Requested, with no producer yet: CAPS has not arrived, or the element is not started.
+	#[default]
+	#[enum_value(name = "No producer yet", nick = "pending")]
+	Pending = 0,
+	/// CAPS built a producer and the broadcast reserved the track.
+	#[enum_value(name = "Publishing", nick = "active")]
+	Active = 1,
+	/// The track was finalized cleanly.
+	#[enum_value(name = "Track finalized", nick = "ended")]
+	Ended = 2,
+	/// The pad was invalidated; `track-error` carries the reason.
+	#[enum_value(name = "Terminal pad failure", nick = "error")]
+	Error = 3,
+}
 
 #[derive(Debug, Default)]
 struct Settings {
@@ -17,49 +39,107 @@ struct Settings {
 	/// The name the broadcast actually reserved. Present only while that producer lives, and while it is
 	/// present the property is fixed.
 	effective: Option<String>,
-	/// Blocks CAPS from creating a producer while the element removes this pad.
-	releasing: bool,
+	/// What the track is doing, read back through `status`.
+	status: Status,
+	/// The reason the pad was invalidated, read back through `track-error`.
+	error: Option<String>,
+}
+
+/// Everything owned by one request pad, protected by one lock.
+pub(super) struct PadLifecycle {
+	settings: Settings,
+	pub(super) media: Pad,
+	pub(super) ended: bool,
+	pub(super) releasing: bool,
+	pub(super) session_error: Option<Arc<AtomicBool>>,
+}
+
+impl Default for PadLifecycle {
+	fn default() -> Self {
+		Self {
+			settings: Settings::default(),
+			media: Pad::new(),
+			ended: false,
+			releasing: false,
+			session_error: None,
+		}
+	}
+}
+
+/// Property notifications earned by one lifecycle operation.
+#[derive(Default)]
+pub(super) struct Notifications {
+	track: bool,
+	status: bool,
+	error: bool,
 }
 
 /// The GObject implementation backing a named `moqsink` request pad.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct MoqSinkPadImp {
-	settings: Mutex<Settings>,
+	lifecycle: Mutex<PadLifecycle>,
 }
 
-/// A pending track reservation that serializes property writes until it is committed or dropped.
-pub(super) struct TrackReservation<'a> {
-	pad: &'a MoqSinkPad,
-	settings: MutexGuard<'a, Settings>,
+impl Settings {
+	/// Set the status, reporting whether it moved.
+	fn set_status(&mut self, status: Status) -> bool {
+		let changed = self.status != status;
+		self.status = status;
+		changed
+	}
 }
 
-impl TrackReservation<'_> {
-	/// The name configured when this reservation began.
+impl PadLifecycle {
+	/// The configured track name while this pad is not releasing.
 	pub(super) fn requested(&self) -> Option<&str> {
 		self.settings.requested.as_deref()
 	}
 
-	/// Fix the property to the name the broadcast reserved, then notify after releasing the lock.
-	pub(super) fn commit(self, track: String) {
-		let TrackReservation { pad, mut settings } = self;
-		let before = settings.effective.clone().or_else(|| settings.requested.clone());
-		settings.effective = Some(track);
-		let changed = before != settings.effective;
-		drop(settings);
-		if changed {
-			pad.notify("track");
+	/// Record the name reserved by a successful CAPS event.
+	pub(super) fn commit(&mut self, track: String) -> Notifications {
+		let before = self
+			.settings
+			.effective
+			.clone()
+			.or_else(|| self.settings.requested.clone());
+		self.settings.effective = Some(track);
+		Notifications {
+			track: before != self.settings.effective,
+			status: self.settings.set_status(Status::Active),
+			error: false,
 		}
 	}
 
-	/// Drop the effective name, then notify after releasing the lock.
-	pub(super) fn release(self) {
-		let TrackReservation { pad, mut settings } = self;
-		let before = settings.effective.take();
-		let changed = before.is_some() && before != settings.requested;
-		drop(settings);
-		if changed {
-			pad.notify("track");
+	/// Record a terminal failure without changing an earlier failure's EOS semantics.
+	pub(super) fn fail(&mut self, reason: String) -> Notifications {
+		let error = self.settings.error.as_deref() != Some(reason.as_str());
+		self.settings.error = Some(reason);
+		Notifications {
+			status: self.settings.set_status(Status::Error),
+			error,
+			..Default::default()
 		}
+	}
+
+	/// Record clean finalization unless the failure is the more useful terminal state.
+	pub(super) fn end(&mut self) -> Notifications {
+		let status = self.settings.status != Status::Error && self.settings.set_status(Status::Ended);
+		Notifications {
+			status,
+			..Default::default()
+		}
+	}
+
+	/// Reset this pad for another run while preserving its requested name.
+	pub(super) fn reset(&mut self) -> Notifications {
+		let before = self.settings.effective.take();
+		let track = before.is_some() && before != self.settings.requested;
+		let error = self.settings.error.take().is_some();
+		let status = self.settings.set_status(Status::Pending);
+		self.media = Pad::new();
+		self.ended = false;
+		self.session_error = None;
+		Notifications { track, status, error }
 	}
 }
 
@@ -87,14 +167,31 @@ impl ObjectImpl for MoqSinkPadImp {
 					)
 					.mutable_playing()
 					.build(),
+				glib::ParamSpecEnum::builder::<Status>("status")
+					.nick("Status")
+					.blurb(
+						"What this pad's track is doing: pending until CAPS builds a producer, active \
+						 once the broadcast reserved the track, ended when it was finalized, error when \
+						 the pad was invalidated. A connection drop is the element's status, not this one",
+					)
+					.read_only()
+					.build(),
+				glib::ParamSpecString::builder("track-error")
+					.nick("Track error")
+					.blurb(
+						"Why this pad was invalidated, or null when it was not. Set with status=error \
+						 and cleared when the pad is released or the element goes back to READY",
+					)
+					.read_only()
+					.build(),
 			]
 		});
 		PROPS.as_ref()
 	}
 
 	fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
-		let mut settings = self.settings.lock().unwrap();
-		if settings.releasing {
+		let mut lifecycle = self.lifecycle.lock().unwrap();
+		if lifecycle.releasing {
 			gst::warning!(
 				CAT,
 				obj = self.obj(),
@@ -105,7 +202,7 @@ impl ObjectImpl for MoqSinkPadImp {
 		}
 		// A producer keeps the name it reserved for its whole life, so a later write would read back
 		// without ever reaching the broadcast or the catalog.
-		if settings.effective.is_some() {
+		if lifecycle.settings.effective.is_some() {
 			gst::warning!(
 				CAT,
 				obj = self.obj(),
@@ -116,19 +213,24 @@ impl ObjectImpl for MoqSinkPadImp {
 		}
 		match pspec.name() {
 			// An empty name is not a track name: it selects the generated one.
-			"track" => settings.requested = value.get::<Option<String>>().unwrap().filter(|name| !name.is_empty()),
+			"track" => {
+				lifecycle.settings.requested = value.get::<Option<String>>().unwrap().filter(|name| !name.is_empty())
+			}
 			_ => unreachable!(),
 		}
 	}
 
 	fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
-		let settings = self.settings.lock().unwrap();
+		let lifecycle = self.lifecycle.lock().unwrap();
 		match pspec.name() {
-			"track" => settings
+			"track" => lifecycle
+				.settings
 				.effective
 				.clone()
-				.or_else(|| settings.requested.clone())
+				.or_else(|| lifecycle.settings.requested.clone())
 				.to_value(),
+			"status" => lifecycle.settings.status.to_value(),
+			"track-error" => lifecycle.settings.error.clone().to_value(),
 			_ => unreachable!(),
 		}
 	}
@@ -143,33 +245,33 @@ glib::wrapper! {
 }
 
 impl MoqSinkPad {
-	/// Lock the configured name until the caller commits or abandons its track reservation.
-	pub(super) fn reserve_track(&self) -> Option<TrackReservation<'_>> {
-		let settings = self.imp().settings.lock().unwrap();
-		if settings.releasing {
-			return None;
+	/// Lock this pad's complete lifecycle state.
+	pub(super) fn lifecycle(&self) -> MutexGuard<'_, PadLifecycle> {
+		self.imp().lifecycle.lock().unwrap()
+	}
+
+	/// Emit property notifications after the lifecycle lock has been released.
+	pub(super) fn notify_changes(&self, changes: Notifications) {
+		if changes.track {
+			self.notify("track");
 		}
-		Some(TrackReservation { pad: self, settings })
-	}
-
-	/// Mark the pad as releasing and lock its track settings during producer removal.
-	pub(super) fn retire_track(&self) -> TrackReservation<'_> {
-		let mut settings = self.imp().settings.lock().unwrap();
-		settings.releasing = true;
-		TrackReservation { pad: self, settings }
-	}
-
-	/// Make a detached pad configurable after CAPS can no longer reach the element.
-	pub(super) fn finish_release(&self) {
-		self.imp().settings.lock().unwrap().releasing = false;
-	}
-
-	/// Drop the reserved name once its producer is finalized, so the pad is configurable again on the
-	/// next run. The requested name stays: that run reserves the same one.
-	pub(super) fn release_track(&self) {
-		if let Some(reservation) = self.reserve_track() {
-			reservation.release();
+		if changes.status {
+			self.notify("status");
 		}
+		if changes.error {
+			self.notify("track-error");
+		}
+	}
+
+	/// Reset a detached pad without asking GStreamer to remove it twice.
+	pub(super) fn reset_detached(&self) {
+		let changes = {
+			let mut lifecycle = self.lifecycle();
+			let changes = lifecycle.reset();
+			lifecycle.releasing = false;
+			changes
+		};
+		self.notify_changes(changes);
 	}
 }
 
@@ -177,34 +279,91 @@ impl MoqSinkPad {
 mod tests {
 	use super::*;
 
+	fn sink_pad() -> MoqSinkPad {
+		gst::init().unwrap();
+		gst::PadBuilder::<MoqSinkPad>::new(gst::PadDirection::Sink)
+			.name("sink_0")
+			.build()
+	}
+
+	fn apply(pad: &MoqSinkPad, operation: impl FnOnce(&mut PadLifecycle) -> Notifications) {
+		let changes = operation(&mut pad.lifecycle());
+		pad.notify_changes(changes);
+	}
+
 	#[test]
-	fn track_selection_is_locked_until_the_reservation_is_committed() {
+	fn the_status_follows_the_lifecycle() {
+		let pad = sink_pad();
+		assert_eq!(pad.property::<Status>("status"), Status::Pending);
+		assert_eq!(pad.property::<Option<String>>("track-error"), None);
+
+		apply(&pad, |lifecycle| lifecycle.commit("camera".to_string()));
+		assert_eq!(pad.property::<Status>("status"), Status::Active);
+
+		apply(&pad, PadLifecycle::end);
+		assert_eq!(pad.property::<Status>("status"), Status::Ended);
+
+		apply(&pad, |lifecycle| lifecycle.fail("no caps".to_string()));
+		assert_eq!(pad.property::<Status>("status"), Status::Error);
+		assert_eq!(
+			pad.property::<Option<String>>("track-error").as_deref(),
+			Some("no caps")
+		);
+
+		apply(&pad, PadLifecycle::reset);
+		assert_eq!(
+			pad.property::<Status>("status"),
+			Status::Pending,
+			"a released pad is pending again"
+		);
+		assert_eq!(
+			pad.property::<Option<String>>("track-error"),
+			None,
+			"and carries no stale reason"
+		);
+	}
+
+	// A failure is what ended the pad, and it is the more useful of the two, so EOS does not bury it.
+	#[test]
+	fn ending_a_failed_pad_keeps_the_error() {
+		let pad = sink_pad();
+		apply(&pad, |lifecycle| lifecycle.fail("bad bitstream".to_string()));
+		apply(&pad, PadLifecycle::end);
+		assert_eq!(pad.property::<Status>("status"), Status::Error);
+		assert_eq!(
+			pad.property::<Option<String>>("track-error").as_deref(),
+			Some("bad bitstream")
+		);
+	}
+
+	#[test]
+	fn track_selection_is_serialized_with_the_lifecycle() {
 		gst::init().unwrap();
 		let pad = gst::PadBuilder::<MoqSinkPad>::new(gst::PadDirection::Sink)
 			.name("sink_0")
 			.build();
 		pad.set_property("track", "camera");
 
-		let abandoned = pad.reserve_track().unwrap();
-		assert_eq!(abandoned.requested(), Some("camera"));
-		drop(abandoned);
+		assert_eq!(pad.lifecycle().requested(), Some("camera"));
 		pad.set_property("track", "other");
 		assert_eq!(pad.property::<String>("track"), "other");
 		pad.set_property("track", "camera");
 
-		let reservation = pad.reserve_track().unwrap();
-		assert_eq!(reservation.requested(), Some("camera"));
+		let mut lifecycle = pad.lifecycle();
+		assert_eq!(lifecycle.requested(), Some("camera"));
 		let other = pad.clone();
 		assert!(
-			std::thread::spawn(move || other.imp().settings.try_lock().is_err())
+			std::thread::spawn(move || other.imp().lifecycle.try_lock().is_err())
 				.join()
 				.unwrap(),
 			"a concurrent property write cannot enter during reservation"
 		);
-		reservation.commit("camera".to_string());
+		let changes = lifecycle.commit("camera".to_string());
+		drop(lifecycle);
+		pad.notify_changes(changes);
 
 		pad.set_property("track", "other");
-		pad.release_track();
+		apply(&pad, PadLifecycle::reset);
 		assert_eq!(
 			pad.property::<String>("track"),
 			"camera",
