@@ -4,7 +4,7 @@
 # Usage:
 #   release.sh parse-version <prefix>          — extract SemVer from GITHUB_REF given a tag prefix
 #   release.sh prev-tag <prefix>               — find the tag immediately before the current one
-#   release.sh create <artifacts_dir>          — create or update a GitHub release with artifacts
+#   release.sh create <artifacts_dir>          — create or update a GitHub release with artifacts + SHA256SUMS
 #   release.sh git-tag-exists <repo> <tag>     — check whether a tag exists on a remote repo
 #   release.sh read-version <pyproject.toml>   — read `version = "x.y.z"` from a manifest
 #   release.sh pypi-exists <dist> <version>    — check whether <dist>==<version> is already on PyPI
@@ -48,7 +48,36 @@ prev_tag() {
     echo "Previous tag: ${prev:-none}"
 }
 
-# Create or update a GitHub release with artifacts.
+# Write SHA256SUMS for every file in <artifacts_dir>, in `sha256sum -c` format.
+# Args: <artifacts_dir>
+write_checksums() {
+    local artifacts_dir="$1"
+    local names=()
+    local path
+    for path in "$artifacts_dir"/*; do
+        if [[ -f "$path" && "$(basename "$path")" != SHA256SUMS ]]; then
+            names+=("$(basename "$path")")
+        fi
+    done
+    if [[ ${#names[@]} -eq 0 ]]; then
+        echo "No artifacts in $artifacts_dir to checksum" >&2
+        exit 1
+    fi
+    (cd "$artifacts_dir" && sha256 "${names[@]}" >SHA256SUMS)
+    echo "Wrote $artifacts_dir/SHA256SUMS:"
+    cat "$artifacts_dir/SHA256SUMS"
+}
+
+# sha256sum is coreutils; macOS ships shasum instead.
+sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$@"
+    else
+        shasum -a 256 "$@"
+    fi
+}
+
+# Create or update a GitHub release with artifacts and their SHA256SUMS.
 # Args: <artifacts_dir>
 # Reads tag/title/prev_tag from environment or step outputs.
 create_release() {
@@ -57,14 +86,12 @@ create_release() {
     local title="${RELEASE_TITLE:?RELEASE_TITLE must be set}"
     local prev_tag="${RELEASE_PREV_TAG:-}"
 
+    write_checksums "$artifacts_dir"
+
     if gh release view "$tag" >/dev/null 2>&1; then
         echo "Release exists, updating assets and metadata..."
         gh release upload "$tag" "$artifacts_dir"/* --clobber
-        if [ -n "$prev_tag" ]; then
-            gh release edit "$tag" --title "$title" --notes-start-tag "$prev_tag"
-        else
-            gh release edit "$tag" --title "$title"
-        fi
+        gh release edit "$tag" --title "$title"
     else
         echo "Creating new release..."
         if [ -n "$prev_tag" ]; then

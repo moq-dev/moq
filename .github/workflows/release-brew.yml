@@ -84,7 +84,7 @@ jobs:
             aarch64-unknown-linux-gnu \
             x86_64-unknown-linux-gnu
           do
-            name="${CRATE}-${VERSION}-${target}.tar.gz"
+            name="${CRATE}-v${VERSION}-${target}.tar.gz"
             echo "Downloading $name..."
             gh release download "$TAG" \
               --repo "${{ github.repository }}" \

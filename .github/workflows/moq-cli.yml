@@ -70,7 +70,7 @@ jobs:
           VERSION: ${{ steps.parse.outputs.version }}
           TARGET: ${{ matrix.target }}
         run: |
-          name="moq-cli-${VERSION}-${TARGET}"
+          name="moq-cli-v${VERSION}-${TARGET}"
           mkdir -p "dist/${name}/bin"
           cp "target/${TARGET}/release/moq" "dist/${name}/bin/moq"
           cp LICENSE-MIT LICENSE-APACHE "dist/${name}/"

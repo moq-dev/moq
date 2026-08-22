@@ -82,7 +82,7 @@ if [[ -z "$LIB_FILE" ]]; then
     exit 1
 fi
 
-NAME="moq-gst-${VERSION}-${TARGET}"
+NAME="moq-gst-v${VERSION}-${TARGET}"
 PACKAGE_DIR="$OUTPUT_DIR/$NAME"
 
 echo "Packaging $NAME..."

@@ -69,7 +69,7 @@ jobs:
           VERSION: ${{ steps.parse.outputs.version }}
           TARGET: ${{ matrix.target }}
         run: |
-          name="moq-token-cli-${VERSION}-${TARGET}"
+          name="moq-token-cli-v${VERSION}-${TARGET}"
           mkdir -p "dist/${name}/bin"
           cp "target/${TARGET}/release/moq-token" "dist/${name}/bin/moq-token"
           cp LICENSE-MIT LICENSE-APACHE "dist/${name}/"
