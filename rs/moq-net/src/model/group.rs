@@ -140,7 +140,7 @@ pub(crate) struct GroupState {
 	// When the group last accepted a frame. The wall-clock half of the same question:
 	// a group is silent from here, not from whenever it was created. `None` while it
 	// has produced nothing, where the track's arrival time is the only thing to go on.
-	pub(crate) activity: Option<kio::time::Instant>,
+	pub(crate) activity: Option<crate::runtime::Instant>,
 
 	// Once finalized, the total number of frames the group will ever contain. Recorded
 	// at finish so the count outlives an abort that clears the cache.
@@ -251,7 +251,7 @@ impl GroupState {
 	fn stamp(&mut self, timestamp: Timestamp) {
 		self.timestamp.get_or_insert(timestamp);
 		self.latest = Some(timestamp);
-		self.activity = Some(kio::time::Instant::now());
+		self.activity = Some(crate::model::clock::now());
 	}
 
 	/// Where a cursor at `index` sits in presentation time: the next frame it would
@@ -1330,7 +1330,7 @@ impl Consumer {
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Position {
 	pub(crate) presentation: Option<Timestamp>,
-	pub(crate) activity: Option<kio::time::Instant>,
+	pub(crate) activity: Option<crate::runtime::Instant>,
 }
 
 impl Plain {

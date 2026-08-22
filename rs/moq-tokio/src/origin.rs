@@ -14,7 +14,7 @@
 /// [`Origin`](moq_net::Origin) id (which uses the default config).
 pub fn spawn(info: impl Into<moq_net::origin::Info>) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(info.into());
-	tokio::spawn(driver);
+	tokio::spawn(driver.run(crate::runtime::Runtime::<()>::new()));
 	producer
 }
 

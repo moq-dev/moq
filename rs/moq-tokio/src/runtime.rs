@@ -6,8 +6,10 @@ use std::{marker::PhantomData, pin::Pin, task::Poll};
 /// and timers are tokio sleeps.
 ///
 /// One runtime drives one transport type (`S`), so each dial path constructs
-/// its own with [`Runtime::new`]; it is a zero-sized handle.
-pub struct Runtime<S>(PhantomData<fn(S)>);
+/// its own with [`Runtime::new`]; it is a zero-sized handle. The default `S`
+/// makes a bare `Runtime::new()` a transportless [`moq_net::Timers`] handle,
+/// for work that only arms timers (the origin driver).
+pub struct Runtime<S = ()>(PhantomData<fn(S)>);
 
 impl<S> Runtime<S> {
 	/// A handle for the transport type this dial produces.
@@ -36,8 +38,9 @@ impl<S> std::fmt::Debug for Runtime<S> {
 	}
 }
 
-impl<S: moq_net::transport::poll::Session> moq_net::Runtime for Runtime<S> {
-	type Transport = S;
+// Unbounded: timers don't involve the transport, so any `Runtime<S>` (including
+// the transportless default) hands them out.
+impl<S> moq_net::Timers for Runtime<S> {
 	type Timer = Timer;
 
 	fn timer(&self) -> Self::Timer {
@@ -49,6 +52,10 @@ impl<S: moq_net::transport::poll::Session> moq_net::Runtime for Runtime<S> {
 		// the real clock outside a paused runtime.
 		tokio::time::Instant::now().into_std()
 	}
+}
+
+impl<S: moq_net::transport::poll::Session> moq_net::Runtime for Runtime<S> {
+	type Transport = S;
 
 	fn spawn(&self, machine: moq_net::runtime::Machine<Self>) {
 		// The session surfaces the result through `closed()`; the task's own
@@ -106,8 +113,7 @@ impl<S: moq_net::transport::poll::Session> std::fmt::Debug for Inline<S> {
 	}
 }
 
-impl<S: moq_net::transport::poll::Session> moq_net::Runtime for Inline<S> {
-	type Transport = S;
+impl<S: moq_net::transport::poll::Session> moq_net::Timers for Inline<S> {
 	type Timer = Timer;
 
 	fn timer(&self) -> Self::Timer {
@@ -117,6 +123,10 @@ impl<S: moq_net::transport::poll::Session> moq_net::Runtime for Inline<S> {
 	fn now(&self) -> moq_net::runtime::Instant {
 		tokio::time::Instant::now().into_std()
 	}
+}
+
+impl<S: moq_net::transport::poll::Session> moq_net::Runtime for Inline<S> {
+	type Transport = S;
 
 	fn spawn(&self, machine: moq_net::runtime::Machine<Self>) {
 		*self.slot.lock().unwrap() = Some(machine);

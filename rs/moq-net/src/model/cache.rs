@@ -71,7 +71,7 @@ struct Inner {
 	// u64::MAX means unbounded.
 	capacity: AtomicU64,
 	// Reference point for the coarse tick clock.
-	epoch: kio::time::Instant,
+	epoch: crate::runtime::Instant,
 	// Sum and count of last-access ticks across the evictable population, giving a
 	// count-weighted mean. Tracks add a group when it becomes evictable (demoted
 	// from the live edge, or inserted behind it) and remove it when it leaves.
@@ -84,7 +84,7 @@ impl Default for Inner {
 		Self {
 			used: AtomicU64::new(0),
 			capacity: AtomicU64::new(u64::MAX),
-			epoch: kio::time::Instant::now(),
+			epoch: crate::model::clock::now(),
 			access_sum: AtomicU64::new(0),
 			access_count: AtomicU64::new(0),
 		}
@@ -147,7 +147,8 @@ impl Pool {
 
 	/// Coarse ticks since the pool was created: the clock access timestamps use.
 	pub(crate) fn now(&self) -> u64 {
-		self.inner.epoch.elapsed().as_millis() as u64 / TICK_MS
+		let elapsed = crate::model::clock::now().duration_since(self.inner.epoch);
+		elapsed.as_millis() as u64 / TICK_MS
 	}
 
 	/// Convert a duration into coarse ticks, saturating.

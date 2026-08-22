@@ -174,7 +174,7 @@ pub(crate) struct TrackState {
 	// Datagrams in arrival order paired with their arrival time, a best-effort send buffer
 	// evicted by age (see `MAX_DATAGRAM_AGE`). Shares the group `max_sequence` namespace but
 	// is otherwise independent.
-	datagrams: VecDeque<(Datagram, kio::time::Instant)>,
+	datagrams: VecDeque<(Datagram, crate::runtime::Instant)>,
 
 	// Number of datagrams dropped off the front (aged out), mapping a subscriber's absolute
 	// cursor to an index into `datagrams` (mirrors `offset` for groups).
@@ -251,7 +251,7 @@ struct Slot {
 
 	// When this group entered the track at this hop. This is the wall-clock
 	// backstop for groups whose first frame has not supplied a timestamp yet.
-	arrived: kio::time::Instant,
+	arrived: crate::runtime::Instant,
 
 	// Incarnation stamp, echoed by this slot's arrival entry (if any). A re-served
 	// sequence (an aborted group re-created by the publisher or re-fetched as
@@ -354,7 +354,7 @@ impl TrackState {
 
 	/// Push a datagram onto the buffer, dropping any that have aged past [`MAX_DATAGRAM_AGE`].
 	fn push_datagram(&mut self, datagram: Datagram) {
-		let now = kio::time::Instant::now();
+		let now = crate::model::clock::now();
 		self.datagrams.push_back((datagram, now));
 		while let Some((_, at)) = self.datagrams.front() {
 			if now.duration_since(*at) <= MAX_DATAGRAM_AGE {
@@ -814,7 +814,7 @@ impl TrackState {
 			sequence,
 			Slot {
 				group: group.clone(),
-				arrived: kio::time::Instant::now(),
+				arrived: crate::model::clock::now(),
 				stamp,
 				visible,
 			},
@@ -2735,7 +2735,7 @@ struct WallEdge {
 	/// The slot incarnation this arrival time was read from, so an eviction or a re-served
 	/// sequence between resolving the anchor and using it is detectable.
 	stamp: u32,
-	arrived: kio::time::Instant,
+	arrived: crate::runtime::Instant,
 }
 
 /// The newest servable group that has presented at least one frame.
@@ -3769,8 +3769,6 @@ mod test {
 
 	#[tokio::test]
 	async fn datagram_evicts_stale() {
-		tokio::time::pause();
-
 		let mut producer = track_producer("test", None);
 		let mut dg = producer.subscribe(None);
 		let ts = Timestamp::from_millis(0).unwrap();
@@ -3778,7 +3776,7 @@ mod test {
 		producer.append_datagram(ts, &b"old"[..]).unwrap(); // sequence 0
 
 		// Age past the send-buffer window, then push a fresh datagram: the stale one is evicted.
-		tokio::time::advance(MAX_DATAGRAM_AGE + Duration::from_millis(10)).await;
+		crate::model::clock::advance(MAX_DATAGRAM_AGE + Duration::from_millis(10));
 		producer.append_datagram(ts, &b"new"[..]).unwrap(); // sequence 1
 
 		// A lagging consumer resumes at the oldest still-buffered datagram (the fresh one).
@@ -3850,8 +3848,6 @@ mod test {
 
 	#[tokio::test]
 	async fn evict_expired_groups() {
-		tokio::time::pause();
-
 		let mut producer = track_producer("test", None);
 
 		// Create 3 groups at time 0.
@@ -3866,7 +3862,7 @@ mod test {
 		}
 
 		// Advance time past the eviction threshold.
-		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
+		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
 
 		// Append a new group to trigger eviction.
 		producer.append_group().unwrap(); // seq 3
@@ -3891,8 +3887,6 @@ mod test {
 	/// track with long groups (a per-minute rollup, say) fails its readers at every boundary.
 	#[tokio::test]
 	async fn aging_out_a_finished_group_keeps_the_clean_end() {
-		tokio::time::pause();
-
 		let mut producer = track_producer("test", None);
 		let mut group = producer.create_group(group::Info { sequence: 0 }).unwrap();
 		let mut consumer = group.consume();
@@ -3903,7 +3897,7 @@ mod test {
 		assert_eq!(consumer.next_frame().await.unwrap().unwrap().size, 5);
 
 		// The group stays open well past the max age, then the next period starts.
-		tokio::time::advance(DEFAULT_MAX_AGE * 12).await;
+		crate::model::clock::advance(DEFAULT_MAX_AGE * 12);
 		group.finish().unwrap();
 		let _next = producer.create_group(group::Info { sequence: 1 }).unwrap();
 
@@ -3912,13 +3906,11 @@ mod test {
 
 	#[tokio::test]
 	async fn evict_keeps_max_sequence() {
-		tokio::time::pause();
-
 		let mut producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0
 
 		// Advance time past threshold.
-		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
+		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
 
 		// Append another group; seq 0 is expired and evicted.
 		producer.append_group().unwrap(); // seq 1
@@ -3933,8 +3925,6 @@ mod test {
 
 	#[tokio::test]
 	async fn no_eviction_when_fresh() {
-		tokio::time::pause();
-
 		let mut producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0
 		producer.append_group().unwrap(); // seq 1
@@ -3949,14 +3939,12 @@ mod test {
 
 	#[tokio::test]
 	async fn consumer_skips_evicted_groups() {
-		tokio::time::pause();
-
 		let mut producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0
 
 		let mut consumer = producer.subscribe(None);
 
-		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
+		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
 		producer.append_group().unwrap(); // seq 1
 
 		// Group 0 was evicted. Consumer should get group 1.
@@ -3966,14 +3954,12 @@ mod test {
 
 	#[tokio::test]
 	async fn cache_age_controls_eviction() {
-		tokio::time::pause();
-
 		// A shorter cache evicts sooner than the default.
 		let mut producer = track_producer("test", Info::default().with_max_age(Duration::from_secs(1)));
 		producer.append_group().unwrap(); // seq 0
 
 		// Past the custom budget but well within DEFAULT_MAX_AGE.
-		tokio::time::advance(Duration::from_secs(2)).await;
+		crate::model::clock::advance(Duration::from_secs(2));
 		producer.append_group().unwrap(); // seq 1
 
 		// Seq 0 is gone because the publisher only keeps groups for 1s.
@@ -4040,8 +4026,6 @@ mod test {
 
 	#[tokio::test]
 	async fn origin_cache_duration_caps_eviction() {
-		tokio::time::pause();
-
 		// The publisher wants a 60s window, but the origin caps retention at 1s.
 		let mut producer = track_producer_capped(
 			"test",
@@ -4051,7 +4035,7 @@ mod test {
 		producer.append_group().unwrap(); // seq 0
 
 		// Past the origin ceiling but far within the publisher's own 60s window.
-		tokio::time::advance(Duration::from_secs(2)).await;
+		crate::model::clock::advance(Duration::from_secs(2));
 		producer.append_group().unwrap(); // seq 1
 
 		// Seq 0 is evicted anyway: the origin ceiling wins over the larger publisher window.
@@ -4156,13 +4140,11 @@ mod test {
 
 	#[tokio::test]
 	async fn wall_clock_expires_an_unstamped_group() {
-		tokio::time::pause();
-
 		let mut producer = track_producer("test", None);
 		let mut subscriber = producer.subscribe(None);
 		producer.append_group().unwrap(); // seq 0 stalls before its first frame
 
-		tokio::time::advance(Duration::from_secs(1)).await;
+		crate::model::clock::advance(Duration::from_secs(1));
 		append_at(&mut producer, 1000); // seq 1 proves the live feed moved on
 
 		// With the real-time budget, wall-clock age backstops the missing timestamp.
@@ -4171,8 +4153,6 @@ mod test {
 
 	#[tokio::test]
 	async fn a_handed_out_group_expires_while_its_first_frame_is_stalled() {
-		tokio::time::pause();
-
 		let mut producer = track_producer("test", None);
 		let mut subscriber = producer.subscribe(None);
 		producer.append_group().unwrap();
@@ -4185,7 +4165,7 @@ mod test {
 			"the empty live edge still waits for its first frame"
 		);
 
-		tokio::time::advance(Duration::from_secs(1)).await;
+		crate::model::clock::advance(Duration::from_secs(1));
 		append_at(&mut producer, 1000);
 
 		// It ends rather than fails: the reader took every frame the group ever had
@@ -4398,8 +4378,6 @@ mod test {
 
 	#[tokio::test]
 	async fn a_handed_out_partial_frame_expires_while_its_payload_is_stalled() {
-		tokio::time::pause();
-
 		let mut producer = track_producer("test", None);
 		let mut subscriber = producer.subscribe(None);
 		let mut source = producer.append_group().unwrap();
@@ -4421,7 +4399,7 @@ mod test {
 		tokio::task::yield_now().await;
 		assert!(!pending.is_finished(), "the partial payload is still stalled");
 
-		tokio::time::advance(Duration::from_secs(1)).await;
+		crate::model::clock::advance(Duration::from_secs(1));
 		append_at(&mut producer, 1000);
 
 		let result = pending.await.unwrap();
@@ -4434,14 +4412,12 @@ mod test {
 
 	#[tokio::test]
 	async fn widening_latency_wakes_a_pending_frame_read() {
-		tokio::time::pause();
-
 		let mut producer = track_producer("test", None);
 		let mut subscriber = producer.subscribe(None);
 		let control = subscriber.control();
 
 		append_at(&mut producer, 0);
-		tokio::time::advance(Duration::from_secs(1)).await;
+		crate::model::clock::advance(Duration::from_secs(1));
 		let _edge = producer.append_group().unwrap();
 
 		let pending = tokio::spawn(async move { subscriber.read_frame().await });
@@ -4512,8 +4488,6 @@ mod test {
 
 	#[tokio::test]
 	async fn real_time_skips_older_sequences_with_equal_ages() {
-		tokio::time::pause();
-
 		let mut producer = track_producer("test", None);
 		append_at(&mut producer, 0);
 		append_at(&mut producer, 0);
@@ -4668,7 +4642,6 @@ mod test {
 
 	#[tokio::test]
 	async fn a_lower_sequence_is_never_the_live_edge() {
-		tokio::time::pause();
 		let mut producer = track_producer("test", None);
 		// A high timestamp on a lower sequence is not a live edge: backfill served on
 		// demand sits there, and so does the tail of a timeline the publisher rewound.
@@ -4820,8 +4793,6 @@ mod test {
 
 	#[tokio::test]
 	async fn out_of_order_max_sequence_at_front() {
-		tokio::time::pause();
-
 		let mut producer = track_producer("test", None);
 
 		// Arrive out of order: seq 5 first, then 3, then 4.
@@ -4836,7 +4807,7 @@ mod test {
 		}
 
 		// Expire all three groups.
-		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
+		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
 
 		// Append seq 6 (becomes new max_sequence).
 		producer.append_group().unwrap(); // seq 6
@@ -4856,14 +4827,12 @@ mod test {
 
 	#[tokio::test]
 	async fn max_sequence_at_front_blocks_trim() {
-		tokio::time::pause();
-
 		let mut producer = track_producer("test", None);
 
 		// Arrive: seq 5, then seq 3.
 		producer.create_group(group::Info { sequence: 5 }).unwrap();
 
-		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
+		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
 
 		// Seq 3 arrives late; max_sequence is still 5 (at front).
 		producer.create_group(group::Info { sequence: 3 }).unwrap();
@@ -4877,7 +4846,7 @@ mod test {
 		}
 
 		// Expire seq 3 as well.
-		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
+		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
 
 		// Seq 2 arrives late, triggering eviction.
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
@@ -6072,8 +6041,6 @@ mod test {
 	/// evicting this track's own oldest groups, so the newest content survives.
 	#[tokio::test]
 	async fn debt_evicts_oldest_group() {
-		tokio::time::pause();
-
 		// Fits one 10k group; each additional group pushes the pool over budget.
 		let (mut producer, pool) = pooled_producer(10_000);
 
@@ -6096,8 +6063,6 @@ mod test {
 	/// The latest group is never in the eviction order, so it survives any budget.
 	#[tokio::test]
 	async fn latest_group_never_evicted() {
-		tokio::time::pause();
-
 		// Far too small for even one group: the latest survives anyway.
 		let (mut producer, pool) = pooled_producer(100);
 		finished_group(&mut producer, 1000); // seq 0
@@ -6118,27 +6083,25 @@ mod test {
 	/// it and evicts a never-read group instead, even one that arrived later.
 	#[tokio::test]
 	async fn fetch_refresh_survives_eviction() {
-		tokio::time::pause();
-
 		let (mut producer, _pool) = pooled_producer(10_000);
 		let consumer = producer.consume();
 
 		finished_group(&mut producer, 3_000); // seq 0
-		tokio::time::advance(Duration::from_secs(1)).await;
+		crate::model::clock::advance(Duration::from_secs(1));
 		finished_group(&mut producer, 3_000); // seq 1
-		tokio::time::advance(Duration::from_secs(1)).await;
+		crate::model::clock::advance(Duration::from_secs(1));
 		finished_group(&mut producer, 3_000); // seq 2
-		tokio::time::advance(Duration::from_millis(500)).await;
+		crate::model::clock::advance(Duration::from_millis(500));
 
 		// FETCH seq 0: the cache hit lifts its access time above the average.
 		let mut fetched = consumer.fetch_group(0, None).await.unwrap();
 		assert_eq!(fetched.read_frame().await.unwrap().unwrap().payload.len(), 3_000);
-		tokio::time::advance(Duration::from_millis(500)).await;
+		crate::model::clock::advance(Duration::from_millis(500));
 
 		// Pressure: seq 0 is first in eviction order but freshly accessed, so it
 		// rotates to the back and the never-read seq 1 dies instead.
 		finished_group(&mut producer, 3_000); // seq 3
-		tokio::time::advance(Duration::from_secs(1)).await;
+		crate::model::clock::advance(Duration::from_secs(1));
 		finished_group(&mut producer, 3_000); // seq 4
 
 		assert!(consumer.peek_group(0).is_some(), "refreshed group survives");
@@ -6149,8 +6112,6 @@ mod test {
 	/// truncated clean end.
 	#[tokio::test]
 	async fn eviction_aborts_readers() {
-		tokio::time::pause();
-
 		let (mut producer, _pool) = pooled_producer(10_000);
 		let mut subscriber = producer.subscribe(None);
 
@@ -6169,8 +6130,6 @@ mod test {
 	/// far smaller write.
 	#[tokio::test]
 	async fn small_writes_carry_debt() {
-		tokio::time::pause();
-
 		let (mut producer, pool) = pooled_producer(22_000);
 		let consumer = producer.consume();
 
@@ -6201,8 +6160,6 @@ mod test {
 	/// backlog in a single call.
 	#[tokio::test]
 	async fn payment_capped_per_write() {
-		tokio::time::pause();
-
 		let (mut producer, pool) = pooled_producer(1 << 40);
 		for _ in 0..10 {
 			finished_group(&mut producer, 1_000);
@@ -6227,8 +6184,6 @@ mod test {
 	/// can't strand the bytes already-created groups keep charging.
 	#[tokio::test]
 	async fn accept_preserves_write_accounting() {
-		tokio::time::pause();
-
 		let pool = cache::Pool::new(12_000);
 		let broadcast = broadcast::Info {
 			origin: crate::origin::Info::default().with_pool(pool.clone()),
@@ -6289,8 +6244,6 @@ mod test {
 	/// content, so the freshly-written group survives and the empty one pays.
 	#[tokio::test]
 	async fn same_tick_write_outranks_inserted() {
-		tokio::time::pause();
-
 		// No time advances: every stamp lands in the same tick.
 		let (mut producer, _pool) = pooled_producer(10_000);
 
@@ -6309,8 +6262,6 @@ mod test {
 	/// group, still settles its eviction debt once enough bytes accumulate.
 	#[tokio::test]
 	async fn frame_only_writer_pays() {
-		tokio::time::pause();
-
 		let (mut producer, pool) = pooled_producer(2_000);
 		let mut demoted = producer.append_group().unwrap(); // seq 0
 		producer.append_group().unwrap().finish().unwrap(); // seq 1 demotes seq 0
@@ -6415,8 +6366,6 @@ mod test {
 	/// `Info` can't leave already-created groups writing for free.
 	#[tokio::test]
 	async fn pre_accept_backfill_settles_late_writes() {
-		tokio::time::pause();
-
 		let pool = cache::Pool::new(2_000);
 		let broadcast = broadcast::Info {
 			origin: crate::origin::Info::default().with_pool(pool.clone()),
@@ -6458,14 +6407,12 @@ mod test {
 	/// expired as old mid-write.
 	#[tokio::test]
 	async fn write_restarts_retention_clock() {
-		tokio::time::pause();
-
 		let (mut producer, _pool) = pooled_producer(1 << 40);
 		let mut straggler = producer.append_group().unwrap(); // seq 0
 		producer.append_group().unwrap().finish().unwrap(); // seq 1 demotes seq 0
 
 		// Idle past the window, then the straggler receives a late frame.
-		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
+		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
 		straggler
 			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 100]))
 			.unwrap();
@@ -6475,7 +6422,7 @@ mod test {
 		assert!(consumer.peek_group(0).is_some(), "the write restarted the clock");
 
 		// Once the writes stop, the group ages out normally.
-		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
+		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
 		producer.append_group().unwrap().finish().unwrap(); // seq 3 runs expiry
 		assert!(consumer.peek_group(0).is_none(), "idle content still expires");
 	}
@@ -6484,8 +6431,6 @@ mod test {
 	/// starve expiry of entries behind them: the scan cursor rotates.
 	#[tokio::test]
 	async fn refreshed_front_does_not_starve_expiry() {
-		tokio::time::pause();
-
 		let (mut producer, _pool) = pooled_producer(1 << 40);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
@@ -6508,7 +6453,7 @@ mod test {
 
 		// Age everything out, then refresh the first four backfills so they sit
 		// fresh at the front of the eviction order, hiding the expired fifth.
-		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
+		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
 		for sequence in 1..=4u64 {
 			consumer.fetch_group(sequence, None).await.unwrap();
 		}
@@ -6549,8 +6494,6 @@ mod test {
 	/// outside the eviction order and bypass the budget.
 	#[tokio::test]
 	async fn datagrams_do_not_block_eviction() {
-		tokio::time::pause();
-
 		let (mut producer, pool) = pooled_producer(1_000);
 		for _ in 0..10 {
 			finished_group(&mut producer, 1_000);
@@ -6571,8 +6514,6 @@ mod test {
 	/// in the past and over-protect every live group.
 	#[tokio::test]
 	async fn aborted_group_leaves_no_ghost_sample() {
-		tokio::time::pause();
-
 		let (mut producer, pool) = pooled_producer(1 << 40);
 		let group0 = producer.append_group().unwrap();
 		producer.append_group().unwrap(); // demotes seq 0 into the mean
@@ -6586,8 +6527,6 @@ mod test {
 	/// evicted rather than being unevictable freeloaders.
 	#[tokio::test]
 	async fn empty_groups_repay_overhead() {
-		tokio::time::pause();
-
 		let (mut producer, pool) = pooled_producer(1_000);
 		for _ in 0..100 {
 			let mut group = producer.append_group().unwrap();
@@ -6605,8 +6544,6 @@ mod test {
 	/// feeds debt on the next append, so a straggler can't grow unbounded.
 	#[tokio::test]
 	async fn growth_on_demoted_group_is_billed() {
-		tokio::time::pause();
-
 		let (mut producer, pool) = pooled_producer(2_000);
 		let mut straggler = producer.append_group().unwrap(); // seq 0
 		producer.append_group().unwrap().finish().unwrap(); // seq 1 demotes seq 0
@@ -6664,8 +6601,6 @@ mod test {
 	/// expiry scans a bounded prefix instead of stopping at the first fresh entry.
 	#[tokio::test]
 	async fn expired_backfill_behind_refreshed_reclaimed() {
-		tokio::time::pause();
-
 		let (mut producer, _pool) = pooled_producer(1 << 40);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
@@ -6687,9 +6622,9 @@ mod test {
 		}
 
 		// Keep seq 2 fresh while seq 3 (behind it in eviction order) expires.
-		tokio::time::advance(Duration::from_secs(4)).await;
+		crate::model::clock::advance(Duration::from_secs(4));
 		consumer.fetch_group(2, None).await.unwrap();
-		tokio::time::advance(DEFAULT_MAX_AGE - Duration::from_secs(2)).await;
+		crate::model::clock::advance(DEFAULT_MAX_AGE - Duration::from_secs(2));
 		producer.create_group(6u64.into()).unwrap().finish().unwrap();
 
 		let consumer = producer.consume();
@@ -6701,8 +6636,6 @@ mod test {
 	/// refresh stamps one tick ahead, so it reads strictly newer than the mean.
 	#[tokio::test]
 	async fn same_tick_fetch_protects() {
-		tokio::time::pause();
-
 		// No time advances at all: every timestamp lands in the same tick.
 		let (mut producer, _pool) = pooled_producer(10_000);
 		let consumer = producer.consume();
@@ -6725,8 +6658,6 @@ mod test {
 	/// content.
 	#[tokio::test]
 	async fn refetched_latest_stays_protected() {
-		tokio::time::pause();
-
 		let (mut producer, _pool) = pooled_producer(10_000);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
@@ -6768,8 +6699,6 @@ mod test {
 	/// replacement serves the sequence again (not `Error::Duplicate`).
 	#[tokio::test]
 	async fn eviction_allows_refetch() {
-		tokio::time::pause();
-
 		let (mut producer, _pool) = pooled_producer(10_000);
 		let dynamic = producer.dynamic();
 
@@ -6837,8 +6766,6 @@ mod test {
 	/// order instead of lingering until the track closes.
 	#[tokio::test]
 	async fn expired_backfill_reclaimed() {
-		tokio::time::pause();
-
 		let (mut producer, pool) = pooled_producer(1 << 40);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
@@ -6861,7 +6788,7 @@ mod test {
 		let used = pool.used();
 
 		// Age past the track window; the next write reclaims the backfill.
-		tokio::time::advance(DEFAULT_MAX_AGE + Duration::from_secs(1)).await;
+		crate::model::clock::advance(DEFAULT_MAX_AGE + Duration::from_secs(1));
 		producer.create_group(6u64.into()).unwrap().finish().unwrap();
 
 		assert!(consumer.peek_group(2).is_none(), "expired backfill is reclaimed");

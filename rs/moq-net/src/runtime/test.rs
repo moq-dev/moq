@@ -7,7 +7,7 @@ use std::{
 	task::Poll,
 };
 
-use super::{Instant, Machine, Runtime, Timer};
+use super::{Instant, Machine, Runtime, Timer, Timers};
 
 /// A deterministic [`Runtime`] for tests: no thread runs machines and no time
 /// passes unless the test says so.
@@ -117,8 +117,7 @@ impl<S: crate::transport::poll::Session> Test<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> Runtime for Test<S> {
-	type Transport = S;
+impl<S: crate::transport::poll::Session> Timers for Test<S> {
 	type Timer = TestTimer<S>;
 
 	fn timer(&self) -> Self::Timer {
@@ -144,6 +143,10 @@ impl<S: crate::transport::poll::Session> Runtime for Test<S> {
 	fn now(&self) -> Instant {
 		self.shared.lock().unwrap().now
 	}
+}
+
+impl<S: crate::transport::poll::Session> Runtime for Test<S> {
+	type Transport = S;
 
 	fn spawn(&self, machine: Machine<Self>) {
 		self.shared.lock().unwrap().machines.push(machine);

@@ -75,7 +75,7 @@ impl Session {
 		// Wire a subscribe origin so the session has somewhere to insert the
 		// broadcasts the remote announces; keep a consumer to read them.
 		let (origin, origin_driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
-		web_async::spawn(origin_driver);
+		web_async::spawn(origin_driver.run(runtime::Runtime));
 		let consumer = origin.consume();
 		let client = moq_net::Client::new().with_subscriber(origin);
 		// The runtime spawns the protocol machine on the microtask queue. The machine

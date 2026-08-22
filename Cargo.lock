@@ -4307,7 +4307,6 @@ dependencies = [
  "loom",
  "smallvec",
  "tokio",
- "web-async",
 ]
 
 [[package]]

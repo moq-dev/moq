@@ -76,9 +76,9 @@ let url = url::Url::parse("https://cdn.moq.dev/anon")?;
 let transport = moq_wasm::transport::connect(url, Default::default()).await?;
 
 // Hand the transport to moq-net and run the MoQ handshake. The origin's driver
-// runs its lifecycle work; spawn it yourself.
+// runs its lifecycle work: give it the runtime's timers and spawn it yourself.
 let (origin, origin_driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
-wasm_bindgen_futures::spawn_local(origin_driver);
+wasm_bindgen_futures::spawn_local(origin_driver.run(moq_wasm::runtime::Runtime));
 let mut consumer = origin.consume();
 
 // The runtime supplies the session's timers and runs its protocol machine on the
