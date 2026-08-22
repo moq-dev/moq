@@ -359,19 +359,27 @@ impl Subscribe {
 /// export's group skipping can't shed that lag either: it fires when the
 /// *current group* is blocked with a newer alternative, so it measures producer
 /// stalls, never consumer lag. So lag is measured here instead, against
-/// `arrived`: a frame obtained without waiting arrived no later than the last
-/// instant the export made us wait, and when its schedule overshoots that bound
-/// by more than the lead, it is delivered immediately and becomes the live edge
+/// `arrived`: the last instant the export made us wait, which is when a frame
+/// obtained without waiting could first have been queued. When a frame's
+/// schedule overshoots that epoch by more than the lead, it is delivered
+/// immediately and becomes the live edge
 /// ([`Pacer::hurry`](moq_mux::Pacer::hurry)). The anchor then rides the newest
 /// frame through a backlog, so pacing resumes from the live edge once the
 /// export makes us wait again.
+///
+/// The epoch is deliberately conservative: a ready frame may in truth have
+/// arrived later, during a pacing sleep, but one-frame polling can't observe
+/// that, and crediting sleep intervals would let a pre-queued backlog restart
+/// the budget on every sleep. The cost is bounded: a hurry can collapse at
+/// most the lead-sized interval ahead of the epoch, and smoothing resumes at
+/// the next actual wait.
 struct Delivery {
 	pacer: moq_mux::Pacer,
 	/// The delivery-lag bound, and the pacer's lead: both are the export's
 	/// latency budget.
 	lead: Duration,
-	/// The last instant the export made us wait for a frame; frames obtained
-	/// without waiting arrived no later than this.
+	/// The last instant the export made us wait for a frame: the conservative
+	/// arrival epoch for frames obtained without waiting (see the type docs).
 	arrived: tokio::time::Instant,
 }
 
