@@ -21,7 +21,7 @@ use hang::moq_net;
 
 use super::pad::{CapsOutcome, PushOutcome, caps_supported};
 use super::request_pad::{MoqSinkPad, Notifications};
-use super::session::{CAT, ConnectionStatus, RUNTIME, ResolvedSettings, Session};
+use super::session::{CAT, ConnectionStatus, RUNTIME, ResolvedSettings, Session, SessionId};
 
 #[derive(Debug, Clone, Default)]
 struct Settings {
@@ -67,16 +67,24 @@ struct PadUpdate {
 	changes: Notifications,
 }
 
-/// What a finalize pass leaves for the caller to put on the bus, once it holds no pad lock.
+/// A deferred element message together with the publishing session that earned it.
 #[derive(Default)]
 enum Posted {
 	/// Nothing to post: the pass did not run.
 	#[default]
 	Nothing,
+	/// A message earned by one publishing session.
+	Message { session: SessionId, kind: MessageKind },
+}
+
+/// The element-wide outcome a publishing session earned.
+enum MessageKind {
 	/// Every pad ended and the producers closed.
 	Eos,
 	/// A producer failed to close, already formatted for the bus.
-	Error(String),
+	FinalizeError(String),
+	/// The reconnect task stopped on a terminal error.
+	SessionError(String),
 }
 
 /// The result of a finalize pass: which pads to report, and what the element owes the bus.
@@ -740,9 +748,13 @@ impl MoqSink {
 		{
 			failure = Some(err);
 		}
-		let message = match failure {
-			Some(err) => Posted::Error(format!("{err:?}")),
-			None => Posted::Eos,
+		let kind = match failure {
+			Some(err) => MessageKind::FinalizeError(format!("{err:?}")),
+			None => MessageKind::Eos,
+		};
+		let message = Posted::Message {
+			session: state.session.id().clone(),
+			kind,
 		};
 		Finished { updates, message }
 	}
@@ -755,22 +767,50 @@ impl MoqSink {
 
 	fn publish_finished(&self, finished: Finished) {
 		self.notify_updates(finished.updates);
-		self.post_finished(finished.message);
+		self.post_current(finished.message);
 	}
 
-	/// Put the finalize pass on the bus. Deliberately separate from the pass itself: `post_message` runs
-	/// the bus sync handlers on this thread, and one reading `status` or `track-error` (the reason they
-	/// exist) would take a pad's settings lock that the EOS path is still holding.
-	fn post_finished(&self, message: Posted) {
-		match message {
-			Posted::Nothing => {}
-			Posted::Eos => {
+	/// Route a terminal reconnect error through the same session gate as finalization messages.
+	pub(super) fn post_session_error(&self, session: &SessionId, error: String) {
+		self.post_current(Posted::Message {
+			session: session.clone(),
+			kind: MessageKind::SessionError(error),
+		});
+	}
+
+	/// Post a message only while the publishing session that produced it remains current. The control
+	/// lock is released first because bus sync handlers can re-enter element and pad properties.
+	fn post_current(&self, message: Posted) {
+		let Posted::Message { session, kind } = message else {
+			return;
+		};
+		let current = self
+			.control
+			.lock()
+			.unwrap()
+			.live
+			.as_ref()
+			.is_some_and(|state| state.session.id().matches(&session));
+		if !current {
+			gst::debug!(
+				CAT,
+				obj = self.obj(),
+				"discarding a message from a stopped publishing session"
+			);
+			return;
+		}
+
+		match kind {
+			MessageKind::Eos => {
 				gst::info!(CAT, "all pads ended, posting EOS");
 				let obj = self.obj();
 				let _ = obj.post_message(gst::message::Eos::builder().src(&*obj).build());
 			}
-			Posted::Error(err) => {
+			MessageKind::FinalizeError(err) => {
 				gst::element_error!(self.obj(), gst::CoreError::Failed, ("finalize failed"), ["{err}"]);
+			}
+			MessageKind::SessionError(err) => {
+				gst::element_error!(self.obj(), gst::CoreError::Failed, ("session error"), ["{err}"]);
 			}
 		}
 	}
@@ -778,8 +818,8 @@ impl MoqSink {
 
 #[cfg(test)]
 mod tests {
-	use std::sync::atomic::AtomicBool;
 	use std::sync::Arc;
+	use std::sync::atomic::AtomicBool;
 
 	use super::super::request_pad::Status;
 	use super::*;
@@ -920,12 +960,29 @@ mod tests {
 	fn a_finalize_failure_reaches_the_bus() {
 		gst::init().unwrap();
 		let sink = sink();
+		sink.set_property("url", "https://127.0.0.1:1");
+		sink.set_property("broadcast", "test");
 		let element = sink.clone().upcast::<gst::Element>();
 		let bus = gst::Bus::new();
 		element.set_bus(Some(&bus));
+		element.set_state(gst::State::Paused).expect("start session");
+		let session = sink
+			.imp()
+			.control
+			.lock()
+			.unwrap()
+			.live
+			.as_ref()
+			.expect("live session")
+			.session
+			.id()
+			.clone();
+		while bus.pop().is_some() {}
 
-		sink.imp()
-			.post_finished(Posted::Error("finalize sink_1: closed".to_string()));
+		sink.imp().post_current(Posted::Message {
+			session,
+			kind: MessageKind::FinalizeError("finalize sink_1: closed".to_string()),
+		});
 
 		let message = bus.pop().expect("the element posted a message");
 		let gst::MessageView::Error(error) = message.view() else {
@@ -935,6 +992,73 @@ mod tests {
 			error.debug().is_some_and(|debug| debug.contains("closed")),
 			"the reason travels with the message"
 		);
+		let _ = element.set_state(gst::State::Null);
+	}
+
+	#[test]
+	fn errors_are_scoped_to_the_session_that_produced_them() {
+		gst::init().unwrap();
+		let sink = sink();
+		sink.set_property("url", "https://127.0.0.1:1");
+		sink.set_property("broadcast", "test");
+		let element = sink.clone().upcast::<gst::Element>();
+		let bus = gst::Bus::new();
+		element.set_bus(Some(&bus));
+		element.set_state(gst::State::Paused).expect("start first session");
+		let first = sink
+			.imp()
+			.control
+			.lock()
+			.unwrap()
+			.live
+			.as_ref()
+			.expect("first session")
+			.session
+			.id()
+			.clone();
+
+		element.set_state(gst::State::Ready).expect("stop first session");
+		element
+			.set_state(gst::State::Paused)
+			.expect("start replacement session");
+		let replacement = sink
+			.imp()
+			.control
+			.lock()
+			.unwrap()
+			.live
+			.as_ref()
+			.expect("replacement session")
+			.session
+			.id()
+			.clone();
+		while bus.pop().is_some() {}
+		sink.imp().post_current(Posted::Message {
+			session: first.clone(),
+			kind: MessageKind::FinalizeError("old finalization failed".to_string()),
+		});
+		sink.imp().post_session_error(&first, "old session failed".to_string());
+
+		assert!(
+			bus.timed_pop_filtered(gst::ClockTime::ZERO, &[gst::MessageType::Error])
+				.is_none(),
+			"the stopped session posted an error into its replacement"
+		);
+
+		sink.imp()
+			.post_session_error(&replacement, "current session failed".to_string());
+		let message = bus
+			.timed_pop_filtered(gst::ClockTime::ZERO, &[gst::MessageType::Error])
+			.expect("the current session posted its error");
+		let gst::MessageView::Error(error) = message.view() else {
+			unreachable!();
+		};
+		assert!(
+			error
+				.debug()
+				.is_some_and(|debug| debug.contains("current session failed"))
+		);
+		let _ = element.set_state(gst::State::Null);
 	}
 
 	#[test]

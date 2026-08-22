@@ -561,6 +561,44 @@ fn a_sync_bus_handler_can_read_the_status_on_eos() {
 	let _ = sink.set_state(gst::State::Null);
 }
 
+// Finalization settles the pad before notifying it. A handler can therefore stop that run and start
+// another before the deferred EOS reaches the bus; the old run must not complete its replacement.
+#[test]
+fn replacing_the_session_from_eos_notify_discards_the_old_eos() {
+	init();
+	let sink = publisher();
+	let bus = gst::Bus::new();
+	sink.set_bus(Some(&bus));
+	let pad = sink.request_pad_simple("sink_0").expect("request sink_0");
+	let restarted = Arc::new(AtomicBool::new(false));
+	let done = restarted.clone();
+	let element = sink.clone();
+	child_of(&sink, "sink_0").connect_notify(Some("status"), move |pad, _| {
+		let value = pad.property_value("status");
+		let (_, status) = gst::glib::EnumValue::from_value(&value).expect("status enum");
+		if status.nick() == "ended" && !done.swap(true, Ordering::SeqCst) {
+			element
+				.set_state(gst::State::Ready)
+				.expect("stop the completed session");
+			element.set_state(gst::State::Paused).expect("start its replacement");
+		}
+	});
+
+	sink.set_state(gst::State::Paused)
+		.expect("Ready -> Paused starts the session");
+	assert!(send_caps(&pad));
+	while bus.pop().is_some() {}
+
+	assert!(pad.send_event(gst::event::Eos::new()));
+	assert!(restarted.load(Ordering::SeqCst));
+	assert!(
+		bus.timed_pop_filtered(gst::ClockTime::ZERO, &[gst::MessageType::Eos])
+			.is_none(),
+		"the completed session posted EOS into its replacement"
+	);
+	let _ = sink.set_state(gst::State::Null);
+}
+
 // A pad that ends and then starts a new stream is publishing again. Leaving it counted as ended would
 // let the next pad EOS finalize the whole element, cutting a track that is still live.
 #[test]

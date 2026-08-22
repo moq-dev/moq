@@ -11,6 +11,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use anyhow::Result;
 use gst::glib;
 use gst::prelude::*;
+use gst::subclass::prelude::*;
 
 use hang::moq_net;
 
@@ -50,9 +51,8 @@ pub enum ConnectionStatus {
 
 /// The connect/version surface behind the `status`, `connected`, and `moq-version` properties. One per
 /// session: the element swaps in a fresh `Arc` on every start, so a previous session's task (which may
-/// still be unwinding) writes only its own detached copy and can never clobber the live status. No
-/// generation bookkeeping needed. The bitrate properties read a [`moq_net::bandwidth::Consumer`] directly,
-/// so they aren't mirrored here.
+/// still be unwinding) writes only its own detached copy and can never clobber the live status. The
+/// bitrate properties read a [`moq_net::bandwidth::Consumer`] directly, so they aren't mirrored here.
 #[derive(Default)]
 struct StatusInner {
 	status: ConnectionStatus,
@@ -63,6 +63,21 @@ struct StatusInner {
 #[derive(Default)]
 pub struct Status {
 	inner: Mutex<StatusInner>,
+}
+
+/// Opaque identity retained by one publishing session and all of its pending messages.
+#[derive(Clone)]
+pub(super) struct SessionId(Arc<()>);
+
+impl SessionId {
+	fn new() -> Self {
+		Self(Arc::new(()))
+	}
+
+	/// Whether both tokens identify the same publishing session.
+	pub(super) fn matches(&self, other: &Self) -> bool {
+		Arc::ptr_eq(&self.0, &other.0)
+	}
 }
 
 impl Status {
@@ -104,6 +119,7 @@ pub struct ResolvedSettings {
 /// A running session: the connect/lifecycle task plus the state the property getters read. Dropping the
 /// `Session` (or the producers held by the element) tears it down.
 pub(crate) struct Session {
+	id: SessionId,
 	join: tokio::task::JoinHandle<()>,
 	status: Arc<Status>,
 	/// The live send-bitrate estimate, tracked across reconnects by the reconnect loop. Read directly
@@ -135,6 +151,7 @@ impl Session {
 
 		let status = Arc::new(Status::default());
 		let errored = Arc::new(AtomicBool::new(false));
+		let id = SessionId::new();
 
 		// Publish through a background reconnect loop: connect, wait for close, reconnect with backoff.
 		// `timeout = 0` drops the give-up deadline so an unattended publisher outlives relay/QUIC
@@ -153,10 +170,18 @@ impl Session {
 		let send_bandwidth = reconnect.send_bandwidth();
 		let recv_bandwidth = reconnect.recv_bandwidth();
 
-		let join = RUNTIME.spawn(forward(reconnect, origin, status.clone(), errored.clone(), element));
+		let join = RUNTIME.spawn(forward(
+			reconnect,
+			origin,
+			status.clone(),
+			errored.clone(),
+			id.clone(),
+			element,
+		));
 
 		Ok((
 			Self {
+				id,
 				join,
 				status,
 				send_bandwidth,
@@ -166,6 +191,11 @@ impl Session {
 			broadcast,
 			catalog,
 		))
+	}
+
+	/// The identity that scopes element-wide messages to this session.
+	pub(super) fn id(&self) -> &SessionId {
+		&self.id
 	}
 
 	/// The live status, read by the element's property getters.
@@ -217,6 +247,7 @@ async fn forward(
 	origin: moq_net::origin::Producer,
 	status: Arc<Status>,
 	errored: Arc<AtomicBool>,
+	id: SessionId,
 	element: glib::WeakRef<Element>,
 ) {
 	// Hold the origin producer for the task's lifetime so the broadcast created on it stays routable:
@@ -256,7 +287,7 @@ async fn forward(
 					status.set(ConnectionStatus::Failed, None);
 					notify(&element, &["status", "connected", "moq-version"]);
 					if let Some(obj) = element.upgrade() {
-						gst::element_error!(obj, gst::CoreError::Failed, ("session error"), ["{err:?}"]);
+						obj.imp().post_session_error(&id, format!("{err:?}"));
 					}
 					return;
 				}
