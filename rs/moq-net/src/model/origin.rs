@@ -716,23 +716,47 @@ impl OriginNode {
 		}
 	}
 
-	fn consume(&mut self, id: ConsumerId, mut notify: AnnounceConsumerNotify) {
-		self.consume_initial(&mut notify);
+	/// Register `notify` on this node, replaying the live broadcast set as initial
+	/// announcements.
+	///
+	/// `skip` holds absolute prefixes the consumer already sees through one of its
+	/// other roots, so widening a scope over them does not announce a second time
+	/// something it is already tracking. Empty for a fresh registration.
+	fn consume(&mut self, id: ConsumerId, mut notify: AnnounceConsumerNotify, skip: &[PathOwned]) {
+		self.consume_initial(&mut notify, skip);
 		self.notify.lock().consumers.insert(id, notify);
 	}
 
-	fn consume_initial(&mut self, notify: &mut AnnounceConsumerNotify) {
+	fn consume_initial(&mut self, notify: &mut AnnounceConsumerNotify, skip: &[PathOwned]) {
 		// Only announced (live) broadcasts replay; offline ones are reachable by
 		// exact path but never advertised.
 		if let Some(broadcast) = &self.broadcast
 			&& broadcast.announced
+			&& !skip.iter().any(|prefix| broadcast.path.has_prefix(prefix))
 		{
 			notify.announce(&broadcast.path, broadcast.broadcast.consume(), &broadcast.state);
 		}
 
 		// Recursively subscribe to all nested nodes.
 		for nested in self.nested.values() {
-			nested.lock().consume_initial(notify);
+			nested.lock().consume_initial(notify, skip);
+		}
+	}
+
+	/// Unannounce every live broadcast under this node, for one consumer only.
+	///
+	/// The mirror of [`Self::consume_initial`], for a scope removed at runtime.
+	/// Notifies `notify` directly rather than going through [`NotifyNode`], since
+	/// the other consumers of this subtree keep their announcements.
+	fn unannounce_all(&self, notify: &AnnounceConsumerNotify) {
+		if let Some(broadcast) = &self.broadcast
+			&& broadcast.announced
+		{
+			notify.unannounce(&broadcast.path);
+		}
+
+		for nested in self.nested.values() {
+			nested.lock().unannounce_all(notify);
 		}
 	}
 
@@ -2950,7 +2974,19 @@ impl AnnounceProducer {
 /// Drop to unregister.
 pub struct AnnounceConsumer {
 	id: ConsumerId,
+
+	// The roots this cursor is registered on: its live scope. No root may be a prefix
+	// of another, the same invariant `PathPrefixes` gives `scope`. An announce
+	// notifies every registration on its way up the tree, so overlapping roots would
+	// deliver it twice.
 	nodes: OriginNodes,
+
+	// The scope this cursor was built with, and the ceiling for `insert_scope`.
+	// Widening resolves against this rather than `nodes`, which is what lets a
+	// removed prefix be restored without ever granting more than the creating
+	// consumer had.
+	allowed: OriginNodes,
+
 	root: PathOwned,
 
 	// Pending updates queued for this cursor. Coalesced so a slow consumer
@@ -2965,6 +3001,10 @@ pub struct AnnounceConsumer {
 	// opens one (bumping `announced` + `announced_bytes`); the matching unannounce
 	// drops it (bumping `announced_closed` + `announced_bytes`).
 	guards: HashMap<PathOwned, stats::Announce>,
+
+	// Retained so a scope inserted later registers with the same identity and
+	// split-horizon exclusion as the roots registered at construction.
+	exclude: Option<Origin>,
 }
 
 impl AnnounceConsumer {
@@ -2978,16 +3018,26 @@ impl AnnounceConsumer {
 				state: state.clone(),
 				exclude,
 			};
-			node.lock().consume(id, notify);
+			node.lock().consume(id, notify, &[]);
 		}
 
 		Self {
 			id,
+			allowed: nodes.clone(),
 			nodes,
 			root,
 			state,
 			stats,
 			guards: HashMap::new(),
+			exclude,
+		}
+	}
+
+	fn notify(&self) -> AnnounceConsumerNotify {
+		AnnounceConsumerNotify {
+			root: self.root.clone(),
+			state: self.state.clone(),
+			exclude: self.exclude,
 		}
 	}
 
@@ -3070,6 +3120,105 @@ impl AnnounceConsumer {
 	/// Converts a relative path to an absolute path.
 	pub fn absolute(&self, path: impl AsPath) -> Path<'_> {
 		self.root.join(path)
+	}
+
+	/// Widen this cursor's scope to also announce broadcasts under `prefix`.
+	///
+	/// `prefix` is relative to this cursor's [`root`](Self::root), the same space as
+	/// the paths [`next`](Self::next) yields. Live broadcasts that are newly in scope
+	/// are announced immediately, and later ones as they arrive.
+	///
+	/// Returns true if the scope changed. It does nothing and returns false when
+	/// `prefix` is already covered, or when it falls outside the scope this cursor
+	/// was created with. A cursor can be re-widened only up to that scope, never past
+	/// it, otherwise narrowing a [`Consumer`] before handing out the cursor would be
+	/// no restriction at all.
+	///
+	/// Inserting a prefix that spans roots already in scope does not re-announce what
+	/// they cover, so widening `a/b` to `a` announces the rest of `a` and leaves
+	/// `a/b` undisturbed.
+	pub fn insert_scope(&mut self, prefix: impl AsPath) -> bool {
+		let prefix = prefix.as_path();
+
+		if self.nodes.nodes.iter().any(|(root, _)| prefix.has_prefix(root)) {
+			return false;
+		}
+
+		// Resolved against the construction scope, never the whole origin.
+		let Some(selected) = self.allowed.select(&PathPrefixes::new([prefix])) else {
+			return false;
+		};
+
+		let id = self.id;
+		let root = self.root.clone();
+
+		// Roots this prefix spans get folded into it. Unregister them without
+		// unannouncing, since they stay in scope and are simply reached through the
+		// wider root now, and skip them in the replay so the consumer sees no second
+		// announce for what it already tracks.
+		let mut skip = Vec::new();
+		self.nodes.nodes.retain(|(existing, node)| {
+			if !existing.has_prefix(&prefix) {
+				return true;
+			}
+			node.lock().unconsume(id);
+			skip.push(root.join(existing));
+			false
+		});
+
+		let notify = self.notify();
+		for (key, node) in &selected.nodes {
+			node.lock().consume(id, notify.clone(), &skip);
+			self.nodes.nodes.push((key.clone(), node.clone()));
+		}
+
+		true
+	}
+
+	/// Narrow this cursor's scope to stop announcing broadcasts under `prefix`.
+	///
+	/// Everything live under `prefix` is unannounced, and nothing under it is
+	/// announced again unless [`insert_scope`](Self::insert_scope) puts it back.
+	/// `prefix` is relative to this cursor's [`root`](Self::root).
+	///
+	/// Returns true if the scope changed. Two different situations return false.
+	/// Either nothing under `prefix` was in scope, so there was nothing to remove, or
+	/// `prefix` is a strict descendant of a root that is in scope, which a set of
+	/// subtree roots cannot express: dropping `room/alice` from a cursor scoped to
+	/// `room` would mean restating the scope as every *other* child of `room`, and
+	/// that set goes stale as soon as a new one is published. Scope such a cursor to
+	/// the paths it should see rather than subtracting from a wider one.
+	///
+	/// # This does not stop an active subscription
+	///
+	/// Scope filters discovery, not delivery. A subscriber holding a
+	/// [`broadcast::Consumer`] from an earlier announce, or from
+	/// [`Consumer::request_broadcast`], keeps receiving it once its path leaves
+	/// scope. Only the unannounce is delivered. Removing a scope is not a way to cut
+	/// someone off from a broadcast they are already reading.
+	pub fn remove_scope(&mut self, prefix: impl AsPath) -> bool {
+		let prefix = prefix.as_path();
+		let id = self.id;
+		let notify = self.notify();
+		let mut removed = false;
+
+		self.nodes.nodes.retain(|(existing, node)| {
+			if !existing.has_prefix(&prefix) {
+				return true;
+			}
+
+			// Unannounce first: once the consumer is off the node it can no longer be
+			// told what it is losing. Coalescing in `OriginConsumerState` drops an
+			// announce the consumer never observed instead of emitting a stray
+			// unannounce for it.
+			let mut node = node.lock();
+			node.unannounce_all(&notify);
+			node.unconsume(id);
+			removed = true;
+			false
+		});
+
+		removed
 	}
 }
 
@@ -6099,6 +6248,229 @@ mod tests {
 		limited_consumer.assert_next_some("bar/test");
 		limited_consumer.assert_next_some("foo/test");
 		limited_consumer.assert_next_wait(); // Should not see "baz/test"
+	}
+
+	/// A cursor scoped to the participants it may see, which is the shape scope
+	/// mutation is for: each participant is a root, so each can be toggled.
+	async fn room_of_two() -> (Producer, AnnounceConsumer, broadcast::Producer, broadcast::Producer) {
+		let origin = Origin::random().produce();
+		let alice = origin.create_broadcast("room/alice", announce()).unwrap();
+		let bob = origin.create_broadcast("room/bob", announce()).unwrap();
+		settle().await;
+
+		let consumer = origin
+			.consume()
+			.scope(&["room/alice".into(), "room/bob".into()])
+			.expect("should create scoped consumer")
+			.announced();
+
+		(origin, consumer, alice, bob)
+	}
+
+	#[tokio::test]
+	async fn test_scope_mutation_is_idempotent() {
+		let (_origin, mut consumer, _alice, _bob) = room_of_two().await;
+		consumer.assert_next_some("room/alice");
+		consumer.assert_next_some("room/bob");
+		consumer.assert_next_wait();
+
+		// Already covered, so nothing to add.
+		assert!(!consumer.insert_scope("room/alice"));
+		assert!(!consumer.insert_scope("room/alice/cam"));
+
+		// Never in scope, so nothing to remove.
+		assert!(!consumer.remove_scope("lobby"));
+
+		settle().await;
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_remove_scope_unannounces() {
+		let (origin, mut consumer, _alice, _bob) = room_of_two().await;
+		consumer.assert_next_some("room/alice");
+		consumer.assert_next_some("room/bob");
+		consumer.assert_next_wait();
+
+		assert!(consumer.remove_scope("room/bob"));
+		settle().await;
+		consumer.assert_next_none("room/bob");
+		consumer.assert_next_wait();
+
+		// Nothing published under the removed prefix is announced either.
+		let _cam = origin.create_broadcast("room/bob/cam", announce()).unwrap();
+		settle().await;
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_insert_scope_announces_live_broadcast() {
+		let (_origin, mut consumer, _alice, _bob) = room_of_two().await;
+		consumer.assert_next_some("room/alice");
+		consumer.assert_next_some("room/bob");
+		consumer.assert_next_wait();
+
+		assert!(consumer.remove_scope("room/bob"));
+		settle().await;
+		consumer.assert_next_none("room/bob");
+		consumer.assert_next_wait();
+
+		// Still live, so putting the prefix back announces it again.
+		assert!(consumer.insert_scope("room/bob"));
+		settle().await;
+		consumer.assert_next_some("room/bob");
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_insert_scope_cannot_widen_past_construction() {
+		let (_origin, mut consumer, _alice, _bob) = room_of_two().await;
+		consumer.assert_next_some("room/alice");
+		consumer.assert_next_some("room/bob");
+		consumer.assert_next_wait();
+
+		// "room" is wider than the scope this cursor was built with.
+		assert!(!consumer.insert_scope("room"));
+		assert!(!consumer.insert_scope("lobby"));
+
+		settle().await;
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_remove_scope_of_descendant_is_unsupported() {
+		let origin = Origin::random().produce();
+		let _alice = origin.create_broadcast("room/alice", announce()).unwrap();
+		settle().await;
+
+		let mut consumer = origin
+			.consume()
+			.scope(&["room".into()])
+			.expect("should create scoped consumer")
+			.announced();
+		consumer.assert_next_some("room/alice");
+		consumer.assert_next_wait();
+
+		// A subtree root set cannot subtract one child, so this reports no change
+		// rather than silently dropping the rest of the room.
+		assert!(!consumer.remove_scope("room/alice"));
+		settle().await;
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_remove_scope_of_never_announced_is_silent() {
+		let origin = Origin::random().produce();
+		let mut consumer = origin
+			.consume()
+			.scope(&["room".into()])
+			.expect("should create scoped consumer")
+			.announced();
+		consumer.assert_next_wait();
+
+		// The root is in scope, so it is removed, but nothing under it was ever
+		// announced and so nothing is unannounced.
+		assert!(consumer.remove_scope("room"));
+		settle().await;
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_scope_mutation_is_per_consumer() {
+		let (origin, mut first, _alice, _bob) = room_of_two().await;
+		let mut second = origin
+			.consume()
+			.scope(&["room/alice".into(), "room/bob".into()])
+			.expect("should create scoped consumer")
+			.announced();
+
+		first.assert_next_some("room/alice");
+		first.assert_next_some("room/bob");
+		second.assert_next_some("room/alice");
+		second.assert_next_some("room/bob");
+
+		assert!(first.remove_scope("room/bob"));
+		settle().await;
+
+		first.assert_next_none("room/bob");
+		first.assert_next_wait();
+		second.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_scope_mutation_composes_with_scope() {
+		let origin = Origin::random().produce();
+		let _alice = origin.create_broadcast("room/alice", announce()).unwrap();
+		let _bob = origin.create_broadcast("room/bob", announce()).unwrap();
+		settle().await;
+
+		let mut consumer = origin
+			.consume()
+			.scope(&["room".into()])
+			.expect("should create scoped consumer")
+			.announced();
+		consumer.assert_next_some("room/alice");
+		consumer.assert_next_some("room/bob");
+		consumer.assert_next_wait();
+
+		assert!(consumer.remove_scope("room"));
+		settle().await;
+		consumer.assert_next_none("room/alice");
+		consumer.assert_next_none("room/bob");
+		consumer.assert_next_wait();
+
+		assert!(consumer.insert_scope("room/alice"));
+		settle().await;
+		consumer.assert_next_some("room/alice");
+		consumer.assert_next_wait();
+
+		// Widening back to the parent picks up bob without announcing alice twice.
+		assert!(consumer.insert_scope("room"));
+		settle().await;
+		consumer.assert_next_some("room/bob");
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_late_announce_respects_current_scope() {
+		let origin = Origin::random().produce();
+		let mut consumer = origin
+			.consume()
+			.scope(&["room/alice".into(), "room/bob".into()])
+			.expect("should create scoped consumer")
+			.announced();
+
+		assert!(consumer.remove_scope("room/bob"));
+		settle().await;
+		consumer.assert_next_wait();
+
+		// Published after the mutation, so gated by the current scope, not the one
+		// the cursor was created with.
+		let _bob = origin.create_broadcast("room/bob", announce()).unwrap();
+		let _alice = origin.create_broadcast("room/alice", announce()).unwrap();
+		settle().await;
+
+		consumer.assert_next_some("room/alice");
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_remove_scope_keeps_active_subscription() {
+		let (_origin, mut consumer, _alice, _bob) = room_of_two().await;
+		let alice = consumer.assert_next_some("room/alice");
+		consumer.assert_next_some("room/bob");
+		consumer.assert_next_wait();
+
+		assert!(consumer.remove_scope("room/alice"));
+		settle().await;
+		consumer.assert_next_none("room/alice");
+
+		// Scope filters discovery, not delivery: a subscriber that already holds the
+		// broadcast keeps it. Removing a scope cannot cut off an existing reader.
+		assert!(
+			!alice.is_closed(),
+			"removing a scope must not cancel an active subscription"
+		);
 	}
 
 	#[tokio::test]

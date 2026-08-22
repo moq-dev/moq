@@ -70,6 +70,10 @@ The [moq-relay clustering](/bin/relay/cluster) feature actually uses this to dis
 The peer first replies with the set of broadcasts that are currently live, then streams updates as they change.
 This initial set is a discrete batch: the latest draft reports how many entries to expect up front, so a freshly connected session can wait until that snapshot has fully arrived before listing what's available, rather than racing the gossip.
 
+The prefixes a given subscriber is scoped to can also be adjusted while the session is live, not just when it starts.
+Widening the scope announces whatever is already live and newly visible, and narrowing it unannounces what is leaving; no stream is reopened either way.
+This filters discovery only, so a subscriber that already holds a broadcast keeps receiving it after that path leaves their scope.
+
 ### Subscriptions
 
 All data transfers are initiated by subscriptions.
