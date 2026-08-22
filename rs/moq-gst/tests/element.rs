@@ -226,6 +226,55 @@ fn release_rejects_pad_traffic_before_detach() {
 	);
 }
 
+// The template announces opaque data, so a data branch negotiates instead of failing to link.
+#[test]
+fn the_pad_template_announces_opaque_data() {
+	init();
+	let sink = gst::ElementFactory::make("moqsink").build().expect("create moqsink");
+	let template = sink
+		.element_class()
+		.pad_template("sink_%u")
+		.expect("the sink_%u template");
+	assert!(
+		template
+			.caps()
+			.can_intersect(&gst::Caps::builder("application/octet-stream").build()),
+		"the template announces application/octet-stream"
+	);
+}
+
+// The CAPS event is the synchronous gate: an unsupported type is refused there, not published.
+#[test]
+fn unsupported_caps_are_refused_at_the_caps_event() {
+	init();
+	let sink = publisher();
+	let pad = sink.request_pad_simple("sink_0").expect("request sink_0");
+	let child = child_of(&sink, "sink_0");
+	child.set_property("track", "audiolevels");
+	sink.set_state(gst::State::Paused)
+		.expect("Ready -> Paused starts the session");
+	assert!(pad.send_event(gst::event::StreamStart::new("test")));
+
+	for refused in ["application/json", "video/x-raw"] {
+		let caps = gst::Caps::builder(refused).build();
+		assert!(
+			!pad.send_event(gst::event::Caps::new(&caps)),
+			"{refused} is refused at the CAPS event"
+		);
+	}
+	let caps = gst::Caps::builder("application/octet-stream").build();
+	assert!(
+		pad.send_event(gst::event::Caps::new(&caps)),
+		"opaque data passes the same gate"
+	);
+	assert_eq!(
+		child.property::<String>("track"),
+		"audiolevels",
+		"the opaque pad reserved the track it was named for"
+	);
+	let _ = sink.set_state(gst::State::Null);
+}
+
 // Settings are validated synchronously: a missing url fails the state change, not the bus.
 #[test]
 fn missing_url_fails_state_change() {

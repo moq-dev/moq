@@ -295,6 +295,8 @@ impl ElementImpl for MoqSink {
 					.build(),
 			);
 			caps.merge(gst::Caps::builder("audio/x-opus").build());
+			// Opaque application data: published byte for byte, so there is no structural field to pin.
+			caps.merge(gst::Caps::builder("application/octet-stream").build());
 
 			let sink =
 				gst::PadTemplate::new("sink_%u", gst::PadDirection::Sink, gst::PadPresence::Request, &caps).unwrap();
