@@ -34,9 +34,7 @@ impl<E: CatalogExt> Import<E> {
 		let rendition = reserved.video(track.name());
 		let catalog = crate::codec::video::Catalog::new(&reserved, track.name(), hint)?;
 		let mut import = Self {
-			track: reserved
-				.producer()
-				.media_producer(track, crate::catalog::hang::Container::Legacy)?,
+			track: reserved.producer().media_producer(track, reserved.container().into())?,
 			rendition,
 			catalog,
 		};
@@ -63,7 +61,6 @@ impl<E: CatalogExt> Import<E> {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.coded_width = Some(width as u32);
 		config.coded_height = Some(height as u32);
-		config.container = hang::catalog::Container::Legacy;
 
 		self.apply_config(config);
 		Ok(())
@@ -179,6 +176,39 @@ mod tests {
 		import
 			.decode(&interframe, Some(Timestamp::from_micros(33_000).unwrap()))
 			.unwrap();
+
+		import.finish().unwrap();
+	}
+
+	/// A reservation that selected LOC makes the importer write LOC frames and advertise the
+	/// container, so the catalog names what is on the wire.
+	#[tokio::test(start_paused = true)]
+	async fn a_loc_reservation_reaches_the_wire_and_the_catalog() {
+		let (track, catalog) = setup();
+		let subscriber = track.subscribe(None);
+		let reserved = catalog.reserve().with_container(crate::catalog::MediaContainer::Loc);
+		let hint = crate::catalog::VideoHint {
+			codec: Some(hang::catalog::VideoCodec::VP8),
+			..Default::default()
+		};
+		let mut import = super::Import::new(track, reserved, hint).unwrap();
+		import.initialize(&[]).unwrap();
+		let config = catalog.snapshot().video.renditions.get("0.vp8").cloned().unwrap();
+		assert_eq!(config.container, hang::catalog::Container::Loc);
+
+		let keyframe = Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00]);
+		import
+			.decode(&keyframe, Some(Timestamp::from_micros(0).unwrap()))
+			.unwrap();
+
+		let mut media = crate::container::Consumer::new(subscriber, crate::catalog::hang::Container::Loc);
+		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(frame.payload, keyframe);
+		assert_eq!(frame.timestamp, Timestamp::from_micros(0).unwrap());
 
 		import.finish().unwrap();
 	}

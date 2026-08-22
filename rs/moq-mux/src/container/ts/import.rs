@@ -43,9 +43,13 @@ use moq_net::Timestamp;
 /// by a program-level 'CUEI' registration descriptor, and other private sections)
 /// are intercepted before the reader and reassembled. With a base `Catalog<()>`
 /// they're logged and dropped instead.
+///
+/// Selecting LOC applies only to decoded media renditions. Verbatim tracks in the
+/// `mpegts` catalog section continue to use the legacy Hang container.
 pub struct Import<E: catalog::Catalog = ()> {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
+	container: crate::catalog::MediaContainer,
 
 	/// Held while the first PMT is parsed so the catalog is withheld from the broadcast until every
 	/// stream in the initial program has reserved its rendition. Dropped once the PMT is fully
@@ -124,6 +128,7 @@ pub struct Import<E: catalog::Catalog = ()> {
 impl<E: catalog::Catalog> Import<E> {
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		let feed = Feed::default();
+		let container = reserved.container();
 		// A long-lived producer handle for catalog edits (mpegts sections, later PMTs); the passed
 		// reservation gates the initial publish and is dropped once the first PMT is parsed.
 		let catalog = reserved.producer();
@@ -134,6 +139,7 @@ impl<E: catalog::Catalog> Import<E> {
 		Self {
 			broadcast,
 			catalog,
+			container,
 			initial_reservation: Some(reserved),
 			reader: TsPacketReader::new(feed.clone()),
 			feed,
@@ -156,6 +162,10 @@ impl<E: catalog::Catalog> Import<E> {
 			last_pts: None,
 			media_unwrap: PtsUnwrap::default(),
 		}
+	}
+
+	fn reserve(&self) -> crate::catalog::Reserved<E> {
+		self.catalog.reserve().with_container(self.container)
 	}
 
 	/// Append `buf` to the internal scratch and demux every whole TS packet it
@@ -376,7 +386,7 @@ impl<E: catalog::Catalog> Import<E> {
 				let track = self.broadcast.unique_track(".avc3", self.catalog.track_info())?;
 				Stream::H264 {
 					split: h264::Split::new(),
-					import: Box::new(h264::Import::new(track, self.catalog.reserve(), Default::default())?),
+					import: Box::new(h264::Import::new(track, self.reserve(), Default::default())?),
 					unwrap: PtsUnwrap::default(),
 				}
 			}
@@ -384,7 +394,7 @@ impl<E: catalog::Catalog> Import<E> {
 				let track = self.broadcast.unique_track(".hev1", self.catalog.track_info())?;
 				Stream::H265 {
 					split: h265::Split::new(),
-					import: Box::new(h265::Import::new(track, self.catalog.reserve(), Default::default())?),
+					import: Box::new(h265::Import::new(track, self.reserve(), Default::default())?),
 					unwrap: PtsUnwrap::default(),
 				}
 			}
@@ -393,7 +403,7 @@ impl<E: catalog::Catalog> Import<E> {
 			StreamType::AdtsAac => Stream::Aac(Box::new(AacStream {
 				import: None,
 				broadcast: self.broadcast.clone(),
-				reserved: Some(self.catalog.reserve()),
+				reserved: Some(self.reserve()),
 				unwrap: PtsUnwrap::default(),
 				jitter: None,
 				tail: Vec::new(),
@@ -414,7 +424,7 @@ impl<E: catalog::Catalog> Import<E> {
 				let track = self.broadcast.unique_track(".opus", self.catalog.track_info())?;
 				let config = opus::Config::new(48_000, channel_count);
 				Stream::Opus(Box::new(OpusStream {
-					import: opus::Import::new(track, self.catalog.reserve(), config.into())?,
+					import: opus::Import::new(track, self.reserve(), config.into())?,
 					unwrap: PtsUnwrap::default(),
 				}))
 			}
@@ -460,7 +470,7 @@ impl<E: catalog::Catalog> Import<E> {
 			descriptor,
 			import: None,
 			broadcast: self.broadcast.clone(),
-			reserved: Some(self.catalog.reserve()),
+			reserved: Some(self.reserve()),
 			unwrap: PtsUnwrap::default(),
 			tail: Vec::new(),
 			tail_pts: None,

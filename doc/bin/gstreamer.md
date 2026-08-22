@@ -238,6 +238,7 @@ The first pad of each kind is always `video_0` / `audio_0` regardless of catalog
 | Audio | AAC   | `audio/mpeg` (v4)     |
 | Audio | MP3   | `audio/mpeg` (v1/v2, layer 3) |
 | Audio | Opus  | `audio/x-opus`        |
+| Data  | Opaque | `application/octet-stream` |
 
 Each `sink_%u` request pad publishes one track. By default the track is named after its codec
 (`0.avc3`, `0.aac`, and so on) and the catalog advertises that name. To choose the name, set the pad's
@@ -252,12 +253,50 @@ gst-launch-1.0 -v -e \
     sink_0::track=camera sink_1::track=commentary
 ```
 
+Media tracks use the legacy Hang container by default. Set `container=loc` before starting the
+element to publish every media pad as Low Overhead Container and advertise LOC in the catalog:
+
+```bash
+gst-launch-1.0 -v -e \
+  videotestsrc is-live=true ! x264enc tune=zerolatency ! h264parse \
+    ! video/x-h264,stream-format=byte-stream,alignment=au ! mux.sink_0 \
+  moqsink name=mux url=http://localhost:4443 broadcast=bbb.hang container=loc
+```
+
+`container` is writable in `NULL` and `READY`. It is fixed for a running publication and becomes
+writable again after returning to `READY`.
+
 `track` is writable in any state until the pad's CAPS event reserves the track, so a pad requested
 while the pipeline runs can still be named before its first buffer. From then on it reads back the
 reserved name, the generated one included, and further writes are ignored with a warning; stopping the
 element (back to `READY`) releases the reservation and makes it writable again. An empty string keeps
 the generated name. A name another pad already holds invalidates only that pad, so the rest of the
 broadcast keeps publishing.
+
+A pad negotiated as `application/octet-stream` publishes application data instead of media. The bytes
+go out exactly as they arrive: no codec, no media container, no interpretation. The element's
+`container` property does not apply to these pads.
+
+```bash
+gst-launch-1.0 -v -e \
+  appsrc name=levels format=time do-timestamp=true caps=application/octet-stream ! mux.sink_0 \
+  moqsink name=mux url=https://cdn.moq.dev/anon broadcast=bbb.hang \
+    sink_0::track=audiolevels
+```
+
+Such a pad requires `track`: an opaque track is advertised nowhere, so a generated name would be
+unreachable, and a pad without one is invalidated. It also requires a TIME segment: byte-oriented
+sources such as `filesrc` and `fdsrc` push a BYTES segment, and every buffer behind one is dropped
+with a single warning on the bus.
+
+Each buffer becomes one group holding one frame, stamped with the buffer's PTS mapped through that
+segment. A buffer that arrives with no segment or no PTS is dropped rather than stamped with a
+substitute: the track shares the timeline of the media it accompanies, and a wall-clock reading would
+belong to a different epoch.
+
+The track is deliberately absent from the catalog. MSF requires a `packaging` value on every declared
+track and defines none for raw bytes, so a consumer is told out of band, by configuration, which data
+tracks to subscribe to.
 
 ### moqsrc (subscribe)
 

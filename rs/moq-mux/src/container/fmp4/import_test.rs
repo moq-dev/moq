@@ -75,6 +75,26 @@ fn test_bbb_catalog() {
 }
 
 #[test]
+fn public_container_keeps_cmaf_when_loc_is_selected() {
+	let data = include_bytes!("test_data/bbb.mp4");
+	let mut cursor = std::io::Cursor::new(data.as_slice());
+	mp4_atom::Ftyp::decode(&mut cursor).unwrap();
+	mp4_atom::Moov::decode(&mut cursor).unwrap();
+	let init = &data[..cursor.position() as usize];
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let reserved = catalog.reserve().with_container(crate::catalog::MediaContainer::Loc);
+	let mut import = crate::import::Container::new(broadcast, reserved, "fmp4", init).unwrap();
+	import.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	let video = snapshot.video.renditions.values().next().expect("a video rendition");
+	assert!(matches!(video.container, Container::Cmaf { .. }));
+	let audio = snapshot.audio.renditions.values().next().expect("an audio rendition");
+	assert!(matches!(audio.container, Container::Cmaf { .. }));
+}
+
+#[test]
 fn aac_without_decoder_specific_info_is_rejected() {
 	let data = include_bytes!("test_data/bbb.mp4");
 	let (ftyp, mut moov) = decode_init(data);

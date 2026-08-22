@@ -72,7 +72,6 @@ pub(crate) fn config_from_av1c(av1c: &[u8]) -> Result<hang::catalog::VideoConfig
 		..Default::default()
 	});
 	config.description = Some(bytes::Bytes::copy_from_slice(av1c));
-	config.container = hang::catalog::Container::Legacy;
 	Ok(config)
 }
 

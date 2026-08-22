@@ -212,7 +212,6 @@ pub(crate) fn config_from_hvcc(hvcc: &[u8]) -> Result<hang::catalog::VideoConfig
 	config.coded_width = Some(sps.rbsp.cropped_width() as u32);
 	config.coded_height = Some(sps.rbsp.cropped_height() as u32);
 	config.description = Some(Bytes::copy_from_slice(hvcc));
-	config.container = hang::catalog::Container::Legacy;
 	Ok(config)
 }
 

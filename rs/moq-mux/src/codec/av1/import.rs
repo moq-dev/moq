@@ -47,9 +47,7 @@ impl<E: CatalogExt> Import<E> {
 		let rendition = reserved.video(track.name());
 		let catalog = crate::codec::video::Catalog::new(&reserved, track.name(), hint)?;
 		let mut import = Self {
-			track: reserved
-				.producer()
-				.media_producer(track, crate::catalog::hang::Container::Legacy)?,
+			track: reserved.producer().media_producer(track, reserved.container().into())?,
 			rendition,
 			catalog,
 			last_seq: None,
@@ -95,7 +93,7 @@ impl<E: CatalogExt> Import<E> {
 		let twelve_bit = ((data[2] >> 5) & 0x01) == 1;
 
 		// Resolution is unknown from av1C; it's filled when the first sequence header arrives.
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
+		let config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
 			profile: seq_profile,
 			level: seq_level_idx,
 			tier: if tier { 'H' } else { 'M' },
@@ -109,7 +107,6 @@ impl<E: CatalogExt> Import<E> {
 			matrix_coefficients: 1,
 			full_range: false,
 		});
-		config.container = hang::catalog::Container::Legacy;
 		self.apply_config(config);
 	}
 
@@ -143,14 +140,13 @@ impl<E: CatalogExt> Import<E> {
 		});
 		config.coded_width = Some(seq_header.max_frame_width as u32);
 		config.coded_height = Some(seq_header.max_frame_height as u32);
-		config.container = hang::catalog::Container::Legacy;
 		self.apply_config(config);
 	}
 
 	/// Minimal config when sequence-header parsing fails, so the stream can still
 	/// flow (the catalog just won't carry full codec info).
 	fn init_minimal(&mut self) {
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
+		let config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
 			profile: 0,
 			level: 0,
 			tier: 'M',
@@ -164,7 +160,6 @@ impl<E: CatalogExt> Import<E> {
 			matrix_coefficients: 2,      // Unspecified
 			full_range: false,
 		});
-		config.container = hang::catalog::Container::Legacy;
 		self.apply_config(config);
 	}
 
