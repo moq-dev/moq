@@ -583,6 +583,19 @@ impl QuicheServer {
 			crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND).map_err(Error::ResolveBind)?;
 		let socket = crate::bind::udp(crate::bind::Udp::new(listen))?;
 
+		// quiche fixes its certificate and client-auth roots when the listener is
+		// built, and takes them as raw DER rather than a rustls resolver or verifier,
+		// so neither in-memory mode can be honored here. Refuse rather than come up
+		// serving a different identity than the caller asked for, or accepting peers
+		// it meant to pin.
+		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+		if config.tls.identity.is_some() {
+			return Err(crate::tls::Error::MemoryUnsupported.into());
+		}
+		if config.tls.peers.is_some() {
+			return Err(crate::tls::Error::MemoryUnsupported.into());
+		}
+
 		let (chain, key) = if !config.tls.generate.is_empty() {
 			generate_quiche_cert(&config.tls.generate)?
 		} else {

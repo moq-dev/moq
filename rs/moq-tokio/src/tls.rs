@@ -13,6 +13,7 @@
 use crate::crypto;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::{fs, io};
@@ -73,6 +74,24 @@ pub enum Error {
 		"--connect-tls-fingerprint cannot be combined with --connect-tls-root or --connect-tls-system-roots: fingerprint pinning bypasses CA verification"
 	)]
 	FingerprintWithRoots,
+
+	/// An in-memory client identity was combined with a certificate from disk.
+	#[error(
+		"a client Identity cannot be combined with --connect-tls-cert or --connect-tls-key: only one client certificate can be presented"
+	)]
+	ConflictingClientAuth,
+
+	/// An in-memory identity or a pinned peer set was configured on a backend that
+	/// fixes its TLS material when the listener is built.
+	#[error(
+		"the quiche backend cannot serve an in-memory Identity or pin client fingerprints; use the quinn or noq backend"
+	)]
+	MemoryUnsupported,
+
+	/// Client pinning was combined with client CA roots. Pinning bypasses the chain,
+	/// so one of the two would be silently ignored.
+	#[error("a client fingerprint allowlist cannot be combined with client CA roots: pinning bypasses CA verification")]
+	PeersWithRoots,
 
 	/// Trust material was configured alongside the flag that ignores all of it.
 	#[error(
@@ -176,6 +195,150 @@ fn read_roots(paths: &[PathBuf]) -> Result<Vec<CertificateDer<'static>>> {
 	Ok(roots)
 }
 
+// ── Identity ────────────────────────────────────────────────────────
+
+/// A self-signed certificate and key, held in memory and used as both a served
+/// certificate and an mTLS client identity.
+///
+/// A peer mesh has no certificate authority: each side generates one of these,
+/// publishes its [`fingerprint`](Self::fingerprint) where the others can find
+/// it, and pins the fingerprints it expects. Because one key covers both roles,
+/// a peer is the same principal whether it dialed or accepted, which is what
+/// lets a listener name the peer that just connected to it.
+///
+/// Set it on [`Listen::identity`] to serve it and [`Connect::identity`] to
+/// present it. Generated in memory and never written to disk, so it lasts as
+/// long as the process and a restart is a new principal.
+#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+#[derive(Clone)]
+pub struct Identity {
+	key: Arc<rustls::sign::CertifiedKey>,
+	fingerprint: String,
+}
+
+#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+impl Identity {
+	/// Generate a fresh identity, valid for `hostnames`.
+	///
+	/// Pass the names a dialer will use in its SNI. A peer dialed by socket
+	/// address has no name to check, and pinning skips the check anyway, so one
+	/// placeholder name is enough there.
+	pub fn generate(hostnames: impl IntoIterator<Item = impl Into<String>>) -> Result<Self> {
+		let hostnames: Vec<String> = hostnames.into_iter().map(Into::into).collect();
+		let provider = crypto::provider();
+		let key = Arc::new(generate(&provider, &hostnames)?);
+		let fingerprint = hex::encode(crypto::sha256(&provider, key.cert[0].as_ref()));
+		Ok(Self { key, fingerprint })
+	}
+
+	/// The certificate's SHA-256 fingerprint, hex encoded.
+	///
+	/// This is what peers pin, in [`Connect::fingerprint`] to reach this process
+	/// and in [`Peers`] to let it in. The same value [`Certificates::fingerprints`]
+	/// reports for the served certificate.
+	pub fn fingerprint(&self) -> &str {
+		&self.fingerprint
+	}
+
+	fn certified(&self) -> Arc<rustls::sign::CertifiedKey> {
+		self.key.clone()
+	}
+}
+
+#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+impl fmt::Debug for Identity {
+	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+		formatter
+			.debug_struct("Identity")
+			.field("fingerprint", &self.fingerprint)
+			.finish_non_exhaustive()
+	}
+}
+
+/// Presents one fixed [`Identity`] whenever a server asks for a client certificate.
+#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+#[derive(Debug)]
+struct IdentityResolver(Arc<rustls::sign::CertifiedKey>);
+
+#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+impl rustls::client::ResolvesClientCert for IdentityResolver {
+	fn resolve(
+		&self,
+		_root_hint_subjects: &[&[u8]],
+		_sigschemes: &[rustls::SignatureScheme],
+	) -> Option<Arc<rustls::sign::CertifiedKey>> {
+		// A self-signed identity chains to nothing, so the server's hints never
+		// match it. Offer it regardless and let the server's verifier decide.
+		Some(self.0.clone())
+	}
+
+	fn has_certs(&self) -> bool {
+		true
+	}
+}
+
+/// The client certificates a listener accepts, pinned by SHA-256 fingerprint.
+///
+/// The CA-rooted alternative ([`Listen::root`]) needs an authority to issue the
+/// certificates; this needs only the fingerprints, which suits a peer mesh where
+/// membership changes as peers appear and go away. Cheap to clone, and every
+/// handshake reads the current set, so a caller holds one handle and edits it as
+/// its peer list changes.
+///
+/// A peer whose fingerprint is absent fails the TLS handshake, so a session that
+/// reaches the application is always one of these. Which one is
+/// [`crate::Request::peer_identity`] plus [`PeerIdentity::fingerprint`].
+#[derive(Clone, Debug, Default)]
+pub struct Peers {
+	allowed: Arc<RwLock<std::collections::HashSet<[u8; 32]>>>,
+}
+
+impl Peers {
+	/// An empty set, which rejects every client certificate until something is added.
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// Allow the peer serving the certificate with this hex SHA-256 fingerprint.
+	pub fn insert(&self, fingerprint: &str) -> Result<()> {
+		let fingerprint = parse_fingerprint(fingerprint)?;
+		self.write().insert(fingerprint);
+		Ok(())
+	}
+
+	/// Stop allowing a fingerprint. Established sessions are unaffected; this only
+	/// applies to handshakes that have yet to happen.
+	pub fn remove(&self, fingerprint: &str) -> Result<()> {
+		let fingerprint = parse_fingerprint(fingerprint)?;
+		self.write().remove(&fingerprint);
+		Ok(())
+	}
+
+	/// Whether a hex fingerprint is currently allowed.
+	pub fn contains(&self, fingerprint: &str) -> bool {
+		match parse_fingerprint(fingerprint) {
+			Ok(fingerprint) => self.read().contains(&fingerprint),
+			Err(_) => false,
+		}
+	}
+
+	/// Whether a raw digest is allowed, for the verifier's hot path.
+	fn contains_raw(&self, fingerprint: &[u8]) -> bool {
+		match <[u8; 32]>::try_from(fingerprint) {
+			Ok(fingerprint) => self.read().contains(&fingerprint),
+			Err(_) => false,
+		}
+	}
+
+	fn read(&self) -> std::sync::RwLockReadGuard<'_, std::collections::HashSet<[u8; 32]>> {
+		self.allowed.read().expect("peer allowlist read lock poisoned")
+	}
+
+	fn write(&self) -> std::sync::RwLockWriteGuard<'_, std::collections::HashSet<[u8; 32]>> {
+		self.allowed.write().expect("peer allowlist write lock poisoned")
+	}
+}
+
 // ── Client ──────────────────────────────────────────────────────────
 
 /// The dial side's TLS: who to trust, and the optional mTLS identity to present.
@@ -237,6 +400,17 @@ pub struct Connect {
 	)]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub fingerprint: Vec<String>,
+
+	/// Present this in-memory [`Identity`] as the mTLS client certificate.
+	///
+	/// The programmatic alternative to the `cert`/`key` pair, for a peer that
+	/// generates its identity at startup rather than loading one from disk.
+	/// Setting both is an error. Not settable from the CLI or a config file,
+	/// since it never exists on disk.
+	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+	#[arg(skip)]
+	#[serde(skip)]
+	pub identity: Option<Identity>,
 
 	/// PEM file containing the client certificate chain for mTLS.
 	///
@@ -859,6 +1033,15 @@ impl Connect {
 		&self,
 		builder: rustls::ConfigBuilder<rustls::ClientConfig, rustls::client::WantsClientCert>,
 	) -> Result<rustls::ClientConfig> {
+		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+		if let Some(identity) = &self.identity {
+			if self.cert.is_some() || self.key.is_some() {
+				return Err(Error::ConflictingClientAuth);
+			}
+			let resolver = Arc::new(IdentityResolver(identity.certified()));
+			return Ok(builder.with_client_cert_resolver(resolver));
+		}
+
 		Ok(match (&self.cert, &self.key) {
 			(Some(cert_path), Some(key_path)) => {
 				let cert_pem = fs::read(cert_path).map_err(Error::ReadFile)?;
@@ -876,6 +1059,33 @@ impl Connect {
 			_ => return Err(Error::IncompleteClientAuth),
 		})
 	}
+}
+
+/// Generate a self-signed certificate and key for `hostnames`.
+///
+/// Valid for two weeks starting yesterday: WebTransport refuses anything longer,
+/// and the backdating absorbs clock drift between two hosts that have never
+/// agreed on a time source.
+#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+fn generate(provider: &crypto::Provider, hostnames: &[String]) -> Result<rustls::sign::CertifiedKey> {
+	let key_pair = rcgen::KeyPair::generate()?;
+
+	let mut params = rcgen::CertificateParams::new(hostnames)?;
+	params.not_before = ::time::OffsetDateTime::now_utc() - ::time::Duration::days(1);
+	params.not_after = params.not_before + ::time::Duration::days(14);
+
+	let cert = params.self_signed(&key_pair)?;
+
+	// Convert the rcgen types to the rustls ones.
+	let key_der = PrivatePkcs8KeyDer::from(key_pair.serialized_der().to_vec());
+	let key = provider.key_provider.load_private_key(key_der.into())?;
+
+	Ok(rustls::sign::CertifiedKey::new(vec![cert.into()], key))
+}
+
+#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
+fn generate(_provider: &crypto::Provider, _hostnames: &[String]) -> Result<rustls::sign::CertifiedKey> {
+	Err(Error::NoCryptoProvider)
 }
 
 /// Build a [`rustls::RootCertStore`] from a list of custom PEM roots.
@@ -946,6 +1156,31 @@ pub struct Listen {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub generate: Vec<String>,
+
+	/// Serve this in-memory [`Identity`] alongside anything loaded from disk.
+	///
+	/// The programmatic alternative to `generate`, for a peer that hands the same
+	/// identity to [`Connect::identity`] so both roles share one fingerprint. Not
+	/// settable from the CLI or a config file, since it never exists on disk.
+	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+	#[arg(skip)]
+	#[serde(skip)]
+	pub identity: Option<Identity>,
+
+	/// Require a client certificate, pinned to these fingerprints (mTLS without a CA).
+	///
+	/// The peer-mesh counterpart to `root`: membership is a set of fingerprints
+	/// that changes as peers are discovered, rather than an authority that issues
+	/// certificates. A client whose certificate isn't in the set fails the
+	/// handshake, and one that is arrives with a [`crate::Request::peer_identity`]
+	/// naming which peer it is.
+	///
+	/// Combining this with `root` is an error: pinning bypasses the chain, so one
+	/// of the two would be silently ignored. Not settable from the CLI or a config
+	/// file, since the set is maintained at runtime.
+	#[arg(skip)]
+	#[serde(skip)]
+	pub peers: Option<Peers>,
 
 	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
 	///
@@ -1090,6 +1325,32 @@ impl Listen {
 		root_store(&read_roots(&self.root)?)
 	}
 
+	/// The client-certificate policy for this listener, or `None` to ask for no
+	/// certificate at all.
+	///
+	/// The one place the three server backends agree on what mTLS means here, so
+	/// a new mode lands once rather than in each of them: pinned [`peers`](Self::peers),
+	/// else optional CA-rooted [`root`](Self::root), else nothing.
+	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+	pub(crate) fn client_auth(
+		&self,
+		provider: crypto::Provider,
+	) -> Result<Option<Arc<dyn rustls::server::danger::ClientCertVerifier>>> {
+		if let Some(peers) = &self.peers {
+			// Pinning replaces the chain rather than adding to it, so a caller that
+			// configured both would silently lose whichever we didn't install.
+			if !self.root.is_empty() {
+				return Err(Error::PeersWithRoots);
+			}
+			return Ok(Some(Arc::new(PeerVerifier::new(provider, peers.clone()))));
+		}
+
+		match self.root.is_empty() {
+			true => Ok(None),
+			false => Ok(Some(self.client_verifier(provider)?)),
+		}
+	}
+
 	/// Build the optional-client-auth verifier, reloading configured roots in place.
 	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
 	pub(crate) fn client_verifier(
@@ -1154,11 +1415,9 @@ fn server_config(config: &Listen, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::Serv
 	let builder =
 		rustls::ServerConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions()?;
 
-	let mut tls = if config.root.is_empty() {
-		builder.with_no_client_auth().with_cert_resolver(certs)
-	} else {
-		let verifier = config.client_verifier(provider)?;
-		builder.with_client_cert_verifier(verifier).with_cert_resolver(certs)
+	let mut tls = match config.client_auth(provider)? {
+		Some(verifier) => builder.with_client_cert_verifier(verifier).with_cert_resolver(certs),
+		None => builder.with_no_client_auth().with_cert_resolver(certs),
 	};
 
 	tls.alpn_protocols = alpn;
@@ -1200,6 +1459,16 @@ impl PeerIdentity {
 	/// bump is a breaking change for consumers of this method.
 	pub fn chain(&self) -> &[CertificateDer<'static>] {
 		&self.chain
+	}
+
+	/// The leaf certificate's SHA-256 fingerprint, hex encoded.
+	///
+	/// Names the peer when the listener pinned [`Peers`] rather than a CA: it is
+	/// the same value that peer published as its [`Identity::fingerprint`], so a
+	/// caller matches it against whatever it discovered them by.
+	pub fn fingerprint(&self) -> Option<String> {
+		let leaf = self.chain.first()?;
+		Some(hex::encode(crypto::sha256(&crypto::provider(), leaf.as_ref())))
 	}
 
 	/// The leaf certificate's `notAfter`, if it parses. A `notAfter` before the
@@ -1442,6 +1711,80 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
 	}
 }
 
+// ── PeerVerifier ────────────────────────────────────────────────────
+
+/// Accepts a client certificate whose fingerprint is in a live [`Peers`] set.
+///
+/// The mirror of [`FingerprintVerifier`] on the accept side, with one difference
+/// that matters: the allowed set is read per handshake rather than fixed when the
+/// listener was built, because a mesh learns its members while it runs.
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+#[derive(Debug)]
+pub(crate) struct PeerVerifier {
+	provider: crypto::Provider,
+	peers: Peers,
+}
+
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+impl PeerVerifier {
+	pub fn new(provider: crypto::Provider, peers: Peers) -> Self {
+		Self { provider, peers }
+	}
+}
+
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
+impl rustls::server::danger::ClientCertVerifier for PeerVerifier {
+	fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+		// Self-signed identities chain to nothing, so there is no issuer to hint at.
+		&[]
+	}
+
+	fn offer_client_auth(&self) -> bool {
+		true
+	}
+
+	fn client_auth_mandatory(&self) -> bool {
+		// Unlike the CA-rooted verifier, an anonymous client is refused outright:
+		// the whole point of this mode is that the listener knows who connected.
+		true
+	}
+
+	fn verify_client_cert(
+		&self,
+		end_entity: &CertificateDer<'_>,
+		_intermediates: &[CertificateDer<'_>],
+		_now: UnixTime,
+	) -> std::result::Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+		let fingerprint = crypto::sha256(&self.provider, end_entity);
+		match self.peers.contains_raw(fingerprint.as_ref()) {
+			true => Ok(rustls::server::danger::ClientCertVerified::assertion()),
+			false => Err(rustls::Error::General("unknown peer fingerprint".into())),
+		}
+	}
+
+	fn verify_tls12_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &rustls::DigitallySignedStruct,
+	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+		rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+	}
+
+	fn verify_tls13_signature(
+		&self,
+		message: &[u8],
+		cert: &CertificateDer<'_>,
+		dss: &rustls::DigitallySignedStruct,
+	) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+		rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+	}
+
+	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+		self.provider.signature_verification_algorithms.supported_schemes()
+	}
+}
+
 // ── FingerprintVerifier ─────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -1617,6 +1960,128 @@ mod tests {
 			..Default::default()
 		};
 		assert!(config.build().is_ok());
+	}
+
+	/// One identity covers both roles, so a peer is the same principal whether it
+	/// dialed or accepted. That is the property the mesh identifies peers by.
+	#[test]
+	fn identity_serves_the_fingerprint_it_presents() {
+		let identity = Identity::generate(["mesh.invalid"]).unwrap();
+
+		let certs = ServeCerts::new(crypto::provider());
+		certs
+			.load_certs(&Listen {
+				identity: Some(identity.clone()),
+				..Default::default()
+			})
+			.unwrap();
+
+		let served = Certificates::new(certs.info.clone()).fingerprints();
+		assert_eq!(served, vec![identity.fingerprint().to_string()]);
+
+		// And the same certificate is what a dial would present.
+		let config = Connect {
+			identity: Some(identity),
+			..Default::default()
+		};
+		assert!(config.build().is_ok());
+	}
+
+	/// Only one client certificate can go on the wire, so asking for two is a
+	/// configuration error rather than a silent preference for either.
+	#[test]
+	fn identity_rejects_a_second_client_certificate() {
+		let config = Connect {
+			identity: Some(Identity::generate(["mesh.invalid"]).unwrap()),
+			cert: Some("/nonexistent/cert.pem".into()),
+			key: Some("/nonexistent/key.pem".into()),
+			..Default::default()
+		};
+		assert!(matches!(config.build(), Err(Error::ConflictingClientAuth)));
+	}
+
+	/// Pinned peers replace the chain rather than extending it, so configuring
+	/// both would silently drop one.
+	#[test]
+	fn peers_reject_client_roots() {
+		let config = Listen {
+			peers: Some(Peers::new()),
+			root: vec!["/nonexistent/ca.pem".into()],
+			..Default::default()
+		};
+		assert!(matches!(
+			config.client_auth(crypto::provider()),
+			Err(Error::PeersWithRoots)
+		));
+	}
+
+	/// No client auth at all unless something asked for it, and `peers` wins over
+	/// `root` only because the two together are already refused.
+	#[test]
+	fn client_auth_is_off_until_configured() {
+		let provider = crypto::provider();
+		assert!(Listen::default().client_auth(provider.clone()).unwrap().is_none());
+
+		let pinned = Listen {
+			peers: Some(Peers::new()),
+			..Default::default()
+		};
+		let verifier = pinned
+			.client_auth(provider)
+			.unwrap()
+			.expect("pinning wants a certificate");
+		// Unlike the CA-rooted verifier, an anonymous client is no longer welcome:
+		// the point of this mode is knowing who connected.
+		assert!(verifier.client_auth_mandatory());
+	}
+
+	/// The allowlist is read per handshake, so a peer discovered after the
+	/// listener was built still gets in and one that went away stops getting in.
+	#[test]
+	fn peers_are_checked_live() {
+		let identity = Identity::generate(["mesh.invalid"]).unwrap();
+		let peers = Peers::new();
+		let verifier = PeerVerifier::new(crypto::provider(), peers.clone());
+		let leaf = identity.certified().cert[0].clone();
+		let now = UnixTime::since_unix_epoch(std::time::Duration::from_secs(1_700_000_000));
+
+		assert!(
+			verifier.verify_client_cert(&leaf, &[], now).is_err(),
+			"empty set lets nobody in"
+		);
+
+		peers.insert(identity.fingerprint()).unwrap();
+		assert!(peers.contains(identity.fingerprint()));
+		assert!(verifier.verify_client_cert(&leaf, &[], now).is_ok());
+
+		peers.remove(identity.fingerprint()).unwrap();
+		assert!(verifier.verify_client_cert(&leaf, &[], now).is_err());
+
+		// A different peer's certificate is not interchangeable with an allowed one.
+		let other = Identity::generate(["mesh.invalid"]).unwrap();
+		peers.insert(identity.fingerprint()).unwrap();
+		let other_leaf = other.certified().cert[0].clone();
+		assert!(verifier.verify_client_cert(&other_leaf, &[], now).is_err());
+	}
+
+	/// The fingerprint a listener reads off an accepted session is the one the
+	/// peer published, which is what makes it usable as an identity.
+	#[test]
+	fn peer_identity_reports_the_published_fingerprint() {
+		let identity = Identity::generate(["mesh.invalid"]).unwrap();
+		let chain = vec![identity.certified().cert[0].clone()];
+		let peer = PeerIdentity { chain };
+		assert_eq!(peer.fingerprint().as_deref(), Some(identity.fingerprint()));
+	}
+
+	/// A malformed fingerprint is rejected on the way in rather than stored as
+	/// something no certificate can ever match.
+	#[test]
+	fn peers_reject_malformed_fingerprints() {
+		let peers = Peers::new();
+		assert!(matches!(peers.insert("not-hex"), Err(Error::Fingerprint(_))));
+		assert!(matches!(peers.insert("abcd"), Err(Error::FingerprintLength(2))));
+		assert!(!peers.contains("not-hex"));
 	}
 
 	#[test]
@@ -2106,7 +2571,13 @@ impl ServeCerts {
 		if config.cert.len() != config.key.len() {
 			return Err(Error::CertKeyCountMismatch);
 		}
-		if config.cert.is_empty() && config.generate.is_empty() {
+		// An in-memory identity is a certificate source like the other two, so a
+		// listener configured with only that one still has something to serve.
+		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+		let in_memory = config.identity.is_some();
+		#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
+		let in_memory = false;
+		if config.cert.is_empty() && config.generate.is_empty() && !in_memory {
 			return Err(Error::NoCertSource);
 		}
 
@@ -2119,7 +2590,12 @@ impl ServeCerts {
 
 		// Generate a new certificate if requested.
 		if !config.generate.is_empty() {
-			certs.push(Arc::new(self.generate(&config.generate)?));
+			certs.push(Arc::new(generate(&self.provider, &config.generate)?));
+		}
+
+		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+		if let Some(identity) = &config.identity {
+			certs.push(identity.certified());
 		}
 
 		self.set_certs(certs);
@@ -2146,34 +2622,6 @@ impl ServeCerts {
 		})?;
 
 		Ok(certified_key)
-	}
-
-	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-	fn generate(&self, hostnames: &[String]) -> Result<rustls::sign::CertifiedKey> {
-		let key_pair = rcgen::KeyPair::generate()?;
-
-		let mut params = rcgen::CertificateParams::new(hostnames)?;
-
-		// Make the certificate valid for two weeks, starting yesterday (in case of clock drift).
-		// WebTransport certificates MUST be valid for two weeks at most.
-		params.not_before = ::time::OffsetDateTime::now_utc() - ::time::Duration::days(1);
-		params.not_after = params.not_before + ::time::Duration::days(14);
-
-		// Generate the certificate
-		let cert = params.self_signed(&key_pair)?;
-
-		// Convert the rcgen type to the rustls type.
-		let key_der = key_pair.serialized_der().to_vec();
-		let key_der = PrivatePkcs8KeyDer::from(key_der);
-		let key = self.provider.key_provider.load_private_key(key_der.into())?;
-
-		// Create a rustls::sign::CertifiedKey
-		Ok(rustls::sign::CertifiedKey::new(vec![cert.into()], key))
-	}
-
-	#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
-	fn generate(&self, _hostnames: &[String]) -> Result<rustls::sign::CertifiedKey> {
-		Err(Error::NoCryptoProvider)
 	}
 
 	// Replace the certificates

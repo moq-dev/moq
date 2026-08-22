@@ -494,13 +494,11 @@ impl NoqServer {
 			.with_protocol_versions(&[&rustls::version::TLS13])
 			.map_err(crate::tls::Error::from)?;
 
-		let mut tls = if config.tls.root.is_empty() {
-			tls_builder.with_no_client_auth().with_cert_resolver(certs.clone())
-		} else {
-			let verifier = config.tls.client_verifier(provider)?;
-			tls_builder
+		let mut tls = match config.tls.client_auth(provider)? {
+			Some(verifier) => tls_builder
 				.with_client_cert_verifier(verifier)
-				.with_cert_resolver(certs.clone())
+				.with_cert_resolver(certs.clone()),
+			None => tls_builder.with_no_client_auth().with_cert_resolver(certs.clone()),
 		};
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
