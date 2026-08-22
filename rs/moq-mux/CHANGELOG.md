@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.9](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.8...moq-mux-v0.9.9) - 2026-08-22
+
+### Fixed
+
+- *(moq-mux)* map containers onto MSF packaging one to one ([#2987](https://github.com/moq-dev/moq/pull/2987))
+- *(moq-mux)* emit the TS PCR as a uniform grid, not the per-unit decode clock ([#2967](https://github.com/moq-dev/moq/pull/2967))
+
 ## [0.9.8](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.7...moq-mux-v0.9.8) - 2026-08-20
 
 ### Added
