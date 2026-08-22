@@ -41,10 +41,11 @@ bursts. The receiver socket reserves four bursts of memory and drains each burst
 before the next one. A one-second deadline turns any remaining packet loss into
 an explicit benchmark failure instead of an indefinite wait.
 
-Multishot `recvmsg` requires Linux 6.0 or newer, and registered provided-buffer
-rings require Linux 5.19 or newer. The ring uses the single-issuer and
-deferred-task-run setup flags because the benchmark and the intended relay shard
-both have one thread driving each ring. It does not use `SQPOLL`.
+The complete io\_uring benchmark requires Linux 6.1 or newer. Multishot
+`recvmsg` arrived in Linux 6.0, registered provided-buffer rings in Linux 5.19,
+and the deferred-task-run setup flag in Linux 6.1. The ring uses that flag and
+the single-issuer flag because the benchmark and the intended relay shard both
+have one thread driving each ring. It does not use `SQPOLL`.
 
 This is deliberately below quiche. It establishes the syscall and completion
 ceiling, but does not decide whether the relay is faster. That requires the same
