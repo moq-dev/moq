@@ -5,14 +5,15 @@
  */
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type { Datagram } from "./datagram.ts";
+import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer, Lagged } from "./group.ts";
 import {
-	type Frame,
-	type Consumer as GroupConsumer,
-	Producer as GroupProducer,
-	Lagged,
-	type Position,
-} from "./group.ts";
-import { hooks, type Recv, type TrackRequestOptions, type TrackSequence, type TrackSequences } from "./internal.ts";
+	type GroupPosition,
+	hooks,
+	type Recv,
+	type TrackRequestOptions,
+	type TrackSequence,
+	type TrackSequences,
+} from "./internal.ts";
 import { Timescale, type Timestamp } from "./time.ts";
 
 export type { Datagram } from "./datagram.ts";
@@ -389,6 +390,7 @@ export class Producer {
 		this.#state.info.set(resolved);
 		// Propagate to any sink handed out before accept (the on-demand path).
 		for (const sink of this.#sinks) sink.info.set(resolved);
+		this.#updateSubscription();
 		return this;
 	}
 
@@ -472,7 +474,10 @@ export class Producer {
 	// Recompute from every live sink because an update or close can narrow as well as widen
 	// the aggregate. The wire layer observes this signal and emits SUBSCRIBE_UPDATE.
 	#updateSubscription(): void {
-		this.#state.update.set(combineSubscriptions(this.#sinks));
+		const combined = combineSubscriptions(this.#sinks);
+		const retained = this.#state.info.peek()?.maxAge;
+		if (combined && retained !== undefined) combined.maxAge = Math.min(combined.maxAge ?? 0, retained);
+		this.#state.update.set(combined);
 	}
 
 	// Mirror a cached source group into a sink. The mirror fills synchronously as the
@@ -730,7 +735,7 @@ export class Subscriber {
 			wall?: { sequence: number; time: number };
 			presentation?: { sequence: number; timestamp: Timestamp };
 		},
-		at?: Position,
+		at?: GroupPosition,
 	): boolean {
 		const candidate = this.#state.timeline.get(group.sequence);
 		if (candidate?.group !== group) return false;
@@ -759,6 +764,7 @@ export class Subscriber {
 				this.#state.groups,
 				this.#state.timelineChanged,
 				this.#state.update,
+				this.#state.info,
 				this.#cursor,
 				this.#state.closed,
 			],

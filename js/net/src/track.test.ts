@@ -189,6 +189,17 @@ test("multiple subscriber options aggregate like Rust", async () => {
 	expect(await none).toBeUndefined();
 });
 
+test("the producer aggregate is clamped without changing subscriber options", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe({ maxAge: 10_000 });
+	const clamped = producer.subscription.changed();
+
+	producer.accept({ maxAge: 2_000 });
+
+	expect((await clamped)?.maxAge).toBe(2_000);
+	expect(track.subscription.peek()?.maxAge).toBe(10_000);
+});
+
 test("nextGroup skips late arrivals", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();
@@ -384,6 +395,24 @@ test("a handed-out group still expires while its first frame is stalled", async 
 	}
 });
 
+test("committing track info wakes a group newly outside the retention window", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe({ maxAge: 10_000 });
+	const source = producer.appendGroup();
+	source.writeFrame({ payload: enc.encode("old"), timestamp: Timestamp.fromMillis(0) });
+
+	const group = await track.recvGroup();
+	if (!group) throw new Error("missing group");
+	expect((await group.readFrame())?.timestamp.asMillis()).toBe(0);
+	const waiting = group.readFrame();
+
+	producer.writeFrame({ payload: enc.encode("edge"), timestamp: Timestamp.fromMillis(1_000) });
+	await settle();
+	producer.accept({ maxAge: 100 });
+
+	await expect(waiting).resolves.toBeUndefined();
+});
+
 test("a handed-out frame cancels its in-flight operation when it expires", async () => {
 	const producer = new TrackProducer("test").accept({ maxAge: 5000 });
 	const track = producer.subscribe();
@@ -400,6 +429,29 @@ test("a handed-out frame cancels its in-flight operation when it expires", async
 	const guarded = hooks.guardGroup(group, operation);
 	producer.writeString("new");
 
+	await expect(guarded).rejects.toThrow("latency budget");
+	release();
+});
+
+test("a guarded write keeps the position of the frame removed from the buffer", async () => {
+	const producer = new TrackProducer("test").accept({ maxAge: 100 });
+	const track = producer.subscribe({ maxAge: 100 });
+	const source = producer.appendGroup();
+	source.writeFrame({ payload: enc.encode("old"), timestamp: Timestamp.fromMillis(0) });
+	source.writeFrame({ payload: enc.encode("future"), timestamp: Timestamp.fromMillis(10_000) });
+
+	const group = await track.recvGroup();
+	if (!group) throw new Error("missing group");
+	const read = await hooks.readGroupFrame(group);
+	if (!read) throw new Error("missing frame");
+
+	let release!: () => void;
+	const operation = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const guarded = hooks.guardGroup(group, operation, read.position);
+
+	producer.writeFrame({ payload: enc.encode("edge"), timestamp: Timestamp.fromMillis(1_000) });
 	await expect(guarded).rejects.toThrow("latency budget");
 	release();
 });

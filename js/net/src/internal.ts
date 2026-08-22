@@ -6,7 +6,7 @@
  * @module
  */
 import type { Dispose, Getter } from "@moq/signals";
-import type { Consumer as GroupConsumer, Position } from "./group.ts";
+import type { Frame, Consumer as GroupConsumer } from "./group.ts";
 import type { Timestamp } from "./time.ts";
 import type { Producer, Request, Subscriber } from "./track.ts";
 
@@ -25,6 +25,24 @@ export type Recv =
 	| { kind: "done" }
 	/** The track aborted. */
 	| { kind: "error"; error: Error };
+
+/** Where a group cursor sits while measuring drift against the live edge. */
+export interface GroupPosition {
+	/** Presentation timestamp of the next or in-flight frame. */
+	presentation?: Timestamp;
+	/** Monotonic arrival time of the next or in-flight frame. */
+	activity?: number;
+}
+
+/** A package-internal frame read paired with its guarded cursor position. */
+export interface ReadGroupFrame {
+	/** Frame sequence within the group. */
+	sequence: number;
+	/** Frame returned to the publisher. */
+	frame: Frame;
+	/** Cursor position held while the frame is in flight. */
+	position: GroupPosition;
+}
 
 /** The next group or datagram sequence shared by dynamic producers of one broadcast track. */
 export interface TrackSequence {
@@ -64,10 +82,12 @@ export const hooks: {
 	/** Keep applying a subscription's drift policy after it hands a group out. */
 	expireGroup: (
 		group: GroupConsumer,
-		expiry: { expired: (at: Position) => boolean; changed: readonly Getter<unknown>[] },
+		expiry: { expired: (at: GroupPosition) => boolean; changed: readonly Getter<unknown>[] },
 	) => void;
 	/** Stop an in-flight group operation if the handed-out group expires. */
-	guardGroup: <T>(group: GroupConsumer, operation: Promise<T>) => Promise<T>;
+	guardGroup: <T>(group: GroupConsumer, operation: Promise<T>, at?: GroupPosition) => Promise<T>;
+	/** Read a frame with the cursor position needed to guard its wire write. */
+	readGroupFrame: (group: GroupConsumer) => Promise<ReadGroupFrame | undefined>;
 	/** Make an evicted mirror terminal while its track timeline still contains it. */
 	evictGroup: (group: GroupConsumer) => void;
 } = {
@@ -90,6 +110,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	guardGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	readGroupFrame: () => {
 		throw new Error("group.ts not loaded");
 	},
 	evictGroup: () => {

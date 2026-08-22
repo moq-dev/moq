@@ -146,6 +146,15 @@ test("done distinguishes a finished group from one that is merely empty", () => 
 	expect(consumer.done).toBe(true);
 });
 
+test("a previously obtained closed handle peeks source closure synchronously", () => {
+	const { producer, consumer } = pair(0);
+	const closed = consumer.closed;
+
+	producer.close();
+
+	expect(closed.peek()).toBeNull();
+});
+
 test("readable resolves once a frame is buffered", async () => {
 	const { producer, consumer } = pair(0);
 	// No frame yet: readable() must stay pending for an empty, open group.

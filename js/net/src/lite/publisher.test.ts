@@ -6,14 +6,14 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timestamp } from "../time.ts";
-import { Subscriber as TrackSubscriber } from "../track.ts";
+import { DEFAULT_MAX_AGE_MS, Subscriber as TrackSubscriber } from "../track.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { sendOrder } from "./priority.ts";
 import { Probe as ProbeMessage } from "./probe.ts";
 import { Publisher } from "./publisher.ts";
 import { decodeSubscribeResponse, Subscribe, SubscribeUpdate } from "./subscribe.ts";
-import { ALPN_05, ALPN_06_WIP, carriesMaxAge, Version } from "./version.ts";
+import { ALPN_05, ALPN_06_WIP, Version } from "./version.ts";
 
 // Scheduling tests intentionally stall groups, so keep latency enforcement out of their scope.
 const TEST_MAX_AGE_MS = 30_000;
@@ -444,6 +444,7 @@ async function servedSubscription(
 		endGroup?: number;
 		endFrame?: number;
 		gated?: boolean;
+		maxAge?: number;
 		// Frame payloads written into every served group. Frame bounds need draft-06.
 		frames?: string[];
 		version?: Version;
@@ -456,7 +457,7 @@ async function servedSubscription(
 	const publisher = new Publisher(pair.server, version, randomOrigin(), origin.consume());
 
 	const broadcast = origin.publish(Path.from("test"));
-	const track = broadcast.createTrack("video");
+	const track = broadcast.createTrack("video", { maxAge: options.maxAge });
 
 	const client = await Stream.open(pair.client);
 
@@ -818,7 +819,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 		expect(sub.track.subscription.peek()).toEqual({
 			priority: 9,
 			ordered: true,
-			maxAge: TEST_MAX_AGE_MS,
+			maxAge: DEFAULT_MAX_AGE_MS,
 			startGroup: undefined,
 			endGroup: 5,
 		});
@@ -1298,16 +1299,15 @@ test("runProbe rounds a fractional smoothedRtt instead of killing the stream", a
 	}
 });
 
-test("a version without the latency field serves a non-dropping budget", () => {
-	// Drafts 01/02 have no latency field, so a SUBSCRIBE from one decodes as 0.
-	// Serving that as a real-time budget would hold every legacy peer to the live edge
-	// and discard backlog it never declined, so those versions get a non-dropping
-	// window and leave enforcement to the receiver. They are the two most-preferred
-	// negotiated versions, so this is the common wire, not an edge case.
+test("a version without the latency field serves a non-dropping budget", async () => {
 	for (const version of [Version.DRAFT_01, Version.DRAFT_02]) {
-		expect(carriesMaxAge(version)).toBe(false);
+		const sub = await servedSubscription({ version, maxAge: Number.MAX_SAFE_INTEGER });
+		try {
+			// These drafts decode the absent field as zero. The publisher must not turn
+			// that into a live-edge request the peer never made.
+			expect(sub.track.subscription.peek()?.maxAge).toBe(Number.MAX_SAFE_INTEGER);
+		} finally {
+			await sub.close();
+		}
 	}
-
-	// A version that does carry it is taken at its word, zero included.
-	expect(carriesMaxAge(Version.DRAFT_05)).toBe(true);
 });

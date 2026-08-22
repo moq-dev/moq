@@ -279,11 +279,15 @@ export class Publisher {
 				await hooks.guardGroup(group, header.encode(stream, this.#session.version));
 
 				for (;;) {
-					const frame = await Promise.race([group.readFrame(), stream.closed]);
-					if (!frame) break;
+					const read = await Promise.race([hooks.readGroupFrame(group), stream.closed]);
+					if (!read) break;
 
-					const obj = new Frame({ payload: frame.payload, timestamp: frame.timestamp });
-					await hooks.guardGroup(group, obj.encode(stream, header.flags, timescale, this.#session.version));
+					const obj = new Frame({ payload: read.frame.payload, timestamp: read.frame.timestamp });
+					await hooks.guardGroup(
+						group,
+						obj.encode(stream, header.flags, timescale, this.#session.version),
+						read.position,
+					);
 				}
 
 				stream.close();

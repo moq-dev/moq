@@ -46,17 +46,6 @@ export function hasSetupStream(version: Version): boolean {
 	}
 }
 
-/**
- * Whether this version's SUBSCRIBE carries the subscriber's maximum-age preference.
- *
- * Drafts 01 and 02 have no field for it, so a decoded `0` there means "not stated",
- * not "real time". A caller that acts on the budget has to tell the two apart or it
- * will hold every legacy peer to the live edge.
- */
-export function carriesMaxAge(version: Version): boolean {
-	return version !== Version.DRAFT_01 && version !== Version.DRAFT_02;
-}
-
 /// Whether the session may deliver groups over unreliable QUIC datagrams (lite-05 §6.4).
 /// A datagram carries one single-frame group's `subscribe | sequence | timestamp | payload` and is
 /// routed over the existing subscription. Added in lite-05; older versions never send/accept them.

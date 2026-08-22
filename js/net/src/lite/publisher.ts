@@ -25,7 +25,7 @@ import {
 	SubscribeUpdate,
 } from "./subscribe.ts";
 import { TrackInfo as TrackInfoMessage, type Track as TrackMessage } from "./track.ts";
-import { carriesMaxAge, hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, Version } from "./version.ts";
+import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasProbeRtt, Version } from "./version.ts";
 
 const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
@@ -270,7 +270,8 @@ function waitForSubscription(controls: SubscriptionControls, subscriber: track.S
  * and leave enforcement to the receiver, as the IETF path does for the same reason.
  */
 function servingMaxAge(version: Version, requested: number | undefined): number {
-	return carriesMaxAge(version) ? (requested ?? 0) : Number.MAX_SAFE_INTEGER;
+	const carriesMaxAge = version !== Version.DRAFT_01 && version !== Version.DRAFT_02;
+	return carriesMaxAge ? (requested ?? 0) : Number.MAX_SAFE_INTEGER;
 }
 
 /**
@@ -916,8 +917,8 @@ export class Publisher {
 				let reached = startFrame === 0;
 
 				for (;;) {
-					const frame = await Promise.race([group.readFrameSequence(), stream.closed]);
-					if (!frame) {
+					const read = await Promise.race([hooks.readGroupFrame(group), stream.closed]);
+					if (!read) {
 						// The group ended before the frame the subscriber asked to start
 						// at, so this publisher can't serve the range at all. FINning here
 						// would claim an empty group under that index; reset so it reads
@@ -928,19 +929,19 @@ export class Publisher {
 
 					// Frames below the requested start were excluded, and the receiver
 					// numbers what it gets from `startFrame`.
-					if (frame.sequence < startFrame) continue;
-					if (endFrame !== undefined && frame.sequence > endFrame) break;
+					if (read.sequence < startFrame) continue;
+					if (endFrame !== undefined && read.sequence > endFrame) break;
 					reached = true;
 
 					if (timestamps) {
 						// Convert each frame to the track's advertised timescale.
-						const ts = BigInt(Math.round(frame.timestamp.as(timescale)));
-						await hooks.guardGroup(group, stream.u62(zigzag(ts - prevTs)));
+						const ts = BigInt(Math.round(read.frame.timestamp.as(timescale)));
+						await hooks.guardGroup(group, stream.u62(zigzag(ts - prevTs)), read.position);
 						prevTs = ts;
 					}
 
-					await hooks.guardGroup(group, stream.u53(frame.payload.byteLength));
-					await hooks.guardGroup(group, stream.write(frame.payload));
+					await hooks.guardGroup(group, stream.u53(read.frame.payload.byteLength), read.position);
+					await hooks.guardGroup(group, stream.write(read.frame.payload), read.position);
 				}
 
 				stream.close();
