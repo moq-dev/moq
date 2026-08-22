@@ -1,10 +1,14 @@
 use crate::origin;
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
-	ALPN_LITE_06_WIP, Consume, Driver, Error, NEGOTIATED, Session, Version, Versions,
+	ALPN_LITE_06_WIP, Consume, Error, NEGOTIATED, Session, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup, stats,
 };
+
+// The transport methods are called on the projected `R::Transport`, which needs the
+// trait itself in scope (a plain type parameter would not).
+use web_transport_trait::{MaybeSend, MaybeSync, poll::Session as _};
 
 /// A MoQ client session builder.
 #[derive(Default, Clone)]
@@ -122,13 +126,16 @@ impl Client {
 		self
 	}
 
-	/// Perform the MoQ handshake, returning the [`Session`] and the [`Driver`] that
-	/// runs its protocol work. The driver must be polled (spawned or awaited) for
-	/// the session to make progress.
-	pub async fn connect<S: crate::transport::poll::Session>(
-		&self,
-		mut session: S,
-	) -> Result<(Session, Driver), Error> {
+	/// Perform the MoQ handshake, returning the [`Session`].
+	///
+	/// The session's protocol machine is handed to `runtime`
+	/// ([`Runtime::spawn`](crate::runtime::Runtime::spawn)), so there is nothing
+	/// else to drive: the runtime runs the session for as long as it lives.
+	pub async fn connect<R>(&self, runtime: R, mut session: R::Transport) -> Result<Session, Error>
+	where
+		R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
+		R::Timer: MaybeSend,
+	{
 		if self.publish.is_none() && self.subscribe.is_none() {
 			tracing::warn!("not publishing or consuming anything");
 		}
@@ -163,6 +170,7 @@ impl Client {
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
 				let (protocol, goaway) = ietf::start(ietf::Config {
+					runtime: runtime.clone(),
 					session: session.clone(),
 					setup: None,
 					request_id_max: None,
@@ -178,7 +186,7 @@ impl Client {
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, protocol, goaway));
+				return Ok(Session::spawn(runtime, session, v, None, protocol, goaway));
 			}
 			Some(ALPN_18) => {
 				let v = self
@@ -189,6 +197,7 @@ impl Client {
 				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
 				let (protocol, goaway) = ietf::start(ietf::Config {
+					runtime: runtime.clone(),
 					session: session.clone(),
 					setup: None,
 					request_id_max: None,
@@ -204,7 +213,7 @@ impl Client {
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, protocol, goaway));
+				return Ok(Session::spawn(runtime, session, v, None, protocol, goaway));
 			}
 			Some(ALPN_17) => {
 				let v = self
@@ -215,6 +224,7 @@ impl Client {
 				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
 				let (protocol, goaway) = ietf::start(ietf::Config {
+					runtime: runtime.clone(),
 					session: session.clone(),
 					setup: None,
 					request_id_max: None,
@@ -230,7 +240,7 @@ impl Client {
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, protocol, goaway));
+				return Ok(Session::spawn(runtime, session, v, None, protocol, goaway));
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -275,6 +285,7 @@ impl Client {
 				};
 
 				let start = lite::start(lite::Config {
+					runtime: runtime.clone(),
 					session: session.clone(),
 					setup_stream: None,
 					publish: publish.clone(),
@@ -285,7 +296,8 @@ impl Client {
 					peer_setup: None,
 				})?;
 
-				return Ok(Session::new(
+				return Ok(Session::spawn(
+					runtime,
 					session,
 					version.into(),
 					start.recv_bandwidth,
@@ -299,6 +311,7 @@ impl Client {
 					.ok_or(Error::Version)?;
 
 				let start = lite::start(lite::Config {
+					runtime: runtime.clone(),
 					session: session.clone(),
 					setup_stream: None,
 					publish: publish.clone(),
@@ -309,7 +322,8 @@ impl Client {
 					peer_setup: None,
 				})?;
 
-				return Ok(Session::new(
+				return Ok(Session::spawn(
+					runtime,
 					session,
 					lite::Version::Lite04.into(),
 					start.recv_bandwidth,
@@ -324,6 +338,7 @@ impl Client {
 
 				// Starting with draft-03, there's no more SETUP control stream.
 				let start = lite::start(lite::Config {
+					runtime: runtime.clone(),
 					session: session.clone(),
 					setup_stream: None,
 					publish: publish.clone(),
@@ -334,7 +349,8 @@ impl Client {
 					peer_setup: None,
 				})?;
 
-				return Ok(Session::new(
+				return Ok(Session::spawn(
+					runtime,
 					session,
 					lite::Version::Lite03.into(),
 					start.recv_bandwidth,
@@ -383,6 +399,7 @@ impl Client {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
+					runtime: runtime.clone(),
 					session: session.clone(),
 					setup_stream: Some(stream),
 					publish: publish.clone(),
@@ -412,6 +429,7 @@ impl Client {
 				let stream = stream.with_version(v);
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
 				let (protocol, goaway) = ietf::start(ietf::Config {
+					runtime: runtime.clone(),
 					session: session.clone(),
 					setup: Some(stream),
 					request_id_max,
@@ -429,7 +447,7 @@ impl Client {
 			}
 		};
 
-		Ok(Session::new(session, version, recv_bw, protocol, goaway))
+		Ok(Session::spawn(runtime, session, version, recv_bw, protocol, goaway))
 	}
 }
 
@@ -679,10 +697,12 @@ mod tests {
 			.into(),
 		);
 
-		// `connect` returns as soon as the handshake completes and never polls the driver,
-		// so the session makes no progress (and never closes) unless we drive it here.
-		let (_session, driver) = client.connect(fake.clone()).await.unwrap();
-		let _driver = tokio::spawn(driver);
+		// `connect` returns as soon as the handshake completes; the protocol machine
+		// was handed to the runtime, which spawned it onto tokio.
+		let _session = client
+			.connect(crate::runtime::tokio_test::Tokio::new(), fake.clone())
+			.await
+			.unwrap();
 
 		// Verify the client setup was encoded using Draft14 framing (ALPN_LITE fallback path).
 		let mut setup_bytes = Bytes::from(fake.control_writes());
@@ -729,10 +749,13 @@ mod tests {
 
 		// Paused time auto-advances while every task is idle, so a `connect` that waits
 		// on the silent peer trips this rather than hanging the suite.
-		tokio::time::timeout(std::time::Duration::from_secs(30), client.connect(transport))
-			.await
-			.expect("connect waited on a peer that never announced")
-			.expect("connect failed");
+		tokio::time::timeout(
+			std::time::Duration::from_secs(30),
+			client.connect(crate::runtime::tokio_test::Tokio::new(), transport),
+		)
+		.await
+		.expect("connect waited on a peer that never announced")
+		.expect("connect failed");
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -745,30 +768,28 @@ mod tests {
 		run_alpn_lite_fallback_case(None).await;
 	}
 
-	// This fake reports no send-rate estimate, so it never reaches the tokio timer in
-	// the bandwidth loop. A driver is NOT runtime-free in general; see the Async
-	// docs in lib.rs.
+	// This fake reports no send-rate estimate, so it never reaches a timer in the
+	// bandwidth loop. `connect` hands the machine to the runtime we pass, so with
+	// the deterministic Test runtime nothing runs on an ambient executor at all.
 	//
-	// The driver must hold no Session clone (the #2286 leak), so the transport still
-	// closes when the caller drops their last session handle, which is what lets a
-	// spawned driver task finish.
+	// The machine must hold no Session clone (the #2286 leak), so the transport
+	// still closes when the caller drops their last session handle, which is what
+	// lets the runtime's machine finish.
 	#[test]
-	fn driver_is_caller_polled_and_holds_no_session() {
+	fn machine_is_runtime_polled_and_holds_no_session() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 
-		let (session, mut driver) = futures::executor::block_on(client.connect(fake.clone())).unwrap();
+		let runtime = crate::runtime::Test::<FakeSession>::new();
+		let session = futures::executor::block_on(client.connect(runtime.clone(), fake.clone())).unwrap();
 		assert_eq!(session.version(), Version::Lite(lite::Version::Lite04));
 
-		// An arbitrary waiter drives it kio-style: nothing was spawned onto a runtime.
-		assert!(driver.poll(&kio::Waiter::noop()).is_pending());
-
-		// The driver is also a plain future (stand in for spawning it).
-		let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-		assert!(std::future::Future::poll(std::pin::Pin::new(&mut driver), &mut context).is_pending());
+		// The machine sits inside the Test runtime, stepped manually: nothing was
+		// spawned onto an ambient runtime, and it is still pending.
+		assert_eq!(runtime.tick(), 1);
 
 		// The caller drops their only session clone, so the transport closes even
-		// though the driver is still alive.
+		// though the machine is still alive inside the runtime.
 		drop(session);
 		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
 	}
@@ -780,7 +801,10 @@ mod tests {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 
-		let (session, _driver) = futures::executor::block_on(client.connect(fake.clone())).unwrap();
+		// The Test runtime holds the machine without running it, so the close
+		// events below come only from the session handles.
+		let runtime = crate::runtime::Test::<FakeSession>::new();
+		let session = futures::executor::block_on(client.connect(runtime.clone(), fake.clone())).unwrap();
 		let clone = session.clone();
 
 		// One clone dropping does nothing while another is alive.
@@ -804,8 +828,10 @@ mod tests {
 		fake.set_send_rate(Some(1_000_000));
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-		let (session, driver) = client.connect(fake.clone()).await.unwrap();
-		tokio::spawn(driver);
+		let session = client
+			.connect(crate::runtime::tokio_test::Tokio::new(), fake.clone())
+			.await
+			.unwrap();
 
 		let mut bandwidth = session.send_bandwidth().expect("backend reports an estimate");
 		assert_eq!(bandwidth.changed().await.unwrap(), Some(1_000_000));

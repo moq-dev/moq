@@ -25,6 +25,8 @@ mod log;
 pub mod media;
 pub mod origin;
 pub mod producer;
+#[cfg(target_arch = "wasm32")]
+mod runtime;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
 pub mod session;
