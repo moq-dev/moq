@@ -1914,11 +1914,15 @@ mod tests {
 	}
 
 	/// A group arriving for a retired alias is the expected tail of our own cancellation, so
-	/// the code that ends up stopping its stream has to say so. moq-lite's cancel encodes to
-	/// 0, which on this wire is an internal failure, and reporting one to a publisher for a
-	/// routine unsubscribe is what distorts its error handling.
+	/// the code it maps to has to say so. moq-lite's cancel encodes to 0, which on this wire
+	/// is an internal failure, and reporting one to a publisher for a routine unsubscribe is
+	/// what distorts its error handling.
+	///
+	/// Covers the error this path produces and the code it maps to, not the dispatch loop
+	/// that sends it: `run_unis` is private to `session`, and retiring an alias reaches into
+	/// state private to this module, so nothing here can drive one end to end. See #3002.
 	#[tokio::test(start_paused = true)]
-	async fn a_retired_alias_stops_its_group_stream_as_cancelled() {
+	async fn a_retired_alias_maps_to_the_cancelled_code() {
 		let aliases = TrackAliases::default();
 		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
 		retire_track_alias(&aliases, 7, RequestId(11));
@@ -1930,7 +1934,7 @@ mod tests {
 		assert_eq!(
 			crate::ietf::error::to_stream_code(&err),
 			crate::ietf::error::CANCELLED,
-			"the wire code the dispatch loop stops this stream with",
+			"the code the dispatch loop maps this error onto",
 		);
 	}
 

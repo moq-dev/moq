@@ -512,3 +512,53 @@ test("a legacy cancel reaches the control stream", async () => {
 
 	expect(seen).toContain(BigInt(Unsubscribe.id));
 });
+
+/**
+ * A publisher that rejects a SUBSCRIBE has torn the request down before answering, so there
+ * is nothing left to cancel. Naming a dead request id back at it is what a strict peer can
+ * read as a protocol violation and close an otherwise healthy session over.
+ */
+test("a rejected subscribe is not unsubscribed", async () => {
+	const LEGACY = Version.DRAFT_16;
+	const pair = createMockTransportPair(ALPN.DRAFT_16);
+
+	const controlStream = await Stream.open(pair.server, { version: LEGACY });
+	const session = new ControlStreamAdapter(pair.server, controlStream, LEGACY, 100n, true);
+	// The mux read loop, which is what routes a response back to its virtual stream.
+	void session.run().catch(() => void 0);
+	const subscriber = new Subscriber({ session });
+
+	const peer = await nextStream(pair.client);
+	expect(peer).toBeDefined();
+	// biome-ignore lint/style/noNonNullAssertion: guarded above
+	const wire = peer!;
+
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.subscribe("video");
+
+	// Read the SUBSCRIBE, then reject it the way a publisher that cannot serve it would.
+	const subscribeType = await wire.reader.u53();
+	const subscribeSize = await wire.reader.u16();
+	await wire.reader.read(subscribeSize);
+	expect(subscribeType).toBe(3);
+
+	await wire.writer.u53(RequestError.id);
+	await new RequestError({
+		requestId: 0n,
+		errorCode: 404,
+		reasonPhrase: "not found",
+		retryInterval: 0n,
+	}).encode(wire.writer, LEGACY);
+
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	track.close();
+	await new Promise((resolve) => setTimeout(resolve, 100));
+
+	// Nothing further belongs on the control stream: the request is already gone.
+	const next = await Promise.race([
+		wire.reader.u53().catch(() => undefined),
+		new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 200)),
+	]);
+
+	expect(next).toBeUndefined();
+});

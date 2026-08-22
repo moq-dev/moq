@@ -56,6 +56,12 @@ type SubscribeSetupState = {
 	 * ever saw the SUBSCRIBE_OK.
 	 */
 	sent?: boolean;
+	/**
+	 * Whether the publisher answered with an error. It has torn the request down already, so
+	 * there is nothing left to cancel and naming the dead request id at it risks being read
+	 * as a protocol violation.
+	 */
+	rejected?: boolean;
 };
 
 /**
@@ -468,7 +474,7 @@ export class Subscriber {
 				// answered yet: data streams are independent of the request stream. Aborting says
 				// nothing on v14-16, where the request rides a virtual stream whose reset is
 				// local, so the UNSUBSCRIBE has to go out explicitly.
-				if (state.sent) await this.#cancelSubscribe(state.stream, requestId);
+				if (state.sent && !state.rejected) await this.#cancelSubscribe(state.stream, requestId);
 				state.stream.abort(e);
 			};
 
@@ -601,6 +607,7 @@ export class Subscriber {
 			} catch {
 				// Decoding error response failed, use default message
 			}
+			state.rejected = true;
 			throw new Error(`SUBSCRIBE error: ${reasonPhrase}`);
 		}
 
