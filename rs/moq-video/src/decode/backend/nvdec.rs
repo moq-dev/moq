@@ -1,6 +1,6 @@
 //! Hardware H.264 / H.265 / AV1 decode via NVIDIA NVDEC (`moq-nvenc`'s cuvid table).
 //!
-//! Linux only, behind the default-on `nvdec` feature. Everything is dlopen'd at
+//! Linux only, behind the default-on `nvidia` feature. Everything is dlopen'd at
 //! runtime (cudarc loads libcuda, the cuvid table loads libnvcuvid), so the
 //! binary links on a GPU-less builder and a driverless host falls back to the
 //! next decoder (see [`backend::open`](super::open)).

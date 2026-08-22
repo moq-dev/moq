@@ -168,8 +168,12 @@ pick a specific rung of a ladder. Audio drives the video clock when both are
 present. The window preserves the video's aspect ratio and can be closed with
 Escape, the close button, or Ctrl-C.
 
-Playback decodes h264, h265, and av1 video, and opus and pcm audio, so
-`--video-codec` / `--audio-codec` are rejected up front for anything else.
+Playback decodes h264, h265, and av1 video, and opus, pcm, and AAC-LC audio, so
+`--video-codec vp8` and `--video-codec vp9` are rejected up front. AAC is the one
+it reads without being able to publish it, since that is what an RTMP or SRT
+ingest produces. A rendition whose config declares HE-AAC fails when it opens,
+either spelling of it; one that carries SBR without declaring it plays as its
+AAC-LC core.
 `--latency-max` controls how far a stalled media group may lag before it is
 skipped and defaults to `500ms`. These flags all follow the `play` verb:
 
@@ -390,7 +394,9 @@ dependency. The codec is chosen with `--codec` (`h264` default, or `h265`). For
 H.264 it picks a hardware encoder (VideoToolbox on macOS, NVENC on Linux NVIDIA,
 or VAAPI on Linux Intel/AMD when built with the `vaapi` feature) when one is
 present, falling back to the built-in software encoder (openh264); force either
-with `--hardware` / `--software`. H.265 is hardware-only (VideoToolbox on macOS,
+with `--hardware` / `--software`. A hardware encoder that was compiled in but
+can't open, typically because its driver libraries aren't on the loader path,
+warns rather than falling back quietly. H.265 is hardware-only (VideoToolbox on macOS,
 Media Foundation on Windows). `--camera` takes a bare integer as a device index,
 otherwise a device path (Linux) or name (a friendly-name substring on Windows, the
 AVFoundation `uniqueID` on macOS). Microphone capture uses cpal (CoreAudio /

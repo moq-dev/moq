@@ -16,6 +16,16 @@ use crate::Error;
 pub struct Resampler {
 	resampler: Async<f32>,
 	chunk_frames: usize,
+	/// Output frames per input frame, for sizing the flushed tail.
+	ratio: f64,
+	/// Output frames the sinc filter holds behind what it has already emitted.
+	delay: usize,
+	/// Whether any caller input has gone in, since the filter only owes a tail
+	/// once it has actually run.
+	started: bool,
+	/// Leading output frames still to be dropped: the filter opens by emitting its
+	/// own centring delay as silence, which is not audio anyone sent.
+	skip: usize,
 	channels: usize,
 	input_planar: Vec<Vec<f32>>,
 	output_planar: Vec<Vec<f32>>,
@@ -42,15 +52,11 @@ impl Resampler {
 			oversampling_factor: 128,
 			window: WindowFunction::BlackmanHarris2,
 		};
-		let resampler = Async::<f32>::new_sinc(
-			output_rate as f64 / input_rate as f64,
-			1.0,
-			&params,
-			chunk_frames,
-			channels as usize,
-			FixedAsync::Input,
-		)?;
+		let ratio = output_rate as f64 / input_rate as f64;
+		let resampler =
+			Async::<f32>::new_sinc(ratio, 1.0, &params, chunk_frames, channels as usize, FixedAsync::Input)?;
 
+		let delay = resampler.output_delay();
 		let input_planar = (0..channels as usize).map(|_| vec![0.0f32; chunk_frames]).collect();
 		let output_frames_max = resampler.output_frames_max();
 		let output_planar = vec![vec![0.0f32; output_frames_max]; channels as usize];
@@ -58,12 +64,100 @@ impl Resampler {
 		Ok(Self {
 			resampler,
 			chunk_frames,
+			ratio,
+			delay,
+			started: false,
+			skip: delay,
 			channels: channels as usize,
 			input_planar,
 			output_planar,
 			output_frames_max,
 			pending: Vec::new(),
 		})
+	}
+
+	/// Output frames dropped so far as the filter's startup silence.
+	///
+	/// The output runs that much shorter than the input it was built from, so a
+	/// caller stamping its output has to reach back over this as well as over what
+	/// is still buffered.
+	pub fn skipped(&self) -> usize {
+		self.delay - self.skip
+	}
+
+	/// Input frames buffered from earlier calls, waiting for enough to fill a chunk.
+	///
+	/// The next output starts with these, so a caller stamping its output has to
+	/// reach back this far.
+	pub fn pending_frames(&self) -> usize {
+		self.pending.len() / self.channels
+	}
+
+	/// Drop everything held, buffered input and filter state alike, returning to
+	/// the just-constructed state.
+	///
+	/// The escape hatch for a *reported* discontinuity: where [`flush`](Self::flush)
+	/// ends the stream, this starts a new one in place, so audio from before the
+	/// gap can't bleed through the filter into audio from after it.
+	pub fn reset(&mut self) {
+		self.resampler.reset();
+		self.pending.clear();
+		self.skip = self.delay;
+		self.started = false;
+	}
+
+	/// Resample what is still buffered, ending the stream.
+	///
+	/// The resampler only consumes whole chunks, so without this the last partial
+	/// chunk of a track is never converted and its audio is simply lost. Pads the
+	/// chunk out with silence and keeps only the output the real input earned, so
+	/// the padding costs a filter tail on the final samples rather than extra
+	/// audio.
+	///
+	/// Takes `self` because that padding runs the filter through silence the
+	/// caller never supplied: resampling more afterwards would carry that state
+	/// into it, across a gap nothing reported. Ending the stream is the only thing
+	/// this can be used for, so that is the only thing it can express.
+	pub fn flush(mut self) -> Result<Vec<f32>, Error> {
+		// Not `pending == 0`: what the filter owes has nothing to do with what is
+		// buffered, so a stream that happens to end on a chunk boundary owes a tail
+		// just the same. Only one that never ran owes nothing.
+		if !self.started {
+			return Ok(Vec::new());
+		}
+
+		let pending = self.pending_frames();
+
+		// The filter runs centred, so every output frame is built from input around
+		// `delay` frames earlier and it still holds that much real audio no amount of
+		// input has pushed out. Ask for that much beyond what the pending input
+		// earns, feeding silence until it arrives, or a track converts its own
+		// ending into frames nobody reads.
+		//
+		// Only as much as `process` actually dropped off the front, though. That is
+		// the whole delay for a stream long enough to have emitted anything, and
+		// nothing at all for one that ended before it filled a chunk, where the skip
+		// still lies ahead and comes out of this call's own output.
+		let repaid = self.delay - self.skip;
+		let wanted = ((pending as f64 * self.ratio).round() as usize + repaid) * self.channels;
+
+		let mut out = Vec::new();
+		while out.len() < wanted {
+			// An empty result does not mean the filter is done: with a chunk smaller
+			// than the delay, a whole chunk's output can disappear into the skip while
+			// the audio behind it is still coming. Stop only when a chunk moves
+			// neither the output nor the skip, which cannot repeat.
+			let skip_before = self.skip;
+			self.pending.resize(self.chunk_frames * self.channels, 0.0);
+			let produced = self.process(&[])?;
+			if produced.is_empty() && self.skip == skip_before {
+				break;
+			}
+			out.extend_from_slice(&produced);
+		}
+
+		out.truncate(wanted);
+		Ok(out)
 	}
 
 	/// Resample interleaved `f32` input into interleaved `f32` output.
@@ -78,6 +172,7 @@ impl Resampler {
 			});
 		}
 
+		self.started |= !samples.is_empty();
 		self.pending.extend_from_slice(samples);
 
 		let chunk_samples = self.chunk_frames * self.channels;
@@ -107,7 +202,27 @@ impl Resampler {
 			self.pending.drain(..chunk_samples);
 		}
 
+		// Drop the filter's startup silence rather than passing it on as audio. What
+		// it costs is paid back by `flush`, which drains the same amount at the end,
+		// so the output keeps the duration of the input that produced it.
+		if self.skip > 0 {
+			let drop = self.skip.min(out.len() / self.channels) * self.channels;
+			out.drain(..drop);
+			self.skip -= drop / self.channels;
+		}
+
 		Ok(out)
+	}
+}
+
+/// Whether [`remix`] can produce this channel count, checked up front so a
+/// consumer fails at construction rather than on its first frame.
+pub(crate) fn validate_channels(count: u32) -> Result<(), Error> {
+	match count {
+		1 | 2 => Ok(()),
+		other => Err(Error::Unsupported(format!(
+			"channel remix only supports mono and stereo (got {other})"
+		))),
 	}
 }
 
@@ -151,6 +266,89 @@ mod tests {
 			(47_000..50_000).contains(&out.len()),
 			"expected ~48k samples, got {}",
 			out.len()
+		);
+	}
+
+	/// The sinc filter is centred, so the end of a track only reaches the output
+	/// once further input has passed through it. Without draining that, a track
+	/// converts its own ending into frames nobody ever reads, and the tail comes
+	/// out silent however loud it was.
+	#[test]
+	fn flush_drains_the_delayed_tail() {
+		let mut r = Resampler::new(44_100, 48_000, 1, 882).unwrap();
+
+		// A full-scale sample near the end of the track, silence around it. Not the
+		// very last one: draining stops at the filter's centre rather than emitting
+		// its ringing past the end of the signal, so the final sample keeps only
+		// half its response however far this drains.
+		let mut input = vec![0.0f32; 1024];
+		input[1000] = 1.0;
+
+		let body = r.process(&input).unwrap();
+		let tail = r.flush().unwrap();
+
+		let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |max, s| max.max(s.abs()));
+		assert!(peak(&body) < 0.01, "the sample emerged early: peak {}", peak(&body));
+		assert!(peak(&tail) > 0.5, "the tail lost the sample: peak {}", peak(&tail));
+	}
+
+	/// The filter owes its tail whether or not anything is buffered, so a track
+	/// whose length lands exactly on a chunk boundary has to drain too. With
+	/// 1024-sample frames at 48 kHz that lands every fifteenth one against the
+	/// 960-frame chunk, so it is not a corner a real stream avoids.
+	#[test]
+	fn flush_drains_on_an_exact_chunk_boundary() {
+		let mut r = Resampler::new(44_100, 48_000, 1, 882).unwrap();
+
+		// Exactly two chunks of input, so nothing is left pending.
+		let mut input = vec![0.0f32; 1764];
+		input[1750] = 1.0;
+
+		let body = r.process(&input).unwrap();
+		assert_eq!(r.pending_frames(), 0, "the input should divide evenly");
+
+		let tail = r.flush().unwrap();
+
+		// Not exactly zero: a centred sinc has a precursor, so a trace of the sample
+		// leads it into the body. The audio itself is still all in the tail.
+		let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |max, s| max.max(s.abs()));
+		assert!(peak(&body) < 0.01, "the sample emerged early: peak {}", peak(&body));
+		assert!(peak(&tail) > 0.5, "the tail lost the sample: peak {}", peak(&tail));
+	}
+
+	/// A stream that ends before it fills a chunk never emitted anything, so the
+	/// filter's startup silence is still ahead of it and comes out of the flush's
+	/// own output. Repaying a skip that has not happened yet hands back a stream
+	/// longer than its source.
+	#[test]
+	fn flush_sizes_a_stream_shorter_than_a_chunk() {
+		let mut r = Resampler::new(44_100, 48_000, 1, 882).unwrap();
+
+		let body = r.process(&[0.25f32; 441]).unwrap();
+		let tail = r.flush().unwrap();
+
+		// 441 frames at 44.1 kHz is 480 at 48 kHz, and that is all it can be.
+		let total = body.len() + tail.len();
+		assert!((475..=485).contains(&total), "unexpected total: {total}");
+	}
+
+	/// `chunk_frames` is the caller's to choose, and a small one can be shorter
+	/// than the filter's delay. Then a whole chunk's output disappears into the
+	/// startup skip, which used to read as "the filter is done" and drop the
+	/// entire stream.
+	#[test]
+	fn flush_survives_a_chunk_smaller_than_the_delay() {
+		let mut r = Resampler::new(44_100, 48_000, 1, 32).unwrap();
+
+		let body = r.process(&[0.5f32; 20]).unwrap();
+		let tail = r.flush().unwrap();
+
+		let total = body.len() + tail.len();
+		assert!((18..=26).contains(&total), "unexpected total: {total}");
+		assert!(
+			tail.iter().any(|s| s.abs() > 0.25),
+			"the stream came back silent: peak {}",
+			tail.iter().fold(0.0f32, |m, s| m.max(s.abs()))
 		);
 	}
 

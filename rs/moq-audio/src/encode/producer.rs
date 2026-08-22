@@ -188,6 +188,13 @@ impl<E: CatalogExt> Producer<E> {
 		self.epoch_us = None;
 		self.frames_produced = 0;
 		self.pending.clear();
+		// The resampler holds samples of its own, plus filter state primed by them.
+		// Left alone, `finish` would flush that pre-reset audio onto the track
+		// (stamped at an epoch that no longer exists), and the next write would run
+		// the new audio through a filter still ringing with the old.
+		if let Some(resampler) = self.resampler.as_mut() {
+			resampler.reset();
+		}
 	}
 
 	/// Push one [`Frame`] of PCM in the layout declared by [`Input`]. Encodes and
@@ -216,6 +223,12 @@ impl<E: CatalogExt> Producer<E> {
 
 		self.pending.extend(pcm);
 
+		self.publish_full_frames(epoch_us)
+	}
+
+	/// Encode and publish every full frame in `pending`, keeping any partial
+	/// trailing frame for the next call.
+	fn publish_full_frames(&mut self, epoch_us: u64) -> Result<(), Error> {
 		let frame_samples = self.encoder.frame_size() * self.encoder.codec_channels() as usize;
 		while self.pending.len() >= frame_samples {
 			let chunk: Vec<f32> = self.pending.drain(..frame_samples).collect();
@@ -267,14 +280,27 @@ impl<E: CatalogExt> Producer<E> {
 	/// Flush any pending samples (zero-padded to a full frame) and finalize the
 	/// track.
 	pub fn finish(mut self) -> Result<(), Error> {
+		// Whatever the resampler still holds belongs to this track: its last partial
+		// chunk, plus the audio its filter is running behind on. Dropping it here
+		// would publish a track that ends before its source did.
+		if let Some(resampler) = self.resampler.take() {
+			self.pending.extend(resampler.flush()?);
+		}
+
+		// The drained tail can be longer than one frame, and the `resize` below
+		// would truncate it rather than encode it.
+		let epoch_us = self.epoch_us.unwrap_or(0);
+		self.publish_full_frames(epoch_us)?;
+
 		let frame_samples = self.encoder.frame_size() * self.encoder.codec_channels() as usize;
 		if !self.pending.is_empty() {
 			self.pending.resize(frame_samples, 0.0);
 			let chunk = std::mem::take(&mut self.pending);
 			let packet = self.encoder.encode(&chunk)?;
-			let timestamp = self.timestamp(self.epoch_us.unwrap_or(0))?;
+			let timestamp = self.timestamp(epoch_us)?;
 			self.publish(packet, timestamp)?;
 		}
+
 		self.track.finish()?;
 		Ok(())
 	}
@@ -305,6 +331,102 @@ impl<E: CatalogExt> Drop for Rendition<E> {
 mod tests {
 	use super::*;
 	use crate::Format;
+
+	/// A resampled publisher used to end its track early: `finish` flushed the
+	/// encoder's own buffer but left the resampler holding its last partial chunk,
+	/// plus the audio its filter runs behind on.
+	#[tokio::test]
+	async fn finish_publishes_the_resampled_tail() {
+		let input = Input {
+			format: Format::F32,
+			sample_rate: 44_100,
+			channels: 1,
+		};
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let consumer = broadcast.consume();
+		let options = Options {
+			track: Some("audio".to_string()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(&mut broadcast, catalog, input.clone(), &options).unwrap();
+
+		// Subscribe before the track ends, or there is nothing left to subscribe to.
+		let mut track = moq_mux::container::Consumer::new(
+			consumer
+				.track("audio")
+				.unwrap()
+				.subscribe(moq_net::track::Subscription::default())
+				.await
+				.unwrap(),
+			moq_mux::catalog::hang::Container::Legacy,
+		);
+
+		// Chosen so the tail decides a whole packet: 8838 frames at 44.1 kHz is ~9620
+		// at 48 kHz, just past ten 960-sample Opus frames. Losing the resampler's
+		// remainder and its filter delay drops back under ten, costing a packet.
+		let data: Vec<u8> = vec![0.25f32; 8_838].iter().flat_map(|s| s.to_le_bytes()).collect();
+		producer
+			.write(&Frame {
+				timestamp: moq_net::Timestamp::ZERO,
+				data: data.into(),
+			})
+			.unwrap();
+		producer.finish().unwrap();
+
+		let mut packets = 0;
+		while track.read().await.unwrap().is_some() {
+			packets += 1;
+		}
+		assert_eq!(packets, 11);
+	}
+
+	/// `reset_epoch` promises to drop buffered samples, and the resampler buffers
+	/// samples of its own. Leaving those behind let `finish` flush pre-reset audio
+	/// onto the track, stamped at an epoch that no longer exists.
+	#[tokio::test]
+	async fn reset_epoch_drops_the_resampler_buffer_too() {
+		let input = Input {
+			format: Format::F32,
+			sample_rate: 44_100,
+			channels: 1,
+		};
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let consumer = broadcast.consume();
+		let options = Options {
+			track: Some("audio".to_string()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(&mut broadcast, catalog, input.clone(), &options).unwrap();
+
+		let mut track = moq_mux::container::Consumer::new(
+			consumer
+				.track("audio")
+				.unwrap()
+				.subscribe(moq_net::track::Subscription::default())
+				.await
+				.unwrap(),
+			moq_mux::catalog::hang::Container::Legacy,
+		);
+
+		// Too little to publish a packet, so it all sits in the resampler.
+		let data: Vec<u8> = vec![0.25f32; 441].iter().flat_map(|s| s.to_le_bytes()).collect();
+		producer
+			.write(&Frame {
+				timestamp: moq_net::Timestamp::ZERO,
+				data: data.into(),
+			})
+			.unwrap();
+
+		producer.reset_epoch();
+		producer.finish().unwrap();
+
+		// The reset dropped everything, so the track ends without a packet.
+		assert!(track.read().await.unwrap().is_none());
+	}
 
 	// One 20 ms Opus frame at 48 kHz mono is exactly 960 f32 samples, so each
 	// `write` of this drains precisely one packet (no resampler, no leftover).

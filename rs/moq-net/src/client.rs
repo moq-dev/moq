@@ -257,12 +257,13 @@ impl Client {
 				};
 				self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
 
-				// Advertise our capabilities (we report send bitrate; we don't pad) plus
+				// Advertise our capabilities (we report what the transport measures; we
+				// don't pad) plus
 				// the request path on URI-less transports, and the direction we intend to
 				// use so the server can reject a token that lacks the matching scope during
 				// the handshake instead of silently carrying no media.
 				let our_setup = lite::Setup {
-					probe: lite::ProbeLevel::Report,
+					probe: lite::ProbeLevel::detect(&session),
 					path: self.setup_path.clone(),
 					role: lite::Role::from_origins(self.publish.is_some(), self.subscribe.is_some()),
 					cost: self.cost,

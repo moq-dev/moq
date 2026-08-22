@@ -170,7 +170,7 @@ build_relay_cli() {
     echo "building moq-relay + moq-cli ($PROFILE)..."
     # ${arr[@]+...} guard: bash 3.2 (macOS /bin/bash) errors on "${flag[@]}" for
     # an empty (debug) array under `set -u`.
-    (cd "$WORKSPACE" && cargo build ${flag[@]+"${flag[@]}"} -p moq-relay -p moq-cli) || {
+    (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-relay -p moq-cli) || {
         echo "error: failed to build moq-relay / moq-cli" >&2
         exit 1
     }
@@ -208,7 +208,7 @@ prepare_js() {
         return
     }
     echo "installing js clients (workspace @moq/* via bun)..."
-    if ! (cd "$WORKSPACE" && bun install) >"$TMP/js-install.log" 2>&1; then
+    if ! (cd "$WORKSPACE" && bun install --frozen-lockfile) >"$TMP/js-install.log" 2>&1; then
         for v in js js-native-node js-native-bun; do needs "$v" && mark_broken "$v" "bun install failed"; done
         sed 's/^/        /' "$TMP/js-install.log" >&2 || true
         return
@@ -243,7 +243,7 @@ prepare_c() {
     echo "building c client (workspace libmoq + cc)..."
     local flag=()
     [[ "$PROFILE" == "release" ]] && flag=(--release)
-    if ! (cd "$WORKSPACE" && cargo build ${flag[@]+"${flag[@]}"} -p libmoq) >"$TMP/c-build.log" 2>&1; then
+    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p libmoq) >"$TMP/c-build.log" 2>&1; then
         mark_broken c "cargo build -p libmoq failed"
         sed 's/^/        /' "$TMP/c-build.log" >&2 || true
         return
@@ -294,7 +294,7 @@ prepare_gst() {
     echo "building gstreamer client (workspace moq-gst plugin)..."
     local flag=()
     [[ "$PROFILE" == "release" ]] && flag=(--release)
-    if ! (cd "$WORKSPACE" && cargo build ${flag[@]+"${flag[@]}"} -p moq-gst) >"$TMP/gst-build.log" 2>&1; then
+    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-gst) >"$TMP/gst-build.log" 2>&1; then
         mark_broken gst "cargo build -p moq-gst failed"
         sed 's/^/        /' "$TMP/gst-build.log" >&2 || true
         return

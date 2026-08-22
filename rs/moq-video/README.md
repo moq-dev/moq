@@ -42,8 +42,8 @@ choice (`Auto` / `Hardware` / `Software` / a named backend).
 
 | Codec | Software | macOS | Windows | Linux |
 |---|---|---|---|---|
-| H.264 | openh264 (vendored, static) | VideoToolbox | Media Foundation | NVENC (`nvenc`), VAAPI (`vaapi`) |
-| H.265 | none | VideoToolbox | Media Foundation | NVENC (`nvenc`) |
+| H.264 | openh264 (vendored, static) | VideoToolbox | Media Foundation | NVENC (feature `nvidia`), VAAPI (feature `vaapi`) |
+| H.265 | none | VideoToolbox | Media Foundation | NVENC (feature `nvidia`) |
 
 Every backend emits Annex-B with in-band parameter sets (SPS/PPS, plus VPS for
 H.265), so the matching `moq_mux::codec` importer handles framing and catalog
@@ -92,9 +92,9 @@ Backends are tried hardware-first, like encode:
 
 | Codec | Software | macOS | Windows | Linux |
 |---|---|---|---|---|
-| H.264 | openh264 (vendored, static) | VideoToolbox | Media Foundation (DXVA) | NVDEC (`nvdec`) |
-| H.265 | none | VideoToolbox | Media Foundation (DXVA) | NVDEC (`nvdec`) |
-| AV1 | none | none | none | NVDEC (`nvdec`) |
+| H.264 | openh264 (vendored, static) | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`) |
+| H.265 | none | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`) |
+| AV1 | none | none | none | NVDEC (feature `nvidia`) |
 
 On macOS VideoToolbox decodes H.264 and H.265 on hardware, pulling the parameter
 sets (SPS/PPS, plus VPS for H.265) out of each keyframe to build the format

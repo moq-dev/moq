@@ -27,7 +27,7 @@ default:
 
 # keeps uv from fetching moq-ffi off PyPI; maturin just installed it locally.
 _develop:
-    cd moq-ffi && uv run --no-sync maturin develop --uv
+    cd moq-ffi && uv run --no-sync maturin develop --locked --uv
     uv pip install --no-deps -e moq-rs
 
 # Lint + format + editable build + pyright + docs. `--no-install-workspace`
@@ -50,7 +50,7 @@ check $FILES="":
     	echo "py: uv not on PATH, skipping" >&2
     	exit 0
     fi
-    uv sync --no-install-workspace
+    uv sync --locked --no-install-workspace
     uv run --no-sync ruff check .
     uv run --no-sync ruff format --check .
     just _develop
@@ -85,7 +85,7 @@ test $FILES="":
     	echo "py: uv not on PATH, skipping" >&2
     	exit 0
     fi
-    uv sync --no-install-workspace
+    uv sync --locked --no-install-workspace
     just _develop
     uv run --no-sync pytest moq-rs/tests/ moq-ffi/tests/
 
@@ -93,7 +93,7 @@ test $FILES="":
 
 # bindings) and the moq-rs wrapper into the workspace venv.
 build:
-    uv sync --no-install-workspace
+    uv sync --locked --no-install-workspace
     just _develop
 
 # Remove the virtualenv, release dist, bytecode caches, and the uniffi
@@ -113,6 +113,10 @@ clean:
 
 # pure python so it needs no compilation, just a metadata-correct wheel.
 package:
+    # `uv build` has no --locked, and this is the recipe release-py.yml
+    # publishes from, so validate the lock explicitly rather than inheriting it
+    # from a sync that never runs here.
+    uv lock --check
     rm -rf dist
     uv build --package moq-rs --out-dir dist
 
@@ -121,7 +125,7 @@ package:
 # native moq_ffi is mocked (autodoc_mock_imports in docs/conf.py), so this needs
 # no Rust build: install the pure-python wrapper metadata and render.
 docs:
-    uv sync --no-install-workspace
+    uv sync --locked --no-install-workspace
     uv pip install --no-deps -e moq-rs
     rm -rf dist/docs
     uv run --no-sync --with sphinx --with myst-parser --with furo \

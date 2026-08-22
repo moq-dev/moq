@@ -576,7 +576,11 @@ async fn run_unis<S: web_transport_trait::Session>(
 			let mut reader = reader.with_version(version);
 			if let Err(err) = run_uni_group(&mut sub, &mut reader).await {
 				tracing::debug!(%err, "uni stream error");
-				reader.abort(&err);
+				// A moq-transport code, not `Error::to_code`'s moq-lite one. A group arriving
+				// for an alias we retired is the expected tail of our own cancellation, and
+				// moq-lite's cancel encodes to 0, which on this wire means the stream died of
+				// an internal failure on our side.
+				reader.stop(super::error::to_stream_code(&err));
 			}
 		});
 	}

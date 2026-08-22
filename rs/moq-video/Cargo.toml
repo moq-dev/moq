@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.0.17"
+version = "0.0.18"
 edition = "2024"
 rust-version.workspace = true
 
@@ -13,25 +13,28 @@ keywords = ["quic", "http3", "webtransport", "media", "video"]
 categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 
 [features]
-# NVIDIA hardware codecs are enabled by default. Disable them (e.g.
+# The NVIDIA codecs are enabled by default. Disable them (e.g.
 # `--no-default-features`) for a slimmer self-compiled Linux build that drops the
 # CUDA dependencies. Openh264 stays as the always-compiled software fallback;
 # disable only `capture` to omit the device stack while retaining codecs.
-default = ["capture", "nvenc", "nvdec"]
+default = ["capture", "nvidia"]
 # Native camera and screen capture. Enabled by default for direct consumers,
 # but workspace consumers opt in so codec-only bindings avoid device build
 # dependencies such as V4L2 and libclang.
 capture = ["dep:v4l", "dep:zune-jpeg"]
-# NVIDIA NVENC hardware encoder (Linux). dlopen'd at runtime (cudarc + moq-nvenc,
-# which loads libnvidia-encode), with a libloading probe for the driver libs, so
-# an nvenc build still links GPU-less and starts driverless, falling back to the
-# next encoder.
-nvenc = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
-# NVIDIA NVDEC hardware decoder (Linux). Same runtime story as `nvenc`: cudarc
-# loads libcuda and moq-nvenc's cuvid table loads libnvcuvid, so an nvdec build
-# links GPU-less and starts driverless, falling back to the next decoder. Decoded
-# frames stay in CUDA memory and feed NVENC zero-copy (the transcode path).
-nvdec = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
+# The NVIDIA codecs on Linux: the NVENC encoder and the NVDEC decoder. One
+# feature because they are one dependency stack (cudarc + moq-nvenc, plus a
+# libloading probe for the driver libs) and one code path: NVDEC hands NVENC a
+# CUDA frame to encode in place, so splitting them saves no build and costs the
+# zero-copy transcode path. Everything is dlopen'd at runtime, so a build with
+# this on still links GPU-less and starts driverless, falling back to the next
+# encoder or decoder.
+nvidia = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
+# Compatibility aliases for the pre-consolidation names, kept so a manifest that
+# already asks for the old split still resolves. Undocumented on purpose: the
+# feature tables name only `nvidia`.
+nvenc = ["nvidia"]
+nvdec = ["nvidia"]
 # Intel/AMD VAAPI hardware encoder (Linux). Off by default because the backend has
 # never been validated on real hardware, not because of anything it costs the
 # build: moq-vaapi dlopen's libva, so an enabled-vaapi build needs no libva at
@@ -101,7 +104,7 @@ yuv = "0.8.14"
 # zbus over DBus). The portal owns source selection: the user picks a monitor in a
 # compositor dialog, and we get back a PipeWire fd + node id to stream from.
 ashpd = { version = "0.13", optional = true, default-features = false, features = ["tokio", "screencast"] }
-# NVENC hardware encoder, behind the default-on `nvenc` feature. Everything is
+# The NVIDIA codecs, behind the default-on `nvidia` feature. Everything is
 # dlopen'd at runtime: cudarc loads CUDA, and moq-nvenc (an in-tree fork of
 # nvidia-video-codec-sdk, see rs/moq-nvenc) loads libnvidia-encode. So the binary
 # links on a GPU-less builder and still starts on machines without the NVIDIA
@@ -180,3 +183,4 @@ futures = "0.3"
 h264-reader = "0.8.0"
 # Driving `encode::Sink` from a plain test thread, the way an FFI caller does.
 pollster = "1.0"
+tracing-test = "0.2"

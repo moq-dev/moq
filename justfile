@@ -108,8 +108,11 @@ _tools $FILES="":
     scoped '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'     && tools+=(uv)
     scoped '^(kt/|rs/moq-ffi/)'                                && tools+=(gradle java)
     # cargo because `go check` builds moq-ffi for the host, and skips on a
-    # missing cargo the same way it skips on a missing go.
-    scoped '^(go/|rs/moq-ffi/)'                                && tools+=(go uniffi-bindgen-go cargo)
+    # missing cargo the same way it skips on a missing go. rsync because the
+    # publish scripts stage the mirror tree with it, so the publisher test skips
+    # without it, and a skip that keeps `just check` green is what MOQ_STRICT is
+    # here to prevent.
+    scoped '^(go/|rs/moq-ffi/)'                                && tools+=(go uniffi-bindgen-go cargo rsync)
     # cargo regenerates moq.h for the type-check; pkg-config locates Qt6 and
     # ffmpeg. Every platform: the plugin type-checks against headers, and the
     # dev shell ships those even on Darwin, where obs-studio can't build.
@@ -320,7 +323,7 @@ build:
 
 # Build browser/WASM bindings into @moq/wasm using the pinned wasm-bindgen toolchain.
 wasm:
-    cargo build -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
+    cargo build --locked -p moq-wasm --target wasm32-unknown-unknown --profile wasm-release
     wasm-bindgen --target web --out-name moq \
     	--out-dir js/wasm/dist "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/wasm-release/moq_wasm.wasm"
 

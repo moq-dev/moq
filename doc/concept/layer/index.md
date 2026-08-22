@@ -42,10 +42,17 @@ It sucks but sometimes *media over QUIC* isn't actually an option.
 
 [iroh](/concept/layer/iroh) is a peer-to-peer alternative to dialing a server.
 
-You dial a public key instead of a hostname, and iroh handles discovery, hole punching, and
-a relay fallback when a direct path can't be established.
+You dial a public key instead of a hostname, and iroh handles discovery and hole punching.
 It's still QUIC underneath, so nothing above this layer changes.
 Native only, since a browser can't hole punch.
+
+Reach for it on a local network, where two peers can talk without anything in the middle.
+Across the internet, run a [MoQ relay](/bin/relay/) instead: iroh's own relay forwards opaque
+packets like WebRTC's TURN, so it costs you a hop without the caching and fanout that hop
+should be buying.
+
+Note that only the media path can be kept local. An endpoint publishes its address to n0's
+discovery servers whichever way it's configured.
 
 ## MoQ Transport
 

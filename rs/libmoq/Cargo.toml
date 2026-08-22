@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>", "Brian Medley <bpm@bmedley.org>"
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.5.8"
+version = "0.5.9"
 edition = "2024"
 rust-version.workspace = true
 
@@ -26,7 +26,7 @@ moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = true }
 moq-net = { workspace = true }
 # Enable the NVIDIA hardware codecs (default-off at the workspace level).
-moq-video = { workspace = true, features = ["nvenc", "nvdec"] }
+moq-video = { workspace = true, features = ["nvidia"] }
 # Blocking on `encode::Sink` from the synchronous C entry points; see
 # `video::block_on` for why not a tokio helper.
 pollster = "1.0"

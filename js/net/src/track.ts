@@ -6,7 +6,7 @@
 import { type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type { Datagram } from "./datagram.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer, Lagged } from "./group.ts";
-import { hooks } from "./internal.ts";
+import { hooks, type TrackRequestOptions, type TrackSequence, type TrackSequences } from "./internal.ts";
 import { Timescale, type Timestamp } from "./time.ts";
 
 export type { Datagram } from "./datagram.ts";
@@ -145,14 +145,16 @@ export class Request {
 	readonly name: string;
 
 	#producer: Producer;
+	#sequences: TrackSequences;
 
-	private constructor(name: string, producer: Producer) {
-		this.name = name;
-		this.#producer = producer;
+	private constructor(options: TrackRequestOptions) {
+		this.name = options.name;
+		this.#producer = options.producer;
+		this.#sequences = options.sequences;
 	}
 
 	static {
-		hooks.makeRequest = (name, producer) => new Request(name, producer);
+		hooks.makeRequest = (options) => new Request(options);
 	}
 
 	/** The aggregate subscription requested for this track. */
@@ -167,6 +169,7 @@ export class Request {
 
 	/** Accept the request, committing the track's immutable {@link Info}. */
 	accept(info: Partial<Info> = {}): Producer {
+		bindProducer(this.name, this.#producer, this.#sequences);
 		return this.#producer.accept(info);
 	}
 
@@ -277,6 +280,17 @@ async function resolveInfo(state: TrackState): Promise<Info> {
 // so eviction can drop them together.
 type CachedGroup = { group: GroupProducer; time: number; mirrors: Map<TrackState, GroupConsumer> };
 
+function bindProducer(name: string, producer: Producer, sequences: TrackSequences): void {
+	let shared = sequences.get(name);
+	if (!shared) {
+		shared = { next: 0 };
+		sequences.set(name, shared);
+	}
+	bindProducerSequence(producer, shared);
+}
+
+let bindProducerSequence: (producer: Producer, sequence: TrackSequence) => void;
+
 // Constructs a Subscriber from within this module without exposing a public
 // constructor that would leak the unexported TrackState. Assigned in the class's
 // static block.
@@ -301,8 +315,7 @@ export class Producer {
 	// The producer's own state is the source of truth (info/closed); subscribers
 	// read mirrored sinks, never this state directly.
 	#state = new TrackState();
-
-	#next?: number;
+	#sequence: TrackSequence = { next: 0 };
 
 	// Recently written source groups, retained for replay to late subscribers and
 	// pruned once closed and older than the cache window. Each entry tracks the mirror
@@ -319,6 +332,12 @@ export class Producer {
 
 	constructor(name: string) {
 		this.name = name;
+	}
+
+	static {
+		bindProducerSequence = (producer, sequence) => {
+			producer.#sequence = sequence;
+		};
 	}
 
 	/**
@@ -487,8 +506,9 @@ export class Producer {
 	appendGroup(): GroupProducer {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
 
-		const group = new GroupProducer(this.#next ?? 0);
-		this.#next = group.sequence + 1;
+		const sequence = this.#sequence;
+		const group = new GroupProducer(sequence.next);
+		sequence.next = group.sequence + 1;
 		this.#publish(group);
 
 		return group;
@@ -515,9 +535,10 @@ export class Producer {
 			this.#cache.splice(existing, 1);
 		}
 
-		// Only advance #next upward (for appendGroup auto-increment).
-		if (group.sequence >= (this.#next ?? 0)) {
-			this.#next = group.sequence + 1;
+		// Only advance the shared counter upward (for appendGroup auto-increment).
+		const sequence = this.#sequence;
+		if (group.sequence >= sequence.next) {
+			sequence.next = group.sequence + 1;
 		}
 
 		this.#publish(group);
@@ -552,8 +573,9 @@ export class Producer {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
 		if (payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
 
-		const sequence = this.#next ?? 0;
-		this.#next = sequence + 1;
+		const counter = this.#sequence;
+		const sequence = counter.next;
+		counter.next = sequence + 1;
 		this.#publishDatagram({ sequence, timestamp, payload });
 		return sequence;
 	}
@@ -569,8 +591,9 @@ export class Producer {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
 		if (datagram.payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
 
-		if (datagram.sequence >= (this.#next ?? 0)) {
-			this.#next = datagram.sequence + 1;
+		const sequence = this.#sequence;
+		if (datagram.sequence >= sequence.next) {
+			sequence.next = datagram.sequence + 1;
 		}
 		this.#publishDatagram(datagram);
 	}

@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.0.11"
+version = "0.0.12"
 edition = "2024"
 rust-version.workspace = true
 
@@ -13,19 +13,21 @@ keywords = ["quic", "http3", "webtransport", "media", "video"]
 categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 
 [features]
-# NVIDIA hardware codecs are on by default, mirroring moq-video: NVDEC -> NVENC
-# is the whole point of a GPU transcode fleet. Disable for a slimmer
-# self-compiled Linux build. VAAPI remains available as an opt-in feature.
-default = ["nvenc", "nvdec"]
-# NVIDIA NVENC hardware encoder (Linux, dlopen'd at runtime; a no-op elsewhere).
-nvenc = ["moq-video/nvenc"]
+# The NVIDIA codecs are on by default, mirroring moq-video: NVDEC -> NVENC is
+# the whole point of a GPU transcode fleet, and it is the zero-copy GPU pipeline
+# (NVDEC decodes and scales in hardware, NVENC encodes the CUDA frame in place).
+# Disable for a slimmer self-compiled Linux build. VAAPI remains an opt-in.
+default = ["nvidia"]
+# NVENC + NVDEC (Linux, dlopen'd at runtime; a no-op elsewhere).
+nvidia = ["moq-video/nvidia"]
+# Compatibility aliases for the pre-consolidation names, kept so a manifest that
+# already asks for the old split still resolves. Undocumented on purpose: the
+# feature tables name only `nvidia`.
+nvenc = ["nvidia"]
+nvdec = ["nvidia"]
 # Intel/AMD VAAPI hardware encoder (Linux; opt-in because the backend is
 # unvalidated on hardware; libva dlopen'd at runtime).
 vaapi = ["moq-video/vaapi"]
-# NVIDIA NVDEC hardware decoder (Linux, dlopen'd at runtime; a no-op elsewhere).
-# With `nvenc` this is the zero-copy GPU pipeline: NVDEC decodes and scales in
-# hardware, and NVENC encodes the CUDA frame in place.
-nvdec = ["moq-video/nvdec"]
 
 [dependencies]
 bytes = "1"

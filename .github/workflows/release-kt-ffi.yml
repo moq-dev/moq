@@ -16,6 +16,11 @@ concurrency:
   group: release-kt-ffi
   cancel-in-progress: false
 
+# Pinned rather than "latest": `--locked` only fixes the tool's own
+# dependencies, not which version of the tool cargo selects.
+env:
+  CARGO_NDK_VERSION: 4.1.2
+
 jobs:
   parse-version:
     name: Parse version
@@ -81,7 +86,7 @@ jobs:
 
       - name: Install cargo-ndk (Android)
         if: contains(matrix.target, 'android')
-        run: cargo install cargo-ndk
+        run: cargo install --locked "cargo-ndk@$CARGO_NDK_VERSION"
 
       - name: Build
         shell: bash

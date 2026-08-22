@@ -36,8 +36,10 @@ package-ffi *args:
 package-wrapper *args:
     bash scripts/package-wrapper.sh {{ args }}
 
-# Remove the generated bindings, native libs, and vendoring that
-# scripts/check.sh produces in go/ (see go/.gitignore). The tmp staging
-# under the workspace dist/ is swept by `just js clean`.
+# The paths are the gitignored ones in go/.gitignore. `just go check` stages
+# into the workspace dist/ instead, which `just js clean` sweeps, so these only
+# show up when uniffi-bindgen-go or `go mod` is pointed at the tree directly.
+
+# Remove the generated bindings, native libs, and vendoring from go/.
 clean:
-    rm -rf moq/moq.go moq/lib go.sum vendor
+    rm -rf ffi/moq/moq.go ffi/moq/moq.h ffi/moq/lib ffi/go.sum ffi/vendor wrapper/go.sum wrapper/vendor

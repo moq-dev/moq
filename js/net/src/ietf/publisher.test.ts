@@ -9,6 +9,7 @@ import type * as Cluster from "./cluster.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
+import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { SubscribeNamespace } from "./subscribe_namespace.ts";
 import { ALPN, Version } from "./version.ts";
 
@@ -372,5 +373,35 @@ test("an advertisement carries our hop id once the peer declared one", async () 
 		}
 
 		pub.close();
+	}
+});
+
+test("a same-tick republish survives its predecessor closing", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pub = publisher(pair.server);
+	const path = Path.from("test");
+
+	const first = new BroadcastProducer();
+	pub.publish(path, first);
+	first.close();
+
+	const second = new BroadcastProducer();
+	second.createTrack("video");
+	pub.publish(path, second);
+
+	await first.closed;
+
+	const client = await Stream.open(pair.client);
+	const server = await nextStream(pair.server);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	const msg = new Subscribe({ requestId: 0n, trackNamespace: path, trackName: "video", subscriberPriority: 0 });
+	void pub.runSubscribe(msg, server);
+
+	try {
+		expect(await client.reader.u53()).toBe(SubscribeOk.id);
+	} finally {
+		pub.close();
+		client.close();
 	}
 });

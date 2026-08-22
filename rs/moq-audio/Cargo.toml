@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.0.17"
+version = "0.0.18"
 edition = "2024"
 rust-version.workspace = true
 
@@ -13,6 +13,13 @@ keywords = ["quic", "http3", "webtransport", "media", "audio"]
 categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
 
 [features]
+# AAC-LC decode via symphonia, on by default. Pure Rust, so it costs no
+# toolchain: the trade this crate already refused for Opus. Only a subscriber to
+# an ingest-sourced broadcast needs it (RTMP, SRT/TS, fmp4, and gstreamer all
+# publish AAC, while everything this crate encodes is Opus or PCM), so a
+# publish-only build can drop it and the two crates it pulls.
+aac = ["dep:symphonia-codec-aac", "dep:symphonia-core"]
+default = ["aac"]
 # Device capture. Microphones go through cpal (pure-Rust: CoreAudio / WASAPI /
 # ALSA); macOS system audio goes through ScreenCaptureKit, which is where Apple
 # puts it. Off by default so audio-only consumers (e.g. moq-ffi) don't pull cpal
@@ -72,6 +79,14 @@ rubato = { version = "4.0", default-features = false }
 # whose echo path changes length does reach (dignifiedquire/sonora#14). The
 # `survives_a_moving_echo_delay` test covers that path.
 sonora = { version = "0.2", optional = true }
+# Pure-Rust AAC-LC decoder, ported from NihAV. Decode only: no Rust AAC encoder
+# exists, and the alternatives (libfdk-aac, ffmpeg) are C libraries we would have
+# to link. Limited to AAC-LC mono/stereo, which is what every ingest gateway
+# publishes; HE-AAC (SBR/PS) is unimplemented upstream and rejected at
+# construction rather than decoded wrong. `symphonia-core` supplies the codec
+# parameter and packet types the decoder is driven with.
+symphonia-codec-aac = { version = "0.6.1", optional = true }
+symphonia-core = { version = "0.6.1", optional = true }
 thiserror = "2"
 # Only the device features need an async runtime: the on-demand capture loop
 # awaits frames and demand transitions, and playback awaits the driver thread.

@@ -38,8 +38,11 @@ Backend selection is automatic and ordered: platform hardware first, then the
 software fallback. The Linux hardware libraries are loaded at runtime (`dlopen`),
 so a binary built with NVENC still links on a GPU-less builder and starts on a
 machine with no NVIDIA driver, falling through to the next backend instead of
-failing to load. No public type, function, or error variant names a backend, so
-swapping one is never a breaking change for you.
+failing to load. Falling past a hardware backend that was compiled in logs a
+warning naming what refused and why, so a host encoding on the CPU when it
+shouldn't be is visible without turning on debug logging. No public type,
+function, or error variant names a backend, so swapping one is never a breaking
+change for you.
 
 **openh264 is the fallback for H.264 only.** It is statically linked and always
 compiled in, so H.264 encodes and decodes on any machine. H.265 is hardware-only:
@@ -64,7 +67,7 @@ cargo add moq-video --features render,pipewire
 | Feature | Default | Pulls in |
 | --- | --- | --- |
 | `capture` | yes | Native device capture (`v4l` and `zune-jpeg` on Linux) |
-| `nvenc` / `nvdec` | yes | NVIDIA encode/decode on Linux (`cudarc`, `moq-nvenc`) |
+| `nvidia` | yes | NVENC encode and NVDEC decode on Linux (`cudarc`, `moq-nvenc`) |
 | `vaapi` | no | Intel/AMD encode on Linux (`moq-vaapi`), unvalidated on hardware |
 | `render` | no | `wgpu`, the GPU renderer, and Linux DMA-BUF support |
 | `pipewire` | no | Wayland/X11 screen capture via xdg-desktop-portal and DMA-BUF |

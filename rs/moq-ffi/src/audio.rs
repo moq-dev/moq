@@ -237,7 +237,13 @@ impl MoqAudioConsumer {
 
 fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::AudioConfig, MoqError> {
 	let codec = catalog_audio.codec.parse().map_err(|_| MoqError::Unsupported)?;
-	if !matches!(&codec, hang::catalog::AudioCodec::Opus) {
+	// What moq-audio's decoder opens. It rejects the rest itself, so this is only
+	// here to report an unusable rendition as a plain Unsupported rather than a
+	// wrapped codec error.
+	if !matches!(
+		&codec,
+		hang::catalog::AudioCodec::Opus | hang::catalog::AudioCodec::AAC(_)
+	) {
 		return Err(MoqError::Unsupported);
 	}
 
@@ -253,7 +259,7 @@ impl MoqBroadcastConsumer {
 	/// Subscribe to an audio track. `catalog_audio_config` comes from
 	/// the catalog (see
 	/// [`MoqCatalogConsumer::next`](crate::consumer::MoqCatalogConsumer::next));
-	/// the codec is inferred from it. Only Opus is currently supported.
+	/// the codec is inferred from it. Only Opus and AAC-LC are supported.
 	pub async fn subscribe_audio(
 		&self,
 		name: String,
@@ -299,8 +305,15 @@ mod tests {
 	}
 
 	#[test]
-	fn audio_config_rejects_non_opus_codec() {
-		let error = audio_config(catalog_audio("mp4a.40.2")).unwrap_err();
+	fn audio_config_accepts_aac() {
+		let config = audio_config(catalog_audio("mp4a.40.2")).unwrap();
+		assert!(matches!(config.codec, hang::catalog::AudioCodec::AAC(_)));
+	}
+
+	#[test]
+	fn audio_config_rejects_a_codec_the_decoder_lacks() {
+		// In the catalog, and decodable in a browser, but not by moq-audio.
+		let error = audio_config(catalog_audio("flac")).unwrap_err();
 		assert!(matches!(error, MoqError::Unsupported));
 	}
 

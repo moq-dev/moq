@@ -98,7 +98,7 @@ jobs:
       # runtime libs (`--with-deps` needs the host package manager); run.sh's own
       # `playwright install` then no-ops.
       - name: Playwright Chromium
-        run: nix develop --command bash -c "bun install && bunx playwright install --with-deps chromium"
+        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
         shell: bash -leo pipefail {0}
 
       - name: WASM

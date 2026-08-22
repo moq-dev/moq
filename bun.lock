@@ -85,7 +85,7 @@
     },
     "js/flate": {
       "name": "@moq/flate",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "dependencies": {
         "pako": "^3.0.1",
       },
@@ -98,7 +98,7 @@
     },
     "js/hang": {
       "name": "@moq/hang",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
         "@libav.js/variant-opus-af": "^6.9.8",
@@ -121,7 +121,7 @@
     },
     "js/json": {
       "name": "@moq/json",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "dependencies": {
         "@moq/flate": "workspace:^",
         "@moq/net": "workspace:^",
@@ -138,7 +138,7 @@
     },
     "js/loc": {
       "name": "@moq/loc",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "dependencies": {
         "@moq/net": "workspace:^",
       },
@@ -170,7 +170,7 @@
     },
     "js/msf": {
       "name": "@moq/msf",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "dependencies": {
         "@moq/net": "workspace:^",
         "zod": "^4.4.3",
@@ -182,11 +182,12 @@
     },
     "js/net": {
       "name": "@moq/net",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "dependencies": {
         "@moq/qmux": "^0.3.3",
         "@moq/signals": "workspace:*",
         "async-mutex": "^0.5.0",
+        "bowser": "^2.14.1",
       },
       "devDependencies": {
         "@types/bun": "^1.3.14",
@@ -242,7 +243,7 @@
     },
     "js/token": {
       "name": "@moq/token",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "bin": {
         "moq-token": "./src/cli.ts",
       },
@@ -265,7 +266,7 @@
     },
     "js/watch": {
       "name": "@moq/watch",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/msf": "workspace:^",
@@ -959,6 +960,8 @@
     "blake3-wasm": ["blake3-wasm@2.1.5", "", {}, "sha512-F1+K8EbfOZE49dtoPtmxUQrpXaBIl3ICvasLh+nJta0xkz+9kF/7uet9fLnwKqhDrmj6g+6K3Tw9yQPUg2ka5g=="],
 
     "boolbase": ["boolbase@1.0.0", "", {}, "sha512-JZOSA7Mo9sNGB8+UjSgzdLtokWAky1zbztM3WRLCbZ70/3cTANmQmOdR7y2g+J0e2WXywy1yS468tY+IruqEww=="],
+
+    "bowser": ["bowser@2.14.1", "", {}, "sha512-tzPjzCxygAKWFOJP011oxFHs57HzIhOEracIgAePE4pqB3LikALKnSzUyU4MGs9/iCEUuHlAJTjTc5M+u7YEGg=="],
 
     "brace-expansion": ["brace-expansion@5.0.6", "", { "dependencies": { "balanced-match": "^4.0.2" } }, "sha512-kLpxurY4Z4r9sgMsyG0Z9uzsBlgiU/EFKhj/h91/8yHu0edo7XuixOIH3VcJ8kkxs6/jPzoI6U9Vj3WqbMQ94g=="],
 

@@ -22,7 +22,7 @@ import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
 import { decodeSubscribeResponse, decodeSubscribeResponseMaybe, Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasExcludeHop, Version } from "./version.ts";
+import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasExcludeHop, hasProbeRtt, Version } from "./version.ts";
 
 // Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
 // drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC streams
@@ -888,12 +888,17 @@ export class Subscriber {
 			for (;;) {
 				const probe = await Probe.decodeMaybe(stream.reader, this.version);
 				if (!probe) break;
-				// A message that omits the RTT leaves the last one standing, so a
-				// bitrate-only report doesn't blank it.
+				// lite-03 carries no RTT field, so an absent value there means "not
+				// carried" and the last reading stands. From lite-04 the field is
+				// always present and 0 explicitly means unknown, so undefined is the
+				// peer retracting a value we would otherwise hold forever.
 				const prev = this.#probe.peek();
+				const rtt = probe.rtt !== undefined ? Time.Milli(probe.rtt) : undefined;
 				this.#probe.set({
-					estimatedRecvRate: probe.bitrate ?? undefined,
-					rtt: probe.rtt !== undefined ? Time.Milli(probe.rtt) : prev.rtt,
+					// `undefined` is the peer reporting "unknown", not an estimate of
+					// zero; letting it through would become a real 0 bps ABR target.
+					estimatedRecvRate: probe.bitrate,
+					rtt: hasProbeRtt(this.version) ? rtt : (rtt ?? prev.rtt),
 				});
 			}
 		} catch (err: unknown) {

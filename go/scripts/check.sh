@@ -21,6 +21,10 @@ if ! command -v go >/dev/null 2>&1; then
     echo "go check: no go on PATH, skipping" >&2
     exit 0
 fi
+# The publish state machine needs neither cargo nor generated bindings, so it
+# runs ahead of the gates that skip a partial toolchain.
+bash "$SCRIPT_DIR/publish-wrapper.test.sh"
+
 if ! command -v cargo >/dev/null 2>&1; then
     echo "go check: no cargo on PATH, skipping" >&2
     exit 0
@@ -46,7 +50,7 @@ CARGO_PROFILE=()
 [[ "$PROFILE" == "release" ]] && CARGO_PROFILE=(--release)
 
 echo "go check: building moq-ffi for $HOST_TARGET..."
-cargo build ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi \
+cargo build --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |

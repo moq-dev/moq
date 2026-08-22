@@ -32,7 +32,7 @@ mod videotoolbox;
 #[cfg(target_os = "windows")]
 mod mediafoundation;
 
-#[cfg(all(target_os = "linux", feature = "nvenc"))]
+#[cfg(all(target_os = "linux", feature = "nvidia"))]
 mod nvenc;
 
 #[cfg(all(target_os = "linux", feature = "vaapi"))]
@@ -99,7 +99,7 @@ const HARDWARE: &[Candidate] = &[
 		codecs: &[Codec::H264, Codec::H265],
 		open: mediafoundation::MediaFoundation::open,
 	},
-	#[cfg(all(target_os = "linux", feature = "nvenc"))]
+	#[cfg(all(target_os = "linux", feature = "nvidia"))]
 	Candidate {
 		name: nvenc::NAME,
 		codecs: &[Codec::H264, Codec::H265],
@@ -135,33 +135,88 @@ const NAMED_ONLY: &[Candidate] = &[Candidate {
 #[cfg(not(test))]
 const NAMED_ONLY: &[Candidate] = &[];
 
+/// A candidate paired with the tier it came from, so [`select`] can tell a
+/// software encoder that was asked for from one reached by falling past
+/// hardware that refused to open.
+struct Attempt<'a> {
+	candidate: &'a Candidate,
+	hardware: bool,
+}
+
+impl<'a> Attempt<'a> {
+	fn hardware(candidate: &'a Candidate) -> Self {
+		Self {
+			candidate,
+			hardware: true,
+		}
+	}
+
+	fn software(candidate: &'a Candidate) -> Self {
+		Self {
+			candidate,
+			hardware: false,
+		}
+	}
+}
+
 /// Open the best encoder for `config.codec` + `config.kind`, trying candidates
 /// in priority order and falling back until one succeeds.
 pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 	let codec = config.codec;
-	let supports = move |c: &&Candidate| c.codecs.contains(&codec);
-	let hardware = HARDWARE.iter().filter(supports);
-	let software = SOFTWARE.iter().filter(supports);
+	let supports = move |c: &Candidate| c.codecs.contains(&codec);
+	let hardware = HARDWARE.iter().filter(|c| supports(c)).map(Attempt::hardware);
+	let software = SOFTWARE.iter().filter(|c| supports(c)).map(Attempt::software);
 
-	let candidates: Vec<&Candidate> = match &config.kind {
+	let attempts: Vec<Attempt> = match &config.kind {
 		Kind::Auto => hardware.chain(software).collect(),
 		Kind::Hardware => hardware.collect(),
 		Kind::Software => software.collect(),
 		Kind::Named(name) => HARDWARE
 			.iter()
-			.chain(SOFTWARE.iter())
-			.chain(NAMED_ONLY.iter())
-			.filter(supports)
-			.filter(|c| c.name == name)
+			.map(Attempt::hardware)
+			.chain(SOFTWARE.iter().chain(NAMED_ONLY.iter()).map(Attempt::software))
+			.filter(|a| supports(a.candidate) && a.candidate.name == name)
 			.collect(),
 	};
 
+	select(attempts, config)
+}
+
+/// Try `attempts` in order and return the first encoder that opens, warning when
+/// that means falling past hardware.
+///
+/// Split out from [`open`] because the candidate lists are platform-gated
+/// consts: what `Auto` has to fall back *from* depends on the machine, so a test
+/// supplies its own attempts instead of hoping the host has the right GPU.
+fn select(attempts: Vec<Attempt>, config: &Config) -> Result<Box<dyn Backend>, Error> {
 	let mut tried = Vec::new();
-	for candidate in candidates {
-		tried.push(candidate.name);
-		match (candidate.open)(config) {
-			Ok(backend) => return Ok(backend),
-			Err(e) => tracing::debug!(encoder = candidate.name, error = %e, "encoder unavailable, trying next"),
+	let mut refused = Vec::new();
+
+	for attempt in attempts {
+		let name = attempt.candidate.name;
+		tried.push(name);
+
+		match (attempt.candidate.open)(config) {
+			Ok(backend) => {
+				// A compiled-in hardware encoder that refuses to open is otherwise
+				// invisible: `Auto` hands back a working software encoder and the only
+				// symptom is the frame rate. Name what refused and why, so the host
+				// diagnoses itself.
+				if !attempt.hardware && !refused.is_empty() {
+					tracing::warn!(
+						encoder = name,
+						refused = %refused.join(", "),
+						"no hardware encoder available, falling back to software"
+					);
+				}
+				return Ok(backend);
+			}
+			Err(e) => {
+				tracing::debug!(encoder = name, error = %e, "encoder unavailable, trying next");
+				if attempt.hardware {
+					refused.push(format!("{name}: {e}"));
+				}
+			}
 		}
 	}
 
@@ -244,5 +299,101 @@ pub(crate) mod test_util {
 			matrix: description.matrix_coefficients,
 			full_range: signal.video_full_range_flag,
 		})
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A backend that opens and encodes nothing. Stands in for a real candidate so
+	/// a selection test doesn't disturb [`probe`]'s process-wide log.
+	struct Stub;
+
+	impl Stub {
+		fn open(_config: &Config) -> Result<Box<dyn Backend>, Error> {
+			Ok(Box::new(Self))
+		}
+	}
+
+	impl Backend for Stub {
+		fn encode(&mut self, _frame: &Frame, _keyframe: bool) -> Result<Vec<Encoded>, Error> {
+			Ok(Vec::new())
+		}
+
+		fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+			Ok(Vec::new())
+		}
+
+		fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
+			Ok(Vec::new())
+		}
+
+		fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
+			Ok(())
+		}
+
+		fn name(&self) -> &str {
+			"stub"
+		}
+	}
+
+	const WORKING: Candidate = Candidate {
+		name: "stub",
+		codecs: &[Codec::H264],
+		open: Stub::open,
+	};
+
+	/// Compiled in but refusing at runtime, the way NVENC does on a host whose
+	/// driver libraries aren't on the loader path.
+	const REFUSING: Candidate = Candidate {
+		name: "driverless",
+		codecs: &[Codec::H264],
+		open: |_| Err(Error::Codec(anyhow::anyhow!("driver libraries not found"))),
+	};
+
+	fn config() -> Config {
+		Config::new(320, 240, 30)
+	}
+
+	#[tracing_test::traced_test]
+	#[test]
+	fn falling_past_hardware_warns() {
+		let backend = select(
+			vec![Attempt::hardware(&REFUSING), Attempt::software(&WORKING)],
+			&config(),
+		)
+		.unwrap();
+		assert_eq!(backend.name(), "stub");
+
+		// The warning has to name what refused and why, or it says no more than the
+		// DEBUG line a user already has to know to go looking for.
+		logs_assert(
+			|lines: &[&str]| match lines.iter().find(|line| line.contains("falling back to software")) {
+				Some(warning) if warning.contains("driverless") && warning.contains("driver libraries not found") => {
+					Ok(())
+				}
+				Some(warning) => Err(format!("warning does not name the refusal: {warning}")),
+				None => Err("no fallback warning".to_owned()),
+			},
+		);
+	}
+
+	#[tracing_test::traced_test]
+	#[test]
+	fn asking_for_software_is_not_a_fallback() {
+		select(vec![Attempt::software(&WORKING)], &config()).unwrap();
+		assert!(!logs_contain("falling back to software"));
+	}
+
+	#[tracing_test::traced_test]
+	#[test]
+	fn hardware_that_opens_is_not_a_fallback() {
+		select(
+			vec![Attempt::hardware(&WORKING), Attempt::software(&WORKING)],
+			&config(),
+		)
+		.unwrap();
+		assert!(!logs_contain("falling back to software"));
 	}
 }

@@ -137,10 +137,9 @@ jobs:
 
       - name: Install uniffi-bindgen-go
         run: |
-          cargo install uniffi-bindgen-go \
+          cargo install --locked uniffi-bindgen-go \
             --git "$UNIFFI_BINDGEN_GO_REPO" \
-            --rev "$UNIFFI_BINDGEN_GO_REV" \
-            --locked
+            --rev "$UNIFFI_BINDGEN_GO_REV"
 
       - name: Generate bindings
         env:

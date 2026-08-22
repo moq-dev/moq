@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.8](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.7...moq-mux-v0.9.8) - 2026-08-20
+
+### Added
+
+- *(hang)* signal stalled video renditions ([#2865](https://github.com/moq-dev/moq/pull/2865))
+
+### Fixed
+
+- *(moq-mux)* compile on wasm32, and gate it so it stays that way
+- *(moq-mux)* accept refreshed clocks on TS duplicates ([#2891](https://github.com/moq-dev/moq/pull/2891))
+
 ## [0.9.7](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.6...moq-mux-v0.9.7) - 2026-08-14
 
 ### Added

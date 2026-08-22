@@ -21,6 +21,7 @@ pub(crate) async fn serve_ws(
 	OriginalUri(uri): OriginalUri,
 	headers: HeaderMap,
 	mtls: Option<Extension<MtlsPeer>>,
+	socket_stats: Option<Extension<crate::web::SocketStats>>,
 	Extension(versions): Extension<moq_net::Versions>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
@@ -72,8 +73,10 @@ pub(crate) async fn serve_ws(
 			publish,
 			subscribe,
 			stats,
+			socket_stats: socket_stats.map(|Extension(s)| s),
 		};
-		let _ = handle_socket(socket, session).await;
+		let expired = async move { token.expired().await };
+		let _ = handle_socket(socket, session, expired).await;
 	}))
 }
 
@@ -91,10 +94,13 @@ struct SessionInputs {
 	publish: Option<origin::Producer>,
 	subscribe: Option<origin::Producer>,
 	stats: Session,
+	/// The kernel's view of the socket under the upgrade, captured at accept time.
+	socket_stats: Option<crate::web::SocketStats>,
 }
 
+/// Serve one upgraded WebSocket until it closes or its credential expires.
 #[tracing::instrument("ws", err, skip_all, fields(id = session.id))]
-async fn handle_socket<T>(socket: T, session: SessionInputs) -> anyhow::Result<()>
+async fn handle_socket<T>(socket: T, session: SessionInputs, expired: impl Future<Output = ()>) -> anyhow::Result<()>
 where
 	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
 		+ futures::Sink<tungstenite::Message, Error = tungstenite::Error>
@@ -109,6 +115,7 @@ where
 		publish,
 		subscribe,
 		stats,
+		socket_stats,
 	} = session;
 
 	// Wrap the WebSocket in a WebTransport compatibility layer. We have to
@@ -121,7 +128,14 @@ where
 	// broadcast it published stays announced for that entire window and the
 	// announce propagates to the rest of the cluster. QUIC gets this from its
 	// idle timeout; WebSocket has no equivalent of its own.
-	let upgraded = qmux::ws::Upgraded::new(socket).with_keep_alive(qmux::ws::KeepAlive::default());
+	let mut upgraded = qmux::ws::Upgraded::new(socket).with_keep_alive(qmux::ws::KeepAlive::default());
+	// Hand qmux the socket we captured before the upgrade erased it, so the session
+	// reports the kernel's RTT (and, on Linux, its delivery rate) from the start
+	// rather than only what QX_PING can measure a round trip later. This is what
+	// fills in the moq-lite PROBE for a WebSocket viewer.
+	if let Some(crate::web::SocketStats(stats)) = socket_stats {
+		upgraded = upgraded.with_socket_stats(stats);
+	}
 	let upgraded = match alpn.as_deref() {
 		Some(alpn) => upgraded.with_alpn(alpn),
 		None => upgraded,
@@ -138,8 +152,17 @@ where
 		server = server.with_subscriber(publish);
 	}
 	// Hold the session so it doesn't close early; the driver serves it in place.
-	let (_session, driver) = server.accept(ws).await?;
-	driver.await.map_err(Into::into)
+	let (session, driver) = server.accept(ws).await?;
+	let mut driver = std::pin::pin!(driver);
+	tokio::select! {
+		res = &mut driver => res.map_err(Into::into),
+		_ = expired => {
+			tracing::info!("credential expired, closing session");
+			session.abort(moq_net::Error::Unauthorized);
+			// Drive the teardown so the close reaches the peer.
+			driver.await.map_err(Into::into)
+		}
+	}
 }
 
 /// Pick a subprotocol for the upgrade, or fail the handshake outright.
@@ -807,10 +830,14 @@ mod tests {
 			publish: None,
 			subscribe: None,
 			stats: Session::default(),
+			// No descriptor to hand over: this drives the transport directly rather
+			// than through an accepted socket.
+			socket_stats: None,
 		};
 		let server = tokio::spawn(handle_socket(
 			Pipe::new(server_incoming, server_to_client, frozen.clone()),
 			session,
+			std::future::pending::<()>(),
 		));
 
 		// A real qmux peer, so the transport handshake completes and its 10s

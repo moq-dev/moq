@@ -8,6 +8,7 @@ import { Reader, Stream } from "../stream.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { sendOrder } from "./priority.ts";
+import { Probe as ProbeMessage } from "./probe.ts";
 import { Publisher } from "./publisher.ts";
 import { decodeSubscribeResponse, Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { ALPN_05, Version } from "./version.ts";
@@ -589,4 +590,70 @@ test("lite draft-05: a group waiting for a stream slot survives the track finish
 	expect(await outcome).toBe("sent");
 
 	close();
+});
+
+// `smoothedRtt` is a DOMHighResTimeStamp, so a real browser hands back a fractional
+// millisecond. The varint encoder converts with `BigInt`, which throws on a fraction,
+// and `runProbe`'s catch would then close the probe stream for the rest of the
+// session. Drive the real loop so removing the rounding fails this test.
+test("runProbe rounds a fractional smoothedRtt instead of killing the stream", async () => {
+	const pair = createMockTransportPair(ALPN_05, {
+		stats: { estimatedSendRate: 1_000_000, smoothedRtt: 12.34 },
+	});
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+
+	// The subscriber opens the probe stream; the publisher only replies on it.
+	const client = await Stream.open(pair.client);
+	const server = await Stream.accept(pair.server);
+	if (!server) throw new Error("publisher never accepted the probe stream");
+
+	// `runProbe` loops until the stream closes, so close it rather than leaving the
+	// task running past the end of the test.
+	const probing = publisher.runProbe(server);
+	try {
+		const probe = await ProbeMessage.decodeMaybe(client.reader, Version.DRAFT_05);
+		expect(probe).toBeDefined();
+		expect(probe?.rtt).toBe(12);
+		expect(probe?.bitrate).toBe(1_000_000);
+	} finally {
+		client.close();
+		await probing;
+	}
+});
+
+test("a same-tick republish survives its predecessor closing", async () => {
+	const pair = createMockTransportPair(ALPN_05);
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+	const path = Path.from("test");
+
+	const first = new BroadcastProducer();
+	publisher.publish(path, first);
+	first.close();
+
+	const second = new BroadcastProducer();
+	const track = second.createTrack("video");
+	publisher.publish(path, second);
+
+	await first.closed;
+
+	const client = await Stream.open(pair.client);
+	const server = await Stream.accept(pair.server);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	const msg = new Subscribe({ id: 0n, broadcast: path, track: "video", priority: 0 });
+	void publisher.runSubscribe(msg, server);
+
+	const group = new GroupProducer(0);
+	group.writeString("hello");
+	group.close();
+	track.writeGroup(group);
+	track.close();
+
+	try {
+		const resp = await decodeSubscribeResponse(client.reader, Version.DRAFT_05);
+		expect("start" in resp || "end" in resp).toBe(true);
+	} finally {
+		publisher.close();
+		client.close();
+	}
 });

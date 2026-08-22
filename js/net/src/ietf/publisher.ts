@@ -123,10 +123,12 @@ export class Publisher {
 			broadcasts.set(path, broadcast);
 		});
 
-		// Remove the broadcast from the lookup when it's closed.
+		// Remove the broadcast from the lookup when it's closed, unless the path was republished.
 		void broadcast.closed.then(() => {
 			this.#broadcasts.mutate((broadcasts) => {
-				broadcasts?.delete(path);
+				if (broadcasts?.get(path) === broadcast) {
+					broadcasts.delete(path);
+				}
 			});
 		});
 	}

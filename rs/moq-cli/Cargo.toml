@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.9.11"
+version = "0.9.12"
 edition = "2024"
 rust-version.workspace = true
 
@@ -18,7 +18,7 @@ name = "moq"
 path = "src/main.rs"
 
 [features]
-default = ["iroh", "quinn", "websocket", "nvenc", "nvdec", "pipewire"]
+default = ["iroh", "quinn", "websocket", "nvidia", "pipewire"]
 iroh = ["moq-native/iroh"]
 jemalloc = ["moq-native/jemalloc"]
 noq = ["moq-native/noq"]
@@ -44,15 +44,20 @@ transcode = ["dep:moq-transcode", "dep:moq-video"]
 # speaker. Off by default because it pulls both graphics and audio device stacks
 # into a binary that may only be routing containers or serving gateways.
 play = ["dep:moq-video", "moq-video/render", "dep:moq-audio", "moq-audio/playback", "dep:pollster", "dep:winit"]
-# NVIDIA hardware codecs for `capture` (Linux), on by default. Each just turns on
-# the matching moq-video feature, and only bites when `capture` pulls in moq-video.
-# For a `capture` build with no CUDA dependencies, drop them, e.g.
+# NVIDIA hardware codecs (NVENC + NVDEC) on Linux, on by default. Just turns on
+# the matching moq-video feature, so it only bites when something else pulls in
+# moq-video: `capture`, `transcode`, or `play`. For a build with no CUDA
+# dependencies, drop it:
 #   cargo build -p moq-cli --no-default-features --features "iroh quinn websocket capture"
-nvenc = ["moq-video?/nvenc", "moq-transcode?/nvenc"]
+nvidia = ["moq-video?/nvidia", "moq-transcode?/nvidia"]
+# Compatibility aliases for the pre-consolidation names, kept so a manifest that
+# already asks for the old split still resolves. Undocumented on purpose: the
+# feature tables name only `nvidia`.
+nvenc = ["nvidia"]
+nvdec = ["nvidia"]
 # Intel/AMD VAAPI hardware encoding (Linux). Off by default because the backend is
 # unvalidated on hardware; enable it explicitly alongside `capture` or `transcode`.
 vaapi = ["moq-video?/vaapi", "moq-transcode?/vaapi"]
-nvdec = ["moq-video?/nvdec", "moq-transcode?/nvdec"]
 # Screen capture for `capture --display` on Linux (xdg-desktop-portal + PipeWire),
 # on by default like the hardware codecs above and trimmable the same way. Only
 # bites when `capture` pulls in moq-video; links libpipewire-0.3 at build time.

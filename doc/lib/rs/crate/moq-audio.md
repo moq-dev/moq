@@ -19,15 +19,16 @@ The native audio stack, and the counterpart to
 | --- | --- | --- |
 | `capture` | Microphone (CoreAudio / WASAPI / ALSA) or macOS system audio | `capture` |
 | `encode` | PCM to Opus or PCM, published through `moq-mux` | always |
-| `decode` | A subscribed track back to PCM | always |
+| `decode` | A subscribed track back to PCM: Opus, PCM, or AAC-LC | always (AAC via `aac`) |
 | `playback` | PCM out a speaker, mixing every track into one device stream | `playback` |
 | `aec` | Subtract what the speaker plays from what the microphone hears | `aec` |
 
 The codecs and DSP are Rust, all the way down. Opus is `unsafe-libopus` (libopus
-transpiled, not wrapped), resampling is `rubato`, echo cancellation is
-[`sonora`](https://crates.io/crates/sonora), a port of WebRTC's audio processing,
-and devices go through `cpal`. So there is no C toolchain, no CMake step, and no
-codec to install on the host.
+transpiled, not wrapped), AAC decode is
+[`symphonia`](https://crates.io/crates/symphonia-codec-aac), resampling is
+`rubato`, echo cancellation is [`sonora`](https://crates.io/crates/sonora), a
+port of WebRTC's audio processing, and devices go through `cpal`. So there is no
+C toolchain, no CMake step, and no codec to install on the host.
 
 The one system dependency is the platform's audio API, and only when you enable
 `capture` or `playback`: CoreAudio and WASAPI ship with the OS, but a Linux build
@@ -77,7 +78,14 @@ for the lowest possible latency and no codec delay.
 ## Subscribing and playback
 
 `decode::Consumer` reads the catalog entry to pick a decoder and resamples to
-whatever rate you ask for. `playback::Engine` owns the output device, and each
+whatever rate you ask for. Alongside the two codecs this crate encodes, it reads
+AAC-LC, which is what a broadcast that arrived through a gateway (RTMP, SRT, HLS,
+gstreamer) carries. That is decode only: there is no Rust AAC encoder, so publish
+Opus. HE-AAC is rejected rather than half-decoded, whether its config says so up
+front (`mp4a.40.5` / `.29`) or hides the SBR in a sync extension after an AAC-LC
+header; only a stream that signals SBR in band alone slips through, and plays as
+its LC core. The `aac` feature (on by default) drops the decoder for a
+publish-only build. `playback::Engine` owns the output device, and each
 `playback::Sink` is one stream mixed into it:
 
 ```rust

@@ -633,6 +633,17 @@ pub struct AuthToken {
 }
 
 impl AuthToken {
+	/// Wait until the backing credential expires, or forever when it has no expiry.
+	pub(crate) async fn expired(&self) {
+		match self.expires {
+			Some(expires) => {
+				let remaining = expires.duration_since(std::time::SystemTime::now()).unwrap_or_default();
+				tokio::time::sleep(remaining).await
+			}
+			None => std::future::pending().await,
+		}
+	}
+
 	/// Construct a token for a peer that was authenticated at the TLS layer
 	/// via mTLS. These peers are granted full publish and subscribe access
 	/// within `root`. The billing tier is left at the default; the caller (mTLS
@@ -3339,5 +3350,28 @@ api = "https://api.example.com/access"
 		})
 		.await;
 		assert!(result.is_err());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn expired_resolves_at_credential_expiry() {
+		let mut token = AuthToken::unrestricted(Path::new("").to_owned());
+		token.expires = Some(std::time::SystemTime::now() + std::time::Duration::from_millis(100));
+
+		let start = tokio::time::Instant::now();
+		tokio::time::timeout(std::time::Duration::from_secs(5), token.expired())
+			.await
+			.expect("an expiring credential must resolve the bound");
+		assert!(
+			start.elapsed() >= std::time::Duration::from_millis(100),
+			"resolved before expiry"
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn expired_pends_without_an_expiry() {
+		let token = AuthToken::unrestricted(Path::new("").to_owned());
+
+		let bounded = tokio::time::timeout(std::time::Duration::from_millis(200), token.expired()).await;
+		assert!(bounded.is_err(), "a token without exp must never expire");
 	}
 }
