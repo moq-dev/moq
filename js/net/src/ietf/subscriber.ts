@@ -45,11 +45,17 @@ type SubscribeSetupState = {
 	stream?: Stream;
 	registeredAlias?: bigint;
 	/**
-	 * Whether SUBSCRIBE_OK arrived, meaning the publisher holds an Established subscription
-	 * and will keep serving it until told otherwise. Set before the alias is bound, since
-	 * binding is one of the things that can fail after the publisher has already accepted.
+	 * Whether the caller has given up. Setup checks this once the stream exists so a request
+	 * opened after the timeout still unwinds: nothing else settles setup if the peer has
+	 * gone quiet, and the cleanup that fired first saw no stream to tear down.
 	 */
-	established?: boolean;
+	cancelled?: boolean;
+	/**
+	 * Whether the SUBSCRIBE reached the wire. From that moment the publisher may be serving,
+	 * even before it answers, so abandoning owes it a cancellation regardless of whether we
+	 * ever saw the SUBSCRIBE_OK.
+	 */
+	sent?: boolean;
 };
 
 /**
@@ -426,6 +432,8 @@ export class Subscriber {
 			// the first pass; the stream is torn down once.
 			let torn = false;
 			const cleanup = async () => {
+				state.cancelled = true;
+
 				if (state.registeredAlias !== undefined && this.#aliases.retire(state.registeredAlias, producer)) {
 					this.#timescales.delete(state.registeredAlias);
 				}
@@ -433,11 +441,11 @@ export class Subscriber {
 				if (!state.stream || torn) return;
 				torn = true;
 
-				// SUBSCRIBE_OK may already have arrived, in which case the publisher holds an
-				// Established subscription and keeps serving it. Aborting says nothing on
-				// v14-16, where the request rides a virtual stream whose reset is local, so
-				// the UNSUBSCRIBE has to go out explicitly.
-				if (state.established) await this.#cancelSubscribe(state.stream, requestId);
+				// Once the SUBSCRIBE is out the publisher may be serving, whether or not it has
+				// answered yet: data streams are independent of the request stream. Aborting says
+				// nothing on v14-16, where the request rides a virtual stream whose reset is
+				// local, so the UNSUBSCRIBE has to go out explicitly.
+				if (state.sent) await this.#cancelSubscribe(state.stream, requestId);
 				state.stream.abort(e);
 			};
 
@@ -532,6 +540,11 @@ export class Subscriber {
 
 		state.stream = await this.#session.openBi();
 
+		// The timeout can fire while the open is still in flight, in which case cleanup ran
+		// with nothing to release. Bail now that the stream is recorded, so settling this
+		// promise hands it back to be torn down.
+		if (state.cancelled) throw new Error("subscribe cancelled before it was sent");
+
 		await state.stream.writer.u53(Subscribe.id);
 		const msg = new Subscribe({
 			requestId,
@@ -540,6 +553,7 @@ export class Subscriber {
 			subscriberPriority: toWire(request.priority),
 		});
 		await msg.encode(state.stream.writer, version);
+		state.sent = true;
 		console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 
 		const respTypeId = await state.stream.reader.u53();
@@ -560,7 +574,6 @@ export class Subscriber {
 		}
 
 		const ok = await SubscribeOk.decode(state.stream.reader, version);
-		state.established = true;
 
 		try {
 			this.#aliases.set(ok.trackAlias, producer, { broadcast, name: request.name });
