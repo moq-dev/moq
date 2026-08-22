@@ -410,14 +410,30 @@ export class Subscriber {
 		const state: SubscribeSetupState = {};
 		const setup = this.#openSubscribe(state, broadcast, request, producer, requestId);
 
+		// The publisher can be serving before it answers, so waiting only on the response
+		// would miss the local side going away and leave it serving a track nobody reads.
+		// Demand returning before we commit is not abandonment, matching the serving loop.
+		const waitAbandoned = async (): Promise<null> => {
+			for (;;) {
+				await producer.unused();
+				if (producer.closed.peek() !== undefined || !producer.used.peek()) return null;
+			}
+		};
+
 		let stream: Stream;
 		let trackAlias: bigint;
 		try {
-			const result = await withTimeout(
-				setup,
-				SUBSCRIBE_OK_TIMEOUT_MS,
-				`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
-			);
+			const result = await Promise.race([
+				withTimeout(
+					setup,
+					SUBSCRIBE_OK_TIMEOUT_MS,
+					`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
+				),
+				waitAbandoned(),
+			]);
+
+			if (result === null) throw new Error("subscribe abandoned before it was accepted");
+
 			stream = result.stream;
 			trackAlias = result.alias;
 			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
@@ -431,7 +447,7 @@ export class Subscriber {
 			// Retirement is repeated because a late SUBSCRIBE_OK can register an alias after
 			// the first pass; the stream is torn down once.
 			let torn = false;
-			const cleanup = async () => {
+			const cleanup = async (afterSetup: boolean) => {
 				state.cancelled = true;
 
 				if (state.registeredAlias !== undefined && this.#aliases.retire(state.registeredAlias, producer)) {
@@ -439,6 +455,13 @@ export class Subscriber {
 				}
 
 				if (!state.stream || torn) return;
+
+				// A SUBSCRIBE still being written must not be torn down from here. Aborting a
+				// Web Stream waits for the in-flight write, so the request can still reach the
+				// peer while the abort destroys the stream we would have cancelled on. Setup
+				// unwinds on the cancelled flag once that write lands, and its pass below has
+				// the finished picture.
+				if (!state.sent && !afterSetup) return;
 				torn = true;
 
 				// Once the SUBSCRIBE is out the publisher may be serving, whether or not it has
@@ -453,8 +476,11 @@ export class Subscriber {
 			// opened the stream and then went quiet never settles it, and deferring would
 			// leave the request outstanding for the life of the session -- which is the
 			// timeout case, not a rare one.
-			void cleanup();
-			setup.then(cleanup, cleanup);
+			void cleanup(false);
+			setup.then(
+				() => cleanup(true),
+				() => cleanup(true),
+			);
 			return;
 		}
 
@@ -554,6 +580,11 @@ export class Subscriber {
 		});
 		await msg.encode(state.stream.writer, version);
 		state.sent = true;
+
+		// The caller may have given up while that write was in flight. It deliberately left
+		// the stream alone, so unwind here and let its cleanup send the cancellation now that
+		// the SUBSCRIBE has actually reached the peer.
+		if (state.cancelled) throw new Error("subscribe cancelled while it was being sent");
 		console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 
 		const respTypeId = await state.stream.reader.u53();
