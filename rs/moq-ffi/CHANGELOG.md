@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.13](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.12...moq-ffi-v0.3.13) - 2026-08-22
+
+### Added
+
+- *(audio)* decode AAC-LC ([#2968](https://github.com/moq-dev/moq/pull/2968))
+
 ## [0.3.12](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.11...moq-ffi-v0.3.12) - 2026-08-20
 
 ### Added

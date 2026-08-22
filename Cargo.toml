@@ -77,16 +77,16 @@ criterion = "0.8"
 flate2 = "1.1"
 getrandom = { version = "0.4", features = ["wasm_js"] }
 hang = { version = "0.20", path = "rs/hang" }
-kio = { version = "0.5.5", path = "rs/kio" }
+kio = { version = "0.5.6", path = "rs/kio" }
 libc = "0.2"
 linux-raw-sys = { version = "0.12.1", features = ["ioctl"] }
 # Permutation testing for the kio primitives (and everything built on them).
 # Only compiled under `--cfg loom`; see `just rs loom`.
 loom = { version = "0.7.2", features = ["futures"] }
-moq-audio = { version = "0.0.18", path = "rs/moq-audio" }
+moq-audio = { version = "0.0.19", path = "rs/moq-audio" }
 moq-flate = { version = "0.1.1", path = "rs/moq-flate" }
-moq-hls = { version = "0.4.9", path = "rs/moq-hls", default-features = false }
-moq-json = { version = "0.3.4", path = "rs/moq-json" }
+moq-hls = { version = "0.4.10", path = "rs/moq-hls", default-features = false }
+moq-json = { version = "0.3.5", path = "rs/moq-json" }
 moq-loc = { version = "0.2", path = "rs/moq-loc" }
 moq-msf = { version = "0.4", path = "rs/moq-msf" }
 moq-mux = { version = "0.9", path = "rs/moq-mux" }
@@ -98,8 +98,8 @@ moq-net = { version = "0.2", path = "rs/moq-net" }
 moq-nvenc = { version = "0.0.3", path = "rs/moq-nvenc" }
 moq-rtc = { version = "0.2.5", path = "rs/moq-rtc" }
 moq-rtmp = { version = "0.2.5", path = "rs/moq-rtmp" }
-moq-srt = { version = "0.2.4", path = "rs/moq-srt" }
-moq-stats = { version = "0.1.5", path = "rs/moq-stats" }
+moq-srt = { version = "0.2.5", path = "rs/moq-srt" }
+moq-stats = { version = "0.1.6", path = "rs/moq-stats" }
 moq-token = { version = "0.7", path = "rs/moq-token" }
 moq-token-cli = { version = "0.5", path = "rs/moq-token-cli" }
 # default-features off (the NVIDIA hardware codecs) on moq-transcode and
