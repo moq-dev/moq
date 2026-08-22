@@ -30,13 +30,6 @@ const TRACK_ALIAS_TIMEOUT: Duration = Duration::from_secs(1);
 /// wait, which is the old behavior rather than a new failure.
 const RETIRED_ALIAS_CAPACITY: usize = 64;
 
-/// The stream reset code for a cancellation, from draft-19 section 3.3.4.
-///
-/// Not [`Error::Cancel`]'s code. That one belongs to the moq-lite space, where cancel is 0,
-/// and 0 here is INTERNAL_ERROR: a routine unsubscribe would reach the publisher looking
-/// like a failure on our side and be counted as one.
-const STREAM_CANCELLED: u32 = 0x1;
-
 /// What a track alias currently refers to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Alias {
@@ -1437,7 +1430,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		// STOP_SENDING needs no acknowledgement, so it goes first and the wait below covers
 		// only what we still have to deliver.
-		reader.stop(STREAM_CANCELLED);
+		reader.stop(super::error::CANCELLED);
 
 		// Finishing alone would leave the writer's Drop free to RESET_STREAM, and a stream
 		// that has sent its FIN is still retransmitting: the reset would discard the
@@ -1920,6 +1913,27 @@ mod tests {
 		);
 	}
 
+	/// A group arriving for a retired alias is the expected tail of our own cancellation, so
+	/// the code that ends up stopping its stream has to say so. moq-lite's cancel encodes to
+	/// 0, which on this wire is an internal failure, and reporting one to a publisher for a
+	/// routine unsubscribe is what distorts its error handling.
+	#[tokio::test(start_paused = true)]
+	async fn a_retired_alias_stops_its_group_stream_as_cancelled() {
+		let aliases = TrackAliases::default();
+		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
+		retire_track_alias(&aliases, 7, RequestId(11));
+
+		let err = resolve_track_alias(aliases.consume(), 7)
+			.await
+			.expect_err("a retired alias resolves to a cancellation");
+
+		assert_eq!(
+			crate::ietf::error::to_stream_code(&err),
+			crate::ietf::error::CANCELLED,
+			"the wire code the dispatch loop stops this stream with",
+		);
+	}
+
 	/// The publisher may point a retired alias at a new track, so a later SUBSCRIBE_OK
 	/// reclaims it rather than colliding with the tombstone.
 	#[test]
@@ -2050,13 +2064,13 @@ mod tests {
 			// routine unsubscribe would read to the publisher as a fault on our side.
 			assert_eq!(
 				log.stops(),
-				vec![STREAM_CANCELLED],
+				vec![crate::ietf::error::CANCELLED],
 				"{version:?}: cancelling must STOP_SENDING the publisher's direction, not just FIN ours",
 			);
 			assert_ne!(
-				STREAM_CANCELLED,
+				crate::ietf::error::CANCELLED,
 				Error::Cancel.to_code(),
-				"the two error spaces disagree; that is why this code is named separately",
+				"the two error spaces disagree; that is why this code is mapped separately",
 			);
 		}
 	}
@@ -2137,7 +2151,7 @@ mod tests {
 		);
 		assert_eq!(
 			log.stops(),
-			vec![STREAM_CANCELLED],
+			vec![crate::ietf::error::CANCELLED],
 			"and must stop the direction the publisher writes",
 		);
 	}

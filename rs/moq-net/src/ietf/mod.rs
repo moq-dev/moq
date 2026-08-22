@@ -9,6 +9,7 @@ mod parameters;
 mod adapter;
 pub mod cluster;
 mod control;
+mod error;
 mod fetch;
 mod goaway;
 mod group;
