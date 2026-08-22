@@ -139,9 +139,9 @@ impl Config {
 
 /// Audio encoder over the PCM layout declared in [`Config::input`].
 ///
-/// Build one with [`Encoder::new`], feed it PCM via [`encode`](Self::encode),
-/// and publish the resulting packets through a [`Producer`](super::Producer)
-/// built from the same [`Config`].
+/// Build one with [`Encoder::new`], feed full PCM frames via
+/// [`encode`](Self::encode), then pass the trailing partial frame to
+/// [`finish`](Self::finish) and publish every packet either call returns.
 pub struct Encoder {
 	backend: Backend,
 	config: Config,
@@ -154,7 +154,11 @@ pub struct Encoder {
 	bitrate: u64,
 	/// Encoder lookahead expressed in the OpusHead 48 kHz timebase.
 	pre_skip: u16,
+	/// Encoder lookahead in codec-rate frames.
+	lookahead: usize,
 	frame_size: usize,
+	/// Whether input has reached the codec, since a fresh encoder owes no drain.
+	started: bool,
 }
 
 enum Backend {
@@ -206,7 +210,7 @@ impl Encoder {
 		}
 
 		let configured = Self::configure_opus(inner, &config, codec_rate, codec_channels);
-		let (bitrate, pre_skip) = match configured {
+		let (bitrate, lookahead, pre_skip) = match configured {
 			Ok(configured) => configured,
 			Err(err) => {
 				// SAFETY: `inner` was created above and not yet handed out.
@@ -225,7 +229,9 @@ impl Encoder {
 			codec_channels,
 			bitrate,
 			pre_skip,
+			lookahead,
 			frame_size,
+			started: false,
 		})
 	}
 
@@ -262,7 +268,9 @@ impl Encoder {
 			codec_channels,
 			bitrate,
 			pre_skip: 0,
+			lookahead: 0,
 			frame_size,
+			started: false,
 		})
 	}
 
@@ -271,7 +279,7 @@ impl Encoder {
 		config: &Config,
 		codec_rate: u32,
 		codec_channels: u32,
-	) -> Result<(u64, u16), Error> {
+	) -> Result<(u64, usize, u16), Error> {
 		if let Some(bitrate) = config.bitrate {
 			Self::set_opus_bitrate(inner, codec_channels, bitrate as u64)?;
 		}
@@ -291,8 +299,10 @@ impl Encoder {
 			.map_err(|_| Error::Unsupported(format!("Opus reported negative lookahead {lookahead}")))?;
 		let pre_skip = u16::try_from((lookahead * 48_000) / codec_rate as u64)
 			.map_err(|_| Error::Unsupported(format!("Opus lookahead {lookahead} does not fit in OpusHead")))?;
+		let lookahead = usize::try_from(lookahead)
+			.map_err(|_| Error::Unsupported(format!("Opus lookahead {lookahead} does not fit in memory")))?;
 
-		Ok((bitrate, pre_skip))
+		Ok((bitrate, lookahead, pre_skip))
 	}
 
 	fn set_opus_bitrate(inner: *mut OpusEncoder, channels: u32, bitrate: u64) -> Result<(), Error> {
@@ -385,7 +395,7 @@ impl Encoder {
 				expected: expected * std::mem::size_of::<f32>(),
 			});
 		}
-		match &mut self.backend {
+		let packet = match &mut self.backend {
 			Backend::Opus(opus) => {
 				// SAFETY: `inner` owns a live OpusEncoder; pcm and scratch slices
 				// are bounded by the lengths we pass.
@@ -401,16 +411,65 @@ impl Encoder {
 				if n < 0 {
 					return Err(crate::opus::error(n, "opus_encode_float"));
 				}
-				Ok(Bytes::copy_from_slice(&opus.scratch[..n as usize]))
+				Bytes::copy_from_slice(&opus.scratch[..n as usize])
 			}
 			Backend::Pcm => {
 				let mut payload = Vec::with_capacity(std::mem::size_of_val(pcm));
 				for sample in pcm {
 					payload.extend_from_slice(&sample.to_le_bytes());
 				}
-				Ok(payload.into())
+				payload.into()
 			}
+		};
+		self.started = true;
+		Ok(packet)
+	}
+
+	/// Finish encoding, zero-padding `pcm` as the final partial frame and
+	/// returning every packet needed to drain codec lookahead.
+	///
+	/// `pcm` is interleaved at [`codec_rate`](Self::codec_rate), may be empty,
+	/// and must contain at most one frame. Silence added here only drains
+	/// audio already supplied; callers must not count it as source duration.
+	/// Consuming the encoder prevents encoding across the artificial terminal
+	/// padding.
+	pub fn finish(mut self, pcm: &[f32]) -> Result<Vec<Bytes>, Error> {
+		let channels = self.codec_channels as usize;
+		let frame_samples = self.frame_size * channels;
+		if pcm.len() > frame_samples || !pcm.len().is_multiple_of(channels) {
+			return Err(Error::Misaligned {
+				got: std::mem::size_of_val(pcm),
+				expected: if pcm.len() > frame_samples {
+					frame_samples * std::mem::size_of::<f32>()
+				} else {
+					pcm.len().next_multiple_of(channels) * std::mem::size_of::<f32>()
+				},
+			});
 		}
+
+		let mut packets = Vec::new();
+		let padding = if pcm.is_empty() {
+			0
+		} else {
+			let mut frame = Vec::with_capacity(frame_samples);
+			frame.extend_from_slice(pcm);
+			frame.resize(frame_samples, 0.0);
+			let padding = (frame_samples - pcm.len()) / channels;
+			packets.push(self.encode(&frame)?);
+			padding
+		};
+
+		if !self.started {
+			return Ok(packets);
+		}
+
+		let drain = self.lookahead.saturating_sub(padding);
+		let silence = vec![0.0; frame_samples];
+		for _ in 0..drain.div_ceil(self.frame_size) {
+			packets.push(self.encode(&silence)?);
+		}
+
+		Ok(packets)
 	}
 
 	/// hang catalog entry describing this encoder's output stream.
@@ -567,6 +626,38 @@ mod tests {
 
 		let second = dec.decode(&enc.encode(&frame).unwrap()).unwrap();
 		assert_eq!(second.len(), frame.len());
+	}
+
+	#[test]
+	fn opus_finish_accounts_for_partial_frame_padding() {
+		let enc = Encoder::new(&Config::new(Input {
+			channels: 1,
+			..Input::default()
+		}))
+		.unwrap();
+
+		// The 360 frames of terminal padding exceed the 312-frame lookahead,
+		// so the partial packet itself completes the drain.
+		let packets = enc.finish(&vec![0.0; 600]).unwrap();
+		assert_eq!(packets.len(), 1);
+	}
+
+	#[test]
+	fn opus_finish_drains_lookahead_across_multiple_short_packets() {
+		let mut enc = Encoder::new(&Config {
+			frame_duration: Duration::from_micros(2_500),
+			..Config::new(Input {
+				channels: 1,
+				..Input::default()
+			})
+		})
+		.unwrap();
+		let frame = vec![0.0; enc.frame_size()];
+		enc.encode(&frame).unwrap();
+
+		// Three 120-frame packets are required to push out 312 frames.
+		let packets = enc.finish(&[]).unwrap();
+		assert_eq!(packets.len(), 3);
 	}
 
 	#[test]
