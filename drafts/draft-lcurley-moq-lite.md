@@ -293,7 +293,7 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x12  | MALFORMED_TRACK | The track's content could not be parsed. |
 | ------- | ------------- | ----------- |
-|  0x20  | CAPACITY | The publisher lacks the capacity to take on the request. The subscriber MAY re-resolve once (see [Wildcards](#wildcards)). |
+|  0x20  | CAPACITY | The publisher lacks the capacity to take on the request. The subscriber MAY re-resolve once (see [Dynamic](#dynamic)). |
 | ------- | ------------- | ----------- |
 
 Note that CANCELLED is 0x1, not 0x0: a stream reset with 0x0 is an INTERNAL_ERROR, not a routine cancellation.
@@ -325,7 +325,7 @@ There's a 1-byte STREAM_TYPE at the beginning of each stream.
 | ------- | ------------- | ----------- |
 |    0x6  | Track        | Subscriber  |
 | ------- | ------------- | ----------- |
-|    0x7  | Wildcard     | Subscriber  |
+|    0x7  | Dynamic      | Subscriber  |
 | ------- | ------------- | ----------- |
 
 ### Announce
@@ -380,33 +380,33 @@ Cooperating redundant publishers opt in by minting the same Epoch, e.g. derived 
 Any other pair is two generations colliding on one path: a relay MUST NOT splice between them and MUST end the lower-Epoch advertisement rather than wait for it to end on its own, which would hold the path for however long the transport takes to notice a publisher is gone.
 Only when both Epochs are 0 does identity fall back to the first entry of the reconstructed path: a shared non-zero first entry is spliceable, while differing or zero first entries (0 proves nothing shared) are a replacement decided toward the most recently received.
 
-### Wildcard {#wildcards}
-A subscriber can open a Wildcard Stream (0x7) to discover patterns of paths the publisher could serve on demand.
-This is routing state rather than content discovery, which is why it is a separate stream from Announce: a wildcard advertises capability, an announcement advertises a broadcast.
+### Dynamic {#dynamic}
+A subscriber can open a Dynamic Stream (0x7) to discover patterns of paths the publisher could serve on demand.
+This is routing state rather than content discovery, which is why it is a separate stream from Announce: a dynamic advertisement offers capability, an announcement advertises a broadcast.
 
-The subscriber creates the stream with a WILDCARD_REQUEST message carrying a path prefix, exactly as ANNOUNCE_REQUEST does.
-The publisher replies with a single WILDCARD_OK message followed by any matching wildcards and any future changes:
+The subscriber creates the stream with a DYNAMIC_REQUEST message carrying a path prefix, exactly as ANNOUNCE_REQUEST does.
+The publisher replies with a single DYNAMIC_OK message followed by any matching dynamic advertisements and any future changes:
 
-- WILDCARD_START: a pattern the publisher could serve.
-- WILDCARD_END: a previously started wildcard is retracted.
-- WILDCARD_UPDATE: a previously started wildcard was atomically replaced.
+- DYNAMIC_START: a pattern the publisher could serve.
+- DYNAMIC_END: a previously started dynamic advertisement is retracted.
+- DYNAMIC_UPDATE: a previously started dynamic advertisement was atomically replaced.
 
-The stream mirrors the Announce Stream's mechanics with its own state: each WILDCARD_START implicitly assigns the next Wildcard ID on the stream, WILDCARD_END and WILDCARD_UPDATE reference that id, each pattern has at most one current wildcard per stream, and the same protocol-violation and stream-close rules apply (see [Announce](#announce)).
-A peer that predates this stream resets it on the unknown stream type (see [STREAM_TYPE](#stream_type)); the subscriber treats the reset as "no wildcards here", and broadcast announcements are unaffected.
+The stream mirrors the Announce Stream's mechanics with its own state: each DYNAMIC_START implicitly assigns the next Dynamic ID on the stream, DYNAMIC_END and DYNAMIC_UPDATE reference that id, each pattern has at most one current advertisement per stream, and the same protocol-violation and stream-close rules apply (see [Announce](#announce)).
+A peer that predates this stream resets it on the unknown stream type (see [STREAM_TYPE](#stream_type)); the subscriber treats the reset as "nothing dynamic here", and broadcast announcements are unaffected.
 
-A wildcard's pattern is a prefix and a suffix, either possibly empty (see [WILDCARD_START](#wildcard-start)).
+A dynamic advertisement's pattern is a prefix and a suffix, either possibly empty (see [DYNAMIC_START](#dynamic-start)).
 A path matches when it starts with the prefix and what remains ends with the suffix, both segment-aware (see [Announce](#announce)).
-A wildcard is a capability, not an inventory: it never implies that any matching path exists, which is what makes an over-claiming pattern well-formed, and refusal (below) is how one path is denied.
-A wildcard carries no `Epoch`, since a pattern names no generation of content.
+A dynamic advertisement is a capability, not an inventory: it never implies that any matching path exists, which is what makes an over-claiming pattern well-formed, and refusal (below) is how one path is denied.
+It carries no `Epoch`, since a pattern names no generation of content.
 
-Wildcards forward like announcements: the hop list, loop discard, cost accumulation, and per-subscriber origin exclusion of [Routing](#routing) apply unchanged.
-A receiver MUST NOT present a wildcard as an available broadcast, and duplicates of one pattern SHOULD be presented combined, gone only when the last advertiser retracts.
+Dynamic advertisements forward like announcements: the hop list, loop discard, cost accumulation, and per-subscriber origin exclusion of [Routing](#routing) apply unchanged.
+A receiver MUST NOT present one as an available broadcast, and duplicates of one pattern SHOULD be presented combined, gone only when the last advertiser retracts.
 
 What patterns a session may advertise is an authorization question, out of scope like the rest, but a receiver MUST enforce that a pattern's prefix is within what the sender may publish.
 The suffix claims nothing about where a path begins, so any pattern with an empty prefix asserts authority over the entire namespace and demands it.
 A mis-scoped empty prefix does not error; it quietly answers for everything.
 
-A receiver MAY resolve a SUBSCRIBE, FETCH, or TRACK request for an unadvertised path against its wildcards.
+A receiver MAY resolve a SUBSCRIBE, FETCH, or TRACK request for an unadvertised path against its dynamic advertisements.
 Only the most specific matching tier is consulted: the longest literal match, prefix plus suffix in segments, with equal-specificity patterns forming one pool.
 Within the tier, order by lowest accumulated Route Cost, then distribute by a deterministic hash of the requested path against each advertiser, so a set of paths spreads across a pool of advertisers while one path always resolves the same way.
 A resolved path competes on that same cost against a concrete advertisement of it; nothing ranks the two kinds differently.
@@ -960,11 +960,11 @@ As defined for [ANNOUNCE_START](#announce-start).
 An update whose only change is a Route Cost is valid: it is how a relay advertises that it started or stopped actively carrying the broadcast.
 
 
-## WILDCARD_REQUEST {#wildcard-request}
-A subscriber sends a WILDCARD_REQUEST message as the first message on a Wildcard Stream, to receive every wildcard whose pattern can match a path starting with the requested prefix (see [Wildcard](#wildcards)).
+## DYNAMIC_REQUEST {#dynamic-request}
+A subscriber sends a DYNAMIC_REQUEST message as the first message on a Dynamic Stream, to receive every dynamic advertisement whose pattern can match a path starting with the requested prefix (see [Dynamic](#dynamic)).
 
 ~~~
-WILDCARD_REQUEST Message {
+DYNAMIC_REQUEST Message {
   Message Length (i)
   Path Prefix (s),
 }
@@ -974,12 +974,12 @@ WILDCARD_REQUEST Message {
 Indicate interest in any pattern that can match a path starting with this prefix.
 
 
-## WILDCARD_OK {#wildcard-ok}
-A publisher sends a WILDCARD_OK message exactly once, as the first message on the response side of a Wildcard Stream.
-Its fields have the same meaning as ANNOUNCE_OK's (see [ANNOUNCE_OK](#announce-ok)), with `Active Count` counting the initial WILDCARD_START messages.
+## DYNAMIC_OK {#dynamic-ok}
+A publisher sends a DYNAMIC_OK message exactly once, as the first message on the response side of a Dynamic Stream.
+Its fields have the same meaning as ANNOUNCE_OK's (see [ANNOUNCE_OK](#announce-ok)), with `Active Count` counting the initial DYNAMIC_START messages.
 
 ~~~
-WILDCARD_OK Message {
+DYNAMIC_OK Message {
   Message Length (i)
   Hop ID (i)
   Active Count (i)
@@ -987,12 +987,12 @@ WILDCARD_OK Message {
 ~~~
 
 
-## WILDCARD_START {#wildcard-start}
-A publisher sends a WILDCARD_START message to advertise a pattern of paths it could serve on demand (see [Wildcard](#wildcards)).
-Each WILDCARD_START implicitly assigns the next Wildcard ID on the stream, later referenced by WILDCARD_END and WILDCARD_UPDATE.
+## DYNAMIC_START {#dynamic-start}
+A publisher sends a DYNAMIC_START message to advertise a pattern of paths it could serve on demand (see [Dynamic](#dynamic)).
+Each DYNAMIC_START implicitly assigns the next Dynamic ID on the stream, later referenced by DYNAMIC_END and DYNAMIC_UPDATE.
 
 ~~~
-WILDCARD_START Message {
+DYNAMIC_START Message {
   Type (i) = 0x0
   Message Length (i)
   Path Prefix (s),
@@ -1004,7 +1004,7 @@ WILDCARD_START Message {
 ~~~
 
 **Type**:
-Set to 0x0 to indicate a WILDCARD_START message.
+Set to 0x0 to indicate a DYNAMIC_START message.
 
 **Path Prefix**:
 The remainder of the pattern's prefix after the stream's requested prefix, like ANNOUNCE_START's Broadcast Path Suffix.
@@ -1021,39 +1021,39 @@ As defined for [ANNOUNCE_START](#announce-start).
 
 **Route Cost**:
 What serving a matching path on demand would cost, in the same units as a broadcast's Route Costs.
-A single value rather than the Warm/Cold pair: a wildcard advertises capability rather than carried content, so it is never warm and the two halves would be provably equal.
-A relay forwarding a wildcard adds the sending peer's declared cost (see [Cost Parameter](#cost-parameter)), saturating, and never applies the actively-carrying discount.
-See [Wildcard](#wildcards) for the floor a standby seed MUST clear.
+A single value rather than the Warm/Cold pair: a dynamic advertisement offers capability rather than carried content, so it is never warm and the two halves would be provably equal.
+A relay forwarding one adds the sending peer's declared cost (see [Cost Parameter](#cost-parameter)), saturating, and never applies the actively-carrying discount.
+See [Dynamic](#dynamic) for the floor a standby seed MUST clear.
 
 
-## WILDCARD_END {#wildcard-end}
-A publisher sends a WILDCARD_END message to retract a previously started wildcard, referencing its Wildcard ID.
+## DYNAMIC_END {#dynamic-end}
+A publisher sends a DYNAMIC_END message to retract a previously started dynamic advertisement, referencing its Dynamic ID.
 The id is retired and MUST NOT be referenced again.
 
 ~~~
-WILDCARD_END Message {
+DYNAMIC_END Message {
   Type (i) = 0x1
   Message Length (i)
-  Wildcard ID (i)
+  Dynamic ID (i)
 }
 ~~~
 
 **Type**:
-Set to 0x1 to indicate a WILDCARD_END message.
+Set to 0x1 to indicate a DYNAMIC_END message.
 
-**Wildcard ID**:
-The ordinal implicitly assigned by a prior WILDCARD_START on this stream, with the same assignment and violation rules as an Announce ID (see [ANNOUNCE_END](#announce-end)).
+**Dynamic ID**:
+The ordinal implicitly assigned by a prior DYNAMIC_START on this stream, with the same assignment and violation rules as an Announce ID (see [ANNOUNCE_END](#announce-end)).
 
 
-## WILDCARD_UPDATE {#wildcard-update}
-A publisher sends a WILDCARD_UPDATE message to atomically replace a previously started wildcard, referencing its Wildcard ID; the id stays live.
+## DYNAMIC_UPDATE {#dynamic-update}
+A publisher sends a DYNAMIC_UPDATE message to atomically replace a previously started dynamic advertisement, referencing its Dynamic ID; the id stays live.
 An update whose only change is the Route Cost is the expected case.
 
 ~~~
-WILDCARD_UPDATE Message {
+DYNAMIC_UPDATE Message {
   Type (i) = 0x2
   Message Length (i)
-  Wildcard ID (i),
+  Dynamic ID (i),
   Hop Count (i),
   Hop ID (i) ...,
   Route Cost (i),
@@ -1061,14 +1061,14 @@ WILDCARD_UPDATE Message {
 ~~~
 
 **Type**:
-Set to 0x2 to indicate a WILDCARD_UPDATE message.
+Set to 0x2 to indicate a DYNAMIC_UPDATE message.
 
-**Wildcard ID**:
-The ordinal implicitly assigned by a prior WILDCARD_START on this stream.
+**Dynamic ID**:
+The ordinal implicitly assigned by a prior DYNAMIC_START on this stream.
 Referencing an id that was never assigned, or one already retired, is a protocol violation.
 
 **Hop Count**, **Hop ID**, and **Route Cost**:
-As defined for [WILDCARD_START](#wildcard-start).
+As defined for [DYNAMIC_START](#dynamic-start).
 
 
 ## SUBSCRIBE
@@ -1480,7 +1480,7 @@ The `Message Length` describes the payload size on the wire.
 - ANNOUNCE_END and ANNOUNCE_UPDATE reference the Announce ID instead of repeating the broadcast path.
 - Replaced the duplicate-`active` restart idiom with ANNOUNCE_UPDATE; a second ANNOUNCE_START for an already-available path is now a protocol violation.
 - Added an `Epoch` to ANNOUNCE_START and ANNOUNCE_UPDATE: a per-path content generation minted by the original publisher and forwarded unchanged, 0 meaning unspecified. The highest Epoch wins (non-zero outranks 0) and replacement is decided by value rather than arrival order; equal non-zero Epochs splice, and the first entry of the path remains the identity only when both are 0. That fallback identity requires a non-zero first entry: 0 identifies nothing, so it never proves continuity, and publishers SHOULD assign themselves a Hop ID (a random per-session value suffices).
-- Added the Wildcard Stream (0x7): WILDCARD_REQUEST/WILDCARD_OK then WILDCARD_START, WILDCARD_END, and WILDCARD_UPDATE advertise a (prefix, suffix) pattern of paths the publisher could serve on demand, mirroring the Announce Stream's mechanics with its own Wildcard ID space. A separate stream because a wildcard is routing capability rather than content discovery, and because a peer without support just resets the unknown stream type, leaving announcements untouched. A wildcard carries a hop list and one Route Cost (no Epoch, never warm) and forwards under the routing rules unchanged. A receiver may resolve a request for an unadvertised path against wildcards: most specific pattern only, then lowest cost, then a hash of the requested path across the pool. A CAPACITY reset permits one re-resolution excluding the refuser; every other reset is terminal.
+- Added the Dynamic Stream (0x7): DYNAMIC_REQUEST/DYNAMIC_OK then DYNAMIC_START, DYNAMIC_END, and DYNAMIC_UPDATE advertise a (prefix, suffix) pattern of paths the publisher could serve on demand, mirroring the Announce Stream's mechanics with its own Dynamic ID space. A separate stream because a dynamic advertisement is routing capability rather than content discovery, and because a peer without support just resets the unknown stream type, leaving announcements untouched. It carries a hop list and one Route Cost (no Epoch, never warm) and forwards under the routing rules unchanged. A receiver may resolve a request for an unadvertised path against dynamic advertisements: most specific pattern only, then lowest cost, then a hash of the requested path across the pool. A CAPACITY reset permits one re-resolution excluding the refuser; every other reset is terminal.
 - Assigned stream error code 0x20 CAPACITY, narrowing the reserved range to 33-63.
 - Specified path matching as segment-aware on `/`-delimited segments, matching the implementations; it was previously stated as byte-by-byte.
 - Added an `Epoch` to SUBSCRIBE, FETCH, and TRACK (0 = current, mismatch = reset) and the resolved `Epoch` to TRACK_INFO, so metadata and groups always come from the same generation and requests cannot race a replacement.
