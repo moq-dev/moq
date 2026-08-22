@@ -3128,11 +3128,15 @@ impl AnnounceConsumer {
 	/// the paths [`next`](Self::next) yields. Live broadcasts that are newly in scope
 	/// are announced immediately, and later ones as they arrive.
 	///
-	/// Returns true if the scope changed. It does nothing and returns false when
-	/// `prefix` is already covered, or when it falls outside the scope this cursor
-	/// was created with. A cursor can be re-widened only up to that scope, never past
-	/// it, otherwise narrowing a [`Consumer`] before handing out the cursor would be
-	/// no restriction at all.
+	/// Returns true if the scope changed, and false when it grants nothing new: either
+	/// `prefix` is already covered, or it lies outside the scope this cursor was
+	/// created with.
+	///
+	/// A cursor can be re-widened only up to its construction scope, never past it,
+	/// otherwise narrowing a [`Consumer`] before handing out the cursor would be no
+	/// restriction at all. A prefix that reaches past that scope is granted for the
+	/// part that falls inside it, so widening to a prefix that covers nothing but
+	/// roots already held is a no-op.
 	///
 	/// Inserting a prefix that spans roots already in scope does not re-announce what
 	/// they cover, so widening `a/b` to `a` announces the rest of `a` and leaves
@@ -3148,6 +3152,17 @@ impl AnnounceConsumer {
 		let Some(selected) = self.allowed.select(&PathPrefixes::new([prefix])) else {
 			return false;
 		};
+
+		// `select` narrows to what the construction scope allows rather than refusing,
+		// so a prefix reaching past it comes back as the roots already held. Granting
+		// nothing new is not a change.
+		if selected
+			.nodes
+			.iter()
+			.all(|(key, _)| self.nodes.nodes.iter().any(|(root, _)| key.has_prefix(root)))
+		{
+			return false;
+		}
 
 		let id = self.id;
 		let root = self.root.clone();
