@@ -299,7 +299,7 @@ impl Timestamp {
 	/// This is the one-way bridge from a local clock to a track timestamp: there is
 	/// deliberately no inverse (a [`Timestamp`] is relative and jittered, never a clock).
 	/// Used to stamp frames that arrive without one, e.g. on protocols whose wire can't
-	/// carry a timestamp. Uses [`web_async::time::Instant::now`] so it works on wasm and honors
+	/// carry a timestamp. Uses [`kio::time::Instant::now`] so it works on wasm and honors
 	/// `tokio::time::pause` in tests.
 	pub fn now() -> Self {
 		clock::now()
@@ -398,7 +398,7 @@ mod clock {
 	});
 
 	pub(super) fn now() -> Timestamp {
-		let instant: std::time::Instant = web_async::time::Instant::now().into();
+		let instant: std::time::Instant = kio::time::Instant::now().into();
 		from_std_instant(instant)
 	}
 
@@ -438,14 +438,14 @@ mod clock {
 
 	use super::Timestamp;
 
-	static TIME_ANCHOR: LazyLock<(web_async::time::Instant, std::time::Duration)> = LazyLock::new(|| {
+	static TIME_ANCHOR: LazyLock<(kio::time::Instant, std::time::Duration)> = LazyLock::new(|| {
 		let jitter = std::time::Duration::from_millis(rand::rng().random_range(1..69_420));
-		(web_async::time::Instant::now(), jitter)
+		(kio::time::Instant::now(), jitter)
 	});
 
 	pub(super) fn now() -> Timestamp {
 		let (anchor_instant, anchor_duration) = *TIME_ANCHOR;
-		let instant = web_async::time::Instant::now();
+		let instant = kio::time::Instant::now();
 		let duration = match instant.checked_duration_since(anchor_instant) {
 			Some(forward) => anchor_duration + forward,
 			None => anchor_duration

@@ -71,7 +71,7 @@ struct Inner {
 	// u64::MAX means unbounded.
 	capacity: AtomicU64,
 	// Reference point for the coarse tick clock.
-	epoch: web_async::time::Instant,
+	epoch: kio::time::Instant,
 	// Sum and count of last-access ticks across the evictable population, giving a
 	// count-weighted mean. Tracks add a group when it becomes evictable (demoted
 	// from the live edge, or inserted behind it) and remove it when it leaves.
@@ -84,7 +84,7 @@ impl Default for Inner {
 		Self {
 			used: AtomicU64::new(0),
 			capacity: AtomicU64::new(u64::MAX),
-			epoch: web_async::time::Instant::now(),
+			epoch: kio::time::Instant::now(),
 			access_sum: AtomicU64::new(0),
 			access_count: AtomicU64::new(0),
 		}

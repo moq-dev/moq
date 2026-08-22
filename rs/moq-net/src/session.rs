@@ -160,7 +160,7 @@ impl Session {
 /// the session ends, and keeps returning that same result if polled again.
 ///
 /// On native, driving requires a tokio runtime with a time driver (timers go
-/// through `web_async::time`); see the crate-level Async docs.
+/// through `kio::time`); see the crate-level Async docs.
 pub struct Driver {
 	state: DriverState,
 	// Retains the waiter across `Future` polls so its kio registrations stay live.
@@ -307,8 +307,8 @@ struct SendBandwidth<S> {
 enum SendBandwidthMode {
 	/// No consumers; sampling is paused.
 	Idle,
-	/// At least one consumer; sample when the sleep elapses.
-	Polling { sleep: MaybeSendBox<'static, ()> },
+	/// At least one consumer; sample when the deadline elapses.
+	Polling { deadline: kio::time::Deadline },
 }
 
 impl<S: crate::transport::poll::Session> SendBandwidth<S> {
@@ -324,13 +324,13 @@ impl<S: crate::transport::poll::Session> SendBandwidth<S> {
 		}
 	}
 
-	/// Sample the current estimate, arming the next sleep. Errors when the
+	/// Sample the current estimate, arming the next deadline. Errors when the
 	/// producer channel is closed.
 	fn sample(&mut self) -> Result<(), Error> {
 		let bitrate = self.session.stats().estimated_send_rate();
 		self.producer.set(bitrate)?;
 		self.mode = SendBandwidthMode::Polling {
-			sleep: web_async::time::sleep(Self::POLL_INTERVAL).maybe_boxed(),
+			deadline: kio::time::Deadline::after(Self::POLL_INTERVAL),
 		};
 		Ok(())
 	}
@@ -354,7 +354,7 @@ impl<S: crate::transport::poll::Session> SendBandwidth<S> {
 						return Poll::Ready(());
 					}
 				}
-				SendBandwidthMode::Polling { sleep } => {
+				SendBandwidthMode::Polling { deadline } => {
 					// Pause before sampling: checked first, like the old biased select.
 					match self.producer.poll_unused(waiter) {
 						Poll::Ready(Ok(())) => {
@@ -365,13 +365,13 @@ impl<S: crate::transport::poll::Session> SendBandwidth<S> {
 						Poll::Pending => {}
 					}
 
-					if waiter.poll_future(sleep.as_mut()).is_pending() {
+					if deadline.poll(waiter).is_pending() {
 						return Poll::Pending;
 					}
 					if self.sample().is_err() {
 						return Poll::Ready(());
 					}
-					// Loop so the fresh sleep registers the waiter.
+					// Loop so the fresh deadline registers the waiter.
 				}
 			}
 		}

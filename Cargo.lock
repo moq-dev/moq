@@ -3822,6 +3822,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "io-uring"
+version = "0.7.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d64d8ca234d152948ceaede1f419b6a83983a5ecccaac05fb337a809c96d3aa6"
+dependencies = [
+ "bitflags 2.13.1",
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "ipconfig"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5151,6 +5162,19 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "moq-uring"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "criterion",
+ "io-uring",
+ "libc",
+ "nix",
+ "noq-udp",
+ "tokio",
 ]
 
 [[package]]

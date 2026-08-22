@@ -27,6 +27,7 @@ members = [
     "rs/moq-token-cli",
     "rs/moq-tokio",
     "rs/moq-transcode",
+    "rs/moq-uring",
     "rs/moq-video",
     "rs/moq-wasm",
 ]
@@ -58,6 +59,7 @@ default-members = [
     "rs/moq-token-cli",
     "rs/moq-tokio",
     "rs/moq-transcode",
+    "rs/moq-uring",
     "rs/moq-video",
     # "rs/moq-wasm",  # wasm32-unknown-unknown target only
 ]
@@ -81,6 +83,7 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 hang = { version = "0.20", path = "rs/hang" }
 # HMAC-SHA256 for the mDNS membership proofs (moq-tokio's `mdns` feature).
 hmac = "0.13"
+io-uring = "0.7.14"
 kio = { version = "0.5.5", path = "rs/kio" }
 libc = "0.2"
 linux-raw-sys = { version = "0.12.1", features = ["ioctl"] }
@@ -124,6 +127,8 @@ moq-vaapi = "0.0.3"
 # whole device graph into every one of them. The NVIDIA codecs are not part of
 # that argument, so moq-ffi and libmoq opt them back in by name.
 moq-video = { version = "0.0.18", path = "rs/moq-video", default-features = false }
+nix = { version = "0.30.1", features = ["net", "socket", "uio"] }
+noq-udp = "1.1.1"
 percent-encoding = "2"
 qmux = { version = "0.5.1", default-features = false }
 serde = { version = "1", features = ["derive"] }

@@ -174,7 +174,7 @@ pub(crate) struct TrackState {
 	// Datagrams in arrival order paired with their arrival time, a best-effort send buffer
 	// evicted by age (see `MAX_DATAGRAM_AGE`). Shares the group `max_sequence` namespace but
 	// is otherwise independent.
-	datagrams: VecDeque<(Datagram, web_async::time::Instant)>,
+	datagrams: VecDeque<(Datagram, kio::time::Instant)>,
 
 	// Number of datagrams dropped off the front (aged out), mapping a subscriber's absolute
 	// cursor to an index into `datagrams` (mirrors `offset` for groups).
@@ -251,7 +251,7 @@ struct Slot {
 
 	// When this group entered the track at this hop. This is the wall-clock
 	// backstop for groups whose first frame has not supplied a timestamp yet.
-	arrived: web_async::time::Instant,
+	arrived: kio::time::Instant,
 
 	// Incarnation stamp, echoed by this slot's arrival entry (if any). A re-served
 	// sequence (an aborted group re-created by the publisher or re-fetched as
@@ -354,7 +354,7 @@ impl TrackState {
 
 	/// Push a datagram onto the buffer, dropping any that have aged past [`MAX_DATAGRAM_AGE`].
 	fn push_datagram(&mut self, datagram: Datagram) {
-		let now = web_async::time::Instant::now();
+		let now = kio::time::Instant::now();
 		self.datagrams.push_back((datagram, now));
 		while let Some((_, at)) = self.datagrams.front() {
 			if now.duration_since(*at) <= MAX_DATAGRAM_AGE {
@@ -814,7 +814,7 @@ impl TrackState {
 			sequence,
 			Slot {
 				group: group.clone(),
-				arrived: web_async::time::Instant::now(),
+				arrived: kio::time::Instant::now(),
 				stamp,
 				visible,
 			},
@@ -2735,7 +2735,7 @@ struct WallEdge {
 	/// The slot incarnation this arrival time was read from, so an eviction or a re-served
 	/// sequence between resolving the anchor and using it is detectable.
 	stamp: u32,
-	arrived: web_async::time::Instant,
+	arrived: kio::time::Instant,
 }
 
 /// The newest servable group that has presented at least one frame.

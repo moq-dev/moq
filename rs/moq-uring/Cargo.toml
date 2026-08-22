@@ -1,0 +1,34 @@
+[package]
+name = "moq-uring"
+description = "Experimental Linux io_uring support for Media over QUIC"
+authors = ["Luke Curley <kixelated@gmail.com>"]
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+
+version = "0.0.1"
+edition = "2024"
+rust-version.workspace = true
+
+keywords = ["quic", "io-uring", "networking", "linux"]
+categories = ["asynchronous", "network-programming", "os::linux-apis"]
+
+publish = false
+
+[dev-dependencies]
+anyhow = "1"
+criterion = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+io-uring = { workspace = true }
+libc = { workspace = true }
+nix = { workspace = true }
+noq-udp = { workspace = true }
+
+[[bench]]
+name = "udp_tokio"
+harness = false
+
+[[bench]]
+name = "udp_uring"
+harness = false

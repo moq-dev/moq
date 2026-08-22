@@ -1333,7 +1333,7 @@ impl Producer {
 /// fail with [`Error::Closed`].
 ///
 /// On native, driving requires a tokio runtime with a time driver (timers go
-/// through `web_async::time`); see the crate-level Async docs.
+/// through `kio::time`); see the crate-level Async docs.
 /// `moq_tokio::origin::spawn` wraps construction and spawning for tokio callers.
 #[must_use = "poll the Driver (spawn or await it) or the origin makes no progress"]
 pub struct Driver {
@@ -1550,7 +1550,7 @@ struct FrontState {
 	/// relay starts its own wait instead of inheriting an aged timer it was
 	/// never held by. See [`HANDOVER_HOLD`]; the front task sleeps on the
 	/// deadline.
-	pending: Option<(HoldKey, web_async::time::Instant)>,
+	pending: Option<(HoldKey, kio::time::Instant)>,
 
 	/// Attach counter, handed to each [`FrontRoute`] so [`route_order`] can break
 	/// an exact tie toward the newest source.
@@ -1728,7 +1728,7 @@ impl FrontState {
 	/// cannot do. It is that the stale advertisement that motivated the adoption
 	/// is refreshed while we wait, so the re-evaluation at expiry runs on current
 	/// costs and usually no longer wants to move at all.
-	fn reselect(&mut self, carrying: bool, now: web_async::time::Instant) -> Option<web_async::time::Instant> {
+	fn reselect(&mut self, carrying: bool, now: kio::time::Instant) -> Option<kio::time::Instant> {
 		let target = self.reselect_target(carrying);
 
 		// What can cycle is re-parenting onto a source reached through a session,
@@ -1837,7 +1837,7 @@ impl FrontState {
 	/// handover order already computes, so it costs nothing and stays put across
 	/// restarts. Added rather than subtracted, so the floor is still
 	/// [`HANDOVER_HOLD`].
-	fn hold_deadline(&self, since: web_async::time::Instant) -> Option<web_async::time::Instant> {
+	fn hold_deadline(&self, since: kio::time::Instant) -> Option<kio::time::Instant> {
 		let spread = (HANDOVER_HOLD / 2).as_millis() as u64;
 		let key = fnv_key(&self.path.as_path(), [self.self_origin]);
 		since.checked_add(HANDOVER_HOLD + Duration::from_millis(key % spread.max(1)))
@@ -1967,7 +1967,7 @@ fn detach_source(state: &kio::Producer<FrontState>, broadcast: &broadcast::Produ
 			return;
 		};
 		s.routes.remove(pos);
-		s.reselect(carrying, web_async::time::Instant::now());
+		s.reselect(carrying, kio::time::Instant::now());
 		if s.routes.is_empty() && !s.closed {
 			// Last one out: close now. The front task observes `closed` and
 			// finishes the teardown (unpublish).
@@ -2181,7 +2181,7 @@ async fn run_source(task: SourceTask) {
 							continue;
 						}
 						entry.route = update;
-						s.reselect(carrying, web_async::time::Instant::now());
+						s.reselect(carrying, kio::time::Instant::now());
 					}
 					// Toggle the ingress announce guard on a live/offline transition.
 					sync_announce(&mut announce, announced, &ingress);
@@ -2299,7 +2299,7 @@ fn attach_source(
 					route: route.clone(),
 					source: source.clone(),
 				});
-				s.reselect(carrying, web_async::time::Instant::now());
+				s.reselect(carrying, kio::time::Instant::now());
 				joined = Some(id);
 			} else if !may_take_over || !route.announce || s.taints_a_reader(&route) {
 				return Attach::Parked(existing.state.clone());
@@ -2449,7 +2449,7 @@ async fn run_front(
 				let carrying = broadcast.demand().is_used();
 				if let Ok(mut s) = state.write() {
 					s.excluded_changed = false;
-					s.reselect(carrying, web_async::time::Instant::now());
+					s.reselect(carrying, kio::time::Instant::now());
 				}
 				sync_front(&state, &broadcast, &node);
 			}
@@ -2516,7 +2516,7 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 	// refusal (ids are never reused, so this cannot wedge).
 	let mut dead: HashSet<u64> = HashSet::new();
 	// When the spliced segment stopped being read, starting the release countdown.
-	let mut idle_since: Option<web_async::time::Instant> = None;
+	let mut idle_since: Option<kio::time::Instant> = None;
 	let mut deadline = kio::time::Deadline::new();
 
 	loop {
@@ -2556,7 +2556,7 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 		// segment's edge behind for the next takeover to splice above.
 		let used = resume.is_used();
 		idle_since = match (resume.is_spliced(), used) {
-			(true, false) => idle_since.or_else(|| Some(web_async::time::Instant::now())),
+			(true, false) => idle_since.or_else(|| Some(kio::time::Instant::now())),
 			_ => None,
 		};
 		deadline.set(idle_since.and_then(|at| at.checked_add(TRACK_IDLE_LINGER)));
@@ -3934,7 +3934,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_blocks_the_stale_ring() {
 		let ids = [1u64, 2, 3];
-		let now = web_async::time::Instant::now();
+		let now = kio::time::Instant::now();
 
 		let moved: Vec<bool> = (0..3)
 			.map(|i| {
@@ -3966,7 +3966,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_blocks_a_forwarder_ring() {
 		let ids = [1u64, 2, 3];
-		let now = web_async::time::Instant::now();
+		let now = kio::time::Instant::now();
 
 		let moved: Vec<bool> = (0..3)
 			.map(|i| {
@@ -3992,7 +3992,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_expires() {
 		let peer = Origin::new(3).unwrap();
-		let start = web_async::time::Instant::now();
+		let start = kio::time::Instant::now();
 		let mut state = front_state(
 			origin_keyed("test", peer, false),
 			vec![upstream_route(10), sibling_route(peer, 4)],
@@ -4029,7 +4029,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_spread_is_stable() {
 		let peer = Origin::new(3).unwrap();
-		let now = web_async::time::Instant::now();
+		let now = kio::time::Instant::now();
 		let build = || {
 			front_state(
 				origin_keyed("test", peer, false),
@@ -4051,7 +4051,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_covers_a_drain() {
 		let peer = Origin::new(3).unwrap();
-		let now = web_async::time::Instant::now();
+		let now = kio::time::Instant::now();
 		let mut state = front_state(
 			origin_keyed("test", peer, false),
 			vec![upstream_route(broadcast::DRAIN_COST), sibling_route(peer, 4)],
@@ -4073,7 +4073,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_ignores_moves_that_cannot_cycle() {
 		let peer = Origin::new(3).unwrap();
-		let now = web_async::time::Instant::now();
+		let now = kio::time::Instant::now();
 		let keyed = || origin_keyed("test", peer, false);
 
 		// A local publish reaches no session, so nothing can depend on us through it.
@@ -4101,7 +4101,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_exempts_an_unannounced_incumbent() {
 		let peer = Origin::new(3).unwrap();
-		let now = web_async::time::Instant::now();
+		let now = kio::time::Instant::now();
 		let offline = upstream_route(10).with_announce(false);
 		let mut state = front_state(origin_keyed("test", peer, false), vec![offline, sibling_route(peer, 4)]);
 
@@ -4118,7 +4118,7 @@ mod tests {
 	/// session reconnecting": it is held like any other re-parent.
 	#[test]
 	fn test_handover_hold_covers_anonymous_relays() {
-		let now = web_async::time::Instant::now();
+		let now = kio::time::Instant::now();
 		let anon = |cold: u64| warm_route(&[90, 0], cold, SIBLING_LINK);
 		let mut state = front_state(Origin::new(7).unwrap(), vec![anon(10), anon(1)]);
 
@@ -4135,7 +4135,7 @@ mod tests {
 	/// hold at all, and two relays could cross-adopt through exactly that gap.
 	#[test]
 	fn test_handover_hold_is_keyed_to_the_target() {
-		let start = web_async::time::Instant::now();
+		let start = kio::time::Instant::now();
 		let relay_b = OriginList::try_from(vec![Origin::new(90).unwrap(), Origin::new(3).unwrap()]).unwrap();
 		let relay_c = OriginList::try_from(vec![Origin::new(90).unwrap(), Origin::new(4).unwrap()]).unwrap();
 
@@ -4187,7 +4187,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_covers_an_idle_front() {
 		let peer = Origin::new(3).unwrap();
-		let now = web_async::time::Instant::now();
+		let now = kio::time::Instant::now();
 		let mut state = front_state(
 			origin_keyed("test", peer, false),
 			vec![upstream_route(10), sibling_route(peer, 4)],
@@ -4204,7 +4204,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_covers_an_opaque_one_hop_peer() {
 		let peer = Origin::new(3).unwrap();
-		let now = web_async::time::Instant::now();
+		let now = kio::time::Instant::now();
 		let opaque = announce()
 			.with_hops(OriginList::try_from(vec![peer]).unwrap())
 			.with_cost(broadcast::Cost::UNKNOWN.charged(1));
@@ -4228,7 +4228,7 @@ mod tests {
 	fn test_a_tainted_incumbent_is_never_retained() {
 		let reader = Origin::new(5).unwrap();
 		let clean_peer = Origin::new(3).unwrap();
-		let now = web_async::time::Instant::now();
+		let now = kio::time::Instant::now();
 
 		// The incumbent runs through the reader and is cheaply rooted, so we outrank
 		// the clean alternative and would otherwise both veto and hold the move.

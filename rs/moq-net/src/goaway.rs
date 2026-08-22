@@ -274,28 +274,28 @@ pub(crate) struct Enforce<S: crate::transport::poll::Session> {
 	session: S,
 	/// The armed deadline, or `None` when the GOAWAY carried no timeout (ready
 	/// immediately: there is nothing to enforce).
-	deadline: Option<(crate::util::MaybeSendBox<'static, ()>, Duration)>,
+	deadline: Option<(kio::time::Deadline, Duration)>,
 }
 
 impl<S: crate::transport::poll::Session> Enforce<S> {
 	pub fn new(session: S, timeout: Option<Duration>) -> Self {
-		use crate::util::MaybeBoxedExt;
 		Self {
 			session,
-			deadline: timeout.map(|timeout| (web_async::time::sleep(timeout).maybe_boxed(), timeout)),
+			deadline: timeout.map(|timeout| (kio::time::Deadline::after(timeout), timeout)),
 		}
 	}
 
 	/// Ready once the session closes on its own or the deadline passes (closing it).
-	pub fn poll(&mut self, cx: &mut std::task::Context<'_>) -> Poll<()> {
+	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let Some((deadline, timeout)) = &mut self.deadline else {
 			return Poll::Ready(());
 		};
 
-		if self.session.poll_closed(cx).is_ready() {
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		if self.session.poll_closed(&mut cx).is_ready() {
 			return Poll::Ready(());
 		}
-		std::task::ready!(deadline.as_mut().poll(cx));
+		std::task::ready!(deadline.poll(waiter));
 
 		tracing::warn!(?timeout, "peer did not leave before the GOAWAY deadline; closing");
 		self.session
@@ -309,7 +309,7 @@ impl<S: crate::transport::poll::Session> Enforce<S> {
 /// The async form of [`Enforce`], for drivers that are still `async` themselves.
 pub(crate) async fn enforce<S: crate::transport::poll::Session>(session: &mut S, timeout: Option<Duration>) {
 	let mut enforce = Enforce::new(session.clone(), timeout);
-	std::future::poll_fn(|cx| enforce.poll(cx)).await
+	kio::wait(|waiter| enforce.poll(waiter)).await
 }
 
 /// The halves held by the public [`crate::Session`].

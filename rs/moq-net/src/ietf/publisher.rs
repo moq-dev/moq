@@ -46,7 +46,7 @@ struct Watched {
 	/// When demand drained while a zero cost was advertised. Restoring the cold cost is
 	/// deferred by [`crate::broadcast::COST_LINGER`] past this, so viewer churn does not
 	/// flap routing across the mesh; demand returning in the window cancels it.
-	idle_at: Option<web_async::time::Instant>,
+	idle_at: Option<kio::time::Instant>,
 	/// Set once the broadcast errors, so a dead entry stops being polled.
 	dead: bool,
 	/// The peer should hold this namespace but does not: it refused the request, or we
@@ -69,7 +69,7 @@ enum Refused {
 	#[default]
 	No,
 	/// Refused with a minimum wait before re-offering.
-	Until(web_async::time::Instant),
+	Until(kio::time::Instant),
 	/// Refused with an interval of 0: the peer does not want this offered again.
 	Never,
 }
@@ -80,7 +80,7 @@ impl Refused {
 	/// The single gate, consulted on every reconciliation rather than only on the retry
 	/// sweep: a route change re-prices an advertisement but does not excuse us from a
 	/// wait the peer asked for, nor make a refused namespace a different one.
-	fn offerable(&self, now: web_async::time::Instant) -> bool {
+	fn offerable(&self, now: kio::time::Instant) -> bool {
 		match self {
 			Self::No => true,
 			Self::Until(at) => now >= *at,
@@ -378,7 +378,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 	/// off). `fired` is the linger deadline's verdict for this turn.
 	fn poll_watched(
 		watched: &mut HashMap<crate::PathOwned, Watched>,
-		fired: Option<web_async::time::Instant>,
+		fired: Option<kio::time::Instant>,
 		waiter: &kio::Waiter,
 	) -> Poll<Watch> {
 		for (path, watch) in watched.iter_mut() {
@@ -438,7 +438,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 	}
 
 	/// The earliest deferred cost-restore across every watched broadcast.
-	fn linger_deadline(watched: &HashMap<crate::PathOwned, Watched>) -> Option<web_async::time::Instant> {
+	fn linger_deadline(watched: &HashMap<crate::PathOwned, Watched>) -> Option<kio::time::Instant> {
 		watched
 			.values()
 			.filter_map(|watch| watch.idle_at)
@@ -866,7 +866,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 
 		// A fresh offer waits for what the refusal asked for, whatever brought us back.
 		// Only withdrawing and re-announcing clears it, since that builds a fresh entry.
-		if wanted && !held && !refused.offerable(web_async::time::Instant::now()) {
+		if wanted && !held && !refused.offerable(kio::time::Instant::now()) {
 			return Ok(());
 		}
 
@@ -1035,7 +1035,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		match (self.version, retry_interval) {
 			(Version::Draft14 | Version::Draft15, _) => Refused::No,
 			(_, 0) => Refused::Never,
-			(_, ms) => Refused::Until(web_async::time::Instant::now() + Duration::from_millis(ms)),
+			(_, ms) => Refused::Until(kio::time::Instant::now() + Duration::from_millis(ms)),
 		}
 	}
 
@@ -1278,7 +1278,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		// the next time that fails. Jittered so a relay's namespaces don't all come back on
 		// the same tick.
 		let mut retry = kio::time::Deadline::new();
-		let mut retry_at: Option<web_async::time::Instant> = None;
+		let mut retry_at: Option<kio::time::Instant> = None;
 		let mut retry_delay = RETRY_BASE;
 
 		// Stream updates (origin (un)announces plus watched route and demand
@@ -1289,7 +1289,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 			match ns.watched.values().any(|watch| watch.deferred) {
 				// Arm on the edge, so a turn that changes nothing else doesn't push the
 				// deadline out forever.
-				true => retry_at = retry_at.or_else(|| Some(web_async::time::Instant::now() + jitter(retry_delay))),
+				true => retry_at = retry_at.or_else(|| Some(kio::time::Instant::now() + jitter(retry_delay))),
 				false => {
 					retry_at = None;
 					retry_delay = RETRY_BASE;
@@ -1314,7 +1314,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 					}
 					// Stamped per poll rather than kept: the turn always ends in a
 					// `Ready` below once it fires, so it never has to survive.
-					let fired = linger.poll(waiter).is_ready().then(web_async::time::Instant::now);
+					let fired = linger.poll(waiter).is_ready().then(kio::time::Instant::now);
 					match Self::poll_watched(watched, fired, waiter) {
 						Poll::Ready(Watch::Changed(path)) => return Poll::Ready(NamespaceEvent::Routes(path)),
 						Poll::Ready(Watch::Idle(path)) => return Poll::Ready(NamespaceEvent::Idle(path)),
@@ -1389,7 +1389,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				}
 				NamespaceEvent::Idle(suffix) => {
 					if let Some(watch) = ns.watched.get_mut(&suffix) {
-						watch.idle_at = Some(web_async::time::Instant::now());
+						watch.idle_at = Some(kio::time::Instant::now());
 					}
 				}
 			}
@@ -2010,7 +2010,7 @@ mod tests {
 			hops: cluster::HopPath::new(hops.clone()),
 			cost: 0,
 		}));
-		watch.idle_at = Some(web_async::time::Instant::now());
+		watch.idle_at = Some(kio::time::Instant::now());
 		let watched = HashMap::from([(crate::Path::new("cam").to_owned(), watch)]);
 		assert!(Publisher::<SinkSession>::linger_deadline(&watched).is_some());
 
@@ -2030,7 +2030,7 @@ mod tests {
 
 		// So does one that stopped being advertisable at all.
 		let mut watch = watched.into_values().next().unwrap();
-		watch.idle_at = Some(web_async::time::Instant::now());
+		watch.idle_at = Some(kio::time::Instant::now());
 		watch.set_sent(Advert::None);
 		let watched = HashMap::from([(crate::Path::new("cam").to_owned(), watch)]);
 		assert_eq!(Publisher::<SinkSession>::linger_deadline(&watched), None);

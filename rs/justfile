@@ -430,6 +430,20 @@ build:
 bench preset url *args:
     cargo run --release -p moq-bench -- --file 'rs/moq-bench/config/{{ preset }}.toml' --connect '{{ url }}' {{ args }}
 
+# Measure the Linux Tokio/epoll UDP syscall path. Extra args pass to Criterion,
+# e.g. `just rs bench-udp-tokio --quick`.
+bench-udp-tokio *args:
+    cargo bench -p moq-uring --bench udp_tokio -- {{ args }}
+
+# Measure the Linux io_uring UDP completion path with multishot recvmsg.
+bench-udp-uring *args:
+    cargo bench -p moq-uring --bench udp_uring -- {{ args }}
+
+# Run the comparable epoll and io_uring UDP matrices.
+bench-udp *args:
+    cargo bench -p moq-uring --bench udp_tokio -- {{ args }}
+    cargo bench -p moq-uring --bench udp_uring -- {{ args }}
+
 # Sample a process's CPU/memory/context switches on this host (run it where the
 # relay runs; it only reads /proc). E.g. `just rs bench-host --name moq-relay`.
 bench-host *args:

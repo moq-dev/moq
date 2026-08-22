@@ -33,7 +33,7 @@ struct WatchedRoute {
 	/// restores the cold cost is deferred by [`COST_LINGER`] past this, so
 	/// viewer churn doesn't flap routing across the mesh; demand returning in
 	/// the window cancels the restore.
-	idle_at: Option<web_async::time::Instant>,
+	idle_at: Option<kio::time::Instant>,
 }
 
 /// What the peer currently holds for a path: the forwarded hop chain plus, on
@@ -313,8 +313,8 @@ impl<S: crate::transport::poll::Session> Control<S> {
 struct ProbeServe<S: crate::transport::poll::Session> {
 	shared: Arc<Shared<S>>,
 	stream: Option<Stream<S, Version>>,
-	last_sent: Option<(lite::Probe, web_async::time::Instant)>,
-	interval: web_async::time::Interval,
+	last_sent: Option<(lite::Probe, kio::time::Instant)>,
+	next_probe: kio::time::Deadline,
 }
 
 impl<S: crate::transport::poll::Session> ProbeServe<S> {
@@ -353,7 +353,8 @@ impl<S: crate::transport::poll::Session> ProbeServe<S> {
 			shared,
 			stream: Some(stream),
 			last_sent: None,
-			interval: web_async::time::interval(Self::PROBE_INTERVAL),
+			// Send the first probe immediately, then keep an anchored cadence.
+			next_probe: kio::time::Deadline::at(kio::time::Instant::now()),
 		}
 	}
 
@@ -380,7 +381,12 @@ impl<S: crate::transport::poll::Session> ProbeServe<S> {
 			if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
 				return Poll::Ready(res);
 			}
-			ready!(self.interval.poll_tick(&mut cx));
+			ready!(self.next_probe.poll(waiter));
+			let next = self
+				.next_probe
+				.deadline()
+				.and_then(|at| at.checked_add(Self::PROBE_INTERVAL));
+			self.next_probe.set(next);
 
 			// The two fields are independent on the wire, each using 0 for unknown,
 			// so a transport that exposes only one still has something to report.
@@ -426,7 +432,7 @@ impl<S: crate::transport::poll::Session> ProbeServe<S> {
 
 			if should_send {
 				stream.writer.buffer(&report)?;
-				self.last_sent = Some((report, web_async::time::Instant::now()));
+				self.last_sent = Some((report, kio::time::Instant::now()));
 			}
 		}
 	}
@@ -789,7 +795,7 @@ impl AnnounceRun {
 				}
 				// Stamped per turn rather than kept: the turn always ends in an op
 				// below once it fires, so it never has to survive.
-				let fired = self.linger.poll(waiter).is_ready().then(web_async::time::Instant::now);
+				let fired = self.linger.poll(waiter).is_ready().then(kio::time::Instant::now);
 				// Poll every watched broadcast for a route-table change; each
 				// wake rescans the map, which announce-control rates make fine.
 				for (suffix, entry) in self.watched.iter_mut() {
@@ -1026,7 +1032,7 @@ impl AnnounceRun {
 				// restore rides the deadline unless demand returns first.
 				Op::Idle(suffix) => {
 					if let Some(entry) = self.watched.get_mut(&suffix) {
-						entry.idle_at = Some(web_async::time::Instant::now());
+						entry.idle_at = Some(kio::time::Instant::now());
 					}
 				}
 				// The linger sleep's job is done; the next turn arms the next

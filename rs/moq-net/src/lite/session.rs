@@ -480,7 +480,7 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 						Err(err) => self.enforce_after(err, timeout),
 					}
 				}
-				SendGoawayState::Enforce(enforce) => return enforce.poll(&mut cx),
+				SendGoawayState::Enforce(enforce) => return enforce.poll(waiter),
 			}
 		}
 	}
