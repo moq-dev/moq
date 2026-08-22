@@ -255,10 +255,10 @@
         # The tag pairs the generator's own version with the uniffi release it
         # targets (v0.8.0+v0.32.0 -> uniffi 0.32), and it only understands
         # metadata emitted by that uniffi, so it moves with the `uniffi`
-        # dependency in rs/moq-ffi/Cargo.toml. Four other places name the same
-        # repo and tag and must be bumped together: UNIFFI_BINDGEN_GO_REPO and
-        # UNIFFI_BINDGEN_GO_TAG in release-go-ffi.yml, and the `cargo install`
-        # line in go/ffi/README.md, go/scripts/check.sh, and
+        # dependency in rs/moq-ffi/Cargo.toml. Five other places name the same
+        # generator version and must be bumped together: the repo and revision
+        # in release-go-ffi.yml, and the `cargo install` line in
+        # rs/moq-ffi/build.sh, go/ffi/README.md, go/scripts/check.sh, and
         # doc/lib/go/moq-ffi.md.
         #
         # This points at a fork rather than NordSecurity because upstream has no

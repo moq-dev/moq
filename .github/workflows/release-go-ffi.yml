@@ -27,8 +27,9 @@ concurrency:
 
 env:
   # A fork until NordSecurity ships a uniffi 0.32 generator; see flake.nix.
+  # The revision is the commit behind v0.8.0+v0.32.0.
   UNIFFI_BINDGEN_GO_REPO: https://github.com/kixelated/uniffi-bindgen-go
-  UNIFFI_BINDGEN_GO_TAG: v0.8.0+v0.32.0
+  UNIFFI_BINDGEN_GO_REV: 4f79e52bd8f518e5fa4d7acff9e586aee21e12a0
 
 jobs:
   parse-version:
@@ -138,7 +139,7 @@ jobs:
         run: |
           cargo install uniffi-bindgen-go \
             --git "$UNIFFI_BINDGEN_GO_REPO" \
-            --tag "$UNIFFI_BINDGEN_GO_TAG" \
+            --rev "$UNIFFI_BINDGEN_GO_REV" \
             --locked
 
       - name: Generate bindings
