@@ -8,6 +8,8 @@ use crate::{
 
 use std::task::{Context, Poll, ready};
 
+use web_transport_trait::{MaybeSend, MaybeSync};
+
 use super::{
 	DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, SubscriberDriver, Version,
 };
@@ -49,7 +51,10 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 }
 
 /// Everything one moq-lite session needs to start.
-pub struct Config<S: crate::transport::poll::Session> {
+pub struct Config<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
+	/// The runtime that arms the session's timers.
+	pub runtime: R,
+
 	/// The transport carrying the session. Cloned into every loop that outlives
 	/// [`start`], so the connection closes when the last of them drops.
 	pub session: S,
@@ -87,8 +92,14 @@ pub struct Config<S: crate::transport::poll::Session> {
 /// Start a lite session.
 ///
 /// Returns the receive-bandwidth consumer (if any) plus the driver that runs the session.
-pub fn start<S: crate::transport::poll::Session>(config: Config<S>) -> Result<SessionStart, Error> {
+pub fn start<S, R>(config: Config<S, R>) -> Result<SessionStart, Error>
+where
+	S: crate::transport::poll::Session,
+	R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
+	R::Timer: MaybeSend,
+{
 	let Config {
+		runtime,
 		mut session,
 		setup_stream,
 		publish,
@@ -157,6 +168,7 @@ pub fn start<S: crate::transport::poll::Session>(config: Config<S>) -> Result<Se
 	let our_cost = our_setup.cost;
 
 	let publisher = Publisher::new(PublisherConfig {
+		runtime: runtime.clone(),
 		session: session.clone(),
 		origin: publish,
 		version,
@@ -182,7 +194,7 @@ pub fn start<S: crate::transport::poll::Session>(config: Config<S>) -> Result<Se
 		setup: version
 			.has_setup_stream()
 			.then(|| SendSetup::new(session.clone(), our_setup, version)),
-		goaway: Some(SendGoaway::new(session.clone(), goaway, version)),
+		goaway: Some(SendGoaway::new(runtime, session.clone(), goaway, version)),
 		session_stream: setup_stream,
 		publisher,
 		subscriber: SubscriberDriver::new(subscriber),
@@ -221,20 +233,25 @@ pub fn start<S: crate::transport::poll::Session>(config: Config<S>) -> Result<Se
 
 /// The lite session driver: one poll function racing every protocol arm, in
 /// place of a task set of boxed futures.
-struct Driver<S: crate::transport::poll::Session> {
+struct Driver<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	/// Advertising our capabilities, or `None` once sent (or on a version with no
 	/// Setup Stream).
 	setup: Option<SendSetup<S>>,
 	/// Sending our single GOAWAY if the drain trigger fires, or `None` once done.
-	goaway: Option<SendGoaway<S>>,
+	goaway: Option<SendGoaway<S, R>>,
 	/// The legacy session stream (pre-lite-03). Only its *error* ends the race, so
 	/// the publisher and subscriber keep running while it sits idle.
 	session_stream: Option<Stream<S, Version>>,
-	publisher: Publisher<S>,
+	publisher: Publisher<S, R>,
 	subscriber: SubscriberDriver<S>,
 }
 
-impl<S: crate::transport::poll::Session> Driver<S> {
+impl<S, R> Driver<S, R>
+where
+	S: crate::transport::poll::Session,
+	R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
+	R::Timer: MaybeSend,
+{
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut cx = Context::from_waker(waiter.waker());
 
@@ -357,17 +374,18 @@ impl<S: crate::transport::poll::Session> SendSetup<S> {
 /// Runs on every version, including those with no GOAWAY message: the deadline is
 /// the sender's own timer, so a caller draining a lite-03 peer still gets the
 /// session closed on schedule; the peer just never learns why.
-struct SendGoaway<S: crate::transport::poll::Session> {
+struct SendGoaway<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	version: Version,
+	runtime: R,
 	goaway: crate::goaway::Protocol,
 	/// A dedicated handle for the trigger-phase close watch, since `session` opens
 	/// the Goaway stream and each pending operation needs its own handle.
 	closed: S,
 	session: S,
-	state: SendGoawayState<S>,
+	state: SendGoawayState<S, R>,
 }
 
-enum SendGoawayState<S: crate::transport::poll::Session> {
+enum SendGoawayState<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	/// Parked on the send trigger, racing the transport close so a parked trigger
 	/// never blocks the driver. The trigger fires at most once.
 	Waiting,
@@ -383,13 +401,14 @@ enum SendGoawayState<S: crate::transport::poll::Session> {
 		finished: bool,
 	},
 	/// The message is on the wire (or failed); enforce the local deadline.
-	Enforce(crate::goaway::Enforce<S>),
+	Enforce(crate::goaway::Enforce<S, R>),
 }
 
-impl<S: crate::transport::poll::Session> SendGoaway<S> {
-	fn new(session: S, goaway: crate::goaway::Protocol, version: Version) -> Self {
+impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> SendGoaway<S, R> {
+	fn new(runtime: R, session: S, goaway: crate::goaway::Protocol, version: Version) -> Self {
 		Self {
 			version,
+			runtime,
 			goaway,
 			closed: session.clone(),
 			session,
@@ -403,7 +422,11 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 	/// it to the peer is no reason to hold the session open.
 	fn enforce_after(&mut self, err: Error, timeout: Option<std::time::Duration>) {
 		tracing::warn!(%err, "failed to send goaway");
-		self.state = SendGoawayState::Enforce(crate::goaway::Enforce::new(self.session.clone(), timeout));
+		self.state = SendGoawayState::Enforce(crate::goaway::Enforce::new(
+			&self.runtime,
+			self.session.clone(),
+			timeout,
+		));
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
@@ -422,7 +445,11 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 					self.state = if self.version.has_goaway() {
 						SendGoawayState::Open { payload }
 					} else {
-						SendGoawayState::Enforce(crate::goaway::Enforce::new(self.session.clone(), payload.timeout))
+						SendGoawayState::Enforce(crate::goaway::Enforce::new(
+							&self.runtime,
+							self.session.clone(),
+							payload.timeout,
+						))
 					};
 				}
 				SendGoawayState::Open { payload } => {
@@ -474,8 +501,11 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 					};
 					match res {
 						Ok(()) => {
-							self.state =
-								SendGoawayState::Enforce(crate::goaway::Enforce::new(self.session.clone(), timeout));
+							self.state = SendGoawayState::Enforce(crate::goaway::Enforce::new(
+								&self.runtime,
+								self.session.clone(),
+								timeout,
+							));
 						}
 						Err(err) => self.enforce_after(err, timeout),
 					}

@@ -5,7 +5,7 @@ use std::{
 	time::Duration,
 };
 
-use web_transport_trait::poll::SendStream as _;
+use web_transport_trait::{MaybeSend, MaybeSync, poll::SendStream as _};
 
 use crate::{
 	AsPath, Error, Timescale,
@@ -46,7 +46,7 @@ struct Watched {
 	/// When demand drained while a zero cost was advertised. Restoring the cold cost is
 	/// deferred by [`crate::broadcast::COST_LINGER`] past this, so viewer churn does not
 	/// flap routing across the mesh; demand returning in the window cancels it.
-	idle_at: Option<kio::time::Instant>,
+	idle_at: Option<crate::runtime::Instant>,
 	/// Set once the broadcast errors, so a dead entry stops being polled.
 	dead: bool,
 	/// The peer should hold this namespace but does not: it refused the request, or we
@@ -69,7 +69,7 @@ enum Refused {
 	#[default]
 	No,
 	/// Refused with a minimum wait before re-offering.
-	Until(kio::time::Instant),
+	Until(crate::runtime::Instant),
 	/// Refused with an interval of 0: the peer does not want this offered again.
 	Never,
 }
@@ -80,7 +80,7 @@ impl Refused {
 	/// The single gate, consulted on every reconciliation rather than only on the retry
 	/// sweep: a route change re-prices an advertisement but does not excuse us from a
 	/// wait the peer asked for, nor make a refused namespace a different one.
-	fn offerable(&self, now: kio::time::Instant) -> bool {
+	fn offerable(&self, now: crate::runtime::Instant) -> bool {
 		match self {
 			Self::No => true,
 			Self::Until(at) => now >= *at,
@@ -258,7 +258,9 @@ enum NamespaceEvent {
 }
 
 #[derive(Clone)]
-pub(super) struct Publisher<S: crate::transport::poll::Session> {
+pub(super) struct Publisher<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
+	// Arms the advertise, retry, and linger timers.
+	runtime: R,
 	session: S,
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Consumer,
@@ -276,8 +278,14 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	version: Version,
 }
 
-impl<S: crate::transport::poll::Session> Publisher<S> {
+impl<S, R> Publisher<S, R>
+where
+	S: crate::transport::poll::Session,
+	R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
+	R::Timer: MaybeSend,
+{
 	pub fn new(
+		runtime: R,
 		session: S,
 		origin: origin::Consumer,
 		control: Control,
@@ -286,6 +294,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		version: Version,
 	) -> Self {
 		Self {
+			runtime,
 			session,
 			self_origin: *origin,
 			origin,
@@ -378,7 +387,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 	/// off). `fired` is the linger deadline's verdict for this turn.
 	fn poll_watched(
 		watched: &mut HashMap<crate::PathOwned, Watched>,
-		fired: Option<kio::time::Instant>,
+		fired: Option<crate::runtime::Instant>,
 		waiter: &kio::Waiter,
 	) -> Poll<Watch> {
 		for (path, watch) in watched.iter_mut() {
@@ -438,7 +447,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 	}
 
 	/// The earliest deferred cost-restore across every watched broadcast.
-	fn linger_deadline(watched: &HashMap<crate::PathOwned, Watched>) -> Option<kio::time::Instant> {
+	fn linger_deadline(watched: &HashMap<crate::PathOwned, Watched>) -> Option<crate::runtime::Instant> {
 		watched
 			.values()
 			.filter_map(|watch| watch.idle_at)
@@ -866,7 +875,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 
 		// A fresh offer waits for what the refusal asked for, whatever brought us back.
 		// Only withdrawing and re-announcing clears it, since that builds a fresh entry.
-		if wanted && !held && !refused.offerable(kio::time::Instant::now()) {
+		if wanted && !held && !refused.offerable(self.runtime.now()) {
 			return Ok(());
 		}
 
@@ -963,7 +972,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		suffix: crate::PathOwned,
 		cluster: Option<cluster::Advert>,
 	) -> Result<Refused, Error> {
-		let request_id = self.control.next_request_id().await?;
+		let request_id = self.control.next_request_id(&self.runtime).await?;
 
 		// Bounded, because an advertisement holds its stream for as long as the namespace
 		// lives: a peer whose concurrent-stream limit we have filled makes this open block,
@@ -986,7 +995,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 
 		// Bounded for the same reason the open is: a peer that takes the stream and answers
 		// nothing would park this loop forever, and every withdrawal queued behind it.
-		let Some((type_id, mut data)) = Self::read_response(&mut request).await? else {
+		let Some((type_id, mut data)) = self.read_response(&mut request).await? else {
 			tracing::debug!(broadcast = %self.origin.absolute(path), "no answer to the advertisement");
 			return Ok(Refused::No);
 		};
@@ -1035,7 +1044,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		match (self.version, retry_interval) {
 			(Version::Draft14 | Version::Draft15, _) => Refused::No,
 			(_, 0) => Refused::Never,
-			(_, ms) => Refused::Until(kio::time::Instant::now() + Duration::from_millis(ms)),
+			(_, ms) => Refused::Until(self.runtime.now() + Duration::from_millis(ms)),
 		}
 	}
 
@@ -1048,7 +1057,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 	async fn open_request(&self) -> Result<Option<Stream<S, Version>>, Error> {
 		let mut session = self.session.clone();
 		let mut open = std::pin::pin!(Stream::open(&mut session, self.version));
-		let mut timeout = kio::time::Deadline::after(ADVERTISE_TIMEOUT);
+		let mut timeout = crate::runtime::Deadline::after(&self.runtime, ADVERTISE_TIMEOUT);
 
 		kio::wait(|waiter| {
 			if let Poll::Ready(res) = waiter.poll_future(open.as_mut()) {
@@ -1068,14 +1077,14 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 	/// behavior seen a step later: a stream the peer accepts and never answers on holds the
 	/// loop just as effectively as one it never grants. Giving up records nothing, so the
 	/// namespace stays outstanding and the retry re-offers it.
-	async fn read_response(request: &mut Stream<S, Version>) -> Result<Option<(u64, bytes::Bytes)>, Error> {
+	async fn read_response(&self, request: &mut Stream<S, Version>) -> Result<Option<(u64, bytes::Bytes)>, Error> {
 		let mut read = std::pin::pin!(async {
 			let type_id: u64 = request.reader.decode().await?;
 			let size: u16 = request.reader.decode().await?;
 			let data = request.reader.read_exact(size as usize).await?;
 			Ok::<_, Error>((type_id, data))
 		});
-		let mut timeout = kio::time::Deadline::after(ADVERTISE_TIMEOUT);
+		let mut timeout = crate::runtime::Deadline::after(&self.runtime, ADVERTISE_TIMEOUT);
 
 		kio::wait(|waiter| {
 			if let Poll::Ready(res) = waiter.poll_future(read.as_mut()) {
@@ -1272,13 +1281,13 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 	) -> Result<(), Error> {
 		let mut announced = origin.announced();
 
-		let mut linger = kio::time::Deadline::new();
+		let mut linger = crate::runtime::Deadline::new(&self.runtime);
 
 		// When to re-offer whatever the peer should hold and doesn't, and how long to wait
 		// the next time that fails. Jittered so a relay's namespaces don't all come back on
 		// the same tick.
-		let mut retry = kio::time::Deadline::new();
-		let mut retry_at: Option<kio::time::Instant> = None;
+		let mut retry = crate::runtime::Deadline::new(&self.runtime);
+		let mut retry_at: Option<crate::runtime::Instant> = None;
 		let mut retry_delay = RETRY_BASE;
 
 		// Stream updates (origin (un)announces plus watched route and demand
@@ -1289,7 +1298,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 			match ns.watched.values().any(|watch| watch.deferred) {
 				// Arm on the edge, so a turn that changes nothing else doesn't push the
 				// deadline out forever.
-				true => retry_at = retry_at.or_else(|| Some(kio::time::Instant::now() + jitter(retry_delay))),
+				true => retry_at = retry_at.or_else(|| Some(self.runtime.now() + jitter(retry_delay))),
 				false => {
 					retry_at = None;
 					retry_delay = RETRY_BASE;
@@ -1314,7 +1323,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 					}
 					// Stamped per poll rather than kept: the turn always ends in a
 					// `Ready` below once it fires, so it never has to survive.
-					let fired = linger.poll(waiter).is_ready().then(kio::time::Instant::now);
+					let fired = linger.poll(waiter).is_ready().then(|| self.runtime.now());
 					match Self::poll_watched(watched, fired, waiter) {
 						Poll::Ready(Watch::Changed(path)) => return Poll::Ready(NamespaceEvent::Routes(path)),
 						Poll::Ready(Watch::Idle(path)) => return Poll::Ready(NamespaceEvent::Idle(path)),
@@ -1389,7 +1398,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				}
 				NamespaceEvent::Idle(suffix) => {
 					if let Some(watch) = ns.watched.get_mut(&suffix) {
-						watch.idle_at = Some(kio::time::Instant::now());
+						watch.idle_at = Some(self.runtime.now());
 					}
 				}
 			}
@@ -1880,7 +1889,12 @@ mod tests {
 	use super::*;
 	use crate::lite::test_transport::SinkSession;
 	use crate::model::ProduceTest;
+	use crate::runtime::Runtime as _;
 	use futures::FutureExt;
+
+	/// The tokio-backed test runtime. Its transport parameter is phantom, so one
+	/// type serves every fake session in this module.
+	type TestRuntime = crate::runtime::tokio_test::Tokio<SinkSession>;
 
 	async fn settle() {
 		tokio::time::sleep(Duration::from_millis(1)).await;
@@ -1949,6 +1963,7 @@ mod tests {
 
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let publisher = Publisher::new(
+			TestRuntime::new(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -2010,9 +2025,9 @@ mod tests {
 			hops: cluster::HopPath::new(hops.clone()),
 			cost: 0,
 		}));
-		watch.idle_at = Some(kio::time::Instant::now());
+		watch.idle_at = Some(TestRuntime::new().now());
 		let watched = HashMap::from([(crate::Path::new("cam").to_owned(), watch)]);
-		assert!(Publisher::<SinkSession>::linger_deadline(&watched).is_some());
+		assert!(Publisher::<SinkSession, TestRuntime>::linger_deadline(&watched).is_some());
 
 		// A re-priced advertisement has a cost to advertise, so there is nothing left
 		// to restore.
@@ -2023,17 +2038,17 @@ mod tests {
 		}));
 		let watched = HashMap::from([(crate::Path::new("cam").to_owned(), watch)]);
 		assert_eq!(
-			Publisher::<SinkSession>::linger_deadline(&watched),
+			Publisher::<SinkSession, TestRuntime>::linger_deadline(&watched),
 			None,
 			"a non-discounted advert must not leave a deadline behind"
 		);
 
 		// So does one that stopped being advertisable at all.
 		let mut watch = watched.into_values().next().unwrap();
-		watch.idle_at = Some(kio::time::Instant::now());
+		watch.idle_at = Some(TestRuntime::new().now());
 		watch.set_sent(Advert::None);
 		let watched = HashMap::from([(crate::Path::new("cam").to_owned(), watch)]);
-		assert_eq!(Publisher::<SinkSession>::linger_deadline(&watched), None);
+		assert_eq!(Publisher::<SinkSession, TestRuntime>::linger_deadline(&watched), None);
 	}
 
 	/// A same-path source can splice into (or detach from) an existing broadcast
@@ -2050,6 +2065,7 @@ mod tests {
 		let session = SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
 		let publisher = Publisher::new(
+			TestRuntime::new(),
 			session.clone(),
 			origin.consume(),
 			Control::new(None, false),
@@ -2156,6 +2172,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
+			TestRuntime::new(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -2245,6 +2262,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
+			TestRuntime::new(),
 			session.clone(),
 			consumer,
 			Control::new(None, false),
@@ -2333,6 +2351,7 @@ mod tests {
 		peer_setup.set(peer::Peer::default());
 
 		let publisher = Publisher::new(
+			TestRuntime::new(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -2380,6 +2399,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
+			TestRuntime::new(),
 			session.clone(),
 			origin.consume(),
 			Control::new(None, false),
@@ -2451,6 +2471,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
+			TestRuntime::new(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -2538,6 +2559,7 @@ mod tests {
 
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let publisher = Publisher::new(
+			TestRuntime::new(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -2584,6 +2606,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
+			TestRuntime::new(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -2644,6 +2667,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
+			TestRuntime::new(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -2702,6 +2726,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
+			TestRuntime::new(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -2751,6 +2776,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
+			TestRuntime::new(),
 			session,
 			origin.consume(),
 			Control::new(None, false),
@@ -2796,7 +2822,7 @@ mod tests {
 
 	/// A publisher talking to a scripted peer that never answers, over one bidi stream.
 	struct Harness {
-		publisher: Publisher<crate::lite::test_transport::ScriptedSession>,
+		publisher: Publisher<crate::lite::test_transport::ScriptedSession, TestRuntime>,
 		session: crate::lite::test_transport::ScriptedSession,
 		log: crate::lite::test_transport::Log,
 		/// Keeps the origin alive; the publisher only holds a consumer.
@@ -2813,6 +2839,7 @@ mod tests {
 		peer_setup.set(peer::Peer::default());
 
 		let publisher = Publisher::new(
+			TestRuntime::new(),
 			session.clone(),
 			origin.consume(),
 			Control::new(None, false),

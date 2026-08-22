@@ -154,8 +154,14 @@ where
 	if let Some(publish) = publish {
 		server = server.with_subscriber(publish);
 	}
-	// Hold the session so it doesn't close early; the driver serves it in place.
-	let (session, mut driver) = server.accept(moq_tokio::transport::Async::new(ws)).await?;
+	// Hold the session so it doesn't close early; the machine serves it in place
+	// (an Inline runtime hands it back instead of spawning), so its lifetime and
+	// teardown stay tied to this handler task.
+	let runtime = moq_tokio::runtime::Inline::new();
+	let session = server
+		.accept(runtime.clone(), moq_tokio::transport::Async::new(ws))
+		.await?;
+	let mut driver = runtime.take().expect("accept hands the machine to its runtime");
 
 	tokio::select! {
 		res = &mut driver => res.map_err(Into::into),

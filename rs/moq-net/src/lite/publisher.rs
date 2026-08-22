@@ -6,7 +6,7 @@ use std::{
 	time::Duration,
 };
 
-use web_transport_trait::Stats;
+use web_transport_trait::{MaybeSend, MaybeSync, Stats};
 
 use crate::{
 	AsPath, Error, Origin, OriginList,
@@ -33,7 +33,7 @@ struct WatchedRoute {
 	/// restores the cold cost is deferred by [`COST_LINGER`] past this, so
 	/// viewer churn doesn't flap routing across the mesh; demand returning in
 	/// the window cancels the restore.
-	idle_at: Option<kio::time::Instant>,
+	idle_at: Option<crate::runtime::Instant>,
 }
 
 /// What the peer currently holds for a path: the forwarded hop chain plus, on
@@ -51,7 +51,9 @@ struct SentRoute {
 	serving: bool,
 }
 
-pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
+pub(super) struct PublisherConfig<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
+	/// The runtime that arms the publisher's timers.
+	pub runtime: R,
 	pub session: S,
 	/// The origin we read local broadcasts from. Traffic stats are attributed
 	/// through this handle: tag it with [`origin::Consumer::with_stats`] first.
@@ -134,16 +136,18 @@ impl<S: crate::transport::poll::Session> Shared<S> {
 
 /// The publisher half: accepts control streams and drives each as a child state
 /// machine. Resolves only on a transport error; children never end the session.
-pub(super) struct Publisher<S: crate::transport::poll::Session> {
+pub(super) struct Publisher<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	shared: Arc<Shared<S>>,
+	// Cloned into each control-stream child that arms timers (PROBE, announce linger).
+	runtime: R,
 	// A dedicated accept handle: the poll interface takes `&mut self`, and the
 	// shared context stays behind the Arc for the per-stream children.
 	accept: S,
 	children: kio::Tasks<crate::util::MaybeSendTask>,
 }
 
-impl<S: crate::transport::poll::Session> Publisher<S> {
-	pub fn new(config: PublisherConfig<S>) -> Self {
+impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Publisher<S, R> {
+	pub fn new(config: PublisherConfig<S, R>) -> Self {
 		// Identity stamped onto outbound announce hops. Derived from the
 		// origin we're consuming so it matches the local relay identity
 		// across every session, required for cross-session loop detection.
@@ -161,11 +165,19 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				version: config.version,
 				goaway: config.goaway,
 			}),
+			runtime: config.runtime,
 			accept,
 			children: kio::Tasks::new(),
 		}
 	}
+}
 
+impl<S, R> Publisher<S, R>
+where
+	S: crate::transport::poll::Session,
+	R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
+	R::Timer: MaybeSend,
+{
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let _ = self.children.poll(waiter);
 
@@ -175,6 +187,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				Poll::Ready(Ok(stream)) => {
 					let mut child = Control {
 						shared: self.shared.clone(),
+						runtime: self.runtime.clone(),
 						state: ControlState::Start { stream },
 					};
 					self.children
@@ -192,9 +205,11 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 }
 
 #[cfg(test)]
-impl<S: crate::transport::poll::Session> Publisher<S> {
+impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Publisher<S, R> {
 	/// Test shim: drive one announce-interest stream like the old `run_announce`.
+	#[allow(clippy::too_many_arguments)]
 	async fn run_announce(
+		runtime: R,
 		stream: &mut Stream<S, Version>,
 		origin: &origin::Consumer,
 		announced: &mut announce::Consumer,
@@ -203,30 +218,32 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		exclude_hop: u64,
 		version: Version,
 	) -> Result<(), Error> {
-		let mut run = AnnounceRun::new(prefix.as_path().to_owned(), exclude_hop, self_origin, version);
+		let mut run = AnnounceRun::new(runtime, prefix.as_path().to_owned(), exclude_hop, self_origin, version);
 		kio::wait(|waiter| run.poll(stream, origin, announced, waiter)).await
 	}
 }
 
 /// One accepted control stream, dispatched on its first varint.
-struct Control<S: crate::transport::poll::Session> {
+struct Control<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	shared: Arc<Shared<S>>,
-	state: ControlState<S>,
+	// Handed to the children that arm timers (PROBE, announce linger).
+	runtime: R,
+	state: ControlState<S, R>,
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
 // big variant is the working state, not padding held in bulk.
 #[allow(clippy::large_enum_variant)]
-enum ControlState<S: crate::transport::poll::Session> {
+enum ControlState<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	/// Reading the stream's type.
 	Start {
 		stream: Stream<S, Version>,
 	},
-	Announce(AnnounceServe<S>),
+	Announce(AnnounceServe<S, R>),
 	Subscribe(SubscribeServe<S>),
 	Fetch(FetchServe<S>),
 	TrackInfo(TrackInfoServe<S>),
-	Probe(ProbeServe<S>),
+	Probe(ProbeServe<S, R>),
 	/// Decoding the peer's GOAWAY, surfaced through [`crate::Session::draining`].
 	Goaway {
 		stream: Stream<S, Version>,
@@ -234,7 +251,7 @@ enum ControlState<S: crate::transport::poll::Session> {
 	Done,
 }
 
-impl<S: crate::transport::poll::Session> Control<S> {
+impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Control<S, R> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		if let Err(err) = ready!(self.poll_serve(waiter)) {
 			tracing::warn!(%err, "control stream error");
@@ -243,7 +260,7 @@ impl<S: crate::transport::poll::Session> Control<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> Control<S> {
+impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Control<S, R> {
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		loop {
 			match &mut self.state {
@@ -255,9 +272,11 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						unreachable!()
 					};
 					self.state = match kind {
-						lite::ControlType::Announce => {
-							ControlState::Announce(AnnounceServe::new(self.shared.clone(), stream))
-						}
+						lite::ControlType::Announce => ControlState::Announce(AnnounceServe::new(
+							self.shared.clone(),
+							self.runtime.clone(),
+							stream,
+						)),
 						lite::ControlType::Subscribe => {
 							ControlState::Subscribe(SubscribeServe::new(self.shared.clone(), stream))
 						}
@@ -265,7 +284,9 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						lite::ControlType::Track => {
 							ControlState::TrackInfo(TrackInfoServe::new(self.shared.clone(), stream)?)
 						}
-						lite::ControlType::Probe => ControlState::Probe(ProbeServe::new(self.shared.clone(), stream)),
+						lite::ControlType::Probe => {
+							ControlState::Probe(ProbeServe::new(self.shared.clone(), self.runtime.clone(), stream))
+						}
 						lite::ControlType::Goaway => ControlState::Goaway { stream },
 						lite::ControlType::Session => return Poll::Ready(Err(Error::UnexpectedStream)),
 					};
@@ -310,14 +331,15 @@ impl<S: crate::transport::poll::Session> Control<S> {
 
 /// Serves one PROBE stream: periodic bandwidth estimates until the peer closes
 /// its side.
-struct ProbeServe<S: crate::transport::poll::Session> {
+struct ProbeServe<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	shared: Arc<Shared<S>>,
+	runtime: R,
 	stream: Option<Stream<S, Version>>,
-	last_sent: Option<(lite::Probe, kio::time::Instant)>,
-	next_probe: kio::time::Deadline,
+	last_sent: Option<(lite::Probe, crate::runtime::Instant)>,
+	next_probe: crate::runtime::Deadline<R>,
 }
 
-impl<S: crate::transport::poll::Session> ProbeServe<S> {
+impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> ProbeServe<S, R> {
 	const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 	const PROBE_MAX_AGE: Duration = Duration::from_secs(10);
 	const PROBE_MAX_DELTA: f64 = 0.25;
@@ -348,13 +370,14 @@ impl<S: crate::transport::poll::Session> ProbeServe<S> {
 		Self::PROBE_MAX_DELTA * (Self::PROBE_MAX_AGE.as_secs_f64() - t) / range
 	}
 
-	fn new(shared: Arc<Shared<S>>, stream: Stream<S, Version>) -> Self {
+	fn new(shared: Arc<Shared<S>>, runtime: R, stream: Stream<S, Version>) -> Self {
 		Self {
 			shared,
 			stream: Some(stream),
 			last_sent: None,
 			// Send the first probe immediately, then keep an anchored cadence.
-			next_probe: kio::time::Deadline::at(kio::time::Instant::now()),
+			next_probe: crate::runtime::Deadline::at(&runtime, runtime.now()),
+			runtime,
 		}
 	}
 
@@ -423,7 +446,7 @@ impl<S: crate::transport::poll::Session> ProbeServe<S> {
 			let should_send = match &self.last_sent {
 				None => true,
 				Some((prev, at)) => {
-					let elapsed = at.elapsed();
+					let elapsed = self.runtime.now().duration_since(*at);
 					elapsed >= Self::PROBE_MAX_AGE
 						|| Self::moved(prev.bitrate, report.bitrate, Self::bitrate_threshold(elapsed))
 						|| Self::moved(prev.rtt, report.rtt, Self::PROBE_RTT_DELTA)
@@ -432,7 +455,7 @@ impl<S: crate::transport::poll::Session> ProbeServe<S> {
 
 			if should_send {
 				stream.writer.buffer(&report)?;
-				self.last_sent = Some((report, kio::time::Instant::now()));
+				self.last_sent = Some((report, self.runtime.now()));
 			}
 		}
 	}
@@ -440,16 +463,18 @@ impl<S: crate::transport::poll::Session> ProbeServe<S> {
 
 /// Serves one announce-interest stream: the initial set, then updates as routes,
 /// demand, and the origin change.
-struct AnnounceServe<S: crate::transport::poll::Session> {
+struct AnnounceServe<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	shared: Arc<Shared<S>>,
+	// Cloned into the run loop, whose linger deadline it arms.
+	runtime: R,
 	stream: Option<Stream<S, Version>>,
-	state: AnnounceState,
+	state: AnnounceState<R>,
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
 // big variant is the working state, not padding held in bulk.
 #[allow(clippy::large_enum_variant)]
-enum AnnounceState {
+enum AnnounceState<R: crate::runtime::Runtime> {
 	/// Reading the ANNOUNCE_REQUEST.
 	Decode,
 	/// Waiting on the peer's SETUP for the session-wide excluded origin
@@ -459,14 +484,15 @@ enum AnnounceState {
 	Run {
 		origin: origin::Consumer,
 		announced: announce::Consumer,
-		run: AnnounceRun,
+		run: AnnounceRun<R>,
 	},
 }
 
-impl<S: crate::transport::poll::Session> AnnounceServe<S> {
-	fn new(shared: Arc<Shared<S>>, stream: Stream<S, Version>) -> Self {
+impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> AnnounceServe<S, R> {
+	fn new(shared: Arc<Shared<S>>, runtime: R, stream: Stream<S, Version>) -> Self {
 		Self {
 			shared,
+			runtime,
 			stream: Some(stream),
 			state: AnnounceState::Decode,
 		}
@@ -545,7 +571,13 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 			Err(_) => origin,
 		};
 		let announced = origin.announced();
-		let run = AnnounceRun::new(prefix, exclude_hop, self.shared.self_origin, self.shared.version);
+		let run = AnnounceRun::new(
+			self.runtime.clone(),
+			prefix,
+			exclude_hop,
+			self.shared.self_origin,
+			self.shared.version,
+		);
 		self.state = AnnounceState::Run { origin, announced, run };
 	}
 }
@@ -566,7 +598,9 @@ enum Op {
 
 /// The announce loop's state, minus the handles it borrows per poll so the test
 /// shim can supply its own.
-struct AnnounceRun {
+struct AnnounceRun<R: crate::runtime::Runtime> {
+	// Arms the linger deadline and stamps idle instants.
+	runtime: R,
 	prefix: crate::PathOwned,
 	exclude_hop: u64,
 	self_origin: Origin,
@@ -589,7 +623,7 @@ struct AnnounceRun {
 	// right after the Active is written and a reflected UNKNOWN route can
 	// replace the incumbent after all.
 	held: HashMap<crate::PathOwned, crate::broadcast::Consumer>,
-	linger: kio::time::Deadline,
+	linger: crate::runtime::Deadline<R>,
 	phase: AnnouncePhase,
 }
 
@@ -601,8 +635,8 @@ enum AnnouncePhase {
 	Closing,
 }
 
-impl AnnounceRun {
-	fn new(prefix: crate::PathOwned, exclude_hop: u64, self_origin: Origin, version: Version) -> Self {
+impl<R: crate::runtime::Runtime> AnnounceRun<R> {
+	fn new(runtime: R, prefix: crate::PathOwned, exclude_hop: u64, self_origin: Origin, version: Version) -> Self {
 		Self {
 			prefix,
 			exclude_hop,
@@ -612,7 +646,8 @@ impl AnnounceRun {
 			announce_ids: HashMap::new(),
 			watched: HashMap::new(),
 			held: HashMap::new(),
-			linger: kio::time::Deadline::new(),
+			linger: crate::runtime::Deadline::new(&runtime),
+			runtime,
 			phase: AnnouncePhase::Init,
 		}
 	}
@@ -795,7 +830,7 @@ impl AnnounceRun {
 				}
 				// Stamped per turn rather than kept: the turn always ends in an op
 				// below once it fires, so it never has to survive.
-				let fired = self.linger.poll(waiter).is_ready().then(kio::time::Instant::now);
+				let fired = self.linger.poll(waiter).is_ready().then(|| self.runtime.now());
 				// Poll every watched broadcast for a route-table change; each
 				// wake rescans the map, which announce-control rates make fine.
 				for (suffix, entry) in self.watched.iter_mut() {
@@ -1032,7 +1067,7 @@ impl AnnounceRun {
 				// restore rides the deadline unless demand returns first.
 				Op::Idle(suffix) => {
 					if let Some(entry) = self.watched.get_mut(&suffix) {
-						entry.idle_at = Some(kio::time::Instant::now());
+						entry.idle_at = Some(self.runtime.now());
 					}
 				}
 				// The linger sleep's job is done; the next turn arms the next
@@ -1830,6 +1865,9 @@ mod announce_test {
 	use crate::model::ProduceTest;
 	use std::sync::Mutex;
 
+	/// The tokio-backed test runtime, matching the fake transport.
+	type TestRuntime = crate::runtime::tokio_test::Tokio<SinkSession>;
+
 	const VERSION: Version = Version::Lite06Wip;
 
 	/// The broadcast's cold cost: what the route advertises without demand.
@@ -1995,8 +2033,17 @@ mod announce_test {
 		let task = tokio::spawn(async move {
 			let mut announced = consumer.announced();
 			let self_origin = *consumer;
-			Publisher::<SinkSession>::run_announce(&mut stream, &consumer, &mut announced, "", self_origin, 0, VERSION)
-				.await
+			Publisher::run_announce(
+				TestRuntime::new(),
+				&mut stream,
+				&consumer,
+				&mut announced,
+				"",
+				self_origin,
+				0,
+				VERSION,
+			)
+			.await
 		});
 		settle().await;
 
@@ -2195,7 +2242,8 @@ mod announce_test {
 		let task = tokio::spawn(async move {
 			let mut announced = consumer.announced();
 			let self_origin = *consumer;
-			Publisher::<SinkSession>::run_announce(
+			Publisher::run_announce(
+				TestRuntime::new(),
 				&mut stream,
 				&consumer,
 				&mut announced,
@@ -3542,6 +3590,9 @@ mod tests {
 	use crate::lite::test_transport::SinkSession;
 	use crate::model::ProduceTest;
 
+	/// The tokio-backed test runtime, matching the fake transport.
+	type TestRuntime = crate::runtime::tokio_test::Tokio<SinkSession>;
+
 	/// Lite01/02 send the initial active set as ANNOUNCE_INIT. It must apply the
 	/// same per-peer route selection as the live loop: a broadcast whose only
 	/// route flows through the excluded hop (here the peer's assigned identity,
@@ -3583,7 +3634,8 @@ mod tests {
 
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
-		let mut run = std::pin::pin!(Publisher::<SinkSession>::run_announce(
+		let mut run = std::pin::pin!(Publisher::run_announce(
+			TestRuntime::new(),
 			&mut stream,
 			&consumer,
 			&mut announced,
@@ -3626,10 +3678,11 @@ mod tests {
 		session: SinkSession,
 		stream: Stream<SinkSession, Version>,
 		version: Version,
-	) -> ProbeServe<SinkSession> {
+	) -> ProbeServe<SinkSession, TestRuntime> {
 		let origin = Origin::random().produce();
 		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
+			runtime: TestRuntime::new(),
 			session,
 			origin: origin.consume(),
 			version,
@@ -3637,7 +3690,7 @@ mod tests {
 			goaway,
 			peer_origin: None,
 		});
-		ProbeServe::new(publisher.shared.clone(), stream)
+		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
 	}
 
 	/// Drive the PROBE state machine against a transport reporting `stats`, and

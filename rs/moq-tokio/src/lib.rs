@@ -35,6 +35,7 @@ pub mod quic;
 pub mod quinn;
 #[cfg(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "tcp"))]
 mod resolve;
+pub mod runtime;
 mod server;
 mod steer;
 #[cfg(feature = "tcp")]
@@ -62,17 +63,6 @@ pub use deprecated::Deprecated;
 pub use error::{Error, Result};
 pub use log::Log;
 pub use server::{Listener, Request, Server, Transport};
-
-/// Spawn the session's protocol driver on the current tokio runtime, handing back
-/// the session it drives.
-///
-/// The driver holds no session clone, so the session still closes when the caller
-/// drops their last [`moq_net::Session`] handle, which in turn lets the driver
-/// task finish.
-pub(crate) fn spawn_session((session, driver): (moq_net::Session, moq_net::Driver)) -> moq_net::Session {
-	tokio::spawn(driver);
-	session
-}
 
 // Re-export these crates.
 pub use moq_net;

@@ -557,7 +557,7 @@ impl Server {
 							// MoQ SETUP up front, so path/role are known before the caller authorizes
 							// (like the stream bindings).
 							let (session, url, identity) = super::noq::accept(_conn, alpns).await?;
-							let request = server.accept_request(crate::transport::Async::new(session)).await?;
+							let request = server.accept_request(crate::runtime::Runtime::new(), crate::transport::Async::new(session)).await?;
 							Ok(Request { transport: Transport::Quic, url, identity, kind: RequestKind::Noq(Box::new(request)) })
 						}.boxed());
 					}
@@ -568,7 +568,7 @@ impl Server {
 						let alpns = versions.alpns();
 						self.accept.push(async move {
 							let (session, url, identity) = super::quinn::accept(_conn, alpns).await?;
-							let request = server.accept_request(session).await?;
+							let request = server.accept_request(crate::runtime::Runtime::new(), session).await?;
 							Ok(Request { transport: Transport::Quic, url, identity, kind: RequestKind::Quinn(Box::new(request)) })
 						}.boxed());
 					}
@@ -579,7 +579,7 @@ impl Server {
 						let alpns = versions.alpns();
 						self.accept.push(async move {
 							let (session, url, identity) = super::quiche::accept(_conn, alpns).await?;
-							let request = server.accept_request(session).await?;
+							let request = server.accept_request(crate::runtime::Runtime::new(), session).await?;
 							Ok(Request { transport: Transport::Quic, url, identity, kind: RequestKind::Quiche(Box::new(request)) })
 						}.boxed());
 					}
@@ -588,7 +588,7 @@ impl Server {
 					#[cfg(feature = "iroh")]
 					self.accept.push(async move {
 						let (session, url, identity) = super::iroh::accept(_conn).await?;
-						let request = server.accept_request(crate::transport::Async::new(session)).await?;
+						let request = server.accept_request(crate::runtime::Runtime::new(), crate::transport::Async::new(session)).await?;
 						Ok(Request { transport: Transport::Iroh, url, identity, kind: RequestKind::Iroh(Box::new(request)) })
 					}.boxed());
 				}
@@ -599,7 +599,7 @@ impl Server {
 							// Read the SETUP off the qmux session before handing it over, so a
 							// slow peer doesn't stall the accept loop (spawned like the others).
 							self.accept.push(async move {
-								let request = server.accept_request(crate::transport::Async::new(session)).await?;
+								let request = server.accept_request(crate::runtime::Runtime::new(), crate::transport::Async::new(session)).await?;
 								Ok(Request { transport: Transport::WebSocket, url: Some(url), identity: None, kind: RequestKind::Qmux(Box::new(request)) })
 							}.boxed());
 						}
@@ -1001,7 +1001,10 @@ fn spawn_stream_request(
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) {
 	tokio::spawn(async move {
-		match server.accept_request(crate::transport::Async::new(session)).await {
+		match server
+			.accept_request(crate::runtime::Runtime::new(), crate::transport::Async::new(session))
+			.await
+		{
 			Ok(request) => {
 				let request = Request {
 					transport,
@@ -1022,17 +1025,20 @@ fn spawn_stream_request(
 /// [`path`](Request::path)/[`role`](Request::role) a client advertised are available on
 /// every transport before the caller authorizes. The variant only distinguishes the
 /// underlying session type; all of them delegate identically.
+/// A pending moq-net request over transport `S`, driven by our tokio runtime.
+type PendingRequest<S> = moq_net::Request<S, crate::runtime::Runtime<S>>;
+
 pub(crate) enum RequestKind {
 	#[cfg(feature = "noq")]
-	Noq(Box<moq_net::Request<crate::transport::Async<web_transport_noq::Session>>>),
+	Noq(Box<PendingRequest<crate::transport::Async<web_transport_noq::Session>>>),
 	#[cfg(feature = "quinn")]
-	Quinn(Box<moq_net::Request<web_transport_quinn::Session>>),
+	Quinn(Box<PendingRequest<web_transport_quinn::Session>>),
 	#[cfg(feature = "quiche")]
-	Quiche(Box<moq_net::Request<web_transport_quiche::Connection>>),
+	Quiche(Box<PendingRequest<web_transport_quiche::Connection>>),
 	#[cfg(feature = "iroh")]
-	Iroh(Box<moq_net::Request<crate::transport::Async<web_transport_iroh::Session>>>),
+	Iroh(Box<PendingRequest<crate::transport::Async<web_transport_iroh::Session>>>),
 	#[cfg(any(feature = "tcp", all(feature = "uds", unix), feature = "websocket"))]
-	Qmux(Box<moq_net::Request<crate::transport::Async<qmux::Session>>>),
+	Qmux(Box<PendingRequest<crate::transport::Async<qmux::Session>>>),
 }
 
 /// The network transport carrying an incoming MoQ session.
@@ -1209,8 +1215,7 @@ impl Request {
 
 	/// Accept the session, starting the MoQ session loops.
 	pub async fn ok(self) -> crate::Result<Session> {
-		let pair = request_into!(self.kind, request => request.ok().await?);
-		Ok(crate::spawn_session(pair))
+		Ok(request_into!(self.kind, request => request.ok().await?))
 	}
 
 	/// Returns the network transport carrying this session.

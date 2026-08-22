@@ -309,7 +309,7 @@ impl Client {
 		// The deadline covers the dial AND the handshake, for every transport: it is the
 		// only bound some of them have. Dropping `attempt` on expiry cancels whichever
 		// arm was still pending.
-		let pair = match self.timeout.is_zero() {
+		let session = match self.timeout.is_zero() {
 			true => attempt.await?,
 			false => match tokio::time::timeout(self.timeout, attempt).await {
 				Ok(res) => res?,
@@ -317,8 +317,8 @@ impl Client {
 			},
 		};
 
-		tracing::info!(version = %pair.0.version(), "connected");
-		Ok(crate::spawn_session(pair))
+		tracing::info!(version = %session.version(), "connected");
+		Ok(session)
 	}
 
 	/// The moq client builder, advertising `path` in the SETUP when there is one.
@@ -347,7 +347,7 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	))]
-	async fn connect_inner(&self, url: Url) -> crate::Result<(moq_net::Session, moq_net::Driver)> {
+	async fn connect_inner(&self, url: Url) -> crate::Result<moq_net::Session> {
 		// Transports with no request URI of their own advertise the request target in the
 		// SETUP instead; `setup_path` returns `None` for the ones that carry a URI, where
 		// sending it again is a protocol violation. An iroh-only build reads none of this:
@@ -361,7 +361,9 @@ impl Client {
 		if url.scheme() == "tcp" {
 			let session =
 				crate::tcp::connect(url, &self.versions.alpns(), self.failover_delay, self.resolution_delay).await?;
-			return Ok(moq.connect(crate::transport::Async::new(session)).await?);
+			return Ok(moq
+				.connect(crate::runtime::Runtime::new(), crate::transport::Async::new(session))
+				.await?);
 		}
 
 		// Unix domain socket (qmux, no TLS). Same-host only; the server can
@@ -369,7 +371,9 @@ impl Client {
 		#[cfg(all(feature = "uds", unix))]
 		if url.scheme() == "unix" {
 			let session = crate::unix::connect(url, &self.versions.alpns()).await?;
-			return Ok(moq.connect(crate::transport::Async::new(session)).await?);
+			return Ok(moq
+				.connect(crate::runtime::Runtime::new(), crate::transport::Async::new(session))
+				.await?);
 		}
 
 		// iroh offers the moq ALPNs ahead of H3, so two moq endpoints normally land on raw
@@ -387,7 +391,9 @@ impl Client {
 				crate::iroh::Binding::H3 => self.moq.clone(),
 			};
 
-			return Ok(moq.connect(crate::transport::Async::new(session)).await?);
+			return Ok(moq
+				.connect(crate::runtime::Runtime::new(), crate::transport::Async::new(session))
+				.await?);
 		}
 
 		#[cfg(feature = "noq")]
@@ -409,7 +415,7 @@ impl Client {
 			#[cfg(not(feature = "websocket"))]
 			{
 				let session = quic_handle.await?;
-				return Ok(moq.connect(session).await?);
+				return Ok(moq.connect(crate::runtime::Runtime::new(), session).await?);
 			}
 		}
 
@@ -427,7 +433,7 @@ impl Client {
 			#[cfg(not(feature = "websocket"))]
 			{
 				let session = quic_handle.await?;
-				return Ok(moq.connect(session).await?);
+				return Ok(moq.connect(crate::runtime::Runtime::new(), session).await?);
 			}
 		}
 
@@ -444,7 +450,7 @@ impl Client {
 			#[cfg(not(feature = "websocket"))]
 			{
 				let session = quic_handle.await?;
-				return Ok(moq.connect(session).await?);
+				return Ok(moq.connect(crate::runtime::Runtime::new(), session).await?);
 			}
 		}
 
@@ -452,7 +458,9 @@ impl Client {
 		{
 			let alpns = self.versions.alpns();
 			let session = crate::websocket::connect(&self.websocket, &self.tls, url, &alpns).await?;
-			return Ok(moq.connect(crate::transport::Async::new(session)).await?);
+			return Ok(moq
+				.connect(crate::runtime::Runtime::new(), crate::transport::Async::new(session))
+				.await?);
 		}
 
 		#[cfg(not(feature = "websocket"))]
@@ -468,12 +476,7 @@ impl Client {
 	/// Only compiled when there is a QUIC dial to race: a WebSocket-only build connects
 	/// over the fallback directly.
 	#[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
-	async fn race_moq_connect<Q, S>(
-		&self,
-		moq: &moq_net::Client,
-		url: Url,
-		quic: Q,
-	) -> crate::Result<(moq_net::Session, moq_net::Driver)>
+	async fn race_moq_connect<Q, S>(&self, moq: &moq_net::Client, url: Url, quic: Q) -> crate::Result<moq_net::Session>
 	where
 		Q: Future<Output = crate::Result<S>>,
 		S: moq_net::transport::poll::Session,
@@ -488,10 +491,11 @@ impl Client {
 		};
 
 		match race_transport_connect(quic, websocket).await? {
-			TransportRace::Quic(quic) => Ok(moq.connect(quic).await?),
-			TransportRace::WebSocket(websocket) => {
-				Ok(self.moq.connect(crate::transport::Async::new(websocket)).await?)
-			}
+			TransportRace::Quic(quic) => Ok(moq.connect(crate::runtime::Runtime::new(), quic).await?),
+			TransportRace::WebSocket(websocket) => Ok(self
+				.moq
+				.connect(crate::runtime::Runtime::new(), crate::transport::Async::new(websocket))
+				.await?),
 		}
 	}
 }

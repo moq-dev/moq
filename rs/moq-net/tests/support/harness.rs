@@ -7,9 +7,80 @@
 
 #![allow(dead_code)]
 
+use std::{marker::PhantomData, pin::Pin, task::Poll};
+
 use moq_net::{Client, Server, Session, Version, origin};
 
-use super::mock::create_mock_session_pair;
+use super::mock::{MockSession, create_mock_session_pair};
+
+/// A tokio-backed [`moq_net::runtime::Runtime`] for these tests: machines are
+/// spawned onto tokio and timers are tokio sleeps, so `tokio::time::pause` keeps
+/// working. A copy of the crate's own `runtime::tokio_test` module, which is
+/// `cfg(test)` and therefore invisible to integration tests.
+pub struct TokioRuntime<S = MockSession>(PhantomData<fn(S)>);
+
+impl<S> TokioRuntime<S> {
+	pub fn new() -> Self {
+		Self(PhantomData)
+	}
+}
+
+impl<S> Clone for TokioRuntime<S> {
+	fn clone(&self) -> Self {
+		Self(PhantomData)
+	}
+}
+
+impl<S> Default for TokioRuntime<S> {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+impl<S: moq_net::transport::poll::Session> moq_net::runtime::Runtime for TokioRuntime<S> {
+	type Transport = S;
+	type Timer = TokioTimer;
+
+	fn timer(&self) -> Self::Timer {
+		TokioTimer { at: None, sleep: None }
+	}
+
+	fn now(&self) -> moq_net::runtime::Instant {
+		tokio::time::Instant::now().into_std()
+	}
+
+	fn spawn(&self, machine: moq_net::runtime::Machine<Self>) {
+		tokio::spawn(machine);
+	}
+}
+
+/// The [`moq_net::runtime::Timer`] handed out by [`TokioRuntime`].
+pub struct TokioTimer {
+	at: Option<moq_net::runtime::Instant>,
+	// Allocated on the first poll after arming, then re-armed in place via
+	// `Sleep::reset`; construction panics without a live tokio time driver.
+	sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+}
+
+impl moq_net::runtime::Timer for TokioTimer {
+	fn set(&mut self, at: Option<moq_net::runtime::Instant>) {
+		self.at = at;
+		if let (Some(at), Some(sleep)) = (at, &mut self.sleep) {
+			sleep.as_mut().reset(tokio::time::Instant::from_std(at));
+		}
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let Some(at) = self.at else { return Poll::Pending };
+		let sleep = self
+			.sleep
+			.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(at))));
+		if sleep.is_elapsed() {
+			return Poll::Ready(());
+		}
+		waiter.poll_future(sleep.as_mut())
+	}
+}
 
 /// Options for [`connect_mock`].
 pub struct MockConnectOptions {
@@ -74,19 +145,21 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 		server = server.with_subscriber(subscribe);
 	}
 
-	// Run both handshakes concurrently, spawning each side's driver the moment
-	// its handshake resolves: on draft-17+ the server's accept blocks on the
-	// client's SETUP, which only reaches the wire once the client's driver is
-	// polled (and vice versa for the server's own SETUP).
+	// Run both handshakes concurrently; the runtime spawns each side's machine
+	// the moment its handshake resolves: on draft-17+ the server's accept blocks
+	// on the client's SETUP, which only reaches the wire once the client's
+	// machine is polled (and vice versa for the server's own SETUP).
 	let client_fut = async {
-		let (session, driver) = client.connect(client_transport).await.expect("client handshake failed");
-		tokio::spawn(driver);
-		session
+		client
+			.connect(TokioRuntime::new(), client_transport)
+			.await
+			.expect("client handshake failed")
 	};
 	let server_fut = async {
-		let (session, driver) = server.accept(server_transport).await.expect("server handshake failed");
-		tokio::spawn(driver);
-		session
+		server
+			.accept(TokioRuntime::new(), server_transport)
+			.await
+			.expect("server handshake failed")
 	};
 	let (client_session, server_session) = tokio::join!(client_fut, server_fut);
 
