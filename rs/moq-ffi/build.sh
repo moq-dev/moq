@@ -163,7 +163,7 @@ generate_bindings() {
 
     # Go uses a separate, third-party bindgen. Upstream has no uniffi 0.32
     # release yet, so install the compatible generator fork with:
-    # cargo install --locked uniffi-bindgen-go --git https://github.com/kixelated/uniffi-bindgen-go --tag v0.8.0+v0.32.0
+    # cargo install --locked uniffi-bindgen-go --git https://github.com/kixelated/uniffi-bindgen-go --rev 4f79e52bd8f518e5fa4d7acff9e586aee21e12a0
     if command -v uniffi-bindgen-go >/dev/null 2>&1; then
         echo "  Generating go bindings..."
         uniffi-bindgen-go --library "$lib_path" --out-dir "$OUTPUT_DIR/bindings/go"
