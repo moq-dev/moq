@@ -3150,7 +3150,7 @@ impl AnnounceConsumer {
 		}
 
 		// Resolved against the construction scope, never the whole origin.
-		let Some(selected) = self.allowed.select(&PathPrefixes::new([prefix])) else {
+		let Some(selected) = self.allowed.select(&PathPrefixes::new([&prefix])) else {
 			return false;
 		};
 
