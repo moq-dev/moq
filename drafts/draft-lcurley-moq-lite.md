@@ -248,7 +248,7 @@ Codes 64 and above are the application's, opaque to moq-lite.
 An endpoint MUST ignore a code it does not recognize, treating it as an unspecified error.
 An endpoint MUST NOT infer a meaning for an unregistered code; in particular, it MUST NOT assume a code is an authorization failure unless it is UNAUTHORIZED.
 
-Codes 33 through 63 are reserved and MUST NOT be interpreted.
+Codes 32 through 63 are reserved and MUST NOT be interpreted, except where a table below assigns one.
 Implementations currently emit values in this range for conditions with no code above, but those values are provisional placeholders, not assignments: a receiver MUST treat one as an unspecified error, exactly as it would any other unregistered code.
 A future revision will assign this range, or fold the conditions into the shared codes.
 
@@ -293,7 +293,7 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x12  | MALFORMED_TRACK | The track's content could not be parsed. |
 | ------- | ------------- | ----------- |
-|  0x20  | CAPACITY | The publisher lacks the capacity to take on the request. The subscriber MAY re-resolve once (see [Dynamic](#dynamic)). |
+|  0x30  | CAPACITY | An advertiser lacks the capacity to take on a dynamically resolved request; the receiver MAY re-resolve once (see [Dynamic](#dynamic)). On any other stream it is terminal, like any refusal. |
 | ------- | ------------- | ----------- |
 
 Note that CANCELLED is 0x1, not 0x0: a stream reset with 0x0 is an INTERNAL_ERROR, not a routine cancellation.
@@ -335,7 +335,7 @@ The subscriber creates the stream with an ANNOUNCE_REQUEST message.
 The publisher replies with a single ANNOUNCE_OK message followed by announcements for any matching broadcasts and any future changes:
 
 - ANNOUNCE_START: a matching broadcast is available.
-- ANNOUNCE_END: a previously started broadcast is no longer available.
+- ANNOUNCE_END: a previously started broadcast is no longer advertised.
 - ANNOUNCE_UPDATE: a previously started advertisement was atomically replaced.
 
 ANNOUNCE_OK carries metadata that applies to every announcement on the stream: the publisher's own `Hop ID` (the implicit trailing entry of every announcement's path) and the number of initial announcements, which lets the subscriber deliver the initial set as a batch (see [ANNOUNCE_OK](#announce-ok)).
@@ -350,7 +350,8 @@ A second ANNOUNCE_START for an already-available path is a protocol violation; a
 The subscriber MUST reset the stream if it receives an ANNOUNCE_END or ANNOUNCE_UPDATE referencing an Announce ID that was never assigned or already retired, an ANNOUNCE_START for a path that is already available, or any announcement before ANNOUNCE_OK.
 When the stream is closed, the subscriber MUST assume that all broadcasts are now unavailable.
 
-Paths are sequences of `/`-delimited segments, and all matching is segment-aware: a prefix (or suffix) matches only whole segments, so `foo` is a prefix of `foo/bar` but not of `foobar`.
+Paths are sequences of non-empty `/`-delimited segments; a leading, trailing, or repeated `/` is removed before comparison, and two paths are equal when their normalized bytes are identical.
+All matching is segment-aware: a prefix (or suffix) matches only whole segments, so `foo` is a prefix of `foo/bar` but not of `foobar`.
 There MAY be multiple Announce Streams, potentially containing overlapping prefixes, that get their own ANNOUNCE_OK + announcements.
 
 #### Routing {#routing}
@@ -396,27 +397,35 @@ A peer that predates this stream resets it on the unknown stream type (see [STRE
 
 A dynamic advertisement's pattern is a prefix and a suffix, either possibly empty (see [DYNAMIC_START](#dynamic-start)).
 A path matches when it starts with the prefix and what remains ends with the suffix, both segment-aware (see [Announce](#announce)).
-A dynamic advertisement is a capability, not an inventory: it never implies that any matching path exists, which is what makes an over-claiming pattern well-formed, and refusal (below) is how one path is denied.
+A dynamic advertisement is a capability, not an inventory: it never implies that any matching path exists, and refusal (below) is how one path is denied.
 It carries no `Epoch`, since a pattern names no generation of content.
 
 Dynamic advertisements forward like announcements: the hop list, loop discard, cost accumulation, and per-subscriber origin exclusion of [Routing](#routing) apply unchanged.
 A receiver MUST NOT present one as an available broadcast, and duplicates of one pattern SHOULD be presented combined, gone only when the last advertiser retracts.
 
-What patterns a session may advertise is an authorization question, out of scope like the rest, but a receiver MUST enforce that a pattern's prefix is within what the sender may publish.
-The suffix claims nothing about where a path begins, so any pattern with an empty prefix asserts authority over the entire namespace and demands it.
-A mis-scoped empty prefix does not error; it quietly answers for everything.
+A receiver MUST discard a dynamic advertisement whose pattern prefix is not within what the sender may publish; how that authority is expressed is out of scope, like the rest of authorization.
+An empty prefix therefore claims the entire namespace and demands that authority.
 
-A receiver MAY resolve a SUBSCRIBE, FETCH, or TRACK request for an unadvertised path against its dynamic advertisements.
+A receiver MAY resolve a SUBSCRIBE, FETCH, or TRACK request for an unadvertised path against its dynamic advertisements, and resolution recurses: a resolved request forwarded upstream is still unadvertised there, so each receiver along the way selects among its own advertisements.
 Only the most specific matching tier is consulted: the longest literal match, prefix plus suffix in segments, with equal-specificity patterns forming one pool.
-Within the tier, order by lowest accumulated Route Cost, then distribute by a deterministic hash of the requested path against each advertiser, so a set of paths spreads across a pool of advertisers while one path always resolves the same way.
-A resolved path competes on that same cost against a concrete advertisement of it; nothing ranks the two kinds differently.
+Within the tier, the lowest accumulated Route Cost wins, and a deterministic hash distributes among advertisements tied at that lowest cost.
+Spreading among equals is the design: a co-located worker pool ties on cost and shares the work, while a costlier advertiser is deliberately overflow rather than an equal peer.
+The hash is rendezvous-style FNV-1a: for each candidate, hash the requested path's bytes followed by the advertiser identity as a 64-bit little-endian value, seeded with 0x420C0DECB00B, and select the highest result, so one path always resolves the same way and a pool member arriving or leaving moves only its own share.
+The advertiser identity is the first entry of the advertisement's reconstructed hop list; 0 identifies nothing, so such an advertisement is its own pool member, keyed by the session it arrived on.
+
+A resolved path competes against a concrete advertisement of the same path with its single Route Cost standing in for both the Warm and Cold halves.
+The kind of advertisement carries no rank of its own; cost ties break by the same chain concrete routes use (see [Routing](#routing)), with the hash deciding only within the pattern pool.
 A publisher advertising standby capacity MUST therefore seed its cost above the largest accumulated topology cost its deployment can produce, or a nearby standby outranks a distant publisher already doing the work and the mesh starts a duplicate.
 
 An advertiser that will not serve a resolved request resets the stream with a typed code (see [Error Codes](#error-codes)).
-A CAPACITY reset permits the receiver ONE re-resolution, within the same tier and excluding the refuser: an advertiser's capacity and a receiver's view of it are at least half a round trip apart, so a retraction and a request for the slot it gave away necessarily cross, and the exclusion is what makes the retry safe rather than the retraction arriving first.
+A CAPACITY reset permits the receiver ONE re-resolution, excluding every advertisement whose advertiser identity matches the refusing route's: an advertiser's capacity and a receiver's view of it are at least half a round trip apart, so a retraction and a request for the slot it gave away necessarily cross, and the exclusion is what makes the retry safe rather than the retraction arriving first.
 Re-resolution may find no other advertiser, and the request is then unroutable; that is a correct outcome, not a fallback list.
+A receiver that has spent its re-resolution, or has nothing to spend it on, MUST reset the downstream request with a terminal code rather than CAPACITY, so the single retry cannot compound hop by hop.
 Every other code, and any unrecognized one, is terminal and propagates without re-resolution, so probing unserved paths costs one round trip per path.
 A receiver SHOULD NOT cache refusals; rate limiting is the advertiser's concern.
+
+A publisher that retains a broadcast's content after it ends (a recording) retracts the advertisement with ANNOUNCE_END and serves the stored groups over FETCH, typically through a dynamic advertisement covering the path.
+How a subscriber learns the path and epoch of stored content is out of band, e.g. an application catalog.
 
 ### Subscribe
 A subscriber opens Subscribe Streams to request a Track.
@@ -424,7 +433,7 @@ A subscriber opens Subscribe Streams to request a Track.
 The subscriber MUST start a Subscribe Stream with a SUBSCRIBE message followed by any number of SUBSCRIBE_UPDATE messages.
 The publisher replies with a SUBSCRIBE_OK message once the start group is resolved, followed by any number of SUBSCRIBE_END and SUBSCRIBE_DROP messages.
 For a live track the publisher MAY withhold SUBSCRIBE_OK until the first matching group resolves the start; if the track has already ended with no matching groups, it sends SUBSCRIBE_END with no preceding SUBSCRIBE_OK.
-A rejection is a stream reset: a publisher that cannot serve the subscription (no such track, an ended broadcast (complete or static content, such as a recording, which is read via FETCH instead), an `Epoch` that is not the one being served, or any other refusal) MUST promptly reset the stream rather than leave it pending, so a subscriber distinguishes "pending" from "refused" by the reset, not by a timeout.
+A rejection is a stream reset: a publisher that cannot serve the subscription (no such track, an ended broadcast, an `Epoch` that is not the one being served, or any other refusal) MUST promptly reset the stream rather than leave it pending, so a subscriber distinguishes "pending" from "refused" by the reset, not by a timeout.
 
 The track's immutable publisher properties are not carried here; they are fetched once via a [Track Stream](#track-stream).
 The subscriber needs the track's TRACK_INFO (notably its timescale) to interpret FRAME messages, and MAY open the Track and Subscribe streams concurrently, buffering frames until it arrives.
@@ -902,6 +911,7 @@ The exemptions also compose: should the drain become a disconnection, the route 
 ## ANNOUNCE_END {#announce-end}
 A publisher sends an ANNOUNCE_END message to retract a previously started broadcast, referencing its Announce ID.
 The id is retired and MUST NOT be referenced again.
+Retraction claims nothing about the content: a broadcast that ends but remains readable retracts too and serves its stored groups over FETCH (see [Dynamic](#dynamic)), and retraction does not disturb subscriptions already in flight, which conclude normally with SUBSCRIBE_END.
 
 ~~~
 ANNOUNCE_END Message {
@@ -931,7 +941,7 @@ The `Epoch` determines what the update means (see [ANNOUNCE_START](#announce-sta
   Cached TRACK_INFO stays valid (see [Track](#track-stream)) and the subscriber MAY resume in-flight subscriptions at a group boundary.
 - Changed: a different generation occupies the path.
   Cached TRACK_INFO MUST be discarded and existing subscriptions do not carry over.
-  A publisher SHOULD only move to a lower Epoch when the higher generation is gone entirely, e.g. a live broadcast vanished and only an older recording remains.
+  A publisher SHOULD only move to a lower Epoch when the higher generation is gone entirely, e.g. the newer publisher vanished and an older redundant one remains.
 - Both 0: the first entry of the reconstructed path decides instead, a preserved non-zero entry meaning a route change and a changed or zero entry a replacement (0 proves nothing shared).
   The first entry only identifies the publisher, so a restart with new content is indistinguishable from a route change; assigning Epochs is what makes it detectable.
 
@@ -961,7 +971,7 @@ An update whose only change is a Route Cost is valid: it is how a relay advertis
 
 
 ## DYNAMIC_REQUEST {#dynamic-request}
-A subscriber sends a DYNAMIC_REQUEST message as the first message on a Dynamic Stream, to receive every dynamic advertisement whose pattern can match a path starting with the requested prefix (see [Dynamic](#dynamic)).
+A subscriber sends a DYNAMIC_REQUEST message as the first message on a Dynamic Stream, encoded exactly as [ANNOUNCE_REQUEST](#announce-request): interest in every dynamic advertisement whose pattern can match a path starting with the requested prefix.
 
 ~~~
 DYNAMIC_REQUEST Message {
@@ -969,9 +979,6 @@ DYNAMIC_REQUEST Message {
   Path Prefix (s),
 }
 ~~~
-
-**Path Prefix**:
-Indicate interest in any pattern that can match a path starting with this prefix.
 
 
 ## DYNAMIC_OK {#dynamic-ok}
@@ -1007,13 +1014,12 @@ DYNAMIC_START Message {
 Set to 0x0 to indicate a DYNAMIC_START message.
 
 **Path Prefix**:
-The remainder of the pattern's prefix after the stream's requested prefix, like ANNOUNCE_START's Broadcast Path Suffix.
-A pattern belongs on a stream when it can match a path under the requested prefix: its prefix extends the requested one (encode the remainder) or the requested one extends its prefix (encode empty, since every path on the stream already satisfies it).
-Empty means every path under the requested prefix.
+The pattern's full prefix, carried whole rather than rebased against the stream's requested prefix: the requested prefix only decides WHICH patterns a stream carries (any whose pattern can match a path under it), never how one is encoded.
+Rebasing would be lossy, since a pattern whose prefix is shorter than the requested prefix cannot be reconstructed, and the pattern's specificity and re-advertisement to other streams depend on the original.
 
 **Path Suffix**:
-The segments a matching path must end with, unchanged by the stream's prefix.
-A path matches the pattern when it starts with the full prefix, ends with the suffix, and the two do not overlap.
+The segments a matching path must end with.
+A path matches the pattern when it starts with the prefix, ends with the suffix, and the two do not overlap.
 Both halves empty matches every path.
 
 **Hop Count** and **Hop ID**:
@@ -1063,12 +1069,8 @@ DYNAMIC_UPDATE Message {
 **Type**:
 Set to 0x2 to indicate a DYNAMIC_UPDATE message.
 
-**Dynamic ID**:
-The ordinal implicitly assigned by a prior DYNAMIC_START on this stream.
-Referencing an id that was never assigned, or one already retired, is a protocol violation.
-
-**Hop Count**, **Hop ID**, and **Route Cost**:
-As defined for [DYNAMIC_START](#dynamic-start).
+**Dynamic ID**, **Hop Count**, **Hop ID**, and **Route Cost**:
+As defined for [DYNAMIC_START](#dynamic-start) and [DYNAMIC_END](#dynamic-end).
 
 
 ## SUBSCRIBE
@@ -1480,9 +1482,10 @@ The `Message Length` describes the payload size on the wire.
 - ANNOUNCE_END and ANNOUNCE_UPDATE reference the Announce ID instead of repeating the broadcast path.
 - Replaced the duplicate-`active` restart idiom with ANNOUNCE_UPDATE; a second ANNOUNCE_START for an already-available path is now a protocol violation.
 - Added an `Epoch` to ANNOUNCE_START and ANNOUNCE_UPDATE: a per-path content generation minted by the original publisher and forwarded unchanged, 0 meaning unspecified. The highest Epoch wins (non-zero outranks 0) and replacement is decided by value rather than arrival order; equal non-zero Epochs splice, and the first entry of the path remains the identity only when both are 0. That fallback identity requires a non-zero first entry: 0 identifies nothing, so it never proves continuity, and publishers SHOULD assign themselves a Hop ID (a random per-session value suffices).
-- Added the Dynamic Stream (0x7): DYNAMIC_REQUEST/DYNAMIC_OK then DYNAMIC_START, DYNAMIC_END, and DYNAMIC_UPDATE advertise a (prefix, suffix) pattern of paths the publisher could serve on demand, mirroring the Announce Stream's mechanics with its own Dynamic ID space. A separate stream because a dynamic advertisement is routing capability rather than content discovery, and because a peer without support just resets the unknown stream type, leaving announcements untouched. It carries a hop list and one Route Cost (no Epoch, never warm) and forwards under the routing rules unchanged. A receiver may resolve a request for an unadvertised path against dynamic advertisements: most specific pattern only, then lowest cost, then a hash of the requested path across the pool. A CAPACITY reset permits one re-resolution excluding the refuser; every other reset is terminal.
-- Assigned stream error code 0x20 CAPACITY, narrowing the reserved range to 33-63.
-- Specified path matching as segment-aware on `/`-delimited segments, matching the implementations; it was previously stated as byte-by-byte.
+- Added the Dynamic Stream (0x7): DYNAMIC_REQUEST/DYNAMIC_OK then DYNAMIC_START, DYNAMIC_END, and DYNAMIC_UPDATE advertise a (prefix, suffix) pattern of paths the publisher could serve on demand, mirroring the Announce Stream's mechanics with its own Dynamic ID space. An advertisement carries its full pattern prefix (the requested prefix filters, never rebases), a hop list, and one Route Cost (no Epoch, never warm), and forwards under the routing rules unchanged. Resolution of an unadvertised path recurses per receiver: most specific pattern, then lowest cost, then a seeded rendezvous FNV-1a hash of the requested path against the advertiser identity. A CAPACITY reset permits one re-resolution excluding the refusing advertiser and is converted to a terminal code rather than propagated; every other reset is terminal.
+- Assigned stream error code 0x30 CAPACITY, above the values current implementations emit as placeholders; the reserved range now admits explicitly assigned exceptions.
+- Specified the path grammar (non-empty `/`-delimited segments, separators normalized before comparison), byte equality of the normalized form, and segment-aware prefix/suffix matching; matching was previously stated as byte-by-byte.
+- Stated the ended-broadcast lifecycle without the flag: a broadcast that ends but remains readable is retracted with ANNOUNCE_END, which never disturbs in-flight subscriptions, and its stored groups are read over FETCH, discovered out of band.
 - Added an `Epoch` to SUBSCRIBE, FETCH, and TRACK (0 = current, mismatch = reset) and the resolved `Epoch` to TRACK_INFO, so metadata and groups always come from the same generation and requests cannot race a replacement.
 - Added `Warm Route Cost` and `Cold Route Cost` fields to ANNOUNCE_START and ANNOUNCE_UPDATE: the same path priced against two cache states. Warm is the accumulated cost of the transfers a subscription via this advertisement would newly cause, and is what route selection minimizes; Cold prices the path as if nothing along it were carrying, and breaks a Warm tie before path length, with the most recently received advertisement below that. Only Warm takes the actively-carrying discount, so Cold still ranks two relays that both advertise 0, and a relay adopts another carrying relay only when that relay's `(Cold cost, hash)` rank is strictly lower. A wire that cannot express Cold is read as the saturation ceiling, not as 0.
 - Added a SETUP `Cost` parameter (0x4) declaring what subscribing from the sender costs, added by the receiver to every announcement that sender forwards. Both endpoints send their own, so the two directions are priced independently, and a receiver MAY charge a locally configured value instead. Unpriced directions default to 1, degrading to shortest-path routing.
@@ -1498,7 +1501,7 @@ The `Message Length` describes the payload size on the wire.
 - Capped the GOAWAY New Session URI at 8,192 bytes, matching moq-transport.
 - Restricted the GOAWAY New Session URI to servers, specified a duplicate GOAWAY as a protocol violation, and recommended scheme continuity and sticky redirects.
 - Exempted a ceiling-cost serving path from the actively-carrying cost discount: a relay whose serving path costs the saturation ceiling (primarily a session that received a GOAWAY) advertises the ceiling instead of 0, so the drain propagates downstream instead of being re-masked by each carrying hop. Keyed on the value, not the reason, which does not travel on the wire.
-- Added the Error Codes section, defining separate session and stream code spaces and listing the codes moq-lite uses, reused unchanged from moq-transport. Codes 64+ are the application's; 32-63 are reserved and MUST NOT be interpreted, pending a future revision. Previously the codes were unspecified, so an endpoint could neither send one a peer would understand nor safely interpret one it received. Note this renumbers every code an existing implementation sent, and that a stream reset of 0x0 is now INTERNAL_ERROR rather than a cancellation (CANCELLED is 0x1).
+- Added the Error Codes section, defining separate session and stream code spaces and listing the codes moq-lite uses, reused unchanged from moq-transport. Codes 64+ are the application's; 32-63 are reserved and MUST NOT be interpreted except where assigned, pending a future revision. Previously the codes were unspecified, so an endpoint could neither send one a peer would understand nor safely interpret one it received. Note this renumbers every code an existing implementation sent, and that a stream reset of 0x0 is now INTERNAL_ERROR rather than a cancellation (CANCELLED is 0x1).
 - Renamed `Subscriber Max Latency` to `Subscriber Max Age` and `Publisher Max Latency` to `Publisher Max Age`.
 
 ## moq-lite-05
