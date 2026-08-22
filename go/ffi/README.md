@@ -26,11 +26,14 @@ The dev shell provides both `go` and `uniffi-bindgen-go`, so `nix develop --comm
 
 ```bash
 cargo install uniffi-bindgen-go \
-    --git https://github.com/NordSecurity/uniffi-bindgen-go \
-    --tag v0.7.1+v0.31.0
+    --git https://github.com/kixelated/uniffi-bindgen-go \
+    --tag v0.8.0+v0.32.0 \
+    --locked
 ```
 
-The tag pins the generator to the `uniffi` version `rs/moq-ffi` depends on; `flake.nix` pins the same one.
+`--locked` matters: `uniffi_bindgen` depends on `toml` across a `>=0.9, <2` range, so a fresh resolve can pick a different `toml` than the generator was built against.
+
+The tag pins the generator to the `uniffi` version `rs/moq-ffi` depends on; `flake.nix` pins the same one. It points at a fork because upstream has no uniffi 0.32 release yet; `flake.nix` carries the details.
 
 ## Layout
 

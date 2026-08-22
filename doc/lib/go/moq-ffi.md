@@ -29,9 +29,12 @@ The in-tree `go/ffi/` directory is the source skeleton; the generated `moq.go`/`
 
 ```bash
 cargo install uniffi-bindgen-go \
-    --git https://github.com/NordSecurity/uniffi-bindgen-go \
-    --tag v0.7.1+v0.31.0
+    --git https://github.com/kixelated/uniffi-bindgen-go \
+    --tag v0.8.0+v0.32.0 \
+    --locked
 ```
+
+That is a fork: upstream has no generator for the `uniffi` version `rs/moq-ffi` depends on yet. The dev shell installs the same one, so `nix develop --command just go check` needs no setup.
 
 ## See also
 
