@@ -149,12 +149,15 @@ export class TrackAliases<T> {
 	 *
 	 * Only retires an alias that still belongs to the supplied value: a later subscription
 	 * may already have reclaimed it, and that binding outranks a departing owner.
+	 *
+	 * Returns whether this caller still owned the binding, so metadata keyed by the alias is
+	 * only torn down by the owner and never out from under whoever reclaimed it.
 	 */
-	retire(alias: bigint, value: T) {
-		if (this.#active.get(alias)?.value !== value) return;
+	retire(alias: bigint, value: T): boolean {
+		if (this.#active.get(alias)?.value !== value) return false;
 		this.#active.delete(alias);
 
-		if (this.#retiredSet.has(alias)) return;
+		if (this.#retiredSet.has(alias)) return true;
 		this.#retiredSet.add(alias);
 		this.#retired.push(alias);
 
@@ -162,6 +165,8 @@ export class TrackAliases<T> {
 			const oldest = this.#retired.shift();
 			if (oldest !== undefined) this.#retiredSet.delete(oldest);
 		}
+
+		return true;
 	}
 
 	#forget(alias: bigint) {

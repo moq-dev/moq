@@ -421,21 +421,31 @@ export class Subscriber {
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);
-			// If setup eventually settles after the timeout, abort the stream
-			// and drop any registration so we don't leak. Cover both branches:
-			// setup may resolve late, or reject (e.g. SUBSCRIBE error) after the
-			// stream is already open.
+			// Runs now for whatever is already open, and again if `setup` settles late.
+			// Retirement is repeated because a late SUBSCRIBE_OK can register an alias after
+			// the first pass; the stream is torn down once.
+			let torn = false;
 			const cleanup = async () => {
-				if (state.registeredAlias !== undefined) this.#aliases.retire(state.registeredAlias, producer);
+				if (state.registeredAlias !== undefined && this.#aliases.retire(state.registeredAlias, producer)) {
+					this.#timescales.delete(state.registeredAlias);
+				}
+
+				if (!state.stream || torn) return;
+				torn = true;
+
 				// SUBSCRIBE_OK may already have arrived, in which case the publisher holds an
 				// Established subscription and keeps serving it. Aborting says nothing on
 				// v14-16, where the request rides a virtual stream whose reset is local, so
 				// the UNSUBSCRIBE has to go out explicitly.
-				if (state.stream) {
-					if (state.established) await this.#cancelSubscribe(state.stream, requestId);
-					state.stream.abort(e);
-				}
+				if (state.established) await this.#cancelSubscribe(state.stream, requestId);
+				state.stream.abort(e);
 			};
+
+			// Tear down what is already open rather than waiting on `setup`. A peer that
+			// opened the stream and then went quiet never settles it, and deferring would
+			// leave the request outstanding for the life of the session -- which is the
+			// timeout case, not a rare one.
+			void cleanup();
 			setup.then(cleanup, cleanup);
 			return;
 		}
@@ -480,8 +490,9 @@ export class Subscriber {
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);
 		} finally {
-			this.#aliases.retire(trackAlias, producer);
-			this.#timescales.delete(trackAlias);
+			// Only the owner tears down the alias metadata: a later subscription may have
+			// reclaimed the alias and installed its own timescale.
+			if (this.#aliases.retire(trackAlias, producer)) this.#timescales.delete(trackAlias);
 		}
 	}
 

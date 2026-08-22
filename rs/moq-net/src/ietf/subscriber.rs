@@ -1264,8 +1264,55 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "subscribe started");
 
+		// A publisher can be serving before its SUBSCRIBE_OK reaches us, since the data
+		// streams are independent of the request stream. Waiting for the response alone would
+		// miss the local side going away in that window and leave the publisher serving a
+		// track nobody reads, which is the leak this whole path exists to close.
+		enum Setup {
+			Response(Result<Option<(u64, Option<Timescale>)>, Error>),
+			Unused,
+			BroadcastClosed(Error),
+		}
+
+		let setup = {
+			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream));
+			kio::wait(|waiter| {
+				if track.poll_unused(waiter).is_ready() {
+					return Poll::Ready(Setup::Unused);
+				}
+				if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
+					return Poll::Ready(Setup::BroadcastClosed(err));
+				}
+				waiter.poll_future(response.as_mut()).map(Setup::Response)
+			})
+			.await
+		};
+
+		// Abandoned before the publisher answered. It may already be serving, so this still
+		// owes it a cancellation rather than a silent walk away.
+		let response = match setup {
+			Setup::Response(res) => res,
+			Setup::Unused | Setup::BroadcastClosed(_) => {
+				let err = match setup {
+					Setup::BroadcastClosed(err) => err,
+					_ => Error::Cancel,
+				};
+
+				tracing::info!(
+					broadcast = %self.origin.absolute(&broadcast_path),
+					track = %track.name(),
+					"subscribe abandoned before it was accepted"
+				);
+
+				let _ = track.abort(err);
+				self.remove_subscribe(request_id);
+				self.cancel_subscribe(stream, request_id).await;
+				return;
+			}
+		};
+
 		// Read the response and register the alias mapping
-		match self.read_subscribe_response(&mut stream).await {
+		match response {
 			Ok(Some((alias, timescale))) => {
 				if let Some(timescale) = timescale {
 					let mut state = self.state.lock();
@@ -2031,6 +2078,170 @@ mod tests {
 			occurrences(&log, &[ietf::Unsubscribe::ID as u8]),
 			0,
 			"draft-17+ has no UNSUBSCRIBE",
+		);
+	}
+
+	/// A publisher can be serving before its SUBSCRIBE_OK arrives, since data streams are
+	/// independent of the request stream. If the last consumer leaves in that window, the
+	/// subscriber still owes it a cancellation: walking away silently is what leaves it
+	/// serving a track nobody reads.
+	#[tokio::test(start_paused = true)]
+	async fn abandoning_before_subscribe_ok_still_cancels() {
+		const VERSION: Version = Version::Draft16;
+
+		// A peer that accepts the stream and then says nothing at all.
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let log = session.log.clone();
+
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			session,
+			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Origin::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+		);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let subscription = track.subscribe(None);
+
+		let request = dynamic.requested_track().await.expect("no track requested");
+
+		let serving = tokio::spawn(async move {
+			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+		});
+
+		// Let the SUBSCRIBE go out. No SUBSCRIBE_OK is coming, so the subscription never
+		// reaches Established on our side.
+		settle().await;
+
+		drop(subscription);
+		drop(track);
+		drop(consumer);
+
+		tokio::time::timeout(std::time::Duration::from_secs(1), serving)
+			.await
+			.expect("run_subscribe parked waiting for a response that never came")
+			.unwrap();
+
+		assert!(
+			occurrences(&log, &[ietf::Unsubscribe::ID as u8]) > 0,
+			"a subscribe abandoned before SUBSCRIBE_OK must still be cancelled",
+		);
+		assert_eq!(
+			log.stops(),
+			vec![STREAM_CANCELLED],
+			"and must stop the direction the publisher writes",
+		);
+	}
+
+	/// The control messages that actually reached the wire, by type id.
+	///
+	/// Decoding the framing rather than scanning for a byte: a type id is one varint among
+	/// many, and a substring match would happily find one inside a length or a payload.
+	fn control_message_types(log: &crate::lite::test_transport::Log, version: Version) -> Vec<u64> {
+		use crate::coding::Decode;
+
+		let writes = log.writes.lock().unwrap().clone();
+		let mut buf = writes.as_slice();
+		let mut types = Vec::new();
+
+		while !buf.is_empty() {
+			let Ok(type_id) = u64::decode(&mut buf, version) else {
+				break;
+			};
+			let Ok(size) = u16::decode(&mut buf, version) else {
+				break;
+			};
+			if buf.len() < size as usize {
+				break;
+			}
+			buf = &buf[size as usize..];
+			types.push(type_id);
+		}
+
+		types
+	}
+
+	/// Drafts 14-16 carry every request over `ControlStreamAdapter`'s virtual streams, so a
+	/// cancellation only counts if it traverses the mux and reaches the real control stream
+	/// writer. A test that drives a direct stream proves the subscriber's own logic and
+	/// nothing about the path production takes: the virtual writer's reset is a no-op and
+	/// its close returns as soon as the bytes are queued, so an adapter that dropped them
+	/// would look identical.
+	#[tokio::test(start_paused = true)]
+	async fn a_legacy_cancel_reaches_the_control_stream() {
+		const VERSION: Version = Version::Draft16;
+
+		// A peer that opens the control stream and then says nothing, so the subscribe is
+		// abandoned before it is accepted and cancelled from there.
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let log = session.log.clone();
+
+		let control = Control::new(None, false);
+		let adapter = super::super::adapter::ControlStreamAdapter::new(session.clone(), control.clone(), VERSION);
+
+		// The one real bidi everything is multiplexed onto.
+		let control_stream = Stream::open(&session, VERSION).await.unwrap();
+		let running = adapter.clone();
+		tokio::spawn(async move {
+			let _ = running.run(control_stream.reader, control_stream.writer).await;
+		});
+
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			adapter,
+			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
+			control,
+			None,
+			peer::PeerSetup::default(),
+			crate::Origin::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+		);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let subscription = track.subscribe(None);
+
+		let request = dynamic.requested_track().await.expect("no track requested");
+
+		let serving = tokio::spawn(async move {
+			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+		});
+
+		settle().await;
+		drop(subscription);
+		drop(track);
+		drop(consumer);
+
+		tokio::time::timeout(std::time::Duration::from_secs(1), serving)
+			.await
+			.expect("run_subscribe did not finish")
+			.unwrap();
+
+		// Let the adapter's writer task drain the queue onto the control stream.
+		settle().await;
+
+		let types = control_message_types(&log, VERSION);
+		assert!(
+			types.contains(&ietf::Subscribe::ID),
+			"the SUBSCRIBE reached the control stream: {types:?}"
+		);
+		assert!(
+			types.contains(&ietf::Unsubscribe::ID),
+			"the UNSUBSCRIBE must traverse the adapter to the control stream, not stop at the \
+			 virtual writer: {types:?}"
 		);
 	}
 

@@ -48,6 +48,17 @@ test("sharing an alias across subscriptions to one track is not fatal", () => {
 	expect(() => aliases.set(7n, {}, { broadcast: "cam", name: "video" })).toThrow(SharedTrackAlias);
 });
 
+// Metadata keyed by an alias (the track's timescale) must only be torn down by whoever
+// still owns the binding, so retirement reports ownership rather than returning void.
+test("retire reports whether the caller still owned the alias", () => {
+	const aliases = new TrackAliases<object>();
+	const owner = {};
+	aliases.set(7n, owner, { broadcast: "cam", name: "video" });
+
+	expect(aliases.retire(7n, {})).toBe(false);
+	expect(aliases.retire(7n, owner)).toBe(true);
+});
+
 test("does not let stale cleanup retire a reused alias", async () => {
 	const aliases = new TrackAliases<object>();
 	const active = {};
