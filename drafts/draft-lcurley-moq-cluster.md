@@ -161,6 +161,22 @@ Costs still accumulate across such a mesh, because each receiver adds the price 
 
 The original publisher seeds the value with its production cost: 0 for content it is already producing, higher for content it would have to spin up on demand, such as a standby transcoder advertising everything it *could* serve.
 
+## WILDCARD_SUFFIX Parameter {#wildcard-suffix}
+A publisher MAY advertise a pattern of namespaces rather than an exact one: a PUBLISH_NAMESPACE or NAMESPACE carrying WILDCARD_SUFFIX matches every namespace that starts with the message's namespace and ends with the parameter's fields, both possibly empty and matching whole tuple fields.
+
+~~~
+WILDCARD_SUFFIX Parameter {
+  Type (vi64) = 0x40B59
+  Length (vi64)
+  Track Namespace Suffix (..)
+}
+~~~
+
+A pattern is a capability, not an inventory: it never implies a matching namespace exists, and a publisher denies one namespace by resetting the request for it.
+A pattern advertisement carries HOP_PATH and ROUTE_COST unchanged; its ROUTE_COST is the on-demand production cost and never takes the actively-carrying discount, and a standby's seed MUST exceed the largest accumulated topology cost the deployment can produce, or a nearby standby outranks a distant publisher already doing the work ({{selection}}).
+A receiver MUST enforce that the message's namespace (the pattern's prefix) is within what the sender may publish; an empty prefix asserts authority over every namespace and demands it.
+Both empty is legal, e.g. an archive advertising "anything you cannot get live".
+
 
 # Relay Behavior
 When forwarding an advertisement downstream, a relay MUST append its own Hop ID to the HOP_PATH it received, so its own ID is always the last entry.
@@ -216,6 +232,10 @@ When serving a subscription, a publisher MUST select the source by that same rul
 If only excluded sources remain the subscription is unroutable, since serving it would hand the subscriber data that already flowed through itself.
 Applying one rule to both advertisement and dispatch keeps advertised paths truthful and prevents subscription cycles of any length.
 
+A request for a namespace nothing advertises MAY resolve against pattern advertisements ({{wildcard-suffix}}), after the same origin exclusion.
+Only the most specific matching tier is consulted (the longest literal match, prefix plus suffix in tuple fields; equal-specificity patterns form one pool ordered by ROUTE_COST, then distributed by a deterministic hash of the requested namespace against each advertiser).
+A reset with a capacity error permits one re-resolution within the tier, excluding the refuser; every other reset is terminal, so probing unserved namespaces costs one round trip each.
+
 
 # Security Considerations
 A Hop ID reveals nothing beyond what its operator encodes in it, and a deployment that considers its identifiers sensitive can use random values or declare 0 ({{zero}}).
@@ -244,15 +264,16 @@ This document requests two registrations in the "MOQT Setup Options" registry ({
 
 ## MOQT Message Parameters
 
-This document requests two registrations in the "MOQT Message Parameters" registry ({{moqt}} Section 15.7).
-Both are carried in PUBLISH_NAMESPACE and in the extended NAMESPACE message ({{namespace}}).
+This document requests three registrations in the "MOQT Message Parameters" registry ({{moqt}} Section 15.7).
+All are carried in PUBLISH_NAMESPACE and in the extended NAMESPACE message ({{namespace}}).
 
-| Value   | Name        | Carried In                   | Reference     |
-|:--------|:------------|:-----------------------------|:--------------|
-| 0x40B57 | HOP_PATH    | PUBLISH_NAMESPACE, NAMESPACE | This Document |
-| 0x40B58 | ROUTE_COST  | PUBLISH_NAMESPACE, NAMESPACE | This Document |
+| Value   | Name            | Carried In                   | Reference     |
+|:--------|:----------------|:-----------------------------|:--------------|
+| 0x40B57 | HOP_PATH        | PUBLISH_NAMESPACE, NAMESPACE | This Document |
+| 0x40B58 | ROUTE_COST      | PUBLISH_NAMESPACE, NAMESPACE | This Document |
+| 0x40B59 | WILDCARD_SUFFIX | PUBLISH_NAMESPACE, NAMESPACE | This Document |
 
-The Key-Value-Pair parity is load-bearing: HOP_PATH and RELAY_HOPS are odd, so their values are length-prefixed byte strings, while ROUTE_COST and RELAY_COST are even, so their values are bare varints.
+The Key-Value-Pair parity is load-bearing: HOP_PATH, RELAY_HOPS, and WILDCARD_SUFFIX are odd, so their values are length-prefixed byte strings, while ROUTE_COST and RELAY_COST are even, so their values are bare varints.
 
 
 --- back

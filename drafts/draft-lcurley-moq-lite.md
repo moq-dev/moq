@@ -248,7 +248,7 @@ Codes 64 and above are the application's, opaque to moq-lite.
 An endpoint MUST ignore a code it does not recognize, treating it as an unspecified error.
 An endpoint MUST NOT infer a meaning for an unregistered code; in particular, it MUST NOT assume a code is an authorization failure unless it is UNAUTHORIZED.
 
-Codes 32 through 63 are reserved and MUST NOT be interpreted.
+Codes 33 through 63 are reserved and MUST NOT be interpreted.
 Implementations currently emit values in this range for conditions with no code above, but those values are provisional placeholders, not assignments: a receiver MUST treat one as an unspecified error, exactly as it would any other unregistered code.
 A future revision will assign this range, or fold the conditions into the shared codes.
 
@@ -293,6 +293,8 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x12  | MALFORMED_TRACK | The track's content could not be parsed. |
 | ------- | ------------- | ----------- |
+|  0x20  | CAPACITY | The publisher lacks the capacity to take on the request. The subscriber MAY re-resolve once (see [Wildcards](#wildcards)). |
+| ------- | ------------- | ----------- |
 
 Note that CANCELLED is 0x1, not 0x0: a stream reset with 0x0 is an INTERNAL_ERROR, not a routine cancellation.
 An endpoint terminating a stream because the session is ending SHOULD use SESSION_CLOSED rather than the session's own code, since the two spaces are disjoint.
@@ -326,28 +328,30 @@ There's a 1-byte STREAM_TYPE at the beginning of each stream.
 
 ### Announce
 A subscriber can open an Announce Stream to discover broadcasts matching a prefix.
-By default only live broadcasts are announced; the subscriber can opt into ended broadcasts too, e.g. to enumerate available recordings (see [ANNOUNCE_REQUEST](#announce-request)).
 
 The subscriber creates the stream with an ANNOUNCE_REQUEST message.
 The publisher replies with a single ANNOUNCE_OK message followed by announcements for any matching broadcasts and any future changes:
 
 - ANNOUNCE_START: a matching broadcast is available.
-- ANNOUNCE_END: a previously started broadcast is no longer available.
-- ANNOUNCE_UPDATE: a previously started advertisement was atomically replaced.
+- ANNOUNCE_END: a previously started advertisement (broadcast or wildcard) is retracted.
+- ANNOUNCE_UPDATE: a previously started broadcast advertisement was atomically replaced.
+- WILDCARD_START: a pattern of paths the publisher could serve on demand (see [Wildcards](#wildcards)).
+- WILDCARD_UPDATE: a previously started wildcard was atomically replaced.
 
 ANNOUNCE_OK carries metadata that applies to every announcement on the stream: the publisher's own `Hop ID` (the implicit trailing entry of every announcement's path) and the number of initial announcements, which lets the subscriber deliver the initial set as a batch (see [ANNOUNCE_OK](#announce-ok)).
 
-Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream: a counter starting at 0 that increments by 1 per ANNOUNCE_START.
+Each ANNOUNCE_START or WILDCARD_START implicitly assigns the next Announce ID on the stream: one counter starting at 0 that increments by 1 per START of either kind.
 The id never appears on the wire; both endpoints derive it from the message order on the (reliable, ordered) stream.
-ANNOUNCE_END and ANNOUNCE_UPDATE reference the Announce ID instead of repeating the broadcast path.
+ANNOUNCE_END, ANNOUNCE_UPDATE, and WILDCARD_UPDATE reference the Announce ID instead of repeating the path or pattern.
 
-Each broadcast has at most one current advertisement per stream.
-A second ANNOUNCE_START for an already-available path is a protocol violation; an ANNOUNCE_UPDATE atomically replaces the current advertisement (equivalent to ANNOUNCE_END+ANNOUNCE_START) while keeping its id live.
+Each broadcast has at most one current advertisement per stream, and each pattern at most one current wildcard.
+A second START for an already-advertised path or pattern is a protocol violation; an UPDATE atomically replaces the current advertisement (equivalent to ANNOUNCE_END plus a new START) while keeping its id live.
+An ANNOUNCE_UPDATE referencing a wildcard's id, or a WILDCARD_UPDATE referencing a broadcast's, is a protocol violation.
 
-The subscriber MUST reset the stream if it receives an ANNOUNCE_END or ANNOUNCE_UPDATE referencing an Announce ID that was never assigned or already retired, an ANNOUNCE_START for a path that is already available, or any announcement before ANNOUNCE_OK.
-When the stream is closed, the subscriber MUST assume that all broadcasts are now unavailable.
+The subscriber MUST reset the stream if it receives an ANNOUNCE_END or UPDATE referencing an Announce ID that was never assigned or already retired, a START for a path or pattern that is already advertised, or any announcement before ANNOUNCE_OK.
+When the stream is closed, the subscriber MUST assume that all broadcasts and wildcards are now unavailable.
 
-Path prefix matching and equality is done on a byte-by-byte basis.
+Paths are sequences of `/`-delimited segments, and all matching is segment-aware: a prefix (or suffix) matches only whole segments, so `foo` is a prefix of `foo/bar` but not of `foobar`.
 There MAY be multiple Announce Streams, potentially containing overlapping prefixes, that get their own ANNOUNCE_OK + announcements.
 
 #### Routing {#routing}
@@ -377,13 +381,38 @@ Cooperating redundant publishers opt in by minting the same Epoch, e.g. derived 
 Any other pair is two generations colliding on one path: a relay MUST NOT splice between them and MUST end the lower-Epoch advertisement rather than wait for it to end on its own, which would hold the path for however long the transport takes to notice a publisher is gone.
 Only when both Epochs are 0 does identity fall back to the first entry of the reconstructed path: a shared non-zero first entry is spliceable, while differing or zero first entries (0 proves nothing shared) are a replacement decided toward the most recently received.
 
+#### Wildcards {#wildcards}
+A wildcard advertises a pattern of paths the publisher could serve on demand: a prefix and a suffix, either possibly empty (see [WILDCARD_START](#wildcard-start)).
+A path matches when it starts with the prefix and what remains ends with the suffix, both segment-aware.
+A wildcard is a capability, not an inventory: it never implies that any matching path exists, which is what makes an over-claiming pattern well-formed, and refusal (below) is how one path is denied.
+A wildcard carries no `Epoch`, since a pattern names no generation of content.
+
+Wildcards forward like announcements: the hop list, loop discard, cost accumulation, and per-subscriber origin exclusion of [Routing](#routing) apply unchanged.
+A receiver MUST NOT present a wildcard as an available broadcast; it is a distinct kind of advertisement, and duplicates of one pattern SHOULD be presented combined, gone only when the last advertiser retracts.
+
+What patterns a session may advertise is an authorization question, out of scope like the rest, but a receiver MUST enforce that a pattern's prefix is within what the sender may publish.
+The suffix claims nothing about where a path begins, so any pattern with an empty prefix asserts authority over the entire namespace and demands it.
+A mis-scoped empty prefix does not error; it quietly answers for everything.
+
+A receiver MAY resolve a SUBSCRIBE, FETCH, or TRACK request for an unadvertised path against its wildcards.
+Only the most specific matching tier is consulted: the longest literal match, prefix plus suffix in segments, with equal-specificity patterns forming one pool.
+Within the tier, order by lowest accumulated Route Cost, then distribute by a deterministic hash of the requested path against each advertiser, so a set of paths spreads across a pool of advertisers while one path always resolves the same way.
+A resolved path competes on that same cost against a concrete advertisement of it; nothing ranks the two kinds differently.
+A publisher advertising standby capacity MUST therefore seed its cost above the largest accumulated topology cost its deployment can produce, or a nearby standby outranks a distant publisher already doing the work and the mesh starts a duplicate.
+
+An advertiser that will not serve a resolved request resets the stream with a typed code (see [Error Codes](#error-codes)).
+A CAPACITY reset permits the receiver ONE re-resolution, within the same tier and excluding the refuser: an advertiser's capacity and a receiver's view of it are at least half a round trip apart, so a retraction and a request for the slot it gave away necessarily cross, and the exclusion is what makes the retry safe rather than the retraction arriving first.
+Re-resolution may find no other advertiser, and the request is then unroutable; that is a correct outcome, not a fallback list.
+Every other code, and any unrecognized one, is terminal and propagates without re-resolution, so probing unserved paths costs one round trip per path.
+A receiver SHOULD NOT cache refusals; rate limiting is the advertiser's concern.
+
 ### Subscribe
 A subscriber opens Subscribe Streams to request a Track.
 
 The subscriber MUST start a Subscribe Stream with a SUBSCRIBE message followed by any number of SUBSCRIBE_UPDATE messages.
 The publisher replies with a SUBSCRIBE_OK message once the start group is resolved, followed by any number of SUBSCRIBE_END and SUBSCRIBE_DROP messages.
 For a live track the publisher MAY withhold SUBSCRIBE_OK until the first matching group resolves the start; if the track has already ended with no matching groups, it sends SUBSCRIBE_END with no preceding SUBSCRIBE_OK.
-A rejection is a stream reset: a publisher that cannot serve the subscription (no such track, an ended broadcast, an `Epoch` that is not the one being served, or any other refusal) MUST promptly reset the stream rather than leave it pending, so a subscriber distinguishes "pending" from "refused" by the reset, not by a timeout.
+A rejection is a stream reset: a publisher that cannot serve the subscription (no such track, an ended broadcast (complete or static content, such as a recording, which is read via FETCH instead), an `Epoch` that is not the one being served, or any other refusal) MUST promptly reset the stream rather than leave it pending, so a subscriber distinguishes "pending" from "refused" by the reset, not by a timeout.
 
 The track's immutable publisher properties are not carried here; they are fetched once via a [Track Stream](#track-stream).
 The subscriber needs the track's TRACK_INFO (notably its timescale) to interpret FRAME messages, and MAY open the Track and Subscribe streams concurrently, buffering frames until it arrives.
@@ -728,25 +757,19 @@ A relay MUST NOT forward it.
 
 
 ## ANNOUNCE_REQUEST {#announce-request}
-A subscriber sends an ANNOUNCE_REQUEST message to indicate it wants to receive announcements for any broadcasts with a path that starts with the requested prefix.
+A subscriber sends an ANNOUNCE_REQUEST message to indicate it wants to receive announcements for any broadcasts with a path that starts with the requested prefix, and any wildcards whose pattern can match such a path (see [Wildcards](#wildcards)).
 
 ~~~
 ANNOUNCE_REQUEST Message {
   Message Length (i)
   Broadcast Path Prefix (s),
-  Ended (i),
 }
 ~~~
 
 **Broadcast Path Prefix**:
 Indicate interest for any broadcasts with a path that starts with this prefix.
 
-**Ended**:
-Whether ended broadcasts match this request (see `Ended` in [ANNOUNCE_START](#announce-start)).
-When 0, only live broadcasts are announced; when 1, ended broadcasts are announced too, e.g. to enumerate available recordings.
-Values other than 0 and 1 are a protocol violation.
-
-The publisher MUST respond with an ANNOUNCE_OK message followed by ANNOUNCE_START messages for any matching and available broadcasts, followed by ANNOUNCE_START, ANNOUNCE_END, and ANNOUNCE_UPDATE messages for any future updates, subject to [Routing](#routing).
+The publisher MUST respond with an ANNOUNCE_OK message followed by START messages for any matching and available broadcasts and wildcards, followed by START, ANNOUNCE_END, and UPDATE messages for any future updates, subject to [Routing](#routing).
 Implementations SHOULD consider reasonable limits on the number of matching broadcasts to prevent resource exhaustion.
 
 
@@ -770,7 +793,7 @@ A publisher that assigns a Hop ID MUST choose a non-zero value, and SHOULD assig
 Receivers reconstruct the full path as `Hop IDs ++ [ANNOUNCE_OK.Hop ID]`.
 
 **Active Count**:
-The number of ANNOUNCE_START messages that the publisher will send immediately as the initial set.
+The number of ANNOUNCE_START and WILDCARD_START messages that the publisher will send immediately as the initial set.
 The subscriber MAY block reporting any announcement to the application until all `Active Count` initial announcements have arrived, then deliver the initial set as a batch.
 Any announcements beyond `Active Count` are live updates and SHOULD be reported as they arrive.
 A value of `0` is valid and means the publisher is offering no initial available broadcasts; all subsequent announcements (if any) are live updates.
@@ -788,7 +811,6 @@ ANNOUNCE_START Message {
   Message Length (i)
   Broadcast Path Suffix (s),
   Epoch (i),
-  Ended (i),
   Hop Count (i),
   Hop ID (i) ...,
   Warm Route Cost (i),
@@ -808,14 +830,6 @@ Each new generation MUST use a non-zero Epoch greater than every Epoch still obs
 RECOMMENDED construction: wall-clock milliseconds shifted left 16 bits with the low 16 bits random, clamped to at least one more than the highest observable Epoch; the timestamp preserves ordering across restarts without persisted state, the random bits make accidental collisions improbable, and the clamp covers same-millisecond generations, clock rollback, and skew.
 A violation is not fatal: receivers keep no high-water mark, so an erroneously high Epoch suppresses newer generations only while its advertisement remains available.
 A value of 0 means unspecified: identity falls back to the first entry of the path (see [Routing](#routing)), e.g. when bridging from an endpoint that does not assign Epochs.
-
-**Ended**:
-Whether the broadcast has ended (1) or is live (0).
-An ended broadcast is complete or static content, such as a recording: the publisher MUST reset a new Subscribe Stream for it, and subscribers read its groups via FETCH instead.
-A broadcast ending does not disturb subscriptions already in flight: they conclude normally with SUBSCRIBE_END.
-`Ended` describes the content; retracting the advertisement itself is ANNOUNCE_END, and an ended broadcast may stay advertised indefinitely.
-Ended broadcasts are only advertised on Announce Streams that requested them (see [ANNOUNCE_REQUEST](#announce-request)); on other streams, a broadcast that ends but remains available is retracted with ANNOUNCE_END.
-Values other than 0 and 1 are a protocol violation.
 
 **Hop Count**:
 The number of Hop ID entries that follow, NOT including the publisher's own `Hop ID` from ANNOUNCE_OK.
@@ -901,7 +915,7 @@ The Hop ID list MAY differ from the original (e.g. after a relay failover or ups
 
 The `Epoch` determines what the update means (see [ANNOUNCE_START](#announce-start)):
 
-- Unchanged (non-zero): the same content over a different route, or a changed `Ended` flag or Route Cost.
+- Unchanged (non-zero): the same content over a different route, or a changed Route Cost.
   Cached TRACK_INFO stays valid (see [Track](#track-stream)) and the subscriber MAY resume in-flight subscriptions at a group boundary.
 - Changed: a different generation occupies the path.
   Cached TRACK_INFO MUST be discarded and existing subscriptions do not carry over.
@@ -915,7 +929,6 @@ ANNOUNCE_UPDATE Message {
   Message Length (i)
   Announce ID (i),
   Epoch (i),
-  Ended (i),
   Hop Count (i),
   Hop ID (i) ...,
   Warm Route Cost (i),
@@ -930,10 +943,74 @@ Set to 0x2 to indicate an ANNOUNCE_UPDATE message.
 The ordinal implicitly assigned by a prior ANNOUNCE_START on this stream.
 Referencing an id that was never assigned, or one already retired by an ANNOUNCE_END, is a protocol violation.
 
-**Epoch**, **Ended**, **Hop Count**, **Hop ID**, **Warm Route Cost**, and **Cold Route Cost**:
+**Epoch**, **Hop Count**, **Hop ID**, **Warm Route Cost**, and **Cold Route Cost**:
 As defined for [ANNOUNCE_START](#announce-start).
 An update whose only change is a Route Cost is valid: it is how a relay advertises that it started or stopped actively carrying the broadcast.
-An update whose only change is the `Ended` flag is likewise valid: it is how a live broadcast ends into a recording without retiring its Announce ID.
+
+
+## WILDCARD_START {#wildcard-start}
+A publisher sends a WILDCARD_START message to advertise a pattern of paths it could serve on demand (see [Wildcards](#wildcards)).
+It assigns the next Announce ID like an ANNOUNCE_START, and is retracted by ANNOUNCE_END.
+
+~~~
+WILDCARD_START Message {
+  Type (i) = 0x3
+  Message Length (i)
+  Path Prefix (s),
+  Path Suffix (s),
+  Hop Count (i),
+  Hop ID (i) ...,
+  Route Cost (i),
+}
+~~~
+
+**Type**:
+Set to 0x3 to indicate a WILDCARD_START message.
+
+**Path Prefix**:
+The remainder of the pattern's prefix after the stream's requested prefix, like ANNOUNCE_START's Broadcast Path Suffix.
+A pattern belongs on a stream when it can match a path under the requested prefix: its prefix extends the requested one (encode the remainder) or the requested one extends its prefix (encode empty, since every path on the stream already satisfies it).
+Empty means every path under the requested prefix.
+
+**Path Suffix**:
+The segments a matching path must end with, unchanged by the stream's prefix.
+A path matches the pattern when it starts with the full prefix, ends with the suffix, and the two do not overlap.
+Both halves empty matches every path.
+
+**Hop Count** and **Hop ID**:
+As defined for [ANNOUNCE_START](#announce-start).
+
+**Route Cost**:
+What serving a matching path on demand would cost, in the same units as a broadcast's Route Costs.
+A single value rather than the Warm/Cold pair: a wildcard advertises capability rather than carried content, so it is never warm and the two halves would be provably equal.
+A relay forwarding a wildcard adds the sending peer's declared cost (see [Cost Parameter](#cost-parameter)), saturating, and never applies the actively-carrying discount.
+See [Wildcards](#wildcards) for the floor a standby seed MUST clear.
+
+
+## WILDCARD_UPDATE {#wildcard-update}
+A publisher sends a WILDCARD_UPDATE message to atomically replace a previously started wildcard, referencing its Announce ID; the id stays live.
+An update whose only change is the Route Cost is the expected case.
+
+~~~
+WILDCARD_UPDATE Message {
+  Type (i) = 0x4
+  Message Length (i)
+  Announce ID (i),
+  Hop Count (i),
+  Hop ID (i) ...,
+  Route Cost (i),
+}
+~~~
+
+**Type**:
+Set to 0x4 to indicate a WILDCARD_UPDATE message.
+
+**Announce ID**:
+The ordinal implicitly assigned by a prior WILDCARD_START on this stream.
+Referencing an id that was never assigned, one already retired, or one assigned by an ANNOUNCE_START is a protocol violation.
+
+**Hop Count**, **Hop ID**, and **Route Cost**:
+As defined for [WILDCARD_START](#wildcard-start).
 
 
 ## SUBSCRIBE
@@ -1345,7 +1422,9 @@ The `Message Length` describes the payload size on the wire.
 - ANNOUNCE_END and ANNOUNCE_UPDATE reference the Announce ID instead of repeating the broadcast path.
 - Replaced the duplicate-`active` restart idiom with ANNOUNCE_UPDATE; a second ANNOUNCE_START for an already-available path is now a protocol violation.
 - Added an `Epoch` to ANNOUNCE_START and ANNOUNCE_UPDATE: a per-path content generation minted by the original publisher and forwarded unchanged, 0 meaning unspecified. The highest Epoch wins (non-zero outranks 0) and replacement is decided by value rather than arrival order; equal non-zero Epochs splice, and the first entry of the path remains the identity only when both are 0. That fallback identity requires a non-zero first entry: 0 identifies nothing, so it never proves continuity, and publishers SHOULD assign themselves a Hop ID (a random per-session value suffices).
-- Added an `Ended` flag to ANNOUNCE_START and ANNOUNCE_UPDATE, and as an opt-in filter on ANNOUNCE_REQUEST: ended broadcasts reject SUBSCRIBE, are read via FETCH, and are only announced to subscribers that asked for them.
+- Added wildcard advertisements: WILDCARD_START (0x3) and WILDCARD_UPDATE (0x4) on the Announce Stream advertise a (prefix, suffix) pattern of paths the publisher could serve on demand, sharing the Announce ID space and retracted by ANNOUNCE_END. A wildcard carries a hop list and one Route Cost (no Epoch, never warm) and forwards under the routing rules unchanged. A receiver may resolve a request for an unadvertised path against wildcards: most specific pattern only, then lowest cost, then a hash of the requested path across the pool. A CAPACITY reset permits one re-resolution excluding the refuser; every other reset is terminal.
+- Assigned stream error code 0x20 CAPACITY, narrowing the reserved range to 33-63.
+- Specified path matching as segment-aware on `/`-delimited segments, matching the implementations; it was previously stated as byte-by-byte.
 - Added an `Epoch` to SUBSCRIBE, FETCH, and TRACK (0 = current, mismatch = reset) and the resolved `Epoch` to TRACK_INFO, so metadata and groups always come from the same generation and requests cannot race a replacement.
 - Added `Warm Route Cost` and `Cold Route Cost` fields to ANNOUNCE_START and ANNOUNCE_UPDATE: the same path priced against two cache states. Warm is the accumulated cost of the transfers a subscription via this advertisement would newly cause, and is what route selection minimizes; Cold prices the path as if nothing along it were carrying, and breaks a Warm tie before path length, with the most recently received advertisement below that. Only Warm takes the actively-carrying discount, so Cold still ranks two relays that both advertise 0, and a relay adopts another carrying relay only when that relay's `(Cold cost, hash)` rank is strictly lower. A wire that cannot express Cold is read as the saturation ceiling, not as 0.
 - Added a SETUP `Cost` parameter (0x4) declaring what subscribing from the sender costs, added by the receiver to every announcement that sender forwards. Both endpoints send their own, so the two directions are priced independently, and a receiver MAY charge a locally configured value instead. Unpriced directions default to 1, degrading to shortest-path routing.
