@@ -67,6 +67,7 @@ pub struct Decoder {
 	backend: Backend,
 	sample_rate: u32,
 	channel_count: u32,
+	delay: usize,
 }
 
 enum Backend {
@@ -142,6 +143,7 @@ impl Decoder {
 			}),
 			sample_rate,
 			channel_count,
+			delay: pre_skip_remaining,
 		})
 	}
 
@@ -184,6 +186,7 @@ impl Decoder {
 			backend: Backend::Aac(Box::new(Aac { inner })),
 			sample_rate,
 			channel_count: channel_count as u32,
+			delay: 0,
 		})
 	}
 
@@ -209,6 +212,7 @@ impl Decoder {
 			backend: Backend::Pcm { bytes_per_frame },
 			sample_rate: catalog.sample_rate,
 			channel_count: catalog.channel_count,
+			delay: 0,
 		})
 	}
 
@@ -220,6 +224,11 @@ impl Decoder {
 	/// The channel count the codec decodes at, read from the catalog.
 	pub fn channel_count(&self) -> u32 {
 		self.channel_count
+	}
+
+	/// Codec delay trimmed from the beginning of a fresh decoder, in native-rate frames.
+	pub(super) fn delay(&self) -> usize {
+		self.delay
 	}
 
 	/// Decode one packet into interleaved `f32` PCM.

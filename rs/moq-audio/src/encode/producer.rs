@@ -102,6 +102,14 @@ pub struct Producer<E: CatalogExt = ()> {
 	epoch_us: Option<u64>,
 }
 
+struct Terminal {
+	packets: Vec<Bytes>,
+	end: Timestamp,
+	start: Timestamp,
+	frame_size: usize,
+	codec_rate: u32,
+}
+
 impl<E: CatalogExt> Producer<E> {
 	/// Publish a track encoding `input` into `broadcast`, registering its
 	/// rendition in `catalog` immediately.
@@ -188,6 +196,7 @@ impl<E: CatalogExt> Producer<E> {
 		self.epoch_us = None;
 		self.frames_produced = 0;
 		self.pending.clear();
+		self.encoder.reset();
 		// The resampler holds samples of its own, plus filter state primed by them.
 		// Left alone, `finish` would flush that pre-reset audio onto the track
 		// (stamped at an epoch that no longer exists), and the next write would run
@@ -269,6 +278,33 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(())
 	}
 
+	/// Publish terminal packets after an empty frame that carries their logical endpoint.
+	fn publish_terminal(
+		track: &mut moq_mux::container::Producer<moq_mux::container::legacy::Wire>,
+		terminal: Terminal,
+	) -> Result<(), Error> {
+		track.write(MuxFrame {
+			timestamp: terminal.end,
+			payload: Bytes::new(),
+			keyframe: true,
+			duration: None,
+		})?;
+
+		for (index, packet) in terminal.packets.into_iter().enumerate() {
+			let offset = Timestamp::from_scale((index * terminal.frame_size) as u64, terminal.codec_rate as u64)?
+				.convert(terminal.start.scale())?;
+			track.write(MuxFrame {
+				timestamp: terminal.start.checked_add(offset)?,
+				payload: packet,
+				keyframe: false,
+				duration: None,
+			})?;
+		}
+
+		track.cut(Some(terminal.end))?;
+		Ok(())
+	}
+
 	/// Mark a break in the published timeline: whatever is published next does not continue
 	/// what came before.
 	///
@@ -298,11 +334,31 @@ impl<E: CatalogExt> Producer<E> {
 
 		let frame_size = self.encoder.frame_size();
 		let codec_rate = self.encoder.codec_rate();
-		let packets = self.encoder.finish(&self.pending)?;
-		for packet in packets {
-			let timestamp = Self::timestamp(epoch_us, self.frames_produced, codec_rate)?;
-			Self::publish(&mut self.track, packet, timestamp)?;
-			self.frames_produced += frame_size as u64;
+		let channels = self.encoder.codec_channels() as usize;
+		let source_frames = self.pending.len() / channels;
+		let start = Self::timestamp(epoch_us, self.frames_produced, codec_rate)?;
+		let end = Self::timestamp(epoch_us, self.frames_produced + source_frames as u64, codec_rate)?;
+		let finish = self.encoder.finish(&self.pending)?;
+		let discard_padding = finish.discard_padding();
+		let packets = finish.into_packets();
+
+		if discard_padding > 0 {
+			Self::publish_terminal(
+				&mut self.track,
+				Terminal {
+					packets,
+					end,
+					start,
+					frame_size,
+					codec_rate,
+				},
+			)?;
+		} else {
+			for packet in packets {
+				let timestamp = Self::timestamp(epoch_us, self.frames_produced, codec_rate)?;
+				Self::publish(&mut self.track, packet, timestamp)?;
+				self.frames_produced += frame_size as u64;
+			}
 		}
 
 		self.track.finish()?;
@@ -335,12 +391,9 @@ impl<E: CatalogExt> Drop for Rendition<E> {
 mod tests {
 	use super::*;
 	use crate::Format;
-	use crate::decode::Decoder;
+	use crate::decode::{Config as DecodeConfig, Consumer as AudioConsumer};
 
-	/// Opus retains its final lookahead until later input pushes it into a
-	/// packet. Ending exactly on a codec-frame boundary used to leave no pending
-	/// producer buffer to pad, so the track dropped that tail outright. A nearly
-	/// full partial frame failed the same way when its padding was too short.
+	/// Terminal Opus lookahead samples survive both exact-frame and partial-frame input.
 	#[tokio::test]
 	async fn finish_publishes_the_opus_lookahead_tail() {
 		for frames in [960, 860] {
@@ -354,21 +407,15 @@ mod tests {
 				bitrate: Some(128_000),
 				..Options::default()
 			};
-			let mut decoder = Decoder::new(&Encoder::new(&options.config(input.clone())).unwrap().catalog()).unwrap();
+			let decoder_config = Encoder::new(&options.config(input.clone())).unwrap().catalog();
 
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 			let consumer = broadcast.consume();
 			let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
-			let mut track = moq_mux::container::Consumer::new(
-				consumer
-					.track("audio")
-					.unwrap()
-					.subscribe(moq_net::track::Subscription::default())
-					.await
-					.unwrap(),
-				moq_mux::catalog::hang::Container::Legacy,
-			);
+			let mut audio = AudioConsumer::new(&consumer, &decoder_config, "audio", DecodeConfig::new())
+				.await
+				.unwrap();
 
 			let mut pcm = vec![0.0f32; frames];
 			let impulse = pcm.len() - 100;
@@ -383,9 +430,11 @@ mod tests {
 			producer.finish().unwrap();
 
 			let mut decoded = Vec::new();
-			while let Some(packet) = track.read().await.unwrap() {
-				decoded.extend(decoder.decode(&packet.payload).unwrap());
+			while let Some(frame) = audio.read().await.unwrap() {
+				let pcm = Format::F32.as_interleaved_f32(&frame.data, 1).unwrap();
+				decoded.extend_from_slice(&pcm);
 			}
+			assert_eq!(decoded.len(), frames, "terminal padding extended the source");
 			let peak = decoded.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
 			assert!(peak > 0.1, "the {frames}-frame Opus tail lost the impulse: peak {peak}");
 		}
@@ -484,6 +533,44 @@ mod tests {
 		producer.finish().unwrap();
 
 		// The reset dropped everything, so the track ends without a packet.
+		assert!(track.read().await.unwrap().is_none());
+	}
+
+	/// Resetting after a full frame drops codec lookahead as well as producer buffers.
+	#[tokio::test]
+	async fn reset_epoch_drops_the_encoder_lookahead() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let consumer = broadcast.consume();
+		let options = Options {
+			track: Some("audio".to_string()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(
+			&mut broadcast,
+			catalog,
+			Input {
+				channels: 1,
+				..Input::default()
+			},
+			&options,
+		)
+		.unwrap();
+		let mut track = moq_mux::container::Consumer::new(
+			consumer
+				.track("audio")
+				.unwrap()
+				.subscribe(moq_net::track::Subscription::default())
+				.await
+				.unwrap(),
+			moq_mux::catalog::hang::Container::Legacy,
+		);
+
+		producer.write(&full_frame(1_000_000)).unwrap();
+		producer.reset_epoch();
+		producer.finish().unwrap();
+
+		assert!(track.read().await.unwrap().is_some());
 		assert!(track.read().await.unwrap().is_none());
 	}
 

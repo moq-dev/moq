@@ -1,6 +1,10 @@
 //! Subscribe to an encoded audio track and emit raw PCM.
 
-use bytes::Bytes;
+use std::task::{Poll, ready};
+
+use bytes::{Buf, Bytes};
+
+use moq_mux::container::{Container as ContainerTrait, Frame as MuxFrame};
 
 use super::decoder::{Config, Decoder};
 use crate::resample::{Resampler, remix, validate_channels};
@@ -14,7 +18,7 @@ use crate::{Error, Frame};
 /// [`read`](Self::read) returns plain [`Frame`]s.
 pub struct Consumer {
 	decoder: Decoder,
-	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
+	track: moq_mux::container::Consumer<AudioContainer>,
 	resampler: Option<Resampler>,
 	config: Config,
 	resolved_sample_rate: u32,
@@ -22,6 +26,64 @@ pub struct Consumer {
 	/// One past the last sample handed to the resampler, so the tail it is still
 	/// holding at end of track can be stamped. `None` until the first packet.
 	tail: Option<moq_net::Timestamp>,
+	/// Timestamp of the first encoded packet, used to interpret a terminal marker.
+	epoch: Option<moq_net::Timestamp>,
+	/// Codec-rate terminal frames emitted since `terminal_start`.
+	frames_decoded: usize,
+	/// Logical endpoint carried by an empty legacy frame before terminal packets.
+	end: Option<moq_net::Timestamp>,
+	/// Presentation time of the first decoded terminal frame.
+	terminal_start: Option<moq_net::Timestamp>,
+}
+
+/// Runtime container dispatch that preserves legacy endpoint markers for audio trimming.
+enum AudioContainer {
+	Legacy,
+	Other(moq_mux::catalog::hang::Container),
+}
+
+impl AudioContainer {
+	fn new(container: &hang::catalog::Container) -> Result<Self, moq_mux::Error> {
+		match container {
+			hang::catalog::Container::Legacy => Ok(Self::Legacy),
+			_ => Ok(Self::Other(moq_mux::catalog::hang::Container::try_from(container)?)),
+		}
+	}
+}
+
+impl ContainerTrait for AudioContainer {
+	type Error = moq_mux::Error;
+
+	fn write(&self, group: &mut moq_net::group::Producer, frames: &[MuxFrame]) -> Result<(), Self::Error> {
+		match self {
+			Self::Legacy => moq_mux::container::legacy::Wire.write(group, frames),
+			Self::Other(container) => container.write(group, frames),
+		}
+	}
+
+	fn poll_read(
+		&self,
+		group: &mut moq_net::group::Consumer,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<Vec<MuxFrame>>, Self::Error>> {
+		let Self::Legacy = self else {
+			let Self::Other(container) = self else { unreachable!() };
+			return container.poll_read(group, waiter);
+		};
+
+		let Some(data) = ready!(group.poll_read_frame(waiter).map_err(hang::Error::from)?) else {
+			return Poll::Ready(Ok(None));
+		};
+		let mut frame = hang::container::Frame::decode(data.payload)?;
+		let payload = frame.payload.copy_to_bytes(frame.payload.remaining());
+
+		Poll::Ready(Ok(Some(vec![MuxFrame {
+			timestamp: frame.timestamp,
+			payload,
+			keyframe: false,
+			duration: None,
+		}])))
+	}
 }
 
 impl Consumer {
@@ -58,7 +120,7 @@ impl Consumer {
 		// The catalog says how the track is framed, and it is not always the legacy
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
-		let container = moq_mux::catalog::hang::Container::try_from(&catalog.container)?;
+		let container = AudioContainer::new(&catalog.container)?;
 		let mut track = moq_mux::container::Consumer::new(track, container);
 		if let Some(latency) = config.latency_max {
 			track = track.with_latency(latency);
@@ -72,6 +134,10 @@ impl Consumer {
 			resolved_sample_rate: sample_rate,
 			resolved_channels: channels,
 			tail: None,
+			epoch: None,
+			frames_decoded: 0,
+			end: None,
+			terminal_start: None,
 		})
 	}
 
@@ -94,31 +160,61 @@ impl Consumer {
 
 	/// Read the next decoded PCM frame, or `None` when the track ends.
 	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
-		let Some(mux_frame) = self.track.read().await? else {
-			return self.flush();
-		};
+		loop {
+			let Some(mux_frame) = self.track.read().await? else {
+				return self.flush();
+			};
 
-		let rate = self.decoder.sample_rate();
-		let decoded = self.decoder.decode(&mux_frame.payload)?;
-		let frames = decoded.len() / self.decoder.channel_count().max(1) as usize;
-
-		let (pcm, timestamp) = match self.resampler.as_mut() {
-			// The resampler works in fixed chunks, so it holds back whatever didn't
-			// fill one. What comes out next starts with those held-back samples, which
-			// arrived before this packet did: stamping it with this packet's timestamp
-			// would place the audio late by up to a chunk, sawtoothing A/V sync.
-			Some(r) => {
-				let pending = r.pending_frames();
-				let skipped = r.skipped();
-				let pcm = r.process(&decoded)?;
-				(pcm, self.starts_at(mux_frame.timestamp, pending, skipped, rate)?)
+			if mux_frame.payload.is_empty() {
+				self.end = Some(mux_frame.timestamp);
+				self.frames_decoded = 0;
+				self.terminal_start = None;
+				continue;
 			}
-			None => (decoded, mux_frame.timestamp),
-		};
 
-		self.tail = Some(advance(mux_frame.timestamp, frames, rate)?);
+			let rate = self.decoder.sample_rate();
+			let epoch = *self.epoch.get_or_insert(mux_frame.timestamp);
+			let mut decoded = self.decoder.decode(&mux_frame.payload)?;
+			if let Some(end) = self.end {
+				let terminal_start = *self
+					.terminal_start
+					.get_or_insert(rewind(mux_frame.timestamp, self.decoder.delay(), rate)?.max(epoch));
+				let total = frames_between(terminal_start, end, rate)?;
+				let remaining = total.saturating_sub(self.frames_decoded);
+				decoded.truncate(remaining.saturating_mul(self.decoder.channel_count() as usize));
+			}
 
-		Ok(Some(self.frame(pcm, timestamp)?))
+			let frames = decoded.len() / self.decoder.channel_count().max(1) as usize;
+			let decoded_at = if let Some(terminal_start) = self.terminal_start {
+				advance(terminal_start, self.frames_decoded, rate)?
+			} else {
+				mux_frame.timestamp
+			};
+			if self.end.is_some() {
+				self.frames_decoded += frames;
+			}
+			if decoded.is_empty() {
+				continue;
+			}
+
+			let (pcm, timestamp) = match self.resampler.as_mut() {
+				// The resampler works in fixed chunks, so it holds back whatever didn't
+				// fill one. What comes out next starts with those held-back samples, which
+				// arrived before this packet did: stamping it with this packet's timestamp
+				// would place the audio late by up to a chunk, sawtoothing A/V sync.
+				Some(r) => {
+					let pending = r.pending_frames();
+					let skipped = r.skipped();
+					let pcm = r.process(&decoded)?;
+					(pcm, self.starts_at(decoded_at, pending, skipped, rate)?)
+				}
+				None => (decoded, decoded_at),
+			};
+
+			self.tail = Some(advance(decoded_at, frames, rate)?);
+
+			return Ok(Some(self.frame(pcm, timestamp)?));
+		}
 	}
 
 	/// The tail the resampler is still holding when the track ends, once.
@@ -186,6 +282,13 @@ fn advance(timestamp: moq_net::Timestamp, frames: usize, sample_rate: u32) -> Re
 
 	let offset = moq_net::Timestamp::from_scale(frames as u64, sample_rate as u64)?.convert(timestamp.scale())?;
 	Ok(timestamp.checked_add(offset)?)
+}
+
+/// Codec-rate frames in the interval, rounding a microsecond marker to the nearest frame.
+fn frames_between(start: moq_net::Timestamp, end: moq_net::Timestamp, sample_rate: u32) -> Result<usize, Error> {
+	let duration = end.checked_sub(start)?;
+	let frames = (std::time::Duration::from(duration).as_nanos() * sample_rate as u128 + 500_000_000) / 1_000_000_000;
+	usize::try_from(frames).map_err(|_| Error::Unsupported("audio duration does not fit in memory".into()))
 }
 
 /// `timestamp` moved back by `frames` at `sample_rate`, in its own timescale.
