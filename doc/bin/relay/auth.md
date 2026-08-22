@@ -241,6 +241,23 @@ auth_api = "https://api.moq.dev/cluster/auth"
 
 Unlike the standalone flags, the unified call **fails closed**: any network error, non-2xx status, or unparseable response rejects the connection. The verifying key itself comes from this call, so there is no safe fallback; the endpoint's `Cache-Control` softens transient failures. This applies to mTLS peers as well, including root (`/`) connections such as cluster peers: when an auth API is configured it is the source of truth for every connection (so it can alias and tier the root too), and a failed lookup rejects the connection so the peer reconnects and self-heals once the API recovers. The only fail-open case is when **no** auth API is configured, where the client certificate is the sole credential and the path is used unchanged.
 
+### Revalidating live sessions (`--auth-api-revalidate`)
+
+By default the auth API is consulted once, at connect time, and an established session lives until its token's `exp`. With `--auth-api-revalidate` (env `MOQ_AUTH_API_REVALIDATE`, or `revalidate = true` under `[auth]`) the relay keeps re-resolving each live JWT session's `kid` against the auth API and closes the session once the API stops vouching for it. The cadence is the response's `Cache-Control: max-age` (60s when absent), re-checks for the same `kid` are coalesced, and each re-check is the same `GET <base>?root=...&kid=...` as admission:
+
+- **200 with `key`**: still vouched for; the next re-check waits out the new `max-age`.
+- **404, or 2xx without `key`**: the grant is gone; the session closes.
+- **anything else** (network error, 5xx, unparseable body): the session keeps serving and the re-check retries with backoff until a staleness window passes without a success, then closes. The window defaults to 3x the last `max-age`; `--auth-api-revalidate-stale` overrides it.
+
+Only JWT sessions with a `kid` are revalidated, and `exp` still applies as the outer bound.
+
+```toml
+[auth]
+auth_api = "https://api.moq.dev/cluster/auth"
+revalidate = true
+revalidate_stale = "5m"
+```
+
 ### Authenticating the relay to the auth API
 
 The outbound HTTP the relay makes for auth (`--auth-api` requests and JWK fetches) reuses the cluster client's TLS configuration. The same `--client-tls-cert` / `--client-tls-key` the relay presents when dialing cluster peers also identifies it to the auth API, and `--client-tls-root` trusts a private CA on the endpoint (env `MOQ_CLIENT_TLS_*`, or `[client.tls]` in TOML). So an auth API can require mTLS and recognize the relay by the same certificate it uses for clustering.

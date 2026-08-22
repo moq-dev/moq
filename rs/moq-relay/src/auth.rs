@@ -1,16 +1,45 @@
 use anyhow::Context;
 use axum::http;
+use futures::FutureExt;
 use moq_native::Transport;
 #[cfg(test)]
 use moq_net::AsPath;
 use moq_net::{Path, PathOwned, PathPrefixes, stats::Tier};
 use moq_token::{Key, KeyId};
+use rand::RngExt;
 use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize};
 use serde_with::{OneOrMany, formats::PreferMany, serde_as};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::time::Instant;
 use url::Url;
+
+/// Revalidation cadence when the auth API's response carries no `max-age`.
+const REVALIDATE_DEFAULT: Duration = Duration::from_secs(60);
+
+/// Floor for the revalidation cadence and the initial retry backoff.
+const REVALIDATE_MIN: Duration = Duration::from_secs(1);
+
+/// Ceiling for the revalidation cadence, whatever `max-age` the auth API sends.
+const REVALIDATE_MAX: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Ceiling for the staleness window, whatever `--auth-api-revalidate-stale` says.
+const REVALIDATE_STALE_MAX: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// The re-check cadence for an auth-API `max-age`, clamped to
+/// [`REVALIDATE_MIN`]..=[`REVALIDATE_MAX`].
+fn cadence(max_age: Option<Duration>, fallback: Duration) -> Duration {
+	max_age.unwrap_or(fallback).clamp(REVALIDATE_MIN, REVALIDATE_MAX)
+}
+
+/// The staleness window for a cadence: the operator override, or 3x the
+/// cadence, capped at [`REVALIDATE_STALE_MAX`].
+fn staleness(stale: Option<Duration>, ttl: Duration) -> Duration {
+	stale.unwrap_or(ttl.saturating_mul(3)).min(REVALIDATE_STALE_MAX)
+}
 
 /// Parameters extracted from an incoming connection for authentication: the
 /// request-derived path + JWT, plus metadata about the connection itself that the
@@ -404,6 +433,34 @@ pub struct AuthConfig {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub auth_api: Option<String>,
 
+	/// Keep re-resolving each live JWT session's grant against `--auth-api`,
+	/// closing the session once the API stops vouching for its `kid`. Defaults to
+	/// false. The cadence is the response's `Cache-Control: max-age` (60s when
+	/// absent); a 404 or a 2xx without `key` closes the session, while API
+	/// failures are tolerated until `--auth-api-revalidate-stale` passes. `exp`
+	/// still applies as the outer bound.
+	#[arg(
+		long = "auth-api-revalidate",
+		env = "MOQ_AUTH_API_REVALIDATE",
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+	)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub revalidate: Option<bool>,
+
+	/// How long a revalidated session may outlive its last successful re-check
+	/// while the auth API is failing, e.g. "5m". Defaults to 3x the response's
+	/// `Cache-Control: max-age`.
+	#[arg(
+		long = "auth-api-revalidate-stale",
+		env = "MOQ_AUTH_API_REVALIDATE_STALE",
+		value_parser = humantime::parse_duration,
+	)]
+	#[serde(default, with = "humantime_serde")]
+	pub revalidate_stale: Option<Duration>,
+
 	/// Billing tier label for mTLS peers when the auth API doesn't return one
 	/// (or no `--auth-api` is configured). Defaults to the unprefixed tier.
 	#[arg(long = "auth-mtls-tier", env = "MOQ_AUTH_MTLS_TIER")]
@@ -630,6 +687,8 @@ pub struct AuthToken {
 	/// certificate's `notAfter`. The relay closes the session once this passes
 	/// instead of trusting a credential that was only checked at connect time.
 	pub expires: Option<std::time::SystemTime>,
+	/// The grant the auth API must keep vouching for; see [`Auth::revalidate`].
+	pub(crate) revalidate: Option<Revalidate>,
 }
 
 impl AuthToken {
@@ -664,6 +723,100 @@ impl AuthToken {
 			tier: Tier::default(),
 			// Filled in by the caller from the peer certificate's notAfter.
 			expires: None,
+			revalidate: None,
+		}
+	}
+}
+
+/// A live session's auth-API grant, re-checked by [`Auth::revalidate`]. Set on
+/// [`AuthToken::revalidate`] for JWT sessions admitted with a `kid` when
+/// `--auth-api-revalidate` is enabled.
+#[derive(Debug, Clone)]
+pub(crate) struct Revalidate {
+	/// The JWT `kid` the auth API resolved at admission.
+	kid: String,
+	/// The connection path the admission call used, re-sent on each re-check.
+	path: String,
+	/// The connection transport, re-sent on each re-check.
+	transport: Option<Transport>,
+	/// Delay before the first re-check: the admission response's max-age.
+	after: Duration,
+}
+
+/// Why [`Auth::expired`] decided a session's credential is no longer valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Expired {
+	/// The JWT `exp` (or client cert `notAfter`) passed.
+	Credential,
+	/// The auth API dropped the grant: a 404, or a 2xx without a key for the kid.
+	Revoked,
+	/// The auth API kept failing for the whole staleness window.
+	Stale,
+}
+
+impl std::fmt::Display for Expired {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::Credential => write!(f, "expired"),
+			Self::Revoked => write!(f, "revoked"),
+			Self::Stale => write!(f, "stale"),
+		}
+	}
+}
+
+/// Outcome of one auth-API re-check for a kid.
+#[derive(Debug, Clone, Copy)]
+enum Recheck {
+	/// Still vouched for; check again after the new max-age.
+	Valid { ttl: Option<Duration> },
+	/// The API dropped the key.
+	Revoked,
+	/// The API could not answer.
+	Unavailable,
+}
+
+/// A registered in-flight re-check, shared by every session waiting on the same request. The map holds only a weak handle, so the request is
+/// dropped with its last waiter instead of running on for nobody.
+struct FlightSlot {
+	id: u64,
+	flight: futures::future::WeakShared<futures::future::BoxFuture<'static, Recheck>>,
+}
+
+/// One auth-API re-check request; sessions that would issue the identical
+/// request share a flight.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FlightKey {
+	kid: String,
+	path: String,
+	transport: Option<Transport>,
+}
+
+/// Shared state for `--auth-api-revalidate`.
+struct Revalidator {
+	/// Overrides the default staleness window of 3x the response's max-age.
+	stale: Option<Duration>,
+	/// In-flight re-checks; an entry removes itself when its flight ends,
+	/// completed or abandoned.
+	flights: Mutex<HashMap<FlightKey, FlightSlot>>,
+	/// Source of [`FlightSlot::id`].
+	next_flight: std::sync::atomic::AtomicU64,
+}
+
+/// Removes a flight's map entry when the flight is dropped, whether it ran to
+/// completion or lost its last waiter mid-request.
+struct FlightGuard {
+	revalidator: Arc<Revalidator>,
+	key: FlightKey,
+	id: u64,
+}
+
+impl Drop for FlightGuard {
+	fn drop(&mut self) {
+		let Ok(mut flights) = self.revalidator.flights.lock() else {
+			return;
+		};
+		if flights.get(&self.key).is_some_and(|slot| slot.id == self.id) {
+			flights.remove(&self.key);
 		}
 	}
 }
@@ -747,6 +900,9 @@ pub struct Auth {
 	/// public access, and alias together. Mutually exclusive with the standalone
 	/// key/public sources. See [`AuthConfig::auth_api`].
 	auth_api: Option<(url::Url, ClientWithMiddleware)>,
+	/// Live-session revalidation against the auth API. See
+	/// [`AuthConfig::revalidate`] and [`Auth::revalidate`].
+	revalidate: Option<Arc<Revalidator>>,
 	/// Billing tier recorded for an mTLS peer when the auth API doesn't return a
 	/// tier (or none is configured). See [`AuthConfig::mtls_tier`].
 	mtls_tier: Tier,
@@ -896,11 +1052,23 @@ impl Auth {
 			None
 		};
 
+		let revalidate = if config.revalidate.unwrap_or_default() {
+			anyhow::ensure!(auth_api.is_some(), "--auth-api-revalidate requires --auth-api");
+			Some(Arc::new(Revalidator {
+				stale: config.revalidate_stale,
+				flights: Mutex::default(),
+				next_flight: std::sync::atomic::AtomicU64::new(0),
+			}))
+		} else {
+			None
+		};
+
 		Ok(Self {
 			resolver,
 			public,
 			domains: Arc::from(domains.into_boxed_slice()),
 			auth_api,
+			revalidate,
 			mtls_tier: crate::configured_tier(config.mtls_tier),
 		})
 	}
@@ -952,7 +1120,7 @@ impl Auth {
 			return Ok((path.to_string(), self.mtls_tier.clone()));
 		};
 
-		let resp = Self::fetch_auth_api(client, base, path, None, true, transport.map(Transport::as_str)).await?;
+		let (resp, _) = Self::fetch_auth_api(client, base, path, None, true, transport.map(Transport::as_str)).await?;
 		// Fall back to the configured mTLS tier when the API omits one.
 		let tier = resp.tier().unwrap_or_else(|| self.mtls_tier.clone());
 		Ok((resp.alias.unwrap_or_else(|| path.to_string()), tier))
@@ -982,7 +1150,8 @@ impl Auth {
 
 	/// One unified auth-API call. Fails CLOSED (any network / non-2xx / parse
 	/// error is an `Err`): with `--auth-api` the verifying key comes from here,
-	/// so there is no safe fallback.
+	/// so there is no safe fallback. Also returns the response's `Cache-Control`
+	/// max-age.
 	async fn fetch_auth_api(
 		client: &ClientWithMiddleware,
 		base: &url::Url,
@@ -990,10 +1159,12 @@ impl Auth {
 		kid: Option<&str>,
 		mtls: bool,
 		transport: Option<&str>,
-	) -> Result<AuthApiResponse, AuthError> {
+	) -> Result<(AuthApiResponse, Option<Duration>), AuthError> {
 		let url = Self::auth_api_url(base, path, kid, mtls, transport);
-		let body = client.get(url).send().await?.error_for_status()?.text().await?;
-		serde_json::from_str(&body).map_err(AuthError::from)
+		let response = client.get(url).send().await?.error_for_status()?;
+		let max_age = cache_max_age(response.headers());
+		let body = response.text().await?;
+		Ok((serde_json::from_str(&body)?, max_age))
 	}
 
 	/// Verify a connection via the unified `--auth-api`: one call returns the
@@ -1015,7 +1186,7 @@ impl Auth {
 			None => None,
 		};
 
-		let resp = Self::fetch_auth_api(
+		let (resp, max_age) = Self::fetch_auth_api(
 			client,
 			base,
 			&params.path,
@@ -1057,6 +1228,14 @@ impl Auth {
 		// pid); anchor the resulting scope on the alias (canonical pid).
 		let mut token = Self::finalize(&params.path, &alias, claims)?;
 		token.tier = tier;
+		if let (Some(_), Some(kid)) = (&self.revalidate, kid) {
+			token.revalidate = Some(Revalidate {
+				kid,
+				path: params.path.clone(),
+				transport: params.transport,
+				after: cadence(max_age, REVALIDATE_DEFAULT),
+			});
+		}
 		Ok(token)
 	}
 
@@ -1159,12 +1338,155 @@ impl Auth {
 			publish: rebase(permissions.publish),
 			tier: Tier::default(),
 			expires: claims.expires,
+			revalidate: None,
 		})
+	}
+
+	/// Wait until `token`'s credential stops being valid: its JWT `exp` or client
+	/// cert `notAfter` passes, or the auth API stops vouching for its grant (see
+	/// [`Auth::revalidate`]). Pends forever for a token with neither bound.
+	pub(crate) async fn expired(&self, token: &AuthToken) -> Expired {
+		let revoked = async {
+			match &token.revalidate {
+				Some(grant) => self.revalidate(grant).await,
+				None => std::future::pending().await,
+			}
+		};
+
+		tokio::select! {
+			_ = token.expired() => Expired::Credential,
+			reason = revoked => reason,
+		}
+	}
+
+	/// Wait until the auth API stops vouching for this session's grant.
+	///
+	/// Re-checks on the endpoint's `Cache-Control: max-age` cadence and resolves
+	/// once the API drops the key ([`Expired::Revoked`]) or keeps failing for the
+	/// whole staleness window, 3x the last max-age unless
+	/// `--auth-api-revalidate-stale` overrides it ([`Expired::Stale`]). Transient
+	/// failures retry with jittered backoff; sessions that would issue the same
+	/// request (kid, root, transport) share one in-flight re-check.
+	pub(crate) async fn revalidate(&self, grant: &Revalidate) -> Expired {
+		let Some(revalidator) = self.revalidate.clone() else {
+			return std::future::pending().await;
+		};
+
+		let stale = |ttl: Duration| staleness(revalidator.stale, ttl);
+
+		let mut ttl = grant.after;
+		let mut next = Instant::now() + ttl;
+		let mut deadline = Instant::now() + stale(ttl);
+		let mut backoff = REVALIDATE_MIN;
+
+		loop {
+			tokio::time::sleep_until(next).await;
+			match self.recheck(&revalidator, grant).await {
+				Recheck::Valid { ttl: max_age } => {
+					ttl = cadence(max_age, ttl);
+					let now = Instant::now();
+					next = now + ttl;
+					deadline = now + stale(ttl);
+					backoff = REVALIDATE_MIN;
+				}
+				Recheck::Revoked => return Expired::Revoked,
+				Recheck::Unavailable => {
+					let now = Instant::now();
+					if now >= deadline {
+						return Expired::Stale;
+					}
+					// The last attempt lands on the staleness deadline itself.
+					let delay = backoff.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+					next = (now + delay).min(deadline);
+					backoff = (backoff * 2).min(ttl);
+				}
+			}
+		}
+	}
+
+	/// One re-check, joining the in-flight request for the same grant if there is one.
+	async fn recheck(&self, revalidator: &Arc<Revalidator>, grant: &Revalidate) -> Recheck {
+		let key = FlightKey {
+			kid: grant.kid.clone(),
+			path: grant.path.clone(),
+			transport: grant.transport,
+		};
+		let flight = {
+			let mut flights = revalidator.flights.lock().unwrap();
+			if let Some(flight) = flights.get(&key).and_then(|slot| slot.flight.upgrade()) {
+				flight
+			} else {
+				let (base, client) = self.auth_api.clone().expect("revalidation requires an auth API");
+				let id = revalidator
+					.next_flight
+					.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+				let guard = FlightGuard {
+					revalidator: revalidator.clone(),
+					key: key.clone(),
+					id,
+				};
+				let owned = grant.clone();
+				let flight = async move {
+					let _guard = guard;
+					Self::recheck_grant(&client, &base, &owned).await
+				}
+				.boxed()
+				.shared();
+				let weak = flight.downgrade().expect("a fresh shared future can be downgraded");
+				flights.insert(key, FlightSlot { id, flight: weak });
+				flight
+			}
+		};
+		flight.await
+	}
+
+	/// One auth-API request for a kid, split into revoked vs. unavailable.
+	async fn recheck_grant(client: &ClientWithMiddleware, base: &url::Url, grant: &Revalidate) -> Recheck {
+		let url = Self::auth_api_url(
+			base,
+			&grant.path,
+			Some(&grant.kid),
+			false,
+			grant.transport.map(Transport::as_str),
+		);
+		let response = match client.get(url).send().await {
+			Ok(response) => response,
+			Err(_) => return Recheck::Unavailable,
+		};
+		if response.status() == http::StatusCode::NOT_FOUND {
+			return Recheck::Revoked;
+		}
+		if !response.status().is_success() {
+			return Recheck::Unavailable;
+		}
+		let ttl = cache_max_age(response.headers());
+		let response: AuthApiResponse = match response.text().await.map(|body| serde_json::from_str(&body)) {
+			Ok(Ok(response)) => response,
+			Ok(Err(_)) | Err(_) => return Recheck::Unavailable,
+		};
+		if response.key.is_some() {
+			Recheck::Valid { ttl }
+		} else {
+			Recheck::Revoked
+		}
 	}
 
 	fn build_client(tls: &rustls::ClientConfig) -> anyhow::Result<ClientWithMiddleware> {
 		crate::http_client::build(tls)
 	}
+}
+
+/// The `max-age` directive (whole seconds) of a `Cache-Control` header.
+fn cache_max_age(headers: &http::HeaderMap) -> Option<Duration> {
+	let value = headers.get(http::header::CACHE_CONTROL)?.to_str().ok()?;
+	value.split(',').find_map(|directive| {
+		let (name, secs) = directive.trim().split_once('=')?;
+		if !name.eq_ignore_ascii_case("max-age") {
+			return None;
+		}
+		let secs: u64 = secs.trim().trim_matches('"').parse().ok()?;
+		Some(Duration::from_secs(secs))
+	})
 }
 
 #[cfg(test)]
@@ -2458,7 +2780,6 @@ api = "https://api.example.com/access"
 			})
 			.await?;
 		}
-		// Mock::expect(1) is asserted on drop of the server.
 		Ok(())
 	}
 
@@ -3352,26 +3673,312 @@ api = "https://api.example.com/access"
 		assert!(result.is_err());
 	}
 
+	/// An Auth on a wiremock `/auth` endpoint with revalidation enabled.
+	async fn auth_with_api_revalidate(server: &MockServer, stale: Option<Duration>) -> Auth {
+		Auth::new(AuthConfig {
+			auth_api: Some(format!("{}/auth", server.uri())),
+			revalidate: Some(true),
+			revalidate_stale: stale,
+			..Default::default()
+		})
+		.await
+		.unwrap()
+	}
+
+	/// A grant as [`Auth::verify`] would mint it, on a short cadence.
+	fn test_grant(kid: &str, after: Duration) -> Revalidate {
+		Revalidate {
+			kid: kid.to_string(),
+			path: "demo".to_string(),
+			transport: None,
+			after,
+		}
+	}
+
+	#[test]
+	fn cache_control_max_age_parsing() {
+		let headers = |value: &str| {
+			let mut headers = http::HeaderMap::new();
+			headers.insert(http::header::CACHE_CONTROL, value.parse().unwrap());
+			headers
+		};
+		assert_eq!(cache_max_age(&headers("max-age=300")), Some(Duration::from_secs(300)));
+		assert_eq!(
+			cache_max_age(&headers("public, max-age=60, must-revalidate")),
+			Some(Duration::from_secs(60))
+		);
+		assert_eq!(cache_max_age(&headers("Max-Age=\"60\"")), Some(Duration::from_secs(60)));
+		assert_eq!(cache_max_age(&headers("no-store")), None);
+		assert_eq!(cache_max_age(&headers("max-age=oops")), None);
+		assert_eq!(cache_max_age(&http::HeaderMap::new()), None);
+	}
+
+	#[tokio::test]
+	async fn auth_api_revalidate_requires_auth_api() {
+		let result = Auth::new(AuthConfig {
+			public: simple_public("anon"),
+			revalidate: Some(true),
+			..Default::default()
+		})
+		.await;
+		assert!(result.is_err());
+	}
+
+	#[tokio::test]
+	async fn auth_api_revalidate_marks_jwt_sessions_only() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("test-key");
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.insert_header("Cache-Control", "max-age=300")
+					.set_body_string(format!(r#"{{"key":{},"public":{{"subscribe":[""]}}}}"#, jwk_body(&key))),
+			)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api_revalidate(&server, None).await;
+		let jwt = key.sign(&moq_token::Claims::default().with_root("demo").with_subscribe([""]))?;
+
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/demo".into(),
+				jwt: Some(jwt),
+				..Default::default()
+			})
+			.await?;
+		let grant = verified.revalidate.expect("jwt session should carry a grant");
+		assert_eq!(grant.kid, "test-key");
+		assert_eq!(grant.after, Duration::from_secs(300));
+
+		let anon = auth.verify(&AuthParams::new("/demo")).await?;
+		assert!(anon.revalidate.is_none());
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn auth_api_revalidate_defaults_off() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("test-key");
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(ResponseTemplate::new(200).set_body_string(format!(r#"{{"key":{}}}"#, jwk_body(&key))))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let jwt = key.sign(&moq_token::Claims::default().with_root("demo").with_subscribe([""]))?;
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/demo".into(),
+				jwt: Some(jwt),
+				..Default::default()
+			})
+			.await?;
+		assert!(verified.revalidate.is_none());
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn revalidate_closes_on_404() -> anyhow::Result<()> {
+		// No mock mounted, so every re-check gets wiremock's 404.
+		let server = MockServer::start().await;
+		let auth = auth_with_api_revalidate(&server, None).await;
+		let grant = test_grant("test-key", Duration::from_millis(500));
+
+		let start = std::time::Instant::now();
+		let reason = tokio::time::timeout(Duration::from_secs(5), auth.revalidate(&grant))
+			.await
+			.expect("revalidate should return once the grant is gone");
+		assert_eq!(reason, Expired::Revoked);
+		assert!(start.elapsed() >= Duration::from_millis(500));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn revalidate_closes_on_missing_key() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp"}"#))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api_revalidate(&server, None).await;
+		let grant = test_grant("test-key", Duration::from_millis(200));
+		let reason = tokio::time::timeout(Duration::from_secs(5), auth.revalidate(&grant))
+			.await
+			.expect("revalidate should return once the grant is gone");
+		assert_eq!(reason, Expired::Revoked);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn revalidate_refreshes_cadence_then_closes() -> anyhow::Result<()> {
+		// One 200 with max-age=1, then wiremock's 404 once the mock is consumed.
+		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("test-key");
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("kid", "test-key"))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.insert_header("Cache-Control", "max-age=1")
+					.set_body_string(format!(r#"{{"key":{}}}"#, jwk_body(&key))),
+			)
+			.up_to_n_times(1)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api_revalidate(&server, None).await;
+		let grant = test_grant("test-key", Duration::from_millis(500));
+
+		let start = std::time::Instant::now();
+		let reason = tokio::time::timeout(Duration::from_secs(10), auth.revalidate(&grant))
+			.await
+			.expect("revalidate should return once the grant is gone");
+		assert_eq!(reason, Expired::Revoked);
+		assert!(start.elapsed() >= Duration::from_millis(1500));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn revalidate_survives_outage_until_stale() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.respond_with(ResponseTemplate::new(500))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api_revalidate(&server, Some(Duration::from_secs(2))).await;
+		let grant = test_grant("test-key", Duration::from_millis(500));
+
+		let start = std::time::Instant::now();
+		let reason = tokio::time::timeout(Duration::from_secs(10), auth.revalidate(&grant))
+			.await
+			.expect("revalidate should fail closed once the staleness window passes");
+		assert_eq!(reason, Expired::Stale);
+		let elapsed = start.elapsed();
+		assert!(elapsed >= Duration::from_secs(2), "closed too early: {elapsed:?}");
+		assert!(elapsed < Duration::from_secs(6), "closed too late: {elapsed:?}");
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn revalidate_coalesces_rechecks_for_one_grant() -> anyhow::Result<()> {
+		// The delay keeps the first flight in the air until the second joins it;
+		// expect(1) fails on drop if it dialed again.
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(ResponseTemplate::new(404).set_delay(Duration::from_millis(300)))
+			.expect(1)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api_revalidate(&server, None).await;
+		let grant = test_grant("shared", Duration::from_millis(100));
+
+		let (a, b) = tokio::join!(auth.revalidate(&grant), auth.revalidate(&grant));
+		assert_eq!(a, Expired::Revoked);
+		assert_eq!(b, Expired::Revoked);
+		// Mock::expect(1) is asserted on drop of the server.
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn revalidate_does_not_coalesce_across_roots() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(ResponseTemplate::new(404).set_delay(Duration::from_millis(300)))
+			.expect(2)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api_revalidate(&server, None).await;
+		let a = test_grant("shared", Duration::from_millis(100));
+		let mut b = a.clone();
+		b.path = "other".to_string();
+
+		let (a, b) = tokio::join!(auth.revalidate(&a), auth.revalidate(&b));
+		assert_eq!(a, Expired::Revoked);
+		assert_eq!(b, Expired::Revoked);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn revalidate_drops_an_abandoned_flight() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(ResponseTemplate::new(404).set_delay(Duration::from_secs(5)))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api_revalidate(&server, None).await;
+		let grant = test_grant("shared", Duration::from_millis(10));
+		let abandoned = tokio::time::timeout(Duration::from_millis(200), auth.revalidate(&grant)).await;
+		assert!(abandoned.is_err(), "the re-check must still be in flight");
+
+		let flights = auth.revalidate.as_ref().unwrap().flights.lock().unwrap().len();
+		assert_eq!(flights, 0, "an abandoned flight must not stay in the map");
+		Ok(())
+	}
+
+	#[test]
+	fn staleness_caps_the_operator_override() {
+		assert_eq!(
+			staleness(Some(Duration::MAX), Duration::from_secs(1)),
+			REVALIDATE_STALE_MAX
+		);
+		assert_eq!(staleness(None, Duration::from_secs(10)), Duration::from_secs(30));
+	}
+
+	#[tokio::test]
+	async fn revalidate_clamps_a_huge_max_age() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("shared");
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.insert_header("Cache-Control", format!("max-age={}", u64::MAX))
+					.set_body_json(serde_json::json!({ "key": key })),
+			)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api_revalidate(&server, None).await;
+		let grant = test_grant("shared", Duration::from_millis(100));
+		assert_eq!(cadence(Some(Duration::MAX), REVALIDATE_DEFAULT), REVALIDATE_MAX);
+		let pending = tokio::time::timeout(Duration::from_millis(500), auth.revalidate(&grant)).await;
+		assert!(pending.is_err(), "a vouched-for grant keeps revalidating");
+		Ok(())
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn expired_resolves_at_credential_expiry() {
+		let auth = Auth::default();
 		let mut token = AuthToken::unrestricted(Path::new("").to_owned());
-		token.expires = Some(std::time::SystemTime::now() + std::time::Duration::from_millis(100));
+		token.expires = Some(std::time::SystemTime::now() + Duration::from_millis(100));
 
 		let start = tokio::time::Instant::now();
-		tokio::time::timeout(std::time::Duration::from_secs(5), token.expired())
+		let reason = tokio::time::timeout(Duration::from_secs(5), auth.expired(&token))
 			.await
 			.expect("an expiring credential must resolve the bound");
-		assert!(
-			start.elapsed() >= std::time::Duration::from_millis(100),
-			"resolved before expiry"
-		);
+		assert_eq!(reason, Expired::Credential);
+		assert!(start.elapsed() >= Duration::from_millis(100), "resolved before expiry");
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn expired_pends_without_an_expiry() {
+		let auth = Auth::default();
 		let token = AuthToken::unrestricted(Path::new("").to_owned());
 
-		let bounded = tokio::time::timeout(std::time::Duration::from_millis(200), token.expired()).await;
-		assert!(bounded.is_err(), "a token without exp must never expire");
+		let bounded = tokio::time::timeout(Duration::from_millis(200), auth.expired(&token)).await;
+		assert!(bounded.is_err(), "a token without exp or grant must never expire");
 	}
 }

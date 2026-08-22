@@ -437,6 +437,41 @@ auth_api = "https://api.moq.dev/cluster/auth"
 		);
 	}
 
+	/// Same clap+TOML clobber guard for `auth.revalidate` / `auth.revalidate_stale`.
+	#[test]
+	fn cli_does_not_clobber_toml_auth_revalidate() {
+		let _env = EnvGuard::clear(&[
+			"MOQ_AUTH_API",
+			"MOQ_AUTH_API_REVALIDATE",
+			"MOQ_AUTH_API_REVALIDATE_STALE",
+		]);
+
+		let toml = r#"
+[auth]
+auth_api = "https://api.moq.dev/cluster/auth"
+revalidate = true
+revalidate_stale = "5m"
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("auth-revalidate-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.auth.revalidate,
+			Some(true),
+			"TOML's auth.revalidate must not be clobbered by the CLI re-parse"
+		);
+		assert_eq!(
+			config.auth.revalidate_stale,
+			Some(std::time::Duration::from_secs(300)),
+			"TOML's auth.revalidate_stale must not be clobbered by the CLI re-parse"
+		);
+	}
+
 	/// Same clap+TOML clobber guard for `client.system_roots`. It's typed as
 	/// `Option<bool>` so an absent `--client-tls-system-roots` CLI flag must not wipe a
 	/// TOML-configured value during the `update_from` re-parse. A bare `bool`
