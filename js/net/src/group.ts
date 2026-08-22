@@ -249,12 +249,14 @@ let makeConsumer: (state: GroupState) => Consumer;
 class CombinedClosed implements GetPromise<Error | null> {
 	#preferred: Once<Error | null>;
 	#source: Once<Error | null>;
+	#sourceCleanReady: () => boolean;
 	#value = new Once<Error | null>();
 	#dispose?: Dispose;
 
-	constructor(preferred: Once<Error | null>, source: Once<Error | null>) {
+	constructor(preferred: Once<Error | null>, source: Once<Error | null>, sourceCleanReady: () => boolean) {
 		this.#preferred = preferred;
 		this.#source = source;
+		this.#sourceCleanReady = sourceCleanReady;
 		if (this.#sync()) return;
 
 		const dispose = [preferred.changed(() => this.#sync()), source.changed(() => this.#sync())];
@@ -267,13 +269,22 @@ class CombinedClosed implements GetPromise<Error | null> {
 		if (this.#value.peek() !== undefined) return true;
 		const preferred = this.#preferred.peek();
 		const source = this.#source.peek();
-		const value = preferred !== undefined ? preferred : source;
+		const value =
+			preferred !== undefined
+				? preferred
+				: source instanceof Error || this.#sourceCleanReady()
+					? source
+					: undefined;
 		if (value === undefined) return false;
 
 		this.#value.set(value);
 		this.#dispose?.();
 		this.#dispose = undefined;
 		return true;
+	}
+
+	refresh() {
+		this.#sync();
 	}
 
 	peek(): Error | null | undefined {
@@ -325,6 +336,7 @@ export class Consumer {
 	#terminal?: Error;
 	#verdict = new Once<Error | null>();
 	#closed?: CombinedClosed;
+	#pendingFrames = 0;
 
 	private constructor(state: GroupState) {
 		this.#state = state;
@@ -332,11 +344,16 @@ export class Consumer {
 	}
 
 	/**
-	 * Settles once the group closes: `null` on a clean close, or the abort {@link Error}.
+	 * Settles when this consumer reaches a terminal state: `null` after a clean close has no
+	 * unread or in-flight frames, or the terminal {@link Error}.
 	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
 	 */
 	get closed(): GetPromise<Error | null> {
-		this.#closed ??= new CombinedClosed(this.#verdict, this.#state.closed);
+		this.#closed ??= new CombinedClosed(
+			this.#verdict,
+			this.#state.closed,
+			() => this.#state.frames.peek().length === 0 && this.#pendingFrames === 0,
+		);
 		return this.#closed;
 	}
 
@@ -347,7 +364,7 @@ export class Consumer {
 			group.#expiry = expiry;
 		};
 		hooks.guardGroup = (group, operation, at) => group.#guard(operation, at);
-		hooks.readGroupFrame = (group) => group.#readFramePosition();
+		hooks.readGroupFrame = (group) => group.#readFramePosition(true);
 		hooks.evictGroup = (group) => {
 			group.#evict();
 		};
@@ -445,16 +462,24 @@ export class Consumer {
 		await Signal.race(this.#state.frames, this.#state.closed, ...this.#expiry.changed);
 	}
 
-	#readBufferedFrame(): ReadGroupFrame | undefined {
+	#readBufferedFrame(pending = false): ReadGroupFrame | undefined {
 		const frames = this.#state.frames.peek();
 		const buffered = frames.shift();
 		if (!buffered) return undefined;
 
 		this.#state.cacheBytes -= buffered.frame.payload.byteLength;
+		if (pending) this.#pendingFrames++;
+		let completed = false;
 		return {
 			sequence: this.#state.total.peek() - frames.length - 1,
 			frame: buffered.frame,
 			position: { presentation: buffered.frame.timestamp, activity: buffered.activity },
+			complete: () => {
+				if (completed) return;
+				completed = true;
+				if (pending) this.#pendingFrames--;
+				this.#closed?.refresh();
+			},
 		};
 	}
 
@@ -487,6 +512,7 @@ export class Consumer {
 	tryReadFrame(): Frame | undefined {
 		if (this.#terminal || this.#ended) return undefined;
 		const read = this.#readBufferedFrame();
+		read?.complete();
 		return read?.frame;
 	}
 
@@ -495,6 +521,7 @@ export class Consumer {
 		if (this.#terminal || this.#ended) return undefined;
 		const read = this.#readBufferedFrame();
 		if (!read) return undefined;
+		read.complete();
 		return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };
 	}
 
@@ -503,7 +530,10 @@ export class Consumer {
 		for (;;) {
 			if (this.#terminal || this.#ended) return;
 			if (this.#state.frames.peek().length > 0) return;
-			if (this.#state.closed.peek() !== undefined) return;
+			if (this.#state.closed.peek() !== undefined) {
+				this.#closed?.refresh();
+				return;
+			}
 			if (this.#expire()) return;
 			await this.#changed();
 		}
@@ -517,18 +547,24 @@ export class Consumer {
 		return (await this.#readFramePosition())?.frame;
 	}
 
-	async #readFramePosition(): Promise<ReadGroupFrame | undefined> {
+	async #readFramePosition(pending = false): Promise<ReadGroupFrame | undefined> {
 		for (;;) {
 			if (this.#terminal) throw this.#terminal;
 			if (this.#ended) return;
 			if (this.#state.offset > 0) throw new Lagged();
 
-			const read = this.#readBufferedFrame();
-			if (read) return read;
+			const read = this.#readBufferedFrame(pending);
+			if (read) {
+				if (!pending) read.complete();
+				return read;
+			}
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
-			if (closed !== undefined) return;
+			if (closed !== undefined) {
+				this.#closed?.refresh();
+				return;
+			}
 
 			// Nothing buffered and the group is still open: this wait is the stall the
 			// drift budget bounds, and the only place it applies.

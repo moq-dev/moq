@@ -42,6 +42,8 @@ export interface ReadGroupFrame {
 	frame: Frame;
 	/** Cursor position held while the frame is in flight. */
 	position: GroupPosition;
+	/** Mark the frame delivered or deliberately skipped by the wire publisher. */
+	complete(): void;
 }
 
 /** The next group or datagram sequence shared by dynamic producers of one broadcast track. */

@@ -453,6 +453,36 @@ test("a guarded write keeps the position of the frame removed from the buffer", 
 
 	producer.writeFrame({ payload: enc.encode("edge"), timestamp: Timestamp.fromMillis(1_000) });
 	await expect(guarded).rejects.toThrow("latency budget");
+	read.complete();
+	release();
+});
+
+test("clean source closure stays provisional while a frame write can expire", async () => {
+	const producer = new TrackProducer("test").accept({ maxAge: 100 });
+	const track = producer.subscribe({ maxAge: 100 });
+	const source = producer.appendGroup();
+	source.writeFrame({ payload: enc.encode("old"), timestamp: Timestamp.fromMillis(0) });
+	source.close();
+
+	const group = await track.recvGroup();
+	if (!group) throw new Error("missing group");
+	const closed = group.closed;
+	expect(closed.peek()).toBeUndefined();
+
+	const read = await hooks.readGroupFrame(group);
+	if (!read) throw new Error("missing frame");
+	let release!: () => void;
+	const operation = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const guarded = hooks.guardGroup(group, operation, read.position);
+
+	const edge = producer.appendGroup();
+	edge.writeFrame({ payload: enc.encode("edge"), timestamp: Timestamp.fromMillis(1_000) });
+	await expect(guarded).rejects.toThrow("latency budget");
+	expect(await closed).toBeInstanceOf(Error);
+
+	read.complete();
 	release();
 });
 

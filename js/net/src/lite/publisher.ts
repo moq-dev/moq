@@ -927,21 +927,25 @@ export class Publisher {
 						break;
 					}
 
-					// Frames below the requested start were excluded, and the receiver
-					// numbers what it gets from `startFrame`.
-					if (read.sequence < startFrame) continue;
-					if (endFrame !== undefined && read.sequence > endFrame) break;
-					reached = true;
+					try {
+						// Frames below the requested start were excluded, and the receiver
+						// numbers what it gets from `startFrame`.
+						if (read.sequence < startFrame) continue;
+						if (endFrame !== undefined && read.sequence > endFrame) break;
+						reached = true;
 
-					if (timestamps) {
-						// Convert each frame to the track's advertised timescale.
-						const ts = BigInt(Math.round(read.frame.timestamp.as(timescale)));
-						await hooks.guardGroup(group, stream.u62(zigzag(ts - prevTs)), read.position);
-						prevTs = ts;
+						if (timestamps) {
+							// Convert each frame to the track's advertised timescale.
+							const ts = BigInt(Math.round(read.frame.timestamp.as(timescale)));
+							await hooks.guardGroup(group, stream.u62(zigzag(ts - prevTs)), read.position);
+							prevTs = ts;
+						}
+
+						await hooks.guardGroup(group, stream.u53(read.frame.payload.byteLength), read.position);
+						await hooks.guardGroup(group, stream.write(read.frame.payload), read.position);
+					} finally {
+						read.complete();
 					}
-
-					await hooks.guardGroup(group, stream.u53(read.frame.payload.byteLength), read.position);
-					await hooks.guardGroup(group, stream.write(read.frame.payload), read.position);
 				}
 
 				stream.close();
