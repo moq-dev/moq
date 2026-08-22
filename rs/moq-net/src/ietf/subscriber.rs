@@ -2172,9 +2172,8 @@ mod tests {
 			.expect("run_subscribe did not finish")
 			.unwrap();
 
-		assert_eq!(
-			occurrences(&log, &[ietf::Unsubscribe::ID as u8]),
-			0,
+		assert!(
+			!control_message_types(&log, VERSION).contains(&ietf::Unsubscribe::ID),
 			"a rejected request is already gone; cancelling it names a dead id at the peer",
 		);
 	}
