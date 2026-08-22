@@ -45,6 +45,31 @@ fn import_bbb_catalog() {
 	assert!(audio.description.is_some(), "AAC track missing AudioSpecificConfig");
 }
 
+#[tokio::test(start_paused = true)]
+async fn public_container_preserves_loc_for_ts() {
+	let data = include_bytes!("test_data/bbb.ts");
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let reserved = catalog.reserve().with_container(crate::catalog::MediaContainer::Loc);
+	let mut import = crate::import::Container::new(broadcast, reserved, "ts", data).unwrap();
+	import.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	let (name, config) = snapshot.video.renditions.iter().next().unwrap();
+	assert_eq!(config.container, hang::catalog::Container::Loc);
+
+	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let mut media = crate::container::Consumer::new(track, crate::catalog::hang::Container::Loc);
+	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+	assert!(frame.keyframe);
+	assert!(!frame.payload.is_empty());
+}
+
 /// The Kyrion capture is H.264 1080i with B-frames (open-GOP, ~5-frame reorder despite only
 /// 3 consecutive B-frames). Its video rendition's `jitter` must capture that reorder delay
 /// (the source `PTS - DTS`), not just the ~33 ms frame interval, so a transmuxer/player sizes

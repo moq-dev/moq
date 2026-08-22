@@ -106,6 +106,17 @@ fn a_pipeline_description_names_the_track() {
 	);
 }
 
+#[test]
+fn a_pipeline_description_selects_loc() {
+	init();
+	let sink = gst::parse::launch("moqsink url=https://127.0.0.1:1 broadcast=test container=loc")
+		.expect("parse the description");
+	assert_eq!(
+		sink.property::<gstmoq::MediaContainer>("container"),
+		gstmoq::MediaContainer::Loc
+	);
+}
+
 // The acceptance criterion: once CAPS reserves the track, `track` reads the effective name, further
 // writes are ignored, and stopping the element makes it configurable again.
 #[test]

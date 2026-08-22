@@ -4,7 +4,7 @@ use std::io::Cursor;
 
 use crate::Result;
 use bytes::{Buf, Bytes, BytesMut};
-use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
+use hang::catalog::{AAC, AudioCodec, AudioConfig, H264, H265, VP9, VideoCodec, VideoConfig};
 use moq_net::Timestamp;
 use mp4_atom::Atom;
 use webm_iterable::WebmIterator;
@@ -41,6 +41,7 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
+	container: crate::catalog::MediaContainer,
 
 	/// Held until the Tracks element is processed, so the catalog is withheld from the broadcast
 	/// until every rendition is in (and, when composed with other importers, until they finish too).
@@ -77,9 +78,11 @@ struct MkvTrack {
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
+		let container = reserved.container();
 		Self {
 			broadcast,
 			catalog: reserved.producer(),
+			container,
 			initial_reservation: Some(reserved),
 			buffer: BytesMut::new(),
 			tracks_seen: false,
@@ -278,20 +281,20 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// Build the media producer before publishing the rendition. It is fallible (its
 		// timeline track can collide), and a rendition published for a track we then fail
 		// to produce would be advertised to consumers but never served.
-		let media = self
-			.catalog
-			.media_producer(track, crate::catalog::hang::Container::Legacy)?;
+		let media = self.catalog.media_producer(track, self.container.into())?;
 
 		let mut catalog = self.catalog.clone();
 		let mut catalog = catalog.lock();
 
 		match kind {
 			TrackKind::Video => {
-				let config = build_video_config(&codec_id, codec_private.as_ref(), video_children.as_deref())?;
+				let mut config = build_video_config(&codec_id, codec_private.as_ref(), video_children.as_deref())?;
+				config.container = self.container.into();
 				catalog.video.renditions.insert(name, config);
 			}
 			TrackKind::Audio => {
-				let config = build_audio_config(&codec_id, codec_private.as_ref(), audio_children.as_deref())?;
+				let mut config = build_audio_config(&codec_id, codec_private.as_ref(), audio_children.as_deref())?;
+				config.container = self.container.into();
 				catalog.audio.renditions.insert(name, config);
 			}
 		}
@@ -470,7 +473,6 @@ fn build_video_config(
 			let mut config = VideoConfig::new(VideoCodec::VP8);
 			config.coded_width = width;
 			config.coded_height = height;
-			config.container = Container::Legacy;
 			config
 		}
 		"V_VP9" => {
@@ -486,7 +488,6 @@ fn build_video_config(
 			});
 			config.coded_width = width;
 			config.coded_height = height;
-			config.container = Container::Legacy;
 			config
 		}
 		"V_MPEG4/ISO/AVC" => build_h264_config(codec_private)?,
@@ -540,7 +541,6 @@ fn build_audio_config(
 				if cfg_channels > 0 { cfg_channels } else { channels },
 			);
 			config.description = codec_private.cloned();
-			config.container = Container::Legacy;
 			Ok(config)
 		}
 		"A_AAC" => {
@@ -565,7 +565,6 @@ fn build_audio_config(
 				},
 			);
 			config.description = Some(priv_data.clone());
-			config.container = Container::Legacy;
 			Ok(config)
 		}
 		"A_FLAC" => {
@@ -594,15 +593,12 @@ fn build_audio_config(
 				},
 			);
 			config.description = Some(priv_data.clone());
-			config.container = Container::Legacy;
 			Ok(config)
 		}
 		"A_MPEG/L3" => {
 			// MP3 carries its config in band, so there's no codec private; the track
 			// header's SamplingFrequency/Channels are the only config source.
-			let mut config = AudioConfig::new(AudioCodec::Mp3, sample_rate, channels);
-			config.container = Container::Legacy;
-			Ok(config)
+			Ok(AudioConfig::new(AudioCodec::Mp3, sample_rate, channels))
 		}
 		other => Err(Error::UnsupportedAudioCodec(other.to_string()).into()),
 	}
@@ -624,7 +620,6 @@ fn build_h264_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 	config.description = Some(avcc_bytes.clone());
 	config.coded_width = avcc.coded_width;
 	config.coded_height = avcc.coded_height;
-	config.container = Container::Legacy;
 	Ok(config)
 }
 
@@ -649,7 +644,6 @@ fn build_h265_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 		constraint_flags: hvcc.general_constraint_indicator_flags,
 	});
 	config.description = Some(description.freeze());
-	config.container = Container::Legacy;
 	Ok(config)
 }
 
@@ -666,6 +660,5 @@ fn build_av1_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 
 	let mut config = VideoConfig::new(crate::codec::av1::av1_from_av1c(&av1c));
 	config.description = Some(description.freeze());
-	config.container = Container::Legacy;
 	Ok(config)
 }

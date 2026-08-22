@@ -187,7 +187,6 @@ pub(crate) fn config_from_keyframe(data: &[u8]) -> Result<Option<hang::catalog::
 	let mut config = hang::catalog::VideoConfig::new(key.to_catalog());
 	config.coded_width = Some(width as u32);
 	config.coded_height = Some(height as u32);
-	config.container = hang::catalog::Container::Legacy;
 	Ok(Some(config))
 }
 

@@ -147,7 +147,6 @@ impl VideoHint {
 	pub fn to_config(&self) -> Option<hang::catalog::VideoConfig> {
 		let codec = self.codec.clone()?;
 		let mut config = hang::catalog::VideoConfig::new(codec);
-		config.container = hang::catalog::Container::Legacy;
 		self.apply(&mut config);
 		Some(config)
 	}
@@ -193,6 +192,37 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::AudioConfig {
 	}
 }
 
+/// The Legacy or LOC wrapper selected for elementary codec payloads.
+///
+/// Importers apply it to both the track writer and the `container` each catalog rendition
+/// advertises, so the catalog names what is on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaContainer {
+	/// A VarInt timestamp prefix followed by the raw codec payload.
+	#[default]
+	Legacy,
+	/// Low Overhead Container: one LOC frame per moq frame.
+	Loc,
+}
+
+impl From<MediaContainer> for hang::catalog::Container {
+	fn from(container: MediaContainer) -> Self {
+		match container {
+			MediaContainer::Legacy => Self::Legacy,
+			MediaContainer::Loc => Self::Loc,
+		}
+	}
+}
+
+impl From<MediaContainer> for super::hang::Container {
+	fn from(container: MediaContainer) -> Self {
+		match container {
+			MediaContainer::Legacy => Self::Legacy,
+			MediaContainer::Loc => Self::Loc,
+		}
+	}
+}
+
 /// A clonable reservation context handed to importers so they declare their tracks up front.
 ///
 /// Made via [`Producer::reserve`]. While any `Reserved` clone is alive the track set may still
@@ -203,12 +233,31 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::AudioConfig {
 /// track list, so a one-shot muxer (fMP4, MPEG-TS) never sees a half-converged catalog.
 pub struct Reserved<E: CatalogExt = ()> {
 	catalog: Producer<E>,
+	container: MediaContainer,
 }
 
 impl<E: CatalogExt> Reserved<E> {
 	pub(super) fn new(catalog: Producer<E>) -> Self {
 		catalog.add_reserver();
-		Self { catalog }
+		Self {
+			catalog,
+			container: MediaContainer::default(),
+		}
+	}
+
+	/// Select the Legacy or LOC wrapper used by importers that publish elementary codec payloads.
+	///
+	/// Legacy unless selected. Passthrough importers such as fMP4 retain their native CMAF container.
+	pub fn with_container(mut self, container: MediaContainer) -> Self {
+		self.container = container;
+		self
+	}
+
+	/// The selected elementary-payload wrapper.
+	///
+	/// See [`Reserved::with_container`].
+	pub fn container(&self) -> MediaContainer {
+		self.container
 	}
 
 	/// Track properties for a media track under this catalog, carrying any retention it declares.
@@ -256,6 +305,7 @@ impl<E: CatalogExt> Clone for Reserved<E> {
 		self.catalog.add_reserver();
 		Self {
 			catalog: self.catalog.clone(),
+			container: self.container,
 		}
 	}
 }
@@ -427,6 +477,17 @@ mod tests {
 
 	fn ts(micros: u64) -> moq_net::Timestamp {
 		moq_net::Timestamp::from_micros(micros).unwrap()
+	}
+
+	// Legacy unless selected, and a clone (what an importer is handed) carries the selection.
+	#[test]
+	fn a_reservation_defaults_to_legacy_and_its_clones_keep_loc() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = super::super::Producer::new(&mut broadcast).unwrap();
+		assert_eq!(catalog.reserve().container(), MediaContainer::Legacy);
+
+		let reserved = catalog.reserve().with_container(MediaContainer::Loc);
+		assert_eq!(reserved.clone().container(), MediaContainer::Loc);
 	}
 
 	/// Feed ~40ms 100 kB frames (one per group) over more than the bitrate window, as a

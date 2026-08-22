@@ -76,13 +76,14 @@ impl Pad {
 		&mut self,
 		broadcast: &moq_net::broadcast::Producer,
 		catalog: &moq_mux::catalog::Producer,
+		container: moq_mux::catalog::MediaContainer,
 		caps: &gst::Caps,
 		track: Option<&str>,
 	) -> Option<String> {
 		if self.failed || (self.track.is_some() && self.caps.as_deref() == Some(caps)) {
 			return None;
 		}
-		match self.build(broadcast, catalog, caps, track) {
+		match self.build(broadcast, catalog, container, caps, track) {
 			Ok(name) => Some(name),
 			Err(err) => {
 				gst::warning!(CAT, "invalidating pad: {err:?}");
@@ -96,6 +97,7 @@ impl Pad {
 		&mut self,
 		broadcast: &moq_net::broadcast::Producer,
 		catalog: &moq_mux::catalog::Producer,
+		container: moq_mux::catalog::MediaContainer,
 		caps: &gst::Caps,
 		requested: Option<&str>,
 	) -> Result<String> {
@@ -117,18 +119,18 @@ impl Pad {
 			return Ok(name);
 		}
 		let mut broadcast = broadcast.clone();
-		let catalog = catalog.clone();
+		let reserved = catalog.reserve().with_container(container);
 		// Every codec converges on one import::Track; only the caps -> importer construction differs. The
 		// pad template fixes the structural fields (h264/h265 byte-stream/au, AAC mpegversion=4/stream-format=raw),
 		// so negotiation rejects non-conforming caps before they reach here; only fields the template can't
 		// pin (the AAC codec_data) are checked below. The importer reserves the pad's track, which it
 		// accepts (setting the timescale) inside `Track::new`.
 		let (track, name): (import::Track, String) = match structure.name().as_str() {
-			"video/x-h264" => Self::reserve(&mut broadcast, catalog, requested, ".avc3", "avc3", &[])?,
-			"video/x-h265" => Self::reserve(&mut broadcast, catalog, requested, ".hev1", "hev1", &[])?,
-			"video/x-av1" => Self::reserve(&mut broadcast, catalog, requested, ".av01", "av01", &[])?,
-			"video/x-vp8" => Self::reserve(&mut broadcast, catalog, requested, ".vp8", "vp8", &[])?,
-			"video/x-vp9" => Self::reserve(&mut broadcast, catalog, requested, ".vp9", "vp9", &[])?,
+			"video/x-h264" => Self::reserve(&mut broadcast, reserved, requested, ".avc3", "avc3", &[])?,
+			"video/x-h265" => Self::reserve(&mut broadcast, reserved, requested, ".hev1", "hev1", &[])?,
+			"video/x-av1" => Self::reserve(&mut broadcast, reserved, requested, ".av01", "av01", &[])?,
+			"video/x-vp8" => Self::reserve(&mut broadcast, reserved, requested, ".vp8", "vp8", &[])?,
+			"video/x-vp9" => Self::reserve(&mut broadcast, reserved, requested, ".vp9", "vp9", &[])?,
 			// MP3: no config blob to parse (the config lives in each frame header), so the importer is
 			// built straight from the caps rate/channels. Keyed on `layer == 3`, which positively
 			// identifies Layer III: AAC (`audio/mpeg`, no layer field) and MP2 (`layer=2`) fall through
@@ -148,7 +150,7 @@ impl Pad {
 				let request = broadcast.reserve_track(name.clone())?;
 				let producer = request.accept(hang::container::track_info());
 				(
-					moq_mux::codec::mp3::Import::new(producer, catalog.reserve(), config.into())?.into(),
+					moq_mux::codec::mp3::Import::new(producer, reserved, config.into())?.into(),
 					name,
 				)
 			}
@@ -158,7 +160,7 @@ impl Pad {
 					.get::<gst::Buffer>("codec_data")
 					.context("AAC caps missing codec_data")?;
 				let map = codec_data.map_readable().context("failed to map AAC codec_data")?;
-				Self::reserve(&mut broadcast, catalog, requested, ".aac", "aac", map.as_slice())?
+				Self::reserve(&mut broadcast, reserved, requested, ".aac", "aac", map.as_slice())?
 			}
 			"audio/x-opus" => {
 				// Opus: GStreamer carries channels/rate in caps (not an OpusHead), and valid Opus caps
@@ -179,7 +181,7 @@ impl Pad {
 				let request = broadcast.reserve_track(name.clone())?;
 				let producer = request.accept(hang::container::track_info());
 				(
-					moq_mux::codec::opus::Import::new(producer, catalog.reserve(), config.into())?.into(),
+					moq_mux::codec::opus::Import::new(producer, reserved, config.into())?.into(),
 					name,
 				)
 			}
@@ -202,7 +204,7 @@ impl Pad {
 	/// Returns the reserved name alongside the importer.
 	fn reserve(
 		broadcast: &mut moq_net::broadcast::Producer,
-		catalog: moq_mux::catalog::Producer,
+		reserved: moq_mux::catalog::Reserved,
 		requested: Option<&str>,
 		suffix: &str,
 		format: &str,
@@ -211,7 +213,7 @@ impl Pad {
 		let name = Self::track_name(broadcast, requested, suffix);
 		let request = broadcast.reserve_track(name.clone())?;
 		Ok((
-			import::Track::new(request, catalog.reserve(), import::Init::new(format, init.to_vec()))?,
+			import::Track::new(request, reserved, import::Init::new(format, init.to_vec()))?,
 			name,
 		))
 	}
@@ -394,6 +396,7 @@ fn signed_nanos(running_time: gst::Signed<gst::ClockTime>) -> Option<i64> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use moq_mux::catalog::MediaContainer::Legacy;
 
 	/// Local producers, no network: a broadcast plus its catalog, exactly what the element holds.
 	fn producers() -> (moq_net::broadcast::Producer, moq_mux::catalog::Producer) {
@@ -448,7 +451,7 @@ mod tests {
 		gst::init().unwrap();
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
-		pad.observe_caps(&broadcast, &catalog, &h264_caps(), None);
+		pad.observe_caps(&broadcast, &catalog, Legacy, &h264_caps(), None);
 		assert!(!pad.is_failed());
 		assert!(pad.finalize().unwrap(), "a producer was built");
 		assert!(!pad.finalize().unwrap(), "second finalize is a no-op");
@@ -462,7 +465,7 @@ mod tests {
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
 		assert_eq!(
-			pad.observe_caps(&broadcast, &catalog, &h264_caps(), Some("camera")),
+			pad.observe_caps(&broadcast, &catalog, Legacy, &h264_caps(), Some("camera")),
 			Some("camera".to_string()),
 			"the reserved name is the requested one"
 		);
@@ -481,7 +484,7 @@ mod tests {
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
 		assert_eq!(
-			pad.observe_caps(&broadcast, &catalog, &h264_caps(), None),
+			pad.observe_caps(&broadcast, &catalog, Legacy, &h264_caps(), None),
 			Some("0.avc3".to_string())
 		);
 	}
@@ -495,11 +498,11 @@ mod tests {
 		let mut first = Pad::new();
 		let mut second = Pad::new();
 		assert_eq!(
-			first.observe_caps(&broadcast, &catalog, &h264_caps(), Some("camera")),
+			first.observe_caps(&broadcast, &catalog, Legacy, &h264_caps(), Some("camera")),
 			Some("camera".to_string())
 		);
 		assert_eq!(
-			second.observe_caps(&broadcast, &catalog, &h264_caps(), Some("camera")),
+			second.observe_caps(&broadcast, &catalog, Legacy, &h264_caps(), Some("camera")),
 			None,
 			"the duplicate reservation is rejected"
 		);
@@ -516,7 +519,7 @@ mod tests {
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
 		assert_eq!(
-			pad.observe_caps(&broadcast, &catalog, &h264_caps(), Some("camera")),
+			pad.observe_caps(&broadcast, &catalog, Legacy, &h264_caps(), Some("camera")),
 			Some("camera".to_string())
 		);
 		let renegotiated = gst::Caps::builder("video/x-h264")
@@ -525,7 +528,7 @@ mod tests {
 			.field("width", 1280i32)
 			.build();
 		assert_eq!(
-			pad.observe_caps(&broadcast, &catalog, &renegotiated, Some("camera")),
+			pad.observe_caps(&broadcast, &catalog, Legacy, &renegotiated, Some("camera")),
 			Some("camera".to_string()),
 			"the same name is reserved again, not rejected as a duplicate"
 		);
@@ -542,7 +545,7 @@ mod tests {
 			.field("mpegversion", 4i32)
 			.field("stream-format", "raw")
 			.build();
-		pad.observe_caps(&broadcast, &catalog, &caps, None);
+		pad.observe_caps(&broadcast, &catalog, Legacy, &caps, None);
 		assert!(pad.is_failed(), "AAC without codec_data fails the pad");
 	}
 
@@ -554,7 +557,7 @@ mod tests {
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
 		let caps = gst::Caps::builder("audio/x-opus").field("rate", 48_000i32).build();
-		pad.observe_caps(&broadcast, &catalog, &caps, None);
+		pad.observe_caps(&broadcast, &catalog, Legacy, &caps, None);
 		assert!(pad.is_failed(), "Opus without channels fails the pad");
 	}
 
@@ -565,7 +568,7 @@ mod tests {
 		gst::init().unwrap();
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
-		pad.observe_caps(&broadcast, &catalog, &h264_caps(), None);
+		pad.observe_caps(&broadcast, &catalog, Legacy, &h264_caps(), None);
 		// No observe_segment: the pad stays in NoSegment.
 		assert!(
 			pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO)),
@@ -583,7 +586,13 @@ mod tests {
 		gst::init().unwrap();
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
-		pad.observe_caps(&broadcast, &catalog, &gst::Caps::builder("video/x-raw").build(), None);
+		pad.observe_caps(
+			&broadcast,
+			&catalog,
+			Legacy,
+			&gst::Caps::builder("video/x-raw").build(),
+			None,
+		);
 		assert!(pad.is_failed());
 	}
 
@@ -594,7 +603,10 @@ mod tests {
 		gst::init().unwrap();
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
-		assert_eq!(pad.observe_caps(&broadcast, &catalog, &opaque_caps(), None), None);
+		assert_eq!(
+			pad.observe_caps(&broadcast, &catalog, Legacy, &opaque_caps(), None),
+			None
+		);
 		assert!(
 			pad.is_failed(),
 			"an unnamed opaque pad fails instead of generating a name"
@@ -610,8 +622,8 @@ mod tests {
 		let (broadcast, catalog) = producers();
 		let mut video = Pad::new();
 		let mut data = Pad::new();
-		video.observe_caps(&broadcast, &catalog, &h264_caps(), Some("camera"));
-		data.observe_caps(&broadcast, &catalog, &opaque_caps(), Some("audiolevels"));
+		video.observe_caps(&broadcast, &catalog, Legacy, &h264_caps(), Some("camera"));
+		data.observe_caps(&broadcast, &catalog, Legacy, &opaque_caps(), Some("audiolevels"));
 		assert!(!data.is_failed());
 		video.observe_segment(time_segment());
 		video.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO));
@@ -624,12 +636,19 @@ mod tests {
 	// The data-track contract: bytes out untouched, one buffer per group, stamped with the PTS the TIME
 	// segment maps.
 	#[tokio::test]
-	async fn an_opaque_pad_publishes_raw_bytes_one_group_per_buffer() {
+	async fn an_opaque_pad_ignores_the_media_container_and_publishes_raw_bytes() {
 		gst::init().unwrap();
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
+		// Select LOC deliberately: opaque pads must still publish the original bytes.
 		assert_eq!(
-			pad.observe_caps(&broadcast, &catalog, &opaque_caps(), Some("audiolevels")),
+			pad.observe_caps(
+				&broadcast,
+				&catalog,
+				moq_mux::catalog::MediaContainer::Loc,
+				&opaque_caps(),
+				Some("audiolevels")
+			),
 			Some("audiolevels".to_string())
 		);
 		pad.observe_segment(time_segment());
@@ -671,6 +690,37 @@ mod tests {
 		assert_eq!(std::time::Duration::from(frame.timestamp).as_micros(), 80_000);
 	}
 
+	#[tokio::test]
+	async fn a_loc_media_pad_reaches_the_wire_and_the_catalog() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		assert_eq!(
+			pad.observe_caps(
+				&broadcast,
+				&catalog,
+				moq_mux::catalog::MediaContainer::Loc,
+				&h264_caps(),
+				Some("camera"),
+			),
+			Some("camera".to_string())
+		);
+		pad.observe_segment(time_segment());
+		pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO));
+
+		let config = catalog.snapshot().video.renditions.get("camera").cloned().unwrap();
+		assert_eq!(config.container, hang::catalog::Container::Loc);
+		let subscriber = broadcast
+			.consume()
+			.track("camera")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let mut media = moq_mux::container::Consumer::new(subscriber, moq_mux::catalog::hang::Container::Loc);
+		assert!(media.read().await.unwrap().is_some());
+	}
+
 	// The opaque track declares microseconds so the PTS maps 1:1, and keeps moq-net's retention: the
 	// media helper raises it to 30s for a segmented egress reading history, which a data track never is.
 	#[tokio::test]
@@ -678,7 +728,7 @@ mod tests {
 		gst::init().unwrap();
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
-		pad.observe_caps(&broadcast, &catalog, &opaque_caps(), Some("audiolevels"));
+		pad.observe_caps(&broadcast, &catalog, Legacy, &opaque_caps(), Some("audiolevels"));
 
 		let subscriber = broadcast
 			.consume()
@@ -702,7 +752,7 @@ mod tests {
 		gst::init().unwrap();
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
-		pad.observe_caps(&broadcast, &catalog, &opaque_caps(), Some("audiolevels"));
+		pad.observe_caps(&broadcast, &catalog, Legacy, &opaque_caps(), Some("audiolevels"));
 		pad.observe_segment(time_segment());
 		pad.push_buffer(Bytes::from_static(b"no pts"), None);
 		pad.push_buffer(Bytes::from_static(b"stamped"), Some(gst::ClockTime::from_mseconds(40)));
@@ -733,7 +783,13 @@ mod tests {
 		gst::init().unwrap();
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
-		pad.observe_caps(&broadcast, &catalog, &gst::Caps::builder("video/x-raw").build(), None);
+		pad.observe_caps(
+			&broadcast,
+			&catalog,
+			Legacy,
+			&gst::Caps::builder("video/x-raw").build(),
+			None,
+		);
 		assert!(pad.is_failed());
 		pad.observe_segment(time_segment());
 		pad.push_buffer(Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO));
@@ -745,7 +801,7 @@ mod tests {
 		gst::init().unwrap();
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
-		pad.observe_caps(&broadcast, &catalog, &h264_caps(), None);
+		pad.observe_caps(&broadcast, &catalog, Legacy, &h264_caps(), None);
 		pad.observe_segment(time_segment());
 		pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO));
 
@@ -892,7 +948,7 @@ mod tests {
 		gst::init().unwrap();
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
-		pad.observe_caps(&broadcast, &catalog, &h264_caps(), None);
+		pad.observe_caps(&broadcast, &catalog, Legacy, &h264_caps(), None);
 		pad.observe_segment(time_segment());
 
 		pad.flush();

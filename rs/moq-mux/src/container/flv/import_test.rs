@@ -135,6 +135,30 @@ async fn import_emits_frames() {
 	assert_eq!(frame.payload.as_ref(), &[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
 }
 
+#[tokio::test(start_paused = true)]
+async fn public_container_preserves_loc_for_flv() {
+	let data = synth_flv();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let reserved = catalog.reserve().with_container(crate::catalog::MediaContainer::Loc);
+	let mut import = crate::import::Container::new(broadcast, reserved, "flv", &data).unwrap();
+	import.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	let (name, config) = snapshot.video.renditions.iter().next().unwrap();
+	assert_eq!(config.container, hang::catalog::Container::Loc);
+
+	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let mut media = crate::container::Consumer::new(track, crate::catalog::hang::Container::Loc);
+	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+	assert_eq!(frame.payload.as_ref(), &[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
+}
+
 /// Bytes split across two `decode` calls still reassemble into whole tags.
 #[tokio::test(start_paused = true)]
 async fn import_handles_split_input() {

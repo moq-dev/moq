@@ -51,9 +51,7 @@ impl<E: CatalogExt> Import<E> {
 		let catalog = crate::codec::video::Catalog::new(&reserved, track.name(), hint)?;
 		let mut import = Self {
 			avc1: false,
-			track: reserved
-				.producer()
-				.media_producer(track, crate::catalog::hang::Container::Legacy)?,
+			track: reserved.producer().media_producer(track, reserved.container().into())?,
 			rendition,
 			catalog,
 			last_sps: None,
@@ -257,7 +255,6 @@ fn config_from_avcc(avcc_bytes: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	config.coded_width = avcc.coded_width;
 	config.coded_height = avcc.coded_height;
 	config.description = Some(Bytes::copy_from_slice(avcc_bytes));
-	config.container = hang::catalog::Container::Legacy;
 	Ok(config)
 }
 
@@ -274,7 +271,6 @@ fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	});
 	config.coded_width = Some(sps.coded_width);
 	config.coded_height = Some(sps.coded_height);
-	config.container = hang::catalog::Container::Legacy;
 	Ok(config)
 }
 

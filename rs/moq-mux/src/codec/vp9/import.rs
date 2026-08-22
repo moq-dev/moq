@@ -34,9 +34,7 @@ impl<E: CatalogExt> Import<E> {
 		let rendition = reserved.video(track.name());
 		let catalog = crate::codec::video::Catalog::new(&reserved, track.name(), hint)?;
 		let mut import = Self {
-			track: reserved
-				.producer()
-				.media_producer(track, crate::catalog::hang::Container::Legacy)?,
+			track: reserved.producer().media_producer(track, reserved.container().into())?,
 			rendition,
 			catalog,
 		};
@@ -63,7 +61,6 @@ impl<E: CatalogExt> Import<E> {
 		let mut config = hang::catalog::VideoConfig::new(vp9);
 		config.coded_width = Some(width as u32);
 		config.coded_height = Some(height as u32);
-		config.container = hang::catalog::Container::Legacy;
 
 		self.apply_config(config);
 		Ok(())

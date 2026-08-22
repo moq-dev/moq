@@ -16,6 +16,7 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use hang::moq_net;
 
+use super::MediaContainer;
 use super::pad::{Pad, caps_supported};
 use super::request_pad::MoqSinkPad;
 use super::session::{CAT, ConnectionStatus, RUNTIME, ResolvedSettings, Session};
@@ -25,6 +26,7 @@ struct Settings {
 	url: Option<String>,
 	broadcast: Option<String>,
 	tls_disable_verify: bool,
+	container: MediaContainer,
 }
 
 impl TryFrom<Settings> for ResolvedSettings {
@@ -50,6 +52,7 @@ struct State {
 	session: Session,
 	broadcast: moq_net::broadcast::Producer,
 	catalog: Option<moq_mux::catalog::Producer>,
+	container: moq_mux::catalog::MediaContainer,
 	pads: HashMap<String, Pad>,
 	ended: HashSet<String>,
 	eos_posted: bool,
@@ -134,6 +137,12 @@ impl ObjectImpl for MoqSink {
 					.default_value(false)
 					.mutable_ready()
 					.build(),
+				glib::ParamSpecEnum::builder::<MediaContainer>("container")
+					.nick("Media container")
+					.blurb("Wire container used for media tracks; opaque application tracks are unchanged")
+					.default_value(MediaContainer::Legacy)
+					.mutable_ready()
+					.build(),
 				// Read-only, served from the live session's status. Each notifies on change.
 				glib::ParamSpecEnum::builder::<ConnectionStatus>("status")
 					.nick("Connection status")
@@ -189,6 +198,7 @@ impl ObjectImpl for MoqSink {
 			"url" => settings.url = value.get().unwrap(),
 			"broadcast" => settings.broadcast = value.get().unwrap(),
 			"tls-disable-verify" => settings.tls_disable_verify = value.get().unwrap(),
+			"container" => settings.container = value.get().unwrap(),
 			_ => unreachable!(),
 		}
 	}
@@ -213,6 +223,7 @@ impl ObjectImpl for MoqSink {
 					"url" => settings.url.to_value(),
 					"broadcast" => settings.broadcast.to_value(),
 					"tls-disable-verify" => settings.tls_disable_verify.to_value(),
+					"container" => settings.container.to_value(),
 					_ => unreachable!(),
 				}
 			}
@@ -384,7 +395,9 @@ impl ElementImpl for MoqSink {
 impl MoqSink {
 	/// Create the session and producers before any buffer flows.
 	fn start_session(&self) -> Result<(), gst::StateChangeError> {
-		let settings = ResolvedSettings::try_from(self.settings.lock().unwrap().clone()).map_err(|err| {
+		let settings = self.settings.lock().unwrap().clone();
+		let container = settings.container.into();
+		let settings = ResolvedSettings::try_from(settings).map_err(|err| {
 			gst::error!(CAT, obj = self.obj(), "invalid settings: {err:#}");
 			gst::StateChangeError
 		})?;
@@ -396,6 +409,7 @@ impl MoqSink {
 			session,
 			broadcast,
 			catalog: Some(catalog),
+			container,
 			pads: HashMap::new(),
 			ended: HashSet::new(),
 			eos_posted: false,
@@ -501,13 +515,14 @@ impl MoqSink {
 						let State {
 							broadcast,
 							catalog,
+							container,
 							pads,
 							..
 						} = state;
 						let catalog = catalog.as_ref()?;
 						pads.entry(pad.name().to_string())
 							.or_insert_with(Pad::new)
-							.observe_caps(broadcast, catalog, &caps, reservation.requested())
+							.observe_caps(broadcast, catalog, *container, &caps, reservation.requested())
 					})
 				};
 				if let Some(track) = reserved {
@@ -606,7 +621,7 @@ mod tests {
 	fn startup_properties_declare_their_window() {
 		gst::init().unwrap();
 		let sink = sink();
-		for name in ["url", "broadcast", "tls-disable-verify"] {
+		for name in ["url", "broadcast", "tls-disable-verify", "container"] {
 			assert!(
 				spec(&sink, name).flags().contains(gst::PARAM_FLAG_MUTABLE_READY),
 				"{name} does not declare MUTABLE_READY"
@@ -630,22 +645,29 @@ mod tests {
 	fn a_started_element_keeps_its_startup_properties() {
 		gst::init().unwrap();
 		let sink = sink();
+		assert_eq!(sink.property::<MediaContainer>("container"), MediaContainer::Legacy);
 		sink.set_property("url", "https://127.0.0.1:1");
 		sink.set_property("broadcast", "before");
+		sink.set_property("container", MediaContainer::Loc);
 		assert_eq!(sink.property::<String>("broadcast"), "before");
+		assert_eq!(sink.property::<MediaContainer>("container"), MediaContainer::Loc);
 
 		sink.set_state(gst::State::Paused).unwrap();
 		sink.set_property("broadcast", "after");
+		sink.set_property("container", MediaContainer::Legacy);
 		assert_eq!(
 			sink.property::<String>("broadcast"),
 			"before",
 			"a write above READY must not be stored: it would read back without taking effect"
 		);
+		assert_eq!(sink.property::<MediaContainer>("container"), MediaContainer::Loc);
 
 		// MUTABLE_READY means configurable on every run, not just before the first.
 		sink.set_state(gst::State::Ready).unwrap();
 		sink.set_property("broadcast", "after");
+		sink.set_property("container", MediaContainer::Legacy);
 		assert_eq!(sink.property::<String>("broadcast"), "after");
+		assert_eq!(sink.property::<MediaContainer>("container"), MediaContainer::Legacy);
 		sink.set_state(gst::State::Null).unwrap();
 	}
 }
