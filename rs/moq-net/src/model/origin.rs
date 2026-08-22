@@ -3012,13 +3012,14 @@ impl AnnounceConsumer {
 		let state = kio::Producer::<OriginConsumerState>::default();
 		let id = ConsumerId::new();
 
+		let notify = AnnounceConsumerNotify {
+			root: root.clone(),
+			state: state.clone(),
+			exclude,
+		};
+
 		for (_, node) in &nodes.nodes {
-			let notify = AnnounceConsumerNotify {
-				root: root.clone(),
-				state: state.clone(),
-				exclude,
-			};
-			node.lock().consume(id, notify, &[]);
+			node.lock().consume(id, notify.clone(), &[]);
 		}
 
 		Self {
