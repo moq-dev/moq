@@ -77,14 +77,26 @@ impl Pacer {
 		};
 
 		match send_at {
-			Some(at) if at <= now + self.lead => at,
-			// Media outran wall-clock (or overflowed the platform clock):
-			// re-anchor so this newest frame is the live edge.
-			_ => {
-				self.anchor = Some((now, nanos));
-				now
-			}
+			// `saturating_duration_since` is zero for an `at` in the past, which any
+			// lead admits; the subtraction form can't overflow on a huge lead.
+			Some(at) if at.saturating_duration_since(now) <= self.lead => at,
+			// Media outran wall-clock (or overflowed the platform clock).
+			_ => self.hurry(ts, now),
 		}
+	}
+
+	/// Deliver `ts` at `now` and make it the live edge: later frames pace
+	/// relative to this pair.
+	///
+	/// This is the re-anchor [`pace`](Self::pace) applies when a frame overshoots
+	/// the lead, exposed for callers whose own lag detection is stricter than
+	/// `pace`'s. A sleeping sink's sleeps push the `now` it paces with forward, so
+	/// a backlog can stay within the lead of every individual call while total
+	/// delivery lag grows; such a caller measures lag against when the frame could
+	/// have arrived and hurries when that overshoots.
+	pub fn hurry(&mut self, ts: Timestamp, now: Instant) -> Instant {
+		self.anchor = Some((now, ts.as_nanos()));
+		now
 	}
 }
 
@@ -154,6 +166,29 @@ mod tests {
 
 		// The next PCR slot, back at microsecond scale, lands on its own boundary.
 		assert_eq!(pacer.pace(ms(50), start), start + Duration::from_millis(50));
+	}
+
+	/// Regression: the lead comparison must not construct `now + lead`, which
+	/// panics on a large but valid `Duration` (`--latency-max` is unbounded).
+	#[test]
+	fn huge_lead_does_not_overflow() {
+		let start = Instant::now();
+		let mut pacer = Pacer::default().with_lead(Duration::MAX);
+		assert_eq!(pacer.pace(ms(0), start), start);
+		assert_eq!(pacer.pace(ms(40), start), start + Duration::from_millis(40));
+	}
+
+	#[test]
+	fn hurry_makes_the_frame_the_live_edge() {
+		let start = Instant::now();
+		let mut pacer = Pacer::default().with_lead(Duration::from_millis(500));
+		assert_eq!(pacer.pace(ms(0), start), start);
+
+		// A caller's stricter lag detection can force the re-anchor `pace` alone
+		// would not apply: the frame goes out at `now` and becomes the new base.
+		let now = start + Duration::from_millis(100);
+		assert_eq!(pacer.hurry(ms(800), now), now);
+		assert_eq!(pacer.pace(ms(840), now), now + Duration::from_millis(40));
 	}
 
 	#[test]
