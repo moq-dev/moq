@@ -6345,11 +6345,33 @@ mod tests {
 		consumer.assert_next_some("room/bob");
 		consumer.assert_next_wait();
 
-		// "room" is wider than the scope this cursor was built with.
+		// "room" is wider than the scope this cursor was built with, and narrowing it to
+		// what is allowed yields only the roots already held, so nothing changes.
 		assert!(!consumer.insert_scope("room"));
 		assert!(!consumer.insert_scope("lobby"));
 
 		settle().await;
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_insert_scope_grants_the_part_within_the_construction_scope() {
+		let (_origin, mut consumer, _alice, _bob) = room_of_two().await;
+		consumer.assert_next_some("room/alice");
+		consumer.assert_next_some("room/bob");
+		consumer.assert_next_wait();
+
+		assert!(consumer.remove_scope("room/bob"));
+		settle().await;
+		consumer.assert_next_none("room/bob");
+		consumer.assert_next_wait();
+
+		// "room" reaches past the construction scope, so it grants back only the part
+		// inside it. That is a real change, unlike the case above, because room/bob
+		// returns. room/alice is still held and must not be announced a second time.
+		assert!(consumer.insert_scope("room"));
+		settle().await;
+		consumer.assert_next_some("room/bob");
 		consumer.assert_next_wait();
 	}
 
