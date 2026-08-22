@@ -1270,13 +1270,20 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let setup = {
 			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream));
 			kio::wait(|waiter| {
+				// An answer that has already arrived wins over the local terminals. Both can
+				// be ready in one poll, and taking abandonment there would discard a response
+				// the publisher has already sent: if it was a rejection, the request is gone
+				// and cancelling it names a dead id back at a peer entitled to object.
+				if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
+					return Poll::Ready(Setup::Response(res));
+				}
 				if track.poll_unused(waiter).is_ready() {
 					return Poll::Ready(Setup::Unused);
 				}
 				if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
 					return Poll::Ready(Setup::BroadcastClosed(err));
 				}
-				waiter.poll_future(response.as_mut()).map(Setup::Response)
+				Poll::Pending
 			})
 			.await
 		};
@@ -2096,6 +2103,79 @@ mod tests {
 			occurrences(&log, &[ietf::Unsubscribe::ID as u8]),
 			0,
 			"draft-17+ has no UNSUBSCRIBE",
+		);
+	}
+
+	/// A rejection and the last consumer leaving can both be ready when the task is next
+	/// polled. The publisher destroyed the request when it sent the error, so treating that
+	/// as abandonment would cancel a request that no longer exists and name a dead id back at
+	/// a peer entitled to object. The answer wins.
+	#[tokio::test(start_paused = true)]
+	async fn a_ready_rejection_beats_local_abandonment() {
+		const VERSION: Version = Version::Draft16;
+
+		// A peer that rejects the subscribe outright.
+		let rejection = {
+			let log = crate::lite::test_transport::Log::default();
+			let mut writer =
+				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			writer.encode(&ietf::RequestError::ID).await.unwrap();
+			writer
+				.encode(&ietf::RequestError {
+					request_id: Some(RequestId(1)),
+					error_code: 404,
+					reason_phrase: "not found".into(),
+					retry_interval: 0,
+				})
+				.await
+				.unwrap();
+
+			log.writes.lock().unwrap().clone()
+		};
+
+		let session = crate::lite::test_transport::ScriptedSession::new(rejection);
+		let log = session.log.clone();
+
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			session,
+			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Origin::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+		);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let subscription = track.subscribe(None);
+
+		let request = dynamic.requested_track().await.expect("no track requested");
+
+		// Drop the demand before the task runs, so the rejection and the unused wake are both
+		// ready the first time the setup race is polled.
+		drop(subscription);
+		drop(track);
+		drop(consumer);
+
+		let serving = tokio::spawn(async move {
+			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+		});
+
+		tokio::time::timeout(std::time::Duration::from_secs(1), serving)
+			.await
+			.expect("run_subscribe did not finish")
+			.unwrap();
+
+		assert_eq!(
+			occurrences(&log, &[ietf::Unsubscribe::ID as u8]),
+			0,
+			"a rejected request is already gone; cancelling it names a dead id at the peer",
 		);
 	}
 
