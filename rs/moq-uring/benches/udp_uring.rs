@@ -12,16 +12,22 @@ mod linux {
 	use std::os::fd::AsRawFd;
 	use std::ptr::{self, NonNull};
 	use std::sync::atomic::{AtomicU16, Ordering};
-	use std::time::Instant;
+	use std::time::{Duration, Instant};
 
 	use criterion::{BenchmarkId, Criterion, Throughput};
 	use io_uring::{IoUring, cqueue, opcode, types};
-	use nix::sys::socket::{setsockopt, sockopt::UdpGroSegment};
+	use nix::sys::socket::{
+		getsockopt, setsockopt,
+		sockopt::{RcvBuf, UdpGroSegment},
+	};
 
 	const SEGMENT_SIZE: usize = 1280;
 	const BURST_SEGMENTS: usize = 32;
+	const BURST_BYTES: usize = SEGMENT_SIZE * BURST_SEGMENTS;
 	const TOTAL_SEGMENTS: usize = 8 * 1024;
 	const TOTAL_BYTES: usize = TOTAL_SEGMENTS * SEGMENT_SIZE;
+	const RECEIVE_BUFFER_SIZE: usize = BURST_BYTES * 4;
+	const BURST_TIMEOUT: Duration = Duration::from_secs(1);
 	const MAX_GRO_SEGMENTS: usize = 64;
 	const MAX_RECV_SIZE: usize = SEGMENT_SIZE * MAX_GRO_SEGMENTS;
 	const CONTROL_SIZE: usize = 64;
@@ -73,6 +79,12 @@ mod linux {
 		fn new(config: Config) -> anyhow::Result<Self> {
 			let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
 			let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
+			setsockopt(&receiver, RcvBuf, &RECEIVE_BUFFER_SIZE)?;
+			let receive_buffer = getsockopt(&receiver, RcvBuf)?;
+			anyhow::ensure!(
+				receive_buffer >= RECEIVE_BUFFER_SIZE,
+				"kernel capped SO_RCVBUF at {receive_buffer} bytes, below the required {RECEIVE_BUFFER_SIZE}"
+			);
 			sender.connect(receiver.local_addr()?)?;
 			receiver.connect(sender.local_addr()?)?;
 			setsockopt(&receiver, UdpGroSegment, &config.gro)?;
@@ -105,9 +117,16 @@ mod linux {
 			for _ in 0..TOTAL_SEGMENTS / BURST_SEGMENTS {
 				let mut sends = self.submit_burst()?;
 				let mut received = Received::default();
+				let deadline = Instant::now() + BURST_TIMEOUT;
 
 				while sends > 0 || received.datagrams < BURST_SEGMENTS {
-					let completion = self.next_completion()?;
+					let completion = self.next_completion(deadline).map_err(|err| {
+						anyhow::anyhow!(
+							"UDP burst stalled with {} send completions pending and {} of {BURST_SEGMENTS} datagrams: {err}",
+							sends,
+							received.datagrams
+						)
+					})?;
 					match completion.user_data {
 						SEND_USER_DATA => {
 							let expected = if self.config.gso {
@@ -163,11 +182,11 @@ mod linux {
 				}
 			}
 			drop(queue);
-			self.ring.as_mut().expect("ring is live").submit_and_wait(1)?;
+			self.ring.as_mut().expect("ring is live").submit()?;
 			Ok(sends)
 		}
 
-		fn next_completion(&mut self) -> anyhow::Result<Completion> {
+		fn next_completion(&mut self, deadline: Instant) -> anyhow::Result<Completion> {
 			loop {
 				if let Some(completion) = self.ring.as_mut().expect("ring is live").completion().next() {
 					return Ok(Completion {
@@ -177,7 +196,24 @@ mod linux {
 					});
 				}
 
-				self.ring.as_mut().expect("ring is live").submit_and_wait(1)?;
+				let remaining = deadline
+					.checked_duration_since(Instant::now())
+					.ok_or_else(|| anyhow::anyhow!("timed out waiting for an io_uring completion"))?;
+				let timeout = types::Timespec::from(remaining);
+				let args = types::SubmitArgs::new().timespec(&timeout);
+				match self
+					.ring
+					.as_mut()
+					.expect("ring is live")
+					.submitter()
+					.submit_with_args(1, &args)
+				{
+					Ok(_) => {}
+					Err(err) if err.raw_os_error() == Some(libc::ETIME) => {
+						anyhow::bail!("timed out waiting for an io_uring completion")
+					}
+					Err(err) => return Err(err.into()),
+				}
 			}
 		}
 

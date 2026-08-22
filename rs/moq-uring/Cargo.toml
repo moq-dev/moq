@@ -17,7 +17,7 @@ publish = false
 [dev-dependencies]
 anyhow = "1"
 criterion = { workspace = true }
-tokio = { workspace = true, features = ["net", "rt"] }
+tokio = { workspace = true, features = ["net", "rt", "time"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 io-uring = { workspace = true }

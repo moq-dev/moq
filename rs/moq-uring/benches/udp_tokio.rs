@@ -10,18 +10,24 @@ mod linux {
 	use std::net::{Ipv4Addr, UdpSocket as StdUdpSocket};
 
 	use std::os::fd::AsRawFd;
-	use std::time::Instant;
+	use std::time::{Duration, Instant};
 
 	use criterion::{BenchmarkId, Criterion, Throughput};
-	use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg, setsockopt, sockopt::UdpGroSegment};
+	use nix::sys::socket::{
+		ControlMessageOwned, MsgFlags, getsockopt, recvmsg, setsockopt,
+		sockopt::{RcvBuf, UdpGroSegment},
+	};
 	use noq_udp::{RecvMeta, Transmit, UdpSocketState};
 	use tokio::io::Interest;
 	use tokio::net::UdpSocket;
 
 	const SEGMENT_SIZE: usize = 1280;
 	const BURST_SEGMENTS: usize = 32;
+	const BURST_BYTES: usize = SEGMENT_SIZE * BURST_SEGMENTS;
 	const TOTAL_SEGMENTS: usize = 8 * 1024;
 	const TOTAL_BYTES: usize = TOTAL_SEGMENTS * SEGMENT_SIZE;
+	const RECEIVE_BUFFER_SIZE: usize = BURST_BYTES * 4;
+	const BURST_TIMEOUT: Duration = Duration::from_secs(1);
 	const MAX_GRO_SEGMENTS: usize = 64;
 	const MAX_RECV_SIZE: usize = SEGMENT_SIZE * MAX_GRO_SEGMENTS;
 
@@ -78,6 +84,12 @@ mod linux {
 		fn new(config: Config) -> anyhow::Result<Self> {
 			let sender = StdUdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
 			let receiver = StdUdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
+			setsockopt(&receiver, RcvBuf, &RECEIVE_BUFFER_SIZE)?;
+			let receive_buffer = getsockopt(&receiver, RcvBuf)?;
+			anyhow::ensure!(
+				receive_buffer >= RECEIVE_BUFFER_SIZE,
+				"kernel capped SO_RCVBUF at {receive_buffer} bytes, below the required {RECEIVE_BUFFER_SIZE}"
+			);
 			let sender_addr = sender.local_addr()?;
 			let receiver_addr = receiver.local_addr()?;
 			sender.connect(receiver_addr)?;
@@ -140,16 +152,11 @@ mod linux {
 			for _ in 0..TOTAL_SEGMENTS / BURST_SEGMENTS {
 				self.send_burst().await?;
 
-				let mut received = Received::default();
-				while received.datagrams < BURST_SEGMENTS {
-					let next = if self.config.recvmmsg {
-						self.recv_many().await?
-					} else {
-						self.recv_one().await?
-					};
-					received.bytes += next.bytes;
-					received.datagrams += next.datagrams;
-				}
+				let received = tokio::time::timeout(BURST_TIMEOUT, self.receive_burst())
+					.await
+					.map_err(|_| {
+						anyhow::anyhow!("timed out receiving a UDP burst; the kernel may have dropped a datagram")
+					})??;
 
 				anyhow::ensure!(
 					received.bytes == SEGMENT_SIZE * BURST_SEGMENTS,
@@ -164,6 +171,20 @@ mod linux {
 				);
 			}
 			Ok(())
+		}
+
+		async fn receive_burst(&mut self) -> anyhow::Result<Received> {
+			let mut received = Received::default();
+			while received.datagrams < BURST_SEGMENTS {
+				let next = if self.config.recvmmsg {
+					self.recv_many().await?
+				} else {
+					self.recv_one().await?
+				};
+				received.bytes += next.bytes;
+				received.datagrams += next.datagrams;
+			}
+			Ok(received)
 		}
 
 		async fn send_burst(&mut self) -> io::Result<()> {
@@ -309,6 +330,7 @@ mod linux {
 	pub fn benchmark(c: &mut Criterion) {
 		let runtime = tokio::runtime::Builder::new_current_thread()
 			.enable_io()
+			.enable_time()
 			.build()
 			.expect("build Tokio current-thread runtime");
 

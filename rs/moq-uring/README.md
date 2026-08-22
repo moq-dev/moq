@@ -37,8 +37,9 @@ just rs bench-udp --sample-size 20 --measurement-time 2 --warm-up-time 1
 ```
 
 Every configuration moves the same number of 1280-byte datagrams in 32-packet
-bursts. The receiver drains each burst before the next one, which prevents UDP
-drops from turning a faster sender into a misleading result.
+bursts. The receiver socket reserves four bursts of memory and drains each burst
+before the next one. A one-second deadline turns any remaining packet loss into
+an explicit benchmark failure instead of an indefinite wait.
 
 Multishot `recvmsg` requires Linux 6.0 or newer, and registered provided-buffer
 rings require Linux 5.19 or newer. The ring uses the single-issuer and
