@@ -16,6 +16,9 @@
 //!   a format string. It picks the right concrete importer for you.
 //! - [`select`] picks which renditions of a broadcast to keep, on either
 //!   the import or the consume side.
+//! - [`Pacer`] maps each exported frame's media timestamp to the wall-clock
+//!   instant it should be delivered at, for byte streams whose spacing is
+//!   part of the format (MPEG-TS).
 //! - [`timeline`](mod@timeline) publishes the broadcast's group index: one
 //!   record per media group mapping it to its start timestamp, so consumers
 //!   can seek or build playlists without downloading media.
@@ -26,12 +29,14 @@ pub mod codec;
 pub mod container;
 mod error;
 pub mod import;
+mod pace;
 pub mod select;
 mod source;
 pub mod timeline;
 
 pub use clock::Clock;
 pub use error::*;
+pub use pace::Pacer;
 pub use source::Source;
 
 /// Re-export of the [`mp4_atom`] crate, whose types appear in the public CMAF

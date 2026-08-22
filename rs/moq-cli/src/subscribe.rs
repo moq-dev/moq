@@ -301,9 +301,18 @@ impl Subscribe {
 			.await?
 			.with_latency(self.args.max_latency);
 
+		// A TS byte stream carries no per-frame timing, so delivery time is the only
+		// carrier of each frame's spacing: the exporter emits its PCR grid as
+		// standalone frames stamped at their slot boundaries, on the contract that
+		// the caller writes the bytes at the time the stamp asserts. Draining on
+		// arrival instead collapses the clock into position clusters no downstream
+		// stage can repair (#2984). The lead reuses the latency budget: it's how
+		// much this consumer is willing to buffer, so an arrival burst within it is
+		// smoothed while anything larger re-anchors to the live edge (and the
+		// exporter's group skipping bounds the backlog to the same budget).
+		let mut pacer = moq_mux::Pacer::default().with_lead(self.args.max_latency);
 		while let Some(frame) = ts.next().await? {
-			stdout.write_all(&frame.payload).await?;
-			stdout.flush().await?;
+			write_paced(&mut pacer, &frame, &mut stdout).await?;
 		}
 
 		Ok(())
@@ -326,5 +335,68 @@ impl Subscribe {
 		}
 
 		Ok(())
+	}
+}
+
+/// Write one export frame to `out` at its paced instant.
+///
+/// Sleeps until the pacer's send time (a no-op for a frame that is due or late),
+/// then writes and flushes the payload.
+async fn write_paced(
+	pacer: &mut moq_mux::Pacer,
+	frame: &moq_mux::container::Frame,
+	out: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> anyhow::Result<()> {
+	// tokio's clock rather than the bare std one so tests can pause it; in
+	// production they are identical.
+	let send_at = pacer.pace(frame.timestamp, tokio::time::Instant::now().into_std());
+	tokio::time::sleep_until(tokio::time::Instant::from_std(send_at)).await;
+	out.write_all(&frame.payload).await?;
+	out.flush().await?;
+	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use hang::moq_net::{Timescale, Timestamp};
+
+	/// Regression for #2984: the TS stdout writer must deliver each frame at the
+	/// instant its timestamp asserts, not as fast as frames arrive. The exporter
+	/// stamps PCR grid frames in microseconds and media frames at the source's own
+	/// timescale, so the spacing must also survive a scale change mid-stream.
+	#[tokio::test(start_paused = true)]
+	async fn ts_frames_are_paced_on_the_media_clock() {
+		let mut pacer = moq_mux::Pacer::default().with_lead(Duration::from_millis(500));
+		let mut out = Vec::new();
+
+		let frame = |value, scale| moq_mux::container::Frame {
+			timestamp: Timestamp::new(value, scale).unwrap(),
+			duration: None,
+			payload: bytes::Bytes::from_static(&[0x47; 188]),
+			keyframe: false,
+		};
+
+		let start = tokio::time::Instant::now();
+
+		// The first frame anchors the pacer and is written immediately.
+		write_paced(&mut pacer, &frame(0, Timescale::MICRO), &mut out)
+			.await
+			.unwrap();
+		assert_eq!(start.elapsed(), Duration::ZERO);
+
+		// A PCR slot 25ms later waits for its grid boundary.
+		write_paced(&mut pacer, &frame(25_000, Timescale::MICRO), &mut out)
+			.await
+			.unwrap();
+		assert_eq!(start.elapsed(), Duration::from_millis(25));
+
+		// A media frame at the source's 90 kHz timescale paces on the same clock.
+		write_paced(&mut pacer, &frame(3_600, Timescale::new(90_000).unwrap()), &mut out)
+			.await
+			.unwrap();
+		assert_eq!(start.elapsed(), Duration::from_millis(40));
+
+		assert_eq!(out.len(), 3 * 188, "every payload was written");
 	}
 }

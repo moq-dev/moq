@@ -560,6 +560,10 @@ ffmpeg -i input.mp4 -c copy -f mpegts - | \
 moq --client-connect https://relay.example.com --broadcast my-stream.hang export ts | ffplay -
 ```
 
+TS export is paced: bytes leave stdout at the instant the stream's clock (PCR)
+asserts, smoothed within the `--latency-max` budget, so the pipe carries a
+real-time transport stream rather than draining as fast as frames arrive.
+
 TS export carries H.264 / H.265 as Annex-B and AAC as ADTS. Both in-band
 (avc3 / hev1) and out-of-band (avc1 / hvc1, e.g. from an fMP4 import) video
 sources work: the parameter sets are read from the bitstream or the catalog
