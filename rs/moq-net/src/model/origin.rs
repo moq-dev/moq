@@ -667,6 +667,15 @@ struct OriginNode {
 
 	// Unfortunately, to notify consumers we need to traverse back up the tree.
 	notify: Lock<NotifyNode>,
+
+	// Cursors that may register here again later: this node is inside their
+	// construction scope (see [`AnnounceConsumer::allowed`]). An anchored node is
+	// never pruned, which is what makes it safe for a cursor to hold the handle
+	// across a window where it has no registration here. Without it, a cursor that
+	// drops its last scope, sees the broadcasts underneath go away, and later calls
+	// [`AnnounceConsumer::insert_scope`] would resolve through a subtree that was
+	// detached in the meantime, and never hear about the republished path.
+	anchors: usize,
 }
 
 impl OriginNode {
@@ -675,6 +684,7 @@ impl OriginNode {
 			broadcast: None,
 			nested: HashMap::new(),
 			notify: Lock::new(NotifyNode::new(parent)),
+			anchors: 0,
 		}
 	}
 
@@ -848,7 +858,10 @@ impl OriginNode {
 	}
 
 	fn is_empty(&self) -> bool {
-		self.broadcast.is_none() && self.nested.is_empty() && self.notify.lock().consumers.is_empty()
+		self.broadcast.is_none()
+			&& self.nested.is_empty()
+			&& self.anchors == 0
+			&& self.notify.lock().consumers.is_empty()
 	}
 }
 
@@ -3019,7 +3032,11 @@ impl AnnounceConsumer {
 		};
 
 		for (_, node) in &nodes.nodes {
-			node.lock().consume(id, notify.clone(), &[]);
+			let mut node = node.lock();
+			// Anchored for this cursor's whole life, not just while it is registered
+			// here, so `insert_scope` always resolves through the live tree.
+			node.anchors += 1;
+			node.consume(id, notify.clone(), &[]);
 		}
 
 		Self {
@@ -3168,24 +3185,41 @@ impl AnnounceConsumer {
 		let id = self.id;
 		let root = self.root.clone();
 
-		// Roots this prefix spans get folded into it. Unregister them without
-		// unannouncing, since they stay in scope and are simply reached through the
-		// wider root now, and skip them in the replay so the consumer sees no second
-		// announce for what it already tracks.
+		// Roots this prefix spans get folded into it: they stay in scope and are
+		// simply reached through the wider root now. A root that `select` returned is
+		// not folded, it is that wider root, and re-registering it would replay what
+		// the cursor already holds.
+		let mut fold = Vec::new();
 		let mut skip = Vec::new();
 		self.nodes.nodes.retain(|(existing, node)| {
-			if !existing.has_prefix(&prefix) {
+			if !existing.has_prefix(&prefix) || selected.nodes.iter().any(|(key, _)| key == existing) {
 				return true;
 			}
-			node.lock().unconsume(id);
+			// Skipped in the replay below so the consumer sees no second announce for
+			// what it already tracks, and unregistered only once the wider root is in
+			// place.
 			skip.push(root.join(existing));
+			fold.push(node.clone());
 			false
 		});
 
+		// Register the wider roots BEFORE dropping the folded ones. The other order
+		// leaves a window with no registration covering the folded subtree, and a
+		// broadcast announced inside it is lost for good: the live notify has nowhere
+		// to go, and the replay deliberately skips that subtree. Overlapping instead
+		// costs nothing, because delivery needs `&mut self` and so cannot run until
+		// this returns, by which point the pair of announces has coalesced into one.
 		let notify = self.notify();
 		for (key, node) in &selected.nodes {
+			if self.nodes.nodes.iter().any(|(existing, _)| existing == key) {
+				continue;
+			}
 			node.lock().consume(id, notify.clone(), &skip);
 			self.nodes.nodes.push((key.clone(), node.clone()));
+		}
+
+		for node in fold {
+			node.lock().unconsume(id);
 		}
 
 		true
@@ -3223,13 +3257,17 @@ impl AnnounceConsumer {
 				return true;
 			}
 
-			// Unannounce first: once the consumer is off the node it can no longer be
-			// told what it is losing. Coalescing in `OriginConsumerState` drops an
-			// announce the consumer never observed instead of emitting a stray
-			// unannounce for it.
+			// Unregister first, then sweep. The other order leaves a window where a
+			// broadcast can announce after the sweep has already walked past its node,
+			// landing an announce for a path that is no longer in scope and that
+			// nothing will ever retract. `unannounce_all` notifies this cursor
+			// directly rather than through `NotifyNode`, so it does not need the
+			// registration it just dropped, and coalescing in `OriginConsumerState`
+			// still drops an announce the consumer never observed rather than emitting
+			// a stray unannounce for it.
 			let mut node = node.lock();
-			node.unannounce_all(&notify);
 			node.unconsume(id);
+			node.unannounce_all(&notify);
 			removed = true;
 			false
 		});
@@ -3242,6 +3280,9 @@ impl Drop for AnnounceConsumer {
 	fn drop(&mut self) {
 		for (_, root) in &self.nodes.nodes {
 			root.lock().unconsume(self.id);
+		}
+		for (_, root) in &self.allowed.nodes {
+			root.lock().anchors -= 1;
 		}
 	}
 }
