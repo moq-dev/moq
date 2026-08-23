@@ -300,6 +300,8 @@ try video.finish()
 
 Set `track` to choose the track name; omit it to derive one from the codec (`.avc3` / `.hev1`). The catalog rendition is published immediately so subscribers can discover it before the first frame exists. `try await video.used()` and `try await video.unused()` monitor subscriber demand. Call `cut()` before the first frame after an idle gap so the resumed stream starts with a keyframe in a new group.
 
+Raw audio takes an explicit track name at publish time. Read it back through `try audio.name`; `try await audio.used()` and `try await audio.unused()` monitor subscriber demand so capture and encoding can stay idle when nobody is listening.
+
 ## Cancellation
 
 All async sequences cooperate with structured concurrency. Cancelling the surrounding `Task` propagates to the underlying `cancel()` on the consumer:

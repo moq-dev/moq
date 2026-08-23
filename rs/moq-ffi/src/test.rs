@@ -2,6 +2,7 @@ use super::origin::*;
 use super::producer::*;
 use super::server::MoqServer;
 use super::session::MoqClient;
+use crate::audio::{MoqAudioCodec, MoqAudioEncoderInput, MoqAudioEncoderOutput, MoqAudioFormat};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqRouteWatch;
@@ -97,6 +98,45 @@ async fn raw_track_activity() {
 		.await
 		.expect("timed out waiting for raw track to become unused")
 		.unwrap();
+}
+
+#[tokio::test]
+async fn raw_audio_activity() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let audio = broadcast
+		.publish_audio(
+			"microphone".into(),
+			MoqAudioEncoderInput {
+				format: MoqAudioFormat::F32,
+				sample_rate: 48_000,
+				channels: 1,
+			},
+			MoqAudioEncoderOutput {
+				codec: MoqAudioCodec::Opus,
+				sample_rate: None,
+				channels: None,
+				bitrate: None,
+				frame_duration_ms: 20,
+			},
+		)
+		.unwrap();
+	assert_eq!(audio.name().unwrap(), "microphone");
+
+	let consumer = broadcast.consume().unwrap();
+	let subscription = consumer.subscribe_track("microphone".into(), None).await.unwrap();
+	tokio::time::timeout(TIMEOUT, audio.used())
+		.await
+		.expect("timed out waiting for raw audio to become used")
+		.unwrap();
+
+	drop(subscription);
+	tokio::time::timeout(TIMEOUT, audio.unused())
+		.await
+		.expect("timed out waiting for raw audio to become unused")
+		.unwrap();
+
+	audio.finish().unwrap();
+	broadcast.finish().unwrap();
 }
 
 #[tokio::test]

@@ -163,6 +163,8 @@ video.finish()
 
 Set `track` to choose the track name; omit it to derive one from the codec (`.avc3` / `.hev1`). The catalog rendition is published immediately so subscribers can discover it before the first frame exists. `used()` and `unused()` monitor subscriber demand. Call `cut()` before the first frame after an idle gap so the resumed stream starts with a keyframe in a new group.
 
+Raw audio takes an explicit track name at publish time. Read it back through `audio.name()`; `audio.used()` and `audio.unused()` suspend on subscriber-demand transitions so capture and encoding can stay idle when nobody is listening.
+
 ## Serve
 
 `Server.listen(bind)` binds a listener, wires an internal origin for both directions, and returns an `AutoCloseable` `Server`. `serve()` accepts every session and holds it alive until it closes:

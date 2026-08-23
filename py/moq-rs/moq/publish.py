@@ -326,6 +326,19 @@ class AudioProducer:
     def __init__(self, inner: MoqAudioProducer) -> None:
         self._inner = inner
 
+    @property
+    def name(self) -> str:
+        """The audio track name."""
+        return self._inner.name()
+
+    async def used(self) -> None:
+        """Wait until this audio track has at least one active subscriber."""
+        await self._inner.used()
+
+    async def unused(self) -> None:
+        """Wait until this audio track has no active subscribers."""
+        await self._inner.unused()
+
     def write(self, frame: AudioFrame) -> None:
         """Push one frame of PCM in the configured input format."""
         self._inner.write(frame)

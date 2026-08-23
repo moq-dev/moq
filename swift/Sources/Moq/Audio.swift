@@ -39,6 +39,21 @@ public final class AudioProducer: Sendable {
         self.ffi = ffi
     }
 
+    /// The audio track's name.
+    public var name: String {
+        get throws { try ffi.name() }
+    }
+
+    /// Suspend until the audio track has at least one active consumer.
+    public func used() async throws {
+        try await ffi.used()
+    }
+
+    /// Suspend until the audio track has no active consumers.
+    public func unused() async throws {
+        try await ffi.unused()
+    }
+
     /// Encode and write one PCM frame.
     public func write(_ frame: AudioFrame) throws {
         try ffi.write(frame: frame)
