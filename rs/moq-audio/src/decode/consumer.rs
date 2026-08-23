@@ -1,10 +1,6 @@
 //! Subscribe to an encoded audio track and emit raw PCM.
 
-use std::task::{Poll, ready};
-
-use bytes::{Buf, Bytes};
-
-use moq_mux::container::{Container as ContainerTrait, Frame as MuxFrame};
+use bytes::Bytes;
 
 use super::decoder::{Config, Decoder};
 use crate::resample::{Resampler, remix, validate_channels};
@@ -18,7 +14,7 @@ use crate::{Error, Frame};
 /// [`read`](Self::read) returns plain [`Frame`]s.
 pub struct Consumer {
 	decoder: Decoder,
-	track: moq_mux::container::Consumer<AudioContainer>,
+	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
 	resampler: Option<Resampler>,
 	config: Config,
 	resolved_sample_rate: u32,
@@ -34,56 +30,6 @@ pub struct Consumer {
 	end: Option<moq_net::Timestamp>,
 	/// Presentation time of the first decoded terminal frame.
 	terminal_start: Option<moq_net::Timestamp>,
-}
-
-/// Runtime container dispatch that preserves legacy endpoint markers for audio trimming.
-enum AudioContainer {
-	Legacy,
-	Other(moq_mux::catalog::hang::Container),
-}
-
-impl AudioContainer {
-	fn new(container: &hang::catalog::Container) -> Result<Self, moq_mux::Error> {
-		match container {
-			hang::catalog::Container::Legacy => Ok(Self::Legacy),
-			_ => Ok(Self::Other(moq_mux::catalog::hang::Container::try_from(container)?)),
-		}
-	}
-}
-
-impl ContainerTrait for AudioContainer {
-	type Error = moq_mux::Error;
-
-	fn write(&self, group: &mut moq_net::group::Producer, frames: &[MuxFrame]) -> Result<(), Self::Error> {
-		match self {
-			Self::Legacy => moq_mux::container::legacy::Wire.write(group, frames),
-			Self::Other(container) => container.write(group, frames),
-		}
-	}
-
-	fn poll_read(
-		&self,
-		group: &mut moq_net::group::Consumer,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<Vec<MuxFrame>>, Self::Error>> {
-		let Self::Legacy = self else {
-			let Self::Other(container) = self else { unreachable!() };
-			return container.poll_read(group, waiter);
-		};
-
-		let Some(data) = ready!(group.poll_read_frame(waiter).map_err(hang::Error::from)?) else {
-			return Poll::Ready(Ok(None));
-		};
-		let mut frame = hang::container::Frame::decode(data.payload)?;
-		let payload = frame.payload.copy_to_bytes(frame.payload.remaining());
-
-		Poll::Ready(Ok(Some(vec![MuxFrame {
-			timestamp: frame.timestamp,
-			payload,
-			keyframe: false,
-			duration: None,
-		}])))
-	}
 }
 
 impl Consumer {
@@ -120,7 +66,7 @@ impl Consumer {
 		// The catalog says how the track is framed, and it is not always the legacy
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
-		let container = AudioContainer::new(&catalog.container)?;
+		let container = moq_mux::catalog::hang::Container::try_from(&catalog.container)?;
 		let mut track = moq_mux::container::Consumer::new(track, container);
 		if let Some(latency) = config.latency_max {
 			track = track.with_latency(latency);
@@ -165,11 +111,12 @@ impl Consumer {
 				return self.flush();
 			};
 
-			if mux_frame.payload.is_empty() {
-				self.end = Some(mux_frame.timestamp);
+			if let Some(end) = self.track.end()
+				&& self.end != Some(end)
+			{
+				self.end = Some(end);
 				self.frames_decoded = 0;
 				self.terminal_start = None;
-				continue;
 			}
 
 			let rate = self.decoder.sample_rate();

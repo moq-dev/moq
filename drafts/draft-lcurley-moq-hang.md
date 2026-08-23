@@ -332,6 +332,11 @@ The default, used when the `container` field is absent.
 Each frame starts with a timestamp, a QUIC variable-length integer (62-bit max) encoded in microseconds.
 The remainder of the payload is codec specific; see the WebCodecs specification for specifics.
 
+A frame with an empty codec payload is an end marker, not media.
+Its timestamp is the exclusive endpoint of the source media.
+When a codec must receive additional packets to emit buffered source samples, the marker MUST precede those terminal packets.
+A consumer MUST NOT submit the marker to the codec decoder, MUST decode the terminal packets, and MUST discard decoded samples at or after the endpoint.
+
 For example, h.264 with no `description` field would be annex.b encoded, while h.264 with a `description` field would be AVCC encoded.
 
 ## cmaf

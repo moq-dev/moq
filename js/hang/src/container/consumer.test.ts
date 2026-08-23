@@ -51,13 +51,13 @@ test("LegacyFormat decodes a valid frame", () => {
 	expect(result[0].keyframe).toBe(false);
 });
 
-test("LegacyFormat skips a marker instead of decoding an empty chunk", () => {
+test("LegacyFormat preserves an endpoint marker", () => {
 	const format = new LegacyFormat();
 	const frame = encodeLegacyFrame(1000 as Time.Micro, new Uint8Array());
 
-	// An empty payload is a marker: no media, so no frames -- and no throw. A
-	// publisher emitting these must not break an older decoder.
-	expect(format.decode(frame)).toEqual([]);
+	const [marker] = format.decode(frame);
+	expect(marker.timestamp).toBe(1000 as Time.Micro);
+	expect(marker.payload).toHaveLength(0);
 });
 
 test("LegacyFormat always returns keyframe: false", () => {
@@ -390,6 +390,33 @@ test("Consumer next() returns group-done signals", async () => {
 	consumer.close();
 });
 
+test("Consumer returns legacy endpoint markers as ordered metadata", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+
+	const group = new Group.Producer(0);
+	group.writeFrame({
+		payload: encodeLegacyFrame(20_000 as Time.Micro, new Uint8Array()),
+		timestamp: Time.Timestamp.now(),
+	});
+	group.writeFrame({
+		payload: encodeLegacyFrame(20_000 as Time.Micro, new Uint8Array([0xde, 0xad])),
+		timestamp: Time.Timestamp.now(),
+	});
+	group.close();
+	track.writeGroup(group);
+	track.close();
+
+	const marker = await consumer.next();
+	expect(marker?.frame).toBeUndefined();
+	expect(marker?.end).toBe(20_000 as Time.Micro);
+
+	const media = await consumer.next();
+	expect(media?.frame?.payload).toEqual(new Uint8Array([0xde, 0xad]));
+	expect(media?.end).toBeUndefined();
+	consumer.close();
+});
+
 // --- Buffered signal ---
 
 test("Consumer buffered signal updates as frames arrive", async () => {
@@ -462,6 +489,26 @@ test("Consumer handles empty decode result without deadlock", async () => {
 	// So the next frame's first sample gets index=0 → keyframe=true.
 	expect(frames).toHaveLength(1);
 	expect(frames[0].keyframe).toBe(true);
+	consumer.close();
+});
+
+test("Consumer preserves empty media from formats without endpoint markers", async () => {
+	const format: ContainerFormat = {
+		decode(): Frame[] {
+			return [{ payload: new Uint8Array(), timestamp: 0 as Time.Micro, keyframe: false }];
+		},
+	};
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe(), { format, latency: 500 as Time.Milli });
+	const group = new Group.Producer(0);
+	group.writeFrame({ payload: new Uint8Array([1]), timestamp: Time.Timestamp.now() });
+	group.close();
+	track.writeGroup(group);
+	track.close();
+
+	const result = await consumer.next();
+	expect(result?.frame?.payload).toHaveLength(0);
+	expect(result?.end).toBeUndefined();
 	consumer.close();
 });
 

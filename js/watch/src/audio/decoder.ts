@@ -11,6 +11,7 @@ import { type AudioBuffer, createAudioBuffer } from "./buffer";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
+import { terminalFrames } from "./terminal";
 import { unlockOnGesture } from "./unlock";
 
 // How long the latency target must hold steady before a floor increase re-anchors. Coalesces a
@@ -84,6 +85,9 @@ export class Decoder {
 	// The last discontinuity count seen from the container consumer. A change means the
 	// publisher rewound the timeline (e.g. a voice agent interrupted) and we must flush.
 	#discontinuity = 0;
+
+	// Exclusive source endpoint carried before terminal codec drain packets.
+	#terminalEnd?: Time.Micro;
 
 	// How much buffered audio the container consumer retains before skipping
 	// ahead. This must be the latency CEILING (maxBuffer), not the floor
@@ -279,6 +283,7 @@ export class Decoder {
 	}
 
 	#runLegacyDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: Catalog.AudioConfig): void {
+		this.#terminalEnd = undefined;
 		const format = config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
@@ -332,6 +337,10 @@ export class Decoder {
 			for (;;) {
 				const next = await consumer.next();
 				if (!next) break;
+				if (next.end !== undefined) {
+					this.#terminalEnd = next.end;
+					continue;
+				}
 
 				// Publisher rewound the timeline: flush + re-anchor before decoding the new frame.
 				this.#onDiscontinuity(next.discontinuity);
@@ -367,6 +376,7 @@ export class Decoder {
 
 	#runCmafDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: Catalog.AudioConfig): void {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
+		this.#terminalEnd = undefined;
 
 		const initSegment = base64ToBytes(config.container.init);
 		const init = Container.Cmaf.decodeInitSegment(initSegment);
@@ -448,6 +458,11 @@ export class Decoder {
 	#emit(sample: AudioData) {
 		const timestamp = sample.timestamp as Time.Micro;
 		const timestampMilli = Time.Milli.fromMicro(timestamp);
+		const frames = terminalFrames(sample, this.#terminalEnd);
+		if (frames === 0) {
+			sample.close();
+			return;
+		}
 
 		const ring = this.#ring;
 		if (!ring) {
@@ -467,7 +482,7 @@ export class Decoder {
 		}
 
 		// Calculate end time from sample duration
-		const durationMicro = ((sample.numberOfFrames / sample.sampleRate) * 1_000_000) as Time.Micro;
+		const durationMicro = ((frames / sample.sampleRate) * 1_000_000) as Time.Micro;
 		const durationMilli = Time.Milli.fromMicro(durationMicro);
 		const end = Time.Milli.add(timestampMilli, durationMilli);
 
@@ -479,8 +494,8 @@ export class Decoder {
 		const channels = Math.min(sample.numberOfChannels, ring.channels);
 		const channelData: Float32Array[] = [];
 		for (let channel = 0; channel < channels; channel++) {
-			const data = new Float32Array(sample.numberOfFrames);
-			sample.copyTo(data, { format: "f32-planar", planeIndex: channel });
+			const data = new Float32Array(frames);
+			sample.copyTo(data, { format: "f32-planar", planeIndex: channel, frameCount: frames });
 			channelData.push(data);
 		}
 
@@ -534,6 +549,7 @@ export class Decoder {
 	#onDiscontinuity(count: number): void {
 		if (count === this.#discontinuity) return;
 		this.#discontinuity = count;
+		this.#terminalEnd = undefined;
 		this.#ring?.reset();
 		this.sync.reset();
 	}

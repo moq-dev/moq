@@ -4636,7 +4636,6 @@ dependencies = [
  "dispatch2",
  "fixed-resample",
  "hang",
- "kio 0.5.5",
  "moq-mux",
  "moq-net",
  "objc2 0.6.4",

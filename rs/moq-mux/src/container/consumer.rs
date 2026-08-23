@@ -59,6 +59,9 @@ pub struct Consumer<F: Container> {
 
 	// Timeline-rewind tracking: the live edge, the active boundary, and the discontinuity count.
 	rewind: Rewind,
+
+	// Exclusive endpoint from the most recently delivered legacy end marker.
+	end: Option<Timestamp>,
 }
 
 /// Live state for detecting timeline rewinds and classifying out-of-order groups.
@@ -138,6 +141,7 @@ impl<F: Container> Consumer<F> {
 			startup: true,
 			latency: std::time::Duration::ZERO,
 			rewind: Rewind::default(),
+			end: None,
 		}
 	}
 
@@ -160,6 +164,15 @@ impl<F: Container> Consumer<F> {
 	/// returned by the read that bumps it is the first of the new timeline.
 	pub fn discontinuity(&self) -> u64 {
 		self.rewind.discontinuity
+	}
+
+	/// The exclusive media endpoint from the most recently consumed legacy end marker.
+	///
+	/// The marker itself is not returned by [`read`](Self::read). Once this changes,
+	/// decoders should consume any following terminal codec packets but discard decoded
+	/// samples at or after this timestamp.
+	pub fn end(&self) -> Option<Timestamp> {
+		self.end
 	}
 
 	/// Read the next frame from the track.
@@ -216,6 +229,10 @@ impl<F: Container> Consumer<F> {
 			{
 				match group.poll_read(waiter, &self.format) {
 					Poll::Ready(Ok(Some(frame))) => {
+						if let Some(end) = self.format.end(&frame) {
+							self.end = Some(end);
+							continue;
+						}
 						// Track the live edge (the max timestamp and the group that carries it) so a
 						// later backwards jump is detectable and the old epoch's tail is anchored.
 						let seq = group.group.sequence;
@@ -1124,6 +1141,7 @@ mod tests {
 		assert_eq!(frames.len(), 2, "markers are not surfaced as media");
 		assert_eq!(frames[0].timestamp, ts(0));
 		assert_eq!(frames[1].timestamp, ts(33_000));
+		assert_eq!(consumer.end(), Some(ts(50_000)), "the latest endpoint is exposed");
 	}
 
 	/// Reading a marker consumes its frame, so a run of them makes progress and the

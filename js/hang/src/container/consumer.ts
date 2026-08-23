@@ -498,8 +498,9 @@ export class Consumer {
 
 	/**
 	 * Returns the next frame in order along with its group number and the current
-	 * {@link discontinuity} count, awaiting one if needed. A `frame` of undefined signals the
-	 * end of that group; the overall result is undefined once closed. When `discontinuity`
+	 * {@link discontinuity} count, awaiting one if needed. A `frame` of undefined signals either
+	 * the end of that group or, when `end` is present, an exclusive media endpoint carried by a
+	 * legacy marker. The overall result is undefined once closed. When `discontinuity`
 	 * jumps relative to the previous call, the publisher rewound the timeline: flush any
 	 * downstream decoder or render buffers before playing this frame.
 	 *
@@ -515,7 +516,14 @@ export class Consumer {
 	 * the missing span will never arrive.
 	 */
 	async next(): Promise<
-		{ frame: Frame | undefined; group: number; discontinuity: number; continuous: boolean } | undefined
+		| {
+				frame: Frame | undefined;
+				group: number;
+				discontinuity: number;
+				continuous: boolean;
+				end?: Time.Micro;
+		  }
+		| undefined
 	> {
 		for (;;) {
 			// A group may have buffered a rewind while the live edge was still behind it; catch it
@@ -549,6 +557,17 @@ export class Consumer {
 				if (frame) {
 					const seq = this.#groups[0].consumer.sequence;
 					const continuous = this.#continuesDelivery(seq);
+					const end = this.#format.end?.(frame);
+					if (end !== undefined) {
+						this.#updateBuffered();
+						return {
+							frame: undefined,
+							group: seq,
+							discontinuity: this.#rewind.discontinuity,
+							continuous,
+							end,
+						};
+					}
 					if (seq !== this.#deliveredGroup) this.#gap = false;
 					this.#deliveredGroup = seq;
 
