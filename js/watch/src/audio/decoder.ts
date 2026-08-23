@@ -18,6 +18,7 @@ import { Warmup } from "./warmup";
 // How long the latency target must hold steady before a floor increase re-anchors. Coalesces a
 // slider drag (many small steps) into a single re-anchor once the user settles on a value.
 const LATENCY_REANCHOR_DEBOUNCE_MS = 150;
+const LEGACY_WARMUP_CALLBACKS = 3;
 
 export type DecoderInput = {
 	// Enable to download the audio track.
@@ -303,13 +304,13 @@ export class Decoder {
 			const loaded = await Util.Libav.polyfill();
 			if (!loaded) return; // cancelled
 
-			const warmup = new Warmup(3);
+			const warmup = new Warmup(LEGACY_WARMUP_CALLBACKS);
 
 			const decoder = new AudioDecoder({
 				output: (data) => {
 					const decoded = this.#terminal.span(data);
 					if (warmup.drop()) {
-						// Drop the first 3 frames to prime the decoder.
+						// Drop initial callbacks to prime the decoder.
 						data.close();
 						return;
 					}
