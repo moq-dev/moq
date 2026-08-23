@@ -74,6 +74,10 @@ The prefixes a given subscriber is scoped to can also be adjusted while the sess
 Widening the scope announces whatever is already live and newly visible, and narrowing it unannounces what is leaving; no stream is reopened either way.
 This filters discovery only, so a subscriber that already holds a broadcast keeps receiving it after that path leaves their scope.
 
+The scope is a set of subtree roots, so narrowing can only drop a whole root, never carve a hole in one.
+Removing `room/alice` from a subscriber scoped to `room` is refused, because the remaining scope would have to be restated as every *other* child of `room` — a set that goes stale the moment a new one is published.
+A subscriber that needs to see all of a room except one participant is therefore scoped to each participant it should see, rather than to the room minus the one it should not.
+
 ### Subscriptions
 
 All data transfers are initiated by subscriptions.
