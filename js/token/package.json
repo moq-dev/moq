@@ -21,7 +21,7 @@
 	"dependencies": {
 		"@hexagon/base64": "^2.0.4",
 		"commander": "^15.0.0",
-		"jose": "^6.2.8",
+		"jose": "^6.2.9",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
