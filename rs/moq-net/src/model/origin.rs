@@ -6324,7 +6324,7 @@ mod tests {
 		(origin, consumer, alice, bob)
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn test_scope_mutation_is_idempotent() {
 		let (_origin, mut consumer, _alice, _bob) = room_of_two().await;
 		consumer.assert_next_some("room/alice");
@@ -6342,7 +6342,7 @@ mod tests {
 		consumer.assert_next_wait();
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn test_remove_scope_unannounces() {
 		let (origin, mut consumer, _alice, _bob) = room_of_two().await;
 		consumer.assert_next_some("room/alice");
@@ -6360,7 +6360,7 @@ mod tests {
 		consumer.assert_next_wait();
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn test_insert_scope_announces_live_broadcast() {
 		let (_origin, mut consumer, _alice, _bob) = room_of_two().await;
 		consumer.assert_next_some("room/alice");
@@ -6379,7 +6379,7 @@ mod tests {
 		consumer.assert_next_wait();
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn test_insert_scope_cannot_widen_past_construction() {
 		let (_origin, mut consumer, _alice, _bob) = room_of_two().await;
 		consumer.assert_next_some("room/alice");
@@ -6395,7 +6395,7 @@ mod tests {
 		consumer.assert_next_wait();
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn test_insert_scope_grants_the_part_within_the_construction_scope() {
 		let (_origin, mut consumer, _alice, _bob) = room_of_two().await;
 		consumer.assert_next_some("room/alice");
@@ -6416,7 +6416,7 @@ mod tests {
 		consumer.assert_next_wait();
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn test_remove_scope_of_descendant_is_unsupported() {
 		let origin = Origin::random().produce();
 		let _alice = origin.create_broadcast("room/alice", announce()).unwrap();
@@ -6437,7 +6437,7 @@ mod tests {
 		consumer.assert_next_wait();
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn test_remove_scope_of_never_announced_is_silent() {
 		let origin = Origin::random().produce();
 		let mut consumer = origin
@@ -6454,7 +6454,7 @@ mod tests {
 		consumer.assert_next_wait();
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn test_scope_mutation_is_per_consumer() {
 		let (origin, mut first, _alice, _bob) = room_of_two().await;
 		let mut second = origin
@@ -6476,7 +6476,7 @@ mod tests {
 		second.assert_next_wait();
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn test_scope_mutation_composes_with_scope() {
 		let origin = Origin::random().produce();
 		let _alice = origin.create_broadcast("room/alice", announce()).unwrap();
@@ -6510,7 +6510,7 @@ mod tests {
 		consumer.assert_next_wait();
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn test_late_announce_respects_current_scope() {
 		let origin = Origin::random().produce();
 		let mut consumer = origin
@@ -6533,7 +6533,7 @@ mod tests {
 		consumer.assert_next_wait();
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn test_remove_scope_keeps_active_subscription() {
 		let (_origin, mut consumer, _alice, _bob) = room_of_two().await;
 		let alice = consumer.assert_next_some("room/alice");
@@ -6552,7 +6552,43 @@ mod tests {
 		);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
+	async fn test_insert_scope_resolves_through_the_live_tree() {
+		let origin = Origin::random().produce();
+		let mut bob = origin.create_broadcast("room/bob", announce()).unwrap();
+		settle().await;
+
+		let mut consumer = origin
+			.consume()
+			.scope(&["room/bob".into()])
+			.expect("should create scoped consumer")
+			.announced();
+
+		consumer.assert_next_some("room/bob");
+		consumer.assert_next_wait();
+
+		// Out of scope, and then gone entirely: nothing is published under "room/bob"
+		// and no cursor is registered there, which is exactly the state in which an
+		// unanchored node is pruned out of the tree.
+		assert!(consumer.remove_scope("room/bob"));
+		settle().await;
+		consumer.assert_next_none("room/bob");
+		bob.finish();
+		settle().await;
+		consumer.assert_next_wait();
+
+		// Republishing builds back whatever nodes the live tree is missing, so a cursor
+		// restoring its scope has to land on those rather than on a subtree that went
+		// out from under it while it held no registration.
+		let _bob = origin.create_broadcast("room/bob", announce()).unwrap();
+		settle().await;
+		assert!(consumer.insert_scope("room/bob"));
+		settle().await;
+		consumer.assert_next_some("room/bob");
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test(start_paused = true)]
 	async fn test_scope_mutation_under_a_root() {
 		let origin = Origin::random().produce();
 		let _alice = origin.create_broadcast("room/alice", announce()).unwrap();
