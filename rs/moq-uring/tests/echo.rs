@@ -43,7 +43,9 @@ fn echo(config: udp::Config) {
 	// The server runs as a spawned worker task; the client drives block_on.
 	let server_handle = handle.clone();
 	handle.spawn(async move {
-		support::echo_server(server_handle, server_sock, certs).await.expect("echo server");
+		support::echo_server(server_handle, server_sock, certs)
+			.await
+			.expect("echo server");
 	});
 
 	let echoed = worker

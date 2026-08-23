@@ -1,7 +1,6 @@
 //! The per-thread worker: ring ownership, the drive loop, and parking.
 
 use std::cell::RefCell;
-use std::io;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
@@ -9,7 +8,7 @@ use std::time::Instant;
 
 use io_uring::{EnterFlags, IoUring, opcode, types};
 
-use crate::park::{FUTEX2_PRIVATE, FUTEX2_SIZE_U32, FUTEX_BITSET_MATCH_ANY, PARKED, RUNNING, Unpark};
+use crate::park::{FUTEX_BITSET_MATCH_ANY, FUTEX2_PRIVATE, FUTEX2_SIZE_U32, PARKED, RUNNING, Unpark};
 use crate::shared::{Cqe, Op, Shared, Task};
 use crate::{Error, timer, udp};
 
@@ -287,7 +286,9 @@ impl Drop for Worker {
 		{
 			let ring = self.shared.ring.borrow_mut();
 			let timeout = types::Timespec::new().sec(1);
-			let _ = ring.submitter().register_sync_cancel(Some(timeout), types::CancelBuilder::any());
+			let _ = ring
+				.submitter()
+				.register_sync_cancel(Some(timeout), types::CancelBuilder::any());
 		}
 		for _ in 0..64 {
 			if self.pump().is_err() {
@@ -340,7 +341,9 @@ impl Handle {
 		self.shared
 			.spawns
 			.borrow_mut()
-			.push(Box::new(move |waiter: &kio::Waiter| waiter.poll_future(future.as_mut())));
+			.push(Box::new(move |waiter: &kio::Waiter| {
+				waiter.poll_future(future.as_mut())
+			}));
 		// Spawning from another task (or before block_on) must reach the next
 		// turn's drain.
 		self.shared.unpark.unpark();
@@ -393,7 +396,9 @@ fn abs_timespec(at: Instant) -> types::Timespec {
 	// SAFETY: valid out-pointer.
 	unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
 	let nanos = now.tv_nsec as u64 + delta.subsec_nanos() as u64;
-	let secs = (now.tv_sec as u64).saturating_add(delta.as_secs()).saturating_add(nanos / 1_000_000_000);
+	let secs = (now.tv_sec as u64)
+		.saturating_add(delta.as_secs())
+		.saturating_add(nanos / 1_000_000_000);
 	types::Timespec::new().sec(secs).nsec((nanos % 1_000_000_000) as u32)
 }
 

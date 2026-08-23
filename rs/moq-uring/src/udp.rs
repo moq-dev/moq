@@ -283,7 +283,9 @@ impl Socket {
 		if config.rx_buffer_len < floor || config.rx_buffers == 0 || config.tx_buffers == 0 {
 			return Err(io::Error::new(
 				io::ErrorKind::InvalidInput,
-				format!("receive buffers must hold one worst-case receive ({floor} bytes) and both pools need at least one buffer"),
+				format!(
+					"receive buffers must hold one worst-case receive ({floor} bytes) and both pools need at least one buffer"
+				),
 			)
 			.into());
 		}
@@ -318,7 +320,9 @@ impl Socket {
 		}
 
 		let bgid = shared.next_bgid.get();
-		shared.next_bgid.set(bgid.checked_add(1).expect("buffer group ids exhausted"));
+		shared
+			.next_bgid
+			.set(bgid.checked_add(1).expect("buffer group ids exhausted"));
 
 		let ring = if config.multishot {
 			let mut ring = BufRing::new(rx_count);
@@ -328,9 +332,12 @@ impl Socket {
 				// armed receive's `Op` keeps alive until its terminal CQE, and
 				// is unregistered before it drops.
 				unsafe {
-					io_ring
-						.submitter()
-						.register_buf_ring_with_flags(ring.ptr.as_ptr() as u64, rx_count, bgid, PBUF_RING_INC)?;
+					io_ring.submitter().register_buf_ring_with_flags(
+						ring.ptr.as_ptr() as u64,
+						rx_count,
+						bgid,
+						PBUF_RING_INC,
+					)?;
 				}
 			}
 			for (bid, buf) in bufs.iter_mut().enumerate() {
@@ -456,7 +463,10 @@ impl Socket {
 		if len == 0 || len > buf.cap || segment == 0 || len.div_ceil(segment) > MAX_GSO_SEGMENTS {
 			return Err(io::Error::new(
 				io::ErrorKind::InvalidInput,
-				format!("invalid send: {len} bytes in {segment} byte segments from a {} byte buffer", buf.cap),
+				format!(
+					"invalid send: {len} bytes in {segment} byte segments from a {} byte buffer",
+					buf.cap
+				),
 			));
 		}
 		let Some(shared) = self.shared.worker.upgrade() else {
@@ -477,7 +487,15 @@ impl Socket {
 			while offset < len {
 				let chunk = segment.min(len - offset);
 				// SAFETY: offset stays within the leased buffer.
-				send_one(&shared, &self.shared, &lease, unsafe { base.add(offset) }, chunk, to, None)?;
+				send_one(
+					&shared,
+					&self.shared,
+					&lease,
+					unsafe { base.add(offset) },
+					chunk,
+					to,
+					None,
+				)?;
 				offset += chunk;
 			}
 		}
@@ -504,7 +522,9 @@ impl Drop for Socket {
 
 impl std::fmt::Debug for Socket {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("Socket").field("addr", &self.shared.io.local_addr()).finish()
+		f.debug_struct("Socket")
+			.field("addr", &self.shared.io.local_addr())
+			.finish()
 	}
 }
 
@@ -757,7 +777,9 @@ pub(crate) fn arm_recv(shared: &Rc<Shared>, sock: &Rc<SockShared>) {
 			one: Some(one),
 		});
 		rx.armed = Some(key);
-		opcode::RecvMsg::new(types::Fd(sock.io.as_raw_fd()), hdr_ptr).build().user_data(key)
+		opcode::RecvMsg::new(types::Fd(sock.io.as_raw_fd()), hdr_ptr)
+			.build()
+			.user_data(key)
 	};
 
 	drop(rx);
@@ -779,7 +801,13 @@ pub(crate) struct OneshotRecv {
 
 /// Handle one receive completion. `terminal` means the op left the slab (the
 /// multishot ended or this was a oneshot), so a re-arm may be needed.
-pub(crate) fn on_recv(shared: &Rc<Shared>, sock: &Rc<SockShared>, one: Option<Box<OneshotRecv>>, cqe: Cqe, terminal: bool) {
+pub(crate) fn on_recv(
+	shared: &Rc<Shared>,
+	sock: &Rc<SockShared>,
+	one: Option<Box<OneshotRecv>>,
+	cqe: Cqe,
+	terminal: bool,
+) {
 	if terminal {
 		sock.rx.borrow_mut().armed = None;
 	}
@@ -834,6 +862,7 @@ pub(crate) fn on_recv(shared: &Rc<Shared>, sock: &Rc<SockShared>, one: Option<Bo
 /// provided buffer it names. Returns the buffer id and the packet, if any.
 fn on_recv_multi(sock: &Rc<SockShared>, cqe: Cqe) -> Result<(u16, Option<Queued>), i32> {
 	let mut rx = sock.rx.borrow_mut();
+	let rx = &mut *rx;
 	let Some(bid) = cqueue::buffer_select(cqe.flags) else {
 		return Err(libc::EPROTO);
 	};
@@ -846,7 +875,7 @@ fn on_recv_multi(sock: &Rc<SockShared>, cqe: Cqe) -> Result<(u16, Option<Queued>
 	// The kernel consumed `len` bytes of this buffer, and releases the buffer
 	// entirely unless it says more is coming.
 	buf.offset += len;
-	if !cqueue::buf_more(cqe.flags) {
+	if !cqueue::buffer_more(cqe.flags) {
 		buf.kernel_done = true;
 	}
 
@@ -1010,13 +1039,17 @@ fn decode_addr(name: &[u8]) -> Option<SocketAddr> {
 	if name.len() < std::mem::size_of::<libc::sa_family_t>() {
 		return None;
 	}
-	let mut family = [0u8; std::mem::size_of::<libc::sa_family_t>()];
-	family.copy_from_slice(&name[..family.len()]);
+	const FAMILY_LEN: usize = std::mem::size_of::<libc::sa_family_t>();
+	let mut family = [0u8; FAMILY_LEN];
+	family.copy_from_slice(&name[..FAMILY_LEN]);
 	match libc::sa_family_t::from_ne_bytes(family) as libc::c_int {
 		libc::AF_INET if name.len() >= std::mem::size_of::<libc::sockaddr_in>() => {
 			// SAFETY: length-checked unaligned read.
 			let sin = unsafe { name.as_ptr().cast::<libc::sockaddr_in>().read_unaligned() };
-			Some(SocketAddr::from((sin.sin_addr.s_addr.to_ne_bytes(), u16::from_be(sin.sin_port))))
+			Some(SocketAddr::from((
+				sin.sin_addr.s_addr.to_ne_bytes(),
+				u16::from_be(sin.sin_port),
+			)))
 		}
 		libc::AF_INET6 if name.len() >= std::mem::size_of::<libc::sockaddr_in6>() => {
 			// SAFETY: length-checked unaligned read.

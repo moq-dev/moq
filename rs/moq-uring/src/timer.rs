@@ -64,9 +64,10 @@ impl Heap {
 
 /// A single re-armable timer slot in a worker's heap.
 ///
-/// Implements [`moq_net::runtime::Timer`]: arm with [`set`](Self::set), poll
-/// from any `poll_*` function on this worker's thread. Minted by
-/// [`moq_net::Timers::timer`] on a [`crate::Handle`].
+/// Implements [`moq_net::runtime::Timer`]: arm with
+/// [`set`](moq_net::runtime::Timer::set), poll from any `poll_*` function on
+/// this worker's thread. Minted by [`moq_net::Timers::timer`] on a
+/// [`crate::Handle`].
 pub struct Timer {
 	heap: Rc<RefCell<Heap>>,
 	slot: Rc<Slot>,

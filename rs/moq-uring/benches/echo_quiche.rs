@@ -5,6 +5,10 @@
 use criterion::{criterion_group, criterion_main};
 
 #[cfg(target_os = "linux")]
+#[path = "../tests/support/quiche.rs"]
+mod support;
+
+#[cfg(target_os = "linux")]
 mod linux {
 	use std::net::UdpSocket;
 	use std::time::Instant;
@@ -12,8 +16,7 @@ mod linux {
 	use criterion::{BenchmarkId, Criterion, Throughput};
 	use moq_uring::{Config, Error, Worker, udp};
 
-	#[path = "../tests/support/quiche.rs"]
-	mod support;
+	use super::support;
 
 	/// Bytes echoed per iteration (each direction).
 	const PAYLOAD: usize = 1024 * 1024;
@@ -36,7 +39,10 @@ mod linux {
 		none.gro = false;
 		none.multishot = false;
 		vec![
-			Ablation { name: "all-on", config: all },
+			Ablation {
+				name: "all-on",
+				config: all,
+			},
 			Ablation {
 				name: "no-gso",
 				config: no_gso,
@@ -49,7 +55,10 @@ mod linux {
 				name: "oneshot",
 				config: oneshot,
 			},
-			Ablation { name: "all-off", config: none },
+			Ablation {
+				name: "all-off",
+				config: none,
+			},
 		]
 	}
 
@@ -83,7 +92,9 @@ mod linux {
 
 			let server_handle = handle.clone();
 			handle.spawn(async move {
-				support::echo_server(server_handle, server_sock, certs).await.expect("echo server");
+				support::echo_server(server_handle, server_sock, certs)
+					.await
+					.expect("echo server");
 			});
 
 			// Establish once; iterations then measure steady-state transfer.

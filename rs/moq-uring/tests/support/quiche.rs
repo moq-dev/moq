@@ -1,10 +1,10 @@
 //! Raw-quiche echo plumbing shared by the integration test and the ablation
 //! benchmark (`#[path]`-included by both, so each sees the subset it calls).
-#![allow(dead_code)]
 //!
 //! quiche is sans-IO, which is the point: these helpers wire its packet-in /
 //! packet-out / timeout surface straight to a [`moq_uring::udp::Socket`] and a
 //! [`moq_net::runtime::Deadline`], with no other runtime underneath.
+#![allow(dead_code)]
 
 use std::net::SocketAddr;
 use std::task::Poll;
@@ -172,19 +172,33 @@ impl Peer {
 	}
 }
 
-/// Echo every readable byte back on its stream, mirroring fins.
+/// Echo every readable byte back on its stream, mirroring fins. Reads are
+/// bounded by the stream's send capacity so the echo write can never hit
+/// `Done`; a capacity-blocked stream stays readable and is retried after the
+/// next flush/receive round frees the congestion window.
 pub fn echo_streams(conn: &mut quiche::Connection, scratch: &mut [u8]) -> anyhow::Result<()> {
 	let readable: Vec<u64> = conn.readable().collect();
 	for stream in readable {
 		loop {
-			match conn.stream_recv(stream, scratch) {
+			let cap = match conn.stream_capacity(stream) {
+				Ok(cap) => cap,
+				Err(quiche::Error::InvalidStreamState(_)) => break,
+				Err(err) => return Err(err.into()),
+			};
+			if cap == 0 {
+				break;
+			}
+			let take = cap.min(scratch.len());
+			match conn.stream_recv(stream, &mut scratch[..take]) {
 				Ok((n, fin)) => {
 					let mut offset = 0;
 					while offset < n {
 						offset += conn.stream_send(stream, &scratch[offset..n], false)?;
 					}
 					if fin {
+						// An empty fin write succeeds even at zero capacity.
 						conn.stream_send(stream, &[], true)?;
+						break;
 					}
 				}
 				Err(quiche::Error::Done) => break,
@@ -198,7 +212,12 @@ pub fn echo_streams(conn: &mut quiche::Connection, scratch: &mut [u8]) -> anyhow
 /// Run a whole client session against an already-listening echo server task:
 /// handshake, send `payload` with fin, collect the echo, close. Returns the
 /// echoed bytes.
-pub async fn echo_client(handle: &Handle, sock: udp::Socket, server: SocketAddr, payload: &[u8]) -> anyhow::Result<Vec<u8>> {
+pub async fn echo_client(
+	handle: &Handle,
+	sock: udp::Socket,
+	server: SocketAddr,
+	payload: &[u8],
+) -> anyhow::Result<Vec<u8>> {
 	let mut peer = Peer::connect(handle, sock, server)?;
 	let mut echoed = Vec::with_capacity(payload.len());
 	let mut sent = 0;
