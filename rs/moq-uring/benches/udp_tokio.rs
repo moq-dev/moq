@@ -362,7 +362,7 @@ mod linux {
 use linux::benchmark;
 
 #[cfg(not(target_os = "linux"))]
-fn benchmark(_: &mut Criterion) {}
+fn benchmark(_: &mut criterion::Criterion) {}
 
 criterion_group!(benches, benchmark);
 criterion_main!(benches);
