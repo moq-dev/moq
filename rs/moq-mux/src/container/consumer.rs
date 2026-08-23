@@ -556,6 +556,7 @@ impl GroupBuffer {
 		};
 
 		for mut frame in frames {
+			let marker = format.end(&frame).is_some();
 			self.min_timestamp = Some(match self.min_timestamp {
 				Some(existing) => existing.min(frame.timestamp),
 				None => frame.timestamp,
@@ -578,8 +579,10 @@ impl GroupBuffer {
 
 			// First frame of a group is always a keyframe by protocol invariant; trust
 			// the container's flag otherwise so CMAF mid-group keyframes survive.
-			frame.keyframe = frame.keyframe || self.index == 0;
-			self.index += 1;
+			if !marker {
+				frame.keyframe = frame.keyframe || self.index == 0;
+				self.index += 1;
+			}
 
 			self.buffered.push_back(frame);
 		}
@@ -1142,6 +1145,33 @@ mod tests {
 		assert_eq!(frames[0].timestamp, ts(0));
 		assert_eq!(frames[1].timestamp, ts(33_000));
 		assert_eq!(consumer.end(), Some(ts(50_000)), "the latest endpoint is exposed");
+	}
+
+	#[tokio::test]
+	async fn leading_marker_preserves_the_first_media_keyframe() {
+		let mut track = track_producer("test", hang::container::track_info());
+		let consumer_track = track.subscribe(None);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::from_millis(500));
+
+		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		write_marker(&mut group, ts(20_000));
+		Container::Legacy
+			.write(
+				&mut group,
+				&[Frame {
+					timestamp: ts(20_000),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		group.finish().unwrap();
+		track.finish().unwrap();
+
+		let frame = consumer.read().await.unwrap().unwrap();
+		assert!(frame.keyframe, "the marker does not consume the first-media slot");
+		assert_eq!(consumer.end(), Some(ts(20_000)));
 	}
 
 	/// Reading a marker consumes its frame, so a run of them makes progress and the

@@ -413,7 +413,53 @@ test("Consumer returns legacy endpoint markers as ordered metadata", async () =>
 
 	const media = await consumer.next();
 	expect(media?.frame?.payload).toEqual(new Uint8Array([0xde, 0xad]));
+	expect(media?.frame?.keyframe).toBe(true);
 	expect(media?.end).toBeUndefined();
+	consumer.close();
+});
+
+test("Consumer delivers a rewound endpoint before its terminal packet", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+
+	const previous = new Group.Producer(0);
+	previous.writeFrame({
+		payload: encodeLegacyFrame(100_000 as Time.Micro, new Uint8Array([0xca, 0xfe])),
+		timestamp: Time.Timestamp.now(),
+	});
+	track.writeGroup(previous);
+	const first = await consumer.next();
+	expect(first?.frame?.timestamp).toBe(100_000 as Time.Micro);
+
+	const group = new Group.Producer(1);
+	group.writeFrame({
+		payload: encodeLegacyFrame(0 as Time.Micro, new Uint8Array()),
+		timestamp: Time.Timestamp.now(),
+	});
+	group.writeFrame({
+		payload: encodeLegacyFrame(0 as Time.Micro, new Uint8Array([0xde, 0xad])),
+		timestamp: Time.Timestamp.now(),
+	});
+	group.close();
+	track.writeGroup(group);
+	await settle();
+
+	let marker: { end?: Time.Micro; discontinuity: number } | undefined;
+	for (;;) {
+		const next = await consumer.next();
+		if (!next || next.end !== undefined) {
+			marker = next;
+			break;
+		}
+	}
+	expect(marker?.end).toBe(0 as Time.Micro);
+	expect(marker?.discontinuity).toBe(1);
+
+	const terminal = await consumer.next();
+	expect(terminal?.frame?.keyframe).toBe(true);
+	expect(terminal?.discontinuity).toBe(1);
+	previous.close();
+	track.close();
 	consumer.close();
 });
 

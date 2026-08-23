@@ -11,7 +11,7 @@ import { type AudioBuffer, createAudioBuffer } from "./buffer";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
-import { terminalFrames } from "./terminal";
+import { Terminal, terminalFrames } from "./terminal";
 import { unlockOnGesture } from "./unlock";
 
 // How long the latency target must hold steady before a floor increase re-anchors. Coalesces a
@@ -82,12 +82,8 @@ export class Decoder {
 	// arrives we pre-build the graph from the catalog rate; if the real rate differs we rebuild it.
 	#decodedSampleRate = new Signal<number | undefined>(undefined);
 
-	// The last discontinuity count seen from the container consumer. A change means the
-	// publisher rewound the timeline (e.g. a voice agent interrupted) and we must flush.
-	#discontinuity = 0;
-
-	// Exclusive source endpoint carried before terminal codec drain packets.
-	#terminalEnd?: Time.Micro;
+	// Ordered discontinuity and endpoint state from the container consumer.
+	#terminal = new Terminal();
 
 	// How much buffered audio the container consumer retains before skipping
 	// ahead. This must be the latency CEILING (maxBuffer), not the floor
@@ -283,7 +279,7 @@ export class Decoder {
 	}
 
 	#runLegacyDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: Catalog.AudioConfig): void {
-		this.#terminalEnd = undefined;
+		this.#terminal.clear();
 		const format = config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
@@ -337,13 +333,10 @@ export class Decoder {
 			for (;;) {
 				const next = await consumer.next();
 				if (!next) break;
+				this.#onNext(next);
 				if (next.end !== undefined) {
-					this.#terminalEnd = next.end;
 					continue;
 				}
-
-				// Publisher rewound the timeline: flush + re-anchor before decoding the new frame.
-				this.#onDiscontinuity(next.discontinuity);
 
 				const { frame } = next;
 				if (!frame) continue;
@@ -376,7 +369,7 @@ export class Decoder {
 
 	#runCmafDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: Catalog.AudioConfig): void {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
-		this.#terminalEnd = undefined;
+		this.#terminal.clear();
 
 		const initSegment = base64ToBytes(config.container.init);
 		const init = Container.Cmaf.decodeInitSegment(initSegment);
@@ -427,7 +420,7 @@ export class Decoder {
 				if (!next) break;
 
 				// Publisher rewound the timeline: flush + re-anchor before decoding the new frame.
-				this.#onDiscontinuity(next.discontinuity);
+				this.#onNext(next);
 
 				const { frame } = next;
 				if (!frame) continue;
@@ -458,7 +451,7 @@ export class Decoder {
 	#emit(sample: AudioData) {
 		const timestamp = sample.timestamp as Time.Micro;
 		const timestampMilli = Time.Milli.fromMicro(timestamp);
-		const frames = terminalFrames(sample, this.#terminalEnd);
+		const frames = terminalFrames(sample, this.#terminal.end);
 		if (frames === 0) {
 			sample.close();
 			return;
@@ -542,14 +535,10 @@ export class Decoder {
 		this.#ring?.reset();
 	}
 
-	// React to the container consumer's discontinuity counter. When it changes the publisher
-	// has rewound the timeline, so flush the queued PCM and re-anchor the shared clock before
-	// the first frame of the new utterance is decoded. This makes the wire signal trigger the
-	// same flush as a manual `reset()`, with no app involvement.
-	#onDiscontinuity(count: number): void {
-		if (count === this.#discontinuity) return;
-		this.#discontinuity = count;
-		this.#terminalEnd = undefined;
+	// Apply ordered container metadata before handling the result. A marker that also
+	// starts a rewound epoch must survive the reset so its following drain is trimmed.
+	#onNext(next: { discontinuity: number; end?: Time.Micro }): void {
+		if (!this.#terminal.update(next)) return;
 		this.#ring?.reset();
 		this.sync.reset();
 	}

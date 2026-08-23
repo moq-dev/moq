@@ -211,13 +211,14 @@ export class Consumer {
 				const decoded = this.#format.decode(next.payload);
 
 				for (const sample of decoded) {
+					const marker = this.#format.end?.(sample) !== undefined;
 					const frame: Frame = {
 						payload: sample.payload,
 						timestamp: sample.timestamp,
 						// Protocol invariant: groups always start at a keyframe.
 						// For index 0, we enforce this regardless of what the format reports.
 						// For index > 0, we trust the format's keyframe detection.
-						keyframe: index === 0 ? true : sample.keyframe,
+						keyframe: !marker && index === 0 ? true : sample.keyframe,
 						// Carry the container's per-sample duration through so group.end is the real
 						// presentation end (ts + duration), not just the last frame's ts. This is what
 						// makes the PTS-contiguity check (next.firstPTS <= group.end) work; without it a
@@ -225,7 +226,7 @@ export class Consumer {
 						duration: sample.duration,
 					};
 
-					index++;
+					if (!marker) index++;
 
 					group.frames.push(frame);
 
