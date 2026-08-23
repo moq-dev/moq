@@ -337,11 +337,16 @@ impl<F: Container> Consumer<F> {
 			if let Some((new_idx, _)) = next_group
 				&& should_skip
 			{
-				let discontinuities = self
-					.pending
-					.iter_mut()
-					.take(new_idx)
-					.fold(0, |count, group| count + u64::from(group.poll_empty(waiter)));
+				// A zero-frame group is ambiguous until its FIN arrives. Keep it in order so a
+				// delayed empty-group boundary cannot be discarded before it is recognized.
+				let mut discontinuities = 0;
+				for group in self.pending.iter_mut().take(new_idx) {
+					match group.poll_empty(waiter) {
+						Poll::Ready(true) => discontinuities += 1,
+						Poll::Ready(false) => {}
+						Poll::Pending => return Poll::Pending,
+					}
+				}
 				self.pending.drain(0..new_idx);
 				self.mark_discontinuities(discontinuities);
 				let new_current = self.pending.front().map(|g| g.sequence).unwrap();
@@ -349,6 +354,15 @@ impl<F: Container> Consumer<F> {
 				tracing::debug!(old = self.current, new = new_current, "skipping slow groups");
 
 				self.current = new_current;
+				continue;
+			}
+
+			if finished
+				&& let Some(group) = self.pending.front_mut()
+				&& group.sequence > self.current
+				&& matches!(group.poll_empty(waiter), Poll::Ready(true))
+			{
+				self.current = group.sequence;
 				continue;
 			}
 
@@ -681,8 +695,16 @@ impl GroupBuffer {
 		matches!(self.group.poll_finished(waiter), Poll::Ready(Err(_)))
 	}
 
-	fn poll_empty(&mut self, waiter: &kio::Waiter) -> bool {
-		self.empty && matches!(self.group.poll_finished(waiter), Poll::Ready(Ok(_)))
+	fn poll_empty(&mut self, waiter: &kio::Waiter) -> Poll<bool> {
+		if !self.empty {
+			return Poll::Ready(false);
+		}
+
+		match self.group.poll_finished(waiter) {
+			Poll::Ready(Ok(_)) => Poll::Ready(true),
+			Poll::Ready(Err(_)) => Poll::Ready(false),
+			Poll::Pending => Poll::Pending,
+		}
 	}
 }
 
@@ -856,16 +878,19 @@ mod tests {
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::ZERO);
 
 		write_group(&mut track, 0, &[ts(0)]);
-		track
-			.create_group(moq_net::group::Info { sequence: 2 })
-			.unwrap()
-			.finish()
-			.unwrap();
+		let mut marker = track.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
 		write_group(&mut track, 3, &[ts(1_000_000)]);
-		track.finish().unwrap();
 
 		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
 		assert_eq!(consumer.discontinuity(), 0);
+		assert!(
+			tokio::time::timeout(Duration::from_millis(20), consumer.read())
+				.await
+				.is_err()
+		);
+
+		marker.finish().unwrap();
+		track.finish().unwrap();
 		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(1_000_000));
 		assert_eq!(consumer.discontinuity(), 1);
 	}

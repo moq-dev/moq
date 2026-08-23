@@ -971,7 +971,7 @@ test("Consumer reports an empty group as a codec discontinuity", async () => {
 	consumer.close();
 });
 
-test("Consumer preserves an empty-group discontinuity while latency-skipping", async () => {
+test("Consumer advances a completed empty group across a sequence gap", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 0 as Time.Milli });
 
@@ -985,9 +985,44 @@ test("Consumer preserves an empty-group discontinuity while latency-skipping", a
 	marker.close();
 	await settle();
 
+	writeGroupWithLegacyFrames(track, 3, [1_000_000 as Time.Micro]);
+	await settle();
+
+	const reset = await consumer.next();
+	expect(reset?.frame).toBeUndefined();
+	expect(reset?.discontinuity).toBe(1);
+	const resumed = await consumer.next();
+	expect(resumed?.frame?.timestamp).toBe(1_000_000 as Time.Micro);
+	expect(resumed?.discontinuity).toBe(1);
+
+	consumer.close();
+});
+
+test("Consumer waits for an empty-group FIN before latency-skipping it", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 0 as Time.Milli });
+
+	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro]);
+	await settle();
+	expect((await consumer.next())?.frame?.timestamp).toBe(0 as Time.Micro);
+	expect((await consumer.next())?.frame).toBeUndefined();
+
+	const marker = new Group.Producer(2);
+	track.writeGroup(marker);
 	writeGroupWithLegacyFrames(track, 3, [1_000_000 as Time.Micro, 1_100_000 as Time.Micro]);
 	await settle();
 
+	const pending = consumer.next();
+	const beforeFin = await Promise.race([
+		pending.then(() => "ready" as const),
+		settle(50).then(() => "pending" as const),
+	]);
+	expect(beforeFin).toBe("pending");
+
+	marker.close();
+	const reset = await pending;
+	expect(reset?.frame).toBeUndefined();
+	expect(reset?.discontinuity).toBe(1);
 	const resumed = await consumer.next();
 	expect(resumed?.frame?.timestamp).toBe(1_000_000 as Time.Micro);
 	expect(resumed?.discontinuity).toBe(1);

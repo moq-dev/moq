@@ -341,6 +341,8 @@ export class Consumer {
 		// group, the latency span proves the missing content is too old to wait for.
 		while (this.#groups.length >= 2) {
 			const threshold = Moq.Time.Micro.fromMilli(this.#latency.peek());
+			const first = this.#groups[0];
+			if (first.empty && !first.consumer.done) break;
 
 			// Check the difference between the earliest and latest known frames.
 			let min: number | undefined;
@@ -359,14 +361,13 @@ export class Consumer {
 			const latency = max - min;
 			if (latency <= threshold) break;
 
-			const first = this.#groups.shift();
-			if (!first) break;
+			this.#groups.shift();
 			this.#active = this.#groups[0]?.consumer.sequence;
 			console.warn(
 				`skipping slow group: track=${this.#track.name} ${first.consumer.sequence} -> ${this.#active}`,
 			);
 
-			if (first.empty && first.consumer.done) this.#markDiscontinuity();
+			if (first.empty) this.#markDiscontinuity();
 			first.consumer.close();
 			first.frames.length = 0;
 			skipped = true;
@@ -539,15 +540,17 @@ export class Consumer {
 			// fallback fired because no later group was buffered yet, and the real (large-gap,
 			// non-sequential) next group has since arrived -- promote #active to the first real
 			// group so delivery resumes instead of stalling on a nonexistent sequence.
-			// Promote #active up to the first buffered group ONLY when it continues the timeline we left
-			// off at (PTS-contiguous with #presentedEnd). Otherwise a real gap sits before it and an
-			// in-transit group may still arrive, so wait -- #checkLatency skips the gap once the buffered
-			// span exceeds the latency budget, and #tryDurationSkip once the duration covers it.
+			// Promote #active to the first buffered group when it continues the timeline we left off at,
+			// or when a completed empty group declares a boundary that makes the earlier gap irrelevant.
+			// Otherwise a real gap sits before it and an in-transit group may still arrive, so wait.
+			// #checkLatency skips the gap once the buffered span exceeds the latency budget, and
+			// #tryDurationSkip once the duration covers it.
 			if (this.#active !== undefined && this.#groups.length > 0) {
 				const head = this.#groups[0];
 				if (
 					head.consumer.sequence > this.#active &&
-					ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp)
+					((head.empty && head.consumer.done) ||
+						ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp))
 				) {
 					this.#active = head.consumer.sequence;
 				}
