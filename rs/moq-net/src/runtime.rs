@@ -30,7 +30,7 @@ pub type Instant = std::time::Instant;
 #[cfg(target_family = "wasm")]
 pub type Instant = web_async::time::Instant;
 
-/// A single re-armable timer registration, produced by [`Runtime::timer`].
+/// A single re-armable timer registration, produced by [`Timers::timer`].
 ///
 /// This is the primitive [`Deadline`] wraps; implement it, use `Deadline`.
 /// Arming is synchronous and in-memory: no I/O submission, no async
@@ -50,18 +50,13 @@ pub trait Timer {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()>;
 }
 
-/// The executor a session runs on.
+/// The timer half of a runtime: mint [`Timer`]s and read the clock they follow.
 ///
-/// Passed to [`crate::Client::connect`] / [`crate::Server::accept`], which hand
-/// their protocol [`Machine`] to [`spawn`](Self::spawn). Cloned into the session
-/// internals that arm timers, so clones must be cheap (a ZST or a reference
-/// count).
-pub trait Runtime: Clone {
-	/// The transport this runtime can drive. Pinning the transport per runtime
-	/// is what lets each implementation know the concrete `Machine` type it
-	/// spawns, including whether it is `Send`.
-	type Transport: crate::transport::poll::Session;
-
+/// Split from [`Runtime`] so work that only arms deadlines (the origin driver's
+/// linger and hold-down machinery) can borrow a runtime's timers without caring
+/// which transport it drives. Cloned into whatever arms timers, so clones must
+/// be cheap (a ZST or a reference count).
+pub trait Timers: Clone {
 	/// The timer registration this runtime hands out.
 	type Timer: Timer;
 
@@ -79,6 +74,17 @@ pub trait Runtime: Clone {
 	fn now(&self) -> Instant {
 		Instant::now()
 	}
+}
+
+/// The executor a session runs on: [`Timers`] plus a transport and a spawn.
+///
+/// Passed to [`crate::Client::connect`] / [`crate::Server::accept`], which hand
+/// their protocol [`Machine`] to [`spawn`](Self::spawn).
+pub trait Runtime: Timers {
+	/// The transport this runtime can drive. Pinning the transport per runtime
+	/// is what lets each implementation know the concrete `Machine` type it
+	/// spawns, including whether it is `Send`.
+	type Transport: crate::transport::poll::Session;
 
 	/// Take ownership of a session's protocol machine and poll it to completion.
 	///
@@ -89,18 +95,147 @@ pub trait Runtime: Clone {
 	fn spawn(&self, machine: Machine<Self>);
 }
 
+/// A boxed [`Timer`], minted by [`AnyTimers`].
+pub(crate) struct BoxTimer(MaybeSendTimer);
+
+#[cfg(not(target_family = "wasm"))]
+type MaybeSendTimer = Box<dyn Timer + Send>;
+#[cfg(target_family = "wasm")]
+type MaybeSendTimer = Box<dyn Timer>;
+
+impl Timer for BoxTimer {
+	fn set(&mut self, at: Option<Instant>) {
+		self.0.set(at);
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		self.0.poll(waiter)
+	}
+}
+
+/// A type-erased [`Timers`], for shared state that cannot be generic over the
+/// runtime (the origin's task machinery). One allocation per minted timer.
+pub(crate) struct AnyTimers(MaybeSendErased);
+
+#[cfg(not(target_family = "wasm"))]
+type MaybeSendErased = std::sync::Arc<dyn ErasedTimers + Send + Sync>;
+#[cfg(target_family = "wasm")]
+type MaybeSendErased = std::sync::Arc<dyn ErasedTimers>;
+
+trait ErasedTimers {
+	fn now(&self) -> Instant;
+	fn timer(&self) -> BoxTimer;
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl<T> ErasedTimers for T
+where
+	T: Timers,
+	T::Timer: Send + 'static,
+{
+	fn now(&self) -> Instant {
+		Timers::now(self)
+	}
+
+	fn timer(&self) -> BoxTimer {
+		BoxTimer(Box::new(Timers::timer(self)))
+	}
+}
+
+#[cfg(target_family = "wasm")]
+impl<T> ErasedTimers for T
+where
+	T: Timers,
+	T::Timer: 'static,
+{
+	fn now(&self) -> Instant {
+		Timers::now(self)
+	}
+
+	fn timer(&self) -> BoxTimer {
+		BoxTimer(Box::new(Timers::timer(self)))
+	}
+}
+
+impl AnyTimers {
+	#[cfg(not(target_family = "wasm"))]
+	pub(crate) fn new<T>(timers: T) -> Self
+	where
+		T: Timers + Send + Sync + 'static,
+		T::Timer: Send + 'static,
+	{
+		Self(std::sync::Arc::new(timers))
+	}
+
+	#[cfg(target_family = "wasm")]
+	pub(crate) fn new<T>(timers: T) -> Self
+	where
+		T: Timers + 'static,
+		T::Timer: 'static,
+	{
+		Self(std::sync::Arc::new(timers))
+	}
+}
+
+impl Clone for AnyTimers {
+	fn clone(&self) -> Self {
+		Self(self.0.clone())
+	}
+}
+
+impl Timers for AnyTimers {
+	type Timer = BoxTimer;
+
+	fn timer(&self) -> Self::Timer {
+		self.0.timer()
+	}
+
+	fn now(&self) -> Instant {
+		self.0.now()
+	}
+}
+
+/// A late-bound [`AnyTimers`]: shared state created before the runtime is known
+/// (the origin's, at [`crate::origin::Producer::new`]) holds this, and
+/// [`crate::origin::Driver::run`] fills it in.
+#[derive(Clone, Default)]
+pub(crate) struct TimersSlot(std::sync::Arc<std::sync::OnceLock<AnyTimers>>);
+
+impl TimersSlot {
+	/// Install the timers, ignoring a second install (clones share one slot).
+	pub(crate) fn install(&self, timers: AnyTimers) {
+		let _ = self.0.set(timers);
+	}
+
+	/// The installed timers. Panics before install, so only call from work that
+	/// the driver polls (it installs before it can poll anything).
+	pub(crate) fn get(&self) -> AnyTimers {
+		self.0.get().expect("origin driver is not running").clone()
+	}
+
+	/// The installed timers' clock, if the driver is running.
+	pub(crate) fn try_now(&self) -> Option<Instant> {
+		self.0.get().map(Timers::now)
+	}
+
+	/// The installed timers' clock.
+	pub(crate) fn now(&self) -> Instant {
+		self.try_now().expect("origin driver is not running")
+	}
+}
+
 /// A wall-clock deadline: the ergonomic layer over [`Timer`].
 ///
-/// Mirrors the old `kio::time::Deadline` surface: arm it with an [`Instant`],
-/// poll it from a `poll_*` function, re-arm or disarm as the deadline moves.
-/// Re-setting the instant it already holds does nothing, so a poll loop can
-/// recompute its deadline every turn without restarting the countdown.
-pub struct Deadline<R: Runtime> {
+/// Arm it with an [`Instant`], poll it from a `poll_*` function, re-arm or
+/// disarm as the deadline moves. Re-setting the instant it already holds does
+/// nothing, so a poll loop can recompute its deadline every turn without
+/// restarting the countdown.
+pub struct Deadline<R: Timers> {
 	at: Option<Instant>,
 	timer: R::Timer,
 }
 
-impl<R: Runtime> Deadline<R> {
+impl<R: Timers> Deadline<R> {
 	/// A disarmed deadline, which never fires until [`set`](Self::set) arms it.
 	pub fn new(runtime: &R) -> Self {
 		Self {
@@ -116,7 +251,7 @@ impl<R: Runtime> Deadline<R> {
 		deadline
 	}
 
-	/// A deadline armed for `duration` past the runtime's [`now`](Runtime::now).
+	/// A deadline armed for `duration` past the runtime's [`now`](Timers::now).
 	///
 	/// A duration the clock cannot represent (e.g. [`std::time::Duration::MAX`])
 	/// leaves the deadline disarmed, so it never fires rather than panicking on
@@ -261,7 +396,7 @@ pub use test::{Never, Test};
 /// A tokio-backed runtime for this crate's own unit tests, so the existing
 /// `tokio::time::pause`/`advance` tests keep their semantics: `now` reads
 /// tokio's (pausable) clock and timers are tokio sleeps, which paused tests
-/// auto-advance. Production code uses `moq_tokio::Runtime` instead; this one is
+/// auto-advance. Production code uses `moq_tokio::runtime::Runtime` instead; this one is
 /// compiled only into the test harness (integration tests carry their own copy
 /// in `tests/support`).
 #[cfg(all(test, not(target_family = "wasm")))]
@@ -270,7 +405,9 @@ pub(crate) mod tokio_test {
 
 	use super::{Instant, Machine, Runtime, Timer};
 
-	pub(crate) struct Tokio<S>(PhantomData<fn(S)>);
+	// The default `S` makes a bare `Tokio::new()` a transportless timers handle
+	// for origin drivers, mirroring `moq_tokio::runtime::Runtime`.
+	pub(crate) struct Tokio<S = ()>(PhantomData<fn(S)>);
 
 	impl<S> Tokio<S> {
 		pub fn new() -> Self {
@@ -284,8 +421,8 @@ pub(crate) mod tokio_test {
 		}
 	}
 
-	impl<S: crate::transport::poll::Session> Runtime for Tokio<S> {
-		type Transport = S;
+	// Unbounded: timers don't involve the transport.
+	impl<S> super::Timers for Tokio<S> {
 		type Timer = TokioTimer;
 
 		fn timer(&self) -> Self::Timer {
@@ -295,6 +432,10 @@ pub(crate) mod tokio_test {
 		fn now(&self) -> Instant {
 			tokio::time::Instant::now().into_std()
 		}
+	}
+
+	impl<S: crate::transport::poll::Session> Runtime for Tokio<S> {
+		type Transport = S;
 
 		fn spawn(&self, machine: Machine<Self>) {
 			tokio::spawn(machine);

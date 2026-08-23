@@ -26,3 +26,6 @@ srt-tokio = "0.4"
 thiserror = "2"
 tokio = { workspace = true, features = ["full"] }
 tracing = "0.1"
+
+[dev-dependencies]
+moq-tokio = { workspace = true }

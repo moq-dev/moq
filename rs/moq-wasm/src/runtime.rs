@@ -7,13 +7,16 @@ use std::{pin::Pin, task::Poll};
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Runtime;
 
-impl moq_net::Runtime for Runtime {
-	type Transport = web_transport_wasm::Session;
+impl moq_net::Timers for Runtime {
 	type Timer = Timer;
 
 	fn timer(&self) -> Self::Timer {
 		Timer { at: None, sleep: None }
 	}
+}
+
+impl moq_net::Runtime for Runtime {
+	type Transport = web_transport_wasm::Session;
 
 	fn spawn(&self, machine: moq_net::runtime::Machine<Self>) {
 		web_async::spawn(async move {

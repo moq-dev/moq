@@ -37,13 +37,6 @@ mod shared;
 mod task;
 mod weak;
 
-#[cfg(feature = "time")]
-pub mod time;
-
-#[cfg(feature = "tokio")]
-#[doc(hidden)]
-pub mod tokio;
-
 #[cfg(all(test, loom))]
 mod loom;
 #[cfg(all(test, not(loom)))]

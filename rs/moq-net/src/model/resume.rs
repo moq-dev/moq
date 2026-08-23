@@ -2588,8 +2588,6 @@ mod test {
 
 	#[tokio::test]
 	async fn a_replacement_copy_keeps_the_handed_out_group_latency_budget() {
-		tokio::time::pause();
-
 		let (mut track_a, consumer_a) = track_pair("a");
 		let (mut track_b, consumer_b) = track_pair("b");
 
@@ -2616,7 +2614,7 @@ mod test {
 			"the replacement group is still the live edge"
 		);
 
-		tokio::time::advance(std::time::Duration::from_secs(1)).await;
+		crate::model::clock::advance(std::time::Duration::from_secs(1));
 		write_group_at(&mut track_b, 1, "edge", std::time::Duration::from_secs(1));
 
 		let result = reading

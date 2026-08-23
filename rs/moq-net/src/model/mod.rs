@@ -12,6 +12,7 @@ pub mod track;
 mod origin_impl;
 
 mod bytes;
+pub(crate) mod clock;
 mod datagram;
 mod requests;
 pub(crate) mod resume;
@@ -33,7 +34,7 @@ pub use time::*;
 
 /// Publishing and consuming the set of broadcasts routed through an origin.
 pub mod origin {
-	pub use super::origin_impl::{Consumer, Driver, Dynamic, Info, Producer, Request, Requesting};
+	pub use super::origin_impl::{Consumer, Driver, Dynamic, Info, Producer, Request, Requesting, Run};
 }
 
 /// Subscribing to broadcast (un)announcements from an origin.

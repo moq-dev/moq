@@ -39,7 +39,7 @@ fn timescale_now_is_sane_and_monotonic() {
 
 /// Bidirectional model round-trip in-process on wasm: produce a track + frame,
 /// then consume it back. Exercises the produce path (which stamps groups via the
-/// wasm `kio::time` clock) and the consume path together.
+/// wasm model clock) and the consume path together.
 #[wasm_bindgen_test]
 async fn produce_consume_frame_roundtrip() {
 	let mut broadcast = Broadcast::new().produce();

@@ -181,6 +181,7 @@ windows = { version = "0.62", features = [
 # `poll!`, to cancel an `encode::Sink` request exactly where a `select!` would.
 futures = "0.3"
 h264-reader = "0.8.0"
+moq-tokio = { workspace = true }
 # Driving `encode::Sink` from a plain test thread, the way an FFI caller does.
 pollster = "1.0"
 tracing-test = "0.2"

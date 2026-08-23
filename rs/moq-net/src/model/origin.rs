@@ -12,11 +12,13 @@ use std::{
 
 use rand::RngExt;
 use web_async::Lock;
+use web_transport_trait::{MaybeSend, MaybeSync};
 
 use super::{Requests, WeakCache};
 use crate::{
 	AsPath, Error, Path, PathOwned, PathPrefixes,
 	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
+	runtime::{AnyTimers, Instant, Timers, TimersSlot},
 	util::{TaskSet, Tasks},
 };
 
@@ -994,6 +996,9 @@ pub struct Producer {
 	// serve tasks queued here run when the driver is polled. Closed once the
 	// driver drops, which is what makes later mutations fail with `Closed`.
 	tasks: Tasks,
+
+	// The driver's clock and timers, installed by [`Driver::run`].
+	timers: TimersSlot,
 }
 
 impl std::ops::Deref for Producer {
@@ -1009,13 +1014,15 @@ impl Producer {
 	/// prefix and no pre-existing broadcasts, paired with the [`Driver`] that runs
 	/// the origin's lifecycle work.
 	///
-	/// Poll the driver (spawn it, await it, or step [`Driver::poll`]) for the
+	/// Hand the driver a [`crate::Timers`] via [`Driver::run`] and poll the
+	/// returned [`Run`] (spawn it, await it, or step [`Run::poll`]) for the
 	/// origin to make progress; see the [`Driver`] docs for the exact contract.
 	/// `moq_tokio::origin::spawn` wraps this for tokio callers.
 	pub fn new(info: Info) -> (Self, Driver) {
 		let (tasks, set) = TaskSet::new();
 		let nodes = OriginNodes::default();
 		let dynamic = kio::Shared::<OriginDynamicState>::default();
+		let timers = TimersSlot::default();
 		let producer = Self {
 			info: info.id,
 			nodes: nodes.clone(),
@@ -1026,6 +1033,7 @@ impl Producer {
 			default_max_age: info.default_max_age,
 			stats: stats::Session::default(),
 			tasks,
+			timers: timers.clone(),
 		};
 		let driver = Driver {
 			state: DriverState {
@@ -1034,7 +1042,7 @@ impl Producer {
 				dynamic,
 				done: false,
 			},
-			park: kio::Park::default(),
+			timers,
 		};
 		(producer, driver)
 	}
@@ -1082,6 +1090,7 @@ impl Producer {
 			default_max_age: track::DEFAULT_MAX_AGE,
 			stats: stats::Session::default(),
 			tasks,
+			timers: TimersSlot::default(),
 		}
 	}
 
@@ -1190,6 +1199,7 @@ impl Producer {
 			full: &full,
 			rest: &rest,
 			tasks: &self.tasks,
+			timers: &self.timers,
 		};
 		let leaf = if rest.is_empty() {
 			node.clone()
@@ -1210,6 +1220,7 @@ impl Producer {
 			source: consumer,
 			ingress,
 			tasks: self.tasks.clone(),
+			timers: self.timers.clone(),
 			route,
 			announce,
 			leaf,
@@ -1237,6 +1248,7 @@ impl Producer {
 			default_max_age: self.default_max_age,
 			stats: self.stats.clone(),
 			tasks: self.tasks.clone(),
+			timers: self.timers.clone(),
 		})
 	}
 
@@ -1294,6 +1306,7 @@ impl Producer {
 			default_max_age: self.default_max_age,
 			stats: self.stats.clone(),
 			tasks: self.tasks.clone(),
+			timers: self.timers.clone(),
 		})
 	}
 
@@ -1314,34 +1327,29 @@ impl Producer {
 	}
 }
 
-/// The future running an origin's lifecycle work.
+/// The origin's lifecycle work, waiting for the [`crate::Timers`] it runs on.
 ///
-/// Returned by [`Producer::new`] alongside the producer. Poll it for the life of
-/// the origin, either by `.await`ing it (typically spawned on an executor) or by
-/// stepping [`poll`](Self::poll) from inside another [`kio`]-style poll function.
-/// Route changes, track serving, linger timers, failover, and teardown all run
-/// here: exact lookups and eligible announcements still update synchronously in
+/// Returned by [`Producer::new`] alongside the producer. Call
+/// [`run`](Self::run) with the timers that arm its deadlines (linger, handover
+/// holds) and poll the returned [`Run`] for the life of the origin. Route
+/// changes, track serving, linger timers, failover, and teardown all run there:
+/// exact lookups and eligible announcements still update synchronously in
 /// [`Producer::create_broadcast`], but nothing else makes progress without
 /// polling.
 ///
-/// It holds no [`Producer`] clone, so it never keeps the origin alive: it
-/// resolves once every producer handle has dropped and the already-submitted
-/// lifecycle work has drained, and keeps returning `Ready` if polled again.
-/// Dropping it instead tears the origin down immediately: active fronts abort
-/// with [`Error::Dropped`], pending dynamic requests are rejected, announced
-/// paths unannounce and announcement cursors end, and later producer mutations
-/// fail with [`Error::Closed`].
+/// It holds no [`Producer`] clone, so it never keeps the origin alive.
+/// Dropping it (before or after `run`) tears the origin down immediately:
+/// active fronts abort with [`Error::Dropped`], pending dynamic requests are
+/// rejected, announced paths unannounce and announcement cursors end, and later
+/// producer mutations fail with [`Error::Closed`].
 ///
-/// On native, driving requires a tokio runtime with a time driver (timers go
-/// through `kio::time`); see the crate-level Async docs.
-/// `moq_tokio::origin::spawn` wraps construction and spawning for tokio callers.
-#[must_use = "poll the Driver (spawn or await it) or the origin makes no progress"]
+/// `moq_tokio::origin::spawn` wraps construction, `run`, and spawning for
+/// tokio callers.
+#[must_use = "call Driver::run and poll the result or the origin makes no progress"]
 pub struct Driver {
 	state: DriverState,
-	// Retains the waiter across `Future` polls so its kio registrations stay live.
-	// Kept out of `DriverState` so the borrow `hold` hands back doesn't collide
-	// with the `&mut` that polling the state needs.
-	park: kio::Park,
+	// The producer's slot, filled by `run` so lifecycle work can mint deadlines.
+	timers: TimersSlot,
 }
 
 /// Everything the driver polls and tears down, split from the park so the two
@@ -1358,10 +1366,48 @@ struct DriverState {
 }
 
 impl Driver {
+	/// Install the timers and return the runnable driver.
+	///
+	/// The origin's lifecycle work stamps instants and arms deadlines against
+	/// `timers`; nothing runs until the returned [`Run`] is polled.
+	pub fn run<T>(self, timers: T) -> Run
+	where
+		T: crate::runtime::Timers + MaybeSend + MaybeSync + 'static,
+		T::Timer: MaybeSend + 'static,
+	{
+		self.timers.install(AnyTimers::new(timers));
+		Run {
+			state: self.state,
+			park: kio::Park::default(),
+		}
+	}
+}
+
+/// The future running an origin's lifecycle work, from [`Driver::run`].
+///
+/// Poll it for the life of the origin, either by `.await`ing it (typically
+/// spawned on an executor) or by stepping [`poll`](Self::poll) from inside
+/// another [`kio`]-style poll function.
+///
+/// It holds no [`Producer`] clone, so it never keeps the origin alive: it
+/// resolves once every producer handle has dropped and the already-submitted
+/// lifecycle work has drained, and keeps returning `Ready` if polled again.
+/// Dropping it tears the origin down immediately, exactly like dropping the
+/// [`Driver`] it came from.
+#[must_use = "poll the driver (spawn or await it) or the origin makes no progress"]
+pub struct Run {
+	state: DriverState,
+	// Retains the waiter across `Future` polls so its kio registrations stay live.
+	// Kept out of `DriverState` so the borrow `hold` hands back doesn't collide
+	// with the `&mut` that polling the state needs.
+	park: kio::Park,
+}
+
+impl Run {
 	/// Drive the origin one step, registering `waiter` for the next wakeup.
 	///
-	/// The `poll_*` counterpart of `.await`ing the driver, for callers composing
-	/// it into their own [`kio`]-style poll functions.
+	/// The `poll_*` counterpart of `.await`ing, for callers composing the driver
+	/// into their own [`kio`]-style poll functions.
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state.poll(waiter)
 	}
@@ -1420,7 +1466,7 @@ impl Drop for DriverState {
 	}
 }
 
-impl Future for Driver {
+impl Future for Run {
 	type Output = ();
 
 	fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<()> {
@@ -1550,7 +1596,7 @@ struct FrontState {
 	/// relay starts its own wait instead of inheriting an aged timer it was
 	/// never held by. See [`HANDOVER_HOLD`]; the front task sleeps on the
 	/// deadline.
-	pending: Option<(HoldKey, kio::time::Instant)>,
+	pending: Option<(HoldKey, Instant)>,
 
 	/// Attach counter, handed to each [`FrontRoute`] so [`route_order`] can break
 	/// an exact tie toward the newest source.
@@ -1728,7 +1774,7 @@ impl FrontState {
 	/// cannot do. It is that the stale advertisement that motivated the adoption
 	/// is refreshed while we wait, so the re-evaluation at expiry runs on current
 	/// costs and usually no longer wants to move at all.
-	fn reselect(&mut self, carrying: bool, now: kio::time::Instant) -> Option<kio::time::Instant> {
+	fn reselect(&mut self, carrying: bool, now: Instant) -> Option<Instant> {
 		let target = self.reselect_target(carrying);
 
 		// What can cycle is re-parenting onto a source reached through a session,
@@ -1837,7 +1883,7 @@ impl FrontState {
 	/// handover order already computes, so it costs nothing and stays put across
 	/// restarts. Added rather than subtracted, so the floor is still
 	/// [`HANDOVER_HOLD`].
-	fn hold_deadline(&self, since: kio::time::Instant) -> Option<kio::time::Instant> {
+	fn hold_deadline(&self, since: Instant) -> Option<Instant> {
 		let spread = (HANDOVER_HOLD / 2).as_millis() as u64;
 		let key = fnv_key(&self.path.as_path(), [self.self_origin]);
 		since.checked_add(HANDOVER_HOLD + Duration::from_millis(key % spread.max(1)))
@@ -1956,7 +2002,13 @@ fn sync_front(state: &kio::Producer<FrontState>, broadcast: &broadcast::Producer
 /// broadcast rather than splicing new content into this one. Failover is a
 /// property of sources that overlap in the table (a GOAWAY migration, a
 /// redundant publisher), never of a source that might come back later.
-fn detach_source(state: &kio::Producer<FrontState>, broadcast: &broadcast::Producer, leaf: &Lock<OriginNode>, id: u64) {
+fn detach_source(
+	state: &kio::Producer<FrontState>,
+	broadcast: &broadcast::Producer,
+	leaf: &Lock<OriginNode>,
+	id: u64,
+	timers: &TimersSlot,
+) {
 	let close = {
 		// Snapshotted before the state lock (lock order: broadcast, then front).
 		// A demand flip in between only stales this reselect's handover gate,
@@ -1967,7 +2019,7 @@ fn detach_source(state: &kio::Producer<FrontState>, broadcast: &broadcast::Produ
 			return;
 		};
 		s.routes.remove(pos);
-		s.reselect(carrying, kio::time::Instant::now());
+		s.reselect(carrying, timers.now());
 		if s.routes.is_empty() && !s.closed {
 			// Last one out: close now. The front task observes `closed` and
 			// finishes the teardown (unpublish).
@@ -2006,6 +2058,7 @@ struct SourceTask {
 	source: broadcast::Consumer,
 	ingress: stats::Scope,
 	tasks: Tasks,
+	timers: TimersSlot,
 	/// The initial route, as create_broadcast observed it.
 	route: broadcast::Route,
 	/// Ingress announce guard: held while this source's route is announced.
@@ -2040,6 +2093,7 @@ async fn run_source(task: SourceTask) {
 		mut source,
 		ingress,
 		tasks,
+		timers,
 		mut route,
 		mut announce,
 		leaf,
@@ -2051,6 +2105,7 @@ async fn run_source(task: SourceTask) {
 		full: &full,
 		rest: &rest,
 		tasks: &tasks,
+		timers: &timers,
 	};
 
 	// Whether this source still has content the live front has not already beaten.
@@ -2162,7 +2217,7 @@ async fn run_source(task: SourceTask) {
 					// handle to a new publisher. An UNKNOWN-to-UNKNOWN metadata
 					// update (a legacy peer repricing) must not detach.
 					if update.hops.iter().next().copied() != publisher {
-						detach_source(&state, &broadcast, &leaf, id);
+						detach_source(&state, &broadcast, &leaf, id, &timers);
 						sync_announce(&mut announce, announced, &ingress);
 						// A new publisher, so this is content no front has beaten yet. A
 						// sibling source may still hold the old front open, making the
@@ -2181,7 +2236,7 @@ async fn run_source(task: SourceTask) {
 							continue;
 						}
 						entry.route = update;
-						s.reselect(carrying, kio::time::Instant::now());
+						s.reselect(carrying, timers.now());
 					}
 					// Toggle the ingress announce guard on a live/offline transition.
 					sync_announce(&mut announce, announced, &ingress);
@@ -2190,7 +2245,7 @@ async fn run_source(task: SourceTask) {
 				Some(Err(_)) => {
 					// The source ended, deliberately or not: detach it. If it was the
 					// last one the front closes with it.
-					detach_source(&state, &broadcast, &leaf, id);
+					detach_source(&state, &broadcast, &leaf, id, &timers);
 					return;
 				}
 			}
@@ -2222,6 +2277,8 @@ struct AttachContext<'a> {
 	rest: &'a PathOwned,
 	/// Driver submission handle, for queueing a fresh front's task.
 	tasks: &'a Tasks,
+	/// The driver's clock, for stamping reselects and threading into fronts.
+	timers: &'a TimersSlot,
 }
 
 /// Whether two hop entries prove the same endpoint.
@@ -2299,7 +2356,12 @@ fn attach_source(
 					route: route.clone(),
 					source: source.clone(),
 				});
-				s.reselect(carrying, kio::time::Instant::now());
+				// A pre-run attach cannot stamp a hold against a clock that has not
+				// been installed yet. `run_front` reselects the complete table on its
+				// first poll and starts any hold on the driver's clock.
+				if let Some(now) = ctx.timers.try_now() {
+					s.reselect(carrying, now);
+				}
 				joined = Some(id);
 			} else if !may_take_over || !route.announce || s.taints_a_reader(&route) {
 				return Attach::Parked(existing.state.clone());
@@ -2377,6 +2439,7 @@ fn attach_source(
 		ctx.node.clone(),
 		ctx.rest.clone(),
 		ctx.tasks.clone(),
+		ctx.timers.clone(),
 	));
 
 	Attach::Ready(state, broadcast, 0)
@@ -2390,6 +2453,7 @@ async fn run_front(
 	node: Lock<OriginNode>,
 	rest: PathOwned,
 	tasks: Tasks,
+	slot: TimersSlot,
 ) {
 	enum Step {
 		Serve(Arc<str>, super::resume::Producer),
@@ -2399,7 +2463,19 @@ async fn run_front(
 		Closed,
 	}
 
-	let mut deadline = kio::time::Deadline::new();
+	// Resolving the slot here is safe: an async body runs only when first
+	// polled, all polling goes through the driver, and `Driver::run` installs
+	// the timers before the driver can poll anything.
+	let timers = slot.get();
+	let mut deadline = crate::runtime::Deadline::new(&timers);
+
+	// Sources may attach synchronously before `Driver::run` installs its clock.
+	// Start any resulting handover only now, on the same clock that will arm it.
+	let carrying = broadcast.demand().is_used();
+	if let Ok(mut s) = state.write() {
+		s.reselect(carrying, timers.now());
+	}
+	sync_front(&state, &broadcast, &node);
 
 	loop {
 		let step = {
@@ -2438,7 +2514,7 @@ async fn run_front(
 			Step::Serve(name, resume) => {
 				// Serve tasks self-terminate when the track completes or the
 				// front closes.
-				tasks.push(serve_track(state.clone(), name, resume));
+				tasks.push(serve_track(state.clone(), name, resume, slot.clone()));
 			}
 			Step::Reselect => {
 				// The costs or taints behind the table may have changed while
@@ -2449,7 +2525,7 @@ async fn run_front(
 				let carrying = broadcast.demand().is_used();
 				if let Ok(mut s) = state.write() {
 					s.excluded_changed = false;
-					s.reselect(carrying, kio::time::Instant::now());
+					s.reselect(carrying, timers.now());
 				}
 				sync_front(&state, &broadcast, &node);
 			}
@@ -2480,7 +2556,12 @@ async fn run_front(
 /// failover and re-splice from the next source at the first missing group; a
 /// source that fails while *closing* is a corpse to fail over past (its watcher
 /// is about to detach it), not a verdict on the track.
-async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resume: super::resume::Producer) {
+async fn serve_track(
+	state: kio::Producer<FrontState>,
+	name: Arc<str>,
+	mut resume: super::resume::Producer,
+	slot: TimersSlot,
+) {
 	enum Step {
 		Closed,
 		Splice(u64, broadcast::Consumer),
@@ -2516,8 +2597,11 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 	// refusal (ids are never reused, so this cannot wedge).
 	let mut dead: HashSet<u64> = HashSet::new();
 	// When the spliced segment stopped being read, starting the release countdown.
-	let mut idle_since: Option<kio::time::Instant> = None;
-	let mut deadline = kio::time::Deadline::new();
+	let mut idle_since: Option<Instant> = None;
+	// Only the driver polls this body, and `Driver::run` installs the slot
+	// before the driver can poll anything (see `run_front`).
+	let timers = slot.get();
+	let mut deadline = crate::runtime::Deadline::new(&timers);
 
 	loop {
 		let serving_id = serving.as_ref().map(|(id, _)| *id);
@@ -2556,7 +2640,7 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 		// segment's edge behind for the next takeover to splice above.
 		let used = resume.is_used();
 		idle_since = match (resume.is_spliced(), used) {
-			(true, false) => idle_since.or_else(|| Some(kio::time::Instant::now())),
+			(true, false) => idle_since.or_else(|| Some(timers.now())),
 			_ => None,
 		};
 		deadline.set(idle_since.and_then(|at| at.checked_add(TRACK_IDLE_LINGER)));
@@ -3687,7 +3771,7 @@ impl ProduceTest for Info {
 	fn produce(self) -> Producer {
 		let (producer, driver) = Producer::new(self);
 		if tokio::runtime::Handle::try_current().is_ok() {
-			web_async::spawn(driver);
+			web_async::spawn(driver.run(crate::runtime::tokio_test::Tokio::<()>::new()));
 		} else {
 			// A sync test: nothing polls the driver, and dropping it would tear
 			// the origin down, so leak it and rely on the synchronous half.
@@ -3934,7 +4018,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_blocks_the_stale_ring() {
 		let ids = [1u64, 2, 3];
-		let now = kio::time::Instant::now();
+		let now = crate::model::clock::now();
 
 		let moved: Vec<bool> = (0..3)
 			.map(|i| {
@@ -3966,7 +4050,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_blocks_a_forwarder_ring() {
 		let ids = [1u64, 2, 3];
-		let now = kio::time::Instant::now();
+		let now = crate::model::clock::now();
 
 		let moved: Vec<bool> = (0..3)
 			.map(|i| {
@@ -3992,7 +4076,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_expires() {
 		let peer = Origin::new(3).unwrap();
-		let start = kio::time::Instant::now();
+		let start = crate::model::clock::now();
 		let mut state = front_state(
 			origin_keyed("test", peer, false),
 			vec![upstream_route(10), sibling_route(peer, 4)],
@@ -4029,7 +4113,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_spread_is_stable() {
 		let peer = Origin::new(3).unwrap();
-		let now = kio::time::Instant::now();
+		let now = crate::model::clock::now();
 		let build = || {
 			front_state(
 				origin_keyed("test", peer, false),
@@ -4051,7 +4135,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_covers_a_drain() {
 		let peer = Origin::new(3).unwrap();
-		let now = kio::time::Instant::now();
+		let now = crate::model::clock::now();
 		let mut state = front_state(
 			origin_keyed("test", peer, false),
 			vec![upstream_route(broadcast::DRAIN_COST), sibling_route(peer, 4)],
@@ -4073,7 +4157,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_ignores_moves_that_cannot_cycle() {
 		let peer = Origin::new(3).unwrap();
-		let now = kio::time::Instant::now();
+		let now = crate::model::clock::now();
 		let keyed = || origin_keyed("test", peer, false);
 
 		// A local publish reaches no session, so nothing can depend on us through it.
@@ -4101,7 +4185,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_exempts_an_unannounced_incumbent() {
 		let peer = Origin::new(3).unwrap();
-		let now = kio::time::Instant::now();
+		let now = crate::model::clock::now();
 		let offline = upstream_route(10).with_announce(false);
 		let mut state = front_state(origin_keyed("test", peer, false), vec![offline, sibling_route(peer, 4)]);
 
@@ -4118,7 +4202,7 @@ mod tests {
 	/// session reconnecting": it is held like any other re-parent.
 	#[test]
 	fn test_handover_hold_covers_anonymous_relays() {
-		let now = kio::time::Instant::now();
+		let now = crate::model::clock::now();
 		let anon = |cold: u64| warm_route(&[90, 0], cold, SIBLING_LINK);
 		let mut state = front_state(Origin::new(7).unwrap(), vec![anon(10), anon(1)]);
 
@@ -4135,7 +4219,7 @@ mod tests {
 	/// hold at all, and two relays could cross-adopt through exactly that gap.
 	#[test]
 	fn test_handover_hold_is_keyed_to_the_target() {
-		let start = kio::time::Instant::now();
+		let start = crate::model::clock::now();
 		let relay_b = OriginList::try_from(vec![Origin::new(90).unwrap(), Origin::new(3).unwrap()]).unwrap();
 		let relay_c = OriginList::try_from(vec![Origin::new(90).unwrap(), Origin::new(4).unwrap()]).unwrap();
 
@@ -4187,7 +4271,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_covers_an_idle_front() {
 		let peer = Origin::new(3).unwrap();
-		let now = kio::time::Instant::now();
+		let now = crate::model::clock::now();
 		let mut state = front_state(
 			origin_keyed("test", peer, false),
 			vec![upstream_route(10), sibling_route(peer, 4)],
@@ -4204,7 +4288,7 @@ mod tests {
 	#[test]
 	fn test_handover_hold_covers_an_opaque_one_hop_peer() {
 		let peer = Origin::new(3).unwrap();
-		let now = kio::time::Instant::now();
+		let now = crate::model::clock::now();
 		let opaque = announce()
 			.with_hops(OriginList::try_from(vec![peer]).unwrap())
 			.with_cost(broadcast::Cost::UNKNOWN.charged(1));
@@ -4228,7 +4312,7 @@ mod tests {
 	fn test_a_tainted_incumbent_is_never_retained() {
 		let reader = Origin::new(5).unwrap();
 		let clean_peer = Origin::new(3).unwrap();
-		let now = kio::time::Instant::now();
+		let now = crate::model::clock::now();
 
 		// The incumbent runs through the reader and is cheaply rooted, so we outrank
 		// the clean alternative and would otherwise both veto and hold the move.
@@ -5157,11 +5241,51 @@ mod tests {
 		dynamic.assert_no_request();
 
 		// Run the driver: the unannounce lands and the track dispatches.
-		web_async::spawn(driver);
+		web_async::spawn(driver.run(crate::runtime::tokio_test::Tokio::<()>::new()));
 		settle().await;
 		announced.assert_next_none("cam");
 		let _producer = accept_track(&mut dynamic, "video").await;
 		drop(subscribing);
+	}
+
+	/// A handover discovered before the driver runs starts aging only after the
+	/// driver's clock is installed. An already-advanced virtual runtime must not
+	/// interpret a stamp from another clock as an expired hold.
+	#[test]
+	fn test_pre_run_handover_uses_driver_clock() {
+		let (origin, driver) = Producer::new(Info::new(Origin::new(7).unwrap()));
+		let consumer = origin.consume();
+		let publisher = Origin::new(90).unwrap();
+		let peer = Origin::new(3).unwrap();
+		let incumbent_hops = OriginList::try_from(vec![publisher]).unwrap();
+		let candidate_hops = OriginList::try_from(vec![publisher, peer]).unwrap();
+
+		let _incumbent = origin
+			.create_broadcast("cam", announce().with_hops(incumbent_hops.clone()).with_cost(10))
+			.unwrap();
+		let _candidate = origin
+			.create_broadcast("cam", forwarder_route(candidate_hops.clone(), 1))
+			.unwrap();
+		let watch = consumer.get_broadcast("cam").unwrap();
+		assert_eq!(watch.route().hops, incumbent_hops);
+
+		let timers = crate::runtime::Test::<crate::runtime::Never>::new();
+		timers.advance(HANDOVER_HOLD * 4);
+		let mut run = driver.run(timers.clone());
+		let _ = run.poll(&kio::Waiter::noop());
+		assert_eq!(
+			watch.route().hops,
+			incumbent_hops,
+			"installing an advanced clock must not expire a pre-run handover"
+		);
+
+		timers.advance(HANDOVER_HOLD * 2);
+		let _ = run.poll(&kio::Waiter::noop());
+		assert_eq!(
+			watch.route().hops,
+			candidate_hops,
+			"the hold must expire on the driver clock"
+		);
 	}
 
 	/// Dropping the driver tears the origin down: fronts abort with `Dropped`,
@@ -5240,7 +5364,7 @@ mod tests {
 		tokio::time::pause();
 
 		let (origin, driver) = Producer::new(Info::new(Origin::random()));
-		let driver = tokio::spawn(driver);
+		let driver = tokio::spawn(driver.run(crate::runtime::tokio_test::Tokio::<()>::new()));
 
 		let mut source = origin.create_broadcast("cam", announce()).unwrap();
 		settle().await;

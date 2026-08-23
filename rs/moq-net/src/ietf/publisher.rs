@@ -1889,7 +1889,7 @@ mod tests {
 	use super::*;
 	use crate::lite::test_transport::SinkSession;
 	use crate::model::ProduceTest;
-	use crate::runtime::Runtime as _;
+	use crate::runtime::Timers as _;
 	use futures::FutureExt;
 
 	/// The tokio-backed test runtime. Its transport parameter is phantom, so one

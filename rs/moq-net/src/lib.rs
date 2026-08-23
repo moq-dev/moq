@@ -58,16 +58,18 @@
 //! deterministic one for tests; see the [`runtime`] module.
 //!
 //! Origins follow the caller-driven pattern: [`origin::Producer::new`] returns a
-//! `(Producer, Driver)` pair, and the [`origin::Driver`] runs the origin's
-//! lifecycle work (route changes, track serving, teardown). Native tokio
-//! applications can use `moq_tokio::origin::spawn` instead of spawning the
+//! `(Producer, Driver)` pair, [`origin::Driver::run`] takes the [`Timers`] the
+//! origin's deadlines arm against, and the returned [`origin::Run`] future runs
+//! the lifecycle work (route changes, track serving, teardown). Native tokio
+//! applications can use `moq_tokio::origin::spawn` instead of running the
 //! driver by hand.
 //!
 //! The crate has no tokio dependency: every future is built on [`kio`]
 //! (plain [`std::task::Waker`] plumbing) and `futures`, so any executor can poll
 //! them, and the `poll_xxx` counterparts can be stepped synchronously with a
 //! [`kio::Waiter`]. Purely model-layer methods (tracks, groups, frames,
-//! origins) never touch a timer and need no [`Runtime`] at all.
+//! origins) never arm a timer and need no [`Runtime`] at all; they read the
+//! crate's ambient clock for passive stamps (arrival times, cache ticks).
 
 #![warn(missing_docs)]
 // The browser transport is `!Send`, so on wasm the shared state behind these `Arc`s is
@@ -100,7 +102,7 @@ pub use error::*;
 pub use lite::Role;
 pub use model::*;
 pub use path::*;
-pub use runtime::Runtime;
+pub use runtime::{Runtime, Timers};
 pub use server::*;
 pub use session::*;
 pub use version::*;

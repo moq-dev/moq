@@ -38,5 +38,6 @@ tracing = "0.1"
 url = "2"
 
 [dev-dependencies]
+moq-tokio = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }

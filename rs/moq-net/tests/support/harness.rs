@@ -37,8 +37,9 @@ impl<S> Default for TokioRuntime<S> {
 	}
 }
 
-impl<S: moq_net::transport::poll::Session> moq_net::runtime::Runtime for TokioRuntime<S> {
-	type Transport = S;
+// Unbounded: timers don't involve the transport, so origin drivers can borrow
+// a transportless handle (`TokioRuntime::<()>::new()`).
+impl<S> moq_net::runtime::Timers for TokioRuntime<S> {
 	type Timer = TokioTimer;
 
 	fn timer(&self) -> Self::Timer {
@@ -48,6 +49,10 @@ impl<S: moq_net::transport::poll::Session> moq_net::runtime::Runtime for TokioRu
 	fn now(&self) -> moq_net::runtime::Instant {
 		tokio::time::Instant::now().into_std()
 	}
+}
+
+impl<S: moq_net::transport::poll::Session> moq_net::runtime::Runtime for TokioRuntime<S> {
+	type Transport = S;
 
 	fn spawn(&self, machine: moq_net::runtime::Machine<Self>) {
 		tokio::spawn(machine);
