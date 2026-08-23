@@ -97,6 +97,9 @@ pub struct MoqVideoEncoderInput {
 #[derive(uniffi::Record)]
 pub struct MoqVideoEncoderOutput {
 	pub codec: MoqVideoCodec,
+	/// Track name. `None` derives a unique name from the codec.
+	#[uniffi(default = None)]
+	pub track: Option<String>,
 	/// Target bitrate in bits per second. `None` derives one from the resolution
 	/// and framerate.
 	#[uniffi(default = None)]
@@ -212,8 +215,34 @@ pub struct MoqVideoProducer {
 	inner: std::sync::Mutex<Option<VideoProducer>>,
 }
 
+impl MoqVideoProducer {
+	fn demand(&self) -> Result<moq_net::track::Demand, MoqError> {
+		let guard = self.inner.lock().unwrap();
+		let producer = guard.as_ref().ok_or(MoqError::Closed)?;
+		Ok(producer.producer.demand())
+	}
+}
+
 #[uniffi::export]
 impl MoqVideoProducer {
+	/// Return the name of this video track.
+	pub fn name(&self) -> Result<String, MoqError> {
+		let _guard = crate::ffi::enter();
+		Ok(self.demand()?.name().to_string())
+	}
+
+	/// Wait until this video track has at least one active consumer.
+	pub async fn used(&self) -> Result<(), MoqError> {
+		let demand = self.demand()?;
+		crate::ffi::detached(async move { demand.used().await }).await
+	}
+
+	/// Wait until this video track has no active consumers.
+	pub async fn unused(&self) -> Result<(), MoqError> {
+		let demand = self.demand()?;
+		crate::ffi::detached(async move { demand.unused().await }).await
+	}
+
 	/// Encode and publish one raw frame.
 	///
 	/// A backend that pipelines publishes an earlier frame's output here, so a
@@ -279,10 +308,10 @@ impl MoqBroadcastProducer {
 	/// it.
 	///
 	/// The encoder opens here, so an unsupported codec, resolution, or backend
-	/// fails now rather than on the first frame. The track is named after the
-	/// codec (`.avc3` / `.hev1`) and its catalog rendition is published
-	/// immediately, read out of the encoder rather than guessed, so a subscriber
-	/// can find the track before a frame is written to it.
+	/// fails now rather than on the first frame. [`MoqVideoEncoderOutput::track`]
+	/// chooses the track name; `None` derives one from the codec. The catalog
+	/// rendition is published immediately so a subscriber can discover the track
+	/// before a frame is written to it.
 	pub fn publish_video(
 		&self,
 		input: MoqVideoEncoderInput,
@@ -303,12 +332,20 @@ impl MoqBroadcastProducer {
 		// closes its encoder before this one opens, so only one codec session is live.
 		let rendition = block_on(config.probe())?;
 		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
-		let producer = self.with_state(|state| {
-			Ok(moq_video::encode::Producer::new(
+		let producer = self.with_state(|state| match output.track {
+			Some(name) => {
+				let track = state.broadcast.create_track(name, state.catalog.track_info())?;
+				Ok(moq_video::encode::Producer::with_track(
+					track,
+					state.catalog.clone(),
+					rendition,
+				)?)
+			}
+			None => Ok(moq_video::encode::Producer::new(
 				state.broadcast.clone(),
 				state.catalog.clone(),
 				rendition,
-			)?)
+			)?),
 		})?;
 
 		Ok(Arc::new(MoqVideoProducer {

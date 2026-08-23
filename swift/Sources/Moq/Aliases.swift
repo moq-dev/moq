@@ -46,7 +46,7 @@ public typealias AudioCodec = MoqFFI.MoqAudioCodec
 public typealias VideoFrame = MoqFFI.MoqVideoFrame
 /// The pixel layout, resolution, and framerate written to a `VideoProducer`.
 public typealias VideoEncoderInput = MoqFFI.MoqVideoEncoderInput
-/// The encoder-side config for a published video track: codec, bitrate,
+/// The encoder-side config for a published video track: name, codec, bitrate,
 /// keyframe interval, and backend preference.
 public typealias VideoEncoderOutput = MoqFFI.MoqVideoEncoderOutput
 /// A raw pixel layout (I420 or RGBA) fed to a `VideoProducer`.

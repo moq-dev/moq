@@ -220,6 +220,7 @@ If a producer is collected without `Finish()`, the underlying library logs a war
 `PublishMedia` takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `PublishVideo` / `PublishAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
 
 ```go
+track := "camera"
 video, err := broadcast.PublishVideo(
     moq.VideoEncoderInput{
         Format:    moq.VideoPixelFormatRgba,
@@ -229,6 +230,7 @@ video, err := broadcast.PublishVideo(
     },
     moq.VideoEncoderOutput{
         Codec: moq.VideoCodecH264,
+        Track: &track,
         Kind:  moq.AutoEncoder(),
     },
 )
@@ -243,7 +245,7 @@ video.Finish()
 
 `AutoEncoder()` prefers a hardware encoder and falls back to software; `SoftwareEncoder()`, `HardwareEncoder()`, and `NamedEncoder("videotoolbox")` pin the choice. The bindings compile VideoToolbox (macOS), Media Foundation (Windows), NVENC (Linux, NVIDIA), and openh264 (software, everywhere). A hardware encoder that is compiled in but can't open, because there is no GPU or because its driver libraries aren't on the loader path, logs a warning naming the reason and falls through to software, so a host that quietly encodes on the CPU says so. `SetBitrate` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
 
-The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition is published immediately, read out of the encoder itself, so subscribers discover it through the catalog rather than a name you pick, and can find it before the first frame exists. `Cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `Gop` frames on its own, and each of those cuts a group.
+Set `Track` to choose the track name; omit it to derive one from the codec (`.avc3` / `.hev1`). The catalog rendition is published immediately so subscribers can discover it before the first frame exists. `Used(ctx)` and `Unused(ctx)` monitor subscriber demand, and `Cut()` starts a new group at the next frame.
 
 ## Raw Track Controls
 

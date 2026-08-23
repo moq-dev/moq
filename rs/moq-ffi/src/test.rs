@@ -1062,6 +1062,7 @@ async fn video_raw_publish_consume() {
 			},
 			MoqVideoEncoderOutput {
 				codec: MoqVideoCodec::H264,
+				track: Some("camera".into()),
 				bitrate: None,
 				gop: None,
 				// Software so the test is deterministic everywhere: `Auto` would
@@ -1070,9 +1071,21 @@ async fn video_raw_publish_consume() {
 			},
 		)
 		.unwrap();
+	assert_eq!(video.name().unwrap(), "camera");
+	let local_consumer = broadcast.consume().unwrap();
+	let demand_consumer = local_consumer.subscribe_track("camera".into(), None).await.unwrap();
+	tokio::time::timeout(TIMEOUT, video.used())
+		.await
+		.expect("timed out waiting for video demand")
+		.unwrap();
+	drop(demand_consumer);
+	tokio::time::timeout(TIMEOUT, video.unused())
+		.await
+		.expect("timed out waiting for video demand to clear")
+		.unwrap();
 
-	// The catalog rendition only exists once the importer has parsed the codec
-	// config out of an encoded keyframe, so write before subscribing.
+	// Seed the track before subscribing so the consumer below has encoded media
+	// waiting at the live edge as soon as it joins.
 	video.cut().unwrap();
 	let rgba = vec![0x80u8; 320 * 240 * 4];
 	for i in 0..5u64 {
@@ -1102,7 +1115,7 @@ async fn video_raw_publish_consume() {
 
 	assert_eq!(catalog.video.len(), 1);
 	let (track_name, rendition) = catalog.video.iter().next().unwrap();
-	assert!(track_name.ends_with(".avc3"), "track name: {track_name}");
+	assert_eq!(track_name, "camera");
 	assert!(
 		rendition.codec.starts_with("avc3."),
 		"codec should be avc3, got {}",
@@ -1165,6 +1178,7 @@ async fn video_raw_publish_from_many_threads() {
 			},
 			MoqVideoEncoderOutput {
 				codec: MoqVideoCodec::H264,
+				track: None,
 				// An explicit ceiling so the retunes below stay under the rate the
 				// encoder opened at, which openh264 requires.
 				bitrate: Some(1_000_000),
@@ -1239,6 +1253,7 @@ async fn video_raw_publish_rejects_bad_frames() {
 	};
 	let output = || MoqVideoEncoderOutput {
 		codec: MoqVideoCodec::H264,
+		track: None,
 		bitrate: None,
 		gop: None,
 		kind: MoqVideoEncoderKind::Software,

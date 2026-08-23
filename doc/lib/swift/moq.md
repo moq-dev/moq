@@ -289,7 +289,7 @@ The served broadcast is not announced. It only resolves consumers that call `req
 ```swift
 let video = try broadcast.publishVideo(
     input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: 30),
-    output: VideoEncoderOutput(codec: .h264, bitrate: nil, gop: nil, kind: .auto)
+    output: VideoEncoderOutput(codec: .h264, track: "camera", bitrate: nil, gop: nil, kind: .auto)
 )
 
 try video.write(VideoFrame(timestampUs: ptsUs, data: rgba))
@@ -298,7 +298,7 @@ try video.finish()
 
 `kind: .auto` prefers a hardware encoder and falls back to software; `.software`, `.hardware`, and `.named(name: "videotoolbox")` pin the choice. The bindings compile VideoToolbox (macOS), Media Foundation (Windows), NVENC (Linux, NVIDIA), and openh264 (software, everywhere). A hardware encoder that is compiled in but can't open, because there is no GPU or because its driver libraries aren't on the loader path, logs a warning naming the reason and falls through to software, so a host that quietly encodes on the CPU says so. `setBitrate(_:)` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
 
-The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition is published immediately, read out of the encoder itself, so subscribers discover it through the catalog rather than a name you pick, and can find it before the first frame exists. `cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group.
+Set `track` to choose the track name; omit it to derive one from the codec (`.avc3` / `.hev1`). The catalog rendition is published immediately so subscribers can discover it before the first frame exists. `await video.used()` and `await video.unused()` monitor subscriber demand, and `cut()` starts a new group at the next frame.
 
 ## Cancellation
 

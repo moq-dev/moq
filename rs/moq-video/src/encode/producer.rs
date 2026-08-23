@@ -99,21 +99,37 @@ impl<E: CatalogExt> Producer<E> {
 		catalog: moq_mux::catalog::Producer<E>,
 		rendition: hang::catalog::VideoConfig,
 	) -> Result<Self, Error> {
+		let suffix = match &rendition.codec {
+			hang::catalog::VideoCodec::H264(_) => ".avc3",
+			hang::catalog::VideoCodec::H265(_) => ".hev1",
+			other => {
+				return Err(Error::Codec(anyhow::anyhow!(
+					"{other} is not a codec this producer can publish"
+				)));
+			}
+		};
+		let track = broadcast.unique_track(suffix, catalog.track_info())?;
+		Self::with_track(track, catalog, rendition)
+	}
+
+	/// Publish `rendition` on an existing track, registering it in `catalog`.
+	///
+	/// Use this when the caller owns the track name. [`new`](Self::new) derives a
+	/// unique name from the codec instead.
+	pub fn with_track(
+		track: moq_net::track::Producer,
+		catalog: moq_mux::catalog::Producer<E>,
+		rendition: hang::catalog::VideoConfig,
+	) -> Result<Self, Error> {
 		let codecs = match &rendition.codec {
-			hang::catalog::VideoCodec::H264(_) => {
-				let track = broadcast.unique_track(".avc3", catalog.track_info())?;
-				Codecs::H264 {
-					split: moq_mux::codec::h264::Split::new(),
-					import: moq_mux::codec::h264::Import::new(track, catalog.reserve(), rendition_hint(rendition))?,
-				}
-			}
-			hang::catalog::VideoCodec::H265(_) => {
-				let track = broadcast.unique_track(".hev1", catalog.track_info())?;
-				Codecs::H265 {
-					split: moq_mux::codec::h265::Split::new(),
-					import: moq_mux::codec::h265::Import::new(track, catalog.reserve(), rendition_hint(rendition))?,
-				}
-			}
+			hang::catalog::VideoCodec::H264(_) => Codecs::H264 {
+				split: moq_mux::codec::h264::Split::new(),
+				import: moq_mux::codec::h264::Import::new(track, catalog.reserve(), rendition_hint(rendition))?,
+			},
+			hang::catalog::VideoCodec::H265(_) => Codecs::H265 {
+				split: moq_mux::codec::h265::Split::new(),
+				import: moq_mux::codec::h265::Import::new(track, catalog.reserve(), rendition_hint(rendition))?,
+			},
 			// Unreachable via `Config::probe`, which only encodes what `Codec` covers.
 			other => {
 				return Err(Error::Codec(anyhow::anyhow!(

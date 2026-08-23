@@ -235,10 +235,9 @@ public final class BroadcastProducer: Sendable {
     /// Open a raw-video track. Pixels written via `VideoProducer.write` are
     /// encoded (H.264 or H.265) inside the FFI boundary per `input`/`output`.
     ///
-    /// The track is named after the codec (`.avc3` / `.hev1`) and its catalog
-    /// rendition is published immediately, read out of the encoder itself, so
-    /// subscribers discover it through the catalog rather than a name you pick,
-    /// and can find it before the first frame exists.
+    /// Set `output.track` to choose the track name; otherwise one is derived from
+    /// the codec (`.avc3` / `.hev1`). The catalog rendition is published
+    /// immediately so subscribers can discover it before the first frame exists.
     public func publishVideo(input: VideoEncoderInput, output: VideoEncoderOutput) throws -> VideoProducer {
         VideoProducer(try ffi.publishVideo(input: input, output: output))
     }

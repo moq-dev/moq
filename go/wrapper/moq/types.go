@@ -54,7 +54,7 @@ type (
 	VideoPixelFormat = ffi.MoqVideoPixelFormat
 	// VideoEncoderInput declares the pixel layout, resolution, and framerate of frames written to a video producer.
 	VideoEncoderInput = ffi.MoqVideoEncoderInput
-	// VideoEncoderOutput configures the video encoder: codec, optional bitrate and keyframe interval, and backend preference.
+	// VideoEncoderOutput configures the video track name, codec, bitrate, keyframe interval, and backend preference.
 	VideoEncoderOutput = ffi.MoqVideoEncoderOutput
 	// VideoFrame is one raw video frame: pixels in the configured layout plus a presentation timestamp in microseconds.
 	VideoFrame = ffi.MoqVideoFrame

@@ -126,10 +126,9 @@ func (b *BroadcastProducer) PublishAudio(name string, input AudioEncoderInput, o
 // PublishVideo publishes a raw-video track with an in-process H.264/H.265
 // encoder.
 //
-// The track is named after the codec (.avc3 / .hev1) and its catalog rendition
-// is published immediately, read out of the encoder itself, so subscribers
-// discover it through the catalog rather than a name you pick, and can find it
-// before the first frame exists.
+// Set output.Track to choose the track name; otherwise one is derived from the
+// codec (.avc3 / .hev1). The catalog rendition is published immediately so
+// subscribers can discover it before the first frame exists.
 func (b *BroadcastProducer) PublishVideo(input VideoEncoderInput, output VideoEncoderOutput) (*VideoProducer, error) {
 	inner, err := b.inner.PublishVideo(input, output)
 	if err != nil {
@@ -476,6 +475,21 @@ func (a *AudioProducer) Finish() error {
 // the way out.
 type VideoProducer struct {
 	inner *ffi.MoqVideoProducer
+}
+
+// Name returns the video track's name.
+func (v *VideoProducer) Name() (string, error) {
+	return v.inner.Name()
+}
+
+// Used blocks until the video track has at least one active subscriber.
+func (v *VideoProducer) Used(ctx context.Context) error {
+	return runErr(ctx, nil, v.inner.Used)
+}
+
+// Unused blocks until the video track has no active subscribers.
+func (v *VideoProducer) Unused(ctx context.Context) error {
+	return runErr(ctx, nil, v.inner.Unused)
 }
 
 // Write encodes and publishes one frame in the configured input format. A

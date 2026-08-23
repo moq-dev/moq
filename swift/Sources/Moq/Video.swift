@@ -10,6 +10,21 @@ public final class VideoProducer: Sendable {
         self.ffi = ffi
     }
 
+    /// The video track's name.
+    public var name: String {
+        get throws { try ffi.name() }
+    }
+
+    /// Suspend until the video track has at least one active consumer.
+    public func used() async throws {
+        try await ffi.used()
+    }
+
+    /// Suspend until the video track has no active consumers.
+    public func unused() async throws {
+        try await ffi.unused()
+    }
+
     /// Encode and publish one raw frame.
     ///
     /// A hardware encoder pipelines, so a call that puts nothing on the wire is
