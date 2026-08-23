@@ -1,17 +1,10 @@
-/** Tracks decoder callbacks discarded after each codec configuration. */
+/** Tracks decoder callbacks discarded during initial playback setup. */
 export class Warmup {
-	#frames: number;
 	#remaining: number;
 
-	/** Create a warm-up window containing `frames` decoder callbacks. */
-	constructor(frames: number) {
-		this.#frames = frames;
-		this.#remaining = frames;
-	}
-
-	/** Restart the warm-up window for a fresh codec epoch. */
-	reset(): void {
-		this.#remaining = this.#frames;
+	/** Create a warm-up window containing `callbacks` decoder callbacks. */
+	constructor(callbacks: number) {
+		this.#remaining = callbacks;
 	}
 
 	/** Consume one callback and report whether it belongs to the warm-up window. */

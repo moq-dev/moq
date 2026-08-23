@@ -339,7 +339,6 @@ export class Decoder {
 				const next = await consumer.next();
 				if (!next) break;
 				if (this.#onNext(next)) {
-					warmup.reset();
 					decoder.reset();
 					decoder.configure(decoderConfig);
 				}
