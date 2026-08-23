@@ -444,6 +444,11 @@ bench-udp *args:
     cargo bench -p moq-uring --bench udp_tokio -- {{ args }}
     cargo bench -p moq-uring --bench udp_uring -- {{ args }}
 
+# Measure a raw-quiche echo through the io_uring worker, ablating receive
+# batching, GRO, and GSO one at a time. Linux 6.12+ (skips loudly otherwise).
+bench-echo *args:
+    cargo bench -p moq-uring --bench echo_quiche -- {{ args }}
+
 # Sample a process's CPU/memory/context switches on this host (run it where the
 # relay runs; it only reads /proc). E.g. `just rs bench-host --name moq-relay`.
 bench-host *args:

@@ -1,53 +1,46 @@
 # moq-uring
 
-Experimental Linux io\_uring support for the native MoQ stack. The crate does not
-expose a public API yet. Its disposable benchmarks validate the UDP primitives
-needed by a QUIC transport before those primitives become production
-abstractions.
+Experimental Linux io\_uring support for the native MoQ stack: a
+thread-per-core `Worker` that owns a `SINGLE_ISSUER | DEFER_TASKRUN |
+COOP_TASKRUN` ring, a userspace timer heap, a local (`!Send`) task set, and
+the UDP sockets bound through it.
 
-## Tokio/epoll baseline
+- **Receive**: one persistent multishot `recvmsg` per socket, fed from a
+  registered provided-buffer ring the kernel consumes incrementally
+  (`IOU_PBUF_RING_INC`), with `UDP_GRO` coalescing. Received packets borrow
+  the pool and hand the space back on drop, which is also the receive-side
+  backpressure.
+- **Send**: `sendmsg` with an explicit `UDP_SEGMENT` control message per call,
+  staged in a fixed pool of buffers owned by id and released on completion
+  (the shape a later `SENDMSG_ZC` needs).
+- **Timers**: a heap the worker sweeps; the earliest deadline rides
+  `io_uring_enter` as an absolute timeout. Zero timeout SQEs. The worker's
+  `Handle` implements `moq_net::Timers`.
+- **Parking**: a futex word per worker. Remote wakes are an atomic store, plus
+  one `futex(2)` wake only while the worker is actually parked (a `FUTEX_WAIT`
+  SQE armed on the word).
 
-`udp_tokio` runs a Tokio current-thread runtime, which uses epoll on Linux. It
-transfers fixed bursts between connected loopback sockets and independently
-toggles:
+Requires **Linux 6.12**; `Worker::new` refuses older kernels with a legible
+error rather than degrading (note that default container seccomp policies
+block io\_uring entirely). There is no fallback here: older kernels keep using
+the tokio stack.
 
-- one `recvmsg` per receive operation or batched `recvmmsg`;
-- `UDP_GRO` receive coalescing;
-- `sendmmsg` without GSO or `sendmsg` with a `UDP_SEGMENT` control message for GSO.
+## Validation
 
-## io\_uring comparison
+`tests/echo.rs` runs a raw [quiche](https://github.com/cloudflare/quiche) echo
+over the worker: handshake, half a megabyte each way, timers driven by
+quiche's own timeout. It skips (loudly) below the kernel floor, which includes
+GitHub-hosted CI runners.
 
-`udp_uring` uses the same payload, burst, GRO, and GSO settings. Without GSO it
-submits 32 `IORING_OP_SENDMSG` entries as one batch. With GSO it submits one
-`IORING_OP_SENDMSG` carrying a `UDP_SEGMENT` control message. Receive uses one
-persistent multishot `IORING_OP_RECVMSG` request and a registered provided-buffer
-ring.
+## Benchmarks
 
-Each completion is parsed with `RecvMsgOut`, including the `UDP_GRO` control
-message, so the logical datagram count is checked rather than inferred from the
-buffer size. The benchmark fails immediately if the kernel rejects the ring,
-GSO, GRO, or any byte and datagram count.
-
-Run either backend, or run both with identical Criterion arguments:
+`udp_tokio` and `udp_uring` are the disposable syscall-level matrices from the
+first spike (recv batching x GRO x GSO, epoll vs io\_uring); see git history
+for their methodology. `echo_quiche` is the ablation matrix over the real
+worker: the same quiche echo with receive batching, GRO, and GSO toggled one
+at a time.
 
 ```bash
-just rs bench-udp-tokio
-just rs bench-udp-uring
 just rs bench-udp --sample-size 20 --measurement-time 2 --warm-up-time 1
+just rs bench-echo
 ```
-
-Every configuration moves the same number of 1280-byte datagrams in 32-packet
-bursts. The receiver socket reserves four bursts of memory and drains each burst
-before the next one. A one-second deadline turns any remaining packet loss into
-an explicit benchmark failure instead of an indefinite wait.
-
-The complete io\_uring benchmark requires Linux 6.1 or newer. Multishot
-`recvmsg` arrived in Linux 6.0, registered provided-buffer rings in Linux 5.19,
-and the deferred-task-run setup flag in Linux 6.1. The ring uses that flag and
-the single-issuer flag because the benchmark and the intended relay shard both
-have one thread driving each ring. It does not use `SQPOLL`.
-
-This is deliberately below quiche. It establishes the syscall and completion
-ceiling, but does not decide whether the relay is faster. That requires the same
-matrix around quiche at a fixed offered load, reporting CPU per message and
-latency on the benchmark rig rather than loopback throughput alone.

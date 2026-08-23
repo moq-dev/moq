@@ -1,0 +1,85 @@
+//! State shared between the [`crate::Worker`] loop and the handles it mints.
+//!
+//! Everything here is single-threaded (`Rc`, `RefCell`); the only cross-thread
+//! surface is [`crate::park::Unpark`]. Handles stage SQEs straight into the
+//! ring (submitting inline when the queue is full), while completions are only
+//! reaped by the worker loop.
+
+use std::cell::{Cell, RefCell};
+use std::io;
+use std::rc::Rc;
+use std::task::Poll;
+
+use io_uring::{IoUring, squeue};
+
+use crate::park::Unpark;
+use crate::{timer, udp};
+
+/// A spawned task: the plain poll-closure shape `kio::Tasks` drives.
+pub(crate) type Task = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;
+
+/// A completion, copied out of the CQ so dispatch can borrow the ring again.
+#[derive(Clone, Copy)]
+pub(crate) struct Cqe {
+	pub user_data: u64,
+	pub result: i32,
+	pub flags: u32,
+}
+
+/// An in-flight operation, keyed by its slab index (the SQE `user_data`).
+///
+/// The entry owns everything the kernel may still touch: a recv keeps its
+/// socket (and so its provided buffers) alive, a send keeps its header and
+/// staging buffer lease. An entry is only removed once its terminal CQE
+/// arrives, which is what makes teardown safe.
+pub(crate) enum Op {
+	/// An armed (possibly multishot) receive on a socket.
+	Recv {
+		sock: Rc<udp::SockShared>,
+		/// Oneshot mode: the receive owns its own header and buffer claim.
+		one: Option<Box<udp::OneshotRecv>>,
+	},
+	/// An in-flight `sendmsg`.
+	Send(udp::SendOp),
+	/// The armed `FUTEX_WAIT` on the park word.
+	FutexWait,
+	/// A fire-and-forget cancellation; only its own CQE to consume.
+	Cancel,
+}
+
+/// The worker's shared core, `Rc`ed into every handle.
+pub(crate) struct Shared {
+	pub ring: RefCell<IoUring>,
+	pub ops: RefCell<slab::Slab<Op>>,
+	/// Its own `Rc` so a [`crate::Timer`] holds just the heap, not the ring.
+	pub timers: Rc<RefCell<timer::Heap>>,
+	/// Tasks handed to [`crate::Handle::spawn`], drained by the worker loop.
+	pub spawns: RefCell<Vec<Task>>,
+	pub unpark: std::sync::Arc<Unpark>,
+	/// The next provided-buffer group id; one per socket.
+	pub next_bgid: Cell<u16>,
+}
+
+impl Shared {
+	/// Stage one SQE, submitting inline to make room when the queue is full.
+	pub fn push(&self, entry: &squeue::Entry) -> io::Result<()> {
+		let mut ring = self.ring.borrow_mut();
+		loop {
+			{
+				let mut sq = ring.submission();
+				// SAFETY: every entry's referenced memory (headers, buffers,
+				// the futex word) is owned by the matching `Op` slab entry or
+				// by `Shared` itself, and stays alive until the terminal CQE.
+				if unsafe { sq.push(entry) }.is_ok() {
+					return Ok(());
+				}
+			}
+			ring.submit()?;
+		}
+	}
+
+	/// Insert an op and return its `user_data` key.
+	pub fn insert(&self, op: Op) -> u64 {
+		self.ops.borrow_mut().insert(op) as u64
+	}
+}

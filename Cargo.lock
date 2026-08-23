@@ -5191,10 +5191,19 @@ dependencies = [
  "anyhow",
  "criterion",
  "io-uring",
+ "kio 0.5.6",
  "libc",
+ "moq-net",
  "nix",
  "noq-udp",
+ "quiche",
+ "rand 0.10.2",
+ "rcgen",
+ "slab",
+ "tempfile",
+ "thiserror 2.0.20",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

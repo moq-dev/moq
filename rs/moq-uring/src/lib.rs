@@ -1,4 +1,28 @@
-//! Experimental Linux io_uring support for Media over QUIC.
+//! A thread-per-core io_uring worker for the native MoQ stack.
 //!
-//! The crate currently contains performance experiments only. Its public API will be introduced
-//! after the socket, timer, cancellation, and executor boundaries have been validated together.
+//! One [`Worker`] per pinned thread. It owns a `SINGLE_ISSUER | DEFER_TASKRUN |
+//! COOP_TASKRUN` ring, a userspace timer heap, a local task set, and the UDP
+//! sockets bound through it. The caller owns the thread loop: drive everything
+//! with [`Worker::block_on`], spawn extra `!Send` tasks through [`Handle`], and
+//! wake the worker from other threads through any [`std::task::Waker`] it hands
+//! out (a futex word, no ring or syscall needed while the worker is awake).
+//!
+//! UDP is the point: [`udp::Socket`] receives through one multishot `recvmsg`
+//! with a registered provided-buffer ring (incrementally consumed, `UDP_GRO`
+//! coalesced) and sends with an explicit `UDP_SEGMENT` control message per
+//! `sendmsg` from a fixed pool of staging buffers.
+//!
+//! Requires Linux 6.12; [`Worker::new`] refuses older kernels with a legible
+//! error instead of degrading. The crate compiles to nothing off Linux.
+#![cfg(target_os = "linux")]
+
+mod error;
+mod park;
+mod shared;
+mod timer;
+pub mod udp;
+mod worker;
+
+pub use error::Error;
+pub use timer::Timer;
+pub use worker::{Config, Handle, Worker};

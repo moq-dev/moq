@@ -14,6 +14,15 @@ categories = ["asynchronous", "network-programming", "os::linux-apis"]
 
 publish = false
 
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { workspace = true }
+kio = { workspace = true }
+libc = { workspace = true }
+moq-net = { workspace = true }
+slab = "0.4"
+thiserror = "2"
+tracing = "0.1"
+
 [dev-dependencies]
 anyhow = "1"
 criterion = { workspace = true }
@@ -24,6 +33,11 @@ io-uring = { workspace = true }
 libc = { workspace = true }
 nix = { workspace = true }
 noq-udp = { workspace = true }
+quiche = "0.29"
+rand = "0.10"
+rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
+tempfile = { workspace = true }
+tracing = "0.1"
 
 [[bench]]
 name = "udp_tokio"
@@ -31,4 +45,8 @@ harness = false
 
 [[bench]]
 name = "udp_uring"
+harness = false
+
+[[bench]]
+name = "echo_quiche"
 harness = false
