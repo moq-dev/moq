@@ -218,7 +218,7 @@ impl BroadcastConfig for hang::catalog::TextConfig {
 pub(crate) fn produce_origin() -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::Origin::random().into());
 	if tokio::runtime::Handle::try_current().is_ok() {
-		tokio::spawn(driver.run(test_timers::Timers));
+		tokio::spawn(driver.run(moq_tokio::runtime::Runtime::<()>::new()));
 	} else {
 		// A sync test: nothing polls the driver, and dropping it would tear
 		// the origin down, so leak it and rely on the synchronous half.
@@ -478,57 +478,5 @@ mod tests {
 			.subscribe_track(Some(&rel), "video")
 			.await
 			.expect("dot should resolve to the empty root broadcast");
-	}
-}
-
-/// Tokio-backed [`moq_net::Timers`] for tests that run an origin driver.
-#[cfg(test)]
-pub(crate) mod test_timers {
-	use std::{pin::Pin, task::Poll};
-
-	/// Hands out tokio sleeps; `now` reads tokio's (pausable) clock.
-	#[derive(Clone, Copy)]
-	pub(crate) struct Timers;
-
-	impl moq_net::Timers for Timers {
-		type Timer = Timer;
-
-		fn timer(&self) -> Self::Timer {
-			Timer { at: None, sleep: None }
-		}
-
-		fn now(&self) -> moq_net::runtime::Instant {
-			tokio::time::Instant::now().into_std()
-		}
-	}
-
-	/// A tokio sleep driven through the [`moq_net::runtime::Timer`] contract.
-	pub(crate) struct Timer {
-		at: Option<moq_net::runtime::Instant>,
-		// Allocated on the first poll after arming: construction panics without
-		// a live tokio time driver, and only the poll runs inside the runtime.
-		sleep: Option<Pin<Box<tokio::time::Sleep>>>,
-	}
-
-	impl moq_net::runtime::Timer for Timer {
-		fn set(&mut self, at: Option<moq_net::runtime::Instant>) {
-			self.at = at;
-			// Reuse the allocation when there is one; `reset` also clears the
-			// elapsed state.
-			if let (Some(at), Some(sleep)) = (at, &mut self.sleep) {
-				sleep.as_mut().reset(tokio::time::Instant::from_std(at));
-			}
-		}
-
-		fn poll(&mut self, waiter: &moq_net::kio::Waiter) -> Poll<()> {
-			let Some(at) = self.at else { return Poll::Pending };
-			let sleep = self
-				.sleep
-				.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(at))));
-			if sleep.is_elapsed() {
-				return Poll::Ready(());
-			}
-			waiter.poll_future(sleep.as_mut())
-		}
 	}
 }

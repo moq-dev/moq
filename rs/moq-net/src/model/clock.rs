@@ -10,9 +10,8 @@
 //! offset. (Crates like `mock_instant` do this by substituting the `Instant`
 //! type; keeping std's type is the point, so this stays hand-rolled.)
 //!
-//! The paused state is process-global, which is safe because tests run under
-//! nextest, one process per test. Under plain `cargo test` (shared process)
-//! concurrent tests would race the offset; don't do that.
+//! The paused state is thread-local so the standard test harness can run tests
+//! concurrently in one process without one test aging another's model.
 
 /// The current instant on the model's clock.
 #[cfg(not(test))]
@@ -20,27 +19,30 @@ pub(crate) fn now() -> crate::runtime::Instant {
 	crate::runtime::Instant::now()
 }
 
-/// The current instant on the model's clock: frozen at process start until
+/// The current instant on the model's clock: frozen at test-thread start until
 /// [`advance`] moves it.
 #[cfg(test)]
 pub(crate) fn now() -> crate::runtime::Instant {
-	*base() + std::time::Duration::from_nanos(OFFSET_NANOS.load(std::sync::atomic::Ordering::Relaxed))
+	BASE.with(|base| *base) + OFFSET.with(std::cell::Cell::get)
 }
 
 /// Move the model's clock forward. Test-only; production time moves itself.
 #[cfg(test)]
 pub(crate) fn advance(duration: std::time::Duration) {
-	let nanos = u64::try_from(duration.as_nanos()).expect("advance overflows the test clock");
-	OFFSET_NANOS.fetch_add(nanos, std::sync::atomic::Ordering::Relaxed);
+	OFFSET.with(|offset| {
+		offset.set(
+			offset
+				.get()
+				.checked_add(duration)
+				.expect("advance overflows the test clock"),
+		);
+	});
 }
 
 #[cfg(test)]
-static OFFSET_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-#[cfg(test)]
-fn base() -> &'static crate::runtime::Instant {
-	static BASE: std::sync::OnceLock<crate::runtime::Instant> = std::sync::OnceLock::new();
-	BASE.get_or_init(crate::runtime::Instant::now)
+thread_local! {
+	static BASE: crate::runtime::Instant = crate::runtime::Instant::now();
+	static OFFSET: std::cell::Cell<std::time::Duration> = const { std::cell::Cell::new(std::time::Duration::ZERO) };
 }
 
 #[cfg(all(test, not(loom)))]
@@ -55,5 +57,19 @@ mod tests {
 
 		super::advance(Duration::from_secs(3));
 		assert_eq!(super::now(), a + Duration::from_secs(3));
+	}
+
+	#[test]
+	fn advances_are_isolated_between_threads() {
+		let before = super::now();
+		std::thread::spawn(|| {
+			let before = super::now();
+			super::advance(Duration::from_secs(7));
+			assert_eq!(super::now(), before + Duration::from_secs(7));
+		})
+		.join()
+		.unwrap();
+
+		assert_eq!(super::now(), before, "another test thread advanced this clock");
 	}
 }

@@ -213,14 +213,14 @@ impl TimersSlot {
 		self.0.get().expect("origin driver is not running").clone()
 	}
 
-	/// The installed timers' clock, or the model's clock before install. Stamps
-	/// taken before the driver runs mix the two, which is fine: both read the
-	/// real clock in production.
+	/// The installed timers' clock, if the driver is running.
+	pub(crate) fn try_now(&self) -> Option<Instant> {
+		self.0.get().map(Timers::now)
+	}
+
+	/// The installed timers' clock.
 	pub(crate) fn now(&self) -> Instant {
-		match self.0.get() {
-			Some(timers) => Timers::now(timers),
-			None => crate::model::clock::now(),
-		}
+		self.try_now().expect("origin driver is not running")
 	}
 }
 
@@ -396,7 +396,7 @@ pub use test::{Never, Test};
 /// A tokio-backed runtime for this crate's own unit tests, so the existing
 /// `tokio::time::pause`/`advance` tests keep their semantics: `now` reads
 /// tokio's (pausable) clock and timers are tokio sleeps, which paused tests
-/// auto-advance. Production code uses `moq_tokio::Runtime` instead; this one is
+/// auto-advance. Production code uses `moq_tokio::runtime::Runtime` instead; this one is
 /// compiled only into the test harness (integration tests carry their own copy
 /// in `tests/support`).
 #[cfg(all(test, not(target_family = "wasm")))]

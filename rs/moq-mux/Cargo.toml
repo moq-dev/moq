@@ -41,4 +41,5 @@ webm-iterable = "0.6"
 
 [dev-dependencies]
 futures = "0.3"
+moq-tokio = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

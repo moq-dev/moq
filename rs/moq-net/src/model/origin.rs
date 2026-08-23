@@ -997,8 +997,7 @@ pub struct Producer {
 	// driver drops, which is what makes later mutations fail with `Closed`.
 	tasks: Tasks,
 
-	// The driver's clock and timers, installed by [`Driver::run`]. Stamps taken
-	// before the driver runs fall back to the model's clock.
+	// The driver's clock and timers, installed by [`Driver::run`].
 	timers: TimersSlot,
 }
 
@@ -2357,7 +2356,12 @@ fn attach_source(
 					route: route.clone(),
 					source: source.clone(),
 				});
-				s.reselect(carrying, ctx.timers.now());
+				// A pre-run attach cannot stamp a hold against a clock that has not
+				// been installed yet. `run_front` reselects the complete table on its
+				// first poll and starts any hold on the driver's clock.
+				if let Some(now) = ctx.timers.try_now() {
+					s.reselect(carrying, now);
+				}
 				joined = Some(id);
 			} else if !may_take_over || !route.announce || s.taints_a_reader(&route) {
 				return Attach::Parked(existing.state.clone());
@@ -2464,6 +2468,14 @@ async fn run_front(
 	// the timers before the driver can poll anything.
 	let timers = slot.get();
 	let mut deadline = crate::runtime::Deadline::new(&timers);
+
+	// Sources may attach synchronously before `Driver::run` installs its clock.
+	// Start any resulting handover only now, on the same clock that will arm it.
+	let carrying = broadcast.demand().is_used();
+	if let Ok(mut s) = state.write() {
+		s.reselect(carrying, timers.now());
+	}
+	sync_front(&state, &broadcast, &node);
 
 	loop {
 		let step = {
@@ -5234,6 +5246,46 @@ mod tests {
 		announced.assert_next_none("cam");
 		let _producer = accept_track(&mut dynamic, "video").await;
 		drop(subscribing);
+	}
+
+	/// A handover discovered before the driver runs starts aging only after the
+	/// driver's clock is installed. An already-advanced virtual runtime must not
+	/// interpret a stamp from another clock as an expired hold.
+	#[test]
+	fn test_pre_run_handover_uses_driver_clock() {
+		let (origin, driver) = Producer::new(Info::new(Origin::new(7).unwrap()));
+		let consumer = origin.consume();
+		let publisher = Origin::new(90).unwrap();
+		let peer = Origin::new(3).unwrap();
+		let incumbent_hops = OriginList::try_from(vec![publisher]).unwrap();
+		let candidate_hops = OriginList::try_from(vec![publisher, peer]).unwrap();
+
+		let _incumbent = origin
+			.create_broadcast("cam", announce().with_hops(incumbent_hops.clone()).with_cost(10))
+			.unwrap();
+		let _candidate = origin
+			.create_broadcast("cam", forwarder_route(candidate_hops.clone(), 1))
+			.unwrap();
+		let watch = consumer.get_broadcast("cam").unwrap();
+		assert_eq!(watch.route().hops, incumbent_hops);
+
+		let timers = crate::runtime::Test::<crate::runtime::Never>::new();
+		timers.advance(HANDOVER_HOLD * 4);
+		let mut run = driver.run(timers.clone());
+		let _ = run.poll(&kio::Waiter::noop());
+		assert_eq!(
+			watch.route().hops,
+			incumbent_hops,
+			"installing an advanced clock must not expire a pre-run handover"
+		);
+
+		timers.advance(HANDOVER_HOLD * 2);
+		let _ = run.poll(&kio::Waiter::noop());
+		assert_eq!(
+			watch.route().hops,
+			candidate_hops,
+			"the hold must expire on the driver clock"
+		);
 	}
 
 	/// Dropping the driver tears the origin down: fronts abort with `Dropped`,
