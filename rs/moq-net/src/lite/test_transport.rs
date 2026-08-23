@@ -33,6 +33,7 @@ impl web_transport_trait::Error for SinkError {
 pub struct Log {
 	pub writes: Arc<Mutex<Vec<u8>>>,
 	pub resets: Arc<Mutex<Vec<u32>>>,
+	stops: Arc<Mutex<Vec<u32>>>,
 	closes: Arc<Mutex<Vec<(u32, String)>>>,
 	bi_opens: Arc<AtomicUsize>,
 	priorities: Arc<Mutex<Vec<u8>>>,
@@ -41,6 +42,16 @@ pub struct Log {
 impl Log {
 	pub fn resets(&self) -> Vec<u32> {
 		self.resets.lock().unwrap().clone()
+	}
+
+	/// The STOP_SENDING codes sent on the session's receive streams, in call order.
+	/// Cancelling a request is a reset of what we send plus one of these on what we
+	/// receive, so a test for a cancellation has to be able to see them.
+	///
+	/// Only [`ScriptedRecv`] records them. The other receive streams here discard the code,
+	/// so an empty result on those is not evidence that nothing was sent.
+	pub fn stops(&self) -> Vec<u32> {
+		self.stops.lock().unwrap().clone()
 	}
 
 	/// Every value handed to the transport's `set_priority`, in call order. These are
@@ -444,6 +455,7 @@ pub struct ScriptedRecv {
 	/// Report EOF once the script is exhausted rather than parking, so a test can drive
 	/// a read loop all the way through its exit path. See [`ScriptedSession::eof`].
 	eof: bool,
+	log: Log,
 }
 
 impl web_transport_trait::RecvStream for ScriptedRecv {
@@ -469,7 +481,9 @@ impl web_transport_trait::RecvStream for ScriptedRecv {
 		}
 	}
 
-	fn stop(&mut self, _code: u32) {}
+	fn stop(&mut self, code: u32) {
+		self.log.stops.lock().unwrap().push(code);
+	}
 
 	async fn closed(&mut self) -> Result<(), Self::Error> {
 		std::future::pending().await
@@ -565,7 +579,14 @@ impl web_transport_trait::Session for ScriptedSession {
 			Some(queue) => Arc::new(Mutex::new(queue.lock().unwrap().pop_front().unwrap_or_default())),
 			None => self.script.clone(),
 		};
-		Ok((SinkSend::new(self.log.clone()), ScriptedRecv { script, eof: self.eof }))
+		Ok((
+			SinkSend::new(self.log.clone()),
+			ScriptedRecv {
+				script,
+				eof: self.eof,
+				log: self.log.clone(),
+			},
+		))
 	}
 
 	async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {

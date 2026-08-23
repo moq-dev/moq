@@ -6,18 +6,18 @@ class MoqCli < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/moq-dev/moq/releases/download/moq-cli-v#{version}/moq-cli-#{version}-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/moq-dev/moq/releases/download/moq-cli-v#{version}/moq-cli-v#{version}-aarch64-apple-darwin.tar.gz"
       sha256 "__SHA256_AARCH64_APPLE_DARWIN__"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/moq-dev/moq/releases/download/moq-cli-v#{version}/moq-cli-#{version}-aarch64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/moq-dev/moq/releases/download/moq-cli-v#{version}/moq-cli-v#{version}-aarch64-unknown-linux-gnu.tar.gz"
       sha256 "__SHA256_AARCH64_UNKNOWN_LINUX_GNU__"
     end
     on_intel do
-      url "https://github.com/moq-dev/moq/releases/download/moq-cli-v#{version}/moq-cli-#{version}-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/moq-dev/moq/releases/download/moq-cli-v#{version}/moq-cli-v#{version}-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "__SHA256_X86_64_UNKNOWN_LINUX_GNU__"
     end
   end

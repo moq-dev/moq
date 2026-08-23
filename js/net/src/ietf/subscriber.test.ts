@@ -4,10 +4,11 @@ import { createMockTransportPair } from "../mock.ts";
 import { type Origin, OriginSchema } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
-import { NativeSession } from "./adapter.ts";
+import { ControlStreamAdapter, NativeSession } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
+import { Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, Version } from "./version.ts";
@@ -461,4 +462,103 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 
 	peer.close();
 	await handler;
+});
+
+/**
+ * Drafts 14-16 carry every request over the control stream adapter's virtual streams,
+ * whose abort is local. UNSUBSCRIBE is the only cancellation that reaches the peer there,
+ * so a cancelled subscription is only really cancelled if that message lands on the real
+ * control stream.
+ */
+test("a legacy cancel reaches the control stream", async () => {
+	const LEGACY = Version.DRAFT_16;
+	const pair = createMockTransportPair(ALPN.DRAFT_16);
+
+	// The one real bidi everything is multiplexed onto.
+	const controlStream = await Stream.open(pair.server, { version: LEGACY });
+	const session = new ControlStreamAdapter(pair.server, controlStream, LEGACY, 100n, true);
+	const subscriber = new Subscriber({ session });
+
+	// The peer's view of that control stream.
+	const peer = await nextStream(pair.client);
+	expect(peer).toBeDefined();
+
+	// Ask for a track, which writes SUBSCRIBE, then drop the only consumer.
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.subscribe("video");
+
+	// Let the SUBSCRIBE reach the control stream before walking away.
+	await new Promise((resolve) => setTimeout(resolve, 50));
+	track.close();
+
+	// Everything the subscriber actually put on the wire.
+	const seen: bigint[] = [];
+	const deadline = Date.now() + STREAM_WAIT;
+	while (Date.now() < deadline) {
+		const type = await Promise.race([
+			// biome-ignore lint/style/noNonNullAssertion: guarded by the expect above
+			peer!.reader.u53().catch(() => undefined),
+			new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 100)),
+		]);
+		if (type === undefined) break;
+
+		seen.push(BigInt(type));
+		// biome-ignore lint/style/noNonNullAssertion: guarded by the expect above
+		const size = await peer!.reader.u16();
+		// biome-ignore lint/style/noNonNullAssertion: guarded by the expect above
+		if (size > 0) await peer!.reader.read(size);
+		if (BigInt(type) === BigInt(Unsubscribe.id)) break;
+	}
+
+	expect(seen).toContain(BigInt(Unsubscribe.id));
+});
+
+/**
+ * A publisher that rejects a SUBSCRIBE has torn the request down before answering, so there
+ * is nothing left to cancel. Naming a dead request id back at it is what a strict peer can
+ * read as a protocol violation and close an otherwise healthy session over.
+ */
+test("a rejected subscribe is not unsubscribed", async () => {
+	const LEGACY = Version.DRAFT_16;
+	const pair = createMockTransportPair(ALPN.DRAFT_16);
+
+	const controlStream = await Stream.open(pair.server, { version: LEGACY });
+	const session = new ControlStreamAdapter(pair.server, controlStream, LEGACY, 100n, true);
+	// The mux read loop, which is what routes a response back to its virtual stream.
+	void session.run().catch(() => void 0);
+	const subscriber = new Subscriber({ session });
+
+	const peer = await nextStream(pair.client);
+	expect(peer).toBeDefined();
+	// biome-ignore lint/style/noNonNullAssertion: guarded above
+	const wire = peer!;
+
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.subscribe("video");
+
+	// Read the SUBSCRIBE, then reject it the way a publisher that cannot serve it would.
+	const subscribeType = await wire.reader.u53();
+	const subscribeSize = await wire.reader.u16();
+	await wire.reader.read(subscribeSize);
+	expect(subscribeType).toBe(3);
+
+	await wire.writer.u53(RequestError.id);
+	await new RequestError({
+		requestId: 0n,
+		errorCode: 404,
+		reasonPhrase: "not found",
+		retryInterval: 0n,
+	}).encode(wire.writer, LEGACY);
+
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	track.close();
+	await new Promise((resolve) => setTimeout(resolve, 100));
+
+	// Nothing further belongs on the control stream: the request is already gone.
+	const next = await Promise.race([
+		wire.reader.u53().catch(() => undefined),
+		new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 200)),
+	]);
+
+	expect(next).toBeUndefined();
 });

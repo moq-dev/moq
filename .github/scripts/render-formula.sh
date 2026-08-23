@@ -13,7 +13,7 @@ set -euo pipefail
 #     --output <path/to/crate.rb>
 #
 # The release dir must contain the three tarballs named like
-# <crate>-<version>-<target>.tar.gz for each of:
+# <crate>-v<version>-<target>.tar.gz for each of:
 #   aarch64-apple-darwin
 #   aarch64-unknown-linux-gnu
 #   x86_64-unknown-linux-gnu
@@ -76,7 +76,7 @@ rendered="${rendered//__VERSION__/$VERSION}"
 for entry in "${targets[@]}"; do
     target="${entry%% *}"
     placeholder="${entry##* }"
-    tarball="$RELEASE_DIR/$CRATE-$VERSION-$target.tar.gz"
+    tarball="$RELEASE_DIR/$CRATE-v$VERSION-$target.tar.gz"
 
     if [[ ! -f "$tarball" ]]; then
         echo "Error: tarball not found: $tarball" >&2

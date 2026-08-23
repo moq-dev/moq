@@ -72,7 +72,7 @@ jobs:
           VERSION: ${{ steps.parse.outputs.version }}
           TARGET: ${{ matrix.target }}
         run: |
-          name="moq-relay-${VERSION}-${TARGET}"
+          name="moq-relay-v${VERSION}-${TARGET}"
           mkdir -p "dist/${name}/bin"
           cp "target/${TARGET}/release/moq-relay" "dist/${name}/bin/moq-relay"
           cp LICENSE-MIT LICENSE-APACHE "dist/${name}/"

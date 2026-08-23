@@ -19,15 +19,71 @@ use web_async::Lock;
 
 const TRACK_ALIAS_TIMEOUT: Duration = Duration::from_secs(1);
 
-type TrackAliases = kio::Producer<HashMap<u64, RequestId>>;
+/// How many cancelled aliases to remember. Objects keep arriving for about a round trip
+/// after we cancel, so a handful covers the window, while the cap keeps a long session with
+/// heavy subscription churn from accumulating tombstones for its whole lifetime.
+///
+/// The bound is a count rather than a deadline, which is what keeps eviction synchronous
+/// with retirement instead of needing a timer to sweep expired entries. The trade is that a
+/// session cancelling more than this many distinct aliases inside one round trip evicts a
+/// tombstone whose objects are still arriving; those groups fall back to the unknown-alias
+/// wait, which is the old behavior rather than a new failure.
+const RETIRED_ALIAS_CAPACITY: usize = 64;
+
+/// What a track alias currently refers to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Alias {
+	/// An established subscription. Groups carrying this alias belong to it.
+	Active(RequestId),
+
+	/// A subscription we cancelled, whose publisher may still be feeding the alias.
+	///
+	/// The publisher only stops once our cancellation reaches it, so objects keep arriving
+	/// for at least a round trip afterwards. Remembering the alias is what lets us discard
+	/// them immediately instead of stalling each one on [`TRACK_ALIAS_TIMEOUT`] and calling
+	/// it unknown.
+	///
+	/// It does not make that window safe, only quiet. A publisher that has processed the
+	/// cancellation may reassign the alias, and nothing on a group stream distinguishes the
+	/// old subscription's objects from the new one's, so a group still in flight when the
+	/// new SUBSCRIBE_OK binds the alias is delivered to the new track. The protocol offers
+	/// no way to tell them apart: the alias is the only identifier a group carries, and the
+	/// draft permits the reuse as long as the two tracks are not live at once. Cancelling
+	/// promptly is what bounds the exposure, since it caps the arrival window at a round
+	/// trip rather than leaving it open for the life of the session.
+	Retired,
+}
+
+/// The aliases a remote publisher has bound on this session, plus the cancelled ones we
+/// still remember.
+#[derive(Default)]
+struct AliasTable {
+	map: HashMap<u64, Alias>,
+
+	/// Retired aliases in retirement order, so the oldest is forgotten first.
+	retired: std::collections::VecDeque<u64>,
+}
+
+type TrackAliases = kio::Producer<AliasTable>;
 
 fn insert_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId) -> Result<(), Error> {
 	let mut aliases = aliases.write().map_err(|_| Error::Dropped)?;
-	match aliases.entry(alias) {
-		Entry::Occupied(entry) if *entry.get() == request_id => Ok(()),
+	let table = &mut *aliases;
+
+	match table.map.entry(alias) {
+		// Our subscription is gone, so the publisher is free to point the alias somewhere
+		// new. Reclaiming it also drops the tombstone early, which reopens the window
+		// described on `Alias::Retired`: a group from the old subscription arriving after
+		// this lands is indistinguishable from one for the new track.
+		Entry::Occupied(mut entry) if *entry.get() == Alias::Retired => {
+			entry.insert(Alias::Active(request_id));
+			table.retired.retain(|&retired| retired != alias);
+			Ok(())
+		}
+		Entry::Occupied(entry) if *entry.get() == Alias::Active(request_id) => Ok(()),
 		Entry::Occupied(_) => Err(Error::Duplicate),
 		Entry::Vacant(entry) => {
-			entry.insert(request_id);
+			entry.insert(Alias::Active(request_id));
 			Ok(())
 		}
 	}
@@ -51,12 +107,31 @@ pub(super) fn is_protocol_violation(err: &Error) -> bool {
 	)
 }
 
-fn remove_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId) {
+/// Retire an alias, so groups still in flight for it are dropped promptly rather than
+/// reported as unknown (draft-19 section 11.1).
+///
+/// Only retires an alias that still belongs to this request: a later subscription may
+/// already have reclaimed it, and that binding outranks a departing owner.
+fn retire_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId) {
 	let Ok(mut aliases) = aliases.write() else {
 		return;
 	};
-	if aliases.get(&alias) == Some(&request_id) {
-		aliases.remove(&alias);
+	let table = &mut *aliases;
+
+	if table.map.get(&alias) != Some(&Alias::Active(request_id)) {
+		return;
+	}
+
+	table.map.insert(alias, Alias::Retired);
+	table.retired.push_back(alias);
+
+	while table.retired.len() > RETIRED_ALIAS_CAPACITY {
+		let oldest = table.retired.pop_front().expect("non-empty above the capacity");
+		// Only forget an entry that is still a tombstone. A reclaimed alias is live again
+		// and its own retirement is queued separately.
+		if table.map.get(&oldest) == Some(&Alias::Retired) {
+			table.map.remove(&oldest);
+		}
 	}
 }
 
@@ -75,6 +150,11 @@ struct State {
 struct TrackState {
 	producer: track::Producer,
 	alias: Option<u64>,
+
+	// The broadcast this track was subscribed from. With the track name it forms the full
+	// track name, which is what decides whether a repeated alias is the fatal collision
+	// (one alias, two tracks) or the legal sharing of an alias across subscriptions.
+	broadcast: PathOwned,
 
 	// Units for this track's object Timestamps, from the TIMESCALE Track Property in
 	// SUBSCRIBE_OK. `None` until it arrives, and for a track that declares none: the
@@ -182,15 +262,25 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	version: Version,
 }
 
-async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, alias: u64) -> Result<RequestId, Error> {
+/// Resolve the subscription a data stream belongs to.
+///
+/// SUBSCRIBE_OK can be reordered behind the stream it describes, so an alias we have not
+/// seen is worth waiting on briefly (draft-19 section 11.4.2). Three outcomes:
+/// the subscription, [`Error::Cancel`] for an alias we retired, and [`Error::NotFound`]
+/// once the wait expires without any binding at all.
+async fn resolve_track_alias(aliases: kio::Consumer<AliasTable>, alias: u64) -> Result<RequestId, Error> {
 	let mut timeout = kio::time::Deadline::after(TRACK_ALIAS_TIMEOUT);
 	kio::wait(|waiter| {
-		let resolved = aliases.poll(waiter, |aliases| match aliases.get(&alias) {
-			Some(request_id) => Poll::Ready(*request_id),
+		let resolved = aliases.poll(waiter, |aliases| match aliases.map.get(&alias) {
+			Some(Alias::Active(request_id)) => Poll::Ready(Ok(*request_id)),
+			// A subscription we already cancelled, whose publisher has not caught up with
+			// our STOP_SENDING. Discard the group now rather than waiting out the timeout
+			// for a binding that is never coming.
+			Some(Alias::Retired) => Poll::Ready(Err(Error::Cancel)),
 			None => Poll::Pending,
 		});
 		if let Poll::Ready(result) = resolved {
-			return Poll::Ready(result.map_err(|_| Error::Dropped));
+			return Poll::Ready(result.unwrap_or(Err(Error::Dropped)));
 		}
 		if timeout.poll(waiter).is_ready() {
 			return Poll::Ready(Err(Error::NotFound));
@@ -301,22 +391,51 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		})
 	}
 
+	/// Bind the alias the publisher chose for this subscription.
+	///
+	/// Two failures, and only one of them is the session's. A publisher may hand the same
+	/// alias to several subscriptions of one track, which draft-19 section 5.1 allows and
+	/// expects the subscriber to demux by re-applying each subscription's filter. Ours are
+	/// all LargestObject, so they are indistinguishable and we cannot: that costs the one
+	/// subscription ([`Error::Unsupported`]). The same alias naming a *different* track is
+	/// the collision section 11.1 makes fatal ([`Error::Duplicate`]).
 	fn register_alias(&self, request_id: RequestId, alias: u64) -> Result<(), Error> {
 		let mut state = self.state.lock();
 		if !state.subscribes.contains_key(&request_id) {
 			return Err(Error::NotFound);
 		}
 
-		insert_track_alias(&state.aliases, alias, request_id)?;
+		if let Err(err) = insert_track_alias(&state.aliases, alias, request_id) {
+			return Err(match self.alias_names_same_track(&state, alias, request_id) {
+				true => Error::Unsupported,
+				false => err,
+			});
+		}
+
 		state.subscribes.get_mut(&request_id).unwrap().alias = Some(alias);
 		Ok(())
+	}
+
+	/// Whether the subscription already holding `alias` is for the same full track name as
+	/// `request_id`, making the repeat legal sharing rather than a collision.
+	fn alias_names_same_track(&self, state: &State, alias: u64, request_id: RequestId) -> bool {
+		let aliases = state.aliases.read();
+		let Some(Alias::Active(holder)) = aliases.map.get(&alias).copied() else {
+			return false;
+		};
+
+		let (Some(held), Some(new)) = (state.subscribes.get(&holder), state.subscribes.get(&request_id)) else {
+			return false;
+		};
+
+		held.broadcast == new.broadcast && held.producer.name() == new.producer.name()
 	}
 
 	fn remove_subscribe(&self, request_id: RequestId) -> Option<TrackState> {
 		let mut state = self.state.lock();
 		let track = state.subscribes.remove(&request_id)?;
 		if let Some(alias) = track.alias {
-			remove_track_alias(&state.aliases, alias, request_id);
+			retire_track_alias(&state.aliases, alias, request_id);
 		}
 		Some(track)
 	}
@@ -757,7 +876,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	) -> Result<(), Error> {
 		tracing::debug!(broadcast = %msg.track_namespace, track = %msg.track_name, "rejecting publish");
 
-		self.write_publish_error(&mut stream, msg.request_id, 400, "PUBLISH is not supported")
+		// NOT_SUPPORTED, from the PUBLISH error codes in draft-19 section 10.10. We decline
+		// the method itself rather than this particular track, which is UNINTERESTED (0x4).
+		//
+		// The alias the message carries is deliberately not recorded. Nothing will ever bind
+		// it, and a rejected request has no lifetime of ours to hang the cleanup on, so the
+		// entry would have to be swept asynchronously. Any data streams the publisher opened
+		// before reading this are dropped by the unknown-alias path instead.
+		const NOT_SUPPORTED: u64 = 0x3;
+
+		self.write_publish_error(&mut stream, msg.request_id, NOT_SUPPORTED, "PUBLISH is not supported")
 			.await?;
 		// The rejection is the whole exchange, but it still has to arrive: a finish alone
 		// leaves the drop-time reset free to discard it before the peer acknowledges it.
@@ -1110,6 +1238,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				TrackState {
 					producer: track.clone(),
 					alias: None,
+					broadcast: broadcast_path.to_owned(),
 					timescale: None,
 				},
 			);
@@ -1128,8 +1257,62 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "subscribe started");
 
+		// A publisher can be serving before its SUBSCRIBE_OK reaches us, since the data
+		// streams are independent of the request stream. Waiting for the response alone would
+		// miss the local side going away in that window and leave the publisher serving a
+		// track nobody reads, which is the leak this whole path exists to close.
+		enum Setup {
+			Response(Result<Option<(u64, Option<Timescale>)>, Error>),
+			Unused,
+			BroadcastClosed(Error),
+		}
+
+		let setup = {
+			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream));
+			kio::wait(|waiter| {
+				// An answer that has already arrived wins over the local terminals. Both can
+				// be ready in one poll, and taking abandonment there would discard a response
+				// the publisher has already sent: if it was a rejection, the request is gone
+				// and cancelling it names a dead id back at a peer entitled to object.
+				if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
+					return Poll::Ready(Setup::Response(res));
+				}
+				if track.poll_unused(waiter).is_ready() {
+					return Poll::Ready(Setup::Unused);
+				}
+				if let Poll::Ready(err) = broadcast.poll_closed(waiter) {
+					return Poll::Ready(Setup::BroadcastClosed(err));
+				}
+				Poll::Pending
+			})
+			.await
+		};
+
+		// Abandoned before the publisher answered. It may already be serving, so this still
+		// owes it a cancellation rather than a silent walk away.
+		let response = match setup {
+			Setup::Response(res) => res,
+			Setup::Unused | Setup::BroadcastClosed(_) => {
+				let err = match setup {
+					Setup::BroadcastClosed(err) => err,
+					_ => Error::Cancel,
+				};
+
+				tracing::info!(
+					broadcast = %self.origin.absolute(&broadcast_path),
+					track = %track.name(),
+					"subscribe abandoned before it was accepted"
+				);
+
+				let _ = track.abort(err);
+				self.remove_subscribe(request_id);
+				self.cancel_subscribe(stream, request_id).await;
+				return;
+			}
+		};
+
 		// Read the response and register the alias mapping
-		match self.read_subscribe_response(&mut stream).await {
+		match response {
 			Ok(Some((alias, timescale))) => {
 				if let Some(timescale) = timescale {
 					let mut state = self.state.lock();
@@ -1139,7 +1322,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				}
 
 				if let Err(err) = self.register_alias(request_id, alias) {
-					self.session.close(err.to_code(), err.to_string().as_ref());
+					// Only one alias naming two different tracks is the session's problem. A
+					// shared alias we cannot demux, or a request that went away underneath us,
+					// costs this subscription and nothing else.
+					if matches!(err, Error::Duplicate) {
+						tracing::warn!(track_alias = %alias, "publisher reused a live track alias for another track");
+						self.session.close(err.to_code(), err.to_string().as_ref());
+					} else {
+						tracing::warn!(track_alias = %alias, %err, "could not bind track alias");
+						// SUBSCRIBE_OK arrived, so the publisher considers this Established and
+						// will keep serving it. Dropping the stream says nothing on the versions
+						// that need UNSUBSCRIBE, so cancel it properly.
+						self.cancel_subscribe(stream, request_id).await;
+					}
 					self.remove_subscribe(request_id);
 					let _ = track.abort(err);
 					return;
@@ -1176,31 +1371,98 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			.await
 		};
 
-		match end {
+		// Whether we are walking away from a subscription the publisher still considers
+		// Established, which is what obliges us to cancel it rather than just close.
+		let cancelled = match end {
 			End::Unused => {
 				tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "subscribe cancelled");
 				let _ = track.abort(Error::Cancel);
+				true
 			}
 			End::BroadcastClosed(err) => {
 				tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "broadcast closed");
 				let _ = track.abort(err);
+				true
 			}
-			End::StreamClosed(res) => match res {
-				Ok(()) => {
-					tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "subscribe complete");
-					let _ = track.finish();
+			End::StreamClosed(res) => {
+				match res {
+					Ok(()) => {
+						tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "subscribe complete");
+						let _ = track.finish();
+					}
+					Err(err) => {
+						tracing::debug!(%err, "subscribe stream closed with error");
+						let _ = track.abort(err);
+					}
 				}
-				Err(err) => {
-					tracing::debug!(%err, "subscribe stream closed with error");
-					let _ = track.abort(err);
-				}
-			},
-		}
+				// The publisher already ended the request, so there is nothing to cancel.
+				false
+			}
+		};
 
 		// Clean up
 		self.remove_subscribe(request_id);
 
-		stream.writer.finish().ok();
+		match cancelled {
+			true => self.cancel_subscribe(stream, request_id).await,
+			// The publisher already ended the request, so a FIN is all we owe it.
+			false => {
+				stream.writer.finish().ok();
+			}
+		}
+	}
+
+	/// Tell the publisher to stop serving a subscription we are walking away from.
+	///
+	/// Every path that abandons an Established subscription goes through here, because
+	/// staying silent is what leaves the publisher serving a track nobody is reading and
+	/// feeding an alias we already retired.
+	///
+	/// Two mechanisms, by version. Draft-14 through 16 carry requests over the control
+	/// stream adapter, whose virtual streams have no reset or stop of their own, so
+	/// UNSUBSCRIBE (draft-16 section 9.12) is the only thing the peer ever sees, and
+	/// draft-16 section 5.1.1 makes receiving it what frees the subscription. Draft-17
+	/// removed the message, leaving the stream itself: a FIN is explicitly not a
+	/// cancellation (draft-19 section 3.3.2), so section 3.3.3's pair applies, an endpoint
+	/// that has already FINed its sending direction cancels with STOP_SENDING on the
+	/// receiving one.
+	async fn cancel_subscribe(&self, stream: Stream<S, Version>, request_id: RequestId) {
+		let Stream { mut writer, mut reader } = stream;
+
+		if self.unsubscribes()
+			&& let Err(err) = self.write_unsubscribe(&mut writer, request_id).await
+		{
+			tracing::debug!(%err, "failed to write unsubscribe");
+		}
+
+		// STOP_SENDING needs no acknowledgement, so it goes first and the wait below covers
+		// only what we still have to deliver.
+		reader.stop(super::error::CANCELLED);
+
+		// Finishing alone would leave the writer's Drop free to RESET_STREAM, and a stream
+		// that has sent its FIN is still retransmitting: the reset would discard the
+		// UNSUBSCRIBE before the peer ever read it, which is the whole message. Closing
+		// consumes the writer, removing that fallback, and waits for the acknowledgement.
+		if let Err(err) = writer.close().await {
+			tracing::debug!(%err, "failed to close the subscribe stream");
+		}
+	}
+
+	/// Whether this version cancels a subscription with an UNSUBSCRIBE message.
+	///
+	/// Draft-17 removed it, leaving the stream reset as the only signal.
+	fn unsubscribes(&self) -> bool {
+		matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+	}
+
+	async fn write_unsubscribe(
+		&self,
+		writer: &mut crate::coding::Writer<S::SendStream, Version>,
+		request_id: RequestId,
+	) -> Result<(), Error> {
+		writer.encode(&ietf::Unsubscribe::ID).await?;
+		writer.encode(&ietf::Unsubscribe { request_id }).await?;
+		Ok(())
 	}
 
 	async fn write_subscribe(
@@ -1265,9 +1527,24 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// SUBSCRIBE_OK or PUBLISH can be reordered behind this stream. Hold only the
 		// subgroup header while waiting so the data stream cannot consume flow control.
 		let aliases = self.state.lock().aliases.consume();
-		let request_id = resolve_track_alias(aliases, group.track_alias).await.inspect_err(|_| {
-			tracing::warn!(track_alias = %group.track_alias, "unknown track alias");
-		})?;
+		let request_id = match resolve_track_alias(aliases, group.track_alias).await {
+			Ok(request_id) => request_id,
+			// Ours: we cancelled the subscription and the publisher has not stopped yet.
+			Err(err @ Error::Cancel) => {
+				tracing::debug!(track_alias = %group.track_alias, "dropping group for a cancelled subscription");
+				return Err(err);
+			}
+			// Theirs: nothing ever bound this alias. Either the publisher sent data for a
+			// track it never acknowledged, or SUBSCRIBE_OK is more than a timeout behind.
+			Err(err) => {
+				tracing::warn!(
+					track_alias = %group.track_alias,
+					timeout = ?TRACK_ALIAS_TIMEOUT,
+					"unknown track alias: no SUBSCRIBE_OK bound it"
+				);
+				return Err(err);
+			}
+		};
 
 		let (mut producer, track, timescale) = {
 			let mut state = self.state.lock();
@@ -1617,12 +1894,605 @@ mod tests {
 	}
 
 	#[test]
-	fn removing_old_track_does_not_remove_reused_alias() {
+	fn retiring_old_track_does_not_retire_reused_alias() {
 		let aliases = TrackAliases::default();
 		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
-		remove_track_alias(&aliases, 7, RequestId(13));
+		retire_track_alias(&aliases, 7, RequestId(13));
 
-		assert_eq!(aliases.read().get(&7), Some(&RequestId(11)));
+		assert_eq!(aliases.read().map.get(&7), Some(&Alias::Active(RequestId(11))));
+	}
+
+	/// A cancelled subscription leaves its alias behind, so the groups the publisher is
+	/// still sending are discarded at once instead of stalling out the timeout and being
+	/// reported as unknown (draft-19 section 11.1).
+	#[tokio::test(start_paused = true)]
+	async fn retired_alias_drops_late_groups_immediately() {
+		let aliases = TrackAliases::default();
+		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
+		retire_track_alias(&aliases, 7, RequestId(11));
+
+		let resolve = resolve_track_alias(aliases.consume(), 7);
+		tokio::pin!(resolve);
+
+		assert!(
+			matches!(poll!(&mut resolve), std::task::Poll::Ready(Err(Error::Cancel))),
+			"a retired alias must resolve without waiting on the timeout",
+		);
+	}
+
+	/// A group arriving for a retired alias is the expected tail of our own cancellation, so
+	/// the code it maps to has to say so. moq-lite's cancel encodes to 0, which on this wire
+	/// is an internal failure, and reporting one to a publisher for a routine unsubscribe is
+	/// what distorts its error handling.
+	///
+	/// Covers the error this path produces and the code it maps to, not the dispatch loop
+	/// that sends it: `run_unis` is private to `session`, and retiring an alias reaches into
+	/// state private to this module, so nothing here can drive one end to end. See #3002.
+	#[tokio::test(start_paused = true)]
+	async fn a_retired_alias_maps_to_the_cancelled_code() {
+		let aliases = TrackAliases::default();
+		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
+		retire_track_alias(&aliases, 7, RequestId(11));
+
+		let err = resolve_track_alias(aliases.consume(), 7)
+			.await
+			.expect_err("a retired alias resolves to a cancellation");
+
+		assert_eq!(
+			crate::ietf::error::to_stream_code(&err),
+			crate::ietf::error::CANCELLED,
+			"the code the dispatch loop maps this error onto",
+		);
+	}
+
+	/// The publisher may point a retired alias at a new track, so a later SUBSCRIBE_OK
+	/// reclaims it rather than colliding with the tombstone.
+	#[test]
+	fn subscribe_ok_reclaims_a_retired_alias() {
+		let aliases = TrackAliases::default();
+		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
+		retire_track_alias(&aliases, 7, RequestId(11));
+
+		insert_track_alias(&aliases, 7, RequestId(13)).unwrap();
+
+		assert_eq!(aliases.read().map.get(&7), Some(&Alias::Active(RequestId(13))));
+		assert!(
+			aliases.read().retired.is_empty(),
+			"reclaiming an alias must drop its tombstone",
+		);
+	}
+
+	/// An alias still serving a live subscription is not a tombstone, so a publisher
+	/// pointing it at a second track is the duplicate the draft makes fatal.
+	#[test]
+	fn active_alias_rejects_a_second_track() {
+		let aliases = TrackAliases::default();
+		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
+
+		assert!(matches!(
+			insert_track_alias(&aliases, 7, RequestId(13)),
+			Err(Error::Duplicate)
+		));
+	}
+
+	/// Build a subscriber with `subscribes` pre-populated, so alias binding can be
+	/// exercised without driving a whole SUBSCRIBE exchange.
+	fn subscriber_with_tracks(
+		tracks: &[(RequestId, &str, &str)],
+	) -> Subscriber<crate::lite::test_transport::SinkSession> {
+		let (tasks, task_set) = crate::util::TaskSet::new();
+		// The tests drive binding directly, so nothing spawns; leaking keeps the handle alive
+		// without a spawner.
+		std::mem::forget(task_set);
+
+		let subscriber = Subscriber::new(
+			crate::lite::test_transport::SinkSession::new(Default::default()),
+			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Origin::new(1).unwrap(),
+			None,
+			Version::Draft19,
+			tasks,
+		);
+
+		{
+			let mut state = subscriber.state.lock();
+			for (request_id, broadcast, name) in tracks {
+				state.subscribes.insert(
+					*request_id,
+					TrackState {
+						producer: track::Producer::new(
+							std::sync::Arc::new(crate::broadcast::Info::default()),
+							*name,
+							None,
+						),
+						alias: None,
+						broadcast: Path::new(broadcast).to_owned(),
+						timescale: None,
+					},
+				);
+			}
+		}
+
+		subscriber
+	}
+
+	/// Draft-19 section 5.1 lets a publisher give several subscriptions to one track the
+	/// same alias. Our filters are all LargestObject, so we cannot re-apply them to tell the
+	/// groups apart, but that is one subscription's problem. Killing the session over a
+	/// legal choice would take every other broadcast down with it.
+	#[test]
+	fn a_shared_alias_for_one_track_costs_only_that_subscription() {
+		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "video"), (RequestId(13), "cam", "video")]);
+
+		subscriber.register_alias(RequestId(11), 7).unwrap();
+
+		assert!(
+			matches!(subscriber.register_alias(RequestId(13), 7), Err(Error::Unsupported)),
+			"a shared alias must not be reported as the fatal collision",
+		);
+	}
+
+	/// One alias naming two different tracks is the collision section 11.1 makes fatal.
+	#[test]
+	fn an_alias_reused_for_another_track_is_fatal() {
+		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "video"), (RequestId(13), "cam", "audio")]);
+
+		subscriber.register_alias(RequestId(11), 7).unwrap();
+
+		assert!(matches!(
+			subscriber.register_alias(RequestId(13), 7),
+			Err(Error::Duplicate)
+		));
+	}
+
+	/// Same track name under a different broadcast is a different full track name, so it is
+	/// a collision too.
+	#[test]
+	fn an_alias_reused_across_broadcasts_is_fatal() {
+		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "video"), (RequestId(13), "screen", "video")]);
+
+		subscriber.register_alias(RequestId(11), 7).unwrap();
+
+		assert!(matches!(
+			subscriber.register_alias(RequestId(13), 7),
+			Err(Error::Duplicate)
+		));
+	}
+
+	/// A FIN only says we will send nothing further; it is not a cancellation (draft-19
+	/// section 3.3.2). A publisher holding an Established subscription keeps serving it
+	/// until STOP_SENDING arrives on the direction it writes (sections 3.3.3 and 5.1.1),
+	/// so a subscriber that only finishes leaves it feeding an alias forever. That is what
+	/// turns a routine unsubscribe into an endless "unknown track alias" stream.
+	#[tokio::test(start_paused = true)]
+	async fn cancelling_a_subscription_stops_the_publisher() {
+		for version in [Version::Draft16, Version::Draft19] {
+			let log = cancel_a_subscription(version).await;
+			// CANCELLED, not the moq-lite cancel code: 0 on this wire is INTERNAL_ERROR, so a
+			// routine unsubscribe would read to the publisher as a fault on our side.
+			assert_eq!(
+				log.stops(),
+				vec![crate::ietf::error::CANCELLED],
+				"{version:?}: cancelling must STOP_SENDING the publisher's direction, not just FIN ours",
+			);
+			assert_ne!(
+				crate::ietf::error::CANCELLED,
+				Error::Cancel.to_code(),
+				"the two error spaces disagree; that is why this code is mapped separately",
+			);
+		}
+	}
+
+	/// Draft-14 through 16 have an UNSUBSCRIBE message, and draft-16 section 5.1.1 makes it
+	/// the thing that lets the publisher destroy the subscription. Resetting the stream
+	/// without it leaves a peer that predates draft-17 serving the track forever.
+	#[tokio::test(start_paused = true)]
+	async fn a_legacy_cancel_sends_unsubscribe() {
+		let log = cancel_a_subscription(Version::Draft16).await;
+		assert!(
+			occurrences(&log, &[ietf::Unsubscribe::ID as u8]) > 0,
+			"draft-16 cancels with UNSUBSCRIBE",
+		);
+
+		// Draft-17 removed the message, so sending one would be a protocol violation.
+		let log = cancel_a_subscription(Version::Draft19).await;
+		assert_eq!(
+			occurrences(&log, &[ietf::Unsubscribe::ID as u8]),
+			0,
+			"draft-17+ has no UNSUBSCRIBE",
+		);
+	}
+
+	/// A rejection and the last consumer leaving can both be ready when the task is next
+	/// polled. The publisher destroyed the request when it sent the error, so treating that
+	/// as abandonment would cancel a request that no longer exists and name a dead id back at
+	/// a peer entitled to object. The answer wins.
+	#[tokio::test(start_paused = true)]
+	async fn a_ready_rejection_beats_local_abandonment() {
+		const VERSION: Version = Version::Draft16;
+
+		// A peer that rejects the subscribe outright.
+		let rejection = {
+			let log = crate::lite::test_transport::Log::default();
+			let mut writer =
+				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			writer.encode(&ietf::RequestError::ID).await.unwrap();
+			writer
+				.encode(&ietf::RequestError {
+					request_id: Some(RequestId(1)),
+					error_code: 404,
+					reason_phrase: "not found".into(),
+					retry_interval: 0,
+				})
+				.await
+				.unwrap();
+
+			log.writes.lock().unwrap().clone()
+		};
+
+		let session = crate::lite::test_transport::ScriptedSession::new(rejection);
+		let log = session.log.clone();
+
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			session,
+			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Origin::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+		);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let subscription = track.subscribe(None);
+
+		let request = dynamic.requested_track().await.expect("no track requested");
+
+		// Drop the demand before the task runs, so the rejection and the unused wake are both
+		// ready the first time the setup race is polled.
+		drop(subscription);
+		drop(track);
+		drop(consumer);
+
+		let serving = tokio::spawn(async move {
+			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+		});
+
+		tokio::time::timeout(std::time::Duration::from_secs(1), serving)
+			.await
+			.expect("run_subscribe did not finish")
+			.unwrap();
+
+		assert!(
+			!control_message_types(&log, VERSION).contains(&ietf::Unsubscribe::ID),
+			"a rejected request is already gone; cancelling it names a dead id at the peer",
+		);
+	}
+
+	/// A publisher can be serving before its SUBSCRIBE_OK arrives, since data streams are
+	/// independent of the request stream. If the last consumer leaves in that window, the
+	/// subscriber still owes it a cancellation: walking away silently is what leaves it
+	/// serving a track nobody reads.
+	#[tokio::test(start_paused = true)]
+	async fn abandoning_before_subscribe_ok_still_cancels() {
+		const VERSION: Version = Version::Draft16;
+
+		// A peer that accepts the stream and then says nothing at all.
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let log = session.log.clone();
+
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			session,
+			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Origin::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+		);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let subscription = track.subscribe(None);
+
+		let request = dynamic.requested_track().await.expect("no track requested");
+
+		let serving = tokio::spawn(async move {
+			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+		});
+
+		// Let the SUBSCRIBE go out. No SUBSCRIBE_OK is coming, so the subscription never
+		// reaches Established on our side.
+		settle().await;
+
+		drop(subscription);
+		drop(track);
+		drop(consumer);
+
+		tokio::time::timeout(std::time::Duration::from_secs(1), serving)
+			.await
+			.expect("run_subscribe parked waiting for a response that never came")
+			.unwrap();
+
+		assert!(
+			occurrences(&log, &[ietf::Unsubscribe::ID as u8]) > 0,
+			"a subscribe abandoned before SUBSCRIBE_OK must still be cancelled",
+		);
+		assert_eq!(
+			log.stops(),
+			vec![crate::ietf::error::CANCELLED],
+			"and must stop the direction the publisher writes",
+		);
+	}
+
+	/// The control messages that actually reached the wire, by type id.
+	///
+	/// Decoding the framing rather than scanning for a byte: a type id is one varint among
+	/// many, and a substring match would happily find one inside a length or a payload.
+	fn control_message_types(log: &crate::lite::test_transport::Log, version: Version) -> Vec<u64> {
+		use crate::coding::Decode;
+
+		let writes = log.writes.lock().unwrap().clone();
+		let mut buf = writes.as_slice();
+		let mut types = Vec::new();
+
+		while !buf.is_empty() {
+			let Ok(type_id) = u64::decode(&mut buf, version) else {
+				break;
+			};
+			let Ok(size) = u16::decode(&mut buf, version) else {
+				break;
+			};
+			if buf.len() < size as usize {
+				break;
+			}
+			buf = &buf[size as usize..];
+			types.push(type_id);
+		}
+
+		types
+	}
+
+	/// Drafts 14-16 carry every request over `ControlStreamAdapter`'s virtual streams, so a
+	/// cancellation only counts if it traverses the mux and reaches the real control stream
+	/// writer. A test that drives a direct stream proves the subscriber's own logic and
+	/// nothing about the path production takes: the virtual writer's reset is a no-op and
+	/// its close returns as soon as the bytes are queued, so an adapter that dropped them
+	/// would look identical.
+	#[tokio::test(start_paused = true)]
+	async fn a_legacy_cancel_reaches_the_control_stream() {
+		const VERSION: Version = Version::Draft16;
+
+		// A peer that opens the control stream and then says nothing, so the subscribe is
+		// abandoned before it is accepted and cancelled from there.
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let log = session.log.clone();
+
+		let control = Control::new(None, false);
+		let adapter = super::super::adapter::ControlStreamAdapter::new(session.clone(), control.clone(), VERSION);
+
+		// The one real bidi everything is multiplexed onto.
+		let control_stream = Stream::open(&session, VERSION).await.unwrap();
+		let running = adapter.clone();
+		tokio::spawn(async move {
+			let _ = running.run(control_stream.reader, control_stream.writer).await;
+		});
+
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			adapter,
+			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
+			control,
+			None,
+			peer::PeerSetup::default(),
+			crate::Origin::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+		);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let subscription = track.subscribe(None);
+
+		let request = dynamic.requested_track().await.expect("no track requested");
+
+		let serving = tokio::spawn(async move {
+			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+		});
+
+		settle().await;
+		drop(subscription);
+		drop(track);
+		drop(consumer);
+
+		tokio::time::timeout(std::time::Duration::from_secs(1), serving)
+			.await
+			.expect("run_subscribe did not finish")
+			.unwrap();
+
+		// Let the adapter's writer task drain the queue onto the control stream.
+		settle().await;
+
+		let types = control_message_types(&log, VERSION);
+		assert!(
+			types.contains(&ietf::Subscribe::ID),
+			"the SUBSCRIBE reached the control stream: {types:?}"
+		);
+		assert!(
+			types.contains(&ietf::Unsubscribe::ID),
+			"the UNSUBSCRIBE must traverse the adapter to the control stream, not stop at the \
+			 virtual writer: {types:?}"
+		);
+	}
+
+	/// Establish a subscription on `version`, then drop its last consumer, and hand back
+	/// what the session recorded on the way out.
+	async fn cancel_a_subscription(version: Version) -> crate::lite::test_transport::Log {
+		cancel_a_subscription_inner(version, false).await
+	}
+
+	/// A publisher on draft-14 through 16 that legally hands a second subscription to one
+	/// track the alias the first already holds. We cannot demux that, so we walk away from
+	/// the new subscription. Those versions carry requests over the control stream adapter,
+	/// whose virtual streams drop silently, so UNSUBSCRIBE is the only way the publisher
+	/// ever learns to stop serving it.
+	#[tokio::test(start_paused = true)]
+	async fn a_legacy_shared_alias_is_unsubscribed() {
+		let log = cancel_a_subscription_inner(Version::Draft16, true).await;
+
+		assert!(
+			occurrences(&log, &[ietf::Unsubscribe::ID as u8]) > 0,
+			"abandoning a shared alias must still tell the publisher to stop",
+		);
+	}
+
+	/// Writing the UNSUBSCRIBE is not the same as delivering it. A stream that has only been
+	/// finished is still retransmitting, so the writer's Drop reset would discard the message
+	/// before the peer read it. Closing consumes the writer, which is what removes that
+	/// fallback, so a reset here means the cancellation never landed.
+	#[tokio::test(start_paused = true)]
+	async fn cancelling_does_not_reset_away_the_unsubscribe() {
+		for version in [Version::Draft16, Version::Draft19] {
+			let log = cancel_a_subscription(version).await;
+			assert!(
+				log.resets().is_empty(),
+				"{version:?}: the send side must be closed, not reset out from under the cancellation",
+			);
+		}
+	}
+
+	/// When `conflict` is set, an alias-7 binding for the same full track name is seeded
+	/// first, so the subscription under test loses the race to bind it.
+	async fn cancel_a_subscription_inner(version: Version, conflict: bool) -> crate::lite::test_transport::Log {
+		// A peer that accepts the subscription, binding alias 7, then says nothing more.
+		let subscribe_ok = {
+			let log = crate::lite::test_transport::Log::default();
+			let mut writer =
+				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+			writer.encode(&ietf::SubscribeOk::ID).await.unwrap();
+			writer
+				.encode(&ietf::SubscribeOk {
+					request_id: match version {
+						Version::Draft14 | Version::Draft15 | Version::Draft16 => Some(RequestId(0)),
+						_ => None,
+					},
+					track_alias: 7,
+					properties: Default::default(),
+				})
+				.await
+				.unwrap();
+
+			log.writes.lock().unwrap().clone()
+		};
+
+		let session = crate::lite::test_transport::ScriptedSession::new(subscribe_ok);
+		let log = session.log.clone();
+
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			session,
+			crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Origin::new(1).unwrap(),
+			None,
+			version,
+			tasks,
+		);
+
+		if conflict {
+			let holder = RequestId(999);
+			let mut state = subscriber.state.lock();
+			state.subscribes.insert(
+				holder,
+				TrackState {
+					producer: track::Producer::new(
+						std::sync::Arc::new(crate::broadcast::Info::default()),
+						"video",
+						None,
+					),
+					alias: Some(7),
+					broadcast: Path::new("broadcast").to_owned(),
+					timescale: None,
+				},
+			);
+			insert_track_alias(&state.aliases, 7, holder).unwrap();
+		}
+
+		// A consumer asking for a track is what dispatches a request to the session.
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let subscription = track.subscribe(None);
+
+		let request = dynamic.requested_track().await.expect("no track requested");
+
+		// A handle on the same state the spawned task mutates, so the test can prove the
+		// subscription reached Established rather than assume it.
+		let probe = subscriber.clone();
+
+		let serving = tokio::spawn(async move {
+			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
+		});
+
+		// Let the SUBSCRIBE go out and the SUBSCRIBE_OK come back, so the subscription is
+		// Established when we walk away from it.
+		settle().await;
+
+		// Without this the test would still pass if SUBSCRIBE_OK never landed, and it would
+		// then be asserting against a subscription that was never established.
+		assert!(
+			matches!(probe.state.lock().aliases.read().map.get(&7), Some(Alias::Active(_))),
+			"{version:?}: alias 7 must be bound before we cancel",
+		);
+
+		// The last consumer leaves: nothing wants this track any more.
+		drop(subscription);
+		drop(track);
+		drop(consumer);
+
+		tokio::time::timeout(std::time::Duration::from_secs(1), serving)
+			.await
+			.expect("run_subscribe did not finish")
+			.unwrap();
+
+		log
+	}
+
+	/// Tombstones are bounded: a session churning through subscriptions must not
+	/// accumulate one entry per alias it ever used.
+	#[test]
+	fn retired_aliases_are_capped() {
+		let aliases = TrackAliases::default();
+
+		for i in 0..(RETIRED_ALIAS_CAPACITY as u64 + 10) {
+			insert_track_alias(&aliases, i, RequestId(i)).unwrap();
+			retire_track_alias(&aliases, i, RequestId(i));
+		}
+
+		let table = aliases.read();
+		assert_eq!(table.retired.len(), RETIRED_ALIAS_CAPACITY);
+		assert_eq!(table.map.len(), RETIRED_ALIAS_CAPACITY);
+		assert!(!table.map.contains_key(&0), "the oldest tombstone is forgotten first");
 	}
 
 	/// moq-transport carries no hop ids, so a peer's broadcasts are normally
@@ -2693,10 +3563,34 @@ mod tests {
 			consumer.get_broadcast("room/host").is_none(),
 			"a rejected PUBLISH must not announce a broadcast"
 		);
+		// Encode the reply we expect rather than matching the reason alone, so the error code
+		// regressing to something outside draft-19 section 10.10's table cannot slip through.
+		let expected = {
+			const NOT_SUPPORTED: u64 = 0x3;
+
+			let log = crate::lite::test_transport::Log::default();
+			let mut writer = crate::coding::Writer::new(
+				crate::lite::test_transport::SinkSend::new(log.clone()),
+				Version::Draft19,
+			);
+			writer.encode(&ietf::RequestError::ID).await.unwrap();
+			writer
+				.encode(&ietf::RequestError {
+					request_id: None,
+					error_code: NOT_SUPPORTED,
+					reason_phrase: "PUBLISH is not supported".into(),
+					retry_interval: 0,
+				})
+				.await
+				.unwrap();
+
+			log.writes.lock().unwrap().clone()
+		};
+
 		assert_eq!(
-			occurrences(&session.log, b"PUBLISH is not supported"),
+			occurrences(&session.log, &expected),
 			1,
-			"the decline reaches the peer"
+			"the decline reaches the peer as NOT_SUPPORTED"
 		);
 	}
 }

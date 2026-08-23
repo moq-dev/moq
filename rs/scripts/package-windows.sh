@@ -9,7 +9,7 @@ set -euo pipefail
 #
 # Runs under Git Bash on a windows-latest runner. Unlike package-binary.sh
 # (nix, macOS + Linux), this is a plain cargo build against the MSVC target.
-# Produces <output>/<crate>-<version>-<target>.zip with the .exe and licenses
+# Produces <output>/<crate>-v<version>-<target>.zip with the .exe and licenses
 # at the archive root. Keeping the layout flat (no versioned top folder) means
 # the winget portable manifest's RelativeFilePath stays the same across
 # releases, so wingetcreate can carry it forward unchanged.
@@ -89,7 +89,7 @@ fi
 # Smoke test: a release we can't even --help is not worth shipping.
 "$BIN_FILE" --help >/dev/null
 
-NAME="$CRATE-$VERSION-$TARGET"
+NAME="$CRATE-v$VERSION-$TARGET"
 STAGING="$(mktemp -d)"
 trap 'rm -rf "$STAGING"' EXIT
 

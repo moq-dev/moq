@@ -301,9 +301,28 @@ impl Subscribe {
 			.await?
 			.with_latency(self.args.max_latency);
 
-		while let Some(frame) = ts.next().await? {
-			stdout.write_all(&frame.payload).await?;
-			stdout.flush().await?;
+		// A TS byte stream carries no per-frame timing, so delivery time is the only
+		// carrier of each frame's spacing: the exporter emits its PCR grid as
+		// standalone frames stamped at their slot boundaries, on the contract that
+		// the caller writes the bytes at the time the stamp asserts. Draining on
+		// arrival instead collapses the clock into position clusters no downstream
+		// stage can repair (#2984). See [`Delivery`] for how the pacing stays
+		// bounded; it needs to know whether each frame was waited for, hence the
+		// hand-rolled poll instead of `ts.next()`.
+		let mut delivery = Delivery::new(self.args.max_latency);
+		loop {
+			let mut waited = false;
+			let frame = hang::moq_net::kio::wait(|waiter| match ts.poll_next(waiter) {
+				std::task::Poll::Pending => {
+					waited = true;
+					std::task::Poll::Pending
+				}
+				ready => ready,
+			})
+			.await?;
+
+			let Some(frame) = frame else { break };
+			delivery.deliver(&frame, waited, &mut stdout).await?;
 		}
 
 		Ok(())
@@ -326,5 +345,176 @@ impl Subscribe {
 		}
 
 		Ok(())
+	}
+}
+
+/// Paced stdout delivery for the TS export: sleeps until each frame's send
+/// instant, with total delivery lag bounded by the latency budget.
+///
+/// The bound is the subtle part. The pacer alone caps how far one frame may be
+/// scheduled past the `now` it paces with, but our own sleeps push that `now`
+/// forward, so a backlog arriving faster than real time (a tune-in group
+/// replaying from its keyframe, a catch-up after a stall) stays within the lead
+/// of every individual call while total delivery lag grows without bound. The
+/// export's group skipping can't shed that lag either: it fires when the
+/// *current group* is blocked with a newer alternative, so it measures producer
+/// stalls, never consumer lag. So lag is measured here instead, against
+/// `arrived`: the last instant the export made us wait, which is when a frame
+/// obtained without waiting could first have been queued. When a frame's
+/// schedule overshoots that epoch by more than the lead, it is delivered
+/// immediately and becomes the live edge
+/// ([`Pacer::hurry`](moq_mux::Pacer::hurry)). The anchor then rides the newest
+/// frame through a backlog, so pacing resumes from the live edge once the
+/// export makes us wait again.
+///
+/// The epoch is deliberately conservative: a ready frame may in truth have
+/// arrived later, during a pacing sleep, but one-frame polling can't observe
+/// that, and crediting sleep intervals would let a pre-queued backlog restart
+/// the budget on every sleep. The cost is bounded: a hurry can collapse at
+/// most the lead-sized interval ahead of the epoch, and smoothing resumes at
+/// the next actual wait.
+struct Delivery {
+	pacer: moq_mux::Pacer,
+	/// The delivery-lag bound, and the pacer's lead: both are the export's
+	/// latency budget.
+	lead: Duration,
+	/// The last instant the export made us wait for a frame: the conservative
+	/// arrival epoch for frames obtained without waiting (see the type docs).
+	arrived: tokio::time::Instant,
+}
+
+impl Delivery {
+	fn new(lead: Duration) -> Self {
+		Self {
+			pacer: moq_mux::Pacer::default().with_lead(lead),
+			lead,
+			// tokio's clock rather than the bare std one so tests can pause it; in
+			// production they are identical.
+			arrived: tokio::time::Instant::now(),
+		}
+	}
+
+	/// Write one export frame to `out` at its paced instant. `waited` is whether
+	/// the export made us wait for this frame rather than having it ready.
+	async fn deliver(
+		&mut self,
+		frame: &moq_mux::container::Frame,
+		waited: bool,
+		out: &mut (impl tokio::io::AsyncWrite + Unpin),
+	) -> anyhow::Result<()> {
+		let now = tokio::time::Instant::now();
+		if waited {
+			self.arrived = now;
+		}
+
+		let mut send_at = self.pacer.pace(frame.timestamp, now.into_std());
+		if send_at.saturating_duration_since(self.arrived.into_std()) > self.lead {
+			send_at = self.pacer.hurry(frame.timestamp, now.into_std());
+		}
+
+		tokio::time::sleep_until(tokio::time::Instant::from_std(send_at)).await;
+		out.write_all(&frame.payload).await?;
+		out.flush().await?;
+		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use hang::moq_net::{Timescale, Timestamp};
+
+	fn frame(value: u64, scale: Timescale) -> moq_mux::container::Frame {
+		moq_mux::container::Frame {
+			timestamp: Timestamp::new(value, scale).unwrap(),
+			duration: None,
+			payload: bytes::Bytes::from_static(&[0x47; 188]),
+			keyframe: false,
+		}
+	}
+
+	/// Regression for #2984: the TS stdout writer must deliver each frame at the
+	/// instant its timestamp asserts, not as fast as frames arrive. The exporter
+	/// stamps PCR grid frames in microseconds and media frames at the source's own
+	/// timescale, so the spacing must also survive a scale change mid-stream.
+	#[tokio::test(start_paused = true)]
+	async fn ts_frames_are_paced_on_the_media_clock() {
+		let mut delivery = Delivery::new(Duration::from_millis(500));
+		let mut out = Vec::new();
+
+		let start = tokio::time::Instant::now();
+
+		// The first frame anchors the pacer and is written immediately.
+		delivery
+			.deliver(&frame(0, Timescale::MICRO), true, &mut out)
+			.await
+			.unwrap();
+		assert_eq!(start.elapsed(), Duration::ZERO);
+
+		// A PCR slot 25ms later (ready without waiting, like a backfilled grid
+		// slot) waits for its grid boundary.
+		delivery
+			.deliver(&frame(25_000, Timescale::MICRO), false, &mut out)
+			.await
+			.unwrap();
+		assert_eq!(start.elapsed(), Duration::from_millis(25));
+
+		// A media frame at the source's 90 kHz timescale paces on the same clock.
+		delivery
+			.deliver(&frame(3_600, Timescale::new(90_000).unwrap()), true, &mut out)
+			.await
+			.unwrap();
+		assert_eq!(start.elapsed(), Duration::from_millis(40));
+
+		assert_eq!(out.len(), 3 * 188, "every payload was written");
+	}
+
+	/// A backlog delivered faster than real time (a tune-in group replaying from
+	/// its keyframe) must not be slept through step by step: each frame is within
+	/// the lead of the previous sleep's end, but total delivery lag versus the
+	/// frames' arrival would grow with the backlog's length and then stand for
+	/// the pipe's lifetime. Lag is measured against the last wait instead, so the
+	/// drain hurries once it overshoots the latency budget.
+	#[tokio::test(start_paused = true)]
+	async fn backlog_lag_is_bounded_by_the_latency_budget() {
+		let mut delivery = Delivery::new(Duration::from_millis(500));
+		let mut out = Vec::new();
+
+		let start = tokio::time::Instant::now();
+
+		// Frames spanning 1200ms of media, all available at once (waited = false
+		// after the first): pacing may hold each for at most the 500ms budget
+		// past the last wait, not restart the budget after every sleep.
+		delivery
+			.deliver(&frame(0, Timescale::MICRO), true, &mut out)
+			.await
+			.unwrap();
+		delivery
+			.deliver(&frame(400_000, Timescale::MICRO), false, &mut out)
+			.await
+			.unwrap();
+		assert_eq!(start.elapsed(), Duration::from_millis(400), "within the budget: paced");
+
+		delivery
+			.deliver(&frame(800_000, Timescale::MICRO), false, &mut out)
+			.await
+			.unwrap();
+		delivery
+			.deliver(&frame(1_200_000, Timescale::MICRO), false, &mut out)
+			.await
+			.unwrap();
+		assert_eq!(
+			start.elapsed(),
+			Duration::from_millis(400),
+			"past the budget: the drain hurries instead of sleeping"
+		);
+
+		// The hurry made the newest frame the live edge, so pacing resumes
+		// relative to it once the export makes us wait again.
+		delivery
+			.deliver(&frame(1_240_000, Timescale::MICRO), true, &mut out)
+			.await
+			.unwrap();
+		assert_eq!(start.elapsed(), Duration::from_millis(440));
 	}
 }

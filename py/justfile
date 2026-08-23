@@ -123,10 +123,8 @@ package:
 # Build the Sphinx API docs for the `moq` wrapper into py/dist/docs. Read the
 # Docs builds the same config (see .readthedocs.yaml) and hosts the result. The
 # native moq_ffi is mocked (autodoc_mock_imports in docs/conf.py), so this needs
-# no Rust build: install the pure-python wrapper metadata and render.
+# no Rust build.
 docs:
-    uv sync --locked --no-install-workspace
-    uv pip install --no-deps -e moq-rs
     rm -rf dist/docs
-    uv run --no-sync --with sphinx --with myst-parser --with furo \
+    uv run --isolated --locked --only-group docs \
         sphinx-build -b html moq-rs/docs dist/docs

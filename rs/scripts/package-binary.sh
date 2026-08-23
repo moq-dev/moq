@@ -8,9 +8,10 @@ set -euo pipefail
 # the `moq-cli` crate ships its binary as `moq`); it defaults to the crate name.
 #
 # Builds via `nix build .#<crate>` against the flake-pinned toolchain so
-# artifacts are reproducible across hosts. The resulting tarball matches
-# the layout consumed by the Homebrew tap templates in
-# .github/homebrew/Formula/.
+# artifacts are reproducible across hosts. Produces
+# <output>/<crate>-v<version>-<target>.tar.gz, named after the release tag so
+# a URL rewritten from one tag to the next still resolves; the layout matches
+# the Homebrew tap templates in .github/homebrew/Formula/.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -98,7 +99,7 @@ if [[ ! -f "$BIN_FILE" ]]; then
     exit 1
 fi
 
-NAME="$CRATE-$VERSION-$TARGET"
+NAME="$CRATE-v$VERSION-$TARGET"
 PACKAGE_DIR="$OUTPUT_DIR/$NAME"
 
 echo "Packaging $NAME..."
