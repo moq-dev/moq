@@ -1,11 +1,15 @@
 //! UDP through the worker's ring: batched receive, GSO send.
 //!
 //! Receive is one multishot `recvmsg` per socket feeding from a registered
-//! provided-buffer ring: a few large buffers the kernel consumes incrementally
-//! (`IOU_PBUF_RING_INC`), which fits `UDP_GRO`'s 100-byte-to-64KB completion
-//! variance without sizing every slot for the worst case. A completed slice is
-//! handed out as a [`Packet`] and its buffer space returns to the kernel once
-//! every packet borrowing it drops.
+//! provided-buffer ring: each completion consumes one whole buffer, so every
+//! buffer is sized for the worst case (a full `UDP_GRO` coalesce plus the
+//! recvmsg header). Incremental consumption (`IOU_PBUF_RING_INC`) looked like
+//! a better fit for GRO's 100-byte-to-64KB completion variance, but it cannot
+//! back a multishot `recvmsg`: the kernel releases an incremental buffer only
+//! at exactly zero bytes left, and `io_recvmsg_prep_multishot` fails with
+//! `EFAULT` the moment a leftover tail is smaller than the recvmsg header.
+//! A completed buffer is handed out as a [`Packet`] and returns to the kernel
+//! once every packet borrowing it drops.
 //!
 //! Send stages datagrams in a fixed pool of buffers owned by id and released
 //! explicitly on completion, the shape `SENDMSG_ZC`'s deferred-reclaim NOTIF
@@ -41,10 +45,6 @@ const RECV_OVERHEAD: usize = 16 + NAME_LEN + CONTROL_LEN;
 const MAX_RECV: usize = 64 * 1024;
 /// The kernel refuses GSO trains beyond this many segments.
 const MAX_GSO_SEGMENTS: usize = 64;
-/// `IOU_PBUF_RING_INC` (Linux 6.12): the kernel consumes each provided buffer
-/// incrementally across completions. The io-uring crate's `sys` module is
-/// private, so the flag is restated here.
-const PBUF_RING_INC: u16 = 2;
 
 /// How a socket uses the ring. The defaults are the production path; the
 /// toggles exist so the benchmarks can ablate one mechanism at a time.
@@ -59,7 +59,8 @@ pub struct Config {
 	/// Receive through one persistent multishot `recvmsg` and the provided
 	/// buffer ring, instead of re-armed oneshot receives.
 	pub multishot: bool,
-	/// Receive pool: buffer count (rounded up to a power of two).
+	/// Receive pool: buffer count (rounded up to a power of two). Each receive
+	/// completion consumes one buffer, so this is the queue depth.
 	pub rx_buffers: u16,
 	/// Receive pool: bytes per buffer. Must hold one worst-case receive.
 	pub rx_buffer_len: usize,
@@ -75,8 +76,8 @@ impl Default for Config {
 			gro: true,
 			gso: true,
 			multishot: true,
-			rx_buffers: 8,
-			rx_buffer_len: 256 * 1024,
+			rx_buffers: 16,
+			rx_buffer_len: MAX_RECV + RECV_OVERHEAD,
 			tx_buffers: 64,
 			tx_buffer_len: 64 * 1024,
 		}
@@ -87,12 +88,10 @@ impl Default for Config {
 struct RxBuf {
 	/// Stable heap allocation; [`Packet`]s hold raw slices into it.
 	data: Box<[u8]>,
-	/// Multishot: where the kernel's incremental consumption has reached.
-	offset: usize,
 	/// Live [`Packet`]s borrowing slices of this buffer.
 	outstanding: usize,
-	/// Multishot: the kernel moved on from this buffer (no `BUF_MORE`), so it
-	/// recycles once `outstanding` drains.
+	/// Multishot: a completion consumed this buffer, so it recycles back into
+	/// the provided ring once `outstanding` drains.
 	kernel_done: bool,
 	/// Oneshot: an armed receive owns this buffer.
 	claimed: bool,
@@ -125,7 +124,6 @@ fn recycle_if_idle(rx: &mut Rx, bid: u16) -> bool {
 	}
 	// Multishot: hand the whole buffer back to the kernel.
 	buf.kernel_done = false;
-	buf.offset = 0;
 	let addr = buf.data.as_mut_ptr();
 	let len = buf.data.len();
 	if let Some(ring) = &mut rx.ring {
@@ -312,7 +310,6 @@ impl Socket {
 		for _ in 0..rx_count {
 			bufs.push(RxBuf {
 				data: vec![0u8; config.rx_buffer_len].into_boxed_slice(),
-				offset: 0,
 				outstanding: 0,
 				kernel_done: false,
 				claimed: false,
@@ -332,12 +329,9 @@ impl Socket {
 				// armed receive's `Op` keeps alive until its terminal CQE, and
 				// is unregistered before it drops.
 				unsafe {
-					io_ring.submitter().register_buf_ring_with_flags(
-						ring.ptr.as_ptr() as u64,
-						rx_count,
-						bgid,
-						PBUF_RING_INC,
-					)?;
+					io_ring
+						.submitter()
+						.register_buf_ring_with_flags(ring.ptr.as_ptr() as u64, rx_count, bgid, 0)?;
 				}
 			}
 			for (bid, buf) in bufs.iter_mut().enumerate() {
@@ -730,9 +724,9 @@ pub(crate) fn arm_recv(shared: &Rc<Shared>, sock: &Rc<SockShared>) {
 	}
 
 	let entry = if sock.config.multishot {
-		// Only arm with buffers in the kernel's hands (`!kernel_done` means in
-		// the provided ring or mid-fill), or the receive would die on ENOBUFS
-		// immediately and re-arming here would spin.
+		// Only arm with buffers in the provided ring (`!kernel_done`), or the
+		// receive would die on ENOBUFS immediately and re-arming here would
+		// spin.
 		if !rx.bufs.iter().any(|buf| !buf.kernel_done) {
 			return;
 		}
@@ -858,8 +852,8 @@ pub(crate) fn on_recv(
 	}
 }
 
-/// Bookkeeping for one multishot completion: an incremental slice of the
-/// provided buffer it names. Returns the buffer id and the packet, if any.
+/// Bookkeeping for one multishot completion: the provided buffer it names,
+/// consumed whole. Returns the buffer id and the packet, if any.
 fn on_recv_multi(sock: &Rc<SockShared>, cqe: Cqe) -> Result<(u16, Option<Queued>), i32> {
 	let mut rx = sock.rx.borrow_mut();
 	let rx = &mut *rx;
@@ -868,18 +862,13 @@ fn on_recv_multi(sock: &Rc<SockShared>, cqe: Cqe) -> Result<(u16, Option<Queued>
 	};
 	let len = cqe.result as usize;
 	let buf = &mut rx.bufs[bid as usize];
-	let start = buf.offset;
-	if start + len > buf.data.len() {
+	if len > buf.data.len() {
 		return Err(libc::EPROTO);
 	}
-	// The kernel consumed `len` bytes of this buffer, and releases the buffer
-	// entirely unless it says more is coming.
-	buf.offset += len;
-	if !cqueue::buffer_more(cqe.flags) {
-		buf.kernel_done = true;
-	}
+	// The completion consumed the buffer; it returns to the ring on recycle.
+	buf.kernel_done = true;
 
-	let slice = &buf.data[start..start + len];
+	let slice = &buf.data[..len];
 	let Ok(out) = types::RecvMsgOut::parse(slice, &rx.hdr) else {
 		tracing::warn!("dropping malformed multishot recvmsg completion");
 		return Ok((bid, None));

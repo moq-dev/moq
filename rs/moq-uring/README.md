@@ -6,10 +6,12 @@ COOP_TASKRUN` ring, a userspace timer heap, a local (`!Send`) task set, and
 the UDP sockets bound through it.
 
 - **Receive**: one persistent multishot `recvmsg` per socket, fed from a
-  registered provided-buffer ring the kernel consumes incrementally
-  (`IOU_PBUF_RING_INC`), with `UDP_GRO` coalescing. Received packets borrow
-  the pool and hand the space back on drop, which is also the receive-side
-  backpressure.
+  registered provided-buffer ring of worst-case-sized buffers (one per
+  completion), with `UDP_GRO` coalescing. Received packets borrow the pool and
+  hand the space back on drop, which is also the receive-side backpressure.
+  Incremental consumption (`IOU_PBUF_RING_INC`) cannot back a multishot
+  `recvmsg`: the kernel faults the receive once a buffer's leftover tail is
+  smaller than the recvmsg header.
 - **Send**: `sendmsg` with an explicit `UDP_SEGMENT` control message per call,
   staged in a fixed pool of buffers owned by id and released on completion
   (the shape a later `SENDMSG_ZC` needs).
