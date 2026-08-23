@@ -366,6 +366,7 @@ export class Consumer {
 				`skipping slow group: track=${this.#track.name} ${first.consumer.sequence} -> ${this.#active}`,
 			);
 
+			if (first.empty && first.consumer.done) this.#markDiscontinuity();
 			first.consumer.close();
 			first.frames.length = 0;
 			skipped = true;

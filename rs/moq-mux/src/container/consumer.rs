@@ -267,10 +267,7 @@ impl<F: Container> Consumer<F> {
 						self.pending.pop_front();
 						self.current += 1;
 						if empty {
-							self.rewind.discontinuity += 1;
-							self.rewind.live_edge = None;
-							self.rewind.boundary = None;
-							self.end = None;
+							self.mark_discontinuities(1);
 						}
 					}
 				}
@@ -340,7 +337,13 @@ impl<F: Container> Consumer<F> {
 			if let Some((new_idx, _)) = next_group
 				&& should_skip
 			{
+				let discontinuities = self
+					.pending
+					.iter_mut()
+					.take(new_idx)
+					.fold(0, |count, group| count + u64::from(group.poll_empty(waiter)));
 				self.pending.drain(0..new_idx);
+				self.mark_discontinuities(discontinuities);
 				let new_current = self.pending.front().map(|g| g.sequence).unwrap();
 
 				tracing::debug!(old = self.current, new = new_current, "skipping slow groups");
@@ -355,6 +358,17 @@ impl<F: Container> Consumer<F> {
 
 			return Poll::Pending;
 		}
+	}
+
+	fn mark_discontinuities(&mut self, count: u64) {
+		if count == 0 {
+			return;
+		}
+
+		self.rewind.discontinuity += count;
+		self.rewind.live_edge = None;
+		self.rewind.boundary = None;
+		self.end = None;
 	}
 
 	// Reads any new groups from the track until we're completely finished.
@@ -666,6 +680,10 @@ impl GroupBuffer {
 	fn poll_aborted(&mut self, waiter: &kio::Waiter) -> bool {
 		matches!(self.group.poll_finished(waiter), Poll::Ready(Err(_)))
 	}
+
+	fn poll_empty(&mut self, waiter: &kio::Waiter) -> bool {
+		self.empty && matches!(self.group.poll_finished(waiter), Poll::Ready(Ok(_)))
+	}
 }
 
 impl std::ops::Deref for GroupBuffer {
@@ -823,6 +841,27 @@ mod tests {
 			.finish()
 			.unwrap();
 		write_group(&mut track, 2, &[ts(1_000_000)]);
+		track.finish().unwrap();
+
+		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));
+		assert_eq!(consumer.discontinuity(), 0);
+		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(1_000_000));
+		assert_eq!(consumer.discontinuity(), 1);
+	}
+
+	#[tokio::test]
+	async fn latency_skip_preserves_empty_group_discontinuity() {
+		let mut track = track_producer("test", hang::container::track_info());
+		let consumer_track = track.subscribe(None);
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy).with_latency(Duration::ZERO);
+
+		write_group(&mut track, 0, &[ts(0)]);
+		track
+			.create_group(moq_net::group::Info { sequence: 2 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		write_group(&mut track, 3, &[ts(1_000_000)]);
 		track.finish().unwrap();
 
 		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(0));

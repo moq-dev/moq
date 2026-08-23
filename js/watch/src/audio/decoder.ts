@@ -13,6 +13,7 @@ import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
 import { type DecodedSpan, Terminal } from "./terminal";
 import { unlockOnGesture } from "./unlock";
+import { Warmup } from "./warmup";
 
 // How long the latency target must hold steady before a floor increase re-anchors. Coalesces a
 // slider drag (many small steps) into a single re-anchor once the user settles on a value.
@@ -302,13 +303,12 @@ export class Decoder {
 			const loaded = await Util.Libav.polyfill();
 			if (!loaded) return; // cancelled
 
-			let warmed = 0;
+			const warmup = new Warmup(3);
 
 			const decoder = new AudioDecoder({
 				output: (data) => {
 					const decoded = this.#terminal.span(data);
-					warmed++;
-					if (warmed <= 3) {
+					if (warmup.drop()) {
 						// Drop the first 3 frames to prime the decoder.
 						data.close();
 						return;
@@ -338,6 +338,7 @@ export class Decoder {
 				const next = await consumer.next();
 				if (!next) break;
 				if (this.#onNext(next)) {
+					warmup.reset();
 					decoder.reset();
 					decoder.configure(decoderConfig);
 				}
