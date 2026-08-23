@@ -100,6 +100,10 @@ pub struct Producer<E: CatalogExt = ()> {
 	/// (re)start. Emitted PTS = `epoch + frames_produced / codec_rate`. `None`
 	/// until the first write so the next frame re-anchors to its timestamp.
 	epoch_us: Option<u64>,
+	/// An encoder reset that still needs an empty group before its next packet.
+	pending_discontinuity: bool,
+	/// Whether an empty group already separates the next packet from prior codec state.
+	decoder_boundary: bool,
 }
 
 struct Terminal {
@@ -162,6 +166,8 @@ impl<E: CatalogExt> Producer<E> {
 			pending: Vec::new(),
 			frames_produced: 0,
 			epoch_us: None,
+			pending_discontinuity: false,
+			decoder_boundary: true,
 		})
 	}
 
@@ -191,8 +197,16 @@ impl<E: CatalogExt> Producer<E> {
 	/// released-then-reopened microphone) so the gap appears in the PTS and
 	/// audio stays aligned with a wall-clock video track, rather than the gap
 	/// being compressed out by the running sample count. Mirrors moq-boy's
-	/// `reset_epoch`.
+	/// `reset_epoch`. If the codec had started, an empty group is published before
+	/// the next packet so subscribers reset their decoders too.
 	pub fn reset_epoch(&mut self) {
+		if self.encoder.started() && !self.decoder_boundary {
+			self.pending_discontinuity = true;
+		}
+		self.reset_state();
+	}
+
+	fn reset_state(&mut self) {
 		self.epoch_us = None;
 		self.frames_produced = 0;
 		self.pending.clear();
@@ -218,6 +232,12 @@ impl<E: CatalogExt> Producer<E> {
 	/// the next frame's wall-clock stamp); writing straight across a gap without
 	/// resetting compresses it out.
 	pub fn write(&mut self, frame: &Frame) -> Result<(), Error> {
+		if self.pending_discontinuity {
+			self.track.discontinuity()?;
+			self.pending_discontinuity = false;
+			self.decoder_boundary = true;
+		}
+
 		let timestamp_us = u64::try_from(frame.timestamp.as_micros())
 			.map_err(|_| Error::Unsupported(format!("frame timestamp {:?} out of range", frame.timestamp)))?;
 		let epoch_us = *self.epoch_us.get_or_insert(timestamp_us);
@@ -246,6 +266,7 @@ impl<E: CatalogExt> Producer<E> {
 			let timestamp = Self::timestamp(epoch_us, self.frames_produced, self.encoder.codec_rate())?;
 			self.frames_produced += self.encoder.frame_size() as u64;
 			Self::publish(&mut self.track, packet, timestamp)?;
+			self.decoder_boundary = false;
 		}
 
 		Ok(())
@@ -305,15 +326,17 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(())
 	}
 
-	/// Mark a break in the published timeline: whatever is published next does not continue
-	/// what came before.
+	/// Mark a break in the published timeline and reset codec state.
 	///
-	/// Call this when capture stops rather than merely gapping between packets -- going idle,
-	/// switching source, anything that resumes on a re-anchored epoch (see
-	/// [`reset_epoch`](Self::reset_epoch)). See
+	/// Call this when capture stops rather than merely gapping between packets: going idle,
+	/// switching source, or anything else that resumes on a re-anchored epoch. Buffered samples
+	/// are dropped, and the next frame anchors a fresh codec epoch. See
 	/// [`Producer::discontinuity`](moq_mux::container::Producer::discontinuity).
 	pub fn discontinuity(&mut self) -> Result<(), Error> {
 		self.track.discontinuity()?;
+		self.pending_discontinuity = false;
+		self.decoder_boundary = true;
+		self.reset_state();
 		Ok(())
 	}
 
@@ -572,6 +595,52 @@ mod tests {
 
 		assert!(track.read().await.unwrap().is_some());
 		assert!(track.read().await.unwrap().is_none());
+	}
+
+	/// A codec reset starts a new pre-skip interval at the receiver too.
+	#[tokio::test]
+	async fn reset_epoch_restarts_the_decoder() {
+		let input = Input {
+			format: Format::F32,
+			sample_rate: 48_000,
+			channels: 1,
+		};
+		let options = Options {
+			track: Some("audio".to_string()),
+			..Options::default()
+		};
+		let decoder_config = Encoder::new(&options.config(input.clone())).unwrap().catalog();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let subscriber = broadcast.consume();
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+		let mut audio = AudioConsumer::new(
+			&subscriber,
+			&decoder_config,
+			"audio",
+			DecodeConfig {
+				latency_max: Some(Duration::from_millis(500)),
+				..DecodeConfig::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		producer.write(&full_frame(0)).unwrap();
+		let first = audio.read().await.unwrap().expect("first epoch packet");
+		assert_eq!(first.data.len() / size_of::<f32>(), 960 - 312);
+
+		producer.reset_epoch();
+		producer.write(&full_frame(1_000_000)).unwrap();
+		producer.finish().unwrap();
+
+		let mut resumed_frames = 0;
+		while let Some(frame) = audio.read().await.unwrap() {
+			assert!(frame.timestamp.as_micros() >= 1_000_000);
+			resumed_frames += frame.data.len() / size_of::<f32>();
+		}
+		assert_eq!(resumed_frames, 960, "the resumed epoch must trim its own pre-skip once");
 	}
 
 	// One 20 ms Opus frame at 48 kHz mono is exactly 960 f32 samples, so each

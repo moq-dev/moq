@@ -416,6 +416,11 @@ impl Encoder {
 		self.started = false;
 	}
 
+	/// Whether this epoch has submitted audio to the codec.
+	pub(super) fn started(&self) -> bool {
+		self.started
+	}
+
 	/// Encode one frame of interleaved `f32` PCM at [`codec_rate`](Self::codec_rate).
 	///
 	/// `pcm.len()` must equal `frame_size() * codec_channels()`. The

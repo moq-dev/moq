@@ -11,7 +11,7 @@ import { type AudioBuffer, createAudioBuffer } from "./buffer";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
-import { Terminal, terminalFrames } from "./terminal";
+import { type DecodedSpan, Terminal } from "./terminal";
 import { unlockOnGesture } from "./unlock";
 
 // How long the latency target must hold steady before a floor increase re-anchors. Coalesces a
@@ -279,7 +279,9 @@ export class Decoder {
 	}
 
 	#runLegacyDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: Catalog.AudioConfig): void {
-		this.#terminal.clear();
+		const preSkip =
+			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
+		this.#terminal.clear(preSkip);
 		const format = config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
@@ -304,13 +306,14 @@ export class Decoder {
 
 			const decoder = new AudioDecoder({
 				output: (data) => {
+					const decoded = this.#terminal.span(data);
 					warmed++;
 					if (warmed <= 3) {
 						// Drop the first 3 frames to prime the decoder.
 						data.close();
 						return;
 					}
-					this.#emit(data);
+					this.#emit(data, decoded);
 				},
 				error: (error) => console.error("audio decoder error", error),
 			});
@@ -325,15 +328,19 @@ export class Decoder {
 					: config.description
 						? Util.Hex.toBytes(config.description)
 						: undefined;
-			decoder.configure({
+			const decoderConfig: AudioDecoderConfig = {
 				...config,
 				description,
-			});
+			};
+			decoder.configure(decoderConfig);
 
 			for (;;) {
 				const next = await consumer.next();
 				if (!next) break;
-				this.#onNext(next);
+				if (this.#onNext(next)) {
+					decoder.reset();
+					decoder.configure(decoderConfig);
+				}
 				if (next.end !== undefined) {
 					continue;
 				}
@@ -369,10 +376,12 @@ export class Decoder {
 
 	#runCmafDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: Catalog.AudioConfig): void {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
-		this.#terminal.clear();
 
 		const initSegment = base64ToBytes(config.container.init);
 		const init = Container.Cmaf.decodeInitSegment(initSegment);
+		const opusDescription = config.description ? Util.Hex.toBytes(config.description) : init.description;
+		const preSkip = config.codec === "opus" && opusDescription ? Util.Opus.preSkip(opusDescription) : 0;
+		this.#terminal.clear(preSkip);
 		// Opus in CMAF uses raw packets (not OGG-wrapped), so description must be omitted.
 		// The dOps box from the init segment is not a valid OGG Identification Header.
 		const description =
@@ -408,19 +417,23 @@ export class Decoder {
 			});
 
 			// Configure decoder with description from catalog
-			decoder.configure({
+			const decoderConfig: AudioDecoderConfig = {
 				codec: config.codec,
 				sampleRate: config.sampleRate,
 				numberOfChannels: config.numberOfChannels,
 				description,
-			});
+			};
+			decoder.configure(decoderConfig);
 
 			for (;;) {
 				const next = await consumer.next();
 				if (!next) break;
 
-				// Publisher rewound the timeline: flush + re-anchor before decoding the new frame.
-				this.#onNext(next);
+				// Reset and re-anchor before decoding the first frame of a new codec epoch.
+				if (this.#onNext(next)) {
+					decoder.reset();
+					decoder.configure(decoderConfig);
+				}
 
 				const { frame } = next;
 				if (!frame) continue;
@@ -448,10 +461,9 @@ export class Decoder {
 		});
 	}
 
-	#emit(sample: AudioData) {
-		const timestamp = sample.timestamp as Time.Micro;
+	#emit(sample: AudioData, decoded: DecodedSpan = this.#terminal.span(sample)) {
+		const { timestamp, frameOffset, frames } = decoded;
 		const timestampMilli = Time.Milli.fromMicro(timestamp);
-		const frames = terminalFrames(sample, this.#terminal.end);
 		if (frames === 0) {
 			sample.close();
 			return;
@@ -488,7 +500,7 @@ export class Decoder {
 		const channelData: Float32Array[] = [];
 		for (let channel = 0; channel < channels; channel++) {
 			const data = new Float32Array(frames);
-			sample.copyTo(data, { format: "f32-planar", planeIndex: channel, frameCount: frames });
+			sample.copyTo(data, { format: "f32-planar", planeIndex: channel, frameOffset, frameCount: frames });
 			channelData.push(data);
 		}
 
@@ -535,12 +547,13 @@ export class Decoder {
 		this.#ring?.reset();
 	}
 
-	// Apply ordered container metadata before handling the result. A marker that also
-	// starts a rewound epoch must survive the reset so its following drain is trimmed.
-	#onNext(next: { discontinuity: number; end?: Time.Micro }): void {
-		if (!this.#terminal.update(next)) return;
+	// Apply ordered container metadata before handling the result. An endpoint that also
+	// starts a new epoch must survive the reset so its following drain is trimmed.
+	#onNext(next: { discontinuity: number; end?: Time.Micro; frame?: { timestamp: Time.Micro } }): boolean {
+		if (!this.#terminal.update(next)) return false;
 		this.#ring?.reset();
 		this.sync.reset();
+		return true;
 	}
 
 	close() {

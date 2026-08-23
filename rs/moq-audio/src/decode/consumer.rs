@@ -30,6 +30,8 @@ pub struct Consumer {
 	end: Option<moq_net::Timestamp>,
 	/// Presentation time of the first decoded terminal frame.
 	terminal_start: Option<moq_net::Timestamp>,
+	/// Last container discontinuity applied to codec and resampler state.
+	discontinuity: u64,
 }
 
 impl Consumer {
@@ -84,6 +86,7 @@ impl Consumer {
 			frames_decoded: 0,
 			end: None,
 			terminal_start: None,
+			discontinuity: 0,
 		})
 	}
 
@@ -107,7 +110,9 @@ impl Consumer {
 	/// Read the next decoded PCM frame, or `None` when the track ends.
 	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
 		loop {
-			let Some(mux_frame) = self.track.read().await? else {
+			let mux_frame = self.track.read().await?;
+			self.apply_discontinuity()?;
+			let Some(mux_frame) = mux_frame else {
 				return self.flush();
 			};
 
@@ -162,6 +167,26 @@ impl Consumer {
 
 			return Ok(Some(self.frame(pcm, timestamp)?));
 		}
+	}
+
+	/// Reset every stateful decode stage before the first packet of a new epoch.
+	fn apply_discontinuity(&mut self) -> Result<(), Error> {
+		let discontinuity = self.track.discontinuity();
+		if discontinuity == self.discontinuity {
+			return Ok(());
+		}
+
+		self.discontinuity = discontinuity;
+		self.decoder.reset()?;
+		if let Some(resampler) = self.resampler.as_mut() {
+			resampler.reset();
+		}
+		self.tail = None;
+		self.epoch = None;
+		self.frames_decoded = 0;
+		self.end = None;
+		self.terminal_start = None;
+		Ok(())
 	}
 
 	/// The tail the resampler is still holding when the track ends, once.

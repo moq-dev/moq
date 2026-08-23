@@ -17,6 +17,7 @@ export interface ConsumerProps {
 interface Group {
 	consumer: Moq.Group.Consumer;
 	frames: Frame[]; // decode order
+	empty: boolean; // no wire frame was published, which declares a discontinuity
 	latest?: Time.Micro; // The timestamp of the latest known frame
 	end?: Time.Micro; // The furthest presentation point so far, i.e. max(timestamp + duration)
 	done?: boolean; // Set when #runGroup finishes reading all frames
@@ -58,19 +59,19 @@ class Reset {
 }
 
 /**
- * Live state for detecting timeline rewinds and classifying out-of-order groups.
+ * Live state for declared discontinuities and detected timeline rewinds.
  *
  * A publisher reneges its buffered tail by rewinding timestamps while group sequence keeps
  * climbing (e.g. a voice agent interrupted mid-utterance). We track the live edge to spot the
- * jump, a {@link Reset} boundary to classify out-of-order groups across it, and a counter that
- * downstream consumers watch to flush their own queues.
+ * jump and a {@link Reset} boundary to classify out-of-order groups across it. The counter also
+ * advances when delivery reaches an explicit empty-group discontinuity.
  */
 class Rewind {
 	/** The live edge of playback: max delivered timestamp and the group that carried it. */
 	liveEdge?: { group: number; timestamp: Time.Micro };
 	/** The active rewind boundary, if any. */
 	boundary?: Reset;
-	/** Increments on every rewind; downstream consumers flush their queues when it changes. */
+	/** Increments on every declared discontinuity or rewind. */
 	discontinuity = 0;
 }
 
@@ -188,6 +189,7 @@ export class Consumer {
 			const group: Group = {
 				consumer,
 				frames: [],
+				empty: true,
 			};
 
 			// Insert into #groups based on the group sequence number (ascending).
@@ -207,6 +209,7 @@ export class Consumer {
 			for (;;) {
 				const next = await group.consumer.readFrame();
 				if (!next) break;
+				group.empty = false;
 
 				const decoded = this.#format.decode(next.payload);
 
@@ -502,8 +505,8 @@ export class Consumer {
 	 * {@link discontinuity} count, awaiting one if needed. A `frame` of undefined signals either
 	 * the end of that group or, when `end` is present, an exclusive media endpoint carried by a
 	 * legacy marker. The overall result is undefined once closed. When `discontinuity`
-	 * jumps relative to the previous call, the publisher rewound the timeline: flush any
-	 * downstream decoder or render buffers before playing this frame.
+	 * jumps relative to the previous call, the publisher declared a break or rewound the
+	 * timeline: reset codec state and flush downstream render buffers before playing this frame.
 	 *
 	 * `continuous` is true when this result picks up exactly where the previous frame left off, so
 	 * the span between them can be treated as delivered. It is false on the first frame, after a
@@ -512,8 +515,8 @@ export class Consumer {
 	 * comparing group numbers, which are not required to be sequential: adjacency neither proves
 	 * the timeline is unbroken nor catches a group dropped on the way past.
 	 *
-	 * It reports what this consumer dropped, not holes the publisher left. A publisher that jumps
-	 * its timeline between two groups still reads as continuous, because nothing on the wire says
+	 * It reports what this consumer dropped plus empty-group discontinuities the publisher declared.
+	 * An unmarked forward timestamp jump still reads as continuous because nothing on the wire says
 	 * the missing span will never arrive.
 	 */
 	async next(): Promise<
@@ -600,6 +603,7 @@ export class Consumer {
 					const group = this.#groups.shift();
 					if (group) {
 						const seq = group.consumer.sequence;
+						if (group.empty) this.#markDiscontinuity();
 						this.#updateBuffered();
 						return {
 							frame: undefined,
@@ -639,6 +643,17 @@ export class Consumer {
 		}
 	}
 
+	// An empty group is an ordered codec boundary. Unlike a detected rewind it needs no
+	// stale-group classification, because delivery has already reached the marker in sequence.
+	#markDiscontinuity(): void {
+		this.#rewind.discontinuity++;
+		this.#rewind.liveEdge = undefined;
+		this.#rewind.boundary = undefined;
+		this.#presentedEnd = undefined;
+		this.#deliveredGroup = undefined;
+		this.#gap = true;
+	}
+
 	#updateBuffered(): void {
 		const ranges: BufferedRanges = [];
 
@@ -666,9 +681,9 @@ export class Consumer {
 	}
 
 	/**
-	 * A counter that increments each time the consumer detects a timeline rewind and drops the
-	 * reneged buffer. Also surfaced per-read via {@link next}; downstream consumers flush their
-	 * decoder and render buffers when it changes.
+	 * A counter that increments at each declared discontinuity or detected timeline rewind.
+	 * Also surfaced per-read via {@link next}; downstream consumers reset codec state and flush
+	 * render buffers when it changes.
 	 */
 	get discontinuity(): number {
 		return this.#rewind.discontinuity;

@@ -5,7 +5,10 @@
 
 use std::time::Duration;
 
-use unsafe_libopus::{OPUS_OK, OpusDecoder, opus_decode_float, opus_decoder_create, opus_decoder_destroy};
+use unsafe_libopus::{
+	OPUS_OK, OPUS_RESET_STATE, OpusDecoder, opus_decode_float, opus_decoder_create, opus_decoder_ctl_impl,
+	opus_decoder_destroy, varargs,
+};
 
 #[cfg(feature = "aac")]
 use symphonia_core::codecs::audio::AudioDecoder;
@@ -224,6 +227,24 @@ impl Decoder {
 	/// The channel count the codec decodes at, read from the catalog.
 	pub fn channel_count(&self) -> u32 {
 		self.channel_count
+	}
+
+	/// Reset codec history and reapply startup delay for a new discontinuous epoch.
+	pub fn reset(&mut self) -> Result<(), Error> {
+		match &mut self.backend {
+			Backend::Opus(opus) => {
+				// SAFETY: `inner` owns a live decoder and OPUS_RESET_STATE takes no arguments.
+				let rc = unsafe { opus_decoder_ctl_impl(opus.inner, OPUS_RESET_STATE, varargs![]) };
+				if rc != OPUS_OK {
+					return Err(crate::opus::error(rc, "OPUS_RESET_STATE"));
+				}
+				opus.pre_skip_remaining = self.delay;
+			}
+			Backend::Pcm { .. } => {}
+			#[cfg(feature = "aac")]
+			Backend::Aac(aac) => aac.inner.reset(),
+		}
+		Ok(())
 	}
 
 	/// Codec delay trimmed from the beginning of a fresh decoder, in native-rate frames.

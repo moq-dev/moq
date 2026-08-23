@@ -949,6 +949,28 @@ test("Consumer reports continuity while nothing is dropped", async () => {
 	consumer.close();
 });
 
+test("Consumer reports an empty group as a codec discontinuity", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 500 as Time.Milli });
+
+	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro]);
+	const marker = new Group.Producer(1);
+	track.writeGroup(marker);
+	marker.close();
+	writeGroupWithLegacyFrames(track, 2, [1_000_000 as Time.Micro]);
+	await settle();
+
+	expect((await consumer.next())?.discontinuity).toBe(0);
+	expect((await consumer.next())?.discontinuity).toBe(0); // group 0 done
+	const reset = await consumer.next();
+	expect(reset?.frame).toBeUndefined();
+	expect(reset?.discontinuity).toBe(1);
+	expect(reset?.continuous).toBe(false);
+	expect((await consumer.next())?.discontinuity).toBe(1);
+
+	consumer.close();
+});
+
 // The case the group-number heuristic got backwards: ids jump, but the PTS timeline is unbroken.
 test("Consumer reports continuity across a PTS-contiguous group id jump (CMAF)", async () => {
 	const track = new Track.Producer("test");

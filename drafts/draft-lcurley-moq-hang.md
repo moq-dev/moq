@@ -326,6 +326,10 @@ Each moq-lite group MUST start with a keyframe.
 If the codec does not support delta frames (e.g. audio), a group MAY consist of multiple keyframes.
 Otherwise, a group MUST consist of a single keyframe followed by zero or more delta frames.
 
+An empty group declares a discontinuity between codec epochs.
+A consumer MUST reset codec state before decoding the next non-empty group, including reapplying any codec startup delay or pre-skip.
+This applies whether the resumed timestamps move backward or forward.
+
 ## legacy
 The default, used when the `container` field is absent.
 
