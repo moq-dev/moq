@@ -6,6 +6,7 @@
 
 mod announce;
 mod datagram;
+mod dynamic;
 mod fetch;
 mod goaway;
 mod group;
@@ -28,6 +29,7 @@ mod version;
 pub use announce::*;
 #[allow(unused_imports)]
 pub use datagram::*;
+pub use dynamic::*;
 #[allow(unused_imports)]
 pub use fetch::*;
 #[allow(unused_imports)]

@@ -36,6 +36,10 @@ pub mod origin {
 	pub use super::origin_impl::{Consumer, Driver, Dynamic, Info, Producer, Request, Requesting};
 }
 
+// Dynamic patterns (paths an origin could serve on demand) stay flat at the
+// crate root: `crate::pattern` is the Pattern type's own module.
+pub use origin_impl::{PatternAd, PatternAdvertised, Patterns};
+
 /// Subscribing to broadcast (un)announcements from an origin.
 pub mod announce {
 	pub use super::origin_impl::{

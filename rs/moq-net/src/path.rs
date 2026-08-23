@@ -206,6 +206,78 @@ impl<'a> Path<'a> {
 		Some(self.slice_from(prefix.len() + 1))
 	}
 
+	/// Check if this path has the given suffix, respecting path boundaries.
+	///
+	/// Unlike String::ends_with, this ensures that "bar" does not match "foobar".
+	/// The suffix must either:
+	/// - Be exactly equal to this path
+	/// - Be preceded by a '/' delimiter in the original path
+	/// - Be empty (matches everything)
+	///
+	/// # Examples
+	/// ```
+	/// use moq_net::Path;
+	///
+	/// let path = Path::new("foo/bar");
+	/// assert!(path.has_suffix("bar"));
+	/// assert!(path.has_suffix(&Path::new("bar")));
+	/// assert!(!path.has_suffix("ar"));
+	///
+	/// let path = Path::new("foobar");
+	/// assert!(!path.has_suffix("bar"));
+	/// ```
+	pub fn has_suffix(&self, suffix: impl AsPath) -> bool {
+		let suffix = suffix.as_path();
+
+		if suffix.is_empty() {
+			return true;
+		}
+
+		let s = self.as_str();
+		if !s.ends_with(suffix.as_str()) {
+			return false;
+		}
+
+		// Check if the suffix is the exact match
+		if s.len() == suffix.len() {
+			return true;
+		}
+
+		// Otherwise, ensure the character before the suffix is a delimiter
+		s.as_bytes().get(s.len() - suffix.len() - 1) == Some(&b'/')
+	}
+
+	/// The remainder before removing `suffix`, or `None` if it isn't a suffix.
+	///
+	/// Only whole segments match: `ab/c` does not end in `b/c`. An empty suffix
+	/// returns the whole path.
+	pub fn strip_suffix(&'a self, suffix: impl AsPath) -> Option<Path<'a>> {
+		let suffix = suffix.as_path();
+
+		if suffix.is_empty() {
+			return Some(self.borrow());
+		}
+
+		let s = self.as_str();
+		if !s.ends_with(suffix.as_str()) {
+			return None;
+		}
+
+		// Check if the suffix is the exact match
+		if s.len() == suffix.len() {
+			return Some(Path::empty());
+		}
+
+		// Otherwise, ensure the character before the suffix is a delimiter
+		if s.as_bytes().get(s.len() - suffix.len() - 1) != Some(&b'/') {
+			return None;
+		}
+
+		// A leading slice can't reuse a shared buffer's offset, so re-parse the
+		// borrowed half; the input is already normalized, so this never allocates.
+		Some(Path::new(&s[..s.len() - suffix.len() - 1]))
+	}
+
 	/// Iterate over the slash-separated parts of the path.
 	///
 	/// The empty path has no parts.
@@ -897,6 +969,46 @@ mod tests {
 		// Should fail for invalid prefixes
 		assert!(path.strip_prefix("fo").is_none());
 		assert!(path.strip_prefix(Path::new("bar")).is_none());
+	}
+
+	#[test]
+	fn test_has_suffix() {
+		let path = Path::new("foo/bar/baz");
+
+		// Valid suffixes - test with both &str and &Path
+		assert!(path.has_suffix(""));
+		assert!(path.has_suffix("baz"));
+		assert!(path.has_suffix(Path::new("baz")));
+		assert!(path.has_suffix("bar/baz"));
+		assert!(path.has_suffix(Path::new("/bar/baz")));
+		assert!(path.has_suffix("foo/bar/baz"));
+
+		// Invalid suffixes - should not match partial components
+		assert!(!path.has_suffix("z"));
+		assert!(!path.has_suffix(Path::new("az")));
+		assert!(!path.has_suffix("r/baz"));
+		assert!(!path.has_suffix(Path::new("o/bar/baz")));
+
+		// Edge case: "foobar" should not match "bar"
+		let path = Path::new("foobar");
+		assert!(!path.has_suffix("bar"));
+		assert!(path.has_suffix(Path::new("foobar")));
+	}
+
+	#[test]
+	fn test_strip_suffix() {
+		let path = Path::new("foo/bar/baz");
+
+		// Test with both &str and &Path
+		assert_eq!(path.strip_suffix("").unwrap().as_str(), "foo/bar/baz");
+		assert_eq!(path.strip_suffix("baz").unwrap().as_str(), "foo/bar");
+		assert_eq!(path.strip_suffix(Path::new("/baz")).unwrap().as_str(), "foo/bar");
+		assert_eq!(path.strip_suffix("bar/baz").unwrap().as_str(), "foo");
+		assert_eq!(path.strip_suffix("foo/bar/baz").unwrap().as_str(), "");
+
+		// Should fail for invalid suffixes
+		assert!(path.strip_suffix("az").is_none());
+		assert!(path.strip_suffix(Path::new("bar")).is_none());
 	}
 
 	#[test]

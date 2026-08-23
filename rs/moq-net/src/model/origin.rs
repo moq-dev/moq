@@ -2789,6 +2789,263 @@ struct OriginDynamicState {
 	// Set when the origin's driver dropped: new requests fail with `Closed`
 	// immediately and handlers observe the end instead of parking forever.
 	closed: bool,
+
+	// The dynamic-pattern table: what this origin could serve on demand, local
+	// advertisements and those learned from peers alike. Lives here because a
+	// pattern, like a dynamically served broadcast, is never announced and is
+	// not a tree node: it covers paths that mostly do not exist.
+	patterns: PatternTable,
+}
+
+/// One advertised dynamic pattern's route state, keyed by its source id.
+struct PatternRouteState {
+	/// The pattern, absolute (cursor roots apply on presentation).
+	pattern: crate::PatternOwned,
+	hops: OriginList,
+	/// The accumulated single-value route cost, clamped to [`broadcast::MAX_COST`].
+	/// One value rather than the warm/cold pair: a pattern names no carried
+	/// content, so it is never warm and the halves would be provably equal.
+	cost: u64,
+	/// The advertiser identity resolution hashes and exclusions key on: the
+	/// first entry of the reconstructed hop list, or a per-session stand-in.
+	advertiser: Origin,
+}
+
+#[derive(Default)]
+struct PatternTable {
+	routes: HashMap<u64, PatternRouteState>,
+	next_source: u64,
+	/// Bumped on every mutation; watchers poll against it.
+	epoch: u64,
+}
+
+impl PatternTable {
+	fn insert(&mut self, route: PatternRouteState) -> u64 {
+		let id = self.next_source;
+		self.next_source += 1;
+		self.routes.insert(id, route);
+		self.epoch += 1;
+		id
+	}
+}
+
+/// A live local pattern advertisement, returned by [`Producer::advertise`].
+///
+/// Dropping the handle retracts the advertisement; [`set_cost`](Self::set_cost)
+/// replaces its price in place (how a standby re-prices without retracting).
+pub struct PatternAd {
+	state: kio::Shared<OriginDynamicState>,
+	id: u64,
+}
+
+impl PatternAd {
+	pub fn set_cost(&self, cost: u64) {
+		let mut state = self.state.lock();
+		let table = &mut state.patterns;
+		let Some(route) = table.routes.get_mut(&self.id) else {
+			return;
+		};
+		let cost = cost.min(broadcast::MAX_COST);
+		if route.cost != cost {
+			route.cost = cost;
+			table.epoch += 1;
+		}
+	}
+}
+
+impl Drop for PatternAd {
+	fn drop(&mut self) {
+		let mut state = self.state.lock();
+		let table = &mut state.patterns;
+		if table.routes.remove(&self.id).is_some() {
+			table.epoch += 1;
+		}
+	}
+}
+
+/// The best current advertisement of one pattern visible to a cursor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PatternAdvertised {
+	/// The pattern, relative to the observing cursor's root.
+	pub pattern: crate::PatternOwned,
+	pub hops: OriginList,
+	pub cost: u64,
+	pub advertiser: Origin,
+}
+
+/// A cursor over an origin's dynamic-pattern table, from [`Consumer::patterns`].
+///
+/// Poll [`poll_changed`](Self::poll_changed) for wakeups, then diff
+/// [`snapshot`](Self::snapshot) against what was last acted on; the snapshot is
+/// already deduplicated to the best route per pattern, so duplicates present
+/// combined, gone only when the last advertiser retracts.
+pub struct Patterns {
+	state: kio::Shared<OriginDynamicState>,
+	root: PathOwned,
+	exclude: Option<Origin>,
+	seen: u64,
+}
+
+impl Patterns {
+	/// Wait until the pattern table has changed since the last call.
+	///
+	/// A fresh cursor resolves as soon as the table was ever mutated, so it
+	/// observes a pre-existing set immediately rather than waiting for the
+	/// next change.
+	pub fn poll_changed(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let seen = self.seen;
+		let state = ready!(self.state.poll(waiter, |state| {
+			if state.patterns.epoch > seen {
+				Poll::Ready(())
+			} else {
+				Poll::Pending
+			}
+		}));
+		self.seen = state.patterns.epoch;
+		Poll::Ready(())
+	}
+
+	/// The best advertisement per pattern visible to this cursor: rebased by
+	/// its root and excluding routes whose hop chain contains its excluded
+	/// origin, ordered deterministically.
+	pub fn snapshot(&self) -> Vec<PatternAdvertised> {
+		let state = self.state.read();
+		let mut best: HashMap<crate::PatternOwned, PatternAdvertised> = HashMap::new();
+		for route in state.patterns.routes.values() {
+			if let Some(exclude) = self.exclude
+				&& route.hops.contains(&exclude) {
+					continue;
+				}
+			// Rebase by the cursor's root: keep the pattern when some path
+			// under the root could match it.
+			let prefix = match route.pattern.prefix.strip_prefix(&self.root) {
+				Some(rest) => rest.to_owned(),
+				None if self.root.has_prefix(&route.pattern.prefix) => crate::Path::empty().to_owned(),
+				None => continue,
+			};
+			let pattern = crate::Pattern {
+				prefix,
+				suffix: route.pattern.suffix.borrow(),
+			}
+			.to_owned();
+			let candidate = PatternAdvertised {
+				pattern: pattern.clone(),
+				hops: route.hops.clone(),
+				cost: route.cost,
+				advertiser: route.advertiser,
+			};
+			match best.entry(pattern) {
+				std::collections::hash_map::Entry::Occupied(mut current) => {
+					if Self::better(&candidate, current.get()) {
+						current.insert(candidate);
+					}
+				}
+				std::collections::hash_map::Entry::Vacant(slot) => {
+					slot.insert(candidate);
+				}
+			}
+		}
+		let mut out: Vec<_> = best.into_values().collect();
+		out.sort_by(|a, b| {
+			(a.pattern.prefix.as_str(), a.pattern.suffix.as_str())
+				.cmp(&(b.pattern.prefix.as_str(), b.pattern.suffix.as_str()))
+		});
+		out
+	}
+
+	/// Lowest cost wins; ties break toward the shorter chain, then the lower
+	/// advertiser id, so every cursor picks the same representative.
+	fn better(candidate: &PatternAdvertised, current: &PatternAdvertised) -> bool {
+		(candidate.cost, candidate.hops.len(), candidate.advertiser.id())
+			< (current.cost, current.hops.len(), current.advertiser.id())
+	}
+}
+
+impl Producer {
+	/// Advertise a pattern of paths this origin could serve on demand.
+	///
+	/// The pattern's prefix must be within this producer's publish scope, so
+	/// the catch-all (and any suffix-only pattern) demands an unscoped handle.
+	/// The advertisement retracts when the returned [`PatternAd`] drops; a
+	/// standby's `cost` MUST clear the topology-cost floor the draft states,
+	/// or it outranks publishers already doing the work.
+	pub fn advertise(&self, pattern: crate::Pattern, cost: u64) -> Result<PatternAd, Error> {
+		self.nodes.get(&pattern.prefix).ok_or(Error::Unauthorized)?;
+		let route = PatternRouteState {
+			pattern: self.absolute_pattern(&pattern),
+			hops: OriginList::new(),
+			cost: cost.min(broadcast::MAX_COST),
+			advertiser: self.info,
+		};
+		let id = self.dynamic.lock().patterns.insert(route);
+		Ok(PatternAd {
+			state: self.dynamic.clone(),
+			id,
+		})
+	}
+
+	/// Insert a pattern learned from a peer, returning its source id.
+	///
+	/// The prefix is checked against this producer's scope like any publish;
+	/// out-of-scope patterns are discarded with `Unauthorized`, per the draft.
+	pub(crate) fn insert_pattern_route(
+		&self,
+		pattern: &crate::Pattern,
+		hops: OriginList,
+		cost: u64,
+		advertiser: Origin,
+	) -> Result<u64, Error> {
+		self.nodes.get(&pattern.prefix).ok_or(Error::Unauthorized)?;
+		let route = PatternRouteState {
+			pattern: self.absolute_pattern(pattern),
+			hops,
+			cost: cost.min(broadcast::MAX_COST),
+			advertiser,
+		};
+		Ok(self.dynamic.lock().patterns.insert(route))
+	}
+
+	/// Replace a peer-learned pattern's route in place (DYNAMIC_UPDATE).
+	pub(crate) fn update_pattern_route(&self, id: u64, hops: OriginList, cost: u64, advertiser: Origin) {
+		let mut state = self.dynamic.lock();
+		let table = &mut state.patterns;
+		if let Some(route) = table.routes.get_mut(&id) {
+			route.hops = hops;
+			route.cost = cost.min(broadcast::MAX_COST);
+			route.advertiser = advertiser;
+			table.epoch += 1;
+		}
+	}
+
+	/// Remove a peer-learned pattern (DYNAMIC_END, or the stream closing).
+	pub(crate) fn remove_pattern_route(&self, id: u64) {
+		let mut state = self.dynamic.lock();
+		let table = &mut state.patterns;
+		if table.routes.remove(&id).is_some() {
+			table.epoch += 1;
+		}
+	}
+
+	fn absolute_pattern(&self, pattern: &crate::Pattern) -> crate::PatternOwned {
+		crate::Pattern {
+			prefix: self.root.join(&pattern.prefix),
+			suffix: pattern.suffix.borrow(),
+		}
+		.to_owned()
+	}
+}
+
+impl Consumer {
+	/// Observe the dynamic patterns visible to this consumer: rebased by its
+	/// root and filtered by its excluded origin.
+	pub fn patterns(&self) -> Patterns {
+		Patterns {
+			state: self.dynamic.clone(),
+			root: self.root.clone(),
+			exclude: self.exclude,
+			seen: 0,
+		}
+	}
 }
 
 /// One-shot result of a dynamic broadcast request.
@@ -7399,6 +7656,94 @@ mod tests {
 	// instantly via `assert_next` (which uses `now_or_never`). The kio-backed
 	// implementation polls synchronously and can deliver all of them without yielding.
 	// Names are zero-padded so lexicographic delivery order matches the loop index.
+	#[tokio::test]
+	async fn test_pattern_advertise() {
+		let origin = Origin::random().produce();
+		let mut patterns = origin.consume().patterns();
+		assert!(patterns.snapshot().is_empty());
+
+		// A root-scoped producer may advertise anything, including the catch-all.
+		let ad = origin.advertise(crate::Pattern::new("", "transcode.pro"), 1000).unwrap();
+		let all = origin.advertise(crate::Pattern::any(), 5000).unwrap();
+
+		// The cursor wakes for the mutations, and the snapshot is deterministic.
+		kio::wait(|waiter| patterns.poll_changed(waiter)).await;
+		let snapshot = patterns.snapshot();
+		assert_eq!(snapshot.len(), 2);
+		assert_eq!(snapshot[0].pattern, crate::Pattern::any().to_owned());
+		assert_eq!(snapshot[1].pattern, crate::Pattern::new("", "transcode.pro").to_owned());
+		assert_eq!(snapshot[1].cost, 1000);
+
+		// Re-pricing in place, retraction on drop.
+		ad.set_cost(7);
+		kio::wait(|waiter| patterns.poll_changed(waiter)).await;
+		drop(all);
+		kio::wait(|waiter| patterns.poll_changed(waiter)).await;
+		let snapshot = patterns.snapshot();
+		assert_eq!(snapshot.len(), 1);
+		assert_eq!(snapshot[0].cost, 7);
+	}
+
+	#[test]
+	fn test_pattern_scope() {
+		let origin = Origin::random().produce();
+		let scoped = origin.scope(&[crate::Path::new("room")]).unwrap();
+
+		// An in-scope prefix advertises; the catch-all and any suffix-only
+		// pattern claim the whole namespace, which a scoped handle cannot.
+		let _ad = scoped.advertise(crate::Pattern::new("room/live", ""), 1).unwrap();
+		assert!(matches!(
+			scoped.advertise(crate::Pattern::any(), 1),
+			Err(Error::Unauthorized)
+		));
+		assert!(matches!(
+			scoped.advertise(crate::Pattern::new("", "transcode.pro"), 1),
+			Err(Error::Unauthorized)
+		));
+		assert!(matches!(
+			scoped.advertise(crate::Pattern::new("lobby", ""), 1),
+			Err(Error::Unauthorized)
+		));
+	}
+
+	#[test]
+	fn test_pattern_rebase_and_exclude() {
+		let origin = Origin::random().produce();
+		let _ad = origin.advertise(crate::Pattern::new("room/live", "cam"), 3).unwrap();
+
+		// A consumer rooted at the prefix (or below) sees the prefix rebased away;
+		// a disjoint root sees nothing.
+		let rooted = origin.consume().with_root("room").unwrap();
+		let snapshot = rooted.patterns().snapshot();
+		assert_eq!(snapshot.len(), 1);
+		assert_eq!(snapshot[0].pattern, crate::Pattern::new("live", "cam").to_owned());
+
+		let deep = origin.consume().with_root("room/live/deep").unwrap();
+		let snapshot = deep.patterns().snapshot();
+		assert_eq!(snapshot.len(), 1);
+		assert_eq!(snapshot[0].pattern, crate::Pattern::new("", "cam").to_owned());
+
+		let disjoint = origin.consume().with_root("lobby").unwrap();
+		assert!(disjoint.patterns().snapshot().is_empty());
+
+		// A route through the excluded origin is filtered; a clean duplicate of
+		// the same pattern still presents (combined), picked by cost.
+		let peer = Origin::new(9).unwrap();
+		let mut hops = OriginList::new();
+		hops.push(peer).unwrap();
+		origin
+			.insert_pattern_route(&crate::Pattern::new("room/live", "cam"), hops, 1, peer)
+			.unwrap();
+
+		let plain = origin.consume().patterns().snapshot();
+		assert_eq!(plain.len(), 1, "duplicates present combined");
+		assert_eq!(plain[0].cost, 1, "the cheaper advertiser represents the pattern");
+
+		let excluded = origin.consume().excluding(peer).patterns().snapshot();
+		assert_eq!(excluded.len(), 1);
+		assert_eq!(excluded[0].cost, 3, "the excluded route falls back to the local advertisement");
+	}
+
 	#[tokio::test]
 	async fn test_many_announces() {
 		let origin = Origin::random().produce();

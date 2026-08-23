@@ -14,6 +14,7 @@ pub enum ControlType {
 	Probe = 4,
 	Goaway = 5,
 	Track = 6,
+	Dynamic = 7,
 }
 
 impl Decode<Version> for ControlType {

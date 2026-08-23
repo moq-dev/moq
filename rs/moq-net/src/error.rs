@@ -185,6 +185,12 @@ pub enum StreamError {
 	#[error("frame timestamp doesn't match track timescale")]
 	TimestampMismatch,
 
+	/// The advertiser lacks the capacity to take on a dynamically resolved
+	/// request; the receiver may re-resolve once (the draft's assigned 0x30,
+	/// not a placeholder, so it round-trips).
+	#[error("capacity")]
+	Capacity,
+
 	/// An application-chosen code, offset into the 64+ range on the wire.
 	#[error("app code={0}")]
 	App(u16),
@@ -214,6 +220,7 @@ impl StreamError {
 			Self::WrongSize => 0x24,
 			Self::FrameTooLarge => 0x25,
 			Self::TimestampMismatch => 0x26,
+			Self::Capacity => 0x30,
 			Self::App(app) => *app as u32 + 64,
 			Self::Unknown(code) => *code,
 		}
@@ -223,8 +230,9 @@ impl StreamError {
 	///
 	/// Only the registered codes decode. 32-63 is the reserved range: we emit placeholders
 	/// there for conditions the shared codes don't cover, but the draft assigns it no
-	/// meaning, so a received one stays [`Unknown`](Self::Unknown) rather than being read
-	/// as our own placeholder. `to_code` is deliberately not injective as a result.
+	/// meaning (CAPACITY at 0x30 is the one assigned exception), so a received
+	/// placeholder stays [`Unknown`](Self::Unknown) rather than being read back
+	/// as our own. `to_code` is deliberately not injective as a result.
 	///
 	/// `SESSION_CLOSED` decodes to `Session(SessionError::Internal)`: the peer's actual
 	/// session code is not on this stream, so the specific reason is unknown here.
@@ -237,6 +245,7 @@ impl StreamError {
 			0x4 => Self::GoingAway,
 			0x5 => Self::TooFarBehind,
 			0x12 => Self::MalformedTrack,
+			0x30 => Self::Capacity,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
 				Err(_) => Self::Unknown(code),
@@ -376,6 +385,12 @@ pub enum Error {
 	#[error("frame timestamp doesn't match track timescale")]
 	TimestampMismatch,
 
+	/// The advertiser lacks the capacity to take on a dynamically resolved
+	/// request. The one refusal that permits a single re-resolution, excluding
+	/// the refusing advertiser; terminal anywhere else.
+	#[error("capacity")]
+	Capacity,
+
 	/// The group was evicted by its own track to pay eviction debt under memory
 	/// pressure (see [`cache::Pool`](crate::cache::Pool)). Unlike [`Self::Old`],
 	/// the group was still within the publisher's window; it can be re-fetched.
@@ -443,6 +458,7 @@ impl Error {
 			Self::Evicted => 31,
 			Self::GoingAway => 32,
 			Self::GoawayTimeout => 33,
+			Self::Capacity => 34,
 			Self::MalformedTrack => 22,
 			Self::SessionClosed => 25,
 			Self::App(app) => *app as u32 + 64,
@@ -508,6 +524,7 @@ impl From<StreamError> for Error {
 			StreamError::WrongSize => Self::WrongSize,
 			StreamError::FrameTooLarge => Self::FrameTooLarge,
 			StreamError::TimestampMismatch => Self::TimestampMismatch,
+			StreamError::Capacity => Self::Capacity,
 			StreamError::App(app) => Self::App(app),
 			// Deliberately not `inner.into()`: that yields a session-space value, which the
 			// stream re-encode would then put back on a stream. The inner reason is always
@@ -574,6 +591,7 @@ impl From<&Error> for StreamError {
 			Error::WrongSize => Self::WrongSize,
 			Error::FrameTooLarge => Self::FrameTooLarge,
 			Error::TimestampMismatch => Self::TimestampMismatch,
+			Error::Capacity => Self::Capacity,
 			Error::Timeout => Self::DeliveryTimeout,
 			Error::GoingAway => Self::GoingAway,
 			// Our own parse failure is, from the peer's side, a malformed track.
@@ -688,6 +706,7 @@ mod tests {
 			StreamError::GoingAway,
 			StreamError::TooFarBehind,
 			StreamError::MalformedTrack,
+			StreamError::Capacity,
 			StreamError::App(7),
 		];
 		for err in registered {

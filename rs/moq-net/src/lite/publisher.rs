@@ -223,6 +223,7 @@ enum ControlState<S: crate::transport::poll::Session> {
 		stream: Stream<S, Version>,
 	},
 	Announce(AnnounceServe<S>),
+	Dynamic(DynamicServe<S>),
 	Subscribe(SubscribeServe<S>),
 	Fetch(FetchServe<S>),
 	TrackInfo(TrackInfoServe<S>),
@@ -266,11 +267,18 @@ impl<S: crate::transport::poll::Session> Control<S> {
 							ControlState::TrackInfo(TrackInfoServe::new(self.shared.clone(), stream)?)
 						}
 						lite::ControlType::Probe => ControlState::Probe(ProbeServe::new(self.shared.clone(), stream)),
+						lite::ControlType::Dynamic if self.shared.version.has_dynamic() => {
+							ControlState::Dynamic(DynamicServe::new(self.shared.clone(), stream))
+						}
+						// A Dynamic Stream on a pre-lite-06 session is as unknown as an
+						// unregistered type: reset the stream, never the session.
+						lite::ControlType::Dynamic => return Poll::Ready(Err(Error::Cancel)),
 						lite::ControlType::Goaway => ControlState::Goaway { stream },
 						lite::ControlType::Session => return Poll::Ready(Err(Error::UnexpectedStream)),
 					};
 				}
 				ControlState::Announce(serve) => return serve.poll(waiter),
+				ControlState::Dynamic(serve) => return serve.poll(waiter),
 				ControlState::Subscribe(serve) => return serve.poll(waiter),
 				ControlState::Fetch(serve) => return serve.poll(waiter),
 				ControlState::TrackInfo(serve) => return serve.poll(waiter),
@@ -547,6 +555,200 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		let announced = origin.announced();
 		let run = AnnounceRun::new(prefix, exclude_hop, self.shared.self_origin, self.shared.version);
 		self.state = AnnounceState::Run { origin, announced, run };
+	}
+}
+
+/// Serves one Dynamic Stream (lite-06+): advertises the origin's pattern table
+/// filtered to the requested prefix, and forwards changes.
+///
+/// Much simpler than the announce machine: a pattern is never warm, so there is
+/// no demand watch, no cost discount, and no linger; the whole loop is
+/// snapshot-diff against the table's epoch.
+struct DynamicServe<S: crate::transport::poll::Session> {
+	shared: Arc<Shared<S>>,
+	stream: Option<Stream<S, Version>>,
+	state: DynamicState,
+}
+
+#[allow(clippy::large_enum_variant)]
+enum DynamicState {
+	/// Reading the DYNAMIC_REQUEST.
+	Decode,
+	/// Waiting on the peer's SETUP for the session-wide excluded origin.
+	ExcludeHop { prefix: crate::PathOwned },
+	/// Streaming pattern updates.
+	Run {
+		patterns: crate::Patterns,
+		run: DynamicRun,
+	},
+}
+
+struct DynamicRun {
+	prefix: crate::PathOwned,
+	self_origin: Origin,
+	/// The prefixes this session may subscribe under: a pattern is only
+	/// advertised when it could match a path the peer can actually name.
+	allowed: Vec<crate::PathOwned>,
+	// Dynamic ids: every Start we send implicitly assigns the next per-stream
+	// ordinal; End/Update reference the id instead of repeating the pattern.
+	next_id: u64,
+	ids: HashMap<crate::PatternOwned, u64>,
+	/// What the peer currently holds, for diffing snapshots.
+	sent: HashMap<crate::PatternOwned, (crate::OriginList, u64)>,
+	init: bool,
+}
+
+impl<S: crate::transport::poll::Session> DynamicServe<S> {
+	fn new(shared: Arc<Shared<S>>, stream: Stream<S, Version>) -> Self {
+		Self {
+			shared,
+			stream: Some(stream),
+			state: DynamicState::Decode,
+		}
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		loop {
+			match &mut self.state {
+				DynamicState::Decode => {
+					let stream = self.stream.as_mut().expect("stream present");
+					let mut cx = Context::from_waker(waiter.waker());
+					let interest = ready!(stream.reader.poll_decode::<lite::DynamicRequest>(&mut cx))?;
+					let prefix = interest.prefix.to_owned();
+					self.state = DynamicState::ExcludeHop { prefix };
+				}
+				DynamicState::ExcludeHop { prefix } => {
+					let assigned = self.shared.peer_origin.map(|origin| origin.id()).unwrap_or(0);
+					let exclude_hop = ready!(self.shared.peer_setup.poll_origin(waiter))
+						.map(|origin| origin.id())
+						.unwrap_or(assigned);
+					let prefix = prefix.clone();
+					self.start(prefix, exclude_hop);
+				}
+				DynamicState::Run { patterns, run } => {
+					let stream = self.stream.as_mut().expect("stream present");
+					let res = ready!(run.poll(stream, patterns, waiter));
+					if let Err(err) = res {
+						match &err {
+							Error::Cancel | Error::Transport(_) => {
+								tracing::debug!(prefix = %run.prefix, "dynamic serving cancelled");
+							}
+							err => {
+								tracing::warn!(%err, prefix = %run.prefix, "dynamic serving error");
+							}
+						}
+						self.stream.take().expect("stream present").writer.abort(&err);
+					}
+					return Poll::Ready(Ok(()));
+				}
+			}
+		}
+	}
+
+	fn start(&mut self, prefix: crate::PathOwned, exclude_hop: u64) {
+		// The split-horizon peer: never advertise a pattern whose chain flows
+		// through the requester. The cursor's exclusion applies it in-model.
+		let origin = match Origin::new(exclude_hop) {
+			Ok(peer) => self.shared.origin.clone().excluding(peer),
+			Err(_) => self.shared.origin.clone(),
+		};
+		let allowed = origin.allowed().map(|p| p.to_owned()).collect();
+		let patterns = origin.patterns();
+		let run = DynamicRun {
+			prefix,
+			self_origin: self.shared.self_origin,
+			allowed,
+			next_id: 0,
+			ids: HashMap::new(),
+			sent: HashMap::new(),
+			init: false,
+		};
+		self.state = DynamicState::Run { patterns, run };
+	}
+}
+
+impl DynamicRun {
+	fn poll<S: crate::transport::poll::Session>(
+		&mut self,
+		stream: &mut Stream<S, Version>,
+		patterns: &mut crate::Patterns,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<(), Error>> {
+		let mut cx = Context::from_waker(waiter.waker());
+		loop {
+			ready!(stream.writer.poll_flush(&mut cx))?;
+
+			if !self.init {
+				let snapshot = self.filtered(patterns);
+				stream.writer.buffer(&lite::DynamicOk {
+					origin: self.self_origin,
+					active: snapshot.len() as u64,
+				})?;
+				self.apply(stream, snapshot)?;
+				self.init = true;
+				continue;
+			}
+
+			// The peer closing (FIN or reset) retires the stream; nothing here
+			// outlives it, so either way we are done.
+			if stream.reader.poll_closed(&mut cx).is_ready() {
+				return Poll::Ready(Ok(()));
+			}
+
+			ready!(patterns.poll_changed(waiter));
+			let snapshot = self.filtered(patterns);
+			self.apply(stream, snapshot)?;
+		}
+	}
+
+	/// The table's best routes, narrowed to patterns the peer could name: they
+	/// must be able to match a path under the requested prefix AND under some
+	/// prefix the session is scoped to.
+	fn filtered(&self, patterns: &crate::Patterns) -> HashMap<crate::PatternOwned, (crate::OriginList, u64)> {
+		patterns
+			.snapshot()
+			.into_iter()
+			.filter(|advert| advert.pattern.overlaps(&self.prefix))
+			.filter(|advert| self.allowed.iter().any(|allowed| advert.pattern.overlaps(allowed)))
+			.map(|advert| (advert.pattern, (advert.hops, advert.cost)))
+			.collect()
+	}
+
+	/// Diff `snapshot` against what the peer holds and buffer the difference.
+	fn apply<S: crate::transport::poll::Session>(
+		&mut self,
+		stream: &mut Stream<S, Version>,
+		snapshot: HashMap<crate::PatternOwned, (crate::OriginList, u64)>,
+	) -> Result<(), Error> {
+		let gone: Vec<_> = self.sent.keys().filter(|p| !snapshot.contains_key(*p)).cloned().collect();
+		for pattern in gone {
+			self.sent.remove(&pattern);
+			if let Some(id) = self.ids.remove(&pattern) {
+				stream.writer.buffer(&lite::DynamicAdvert::EndId { id })?;
+			}
+		}
+
+		for (pattern, (hops, cost)) in snapshot {
+			match self.sent.get(&pattern) {
+				Some(sent) if sent.0 == hops && sent.1 == cost => {}
+				Some(_) => {
+					let id = *self.ids.get(&pattern).expect("sent pattern without an id");
+					self.sent.insert(pattern, (hops.clone(), cost));
+					stream.writer.buffer(&lite::DynamicAdvert::Update { id, hops, cost })?;
+				}
+				None => {
+					self.ids.insert(pattern.clone(), self.next_id);
+					self.next_id += 1;
+					self.sent.insert(pattern.clone(), (hops.clone(), cost));
+					stream.writer.buffer(&lite::DynamicAdvert::Start {
+						pattern: pattern.borrow(),
+						hops,
+						cost,
+					})?;
+				}
+			}
+		}
+		Ok(())
 	}
 }
 

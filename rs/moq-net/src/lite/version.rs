@@ -142,6 +142,18 @@ impl Version {
 	/// the broadcast via this route, accumulated per link. Added in lite-06.
 	/// Older versions carry nothing, so a received route stays at zero and ranks
 	/// on hop count alone, exactly as before.
+
+	/// Whether the version carries the Dynamic Stream (0x7): pattern
+	/// advertisements for paths a publisher could serve on demand.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_dynamic(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => false,
+			_ => true,
+		}
+	}
+
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_route_cost(self) -> bool {
 		// Match form so future versions default forward (CLAUDE.md convention).

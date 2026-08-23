@@ -469,6 +469,9 @@ pub(super) struct SubscriberDriver<S: crate::transport::poll::Session> {
 	/// One machine per permitted prefix. Only an error ends the session; a
 	/// prefix finishing cleanly (publisher FIN) just retires.
 	prefixes: Vec<AnnouncePrefix<S>>,
+	/// One Dynamic Stream per allowed prefix (lite-06+); each retires quietly
+	/// on any failure, since a peer without support just resets the stream.
+	dynamics: Vec<DynamicPrefix<S>>,
 	uni: UniAccept<S>,
 	/// PROBE feedback; finishes quietly when unsupported or given up on.
 	bandwidth: Option<RecvBandwidth<S>>,
@@ -480,17 +483,23 @@ pub(super) struct SubscriberDriver<S: crate::transport::poll::Session> {
 
 impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 	pub fn new(subscriber: Subscriber<S>) -> Self {
-		let prefixes = subscriber
-			.origin
-			.allowed()
-			.map(|p| p.to_owned())
-			.collect::<Vec<PathOwned>>()
-			.into_iter()
+		let allowed = subscriber.origin.allowed().map(|p| p.to_owned()).collect::<Vec<PathOwned>>();
+		let prefixes = allowed
+			.iter()
+			.cloned()
 			.map(|prefix| AnnouncePrefix::new(subscriber.clone(), prefix))
 			.collect();
+		let dynamics = match subscriber.version.has_dynamic() {
+			true => allowed
+				.into_iter()
+				.map(|prefix| DynamicPrefix::new(subscriber.clone(), prefix))
+				.collect(),
+			false => Vec::new(),
+		};
 
 		Self {
 			prefixes,
+			dynamics,
 			uni: UniAccept::new(subscriber.clone()),
 			bandwidth: Some(RecvBandwidth::new(subscriber.clone())),
 			datagrams: Some(DatagramRecv::new(subscriber.clone())),
@@ -507,6 +516,15 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 					self.prefixes.swap_remove(i);
 				}
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+				Poll::Pending => i += 1,
+			}
+		}
+		let mut i = 0;
+		while i < self.dynamics.len() {
+			match self.dynamics[i].poll(waiter) {
+				Poll::Ready(()) => {
+					self.dynamics.swap_remove(i);
+				}
 				Poll::Pending => i += 1,
 			}
 		}
@@ -1243,6 +1261,239 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 				}
 			}
 		}
+	}
+}
+
+/// One Dynamic Stream (lite-06+): receives pattern advertisements for a prefix
+/// and mirrors them into the origin's pattern table.
+///
+/// Unlike the announce machine, every failure here is graceful: a peer that
+/// predates the stream resets the unknown stream type, and the draft says to
+/// treat that as "nothing dynamic here" rather than a session error.
+struct DynamicPrefix<S: crate::transport::poll::Session> {
+	subscriber: Subscriber<S>,
+	prefix: PathOwned,
+	state: DynamicPrefixState<S>,
+}
+
+enum DynamicPrefixState<S: crate::transport::poll::Session> {
+	/// Opening the control stream (after the GOAWAY gate).
+	Open,
+	/// Flushing the buffered request.
+	Send { stream: Stream<S, Version> },
+	/// Reading the publisher's DYNAMIC_OK.
+	ReadOk { stream: Stream<S, Version> },
+	/// Waiting for the link cost (may block on the peer's SETUP).
+	Cost {
+		stream: Stream<S, Version>,
+		responder_origin: Option<crate::Origin>,
+	},
+	/// Streaming advertisement updates.
+	Run {
+		stream: Stream<S, Version>,
+		run: DynamicPrefixRun,
+	},
+	/// Retired; the driver drops us on the next poll.
+	Done,
+}
+
+struct DynamicPrefixRun {
+	responder_origin: Option<crate::Origin>,
+	link_cost: u64,
+	// Dynamic ids: each received Start implicitly assigns the next per-stream
+	// ordinal; End/Update reference it. Tracked even for advertisements we
+	// drop locally (reflected or out of scope), since the sender doesn't know
+	// we dropped them; those map to `None`.
+	next_id: u64,
+	by_id: HashMap<u64, Option<u64>>,
+}
+
+impl<S: crate::transport::poll::Session> DynamicPrefix<S> {
+	fn new(subscriber: Subscriber<S>, prefix: PathOwned) -> Self {
+		Self {
+			subscriber,
+			prefix,
+			state: DynamicPrefixState::Open,
+		}
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if let Err(err) = ready!(self.poll_inner(waiter)) {
+			// A reset is the spec'd "no dynamic support here" answer, and nothing
+			// on this stream is worth a session, so every failure retires quietly.
+			tracing::debug!(%err, prefix = %self.prefix, "dynamic stream ended");
+		}
+		self.finish();
+		Poll::Ready(())
+	}
+
+	/// Drop every table entry this stream inserted: a closed stream retracts
+	/// its advertisements, exactly like announcements.
+	fn finish(&mut self) {
+		if let DynamicPrefixState::Run { run, .. } = &mut self.state {
+			for source in run.by_id.values().flatten() {
+				self.subscriber.origin.remove_pattern_route(*source);
+			}
+		}
+		self.state = DynamicPrefixState::Done;
+	}
+
+	fn poll_inner(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		loop {
+			match &mut self.state {
+				DynamicPrefixState::Open => {
+					self.subscriber.check_going_away()?;
+					let mut stream = ready!(Stream::poll_open(
+						&mut self.subscriber.session,
+						self.subscriber.version,
+						&mut cx
+					))?;
+
+					stream.writer.buffer(&lite::ControlType::Dynamic)?;
+					stream.writer.buffer(&lite::DynamicRequest {
+						prefix: self.prefix.as_path(),
+					})?;
+					self.state = DynamicPrefixState::Send { stream };
+				}
+				DynamicPrefixState::Send { stream } => {
+					ready!(stream.writer.poll_flush(&mut cx))?;
+					let DynamicPrefixState::Send { stream } =
+						std::mem::replace(&mut self.state, DynamicPrefixState::Open)
+					else {
+						unreachable!()
+					};
+					self.state = DynamicPrefixState::ReadOk { stream };
+				}
+				DynamicPrefixState::ReadOk { stream } => {
+					let ok = ready!(stream.reader.poll_decode::<lite::DynamicOk>(&mut cx))?;
+					// A peer may legally report id 0 (no identity). When the caller
+					// assigned it one, stand that in so the chain isn't loop-blind.
+					let origin = match ok.origin.id() {
+						0 => self.subscriber.peer_origin.unwrap_or(ok.origin),
+						_ => ok.origin,
+					};
+					let DynamicPrefixState::ReadOk { stream } =
+						std::mem::replace(&mut self.state, DynamicPrefixState::Open)
+					else {
+						unreachable!()
+					};
+					self.state = DynamicPrefixState::Cost {
+						stream,
+						responder_origin: Some(origin),
+					};
+				}
+				DynamicPrefixState::Cost { .. } => {
+					let link_cost = ready!(self.subscriber.poll_link_cost(waiter));
+					let DynamicPrefixState::Cost {
+						stream,
+						responder_origin,
+					} = std::mem::replace(&mut self.state, DynamicPrefixState::Open)
+					else {
+						unreachable!()
+					};
+					let run = DynamicPrefixRun {
+						responder_origin,
+						link_cost,
+						next_id: 0,
+						by_id: HashMap::new(),
+					};
+					self.state = DynamicPrefixState::Run { stream, run };
+				}
+				DynamicPrefixState::Run { stream, run } => loop {
+					let Some(advert) = ready!(stream.reader.poll_decode_maybe::<lite::DynamicAdvert>(&mut cx))?
+					else {
+						// The publisher FINed: nothing (more) to advertise here.
+						stream.writer.finish().ok();
+						return Poll::Ready(Ok(()));
+					};
+					Self::handle_advert(&self.subscriber, advert, run)?;
+				},
+				DynamicPrefixState::Done => return Poll::Ready(Ok(())),
+			}
+		}
+	}
+
+	fn handle_advert(
+		subscriber: &Subscriber<S>,
+		advert: lite::DynamicAdvert,
+		run: &mut DynamicPrefixRun,
+	) -> Result<(), Error> {
+		match advert {
+			lite::DynamicAdvert::Start { pattern, hops, cost } => {
+				let id = run.next_id;
+				run.next_id += 1;
+				let source = match Self::prepare_route(subscriber, hops, cost, run) {
+					Some((hops, cost, advertiser)) => subscriber
+						.origin
+						.insert_pattern_route(&pattern, hops, cost, advertiser)
+						.map_err(|_| {
+							// The draft: a receiver MUST discard a pattern whose prefix
+							// exceeds the sender's publish authority.
+							tracing::debug!(%pattern, "discarding out-of-scope pattern");
+						})
+						.ok(),
+					None => None,
+				};
+				run.by_id.insert(id, source);
+			}
+			lite::DynamicAdvert::EndId { id } => {
+				let Some(entry) = run.by_id.remove(&id) else {
+					return Err(Error::ProtocolViolation);
+				};
+				if let Some(source) = entry {
+					subscriber.origin.remove_pattern_route(source);
+				}
+			}
+			lite::DynamicAdvert::Update { id, hops, cost } => {
+				let Some(entry) = run.by_id.get(&id).copied() else {
+					return Err(Error::ProtocolViolation);
+				};
+				let Some(source) = entry else {
+					// Locally dropped (reflected or unauthorized); the id stays
+					// tracked but there is nothing to update.
+					return Ok(());
+				};
+				match Self::prepare_route(subscriber, hops, cost, run) {
+					Some((hops, cost, advertiser)) => {
+						subscriber.origin.update_pattern_route(source, hops, cost, advertiser);
+					}
+					None => {
+						// The replacement chain loops back through us: retract our copy
+						// while keeping the id live, since the sender still holds it.
+						subscriber.origin.remove_pattern_route(source);
+						run.by_id.insert(id, None);
+					}
+				}
+			}
+		}
+		Ok(())
+	}
+
+	/// The shared receive pipeline: append the responder's hop, drop
+	/// reflections, fill an empty chain, resolve the advertiser identity, and
+	/// charge the link cost.
+	fn prepare_route(
+		subscriber: &Subscriber<S>,
+		mut hops: crate::OriginList,
+		cost: u64,
+		run: &DynamicPrefixRun,
+	) -> Option<(crate::OriginList, u64, crate::Origin)> {
+		if let Some(origin) = run.responder_origin
+			&& hops.push(origin).is_err() {
+				tracing::warn!("dropping pattern; hop chain at MAX_HOPS (possible loop)");
+				return None;
+			}
+		if hops.contains(&subscriber.self_origin) {
+			// Reflected: our own advertisement come back around.
+			return None;
+		}
+		if hops.is_empty() {
+			let _ = hops.push(subscriber.session_origin);
+		}
+		let advertiser = hops.iter().next().copied().unwrap_or(subscriber.session_origin);
+		let cost = cost.saturating_add(run.link_cost).min(crate::broadcast::MAX_COST);
+		Some((hops, cost, advertiser))
 	}
 }
 
