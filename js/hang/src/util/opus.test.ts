@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { pickRate, SAMPLE_RATES, supportsRate, toDOps } from "./opus";
+import { pickRate, preSkip, SAMPLE_RATES, supportsRate, toDOps } from "./opus";
 
 describe("pickRate", () => {
 	// Matches the pick_opus_rate tests in rs/moq-audio/src/codec.rs.
@@ -65,5 +65,18 @@ describe("toDOps", () => {
 	it("passes an existing dOps payload through", () => {
 		const dops = Uint8Array.from([0, 2, 1, 56, 0, 0, 187, 128, 0, 0, 0]);
 		expect(toDOps(dops)).toEqual(dops);
+	});
+});
+
+describe("preSkip", () => {
+	it("reads OpusHead and dOps byte order", () => {
+		const head = new Uint8Array(19);
+		head.set(new TextEncoder().encode("OpusHead"));
+		head[8] = 1;
+		new DataView(head.buffer).setUint16(10, 312, true);
+
+		const dops = Uint8Array.from([0, 2, 1, 56, 0, 0, 187, 128, 0, 0, 0]);
+		expect(preSkip(head)).toBe(312);
+		expect(preSkip(dops)).toBe(312);
 	});
 });

@@ -326,11 +326,20 @@ Each moq-lite group MUST start with a keyframe.
 If the codec does not support delta frames (e.g. audio), a group MAY consist of multiple keyframes.
 Otherwise, a group MUST consist of a single keyframe followed by zero or more delta frames.
 
+An empty group declares a discontinuity between codec epochs.
+A consumer MUST reset codec state before decoding the next non-empty group, including reapplying any codec startup delay or pre-skip.
+This applies whether the resumed timestamps move backward or forward.
+
 ## legacy
 The default, used when the `container` field is absent.
 
 Each frame starts with a timestamp, a QUIC variable-length integer (62-bit max) encoded in microseconds.
 The remainder of the payload is codec specific; see the WebCodecs specification for specifics.
+
+A frame with an empty codec payload is an end marker, not media.
+Its timestamp is the exclusive endpoint of the source media.
+When a codec must receive additional packets to emit buffered source samples, the marker MUST precede those terminal packets.
+A consumer MUST NOT submit the marker to the codec decoder, MUST decode the terminal packets, and MUST discard decoded samples at or after the endpoint.
 
 For example, h.264 with no `description` field would be annex.b encoded, while h.264 with a `description` field would be AVCC encoded.
 

@@ -32,13 +32,7 @@ export function pickRate(rate: number): number {
 
 const OPUS_HEAD = new TextEncoder().encode("OpusHead");
 
-/**
- * Convert an OpusHead decoder description into an ISO BMFF dOps payload.
- *
- * Existing dOps payloads pass through unchanged so CMAF descriptions can be
- * remuxed without another format conversion.
- */
-export function toDOps(description: Uint8Array): Uint8Array {
+function header(description: Uint8Array): { offset: number; littleEndian: boolean } {
 	let offset = 0;
 	let littleEndian = false;
 
@@ -55,6 +49,24 @@ export function toDOps(description: Uint8Array): Uint8Array {
 	if (description.length - offset < 11) {
 		throw new Error("Opus decoder description must contain at least 11 bytes");
 	}
+
+	return { offset, littleEndian };
+}
+
+/** Read the codec pre-skip in 48 kHz frames from an OpusHead or dOps payload. */
+export function preSkip(description: Uint8Array): number {
+	const { offset, littleEndian } = header(description);
+	return new DataView(description.buffer, description.byteOffset + offset, 11).getUint16(2, littleEndian);
+}
+
+/**
+ * Convert an OpusHead decoder description into an ISO BMFF dOps payload.
+ *
+ * Existing dOps payloads pass through unchanged so CMAF descriptions can be
+ * remuxed without another format conversion.
+ */
+export function toDOps(description: Uint8Array): Uint8Array {
+	const { offset, littleEndian } = header(description);
 
 	if (!littleEndian) {
 		return description.slice(offset);

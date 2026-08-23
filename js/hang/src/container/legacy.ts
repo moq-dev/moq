@@ -9,15 +9,14 @@ import type { Frame } from "./types";
 
 /** The legacy hang container: a microsecond timestamp varint followed by the raw codec payload. */
 export class Format implements ContainerFormat {
-	/** Decode one legacy frame into a single media frame, or none if it's a marker. */
+	/** Return the marker timestamp for an empty codec payload. */
+	end(frame: Frame): Time.Micro | undefined {
+		return frame.payload.byteLength === 0 ? frame.timestamp : undefined;
+	}
+
+	/** Decode one legacy frame, including an empty-payload endpoint marker. */
 	decode(frame: Uint8Array): Frame[] {
 		const [timestamp, data] = Moq.Varint.decode(frame);
-
-		// An empty payload is a marker, not a sample: it says content stops at this
-		// timestamp, so there's nothing to decode. Yield no frames rather than hand an
-		// empty chunk to a decoder -- a publisher emitting these must not break us.
-		if (data.byteLength === 0) return [];
-
 		return [{ payload: data, timestamp: timestamp as Time.Micro, keyframe: false }];
 	}
 }

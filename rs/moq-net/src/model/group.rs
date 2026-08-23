@@ -23,7 +23,7 @@ use crate::{Error, IntoBytes, Result, Timestamp};
 /// Doubles as the per-frame size cap: a single frame can be at most this large (a
 /// larger declared size is refused before allocating), so one maximum-size frame can
 /// fill a group's cache.
-const MAX_GROUP_CACHE: u64 = 32 * 1024 * 1024; // 32 MB
+pub(super) const MAX_GROUP_CACHE: u64 = 32 * 1024 * 1024; // 32 MB
 
 /// A group contains a sequence number because they can arrive out of order.
 ///

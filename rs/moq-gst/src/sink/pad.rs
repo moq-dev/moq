@@ -25,9 +25,17 @@ enum PadState {
 	Invalid,
 }
 
-/// One sink pad's media producer plus its timeline policy.
+/// What a pad publishes into. Opaque data has no codec to import through, so it writes frames
+/// straight onto the track producer.
+enum Producer {
+	/// Boxed to keep the variants comparable in size (clippy::large_enum_variant).
+	Media(Box<import::Track>),
+	Opaque(moq_net::track::Producer),
+}
+
+/// One sink pad's producer plus its timeline policy.
 pub struct Pad {
-	track: Option<import::Track>,
+	track: Option<Producer>,
 	caps: Option<gst::Caps>,
 	/// Set once a producer build rejects this pad's caps or bitstream; further buffers are dropped and
 	/// the track stays finalized. Isolated to the pad, so the session and other pads keep going.
@@ -94,6 +102,20 @@ impl Pad {
 		let structure = caps.structure(0).context("empty caps")?;
 		// Renegotiation: finalize the previous producer before replacing it (closed once, not abandoned).
 		self.finalize()?;
+		// Opaque data has no codec importer and no catalog entry, so it never reaches the codec match.
+		if structure.name() == "application/octet-stream" {
+			// A generated name would leave the track unfindable: nothing advertises it.
+			let name = requested
+				.context("an opaque data pad requires a track name")?
+				.to_owned();
+			let mut broadcast = broadcast.clone();
+			let request = broadcast.reserve_track(name.clone())?;
+			// Followed at the live edge, so it keeps the default retention the media helper raises.
+			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
+			self.track = Some(Producer::Opaque(request.accept(info)));
+			self.caps = Some(caps.clone());
+			return Ok(name);
+		}
 		let mut broadcast = broadcast.clone();
 		let catalog = catalog.clone();
 		// Every codec converges on one import::Track; only the caps -> importer construction differs. The
@@ -163,7 +185,7 @@ impl Pad {
 			}
 			other => anyhow::bail!("unsupported caps: {other}"),
 		};
-		self.track = Some(track);
+		self.track = Some(Producer::Media(Box::new(track)));
 		self.caps = Some(caps.clone());
 		Ok(name)
 	}
@@ -266,35 +288,59 @@ impl Pad {
 	}
 
 	/// Import one buffer into the producer. A failed or producer-less pad drops the buffer; a timeline
-	/// drop is logged. A bad bitstream (or an oversized frame, rejected by moq-net) invalidates only this
-	/// pad.
+	/// drop is logged. Unstamped opaque data on an active timeline uses the element's current running
+	/// time. A bad bitstream (or an oversized frame, rejected by moq-net) invalidates only this pad.
 	/// Returns `true` the first time a buffer is dropped because the pad has no TIME segment, so the
-	/// caller can surface it once on the bus: without a timeline the pad can never publish.
-	pub fn push_buffer(&mut self, data: Bytes, pts: Option<gst::ClockTime>) -> bool {
+	/// caller can surface it once on the bus. Returns an error when an unstamped opaque buffer has no
+	/// current running time, so the caller fails the flow instead of silently dropping data.
+	pub fn push_buffer(
+		&mut self,
+		data: Bytes,
+		pts: Option<gst::ClockTime>,
+		current_running_time: Option<gst::ClockTime>,
+	) -> std::result::Result<bool, &'static str> {
 		if self.failed {
-			return false;
+			return Ok(false);
 		}
-		let timestamp = self.frame_timestamp(pts);
 		if self.track.is_none() {
 			gst::warning!(CAT, "dropping buffer received before caps");
-			return false;
+			return Ok(false);
 		}
+		let opaque = matches!(self.track.as_ref(), Some(Producer::Opaque(_)));
+		let timestamp = if opaque && pts.is_none() && self.state == PadState::Active {
+			let running_time = current_running_time.ok_or("no current running time for unstamped opaque data")?;
+			let nanos = i64::try_from(running_time.nseconds()).map_err(|_| "current running time is out of range")?;
+			frame_micros(Some(nanos))
+		} else {
+			self.frame_timestamp(pts)
+		};
 		match timestamp {
 			Ok(micros) => {
 				let ts = hang::container::Timestamp::from_micros(micros).ok();
-				let track = self.track.as_mut().expect("track present");
-				if let Err(err) = track.decode(&data, ts) {
-					gst::warning!(CAT, "invalidating pad: {err}");
-					self.fail();
+				// Resolved before acting on it: `fail()` needs `self` back.
+				let result = match self.track.as_mut().expect("track present") {
+					Producer::Media(track) => Some(track.decode(&data, ts).map_err(|err| err.to_string())),
+					// Opaque data bypasses the codec/container importer and writes one group directly.
+					Producer::Opaque(producer) => {
+						ts.map(|ts| producer.write_frame(ts, &data).map_err(|err| err.to_string()))
+					}
+				};
+				match result {
+					Some(Err(err)) => {
+						gst::warning!(CAT, "invalidating pad: {err}");
+						self.fail();
+					}
+					Some(Ok(())) => {}
+					None => gst::warning!(CAT, "dropping frame: timestamp out of range"),
 				}
-				false
+				Ok(false)
 			}
 			Err(reason) => {
 				gst::warning!(CAT, "dropping frame: {reason}");
 				// A pad stuck in NoSegment has no timeline and will never publish; report it once.
 				let first = self.state == PadState::NoSegment && !self.no_segment_reported;
 				self.no_segment_reported |= first;
-				first
+				Ok(first)
 			}
 		}
 	}
@@ -307,19 +353,30 @@ impl Pad {
 		let Some(mut track) = self.track.take() else {
 			return Ok(false);
 		};
-		track.finish()?;
+		match &mut track {
+			Producer::Media(track) => track.finish()?,
+			Producer::Opaque(producer) => producer.finish()?,
+		}
 		Ok(true)
 	}
 }
 
-/// Media types moqsink can build a producer for. Checked synchronously at the CAPS event so an
-/// unsupported type is rejected with NotNegotiated. The structural fields (byte-stream/au, AAC
-/// mpegversion/stream-format) are pinned by the pad template, so negotiation enforces them.
+/// Media types moqsink can build a producer for, plus `application/octet-stream` for opaque data.
+/// Checked synchronously at the CAPS event so an unsupported type is rejected with NotNegotiated. The
+/// structural fields (byte-stream/au, AAC mpegversion/stream-format) are pinned by the pad template,
+/// so negotiation enforces them.
 pub fn caps_supported(caps: &gst::CapsRef) -> bool {
 	let Some(s) = caps.structure(0) else { return false };
 	matches!(
 		s.name().as_str(),
-		"video/x-h264" | "video/x-h265" | "video/x-av1" | "video/x-vp8" | "video/x-vp9" | "audio/mpeg" | "audio/x-opus"
+		"video/x-h264"
+			| "video/x-h265"
+			| "video/x-av1"
+			| "video/x-vp8"
+			| "video/x-vp9"
+			| "audio/mpeg"
+			| "audio/x-opus"
+			| "application/octet-stream"
 	)
 }
 
@@ -363,6 +420,10 @@ mod tests {
 			.field("stream-format", "byte-stream")
 			.field("alignment", "au")
 			.build()
+	}
+
+	fn opaque_caps() -> gst::Caps {
+		gst::Caps::builder("application/octet-stream").build()
 	}
 
 	/// A real Annex-B AU (SPS + PPS + IDR) so the importer publishes a rendition and a frame.
@@ -419,7 +480,8 @@ mod tests {
 			"the reserved name is the requested one"
 		);
 		pad.observe_segment(time_segment());
-		pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO));
+		pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None)
+			.unwrap();
 
 		let snapshot = catalog.snapshot();
 		let renditions: Vec<String> = snapshot.video.renditions.keys().map(|name| name.to_string()).collect();
@@ -520,11 +582,13 @@ mod tests {
 		pad.observe_caps(&broadcast, &catalog, &h264_caps(), None);
 		// No observe_segment: the pad stays in NoSegment.
 		assert!(
-			pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO)),
+			pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None)
+				.unwrap(),
 			"first no-segment buffer is reported"
 		);
 		assert!(
-			!pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO)),
+			!pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None)
+				.unwrap(),
 			"subsequent no-segment buffers are not re-reported"
 		);
 	}
@@ -539,6 +603,168 @@ mod tests {
 		assert!(pad.is_failed());
 	}
 
+	// An opaque track nobody can name is unfindable: it is absent from the catalog by design, so a
+	// generated name would publish bytes no consumer could ask for.
+	#[test]
+	fn an_opaque_pad_requires_a_name() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		assert_eq!(pad.observe_caps(&broadcast, &catalog, &opaque_caps(), None), None);
+		assert!(
+			pad.is_failed(),
+			"an unnamed opaque pad fails instead of generating a name"
+		);
+	}
+
+	// MSF defines no packaging for raw bytes, so the opaque track is not advertised. The media pad's
+	// rendition still resolves, which also shows the opaque pad never reserved a catalog slot: an
+	// unresolved reservation would hold the snapshot back.
+	#[test]
+	fn an_opaque_pad_stays_out_of_the_catalog() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut video = Pad::new();
+		let mut data = Pad::new();
+		video.observe_caps(&broadcast, &catalog, &h264_caps(), Some("camera"));
+		data.observe_caps(&broadcast, &catalog, &opaque_caps(), Some("audiolevels"));
+		assert!(!data.is_failed());
+		video.observe_segment(time_segment());
+		video
+			.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None)
+			.unwrap();
+
+		let snapshot = catalog.snapshot();
+		let renditions: Vec<String> = snapshot.video.renditions.keys().map(|name| name.to_string()).collect();
+		assert_eq!(renditions, ["camera"], "only the media pad is advertised");
+	}
+
+	// The data-track contract: bytes out untouched, one buffer per group, stamped with the PTS the TIME
+	// segment maps.
+	#[tokio::test]
+	async fn an_opaque_pad_publishes_raw_bytes_one_group_per_buffer() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		assert_eq!(
+			pad.observe_caps(&broadcast, &catalog, &opaque_caps(), Some("audiolevels")),
+			Some("audiolevels".to_string())
+		);
+		pad.observe_segment(time_segment());
+		// Opens with a zero byte and carries a non-UTF-8 one: nothing here may be reinterpreted.
+		pad.push_buffer(
+			Bytes::from_static(b"\x00\xffLEVELS"),
+			Some(gst::ClockTime::from_mseconds(40)),
+			None,
+		)
+		.unwrap();
+		pad.push_buffer(
+			Bytes::from_static(b"second"),
+			Some(gst::ClockTime::from_mseconds(80)),
+			None,
+		)
+		.unwrap();
+
+		let mut subscriber = broadcast
+			.consume()
+			.track("audiolevels")
+			.expect("the opaque track is published")
+			.subscribe(None)
+			.await
+			.expect("subscribe to the opaque track");
+
+		let mut group = subscriber.next_group().await.unwrap().expect("a first group");
+		let frame = group.read_frame().await.unwrap().expect("a frame in the first group");
+		assert_eq!(
+			frame.payload.as_ref(),
+			b"\x00\xffLEVELS",
+			"the payload goes out untouched"
+		);
+		assert_eq!(
+			std::time::Duration::from(frame.timestamp).as_micros(),
+			40_000,
+			"the frame carries the PTS mapped through the segment"
+		);
+		assert!(
+			group.read_frame().await.unwrap().is_none(),
+			"one buffer produces one group with one frame"
+		);
+
+		let mut group = subscriber.next_group().await.unwrap().expect("a second group");
+		let frame = group.read_frame().await.unwrap().expect("a frame in the second group");
+		assert_eq!(frame.payload.as_ref(), b"second");
+		assert_eq!(std::time::Duration::from(frame.timestamp).as_micros(), 80_000);
+	}
+
+	// The opaque track declares microseconds so the PTS maps 1:1, and keeps moq-net's retention: the
+	// media helper raises it to 30s for a segmented egress reading history, which a data track never is.
+	#[tokio::test]
+	async fn an_opaque_track_declares_micros_and_the_default_retention() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.observe_caps(&broadcast, &catalog, &opaque_caps(), Some("audiolevels"));
+
+		let subscriber = broadcast
+			.consume()
+			.track("audiolevels")
+			.expect("the opaque track is published")
+			.subscribe(None)
+			.await
+			.expect("subscribe to the opaque track");
+		assert_eq!(subscriber.info().timescale, moq_net::Timescale::MICRO);
+		assert_eq!(
+			subscriber.info().latency_max,
+			moq_net::track::DEFAULT_LATENCY_MAX,
+			"an opaque track keeps the default retention"
+		);
+	}
+
+	// A buffer with no PTS uses the pipeline's current running time, preserving the data and the media
+	// timeline's epoch.
+	#[tokio::test]
+	async fn an_opaque_pad_stamps_a_buffer_without_pts_with_current_running_time() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.observe_caps(&broadcast, &catalog, &opaque_caps(), Some("audiolevels"));
+		pad.observe_segment(time_segment());
+		pad.push_buffer(
+			Bytes::from_static(b"no pts"),
+			None,
+			Some(gst::ClockTime::from_mseconds(25)),
+		)
+		.unwrap();
+		assert!(!pad.is_failed(), "a missing PTS uses the supplied running time");
+
+		let mut subscriber = broadcast
+			.consume()
+			.track("audiolevels")
+			.expect("the opaque track is published")
+			.subscribe(None)
+			.await
+			.expect("subscribe to the opaque track");
+		let mut group = subscriber.next_group().await.unwrap().expect("a group");
+		let frame = group.read_frame().await.unwrap().expect("a frame");
+		assert_eq!(frame.payload.as_ref(), b"no pts", "the unstamped buffer was published");
+		assert_eq!(std::time::Duration::from(frame.timestamp).as_micros(), 25_000);
+	}
+
+	#[test]
+	fn an_unstamped_opaque_buffer_requires_a_current_running_time() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.observe_caps(&broadcast, &catalog, &opaque_caps(), Some("audiolevels"));
+		pad.observe_segment(time_segment());
+
+		assert!(
+			pad.push_buffer(Bytes::from_static(b"no timestamp"), None, None)
+				.is_err(),
+			"the caller gets a hard error instead of a silent drop"
+		);
+	}
+
 	// A failed pad drops further buffers (and never panics) instead of writing them.
 	#[test]
 	fn failed_pad_drops_buffers() {
@@ -548,7 +774,8 @@ mod tests {
 		pad.observe_caps(&broadcast, &catalog, &gst::Caps::builder("video/x-raw").build(), None);
 		assert!(pad.is_failed());
 		pad.observe_segment(time_segment());
-		pad.push_buffer(Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO));
+		pad.push_buffer(Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO), None)
+			.unwrap();
 	}
 
 	// A real IDR AU emits a frame to the published track (not just a rendition off the SPS).
@@ -559,7 +786,8 @@ mod tests {
 		let mut pad = Pad::new();
 		pad.observe_caps(&broadcast, &catalog, &h264_caps(), None);
 		pad.observe_segment(time_segment());
-		pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO));
+		pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None)
+			.unwrap();
 
 		let snapshot = catalog.snapshot();
 		let track = snapshot.video.renditions.keys().next().expect("a video rendition");

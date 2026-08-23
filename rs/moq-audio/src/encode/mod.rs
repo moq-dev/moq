@@ -24,7 +24,7 @@ mod producer;
 #[cfg(feature = "capture")]
 mod capture;
 
-pub use encoder::{Codec, Config, Encoder, Input};
+pub use encoder::{Codec, Config, Encoder, Finish, Input};
 pub use producer::{Options, Producer};
 
 #[cfg(feature = "capture")]

@@ -100,6 +100,18 @@ pub struct Producer<E: CatalogExt = ()> {
 	/// (re)start. Emitted PTS = `epoch + frames_produced / codec_rate`. `None`
 	/// until the first write so the next frame re-anchors to its timestamp.
 	epoch_us: Option<u64>,
+	/// An encoder reset that still needs an empty group before its next packet.
+	pending_discontinuity: bool,
+	/// Whether an empty group already separates the next packet from prior codec state.
+	decoder_boundary: bool,
+}
+
+struct Terminal {
+	packets: Vec<Bytes>,
+	end: Timestamp,
+	start: Timestamp,
+	frame_size: usize,
+	codec_rate: u32,
 }
 
 impl<E: CatalogExt> Producer<E> {
@@ -154,6 +166,8 @@ impl<E: CatalogExt> Producer<E> {
 			pending: Vec::new(),
 			frames_produced: 0,
 			epoch_us: None,
+			pending_discontinuity: false,
+			decoder_boundary: true,
 		})
 	}
 
@@ -183,11 +197,20 @@ impl<E: CatalogExt> Producer<E> {
 	/// released-then-reopened microphone) so the gap appears in the PTS and
 	/// audio stays aligned with a wall-clock video track, rather than the gap
 	/// being compressed out by the running sample count. Mirrors moq-boy's
-	/// `reset_epoch`.
+	/// `reset_epoch`. If the codec had started, an empty group is published before
+	/// the next packet so subscribers reset their decoders too.
 	pub fn reset_epoch(&mut self) {
+		if self.encoder.started() && !self.decoder_boundary {
+			self.pending_discontinuity = true;
+		}
+		self.reset_state();
+	}
+
+	fn reset_state(&mut self) {
 		self.epoch_us = None;
 		self.frames_produced = 0;
 		self.pending.clear();
+		self.encoder.reset();
 		// The resampler holds samples of its own, plus filter state primed by them.
 		// Left alone, `finish` would flush that pre-reset audio onto the track
 		// (stamped at an epoch that no longer exists), and the next write would run
@@ -209,6 +232,12 @@ impl<E: CatalogExt> Producer<E> {
 	/// the next frame's wall-clock stamp); writing straight across a gap without
 	/// resetting compresses it out.
 	pub fn write(&mut self, frame: &Frame) -> Result<(), Error> {
+		if self.pending_discontinuity {
+			self.track.discontinuity()?;
+			self.pending_discontinuity = false;
+			self.decoder_boundary = true;
+		}
+
 		let timestamp_us = u64::try_from(frame.timestamp.as_micros())
 			.map_err(|_| Error::Unsupported(format!("frame timestamp {:?} out of range", frame.timestamp)))?;
 		let epoch_us = *self.epoch_us.get_or_insert(timestamp_us);
@@ -234,21 +263,26 @@ impl<E: CatalogExt> Producer<E> {
 			let chunk: Vec<f32> = self.pending.drain(..frame_samples).collect();
 			let packet = self.encoder.encode(&chunk)?;
 
-			let timestamp = self.timestamp(epoch_us)?;
+			let timestamp = Self::timestamp(epoch_us, self.frames_produced, self.encoder.codec_rate())?;
 			self.frames_produced += self.encoder.frame_size() as u64;
-			self.publish(packet, timestamp)?;
+			Self::publish(&mut self.track, packet, timestamp)?;
+			self.decoder_boundary = false;
 		}
 
 		Ok(())
 	}
 
 	/// PTS of the next frame: the epoch plus the samples emitted since it.
-	fn timestamp(&self, epoch_us: u64) -> Result<Timestamp, Error> {
-		let offset_us = (self.frames_produced * 1_000_000) / self.encoder.codec_rate() as u64;
+	fn timestamp(epoch_us: u64, frames_produced: u64, codec_rate: u32) -> Result<Timestamp, Error> {
+		let offset_us = (frames_produced * 1_000_000) / codec_rate as u64;
 		Ok(Timestamp::from_micros(epoch_us + offset_us)?)
 	}
 
-	fn publish(&mut self, payload: Bytes, timestamp: Timestamp) -> Result<(), Error> {
+	fn publish(
+		track: &mut moq_mux::container::Producer<moq_mux::container::legacy::Wire>,
+		payload: Bytes,
+		timestamp: Timestamp,
+	) -> Result<(), Error> {
 		// Publish each audio packet as its own moq-lite group: write it as a keyframe, then cut
 		// (below) so the relay forwards it without waiting for the next. Codecs can recover
 		// independently after a dropped group.
@@ -258,27 +292,56 @@ impl<E: CatalogExt> Producer<E> {
 			keyframe: true,
 			duration: None,
 		};
-		self.track.write(mux_frame)?;
+		track.write(mux_frame)?;
 		// No boundary to give: the next packet bounds this one, and Opus frames have a
 		// deterministic duration anyway.
-		self.track.cut(None)?;
+		track.cut(None)?;
 		Ok(())
 	}
 
-	/// Mark a break in the published timeline: whatever is published next does not continue
-	/// what came before.
+	/// Publish terminal packets after an empty frame that carries their logical endpoint.
+	fn publish_terminal(
+		track: &mut moq_mux::container::Producer<moq_mux::container::legacy::Wire>,
+		terminal: Terminal,
+	) -> Result<(), Error> {
+		track.write(MuxFrame {
+			timestamp: terminal.end,
+			payload: Bytes::new(),
+			keyframe: true,
+			duration: None,
+		})?;
+
+		for (index, packet) in terminal.packets.into_iter().enumerate() {
+			let offset = Timestamp::from_scale((index * terminal.frame_size) as u64, terminal.codec_rate as u64)?
+				.convert(terminal.start.scale())?;
+			track.write(MuxFrame {
+				timestamp: terminal.start.checked_add(offset)?,
+				payload: packet,
+				keyframe: false,
+				duration: None,
+			})?;
+		}
+
+		track.cut(Some(terminal.end))?;
+		Ok(())
+	}
+
+	/// Mark a break in the published timeline and reset codec state.
 	///
-	/// Call this when capture stops rather than merely gapping between packets -- going idle,
-	/// switching source, anything that resumes on a re-anchored epoch (see
-	/// [`reset_epoch`](Self::reset_epoch)). See
+	/// Call this when capture stops rather than merely gapping between packets: going idle,
+	/// switching source, or anything else that resumes on a re-anchored epoch. Buffered samples
+	/// are dropped, and the next frame anchors a fresh codec epoch. See
 	/// [`Producer::discontinuity`](moq_mux::container::Producer::discontinuity).
 	pub fn discontinuity(&mut self) -> Result<(), Error> {
 		self.track.discontinuity()?;
+		self.pending_discontinuity = false;
+		self.decoder_boundary = true;
+		self.reset_state();
 		Ok(())
 	}
 
-	/// Flush any pending samples (zero-padded to a full frame) and finalize the
-	/// track.
+	/// Flush pending samples, resampler output, and codec lookahead, then finalize
+	/// the track.
 	pub fn finish(mut self) -> Result<(), Error> {
 		// Whatever the resampler still holds belongs to this track: its last partial
 		// chunk, plus the audio its filter is running behind on. Dropping it here
@@ -287,18 +350,38 @@ impl<E: CatalogExt> Producer<E> {
 			self.pending.extend(resampler.flush()?);
 		}
 
-		// The drained tail can be longer than one frame, and the `resize` below
-		// would truncate it rather than encode it.
+		// The drained resampler tail can span multiple frames. Publish those first
+		// so only the final partial frame reaches the encoder's terminal drain.
 		let epoch_us = self.epoch_us.unwrap_or(0);
 		self.publish_full_frames(epoch_us)?;
 
-		let frame_samples = self.encoder.frame_size() * self.encoder.codec_channels() as usize;
-		if !self.pending.is_empty() {
-			self.pending.resize(frame_samples, 0.0);
-			let chunk = std::mem::take(&mut self.pending);
-			let packet = self.encoder.encode(&chunk)?;
-			let timestamp = self.timestamp(epoch_us)?;
-			self.publish(packet, timestamp)?;
+		let frame_size = self.encoder.frame_size();
+		let codec_rate = self.encoder.codec_rate();
+		let channels = self.encoder.codec_channels() as usize;
+		let source_frames = self.pending.len() / channels;
+		let start = Self::timestamp(epoch_us, self.frames_produced, codec_rate)?;
+		let end = Self::timestamp(epoch_us, self.frames_produced + source_frames as u64, codec_rate)?;
+		let finish = self.encoder.finish(&self.pending)?;
+		let discard_padding = finish.discard_padding();
+		let packets = finish.into_packets();
+
+		if discard_padding > 0 {
+			Self::publish_terminal(
+				&mut self.track,
+				Terminal {
+					packets,
+					end,
+					start,
+					frame_size,
+					codec_rate,
+				},
+			)?;
+		} else {
+			for packet in packets {
+				let timestamp = Self::timestamp(epoch_us, self.frames_produced, codec_rate)?;
+				Self::publish(&mut self.track, packet, timestamp)?;
+				self.frames_produced += frame_size as u64;
+			}
 		}
 
 		self.track.finish()?;
@@ -331,6 +414,54 @@ impl<E: CatalogExt> Drop for Rendition<E> {
 mod tests {
 	use super::*;
 	use crate::Format;
+	use crate::decode::{Config as DecodeConfig, Consumer as AudioConsumer};
+
+	/// Terminal Opus lookahead samples survive both exact-frame and partial-frame input.
+	#[tokio::test]
+	async fn finish_publishes_the_opus_lookahead_tail() {
+		for frames in [960, 860] {
+			let input = Input {
+				format: Format::F32,
+				sample_rate: 48_000,
+				channels: 1,
+			};
+			let options = Options {
+				track: Some("audio".to_string()),
+				bitrate: Some(128_000),
+				..Options::default()
+			};
+			let decoder_config = Encoder::new(&options.config(input.clone())).unwrap().catalog();
+
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+			let consumer = broadcast.consume();
+			let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+			let mut audio = AudioConsumer::new(&consumer, &decoder_config, "audio", DecodeConfig::new())
+				.await
+				.unwrap();
+
+			let mut pcm = vec![0.0f32; frames];
+			let impulse = pcm.len() - 100;
+			pcm[impulse] = 1.0;
+			let data: Vec<u8> = pcm.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+			producer
+				.write(&Frame {
+					timestamp: Timestamp::ZERO,
+					data: Bytes::from(data),
+				})
+				.unwrap();
+			producer.finish().unwrap();
+
+			let mut decoded = Vec::new();
+			while let Some(frame) = audio.read().await.unwrap() {
+				let pcm = Format::F32.as_interleaved_f32(&frame.data, 1).unwrap();
+				decoded.extend_from_slice(&pcm);
+			}
+			assert_eq!(decoded.len(), frames, "terminal padding extended the source");
+			let peak = decoded.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+			assert!(peak > 0.1, "the {frames}-frame Opus tail lost the impulse: peak {peak}");
+		}
+	}
 
 	/// A resampled publisher used to end its track early: `finish` flushed the
 	/// encoder's own buffer but left the resampler holding its last partial chunk,
@@ -426,6 +557,90 @@ mod tests {
 
 		// The reset dropped everything, so the track ends without a packet.
 		assert!(track.read().await.unwrap().is_none());
+	}
+
+	/// Resetting after a full frame drops codec lookahead as well as producer buffers.
+	#[tokio::test]
+	async fn reset_epoch_drops_the_encoder_lookahead() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let consumer = broadcast.consume();
+		let options = Options {
+			track: Some("audio".to_string()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(
+			&mut broadcast,
+			catalog,
+			Input {
+				channels: 1,
+				..Input::default()
+			},
+			&options,
+		)
+		.unwrap();
+		let mut track = moq_mux::container::Consumer::new(
+			consumer
+				.track("audio")
+				.unwrap()
+				.subscribe(moq_net::track::Subscription::default())
+				.await
+				.unwrap(),
+			moq_mux::catalog::hang::Container::Legacy,
+		);
+
+		producer.write(&full_frame(1_000_000)).unwrap();
+		producer.reset_epoch();
+		producer.finish().unwrap();
+
+		assert!(track.read().await.unwrap().is_some());
+		assert!(track.read().await.unwrap().is_none());
+	}
+
+	/// A codec reset starts a new pre-skip interval at the receiver too.
+	#[tokio::test]
+	async fn reset_epoch_restarts_the_decoder() {
+		let input = Input {
+			format: Format::F32,
+			sample_rate: 48_000,
+			channels: 1,
+		};
+		let options = Options {
+			track: Some("audio".to_string()),
+			..Options::default()
+		};
+		let decoder_config = Encoder::new(&options.config(input.clone())).unwrap().catalog();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let subscriber = broadcast.consume();
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+		let mut audio = AudioConsumer::new(
+			&subscriber,
+			&decoder_config,
+			"audio",
+			DecodeConfig {
+				latency_max: Some(Duration::from_millis(500)),
+				..DecodeConfig::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		producer.write(&full_frame(0)).unwrap();
+		let first = audio.read().await.unwrap().expect("first epoch packet");
+		assert_eq!(first.data.len() / size_of::<f32>(), 960 - 312);
+
+		producer.reset_epoch();
+		producer.write(&full_frame(1_000_000)).unwrap();
+		producer.finish().unwrap();
+
+		let mut resumed_frames = 0;
+		while let Some(frame) = audio.read().await.unwrap() {
+			assert!(frame.timestamp.as_micros() >= 1_000_000);
+			resumed_frames += frame.data.len() / size_of::<f32>();
+		}
+		assert_eq!(resumed_frames, 960, "the resumed epoch must trim its own pre-skip once");
 	}
 
 	// One 20 ms Opus frame at 48 kHz mono is exactly 960 f32 samples, so each

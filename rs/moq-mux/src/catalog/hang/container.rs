@@ -49,6 +49,14 @@ pub(crate) fn supported(rendition: &str, container: &hang::catalog::Container) -
 impl ContainerTrait for Container {
 	type Error = crate::Error;
 
+	fn end(&self, frame: &Frame) -> Option<moq_net::Timestamp> {
+		match self {
+			Self::Legacy => legacy::Wire.end(frame),
+			Self::Cmaf(cmaf) => cmaf.end(frame),
+			Self::Loc => loc::Wire.end(frame),
+		}
+	}
+
 	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
 		match self {
 			Self::Legacy => legacy::Wire.write(group, frames),

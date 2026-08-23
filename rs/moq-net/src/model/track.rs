@@ -1037,6 +1037,10 @@ impl Producer {
 	/// The timestamp is converted into the track's timescale. For data without
 	/// a presentation time, pass [`Timestamp::now`] explicitly.
 	pub fn write_frame<B: crate::IntoBytes>(&mut self, timestamp: Timestamp, frame: B) -> Result<()> {
+		let frame = crate::IntoBytes::into_bytes(frame);
+		if frame.len() as u64 > group::MAX_GROUP_CACHE {
+			return Err(Error::FrameTooLarge);
+		}
 		let mut group = self.append_group()?;
 		group.write_frame(timestamp, frame)?;
 		group.finish()?;
@@ -4080,6 +4084,18 @@ mod test {
 			.expect("would have errored")
 			.expect("track should not be closed");
 		assert_eq!(&frame.payload[..], b"world");
+	}
+
+	#[test]
+	fn write_frame_rejects_an_oversized_frame_before_appending_its_group() {
+		let mut producer = track_producer("test", None);
+		let frame = bytes::Bytes::from(vec![0; group::MAX_GROUP_CACHE as usize + 1]);
+
+		assert!(matches!(
+			producer.write_frame(Timestamp::ZERO, frame),
+			Err(Error::FrameTooLarge)
+		));
+		assert_eq!(producer.latest(), None, "the rejected frame did not publish a group");
 	}
 
 	#[tokio::test]

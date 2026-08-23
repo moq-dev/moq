@@ -11,11 +11,14 @@ import { type AudioBuffer, createAudioBuffer } from "./buffer";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
+import { type DecodedSpan, Terminal } from "./terminal";
 import { unlockOnGesture } from "./unlock";
+import { Warmup } from "./warmup";
 
 // How long the latency target must hold steady before a floor increase re-anchors. Coalesces a
 // slider drag (many small steps) into a single re-anchor once the user settles on a value.
 const LATENCY_REANCHOR_DEBOUNCE_MS = 150;
+const LEGACY_WARMUP_CALLBACKS = 3;
 
 export type DecoderInput = {
 	// Enable to download the audio track.
@@ -81,9 +84,8 @@ export class Decoder {
 	// arrives we pre-build the graph from the catalog rate; if the real rate differs we rebuild it.
 	#decodedSampleRate = new Signal<number | undefined>(undefined);
 
-	// The last discontinuity count seen from the container consumer. A change means the
-	// publisher rewound the timeline (e.g. a voice agent interrupted) and we must flush.
-	#discontinuity = 0;
+	// Ordered discontinuity and endpoint state from the container consumer.
+	#terminal = new Terminal();
 
 	// How much buffered audio the container consumer retains before skipping
 	// ahead. This must be the latency CEILING (maxBuffer), not the floor
@@ -279,6 +281,9 @@ export class Decoder {
 	}
 
 	#runLegacyDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: Catalog.AudioConfig): void {
+		const preSkip =
+			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
+		this.#terminal.clear(preSkip);
 		const format = config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
@@ -299,17 +304,17 @@ export class Decoder {
 			const loaded = await Util.Libav.polyfill();
 			if (!loaded) return; // cancelled
 
-			let warmed = 0;
+			const warmup = new Warmup(LEGACY_WARMUP_CALLBACKS);
 
 			const decoder = new AudioDecoder({
 				output: (data) => {
-					warmed++;
-					if (warmed <= 3) {
-						// Drop the first 3 frames to prime the decoder.
+					const decoded = this.#terminal.span(data);
+					if (warmup.drop()) {
+						// Drop initial callbacks to prime the decoder.
 						data.close();
 						return;
 					}
-					this.#emit(data);
+					this.#emit(data, decoded);
 				},
 				error: (error) => console.error("audio decoder error", error),
 			});
@@ -324,17 +329,22 @@ export class Decoder {
 					: config.description
 						? Util.Hex.toBytes(config.description)
 						: undefined;
-			decoder.configure({
+			const decoderConfig: AudioDecoderConfig = {
 				...config,
 				description,
-			});
+			};
+			decoder.configure(decoderConfig);
 
 			for (;;) {
 				const next = await consumer.next();
 				if (!next) break;
-
-				// Publisher rewound the timeline: flush + re-anchor before decoding the new frame.
-				this.#onDiscontinuity(next.discontinuity);
+				if (this.#onNext(next)) {
+					decoder.reset();
+					decoder.configure(decoderConfig);
+				}
+				if (next.end !== undefined) {
+					continue;
+				}
 
 				const { frame } = next;
 				if (!frame) continue;
@@ -370,6 +380,9 @@ export class Decoder {
 
 		const initSegment = base64ToBytes(config.container.init);
 		const init = Container.Cmaf.decodeInitSegment(initSegment);
+		const opusDescription = config.description ? Util.Hex.toBytes(config.description) : init.description;
+		const preSkip = config.codec === "opus" && opusDescription ? Util.Opus.preSkip(opusDescription) : 0;
+		this.#terminal.clear(preSkip);
 		// Opus in CMAF uses raw packets (not OGG-wrapped), so description must be omitted.
 		// The dOps box from the init segment is not a valid OGG Identification Header.
 		const description =
@@ -405,19 +418,23 @@ export class Decoder {
 			});
 
 			// Configure decoder with description from catalog
-			decoder.configure({
+			const decoderConfig: AudioDecoderConfig = {
 				codec: config.codec,
 				sampleRate: config.sampleRate,
 				numberOfChannels: config.numberOfChannels,
 				description,
-			});
+			};
+			decoder.configure(decoderConfig);
 
 			for (;;) {
 				const next = await consumer.next();
 				if (!next) break;
 
-				// Publisher rewound the timeline: flush + re-anchor before decoding the new frame.
-				this.#onDiscontinuity(next.discontinuity);
+				// Reset and re-anchor before decoding the first frame of a new codec epoch.
+				if (this.#onNext(next)) {
+					decoder.reset();
+					decoder.configure(decoderConfig);
+				}
 
 				const { frame } = next;
 				if (!frame) continue;
@@ -445,9 +462,13 @@ export class Decoder {
 		});
 	}
 
-	#emit(sample: AudioData) {
-		const timestamp = sample.timestamp as Time.Micro;
+	#emit(sample: AudioData, decoded: DecodedSpan = this.#terminal.span(sample)) {
+		const { timestamp, frameOffset, frames } = decoded;
 		const timestampMilli = Time.Milli.fromMicro(timestamp);
+		if (frames === 0) {
+			sample.close();
+			return;
+		}
 
 		const ring = this.#ring;
 		if (!ring) {
@@ -467,7 +488,7 @@ export class Decoder {
 		}
 
 		// Calculate end time from sample duration
-		const durationMicro = ((sample.numberOfFrames / sample.sampleRate) * 1_000_000) as Time.Micro;
+		const durationMicro = ((frames / sample.sampleRate) * 1_000_000) as Time.Micro;
 		const durationMilli = Time.Milli.fromMicro(durationMicro);
 		const end = Time.Milli.add(timestampMilli, durationMilli);
 
@@ -479,8 +500,8 @@ export class Decoder {
 		const channels = Math.min(sample.numberOfChannels, ring.channels);
 		const channelData: Float32Array[] = [];
 		for (let channel = 0; channel < channels; channel++) {
-			const data = new Float32Array(sample.numberOfFrames);
-			sample.copyTo(data, { format: "f32-planar", planeIndex: channel });
+			const data = new Float32Array(frames);
+			sample.copyTo(data, { format: "f32-planar", planeIndex: channel, frameOffset, frameCount: frames });
 			channelData.push(data);
 		}
 
@@ -527,15 +548,13 @@ export class Decoder {
 		this.#ring?.reset();
 	}
 
-	// React to the container consumer's discontinuity counter. When it changes the publisher
-	// has rewound the timeline, so flush the queued PCM and re-anchor the shared clock before
-	// the first frame of the new utterance is decoded. This makes the wire signal trigger the
-	// same flush as a manual `reset()`, with no app involvement.
-	#onDiscontinuity(count: number): void {
-		if (count === this.#discontinuity) return;
-		this.#discontinuity = count;
+	// Apply ordered container metadata before handling the result. An endpoint that also
+	// starts a new epoch must survive the reset so its following drain is trimmed.
+	#onNext(next: { discontinuity: number; end?: Time.Micro; frame?: { timestamp: Time.Micro } }): boolean {
+		if (!this.#terminal.update(next)) return false;
 		this.#ring?.reset();
 		this.sync.reset();
+		return true;
 	}
 
 	close() {

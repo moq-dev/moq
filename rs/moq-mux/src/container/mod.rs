@@ -111,6 +111,13 @@ pub trait Container {
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>>;
 
+	/// Return the exclusive media endpoint when `frame` is a container marker.
+	///
+	/// Formats without endpoint markers use the default implementation.
+	fn end(&self, _frame: &Frame) -> Option<moq_net::Timestamp> {
+		None
+	}
+
 	/// Async wrapper around [`Self::poll_read`]. Carries the same contract: only
 	/// `Ok(None)` ends the group, and `Ok(Some(batch))` may hand back an empty
 	/// `batch` (poll again for more), so a caller loop must key completion off
