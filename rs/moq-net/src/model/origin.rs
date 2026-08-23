@@ -6512,6 +6512,41 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn test_scope_mutation_under_a_root() {
+		let origin = Origin::random().produce();
+		let _alice = origin.create_broadcast("room/alice", announce()).unwrap();
+		let _bob = origin.create_broadcast("room/bob", announce()).unwrap();
+		settle().await;
+
+		// Rooted at "room", so scope prefixes and announced paths are both relative to
+		// it while the broadcasts underneath keep their absolute paths.
+		let mut consumer = origin
+			.consume()
+			.with_root("room")
+			.expect("should create rooted consumer")
+			.scope(&["alice".into(), "bob".into()])
+			.expect("should create scoped consumer")
+			.announced();
+
+		consumer.assert_next_some("alice");
+		consumer.assert_next_some("bob");
+		consumer.assert_next_wait();
+
+		assert!(consumer.remove_scope("bob"));
+		settle().await;
+		consumer.assert_next_none("bob");
+		consumer.assert_next_wait();
+
+		// Widening to the root spans the "alice" root still held, so only "bob" comes
+		// back. Getting this wrong announces "alice" twice, since suppressing the
+		// replay has to compare absolute paths against a relative node key.
+		assert!(consumer.insert_scope(""));
+		settle().await;
+		consumer.assert_next_some("bob");
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
 	async fn test_with_root_and_publish_scope() {
 		let origin = Origin::random().produce();
 
