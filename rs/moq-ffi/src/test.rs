@@ -102,6 +102,12 @@ async fn raw_track_activity() {
 
 #[tokio::test]
 async fn raw_audio_activity() {
+	const SAMPLE_RATE: u32 = 48_000;
+	const FRAME_DURATION_MS: u32 = 20;
+	const FRAME_SAMPLES: usize = (SAMPLE_RATE * FRAME_DURATION_MS / 1_000) as usize;
+	const FIRST_TIMESTAMP_US: u64 = 1_000_000;
+	const RESUMED_TIMESTAMP_US: u64 = 2_000_000;
+
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
 	let catalog_consumer = consumer.subscribe_catalog().await.unwrap();
@@ -110,7 +116,7 @@ async fn raw_audio_activity() {
 			"microphone".into(),
 			MoqAudioEncoderInput {
 				format: MoqAudioFormat::F32,
-				sample_rate: 48_000,
+				sample_rate: SAMPLE_RATE,
 				channels: 1,
 			},
 			MoqAudioEncoderOutput {
@@ -118,7 +124,7 @@ async fn raw_audio_activity() {
 				sample_rate: None,
 				channels: None,
 				bitrate: None,
-				frame_duration_ms: 20,
+				frame_duration_ms: FRAME_DURATION_MS,
 			},
 		)
 		.unwrap();
@@ -140,8 +146,8 @@ async fn raw_audio_activity() {
 		.unwrap();
 	audio
 		.write(MoqAudioFrame {
-			timestamp_us: 1_000_000,
-			data: vec![0; 960 * std::mem::size_of::<f32>()],
+			timestamp_us: FIRST_TIMESTAMP_US,
+			data: vec![0; FRAME_SAMPLES * std::mem::size_of::<f32>()],
 		})
 		.unwrap();
 	let first = tokio::time::timeout(TIMEOUT, subscription.next())
@@ -149,7 +155,7 @@ async fn raw_audio_activity() {
 		.expect("timed out waiting for raw audio frame")
 		.unwrap()
 		.expect("expected a raw audio frame");
-	assert_eq!(first.timestamp_us, 1_000_000);
+	assert_eq!(first.timestamp_us, FIRST_TIMESTAMP_US);
 
 	drop(subscription);
 	tokio::time::timeout(TIMEOUT, audio.unused())
@@ -168,8 +174,8 @@ async fn raw_audio_activity() {
 	audio.reset_epoch().unwrap();
 	audio
 		.write(MoqAudioFrame {
-			timestamp_us: 2_000_000,
-			data: vec![0; 960 * std::mem::size_of::<f32>()],
+			timestamp_us: RESUMED_TIMESTAMP_US,
+			data: vec![0; FRAME_SAMPLES * std::mem::size_of::<f32>()],
 		})
 		.unwrap();
 	let mut resumed = tokio::time::timeout(TIMEOUT, subscription.next())
@@ -184,7 +190,7 @@ async fn raw_audio_activity() {
 			.unwrap()
 			.expect("expected a re-anchored raw audio frame");
 	}
-	assert_eq!(resumed.timestamp_us, 2_000_000);
+	assert_eq!(resumed.timestamp_us, RESUMED_TIMESTAMP_US);
 
 	audio.finish().unwrap();
 	broadcast.finish().unwrap();
