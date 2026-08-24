@@ -295,6 +295,7 @@ mod tests {
 			channel_count: 2,
 			bitrate: None,
 			container: MoqContainer::Legacy,
+			timeline: None,
 		}
 	}
 

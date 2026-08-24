@@ -60,6 +60,11 @@ public final class BroadcastConsumer: Sendable {
         )
     }
 
+    /// Subscribe to a media track's timestamp-to-group timeline index.
+    public func subscribeTimeline(_ timeline: Timeline) async throws -> TimelineConsumer {
+        TimelineConsumer(try await ffi.subscribeTimeline(timeline: timeline))
+    }
+
     /// Subscribe to a media track, delivering frames in decode order. `container`
     /// comes from the catalog. `subscription` tunes delivery priority, group ordering
     /// priority, group range, and the latency budget; omit for defaults. Raise
