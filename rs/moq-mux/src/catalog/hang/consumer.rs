@@ -58,6 +58,7 @@ impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod test {
 	use std::task::Poll;
 

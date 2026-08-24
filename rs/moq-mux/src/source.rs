@@ -165,6 +165,7 @@ fn invalid_broadcast_reference(rel: Option<&moq_net::PathRelative<'_>>) -> crate
 /// it by path. The origin is leaked so the broadcast stays reachable for the source's
 /// lifetime (harmless in a test binary).
 #[cfg(test)]
+#[allow(deprecated)]
 pub(crate) fn announced(broadcast: &moq_net::broadcast::Consumer) -> Source {
 	let origin = moq_net::Origin::random().produce();
 	let mut dynamic = origin.dynamic();

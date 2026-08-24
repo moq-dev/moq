@@ -218,6 +218,7 @@ impl MoqOriginProducer {
 	///
 	/// Hold the returned object while missing broadcast requests should be accepted.
 	/// Dropping it makes future requests to unknown broadcasts fail.
+	#[allow(deprecated)]
 	pub fn dynamic(&self) -> Arc<MoqOriginDynamic> {
 		let _guard = crate::ffi::enter();
 		Arc::new(MoqOriginDynamic {

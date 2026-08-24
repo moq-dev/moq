@@ -84,6 +84,7 @@ impl Consumer {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
 	use super::*;
 	use crate::decode::Kind;
