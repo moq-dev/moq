@@ -2,7 +2,6 @@
 //! DASH over HTTP from MoQ broadcasts (export), fetching media groups on demand.
 
 use std::net::SocketAddr;
-use std::time::Duration;
 
 use anyhow::Context;
 use axum::http::Method;
@@ -12,30 +11,32 @@ use hang::moq_net::AsPath;
 use crate::moq::notify_ready;
 
 /// HLS import (pull a remote playlist) args.
-#[derive(clap::Args, Clone)]
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ImportArgs {
 	/// Playlist URL (http/https) or local file path.
 	pub playlist: String,
 }
 
 /// HLS export (serve over HTTP) args.
-#[derive(clap::Args, Clone)]
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ExportArgs {
 	/// HTTP listener for the HLS endpoints.
-	#[arg(long, default_value = "[::]:8089")]
+	#[usage(long, default = "[::]:8089")]
 	pub listen: SocketAddr,
 
 	/// TLS certificates, keys, self-signed generation, and optional mTLS roots.
-	#[command(flatten)]
+	#[usage(flatten)]
 	pub tls: moq_tokio::tls::Listen,
 
 	/// Minimum media listed in each rendition's playlist window. Keep it within the
 	/// relay's group-cache retention, since segments are fetched from there on request.
-	#[arg(long, default_value = "16s", value_parser = humantime::parse_duration)]
-	pub window: Duration,
+	#[usage(long, default = "16s")]
+	pub window: moq_tokio::Duration,
 
 	/// Browser CORS policy for the HLS listener.
-	#[command(flatten)]
+	#[usage(flatten)]
 	pub cors: crate::web::Cors,
 }
 
@@ -73,7 +74,7 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 
 	let mut config = moq_hls::export::Config::default();
-	config.window = args.window;
+	config.window = args.window.into_std();
 	let server = moq_hls::Server::new(scoped, config);
 	let app = server.router().layer(args.cors.layer([Method::GET])?);
 

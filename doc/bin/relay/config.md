@@ -11,6 +11,10 @@ moq-relay is configured via a TOML file. Pass the path as the only positional ar
 moq-relay relay.toml
 ```
 
+Settings may also come from command-line flags or `MOQ_*` environment
+variables. Command-line flags take precedence over TOML, TOML takes precedence
+over environment variables, and built-in defaults apply last.
+
 ## Minimal Example
 
 ```toml

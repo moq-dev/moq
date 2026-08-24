@@ -22,33 +22,33 @@ const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
 /// or a private interface; a non-loopback bind logs a warning but is allowed.
 // The derived arg group is named after the struct, so it needs an explicit id to
 // stay unique across the flattened sections.
-#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-#[group(id = "listen-tcp")]
+#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct Config {
 	/// Bind a plaintext qmux TCP listener on this address.
-	#[arg(long = "listen-tcp-bind", id = "listen-tcp-bind", env = "MOQ_LISTEN_TCP_BIND")]
+	#[usage(long = "listen-tcp-bind", name = "listen-tcp-bind", env = "MOQ_LISTEN_TCP_BIND")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub bind: Option<net::SocketAddr>,
 
 	/// The released `--server-tcp-bind` spelling and its env var, folded in by
 	/// [`Config::resolved`].
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(skip)]
 	pub(crate) legacy: Legacy,
 }
 
 /// The `--server-tcp-*` flag from before the accept side was named `listen`.
 ///
-/// A separate arg rather than a clap alias, since an alias renames the flag but
+/// A separate arg rather than a Usage alias, since an alias renames the flag but
 /// leaves its env var behind.
-#[derive(clap::Args, Clone, Debug, Default)]
-#[group(id = "listen-tcp-legacy")]
+#[derive(usage::Args, Clone, Debug, Default)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
-	#[arg(
+	#[usage(
 		long = "server-tcp-bind",
-		id = "server-tcp-bind",
+		name = "server-tcp-bind",
 		env = "MOQ_SERVER_TCP_BIND",
 		hide = true
 	)]
@@ -300,18 +300,22 @@ mod tests {
 #[cfg(test)]
 mod legacy_tests {
 	use super::*;
-	use clap::Parser;
-
-	#[derive(Parser)]
+	#[derive(usage::Cli)]
+	#[usage(unknown_flags = "error", args_override_self = false)]
 	struct Cli {
-		#[command(flatten)]
+		#[usage(flatten)]
 		tcp: Config,
 	}
 
 	/// The released `--server-tcp-bind` is recognized and reported, never bound.
 	#[test]
 	fn released_spelling_is_reported_not_applied() {
-		let config = Cli::parse_from(["test", "--server-tcp-bind", "127.0.0.1:4443"]).tcp;
+		let config = Cli::parse_from(&[
+			std::ffi::OsStr::new("--server-tcp-bind"),
+			std::ffi::OsStr::new("127.0.0.1:4443"),
+		])
+		.unwrap()
+		.tcp;
 		assert_eq!(config.bind, None);
 
 		let reported = config.deprecated().to_string();
@@ -320,7 +324,12 @@ mod legacy_tests {
 			"{reported}"
 		);
 
-		let config = Cli::parse_from(["test", "--listen-tcp-bind", "127.0.0.1:1"]).tcp;
+		let config = Cli::parse_from(&[
+			std::ffi::OsStr::new("--listen-tcp-bind"),
+			std::ffi::OsStr::new("127.0.0.1:1"),
+		])
+		.unwrap()
+		.tcp;
 		assert!(config.deprecated().is_empty());
 		assert_eq!(config.bind, Some("127.0.0.1:1".parse().unwrap()));
 	}

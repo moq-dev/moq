@@ -290,7 +290,7 @@ async fn mtls_test(scheme: &str, backend: moq_tokio::QuicBackend, reject: bool) 
 	// One shared tuning, handed to both roles the way a binary would.
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.gso = Some(false);
-	quic.keep_alive = Some(Duration::from_secs(1));
+	quic.keep_alive = Duration::from_secs(1).into();
 
 	let server = server_config.init(quic.clone()).expect("failed to init server");
 	let mut server = server.listen().await.expect("failed to listen");

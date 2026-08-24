@@ -22,7 +22,6 @@ websocket = ["moq-tokio/websocket"]
 anyhow = { version = "1", features = ["backtrace"] }
 boytacean = { version = "0.13", features = ["gen-mock"] }
 bytes = "1"
-clap = { version = "4", features = ["derive"] }
 hang = { workspace = true }
 moq-audio = { workspace = true }
 moq-json = { workspace = true }
@@ -34,3 +33,4 @@ moq-video = { workspace = true, features = ["nvidia"] }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = "0.1"
+usage = { workspace = true, features = ["completions"] }

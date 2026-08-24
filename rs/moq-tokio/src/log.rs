@@ -9,13 +9,14 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 /// Tracing log configuration.
 #[serde_with::serde_as]
-#[derive(Clone, clap::Parser, Serialize, Deserialize, Debug)]
+#[derive(Clone, usage::Args, Serialize, Deserialize, Debug)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct Log {
 	/// The level filter to use.
 	#[serde_as(as = "DisplayFromStr")]
-	#[arg(id = "log-level", long = "log-level", default_value = "info", env = "MOQ_LOG_LEVEL")]
+	#[usage(name = "log-level", long = "log-level", default = "info", env = "MOQ_LOG_LEVEL")]
 	pub level: Level,
 }
 

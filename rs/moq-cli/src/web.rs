@@ -7,10 +7,11 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 /// Browser CORS policy for HTTP gateway listeners.
-#[derive(clap::Args, Clone, Default)]
+#[derive(usage::Args, Clone, Default)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Cors {
 	/// Browser origin allowed to call this listener. Repeat to allow multiple.
-	#[arg(long = "cors-origin", value_name = "ORIGIN", value_parser = parse_origin)]
+	#[usage(long = "cors-origin", value_name = "ORIGIN")]
 	pub origin: Vec<HeaderValue>,
 }
 
@@ -32,10 +33,6 @@ impl Cors {
 			}
 		})
 	}
-}
-
-fn parse_origin(origin: &str) -> Result<HeaderValue, axum::http::header::InvalidHeaderValue> {
-	origin.parse()
 }
 
 /// Serve an axum router over TCP, optionally terminating TLS. Used by the HLS

@@ -156,7 +156,7 @@ fn client_version(version: Option<moq_net::Version>) -> moq_tokio::Client {
 	// redial would re-register with the relay behind the assertions' back.
 	config.once = Some(true);
 	// Zero head start so the WebSocket path runs immediately.
-	config.websocket.delay = Some(std::time::Duration::ZERO);
+	config.websocket.delay = std::time::Duration::ZERO.into();
 	// Every relay in this file listens on IPv4 loopback, so bind the same family
 	// rather than egressing a QUIC dial from a dual-stack IPv6 socket.
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));

@@ -1,23 +1,41 @@
 //! The token command line surface: generate, sign, and verify tokens for moq-relay.
 //!
-//! Flatten [`Args`] into a `clap` command and call [`Args::run`]. The standalone
+//! Flatten [`Args`] into a Usage command and call [`Args::run`]. The standalone
 //! `moq-token` binary and moq-cli's `moq token` are both built from this crate, so
-//! they stay in sync. The `moq-token` library underneath stays free of clap.
+//! they stay in sync. The `moq-token` library underneath stays free of CLI concerns.
 
 use anyhow::Context;
-use clap::Subcommand;
 use std::{io, path::PathBuf};
 
 use moq_token::Algorithm;
 
+#[derive(usage::Cli)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+#[usage(name = "moq-token")]
+#[usage(about = "Generate, sign, and verify tokens for moq-relay")]
+#[usage(version = env!("VERSION"))]
+#[usage(completion)]
+struct Root {
+	#[usage(subcommand)]
+	command: Command,
+}
+
 /// Generate, sign, and verify tokens for moq-relay.
-#[derive(clap::Args, Clone, Debug)]
+#[derive(usage::Args, Clone, Debug)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
-	#[command(subcommand)]
+	#[usage(subcommand)]
 	command: Command,
 }
 
 impl Args {
+	/// Parse the standalone `moq-token` command line.
+	pub fn parse() -> Self {
+		Self {
+			command: Root::parse().command,
+		}
+	}
+
 	/// Run the requested command, writing the key, token, or payload to the chosen
 	/// destination (stdout by default).
 	pub fn run(self) -> anyhow::Result<()> {
@@ -87,8 +105,8 @@ impl Args {
 					.with_root(root)
 					.with_publish(publish)
 					.with_subscribe(subscribe)
-					.with_expires(expires)
-					.with_issued(issued);
+					.with_expires(expires.map(Into::into))
+					.with_issued(issued.map(Into::into));
 
 				let token = key.sign(&payload)?;
 				println!("{token}");
@@ -110,7 +128,7 @@ impl Args {
 	}
 }
 
-#[derive(Subcommand, Clone, Debug)]
+#[derive(usage::Subcommands, Clone, Debug)]
 enum Command {
 	/// Generate a new signing key.
 	///
@@ -118,77 +136,77 @@ enum Command {
 	/// Output is base64url-encoded JSON.
 	Generate {
 		/// The algorithm to use.
-		#[arg(long, default_value = "HS256")]
+		#[usage(long, default = "HS256")]
 		algorithm: Algorithm,
 
 		/// The key ID. Randomly generated if not provided.
-		#[arg(long)]
+		#[usage(long)]
 		id: Option<String>,
 
 		/// Write the key to a file path. Use `-` for stdout.
-		#[arg(long)]
+		#[usage(long)]
 		out: Option<PathBuf>,
 
 		/// Write the key to a directory as {kid}.jwk.
-		#[arg(long, conflicts_with = "out")]
+		#[usage(long, conflicts = "--out")]
 		out_dir: Option<PathBuf>,
 
 		/// Write the public key to a file path (asymmetric algorithms only). Use `-` for stdout.
-		#[arg(long)]
+		#[usage(long)]
 		public: Option<PathBuf>,
 
 		/// Write the public key to a directory as {kid}.jwk (asymmetric algorithms only).
-		#[arg(long, conflicts_with = "public")]
+		#[usage(long, conflicts = "--public")]
 		public_dir: Option<PathBuf>,
 
 		/// Root path for the optional key scope. Only applied alongside --publish or --subscribe.
-		#[arg(long, default_value = "")]
+		#[usage(long, default = "")]
 		root: String,
 
 		/// Publish prefixes the key may grant (repeatable).
-		#[arg(long)]
+		#[usage(long)]
 		publish: Vec<String>,
 
 		/// Subscribe prefixes the key may grant (repeatable).
-		#[arg(long)]
+		#[usage(long)]
 		subscribe: Vec<String>,
 	},
 
 	/// Sign a token, writing it to stdout.
 	Sign {
 		/// Path to the signing key file. Use `-` for stdin.
-		#[arg(long)]
+		#[usage(long)]
 		key: PathBuf,
 
 		/// The root path for the token.
-		#[arg(long, default_value = "")]
+		#[usage(long, default = "")]
 		root: String,
 
 		/// Paths the user can publish to (repeatable).
-		#[arg(long)]
+		#[usage(long)]
 		publish: Vec<String>,
 
 		/// Paths the user can subscribe to (repeatable).
-		#[arg(long)]
+		#[usage(long)]
 		subscribe: Vec<String>,
 
 		/// Expiration time as a unix timestamp.
-		#[arg(long, value_parser = parse_unix_timestamp)]
-		expires: Option<std::time::SystemTime>,
+		#[usage(long)]
+		expires: Option<UnixTimestamp>,
 
 		/// Issued-at time as a unix timestamp.
-		#[arg(long, value_parser = parse_unix_timestamp)]
-		issued: Option<std::time::SystemTime>,
+		#[usage(long)]
+		issued: Option<UnixTimestamp>,
 	},
 
 	/// Verify a token, writing the payload to stdout.
 	Verify {
 		/// Path to the key file. Use `-` for stdin (requires `--in` to be a file).
-		#[arg(long)]
+		#[usage(long)]
 		key: PathBuf,
 
 		/// Path to read the token from. Use `-` for stdin.
-		#[arg(long = "in", default_value = "-")]
+		#[usage(long = "in", default = "-")]
 		token: PathBuf,
 	},
 }
@@ -225,32 +243,41 @@ fn read_token(path: &std::path::Path) -> anyhow::Result<String> {
 	Ok(raw.trim().to_string())
 }
 
-fn parse_unix_timestamp(s: &str) -> anyhow::Result<std::time::SystemTime> {
-	let timestamp = s.parse::<i64>().context("expected unix timestamp")?;
-	let timestamp = timestamp.try_into().context("timestamp out of range")?;
-	// checked_add, because plain `+` panics on overflow and how far a SystemTime
-	// reaches is platform-dependent: a timespec holds i64 seconds, while Windows
-	// counts 100ns ticks and runs out far sooner.
-	std::time::SystemTime::UNIX_EPOCH
-		.checked_add(std::time::Duration::from_secs(timestamp))
-		.context("timestamp out of range")
+#[derive(Clone, Copy, Debug)]
+struct UnixTimestamp(std::time::SystemTime);
+
+impl From<UnixTimestamp> for std::time::SystemTime {
+	fn from(value: UnixTimestamp) -> Self {
+		value.0
+	}
+}
+
+impl std::str::FromStr for UnixTimestamp {
+	type Err = anyhow::Error;
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		let timestamp = s.parse::<i64>().context("expected unix timestamp")?;
+		let timestamp = timestamp.try_into().context("timestamp out of range")?;
+		// checked_add, because plain `+` panics on overflow and how far a SystemTime
+		// reaches is platform-dependent: a timespec holds i64 seconds, while Windows
+		// counts 100ns ticks and runs out far sooner.
+		let value = std::time::SystemTime::UNIX_EPOCH
+			.checked_add(std::time::Duration::from_secs(timestamp))
+			.context("timestamp out of range")?;
+		Ok(Self(value))
+	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use clap::Parser;
-
-	/// Drive the same clap grammar the binaries expose, rather than building
+	/// Drive the same Usage grammar the binaries expose, rather than building
 	/// `Command` directly, so the flags stay part of what's under test.
-	#[derive(Parser)]
-	struct Harness {
-		#[command(flatten)]
-		args: Args,
-	}
-
 	fn run(args: &[&str]) -> anyhow::Result<()> {
-		Harness::try_parse_from(args)?.args.run()
+		let args = args.iter().skip(1).map(std::ffi::OsStr::new).collect::<Vec<_>>();
+		let root =
+			Root::parse_from(&args).map_err(|err| anyhow::anyhow!(usage::render_failure(Root::spec(), &args, &err)))?;
+		Args { command: root.command }.run()
 	}
 
 	#[test]
@@ -343,14 +370,14 @@ mod tests {
 
 	#[test]
 	fn timestamp_before_the_epoch_is_rejected() {
-		assert!(parse_unix_timestamp("-1").is_err());
-		assert!(parse_unix_timestamp("not-a-number").is_err());
+		assert!("-1".parse::<UnixTimestamp>().is_err());
+		assert!("not-a-number".parse::<UnixTimestamp>().is_err());
 	}
 
 	// Whether the largest parseable timestamp is representable depends on the
 	// platform's SystemTime, so assert only that it never panics.
 	#[test]
 	fn timestamp_at_the_maximum_does_not_panic() {
-		let _ = parse_unix_timestamp(&i64::MAX.to_string());
+		let _ = i64::MAX.to_string().parse::<UnixTimestamp>();
 	}
 }

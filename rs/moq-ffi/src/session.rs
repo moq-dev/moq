@@ -476,10 +476,10 @@ impl MoqClient {
 	pub fn set_backoff(&self, backoff: MoqBackoff) {
 		if let Some(mut state) = self.task.lock() {
 			let mut out = moq_tokio::Backoff::default();
-			out.initial = Some(std::time::Duration::from_millis(backoff.initial_ms));
-			out.multiplier = Some(backoff.multiplier);
-			out.max = Some(std::time::Duration::from_millis(backoff.max_ms));
-			out.timeout = Some(std::time::Duration::from_millis(backoff.timeout_ms));
+			out.initial = std::time::Duration::from_millis(backoff.initial_ms).into();
+			out.multiplier = backoff.multiplier;
+			out.max = std::time::Duration::from_millis(backoff.max_ms).into();
+			out.timeout = std::time::Duration::from_millis(backoff.timeout_ms).into();
 			state.config.backoff = out;
 		}
 	}

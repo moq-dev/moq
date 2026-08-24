@@ -21,67 +21,67 @@ const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
 /// Flattened onto [`crate::listen::Config::unix`].
 // The derived arg group is named after the struct, so it needs an explicit id to
 // stay unique across the flattened sections.
-#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-#[group(id = "listen-unix")]
+#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct Config {
 	/// Bind a plaintext qmux Unix-socket listener at this path.
-	#[arg(long = "listen-unix-bind", id = "listen-unix-bind", env = "MOQ_LISTEN_UNIX_BIND")]
+	#[usage(long = "listen-unix-bind", name = "listen-unix-bind", env = "MOQ_LISTEN_UNIX_BIND")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub bind: Option<PathBuf>,
 
-	/// Peer-credential allowlist. `None` (the default) enforces nothing, so the
+	/// Peer-credential allowlist. An empty allowlist enforces nothing, so the
 	/// parent directory's permissions are the only filesystem gate.
-	#[command(flatten)]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub allow: Option<Allow>,
+	#[usage(flatten)]
+	#[serde(default, skip_serializing_if = "Allow::is_empty")]
+	pub allow: Allow,
 
 	/// The released `--server-unix-*` spellings and their env vars, folded in by
 	/// [`Config::resolved`].
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(skip)]
 	pub(crate) legacy: Legacy,
 }
 
 /// The `--server-unix-*` flags from before the accept side was named `listen`.
 ///
-/// Separate args rather than clap aliases, since an alias renames the flag but
+/// Separate args rather than Usage aliases, since an alias renames the flag but
 /// leaves its env var behind.
-#[derive(clap::Args, Clone, Debug, Default)]
-#[group(id = "listen-unix-legacy")]
+#[derive(usage::Args, Clone, Debug, Default)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
-	#[arg(
+	#[usage(
 		long = "server-unix-bind",
-		id = "server-unix-bind",
+		name = "server-unix-bind",
 		env = "MOQ_SERVER_UNIX_BIND",
 		hide = true
 	)]
 	bind: Option<PathBuf>,
 
-	#[arg(
+	#[usage(
 		long = "server-unix-allow-uid",
-		id = "server-unix-allow-uid",
+		name = "server-unix-allow-uid",
 		env = "MOQ_SERVER_UNIX_ALLOW_UID",
-		value_delimiter = ',',
+		delimiter = ',',
 		hide = true
 	)]
 	uid: Vec<u32>,
 
-	#[arg(
+	#[usage(
 		long = "server-unix-allow-gid",
-		id = "server-unix-allow-gid",
+		name = "server-unix-allow-gid",
 		env = "MOQ_SERVER_UNIX_ALLOW_GID",
-		value_delimiter = ',',
+		delimiter = ',',
 		hide = true
 	)]
 	gid: Vec<u32>,
 
-	#[arg(
+	#[usage(
 		long = "server-unix-allow-pid",
-		id = "server-unix-allow-pid",
+		name = "server-unix-allow-pid",
 		env = "MOQ_SERVER_UNIX_ALLOW_PID",
-		value_delimiter = ',',
+		delimiter = ',',
 		hide = true
 	)]
 	pid: Vec<i32>,
@@ -133,38 +133,38 @@ impl Config {
 /// The kernel reports the connecting process's credentials. Each populated list
 /// constrains the corresponding credential (AND across the three, OR within
 /// each); all empty means no check.
-#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-#[group(id = "listen-unix-allow")]
+#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct Allow {
 	/// Allowed peer user IDs. Empty means any uid.
-	#[arg(
+	#[usage(
 		long = "listen-unix-allow-uid",
-		id = "listen-unix-allow-uid",
+		name = "listen-unix-allow-uid",
 		env = "MOQ_LISTEN_UNIX_ALLOW_UID",
-		value_delimiter = ','
+		delimiter = ','
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub uid: Vec<u32>,
 
 	/// Allowed peer group IDs. Empty means any gid.
-	#[arg(
+	#[usage(
 		long = "listen-unix-allow-gid",
-		id = "listen-unix-allow-gid",
+		name = "listen-unix-allow-gid",
 		env = "MOQ_LISTEN_UNIX_ALLOW_GID",
-		value_delimiter = ','
+		delimiter = ','
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub gid: Vec<u32>,
 
 	/// Allowed peer PIDs. Empty means any pid; a populated list rejects peers
 	/// whose PID the platform doesn't report.
-	#[arg(
+	#[usage(
 		long = "listen-unix-allow-pid",
-		id = "listen-unix-allow-pid",
+		name = "listen-unix-allow-pid",
 		env = "MOQ_LISTEN_UNIX_ALLOW_PID",
-		value_delimiter = ','
+		delimiter = ','
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub pid: Vec<i32>,
@@ -384,18 +384,16 @@ impl Drop for Listener {
 #[cfg(test)]
 mod legacy_tests {
 	use super::*;
-	use clap::Parser;
-
-	#[derive(Parser)]
+	#[derive(usage::Cli)]
+	#[usage(unknown_flags = "error", args_override_self = false)]
 	struct Cli {
-		#[command(flatten)]
+		#[usage(flatten)]
 		unix: Config,
 	}
 
 	fn parse(args: &[&str]) -> Config {
-		let mut argv = vec!["test"];
-		argv.extend_from_slice(args);
-		Cli::parse_from(argv).unix
+		let argv = args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>();
+		Cli::parse_from(&argv).unwrap().unix
 	}
 
 	/// The released `--server-unix-*` spellings parse so the process can name their
@@ -409,7 +407,7 @@ mod legacy_tests {
 	fn released_spellings_are_reported_not_applied() {
 		let config = parse(&["--server-unix-bind", "/tmp/moq.sock", "--server-unix-allow-uid", "501"]);
 		assert_eq!(config.bind, None);
-		assert!(config.allow.as_ref().is_none_or(|allow| allow.uid.is_empty()));
+		assert!(config.allow.uid.is_empty());
 
 		let reported = config.deprecated().to_string();
 		assert!(
@@ -437,16 +435,15 @@ mod legacy_tests {
 	fn canonical_allowlist_applies() {
 		let config = parse(&["--listen-unix-allow-gid", "20", "--listen-unix-allow-uid", "501"]);
 		assert!(config.deprecated().is_empty());
-		let allow = config.allow.as_ref().expect("allowlist");
-		assert_eq!(allow.uid, vec![501]);
-		assert_eq!(allow.gid, vec![20]);
+		assert_eq!(config.allow.uid, vec![501]);
+		assert_eq!(config.allow.gid, vec![20]);
 	}
 
-	/// No flag at all leaves the allowlist unset, so the parent directory's
+	/// No flag at all leaves the allowlist empty, so the parent directory's
 	/// permissions stay the only filesystem gate.
 	#[test]
 	fn no_allowlist_stays_unset() {
 		let config = parse(&["--listen-unix-bind", "/tmp/moq.sock"]);
-		assert!(config.allow.as_ref().is_none_or(|allow| allow.is_empty()));
+		assert!(config.allow.is_empty());
 	}
 }

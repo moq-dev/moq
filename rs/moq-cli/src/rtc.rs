@@ -14,28 +14,29 @@ use crate::moq::{ImportTarget, notify_ready};
 
 /// WebRTC endpoint args: exactly one of `--connect` (WHIP/WHEP client) /
 /// `--listen` (WHIP/WHEP server). The parent direction picks WHIP vs WHEP.
-#[derive(clap::Args, Clone)]
-#[command(group = clap::ArgGroup::new("rtc-mode").required(true).multiple(false).args(["rtc-connect", "rtc-listen"]))]
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+#[usage(group("rtc-mode", required))]
 pub struct Args {
 	/// Dial a remote WHIP/WHEP endpoint URL.
-	#[arg(id = "rtc-connect", long = "connect", value_name = "URL")]
+	#[usage(name = "rtc-connect", long = "connect", value_name = "URL", group = "rtc-mode")]
 	pub connect: Option<Url>,
 
 	/// Bind an HTTP listener for WHIP/WHEP, scoped to the single `--broadcast`
 	/// (peers reach it at `http://host:port/<broadcast>`).
-	#[arg(id = "rtc-listen", long = "listen", value_name = "ADDR")]
+	#[usage(name = "rtc-listen", long = "listen", value_name = "ADDR", group = "rtc-mode")]
 	pub listen: Option<SocketAddr>,
 
 	/// Shared UDP socket for ICE/media (one port for all sessions).
-	#[arg(long, requires = "rtc-listen", default_value = "[::]:0")]
+	#[usage(long, requires = "--listen", default = "[::]:0")]
 	pub udp_bind: SocketAddr,
 
 	/// Public UDP address(es) advertised as ICE host candidates (repeatable).
-	#[arg(long, requires = "rtc-listen")]
+	#[usage(long, requires = "rtc-listen")]
 	pub public_addr: Vec<SocketAddr>,
 
 	/// Browser CORS policy for the WHIP/WHEP listener.
-	#[command(flatten)]
+	#[usage(flatten)]
 	pub cors: crate::web::Cors,
 }
 

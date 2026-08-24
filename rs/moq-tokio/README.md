@@ -17,7 +17,7 @@ Establishes MoQ connections over a few different transports, selectable via carg
 - **WebSocket** as a fallback when QUIC isn't available
 - **Iroh** P2P (`iroh` feature)
 
-Also handles TLS, certificate generation, logging setup, and reconnection logic, with `clap`-derived configuration ready for binaries.
+Also handles TLS, certificate generation, logging setup, and reconnection logic, with Usage-derived configuration ready for binaries.
 
 ## Examples
 

@@ -121,46 +121,45 @@ pub enum Error {
 type Result<T> = std::result::Result<T, Error>;
 
 /// Settings for the shared iroh endpoint, used by both the client and server.
-#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct EndpointConfig {
 	/// Whether to enable iroh support.
-	#[arg(
-		id = "iroh-enabled",
+	#[usage(
+		name = "iroh-enabled",
 		long = "iroh-enabled",
 		env = "MOQ_IROH_ENABLED",
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
-		value_parser = clap::value_parser!(bool),
 	)]
 	pub enabled: Option<bool>,
 
 	/// Secret key for the iroh endpoint, either a hex-encoded string or a path to a file.
 	/// If the file does not exist, a random key will be generated and written to the path.
-	#[arg(id = "iroh-secret", long = "iroh-secret", env = "MOQ_IROH_SECRET")]
+	#[usage(name = "iroh-secret", long = "iroh-secret", env = "MOQ_IROH_SECRET")]
 	pub secret: Option<String>,
 
 	/// Listen for UDP packets on the given address.
 	/// Defaults to `0.0.0.0:0` if not provided.
-	#[arg(id = "iroh-bind-v4", long = "iroh-bind-v4", env = "MOQ_IROH_BIND_V4")]
+	#[usage(name = "iroh-bind-v4", long = "iroh-bind-v4", env = "MOQ_IROH_BIND_V4")]
 	pub bind_v4: Option<net::SocketAddrV4>,
 
 	/// Listen for UDP packets on the given address.
 	/// Defaults to `[::]:0` if not provided.
-	#[arg(id = "iroh-bind-v6", long = "iroh-bind-v6", env = "MOQ_IROH_BIND_V6")]
+	#[usage(name = "iroh-bind-v6", long = "iroh-bind-v6", env = "MOQ_IROH_BIND_V6")]
 	pub bind_v6: Option<net::SocketAddrV6>,
 
 	/// Disable the iroh relay, using only direct P2P connections.
-	#[arg(
-		id = "iroh-disable-relay",
+	#[usage(
+		name = "iroh-disable-relay",
 		long = "iroh-disable-relay",
 		env = "MOQ_IROH_DISABLE_RELAY",
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
-		value_parser = clap::value_parser!(bool),
 	)]
 	pub disable_relay: Option<bool>,
 }
@@ -382,15 +381,16 @@ mod tests {
 	/// endpoint is the accepted-and-ignored failure in miniature.
 	#[tokio::test]
 	async fn bind_refuses_a_released_quic_spelling() {
-		use clap::Parser;
-
-		#[derive(Parser)]
+		#[derive(usage::Cli)]
+		#[usage(unknown_flags = "error", args_override_self = false)]
 		struct Cli {
-			#[command(flatten)]
+			#[usage(flatten)]
 			quic: crate::quic::Config,
 		}
 
-		let quic = Cli::parse_from(["test", "--client-quic-gso=false"]).quic;
+		let quic = Cli::parse_from(&[std::ffi::OsStr::new("--client-quic-gso=false")])
+			.unwrap()
+			.quic;
 		let config = EndpointConfig {
 			enabled: Some(true),
 			..Default::default()

@@ -42,8 +42,8 @@ tracing = "0.1"
 
 [dev-dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
 moq-tokio = { workspace = true, features = ["quinn", "aws-lc-rs", "websocket"] }
 # test-util unlocks tokio::time::pause for the deterministic live-feed tests.
 tokio = { workspace = true, features = ["full", "test-util"] }
 url = "2"
+usage = { workspace = true }

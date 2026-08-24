@@ -1,6 +1,8 @@
 use std::task::{Poll, ready};
 use std::time::Duration;
 
+use crate::Duration as CliDuration;
+
 use moq_net::Version;
 use moq_net::bandwidth::{Consumer as BandwidthConsumer, Producer as BandwidthProducer};
 use moq_net::kio;
@@ -73,11 +75,11 @@ fn attempt_deadline(
 
 /// Exponential backoff configuration for reconnection attempts.
 ///
-/// Every field is optional so a value set in TOML survives the CLI re-parse that follows it; read
-/// them through the accessors, which supply the defaults. The delays carry jitter, so a fleet
+/// The delays carry jitter, so a fleet
 /// knocked offline together does not reconnect in lockstep. The timeout bounds every failure;
 /// only a settled response from the server short-circuits it.
-#[derive(Clone, Debug, Default, clap::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Backoff {
@@ -86,67 +88,56 @@ pub struct Backoff {
 	/// Doubles as the bar a session must stay up to count as healthy, so it is
 	/// floored at 50ms: at zero every session would look healthy and the retry
 	/// pacing would collapse.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "backoff-initial",
-		long,
-		env = "MOQ_BACKOFF_INITIAL",
-		value_parser = humantime::parse_duration,
-	)]
-	#[serde(with = "humantime_serde")]
-	pub initial: Option<Duration>,
+	#[usage(name = "backoff-initial", long, env = "MOQ_BACKOFF_INITIAL", default = "1s")]
+	pub initial: CliDuration,
 
 	/// Multiplier applied to delay after each failure. Defaults to 2.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "backoff-multiplier", long, env = "MOQ_BACKOFF_MULTIPLIER")]
-	pub multiplier: Option<u32>,
+	#[usage(name = "backoff-multiplier", long, env = "MOQ_BACKOFF_MULTIPLIER", default = "2")]
+	pub multiplier: u32,
 
 	/// Maximum delay between reconnect attempts. Defaults to 5s.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "backoff-max",
-		long,
-		env = "MOQ_BACKOFF_MAX",
-		value_parser = humantime::parse_duration,
-	)]
-	#[serde(with = "humantime_serde")]
-	pub max: Option<Duration>,
+	#[usage(name = "backoff-max", long, env = "MOQ_BACKOFF_MAX", default = "5s")]
+	pub max: CliDuration,
 
 	/// Maximum time to spend retrying before giving up. Defaults to 10s.
 	///
 	/// Resets after a stable connection (one that outlives the initial backoff), so a flapping
 	/// session that reconnects then immediately drops still counts toward the timeout. Set to 0 for
 	/// unlimited retries.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "backoff-timeout",
-		long,
-		env = "MOQ_BACKOFF_TIMEOUT",
-		value_parser = humantime::parse_duration,
-	)]
-	#[serde(with = "humantime_serde")]
-	pub timeout: Option<Duration>,
+	#[usage(name = "backoff-timeout", long, env = "MOQ_BACKOFF_TIMEOUT", default = "10s")]
+	pub timeout: CliDuration,
+}
+
+impl Default for Backoff {
+	fn default() -> Self {
+		Self {
+			initial: DEFAULT_INITIAL.into(),
+			multiplier: DEFAULT_MULTIPLIER,
+			max: DEFAULT_MAX.into(),
+			timeout: DEFAULT_TIMEOUT.into(),
+		}
+	}
 }
 
 impl Backoff {
 	/// The configured initial delay, or the default.
 	pub fn initial(&self) -> Duration {
-		self.initial.unwrap_or(DEFAULT_INITIAL)
+		self.initial.into_std()
 	}
 
 	/// The configured multiplier, or the default.
 	pub fn multiplier(&self) -> u32 {
-		self.multiplier.unwrap_or(DEFAULT_MULTIPLIER)
+		self.multiplier
 	}
 
 	/// The configured delay ceiling, or the default.
 	pub fn max(&self) -> Duration {
-		self.max.unwrap_or(DEFAULT_MAX)
+		self.max.into_std()
 	}
 
 	/// The configured give-up window, or the default. Zero retries forever.
 	pub fn timeout(&self) -> Duration {
-		self.timeout.unwrap_or(DEFAULT_TIMEOUT)
+		self.timeout.into_std()
 	}
 }
 
@@ -167,7 +158,7 @@ pub enum Status {
 ///
 /// The URI is dialed exactly as given, so it must carry whatever credentials the
 /// new endpoint needs. Nothing from the current session is copied onto it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, usage::ValueEnum, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum Redirect {
@@ -261,27 +252,37 @@ fn is_local_v4(ip: std::net::Ipv4Addr) -> bool {
 }
 
 /// How a reconnect loop reacts to a peer's GOAWAY.
-#[derive(Clone, Debug, Default, clap::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct GoawayConfig {
 	/// What to do with the URI a peer names in its GOAWAY. Defaults to
 	/// [`Redirect::Follow`].
-	#[arg(id = "goaway-redirect", long, env = "MOQ_GOAWAY_REDIRECT", value_enum)]
-	pub redirect: Option<Redirect>,
+	#[usage(
+		name = "goaway-redirect",
+		long,
+		env = "MOQ_GOAWAY_REDIRECT",
+		value_enum,
+		default = "follow"
+	)]
+	pub redirect: Redirect,
 
 	/// How long the old session keeps serving after its replacement connects, e.g.
 	/// "10s" or "500ms". This is a cap: a GOAWAY naming a shorter deadline wins,
 	/// since the peer force-closes at its own deadline regardless, but a longer one
 	/// does not extend it. Defaults to 10 seconds.
-	#[arg(
-		id = "goaway-handover",
-		long,
-		env = "MOQ_GOAWAY_HANDOVER",
-		value_parser = humantime::parse_duration,
-	)]
-	#[serde(default, with = "humantime_serde")]
-	pub handover: Option<Duration>,
+	#[usage(name = "goaway-handover", long, env = "MOQ_GOAWAY_HANDOVER", default = "10s")]
+	pub handover: CliDuration,
+}
+
+impl Default for GoawayConfig {
+	fn default() -> Self {
+		Self {
+			redirect: Redirect::Follow,
+			handover: DEFAULT_HANDOVER.into(),
+		}
+	}
 }
 
 /// Defaults for the [`Backoff`] knobs, applied by its accessors when a field is unset.
@@ -336,7 +337,7 @@ const DEFAULT_HANDOVER: Duration = Duration::from_secs(10);
 impl GoawayConfig {
 	/// The configured redirect policy, or the default.
 	pub fn redirect(&self) -> Redirect {
-		self.redirect.unwrap_or_default()
+		self.redirect
 	}
 
 	/// How long the old session keeps serving, given the deadline the peer's GOAWAY
@@ -347,10 +348,7 @@ impl GoawayConfig {
 	/// on how long we keep one around at all, so a peer naming an hour cannot talk
 	/// us into honoring it.
 	pub fn handover(&self, timeout: Option<Duration>) -> Duration {
-		std::cmp::min(
-			self.handover.unwrap_or(DEFAULT_HANDOVER),
-			timeout.unwrap_or(Duration::MAX),
-		)
+		std::cmp::min(self.handover.into_std(), timeout.unwrap_or(Duration::MAX))
 	}
 }
 
@@ -1166,70 +1164,70 @@ fn terminal(state: &State) -> Error {
 mod tests {
 	use super::*;
 
-	/// The same clobber guard for [`Backoff`]. A bare field with a `default_value`
-	/// would be rewritten by the CLI re-parse that follows a TOML load, silently
-	/// resetting retry tuning that was only ever configured in the file.
+	/// Updating with an empty CLI preserves a standing TOML value over typed defaults.
 	#[test]
 	fn cli_does_not_clobber_toml_backoff() {
-		use clap::Parser;
-
-		#[derive(Parser)]
+		#[derive(usage::Cli)]
+		#[usage(unknown_flags = "error", args_override_self = false)]
 		struct Wrapper {
-			#[command(flatten)]
+			#[usage(flatten)]
 			backoff: Backoff,
 		}
 
 		// Stand in for the TOML layer, then re-apply the CLI with none of the flags set.
-		let mut parsed = Wrapper::parse_from(["test"]);
-		parsed.backoff.initial = Some(Duration::from_secs(7));
-		parsed.backoff.multiplier = Some(5);
-		parsed.backoff.max = Some(Duration::from_secs(11));
-		parsed.backoff.timeout = Some(Duration::ZERO);
-		parsed.update_from(["test"]);
+		let mut parsed = Wrapper::parse_from(&[]).unwrap();
+		parsed.backoff.initial = Duration::from_secs(7).into();
+		parsed.backoff.multiplier = 5;
+		parsed.backoff.max = Duration::from_secs(11).into();
+		parsed.backoff.timeout = Duration::ZERO.into();
+		parsed.update_from(&[]);
 
-		assert_eq!(parsed.backoff.initial, Some(Duration::from_secs(7)));
-		assert_eq!(parsed.backoff.multiplier, Some(5));
-		assert_eq!(parsed.backoff.max, Some(Duration::from_secs(11)));
-		assert_eq!(parsed.backoff.timeout, Some(Duration::ZERO), "0 means retry forever");
+		assert_eq!(parsed.backoff.initial, Duration::from_secs(7));
+		assert_eq!(parsed.backoff.multiplier, 5);
+		assert_eq!(parsed.backoff.max, Duration::from_secs(11));
+		assert_eq!(parsed.backoff.timeout, Duration::ZERO, "0 means retry forever");
 
-		// Unset stays unset, so the accessors supply the documented defaults.
-		let parsed = Wrapper::parse_from(["test"]);
-		assert_eq!(parsed.backoff.initial, None);
+		// With no flags, the typed defaults are materialized directly.
+		let parsed = Wrapper::parse_from(&[]).unwrap();
+		assert_eq!(parsed.backoff.initial, DEFAULT_INITIAL);
 		assert_eq!(parsed.backoff.initial(), DEFAULT_INITIAL);
 		assert_eq!(parsed.backoff.multiplier(), DEFAULT_MULTIPLIER);
 		assert_eq!(parsed.backoff.max(), DEFAULT_MAX);
 		assert_eq!(parsed.backoff.timeout(), DEFAULT_TIMEOUT);
 
 		// And a flag still lands where the merge can see it.
-		let parsed = Wrapper::parse_from(["test", "--backoff-initial", "3s"]);
-		assert_eq!(parsed.backoff.initial, Some(Duration::from_secs(3)));
+		let parsed =
+			Wrapper::parse_from(&[std::ffi::OsStr::new("--backoff-initial"), std::ffi::OsStr::new("3s")]).unwrap();
+		assert_eq!(parsed.backoff.initial, Duration::from_secs(3));
 	}
 
-	/// The clap+TOML clobber guard: both `GoawayConfig` fields are `Option<T>` with
-	/// no `default_value`, so a TOML-configured value survives the CLI re-parse
-	/// that follows. A bare scalar with a clap default would silently win instead.
+	/// GOAWAY typed defaults remain overrideable by a standing TOML layer.
 	#[test]
 	fn cli_does_not_clobber_toml_goaway() {
-		use clap::Parser;
-
-		#[derive(Parser)]
+		#[derive(usage::Cli)]
+		#[usage(unknown_flags = "error", args_override_self = false)]
 		struct Wrapper {
-			#[command(flatten)]
+			#[usage(flatten)]
 			goaway: GoawayConfig,
 		}
 
-		// No flags passed: the fields stay None so a TOML layer underneath keeps its
-		// values, and the accessors supply the documented defaults.
-		let parsed = Wrapper::parse_from(["test"]);
-		assert_eq!(parsed.goaway.redirect, None);
-		assert_eq!(parsed.goaway.handover, None);
+		// No flags passed: the typed defaults are present.
+		let parsed = Wrapper::parse_from(&[]).unwrap();
+		assert_eq!(parsed.goaway.redirect, Redirect::Follow);
+		assert_eq!(parsed.goaway.handover, Duration::from_secs(10));
 		assert_eq!(parsed.goaway.redirect(), Redirect::Follow);
 		assert_eq!(parsed.goaway.handover(None), Duration::from_secs(10));
 
 		// Flags passed: they land where the merge can see them.
-		let parsed = Wrapper::parse_from(["test", "--goaway-redirect", "ignore", "--goaway-handover", "3s"]);
-		assert_eq!(parsed.goaway.redirect, Some(Redirect::Ignore));
-		assert_eq!(parsed.goaway.handover, Some(Duration::from_secs(3)));
+		let parsed = Wrapper::parse_from(&[
+			std::ffi::OsStr::new("--goaway-redirect"),
+			std::ffi::OsStr::new("ignore"),
+			std::ffi::OsStr::new("--goaway-handover"),
+			std::ffi::OsStr::new("3s"),
+		])
+		.unwrap();
+		assert_eq!(parsed.goaway.redirect, Redirect::Ignore);
+		assert_eq!(parsed.goaway.handover, Duration::from_secs(3));
 	}
 
 	/// Our own window caps the peer's. A GOAWAY deadline shortens the handover but
@@ -1238,7 +1236,7 @@ mod tests {
 	#[test]
 	fn handover_takes_the_earlier_deadline() {
 		let config = GoawayConfig {
-			handover: Some(Duration::from_secs(10)),
+			handover: Duration::from_secs(10).into(),
 			..Default::default()
 		};
 
@@ -1378,7 +1376,7 @@ mod tests {
 		// A zero initial would also make every session look healthy, resetting the
 		// give-up window forever.
 		let pacing = Pacing::new(&Backoff {
-			initial: Some(Duration::ZERO),
+			initial: Duration::ZERO.into(),
 			..Default::default()
 		});
 		assert_eq!(pacing.initial, MIN_BACKOFF);
@@ -1386,7 +1384,7 @@ mod tests {
 
 		// A cap below the floor would clamp the delay straight back down.
 		let pacing = Pacing::new(&Backoff {
-			max: Some(Duration::ZERO),
+			max: Duration::ZERO.into(),
 			..Default::default()
 		});
 		assert_eq!(pacing.max, pacing.initial);
@@ -1394,16 +1392,16 @@ mod tests {
 
 		// A zero multiplier would shrink it to nothing on the second attempt.
 		let pacing = Pacing::new(&Backoff {
-			multiplier: Some(0),
+			multiplier: 0,
 			..Default::default()
 		});
 		assert_eq!(pacing.next(pacing.initial), pacing.initial);
 
 		// All at once: still paced.
 		let pacing = Pacing::new(&Backoff {
-			initial: Some(Duration::ZERO),
-			max: Some(Duration::ZERO),
-			multiplier: Some(0),
+			initial: Duration::ZERO.into(),
+			max: Duration::ZERO.into(),
+			multiplier: 0,
 			..Default::default()
 		});
 		let mut delay = pacing.initial;
@@ -1417,9 +1415,9 @@ mod tests {
 	#[test]
 	fn pacing_grows_to_the_cap() {
 		let pacing = Pacing::new(&Backoff {
-			initial: Some(Duration::from_millis(100)),
-			multiplier: Some(2),
-			max: Some(Duration::from_millis(400)),
+			initial: Duration::from_millis(100).into(),
+			multiplier: 2,
+			max: Duration::from_millis(400).into(),
 			..Default::default()
 		});
 

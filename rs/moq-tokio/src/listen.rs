@@ -7,11 +7,11 @@ use crate::QuicBackend;
 
 /// The accept side of an endpoint: what to listen on and how to be trusted.
 ///
-/// Derives [`clap::Args`], so flatten it into a binary's own parser with
-/// `#[command(flatten)]`. The dial side is [`crate::connect::Config`].
-#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+/// Derives [`usage::Args`], so flatten it into a binary's own parser with
+/// `#[usage(flatten)]`. The dial side is [`crate::connect::Config`].
+#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
-#[group(id = "listen-config")]
 #[non_exhaustive]
 pub struct Config {
 	/// Listen for QUIC (UDP) on the given address. Defaults to `[::]:443`.
@@ -22,26 +22,26 @@ pub struct Config {
 	/// `tcp`/`unix` listener is configured to run a stream-only server with no
 	/// QUIC.
 	#[serde(alias = "listen")]
-	#[arg(id = "listen", long = "listen", env = "MOQ_LISTEN")]
+	#[usage(name = "listen", long = "listen", env = "MOQ_LISTEN")]
 	pub bind: Option<String>,
 
 	/// Plaintext qmux TCP listener (`--listen-tcp-bind`, no TLS). Requires the
 	/// `tcp` feature.
 	#[cfg(feature = "tcp")]
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	pub tcp: crate::tcp::Config,
 
 	/// Plaintext qmux Unix-socket listener (`--listen-unix-bind`) with an optional
 	/// peer-credential allowlist. Requires the `uds` feature; unix-only.
 	#[cfg(all(feature = "uds", unix))]
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	pub unix: crate::unix::Config,
 
 	/// The QUIC backend to use.
 	/// Auto-detected from compiled features if not specified.
-	#[arg(id = "listen-backend", long = "listen-backend", env = "MOQ_LISTEN_BACKEND")]
+	#[usage(name = "listen-backend", long = "listen-backend", env = "MOQ_LISTEN_BACKEND")]
 	pub backend: Option<QuicBackend>,
 
 	/// Restrict the server to specific MoQ protocol version(s).
@@ -50,17 +50,30 @@ pub struct Config {
 	/// Use this to restrict to specific versions, e.g. `--listen-version moq-lite-02`.
 	/// Can be specified multiple times to accept a subset of versions.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[arg(
-		id = "listen-version",
+	#[usage(
+		name = "listen-version",
 		long = "listen-version",
 		env = "MOQ_LISTEN_VERSION",
-		value_parser = crate::version_parser(),
+		choices(
+			"moq-lite-01",
+			"moq-lite-02",
+			"moq-lite-03",
+			"moq-lite-04",
+			"moq-lite-05",
+			"moq-lite-06-wip",
+			"moq-transport-14",
+			"moq-transport-15",
+			"moq-transport-16",
+			"moq-transport-17",
+			"moq-transport-18",
+			"moq-transport-19"
+		)
 	)]
 	pub version: Vec<moq_net::Version>,
 
 	/// The certificates to serve and the roots that authenticate mTLS clients
 	/// (`--listen-tls-*`).
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	pub tls: crate::tls::Listen,
 
@@ -72,8 +85,8 @@ pub struct Config {
 	///
 	/// Honored by the Quinn and noq backends. Accept-only, which is why it lives
 	/// here rather than in the shared [`crate::quic::Config`].
-	#[arg(
-		id = "listen-preferred-v4",
+	#[usage(
+		name = "listen-preferred-v4",
 		long = "listen-preferred-v4",
 		env = "MOQ_LISTEN_PREFERRED_V4"
 	)]
@@ -81,8 +94,8 @@ pub struct Config {
 	pub preferred_v4: Option<std::net::SocketAddrV4>,
 
 	/// IPv6 address advertised as the QUIC preferred_address. See [`Self::preferred_v4`].
-	#[arg(
-		id = "listen-preferred-v6",
+	#[usage(
+		name = "listen-preferred-v6",
 		long = "listen-preferred-v6",
 		env = "MOQ_LISTEN_PREFERRED_V6"
 	)]
@@ -91,14 +104,18 @@ pub struct Config {
 
 	/// Server ID to embed in connection IDs for QUIC-LB compatibility.
 	/// If set, connection IDs will be derived semi-deterministically.
-	#[arg(id = "listen-quic-lb-id", long = "listen-quic-lb-id", env = "MOQ_LISTEN_QUIC_LB_ID")]
+	#[usage(
+		name = "listen-quic-lb-id",
+		long = "listen-quic-lb-id",
+		env = "MOQ_LISTEN_QUIC_LB_ID"
+	)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub lb_id: Option<crate::quic::ServerId>,
 
 	/// Number of random nonce bytes in QUIC-LB connection IDs.
 	/// Must be at least 4, and server_id + nonce + 1 must not exceed 20.
-	#[arg(
-		id = "listen-quic-lb-nonce",
+	#[usage(
+		name = "listen-quic-lb-nonce",
 		long = "listen-quic-lb-nonce",
 		env = "MOQ_LISTEN_QUIC_LB_NONCE"
 	)]
@@ -108,7 +125,7 @@ pub struct Config {
 	/// The released `--server-*` spellings and their env vars, kept parsing but
 	/// hidden. Never read as settings: [`Config::deprecated`] names what replaced
 	/// each one so a process can say so and stop.
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(skip)]
 	pub(crate) legacy: Legacy,
 
@@ -118,7 +135,7 @@ pub struct Config {
 	/// Parsed only so [`deprecated`](Self::deprecated) can name the replacement;
 	/// `deny_unknown_fields` would otherwise refuse the file with nothing to
 	/// migrate to.
-	#[arg(skip)]
+	#[usage(skip)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub quic: Option<crate::quic::Config>,
 }
@@ -161,57 +178,70 @@ impl Shard {
 /// The `--server-*` flags from before the accept side was named `listen`.
 ///
 /// They carry their original env vars, which is why these are separate args rather
-/// than clap aliases: an alias renames the flag but not the variable, and a relay
+/// than Usage aliases: an alias renames the flag but not the variable, and a relay
 /// deployed through the environment is the common case.
-#[derive(Clone, Debug, Default, clap::Args)]
-#[group(id = "listen-legacy")]
+#[derive(Clone, Debug, Default, usage::Args)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
-	#[arg(id = "server-bind", long = "server-bind", env = "MOQ_SERVER_BIND", hide = true)]
+	#[usage(name = "server-bind", long = "server-bind", env = "MOQ_SERVER_BIND", hide = true)]
 	bind: Option<String>,
 
-	#[arg(
-		id = "server-backend",
+	#[usage(
+		name = "server-backend",
 		long = "server-backend",
 		env = "MOQ_SERVER_BACKEND",
 		hide = true
 	)]
 	backend: Option<QuicBackend>,
 
-	#[arg(
-		id = "server-version",
+	#[usage(
+		name = "server-version",
 		long = "server-version",
 		env = "MOQ_SERVER_VERSION",
-		value_parser = crate::version_parser(),
-		hide = true,
+		choices(
+			"moq-lite-01",
+			"moq-lite-02",
+			"moq-lite-03",
+			"moq-lite-04",
+			"moq-lite-05",
+			"moq-lite-06-wip",
+			"moq-transport-14",
+			"moq-transport-15",
+			"moq-transport-16",
+			"moq-transport-17",
+			"moq-transport-18",
+			"moq-transport-19"
+		),
+		hide = true
 	)]
 	version: Vec<moq_net::Version>,
 
-	#[arg(
-		id = "server-preferred-v4",
+	#[usage(
+		name = "server-preferred-v4",
 		long = "server-preferred-v4",
 		env = "MOQ_SERVER_PREFERRED_V4",
 		hide = true
 	)]
 	preferred_v4: Option<std::net::SocketAddrV4>,
 
-	#[arg(
-		id = "server-preferred-v6",
+	#[usage(
+		name = "server-preferred-v6",
 		long = "server-preferred-v6",
 		env = "MOQ_SERVER_PREFERRED_V6",
 		hide = true
 	)]
 	preferred_v6: Option<std::net::SocketAddrV6>,
 
-	#[arg(
-		id = "server-quic-lb-id",
+	#[usage(
+		name = "server-quic-lb-id",
 		long = "server-quic-lb-id",
 		env = "MOQ_SERVER_QUIC_LB_ID",
 		hide = true
 	)]
 	lb_id: Option<crate::quic::ServerId>,
 
-	#[arg(
-		id = "server-quic-lb-nonce",
+	#[usage(
+		name = "server-quic-lb-nonce",
 		long = "server-quic-lb-nonce",
 		env = "MOQ_SERVER_QUIC_LB_NONCE",
 		hide = true
@@ -295,7 +325,7 @@ impl Config {
 
 	/// Reject a QUIC-LB nonce with no server id to pair it with.
 	///
-	/// Checked here rather than with clap's `requires`, which can only name one arg
+	/// Checked here rather than with Usage's `requires`, which can only name one arg
 	/// id, and the nonce reaches this config from a TOML file as well as the flag.
 	pub(crate) fn validate(&self) -> crate::Result<()> {
 		match (self.lb_id.is_some(), self.lb_nonce.is_some()) {
@@ -308,13 +338,12 @@ impl Config {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use clap::Parser;
-
 	/// A parser wrapping the config, since it derives `Args` (see the note in
 	/// [`crate::connect`]).
-	#[derive(Parser)]
+	#[derive(usage::Cli)]
+	#[usage(unknown_flags = "error", args_override_self = false)]
 	struct Cli {
-		#[command(flatten)]
+		#[usage(flatten)]
 		config: Config,
 	}
 
@@ -323,11 +352,17 @@ mod tests {
 		I: IntoIterator<Item = T>,
 		T: Into<std::ffi::OsString> + Clone,
 	{
-		Cli::parse_from(args).config
+		let args = args.into_iter().map(Into::into).collect::<Vec<std::ffi::OsString>>();
+		let args = args
+			.iter()
+			.skip(1)
+			.map(std::ffi::OsString::as_os_str)
+			.collect::<Vec<_>>();
+		Cli::parse_from(&args).unwrap().config
 	}
 
 	/// Every released `--server-*` spelling keeps parsing, so the process can name
-	/// its replacement rather than leave clap reporting an unexpected argument.
+	/// its replacement rather than leave Usage reporting an unexpected argument.
 	/// None of them configure anything.
 	#[test]
 	fn released_server_spellings_are_reported_not_applied() {
@@ -380,7 +415,7 @@ mod tests {
 	}
 
 	/// A nonce with no server id is meaningless. Checked here rather than with a
-	/// clap `requires`, which can only name one arg id and never sees a TOML file.
+	/// Usage `requires`, which can only name one arg id and never sees a TOML file.
 	#[test]
 	fn lb_nonce_needs_an_id() {
 		let config = config_from(["test", "--listen-quic-lb-nonce", "8"]);

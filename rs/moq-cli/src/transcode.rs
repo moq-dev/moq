@@ -14,56 +14,72 @@ use crate::args::MoqSide;
 use hang::moq_net;
 
 /// Ladder and codec options for the `transcode` verb.
-#[derive(clap::Args, Clone)]
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
 	/// The derivative broadcast path. Defaults to `<broadcast>/transcode.hang`.
-	#[arg(long)]
+	#[usage(long)]
 	pub output: Option<String>,
 
 	/// A ladder rung as `height:bitrate` (pixels : bits per second), repeatable,
 	/// e.g. `--rung 720:2500000 --rung 360:600000`. Rungs at or above the source
 	/// are dropped at runtime. Defaults to a 1080p..240p ladder.
-	#[arg(long = "rung", value_parser = parse_rung)]
-	pub rungs: Vec<moq_transcode::Rung>,
+	#[usage(long = "rung")]
+	rungs: Vec<RungArg>,
 
 	/// The video encoder: `auto` (hardware first), `hardware`, `software`, or a
 	/// backend name like `nvenc`.
-	#[arg(long, default_value = "auto")]
+	#[usage(long, default = "auto")]
 	pub encoder: String,
 
 	/// The video decoder: `auto` (hardware first), `hardware`, `software`, or a
 	/// backend name like `nvdec`.
-	#[arg(long, default_value = "auto")]
+	#[usage(long, default = "auto")]
 	pub decoder: String,
 
 	/// Frame resize acceleration: `auto` (GPU-backed frames stay resident), `cpu`,
 	/// or `gpu`.
-	#[arg(long, default_value = "auto", value_parser = parse_resize_acceleration)]
-	pub resize_acceleration: moq_video::resize::Acceleration,
+	#[usage(long, default = "auto")]
+	resize_acceleration: AccelerationArg,
 }
 
-/// Parse a `height:bitrate` rung, e.g. `720:2500000`.
-fn parse_rung(arg: &str) -> Result<moq_transcode::Rung, String> {
-	let (height, bitrate) = arg
-		.split_once(':')
-		.ok_or_else(|| format!("expected height:bitrate, got `{arg}`"))?;
-	let height: u32 = height.parse().map_err(|e| format!("invalid height `{height}`: {e}"))?;
-	let bitrate: u64 = bitrate
-		.parse()
-		.map_err(|e| format!("invalid bitrate `{bitrate}`: {e}"))?;
-	Ok(moq_transcode::Rung::new(
-		height,
-		moq_net::bandwidth::Rate::from_bps(bitrate),
-	))
+/// A `height:bitrate` rung, e.g. `720:2500000`.
+///
+/// A newtype because Usage builds a value through `FromStr`, and `Rung` is not ours.
+#[derive(Clone)]
+struct RungArg(moq_transcode::Rung);
+
+impl std::str::FromStr for RungArg {
+	type Err = String;
+
+	fn from_str(arg: &str) -> Result<Self, Self::Err> {
+		let (height, bitrate) = arg
+			.split_once(':')
+			.ok_or_else(|| format!("expected height:bitrate, got `{arg}`"))?;
+		let height: u32 = height.parse().map_err(|e| format!("invalid height `{height}`: {e}"))?;
+		let bitrate: u64 = bitrate
+			.parse()
+			.map_err(|e| format!("invalid bitrate `{bitrate}`: {e}"))?;
+		Ok(Self(moq_transcode::Rung::new(
+			height,
+			moq_net::bandwidth::Rate::from_bps(bitrate),
+		)))
+	}
 }
 
-/// Parse a frame resize acceleration preference.
-fn parse_resize_acceleration(arg: &str) -> Result<moq_video::resize::Acceleration, String> {
-	match arg {
-		"auto" => Ok(moq_video::resize::Acceleration::Auto),
-		"cpu" => Ok(moq_video::resize::Acceleration::Cpu),
-		"gpu" => Ok(moq_video::resize::Acceleration::Gpu),
-		_ => Err(format!("expected auto, cpu, or gpu, got `{arg}`")),
+#[derive(Clone, Copy)]
+struct AccelerationArg(moq_video::resize::Acceleration);
+
+impl std::str::FromStr for AccelerationArg {
+	type Err = String;
+
+	fn from_str(arg: &str) -> Result<Self, Self::Err> {
+		match arg {
+			"auto" => Ok(Self(moq_video::resize::Acceleration::Auto)),
+			"cpu" => Ok(Self(moq_video::resize::Acceleration::Cpu)),
+			"gpu" => Ok(Self(moq_video::resize::Acceleration::Gpu)),
+			_ => Err(format!("expected auto, cpu, or gpu, got `{arg}`")),
+		}
 	}
 }
 
@@ -128,7 +144,7 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 
 	let mut config = moq_transcode::Config::default();
 	if !args.rungs.is_empty() {
-		config.rungs = args.rungs.clone();
+		config.rungs = args.rungs.into_iter().map(|rung| rung.0).collect();
 	}
 	config.encoder = match args.encoder.as_str() {
 		"auto" => moq_video::encode::Kind::Auto,
@@ -142,7 +158,7 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		"software" => moq_video::decode::Kind::Software,
 		name => moq_video::decode::Kind::Named(name.to_string()),
 	};
-	config.resize.acceleration = args.resize_acceleration;
+	config.resize.acceleration = args.resize_acceleration.0;
 	// Point the derivative catalog at the source renditions so players fetch them from the
 	// source directly. An empty reference would name the derivative broadcast itself, which
 	// publishes the rungs and nothing else.

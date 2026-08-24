@@ -48,7 +48,7 @@ fn worker_config(cert: &std::path::Path, key: &std::path::Path, port: u16, worke
 	config.listen.tls.cert = vec![cert.to_path_buf()];
 	config.listen.tls.key = vec![key.to_path_buf()];
 	config.runtime.workers = Some(workers);
-	config.runtime.pin = Some(false);
+	config.runtime.pin = false;
 	#[allow(deprecated)]
 	let public = PublicConfig::Simple(vec![String::new()]);
 	config.auth.public = Some(public);

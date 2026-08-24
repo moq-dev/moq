@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use clap::ValueEnum;
 use hang::catalog::{AudioCodecKind, VideoCodecKind};
 use moq_mux::catalog::{self, CatalogFormat, Stream};
 use moq_mux::select;
@@ -23,12 +22,12 @@ pub enum SubscribeFormat {
 	Flv,
 }
 
-/// `clap` adapter for [`CatalogFormat`] (which is `#[non_exhaustive]` and so
+/// `Usage` adapter for [`CatalogFormat`] (which is `#[non_exhaustive]` and so
 /// can't derive `ValueEnum` itself).
-#[derive(ValueEnum, Clone, Copy)]
+#[derive(usage::ValueEnum, Clone, Copy)]
 pub enum CatalogFormatArg {
 	Hang,
-	#[value(name = "hangz")]
+	#[usage(name = "hangz")]
 	HangZ,
 	Msf,
 }
@@ -43,8 +42,8 @@ impl From<CatalogFormatArg> for CatalogFormat {
 	}
 }
 
-/// `clap` adapter for [`VideoCodecKind`].
-#[derive(ValueEnum, Clone, Copy)]
+/// `Usage` adapter for [`VideoCodecKind`].
+#[derive(usage::ValueEnum, Clone, Copy)]
 pub enum VideoCodecArg {
 	H264,
 	H265,
@@ -65,8 +64,8 @@ impl From<VideoCodecArg> for VideoCodecKind {
 	}
 }
 
-/// `clap` adapter for [`AudioCodecKind`].
-#[derive(ValueEnum, Clone, Copy)]
+/// `Usage` adapter for [`AudioCodecKind`].
+#[derive(usage::ValueEnum, Clone, Copy)]
 pub enum AudioCodecArg {
 	Aac,
 	Opus,
@@ -85,22 +84,23 @@ impl From<AudioCodecArg> for AudioCodecKind {
 
 /// Rendition selection flags for stdout container sinks and native playback.
 /// With no flags set, every rendition is kept.
-#[derive(clap::Args, Clone, Default)]
+#[derive(usage::Args, Clone, Default)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub struct SelectArgs {
 	/// Pick the video rendition with this exact name.
-	#[arg(long)]
+	#[usage(long)]
 	pub video_name: Option<String>,
 
 	/// Keep only video renditions whose codec family matches.
-	#[arg(long)]
+	#[usage(long, value_enum)]
 	pub video_codec: Option<VideoCodecArg>,
 
 	/// Pick the audio rendition with this exact name.
-	#[arg(long)]
+	#[usage(long)]
 	pub audio_name: Option<String>,
 
 	/// Keep only audio renditions whose codec family matches.
-	#[arg(long)]
+	#[usage(long, value_enum)]
 	pub audio_codec: Option<AudioCodecArg>,
 }
 

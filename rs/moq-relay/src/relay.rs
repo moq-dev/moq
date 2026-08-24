@@ -24,7 +24,7 @@
 
 use anyhow::Context;
 
-use crate::{Auth, Cluster, Config, Connection, DEFAULT_DRAIN_TIMEOUT, Internal, Shutdown, ShutdownTrigger, Web};
+use crate::{Auth, Cluster, Config, Connection, Internal, Shutdown, ShutdownTrigger, Web};
 
 /// A fully assembled relay: the listeners and the shared cluster behind them.
 ///
@@ -160,7 +160,7 @@ impl Relay {
 
 		// Graceful shutdown: the first signal drains every accepted session with a
 		// GOAWAY; a second signal (or the drain window elapsing) exits.
-		let drain_timeout = config.drain_timeout.unwrap_or(DEFAULT_DRAIN_TIMEOUT);
+		let drain_timeout = config.drain_timeout.into_std();
 		let (shutdown_trigger, shutdown) = Shutdown::new(drain_timeout);
 		// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
 		// The workers hold the certificates when they own QUIC; the server has none.

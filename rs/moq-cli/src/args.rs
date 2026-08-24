@@ -13,17 +13,17 @@
 //!   bidirectional gateways, whether `--connect`/`--listen` push or pull).
 //! - `devices` and `token` touch no network at all, so they're the verbs that take
 //!   no MoQ side. That's why the requirement is enforced per-verb
-//!   ([`MoqSide::validate`]) rather than by clap: an `ArgGroup` can't be
+//!   ([`MoqSide::validate`]) rather than by the parser: an argument group can't be
 //!   conditional on the subcommand.
 //! - The endpoint is one subcommand: a container format (`ts`, `fmp4`, ... read
 //!   from stdin on import, written to stdout on export) or a gateway (`hls`,
 //!   `rtmp`, `srt`, `rtc`). Exactly one per stage, so "which endpoint" is
 //!   unambiguous and there's no silently-ignored flag.
 //! - `--` starts another stage on the same Origin and the same MoQ attachment, so
-//!   one process can bridge several broadcasts (or both directions at once). clap
+//!   one process can bridge several broadcasts (or both directions at once). Usage
 //!   can't express a repeated subcommand, so [`Invocation`] splits argv on `--`
 //!   and runs each chunk through a real parser: every stage keeps full validation
-//!   and its own `--help`. That claims `--` from clap, which would otherwise treat
+//!   and its own `--help`. That claims `--` from Usage, which would otherwise treat
 //!   it as the end-of-options marker. The only positional it could have escaped is
 //!   an `import hls` playlist path starting with `-`, which `./-name` covers, so
 //!   the separator stays unconditional rather than context-sensitive.
@@ -31,45 +31,47 @@
 use std::ffi::{OsStr, OsString};
 use std::time::Duration;
 
-use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand};
 use hang::moq_net;
 
 use crate::publish::PublishFormat;
 use crate::subscribe::{CatalogFormatArg, SubscribeFormat};
 
 // The globals plus the first stage; later stages are parsed as a [`Stage`]. Keep
-// the doc comment to one line: clap renders the rest as `--help` body text, where
+// the doc comment to one line: Usage renders the rest as `--help` body text, where
 // rustdoc links read as noise.
 /// moq-cli: a media router that wires endpoints onto a shared MoQ Origin.
-#[derive(Parser, Clone)]
-#[command(name = "moq", version = env!("VERSION"))]
-#[command(after_help = "Separate additional import/export stages with `--`; they share one \
+#[derive(usage::Cli, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+#[usage(name = "moq", version = env!("VERSION"))]
+#[usage(completion)]
+#[usage(after_help = "Separate additional import/export stages with `--`; they share one \
                         connection and one Origin. Every `--` starts a stage, so it is not an \
                         end-of-options marker: write a path starting with `-` as `./-name`.")]
 pub struct Cli {
 	/// Logging configuration.
-	#[command(flatten)]
+	#[usage(flatten)]
 	pub log: moq_tokio::Log,
 
 	/// The MoQ attachment, shared by both directions.
-	#[command(flatten)]
+	#[usage(flatten)]
 	pub moq: MoqSide,
 
 	/// The verb and endpoint.
-	#[command(subcommand)]
+	#[usage(subcommand)]
 	pub command: Command,
 }
 
 // `no_binary_name` because the chunk after a `--` starts at the verb, and the
 // globals are deliberately absent: `--connect` past the first stage would
 // read like it scopes that stage, when there is only ever one connection. As with
-// [`Cli`], the doc comment stays one line because clap shows it in `--help`.
+// [`Cli`], the doc comment stays one line because Usage shows it in `--help`.
 /// A stage after the first: the verb and endpoint, without the globals.
-#[derive(Parser, Clone)]
-#[command(name = "moq", no_binary_name = true)]
+#[derive(usage::Cli, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+#[usage(name = "moq")]
 pub struct Stage {
 	/// The verb and endpoint.
-	#[command(subcommand)]
+	#[usage(subcommand)]
 	pub command: Command,
 }
 
@@ -85,8 +87,64 @@ pub struct Invocation {
 	pub stages: Vec<Command>,
 }
 
+/// Broad category for an invocation parse failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParseErrorKind {
+	/// An argument or flag was not recognized.
+	UnknownArgument,
+	/// A command or stage was missing.
+	MissingSubcommand,
+	/// An argument value or deprecated spelling was invalid.
+	ValueValidation,
+	/// Help was requested.
+	DisplayHelp,
+	/// Version information was requested.
+	DisplayVersion,
+	/// Another parser constraint failed.
+	Other,
+}
+
+/// An owned, rendered invocation parse failure.
+#[derive(Debug)]
+pub struct ParseError {
+	kind: ParseErrorKind,
+	message: String,
+}
+
+impl ParseError {
+	/// The broad failure category.
+	#[cfg_attr(not(test), allow(dead_code))]
+	pub fn kind(&self) -> ParseErrorKind {
+		self.kind
+	}
+
+	fn new(kind: ParseErrorKind, message: impl Into<String>) -> Self {
+		Self {
+			kind,
+			message: message.into(),
+		}
+	}
+
+	fn exit(self) -> ! {
+		if matches!(self.kind, ParseErrorKind::DisplayHelp | ParseErrorKind::DisplayVersion) {
+			print!("{}", self.message);
+			std::process::exit(0);
+		}
+		eprint!("{}", self.message);
+		std::process::exit(2)
+	}
+}
+
+impl std::fmt::Display for ParseError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(&self.message)
+	}
+}
+
+impl std::error::Error for ParseError {}
+
 impl Invocation {
-	/// Parse the process arguments, exiting with clap's own message on error.
+	/// Parse the process arguments, exiting with Usage's rendered message on error.
 	pub fn parse() -> Self {
 		match Self::try_parse_from(std::env::args_os()) {
 			Ok(parsed) => parsed,
@@ -95,7 +153,7 @@ impl Invocation {
 	}
 
 	/// Split `argv` on `--` and run each chunk through a real parser.
-	pub fn try_parse_from<I, T>(argv: I) -> Result<Self, clap::Error>
+	pub fn try_parse_from<I, T>(argv: I) -> Result<Self, ParseError>
 	where
 		I: IntoIterator<Item = T>,
 		T: Into<OsString>,
@@ -103,34 +161,44 @@ impl Invocation {
 		let argv: Vec<OsString> = argv.into_iter().map(Into::into).collect();
 		let mut chunks = argv.split(|arg| arg == OsStr::new("--"));
 
-		// `split` always yields at least one chunk, even for an empty argv; clap then
+		// `split` always yields at least one chunk, even for an empty argv; Usage then
 		// reports the missing subcommand as usual.
-		let cli = Cli::try_parse_from(chunks.next().unwrap_or_default())?;
+		let first = chunks.next().unwrap_or_default();
+		let first = first.iter().skip(1).map(OsString::as_os_str).collect::<Vec<_>>();
+		let cli = Cli::parse_from(&first).map_err(|err| parse_error(Cli::spec(), &first, err))?;
 
 		let mut stages = vec![cli.command];
 		for chunk in chunks {
-			// A trailing or doubled `--` leaves an empty chunk, which clap would report as a
+			// A trailing or doubled `--` leaves an empty chunk, which Usage would report as a
 			// bare missing-subcommand usage dump. Name what's actually wrong instead.
 			if chunk.is_empty() {
-				return Err(Stage::command().error(
-					clap::error::ErrorKind::MissingSubcommand,
-					"`--` starts another stage, so it must be followed by `import` or `export`",
+				return Err(ParseError::new(
+					ParseErrorKind::MissingSubcommand,
+					"error: `--` starts another stage, so it must be followed by `import` or `export`\n",
 				));
 			}
 
-			stages.push(Stage::try_parse_from(chunk)?.command);
+			let chunk = chunk.iter().map(OsString::as_os_str).collect::<Vec<_>>();
+			stages.push(
+				Stage::parse_from(&chunk)
+					.map_err(|err| parse_error(Stage::spec(), &chunk, err))?
+					.command,
+			);
 		}
 
 		// Before anything reads the config: a released spelling parses into a hidden
 		// field that nothing honors, so continuing would run on settings the command
 		// line never asked for. Every stage is in by now, since a stage can carry a
-		// config of its own. A clap error, since that is what this is.
+		// config of its own. A Usage error, since that is what this is.
 		let mut deprecated = cli.moq.deprecated();
 		for stage in &stages {
 			deprecated.extend(stage.deprecated());
 		}
 		if !deprecated.is_empty() {
-			return Err(Cli::command().error(clap::error::ErrorKind::ValueValidation, deprecated.to_string()));
+			return Err(ParseError::new(
+				ParseErrorKind::ValueValidation,
+				format!("error: {deprecated}\n"),
+			));
 		}
 
 		Ok(Self {
@@ -186,6 +254,18 @@ impl Invocation {
 	}
 }
 
+fn parse_error(spec: &usage::argv::spec::Spec<'_>, argv: &[&OsStr], err: usage::Error<'_, '_>) -> ParseError {
+	let kind = match err {
+		usage::Error::UnknownFlag { .. } | usage::Error::UnexpectedArg { .. } => ParseErrorKind::UnknownArgument,
+		usage::Error::MissingSubcommand => ParseErrorKind::MissingSubcommand,
+		usage::Error::InvalidValue(_) | usage::Error::InvalidChoice { .. } => ParseErrorKind::ValueValidation,
+		usage::Error::Help { .. } | usage::Error::HelpAll { .. } => ParseErrorKind::DisplayHelp,
+		usage::Error::Version { .. } => ParseErrorKind::DisplayVersion,
+		_ => ParseErrorKind::Other,
+	};
+	ParseError::new(kind, usage::render_failure(spec, argv, &err))
+}
+
 /// The MoQ attachment: a relay dial, a server listener, a LAN mesh, or any
 /// combination.
 ///
@@ -196,15 +276,8 @@ impl Invocation {
 /// The three transport sections are read as plain fields. [`Invocation`] refuses a
 /// released spelling while parsing, so a field left unset here means the command
 /// line really did leave it unset.
-#[derive(Args, Clone)]
-#[cfg_attr(
-	feature = "cluster-lan",
-	command(group = ArgGroup::new("moq").multiple(true).args(["connect", "listen", "cluster-lan"]))
-)]
-#[cfg_attr(
-	not(feature = "cluster-lan"),
-	command(group = ArgGroup::new("moq").multiple(true).args(["connect", "listen"]))
-)]
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub struct MoqSide {
 	/// The default broadcast name for every stage that doesn't name its own.
 	///
@@ -212,7 +285,7 @@ pub struct MoqSide {
 	/// `--connect` dials), which default to the root broadcast at the connection
 	/// path; required by the `--listen` endpoints and `hls export`, which bridge one
 	/// named broadcast.
-	#[arg(long, alias = "name", help_heading = "MoQ")]
+	#[usage(long, alias = "name", help_heading = "MoQ")]
 	pub broadcast: Option<String>,
 
 	/// Fix this process's origin id instead of minting a fresh random one.
@@ -223,30 +296,30 @@ pub struct MoqSide {
 	/// over between them at a group boundary. Leave unset outside a redundant
 	/// (1+1) chain; the default fresh id per run is what makes a restarted
 	/// publisher look like new content instead of silently splicing.
-	#[arg(long, env = "MOQ_ORIGIN", help_heading = "MoQ")]
+	#[usage(long, env = "MOQ_ORIGIN", help_heading = "MoQ")]
 	pub origin: Option<u64>,
 
 	/// MoQ client config (`--connect`, `--connect-bind`, `--connect-tls-*`, ...).
-	#[command(flatten)]
+	#[usage(flatten)]
 	pub client: moq_tokio::connect::Config,
 
 	/// QUIC transport tuning (`--quic-*`), shared by the dial and accept sides.
-	#[command(flatten)]
+	#[usage(flatten)]
 	pub quic: moq_tokio::quic::Config,
 
 	/// MoQ server transport config (`--listen`, `--listen-tcp-bind`,
 	/// `--listen-unix-bind`, `--listen-tls-*`).
-	#[command(flatten)]
+	#[usage(flatten)]
 	pub server: moq_tokio::listen::Config,
 
 	/// Iroh transport config (`--iroh-*`), used by both the client and server.
 	#[cfg(feature = "iroh")]
-	#[command(flatten)]
+	#[usage(flatten)]
 	pub iroh: moq_tokio::iroh::EndpointConfig,
 
 	/// LAN clustering config (`--cluster-lan`, `--cluster-lan-secret`).
 	#[cfg(feature = "cluster-lan")]
-	#[command(flatten)]
+	#[usage(flatten)]
 	pub cluster: crate::cluster::Args,
 }
 
@@ -300,7 +373,7 @@ impl MoqSide {
 	}
 
 	/// Reject a verb that needs the MoQ network but was given no way to reach it.
-	/// Stands in for the clap `required` the `moq` group can't carry, since
+	/// Stands in for the Usage `required` the `moq` group can't carry, since
 	/// `devices` is exempt.
 	pub fn validate(&self) -> anyhow::Result<()> {
 		anyhow::ensure!(
@@ -345,7 +418,7 @@ impl MoqSide {
 		let ignored = ignored
 			.or_else(|| self.server.unix.bind.is_some().then_some("--listen-unix-bind"))
 			.or_else(|| {
-				let allow = self.server.unix.allow.as_ref()?;
+				let allow = &self.server.unix.allow;
 				[
 					("--listen-unix-allow-uid", !allow.uid.is_empty()),
 					("--listen-unix-allow-gid", !allow.gid.is_empty()),
@@ -365,13 +438,13 @@ impl MoqSide {
 
 /// The verb: for `import`/`export` it is also the data direction, the pivot
 /// between the MoQ side and the endpoint.
-#[derive(Subcommand, Clone)]
+#[derive(usage::Subcommands, Clone)]
 pub enum Command {
 	/// Route media INTO MoQ from one source.
-	#[command(alias = "publish")]
+	#[usage(alias = "publish")]
 	Import(Import),
 	/// Route media OUT OF MoQ to one sink.
-	#[command(alias = "subscribe")]
+	#[usage(alias = "subscribe")]
 	Export(Export),
 	/// Play a broadcast in a native window and speaker.
 	#[cfg(feature = "play")]
@@ -444,13 +517,14 @@ impl Command {
 // ------------------------------------------------------------------ import
 
 /// import = one source -> MoQ.
-#[derive(Args, Clone)]
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Import {
 	/// The broadcast this stage publishes, overriding the process-wide `--broadcast`.
 	///
 	/// Required when a process imports more than one broadcast; a single stage can
 	/// keep naming it before the verb.
-	#[arg(long, alias = "name")]
+	#[usage(long, alias = "name")]
 	pub broadcast: Option<String>,
 
 	/// How long relays keep a non-latest group of the published media tracks fetchable,
@@ -462,17 +536,17 @@ pub struct Import {
 	/// advertise segments that are still fetchable; lower it when nothing reads history and the
 	/// memory matters. Media tracks only -- the catalog and timeline are read at the live edge,
 	/// which is retained unconditionally.
-	#[arg(long = "latency-max", value_parser = humantime::parse_duration)]
-	pub max_age: Option<std::time::Duration>,
+	#[usage(long = "latency-max")]
+	pub max_age: Option<moq_tokio::Duration>,
 
 	/// The single source feeding the Origin.
-	#[command(subcommand)]
+	#[usage(subcommand)]
 	pub source: ImportSource,
 }
 
 /// The single source feeding the Origin on an import. The container formats read
 /// from stdin; the gateways bridge another protocol.
-#[derive(Subcommand, Clone)]
+#[derive(usage::Subcommands, Clone)]
 pub enum ImportSource {
 	/// Raw H.264 Annex-B from stdin.
 	Avc3,
@@ -524,31 +598,32 @@ impl ImportSource {
 // ------------------------------------------------------------------ export
 
 /// export = MoQ -> one sink.
-#[derive(Args, Clone)]
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Export {
 	/// The broadcast this stage subscribes to, overriding the process-wide `--broadcast`.
 	///
 	/// Required when a process exports more than one broadcast; a single stage can
 	/// keep naming it before the verb.
-	#[arg(long, alias = "name")]
+	#[usage(long, alias = "name")]
 	pub broadcast: Option<String>,
 
 	/// Catalog format to read for track discovery (default: detect from the broadcast suffix).
-	#[arg(long = "catalog-format")]
+	#[usage(long = "catalog-format", value_enum)]
 	pub catalog_format: Option<CatalogFormatArg>,
 
 	/// Rendition selection (`--video-name`, `--video-codec`, `--audio-name`, `--audio-codec`).
-	#[command(flatten)]
+	#[usage(flatten)]
 	pub select: crate::subscribe::SelectArgs,
 
 	/// The single sink draining the Origin.
-	#[command(subcommand)]
+	#[usage(subcommand)]
 	pub sink: ExportSink,
 }
 
 /// The single sink draining the Origin on an export. The container formats write
 /// to stdout; the gateways bridge another protocol.
-#[derive(Subcommand, Clone)]
+#[derive(usage::Subcommands, Clone)]
 pub enum ExportSink {
 	/// Fragmented MP4 / CMAF to stdout.
 	Fmp4(Fragmented),
@@ -578,54 +653,64 @@ impl ExportSink {
 	/// fmp4/mkv-only.
 	pub fn stdout(&self) -> Option<(SubscribeFormat, std::time::Duration, Option<Duration>)> {
 		Some(match self {
-			Self::Fmp4(args) => (SubscribeFormat::Fmp4, args.container.max_age, args.fragment_duration),
-			Self::Mkv(args) => (SubscribeFormat::Mkv, args.container.max_age, args.fragment_duration),
-			Self::Ts(args) => (SubscribeFormat::Ts, args.max_age, None),
-			Self::Flv(args) => (SubscribeFormat::Flv, args.max_age, None),
-			Self::H264(args) => (SubscribeFormat::H264, args.max_age, None),
-			Self::H265(args) => (SubscribeFormat::H265, args.max_age, None),
+			Self::Fmp4(args) => (
+				SubscribeFormat::Fmp4,
+				args.container.max_age.into_std(),
+				args.fragment_duration.map(moq_tokio::Duration::into_std),
+			),
+			Self::Mkv(args) => (
+				SubscribeFormat::Mkv,
+				args.container.max_age.into_std(),
+				args.fragment_duration.map(moq_tokio::Duration::into_std),
+			),
+			Self::Ts(args) => (SubscribeFormat::Ts, args.max_age.into_std(), None),
+			Self::Flv(args) => (SubscribeFormat::Flv, args.max_age.into_std(), None),
+			Self::H264(args) => (SubscribeFormat::H264, args.max_age.into_std(), None),
+			Self::H265(args) => (SubscribeFormat::H265, args.max_age.into_std(), None),
 			_ => return None,
 		})
 	}
 }
 
 /// Options shared by every stdout container sink.
-#[derive(Args, Clone)]
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Container {
 	/// Maximum latency before skipping a stalled group (e.g. `500ms`, `1s`).
-	#[arg(long = "latency-max", default_value = "500ms", value_parser = humantime::parse_duration)]
-	pub max_age: Duration,
+	#[usage(long = "latency-max", default = "500ms")]
+	pub max_age: moq_tokio::Duration,
 }
 
 /// The fmp4 / mkv stdout containers: [`Container`] plus a fragment cap.
-#[derive(Args, Clone)]
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Fragmented {
-	#[command(flatten)]
+	#[usage(flatten)]
 	pub container: Container,
 
 	/// Cap the output fragment/cluster duration (e.g. `2s`). Default: one GOP.
-	#[arg(long, value_parser = humantime::parse_duration)]
-	pub fragment_duration: Option<Duration>,
+	#[usage(long)]
+	pub fragment_duration: Option<moq_tokio::Duration>,
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
 
-	// Catches the conflicts clap only panics on at runtime: a duplicate long, a
-	// dangling `conflicts_with`, a flattened arg colliding with an existing one.
+	// Materializing the spec catches invalid relationships, duplicate selectors,
+	// and flattened arguments colliding with an existing one.
 	// The token verb flattens a whole command tree from another crate, so this is
 	// the only thing standing between a rename there and a broken `moq`.
 	#[test]
 	fn valid() {
-		Cli::command().debug_assert();
+		let _ = Cli::to_kdl();
 	}
 
 	/// The `Stage` parser is a second entry point into the same command tree, so it
 	/// needs the same conflict check as [`Cli`].
 	#[test]
 	fn valid_stage() {
-		Stage::command().debug_assert();
+		let _ = Stage::to_kdl();
 	}
 
 	#[test]
@@ -745,7 +830,7 @@ mod tests {
 		);
 	}
 
-	/// The grammar clap can't express: one connection, several endpoints.
+	/// The grammar Usage can't express: one connection, several endpoints.
 	#[test]
 	fn multiple_stages() {
 		let cli = Invocation::try_parse_from([
@@ -841,7 +926,7 @@ mod tests {
 		assert!(err.contains("token"), "{err}");
 	}
 
-	/// Each stage is parsed by a real clap parser, so a typo past the first `--` is
+	/// Each stage is parsed by a real Usage parser, so a typo past the first `--` is
 	/// still a parse error rather than something swallowed as a positional.
 	#[test]
 	fn stage_errors_are_parse_errors() {
@@ -859,10 +944,10 @@ mod tests {
 			panic!("expected a parse error")
 		};
 
-		assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+		assert_eq!(err.kind(), ParseErrorKind::UnknownArgument);
 	}
 
-	/// Splitting on `--` claims it from clap, so it can't also escape a positional
+	/// Splitting on `--` claims it from Usage, so it can't also escape a positional
 	/// starting with `-`. `./-name` is the documented way to write one.
 	#[test]
 	fn a_dash_prefixed_path_is_written_relative() {
@@ -900,7 +985,7 @@ mod tests {
 				panic!("expected a parse error for {argv:?}")
 			};
 
-			assert_eq!(err.kind(), clap::error::ErrorKind::MissingSubcommand);
+			assert_eq!(err.kind(), ParseErrorKind::MissingSubcommand);
 			assert!(err.to_string().contains("must be followed by"), "{err}");
 		}
 	}
@@ -924,7 +1009,7 @@ mod tests {
 			panic!("expected a parse error")
 		};
 
-		assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+		assert_eq!(err.kind(), ParseErrorKind::UnknownArgument);
 	}
 
 	/// Stages that never read the estimate can share a connection freely, so the guard
@@ -1031,7 +1116,7 @@ mod tests {
 	#[test]
 	fn max_age_is_unset_unless_asked_for() {
 		// Unset rather than defaulted to hang's constant, so the publisher's own default is
-		// what every source falls back to. A `default_value` here would put the number in the
+		// what every source falls back to. A second default here would put the number in the
 		// CLI as well, and the two would drift.
 		let cli = Invocation::try_parse_from(["moq", "import", "ts"]).unwrap();
 		let Command::Import(import) = &cli.stages[0] else {
@@ -1044,7 +1129,7 @@ mod tests {
 		let Command::Import(import) = &cli.stages[0] else {
 			panic!("expected import")
 		};
-		assert_eq!(import.max_age, Some(Duration::from_secs(5)));
+		assert_eq!(import.max_age, Some(Duration::from_secs(5).into()));
 
 		let cli = Invocation::try_parse_from([
 			"moq",
@@ -1059,7 +1144,7 @@ mod tests {
 		let Command::Import(import) = &cli.stages[0] else {
 			panic!("expected import")
 		};
-		assert_eq!(import.max_age, Some(Duration::from_secs(5)));
+		assert_eq!(import.max_age, Some(Duration::from_secs(5).into()));
 	}
 
 	#[test]
@@ -1101,7 +1186,7 @@ mod tests {
 			let err = cli.moq.reject("token").unwrap_err().to_string();
 			assert!(err.contains("--cluster-lan"), "{err}");
 
-			// Clap considers the secret's `requires` satisfied when the boolean flag
+			// The parser considers the secret's `requires` satisfied when the boolean flag
 			// is explicitly present but false. The local verb still has to reject the
 			// otherwise silently ignored secret.
 			let cli = Invocation::try_parse_from([
@@ -1164,9 +1249,9 @@ mod tests {
 			.err()
 			.expect("the secret must require --cluster-lan")
 			.to_string();
-		assert!(err.contains("--cluster-lan"), "{err}");
+		assert!(err.contains("cluster-lan"), "{err}");
 
-		// `--cluster-lan=false` satisfies clap's `requires` (the flag is present),
+		// `--cluster-lan=false` satisfies Usage's `requires` (the flag is present),
 		// so the real check lives in `validate`.
 		let cli = Invocation::try_parse_from([
 			"moq",
@@ -1251,9 +1336,8 @@ mod tests {
 		assert!(play.validate().is_ok());
 	}
 
-	/// The selection flags are shared with the exports, which pass every codec
-	/// through. Playback has to decode, so it rejects the rest up front instead
-	/// of filtering the catalog down to a rendition that can't open.
+	/// The selection flags are shared with exports, which pass every codec
+	/// through. Playback validates them against the codecs it can decode.
 	#[cfg(feature = "play")]
 	#[test]
 	fn play_rejects_undecodable_codecs() {
@@ -1273,5 +1357,19 @@ mod tests {
 			let err = play.validate().unwrap_err().to_string();
 			assert!(err.contains(codec), "{err}");
 		}
+
+		let cli = Invocation::try_parse_from([
+			"moq",
+			"--connect",
+			"https://relay.example.com/anon",
+			"play",
+			"--audio-codec",
+			"aac",
+		])
+		.unwrap();
+		let Command::Play(play) = &cli.stages[0] else {
+			panic!("expected play")
+		};
+		assert!(play.validate().is_ok());
 	}
 }

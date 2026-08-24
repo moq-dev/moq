@@ -380,11 +380,11 @@ impl DialMap {
 ///
 /// Hop-based routing on broadcasts prevents announcement loops regardless of topology.
 #[serde_with::serde_as]
-#[derive(clap::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
+#[derive(usage::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde_with::skip_serializing_none]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
-#[group(id = "cluster-config")]
 pub struct ClusterConfig {
 	/// Fixed origin (hop) id for this relay, identifying it in the hop chains
 	/// carried on each broadcast for loop detection and shortest-path routing.
@@ -394,7 +394,7 @@ pub struct ClusterConfig {
 	/// (the wire varint limit); an out-of-range value errors at startup. Keep it
 	/// below 2^53 for compatibility with older `@moq/lite` JS clients, which
 	/// decode hop ids as a `u53` and reject anything larger.
-	#[arg(id = "cluster-id", long = "cluster-id", env = "MOQ_CLUSTER_ID")]
+	#[usage(name = "cluster-id", long = "cluster-id", env = "MOQ_CLUSTER_ID")]
 	pub id: Option<u64>,
 
 	/// Connect to one or more other cluster nodes. Each peer is a full URL, e.g.
@@ -409,11 +409,11 @@ pub struct ClusterConfig {
 	/// reproduces plain hop counting. The param is consumed by this relay, not
 	/// sent to the peer.
 	#[serde(alias = "connect")]
-	#[arg(
-		id = "cluster-connect",
+	#[usage(
+		name = "cluster-connect",
 		long = "cluster-connect",
 		env = "MOQ_CLUSTER_CONNECT",
-		value_delimiter = ','
+		delimiter = ','
 	)]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub connect: Vec<String>,
@@ -429,8 +429,8 @@ pub struct ClusterConfig {
 	/// [`Self::node`] value, when set, is sent as a `?node=` query param so the
 	/// server can return this node's peers. The relay keeps the last good list if
 	/// a fetch fails. Composes with [`Self::connect`] and [`Self::mesh`].
-	#[arg(
-		id = "cluster-connect-api",
+	#[usage(
+		name = "cluster-connect-api",
 		long = "cluster-connect-api",
 		env = "MOQ_CLUSTER_CONNECT_API"
 	)]
@@ -440,7 +440,7 @@ pub struct ClusterConfig {
 	/// [`Self::connect_api`] as a `?node=` query param so the endpoint can return
 	/// this node's peers, and advertised to other relays when [`Self::mesh`] gossip
 	/// is enabled. On its own it neither opens nor accepts a connection.
-	#[arg(id = "cluster-node", long = "cluster-node", env = "MOQ_CLUSTER_NODE")]
+	#[usage(name = "cluster-node", long = "cluster-node", env = "MOQ_CLUSTER_NODE")]
 	pub node: Option<String>,
 
 	/// Enable gossip discovery: advertise this relay's [`Self::node`] URL on the
@@ -452,11 +452,11 @@ pub struct ClusterConfig {
 	/// this relay's URL. A non-boolean value is treated as a legacy [`Self::node`]
 	/// (with a deprecation warning), or an error if it conflicts with an explicit
 	/// `--cluster-node`. Accepts a TOML boolean or string.
-	#[arg(
-		id = "cluster-mesh",
+	#[usage(
+		name = "cluster-mesh",
 		long = "cluster-mesh",
 		env = "MOQ_CLUSTER_MESH",
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
 	)]
@@ -465,7 +465,7 @@ pub struct ClusterConfig {
 
 	/// LAN discovery over mDNS (`[cluster.lan]`).
 	#[cfg(feature = "cluster-lan")]
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	pub lan: LanConfig,
 
@@ -474,26 +474,24 @@ pub struct ClusterConfig {
 	/// any peer whose URL has no inline token). An inline `?jwt=` can provide a
 	/// per-peer credential for static or `connect_api` peers. Gossip should use
 	/// this shared token or mTLS because the advertised node URL is public.
-	#[arg(id = "cluster-token", long = "cluster-token", env = "MOQ_CLUSTER_TOKEN")]
+	#[usage(name = "cluster-token", long = "cluster-token", env = "MOQ_CLUSTER_TOKEN")]
 	pub token: Option<PathBuf>,
 
 	/// Billing tier label that cluster-peer (relay-to-relay) traffic records
 	/// stats under. Defaults to the unprefixed tier.
-	#[arg(id = "cluster-tier", long = "cluster-tier", env = "MOQ_CLUSTER_TIER")]
+	#[usage(name = "cluster-tier", long = "cluster-tier", env = "MOQ_CLUSTER_TIER")]
 	pub tier: Option<String>,
 	// Accepted so existing configs keep parsing (`deny_unknown_fields`), but
 	// ignored: a broadcast now closes as soon as its last publisher is lost.
 	#[doc(hidden)]
 	#[deprecated(note = "ignored; a broadcast closes as soon as its last publisher is lost")]
-	#[arg(
-		id = "cluster-linger",
+	#[usage(
+		name = "cluster-linger",
 		long = "cluster-linger",
 		env = "MOQ_CLUSTER_LINGER",
-		value_parser = humantime::parse_duration,
-		hide = true,
+		hide = true
 	)]
-	#[serde(default, with = "humantime_serde")]
-	pub linger: Option<Duration>,
+	pub linger: Option<moq_tokio::Duration>,
 }
 
 /// LAN discovery configuration (`[cluster.lan]`).
@@ -502,25 +500,24 @@ pub struct ClusterConfig {
 /// relays advertise, so a rack or a home lab meshes with no seed list and no
 /// shared rendezvous. mDNS only replaces *how* peers are found: they are dialed
 /// and authenticated exactly like any other cluster peer.
-#[derive(clap::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
+#[derive(usage::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde_with::skip_serializing_none]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
-#[group(id = "cluster-lan-config")]
 #[cfg(feature = "cluster-lan")]
 pub struct LanConfig {
 	/// Enable mDNS discovery. Requires [`ClusterConfig::node`], so there is an
 	/// address to advertise, and [`Self::secret`]. Boolean flag: pass
 	/// `--cluster-lan` (or `=true` / `=false`).
-	#[arg(
-		id = "cluster-lan",
+	#[usage(
+		name = "cluster-lan",
 		long = "cluster-lan",
 		env = "MOQ_CLUSTER_LAN",
-		default_missing_value = "true",
-		num_args = 0..=1,
-		require_equals = true,
+		default = "false",
+		bool_value
 	)]
-	pub enabled: Option<bool>,
+	pub enabled: bool,
 
 	/// The shared key admitting a peer to the LAN mesh, as 64 hexadecimal
 	/// characters or a path to a file containing them. Required by
@@ -531,8 +528,8 @@ pub struct LanConfig {
 	/// key, this relay would dial that URL and hand it
 	/// [`ClusterConfig::token`]. So the key is mandatory rather than optional,
 	/// and only peers that prove they hold it are ever dialed.
-	#[arg(
-		id = "cluster-lan-secret",
+	#[usage(
+		name = "cluster-lan-secret",
 		long = "cluster-lan-secret",
 		env = "MOQ_CLUSTER_LAN_SECRET",
 		value_name = "HEX_OR_PATH"
@@ -797,7 +794,7 @@ impl Cluster {
 	/// Whether `--cluster-lan` asked this relay to discover peers over mDNS.
 	fn lan(&self) -> bool {
 		#[cfg(feature = "cluster-lan")]
-		return self.config.lan.enabled.unwrap_or(false);
+		return self.config.lan.enabled;
 		#[cfg(not(feature = "cluster-lan"))]
 		false
 	}
@@ -1628,7 +1625,7 @@ mod tests {
 	#[tokio::test]
 	async fn stats_publishing_outlives_the_producer_handle() {
 		let config = crate::StatsConfig {
-			enabled: Some(true),
+			enabled: true,
 			node: Some("test".to_string()),
 			..Default::default()
 		};
@@ -2162,10 +2159,10 @@ mod tests {
 
 	/// `cluster.node` (identity) and `cluster.mesh` (gossip toggle) round-trip
 	/// through TOML and survive the CLI re-parse when no flags override them.
-	/// `mesh` is a string (clobber-safe) that accepts a TOML boolean.
+	/// `mesh` is a string that accepts a TOML boolean for compatibility.
 	#[test]
 	fn cluster_node_and_mesh_round_trip() {
-		// clap reads the environment while parsing, so serialize with the tests
+		// Usage reads the environment while parsing, so serialize with the tests
 		// that mutate it.
 		let _env = crate::test_env::EnvGuard::lock();
 
@@ -2375,15 +2372,11 @@ mod tests {
 		assert!(format!("{err}").contains("conflicts with"), "got: {err}");
 	}
 
-	/// `cluster.connect_api` set in TOML must survive the CLI re-parse when no
-	/// `--cluster-connect-api` flag is passed (same clap+TOML clobber pitfall the
-	/// config tests guard, which is why the field is `Option<String>`).
-	/// The nested `[cluster.lan]` table survives the TOML -> CLI merge, the
-	/// footgun that `Option<T>` fields exist to avoid.
+	/// The nested `[cluster.lan]` table survives the TOML-to-CLI merge.
 	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cluster_lan_survives_toml_merge() {
-		// clap reads the environment while parsing, so serialize with the tests
+		// Usage reads the environment while parsing, so serialize with the tests
 		// that mutate it.
 		let _env = crate::test_env::EnvGuard::clear(&["MOQ_CLUSTER_LAN", "MOQ_CLUSTER_LAN_SECRET"]);
 
@@ -2395,7 +2388,7 @@ mod tests {
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
-		assert_eq!(config.cluster.lan.enabled, Some(true));
+		assert!(config.cluster.lan.enabled);
 		assert_eq!(config.cluster.lan.secret.as_deref(), Some("cluster.key"));
 		assert_eq!(config.cluster.node.as_deref(), Some("https://relay.example.com"));
 	}
@@ -2421,7 +2414,7 @@ mod tests {
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert_eq!(config.cluster.lan.secret.as_deref(), Some("from-cli.key"));
-		assert_eq!(config.cluster.lan.enabled, Some(true), "the untouched key survives");
+		assert!(config.cluster.lan.enabled, "the untouched key survives");
 	}
 
 	/// The LAN needs an address to advertise, like gossip does.
@@ -2430,7 +2423,7 @@ mod tests {
 	async fn lan_without_node_errors() {
 		let config = ClusterConfig {
 			lan: LanConfig {
-				enabled: Some(true),
+				enabled: true,
 				..Default::default()
 			},
 			..Default::default()
@@ -2455,7 +2448,7 @@ mod tests {
 		let config = ClusterConfig {
 			node: Some("https://us-west.example.com".to_string()),
 			lan: LanConfig {
-				enabled: Some(true),
+				enabled: true,
 				..Default::default()
 			},
 			..Default::default()
@@ -2493,7 +2486,7 @@ mod tests {
 
 	#[test]
 	fn cluster_connect_api_survives_toml_merge() {
-		// clap reads the environment while parsing, so serialize with the tests
+		// Usage reads the environment while parsing, so serialize with the tests
 		// that mutate it.
 		let _env = crate::test_env::EnvGuard::lock();
 

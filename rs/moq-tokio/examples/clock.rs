@@ -14,33 +14,33 @@
 
 use anyhow::Context;
 use chrono::prelude::*;
-use clap::Parser;
 use moq_net::*;
 
-#[derive(Parser, Clone)]
+#[derive(usage::Cli, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 struct Config {
 	/// The name of the broadcast to publish or subscribe to.
-	#[arg(long)]
+	#[usage(long)]
 	broadcast: String,
 
 	/// The MoQ client configuration.
-	#[command(flatten)]
+	#[usage(flatten)]
 	client: moq_tokio::connect::Config,
 
 	/// The name of the clock track.
-	#[arg(long, default_value = "seconds")]
+	#[usage(long, default = "seconds")]
 	track: String,
 
 	/// The log configuration.
-	#[command(flatten)]
+	#[usage(flatten)]
 	log: moq_tokio::Log,
 
 	/// Whether to publish the clock or consume it.
-	#[command(subcommand)]
+	#[usage(subcommand)]
 	role: Command,
 }
 
-#[derive(Parser, Clone)]
+#[derive(usage::Subcommands, Clone)]
 enum Command {
 	Publish,
 	Subscribe,

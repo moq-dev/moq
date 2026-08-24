@@ -6,7 +6,6 @@
 
 use std::time::Duration;
 
-use clap::Args;
 use moq_net::cache;
 use serde::{Deserialize, Serialize};
 
@@ -20,10 +19,10 @@ const GOVERNOR_INTERVAL: Duration = Duration::from_secs(5);
 /// comes first (the latest group of every track is always retained). With none
 /// of the knobs set the pool is unbounded and only each track's own window
 /// bounds memory.
-#[derive(Args, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(usage::Args, Clone, Debug, Default, Deserialize, Serialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
-#[group(id = "cache-config")]
 pub struct CacheConfig {
 	/// Target bytes of cached group payload, e.g. "8GiB", "512MB", or a
 	/// percentage of memory like "75%" (respecting the cgroup limit when set).
@@ -32,7 +31,7 @@ pub struct CacheConfig {
 	/// A target that usage converges toward as tracks write, not a hard limit, and
 	/// it counts payload bytes, not process RSS; leave some slack below physical
 	/// memory or combine with `headroom`.
-	#[arg(long = "cache-capacity", env = "MOQ_CACHE_CAPACITY")]
+	#[usage(long = "cache-capacity", env = "MOQ_CACHE_CAPACITY")]
 	pub capacity: Option<String>,
 
 	/// Keep at least this much system memory available, e.g. "2GiB" or "10%".
@@ -41,7 +40,7 @@ pub struct CacheConfig {
 	/// so the cache soaks up idle memory but is the first thing reclaimed when
 	/// the rest of the system needs it. Combine with `capacity` to also cap the
 	/// absolute size.
-	#[arg(long = "cache-headroom", env = "MOQ_CACHE_HEADROOM")]
+	#[usage(long = "cache-headroom", env = "MOQ_CACHE_HEADROOM")]
 	pub headroom: Option<String>,
 
 	/// Maximum time a non-latest cached group is retained since it was last
@@ -60,9 +59,8 @@ pub struct CacheConfig {
 	/// disconnecting keeps whatever it had cached until it resumes or the
 	/// broadcast closes; under memory pressure the `capacity` budget is repaid by
 	/// the tracks that are still writing.
-	#[arg(long = "cache-duration", env = "MOQ_CACHE_DURATION", value_parser = humantime::parse_duration)]
-	#[serde(default, with = "humantime_serde")]
-	pub duration: Option<Duration>,
+	#[usage(long = "cache-duration", env = "MOQ_CACHE_DURATION")]
+	pub duration: Option<moq_tokio::Duration>,
 }
 
 /// The relay's resolved cache settings: the shared byte-budget pool plus the
@@ -97,13 +95,16 @@ impl CacheConfig {
 			tracing::info!(capacity, "cache capacity set");
 		}
 
-		if let Some(duration) = self.duration {
+		if let Some(duration) = self.duration.map(moq_tokio::Duration::into_std) {
 			tracing::info!(?duration, "cache duration ceiling set");
 		}
 
 		Ok(Cache {
 			pool,
-			duration: self.duration.unwrap_or(Duration::MAX),
+			duration: self
+				.duration
+				.map(moq_tokio::Duration::into_std)
+				.unwrap_or(Duration::MAX),
 		})
 	}
 }

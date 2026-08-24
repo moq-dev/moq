@@ -25,7 +25,6 @@
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use clap::Parser;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,42 +42,44 @@ mod stats;
 mod status;
 mod video;
 
-#[derive(Parser, Clone)]
+#[derive(usage::Cli, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+#[usage(completion)]
 pub struct Config {
 	/// Path to the Game Boy ROM file.
-	#[arg(long)]
+	#[usage(long)]
 	pub rom: PathBuf,
 
 	/// Session name (used in broadcast path). Defaults to ROM filename.
-	#[arg(long)]
+	#[usage(long)]
 	pub name: Option<String>,
 
 	/// Base path prefix. Used to derive --prefix-game and --prefix-viewer defaults.
-	#[arg(long, default_value = "boy")]
+	#[usage(long, default = "boy")]
 	pub prefix: String,
 
 	/// Path prefix for game broadcasts ("{prefix-game}/{name}"). Defaults to "{prefix}/game".
-	#[arg(long)]
+	#[usage(long)]
 	pub prefix_game: Option<String>,
 
 	/// Path prefix for viewer broadcasts ("{prefix-viewer}/{name}"). Defaults to "{prefix}/viewer".
-	#[arg(long)]
+	#[usage(long)]
 	pub prefix_viewer: Option<String>,
 
 	/// Location label shown in viewer stats (e.g. "Dallas, TX").
-	#[arg(long)]
+	#[usage(long)]
 	pub location: Option<String>,
 
 	/// The MoQ client configuration.
-	#[command(flatten)]
+	#[usage(flatten)]
 	pub client: moq_tokio::connect::Config,
 
 	/// QUIC transport tuning (`--quic-*`).
-	#[command(flatten)]
+	#[usage(flatten)]
 	pub quic: moq_tokio::quic::Config,
 
 	/// The log configuration.
-	#[command(flatten)]
+	#[usage(flatten)]
 	pub log: moq_tokio::Log,
 }
 
@@ -502,14 +503,13 @@ mod tests {
 	/// land where `run` reads it. A second required flag would leave it inert.
 	#[test]
 	fn matches_demo_invocation() {
-		let config = Config::try_parse_from([
-			"moq-boy",
-			"--connect",
-			"http://localhost:4443",
-			"--rom",
-			"rom/big2small.gb",
-			"--location",
-			"localhost",
+		let config = Config::parse_from(&[
+			std::ffi::OsStr::new("--connect"),
+			std::ffi::OsStr::new("http://localhost:4443"),
+			std::ffi::OsStr::new("--rom"),
+			std::ffi::OsStr::new("rom/big2small.gb"),
+			std::ffi::OsStr::new("--location"),
+			std::ffi::OsStr::new("localhost"),
 		])
 		.expect("demo/boy/justfile invocation should parse");
 		config.check_deprecated().expect("the demo uses current spellings");
@@ -521,16 +521,15 @@ mod tests {
 	}
 
 	/// The spelling the demo used to pass. It still parses, so the process can name
-	/// `--connect` rather than leave clap reporting an unexpected argument, but it
+	/// `--connect` rather than leave the parser reporting an unexpected argument, but it
 	/// configures nothing and must stop the run.
 	#[test]
 	fn the_released_connect_spelling_is_refused() {
-		let config = Config::try_parse_from([
-			"moq-boy",
-			"--client-connect",
-			"http://localhost:4443",
-			"--rom",
-			"rom/big2small.gb",
+		let config = Config::parse_from(&[
+			std::ffi::OsStr::new("--client-connect"),
+			std::ffi::OsStr::new("http://localhost:4443"),
+			std::ffi::OsStr::new("--rom"),
+			std::ffi::OsStr::new("rom/big2small.gb"),
 		])
 		.expect("the released spelling still parses");
 		assert_eq!(config.client.url, None);

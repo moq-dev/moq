@@ -196,7 +196,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		let mut client_config = moq_tokio::connect::Config::default();
 		client_config.tls.insecure = Some(true);
 		// Short handover so the test observes the old session close quickly.
-		client_config.goaway.handover = Some(Duration::from_secs(2));
+		client_config.goaway.handover = Duration::from_secs(2).into();
 		let client = client_config.init(Default::default()).expect("client init");
 
 		let mut cluster_config = ClusterConfig::default();
@@ -315,7 +315,7 @@ async fn spawn_relay_with_upstream(
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// Short handover so the test observes the old session close quickly.
-	client_config.goaway.handover = Some(Duration::from_secs(2));
+	client_config.goaway.handover = Duration::from_secs(2).into();
 	let client = client_config.init(Default::default()).expect("client init");
 
 	let cluster = Cluster::new(cluster_config).expect("cluster init").with_client(client);
@@ -391,7 +391,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// Short handover so the test observes the old session close quickly.
-	client_config.goaway.handover = Some(Duration::from_secs(2));
+	client_config.goaway.handover = Duration::from_secs(2).into();
 	let mid_a_client = client_config.init(Default::default()).expect("mid-a client init");
 	let (_mid_a_upstream_client, mid_a_upstream) = within(
 		"MID-A connects to TOP",
@@ -617,7 +617,7 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// Short handover so the test observes the old session close quickly.
-	client_config.goaway.handover = Some(Duration::from_secs(2));
+	client_config.goaway.handover = Duration::from_secs(2).into();
 	let client = client_config.init(Default::default()).expect("client init");
 
 	let mut cluster_config = ClusterConfig::default();
@@ -739,11 +739,11 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	let handover = Duration::from_millis(200);
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	client_config.goaway.handover = Some(handover);
+	client_config.goaway.handover = handover.into();
 	// The GOAWAY has to land on a *healthy* session, which is the path that goes
 	// straight into the replacement dial. Below this bar it takes the immediate
 	// redirect path instead, whose sleep polls the drain either way.
-	client_config.backoff.initial = Some(Duration::from_millis(50));
+	client_config.backoff.initial = Duration::from_millis(50).into();
 	let client = client_config.init(Default::default()).expect("client init");
 
 	let url: Url = format!("tcp://127.0.0.1:{port}/").parse().expect("parse url");

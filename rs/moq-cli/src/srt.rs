@@ -12,21 +12,22 @@ use url::Url;
 use crate::moq::{ImportTarget, notify_ready};
 
 /// SRT endpoint args: exactly one of `--connect` (dial) / `--listen` (bind).
-#[derive(clap::Args, Clone)]
-#[command(group = clap::ArgGroup::new("srt-mode").required(true).multiple(false).args(["srt-connect", "srt-listen"]))]
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+#[usage(group("srt-mode", required))]
 pub struct Args {
 	/// Dial `srt://host:port?streamid=...`.
-	#[arg(id = "srt-connect", long = "connect", value_name = "URL")]
+	#[usage(name = "srt-connect", long = "connect", value_name = "URL", group = "srt-mode")]
 	pub connect: Option<Url>,
 
 	/// Bind an SRT listener, bridging the single `--broadcast` (the SRT stream id
 	/// is accepted but not used for routing).
-	#[arg(id = "srt-listen", long = "listen", value_name = "ADDR")]
+	#[usage(name = "srt-listen", long = "listen", value_name = "ADDR", group = "srt-mode")]
 	pub listen: Option<SocketAddr>,
 
 	/// SRT receive latency: the buffering delay traded for loss-recovery headroom.
-	#[arg(long, default_value = "500ms", value_parser = humantime::parse_duration)]
-	pub latency: Duration,
+	#[usage(long, default = "500ms")]
+	pub latency: moq_tokio::Duration,
 }
 
 /// Accept incoming SRT publishes into the Origin as `target.name`; reject requests (import).

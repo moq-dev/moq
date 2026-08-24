@@ -3156,12 +3156,12 @@ fn zero_with_a_flag_set_is_a_real_value() {
 
 	let explicit = parsed(&config);
 	assert_eq!(explicit.connect.backoff.timeout(), std::time::Duration::ZERO);
-	assert_eq!(explicit.quic.keep_alive, Some(std::time::Duration::ZERO));
+	assert_eq!(explicit.quic.keep_alive, std::time::Duration::ZERO);
 
 	// Without the flags the same zeroes mean nothing at all.
 	let defaults = parsed(&client_config());
 	assert_ne!(defaults.connect.backoff.timeout(), std::time::Duration::ZERO);
-	assert_eq!(defaults.quic.keep_alive, None);
+	assert_eq!(defaults.quic.keep_alive, std::time::Duration::from_secs(5));
 }
 
 #[test]
@@ -3290,7 +3290,7 @@ fn config_quic_and_backoff_knobs_apply() {
 	assert_eq!(parsed.connect.backoff.multiplier(), 3);
 	assert_eq!(parsed.connect.backoff.max(), std::time::Duration::from_millis(10_000));
 	assert_eq!(parsed.quic.max_streams, Some(4096));
-	assert_eq!(parsed.quic.idle_timeout, Some(std::time::Duration::from_millis(15_000)));
+	assert_eq!(parsed.quic.idle_timeout, std::time::Duration::from_millis(15_000));
 	assert_eq!(parsed.quic.gso, Some(false));
 	assert_eq!(parsed.quic.mtu_discovery, Some(true));
 	assert_eq!(parsed.quic.qlog.as_deref(), Some(std::path::Path::new(dir)));

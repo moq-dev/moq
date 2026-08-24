@@ -4,14 +4,13 @@
 //! half, which is the only part specific to the relay. Unset (the default) keeps
 //! QUIC on the shared runtime with everything else.
 
-use clap::Args;
 use serde::{Deserialize, Serialize};
 
 /// How the relay lays its QUIC work out over threads.
-#[derive(Args, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(usage::Args, Clone, Debug, Deserialize, Serialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
-#[group(id = "runtime-config")]
 pub struct RuntimeConfig {
 	/// Serve QUIC from this many single-threaded workers instead of the shared
 	/// runtime, each pinned to a core with its own socket on the listen address.
@@ -21,7 +20,7 @@ pub struct RuntimeConfig {
 	/// Linux-only, and mutually exclusive with `--listen-tls-generate`, since
 	/// each worker would otherwise generate and serve a certificate of its own.
 	/// Unset (the default) keeps QUIC on the shared runtime.
-	#[arg(long = "runtime-workers", env = "MOQ_RUNTIME_WORKERS")]
+	#[usage(long = "runtime-workers", env = "MOQ_RUNTIME_WORKERS")]
 	pub workers: Option<u16>,
 
 	/// Pin each worker to a CPU core, defaulting to on.
@@ -32,8 +31,8 @@ pub struct RuntimeConfig {
 	/// scheduler migrating a busy worker, which should matter on a multi-socket
 	/// or NUMA machine, and costs nothing elsewhere. Turn it off when sharing
 	/// the machine with something that manages CPU placement itself.
-	#[arg(long = "runtime-pin", env = "MOQ_RUNTIME_PIN")]
-	pub pin: Option<bool>,
+	#[usage(long = "runtime-pin", env = "MOQ_RUNTIME_PIN", default = "true", bool_value)]
+	pub pin: bool,
 }
 
 impl RuntimeConfig {
@@ -44,6 +43,15 @@ impl RuntimeConfig {
 	/// to switch the mode off from a config file that already has the section.
 	pub fn workers(&self) -> Option<moq_tokio::worker::Config> {
 		let count = self.workers.filter(|count| *count > 0)?;
-		Some(moq_tokio::worker::Config::new(count).with_pin(self.pin.unwrap_or(true)))
+		Some(moq_tokio::worker::Config::new(count).with_pin(self.pin))
+	}
+}
+
+impl Default for RuntimeConfig {
+	fn default() -> Self {
+		Self {
+			workers: None,
+			pin: true,
+		}
 	}
 }

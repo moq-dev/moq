@@ -12,6 +12,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::Duration as CliDuration;
+
 /// The routable server ID a QUIC-LB load balancer encodes into connection IDs.
 ///
 /// Parsed from, and serialized as, a hex string. Its length must match the load
@@ -46,7 +48,8 @@ impl std::str::FromStr for ServerId {
 /// This selects a family rather than a named algorithm because each backend ships a
 /// different generation: BBRv1 on quinn, BBRv2 on quiche, BBRv3 on noq and iroh. A
 /// `Bbr` variant would promise more than any one backend delivers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, usage::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[usage(ignore_case)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum CongestionControl {
@@ -64,7 +67,7 @@ impl std::str::FromStr for CongestionControl {
 	type Err = String;
 
 	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-		<Self as clap::ValueEnum>::from_str(s, true)
+		<Self as usage::argv::spec::ValueEnum>::from_choice(s).ok_or_else(|| format!("unknown congestion control: {s}"))
 	}
 }
 
@@ -78,15 +81,15 @@ pub(crate) const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(5);
 
 /// The `--quic-*` transport section, applied to dialed and accepted connections alike.
-#[derive(Clone, Debug, Default, clap::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
-#[group(id = "quic")]
 #[non_exhaustive]
 pub struct Config {
 	/// Maximum number of concurrent QUIC streams per connection (both bidi and uni).
 	/// Defaults to 1024. MoQ opens a stream per group, so busy endpoints want this high.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "quic-max-streams", long = "quic-max-streams", env = "MOQ_QUIC_MAX_STREAMS")]
+	#[usage(name = "quic-max-streams", long = "quic-max-streams", env = "MOQ_QUIC_MAX_STREAMS")]
 	pub max_streams: Option<u64>,
 
 	/// Enable UDP generic segmentation offload (GSO).
@@ -95,48 +98,44 @@ pub struct Config {
 	/// middleboxes mangle segmented packets. Defaults to on. The iroh backend
 	/// cannot turn it off and rejects an explicit `false`.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "quic-gso",
+	#[usage(
+		name = "quic-gso",
 		long = "quic-gso",
 		env = "MOQ_QUIC_GSO",
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
-		value_parser = clap::value_parser!(bool),
 	)]
 	pub gso: Option<bool>,
 
 	/// Idle timeout before an inactive connection is dropped. Defaults to 30s.
-	#[serde(default, skip_serializing_if = "Option::is_none", with = "humantime_serde::option")]
-	#[arg(
-		id = "quic-idle-timeout",
+	#[usage(
+		name = "quic-idle-timeout",
 		long = "quic-idle-timeout",
 		env = "MOQ_QUIC_IDLE_TIMEOUT",
-		value_parser = humantime::parse_duration,
+		default = "30s"
 	)]
-	pub idle_timeout: Option<Duration>,
+	pub idle_timeout: CliDuration,
 
 	/// Keep-alive ping interval. Defaults to 5s; set `0s` to disable.
 	/// Ignored by the iroh backend, which has no keep-alive knob.
-	#[serde(default, skip_serializing_if = "Option::is_none", with = "humantime_serde::option")]
-	#[arg(
-		id = "quic-keep-alive",
+	#[usage(
+		name = "quic-keep-alive",
 		long = "quic-keep-alive",
 		env = "MOQ_QUIC_KEEP_ALIVE",
-		value_parser = humantime::parse_duration,
+		default = "5s"
 	)]
-	pub keep_alive: Option<Duration>,
+	pub keep_alive: CliDuration,
 
 	/// Enable path MTU discovery. Defaults to off.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "quic-mtu-discovery",
+	#[usage(
+		name = "quic-mtu-discovery",
 		long = "quic-mtu-discovery",
 		env = "MOQ_QUIC_MTU_DISCOVERY",
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
-		value_parser = clap::value_parser!(bool),
 	)]
 	pub mtu_discovery: Option<bool>,
 
@@ -144,8 +143,8 @@ pub struct Config {
 	/// `loss` on noq and iroh, whose shared BBRv3 can panic on packet loss and take
 	/// the process with it. Selecting `delay` there is for deliberate testing only.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "quic-congestion-control",
+	#[usage(
+		name = "quic-congestion-control",
 		long = "quic-congestion-control",
 		env = "MOQ_QUIC_CONGESTION_CONTROL",
 		value_enum
@@ -160,25 +159,40 @@ pub struct Config {
 	///
 	/// Requires the `qlog` feature; setting it errors at init otherwise.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	#[arg(id = "quic-qlog", long = "quic-qlog", env = "MOQ_QUIC_QLOG")]
+	#[usage(name = "quic-qlog", long = "quic-qlog", env = "MOQ_QUIC_QLOG")]
 	pub qlog: Option<PathBuf>,
 
 	/// The old role-prefixed spellings, kept parsing but hidden. Never read as
 	/// settings: [`Config::deprecated`] names what replaced each one so a process
 	/// can say so and stop. Not a TOML surface (config files use the canonical
 	/// names).
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(skip)]
 	pub(crate) legacy: Legacy,
 }
 
+impl Default for Config {
+	fn default() -> Self {
+		Self {
+			max_streams: None,
+			gso: None,
+			idle_timeout: DEFAULT_IDLE_TIMEOUT.into(),
+			keep_alive: DEFAULT_KEEP_ALIVE.into(),
+			mtu_discovery: None,
+			congestion_control: None,
+			qlog: None,
+			legacy: Default::default(),
+		}
+	}
+}
+
 /// The hidden `--client-quic-*` / `--server-quic-*` spellings (and their env
 /// vars), from when the endpoint config was split by role.
-#[derive(Clone, Debug, Default, clap::Args)]
-#[group(id = "quic-legacy")]
+#[derive(Clone, Debug, Default, usage::Args)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
-	#[arg(
-		id = "client-quic-max-streams",
+	#[usage(
+		name = "client-quic-max-streams",
 		long = "client-quic-max-streams",
 		alias = "client-max-streams",
 		env = "MOQ_CLIENT_QUIC_MAX_STREAMS",
@@ -186,8 +200,8 @@ pub(crate) struct Legacy {
 	)]
 	client_max_streams: Option<u64>,
 
-	#[arg(
-		id = "server-quic-max-streams",
+	#[usage(
+		name = "server-quic-max-streams",
 		long = "server-quic-max-streams",
 		alias = "server-max-streams",
 		env = "MOQ_SERVER_QUIC_MAX_STREAMS",
@@ -195,92 +209,84 @@ pub(crate) struct Legacy {
 	)]
 	server_max_streams: Option<u64>,
 
-	#[arg(
-		id = "client-quic-gso",
+	#[usage(
+		name = "client-quic-gso",
 		long = "client-quic-gso",
 		env = "MOQ_CLIENT_QUIC_GSO",
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
-		value_parser = clap::value_parser!(bool),
 		hide = true,
 	)]
 	client_gso: Option<bool>,
 
-	#[arg(
-		id = "server-quic-gso",
+	#[usage(
+		name = "server-quic-gso",
 		long = "server-quic-gso",
 		env = "MOQ_SERVER_QUIC_GSO",
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
-		value_parser = clap::value_parser!(bool),
 		hide = true,
 	)]
 	server_gso: Option<bool>,
 
-	#[arg(
-		id = "client-quic-idle-timeout",
+	#[usage(
+		name = "client-quic-idle-timeout",
 		long = "client-quic-idle-timeout",
 		env = "MOQ_CLIENT_QUIC_IDLE_TIMEOUT",
-		value_parser = humantime::parse_duration,
-		hide = true,
+		hide = true
 	)]
-	client_idle_timeout: Option<Duration>,
+	client_idle_timeout: Option<CliDuration>,
 
-	#[arg(
-		id = "server-quic-idle-timeout",
+	#[usage(
+		name = "server-quic-idle-timeout",
 		long = "server-quic-idle-timeout",
 		env = "MOQ_SERVER_QUIC_IDLE_TIMEOUT",
-		value_parser = humantime::parse_duration,
-		hide = true,
+		hide = true
 	)]
-	server_idle_timeout: Option<Duration>,
+	server_idle_timeout: Option<CliDuration>,
 
-	#[arg(
-		id = "client-quic-keep-alive",
+	#[usage(
+		name = "client-quic-keep-alive",
 		long = "client-quic-keep-alive",
 		env = "MOQ_CLIENT_QUIC_KEEP_ALIVE",
-		value_parser = humantime::parse_duration,
-		hide = true,
+		hide = true
 	)]
-	client_keep_alive: Option<Duration>,
+	client_keep_alive: Option<CliDuration>,
 
-	#[arg(
-		id = "server-quic-keep-alive",
+	#[usage(
+		name = "server-quic-keep-alive",
 		long = "server-quic-keep-alive",
 		env = "MOQ_SERVER_QUIC_KEEP_ALIVE",
-		value_parser = humantime::parse_duration,
-		hide = true,
+		hide = true
 	)]
-	server_keep_alive: Option<Duration>,
+	server_keep_alive: Option<CliDuration>,
 
-	#[arg(
-		id = "client-quic-mtu-discovery",
+	#[usage(
+		name = "client-quic-mtu-discovery",
 		long = "client-quic-mtu-discovery",
 		env = "MOQ_CLIENT_QUIC_MTU_DISCOVERY",
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
-		value_parser = clap::value_parser!(bool),
 		hide = true,
 	)]
 	client_mtu_discovery: Option<bool>,
 
-	#[arg(
-		id = "server-quic-mtu-discovery",
+	#[usage(
+		name = "server-quic-mtu-discovery",
 		long = "server-quic-mtu-discovery",
 		env = "MOQ_SERVER_QUIC_MTU_DISCOVERY",
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
-		value_parser = clap::value_parser!(bool),
 		hide = true,
 	)]
 	server_mtu_discovery: Option<bool>,
 
-	#[arg(
-		id = "client-quic-congestion-control",
+	#[usage(
+		name = "client-quic-congestion-control",
 		long = "client-quic-congestion-control",
 		env = "MOQ_CLIENT_QUIC_CONGESTION_CONTROL",
 		value_enum,
@@ -288,8 +294,8 @@ pub(crate) struct Legacy {
 	)]
 	client_congestion_control: Option<CongestionControl>,
 
-	#[arg(
-		id = "server-quic-congestion-control",
+	#[usage(
+		name = "server-quic-congestion-control",
 		long = "server-quic-congestion-control",
 		env = "MOQ_SERVER_QUIC_CONGESTION_CONTROL",
 		value_enum,
@@ -297,16 +303,16 @@ pub(crate) struct Legacy {
 	)]
 	server_congestion_control: Option<CongestionControl>,
 
-	#[arg(
-		id = "client-quic-qlog",
+	#[usage(
+		name = "client-quic-qlog",
 		long = "client-quic-qlog",
 		env = "MOQ_CLIENT_QUIC_QLOG",
 		hide = true
 	)]
 	client_qlog: Option<PathBuf>,
 
-	#[arg(
-		id = "server-quic-qlog",
+	#[usage(
+		name = "server-quic-qlog",
 		long = "server-quic-qlog",
 		env = "MOQ_SERVER_QUIC_QLOG",
 		hide = true
@@ -410,7 +416,7 @@ impl Config {
 			Some(_) if cfg!(not(feature = "qlog")) => Err(crate::Error::QlogUnsupported),
 			_ => Ok(()),
 		}?;
-		validate_idle_timeout(self.idle_timeout)
+		validate_idle_timeout(Some(self.idle_timeout.into_std()))
 	}
 
 	/// The per-connection knobs with defaults applied, ready to hand to a backend.
@@ -421,16 +427,12 @@ impl Config {
 	pub fn resolve(&self) -> Resolved {
 		// A zero keep-alive means "disabled"; anything else (including unset) keeps
 		// the connection warm, defaulting to 5s.
-		let keep_alive = match self.keep_alive {
-			Some(d) if d.is_zero() => None,
-			Some(d) => Some(d),
-			None => Some(DEFAULT_KEEP_ALIVE),
-		};
+		let keep_alive = (!self.keep_alive.is_zero()).then(|| self.keep_alive.into_std());
 
 		Resolved {
 			max_streams: self.max_streams.unwrap_or(DEFAULT_MAX_STREAMS),
 			gso: self.gso,
-			idle_timeout: self.idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT),
+			idle_timeout: self.idle_timeout.into_std(),
 			keep_alive,
 			mtu_discovery: self.mtu_discovery.unwrap_or(false),
 			congestion_control: self.congestion_control,
@@ -513,20 +515,20 @@ impl Resolved {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use clap::Parser;
-
 	/// A minimal parser so we can exercise the `--quic-*` args (and the legacy
 	/// role-prefixed spellings) in isolation.
-	#[derive(Parser)]
+	#[derive(usage::Cli)]
+	#[usage(unknown_flags = "error", args_override_self = false)]
 	struct Cli {
-		#[command(flatten)]
+		#[usage(flatten)]
 		quic: Config,
 	}
 
 	fn parse(args: &[&str]) -> Config {
-		let mut full = vec!["test"];
-		full.extend_from_slice(args);
-		Cli::parse_from(full).quic
+		let mut argv = vec![std::ffi::OsString::from("test")];
+		argv.extend(args.iter().map(std::ffi::OsString::from));
+		let argv: Vec<_> = argv.iter().map(std::ffi::OsString::as_os_str).collect();
+		Cli::try_parse_from(&argv).expect("valid test arguments").quic
 	}
 
 	#[test]
@@ -543,13 +545,13 @@ mod tests {
 	#[test]
 	fn zero_keep_alive_disables_it() {
 		let disabled = Config {
-			keep_alive: Some(Duration::ZERO),
+			keep_alive: Duration::ZERO.into(),
 			..Default::default()
 		};
 		assert_eq!(disabled.resolve().keep_alive, None);
 
 		let explicit = Config {
-			keep_alive: Some(Duration::from_secs(2)),
+			keep_alive: Duration::from_secs(2).into(),
 			..Default::default()
 		};
 		assert_eq!(explicit.resolve().keep_alive, Some(Duration::from_secs(2)));
@@ -611,14 +613,17 @@ mod tests {
 	/// does not exist. Check every one against the parser.
 	#[test]
 	fn every_replacement_is_a_real_flag() {
-		let canonical: std::collections::HashSet<String> =
-			<Config as clap::Args>::augment_args(clap::Command::new("test"))
-				.get_arguments()
-				.filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
-				.collect();
-		let envs: std::collections::HashSet<String> = <Config as clap::Args>::augment_args(clap::Command::new("test"))
-			.get_arguments()
-			.filter_map(|arg| arg.get_env().map(|env| env.to_string_lossy().to_string()))
+		let canonical: std::collections::HashSet<String> = Cli::spec()
+			.root
+			.flags
+			.iter()
+			.flat_map(|flag| flag.flag.longs.iter().map(|long| format!("--{long}")))
+			.collect();
+		let envs: std::collections::HashSet<String> = Cli::spec()
+			.root
+			.flags
+			.iter()
+			.filter_map(|flag| flag.env.map(str::to_owned))
 			.collect();
 
 		for args in [
@@ -686,19 +691,19 @@ mod tests {
 	#[test]
 	fn idle_timeout_beyond_the_varint_is_rejected() {
 		let over = Config {
-			idle_timeout: Some(MAX_IDLE_TIMEOUT + Duration::from_millis(1)),
+			idle_timeout: (MAX_IDLE_TIMEOUT + Duration::from_millis(1)).into(),
 			..Default::default()
 		};
 		assert!(matches!(over.validate(), Err(crate::Error::IdleTimeoutRange)));
 
 		let saturated = Config {
-			idle_timeout: Some(Duration::from_millis(u64::MAX)),
+			idle_timeout: Duration::from_millis(u64::MAX).into(),
 			..Default::default()
 		};
 		assert!(matches!(saturated.validate(), Err(crate::Error::IdleTimeoutRange)));
 
 		let at_limit = Config {
-			idle_timeout: Some(MAX_IDLE_TIMEOUT),
+			idle_timeout: MAX_IDLE_TIMEOUT.into(),
 			..Default::default()
 		};
 		assert!(at_limit.validate().is_ok());

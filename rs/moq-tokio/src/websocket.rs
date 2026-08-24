@@ -12,6 +12,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::{net, time};
 use url::Url;
 
+use crate::Duration as CliDuration;
+
 /// Errors specific to the WebSocket fallback backend.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -65,77 +67,75 @@ type Result<T> = std::result::Result<T, Error>;
 static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// WebSocket configuration for the client.
-#[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
-#[group(id = "websocket-client")]
 #[non_exhaustive]
-#[derive(Default)]
 pub struct Config {
 	/// Whether to enable the WebSocket fallback. Defaults to true.
-	///
-	/// `Option` with the default resolved in code rather than a clap `default_value`,
-	/// which a config file could not override: the CLI is re-parsed after the file is
-	/// read, so a materialized default would win.
-	#[arg(
-		id = "connect-websocket-enabled",
+	#[usage(
+		name = "connect-websocket-enabled",
 		long = "connect-websocket-enabled",
 		env = "MOQ_CONNECT_WEBSOCKET_ENABLED",
-		default_missing_value = "true",
-		num_args = 0..=1,
-		require_equals = true,
-		value_parser = clap::value_parser!(bool),
+		default = "true",
+		bool_value
 	)]
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub enabled: Option<bool>,
+	pub enabled: bool,
 
 	/// Head start given to the QUIC dial before the WebSocket fallback joins the
 	/// race. Defaults to 200ms, and drops to zero for a server WebSocket already won.
-	#[arg(
-		id = "connect-websocket-delay",
+	#[usage(
+		name = "connect-websocket-delay",
 		long = "connect-websocket-delay",
 		env = "MOQ_CONNECT_WEBSOCKET_DELAY",
-		value_parser = humantime::parse_duration,
+		default = "200ms"
 	)]
-	#[serde(default, with = "humantime_serde::option")]
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub delay: Option<time::Duration>,
+	pub delay: CliDuration,
 
 	/// The released `MOQ_CLIENT_WEBSOCKET_*` env vars, folded in by [`Config::resolved`].
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(skip)]
 	pub(crate) legacy: Legacy,
+}
+
+impl Default for Config {
+	fn default() -> Self {
+		Self {
+			enabled: true,
+			delay: DEFAULT_DELAY.into(),
+			legacy: Default::default(),
+		}
+	}
 }
 
 /// The released spellings for this section, which moved to `--connect-websocket-*`
 /// and `MOQ_CONNECT_WEBSOCKET_*` with the rest of the dial side.
 ///
-/// Separate args rather than clap aliases, since an alias renames the flag but
+/// Separate args rather than Usage aliases, since an alias renames the flag but
 /// leaves its env var behind.
-#[derive(Clone, Debug, Default, clap::Args)]
-#[group(id = "websocket-legacy")]
+#[derive(Clone, Debug, Default, usage::Args)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
-	#[arg(
-		id = "websocket-enabled",
+	#[usage(
+		name = "websocket-enabled",
 		long = "websocket-enabled",
 		alias = "client-websocket-enabled",
 		env = "MOQ_CLIENT_WEBSOCKET_ENABLED",
 		hide = true,
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
-		value_parser = clap::value_parser!(bool),
 	)]
 	enabled: Option<bool>,
 
-	#[arg(
-		id = "websocket-delay",
+	#[usage(
+		name = "websocket-delay",
 		long = "websocket-delay",
 		alias = "client-websocket-delay",
 		env = "MOQ_CLIENT_WEBSOCKET_DELAY",
-		hide = true,
-		value_parser = humantime::parse_duration,
+		hide = true
 	)]
-	delay: Option<time::Duration>,
+	delay: Option<CliDuration>,
 }
 
 /// The QUIC head start when `--connect-websocket-delay` is unset.
@@ -165,12 +165,12 @@ impl Config {
 
 	/// Whether the fallback runs at all, resolving the default.
 	pub fn resolved_enabled(&self) -> bool {
-		self.enabled.unwrap_or(true)
+		self.enabled
 	}
 
 	/// The head start a QUIC dial gets, resolving the default.
 	pub fn resolved_delay(&self) -> time::Duration {
-		self.delay.unwrap_or(DEFAULT_DELAY)
+		self.delay.into_std()
 	}
 }
 
@@ -554,18 +554,16 @@ mod tests {
 #[cfg(test)]
 mod legacy_tests {
 	use super::*;
-	use clap::Parser;
-
-	#[derive(Parser)]
+	#[derive(usage::Cli)]
+	#[usage(unknown_flags = "error", args_override_self = false)]
 	struct Cli {
-		#[command(flatten)]
+		#[usage(flatten)]
 		websocket: Config,
 	}
 
 	fn parse(args: &[&str]) -> Config {
-		let mut argv = vec!["test"];
-		argv.extend_from_slice(args);
-		Cli::parse_from(argv).websocket
+		let argv = args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>();
+		Cli::parse_from(&argv).unwrap().websocket
 	}
 
 	/// The released env vars have hidden flags of their own, so they are recognized
@@ -591,9 +589,9 @@ mod legacy_tests {
 		assert!(!config.resolved_enabled());
 		assert_eq!(config.resolved_delay(), time::Duration::from_secs(2));
 
-		// Neither given: the defaults, which no config file can be clobbered out of.
+		// Neither given: the typed defaults.
 		let config = parse(&[]);
-		assert_eq!(config.delay, None);
+		assert_eq!(config.delay, DEFAULT_DELAY);
 		assert_eq!(config.resolved_delay(), DEFAULT_DELAY);
 	}
 }

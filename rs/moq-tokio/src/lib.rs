@@ -20,6 +20,7 @@ pub mod connect;
 mod connection;
 mod crypto;
 mod deprecated;
+mod duration;
 mod error;
 #[cfg(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "tcp"))]
 pub mod failover;
@@ -60,6 +61,7 @@ pub use client::Client;
 pub use connect::{Addrs, ConnectError};
 pub use connection::{Backoff, Connection, ConnectionStatsReader, GoawayConfig, Redirect, Status};
 pub use deprecated::Deprecated;
+pub use duration::Duration;
 pub use error::{Error, Result};
 pub use log::Log;
 pub use server::{Listener, Request, Server, Transport};
@@ -67,13 +69,6 @@ pub use server::{Listener, Request, Server, Transport};
 // Re-export these crates.
 pub use moq_net;
 pub use rustls;
-
-fn version_parser() -> impl clap::builder::TypedValueParser<Value = moq_net::Version> {
-	use clap::builder::TypedValueParser;
-
-	clap::builder::PossibleValuesParser::new(moq_net::Version::names())
-		.map(|name| name.parse().expect("possible version names must parse"))
-}
 
 /// Re-exported because [`watch::FileWatcher`] surfaces `notify::Result`/`notify::Error`
 /// in its API; a major `notify` bump is therefore a breaking change for this crate.
@@ -95,7 +90,8 @@ pub mod iroh;
 pub mod mdns;
 
 /// The QUIC backend to use for connections.
-#[derive(Clone, Debug, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, usage::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[usage(ignore_case)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum QuicBackend {
@@ -119,7 +115,7 @@ impl std::str::FromStr for QuicBackend {
 	type Err = String;
 
 	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-		<Self as clap::ValueEnum>::from_str(s, true)
+		<Self as usage::argv::spec::ValueEnum>::from_choice(s).ok_or_else(|| format!("unknown QUIC backend: {s}"))
 	}
 }
 

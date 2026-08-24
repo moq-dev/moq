@@ -11,20 +11,20 @@
 // omits the passthrough renditions. Rungs are only encoded while watched or fetched.
 
 use anyhow::Context;
-use clap::Parser;
 
-#[derive(Parser)]
+#[derive(usage::Cli)]
+#[usage(bin = "transcode", unknown_flags = "error", args_override_self = false)]
 struct Args {
 	/// The relay URL, including any auth path prefix.
-	#[arg(long, default_value = "http://localhost:4443/anon")]
+	#[usage(long, default = "http://localhost:4443/anon")]
 	url: url::Url,
 
 	/// The source broadcast path within the origin.
-	#[arg(long)]
+	#[usage(long)]
 	source: String,
 
 	/// The derivative broadcast path. Defaults to `<source>/transcode.hang`.
-	#[arg(long)]
+	#[usage(long)]
 	output: Option<String>,
 }
 
@@ -90,5 +90,28 @@ async fn main() -> anyhow::Result<()> {
 	tokio::select! {
 		res = moq_transcode::run(source, output, config) => Ok(res?),
 		res = session.closed() => Ok(res?),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn parses_defaults() {
+		let argv = ["transcode", "--source", "input"].map(std::ffi::OsStr::new);
+		let args = Args::try_parse_from(&argv).unwrap();
+		assert_eq!(args.url.as_str(), "http://localhost:4443/anon");
+		assert_eq!(args.source, "input");
+		assert_eq!(args.output, None);
+	}
+
+	#[test]
+	fn rejects_unknown_and_duplicate_flags() {
+		let unknown = ["transcode", "--source", "input", "--unknown"].map(std::ffi::OsStr::new);
+		assert!(Args::try_parse_from(&unknown).is_err());
+
+		let duplicate = ["transcode", "--source", "input", "--source", "other"].map(std::ffi::OsStr::new);
+		assert!(Args::try_parse_from(&duplicate).is_err());
 	}
 }

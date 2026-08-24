@@ -34,10 +34,10 @@ use axum::{
 	response::{IntoResponse, Response},
 	routing::get,
 };
-use clap::Parser;
 
 /// Configuration for the internal (ops) listener.
-#[derive(Parser, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
+#[derive(usage::Args, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct InternalConfig {
@@ -50,7 +50,7 @@ pub struct InternalConfig {
 	/// intentional: on loopback there's nothing to encrypt, and a private
 	/// overlay (e.g. a mesh VPN) already provides transport encryption and peer
 	/// identity. Unset (the default) disables the listener entirely.
-	#[arg(id = "internal-listen", long = "internal-listen", env = "MOQ_INTERNAL_LISTEN")]
+	#[usage(name = "internal-listen", long = "internal-listen", env = "MOQ_INTERNAL_LISTEN")]
 	pub listen: Option<net::SocketAddr>,
 }
 

@@ -3,10 +3,10 @@
 //! Every flag and environment variable a published `moq-relay` accepted, checked
 //! against the parser this build actually has. A renamed spelling must keep
 //! *parsing* even though it no longer configures anything: that is what lets the
-//! relay name its replacement and stop, instead of clap reporting an unexpected
+//! relay name its replacement and stop, instead of the parser reporting an unexpected
 //! argument or, worse, the value being read from the environment and ignored.
 //!
-//! Environment variables are the half a clap `alias` silently misses: an alias
+//! Environment variables are the half a flag alias silently misses: an alias
 //! renames the flag but leaves the variable behind, so a renamed arg keeps parsing
 //! on the command line while quietly ignoring the environment. That is what this
 //! pins.
@@ -16,7 +16,6 @@
 //! deliberately dropped, which is a breaking change to call out in the release
 //! notes.
 
-use clap::CommandFactory;
 use std::collections::{HashMap, HashSet};
 
 /// `(flag, env)` for every released argument. `None` means it had no env var.
@@ -128,32 +127,34 @@ const RELEASED: &[(&str, Option<&str>)] = &[
 ];
 
 /// Every flag name the parser accepts today, including aliases and hidden args.
-fn flags(cmd: &clap::Command) -> HashSet<String> {
+fn flags(cmd: &usage::argv::spec::CommandMeta<'_>) -> HashSet<String> {
 	let mut out = HashSet::new();
-	for arg in cmd.get_arguments() {
-		if let Some(long) = arg.get_long() {
-			out.insert(long.to_string());
-		}
-		for alias in arg.get_all_aliases().unwrap_or_default() {
-			out.insert(alias.to_string());
+	for flag in cmd.flags {
+		for long in flag.flag.longs {
+			out.insert((*long).to_string());
 		}
 	}
-	for sub in cmd.get_subcommands() {
+	for sub in cmd.subcommands {
 		out.extend(flags(sub));
 	}
 	out
 }
 
 /// Every environment variable the parser reads, mapped to the flag that reads it.
-fn envs(cmd: &clap::Command) -> HashMap<String, String> {
+fn envs(cmd: &usage::argv::spec::CommandMeta<'_>) -> HashMap<String, String> {
 	let mut out = HashMap::new();
-	for arg in cmd.get_arguments() {
-		if let Some(env) = arg.get_env() {
-			let flag = arg.get_long().unwrap_or_else(|| arg.get_id().as_str());
-			out.insert(env.to_string_lossy().to_string(), flag.to_string());
+	for flag in cmd.flags {
+		let name = flag.flag.longs.first().copied().unwrap_or(flag.flag.name);
+		for env in flag
+			.env
+			.into_iter()
+			.chain(flag.env_fallback.iter().copied())
+			.chain(flag.deprecated_env.iter().copied())
+		{
+			out.insert(env.to_string(), name.to_string());
 		}
 	}
-	for sub in cmd.get_subcommands() {
+	for sub in cmd.subcommands {
 		out.extend(envs(sub));
 	}
 	out
@@ -161,8 +162,8 @@ fn envs(cmd: &clap::Command) -> HashMap<String, String> {
 
 #[test]
 fn released_flags_still_parse() {
-	let cmd = moq_relay::Config::command();
-	let flags = flags(&cmd);
+	let cmd = moq_relay::Config::spec().root;
+	let flags = flags(cmd);
 
 	let missing: Vec<&str> = RELEASED
 		.iter()
@@ -172,14 +173,14 @@ fn released_flags_still_parse() {
 
 	assert!(
 		missing.is_empty(),
-		"released flags no longer parse: {missing:?}\nKeep the old spelling as a hidden arg, so the process can name what replaced it rather than leaving clap to report an unexpected argument."
+		"released flags no longer parse: {missing:?}\nKeep the old spelling as a hidden arg, so the process can name what replaced it rather than leaving Usage to report an unexpected argument."
 	);
 }
 
 #[test]
 fn released_env_vars_are_still_read() {
-	let cmd = moq_relay::Config::command();
-	let envs = envs(&cmd);
+	let cmd = moq_relay::Config::spec().root;
+	let envs = envs(cmd);
 
 	let missing: Vec<&str> = RELEASED
 		.iter()
@@ -189,6 +190,6 @@ fn released_env_vars_are_still_read() {
 
 	assert!(
 		missing.is_empty(),
-		"released env vars are silently ignored: {missing:?}\nA clap alias carries the flag name only; give the old variable a hidden arg of its own so it reaches the deprecation check."
+		"released env vars are silently ignored: {missing:?}\nA flag alias carries the flag name only; give the old variable a hidden arg of its own so it reaches the deprecation check."
 	);
 }

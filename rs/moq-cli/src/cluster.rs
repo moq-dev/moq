@@ -108,7 +108,7 @@ impl Lan {
 
 		// A peer that is still advertising is still wanted, however long it has
 		// been unreachable; mDNS expiry is what ends a dial, not a retry budget.
-		client.backoff.timeout = Some(std::time::Duration::ZERO);
+		client.backoff.timeout = std::time::Duration::ZERO.into();
 		// Whatever `--connect-once` means for the relay dial, a mesh dial has to keep
 		// redialing: the map is keyed on the advertisement, so a one-shot handle that
 		// stopped after the first session would sit there dead until mDNS expired the
@@ -366,19 +366,20 @@ struct Dial {
 }
 
 /// The `--cluster-lan` flags.
-#[derive(clap::Args, Clone, Default)]
+#[derive(usage::Args, Clone, Default)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
 	/// Discover and mesh with every other participating MoQ process on the LAN
 	/// via mDNS: no relay, internet, or certificate setup needed. Reuses the
 	/// --listen listener, defaulting it to an ephemeral port with a
 	/// generated certificate. Composes with --connect, e.g. mesh locally
 	/// while a relay serves external viewers.
-	#[arg(
-		id = "cluster-lan",
+	#[usage(
+		name = "cluster-lan",
 		long = "cluster-lan",
 		env = "MOQ_CLUSTER_LAN",
 		help_heading = "Cluster",
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
 	)]
@@ -390,12 +391,12 @@ pub struct Args {
 	///
 	/// Without it, anyone who can reach the listener joins, so leave it unset only
 	/// on networks you trust. A missing file is an error, never generated.
-	#[arg(
-		id = "cluster-lan-secret",
+	#[usage(
+		name = "cluster-lan-secret",
 		long = "cluster-lan-secret",
 		env = "MOQ_CLUSTER_LAN_SECRET",
 		help_heading = "Cluster",
-		requires = "cluster-lan",
+		requires = "--cluster-lan",
 		value_name = "HEX_OR_PATH"
 	)]
 	pub secret: Option<String>,

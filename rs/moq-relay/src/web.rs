@@ -21,7 +21,6 @@ use axum_server::{
 	tls_rustls::{RustlsAcceptor, RustlsConfig},
 };
 use bytes::Bytes;
-use clap::Parser;
 use futures::{FutureExt, future::BoxFuture};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::server::TlsStream;
@@ -31,53 +30,61 @@ use tower_service::Service;
 use crate::{Auth, AuthParams, Cluster};
 
 /// Configuration for the HTTP/HTTPS web server.
-#[derive(Parser, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
+#[derive(usage::Args, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct WebConfig {
 	/// Plain HTTP listener settings.
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	pub http: HttpConfig,
 
 	/// HTTPS listener settings with TLS.
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	pub https: HttpsConfig,
 
 	/// If true (default), expose a WebTransport compatible WebSocket polyfill.
-	#[arg(long = "web-ws", env = "MOQ_WEB_WS", default_value = "true")]
+	#[usage(long = "web-ws", env = "MOQ_WEB_WS", default = "true", bool_value)]
 	#[serde(default = "default_true")]
 	pub ws: bool,
 }
 
 /// Plain HTTP listener configuration.
-#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct HttpConfig {
 	/// Socket address to bind the HTTP listener to.
-	#[arg(long = "web-http-listen", id = "http-listen", env = "MOQ_WEB_HTTP_LISTEN")]
+	#[usage(long = "web-http-listen", name = "http-listen", env = "MOQ_WEB_HTTP_LISTEN")]
 	pub listen: Option<net::SocketAddr>,
 }
 
 /// HTTPS listener configuration with TLS certificates and keys.
 #[serde_with::serde_as]
-#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct HttpsConfig {
 	/// Socket address to bind the HTTPS listener to.
-	#[arg(long = "web-https-listen", id = "web-https-listen", env = "MOQ_WEB_HTTPS_LISTEN", requires_all = ["web-https-cert", "web-https-key"])]
+	#[usage(
+		long = "web-https-listen",
+		name = "web-https-listen",
+		env = "MOQ_WEB_HTTPS_LISTEN",
+		requires("--web-https-cert", "--web-https-key")
+	)]
 	pub listen: Option<net::SocketAddr>,
 
 	/// Load the given certificate chain files from disk.
 	///
 	/// In config files, accepts either a single string or a TOML array.
-	#[arg(
+	#[usage(
 		long = "web-https-cert",
-		id = "web-https-cert",
-		value_delimiter = ',',
+		name = "web-https-cert",
+		delimiter = ',',
 		env = "MOQ_WEB_HTTPS_CERT"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -88,10 +95,10 @@ pub struct HttpsConfig {
 	///
 	/// Each key is paired with the certificate chain at the same index.
 	/// In config files, accepts either a single string or a TOML array.
-	#[arg(
+	#[usage(
 		long = "web-https-key",
-		id = "web-https-key",
-		value_delimiter = ',',
+		name = "web-https-key",
+		delimiter = ',',
 		env = "MOQ_WEB_HTTPS_KEY"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -107,10 +114,10 @@ pub struct HttpsConfig {
 	/// JWT path.
 	///
 	/// In config files, accepts either a single string or a TOML array.
-	#[arg(
+	#[usage(
 		long = "web-https-root",
-		id = "web-https-root",
-		value_delimiter = ',',
+		name = "web-https-root",
+		delimiter = ',',
 		env = "MOQ_WEB_HTTPS_ROOT"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]

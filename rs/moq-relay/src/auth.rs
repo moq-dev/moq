@@ -207,33 +207,43 @@ impl axum::response::IntoResponse for AuthError {
 /// Hidden from `--help`; setting any field logs a deprecation warning.
 #[doc(hidden)]
 #[serde_as]
-#[derive(Clone, Default, Debug, clap::Args, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, usage::Args, Serialize, Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct AuthTls {
 	#[serde(skip_serializing_if = "Vec::is_empty")]
-	#[arg(id = "auth-tls-root", long = "auth-tls-root", env = "MOQ_AUTH_TLS_ROOT", hide = true)]
+	#[usage(
+		name = "auth-tls-root",
+		long = "auth-tls-root",
+		env = "MOQ_AUTH_TLS_ROOT",
+		hide = true
+	)]
 	#[serde_as(as = "OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "auth-tls-cert", long = "auth-tls-cert", env = "MOQ_AUTH_TLS_CERT", hide = true)]
+	#[usage(
+		name = "auth-tls-cert",
+		long = "auth-tls-cert",
+		env = "MOQ_AUTH_TLS_CERT",
+		hide = true
+	)]
 	pub cert: Option<PathBuf>,
 
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "auth-tls-key", long = "auth-tls-key", env = "MOQ_AUTH_TLS_KEY", hide = true)]
+	#[usage(name = "auth-tls-key", long = "auth-tls-key", env = "MOQ_AUTH_TLS_KEY", hide = true)]
 	pub key: Option<PathBuf>,
 
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "auth-tls-disable-verify",
+	#[usage(
+		name = "auth-tls-disable-verify",
 		long = "auth-tls-disable-verify",
 		env = "MOQ_AUTH_TLS_DISABLE_VERIFY",
 		hide = true,
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
-		value_parser = clap::value_parser!(bool),
 	)]
 	pub disable_verify: Option<bool>,
 }
@@ -265,13 +275,14 @@ impl AuthTls {
 
 /// Configuration for JWT-based authentication.
 #[serde_as]
-#[derive(clap::Args, Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(usage::Args, Clone, Debug, Serialize, Deserialize, Default)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default)]
 #[non_exhaustive]
 pub struct AuthConfig {
 	/// A single JWK key file for authentication.
 	/// No `kid` header is required in JWTs.
-	#[arg(long = "auth-key", env = "MOQ_AUTH_KEY")]
+	#[usage(long = "auth-key", env = "MOQ_AUTH_KEY")]
 	pub key: Option<String>,
 
 	/// A directory path or base URL containing JWK files named by key ID.
@@ -282,18 +293,18 @@ pub struct AuthConfig {
 	/// DEPRECATED (URL form): prefer the unified `--auth-api`, which resolves the
 	/// key in the same call as public access and the alias. The file-directory
 	/// form remains supported for standalone relays.
-	#[arg(long = "auth-key-dir", env = "MOQ_AUTH_KEY_DIR")]
+	#[usage(long = "auth-key-dir", env = "MOQ_AUTH_KEY_DIR")]
 	pub key_dir: Option<String>,
 
 	/// Deprecated `--auth-tls-*` overrides; see [`AuthTls`].
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	pub tls: AuthTls,
 
 	/// Cluster client TLS injected by [`AuthConfig::init`] so outbound auth HTTP
 	/// (JWK + auth/public-API fetches) reuses the `--connect-tls-*` identity.
 	/// Not a CLI or TOML field; the deprecated `--auth-tls-*` flags override it.
-	#[arg(skip)]
+	#[usage(skip)]
 	#[serde(skip)]
 	client_tls: Option<moq_tokio::tls::Connect>,
 
@@ -302,7 +313,7 @@ pub struct AuthConfig {
 	/// CLI: `--auth-public <prefix>` sets both subscribe and publish for the prefix.
 	/// TOML: Accepts a string, array, or table `{ subscribe = ..., publish = ... }`.
 	/// Any value starting with `http://` or `https://` is treated as a URL endpoint.
-	#[arg(long = "auth-public", env = "MOQ_AUTH_PUBLIC")]
+	#[usage(long = "auth-public", env = "MOQ_AUTH_PUBLIC")]
 	#[serde(default, deserialize_with = "PublicConfig::deserialize_option")]
 	pub public: Option<PublicConfig>,
 
@@ -310,7 +321,7 @@ pub struct AuthConfig {
 	///
 	/// CLI-only shorthand: `--auth-public-subscribe <prefix>` sets subscribe-only access.
 	/// For TOML, use `[auth.public]` with separate `subscribe`/`publish` fields instead.
-	#[arg(long = "auth-public-subscribe", env = "MOQ_AUTH_PUBLIC_SUBSCRIBE")]
+	#[usage(long = "auth-public-subscribe", env = "MOQ_AUTH_PUBLIC_SUBSCRIBE")]
 	#[serde(skip)]
 	pub public_subscribe: Option<PublicConfig>,
 
@@ -318,7 +329,7 @@ pub struct AuthConfig {
 	///
 	/// CLI-only shorthand: `--auth-public-publish <prefix>` sets publish-only access.
 	/// For TOML, use `[auth.public]` with separate `subscribe`/`publish` fields instead.
-	#[arg(long = "auth-public-publish", env = "MOQ_AUTH_PUBLIC_PUBLISH")]
+	#[usage(long = "auth-public-publish", env = "MOQ_AUTH_PUBLIC_PUBLISH")]
 	#[serde(skip)]
 	pub public_publish: Option<PublicConfig>,
 
@@ -328,7 +339,7 @@ pub struct AuthConfig {
 	///
 	/// DEPRECATED: prefer the unified `--auth-api`, which returns public access in
 	/// the same call as the key and alias.
-	#[arg(long = "auth-public-api", env = "MOQ_AUTH_PUBLIC_API")]
+	#[usage(long = "auth-public-api", env = "MOQ_AUTH_PUBLIC_API")]
 	#[serde(skip)]
 	pub public_api: Option<String>,
 
@@ -355,7 +366,7 @@ pub struct AuthConfig {
 	/// path `/usw/customer/foo`).
 	///
 	/// In config files, accepts either a single string or a TOML array.
-	#[arg(long = "auth-domain", env = "MOQ_AUTH_DOMAIN")]
+	#[usage(long = "auth-domain", env = "MOQ_AUTH_DOMAIN")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "OneOrMany<_>")]
 	pub domains: Vec<String>,
@@ -400,13 +411,13 @@ pub struct AuthConfig {
 	///
 	/// Example: `https://api.moq.dev/cluster/auth` (called as
 	/// `?root=demo/room&kid=abc&mtls=true`).
-	#[arg(long = "auth-api", env = "MOQ_AUTH_API")]
+	#[usage(long = "auth-api", env = "MOQ_AUTH_API")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub auth_api: Option<String>,
 
 	/// Billing tier label for mTLS peers when the auth API doesn't return one
 	/// (or no `--auth-api` is configured). Defaults to the unprefixed tier.
-	#[arg(long = "auth-mtls-tier", env = "MOQ_AUTH_MTLS_TIER")]
+	#[usage(long = "auth-mtls-tier", env = "MOQ_AUTH_MTLS_TIER")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub mtls_tier: Option<String>,
 }
@@ -2206,7 +2217,7 @@ api = "https://api.example.com/access"
 	}
 
 	#[test]
-	fn test_clap_public_from_str() {
+	fn test_usage_public_from_str() {
 		let config: PublicConfig = "anon".parse().unwrap();
 		let d = config.into_detailed();
 		assert_eq!(d.subscribe, vec!["anon"]);
@@ -2214,7 +2225,7 @@ api = "https://api.example.com/access"
 	}
 
 	#[test]
-	fn test_clap_public_url_from_str() {
+	fn test_usage_public_url_from_str() {
 		let config: PublicConfig = "https://api.example.com/access".parse().unwrap();
 		let d = config.into_detailed();
 		assert_eq!(d.subscribe, vec!["https://api.example.com/access"]);

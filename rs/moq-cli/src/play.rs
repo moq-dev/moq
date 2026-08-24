@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use clap::Args as ClapArgs;
 use hang::moq_net;
 use moq_mux::catalog::{self, CatalogFormat, Stream};
 use moq_video::render::wgpu;
@@ -45,18 +44,19 @@ const MAX_PRESENT_RETRIES: u32 = 8;
 const AUDIO_DRAIN_MAX: Duration = Duration::from_secs(4);
 
 /// Play one MoQ broadcast through a native window and speaker.
-#[derive(ClapArgs, Clone)]
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
 	/// Catalog format, detected from the broadcast suffix when omitted.
-	#[arg(long)]
+	#[usage(long, value_enum)]
 	pub catalog_format: Option<CatalogFormatArg>,
 
 	/// Maximum media buffering before skipping a stalled group.
-	#[arg(long = "latency-max", default_value = "500ms", value_parser = humantime::parse_duration)]
-	pub max_age: Duration,
+	#[usage(long = "latency-max", default = "500ms")]
+	pub max_age: moq_tokio::Duration,
 
 	/// Rendition selection by track name or codec.
-	#[command(flatten)]
+	#[usage(flatten)]
 	pub select: SelectArgs,
 }
 
@@ -272,7 +272,7 @@ impl Media {
 								}
 							};
 							let mut decode = moq_video::decode::Config::new();
-							decode.max_age = self.args.max_age;
+							decode.max_age = self.args.max_age.into_std();
 							match moq_video::decode::Consumer::new(&rendition, &config, &name, decode).await {
 								Ok(consumer) => {
 									tracing::info!(track = name, decoder = consumer.name(), "playing video rendition");
@@ -304,7 +304,7 @@ impl Media {
 								}
 							};
 							let mut decode = moq_audio::decode::Config::new();
-							decode.max_age = self.args.max_age;
+							decode.max_age = self.args.max_age.into_std();
 							// The sink and the frame-duration math below both assume f32,
 							// so ask for it rather than inheriting the decoder default.
 							decode.format = moq_audio::Format::F32;

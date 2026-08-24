@@ -1,7 +1,6 @@
 //! QUIC backend built on [`web_transport_quiche`], speaking WebTransport over HTTP/3
 //! (`https://`) or raw QUIC (`moqt://` / `moql://`).
 
-use crate::connect;
 use crate::crypto;
 use crate::listen;
 use crate::quic::CongestionControl;

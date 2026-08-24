@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 /// One lock for every test that reads or writes the process environment.
 ///
 /// `env::set_var` / `remove_var` are not thread-safe against a concurrent read,
-/// which is why they're `unsafe`, and clap reads the `MOQ_*` vars while it
+/// which is why they're `unsafe`, and Usage reads the `MOQ_*` vars while it
 /// parses. Per-variable-group locks aren't enough: they let one group clear its
 /// vars while another group is inside `Config::parse_and_merge` reading the
 /// environment. A single lock is what actually makes that pairing safe, and

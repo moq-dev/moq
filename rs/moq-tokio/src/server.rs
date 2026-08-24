@@ -85,7 +85,7 @@ pub(crate) const DEFAULT_BIND: &str = "[::]:443";
 /// Not configuration, which is why it is a constructor argument rather than a
 /// field on [`crate::listen::Config`]: it says how *one process* splits its
 /// listeners across threads, not what the process listens on. Keeping it out of
-/// the config also keeps it off the clap and serde surface, where it would be a
+/// the config also keeps it off the Usage and serde surface, where it would be a
 /// flag nobody can set and a field every round-trip drops.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) enum Parts {
@@ -258,7 +258,7 @@ impl Server {
 		}
 		// `None` (or an all-empty allowlist) means the listener enforces nothing.
 		#[cfg(all(feature = "uds", unix))]
-		let unix_allow = config.unix.allow.clone().filter(|allow| !allow.is_empty());
+		let unix_allow = (!config.unix.allow.is_empty()).then(|| config.unix.allow.clone());
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		let streams = StreamListeners::new(
 			stream_binds,
@@ -1305,9 +1305,14 @@ mod tests {
 
 	#[test]
 	fn version_help_lists_every_parseable_name() {
-		let help = <crate::listen::Config as clap::Args>::augment_args(clap::Command::new("test"))
-			.render_long_help()
-			.to_string();
+		#[derive(usage::Cli)]
+		#[usage(unknown_flags = "error", args_override_self = false)]
+		struct Cli {
+			#[usage(flatten)]
+			_listen: crate::listen::Config,
+		}
+
+		let help = Cli::render_help(Cli::command(), true).unwrap();
 		for name in moq_net::Version::names() {
 			assert!(help.contains(name), "missing {name} from --server-version help");
 		}
@@ -1616,7 +1621,7 @@ uid = [1001, 1002]
 		.unwrap();
 		assert_eq!(config.bind.as_deref(), Some("[::]:443"));
 		assert_eq!(config.unix.bind.as_deref(), Some(std::path::Path::new("/run/moq.sock")));
-		assert_eq!(config.unix.allow.as_ref().expect("allow").uid, vec![1001, 1002]);
+		assert_eq!(config.unix.allow.uid, vec![1001, 1002]);
 		assert!(config.has_stream_listener());
 		assert!(config.has_explicit_bind());
 	}

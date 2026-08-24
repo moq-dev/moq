@@ -629,14 +629,13 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use clap::Parser;
-
 	/// A parser wrapping the config, since it derives `Args` (a flattened `Parser`
 	/// registers an implicit group named after the struct, which collides once two
 	/// role configs are flattened together).
-	#[derive(Parser)]
+	#[derive(usage::Cli)]
+	#[usage(unknown_flags = "error", args_override_self = false)]
 	struct Cli {
-		#[command(flatten)]
+		#[usage(flatten)]
 		config: crate::connect::Config,
 	}
 
@@ -646,7 +645,9 @@ mod tests {
 			I: IntoIterator<Item = T>,
 			T: Into<std::ffi::OsString> + Clone,
 		{
-			Cli::parse_from(args).config
+			let args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
+			let args: Vec<_> = args.iter().map(std::ffi::OsString::as_os_str).collect();
+			Cli::try_parse_from(&args).expect("valid test arguments").config
 		}
 	}
 
@@ -741,7 +742,7 @@ mod tests {
 
 		// Simulate: TOML loaded, then CLI args re-applied (no --connect-tls-insecure flag).
 		let mut cli = Cli { config };
-		clap::Parser::update_from(&mut cli, ["test"]);
+		cli.update_from(&[]);
 		let config = cli.config;
 		assert_eq!(config.tls.insecure, Some(true));
 	}
@@ -833,19 +834,19 @@ mod tests {
 		"#;
 
 		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.race, Some(std::time::Duration::from_secs(1)));
+		assert_eq!(config.race, std::time::Duration::from_secs(1));
 
 		// Simulate: TOML loaded, then CLI args re-applied (no --client-failover-delay flag).
 		let mut cli = Cli { config };
-		clap::Parser::update_from(&mut cli, ["test"]);
+		cli.update_from(&[]);
 		let config = cli.config;
-		assert_eq!(config.race, Some(std::time::Duration::from_secs(1)));
+		assert_eq!(config.race, std::time::Duration::from_secs(1));
 	}
 
 	#[test]
 	fn test_cli_failover_delay() {
 		let config = Cli::config_from(["test", "--connect-race", "50ms"]);
-		assert_eq!(config.race, Some(std::time::Duration::from_millis(50)));
+		assert_eq!(config.race, std::time::Duration::from_millis(50));
 	}
 
 	#[test]
@@ -855,25 +856,25 @@ mod tests {
 		"#;
 
 		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.resolution_delay, Some(std::time::Duration::from_millis(10)));
+		assert_eq!(config.resolution_delay, std::time::Duration::from_millis(10));
 
 		// Simulate: TOML loaded, then CLI args re-applied (no --connect-resolution-delay flag).
 		let mut cli = Cli { config };
-		cli.update_from(["test"]);
-		assert_eq!(cli.config.resolution_delay, Some(std::time::Duration::from_millis(10)));
+		cli.update_from(&[]);
+		assert_eq!(cli.config.resolution_delay, std::time::Duration::from_millis(10));
 	}
 
 	#[test]
 	fn test_cli_resolution_delay() {
 		let config = Cli::config_from(["test", "--connect-resolution-delay", "0s"]);
-		assert_eq!(config.resolution_delay, Some(std::time::Duration::ZERO));
+		assert_eq!(config.resolution_delay, std::time::Duration::ZERO);
 		assert_eq!(config.resolved_resolution_delay(), std::time::Duration::ZERO);
 	}
 
 	#[test]
 	fn resolution_delay_defaults_to_the_rfc_value() {
 		let config = Cli::config_from(["test"]);
-		assert_eq!(config.resolution_delay, None);
+		assert_eq!(config.resolution_delay, std::time::Duration::from_millis(50));
 		assert_eq!(config.resolved_resolution_delay(), std::time::Duration::from_millis(50));
 	}
 
@@ -888,7 +889,7 @@ mod tests {
 
 		// Simulate: TOML loaded, then CLI args re-applied (no --client-tls-fingerprint flag).
 		let mut cli = Cli { config };
-		clap::Parser::update_from(&mut cli, ["test"]);
+		cli.update_from(&[]);
 		let config = cli.config;
 		assert_eq!(config.tls.fingerprint, vec!["abcd1234", "ef567890"]);
 	}
@@ -920,7 +921,7 @@ mod tests {
 
 		// Simulate: TOML loaded, then CLI args re-applied (no --client-version flag).
 		let mut cli = Cli { config };
-		clap::Parser::update_from(&mut cli, ["test"]);
+		cli.update_from(&[]);
 		let config = cli.config;
 		assert_eq!(config.version, vec!["moq-lite-02".parse::<moq_net::Version>().unwrap()]);
 	}
@@ -933,9 +934,7 @@ mod tests {
 
 	#[test]
 	fn test_cli_version_help_lists_every_parseable_name() {
-		let help = <crate::connect::Config as clap::Args>::augment_args(clap::Command::new("test"))
-			.render_long_help()
-			.to_string();
+		let help = Cli::render_help(Cli::command(), true).expect("long help");
 		for name in moq_net::Version::names() {
 			assert!(help.contains(name), "missing {name} from --connect-version help");
 		}
@@ -952,7 +951,7 @@ mod tests {
 
 		// Simulate: TOML loaded, then CLI args re-applied (no --client-connect flag).
 		let mut cli = Cli { config };
-		clap::Parser::update_from(&mut cli, ["test"]);
+		cli.update_from(&[]);
 		let config = cli.config;
 		assert_eq!(config.url.as_ref().unwrap().as_str(), "https://relay.example.com/anon");
 	}
@@ -974,7 +973,7 @@ mod tests {
 
 		// Simulate: TOML loaded, then CLI args re-applied (no --connect-once flag).
 		let mut cli = Cli { config };
-		clap::Parser::update_from(&mut cli, ["test"]);
+		cli.update_from(&[]);
 		let config = cli.config;
 		assert_eq!(config.once, Some(true));
 	}
@@ -994,8 +993,7 @@ mod tests {
 		assert!(reported.contains("inverted"), "{reported}");
 	}
 
-	/// An explicit canonical bind wins even when it equals the default, which a
-	/// `default_value` would have made indistinguishable from "unset".
+	/// An explicit canonical bind remains distinguishable from an omitted bind.
 	#[test]
 	fn test_cli_bind_prefers_canonical() {
 		let config = Cli::config_from(["test"]);
@@ -1010,15 +1008,14 @@ mod tests {
 		);
 	}
 
-	/// A config file's bind survives the CLI re-parse, which a clap `default_value`
-	/// would have clobbered.
+	/// A config file's bind survives when the CLI omits it.
 	#[test]
 	fn test_toml_bind_survives_update_from() {
 		let config: crate::connect::Config = toml::from_str(r#"bind = "127.0.0.1:1234""#).unwrap();
 		assert_eq!(config.bind, Some("127.0.0.1:1234".parse().unwrap()));
 
 		let mut cli = Cli { config };
-		clap::Parser::update_from(&mut cli, ["test"]);
+		cli.update_from(&[]);
 		assert_eq!(cli.config.bind, Some("127.0.0.1:1234".parse().unwrap()));
 	}
 
@@ -1064,7 +1061,7 @@ mod tests {
 
 		// Simulate: TOML loaded, then CLI args re-applied (no --client-tls-host-name flag).
 		let mut cli = Cli { config };
-		clap::Parser::update_from(&mut cli, ["test"]);
+		cli.update_from(&[]);
 		let config = cli.config;
 		assert_eq!(config.tls.host_name.as_deref(), Some("example.host"));
 	}
@@ -1128,7 +1125,7 @@ mod tests {
 	#[test]
 	fn race_defaults_to_the_rfc_8305_stagger() {
 		let config = crate::connect::Config::default();
-		assert_eq!(config.race, None);
+		assert_eq!(config.race, std::time::Duration::from_millis(250));
 		assert_eq!(config.resolved_race(), std::time::Duration::from_millis(250));
 	}
 
@@ -1146,7 +1143,7 @@ mod tests {
 	#[test]
 	fn connect_timeout_defaults_to_thirty_seconds() {
 		let config = Cli::config_from(["test"]);
-		assert_eq!(config.timeout, None);
+		assert_eq!(config.timeout, crate::connect::DEFAULT_TIMEOUT);
 		assert_eq!(config.resolved_timeout(), crate::connect::DEFAULT_TIMEOUT);
 	}
 
@@ -1165,10 +1162,10 @@ mod tests {
 
 		let timeout = crate::connect::DEFAULT_TIMEOUT;
 		let mut config = crate::connect::Config {
-			timeout: Some(timeout),
+			timeout: timeout.into(),
 			..Default::default()
 		};
-		config.websocket.delay = Some(std::time::Duration::ZERO);
+		config.websocket.delay = std::time::Duration::ZERO.into();
 		let client = config.init(Default::default()).unwrap();
 
 		// Nothing is listening on UDP, so the QUIC arm fails and leaves the WebSocket

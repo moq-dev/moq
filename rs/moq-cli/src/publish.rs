@@ -14,9 +14,9 @@ pub enum PublishFormat {
 	Flv,
 }
 
-/// `clap` adapter for [`moq_video::encode::Codec`].
+/// Command-line adapter for [`moq_video::encode::Codec`].
 #[cfg(feature = "capture")]
-#[derive(clap::ValueEnum, Clone, Copy, Default)]
+#[derive(usage::ValueEnum, Clone, Copy, Default)]
 pub enum VideoCodec {
 	/// H.264 / AVC (the default; widest support).
 	#[default]
@@ -44,87 +44,88 @@ impl From<VideoCodec> for moq_video::encode::Codec {
 /// the default camera and microphone. Run `moq devices` to list the ids each one
 /// takes.
 #[cfg(feature = "capture")]
-#[derive(clap::Args, Clone)]
-#[command(group = clap::ArgGroup::new("video-source").multiple(false))]
-#[command(group = clap::ArgGroup::new("audio-source").multiple(false))]
+#[derive(usage::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+#[usage(group("video-source"))]
+#[usage(group("audio-source"))]
 pub struct CaptureArgs {
 	/// Capture a camera, by the id `moq devices` reports (an AVFoundation
 	/// `uniqueID`, `/dev/videoN` path, or Media Foundation symbolic link).
 	/// Bare `--camera`, or no source flag at all, opens the default camera.
-	#[arg(long, num_args = 0..=1, group = "video-source")]
+	#[usage(long, group = "video-source")]
 	pub camera: Option<Option<String>>,
 
 	/// Capture a whole display, by the id `moq devices` reports. Bare
 	/// `--display` captures the main display. On Linux the desktop portal opens a
 	/// picker dialog and the id is ignored.
-	#[arg(long, num_args = 0..=1, group = "video-source", alias = "screen")]
+	#[usage(long, group = "video-source", alias = "screen")]
 	pub display: Option<Option<String>>,
 
 	/// Capture a single window, by the id `moq devices` reports. macOS only.
-	#[arg(long, group = "video-source")]
+	#[usage(long, group = "video-source")]
 	pub window: Option<String>,
 
 	/// Capture every window of an application, by the bundle id `moq devices`
 	/// reports. Windows opened later are included. macOS only.
-	#[arg(long, group = "video-source")]
+	#[usage(long, group = "video-source")]
 	pub app: Option<String>,
 
 	/// Hide the mouse cursor. Display/window/app capture only.
-	#[arg(long)]
+	#[usage(long)]
 	pub no_cursor: bool,
 
 	/// Requested capture width. The source snaps to its nearest supported mode.
-	#[arg(long)]
+	#[usage(long)]
 	pub width: Option<u32>,
 
 	/// Requested capture height.
-	#[arg(long)]
+	#[usage(long)]
 	pub height: Option<u32>,
 
 	/// Capture/encode framerate. Omit to use the source's reported rate.
-	#[arg(long)]
+	#[usage(long)]
 	pub fps: Option<u32>,
 
 	/// Maximum video bitrate in bits per second. Omit to derive one from the resolution.
 	///
 	/// When publishing to a relay, the encoder backs off below this while the uplink is
 	/// congested and climbs back afterwards; it never encodes above it.
-	#[arg(long)]
+	#[usage(long)]
 	pub bitrate: Option<u64>,
 
 	/// Video codec to encode. H.265 is hardware-only (VideoToolbox on macOS).
-	#[arg(long, value_enum, default_value_t)]
+	#[usage(long, value_enum, default = "h264")]
 	pub codec: VideoCodec,
 
 	/// Force a hardware encoder (error if none is available).
-	#[arg(long, conflicts_with = "software")]
+	#[usage(long, conflicts = "--software")]
 	pub hardware: bool,
 
 	/// Force the software encoder (openh264).
-	#[arg(long)]
+	#[usage(long)]
 	pub software: bool,
 
 	/// Capture a microphone, by the id `moq devices` reports. Bare
 	/// `--microphone`, or no audio source flag, opens the default input.
-	#[arg(long, num_args = 0..=1, group = "audio-source")]
+	#[usage(long, group = "audio-source")]
 	pub microphone: Option<Option<String>>,
 
 	/// Capture the system (desktop) audio instead of a microphone: everything the
 	/// machine is playing, minus this process. macOS only, and it needs the Screen
 	/// Recording permission.
-	#[arg(long, group = "audio-source")]
+	#[usage(long, group = "audio-source")]
 	pub system_audio: bool,
 
 	/// Target audio bitrate in bits per second (Opus). Omit for the codec default.
-	#[arg(long)]
+	#[usage(long)]
 	pub audio_bitrate: Option<u32>,
 
 	/// Capture audio only (no camera).
-	#[arg(long, conflicts_with = "no_audio", conflicts_with = "video-source")]
+	#[usage(long, conflicts("--no-audio", "--camera", "--display", "--window", "--app"))]
 	pub no_video: bool,
 
 	/// Capture video only (no microphone).
-	#[arg(long, conflicts_with = "audio-source")]
+	#[usage(long, conflicts("--microphone", "--system-audio"))]
 	pub no_audio: bool,
 }
 

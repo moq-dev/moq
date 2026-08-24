@@ -70,9 +70,7 @@ anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.8", features = ["tokio"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 bytes = "1"
-clap = { version = "4", features = ["derive"] }
 hang = { workspace = true }
-humantime = "2.3"
 moq-audio = { workspace = true, optional = true }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
@@ -91,6 +89,7 @@ tokio = { workspace = true, features = ["full"] }
 tower-http = { version = "0.7", features = ["cors"] }
 tracing = "0.1"
 url = "2"
+usage = { workspace = true, features = ["completions"] }
 winit = { version = "0.30.13", optional = true }
 
 [target.'cfg(unix)'.dependencies]

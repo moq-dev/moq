@@ -124,7 +124,7 @@ fn relay_config() -> (u16, Config) {
 	let mut config = Config::default();
 	config.listen.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 	config.auth = auth;
-	config.drain_timeout = Some(DRAIN_TIMEOUT);
+	config.drain_timeout = DRAIN_TIMEOUT.into();
 
 	(port, config)
 }

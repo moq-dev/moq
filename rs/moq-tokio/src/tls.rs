@@ -343,9 +343,9 @@ impl Peers {
 
 /// The dial side's TLS: who to trust, and the optional mTLS identity to present.
 #[serde_with::serde_as]
-#[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
-#[group(id = "tls-client")]
 #[non_exhaustive]
 pub struct Connect {
 	/// Trust the TLS root at this path, encoded as PEM.
@@ -360,7 +360,7 @@ pub struct Connect {
 	/// Files are hot reloaded for new connections, retaining the last valid roots
 	/// if a rotation is temporarily missing or malformed.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
-	#[arg(id = "connect-tls-root", long = "connect-tls-root", env = "MOQ_CONNECT_TLS_ROOT")]
+	#[usage(name = "connect-tls-root", long = "connect-tls-root", env = "MOQ_CONNECT_TLS_ROOT")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
@@ -371,14 +371,13 @@ pub struct Connect {
 	/// to false to trust only the custom roots. Trusting neither (no custom root
 	/// and system roots disabled) is rejected, since verification could never pass.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "connect-tls-system-roots",
+	#[usage(
+		name = "connect-tls-system-roots",
 		long = "connect-tls-system-roots",
 		env = "MOQ_CONNECT_TLS_SYSTEM_ROOTS",
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
-		value_parser = clap::value_parser!(bool),
 	)]
 	pub system_roots: Option<bool>,
 
@@ -393,8 +392,8 @@ pub struct Connect {
 	/// This value can be provided multiple times to accept any of several fingerprints (e.g.
 	/// across a certificate rotation). In config files, accepts either a single string or a TOML array.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
-	#[arg(
-		id = "connect-tls-fingerprint",
+	#[usage(
+		name = "connect-tls-fingerprint",
 		long = "connect-tls-fingerprint",
 		env = "MOQ_CONNECT_TLS_FINGERPRINT"
 	)]
@@ -417,7 +416,7 @@ pub struct Connect {
 	/// Only certificates are extracted; any private keys in the file are ignored.
 	/// Must be paired with `--connect-tls-key`.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "connect-tls-cert", long = "connect-tls-cert", env = "MOQ_CONNECT_TLS_CERT")]
+	#[usage(name = "connect-tls-cert", long = "connect-tls-cert", env = "MOQ_CONNECT_TLS_CERT")]
 	pub cert: Option<PathBuf>,
 
 	/// PEM file containing the private key for mTLS.
@@ -425,21 +424,20 @@ pub struct Connect {
 	/// Only the private key is extracted; any certificates in the file are ignored.
 	/// Must be paired with `--connect-tls-cert`.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "connect-tls-key", long = "connect-tls-key", env = "MOQ_CONNECT_TLS_KEY")]
+	#[usage(name = "connect-tls-key", long = "connect-tls-key", env = "MOQ_CONNECT_TLS_KEY")]
 	pub key: Option<PathBuf>,
 
 	/// Danger: Disable TLS certificate verification.
 	///
 	/// Fine for local development and between relays, but should be used in caution in production.
 	#[serde(alias = "disable_verify", skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "connect-tls-insecure",
+	#[usage(
+		name = "connect-tls-insecure",
 		long = "connect-tls-insecure",
 		env = "MOQ_CONNECT_TLS_INSECURE",
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
-		value_parser = clap::value_parser!(bool),
 	)]
 	pub insecure: Option<bool>,
 
@@ -448,8 +446,8 @@ pub struct Connect {
 	/// When unset, the connect URL's host is used (default behavior). Useful when dialing a
 	/// raw IP address but needing to present/verify a DNS name the server certificate covers.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "connect-tls-host-name",
+	#[usage(
+		name = "connect-tls-host-name",
 		long = "connect-tls-host-name",
 		env = "MOQ_CONNECT_TLS_HOST_NAME"
 	)]
@@ -458,7 +456,7 @@ pub struct Connect {
 	/// Released `--tls-*` spellings, never read as settings. Private and hidden so
 	/// they stay off the public surface; not a TOML field (config files use the
 	/// canonical names).
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(skip)]
 	deprecated: ConnectDeprecated,
 }
@@ -467,98 +465,95 @@ pub struct Connect {
 /// the `--client-tls-*` pair of flag and env var.
 ///
 /// Flattened into [`Connect`] so they keep parsing, which is what lets
-/// [`Connect::deprecated`] name their replacement instead of clap reporting an
-/// unexpected argument. Each carries its original env var, since a clap alias renames
+/// [`Connect::deprecated`] name their replacement instead of Usage reporting an
+/// unexpected argument. Each carries its original env var, since a Usage alias renames
 /// the flag but not the variable, and a deployment that configures a relay through
 /// the environment would otherwise slip past the check entirely. Not TOML fields:
 /// config files use the canonical names.
-#[derive(Clone, Default, Debug, clap::Args)]
+#[derive(Clone, Default, Debug, usage::Args)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 struct ConnectDeprecated {
-	#[arg(long = "tls-root", hide = true)]
+	#[usage(long = "tls-root", hide = true)]
 	root: Vec<PathBuf>,
 
-	#[arg(
+	#[usage(
 		long = "tls-system-roots",
 		hide = true,
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
-		value_parser = clap::value_parser!(bool),
 	)]
 	system_roots: Option<bool>,
 
-	#[arg(long = "tls-fingerprint", hide = true)]
+	#[usage(long = "tls-fingerprint", hide = true)]
 	fingerprint: Vec<String>,
 
-	#[arg(
+	#[usage(
 		long = "tls-disable-verify",
 		hide = true,
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
-		value_parser = clap::value_parser!(bool),
 	)]
 	insecure: Option<bool>,
 
-	#[arg(
-		id = "client-tls-root",
+	#[usage(
+		name = "client-tls-root",
 		long = "client-tls-root",
 		env = "MOQ_CLIENT_TLS_ROOT",
 		hide = true
 	)]
 	client_root: Vec<PathBuf>,
 
-	#[arg(
-		id = "client-tls-system-roots",
+	#[usage(
+		name = "client-tls-system-roots",
 		long = "client-tls-system-roots",
 		env = "MOQ_CLIENT_TLS_SYSTEM_ROOTS",
 		hide = true,
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
-		value_parser = clap::value_parser!(bool),
 	)]
 	client_system_roots: Option<bool>,
 
-	#[arg(
-		id = "client-tls-fingerprint",
+	#[usage(
+		name = "client-tls-fingerprint",
 		long = "client-tls-fingerprint",
 		env = "MOQ_CLIENT_TLS_FINGERPRINT",
 		hide = true
 	)]
 	client_fingerprint: Vec<String>,
 
-	#[arg(
-		id = "client-tls-cert",
+	#[usage(
+		name = "client-tls-cert",
 		long = "client-tls-cert",
 		env = "MOQ_CLIENT_TLS_CERT",
 		hide = true
 	)]
 	client_cert: Option<PathBuf>,
 
-	#[arg(
-		id = "client-tls-key",
+	#[usage(
+		name = "client-tls-key",
 		long = "client-tls-key",
 		env = "MOQ_CLIENT_TLS_KEY",
 		hide = true
 	)]
 	client_key: Option<PathBuf>,
 
-	#[arg(
-		id = "client-tls-disable-verify",
+	#[usage(
+		name = "client-tls-disable-verify",
 		long = "client-tls-disable-verify",
 		alias = "client-tls-insecure",
 		env = "MOQ_CLIENT_TLS_DISABLE_VERIFY",
 		hide = true,
-		default_missing_value = "true",
+		default_missing = "true",
 		num_args = 0..=1,
 		require_equals = true,
-		value_parser = clap::value_parser!(bool),
 	)]
 	client_insecure: Option<bool>,
 
-	#[arg(
-		id = "client-tls-host-name",
+	#[usage(
+		name = "client-tls-host-name",
 		long = "client-tls-host-name",
 		env = "MOQ_CLIENT_TLS_HOST_NAME",
 		hide = true
@@ -1128,29 +1123,29 @@ pub fn init_android(env: &mut jni::Env, context: jni::objects::JObject) -> Resul
 ///
 /// In config files, each list field accepts either a single string or a TOML array.
 #[serde_with::serde_as]
-#[derive(clap::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(usage::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields)]
-#[group(id = "tls-server")]
 #[non_exhaustive]
 pub struct Listen {
 	/// Load the given certificate from disk.
-	#[arg(long = "listen-tls-cert", id = "listen-tls-cert", env = "MOQ_LISTEN_TLS_CERT")]
+	#[usage(long = "listen-tls-cert", name = "listen-tls-cert", env = "MOQ_LISTEN_TLS_CERT")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub cert: Vec<PathBuf>,
 
 	/// Load the given key from disk.
-	#[arg(long = "listen-tls-key", id = "listen-tls-key", env = "MOQ_LISTEN_TLS_KEY")]
+	#[usage(long = "listen-tls-key", name = "listen-tls-key", env = "MOQ_LISTEN_TLS_KEY")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub key: Vec<PathBuf>,
 
 	/// Or generate a new certificate and key with the given hostnames.
 	/// This won't be valid unless the client uses the fingerprint or disables verification.
-	#[arg(
+	#[usage(
 		long = "listen-tls-generate",
-		id = "listen-tls-generate",
-		value_delimiter = ',',
+		name = "listen-tls-generate",
+		delimiter = ',',
 		env = "MOQ_LISTEN_TLS_GENERATE"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1193,10 +1188,10 @@ pub struct Listen {
 	/// for optional mTLS. Root files are hot reloaded for new handshakes on the
 	/// rustls-based backends; quiche servers require a restart because their TLS
 	/// hook fixes client-auth roots when the listener is built.
-	#[arg(
+	#[usage(
 		long = "listen-tls-root",
-		id = "listen-tls-root",
-		value_delimiter = ',',
+		name = "listen-tls-root",
+		delimiter = ',',
 		env = "MOQ_LISTEN_TLS_ROOT"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1205,7 +1200,7 @@ pub struct Listen {
 
 	/// The released `--server-tls-*` spellings and env vars, folded into the fields
 	/// above by [`Self::resolved`].
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(skip)]
 	pub(crate) deprecated: ListenDeprecated,
 }
@@ -1213,13 +1208,14 @@ pub struct Listen {
 /// The released served-identity spellings, kept parsing but hidden.
 ///
 /// The flags themselves mostly survived this rename (`--tls-cert` is still
-/// `--tls-cert`); what they carry here is their original env var, which a clap
+/// `--tls-cert`); what they carry here is their original env var, which a Usage
 /// alias cannot. A relay configured through the environment would otherwise come
 /// up with no certificate at all.
-#[derive(Clone, Default, Debug, clap::Args)]
+#[derive(Clone, Default, Debug, usage::Args)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct ListenDeprecated {
-	#[arg(
-		id = "server-tls-cert",
+	#[usage(
+		name = "server-tls-cert",
 		long = "tls-cert",
 		alias = "server-tls-cert",
 		env = "MOQ_SERVER_TLS_CERT",
@@ -1227,8 +1223,8 @@ pub(crate) struct ListenDeprecated {
 	)]
 	cert: Vec<PathBuf>,
 
-	#[arg(
-		id = "server-tls-key",
+	#[usage(
+		name = "server-tls-key",
 		long = "tls-key",
 		alias = "server-tls-key",
 		env = "MOQ_SERVER_TLS_KEY",
@@ -1236,20 +1232,20 @@ pub(crate) struct ListenDeprecated {
 	)]
 	key: Vec<PathBuf>,
 
-	#[arg(
-		id = "server-tls-generate",
+	#[usage(
+		name = "server-tls-generate",
 		long = "tls-generate",
 		alias = "server-tls-generate",
-		value_delimiter = ',',
+		delimiter = ',',
 		env = "MOQ_SERVER_TLS_GENERATE",
 		hide = true
 	)]
 	generate: Vec<String>,
 
-	#[arg(
-		id = "server-tls-root",
+	#[usage(
+		name = "server-tls-root",
 		long = "server-tls-root",
-		value_delimiter = ',',
+		delimiter = ',',
 		env = "MOQ_SERVER_TLS_ROOT",
 		hide = true
 	)]
@@ -2753,21 +2749,19 @@ pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: Listen) {
 #[cfg(test)]
 mod legacy_tests {
 	use super::*;
-	use clap::Parser;
-
 	/// A parser wrapping the sections, which derive `Args` rather than `Parser`.
-	#[derive(Parser)]
+	#[derive(usage::Cli)]
+	#[usage(unknown_flags = "error", args_override_self = false)]
 	struct Cli {
-		#[command(flatten)]
+		#[usage(flatten)]
 		connect: Connect,
-		#[command(flatten)]
+		#[usage(flatten)]
 		listen: Listen,
 	}
 
 	fn parse(args: &[&str]) -> Cli {
-		let mut argv = vec!["test"];
-		argv.extend_from_slice(args);
-		Cli::parse_from(argv)
+		let argv = args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>();
+		Cli::parse_from(&argv).unwrap()
 	}
 
 	/// The released `--client-tls-*` spellings parse so the process can name their

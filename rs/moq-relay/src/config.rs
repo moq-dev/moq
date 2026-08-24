@@ -1,75 +1,74 @@
-use std::time::Duration;
-
-use clap::Parser;
 use serde::{Deserialize, Serialize};
 
 use crate::{AuthConfig, CacheConfig, ClusterConfig, InternalConfig, StatsConfig, WebConfig};
 
 /// Top-level relay configuration, loadable from CLI arguments, environment
 /// variables, or a TOML file.
-#[derive(Parser, Clone, Debug, Deserialize, Serialize, Default)]
+#[derive(usage::Cli, Clone, Debug, Deserialize, Serialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
-#[command(version = env!("VERSION"))]
+#[usage(version = env!("VERSION"))]
+#[usage(completion)]
 #[non_exhaustive]
 pub struct Config {
 	/// The QUIC/TLS configuration for the server.
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	#[serde(alias = "server")]
 	pub listen: moq_tokio::listen::Config,
 
 	/// The QUIC/TLS configuration for the client. (clustering only)
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	#[serde(alias = "client")]
 	pub connect: moq_tokio::connect::Config,
 
 	/// QUIC transport tuning (`--quic-*`), shared by the dial and accept sides:
 	/// these knobs mean the same thing whichever way the connection was opened.
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	pub quic: moq_tokio::quic::Config,
 
 	/// Log configuration.
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	pub log: moq_tokio::Log,
 
 	/// How QUIC work is laid out over threads. One shared runtime unless
 	/// `runtime.workers` is set.
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	pub runtime: crate::RuntimeConfig,
 
 	/// Cluster configuration.
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	pub cluster: ClusterConfig,
 
 	/// Authentication configuration.
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	pub auth: AuthConfig,
 
 	/// Optionally run a TCP HTTP/WebSocket server.
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	pub web: WebConfig,
 
 	/// Stats publishing configuration. Disabled unless `stats.enabled = true`.
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	pub stats: StatsConfig,
 
 	/// Group cache sizing. Unbounded unless `cache.capacity` or `cache.headroom`
 	/// is set.
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	pub cache: CacheConfig,
 
 	/// Internal (ops) listener for `/metrics`, `/health`, and `/nodes`. Disabled unless
 	/// `internal.listen` is set.
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	pub internal: InternalConfig,
 
@@ -78,24 +77,45 @@ pub struct Config {
 	/// this long for clients to reconnect elsewhere before force-closing them; a
 	/// second signal exits immediately. Zero closes them at once, with no GOAWAY
 	/// they would have no time to act on. Defaults to 10 seconds.
-	#[arg(
-		id = "drain-timeout",
+	#[usage(
+		name = "drain-timeout",
 		long = "drain-timeout",
 		env = "MOQ_DRAIN_TIMEOUT",
-		value_parser = humantime::parse_duration,
+		default = "10s"
 	)]
-	#[serde(default, with = "humantime_serde")]
-	pub drain_timeout: Option<Duration>,
+	pub drain_timeout: moq_tokio::Duration,
 
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
 	pub file: Option<String>,
 
 	/// Iroh specific configuration, used for both a client and server.
-	#[command(flatten)]
+	#[usage(flatten)]
 	#[serde(default)]
 	#[cfg(feature = "iroh")]
 	pub iroh: moq_tokio::iroh::EndpointConfig,
+}
+
+impl Default for Config {
+	fn default() -> Self {
+		Self {
+			listen: Default::default(),
+			connect: Default::default(),
+			quic: Default::default(),
+			log: Default::default(),
+			runtime: Default::default(),
+			cluster: Default::default(),
+			auth: Default::default(),
+			web: Default::default(),
+			stats: Default::default(),
+			cache: Default::default(),
+			internal: Default::default(),
+			drain_timeout: crate::DEFAULT_DRAIN_TIMEOUT.into(),
+			file: None,
+			#[cfg(feature = "iroh")]
+			iroh: Default::default(),
+		}
+	}
 }
 
 impl Config {
@@ -112,30 +132,103 @@ impl Config {
 	/// Pure version of [`Self::load`] without logger init, so tests can drive
 	/// it with synthetic args and inspect the result.
 	///
-	/// Merge order: CLI args (the positional `file` and any flags) → TOML file
-	/// (if `file` is set) → CLI args re-applied so explicit flags / env vars
-	/// override TOML.
-	///
-	/// # Pitfall (see `rs/CLAUDE.md` and `tests` below)
-	///
-	/// The final `update_from` re-runs the clap parser over `args`. For
-	/// fields typed as bare `bool`, an absent CLI flag writes
-	/// `Default::default()` (i.e. `false`) over the TOML value, silently
-	/// disabling settings that the TOML enabled. Type any new flag that
-	/// should be TOML-overridable as `Option<bool>` (or other `Option<T>`)
-	/// — those are left untouched when the CLI arg is absent.
+	/// Merge defaults and environment, then TOML, then explicit CLI flags.
 	pub(crate) fn parse_and_merge<I, T>(args: I) -> anyhow::Result<Self>
 	where
 		I: IntoIterator<Item = T>,
 		T: Into<std::ffi::OsString> + Clone,
 	{
 		let args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
-		let mut config = Config::parse_from(&args);
+		let argv = args
+			.iter()
+			.skip(1)
+			.map(std::ffi::OsString::as_os_str)
+			.collect::<Vec<_>>();
+		let mut config = Config::parse_from(&argv)
+			.map_err(|err| anyhow::anyhow!(usage::render_failure(Config::spec(), &argv, &err)))?;
 		if let Some(file) = config.file.clone() {
-			config = toml::from_str(&std::fs::read_to_string(file)?)?;
-			config.update_from(&args);
+			let mut merged = toml::Value::try_from(&config)?;
+			let source = std::fs::read_to_string(file)?;
+			let mut file = toml::from_str::<toml::Value>(&source)?;
+			normalize_toml_aliases(&mut file)?;
+			merge_toml(&mut merged, file);
+			config = merged.try_into()?;
+			let runtime_pin = config.runtime.pin;
+			let web_ws = config.web.ws;
+			let connect_websocket = config.connect.websocket.enabled;
+			config.update_from(&argv);
+			// Usage treats `false` as an empty standing boolean, so a declared
+			// default of `true` fills it during an update. Preserve the source layer
+			// unless the corresponding CLI flag was explicitly present.
+			if !has_long_flag(&argv, "--runtime-pin") {
+				config.runtime.pin = runtime_pin;
+			}
+			if !has_long_flag(&argv, "--web-ws") {
+				config.web.ws = web_ws;
+			}
+			if !has_long_flag(&argv, "--connect-websocket-enabled") {
+				config.connect.websocket.enabled = connect_websocket;
+			}
 		}
 		Ok(config)
+	}
+}
+
+fn has_long_flag(argv: &[&std::ffi::OsStr], selector: &str) -> bool {
+	argv.iter().any(|arg| {
+		*arg == std::ffi::OsStr::new(selector)
+			|| arg
+				.to_str()
+				.and_then(|arg| arg.strip_prefix(selector))
+				.is_some_and(|suffix| suffix.starts_with('='))
+	})
+}
+
+fn normalize_toml_aliases(value: &mut toml::Value) -> anyhow::Result<()> {
+	let Some(root) = value.as_table_mut() else {
+		return Ok(());
+	};
+	rename_toml_key(root, "server", "listen")?;
+	rename_toml_key(root, "client", "connect")?;
+
+	if let Some(listen) = root.get_mut("listen").and_then(toml::Value::as_table_mut) {
+		rename_toml_key(listen, "listen", "bind")?;
+	}
+	if let Some(connect) = root.get_mut("connect").and_then(toml::Value::as_table_mut) {
+		rename_toml_key(connect, "connect", "url")?;
+		rename_toml_key(connect, "failover_delay", "race")?;
+		if let Some(tls) = connect.get_mut("tls").and_then(toml::Value::as_table_mut) {
+			rename_toml_key(tls, "disable_verify", "insecure")?;
+		}
+	}
+	Ok(())
+}
+
+fn rename_toml_key(table: &mut toml::Table, alias: &str, canonical: &str) -> anyhow::Result<()> {
+	let Some(value) = table.remove(alias) else {
+		return Ok(());
+	};
+	anyhow::ensure!(
+		!table.contains_key(canonical),
+		"TOML specifies both `{alias}` and `{canonical}`"
+	);
+	table.insert(canonical.into(), value);
+	Ok(())
+}
+
+fn merge_toml(base: &mut toml::Value, overlay: toml::Value) {
+	match (base, overlay) {
+		(toml::Value::Table(base), toml::Value::Table(overlay)) => {
+			for (key, value) in overlay {
+				match base.get_mut(&key) {
+					Some(base) => merge_toml(base, value),
+					None => {
+						base.insert(key, value);
+					}
+				}
+			}
+		}
+		(base, overlay) => *base = overlay,
 	}
 }
 
@@ -167,11 +260,12 @@ mod tests {
 	fn the_relay_default_applies() {
 		let _env = EnvGuard::clear(&["MOQ_QUIC_MAX_STREAMS", "MOQ_SERVER_QUIC_MAX_STREAMS"]);
 
-		let mut config = Config::parse_from(["moq-relay", "--quic-max-streams", "4096"]);
+		let mut config =
+			Config::parse_from(&[std::ffi::OsStr::new("--quic-max-streams"), std::ffi::OsStr::new("4096")]).unwrap();
 		config.resolve().expect("current spellings");
 		assert_eq!(config.quic.max_streams, Some(4096));
 
-		let mut config = Config::parse_from(["moq-relay"]);
+		let mut config = Config::parse_from(&[]).unwrap();
 		config.resolve().expect("current spellings");
 		assert_eq!(config.quic.max_streams, Some(crate::DEFAULT_MAX_STREAMS));
 	}
@@ -190,15 +284,15 @@ mod tests {
 			"MOQ_SERVER_TLS_CERT",
 		]);
 
-		let mut config = Config::parse_from([
-			"moq-relay",
-			"--server-bind",
-			"[::]:4443",
-			"--server-tls-cert",
-			"/tmp/cert.pem",
-			"--server-tls-key",
-			"/tmp/cert.key",
-		]);
+		let mut config = Config::parse_from(&[
+			std::ffi::OsStr::new("--server-bind"),
+			std::ffi::OsStr::new("[::]:4443"),
+			std::ffi::OsStr::new("--server-tls-cert"),
+			std::ffi::OsStr::new("/tmp/cert.pem"),
+			std::ffi::OsStr::new("--server-tls-key"),
+			std::ffi::OsStr::new("/tmp/cert.key"),
+		])
+		.unwrap();
 		assert_eq!(config.listen.bind, None, "the released flag configures nothing");
 
 		let err = config.resolve().expect_err("must refuse").to_string();
@@ -266,14 +360,7 @@ max_streams = 64
 		assert!(checked > 0, "no demo configs found in {}", dir.display());
 	}
 
-	/// Regression test for the clap+TOML interaction documented on
-	/// `Config::parse_and_merge`. A TOML file that enables stats with no
-	/// overriding CLI flag must still produce `stats.enabled == Some(true)`.
-	///
-	/// Before the fix, `stats.enabled` was a bare `bool`. `update_from` would
-	/// re-run the clap parser over args containing no `--stats-enabled`, which
-	/// wrote the default `false` over the TOML's `true`, silently disabling
-	/// stats publishing for any deployment that configured it via TOML.
+	/// Bare defaults loaded from TOML survive when the CLI does not mention them.
 	#[test]
 	fn cli_does_not_clobber_toml_stats_enabled() {
 		let _env = EnvGuard::clear(&["MOQ_STATS_ENABLED", "MOQ_STATS_DEPTH"]);
@@ -293,32 +380,35 @@ depth = 2
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
 
-		assert_eq!(
+		assert!(
 			config.stats.enabled,
-			Some(true),
-			"TOML's stats.enabled=true must not be clobbered by the CLI re-parse \
-			 (any new bare-bool field on a flatten-derived config will have the same bug; \
-			 type it as Option<bool>)"
+			"TOML's stats.enabled=true must not be clobbered by CLI defaults"
 		);
-		// The `interval` flag must survive the CLI re-parse the same way.
-		// It's typed as `Option<u64>` rather than a bare numeric type for
-		// exactly this reason.
-		assert_eq!(config.stats.interval, Some(5));
+		assert_eq!(config.stats.interval, 5);
 		assert_eq!(config.stats.node.as_deref(), Some("localhost"));
-		assert_eq!(config.stats.depth, Some(2));
+		assert_eq!(config.stats.depth, 2);
 	}
 
-	/// Regression test for the clap+TOML clobber bug applied to `[cache]`. Both
-	/// fields are `Option<String>` so a TOML-configured cache size survives the
-	/// CLI re-parse when no `--cache-*` flag is passed.
+	/// Bare runtime defaults loaded from TOML survive when the CLI omits them.
 	#[test]
 	fn cli_does_not_clobber_toml_runtime() {
-		let _env = EnvGuard::clear(&["MOQ_RUNTIME_WORKERS", "MOQ_RUNTIME_PIN"]);
+		let _env = EnvGuard::clear(&[
+			"MOQ_RUNTIME_WORKERS",
+			"MOQ_RUNTIME_PIN",
+			"MOQ_WEB_WS",
+			"MOQ_CONNECT_WEBSOCKET_ENABLED",
+		]);
 
 		let toml = r#"
 [runtime]
 workers = 8
 pin = false
+
+[web]
+ws = false
+
+[connect.websocket]
+enabled = false
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
@@ -329,11 +419,27 @@ pin = false
 		let config = Config::parse_and_merge(args).expect("config load");
 
 		assert_eq!(config.runtime.workers, Some(8));
-		assert_eq!(
-			config.runtime.pin,
-			Some(false),
+		assert!(
+			!config.runtime.pin,
 			"TOML's runtime.pin=false must survive the CLI re-parse"
 		);
+		assert!(!config.web.ws, "TOML's web.ws=false must survive the CLI re-parse");
+		assert!(
+			!config.connect.websocket.enabled,
+			"TOML's connect.websocket.enabled=false must survive the CLI re-parse"
+		);
+
+		let args = [
+			std::ffi::OsString::from("moq-relay"),
+			std::ffi::OsString::from(&path),
+			std::ffi::OsString::from("--runtime-pin=true"),
+			std::ffi::OsString::from("--web-ws=true"),
+			std::ffi::OsString::from("--connect-websocket-enabled=true"),
+		];
+		let config = Config::parse_and_merge(args).expect("config load");
+		assert!(config.runtime.pin);
+		assert!(config.web.ws);
+		assert!(config.connect.websocket.enabled);
 	}
 
 	#[test]
@@ -362,7 +468,7 @@ duration = "30s"
 		assert_eq!(config.cache.headroom.as_deref(), Some("10%"));
 		assert_eq!(
 			config.cache.duration,
-			Some(std::time::Duration::from_secs(30)),
+			Some(std::time::Duration::from_secs(30).into()),
 			"TOML's cache.duration must not be clobbered by the CLI re-parse"
 		);
 	}
@@ -373,7 +479,7 @@ duration = "30s"
 	#[test]
 	fn cache_duration_serde_round_trip() {
 		let set: CacheConfig = toml::from_str(r#"duration = "30s""#).expect("deserialize Some");
-		assert_eq!(set.duration, Some(std::time::Duration::from_secs(30)));
+		assert_eq!(set.duration, Some(std::time::Duration::from_secs(30).into()));
 
 		let unset: CacheConfig = toml::from_str("").expect("deserialize absent");
 		assert_eq!(unset.duration, None);
@@ -385,10 +491,7 @@ duration = "30s"
 		toml::to_string(&unset).expect("serialize None");
 	}
 
-	/// Regression test for the clap+TOML clobber bug applied to `cluster.linger`.
-	/// The field is `Option<Duration>` so a TOML-configured window survives the
-	/// CLI re-parse when no `--cluster-linger` flag is passed (deprecated and
-	/// ignored, but it must keep parsing so existing configs boot).
+	/// A deprecated TOML value still survives the merge so validation can name it.
 	#[test]
 	#[allow(deprecated)]
 	fn cli_does_not_clobber_toml_linger() {
@@ -408,18 +511,12 @@ linger = "30s"
 
 		assert_eq!(
 			config.cluster.linger,
-			Some(std::time::Duration::from_secs(30)),
+			Some(std::time::Duration::from_secs(30).into()),
 			"TOML's cluster.linger must not be clobbered by the CLI re-parse"
 		);
 	}
 
-	/// Regression test for the same clap+TOML clobber bug applied to the
-	/// `preferred_v4` / `preferred_v6` fields on `moq_tokio::listen::Config`.
-	/// If either field is ever re-typed as a bare `SocketAddrV4` / `SocketAddrV6`
-	/// (without `Option<>`), the CLI re-parse will overwrite the TOML value
-	/// with `Default::default()` and silently disable the
-	/// preferred_address transport parameter for deployments configured via
-	/// TOML. This test asserts the TOML value survives an absent CLI flag.
+	/// Preferred addresses loaded from TOML survive when the CLI omits them.
 	#[test]
 	fn cli_does_not_clobber_toml_preferred_addresses() {
 		let _env = EnvGuard::clear(&["MOQ_LISTEN_PREFERRED_V4", "MOQ_LISTEN_PREFERRED_V6"]);
@@ -476,11 +573,7 @@ qlog = "/tmp/moq-qlog"
 		);
 	}
 
-	/// Regression test for the clap+TOML clobber bug applied to the
-	/// `congestion_control` fields on the quic sections of
-	/// `moq-tokio::ServerConfig` / `ClientConfig`. The fields must stay
-	/// `Option<CongestionControl>` so a TOML-selected family survives the
-	/// CLI re-parse when no `--*-quic-congestion-control` flag is passed.
+	/// A backend-specific congestion-control choice loaded from TOML survives.
 	#[test]
 	fn cli_does_not_clobber_toml_congestion_control() {
 		let _env = EnvGuard::clear(&[
@@ -509,8 +602,7 @@ congestion_control = "delay"
 		);
 	}
 
-	/// The client connect timeout is optional at the clap layer so an absent CLI
-	/// flag does not replace the TOML value with the resolved 30-second default.
+	/// The client connect timeout loaded from TOML replaces the built-in default.
 	#[test]
 	fn cli_does_not_clobber_toml_client_connect_timeout() {
 		let _env = EnvGuard::clear(&["MOQ_CLIENT_CONNECT_TIMEOUT"]);
@@ -527,7 +619,7 @@ timeout = "2m"
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
 
-		assert_eq!(config.connect.timeout, Some(std::time::Duration::from_secs(120)));
+		assert_eq!(config.connect.timeout, std::time::Duration::from_secs(120));
 	}
 
 	#[test]
@@ -564,9 +656,7 @@ key = ["cdn.key", "moq-pro.key"]
 		);
 	}
 
-	/// Explicit CLI flag must still override TOML. Belt-and-suspenders for the
-	/// fix above: making `enabled: Option<bool>` shouldn't break the override
-	/// path.
+	/// Explicit CLI flags still override TOML defaults.
 	#[test]
 	fn cli_flag_overrides_toml_stats_enabled() {
 		let _env = EnvGuard::clear(&["MOQ_STATS_ENABLED"]);
@@ -583,12 +673,10 @@ key = ["cdn.key", "moq-pro.key"]
 			std::ffi::OsString::from("--stats-enabled=false"),
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
-		assert_eq!(config.stats.enabled, Some(false));
+		assert!(!config.stats.enabled);
 	}
 
-	/// Same clap+TOML clobber guard applied to `auth.auth_api`. It's typed as
-	/// `Option<String>` so an absent `--auth-api` CLI flag must not wipe a
-	/// TOML-configured value during the `update_from` re-parse.
+	/// An auth API loaded from TOML survives when the CLI omits it.
 	#[test]
 	fn cli_does_not_clobber_toml_auth_api() {
 		let _env = EnvGuard::clear(&["MOQ_AUTH_API"]);
@@ -612,11 +700,7 @@ auth_api = "https://api.moq.dev/cluster/auth"
 		);
 	}
 
-	/// Same clap+TOML clobber guard for `client.system_roots`. It's typed as
-	/// `Option<bool>` so an absent `--client-tls-system-roots` CLI flag must not wipe a
-	/// TOML-configured value during the `update_from` re-parse. A bare `bool`
-	/// would reset it to `false`, silently dropping the system roots for a
-	/// cluster client that opted into trusting both system and custom roots.
+	/// The optional system-roots policy loaded from TOML survives when omitted on the CLI.
 	#[test]
 	fn cli_does_not_clobber_toml_system_roots() {
 		let _env = EnvGuard::clear(&["MOQ_CLIENT_TLS_SYSTEM_ROOTS"]);
@@ -640,11 +724,7 @@ system_roots = true
 		);
 	}
 
-	/// Same clap+TOML clobber guard for `cluster.id`. It's typed as `Option<u64>`
-	/// so an absent `--cluster-id` CLI flag must not wipe a TOML-configured value
-	/// during the `update_from` re-parse. A bare `u64` would reset it to `0`,
-	/// which the cluster treats as reserved and silently swaps for a random id,
-	/// defeating the point of pinning a stable origin via TOML.
+	/// A stable cluster id loaded from TOML survives when omitted on the CLI.
 	#[test]
 	fn cli_does_not_clobber_toml_cluster_id() {
 		let _env = EnvGuard::clear(&["MOQ_CLUSTER_ID"]);
@@ -701,10 +781,7 @@ mtls_tier = "edge"
 		);
 	}
 
-	/// Same clap+TOML clobber guard for the stream listeners. The `[server.unix]`
-	/// bind (`Option<PathBuf>`) and its peer-credential allowlist must survive the
-	/// `update_from` re-parse when their CLI flags are absent, or a TOML-configured
-	/// Unix listener (and its allowlist) gets silently dropped.
+	/// A Unix listener and its allowlist loaded from TOML survive together.
 	#[cfg(all(feature = "uds", unix))]
 	#[test]
 	fn cli_does_not_clobber_toml_server_unix() {
@@ -735,7 +812,7 @@ uid = [1001]
 			"TOML's server.unix.bind must not be clobbered by the CLI re-parse"
 		);
 		assert_eq!(
-			config.listen.unix.allow.expect("allow present").uid,
+			config.listen.unix.allow.uid,
 			vec![1001],
 			"TOML's server.unix.allow must not be clobbered by the CLI re-parse"
 		);
@@ -760,11 +837,7 @@ uid = [1001]
 		assert_eq!(config.cluster.id, Some(67890));
 	}
 
-	/// Regression test for the same clap+TOML clobber bug on `internal.listen`
-	/// (the `--internal-listen` / `MOQ_INTERNAL_LISTEN` ops listener). It's an
-	/// `Option<SocketAddr>`, so an absent CLI flag must leave the TOML value
-	/// intact; if it were ever re-typed to a bare `SocketAddr`, the `update_from`
-	/// re-parse would overwrite a TOML-configured listener with the default.
+	/// An internal listener loaded from TOML survives when omitted on the CLI.
 	#[test]
 	fn cli_does_not_clobber_toml_internal_listen() {
 		let _env = EnvGuard::clear(&["MOQ_INTERNAL_LISTEN"]);

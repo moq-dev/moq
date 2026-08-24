@@ -43,7 +43,6 @@ android-logcat = ["dep:tracing-android"]
 
 [dependencies]
 bytes = "1"
-clap = { version = "4", features = ["derive", "env"] }
 core_affinity = "0.8"
 # Family-restricted `getaddrinfo`, so the AAAA and A queries can be issued separately
 # (RFC 8305 section 3) while still going through the system resolver.
@@ -52,7 +51,6 @@ futures = "0.3"
 hex = "0.4"
 hmac = { workspace = true, optional = true }
 humantime = "2.3"
-humantime-serde = "1.1"
 mdns-sd = { workspace = true, optional = true }
 
 moq-net = { workspace = true }
@@ -85,6 +83,7 @@ tokio = { workspace = true, features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = { version = "2", features = ["serde"] }
+usage = { workspace = true }
 web-transport-iroh = { workspace = true, optional = true }
 web-transport-noq = { workspace = true, optional = true }
 web-transport-proto = { workspace = true, optional = true }

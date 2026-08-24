@@ -37,9 +37,7 @@ websocket = ["moq-tokio/websocket"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
-clap = { version = "4", features = ["derive", "env"] }
 humantime = "2.3"
-humantime-serde = "1.1"
 moq-net = { workspace = true }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 rand = "0.10.1"
@@ -49,6 +47,7 @@ serde_json = "1"
 tokio = { workspace = true, features = ["full"] }
 toml = "1.1"
 tracing = "0.1"
+usage = { workspace = true, features = ["completions"] }
 
 # The host sampler reads /proc, so it is Linux-only (production relays are Linux).
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -451,7 +451,7 @@ fn spawn_import(
 		reject_listener_cors(&rtc.cors, "import rtc")?;
 	}
 
-	let max_age = import.max_age;
+	let max_age = import.max_age.map(moq_tokio::Duration::into_std);
 	// The MoQ side every gateway publishes into, minted per source since each takes it
 	// by value onto its own task.
 	let target = |name: String| crate::moq::ImportTarget {
@@ -467,13 +467,12 @@ fn spawn_import(
 		let broadcast = origin
 			.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
 			.context("failed to create broadcast")?;
-		local = Some(Publish::new(broadcast, &format, import.max_age)?);
+		local = Some(Publish::new(broadcast, &format, max_age)?);
 	} else {
 		match import.source {
 			ImportSource::Hls(hls) => {
 				warn_if_missing_format(&name);
 				let origin = origin.clone();
-				let max_age = import.max_age;
 				tasks.spawn(async move { hls::import(&origin, name, hls.playlist, max_age).await });
 			}
 			ImportSource::Rtmp(rtmp) => {
@@ -487,9 +486,9 @@ fn spawn_import(
 			ImportSource::Srt(srt) => {
 				if let Some(addr) = srt.listen {
 					let name = require_broadcast(name, "import srt --listen")?;
-					tasks.spawn(srt::listen_import(target(name), addr, srt.latency));
+					tasks.spawn(srt::listen_import(target(name), addr, srt.latency.into_std()));
 				} else if let Some(url) = srt.connect {
-					tasks.spawn(srt::connect_import(target(name), url, srt.latency));
+					tasks.spawn(srt::connect_import(target(name), url, srt.latency.into_std()));
 				}
 			}
 			ImportSource::Rtc(rtc) => {
@@ -514,7 +513,7 @@ fn spawn_import(
 				let broadcast = origin
 					.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
 					.context("failed to create broadcast")?;
-				local = Some(Publish::capture(broadcast, &capture, bandwidth, import.max_age)?);
+				local = Some(Publish::capture(broadcast, &capture, bandwidth, max_age)?);
 			}
 			_ => unreachable!("container formats are handled by stdin_format above"),
 		}
@@ -553,7 +552,7 @@ fn spawn_export(
 				tasks.spawn(hls::export(origin.consume(), args, name));
 			}
 			ExportSink::Rtmp(rtmp) => {
-				let max_age = rtmp.max_age;
+				let max_age = rtmp.max_age.into_std();
 				if let Some(addr) = rtmp.endpoint.listen {
 					let name = require_broadcast(name, "export rtmp --listen")?;
 					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name, max_age));
@@ -564,9 +563,9 @@ fn spawn_export(
 			ExportSink::Srt(srt) => {
 				if let Some(addr) = srt.listen {
 					let name = require_broadcast(name, "export srt --listen")?;
-					tasks.spawn(srt::listen_export(origin.consume(), addr, name, srt.latency));
+					tasks.spawn(srt::listen_export(origin.consume(), addr, name, srt.latency.into_std()));
 				} else if let Some(url) = srt.connect {
-					tasks.spawn(srt::connect_export(origin.consume(), url, name, srt.latency));
+					tasks.spawn(srt::connect_export(origin.consume(), url, name, srt.latency.into_std()));
 				}
 			}
 			ExportSink::Rtc(rtc) => {

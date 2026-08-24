@@ -136,6 +136,7 @@ sha2 = "0.11"
 subtle = "2.6"
 tempfile = "3"
 tokio = "1.48"
+usage = { package = "usage-rs", version = "6.3.0" }
 web-async = { version = "0.1.5", features = ["tracing"] }
 web-transport-iroh = "0.7"
 # default-features off so the QUIC crypto provider is chosen by moq-tokio's

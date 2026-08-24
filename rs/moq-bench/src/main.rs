@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
 		});
 	}
 
-	let duration = config.duration;
+	let duration = config.duration.map(moq_tokio::Duration::into_std);
 	let stop = async move {
 		match duration {
 			Some(d) => tokio::time::sleep(d).await,
