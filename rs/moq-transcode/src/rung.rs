@@ -127,9 +127,10 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 			}
 		}
 
-		// Encoding starts here and stops when the session breaks, so this is
-		// exactly the interval a meter should charge for.
-		let _active = rung.active.enter(&rung.info);
+		// Attach the meter here rather than at the first frame: it counts nothing
+		// until this pipeline encodes one, so a subscriber waiting on a stalled
+		// source is not billed for a session that produced nothing.
+		let active = rung.active.attach(&rung.info);
 
 		// One listener + encoder per demand session: rate control persists
 		// across groups, while every group still opens with a forced IDR.
@@ -219,14 +220,14 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 							encoder.insert(opened)
 						}
 					};
-					write(output, encoder.encode(frame).await?)?;
+					write(output, &active, encoder.encode(frame).await?)?;
 				}
 				Some(Item::End) => {
 					if let Some(mut output) = current.take() {
 						// The source group is complete, so this one has to be too: a
 						// hardware encoder is still holding its last frames.
 						if let Some(encoder) = &mut encoder {
-							write(&mut output, encoder.flush().await?)?;
+							write(&mut output, &active, encoder.flush().await?)?;
 						}
 						output.finish()?;
 					}
@@ -333,8 +334,8 @@ async fn fetch(rung: Rung, request: moq_net::track::GroupRequest) -> Result<(), 
 	// A fetch builds its own pipeline, so it is billable work even when the
 	// live path is idle. Reference counted, so overlapping the live session
 	// bills the rendition once rather than twice.
-	let _active = rung.active.enter(&rung.info);
-	transcode_group(pipeline, &container, &mut source, output).await?;
+	let active = rung.active.attach(&rung.info);
+	transcode_group(pipeline, &container, &mut source, output, &active).await?;
 	Ok(())
 }
 
@@ -346,8 +347,9 @@ async fn transcode_group(
 	container: &moq_mux::catalog::hang::Container,
 	source: &mut moq_net::group::Consumer,
 	mut output: moq_net::group::Producer,
+	active: &crate::active::Guard,
 ) -> Result<(), Error> {
-	match transcode_group_inner(pipeline, container, source, &mut output).await {
+	match transcode_group_inner(pipeline, container, source, &mut output, active).await {
 		Ok(()) => {
 			output.finish()?;
 			Ok(())
@@ -364,6 +366,7 @@ async fn transcode_group_inner(
 	container: &moq_mux::catalog::hang::Container,
 	source: &mut moq_net::group::Consumer,
 	output: &mut moq_net::group::Producer,
+	active: &crate::active::Guard,
 ) -> Result<(), Error> {
 	let mut first = true;
 
@@ -381,25 +384,44 @@ async fn transcode_group_inner(
 			let keyframe = frame.keyframe || first;
 			first = false;
 
-			write(output, pipeline.process(frame.payload, timestamp, keyframe).await?)?;
+			write(
+				output,
+				active,
+				pipeline.process(frame.payload, timestamp, keyframe).await?,
+			)?;
 		}
 	}
 
 	// One-shot group: drain whatever the encoder still buffers. Each packet keeps
 	// the timestamp of the frame it was encoded from, so the tail stays in step.
-	write(output, pipeline.finish().await?)?;
+	write(output, active, pipeline.finish().await?)?;
 	Ok(())
 }
 
-/// Append encoded frames to the output group in the legacy hang framing.
-fn write(output: &mut moq_net::group::Producer, encoded: Vec<moq_video::encode::Encoded>) -> Result<(), Error> {
+/// Append encoded frames to the output group in the legacy hang framing, metering
+/// what reached the track.
+///
+/// A frame that fails to write never reaches a consumer, so an early return
+/// leaves it (and the rest of the batch) uncounted.
+fn write(
+	output: &mut moq_net::group::Producer,
+	active: &crate::active::Guard,
+	encoded: Vec<moq_video::encode::Encoded>,
+) -> Result<(), Error> {
+	let mut frames = 0;
+	let mut bytes = 0;
+
 	for encoded in encoded {
 		let frame = hang::container::Frame {
 			timestamp: encoded.timestamp,
 			payload: encoded.payload,
 		};
+		bytes += frame.payload.len() as u64;
 		frame.write_to(output)?;
+		frames += 1;
 	}
+
+	active.produced(frames, bytes);
 	Ok(())
 }
 

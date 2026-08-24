@@ -697,10 +697,12 @@ mod tests {
 		assert_eq!(update.rendition.name(), "video/120p");
 		assert!(update.encoding);
 
-		// Real frames, so the clock is metering encoding rather than intent.
+		// Real frames, so the meters are counting encoding rather than intent.
 		let mut group = subscriber.next_group().await.unwrap().unwrap();
 		group.read_frame().await.unwrap().unwrap();
 		assert!(rendition.encoded() > Duration::ZERO);
+		assert!(rendition.frames() > 0);
+		assert!(rendition.bytes() > 0);
 
 		// Demand gone: the rung stops encoding and the cursor reports the edge.
 		drop(group);
@@ -709,8 +711,11 @@ mod tests {
 		assert_eq!(update.rendition.name(), "video/120p");
 		assert!(!update.encoding);
 
-		// The clock stopped, but the total survives for the final bill.
-		assert!(rendition.encoded() > Duration::ZERO);
+		// The clock stopped, but the totals survive for the final bill.
+		let billed = rendition.encoded();
+		assert!(billed > Duration::ZERO);
+		assert_eq!(rendition.encoded(), billed, "the clock kept running while idle");
+		assert!(rendition.frames() > 0);
 
 		driver.abort();
 	}
