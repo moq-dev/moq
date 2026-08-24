@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.13](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.12...moq-ffi-v0.3.13) - 2026-08-24
+
+### Added
+
+- *(moq-ffi)* expose raw audio track demand ([#3020](https://github.com/moq-dev/moq/pull/3020))
+- *(moq-ffi)* expose raw video track demand ([#3013](https://github.com/moq-dev/moq/pull/3013))
+- *(audio)* decode AAC-LC ([#2968](https://github.com/moq-dev/moq/pull/2968))
+
+### Fixed
+
+- *(moq-ffi)* bump uniffi to 0.32 so Python copies payloads with memmove ([#2949](https://github.com/moq-dev/moq/pull/2949))
+
 ## [0.3.12](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.11...moq-ffi-v0.3.12) - 2026-08-20
 
 ### Added
