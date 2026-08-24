@@ -15,6 +15,36 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+#[tokio::test]
+async fn detached_cancels_inner_on_drop() {
+	struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+	impl Drop for DropSignal {
+		fn drop(&mut self) {
+			let _ = self.0.take().unwrap().send(());
+		}
+	}
+
+	let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+	let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+	let outer = tokio::spawn(crate::ffi::detached(async move {
+		let _drop = DropSignal(Some(dropped_tx));
+		started_tx.send(()).unwrap();
+		std::future::pending::<Result<(), MoqError>>().await
+	}));
+
+	tokio::time::timeout(TIMEOUT, started_rx)
+		.await
+		.expect("timed out waiting for detached task to start")
+		.unwrap();
+	outer.abort();
+	assert!(outer.await.unwrap_err().is_cancelled());
+	tokio::time::timeout(TIMEOUT, dropped_rx)
+		.await
+		.expect("timed out waiting for detached task to be dropped")
+		.unwrap();
+}
+
 /// A bare [`MoqInit`] with a format and init bytes, no catalog hints.
 fn media_init(format: &str, data: Vec<u8>) -> MoqInit {
 	MoqInit {

@@ -50,7 +50,17 @@ where
 	T: Send + 'static,
 	E: Into<MoqError> + Send + 'static,
 {
-	match RUNTIME.spawn(future).await {
+	struct AbortOnDrop(tokio::task::AbortHandle);
+
+	impl Drop for AbortOnDrop {
+		fn drop(&mut self) {
+			self.0.abort();
+		}
+	}
+
+	let task = RUNTIME.spawn(future);
+	let _abort = AbortOnDrop(task.abort_handle());
+	match task.await {
 		Ok(result) => result.map_err(Into::into),
 		Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
 		Err(e) => Err(MoqError::Task(e)),
