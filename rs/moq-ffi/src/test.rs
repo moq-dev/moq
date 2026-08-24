@@ -2,7 +2,7 @@ use super::origin::*;
 use super::producer::*;
 use super::server::MoqServer;
 use super::session::MoqClient;
-use crate::audio::{MoqAudioCodec, MoqAudioEncoderInput, MoqAudioEncoderOutput, MoqAudioFormat};
+use crate::audio::{MoqAudioCodec, MoqAudioEncoderInput, MoqAudioEncoderOutput, MoqAudioFormat, MoqAudioFrame};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqRouteWatch;
@@ -103,6 +103,8 @@ async fn raw_track_activity() {
 #[tokio::test]
 async fn raw_audio_activity() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let catalog_consumer = consumer.subscribe_catalog().await.unwrap();
 	let audio = broadcast
 		.publish_audio(
 			"microphone".into(),
@@ -122,18 +124,67 @@ async fn raw_audio_activity() {
 		.unwrap();
 	assert_eq!(audio.name().unwrap(), "microphone");
 
-	let consumer = broadcast.consume().unwrap();
-	let subscription = consumer.subscribe_track("microphone".into(), None).await.unwrap();
+	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("timed out waiting for raw audio catalog")
+		.unwrap()
+		.expect("expected a raw audio catalog");
+	let container = catalog.audio.get("microphone").unwrap().container.clone();
+	let subscription = consumer
+		.subscribe_media("microphone".into(), container.clone(), None)
+		.await
+		.unwrap();
 	tokio::time::timeout(TIMEOUT, audio.used())
 		.await
 		.expect("timed out waiting for raw audio to become used")
 		.unwrap();
+	audio
+		.write(MoqAudioFrame {
+			timestamp_us: 1_000_000,
+			data: vec![0; 960 * std::mem::size_of::<f32>()],
+		})
+		.unwrap();
+	let first = tokio::time::timeout(TIMEOUT, subscription.next())
+		.await
+		.expect("timed out waiting for raw audio frame")
+		.unwrap()
+		.expect("expected a raw audio frame");
+	assert_eq!(first.timestamp_us, 1_000_000);
 
 	drop(subscription);
 	tokio::time::timeout(TIMEOUT, audio.unused())
 		.await
 		.expect("timed out waiting for raw audio to become unused")
 		.unwrap();
+
+	let subscription = consumer
+		.subscribe_media("microphone".into(), container, None)
+		.await
+		.unwrap();
+	tokio::time::timeout(TIMEOUT, audio.used())
+		.await
+		.expect("timed out waiting for raw audio to become used again")
+		.unwrap();
+	audio.reset_epoch().unwrap();
+	audio
+		.write(MoqAudioFrame {
+			timestamp_us: 2_000_000,
+			data: vec![0; 960 * std::mem::size_of::<f32>()],
+		})
+		.unwrap();
+	let mut resumed = tokio::time::timeout(TIMEOUT, subscription.next())
+		.await
+		.expect("timed out waiting for resumed raw audio frame")
+		.unwrap()
+		.expect("expected a resumed raw audio frame");
+	if resumed.timestamp_us == first.timestamp_us {
+		resumed = tokio::time::timeout(TIMEOUT, subscription.next())
+			.await
+			.expect("timed out waiting for re-anchored raw audio frame")
+			.unwrap()
+			.expect("expected a re-anchored raw audio frame");
+	}
+	assert_eq!(resumed.timestamp_us, 2_000_000);
 
 	audio.finish().unwrap();
 	broadcast.finish().unwrap();

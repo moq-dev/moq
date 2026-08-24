@@ -176,6 +176,18 @@ impl MoqAudioProducer {
 		crate::ffi::detached(async move { demand.unused().await }).await
 	}
 
+	/// Re-anchor the timeline to the next frame's timestamp.
+	///
+	/// Call this before writing after an idle gap so the gap remains visible in
+	/// the audio PTS instead of being compressed out by the running sample count.
+	pub fn reset_epoch(&self) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let mut guard = self.inner.lock().unwrap();
+		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
+		producer.reset_epoch();
+		Ok(())
+	}
+
 	pub fn write(&self, frame: MoqAudioFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let frame = moq_audio::Frame::try_from(frame)?;

@@ -247,7 +247,7 @@ video.Finish()
 
 Set `Track` to choose the track name; omit it to derive one from the codec (`.avc3` / `.hev1`). The catalog rendition is published immediately so subscribers can discover it before the first frame exists. `Used(ctx)` and `Unused(ctx)` monitor subscriber demand. Call `Cut()` before the first frame after an idle gap so the resumed stream starts with a keyframe in a new group.
 
-Raw audio takes an explicit track name at publish time. Read it back through `audio.Name()`; `audio.Used(ctx)` and `audio.Unused(ctx)` monitor subscriber demand so capture and encoding can stay idle when nobody is listening.
+Raw audio takes an explicit track name at publish time. Read it back through `audio.Name()`; `audio.Used(ctx)` and `audio.Unused(ctx)` monitor subscriber demand so capture and encoding can stay idle when nobody is listening. Call `audio.ResetEpoch()` before the first frame after resuming so its timestamp preserves the idle gap.
 
 ## Raw Track Controls
 

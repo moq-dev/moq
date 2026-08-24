@@ -466,14 +466,21 @@ func (a *AudioProducer) Name() (string, error) {
 	return a.inner.Name()
 }
 
-// Used blocks until the audio track has at least one active subscriber.
+// Used blocks until the audio track has at least one active subscriber. See
+// MediaProducer.Used regarding cancellation.
 func (a *AudioProducer) Used(ctx context.Context) error {
 	return runErr(ctx, nil, a.inner.Used)
 }
 
-// Unused blocks until the audio track has no active subscribers.
+// Unused blocks until the audio track has no active subscribers. See
+// MediaProducer.Used regarding cancellation.
 func (a *AudioProducer) Unused(ctx context.Context) error {
 	return runErr(ctx, nil, a.inner.Unused)
+}
+
+// ResetEpoch re-anchors the timeline to the next frame after an idle gap.
+func (a *AudioProducer) ResetEpoch() error {
+	return a.inner.ResetEpoch()
 }
 
 // Write pushes one frame of PCM in the configured input format.

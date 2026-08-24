@@ -54,6 +54,11 @@ public final class AudioProducer: Sendable {
         try await ffi.unused()
     }
 
+    /// Re-anchor the timeline to the next frame after an idle gap.
+    public func resetEpoch() throws {
+        try ffi.resetEpoch()
+    }
+
     /// Encode and write one PCM frame.
     public func write(_ frame: AudioFrame) throws {
         try ffi.write(frame: frame)
