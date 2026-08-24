@@ -36,17 +36,6 @@ pub(crate) trait MaybeBoxedExt<'a>: Future + Sized + 'a {
 #[cfg(target_family = "wasm")]
 impl<'a, F: Future + 'a> MaybeBoxedExt<'a> for F {}
 
-/// Box a poll closure into a [`MaybeSendTask`], for pushing a hand-rolled
-/// machine into a [`kio::Tasks`] stored behind the type-erased alias.
-#[cfg(not(target_family = "wasm"))]
-pub(crate) fn poll_task(task: impl FnMut(&kio::Waiter) -> Poll<()> + Send + 'static) -> MaybeSendTask {
-	Box::new(task)
-}
-#[cfg(target_family = "wasm")]
-pub(crate) fn poll_task(task: impl FnMut(&kio::Waiter) -> Poll<()> + 'static) -> MaybeSendTask {
-	Box::new(task)
-}
-
 /// Adapt a boxed future into a [`kio::Tasks`] task.
 fn future_task(mut task: MaybeSendBox<'static, ()>) -> MaybeSendTask {
 	Box::new(move |waiter| waiter.poll_future(task.as_mut()))

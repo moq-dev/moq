@@ -1417,7 +1417,7 @@ struct TrackServe<S: crate::transport::poll::Session> {
 	track: track::Subscriber,
 	request_id: RequestId,
 	version: Version,
-	children: kio::Tasks<crate::util::MaybeSendTask>,
+	children: kio::Tasks<GroupServe<S>>,
 	/// The track finished: the in-flight group machines drain, then FIN.
 	draining: bool,
 }
@@ -1467,7 +1467,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						},
 					};
 
-					let mut serve = GroupServe {
+					self.children.push(GroupServe {
 						session: self.session.clone(),
 						msg,
 						priority: self.track.subscription().priority,
@@ -1475,9 +1475,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						timescale: self.track.info().timescale,
 						version: self.version,
 						state: GroupState::Open,
-					};
-					self.children
-						.push(crate::util::poll_task(move |waiter| serve.poll(waiter)));
+					});
 				}
 				Poll::Ready(Ok(None)) => {
 					self.draining = true;
@@ -1526,7 +1524,7 @@ enum GroupState<S: crate::transport::poll::Session> {
 	Done,
 }
 
-impl<S: crate::transport::poll::Session> GroupServe<S> {
+impl<S: crate::transport::poll::Session> kio::Task for GroupServe<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		// Errors just drop the writer, whose Drop resets the stream, exactly like
 		// the old future being discarded.

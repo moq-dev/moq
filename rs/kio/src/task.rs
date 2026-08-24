@@ -5,14 +5,15 @@
 //! the task it was aimed at (plus any newly pushed ones). A driver serving
 //! hundreds of children steps one machine per event, not all of them.
 //!
-//! A task is a plain poll closure, the same `FnMut(&Waiter) -> Poll<()>` shape
-//! [`wait`](crate::wait) takes: no trait to implement, state lives in the
-//! captures. `Send` is therefore purely inferred: a [`Tasks`] of `Send`
-//! closures is `Send` and drives from any thread, one capturing an `Rc` is not
-//! and drives locally, and the same code compiles either way. One set holds one
-//! closure type, which one construction site provides naturally; a set that
-//! must mix shapes boxes them (`Box<dyn FnMut(&Waiter) -> Poll<()>>`, adding
-//! `+ Send` only if it crosses threads), and a future adapts with one line:
+//! A task is anything implementing [`Task`]: a plain poll closure (the same
+//! `FnMut(&Waiter) -> Poll<()>` shape [`wait`](crate::wait) takes, state in the
+//! captures) or a named machine implementing the trait directly. `Send` is
+//! purely inferred either way: a [`Tasks`] of `Send` tasks is `Send` and drives
+//! from any thread, one capturing an `Rc` is not and drives locally, and the
+//! same code compiles either way. One set holds one task type, which one
+//! construction site provides naturally; a set that must mix shapes boxes them
+//! (`Box<dyn FnMut(&Waiter) -> Poll<()>>`, adding `+ Send` only if it crosses
+//! threads), and a future adapts with one line:
 //!
 //! ```
 //! let mut tasks = kio::Tasks::new();
@@ -61,7 +62,7 @@ impl Chunk {
 	}
 }
 
-/// A set of poll-closure tasks polled by their owner with per-task granularity.
+/// A set of [`Task`]s polled by their owner with per-task granularity.
 ///
 /// [`poll`](Self::poll) drives the tasks that are new or woken and reports
 /// `Ready` when the set is empty; [`push`](Self::push) wakes the owner, so a
@@ -194,7 +195,24 @@ impl<T> Tasks<T> {
 	}
 }
 
-impl<T: FnMut(&Waiter) -> Poll<()>> Tasks<T> {
+/// A unit of work a [`Tasks`] set drives: polled with a [`Waiter`] until `Ready`.
+///
+/// Every `FnMut(&Waiter) -> Poll<()>` closure implements it, so captures-based
+/// tasks need nothing extra. Implement it on a named machine to store one
+/// concrete type in a set without boxing; `Send` then stays inferred from the
+/// machine's fields, exactly as it is from a closure's captures.
+pub trait Task {
+	/// Drive the task, registering `waiter` for its next wakeup.
+	fn poll(&mut self, waiter: &Waiter) -> Poll<()>;
+}
+
+impl<F: FnMut(&Waiter) -> Poll<()>> Task for F {
+	fn poll(&mut self, waiter: &Waiter) -> Poll<()> {
+		self(waiter)
+	}
+}
+
+impl<T: Task> Tasks<T> {
 	/// Poll every task that is new or was woken since the last call, retiring
 	/// the ones that return `Ready`.
 	///
@@ -247,7 +265,7 @@ impl<T: FnMut(&Waiter) -> Poll<()>> Tasks<T> {
 				};
 				let cx = Context::from_waker(&self.wakers[index]);
 				let child_waiter = occupant.park.hold(&cx);
-				if (occupant.task)(child_waiter).is_ready() {
+				if occupant.task.poll(child_waiter).is_ready() {
 					self.children[index] = None;
 					self.free.push(index);
 					self.len -= 1;
