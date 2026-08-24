@@ -68,6 +68,8 @@ DYNAMIC_SUFFIX Parameter {
 ~~~
 
 The message's namespace is the pattern's prefix and the parameter is its suffix, each a sequence of Track Namespace tuple fields encoded as in {{moqt}}: a namespace matches when it starts with the prefix and ends with the suffix, matching whole tuple fields, with the two not overlapping.
+A field matches in its entirety or not at all, so a suffix of `transcode.bar` matches the namespace `("foo", "transcode.bar")` and not `("foo.transcode.bar")`.
+The tuple boundary is the only boundary, and a byte inside a field, `.` included, divides nothing.
 Either half may be empty, and both empty matches every namespace; the archive case above is exactly that.
 
 A dynamic advertisement names no content.
