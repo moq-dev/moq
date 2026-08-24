@@ -1,14 +1,13 @@
 name: Cache
 
-# Populates the Rust build cache that check.yml restores, and the dev shell
-# closure that every nix job substitutes.
+# Populates the Rust build caches that pull request jobs restore, and the dev
+# shell closure that every nix job substitutes.
 #
 # Actions scopes cache reads to the current branch plus the default branch, so
-# only a cache written here on `main` is reachable from a pull request. `main`
-# is therefore the single writer and pull requests are readers (`save-if` in
-# check.yml): one cache everyone can reach, rather than per-PR entries that fill
-# the repository's 10 GB budget while remaining private to the PR that wrote
-# them.
+# only caches written here on `main` are reachable from a pull request. This
+# workflow is therefore the single trusted writer, with one cache per runner
+# architecture. Pull requests are readers (`save-if: false`) rather than writers
+# of private entries that fill the repository's 10 GB budget.
 #
 # This runs the unscoped suite rather than the diff-scoped one: the point is to
 # leave artifacts for whatever a future PR happens to touch, not to check `main`
@@ -39,8 +38,12 @@ concurrency:
 
 jobs:
   warm:
-    name: Warm
-    runs-on: ubuntu-24.04-arm
+    name: Warm (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04-arm, ubuntu-latest]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
 
     steps:
