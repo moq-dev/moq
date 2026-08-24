@@ -52,6 +52,17 @@ struct RecvHeader {
 	fps: u64,
 	frame_size: u64,
 	group_size: u64,
+	timestamp_ms: u128,
+}
+
+/// The role one connection plays in the selected benchmark shape.
+pub enum Role {
+	/// Publish and discover broadcasts within this invocation's namespace.
+	Mesh,
+	/// Publish the one broadcast every fan-out subscriber targets.
+	FanoutPublisher { path: String },
+	/// Subscribe to the exact fan-out broadcast, waiting for its announcement.
+	FanoutSubscriber { path: String },
 }
 
 /// Everything one benchmark connection needs to run: its identity, the rolled
@@ -60,6 +71,7 @@ struct RecvHeader {
 pub struct Connection {
 	pub index: u64,
 	pub run_id: u64,
+	pub role: Role,
 	pub rolled: Rolled,
 	pub config: Arc<crate::Config>,
 	pub client: moq_native::Client,
@@ -74,6 +86,7 @@ pub async fn run(ctx: Connection) {
 	let Connection {
 		index: connection,
 		run_id,
+		role,
 		rolled,
 		config,
 		client,
@@ -87,19 +100,30 @@ pub async fn run(ctx: Connection) {
 	// Consume side: the session fills this with peer announcements.
 	let consume = Origin::random().produce();
 
-	let name = config.name();
-	let announced = discover(&consume, name);
+	let namespace = format!("{}/{run_id:08x}", config.name());
+	let discovery = if config.publishes() {
+		namespace.as_str()
+	} else {
+		config.name()
+	};
 
 	let mut broadcasts = Vec::new();
 	let mut own = HashSet::new();
 	let mut tasks = JoinSet::new();
 
-	for index in 0..rolled.broadcasts {
-		// The announce consumer is rooted at `name`, so `own` (compared against
-		// announced paths) stays relative while the full path goes on the wire.
-		let relative = format!("{run_id:08x}/{connection}/{index}");
-		let path = format!("{name}/{relative}");
+	let paths: Vec<(String, String)> = match &role {
+		Role::Mesh => (0..rolled.broadcasts)
+			.map(|index| {
+				let relative = format!("{connection}/{index}");
+				let path = format!("{namespace}/{relative}");
+				(relative, path)
+			})
+			.collect(),
+		Role::FanoutPublisher { path } => vec![(path.clone(), path.clone())],
+		Role::FanoutSubscriber { .. } => Vec::new(),
+	};
 
+	for (relative, path) in paths {
 		let mut broadcast = match publish.create_broadcast(&path, broadcast::Route::new().with_announce(true)) {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
@@ -122,18 +146,23 @@ pub async fn run(ctx: Connection) {
 		tasks.spawn(produce(connection, path, rolled, track, stats));
 	}
 
-	let client = client.with_publisher(&publish).with_subscriber(consume);
+	let client = client.with_publisher(&publish).with_subscriber(consume.clone());
 	let mut reconnect = client.reconnect(url);
 
-	// Subscriber: drain up to `subscribe` peer broadcasts.
-	if rolled.subscribe > 0 {
-		tasks.spawn(subscribe(
-			announced,
-			own,
-			rolled.subscribe,
-			config.startup(),
-			stats.clone(),
-		));
+	match &role {
+		Role::Mesh if rolled.subscribe > 0 => {
+			tasks.spawn(subscribe(
+				discover(&consume, discovery),
+				own,
+				rolled.subscribe,
+				config.startup(),
+				stats.clone(),
+			));
+		}
+		Role::FanoutSubscriber { path } => {
+			tasks.spawn(subscribe_named(consume.consume(), path.clone(), stats.clone()));
+		}
+		Role::Mesh | Role::FanoutPublisher { .. } => {}
 	}
 
 	// The status loop doubles as the keep-alive: it tracks connect/disconnect for
@@ -257,6 +286,15 @@ fn discover(consume: &moq_net::origin::Producer, name: &str) -> moq_net::announc
 		.announced()
 }
 
+/// Wait for one exact broadcast and drain it for the lifetime of the source.
+async fn subscribe_named(consume: moq_net::origin::Consumer, path: String, stats: Arc<Stats>) -> anyhow::Result<()> {
+	let broadcast = consume
+		.announced_broadcast(path.as_str())
+		.await
+		.ok_or_else(|| anyhow::anyhow!("target broadcast was never announced: {path}"))?;
+	drain(broadcast, &stats).await
+}
+
 /// Watch announcements and drain up to `want` peer broadcasts (excluding our own).
 ///
 /// Candidates are gathered over the `startup` window and picked at random. The
@@ -373,17 +411,17 @@ async fn drain(broadcast: broadcast::Consumer, stats: &Stats) -> anyhow::Result<
 		while let Some(frame) = group.read_frame().await? {
 			// The first frame of every group is the JSON keyframe. Parse it once to
 			// learn the publisher's shape (we may be watching a peer, not ourselves).
-			if first
-				&& !learned_shape
-				&& let Ok(header) = serde_json::from_slice::<RecvHeader>(&frame.payload)
-			{
-				tracing::debug!(
-					fps = header.fps,
-					frame_size = header.frame_size,
-					group_size = header.group_size,
-					"subscribed broadcast shape"
-				);
-				learned_shape = true;
+			if first && let Ok(header) = serde_json::from_slice::<RecvHeader>(&frame.payload) {
+				stats.latency(header.timestamp_ms);
+				if !learned_shape {
+					tracing::debug!(
+						fps = header.fps,
+						frame_size = header.frame_size,
+						group_size = header.group_size,
+						"subscribed broadcast shape"
+					);
+					learned_shape = true;
+				}
 			}
 			first = false;
 			stats.frame_recv(frame.payload.len());
@@ -637,14 +675,18 @@ mod tests {
 
 		// Our own broadcast: in the namespace, but excluded via the `own` set
 		// (paths relative to the namespace, matching the scoped announce consumer).
-		let _own = origin
-			.create_broadcast("bench/00000000/9/9", broadcast::Route::new().with_announce(true))
+		let _previous = origin
+			.create_broadcast("bench/previous/0/0", broadcast::Route::new().with_announce(true))
 			.unwrap();
-		let own = HashSet::from(["00000000/9/9".to_string()]);
+
+		let _own = origin
+			.create_broadcast("bench/current/9/9", broadcast::Route::new().with_announce(true))
+			.unwrap();
+		let own = HashSet::from(["9/9".to_string()]);
 
 		// One legitimate peer under the bench namespace with a single finished group.
 		let mut peer = origin
-			.create_broadcast("bench/00000000/0/0", broadcast::Route::new().with_announce(true))
+			.create_broadcast("bench/current/0/0", broadcast::Route::new().with_announce(true))
 			.unwrap();
 		let mut track = peer.create_track(TRACK, None).unwrap();
 		let mut group = track.append_group().unwrap();
@@ -654,13 +696,43 @@ mod tests {
 		group.finish().unwrap();
 		track.finish().unwrap();
 
-		let announced = discover(&origin, "bench");
+		let announced = discover(&origin, "bench/current");
 		subscribe(announced, own, 1, Duration::ZERO, stats.clone())
 			.await
 			.unwrap();
 
 		// The one wanted slot went to the peer, not `.stats` and not our own.
 		assert_eq!(stats.frames_recv.load(Ordering::Relaxed), 1);
+		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 1);
+	}
+
+	#[tokio::test]
+	async fn named_subscription_waits_for_the_exact_broadcast() {
+		let stats = Arc::new(Stats::default());
+		let origin = Origin::random().produce();
+		let consume = origin.consume();
+		let task = tokio::spawn(subscribe_named(consume, "bench/run/chat".into(), stats.clone()));
+
+		let mut broadcast = origin
+			.create_broadcast("bench/run/chat", broadcast::Route::new().with_announce(true))
+			.unwrap();
+		let mut track = broadcast.create_track(TRACK, None).unwrap();
+		tokio::task::yield_now().await;
+		let mut group = track.append_group().unwrap();
+		let header = serde_json::json!({
+			"fps": 1,
+			"frame_size": 200,
+			"group_size": 0,
+			"timestamp_ms": 0,
+		});
+		group
+			.write_frame(moq_net::Timestamp::now(), serde_json::to_vec(&header).unwrap())
+			.unwrap();
+		group.finish().unwrap();
+		track.finish().unwrap();
+		broadcast.finish();
+
+		task.await.unwrap().unwrap();
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 1);
 	}
 

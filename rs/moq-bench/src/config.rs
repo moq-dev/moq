@@ -22,6 +22,12 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub name: Option<String>,
 
+	/// Run a 1:N benchmark around one named broadcast. The first connection
+	/// publishes `<name>/<run>/<fanout>` and every remaining connection subscribes.
+	#[arg(long, env = "MOQ_BENCH_FANOUT")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub fanout: Option<String>,
+
 	/// Spread connection and subscription startup over this duration to avoid a thundering herd.
 	#[arg(long, value_parser = humantime::parse_duration, env = "MOQ_BENCH_STARTUP")]
 	#[serde(default, with = "humantime_serde::option", skip_serializing_if = "Option::is_none")]
@@ -118,11 +124,28 @@ impl Config {
 		// `Stats::report` feeds this into `tokio::time::interval`, which panics on a
 		// zero period. Reject it up front with a clear message.
 		anyhow::ensure!(!config.report().is_zero(), "--report must be greater than 0s");
+		if let Some(fanout) = &config.fanout {
+			anyhow::ensure!(!fanout.is_empty(), "--fanout must name a broadcast");
+			let connections = config.connections();
+			anyhow::ensure!(
+				connections.min.min(connections.max) >= 2,
+				"--fanout requires at least 2 connections (one publisher and one subscriber)"
+			);
+			anyhow::ensure!(
+				config.broadcasts.is_none() && config.subscribe.is_none(),
+				"--fanout owns the publish/subscribe shape; omit --broadcasts and --subscribe"
+			);
+		}
 		Ok(config)
 	}
 
 	pub fn name(&self) -> &str {
 		self.name.as_deref().unwrap_or("bench")
+	}
+
+	/// The named 1:N broadcast, when fan-out mode is enabled.
+	pub fn fanout(&self) -> Option<&str> {
+		self.fanout.as_deref()
 	}
 
 	pub fn startup(&self) -> Duration {
@@ -155,6 +178,16 @@ impl Config {
 
 	pub fn group_size(&self) -> Range {
 		self.group_size.unwrap_or(Range::new(60, 60))
+	}
+
+	/// Whether this configuration expects subscribers to receive media.
+	pub fn expects_delivery(&self) -> bool {
+		self.fanout.is_some() || self.subscribe().min.max(self.subscribe().max) > 0
+	}
+
+	/// Whether any connection may publish a generated broadcast.
+	pub fn publishes(&self) -> bool {
+		self.broadcasts().min.max(self.broadcasts().max) > 0
 	}
 }
 
@@ -244,5 +277,33 @@ connect = "https://example.com"
 		assert_eq!(config.frame_size(), Range::new(1200, 1200));
 		assert_eq!(config.group_size(), Range::new(60, 60));
 		assert_eq!(config.name(), "bench");
+		assert_eq!(config.fanout(), None);
+		assert!(!config.expects_delivery());
+		assert!(config.publishes());
+	}
+
+	#[test]
+	fn fanout_owns_the_connection_roles() {
+		let config = Config::parse_and_merge(["moq-bench", "--fanout", "chat", "--connections", "100"]).unwrap();
+		assert_eq!(config.fanout(), Some("chat"));
+		assert!(config.expects_delivery());
+
+		let err = Config::parse_and_merge([
+			"moq-bench",
+			"--fanout",
+			"chat",
+			"--connections",
+			"100",
+			"--subscribe",
+			"1",
+		])
+		.unwrap_err();
+		assert!(err.to_string().contains("owns the publish/subscribe shape"));
+	}
+
+	#[test]
+	fn fanout_requires_a_publisher_and_subscriber() {
+		let err = Config::parse_and_merge(["moq-bench", "--fanout", "chat", "--connections", "1"]).unwrap_err();
+		assert!(err.to_string().contains("at least 2 connections"));
 	}
 }

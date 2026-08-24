@@ -16,6 +16,11 @@ For a run, `moq-bench` establishes **A** connections. Each connection:
 - produces **D** frames per second per track, each **E** bytes large;
 - splits frames into groups of **F** frames each.
 
+`--fanout <name>` selects a dedicated 1:N shape instead: the first connection
+publishes one broadcast at `<name>/<run>/<fanout>`, and every remaining
+connection subscribes to that exact broadcast. `--broadcasts` and `--subscribe`
+are omitted in this mode because the roles are fixed.
+
 The first frame of every group is a JSON keyframe describing the rolled
 parameters (connection id, broadcast path, group sequence, fps, frame size,
 group size, and a wall-clock timestamp), padded up to **E** bytes so the
@@ -38,6 +43,8 @@ and `send_fps`/`recv_fps`) plus delivery accounting for the subscribe side:
 - `recv_groups`: cumulative groups received across all subscriptions.
 - `lost_groups`: cumulative groups that never arrived.
 - `loss`: `lost_groups` as a percentage.
+- `latency_p50_ms` / `latency_p90_ms` / `latency_p99_ms` / `latency_max_ms`:
+  cumulative one-way delivery latency from each group's keyframe timestamp.
 
 Subscribers read groups in arrival order (out-of-order included) and track each
 subscription's sequence span. A span wider than the count received means groups
@@ -74,6 +81,7 @@ table (`fps = { min = 24, max = 60 }`).
 | `--fps` | D | Frames per second per track (0 = idle) |
 | `--frame-size` | E | Bytes per frame |
 | `--group-size` | F | Zeroed frames per group after the keyframe |
+| `--fanout` | | Publish one named broadcast and point every other connection at it |
 | `--startup` | | Ramp window for staggering connections/subscriptions |
 | `--duration` | | Stop after this long (runs until interrupted otherwise) |
 | `--report` | | How often to log throughput stats |
@@ -90,12 +98,8 @@ The `config/` directory has a few starting points:
 - `sd.toml`: standard-definition video with more viewers per publisher.
 - `audio.toml`: small, frequent frames with short groups (Opus-like).
 - `announce.toml`: many broadcasts, near-zero media, to stress announcements.
-- `chat.toml`: a chat message bus, 1:1. Many connections, tiny frames, one
-  group per message, so the cost is per-message overhead rather than bandwidth.
-- `chat-pub.toml` / `chat-sub.toml`: chat rooms, 1:N. A pair of configs run as
-  two instances against the same relay: a few busy rooms and a large
-  subscriber-only audience that discovers them via announcements. Scale the
-  audience's `--connections` (or run more instances) to push the fanout.
+- `chat.toml`: one active chat channel with 2,000 viewers, one group per
+  message, and every viewer targeting that named broadcast in the same process.
 
 ## Machine-readable output
 
@@ -105,6 +109,12 @@ cumulative and monotonic, so a consumer diffs successive lines to compute
 rates, the same convention as `moq-stats` frames. `connections`, `broadcasts`,
 and `subscriptions` are live gauges that fall as work ends; diff only the
 counters.
+
+Latency is measured from wall-clock milliseconds embedded by the publisher.
+Keep separate publisher and subscriber hosts NTP-synchronized. Samples where
+the receiver clock is behind the sender are omitted and counted in
+`latency_clock_skew`; values at or above 60 seconds share the last percentile
+bucket while `latency_max_ms` preserves the exact maximum.
 
 ## Host-side sampling: moq-bench-host
 
@@ -135,8 +145,7 @@ pinning once the relay grows a thread-per-core mode.
 
 Run the load from one machine and the sampler on the relay's host, then join
 the two JSONL files on `timestamp_ms` over the same steady-state window. Skip
-the first two `--startup` windows: connections ramp across the first, and each
-connection then gathers announcements for one more window before subscribing. `timestamp_ms` is wall clock from two different hosts,
+the `--startup` window while connections ramp. `timestamp_ms` is wall clock from two different hosts,
 so keep both NTP-synced; the join only has to agree on the window boundaries,
 since every rate comes from deltas within a single file:
 
@@ -145,9 +154,8 @@ since every rate comes from deltas within a single file:
   This charges each message once, including its whole fanout, so it is the
   number that answers "what does one chat message cost the relay".
 - CPU per delivered copy: same numerator over `delta frames_recv`, when the
-  per-subscriber cost is the question. Do not sum the two frame counters: in
-  the 1:1 preset every message is counted by both, so the sum double-counts
-  and halves the apparent cost.
+  per-subscriber cost is the question. Do not sum the frame counters: the
+  fan-out publisher counts each message once while subscribers count every copy.
 - Context switches per message: either shape, with `delta ctx_voluntary + delta ctx_involuntary`
   as the numerator.
 

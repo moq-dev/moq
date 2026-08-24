@@ -5,8 +5,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use serde::Serialize;
 
+/// One-millisecond buckets through 60 seconds, with the last bucket also
+/// collecting larger values. Chat delivery should stay far below this ceiling.
+const LATENCY_BUCKETS: usize = 60_001;
+
 /// Shared counters bumped by the connection tasks and drained by the reporter.
-#[derive(Default)]
 pub struct Stats {
 	pub connections: AtomicU64,
 	pub broadcasts: AtomicU64,
@@ -22,6 +25,25 @@ pub struct Stats {
 	/// How many groups within those settled spans actually arrived. The shortfall
 	/// `groups_expected - groups_present` is the number skipped. See `connection::GapTracker`.
 	pub groups_present: AtomicU64,
+	latency: Latency,
+}
+
+impl Default for Stats {
+	fn default() -> Self {
+		Self {
+			connections: AtomicU64::new(0),
+			broadcasts: AtomicU64::new(0),
+			subscriptions: AtomicU64::new(0),
+			frames_sent: AtomicU64::new(0),
+			bytes_sent: AtomicU64::new(0),
+			frames_recv: AtomicU64::new(0),
+			bytes_recv: AtomicU64::new(0),
+			groups_recv: AtomicU64::new(0),
+			groups_expected: AtomicU64::new(0),
+			groups_present: AtomicU64::new(0),
+			latency: Latency::default(),
+		}
+	}
 }
 
 impl Stats {
@@ -33,6 +55,24 @@ impl Stats {
 	pub fn frame_recv(&self, bytes: usize) {
 		self.frames_recv.fetch_add(1, Ordering::Relaxed);
 		self.bytes_recv.fetch_add(bytes as u64, Ordering::Relaxed);
+	}
+
+	/// Record one group keyframe's wall-clock delivery latency.
+	pub fn latency(&self, sent_ms: u128) {
+		let now_ms = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.unwrap_or_default()
+			.as_millis();
+		self.latency.observe(sent_ms, now_ms);
+	}
+
+	/// Reject an invalid subscriber run that completed without one delivered group.
+	pub fn ensure_delivery(&self, expected: bool) -> anyhow::Result<()> {
+		anyhow::ensure!(
+			!expected || self.groups_recv.load(Ordering::Relaxed) > 0,
+			"benchmark expected subscribed media but received zero groups"
+		);
+		Ok(())
 	}
 
 	/// Periodically log totals plus the throughput since the previous report.
@@ -92,6 +132,12 @@ impl Stats {
 				recv_groups = now.groups_recv,
 				lost_groups,
 				loss = format_args!("{loss:.2}%"),
+				latency_samples = now.latency_samples,
+				latency_p50_ms = ?now.latency_p50_ms,
+				latency_p90_ms = ?now.latency_p90_ms,
+				latency_p99_ms = ?now.latency_p99_ms,
+				latency_max_ms = ?now.latency_max_ms,
+				latency_clock_skew = now.latency_clock_skew,
 				"stats"
 			);
 
@@ -123,10 +169,21 @@ struct Snapshot {
 	groups_recv: u64,
 	groups_expected: u64,
 	groups_present: u64,
+	latency_samples: u64,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	latency_p50_ms: Option<u64>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	latency_p90_ms: Option<u64>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	latency_p99_ms: Option<u64>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	latency_max_ms: Option<u64>,
+	latency_clock_skew: u64,
 }
 
 impl Snapshot {
 	fn take(stats: &Stats) -> Self {
+		let latency = stats.latency.snapshot();
 		Self {
 			connections: stats.connections.load(Ordering::Relaxed),
 			broadcasts: stats.broadcasts.load(Ordering::Relaxed),
@@ -138,8 +195,86 @@ impl Snapshot {
 			groups_recv: stats.groups_recv.load(Ordering::Relaxed),
 			groups_expected: stats.groups_expected.load(Ordering::Relaxed),
 			groups_present: stats.groups_present.load(Ordering::Relaxed),
+			latency_samples: latency.samples,
+			latency_p50_ms: latency.p50_ms,
+			latency_p90_ms: latency.p90_ms,
+			latency_p99_ms: latency.p99_ms,
+			latency_max_ms: latency.max_ms,
+			latency_clock_skew: latency.clock_skew,
 		}
 	}
+}
+
+struct Latency {
+	buckets: Box<[AtomicU64]>,
+	max_ms: AtomicU64,
+	clock_skew: AtomicU64,
+}
+
+impl Default for Latency {
+	fn default() -> Self {
+		Self {
+			buckets: (0..LATENCY_BUCKETS).map(|_| AtomicU64::new(0)).collect(),
+			max_ms: AtomicU64::new(0),
+			clock_skew: AtomicU64::new(0),
+		}
+	}
+}
+
+impl Latency {
+	fn observe(&self, sent_ms: u128, now_ms: u128) {
+		let Some(latency_ms) = now_ms.checked_sub(sent_ms) else {
+			self.clock_skew.fetch_add(1, Ordering::Relaxed);
+			return;
+		};
+		let latency_ms = u64::try_from(latency_ms).unwrap_or(u64::MAX);
+		let bucket = usize::try_from(latency_ms)
+			.unwrap_or(usize::MAX)
+			.min(LATENCY_BUCKETS - 1);
+		self.buckets[bucket].fetch_add(1, Ordering::Relaxed);
+		self.max_ms.fetch_max(latency_ms, Ordering::Relaxed);
+	}
+
+	fn snapshot(&self) -> LatencySnapshot {
+		let buckets: Vec<u64> = self
+			.buckets
+			.iter()
+			.map(|bucket| bucket.load(Ordering::Relaxed))
+			.collect();
+		let samples = buckets.iter().sum();
+		LatencySnapshot {
+			samples,
+			p50_ms: percentile(&buckets, samples, 50),
+			p90_ms: percentile(&buckets, samples, 90),
+			p99_ms: percentile(&buckets, samples, 99),
+			max_ms: (samples > 0).then(|| self.max_ms.load(Ordering::Relaxed)),
+			clock_skew: self.clock_skew.load(Ordering::Relaxed),
+		}
+	}
+}
+
+struct LatencySnapshot {
+	samples: u64,
+	p50_ms: Option<u64>,
+	p90_ms: Option<u64>,
+	p99_ms: Option<u64>,
+	max_ms: Option<u64>,
+	clock_skew: u64,
+}
+
+fn percentile(buckets: &[u64], samples: u64, percentile: u64) -> Option<u64> {
+	if samples == 0 {
+		return None;
+	}
+	let target = samples.saturating_mul(percentile).div_ceil(100);
+	let mut cumulative = 0;
+	for (value, count) in buckets.iter().enumerate() {
+		cumulative += count;
+		if cumulative >= target {
+			return Some(value as u64);
+		}
+	}
+	Some((buckets.len() - 1) as u64)
 }
 
 #[cfg(test)]
@@ -171,5 +306,31 @@ mod tests {
 		tokio::time::advance(Duration::from_secs(3)).await;
 		let result = task.await.unwrap();
 		assert!(result.is_err(), "report must surface the output failure");
+	}
+
+	#[test]
+	fn latency_reports_percentiles_and_clock_skew() {
+		let latency = Latency::default();
+		for value in 1..=100 {
+			latency.observe(1_000, 1_000 + value);
+		}
+		latency.observe(1_001, 1_000);
+
+		let snapshot = latency.snapshot();
+		assert_eq!(snapshot.samples, 100);
+		assert_eq!(snapshot.p50_ms, Some(50));
+		assert_eq!(snapshot.p90_ms, Some(90));
+		assert_eq!(snapshot.p99_ms, Some(99));
+		assert_eq!(snapshot.max_ms, Some(100));
+		assert_eq!(snapshot.clock_skew, 1);
+	}
+
+	#[test]
+	fn expected_delivery_must_not_be_zero() {
+		let stats = Stats::default();
+		assert!(stats.ensure_delivery(false).is_ok());
+		assert!(stats.ensure_delivery(true).is_err());
+		stats.groups_recv.store(1, Ordering::Relaxed);
+		assert!(stats.ensure_delivery(true).is_ok());
 	}
 }

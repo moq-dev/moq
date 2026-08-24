@@ -10,7 +10,7 @@ pub use config::Config;
 pub use range::Range;
 pub use stats::Stats;
 
-use connection::Rolled;
+use connection::{Role, Rolled};
 use rand::RngExt;
 
 #[tokio::main]
@@ -46,14 +46,30 @@ async fn main() -> anyhow::Result<()> {
 	let count = config.connections().sample(&mut rng).max(1);
 	let run_id = rng.random_range(0..=u64::MAX);
 	let startup = config.startup();
+	let fanout = config
+		.fanout()
+		.map(|name| format!("{}/{run_id:08x}/{name}", config.name()));
 
 	tracing::info!(connections = count, url = %config.client.connect.as_ref().unwrap(), "starting benchmark");
 
 	let mut tasks = tokio::task::JoinSet::new();
 	for i in 0..count {
+		let role = match &fanout {
+			Some(path) if i == 0 => Role::FanoutPublisher { path: path.clone() },
+			Some(path) => Role::FanoutSubscriber { path: path.clone() },
+			None => Role::Mesh,
+		};
+		let (broadcasts, subscribe) = match &role {
+			Role::FanoutPublisher { .. } => (1, 0),
+			Role::FanoutSubscriber { .. } => (0, 1),
+			Role::Mesh => (
+				config.broadcasts().sample(&mut rng),
+				config.subscribe().sample(&mut rng),
+			),
+		};
 		let rolled = Rolled {
-			broadcasts: config.broadcasts().sample(&mut rng),
-			subscribe: config.subscribe().sample(&mut rng),
+			broadcasts,
+			subscribe,
 			fps: config.fps().sample(&mut rng),
 			frame_size: config.frame_size().sample(&mut rng),
 			group_size: config.group_size().sample(&mut rng),
@@ -69,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
 		let ctx = connection::Connection {
 			index: i,
 			run_id,
+			role,
 			rolled,
 			config: config.clone(),
 			client: client.clone(),
@@ -93,11 +110,11 @@ async fn main() -> anyhow::Result<()> {
 	tokio::select! {
 		_ = stop => tracing::info!("duration elapsed, stopping"),
 		_ = tokio::signal::ctrl_c() => tracing::info!("interrupted, stopping"),
-		_ = drained => tracing::warn!("all connections ended"),
+		_ = drained => anyhow::bail!("all benchmark connections ended"),
 		// The reporter only returns on a stats-output failure; die loudly rather
 		// than exit green with a partial JSONL file.
 		res = &mut reporter => res??,
 	}
 
-	Ok(())
+	stats.ensure_delivery(config.expects_delivery())
 }
