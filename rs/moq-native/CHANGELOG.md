@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.13](https://github.com/moq-dev/moq/compare/moq-native-v0.19.12...moq-native-v0.19.13) - 2026-08-24
+
+### Other
+
+- update Cargo.toml dependencies
+
 ## [0.19.12](https://github.com/moq-dev/moq/compare/moq-native-v0.19.11...moq-native-v0.19.12) - 2026-08-20
 
 ### Added

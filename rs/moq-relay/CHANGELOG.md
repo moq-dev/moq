@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.13](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.12...moq-relay-v0.14.13) - 2026-08-24
+
+### Added
+
+- *(moq-relay)* hand qmux the socket under a WebSocket upgrade ([#2963](https://github.com/moq-dev/moq/pull/2963))
+
+### Fixed
+
+- *(relay)* bound WebSocket sessions by their credential lifetime ([#2973](https://github.com/moq-dev/moq/pull/2973))
+
 ## [0.14.12](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.11...moq-relay-v0.14.12) - 2026-08-20
 
 ### Fixed

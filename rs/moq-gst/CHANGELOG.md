@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7](https://github.com/moq-dev/moq/compare/moq-gst-v0.3.6...moq-gst-v0.3.7) - 2026-08-24
+
+### Added
+
+- *(moq-gst)* publish opaque application data tracks
+- *(moq-gst)* let sink pads name the track they publish ([#2983](https://github.com/moq-dev/moq/pull/2983))
+
+### Fixed
+
+- *(moq-gst)* make startup properties READY-only ([#2982](https://github.com/moq-dev/moq/pull/2982))
+
+### Other
+
+- name release archives after their tag and publish SHA256SUMS ([#2995](https://github.com/moq-dev/moq/pull/2995))
+
 ## [0.3.6](https://github.com/moq-dev/moq/compare/moq-gst-v0.3.5...moq-gst-v0.3.6) - 2026-08-20
 
 ### Other

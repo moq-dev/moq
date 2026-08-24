@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.14](https://github.com/moq-dev/moq/compare/moq-net-v0.2.13...moq-net-v0.2.14) - 2026-08-24
+
+### Added
+
+- *(moq-gst)* publish opaque application data tracks
+
+### Fixed
+
+- *(moq-net)* let a ready response beat local abandonment ([#3004](https://github.com/moq-dev/moq/pull/3004))
+- *(moq-net)* cancel IETF subscriptions instead of only closing the stream ([#2993](https://github.com/moq-dev/moq/pull/2993))
+
+### Other
+
+- *(moq-net)* hand lite group chunks to the transport by reference ([#2975](https://github.com/moq-dev/moq/pull/2975))
+
 ## [0.2.13](https://github.com/moq-dev/moq/compare/moq-net-v0.2.12...moq-net-v0.2.13) - 2026-08-20
 
 ### Added

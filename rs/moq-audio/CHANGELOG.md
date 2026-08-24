@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.19](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.18...moq-audio-v0.0.19) - 2026-08-24
+
+### Added
+
+- *(audio)* decode AAC-LC ([#2968](https://github.com/moq-dev/moq/pull/2968))
+
+### Fixed
+
+- *(audio)* drain Opus lookahead on finish ([#3008](https://github.com/moq-dev/moq/pull/3008))
+- *(audio)* make the resampler tell the truth about where its samples belong ([#2992](https://github.com/moq-dev/moq/pull/2992))
+
 ## [0.0.18](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.17...moq-audio-v0.0.18) - 2026-08-20
 
 ### Other

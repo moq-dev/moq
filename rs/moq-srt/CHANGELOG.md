@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5](https://github.com/moq-dev/moq/compare/moq-srt-v0.2.4...moq-srt-v0.2.5) - 2026-08-24
+
+### Fixed
+
+- *(moq-cli)* pace the TS stdout export on each frame's timestamp ([#3006](https://github.com/moq-dev/moq/pull/3006))
+- *(moq-srt)* preserve egress frame pacing timestamps ([#2990](https://github.com/moq-dev/moq/pull/2990))
+
 ## [0.2.4](https://github.com/moq-dev/moq/compare/moq-srt-v0.2.3...moq-srt-v0.2.4) - 2026-08-20
 
 ### Other
