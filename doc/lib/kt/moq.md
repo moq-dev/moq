@@ -161,7 +161,7 @@ video.finish()
 
 `autoEncoder` prefers a hardware encoder and falls back to software; `softwareEncoder`, `hardwareEncoder`, and `namedEncoder("videotoolbox")` pin the choice. The bindings compile VideoToolbox (macOS), Media Foundation (Windows), NVENC (Linux, NVIDIA), and openh264 (software, everywhere). A hardware encoder that is compiled in but can't open, because there is no GPU or because its driver libraries aren't on the loader path, logs a warning naming the reason and falls through to software, so a host that quietly encodes on the CPU says so. `setBitrate` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
 
-Set `track` to choose the track name; omit it to derive one from the codec (`.avc3` / `.hev1`). The catalog rendition is published immediately so subscribers can discover it before the first frame exists. `used()` and `unused()` monitor subscriber demand, and `cut()` starts a new group at the next frame.
+Set `track` to choose the track name; omit it to derive one from the codec (`.avc3` / `.hev1`). The catalog rendition is published immediately so subscribers can discover it before the first frame exists. `used()` and `unused()` monitor subscriber demand. Call `cut()` before the first frame after an idle gap so the resumed stream starts with a keyframe in a new group.
 
 ## Serve
 

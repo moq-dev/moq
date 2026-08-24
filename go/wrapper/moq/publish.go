@@ -482,12 +482,14 @@ func (v *VideoProducer) Name() (string, error) {
 	return v.inner.Name()
 }
 
-// Used blocks until the video track has at least one active subscriber.
+// Used blocks until the video track has at least one active subscriber. See
+// MediaProducer.Used regarding cancellation.
 func (v *VideoProducer) Used(ctx context.Context) error {
 	return runErr(ctx, nil, v.inner.Used)
 }
 
-// Unused blocks until the video track has no active subscribers.
+// Unused blocks until the video track has no active subscribers. See
+// MediaProducer.Used regarding cancellation.
 func (v *VideoProducer) Unused(ctx context.Context) error {
 	return runErr(ctx, nil, v.inner.Unused)
 }
