@@ -89,9 +89,11 @@ pub trait Runtime: Timers {
 	/// Take ownership of a session's protocol machine and poll it to completion.
 	///
 	/// The machine holds no [`crate::Session`] clone, so running it never keeps
-	/// the session alive; once the last session handle drops, the transport
-	/// closes and the machine finishes on its own. Dropping the machine instead
-	/// cancels the protocol work without closing the session.
+	/// the session alive; once the last session handle drops, the machine closes
+	/// the transport and finishes on its own. The machine is also the only thing
+	/// holding the transport, so dropping it instead tears the whole session
+	/// down: the transport closes and [`crate::Session::closed`] resolves with
+	/// [`crate::Error::Cancel`].
 	fn spawn(&self, machine: Machine<Self>);
 }
 
@@ -320,11 +322,14 @@ pub struct Machine<R: Runtime> {
 /// disjointly.
 pub(crate) struct MachineState {
 	pub(crate) protocol: crate::util::MaybeSendBox<'static, Result<(), Error>>,
-	// Bandwidth sampling, polled alongside the protocol. Its completion never
-	// ends the machine: the protocol owns the teardown. `None` once finished
-	// (or when the transport reports no send-rate estimate), since a completed
-	// future must not be polled again.
-	pub(crate) maintenance: Option<crate::util::MaybeSendBox<'static, ()>>,
+	// The session supervisor, polled alongside the protocol: it executes the
+	// handles' close requests, publishes the transport's terminal error, and
+	// samples stats. It finishes once the transport reports closed, and the
+	// machine is not done until it has: the protocol's terminal transport close
+	// is what `Session::closed` observes, so resolving before it is published
+	// would leave waiters parked on a machine nobody polls again. `None` once
+	// finished, since a completed future must not be polled again.
+	pub(crate) supervisor: Option<crate::util::MaybeSendBox<'static, ()>>,
 	// Cached so a poll after completion doesn't re-poll a finished future.
 	pub(crate) result: Option<Result<(), Error>>,
 }
@@ -349,22 +354,29 @@ impl<R: Runtime> Machine<R> {
 
 impl MachineState {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		if let Some(result) = &self.result {
-			return Poll::Ready(result.clone());
-		}
-
-		if let Some(maintenance) = &mut self.maintenance
-			&& waiter.poll_future(maintenance.as_mut()).is_ready()
+		if let Some(supervisor) = &mut self.supervisor
+			&& waiter.poll_future(supervisor.as_mut()).is_ready()
 		{
-			self.maintenance = None;
+			self.supervisor = None;
 		}
 
-		let result = std::task::ready!(waiter.poll_future(self.protocol.as_mut()));
-		self.result = Some(result.clone());
-		// The session is over; release the maintenance future now rather than
-		// on Drop, since it holds a transport clone.
-		self.maintenance = None;
-		Poll::Ready(result)
+		if self.result.is_none()
+			&& let Poll::Ready(result) = waiter.poll_future(self.protocol.as_mut())
+		{
+			self.result = Some(result);
+			// The protocol's last act was closing the transport, which wakes the
+			// supervisor's close watch; poll it now instead of waiting a turn.
+			if let Some(supervisor) = &mut self.supervisor
+				&& waiter.poll_future(supervisor.as_mut()).is_ready()
+			{
+				self.supervisor = None;
+			}
+		}
+
+		match (&self.result, &self.supervisor) {
+			(Some(result), None) => Poll::Ready(result.clone()),
+			_ => Poll::Pending,
+		}
 	}
 }
 

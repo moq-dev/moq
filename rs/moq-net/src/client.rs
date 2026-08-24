@@ -773,8 +773,9 @@ mod tests {
 	// the deterministic Test runtime nothing runs on an ambient executor at all.
 	//
 	// The machine must hold no Session clone (the #2286 leak), so the transport
-	// still closes when the caller drops their last session handle, which is what
-	// lets the runtime's machine finish.
+	// still closes when the caller drops their last session handle. The close is
+	// relayed through the machine (the Session holds no transport), so it lands
+	// on the next tick.
 	#[test]
 	fn machine_is_runtime_polled_and_holds_no_session() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
@@ -788,35 +789,84 @@ mod tests {
 		// spawned onto an ambient runtime, and it is still pending.
 		assert_eq!(runtime.tick(), 1);
 
-		// The caller drops their only session clone, so the transport closes even
-		// though the machine is still alive inside the runtime.
+		// The caller drops their only session clone; the machine observes the
+		// last handle going away and closes the transport.
 		drop(session);
+		runtime.tick();
 		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
 	}
 
 	// Clones share the connection: the transport closes on the LAST drop, and
-	// abort() closes it explicitly (first close wins).
+	// abort() closes it explicitly (first close wins). Both are relayed through
+	// the machine, so each takes a tick to land.
 	#[test]
 	fn session_clones_share_the_close() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 
-		// The Test runtime holds the machine without running it, so the close
-		// events below come only from the session handles.
 		let runtime = crate::runtime::Test::<FakeSession>::new();
 		let session = futures::executor::block_on(client.connect(runtime.clone(), fake.clone())).unwrap();
 		let clone = session.clone();
 
 		// One clone dropping does nothing while another is alive.
 		drop(session);
+		runtime.tick();
 		assert!(fake.state.close_events.lock().unwrap().is_empty());
 
 		clone.abort(Error::Cancel);
+		runtime.tick();
 		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
 
-		// The final drop is a no-op thanks to close-once.
+		// And the machine publishes the transport's terminal error, which is
+		// what `closed()` reports.
+		runtime.tick();
+		futures::executor::block_on(clone.closed());
+
+		// The final drop requests no second close: the handle-side close is once.
+		let closes = fake.state.close_events.lock().unwrap().len();
 		drop(clone);
-		assert_eq!(fake.state.close_events.lock().unwrap().len(), 1);
+		runtime.tick();
+		assert_eq!(fake.state.close_events.lock().unwrap().len(), closes);
+	}
+
+	// A runtime that drops the machine instead of running it tears the session
+	// down: the machine was the only transport holder, and `closed()` resolves
+	// rather than parking forever on a machine nobody polls.
+	#[test]
+	fn dropped_machine_resolves_closed() {
+		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
+		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+
+		let runtime = crate::runtime::Test::<FakeSession>::new();
+		let session = futures::executor::block_on(client.connect(runtime.clone(), fake.clone())).unwrap();
+
+		runtime.shutdown();
+		assert!(matches!(futures::executor::block_on(session.closed()), Error::Cancel));
+	}
+
+	// `stats()` reads the machine's latest sample and primes the sampler, so a
+	// periodic poller observes fresh counters without consuming the bandwidth
+	// channel.
+	#[tokio::test(start_paused = true)]
+	async fn stats_reads_prime_the_sampler() {
+		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
+		fake.set_send_rate(Some(1_000_000));
+
+		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+		let session = client
+			.connect(crate::runtime::tokio_test::Tokio::new(), fake.clone())
+			.await
+			.unwrap();
+
+		// The construction-time snapshot, before the machine sampled anything.
+		assert_eq!(session.stats().estimated_send_rate, Some(1_000_000));
+
+		// That read was demand: the machine keeps sampling while stats are read,
+		// so the new rate shows up within an interval (paused time auto-advances).
+		fake.set_send_rate(Some(2_000_000));
+		while session.stats().estimated_send_rate != Some(2_000_000) {
+			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		}
 	}
 
 	// The send-bandwidth sampler lives inside the driver: it samples as soon as a

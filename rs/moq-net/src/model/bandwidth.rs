@@ -73,6 +73,11 @@ impl Producer {
 		})
 	}
 
+	/// Whether at least one active consumer exists right now.
+	pub fn is_used(&self) -> bool {
+		self.state.is_used()
+	}
+
 	/// Block until there is at least one active consumer.
 	pub async fn used(&self) -> Result<()> {
 		kio::wait(|waiter| self.poll_used(waiter)).await

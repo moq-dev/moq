@@ -98,6 +98,16 @@ impl<S: crate::transport::poll::Session> Test<S> {
 		}
 	}
 
+	/// Drop every spawned machine without polling it, like a runtime shutting
+	/// down mid-session.
+	///
+	/// Machines hold runtime clones (for timers), so dropping every external
+	/// handle alone never drops them; this is the explicit teardown.
+	pub fn shutdown(&self) {
+		let machines = std::mem::take(&mut self.shared.lock().unwrap().machines);
+		drop(machines);
+	}
+
 	/// Poll every spawned machine once, dropping the finished ones.
 	///
 	/// Returns how many machines remain. Polling is unconditional (no waker
