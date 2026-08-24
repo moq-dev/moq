@@ -53,12 +53,6 @@ mod net;
 mod sdp;
 mod session;
 
-/// Re-export of the underlying WebRTC stack, so consumers can name the str0m
-/// types that surface through [`Error::Rtc`] / [`Error::RtcInput`] without adding
-/// their own str0m dependency (and risking a version mismatch). A major str0m
-/// bump is therefore a breaking change for this crate.
-pub use str0m;
-
 /// Re-export of the HTTP router stack, so consumers can merge the [`axum::Router`]
 /// returned by [`Server::publish_router`] / [`Server::subscribe_router`] (and by
 /// [`whip::router`] / [`whep::router`]) into their own app without adding their own

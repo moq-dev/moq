@@ -35,7 +35,7 @@ pub(crate) async fn dial(
 	// answer doesn't pick a codec we have no rendition for.
 	let mut rtc = session::rtc_with_codecs(&codecs);
 	for addr in &candidates {
-		let cand = Candidate::host(*addr, "udp").map_err(str0m::RtcError::from)?;
+		let cand = Candidate::host(*addr, "udp").map_err(Error::rtc)?;
 		rtc.add_local_candidate(cand);
 	}
 
@@ -68,7 +68,7 @@ pub(crate) async fn dial(
 		.map_err(|err| Error::Other(anyhow::anyhow!("reading WHIP answer body: {err}")))?;
 	let answer = SdpAnswer::from_sdp_string(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
 
-	rtc.sdp_api().accept_answer(pending, answer).map_err(Error::Rtc)?;
+	rtc.sdp_api().accept_answer(pending, answer).map_err(Error::rtc)?;
 	tracing::info!(%url, "whip client connected");
 
 	// 1:1 socket (no demux on the client): pump its datagrams into the session.

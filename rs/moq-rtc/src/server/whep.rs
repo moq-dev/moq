@@ -135,11 +135,11 @@ pub async fn accept(
 		.set_local_ice_credentials(creds)
 		.build(std::time::Instant::now());
 	for addr in mux.candidates() {
-		let cand = Candidate::host(*addr, "udp").map_err(str0m::RtcError::from)?;
+		let cand = Candidate::host(*addr, "udp").map_err(Error::rtc)?;
 		rtc.add_local_candidate(cand);
 	}
 
-	let answer = rtc.sdp_api().accept_offer(offer).map_err(Error::Rtc)?;
+	let answer = rtc.sdp_api().accept_offer(offer).map_err(Error::rtc)?;
 	let resource_id = sdp::new_resource_id();
 	let session = session::Session::egress(rtc, mux.socket(), mux.candidates().to_vec(), inbound, source);
 

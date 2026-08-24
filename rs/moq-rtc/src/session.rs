@@ -203,7 +203,7 @@ impl Session {
 				return Err(Error::IceTimeout);
 			}
 
-			let timeout = match self.rtc.poll_output().map_err(Error::Rtc)? {
+			let timeout = match self.rtc.poll_output().map_err(Error::rtc)? {
 				Output::Timeout(t) => t,
 				Output::Transmit(t) => {
 					let dst = crate::net::to_family(t.destination, socket_v6);
@@ -229,7 +229,7 @@ impl Session {
 				duration = duration.min(ICE_ESTABLISH_TIMEOUT.saturating_sub(started.elapsed()));
 			}
 			if duration.is_zero() {
-				self.rtc.handle_input(Input::Timeout(now)).map_err(Error::Rtc)?;
+				self.rtc.handle_input(Input::Timeout(now)).map_err(Error::rtc)?;
 				continue;
 			}
 
@@ -259,8 +259,8 @@ impl Session {
 							// address family, not the socket bind (see the `locals` docs).
 							let local = pick_local(&self.locals, src);
 							let recv = Receive::new(str0m::net::Protocol::Udp, src, local, &data)
-								.map_err(Error::RtcInput)?;
-							self.rtc.handle_input(Input::Receive(now, recv)).map_err(Error::Rtc)?;
+								.map_err(Error::rtc_input)?;
+							self.rtc.handle_input(Input::Receive(now, recv)).map_err(Error::rtc)?;
 						}
 						// Every sender dropped: the demux unregistered us (or the
 						// 1:1 reader stopped). Nothing more will arrive, so end.
@@ -271,7 +271,7 @@ impl Session {
 				_ = tokio::time::sleep(duration) => {
 					self.rtc
 						.handle_input(Input::Timeout(Instant::now()))
-						.map_err(Error::Rtc)?;
+						.map_err(Error::rtc)?;
 				}
 			}
 		}
@@ -630,7 +630,7 @@ pub(crate) fn advertised_candidates(advertise: &[SocketAddr], local: SocketAddr)
 	};
 
 	for addr in &candidates {
-		Candidate::host(*addr, "udp").map_err(str0m::RtcError::from)?;
+		Candidate::host(*addr, "udp").map_err(Error::rtc)?;
 	}
 	Ok(candidates)
 }

@@ -12,6 +12,24 @@ use rubato::{
 
 use crate::Error;
 
+#[derive(Debug, thiserror::Error)]
+enum BackendError {
+	#[error(transparent)]
+	Construction(#[from] rubato::ResamplerConstructionError),
+
+	#[error(transparent)]
+	Process(#[from] rubato::ResampleError),
+}
+
+impl BackendError {
+	fn into_public(self) -> Error {
+		match self {
+			Self::Construction(err) => Error::ResamplerConstruction(err.to_string()),
+			Self::Process(err) => Error::Resample(err.to_string()),
+		}
+	}
+}
+
 /// Sample-rate converter over interleaved `f32` PCM.
 pub struct Resampler {
 	resampler: Async<f32>,
@@ -35,6 +53,10 @@ impl Resampler {
 			return Err(Error::Unsupported("chunk_frames must be > 0".into()));
 		}
 
+		Self::new_inner(input_rate, output_rate, channels, chunk_frames).map_err(BackendError::into_public)
+	}
+
+	fn new_inner(input_rate: u32, output_rate: u32, channels: u32, chunk_frames: usize) -> Result<Self, BackendError> {
 		let params = SincInterpolationParameters {
 			sinc_len: 128,
 			f_cutoff: Some(0.95),
@@ -78,6 +100,10 @@ impl Resampler {
 			});
 		}
 
+		self.process_inner(samples).map_err(BackendError::into_public)
+	}
+
+	fn process_inner(&mut self, samples: &[f32]) -> Result<Vec<f32>, BackendError> {
 		self.pending.extend_from_slice(samples);
 
 		let chunk_samples = self.chunk_frames * self.channels;

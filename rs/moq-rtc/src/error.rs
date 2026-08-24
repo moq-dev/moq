@@ -34,17 +34,27 @@ pub enum Error {
 	#[error("mux error: {0}")]
 	Mux(#[from] moq_mux::Error),
 
-	/// Error from the str0m WebRTC engine (SDP negotiation, DTLS, media state).
+	/// Error from the WebRTC engine (SDP negotiation, DTLS, media state).
 	#[error("rtc error: {0}")]
-	Rtc(#[from] str0m::RtcError),
+	Rtc(String),
 
-	/// Error feeding a received UDP datagram into the str0m WebRTC engine.
+	/// Error feeding a received UDP datagram into the WebRTC engine.
 	#[error("rtc input error: {0}")]
-	RtcInput(#[from] str0m::error::NetError),
+	RtcInput(String),
 
 	/// Catch-all for gateway logic that reports via `anyhow`.
 	#[error(transparent)]
 	Other(#[from] anyhow::Error),
+}
+
+impl Error {
+	pub(crate) fn rtc(err: impl std::fmt::Display) -> Self {
+		Self::Rtc(err.to_string())
+	}
+
+	pub(crate) fn rtc_input(err: impl std::fmt::Display) -> Self {
+		Self::RtcInput(err.to_string())
+	}
 }
 
 /// Convenience alias for results from the WebRTC <-> MoQ gateway.
