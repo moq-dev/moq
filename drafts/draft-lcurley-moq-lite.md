@@ -248,9 +248,13 @@ Codes 64 and above are the application's, opaque to moq-lite.
 An endpoint MUST ignore a code it does not recognize, treating it as an unspecified error.
 An endpoint MUST NOT infer a meaning for an unregistered code; in particular, it MUST NOT assume a code is an authorization failure unless it is UNAUTHORIZED.
 
-Codes 32 through 63 are reserved and MUST NOT be interpreted, except where a table below assigns one.
+Codes 32 through 47 are reserved and MUST NOT be interpreted.
 Implementations currently emit values in this range for conditions with no code above, but those values are provisional placeholders, not assignments: a receiver MUST treat one as an unspecified error, exactly as it would any other unregistered code.
 A future revision will assign this range, or fold the conditions into the shared codes.
+
+Codes 48 through 63 are moq-lite's own, for conditions moq-transport has no code for, and are assigned by the tables below.
+This is the one range that does not survive a bridge unchanged: an endpoint speaking both protocols MUST map a code here to the moq-transport code with the same meaning rather than forwarding the value, and MUST map an unmapped one to an unspecified error.
+Placeholders stay below 48, so a value in this range is always an assignment.
 
 ### Session Error Codes
 Sent when terminating the session, via the transport's session close.
@@ -293,7 +297,7 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x12  | MALFORMED_TRACK | The track's content could not be parsed. |
 | ------- | ------------- | ----------- |
-|  0x30  | CAPACITY | An advertiser lacks the capacity to take on a dynamically resolved request; the receiver MAY re-resolve once (see [Dynamic](#dynamic)). On any other stream it is terminal, like any refusal. |
+|  0x30  | COVERAGE_CAPACITY | The advertiser lacks the capacity to serve a request resolved against its coverage; the receiver MAY re-resolve once (see [Coverage](#coverage)). Anywhere else it is terminal, like any refusal. Bridges to COVERAGE_CAPACITY in the moq-coverage extension. |
 | ------- | ------------- | ----------- |
 
 Note that CANCELLED is 0x1, not 0x0: a stream reset with 0x0 is an INTERNAL_ERROR, not a routine cancellation.
@@ -325,7 +329,7 @@ There's a 1-byte STREAM_TYPE at the beginning of each stream.
 | ------- | ------------- | ----------- |
 |    0x6  | Track        | Subscriber  |
 | ------- | ------------- | ----------- |
-|    0x7  | Dynamic      | Subscriber  |
+|    0x7  | Coverage     | Subscriber  |
 | ------- | ------------- | ----------- |
 
 ### Announce
@@ -381,50 +385,73 @@ Cooperating redundant publishers opt in by minting the same Epoch, e.g. derived 
 Any other pair is two generations colliding on one path: a relay MUST NOT splice between them and MUST end the lower-Epoch advertisement rather than wait for it to end on its own, which would hold the path for however long the transport takes to notice a publisher is gone.
 Only when both Epochs are 0 does identity fall back to the first entry of the reconstructed path: a shared non-zero first entry is spliceable, while differing or zero first entries (0 proves nothing shared) are a replacement decided toward the most recently received.
 
-### Dynamic {#dynamic}
-A subscriber can open a Dynamic Stream (0x7) to discover patterns of paths the publisher could serve on demand.
-This is routing state rather than content discovery, which is why it is a separate stream from Announce: a dynamic advertisement offers capability, an announcement advertises a broadcast.
+### Coverage {#coverage}
+A subscriber can open a Coverage Stream (0x7) to discover which regions of the path space the publisher can serve on demand.
+This is routing state rather than content discovery, which is why it is a separate stream from Announce: an announcement says a broadcast exists and where it is, while a coverage advertisement says only that requests under a pattern have somewhere to go.
 
-The subscriber creates the stream with a DYNAMIC_REQUEST message carrying a path prefix, exactly as ANNOUNCE_REQUEST does.
-The publisher replies with a single DYNAMIC_OK message followed by any matching dynamic advertisements and any future changes:
+The subscriber creates the stream with a COVERAGE_REQUEST message carrying a path prefix, exactly as ANNOUNCE_REQUEST does.
+The publisher replies with a single COVERAGE_OK message followed by any matching coverage advertisements and any future changes:
 
-- DYNAMIC_START: a pattern the publisher could serve.
-- DYNAMIC_END: a previously started dynamic advertisement is retracted.
-- DYNAMIC_UPDATE: a previously started dynamic advertisement was atomically replaced.
+- COVERAGE_START: a pattern the publisher could serve.
+- COVERAGE_END: a previously started coverage advertisement is retracted.
+- COVERAGE_UPDATE: a previously started coverage advertisement was atomically replaced.
 
-The stream mirrors the Announce Stream's mechanics with its own state: each DYNAMIC_START implicitly assigns the next Dynamic ID on the stream, DYNAMIC_END and DYNAMIC_UPDATE reference that id, each pattern has at most one current advertisement per stream, and the same protocol-violation and stream-close rules apply (see [Announce](#announce)).
-A peer that predates this stream resets it on the unknown stream type (see [STREAM_TYPE](#stream_type)); the subscriber treats the reset as "nothing dynamic here", and broadcast announcements are unaffected.
+The stream mirrors the Announce Stream's mechanics with its own state: each COVERAGE_START implicitly assigns the next Coverage ID on the stream, COVERAGE_END and COVERAGE_UPDATE reference that id, each pattern has at most one current advertisement per stream, and the same protocol-violation and stream-close rules apply (see [Announce](#announce)).
+A peer that predates this stream resets it on the unknown stream type (see [STREAM_TYPE](#stream_type)); the subscriber treats the reset as "no coverage here", and broadcast announcements are unaffected.
 
-A dynamic advertisement's pattern is a prefix and a suffix, either possibly empty (see [DYNAMIC_START](#dynamic-start)).
+#### Patterns {#coverage-patterns}
+A coverage advertisement's pattern is a prefix and a suffix, either possibly empty (see [COVERAGE_START](#coverage-start)).
 A path matches when it starts with the prefix and what remains ends with the suffix, both segment-aware (see [Announce](#announce)).
-A dynamic advertisement is a capability, not an inventory: it never implies that any matching path exists, and refusal (below) is how one path is denied.
+A coverage advertisement is a capability, not an inventory: it never implies that any matching path exists, and refusal is how one path is denied (see [Refusal](#coverage-refusal)).
 It carries no `Epoch`, since a pattern names no generation of content.
 
-Dynamic advertisements forward like announcements: the hop list, loop discard, cost accumulation, and per-subscriber origin exclusion of [Routing](#routing) apply unchanged.
+The requested prefix filters which patterns a stream carries and nothing more: a pattern is carried when it could match any path under that prefix, and the pattern's own prefix travels whole rather than rebased against the request (see [COVERAGE_START](#coverage-start)).
+A pattern is therefore routinely broader than the request that surfaced it, up to the empty prefix that matches every path, and the receiver MAY resolve any path against it, including paths outside what it asked for.
+A receiver that wants a narrower claim than the sender made takes it from its own policy, not from the request.
+
+Coverage advertisements forward like announcements: the hop list, loop discard, cost accumulation, and per-subscriber origin exclusion of [Routing](#routing) apply unchanged.
 A receiver MUST NOT present one as an available broadcast, and duplicates of one pattern SHOULD be presented combined, gone only when the last advertiser retracts.
 
-A receiver MUST discard a dynamic advertisement whose pattern prefix is not within what the sender may publish; how that authority is expressed is out of scope, like the rest of authorization.
+A receiver MUST discard a coverage advertisement whose pattern prefix, as sent, is not within what the sender may publish; how that authority is expressed is out of scope, like the rest of authorization.
+The check is against the prefix on the wire rather than its intersection with the requested one, since the prefix on the wire is the claim being made and the claim that will be re-advertised.
 An empty prefix therefore claims the entire namespace and demands that authority.
 
-A receiver MAY resolve a SUBSCRIBE, FETCH, or TRACK request for an unadvertised path against its dynamic advertisements, and resolution recurses: a resolved request forwarded upstream is still unadvertised there, so each receiver along the way selects among its own advertisements.
+#### Resolution {#coverage-resolution}
+A receiver MAY resolve a SUBSCRIBE, FETCH, or TRACK request for an unadvertised path against its coverage advertisements, and resolution recurses: a resolved request forwarded upstream is still unadvertised there, so each receiver along the way selects among its own advertisements.
+
 Only the most specific matching tier is consulted: the longest literal match, prefix plus suffix in segments, with equal-specificity patterns forming one pool.
+Specificity counts matched segments and does not care how they split, so `("a/b", "")`, `("a", "b")`, and `("", "a/b")` share a tier: a pattern is as specific as the amount of the path it pins down.
+The winning tier is the whole answer, and a refusal from it never falls through to a less specific pattern, so a path that tier will not serve costs one round trip rather than a walk down the candidates.
+
 Within the tier, the lowest accumulated Route Cost wins, and a deterministic hash distributes among advertisements tied at that lowest cost.
 Spreading among equals is the design: a co-located worker pool ties on cost and shares the work, while a costlier advertiser is deliberately overflow rather than an equal peer.
-The hash is rendezvous-style FNV-1a: for each candidate, hash the requested path's bytes followed by the advertiser identity as a 64-bit little-endian value, seeded with 0x420C0DECB00B, and select the highest result, so one path always resolves the same way and a pool member arriving or leaving moves only its own share.
+The hash is rendezvous-style FNV-1a over the normalized path (see [Announce](#announce)), so that every receiver hashes the same bytes.
+Start the accumulator at `0x420C0DECB00B` in place of FNV's offset basis, then for each byte of the normalized path followed by the eight bytes of the advertiser identity in little-endian order, XOR the byte into the accumulator and multiply by the FNV prime `0x100000001B3`, wrapping at 64 bits.
+Select the candidate whose full 64-bit result is highest, so one path always resolves the same way and a pool member arriving or leaving moves only its own share.
 The advertiser identity is the first entry of the advertisement's reconstructed hop list; 0 identifies nothing, so such an advertisement is its own pool member, keyed by the session it arrived on.
 
 A resolved path competes against a concrete advertisement of the same path with its single Route Cost standing in for both the Warm and Cold halves.
 The kind of advertisement carries no rank of its own; cost ties break by the same chain concrete routes use (see [Routing](#routing)), with the hash deciding only within the pattern pool.
-A publisher advertising standby capacity MUST therefore seed its cost above the largest accumulated topology cost its deployment can produce, or a nearby standby outranks a distant publisher already doing the work and the mesh starts a duplicate.
 
+Standby capacity has to be priced above the work it would duplicate, or a nearby standby outranks a distant publisher already doing the work and the mesh starts a second copy.
+A publisher advertising standby capacity SHOULD seed its Route Cost at or above the RECOMMENDED standby floor of `2^32`: it sits far above any cost an accumulating topology reaches in practice, and being a constant it is something independent implementations agree on without having to know the deployment.
+Such a publisher MUST NOT seed the saturation ceiling, which already marks a draining path of last resort (see [Routing](#routing)).
+
+#### Refusal {#coverage-refusal}
 An advertiser that will not serve a resolved request resets the stream with a typed code (see [Error Codes](#error-codes)).
-A CAPACITY reset permits the receiver ONE re-resolution, excluding every advertisement whose advertiser identity matches the refusing route's: an advertiser's capacity and a receiver's view of it are at least half a round trip apart, so a retraction and a request for the slot it gave away necessarily cross, and the exclusion is what makes the retry safe rather than the retraction arriving first.
+A COVERAGE_CAPACITY reset permits the receiver ONE re-resolution, within the same tier and excluding every advertisement whose advertiser identity matches the refusing route's: an advertiser's capacity and a receiver's view of it are at least half a round trip apart, so a retraction and a request for the slot it gave away necessarily cross, and the exclusion is what makes the retry safe rather than the retraction arriving first.
 Re-resolution may find no other advertiser, and the request is then unroutable; that is a correct outcome, not a fallback list.
-A receiver that has spent its re-resolution, or has nothing to spend it on, MUST reset the downstream request with a terminal code rather than CAPACITY, so the single retry cannot compound hop by hop.
+A receiver that has spent its re-resolution, or has nothing to spend it on, MUST reset the downstream request with a terminal code rather than COVERAGE_CAPACITY, so the single retry cannot compound hop by hop.
 Every other code, and any unrecognized one, is terminal and propagates without re-resolution, so probing unserved paths costs one round trip per path.
 A receiver SHOULD NOT cache refusals; rate limiting is the advertiser's concern.
 
-A publisher that retains a broadcast's content after it ends (a recording) retracts the advertisement with ANNOUNCE_END and serves the stored groups over FETCH, typically through a dynamic advertisement covering the path.
+#### Resolved Content {#coverage-content}
+What a resolution produces is an ordinary broadcast at the requested path, and the coverage advertisement it resolved against is unchanged by it: coverage is not consumed, and it does not turn into an announcement.
+A receiver holding the produced broadcast SHOULD announce it concretely on its Announce Streams, so that a later request for the same path finds it by announcement instead of resolving again.
+Resolving again is what starts a second producer for one path, which is the duplicated work the mechanism exists to avoid.
+The broadcast then lives and ends like any other, retracted with ANNOUNCE_END, while the coverage that produced it stays advertised.
+
+A publisher that retains a broadcast's content after it ends (a recording) retracts the advertisement with ANNOUNCE_END and serves the stored groups over FETCH, typically through a coverage advertisement covering the path.
 How a subscriber learns the path and epoch of stored content is out of band, e.g. an application catalog.
 
 ### Subscribe
@@ -911,7 +938,7 @@ The exemptions also compose: should the drain become a disconnection, the route 
 ## ANNOUNCE_END {#announce-end}
 A publisher sends an ANNOUNCE_END message to retract a previously started broadcast, referencing its Announce ID.
 The id is retired and MUST NOT be referenced again.
-Retraction claims nothing about the content: a broadcast that ends but remains readable retracts too and serves its stored groups over FETCH (see [Dynamic](#dynamic)), and retraction does not disturb subscriptions already in flight, which conclude normally with SUBSCRIBE_END.
+Retraction claims nothing about the content: a broadcast that ends but remains readable retracts too and serves its stored groups over FETCH (see [Coverage](#coverage)), and retraction does not disturb subscriptions already in flight, which conclude normally with SUBSCRIBE_END.
 
 ~~~
 ANNOUNCE_END Message {
@@ -970,23 +997,23 @@ As defined for [ANNOUNCE_START](#announce-start).
 An update whose only change is a Route Cost is valid: it is how a relay advertises that it started or stopped actively carrying the broadcast.
 
 
-## DYNAMIC_REQUEST {#dynamic-request}
-A subscriber sends a DYNAMIC_REQUEST message as the first message on a Dynamic Stream, encoded exactly as [ANNOUNCE_REQUEST](#announce-request): interest in every dynamic advertisement whose pattern can match a path starting with the requested prefix.
+## COVERAGE_REQUEST {#coverage-request}
+A subscriber sends a COVERAGE_REQUEST message as the first message on a Coverage Stream, encoded exactly as [ANNOUNCE_REQUEST](#announce-request): interest in every coverage advertisement whose pattern can match a path starting with the requested prefix.
 
 ~~~
-DYNAMIC_REQUEST Message {
+COVERAGE_REQUEST Message {
   Message Length (i)
-  Path Prefix (s),
+  Broadcast Path Prefix (s),
 }
 ~~~
 
 
-## DYNAMIC_OK {#dynamic-ok}
-A publisher sends a DYNAMIC_OK message exactly once, as the first message on the response side of a Dynamic Stream.
-Its fields have the same meaning as ANNOUNCE_OK's (see [ANNOUNCE_OK](#announce-ok)), with `Active Count` counting the initial DYNAMIC_START messages.
+## COVERAGE_OK {#coverage-ok}
+A publisher sends a COVERAGE_OK message exactly once, as the first message on the response side of a Coverage Stream.
+Its fields have the same meaning as ANNOUNCE_OK's (see [ANNOUNCE_OK](#announce-ok)), with `Active Count` counting the initial COVERAGE_START messages.
 
 ~~~
-DYNAMIC_OK Message {
+COVERAGE_OK Message {
   Message Length (i)
   Hop ID (i)
   Active Count (i)
@@ -994,16 +1021,16 @@ DYNAMIC_OK Message {
 ~~~
 
 
-## DYNAMIC_START {#dynamic-start}
-A publisher sends a DYNAMIC_START message to advertise a pattern of paths it could serve on demand (see [Dynamic](#dynamic)).
-Each DYNAMIC_START implicitly assigns the next Dynamic ID on the stream, later referenced by DYNAMIC_END and DYNAMIC_UPDATE.
+## COVERAGE_START {#coverage-start}
+A publisher sends a COVERAGE_START message to advertise a pattern of paths it could serve on demand (see [Coverage](#coverage)).
+Each COVERAGE_START implicitly assigns the next Coverage ID on the stream, later referenced by COVERAGE_END and COVERAGE_UPDATE.
 
 ~~~
-DYNAMIC_START Message {
+COVERAGE_START Message {
   Type (i) = 0x0
   Message Length (i)
-  Path Prefix (s),
-  Path Suffix (s),
+  Pattern Prefix (s),
+  Pattern Suffix (s),
   Hop Count (i),
   Hop ID (i) ...,
   Route Cost (i),
@@ -1011,13 +1038,14 @@ DYNAMIC_START Message {
 ~~~
 
 **Type**:
-Set to 0x0 to indicate a DYNAMIC_START message.
+Set to 0x0 to indicate a COVERAGE_START message.
 
-**Path Prefix**:
-The pattern's full prefix, carried whole rather than rebased against the stream's requested prefix: the requested prefix only decides WHICH patterns a stream carries (any whose pattern can match a path under it), never how one is encoded.
+**Pattern Prefix**:
+The segments a matching path must start with, carried whole rather than rebased against the stream's requested prefix: the requested prefix only decides WHICH patterns a stream carries (any whose pattern can match a path under it), never how one is encoded.
 Rebasing would be lossy, since a pattern whose prefix is shorter than the requested prefix cannot be reconstructed, and the pattern's specificity and re-advertisement to other streams depend on the original.
+Note that this is a different field from ANNOUNCE_START's `Broadcast Path Suffix`, which is a whole path with the requested prefix elided; a pattern's halves are the parts of a path it pins down and are always sent in full.
 
-**Path Suffix**:
+**Pattern Suffix**:
 The segments a matching path must end with.
 A path matches the pattern when it starts with the prefix, ends with the suffix, and the two do not overlap.
 Both halves empty matches every path.
@@ -1027,39 +1055,39 @@ As defined for [ANNOUNCE_START](#announce-start).
 
 **Route Cost**:
 What serving a matching path on demand would cost, in the same units as a broadcast's Route Costs.
-A single value rather than the Warm/Cold pair: a dynamic advertisement offers capability rather than carried content, so it is never warm and the two halves would be provably equal.
+A single value rather than the Warm/Cold pair: a coverage advertisement offers capability rather than carried content, so it is never warm and the two halves would be provably equal.
 A relay forwarding one adds the sending peer's declared cost (see [Cost Parameter](#cost-parameter)), saturating, and never applies the actively-carrying discount.
-See [Dynamic](#dynamic) for the floor a standby seed MUST clear.
+See [Resolution](#coverage-resolution) for the floor a standby seed SHOULD clear.
 
 
-## DYNAMIC_END {#dynamic-end}
-A publisher sends a DYNAMIC_END message to retract a previously started dynamic advertisement, referencing its Dynamic ID.
+## COVERAGE_END {#coverage-end}
+A publisher sends a COVERAGE_END message to retract a previously started coverage advertisement, referencing its Coverage ID.
 The id is retired and MUST NOT be referenced again.
 
 ~~~
-DYNAMIC_END Message {
+COVERAGE_END Message {
   Type (i) = 0x1
   Message Length (i)
-  Dynamic ID (i)
+  Coverage ID (i)
 }
 ~~~
 
 **Type**:
-Set to 0x1 to indicate a DYNAMIC_END message.
+Set to 0x1 to indicate a COVERAGE_END message.
 
-**Dynamic ID**:
-The ordinal implicitly assigned by a prior DYNAMIC_START on this stream, with the same assignment and violation rules as an Announce ID (see [ANNOUNCE_END](#announce-end)).
+**Coverage ID**:
+The ordinal implicitly assigned by a prior COVERAGE_START on this stream, with the same assignment and violation rules as an Announce ID (see [ANNOUNCE_END](#announce-end)).
 
 
-## DYNAMIC_UPDATE {#dynamic-update}
-A publisher sends a DYNAMIC_UPDATE message to atomically replace a previously started dynamic advertisement, referencing its Dynamic ID; the id stays live.
+## COVERAGE_UPDATE {#coverage-update}
+A publisher sends a COVERAGE_UPDATE message to atomically replace a previously started coverage advertisement, referencing its Coverage ID; the id stays live.
 An update whose only change is the Route Cost is the expected case.
 
 ~~~
-DYNAMIC_UPDATE Message {
+COVERAGE_UPDATE Message {
   Type (i) = 0x2
   Message Length (i)
-  Dynamic ID (i),
+  Coverage ID (i),
   Hop Count (i),
   Hop ID (i) ...,
   Route Cost (i),
@@ -1067,10 +1095,10 @@ DYNAMIC_UPDATE Message {
 ~~~
 
 **Type**:
-Set to 0x2 to indicate a DYNAMIC_UPDATE message.
+Set to 0x2 to indicate a COVERAGE_UPDATE message.
 
-**Dynamic ID**, **Hop Count**, **Hop ID**, and **Route Cost**:
-As defined for [DYNAMIC_START](#dynamic-start) and [DYNAMIC_END](#dynamic-end).
+**Coverage ID**, **Hop Count**, **Hop ID**, and **Route Cost**:
+As defined for [COVERAGE_START](#coverage-start) and [COVERAGE_END](#coverage-end).
 
 
 ## SUBSCRIBE
@@ -1482,8 +1510,8 @@ The `Message Length` describes the payload size on the wire.
 - ANNOUNCE_END and ANNOUNCE_UPDATE reference the Announce ID instead of repeating the broadcast path.
 - Replaced the duplicate-`active` restart idiom with ANNOUNCE_UPDATE; a second ANNOUNCE_START for an already-available path is now a protocol violation.
 - Added an `Epoch` to ANNOUNCE_START and ANNOUNCE_UPDATE: a per-path content generation minted by the original publisher and forwarded unchanged, 0 meaning unspecified. The highest Epoch wins (non-zero outranks 0) and replacement is decided by value rather than arrival order; equal non-zero Epochs splice, and the first entry of the path remains the identity only when both are 0. That fallback identity requires a non-zero first entry: 0 identifies nothing, so it never proves continuity, and publishers SHOULD assign themselves a Hop ID (a random per-session value suffices).
-- Added the Dynamic Stream (0x7): DYNAMIC_REQUEST/DYNAMIC_OK then DYNAMIC_START, DYNAMIC_END, and DYNAMIC_UPDATE advertise a (prefix, suffix) pattern of paths the publisher could serve on demand, mirroring the Announce Stream's mechanics with its own Dynamic ID space. An advertisement carries its full pattern prefix (the requested prefix filters, never rebases), a hop list, and one Route Cost (no Epoch, never warm), and forwards under the routing rules unchanged. Resolution of an unadvertised path recurses per receiver: most specific pattern, then lowest cost, then a seeded rendezvous FNV-1a hash of the requested path against the advertiser identity. A CAPACITY reset permits one re-resolution excluding the refusing advertiser and is converted to a terminal code rather than propagated; every other reset is terminal.
-- Assigned stream error code 0x30 CAPACITY, above the values current implementations emit as placeholders; the reserved range now admits explicitly assigned exceptions.
+- Added the Coverage Stream (0x7): COVERAGE_REQUEST/COVERAGE_OK then COVERAGE_START, COVERAGE_END, and COVERAGE_UPDATE advertise a (prefix, suffix) pattern of paths the publisher could serve on demand, mirroring the Announce Stream's mechanics with its own Coverage ID space. An advertisement carries its pattern halves in full (the requested prefix filters, never rebases), a hop list, and one Route Cost (no Epoch, never warm), and forwards under the routing rules unchanged. Resolution of an unadvertised path recurses per receiver: most specific tier, then lowest cost, then a seeded rendezvous FNV-1a hash of the normalized path against the advertiser identity, with the winning tier the whole answer rather than the head of a fallback list. A COVERAGE_CAPACITY reset permits one re-resolution within the tier excluding the refusing advertiser, and is converted to a terminal code rather than propagated; every other reset is terminal. What a resolution produces is an ordinary broadcast, announced concretely so the next request does not resolve a second producer.
+- Split the reserved stream error range: 32-47 stays reserved for the placeholders implementations emit today, and 48-63 becomes moq-lite's own space for conditions moq-transport has no code for. Assigned 0x30 COVERAGE_CAPACITY there. This is the one range a bridge must map rather than forward, since it has no moq-transport counterpart by construction.
 - Specified the path grammar (non-empty `/`-delimited segments, separators normalized before comparison), byte equality of the normalized form, and segment-aware prefix/suffix matching; matching was previously stated as byte-by-byte.
 - Stated the ended-broadcast lifecycle without the flag: a broadcast that ends but remains readable is retracted with ANNOUNCE_END, which never disturbs in-flight subscriptions, and its stored groups are read over FETCH, discovered out of band.
 - Added an `Epoch` to SUBSCRIBE, FETCH, and TRACK (0 = current, mismatch = reset) and the resolved `Epoch` to TRACK_INFO, so metadata and groups always come from the same generation and requests cannot race a replacement.
@@ -1501,7 +1529,7 @@ The `Message Length` describes the payload size on the wire.
 - Capped the GOAWAY New Session URI at 8,192 bytes, matching moq-transport.
 - Restricted the GOAWAY New Session URI to servers, specified a duplicate GOAWAY as a protocol violation, and recommended scheme continuity and sticky redirects.
 - Exempted a ceiling-cost serving path from the actively-carrying cost discount: a relay whose serving path costs the saturation ceiling (primarily a session that received a GOAWAY) advertises the ceiling instead of 0, so the drain propagates downstream instead of being re-masked by each carrying hop. Keyed on the value, not the reason, which does not travel on the wire.
-- Added the Error Codes section, defining separate session and stream code spaces and listing the codes moq-lite uses, reused unchanged from moq-transport. Codes 64+ are the application's; 32-63 are reserved and MUST NOT be interpreted except where assigned, pending a future revision. Previously the codes were unspecified, so an endpoint could neither send one a peer would understand nor safely interpret one it received. Note this renumbers every code an existing implementation sent, and that a stream reset of 0x0 is now INTERNAL_ERROR rather than a cancellation (CANCELLED is 0x1).
+- Added the Error Codes section, defining separate session and stream code spaces and listing the codes moq-lite uses, reused unchanged from moq-transport. Codes 64+ are the application's; 32-63 are reserved and MUST NOT be interpreted, pending a future revision. Previously the codes were unspecified, so an endpoint could neither send one a peer would understand nor safely interpret one it received. Note this renumbers every code an existing implementation sent, and that a stream reset of 0x0 is now INTERNAL_ERROR rather than a cancellation (CANCELLED is 0x1).
 - Renamed `Subscriber Max Latency` to `Subscriber Max Age` and `Publisher Max Latency` to `Publisher Max Age`.
 
 ## moq-lite-05

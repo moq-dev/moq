@@ -118,7 +118,7 @@ describe("tables render as tables", () => {
 		const header = /<th[^>]*>Stream<\/th>/.exec(rendered);
 		expect(header).not.toBeNull();
 
-		for (const stream of ["Announce", "Subscribe", "Fetch", "Probe", "Goaway", "Track", "Dynamic"]) {
+		for (const stream of ["Announce", "Subscribe", "Fetch", "Probe", "Goaway", "Track", "Coverage"]) {
 			expect(rendered).toMatch(new RegExp(`<td[^>]*>${stream}</td>`));
 		}
 
