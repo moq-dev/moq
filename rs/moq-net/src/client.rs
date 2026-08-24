@@ -126,6 +126,104 @@ impl Client {
 		self
 	}
 
+	/// The origin pair a session attaches, tagged and filtered.
+	///
+	/// Reads through the publish (egress) consumer and writes through the
+	/// subscribe (ingress) producer are attributed by the model through the
+	/// stats context; one shared context, so presence and viewer counts are
+	/// never double-attributed across the two halves. An assigned peer identity
+	/// means subscriptions from the peer resolve to a source whose hop chain
+	/// excludes it, the same split-horizon rule applied when a peer declares
+	/// its own id; announce filtering is per-protocol and handled inside each
+	/// publisher.
+	fn origins(&self) -> (Option<origin::Consumer>, Option<origin::Producer>) {
+		if self.publish.is_none() && self.subscribe.is_none() {
+			tracing::warn!("not publishing or consuming anything");
+		}
+		let publish = self.publish.clone().map(|origin| origin.with_stats(self.stats.clone()));
+		let subscribe = self
+			.subscribe
+			.clone()
+			.map(|origin| origin.with_stats(self.stats.clone()));
+		let publish = match self.peer_origin {
+			Some(peer) => publish.map(|origin| origin.excluding(peer)),
+			None => publish,
+		};
+		(publish, subscribe)
+	}
+
+	/// Start a lite session on an already-negotiated version: build our SETUP,
+	/// wire the origins, and hand the machine to the runtime.
+	fn start_lite<R>(&self, runtime: R, session: R::Transport, version: lite::Version) -> Result<Session, Error>
+	where
+		R: crate::runtime::Runtime + 'static,
+	{
+		let (publish, subscribe) = self.origins();
+
+		// Advertise our capabilities (we report what the transport measures; we
+		// don't pad) plus the request path on URI-less transports, and the
+		// direction we intend to use so the server can reject a token that lacks
+		// the matching scope during the handshake instead of silently carrying
+		// no media. Versions without a Setup Stream have nothing to advertise.
+		let our_setup = if version.has_setup_stream() {
+			lite::Setup {
+				probe: lite::ProbeLevel::detect(&session),
+				path: self.setup_path.clone(),
+				role: lite::Role::from_origins(self.publish.is_some(), self.subscribe.is_some()),
+				cost: self.cost,
+				// Filled by `lite::start` from the attached origin handles.
+				origin: None,
+			}
+		} else {
+			lite::Setup::default()
+		};
+
+		let start = lite::start(lite::Config {
+			runtime: runtime.clone(),
+			session: session.clone(),
+			setup_stream: None,
+			publish,
+			subscribe,
+			peer_origin: self.peer_origin,
+			version,
+			our_setup,
+			peer_setup: None,
+		})?;
+
+		Ok(Session::spawn(
+			runtime,
+			session,
+			version.into(),
+			start.recv_bandwidth,
+			crate::runtime::Protocol::Lite(Box::new(start.driver)),
+			start.goaway,
+		))
+	}
+
+	/// Perform the MoQ handshake for moq-lite only, over any transport.
+	///
+	/// Unlike [`connect`](Self::connect) this puts no thread-affinity bound on
+	/// the transport, so a pinned `!Send` transport works and yields a `!Send`
+	/// machine that stays on its thread. The trade is protocol scope: only a
+	/// moq-lite ALPN is accepted, since the moq-transport driver still needs a
+	/// [`Boxable`](crate::transport::poll::Boxable) transport. An ietf ALPN, an
+	/// unknown one, or the legacy no-ALPN SETUP negotiation is refused with
+	/// [`Error::Version`].
+	pub async fn connect_lite<R>(&self, runtime: R, session: R::Transport) -> Result<Session, Error>
+	where
+		R: crate::runtime::Runtime + 'static,
+	{
+		let version = match session.protocol() {
+			Some(ALPN_LITE_06_WIP) => lite::Version::Lite06Wip,
+			Some(ALPN_LITE_05) => lite::Version::Lite05,
+			Some(ALPN_LITE_04) => lite::Version::Lite04,
+			Some(ALPN_LITE_03) => lite::Version::Lite03,
+			_ => return Err(Error::Version),
+		};
+		self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
+		self.start_lite(runtime, session, version)
+	}
+
 	/// Perform the MoQ handshake, returning the [`Session`].
 	///
 	/// The session's protocol machine is handed to `runtime`
@@ -134,30 +232,10 @@ impl Client {
 	pub async fn connect<R>(&self, runtime: R, mut session: R::Transport) -> Result<Session, Error>
 	where
 		R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
+		R::Transport: crate::transport::poll::Boxable,
 		R::Timer: MaybeSend,
 	{
-		if self.publish.is_none() && self.subscribe.is_none() {
-			tracing::warn!("not publishing or consuming anything");
-		}
-
-		// Tag the origin pair with the stats context: reads through the publish
-		// (egress) consumer and writes through the subscribe (ingress) producer are
-		// then attributed by the model. One shared context, so presence and viewer
-		// counts are never double-attributed across the two halves.
-		let publish = self.publish.clone().map(|origin| origin.with_stats(self.stats.clone()));
-		let subscribe = self
-			.subscribe
-			.clone()
-			.map(|origin| origin.with_stats(self.stats.clone()));
-
-		// An assigned peer identity means subscriptions from the peer resolve to a
-		// source whose hop chain excludes it, the same split-horizon rule applied
-		// when a peer declares its own id. Announce filtering is per-protocol and
-		// handled inside each publisher.
-		let publish = match self.peer_origin {
-			Some(peer) => publish.map(|origin| origin.excluding(peer)),
-			None => publish,
-		};
+		let (publish, subscribe) = self.origins();
 
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
@@ -186,7 +264,14 @@ impl Client {
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::spawn(runtime, session, v, None, protocol, goaway));
+				return Ok(Session::spawn(
+					runtime,
+					session,
+					v,
+					None,
+					crate::runtime::Protocol::Ietf(protocol),
+					goaway,
+				));
 			}
 			Some(ALPN_18) => {
 				let v = self
@@ -213,7 +298,14 @@ impl Client {
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::spawn(runtime, session, v, None, protocol, goaway));
+				return Ok(Session::spawn(
+					runtime,
+					session,
+					v,
+					None,
+					crate::runtime::Protocol::Ietf(protocol),
+					goaway,
+				));
 			}
 			Some(ALPN_17) => {
 				let v = self
@@ -240,7 +332,14 @@ impl Client {
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::spawn(runtime, session, v, None, protocol, goaway));
+				return Ok(Session::spawn(
+					runtime,
+					session,
+					v,
+					None,
+					crate::runtime::Protocol::Ietf(protocol),
+					goaway,
+				));
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -269,94 +368,19 @@ impl Client {
 					_ => lite::Version::Lite05,
 				};
 				self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
-
-				// Advertise our capabilities (we report what the transport measures; we
-				// don't pad) plus
-				// the request path on URI-less transports, and the direction we intend to
-				// use so the server can reject a token that lacks the matching scope during
-				// the handshake instead of silently carrying no media.
-				let our_setup = lite::Setup {
-					probe: lite::ProbeLevel::detect(&session),
-					path: self.setup_path.clone(),
-					role: lite::Role::from_origins(self.publish.is_some(), self.subscribe.is_some()),
-					cost: self.cost,
-					// Filled by `lite::start` from the attached origin handles.
-					origin: None,
-				};
-
-				let start = lite::start(lite::Config {
-					runtime: runtime.clone(),
-					session: session.clone(),
-					setup_stream: None,
-					publish: publish.clone(),
-					subscribe: subscribe.clone(),
-					peer_origin: self.peer_origin,
-					version,
-					our_setup,
-					peer_setup: None,
-				})?;
-
-				return Ok(Session::spawn(
-					runtime,
-					session,
-					version.into(),
-					start.recv_bandwidth,
-					start.driver,
-					start.goaway,
-				));
+				return self.start_lite(runtime, session, version);
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions
 					.select(Version::Lite(lite::Version::Lite04))
 					.ok_or(Error::Version)?;
-
-				let start = lite::start(lite::Config {
-					runtime: runtime.clone(),
-					session: session.clone(),
-					setup_stream: None,
-					publish: publish.clone(),
-					subscribe: subscribe.clone(),
-					peer_origin: self.peer_origin,
-					version: lite::Version::Lite04,
-					our_setup: lite::Setup::default(),
-					peer_setup: None,
-				})?;
-
-				return Ok(Session::spawn(
-					runtime,
-					session,
-					lite::Version::Lite04.into(),
-					start.recv_bandwidth,
-					start.driver,
-					start.goaway,
-				));
+				return self.start_lite(runtime, session, lite::Version::Lite04);
 			}
 			Some(ALPN_LITE_03) => {
 				self.versions
 					.select(Version::Lite(lite::Version::Lite03))
 					.ok_or(Error::Version)?;
-
-				// Starting with draft-03, there's no more SETUP control stream.
-				let start = lite::start(lite::Config {
-					runtime: runtime.clone(),
-					session: session.clone(),
-					setup_stream: None,
-					publish: publish.clone(),
-					subscribe: subscribe.clone(),
-					peer_origin: self.peer_origin,
-					version: lite::Version::Lite03,
-					our_setup: lite::Setup::default(),
-					peer_setup: None,
-				})?;
-
-				return Ok(Session::spawn(
-					runtime,
-					session,
-					lite::Version::Lite03.into(),
-					start.recv_bandwidth,
-					start.driver,
-					start.goaway,
-				));
+				return self.start_lite(runtime, session, lite::Version::Lite03);
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -412,7 +436,11 @@ impl Client {
 					peer_setup: None,
 				})?;
 
-				(start.recv_bandwidth, start.driver, start.goaway)
+				(
+					start.recv_bandwidth,
+					crate::runtime::Protocol::Lite(Box::new(start.driver)),
+					start.goaway,
+				)
 			}
 			Version::Ietf(v) => {
 				// Decode the parameters to get the initial request ID and what the server
@@ -443,7 +471,7 @@ impl Client {
 					peer_setup_stream: None,
 					peer_declared: Some(peer_declared),
 				})?;
-				(None, protocol, goaway)
+				(None, crate::runtime::Protocol::Ietf(protocol), goaway)
 			}
 		};
 
@@ -854,6 +882,210 @@ mod tests {
 
 		runtime.shutdown();
 		assert!(matches!(futures::executor::block_on(session.closed()), Error::Cancel));
+	}
+
+	/// A transport made deliberately `!Send` by an `Rc` marker on the session and
+	/// both stream types: compiling at all is the point, proving the lite path
+	/// never demands thread mobility of any transport piece.
+	#[derive(Clone)]
+	struct LocalSession {
+		inner: FakeSession,
+		_local: std::rc::Rc<()>,
+	}
+
+	struct LocalSend {
+		inner: FakeSendStream,
+		_local: std::rc::Rc<()>,
+	}
+
+	struct LocalRecv {
+		inner: FakeRecvStream,
+		_local: std::rc::Rc<()>,
+	}
+
+	impl web_transport_trait::poll::Session for LocalSession {
+		type SendStream = LocalSend;
+		type RecvStream = LocalRecv;
+		type Error = FakeError;
+
+		fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+			self.inner.poll_accept_uni(cx).map_ok(|stream| LocalRecv {
+				inner: stream,
+				_local: self._local.clone(),
+			})
+		}
+
+		fn poll_accept_bi(
+			&mut self,
+			cx: &mut Context<'_>,
+		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
+			self.inner.poll_accept_bi(cx).map_ok(|(send, recv)| {
+				(
+					LocalSend {
+						inner: send,
+						_local: self._local.clone(),
+					},
+					LocalRecv {
+						inner: recv,
+						_local: self._local.clone(),
+					},
+				)
+			})
+		}
+
+		fn poll_open_bi(
+			&mut self,
+			cx: &mut Context<'_>,
+		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
+			self.inner.poll_open_bi(cx).map_ok(|(send, recv)| {
+				(
+					LocalSend {
+						inner: send,
+						_local: self._local.clone(),
+					},
+					LocalRecv {
+						inner: recv,
+						_local: self._local.clone(),
+					},
+				)
+			})
+		}
+
+		fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+			self.inner.poll_open_uni(cx).map_ok(|stream| LocalSend {
+				inner: stream,
+				_local: self._local.clone(),
+			})
+		}
+
+		fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+			self.inner.poll_send_datagram(cx, payload)
+		}
+
+		fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
+			self.inner.poll_recv_datagram(cx)
+		}
+
+		fn max_datagram_size(&self) -> usize {
+			self.inner.max_datagram_size()
+		}
+
+		fn protocol(&self) -> Option<&str> {
+			self.inner.protocol()
+		}
+
+		fn close(&mut self, code: u32, reason: &str) {
+			self.inner.close(code, reason);
+		}
+
+		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
+			self.inner.poll_closed(cx)
+		}
+
+		fn stats(&self) -> impl web_transport_trait::Stats {
+			self.inner.stats()
+		}
+	}
+
+	impl web_transport_trait::poll::SendStream for LocalSend {
+		type Error = FakeError;
+
+		fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+			self.inner.poll_write(cx, buf)
+		}
+
+		fn set_priority(&mut self, order: u8) {
+			self.inner.set_priority(order);
+		}
+
+		fn finish(&mut self) -> Result<(), Self::Error> {
+			self.inner.finish()
+		}
+
+		fn reset(&mut self, code: u32) {
+			self.inner.reset(code);
+		}
+
+		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			web_transport_trait::poll::SendStream::poll_closed(&mut self.inner, cx)
+		}
+	}
+
+	impl web_transport_trait::poll::RecvStream for LocalRecv {
+		type Error = FakeError;
+
+		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+			self.inner.poll_read(cx, dst)
+		}
+
+		fn stop(&mut self, code: u32) {
+			self.inner.stop(code);
+		}
+
+		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			web_transport_trait::poll::RecvStream::poll_closed(&mut self.inner, cx)
+		}
+	}
+
+	// The point of the lite-only entry: a `!Send` transport yields a `!Send`
+	// machine held by a local runtime, while the severed Session handle stays
+	// Send + Sync. Compiling is most of the assertion; the rest checks the
+	// machine still relays the close.
+	#[test]
+	fn connect_lite_over_a_send_less_transport() {
+		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
+		let local = LocalSession {
+			inner: fake.clone(),
+			_local: std::rc::Rc::new(()),
+		};
+		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+
+		let runtime = crate::runtime::Test::<LocalSession>::new();
+		let session = futures::executor::block_on(client.connect_lite(runtime.clone(), local)).unwrap();
+		assert_eq!(runtime.tick(), 1);
+
+		fn assert_send_sync<T: Send + Sync>(_: &T) {}
+		assert_send_sync(&session);
+
+		session.abort(Error::Cancel);
+		runtime.tick();
+		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
+	}
+
+	// The server-side twin: a `!Send` transport accepts a lite session whose
+	// machine a local runtime drives.
+	#[test]
+	fn accept_lite_over_a_send_less_transport() {
+		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
+		let local = LocalSession {
+			inner: fake.clone(),
+			_local: std::rc::Rc::new(()),
+		};
+		let server = crate::Server::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+
+		let runtime = crate::runtime::Test::<LocalSession>::new();
+		let session = futures::executor::block_on(server.accept_lite(runtime.clone(), local)).unwrap();
+		assert_eq!(session.version(), Version::Lite(lite::Version::Lite04));
+		assert_eq!(runtime.tick(), 1);
+
+		drop(session);
+		runtime.tick();
+		assert_eq!(fake.state.close_events.lock().unwrap()[0].0, Error::Cancel.to_code());
+	}
+
+	// The lite-only entry refuses everything that still needs the boxed ietf
+	// driver, instead of silently negotiating it.
+	#[test]
+	fn connect_lite_refuses_ietf_alpns() {
+		let fake = FakeSession::new(Some(ALPN_19), Vec::new());
+		let local = LocalSession {
+			inner: fake,
+			_local: std::rc::Rc::new(()),
+		};
+		let client = Client::new();
+		let runtime = crate::runtime::Test::<LocalSession>::new();
+		let result = futures::executor::block_on(client.connect_lite(runtime, local));
+		assert!(matches!(result, Err(Error::Version)));
 	}
 
 	// `stats()` reads the machine's latest sample and primes the sampler, so a

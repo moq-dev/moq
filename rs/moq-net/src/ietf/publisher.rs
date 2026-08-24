@@ -280,7 +280,7 @@ pub(super) struct Publisher<S: crate::transport::poll::Session, R: crate::runtim
 
 impl<S, R> Publisher<S, R>
 where
-	S: crate::transport::poll::Session,
+	S: crate::transport::poll::Boxable,
 	R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
 	R::Timer: MaybeSend,
 {

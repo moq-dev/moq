@@ -51,7 +51,8 @@ impl<S> moq_net::runtime::Timers for TokioRuntime<S> {
 	}
 }
 
-impl<S: moq_net::transport::poll::Session> moq_net::runtime::Runtime for TokioRuntime<S> {
+// Boxable: tokio work-steals, so the machine must be `Send`.
+impl<S: moq_net::transport::poll::Boxable> moq_net::runtime::Runtime for TokioRuntime<S> {
 	type Transport = S;
 
 	fn spawn(&self, machine: moq_net::runtime::Machine<Self>) {

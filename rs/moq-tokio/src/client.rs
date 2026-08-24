@@ -479,7 +479,7 @@ impl Client {
 	async fn race_moq_connect<Q, S>(&self, moq: &moq_net::Client, url: Url, quic: Q) -> crate::Result<moq_net::Session>
 	where
 		Q: Future<Output = crate::Result<S>>,
-		S: moq_net::transport::poll::Session,
+		S: moq_net::transport::poll::Boxable,
 	{
 		let alpns = self.versions.alpns();
 		let ws_config = self.websocket.clone();

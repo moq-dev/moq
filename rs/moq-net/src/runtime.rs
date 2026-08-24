@@ -308,38 +308,48 @@ impl<R: Runtime> std::fmt::Debug for Deadline<R> {
 /// [`kio`]-style poll function. It resolves when the session ends, and keeps
 /// returning that same result if polled again.
 pub struct Machine<R: Runtime> {
-	state: MachineState,
+	state: MachineState<R>,
 	// Retains the waiter across `Future` polls so its kio registrations stay
 	// live. Kept out of `MachineState` so the borrow `hold` hands back doesn't
 	// collide with the `&mut` that polling the state needs.
 	park: kio::Park,
-	// Ties the machine to the runtime that spawns it without affecting
-	// auto-traits: those follow the actual state (type-erased boxes today).
-	_runtime: std::marker::PhantomData<fn(R) -> R>,
+}
+
+/// The protocol half of a machine, one variant per negotiated wire protocol.
+///
+/// The lite driver is a named machine, so the machine's `Send`-ness follows
+/// the transport (a pinned `!Send` transport yields a `!Send` machine that
+/// stays on its thread). The ietf driver is still a boxed future; the box
+/// demands `Send` on native, which is why the ietf path requires a
+/// [`Boxable`](crate::transport::poll::Boxable) transport until it too becomes
+/// a named machine.
+pub(crate) enum Protocol<R: Runtime> {
+	/// Boxed for size only: a concrete box, so `Send` stays inferred.
+	Lite(Box<crate::lite::Driver<R::Transport, R>>),
+	Ietf(crate::util::MaybeSendBox<'static, Result<(), Error>>),
 }
 
 /// Everything the machine polls, split from the park so the two borrow
 /// disjointly.
-pub(crate) struct MachineState {
-	pub(crate) protocol: crate::util::MaybeSendBox<'static, Result<(), Error>>,
+pub(crate) struct MachineState<R: Runtime> {
+	pub(crate) protocol: Protocol<R>,
 	// The session supervisor, polled alongside the protocol: it executes the
 	// handles' close requests, publishes the transport's terminal error, and
 	// samples stats. It finishes once the transport reports closed, and the
 	// machine is not done until it has: the protocol's terminal transport close
 	// is what `Session::closed` observes, so resolving before it is published
 	// would leave waiters parked on a machine nobody polls again. `None` once
-	// finished, since a completed future must not be polled again.
-	pub(crate) supervisor: Option<crate::util::MaybeSendBox<'static, ()>>,
-	// Cached so a poll after completion doesn't re-poll a finished future.
+	// finished, since a completed machine must not be polled again.
+	pub(crate) supervisor: Option<crate::session::Supervisor<R::Transport, R>>,
+	// Cached so a poll after completion doesn't re-poll a finished protocol.
 	pub(crate) result: Option<Result<(), Error>>,
 }
 
 impl<R: Runtime> Machine<R> {
-	pub(crate) fn new(state: MachineState) -> Self {
+	pub(crate) fn new(state: MachineState<R>) -> Self {
 		Self {
 			state,
 			park: kio::Park::default(),
-			_runtime: std::marker::PhantomData,
 		}
 	}
 
@@ -352,22 +362,31 @@ impl<R: Runtime> Machine<R> {
 	}
 }
 
-impl MachineState {
+impl<R: Runtime> Protocol<R> {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		match self {
+			Self::Lite(driver) => driver.poll(waiter),
+			Self::Ietf(driver) => waiter.poll_future(driver.as_mut()),
+		}
+	}
+}
+
+impl<R: Runtime> MachineState<R> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		if let Some(supervisor) = &mut self.supervisor
-			&& waiter.poll_future(supervisor.as_mut()).is_ready()
+			&& supervisor.poll(waiter).is_ready()
 		{
 			self.supervisor = None;
 		}
 
 		if self.result.is_none()
-			&& let Poll::Ready(result) = waiter.poll_future(self.protocol.as_mut())
+			&& let Poll::Ready(result) = self.protocol.poll(waiter)
 		{
 			self.result = Some(result);
 			// The protocol's last act was closing the transport, which wakes the
 			// supervisor's close watch; poll it now instead of waiting a turn.
 			if let Some(supervisor) = &mut self.supervisor
-				&& waiter.poll_future(supervisor.as_mut()).is_ready()
+				&& supervisor.poll(waiter).is_ready()
 			{
 				self.supervisor = None;
 			}
@@ -379,6 +398,11 @@ impl MachineState {
 		}
 	}
 }
+
+// Every part of the machine is a poll machine driven through `&mut` (the one
+// pinned piece, the boxed ietf future, is `Unpin` itself), so nothing relies
+// on address stability and the machine may move freely between polls.
+impl<R: Runtime> Unpin for Machine<R> {}
 
 impl<R: Runtime> Future for Machine<R> {
 	type Output = Result<(), Error>;
@@ -446,7 +470,8 @@ pub(crate) mod tokio_test {
 		}
 	}
 
-	impl<S: crate::transport::poll::Session> Runtime for Tokio<S> {
+	// Boxable: tokio work-steals, so the machine must be `Send`.
+	impl<S: crate::transport::poll::Boxable> Runtime for Tokio<S> {
 		type Transport = S;
 
 		fn spawn(&self, machine: Machine<Self>) {

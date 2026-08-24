@@ -70,7 +70,7 @@ pub fn start<S, R>(
 	config: Config<S, R>,
 ) -> Result<(MaybeSendBox<'static, Result<(), Error>>, crate::goaway::Handle), Error>
 where
-	S: crate::transport::poll::Session,
+	S: crate::transport::poll::Boxable,
 	R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
 	R::Timer: MaybeSend,
 {
@@ -599,7 +599,7 @@ async fn run_unis<S, R>(
 	goaway: crate::goaway::Protocol,
 ) -> Result<(), Error>
 where
-	S: crate::transport::poll::Session,
+	S: crate::transport::poll::Boxable,
 	R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
 	R::Timer: MaybeSend,
 {
@@ -709,7 +709,7 @@ async fn run_uni_group<S, R>(
 	stream: &mut Reader<S::RecvStream, Version>,
 ) -> Result<(), Error>
 where
-	S: crate::transport::poll::Session,
+	S: crate::transport::poll::Boxable,
 	R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
 	R::Timer: MaybeSend,
 {
@@ -738,7 +738,7 @@ async fn run_dispatch<S, R>(
 	version: Version,
 ) -> Result<(), Error>
 where
-	S: crate::transport::poll::Session,
+	S: crate::transport::poll::Boxable,
 	R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
 	R::Timer: MaybeSend,
 {

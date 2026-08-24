@@ -301,7 +301,7 @@ async fn resolve_track_alias<R: crate::runtime::Runtime>(
 
 impl<S, R> Subscriber<S, R>
 where
-	S: crate::transport::poll::Session,
+	S: crate::transport::poll::Boxable,
 	R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
 	R::Timer: MaybeSend,
 {

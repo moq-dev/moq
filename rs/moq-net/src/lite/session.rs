@@ -3,20 +3,19 @@ use crate::{
 	Error, Origin, SessionError, bandwidth,
 	coding::{Reader, Stream, Writer},
 	lite::SessionInfo,
-	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
 use std::task::{Context, Poll, ready};
-
-use web_transport_trait::{MaybeSend, MaybeSync};
 
 use super::{
 	DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, SubscriberDriver, Version,
 };
 
-pub(crate) struct SessionStart {
+pub(crate) struct SessionStart<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	pub recv_bandwidth: Option<bandwidth::Consumer>,
-	pub driver: MaybeSendBox<'static, Result<(), Error>>,
+	/// The session's protocol machine, named so its `Send`-ness stays inferred
+	/// from the transport instead of being fixed by a box.
+	pub driver: Driver<S, R>,
 	/// The session-side GOAWAY halves, stored on the public [`crate::Session`].
 	pub goaway: crate::goaway::Handle,
 }
@@ -92,15 +91,14 @@ pub struct Config<S: crate::transport::poll::Session, R: crate::runtime::Runtime
 /// Start a lite session.
 ///
 /// Returns the receive-bandwidth consumer (if any) plus the driver that runs the session.
-pub fn start<S, R>(config: Config<S, R>) -> Result<SessionStart, Error>
+pub fn start<S, R>(config: Config<S, R>) -> Result<SessionStart<S, R>, Error>
 where
 	S: crate::transport::poll::Session,
-	R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
-	R::Timer: MaybeSend,
+	R: crate::runtime::Runtime,
 {
 	let Config {
 		runtime,
-		mut session,
+		session,
 		setup_stream,
 		publish,
 		subscribe,
@@ -190,7 +188,7 @@ where
 		going_away: goaway.going_away.clone(),
 	});
 
-	let mut driver = Driver {
+	let driver = Driver {
 		setup: version
 			.has_setup_stream()
 			.then(|| SendSetup::new(session.clone(), our_setup, version)),
@@ -198,31 +196,8 @@ where
 		session_stream: setup_stream,
 		publisher,
 		subscriber: SubscriberDriver::new(subscriber),
+		session,
 	};
-
-	// The async block only owns the state; all the logic is in `Driver::poll`.
-	// (The closure borrows `driver` so it stays `Unpin` for any transport.)
-	let driver = async move {
-		let res = kio::wait(|waiter| driver.poll(waiter)).await;
-
-		match &res {
-			Err(Error::Transport(_)) => {
-				tracing::info!("session terminated");
-				session.close(SessionError::Internal.to_code(), "");
-			}
-			Err(err) => {
-				tracing::warn!(%err, "session error");
-				session.close(SessionError::from(err).to_code(), err.to_string().as_ref());
-			}
-			_ => {
-				tracing::info!("session closed");
-				session.close(SessionError::Cancel.to_code(), "");
-			}
-		}
-
-		res
-	}
-	.maybe_boxed();
 
 	Ok(SessionStart {
 		recv_bandwidth: recv_bw_consumer,
@@ -233,7 +208,7 @@ where
 
 /// The lite session driver: one poll function racing every protocol arm, in
 /// place of a task set of boxed futures.
-struct Driver<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
+pub(crate) struct Driver<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	/// Advertising our capabilities, or `None` once sent (or on a version with no
 	/// Setup Stream).
 	setup: Option<SendSetup<S>>,
@@ -244,15 +219,37 @@ struct Driver<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 	session_stream: Option<Stream<S, Version>>,
 	publisher: Publisher<S, R>,
 	subscriber: SubscriberDriver<S>,
+	/// For the terminal close: the machine's last act reports the outcome to
+	/// the peer through the transport.
+	session: S,
 }
 
 impl<S, R> Driver<S, R>
 where
 	S: crate::transport::poll::Session,
-	R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
-	R::Timer: MaybeSend,
+	R: crate::runtime::Runtime,
 {
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let res = std::task::ready!(self.poll_protocol(waiter));
+		match &res {
+			Err(Error::Transport(_)) => {
+				tracing::info!("session terminated");
+				self.session.close(SessionError::Internal.to_code(), "");
+			}
+			Err(err) => {
+				tracing::warn!(%err, "session error");
+				self.session
+					.close(SessionError::from(err).to_code(), err.to_string().as_ref());
+			}
+			_ => {
+				tracing::info!("session closed");
+				self.session.close(SessionError::Cancel.to_code(), "");
+			}
+		}
+		Poll::Ready(res)
+	}
+
+	fn poll_protocol(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut cx = Context::from_waker(waiter.waker());
 
 		// The send-side machines never end the session; completion just retires them.

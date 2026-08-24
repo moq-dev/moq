@@ -6,7 +6,7 @@ use std::{
 	time::Duration,
 };
 
-use web_transport_trait::{MaybeSend, MaybeSync, Stats};
+use web_transport_trait::Stats;
 
 use crate::{
 	AsPath, Error, Origin, OriginList,
@@ -175,8 +175,7 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Runtime> Publisher<S
 impl<S, R> Publisher<S, R>
 where
 	S: crate::transport::poll::Session,
-	R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
-	R::Timer: MaybeSend,
+	R: crate::runtime::Runtime,
 {
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let _ = self.children.poll(waiter);

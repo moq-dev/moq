@@ -1,11 +1,8 @@
 use std::{sync::Arc, task::Poll, time::Duration};
 
-use web_transport_trait::{MaybeSend, MaybeSync, Stats};
+use web_transport_trait::Stats;
 
-use crate::{
-	Error, SessionError, Version, bandwidth, goaway,
-	util::{MaybeBoxedExt, MaybeSendBox},
-};
+use crate::{Error, SessionError, Version, bandwidth, goaway};
 
 /// A close requested by a session handle, executed by the machine.
 #[derive(Clone)]
@@ -201,18 +198,16 @@ impl Session {
 }
 
 impl Session {
-	pub(super) fn new<S, R>(
+	pub(super) fn new<R>(
 		runtime: R,
-		session: S,
+		session: R::Transport,
 		version: Version,
 		recv_bandwidth: Option<bandwidth::Consumer>,
-		protocol: MaybeSendBox<'static, Result<(), Error>>,
+		protocol: crate::runtime::Protocol<R>,
 		goaway: goaway::Handle,
 	) -> (Self, crate::runtime::Machine<R>)
 	where
-		S: crate::transport::poll::Session,
-		R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
-		R::Timer: MaybeSend,
+		R: crate::runtime::Runtime + 'static,
 	{
 		let sample = snapshot(&session);
 
@@ -232,7 +227,7 @@ impl Session {
 			demanded: false,
 		});
 
-		let mut supervisor = Supervisor {
+		let supervisor = Supervisor {
 			runtime,
 			closed_watch: session.clone(),
 			session,
@@ -242,7 +237,6 @@ impl Session {
 			send_bandwidth: send_producer,
 			mode: SamplerMode::Idle,
 		};
-		let supervisor = async move { kio::wait(|waiter| supervisor.poll(waiter)).await }.maybe_boxed();
 
 		let session = Self {
 			close,
@@ -263,18 +257,16 @@ impl Session {
 	}
 
 	/// Build the session, hand its machine to the runtime, and return the handle.
-	pub(super) fn spawn<S, R>(
+	pub(super) fn spawn<R>(
 		runtime: R,
-		session: S,
+		session: R::Transport,
 		version: Version,
 		recv_bandwidth: Option<bandwidth::Consumer>,
-		protocol: MaybeSendBox<'static, Result<(), Error>>,
+		protocol: crate::runtime::Protocol<R>,
 		goaway: goaway::Handle,
 	) -> Self
 	where
-		S: crate::transport::poll::Session,
-		R: crate::runtime::Runtime + MaybeSend + MaybeSync + 'static,
-		R::Timer: MaybeSend,
+		R: crate::runtime::Runtime + 'static,
 	{
 		let (session, machine) = Self::new(runtime.clone(), session, version, recv_bandwidth, protocol, goaway);
 		runtime.spawn(machine);
@@ -288,7 +280,7 @@ impl Session {
 /// anyone is consuming them.
 ///
 /// Finishes once the transport reports closed; everything else is moot then.
-struct Supervisor<S, R: crate::runtime::Timers> {
+pub(crate) struct Supervisor<S, R: crate::runtime::Timers> {
 	runtime: R,
 	session: S,
 	// A dedicated clone for the close watch, since each pending poll operation
@@ -317,7 +309,7 @@ enum SamplerMode<R: crate::runtime::Timers> {
 impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> Supervisor<S, R> {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let mut cx = std::task::Context::from_waker(waiter.waker());
 
 		// The transport's terminal error ends the supervisor.
