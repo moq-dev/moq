@@ -58,9 +58,17 @@ pub(crate) struct Shared {
 	pub unpark: std::sync::Arc<Unpark>,
 	/// The next provided-buffer group id; one per socket.
 	pub next_bgid: Cell<u16>,
+	/// Set by [`crate::Worker`]'s drop: handles outlive the loop that would
+	/// drive them, so operations must fail instead of pending forever.
+	pub stopped: Cell<bool>,
 }
 
 impl Shared {
+	/// The error every operation reports once the worker has been dropped.
+	pub fn gone_error() -> io::Error {
+		io::Error::new(io::ErrorKind::NotConnected, "the worker was dropped")
+	}
+
 	/// Stage one SQE, submitting inline to make room when the queue is full.
 	pub fn push(&self, entry: &squeue::Entry) -> io::Result<()> {
 		let mut ring = self.ring.borrow_mut();

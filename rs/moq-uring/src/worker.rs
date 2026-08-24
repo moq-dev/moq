@@ -56,11 +56,15 @@ impl Worker {
 			.setup_coop_taskrun()
 			.build(config.entries)
 			.map_err(|err| match err.raw_os_error() {
-				Some(libc::ENOSYS) | Some(libc::EPERM) | Some(libc::EACCES) => Error::Unsupported(format!(
-					"io_uring is unavailable ({err}); kernel {} (Linux 6.12+ required, and container seccomp \
-					 policies such as Docker's default commonly block io_uring)",
-					kernel_release()
-				)),
+				// EINVAL from setup means the kernel predates one of the
+				// requested flags, so it never reaches the feature check below.
+				Some(libc::ENOSYS) | Some(libc::EPERM) | Some(libc::EACCES) | Some(libc::EINVAL) => {
+					Error::Unsupported(format!(
+						"io_uring is unavailable ({err}); kernel {} (Linux 6.12+ required, and container seccomp \
+						 policies such as Docker's default commonly block io_uring)",
+						kernel_release()
+					))
+				}
 				_ => Error::Io(err),
 			})?;
 
@@ -81,6 +85,7 @@ impl Worker {
 				spawns: RefCell::new(Vec::new()),
 				unpark: Unpark::new(),
 				next_bgid: std::cell::Cell::new(0),
+				stopped: std::cell::Cell::new(false),
 			}),
 			tasks: kio::Tasks::new(),
 			park: kio::Park::default(),
@@ -280,6 +285,9 @@ impl Worker {
 
 impl Drop for Worker {
 	fn drop(&mut self) {
+		// Handles may outlive us; everything they try from here on fails
+		// instead of pending on a loop that will never run again.
+		self.shared.stopped.set(true);
 		// The kernel may still write into provided buffers and read send
 		// headers owned by the ops slab. Cancel everything and wait for the
 		// terminal completions before any of that memory frees.
@@ -336,7 +344,13 @@ impl Clone for Handle {
 
 impl Handle {
 	/// Run a `!Send` future on this worker until completion.
+	///
+	/// If the worker has already been dropped the future is dropped instead of
+	/// running, like a task spawned on a shut-down runtime.
 	pub fn spawn(&self, future: impl Future<Output = ()> + 'static) {
+		if self.shared.stopped.get() {
+			return;
+		}
 		let mut future = Box::pin(future);
 		self.shared
 			.spawns
@@ -354,6 +368,9 @@ impl Handle {
 	/// The caller configures and binds the socket (options, addresses); this
 	/// takes over receive and send. `config` picks the batching mechanisms.
 	pub fn udp(&self, socket: std::net::UdpSocket, config: udp::Config) -> Result<udp::Socket, Error> {
+		if self.shared.stopped.get() {
+			return Err(Shared::gone_error().into());
+		}
 		udp::Socket::bind(&self.shared, socket, config)
 	}
 }
@@ -499,6 +516,51 @@ mod tests {
 			})
 			.unwrap();
 		assert!(start.elapsed() >= Duration::from_millis(20));
+	}
+
+	#[test]
+	fn dropped_worker_rejects_operations() {
+		let Some(worker) = worker() else { return };
+		let handle = worker.handle();
+		let bind = || std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+		let sock = handle.udp(bind(), udp::Config::default()).expect("socket");
+		let to = sock.local_addr().expect("addr");
+		let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+			panic!("no tx buffer");
+		};
+		drop(worker);
+
+		// Every path a retained handle can reach fails instead of pending on
+		// a loop that will never run again.
+		assert!(handle.udp(bind(), udp::Config::default()).is_err());
+		assert!(matches!(sock.poll_recv(&kio::Waiter::noop()), Poll::Ready(Err(_))));
+		assert!(matches!(sock.poll_acquire(&kio::Waiter::noop()), Poll::Ready(Err(_))));
+		assert!(tx.send(1200, to, 1200).is_err());
+		// And a late spawn is dropped rather than parked forever.
+		handle.spawn(async {});
+	}
+
+	#[test]
+	fn oversized_gso_segment_is_rejected() {
+		let Some(worker) = worker() else { return };
+		let handle = worker.handle();
+		let sock = handle
+			.udp(
+				std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"),
+				udp::Config::default(),
+			)
+			.expect("socket");
+		let to = sock.local_addr().expect("addr");
+		let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+			panic!("no tx buffer");
+		};
+		// `UDP_SEGMENT` is a u16: without validation this would truncate to a
+		// one-byte stride instead of one segment.
+		let err = tx
+			.send(60_000, to, usize::from(u16::MAX) + 2)
+			.expect_err("oversized segment");
+		assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+		drop(worker);
 	}
 
 	#[test]

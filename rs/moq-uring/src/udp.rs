@@ -23,7 +23,7 @@ use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::io;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{SocketAddr, SocketAddrV6, UdpSocket};
 use std::os::fd::AsRawFd;
 use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
@@ -219,6 +219,15 @@ pub(crate) struct SockShared {
 }
 
 impl SockShared {
+	/// Whether the worker loop that would drive this socket is gone: dropped
+	/// outright, or torn down while handles keep the shared state alive.
+	fn worker_gone(&self) -> bool {
+		match self.worker.upgrade() {
+			Some(shared) => shared.stopped.get(),
+			None => true,
+		}
+	}
+
 	/// A packet released its buffer slice.
 	fn release_rx(self: &Rc<Self>, bid: u16) {
 		let mut rx = self.rx.borrow_mut();
@@ -411,6 +420,9 @@ impl Socket {
 		if let Some(code) = rx.error {
 			return Poll::Ready(Err(io::Error::from_raw_os_error(code)));
 		}
+		if self.shared.worker_gone() {
+			return Poll::Ready(Err(Shared::gone_error()));
+		}
 		waiter.register(&mut rx.waiters);
 		Poll::Pending
 	}
@@ -426,6 +438,9 @@ impl Socket {
 		let mut tx = self.shared.tx.borrow_mut();
 		if let Some(code) = tx.error {
 			return Poll::Ready(Err(io::Error::from_raw_os_error(code)));
+		}
+		if self.shared.worker_gone() {
+			return Poll::Ready(Err(Shared::gone_error()));
 		}
 		if let Some(id) = tx.free.pop() {
 			let buf = &mut tx.bufs[id as usize];
@@ -448,52 +463,6 @@ impl Socket {
 	/// Await [`poll_acquire`](Self::poll_acquire).
 	pub async fn acquire(&self) -> io::Result<TxBuf> {
 		kio::wait(|waiter| self.poll_acquire(waiter)).await
-	}
-
-	/// Send `buf[..len]` to `to` as datagrams of `segment` bytes (the last may
-	/// be short). Fire-and-forget: the buffer returns to the pool when the
-	/// kernel completes, and a failed send surfaces on the next pool acquire.
-	pub fn send(&self, mut buf: TxBuf, len: usize, to: SocketAddr, segment: usize) -> io::Result<()> {
-		if len == 0 || len > buf.cap || segment == 0 || len.div_ceil(segment) > MAX_GSO_SEGMENTS {
-			return Err(io::Error::new(
-				io::ErrorKind::InvalidInput,
-				format!(
-					"invalid send: {len} bytes in {segment} byte segments from a {} byte buffer",
-					buf.cap
-				),
-			));
-		}
-		let Some(shared) = self.shared.worker.upgrade() else {
-			return Err(io::Error::new(io::ErrorKind::NotConnected, "worker is gone"));
-		};
-
-		buf.armed = true;
-		let lease = Rc::new(TxLease {
-			sock: self.shared.clone(),
-			id: buf.id,
-		});
-		let base = buf.ptr.as_ptr();
-
-		if self.shared.config.gso {
-			send_one(&shared, &self.shared, &lease, base, len, to, Some(segment as u16))?;
-		} else {
-			let mut offset = 0;
-			while offset < len {
-				let chunk = segment.min(len - offset);
-				// SAFETY: offset stays within the leased buffer.
-				send_one(
-					&shared,
-					&self.shared,
-					&lease,
-					unsafe { base.add(offset) },
-					chunk,
-					to,
-					None,
-				)?;
-				offset += chunk;
-			}
-		}
-		Ok(())
 	}
 }
 
@@ -582,15 +551,66 @@ impl std::fmt::Debug for Packet {
 	}
 }
 
-/// A checked-out send-staging buffer: fill it, then [`Socket::send`] it.
+/// A checked-out send-staging buffer: fill it, then [`send`](Self::send) it.
 ///
-/// Dropping it unsent returns it to the pool.
+/// The buffer belongs to the socket it was acquired from, and sending goes
+/// back through that socket. Dropping it unsent returns it to the pool.
 pub struct TxBuf {
 	sock: Rc<SockShared>,
 	id: u16,
 	ptr: NonNull<u8>,
 	cap: usize,
 	armed: bool,
+}
+
+impl TxBuf {
+	/// Send `self[..len]` on the owning socket, to `to`, as datagrams of
+	/// `segment` bytes (the last may be short). Fire-and-forget: the buffer
+	/// returns to the pool when the kernel completes, and a failed send
+	/// surfaces on the next pool acquire.
+	pub fn send(mut self, len: usize, to: SocketAddr, segment: usize) -> io::Result<()> {
+		// `UDP_SEGMENT` is a u16, so an oversized segment would silently
+		// truncate into a tiny stride and explode the implied segment count.
+		if len == 0
+			|| len > self.cap
+			|| segment == 0
+			|| segment > usize::from(u16::MAX)
+			|| len.div_ceil(segment) > MAX_GSO_SEGMENTS
+		{
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				format!(
+					"invalid send: {len} bytes in {segment} byte segments from a {} byte buffer",
+					self.cap
+				),
+			));
+		}
+		let shared = match self.sock.worker.upgrade() {
+			Some(shared) if !shared.stopped.get() => shared,
+			_ => return Err(Shared::gone_error()),
+		};
+
+		self.armed = true;
+		let sock = self.sock.clone();
+		let lease = Rc::new(TxLease {
+			sock: sock.clone(),
+			id: self.id,
+		});
+		let base = self.ptr.as_ptr();
+
+		if sock.config.gso {
+			send_one(&shared, &sock, &lease, base, len, to, Some(segment as u16))?;
+		} else {
+			let mut offset = 0;
+			while offset < len {
+				let chunk = segment.min(len - offset);
+				// SAFETY: offset stays within the leased buffer.
+				send_one(&shared, &sock, &lease, unsafe { base.add(offset) }, chunk, to, None)?;
+				offset += chunk;
+			}
+		}
+		Ok(())
+	}
 }
 
 impl std::ops::Deref for TxBuf {
@@ -715,7 +735,7 @@ fn send_one(
 
 /// Arm (or re-arm) the socket's receive. Failure is recorded on the socket.
 pub(crate) fn arm_recv(shared: &Rc<Shared>, sock: &Rc<SockShared>) {
-	if sock.closed.get() {
+	if sock.closed.get() || shared.stopped.get() {
 		return;
 	}
 	let mut rx = sock.rx.borrow_mut();
@@ -1043,8 +1063,43 @@ fn decode_addr(name: &[u8]) -> Option<SocketAddr> {
 		libc::AF_INET6 if name.len() >= std::mem::size_of::<libc::sockaddr_in6>() => {
 			// SAFETY: length-checked unaligned read.
 			let sin6 = unsafe { name.as_ptr().cast::<libc::sockaddr_in6>().read_unaligned() };
-			Some(SocketAddr::from((sin6.sin6_addr.s6_addr, u16::from_be(sin6.sin6_port))))
+			// Keep the scope id: link-local replies are unroutable without it.
+			Some(SocketAddr::V6(SocketAddrV6::new(
+				sin6.sin6_addr.s6_addr.into(),
+				u16::from_be(sin6.sin6_port),
+				sin6.sin6_flowinfo,
+				sin6.sin6_scope_id,
+			)))
 		}
 		_ => None,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4};
+
+	/// Round-trip an address through the kernel wire encoding.
+	fn roundtrip(addr: SocketAddr) -> Option<SocketAddr> {
+		// SAFETY: all-zero is a valid sockaddr_storage.
+		let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+		let len = encode_addr(addr, &mut storage) as usize;
+		// SAFETY: encode_addr wrote `len` bytes into `storage`.
+		let name = unsafe { std::slice::from_raw_parts((&raw const storage).cast::<u8>(), len) };
+		decode_addr(name)
+	}
+
+	#[test]
+	fn addr_roundtrip_v4() {
+		let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 7), 4443));
+		assert_eq!(roundtrip(addr), Some(addr));
+	}
+
+	#[test]
+	fn addr_roundtrip_v6_keeps_scope_and_flow() {
+		let ip = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+		let addr = SocketAddr::V6(SocketAddrV6::new(ip, 4443, 0x12345, 3));
+		assert_eq!(roundtrip(addr), Some(addr));
 	}
 }

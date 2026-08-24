@@ -122,7 +122,7 @@ impl Peer {
 			let Some(to) = dest else {
 				return Ok(());
 			};
-			self.sock.send(tx, filled, to, SEGMENT)?;
+			tx.send(filled, to, SEGMENT)?;
 		}
 	}
 

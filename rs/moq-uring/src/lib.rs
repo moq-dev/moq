@@ -8,12 +8,14 @@
 //! out (a futex word, no ring or syscall needed while the worker is awake).
 //!
 //! UDP is the point: [`udp::Socket`] receives through one multishot `recvmsg`
-//! with a registered provided-buffer ring (incrementally consumed, `UDP_GRO`
-//! coalesced) and sends with an explicit `UDP_SEGMENT` control message per
-//! `sendmsg` from a fixed pool of staging buffers.
+//! with a registered provided-buffer ring (one whole buffer per completion,
+//! `UDP_GRO` coalesced) and sends with an explicit `UDP_SEGMENT` control
+//! message per `sendmsg` from a fixed pool of staging buffers.
 //!
 //! Requires Linux 6.12; [`Worker::new`] refuses older kernels with a legible
 //! error instead of degrading. The crate compiles to nothing off Linux.
+// Off Linux the crate compiles to nothing, so these doc links have no target.
+#![cfg_attr(not(target_os = "linux"), allow(rustdoc::broken_intra_doc_links))]
 #![cfg(target_os = "linux")]
 
 mod error;
