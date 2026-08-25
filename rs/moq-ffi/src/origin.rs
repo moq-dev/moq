@@ -77,11 +77,13 @@ pub struct MoqAnnounced {
 	task: Task<Announced>,
 }
 
+#[doc(hidden)]
 #[derive(uniffi::Object)]
 pub struct MoqOriginDynamic {
 	task: Task<OriginDynamic>,
 }
 
+#[doc(hidden)]
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastRequest {
 	inner: std::sync::Mutex<Option<moq_net::origin::Request>>,

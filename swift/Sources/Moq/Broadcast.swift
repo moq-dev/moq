@@ -139,14 +139,13 @@ public final class RouteWatch: AsyncSequence, Sendable {
 
 /// Write side of a broadcast: open tracks and publish frames.
 ///
-/// Constructing one directly creates a standalone broadcast for serving dynamic
-/// requests (`BroadcastRequest.accept`) or local pub/sub. To publish at a path,
-/// use `OriginProducer.createBroadcast(path:)` instead.
+/// Constructing one directly creates a standalone broadcast for local pub/sub.
+/// To publish at a path, use `OriginProducer.createBroadcast(path:)` instead.
 public final class BroadcastProducer: Sendable {
     let ffi: MoqBroadcastProducer
 
-    /// Create a standalone broadcast for serving dynamic requests or local
-    /// pub/sub. To publish at a path, use `OriginProducer.createBroadcast(path:)`.
+    /// Create a standalone broadcast for local pub/sub. To publish at a path,
+    /// use `OriginProducer.createBroadcast(path:)`.
     public init() throws {
         ffi = try MoqBroadcastProducer()
     }
