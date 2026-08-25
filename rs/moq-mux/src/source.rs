@@ -31,7 +31,7 @@ impl Source {
 	/// `broadcast` reference is resolved against it. Both the catalog broadcast and any
 	/// referenced broadcast are fetched via
 	/// [`origin.request_broadcast`](moq_net::origin::Consumer::request_broadcast), so they
-	/// must be reachable through `origin` (announced, or served by a dynamic handler).
+	/// must be reachable through `origin` (by exact path, or served by a dynamic handler).
 	pub fn new(origin: moq_net::origin::Consumer, path: impl AsPath) -> Self {
 		Self {
 			origin,
@@ -50,8 +50,8 @@ impl Source {
 	/// A missing/empty `rel` targets the catalog broadcast. Anything else, including
 	/// the empty root broadcast, targets the resolved path. A reference that escapes above
 	/// the origin root returns `None`. Either valid target is fetched from the origin,
-	/// which deduplicates repeat requests for the same live path (announced or dynamically
-	/// served) so the catalog and every rendition share one upstream subscription.
+	/// which deduplicates repeat requests for the same reachable or dynamically served path so the
+	/// catalog and every rendition share one upstream subscription.
 	pub(crate) fn request(
 		&self,
 		rel: Option<&moq_net::PathRelative<'_>>,

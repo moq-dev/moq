@@ -2815,12 +2815,12 @@ impl Consumer {
 		})
 	}
 
-	/// Get a broadcast by path, falling back to a dynamic request when it is not announced.
+	/// Get a broadcast by exact path, falling back to a dynamic request when none is reachable.
 	///
-	/// Returns a [`kio::Pending`] future (resolved synchronously for an announced broadcast,
+	/// Returns a [`kio::Pending`] future (resolved synchronously for an existing broadcast,
 	/// otherwise once a handler serves it), mirroring [`track::Consumer::fetch_group`](track::Consumer::fetch_group).
-	/// The lookup order is: an already-announced broadcast resolves
-	/// immediately; otherwise, if an [`Dynamic`] handler is live (see
+	/// The lookup order is: an existing broadcast reachable by exact path resolves
+	/// immediately, whether announced or not; otherwise, if an [`Dynamic`] handler is live (see
 	/// [`Producer::dynamic`]), a fallback request is registered and the future resolves
 	/// when the handler [`accept`](Request::accept)s it (or errors if it
 	/// [`reject`](Request::reject)s or every handler drops). Concurrent requests for
@@ -2829,7 +2829,7 @@ impl Consumer {
 	/// than re-invoking the handler and opening a duplicate upstream subscription) for as
 	/// long as it stays live; a closed one is re-served on the next request.
 	///
-	/// The returned future resolves to [`Error::Unroutable`] when the path is not announced and no
+	/// The returned future resolves to [`Error::Unroutable`] when no broadcast is reachable and no
 	/// dynamic handler exists. A request that is registered while a handler is live but then loses
 	/// every handler before being served also resolves to [`Error::Unroutable`]. Unlike an announced
 	/// broadcast, a dynamically served one is never visible to [`Self::announced`].

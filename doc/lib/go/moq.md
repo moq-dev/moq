@@ -451,6 +451,12 @@ for request, err := range dynamic.Requests(ctx) {
 	if err := track.WriteFrame(moq.Frame{Payload: []byte("ready")}); err != nil {
 		log.Fatal(err)
 	}
+	if err := track.Finish(); err != nil {
+		log.Fatal(err)
+	}
+	if err := broadcast.Finish(); err != nil {
+		log.Fatal(err)
+	}
 }
 ```
 

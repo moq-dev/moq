@@ -310,6 +310,10 @@ async for request in dynamic:
         track = broadcast.publish_track("status")
         request.accept(broadcast)
         track.write_frame(b"ready", 0)
+        track.finish()
+        broadcast.finish()
+    else:
+        request.abort(404)
 ```
 
 The served broadcast is not announced. It only resolves consumers that call `request_broadcast(path)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast)` to serve it, or `abort(code)` to fail the requester.

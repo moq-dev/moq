@@ -274,6 +274,8 @@ for try await request in dynamic {
         let track = try broadcast.publishTrack(name: "status")
         try request.accept(broadcast: broadcast)
         try track.writeFrame(Data("ready".utf8), timestampUs: 0)
+        try track.finish()
+        try broadcast.finish()
     } else {
         try request.abort(errorCode: 404)
     }
