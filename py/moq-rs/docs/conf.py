@@ -49,6 +49,22 @@ autodoc_member_order = "bysource"
 napoleon_google_docstring = True
 napoleon_numpy_docstring = False
 
+
+def _skip_compatibility_member(_app, what, _name, obj, skip, _options):
+    """Hide compatibility-only members from the published API reference."""
+    if (
+        what == "class"
+        and getattr(obj, "__qualname__", "") == "OriginProducer.dynamic"
+    ):
+        return True
+    return skip
+
+
+def setup(app):
+    """Register the API-reference filters."""
+    app.connect("autodoc-skip-member", _skip_compatibility_member)
+
+
 intersphinx_mapping = {"python": ("https://docs.python.org/3", None)}
 
 templates_path = ["_templates"]
