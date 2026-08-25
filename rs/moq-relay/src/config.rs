@@ -7,7 +7,7 @@ use crate::{AuthConfig, CacheConfig, ClusterConfig, InternalConfig, StatsConfig,
 #[derive(usage::Cli, Clone, Debug, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
-#[usage(version = env!("VERSION"))]
+#[usage(name = "moq-relay", version = env!("VERSION"))]
 #[usage(completion)]
 #[non_exhaustive]
 pub struct Config {
@@ -163,8 +163,20 @@ impl Config {
 			.skip(1)
 			.map(std::ffi::OsString::as_os_str)
 			.collect::<Vec<_>>();
-		let mut config = Config::parse_from(&argv)
-			.map_err(|err| anyhow::anyhow!(usage::render_failure(Config::spec(), &argv, &err)))?;
+		// Help and version are questions rather than failures. Answered and exited
+		// here, because wrapping them renders an empty `anyhow` error and exits
+		// non-zero having printed nothing. A real failure still comes back as an
+		// error, so a caller that parses synthetic args keeps its Result.
+		let mut config = match Config::parse_from(&argv) {
+			Ok(config) => config,
+			Err(err) => {
+				let answer = moq_tokio::cli::answer(Config::spec(), Config::command(), &argv, err);
+				if answer.is_question() {
+					answer.exit();
+				}
+				anyhow::bail!("{}", answer.message());
+			}
+		};
 		if let Some(file) = config.file.clone() {
 			let mut merged = toml::Value::try_from(&config)?;
 			let source = std::fs::read_to_string(file)?;
@@ -858,5 +870,31 @@ uid = [1001]
 			Some("127.0.0.1:9101".parse().unwrap()),
 			"TOML's internal.listen must not be clobbered by the CLI re-parse"
 		);
+	}
+
+	/// Help and version are answered, not wrapped as failures.
+	///
+	/// Usage renders those variants as an empty string through `render_failure`,
+	/// because the generated `parse()` is expected to take them first. This loader
+	/// parses twice for the TOML merge and never reaches that code, so wrapping
+	/// them exited non-zero having printed nothing.
+	#[test]
+	fn help_and_version_are_questions() {
+		for flag in ["--help", "-h", "--version", "-V"] {
+			let argv = [std::ffi::OsStr::new(flag)];
+			let err = Config::parse_from(&argv).unwrap_err();
+			let answer = moq_tokio::cli::answer(Config::spec(), Config::command(), &argv, err);
+			assert!(answer.is_question(), "{flag} was treated as a failure");
+			assert!(!answer.message().trim().is_empty(), "{flag} rendered nothing");
+		}
+	}
+
+	/// The spec is named for the binary, not for the struct that declares it.
+	///
+	/// Usage takes the program name from the type unless told otherwise, so an
+	/// undeclared name renders every usage line and completion as `config`.
+	#[test]
+	fn the_spec_is_named_for_the_binary() {
+		assert_eq!(Config::spec().bin.unwrap_or(Config::spec().name), "moq-relay");
 	}
 }

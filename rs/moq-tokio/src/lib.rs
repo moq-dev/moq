@@ -15,6 +15,7 @@
 
 pub mod accept;
 pub mod bind;
+pub mod cli;
 mod client;
 pub mod connect;
 mod connection;

@@ -12,7 +12,7 @@ use crate::Range;
 #[derive(usage::Cli, Clone, Debug, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
-#[usage(version = env!("VERSION"))]
+#[usage(name = "moq-bench", version = env!("VERSION"))]
 #[usage(completion)]
 #[non_exhaustive]
 pub struct Config {
@@ -23,7 +23,7 @@ pub struct Config {
 
 	/// Run a 1:N benchmark around one named broadcast. The first connection
 	/// publishes `<name>/<run>/<fanout>` and every remaining connection subscribes.
-	#[arg(long, env = "MOQ_BENCH_FANOUT")]
+	#[usage(long, env = "MOQ_BENCH_FANOUT")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub fanout: Option<String>,
 
@@ -45,12 +45,19 @@ pub struct Config {
 	pub connections: Range,
 
 	/// Broadcasts published per connection (B), each with a single track.
-	#[usage(long, env = "MOQ_BENCH_BROADCASTS", default = "1")]
-	pub broadcasts: Range,
+	///
+	/// `Option` because `--fanout` refuses to run alongside an explicit shape, and
+	/// a materialized default cannot say whether one was given.
+	#[usage(long, env = "MOQ_BENCH_BROADCASTS")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub broadcasts: Option<Range>,
 
 	/// Other broadcasts each connection subscribes to (C), discovered via announcements.
-	#[usage(long, env = "MOQ_BENCH_SUBSCRIBE", default = "0")]
-	pub subscribe: Range,
+	///
+	/// `Option` for the same reason as [`Self::broadcasts`].
+	#[usage(long, env = "MOQ_BENCH_SUBSCRIBE")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub subscribe: Option<Range>,
 
 	/// Frames per second per track (D). Zero leaves the track idle.
 	#[usage(long, env = "MOQ_BENCH_FPS", default = "30")]
@@ -95,12 +102,13 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			name: "bench".into(),
+			fanout: None,
 			startup: Duration::from_secs(10).into(),
 			duration: None,
 			report: Duration::from_secs(1).into(),
 			connections: Range::new(1, 1),
-			broadcasts: Range::new(1, 1),
-			subscribe: Range::new(0, 0),
+			broadcasts: None,
+			subscribe: None,
 			fps: Range::new(30, 30),
 			frame_size: Range::new(1200, 1200),
 			group_size: Range::new(60, 60),
@@ -155,8 +163,20 @@ impl Config {
 			.skip(1)
 			.map(std::ffi::OsString::as_os_str)
 			.collect::<Vec<_>>();
-		let mut config = Config::parse_from(&argv)
-			.map_err(|err| anyhow::anyhow!(usage::render_failure(Config::spec(), &argv, &err)))?;
+		// Help and version are questions rather than failures. Answered and exited
+		// here, because wrapping them renders an empty `anyhow` error and exits
+		// non-zero having printed nothing. A real failure still comes back as an
+		// error, so a caller that parses synthetic args keeps its Result.
+		let mut config = match Config::parse_from(&argv) {
+			Ok(config) => config,
+			Err(err) => {
+				let answer = moq_tokio::cli::answer(Config::spec(), Config::command(), &argv, err);
+				if answer.is_question() {
+					answer.exit();
+				}
+				anyhow::bail!("{}", answer.message());
+			}
+		};
 		if let Some(file) = config.file.clone() {
 			let mut merged = toml::Value::try_from(&config)?;
 			let source = std::fs::read_to_string(file)?;
@@ -207,11 +227,11 @@ impl Config {
 	}
 
 	pub fn broadcasts(&self) -> Range {
-		self.broadcasts
+		self.broadcasts.unwrap_or(Range::new(1, 1))
 	}
 
 	pub fn subscribe(&self) -> Range {
-		self.subscribe
+		self.subscribe.unwrap_or(Range::new(0, 0))
 	}
 
 	pub fn fps(&self) -> Range {
@@ -224,6 +244,16 @@ impl Config {
 
 	pub fn group_size(&self) -> Range {
 		self.group_size
+	}
+
+	/// Whether this configuration expects subscribers to receive media.
+	pub fn expects_delivery(&self) -> bool {
+		self.fanout.is_some() || self.subscribe().min.max(self.subscribe().max) > 0
+	}
+
+	/// Whether any connection may publish a generated broadcast.
+	pub fn publishes(&self) -> bool {
+		self.broadcasts().min.max(self.broadcasts().max) > 0
 	}
 }
 
@@ -268,16 +298,6 @@ fn merge_toml(base: &mut toml::Value, overlay: toml::Value) {
 			}
 		}
 		(base, overlay) => *base = overlay,
-	}
-
-	/// Whether this configuration expects subscribers to receive media.
-	pub fn expects_delivery(&self) -> bool {
-		self.fanout.is_some() || self.subscribe().min.max(self.subscribe().max) > 0
-	}
-
-	/// Whether any connection may publish a generated broadcast.
-	pub fn publishes(&self) -> bool {
-		self.broadcasts().min.max(self.broadcasts().max) > 0
 	}
 }
 
@@ -414,5 +434,31 @@ connect = "https://example.com"
 	fn fanout_requires_a_publisher_and_subscriber() {
 		let err = Config::parse_and_merge(["moq-bench", "--fanout", "chat", "--connections", "1"]).unwrap_err();
 		assert!(err.to_string().contains("at least 2 connections"));
+	}
+
+	/// Help and version are answered, not wrapped as failures.
+	///
+	/// Usage renders those variants as an empty string through `render_failure`,
+	/// because the generated `parse()` is expected to take them first. This loader
+	/// parses twice for the TOML merge and never reaches that code, so wrapping
+	/// them exited non-zero having printed nothing.
+	#[test]
+	fn help_and_version_are_questions() {
+		for flag in ["--help", "-h", "--version", "-V"] {
+			let argv = [std::ffi::OsStr::new(flag)];
+			let err = Config::parse_from(&argv).unwrap_err();
+			let answer = moq_tokio::cli::answer(Config::spec(), Config::command(), &argv, err);
+			assert!(answer.is_question(), "{flag} was treated as a failure");
+			assert!(!answer.message().trim().is_empty(), "{flag} rendered nothing");
+		}
+	}
+
+	/// The spec is named for the binary, not for the struct that declares it.
+	///
+	/// Usage takes the program name from the type unless told otherwise, so an
+	/// undeclared name renders every usage line and completion as `config`.
+	#[test]
+	fn the_spec_is_named_for_the_binary() {
+		assert_eq!(Config::spec().bin.unwrap_or(Config::spec().name), "moq-bench");
 	}
 }

@@ -69,6 +69,7 @@ pub struct Cli {
 #[derive(usage::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq")]
+#[usage(completion)]
 pub struct Stage {
 	/// The verb and endpoint.
 	#[usage(subcommand)]
@@ -156,7 +157,7 @@ impl Invocation {
 		// against a grammar that also carries the process-wide flags a stage refuses.
 		// Narrowing that needs the request's own line and cursor rewritten to the last
 		// stage, which is not done here.
-		if let Some(reply) = Cli::completion_request(args.get(1..).unwrap_or_default()) {
+		if let Some(reply) = completion_request(args.get(1..).unwrap_or_default()) {
 			print!("{reply}");
 			std::process::exit(0);
 		}
@@ -268,59 +269,118 @@ impl Invocation {
 	}
 }
 
-/// Turn a Usage parse result into a [`ParseError`], rendering the page or version
-/// line a request asks for.
+/// Answer a shell's completion request, against the grammar the cursor is actually in.
 ///
-/// Help and version are questions rather than failures, and Usage answers them by
-/// handing back the command to render: `render_failure` produces an empty string
-/// for those variants, because a caller is expected to have taken them first. The
-/// generated `parse()` does exactly this, which the stage grammar can't use.
+/// `#[usage(completion)]` installs the `__complete_word__` interception in the
+/// generated `Cli::parse()`, which the stage grammar cannot use: this binary splits
+/// argv on `--` and parses each chunk itself, so without this the request reaches
+/// the ordinary grammar and is refused.
+///
+/// The root spec is the globals plus the *first* stage. A cursor in a later chunk
+/// answered against it offers `--connect` and the other process-wide flags, which a
+/// stage refuses, so the request is rewritten to the active chunk and handed to
+/// [`Stage`]. Both request shapes normalize to a word list first: elvish sends one
+/// already, and everything else sends a line and a cursor that Usage's own splitter
+/// turns into the same thing.
+fn completion_request(argv: &[OsString]) -> Option<String> {
+	if argv.first()?.to_str()? != "__complete_word__" {
+		return None;
+	}
+
+	let mut shell_name = "bash".to_string();
+	let mut candidates: Option<String> = None;
+	let mut line = String::new();
+	let mut cursor = None;
+	let mut words: Option<Vec<String>> = None;
+
+	let mut rest = argv[1..].iter();
+	while let Some(arg) = rest.next() {
+		match arg.to_str().unwrap_or_default() {
+			"--shell" => {
+				if let Some(name) = rest.next() {
+					shell_name = name.to_string_lossy().into_owned();
+				}
+			}
+			"--line" => {
+				if let Some(value) = rest.next() {
+					line = value.to_string_lossy().into_owned();
+				}
+			}
+			"--cursor" => cursor = rest.next().and_then(|v| v.to_str()).and_then(|v| v.parse().ok()),
+			"--candidates" => candidates = rest.next().map(|v| v.to_string_lossy().into_owned()),
+			// Terminal, as it is for Usage: the rest of argv is the word list.
+			"--words" => {
+				words = Some(rest.map(|w| w.to_string_lossy().into_owned()).collect());
+				break;
+			}
+			// An unknown flag is a shell passing something this version does not know
+			// about. Ignored rather than refused, the way Usage ignores it.
+			_ => {}
+		}
+	}
+
+	let shell = usage::complete::Shell::from_name(&shell_name).unwrap_or(usage::complete::Shell::Bash);
+	let (mut words, cword) = match words {
+		Some(mut words) => {
+			if words.is_empty() {
+				words.push(String::new());
+			}
+			let cword = words.len() - 1;
+			(words, cword)
+		}
+		None => {
+			let split = usage::complete::split(&line, cursor.unwrap_or(line.len()), shell);
+			(split.words, split.cword)
+		}
+	};
+
+	// Everything past the cursor says nothing about the word being completed, and
+	// dropping it leaves that word last, which is the shape `--words` describes.
+	words.truncate(cword + 1);
+
+	// Strictly before the cursor: a cursor sitting *on* a `--` is typing the
+	// separator itself, which is the root's business rather than a stage's.
+	let stage_start = words[..cword].iter().rposition(|word| word == "--").map(|at| at + 1);
+	let Some(start) = stage_start else {
+		return Cli::completion_request(argv);
+	};
+
+	// `words[0]` is read as the program name, so the chunk gets one of its own.
+	let mut rewritten: Vec<OsString> = vec![
+		OsString::from("__complete_word__"),
+		OsString::from("--shell"),
+		OsString::from(&shell_name),
+	];
+	if let Some(name) = candidates {
+		rewritten.push(OsString::from("--candidates"));
+		rewritten.push(OsString::from(name));
+	}
+	rewritten.push(OsString::from("--words"));
+	rewritten.push(OsString::from("moq"));
+	rewritten.extend(words[start..].iter().map(OsString::from));
+	Stage::completion_request(&rewritten)
+}
+
+/// Turn a Usage parse result into a [`ParseError`].
+///
+/// The rendering lives in [`moq_tokio::cli::answer`], shared with moq-relay and
+/// moq-bench, which parse more than once for their own reasons. This adds the
+/// failure category, which only this crate's callers ask about.
 fn parse_error(
 	spec: &usage::argv::spec::Spec<'_>,
 	root: &usage::Command<'_>,
 	argv: &[&OsStr],
 	err: usage::Error<'_, '_>,
 ) -> ParseError {
-	use usage::help::{Page, Style};
-
-	let page = |cmd, want, style| usage::help::page(spec, root, argv, cmd, want, style).unwrap_or_default();
-
-	match err {
-		usage::Error::Help { cmd, long } => {
-			let want = if long { Page::Long } else { Page::Short };
-			ParseError::new(ParseErrorKind::DisplayHelp, page(cmd, want, Style::auto()))
-		}
-		usage::Error::HelpAll { cmd } => {
-			ParseError::new(ParseErrorKind::DisplayHelp, page(cmd, Page::All, Style::auto()))
-		}
-		// Not a request: `arg_required_else_help` found nothing to do. clap prints
-		// the short page to stderr and exits 2, and so does this.
-		usage::Error::MissingArgsHelp { cmd } => ParseError::new(
-			ParseErrorKind::MissingSubcommand,
-			page(cmd, Page::Short, Style::auto_stderr()),
-		),
-		usage::Error::Version { long } => {
-			let bin = spec.bin.unwrap_or(spec.name);
-			let version = if long {
-				spec.long_version.or(spec.version)
-			} else {
-				spec.version.or(spec.long_version)
-			}
-			.unwrap_or_default();
-			ParseError::new(ParseErrorKind::DisplayVersion, format!("{bin} {version}\n"))
-		}
-		err => {
-			let kind = match err {
-				usage::Error::UnknownFlag { .. } | usage::Error::UnexpectedArg { .. } => {
-					ParseErrorKind::UnknownArgument
-				}
-				usage::Error::MissingSubcommand => ParseErrorKind::MissingSubcommand,
-				usage::Error::InvalidValue(_) | usage::Error::InvalidChoice { .. } => ParseErrorKind::ValueValidation,
-				_ => ParseErrorKind::Other,
-			};
-			ParseError::new(kind, usage::render_failure(spec, argv, &err))
-		}
-	}
+	let kind = match &err {
+		usage::Error::Help { .. } | usage::Error::HelpAll { .. } => ParseErrorKind::DisplayHelp,
+		usage::Error::Version { .. } => ParseErrorKind::DisplayVersion,
+		usage::Error::UnknownFlag { .. } | usage::Error::UnexpectedArg { .. } => ParseErrorKind::UnknownArgument,
+		usage::Error::MissingSubcommand | usage::Error::MissingArgsHelp { .. } => ParseErrorKind::MissingSubcommand,
+		usage::Error::InvalidValue(_) | usage::Error::InvalidChoice { .. } => ParseErrorKind::ValueValidation,
+		_ => ParseErrorKind::Other,
+	};
+	ParseError::new(kind, moq_tokio::cli::answer(spec, root, argv, err).message())
 }
 
 /// The MoQ attachment: a relay dial, a server listener, a LAN mesh, or any
@@ -1534,5 +1594,42 @@ mod tests {
 			choices.sort_unstable();
 			assert_eq!(choices, &expected, "--{long} is out of step with Version::names()");
 		}
+	}
+
+	/// A cursor in a later stage is completed against the stage grammar.
+	///
+	/// The root spec is the globals plus the first stage, so answering a later chunk
+	/// against it offers process-wide flags that the chunk refuses.
+	#[test]
+	fn completion_retargets_to_the_active_stage() {
+		fn complete(line: &str) -> Vec<String> {
+			let argv: Vec<OsString> = ["__complete_word__", "--shell", "bash", "--line", line, "--cursor"]
+				.iter()
+				.map(OsString::from)
+				.chain(std::iter::once(OsString::from(line.len().to_string())))
+				.collect();
+			completion_request(&argv)
+				.unwrap_or_default()
+				.lines()
+				.map(str::to_string)
+				.collect()
+		}
+
+		// A stage offers its own flags, and none of the globals it would refuse.
+		let staged = complete("moq --connect http://x/y import fmp4 -- export fmp4 --");
+		assert!(!staged.is_empty(), "a later stage completed nothing");
+		for global in ["--connect", "--origin", "--broadcast"] {
+			assert!(
+				!staged.iter().any(|c| c == global),
+				"{global} leaked into a stage that refuses it: {staged:?}"
+			);
+		}
+
+		// The root still answers for itself.
+		let root = complete("moq --conn");
+		assert!(root.iter().any(|c| c == "--connect"), "root lost its globals: {root:?}");
+
+		// A cursor sitting on the separator is typing `--`, not inside a stage.
+		assert!(complete("moq import fmp4 --").is_empty());
 	}
 }

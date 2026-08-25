@@ -407,7 +407,7 @@ pub struct Connect {
 	/// Setting both is an error. Not settable from the CLI or a config file,
 	/// since it never exists on disk.
 	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-	#[arg(skip)]
+	#[usage(skip)]
 	#[serde(skip)]
 	pub identity: Option<Identity>,
 
@@ -1158,7 +1158,7 @@ pub struct Listen {
 	/// identity to [`Connect::identity`] so both roles share one fingerprint. Not
 	/// settable from the CLI or a config file, since it never exists on disk.
 	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-	#[arg(skip)]
+	#[usage(skip)]
 	#[serde(skip)]
 	pub identity: Option<Identity>,
 
@@ -1173,7 +1173,7 @@ pub struct Listen {
 	/// Combining this with `root` is an error: pinning bypasses the chain, so one
 	/// of the two would be silently ignored. Not settable from the CLI or a config
 	/// file, since the set is maintained at runtime.
-	#[arg(skip)]
+	#[usage(skip)]
 	#[serde(skip)]
 	pub peers: Option<Peers>,
 
