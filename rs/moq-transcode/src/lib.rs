@@ -219,7 +219,6 @@ impl Transcoder {
 
 #[cfg(test)]
 mod tests {
-	use std::time::Duration;
 
 	use super::*;
 
@@ -690,17 +689,16 @@ mod tests {
 		assert_eq!(rendition.size().height, 120);
 		assert_eq!(rendition.bitrate(), 100_000);
 		assert!(!update.encoding, "encoding before anyone asked");
-		assert_eq!(rendition.encoded(), Duration::ZERO);
+		assert_eq!(rendition.frames(), 0);
 
 		let mut subscriber = consumer.track("video/120p").unwrap().subscribe(None).await.unwrap();
 		let update = active.next().await.unwrap();
 		assert_eq!(update.rendition.name(), "video/120p");
 		assert!(update.encoding);
 
-		// Real frames, so the meters are counting encoding rather than intent.
+		// Real frames, so the counters are counting encoding rather than intent.
 		let mut group = subscriber.next_group().await.unwrap().unwrap();
 		group.read_frame().await.unwrap().unwrap();
-		assert!(rendition.encoded() > Duration::ZERO);
 		assert!(rendition.frames() > 0);
 		assert!(rendition.bytes() > 0);
 
@@ -711,11 +709,9 @@ mod tests {
 		assert_eq!(update.rendition.name(), "video/120p");
 		assert!(!update.encoding);
 
-		// The clock stopped, but the totals survive for the final bill.
-		let billed = rendition.encoded();
-		assert!(billed > Duration::ZERO);
-		assert_eq!(rendition.encoded(), billed, "the clock kept running while idle");
+		// The rendition is idle, but the totals survive for the final bill.
 		assert!(rendition.frames() > 0);
+		assert!(rendition.bytes() > 0);
 
 		driver.abort();
 	}

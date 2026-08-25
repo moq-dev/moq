@@ -1,32 +1,36 @@
-//! Which renditions are encoding, and how much they have produced.
+//! Which renditions are encoding, and how much each has produced.
 //!
 //! Nothing is encoded until a consumer asks for a rung, so a transcoder that is
 //! publishing a catalog and a transcoder that is saturating a GPU look identical
 //! from the outside. Broadcast demand ([`moq_net::broadcast::Demand`]) closes
 //! half the gap: it says *someone* is watching. This module closes the other
-//! half by naming *which* renditions are being produced, and metering what each
+//! half by naming *which* renditions are being produced, and counting what each
 //! one produced, which is what a caller pricing or admitting the work needs.
 //!
 //! [`Consumer`] is a cursor shaped like [`moq_net::announce::Consumer`]: it
 //! reports the ladder as it resolves, then one rendition starting or stopping at
 //! a time. Each [`Rendition`] it hands over is a lasting handle, so a caller
-//! keeps them all and reads the meters whenever it bills.
+//! keeps them all and reads the counters whenever it bills.
 //!
 //! The cursor cannot bill on its own. A rendition whose pipelines start and stop
 //! between two calls is never reported as an edge (the same is true of
 //! `announce`), and a group fetch is exactly that: one pipeline per group, alive
-//! for milliseconds. The meters behind the handle count it anyway, which is why
-//! the ladder is delivered up front rather than on the first edge.
+//! for milliseconds. The counters behind the handle count it anyway, which is
+//! why the ladder is delivered up front rather than on the first edge.
+//!
+//! Frames are the unit rather than wall-clock time, because the two only agree
+//! on the live path. A group fetch encodes seconds of media in milliseconds, and
+//! a subscriber attached to a stalled source holds a pipeline open for minutes
+//! while producing nothing; counting frames is right in both. Media seconds, if
+//! that is the bill, are [`Rendition::frames`] over [`Rendition::framerate`].
 //!
 //! A rendition counts as encoding from its first encoded frame, not from the
-//! moment a consumer asked: a pipeline attached to a source that never sends a
-//! frame produces nothing, and nothing is what it bills.
+//! moment a consumer asked, for the same reason.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Poll, ready};
-use std::time::{Duration, Instant};
 
 use crate::catalog::Resolved;
 
@@ -42,7 +46,7 @@ pub struct Update {
 	pub encoding: bool,
 }
 
-/// A handle to one output rendition, holding the meters a caller bills against.
+/// A handle to one output rendition, holding the counters a caller bills against.
 ///
 /// Cheap to clone, and it outlives the encode: the totals stay readable while
 /// the rendition is idle, and keep accumulating if it starts again. Obtained
@@ -78,29 +82,13 @@ impl Rendition {
 		self.0.rung.framerate
 	}
 
-	/// How long this rendition has spent encoding, including the interval still
-	/// in flight.
-	///
-	/// The interval opens on the first frame a pipeline encodes and closes when
-	/// the last pipeline lets go, so a subscriber attached to a stalled source
-	/// bills nothing. Monotonic and never reset, across an idle gap included, so
-	/// subtracting two reads bills the span between them. Pipelines encoding the
-	/// same rendition concurrently (a group fetch overlapping the live path)
-	/// count once: a rendition-second is one rendition-second however many
-	/// encoders produced it.
-	pub fn encoded(&self) -> Duration {
-		let counts = self.0.counts.lock();
-		match counts.started {
-			Some(started) => counts.elapsed + started.elapsed(),
-			None => counts.elapsed,
-		}
-	}
-
 	/// How many frames this rendition has encoded, over every pipeline.
 	///
-	/// Unlike [`encoded`](Self::encoded) this counts what was produced rather
-	/// than how long it took, so it bills a fetch storm the same way it bills a
-	/// live session. Frames that failed to reach the output group are not
+	/// This is the meter to bill: monotonic, never reset, and counting what was
+	/// produced rather than how long a pipeline stayed alive, so a group fetch
+	/// and a live session are charged the same way. Subtracting two reads bills
+	/// the span between them, and `frames / framerate` is the media seconds that
+	/// reached consumers. Frames that failed to reach the output group are not
 	/// counted.
 	pub fn frames(&self) -> u64 {
 		self.0.counts.lock().frames
@@ -119,27 +107,12 @@ impl Rendition {
 		counts.frames += frames;
 		counts.bytes += bytes;
 	}
-
-	/// Start the clock. Called for the first pipeline to produce, under the
-	/// state lock.
-	fn start(&self) {
-		self.0.counts.lock().started = Some(Instant::now());
-	}
-
-	/// Stop the clock, banking the interval. Called for the last pipeline.
-	fn stop(&self) {
-		let mut counts = self.0.counts.lock();
-		if let Some(started) = counts.started.take() {
-			counts.elapsed += started.elapsed();
-		}
-	}
 }
 
 impl std::fmt::Debug for Rendition {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("Rendition")
 			.field("name", &self.name())
-			.field("encoded", &self.encoded())
 			.field("frames", &self.frames())
 			.finish()
 	}
@@ -153,10 +126,6 @@ struct Meter {
 /// Everything a caller bills against, behind one lock the cursors never touch.
 #[derive(Default)]
 struct Counts {
-	/// Intervals that have finished.
-	elapsed: Duration,
-	/// When the current interval began, set while a pipeline is encoding.
-	started: Option<Instant>,
 	/// Frames written to the output track.
 	frames: u64,
 	/// Bytes of encoded bitstream written to the output track.
@@ -174,8 +143,8 @@ struct Entry {
 #[derive(Default)]
 struct State {
 	/// The resolved ladder, by track name. Fixed once `run` resolves it, and
-	/// never pruned: a caller subtracting two [`Rendition::encoded`] reads needs
-	/// the meters to survive an idle gap.
+	/// never pruned: a caller subtracting two [`Rendition::frames`] reads needs
+	/// the counters to survive an idle gap.
 	ladder: BTreeMap<String, Entry>,
 }
 
@@ -206,9 +175,9 @@ impl Producer {
 
 	/// Attach a pipeline to a rendition until the returned guard drops.
 	///
-	/// Attaching is not encoding: the rendition starts (and its clock runs) on
-	/// the guard's first [`Guard::produced`], so a pipeline that never encodes a
-	/// frame is never reported and never billed.
+	/// Attaching is not encoding: the rendition starts on the guard's first
+	/// [`Guard::produced`], so a pipeline that never encodes a frame is never
+	/// reported and never billed.
 	pub(crate) fn attach(&self, rung: &Resolved) -> Guard {
 		// The guard holds a producer clone, so the channel stays open until the
 		// last of them is gone.
@@ -234,25 +203,20 @@ impl State {
 		})
 	}
 
-	/// Adjust how many pipelines are producing `name`, starting or stopping its
-	/// clock on the edges.
+	/// Adjust how many pipelines are producing `name`. Zero to one (and back) is
+	/// the edge a cursor reports.
 	fn count(&mut self, name: &str, delta: isize) {
 		let Some(entry) = self.ladder.get_mut(name) else { return };
 		entry.refs = entry.refs.saturating_add_signed(delta);
-		match entry.refs {
-			1 if delta > 0 => entry.rendition.start(),
-			0 => entry.rendition.stop(),
-			_ => {}
-		}
 	}
 }
 
-/// Holds a rendition encoding, and its clock running, until dropped.
+/// Holds a rendition encoding until dropped.
 ///
 /// RAII rather than an explicit release: every encode path is cancelled by being
 /// dropped (a rung whose demand goes away, a fetch aborted with its `JoinSet`),
 /// so a release call would be skipped exactly when it matters and leave the
-/// clock running forever.
+/// rendition reported as encoding forever.
 pub(crate) struct Guard {
 	state: kio::Producer<State>,
 	rendition: Rendition,
@@ -265,9 +229,9 @@ pub(crate) struct Guard {
 impl Guard {
 	/// Count frames written to the output track.
 	///
-	/// The first call is what makes the rendition encoding: it starts the clock
-	/// and wakes the cursors. Later calls only touch this rendition's meters, so
-	/// a per-frame call costs one uncontended lock and no wakeups.
+	/// The first call is what makes the rendition encoding, waking the cursors.
+	/// Later calls only touch this rendition's counters, so a per-frame call
+	/// costs one uncontended lock and no wakeups.
 	pub(crate) fn produced(&self, frames: u64, bytes: u64) {
 		if frames == 0 {
 			return;
@@ -303,15 +267,15 @@ impl Drop for Guard {
 /// [`Transcoder::active`](crate::Transcoder::active).
 ///
 /// It is a cursor, not a log: a rendition that starts and stops between two
-/// calls is reported neither time. Bill from [`Rendition::encoded`] (or
-/// [`Rendition::frames`]), which count it regardless.
+/// calls is reported neither time. Bill from [`Rendition::frames`], which counts
+/// it regardless.
 ///
 /// ```no_run
 /// # async fn example(active: &mut moq_transcode::active::Consumer) {
 /// while let Some(update) = active.next().await {
 ///     match update.encoding {
 ///         true => println!("{} started", update.rendition.name()),
-///         false => println!("{} idle after {:?}", update.rendition.name(), update.rendition.encoded()),
+///         false => println!("{} idle after {} frames", update.rendition.name(), update.rendition.frames()),
 ///     }
 /// }
 /// # }
@@ -388,6 +352,8 @@ fn next_update(state: &State, seen: &BTreeMap<String, bool>) -> Option<Update> {
 
 #[cfg(test)]
 mod tests {
+	use std::time::Duration;
+
 	use super::*;
 
 	fn resolved(name: &str, height: u32) -> Resolved {
@@ -439,23 +405,20 @@ mod tests {
 		let guard = active.attach(&rung);
 		tokio::time::sleep(Duration::from_millis(20)).await;
 		assert!(cursor.try_next().is_none(), "attaching reported an edge");
-		assert_eq!(rendition.encoded(), Duration::ZERO);
+		assert_eq!(rendition.frames(), 0);
 
-		// The first frame is what starts the clock and the edge.
+		// The first frame is what makes it encoding.
 		guard.produced(1, 1_000);
 		assert!(cursor.next().await.unwrap().encoding);
-		assert!(
-			rendition.encoded() < Duration::from_millis(20),
-			"billed the idle attach"
-		);
+		assert_eq!(rendition.frames(), 1);
 
 		drop(guard);
 		assert!(!cursor.next().await.unwrap().encoding);
 	}
 
-	/// A fetch overlapping the live session is one rendition, not two: the bill
-	/// is per rendition-second, so a second pipeline is not an edge and does not
-	/// start a second clock. Its output still counts.
+	/// A fetch overlapping the live session is one rendition, not two: a second
+	/// pipeline is not an edge. Its output still counts, because it really did
+	/// encode those frames.
 	#[tokio::test]
 	async fn concurrent_pipelines_are_one_rendition() {
 		let active = Producer::default();
@@ -488,9 +451,7 @@ mod tests {
 		drop(other);
 		assert!(!cursor.next().await.unwrap().encoding);
 
-		// The handle outlives the encode, the clock ran once, and both pipelines
-		// counted their own output.
-		assert!(rendition.encoded() > Duration::ZERO);
+		// The handle outlives the encode, and both pipelines counted their output.
 		assert_eq!(rendition.frames(), 3);
 		assert_eq!(rendition.bytes(), 2_500);
 	}
@@ -517,7 +478,7 @@ mod tests {
 		);
 	}
 
-	/// The whole point of splitting the meters from the cursor: a pipeline that
+	/// The whole point of splitting the counters from the cursor: a pipeline that
 	/// starts and stops between two reads is invisible as an edge, but it still
 	/// encoded, so it still bills. This is the group-fetch path, which lives for
 	/// milliseconds. The caller can only bill it because the ladder handed it the
@@ -530,50 +491,42 @@ mod tests {
 
 		let mut cursor = active.consume();
 		let rendition = cursor.next().await.unwrap().rendition;
-		assert_eq!(rendition.encoded(), Duration::ZERO);
+		assert_eq!(rendition.frames(), 0);
 
 		let guard = active.attach(&rung);
 		guard.produced(30, 30_000);
-		tokio::time::sleep(Duration::from_millis(20)).await;
 		drop(guard);
 
 		// The cursor converged without ever reporting the start or the stop.
 		assert!(cursor.try_next().is_none());
-		// The meters did not miss it.
-		assert!(rendition.encoded() >= Duration::from_millis(20));
+		// The counters did not miss it.
 		assert_eq!(rendition.frames(), 30);
 		assert_eq!(rendition.bytes(), 30_000);
 	}
 
-	/// A caller bills by subtracting two reads, so the clock has to advance while
-	/// the rendition is still encoding rather than only when it stops, and it has
-	/// to keep its total across an idle gap.
+	/// A caller bills by subtracting two reads, so the counters have to keep
+	/// their totals across an idle gap rather than restarting with the next
+	/// pipeline.
 	#[tokio::test]
-	async fn the_clock_runs_in_flight_and_survives_an_idle_gap() {
+	async fn the_counters_survive_an_idle_gap() {
 		let active = Producer::default();
 		let rung = resolved("video/360p", 360);
 		let mut cursor = active.consume();
 
 		let guard = active.attach(&rung);
-		guard.produced(1, 1_000);
+		guard.produced(10, 10_000);
 		let rendition = cursor.next().await.unwrap().rendition;
-
-		tokio::time::sleep(Duration::from_millis(20)).await;
-		let first = rendition.encoded();
-		assert!(first >= Duration::from_millis(20), "the clock stalled while encoding");
 
 		drop(guard);
 		cursor.next().await;
-		let idle = rendition.encoded();
-		assert!(idle >= first);
+		assert_eq!(rendition.frames(), 10, "the totals reset when the rendition went idle");
 
 		// A second session keeps accumulating rather than restarting at zero.
 		let guard = active.attach(&rung);
-		guard.produced(1, 1_000);
-		cursor.next().await;
-		tokio::time::sleep(Duration::from_millis(20)).await;
-		assert!(rendition.encoded() >= idle + Duration::from_millis(20));
-		assert_eq!(rendition.frames(), 2);
+		guard.produced(5, 5_000);
+		assert!(cursor.next().await.unwrap().encoding);
+		assert_eq!(rendition.frames(), 15);
+		assert_eq!(rendition.bytes(), 15_000);
 		drop(guard);
 	}
 

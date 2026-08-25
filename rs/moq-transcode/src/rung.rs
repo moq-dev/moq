@@ -577,7 +577,7 @@ mod tests {
 		assert!(write(&mut group, &guard, vec![good, bad]).is_err());
 		assert_eq!(rendition.frames(), 1);
 		assert_eq!(rendition.bytes(), 5);
-		// One frame is still a start, so the rendition is encoding and clocked.
+		// One frame is still a start, so the rendition reads as encoding.
 		assert!(cursor.try_next().expect("edge").encoding);
 	}
 }
