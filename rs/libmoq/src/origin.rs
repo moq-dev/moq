@@ -182,9 +182,9 @@ impl Origin {
 	///
 	/// Unlike [`Self::consume`] (announced-only, fails fast) and [`Self::consume_announced`]
 	/// (waits indefinitely for a future announcement), this resolves against any broadcast
-	/// reachable by exact path now plus any dynamic fallback handler on the origin: the callback
-	/// fires the broadcast handle (> 0) once served, then a terminal `0`; or a single terminal code
-	/// (`0` on close, negative on error) if it can't be served. Returns a task handle for cancellation.
+	/// reachable by exact path now, whether announced or not: the callback fires the broadcast
+	/// handle (> 0) once served, then a terminal `0`; or a single terminal code (`0` on close,
+	/// negative on error) if it can't be served. Returns a task handle for cancellation.
 	pub fn request(&mut self, origin: Id, path: String, on_broadcast: OnStatus) -> Result<Id, Error> {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
 		let consumer = origin.consume();
@@ -216,8 +216,7 @@ impl Origin {
 		path: String,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
-		// Resolves to an error if the path can never be served (not announced and no dynamic
-		// handler), otherwise once a handler serves it.
+		// Resolves to an error when no broadcast is reachable by exact path.
 		let pending = consumer.request_broadcast(path.as_str());
 
 		// `biased` so a pending close always wins over a ready broadcast.

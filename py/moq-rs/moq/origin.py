@@ -165,10 +165,10 @@ class OriginConsumer:
     async def request_broadcast(self, path: str) -> BroadcastConsumer:
         """Request a broadcast by path, resolving as soon as it can be served.
 
-        Returns the announced broadcast immediately if one exists, otherwise falls
-        back to a dynamic handler on the origin (if any), or raises if neither can
-        serve it. Unlike `announced_broadcast`, this does not wait indefinitely for a
-        future announcement.
+        Returns an existing exact-path broadcast immediately, whether announced or
+        not, otherwise falls back to a dynamic handler on the origin (if any), or
+        raises if neither can serve it. Unlike `announced_broadcast`, this does not
+        wait indefinitely for a future announcement.
         """
         return BroadcastConsumer(await self._inner.request_broadcast(path))
 

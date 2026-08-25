@@ -92,7 +92,7 @@ public final class OriginDynamic: AsyncSequence, Sendable {
     }
 }
 
-/// The subscribe side of an origin: discover announced broadcasts.
+/// The subscribe side of an origin: discover and request published broadcasts.
 public final class OriginConsumer: Sendable {
     let ffi: MoqOriginConsumer
 
@@ -110,10 +110,10 @@ public final class OriginConsumer: Sendable {
         AnnouncedBroadcast(try ffi.announcedBroadcast(path: path))
     }
 
-    /// Request a broadcast by path, resolving as soon as it can be served: the announced
-    /// broadcast if present, otherwise a dynamic fallback on the origin, or an error if
-    /// neither can serve it. Unlike `announcedBroadcast`, this does not wait for a future
-    /// announcement.
+    /// Request a broadcast by path, resolving as soon as it can be served: an existing
+    /// exact-path broadcast whether announced or not, otherwise a dynamic fallback on the
+    /// origin, or an error if neither can serve it. Unlike `announcedBroadcast`, this does
+    /// not wait for a future announcement.
     public func requestBroadcast(path: String) async throws -> BroadcastConsumer {
         BroadcastConsumer(try await ffi.requestBroadcast(path: path))
     }

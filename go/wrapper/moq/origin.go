@@ -51,12 +51,13 @@ func (o *OriginProducer) CreateBroadcast(path string) (*BroadcastProducer, error
 	return &BroadcastProducer{inner: inner}, nil
 }
 
-// OriginDynamic streams broadcast requests for paths that are not announced.
+// OriginDynamic streams requests for paths with no existing exact-path broadcast.
 type OriginDynamic struct {
 	inner *ffi.MoqOriginDynamic
 }
 
-// RequestedBroadcast blocks until a consumer requests an unannounced broadcast.
+// RequestedBroadcast blocks until a consumer requests a path with no existing
+// exact-path broadcast.
 func (d *OriginDynamic) RequestedBroadcast(ctx context.Context) (*BroadcastRequest, error) {
 	inner, err := runCancellable(ctx, d.inner.Cancel, d.inner.RequestedBroadcast)
 	if err != nil {
@@ -99,7 +100,7 @@ func (r *BroadcastRequest) Abort(errorCode uint16) error {
 	return r.inner.Abort(errorCode)
 }
 
-// OriginConsumer discovers broadcasts announced to an origin.
+// OriginConsumer discovers and requests broadcasts published to an origin.
 type OriginConsumer struct {
 	inner *ffi.MoqOriginConsumer
 }
@@ -122,10 +123,11 @@ func (o *OriginConsumer) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, e
 	return &AnnouncedBroadcast{inner: inner}, nil
 }
 
-// RequestBroadcast resolves a broadcast at path as soon as it can be served: the
-// announced broadcast if present, otherwise a dynamic fallback on the origin, or an
-// error if neither can serve it. Unlike AnnouncedBroadcast, it does not wait for a
-// future announcement. Blocks until resolved.
+// RequestBroadcast resolves a broadcast at path as soon as it can be served: an
+// existing exact-path broadcast whether announced or not, otherwise a dynamic
+// fallback on the origin, or an error if neither can serve it. Unlike
+// AnnouncedBroadcast, it does not wait for a future announcement. Blocks until
+// resolved.
 func (o *OriginConsumer) RequestBroadcast(path string) (*BroadcastConsumer, error) {
 	inner, err := o.inner.RequestBroadcast(path)
 	if err != nil {
