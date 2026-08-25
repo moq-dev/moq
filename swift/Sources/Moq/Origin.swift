@@ -20,6 +20,7 @@ public final class OriginProducer: Sendable {
         OriginConsumer(ffi.consume())
     }
 
+    @_documentation(visibility: internal)
     @available(*, deprecated, message: "dynamic routing is not currently supported by clients")
     public func dynamic() -> OriginDynamic {
         OriginDynamic(ffi.dynamic())
@@ -38,6 +39,7 @@ public final class OriginProducer: Sendable {
 }
 
 /// A requested broadcast that has not been accepted yet.
+@_documentation(visibility: internal)
 public final class BroadcastRequest: Sendable {
     let ffi: MoqBroadcastRequest
 
@@ -64,6 +66,7 @@ public final class BroadcastRequest: Sendable {
 /// A stream of broadcasts requested by consumers. Iterate directly:
 /// `for try await request in dynamic { ... }`. Hold this while missing
 /// broadcasts should be served; cancelling the consuming task stops serving.
+@_documentation(visibility: internal)
 public final class OriginDynamic: AsyncSequence, Sendable {
     /// The broadcast request emitted by this sequence.
     public typealias Element = BroadcastRequest
