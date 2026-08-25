@@ -38,7 +38,13 @@ It advertises a pattern of namespaces rather than an exact one.
 
 
 # Introduction
-Some content does not exist until somebody asks for it, and the set of namespaces it could occupy is too large to enumerate: a standby transcoder that would otherwise advertise a derivative per broadcast, or an archive whose claim is "if nobody is producing this live, I have it".
+An advertisement says a namespace exists and, by its route, where to reach it.
+Without one there is no route at all: an endpoint holds sessions rather than a directory, so a namespace nobody advertised has no session to send a request down, however willing some peer would have been to produce it.
+
+The set that would fix this cannot be enumerated, and not merely because it is large.
+A standby transcoder cannot advertise a derivative before the broadcast it derives from exists, and an archive whose claim is "if nobody is producing this live, I have it" is making a claim about namespaces that have not been created yet.
+Content that does not exist until somebody asks for it cannot be listed in advance at any price.
+
 A dynamic advertisement makes the claim once, as a pattern of namespaces the publisher *could* serve: a capability, not an inventory, with one namespace denied by refusing its request ({{refusal}}).
 
 
@@ -76,6 +82,10 @@ A dynamic advertisement names no content.
 A receiver MUST NOT present one as an available namespace, and SHOULD present duplicate advertisements of one pattern combined, gone only when the last advertiser withdraws.
 An advertisement is withdrawn or replaced through the same forms a concrete advertisement uses.
 
+Because a dynamic advertisement rides the same messages as a concrete one, a receiver takes both kinds together and separates them itself.
+There is no way to ask for capability without inventory, as {{moqt}} has no request that could carry the distinction; declining the setup option refuses patterns entirely, which is the opposite request.
+A receiver that wants only patterns subscribes to the namespace and discards the concrete advertisements, which costs bandwidth and nothing else.
+
 
 # Selection {#selection}
 An endpoint MAY resolve a request (SUBSCRIBE, FETCH, or TRACK_STATUS) for an unadvertised namespace against the dynamic advertisements it holds, and resolution recurses: a resolved request forwarded onward is still unadvertised there.
@@ -93,6 +103,7 @@ Select the candidate whose full 64-bit result is highest.
 For dynamic advertisements this hash replaces {{cluster}}'s shorter-HOP_PATH and recency tie-breaks.
 
 A resolved namespace competes on that same accumulated cost against any concrete advertisement of it; the kind carries no rank of its own.
+A dynamic advertisement carries no EPOCH ({{moqt}} extensions notwithstanding): two advertisers of one pattern are a pool rather than a contest, so there is no generation to arbitrate, and a fleet handing off to another prices its cost above it and drains rather than suppressing it outright.
 A dynamic advertisement's cost is its on-demand production cost, and it never takes the actively-carrying discount.
 Standby capacity has to be priced above the work it would duplicate, or a nearby standby outranks a distant publisher already doing the work and the mesh starts a second copy.
 A publisher advertising standby capacity SHOULD therefore price at or above the RECOMMENDED standby floor of `2^32`, which sits far above any cost an accumulating topology reaches in practice and, being a constant, is something independent implementations agree on without having to know the deployment.
