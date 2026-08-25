@@ -21,7 +21,7 @@ public final class OriginProducer: Sendable {
     }
 
     @_documentation(visibility: internal)
-    @available(*, deprecated, message: "Dynamic origin routing is not currently supported by clients.")
+    @available(*, deprecated, message: "dynamic routing is not currently supported by clients")
     public func dynamic() -> OriginDynamic {
         OriginDynamic(ffi.dynamic())
     }
@@ -109,10 +109,8 @@ public final class OriginConsumer: Sendable {
         AnnouncedBroadcast(try ffi.announcedBroadcast(path: path))
     }
 
-    /// Request a broadcast by path, resolving as soon as it can be served: the announced
-    /// broadcast if present, otherwise a dynamic fallback on the origin, or an error if
-    /// neither can serve it. Unlike `announcedBroadcast`, this does not wait for a future
-    /// announcement.
+    /// Request an already-announced broadcast by path, or throw if none is available.
+    /// Unlike `announcedBroadcast`, this does not wait for a future announcement.
     public func requestBroadcast(path: String) async throws -> BroadcastConsumer {
         BroadcastConsumer(try await ffi.requestBroadcast(path: path))
     }

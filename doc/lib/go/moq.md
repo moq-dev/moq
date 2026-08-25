@@ -317,7 +317,7 @@ _ = producer.Finish()
 
 Call `request.Abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
 
-To serve requests in a loop, range over `dynamic.Requests(ctx)` instead, the same shape `BroadcastDynamic` and `OriginDynamic` use:
+To serve requests in a loop, range over `dynamic.Requests(ctx)` instead, the same shape `BroadcastDynamic` uses:
 
 ```go
 for request, err := range dynamic.Requests(ctx) {

@@ -381,7 +381,10 @@ async def test_dynamic_track_request_can_publish_media():
 
 async def test_dynamic_broadcast_request():
     origin = moq.OriginProducer(cache_capacity_bytes=4096)
-    with pytest.warns(DeprecationWarning, match="not currently supported by clients"):
+    with pytest.warns(
+        DeprecationWarning,
+        match="dynamic routing is not currently supported by clients",
+    ):
         dynamic = origin.dynamic()
     consumer = origin.consume()
 
@@ -411,7 +414,10 @@ async def test_dynamic_broadcast_request():
 
 async def test_dynamic_broadcast_request_can_reject():
     origin = moq.OriginProducer()
-    with pytest.warns(DeprecationWarning, match="not currently supported by clients"):
+    with pytest.warns(
+        DeprecationWarning,
+        match="dynamic routing is not currently supported by clients",
+    ):
         dynamic = origin.dynamic()
     consumer = origin.consume()
 

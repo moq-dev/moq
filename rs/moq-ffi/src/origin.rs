@@ -221,7 +221,7 @@ impl MoqOriginProducer {
 	#[deprecated(note = "dynamic routing is not currently supported by clients")]
 	pub fn dynamic(&self) -> Arc<MoqOriginDynamic> {
 		let _guard = crate::ffi::enter();
-		tracing::warn!("dynamic origin routing is not currently supported by clients");
+		tracing::warn!("dynamic routing is not currently supported by clients");
 		Arc::new(MoqOriginDynamic {
 			task: Task::new(OriginDynamic {
 				inner: self.inner.dynamic(),
@@ -278,11 +278,9 @@ impl MoqOriginConsumer {
 
 	/// Request a broadcast by path, resolving as soon as it can be served.
 	///
-	/// Returns the announced broadcast immediately if one exists; otherwise falls back to a
-	/// dynamic handler on the origin (if any) and resolves once it serves the broadcast, or
-	/// errors if nothing can serve it. Unlike `announced_broadcast`, this does *not* wait
-	/// indefinitely for a future announcement: it resolves or fails based on what is
-	/// announced now plus any dynamic fallback. Drop the returned future to cancel.
+	/// Returns an already-announced broadcast immediately, or errors if none is available.
+	/// Unlike `announced_broadcast`, this does *not* wait indefinitely for a future
+	/// announcement. Drop the returned future to cancel.
 	///
 	/// Calling this straight after connecting therefore races the session's announcements
 	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first.

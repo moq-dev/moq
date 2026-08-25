@@ -167,9 +167,9 @@ class OriginConsumer:
     async def request_broadcast(self, path: str) -> BroadcastConsumer:
         """Request a broadcast by path, resolving as soon as it can be served.
 
-        Returns a broadcast that can be served immediately, or raises if none exists.
-        Unlike `announced_broadcast`, this does not wait indefinitely for a future
-        announcement.
+        Returns an already-announced broadcast immediately, or raises if none is
+        available. Unlike `announced_broadcast`, this does not wait indefinitely for
+        a future announcement.
         """
         return BroadcastConsumer(await self._inner.request_broadcast(path))
 
@@ -177,7 +177,7 @@ class OriginConsumer:
 class OriginProducer:
     """The publishing side of an origin: announce broadcasts for consumers to discover.
 
-    Call :meth:`create_broadcast` to publish at a path, or :meth:`consume` for a
+    Call :meth:`create_broadcast` to publish at a path or :meth:`consume` for a
     matching :class:`OriginConsumer`.
     """
 
@@ -197,7 +197,7 @@ class OriginProducer:
 
     def dynamic(self) -> OriginDynamic:
         warnings.warn(
-            "dynamic origin routing is not currently supported by clients",
+            "dynamic routing is not currently supported by clients",
             DeprecationWarning,
             stacklevel=2,
         )

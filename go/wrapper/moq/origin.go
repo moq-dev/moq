@@ -30,7 +30,9 @@ func (o *OriginProducer) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: o.inner.Consume()}
 }
 
-// Deprecated: Dynamic origin routing is not currently supported by clients.
+// Dynamic serves broadcasts that consumers request without an announcement.
+//
+// Deprecated: dynamic routing is not currently supported by clients.
 func (o *OriginProducer) Dynamic() *OriginDynamic {
 	return &OriginDynamic{inner: o.inner.Dynamic()}
 }
@@ -52,6 +54,8 @@ func (o *OriginProducer) CreateBroadcast(path string) (*BroadcastProducer, error
 }
 
 // OriginDynamic streams broadcast requests for paths that are not announced.
+//
+// Deprecated: dynamic routing is not currently supported by clients.
 type OriginDynamic struct {
 	inner *ffi.MoqOriginDynamic
 }
@@ -122,10 +126,9 @@ func (o *OriginConsumer) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, e
 	return &AnnouncedBroadcast{inner: inner}, nil
 }
 
-// RequestBroadcast resolves a broadcast at path as soon as it can be served: the
-// announced broadcast if present, otherwise a dynamic fallback on the origin, or an
-// error if neither can serve it. Unlike AnnouncedBroadcast, it does not wait for a
-// future announcement. Blocks until resolved.
+// RequestBroadcast returns an already-announced broadcast at path, or an error if
+// none is available. Unlike AnnouncedBroadcast, it does not wait for a future
+// announcement. Blocks until resolved.
 func (o *OriginConsumer) RequestBroadcast(path string) (*BroadcastConsumer, error) {
 	inner, err := o.inner.RequestBroadcast(path)
 	if err != nil {
