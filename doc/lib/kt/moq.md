@@ -58,7 +58,7 @@ To resolve a single broadcast rather than iterate announcements:
 // Waits for the announcement, however long that takes.
 val broadcast = moq.announcedBroadcast("demos/clock").available()
 
-// Returns an already-announced broadcast, or throws.
+// Resolves without waiting for a future announcement, or throws.
 val broadcast = moq.requestBroadcast("demos/clock")
 ```
 

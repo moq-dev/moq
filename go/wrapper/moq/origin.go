@@ -112,9 +112,9 @@ func (o *OriginConsumer) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, e
 	return &AnnouncedBroadcast{inner: inner}, nil
 }
 
-// RequestBroadcast returns an already-announced broadcast at path, or an error if
-// none is available. Unlike AnnouncedBroadcast, it does not wait for a future
-// announcement. Blocks until resolved.
+// RequestBroadcast resolves a broadcast at path when it can be served, or returns
+// an error. Unlike AnnouncedBroadcast, it does not wait for a future announcement.
+// Blocks until resolved.
 func (o *OriginConsumer) RequestBroadcast(path string) (*BroadcastConsumer, error) {
 	inner, err := o.inner.RequestBroadcast(path)
 	if err != nil {

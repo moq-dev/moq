@@ -307,11 +307,11 @@ async for announcement in client.announced("live/"):
 # Or wait for a specific path to be announced:
 broadcast = await client.announced_broadcast("live/cam1")
 
-# Or request a path that is already announced. This does not wait for a future announce.
+# Or resolve a path without waiting for a future announce.
 broadcast = await client.request_broadcast("live/cam1")
 ```
 
-Announcements arrive over the session after it connects, so `request_broadcast` on its own races them: right after connecting it can raise for a broadcast that is live. Await `announced_broadcast(path)` first when you know the path you want; use `request_broadcast` only when you already know the path is announced.
+Announcements arrive over the session after it connects, so `request_broadcast` on its own races them: right after connecting it can raise for a broadcast that is live. Await `announced_broadcast(path)` when you want to wait for that announcement; use `request_broadcast` when the path should resolve immediately or fail.
 
 Each broadcast carries a `Route`: `route.hops` is the chain of relay origin ids (as `list[int]`) the broadcast passed through to reach you, oldest first, and `route.cost` is the publisher's advertised preference (lower wins). The route is dynamic; `await broadcast.route_changed()` returns the current route first, then blocks for each change (e.g. an upstream failover), and returns `None` once the broadcast ends. A publisher advertises its own route with `producer.set_route(moq.Route(hops=[], cost=10))`, for example a standby transcoder that lowers its cost to 0 once it is warm.
 

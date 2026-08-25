@@ -53,7 +53,7 @@ class Moq internal constructor(
     fun announcedBroadcast(path: String): MoqAnnouncedBroadcast = session.consumer().announcedBroadcast(path)
 
     /**
-     * Resolve an already-announced broadcast at [path], or throw if none is available.
+     * Resolve a broadcast at [path] when it can be served, or throw otherwise.
      *
      * Unlike [announcedBroadcast] this does not wait for a future announcement.
      */

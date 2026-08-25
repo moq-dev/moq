@@ -280,9 +280,9 @@ impl MoqOriginConsumer {
 
 	/// Request a broadcast by path, resolving as soon as it can be served.
 	///
-	/// Returns an already-announced broadcast immediately, or errors if none is available.
-	/// Unlike `announced_broadcast`, this does *not* wait indefinitely for a future
-	/// announcement. Drop the returned future to cancel.
+	/// Resolves when a broadcast can be served, or errors if none is available. Unlike
+	/// `announced_broadcast`, this does *not* wait indefinitely for a future announcement.
+	/// Drop the returned future to cancel.
 	///
 	/// Calling this straight after connecting therefore races the session's announcements
 	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first.
