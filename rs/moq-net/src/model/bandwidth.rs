@@ -8,6 +8,7 @@
 //! *follows* its share is policy and lives with the sender: see
 //! `moq_video::encode::rate` for the encoder's.
 
+use std::sync::Arc;
 use std::task::Poll;
 
 use crate::{Error, Result, track};
@@ -166,9 +167,13 @@ impl Allocator {
 	///
 	/// The returned [`Consumer`] reports `None` while nothing is subscribed to the
 	/// track or the connection has no estimate, which tells a sender to hold its
-	/// current rate rather than to encode at zero. The share is released when the
-	/// track closes: a [`track::Demand`] is a weak handle, so registering one never
+	/// current rate rather than to encode at zero. The reservation lasts as long as
+	/// that consumer (and any clone of it), and is released when the track closes
+	/// either way: a [`track::Demand`] is a weak handle, so registering one never
 	/// keeps a track alive.
+	///
+	/// Registering the same track again claims a second reservation, so a sender
+	/// whose ceiling changed must drop the old share before taking a new one.
 	pub fn register(&self, track: &track::Demand, max: u64) -> Consumer {
 		// Read the track before taking the registry lock, so the two are never held
 		// at once and there's no order to get wrong.
@@ -200,7 +205,10 @@ impl Allocator {
 			inner: Inner::Share(Box::new(Share {
 				estimate: self.estimate.clone(),
 				registry: self.registry.consume(),
-				id,
+				registration: Arc::new(Registration {
+					registry: self.registry.downgrade(),
+					id,
+				}),
 			})),
 			last: None,
 		}
@@ -238,7 +246,32 @@ struct Share {
 	/// What's being divided, which may itself be a share.
 	estimate: Consumer,
 	registry: kio::Consumer<Registry>,
+	registration: Arc<Registration>,
+}
+
+/// A reservation's entry in the registry, released when the last clone of the share
+/// holding it goes away.
+///
+/// A track that outlives its share (an encoder reopening at a different ceiling) would
+/// otherwise keep claiming the old reservation for the rest of the connection, since
+/// the registry only ever prunes tracks that have closed.
+struct Registration {
+	/// Weak so a share can't keep the registry alive: a share outliving every
+	/// [`Allocator`] still reports the registry as gone.
+	registry: kio::Weak<Registry>,
 	id: u64,
+}
+
+impl Drop for Registration {
+	fn drop(&mut self) {
+		let Some(registry) = self.registry.upgrade() else {
+			return;
+		};
+		let Ok(mut registry) = registry.write() else {
+			return;
+		};
+		registry.entries.retain(|entry| entry.id != self.id);
+	}
 }
 
 /// One demanded track's claim, snapshotted out of the [`Registry`] so no lock is
@@ -260,7 +293,7 @@ impl Share {
 			.filter(|(_, demand)| demand.is_used())
 			.map(|(want, _)| want)
 			.collect();
-		allocate(estimate, &wants, self.id)
+		allocate(estimate, &wants, self.registration.id)
 	}
 
 	/// This share's slice, arming `waiter` for everything that could move it: the
@@ -305,7 +338,7 @@ impl Share {
 		let grant = self
 			.estimate
 			.peek()
-			.and_then(|estimate| allocate(estimate, &wants, self.id));
+			.and_then(|estimate| allocate(estimate, &wants, self.registration.id));
 		Poll::Ready(Ok(grant))
 	}
 
@@ -727,14 +760,63 @@ mod tests {
 		let estimate = Producer::new();
 		let allocator = Allocator::new(estimate.consume());
 
+		// Both shares are held: dropping one releases its reservation on its own,
+		// which would prove nothing about pruning the track that closed.
 		let (_first_broadcast, first) = track(VIDEO);
-		allocator.register(&first.demand(), 4_000_000);
+		let _first_share = allocator.register(&first.demand(), 4_000_000);
 		first.abort(Error::Cancel).unwrap();
 
 		let (_second_broadcast, second) = track(VIDEO);
-		allocator.register(&second.demand(), 4_000_000);
+		let _second_share = allocator.register(&second.demand(), 4_000_000);
 
 		assert_eq!(allocator.registry.read().entries.len(), 1);
+	}
+
+	/// An encoder reopening at a different ceiling drops its old share before taking a
+	/// new one, and that has to hand the room straight back. The registry only ever
+	/// prunes tracks that have *closed*, so a reservation left behind by a track that
+	/// is still alive would keep claiming for the rest of the connection.
+	#[tokio::test]
+	async fn dropping_a_share_releases_its_reservation() {
+		let estimate = Producer::new();
+		let allocator = Allocator::new(estimate.consume());
+		estimate.set(Some(2_000_000)).unwrap();
+
+		let (_first_broadcast, first) = track(VIDEO);
+		let _first_sub = first.consume();
+		let first_share = allocator.register(&first.demand(), 4_000_000);
+
+		let (_second_broadcast, second) = track(VIDEO);
+		let _second_sub = second.consume();
+		let second_share = allocator.register(&second.demand(), 4_000_000);
+		assert_eq!(second_share.peek(), Some(1_000_000));
+
+		// A clone is the same reservation, so the entry outlives the first drop: the
+		// capture loop hands one to its rate controller for the life of an encoder.
+		let clone = first_share.clone();
+		drop(first_share);
+		assert_eq!(allocator.registry.read().entries.len(), 2);
+		assert_eq!(second_share.peek(), Some(1_000_000));
+
+		drop(clone);
+		assert_eq!(allocator.registry.read().entries.len(), 1);
+		assert_eq!(second_share.peek(), Some(2_000_000));
+	}
+
+	/// The registry is the allocator's, not a share's: a share that outlives every
+	/// allocator reports the estimate as gone rather than keeping the channel open.
+	#[tokio::test]
+	async fn a_share_outliving_the_allocator_reports_closed() {
+		let estimate = Producer::new();
+		let allocator = Allocator::new(estimate.consume());
+
+		let (_broadcast, producer) = track(VIDEO);
+		let _sub = producer.consume();
+		let mut share = allocator.register(&producer.demand(), 4_000_000);
+
+		drop(allocator);
+		drop(estimate);
+		assert!(share.changed().await.is_err());
 	}
 
 	/// An unavailable estimate and a dead producer must not look alike: a caller

@@ -415,10 +415,11 @@ async fn capture_loop<E: CatalogExt>(
 	encode: &Options,
 	clock: &moq_mux::Clock,
 ) -> Result<(), Error> {
-	// This track's slice of the connection, once the encoder's ceiling is known.
-	// Unset when the caller passed no allocator, which means encode at the
-	// configured bitrate and ignore congestion entirely.
-	let mut share: Option<moq_net::bandwidth::Consumer> = None;
+	// This track's slice of the connection, once the encoder's ceiling is known,
+	// paired with the ceiling it was reserved for. Unset when the caller passed no
+	// allocator, which means encode at the configured bitrate and ignore congestion
+	// entirely.
+	let mut share: Option<(moq_net::bandwidth::Consumer, u64)> = None;
 
 	loop {
 		// Idle until a viewer subscribes; the track ending is a clean exit. The
@@ -450,21 +451,27 @@ async fn capture_loop<E: CatalogExt>(
 		tracing::info!(encoder = encoder.name(), device = camera.device(), "capturing");
 
 		// The negotiated mode is what finally says how much this encoder can ever
-		// send, so the reservation waits for the first open. It's kept across
-		// reopens: one registry entry per publish, and the allocator releases the
-		// share on its own while nothing is subscribed.
+		// send, so the reservation waits for the first open. A reopen that lands on
+		// the same mode keeps the reservation it already holds; one that negotiates
+		// a different mode replaces it, since the old ceiling would either cap a
+		// larger mode or keep claiming room a smaller one no longer needs.
 		let ceiling = encoder_config.resolved_bitrate();
-		if share.is_none()
+		if share.as_ref().is_none_or(|(_, reserved)| *reserved != ceiling)
 			&& let Some(allocator) = &encode.bandwidth
 		{
-			share = Some(allocator.register(demand, ceiling));
+			// Released before the new claim, since registering again would otherwise
+			// leave the old reservation standing for the rest of the connection.
+			drop(share.take());
+			share = Some((allocator.register(demand, ceiling), ceiling));
 		}
 
 		// Rate control is per encoder: this one opened at the configured bitrate,
 		// so the policy's ceiling is that rate and the target starts there. A
 		// reopened camera starts optimistic again rather than inheriting the
 		// backed-off rate from whatever the link was doing last time.
-		let mut rate = share.clone().map(|share| (share, Control::new(Policy::new(ceiling))));
+		let mut rate = share
+			.as_ref()
+			.map(|(share, _)| (share.clone(), Control::new(Policy::new(ceiling))));
 
 		loop {
 			// Race the next frame against the last viewer leaving so we release the
