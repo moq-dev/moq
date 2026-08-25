@@ -401,8 +401,9 @@ async fn transcode_group_inner(
 /// Append encoded frames to the output group in the legacy hang framing, metering
 /// what reached the track.
 ///
-/// A frame that fails to write never reaches a consumer, so an early return
-/// leaves it (and the rest of the batch) uncounted.
+/// The frames written before a failure are banked anyway: they are on the group
+/// and a consumer may already have read them, so dropping them from the meters
+/// would understate the bill exactly when something went wrong.
 fn write(
 	output: &mut moq_net::group::Producer,
 	active: &crate::active::Guard,
@@ -411,18 +412,22 @@ fn write(
 	let mut frames = 0;
 	let mut bytes = 0;
 
-	for encoded in encoded {
-		let frame = hang::container::Frame {
-			timestamp: encoded.timestamp,
-			payload: encoded.payload,
-		};
-		bytes += frame.payload.len() as u64;
-		frame.write_to(output)?;
-		frames += 1;
-	}
+	let result: Result<(), Error> = (|| {
+		for encoded in encoded {
+			let size = encoded.payload.len() as u64;
+			let frame = hang::container::Frame {
+				timestamp: encoded.timestamp,
+				payload: encoded.payload,
+			};
+			frame.write_to(output)?;
+			frames += 1;
+			bytes += size;
+		}
+		Ok(())
+	})();
 
 	active.produced(frames, bytes);
-	Ok(())
+	result
 }
 
 /// Decode -> resize -> encode for one fetched group of one rung.
@@ -520,7 +525,7 @@ fn decoder_resize(size: moq_video::Size, acceleration: moq_video::resize::Accele
 
 #[cfg(test)]
 mod tests {
-	use super::decoder_resize;
+	use super::*;
 	use moq_video::resize::Acceleration;
 
 	/// A fetched NVDEC group reaches `Frame::resize_with` at native size when
@@ -532,5 +537,47 @@ mod tests {
 		assert_eq!(decoder_resize(size, Acceleration::Cpu), None);
 		assert_eq!(decoder_resize(size, Acceleration::Auto), Some(size));
 		assert_eq!(decoder_resize(size, Acceleration::Gpu), Some(size));
+	}
+
+	/// A frame that reached the group is billable even when a later frame in the
+	/// same batch fails: it is on the track and a consumer may already have read
+	/// it, so the meters must not lose it with the error.
+	#[test]
+	fn write_banks_the_frames_that_reached_the_group() {
+		let rung = Resolved {
+			name: "video/120p".to_string(),
+			size: moq_video::Size::new(160, 120),
+			bitrate: 100_000,
+			framerate: 30,
+		};
+
+		let active = crate::active::Producer::default();
+		active.declare(std::slice::from_ref(&rung));
+		let mut cursor = active.consume();
+		let rendition = cursor.try_next().expect("ladder").rendition;
+
+		let mut broadcast = moq_net::broadcast::Info::default().produce();
+		let mut track = broadcast
+			.create_track("video/120p", hang::container::track_info())
+			.unwrap();
+		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		let guard = active.attach(&rung);
+
+		// The second frame cannot be expressed in the container's timescale, so it
+		// fails to write while the first is already on the group.
+		let good = moq_video::encode::Encoded::new(
+			Bytes::from_static(b"hello"),
+			moq_net::Timestamp::from_micros(0).unwrap(),
+		);
+		let bad = moq_video::encode::Encoded::new(
+			Bytes::from_static(b"world"),
+			moq_net::Timestamp::from_secs(1 << 60).unwrap(),
+		);
+
+		assert!(write(&mut group, &guard, vec![good, bad]).is_err());
+		assert_eq!(rendition.frames(), 1);
+		assert_eq!(rendition.bytes(), 5);
+		// One frame is still a start, so the rendition is encoding and clocked.
+		assert!(cursor.try_next().expect("edge").encoding);
 	}
 }
