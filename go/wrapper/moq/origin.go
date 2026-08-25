@@ -81,6 +81,8 @@ func (d *OriginDynamic) Cancel() {
 }
 
 // BroadcastRequest is a requested broadcast that has not been accepted yet.
+//
+// Deprecated: dynamic routing is not currently supported by clients.
 type BroadcastRequest struct {
 	inner *ffi.MoqBroadcastRequest
 }

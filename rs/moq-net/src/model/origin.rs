@@ -2316,6 +2316,7 @@ struct PendingBroadcast {
 /// Served broadcasts are deliberately *not* announced, so they never appear in
 /// [`Consumer::announced`]. Drop this handle (and every clone) to reject the
 /// requests still waiting to be served.
+#[doc(hidden)]
 pub struct Dynamic {
 	info: Origin,
 	root: PathOwned,
@@ -2405,6 +2406,7 @@ impl Drop for Dynamic {
 /// [`Consumer::request_broadcast`]; [`accept`](Self::accept) resolves it with a live
 /// broadcast (which the handler keeps producing into) and [`reject`](Self::reject) resolves
 /// it with an error. Dropping the request without either rejects it.
+#[doc(hidden)]
 pub struct Request {
 	// Absolute path that was requested.
 	path: PathOwned,
@@ -2817,24 +2819,11 @@ impl Consumer {
 		})
 	}
 
-	/// Get a broadcast by path, falling back to a dynamic request when it is not announced.
+	/// Get an already-announced broadcast by path.
 	///
-	/// Returns a [`kio::Pending`] future (resolved synchronously for an announced broadcast,
-	/// otherwise once a handler serves it), mirroring [`track::Consumer::fetch_group`](track::Consumer::fetch_group).
-	/// The lookup order is: an already-announced broadcast resolves
-	/// immediately; otherwise, if an [`Dynamic`] handler is live (see
-	/// [`Producer::dynamic`]), a fallback request is registered and the future resolves
-	/// when the handler [`accept`](Request::accept)s it (or errors if it
-	/// [`reject`](Request::reject)s or every handler drops). Concurrent requests for
-	/// the same unannounced path coalesce onto one handler request, and once served the
-	/// broadcast is cached weakly so *later* requests for that path also share it (rather
-	/// than re-invoking the handler and opening a duplicate upstream subscription) for as
-	/// long as it stays live; a closed one is re-served on the next request.
-	///
-	/// The returned future resolves to [`Error::Unroutable`] when the path is not announced and no
-	/// dynamic handler exists. A request that is registered while a handler is live but then loses
-	/// every handler before being served also resolves to [`Error::Unroutable`]. Unlike an announced
-	/// broadcast, a dynamically served one is never visible to [`Self::announced`].
+	/// Returns a [`kio::Pending`] future that resolves synchronously when the
+	/// broadcast is available, or to [`Error::Unroutable`] otherwise. Unlike
+	/// [`Self::announced`], this does not wait for a future announcement.
 	pub fn request_broadcast(&self, path: impl AsPath) -> kio::Pending<Requesting> {
 		let path = path.as_path();
 
