@@ -12,12 +12,15 @@ use crate::park::{FUTEX_BITSET_MATCH_ANY, FUTEX2_PRIVATE, FUTEX2_SIZE_U32, PARKE
 use crate::shared::{Cqe, Op, Shared, Task};
 use crate::{Error, timer, udp};
 
+/// The largest submission queue io_uring will set up.
+const MAX_ENTRIES: u32 = 32768;
+
 /// Worker construction knobs.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
-	/// Submission queue depth (the kernel sizes the completion queue at twice
-	/// this).
+	/// Submission queue depth, from 1 to 32768 (the kernel rounds it up to a
+	/// power of two and sizes the completion queue at twice this).
 	pub entries: u32,
 }
 
@@ -50,6 +53,15 @@ impl Worker {
 	/// park timeout, and batched minimum waits with one code path; there is
 	/// deliberately no fallback (use the tokio stack instead).
 	pub fn new(config: Config) -> Result<Self, Error> {
+		// Checked here so the `EINVAL` below can only mean the kernel refused
+		// one of the setup flags, not that the caller asked for a bad depth.
+		if config.entries == 0 || config.entries > MAX_ENTRIES {
+			return Err(Error::Io(std::io::Error::new(
+				std::io::ErrorKind::InvalidInput,
+				format!("ring depth must be 1 to {MAX_ENTRIES}, got {}", config.entries),
+			)));
+		}
+
 		let ring = IoUring::builder()
 			.setup_single_issuer()
 			.setup_defer_taskrun()
@@ -57,7 +69,8 @@ impl Worker {
 			.build(config.entries)
 			.map_err(|err| match err.raw_os_error() {
 				// EINVAL from setup means the kernel predates one of the
-				// requested flags, so it never reaches the feature check below.
+				// requested flags (the depth is already validated), so it never
+				// reaches the feature check below.
 				Some(libc::ENOSYS) | Some(libc::EPERM) | Some(libc::EACCES) | Some(libc::EINVAL) => {
 					Error::Unsupported(format!(
 						"io_uring is unavailable ({err}); kernel {} (Linux 6.12+ required, and container seccomp \
@@ -538,6 +551,76 @@ mod tests {
 		assert!(tx.send(1200, to, 1200).is_err());
 		// And a late spawn is dropped rather than parked forever.
 		handle.spawn(async {});
+	}
+
+	#[test]
+	fn invalid_ring_depth_is_not_unsupported() {
+		// A caller's bad depth must not read as "this kernel cannot run the
+		// worker", which is the signal to fall back to the tokio stack.
+		for entries in [0, MAX_ENTRIES + 1] {
+			let err = Worker::new(Config { entries }).expect_err("invalid depth");
+			assert!(matches!(err, Error::Io(_)), "classified as {err:?}");
+		}
+	}
+
+	#[test]
+	fn oversized_receive_pool_is_rejected() {
+		let Some(worker) = worker() else { return };
+		let handle = worker.handle();
+		// Without validation the power-of-two rounding wraps to a zero-entry
+		// ring, which allocates nothing and underflows its mask.
+		let config = udp::Config {
+			rx_buffers: u16::MAX,
+			..Default::default()
+		};
+		let err = handle
+			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
+			.expect_err("oversized pool");
+		assert!(matches!(err, Error::Io(err) if err.kind() == std::io::ErrorKind::InvalidInput));
+	}
+
+	#[test]
+	fn ungso_send_is_not_capped_at_a_train() {
+		let Some(worker) = worker() else { return };
+		let handle = worker.handle();
+		// Without GSO each segment rides its own `sendmsg`, so the kernel's
+		// 64-segment train limit does not apply.
+		let config = udp::Config {
+			gso: false,
+			..Default::default()
+		};
+		let sock = handle
+			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
+			.expect("socket");
+		let to = sock.local_addr().expect("addr");
+		let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+			panic!("no tx buffer");
+		};
+		tx.send(64 * 1024, to, 1000).expect("send 66 datagrams");
+		drop(worker);
+	}
+
+	#[test]
+	fn ungso_send_is_capped_by_the_ring() {
+		let Some(worker) = worker() else { return };
+		let handle = worker.handle();
+		// Without GSO the segment count is the `sendmsg` count, and `push`
+		// submits inline without reaping once the queue is full, so one call
+		// must not outrun the ring.
+		let config = udp::Config {
+			gso: false,
+			..Default::default()
+		};
+		let sock = handle
+			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
+			.expect("socket");
+		let to = sock.local_addr().expect("addr");
+		let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+			panic!("no tx buffer");
+		};
+		let err = tx.send(64 * 1024, to, 1).expect_err("65536 datagrams from one buffer");
+		assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+		drop(worker);
 	}
 
 	#[test]

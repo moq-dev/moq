@@ -45,6 +45,9 @@ const RECV_OVERHEAD: usize = 16 + NAME_LEN + CONTROL_LEN;
 const MAX_RECV: usize = 64 * 1024;
 /// The kernel refuses GSO trains beyond this many segments.
 const MAX_GSO_SEGMENTS: usize = 64;
+/// The largest receive pool: the provided-buffer ring holds a power-of-two
+/// number of entries and the kernel caps it here.
+const MAX_RX_BUFFERS: u16 = 1 << 15;
 
 /// How a socket uses the ring. The defaults are the production path; the
 /// toggles exist so the benchmarks can ablate one mechanism at a time.
@@ -59,8 +62,9 @@ pub struct Config {
 	/// Receive through one persistent multishot `recvmsg` and the provided
 	/// buffer ring, instead of re-armed oneshot receives.
 	pub multishot: bool,
-	/// Receive pool: buffer count (rounded up to a power of two). Each receive
-	/// completion consumes one buffer, so this is the queue depth.
+	/// Receive pool: buffer count (rounded up to a power of two, at most
+	/// 32768). Each receive completion consumes one buffer, so this is the
+	/// queue depth.
 	pub rx_buffers: u16,
 	/// Receive pool: bytes per buffer. Must hold one worst-case receive.
 	pub rx_buffer_len: usize,
@@ -292,6 +296,17 @@ impl Socket {
 				io::ErrorKind::InvalidInput,
 				format!(
 					"receive buffers must hold one worst-case receive ({floor} bytes) and both pools need at least one buffer"
+				),
+			)
+			.into());
+		}
+		// Rounding up past `u16::MAX` would wrap to a zero-entry ring.
+		if config.rx_buffers > MAX_RX_BUFFERS {
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				format!(
+					"receive pool holds at most {MAX_RX_BUFFERS} buffers, got {}",
+					config.rx_buffers
 				),
 			)
 			.into());
@@ -571,12 +586,7 @@ impl TxBuf {
 	pub fn send(mut self, len: usize, to: SocketAddr, segment: usize) -> io::Result<()> {
 		// `UDP_SEGMENT` is a u16, so an oversized segment would silently
 		// truncate into a tiny stride and explode the implied segment count.
-		if len == 0
-			|| len > self.cap
-			|| segment == 0
-			|| segment > usize::from(u16::MAX)
-			|| len.div_ceil(segment) > MAX_GSO_SEGMENTS
-		{
+		if len == 0 || len > self.cap || segment == 0 || segment > usize::from(u16::MAX) {
 			return Err(io::Error::new(
 				io::ErrorKind::InvalidInput,
 				format!(
@@ -589,6 +599,23 @@ impl TxBuf {
 			Some(shared) if !shared.stopped.get() => shared,
 			_ => return Err(Shared::gone_error()),
 		};
+
+		// A GSO train is one `sendmsg` the kernel caps at 64 segments. Without
+		// GSO every segment is its own `sendmsg`, so the ring is the limit
+		// instead: staging more than the submission queue holds makes `push`
+		// submit inline and go round again without reaping a single
+		// completion, which starves the worker and overflows the queue.
+		let segments = len.div_ceil(segment);
+		let limit = match self.sock.config.gso {
+			true => MAX_GSO_SEGMENTS,
+			false => shared.ring.borrow().params().sq_entries() as usize,
+		};
+		if segments > limit {
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				format!("send of {segments} datagrams exceeds the {limit} one call may stage"),
+			));
+		}
 
 		self.armed = true;
 		let sock = self.sock.clone();
