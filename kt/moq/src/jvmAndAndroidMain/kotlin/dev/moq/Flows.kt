@@ -178,6 +178,7 @@ fun MoqTrackDynamic.requestedGroups(): Flow<MoqGroupRequest> = flow {
     if (cause is CancellationException) cancel()
 }
 
+/** @suppress */
 @Deprecated("dynamic routing is not currently supported by clients")
 fun MoqOriginDynamic.requestedBroadcasts(): Flow<MoqBroadcastRequest> = flow {
     while (true) {
