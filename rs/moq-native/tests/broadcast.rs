@@ -1936,6 +1936,128 @@ async fn broadcast_race_quic_wins() {
 		.expect("server task failed");
 }
 
+/// Regression guard: the QUIC session driver `spawn_session` hands to
+/// `tokio::spawn` must run under the span active at accept time (e.g. a relay's
+/// per-connection span), or every log line moq-net emits from inside it
+/// (subscribe/track/announce) silently loses that span's fields. Mirrors
+/// `moq-relay`'s `Connection::run`, whose `#[instrument("conn", fields(addr =
+/// ...))]` span is exactly what this depends on for a QUIC connection.
+///
+/// Needs the crate's `tracing-test/no-env-filter` feature: plain `traced_test`
+/// scopes its `EnvFilter` to this test binary's own crate name, which never
+/// matches `moq-net`, the crate whose log lines this test inspects.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn quic_driver_task_inherits_connection_span() {
+	use tracing::Instrument;
+
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+		.expect("failed to create broadcast");
+	let mut track = broadcast.create_track("video", None).expect("failed to create track");
+	let mut group = track.append_group().expect("failed to append group");
+	group
+		.write_frame(moq_native::moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.expect("failed to write frame");
+	group.finish().expect("failed to finish group");
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+
+	let mut server = server_config.init().expect("failed to init server");
+	let addr = server.local_addr().expect("failed to get local addr");
+
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume().announced();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	let client = client_config
+		.init()
+		.expect("failed to init client")
+		.with_subscriber(sub_origin);
+	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
+
+	// A stand-in for the per-connection "conn" span a relay enters around
+	// `Request::ok()`. Only `spawn_session` correctly re-instrumenting the
+	// spawned driver with this span carries `addr` into moq-net's own logs.
+	let conn_span = tracing::info_span!("conn", addr = "203.0.113.1:56789");
+	let server_handle = tokio::spawn(
+		async move {
+			let request = server.accept().await.expect("no incoming connection");
+			let session = request.with_publisher(&pub_origin).ok().await?;
+			let _broadcast = broadcast;
+			let _track = track;
+			let _ = session.closed().await;
+			Ok::<_, anyhow::Error>(())
+		}
+		.instrument(conn_span),
+	);
+
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+
+	let moq_native::moq_net::announce::Update { broadcast: bc, .. } =
+		tokio::time::timeout(TIMEOUT, announcements.next())
+			.await
+			.expect("announce timed out")
+			.expect("origin closed");
+	let bc = bc.expect("expected announce, got unannounce");
+
+	// Triggers `lite/publisher.rs`'s "subscribed started" log on the server,
+	// from inside the driver task `spawn_session` hands to `tokio::spawn`.
+	let mut track_sub = bc
+		.track("video")
+		.unwrap()
+		.subscribe(None)
+		.await
+		.expect("consume_track failed");
+
+	// Actually read the group/frame (as the server sees it), rather than just
+	// issuing the subscribe, so the SUBSCRIBE message is guaranteed to have
+	// reached and been logged by the server before we inspect the log buffer.
+	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+		.await
+		.expect("recv_group timed out")
+		.expect("recv_group failed")
+		.expect("track closed prematurely");
+	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+		.await
+		.expect("read_frame timed out")
+		.expect("read_frame failed")
+		.expect("group closed prematurely");
+	assert_eq!(&frame.payload[..], b"hello");
+
+	// Other tasks (e.g. quinn's own internal per-connection IO loop) legitimately
+	// carry the "conn" span too, since they're spawned while it's entered. So it's
+	// not enough for the marker to appear *somewhere* in the logs; it must be on
+	// the exact line moq-net emits from inside the driver task `spawn_session`
+	// spawns, or the assertion would pass even without the fix.
+	logs_assert(|lines| {
+		let subscribed = lines
+			.iter()
+			.find(|line| line.contains("subscribed started"))
+			.ok_or("\"subscribed started\" not logged")?;
+		if subscribed.contains("203.0.113.1:56789") {
+			Ok(())
+		} else {
+			Err(format!(
+				"subscribe log lost the connection span's addr field, spawn_session isn't instrumenting the driver task\nline: {subscribed}"
+			))
+		}
+	});
+
+	drop(session);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
+
 // ── Subscription churn: drop the last consumer, then come back ──────
 //
 // When the last consumer of an upstream subscription drops, the subscriber

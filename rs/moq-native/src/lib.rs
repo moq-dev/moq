@@ -56,8 +56,14 @@ pub use server::{Request, Server, ServerConfig, Transport};
 /// The driver holds no session clone, so the session still closes when the caller
 /// drops their last [`moq_net::Session`] handle, which in turn lets the driver
 /// task finish.
+///
+/// Instruments the spawned task with the span active at the call site (e.g. the
+/// caller's per-connection span), since `tokio::spawn` otherwise starts the driver
+/// with no span at all: it doesn't inherit one from the spawning task the way a
+/// plain nested call would.
 pub(crate) fn spawn_session((session, driver): (moq_net::Session, moq_net::Driver)) -> moq_net::Session {
-	tokio::spawn(driver);
+	use tracing::Instrument;
+	tokio::spawn(driver.instrument(tracing::Span::current()));
 	session
 }
 

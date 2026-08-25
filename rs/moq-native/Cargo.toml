@@ -104,4 +104,7 @@ tempfile = "3"
 # test-util adds tokio::time::pause/auto-advance for the time-dependent tests.
 tokio = { workspace = true, features = ["test-util"] }
 toml = "1.1"
-tracing-test = "0.2"
+# no-env-filter: traced_test's default filter scopes to the test binary's own
+# crate name, which never matches log lines from a dependency crate (e.g.
+# moq-net's), so a test asserting on those needs this to see them at all.
+tracing-test = { version = "0.2", features = ["no-env-filter"] }
