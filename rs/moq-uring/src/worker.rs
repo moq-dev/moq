@@ -402,6 +402,21 @@ impl moq_net::Timers for Handle {
 	}
 }
 
+impl moq_net::Runtime for Handle {
+	type Transport = crate::quic::Connection;
+
+	fn spawn(&self, machine: moq_net::runtime::Machine<Self>) {
+		// The machine is `!Send` (its transport is), which is exactly what the
+		// worker's local spawn takes. Its result is the session outcome, which
+		// the `Session` handle also observes; here it is just the task ending.
+		self.spawn(async move {
+			if let Err(err) = machine.await {
+				tracing::debug!(%err, "session machine ended");
+			}
+		});
+	}
+}
+
 /// The running kernel release, for error messages.
 fn kernel_release() -> String {
 	// SAFETY: all-zero is a valid utsname out-buffer.

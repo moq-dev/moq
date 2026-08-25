@@ -5189,6 +5189,7 @@ name = "moq-uring"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "bytes",
  "criterion",
  "io-uring",
  "kio 0.5.6",
@@ -5204,6 +5205,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "web-transport-trait",
 ]
 
 [[package]]

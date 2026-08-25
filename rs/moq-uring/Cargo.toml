@@ -15,26 +15,28 @@ categories = ["asynchronous", "network-programming", "os::linux-apis"]
 publish = false
 
 [target.'cfg(target_os = "linux")'.dependencies]
+bytes = "1"
 io-uring = { workspace = true }
 kio = { workspace = true }
 libc = { workspace = true }
 moq-net = { workspace = true }
+quiche = "0.29"
+rand = "0.10"
 slab = "0.4"
 thiserror = "2"
 tracing = "0.1"
+web-transport-trait = { workspace = true }
 
 [dev-dependencies]
 anyhow = "1"
 criterion = { workspace = true }
-tokio = { workspace = true, features = ["net", "rt", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 io-uring = { workspace = true }
 libc = { workspace = true }
 nix = { workspace = true }
 noq-udp = { workspace = true }
-quiche = "0.29"
-rand = "0.10"
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
 tempfile = { workspace = true }
 tracing = "0.1"
