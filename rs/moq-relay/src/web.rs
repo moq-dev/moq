@@ -657,11 +657,22 @@ impl<'de> serde::Deserialize<'de> for FetchGroup {
 	}
 }
 
+/// The host this request was addressed to, which `AuthApiMode::Proxy` forwards so
+/// the endpoint can do its own routing. These handlers build their params from a
+/// path rather than a URL, so it has to come off the request headers.
+fn request_host(headers: &http::HeaderMap) -> Option<String> {
+	headers
+		.get(http::header::HOST)
+		.and_then(|host| host.to_str().ok())
+		.map(str::to_ascii_lowercase)
+}
+
 /// Serve the announced broadcasts for a given prefix.
 async fn serve_announced(
 	path: Option<Path<String>>,
 	Query(query): Query<AuthQuery>,
 	mtls: Option<Extension<MtlsPeer>>,
+	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<String> {
 	let prefix = match path {
@@ -671,6 +682,7 @@ async fn serve_announced(
 
 	let params = AuthParams {
 		path: prefix,
+		host: request_host(&headers),
 		jwt: query.jwt,
 		..Default::default()
 	};
@@ -709,6 +721,7 @@ async fn serve_fetch(
 	Path(path): Path<String>,
 	Query(params): Query<FetchParams>,
 	mtls: Option<Extension<MtlsPeer>>,
+	headers: http::HeaderMap,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<ServeGroup> {
 	// The path containts a broadcast/track
@@ -722,6 +735,7 @@ async fn serve_fetch(
 
 	let auth = AuthParams {
 		path: path.join("/"),
+		host: request_host(&headers),
 		jwt: params.auth.jwt,
 		..Default::default()
 	};

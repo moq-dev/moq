@@ -1,4 +1,5 @@
 use anyhow::Context;
+use axum::http;
 use http_cache_reqwest::{Cache, CacheMode, HttpCache, HttpCacheOptions, MokaCache, MokaManager};
 use reqwest_middleware::ClientWithMiddleware;
 use std::time::Duration;
@@ -27,7 +28,47 @@ pub(crate) fn build(tls: &rustls::ClientConfig) -> anyhow::Result<ClientWithMidd
 			// root, transport) and are now read on a cadence by every live session,
 			// so a busy relay thrashes 42 and re-dials the auth API for every miss.
 			manager: MokaManager::new(MokaCache::new(10_000)),
-			options: HttpCacheOptions::default(),
+			options: HttpCacheOptions {
+				cache_key: Some(std::sync::Arc::new(cache_key)),
+				// RFC 9111 §3.5 stops a SHARED cache storing any response to a request
+				// carrying `Authorization`, because it cannot tell one user's response
+				// from another's. `cache_key` above draws exactly that line, so this
+				// cache is private by construction and the blanket refusal only means a
+				// proxy-mode endpoint sending a plain `max-age` would never be cached
+				// at all. Nothing here reads `s-maxage` (see `CacheHints`), so the
+				// revalidation schedule is unaffected.
+				cache_options: Some(http_cache_reqwest::CacheOptions {
+					shared: false,
+					..Default::default()
+				}),
+				..HttpCacheOptions::default()
+			},
 		}))
 		.build())
+}
+
+/// The default `method:uri` cache key, plus the `Authorization` header when the
+/// request carries one.
+///
+/// A credential-carrying auth-API lookup (see `Auth::verify`) returns a grant
+/// decided from that credential, so two viewers on the same URL can legitimately
+/// get different answers. `Vary: Authorization` is the endpoint's job to send and
+/// an endpoint that forgets it would have one viewer served another's grant, so
+/// the split is enforced here instead of trusted. Requests without the header key
+/// exactly as before.
+fn cache_key(parts: &http::request::Parts) -> String {
+	let key = format!("{}:{}", parts.method, parts.uri);
+	match parts.headers.get(http::header::AUTHORIZATION) {
+		// Digested rather than interpolated: the key is a moka map key that can
+		// reach logs and metrics, and the raw value is a bearer secret. SHA-256
+		// rather than a `Hash` impl because the split is a security boundary and
+		// the credentials are attacker-chosen: two of them landing on one key
+		// would serve one viewer another's grant.
+		Some(auth) => {
+			use sha2::Digest;
+			let digest = sha2::Sha256::digest(auth.as_bytes());
+			format!("{key}:{}", hex::encode(digest))
+		}
+		None => key,
+	}
 }
