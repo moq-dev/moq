@@ -82,9 +82,9 @@ pub enum Error {
 	ConflictingClientAuth,
 
 	/// An in-memory identity or a pinned peer set was configured on a backend that
-	/// fixes its TLS material when the listener is built.
+	/// cannot consume the live rustls material.
 	#[error(
-		"the quiche backend cannot serve an in-memory Identity or pin client fingerprints; use the quinn or noq backend"
+		"the quiche backend cannot use an in-memory Identity or pin client fingerprints; use the quinn or noq backend"
 	)]
 	MemoryUnsupported,
 
@@ -1301,10 +1301,10 @@ impl Listen {
 		found
 	}
 
-	/// Disable cached client authentication when client roots can reload.
+	/// Disable cached client authentication when client authorization can change.
 	#[cfg(feature = "watch")]
 	pub(crate) fn disable_resumption(&self, tls: &mut rustls::ServerConfig) {
-		if !self.root.is_empty() {
+		if !self.root.is_empty() || self.peers.is_some() {
 			tls.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
 			tls.send_tls13_tickets = 0;
 		}
@@ -2062,6 +2062,41 @@ mod tests {
 		peers.insert(identity.fingerprint()).unwrap();
 		let other_leaf = other.certified().cert[0].clone();
 		assert!(verifier.verify_client_cert(&other_leaf, &[], now).is_err());
+	}
+
+	/// A resumed handshake skips certificate verification, so a listener with a
+	/// live peer set must disable resumption for removals to take effect.
+	#[cfg(all(feature = "watch", any(feature = "quinn", feature = "noq", feature = "quiche")))]
+	#[test]
+	fn removed_peers_cannot_resume() {
+		let server_identity = Identity::generate(["localhost"]).unwrap();
+		let client_identity = Identity::generate(["client.invalid"]).unwrap();
+		let peers = Peers::new();
+		peers.insert(client_identity.fingerprint()).unwrap();
+
+		let client = Arc::new(
+			Connect {
+				identity: Some(client_identity.clone()),
+				fingerprint: vec![server_identity.fingerprint().to_string()],
+				..Default::default()
+			}
+			.build()
+			.unwrap(),
+		);
+		let server = Listen {
+			identity: Some(server_identity),
+			peers: Some(peers.clone()),
+			..Default::default()
+		}
+		.server_config(Vec::new())
+		.unwrap();
+
+		assert_eq!(
+			handshake_kinds(client.clone(), server.clone()).unwrap().1,
+			rustls::HandshakeKind::Full
+		);
+		peers.remove(client_identity.fingerprint()).unwrap();
+		assert!(handshake_kinds(client, server).is_err());
 	}
 
 	/// The fingerprint a listener reads off an accepted session is the one the

@@ -234,6 +234,12 @@ struct ClientIdentity {
 impl QuicheClient {
 	pub fn new(config: &crate::connect::Config, quic: &crate::quic::Config) -> Result<Self> {
 		let quic = quic.resolve();
+		// Identity holds a rustls signer rather than exportable private-key DER, which
+		// quiche requires. Refuse it instead of silently dialing without mTLS.
+		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+		if config.tls.identity.is_some() {
+			return Err(crate::tls::Error::MemoryUnsupported.into());
+		}
 		let identity = match (&config.tls.cert, &config.tls.key) {
 			(Some(cert), Some(key)) => {
 				let (chain, key) = load_quiche_cert(cert, key)?;
@@ -806,5 +812,22 @@ mod tests {
 		quic.congestion_control = Some(CongestionControl::Loss);
 		apply_settings(&mut settings, &quic.resolve()).unwrap();
 		assert_eq!(settings.cc_algorithm, "cubic");
+	}
+
+	/// An in-memory identity must not disappear when the quiche backend is selected.
+	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+	#[test]
+	fn rejects_in_memory_client_identity() {
+		let mut tls = crate::tls::Connect::default();
+		tls.identity = Some(crate::tls::Identity::generate(["client.invalid"]).unwrap());
+		let config = crate::connect::Config {
+			tls,
+			..Default::default()
+		};
+
+		assert!(matches!(
+			QuicheClient::new(&config, &crate::quic::Config::default()),
+			Err(Error::Tls(crate::tls::Error::MemoryUnsupported))
+		));
 	}
 }
