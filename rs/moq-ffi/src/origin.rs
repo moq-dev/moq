@@ -221,7 +221,7 @@ impl MoqOriginProducer {
 	#[deprecated(note = "dynamic routing is not currently supported by clients")]
 	pub fn dynamic(&self) -> Arc<MoqOriginDynamic> {
 		let _guard = crate::ffi::enter();
-		tracing::warn!("dynamic routing is not currently supported by clients");
+		eprintln!("warning: dynamic routing is not currently supported by clients");
 		Arc::new(MoqOriginDynamic {
 			task: Task::new(OriginDynamic {
 				inner: self.inner.dynamic(),

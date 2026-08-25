@@ -30,9 +30,6 @@ func (o *OriginProducer) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: o.inner.Consume()}
 }
 
-// Dynamic serves broadcasts that consumers request without an announcement.
-//
-// Deprecated: dynamic routing is not currently supported by clients.
 func (o *OriginProducer) Dynamic() *OriginDynamic {
 	return &OriginDynamic{inner: o.inner.Dynamic()}
 }
@@ -53,14 +50,10 @@ func (o *OriginProducer) CreateBroadcast(path string) (*BroadcastProducer, error
 	return &BroadcastProducer{inner: inner}, nil
 }
 
-// OriginDynamic streams broadcast requests for paths that are not announced.
-//
-// Deprecated: dynamic routing is not currently supported by clients.
 type OriginDynamic struct {
 	inner *ffi.MoqOriginDynamic
 }
 
-// RequestedBroadcast blocks until a consumer requests an unannounced broadcast.
 func (d *OriginDynamic) RequestedBroadcast(ctx context.Context) (*BroadcastRequest, error) {
 	inner, err := runCancellable(ctx, d.inner.Cancel, d.inner.RequestedBroadcast)
 	if err != nil {
@@ -69,28 +62,22 @@ func (d *OriginDynamic) RequestedBroadcast(ctx context.Context) (*BroadcastReque
 	return &BroadcastRequest{inner: inner}, nil
 }
 
-// Requests ranges over requested broadcasts until the stream errors or the loop
-// breaks.
 func (d *OriginDynamic) Requests(ctx context.Context) iter.Seq2[*BroadcastRequest, error] {
 	return streamSeq(ctx, d.RequestedBroadcast)
 }
 
-// Cancel stops serving requested broadcasts.
 func (d *OriginDynamic) Cancel() {
 	d.inner.Cancel()
 }
 
-// BroadcastRequest is a requested broadcast that has not been accepted yet.
 type BroadcastRequest struct {
 	inner *ffi.MoqBroadcastRequest
 }
 
-// Path returns the requested broadcast path.
 func (r *BroadcastRequest) Path() (string, error) {
 	return r.inner.Path()
 }
 
-// Accept serves the request with an unannounced broadcast.
 func (r *BroadcastRequest) Accept(broadcast *BroadcastProducer) error {
 	if broadcast == nil {
 		return errors.New("moq: nil broadcast producer")
@@ -98,7 +85,6 @@ func (r *BroadcastRequest) Accept(broadcast *BroadcastProducer) error {
 	return r.inner.Accept(broadcast.inner)
 }
 
-// Abort fails the request with an application error code.
 func (r *BroadcastRequest) Abort(errorCode uint16) error {
 	return r.inner.Abort(errorCode)
 }

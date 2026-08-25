@@ -23,9 +23,10 @@ typealias OriginProducer = uniffi.moq.MoqOriginProducer
 typealias OriginOptions = uniffi.moq.MoqOriginOptions
 /** The subscribe side of an origin: discover and request announced broadcasts. */
 typealias OriginConsumer = uniffi.moq.MoqOriginConsumer
+/** @suppress */
 @Deprecated("dynamic routing is not currently supported by clients")
 typealias OriginDynamic = uniffi.moq.MoqOriginDynamic
-/** A requested broadcast not yet accepted: fulfill it with a producer or abort it. */
+/** @suppress */
 typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
 /** A stream of broadcast announcements under a prefix. */
 typealias Announced = uniffi.moq.MoqAnnounced
