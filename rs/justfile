@@ -29,6 +29,7 @@ default:
 # Compile, lint, format-check, doc-check, and verify dependency hygiene.
 check *args:
     just rs _select-test
+    just rs _publish-test
     cargo clippy --locked --all-targets {{ args }} -- -D warnings
     cargo fmt --all --check
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps {{ args }}
@@ -199,6 +200,35 @@ _select-test:
     	|| fail "a non-crate seed must select nothing"
 
     echo "rs: selection ok"
+
+# Published crates need the current workspace version as the lower bound for
+# internal dependencies. The workspace only tests that version set, and a looser
+# bound lets package verification combine incompatible older releases.
+[private]
+_publish-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    metadata=$(cargo metadata --locked --format-version 1 --no-deps)
+    stale=$(jq -r '
+        .packages as $packages
+        | $packages[] as $package
+        | select($package.publish != [])
+        | $package.dependencies[]
+        | select(.source == null and .path != null and .kind != "dev")
+        | . as $dependency
+        | ($packages[] | select(.name == $dependency.name)) as $current
+        | select($dependency.req != ("^" + $current.version))
+        | "\($package.name): \($dependency.name) requires \($dependency.req), current is ^\($current.version)"
+    ' <<< "$metadata")
+
+    if [[ -n "$stale" ]]; then
+        echo "rs: published workspace dependency lower bounds are stale:" >&2
+        echo "$stale" >&2
+        exit 1
+    fi
+
+    echo "rs: published workspace dependencies current"
 
 # Takes a newline-separated list of changed files; skips when no crate is
 # affected. The `just rs ...` calls below go through the root justfile's

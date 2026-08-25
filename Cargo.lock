@@ -4271,16 +4271,6 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kio"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fa984c3b737520c30b414041ec63b013614abba31418585d83c5c792fb5bb7d"
-dependencies = [
- "loom",
- "smallvec",
-]
-
-[[package]]
-name = "kio"
 version = "0.5.6"
 dependencies = [
  "criterion",
@@ -4288,6 +4278,16 @@ dependencies = [
  "smallvec",
  "tokio",
  "web-async",
+]
+
+[[package]]
+name = "kio"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36d64d03bab237df643a5013adcf07764e4bd3265117e4c4f69e856d37928e69"
+dependencies = [
+ "loom",
+ "smallvec",
 ]
 
 [[package]]
@@ -10435,7 +10435,7 @@ dependencies = [
  "bytes",
  "http",
  "iroh",
- "kio 0.5.5",
+ "kio 0.5.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "n0-error",
  "n0-future",
  "tokio",
@@ -10454,7 +10454,7 @@ dependencies = [
  "bytes",
  "futures",
  "http",
- "kio 0.5.5",
+ "kio 0.5.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "noq",
  "rustls",
  "rustls-native-certs",
@@ -10491,7 +10491,7 @@ dependencies = [
  "flume",
  "futures",
  "http",
- "kio 0.5.5",
+ "kio 0.5.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "rustls-pki-types",
  "thiserror 2.0.20",
  "tokio",
@@ -10511,7 +10511,7 @@ dependencies = [
  "bytes",
  "futures",
  "http",
- "kio 0.5.5",
+ "kio 0.5.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "quinn",
  "rustls",
  "rustls-native-certs",
