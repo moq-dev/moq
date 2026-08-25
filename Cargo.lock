@@ -5189,6 +5189,7 @@ name = "moq-uring"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "boring",
  "bytes",
  "criterion",
  "io-uring",

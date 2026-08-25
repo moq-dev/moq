@@ -153,13 +153,9 @@ mod linux {
 			let mut track = broadcast.create_track("data", None).expect("create track");
 
 			let certs = support::certs().expect("certificates");
-			let mut server_config = quic::Config::default();
+			let mut server_config =
+				quic::server::Config::new(quic::Identity::new(certs.cert.clone(), certs.key.clone()));
 			server_config.alpn = vec![ALPN.to_string()];
-			server_config.cert = Some(certs.cert.clone());
-			server_config.key = Some(certs.key.clone());
-			let mut client_config = quic::Config::default();
-			client_config.alpn = vec![ALPN.to_string()];
-			client_config.verify_peer = false;
 
 			let server_sock = handle
 				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), ablation.config.clone())
@@ -168,10 +164,13 @@ mod linux {
 			let client_sock = handle
 				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), ablation.config.clone())
 				.expect("client socket");
+			let mut dial = quic::client::Config::new(server_addr, "localhost");
+			dial.alpn = vec![ALPN.to_string()];
+			dial.verify = false;
 
 			let server_handle = handle.clone();
 			handle.spawn(async move {
-				let conn = quic::accept(&server_handle, server_sock, &server_config)
+				let conn = quic::server::accept(&server_handle, server_sock, &server_config)
 					.await
 					.expect("quic accept");
 				let session = moq_net::Server::new()
@@ -185,7 +184,7 @@ mod linux {
 			// Establish and subscribe once; iterations measure steady state.
 			let (_session, mut sub) = worker
 				.block_on(async {
-					let conn = quic::connect(&handle, client_sock, "localhost", server_addr, &client_config)
+					let conn = quic::client::connect(&handle, client_sock, &dial)
 						.await
 						.expect("quic connect");
 					let session = moq_net::Client::new()

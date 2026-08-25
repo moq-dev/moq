@@ -7,6 +7,8 @@
 
 use std::task::{Context, Poll};
 
+use bytes::{Buf, BytesMut};
+
 use super::{Error, Shared};
 
 /// An outgoing stream. Dropping it unfinished resets it with code 0.
@@ -76,7 +78,17 @@ impl web_transport_trait::poll::SendStream for SendStream {
 			return Ok(());
 		}
 		// An empty FIN write succeeds even at zero capacity.
-		self.shared.conn.borrow_mut().stream_send(self.id, &[], true)?;
+		match self.shared.conn.borrow_mut().stream_send(self.id, &[], true) {
+			Ok(_) => {}
+			// A STOP_SENDING beat us here. Carry the code like `poll_write`
+			// does, or `moq_net::Error::from_transport` cannot decode a
+			// routine cancellation.
+			Err(quiche::Error::StreamStopped(code)) => {
+				self.reset = true;
+				return Err(Error::Stop(code));
+			}
+			Err(err) => return Err(err.into()),
+		}
 		self.fin = true;
 		self.shared.kick();
 		Ok(())
@@ -106,7 +118,18 @@ impl web_transport_trait::poll::SendStream for SendStream {
 		let result = self.shared.conn.borrow_mut().stream_capacity(self.id);
 		match result {
 			Err(quiche::Error::StreamStopped(code)) => Poll::Ready(Err(Error::Stop(code))),
-			Err(_) => Poll::Ready(Ok(())),
+			// The stream is gone. If the driver watched it end while the
+			// connection was up, that verdict stands and a close afterwards
+			// changes nothing. Otherwise we never found out, and the caller
+			// reads success as "every byte arrived".
+			Err(_) => match self.shared.collected(self.id) {
+				Some(Some(code)) => Poll::Ready(Err(Error::Stop(code))),
+				Some(None) => Poll::Ready(Ok(())),
+				None => match self.shared.closed() {
+					Some(err) => Poll::Ready(Err(err)),
+					None => Poll::Ready(Ok(())),
+				},
+			},
 			Ok(_) => {
 				if let Some(err) = self.shared.closed() {
 					return Poll::Ready(Err(err));
@@ -120,6 +143,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 
 impl Drop for SendStream {
 	fn drop(&mut self) {
+		self.shared.forget(self.id);
 		if !self.fin && !self.reset {
 			let _ = self
 				.shared
@@ -137,15 +161,22 @@ impl std::fmt::Debug for SendStream {
 	}
 }
 
+/// How far [`RecvStream::poll_closed`] reads ahead of the application before
+/// it waits for the backlog to drain.
+const READ_AHEAD: usize = 64 * 1024;
+
 /// An incoming stream. Dropping it unfinished sends STOP_SENDING with code 0.
 pub struct RecvStream {
 	shared: Shared,
 	id: u64,
 	park: kio::Park,
-	/// Every byte up to the FIN was read; reads report the end from now on.
+	/// Every byte up to the FIN was read out of quiche; reads report the end
+	/// once `backlog` is drained too.
 	finished: bool,
 	/// We stopped the stream; no more reads matter.
 	stopped: bool,
+	/// Bytes `poll_closed` read ahead, handed to `poll_read` before quiche's.
+	backlog: BytesMut,
 }
 
 impl RecvStream {
@@ -156,7 +187,22 @@ impl RecvStream {
 			park: kio::Park::default(),
 			finished: false,
 			stopped: false,
+			backlog: BytesMut::new(),
 		}
+	}
+
+	/// Move up to `dst.len()` read-ahead bytes out of the backlog.
+	///
+	/// Wakes a `poll_closed` parked at the read-ahead cap: the room it was
+	/// waiting for is what this just made.
+	fn drain(&mut self, dst: &mut [u8]) -> usize {
+		let n = dst.len().min(self.backlog.len());
+		dst[..n].copy_from_slice(&self.backlog[..n]);
+		self.backlog.advance(n);
+		if n > 0 {
+			self.shared.wake_readable(self.id);
+		}
+		n
 	}
 }
 
@@ -165,11 +211,14 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
 		let waiter = self.park.hold(cx);
-		if self.finished {
-			return Poll::Ready(Ok(None));
-		}
 		if dst.is_empty() {
 			return Poll::Ready(Ok(Some(0)));
+		}
+		if !self.backlog.is_empty() {
+			return Poll::Ready(Ok(Some(self.drain(dst))));
+		}
+		if self.finished {
+			return Poll::Ready(Ok(None));
 		}
 		let mut conn = self.shared.conn.borrow_mut();
 		match conn.stream_recv(self.id, dst) {
@@ -203,6 +252,9 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 	}
 
 	fn stop(&mut self, code: u32) {
+		// Giving up on the read side abandons whatever was read ahead, even
+		// when the FIN is already in and only the backlog is left.
+		self.backlog.clear();
 		if self.stopped || self.finished {
 			return;
 		}
@@ -220,16 +272,55 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 		if self.finished || self.stopped {
 			return Poll::Ready(Ok(()));
 		}
-		// `stream_finished` also reports a reset stream: either way no more
-		// data is coming, which is what "closed" means for the read side.
-		if self.shared.conn.borrow().stream_finished(self.id) {
-			return Poll::Ready(Ok(()));
+		// The FIN sits behind whatever the peer sent before it, and quiche only
+		// reports the stream finished once that is read out. Waiting on
+		// readability alone would park behind bytes nobody is reading, so read
+		// ahead into the backlog `poll_read` serves first: this watch resolves
+		// without the application draining the stream, and without losing what
+		// it might still want.
+		loop {
+			if self.backlog.len() >= READ_AHEAD {
+				// Enough held: reading further would let the peer send more
+				// still, so the memory bound wins over watch liveness here.
+				// `drain` wakes this once the application takes some, and a
+				// stream nobody reads past the cap keeps its watch pending
+				// until the connection's idle timeout.
+				self.shared.park_readable(self.id, waiter);
+				return Poll::Pending;
+			}
+			let mut chunk = [0u8; 8 * 1024];
+			let mut conn = self.shared.conn.borrow_mut();
+			match conn.stream_recv(self.id, &mut chunk) {
+				Ok((n, fin)) => {
+					drop(conn);
+					self.backlog.extend_from_slice(&chunk[..n]);
+					// Reading frees flow control the peer is waiting on.
+					self.shared.kick();
+					if fin {
+						self.finished = true;
+						return Poll::Ready(Ok(()));
+					}
+				}
+				Err(quiche::Error::Done) => {
+					// Nothing buffered: either the FIN is in (a reset comes
+					// back as `StreamReset` below, not as this) or more is
+					// still coming.
+					let finished = conn.stream_finished(self.id);
+					drop(conn);
+					if finished {
+						self.finished = true;
+						return Poll::Ready(Ok(()));
+					}
+					if let Some(err) = self.shared.closed() {
+						return Poll::Ready(Err(err));
+					}
+					self.shared.park_readable(self.id, waiter);
+					return Poll::Pending;
+				}
+				Err(quiche::Error::StreamReset(code)) => return Poll::Ready(Err(Error::Reset(code))),
+				Err(err) => return Poll::Ready(Err(err.into())),
+			}
 		}
-		if let Some(err) = self.shared.closed() {
-			return Poll::Ready(Err(err));
-		}
-		self.shared.park_readable(self.id, waiter);
-		Poll::Pending
 	}
 }
 

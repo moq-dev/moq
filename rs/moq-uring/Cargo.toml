@@ -15,6 +15,7 @@ categories = ["asynchronous", "network-programming", "os::linux-apis"]
 publish = false
 
 [target.'cfg(target_os = "linux")'.dependencies]
+boring = "4.22"
 bytes = "1"
 io-uring = { workspace = true }
 kio = { workspace = true }

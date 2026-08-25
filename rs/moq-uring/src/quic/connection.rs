@@ -61,6 +61,12 @@ pub(crate) struct State {
 	/// reset); the driver probes these each turn since quiche has no event
 	/// for stream collection.
 	finishing: HashMap<u64, kio::WaiterList>,
+	/// How each send stream ended, for the ones the driver saw collected while
+	/// the connection was still up: `None` for a FIN the peer acknowledged,
+	/// `Some(code)` for a `STOP_SENDING` the probe consumed on our behalf.
+	/// That is what makes a later close mean "already delivered" rather than
+	/// "we never found out". Cleared when the stream drops.
+	pub(crate) collected: HashMap<u64, Option<u64>>,
 
 	/// Received datagrams, oldest first; over [`DGRAM_QUEUE`] the oldest drop.
 	datagrams: VecDeque<Bytes>,
@@ -97,6 +103,7 @@ impl State {
 			readable: HashMap::new(),
 			writable: HashMap::new(),
 			finishing: HashMap::new(),
+			collected: HashMap::new(),
 			datagrams: VecDeque::new(),
 			datagram_recv_waiters: kio::WaiterList::new(),
 			datagram_send_waiters: kio::WaiterList::new(),
@@ -157,11 +164,34 @@ impl Inner {
 		let mut state = self.state.borrow_mut();
 		waiter.register(state.finishing.entry(id).or_default());
 	}
+
+	/// How send stream `id` ended, if the driver saw it collected on a live
+	/// connection: `Some(None)` for an acknowledged FIN, `Some(Some(code))`
+	/// for a `STOP_SENDING`.
+	pub(crate) fn collected(&self, id: u64) -> Option<Option<u64>> {
+		self.state.borrow().collected.get(&id).copied()
+	}
+
+	/// Forget stream `id`'s bookkeeping; called when a handle drops.
+	pub(crate) fn forget(&self, id: u64) {
+		let mut state = self.state.borrow_mut();
+		state.collected.remove(&id);
+		state.finishing.remove(&id);
+	}
+
+	/// Wake anyone parked on stream `id` being readable.
+	pub(crate) fn wake_readable(&self, id: u64) {
+		let mut state = self.state.borrow_mut();
+		if let Some(mut waiters) = state.readable.remove(&id) {
+			waiters.wake();
+		}
+	}
 }
 
 /// A QUIC connection driven by a [`crate::Worker`], usable as a MoQ transport.
 ///
-/// Created by [`connect`](super::connect) / [`accept`](super::accept), already
+/// Created by [`client::connect`](super::client::connect) /
+/// [`server::accept`](super::server::accept), already
 /// established. Clones share the connection; each carries its own parking so
 /// concurrent pending operations don't trample each other's wakeups. Dropping
 /// every handle (and every stream) drops the driver's `Rc` peers, but the
@@ -203,6 +233,7 @@ impl Connection {
 			local,
 			deadline: moq_net::runtime::Deadline::new(handle),
 			scratch: vec![0u8; 65535],
+			carry: None,
 		};
 		handle.spawn(async move { kio::wait(|waiter| driver.poll(waiter)).await });
 
@@ -467,6 +498,9 @@ struct Driver {
 	deadline: moq_net::runtime::Deadline<Handle>,
 	/// Datagram receive scratch.
 	scratch: Vec<u8>,
+	/// A packet quiche handed us for a different path than the train being
+	/// packed; it opens the next one.
+	carry: Option<(SocketAddr, Vec<u8>)>,
 }
 
 impl Driver {
@@ -561,13 +595,26 @@ impl Driver {
 
 		// quiche has no stream-collected event, so probe: a send stream whose
 		// capacity query errors has ended one way or another.
+		let mut collected = Vec::new();
 		state.finishing.retain(|id, waiters| match conn.stream_capacity(*id) {
 			Ok(_) => true,
+			// This probe is the only reader of the stop code, so record it
+			// rather than letting the collection look like a clean delivery.
+			Err(quiche::Error::StreamStopped(code)) => {
+				collected.push((*id, Some(code)));
+				waiters.wake();
+				false
+			}
 			Err(_) => {
+				collected.push((*id, None));
 				waiters.wake();
 				false
 			}
 		});
+		// Recorded before any terminal error is published this turn, so a
+		// close racing the acknowledgement cannot turn a delivered FIN into a
+		// reported failure.
+		state.collected.extend(collected);
 
 		let mut received = false;
 		while let Ok(len) = conn.dgram_recv(&mut self.scratch) {
@@ -596,13 +643,29 @@ impl Driver {
 
 			let mut filled = 0;
 			let mut dest = None;
-			{
+			// One train, one destination, so a packet left over from the last
+			// one leads this one.
+			if let Some((to, packet)) = self.carry.take() {
+				tx[..packet.len()].copy_from_slice(&packet);
+				filled = packet.len();
+				dest = Some(to);
+			}
+			// A short packet must ride last in a GSO send, so a short carry
+			// goes out alone.
+			if filled == 0 || filled == SEGMENT {
 				let mut conn = self.shared.conn.borrow_mut();
 				// Pack uniform SEGMENT-sized packets back to back; a short
 				// packet ends the train (it must ride last in a GSO send).
 				while filled + SEGMENT <= tx.len() && filled / SEGMENT < TRAIN_SEGMENTS {
 					match conn.send(&mut tx[filled..filled + SEGMENT]) {
 						Ok((n, info)) => {
+							// Path validation and NAT rebinding make quiche
+							// alternate destinations; sending this packet with
+							// the train would misroute it.
+							if dest.is_some_and(|to| to != info.to) {
+								self.carry = Some((info.to, tx[filled..filled + n].to_vec()));
+								break;
+							}
 							dest = Some(info.to);
 							filled += n;
 							if n < SEGMENT {
