@@ -116,7 +116,16 @@ impl Default for Config {
 impl Config {
 	/// Parse from CLI args, optionally merging a TOML file, then init the logger.
 	pub fn load() -> anyhow::Result<Self> {
-		let config = Self::parse_and_merge(std::env::args_os())?;
+		let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+		// `#[usage(completion)]` installs the `__complete_word__` interception in the
+		// generated `parse()`, which this loader does not use: without this the request
+		// would reach the ordinary grammar and be refused. Recognized before the parse,
+		// because a completion is not a command this binary runs.
+		if let Some(reply) = Self::completion_request(args.get(1..).unwrap_or_default()) {
+			print!("{reply}");
+			std::process::exit(0);
+		}
+		let config = Self::parse_and_merge(args)?;
 		config.log.init()?;
 		tracing::trace!(?config, "final config");
 		Ok(config)
@@ -155,11 +164,7 @@ impl Config {
 			normalize_client_aliases(&mut file)?;
 			merge_toml(&mut merged, file);
 			config = merged.try_into()?;
-			let connect_websocket = config.client.websocket.enabled;
 			config.update_from(&argv);
-			if !has_long_flag(&argv, "--connect-websocket-enabled") {
-				config.client.websocket.enabled = connect_websocket;
-			}
 		}
 		config.check_deprecated()?;
 		// `Stats::report` feeds this into `tokio::time::interval`, which panics on a
@@ -220,16 +225,6 @@ impl Config {
 	pub fn group_size(&self) -> Range {
 		self.group_size
 	}
-}
-
-fn has_long_flag(argv: &[&std::ffi::OsStr], selector: &str) -> bool {
-	argv.iter().any(|arg| {
-		*arg == std::ffi::OsStr::new(selector)
-			|| arg
-				.to_str()
-				.and_then(|arg| arg.strip_prefix(selector))
-				.is_some_and(|suffix| suffix.starts_with('='))
-	})
 }
 
 fn normalize_client_aliases(value: &mut toml::Value) -> anyhow::Result<()> {
@@ -319,7 +314,7 @@ enabled = false
 		assert_eq!(config.fps(), Range::new(24, 60));
 		assert_eq!(config.client.url.as_ref().unwrap().as_str(), "https://example.com/");
 		assert_eq!(config.client.tls.insecure, Some(true));
-		assert!(!config.client.websocket.enabled);
+		assert_eq!(config.client.websocket.enabled, Some(false));
 
 		// CLI flag wins over the TOML value.
 		let args = vec![
@@ -334,7 +329,7 @@ enabled = false
 		assert_eq!(config.connections(), Range::new(5, 10));
 		// Untouched TOML field is still intact.
 		assert_eq!(config.fps(), Range::new(24, 60));
-		assert!(config.client.websocket.enabled);
+		assert_eq!(config.client.websocket.enabled, Some(true));
 	}
 
 	#[test]

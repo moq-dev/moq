@@ -60,7 +60,7 @@ async fn spawn_ws_relay(auth: moq_relay::Auth) -> (u16, tokio::task::JoinHandle<
 		.certificates();
 
 	let mut web_config = WebConfig::default();
-	web_config.ws = true;
+	web_config.ws = Some(true);
 	web_config.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
 	let web = Web::new(auth, cluster, certificates, web_config);
 

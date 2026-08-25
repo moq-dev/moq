@@ -46,9 +46,27 @@ pub struct WebConfig {
 	pub https: HttpsConfig,
 
 	/// If true (default), expose a WebTransport compatible WebSocket polyfill.
-	#[usage(long = "web-ws", env = "MOQ_WEB_WS", default = "true", bool_value)]
-	#[serde(default = "default_true")]
-	pub ws: bool,
+	///
+	/// `Option` with the default resolved by [`Self::resolved_ws`] rather than a
+	/// Usage `default`, which a config file could not override: Usage reads a
+	/// standing `false` as an empty boolean, so the re-parse over the CLI args
+	/// would refill it with the declared `true`.
+	#[usage(
+		long = "web-ws",
+		env = "MOQ_WEB_WS",
+		default_missing = "true",
+		num_args = 0..=1,
+		require_equals = true,
+	)]
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub ws: Option<bool>,
+}
+
+impl WebConfig {
+	/// Whether the WebSocket polyfill is served, resolving the default.
+	pub fn resolved_ws(&self) -> bool {
+		self.ws.unwrap_or(true)
+	}
 }
 
 /// Plain HTTP listener configuration.
@@ -236,7 +254,7 @@ impl Web {
 		// through to the landing page, and the client's WS fallback is silently
 		// dead.
 		#[cfg(feature = "websocket")]
-		let app = if self.config.ws {
+		let app = if self.config.resolved_ws() {
 			app.route("/", axum::routing::any(crate::websocket::serve_ws))
 				.route("/{*path}", axum::routing::any(crate::websocket::serve_ws))
 		} else {
@@ -265,8 +283,9 @@ impl Web {
 			let listener = moq_tokio::bind::tcp(listen).context("failed to bind HTTP listener")?;
 			// Same socket capture the HTTPS path gets from `MtlsAcceptor`: without it
 			// a `ws://` session reaches qmux with no descriptor and reports no RTT.
-			let server =
-				crate::listener::server(listener, self.health.clone())?.acceptor(SocketAcceptor { ws: config.ws });
+			let server = crate::listener::server(listener, self.health.clone())?.acceptor(SocketAcceptor {
+				ws: config.resolved_ws(),
+			});
 			Some(server.serve(app.clone()))
 		} else {
 			None
@@ -288,7 +307,7 @@ impl Web {
 			// a near-no-op, but keeping a single path simplifies reload + serve.
 			let acceptor = MtlsAcceptor {
 				inner: RustlsAcceptor::new(rustls_config),
-				ws: config.ws,
+				ws: config.resolved_ws(),
 			};
 			let listener = moq_tokio::bind::tcp(listen).context("failed to bind HTTPS listener")?;
 			let server = crate::listener::server(listener, self.health.clone())?.acceptor(acceptor);
@@ -826,10 +845,6 @@ impl IntoResponse for ServeGroupError {
 	fn into_response(self) -> Response {
 		(StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()).into_response()
 	}
-}
-
-fn default_true() -> bool {
-	true
 }
 
 #[cfg(test)]

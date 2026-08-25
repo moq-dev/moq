@@ -146,7 +146,21 @@ impl std::error::Error for ParseError {}
 impl Invocation {
 	/// Parse the process arguments, exiting with Usage's rendered message on error.
 	pub fn parse() -> Self {
-		match Self::try_parse_from(std::env::args_os()) {
+		let args: Vec<OsString> = std::env::args_os().collect();
+		// `#[usage(completion)]` installs the `__complete_word__` interception in the
+		// generated `Cli::parse()`, which the stage grammar cannot use: without this
+		// the request reaches the ordinary grammar and is refused. Recognized before
+		// the split on `--`, because a completion is not a command this binary runs.
+		//
+		// Answered against the root, so a cursor inside a later stage is completed
+		// against a grammar that also carries the process-wide flags a stage refuses.
+		// Narrowing that needs the request's own line and cursor rewritten to the last
+		// stage, which is not done here.
+		if let Some(reply) = Cli::completion_request(args.get(1..).unwrap_or_default()) {
+			print!("{reply}");
+			std::process::exit(0);
+		}
+		match Self::try_parse_from(args) {
 			Ok(parsed) => parsed,
 			Err(err) => err.exit(),
 		}
@@ -165,7 +179,7 @@ impl Invocation {
 		// reports the missing subcommand as usual.
 		let first = chunks.next().unwrap_or_default();
 		let first = first.iter().skip(1).map(OsString::as_os_str).collect::<Vec<_>>();
-		let cli = Cli::parse_from(&first).map_err(|err| parse_error(Cli::spec(), &first, err))?;
+		let cli = Cli::parse_from(&first).map_err(|err| parse_error(Cli::spec(), Cli::command(), &first, err))?;
 
 		let mut stages = vec![cli.command];
 		for chunk in chunks {
@@ -181,7 +195,7 @@ impl Invocation {
 			let chunk = chunk.iter().map(OsString::as_os_str).collect::<Vec<_>>();
 			stages.push(
 				Stage::parse_from(&chunk)
-					.map_err(|err| parse_error(Stage::spec(), &chunk, err))?
+					.map_err(|err| parse_error(Stage::spec(), Stage::command(), &chunk, err))?
 					.command,
 			);
 		}
@@ -254,16 +268,59 @@ impl Invocation {
 	}
 }
 
-fn parse_error(spec: &usage::argv::spec::Spec<'_>, argv: &[&OsStr], err: usage::Error<'_, '_>) -> ParseError {
-	let kind = match err {
-		usage::Error::UnknownFlag { .. } | usage::Error::UnexpectedArg { .. } => ParseErrorKind::UnknownArgument,
-		usage::Error::MissingSubcommand => ParseErrorKind::MissingSubcommand,
-		usage::Error::InvalidValue(_) | usage::Error::InvalidChoice { .. } => ParseErrorKind::ValueValidation,
-		usage::Error::Help { .. } | usage::Error::HelpAll { .. } => ParseErrorKind::DisplayHelp,
-		usage::Error::Version { .. } => ParseErrorKind::DisplayVersion,
-		_ => ParseErrorKind::Other,
-	};
-	ParseError::new(kind, usage::render_failure(spec, argv, &err))
+/// Turn a Usage parse result into a [`ParseError`], rendering the page or version
+/// line a request asks for.
+///
+/// Help and version are questions rather than failures, and Usage answers them by
+/// handing back the command to render: `render_failure` produces an empty string
+/// for those variants, because a caller is expected to have taken them first. The
+/// generated `parse()` does exactly this, which the stage grammar can't use.
+fn parse_error(
+	spec: &usage::argv::spec::Spec<'_>,
+	root: &usage::Command<'_>,
+	argv: &[&OsStr],
+	err: usage::Error<'_, '_>,
+) -> ParseError {
+	use usage::help::{Page, Style};
+
+	let page = |cmd, want, style| usage::help::page(spec, root, argv, cmd, want, style).unwrap_or_default();
+
+	match err {
+		usage::Error::Help { cmd, long } => {
+			let want = if long { Page::Long } else { Page::Short };
+			ParseError::new(ParseErrorKind::DisplayHelp, page(cmd, want, Style::auto()))
+		}
+		usage::Error::HelpAll { cmd } => {
+			ParseError::new(ParseErrorKind::DisplayHelp, page(cmd, Page::All, Style::auto()))
+		}
+		// Not a request: `arg_required_else_help` found nothing to do. clap prints
+		// the short page to stderr and exits 2, and so does this.
+		usage::Error::MissingArgsHelp { cmd } => ParseError::new(
+			ParseErrorKind::MissingSubcommand,
+			page(cmd, Page::Short, Style::auto_stderr()),
+		),
+		usage::Error::Version { long } => {
+			let bin = spec.bin.unwrap_or(spec.name);
+			let version = if long {
+				spec.long_version.or(spec.version)
+			} else {
+				spec.version.or(spec.long_version)
+			}
+			.unwrap_or_default();
+			ParseError::new(ParseErrorKind::DisplayVersion, format!("{bin} {version}\n"))
+		}
+		err => {
+			let kind = match err {
+				usage::Error::UnknownFlag { .. } | usage::Error::UnexpectedArg { .. } => {
+					ParseErrorKind::UnknownArgument
+				}
+				usage::Error::MissingSubcommand => ParseErrorKind::MissingSubcommand,
+				usage::Error::InvalidValue(_) | usage::Error::InvalidChoice { .. } => ParseErrorKind::ValueValidation,
+				_ => ParseErrorKind::Other,
+			};
+			ParseError::new(kind, usage::render_failure(spec, argv, &err))
+		}
+	}
 }
 
 /// The MoQ attachment: a relay dial, a server listener, a LAN mesh, or any
@@ -441,10 +498,14 @@ impl MoqSide {
 #[derive(usage::Subcommands, Clone)]
 pub enum Command {
 	/// Route media INTO MoQ from one source.
-	#[usage(alias = "publish")]
+	///
+	/// `alias_hidden`, not `alias`: Usage advertises an `alias` in help and
+	/// completions, and `import` / `export` are the canonical spellings. The old
+	/// names keep parsing without rejoining the published surface.
+	#[usage(alias_hidden = "publish")]
 	Import(Import),
 	/// Route media OUT OF MoQ to one sink.
-	#[usage(alias = "subscribe")]
+	#[usage(alias_hidden = "subscribe")]
 	Export(Export),
 	/// Play a broadcast in a native window and speaker.
 	#[cfg(feature = "play")]
@@ -1371,5 +1432,107 @@ mod tests {
 			panic!("expected play")
 		};
 		assert!(play.validate().is_ok());
+	}
+
+	/// Help and version are answered with their actual page, not an empty string.
+	///
+	/// Usage renders those variants as nothing through `render_failure`, because the
+	/// caller is expected to take them first. The stage grammar parses each chunk
+	/// itself rather than through the generated `parse()`, so it has to.
+	#[test]
+	fn help_and_version_render_their_output() {
+		for args in [
+			vec!["moq", "--help"],
+			vec!["moq", "-h"],
+			vec!["moq", "--version"],
+			vec!["moq", "-V"],
+			vec!["moq", "publish", "--help"],
+		] {
+			let Err(err) = Invocation::try_parse_from(args.clone()) else {
+				panic!("{args:?} parsed instead of asking a question")
+			};
+			assert!(
+				matches!(err.kind(), ParseErrorKind::DisplayHelp | ParseErrorKind::DisplayVersion),
+				"{args:?} produced {:?}",
+				err.kind()
+			);
+			assert!(!err.to_string().trim().is_empty(), "{args:?} printed nothing");
+		}
+	}
+
+	/// A stage after `--` gets its own help page, since each chunk is its own parse.
+	///
+	/// The root spec models only the first stage, so a later chunk is parsed against
+	/// `Stage` and has to render its own answer.
+	#[test]
+	fn stage_help_renders() {
+		for args in [
+			vec![
+				"moq",
+				"--connect",
+				"http://localhost:4444/x",
+				"import",
+				"fmp4",
+				"--",
+				"export",
+				"--help",
+			],
+			vec![
+				"moq",
+				"--connect",
+				"http://localhost:4444/x",
+				"import",
+				"fmp4",
+				"--",
+				"export",
+				"fmp4",
+				"--help",
+			],
+		] {
+			let Err(err) = Invocation::try_parse_from(args.clone()) else {
+				panic!("{args:?} parsed instead of asking a question")
+			};
+			assert_eq!(err.kind(), ParseErrorKind::DisplayHelp, "{args:?}");
+			assert!(
+				err.to_string().contains("Usage:"),
+				"{args:?} rendered no help page: {err}"
+			);
+		}
+	}
+
+	/// Every `*-version` flag offers exactly the versions [`Version::names`] parses.
+	///
+	/// The lists are `choices(...)` literals because Usage reads them at expansion
+	/// time, so they are copies. This is what keeps a new protocol draft from
+	/// parsing through `FromStr` while staying unreachable from the command line:
+	/// add the draft, and this fails until every list has it.
+	#[test]
+	fn version_choices_match_the_parser() {
+		fn walk<'a>(cmd: &'a usage::argv::spec::CommandMeta<'a>, found: &mut Vec<(&'a str, Vec<&'a str>)>) {
+			for flag in cmd.flags {
+				let Some(long) = flag.flag.longs.first() else {
+					continue;
+				};
+				if long.ends_with("version") && !flag.choices.is_empty() {
+					found.push((long, flag.choices.to_vec()));
+				}
+			}
+			for sub in cmd.subcommands {
+				walk(sub, found);
+			}
+		}
+
+		// As a set: `names()` is preference-ordered (newest first) while a choice
+		// list reads ascending, and that ordering is a presentation call.
+		let mut expected: Vec<&str> = moq_net::Version::names().collect();
+		expected.sort_unstable();
+		let mut found = Vec::new();
+		walk(Cli::spec().root, &mut found);
+
+		assert!(!found.is_empty(), "no version flag carried a choice list");
+		for (long, choices) in &mut found {
+			choices.sort_unstable();
+			assert_eq!(choices, &expected, "--{long} is out of step with Version::names()");
+		}
 	}
 }

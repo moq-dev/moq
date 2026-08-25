@@ -73,14 +73,22 @@ static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(||
 #[non_exhaustive]
 pub struct Config {
 	/// Whether to enable the WebSocket fallback. Defaults to true.
+	///
+	/// `Option` with the default resolved by [`Self::resolved_enabled`] rather than
+	/// a Usage `default`, which a config file could not override: Usage reads a
+	/// standing `false` as an empty boolean, so the re-parse over the CLI args
+	/// would refill it with the declared `true`. An `Option` is empty only when
+	/// nothing set it.
 	#[usage(
 		name = "connect-websocket-enabled",
 		long = "connect-websocket-enabled",
 		env = "MOQ_CONNECT_WEBSOCKET_ENABLED",
-		default = "true",
-		bool_value
+		default_missing = "true",
+		num_args = 0..=1,
+		require_equals = true,
 	)]
-	pub enabled: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub enabled: Option<bool>,
 
 	/// Head start given to the QUIC dial before the WebSocket fallback joins the
 	/// race. Defaults to 200ms, and drops to zero for a server WebSocket already won.
@@ -101,7 +109,7 @@ pub struct Config {
 impl Default for Config {
 	fn default() -> Self {
 		Self {
-			enabled: true,
+			enabled: None,
 			delay: DEFAULT_DELAY.into(),
 			legacy: Default::default(),
 		}
@@ -165,7 +173,7 @@ impl Config {
 
 	/// Whether the fallback runs at all, resolving the default.
 	pub fn resolved_enabled(&self) -> bool {
-		self.enabled
+		self.enabled.unwrap_or(true)
 	}
 
 	/// The head start a QUIC dial gets, resolving the default.

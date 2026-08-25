@@ -62,7 +62,7 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 		out.connect.resolution_delay = std::time::Duration::from_millis(config.resolution_delay_ms).into();
 	}
 	if config.has_websocket_enabled {
-		out.connect.websocket.enabled = config.websocket_enabled;
+		out.connect.websocket.enabled = Some(config.websocket_enabled);
 	}
 	if config.has_websocket_delay {
 		out.connect.websocket.delay = std::time::Duration::from_millis(config.websocket_delay_ms).into();

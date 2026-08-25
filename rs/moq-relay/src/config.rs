@@ -123,7 +123,16 @@ impl Config {
 	/// TOML file specified via the positional `file` argument. Also initializes
 	/// the logger.
 	pub fn load() -> anyhow::Result<Self> {
-		let config = Self::parse_and_merge(std::env::args_os())?;
+		let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+		// `#[usage(completion)]` installs the `__complete_word__` interception in the
+		// generated `parse()`, which this loader does not use: without this the request
+		// would reach the ordinary grammar and be refused. Recognized before the parse,
+		// because a completion is not a command this binary runs.
+		if let Some(reply) = Self::completion_request(args.get(1..).unwrap_or_default()) {
+			print!("{reply}");
+			std::process::exit(0);
+		}
+		let config = Self::parse_and_merge(args)?;
 		config.log.init()?;
 		tracing::trace!(?config, "final config");
 		Ok(config)
@@ -133,6 +142,16 @@ impl Config {
 	/// it with synthetic args and inspect the result.
 	///
 	/// Merge defaults and environment, then TOML, then explicit CLI flags.
+	///
+	/// # Pitfall (see `rs/CLAUDE.md` and `tests` below)
+	///
+	/// The final `update_from` re-parses `argv` over the merged config. Usage
+	/// fills a declared default only where the standing value is still empty,
+	/// and a bare `bool` reading `false` is what it counts as empty: a field
+	/// with `default = "true"` is therefore refilled over whatever the TOML
+	/// said. Type any new flag that should be TOML-overridable as
+	/// `Option<bool>` and resolve the default in code. Every other shape is
+	/// safe, because a plain value always reads as present.
 	pub(crate) fn parse_and_merge<I, T>(args: I) -> anyhow::Result<Self>
 	where
 		I: IntoIterator<Item = T>,
@@ -153,35 +172,10 @@ impl Config {
 			normalize_toml_aliases(&mut file)?;
 			merge_toml(&mut merged, file);
 			config = merged.try_into()?;
-			let runtime_pin = config.runtime.pin;
-			let web_ws = config.web.ws;
-			let connect_websocket = config.connect.websocket.enabled;
 			config.update_from(&argv);
-			// Usage treats `false` as an empty standing boolean, so a declared
-			// default of `true` fills it during an update. Preserve the source layer
-			// unless the corresponding CLI flag was explicitly present.
-			if !has_long_flag(&argv, "--runtime-pin") {
-				config.runtime.pin = runtime_pin;
-			}
-			if !has_long_flag(&argv, "--web-ws") {
-				config.web.ws = web_ws;
-			}
-			if !has_long_flag(&argv, "--connect-websocket-enabled") {
-				config.connect.websocket.enabled = connect_websocket;
-			}
 		}
 		Ok(config)
 	}
-}
-
-fn has_long_flag(argv: &[&std::ffi::OsStr], selector: &str) -> bool {
-	argv.iter().any(|arg| {
-		*arg == std::ffi::OsStr::new(selector)
-			|| arg
-				.to_str()
-				.and_then(|arg| arg.strip_prefix(selector))
-				.is_some_and(|suffix| suffix.starts_with('='))
-	})
 }
 
 fn normalize_toml_aliases(value: &mut toml::Value) -> anyhow::Result<()> {
@@ -419,13 +413,21 @@ enabled = false
 		let config = Config::parse_and_merge(args).expect("config load");
 
 		assert_eq!(config.runtime.workers, Some(8));
-		assert!(
-			!config.runtime.pin,
-			"TOML's runtime.pin=false must survive the CLI re-parse"
+		assert_eq!(
+			config.runtime.pin,
+			Some(false),
+			"TOML's runtime.pin=false must survive the CLI re-parse \
+			 (a bare bool with a `true` default reads as empty and is refilled; \
+			 type it as Option<bool>)"
 		);
-		assert!(!config.web.ws, "TOML's web.ws=false must survive the CLI re-parse");
-		assert!(
-			!config.connect.websocket.enabled,
+		assert_eq!(
+			config.web.ws,
+			Some(false),
+			"TOML's web.ws=false must survive the CLI re-parse"
+		);
+		assert_eq!(
+			config.connect.websocket.enabled,
+			Some(false),
 			"TOML's connect.websocket.enabled=false must survive the CLI re-parse"
 		);
 
@@ -437,9 +439,9 @@ enabled = false
 			std::ffi::OsString::from("--connect-websocket-enabled=true"),
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
-		assert!(config.runtime.pin);
-		assert!(config.web.ws);
-		assert!(config.connect.websocket.enabled);
+		assert_eq!(config.runtime.pin, Some(true));
+		assert_eq!(config.web.ws, Some(true));
+		assert_eq!(config.connect.websocket.enabled, Some(true));
 	}
 
 	#[test]
