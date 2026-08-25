@@ -70,6 +70,13 @@ impl<S: moq_net::transport::poll::Session> moq_net::Runtime for Runtime<S> {
 /// lifetime and teardown stay tied to theirs (the relay's WebSocket handler
 /// does this). Accept or connect with a clone, then [`take`](Self::take) the
 /// machine and poll it yourself.
+///
+/// One handle serves exactly one session. Clones share its slot, which is how
+/// the machine gets back from the clone `accept`/`connect` took, so a second
+/// session through the same handle panics rather than silently taking the
+/// first one's place: whichever way that resolved, some session would end up
+/// with the wrong driver or none at all, and a session nobody drives makes no
+/// progress and never processes its shutdown.
 pub struct Inline<S: moq_net::transport::poll::Session> {
 	slot: std::sync::Arc<std::sync::Mutex<Option<moq_net::runtime::Machine<Self>>>>,
 	_transport: PhantomData<fn(S)>,
@@ -84,7 +91,7 @@ impl<S: moq_net::transport::poll::Session> Inline<S> {
 		}
 	}
 
-	/// The machine the last accept/connect handed over, if any.
+	/// The machine this handle's accept/connect handed over, if any.
 	///
 	/// The session makes no progress until the caller polls it.
 	pub fn take(&self) -> Option<moq_net::runtime::Machine<Self>> {
@@ -129,7 +136,17 @@ impl<S: moq_net::transport::poll::Session> moq_net::Runtime for Inline<S> {
 	type Transport = S;
 
 	fn spawn(&self, machine: moq_net::runtime::Machine<Self>) {
-		*self.slot.lock().unwrap() = Some(machine);
+		let mut slot = self.slot.lock().unwrap();
+		if slot.is_some() {
+			// Unlock first: panicking under the guard would poison the slot and
+			// stop the caller who used this handle correctly from ever taking
+			// their machine, stranding the session this is meant to protect.
+			drop(slot);
+			panic!(
+				"an Inline runtime drives one session: take() the machine from the previous accept/connect, or use a fresh handle"
+			);
+		}
+		*slot = Some(machine);
 	}
 }
 
