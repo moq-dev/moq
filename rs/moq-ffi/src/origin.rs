@@ -76,7 +76,7 @@ pub struct MoqAnnounced {
 
 #[derive(uniffi::Object)]
 pub struct MoqOriginDynamic {
-	task: Task<OriginDynamic>,
+	task: std::sync::Mutex<Option<Arc<Task<OriginDynamic>>>>,
 }
 
 #[derive(uniffi::Object)]
@@ -221,9 +221,9 @@ impl MoqOriginProducer {
 	pub fn dynamic(&self) -> Arc<MoqOriginDynamic> {
 		let _guard = crate::ffi::enter();
 		Arc::new(MoqOriginDynamic {
-			task: Task::new(OriginDynamic {
+			task: std::sync::Mutex::new(Some(Arc::new(Task::new(OriginDynamic {
 				inner: self.inner.dynamic(),
-			}),
+			})))),
 		})
 	}
 
@@ -299,14 +299,16 @@ impl MoqOriginDynamic {
 	/// Returns a [`MoqBroadcastRequest`]: accept it with a broadcast producer or abort
 	/// it with an application error code. The requesting consumer stays pending until then.
 	pub async fn requested_broadcast(&self) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
-		self.task
-			.run(|mut state| async move { state.requested_broadcast().await })
+		let task = self.task.lock().unwrap().clone().ok_or(MoqError::Closed)?;
+		task.run(|mut state| async move { state.requested_broadcast().await })
 			.await
 	}
 
-	/// Cancel all current and future `requested_broadcast()` calls.
+	/// Stop serving dynamic requests and cancel all current `requested_broadcast()` calls.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		if let Some(task) = self.task.lock().unwrap().take() {
+			task.cancel();
+		}
 	}
 }
 

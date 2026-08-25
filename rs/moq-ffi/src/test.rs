@@ -1627,6 +1627,21 @@ async fn dynamic_broadcast_request_can_reject() {
 	assert!(result.is_err(), "request for a rejected broadcast should fail");
 }
 
+#[tokio::test]
+async fn cancelling_dynamic_broadcasts_unregisters_the_handler() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let dynamic = origin.dynamic();
+	let consumer = origin.consume();
+
+	dynamic.cancel();
+	assert!(matches!(dynamic.requested_broadcast().await, Err(MoqError::Closed)));
+
+	let result = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("missing".into()))
+		.await
+		.expect("request stayed pending after the dynamic handler was cancelled");
+	assert!(matches!(result, Err(MoqError::Protocol(moq_net::Error::Unroutable))));
+}
+
 #[test]
 fn without_runtime() {
 	std::thread::spawn(|| {
