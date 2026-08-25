@@ -52,3 +52,7 @@ harness = false
 [[bench]]
 name = "echo_quiche"
 harness = false
+
+[[bench]]
+name = "session_lite"
+harness = false

@@ -449,6 +449,12 @@ bench-udp *args:
 bench-echo *args:
     cargo bench -p moq-uring --bench echo_quiche -- {{ args }}
 
+# Measure a full moq-lite session (publisher to subscriber) through the
+# io_uring worker, same ablations and per-iteration unit as bench-echo.
+# Linux 6.12+ (skips loudly otherwise).
+bench-session *args:
+    cargo bench -p moq-uring --bench session_lite -- {{ args }}
+
 # Sample a process's CPU/memory/context switches on this host (run it where the
 # relay runs; it only reads /proc). E.g. `just rs bench-host --name moq-relay`.
 bench-host *args:
