@@ -317,7 +317,7 @@ _ = producer.Finish()
 
 Call `request.Abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
 
-To serve requests in a loop, range over `dynamic.Requests(ctx)` instead, the same shape `BroadcastDynamic` and `OriginDynamic` use:
+To serve requests in a loop, range over `dynamic.Requests(ctx)` instead, the same shape `BroadcastDynamic` uses:
 
 ```go
 for request, err := range dynamic.Requests(ctx) {
@@ -404,57 +404,6 @@ for datagram, err := range consumer.Datagrams(ctx) {
 ```
 
 Datagrams are delivered as `Datagram{Sequence, TimestampUs, Payload}`. Payloads are capped at 1200 bytes. Delivery requires a datagram-capable transport and lite-05 or newer moq-lite; IETF moq-transport, pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
-
-## On-demand broadcasts
-
-Use a dynamic origin when consumers should be able to request whole broadcasts that are not announced:
-
-```go
-capacity := uint64(256 * 1024 * 1024)
-origin := moq.NewOriginProducerWithOptions(moq.OriginOptions{
-	CacheCapacityBytes: &capacity,
-})
-
-dynamic := origin.Dynamic()
-defer dynamic.Cancel()
-
-for request, err := range dynamic.Requests(ctx) {
-	if err != nil {
-		if moq.IsShutdown(err) {
-			break
-		}
-		log.Fatal(err)
-	}
-
-	path, err := request.Path()
-	if err != nil {
-		log.Fatal(err)
-	}
-	if path != "events" {
-		if err := request.Abort(404); err != nil {
-			log.Fatal(err)
-		}
-		continue
-	}
-
-	broadcast, err := moq.NewBroadcastProducer()
-	if err != nil {
-		log.Fatal(err)
-	}
-	track, err := broadcast.PublishTrack("status", nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := request.Accept(broadcast); err != nil {
-		log.Fatal(err)
-	}
-	if err := track.WriteFrame(moq.Frame{Payload: []byte("ready")}); err != nil {
-		log.Fatal(err)
-	}
-}
-```
-
-The served broadcast is not announced. It only resolves consumers that call `RequestBroadcast(path)`. Each request arrives as a `BroadcastRequest`; call `Accept(broadcast)` to serve it, or `Abort(code)` to fail the requester.
 
 ## Local development
 

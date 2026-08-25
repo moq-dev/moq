@@ -260,28 +260,6 @@ for try await record in try await consumer.subscribeJsonStream(name: "events", a
 
 `compression` must match on the producer and subscriber. Snapshot mode also takes `deltaRatio` (`0` disables merge-patch deltas, so every change is a fresh snapshot). Advertise the track with a catalog section (`setCatalogSection`) if subscribers should discover it.
 
-### On-demand broadcasts
-
-Use a dynamic origin when consumers should be able to request whole broadcasts that are not announced:
-
-```swift
-let origin = OriginProducer(cacheCapacityBytes: 256 * 1024 * 1024)
-let dynamic = origin.dynamic()
-
-for try await request in dynamic {
-    if try request.path == "events" {
-        let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "status")
-        try request.accept(broadcast: broadcast)
-        try track.writeFrame(Data("ready".utf8), timestampUs: 0)
-    } else {
-        try request.abort(errorCode: 404)
-    }
-}
-```
-
-The served broadcast is not announced. It only resolves consumers that call `requestBroadcast(path:)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast:)` to serve it, or `abort(errorCode:)` to fail the requester.
-
 ### Raw media
 
 `publishMedia` above takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `publishVideo` / `publishAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
