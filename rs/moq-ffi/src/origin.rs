@@ -75,11 +75,13 @@ pub struct MoqAnnounced {
 }
 
 #[derive(uniffi::Object)]
+/// A dynamic origin handler that serves broadcast requests not resolved by an existing route.
 pub struct MoqOriginDynamic {
 	task: std::sync::Mutex<Option<Arc<Task<OriginDynamic>>>>,
 }
 
 #[derive(uniffi::Object)]
+/// A pending dynamic broadcast request that must be accepted or aborted.
 pub struct MoqBroadcastRequest {
 	inner: std::sync::Mutex<Option<moq_net::origin::Request>>,
 }
