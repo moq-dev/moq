@@ -322,6 +322,10 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> Supervisor<S
 
 		// The transport's terminal error ends the supervisor.
 		if let Poll::Ready(err) = self.closed_watch.poll_closed(&mut cx) {
+			// Nothing samples once this returns, but `stats()` keeps serving
+			// this cell, so leave it holding the session's final counters
+			// rather than whichever sample the last demand happened to catch.
+			self.stats.lock().sample = snapshot(&self.session);
 			if let Ok(mut closed) = self.closed.write() {
 				*closed = Some(Error::from_transport(err));
 			}

@@ -498,6 +498,7 @@ mod tests {
 		closed: kio::Fan,
 		control_writes: Arc<Mutex<Vec<u8>>>,
 		send_rate: Mutex<Option<u64>>,
+		bytes_sent: Mutex<Option<u64>>,
 	}
 
 	impl FakeSession {
@@ -514,6 +515,7 @@ mod tests {
 				closed: kio::Fan::default(),
 				control_writes: writes,
 				send_rate: Mutex::new(None),
+				bytes_sent: Mutex::new(None),
 			};
 			Self {
 				state: Arc::new(state),
@@ -523,6 +525,10 @@ mod tests {
 
 		fn set_send_rate(&self, rate: Option<u64>) {
 			*self.state.send_rate.lock().unwrap() = rate;
+		}
+
+		fn set_bytes_sent(&self, bytes: Option<u64>) {
+			*self.state.bytes_sent.lock().unwrap() = bytes;
 		}
 
 		fn control_writes(&self) -> Vec<u8> {
@@ -601,17 +607,23 @@ mod tests {
 		fn stats(&self) -> impl web_transport_trait::Stats {
 			FakeStats {
 				send_rate: *self.state.send_rate.lock().unwrap(),
+				bytes_sent: *self.state.bytes_sent.lock().unwrap(),
 			}
 		}
 	}
 
 	struct FakeStats {
 		send_rate: Option<u64>,
+		bytes_sent: Option<u64>,
 	}
 
 	impl web_transport_trait::Stats for FakeStats {
 		fn estimated_send_rate(&self) -> Option<u64> {
 			self.send_rate
+		}
+
+		fn bytes_sent(&self) -> Option<u64> {
+			self.bytes_sent
 		}
 	}
 
@@ -867,6 +879,40 @@ mod tests {
 		while session.stats().estimated_send_rate != Some(2_000_000) {
 			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 		}
+	}
+
+	// Sampling stops when the supervisor ends, but `stats()` keeps serving its
+	// cell, so the last thing the supervisor does is take a final snapshot.
+	// Without one, "what did that session move?" asked at teardown answers with
+	// the construction-time snapshot: this backend reports no send rate, so
+	// there is no bandwidth consumer keeping the sampler ticking, and the test
+	// never reads stats while the session is live.
+	#[tokio::test(start_paused = true)]
+	async fn stats_capture_the_final_counters() {
+		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
+		fake.set_send_rate(None);
+		fake.set_bytes_sent(Some(0));
+
+		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+		let session = client
+			.connect(crate::runtime::tokio_test::Tokio::new(), fake.clone())
+			.await
+			.unwrap();
+		assert!(
+			session.send_bandwidth().is_none(),
+			"no send-rate estimate, so nothing samples on its own"
+		);
+
+		fake.set_bytes_sent(Some(4242));
+
+		session.abort(Error::Cancel);
+		session.closed().await;
+
+		assert_eq!(
+			session.stats().bytes_sent,
+			Some(4242),
+			"the closing snapshot must carry the session's final counters"
+		);
 	}
 
 	// The send-bandwidth sampler lives inside the driver: it samples as soon as a
