@@ -1457,7 +1457,10 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						track_alias: self.request_id.0,
 						group_id: sequence,
 						sub_group_id: 0,
-						publisher_priority: 0,
+						// The publisher's own ranking of its tracks, which is what a relay
+						// prefers when it can't pick between its subscribers' priorities. The
+						// model ranks higher-first and this wire field lower-first.
+						publisher_priority: super::priority::to_wire(self.track.info().priority),
 						// Carry per-object timestamps as extension headers (the Timestamp
 						// Object Property) so moq-transport peers get the real PTS. The
 						// units are the track's, declared once in SUBSCRIBE_OK.
@@ -1698,6 +1701,8 @@ struct NamespaceRequest<S: crate::transport::poll::Session> {
 #[cfg(test)]
 mod group_priority_test {
 	use super::*;
+	use crate::coding::Decode;
+	use crate::ietf::priority;
 	use crate::lite::test_transport::SinkSession;
 
 	/// The model's `Subscription::priority` is higher-first ("higher values preempt
@@ -1741,6 +1746,51 @@ mod group_priority_test {
 			vec![200],
 			"model priority must pass through unchanged"
 		);
+	}
+
+	/// The publisher's own ranking of its tracks (`track::Info::priority`) is what a relay
+	/// prefers when it has no subscriber preference to go on, so it has to reach the wire.
+	/// It went out as a flat 0 before, which put catalog, audio, and video in one tier for
+	/// every moq-transport peer.
+	#[tokio::test]
+	async fn group_header_carries_the_publisher_priority() {
+		let log = crate::lite::test_transport::Log::default();
+		let session = SinkSession::new(log.clone());
+
+		let info = track::Info::default().with_priority(hang_audio_priority());
+		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", info);
+		let subscriber = track.subscribe(None);
+
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"hello".as_slice()).unwrap();
+		group.finish().unwrap();
+		track.finish().unwrap();
+
+		let mut serve = TrackServe::new(session, subscriber, RequestId(0), Version::Draft14);
+		kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
+
+		let written = log.writes.lock().unwrap().clone();
+		let mut buf = bytes::Bytes::from(written);
+		let header = ietf::GroupHeader::decode(&mut buf, Version::Draft14).expect("a group header");
+		assert_eq!(
+			header.publisher_priority,
+			priority::to_wire(hang_audio_priority()),
+			"the wire is lower-first, so audio must encode below video"
+		);
+		assert!(
+			priority::to_wire(hang_audio_priority()) < priority::to_wire(hang_video_priority()),
+			"audio outranks video on the wire"
+		);
+	}
+
+	/// `hang::catalog::PRIORITY` isn't reachable from `moq-net` (hang depends on it, not the
+	/// other way round), so the two ranks it publishes audio and video at are spelled here.
+	fn hang_audio_priority() -> u8 {
+		80
+	}
+
+	fn hang_video_priority() -> u8 {
+		60
 	}
 
 	/// A subgroup waiting for stream credit keeps its subscription expiry armed.

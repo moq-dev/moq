@@ -12,7 +12,7 @@ import * as Varint from "../varint.ts";
 import type { Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
-import { fromWire } from "./priority.ts";
+import { fromWire, toWire } from "./priority.ts";
 import { PublishDone } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceDone, PublishNamespaceOk } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
@@ -64,6 +64,9 @@ interface RunGroup {
 
 	/** The track's advertised timescale, applied to every frame timestamp. */
 	timescale: Timescale;
+
+	/** The publisher's tie-break priority, already converted to the IETF wire convention. */
+	publisherPriority: number;
 
 	/** Settles when the subscriber leaves, dropping a group still queued for a stream slot. */
 	unsubscribed: Promise<void>;
@@ -168,7 +171,13 @@ export class Publisher {
 		try {
 			// Declaring the timescale is what opts the track into timestamps; every object
 			// Timestamp below is in these units.
-			const timescale = (await track.info()).timescale;
+			const info = await track.info();
+			const timescale = info.timescale;
+			// The model ranks higher-first, the IETF wire lower-first. Every group this
+			// subscription serves carries the same publisher priority, which is what lets a
+			// relay prefer catalog and audio over video when it has no subscriber preference
+			// to go on.
+			const publisherPriority = toWire(info.priority);
 
 			// Send SUBSCRIBE_OK
 			await stream.writer.u53(SubscribeOk.id);
@@ -204,7 +213,13 @@ export class Publisher {
 				for (;;) {
 					const group = await track.recvGroup();
 					if (!group) return;
-					void this.#runGroup({ requestId: msg.requestId, group, timescale, unsubscribed });
+					void this.#runGroup({
+						requestId: msg.requestId,
+						group,
+						timescale,
+						publisherPriority,
+						unsubscribed,
+					});
 				}
 			})();
 
@@ -245,7 +260,7 @@ export class Publisher {
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
 	async #runGroup(options: RunGroup) {
-		const { requestId, group, timescale, unsubscribed } = options;
+		const { requestId, group, timescale, publisherPriority, unsubscribed } = options;
 		try {
 			// One stream per group is faster than a peer at its limit can retire them, so this
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
@@ -265,7 +280,7 @@ export class Publisher {
 				trackAlias: requestId,
 				groupId: group.sequence,
 				subGroupId: 0,
-				publisherPriority: 0,
+				publisherPriority,
 				flags: {
 					hasExtensions: true,
 					hasSubgroup: false,
