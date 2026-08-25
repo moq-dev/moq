@@ -2819,11 +2819,11 @@ impl Consumer {
 		})
 	}
 
-	/// Get an already-announced broadcast by path.
+	/// Get a broadcast by path.
 	///
-	/// Returns a [`kio::Pending`] future that resolves synchronously when the
-	/// broadcast is available, or to [`Error::Unroutable`] otherwise. Unlike
-	/// [`Self::announced`], this does not wait for a future announcement.
+	/// Returns a [`kio::Pending`] future that resolves when the broadcast can be
+	/// served, or to [`Error::Unroutable`] otherwise. Unlike [`Self::announced`],
+	/// this does not wait for a future announcement.
 	pub fn request_broadcast(&self, path: impl AsPath) -> kio::Pending<Requesting> {
 		let path = path.as_path();
 
