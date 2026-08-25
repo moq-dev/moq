@@ -39,6 +39,7 @@ public final class OriginProducer: Sendable {
 }
 
 /// A requested broadcast that has not been accepted yet.
+@_documentation(visibility: internal)
 public final class BroadcastRequest: Sendable {
     let ffi: MoqBroadcastRequest
 
