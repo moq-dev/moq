@@ -31,7 +31,6 @@ func opusHead() []byte {
 func TestOriginLifecycle(t *testing.T) {
 	origin := moq.NewOriginProducer()
 	_ = origin.Consume()
-	origin.Dynamic().Cancel()
 }
 
 func TestDynamicBroadcastRequest(t *testing.T) {

@@ -30,7 +30,7 @@ func (o *OriginProducer) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: o.inner.Consume()}
 }
 
-// Dynamic serves broadcasts that consumers request without an announcement.
+// Deprecated: Dynamic origin routing is not currently supported by clients.
 func (o *OriginProducer) Dynamic() *OriginDynamic {
 	return &OriginDynamic{inner: o.inner.Dynamic()}
 }

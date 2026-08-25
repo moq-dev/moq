@@ -381,7 +381,8 @@ async def test_dynamic_track_request_can_publish_media():
 
 async def test_dynamic_broadcast_request():
     origin = moq.OriginProducer(cache_capacity_bytes=4096)
-    dynamic = origin.dynamic()
+    with pytest.warns(DeprecationWarning, match="not currently supported by clients"):
+        dynamic = origin.dynamic()
     consumer = origin.consume()
 
     request_broadcast = asyncio.create_task(consumer.request_broadcast("dynamic/broadcast"))
@@ -410,7 +411,8 @@ async def test_dynamic_broadcast_request():
 
 async def test_dynamic_broadcast_request_can_reject():
     origin = moq.OriginProducer()
-    dynamic = origin.dynamic()
+    with pytest.warns(DeprecationWarning, match="not currently supported by clients"):
+        dynamic = origin.dynamic()
     consumer = origin.consume()
 
     request_broadcast = asyncio.create_task(consumer.request_broadcast("missing"))

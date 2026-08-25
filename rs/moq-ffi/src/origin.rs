@@ -1,3 +1,6 @@
+// UniFFI's generated scaffolding references deprecated methods within this module.
+#![allow(deprecated)]
+
 use std::sync::Arc;
 
 use crate::consumer::MoqBroadcastConsumer;
@@ -214,13 +217,11 @@ impl MoqOriginProducer {
 		})
 	}
 
-	/// Create a dynamic handler for serving unannounced broadcasts on request.
-	///
-	/// Hold the returned object while missing broadcast requests should be accepted.
-	/// Dropping it makes future requests to unknown broadcasts fail.
-	#[allow(deprecated)]
+	#[doc(hidden)]
+	#[deprecated(note = "dynamic routing is not currently supported by clients")]
 	pub fn dynamic(&self) -> Arc<MoqOriginDynamic> {
 		let _guard = crate::ffi::enter();
+		tracing::warn!("dynamic origin routing is not currently supported by clients");
 		Arc::new(MoqOriginDynamic {
 			task: Task::new(OriginDynamic {
 				inner: self.inner.dynamic(),

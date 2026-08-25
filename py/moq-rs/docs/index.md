@@ -96,7 +96,6 @@ asyncio.run(main())
 
    OriginProducer
    OriginConsumer
-   OriginDynamic
    Announced
    AnnouncedBroadcast
    Announcement

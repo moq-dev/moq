@@ -290,30 +290,6 @@ consumer.datagrams().collect { datagram ->
 
 Datagrams are delivered as `Datagram(sequence, timestampUs, payload)`. Payloads are capped at 1200 bytes. Delivery requires a datagram-capable transport and lite-05 or newer moq-lite; IETF moq-transport, pre-lite-05, WebSocket, and TCP paths do not deliver them, and there is no stream fallback.
 
-### On-demand broadcasts
-
-Use a dynamic origin when consumers should be able to request whole broadcasts that are not announced:
-
-```kotlin
-import dev.moq.*
-
-val origin = OriginProducer(OriginOptions(cacheCapacityBytes = 256UL * 1024UL * 1024UL))
-val dynamic = origin.dynamic()
-
-dynamic.requestedBroadcasts().collect { request ->
-    if (request.path() == "events") {
-        val broadcast = BroadcastProducer()
-        val track = broadcast.publishTrack("status", null)
-        request.accept(broadcast)
-        track.writeFrame(Frame(payload = "ready".encodeToByteArray()))
-    } else {
-        request.abort(404u)
-    }
-}
-```
-
-The served broadcast is not announced. It only resolves consumers that call `requestBroadcast(path)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast)` to serve it, or `abort(code)` to fail the requester.
-
 ### JSON tracks
 
 For JSON payloads, publish and subscribe with the framing handled for you, in one of two modes. Snapshot (lossy) carries one value updated over time; a subscriber only sees the latest. Stream (lossless) is an ordered append-log where every record is preserved.

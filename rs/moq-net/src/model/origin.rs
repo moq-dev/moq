@@ -1163,10 +1163,6 @@ impl Producer {
 	#[doc(hidden)]
 	#[deprecated(note = "dynamic routing is not currently supported by clients")]
 	pub fn dynamic(&self) -> Dynamic {
-		self.dynamic_inner()
-	}
-
-	fn dynamic_inner(&self) -> Dynamic {
 		Dynamic::new(self.info, self.root.clone(), self.dynamic.clone())
 	}
 
@@ -3151,6 +3147,7 @@ impl AnnounceConsumer {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
 	use crate::coding::Decode;
 	use crate::group;
@@ -5802,7 +5799,7 @@ mod tests {
 
 		let origin = Origin::random().produce();
 		let consumer = origin.consume();
-		let mut dynamic = origin.dynamic_inner();
+		let mut dynamic = origin.dynamic();
 
 		let peer = Origin::new(5).unwrap();
 		let tainted = OriginList::try_from(vec![Origin::new(1).unwrap(), peer]).unwrap();
@@ -6983,7 +6980,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_served_not_announced() {
 		let origin = Origin::random().produce();
-		let mut dynamic = origin.dynamic_inner();
+		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
 		// A separate announce cursor must never observe the dynamic broadcast.
@@ -7020,7 +7017,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_coalesces() {
 		let origin = Origin::random().produce();
-		let mut dynamic = origin.dynamic_inner();
+		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
 		// Both register before the handler drains either.
@@ -7047,7 +7044,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_dedups_served() {
 		let origin = Origin::random().produce();
-		let mut dynamic = origin.dynamic_inner();
+		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
 		let request_fut = consumer.request_broadcast("fallback");
@@ -7072,7 +7069,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_reserves_after_close() {
 		let origin = Origin::random().produce();
-		let mut dynamic = origin.dynamic_inner();
+		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
 		let request_fut = consumer.request_broadcast("fallback");
@@ -7098,7 +7095,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_served_cache_bounded() {
 		let origin = Origin::random().produce();
-		let mut dynamic = origin.dynamic_inner();
+		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
 		for i in 0..100 {
@@ -7126,7 +7123,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_coalesces_after_handoff() {
 		let origin = Origin::random().produce();
-		let mut dynamic = origin.dynamic_inner();
+		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
 		let f1 = consumer.request_broadcast("fallback");
@@ -7151,7 +7148,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_dropped_after_handoff() {
 		let origin = Origin::random().produce();
-		let mut dynamic = origin.dynamic_inner();
+		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
 		let f1 = consumer.request_broadcast("fallback");
@@ -7168,7 +7165,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_rejected() {
 		let origin = Origin::random().produce();
-		let mut dynamic = origin.dynamic_inner();
+		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
 		let request_fut = consumer.request_broadcast("fallback");
@@ -7185,7 +7182,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_rerequest_after_reject() {
 		let origin = Origin::random().produce();
-		let mut dynamic = origin.dynamic_inner();
+		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
 		let f1 = consumer.request_broadcast("fallback");
@@ -7206,7 +7203,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_handler_dropped() {
 		let origin = Origin::random().produce();
-		let dynamic = origin.dynamic_inner();
+		let dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
 		let request_fut = consumer.request_broadcast("fallback");
@@ -7226,7 +7223,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_accept_after_handler_dropped() {
 		let origin = Origin::random().produce();
-		let mut dynamic = origin.dynamic_inner();
+		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
 		let request_fut = consumer.request_broadcast("fallback");
@@ -7245,7 +7242,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_prefers_announced() {
 		let origin = Origin::random().produce();
-		let mut dynamic = origin.dynamic_inner();
+		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
 		let _broadcast = origin.create_broadcast("live", announce()).unwrap();
@@ -7266,7 +7263,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_clone_keeps_alive() {
 		let origin = Origin::random().produce();
-		let dynamic = origin.dynamic_inner();
+		let dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
 		drop(dynamic.clone());
