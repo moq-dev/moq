@@ -888,6 +888,8 @@ mod tests {
 			"play",
 			"--video-name",
 			"hd",
+			"--audio-codec",
+			"aac",
 		])
 		.unwrap();
 		let Command::Play(play) = cli.command else {
@@ -905,21 +907,21 @@ mod tests {
 	#[cfg(feature = "play")]
 	#[test]
 	fn play_rejects_undecodable_codecs() {
-		for flag in [["--video-codec", "vp9"], ["--audio-codec", "aac"]] {
+		for codec in ["vp8", "vp9"] {
 			let cli = Cli::try_parse_from([
 				"moq",
 				"--client-connect",
 				"https://relay.example.com/anon",
 				"play",
-				flag[0],
-				flag[1],
+				"--video-codec",
+				codec,
 			])
 			.unwrap();
 			let Command::Play(play) = cli.command else {
 				panic!("expected play")
 			};
 			let err = play.validate().unwrap_err().to_string();
-			assert!(err.contains(flag[1]), "{err}");
+			assert!(err.contains(codec), "{err}");
 		}
 	}
 }
