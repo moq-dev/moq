@@ -14,7 +14,7 @@ Full API reference: [Swift Package Index](https://swiftpackageindex.com/moq-dev/
 ## Install
 
 ```swift
-.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.4"),
+.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.5"),
 ```
 
 Add `Moq` to your target's dependencies:
