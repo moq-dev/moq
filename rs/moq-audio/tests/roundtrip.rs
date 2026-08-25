@@ -46,7 +46,7 @@ async fn opus_round_trip_48k_stereo() {
 	let mut options = encode::Options::default();
 	options.track = Some("audio".to_string());
 	options.codec = encode::Codec::Opus;
-	options.bitrate = Some(96_000);
+	options.bitrate = Some(moq_net::bandwidth::Rate::from_bps(96_000));
 
 	let mut producer = encode::Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap();
 
@@ -119,7 +119,7 @@ async fn opus_round_trip_44100_s16_resampled() {
 	let mut options = encode::Options::default();
 	options.track = Some("audio".to_string());
 	options.codec = encode::Codec::Opus;
-	options.bitrate = Some(64_000);
+	options.bitrate = Some(moq_net::bandwidth::Rate::from_bps(64_000));
 
 	let mut producer = encode::Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap();
 

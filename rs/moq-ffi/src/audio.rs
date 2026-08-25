@@ -232,7 +232,7 @@ impl MoqBroadcastProducer {
 		options.codec = output.codec.into();
 		options.sample_rate = output.sample_rate;
 		options.channels = output.channels;
-		options.bitrate = output.bitrate;
+		options.bitrate = output.bitrate.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
 		options.frame_duration = Duration::from_millis(output.frame_duration_ms.into());
 
 		let producer = self.with_state(|state| {

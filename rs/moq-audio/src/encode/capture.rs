@@ -40,13 +40,12 @@ pub async fn publish_capture(
 	let track = producer.track().clone();
 
 	// Reserve what audio actually costs, so a video encoder on the same connection
-	// sizes itself against what's left. The share is deliberately dropped: audio
-	// doesn't follow it yet, and the reservation lives with the track rather than
-	// with this handle. The encoder is open by now, so this is its real rate even
-	// when the caller left `Options::bitrate` unset for Opus to pick.
-	if let Some(allocator) = &encode.bandwidth {
-		allocator.register(&track.demand(), producer.bitrate());
-	}
+	// sizes itself against what's left. Held for the whole capture: dropping it would
+	// hand the room straight back and put video back to targeting the entire uplink.
+	// Audio doesn't read its share (it doesn't follow one yet), but it has to claim
+	// one. The encoder is open by now, so this is its real rate even when the caller
+	// left `Options::bitrate` unset for Opus to pick.
+	let _reservation = encode.bandwidth.reserve(&track.demand(), producer.bitrate());
 
 	let result = capture_loop(&mut producer, &track, &capture, &clock).await;
 

@@ -24,14 +24,14 @@ pub struct Rung {
 	/// Output height in pixels. Rounded down to even (I420 chroma is 2x2).
 	pub height: u32,
 
-	/// Target bitrate in bits per second: the CBR target and the bitrate
-	/// advertised in the derivative catalog.
-	pub bitrate: u64,
+	/// Target bitrate: the CBR target and the bitrate advertised in the derivative
+	/// catalog.
+	pub bitrate: moq_net::bandwidth::Rate,
 }
 
 impl Rung {
-	/// A rung at `height` pixels and `bitrate` bits per second.
-	pub fn new(height: u32, bitrate: u64) -> Self {
+	/// A rung at `height` pixels and `bitrate`.
+	pub fn new(height: u32, bitrate: moq_net::bandwidth::Rate) -> Self {
 		Self { height, bitrate }
 	}
 }
@@ -78,11 +78,11 @@ impl Default for Config {
 			// The default ladder, top rung first, filtered against the source at
 			// runtime so only strictly-lower renditions are offered.
 			rungs: vec![
-				Rung::new(1080, 5_000_000),
-				Rung::new(720, 2_500_000),
-				Rung::new(480, 1_200_000),
-				Rung::new(360, 600_000),
-				Rung::new(240, 350_000),
+				Rung::new(1080, moq_net::bandwidth::Rate::from_bps(5_000_000)),
+				Rung::new(720, moq_net::bandwidth::Rate::from_bps(2_500_000)),
+				Rung::new(480, moq_net::bandwidth::Rate::from_bps(1_200_000)),
+				Rung::new(360, moq_net::bandwidth::Rate::from_bps(600_000)),
+				Rung::new(240, moq_net::bandwidth::Rate::from_bps(350_000)),
 			],
 			source: None,
 			encoder: moq_video::encode::Kind::default(),

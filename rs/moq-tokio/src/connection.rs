@@ -1452,9 +1452,9 @@ mod tests {
 		assert!(bw.is_some());
 
 		// A value is mirrored through.
-		src.set(Some(3_000)).unwrap();
+		src.set(Some(moq_net::bandwidth::Rate::from_bps(3_000))).unwrap();
 		poll_forward(&mut bw, &out, &waiter);
-		assert_eq!(out_rx.peek(), Some(3_000));
+		assert_eq!(out_rx.peek(), Some(moq_net::bandwidth::Rate::from_bps(3_000)));
 
 		// The estimate becoming unavailable is mirrored, but the arm stays: the
 		// backend reporting nothing right now is not the session ending.
@@ -1466,9 +1466,9 @@ mod tests {
 		// So a later value on the same live session still gets through. Dropping the
 		// arm on the `None` above would have stranded the estimate at `None` for the
 		// rest of the session.
-		src.set(Some(9_000)).unwrap();
+		src.set(Some(moq_net::bandwidth::Rate::from_bps(9_000))).unwrap();
 		poll_forward(&mut bw, &out, &waiter);
-		assert_eq!(out_rx.peek(), Some(9_000));
+		assert_eq!(out_rx.peek(), Some(moq_net::bandwidth::Rate::from_bps(9_000)));
 
 		// Closing the source is what retires the arm, so we stop polling a dead one.
 		src.abort(moq_net::Error::Cancel).unwrap();

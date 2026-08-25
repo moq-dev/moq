@@ -292,7 +292,11 @@ impl MoqVideoProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
-		Ok(block_on(producer.encoder.set_bitrate(bitrate))?)
+		Ok(block_on(
+			producer
+				.encoder
+				.set_bitrate(moq_net::bandwidth::Rate::from_bps(bitrate)),
+		)?)
 	}
 
 	/// Flush any frames the codec is still holding and finalize the track.
@@ -323,7 +327,7 @@ impl MoqBroadcastProducer {
 		let mut config = moq_video::encode::Config::new(input.width, input.height, input.framerate);
 		config.codec = output.codec.into();
 		config.kind = output.kind.into();
-		config.bitrate = output.bitrate;
+		config.bitrate = output.bitrate.map(moq_net::bandwidth::Rate::from_bps);
 		if let Some(gop) = output.gop {
 			config.gop = gop;
 		}

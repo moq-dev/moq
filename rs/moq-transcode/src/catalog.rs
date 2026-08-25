@@ -13,7 +13,7 @@ pub(crate) struct Resolved {
 	pub name: String,
 	/// The output resolution, derived from the source aspect ratio.
 	pub size: moq_video::Size,
-	pub bitrate: u64,
+	pub bitrate: moq_net::bandwidth::Rate,
 	pub framerate: u32,
 }
 
@@ -81,7 +81,7 @@ pub(crate) fn resolve_rungs(rungs: &[Rung], source_name: &str, source: &VideoCon
 		if height == source_height && source.bitrate.is_none() {
 			continue;
 		}
-		if source.bitrate.is_some_and(|bitrate| rung.bitrate >= bitrate) {
+		if source.bitrate.is_some_and(|bitrate| rung.bitrate.as_bps() >= bitrate) {
 			continue;
 		}
 		// Preserve the source aspect ratio, rounded to even for I420 chroma.
@@ -211,7 +211,7 @@ mod tests {
 
 	#[test]
 	fn same_height_needs_lower_bitrate() {
-		let rungs = vec![Rung::new(480, 1_200_000)];
+		let rungs = vec![Rung::new(480, moq_net::bandwidth::Rate::from_bps(1_200_000))];
 		// Unknown source bitrate: a same-height rung can't prove it's below.
 		assert!(
 			resolve_rungs(&rungs, "video", &source(854, 480, None))
@@ -229,7 +229,7 @@ mod tests {
 	#[test]
 	fn rung_geometry_follows_source_aspect() {
 		let resolved = resolve_rungs(
-			&[Rung::new(360, 600_000)],
+			&[Rung::new(360, moq_net::bandwidth::Rate::from_bps(600_000))],
 			"video",
 			&source(1920, 1080, Some(6_000_000)),
 		)
@@ -239,7 +239,7 @@ mod tests {
 
 		// Vertical video: aspect preserved, width rounded to even.
 		let resolved = resolve_rungs(
-			&[Rung::new(360, 600_000)],
+			&[Rung::new(360, moq_net::bandwidth::Rate::from_bps(600_000))],
 			"video",
 			&source(1080, 1920, Some(6_000_000)),
 		)
@@ -274,7 +274,11 @@ mod tests {
 		config.coded_width = None;
 		config.coded_height = None;
 		assert!(matches!(
-			resolve_rungs(&[Rung::new(360, 600_000)], "video", &config),
+			resolve_rungs(
+				&[Rung::new(360, moq_net::bandwidth::Rate::from_bps(600_000))],
+				"video",
+				&config
+			),
 			Err(Error::SourceDimensions(_))
 		));
 	}
@@ -287,7 +291,7 @@ mod tests {
 		let rung = Resolved {
 			name: "video/360p".to_string(),
 			size: moq_video::Size::new(640, 360),
-			bitrate: 600_000,
+			bitrate: moq_net::bandwidth::Rate::from_bps(600_000),
 			framerate: 30,
 		};
 		let mut source = source(1920, 1080, Some(6_000_000));

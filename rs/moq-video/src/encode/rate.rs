@@ -3,21 +3,36 @@
 //!
 //! [`Control`] is the one place this policy lives, so every sender backs off the
 //! same way. It's a pure function of the estimate: feed it every value from a
-//! [`bandwidth::Consumer`](moq_net::bandwidth::Consumer) and hand what it
+//! [`bandwidth::Consumer`] and hand what it
 //! returns to [`Encoder::set_bitrate`](super::Encoder::set_bitrate).
 
 use std::time::Instant;
 
+use moq_net::bandwidth;
+
+/// Ignore moves smaller than this fraction of the current target, so a jittering
+/// estimate doesn't reconfigure the encoder on every 100ms sample.
+const HYSTERESIS: f64 = 0.05;
+
+/// How fast the target may climb back, as a fraction of the current target per second
+/// (~3s from the floor back to a 2x higher rate).
+///
+/// Drops ignore this and apply at once. Overshooting a closing uplink costs a stalled
+/// picture, while undershooting an opening one costs a few seconds of lower quality,
+/// so the response is deliberately asymmetric.
+const RAMP: f64 = 0.25;
+
 /// How a bandwidth estimate maps onto the bitrate a sender should produce at.
 ///
-/// Build one with [`Policy::new`] and override what you need. The defaults are
-/// tuned for a live contribution encoder on a cellular uplink: give back
-/// bandwidth immediately when the pipe closes, take it back slowly when it
-/// opens, and don't twitch at every jitter in the estimate.
+/// Build one with [`Policy::new`]. The behaviour is tuned for a live contribution
+/// encoder on a cellular uplink: give back bandwidth immediately when the pipe closes,
+/// take it back slowly when it opens, and don't twitch at every jitter in the estimate.
+/// The deadband and ramp that implement that are deliberately not knobs; they are
+/// properties of how congestion control behaves, not of any one sender.
 ///
 /// The estimate handed in is expected to be this sender's alone. Splitting one
 /// connection's estimate among the senders sharing it is
-/// [`bandwidth::Allocator`](moq_net::bandwidth::Allocator)'s job, one layer down,
+/// [`bandwidth::Allocator`]'s job, one layer down,
 /// so nothing here holds a fraction back for anyone else.
 ///
 /// `#[non_exhaustive]`: construct via [`Policy::new`] and set fields, so new
@@ -25,40 +40,25 @@ use std::time::Instant;
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Policy {
-	/// Upper bound in bits per second, normally the bitrate the caller asked
-	/// for. The estimate can only ever take the target *down* from here: an
-	/// optimistic estimate is not a reason to send more than was configured.
-	pub max: u64,
+	/// Upper bound, normally the bitrate the caller asked for. The estimate can only
+	/// ever take the target *down* from here: an optimistic estimate is not a reason
+	/// to send more than was configured.
+	pub max: bandwidth::Rate,
 
-	/// Lower bound in bits per second. Below some rate the picture isn't worth
-	/// sending, so the target holds here and the transport's priority queue
-	/// sheds the excess instead. Defaults to a tenth of `max`.
-	pub min: u64,
-
-	/// Ignore moves smaller than this fraction of the current target, so a
-	/// jittering estimate doesn't reconfigure the encoder every 100ms.
-	/// Defaults to 0.05 (5%).
-	pub hysteresis: f64,
-
-	/// How fast the target may climb back, as a fraction of the current target
-	/// per second. Defaults to 0.25 (25%/s, so ~3s from the floor back to a 2x
-	/// higher rate). Drops ignore this and apply at once: overshooting a closing
-	/// uplink costs a stalled picture, while undershooting an opening one costs
-	/// only a few seconds of lower quality.
-	pub ramp: f64,
+	/// Lower bound. Below some rate the picture isn't worth sending, so the target
+	/// holds here and the transport's priority queue sheds the excess instead.
+	/// Defaults to a tenth of `max`.
+	pub min: bandwidth::Rate,
 }
 
 impl Policy {
-	/// A policy targeting at most `max` bits per second, with the documented
-	/// defaults for every other knob.
-	pub fn new(max: u64) -> Self {
+	/// A policy targeting at most `max`, with a floor a tenth of it.
+	pub fn new(max: bandwidth::Rate) -> Self {
 		Self {
 			max,
 			// A tenth of the ceiling: low enough to ride out a bad uplink, high
 			// enough that what we do send is still worth decoding.
-			min: max / 10,
-			hysteresis: 0.05,
-			ramp: 0.25,
+			min: bandwidth::Rate::from_bps(max.as_bps() / 10),
 		}
 	}
 }
@@ -66,16 +66,20 @@ impl Policy {
 /// Maps bandwidth estimates onto a target bitrate, per a [`Policy`].
 ///
 /// Feed it every estimate from a
-/// [`bandwidth::Consumer`](moq_net::bandwidth::Consumer); it returns a new
+/// [`bandwidth::Consumer`]; it returns a new
 /// target only when one is worth applying, so a caller can hand the result
 /// straight to an encoder without rate-limiting it further:
 ///
 /// ```
 /// # use moq_video::encode::rate::{Control, Policy};
+/// # use moq_net::bandwidth;
 /// # use std::time::Instant;
-/// let mut control = Control::new(Policy::new(4_000_000));
+/// let mut control = Control::new(Policy::new(bandwidth::Rate::from_mbps(4)));
 /// // A 2 Mbps estimate takes the 4 Mbps target down to what the link will carry.
-/// assert_eq!(control.update(Some(2_000_000), Instant::now()), Some(2_000_000));
+/// assert_eq!(
+///     control.update(Some(bandwidth::Rate::from_mbps(2)), Instant::now()),
+///     Some(bandwidth::Rate::from_mbps(2))
+/// );
 /// ```
 ///
 /// The time source is a parameter rather than an [`Instant::now`] call so the
@@ -83,8 +87,8 @@ impl Policy {
 #[derive(Clone, Debug)]
 pub struct Control {
 	policy: Policy,
-	target: u64,
-	/// When the target last moved, anchoring the [`Policy::ramp`] limit. `None`
+	target: bandwidth::Rate,
+	/// When the target last moved, anchoring the [`RAMP`] limit. `None`
 	/// until the first change, when there's nothing to ramp from.
 	applied: Option<Instant>,
 }
@@ -100,8 +104,8 @@ impl Control {
 		}
 	}
 
-	/// The current target in bits per second.
-	pub fn target(&self) -> u64 {
+	/// The current target bitrate.
+	pub fn target(&self) -> bandwidth::Rate {
 		self.target
 	}
 
@@ -111,7 +115,7 @@ impl Control {
 	/// A `None` estimate (no congestion controller, or disconnected) holds the
 	/// current target rather than resetting to [`Policy::max`]: losing the
 	/// estimate is not evidence the uplink got better.
-	pub fn update(&mut self, estimate: Option<u64>, now: Instant) -> Option<u64> {
+	pub fn update(&mut self, estimate: Option<bandwidth::Rate>, now: Instant) -> Option<bandwidth::Rate> {
 		let estimate = estimate?;
 
 		// Normalize rather than trusting the fields: `min > max` would make the
@@ -128,9 +132,8 @@ impl Control {
 			match self.applied {
 				Some(applied) => {
 					let elapsed = now.saturating_duration_since(applied).as_secs_f64();
-					let ramp = self.policy.ramp.max(0.0);
-					let grown = self.target as f64 * (1.0 + ramp * elapsed);
-					(grown as u64).min(desired).clamp(min, self.policy.max)
+					let grown = self.target.scaled(1.0 + RAMP * elapsed);
+					grown.min(desired).clamp(min, self.policy.max)
 				}
 				None => desired,
 			}
@@ -158,8 +161,7 @@ impl Control {
 		// Drops keep the deadband either way: sitting a little above a falling
 		// estimate is what it's for.
 		let settling = next > self.target && next == self.policy.max;
-		let hysteresis = self.policy.hysteresis.max(0.0);
-		if !settling && (next.abs_diff(self.target) as f64) < self.target as f64 * hysteresis {
+		if !settling && next.abs_diff(self.target) < self.target.scaled(HYSTERESIS) {
 			return None;
 		}
 
@@ -175,76 +177,86 @@ mod tests {
 
 	use super::*;
 
+	/// Bits per second, so the tables below stay readable.
+	fn bps(bps: u64) -> bandwidth::Rate {
+		bandwidth::Rate::from_bps(bps)
+	}
+
 	/// 4 Mbps ceiling, so the max/10 floor lands on a round 400 kbps.
 	fn control() -> Control {
-		Control::new(Policy::new(4_000_000))
+		Control::new(Policy::new(bps(4_000_000)))
 	}
 
 	#[test]
 	fn starts_optimistic() {
-		assert_eq!(control().target(), 4_000_000);
+		assert_eq!(control().target(), bps(4_000_000));
 	}
 
 	#[test]
 	fn drop_applies_immediately() {
 		let mut control = control();
 		// A 2 Mbps pipe: take the target down to it at once, no ramp, no waiting.
-		assert_eq!(control.update(Some(2_000_000), Instant::now()), Some(2_000_000));
-		assert_eq!(control.target(), 2_000_000);
+		assert_eq!(
+			control.update(Some(bps(2_000_000)), Instant::now()),
+			Some(bps(2_000_000))
+		);
+		assert_eq!(control.target(), bps(2_000_000));
 	}
 
 	#[test]
 	fn missing_estimate_holds_the_target() {
 		let mut control = control();
 		let now = Instant::now();
-		control.update(Some(2_000_000), now).unwrap();
+		control.update(Some(bps(2_000_000)), now).unwrap();
 
 		// Losing the estimate (disconnected) is not evidence the uplink is
 		// healthy again, so the target must not jump back to max.
 		assert_eq!(control.update(None, now + Duration::from_secs(10)), None);
-		assert_eq!(control.target(), 2_000_000);
+		assert_eq!(control.target(), bps(2_000_000));
 	}
 
 	#[test]
 	fn estimate_never_raises_above_max() {
 		let mut control = control();
 		// A wildly optimistic estimate is not licence to exceed what was configured.
-		assert_eq!(control.update(Some(100_000_000), Instant::now()), None);
-		assert_eq!(control.target(), 4_000_000);
+		assert_eq!(control.update(Some(bps(100_000_000)), Instant::now()), None);
+		assert_eq!(control.target(), bps(4_000_000));
 	}
 
 	#[test]
 	fn target_never_falls_below_min() {
 		let mut control = control();
 		// A near-dead uplink floors at min (max/10) rather than chasing to zero.
-		assert_eq!(control.update(Some(1), Instant::now()), Some(400_000));
-		assert_eq!(control.target(), 400_000);
+		assert_eq!(control.update(Some(bps(1)), Instant::now()), Some(bps(400_000)));
+		assert_eq!(control.target(), bps(400_000));
 	}
 
 	#[test]
 	fn raise_is_ramp_limited() {
 		let mut control = control();
 		let start = Instant::now();
-		control.update(Some(1_000_000), start).unwrap(); // target 1M
+		control.update(Some(bps(1_000_000)), start).unwrap(); // target 1M
 
 		// The pipe reopens to 4 Mbps. One second later the default 25%/s ramp
 		// allows only 1M -> 1.25M, not the full 4 Mbps the estimate wants.
-		let raised = control.update(Some(4_000_000), start + Duration::from_secs(1)).unwrap();
-		assert_eq!(raised, 1_250_000);
+		let raised = control
+			.update(Some(bps(4_000_000)), start + Duration::from_secs(1))
+			.unwrap();
+		assert_eq!(raised, bps(1_250_000));
 	}
 
 	#[test]
 	fn raise_eventually_reaches_the_estimate() {
 		let mut control = control();
 		let start = Instant::now();
-		control.update(Some(1_000_000), start).unwrap(); // target 1M
+		control.update(Some(bps(1_000_000)), start).unwrap(); // target 1M
 
 		// Feed a steady healthy estimate every 100ms; the ramp should walk the
 		// target back up to the ceiling and then stop.
 		for tick in 1..=200 {
-			control.update(Some(4_000_000), start + Duration::from_millis(100 * tick));
+			control.update(Some(bps(4_000_000)), start + Duration::from_millis(100 * tick));
 		}
-		assert_eq!(control.target(), 4_000_000);
+		assert_eq!(control.target(), bps(4_000_000));
 	}
 
 	/// Regression: the ramp allowance per tick (25%/s * 100ms = 2.5%) is smaller
@@ -256,12 +268,12 @@ mod tests {
 	fn suppressed_raises_do_not_starve_the_ramp() {
 		let mut control = control();
 		let start = Instant::now();
-		control.update(Some(1_000_000), start).unwrap(); // target 1M
+		control.update(Some(bps(1_000_000)), start).unwrap(); // target 1M
 
 		// Tick at 100ms: each tick alone is under the 5% threshold.
 		let mut raised = None;
 		for tick in 1..=10 {
-			if let Some(next) = control.update(Some(4_000_000), start + Duration::from_millis(100 * tick)) {
+			if let Some(next) = control.update(Some(bps(4_000_000)), start + Duration::from_millis(100 * tick)) {
 				raised = Some((tick, next));
 				break;
 			}
@@ -270,7 +282,7 @@ mod tests {
 		let (tick, next) = raised.expect("a raise must eventually clear hysteresis");
 		// 5% of 1M needs 0.05/0.25 = 0.2s of ramp, i.e. the tick at 200ms.
 		assert_eq!(tick, 2);
-		assert_eq!(next, 1_050_000);
+		assert_eq!(next, bps(1_050_000));
 	}
 
 	/// Regression: the ramp stops growing `next` once it reaches the ceiling, so a
@@ -282,19 +294,22 @@ mod tests {
 	fn a_raise_reaching_the_ceiling_beats_hysteresis() {
 		let mut control = control();
 		let start = Instant::now();
-		control.update(Some(1_000_000), start).unwrap();
+		control.update(Some(bps(1_000_000)), start).unwrap();
 
 		// Walk up until it settles, then confirm where it settled.
 		let mut last = None;
 		for tick in 1..=200 {
-			if let Some(next) = control.update(Some(4_000_000), start + Duration::from_millis(100 * tick)) {
+			if let Some(next) = control.update(Some(bps(4_000_000)), start + Duration::from_millis(100 * tick)) {
 				last = Some(next);
 			}
 		}
 
-		assert_eq!(last, Some(4_000_000));
+		assert_eq!(last, Some(bps(4_000_000)));
 		// And it stops there rather than reapplying the same value forever.
-		assert_eq!(control.update(Some(4_000_000), start + Duration::from_secs(60)), None);
+		assert_eq!(
+			control.update(Some(bps(4_000_000)), start + Duration::from_secs(60)),
+			None
+		);
 	}
 
 	/// Regression: the ceiling exemption above must not swallow the deadband. Every
@@ -305,11 +320,11 @@ mod tests {
 	fn upward_jitter_stays_inside_the_deadband() {
 		let mut control = control();
 		let start = Instant::now();
-		control.update(Some(2_000_000), start).unwrap(); // target 2M, well under the 4M ceiling
+		control.update(Some(bps(2_000_000)), start).unwrap(); // target 2M, well under the 4M ceiling
 
 		// A 0.5% rise: inside the 5% deadband, and nowhere near the ceiling.
 		assert_eq!(
-			control.update(Some(2_010_000), start + Duration::from_millis(100)),
+			control.update(Some(bps(2_010_000)), start + Duration::from_millis(100)),
 			None
 		);
 
@@ -318,18 +333,18 @@ mod tests {
 		for tick in 2..=9 {
 			let estimate = 2_000_000 + tick * 10_000;
 			assert_eq!(
-				control.update(Some(estimate), start + Duration::from_millis(100 * tick)),
+				control.update(Some(bps(estimate)), start + Duration::from_millis(100 * tick)),
 				None,
 				"estimate {estimate} is inside the deadband"
 			);
 		}
-		assert_eq!(control.target(), 2_000_000);
+		assert_eq!(control.target(), bps(2_000_000));
 
 		// And the deadband is still only a deadband: once the estimate does clear it,
 		// the raise lands normally, without needing the ceiling exemption.
 		assert_eq!(
-			control.update(Some(2_200_000), start + Duration::from_secs(2)),
-			Some(2_200_000)
+			control.update(Some(bps(2_200_000)), start + Duration::from_secs(2)),
+			Some(bps(2_200_000))
 		);
 	}
 
@@ -337,16 +352,16 @@ mod tests {
 	fn small_moves_are_suppressed() {
 		let mut control = control();
 		let now = Instant::now();
-		control.update(Some(2_000_000), now).unwrap(); // target 2M
+		control.update(Some(bps(2_000_000)), now).unwrap(); // target 2M
 
 		// 2% under the current target: inside the 5% deadband, so no reconfigure.
-		assert_eq!(control.update(Some(1_960_000), now + Duration::from_secs(1)), None);
-		assert_eq!(control.target(), 2_000_000);
+		assert_eq!(control.update(Some(bps(1_960_000)), now + Duration::from_secs(1)), None);
+		assert_eq!(control.target(), bps(2_000_000));
 
 		// 20% under: outside the deadband, so it applies.
 		assert_eq!(
-			control.update(Some(1_600_000), now + Duration::from_secs(2)),
-			Some(1_600_000)
+			control.update(Some(bps(1_600_000)), now + Duration::from_secs(2)),
+			Some(bps(1_600_000))
 		);
 	}
 
@@ -354,10 +369,10 @@ mod tests {
 	/// bound is fed straight to `clamp`, which panics on an inverted range.
 	#[test]
 	fn inverted_bounds_do_not_panic() {
-		let mut policy = Policy::new(1_000_000);
-		policy.min = 5_000_000;
+		let mut policy = Policy::new(bps(1_000_000));
+		policy.min = bps(5_000_000);
 		let mut control = Control::new(policy);
-		control.update(Some(2_000_000), Instant::now());
-		assert!(control.target() <= 5_000_000);
+		control.update(Some(bps(2_000_000)), Instant::now());
+		assert!(control.target() <= bps(5_000_000));
 	}
 }

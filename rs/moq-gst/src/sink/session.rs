@@ -194,12 +194,12 @@ impl Session {
 
 	/// The congestion controller's send estimate in bits per second, 0 when disconnected or unavailable.
 	pub fn send_bitrate(&self) -> u64 {
-		self.send_bandwidth.peek().unwrap_or(0)
+		self.send_bandwidth.peek().map_or(0, moq_net::bandwidth::Rate::as_bps)
 	}
 
 	/// The estimated receive bitrate in bits per second, 0 when disconnected or unavailable.
 	pub fn recv_bitrate(&self) -> u64 {
-		self.recv_bandwidth.peek().unwrap_or(0)
+		self.recv_bandwidth.peek().map_or(0, moq_net::bandwidth::Rate::as_bps)
 	}
 
 	/// Whether the transport has hit a fatal error (the pad streaming threads stop feeding it on this).

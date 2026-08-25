@@ -150,7 +150,9 @@ mod tests {
 	async fn a_loc_reservation_reaches_the_wire_and_the_catalog() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-		let track = broadcast.create_track("audio", hang::container::track_info()).unwrap();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
 		let subscriber = track.subscribe(None);
 		let reserved = catalog.reserve();
 		let config = crate::codec::opus::Config::new(48_000, 2);

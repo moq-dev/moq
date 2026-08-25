@@ -56,9 +56,9 @@ pub struct Config {
 	pub width: u32,
 	pub height: u32,
 	pub framerate: u32,
-	/// Target bitrate in bits per second. `None` derives a sane default
+	/// Target bitrate. `None` derives a sane default
 	/// from resolution and framerate (~0.07 bits per pixel per second).
-	pub bitrate: Option<u64>,
+	pub bitrate: Option<moq_net::bandwidth::Rate>,
 	/// Keyframe interval in frames. Subscribers joining mid-stream wait at
 	/// most this many frames before they can start decoding.
 	pub gop: u32,
@@ -152,7 +152,7 @@ impl Config {
 
 		// Neither is in the bitstream: the target bitrate is nowhere in it, and the framerate only
 		// rides in an optional VUI. Fill them from the config that produced the rest.
-		rendition.bitrate.get_or_insert(self.resolved_bitrate());
+		rendition.bitrate.get_or_insert(self.resolved_bitrate().as_bps());
 		rendition.framerate.get_or_insert(self.framerate.into());
 		Ok(rendition)
 	}
@@ -166,7 +166,7 @@ impl Config {
 	}
 
 	/// Resolved bitrate: explicit override, or a pixels-per-second estimate.
-	pub(crate) fn resolved_bitrate(&self) -> u64 {
+	pub(crate) fn resolved_bitrate(&self) -> moq_net::bandwidth::Rate {
 		self.bitrate
 			.unwrap_or_else(|| default_bitrate(self.size(), self.framerate))
 	}
@@ -174,8 +174,8 @@ impl Config {
 
 /// The bitrate an unconfigured encode resolves to: 0.07 bits per pixel per second, which matches
 /// the JS publisher's default and lands ~4.4 Mbps for 1080p30.
-pub(crate) fn default_bitrate(size: Size, framerate: u32) -> u64 {
-	((size.pixels() * framerate as u64) as f64 * 0.07) as u64
+pub(crate) fn default_bitrate(size: Size, framerate: u32) -> moq_net::bandwidth::Rate {
+	moq_net::bandwidth::Rate::from_bps(((size.pixels() * framerate as u64) as f64 * 0.07) as u64)
 }
 
 /// Video encoder. Build one with [`Encoder::new`], feed it raw [`Frame`]s via
@@ -185,7 +185,7 @@ pub struct Encoder {
 	backend: Box<dyn Backend>,
 	codec: Codec,
 	size: Size,
-	bitrate: u64,
+	bitrate: moq_net::bandwidth::Rate,
 	/// What the backend wrote into the bitstream's VUI, kept so a frame declaring
 	/// a different space is caught rather than silently mislabeled.
 	color: Color,
@@ -230,15 +230,13 @@ impl Encoder {
 		self.size
 	}
 
-	/// The current target bitrate in bits per second: what
-	/// [`Config::bitrate`] resolved to at open, or the last value
-	/// [`set_bitrate`](Self::set_bitrate) accepted.
-	pub fn bitrate(&self) -> u64 {
+	/// The current target bitrate: what [`Config::bitrate`] resolved to at open, or
+	/// the last value [`set_bitrate`](Self::set_bitrate) accepted.
+	pub fn bitrate(&self) -> moq_net::bandwidth::Rate {
 		self.bitrate
 	}
 
-	/// Retune the live encoder to `bitrate` bits per second, taking effect from
-	/// roughly the next frame. No IDR is forced, so this is cheap enough to
+	/// Retune the live encoder to `bitrate`, taking effect from roughly the next frame. No IDR is forced, so this is cheap enough to
 	/// drive from a congestion controller: pair it with
 	/// [`rate::Control`](super::rate::Control), which decides *when* the target
 	/// is worth moving.
@@ -251,11 +249,13 @@ impl Encoder {
 	/// running. That's not fatal: the encoder keeps running at its current rate,
 	/// so a caller driving a control loop should stop adapting rather than stop
 	/// encoding.
-	pub fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+	pub fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
 		if bitrate == self.bitrate {
 			return Ok(());
 		}
-		self.backend.set_bitrate(bitrate)?;
+		// The backends speak to codec APIs that want a plain integer, so the unit is
+		// unwrapped once here rather than in each of them.
+		self.backend.set_bitrate(bitrate.as_bps())?;
 		// Only after the backend accepts it, so a failed set doesn't leave the
 		// getter reporting a rate the encoder isn't using.
 		self.bitrate = bitrate;
@@ -833,7 +833,7 @@ mod tests {
 		// Encode first: this is the live-retune path, once the encoder exists.
 		encoder.encode(&gray_frame(320, 240, 0)).unwrap();
 
-		let halved = opened / 2;
+		let halved = opened.scaled(0.5);
 		encoder.set_bitrate(halved).unwrap();
 		assert_eq!(encoder.bitrate(), halved);
 
@@ -855,7 +855,7 @@ mod tests {
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
 
-		let halved = encoder.bitrate() / 2;
+		let halved = encoder.bitrate().scaled(0.5);
 		encoder.set_bitrate(halved).expect("a retune before the first frame");
 		assert_eq!(encoder.bitrate(), halved);
 
@@ -864,7 +864,7 @@ mod tests {
 		assert!(!frames.is_empty());
 
 		// And the encoder is live now, so a further retune takes the direct path.
-		encoder.set_bitrate(halved / 2).unwrap();
+		encoder.set_bitrate(halved.scaled(0.5)).unwrap();
 		assert!(encoder.encode(&gray_frame(320, 240, 1)).is_ok());
 	}
 
@@ -888,7 +888,7 @@ mod tests {
 		let small = Config::new(320, 240, 30).resolved_bitrate();
 		let large = Config::new(1920, 1080, 30).resolved_bitrate();
 		assert!(large > small);
-		assert!(small > 0);
+		assert!(small > moq_net::bandwidth::Rate::ZERO);
 	}
 
 	/// A backend that holds each frame back by one, like the Media Foundation MFT:

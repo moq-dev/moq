@@ -269,8 +269,9 @@ impl Directions {
 ///
 /// Returns an allocator over the uplink's bandwidth estimate, for the sources that
 /// can encode to fit it. Only an outbound client has one: a `--server-bind`
-/// publisher's sessions are inbound and never surfaced here, so it stays `None` and
-/// those sources encode at their configured rate.
+/// publisher's sessions are inbound and never surfaced here, so it gets an
+/// [`unlimited`](moq_net::bandwidth::Allocator::unlimited) allocator and those
+/// sources encode at their configured rate.
 ///
 /// One allocator per connection, minted here rather than per stage, since dividing
 /// the estimate is only meaningful across everything sharing it. A stage that built
@@ -282,8 +283,8 @@ async fn spawn_moq(
 	origin: &moq_net::origin::Producer,
 	directions: Directions,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
-) -> anyhow::Result<Option<moq_net::bandwidth::Allocator>> {
-	let mut bandwidth = None;
+) -> anyhow::Result<moq_net::bandwidth::Allocator> {
+	let mut bandwidth = moq_net::bandwidth::Allocator::unlimited();
 
 	if let Some(url) = moq.client.url.clone() {
 		let mut client = net.client(moq.client.clone())?;
@@ -301,7 +302,7 @@ async fn spawn_moq(
 		// Read before the handle moves into the task. This consumer is persistent: it
 		// survives reconnects, reading `None` while down, so it can be wired up before
 		// anything connects.
-		bandwidth = Some(moq_net::bandwidth::Allocator::new(reconnect.send_bandwidth()));
+		bandwidth = moq_net::bandwidth::Allocator::new(reconnect.send_bandwidth());
 		tasks.spawn(async move { Ok(reconnect.closed().await?) });
 	}
 	notify_when_initialized(spawn_server(tasks, moq, origin, net, directions), moq::notify_ready).await?;
@@ -436,10 +437,10 @@ fn spawn_import(
 	origin: &moq_net::origin::Producer,
 	import: Import,
 	name: String,
-	bandwidth: Option<moq_net::bandwidth::Allocator>,
+	bandwidth: moq_net::bandwidth::Allocator,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Option<Publish>> {
-	// Capture is the only source that reads the bandwidth estimate, so without that
+	// Capture is the only source that reserves against the estimate, so without that
 	// feature nothing does.
 	#[cfg(not(feature = "capture"))]
 	let _ = bandwidth;

@@ -38,7 +38,7 @@ unsafe impl Send for Vaapi {}
 
 impl Vaapi {
 	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
-		let bitrate = config.resolved_bitrate().min(u32::MAX as u64) as u32;
+		let bitrate = config.resolved_bitrate().as_bps().min(u32::MAX as u64) as u32;
 		let vaapi = VaapiConfig::new(config.width, config.height, config.framerate, bitrate, config.gop);
 		let encoder = Encoder::new(vaapi).map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI encoder init: {e:?}")))?;
 

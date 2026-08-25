@@ -1053,7 +1053,7 @@ impl<S: crate::transport::poll::Session> ProbeStream<S> {
 						let Some(probe) = ready!(stream.reader.poll_decode_maybe::<lite::Probe>(&mut cx))? else {
 							return Poll::Ready(Ok(()));
 						};
-						bandwidth.set(probe.bitrate)?;
+						bandwidth.set(probe.bitrate.map(bandwidth::Rate::from_bps))?;
 					}
 				}
 			}

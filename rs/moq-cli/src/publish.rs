@@ -276,7 +276,7 @@ impl Publish {
 	pub fn capture(
 		mut broadcast: moq_net::broadcast::Producer,
 		args: &CaptureArgs,
-		bandwidth: Option<moq_net::bandwidth::Allocator>,
+		bandwidth: moq_net::bandwidth::Allocator,
 		max_age: Option<std::time::Duration>,
 	) -> anyhow::Result<Self> {
 		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
@@ -395,9 +395,9 @@ impl CaptureArgs {
 		config
 	}
 
-	fn video_encode(&self, bandwidth: Option<moq_net::bandwidth::Allocator>) -> moq_video::encode::Options {
+	fn video_encode(&self, bandwidth: moq_net::bandwidth::Allocator) -> moq_video::encode::Options {
 		let mut options = moq_video::encode::Options::default();
-		options.bitrate = self.bitrate;
+		options.bitrate = self.bitrate.map(moq_net::bandwidth::Rate::from_bps);
 		options.codec = self.codec.into();
 		options.kind = if self.software {
 			moq_video::encode::Kind::Software
@@ -431,9 +431,11 @@ impl CaptureArgs {
 	/// The audio counterpart to [`video_encode`](Self::video_encode). `track` is
 	/// left unset so the name derives from the codec, the way the video side
 	/// names its track; consumers find it through the catalog either way.
-	fn audio_encode(&self, bandwidth: Option<moq_net::bandwidth::Allocator>) -> moq_audio::encode::Options {
+	fn audio_encode(&self, bandwidth: moq_net::bandwidth::Allocator) -> moq_audio::encode::Options {
 		let mut options = moq_audio::encode::Options::default();
-		options.bitrate = self.audio_bitrate;
+		options.bitrate = self
+			.audio_bitrate
+			.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
 		options.bandwidth = bandwidth;
 		options
 	}

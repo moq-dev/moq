@@ -111,7 +111,7 @@ pub struct Config {
 	pub channels: Option<u32>,
 	/// Bitrate in bits per second. `None` lets Opus pick. PCM requires `None`
 	/// because its bitrate is fixed by the sample rate and channel count.
-	pub bitrate: Option<u32>,
+	pub bitrate: Option<moq_net::bandwidth::Rate>,
 	/// Enable Opus in-band forward error correction.
 	pub fec: bool,
 	/// Enable Opus discontinuous transmission during silence.
@@ -305,7 +305,8 @@ impl Encoder {
 		codec_channels: u32,
 	) -> Result<(u64, usize, u16), Error> {
 		if let Some(bitrate) = config.bitrate {
-			Self::set_opus_bitrate(inner, codec_channels, bitrate as u64)?;
+			// libopus takes a plain integer, so the unit is unwrapped at this seam.
+			Self::set_opus_bitrate(inner, codec_channels, bitrate.as_bps())?;
 		}
 		Self::set_opus_ctl(
 			inner,
@@ -388,20 +389,21 @@ impl Encoder {
 		self.frame_size
 	}
 
-	/// Current target bitrate in bits per second.
-	pub fn bitrate(&self) -> u64 {
-		self.bitrate
+	/// Current target bitrate.
+	pub fn bitrate(&self) -> moq_net::bandwidth::Rate {
+		moq_net::bandwidth::Rate::from_bps(self.bitrate)
 	}
 
-	/// Retune the live Opus encoder to `bitrate` bits per second.
-	pub fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+	/// Retune the live Opus encoder to `bitrate`.
+	pub fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
 		let Backend::Opus(opus) = &mut self.backend else {
 			return Err(Error::Unsupported("pcm bitrate is fixed".into()));
 		};
-		if bitrate != self.bitrate {
-			Self::set_opus_bitrate(opus.inner, self.codec_channels, bitrate)?;
-			self.bitrate = bitrate;
-			self.config.bitrate = Some(bitrate as u32);
+		if bitrate.as_bps() != self.bitrate {
+			// libopus wants a plain integer, so the unit is unwrapped at this seam.
+			Self::set_opus_bitrate(opus.inner, self.codec_channels, bitrate.as_bps())?;
+			self.bitrate = bitrate.as_bps();
+			self.config.bitrate = Some(bitrate);
 		}
 		Ok(())
 	}
@@ -541,7 +543,7 @@ impl Encoder {
 					self.codec_rate,
 					self.codec_channels,
 				);
-				config.bitrate = self.config.bitrate.map(u64::from);
+				config.bitrate = self.config.bitrate.map(moq_net::bandwidth::Rate::as_bps);
 				config.description = Some(head);
 				config.container = hang::catalog::Container::Legacy;
 				config
@@ -605,7 +607,7 @@ mod tests {
 	#[test]
 	fn opus_encode_then_decode_keeps_signal_close() {
 		let mut enc = Encoder::new(&Config {
-			bitrate: Some(96_000),
+			bitrate: Some(moq_net::bandwidth::Rate::from_bps(96_000)),
 			..Config::new(stereo_48k())
 		})
 		.unwrap();
@@ -650,7 +652,7 @@ mod tests {
 	#[test]
 	fn opus_catalog_includes_opushead() {
 		let enc = Encoder::new(&Config {
-			bitrate: Some(64_000),
+			bitrate: Some(moq_net::bandwidth::Rate::from_bps(64_000)),
 			..Config::new(stereo_48k())
 		})
 		.unwrap();
@@ -743,14 +745,14 @@ mod tests {
 	#[test]
 	fn opus_runtime_bitrate_updates_encoder_state() {
 		let mut enc = Encoder::new(&Config {
-			bitrate: Some(64_000),
+			bitrate: Some(moq_net::bandwidth::Rate::from_bps(64_000)),
 			..Config::new(stereo_48k())
 		})
 		.unwrap();
 
-		enc.set_bitrate(32_000).unwrap();
-		assert_eq!(enc.bitrate(), 32_000);
-		assert_eq!(enc.config().bitrate, Some(32_000));
+		enc.set_bitrate(moq_net::bandwidth::Rate::from_bps(32_000)).unwrap();
+		assert_eq!(enc.bitrate(), moq_net::bandwidth::Rate::from_bps(32_000));
+		assert_eq!(enc.config().bitrate, Some(moq_net::bandwidth::Rate::from_bps(32_000)));
 		assert_eq!(
 			Encoder::get_opus_ctl(
 				opus_inner(&enc),
@@ -766,8 +768,8 @@ mod tests {
 	fn opus_runtime_bitrate_rejects_values_libopus_would_clamp() {
 		let mut enc = Encoder::new(&Config::new(stereo_48k())).unwrap();
 		let original = enc.bitrate();
-		assert!(enc.set_bitrate(1).is_err());
-		assert!(enc.set_bitrate(600_001).is_err());
+		assert!(enc.set_bitrate(moq_net::bandwidth::Rate::from_bps(1)).is_err());
+		assert!(enc.set_bitrate(moq_net::bandwidth::Rate::from_bps(600_001)).is_err());
 		assert_eq!(enc.bitrate(), original);
 	}
 

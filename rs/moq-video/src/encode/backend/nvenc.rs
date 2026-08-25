@@ -97,7 +97,7 @@ impl Nvenc {
 		cfg.gopLength = config.gop;
 		cfg.frameIntervalP = 1; // no B-frames
 		cfg.rcParams.rateControlMode = NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
-		cfg.rcParams.averageBitRate = config.resolved_bitrate().min(u32::MAX as u64) as u32;
+		cfg.rcParams.averageBitRate = config.resolved_bitrate().as_bps().min(u32::MAX as u64) as u32;
 
 		// Two codec-specific knobs the importer relies on, verified on hardware:
 		//   - repeatSPSPPS: emit the parameter sets in-band ahead of *every* IDR,

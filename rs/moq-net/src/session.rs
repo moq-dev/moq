@@ -123,7 +123,11 @@ impl Session {
 			}
 			state.sample
 		};
-		stats.estimated_recv_rate = self.recv_bandwidth.as_ref().and_then(bandwidth::Consumer::peek);
+		stats.estimated_recv_rate = self
+			.recv_bandwidth
+			.as_ref()
+			.and_then(bandwidth::Consumer::peek)
+			.map(bandwidth::Rate::as_bps);
 		stats
 	}
 
@@ -355,7 +359,10 @@ impl<S: crate::transport::poll::Session, R: crate::runtime::Timers> Supervisor<S
 		if let Some(producer) = &self.send_bandwidth {
 			// An error means every consumer is gone for good; the stats cell
 			// still wants the sample.
-			if producer.set(sample.estimated_send_rate).is_err() {
+			if producer
+				.set(sample.estimated_send_rate.map(bandwidth::Rate::from_bps))
+				.is_err()
+			{
 				self.send_bandwidth = None;
 			}
 		}

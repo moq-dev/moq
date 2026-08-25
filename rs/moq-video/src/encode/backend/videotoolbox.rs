@@ -124,7 +124,7 @@ impl VideoToolbox {
 		set_number(
 			&session,
 			unsafe { kVTCompressionPropertyKey_AverageBitRate },
-			clamp_i32(config.resolved_bitrate()),
+			clamp_i32(config.resolved_bitrate().as_bps()),
 		)?;
 		set_number(
 			&session,

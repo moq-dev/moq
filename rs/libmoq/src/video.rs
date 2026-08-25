@@ -266,7 +266,7 @@ impl VideoEncoder {
 	}
 
 	fn publish_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
-		block_on(self.encoder.set_bitrate(bitrate))?;
+		block_on(self.encoder.set_bitrate(moq_net::bandwidth::Rate::from_bps(bitrate)))?;
 		Ok(())
 	}
 
@@ -492,7 +492,7 @@ pub unsafe extern "C" fn moq_encode_video(
 		config.kind = unsafe { encoder_kind(raw_output)? };
 		// The C ABI spells an unset knob as 0, which neither field accepts as a real
 		// value: a zero bitrate or GOP is the default, not a request.
-		config.bitrate = (raw_output.bitrate != 0).then_some(raw_output.bitrate);
+		config.bitrate = (raw_output.bitrate != 0).then(|| moq_net::bandwidth::Rate::from_bps(raw_output.bitrate));
 		if raw_output.gop != 0 {
 			config.gop = raw_output.gop;
 		}

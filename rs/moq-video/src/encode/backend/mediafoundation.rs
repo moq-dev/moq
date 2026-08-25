@@ -143,7 +143,7 @@ impl MediaFoundation {
 			width: config.width,
 			height: config.height,
 			framerate: config.framerate,
-			bitrate: clamp_u32(config.resolved_bitrate()),
+			bitrate: clamp_u32(config.resolved_bitrate().as_bps()),
 			gop: config.gop,
 			color: config.resolved_color(),
 			started: false,

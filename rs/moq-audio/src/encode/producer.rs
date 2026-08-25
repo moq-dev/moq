@@ -37,7 +37,7 @@ pub struct Options {
 	pub channels: Option<u32>,
 	/// Bitrate in bits per second. `None` lets Opus pick. PCM requires `None`
 	/// because its bitrate is fixed by the sample rate and channel count.
-	pub bitrate: Option<u32>,
+	pub bitrate: Option<moq_net::bandwidth::Rate>,
 	/// Enable Opus in-band forward error correction.
 	pub fec: bool,
 	/// Enable Opus discontinuous transmission during silence.
@@ -48,14 +48,17 @@ pub struct Options {
 	/// The connection's bandwidth, as an allocator over
 	/// [`Session::send_bandwidth`](moq_net::Session::send_bandwidth).
 	///
-	/// Set it and the audio track reserves its bitrate, so the video encoder
-	/// sharing the connection sizes itself against what's actually left rather
-	/// than against the whole uplink. Pass the same allocator to both.
+	/// The audio track reserves its bitrate against it, so the video encoder sharing
+	/// the connection sizes itself against what's actually left rather than against
+	/// the whole uplink. Pass the same allocator to both.
+	///
+	/// Defaults to [`Allocator::unlimited`](moq_net::bandwidth::Allocator::unlimited),
+	/// which reserves nothing and leaves every sender at its configured rate.
 	///
 	/// Audio reserves but does not follow its share: Opus can retune live and PCM
 	/// can't at all, and at `hang`'s priorities audio outranks video, so it is only
 	/// ever squeezed on a link that can't carry audio alone.
-	pub bandwidth: Option<moq_net::bandwidth::Allocator>,
+	pub bandwidth: moq_net::bandwidth::Allocator,
 }
 
 impl Default for Options {
@@ -69,7 +72,7 @@ impl Default for Options {
 			fec: false,
 			dtx: false,
 			frame_duration: Duration::from_millis(20),
-			bandwidth: None,
+			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 		}
 	}
 }
@@ -197,13 +200,13 @@ impl<E: CatalogExt> Producer<E> {
 		self.track.track()
 	}
 
-	/// Current encoder target bitrate in bits per second.
-	pub fn bitrate(&self) -> u64 {
+	/// Current encoder target bitrate.
+	pub fn bitrate(&self) -> moq_net::bandwidth::Rate {
 		self.encoder.bitrate()
 	}
 
-	/// Retune the live encoder to `bitrate` bits per second.
-	pub fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+	/// Retune the live encoder to `bitrate`.
+	pub fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
 		self.encoder.set_bitrate(bitrate)
 	}
 
@@ -427,7 +430,7 @@ mod tests {
 			};
 			let options = Options {
 				track: Some("audio".to_string()),
-				bitrate: Some(128_000),
+				bitrate: Some(moq_net::bandwidth::Rate::from_bps(128_000)),
 				..Options::default()
 			};
 			let decoder_config = Encoder::new(&options.config(input.clone())).unwrap().catalog();

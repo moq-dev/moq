@@ -386,7 +386,10 @@ mod tests {
 		// source against the encoders the way a live source does.
 		let (source, producer_task) = source_broadcast_live(3, 5);
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000), Rung::new(60, 50_000)],
+			rungs: vec![
+				Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000)),
+				Rung::new(60, moq_net::bandwidth::Rate::from_bps(50_000)),
+			],
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -452,7 +455,10 @@ mod tests {
 		// encode resolution), so the hardware ladder stays a bit larger than the
 		// software test's.
 		let mut config = Config {
-			rungs: vec![Rung::new(180, 200_000), Rung::new(120, 100_000)],
+			rungs: vec![
+				Rung::new(180, moq_net::bandwidth::Rate::from_bps(200_000)),
+				Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000)),
+			],
 			encoder: moq_video::encode::Kind::Hardware,
 			decoder: moq_video::decode::Kind::Hardware,
 			source: None,
@@ -530,7 +536,7 @@ mod tests {
 
 		let source = source_broadcast(2, 5);
 		let mut config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			rungs: vec![Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))],
 			encoder: moq_video::encode::Kind::Hardware,
 			decoder: moq_video::decode::Kind::Hardware,
 			source: None,
@@ -569,7 +575,7 @@ mod tests {
 		let source = source_broadcast(2, 5);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			rungs: vec![Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))],
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: Some(moq_net::PathRelativeOwned::from(".".to_string())),
@@ -675,7 +681,7 @@ mod tests {
 		let source = source_broadcast(2, 5);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			rungs: vec![Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))],
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
@@ -693,7 +699,7 @@ mod tests {
 		let rendition = update.rendition;
 		assert_eq!(rendition.name(), "video/120p");
 		assert_eq!(rendition.size().height, 120);
-		assert_eq!(rendition.bitrate(), 100_000);
+		assert_eq!(rendition.bitrate(), moq_net::bandwidth::Rate::from_bps(100_000));
 		assert!(!update.encoding, "encoding before anyone asked");
 		assert_eq!(rendition.frames(), 0);
 
@@ -729,7 +735,7 @@ mod tests {
 		let source = source_broadcast(1, 3);
 
 		let config = Config {
-			rungs: vec![Rung::new(120, 100_000)],
+			rungs: vec![Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))],
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,

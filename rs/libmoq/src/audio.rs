@@ -317,7 +317,7 @@ pub unsafe extern "C" fn moq_encode_audio(
 			.map_err(|_| Error::UnknownFormat(codec_str.to_string()))?;
 		options.sample_rate = zeroable(raw_output.sample_rate);
 		options.channels = zeroable(raw_output.channels);
-		options.bitrate = zeroable(raw_output.bitrate);
+		options.bitrate = zeroable(raw_output.bitrate).map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
 		options.frame_duration = Duration::from_millis(raw_output.frame_duration_ms.into());
 
 		let mut state = State::lock();

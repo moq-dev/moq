@@ -103,7 +103,7 @@ impl Sink {
 	/// Retune the encoder, waiting for the backend's verdict. See
 	/// [`Encoder::set_bitrate`](super::Encoder::set_bitrate) for what a failure
 	/// means (not fatal: stop adapting, keep encoding).
-	pub async fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+	pub async fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
 		self.0.set_bitrate(bitrate).await
 	}
 
@@ -160,7 +160,7 @@ mod threaded {
 		/// is affordable because the rate control policy only sends one of these
 		/// when the target moves meaningfully, not per frame.
 		SetBitrate {
-			bitrate: u64,
+			bitrate: moq_net::bandwidth::Rate,
 			resp: oneshot::Sender<Result<(), Error>>,
 		},
 		/// Empty the codec at a group boundary, leaving it running. Unlike
@@ -244,7 +244,7 @@ mod threaded {
 			self.0.request(|resp| Request::Encode { frame, resp }).await
 		}
 
-		pub async fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		pub async fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
 			self.0.request(|resp| Request::SetBitrate { bitrate, resp }).await
 		}
 
@@ -290,7 +290,7 @@ mod inline {
 			self.0.encode(&frame)
 		}
 
-		pub async fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		pub async fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
 			self.0.set_bitrate(bitrate)
 		}
 
@@ -402,7 +402,7 @@ mod tests {
 				let sink = guard.as_mut().unwrap();
 				sink.keyframe();
 				pollster::block_on(sink.encode(gray(index))).unwrap();
-				pollster::block_on(sink.set_bitrate(500_000 + index)).unwrap();
+				pollster::block_on(sink.set_bitrate(moq_net::bandwidth::Rate::from_bps(500_000 + index))).unwrap();
 				// Only the first frame closes a group, so the two after it stay in
 				// the codec and leave the drain below something to find.
 				let flushed = match index {

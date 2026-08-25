@@ -51,7 +51,10 @@ fn parse_rung(arg: &str) -> Result<moq_transcode::Rung, String> {
 	let bitrate: u64 = bitrate
 		.parse()
 		.map_err(|e| format!("invalid bitrate `{bitrate}`: {e}"))?;
-	Ok(moq_transcode::Rung::new(height, bitrate))
+	Ok(moq_transcode::Rung::new(
+		height,
+		moq_net::bandwidth::Rate::from_bps(bitrate),
+	))
 }
 
 /// Parse a frame resize acceleration preference.

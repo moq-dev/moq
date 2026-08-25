@@ -547,7 +547,7 @@ mod tests {
 		let rung = Resolved {
 			name: "video/120p".to_string(),
 			size: moq_video::Size::new(160, 120),
-			bitrate: 100_000,
+			bitrate: moq_net::bandwidth::Rate::from_bps(100_000),
 			framerate: 30,
 		};
 
@@ -558,7 +558,7 @@ mod tests {
 
 		let mut broadcast = moq_net::broadcast::Info::default().produce();
 		let mut track = broadcast
-			.create_track("video/120p", hang::container::track_info())
+			.create_track("video/120p", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		let guard = active.attach(&rung);

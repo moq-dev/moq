@@ -52,7 +52,9 @@ impl Openh264 {
 		.full_range(!color.limited());
 
 		let cfg = EncoderConfig::new()
-			.bitrate(BitRate::from_bps(config.resolved_bitrate().min(u32::MAX as u64) as u32))
+			.bitrate(BitRate::from_bps(
+				config.resolved_bitrate().as_bps().min(u32::MAX as u64) as u32,
+			))
 			.max_frame_rate(FrameRate::from_hz(config.framerate as f32))
 			.rate_control_mode(RateControlMode::Bitrate)
 			// Real-time camera: prioritize latency over compression.
@@ -211,7 +213,7 @@ mod tests {
 		let mut enc = Openh264::new(&config()).unwrap();
 		enc.encode(&gray(), true).unwrap();
 
-		let lower = config().resolved_bitrate() / 2;
+		let lower = config().resolved_bitrate().as_bps() / 2;
 		enc.set_bitrate(lower).unwrap();
 		assert_eq!(enc.read_bitrate(), lower as i64);
 	}
@@ -225,7 +227,7 @@ mod tests {
 		let mut enc = Openh264::new(&config()).unwrap();
 		enc.encode(&gray(), true).unwrap();
 
-		let higher = config().resolved_bitrate() * 4;
+		let higher = config().resolved_bitrate().as_bps() * 4;
 		assert!(enc.set_bitrate(higher).is_err());
 	}
 
@@ -236,7 +238,7 @@ mod tests {
 	fn set_bitrate_at_the_opening_rate_is_accepted() {
 		let mut enc = Openh264::new(&config()).unwrap();
 		enc.encode(&gray(), true).unwrap();
-		let opened = config().resolved_bitrate();
+		let opened = config().resolved_bitrate().as_bps();
 
 		enc.set_bitrate(opened / 2).unwrap();
 		enc.set_bitrate(opened).unwrap();
@@ -251,7 +253,7 @@ mod tests {
 	#[test]
 	fn a_live_set_supersedes_a_deferred_one() {
 		let mut enc = Openh264::new(&config()).unwrap();
-		let opened = config().resolved_bitrate();
+		let opened = config().resolved_bitrate().as_bps();
 
 		// Deferred: the encoder doesn't exist yet.
 		enc.set_bitrate(opened / 2).unwrap();
