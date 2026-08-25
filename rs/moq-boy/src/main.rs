@@ -44,6 +44,7 @@ mod video;
 
 #[derive(usage::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
+#[usage(name = "moq-boy")]
 #[usage(completion)]
 pub struct Config {
 	/// Path to the Game Boy ROM file.
