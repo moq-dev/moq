@@ -3,7 +3,7 @@
 //! Native transports (Quinn) are `Send`, so boxed futures and tasks carry the
 //! `Send` bound. Browser WebTransport is `!Send`, so on wasm we box without it.
 //! `MaybeSendBox` / `MaybeSendTask` resolve to the right form per target, and
-//! `.maybe_boxed()` / [`poll_task`] pick the matching constructor.
+//! `.maybe_boxed()` / `future_task` pick the matching constructor.
 
 use std::{collections::VecDeque, future::Future, pin::Pin, task::Poll};
 
