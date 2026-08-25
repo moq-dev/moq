@@ -162,9 +162,7 @@ GENERATED_KT="$BINDINGS_DIR/uniffi/moq/moq.kt"
     exit 1
 }
 mkdir -p "$KT_DIR/moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi/moq"
-PACKAGED_KT="$KT_DIR/moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi/moq/moq.kt"
-cp "$GENERATED_KT" "$PACKAGED_KT"
-bash "$SCRIPT_DIR/patch-bindings.sh" "$PACKAGED_KT"
+cp "$GENERATED_KT" "$KT_DIR/moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi/moq/moq.kt"
 
 # --- Maven-local publish ---
 MAVEN_LOCAL="$OUTPUT_DIR/maven-local"

@@ -1587,8 +1587,8 @@ pub extern "C" fn moq_origin_announced_close(announced: u32) -> i32 {
 ///
 /// Resolves against future announcements: it waits for the announcement to arrive (e.g. over the
 /// network) and then delivers the broadcast handle via `on_broadcast`. Use it right after
-/// [moq_session_connect] to avoid racing announcement gossip. To resolve without waiting for a
-/// future announcement, use [moq_origin_request] instead.
+/// [moq_session_connect] to avoid racing announcement gossip. To resolve against only what is
+/// announced now (plus any dynamic fallback), use [moq_origin_request] instead.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once announced, then exactly once
 /// more with a terminal code: `0` (the wait finished, including after
@@ -1635,9 +1635,11 @@ pub extern "C" fn moq_origin_consume_announced_close(task: u32) -> i32 {
 
 /// Request a broadcast from an origin by path, resolving as soon as it can be served.
 ///
-/// Resolves a broadcast that can be served without waiting for a later announcement, where
-/// [moq_origin_consume_announced] waits indefinitely for a future announcement. The request
-/// fails when no route can serve the path.
+/// Resolves against what is announced *now* plus any dynamic fallback, where
+/// [moq_origin_consume_announced] waits indefinitely for a future announcement: it returns an
+/// already-announced broadcast at once, otherwise falls back to a dynamic handler on the origin
+/// (if any), and fails when neither can serve the path. It does NOT wait for a later
+/// announcement.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once served, then exactly once more
 /// with a terminal code: `0` (finished, including after [moq_origin_request_close]) or a negative

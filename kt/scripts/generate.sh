@@ -82,6 +82,4 @@ cargo run --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi -
     generate --library "$CDYLIB" --language kotlin --no-format --out-dir "$BINDGEN_OUT"
 
 mkdir -p "$KT_DIR/moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi/moq"
-GENERATED_KT="$KT_DIR/moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi/moq/moq.kt"
-cp "$BINDGEN_OUT/uniffi/moq/moq.kt" "$GENERATED_KT"
-bash "$SCRIPT_DIR/patch-bindings.sh" "$GENERATED_KT"
+cp "$BINDGEN_OUT/uniffi/moq/moq.kt" "$KT_DIR/moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi/moq/moq.kt"

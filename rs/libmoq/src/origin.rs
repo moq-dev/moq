@@ -181,10 +181,10 @@ impl Origin {
 	/// Request the broadcast at `path`, delivering its handle once it can be served.
 	///
 	/// Unlike [`Self::consume`] (announced-only, fails fast) and [`Self::consume_announced`]
-	/// (waits indefinitely for a future announcement), this resolves without waiting for a
-	/// later announcement. The callback fires the broadcast handle (> 0) once served, then a
-	/// terminal `0`; or a single terminal code (`0` on close, negative on error) if it cannot
-	/// be served. Returns a task handle for cancellation.
+	/// (waits indefinitely for a future announcement), this resolves against what is announced
+	/// now plus any dynamic fallback handler on the origin: the callback fires the broadcast
+	/// handle (> 0) once served, then a terminal `0`; or a single terminal code (`0` on close,
+	/// negative on error) if it can't be served. Returns a task handle for cancellation.
 	pub fn request(&mut self, origin: Id, path: String, on_broadcast: OnStatus) -> Result<Id, Error> {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
 		let consumer = origin.consume();

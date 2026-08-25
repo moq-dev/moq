@@ -55,6 +55,7 @@ class SmokeTest {
     fun `origin alias constructs and consumes`() = runTest {
         OriginProducer(OriginOptions()).use { origin ->
             origin.consume().use { /* lifecycle smoke */ }
+            origin.dynamic().use { /* dynamic origin smoke */ }
         }
     }
 

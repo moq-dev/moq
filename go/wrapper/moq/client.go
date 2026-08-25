@@ -175,8 +175,9 @@ func (c *Client) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, error) {
 	return c.consumer.AnnouncedBroadcast(path)
 }
 
-// RequestBroadcast resolves a broadcast at path as soon as it can be served, or
-// returns an error. Unlike AnnouncedBroadcast, it does not wait for a future announcement.
+// RequestBroadcast resolves a broadcast at path as soon as it can be served: the
+// announced broadcast if present, otherwise a dynamic fallback on the origin, or an
+// error. Unlike AnnouncedBroadcast, it does not wait for a future announcement.
 func (c *Client) RequestBroadcast(path string) (*BroadcastConsumer, error) {
 	return c.consumer.RequestBroadcast(path)
 }

@@ -434,8 +434,9 @@ class BroadcastDynamic:
 class BroadcastProducer:
     """Wraps MoqBroadcastProducer with a cleaner interface.
 
-    Constructing one directly creates a standalone broadcast for local pub/sub.
-    To publish at a path, use :meth:`moq.OriginProducer.create_broadcast` instead.
+    Constructing one directly creates a standalone broadcast for serving dynamic
+    requests (:meth:`moq.BroadcastRequest.accept`) or local pub/sub. To publish at
+    a path, use :meth:`moq.OriginProducer.create_broadcast` instead.
     """
 
     def __init__(self) -> None:

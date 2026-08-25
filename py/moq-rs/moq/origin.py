@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
-
 from moq_ffi import (
     MoqAnnounced,
     MoqAnnouncedBroadcast,
@@ -167,9 +165,10 @@ class OriginConsumer:
     async def request_broadcast(self, path: str) -> BroadcastConsumer:
         """Request a broadcast by path, resolving as soon as it can be served.
 
-        Resolves when a broadcast can be served, or raises if none is available.
-        Unlike `announced_broadcast`, this does not wait indefinitely for a future
-        announcement.
+        Returns the announced broadcast immediately if one exists, otherwise falls
+        back to a dynamic handler on the origin (if any), or raises if neither can
+        serve it. Unlike `announced_broadcast`, this does not wait indefinitely for a
+        future announcement.
         """
         return BroadcastConsumer(await self._inner.request_broadcast(path))
 
@@ -177,8 +176,8 @@ class OriginConsumer:
 class OriginProducer:
     """The publishing side of an origin: announce broadcasts for consumers to discover.
 
-    Call :meth:`create_broadcast` to publish at a path or :meth:`consume` for a
-    matching :class:`OriginConsumer`.
+    Call :meth:`create_broadcast` to publish at a path, :meth:`consume` for a
+    matching :class:`OriginConsumer`, or :meth:`dynamic` to serve on-demand requests.
     """
 
     def __init__(self, *, cache_capacity_bytes: int | None = None) -> None:
@@ -196,11 +195,7 @@ class OriginProducer:
         return OriginConsumer(self._inner.consume())
 
     def dynamic(self) -> OriginDynamic:
-        warnings.warn(
-            "dynamic routing is not currently supported by clients",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        """Serve broadcasts that consumers request without an announcement."""
         return OriginDynamic(self._inner.dynamic())
 
     def create_broadcast(self, path: str) -> BroadcastProducer:

@@ -37,5 +37,4 @@ uniffi::setup_scaffolding!("moq");
 
 // The test suite drives a native relay over a tokio runtime.
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[allow(deprecated)]
 mod test;

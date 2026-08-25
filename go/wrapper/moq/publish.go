@@ -40,8 +40,9 @@ type BroadcastProducer struct {
 	inner *ffi.MoqBroadcastProducer
 }
 
-// NewBroadcastProducer creates a standalone broadcast for local pub/sub.
-// To publish at a path, use [OriginProducer.CreateBroadcast].
+// NewBroadcastProducer creates a standalone broadcast, not attached to any
+// origin: use it to serve a dynamic request ([BroadcastRequest.Accept]) or for
+// local pub/sub. To publish at a path, use [OriginProducer.CreateBroadcast].
 func NewBroadcastProducer() (*BroadcastProducer, error) {
 	inner, err := ffi.NewMoqBroadcastProducer()
 	if err != nil {
