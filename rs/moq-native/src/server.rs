@@ -1105,6 +1105,23 @@ impl Request {
 		}
 	}
 
+	/// Override the fallback origin for a peer that did not declare one on the wire.
+	pub fn with_peer_origin(self, origin: moq_net::Origin) -> Self {
+		let Request {
+			transport,
+			url,
+			identity,
+			kind,
+		} = self;
+		let kind = request_map!(kind, request => request.with_peer_origin(origin));
+		Request {
+			transport,
+			url,
+			identity,
+			kind,
+		}
+	}
+
 	/// Attach a per-connection [`moq_net::stats::Session`] context to this session.
 	pub fn with_stats(self, stats: moq_net::stats::Session) -> Self {
 		let Request {
