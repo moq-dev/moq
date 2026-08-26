@@ -281,6 +281,9 @@ pub struct Request<S: web_transport_trait::Session> {
 	path: Option<String>,
 	role: Option<Role>,
 	origin: Option<crate::Origin>,
+	/// The identity this session's routes are stamped with when the peer declares none
+	/// on the wire. Fresh per request unless the caller overrides it
+	/// ([`Request::with_peer_origin`]).
 	assigned_origin: crate::Origin,
 	// Taken by `ok`/`close`; `Drop` rejects the handshake if neither ran.
 	inner: Option<RequestInner<S>>,
@@ -373,10 +376,18 @@ impl<S: web_transport_trait::Session> Request<S> {
 		self
 	}
 
-	/// Override the origin assigned to a peer when the protocol does not carry one.
+	/// Assign the identity this peer's routes are attributed to, overriding the fresh
+	/// per-session default.
 	///
-	/// Each request defaults to a fresh per-session origin. Use this method when the
-	/// peer has a stable identity known out of band. A peer-declared origin still wins.
+	/// Only for a peer whose identity the server has actually established, such as one
+	/// authenticated by mTLS or a token ([`crate::Client::with_peer_origin`] is the
+	/// dialing-side equivalent). An identity the peer declares on the wire still wins.
+	///
+	/// Two sessions given the same origin are treated as one endpoint: routes learned
+	/// from either are kept off both, and content arriving on either is interchangeable
+	/// with the other's. That is the point when they really are one peer reconnecting or
+	/// running redundant links, and a bug otherwise. Derive it from the authenticated
+	/// identity, never from something coarser like the remote address.
 	pub fn with_peer_origin(mut self, origin: crate::Origin) -> Self {
 		self.assigned_origin = origin;
 		self

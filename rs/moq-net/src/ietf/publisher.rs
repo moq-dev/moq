@@ -248,9 +248,10 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	// origin we consume so it matches the local relay identity across every session,
 	// which is what makes cross-session loop detection work.
 	self_origin: crate::Origin,
-	// The identity assigned to the peer by `Client::with_peer_origin`, used when the
-	// peer declares none itself. A peer that negotiates the MoQ Cluster extension
-	// declares its own, which wins.
+	// The identity assigned to the peer by the caller (`Client::with_peer_origin`, or
+	// the per-session default a server hands every request), used when the peer declares
+	// none itself. A peer that negotiates the MoQ Cluster extension declares its own,
+	// which wins unless it withheld it as the reserved 0.
 	peer_origin: Option<crate::Origin>,
 	// What the peer declared in its SETUP, filled when that stream is read.
 	peer_setup: peer::PeerSetup,
@@ -304,8 +305,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	/// The same exclusion the announce path applies (see [`Self::select`]), which is what
 	/// keeps advertised paths truthful and prevents subscription cycles of any length.
 	async fn serving_origin(&self) -> origin::Consumer {
-		let peer = self.peer().await;
-		match self.exclude(&peer) {
+		self.excluding(&self.peer().await)
+	}
+
+	/// Our origin handle with [`Self::exclude`] applied, the view both the data plane
+	/// and the announce loops read this peer's routes through.
+	fn excluding(&self, peer: &cluster::Peer) -> origin::Consumer {
+		match self.exclude(peer) {
 			crate::Origin::UNKNOWN => self.origin.clone(),
 			exclude => self.origin.clone().excluding(exclude),
 		}
@@ -313,14 +319,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	/// The Hop ID whose paths must not be advertised (or served) back to this peer.
 	///
-	/// A peer that negotiated the extension declares its own; otherwise fall back to
-	/// one the caller assigned out of band (`Client::with_peer_origin`), since
-	/// moq-transport itself carries no identity.
+	/// A peer that declared an identity supplies its own; otherwise fall back to the one
+	/// we assigned it (`Client::with_peer_origin` when dialing, `Request::with_peer_origin`
+	/// or a fresh per-session id when accepting), since moq-transport carries no identity
+	/// of its own. A peer that declared the reserved 0 declared no identity, so it takes
+	/// the fallback like any other anonymous peer.
 	fn exclude(&self, peer: &cluster::Peer) -> crate::Origin {
-		match peer.negotiated() {
-			true => peer.exclude(),
-			false => self.peer_origin.unwrap_or(crate::Origin::UNKNOWN),
-		}
+		peer.identity().or(self.peer_origin).unwrap_or(crate::Origin::UNKNOWN)
 	}
 
 	/// Pick what to advertise to this peer for one broadcast.
@@ -1288,10 +1293,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Split horizon, as the solicited loop applies it: never advertise a route back
 		// to the peer it came from.
-		let origin = match self.exclude(&peer) {
-			crate::Origin::UNKNOWN => self.origin.clone(),
-			exclude => self.origin.clone().excluding(exclude),
-		};
+		let origin = self.excluding(&peer);
 
 		let ns = Namespaces::new(peer, Target::Requests(None));
 		self.run_namespaces(origin, crate::Path::empty().to_owned(), ns).await
@@ -1644,15 +1646,18 @@ mod tests {
 		declared(Some(true))
 	}
 
-	/// A broadcast whose every route flows through the peer's assigned identity
-	/// (`Client::with_peer_origin`) is never advertised to that peer; it would only
-	/// echo the peer's own content back at it. A broadcast with an independent
-	/// route still is.
-	#[tokio::test]
-	async fn assigned_peer_origin_filters_echoed_announces() {
-		let assigned = crate::Origin::new(777).unwrap();
+	/// A publisher for a peer assigned `assigned`, over an origin holding two
+	/// broadcasts: `from/peer`, whose only route flows through `assigned`, and
+	/// `from/us`, which does not. The producers are returned so the routes outlive
+	/// the assertions.
+	async fn echo_harness(
+		assigned: crate::Origin,
+	) -> (
+		Publisher<SinkSession>,
+		origin::Consumer,
+		Vec<crate::broadcast::Producer>,
+	) {
 		let other = crate::Origin::new(778).unwrap();
-
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
@@ -1668,7 +1673,7 @@ mod tests {
 
 		let mut echoed_hops = crate::OriginList::new();
 		echoed_hops.push(assigned).unwrap();
-		let _echoed = origin
+		let echoed = origin
 			.create_broadcast(
 				"from/peer",
 				crate::broadcast::Route::new()
@@ -1679,7 +1684,7 @@ mod tests {
 
 		let mut local_hops = crate::OriginList::new();
 		local_hops.push(other).unwrap();
-		let _local = origin
+		let local = origin
 			.create_broadcast(
 				"from/us",
 				crate::broadcast::Route::new().with_hops(local_hops).with_announce(true),
@@ -1689,6 +1694,18 @@ mod tests {
 		// Broadcast visibility is deferred until the executor ticks.
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
+		(publisher, consumer, vec![echoed, local])
+	}
+
+	/// A broadcast whose every route flows through the peer's assigned identity
+	/// (`Client::with_peer_origin`) is never advertised to that peer; it would only
+	/// echo the peer's own content back at it. A broadcast with an independent
+	/// route still is.
+	#[tokio::test(start_paused = true)]
+	async fn assigned_peer_origin_filters_echoed_announces() {
+		let assigned = crate::Origin::new(777).unwrap();
+		let (publisher, consumer, _routes) = echo_harness(assigned).await;
+
 		let peer = cluster::Peer::default();
 
 		let echoed = consumer.get_broadcast("from/peer").unwrap();
@@ -1696,6 +1713,27 @@ mod tests {
 
 		let local = consumer.get_broadcast("from/us").unwrap();
 		assert_eq!(publisher.select(&Watched::new(local), &peer), Advert::Plain);
+	}
+
+	/// A peer that negotiates the cluster extension but declares the reserved 0 has
+	/// withheld its identity, which excludes nothing. The identity we assigned it
+	/// stands in, so its own routes still don't come back to it.
+	#[tokio::test(start_paused = true)]
+	async fn withheld_peer_origin_falls_back_to_assigned() {
+		let assigned = crate::Origin::new(777).unwrap();
+		let (publisher, consumer, _routes) = echo_harness(assigned).await;
+
+		let peer = cluster::Peer {
+			origin: Some(crate::Origin::UNKNOWN),
+			cost: None,
+		};
+		assert!(peer.negotiated());
+
+		let echoed = consumer.get_broadcast("from/peer").unwrap();
+		assert!(!publisher.select(&Watched::new(echoed), &peer).wanted());
+
+		let local = consumer.get_broadcast("from/us").unwrap();
+		assert!(publisher.select(&Watched::new(local), &peer).wanted());
 	}
 
 	/// A drained broadcast arms a linger so the cold cost is restored after a grace

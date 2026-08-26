@@ -1105,7 +1105,9 @@ impl Request {
 		}
 	}
 
-	/// Override the fallback origin for a peer that did not declare one on the wire.
+	/// Assign the identity this peer's routes are attributed to; see
+	/// [`moq_net::Request::with_peer_origin`]. Derive it from [`Self::peer_identity`],
+	/// never from something coarser.
 	pub fn with_peer_origin(self, origin: moq_net::Origin) -> Self {
 		let Request {
 			transport,

@@ -244,10 +244,10 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	// sessions dialing the same relay.
 	//
 	// Otherwise this is `Origin::UNKNOWN` (0), the reserved "no identity" value.
-	// Inventing a random id here would look like a real identity without being
-	// one: the peer never learns it, so it cannot exclude it for loop detection,
-	// and two unrelated publishers would each get an id that made their content
-	// look distinct rather than merely unknown.
+	// Minting one here is not this layer's call: the peer never learns the id, so
+	// only the side that assigned it can exclude it for loop detection, and whether
+	// two sessions should look like one identity or two is the caller's policy. A
+	// server answers it per accepted session; a client only when it knows the peer.
 	session_origin: crate::Origin,
 	// Our own Hop ID, which an advertisement must not already contain: one that does
 	// looped back through us.

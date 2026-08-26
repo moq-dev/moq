@@ -62,13 +62,16 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	//
 	// This is the peer's assigned identity (`peer_origin`) when the caller gave
 	// it one, which also makes the route recognizable across sessions. Otherwise
-	// it is `Origin::UNKNOWN` (0), the reserved "no identity" value: a random id
-	// would look like an identity the peer never agreed to and cannot exclude
-	// for loop detection.
+	// it is `Origin::UNKNOWN` (0), the reserved "no identity" value.
+	//
+	// Assigning one is the caller's call, not this layer's: a server gives every
+	// accepted session a fresh id so its routes are at least distinguishable from
+	// another session's, while a client only assigns one it knows out of band. Either
+	// way the peer never learns the id, so only we can exclude it for loop detection.
 	session_origin: crate::Origin,
-	// The identity assigned to the peer by `Client::with_peer_origin`, standing
-	// in wherever the peer declines to declare one (an AnnounceOk reporting
-	// origin id 0).
+	// The identity assigned to the peer by the caller (`Client::with_peer_origin`,
+	// or the per-session default a server hands every request), standing in wherever
+	// the peer declines to declare one (an AnnounceOk reporting origin id 0).
 	peer_origin: Option<crate::Origin>,
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
 	next_id: Arc<atomic::AtomicU64>,
@@ -458,7 +461,24 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		responder_origin: Option<crate::Origin>,
 		routes: &mut HashMap<PathOwned, AnnouncedRoute>,
 	) -> Result<bool, Error> {
+		// Make sure the peer doesn't double announce. Decided first: the drops below
+		// return `Ok(false)`, and the caller has already assigned this announce an id,
+		// so letting one of them pre-empt this check leaves that id bound to a path
+		// whose route belongs to the earlier announce. The `ANNOUNCE_END` that follows
+		// would then retire the wrong one.
+		if routes.contains_key(&path) {
+			return Err(Error::Duplicate);
+		}
+
 		if let Some(responder) = responder_origin {
+			// A chain already naming the sender came back through it: a reflection, and
+			// appending the sender again would name it twice. That is legal in a lite
+			// chain but a PROTOCOL_VIOLATION for an IETF peer we forward it to, so it
+			// must not enter the model at all. Zero names nobody, so it may repeat.
+			if responder != crate::Origin::UNKNOWN && hops.contains(&responder) {
+				tracing::debug!(broadcast = %self.log_path(&path), "dropping announce reflected by its sender");
+				return Ok(false);
+			}
 			// If the chain is already full, drop the announce. This is the same decision
 			// the Lite04 sender makes at its push site.
 			if hops.push(responder).is_err() {
@@ -497,11 +517,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		if hops.is_empty() {
 			hops.push(self.session_origin)
 				.expect("an empty hop chain always has room for one entry");
-		}
-
-		// Make sure the peer doesn't double announce.
-		if routes.contains_key(&path) {
-			return Err(Error::Duplicate);
 		}
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
@@ -561,7 +576,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	) -> Result<bool, Error> {
 		// Reflected loop (or a full chain): the route can't be used here anymore. Retire it.
 		let reflected = match responder_origin {
-			Some(responder) => hops.push(responder).is_err() || hops.contains(&self.self_origin),
+			// A chain already naming the sender came back through it; see `start_announce`.
+			Some(responder) => {
+				(responder != crate::Origin::UNKNOWN && hops.contains(&responder))
+					|| hops.push(responder).is_err()
+					|| hops.contains(&self.self_origin)
+			}
 			None => hops.contains(&self.self_origin),
 		};
 		if reflected {
@@ -900,6 +920,98 @@ mod tests {
 		assert!(wire.is_empty(), "a second SUBSCRIBE trailed the first");
 	}
 
+	/// A second announce for a live path is a protocol error whatever its hops say. It
+	/// must be caught before the reflection drops, because the caller has already bound
+	/// an announce id to it: dropping it silently leaves that id pointing at a path
+	/// owned by the earlier announce, and the `ANNOUNCE_END` that follows retires the
+	/// wrong route.
+	#[tokio::test]
+	async fn a_double_announce_is_an_error_even_when_reflected() {
+		let assigned = crate::Origin::new(777).unwrap();
+		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let (tasks, _task_set) = TaskSet::new();
+		let mut subscriber = Subscriber::new(SubscriberConfig {
+			session: SinkSession::new(Default::default()),
+			origin,
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			cost: None,
+			peer_origin: Some(assigned),
+			tasks,
+		});
+
+		let path = Path::new("room/host").to_owned();
+		let mut routes = HashMap::new();
+		assert!(
+			subscriber
+				.start_announce(
+					path.clone(),
+					crate::OriginList::new(),
+					RouteCost::default(),
+					0,
+					Some(assigned),
+					&mut routes,
+				)
+				.unwrap()
+		);
+
+		// The same path again, this time with a chain that names the sender.
+		let mut reflected = crate::OriginList::new();
+		reflected.push(assigned).unwrap();
+		assert!(
+			matches!(
+				subscriber.start_announce(path, reflected, RouteCost::default(), 0, Some(assigned), &mut routes),
+				Err(Error::Duplicate)
+			),
+			"the double announce must be reported, not silently dropped",
+		);
+	}
+
+	/// An announce whose chain already names the sender came back through the sender.
+	/// Appending it again would name one identity twice, which is tolerated in a lite
+	/// chain but is a PROTOCOL_VIOLATION for an IETF peer the route is later forwarded
+	/// to, so the route must never enter the model carrying it.
+	#[tokio::test]
+	async fn an_announce_reflected_by_its_sender_is_dropped() {
+		let assigned = crate::Origin::new(777).unwrap();
+
+		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+		let (tasks, _task_set) = TaskSet::new();
+		let mut subscriber = Subscriber::new(SubscriberConfig {
+			session: SinkSession::new(Default::default()),
+			origin,
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			cost: None,
+			peer_origin: Some(assigned),
+			tasks,
+		});
+
+		// The sender reports origin 0, so it takes the assigned identity, and its chain
+		// already carries that identity: the route came back through it.
+		let mut hops = crate::OriginList::new();
+		hops.push(assigned).unwrap();
+
+		let mut routes = HashMap::new();
+		let accepted = subscriber
+			.start_announce(
+				Path::new("room/host").to_owned(),
+				hops,
+				RouteCost::default(),
+				0,
+				Some(assigned),
+				&mut routes,
+			)
+			.unwrap();
+		assert!(!accepted, "a chain naming its own sender must not become a route");
+
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		assert!(consumer.get_broadcast("room/host").is_none());
+	}
+
 	/// A peer that declares no identity gets attributed the origin the caller
 	/// assigned it (`Client::with_peer_origin`), so every session dialing the same
 	/// relay yields one recognizable hop instead of a random id per connection.
@@ -946,8 +1058,9 @@ mod tests {
 	}
 
 	/// A peer with no assigned identity is attributed the reserved origin 0
-	/// (UNKNOWN), not a random one: a random id would look like a real identity
-	/// the peer never agreed to and cannot exclude for loop detection.
+	/// (UNKNOWN). This layer never mints one of its own: whether an anonymous peer
+	/// gets an identity, and whether two of its sessions share it, is the caller's
+	/// policy, and a minted id here would be indistinguishable from a declared one.
 	#[tokio::test]
 	async fn absent_peer_origin_stamps_unknown() {
 		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));

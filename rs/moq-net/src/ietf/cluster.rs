@@ -182,11 +182,9 @@ impl Advert {
 /// What the peer declared in its SETUP.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Peer {
-	/// The peer's Hop ID, or `None` when it did not negotiate the extension.
-	///
-	/// A peer that declared the reserved 0 negotiated the extension but withheld its
-	/// identity, which decodes to `Some(Origin::UNKNOWN)`: the extension is on, but
-	/// there is nothing to exclude.
+	/// What the peer put in RELAY_HOPS, or `None` when it did not negotiate the
+	/// extension. Read [`Self::identity`] for the identity; this field answers whether
+	/// the extension is on, which is a different question when the peer declared 0.
 	pub origin: Option<Origin>,
 
 	/// What the peer said subscribing from it costs, or `None` when it priced nothing
@@ -196,15 +194,19 @@ pub struct Peer {
 }
 
 impl Peer {
-	/// Whether the peer negotiated the extension.
+	/// Whether the peer negotiated the extension, which is what decides the NAMESPACE
+	/// encoding. True even for a peer that declared the reserved 0.
 	pub fn negotiated(&self) -> bool {
 		self.origin.is_some()
 	}
 
-	/// The Hop ID to exclude when advertising to (and serving) this peer.
-	/// [`Origin::UNKNOWN`] excludes nothing.
-	pub fn exclude(&self) -> Origin {
-		self.origin.unwrap_or(Origin::UNKNOWN)
+	/// The identity the peer declared, or `None` when it declared none.
+	///
+	/// Declaring the reserved 0 turns the extension on while withholding an identity,
+	/// which reads here exactly like declaring nothing at all. The receiver assigns one
+	/// instead, so there is no third state for callers to get wrong.
+	pub fn identity(&self) -> Option<Origin> {
+		self.origin.filter(|origin| *origin != Origin::UNKNOWN)
 	}
 }
 
@@ -414,19 +416,29 @@ mod tests {
 		assert_eq!(absurd.route(10).cost, u64::MAX);
 	}
 
+	/// Negotiating the extension and declaring an identity are separate questions, and a
+	/// peer that declared the reserved 0 answers them differently: the extension is on,
+	/// so the NAMESPACE encoding changes, but it named nobody, so it reads exactly like a
+	/// peer that declared nothing and the receiver assigns an identity instead.
 	#[test]
-	fn peer_defaults() {
+	fn declared_zero_negotiates_without_an_identity() {
 		let peer = Peer::default();
 		assert!(!peer.negotiated());
-		assert_eq!(peer.exclude(), Origin::UNKNOWN);
+		assert_eq!(peer.identity(), None);
 
-		// A declared 0 negotiates the extension but excludes nothing.
 		let anonymous = Peer {
 			origin: Some(Origin::UNKNOWN),
 			cost: Some(0),
 		};
 		assert!(anonymous.negotiated());
-		assert_eq!(anonymous.exclude(), Origin::UNKNOWN);
+		assert_eq!(anonymous.identity(), None);
+
+		let named = Peer {
+			origin: Some(origin(9)),
+			cost: None,
+		};
+		assert!(named.negotiated());
+		assert_eq!(named.identity(), Some(origin(9)));
 	}
 
 	#[test]
