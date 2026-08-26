@@ -489,3 +489,48 @@ test("a violation on a very long path still ends the session", async () => {
 	expect(info?.closeCode).toBe(15);
 	expect(new TextEncoder().encode(info?.reason ?? "").byteLength).toBeLessThanOrEqual(1024);
 });
+
+test("a draft-04 duplicate start is a violation, not a restart", async () => {
+	// Pre-lite-05 has no replacement idiom, so a second ANNOUNCE_START for a live path is
+	// the same violation lite-06 treats it as. Only lite-05, where the duplicate *is* the
+	// restart, is exempt. The Rust loop routes every other version through `start_announce`,
+	// which rejects it.
+	const { subscriber, send, sessionEnded, settle } = announceHarness(Version.DRAFT_04);
+	const announced = subscriber.announced(Path.empty());
+	await settle();
+
+	const active: AnnounceBroadcast = { status: "active", suffix: Path.from("room"), hops: [PUBLISHER_A] };
+	await send((w) => encodeAnnounceBroadcast(w, active, Version.DRAFT_04));
+	expect(await announced.next()).toEqual({ path: Path.from("room"), active: true });
+
+	await send((w) => encodeAnnounceBroadcast(w, active, Version.DRAFT_04));
+
+	// Session first: it is the bounded assertion, so a version that treats this as a
+	// restart fails here in 250ms instead of hanging on a rejection that never comes.
+	expect((await sessionEnded())?.closeCode).toBe(15);
+	await expect(announced.next()).rejects.toThrow("duplicate announce");
+});
+
+test("a draft-05 duplicate start is still a restart", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_05);
+	const announced = subscriber.announced(Path.empty());
+	await settle();
+
+	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_05));
+
+	const active: AnnounceBroadcast = { status: "active", suffix: Path.from("room"), hops: [PUBLISHER_A] };
+	await send((w) => encodeAnnounceBroadcast(w, active, Version.DRAFT_05));
+	expect(await announced.next()).toEqual({ path: Path.from("room"), active: true });
+
+	// Same publisher over a new route: transparent, and emphatically not an error.
+	await send((w) => encodeAnnounceBroadcast(w, active, Version.DRAFT_05));
+
+	// A different publisher does surface, which is what proves the reroute above passed.
+	const replaced: AnnounceBroadcast = { status: "active", suffix: Path.from("room"), hops: [PUBLISHER_B] };
+	await send((w) => encodeAnnounceBroadcast(w, replaced, Version.DRAFT_05));
+	expect(await announced.next()).toEqual({ path: Path.from("room"), active: false });
+	expect(await announced.next()).toEqual({ path: Path.from("room"), active: true });
+
+	announced.close();
+	subscriber.close();
+});

@@ -75,6 +75,22 @@ export function hasAnnounceOk(version: Version): boolean {
 	}
 }
 
+/** Whether the version can replace an advertisement in place rather than retracting and
+ * re-announcing it. Added in lite-05 as a duplicate ANNOUNCE; lite-06 gave it a message of
+ * its own (ANNOUNCE_UPDATE) and made the duplicate a violation. */
+export function restartSupported(version: Version): boolean {
+	// Explicitly list older versions so future versions default to supported.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** Whether announcements carry implicit announce ids: each `active` assigns the next
  * per-stream ordinal, and `ended`/`restart` reference that id instead of repeating the
  * path. Added in lite-06. */

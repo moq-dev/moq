@@ -22,7 +22,15 @@ import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
 import { decodeSubscribeResponse, decodeSubscribeResponseMaybe, Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasExcludeHop, hasProbeRtt, Version } from "./version.ts";
+import {
+	hasAnnounceId,
+	hasAnnounceOk,
+	hasDatagrams,
+	hasExcludeHop,
+	hasProbeRtt,
+	restartSupported,
+	Version,
+} from "./version.ts";
 
 // Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
 // drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC streams
@@ -311,12 +319,18 @@ export class Subscriber {
 				const path = Path.join(prefix, suffix);
 
 				// One current advertisement per path per stream, decided before anything below
-				// can skip this announcement. From lite-06 a replacement is an explicit RESTART,
-				// so a second ANNOUNCE_START for a path the peer already advertised is a
-				// violation whether or not its route would be usable here, and whether or not we
-				// kept the first. Letting a skip pre-empt it would retract the live route and
-				// leave the stream open on a peer that is already out of spec.
-				if (announce.status === "active" && hasAnnounceId(this.version) && advertised.has(suffix)) {
+				// can skip this announcement. A second ANNOUNCE_START for a path the peer
+				// already advertised is a violation whether or not its route would be usable
+				// here, and whether or not we kept the first; letting a skip pre-empt it would
+				// retract the live route and leave the stream open on a peer already out of
+				// spec.
+				//
+				// lite-05 alone is exempt, where a duplicate ANNOUNCE *is* the replacement
+				// idiom. lite-06 gave that its own message and older versions never had one, so
+				// a duplicate means the same thing on both sides of it. Mirrors the branch the
+				// Rust announce loop takes before `start_announce`.
+				const duplicateIsRestart = restartSupported(this.version) && !hasAnnounceId(this.version);
+				if (announce.status === "active" && !duplicateIsRestart && advertised.has(suffix)) {
 					throw new ProtocolViolation(`duplicate announce for ${path}`);
 				}
 
