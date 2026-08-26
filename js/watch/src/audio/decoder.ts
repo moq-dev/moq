@@ -9,7 +9,7 @@ import { subscribeMedia } from "../media";
 
 import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
-import { reanchorFloor } from "./latency";
+import { reanchorFloor, ringSamples } from "./latency";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
@@ -21,16 +21,6 @@ import { Warmup } from "./warmup";
 // slider drag (many small steps) into a single re-anchor once the user settles on a value.
 const LATENCY_REANCHOR_DEBOUNCE_MS = 150;
 
-// An AudioWorkletProcessor renders in fixed 128-sample quanta, so a ring shallower than one can
-// never be read from. `latency="instant"` asks Sync for a zero buffer, and the ring rejects that
-// outright: the worklet's construction throws, leaving it with no backend and no way back, since
-// every later resize is gated on the backend existing. Audio keeps its own floor for that reason.
-const RENDER_QUANTUM = 128;
-
-/** The ring depth for a target latency, floored at one render quantum. */
-function ringSamples(rate: number, latency: Time.Milli): number {
-	return Math.max(RENDER_QUANTUM, Math.ceil(rate * Time.Second.fromMilli(latency)));
-}
 const LEGACY_WARMUP_CALLBACKS = 3;
 
 export type DecoderInput = {
