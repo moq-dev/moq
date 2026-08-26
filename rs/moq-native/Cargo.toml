@@ -106,5 +106,6 @@ rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc
 tempfile = "3"
 # test-util adds tokio::time::pause/auto-advance for the time-dependent tests.
 tokio = { workspace = true, features = ["test-util"] }
+tokio-rustls = { version = "0.26", default-features = false }
 toml = "1.1"
 tracing-test = "0.2"

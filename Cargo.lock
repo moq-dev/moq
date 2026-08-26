@@ -4909,6 +4909,7 @@ dependencies = [
  "tikv-jemallocator",
  "time",
  "tokio",
+ "tokio-rustls",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
  "tracing-android",

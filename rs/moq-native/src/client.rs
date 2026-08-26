@@ -232,6 +232,10 @@ pub struct Client {
 	resolution_delay: std::time::Duration,
 	#[cfg(feature = "websocket")]
 	websocket: crate::websocket::Client,
+	/// The TLS server name override used by the WebSocket fallback. QUIC backends
+	/// capture their own copy from the config.
+	#[cfg(feature = "websocket")]
+	tls_host_name: Option<String>,
 	/// Only the rustls-based dials read this. quiche builds its own TLS stack, and the
 	/// plaintext qmux transports have none.
 	#[cfg(any(feature = "noq", feature = "quinn", feature = "websocket"))]
@@ -316,6 +320,8 @@ impl Client {
 		let failover_delay = config.resolved_failover_delay();
 		#[cfg(feature = "tcp")]
 		let resolution_delay = config.resolved_resolution_delay();
+		#[cfg(feature = "websocket")]
+		let tls_host_name = config.tls.host_name.clone();
 		let timeout = config.resolved_connect_timeout();
 
 		Ok(Self {
@@ -338,6 +344,8 @@ impl Client {
 			resolution_delay,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
+			#[cfg(feature = "websocket")]
+			tls_host_name,
 			#[cfg(any(feature = "noq", feature = "quinn", feature = "websocket"))]
 			tls,
 			#[cfg(feature = "noq")]
@@ -618,7 +626,9 @@ impl Client {
 		#[cfg(feature = "websocket")]
 		{
 			let alpns = self.versions.alpns();
-			let session = crate::websocket::connect(&self.websocket, &self.tls, url, &alpns).await?;
+			let session =
+				crate::websocket::connect(&self.websocket, &self.tls, self.tls_host_name.as_deref(), url, &alpns)
+					.await?;
 			return Ok(moq.connect(session).await?);
 		}
 
@@ -648,8 +658,9 @@ impl Client {
 		let alpns = self.versions.alpns();
 		let ws_config = self.websocket.clone();
 		let ws_tls = self.tls.clone();
+		let ws_tls_host_name = self.tls_host_name.clone();
 		let websocket = async move {
-			crate::websocket::race_handle(&ws_config, &ws_tls, url, &alpns)
+			crate::websocket::race_handle(&ws_config, &ws_tls, ws_tls_host_name.as_deref(), url, &alpns)
 				.await
 				.map(|res| res.map_err(Error::from))
 		};

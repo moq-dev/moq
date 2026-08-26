@@ -6,7 +6,7 @@
 //! through. Servers accept it on a separate TCP port via [`Listener`].
 
 use qmux::ws::tokio_tungstenite;
-use qmux::ws::tokio_tungstenite::tungstenite::{self, http};
+use qmux::ws::tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http};
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::{net, time};
@@ -108,6 +108,7 @@ impl Default for Client {
 pub(crate) async fn race_handle(
 	config: &Client,
 	tls: &rustls::ClientConfig,
+	tls_host_name: Option<&str>,
 	url: Url,
 	alpns: &[&str],
 ) -> Option<Result<qmux::Session>> {
@@ -122,7 +123,7 @@ pub(crate) async fn race_handle(
 		_ => return None,
 	}
 
-	let res = connect(config, tls, url, alpns).await;
+	let res = connect(config, tls, tls_host_name, url, alpns).await;
 	if let Err(err) = &res {
 		tracing::warn!(%err, "WebSocket connection failed");
 	}
@@ -132,6 +133,7 @@ pub(crate) async fn race_handle(
 pub(crate) async fn connect(
 	config: &Client,
 	tls: &rustls::ClientConfig,
+	tls_host_name: Option<&str>,
 	mut url: Url,
 	alpns: &[&str],
 ) -> Result<qmux::Session> {
@@ -145,7 +147,7 @@ pub(crate) async fn connect(
 		"http" | "ws" => 80,
 		_ => 443,
 	});
-	let key = (host, port);
+	let key = (host.clone(), port);
 
 	// Apply a small penalty to WebSocket to improve odds for QUIC to connect first,
 	// unless we've already had to fall back to WebSockets for this server.
@@ -176,30 +178,84 @@ pub(crate) async fn connect(
 
 	tracing::debug!(%url, "connecting via WebSocket");
 
-	// Use the existing TLS config (which respects tls-disable-verify) for secure connections.
-	let connector = if needs_tls {
-		tokio_tungstenite::Connector::Rustls(Arc::new(tls.clone()))
-	} else {
-		tokio_tungstenite::Connector::Plain
-	};
+	let session = match (needs_tls, tls_host_name) {
+		(true, Some(tls_host_name)) => connect_tls_override(tls, tls_host_name, &url, &host, port, alpns).await?,
+		_ => {
+			// Use the existing TLS config (which respects tls-disable-verify) for secure connections.
+			let connector = if needs_tls {
+				tokio_tungstenite::Connector::Rustls(Arc::new(tls.clone()))
+			} else {
+				tokio_tungstenite::Connector::Plain
+			};
 
-	// Most moq ALPNs can ride on any QMux draft (`&[]` lets the polyfill expand
-	// to every version it knows). `qmux_versions_for` pins the few that the spec
-	// restricts. qmux also offers the bare ALPNs (`qmux-01`, `qmux-00`,
-	// `webtransport`) by default so we still interop with relays that only know a
-	// wire-format version.
-	let session = qmux::ws::Client::new()
-		.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
-		.with_connector(connector)
-		.with_keep_alive(qmux::ws::KeepAlive::default()) // 5s ping / 30s deadline, parity with QUIC
-		.connect(url.as_str())
-		.await
-		.map_err(Error::Connect)?;
+			// Most moq ALPNs can ride on any QMux draft (`&[]` lets the polyfill expand
+			// to every version it knows). `qmux_versions_for` pins the few that the spec
+			// restricts. qmux also offers the bare ALPNs (`qmux-01`, `qmux-00`,
+			// `webtransport`) by default so we still interop with relays that only know a
+			// wire-format version.
+			qmux::ws::Client::new()
+				.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
+				.with_connector(connector)
+				.with_keep_alive(qmux::ws::KeepAlive::default()) // 5s ping / 30s deadline, parity with QUIC
+				.connect(url.as_str())
+				.await
+				.map_err(Error::Connect)?
+		}
+	};
 
 	tracing::warn!(%url, "using WebSocket fallback");
 	WEBSOCKET_WON.lock().unwrap().insert(key);
 
 	Ok(session)
+}
+
+/// Dial the URL address while using a different server name for the TLS layer.
+async fn connect_tls_override(
+	tls: &rustls::ClientConfig,
+	tls_host_name: &str,
+	url: &Url,
+	host: &str,
+	port: u16,
+	alpns: &[&str],
+) -> Result<qmux::Session> {
+	let original_request = url.as_str().into_client_request().map_err(Error::BuildRequest)?;
+	let original_host = original_request
+		.headers()
+		.get(http::header::HOST)
+		.cloned()
+		.ok_or(Error::MissingHostname)?;
+	let mut tls_url = url.clone();
+	tls_url
+		.set_host(Some(tls_host_name))
+		.map_err(|_| Error::Connect(qmux::Error::InvalidServerName))?;
+	let mut request = tls_url.as_str().into_client_request().map_err(Error::BuildRequest)?;
+	request.headers_mut().insert(http::header::HOST, original_host);
+	let protocols = supported_subprotocols(alpns).join(", ");
+	request.headers_mut().insert(
+		http::header::SEC_WEBSOCKET_PROTOCOL,
+		http::HeaderValue::from_str(&protocols).map_err(Error::ProtocolHeader)?,
+	);
+
+	let host = host
+		.strip_prefix('[')
+		.and_then(|host| host.strip_suffix(']'))
+		.unwrap_or(host);
+	let stream = tokio::net::TcpStream::connect((host, port)).await?;
+	let connector = tokio_tungstenite::Connector::Rustls(Arc::new(tls.clone()));
+	let (websocket, response) = tokio_tungstenite::client_async_tls_with_config(request, stream, None, Some(connector))
+		.await
+		.map_err(qmux::Error::from)
+		.map_err(Error::Connect)?;
+
+	let negotiated = response
+		.headers()
+		.get(http::header::SEC_WEBSOCKET_PROTOCOL)
+		.and_then(|value| value.to_str().ok());
+	let upgraded = qmux::ws::Upgraded::new(websocket).with_keep_alive(qmux::ws::KeepAlive::default());
+	Ok(match negotiated {
+		Some(protocol) => upgraded.with_alpn(protocol).connect(),
+		None => upgraded.connect(),
+	})
 }
 
 /// The QMux drafts a moq ALPN is allowed to ride on, for `qmux::ws::Client::with_protocols`.
@@ -425,6 +481,7 @@ fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 	#[test]
 	fn subprotocol_selection_preserves_legacy_clients() {
@@ -453,6 +510,80 @@ mod tests {
 		assert_eq!(url.query(), Some("jwt=test"));
 		drop(session);
 		drop(websocket);
+	}
+
+	#[tokio::test]
+	async fn tls_host_name_override_dials_url_address() {
+		let rcgen::CertifiedKey { cert, signing_key } =
+			rcgen::generate_simple_self_signed(["relay.example".to_string()]).unwrap();
+		let cert = CertificateDer::from(cert);
+		let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
+		let provider = crate::crypto::provider();
+		let server_tls = rustls::ServerConfig::builder_with_provider(provider.clone())
+			.with_safe_default_protocol_versions()
+			.unwrap()
+			.with_no_client_auth()
+			.with_single_cert(vec![cert.clone()], key)
+			.unwrap();
+
+		let mut roots = rustls::RootCertStore::empty();
+		roots.add(cert).unwrap();
+		let client_tls = rustls::ClientConfig::builder_with_provider(provider)
+			.with_safe_default_protocol_versions()
+			.unwrap()
+			.with_root_certificates(roots)
+			.with_no_client_auth();
+
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+		let accepted = tokio::spawn(async move {
+			let (stream, _) = listener.accept().await.unwrap();
+			let tls = tokio_rustls::TlsAcceptor::from(Arc::new(server_tls))
+				.accept(stream)
+				.await
+				.unwrap();
+			let server_name = tls.get_ref().1.server_name().map(str::to_string);
+			let host = Arc::new(Mutex::new(None));
+			let request_host = host.clone();
+			#[allow(clippy::result_large_err)]
+			let callback = move |request: &tungstenite::handshake::server::Request,
+			            mut response: tungstenite::handshake::server::Response| {
+				*request_host.lock().unwrap() = request
+					.headers()
+					.get(http::header::HOST)
+					.and_then(|value| value.to_str().ok())
+					.map(str::to_string);
+				if let Some(protocol) = request
+					.headers()
+					.get(http::header::SEC_WEBSOCKET_PROTOCOL)
+					.and_then(|value| value.to_str().ok())
+					.and_then(|value| value.split(',').next())
+					.map(str::trim)
+				{
+					response.headers_mut().insert(
+						http::header::SEC_WEBSOCKET_PROTOCOL,
+						http::HeaderValue::from_str(protocol).unwrap(),
+					);
+				}
+				Ok(response)
+			};
+			let _websocket = tokio_tungstenite::accept_hdr_async(tls, callback).await.unwrap();
+			let host = host.lock().unwrap().take();
+			(server_name, host)
+		});
+
+		let config = Client {
+			delay: None,
+			..Default::default()
+		};
+		let url = Url::parse(&format!("wss://127.0.0.1:{}/anon", addr.port())).unwrap();
+		let session = connect(&config, &client_tls, Some("relay.example"), url, moq_net::ALPNS)
+			.await
+			.unwrap();
+		drop(session);
+		let (server_name, host) = accepted.await.unwrap();
+		assert_eq!(server_name.as_deref(), Some("relay.example"));
+		assert_eq!(host.as_deref(), Some(format!("127.0.0.1:{}", addr.port()).as_str()));
 	}
 
 	#[test]
