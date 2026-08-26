@@ -29,8 +29,8 @@ pub struct StatsConfig {
 	/// `Option` rather than a materialized default: Usage reads a standing `false`
 	/// as an empty boolean, so `update_from` would refill it from the environment
 	/// (or a declared default) over whatever the TOML file said. An `Option` is
-	/// empty only when nothing set it. Every other shape a plain value can take
-	/// always reads as present, so this applies to booleans alone.
+	/// empty only when nothing set it. A bare `Vec<T>` has the same hazard, since
+	/// an empty list also reads as absent; see moq-dev/moq#3051.
 	#[usage(
 		long = "stats-enabled",
 		env = "MOQ_STATS_ENABLED",

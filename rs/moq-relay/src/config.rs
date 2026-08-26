@@ -903,8 +903,8 @@ uid = [1001]
 	///
 	/// Usage reads a standing `false` as an empty boolean, so a bare `bool` is
 	/// refilled from the environment during the CLI re-parse and the file loses.
-	/// Every merged boolean is therefore `Option<bool>`; every other shape is
-	/// safe, because a plain value always reads as present.
+	/// Every merged boolean is therefore `Option<bool>`. A bare `Vec<T>` is the
+	/// other unsafe shape, tracked in moq-dev/moq#3051; scalars are safe.
 	#[test]
 	fn env_does_not_clobber_toml_booleans() {
 		let _env = EnvGuard::clear(&["MOQ_STATS_ENABLED", "MOQ_CLUSTER_LAN"]);
@@ -914,7 +914,12 @@ uid = [1001]
 			std::env::set_var("MOQ_CLUSTER_LAN", "true");
 		}
 
+		// `[cluster.lan]` is only a key when the feature that reads it is on, and
+		// `deny_unknown_fields` refuses it otherwise.
+		#[cfg(feature = "cluster-lan")]
 		let toml = "[stats]\nenabled = false\n\n[cluster.lan]\nenabled = false\n";
+		#[cfg(not(feature = "cluster-lan"))]
+		let toml = "[stats]\nenabled = false\n";
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
 		let path = dir.join("env-vs-toml-bools.toml");
@@ -933,6 +938,7 @@ uid = [1001]
 			Some(false),
 			"TOML stats.enabled=false must beat MOQ_STATS_ENABLED=true"
 		);
+		#[cfg(feature = "cluster-lan")]
 		assert_eq!(
 			config.cluster.lan.enabled,
 			Some(false),
