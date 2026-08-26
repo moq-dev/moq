@@ -57,9 +57,22 @@ export type AnnounceBroadcast =
 	 * chain after a relay failover, or a route whose cost moved). The id stays live. */
 	| { status: "restart"; id: bigint; hops: Origin[]; cost?: Cost };
 
+// Both wire rules on a hop chain, applied to what we send and to what we receive: a
+// chain that revisits a hop looped, so neither forwarding it nor subscribing through it
+// is safe, and a receiver must close the stream over one. `UNKNOWN_ORIGIN` identifies
+// nothing, so any number of hops may be unknown.
 function checkHops(hops: Origin[]) {
 	if (hops.length > MAX_HOPS) {
 		throw new Error(`hop count ${hops.length} exceeds maximum ${MAX_HOPS}`);
+	}
+
+	// MAX_HOPS is 32, so the quadratic scan is cheaper than allocating a set.
+	for (let i = 0; i < hops.length; i++) {
+		const hop = hops[i];
+		if (hop === UNKNOWN_ORIGIN) continue;
+		if (hops.indexOf(hop, i + 1) !== -1) {
+			throw new Error(`hop ${hop} appears twice in the chain`);
+		}
 	}
 }
 
@@ -102,6 +115,7 @@ async function decodeHops(r: Reader, version: Version): Promise<Origin[]> {
 			for (let i = 0; i < count; i++) {
 				hops.push(OriginSchema.parse(await r.u62()));
 			}
+			checkHops(hops);
 			return hops;
 		}
 	}
