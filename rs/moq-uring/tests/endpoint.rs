@@ -231,6 +231,47 @@ fn the_backlog_bounds_pending_handshakes() {
 	assert!(!accepted.get(), "a handshake over the backlog must not be accepted");
 }
 
+/// Completed connections stay in the backlog until the application accepts
+/// them, so finishing a handshake cannot make room for an unbounded queue.
+#[test]
+fn the_backlog_bounds_queued_connections() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+
+	let sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("socket");
+	let mut config = quic::endpoint::Config::default().with_server(server_config(&certs));
+	config.backlog = 1;
+	let endpoint = quic::Endpoint::new(&handle, sock, config).expect("endpoint");
+	let server = endpoint.local_addr();
+
+	let first_sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("first client socket");
+	let first = worker
+		.block_on(async { quic::client::connect(&handle, first_sock, &dial_config(server)).await })
+		.expect("worker")
+		.expect("first connection");
+
+	let second_sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("second client socket");
+	let mut second_config = dial_config(server);
+	second_config.idle_timeout = Duration::from_millis(500);
+	let second = worker
+		.block_on(async { quic::client::connect(&handle, second_sock, &second_config).await })
+		.expect("worker");
+	assert!(second.is_err(), "a completed connection must still occupy the backlog");
+
+	let accepted = worker
+		.block_on(endpoint.accept())
+		.expect("worker")
+		.expect("first accepted connection");
+	drop((first, accepted));
+}
+
 /// A dial-only endpoint refuses to accept, loudly.
 #[test]
 fn accept_needs_a_server_config() {

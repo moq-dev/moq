@@ -35,13 +35,12 @@ pub struct Config {
 	/// endpoint only dials, and inbound handshakes are dropped.
 	pub server: Option<server::Config>,
 
-	/// How many incoming handshakes may be in flight at once (default 1024).
+	/// How many incoming connections may await acceptance at once (default 1024).
 	///
-	/// Each unauthenticated Initial births per-connection state, so this is
-	/// the bound on what a spoofed packet can allocate. An Initial past the
-	/// cap is dropped; a real peer retransmits and lands once the backlog
-	/// drains (a handshake resolves in about a round trip, or by idle
-	/// timeout).
+	/// This bounds both handshakes in flight and completed connections queued
+	/// for [`Endpoint::accept`]. An Initial past the cap is dropped; a real
+	/// peer retransmits and lands once the application drains the backlog or
+	/// a handshake fails.
 	pub backlog: usize,
 }
 
@@ -87,7 +86,8 @@ struct Inner {
 	conns: RefCell<slab::Slab<Conn>>,
 	/// Destination connection id -> the connection it belongs to.
 	routes: RefCell<HashMap<Vec<u8>, usize>>,
-	/// Incoming handshakes in flight, bounded by [`Config::backlog`].
+	/// Incoming handshakes in flight. Together with the accept queue this is
+	/// bounded by [`Config::backlog`].
 	pending: Cell<usize>,
 	backlog: usize,
 	/// Live [`Endpoint`] handles; at zero the endpoint winds down (no new
@@ -312,9 +312,10 @@ impl Inner {
 			self.negotiate(&hdr, info.from);
 			return None;
 		}
-		// Every pending handshake holds per-connection state an unauthenticated
-		// packet conjured, so bound them; a dropped Initial is retransmitted.
-		if self.pending.get() >= self.backlog {
+		// Bound every connection the application has not claimed, whether its
+		// handshake is still pending or it is already queued for accept.
+		let queued = self.accepting.borrow().as_ref().expect("checked above").queue.len();
+		if self.pending.get() + queued >= self.backlog {
 			tracing::debug!(from = %info.from, "dropping a handshake over the backlog");
 			return None;
 		}
