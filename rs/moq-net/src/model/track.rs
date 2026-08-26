@@ -3127,6 +3127,37 @@ mod test {
 		assert!(!state.lookup.contains_key(&1), "the unread group still expired");
 	}
 
+	/// Whole-frame reads served from the prefetch batch must also keep the group
+	/// alive: the batch is filled (and stamped) once per `Prefetch::CAP` frames,
+	/// which bounds frames, not elapsed time, so a slow `read_frame` reader has to
+	/// re-stamp on a time bound between refills.
+	#[tokio::test]
+	async fn slow_prefetch_reader_survives_expiry() {
+		tokio::time::pause();
+
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(None);
+
+		let mut group = producer.create_group(0u64.into()).unwrap();
+		for _ in 0..20 {
+			group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		}
+		group.finish().unwrap();
+		let mut reading = subscriber.assert_group();
+
+		// One whole-frame read per half-window: most are served straight from the
+		// prefetch without locking. New groups keep the expiry scan running.
+		for seq in 1..20u64 {
+			tokio::time::advance(DEFAULT_LATENCY_MAX / 2).await;
+			let frame = reading.read_frame().await;
+			assert!(
+				matches!(frame, Ok(Some(_))),
+				"a slow prefetch reader must not expire mid-read (step {seq})"
+			);
+			producer.create_group(seq.into()).unwrap().finish().unwrap();
+		}
+	}
+
 	/// Receiving a group is itself a cache access: a subscriber that takes
 	/// delivery just before the group would age out still gets to read it a full
 	/// window later.

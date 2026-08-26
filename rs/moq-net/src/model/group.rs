@@ -508,6 +508,7 @@ impl Producer {
 			track: self.track.clone(),
 			index: 0,
 			prefetch: Prefetch::default(),
+			last_refresh: web_async::time::Instant::now(),
 			// Untagged: a tagged track attaches the egress meter via `with_meter`
 			// when it hands the consumer to a subscriber/fetch.
 			stats: stats::Meter::default(),
@@ -637,6 +638,12 @@ pub struct Consumer {
 	// A batch of completed frames drained ahead under one lock (whole-frame reads only).
 	prefetch: Prefetch,
 
+	// When this consumer last stamped the group's access time. The prefetch bounds
+	// a batch by frame count, not elapsed time, so pops re-stamp on a time bound
+	// (see [`Self::refresh_if_stale`]) or a slow reader could go a full retention
+	// window without an access and be expired mid-read.
+	last_refresh: web_async::time::Instant,
+
 	// Egress payload meter, set by a tagged track via [`Self::with_meter`]. Empty
 	// (no-op) for an untagged group.
 	stats: stats::Meter,
@@ -652,6 +659,7 @@ impl Clone for Consumer {
 			track: self.track.clone(),
 			index: self.index,
 			prefetch: Prefetch::default(),
+			last_refresh: self.last_refresh,
 			// Inherit the meter without re-counting the group: the original already
 			// counted it when the track handed it out.
 			stats: self.stats.clone(),
@@ -694,6 +702,19 @@ impl Consumer {
 		self.track.timescale
 	}
 
+	/// Re-stamp the group's access time from the lock-free prefetch path once half
+	/// the retention window has passed since this consumer last stamped it. The
+	/// batch bounds frames, not elapsed time, so without this a reader pacing
+	/// through a batch could be expired while demonstrably active. Half the window
+	/// keeps the stamp comfortably inside it while staying rare on the hot path.
+	fn refresh_if_stale(&mut self) {
+		if self.last_refresh.elapsed() * 2 < self.track.latency_max {
+			return;
+		}
+		self.state.read().charge.refresh();
+		self.last_refresh = web_async::time::Instant::now();
+	}
+
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where
@@ -719,6 +740,7 @@ impl Consumer {
 		// Their bytes were already counted at the batch fill, so the frame::Consumer
 		// carries no meter.
 		if let Some(frame) = self.prefetch.pop() {
+			self.refresh_if_stale();
 			self.index += 1;
 			let info = frame::Info {
 				size: frame.payload.len() as u64,
@@ -746,6 +768,7 @@ impl Consumer {
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
 		// Fast path: serve from the prefetched batch without locking or allocating a waker.
 		if let Some(frame) = self.prefetch.pop() {
+			self.refresh_if_stale();
 			self.index += 1;
 			return Poll::Ready(Ok(Some(frame)));
 		}
@@ -781,6 +804,10 @@ impl Consumer {
 			Err(state) => return Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
 		}
 
+		// The refill stamped the group under its lock; restart the staleness clock
+		// so the pops that follow don't immediately re-stamp.
+		self.last_refresh = web_async::time::Instant::now();
+
 		// A fresh batch was just filled (empty only on a clean end). Count the whole
 		// batch once here, under no lock, so the drained pops that follow stay free.
 		let (frames, bytes) = self.prefetch.buffered();
@@ -796,6 +823,7 @@ impl Consumer {
 	pub async fn read_frame(&mut self) -> Result<Option<frame::Frame>> {
 		// Serve from the prefetched batch without building a future or allocating a waker.
 		if let Some(frame) = self.prefetch.pop() {
+			self.refresh_if_stale();
 			self.index += 1;
 			return Ok(Some(frame));
 		}
