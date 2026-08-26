@@ -321,9 +321,13 @@ class DecoderTrack {
 						return;
 					}
 
-					// A rewind clears the reference under the frames already in flight, and wait()
-					// throws on an unanchored clock. Paint now and let the next received() anchor it.
-					if (this.paced.peek() && this.sync.out.reference.peek() !== undefined) {
+					if (this.paced.peek()) {
+						// `received()` runs at submit, so a frame is anchored by the time it decodes.
+						// Reaching here unanchored means a rewind reset the clock after this frame's
+						// received(), so it predates the current timeline. Drop it: painting it would
+						// set `timestamp` from the old timeline and late-reject the whole rewind.
+						if (this.sync.out.reference.peek() === undefined) return;
+
 						if (this.frame.peek() === undefined) {
 							// Render something while we wait for the sync to catch up.
 							this.frame.set(frame.clone());
@@ -536,15 +540,17 @@ class DecoderTrack {
 	// Sleep until the clock says to paint this frame, waking early if pacing is turned off or the
 	// run is torn down. Returns false when the frame should be dropped.
 	//
-	// Turning pacing off has to cut parked frames loose, otherwise a deep buffer holds them (and
-	// their GPU memory) until deadlines that no longer apply. Dispose the registration once the race
-	// settles: one that outlives the frame retains an entry per decoded frame for as long as the
-	// track lives, which is unbounded during steady playback.
+	// Turning pacing off has to release parked frames, otherwise a deep buffer holds them (and their
+	// GPU memory) until deadlines that no longer apply. They paint rather than drop: a parked frame
+	// is early, not stale, so it is the freshest picture available the moment pacing stops.
+	//
+	// Dispose the registration once the race settles: one that outlives the frame retains an entry
+	// per decoded frame for as long as the track lives, which is unbounded during steady playback.
 	async #park(timestamp: Time.Milli, effect: Effect): Promise<boolean> {
 		let release: Dispose | undefined;
 		try {
 			const released = new Promise<boolean>((resolve) => {
-				release = this.paced.changed(() => resolve(false));
+				release = this.paced.changed(() => resolve(!this.paced.peek()));
 			});
 			const wait = this.sync.wait(timestamp).then(() => true);
 			return (await Promise.race([wait, released, effect.cancel])) ?? false;

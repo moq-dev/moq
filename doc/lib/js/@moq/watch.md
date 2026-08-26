@@ -71,7 +71,7 @@ a real bundler (the examples below).
 - `muted`: Mute audio (boolean)
 - `volume`: Audio volume (0 to 1, default: 1)
 - `reload`: Wait for (re)announcement before subscribing (default: true). Ignored when the relay does not support broadcast discovery, which subscribes immediately instead of waiting forever.
-- `latency`: Latency target. `"real-time"` (default) derives it from RTT, or a number sets a fixed jitter buffer in ms. Collapses `latency-min` and `latency-max` to one value (minimize latency). `"instant"` drops the clock entirely, see [instant playback](#instant-playback).
+- `latency`: Latency target. `"real-time"` (default) derives it from RTT, or a number sets a fixed jitter buffer in ms. Collapses `latency-min` and `latency-max` to one value (minimize latency). `"instant"` stops pacing off the clock, see [instant playback](#instant-playback).
 - `latency-min`: Latency floor (the jitter/startup buffer). Same units as `latency`; leaves the ceiling untouched.
 - `latency-max`: Latency ceiling. `"real-time"` (default) minimizes latency; a number caps at that many ms. A ceiling above the floor enables [buffered playback](#buffered-playback): build up a buffer from future-dated frames instead of skipping ahead.
 - `catalog-format`: Catalog format. One of `"hang"`, `"hangz"` (the [DEFLATE-compressed](/concept/layer/hang#compression) `catalog.json.z` track), `"msf"` (see [MSF](/concept/standard/msf)), or `"manual"` (supply the catalog yourself). When omitted, the format is auto-detected from the broadcast `name` extension (`.hang` or `.msf`), falling back to `"hang"`. `"hangz"` is opt-in only and never auto-detected (it shares the `.hang` suffix).
@@ -249,9 +249,10 @@ The component exposes everything via its `broadcast` property
 frame that arrives early waits until its timestamp comes up. That's what keeps
 motion smooth, and it costs at least a frame interval.
 
-`latency="instant"` removes the clock instead of shrinking it. Frames paint the
-moment they decode, so latency drops to whatever the display costs (about half a
-refresh interval on average) and the canvas shows the newest frame at every repaint:
+`latency="instant"` stops pacing off the clock instead of shrinking the buffer.
+Frames paint the moment they decode, so latency drops to whatever the display costs
+(about half a refresh interval on average) and the canvas shows the newest frame at
+every repaint:
 
 ```html
 <moq-watch url="https://relay.moq.dev/anon" name="demo/bbb" latency="instant">

@@ -15,8 +15,8 @@ export type Bound = "real-time" | Time.Milli;
  *
  * `"instant"` drops the clock instead of bounding it: video paints the moment it decodes and
  * audio is disabled. It replaces the range rather than sitting inside it, so it is not a
- * {@link Bound} and cannot be used as a floor or ceiling. Detaching video and disabling audio is
- * the owner's job, so {@link Sync} takes the narrower {@link Paced} and never sees it.
+ * {@link Bound} and cannot be used as a floor or ceiling. Not pacing video and disabling audio is
+ * the owner's job, so a {@link Sync} handed this value resolves it to a zero buffer and no more.
  */
 export type Latency = "instant" | Paced;
 
