@@ -175,14 +175,15 @@ function installEncodingHarness(description: Uint8Array) {
 				},
 			} as EncodedAudioChunk;
 
-			this.#output(chunk, {
+			const metadata = {
 				decoderConfig: {
 					codec: "opus",
 					sampleRate: 48_000,
 					numberOfChannels: 1,
 					description: view,
 				},
-			});
+			};
+			queueMicrotask(() => this.#output(chunk, metadata));
 		}
 
 		close(): void {}
