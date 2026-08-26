@@ -74,6 +74,10 @@ url = { version = "2", features = ["serde"] }
 usage = { workspace = true, features = ["completions"] }
 web-transport-trait = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+moq-sock = { workspace = true }
+moq-uring = { workspace = true }
+
 [target.'cfg(unix)'.dependencies]
 sd-notify = "0.5"
 

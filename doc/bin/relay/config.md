@@ -87,6 +87,17 @@ workers = 8
 
 # Pin each worker to a CPU core. Default: true.
 pin = true
+
+# Drive the workers with io_uring instead of tokio. Each worker owns a ring
+# with batched UDP (multishot receive with UDP_GRO, UDP_SEGMENT send),
+# userspace timers, and a local task set; authentication and session
+# supervision stay on the shared runtime. Serves browsers (WebTransport) and
+# native peers (raw QUIC) alike, moq-lite sessions only: moq-transport
+# versions are not offered on this listener. Requires `workers`, Linux 6.12+,
+# and exactly one listen.tls certificate; the certificate is read once at
+# startup (no hot reload yet), and mTLS client roots are not yet honored.
+# Refuses to start anywhere it cannot deliver. Default: false.
+io_uring = false
 ```
 
 The shared runtime is still there for everything that is not QUIC, and it still

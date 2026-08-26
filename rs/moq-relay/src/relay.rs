@@ -80,6 +80,13 @@ pub struct Relay {
 	/// and run. `None` unless `runtime.workers` is configured, in which case
 	/// [`Self::server`] carries no QUIC listener of its own.
 	pub workers: Option<moq_tokio::worker::Workers>,
+
+	/// The io_uring QUIC workers, already bound and waiting for
+	/// [`serve`](crate::uring::Workers::serve). `None` unless both
+	/// `runtime.workers` and `runtime.io_uring` are configured, in which case
+	/// they own the QUIC listen address instead of [`Self::workers`].
+	#[cfg(target_os = "linux")]
+	pub uring: Option<crate::uring::Workers>,
 }
 
 impl Relay {
@@ -98,25 +105,51 @@ impl Relay {
 
 		// Bind the QUIC workers first: they own the listen address when configured,
 		// so the server below must not also try to bind it.
+		let io_uring = config.runtime.io_uring();
+		anyhow::ensure!(
+			!io_uring || config.runtime.workers().is_some(),
+			"runtime.io_uring requires runtime.workers"
+		);
+		#[cfg(not(target_os = "linux"))]
+		anyhow::ensure!(!io_uring, "runtime.io_uring is Linux-only");
+
 		let workers = match config.runtime.workers() {
-			Some(worker) => Some(
+			Some(worker) if !io_uring => Some(
 				moq_tokio::worker::Workers::bind(config.listen.clone(), config.quic.clone(), worker)
 					.context("failed to start the QUIC workers")?,
 			),
-			None => None,
+			_ => None,
+		};
+		#[cfg(target_os = "linux")]
+		let uring = match config.runtime.workers() {
+			Some(worker) if io_uring => Some(
+				crate::uring::Workers::bind(&config.listen, worker)
+					.context("failed to start the io_uring QUIC workers")?,
+			),
+			_ => None,
 		};
 
+		#[cfg(target_os = "linux")]
+		let quic_owned_elsewhere = workers.is_some() || uring.is_some();
+		#[cfg(not(target_os = "linux"))]
+		let quic_owned_elsewhere = workers.is_some();
+
 		#[allow(unused_mut)]
-		let mut server = match &workers {
-			Some(_) => config.listen.clone().init_streams()?,
-			None => config.listen.clone().init(config.quic.clone())?,
+		let mut server = match quic_owned_elsewhere {
+			true => config.listen.clone().init_streams()?,
+			false => config.listen.clone().init(config.quic.clone())?,
 		};
 		let client = config.connect.clone().init(config.quic.clone())?;
 
 		// `None` for a stream-only server (no QUIC); any other error is real.
-		let addr = match &workers {
-			Some(workers) => Some(workers.local_addr()),
-			None => match server.local_addr() {
+		#[cfg(target_os = "linux")]
+		let uring_addr = uring.as_ref().map(crate::uring::Workers::local_addr);
+		#[cfg(not(target_os = "linux"))]
+		let uring_addr: Option<std::net::SocketAddr> = None;
+		let addr = match (&workers, uring_addr) {
+			(Some(workers), _) => Some(workers.local_addr()),
+			(None, Some(addr)) => Some(addr),
+			(None, None) => match server.local_addr() {
 				Ok(addr) => Some(addr),
 				Err(moq_tokio::Error::NoBackend(_)) => None,
 				Err(err) => return Err(err).context("failed to resolve the QUIC bind address"),
@@ -199,6 +232,8 @@ impl Relay {
 			shutdown,
 			shutdown_trigger,
 			workers,
+			#[cfg(target_os = "linux")]
+			uring,
 		})
 	}
 
@@ -217,6 +252,8 @@ impl Relay {
 			shutdown,
 			shutdown_trigger,
 			workers,
+			#[cfg(target_os = "linux")]
+			uring,
 			..
 		} = self;
 
@@ -234,6 +271,31 @@ impl Relay {
 		let jemalloc = moq_tokio::jemalloc::run();
 		#[cfg(not(feature = "jemalloc"))]
 		let jemalloc = std::future::pending::<anyhow::Result<()>>();
+
+		// The io_uring workers own their accept loops outright: serving starts
+		// here, and the group only reports a fatal error back.
+		#[cfg(target_os = "linux")]
+		let mut uring = uring;
+		#[cfg(target_os = "linux")]
+		if let Some(uring) = uring.as_mut() {
+			uring
+				.serve(cluster.clone(), auth.clone(), shutdown.clone())
+				.context("failed to start the io_uring QUIC workers")?;
+		}
+		#[cfg(target_os = "linux")]
+		let uring_serving = uring.is_some();
+		#[cfg(target_os = "linux")]
+		let uring_failed = {
+			let uring = uring.as_mut();
+			async move {
+				match uring {
+					Some(uring) => uring.failed().await,
+					None => std::future::pending().await,
+				}
+			}
+		};
+		#[cfg(not(target_os = "linux"))]
+		let uring_failed = std::future::pending::<anyhow::Error>();
 
 		// Each worker serves from its own thread, so the future built here only
 		// reports the outcome. The group is what owns those threads, so it has to
@@ -265,12 +327,35 @@ impl Relay {
 			}
 		};
 
+		// With the QUIC listener owned by a worker group, the shared server has
+		// only the `tcp`/`unix` stream listeners left, and a config with none
+		// of those has nothing to accept: its loop would report "stopped
+		// accepting" immediately and take the healthy relay down. Pend instead;
+		// the workers are what serve.
+		#[cfg(target_os = "linux")]
+		let quic_on_workers = workers.is_some() || uring_serving;
+		#[cfg(not(target_os = "linux"))]
+		let quic_on_workers = workers.is_some();
+		let serve_shared = {
+			let idle = quic_on_workers && server.accept_health().is_empty();
+			let cluster = cluster.clone();
+			let auth = auth.clone();
+			let shutdown = shutdown.clone();
+			async move {
+				match idle {
+					true => std::future::pending().await,
+					false => serve(server, cluster, auth, shutdown).await,
+				}
+			}
+		};
+
 		let result = tokio::select! {
 			Err(err) = started.run() => Err(err).context("cluster failed"),
 			Err(err) = web.run() => Err(err).context("web server failed"),
 			Err(err) = internal.run() => Err(err).context("internal server failed"),
-			Err(err) = serve(server, cluster.clone(), auth.clone(), shutdown.clone()) => Err(err).context("server failed"),
+			Err(err) = serve_shared => Err(err).context("server failed"),
 			Err(err) = quic_workers => Err(err).context("QUIC workers failed"),
+			err = uring_failed => Err(err).context("io_uring QUIC workers failed"),
 			Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
 			res = drain_on_signal(shutdown_trigger, shutdown.drain_timeout) => res,
 			else => Ok(()),
@@ -280,6 +365,10 @@ impl Relay {
 		// executor thread this future happens to be running on.
 		if let Some(workers) = workers {
 			workers.shutdown().await;
+		}
+		#[cfg(target_os = "linux")]
+		if let Some(uring) = uring {
+			uring.shutdown().await;
 		}
 
 		result

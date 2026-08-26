@@ -78,61 +78,14 @@ impl Connection {
 			}
 		};
 
-		let publish = self.cluster.publisher(&token);
-		let subscribe = self.cluster.subscriber(&token);
 		let transport = self.request.transport();
-
-		// The client advertises which direction it intends to use (moq-lite-05 SETUP).
-		// A bidirectional connection (e.g. a cluster peer) advertises nothing, so the
-		// only requirement is that the token grants *something*. But a gateway that only
-		// publishes or only subscribes says so, and a token missing that direction's
-		// scope is rejected here during the handshake, instead of being accepted and
-		// then silently carrying no media (the bug that motivated the role hint).
 		let role = self.request.role();
-		let authorized = match role {
-			Some(moq_net::Role::Publisher) => publish.is_some(),
-			Some(moq_net::Role::Subscriber) => subscribe.is_some(),
-			// Bidirectional or an unrecognized future role: require the token to grant
-			// something, and let the per-direction checks apply once it's used.
-			None | Some(_) => publish.is_some() || subscribe.is_some(),
-		};
-		if !authorized {
-			let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
-			let wanted = role.map_or("any", moq_net::Role::as_str);
-			anyhow::bail!("token does not grant {wanted} access to {}", token.root);
-		}
-
-		match (&publish, &subscribe) {
-			(Some(publish), Some(subscribe)) => {
-				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), "session accepted");
+		let grants = match authorize(&self.cluster, &token, role, &transport) {
+			Ok(grants) => grants,
+			Err(err) => {
+				let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
+				return Err(err);
 			}
-			(Some(publish), None) => {
-				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), "publisher accepted");
-			}
-			(None, Some(subscribe)) => {
-				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, subscribe = %subscribe.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), "subscriber accepted");
-			}
-			_ => unreachable!("authorized above guarantees at least one origin"),
-		}
-
-		// Build this session's stats context under its billing tier and auth root.
-		// The context carries the presence gauge (a client that merely connects to
-		// e.g. `/acme` is counted, even idle) and drives the model-layer counters
-		// once it tags the session's origin pair below. It closes when the last
-		// clone drops (the connection ends).
-		let stats = self.cluster.stats.tier(token.tier.clone()).session(&token.root);
-
-		// Wire only the direction(s) the client will actually use. The token scope
-		// (enforced above) caps what it *may* do; the role caps what it *will* do.
-		// Pruning the unused half means moq-net feeds that side a no-op origin, so a
-		// publish-only ingest isn't announced every cluster broadcast it would ignore,
-		// and a subscribe-only egress issues no announce-interest. A bidirectional
-		// client (and any transport that carries no role) keeps whatever the token grants.
-		let (publish, subscribe) = match role {
-			Some(moq_net::Role::Publisher) => (publish, None),
-			Some(moq_net::Role::Subscriber) => (None, subscribe),
-			// Bidirectional or an unrecognized future role: keep whatever the token grants.
-			None | Some(_) => (publish, subscribe),
 		};
 
 		// Accept the connection.
@@ -142,11 +95,11 @@ impl Connection {
 		//
 		// moq-net defaults the unset side to a fresh no-op origin, which is fine for a
 		// publish-only or subscribe-only session.
-		let mut request = self.request.with_stats(stats);
-		if let Some(subscribe) = subscribe {
+		let mut request = self.request.with_stats(grants.stats);
+		if let Some(subscribe) = grants.subscribe {
 			request = request.with_publisher(&subscribe);
 		}
-		if let Some(publish) = publish {
+		if let Some(publish) = grants.publish {
 			request = request.with_subscriber(publish);
 		}
 		let session = request.ok().await?;
@@ -154,28 +107,7 @@ impl Connection {
 
 		tracing::info!(version = %session.version(), %transport, "negotiated");
 
-		// The credential (JWT `exp` or client cert `notAfter`) is only checked at
-		// connect time, so hold the session open no longer than the credential is
-		// valid. Without any bound, wait for the session to close. Either way, a
-		// relay shutdown drains the session with a GOAWAY instead of cutting it off.
-		let mut shutdown = self.shutdown.clone();
-
-		tokio::select! {
-			err = session.closed() => Err(err.into()),
-			reason = self.auth.expired(&token) => {
-				tracing::info!(%reason, "credential no longer valid, closing session");
-				session.abort(moq_net::Error::Unauthorized);
-				Ok(())
-			}
-			_ = shutdown.started() => {
-				tracing::info!("relay shutting down; draining session");
-				// Empty URI: "reconnect to me" (the relay is restarting). The session
-				// driver was spawned by `request.ok()`, so the GOAWAY still reaches
-				// the wire while we wait here.
-				shutdown.drain_session(&session).await;
-				Ok(())
-			}
-		}
+		supervise(&self.auth, session, token, self.shutdown.clone()).await
 	}
 
 	/// Resolve an [`AuthToken`] for this connection. Any failure is returned as a
@@ -220,5 +152,120 @@ impl Connection {
 		params.transport = Some(transport);
 
 		Ok(self.auth.verify(&params).await?)
+	}
+}
+
+/// What an authorized session may serve: the token-scoped origin pair, pruned
+/// to the advertised role, plus its stats context.
+pub(crate) struct Grants {
+	/// What the client may subscribe to (we publish it).
+	pub(crate) publish: Option<moq_net::origin::Producer>,
+	/// What the client may publish (we subscribe to it).
+	pub(crate) subscribe: Option<moq_net::origin::Producer>,
+	/// The session's billing/attribution context.
+	pub(crate) stats: moq_net::stats::Session,
+}
+
+/// Authorize an authenticated session and resolve what it may serve, however
+/// its transport is driven (the shared runtime or a QUIC worker).
+///
+/// The client advertises which direction it intends to use (moq-lite-05
+/// SETUP). A bidirectional connection (e.g. a cluster peer) advertises
+/// nothing, so the only requirement is that the token grants *something*. But
+/// a gateway that only publishes or only subscribes says so, and a token
+/// missing that direction's scope is rejected here during the handshake,
+/// instead of being accepted and then silently carrying no media (the bug
+/// that motivated the role hint).
+pub(crate) fn authorize(
+	cluster: &Cluster,
+	token: &AuthToken,
+	role: Option<moq_net::Role>,
+	transport: &dyn std::fmt::Display,
+) -> anyhow::Result<Grants> {
+	let publish = cluster.publisher(token);
+	let subscribe = cluster.subscriber(token);
+
+	let authorized = match role {
+		Some(moq_net::Role::Publisher) => publish.is_some(),
+		Some(moq_net::Role::Subscriber) => subscribe.is_some(),
+		// Bidirectional or an unrecognized future role: require the token to grant
+		// something, and let the per-direction checks apply once it's used.
+		None | Some(_) => publish.is_some() || subscribe.is_some(),
+	};
+	if !authorized {
+		let wanted = role.map_or("any", moq_net::Role::as_str);
+		anyhow::bail!("token does not grant {wanted} access to {}", token.root);
+	}
+
+	match (&publish, &subscribe) {
+		(Some(publish), Some(subscribe)) => {
+			tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), "session accepted");
+		}
+		(Some(publish), None) => {
+			tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), "publisher accepted");
+		}
+		(None, Some(subscribe)) => {
+			tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, subscribe = %subscribe.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), "subscriber accepted");
+		}
+		_ => unreachable!("authorized above guarantees at least one origin"),
+	}
+
+	// Build this session's stats context under its billing tier and auth root.
+	// The context carries the presence gauge (a client that merely connects to
+	// e.g. `/acme` is counted, even idle) and drives the model-layer counters
+	// once it tags the session's origin pair. It closes when the last clone
+	// drops (the connection ends).
+	let stats = cluster.stats.tier(token.tier.clone()).session(&token.root);
+
+	// Wire only the direction(s) the client will actually use. The token scope
+	// (enforced above) caps what it *may* do; the role caps what it *will* do.
+	// Pruning the unused half means moq-net feeds that side a no-op origin, so a
+	// publish-only ingest isn't announced every cluster broadcast it would ignore,
+	// and a subscribe-only egress issues no announce-interest. A bidirectional
+	// client (and any transport that carries no role) keeps whatever the token grants.
+	let (publish, subscribe) = match role {
+		Some(moq_net::Role::Publisher) => (publish, None),
+		Some(moq_net::Role::Subscriber) => (None, subscribe),
+		// Bidirectional or an unrecognized future role: keep whatever the token grants.
+		None | Some(_) => (publish, subscribe),
+	};
+
+	Ok(Grants {
+		publish,
+		subscribe,
+		stats,
+	})
+}
+
+/// Hold an accepted session open for as long as it is allowed to run.
+///
+/// The credential (JWT `exp` or client cert `notAfter`) is only checked at
+/// connect time, so hold the session open no longer than the credential is
+/// valid. Without any bound, wait for the session to close. Either way, a
+/// relay shutdown drains the session with a GOAWAY instead of cutting it off.
+///
+/// The session handle is `Send + Sync` whatever transport carries it, so this
+/// runs on the shared runtime even for sessions a pinned QUIC worker drives.
+pub(crate) async fn supervise(
+	auth: &Auth,
+	session: moq_net::Session,
+	token: AuthToken,
+	mut shutdown: crate::Shutdown,
+) -> anyhow::Result<()> {
+	tokio::select! {
+		err = session.closed() => Err(err.into()),
+		reason = auth.expired(&token) => {
+			tracing::info!(%reason, "credential no longer valid, closing session");
+			session.abort(moq_net::Error::Unauthorized);
+			Ok(())
+		}
+		_ = shutdown.started() => {
+			tracing::info!("relay shutting down; draining session");
+			// Empty URI: "reconnect to me" (the relay is restarting). The session's
+			// machine runs on its own, so the GOAWAY still reaches the wire while
+			// we wait here.
+			shutdown.drain_session(&session).await;
+			Ok(())
+		}
 	}
 }

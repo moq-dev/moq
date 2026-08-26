@@ -402,6 +402,7 @@ depth = 2
 		let _env = EnvGuard::clear(&[
 			"MOQ_RUNTIME_WORKERS",
 			"MOQ_RUNTIME_PIN",
+			"MOQ_RUNTIME_IO_URING",
 			"MOQ_WEB_WS",
 			"MOQ_CONNECT_WEBSOCKET_ENABLED",
 		]);
@@ -410,6 +411,7 @@ depth = 2
 [runtime]
 workers = 8
 pin = false
+io_uring = false
 
 [web]
 ws = false
@@ -432,6 +434,11 @@ enabled = false
 			"TOML's runtime.pin=false must survive the CLI re-parse \
 			 (a bare bool with a `true` default reads as empty and is refilled; \
 			 type it as Option<bool>)"
+		);
+		assert_eq!(
+			config.runtime.io_uring,
+			Some(false),
+			"TOML's runtime.io_uring=false must survive the CLI re-parse"
 		);
 		assert_eq!(
 			config.web.ws,
