@@ -1,3 +1,4 @@
+import { ProtocolViolation } from "../error.ts";
 import { MAX_HOPS, type Origin, OriginSchema, UNKNOWN_ORIGIN } from "../hop.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
@@ -59,11 +60,14 @@ export type AnnounceBroadcast =
 
 // Both wire rules on a hop chain, applied to what we send and to what we receive: a
 // chain that revisits a hop looped, so neither forwarding it nor subscribing through it
-// is safe, and a receiver must close the stream over one. `UNKNOWN_ORIGIN` identifies
+// is safe, and a receiver must end the session over one. `UNKNOWN_ORIGIN` identifies
 // nothing, so any number of hops may be unknown.
+//
+// `ProtocolViolation` so a receipt takes the session down rather than the one stream,
+// matching what `ietf/cluster.ts` throws for the identical rule.
 function checkHops(hops: Origin[]) {
 	if (hops.length > MAX_HOPS) {
-		throw new Error(`hop count ${hops.length} exceeds maximum ${MAX_HOPS}`);
+		throw new ProtocolViolation(`hop count ${hops.length} exceeds maximum ${MAX_HOPS}`);
 	}
 
 	// MAX_HOPS is 32, so the quadratic scan is cheaper than allocating a set.
@@ -71,7 +75,7 @@ function checkHops(hops: Origin[]) {
 		const hop = hops[i];
 		if (hop === UNKNOWN_ORIGIN) continue;
 		if (hops.indexOf(hop, i + 1) !== -1) {
-			throw new Error(`hop ${hop} appears twice in the chain`);
+			throw new ProtocolViolation(`hop ${hop} appears twice in the chain`);
 		}
 	}
 }
