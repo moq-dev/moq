@@ -1325,9 +1325,9 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "combine"
-version = "4.6.7"
+version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
+checksum = "cfc320937d09e6de266b31b9afb480f197d7a861be86be7cb2ea7e5d1bfffc5e"
 dependencies = [
  "bytes",
  "memchr",
@@ -2592,9 +2592,9 @@ dependencies = [
 
 [[package]]
 name = "foundations"
-version = "5.9.1"
+version = "5.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12a62fa20c0203e73a20912b2dacf0513133351c0486e12e4504be0008584ae7"
+checksum = "63c94754c2c267c4e83ec098155a5089ccf184a5283ec00a41e9965403086222"
 dependencies = [
  "anyhow",
  "cf-rustracing",
@@ -2632,9 +2632,9 @@ dependencies = [
 
 [[package]]
 name = "foundations-macros"
-version = "5.9.1"
+version = "5.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9fd77b60b7eeca55a566489846ff8454889fea71859e56249e9010f8d900f10c"
+checksum = "4cd787b0e7b65745b36dd8ba0a5a562fc30df4356c7d864e7bcb0da663b3e614"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -3182,7 +3182,7 @@ dependencies = [
 
 [[package]]
 name = "hang"
-version = "0.20.6"
+version = "0.20.7"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3836,9 +3836,9 @@ dependencies = [
 
 [[package]]
 name = "iroh"
-version = "1.0.3"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "460de6bc52163b41b1646931f2897e5ab986f0966ade444467fec25024751a72"
+checksum = "329552fad4e46b5ccb4439d5635216f6289eec2c46f3fde4bc732d762694b9e5"
 dependencies = [
  "backon",
  "blake3",
@@ -3887,9 +3887,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-base"
-version = "1.0.3"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6be73e16ee21c923aca9b3121aaa0db936f7c7ecc156ff47b8dac944c68d59a8"
+checksum = "3ccf4cde68a02ef03c0095ab2c031c6adfe508f3bc8e7c258558a027ebe64a8e"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -3906,9 +3906,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-dns"
-version = "1.0.3"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46f6a9b39d18e6345f5c151afd299f2488e2cb5c520fe41b107b6bd3dc4c3349"
+checksum = "9a41224eb0140a5c519935d4073fc6b236d174080be401f9bf7da126b2ee3aa4"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -3957,9 +3957,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-relay"
-version = "1.0.3"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24bd586cf927f7b700f56ec3639b53cb5fa901ce284784051ff71092bfbf8193"
+checksum = "1b5f6f07e2c9b0c4bc82e2864be09f4aea4320165d5316e668616dbc822f428a"
 dependencies = [
  "blake3",
  "bytes",
@@ -4359,7 +4359,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4631,7 +4631,7 @@ dependencies = [
 
 [[package]]
 name = "moq-audio"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "block2 0.6.2",
  "bytes",
@@ -4680,7 +4680,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.4.10"
+version = "0.4.11"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -4700,7 +4700,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.9.13"
+version = "0.9.14"
 dependencies = [
  "anyhow",
  "axum",
@@ -4731,7 +4731,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "bytes",
  "getrandom 0.4.3",
@@ -4784,7 +4784,7 @@ dependencies = [
 
 [[package]]
 name = "moq-hls"
-version = "0.4.10"
+version = "0.4.11"
 dependencies = [
  "anyhow",
  "axum",
@@ -4807,7 +4807,7 @@ dependencies = [
 
 [[package]]
 name = "moq-json"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "bytes",
  "criterion",
@@ -4824,7 +4824,7 @@ dependencies = [
 
 [[package]]
 name = "moq-loc"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bytes",
  "moq-net",
@@ -4842,7 +4842,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4874,7 +4874,7 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.19.13"
+version = "0.19.14"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4928,7 +4928,7 @@ dependencies = [
 
 [[package]]
 name = "moq-net"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "bytes",
  "criterion",
@@ -5003,7 +5003,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtc"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -5023,7 +5023,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtmp"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -5047,7 +5047,7 @@ dependencies = [
 
 [[package]]
 name = "moq-srt"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5106,7 +5106,7 @@ dependencies = [
 
 [[package]]
 name = "moq-transcode"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5140,7 +5140,7 @@ dependencies = [
 
 [[package]]
 name = "moq-video"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -5421,6 +5421,33 @@ dependencies = [
 
 [[package]]
 name = "netdev"
+version = "0.45.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "569dfbdd2efd771b24ec9bb57f956e04d4fbfc72f62b2f11961723f9b3f4b020"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "dlopen2",
+ "ipnet",
+ "jni 0.21.1",
+ "libc",
+ "mac-addr",
+ "ndk-context",
+ "netlink-packet-core",
+ "netlink-packet-route",
+ "netlink-sys",
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-core-wlan",
+ "objc2-foundation 0.3.2",
+ "objc2-system-configuration",
+ "once_cell",
+ "plist",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "netdev"
 version = "0.46.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a5f88621a4b468e8ce92626f847cc02462cef3e06d793baa8b1c8617e304b20"
@@ -5494,9 +5521,9 @@ dependencies = [
 
 [[package]]
 name = "netwatch"
-version = "0.19.2"
+version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9554f614feba706ae804dfa9a50f04ae5998a161b3680c7d318a412330ccab87"
+checksum = "39da9cad5f23aa43401f09497d3b280e51b5feba115d9ffbf38ca35d6ff95e96"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -5508,7 +5535,8 @@ dependencies = [
  "n0-error",
  "n0-future",
  "n0-watcher",
- "netdev",
+ "netdev 0.45.0",
+ "netdev 0.46.1",
  "netlink-packet-core",
  "netlink-packet-route",
  "netlink-proto",
@@ -5713,7 +5741,7 @@ dependencies = [
  "num-integer",
  "num-iter",
  "num-traits",
- "rand 0.8.7",
+ "rand 0.8.8",
  "smallvec",
  "zeroize",
 ]
@@ -6068,6 +6096,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-core-wlan"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c71e34919aba0d701380d911702455038a8a3587467fe0141d6a71501e7ffe48"
+dependencies = [
+ "bitflags 2.13.1",
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "objc2-security",
+ "objc2-security-foundation",
+]
+
+[[package]]
 name = "objc2-encode"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6236,6 +6278,16 @@ dependencies = [
  "bitflags 2.13.1",
  "objc2 0.6.4",
  "objc2-core-foundation",
+]
+
+[[package]]
+name = "objc2-security-foundation"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef76382e9cedd18123099f17638715cc3d81dba3637d4c0d39ab69df2ef345a5"
+dependencies = [
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]
@@ -6869,9 +6921,9 @@ dependencies = [
 
 [[package]]
 name = "portmapper"
-version = "0.19.2"
+version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "daed0c299f997c4b929f5c111e69bb58401376e525d8ef2c07cadfe25282fd71"
+checksum = "ca97242f016e090a25330613bc2382aab65eb22f9149dbe84d8f8e711d49a530"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -7081,6 +7133,7 @@ dependencies = [
  "memchr",
  "parking_lot",
  "procfs 0.17.0",
+ "protobuf",
  "thiserror 2.0.20",
 ]
 
@@ -7156,6 +7209,26 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "protobuf"
+version = "3.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d65a1d4ddae7d8b5de68153b48f6aa3bba8cb002b243dbdbc55a5afbc98f99f4"
+dependencies = [
+ "once_cell",
+ "protobuf-support",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "protobuf-support"
+version = "3.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e36c2f31e0a47f9280fb347ef5e461ffcd2c52dd520d8e216b52f93b0b0d7d6"
+dependencies = [
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -7337,9 +7410,9 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
-version = "0.8.7"
+version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
+checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -8415,9 +8488,9 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "simple-dns"
-version = "0.11.3"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a75cbde1bf934313596a004973e462f9a82caa814dcf1a5f507bdf51597eeb4"
+checksum = "2b6f884fa9a8d48101774bfbd3aeb81e968dd22cffd19a372da69f183db22c1a"
 dependencies = [
  "bitflags 2.13.1",
 ]
@@ -8758,7 +8831,7 @@ dependencies = [
  "keyed_priority_queue",
  "log",
  "pbkdf2",
- "rand 0.8.7",
+ "rand 0.8.8",
  "regex",
  "sha-1",
  "streaming-stats",
@@ -8776,7 +8849,7 @@ dependencies = [
  "bytes",
  "futures",
  "log",
- "rand 0.8.7",
+ "rand 0.8.8",
  "socket2 0.5.10",
  "srt-protocol",
  "tokio",
@@ -10061,9 +10134,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.25.0"
+version = "1.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f053576934f05a761a402421fbbe3d425d9366f75f978806a037b3ca481abecc"
+checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",

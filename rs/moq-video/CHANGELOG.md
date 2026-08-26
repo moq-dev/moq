@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.20](https://github.com/moq-dev/moq/compare/moq-video-v0.0.19...moq-video-v0.0.20) - 2026-08-26
+
+### Added
+
+- *(moq-gst)* select media container for sink pads ([#2997](https://github.com/moq-dev/moq/pull/2997))
+
+### Fixed
+
+- *(video)* warn when Auto selects software encoding ([#3054](https://github.com/moq-dev/moq/pull/3054))
+
 ## [0.0.19](https://github.com/moq-dev/moq/compare/moq-video-v0.0.18...moq-video-v0.0.19) - 2026-08-24
 
 ### Added

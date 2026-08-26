@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.15](https://github.com/moq-dev/moq/compare/moq-net-v0.2.14...moq-net-v0.2.15) - 2026-08-26
+
+### Fixed
+
+- *(net)* track lite announces the peer sent, not the ones we kept ([#3065](https://github.com/moq-dev/moq/pull/3065))
+- *(net)* count reads as cache accesses for eviction and expiry ([#3062](https://github.com/moq-dev/moq/pull/3062))
+- *(net)* scope what an assigned identity actually suppresses ([#3057](https://github.com/moq-dev/moq/pull/3057))
+- *(net)* assign anonymous server peers an origin ([#3042](https://github.com/moq-dev/moq/pull/3042))
+- *(net)* restore dynamic routing APIs ([#3038](https://github.com/moq-dev/moq/pull/3038))
+- *(net)* deprecate unsupported dynamic routing ([#3029](https://github.com/moq-dev/moq/pull/3029))
+
 ## [0.2.14](https://github.com/moq-dev/moq/compare/moq-net-v0.2.13...moq-net-v0.2.14) - 2026-08-24
 
 ### Added
