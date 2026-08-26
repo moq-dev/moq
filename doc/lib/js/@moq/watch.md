@@ -252,8 +252,8 @@ The component exposes everything via its `broadcast` property
 frame that arrives early waits until its timestamp comes up. That's what keeps
 motion smooth, and it costs at least a frame interval.
 
-`latency="instant"` stops pacing off the clock instead of shrinking the buffer.
-Frames paint the moment they decode, so latency drops to whatever the display costs
+`latency="instant"` empties the buffer and stops pacing off the clock, rather than
+just shrinking the buffer. Frames paint the moment they decode, so latency drops to whatever the display costs
 (about half a refresh interval on average) and the canvas shows the newest frame at
 every repaint:
 
@@ -276,13 +276,18 @@ This disables audio. The audio ring needs a target depth to avoid underrunning,
 and unsynced video has nothing pulling it back toward the audio clock, so the two
 would drift apart.
 
-The clock itself keeps running: video still reports every frame it receives and
-still resets it on a rewind. Only the wait is skipped. That keeps anything else
-reading the clock working, and it means switching back to a paced latency resumes
-from a current reference instead of a stale one.
+Note that `latency-min="0"` is not the same thing, and neither half of this is
+redundant. A zero floor still holds the selected rendition's own delay, a frame
+interval at 60fps, and it still sleeps, because the wait comes from the playback
+anchor rather than the buffer. `"instant"` drops both.
 
-Captions are one such reader, so they keep working, trailing the picture by roughly
-the jitter buffer.
+The clock itself keeps running: video still reports every frame it receives and
+still resets it on a rewind. That keeps anything else reading the clock working, and
+it means switching back to a paced latency resumes from a current reference instead
+of a stale one.
+
+Captions are one such reader, so they keep working. With nothing buffered they track
+the picture directly rather than trailing it.
 
 ## UI Overlay
 
