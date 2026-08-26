@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { ProtocolViolation } from "../error.ts";
 import { OriginSchema } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
@@ -135,7 +136,7 @@ test("a hop chain that revisits a hop is refused in both directions", async () =
 	const eight = OriginSchema.parse(8n);
 	const looped: AnnounceBroadcast = { status: "active", suffix: Path.from("room"), hops: [four, eight, four] };
 
-	// Outbound: refused before it reaches the wire. A receiver must close the stream over
+	// Outbound: refused before it reaches the wire. A receiver must close the session over
 	// a repeated Hop ID, so sending one costs someone else their session.
 	await expect(bytes((w) => encodeAnnounceBroadcast(w, looped, Version.DRAFT_06))).rejects.toThrow("appears twice");
 
@@ -152,6 +153,12 @@ test("a hop chain that revisits a hop is refused in both directions", async () =
 	expect(nine).toBeGreaterThan(0);
 	forged[nine] = 4;
 
+	// The type carries the consequence, not just the text: the subscriber's dispatch closes
+	// the session on `instanceof ProtocolViolation`, so a plain Error here would reset the
+	// stream and leave a nonconforming peer free to repeat itself.
+	await expect(decodeAnnounceBroadcast(new Reader(undefined, forged), Version.DRAFT_06)).rejects.toThrow(
+		ProtocolViolation,
+	);
 	await expect(decodeAnnounceBroadcast(new Reader(undefined, forged), Version.DRAFT_06)).rejects.toThrow(
 		"appears twice",
 	);
