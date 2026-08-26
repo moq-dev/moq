@@ -43,7 +43,6 @@ android-logcat = ["dep:tracing-android"]
 
 [dependencies]
 bytes = "1"
-core_affinity = "0.8"
 # Family-restricted `getaddrinfo`, so the AAAA and A queries can be issued separately
 # (RFC 8305 section 3) while still going through the system resolver.
 dns-lookup = { version = "3", optional = true }
@@ -54,6 +53,7 @@ humantime = "2.3"
 mdns-sd = { workspace = true, optional = true }
 
 moq-net = { workspace = true }
+moq-sock = { workspace = true }
 # iroh runs on noq but re-exports only the ControllerFactory trait, not the concrete
 # congestion configs. Version matched to the copy iroh pulls in.
 noq-proto = { version = "1", default-features = false, optional = true }
@@ -73,7 +73,6 @@ rustls-webpki = { version = "0.103", features = ["aws-lc-rs"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_with = { version = "3", features = ["hex"] }
 sha2 = { workspace = true, optional = true }
-socket2 = { version = "0.6", features = ["all"] }
 subtle = { workspace = true, optional = true }
 thiserror = "2"
 tikv-jemalloc-ctl = { version = "0.6", optional = true }

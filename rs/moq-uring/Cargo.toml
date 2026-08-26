@@ -21,6 +21,7 @@ io-uring = { workspace = true }
 kio = { workspace = true }
 libc = { workspace = true }
 moq-net = { workspace = true }
+moq-sock = { workspace = true }
 quiche = "0.29"
 rand = "0.10"
 slab = "0.4"

@@ -21,6 +21,7 @@ members = [
     "rs/moq-relay",
     "rs/moq-rtc",
     "rs/moq-rtmp",
+    "rs/moq-sock",
     "rs/moq-srt",
     "rs/moq-stats",
     "rs/moq-token",
@@ -53,6 +54,7 @@ default-members = [
     "rs/moq-relay",
     "rs/moq-rtc",
     "rs/moq-rtmp",
+    "rs/moq-sock",
     "rs/moq-srt",
     "rs/moq-stats",
     "rs/moq-token",
@@ -107,6 +109,7 @@ moq-net = { version = "0.2.14", path = "rs/moq-net" }
 moq-nvenc = { version = "0.0.3", path = "rs/moq-nvenc" }
 moq-rtc = { version = "0.2.5", path = "rs/moq-rtc" }
 moq-rtmp = { version = "0.2.5", path = "rs/moq-rtmp" }
+moq-sock = { version = "0.1.0", path = "rs/moq-sock" }
 moq-srt = { version = "0.2.5", path = "rs/moq-srt" }
 moq-stats = { version = "0.1.6", path = "rs/moq-stats" }
 moq-token = { version = "0.7.2", path = "rs/moq-token" }

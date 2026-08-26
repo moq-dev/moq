@@ -577,7 +577,7 @@ impl QuinnServer {
 			endpoint_config.cid_generator(move || Box::new(ServerIdGenerator::new(server_id.clone(), nonce_len)));
 		}
 
-		let socket = crate::steer::bind(listen, shard).map_err(Error::BindSocket)?;
+		let socket = moq_sock::shard::bind(listen, shard).map_err(Error::BindSocket)?;
 
 		// Create the generic QUIC endpoint.
 		let quic = quinn::Endpoint::new(endpoint_config, Some(tls), socket, runtime).map_err(Error::CreateEndpoint)?;
@@ -698,7 +698,7 @@ impl quinn::ConnectionIdGenerator for ShardIdGenerator {
 	fn generate_cid(&mut self) -> quinn::ConnectionId {
 		use rand::RngExt;
 		let mut cid = Vec::with_capacity(Self::LEN);
-		cid.push(crate::steer::cid_prefix(self.shard));
+		cid.push(moq_sock::shard::cid_prefix(self.shard));
 		cid.extend(rand::rng().random_iter::<u8>().take(Self::LEN - 1));
 		quinn::ConnectionId::new(&cid)
 	}

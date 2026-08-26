@@ -28,6 +28,10 @@ the UDP sockets bound through it.
   transport traits and the worker's `Handle` implements `moq_net::Runtime`,
   so `connect_lite`/`accept_lite` run moq-lite sessions on the worker. Raw
   QUIC only: the ALPN carries the application protocol, no HTTP/3 layer yet.
+- **Steering**: an endpoint whose socket sits in a `moq-sock` steered
+  `SO_REUSEPORT` group sets `endpoint::Config::shard`, and every issued
+  connection id leads with the group's steering byte, so the kernel keeps a
+  connection (and a cluster dial's responses) on the worker that owns it.
 
 Requires **Linux 6.12**; `Worker::new` refuses older kernels with a legible
 error rather than degrading (note that default container seccomp policies
@@ -41,8 +45,10 @@ over the worker: handshake, half a megabyte each way, timers driven by
 quiche's own timeout. `tests/session.rs` runs full moq-lite sessions through
 `quic::Endpoint` (including two clients demuxed on one server socket), and
 `tests/endpoint.rs` covers the endpoint mechanics (dial+accept on one socket,
-version negotiation, the dial-only refusal). All of them skip (loudly) below
-the kernel floor, which includes GitHub-hosted CI runners.
+version negotiation, the dial-only refusal), and `tests/workers.rs` runs a
+steered two-worker reuseport group serving one port across threads. All of
+them skip (loudly) below the kernel floor, which includes GitHub-hosted CI
+runners.
 
 ## Benchmarks
 

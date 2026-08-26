@@ -5024,6 +5024,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-sock"
+version = "0.1.0"
+dependencies = [
+ "core_affinity",
+ "libc",
+ "rand 0.10.2",
+ "socket2 0.6.5",
+ "tracing",
+ "tracing-test",
+]
+
+[[package]]
 name = "moq-srt"
 version = "0.2.5"
 dependencies = [
@@ -5091,7 +5103,6 @@ dependencies = [
  "anyhow",
  "bytes",
  "chrono",
- "core_affinity",
  "dns-lookup",
  "flume",
  "futures",
@@ -5102,6 +5113,7 @@ dependencies = [
  "libc",
  "mdns-sd",
  "moq-net",
+ "moq-sock",
  "noq-proto",
  "notify",
  "parking_lot",
@@ -5117,7 +5129,6 @@ dependencies = [
  "serde",
  "serde_with",
  "sha2",
- "socket2 0.6.5",
  "subtle",
  "tempfile",
  "thiserror 2.0.20",
@@ -5173,6 +5184,7 @@ dependencies = [
  "kio",
  "libc",
  "moq-net",
+ "moq-sock",
  "nix",
  "noq-udp",
  "quiche",

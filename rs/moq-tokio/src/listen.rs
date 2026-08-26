@@ -142,38 +142,12 @@ pub struct Config {
 
 /// One server's slot in a group of sockets sharing a port via `SO_REUSEPORT`.
 ///
-/// Every member binds the same address and the kernel spreads inbound datagrams
-/// across the group, so N servers on N threads can serve one port without a
-/// shared socket between them.
-///
-/// Crate-private on purpose. The kernel identifies a member by its *position*,
-/// so a shard is only meaningful as part of a group that was bound once, in
-/// index order, and is never resized. [`crate::worker::Workers`] is what holds
-/// that invariant; a shard a caller could mint, clone, or bind twice would break
-/// steering with no error to show for it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Shard {
-	index: u16,
-	count: u16,
-}
-
-impl Shard {
-	/// Slot `index` of a group of `count` sockets, or `None` if that slot does not
-	/// exist (`count` of zero, or an `index` at or past the end).
-	pub(crate) fn new(index: u16, count: u16) -> Option<Self> {
-		(index < count).then_some(Self { index, count })
-	}
-
-	/// This member's position in the group, from zero.
-	pub(crate) fn index(self) -> u16 {
-		self.index
-	}
-
-	/// How many sockets share the port.
-	pub(crate) fn count(self) -> u16 {
-		self.count
-	}
-}
+/// Crate-private on purpose: a shard is only meaningful inside a group that was
+/// bound once, in index order, and is never resized, and
+/// [`crate::worker::Workers`] is what holds that invariant here. A shard a
+/// caller could mint, clone, or bind twice would break steering with no error
+/// to show for it.
+pub(crate) use moq_sock::shard::Shard;
 
 /// The `--server-*` flags from before the accept side was named `listen`.
 ///
@@ -423,15 +397,6 @@ mod tests {
 
 		let config = config_from(["test", "--listen-quic-lb-id", "ab", "--listen-quic-lb-nonce", "8"]);
 		assert!(config.validate().is_ok());
-	}
-
-	/// A slot has to exist in the group it names.
-	#[test]
-	fn shard_slots_are_bounded() {
-		assert_eq!(Shard::new(0, 1).map(|shard| shard.count()), Some(1));
-		assert_eq!(Shard::new(3, 4).map(|shard| shard.index()), Some(3));
-		assert!(Shard::new(4, 4).is_none());
-		assert!(Shard::new(0, 0).is_none());
 	}
 
 	/// A stream-only server opens no QUIC listener even with a bind configured,

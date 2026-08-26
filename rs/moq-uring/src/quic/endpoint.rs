@@ -12,6 +12,13 @@
 //! parsed at all. Ids rotate as peers consume them (`NEW_CONNECTION_ID`), so
 //! a migrating client stays routable; an Initial for an unsupported version
 //! gets a version negotiation packet back.
+//!
+//! An endpoint whose socket is a member of a steered `SO_REUSEPORT` group
+//! (one worker per core on one port) sets [`Config::shard`], and every id it
+//! issues then carries the [`moq_sock::shard::cid_prefix`] steering byte, so
+//! the kernel keeps delivering a connection's packets to the worker that owns
+//! it. Dials through the endpoint carry it too, which is what steers a
+//! cluster peer's responses back to the dialing worker.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -42,6 +49,15 @@ pub struct Config {
 	/// peer retransmits and lands once the application drains the backlog or
 	/// a handshake fails.
 	pub backlog: usize,
+
+	/// This socket's slot in a steered `SO_REUSEPORT` group, if it is in one.
+	///
+	/// Every connection id the endpoint issues then leads with the slot's
+	/// [`cid_prefix`](moq_sock::shard::cid_prefix) byte, which is what the
+	/// group's filter selects on. Set it if and only if the socket was bound
+	/// into a group with this shard; a lone socket leaves it `None` and keeps
+	/// the whole id random.
+	pub shard: Option<moq_sock::shard::Shard>,
 }
 
 impl Default for Config {
@@ -49,6 +65,7 @@ impl Default for Config {
 		Self {
 			server: None,
 			backlog: 1024,
+			shard: None,
 		}
 	}
 }
@@ -57,6 +74,12 @@ impl Config {
 	/// Accept incoming connections with `server`, on top of dialing.
 	pub fn with_server(mut self, server: server::Config) -> Self {
 		self.server = Some(server);
+		self
+	}
+
+	/// Issue connection ids steering to `shard`'s slot of a reuseport group.
+	pub fn with_shard(mut self, shard: moq_sock::shard::Shard) -> Self {
+		self.shard = Some(shard);
 		self
 	}
 }
@@ -90,6 +113,8 @@ struct Inner {
 	/// bounded by [`Config::backlog`].
 	pending: Cell<usize>,
 	backlog: usize,
+	/// The reuseport slot every issued connection id steers to, if any.
+	shard: Option<moq_sock::shard::Shard>,
 	/// Live [`Endpoint`] handles; at zero the endpoint winds down (no new
 	/// accepts or dials, existing connections served until they end).
 	handles: Cell<usize>,
@@ -130,6 +155,7 @@ impl Endpoint {
 			routes: RefCell::new(HashMap::new()),
 			pending: Cell::new(0),
 			backlog: config.backlog,
+			shard: config.shard,
 			handles: Cell::new(1),
 			closed: RefCell::new(None),
 			task_waiters: RefCell::new(kio::WaiterList::new()),
@@ -177,7 +203,7 @@ impl Endpoint {
 			return Err(err.clone());
 		}
 		let mut quiche_config = config.quiche()?;
-		let scid = random_cid();
+		let scid = self.inner.cid();
 		let conn = quiche::connect(
 			Some(&config.server_name),
 			&quiche::ConnectionId::from_ref(&scid),
@@ -323,7 +349,7 @@ impl Inner {
 			return None;
 		}
 
-		let scid = random_cid();
+		let scid = self.cid();
 		let mut conn = {
 			let mut accepting = self.accepting.borrow_mut();
 			let accepting = accepting.as_mut().expect("checked above");
@@ -431,7 +457,7 @@ impl Inner {
 			// The peer's active_connection_id_limit is the credit; keep it
 			// spent so a migration always has a fresh id to switch to.
 			while conn.scids_left() > 0 {
-				let cid = random_cid();
+				let cid = self.cid();
 				if conn
 					.new_scid(&quiche::ConnectionId::from_ref(&cid), rand::random(), false)
 					.is_err()
@@ -461,6 +487,16 @@ impl Inner {
 		self.task_waiters.borrow_mut().wake();
 	}
 
+	/// A fresh [`CID_LEN`]-byte connection id, leading with the steering
+	/// prefix when this endpoint sits in a reuseport group.
+	fn cid(&self) -> [u8; CID_LEN] {
+		let mut cid: [u8; CID_LEN] = rand::random();
+		if let Some(shard) = self.shard {
+			cid[0] = moq_sock::shard::cid_prefix(shard);
+		}
+		cid
+	}
+
 	/// The socket died: everything on it fails with `err`.
 	fn fail(&self, err: Error) {
 		*self.closed.borrow_mut() = Some(err.clone());
@@ -475,9 +511,4 @@ impl Inner {
 		}
 		self.accept_waiters.borrow_mut().wake();
 	}
-}
-
-/// A fresh [`CID_LEN`]-byte connection id.
-fn random_cid() -> [u8; CID_LEN] {
-	rand::random()
 }

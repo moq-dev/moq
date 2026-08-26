@@ -566,7 +566,7 @@ impl NoqServer {
 			}));
 		}
 
-		let socket = crate::steer::bind(listen, shard).map_err(Error::BindSocket)?;
+		let socket = moq_sock::shard::bind(listen, shard).map_err(Error::BindSocket)?;
 
 		// Create the generic QUIC endpoint.
 		let quic = noq::Endpoint::new(endpoint_config, Some(tls), socket, runtime).map_err(Error::CreateEndpoint)?;
@@ -686,7 +686,7 @@ impl noq::ConnectionIdGenerator for ShardIdGenerator {
 	fn generate_cid(&mut self) -> noq::ConnectionId {
 		use rand::RngExt;
 		let mut cid = Vec::with_capacity(Self::LEN);
-		cid.push(crate::steer::cid_prefix(self.shard));
+		cid.push(moq_sock::shard::cid_prefix(self.shard));
 		cid.extend(rand::rng().random_iter::<u8>().take(Self::LEN - 1));
 		noq::ConnectionId::new(cid.as_slice())
 	}

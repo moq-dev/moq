@@ -1,12 +1,11 @@
 //! Dual-stack socket binding.
 //!
-//! Quinn uses a single socket and relies on the OS to route both address
-//! families. On Linux an `[::]` socket accepts IPv4 too, but Windows defaults
-//! `IPV6_V6ONLY` to on, so an IPv6 socket silently drops every IPv4 packet. The
-//! helpers here clear that before binding, so a relay on `[::]` is reachable
-//! over IPv4 and a dual-stack client can dial IPv4 servers (via IPv4-mapped
-//! addresses; the client's address-family matching lives in
-//! `resolve::Candidates::with_local`).
+//! A QUIC stack typically uses a single socket and relies on the OS to route
+//! both address families. On Linux an `[::]` socket accepts IPv4 too, but
+//! Windows defaults `IPV6_V6ONLY` to on, so an IPv6 socket silently drops
+//! every IPv4 packet. The helpers here clear that before binding, so a relay
+//! on `[::]` is reachable over IPv4 and a dual-stack client can dial IPv4
+//! servers (via IPv4-mapped addresses).
 //! See <https://github.com/moq-dev/moq/issues/1375>.
 
 use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
@@ -274,8 +273,7 @@ fn set_reuse_port(_socket: &Socket) -> io::Result<()> {
 /// v6-only can't send to a mapped destination, and it looks identical from the
 /// outside: `local_addr` reads `[::]` either way. Always false for an IPv4
 /// socket, which reaches IPv4 natively rather than through mapping.
-#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-pub(crate) fn udp_is_dual_stack(socket: &UdpSocket) -> bool {
+pub fn udp_is_dual_stack(socket: &UdpSocket) -> bool {
 	match socket.local_addr() {
 		Ok(addr) if addr.is_ipv6() => socket2::SockRef::from(socket).only_v6().is_ok_and(|only| !only),
 		_ => false,

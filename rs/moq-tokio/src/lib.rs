@@ -14,7 +14,7 @@
 #![warn(missing_docs)]
 
 pub mod accept;
-pub mod bind;
+pub use moq_sock::bind;
 pub mod cli;
 mod client;
 pub mod connect;
@@ -39,7 +39,6 @@ pub mod quinn;
 mod resolve;
 pub mod runtime;
 mod server;
-mod steer;
 #[cfg(feature = "tcp")]
 pub mod tcp;
 pub mod tls;

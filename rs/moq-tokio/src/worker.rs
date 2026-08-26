@@ -87,7 +87,7 @@ pub struct Workers {
 	/// Holds the listen port against a second group for as long as this one
 	/// lives. `None` for an ephemeral port, or when no lock directory was
 	/// available and the group started on probe-only protection.
-	_lock: Option<crate::steer::Lock>,
+	_lock: Option<moq_sock::shard::Lock>,
 }
 
 impl std::fmt::Debug for Workers {
@@ -118,10 +118,10 @@ impl Workers {
 		}
 
 		let count = config.count.max(1);
-		if count > crate::steer::MAX_SHARDS {
+		if count > moq_sock::shard::MAX_SHARDS {
 			return Err(Error::WorkerCount {
 				count,
-				max: crate::steer::MAX_SHARDS,
+				max: moq_sock::shard::MAX_SHARDS,
 			});
 		}
 
@@ -152,7 +152,7 @@ impl Workers {
 		// lone worker may use one, and its port cannot be named in advance.
 		let lock = match requested.port() {
 			0 => None,
-			port => crate::steer::Lock::acquire(port).map_err(|_| Error::WorkerOverlap { addr: requested })?,
+			port => moq_sock::shard::Lock::acquire(port).map_err(|_| Error::WorkerOverlap { addr: requested })?,
 		};
 
 		let mut workers = Vec::with_capacity(count as usize);
@@ -520,26 +520,17 @@ fn run(
 	tracing::debug!(index, "QUIC worker stopped");
 }
 
-/// A core to pin a worker to. Kept behind a type so the non-Linux build has
-/// something to name without depending on the pinning crate's types.
-type CoreId = core_affinity::CoreId;
+/// A core to pin a worker to.
+type CoreId = moq_sock::cpu::CoreId;
 
-/// The cores workers may be pinned to, in the order they are handed out.
-///
-/// Empty when the platform will not report them, which disables pinning rather
-/// than failing: the mode's other half (one runtime and one socket per worker)
-/// is still worth having.
+/// The cores workers may be pinned to; empty disables pinning with a warning.
 fn cores() -> Vec<CoreId> {
-	let cores = core_affinity::get_core_ids().unwrap_or_default();
-	if cores.is_empty() {
-		tracing::warn!("could not enumerate CPU cores; QUIC workers will not be pinned");
-	}
-	cores
+	moq_sock::cpu::cores()
 }
 
 /// Pin the calling thread to `core`, warning if the platform refuses.
 fn pin(index: u16, core: CoreId) {
-	if core_affinity::set_for_current(core) {
+	if moq_sock::cpu::pin(core) {
 		tracing::debug!(index, core = core.id, "pinned QUIC worker");
 	} else {
 		tracing::warn!(index, core = core.id, "failed to pin QUIC worker");

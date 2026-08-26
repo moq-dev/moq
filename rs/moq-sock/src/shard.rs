@@ -32,14 +32,47 @@
 //! index. That is the whole rule in seven instructions, with no `CAP_BPF`, no
 //! BPF toolchain in the build, and no map to keep alive across restarts. The
 //! cost is that the kernel selects by *position*, so the group has to be built
-//! once, in order, and never resized. [`crate::worker::Workers`] is what
-//! guarantees that, which is why [`crate::listen::Shard`] cannot be minted from
-//! outside this crate.
+//! once, in order, and never resized. Each runtime's worker group (moq-tokio's
+//! `worker::Workers`, moq-uring's) is what holds that invariant; a [`Shard`]
+//! is only meaningful inside a group built that way.
 
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 
-use crate::listen::Shard;
+/// One member's slot in a group of sockets sharing a port via `SO_REUSEPORT`.
+///
+/// Every member binds the same address and the kernel spreads inbound datagrams
+/// across the group, so N servers on N threads can serve one port without a
+/// shared socket between them.
+///
+/// A shard is only meaningful as part of a group that was bound once, in index
+/// order, and is never resized: the kernel identifies a member by its
+/// *position*, so a shard bound out of order, twice, or into a resized group
+/// breaks steering with no error to show for it. Mint them from the loop that
+/// forms the group, and nowhere else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shard {
+	index: u16,
+	count: u16,
+}
+
+impl Shard {
+	/// Slot `index` of a group of `count` sockets, or `None` if that slot does
+	/// not exist (`count` of zero, or an `index` at or past the end).
+	pub fn new(index: u16, count: u16) -> Option<Self> {
+		(index < count).then_some(Self { index, count })
+	}
+
+	/// This member's position in the group, from zero.
+	pub fn index(self) -> u16 {
+		self.index
+	}
+
+	/// How many sockets share the port.
+	pub fn count(self) -> u16 {
+		self.count
+	}
+}
 
 /// Bind this member's socket into the group, steering the whole group once the
 /// last member has joined.
@@ -47,7 +80,7 @@ use crate::listen::Shard;
 /// Call it for every member in index order and nothing else in between: the
 /// kernel identifies a member by its position in the group, which is the order
 /// the sockets bound. An unsharded bind is the plain one.
-pub(crate) fn bind(addr: SocketAddr, shard: Option<Shard>) -> io::Result<UdpSocket> {
+pub fn bind(addr: SocketAddr, shard: Option<Shard>) -> io::Result<UdpSocket> {
 	// The first member probes with a plain bind before the group forms.
 	// `SO_REUSEPORT` groups by address and UID, so a member would otherwise
 	// *join* any group a same-UID process already has on the address, as two
@@ -96,13 +129,13 @@ pub(crate) fn bind(addr: SocketAddr, shard: Option<Shard>) -> io::Result<UdpSock
 /// filesystem, are refused although they could coexist. That failure is loud
 /// and names the port; the alternative failure was silent traffic loss.
 ///
-/// The file lives in a directory only this UID can write ([`dir`]), which is
+/// The file lives in a directory only this UID can write (see `dir`), which is
 /// what makes the lock immune to other users: a reuseport group only admits
 /// same-UID sockets, so same-UID is exactly the set that must be excluded,
 /// and no other user can touch the lock to deny it. When no such directory
 /// can be had, the lock is skipped with a warning rather than refusing to
 /// start, and the probe carries the remaining risk.
-pub(crate) struct Lock {
+pub struct Lock {
 	#[cfg(target_os = "linux")]
 	_file: std::fs::File,
 }
@@ -115,7 +148,7 @@ impl Lock {
 	///
 	/// Elsewhere than Linux this is a no-op: the platform refuses the reuseport
 	/// bind itself, so there is nothing to exclude.
-	pub(crate) fn acquire(port: u16) -> io::Result<Option<Self>> {
+	pub fn acquire(port: u16) -> io::Result<Option<Self>> {
 		#[cfg(target_os = "linux")]
 		{
 			use std::os::unix::fs::OpenOptionsExt;
@@ -269,21 +302,21 @@ fn prepare(dir: std::path::PathBuf) -> Option<std::path::PathBuf> {
 	Some(dir)
 }
 
-/// The first byte of a connection ID issued by `shard`.
-///
-/// `count` values of the byte are reserved per member, so this keeps
-/// `256 / count` of its randomness: 32 values across 8 members, and the other 19
-/// bytes of the ID stay fully random either way. Connection IDs are not secrets,
-/// but they are unlinkable only while they look random, which is why this spends
-/// as little of that byte as it can.
 /// The largest group the steering filter can address.
 ///
 /// It selects with one byte of the connection ID, so a member past 255 could
 /// never be named: [`cid_prefix`] would have no stride to spend and the filter's
 /// `byte % count` could never return that index.
-pub(crate) const MAX_SHARDS: u16 = 256;
+pub const MAX_SHARDS: u16 = 256;
 
-pub(crate) fn cid_prefix(shard: Shard) -> u8 {
+/// The first byte of a connection ID issued by `shard`.
+///
+/// `count` values of the byte are reserved per member, so this keeps
+/// `256 / count` of its randomness: 32 values across 8 members, and the other
+/// bytes of the ID stay fully random either way. Connection IDs are not secrets,
+/// but they are unlinkable only while they look random, which is why this spends
+/// as little of that byte as it can.
+pub fn cid_prefix(shard: Shard) -> u8 {
 	use rand::RngExt;
 
 	let count = u32::from(shard.count());
@@ -390,6 +423,15 @@ fn program(count: u16) -> [libc::sock_filter; 7] {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A slot has to exist in the group it names.
+	#[test]
+	fn shard_slots_are_bounded() {
+		assert_eq!(Shard::new(0, 1).map(|shard| shard.count()), Some(1));
+		assert_eq!(Shard::new(3, 4).map(|shard| shard.index()), Some(3));
+		assert!(Shard::new(4, 4).is_none());
+		assert!(Shard::new(0, 0).is_none());
+	}
 
 	/// The encoding's only real requirement: whatever byte a member issues has to
 	/// reduce back to that member.
