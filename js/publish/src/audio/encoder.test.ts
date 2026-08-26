@@ -14,21 +14,6 @@ async function settle(times = 5): Promise<void> {
 	for (let i = 0; i < times; i++) await flush();
 }
 
-function installGlobals(globals: Record<string, unknown>) {
-	const originals = new Map<string, PropertyDescriptor | undefined>();
-	for (const [name, value] of Object.entries(globals)) {
-		originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
-		Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
-	}
-
-	return () => {
-		for (const [name, original] of originals) {
-			if (original) Object.defineProperty(globalThis, name, original);
-			else Reflect.deleteProperty(globalThis, name);
-		}
-	};
-}
-
 // Models the WebAudio surface `#runSource` touches. The key detail is `AudioContext.close()`: on
 // Firefox and Safari it does NOT synchronously flip `.state` to "closed" (it stays "suspended"), which
 // is exactly the browser behavior the old `context.state === "closed"` guard failed to account for.
@@ -74,7 +59,11 @@ function installFakeWebAudio() {
 		AudioWorkletNode: FakeAudioWorkletNode,
 	};
 
-	const restore = installGlobals(globals);
+	const originals = new Map<string, PropertyDescriptor | undefined>();
+	for (const [name, value] of Object.entries(globals)) {
+		originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+		Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+	}
 
 	return {
 		get audioWorkletNodes() {
@@ -84,7 +73,10 @@ function installFakeWebAudio() {
 			return requestedRates;
 		},
 		[Symbol.dispose]() {
-			restore();
+			for (const [name, original] of originals) {
+				if (original) Object.defineProperty(globalThis, name, original);
+				else Reflect.deleteProperty(globalThis, name);
+			}
 		},
 	};
 }
@@ -198,7 +190,7 @@ function installEncodingHarness(description: Uint8Array) {
 
 	class FakeAudioDecoder {}
 
-	const restore = installGlobals({
+	const globals: Record<string, unknown> = {
 		AudioContext: FakeAudioContext,
 		MediaStream: FakeMediaStream,
 		MediaStreamAudioSourceNode: FakeGraphNode,
@@ -207,7 +199,12 @@ function installEncodingHarness(description: Uint8Array) {
 		AudioData: FakeAudioData,
 		AudioEncoder: FakeAudioEncoder,
 		AudioDecoder: FakeAudioDecoder,
-	});
+	};
+	const originals = new Map<string, PropertyDescriptor | undefined>();
+	for (const [name, value] of Object.entries(globals)) {
+		originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+		Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+	}
 
 	return {
 		get worklet() {
@@ -217,7 +214,10 @@ function installEncodingHarness(description: Uint8Array) {
 			return audioEncoders;
 		},
 		[Symbol.dispose]() {
-			restore();
+			for (const [name, original] of originals) {
+				if (original) Object.defineProperty(globalThis, name, original);
+				else Reflect.deleteProperty(globalThis, name);
+			}
 		},
 	};
 }
