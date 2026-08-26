@@ -15,6 +15,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use moq_uring::{Config, Error, Worker, quic, udp};
+use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
 
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
@@ -271,6 +272,106 @@ fn the_backlog_bounds_queued_connections() {
 		.expect("worker")
 		.expect("first accepted connection");
 	drop((first, accepted));
+}
+
+/// One busy connection cannot monopolize a shared transmit pool and starve a
+/// later connection's handshake. One buffer keeps the pool contended.
+#[test]
+fn connections_share_one_tx_buffer_fairly() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+
+	let mut udp_config = udp::Config::default();
+	udp_config.tx_buffers = 1;
+	let sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp_config)
+		.expect("socket");
+	let endpoint = quic::Endpoint::new(
+		&handle,
+		sock,
+		quic::endpoint::Config::default().with_server(server_config(&certs)),
+	)
+	.expect("endpoint");
+	let server = endpoint.local_addr();
+
+	worker
+		.block_on(async {
+			let first_sock = handle
+				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+				.expect("first client socket");
+			let first_client = quic::client::connect(&handle, first_sock, &dial_config(server))
+				.await
+				.expect("first connection");
+			let mut first_server = endpoint.accept().await.expect("first accepted connection");
+
+			let mut send = std::future::poll_fn(|cx| first_server.poll_open_uni(cx))
+				.await
+				.expect("open busy stream");
+			let running = std::rc::Rc::new(std::cell::Cell::new(true));
+			#[derive(Default)]
+			struct Progress {
+				bytes: usize,
+				waker: Option<std::task::Waker>,
+			}
+			let progress = std::rc::Rc::new(std::cell::RefCell::new(Progress::default()));
+			let send_running = running.clone();
+			let send_progress = progress.clone();
+			handle.spawn(async move {
+				let chunk = vec![0x5a; 64 * 1024];
+				while send_running.get() {
+					let mut offset = 0;
+					while offset < chunk.len() {
+						offset += std::future::poll_fn(|cx| send.poll_write(cx, &chunk[offset..]))
+							.await
+							.expect("write busy stream");
+					}
+					let mut progress = send_progress.borrow_mut();
+					progress.bytes += chunk.len();
+					if let Some(waker) = progress.waker.take() {
+						waker.wake();
+					}
+				}
+			});
+			let recv_running = running.clone();
+			handle.spawn(async move {
+				let mut first_client = first_client;
+				let mut recv = std::future::poll_fn(|cx| first_client.poll_accept_uni(cx))
+					.await
+					.expect("accept busy stream");
+				let mut chunk = vec![0; 64 * 1024];
+				while recv_running.get() {
+					if std::future::poll_fn(|cx| recv.poll_read(cx, &mut chunk))
+						.await
+						.expect("read busy stream")
+						.is_none()
+					{
+						break;
+					}
+				}
+			});
+			std::future::poll_fn(|cx| {
+				let mut progress = progress.borrow_mut();
+				if progress.bytes >= 4 * 1024 * 1024 {
+					return Poll::Ready(());
+				}
+				progress.waker = Some(cx.waker().clone());
+				Poll::Pending
+			})
+			.await;
+
+			let second_sock = handle
+				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+				.expect("second client socket");
+			let mut second_config = dial_config(server);
+			second_config.idle_timeout = Duration::from_millis(500);
+			let second = quic::client::connect(&handle, second_sock, &second_config).await;
+			running.set(false);
+			let second = second.expect("the second connection must not starve");
+			let accepted = endpoint.accept().await.expect("second accepted connection");
+			drop((second, accepted));
+		})
+		.expect("worker");
 }
 
 /// A dial-only endpoint refuses to accept, loudly.

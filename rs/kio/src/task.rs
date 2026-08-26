@@ -84,6 +84,9 @@ pub struct Tasks<T> {
 	/// runs so a mid-pass wake lands in the next pass wherever its slot sits.
 	/// Retained so steady-state polls don't allocate.
 	scratch: Vec<u64>,
+	/// The slot that leads the next readiness snapshot, rotated after every
+	/// nonempty pass so wake-all resources cannot favor low-numbered tasks.
+	next: usize,
 }
 
 /// A slot's current task and its retained kio registrations.
@@ -150,6 +153,7 @@ impl<T> Tasks<T> {
 				pending: AtomicBool::new(false),
 			}),
 			scratch: Vec::new(),
+			next: 0,
 		}
 	}
 
@@ -244,34 +248,57 @@ impl<T: Task> Tasks<T> {
 		// pass wherever its slot sits, never this one. Dispatching straight off
 		// the words instead would run a forward wake chain in a single pass,
 		// starving the caller's other arms.
-		self.scratch.clear();
+		let mut scratch = std::mem::take(&mut self.scratch);
+		scratch.clear();
 		for chunk in &self.chunks {
 			for word in &chunk.0 {
-				self.scratch.push(word.swap(0, Ordering::AcqRel));
+				scratch.push(word.swap(0, Ordering::AcqRel));
 			}
 		}
 
-		for w in 0..self.scratch.len() {
-			let mut bits = self.scratch[w];
-			while bits != 0 {
-				let bit = bits.trailing_zeros() as usize;
-				bits &= bits - 1;
-				let index = w * WORD_BITS + bit;
-				// A stale bit (the occupant finished; maybe the slot was
-				// reused) is skipped or costs one spurious poll; both are
-				// harmless.
-				let Some(occupant) = self.children.get_mut(index).and_then(Option::as_mut) else {
-					continue;
-				};
-				let cx = Context::from_waker(&self.wakers[index]);
-				let child_waiter = occupant.park.hold(&cx);
-				if occupant.task.poll(child_waiter).is_ready() {
-					self.children[index] = None;
-					self.free.push(index);
-					self.len -= 1;
+		let slots = self.children.len();
+		let mut advanced = false;
+		// Visit `next..slots`, then wrap through `0..next`. The snapshot stays
+		// word-packed; only the boundary words need masks.
+		for (from, to) in [(self.next.min(slots), slots), (0, self.next.min(slots))] {
+			if from == to {
+				continue;
+			}
+			let first_word = from / WORD_BITS;
+			let last_word = (to - 1) / WORD_BITS;
+			for (word_index, word) in scratch.iter().enumerate().take(last_word + 1).skip(first_word) {
+				let mut bits = *word;
+				if word_index == first_word {
+					bits &= u64::MAX << (from % WORD_BITS);
+				}
+				if word_index == last_word && !to.is_multiple_of(WORD_BITS) {
+					bits &= (1 << (to % WORD_BITS)) - 1;
+				}
+				while bits != 0 {
+					let bit = bits.trailing_zeros() as usize;
+					bits &= bits - 1;
+					let index = word_index * WORD_BITS + bit;
+					// A stale bit (the occupant finished; maybe the slot was
+					// reused) is skipped or costs one spurious poll; both are
+					// harmless.
+					let Some(occupant) = self.children.get_mut(index).and_then(Option::as_mut) else {
+						continue;
+					};
+					if !advanced {
+						self.next = (index + 1) % slots;
+						advanced = true;
+					}
+					let cx = Context::from_waker(&self.wakers[index]);
+					let child_waiter = occupant.park.hold(&cx);
+					if occupant.task.poll(child_waiter).is_ready() {
+						self.children[index] = None;
+						self.free.push(index);
+						self.len -= 1;
+					}
 				}
 			}
 		}
+		self.scratch = scratch;
 
 		match self.len {
 			0 => Poll::Ready(()),
@@ -289,7 +316,7 @@ impl<T> Default for Tasks<T> {
 #[cfg(all(test, not(loom)))]
 mod tests {
 	use super::*;
-	use std::sync::atomic::AtomicUsize;
+	use std::sync::{Mutex, atomic::AtomicUsize};
 
 	/// A task counting its polls, finishing when its gate opens. A factory
 	/// returning `impl FnMut` mints one closure type, so every task from it
@@ -539,6 +566,31 @@ mod tests {
 			2,
 			"the next owner poll runs the task again"
 		);
+	}
+
+	/// Wake-all resources must not always hand the first chance to the lowest
+	/// task slot. Rotating the leading task lets every contender make progress.
+	#[test]
+	fn self_waking_tasks_rotate_the_leading_slot() {
+		fn task(id: usize, order: Arc<Mutex<Vec<usize>>>) -> impl FnMut(&Waiter) -> Poll<()> {
+			move |waiter| {
+				order.lock().unwrap().push(id);
+				waiter.waker().wake_by_ref();
+				Poll::Pending
+			}
+		}
+
+		let order = Arc::new(Mutex::new(Vec::new()));
+		let mut tasks = Tasks::new();
+		for id in 0..3 {
+			tasks.push(task(id, order.clone()));
+		}
+
+		let waiter = Waiter::noop();
+		for _ in 0..3 {
+			assert!(tasks.poll(&waiter).is_pending());
+		}
+		assert_eq!(*order.lock().unwrap(), [0, 1, 2, 1, 2, 0, 2, 0, 1]);
 	}
 
 	/// Drive a set to completion as a future. Generic on purpose: the two tests
