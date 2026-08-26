@@ -11,7 +11,7 @@ import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import { Broadcast, type CatalogFormat, parseCatalogFormat } from "./broadcast";
-import { type Bound, type Latency, latencyBounds, latencyFromBounds, type Paced, Sync } from "./sync";
+import { type Bound, type Latency, latencyBounds, latencyFromBounds, Sync } from "./sync";
 import * as Text from "./text";
 import * as Video from "./video";
 
@@ -136,12 +136,6 @@ export default class MoqWatch extends HTMLElement {
 	// clobber the range that replaced it.
 	#reflectingLatency = false;
 
-	// Whether video paces off the clock, cleared while the latency is "instant".
-	#videoPaced = new Signal(true);
-
-	// The latency handed to Sync, which has no way to express "instant".
-	#syncLatency = new Signal<Paced>("real-time");
-
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
 
@@ -202,31 +196,15 @@ export default class MoqWatch extends HTMLElement {
 		// parent-owned signal so Sync can be constructed first without exposing mutable wiring.
 		const videoJitter = new Signal<Time.Milli | undefined>(undefined);
 
-		// Sync can't implement "instant" on its own: not pacing video and disabling audio happens
-		// here. Hand it a zero buffer instead, which is what the caption clock should run at.
-		this.signals.run((effect) => {
-			const latency = effect.get(this.controls.latency);
-			this.#syncLatency.set(latency === "instant" ? Moq.Time.Milli.zero : latency);
-		});
-
 		this.sync = new Sync({
-			latency: this.#syncLatency,
+			latency: this.controls.latency,
 			probe: this.connection.probe,
 			video: videoJitter,
 			audio: audioSource.out.jitter,
 		});
 		this.signals.cleanup(() => this.sync.close());
 
-		// `latency="instant"` stops video waiting on the clock, so frames paint the moment they
-		// decode. The clock stays wired: it still tracks receipts and rewinds for the captions.
-		this.signals.run((effect) => {
-			this.#videoPaced.set(effect.get(this.controls.latency) !== "instant");
-		});
-
-		this.video = new Video.Decoder(videoSource, this.sync, {
-			enabled: this.#videoEnabled,
-			paced: this.#videoPaced,
-		});
+		this.video = new Video.Decoder(videoSource, this.sync, { enabled: this.#videoEnabled });
 		this.signals.proxy(videoJitter, this.video.out.jitter);
 		this.audio = new Audio.Decoder(audioSource, this.sync, { enabled: this.#audioEnabled });
 		this.signals.cleanup(() => {

@@ -13,15 +13,13 @@ export type Bound = "real-time" | Time.Milli;
  * bounds default to `"real-time"` when omitted. The ceiling is always finite (no uncapped buffering),
  * so worst case the audio ring drops its oldest samples rather than exhausting memory.
  *
- * `"instant"` drops the clock instead of bounding it: video paints the moment it decodes and
- * audio is disabled. It replaces the range rather than sitting inside it, so it is not a
- * {@link Bound} and cannot be used as a floor or ceiling. Not pacing video and disabling audio is
- * the owner's job, so a {@link Sync} handed this value resolves it to a zero buffer and no more.
+ * `"instant"` drops the buffer and the pacing together: nothing is held, and {@link Sync.wait}
+ * returns without sleeping, so a frame presents as soon as it exists. It replaces the range rather
+ * than sitting inside it, so it is not a {@link Bound} and can't be used as a floor or ceiling.
+ * Audio is the owner's business: a ring with no depth underruns, so whoever wants this mode is
+ * expected to turn audio off.
  */
-export type Latency = "instant" | Paced;
-
-/** A latency target the playback clock can pace off on its own: every {@link Latency} but `"instant"`. */
-export type Paced = Bound | { min?: Bound; max?: Bound };
+export type Latency = "instant" | Bound | { min?: Bound; max?: Bound };
 
 /**
  * Resolve a {@link Latency} into explicit floor/ceiling bounds (a scalar collapses to `min == max`).
@@ -35,8 +33,8 @@ export function latencyBounds(latency: Latency): { min: Bound; max: Bound } {
 	return { min: latency.min ?? "real-time", max: latency.max ?? "real-time" };
 }
 
-/** Build a {@link Paced} latency from explicit bounds, collapsing to a scalar when they're equal. */
-export function latencyFromBounds(min: Bound, max: Bound): Paced {
+/** Build a {@link Latency} from explicit bounds, collapsing to a scalar when they're equal. */
+export function latencyFromBounds(min: Bound, max: Bound): Latency {
 	return min === max ? min : { min, max };
 }
 
@@ -45,10 +43,8 @@ const FALLBACK_JITTER = Time.Milli(100);
 
 export type SyncInput = {
 	/**
-	 * Latency target: a scalar minimizes (collapsed range), an object opens a range. See {@link Paced}.
-	 *
-	 * A clock cannot implement `"instant"` on its own, since not pacing video and disabling audio
-	 * are the owner's job. Pass a {@link Paced} value: `"instant"` resolves to a zero buffer here.
+	 * Latency target: a scalar minimizes (collapsed range), an object opens a range, and
+	 * `"instant"` holds nothing and never sleeps. See {@link Latency}.
 	 */
 	latency: Getter<Latency>;
 
@@ -188,7 +184,10 @@ export class Sync {
 		const video = effect.get(this.in.video) ?? Time.Milli.zero;
 		const audio = effect.get(this.in.audio) ?? Time.Milli.zero;
 
-		const buffer = Time.Milli.add(Time.Milli.max(video, audio), jitter);
+		// A zero floor still holds the rendition's own delay, which is a frame interval at 60fps.
+		// "instant" holds nothing at all.
+		const instant = effect.get(this.in.latency) === "instant";
+		const buffer = instant ? Time.Milli.zero : Time.Milli.add(Time.Milli.max(video, audio), jitter);
 		this.#out.buffer.set(buffer);
 
 		this.#update.resolve();
@@ -269,12 +268,19 @@ export class Sync {
 
 	// Sleep until it's time to render this frame.
 	async wait(timestamp: Time.Milli): Promise<void> {
+		// A zero buffer still sleeps: the sleep comes from the reference, which holds an early frame
+		// until its timestamp comes up. "instant" is the only thing that skips the wait itself.
+		if (this.in.latency.peek() === "instant") return;
+
 		const reference = this.#out.reference.peek();
 		if (reference === undefined) {
 			throw new Error("reference not set; call received() first");
 		}
 
 		for (;;) {
+			// Switching to "instant" resolves `#update`, so frames parked here wake and leave.
+			if (this.in.latency.peek() === "instant") return;
+
 			// Sleep until it's time to decode the next frame.
 			// NOTE: This function runs in parallel for each frame.
 			const now = Time.Milli.now();
