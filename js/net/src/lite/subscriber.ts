@@ -3,7 +3,7 @@ import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
-import { error, reason } from "../error.ts";
+import { error, ProtocolViolation, reason } from "../error.ts";
 import * as netGroup from "../group.ts";
 import type { Origin } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -220,7 +220,7 @@ export class Subscriber {
 					for (const suffix of init.suffixes) {
 						const path = Path.join(prefix, suffix);
 						if (advertised.has(suffix)) {
-							throw new Error(`duplicate announce for ${path}`);
+							throw new ProtocolViolation(`duplicate announce for ${path}`);
 						}
 						advertised.set(suffix, { publisher: undefined, live: true });
 						console.debug(`announced: broadcast=${path} active=true`);
@@ -270,7 +270,7 @@ export class Subscriber {
 					case "endedId": {
 						// Resolve and retire the id; an unknown or retired id is a protocol violation.
 						const path = announcedById.get(announce.id);
-						if (path === undefined) throw new Error(`unknown announce id: ${announce.id}`);
+						if (path === undefined) throw new ProtocolViolation(`unknown announce id: ${announce.id}`);
 						announcedById.delete(announce.id);
 						suffix = path;
 						active = false;
@@ -279,7 +279,7 @@ export class Subscriber {
 					case "restart": {
 						// Resolve the id; it stays live (the replacement reuses it).
 						const path = announcedById.get(announce.id);
-						if (path === undefined) throw new Error(`unknown announce id: ${announce.id}`);
+						if (path === undefined) throw new ProtocolViolation(`unknown announce id: ${announce.id}`);
 						suffix = path;
 						active = true;
 						hops = announce.hops;
@@ -296,7 +296,7 @@ export class Subscriber {
 				// kept the first. Letting a skip pre-empt it would retract the live route and
 				// leave the stream open on a peer that is already out of spec.
 				if (announce.status === "active" && hasAnnounceId(this.version) && advertised.has(suffix)) {
-					throw new Error(`duplicate announce for ${path}`);
+					throw new ProtocolViolation(`duplicate announce for ${path}`);
 				}
 
 				// Retract the path: forget the advertisement, drop the shared consume entry so a
@@ -370,6 +370,10 @@ export class Subscriber {
 			// would leave it announcing into a stream nobody reads.
 			stream.abort(e);
 			announced.close(e);
+			// A violation ends the session, not just this stream, so a nonconforming peer
+			// cannot repeat it on the next one. Matches `ietf::Subscriber` and the Rust
+			// lite subscriber, where the announce half only ever ends the session on error.
+			if (e instanceof ProtocolViolation) this.#quic.close();
 		}
 	}
 

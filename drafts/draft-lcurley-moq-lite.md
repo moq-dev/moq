@@ -249,7 +249,8 @@ ANNOUNCE_END and ANNOUNCE_UPDATE reference the Announce ID instead of repeating 
 Each broadcast has at most one current advertisement per stream.
 A second ANNOUNCE_START for an already-available path is a protocol violation; an ANNOUNCE_UPDATE atomically replaces the current advertisement (equivalent to ANNOUNCE_END+ANNOUNCE_START) while keeping its id live.
 
-The subscriber MUST reset the stream if it receives an ANNOUNCE_END or ANNOUNCE_UPDATE referencing an Announce ID that was never assigned or already retired, an ANNOUNCE_START for a path that is already available, or any announcement before ANNOUNCE_OK.
+The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives an ANNOUNCE_END or ANNOUNCE_UPDATE referencing an Announce ID that was never assigned or already retired, an ANNOUNCE_START for a path that is already available, or any announcement before ANNOUNCE_OK.
+Resetting only the stream would leave the peer free to repeat the violation on the next one, and a sender that has lost track of what it advertised has nothing left that the receiver can trust.
 When the stream is closed, the subscriber MUST assume that all broadcasts are now unavailable.
 
 Path prefix matching and equality is done on a byte-by-byte basis.

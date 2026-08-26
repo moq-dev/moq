@@ -45,11 +45,16 @@ function announceHarness(version: Version, origin = 1n) {
 	// learns it violated the protocol. Never resolving is the failure this observes.
 	let onAbort!: (reason: unknown) => void;
 	const aborted = new Promise<unknown>((resolve) => (onAbort = resolve));
+	// Resolves once the subscriber ends the session, which is what the draft requires of a
+	// protocol violation: a stream reset alone would let the peer repeat it on the next one.
+	let onSessionClose!: () => void;
+	const sessionClosed = new Promise<void>((resolve) => (onSessionClose = resolve));
 	const quic = {
 		createBidirectionalStream: async () => ({
 			readable: new ReadableStream<Uint8Array>({ start: (controller) => (inbound = controller) }),
 			writable: new WritableStream<Uint8Array>({ abort: (reason) => void onAbort(reason) }),
 		}),
+		close: () => void onSessionClose(),
 	} as unknown as WebTransport;
 
 	const subscriber = new Subscriber(quic, version, OriginSchema.parse(origin));
@@ -88,7 +93,26 @@ function announceHarness(version: Version, origin = 1n) {
 		}
 	};
 
-	return { subscriber, send, abortReason, settle: () => new Promise((resolve) => setTimeout(resolve, 0)) };
+	// Rejects promptly if the session outlives the violation, rather than hanging the test.
+	const sessionEnded = async () => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timeout = new Promise<never>((_, reject) => {
+			timer = setTimeout(() => reject(new Error("session was never closed")), 250);
+		});
+		try {
+			await Promise.race([sessionClosed, timeout]);
+		} finally {
+			clearTimeout(timer);
+		}
+	};
+
+	return {
+		subscriber,
+		send,
+		abortReason,
+		sessionEnded,
+		settle: () => new Promise((resolve) => setTimeout(resolve, 0)),
+	};
 }
 
 const PUBLISHER_A = OriginSchema.parse(7n);
@@ -253,7 +277,7 @@ test("lite-03 keeps an existing RTT, since its PROBE cannot carry one", async ()
 test("an announce skipped as a reflected loop still holds its path", async () => {
 	// The subscriber's own origin, so a chain naming it reflects back through us.
 	const SELF = 1n;
-	const { subscriber, send, abortReason, settle } = announceHarness(Version.DRAFT_06, SELF);
+	const { subscriber, send, abortReason, sessionEnded, settle } = announceHarness(Version.DRAFT_06, SELF);
 	const announced = subscriber.announced(Path.empty());
 	await settle();
 
@@ -284,6 +308,9 @@ test("an announce skipped as a reflected loop still holds its path", async () =>
 	// The peer has to hear about it: closing only our side would leave it announcing
 	// into a stream nobody reads.
 	expect(await abortReason()).toContain("duplicate announce");
+	// The draft makes this session-fatal: resetting only the stream would let the peer
+	// repeat the violation on the next one.
+	await sessionEnded();
 
 	announced.close();
 	subscriber.close();
@@ -408,7 +435,7 @@ test("a duplicate start is reported even when its own route reflects", async () 
 });
 
 test("a draft-02 initial set naming a path twice is refused", async () => {
-	const { subscriber, send, abortReason, settle } = announceHarness(Version.DRAFT_02);
+	const { subscriber, send, abortReason, sessionEnded, settle } = announceHarness(Version.DRAFT_02);
 	const announced = subscriber.announced(Path.empty());
 	await settle();
 
@@ -421,6 +448,9 @@ test("a draft-02 initial set naming a path twice is refused", async () => {
 	// violation rather than the first entry followed by it.
 	await expect(announced.next()).rejects.toThrow("duplicate announce");
 	expect(await abortReason()).toContain("duplicate announce");
+	// The draft makes this session-fatal: resetting only the stream would let the peer
+	// repeat the violation on the next one.
+	await sessionEnded();
 
 	announced.close();
 	subscriber.close();
