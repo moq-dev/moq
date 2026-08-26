@@ -123,7 +123,9 @@ Sharing one makes their content interchangeable ({{selection}}) and suppresses e
 
 How an endpoint scopes the ID follows from what it can establish about the peer.
 One it authenticated, or one it dialed and therefore chose, SHOULD get a single stable ID, which additionally lets reconnects and redundant sessions be recognized as the same content ({{selection}}); assigning per connection there would make one peer look like several.
-An endpoint accepting an anonymous session can establish nothing and cannot correlate it with any other, so it SHOULD assign a distinct ID per session: less than an identity, but enough to keep that session's own routes from being advertised back to it, which is the loop 0 cannot prevent.
+An endpoint accepting an anonymous session can establish nothing and cannot correlate it with any other, so it SHOULD assign a distinct ID per session: less than an identity, but enough to keep routes it attributed to that session from being advertised back to it, which is the loop 0 cannot prevent.
+That covers a peer that sent no HOP_PATH, since the receiver built the chain and put the ID there itself.
+A peer that negotiated the extension always sends one ({{namespace}}), so one declaring 0 names itself 0 in every chain it sends and an assigned ID reaches none of them.
 
 An assigned ID is indistinguishable on the wire from a declared one, so it identifies the peer to everyone the receiver forwards to; a peer that declared 0 for anonymity did not ask for that.
 

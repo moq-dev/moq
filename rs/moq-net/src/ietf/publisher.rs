@@ -1715,25 +1715,77 @@ mod tests {
 		assert_eq!(publisher.select(&Watched::new(local), &peer), Advert::Plain);
 	}
 
-	/// A peer that negotiates the cluster extension but declares the reserved 0 has
-	/// withheld its identity, which excludes nothing. The identity we assigned it
-	/// stands in, so its own routes still don't come back to it.
+	/// Declaring the reserved 0 turns the extension on while naming nobody, so the
+	/// identity we assigned stands in, exactly as for a peer that never negotiated.
+	/// Asserted on the resolution itself rather than through an advertisement: a
+	/// negotiated peer always sends its own HOP_PATH, so a route attributed to the
+	/// assigned identity is a state this peer class cannot reach (see
+	/// `a_declared_zero_chain_is_still_advertised_back`).
 	#[tokio::test(start_paused = true)]
 	async fn withheld_peer_origin_falls_back_to_assigned() {
 		let assigned = crate::Origin::new(777).unwrap();
-		let (publisher, consumer, _routes) = echo_harness(assigned).await;
+		let declared = crate::Origin::new(9).unwrap();
+		let (publisher, _consumer, _routes) = echo_harness(assigned).await;
+
+		let withheld = cluster::Peer {
+			origin: Some(crate::Origin::UNKNOWN),
+			cost: None,
+		};
+		assert!(withheld.negotiated(), "the extension is on");
+		assert_eq!(publisher.exclude(&withheld), assigned, "0 names nobody, so we do");
+
+		let absent = cluster::Peer::default();
+		assert_eq!(publisher.exclude(&absent), assigned, "so does declaring nothing");
+
+		let named = cluster::Peer {
+			origin: Some(declared),
+			cost: None,
+		};
+		assert_eq!(publisher.exclude(&named), declared, "a declared identity wins");
+	}
+
+	/// The boundary this change stops at, pinned so it fails loudly when it moves.
+	///
+	/// A peer that negotiated the extension MUST send a HOP_PATH on every
+	/// advertisement, and one that declared 0 names itself 0 there. We do not rewrite
+	/// an arriving chain, so the route carries 0, the assigned identity appears nowhere
+	/// in it, and the split-horizon filter has nothing to match: the peer is advertised
+	/// its own route back. Tracked in moq-dev/moq#3053; update this test when it lands.
+	#[tokio::test(start_paused = true)]
+	async fn a_declared_zero_chain_is_still_advertised_back() {
+		let assigned = crate::Origin::new(777).unwrap();
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+
+		let publisher = Publisher::new(
+			crate::lite::test_transport::SinkSession::new(Default::default()),
+			origin.consume(),
+			Control::new(None, false),
+			Some(assigned),
+			peer::PeerSetup::default(),
+			Version::Draft16,
+		);
+
+		// The chain as ingress stores it: the peer named itself 0.
+		let mut hops = crate::OriginList::new();
+		hops.push(crate::Origin::UNKNOWN).unwrap();
+		let _echoed = origin
+			.create_broadcast(
+				"from/peer",
+				crate::broadcast::Route::new().with_hops(hops).with_announce(true),
+			)
+			.unwrap();
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
 		let peer = cluster::Peer {
 			origin: Some(crate::Origin::UNKNOWN),
 			cost: None,
 		};
-		assert!(peer.negotiated());
-
 		let echoed = consumer.get_broadcast("from/peer").unwrap();
-		assert!(!publisher.select(&Watched::new(echoed), &peer).wanted());
-
-		let local = consumer.get_broadcast("from/us").unwrap();
-		assert!(publisher.select(&Watched::new(local), &peer).wanted());
+		assert!(
+			publisher.select(&Watched::new(echoed), &peer).wanted(),
+			"known gap: the assigned identity is not in the chain, so nothing filters it",
+		);
 	}
 
 	/// A drained broadcast arms a linger so the cold cost is restored after a grace
