@@ -66,8 +66,11 @@ pub fn supported(version: Version) -> bool {
 pub struct HopPath(OriginList);
 
 impl HopPath {
-	/// Wrap a hop chain. The list must be non-empty and free of repeated non-zero
-	/// entries to be legal on the wire; [`Self::validate`] is what checks that.
+	/// Wrap a hop chain.
+	///
+	/// [`OriginList`] already refuses a repeated non-zero entry, so the only wire rule
+	/// left to check is that the list is non-empty; [`Self::validate`] does that on
+	/// decode, where an empty parameter can arrive.
 	pub fn new(hops: OriginList) -> Self {
 		Self(hops)
 	}
@@ -77,26 +80,16 @@ impl HopPath {
 		&self.0
 	}
 
-	/// Reject a path that cannot have come from a conforming sender: an empty list, or
-	/// a non-zero Hop ID appearing twice (a loop). Duplicate zeros are legal, since 0
-	/// identifies nothing.
+	/// Reject a path that cannot have come from a conforming sender.
+	///
+	/// Only the empty list is left to catch: the other rule, that a non-zero Hop ID may
+	/// not appear twice, is enforced by [`OriginList`] wherever a chain is built, so it
+	/// holds on the outbound path too rather than only where one was parsed.
 	fn validate(&self) -> Result<(), DecodeError> {
-		if self.0.is_empty() {
-			return Err(DecodeError::InvalidValue);
+		match self.0.is_empty() {
+			true => Err(DecodeError::InvalidValue),
+			false => Ok(()),
 		}
-
-		// MAX_HOPS is 32, so the quadratic scan is cheaper than allocating a set.
-		let hops = self.0.as_slice();
-		for (i, hop) in hops.iter().enumerate() {
-			if *hop == Origin::UNKNOWN {
-				continue;
-			}
-			if hops[i + 1..].contains(hop) {
-				return Err(DecodeError::InvalidValue);
-			}
-		}
-
-		Ok(())
 	}
 }
 
@@ -145,9 +138,15 @@ impl Advert {
 	/// Build the advertisement to send for a route, appending our own Hop ID.
 	///
 	/// A relay's own ID is always the last entry, so a receiver reconstructs the full
-	/// path without the sender restating it. Fails once the chain is at
-	/// [`MAX_HOPS`](crate::TooManyOrigins), which a real path never reaches and a loop does.
-	pub fn forward(hops: &OriginList, cost: u64, self_origin: Origin) -> Result<Self, crate::TooManyOrigins> {
+	/// path without the sender restating it.
+	///
+	/// Fails for a chain this cannot be legally appended to: one already at
+	/// [`MAX_HOPS`](crate::InvalidHop::TooMany), which a real path never reaches and a
+	/// loop does, or one that already names us. Either is a loop, and the caller's job
+	/// is to advertise a different route rather than send this one: a receiver must
+	/// close the session over a repeated Hop ID, so a malformed chain we build costs
+	/// someone else their session rather than degrading our own routing.
+	pub fn forward(hops: &OriginList, cost: u64, self_origin: Origin) -> Result<Self, crate::InvalidHop> {
 		let mut hops = hops.clone();
 		hops.push(self_origin)?;
 		Ok(Self {
@@ -345,14 +344,49 @@ mod tests {
 
 	#[test]
 	fn hop_path_rejects_repeated_hop() {
-		// A non-zero id appearing twice is a loop, which the receiver must reject.
+		// A non-zero id appearing twice is a loop, which the receiver must reject. The
+		// bytes are forged rather than encoded from a `HopPath`, because `OriginList`
+		// no longer lets one be built: only a non-conforming sender produces this.
+		let mut value = Vec::new();
+		for id in [4u64, 8, 4] {
+			origin(id).encode(&mut value, VERSION).unwrap();
+		}
+
 		let mut buf = BytesMut::new();
-		hop_path(&[4, 8, 4]).param_encode(&mut buf, VERSION).unwrap();
+		value.encode(&mut buf, VERSION).unwrap();
+
 		let mut bytes = buf.freeze();
 		assert!(matches!(
 			HopPath::param_decode(&mut bytes, VERSION),
 			Err(DecodeError::InvalidValue)
 		));
+	}
+
+	/// The rule the receiver enforces has to hold on the way out too. A chain that
+	/// already names us, or one with no room left, cannot be appended to, and the
+	/// caller's job is to advertise a different route rather than send this one: a
+	/// receiver must close the session over a repeated Hop ID, so a malformed chain we
+	/// build costs someone else their session rather than degrading our own routing.
+	#[test]
+	fn forward_refuses_a_chain_it_cannot_extend() {
+		let mut hops = OriginList::new();
+		hops.push(origin(1)).unwrap();
+		hops.push(origin(3)).unwrap();
+
+		assert_eq!(
+			Advert::forward(&hops, 5, origin(3)),
+			Err(crate::InvalidHop::Duplicate),
+			"appending an id the chain already names must not produce an advertisement"
+		);
+
+		// Fill the chain with distinct ids, so the next append fails on length rather
+		// than on the id already being there.
+		let mut full = OriginList::new();
+		let mut next = 1;
+		while full.push(origin(next)).is_ok() {
+			next += 1;
+		}
+		assert_eq!(Advert::forward(&full, 0, origin(next)), Err(crate::InvalidHop::TooMany));
 	}
 
 	#[test]

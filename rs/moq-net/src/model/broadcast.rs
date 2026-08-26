@@ -247,9 +247,9 @@ impl Route {
 
 	/// Append a hop to the chain, oldest first.
 	///
-	/// Fails with [`crate::TooManyOrigins`] once the chain is full, the same limit
-	/// the wire enforces.
-	pub fn with_hop(mut self, origin: super::Origin) -> Result<Self, super::TooManyOrigins> {
+	/// Fails with [`crate::InvalidHop`] for a hop the wire would reject: one past the
+	/// chain's length cap, or one already in it, which is a loop.
+	pub fn with_hop(mut self, origin: super::Origin) -> Result<Self, super::InvalidHop> {
 		self.hops.push(origin)?;
 		Ok(self)
 	}

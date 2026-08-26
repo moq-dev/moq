@@ -829,6 +829,10 @@ When forwarding an announcement received from an upstream peer, a relay MUST app
 The first entry of the reconstructed path identifies the original publisher of the broadcast; it is the fallback content identity when `Epoch` is 0 (see [Routing](#routing)).
 A Hop ID value of 0 means the hop is unknown: either it was never assigned or a relay deliberately withholds it (see [Routing](#routing)).
 
+A receiver MUST close the stream with a PROTOCOL_VIOLATION if a non-zero Hop ID appears twice in the reconstructed path.
+An announcement that traversed the same relay twice looped, so neither forwarding it nor subscribing through it is safe.
+Duplicate values of 0 are not a violation, since 0 identifies nothing and any number of hops may be unknown.
+
 **Warm Route Cost** and **Cold Route Cost**:
 What subscribing to the broadcast via this advertisement costs, in units chosen by the deployment, priced against two different cache states.
 The Warm cost is what one more subscription would cost the mesh as it stands, and is what routing minimizes.

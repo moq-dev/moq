@@ -303,8 +303,12 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// the route is attributable to the upstream session, without changing
 		// the hop count (shortest-path selection and the MAX_HOPS limit stay
 		// accurate). Lite01/02 send no placeholders; they're covered below.
-		if self.version_lacks_hops() {
-			hops.replace_first(crate::Origin::UNKNOWN, self.session_origin);
+		//
+		// The rewrite fails if the chain already names this session, which would put one
+		// id in it twice: a loop, and one a cluster receiver must close the session over.
+		if self.version_lacks_hops() && hops.replace_first(crate::Origin::UNKNOWN, self.session_origin).is_err() {
+			tracing::debug!(broadcast = %self.log_path(&path), "dropping announce reflected by its session");
+			return Ok(false);
 		}
 
 		// Guarantee at least one attributable hop for versions that did not provide
@@ -314,7 +318,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// the AnnounceOk is read).
 		if hops.is_empty() {
 			hops.push(self.session_origin)
-				.expect("an empty hop chain always has room for one entry");
+				.expect("an empty hop chain always has room for one entry, and repeats nothing");
 		}
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
