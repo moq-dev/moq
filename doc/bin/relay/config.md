@@ -93,12 +93,23 @@ pin = true
 # userspace timers, and a local task set; authentication and session
 # supervision stay on the shared runtime. Serves browsers (WebTransport) and
 # native peers (raw QUIC) alike, moq-lite sessions only: moq-transport
-# versions are not offered on this listener. Requires `workers`, Linux 6.12+,
-# and exactly one listen.tls certificate; the certificate is read once at
-# startup (no hot reload yet), and mTLS client roots are not yet honored.
-# Refuses to start anywhere it cannot deliver. Default: false.
+# versions are not offered on this listener, and neither is the pre-lite-05
+# SETUP exchange a browser reaches by offering no subprotocol. Requires
+# `workers`, Linux 6.12+, a build with the `io-uring` cargo feature, and
+# exactly one listen.tls certificate; the certificate is read once at startup
+# (no hot reload yet), and mTLS client roots are not yet honored. Refuses to
+# start anywhere it cannot deliver. Default: false.
 io_uring = false
 ```
+
+The `io-uring` feature is off by default because quiche links BoringSSL, which
+a default relay build does not need. Prebuilt binaries that ship it say so;
+building it yourself is `cargo build -p moq-relay --features io-uring`.
+
+The `[quic]` section applies to this listener too. `max_streams`,
+`idle_timeout`, `keep_alive`, `mtu_discovery`, `congestion_control` and `gso`
+are all honored; `qlog` is not, and asking for it is a startup error rather
+than a setting that quietly does nothing.
 
 The shared runtime is still there for everything that is not QUIC, and it still
 sizes its thread pool to the machine. Set `TOKIO_WORKER_THREADS` in the

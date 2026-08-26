@@ -88,6 +88,8 @@ impl Config {
 /// nobody has claimed yet.
 struct Accepting {
 	config: quiche::Config,
+	/// The keep-alive every accepted connection's driver runs.
+	keep_alive: Option<std::time::Duration>,
 	queue: VecDeque<Connection>,
 }
 
@@ -142,6 +144,7 @@ impl Endpoint {
 		let accepting = match config.server {
 			Some(server) => Some(Accepting {
 				config: server.quiche()?,
+				keep_alive: server.transport.keep_alive,
 				queue: VecDeque::new(),
 			}),
 			None => None,
@@ -211,7 +214,9 @@ impl Endpoint {
 			config.peer,
 			&mut quiche_config,
 		)?;
-		let (shared, _key) = self.inner.launch(conn, vec![scid.to_vec()]);
+		let (shared, _key) = self
+			.inner
+			.launch(conn, vec![scid.to_vec()], config.transport.keep_alive);
 		// Flush the Initial flight; the demux task takes it from here.
 		shared.kick();
 		connection::establish(shared).await
@@ -350,6 +355,7 @@ impl Inner {
 		}
 
 		let scid = self.cid();
+		let keep_alive = self.accepting.borrow().as_ref().expect("checked above").keep_alive;
 		let mut conn = {
 			let mut accepting = self.accepting.borrow_mut();
 			let accepting = accepting.as_mut().expect("checked above");
@@ -375,7 +381,7 @@ impl Inner {
 
 		// Route our chosen id, and the client's Initial id: retransmitted
 		// Initials (and 0-RTT) keep carrying it until our id takes effect.
-		let (shared, key) = self.launch(conn, vec![scid.to_vec(), hdr.dcid.to_vec()]);
+		let (shared, key) = self.launch(conn, vec![scid.to_vec(), hdr.dcid.to_vec()], keep_alive);
 		shared.mark_ingested();
 
 		// Hand the connection over once (if) its handshake completes.
@@ -425,8 +431,13 @@ impl Inner {
 	}
 
 	/// Register `conn`, spawn its driver, and arrange its teardown.
-	fn launch(self: &Rc<Self>, conn: quiche::Connection, cids: Vec<Vec<u8>>) -> (connection::Shared, usize) {
-		let (shared, driver) = connection::launch(&self.handle, self.socket.clone(), conn);
+	fn launch(
+		self: &Rc<Self>,
+		conn: quiche::Connection,
+		cids: Vec<Vec<u8>>,
+		keep_alive: Option<std::time::Duration>,
+	) -> (connection::Shared, usize) {
+		let (shared, driver) = connection::launch(&self.handle, self.socket.clone(), conn, keep_alive);
 		let key = self.conns.borrow_mut().insert(Conn {
 			shared: shared.clone(),
 			cids: cids.clone(),

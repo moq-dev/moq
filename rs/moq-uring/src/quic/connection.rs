@@ -268,6 +268,7 @@ pub(crate) fn launch(
 	handle: &Handle,
 	socket: Rc<udp::Socket>,
 	conn: quiche::Connection,
+	keep_alive: Option<std::time::Duration>,
 ) -> (Shared, impl Future<Output = ()> + use<>) {
 	let is_server = conn.is_server();
 	let shared = Rc::new(Inner {
@@ -279,6 +280,11 @@ pub(crate) fn launch(
 		shared: shared.clone(),
 		socket,
 		deadline: moq_net::runtime::Deadline::new(handle),
+		keep_alive: match keep_alive {
+			Some(every) => moq_net::runtime::Deadline::after(handle, every),
+			None => moq_net::runtime::Deadline::new(handle),
+		},
+		keep_alive_every: keep_alive,
 		scratch: vec![0u8; 65535],
 		carry: None,
 	};
@@ -547,6 +553,11 @@ struct Driver {
 	shared: Shared,
 	socket: Rc<udp::Socket>,
 	deadline: moq_net::runtime::Deadline<Handle>,
+	/// Fires when the connection owes the peer an ack-eliciting packet, so an
+	/// idle path (and whatever NAT sits on it) stays open. Disarmed when the
+	/// caller asked for no keep-alive.
+	keep_alive: moq_net::runtime::Deadline<Handle>,
+	keep_alive_every: Option<std::time::Duration>,
 	/// Datagram receive scratch.
 	scratch: Vec<u8>,
 	/// A packet quiche handed us for a different path than the train being
@@ -594,12 +605,22 @@ impl Driver {
 			// Arm, *then* poll: the poll is what registers the waiter, so
 			// polling before the set would leave the firing to wake nobody
 			// (fatal on a dial nobody answers, where no ingress ever re-polls
-			// us). Elapsed means quiche's timeout is due right now; restart
-			// the turn so its effects flush and the next deadline arms.
-			if self.deadline.poll(waiter).is_pending() {
+			// us). Elapsed means the timer is due right now; restart the turn
+			// so its effects flush and the next deadline arms.
+			let timeout = self.deadline.poll(waiter);
+			let keep_alive = self.keep_alive.poll(waiter);
+			if timeout.is_pending() && keep_alive.is_pending() {
 				return Poll::Pending;
 			}
-			self.shared.conn.borrow_mut().on_timeout();
+			if timeout.is_ready() {
+				self.shared.conn.borrow_mut().on_timeout();
+			}
+			if keep_alive.is_ready() {
+				// With nothing else queued quiche emits a PING, which is the
+				// point; with traffic in flight the flag just rides along.
+				let _ = self.shared.conn.borrow_mut().send_ack_eliciting();
+				self.arm_keep_alive();
+			}
 		}
 	}
 
@@ -727,6 +748,14 @@ impl Driver {
 		// poll costs one empty acquire and then parks normally.
 		waiter.waker().wake_by_ref();
 		Poll::Pending
+	}
+
+	/// Re-arm the keep-alive timer, if this connection asked for one.
+	fn arm_keep_alive(&mut self) {
+		let at = self
+			.keep_alive_every
+			.and_then(|every| std::time::Instant::now().checked_add(every));
+		self.keep_alive.set(at);
 	}
 
 	fn fail(&mut self, err: Error) {

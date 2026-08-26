@@ -27,8 +27,9 @@ pub struct Config {
 	pub system_roots: bool,
 	/// A certificate to present when the server asks for one (mTLS).
 	pub identity: Option<Identity>,
-	/// Close the connection after this long without activity.
-	pub idle_timeout: std::time::Duration,
+	/// The per-connection transport settings (timeouts, stream limits,
+	/// congestion control).
+	pub transport: super::Transport,
 }
 
 impl Config {
@@ -42,7 +43,7 @@ impl Config {
 			roots: Vec::new(),
 			system_roots: true,
 			identity: None,
-			idle_timeout: std::time::Duration::from_secs(10),
+			transport: super::Transport::default(),
 		}
 	}
 
@@ -62,7 +63,7 @@ impl Config {
 				verify: boring::ssl::SslVerifyMode::NONE,
 			},
 		};
-		super::tls(&self.alpn, self.identity.as_ref(), trust, self.idle_timeout)
+		super::tls(&self.alpn, self.identity.as_ref(), trust, &self.transport)
 	}
 }
 

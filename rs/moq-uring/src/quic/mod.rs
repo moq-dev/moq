@@ -72,12 +72,77 @@ pub(crate) struct Trust {
 	pub verify: boring::ssl::SslVerifyMode,
 }
 
+/// The per-connection transport knobs, the same for either role.
+///
+/// Separate from the role configs so a caller that already has these
+/// settings (a relay applying its `--quic-*` section, say) sets them once and
+/// hands the same value to a dial and a listener.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Transport {
+	/// Close the connection after this long without activity.
+	pub idle_timeout: std::time::Duration,
+	/// The most streams of each kind (bidirectional and unidirectional) a peer
+	/// may have open at once. MoQ opens a stream per group, so busy endpoints
+	/// want this high.
+	pub max_streams: u64,
+	/// Which congestion controller to run.
+	pub congestion: Congestion,
+	/// Probe for a larger path MTU than the conservative default.
+	pub mtu_discovery: bool,
+	/// How often to send an ack-eliciting packet on an otherwise idle
+	/// connection, or `None` (the default) to send none and let the idle
+	/// timeout decide.
+	pub keep_alive: Option<std::time::Duration>,
+}
+
+impl Default for Transport {
+	fn default() -> Self {
+		Self {
+			idle_timeout: std::time::Duration::from_secs(10),
+			max_streams: 1024,
+			congestion: Congestion::default(),
+			mtu_discovery: false,
+			keep_alive: None,
+		}
+	}
+}
+
+/// The congestion control family a connection runs.
+///
+/// The default is [`Loss`](Self::Loss), which is quiche's own, so a caller
+/// that sets nothing gets what this crate has always done. An application
+/// carrying live media wants [`Delay`](Self::Delay) and should say so; the
+/// relay does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Congestion {
+	/// Loss-based: grows until it drops packets, so the send rate sawtooths.
+	#[default]
+	Loss,
+	/// Delay-based: tracks the measured delivery rate and RTT instead of
+	/// waiting for loss, which keeps queues short and the send rate steady
+	/// enough for an encoder to track.
+	Delay,
+}
+
+impl Congestion {
+	/// quiche takes its controller by name, and its BBR is the v2 gcongestion
+	/// port.
+	fn name(self) -> &'static str {
+		match self {
+			Self::Loss => "cubic",
+			Self::Delay => "bbr2_gcongestion",
+		}
+	}
+}
+
 /// Build the quiche config shared by both roles.
 pub(crate) fn tls(
 	alpn: &[String],
 	identity: Option<&Identity>,
 	trust: Trust,
-	idle_timeout: std::time::Duration,
+	transport: &Transport,
 ) -> Result<quiche::Config, Error> {
 	use boring::ssl::{SslContextBuilder, SslFiletype, SslMethod};
 
@@ -96,15 +161,17 @@ pub(crate) fn tls(
 	let mut config = quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, builder)?;
 	let alpn: Vec<&[u8]> = alpn.iter().map(|p| p.as_bytes()).collect();
 	config.set_application_protos(&alpn)?;
-	config.set_max_idle_timeout(idle_timeout.as_millis() as u64);
+	config.set_max_idle_timeout(transport.idle_timeout.as_millis() as u64);
 	config.set_max_recv_udp_payload_size(SEGMENT);
 	config.set_max_send_udp_payload_size(SEGMENT);
 	config.set_initial_max_data(16 * 1024 * 1024);
 	config.set_initial_max_stream_data_bidi_local(4 * 1024 * 1024);
 	config.set_initial_max_stream_data_bidi_remote(4 * 1024 * 1024);
 	config.set_initial_max_stream_data_uni(4 * 1024 * 1024);
-	config.set_initial_max_streams_bidi(256);
-	config.set_initial_max_streams_uni(1024);
+	config.set_initial_max_streams_bidi(transport.max_streams);
+	config.set_initial_max_streams_uni(transport.max_streams);
+	config.set_cc_algorithm_name(transport.congestion.name())?;
+	config.discover_pmtu(transport.mtu_discovery);
 	config.enable_dgram(true, 64, 64);
 	Ok(config)
 }

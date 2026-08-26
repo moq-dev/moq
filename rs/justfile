@@ -298,6 +298,13 @@ fix-changed $FILES:
 windows *args:
     cargo check --locked --workspace --exclude moq-gst --all-targets --features "moq-cli/play moq-cli/capture" {{ args }}
 
+# Compile and test the io_uring relay path, which is off the default feature
+# set (quiche links BoringSSL, and a default relay build has no use for it).
+# Linux-only, and the tests below the 6.12 kernel floor skip themselves.
+uring *args:
+    cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }} -- -D warnings
+    cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }}
+
 # Runs the `#[cfg(target_os = "macos")]` code past the compiler: moq-video's
 # VideoToolbox encode/decode and its ScreenCaptureKit / AVFoundation capture,
 # plus moq-audio's ScreenCaptureKit system audio and TCC permission pre-check.

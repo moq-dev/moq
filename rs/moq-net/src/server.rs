@@ -265,20 +265,6 @@ impl Server {
 		<R::Transport as web_transport_trait::poll::Session>::RecvStream: MaybeSync,
 		R::Timer: MaybeSend,
 	{
-		// Regimes without a path to read defer to `ok()` without surfacing one, and
-		// carry no role or origin hint, so authorization is unchanged for them.
-		let deferred = |runtime: R, handshake| Request {
-			path: None,
-			role: None,
-			origin: None,
-			assigned_origin: crate::Origin::random(),
-			inner: Some(RequestInner {
-				server: self.clone(),
-				runtime,
-				handshake,
-			}),
-		};
-
 		let (encoding, supported) = match session.protocol() {
 			Some(ALPN_19) => {
 				self.versions
@@ -319,56 +305,10 @@ impl Server {
 					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
-			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06_WIP)) => {
-				let version = match alpn {
-					ALPN_LITE_06_WIP => lite::Version::Lite06Wip,
-					_ => lite::Version::Lite05,
-				};
-				self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
-
-				// Gate on the client's SETUP: read it before serving so the caller can
-				// scope by the advertised path. Seeded back into `start` on `ok()` so
-				// PROBE gating resolves without re-reading the (consumed) Setup Stream.
-				let client_setup = lite::accept_setup(&mut session, version).await?;
-				return Ok(Request {
-					path: client_setup.path.clone(),
-					role: client_setup.role,
-					origin: client_setup.origin,
-					assigned_origin: crate::Origin::random(),
-					inner: Some(RequestInner {
-						server: self.clone(),
-						runtime,
-						handshake: Handshake::LiteSetup {
-							session,
-							version,
-							client_setup,
-						},
-					}),
-				});
-			}
-			Some(ALPN_LITE_04) => {
-				self.versions
-					.select(Version::Lite(lite::Version::Lite04))
-					.ok_or(Error::Version)?;
-				return Ok(deferred(
-					runtime,
-					Handshake::LiteBare {
-						session,
-						version: lite::Version::Lite04,
-					},
-				));
-			}
-			Some(ALPN_LITE_03) => {
-				self.versions
-					.select(Version::Lite(lite::Version::Lite03))
-					.ok_or(Error::Version)?;
-				return Ok(deferred(
-					runtime,
-					Handshake::LiteBare {
-						session,
-						version: lite::Version::Lite03,
-					},
-				));
+			// Every lite ALPN goes through the same entry point, which is also
+			// what a `!Send` transport calls directly.
+			Some(ALPN_LITE_05 | ALPN_LITE_06_WIP | ALPN_LITE_04 | ALPN_LITE_03) => {
+				return self.accept_request_lite(runtime, session).await;
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -524,6 +464,10 @@ enum Handshake<S: crate::transport::poll::Session, R: crate::runtime::Runtime> {
 
 /// A paused non-lite handshake. See [`Handshake::Boxed`] for why this is a
 /// trait object.
+///
+/// `MaybeSync` is not decoration: a caller holding a [`Request`] across an
+/// await behind `&self` (moq-relay authenticates that way) needs
+/// `&Request: Send`, which is `Request: Sync`, which is this.
 trait Paused<R: crate::runtime::Runtime>: MaybeSend + MaybeSync {
 	/// Complete the handshake with the final server config.
 	fn ok(

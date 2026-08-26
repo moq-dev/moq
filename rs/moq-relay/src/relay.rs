@@ -85,7 +85,7 @@ pub struct Relay {
 	/// [`serve`](crate::uring::Workers::serve). `None` unless both
 	/// `runtime.workers` and `runtime.io_uring` are configured, in which case
 	/// they own the QUIC listen address instead of [`Self::workers`].
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", feature = "io-uring"))]
 	pub uring: Option<crate::uring::Workers>,
 }
 
@@ -112,6 +112,11 @@ impl Relay {
 		);
 		#[cfg(not(target_os = "linux"))]
 		anyhow::ensure!(!io_uring, "runtime.io_uring is Linux-only");
+		#[cfg(all(target_os = "linux", not(feature = "io-uring")))]
+		anyhow::ensure!(
+			!io_uring,
+			"runtime.io_uring needs moq-relay built with the `io-uring` feature"
+		);
 
 		let workers = match config.runtime.workers() {
 			Some(worker) if !io_uring => Some(
@@ -120,18 +125,18 @@ impl Relay {
 			),
 			_ => None,
 		};
-		#[cfg(target_os = "linux")]
+		#[cfg(all(target_os = "linux", feature = "io-uring"))]
 		let uring = match config.runtime.workers() {
 			Some(worker) if io_uring => Some(
-				crate::uring::Workers::bind(&config.listen, worker)
+				crate::uring::Workers::bind(&config.listen, &config.quic, worker)
 					.context("failed to start the io_uring QUIC workers")?,
 			),
 			_ => None,
 		};
 
-		#[cfg(target_os = "linux")]
+		#[cfg(all(target_os = "linux", feature = "io-uring"))]
 		let quic_owned_elsewhere = workers.is_some() || uring.is_some();
-		#[cfg(not(target_os = "linux"))]
+		#[cfg(not(all(target_os = "linux", feature = "io-uring")))]
 		let quic_owned_elsewhere = workers.is_some();
 
 		#[allow(unused_mut)]
@@ -142,9 +147,9 @@ impl Relay {
 		let client = config.connect.clone().init(config.quic.clone())?;
 
 		// `None` for a stream-only server (no QUIC); any other error is real.
-		#[cfg(target_os = "linux")]
+		#[cfg(all(target_os = "linux", feature = "io-uring"))]
 		let uring_addr = uring.as_ref().map(crate::uring::Workers::local_addr);
-		#[cfg(not(target_os = "linux"))]
+		#[cfg(not(all(target_os = "linux", feature = "io-uring")))]
 		let uring_addr: Option<std::net::SocketAddr> = None;
 		let addr = match (&workers, uring_addr) {
 			(Some(workers), _) => Some(workers.local_addr()),
@@ -232,7 +237,7 @@ impl Relay {
 			shutdown,
 			shutdown_trigger,
 			workers,
-			#[cfg(target_os = "linux")]
+			#[cfg(all(target_os = "linux", feature = "io-uring"))]
 			uring,
 		})
 	}
@@ -252,7 +257,7 @@ impl Relay {
 			shutdown,
 			shutdown_trigger,
 			workers,
-			#[cfg(target_os = "linux")]
+			#[cfg(all(target_os = "linux", feature = "io-uring"))]
 			uring,
 			..
 		} = self;
@@ -274,17 +279,17 @@ impl Relay {
 
 		// The io_uring workers own their accept loops outright: serving starts
 		// here, and the group only reports a fatal error back.
-		#[cfg(target_os = "linux")]
+		#[cfg(all(target_os = "linux", feature = "io-uring"))]
 		let mut uring = uring;
-		#[cfg(target_os = "linux")]
+		#[cfg(all(target_os = "linux", feature = "io-uring"))]
 		if let Some(uring) = uring.as_mut() {
 			uring
 				.serve(cluster.clone(), auth.clone(), shutdown.clone())
 				.context("failed to start the io_uring QUIC workers")?;
 		}
-		#[cfg(target_os = "linux")]
+		#[cfg(all(target_os = "linux", feature = "io-uring"))]
 		let uring_serving = uring.is_some();
-		#[cfg(target_os = "linux")]
+		#[cfg(all(target_os = "linux", feature = "io-uring"))]
 		let uring_failed = {
 			let uring = uring.as_mut();
 			async move {
@@ -294,7 +299,7 @@ impl Relay {
 				}
 			}
 		};
-		#[cfg(not(target_os = "linux"))]
+		#[cfg(not(all(target_os = "linux", feature = "io-uring")))]
 		let uring_failed = std::future::pending::<anyhow::Error>();
 
 		// Each worker serves from its own thread, so the future built here only
@@ -332,9 +337,9 @@ impl Relay {
 		// of those has nothing to accept: its loop would report "stopped
 		// accepting" immediately and take the healthy relay down. Pend instead;
 		// the workers are what serve.
-		#[cfg(target_os = "linux")]
+		#[cfg(all(target_os = "linux", feature = "io-uring"))]
 		let quic_on_workers = workers.is_some() || uring_serving;
-		#[cfg(not(target_os = "linux"))]
+		#[cfg(not(all(target_os = "linux", feature = "io-uring")))]
 		let quic_on_workers = workers.is_some();
 		let serve_shared = {
 			let idle = quic_on_workers && server.accept_health().is_empty();
@@ -366,7 +371,7 @@ impl Relay {
 		if let Some(workers) = workers {
 			workers.shutdown().await;
 		}
-		#[cfg(target_os = "linux")]
+		#[cfg(all(target_os = "linux", feature = "io-uring"))]
 		if let Some(uring) = uring {
 			uring.shutdown().await;
 		}

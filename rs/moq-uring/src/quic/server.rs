@@ -34,8 +34,9 @@ pub struct Config {
 	pub alpn: Vec<String>,
 	/// Whether to ask connecting clients for a certificate.
 	pub client_auth: ClientAuth,
-	/// Close the connection after this long without activity.
-	pub idle_timeout: std::time::Duration,
+	/// The per-connection transport settings (timeouts, stream limits,
+	/// congestion control).
+	pub transport: super::Transport,
 }
 
 impl Config {
@@ -46,7 +47,7 @@ impl Config {
 			identity,
 			alpn: Vec::new(),
 			client_auth: ClientAuth::default(),
-			idle_timeout: std::time::Duration::from_secs(10),
+			transport: super::Transport::default(),
 		}
 	}
 
@@ -72,7 +73,7 @@ impl Config {
 			system: false,
 			verify,
 		};
-		super::tls(&self.alpn, Some(&self.identity), trust, self.idle_timeout)
+		super::tls(&self.alpn, Some(&self.identity), trust, &self.transport)
 	}
 }
 

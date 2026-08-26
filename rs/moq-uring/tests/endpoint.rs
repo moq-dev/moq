@@ -206,7 +206,7 @@ fn an_unanswered_dial_times_out() {
 	let mut dial = dial_config(hole.local_addr().expect("addr"));
 	// quiche stretches this to 3x the initial probe timeout (RFC 9000 §10.1),
 	// so the dial resolves in about three seconds.
-	dial.idle_timeout = Duration::from_millis(500);
+	dial.transport.idle_timeout = Duration::from_millis(500);
 
 	let result = worker
 		.block_on(async move { quic::client::connect(&handle, client_sock, &dial).await })
@@ -245,7 +245,7 @@ fn the_backlog_bounds_pending_handshakes() {
 	let mut dial = dial_config(server);
 	// The server never answers, so the dial ends at the idle timeout; keep the
 	// test short.
-	dial.idle_timeout = Duration::from_millis(500);
+	dial.transport.idle_timeout = Duration::from_millis(500);
 
 	let result = worker
 		.block_on(async move { quic::client::connect(&handle, client_sock, &dial).await })
@@ -282,7 +282,7 @@ fn the_backlog_bounds_queued_connections() {
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("second client socket");
 	let mut second_config = dial_config(server);
-	second_config.idle_timeout = Duration::from_millis(500);
+	second_config.transport.idle_timeout = Duration::from_millis(500);
 	let second = worker
 		.block_on(async { quic::client::connect(&handle, second_sock, &second_config).await })
 		.expect("worker");
@@ -343,9 +343,14 @@ fn connections_share_one_tx_buffer_fairly() {
 				while send_running.get() {
 					let mut offset = 0;
 					while offset < chunk.len() {
-						offset += std::future::poll_fn(|cx| send.poll_write(cx, &chunk[offset..]))
-							.await
-							.expect("write busy stream");
+						match std::future::poll_fn(|cx| send.poll_write(cx, &chunk[offset..])).await {
+							Ok(n) => offset += n,
+							// The reader drops its half as the test winds down, which
+							// stops this stream mid-write. Only a stop *before* that is
+							// a real failure.
+							Err(_) if !send_running.get() => return,
+							Err(err) => panic!("write busy stream: {err}"),
+						}
 					}
 					let mut progress = send_progress.borrow_mut();
 					progress.bytes += chunk.len();
@@ -385,7 +390,7 @@ fn connections_share_one_tx_buffer_fairly() {
 				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 				.expect("second client socket");
 			let mut second_config = dial_config(server);
-			second_config.idle_timeout = Duration::from_millis(500);
+			second_config.transport.idle_timeout = Duration::from_millis(500);
 			let second = quic::client::connect(&handle, second_sock, &second_config).await;
 			running.set(false);
 			let second = second.expect("the second connection must not starve");

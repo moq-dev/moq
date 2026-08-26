@@ -88,6 +88,7 @@ pub struct Workers {
 	members: Vec<Member>,
 	addr: SocketAddr,
 	server: moq_uring::quic::server::Config,
+	udp: moq_uring::udp::Config,
 	pin: bool,
 	alpns: Arc<Vec<String>>,
 	versions: moq_net::Versions,
@@ -111,7 +112,11 @@ impl Workers {
 	/// server), and `tls.generate` is refused since every worker must serve
 	/// one identity. Unlike it, exactly one certificate/key pair is required,
 	/// and mTLS client roots are not yet wired through.
-	pub fn bind(listen: &moq_tokio::listen::Config, config: moq_tokio::worker::Config) -> anyhow::Result<Self> {
+	pub fn bind(
+		listen: &moq_tokio::listen::Config,
+		quic: &moq_tokio::quic::Config,
+		config: moq_tokio::worker::Config,
+	) -> anyhow::Result<Self> {
 		if !listen.tls.generate.is_empty() {
 			anyhow::bail!("io_uring workers cannot use listen.tls.generate; provide a certificate file");
 		}
@@ -187,6 +192,13 @@ impl Workers {
 
 		let mut server = moq_uring::quic::server::Config::new(moq_uring::quic::Identity::new(cert, key));
 		server.alpn = alpns.iter().cloned().chain(["h3".to_string()]).collect();
+		let quic = quic.resolve();
+		server.transport = transport(&quic)?;
+
+		// GSO is a property of the socket, not the connection, so it rides the
+		// worker's UDP config rather than quiche's.
+		let mut udp = moq_uring::udp::Config::default();
+		udp.gso = quic.gso.unwrap_or(true);
 
 		let (failures_tx, failures) = tokio::sync::mpsc::unbounded_channel();
 		tracing::info!(workers = count, %addr, "bound io_uring QUIC workers");
@@ -195,6 +207,7 @@ impl Workers {
 			members,
 			addr,
 			server,
+			udp,
 			pin: config.pin,
 			alpns: Arc::new(alpns),
 			versions,
@@ -236,15 +249,21 @@ impl Workers {
 			let index = member.shard.index();
 			let core = cores.get(index as usize % cores.len().max(1)).copied();
 			let stop = Arc::new(Stop::default());
-			let serve = serve.clone();
-			let server = self.server.clone();
-			let failures = self.failures_tx.clone();
 			let (ready_tx, ready_rx) = std::sync::mpsc::channel();
 
-			let thread_stop = stop.clone();
+			let spawn = Spawn {
+				member,
+				core,
+				server: self.server.clone(),
+				udp: self.udp.clone(),
+				serve: serve.clone(),
+				stop: stop.clone(),
+				ready: ready_tx,
+				failures: self.failures_tx.clone(),
+			};
 			let thread = std::thread::Builder::new()
 				.name(format!("moq-uring-{index}"))
-				.spawn(move || run_worker(member, core, server, serve, thread_stop, ready_tx, failures))
+				.spawn(move || run_worker(spawn))
 				.with_context(|| format!("failed to spawn io_uring worker {index}"))?;
 
 			// A worker that fails setup drops its sender, so a recv error and
@@ -310,6 +329,35 @@ impl std::fmt::Debug for Workers {
 	}
 }
 
+/// Map the relay's `--quic-*` section onto the worker's transport settings.
+///
+/// Everything the io_uring stack can express is applied; what it cannot is an
+/// error here rather than a setting the operator believes is in force. GSO is
+/// the exception in the other direction: it belongs to the socket, so the
+/// caller applies it to the UDP config instead.
+fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic::Transport> {
+	anyhow::ensure!(
+		quic.qlog.is_none(),
+		"io_uring workers cannot write qlog traces; drop quic.qlog or use the tokio workers"
+	);
+
+	let mut transport = moq_uring::quic::Transport::default();
+	transport.idle_timeout = quic.idle_timeout;
+	transport.max_streams = quic.max_streams;
+	transport.mtu_discovery = quic.mtu_discovery;
+	transport.keep_alive = quic.keep_alive;
+	transport.congestion = match quic.congestion_control {
+		Some(moq_tokio::quic::CongestionControl::Loss) => moq_uring::quic::Congestion::Loss,
+		// Unset means the backend's own default, and live media wants a steady
+		// send rate an encoder can track over CUBIC's sawtooth.
+		Some(moq_tokio::quic::CongestionControl::Delay) | None => moq_uring::quic::Congestion::Delay,
+		// A family added to the tokio stack later, rather than a silent
+		// substitution the operator would never learn about.
+		Some(other) => anyhow::bail!("io_uring workers cannot run the {other:?} congestion controller"),
+	};
+	Ok(transport)
+}
+
 /// Wait for every worker thread, reporting the ones that panicked.
 fn join(threads: Vec<(u16, std::thread::JoinHandle<()>)>) {
 	for (index, thread) in threads {
@@ -319,22 +367,40 @@ fn join(threads: Vec<(u16, std::thread::JoinHandle<()>)>) {
 	}
 }
 
-/// One worker thread: pin, ring up, serve the endpoint until stopped.
-fn run_worker(
+/// Everything one worker thread is handed at spawn.
+struct Spawn {
 	member: Member,
+	/// The core to pin to, or `None` when pinning is off or unavailable.
 	core: Option<moq_sock::cpu::CoreId>,
 	server: moq_uring::quic::server::Config,
+	udp: moq_uring::udp::Config,
 	serve: Serve,
 	stop: Arc<Stop>,
+	/// Reports setup back to [`Workers::serve`], which blocks on it so a
+	/// worker that cannot start is an error there rather than a dead thread.
 	ready: std::sync::mpsc::Sender<anyhow::Result<()>>,
+	/// Where a fatal error goes once the worker is running.
 	failures: tokio::sync::mpsc::UnboundedSender<anyhow::Error>,
-) {
+}
+
+/// One worker thread: pin, ring up, serve the endpoint until stopped.
+fn run_worker(spawn: Spawn) {
+	let Spawn {
+		member,
+		core,
+		server,
+		udp,
+		serve,
+		stop,
+		ready,
+		failures,
+	} = spawn;
 	let index = member.shard.index();
 	if let Some(core) = core {
 		if moq_sock::cpu::pin(core) {
-			tracing::debug!(index, core = core.id, "pinned io_uring QUIC worker");
+			tracing::debug!(index, core = core.id(), "pinned io_uring QUIC worker");
 		} else {
-			tracing::warn!(index, core = core.id, "failed to pin io_uring QUIC worker");
+			tracing::warn!(index, core = core.id(), "failed to pin io_uring QUIC worker");
 		}
 	}
 
@@ -342,7 +408,7 @@ fn run_worker(
 		let worker = moq_uring::Worker::new(Default::default()).context("io_uring setup failed")?;
 		let handle = worker.handle();
 		let socket = handle
-			.udp(member.socket, Default::default())
+			.udp(member.socket, udp)
 			.context("failed to adopt the worker socket")?;
 		let endpoint = moq_uring::quic::Endpoint::new(
 			&handle,
@@ -406,8 +472,12 @@ async fn serve_connection(
 	use web_transport_trait::poll::Session as _;
 
 	// Browsers speak WebTransport; everyone else raw QUIC. The moq version
-	// rides the ALPN for raw QUIC and the WebTransport subprotocol for `h3`
-	// (with in-band SETUP negotiation as the fallback for older clients).
+	// rides the ALPN for raw QUIC and the WebTransport subprotocol for `h3`.
+	// A browser offering no subprotocol we speak is refused with
+	// `Error::Version` rather than falling back to the pre-lite-05 bidi SETUP
+	// the tokio listener still accepts: that path is moq-transport-shaped, and
+	// reaching it would drag the thread-affinity bounds `accept_request_lite`
+	// exists to avoid back onto this transport.
 	let (transport, url) = match conn.protocol() {
 		Some("h3") => {
 			let request = moq_uring::quic::web::Request::accept(&handle, conn)
@@ -419,8 +489,12 @@ async fn serve_connection(
 				.iter()
 				.find(|offered| serve.alpns.iter().any(|alpn| alpn == *offered))
 				.cloned();
+			let mut response = moq_uring::quic::web::Response::default();
+			if let Some(protocol) = &protocol {
+				response = response.with_protocol(protocol);
+			}
 			let session = request
-				.respond(protocol.as_deref())
+				.respond(response)
 				.await
 				.context("WebTransport response failed")?;
 			(session, Some(url))

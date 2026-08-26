@@ -39,6 +39,12 @@ websocket = ["moq-tokio/websocket", "dep:qmux", "axum/ws"]
 # Unix-domain-socket stream listener (`--server-unix-bind`), unix-only. In the
 # default set; drop via --no-default-features on platforms without Unix sockets.
 uds = ["moq-tokio/uds"]
+# Serve QUIC from io_uring workers (`--runtime-io-uring`), Linux-only. Off by
+# default because it links a second TLS stack: quiche brings BoringSSL, and
+# building that needs cmake and a C++ toolchain a default relay build does not.
+# Compiled by the nightly `--all-features` pass (`just rs features`) and by
+# `just rs uring` on demand.
+io-uring = ["dep:moq-sock", "dep:moq-uring"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
@@ -75,8 +81,8 @@ usage = { workspace = true, features = ["completions"] }
 web-transport-trait = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-moq-sock = { workspace = true }
-moq-uring = { workspace = true }
+moq-sock = { workspace = true, optional = true }
+moq-uring = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 sd-notify = "0.5"
