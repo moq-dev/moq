@@ -510,14 +510,21 @@ pub struct LanConfig {
 	/// Enable mDNS discovery. Requires [`ClusterConfig::node`], so there is an
 	/// address to advertise, and [`Self::secret`]. Boolean flag: pass
 	/// `--cluster-lan` (or `=true` / `=false`).
+	/// `Option` rather than a materialized default: Usage reads a standing `false`
+	/// as an empty boolean, so `update_from` would refill it from the environment
+	/// (or a declared default) over whatever the TOML file said. An `Option` is
+	/// empty only when nothing set it. Every other shape a plain value can take
+	/// always reads as present, so this applies to booleans alone.
 	#[usage(
 		name = "cluster-lan",
 		long = "cluster-lan",
 		env = "MOQ_CLUSTER_LAN",
-		default = "false",
-		bool_value
+		default_missing = "true",
+		num_args = 0..=1,
+		require_equals = true,
 	)]
-	pub enabled: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub enabled: Option<bool>,
 
 	/// The shared key admitting a peer to the LAN mesh, as 64 hexadecimal
 	/// characters or a path to a file containing them. Required by
@@ -794,7 +801,7 @@ impl Cluster {
 	/// Whether `--cluster-lan` asked this relay to discover peers over mDNS.
 	fn lan(&self) -> bool {
 		#[cfg(feature = "cluster-lan")]
-		return self.config.lan.enabled;
+		return self.config.lan.enabled.unwrap_or(false);
 		#[cfg(not(feature = "cluster-lan"))]
 		false
 	}
@@ -1625,7 +1632,7 @@ mod tests {
 	#[tokio::test]
 	async fn stats_publishing_outlives_the_producer_handle() {
 		let config = crate::StatsConfig {
-			enabled: true,
+			enabled: Some(true),
 			node: Some("test".to_string()),
 			..Default::default()
 		};
@@ -2388,7 +2395,7 @@ mod tests {
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
-		assert!(config.cluster.lan.enabled);
+		assert_eq!(config.cluster.lan.enabled, Some(true));
 		assert_eq!(config.cluster.lan.secret.as_deref(), Some("cluster.key"));
 		assert_eq!(config.cluster.node.as_deref(), Some("https://relay.example.com"));
 	}
@@ -2414,7 +2421,7 @@ mod tests {
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert_eq!(config.cluster.lan.secret.as_deref(), Some("from-cli.key"));
-		assert!(config.cluster.lan.enabled, "the untouched key survives");
+		assert_eq!(config.cluster.lan.enabled, Some(true), "the untouched key survives");
 	}
 
 	/// The LAN needs an address to advertise, like gossip does.
@@ -2423,7 +2430,7 @@ mod tests {
 	async fn lan_without_node_errors() {
 		let config = ClusterConfig {
 			lan: LanConfig {
-				enabled: true,
+				enabled: Some(true),
 				..Default::default()
 			},
 			..Default::default()
@@ -2448,7 +2455,7 @@ mod tests {
 		let config = ClusterConfig {
 			node: Some("https://us-west.example.com".to_string()),
 			lan: LanConfig {
-				enabled: true,
+				enabled: Some(true),
 				..Default::default()
 			},
 			..Default::default()

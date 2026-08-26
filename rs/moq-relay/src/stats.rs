@@ -25,8 +25,21 @@ use serde::{Deserialize, Serialize};
 #[non_exhaustive]
 pub struct StatsConfig {
 	/// Master switch for stats publishing. Defaults to false.
-	#[usage(long = "stats-enabled", env = "MOQ_STATS_ENABLED", default = "false", bool_value)]
-	pub enabled: bool,
+	///
+	/// `Option` rather than a materialized default: Usage reads a standing `false`
+	/// as an empty boolean, so `update_from` would refill it from the environment
+	/// (or a declared default) over whatever the TOML file said. An `Option` is
+	/// empty only when nothing set it. Every other shape a plain value can take
+	/// always reads as present, so this applies to booleans alone.
+	#[usage(
+		long = "stats-enabled",
+		env = "MOQ_STATS_ENABLED",
+		default_missing = "true",
+		num_args = 0..=1,
+		require_equals = true,
+	)]
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub enabled: Option<bool>,
 
 	/// Top-level path under which stats broadcasts are published. Defaults
 	/// to `.stats`. Future stats categories (e.g. host-level node stats)
@@ -62,7 +75,7 @@ pub struct StatsConfig {
 impl Default for StatsConfig {
 	fn default() -> Self {
 		Self {
-			enabled: false,
+			enabled: None,
 			prefix: ".stats".into(),
 			interval: 1,
 			node: None,
@@ -80,7 +93,7 @@ impl StatsConfig {
 	/// the registry and keeping the publish task alive (the task stops when the
 	/// last clone of the producer drops).
 	pub fn build(&self, origin: origin::Producer) -> moq_stats::Producer {
-		if !self.enabled {
+		if !self.enabled.unwrap_or(false) {
 			return moq_stats::Producer::new(moq_stats::ProducerConfig::new());
 		}
 		let prefix = self.prefix.clone();

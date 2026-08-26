@@ -386,8 +386,9 @@ depth = 2
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
 
-		assert!(
+		assert_eq!(
 			config.stats.enabled,
+			Some(true),
 			"TOML's stats.enabled=true must not be clobbered by CLI defaults"
 		);
 		assert_eq!(config.stats.interval, 5);
@@ -687,7 +688,7 @@ key = ["cdn.key", "moq-pro.key"]
 			std::ffi::OsString::from("--stats-enabled=false"),
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
-		assert!(!config.stats.enabled);
+		assert_eq!(config.stats.enabled, Some(false));
 	}
 
 	/// An auth API loaded from TOML survives when the CLI omits it.
@@ -896,5 +897,46 @@ uid = [1001]
 	#[test]
 	fn the_spec_is_named_for_the_binary() {
 		assert_eq!(Config::spec().bin.unwrap_or(Config::spec().name), "moq-relay");
+	}
+
+	/// A TOML boolean survives an environment variable that says otherwise.
+	///
+	/// Usage reads a standing `false` as an empty boolean, so a bare `bool` is
+	/// refilled from the environment during the CLI re-parse and the file loses.
+	/// Every merged boolean is therefore `Option<bool>`; every other shape is
+	/// safe, because a plain value always reads as present.
+	#[test]
+	fn env_does_not_clobber_toml_booleans() {
+		let _env = EnvGuard::clear(&["MOQ_STATS_ENABLED", "MOQ_CLUSTER_LAN"]);
+		// SAFETY: EnvGuard serializes env mutation across these tests.
+		unsafe {
+			std::env::set_var("MOQ_STATS_ENABLED", "true");
+			std::env::set_var("MOQ_CLUSTER_LAN", "true");
+		}
+
+		let toml = "[stats]\nenabled = false\n\n[cluster.lan]\nenabled = false\n";
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("env-vs-toml-bools.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		unsafe {
+			std::env::remove_var("MOQ_STATS_ENABLED");
+			std::env::remove_var("MOQ_CLUSTER_LAN");
+		}
+
+		assert_eq!(
+			config.stats.enabled,
+			Some(false),
+			"TOML stats.enabled=false must beat MOQ_STATS_ENABLED=true"
+		);
+		assert_eq!(
+			config.cluster.lan.enabled,
+			Some(false),
+			"TOML cluster.lan.enabled=false must beat MOQ_CLUSTER_LAN=true"
+		);
 	}
 }
