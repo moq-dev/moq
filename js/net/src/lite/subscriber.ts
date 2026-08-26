@@ -167,9 +167,18 @@ export class Subscriber {
 		// as lite-05. Lite01-03 carry no real hop ids, so the check never matches there.
 		const dropReflected = options.ignoreSelf || !hasExcludeHop(this.version);
 
+		// Opened outside the try so the catch can reach it: a protocol violation below has
+		// to reset the stream, not just close our side of it.
+		let stream: Stream;
 		try {
-			// Open a stream and send the announce interest.
-			const stream = await Stream.open(this.#quic);
+			stream = await Stream.open(this.#quic);
+		} catch (err: unknown) {
+			announced.close(error(err));
+			return;
+		}
+
+		try {
+			// Send the announce interest.
 			await stream.writer.u53(StreamId.Announce);
 			await msg.encode(stream.writer, this.version);
 
@@ -354,7 +363,13 @@ export class Subscriber {
 
 			announced.close();
 		} catch (err: unknown) {
-			announced.close(error(err));
+			const e = error(err);
+			// Reaches here on a protocol violation the peer committed (a second
+			// advertisement for a live path, an unknown announce id) as well as on a
+			// transport failure. Either way the peer has to be told: closing only our side
+			// would leave it announcing into a stream nobody reads.
+			stream.abort(e);
+			announced.close(e);
 		}
 	}
 

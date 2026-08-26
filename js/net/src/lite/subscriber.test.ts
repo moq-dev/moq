@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
+import { error, reason } from "../error.ts";
 import { OriginSchema } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Writer } from "../stream.ts";
@@ -40,10 +41,14 @@ test("closing the subscriber suppresses probe stream warnings", async () => {
 // forged announce messages into the stream the subscriber opens.
 function announceHarness(version: Version, origin = 1n) {
 	let inbound!: ReadableStreamDefaultController<Uint8Array>;
+	// Resolves with the reason once the subscriber resets the stream, which is how a peer
+	// learns it violated the protocol. Never resolving is the failure this observes.
+	let onAbort!: (reason: unknown) => void;
+	const aborted = new Promise<unknown>((resolve) => (onAbort = resolve));
 	const quic = {
 		createBidirectionalStream: async () => ({
 			readable: new ReadableStream<Uint8Array>({ start: (controller) => (inbound = controller) }),
-			writable: new WritableStream<Uint8Array>(),
+			writable: new WritableStream<Uint8Array>({ abort: (reason) => void onAbort(reason) }),
 		}),
 	} as unknown as WebTransport;
 
@@ -68,7 +73,22 @@ function announceHarness(version: Version, origin = 1n) {
 		inbound.enqueue(out);
 	};
 
-	return { subscriber, send, settle: () => new Promise((resolve) => setTimeout(resolve, 0)) };
+	// The reason the subscriber reset the stream, or a prompt rejection if it never did.
+	// A peer that is not told about its own violation should fail the test visibly rather
+	// than hang it out to the suite timeout.
+	const abortReason = async () => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timeout = new Promise<never>((_, reject) => {
+			timer = setTimeout(() => reject(new Error("stream was never aborted")), 250);
+		});
+		try {
+			return reason(error(await Promise.race([aborted, timeout])));
+		} finally {
+			clearTimeout(timer);
+		}
+	};
+
+	return { subscriber, send, abortReason, settle: () => new Promise((resolve) => setTimeout(resolve, 0)) };
 }
 
 const PUBLISHER_A = OriginSchema.parse(7n);
@@ -233,7 +253,7 @@ test("lite-03 keeps an existing RTT, since its PROBE cannot carry one", async ()
 test("an announce skipped as a reflected loop still holds its path", async () => {
 	// The subscriber's own origin, so a chain naming it reflects back through us.
 	const SELF = 1n;
-	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06, SELF);
+	const { subscriber, send, abortReason, settle } = announceHarness(Version.DRAFT_06, SELF);
 	const announced = subscriber.announced(Path.empty());
 	await settle();
 
@@ -261,6 +281,9 @@ test("an announce skipped as a reflected loop still holds its path", async () =>
 	);
 
 	await expect(announced.next()).rejects.toThrow("duplicate announce");
+	// The peer has to hear about it: closing only our side would leave it announcing
+	// into a stream nobody reads.
+	expect(await abortReason()).toContain("duplicate announce");
 
 	announced.close();
 	subscriber.close();
@@ -385,7 +408,7 @@ test("a duplicate start is reported even when its own route reflects", async () 
 });
 
 test("a draft-02 initial set naming a path twice is refused", async () => {
-	const { subscriber, send, settle } = announceHarness(Version.DRAFT_02);
+	const { subscriber, send, abortReason, settle } = announceHarness(Version.DRAFT_02);
 	const announced = subscriber.announced(Path.empty());
 	await settle();
 
@@ -397,6 +420,7 @@ test("a draft-02 initial set naming a path twice is refused", async () => {
 	// Erroring the stream discards what it had already queued, so the consumer sees the
 	// violation rather than the first entry followed by it.
 	await expect(announced.next()).rejects.toThrow("duplicate announce");
+	expect(await abortReason()).toContain("duplicate announce");
 
 	announced.close();
 	subscriber.close();
