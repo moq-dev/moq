@@ -119,9 +119,10 @@ fn unsupported_version_is_negotiated() {
 			// Junk first: it must be ignored, not answered or fatal.
 			sock.send_to(&[0u8; 64], server)?;
 
-			// A v1-shaped Initial with a version nobody supports (GREASE).
+			// The long-header type bits are version-specific. Use bits that mean
+			// 0-RTT in v1 to prove we negotiate before interpreting them.
 			let mut packet = Vec::new();
-			packet.push(0xC0); // long header, fixed bit, type Initial
+			packet.push(0xD0); // long header, fixed bit, unknown-version type
 			packet.extend_from_slice(&0x0a0a_0a0au32.to_be_bytes());
 			packet.push(8); // dcid
 			packet.extend_from_slice(&[0xAB; 8]);
