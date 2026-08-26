@@ -50,7 +50,7 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"
 # RTMPS: TLS-terminate accepted connections. Mirrors moq-relay's pinning so the
 # workspace shares one tokio-rustls; the crypto provider comes from the supplied
 # `rustls::ServerConfig`, so no default crypto feature is needed here.
-tokio-rustls = { version = "0.26", default-features = false, optional = true }
+tokio-rustls = { workspace = true, optional = true }
 tracing = "0.1"
 
 [dev-dependencies]

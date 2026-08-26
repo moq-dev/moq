@@ -121,6 +121,7 @@ percent-encoding = "2"
 qmux = { version = "0.5.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
+tokio-rustls = { version = "0.26", default-features = false }
 web-async = { version = "0.1.5", features = ["tracing"] }
 web-transport-iroh = "0.7"
 # default-features off so the QUIC crypto provider is chosen by moq-native's
