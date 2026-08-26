@@ -383,3 +383,21 @@ test("a duplicate start is reported even when its own route reflects", async () 
 	announced.close();
 	subscriber.close();
 });
+
+test("a draft-02 initial set naming a path twice is refused", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_02);
+	const announced = subscriber.announced(Path.empty());
+	await settle();
+
+	// One advertisement per path, and the initial set is advertisements. Two entries for
+	// one path is the same violation as two ANNOUNCE_STARTs for it, which `start_announce`
+	// already rejects on the Rust side.
+	await send((w) => new AnnounceInit([Path.from("room"), Path.from("room")]).encode(w, Version.DRAFT_02));
+
+	// Erroring the stream discards what it had already queued, so the consumer sees the
+	// violation rather than the first entry followed by it.
+	await expect(announced.next()).rejects.toThrow("duplicate announce");
+
+	announced.close();
+	subscriber.close();
+});

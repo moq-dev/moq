@@ -204,12 +204,15 @@ export class Subscriber {
 					const init = await AnnounceInit.decode(stream.reader, this.version);
 
 					// Process initial announcements. These are advertisements like any other, so
-					// they go on record: a later `ended` for one has to find it here to retract
-					// it, and a second announcement at the same path is still one too many.
-					// Draft01/02 carry no hop ids and no ANNOUNCE_OK, so nothing names the
-					// publisher.
+					// they go on record and obey the same one-per-path rule: the initial set
+					// naming a path twice is the same violation as two ANNOUNCE_STARTs for it,
+					// and the record is what catches either. Draft01/02 carry no hop ids and no
+					// ANNOUNCE_OK, so nothing names the publisher.
 					for (const suffix of init.suffixes) {
 						const path = Path.join(prefix, suffix);
+						if (advertised.has(suffix)) {
+							throw new Error(`duplicate announce for ${path}`);
+						}
 						advertised.set(suffix, { publisher: undefined, live: true });
 						console.debug(`announced: broadcast=${path} active=true`);
 						announced.append({ path: suffix, active: true });
