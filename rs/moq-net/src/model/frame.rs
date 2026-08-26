@@ -56,10 +56,11 @@ pub struct Frame {
 /// default on a const parameter only applies in type position, so name the type to
 /// get it: `let buf: frame::Buffer = Buffer::new()`.
 ///
-/// A fill stamps the group's cache access once for the whole batch, so a reader that
-/// takes longer than the track's `latency_max` to work through one batch can find the
-/// rest of the group expired. Size the buffer so a batch is comfortably quicker than
-/// that window.
+/// A fill stamps the group's cache access once for the whole batch, which bounds
+/// frames rather than elapsed time. A reader that may take longer than the track's
+/// `latency_max` to work through one batch calls
+/// [`group::Consumer::keep_alive`] between frames, or the rest of the group is
+/// expired out from under it.
 #[derive(Debug, Default)]
 pub struct Buffer<const N: usize = 32>(ArrayVec<Frame, N>);
 

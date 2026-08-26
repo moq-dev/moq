@@ -793,6 +793,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						} else {
 							stream.write_chunk(frame.payload).await?;
 						}
+						// The fill stamped the group once. A flow-controlled peer can
+						// take longer than `latency_max` to accept one batch, so keep
+						// stamping or the rest of the group expires mid-serve.
+						group.keep_alive();
 					}
 				}
 				Step::Partial(mut frame) => {

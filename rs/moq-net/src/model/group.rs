@@ -372,12 +372,14 @@ impl Producer {
 	/// the batch with [`frame::Buffer::push`].
 	///
 	/// The batch is validated before anything is written, so a rejected frame leaves
-	/// the group untouched and the buffer intact.
+	/// both the group and the buffer exactly as they were, ready to retry or redirect.
 	pub fn write_frames<const N: usize>(&mut self, frames: &mut frame::Buffer<N>) -> Result<()> {
-		// Convert and check up front: a failure half way through would leave the group
-		// holding part of a batch the caller thinks it still owns.
-		for frame in frames.filled_mut() {
-			frame.timestamp = frame
+		// Check the whole batch up front, without touching it: a rejected batch stays
+		// exactly as the caller built it, so it can be retried or sent elsewhere.
+		// Timestamp conversion is lossy across scales that don't divide evenly, so
+		// converting in place here would silently shift presentation times on retry.
+		for frame in frames.filled() {
+			frame
 				.timestamp
 				.convert(self.track.timescale)
 				.map_err(|_| Error::TimestampMismatch)?;
@@ -394,7 +396,13 @@ impl Producer {
 			return Err(Error::Closed);
 		}
 		debug_assert!(state.partial.is_none(), "a frame is already open");
-		for frame in frames.drain() {
+		// Past every fallible check: converting again can't fail, and the batch is
+		// ours from here.
+		for mut frame in frames.drain() {
+			frame.timestamp = frame
+				.timestamp
+				.convert(self.track.timescale)
+				.expect("timestamp scale checked above");
 			let size = frame.payload.len() as u64;
 			bytes += size;
 			state.cache += size;
@@ -661,10 +669,25 @@ impl Consumer {
 		self.state.read().abort.is_some()
 	}
 
+	/// Mark the group as still being read, so a slow drain doesn't expire it.
+	///
+	/// [`Self::read_frames`] stamps the group's cache access once per batch, which
+	/// bounds frames rather than elapsed time. A reader that takes longer than the
+	/// track's `latency_max` to work through one batch (a publisher writing to a
+	/// flow-controlled peer, say) calls this between frames, or the rest of the group
+	/// is expired out from under it mid-serve. [`Self::read_frame`] stamps on every
+	/// call and needs no help.
+	///
+	/// Cheap and idempotent within a coarse clock tick, so calling it per frame is
+	/// fine.
+	pub fn keep_alive(&self) {
+		self.state.read().charge.refresh();
+	}
+
 	/// Record a cache access from the consumer side: a parked group re-offered to
 	/// its subscriber. Same stamp as [`Producer::cache_refresh`].
 	pub(crate) fn cache_refresh(&self) {
-		self.state.read().charge.refresh();
+		self.keep_alive();
 	}
 
 	/// Park `waiter` until the group closes (finish, abort, or eviction). Spliced
@@ -757,6 +780,9 @@ impl Consumer {
 	/// This is a *short* read: it returns as soon as anything is ready rather than
 	/// waiting for `out` to fill, so a partial batch does not mean the group ended.
 	/// Only a count of `0` does (and only for a non-zero capacity).
+	///
+	/// One stamp covers the whole batch, so a slow drain calls
+	/// [`Self::keep_alive`] between frames.
 	pub fn poll_read_frames<const N: usize>(
 		&mut self,
 		waiter: &kio::Waiter,
@@ -944,6 +970,70 @@ mod test {
 		producer.finish().unwrap();
 		let mut consumer = producer.consume();
 		assert!(drain::<4>(&mut consumer).is_empty(), "nothing was written");
+	}
+
+	/// A batch rejected mid-validation must leave the caller's frames byte-identical,
+	/// including their timestamps: converting in place would compound scale loss if
+	/// the batch is retried against another track.
+	#[test]
+	fn write_frames_leaves_a_rejected_batch_unconverted() {
+		use crate::Timescale;
+
+		let mut producer = Producer::new(
+			Info { sequence: 0 },
+			track::Info::default().with_timescale(Timescale::MICRO),
+			Default::default(),
+		);
+
+		let mut buf = frame::Buffer::<4>::new();
+		buf.push(frame::Frame {
+			timestamp: Timestamp::from_millis(1).unwrap(),
+			payload: Bytes::from_static(b"ok"),
+		})
+		.unwrap();
+		// Refused after the first frame would already have been converted in place.
+		buf.push(frame::Frame {
+			timestamp: Timestamp::from_millis(2).unwrap(),
+			payload: Bytes::from(vec![0u8; MAX_GROUP_CACHE as usize + 1]),
+		})
+		.unwrap();
+
+		assert!(matches!(producer.write_frames(&mut buf), Err(Error::FrameTooLarge)));
+		let kept = buf.filled();
+		assert_eq!(kept.len(), 2, "the batch is still the caller's");
+		assert_eq!(kept[0].timestamp.scale(), Timescale::MILLI, "timestamp was rewritten");
+		assert_eq!(kept[0].timestamp.value(), 1);
+	}
+
+	/// A batch that is accepted still converts into the track's scale.
+	#[test]
+	fn write_frames_converts_into_the_track_scale() {
+		use crate::Timescale;
+
+		let mut producer = Producer::new(
+			Info { sequence: 0 },
+			track::Info::default().with_timescale(Timescale::MICRO),
+			Default::default(),
+		);
+
+		let mut buf = frame::Buffer::<4>::new();
+		buf.push(frame::Frame {
+			timestamp: Timestamp::from_millis(1).unwrap(),
+			payload: Bytes::from_static(b"x"),
+		})
+		.unwrap();
+		producer.write_frames(&mut buf).unwrap();
+		producer.finish().unwrap();
+
+		let frame = producer
+			.consume()
+			.read_frame()
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(frame.timestamp.scale(), Timescale::MICRO);
+		assert_eq!(frame.timestamp.value(), 1000);
 	}
 
 	#[test]

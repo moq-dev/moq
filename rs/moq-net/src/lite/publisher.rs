@@ -1136,6 +1136,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					for i in 0..buf.filled().len() {
 						let frame = buf.filled()[i].clone();
 						write_fetch_frame(&mut stream.writer, frame, timescale, &mut prev_ts).await?;
+						// One stamp per batch isn't enough for a slow peer; see `write_group`.
+						group.keep_alive();
 					}
 				}
 				Step::Partial(mut frame) => {
@@ -2185,6 +2187,10 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 						// across them for no reason.
 						let frame = buf.filled()[i].clone();
 						self.serve_whole_frame(stream, priority, frame, &mut prev_ts).await?;
+						// The fill stamped the group once. A flow-controlled peer can
+						// take longer than `latency_max` to accept one batch, so keep
+						// stamping or the rest of the group expires mid-serve.
+						group.keep_alive();
 					}
 				}
 				Step::Partial(frame) => self.serve_frame(stream, priority, frame, &mut prev_ts).await?,
