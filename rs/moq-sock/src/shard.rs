@@ -57,10 +57,15 @@ pub struct Shard {
 }
 
 impl Shard {
-	/// Slot `index` of a group of `count` sockets, or `None` if that slot does
-	/// not exist (`count` of zero, or an `index` at or past the end).
+	/// Slot `index` of a group of `count` sockets, or `None` if that slot
+	/// cannot exist: a `count` of zero or past [`MAX_SHARDS`], or an `index`
+	/// at or past the end.
+	///
+	/// The upper bound is what makes every constructible shard safe to steer:
+	/// [`cid_prefix`] spends `256 / count` values of a byte, so a larger group
+	/// would leave it none to spend.
 	pub fn new(index: u16, count: u16) -> Option<Self> {
-		(index < count).then_some(Self { index, count })
+		(count <= MAX_SHARDS && index < count).then_some(Self { index, count })
 	}
 
 	/// This member's position in the group, from zero.
@@ -321,7 +326,7 @@ pub fn cid_prefix(shard: Shard) -> u8 {
 
 	let count = u32::from(shard.count());
 	// The number of whole strides of `count` that fit in a byte. At least one,
-	// because `Workers::bind` refuses a group larger than `MAX_SHARDS`.
+	// because `Shard::new` refuses a group larger than `MAX_SHARDS`.
 	let strides = 256 / count;
 	let stride = rand::rng().random_range(0..strides);
 
@@ -424,13 +429,17 @@ fn program(count: u16) -> [libc::sock_filter; 7] {
 mod tests {
 	use super::*;
 
-	/// A slot has to exist in the group it names.
+	/// A slot has to exist in the group it names, and the group has to be one
+	/// the steering filter can address: `cid_prefix` divides by the count, so
+	/// an oversized group would panic on a zero-width stride.
 	#[test]
 	fn shard_slots_are_bounded() {
 		assert_eq!(Shard::new(0, 1).map(|shard| shard.count()), Some(1));
 		assert_eq!(Shard::new(3, 4).map(|shard| shard.index()), Some(3));
 		assert!(Shard::new(4, 4).is_none());
 		assert!(Shard::new(0, 0).is_none());
+		assert!(Shard::new(0, MAX_SHARDS).is_some());
+		assert!(Shard::new(0, MAX_SHARDS + 1).is_none());
 	}
 
 	/// The encoding's only real requirement: whatever byte a member issues has to
