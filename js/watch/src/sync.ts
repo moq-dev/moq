@@ -12,19 +12,31 @@ export type Bound = "real-time" | Time.Milli;
  * frames (e.g. a TTS response with future timestamps) build up instead of being skipped. Both
  * bounds default to `"real-time"` when omitted. The ceiling is always finite (no uncapped buffering),
  * so worst case the audio ring drops its oldest samples rather than exhausting memory.
+ *
+ * `"instant"` drops the clock instead of bounding it: video paints the moment it decodes and
+ * audio is disabled. It replaces the range rather than sitting inside it, so it is not a
+ * {@link Bound} and cannot be used as a floor or ceiling. Detaching video and disabling audio is
+ * the owner's job, so {@link Sync} takes the narrower {@link Paced} and never sees it.
  */
-export type Latency = Bound | { min?: Bound; max?: Bound };
+export type Latency = "instant" | Paced;
 
-/** Resolve a {@link Latency} into explicit floor/ceiling bounds (a scalar collapses to `min == max`). */
+/** A latency target the playback clock can pace off on its own: every {@link Latency} but `"instant"`. */
+export type Paced = Bound | { min?: Bound; max?: Bound };
+
+/**
+ * Resolve a {@link Latency} into explicit floor/ceiling bounds (a scalar collapses to `min == max`).
+ * `"instant"` holds nothing, so both bounds are zero.
+ */
 export function latencyBounds(latency: Latency): { min: Bound; max: Bound } {
+	if (latency === "instant") return { min: Time.Milli.zero, max: Time.Milli.zero };
 	if (latency === "real-time" || typeof latency === "number") {
 		return { min: latency, max: latency };
 	}
 	return { min: latency.min ?? "real-time", max: latency.max ?? "real-time" };
 }
 
-/** Build a {@link Latency} from explicit bounds, collapsing to a scalar when they're equal. */
-export function latencyFromBounds(min: Bound, max: Bound): Latency {
+/** Build a {@link Paced} latency from explicit bounds, collapsing to a scalar when they're equal. */
+export function latencyFromBounds(min: Bound, max: Bound): Paced {
 	return min === max ? min : { min, max };
 }
 
@@ -32,14 +44,21 @@ const MIN_JITTER = Time.Milli(20);
 const FALLBACK_JITTER = Time.Milli(100);
 
 export type SyncInput = {
-	// Latency target: a scalar minimizes (collapsed range), an object opens a range. See {@link Latency}.
+	/**
+	 * Latency target: a scalar minimizes (collapsed range), an object opens a range. See {@link Paced}.
+	 *
+	 * A clock cannot implement `"instant"` on its own, since not pacing video and disabling audio
+	 * are the owner's job. Pass a {@link Paced} value: `"instant"` resolves to a zero buffer here.
+	 */
 	latency: Getter<Latency>;
 
-	// The connection used for "real-time" jitter: PROBE supplies RTT.
+	/** The connection used for "real-time" jitter: PROBE supplies RTT. */
 	connection: Getter<Moq.Connection.Established | undefined>;
 
-	// Any additional delay required for audio or video (wired from the per-rendition source).
+	/** Any additional delay required for audio (wired from the per-rendition source). */
 	audio: Getter<Time.Milli | undefined>;
+
+	/** Any additional delay required for video (wired from the per-rendition source). */
 	video: Getter<Time.Milli | undefined>;
 };
 
