@@ -829,8 +829,7 @@ When forwarding an announcement received from an upstream peer, a relay MUST app
 The first entry of the reconstructed path identifies the original publisher of the broadcast; it is the fallback content identity when `Epoch` is 0 (see [Routing](#routing)).
 A Hop ID value of 0 means the hop is unknown: either it was never assigned or a relay deliberately withholds it (see [Routing](#routing)).
 
-A receiver MUST close the session with a PROTOCOL_VIOLATION if a non-zero Hop ID appears twice in the reconstructed path.
-An announcement that traversed the same relay twice looped, so neither forwarding it nor subscribing through it is safe.
+A receiver MUST close the session with a PROTOCOL_VIOLATION if a non-zero Hop ID appears twice in this list.
 Duplicate values of 0 are not a violation, since 0 identifies nothing and any number of hops may be unknown.
 
 **Warm Route Cost** and **Cold Route Cost**:
@@ -1340,6 +1339,7 @@ The `Message Length` describes the payload size on the wire.
 # Appendix A: Changelog
 
 ## moq-lite-06
+- Made a repeated non-zero Hop ID in one announcement's Hop ID list a PROTOCOL_VIOLATION, matching draft-lcurley-moq-cluster. Repeated 0 entries stay legal.
 - Moved the Qmux-over-WebSocket binding details to draft-lcurley-qmux-websocket; the binding itself is unchanged.
 - Extended the SETUP `Path` parameter to carry the URI query: a client appends `?` and the query component after the path, matching moq-transport's PATH option. The credential a deployment puts in the query was previously unrepresentable on a binding with no request URI.
 - Allowed an empty SETUP `Path` parameter, equivalent to omitting it; both request the server's default path. Previously an empty value was a protocol violation, which made the two ways of asking for the default disagree.

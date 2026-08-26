@@ -285,19 +285,27 @@ impl OriginList {
 	/// Replace the first entry equal to `target` with `replacement`, returning
 	/// true if a match was found. The length is unchanged.
 	///
-	/// Fails with [`InvalidHop::Duplicate`] if `replacement` is already in the chain,
-	/// since naming it twice is the loop [`Self::push`] refuses to build.
+	/// Fails with [`InvalidHop::Duplicate`] only when the rewrite would actually name
+	/// `replacement` twice, which is the loop [`Self::push`] refuses to build. A `target`
+	/// that is not present changes nothing and so cannot duplicate anything, and the slot
+	/// being overwritten is not a duplicate of itself.
 	pub fn replace_first(&mut self, target: Origin, replacement: Origin) -> Result<bool, InvalidHop> {
-		if replacement != Origin::UNKNOWN && self.0.contains(&replacement) {
+		let Some(index) = self.0.iter().position(|entry| *entry == target) else {
+			return Ok(false);
+		};
+
+		if replacement != Origin::UNKNOWN
+			&& self
+				.0
+				.iter()
+				.enumerate()
+				.any(|(i, entry)| i != index && *entry == replacement)
+		{
 			return Err(InvalidHop::Duplicate);
 		}
-		for entry in &mut self.0 {
-			if *entry == target {
-				*entry = replacement;
-				return Ok(true);
-			}
-		}
-		Ok(false)
+
+		self.0[index] = replacement;
+		Ok(true)
 	}
 
 	/// Returns true if any entry matches `origin`.
@@ -5261,6 +5269,24 @@ mod tests {
 		assert_eq!(
 			list.replace_first(Origin::UNKNOWN, Origin::new(7).unwrap()),
 			Err(InvalidHop::Duplicate)
+		);
+
+		// A target that is not there changes nothing, so it cannot duplicate anything,
+		// however many times the replacement already appears.
+		assert_eq!(
+			list.replace_first(Origin::new(99).unwrap(), Origin::new(7).unwrap()),
+			Ok(false)
+		);
+
+		// Overwriting a slot with what it already holds is a no-op, not a duplicate: the
+		// entry being replaced is not a second occurrence of itself.
+		assert_eq!(
+			list.replace_first(Origin::new(7).unwrap(), Origin::new(7).unwrap()),
+			Ok(true)
+		);
+		assert_eq!(
+			list.as_slice(),
+			&[Origin::new(7).unwrap(), Origin::UNKNOWN, Origin::UNKNOWN]
 		);
 	}
 
