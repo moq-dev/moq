@@ -39,6 +39,22 @@ const FRAME_DATA: u64 = 0x00;
 /// How long a graceful close waits for the peer to act on the
 /// `CloseWebTransportSession` capsule before closing the connection itself.
 const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+/// How much of one HTTP/3 message to buffer while waiting for the rest.
+///
+/// A peer declares a frame's length before sending its body, and reading what
+/// does arrive replenishes its flow-control credit, so an unauthenticated
+/// client could otherwise announce an enormous SETTINGS, CONNECT, or capsule
+/// frame and dribble it until the process runs out of memory. Everything
+/// parsed here is a few hundred bytes; no real peer meets this.
+const MESSAGE_LIMIT: usize = 64 * 1024;
+/// How many unidirectional streams a peer may open before its control stream
+/// arrives.
+///
+/// The handshake holds each arrival (QPACK, the control stream) or parks it as
+/// an early WebTransport stream, so without a cap a peer that never sends a
+/// control stream could open them without end. A real client opens three
+/// before its CONNECT, plus whatever it pipelines.
+const HANDSHAKE_STREAMS: usize = 64;
 
 /// An incoming WebTransport handshake: the CONNECT request, ready to answer.
 ///
@@ -82,6 +98,9 @@ impl Request {
 		let mut held = Vec::new();
 		let mut early = Vec::new();
 		loop {
+			if held.len() + early.len() >= HANDSHAKE_STREAMS {
+				return Err(Error::Web("too many streams before the control stream".into()));
+			}
 			let recv = accept_uni(&mut conn).await?;
 			let mut pending = PendingUni::new(recv);
 			let class = std::future::poll_fn(|cx| pending.poll_classify(cx)).await;
@@ -924,11 +943,17 @@ async fn write_all(send: &mut super::SendStream, mut buf: &[u8]) -> Result<(), E
 }
 
 /// Read another chunk into `buf`; `false` once the stream has ended.
+///
+/// Fails rather than letting `buf` grow past [`MESSAGE_LIMIT`], which is what
+/// bounds a peer that declares a huge frame and never finishes it.
 async fn read_some(recv: &mut super::RecvStream, buf: &mut BytesMut) -> Result<bool, Error> {
 	let mut chunk = [0u8; 4096];
 	let n = std::future::poll_fn(|cx| web_transport_trait::poll::RecvStream::poll_read(recv, cx, &mut chunk)).await?;
 	match n {
 		Some(n) => {
+			if buf.len() + n > MESSAGE_LIMIT {
+				return Err(Error::Web("an HTTP/3 message exceeded the buffer limit".into()));
+			}
 			buf.extend_from_slice(&chunk[..n]);
 			Ok(true)
 		}
@@ -978,17 +1003,22 @@ async fn read_connect(recv: &mut super::RecvStream) -> Result<proto::ConnectRequ
 /// `CloseWebTransportSession` capsule (carried in HTTP/3 DATA frames) as the
 /// session's error, then close the connection.
 async fn read_capsules(web: Rc<Web>, conn: Connection, mut recv: super::RecvStream) {
-	let mut buf = BytesMut::new();
+	let mut capsules = Capsules::default();
 	let capsule = loop {
-		match parse_capsule(&mut buf) {
-			Ok(Some(capsule)) => break Some(capsule),
+		match capsules.take() {
+			Ok(Some(proto::Capsule::CloseWebTransportSession { code, reason })) => {
+				break Some((code, reason));
+			}
+			// GREASE and anything else defined later: skip it and keep
+			// reading, since the close capsule may still be behind it.
+			Ok(Some(_)) => continue,
 			Ok(None) => {}
 			Err(err) => {
 				tracing::debug!(%err, "failed to parse a capsule on the CONNECT stream");
 				break None;
 			}
 		}
-		match read_some(&mut recv, &mut buf).await {
+		match read_some(&mut recv, &mut capsules.frames).await {
 			Ok(true) => {}
 			// A clean FIN without a capsule, or the connection died under
 			// the stream; either way the session is over.
@@ -997,7 +1027,7 @@ async fn read_capsules(web: Rc<Web>, conn: Connection, mut recv: super::RecvStre
 	};
 
 	match capsule {
-		Some(proto::Capsule::CloseWebTransportSession { code, reason }) => {
+		Some((code, reason)) => {
 			web.closed.borrow_mut().get_or_insert(Error::App {
 				code: u64::from(code),
 				reason: reason.clone(),
@@ -1005,37 +1035,187 @@ async fn read_capsules(web: Rc<Web>, conn: Connection, mut recv: super::RecvStre
 			conn.shared().close_code(proto::error_to_http3(code), &reason);
 		}
 		// The CONNECT stream ending closes the session with no error.
-		_ => conn.shared().close_code(proto::error_to_http3(0), ""),
+		None => conn.shared().close_code(proto::error_to_http3(0), ""),
 	}
 }
 
-/// Pop one capsule out of the buffered DATA frames, if a whole one is in.
-fn parse_capsule(buf: &mut BytesMut) -> Result<Option<proto::Capsule>, Error> {
-	loop {
-		let mut peek: &[u8] = &buf[..];
-		let Some(typ) = decode_varint(&mut peek) else {
-			return Ok(None);
-		};
-		let Some(len) = decode_varint(&mut peek) else {
-			return Ok(None);
-		};
-		let len = usize::try_from(len).map_err(|_| Error::Web("oversized HTTP/3 frame".into()))?;
-		if peek.len() < len {
-			return Ok(None);
-		}
-		let header = buf.len() - peek.len();
+/// The CONNECT stream's capsule reader.
+///
+/// HTTP/3 framing and the Capsule Protocol are independent layers: a capsule
+/// may span DATA frames and one DATA frame may carry several, so the payloads
+/// are concatenated and parsed as one continuous byte stream rather than
+/// frame by frame.
+#[derive(Default)]
+struct Capsules {
+	/// Stream bytes whose HTTP/3 framing has not been split off yet.
+	frames: BytesMut,
+	/// The DATA payloads, concatenated: the capsule stream itself.
+	body: BytesMut,
+}
 
-		if typ != FRAME_DATA {
-			// Some other frame on the CONNECT stream; skip it whole.
-			buf.advance(header + len);
-			continue;
-		}
+impl Capsules {
+	/// Take the next whole capsule, or `None` until one has fully arrived.
+	fn take(&mut self) -> Result<Option<proto::Capsule>, Error> {
+		self.demux()?;
 
-		// A capsule split across DATA frames is legal but nothing we talk to
-		// does it; treat a partial capsule as unparseable.
-		let mut payload: &[u8] = &peek[..len];
-		let capsule = proto::Capsule::decode(&mut payload).map_err(|err| Error::Web(err.to_string()))?;
-		buf.advance(header + len);
-		return Ok(Some(capsule));
+		let mut peek: &[u8] = &self.body;
+		match proto::Capsule::decode(&mut peek) {
+			Ok(capsule) => {
+				let consumed = self.body.len() - peek.len();
+				self.body.advance(consumed);
+				Ok(Some(capsule))
+			}
+			// A short header and a short body are both just "not yet".
+			Err(proto::CapsuleError::UnexpectedEnd | proto::CapsuleError::VarInt(_)) => Ok(None),
+			Err(err) => Err(Error::Web(err.to_string())),
+		}
+	}
+
+	/// Move every whole DATA payload into [`body`](Self::body), skipping other
+	/// frame types entirely.
+	fn demux(&mut self) -> Result<(), Error> {
+		loop {
+			let mut peek: &[u8] = &self.frames;
+			let Some(typ) = decode_varint(&mut peek) else {
+				return Ok(());
+			};
+			let Some(len) = decode_varint(&mut peek) else {
+				return Ok(());
+			};
+			let len = usize::try_from(len).map_err(|_| Error::Web("oversized HTTP/3 frame".into()))?;
+			if peek.len() < len {
+				return Ok(());
+			}
+			let header = self.frames.len() - peek.len();
+
+			if typ == FRAME_DATA {
+				// Bounded like the frame buffer: a capsule nothing ever
+				// completes must not grow here either.
+				if self.body.len() + len > MESSAGE_LIMIT {
+					return Err(Error::Web("a capsule exceeded the buffer limit".into()));
+				}
+				self.body.extend_from_slice(&peek[..len]);
+			}
+			self.frames.advance(header + len);
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Wrap `payload` in an HTTP/3 frame of type `typ`.
+	fn frame(typ: u64, payload: &[u8]) -> Vec<u8> {
+		let mut buf = Vec::new();
+		encode_varint(typ, &mut buf);
+		encode_varint(payload.len() as u64, &mut buf);
+		buf.extend_from_slice(payload);
+		buf
+	}
+
+	fn close_capsule(code: u32, reason: &str) -> Vec<u8> {
+		let mut buf = Vec::new();
+		proto::Capsule::CloseWebTransportSession {
+			code,
+			reason: reason.to_string(),
+		}
+		.encode(&mut buf);
+		buf
+	}
+
+	/// The Capsule Protocol runs across DATA frames, so a capsule cut in half
+	/// by the framing still has to come out whole.
+	#[test]
+	fn a_capsule_spans_data_frames() {
+		let capsule = close_capsule(42, "split");
+		let (head, tail) = capsule.split_at(capsule.len() / 2);
+
+		let mut capsules = Capsules::default();
+		capsules.frames.extend_from_slice(&frame(FRAME_DATA, head));
+		assert!(capsules.take().expect("parse").is_none(), "half a capsule is not one");
+
+		capsules.frames.extend_from_slice(&frame(FRAME_DATA, tail));
+		let capsule = capsules.take().expect("parse").expect("the second half completes it");
+		assert_eq!(
+			capsule,
+			proto::Capsule::CloseWebTransportSession {
+				code: 42,
+				reason: "split".to_string()
+			}
+		);
+	}
+
+	/// One DATA frame may carry several capsules, and reading the first must
+	/// not discard the rest.
+	#[test]
+	fn one_frame_carries_several_capsules() {
+		let mut payload = close_capsule(1, "first");
+		payload.extend_from_slice(&close_capsule(2, "second"));
+
+		let mut capsules = Capsules::default();
+		capsules.frames.extend_from_slice(&frame(FRAME_DATA, &payload));
+
+		for (code, reason) in [(1, "first"), (2, "second")] {
+			let capsule = capsules.take().expect("parse").expect("a whole capsule");
+			assert_eq!(
+				capsule,
+				proto::Capsule::CloseWebTransportSession {
+					code,
+					reason: reason.to_string()
+				}
+			);
+		}
+		assert!(capsules.take().expect("parse").is_none(), "only two were written");
+	}
+
+	/// Frames that are not DATA carry no capsules; skipping one must not
+	/// disturb the capsule stream around it.
+	#[test]
+	fn a_non_data_frame_is_skipped() {
+		let capsule = close_capsule(7, "after");
+		let (head, tail) = capsule.split_at(1);
+
+		let mut capsules = Capsules::default();
+		capsules.frames.extend_from_slice(&frame(FRAME_DATA, head));
+		// 0x07 is GOAWAY: legal on the stream, and not a capsule carrier.
+		capsules.frames.extend_from_slice(&frame(0x07, b"\x00"));
+		capsules.frames.extend_from_slice(&frame(FRAME_DATA, tail));
+
+		let capsule = capsules.take().expect("parse").expect("a whole capsule");
+		assert_eq!(
+			capsule,
+			proto::Capsule::CloseWebTransportSession {
+				code: 7,
+				reason: "after".to_string()
+			}
+		);
+	}
+
+	/// A peer that declares a capsule payload it never sends must not grow the
+	/// buffer without end.
+	#[test]
+	fn a_capsule_stream_is_bounded() {
+		// A close capsule whose declared length never arrives. 65536 is the
+		// largest the decoder entertains, so it keeps asking for more rather
+		// than refusing the length outright.
+		let mut header = Vec::new();
+		encode_varint(0x2843, &mut header);
+		encode_varint(65536, &mut header);
+
+		let mut capsules = Capsules::default();
+		capsules.frames.extend_from_slice(&frame(FRAME_DATA, &header));
+
+		let chunk = vec![0u8; 8 * 1024];
+		let err = loop {
+			match capsules.take() {
+				Ok(None) => {}
+				Ok(Some(capsule)) => panic!("the payload never arrived, got {capsule:?}"),
+				Err(err) => break err,
+			}
+			capsules.frames.extend_from_slice(&frame(FRAME_DATA, &chunk));
+		};
+		assert!(matches!(err, Error::Web(_)), "refused with {err}");
+		assert!(capsules.body.len() <= MESSAGE_LIMIT, "the buffer stayed bounded");
 	}
 }
