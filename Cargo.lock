@@ -4930,6 +4930,7 @@ dependencies = [
 name = "moq-net"
 version = "0.2.15"
 dependencies = [
+ "arrayvec",
  "bytes",
  "criterion",
  "futures",

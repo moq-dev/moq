@@ -17,7 +17,7 @@ use std::hint::black_box;
 use bytes::Bytes;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Timestamp, broadcast, group, track};
+use moq_net::{Timestamp, broadcast, frame, group, track};
 
 /// A small, fixed payload shared across every frame. Cloning a `Bytes` is a
 /// refcount bump (no allocation), so the benchmark isolates the per-frame control
@@ -55,12 +55,37 @@ fn fresh_group() -> Ctx {
 }
 
 /// Write N small frames into a fresh group (producer-side per-frame cost).
+///
+/// `single` is one `write_frame` per frame: a group lock plus a track-level eviction
+/// settle each. `batch32` fills a `frame::Buffer` and hands the whole thing to
+/// `write_frames`, paying both once per batch.
 fn bench_write(c: &mut Criterion) {
 	let payload = Bytes::from(vec![0u8; PAYLOAD]);
 	let mut g = c.benchmark_group("group_write_frames");
 	for &n in &COUNTS {
 		g.throughput(Throughput::Elements(n as u64));
-		g.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
+		g.bench_with_input(BenchmarkId::new("batch32", n), &n, |b, &n| {
+			b.iter_batched(
+				|| (fresh_group(), frame::Buffer::<32>::new()),
+				|(mut ctx, mut buf)| {
+					for _ in 0..n {
+						let frame = frame::Frame {
+							timestamp: Timestamp::ZERO,
+							payload: payload.clone(),
+						};
+						// A full buffer hands the frame back: flush, then take it.
+						if let Err(frame) = buf.push(frame) {
+							ctx.group.write_frames(&mut buf).unwrap();
+							buf.push(frame).unwrap();
+						}
+					}
+					ctx.group.write_frames(&mut buf).unwrap();
+					(ctx, buf)
+				},
+				BatchSize::SmallInput,
+			);
+		});
+		g.bench_with_input(BenchmarkId::new("single", n), &n, |b, &n| {
 			b.iter_batched(
 				fresh_group,
 				|mut ctx| {
@@ -77,23 +102,43 @@ fn bench_write(c: &mut Criterion) {
 	g.finish();
 }
 
+/// A pre-filled, finished group plus a consumer positioned at its first frame.
+fn filled_group(n: usize, payload: &Bytes) -> (Ctx, group::Consumer) {
+	let mut ctx = fresh_group();
+	for _ in 0..n {
+		ctx.group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+	}
+	ctx.group.finish().unwrap();
+	let consumer = ctx.group.consume();
+	(ctx, consumer)
+}
+
+/// Drain a whole group through a reused `frame::Buffer<N>`.
+fn drain_batched<const N: usize>(consumer: &mut group::Consumer, buf: &mut frame::Buffer<N>) {
+	loop {
+		let batch = consumer.read_frames(buf).now_or_never().unwrap().unwrap();
+		if batch.is_empty() {
+			break;
+		}
+		for frame in batch.iter() {
+			black_box(frame);
+		}
+	}
+}
+
 /// Drain N small frames from a pre-filled group (consumer-side per-frame cost).
+///
+/// `single` is one frame at a time via [`group::Consumer::read_frame`]: a lock and a
+/// waker each. `batch{N}` is [`group::Consumer::read_frames`] cloning the ready tail
+/// into a reused `N`-frame buffer, amortizing both across the batch.
 fn bench_read(c: &mut Criterion) {
 	let payload = Bytes::from(vec![0u8; PAYLOAD]);
 	let mut g = c.benchmark_group("group_read_frames");
 	for &n in &COUNTS {
 		g.throughput(Throughput::Elements(n as u64));
-		g.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
+		g.bench_with_input(BenchmarkId::new("single", n), &n, |b, &n| {
 			b.iter_batched(
-				|| {
-					let mut ctx = fresh_group();
-					for _ in 0..n {
-						ctx.group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
-					}
-					ctx.group.finish().unwrap();
-					let consumer = ctx.group.consume();
-					(ctx, consumer)
-				},
+				|| filled_group(n, &payload),
 				|(ctx, mut consumer)| {
 					for _ in 0..n {
 						// All frames are already present and finished, so a single poll
@@ -106,6 +151,31 @@ fn bench_read(c: &mut Criterion) {
 				BatchSize::SmallInput,
 			);
 		});
+
+		// The buffer is allocated in setup and refilled for the whole group, like a
+		// real reader that keeps one per task.
+		macro_rules! batched {
+			($cap:expr) => {
+				g.bench_with_input(BenchmarkId::new(concat!("batch", $cap), n), &n, |b, &n| {
+					b.iter_batched(
+						|| {
+							let (ctx, consumer) = filled_group(n, &payload);
+							(ctx, consumer, frame::Buffer::<$cap>::new())
+						},
+						|(ctx, mut consumer, mut buf)| {
+							drain_batched(&mut consumer, &mut buf);
+							(ctx, consumer, buf)
+						},
+						BatchSize::SmallInput,
+					);
+				});
+			};
+		}
+
+		batched!(4);
+		batched!(8);
+		batched!(32);
+		batched!(128);
 	}
 	g.finish();
 }

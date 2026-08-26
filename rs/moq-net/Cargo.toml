@@ -16,6 +16,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 ignored = ["getrandom"]
 
 [dependencies]
+arrayvec = "0.7"
 bytes = "1"
 futures = "0.3"
 kio = { workspace = true, features = ["time"] }

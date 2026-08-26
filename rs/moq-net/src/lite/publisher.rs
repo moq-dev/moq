@@ -1117,9 +1117,32 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Stream every frame in order. The delta-timestamp baseline resets to 0, so the
 		// first served frame's delta is its absolute timestamp (the subscriber decodes
 		// against the same baseline).
+		//
+		// A fetched group is usually cached whole, so the batch takes it under one lock;
+		// a fetch that catches the live edge falls back to streaming the open tail.
 		let mut prev_ts: u64 = 0;
-		while let Some(mut frame) = group.next_frame().await? {
-			write_fetch_frame(&mut stream.writer, &mut frame, timescale, &mut prev_ts).await?;
+		let mut buf: frame::Buffer = frame::Buffer::new();
+		loop {
+			let step = kio::wait(|waiter| match group.poll_read_frames(waiter, &mut buf) {
+				Poll::Pending => group
+					.poll_next_frame(waiter)
+					.map_ok(|frame| frame.map_or(Step::Done, Step::Partial)),
+				res => res.map_ok(|count| if count == 0 { Step::Done } else { Step::Batch }),
+			})
+			.await?;
+
+			match step {
+				Step::Batch => {
+					for i in 0..buf.filled().len() {
+						let frame = buf.filled()[i].clone();
+						write_fetch_frame(&mut stream.writer, frame, timescale, &mut prev_ts).await?;
+					}
+				}
+				Step::Partial(mut frame) => {
+					write_fetch_partial(&mut stream.writer, &mut frame, timescale, &mut prev_ts).await?;
+				}
+				Step::Done => break,
+			}
 		}
 
 		stream.writer.finish()?;
@@ -1796,7 +1819,7 @@ mod announce_test {
 /// the decode in the subscriber's `run_group`.
 async fn encode_frame_timing<W: web_transport_trait::SendStream>(
 	writer: &mut Writer<W, Version>,
-	frame: &frame::Consumer,
+	timestamp: crate::Timestamp,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
 ) -> Result<(), Error> {
@@ -1804,8 +1827,7 @@ async fn encode_frame_timing<W: web_transport_trait::SendStream>(
 		return Ok(());
 	}
 
-	let ts = frame.timestamp.value();
-	encode_zigzag_delta(writer, ts, prev_ts).await?;
+	encode_zigzag_delta(writer, timestamp.value(), prev_ts).await?;
 
 	Ok(())
 }
@@ -1831,13 +1853,31 @@ async fn encode_zigzag_delta<W: web_transport_trait::SendStream>(
 /// per-frame encoding in [`Subscription::serve_frame`] without the priority
 /// machinery, since a one-shot fetch carries a single static priority set on the
 /// stream up front.
+/// Write one already-complete frame of a fetched group.
 async fn write_fetch_frame<W: web_transport_trait::SendStream>(
+	writer: &mut Writer<W, Version>,
+	frame: frame::Frame,
+	timescale: Option<crate::Timescale>,
+	prev_ts: &mut u64,
+) -> Result<(), Error> {
+	encode_frame_timing(writer, frame.timestamp, timescale, prev_ts).await?;
+
+	writer.encode(&(frame.payload.len() as u64)).await?;
+	if !frame.payload.is_empty() {
+		writer.write_chunk(frame.payload).await?;
+	}
+
+	Ok(())
+}
+
+/// Write one in-flight frame of a fetched group, streaming its chunks as they land.
+async fn write_fetch_partial<W: web_transport_trait::SendStream>(
 	writer: &mut Writer<W, Version>,
 	frame: &mut frame::Consumer,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
 ) -> Result<(), Error> {
-	encode_frame_timing(writer, frame, timescale, prev_ts).await?;
+	encode_frame_timing(writer, frame.timestamp, timescale, prev_ts).await?;
 
 	writer.encode(&frame.size).await?;
 	while let Some(chunk) = frame.read_chunk().await? {
@@ -1847,13 +1887,20 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	Ok(())
 }
 
+/// What a group has next for [`Publisher::next_frames`]: a batch of complete frames
+/// waiting in the buffer, a consumer for the in-flight tail, or the end of the group.
+enum Step {
+	/// The buffer was refilled; its frames are the next ones to send.
+	Batch,
+	/// Nothing is complete yet, so stream the open tail chunk by chunk.
+	Partial(frame::Consumer),
+	/// The group ended.
+	Done,
+}
+
 /// What [`recv_next`] pulled from the one subscriber: the next group to serve, the next
 /// best-effort datagram to forward, the track declaring its exclusive final sequence, or
 /// the track finishing (the live edge having reached that boundary).
-// A `group::Consumer` carries an inline frame prefetch, so the `Group` variant dwarfs the
-// others. This is a transient, one-at-a-time return value, so the padding is never held in
-// bulk; boxing would only add a per-group allocation.
-#[allow(clippy::large_enum_variant)]
 enum Recv {
 	Group(group::Consumer),
 	Datagram(crate::Datagram),
@@ -2128,8 +2175,21 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		// frame's delta is absolute (against an implicit prev value of 0), every
 		// subsequent delta is signed against the previous frame.
 		let mut prev_ts: u64 = 0;
-		while let Some(frame) = self.next_frame(stream, priority, group).await? {
-			self.serve_frame(stream, priority, frame, &mut prev_ts).await?;
+		let mut buf = frame::Buffer::new();
+		loop {
+			match self.next_frames(stream, priority, group, &mut buf).await? {
+				Step::Batch => {
+					for i in 0..buf.filled().len() {
+						// Index rather than iterate: the writes below borrow `self`
+						// mutably, and a live `buf.filled()` iterator would pin `buf`
+						// across them for no reason.
+						let frame = buf.filled()[i].clone();
+						self.serve_whole_frame(stream, priority, frame, &mut prev_ts).await?;
+					}
+				}
+				Step::Partial(frame) => self.serve_frame(stream, priority, frame, &mut prev_ts).await?,
+				Step::Done => break,
+			}
 		}
 
 		Ok(())
@@ -2175,7 +2235,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		mut frame: frame::Consumer,
 		prev_ts: &mut u64,
 	) -> Result<(), Error> {
-		encode_frame_timing(stream, &frame, self.timescale, prev_ts).await?;
+		encode_frame_timing(stream, frame.timestamp, self.timescale, prev_ts).await?;
 
 		stream.encode(&frame.size).await?;
 
@@ -2186,22 +2246,50 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		Ok(())
 	}
 
-	/// Await the next frame in the group, applying any priority changes that
-	/// arrive meanwhile. Errors with [`Error::Cancel`] if the peer closes first.
-	async fn next_frame(
+	/// Await whatever the group has next: a batch of already-complete frames, or a
+	/// consumer for the in-flight tail when nothing is complete yet.
+	///
+	/// A subscriber catching up on a cached group takes the whole backlog under one
+	/// lock instead of one wait per frame. At the live edge the batch comes up empty
+	/// and the tail streams chunk by chunk, exactly as it did before, so forwarding
+	/// never waits for a frame to complete.
+	async fn next_frames(
 		&mut self,
 		stream: &mut Writer<S::SendStream, Version>,
 		priority: &mut PriorityHandle,
 		group: &mut group::Consumer,
-	) -> Result<Option<frame::Consumer>, Error> {
+		buf: &mut frame::Buffer,
+	) -> Result<Step, Error> {
 		Self::serve_step(
 			stream,
 			priority,
 			&self.track_priority,
 			&mut self.track_priority_seen,
-			|waiter| group.poll_next_frame(waiter),
+			|waiter| match group.poll_read_frames(waiter, buf) {
+				// Nothing complete: the tail is either in flight or the group ended.
+				Poll::Pending => group
+					.poll_next_frame(waiter)
+					.map_ok(|frame| frame.map_or(Step::Done, Step::Partial)),
+				res => res.map_ok(|count| if count == 0 { Step::Done } else { Step::Batch }),
+			},
 		)
 		.await
+	}
+
+	/// Send one already-complete frame: the timestamp, the size, then the payload.
+	async fn serve_whole_frame(
+		&mut self,
+		stream: &mut Writer<S::SendStream, Version>,
+		priority: &mut PriorityHandle,
+		frame: frame::Frame,
+		prev_ts: &mut u64,
+	) -> Result<(), Error> {
+		encode_frame_timing(stream, frame.timestamp, self.timescale, prev_ts).await?;
+		stream.encode(&(frame.payload.len() as u64)).await?;
+		if !frame.payload.is_empty() {
+			self.write_chunk(stream, priority, frame.payload).await?;
+		}
+		Ok(())
 	}
 
 	/// Await the next chunk of `frame`, applying priority changes meanwhile.
@@ -2347,6 +2435,111 @@ mod serve_group_test {
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 		assert_eq!(log.resets(), vec![Error::Old.to_code()]);
+	}
+
+	/// `write_group` takes two routes to the wire: complete frames come out of a batch
+	/// read, while an in-flight frame streams chunk by chunk. The two must encode
+	/// identically, or a subscriber catching up sees different bytes than one at the
+	/// live edge.
+	#[tokio::test]
+	async fn batched_and_streamed_frames_encode_identically() {
+		const FRAMES: usize = 40;
+
+		async fn serve(chunked: bool) -> Vec<u8> {
+			let log = Log::default();
+			let session = SinkSession::new(log.clone());
+
+			let track_priority = kio::Producer::new(0u8);
+			let subscription = Subscription {
+				session,
+				id: 0,
+				track_name: "test".into(),
+				priority: PriorityQueue::default(),
+				track_priority: track_priority.consume(),
+				track_priority_seen: 0,
+				version: Version::Lite06Wip,
+				timescale: Some(crate::Timescale::default()),
+			};
+
+			let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+			for i in 0..FRAMES {
+				let timestamp = Timestamp::from_millis(i as u64 * 10).unwrap();
+				let payload = vec![i as u8; 7];
+				if chunked {
+					// Written a byte at a time and completed, so the group holds no open
+					// tail by the time it is served: the batch read takes them all.
+					let mut frame = group
+						.create_frame(frame::Info {
+							size: payload.len() as u64,
+							timestamp,
+						})
+						.unwrap();
+					for byte in &payload {
+						frame.write(&[*byte][..]).unwrap();
+					}
+					frame.finish().unwrap();
+				} else {
+					group.write_frame(timestamp, payload.as_slice()).unwrap();
+				}
+			}
+			let consumer = group.consume();
+			group.finish().unwrap();
+
+			let handle = subscription.priority.insert(Priority::new(0, 0));
+			subscription.serve_group(0, handle, consumer).await.unwrap();
+
+			log.writes.lock().unwrap().clone()
+		}
+
+		let whole = serve(false).await;
+		let chunked = serve(true).await;
+		assert!(!whole.is_empty(), "the group produced no bytes");
+		assert_eq!(whole, chunked, "batched and chunked writes must encode the same");
+	}
+
+	/// A frame still being written must reach the wire as it fills rather than waiting
+	/// for the whole thing: the batch read has to yield to the open tail.
+	#[tokio::test]
+	async fn an_open_frame_streams_before_it_completes() {
+		let log = Log::default();
+		let session = SinkSession::new(log.clone());
+
+		let track_priority = kio::Producer::new(0u8);
+		let subscription = Subscription {
+			session,
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			version: Version::Lite06Wip,
+			timescale: Some(crate::Timescale::default()),
+		};
+
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		let consumer = group.consume();
+
+		// A large frame, opened but far from complete.
+		let mut frame = group
+			.create_frame(frame::Info {
+				size: 4096,
+				timestamp: Timestamp::from_millis(0).unwrap(),
+			})
+			.unwrap();
+		frame.write(&[7u8; 512][..]).unwrap();
+
+		let handle = subscription.priority.insert(Priority::new(0, 0));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, handle, consumer));
+		// Let it run until it blocks on the rest of the frame.
+		assert!(futures::poll!(serve.as_mut()).is_pending());
+
+		let written = log.writes.lock().unwrap().len();
+		assert!(
+			written >= 512,
+			"the open frame's first chunk must be forwarded before it completes, wrote {written}"
+		);
 	}
 
 	/// A group that completes cleanly must not reset at all. The completion path

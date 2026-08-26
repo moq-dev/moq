@@ -1,10 +1,10 @@
-use crate::{group, origin, track};
+use crate::{frame, group, origin, track};
 use std::{collections::HashMap, task::Poll};
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 
 use crate::{
-	AsPath, Error, Timescale,
+	AsPath, Error, Timescale, Timestamp,
 	coding::{Stream, Writer},
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
 	track::Subscription,
@@ -43,6 +43,17 @@ struct Watched {
 /// A peer answers a request it declines with a retry interval ({{moqt}} REQUEST_ERROR),
 /// and ignoring it is how a permanent refusal (unauthorized, uninterested) turns into a
 /// request every few seconds for the life of the session.
+/// What a group has next for [`Publisher::run_group`]: a batch of complete frames
+/// waiting in the buffer, a consumer for the in-flight tail, or the end of the group.
+enum Step {
+	/// The buffer was refilled; its frames are the next ones to send.
+	Batch,
+	/// Nothing is complete yet, so stream the open tail chunk by chunk.
+	Partial(frame::Consumer),
+	/// The group ended.
+	Done,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Refused {
 	/// Never refused, or refused on a draft whose error carries no interval, so our own
@@ -748,62 +759,75 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		stream.encode(&msg).await?;
 
+		// A subscriber catching up on a cached group takes the whole backlog under one
+		// lock; at the live edge the batch comes up empty and the open tail streams
+		// chunk by chunk, so forwarding never waits for a frame to complete.
+		let mut buf: frame::Buffer = frame::Buffer::new();
 		loop {
-			// Wait for the next frame, bailing if the peer closes the stream first.
-			let frame = {
+			// Wait for whatever the group has next, bailing if the peer closes first.
+			let step = {
 				let mut closed = std::pin::pin!(stream.closed());
 				kio::wait(|waiter| {
 					if waiter.poll_future(closed.as_mut()).is_ready() {
 						return Poll::Ready(Err(Error::Cancel));
 					}
-					group.poll_next_frame(waiter)
+					match group.poll_read_frames(waiter, &mut buf) {
+						Poll::Pending => group
+							.poll_next_frame(waiter)
+							.map_ok(|frame| frame.map_or(Step::Done, Step::Partial)),
+						res => res.map_ok(|count| if count == 0 { Step::Done } else { Step::Batch }),
+					}
 				})
 				.await
 			};
 
-			let mut frame = match frame? {
-				Some(frame) => frame,
-				None => break,
-			};
-
-			// object id delta is always 0.
-			stream.encode(&0u64).await?;
-
-			// Per-object extension headers carry the frame's presentation timestamp.
-			if msg.flags.has_extensions {
-				let mut ext = bytes::BytesMut::new();
-				ietf::encode_object_time(&mut ext, frame.timestamp, timescale, version)?;
-				stream.encode(&(ext.len() as u64)).await?;
-				stream.write_chunk(ext.freeze()).await?;
-			}
-
-			// Write the size of the frame.
-			stream.encode(&frame.size).await?;
-
-			if frame.size == 0 {
-				// Have to write the object status too.
-				stream.encode(&0u8).await?;
-			} else {
-				// Stream each chunk of the frame.
-				loop {
-					let chunk = {
-						let mut closed = std::pin::pin!(stream.closed());
-						kio::wait(|waiter| {
-							if waiter.poll_future(closed.as_mut()).is_ready() {
-								return Poll::Ready(Err(Error::Cancel));
-							}
-							frame.poll_read_chunk(waiter)
-						})
-						.await
-					};
-
-					match chunk? {
-						Some(chunk) => {
-							stream.write_chunk(chunk).await?;
+			match step? {
+				Step::Batch => {
+					for i in 0..buf.filled().len() {
+						let frame = buf.filled()[i].clone();
+						Self::write_object_header(&mut stream, &msg, frame.timestamp, timescale, version).await?;
+						stream.encode(&(frame.payload.len() as u64)).await?;
+						if frame.payload.is_empty() {
+							// Have to write the object status too.
+							stream.encode(&0u8).await?;
+						} else {
+							stream.write_chunk(frame.payload).await?;
 						}
-						None => break,
 					}
 				}
+				Step::Partial(mut frame) => {
+					Self::write_object_header(&mut stream, &msg, frame.timestamp, timescale, version).await?;
+
+					// Write the size of the frame.
+					stream.encode(&frame.size).await?;
+
+					if frame.size == 0 {
+						// Have to write the object status too.
+						stream.encode(&0u8).await?;
+					} else {
+						// Stream each chunk of the frame.
+						loop {
+							let chunk = {
+								let mut closed = std::pin::pin!(stream.closed());
+								kio::wait(|waiter| {
+									if waiter.poll_future(closed.as_mut()).is_ready() {
+										return Poll::Ready(Err(Error::Cancel));
+									}
+									frame.poll_read_chunk(waiter)
+								})
+								.await
+							};
+
+							match chunk? {
+								Some(chunk) => {
+									stream.write_chunk(chunk).await?;
+								}
+								None => break,
+							}
+						}
+					}
+				}
+				Step::Done => break,
 			}
 		}
 
@@ -813,6 +837,29 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.close().await?;
 
 		tracing::debug!(sequence = %msg.group_id, "finished group");
+
+		Ok(())
+	}
+
+	/// Write one object's header: the id delta (always 0) and, when the group carries
+	/// extensions, the presentation timestamp.
+	async fn write_object_header(
+		stream: &mut Writer<S::SendStream, Version>,
+		msg: &ietf::GroupHeader,
+		timestamp: Timestamp,
+		timescale: Timescale,
+		version: Version,
+	) -> Result<(), Error> {
+		// object id delta is always 0.
+		stream.encode(&0u64).await?;
+
+		// Per-object extension headers carry the frame's presentation timestamp.
+		if msg.flags.has_extensions {
+			let mut ext = bytes::BytesMut::new();
+			ietf::encode_object_time(&mut ext, timestamp, timescale, version)?;
+			stream.encode(&(ext.len() as u64)).await?;
+			stream.write_chunk(ext.freeze()).await?;
+		}
 
 		Ok(())
 	}
@@ -1566,6 +1613,110 @@ mod group_priority_test {
 			log.priorities(),
 			vec![200],
 			"model priority must pass through unchanged"
+		);
+	}
+
+	/// `run_group` takes two routes to the wire: complete frames come out of a batch
+	/// read, while an in-flight frame streams chunk by chunk. The two must encode
+	/// identically, or a subscriber catching up sees different bytes than one at the
+	/// live edge.
+	#[tokio::test]
+	async fn batched_and_streamed_frames_encode_identically() {
+		const FRAMES: usize = 40;
+
+		async fn serve(chunked: bool) -> Vec<u8> {
+			let log = crate::lite::test_transport::Log::default();
+			let session = SinkSession::new(log.clone());
+
+			let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+			for i in 0..FRAMES {
+				let timestamp = crate::Timestamp::from_millis(i as u64 * 10).unwrap();
+				let payload = vec![i as u8; 7];
+				if chunked {
+					// Written a byte at a time and completed, so the group holds no open
+					// tail by the time it is served: the batch read takes them all.
+					let mut frame = group
+						.create_frame(crate::frame::Info {
+							size: payload.len() as u64,
+							timestamp,
+						})
+						.unwrap();
+					for byte in &payload {
+						frame.write(&[*byte][..]).unwrap();
+					}
+					frame.finish().unwrap();
+				} else {
+					group.write_frame(timestamp, payload.as_slice()).unwrap();
+				}
+			}
+			let consumer = group.consume();
+			group.finish().unwrap();
+
+			let msg = ietf::GroupHeader {
+				track_alias: 0,
+				group_id: 0,
+				sub_group_id: 0,
+				publisher_priority: 0,
+				flags: Default::default(),
+			};
+
+			Publisher::<SinkSession>::run_group(session, msg, 0, consumer, Timescale::default(), Version::Draft14)
+				.await
+				.unwrap();
+
+			log.writes.lock().unwrap().clone()
+		}
+
+		let whole = serve(false).await;
+		let chunked = serve(true).await;
+		assert!(!whole.is_empty(), "the group produced no bytes");
+		assert_eq!(whole, chunked, "batched and chunked writes must encode the same");
+	}
+
+	/// A frame still being written must reach the wire as it fills rather than waiting
+	/// for the whole thing: the batch read has to yield to the open tail.
+	#[tokio::test]
+	async fn an_open_frame_streams_before_it_completes() {
+		let log = crate::lite::test_transport::Log::default();
+		let session = SinkSession::new(log.clone());
+
+		let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		let consumer = group.consume();
+
+		// A large frame, opened but far from complete.
+		let mut frame = group
+			.create_frame(crate::frame::Info {
+				size: 4096,
+				timestamp: crate::Timestamp::from_millis(0).unwrap(),
+			})
+			.unwrap();
+		frame.write(&[7u8; 512][..]).unwrap();
+
+		let msg = ietf::GroupHeader {
+			track_alias: 0,
+			group_id: 0,
+			sub_group_id: 0,
+			publisher_priority: 0,
+			flags: Default::default(),
+		};
+
+		let mut serving = std::pin::pin!(Publisher::<SinkSession>::run_group(
+			session,
+			msg,
+			0,
+			consumer,
+			Timescale::default(),
+			Version::Draft14
+		));
+		// Let it run until it blocks on the rest of the frame.
+		assert!(futures::poll!(serving.as_mut()).is_pending());
+
+		let written = log.writes.lock().unwrap().len();
+		assert!(
+			written >= 512,
+			"the open frame's first chunk must be forwarded before it completes, wrote {written}"
 		);
 	}
 }

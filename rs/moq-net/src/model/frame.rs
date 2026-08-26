@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Poll, ready};
 
+use arrayvec::ArrayVec;
 use bytes::Bytes;
 
 use crate::group::{self, GroupState};
@@ -41,6 +42,91 @@ pub struct Frame {
 	pub timestamp: Timestamp,
 	/// The full frame payload.
 	pub payload: Bytes,
+}
+
+/// A reusable batch of frames, filled by [`group::Consumer::read_frames`] and drained
+/// by [`group::Producer::write_frames`].
+///
+/// A fixed-capacity inline buffer: `N` frames of stack storage, never a heap
+/// allocation and never a spill. Allocate one per task and reuse it for the life of
+/// the group rather than one per read.
+///
+/// `N` defaults to 32, chosen from `benches/group.rs`: batches of 32 read ~7x faster
+/// than a frame at a time, and 128 buys nothing back for four times the stack. A
+/// default on a const parameter only applies in type position, so name the type to
+/// get it: `let buf: frame::Buffer = Buffer::new()`.
+///
+/// A fill stamps the group's cache access once for the whole batch, so a reader that
+/// takes longer than the track's `latency_max` to work through one batch can find the
+/// rest of the group expired. Size the buffer so a batch is comfortably quicker than
+/// that window.
+#[derive(Debug, Default)]
+pub struct Buffer<const N: usize = 32>(ArrayVec<Frame, N>);
+
+impl<const N: usize> Buffer<N> {
+	/// An empty buffer with room for `N` frames.
+	pub fn new() -> Self {
+		Self(ArrayVec::new())
+	}
+
+	/// How many frames a single fill can hold.
+	pub const fn capacity(&self) -> usize {
+		N
+	}
+
+	/// How many frames the buffer currently holds.
+	pub fn len(&self) -> usize {
+		self.0.len()
+	}
+
+	/// Whether the buffer holds no frames.
+	pub fn is_empty(&self) -> bool {
+		self.0.is_empty()
+	}
+
+	/// Whether the buffer is at capacity, so [`Self::push`] would refuse.
+	pub fn is_full(&self) -> bool {
+		self.0.is_full()
+	}
+
+	/// The frames from the most recent fill, in order.
+	pub fn filled(&self) -> &[Frame] {
+		&self.0
+	}
+
+	/// The frames from the most recent fill, mutably (to take payloads out, say).
+	pub fn filled_mut(&mut self) -> &mut [Frame] {
+		&mut self.0
+	}
+
+	/// Append a frame, handing it back if the buffer is already full.
+	///
+	/// Fill a buffer this way to hand a whole batch to
+	/// [`group::Producer::write_frames`].
+	pub fn push(&mut self, frame: Frame) -> std::result::Result<(), Frame> {
+		self.0.try_push(frame).map_err(|err| err.element())
+	}
+
+	/// Move every frame out, leaving the buffer empty.
+	///
+	/// Frames left in the iterator when it drops are dropped with it, so the buffer
+	/// ends up empty either way.
+	pub fn drain(&mut self) -> impl ExactSizeIterator<Item = Frame> + '_ {
+		self.0.drain(..)
+	}
+
+	/// Drop the current batch, leaving the buffer empty.
+	pub fn clear(&mut self) {
+		self.0.clear();
+	}
+
+	/// Replace the contents with up to `N` frames, returning how many were written.
+	/// Must be cleared first.
+	pub(crate) fn fill(&mut self, frames: impl Iterator<Item = Frame>) -> usize {
+		debug_assert!(self.is_empty(), "fill on a non-empty buffer would drop frames");
+		self.0.extend(frames.take(N));
+		self.len()
+	}
 }
 
 /// Payload storage for the single in-flight frame, shared between the writing
@@ -351,9 +437,8 @@ pub struct Consumer {
 	source: Source,
 	// Byte offset consumed so far.
 	read_idx: usize,
-	// Egress payload meter. Set only for frames read directly from the group (not
-	// from the prefetch batch, whose bytes were already counted at fill), so chunks
-	// bump `bytes` exactly once. Empty (no-op) otherwise.
+	// Egress payload meter, so chunks bump `bytes` exactly once as they're read out.
+	// Empty (no-op) for an untagged group.
 	stats: stats::Meter,
 }
 
