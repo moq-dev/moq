@@ -229,3 +229,105 @@ test("lite-03 keeps an existing RTT, since its PROBE cannot carry one", async ()
 	expect(got.estimatedRecvRate).toBe(2_000_000);
 	expect(got.rtt).toBe(Time.Milli(40));
 });
+
+test("an announce skipped as a reflected loop still holds its path", async () => {
+	// The subscriber's own origin, so a chain naming it reflects back through us.
+	const SELF = 1n;
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06, SELF);
+	const announced = subscriber.announced(Path.empty());
+	await settle();
+
+	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
+
+	// Announce id 0: the chain loops back through us, so it is skipped locally. The peer
+	// numbered it regardless and still holds the path.
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("room"), hops: [OriginSchema.parse(SELF)] },
+			Version.DRAFT_06,
+		),
+	);
+	await settle();
+
+	// A second start for that path is one advertisement too many, whether or not we made
+	// anything of the first. Accepting it is what let id 0's end retract this one's state.
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("room"), hops: [PUBLISHER_A] },
+			Version.DRAFT_06,
+		),
+	);
+
+	await expect(announced.next()).rejects.toThrow("duplicate announce");
+
+	announced.close();
+	subscriber.close();
+});
+
+test("a restart replaces an announce that was skipped as a reflected loop", async () => {
+	const SELF = 1n;
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06, SELF);
+	const announced = subscriber.announced(Path.empty());
+	await settle();
+
+	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
+
+	// Skipped: the chain reflects back through us.
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("room"), hops: [OriginSchema.parse(SELF)] },
+			Version.DRAFT_06,
+		),
+	);
+	await settle();
+
+	// The id stays live, so the peer may restart it into a route that is usable here.
+	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_A] }, Version.DRAFT_06));
+	expect(await announced.next()).toEqual({ path: Path.from("room"), active: true });
+
+	// Retiring the id ends what the restart attached, and nothing else.
+	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_06));
+	expect(await announced.next()).toEqual({ path: Path.from("room"), active: false });
+
+	announced.close();
+	subscriber.close();
+});
+
+test("retiring an id whose announce was skipped ends nothing", async () => {
+	const SELF = 1n;
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06, SELF);
+	const announced = subscriber.announced(Path.empty());
+	await settle();
+
+	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
+
+	// Id 0 for "room": skipped as a reflected loop.
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("room"), hops: [OriginSchema.parse(SELF)] },
+			Version.DRAFT_06,
+		),
+	);
+	// Id 1 for a different path, which is routable.
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("lobby"), hops: [PUBLISHER_A] },
+			Version.DRAFT_06,
+		),
+	);
+	expect(await announced.next()).toEqual({ path: Path.from("lobby"), active: true });
+
+	// Retire the skipped one, then the live one. The first must surface nothing, so the
+	// only end a consumer sees is "lobby".
+	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_06));
+	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 1n }, Version.DRAFT_06));
+	expect(await announced.next()).toEqual({ path: Path.from("lobby"), active: false });
+
+	announced.close();
+	subscriber.close();
+});

@@ -207,12 +207,20 @@ export class Subscriber {
 			let nextAnnounceId = 0n;
 			const announcedById = new Map<bigint, Path.Valid>();
 
-			// The publisher behind each path we currently advertise, so a restart can tell a
-			// route change (same publisher, subscriptions resume) from a replacement (a new
-			// generation took the path, nothing carries over). At most one advertisement per
-			// path is current, and every announce on this stream shares `prefix`, so the
-			// suffix is the key.
-			const advertised = new Map<Path.Valid, Origin | undefined>();
+			// Every advertisement the peer currently has live, keyed by suffix (at most one
+			// per path is current, and every announce on this stream shares `prefix`).
+			//
+			// An advertisement skipped locally as a reflected loop is recorded with
+			// `publisher: undefined` and `live: false`: the peer numbered it and will retract
+			// it regardless of what we made of it, so its path is not free. Dropping it from
+			// the map instead would let a later announce take the path, and the skipped one's
+			// `endedId` would then retract that one's state.
+			//
+			// `publisher` is what lets a restart tell a route change (same publisher,
+			// subscriptions resume) from a replacement (a new generation took the path,
+			// nothing carries over).
+			type Advertisement = { publisher: Origin | undefined; live: boolean };
+			const advertised = new Map<Path.Valid, Advertisement>();
 
 			// Receive announce updates (for Draft03, this includes initial state)
 			for (;;) {
@@ -266,9 +274,12 @@ export class Subscriber {
 
 				// Retract the path: forget the advertisement, drop the shared consume entry so a
 				// later announce subscribes fresh rather than cloning the dead generation's tracks,
-				// and tell the consumer.
+				// and tell the consumer. A no-op for an advertisement never surfaced, which is
+				// what an id retiring a skipped announce resolves to.
 				const retract = () => {
+					const previous = advertised.get(suffix);
 					advertised.delete(suffix);
+					if (!previous?.live) return;
 					this.#consumes.evict(path);
 					console.debug(`announced: broadcast=${path} active=false`);
 					announced.append({ path: suffix, active: false });
@@ -280,8 +291,11 @@ export class Subscriber {
 					const full = responderOrigin !== undefined ? [...hops, responderOrigin] : hops;
 					if (full.includes(this.origin)) {
 						// A reflected restart means the peer's remaining route loops back through
-						// us, so the advertisement is gone even though the message says active.
-						if (advertised.has(suffix)) retract();
+						// us, so the route is gone even though the message says active. The
+						// advertisement stays live: the peer still holds the path and its id still
+						// resolves here.
+						retract();
+						advertised.set(suffix, { publisher: undefined, live: false });
 						continue;
 					}
 				}
@@ -291,10 +305,18 @@ export class Subscriber {
 					// peer itself originated it. See `restart_announce` in the Rust subscriber.
 					const publisher = hops?.[0] ?? responderOrigin;
 
+					// One current advertisement per path per stream. From lite-06 a replacement
+					// is an explicit RESTART, so a second ANNOUNCE_START for a path the peer
+					// already advertised is a violation, whether or not we skipped the first.
+					if (announce.status === "active" && hasAnnounceId(this.version) && advertised.has(suffix)) {
+						throw new Error(`duplicate announce for ${path}`);
+					}
+
 					// A second advertisement for a path we already carry is a restart: either an
 					// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.
-					if (advertised.has(suffix)) {
-						if (advertised.get(suffix) === publisher) {
+					const previous = advertised.get(suffix);
+					if (previous?.live) {
+						if (previous.publisher === publisher) {
 							// Same publisher, new route. In-flight subscriptions resume across it,
 							// so there is nothing for a consumer to react to.
 							console.debug(`announced: broadcast=${path} rerouted`);
@@ -309,7 +331,7 @@ export class Subscriber {
 					// After `retract()`, which clears the entry: the path is advertised again, by
 					// whoever just took it over. Recording it before would leave nothing behind, so
 					// the *next* takeover would read as a first announcement and skip its own end.
-					advertised.set(suffix, publisher);
+					advertised.set(suffix, { publisher, live: true });
 				} else {
 					retract();
 					continue;
