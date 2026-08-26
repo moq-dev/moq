@@ -843,6 +843,11 @@ impl AuthToken {
 /// - a grant resolved by the endpoint itself has no key to look for at all.
 #[derive(Debug, Clone)]
 pub(crate) struct Revalidate {
+	/// The endpoint that admitted the session, and therefore the only authority
+	/// that can revoke it. Carried rather than resolved from whichever [`Auth`]
+	/// happens to run the re-check, so a token can never be judged against a
+	/// differently-configured endpoint, or against none at all.
+	api: AuthApi,
 	/// The admission request, replayed verbatim on each re-check.
 	params: Arc<AuthParams>,
 	/// The scope admission granted. A replay that no longer covers it is a
@@ -1364,8 +1369,8 @@ impl Auth {
 	}
 
 	/// The flight key for a live session's re-check.
-	fn flight_key(&self, api: &AuthApi, grant: &Revalidate) -> Option<FlightKey> {
-		Some(self.api_request(&grant.params).ok()?.identity(&api.base))
+	fn flight_key(&self, grant: &Revalidate) -> Option<FlightKey> {
+		Some(self.api_request(&grant.params).ok()?.identity(&grant.api.base))
 	}
 
 	/// Anchor verified claims on the API's alias, shared by both modes.
@@ -1402,6 +1407,7 @@ impl Auth {
 		// No schedule means the endpoint named no `max-age`, so it has not asked to
 		// be re-consulted; the credential's own `exp` stays the only bound.
 		token.revalidate = hints.schedule().map(|schedule| Revalidate {
+			api: api.clone(),
 			params: Arc::new(params.clone()),
 			scope: Scope::new(&token),
 			schedule,
@@ -1524,6 +1530,10 @@ impl Auth {
 	/// bound, anonymous ones included; mTLS peers carry neither. This is the one
 	/// seam a session loop needs: selecting on the credential's expiry alone
 	/// would keep serving through a revoked grant.
+	///
+	/// The endpoint consulted is the one that ADMITTED the session, carried on the
+	/// token itself, so a process holding several differently-configured `Auth`
+	/// instances still judges each token against the authority that issued it.
 	pub async fn expired(&self, token: &AuthToken) -> Expired {
 		let revoked = async {
 			match &token.revalidate {
@@ -1567,12 +1577,6 @@ impl Auth {
 	/// retries: a brief auth outage must not mass-disconnect a fleet's worth of
 	/// viewers. A sustained one still fails closed.
 	async fn revalidate(&self, grant: &Revalidate) -> Expired {
-		// A `Revalidate` is only ever minted by `admit_via_api`, so the API it came
-		// from is still configured; the guard is for a stub `Auth` in tests.
-		let Some(api) = self.auth_api.clone() else {
-			return std::future::pending().await;
-		};
-
 		let mut schedule = grant.schedule;
 		let mut next = Instant::now() + schedule.cadence;
 		let mut deadline = next + schedule.staleness;
@@ -1587,7 +1591,7 @@ impl Auth {
 			// would otherwise cancel the very re-check that was about to RENEW the
 			// grant, closing every session without the endpoint ever being asked.
 			let budget = deadline.max(Instant::now() + crate::http_client::REQUEST_TIMEOUT);
-			let outcome = match tokio::time::timeout_at(budget, self.recheck(&api, grant)).await {
+			let outcome = match tokio::time::timeout_at(budget, self.recheck(grant)).await {
 				Ok(outcome) => outcome,
 				Err(_) => return Expired::Stale,
 			};
@@ -1617,8 +1621,8 @@ impl Auth {
 	}
 
 	/// One re-check, joining the in-flight request for the same grant if there is one.
-	async fn recheck(&self, api: &AuthApi, grant: &Revalidate) -> Recheck {
-		match self.fetch_shared(api, grant).await {
+	async fn recheck(&self, grant: &Revalidate) -> Recheck {
+		match self.fetch_shared(grant).await {
 			// The reply is shared; the verdict is this session's alone.
 			Fetched::Ok { resp, hints } => match self.authorize(&grant.params, &resp) {
 				Ok(token) if grant.scope.covered_by(&token) => Recheck::Valid { hints },
@@ -1632,30 +1636,29 @@ impl Auth {
 	}
 
 	/// The shared auth-API fetch, joining an in-flight one for the same request.
-	async fn fetch_shared(&self, api: &AuthApi, grant: &Revalidate) -> Fetched {
-		let Some(key) = self.flight_key(api, grant) else {
+	async fn fetch_shared(&self, grant: &Revalidate) -> Fetched {
+		let Some(key) = self.flight_key(grant) else {
 			return Fetched::Unavailable;
 		};
+		let revalidator = &grant.api.revalidator;
 		let flight = {
-			let mut flights = api.revalidator.flights.lock().unwrap();
+			let mut flights = revalidator.flights.lock().unwrap();
 			if let Some(flight) = flights.get(&key).and_then(|slot| slot.flight.upgrade()) {
 				flight
 			} else {
-				let id = api
-					.revalidator
+				let id = revalidator
 					.next_flight
 					.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				let guard = FlightGuard {
-					revalidator: api.revalidator.clone(),
+					revalidator: revalidator.clone(),
 					key: key.clone(),
 					id,
 				};
 				let owned = grant.clone();
 				let auth = self.clone();
-				let api = api.clone();
 				let flight = async move {
 					let _guard = guard;
-					auth.recheck_fetch(&api, &owned).await
+					auth.recheck_fetch(&owned).await
 				}
 				.boxed()
 				.shared();
@@ -1672,13 +1675,13 @@ impl Auth {
 	/// Asking the SAME question admission asked is the whole point. A narrower
 	/// check ("does a key still exist for this kid?") cannot see a key REPLACED
 	/// under that kid, and cannot see an anonymous grant withdrawn.
-	async fn recheck_fetch(&self, api: &AuthApi, grant: &Revalidate) -> Fetched {
+	async fn recheck_fetch(&self, grant: &Revalidate) -> Fetched {
 		let request = match self.api_request(&grant.params) {
 			Ok(request) => request,
 			// The credential parsed at admission, so this cannot be transient.
 			Err(_) => return Fetched::Refused,
 		};
-		match api.fetch(&request).await {
+		match grant.api.fetch(&request).await {
 			Ok((resp, hints)) => Fetched::Ok {
 				resp: Arc::new(resp),
 				hints,
@@ -3992,11 +3995,18 @@ api = "https://api.example.com/access"
 		assert!(result.is_err());
 	}
 
+	/// The endpoint `auth` was built with. Admission carries this onto every grant
+	/// it mints, so a hand-built one has to name it too.
+	fn test_api(auth: &Auth) -> AuthApi {
+		auth.auth_api.clone().expect("test grants need an auth API")
+	}
+
 	/// A grant as admission would mint it, on a short cadence. The empty scope
 	/// makes `covered_by` a root check, which is what the loop tests care about;
 	/// the scope comparison itself is covered by its own tests below.
-	fn test_grant(jwt: Option<String>, after: Duration) -> Revalidate {
+	fn test_grant(auth: &Auth, jwt: Option<String>, after: Duration) -> Revalidate {
 		test_grant_schedule(
+			auth,
 			jwt,
 			Schedule {
 				cadence: after,
@@ -4010,8 +4020,9 @@ api = "https://api.example.com/access"
 	}
 
 	/// The same, with the resolved schedule spelled out.
-	fn test_grant_schedule(jwt: Option<String>, schedule: Schedule) -> Revalidate {
+	fn test_grant_schedule(auth: &Auth, jwt: Option<String>, schedule: Schedule) -> Revalidate {
 		Revalidate {
+			api: test_api(auth),
 			params: Arc::new(AuthParams {
 				path: "demo".into(),
 				jwt,
@@ -4241,7 +4252,7 @@ api = "https://api.example.com/access"
 		.expect("max-age opts in");
 		assert_eq!(schedule.staleness, CacheHints::DEFAULT_STALE);
 
-		let grant = test_grant_schedule(None, schedule);
+		let grant = test_grant_schedule(&auth, None, schedule);
 		// Half an hour of total outage: still serving.
 		let alive = tokio::time::timeout(Duration::from_secs(30 * 60), auth.revalidate(&grant)).await;
 		assert!(alive.is_err(), "a 30 minute outage must not disconnect anyone");
@@ -4295,6 +4306,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api(&server).await;
 		let grant = test_grant_schedule(
+			&auth,
 			None,
 			Schedule {
 				cadence: Duration::from_millis(200),
@@ -4314,7 +4326,7 @@ api = "https://api.example.com/access"
 		// No mock mounted, so every re-check gets wiremock's 404.
 		let server = MockServer::start().await;
 		let auth = auth_with_api(&server).await;
-		let grant = test_grant(None, Duration::from_millis(500));
+		let grant = test_grant(&auth, None, Duration::from_millis(500));
 
 		let start = std::time::Instant::now();
 		let reason = tokio::time::timeout(Duration::from_secs(5), auth.revalidate(&grant))
@@ -4333,7 +4345,7 @@ api = "https://api.example.com/access"
 		mount_auth(&server, "max-age=1", r#"{"alias":"demo"}"#.to_string()).await;
 
 		let auth = auth_with_api(&server).await;
-		let grant = test_grant(None, Duration::from_millis(200));
+		let grant = test_grant(&auth, None, Duration::from_millis(200));
 		let reason = tokio::time::timeout(Duration::from_secs(5), auth.revalidate(&grant))
 			.await
 			.expect("a withdrawn public grant must close the session");
@@ -4356,7 +4368,7 @@ api = "https://api.example.com/access"
 		let jwt = original.sign(&moq_token::Claims::default().with_root("demo").with_subscribe([""]))?;
 
 		let auth = auth_with_api(&server).await;
-		let grant = test_grant(Some(jwt), Duration::from_millis(200));
+		let grant = test_grant(&auth, Some(jwt), Duration::from_millis(200));
 		let reason = tokio::time::timeout(Duration::from_secs(5), auth.revalidate(&grant))
 			.await
 			.expect("a replaced key must close the sessions its predecessor admitted");
@@ -4404,7 +4416,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let grant = test_grant(None, Duration::from_millis(500));
+		let grant = test_grant(&auth, None, Duration::from_millis(500));
 
 		let start = std::time::Instant::now();
 		let reason = tokio::time::timeout(Duration::from_secs(10), auth.revalidate(&grant))
@@ -4426,7 +4438,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let grant = test_grant(None, Duration::from_millis(500));
+		let grant = test_grant(&auth, None, Duration::from_millis(500));
 
 		let start = std::time::Instant::now();
 		let reason = tokio::time::timeout(Duration::from_secs(10), auth.revalidate(&grant))
@@ -4453,6 +4465,7 @@ api = "https://api.example.com/access"
 		let auth = auth_with_api(&server).await;
 		// 200ms cadence would default to a 600ms window; the endpoint asked for 2s.
 		let grant = test_grant_schedule(
+			&auth,
 			None,
 			Schedule {
 				cadence: Duration::from_millis(200),
@@ -4482,7 +4495,7 @@ api = "https://api.example.com/access"
 		mount_auth(&server, "max-age=1", "not json".to_string()).await;
 
 		let auth = auth_with_api(&server).await;
-		let grant = test_grant(None, Duration::from_millis(300));
+		let grant = test_grant(&auth, None, Duration::from_millis(300));
 		let reason = tokio::time::timeout(Duration::from_secs(10), auth.revalidate(&grant))
 			.await
 			.expect("a garbage body must fail closed only after the staleness window");
@@ -4503,7 +4516,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let grant = test_grant(None, Duration::from_millis(100));
+		let grant = test_grant(&auth, None, Duration::from_millis(100));
 
 		let (a, b) = tokio::join!(auth.revalidate(&grant), auth.revalidate(&grant));
 		assert_eq!(a, Expired::Revoked);
@@ -4523,7 +4536,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let a = test_grant(None, Duration::from_millis(100));
+		let a = test_grant(&auth, None, Duration::from_millis(100));
 		let mut b = a.clone();
 		b.params = Arc::new(AuthParams {
 			path: "other".into(),
@@ -4549,17 +4562,18 @@ api = "https://api.example.com/access"
 			.mount(&server)
 			.await;
 
+		let auth = auth_with_api(&server).await;
 		let key = create_test_key_with_kid("shared");
 		let claims = moq_token::Claims::default().with_root("demo").with_subscribe([""]);
 		// Two different tokens, same signing key, so the same kid.
-		let a = test_grant(Some(key.sign(&claims)?), Duration::from_millis(100));
+		let a = test_grant(&auth, Some(key.sign(&claims)?), Duration::from_millis(100));
 		let b = test_grant(
+			&auth,
 			Some(key.sign(&claims.clone().with_publish([""]))?),
 			Duration::from_millis(100),
 		);
 		assert_ne!(a.params.jwt, b.params.jwt, "the viewers must hold distinct tokens");
 
-		let auth = auth_with_api(&server).await;
 		let (a, b) = tokio::join!(auth.revalidate(&a), auth.revalidate(&b));
 		assert_eq!(a, Expired::Revoked);
 		assert_eq!(b, Expired::Revoked);
@@ -4592,6 +4606,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api(&server).await;
 		let scoped = |subscribe: &str| Revalidate {
+			api: test_api(&auth),
 			params: Arc::new(AuthParams {
 				path: "demo".into(),
 				..Default::default()
@@ -4641,6 +4656,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api(&server).await;
 		let grant = test_grant_schedule(
+			&auth,
 			None,
 			Schedule {
 				cadence: Duration::from_millis(500),
@@ -4675,6 +4691,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api(&server).await;
 		let grant = test_grant_schedule(
+			&auth,
 			None,
 			Schedule {
 				cadence: Duration::from_millis(200),
@@ -4705,7 +4722,7 @@ api = "https://api.example.com/access"
 			.await;
 
 		let auth = auth_with_api(&server).await;
-		let grant = test_grant(None, Duration::from_millis(10));
+		let grant = test_grant(&auth, None, Duration::from_millis(10));
 		let abandoned = tokio::time::timeout(Duration::from_millis(200), auth.revalidate(&grant)).await;
 		assert!(abandoned.is_err(), "the re-check must still be in flight");
 
@@ -4733,9 +4750,58 @@ api = "https://api.example.com/access"
 		.await;
 
 		let auth = auth_with_api(&server).await;
-		let grant = test_grant(None, Duration::from_millis(100));
+		let grant = test_grant(&auth, None, Duration::from_millis(100));
 		let pending = tokio::time::timeout(Duration::from_millis(500), auth.revalidate(&grant)).await;
 		assert!(pending.is_err(), "a vouched-for grant keeps revalidating");
+		Ok(())
+	}
+
+	/// A grant is judged by the endpoint that ISSUED it, not by whichever `Auth`
+	/// happens to run the re-check. Two differently-configured instances in one
+	/// process would otherwise let a stranger's endpoint revoke a healthy session.
+	#[tokio::test]
+	async fn revalidate_asks_the_granting_endpoint() -> anyhow::Result<()> {
+		let vouching = MockServer::start().await;
+		mount_auth(&vouching, "max-age=1", r#"{"public":{"subscribe":[""]}}"#.to_string()).await;
+
+		let refusing = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(ResponseTemplate::new(404))
+			.mount(&refusing)
+			.await;
+
+		let issuer = auth_with_api(&vouching).await;
+		let stranger = auth_with_api(&refusing).await;
+		let grant = test_grant(&issuer, None, Duration::from_millis(100));
+
+		// The stranger's endpoint refuses everything, so a re-check aimed there
+		// would close the session on its first cadence.
+		let pending = tokio::time::timeout(Duration::from_millis(500), stranger.revalidate(&grant)).await;
+		assert!(pending.is_err(), "a vouched grant must survive a stranger's Auth");
+		Ok(())
+	}
+
+	/// The other direction of the same rule: an `Auth` with no endpoint of its own
+	/// must not silently stop revoking. The authority rides on the grant, so the
+	/// re-check still runs and still fails closed.
+	#[tokio::test]
+	async fn revalidate_without_a_local_api_still_closes() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(ResponseTemplate::new(404))
+			.mount(&server)
+			.await;
+
+		let issuer = auth_with_api(&server).await;
+		let grant = test_grant(&issuer, None, Duration::from_millis(100));
+
+		let stub = Auth::default();
+		let reason = tokio::time::timeout(Duration::from_secs(5), stub.revalidate(&grant))
+			.await
+			.expect("a withdrawn grant must close even without a local endpoint");
+		assert_eq!(reason, Expired::Revoked);
 		Ok(())
 	}
 
