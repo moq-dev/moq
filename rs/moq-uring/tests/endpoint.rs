@@ -166,6 +166,71 @@ fn unsupported_version_is_negotiated() {
 	drop(endpoint);
 }
 
+/// A dial nobody answers must time out rather than hang: with no ingress ever
+/// arriving, the driver's own deadline is the only thing that can wake it, so
+/// this fails if the deadline is armed without a registered waiter (the driver
+/// must arm before polling, not after).
+#[test]
+fn an_unanswered_dial_times_out() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+
+	// A bound socket nobody reads: the Initial goes nowhere.
+	let hole = UdpSocket::bind("127.0.0.1:0").expect("bind");
+	let client_sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("client socket");
+	let mut dial = dial_config(hole.local_addr().expect("addr"));
+	// quiche stretches this to 3x the initial probe timeout (RFC 9000 §10.1),
+	// so the dial resolves in about three seconds.
+	dial.idle_timeout = Duration::from_millis(500);
+
+	let result = worker
+		.block_on(async move { quic::client::connect(&handle, client_sock, &dial).await })
+		.expect("worker");
+	assert!(result.is_err(), "a dial into a black hole must time out");
+}
+
+/// The handshake backlog bounds what an unauthenticated Initial can allocate:
+/// past it, Initials are dropped before any per-connection state exists. Zero
+/// is the forcing value, refusing every handshake outright.
+#[test]
+fn the_backlog_bounds_pending_handshakes() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+
+	let sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("socket");
+	let mut config = quic::endpoint::Config::default().with_server(server_config(&certs));
+	config.backlog = 0;
+	let endpoint = quic::Endpoint::new(&handle, sock, config).expect("endpoint");
+	let server = endpoint.local_addr();
+
+	let accepted = std::rc::Rc::new(std::cell::Cell::new(false));
+	let accept_flag = accepted.clone();
+	handle.spawn(async move {
+		if endpoint.accept().await.is_ok() {
+			accept_flag.set(true);
+		}
+	});
+
+	let client_sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("client socket");
+	let mut dial = dial_config(server);
+	// The server never answers, so the dial ends at the idle timeout; keep the
+	// test short.
+	dial.idle_timeout = Duration::from_millis(500);
+
+	let result = worker
+		.block_on(async move { quic::client::connect(&handle, client_sock, &dial).await })
+		.expect("worker");
+	assert!(result.is_err(), "a handshake over the backlog must not complete");
+	assert!(!accepted.get(), "a handshake over the backlog must not be accepted");
+}
+
 /// A dial-only endpoint refuses to accept, loudly.
 #[test]
 fn accept_needs_a_server_config() {

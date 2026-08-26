@@ -28,12 +28,30 @@ use crate::{Handle, udp};
 pub const CID_LEN: usize = 8;
 
 /// What an endpoint serves, beyond dialing.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
 	/// Accept incoming connections with this configuration. Without it the
 	/// endpoint only dials, and inbound handshakes are dropped.
 	pub server: Option<server::Config>,
+
+	/// How many incoming handshakes may be in flight at once (default 1024).
+	///
+	/// Each unauthenticated Initial births per-connection state, so this is
+	/// the bound on what a spoofed packet can allocate. An Initial past the
+	/// cap is dropped; a real peer retransmits and lands once the backlog
+	/// drains (a handshake resolves in about a round trip, or by idle
+	/// timeout).
+	pub backlog: usize,
+}
+
+impl Default for Config {
+	fn default() -> Self {
+		Self {
+			server: None,
+			backlog: 1024,
+		}
+	}
 }
 
 impl Config {
@@ -69,6 +87,9 @@ struct Inner {
 	conns: RefCell<slab::Slab<Conn>>,
 	/// Destination connection id -> the connection it belongs to.
 	routes: RefCell<HashMap<Vec<u8>, usize>>,
+	/// Incoming handshakes in flight, bounded by [`Config::backlog`].
+	pending: Cell<usize>,
+	backlog: usize,
 	/// Live [`Endpoint`] handles; at zero the endpoint winds down (no new
 	/// accepts or dials, existing connections served until they end).
 	handles: Cell<usize>,
@@ -107,6 +128,8 @@ impl Endpoint {
 			accepting: RefCell::new(accepting),
 			conns: RefCell::new(slab::Slab::new()),
 			routes: RefCell::new(HashMap::new()),
+			pending: Cell::new(0),
+			backlog: config.backlog,
 			handles: Cell::new(1),
 			closed: RefCell::new(None),
 			task_waiters: RefCell::new(kio::WaiterList::new()),
@@ -289,6 +312,12 @@ impl Inner {
 			self.negotiate(&hdr, info.from);
 			return None;
 		}
+		// Every pending handshake holds per-connection state an unauthenticated
+		// packet conjured, so bound them; a dropped Initial is retransmitted.
+		if self.pending.get() >= self.backlog {
+			tracing::debug!(from = %info.from, "dropping a handshake over the backlog");
+			return None;
+		}
 
 		let scid = random_cid();
 		let mut conn = {
@@ -320,9 +349,12 @@ impl Inner {
 		shared.mark_ingested();
 
 		// Hand the connection over once (if) its handshake completes.
+		self.pending.set(self.pending.get() + 1);
 		let inner = self.clone();
 		self.handle.spawn(async move {
-			let mut conn = match connection::establish(shared).await {
+			let outcome = connection::establish(shared).await;
+			inner.pending.set(inner.pending.get() - 1);
+			let mut conn = match outcome {
 				Ok(conn) => conn,
 				Err(err) => {
 					tracing::debug!(%err, "incoming handshake failed");

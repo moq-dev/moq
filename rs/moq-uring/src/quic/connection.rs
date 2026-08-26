@@ -539,7 +539,7 @@ struct Driver {
 impl Driver {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		// The endpoint fails the connection from outside when its socket dies.
-		let ingested = {
+		let mut ingested = {
 			let mut state = self.shared.state.borrow_mut();
 			if state.closed.is_some() {
 				return Poll::Ready(());
@@ -550,32 +550,39 @@ impl Driver {
 			std::mem::take(&mut state.ingested)
 		};
 
-		if self.deadline.poll(waiter).is_ready() {
-			self.shared.conn.borrow_mut().on_timeout();
-		}
+		loop {
+			self.sweep(ingested);
+			ingested = false;
 
-		self.sweep(ingested);
-
-		if let Poll::Ready(err) = self.flush(waiter) {
-			self.fail(err);
-			return Poll::Ready(());
-		}
-
-		// A flush frees datagram-send queue space.
-		self.shared.state.borrow_mut().datagram_send_waiters.wake();
-
-		{
-			let conn = self.shared.conn.borrow();
-			self.deadline.set(conn.timeout_instant());
-			if conn.is_closed() {
-				let err = terminal(&conn);
-				drop(conn);
+			if let Poll::Ready(err) = self.flush(waiter) {
 				self.fail(err);
 				return Poll::Ready(());
 			}
-		}
 
-		Poll::Pending
+			// A flush frees datagram-send queue space.
+			self.shared.state.borrow_mut().datagram_send_waiters.wake();
+
+			{
+				let conn = self.shared.conn.borrow();
+				self.deadline.set(conn.timeout_instant());
+				if conn.is_closed() {
+					let err = terminal(&conn);
+					drop(conn);
+					self.fail(err);
+					return Poll::Ready(());
+				}
+			}
+
+			// Arm, *then* poll: the poll is what registers the waiter, so
+			// polling before the set would leave the firing to wake nobody
+			// (fatal on a dial nobody answers, where no ingress ever re-polls
+			// us). Elapsed means quiche's timeout is due right now; restart
+			// the turn so its effects flush and the next deadline arms.
+			if self.deadline.poll(waiter).is_pending() {
+				return Poll::Pending;
+			}
+			self.shared.conn.borrow_mut().on_timeout();
+		}
 	}
 
 	/// Everything event-shaped: establishment, new and readable streams,

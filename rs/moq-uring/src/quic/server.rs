@@ -87,9 +87,7 @@ pub async fn accept(handle: &Handle, socket: udp::Socket, config: &Config) -> Re
 	let endpoint = super::Endpoint::new(
 		handle,
 		socket,
-		super::endpoint::Config {
-			server: Some(config.clone()),
-		},
+		super::endpoint::Config::default().with_server(config.clone()),
 	)?;
 	endpoint.accept().await
 }
