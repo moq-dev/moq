@@ -315,7 +315,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						// lite-05 only: a duplicate ANNOUNCE for an already-announced path is a RESTART;
 						// atomically replace the broadcast. Lite06+ restarts by announce id, and older
 						// versions never defined restarts, so both fall through to start_announce, which
-						// rejects the duplicate (Error::Duplicate).
+						// rejects the duplicate (Error::ProtocolViolation).
 						self.restart_announce(path.clone(), hops, cost, link_cost, responder_origin, &mut announced)?;
 					} else {
 						self.start_announce(path.clone(), hops, cost, link_cost, responder_origin, &mut announced)?;
@@ -455,8 +455,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// advertised rather than what we accepted: a second start for a path whose first
 		// announce we declined is the same violation, and letting it through is how an
 		// id ends up bound to a path holding a different announce's route.
+		//
+		// One of the three conditions the draft ends the session over, alongside an
+		// unknown or retired announce id, so it reports the same code as those rather
+		// than the narrower `Duplicate`.
 		if announced.contains(&path) {
-			return Err(Error::Duplicate);
+			return Err(Error::ProtocolViolation);
 		}
 
 		if let Some(responder) = responder_origin {
@@ -960,7 +964,7 @@ mod tests {
 		assert!(
 			matches!(
 				subscriber.start_announce(path, reflected, RouteCost::default(), 0, Some(assigned), &mut announced),
-				Err(Error::Duplicate)
+				Err(Error::ProtocolViolation)
 			),
 			"the double announce must be reported, not silently dropped",
 		);
@@ -1019,13 +1023,17 @@ mod tests {
 		// nothing was accepted at this path for an acceptance record to hold.
 		let mut hops = crate::OriginList::new();
 		hops.push(crate::Origin::new(7).unwrap()).unwrap();
-		assert!(
-			matches!(
-				subscriber.start_announce(path, hops, RouteCost::default(), 0, Some(assigned), &mut announced),
-				Err(Error::Duplicate)
-			),
-			"a start for a path the peer already advertised must be reported, even though the first was dropped",
-		);
+		let err = subscriber
+			.start_announce(path, hops, RouteCost::default(), 0, Some(assigned), &mut announced)
+			.expect_err(
+				"a start for a path the peer already advertised must be reported, even though the first was dropped",
+			);
+
+		// `lite::session` closes with `to_code()`, and the draft ends the session over this
+		// alongside an unknown or retired announce id. Reporting a narrower code would tell
+		// the peer it hit a different rule than the one it broke.
+		assert!(matches!(err, Error::ProtocolViolation));
+		assert_eq!(err.to_code(), Error::ProtocolViolation.to_code());
 	}
 
 	/// An announce whose chain already names the sender came back through the sender.
