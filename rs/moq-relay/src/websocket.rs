@@ -75,7 +75,8 @@ pub(crate) async fn serve_ws(
 			stats,
 			socket_stats: socket_stats.map(|Extension(s)| s),
 		};
-		let expired = async move { token.expired().await };
+		let auth = state.auth.clone();
+		let expired = async move { auth.expired(&token).await };
 		let _ = handle_socket(socket, session, expired).await;
 	}))
 }
@@ -100,7 +101,11 @@ struct SessionInputs {
 
 /// Serve one upgraded WebSocket until it closes or its credential expires.
 #[tracing::instrument("ws", err, skip_all, fields(id = session.id))]
-async fn handle_socket<T>(socket: T, session: SessionInputs, expired: impl Future<Output = ()>) -> anyhow::Result<()>
+async fn handle_socket<T>(
+	socket: T,
+	session: SessionInputs,
+	expired: impl Future<Output = crate::Expired>,
+) -> anyhow::Result<()>
 where
 	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
 		+ futures::Sink<tungstenite::Message, Error = tungstenite::Error>
@@ -156,8 +161,8 @@ where
 	let mut driver = std::pin::pin!(driver);
 	tokio::select! {
 		res = &mut driver => res.map_err(Into::into),
-		_ = expired => {
-			tracing::info!("credential expired, closing session");
+		reason = expired => {
+			tracing::info!(%reason, "credential no longer valid, closing session");
 			session.abort(moq_net::Error::Unauthorized);
 			// Drive the teardown so the close reaches the peer.
 			driver.await.map_err(Into::into)
@@ -837,7 +842,7 @@ mod tests {
 		let server = tokio::spawn(handle_socket(
 			Pipe::new(server_incoming, server_to_client, frozen.clone()),
 			session,
-			std::future::pending::<()>(),
+			std::future::pending::<crate::Expired>(),
 		));
 
 		// A real qmux peer, so the transport handshake completes and its 10s

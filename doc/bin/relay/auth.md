@@ -241,6 +241,36 @@ auth_api = "https://api.moq.dev/cluster/auth"
 
 Unlike the standalone flags, the unified call **fails closed**: any network error, non-2xx status, or unparseable response rejects the connection. The verifying key itself comes from this call, so there is no safe fallback; the endpoint's `Cache-Control` softens transient failures. This applies to mTLS peers as well, including root (`/`) connections such as cluster peers: when an auth API is configured it is the source of truth for every connection (so it can alias and tier the root too), and a failed lookup rejects the connection so the peer reconnects and self-heals once the API recovers. The only fail-open case is when **no** auth API is configured, where the client certificate is the sole credential and the path is used unchanged.
 
+### Revalidating live sessions
+
+A grant that is only checked at connect time can only stop NEW connections. Revoking a key, gating a project, or exhausting a quota would leave every session it already admitted running until its token's `exp` - and an anonymous session has no `exp` at all, so it would run until the peer hung up.
+
+So `--auth-api` keeps asking. The relay re-issues each live session's admission request on the endpoint's own `Cache-Control: max-age` cadence, and closes the session once the reply no longer grants what the session holds. There is no flag: an endpoint that can refuse a connection can stop one, or the two would disagree.
+
+- **Still granted**: the reply still authorizes at least the scope the session already has - a `key` that verifies its credential, or the `public` prefixes it was admitted under. The next re-check waits out the new `max-age`.
+- **Refused** (404, or a reply that no longer grants the session's scope): the session closes immediately.
+- **Unavailable** (network error, 5xx, unparseable body, or a 401/403 rejecting the *relay's own* credential): evidence of nothing about this session. The session keeps serving and the re-check retries with jittered backoff until the outage window passes without a success, then closes. A brief auth outage does not mass-disconnect; a sustained one still fails closed.
+
+The re-check REPLAYS the admission request rather than asking a narrower question, which is what makes one mechanism correct for every credential: a key replaced under an existing `kid` no longer verifies the retained JWT, and a withdrawn `public` block revokes anonymous sessions. `exp` still applies as the outer bound wherever the credential has one. mTLS peers are never revalidated, so a customer-facing decision cannot tear down the relay mesh.
+
+**`max-age` is the opt-in.** Revalidation is switched on by the endpoint, not by relay config: a reply that names a `max-age` is telling the relay how long its answer is good for, and that is the cadence. A reply with no usable `max-age` - none at all, `no-store`, `no-cache`, or `max-age=0` - has not asked to be re-consulted, so the session is never re-checked and its credential's own `exp` remains the only bound, exactly as before revalidation existed. Nothing is invented on the endpoint's behalf, and an existing deployment that sends no `Cache-Control` is unaffected until it opts in.
+
+| directive | meaning here | when absent | relay guardrail |
+|---|---|---|---|
+| `max-age` | re-check cadence, so also the bound on how long a revoked grant keeps serving | no revalidation at all | floor of 1s |
+| `stale-if-error` | how long to keep serving while re-checks FAIL, measured from where `max-age` ends | falls back to `stale-while-revalidate` | - |
+| `stale-while-revalidate` | the same window, for endpoints that express it that way | 1 hour | - |
+
+Either stale directive grants the outage window, and `stale-if-error` wins when both are present - it is the precise license for the case the relay is actually in: revalidation is erroring and the session keeps serving on the last good answer. The window runs from the END of freshness, so `max-age=300, stale-if-error=60` means a session survives 60s of a failing auth API, not that it closes 4 minutes before the first re-check. Zero is allowed and means "close on the first failed re-check" - the re-check itself still gets a full request budget, so a healthy endpoint renews the grant rather than the session closing without ever being asked.
+
+**The relay does not impose a ceiling.** A long `max-age` is a long revocation window, by the endpoint's explicit choice; the only bound is far beyond any real value and exists so the relay's clock arithmetic cannot overflow. Pick the number you are willing to wait for a ban to land.
+
+**The outage default is an hour, on purpose.** A short cadence is a request for a tight *revocation* window, not permission to sever every live session over a brief auth outage. If the default were proportional to the cadence, a 60s cadence would drop the fleet after three minutes - which an ordinary Worker deploy or transient incident can exceed. An hour of the endpoint being unreachable is worth surviving; past that, failing closed is the right call. Send `stale-if-error` to ask for less.
+
+**Budget for twice the `max-age`.** Two things hold the request rate to one per grant rather than one per viewer, and the second costs window. Sessions that would issue an identical request share one in-flight re-check, which merges an audience whose timers fire together. Re-checks also ride the same cached HTTP client as admission, which merges the ones that do not - sessions connect at staggered times, so without it a staggered audience would each dial on its own schedule. The cost is that a re-check may be answered from a cache entry up to one `max-age` old, so worst case is one `max-age` of staleness plus one until the session asks again: `2 x max-age`. Cap what you emit at half the window you are willing to promise.
+
+Note the asymmetry when choosing a long `max-age`: the cadence is set by the reply the relay is already holding, so shortening `max-age` later cannot pull in a re-check that is already scheduled. Whatever TTL you hand a healthy connection is how long an unannounced revocation takes to reach it.
+
 ### Authenticating the relay to the auth API
 
 The outbound HTTP the relay makes for auth (`--auth-api` requests and JWK fetches) reuses the cluster client's TLS configuration. The same `--client-tls-cert` / `--client-tls-key` the relay presents when dialing cluster peers also identifies it to the auth API, and `--client-tls-root` trusts a private CA on the endpoint (env `MOQ_CLIENT_TLS_*`, or `[client.tls]` in TOML). So an auth API can require mTLS and recognize the relay by the same certificate it uses for clustering.

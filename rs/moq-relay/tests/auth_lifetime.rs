@@ -1,16 +1,45 @@
-//! End-to-end test of the session credential bound through a real moq-relay.
+//! End-to-end tests of the session credential bound through a real moq-relay.
 //!
-//! Stands up the relay's axum WebSocket path (`serve_ws`), connects a publisher
+//! Stands up the relay's native accept loop (`Connection::run` over `tcp://`)
+//! or its axum WebSocket path (`serve_ws` over `ws://`), connects a publisher
 //! and a subscriber with JWTs, confirms media flows, then asserts the relay
 //! closes the live sessions once the credential stops being valid.
 
 use std::{net::TcpListener, time::Duration};
 
 use moq_native::moq_net::{self, Origin};
-use moq_relay::{AuthConfig, Cluster, ClusterConfig, Web, WebConfig};
-use moq_token::{Algorithm, Key};
+use moq_relay::{AuthConfig, Cluster, ClusterConfig, Connection, Web, WebConfig};
+use moq_token::{Algorithm, Key, KeyId};
+use wiremock::matchers::{method, path as path_matcher, query_param};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+const KID: &str = "session-key";
+
+/// The stub auth API's 200 response: the verifying key for [`KID`], cached for
+/// one second so revalidation re-checks on that cadence.
+async fn mount_valid_key(server: &MockServer, key: &Key) {
+	Mock::given(method("GET"))
+		.and(path_matcher("/auth"))
+		.and(query_param("kid", KID))
+		.respond_with(
+			ResponseTemplate::new(200)
+				.insert_header("Cache-Control", "max-age=1")
+				.set_body_string(format!(r#"{{"key":{}}}"#, serde_json::to_string(key).unwrap())),
+		)
+		.mount(server)
+		.await;
+}
+
+/// An auth stack on the stub auth API with revalidation enabled.
+async fn build_api_auth(api: &MockServer) -> moq_relay::Auth {
+	let mut auth_config = AuthConfig::default();
+	auth_config.auth_api = Some(format!("{}/auth", api.uri()));
+	auth_config
+		.init(&moq_native::tls::Client::default())
+		.await
+		.expect("auth init")
+}
 
 /// An auth stack verifying JWTs with `key` alone. The key file is re-read per
 /// connection, so the returned guard must outlive the relay.
@@ -36,6 +65,41 @@ async fn wait_for_listener(port: u16) {
 		);
 		tokio::time::sleep(Duration::from_millis(25)).await;
 	}
+}
+
+/// Stand up the relay's accept loop on a plain-TCP qmux listener and return the
+/// port plus an abort handle.
+async fn spawn_relay(auth: moq_relay::Auth) -> (u16, tokio::task::JoinHandle<()>) {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe");
+	let port = probe.local_addr().expect("local addr").port();
+	drop(probe);
+
+	let mut config = moq_native::ServerConfig::default();
+	config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
+	let mut server = config.init().expect("server init");
+	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
+
+	let handle = tokio::spawn(async move {
+		let mut id = 0;
+		while let Some(request) = server.accept().await {
+			let conn = Connection {
+				id,
+				request,
+				cluster: cluster.clone(),
+				auth: auth.clone(),
+			};
+			id += 1;
+			tokio::spawn(async move {
+				let _ = conn.run().await;
+			});
+		}
+	});
+
+	wait_for_listener(port).await;
+
+	(port, handle)
 }
 
 /// Stand up the relay's axum web stack with WebSocket enabled and return the
@@ -83,6 +147,20 @@ fn room_claims() -> moq_token::Claims {
 		.with_root("room")
 		.with_subscribe([""])
 		.with_publish([""])
+}
+
+/// The stub auth API's anonymous 200: full public access under `room`, cached
+/// for one second so revalidation re-checks on that cadence.
+async fn mount_public(server: &MockServer) {
+	Mock::given(method("GET"))
+		.and(path_matcher("/auth"))
+		.respond_with(
+			ResponseTemplate::new(200)
+				.insert_header("Cache-Control", "max-age=1")
+				.set_body_string(r#"{"public":{"subscribe":[""],"publish":[""]}}"#),
+		)
+		.mount(server)
+		.await;
 }
 
 /// A relay URL for the `/room` root carrying a freshly minted JWT.
@@ -172,6 +250,112 @@ async fn ws_expired_token_closes_live_sessions() {
 		elapsed >= Duration::from_secs(1),
 		"sessions closed before the token's exp: {elapsed:?}"
 	);
+
+	relay.abort();
+}
+
+/// Withdrawing the grant closes live sessions on the next re-check.
+#[tokio::test]
+async fn revoked_grant_closes_live_sessions() {
+	let api = MockServer::start().await;
+	let key = Key::generate(Algorithm::HS256, Some(KeyId::decode(KID).unwrap())).expect("generate key");
+	mount_valid_key(&api, &key).await;
+
+	let (port, relay) = spawn_relay(build_api_auth(&api).await).await;
+	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port, &key, &room_claims())).await;
+
+	// Every subsequent auth-API call gets wiremock's 404.
+	api.reset().await;
+
+	tokio::time::timeout(Duration::from_secs(5), pub_session.closed())
+		.await
+		.expect("relay should close the publisher session after the grant is revoked");
+	tokio::time::timeout(Duration::from_secs(5), sub_session.closed())
+		.await
+		.expect("relay should close the subscriber session after the grant is revoked");
+
+	relay.abort();
+}
+
+/// WebSocket sessions close on revocation like the native accept path.
+#[tokio::test]
+async fn ws_revoked_grant_closes_live_sessions() {
+	let api = MockServer::start().await;
+	let key = Key::generate(Algorithm::HS256, Some(KeyId::decode(KID).unwrap())).expect("generate key");
+	mount_valid_key(&api, &key).await;
+
+	let (port, relay) = spawn_ws_relay(build_api_auth(&api).await).await;
+	let (pub_session, sub_session) = connect_and_round_trip(&room_url("ws", port, &key, &room_claims())).await;
+
+	api.reset().await;
+
+	tokio::time::timeout(Duration::from_secs(5), pub_session.closed())
+		.await
+		.expect("relay should close the publisher WS session after the grant is revoked");
+	tokio::time::timeout(Duration::from_secs(5), sub_session.closed())
+		.await
+		.expect("relay should close the subscriber WS session after the grant is revoked");
+
+	relay.abort();
+}
+
+/// An ANONYMOUS session is revoked by the same re-check.
+///
+/// This is the case a "does the kid still resolve" check could never cover: a
+/// public grant is built from claims with no `exp` at all, so before this the
+/// relay held such a session until the peer hung up. Gating a project stopped
+/// new admissions while its existing tokenless viewers kept drawing traffic.
+#[tokio::test]
+async fn revoked_public_grant_closes_anonymous_sessions() {
+	let api = MockServer::start().await;
+	mount_public(&api).await;
+
+	let (port, relay) = spawn_relay(build_api_auth(&api).await).await;
+	let url: url::Url = format!("tcp://127.0.0.1:{port}/room").parse().expect("parse url");
+	let (pub_session, sub_session) = connect_and_round_trip(&url).await;
+
+	// Withdraw `public`, exactly as a gated project's auth API does.
+	api.reset().await;
+	Mock::given(method("GET"))
+		.and(path_matcher("/auth"))
+		.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"alias":"room"}"#))
+		.mount(&api)
+		.await;
+
+	tokio::time::timeout(Duration::from_secs(5), pub_session.closed())
+		.await
+		.expect("relay should close the anonymous publisher once public access is withdrawn");
+	tokio::time::timeout(Duration::from_secs(5), sub_session.closed())
+		.await
+		.expect("relay should close the anonymous subscriber once public access is withdrawn");
+
+	relay.abort();
+}
+
+/// Replacing a key's MATERIAL under the same `kid` closes the sessions the old
+/// key admitted, because the re-check reverifies the retained JWT against
+/// whatever the API now returns. Checking only that some key exists for the kid
+/// would leave every session the compromised key admitted running until `exp`.
+#[tokio::test]
+async fn rotated_key_closes_live_sessions() {
+	let api = MockServer::start().await;
+	let key = Key::generate(Algorithm::HS256, Some(KeyId::decode(KID).unwrap())).expect("generate key");
+	mount_valid_key(&api, &key).await;
+
+	let (port, relay) = spawn_relay(build_api_auth(&api).await).await;
+	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port, &key, &room_claims())).await;
+
+	// Same kid, different material.
+	let replacement = Key::generate(Algorithm::HS256, Some(KeyId::decode(KID).unwrap())).expect("generate key");
+	api.reset().await;
+	mount_valid_key(&api, &replacement).await;
+
+	tokio::time::timeout(Duration::from_secs(5), pub_session.closed())
+		.await
+		.expect("relay should close the publisher once its key is replaced");
+	tokio::time::timeout(Duration::from_secs(5), sub_session.closed())
+		.await
+		.expect("relay should close the subscriber once its key is replaced");
 
 	relay.abort();
 }

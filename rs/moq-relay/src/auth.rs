@@ -1,22 +1,27 @@
 use anyhow::Context;
 use axum::http;
+use futures::FutureExt;
 use moq_native::Transport;
 #[cfg(test)]
 use moq_net::AsPath;
 use moq_net::{Path, PathOwned, PathPrefixes, stats::Tier};
 use moq_token::{Key, KeyId};
+use rand::RngExt;
 use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize};
 use serde_with::{OneOrMany, formats::PreferMany, serde_as};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::time::Instant;
 use url::Url;
 
 /// Parameters extracted from an incoming connection for authentication: the
 /// request-derived path + JWT, plus metadata about the connection itself that the
 /// auth API can bucket on (e.g. the transport). Connection metadata is set by the
 /// relay after parsing the request (the URL/SETUP parsers don't know it).
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct AuthParams {
 	/// The URL path identifying the broadcast root.
 	pub path: String,
@@ -153,6 +158,12 @@ pub enum AuthError {
 	#[error("key not found")]
 	KeyNotFound,
 
+	#[error("the auth API has no grant for this connection")]
+	NotFound,
+
+	#[error("the auth API could not be revalidated; served a stale cached response")]
+	ApiStale,
+
 	#[error("missing key ID in token")]
 	MissingKeyId,
 
@@ -169,6 +180,29 @@ pub enum AuthError {
 	InvalidKeyId(#[from] moq_token::KeyIdError),
 }
 
+impl AuthError {
+	/// True when the auth API answered and the answer was "no".
+	///
+	/// The distinction is what lets [`Auth::revalidate`] tell a withdrawn grant
+	/// from an unreachable API: a refusal closes the session immediately, while
+	/// everything else is evidence of nothing and only closes once the staleness
+	/// window passes. An unrecognized error is NOT a refusal, so a new failure
+	/// mode keeps sessions serving rather than mass-disconnecting them.
+	fn is_refusal(&self) -> bool {
+		matches!(
+			self,
+			Self::UnexpectedToken
+				| Self::ExpectedToken
+				| Self::DecodeFailed
+				| Self::IncorrectRoot
+				| Self::KeyNotFound
+				| Self::MissingKeyId
+				| Self::NotFound
+				| Self::InvalidKeyId(_)
+		)
+	}
+}
+
 // reqwest::Error → AuthError flows through reqwest_middleware::Error so callers can use `?`
 // on both .send() (returns reqwest_middleware::Error) and .error_for_status() / .text()
 // (return reqwest::Error) without a manual map_err.
@@ -183,7 +217,18 @@ impl From<&AuthError> for http::StatusCode {
 		match err {
 			// Upstream auth API unreachable or misconfigured — this is a server-side
 			// problem, not a credential problem.
-			AuthError::ApiUnavailable(_) | AuthError::ApiInvalidResponse(_) => http::StatusCode::BAD_GATEWAY,
+			// A 404 is reported the same way. It is a deterministic answer, which is
+			// why revalidation treats it as a refusal, but at ADMISSION it is far
+			// more often a misconfigured or half-deployed endpoint than a real
+			// verdict -- and 502 is what lets an mTLS cluster peer reconnect and
+			// self-heal once the endpoint is fixed.
+			// `ApiStale` belongs here too: the endpoint was unreachable and the cache
+			// answered for it. Reporting that as 401 would tell a client its
+			// credential was rejected when nothing was ever checked.
+			AuthError::ApiUnavailable(_)
+			| AuthError::ApiInvalidResponse(_)
+			| AuthError::NotFound
+			| AuthError::ApiStale => http::StatusCode::BAD_GATEWAY,
 			AuthError::InvalidUrl(_) => http::StatusCode::INTERNAL_SERVER_ERROR,
 			_ => http::StatusCode::UNAUTHORIZED,
 		}
@@ -533,6 +578,115 @@ struct PublicResponse {
 	publish: Vec<String>,
 }
 
+/// The configured `--auth-api`, and the revalidation state that belongs to it.
+///
+/// One struct rather than two `Option`s that were always in lockstep:
+/// revalidation is what `--auth-api` MEANS, so an endpoint that can refuse a new
+/// connection can also stop a running one, and there is no flag to get that
+/// wrong. Keeping them together is also what removes the "revalidation requires
+/// an auth API" expect and the impossible-state plumbing around it.
+#[derive(Clone)]
+struct AuthApi {
+	base: url::Url,
+	client: ClientWithMiddleware,
+	revalidator: Arc<Revalidator>,
+}
+
+/// Only the endpoint is worth printing: the HTTP client and the in-flight map
+/// are noise in a log line, and the map is behind a mutex besides.
+impl std::fmt::Debug for AuthApi {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("AuthApi").field("base", &self.base.as_str()).finish()
+	}
+}
+
+impl AuthApi {
+	/// True when the reply is a cached response the middleware served only
+	/// because it could not revalidate it against the origin.
+	fn revalidation_failed(headers: &http::HeaderMap) -> bool {
+		headers
+			.get_all(http::header::WARNING)
+			.iter()
+			.filter_map(|value| value.to_str().ok())
+			.any(|value| value.trim_start().starts_with("111"))
+	}
+
+	/// One unified auth-API call. Fails CLOSED (any network / non-2xx / parse
+	/// error is an `Err`): with `--auth-api` the verifying key comes from here,
+	/// so there is no safe fallback. Also returns the response's `Cache-Control`
+	/// timings, which drive revalidation.
+	async fn fetch(&self, request: &AuthApiRequest) -> Result<(AuthApiResponse, CacheHints), AuthError> {
+		let response = self.client.get(request.url(&self.base)).send().await?;
+
+		// `Warning: 111` means the cache served a STALE entry because it could not
+		// reach the origin (RFC 2616 14.46). Treating that as a success would let a
+		// sustained outage hand back the same cached grant every cadence, resetting
+		// the staleness deadline forever, so a revoked session would keep serving
+		// for the whole outage and the window would never fail closed.
+		if Self::revalidation_failed(response.headers()) {
+			return Err(AuthError::ApiStale);
+		}
+		// A 404 is the endpoint answering, not failing: it means no grant here.
+		// Named so revalidation can close the session immediately instead of
+		// waiting out the staleness window, while admission keeps reporting it as
+		// an upstream problem (see the StatusCode mapping).
+		if response.status() == http::StatusCode::NOT_FOUND {
+			return Err(AuthError::NotFound);
+		}
+		let response = response.error_for_status()?;
+		let hints = CacheHints::from_headers(response.headers());
+		let body = response.text().await?;
+		Ok((serde_json::from_str(&body)?, hints))
+	}
+}
+
+/// One lookup against the unified `--auth-api` endpoint.
+#[derive(Debug)]
+struct AuthApiRequest {
+	/// The connection path.
+	path: String,
+	/// The JWT `kid` to resolve a verifying key for.
+	kid: Option<String>,
+	/// Set only after the relay has verified the peer's client certificate.
+	mtls: bool,
+	transport: Option<&'static str>,
+}
+
+impl AuthApiRequest {
+	/// The request URL. Everything the endpoint keys on is a query param on the
+	/// base URL - never a path segment - so client-controlled values are
+	/// percent-encoded by `query_pairs_mut` and can't retarget the path/query.
+	fn url(&self, base: &url::Url) -> url::Url {
+		let mut url = base.clone();
+		{
+			let mut q = url.query_pairs_mut();
+			q.append_pair("root", self.path.trim_matches('/'));
+			if let Some(kid) = &self.kid {
+				q.append_pair("kid", kid);
+			}
+			if self.mtls {
+				q.append_pair("mtls", "true");
+			}
+			if let Some(transport) = self.transport {
+				q.append_pair("transport", transport);
+			}
+		}
+		url
+	}
+
+	/// What two sessions must share before they can share one re-check.
+	///
+	/// Derived from the request that actually gets sent, never rebuilt alongside
+	/// it: a key assembled from parts can describe a different request than the
+	/// one issued, which silently costs a re-check per viewer instead of per
+	/// broadcast.
+	fn identity(&self, base: &url::Url) -> FlightKey {
+		FlightKey {
+			url: self.url(base).into(),
+		}
+	}
+}
+
 /// Response from the unified `--auth-api` endpoint. Every field is optional; the
 /// relay defaults anything absent (see [`AuthConfig::auth_api`]).
 #[derive(Debug, Default, Deserialize)]
@@ -630,6 +784,9 @@ pub struct AuthToken {
 	/// certificate's `notAfter`. The relay closes the session once this passes
 	/// instead of trusting a credential that was only checked at connect time.
 	pub expires: Option<std::time::SystemTime>,
+	/// The grant the auth API must keep vouching for; see [`Auth::revalidate`].
+	/// Set for every auth-API session, anonymous ones included; never for mTLS.
+	pub(crate) revalidate: Option<Revalidate>,
 }
 
 impl AuthToken {
@@ -664,6 +821,180 @@ impl AuthToken {
 			tier: Tier::default(),
 			// Filled in by the caller from the peer certificate's notAfter.
 			expires: None,
+			revalidate: None,
+		}
+	}
+}
+
+/// A live session's auth-API grant, re-checked by [`Auth::revalidate`].
+///
+/// The re-check REPLAYS the admission request rather than asking a narrower
+/// question, and the session survives only while the replay still produces a
+/// grant covering `scope`. That one predicate is what makes revocation correct
+/// for every credential shape at once:
+///
+/// - a disabled key, or a gated project, stops returning a key or a public
+///   grant, so the replay refuses;
+/// - a key REPLACED under the same `kid` fails to verify the retained JWT, which
+///   a "does some key exist for this kid" check would have missed entirely;
+/// - an anonymous session has no `kid` and no `exp`, so the replay is its ONLY
+///   bound - and it is the case that matters most, since a tokenless viewer of a
+///   gated project would otherwise draw billable traffic forever;
+/// - a grant resolved by the endpoint itself has no key to look for at all.
+#[derive(Debug, Clone)]
+pub(crate) struct Revalidate {
+	/// The admission request, replayed verbatim on each re-check.
+	params: Arc<AuthParams>,
+	/// The scope admission granted. A replay that no longer covers it is a
+	/// revocation, so a narrowed grant closes the session and the client
+	/// reconnects into the narrower one.
+	scope: Scope,
+	/// The schedule admission resolved. Its existence IS the opt-in: no `max-age`
+	/// on the admission reply means no `Revalidate` at all.
+	schedule: Schedule,
+}
+
+/// The part of an [`AuthToken`] a re-check has to keep vouching for.
+#[derive(Debug, Clone)]
+struct Scope {
+	root: PathOwned,
+	subscribe: PathPrefixes,
+	publish: PathPrefixes,
+}
+
+impl Scope {
+	fn new(token: &AuthToken) -> Self {
+		Self {
+			root: token.root.clone(),
+			subscribe: token.subscribe.clone(),
+			publish: token.publish.clone(),
+		}
+	}
+
+	/// True when `token` still grants everything this scope holds.
+	///
+	/// Deliberately "covers" and not "equals": an endpoint WIDENING a grant (the
+	/// customer adds a public prefix) must not drop live sessions, while any loss
+	/// of authority must.
+	fn covered_by(&self, token: &AuthToken) -> bool {
+		let covers = |granted: &PathPrefixes, held: &PathPrefixes| {
+			held.iter()
+				.all(|held| granted.iter().any(|granted| held.has_prefix(granted)))
+		};
+		self.root == token.root && covers(&token.subscribe, &self.subscribe) && covers(&token.publish, &self.publish)
+	}
+}
+
+/// Why [`Auth::expired`] decided a session's credential is no longer valid.
+///
+/// `#[non_exhaustive]` because this is a new public enum and a future bound (a
+/// lifecycle hook, a quota signal) should not be a breaking release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Expired {
+	/// The JWT `exp` (or client cert `notAfter`) passed.
+	Credential,
+	/// The auth API stopped vouching for the grant: it refused the replayed
+	/// admission request, or answered with a grant that no longer covers what the
+	/// session holds.
+	Revoked,
+	/// The auth API kept failing for the whole staleness window.
+	Stale,
+}
+
+impl std::fmt::Display for Expired {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::Credential => write!(f, "expired"),
+			Self::Revoked => write!(f, "revoked"),
+			Self::Stale => write!(f, "stale"),
+		}
+	}
+}
+
+/// The SHARED half of a re-check: one auth-API reply, reused by every session
+/// that would have issued the identical request.
+///
+/// Deliberately not a verdict. Sessions sharing a [`FlightKey`] do not
+/// necessarily hold the same grant - two anonymous sessions on one path can have
+/// been admitted either side of a narrowed `public` block, and two JWTs under
+/// one `kid` can carry different claims - so each waiter authorizes this reply
+/// against its OWN credential and scope. Deciding once inside the flight would
+/// hand the creator's answer to everybody, letting a session keep authority the
+/// reply no longer grants.
+#[derive(Clone)]
+enum Fetched {
+	/// The endpoint answered. Shared, so waiters read it rather than own it.
+	Ok {
+		resp: Arc<AuthApiResponse>,
+		hints: CacheHints,
+	},
+	/// The endpoint refused, which is true for every waiter regardless of scope.
+	Refused,
+	/// The endpoint could not answer.
+	Unavailable,
+}
+
+/// One session's conclusion, drawn from a [`Fetched`] against its own scope.
+#[derive(Debug, Clone, Copy)]
+enum Recheck {
+	/// Still vouched for; check again after the new max-age.
+	Valid { hints: CacheHints },
+	/// The reply no longer grants what this session holds.
+	Revoked,
+	/// The API could not answer.
+	Unavailable,
+}
+
+/// A registered in-flight re-check, shared by every session waiting on the same request. The map holds only a weak handle, so the request is
+/// dropped with its last waiter instead of running on for nobody.
+struct FlightSlot {
+	id: u64,
+	flight: futures::future::WeakShared<futures::future::BoxFuture<'static, Fetched>>,
+}
+
+/// One auth-API re-check request; sessions that would issue the identical
+/// request share a flight. Built by [`AuthApiRequest::identity`].
+///
+/// The credential is not part of it: the response depends only on (`kid`, root,
+/// transport), so an audience sharing one `kid` shares one re-check however many
+/// distinct tokens they hold, and auth cost tracks broadcasts rather than
+/// viewers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FlightKey {
+	url: String,
+}
+
+/// Shared state for live-session revalidation.
+#[derive(Default)]
+struct Revalidator {
+	/// In-flight re-checks; an entry removes itself when its flight ends,
+	/// completed or abandoned.
+	flights: Mutex<HashMap<FlightKey, FlightSlot>>,
+	/// Source of [`FlightSlot::id`].
+	next_flight: std::sync::atomic::AtomicU64,
+}
+
+/// Removes a flight's map entry when the flight is dropped, whether it ran to
+/// completion or lost its last waiter mid-request.
+struct FlightGuard {
+	revalidator: Arc<Revalidator>,
+	key: FlightKey,
+	id: u64,
+}
+
+impl Revalidator {
+	/// Initial retry backoff after a failed re-check, doubled up to the cadence.
+	const BACKOFF: Duration = Duration::from_secs(1);
+}
+
+impl Drop for FlightGuard {
+	fn drop(&mut self) {
+		let Ok(mut flights) = self.revalidator.flights.lock() else {
+			return;
+		};
+		if flights.get(&self.key).is_some_and(|slot| slot.id == self.id) {
+			flights.remove(&self.key);
 		}
 	}
 }
@@ -746,7 +1077,7 @@ pub struct Auth {
 	/// Optional unified auth API: one call per connection resolves the key,
 	/// public access, and alias together. Mutually exclusive with the standalone
 	/// key/public sources. See [`AuthConfig::auth_api`].
-	auth_api: Option<(url::Url, ClientWithMiddleware)>,
+	auth_api: Option<AuthApi>,
 	/// Billing tier recorded for an mTLS peer when the auth API doesn't return a
 	/// tier (or none is configured). See [`AuthConfig::mtls_tier`].
 	mtls_tier: Tier,
@@ -889,11 +1220,13 @@ impl Auth {
 
 		// The connection path, kid, and mtls flag all go in the query string, so
 		// the base URL is used verbatim (no trailing-slash / path-append handling).
-		let auth_api = if let Some(url_str) = config.auth_api {
-			let url = Url::parse(&url_str).context("invalid --auth-api URL")?;
-			Some((url, Self::build_client(&tls)?))
-		} else {
-			None
+		let auth_api = match config.auth_api {
+			Some(url_str) => Some(AuthApi {
+				base: Url::parse(&url_str).context("invalid --auth-api URL")?,
+				client: Self::build_client(&tls)?,
+				revalidator: Arc::default(),
+			}),
+			None => None,
 		};
 
 		Ok(Self {
@@ -948,115 +1281,131 @@ impl Auth {
 	/// believes it is connected and never reconnects, but nothing is ever served.
 	/// Failing closed lets the client retry and self-heal once the API recovers.
 	async fn resolve_mtls(&self, path: &str, transport: Option<Transport>) -> Result<(String, Tier), AuthError> {
-		let Some((base, client)) = &self.auth_api else {
+		let Some(api) = &self.auth_api else {
 			return Ok((path.to_string(), self.mtls_tier.clone()));
 		};
 
-		let resp = Self::fetch_auth_api(client, base, path, None, true, transport.map(Transport::as_str)).await?;
+		let request = AuthApiRequest {
+			path: path.to_string(),
+			kid: None,
+			mtls: true,
+			transport: transport.map(Transport::as_str),
+		};
+		let (resp, _) = api.fetch(&request).await?;
 		// Fall back to the configured mTLS tier when the API omits one.
 		let tier = resp.tier().unwrap_or_else(|| self.mtls_tier.clone());
 		Ok((resp.alias.unwrap_or_else(|| path.to_string()), tier))
 	}
 
-	/// Build the unified auth-API request URL. The connection path (`root`), the
-	/// JWT `kid`, and the `mtls` flag are all query params on the base URL — never
-	/// path segments — so client-controlled values are percent-encoded by
-	/// `query_pairs_mut` and can't retarget the path/query.
-	fn auth_api_url(base: &url::Url, path: &str, kid: Option<&str>, mtls: bool, transport: Option<&str>) -> url::Url {
-		let mut url = base.clone();
-		{
-			let mut q = url.query_pairs_mut();
-			q.append_pair("root", path.trim_matches('/'));
-			if let Some(kid) = kid {
-				q.append_pair("kid", kid);
-			}
-			if mtls {
-				q.append_pair("mtls", "true");
-			}
-			if let Some(transport) = transport {
-				q.append_pair("transport", transport);
-			}
-		}
-		url
-	}
-
-	/// One unified auth-API call. Fails CLOSED (any network / non-2xx / parse
-	/// error is an `Err`): with `--auth-api` the verifying key comes from here,
-	/// so there is no safe fallback.
-	async fn fetch_auth_api(
-		client: &ClientWithMiddleware,
-		base: &url::Url,
-		path: &str,
-		kid: Option<&str>,
-		mtls: bool,
-		transport: Option<&str>,
-	) -> Result<AuthApiResponse, AuthError> {
-		let url = Self::auth_api_url(base, path, kid, mtls, transport);
-		let body = client.get(url).send().await?.error_for_status()?.text().await?;
-		serde_json::from_str(&body).map_err(AuthError::from)
-	}
-
 	/// Verify a connection via the unified `--auth-api`: one call returns the
-	/// alias (root), public access, and verifying key.
-	async fn verify_via_api(
-		&self,
-		base: &url::Url,
-		client: &ClientWithMiddleware,
-		params: &AuthParams,
-	) -> Result<AuthToken, AuthError> {
-		// A JWT's kid selects the verifying key; extract it (no kid -> the API
-		// returns no key -> we reject below).
-		let kid = match params.jwt.as_deref() {
+	/// alias (root), the billing tier, and EITHER something to verify the
+	/// credential against (a `key`) or the answer itself (a `grant`).
+	async fn verify_via_api(&self, api: &AuthApi, params: &AuthParams) -> Result<(AuthToken, CacheHints), AuthError> {
+		let request = self.api_request(params)?;
+		let (resp, hints) = api.fetch(&request).await?;
+		Ok((self.authorize(params, &resp)?, hints))
+	}
+
+	/// Turn one auth-API reply into this connection's token.
+	///
+	/// Split out from the fetch because the two have different scopes: the reply
+	/// depends only on (`kid`, root, transport) and is shared, while the
+	/// authorization depends on the credential and is emphatically NOT. See
+	/// [`Fetched`].
+	fn authorize(&self, params: &AuthParams, resp: &AuthApiResponse) -> Result<AuthToken, AuthError> {
+		let claims = match params.jwt.as_deref() {
 			Some(token) => {
-				jsonwebtoken::decode_header(token)
-					.map_err(|_| AuthError::DecodeFailed)?
-					.kid
+				let key = resp.key.as_ref().ok_or(AuthError::KeyNotFound)?;
+				// claims.root is the token's own root (a vanity name OR a pid); it is
+				// checked against the ORIGINAL connection path below, not the alias, so
+				// a vanity token matches a vanity URL and a pid token matches a pid URL.
+				key.verify(token).map_err(|_| AuthError::DecodeFailed)?
 			}
-			None => None,
+			None => {
+				let public = resp.public.as_ref();
+				let subscribe = public.map(|p| p.subscribe.clone()).unwrap_or_default();
+				let publish = public.map(|p| p.publish.clone()).unwrap_or_default();
+				if subscribe.is_empty() && publish.is_empty() {
+					return Err(AuthError::ExpectedToken);
+				}
+				// Anonymous access: anchor the public claims at the connection path so
+				// the overlap check below is a no-op; routing lands on the alias.
+				moq_token::Claims::default()
+					.with_root(params.path.clone())
+					.with_subscribe(subscribe)
+					.with_publish(publish)
+			}
 		};
 
-		let resp = Self::fetch_auth_api(
-			client,
-			base,
-			&params.path,
-			kid.as_deref(),
-			false,
-			params.transport.map(Transport::as_str),
-		)
-		.await?;
-		// Resolve the tier before consuming `resp`'s other fields below.
-		// Connections default to the unprefixed tier; the API may bucket specific
-		// ones under a named tier.
-		let tier = resp.tier().unwrap_or_default();
-		// The API resolves the connection path's leading segment (a vanity name or
-		// pid) to the project's canonical pid. Broadcasts anchor here on the
-		// backbone so they survive vanity renames. Absent alias (unknown project)
-		// -> route to the request path unchanged.
-		let alias = resp.alias.unwrap_or_else(|| params.path.clone());
+		Self::finalize_api(params, resp.alias.clone(), resp.tier(), claims)
+	}
 
-		let claims = if let Some(token) = params.jwt.as_deref() {
-			let key = resp.key.ok_or(AuthError::KeyNotFound)?;
-			// claims.root is the token's own root (a vanity name OR a pid); it is
-			// checked against the ORIGINAL connection path below, not the alias, so
-			// a vanity token matches a vanity URL and a pid token matches a pid URL.
-			key.verify(token).map_err(|_| AuthError::DecodeFailed)?
-		} else {
-			let public = resp.public.unwrap_or_default();
-			if public.subscribe.is_empty() && public.publish.is_empty() {
-				return Err(AuthError::ExpectedToken);
-			}
-			// Anonymous access: anchor the public claims at the connection path so
-			// the overlap check below is a no-op; routing still lands on the alias.
-			moq_token::Claims::default()
-				.with_root(params.path.clone())
-				.with_subscribe(public.subscribe)
-				.with_publish(public.publish)
-		};
+	/// The auth-API request for a connection.
+	///
+	/// Admission and every re-check build the request here, so the flight key can
+	/// be taken from the request itself rather than reconstructed beside it. The
+	/// credential is never sent: the response depends only on (kid, root,
+	/// transport), which is what lets a whole audience sharing a signing key
+	/// resolve to one cached request per relay.
+	fn api_request(&self, params: &AuthParams) -> Result<AuthApiRequest, AuthError> {
+		Ok(AuthApiRequest {
+			path: params.path.clone(),
+			kid: match params.jwt.as_deref() {
+				Some(token) => {
+					jsonwebtoken::decode_header(token)
+						.map_err(|_| AuthError::DecodeFailed)?
+						.kid
+				}
+				None => None,
+			},
+			mtls: false,
+			transport: params.transport.map(Transport::as_str),
+		})
+	}
 
+	/// The flight key for a live session's re-check.
+	fn flight_key(&self, api: &AuthApi, grant: &Revalidate) -> Option<FlightKey> {
+		Some(self.api_request(&grant.params).ok()?.identity(&api.base))
+	}
+
+	/// Anchor verified claims on the API's alias, shared by both modes.
+	///
+	/// The API resolves the connection path's leading segment (a vanity name or
+	/// pid) to the project's canonical pid. Broadcasts anchor there on the
+	/// backbone so they survive vanity renames. An absent alias (unknown project)
+	/// routes to the request path unchanged. Connections default to the unprefixed
+	/// tier; the API may bucket specific ones under a named tier.
+	fn finalize_api(
+		params: &AuthParams,
+		alias: Option<String>,
+		tier: Option<Tier>,
+		claims: moq_token::Claims,
+	) -> Result<AuthToken, AuthError> {
+		let alias = alias.unwrap_or_else(|| params.path.clone());
 		// Check the token root against the ORIGINAL connection path (vanity or
 		// pid); anchor the resulting scope on the alias (canonical pid).
 		let mut token = Self::finalize(&params.path, &alias, claims)?;
-		token.tier = tier;
+		token.tier = tier.unwrap_or_default();
+		Ok(token)
+	}
+
+	/// Admit a connection through the auth API and arm its re-check.
+	///
+	/// Every auth-API session is revalidated, anonymous ones included. A public
+	/// grant is built from claims with no `exp` at all, so without this the relay
+	/// would hold a gated project's tokenless viewers until the peer hung up.
+	/// mTLS peers are the one exemption: they authenticate through
+	/// [`Auth::verify_mtls`], which never reaches here, so the relay mesh is never
+	/// torn down by a customer-facing decision.
+	async fn admit_via_api(&self, api: &AuthApi, params: &AuthParams) -> Result<AuthToken, AuthError> {
+		let (mut token, hints) = self.verify_via_api(api, params).await?;
+		// No schedule means the endpoint named no `max-age`, so it has not asked to
+		// be re-consulted; the credential's own `exp` stays the only bound.
+		token.revalidate = hints.schedule().map(|schedule| Revalidate {
+			params: Arc::new(params.clone()),
+			scope: Scope::new(&token),
+			schedule,
+		});
 		Ok(token)
 	}
 
@@ -1069,9 +1418,9 @@ impl Auth {
 	/// If no token is provided, then the claims will use the public access configuration.
 	#[allow(deprecated)] // `claims.cluster` is deprecated but still accepted for backwards compat
 	pub async fn verify(&self, params: &AuthParams) -> Result<AuthToken, AuthError> {
-		// The unified API resolves key + public + alias in one call.
-		if let Some((base, client)) = &self.auth_api {
-			return self.verify_via_api(base, client, params).await;
+		// The unified API resolves key/grant + public + alias in one call.
+		if let Some(api) = &self.auth_api {
+			return self.admit_via_api(api, params).await;
 		}
 
 		let claims = if let Some(token) = params.jwt.as_deref() {
@@ -1159,12 +1508,304 @@ impl Auth {
 			publish: rebase(permissions.publish),
 			tier: Tier::default(),
 			expires: claims.expires,
+			revalidate: None,
 		})
+	}
+
+	/// Wait until `token` stops being valid, then say why.
+	///
+	/// Resolves when the credential's own bound passes (a JWT `exp`, or a client
+	/// cert's `notAfter`), or when the auth API stops vouching for the grant -
+	/// because a key was disabled or replaced, a project was gated, or the API
+	/// went unreachable for long enough to fail closed. Pends forever for a token
+	/// with neither bound, so it is always safe to `select!` on.
+	///
+	/// Every session that authenticated through `--auth-api` carries the second
+	/// bound, anonymous ones included; mTLS peers carry neither. This is the one
+	/// seam a session loop needs: selecting on the credential's expiry alone
+	/// would keep serving through a revoked grant.
+	pub async fn expired(&self, token: &AuthToken) -> Expired {
+		let revoked = async {
+			match &token.revalidate {
+				Some(grant) => self.revalidate(grant).await,
+				None => std::future::pending().await,
+			}
+		};
+
+		tokio::select! {
+			_ = token.expired() => Expired::Credential,
+			reason = revoked => reason,
+		}
+	}
+
+	/// Wait until the auth API stops vouching for this session's grant.
+	///
+	/// Re-checks ride the same cached HTTP client as admission, which is the other
+	/// half of the cost story: coalescing merges re-checks in flight at the same
+	/// moment, and the cache merges the ones that are not. Sessions start at
+	/// different times, so without it a staggered audience would each dial on its
+	/// own schedule. The price is that a re-check may be answered from an entry up
+	/// to one `max-age` old, so the revocation window is up to TWICE the
+	/// endpoint's `max-age`. Size it accordingly.
+	///
+	/// Re-checks ride the same cached HTTP client as admission, which is the other
+	/// half of the cost story: coalescing merges re-checks in flight at the same
+	/// moment, and the cache merges the ones that are not. Sessions start at
+	/// different times, so without it a staggered audience would each dial on its
+	/// own schedule. The price is that a re-check may be answered from an entry up
+	/// to one `max-age` old, so the revocation window is up to TWICE the
+	/// endpoint's `max-age`. Size it accordingly.
+	///
+	/// Re-checks on the endpoint's `Cache-Control: max-age` cadence and resolves
+	/// once the API refuses the replayed request or answers with a smaller grant
+	/// ([`Expired::Revoked`]), or keeps failing for the whole staleness window,
+	/// 3x the last max-age ([`Expired::Stale`]).
+	///
+	/// The two failure directions are deliberately asymmetric. A refusal is the
+	/// API answering, so it closes the session at once. Everything else is
+	/// evidence of nothing, so the session keeps SERVING through jittered
+	/// retries: a brief auth outage must not mass-disconnect a fleet's worth of
+	/// viewers. A sustained one still fails closed.
+	async fn revalidate(&self, grant: &Revalidate) -> Expired {
+		// A `Revalidate` is only ever minted by `admit_via_api`, so the API it came
+		// from is still configured; the guard is for a stub `Auth` in tests.
+		let Some(api) = self.auth_api.clone() else {
+			return std::future::pending().await;
+		};
+
+		let mut schedule = grant.schedule;
+		let mut next = Instant::now() + schedule.cadence;
+		let mut deadline = next + schedule.staleness;
+		let mut backoff = Revalidator::BACKOFF;
+
+		loop {
+			tokio::time::sleep_until(next).await;
+
+			// Bound the attempt by the deadline so a peer that accepts a request and
+			// then stalls cannot carry a revoked session past its window - but never
+			// give it less than one request timeout. A zero or very short window
+			// would otherwise cancel the very re-check that was about to RENEW the
+			// grant, closing every session without the endpoint ever being asked.
+			let budget = deadline.max(Instant::now() + crate::http_client::REQUEST_TIMEOUT);
+			let outcome = match tokio::time::timeout_at(budget, self.recheck(&api, grant)).await {
+				Ok(outcome) => outcome,
+				Err(_) => return Expired::Stale,
+			};
+			match outcome {
+				Recheck::Valid { hints } => {
+					// A reply that stops naming `max-age` keeps the schedule the session
+					// already opted into, rather than silently becoming unrevocable.
+					schedule = hints.schedule().unwrap_or(schedule);
+					next = Instant::now() + schedule.cadence;
+					deadline = next + schedule.staleness;
+					backoff = Revalidator::BACKOFF;
+				}
+				Recheck::Revoked => return Expired::Revoked,
+				Recheck::Unavailable => {
+					let now = Instant::now();
+					if now >= deadline {
+						return Expired::Stale;
+					}
+					// Retries are capped at the deadline; an attempt scheduled there is
+					// cut off by `timeout_at` above rather than running past it.
+					let delay = backoff.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+					next = (now + delay).min(deadline);
+					backoff = (backoff * 2).min(schedule.cadence);
+				}
+			}
+		}
+	}
+
+	/// One re-check, joining the in-flight request for the same grant if there is one.
+	async fn recheck(&self, api: &AuthApi, grant: &Revalidate) -> Recheck {
+		match self.fetch_shared(api, grant).await {
+			// The reply is shared; the verdict is this session's alone.
+			Fetched::Ok { resp, hints } => match self.authorize(&grant.params, &resp) {
+				Ok(token) if grant.scope.covered_by(&token) => Recheck::Valid { hints },
+				Ok(_) => Recheck::Revoked,
+				Err(err) if err.is_refusal() => Recheck::Revoked,
+				Err(_) => Recheck::Unavailable,
+			},
+			Fetched::Refused => Recheck::Revoked,
+			Fetched::Unavailable => Recheck::Unavailable,
+		}
+	}
+
+	/// The shared auth-API fetch, joining an in-flight one for the same request.
+	async fn fetch_shared(&self, api: &AuthApi, grant: &Revalidate) -> Fetched {
+		let Some(key) = self.flight_key(api, grant) else {
+			return Fetched::Unavailable;
+		};
+		let flight = {
+			let mut flights = api.revalidator.flights.lock().unwrap();
+			if let Some(flight) = flights.get(&key).and_then(|slot| slot.flight.upgrade()) {
+				flight
+			} else {
+				let id = api
+					.revalidator
+					.next_flight
+					.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+				let guard = FlightGuard {
+					revalidator: api.revalidator.clone(),
+					key: key.clone(),
+					id,
+				};
+				let owned = grant.clone();
+				let auth = self.clone();
+				let api = api.clone();
+				let flight = async move {
+					let _guard = guard;
+					auth.recheck_fetch(&api, &owned).await
+				}
+				.boxed()
+				.shared();
+				let weak = flight.downgrade().expect("a fresh shared future can be downgraded");
+				flights.insert(key, FlightSlot { id, flight: weak });
+				flight
+			}
+		};
+		flight.await
+	}
+
+	/// Replay the admission request. The reply is shared; what it MEANS is not.
+	///
+	/// Asking the SAME question admission asked is the whole point. A narrower
+	/// check ("does a key still exist for this kid?") cannot see a key REPLACED
+	/// under that kid, and cannot see an anonymous grant withdrawn.
+	async fn recheck_fetch(&self, api: &AuthApi, grant: &Revalidate) -> Fetched {
+		let request = match self.api_request(&grant.params) {
+			Ok(request) => request,
+			// The credential parsed at admission, so this cannot be transient.
+			Err(_) => return Fetched::Refused,
+		};
+		match api.fetch(&request).await {
+			Ok((resp, hints)) => Fetched::Ok {
+				resp: Arc::new(resp),
+				hints,
+			},
+			Err(err) if err.is_refusal() => Fetched::Refused,
+			Err(_) => Fetched::Unavailable,
+		}
 	}
 
 	fn build_client(tls: &rustls::ClientConfig) -> anyhow::Result<ClientWithMiddleware> {
 		crate::http_client::build(tls)
 	}
+}
+
+/// What the auth API said about how long its answer is good for.
+///
+/// This IS the revalidation policy. There is no relay configuration for any of
+/// it: the endpoint decides per response, so it can hand a project nowhere near
+/// its limits a long window and one close to them a short one, with no fleet
+/// roll. The relay only imposes guardrails so a pathological value cannot make
+/// it poll hot or serve forever.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CacheHints {
+	/// `max-age`: how long this answer is fresh. Also the re-check cadence, and
+	/// therefore what bounds how long a revoked grant keeps serving.
+	max_age: Option<Duration>,
+	/// `stale-if-error`: how long to keep serving when revalidation ERRORS. The
+	/// precise license for what this loop does, so it wins over the broader
+	/// `stale-while-revalidate` when both are present.
+	stale_if_error: Option<Duration>,
+	/// `stale-while-revalidate`: the broader "serve stale while refreshing"
+	/// license, used as the outage window when `stale-if-error` is absent.
+	stale_while_revalidate: Option<Duration>,
+}
+
+impl CacheHints {
+	/// Floor on the re-check cadence.
+	const MIN_CADENCE: Duration = Duration::from_secs(1);
+
+	/// Upper bound on any timing the endpoint asks for.
+	///
+	/// NOT a policy ceiling: the endpoint owns the window, so a long `max-age` is
+	/// a long revocation window by its explicit choice, and the relay does not
+	/// second-guess it. This exists so `Instant` arithmetic cannot overflow on a
+	/// `max-age` near `u64::MAX`, and is set far beyond any duration a real
+	/// endpoint would send.
+	const MAX_TIMING: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);
+
+	/// Outage tolerance when the endpoint names neither stale directive.
+	///
+	/// Deliberately generous, and deliberately not a multiple of the cadence: a
+	/// short cadence is a request for a tight REVOCATION window, not permission to
+	/// sever every live session over a brief auth outage. At a 60s cadence a
+	/// proportional default would drop the fleet after three minutes, which a
+	/// routine Worker deploy or a transient incident can exceed. An hour of the
+	/// auth API being unreachable is an outage worth surviving; past that,
+	/// failing closed is the right call. An endpoint that wants less says so with
+	/// `stale-if-error`.
+	const DEFAULT_STALE: Duration = Duration::from_secs(60 * 60);
+
+	fn from_headers(headers: &http::HeaderMap) -> Self {
+		Self {
+			max_age: Self::directive(headers, "max-age"),
+			stale_if_error: Self::directive(headers, "stale-if-error"),
+			stale_while_revalidate: Self::directive(headers, "stale-while-revalidate"),
+		}
+	}
+
+	/// The schedule these hints ask for, or `None` when the endpoint named no
+	/// `max-age` and so did not opt in to revalidation at all.
+	///
+	/// Revalidation is opt-in BY THE ENDPOINT rather than by relay config, and
+	/// `max-age` is the opt-in: an endpoint that will not say how long its answer
+	/// is good for has not given the relay a cadence to invent. `no-store`,
+	/// `no-cache`, and `max-age=0` all carry no usable interval and mean the same
+	/// thing here. The session then ends only at its credential's own `exp`,
+	/// exactly as it did before revalidation existed.
+	fn schedule(&self) -> Option<Schedule> {
+		let cadence = self
+			.max_age
+			.filter(|max_age| !max_age.is_zero())?
+			.clamp(Self::MIN_CADENCE, Self::MAX_TIMING);
+
+		// `stale-if-error` is the precise license for "revalidation is failing";
+		// `stale-while-revalidate` is the broader one. Either grants the window,
+		// the specific one wins, and absent both the cadence implies it.
+		let staleness = self
+			.stale_if_error
+			.or(self.stale_while_revalidate)
+			.unwrap_or(Self::DEFAULT_STALE)
+			.min(Self::MAX_TIMING);
+
+		Some(Schedule { cadence, staleness })
+	}
+
+	/// The seconds value of one `Cache-Control` directive.
+	fn directive(headers: &http::HeaderMap, name: &str) -> Option<Duration> {
+		// Repeated Cache-Control field lines are valid and combine, so read them
+		// all rather than only the first.
+		headers
+			.get_all(http::header::CACHE_CONTROL)
+			.iter()
+			.filter_map(|value| value.to_str().ok())
+			.flat_map(|value| value.split(','))
+			.find_map(|directive| {
+				let (found, secs) = directive.trim().split_once('=')?;
+				if !found.eq_ignore_ascii_case(name) {
+					return None;
+				}
+				let secs: u64 = secs.trim().trim_matches('"').parse().ok()?;
+				Some(Duration::from_secs(secs))
+			})
+	}
+}
+
+/// When a live session re-checks, and how long it may keep serving once those
+/// re-checks start failing.
+///
+/// `staleness` runs from where freshness ENDS, not from the last success, which
+/// is what the stale directives mean. Measuring from the last success would make
+/// an ordinary `max-age=300, stale-while-revalidate=60` expire its deadline four
+/// minutes before the first re-check even ran, so one transient 500 would
+/// disconnect every affected session at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Schedule {
+	cadence: Duration,
+	staleness: Duration,
 }
 
 #[cfg(test)]
@@ -2458,7 +3099,6 @@ api = "https://api.example.com/access"
 			})
 			.await?;
 		}
-		// Mock::expect(1) is asserted on drop of the server.
 		Ok(())
 	}
 
@@ -3316,7 +3956,7 @@ api = "https://api.example.com/access"
 
 		let auth = auth_with_api(&server).await;
 		let err = auth.resolve_mtls("/demo", None).await.unwrap_err();
-		assert!(matches!(err, AuthError::ApiUnavailable(_)));
+		assert!(matches!(err, AuthError::NotFound));
 		assert_eq!(http::StatusCode::from(err), http::StatusCode::BAD_GATEWAY);
 		Ok(())
 	}
@@ -3352,26 +3992,773 @@ api = "https://api.example.com/access"
 		assert!(result.is_err());
 	}
 
+	/// A grant as admission would mint it, on a short cadence. The empty scope
+	/// makes `covered_by` a root check, which is what the loop tests care about;
+	/// the scope comparison itself is covered by its own tests below.
+	fn test_grant(jwt: Option<String>, after: Duration) -> Revalidate {
+		test_grant_schedule(
+			jwt,
+			Schedule {
+				cadence: after,
+				// Deliberately generous, and deliberately not `3 * cadence`: these
+				// cadences are far below `MIN_CADENCE` so the tests run fast, and a
+				// proportional window would then cut a mock's response short at the
+				// staleness deadline. Tests that are ABOUT the window set it.
+				staleness: Duration::from_secs(5),
+			},
+		)
+	}
+
+	/// The same, with the resolved schedule spelled out.
+	fn test_grant_schedule(jwt: Option<String>, schedule: Schedule) -> Revalidate {
+		Revalidate {
+			params: Arc::new(AuthParams {
+				path: "demo".into(),
+				jwt,
+				..Default::default()
+			}),
+			scope: Scope {
+				root: Path::new("demo").to_owned(),
+				subscribe: PathPrefixes::default(),
+				publish: PathPrefixes::default(),
+			},
+			schedule,
+		}
+	}
+
+	/// Mount a `/auth` responder returning `body` with the given `Cache-Control`.
+	async fn mount_auth(server: &MockServer, cache_control: &str, body: String) {
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.insert_header("Cache-Control", cache_control)
+					.set_body_string(body),
+			)
+			.mount(server)
+			.await;
+	}
+
+	fn hints(value: &str) -> CacheHints {
+		let mut headers = http::HeaderMap::new();
+		headers.insert(http::header::CACHE_CONTROL, value.parse().unwrap());
+		CacheHints::from_headers(&headers)
+	}
+
+	#[test]
+	fn cache_control_directive_parsing() {
+		assert_eq!(hints("max-age=300").max_age, Some(Duration::from_secs(300)));
+		assert_eq!(
+			hints("public, max-age=60, must-revalidate").max_age,
+			Some(Duration::from_secs(60))
+		);
+		assert_eq!(hints("Max-Age=\"60\"").max_age, Some(Duration::from_secs(60)));
+		assert_eq!(hints("no-store").max_age, None);
+		assert_eq!(hints("max-age=oops").max_age, None);
+		assert_eq!(CacheHints::from_headers(&http::HeaderMap::new()), CacheHints::default());
+
+		// The shared prefix must not let one stale directive match the other.
+		let both = hints("max-age=60, stale-while-revalidate=300, stale-if-error=900");
+		assert_eq!(both.stale_while_revalidate, Some(Duration::from_secs(300)));
+		assert_eq!(both.stale_if_error, Some(Duration::from_secs(900)));
+	}
+
+	/// Revalidation is opt-in by the ENDPOINT, and `max-age` is the opt-in. A
+	/// reply that names no usable interval is not asking to be re-consulted, and
+	/// the relay does not invent a cadence for it.
+	#[test]
+	fn no_max_age_means_no_schedule() {
+		assert_eq!(CacheHints::default().schedule(), None);
+		assert_eq!(hints("no-store").schedule(), None);
+		assert_eq!(hints("no-cache").schedule(), None);
+		assert_eq!(hints("max-age=0").schedule(), None);
+		// A stale directive alone does not opt in either: there is no cadence.
+		assert_eq!(hints("stale-if-error=900").schedule(), None);
+	}
+
+	#[test]
+	fn schedule_clamps_the_cadence() {
+		assert_eq!(
+			hints("max-age=300").schedule().unwrap().cadence,
+			Duration::from_secs(300)
+		);
+		assert_eq!(hints("max-age=1").schedule().unwrap().cadence, CacheHints::MIN_CADENCE);
+		assert_eq!(
+			hints(&format!("max-age={}", u64::MAX)).schedule().unwrap().cadence,
+			CacheHints::MAX_TIMING
+		);
+	}
+
+	/// `stale-if-error` is the precise license for "revalidation is failing", so
+	/// it wins over the broader `stale-while-revalidate`; either grants the
+	/// window, and absent both the cadence implies it.
+	#[test]
+	fn schedule_prefers_stale_if_error() {
+		assert_eq!(
+			hints("max-age=10").schedule().unwrap().staleness,
+			CacheHints::DEFAULT_STALE
+		);
+		assert_eq!(
+			hints("max-age=10, stale-while-revalidate=300")
+				.schedule()
+				.unwrap()
+				.staleness,
+			Duration::from_secs(300)
+		);
+		assert_eq!(
+			hints("max-age=10, stale-if-error=900").schedule().unwrap().staleness,
+			Duration::from_secs(900)
+		);
+		assert_eq!(
+			hints("max-age=10, stale-while-revalidate=300, stale-if-error=60")
+				.schedule()
+				.unwrap()
+				.staleness,
+			Duration::from_secs(60)
+		);
+		// Capped, both as policy and to keep the deadline off `Instant` overflow.
+		assert_eq!(
+			hints(&format!("max-age=10, stale-if-error={}", u64::MAX))
+				.schedule()
+				.unwrap()
+				.staleness,
+			CacheHints::MAX_TIMING
+		);
+	}
+
+	/// EVERY auth-API session is revalidated, anonymous ones included. An
+	/// anonymous grant has no `exp`, so without this a gated project's tokenless
+	/// viewers would keep drawing traffic until the peer hung up.
+	#[tokio::test]
+	async fn revalidate_arms_every_api_session() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("test-key");
+		mount_auth(
+			&server,
+			"max-age=300",
+			format!(r#"{{"key":{},"public":{{"subscribe":[""]}}}}"#, jwk_body(&key)),
+		)
+		.await;
+
+		let auth = auth_with_api(&server).await;
+		let jwt = key.sign(&moq_token::Claims::default().with_root("demo").with_subscribe([""]))?;
+
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/demo".into(),
+				jwt: Some(jwt),
+				..Default::default()
+			})
+			.await?;
+		let grant = verified.revalidate.expect("jwt session should carry a grant");
+		assert_eq!(grant.schedule.cadence, Duration::from_secs(300));
+
+		let anon = auth.verify(&AuthParams::new("/demo")).await?;
+		assert!(anon.revalidate.is_some(), "anonymous sessions must revalidate too");
+
+		// mTLS is the one exemption: a customer decision must never tear down the
+		// relay mesh.
+		let peer = auth.verify_mtls("/demo", None).await?;
+		assert!(peer.revalidate.is_none(), "mTLS peers must never revalidate");
+		Ok(())
+	}
+
+	/// An endpoint that names no `max-age` has not opted in, so the session gets
+	/// no re-check at all and its credential's `exp` stays the only bound. This
+	/// is what makes the upgrade inert for an operator who was not caching.
+	#[tokio::test]
+	async fn no_max_age_arms_no_revalidation() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.insert_header("Cache-Control", "no-store")
+					.set_body_string(r#"{"public":{"subscribe":[""]}}"#),
+			)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let token = auth.verify(&AuthParams::new("/demo")).await?;
+		assert!(token.revalidate.is_none(), "no max-age means no opt-in");
+
+		// And so `expired` never resolves for a credential with no `exp` either.
+		let bounded = tokio::time::timeout(Duration::from_millis(200), auth.expired(&token)).await;
+		assert!(bounded.is_err(), "an un-opted-in session has no bound to hit");
+		Ok(())
+	}
+
+	/// A cached reply the middleware served only because it could NOT reach the
+	/// origin (`Warning: 111`) is evidence of nothing. Accepting it would reset
+	/// the staleness deadline every cadence, so a sustained outage would keep a
+	/// revoked session serving forever and the window would never fail closed.
+	#[test]
+	fn stale_cached_replies_are_not_successes() {
+		let warned = |value: &str| {
+			let mut headers = http::HeaderMap::new();
+			headers.insert(http::header::WARNING, value.parse().unwrap());
+			AuthApi::revalidation_failed(&headers)
+		};
+		assert!(warned(r#"111 localhost "Revalidation failed""#));
+		assert!(!warned(r#"110 localhost "Response is stale""#));
+		assert!(!AuthApi::revalidation_failed(&http::HeaderMap::new()));
+		// And it must classify as unavailable, never as a revocation - nor, at
+		// admission, as the client's credential being rejected.
+		assert!(!AuthError::ApiStale.is_refusal());
+		assert_eq!(
+			http::StatusCode::from(&AuthError::ApiStale),
+			http::StatusCode::BAD_GATEWAY
+		);
+	}
+
+	/// An auth API that goes down must not sever the fleet. With no stale
+	/// directive the session rides out a total outage for the default hour, which
+	/// is the whole point of the default being flat rather than a small multiple
+	/// of a possibly-short cadence.
+	#[tokio::test(start_paused = true)]
+	async fn a_total_outage_is_survived_for_the_default_hour() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		// Admission succeeds and opts in; every later request fails.
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(ResponseTemplate::new(200).insert_header("Cache-Control", "max-age=60"))
+			.up_to_n_times(1)
+			.mount(&server)
+			.await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(ResponseTemplate::new(503))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let schedule = CacheHints {
+			max_age: Some(Duration::from_secs(60)),
+			..Default::default()
+		}
+		.schedule()
+		.expect("max-age opts in");
+		assert_eq!(schedule.staleness, CacheHints::DEFAULT_STALE);
+
+		let grant = test_grant_schedule(None, schedule);
+		// Half an hour of total outage: still serving.
+		let alive = tokio::time::timeout(Duration::from_secs(30 * 60), auth.revalidate(&grant)).await;
+		assert!(alive.is_err(), "a 30 minute outage must not disconnect anyone");
+
+		// Past the window it still fails closed rather than serving forever.
+		let closed = tokio::time::timeout(Duration::from_secs(2 * 60 * 60), auth.revalidate(&grant))
+			.await
+			.expect("a sustained outage must eventually close");
+		assert_eq!(closed, Expired::Stale);
+		Ok(())
+	}
+
+	/// The endpoint owns the window, so an enormous `max-age` is honoured rather
+	/// than second-guessed - and must not overflow the deadline arithmetic that
+	/// `Instant` would panic on.
+	#[tokio::test]
+	async fn an_enormous_max_age_is_honoured_without_overflowing() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		mount_auth(
+			&server,
+			&format!("max-age={}, stale-if-error={}", u64::MAX, u64::MAX),
+			r#"{"public":{"subscribe":[""]}}"#.to_string(),
+		)
+		.await;
+
+		let auth = auth_with_api(&server).await;
+		let token = auth.verify(&AuthParams::new("demo")).await?;
+		let grant = token.revalidate.clone().expect("a max-age opts in");
+		assert_eq!(grant.schedule.cadence, CacheHints::MAX_TIMING);
+		assert_eq!(grant.schedule.staleness, CacheHints::MAX_TIMING);
+
+		// Arming the loop computes `now + cadence` and `next + staleness`; both must
+		// be representable rather than panicking.
+		let pending = tokio::time::timeout(Duration::from_millis(200), auth.revalidate(&grant)).await;
+		assert!(pending.is_err(), "a grant this long-lived simply keeps serving");
+		Ok(())
+	}
+
+	/// A zero stale window means "close on the first FAILED re-check", not "close
+	/// without ever asking". The attempt still gets a full request budget, so a
+	/// healthy endpoint renews the grant.
+	#[tokio::test]
+	async fn zero_stale_window_still_lets_a_recheck_succeed() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		mount_auth(
+			&server,
+			"max-age=1, stale-if-error=0",
+			r#"{"public":{"subscribe":[""]}}"#.to_string(),
+		)
+		.await;
+
+		let auth = auth_with_api(&server).await;
+		let grant = test_grant_schedule(
+			None,
+			Schedule {
+				cadence: Duration::from_millis(200),
+				staleness: Duration::ZERO,
+			},
+		);
+
+		// The endpoint is healthy, so the session must survive its re-checks rather
+		// than being closed by a deadline that left the request no time to run.
+		let pending = tokio::time::timeout(Duration::from_millis(900), auth.revalidate(&grant)).await;
+		assert!(pending.is_err(), "a healthy endpoint must renew the grant");
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn revalidate_closes_on_404() -> anyhow::Result<()> {
+		// No mock mounted, so every re-check gets wiremock's 404.
+		let server = MockServer::start().await;
+		let auth = auth_with_api(&server).await;
+		let grant = test_grant(None, Duration::from_millis(500));
+
+		let start = std::time::Instant::now();
+		let reason = tokio::time::timeout(Duration::from_secs(5), auth.revalidate(&grant))
+			.await
+			.expect("revalidate should return once the grant is gone");
+		assert_eq!(reason, Expired::Revoked);
+		assert!(start.elapsed() >= Duration::from_millis(500));
+		Ok(())
+	}
+
+	/// A gated project withholds `public`, which is how an anonymous session is
+	/// revoked. `key.is_some()` could never have seen this.
+	#[tokio::test]
+	async fn revalidate_closes_when_public_is_withdrawn() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		mount_auth(&server, "max-age=1", r#"{"alias":"demo"}"#.to_string()).await;
+
+		let auth = auth_with_api(&server).await;
+		let grant = test_grant(None, Duration::from_millis(200));
+		let reason = tokio::time::timeout(Duration::from_secs(5), auth.revalidate(&grant))
+			.await
+			.expect("a withdrawn public grant must close the session");
+		assert_eq!(reason, Expired::Revoked);
+		Ok(())
+	}
+
+	/// A key DELETED and reimported with different material under the same `kid`
+	/// must close the sessions the old key admitted. Replaying the request catches
+	/// this because the retained JWT no longer verifies; asking "does a key exist
+	/// for this kid" would have said yes.
+	#[tokio::test]
+	async fn revalidate_closes_on_a_rotated_key() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		let replacement = create_test_key_with_kid("test-key");
+		mount_auth(&server, "max-age=1", format!(r#"{{"key":{}}}"#, jwk_body(&replacement))).await;
+
+		// A token signed by the ORIGINAL key, still presenting the same kid.
+		let original = create_test_key_with_kid("test-key");
+		let jwt = original.sign(&moq_token::Claims::default().with_root("demo").with_subscribe([""]))?;
+
+		let auth = auth_with_api(&server).await;
+		let grant = test_grant(Some(jwt), Duration::from_millis(200));
+		let reason = tokio::time::timeout(Duration::from_secs(5), auth.revalidate(&grant))
+			.await
+			.expect("a replaced key must close the sessions its predecessor admitted");
+		assert_eq!(reason, Expired::Revoked);
+		Ok(())
+	}
+
+	#[test]
+	fn scope_is_covered_only_while_authority_holds() {
+		let scope = |root: &str, subscribe: Vec<&str>| Scope {
+			root: Path::new(root).to_owned(),
+			subscribe: PathPrefixes::from(subscribe.iter().map(|p| Path::new(p).to_owned()).collect::<Vec<_>>()),
+			publish: PathPrefixes::default(),
+		};
+		let token = |root: &str, subscribe: Vec<&str>| {
+			let s = scope(root, subscribe);
+			let mut token = AuthToken::unrestricted(s.root.clone());
+			token.subscribe = s.subscribe;
+			token.publish = PathPrefixes::default();
+			token
+		};
+
+		// Unchanged, and widened, both keep serving.
+		assert!(scope("demo", vec!["room"]).covered_by(&token("demo", vec!["room"])));
+		assert!(scope("demo", vec!["room"]).covered_by(&token("demo", vec![""])));
+		// Narrowed, or re-rooted, is a loss of authority.
+		assert!(!scope("demo", vec![""]).covered_by(&token("demo", vec!["room"])));
+		assert!(!scope("demo", vec!["room"]).covered_by(&token("other", vec!["room"])));
+		assert!(!scope("demo", vec!["room"]).covered_by(&token("demo", vec!["lobby"])));
+	}
+
+	#[tokio::test]
+	async fn revalidate_refreshes_cadence_then_closes() -> anyhow::Result<()> {
+		// One 200 with max-age=1, then wiremock's 404 once the mock is consumed.
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.insert_header("Cache-Control", "max-age=1")
+					.set_body_string(r#"{"public":{"subscribe":[""]}}"#),
+			)
+			.up_to_n_times(1)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let grant = test_grant(None, Duration::from_millis(500));
+
+		let start = std::time::Instant::now();
+		let reason = tokio::time::timeout(Duration::from_secs(10), auth.revalidate(&grant))
+			.await
+			.expect("revalidate should return once the grant is gone");
+		assert_eq!(reason, Expired::Revoked);
+		assert!(start.elapsed() >= Duration::from_millis(1500));
+		Ok(())
+	}
+
+	/// An outage is evidence of nothing: keep serving, then fail closed. The
+	/// window is three cadences, so a 500ms cadence closes at ~1.5s.
+	#[tokio::test]
+	async fn revalidate_survives_outage_until_stale() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.respond_with(ResponseTemplate::new(500))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let grant = test_grant(None, Duration::from_millis(500));
+
+		let start = std::time::Instant::now();
+		let reason = tokio::time::timeout(Duration::from_secs(10), auth.revalidate(&grant))
+			.await
+			.expect("revalidate should fail closed once the staleness window passes");
+		assert_eq!(reason, Expired::Stale);
+		let elapsed = start.elapsed();
+		assert!(elapsed >= Duration::from_millis(1500), "closed too early: {elapsed:?}");
+		assert!(elapsed < Duration::from_secs(6), "closed too late: {elapsed:?}");
+		Ok(())
+	}
+
+	/// The endpoint can stretch the outage window past the default three cadences
+	/// with `stale-while-revalidate`, so how long a session rides out an outage is a
+	/// response header rather than relay config.
+	#[tokio::test]
+	async fn revalidate_honors_stale_while_revalidate() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.respond_with(ResponseTemplate::new(500))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		// 200ms cadence would default to a 600ms window; the endpoint asked for 2s.
+		let grant = test_grant_schedule(
+			None,
+			Schedule {
+				cadence: Duration::from_millis(200),
+				staleness: Duration::from_secs(2),
+			},
+		);
+
+		let start = std::time::Instant::now();
+		let reason = tokio::time::timeout(Duration::from_secs(10), auth.revalidate(&grant))
+			.await
+			.expect("revalidate should fail closed once the staleness window passes");
+		assert_eq!(reason, Expired::Stale);
+		let elapsed = start.elapsed();
+		assert!(
+			elapsed >= Duration::from_secs(2),
+			"closed before stale-while-revalidate: {elapsed:?}"
+		);
+		assert!(elapsed < Duration::from_secs(6), "closed too late: {elapsed:?}");
+		Ok(())
+	}
+
+	/// A garbage body is unavailable, not revoked: an endpoint answering nonsense
+	/// has told us nothing about the grant.
+	#[tokio::test]
+	async fn revalidate_treats_garbage_as_unavailable() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		mount_auth(&server, "max-age=1", "not json".to_string()).await;
+
+		let auth = auth_with_api(&server).await;
+		let grant = test_grant(None, Duration::from_millis(300));
+		let reason = tokio::time::timeout(Duration::from_secs(10), auth.revalidate(&grant))
+			.await
+			.expect("a garbage body must fail closed only after the staleness window");
+		assert_eq!(reason, Expired::Stale);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn revalidate_coalesces_rechecks_for_one_grant() -> anyhow::Result<()> {
+		// The delay keeps the first flight in the air until the second joins it;
+		// expect(1) fails on drop if it dialed again.
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(ResponseTemplate::new(404).set_delay(Duration::from_millis(300)))
+			.expect(1)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let grant = test_grant(None, Duration::from_millis(100));
+
+		let (a, b) = tokio::join!(auth.revalidate(&grant), auth.revalidate(&grant));
+		assert_eq!(a, Expired::Revoked);
+		assert_eq!(b, Expired::Revoked);
+		// Mock::expect(1) is asserted on drop of the server.
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn revalidate_does_not_coalesce_across_roots() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(ResponseTemplate::new(404).set_delay(Duration::from_millis(300)))
+			.expect(2)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let a = test_grant(None, Duration::from_millis(100));
+		let mut b = a.clone();
+		b.params = Arc::new(AuthParams {
+			path: "other".into(),
+			..Default::default()
+		});
+
+		let (a, b) = tokio::join!(auth.revalidate(&a), auth.revalidate(&b));
+		assert_eq!(a, Expired::Revoked);
+		assert_eq!(b, Expired::Revoked);
+		Ok(())
+	}
+
+	/// Viewers of one broadcast hold DISTINCT JWTs signed by the SAME key, so the
+	/// flight key must be the kid, not the credential. Keying it on the credential
+	/// makes an N-viewer broadcast cost N re-checks per cadence instead of one.
+	#[tokio::test]
+	async fn revalidate_coalesces_across_one_kids_audience() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(ResponseTemplate::new(404).set_delay(Duration::from_millis(300)))
+			.expect(1)
+			.mount(&server)
+			.await;
+
+		let key = create_test_key_with_kid("shared");
+		let claims = moq_token::Claims::default().with_root("demo").with_subscribe([""]);
+		// Two different tokens, same signing key, so the same kid.
+		let a = test_grant(Some(key.sign(&claims)?), Duration::from_millis(100));
+		let b = test_grant(
+			Some(key.sign(&claims.clone().with_publish([""]))?),
+			Duration::from_millis(100),
+		);
+		assert_ne!(a.params.jwt, b.params.jwt, "the viewers must hold distinct tokens");
+
+		let auth = auth_with_api(&server).await;
+		let (a, b) = tokio::join!(auth.revalidate(&a), auth.revalidate(&b));
+		assert_eq!(a, Expired::Revoked);
+		assert_eq!(b, Expired::Revoked);
+		// Mock::expect(1) is asserted on drop of the server.
+		Ok(())
+	}
+
+	/// Sessions sharing a flight must NOT share its verdict. Two anonymous
+	/// sessions on one path have the same flight key, but can have been admitted
+	/// either side of a narrowed `public` block - so the one still covered keeps
+	/// serving while the one that is not gets revoked, off the same reply.
+	#[tokio::test]
+	async fn revalidate_judges_each_waiter_against_its_own_scope() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		// The project has narrowed anonymous access to `room`.
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(
+				ResponseTemplate::new(200)
+					// Long enough that the surviving session does not re-check again
+					// inside this test, so `expect(1)` proves both verdicts came from
+					// ONE request.
+					.insert_header("Cache-Control", "max-age=60")
+					.set_body_string(r#"{"public":{"subscribe":["room"]}}"#)
+					.set_delay(Duration::from_millis(300)),
+			)
+			.expect(1)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let scoped = |subscribe: &str| Revalidate {
+			params: Arc::new(AuthParams {
+				path: "demo".into(),
+				..Default::default()
+			}),
+			scope: Scope {
+				root: Path::new("demo").to_owned(),
+				subscribe: PathPrefixes::from(vec![Path::new(subscribe).to_owned()]),
+				publish: PathPrefixes::default(),
+			},
+			schedule: Schedule {
+				cadence: Duration::from_millis(100),
+				// Generous, so the 300ms mock is not cut short by the deadline; this
+				// test is about WHOSE scope decides, not about the window.
+				staleness: Duration::from_secs(5),
+			},
+		};
+
+		// Admitted when anonymous access still covered the whole root.
+		let broad = scoped("");
+		// Admitted after it narrowed.
+		let narrow = scoped("room");
+
+		let (broad, narrow) = tokio::join!(
+			tokio::time::timeout(Duration::from_secs(5), auth.revalidate(&broad)),
+			tokio::time::timeout(Duration::from_millis(1000), auth.revalidate(&narrow)),
+		);
+		assert_eq!(
+			broad.expect("the session the reply no longer covers must close"),
+			Expired::Revoked
+		);
+		assert!(narrow.is_err(), "the still-covered session must keep serving");
+		// expect(1): both verdicts came from ONE auth-API request.
+		Ok(())
+	}
+
+	/// `stale-while-revalidate` is measured from where freshness ends, so a window
+	/// SHORTER than the cadence still buys its full outage tolerance. Measuring it
+	/// from the last success would expire the deadline before the first re-check
+	/// even runs, and one transient 500 would disconnect everybody.
+	#[tokio::test]
+	async fn revalidate_tolerates_an_outage_with_swr_below_max_age() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.respond_with(ResponseTemplate::new(500))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let grant = test_grant_schedule(
+			None,
+			Schedule {
+				cadence: Duration::from_millis(500),
+				staleness: Duration::from_millis(800),
+			},
+		);
+
+		let start = std::time::Instant::now();
+		let reason = tokio::time::timeout(Duration::from_secs(10), auth.revalidate(&grant))
+			.await
+			.expect("revalidate should fail closed once the window passes");
+		assert_eq!(reason, Expired::Stale);
+		let elapsed = start.elapsed();
+		// Freshness (500ms) THEN the window (800ms), not 800ms total.
+		assert!(elapsed >= Duration::from_millis(1300), "closed too early: {elapsed:?}");
+		assert!(elapsed < Duration::from_secs(5), "closed too late: {elapsed:?}");
+		Ok(())
+	}
+
+	/// A stalled endpoint cannot hold a session open indefinitely: the re-check is
+	/// bounded by the staleness deadline, floored at one request timeout so a
+	/// short window still lets an attempt complete. So the session closes by
+	/// roughly `deadline + REQUEST_TIMEOUT`, well before the peer would answer.
+	#[tokio::test]
+	async fn revalidate_closes_while_a_recheck_hangs() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(120)))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let grant = test_grant_schedule(
+			None,
+			Schedule {
+				cadence: Duration::from_millis(200),
+				staleness: Duration::from_millis(300),
+			},
+		);
+
+		let start = std::time::Instant::now();
+		let reason = tokio::time::timeout(Duration::from_secs(30), auth.revalidate(&grant))
+			.await
+			.expect("a hung re-check must not outlive its budget");
+		assert_eq!(reason, Expired::Stale);
+		let elapsed = start.elapsed();
+		assert!(
+			elapsed < Duration::from_secs(20),
+			"should close on its own budget, not wait out the peer: {elapsed:?}"
+		);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn revalidate_drops_an_abandoned_flight() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(ResponseTemplate::new(404).set_delay(Duration::from_secs(5)))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api(&server).await;
+		let grant = test_grant(None, Duration::from_millis(10));
+		let abandoned = tokio::time::timeout(Duration::from_millis(200), auth.revalidate(&grant)).await;
+		assert!(abandoned.is_err(), "the re-check must still be in flight");
+
+		let flights = auth
+			.auth_api
+			.as_ref()
+			.unwrap()
+			.revalidator
+			.flights
+			.lock()
+			.unwrap()
+			.len();
+		assert_eq!(flights, 0, "an abandoned flight must not stay in the map");
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn revalidate_keeps_serving_a_vouched_grant() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		mount_auth(
+			&server,
+			&format!("max-age={}", u64::MAX),
+			r#"{"public":{"subscribe":[""]}}"#.to_string(),
+		)
+		.await;
+
+		let auth = auth_with_api(&server).await;
+		let grant = test_grant(None, Duration::from_millis(100));
+		let pending = tokio::time::timeout(Duration::from_millis(500), auth.revalidate(&grant)).await;
+		assert!(pending.is_err(), "a vouched-for grant keeps revalidating");
+		Ok(())
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn expired_resolves_at_credential_expiry() {
+		let auth = Auth::default();
 		let mut token = AuthToken::unrestricted(Path::new("").to_owned());
-		token.expires = Some(std::time::SystemTime::now() + std::time::Duration::from_millis(100));
+		token.expires = Some(std::time::SystemTime::now() + Duration::from_millis(100));
 
 		let start = tokio::time::Instant::now();
-		tokio::time::timeout(std::time::Duration::from_secs(5), token.expired())
+		let reason = tokio::time::timeout(Duration::from_secs(5), auth.expired(&token))
 			.await
 			.expect("an expiring credential must resolve the bound");
-		assert!(
-			start.elapsed() >= std::time::Duration::from_millis(100),
-			"resolved before expiry"
-		);
+		assert_eq!(reason, Expired::Credential);
+		assert!(start.elapsed() >= Duration::from_millis(100), "resolved before expiry");
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn expired_pends_without_an_expiry() {
+		let auth = Auth::default();
 		let token = AuthToken::unrestricted(Path::new("").to_owned());
 
-		let bounded = tokio::time::timeout(std::time::Duration::from_millis(200), token.expired()).await;
-		assert!(bounded.is_err(), "a token without exp must never expire");
+		let bounded = tokio::time::timeout(Duration::from_millis(200), auth.expired(&token)).await;
+		assert!(bounded.is_err(), "a token without exp or grant must never expire");
 	}
 }
