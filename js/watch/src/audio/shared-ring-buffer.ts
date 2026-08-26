@@ -221,8 +221,11 @@ export class SharedRingBuffer {
 		for (;;) {
 			const write = Atomics.load(this.#control, WRITE);
 			if (((write - target) | 0) <= 0) return; // nothing buffered past the new timeline
-			// Never retreat past the playhead: those samples are already due. READ can only advance
-			// under us, which leaves the ring empty rather than replaying anything.
+			// Never retreat past the playhead: those samples are already due. The worklet can still
+			// advance READ past the value read here, leaving READ ahead of WRITE. That reads as an
+			// empty ring (read() returns nothing, insert() trims what the worklet already played) and
+			// heals on the first successor sample past the playhead, so it costs a quantum of silence
+			// rather than replaying anything.
 			const clamped = i32Max(target, Atomics.load(this.#control, READ));
 			if (((write - clamped) | 0) <= 0) return;
 			if (Atomics.compareExchange(this.#control, WRITE, write, clamped) === write) return;

@@ -1,6 +1,7 @@
 import type { Time } from "@moq/net";
 import type { SharedRingBufferInit } from "./shared-ring-buffer";
 
+/** Everything the main thread sends the render worklet over its port. */
 export type Message = InitShared | InitPost | Data | Latency | Reset | Truncate;
 export type ToMain = State;
 

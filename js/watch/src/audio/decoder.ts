@@ -8,6 +8,7 @@ import { base64ToBytes } from "../base64";
 
 import { type Bound, latencyBounds, type Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
+import { Handover } from "./handover";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
@@ -103,10 +104,8 @@ export class Decoder {
 	// cushion) versus a decrease or a real-time RTT wiggle. See #runLatencyReanchor.
 	#prevFloor?: Bound;
 
-	// The track the current subscription was opened on, and whether the next decoded frame takes
-	// over the timeline from a different one. See #runDecoder.
-	#prevTrack?: string;
-	#truncatePending = false;
+	// Which subscription the ring's buffered samples came from. See #runDecoder.
+	#handover = new Handover();
 
 	#signals = new Effect();
 
@@ -267,14 +266,6 @@ export class Decoder {
 		const track = effect.get(this.source.out.track);
 		if (!track) return;
 
-		// The ring outlives this effect (it's keyed on the sample rate and channel count), so a track
-		// swap leaves whatever the previous track decoded still buffered. Its samples are timestamp
-		// indexed, so the successor overwrites the slots it lands on, but a publisher writing ahead of
-		// real-time can leave seconds of tail beyond them. Drop it once the successor's first frame
-		// tells us where the new timeline starts.
-		if (this.#prevTrack !== undefined && this.#prevTrack !== track) this.#truncatePending = true;
-		this.#prevTrack = track;
-
 		const config = effect.get(this.source.out.config);
 		if (!config) return;
 
@@ -282,6 +273,13 @@ export class Decoder {
 		// broadcast instead of the catalog's own broadcast.
 		const active = broadcast.relativeBroadcast(effect, config.broadcast);
 		if (!active) return;
+
+		// The ring outlives this effect (it's keyed on the sample rate and channel count), so a
+		// replacement subscription (a rendition swap, a republished broadcast, a reconnect) inherits
+		// whatever its predecessor decoded. Samples are timestamp indexed, so the replacement
+		// overwrites the slots it lands on, but a publisher writing ahead of real-time leaves seconds
+		// of tail beyond them. Drop that once the replacement's first frame says where it starts.
+		this.#handover.opened();
 
 		const sub = active.track(track).subscribe({ priority: Catalog.PRIORITY.audio });
 		effect.cleanup(() => sub.close());
@@ -505,10 +503,9 @@ export class Decoder {
 		const durationMilli = Time.Milli.fromMicro(durationMicro);
 		const end = Time.Milli.add(timestampMilli, durationMilli);
 
-		// A new track has taken over the timeline: drop the previous one's write-ahead tail rather
-		// than letting it play out after this frame. See #runDecoder.
-		if (this.#truncatePending) {
-			this.#truncatePending = false;
+		// A new subscription has taken over the timeline: drop the previous one's write-ahead tail
+		// rather than letting it play out after this frame. See #runDecoder.
+		if (this.#handover.takeover()) {
 			ring.truncate(timestamp);
 			this.#truncateDecodeBuffered(timestampMilli);
 		}
