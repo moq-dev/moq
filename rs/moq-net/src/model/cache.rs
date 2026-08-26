@@ -11,8 +11,9 @@
 //!
 //! Cross-track ordering comes from one statistic: the mean last-access time of the
 //! evictable population (every cached group except each track's protected latest).
-//! A group accessed more recently than that mean is never evicted, so a fresh fetch
-//! in one track can't die while another track holds staler content, and a track
+//! A group accessed more recently than that mean is never evicted, so freshly read
+//! or fetched content in one track can't die while another track holds staler
+//! content, and a track
 //! whose oldest group is staler than the mean accrues debt at double rate. Evicting
 //! old entries and inserting new ones both advance the mean, so the eviction
 //! frontier moves with cache turnover on its own.
@@ -37,8 +38,8 @@ use super::track::TrackState;
 const ENTRY_OVERHEAD: u64 = 256;
 
 /// Sub-tick boosts applied to the last-access stamp, breaking ties within one
-/// coarse tick: a frame write outranks merely-inserted content, and an explicit
-/// read (FETCH hit or backfill birth) outranks both.
+/// coarse tick: a frame write outranks merely-inserted content, and a read (a
+/// delivered or fetched group, a frame read, a backfill's birth) outranks both.
 const WRITE_BOOST: u64 = 1;
 const READ_BOOST: u64 = 2;
 
@@ -263,7 +264,7 @@ impl Track {
 		Charge {
 			track: Some(self.clone()),
 			bytes: ENTRY_OVERHEAD,
-			last,
+			last: AtomicU64::new(last),
 			counted: false,
 		}
 	}
@@ -306,9 +307,13 @@ pub(crate) struct Charge {
 	track: Option<Arc<Track>>,
 	// Bytes currently charged, including ENTRY_OVERHEAD, released on drop.
 	bytes: u64,
-	// Tick of the last cache access: creation, a FETCH hit, or a fetched backfill's
-	// birth. Eviction protection and age expiry key off this.
-	last: u64,
+	// Tick of the last cache access: creation, every write, and every read (group
+	// delivery, frame reads, FETCH hits, a fetched backfill's birth). Eviction
+	// protection and age expiry key off this. Atomic so the read paths can stamp
+	// it through a shared guard: a kio write guard's release notifies every parked
+	// consumer, which a mere access must not do. Accesses are still serialized by
+	// the owning state's lock, so `counted` can pair with it as a plain bool.
+	last: AtomicU64,
 	// Whether `last` is currently a sample in the pool's access mean, i.e. the
 	// group is in the evictable population.
 	counted: bool,
@@ -345,7 +350,7 @@ impl Charge {
 
 	/// Tick of the group's last cache access.
 	pub(crate) fn accessed(&self) -> u64 {
-		self.last
+		self.last.load(Ordering::Relaxed)
 	}
 
 	/// Enter the group into the evictable population (demoted from the live edge,
@@ -355,13 +360,15 @@ impl Charge {
 		if let Some(track) = &self.track
 			&& !self.counted
 		{
-			track.pool.access_insert(self.last);
+			track.pool.access_insert(self.accessed());
 			self.counted = true;
 		}
 	}
 
-	/// Record a cache read (a FETCH hit, or a fetched backfill's birth).
-	pub(crate) fn refresh(&mut self) {
+	/// Record a cache read: a delivered or fetched group, a frame read, or a
+	/// fetched backfill's birth. `&self` so the read paths can stamp through a
+	/// shared guard without waking parked consumers.
+	pub(crate) fn refresh(&self) {
 		self.touch(READ_BOOST);
 	}
 
@@ -372,16 +379,18 @@ impl Charge {
 	/// same-tick access still reads as strictly newer than the population mean of
 	/// weaker accesses. Idempotent within a tick (monotone, never regressing), so
 	/// repeated accesses can't run ahead of the clock by more than the boost.
-	fn touch(&mut self, boost: u64) {
+	fn touch(&self, boost: u64) {
 		let Some(track) = &self.track else { return };
 		let target = track.pool.now().saturating_add(boost);
-		if target <= self.last {
+		// `fetch_max` keeps the stamp monotone, and its prior value makes the
+		// paired mean update exact even for back-to-back accesses.
+		let prev = self.last.fetch_max(target, Ordering::Relaxed);
+		if target <= prev {
 			return;
 		}
 		if self.counted {
-			track.pool.access_refresh(self.last, target);
+			track.pool.access_refresh(prev, target);
 		}
-		self.last = target;
 	}
 
 	/// Release everything this charge holds: bytes, overhead, and the access
@@ -391,7 +400,7 @@ impl Charge {
 			track.pool.sub(self.bytes);
 			self.bytes = 0;
 			if self.counted {
-				track.pool.access_remove(self.last);
+				track.pool.access_remove(self.accessed());
 				self.counted = false;
 			}
 		}
@@ -523,6 +532,19 @@ mod test {
 		c.clear();
 		assert_eq!(pool.average(), None, "aborted groups leave no ghost sample");
 		drop(c);
+		assert_eq!(pool.average(), None);
+	}
+
+	#[test]
+	fn refresh_updates_a_counted_sample() {
+		let pool = Pool::new(1000);
+		let mut c = charge(&pool);
+		c.demote();
+		c.refresh();
+		// The sample in the pool mean moved with the stamp, so releasing the charge
+		// removes exactly what was inserted and leaves no residue.
+		assert_eq!(pool.average(), Some(c.accessed()));
+		c.clear();
 		assert_eq!(pool.average(), None);
 	}
 

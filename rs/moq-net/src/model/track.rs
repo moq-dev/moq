@@ -278,6 +278,9 @@ impl TrackState {
 				&& slot.stamp == *stamp
 				&& !slot.group.is_aborted()
 			{
+				// Delivery is a cache access: stamp it so expiry and the eviction
+				// walk don't kill a group a subscriber is about to read.
+				slot.group.cache_refresh();
 				return Poll::Ready(Ok(Some((slot.group.consume(), self.offset + i))));
 			}
 		}
@@ -425,6 +428,8 @@ impl TrackState {
 		}
 
 		if let Some(group) = best {
+			// Delivery is a cache access, same as the arrival-order path.
+			group.cache_refresh();
 			return Poll::Ready(Ok(Some(group.consume())));
 		}
 
@@ -492,9 +497,9 @@ impl TrackState {
 	///
 	/// One bounded, rotating scan over the eviction order, which holds every cached
 	/// group except the protected latest. The cursor persists across calls, so
-	/// entries beyond one scan window can't be starved by fresh (recently fetched
-	/// or written) entries in front of them: every position is revisited within a
-	/// few writes. Expiry throughput is therefore EVICT_SCAN groups per write; the
+	/// entries beyond one scan window can't be starved by fresh (recently read,
+	/// fetched, or written) entries in front of them: every position is revisited
+	/// within a few writes. Expiry throughput is therefore EVICT_SCAN groups per write; the
 	/// byte budget reclaims the remainder under memory pressure.
 	fn evict_expired(&mut self, max_age: Duration) {
 		let now = self.cache.pool().now();
@@ -752,9 +757,9 @@ impl TrackState {
 			}
 
 			scanned += 1;
-			// Protected: accessed more recently than the average (a fresh insert or
-			// a FETCH hit, which also covers a backfill still being filled). Rotate
-			// to the back.
+			// Protected: accessed more recently than the average (a fresh insert,
+			// an active reader, or a FETCH hit, which also covers a backfill still
+			// being filled). Rotate to the back.
 			if slot.group.cache_accessed() > average {
 				self.evict.push_back((sequence, stamp));
 				continue;
@@ -3082,6 +3087,73 @@ mod test {
 		let _next = producer.create_group(group::Info { sequence: 1 }).unwrap();
 
 		assert!(consumer.next_frame().await.unwrap().is_none());
+	}
+
+	/// An actively-read group is not expired out from under its reader: every frame
+	/// read restarts the retention clock. A group nobody reads still ages out on
+	/// schedule, so reclamation stays intact.
+	#[tokio::test]
+	async fn active_reader_survives_expiry() {
+		tokio::time::pause();
+
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(None);
+
+		// A finished group with one frame per step of the read loop below.
+		let mut group = producer.create_group(0u64.into()).unwrap();
+		for _ in 0..10 {
+			group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		}
+		group.finish().unwrap();
+		let mut reading = subscriber.assert_group();
+
+		// A sibling written at the same time that nobody ever reads.
+		producer.create_group(1u64.into()).unwrap().finish().unwrap();
+
+		// Each step stays well inside the retention window, but the whole read
+		// spans several windows. New groups keep the expiry scan running.
+		for seq in 2..12u64 {
+			tokio::time::advance(DEFAULT_LATENCY_MAX / 2).await;
+			let frame = reading.next_frame().await;
+			assert!(
+				matches!(frame, Ok(Some(_))),
+				"an actively-read group must not expire mid-read (step {seq})"
+			);
+			producer.create_group(seq.into()).unwrap().finish().unwrap();
+		}
+
+		let state = producer.state.read();
+		assert!(state.lookup.contains_key(&0), "the read group survived");
+		assert!(!state.lookup.contains_key(&1), "the unread group still expired");
+	}
+
+	/// Receiving a group is itself a cache access: a subscriber that takes
+	/// delivery just before the group would age out still gets to read it a full
+	/// window later.
+	#[tokio::test]
+	async fn delivery_restarts_the_expiry_clock() {
+		tokio::time::pause();
+
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(None);
+
+		let mut group = producer.create_group(0u64.into()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		group.finish().unwrap();
+		// A second group so seq 0 leaves the protected live edge.
+		producer.create_group(1u64.into()).unwrap().finish().unwrap();
+
+		// Deliver just inside the window: the delivery stamps the group.
+		tokio::time::advance(DEFAULT_LATENCY_MAX - Duration::from_secs(1)).await;
+		let mut reading = subscriber.assert_group();
+
+		// Almost another full window passes: far beyond the write, inside the
+		// delivery stamp. The new group runs the expiry scan.
+		tokio::time::advance(DEFAULT_LATENCY_MAX - Duration::from_secs(1)).await;
+		producer.create_group(2u64.into()).unwrap().finish().unwrap();
+
+		let frame = reading.read_frame().await.unwrap();
+		assert!(frame.is_some(), "a just-delivered group must not expire unread");
 	}
 
 	#[tokio::test]

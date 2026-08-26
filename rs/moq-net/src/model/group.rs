@@ -122,6 +122,9 @@ impl GroupState {
 		}
 		let local = index - self.offset;
 		if let Some(f) = self.frames.get(local) {
+			// A frame read is a cache access: stamp it so expiry and the eviction
+			// walk spare a group a consumer is actively draining.
+			self.charge.refresh();
 			let info = frame::Info {
 				size: f.payload.len() as u64,
 				timestamp: f.timestamp,
@@ -131,6 +134,7 @@ impl GroupState {
 		if local == self.frames.len()
 			&& let Some(p) = &self.partial
 		{
+			self.charge.refresh();
 			let info = frame::Info {
 				size: p.buf.capacity() as u64,
 				timestamp: p.timestamp,
@@ -487,13 +491,13 @@ impl Producer {
 		}
 	}
 
-	/// Record a cache access (a FETCH hit, or a fetched backfill's birth),
-	/// protecting the group from eviction and restarting its expiry clock. A no-op
-	/// once the group is closed.
+	/// Record a cache access (delivery to a subscriber, a FETCH hit, or a fetched
+	/// backfill's birth), protecting the group from eviction and restarting its
+	/// expiry clock. Stamps through a read guard, whose release never notifies, so
+	/// delivery can't wake every consumer parked on the group. Harmless on a
+	/// closed group: its charge is already cleared.
 	pub(crate) fn cache_refresh(&self) {
-		if let Ok(mut state) = self.state.write() {
-			state.charge.refresh();
-		}
+		self.state.read().charge.refresh();
 	}
 
 	/// Create a new consumer for the group.
@@ -761,6 +765,9 @@ impl Consumer {
 			let local = (index - state.offset).min(state.frames.len());
 			prefetch.fill(state.frames.range(local..).cloned());
 			if prefetch.len > 0 {
+				// One stamp covers the whole batch: frames popped from the prefetch
+				// don't re-stamp until the next refill, which `CAP` bounds.
+				state.charge.refresh();
 				return Poll::Ready(Ok(()));
 			}
 			// Nothing completed at `index`: an in-flight tail waits, otherwise resolve
