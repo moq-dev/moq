@@ -84,10 +84,10 @@ fn dial_and_accept_share_one_socket() {
 		.expect("worker");
 }
 
-/// An Initial for a version we don't speak gets a version negotiation packet
-/// back (and junk gets nothing but silence, before and after).
+/// A server negotiates an unsupported version, while a dial-only endpoint and
+/// junk stay silent.
 #[test]
-fn unsupported_version_is_negotiated() {
+fn unsupported_version_is_negotiated_only_by_servers() {
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
 	let certs = support::certs().expect("certificates");
@@ -102,6 +102,12 @@ fn unsupported_version_is_negotiated() {
 	)
 	.expect("endpoint");
 	let server = endpoint.local_addr();
+	let dial_only_sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("dial-only socket");
+	let dial_only =
+		quic::Endpoint::new(&handle, dial_only_sock, quic::endpoint::Config::default()).expect("dial-only endpoint");
+	let dial_only_addr = dial_only.local_addr();
 
 	// The raw client runs on its own thread (the worker owns this one) and
 	// wakes the worker when it has a verdict.
@@ -136,6 +142,21 @@ fn unsupported_version_is_negotiated() {
 			let mut response = vec![0u8; 1500];
 			let (len, _) = sock.recv_from(&mut response)?;
 			response.truncate(len);
+
+			// A dial-only socket owns no inbound handshake policy and must not
+			// spend its shared transmit pool on stateless responses.
+			sock.set_read_timeout(Some(Duration::from_millis(200)))?;
+			sock.send_to(&packet, dial_only_addr)?;
+			let mut unexpected = [0u8; 1500];
+			match sock.recv_from(&mut unexpected) {
+				Err(err)
+					if matches!(
+						err.kind(),
+						std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+					) => {}
+				Err(err) => return Err(err.into()),
+				Ok((len, from)) => anyhow::bail!("dial-only endpoint answered {len} bytes from {from}"),
+			}
 			Ok(response)
 		})();
 		let mut verdict = thread_verdict.lock().unwrap();
@@ -165,7 +186,7 @@ fn unsupported_version_is_negotiated() {
 		versions.contains(&quiche::PROTOCOL_VERSION),
 		"the supported version is offered: {versions:?}"
 	);
-	drop(endpoint);
+	drop((endpoint, dial_only));
 }
 
 /// A dial nobody answers must time out rather than hang: with no ingress ever

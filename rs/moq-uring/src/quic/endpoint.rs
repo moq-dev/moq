@@ -299,6 +299,12 @@ impl Inner {
 	/// A datagram no connection claims: the start of a handshake, or noise.
 	/// Returns the new connection's key when one is born.
 	fn greet(self: &Rc<Self>, hdr: quiche::Header<'_>, segment: &mut [u8], info: quiche::RecvInfo) -> Option<usize> {
+		// Nobody left to claim the connection, or a dial-only endpoint. This
+		// also suppresses stateless responses from a socket that does not serve.
+		if self.handles.get() == 0 || self.accepting.borrow().is_none() {
+			tracing::trace!(from = %info.from, "dropping an unsolicited handshake");
+			return None;
+		}
 		// Long-header packet types are version-specific. Negotiate an unknown
 		// nonzero version before interpreting those bits with our version's map.
 		if hdr.version != 0 && !quiche::version_is_supported(hdr.version) {
@@ -307,11 +313,6 @@ impl Inner {
 		}
 		if hdr.ty != quiche::Type::Initial {
 			tracing::trace!(from = %info.from, ty = ?hdr.ty, "dropping an unroutable datagram");
-			return None;
-		}
-		// Nobody left to claim the connection, or a dial-only endpoint.
-		if self.handles.get() == 0 || self.accepting.borrow().is_none() {
-			tracing::trace!(from = %info.from, "dropping an unsolicited handshake");
 			return None;
 		}
 		// Bound every connection the application has not claimed, whether its
