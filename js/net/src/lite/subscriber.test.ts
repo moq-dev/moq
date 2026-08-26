@@ -5,7 +5,7 @@ import { OriginSchema } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Writer } from "../stream.ts";
 import * as Time from "../time.ts";
-import { AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
+import { AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
 import { Probe } from "./probe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { Version } from "./version.ts";
@@ -327,6 +327,58 @@ test("retiring an id whose announce was skipped ends nothing", async () => {
 	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_06));
 	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 1n }, Version.DRAFT_06));
 	expect(await announced.next()).toEqual({ path: Path.from("lobby"), active: false });
+
+	announced.close();
+	subscriber.close();
+});
+
+test("a draft-02 initial announcement can still be retracted", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_02);
+	const announced = subscriber.announced(Path.empty());
+	await settle();
+
+	// ANNOUNCE_INIT carries the initial set. These are advertisements like any other, so
+	// the peer may retract one later and the consumer has to hear about it.
+	await send((w) => new AnnounceInit([Path.from("room")]).encode(w, Version.DRAFT_02));
+	expect(await announced.next()).toEqual({ path: Path.from("room"), active: true });
+
+	await send((w) => encodeAnnounceBroadcast(w, { status: "ended", suffix: Path.from("room") }, Version.DRAFT_02));
+	expect(await announced.next()).toEqual({ path: Path.from("room"), active: false });
+
+	announced.close();
+	subscriber.close();
+});
+
+test("a duplicate start is reported even when its own route reflects", async () => {
+	const SELF = 1n;
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06, SELF);
+	const announced = subscriber.announced(Path.empty());
+	await settle();
+
+	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
+
+	// A first start we accept and surface.
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("room"), hops: [PUBLISHER_A] },
+			Version.DRAFT_06,
+		),
+	);
+	expect(await announced.next()).toEqual({ path: Path.from("room"), active: true });
+
+	// A second start for that path, carrying a route that loops back through us. Skipping
+	// it must not pre-empt the violation: the peer sent two starts with no end between
+	// them regardless of whether the second one's route was usable.
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: Path.from("room"), hops: [OriginSchema.parse(SELF)] },
+			Version.DRAFT_06,
+		),
+	);
+
+	await expect(announced.next()).rejects.toThrow("duplicate announce");
 
 	announced.close();
 	subscriber.close();

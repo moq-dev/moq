@@ -430,9 +430,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	/// Records the advertisement either way. Returns `Ok(true)` if it was accepted (and
-	/// a route was attached to the origin's broadcast at the path), `Ok(false)` if it was
-	/// dropped as a reflected loop.
+	/// Records the advertisement either way. Returns `Ok(true)` if it was accepted (and a
+	/// route was attached to the origin's broadcast at the path), `Ok(false)` if it was
+	/// declined locally: a chain reflected by its sender, one at `MAX_HOPS`, one reflected
+	/// through us, or a path outside our scope.
 	fn start_announce(
 		&mut self,
 		path: PathOwned,
@@ -1014,8 +1015,8 @@ mod tests {
 		assert!(consumer.get_broadcast("room/host").is_none());
 
 		// Announce id 1, for a path the peer never retracted: two starts with no end
-		// between them. The receiver used to miss that because it consulted its own
-		// acceptance record, accept this one, and let id 0's end retire its route.
+		// between them. Catching it requires testing against what the peer advertised, since
+		// nothing was accepted at this path for an acceptance record to hold.
 		let mut hops = crate::OriginList::new();
 		hops.push(crate::Origin::new(7).unwrap()).unwrap();
 		assert!(

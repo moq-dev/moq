@@ -182,15 +182,35 @@ export class Subscriber {
 				responderOrigin = ok.origin;
 			}
 
+			// Every advertisement the peer currently has live, keyed by suffix (at most one
+			// per path is current, and every announce on this stream shares `prefix`).
+			//
+			// An advertisement skipped locally as a reflected loop is recorded with
+			// `publisher: undefined` and `live: false`: the peer numbered it and will retract
+			// it regardless of what we made of it, so its path is not free. Dropping it from
+			// the map instead would let a later announce take the path, and the skipped one's
+			// `endedId` would then retract that one's state.
+			//
+			// `publisher` is what lets a restart tell a route change (same publisher,
+			// subscriptions resume) from a replacement (a new generation took the path,
+			// nothing carries over).
+			type Advertisement = { publisher: Origin | undefined; live: boolean };
+			const advertised = new Map<Path.Valid, Advertisement>();
+
 			switch (this.version) {
 				case Version.DRAFT_01:
 				case Version.DRAFT_02: {
 					// Receive ANNOUNCE_INIT first
 					const init = await AnnounceInit.decode(stream.reader, this.version);
 
-					// Process initial announcements
+					// Process initial announcements. These are advertisements like any other, so
+					// they go on record: a later `ended` for one has to find it here to retract
+					// it, and a second announcement at the same path is still one too many.
+					// Draft01/02 carry no hop ids and no ANNOUNCE_OK, so nothing names the
+					// publisher.
 					for (const suffix of init.suffixes) {
 						const path = Path.join(prefix, suffix);
+						advertised.set(suffix, { publisher: undefined, live: true });
 						console.debug(`announced: broadcast=${path} active=true`);
 						announced.append({ path: suffix, active: true });
 					}
@@ -206,21 +226,6 @@ export class Subscriber {
 			// announces we skip via ignoreSelf, since the sender doesn't know we skipped.
 			let nextAnnounceId = 0n;
 			const announcedById = new Map<bigint, Path.Valid>();
-
-			// Every advertisement the peer currently has live, keyed by suffix (at most one
-			// per path is current, and every announce on this stream shares `prefix`).
-			//
-			// An advertisement skipped locally as a reflected loop is recorded with
-			// `publisher: undefined` and `live: false`: the peer numbered it and will retract
-			// it regardless of what we made of it, so its path is not free. Dropping it from
-			// the map instead would let a later announce take the path, and the skipped one's
-			// `endedId` would then retract that one's state.
-			//
-			// `publisher` is what lets a restart tell a route change (same publisher,
-			// subscriptions resume) from a replacement (a new generation took the path,
-			// nothing carries over).
-			type Advertisement = { publisher: Origin | undefined; live: boolean };
-			const advertised = new Map<Path.Valid, Advertisement>();
 
 			// Receive announce updates (for Draft03, this includes initial state)
 			for (;;) {
@@ -272,6 +277,16 @@ export class Subscriber {
 
 				const path = Path.join(prefix, suffix);
 
+				// One current advertisement per path per stream, decided before anything below
+				// can skip this announcement. From lite-06 a replacement is an explicit RESTART,
+				// so a second ANNOUNCE_START for a path the peer already advertised is a
+				// violation whether or not its route would be usable here, and whether or not we
+				// kept the first. Letting a skip pre-empt it would retract the live route and
+				// leave the stream open on a peer that is already out of spec.
+				if (announce.status === "active" && hasAnnounceId(this.version) && advertised.has(suffix)) {
+					throw new Error(`duplicate announce for ${path}`);
+				}
+
 				// Retract the path: forget the advertisement, drop the shared consume entry so a
 				// later announce subscribes fresh rather than cloning the dead generation's tracks,
 				// and tell the consumer. A no-op for an advertisement never surfaced, which is
@@ -304,13 +319,6 @@ export class Subscriber {
 					// The first hop identifies the original publisher; an empty chain means the
 					// peer itself originated it. See `restart_announce` in the Rust subscriber.
 					const publisher = hops?.[0] ?? responderOrigin;
-
-					// One current advertisement per path per stream. From lite-06 a replacement
-					// is an explicit RESTART, so a second ANNOUNCE_START for a path the peer
-					// already advertised is a violation, whether or not we skipped the first.
-					if (announce.status === "active" && hasAnnounceId(this.version) && advertised.has(suffix)) {
-						throw new Error(`duplicate announce for ${path}`);
-					}
 
 					// A second advertisement for a path we already carry is a restart: either an
 					// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.
