@@ -198,16 +198,21 @@ fn select(attempts: Vec<Attempt>, config: &Config) -> Result<Box<dyn Backend>, E
 
 		match (attempt.candidate.open)(config) {
 			Ok(backend) => {
-				// A compiled-in hardware encoder that refuses to open is otherwise
-				// invisible: `Auto` hands back a working software encoder and the only
-				// symptom is the frame rate. Name what refused and why, so the host
-				// diagnoses itself.
-				if !attempt.hardware && !refused.is_empty() {
-					tracing::warn!(
-						encoder = name,
-						refused = %refused.join(", "),
-						"no hardware encoder available, falling back to software"
-					);
+				// `Auto` returning a software encoder is otherwise invisible except for
+				// its CPU cost. Include runtime failures when hardware candidates existed.
+				if !attempt.hardware && matches!(&config.kind, Kind::Auto) {
+					if refused.is_empty() {
+						tracing::warn!(
+							encoder = name,
+							"no hardware encoder available, falling back to software"
+						);
+					} else {
+						tracing::warn!(
+							encoder = name,
+							refused = %refused.join(", "),
+							"no hardware encoder available, falling back to software"
+						);
+					}
 				}
 				return Ok(backend);
 			}
@@ -381,8 +386,18 @@ mod tests {
 
 	#[tracing_test::traced_test]
 	#[test]
+	fn auto_without_hardware_warns() {
+		let backend = select(vec![Attempt::software(&WORKING)], &config()).unwrap();
+		assert_eq!(backend.name(), "stub");
+		assert!(logs_contain("falling back to software"));
+	}
+
+	#[tracing_test::traced_test]
+	#[test]
 	fn asking_for_software_is_not_a_fallback() {
-		select(vec![Attempt::software(&WORKING)], &config()).unwrap();
+		let mut config = config();
+		config.kind = Kind::Software;
+		select(vec![Attempt::software(&WORKING)], &config).unwrap();
 		assert!(!logs_contain("falling back to software"));
 	}
 
