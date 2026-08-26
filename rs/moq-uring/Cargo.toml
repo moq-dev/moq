@@ -17,6 +17,7 @@ publish = false
 [target.'cfg(target_os = "linux")'.dependencies]
 boring = "4.22"
 bytes = "1"
+http = "1"
 io-uring = { workspace = true }
 kio = { workspace = true }
 libc = { workspace = true }
@@ -27,6 +28,8 @@ rand = "0.10"
 slab = "0.4"
 thiserror = "2"
 tracing = "0.1"
+url = "2"
+web-transport-proto = { workspace = true }
 web-transport-trait = { workspace = true }
 
 [dev-dependencies]
@@ -37,11 +40,14 @@ tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 io-uring = { workspace = true }
 libc = { workspace = true }
+moq-tokio = { workspace = true, features = ["quinn", "aws-lc-rs"] }
 nix = { workspace = true }
 noq-udp = { workspace = true }
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
+rustls = "0.23"
 tempfile = { workspace = true }
 tracing = "0.1"
+web-transport-quinn = { workspace = true }
 
 [[bench]]
 name = "udp_tokio"

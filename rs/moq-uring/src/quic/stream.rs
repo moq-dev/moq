@@ -33,6 +33,44 @@ impl SendStream {
 			reset: false,
 		}
 	}
+
+	/// The QUIC stream id, which the WebTransport layer uses as the session id.
+	pub(crate) fn id(&self) -> u64 {
+		self.id
+	}
+
+	/// Queue as much of `buf` as quiche will take right now, without parking.
+	/// Best-effort, for the close path where nobody is left to poll.
+	pub(crate) fn try_write(&mut self, buf: &[u8]) -> usize {
+		if self.fin || self.reset {
+			return 0;
+		}
+		let n = self
+			.shared
+			.conn
+			.borrow_mut()
+			.stream_send(self.id, buf, false)
+			.unwrap_or(0);
+		if n > 0 {
+			self.shared.kick();
+		}
+		n
+	}
+
+	/// [`reset`](web_transport_trait::poll::SendStream::reset) with a
+	/// full-width code, for the WebTransport HTTP/3 error mapping.
+	pub(crate) fn reset_code(&mut self, code: u64) {
+		if self.reset {
+			return;
+		}
+		let _ = self
+			.shared
+			.conn
+			.borrow_mut()
+			.stream_shutdown(self.id, quiche::Shutdown::Write, code);
+		self.reset = true;
+		self.shared.kick();
+	}
 }
 
 impl web_transport_trait::poll::SendStream for SendStream {
@@ -95,16 +133,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 	}
 
 	fn reset(&mut self, code: u32) {
-		if self.reset {
-			return;
-		}
-		let _ = self
-			.shared
-			.conn
-			.borrow_mut()
-			.stream_shutdown(self.id, quiche::Shutdown::Write, u64::from(code));
-		self.reset = true;
-		self.shared.kick();
+		self.reset_code(u64::from(code));
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -191,6 +220,22 @@ impl RecvStream {
 		}
 	}
 
+	/// [`stop`](web_transport_trait::poll::RecvStream::stop) with a
+	/// full-width code, for the WebTransport HTTP/3 error mapping.
+	pub(crate) fn stop_code(&mut self, code: u64) {
+		self.backlog.clear();
+		if self.stopped || self.finished {
+			return;
+		}
+		let _ = self
+			.shared
+			.conn
+			.borrow_mut()
+			.stream_shutdown(self.id, quiche::Shutdown::Read, code);
+		self.stopped = true;
+		self.shared.kick();
+	}
+
 	/// Move up to `dst.len()` read-ahead bytes out of the backlog.
 	///
 	/// Wakes a `poll_closed` parked at the read-ahead cap: the room it was
@@ -254,17 +299,7 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 	fn stop(&mut self, code: u32) {
 		// Giving up on the read side abandons whatever was read ahead, even
 		// when the FIN is already in and only the backlog is left.
-		self.backlog.clear();
-		if self.stopped || self.finished {
-			return;
-		}
-		let _ = self
-			.shared
-			.conn
-			.borrow_mut()
-			.stream_shutdown(self.id, quiche::Shutdown::Read, u64::from(code));
-		self.stopped = true;
-		self.shared.kick();
+		self.stop_code(u64::from(code));
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {

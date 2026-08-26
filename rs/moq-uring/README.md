@@ -24,10 +24,15 @@ the UDP sockets bound through it.
 - **QUIC**: sans-IO quiche over that UDP path. A `quic::Endpoint` serves many
   connections on one socket, demuxed by connection id (dials share the socket
   with accepts, ids rotate as peers consume them, unknown versions get a
-  version negotiation packet). Each `quic::Connection` implements the
-  transport traits and the worker's `Handle` implements `moq_net::Runtime`,
-  so `connect_lite`/`accept_lite` run moq-lite sessions on the worker. Raw
-  QUIC only: the ALPN carries the application protocol, no HTTP/3 layer yet.
+  version negotiation packet). Native peers speak raw QUIC: the ALPN carries
+  the application protocol.
+- **WebTransport**: browsers negotiate `h3` and `quic::web::Request` runs the
+  HTTP/3 CONNECT handshake (SETTINGS, subprotocol selection, capsule close)
+  over the same adapter via `web-transport-proto`. `quic::web::Session` is
+  the one transport type the runtime drives, raw or web (`Session::raw`), so
+  `connect_lite`/`accept_lite` run moq-lite sessions on the worker either
+  way, with stream and close codes mapped through the HTTP/3 error space in
+  web mode.
 - **Steering**: an endpoint whose socket sits in a `moq-sock` steered
   `SO_REUSEPORT` group sets `endpoint::Config::shard`, and every issued
   connection id leads with the group's steering byte, so the kernel keeps a
@@ -45,10 +50,13 @@ over the worker: handshake, half a megabyte each way, timers driven by
 quiche's own timeout. `tests/session.rs` runs full moq-lite sessions through
 `quic::Endpoint` (including two clients demuxed on one server socket), and
 `tests/endpoint.rs` covers the endpoint mechanics (dial+accept on one socket,
-version negotiation, the dial-only refusal), and `tests/workers.rs` runs a
-steered two-worker reuseport group serving one port across threads. All of
-them skip (loudly) below the kernel floor, which includes GitHub-hosted CI
-runners.
+version negotiation, the dial-only refusal), `tests/workers.rs` runs a
+steered two-worker reuseport group serving one port across threads, and
+`tests/web.rs` is WebTransport interop against `web-transport-quinn` (the
+stack browsers interop with): stream/datagram echo through the H3 framing,
+close codes through the capsule, and a full moq-lite session over
+WebTransport. All of them skip (loudly) below the kernel floor, which
+includes GitHub-hosted CI runners.
 
 ## Benchmarks
 

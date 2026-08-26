@@ -9,15 +9,17 @@
 //! `Server::accept_lite` run real moq-lite sessions on the worker; everything
 //! is `Rc`-shared and `!Send` by design.
 //!
-//! This is raw QUIC: the ALPN carries the application protocol and there is no
-//! HTTP/3 WebTransport layer (browsers need one; it can wrap this adapter
-//! later). An [`Endpoint`] serves many connections on one socket, demuxed by
+//! An [`Endpoint`] serves many connections on one socket, demuxed by
 //! connection id; [`client::connect`] and [`server::accept`] are its
-//! single-connection shorthands.
+//! single-connection shorthands. Native peers speak raw QUIC (the ALPN
+//! carries the application protocol); browsers negotiate `h3` and get the
+//! [`web`] layer's HTTP/3 CONNECT handshake on top of the same adapter, with
+//! [`web::Session`] as the one transport type covering both.
 
 pub mod client;
 pub mod endpoint;
 pub mod server;
+pub mod web;
 
 mod connection;
 mod stream;
@@ -192,6 +194,10 @@ pub enum Error {
 	/// without.
 	#[error("endpoint has no server configuration")]
 	NotServer,
+	/// The WebTransport (HTTP/3) layer failed: a broken handshake, or a
+	/// stream that could not be framed.
+	#[error("webtransport error: {0}")]
+	Web(String),
 }
 
 impl web_transport_trait::Error for Error {

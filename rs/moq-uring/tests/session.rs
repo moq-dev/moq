@@ -20,8 +20,6 @@
 mod support;
 
 use std::net::UdpSocket;
-use std::pin::Pin;
-use std::task::Poll;
 
 use moq_net::origin;
 use moq_uring::{Config, Error, Worker, quic, udp};
@@ -34,49 +32,6 @@ fn worker() -> Option<Worker> {
 			None
 		}
 		Err(err) => panic!("worker setup failed: {err}"),
-	}
-}
-
-/// A `Send` [`moq_net::runtime::Timers`] over tokio, for the origin drivers.
-#[derive(Clone, Default)]
-struct TokioTimers;
-
-impl moq_net::runtime::Timers for TokioTimers {
-	type Timer = TokioTimer;
-
-	fn timer(&self) -> Self::Timer {
-		TokioTimer { at: None, sleep: None }
-	}
-
-	fn now(&self) -> moq_net::runtime::Instant {
-		tokio::time::Instant::now().into_std()
-	}
-}
-
-struct TokioTimer {
-	at: Option<moq_net::runtime::Instant>,
-	// Allocated on the first poll after arming, then re-armed in place;
-	// construction panics without a live tokio time driver.
-	sleep: Option<Pin<Box<tokio::time::Sleep>>>,
-}
-
-impl moq_net::runtime::Timer for TokioTimer {
-	fn set(&mut self, at: Option<moq_net::runtime::Instant>) {
-		self.at = at;
-		if let (Some(at), Some(sleep)) = (at, &mut self.sleep) {
-			sleep.as_mut().reset(tokio::time::Instant::from_std(at));
-		}
-	}
-
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let Some(at) = self.at else { return Poll::Pending };
-		let sleep = self
-			.sleep
-			.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(at))));
-		if sleep.is_elapsed() {
-			return Poll::Ready(());
-		}
-		waiter.poll_future(sleep.as_mut())
 	}
 }
 
@@ -97,7 +52,10 @@ fn lite_session_over_the_worker() {
 			.build()
 			.expect("tokio runtime");
 		rt.block_on(async move {
-			tokio::join!(pub_driver.run(TokioTimers), sub_driver.run(TokioTimers));
+			tokio::join!(
+				pub_driver.run(support::TokioTimers),
+				sub_driver.run(support::TokioTimers)
+			);
 		});
 	});
 
@@ -137,7 +95,7 @@ fn lite_session_over_the_worker() {
 			.expect("quic accept");
 		let session = moq_net::Server::new()
 			.with_publisher(&pub_origin)
-			.accept_lite(server_handle.clone(), conn)
+			.accept_lite(server_handle.clone(), quic::web::Session::raw(conn))
 			.await
 			.expect("accept_lite");
 		// Serve until the client walks away.
@@ -158,7 +116,7 @@ fn lite_session_over_the_worker() {
 
 			let session = moq_net::Client::new()
 				.with_subscriber(sub.clone())
-				.connect_lite(handle.clone(), conn)
+				.connect_lite(handle.clone(), quic::web::Session::raw(conn))
 				.await
 				.expect("connect_lite");
 
@@ -214,9 +172,9 @@ fn two_lite_sessions_share_the_server_socket() {
 			.expect("tokio runtime");
 		rt.block_on(async move {
 			tokio::join!(
-				pub_driver.run(TokioTimers),
-				sub_a_driver.run(TokioTimers),
-				sub_b_driver.run(TokioTimers),
+				pub_driver.run(support::TokioTimers),
+				sub_a_driver.run(support::TokioTimers),
+				sub_b_driver.run(support::TokioTimers),
 			);
 		});
 	});
@@ -255,7 +213,7 @@ fn two_lite_sessions_share_the_server_socket() {
 			server_handle.spawn(async move {
 				let session = moq_net::Server::new()
 					.with_publisher(&pub_origin)
-					.accept_lite(session_handle, conn)
+					.accept_lite(session_handle, quic::web::Session::raw(conn))
 					.await
 					.expect("accept_lite");
 				session.closed().await;
@@ -279,7 +237,7 @@ fn two_lite_sessions_share_the_server_socket() {
 					.expect("quic connect");
 				let session = moq_net::Client::new()
 					.with_subscriber(sub.clone())
-					.connect_lite(handle.clone(), conn)
+					.connect_lite(handle.clone(), quic::web::Session::raw(conn))
 					.await
 					.expect("connect_lite");
 

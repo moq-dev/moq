@@ -208,6 +208,17 @@ impl Inner {
 			waiters.wake();
 		}
 	}
+
+	/// Close the connection with a full-width application code.
+	///
+	/// The [`web_transport_trait::poll::Session::close`] surface narrows codes
+	/// to `u32`; the WebTransport layer maps its codes into HTTP/3's error
+	/// space, which needs the whole varint range.
+	pub(crate) fn close_code(&self, code: u64, reason: &str) {
+		// Err(Done) means already closed, which is what the caller wanted.
+		let _ = self.conn.borrow_mut().close(true, code, reason.as_bytes());
+		self.kick();
+	}
 }
 
 /// A QUIC connection driven by a [`crate::Worker`], usable as a MoQ transport.
@@ -228,6 +239,13 @@ pub struct Connection {
 	/// The negotiated ALPN, cached at establishment so `protocol()` can
 	/// borrow from the handle.
 	alpn: Option<String>,
+}
+
+impl Connection {
+	/// The shared connection state, for the WebTransport layer on top.
+	pub(crate) fn shared(&self) -> &Shared {
+		&self.shared
+	}
 }
 
 impl Clone for Connection {

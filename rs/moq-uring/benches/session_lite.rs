@@ -175,7 +175,7 @@ mod linux {
 					.expect("quic accept");
 				let session = moq_net::Server::new()
 					.with_publisher(&pub_origin)
-					.accept_lite(server_handle.clone(), conn)
+					.accept_lite(server_handle.clone(), quic::web::Session::raw(conn))
 					.await
 					.expect("accept_lite");
 				session.closed().await;
@@ -189,7 +189,7 @@ mod linux {
 						.expect("quic connect");
 					let session = moq_net::Client::new()
 						.with_subscriber(sub_origin.clone())
-						.connect_lite(handle.clone(), conn)
+						.connect_lite(handle.clone(), quic::web::Session::raw(conn))
 						.await
 						.expect("connect_lite");
 					let bc = sub_origin

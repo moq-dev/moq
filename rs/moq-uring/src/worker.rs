@@ -403,7 +403,7 @@ impl moq_net::Timers for Handle {
 }
 
 impl moq_net::Runtime for Handle {
-	type Transport = crate::quic::Connection;
+	type Transport = crate::quic::web::Session;
 
 	fn spawn(&self, machine: moq_net::runtime::Machine<Self>) {
 		// The machine is `!Send` (its transport is), which is exactly what the
