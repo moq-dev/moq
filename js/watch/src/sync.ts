@@ -16,7 +16,7 @@ export type Bound = "real-time" | Time.Milli;
  * `"instant"` drops the clock instead of bounding it: video paints the moment it decodes and
  * audio is disabled. It replaces the range rather than sitting inside it, so it is not a
  * {@link Bound} and cannot be used as a floor or ceiling. Not pacing video and disabling audio is
- * the owner's job, so a {@link Sync} handed this value resolves it to a zero buffer and no more.
+ * the owner's job, so {@link Sync} takes the narrower {@link Paced} and never sees it.
  */
 export type Latency = "instant" | Paced;
 
@@ -47,10 +47,10 @@ export type SyncInput = {
 	/**
 	 * Latency target: a scalar minimizes (collapsed range), an object opens a range. See {@link Paced}.
 	 *
-	 * A clock cannot implement `"instant"` on its own, since not pacing video and disabling audio
-	 * are the owner's job. Pass a {@link Paced} value: `"instant"` resolves to a zero buffer here.
+	 * `"instant"` is deliberately absent from this type. Honoring it means not pacing video and
+	 * disabling audio, which only the owner can do, so a clock is never handed one.
 	 */
-	latency: Getter<Latency>;
+	latency: Getter<Paced>;
 
 	/**
 	 * The connection's PROBE estimates, whose RTT drives "real-time" jitter. Usually wired
@@ -118,7 +118,7 @@ export class Sync {
 
 	constructor(props?: Inputs<SyncInput>) {
 		this.in = {
-			latency: getter(props?.latency ?? ("real-time" as Latency)),
+			latency: getter(props?.latency ?? ("real-time" as Paced)),
 			probe: getter(props?.probe),
 			audio: getter(props?.audio),
 			video: getter(props?.video),

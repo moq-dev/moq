@@ -74,7 +74,7 @@ export class Game {
 	// Reactive state exposed to UI.
 	readonly hovered = new Moq.Signals.Signal(false);
 	readonly active = new Moq.Signals.Signal(false);
-	readonly latency = new Moq.Signals.Signal<Watch.Latency>("real-time");
+	readonly latency = new Moq.Signals.Signal<Watch.Paced>("real-time");
 	readonly userMuted = new Moq.Signals.Signal(false);
 	readonly volume = new Moq.Signals.Signal(0.25);
 	readonly status = new Moq.Signals.Signal<GameStatus | undefined>(undefined);

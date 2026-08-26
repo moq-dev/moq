@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
-import { type Latency, Sync } from "./sync";
+import { type Paced, Sync } from "./sync";
 
 // Effects in @moq/signals flush on a microtask, so let pending updates drain before asserting.
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -39,7 +39,7 @@ describe("latency range", () => {
 	});
 
 	it("reacts to a ceiling set after construction", async () => {
-		const latency = new Signal<Latency>("real-time");
+		const latency = new Signal<Paced>("real-time");
 		const sync = new Sync({ latency });
 		await flush();
 		expect(sync.out.buffered.peek()).toBe(false);
