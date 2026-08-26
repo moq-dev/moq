@@ -90,6 +90,20 @@ interface SubscribeEntry {
 // two report the same thing, where the default 0 would tell the peer it closed cleanly.
 const PROTOCOL_VIOLATION_CODE = 15;
 
+// WebTransport rejects a close reason over 1024 bytes of UTF-8 by throwing, so a reason
+// built from peer-supplied data has to be bounded before it gets there. A broadcast path
+// is peer-supplied and long enough to reach this on its own.
+const MAX_CLOSE_REASON = 1024;
+
+// The longest prefix of `text` that fits a close reason. `encodeInto` stops on a whole
+// code point, so `read` never lands mid-character the way slicing bytes would.
+function closeReason(text: string): string {
+	const encoder = new TextEncoder();
+	const buf = new Uint8Array(MAX_CLOSE_REASON);
+	const { read } = encoder.encodeInto(text, buf);
+	return text.slice(0, read);
+}
+
 export class Subscriber {
 	#quic: WebTransport;
 
@@ -381,7 +395,7 @@ export class Subscriber {
 			// cannot repeat it on the next one. Matches `ietf::Subscriber` and the Rust
 			// lite subscriber, where the announce half only ever ends the session on error.
 			if (e instanceof ProtocolViolation) {
-				this.#quic.close({ closeCode: PROTOCOL_VIOLATION_CODE, reason: reason(e) });
+				this.#quic.close({ closeCode: PROTOCOL_VIOLATION_CODE, reason: closeReason(reason(e)) });
 			}
 		}
 	}

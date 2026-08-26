@@ -6,7 +6,7 @@ import { OriginSchema } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Writer } from "../stream.ts";
 import * as Time from "../time.ts";
-import { AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
+import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
 import { Probe } from "./probe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { Version } from "./version.ts";
@@ -54,7 +54,15 @@ function announceHarness(version: Version, origin = 1n) {
 			readable: new ReadableStream<Uint8Array>({ start: (controller) => (inbound = controller) }),
 			writable: new WritableStream<Uint8Array>({ abort: (reason) => void onAbort(reason) }),
 		}),
-		close: (info?: WebTransportCloseInfo) => void onSessionClose(info),
+		close: (info?: WebTransportCloseInfo) => {
+			// WebTransport throws rather than closing when the reason exceeds 1024 bytes of
+			// UTF-8. Enforced here so an unbounded reason fails as a session that stayed up,
+			// which is what it does in a browser, rather than as a long string.
+			if (new TextEncoder().encode(info?.reason ?? "").byteLength > 1024) {
+				throw new TypeError("close reason exceeds 1024 bytes");
+			}
+			onSessionClose(info);
+		},
 	} as unknown as WebTransport;
 
 	const subscriber = new Subscriber(quic, version, OriginSchema.parse(origin));
@@ -456,4 +464,28 @@ test("a draft-02 initial set naming a path twice is refused", async () => {
 
 	announced.close();
 	subscriber.close();
+});
+
+test("a violation on a very long path still ends the session", async () => {
+	const SELF = 1n;
+	const { subscriber, send, sessionEnded, settle } = announceHarness(Version.DRAFT_06, SELF);
+	const announced = subscriber.announced(Path.empty());
+	await settle();
+
+	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
+
+	// The path is peer-supplied and lands in the close reason. WebTransport throws on a
+	// reason over 1024 bytes of UTF-8, and `#runAnnounced` is launched with `void`, so an
+	// unbounded reason would surface as an unhandled rejection with the session still up.
+	const long = Path.from("x".repeat(2000));
+	const active: AnnounceBroadcast = { status: "active", suffix: long, hops: [PUBLISHER_A] };
+	await send((w) => encodeAnnounceBroadcast(w, active, Version.DRAFT_06));
+	expect(await announced.next()).toEqual({ path: long, active: true });
+
+	await send((w) => encodeAnnounceBroadcast(w, active, Version.DRAFT_06));
+	await expect(announced.next()).rejects.toThrow("duplicate announce");
+
+	const info = await sessionEnded();
+	expect(info?.closeCode).toBe(15);
+	expect(new TextEncoder().encode(info?.reason ?? "").byteLength).toBeLessThanOrEqual(1024);
 });
