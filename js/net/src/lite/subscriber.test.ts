@@ -47,14 +47,14 @@ function announceHarness(version: Version, origin = 1n) {
 	const aborted = new Promise<unknown>((resolve) => (onAbort = resolve));
 	// Resolves once the subscriber ends the session, which is what the draft requires of a
 	// protocol violation: a stream reset alone would let the peer repeat it on the next one.
-	let onSessionClose!: () => void;
-	const sessionClosed = new Promise<void>((resolve) => (onSessionClose = resolve));
+	let onSessionClose!: (info?: WebTransportCloseInfo) => void;
+	const sessionClosed = new Promise<WebTransportCloseInfo | undefined>((resolve) => (onSessionClose = resolve));
 	const quic = {
 		createBidirectionalStream: async () => ({
 			readable: new ReadableStream<Uint8Array>({ start: (controller) => (inbound = controller) }),
 			writable: new WritableStream<Uint8Array>({ abort: (reason) => void onAbort(reason) }),
 		}),
-		close: () => void onSessionClose(),
+		close: (info?: WebTransportCloseInfo) => void onSessionClose(info),
 	} as unknown as WebTransport;
 
 	const subscriber = new Subscriber(quic, version, OriginSchema.parse(origin));
@@ -100,7 +100,7 @@ function announceHarness(version: Version, origin = 1n) {
 			timer = setTimeout(() => reject(new Error("session was never closed")), 250);
 		});
 		try {
-			await Promise.race([sessionClosed, timeout]);
+			return await Promise.race([sessionClosed, timeout]);
 		} finally {
 			clearTimeout(timer);
 		}
@@ -309,8 +309,9 @@ test("an announce skipped as a reflected loop still holds its path", async () =>
 	// into a stream nobody reads.
 	expect(await abortReason()).toContain("duplicate announce");
 	// The draft makes this session-fatal: resetting only the stream would let the peer
-	// repeat the violation on the next one.
-	await sessionEnded();
+	// repeat the violation on the next one. The code has to say so too, or the peer reads
+	// the default 0 as a clean close.
+	expect((await sessionEnded())?.closeCode).toBe(15);
 
 	announced.close();
 	subscriber.close();
@@ -449,8 +450,9 @@ test("a draft-02 initial set naming a path twice is refused", async () => {
 	await expect(announced.next()).rejects.toThrow("duplicate announce");
 	expect(await abortReason()).toContain("duplicate announce");
 	// The draft makes this session-fatal: resetting only the stream would let the peer
-	// repeat the violation on the next one.
-	await sessionEnded();
+	// repeat the violation on the next one. The code has to say so too, or the peer reads
+	// the default 0 as a clean close.
+	expect((await sessionEnded())?.closeCode).toBe(15);
 
 	announced.close();
 	subscriber.close();

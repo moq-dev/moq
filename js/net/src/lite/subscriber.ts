@@ -83,6 +83,13 @@ interface SubscribeEntry {
  *
  * @internal
  */
+// What we close a session with on a protocol violation.
+//
+// The draft names the condition but assigns no numbers, so this is the Rust
+// implementation's code for `Error::ProtocolViolation`: matching it is what makes the
+// two report the same thing, where the default 0 would tell the peer it closed cleanly.
+const PROTOCOL_VIOLATION_CODE = 15;
+
 export class Subscriber {
 	#quic: WebTransport;
 
@@ -373,7 +380,9 @@ export class Subscriber {
 			// A violation ends the session, not just this stream, so a nonconforming peer
 			// cannot repeat it on the next one. Matches `ietf::Subscriber` and the Rust
 			// lite subscriber, where the announce half only ever ends the session on error.
-			if (e instanceof ProtocolViolation) this.#quic.close();
+			if (e instanceof ProtocolViolation) {
+				this.#quic.close({ closeCode: PROTOCOL_VIOLATION_CODE, reason: reason(e) });
+			}
 		}
 	}
 
