@@ -275,7 +275,7 @@ Note the asymmetry when choosing a long `max-age`: the cadence is set by the rep
 
 By default (`--auth-api-mode token`) the relay is the verifier: the endpoint hands back a `key` and the relay checks the credential against it.
 
-With `--auth-api-mode proxy` the endpoint is the decider. The relay forwards the connection verbatim - host, path, transport, and the credential as `Authorization: Bearer` - and enforces whatever comes back:
+With `--auth-api-mode proxy` the endpoint is the decider. The relay forwards the connection verbatim - host (the URL authority, or `Host` on HTTP/1.1), path, transport, and the credential as `Authorization: Bearer` - and enforces whatever comes back:
 
 ```
 GET <base>?root=demo&host=live.example.com&transport=quic

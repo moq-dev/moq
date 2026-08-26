@@ -1789,16 +1789,16 @@ impl Auth {
 	/// token itself, so a process holding several differently-configured `Auth`
 	/// instances still judges each token against the authority that issued it.
 	pub async fn expired(&self, token: &AuthToken) -> Expired {
-		let revoked = async {
-			match &token.revalidate {
-				Some(grant) => self.revalidate(grant).await,
-				None => std::future::pending().await,
+		match &token.revalidate {
+			// The loop starts from this same credential bound and each reply may move
+			// it, so it subsumes the timer below rather than racing it. Racing would
+			// pin the session to admission's bound, letting a re-check shorten one but
+			// never extend a renewed grant.
+			Some(grant) => self.revalidate(grant).await,
+			None => {
+				token.expired().await;
+				Expired::Credential
 			}
-		};
-
-		tokio::select! {
-			_ = token.expired() => Expired::Credential,
-			reason = revoked => reason,
 		}
 	}
 
@@ -5581,6 +5581,50 @@ api = "https://api.example.com/access"
 			.await
 			.expect("a revalidated exp must bound the session");
 		assert_eq!(reason, Expired::Credential);
+		Ok(())
+	}
+
+	/// The other direction, and the one an admission-time timer running beside the
+	/// loop would silently break: a proxy endpoint EXTENDING a renewed grant. The
+	/// session must outlive the bound it was admitted with.
+	#[tokio::test]
+	async fn proxy_revalidation_applies_an_extended_exp() -> anyhow::Result<()> {
+		let near = std::time::SystemTime::now() + Duration::from_secs(2);
+		let near = near.duration_since(std::time::UNIX_EPOCH)?.as_secs();
+		let far = std::time::SystemTime::now() + Duration::from_secs(3600);
+		let far = far.duration_since(std::time::UNIX_EPOCH)?.as_secs();
+
+		let server = MockServer::start().await;
+		// Admission sees the near bound; every re-check after it sees the extension.
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.insert_header("Cache-Control", "max-age=1")
+					.set_body_string(format!(r#"{{"grant":{{"subscribe":[""],"exp":{near}}}}}"#)),
+			)
+			.up_to_n_times(1)
+			.mount(&server)
+			.await;
+		mount_auth(
+			&server,
+			"max-age=1",
+			format!(r#"{{"grant":{{"subscribe":[""],"exp":{far}}}}}"#),
+		)
+		.await;
+
+		let auth = auth_with_api_proxy(&server).await;
+		let token = auth
+			.verify(&AuthParams {
+				path: "demo".into(),
+				jwt: Some("opaque".into()),
+				..Default::default()
+			})
+			.await?;
+
+		// Well past the 2s the session was admitted with: the extension must hold.
+		let pending = tokio::time::timeout(Duration::from_millis(3500), auth.expired(&token)).await;
+		assert!(pending.is_err(), "an extended grant must outlive admission's exp");
 		Ok(())
 	}
 
