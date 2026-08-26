@@ -21,7 +21,7 @@ use super::{Datagram, Requests};
 pub use super::subscription::Subscription;
 
 use std::{
-	collections::{BTreeMap, HashMap, VecDeque},
+	collections::{BTreeMap, VecDeque},
 	sync::Arc,
 	sync::OnceLock,
 	sync::atomic::{AtomicBool, Ordering},
@@ -146,7 +146,11 @@ pub(crate) struct TrackState {
 	// Cached groups by sequence: the single source of truth for what is cached. The
 	// two orderings below hold bare sequences and validate against this map, so a
 	// removed or replaced group turns their entries into discarded-on-pop hints.
-	lookup: HashMap<u64, Slot>,
+	//
+	// Ordered rather than hashed so `poll_next_in_range` can seek to the first
+	// cached sequence at or above a subscriber's cursor. A hash map forces a full
+	// scan per delivery, making a drain of N cached groups quadratic.
+	lookup: BTreeMap<u64, Slot>,
 
 	// Publisher-produced groups in arrival order as (sequence, stamp), walked by
 	// subscriptions; an entry only resolves while its stamp matches the slot's.
@@ -408,24 +412,14 @@ impl TrackState {
 			return Poll::Pending;
 		}
 
-		let mut best: Option<&group::Producer> = None;
-		for slot in self.lookup.values() {
-			let group = &slot.group;
-			if group.sequence < next_sequence {
-				continue;
-			}
-			if let Some(end) = end_sequence
-				&& group.sequence > end
-			{
-				continue;
-			}
-			if group.is_aborted() {
-				continue;
-			}
-			if best.is_none_or(|b| group.sequence < b.sequence) {
-				best = Some(group);
-			}
-		}
+		// Seek straight to the cursor: only aborted groups (waiting on the next
+		// eviction scan to reclaim their slots) are stepped over.
+		let best = self
+			.lookup
+			.range(next_sequence..)
+			.map(|(_, slot)| &slot.group)
+			.take_while(|group| end_sequence.is_none_or(|end| group.sequence <= end))
+			.find(|group| !group.is_aborted());
 
 		if let Some(group) = best {
 			// Delivery is a cache access, same as the arrival-order path.

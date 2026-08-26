@@ -1,4 +1,4 @@
-//! Per-frame overhead benchmarks for the group model.
+//! Delivery-path benchmarks for the group and track models.
 //!
 //! The point of interest is small frames: today each frame in a group is a
 //! `frame::Producer` owning its own `kio` channel plus a couple of `Arc`s, so a
@@ -6,6 +6,9 @@
 //! objects. These benchmarks write and read many small frames so that cost shows
 //! up as wall-clock time, giving a before/after for reshaping frames into plain
 //! data.
+//!
+//! `track_recv_groups` covers the layer above: how much it costs to hand out one
+//! cached group, swept over cache depth so a per-delivery scan shows up as a slope.
 //!
 //! Run with `cargo bench -p moq-net`.
 
@@ -24,6 +27,12 @@ const PAYLOAD: usize = 64;
 /// Frame counts to sweep. The top end intentionally reaches the raised
 /// `MAX_GROUP_FRAMES` so a full group of tiny frames is exercised.
 const COUNTS: [usize; 3] = [512, 8_192, 32_768];
+
+/// Cached group counts to sweep for the track-level delivery benchmarks. A track
+/// publishing one group per frame at the default 5s retention sits in the hundreds,
+/// so the top end is deliberately past anything realistic: a per-delivery scan over
+/// the cache shows up as a slope here, while a seek stays flat.
+const DEPTHS: [usize; 3] = [64, 512, 4_096];
 
 /// Keeps the broadcast/track producers alive alongside the group so the group
 /// isn't torn down mid-benchmark. Only `group` is written to.
@@ -101,6 +110,76 @@ fn bench_read(c: &mut Criterion) {
 	g.finish();
 }
 
+/// Keeps the broadcast alive alongside the track being drained.
+struct TrackCtx {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+}
+
+/// Build a track holding N cached groups, each with a single small frame.
+fn filled_track(n: usize, payload: &Bytes) -> TrackCtx {
+	let mut broadcast = broadcast::Producer::new(broadcast::Info::default());
+	let mut track = broadcast.create_track("bench", None).unwrap();
+	for _ in 0..n {
+		let mut group = track.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+		group.finish().unwrap();
+	}
+	TrackCtx {
+		_broadcast: broadcast,
+		track,
+	}
+}
+
+/// Drain N cached groups from a track, in arrival order and in sequence order.
+///
+/// The two differ in how they find the next group: `recv_group` walks an arrival
+/// index, while `next_group` seeks by sequence. Both should be flat in the cache
+/// depth; a per-delivery scan over the cache makes the sequence-ordered arm
+/// quadratic in N.
+fn bench_track_recv(c: &mut Criterion) {
+	let payload = Bytes::from(vec![0u8; PAYLOAD]);
+	let mut g = c.benchmark_group("track_recv_groups");
+	for &n in &DEPTHS {
+		g.throughput(Throughput::Elements(n as u64));
+		g.bench_with_input(BenchmarkId::new("arrival", n), &n, |b, &n| {
+			b.iter_batched(
+				|| {
+					let ctx = filled_track(n, &payload);
+					let subscriber = ctx.track.subscribe(None);
+					(ctx, subscriber)
+				},
+				|(ctx, mut subscriber)| {
+					for _ in 0..n {
+						let group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
+						black_box(group);
+					}
+					(ctx, subscriber)
+				},
+				BatchSize::SmallInput,
+			);
+		});
+		g.bench_with_input(BenchmarkId::new("sequence", n), &n, |b, &n| {
+			b.iter_batched(
+				|| {
+					let ctx = filled_track(n, &payload);
+					let subscriber = ctx.track.subscribe(None);
+					(ctx, subscriber)
+				},
+				|(ctx, mut subscriber)| {
+					for _ in 0..n {
+						let group = subscriber.next_group().now_or_never().unwrap().unwrap().unwrap();
+						black_box(group);
+					}
+					(ctx, subscriber)
+				},
+				BatchSize::SmallInput,
+			);
+		});
+	}
+	g.finish();
+}
+
 /// The full lifecycle: build a group, write N frames, then drain them.
 fn bench_roundtrip(c: &mut Criterion) {
 	let payload = Bytes::from(vec![0u8; PAYLOAD]);
@@ -129,5 +208,5 @@ fn bench_roundtrip(c: &mut Criterion) {
 	g.finish();
 }
 
-criterion_group!(benches, bench_write, bench_read, bench_roundtrip);
+criterion_group!(benches, bench_write, bench_read, bench_roundtrip, bench_track_recv);
 criterion_main!(benches);
