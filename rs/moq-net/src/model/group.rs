@@ -416,11 +416,13 @@ impl Producer {
 
 	/// Wake consumers parked on the group channel (called after a partial write).
 	pub(crate) fn frame_notify(&self) {
-		// Taking the write lock and dropping it triggers kio's notify. The chunk
-		// that was just written is also a write access: restart the retention
+		// The chunk that was just written is a write access: restart the retention
 		// clock so a straggler group streaming a large frame isn't expired
 		// mid-write (its bytes were already charged when the frame was created).
-		if let Ok(state) = self.state.write() {
+		// `record_write` takes `&mut`, which marks the guard modified: kio only
+		// notifies on a mutably-accessed guard's release, and that notify is what
+		// delivers the chunk to parked readers.
+		if let Ok(mut state) = self.state.write() {
 			state.charge.record_write();
 		}
 	}
@@ -1280,6 +1282,33 @@ mod test {
 		// Take one frame so the batch is filled but only partially drained.
 		let _ = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
 		drop(consumer);
+	}
+
+	/// A parked chunk reader is woken by each chunk write. kio only notifies when
+	/// a write guard was mutably accessed, so `frame_notify` must mark the guard
+	/// modified; a guard dropped untouched wakes nobody and the reader would
+	/// stall until the frame completed.
+	#[tokio::test]
+	async fn chunk_write_wakes_parked_reader() {
+		let mut producer = Info { sequence: 0 }.produce();
+		let mut consumer = producer.consume();
+		let mut frame = producer
+			.create_frame(frame::Info {
+				size: 6,
+				timestamp: Timestamp::ZERO,
+			})
+			.unwrap();
+		let mut f = consumer.next_frame().await.unwrap().unwrap();
+		let handle = tokio::spawn(async move { f.read_chunk().await });
+		// Let the reader park on the empty partial before the chunk lands.
+		tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+		frame.write(Bytes::from_static(b"foo")).unwrap();
+		let chunk = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+			.await
+			.expect("parked chunk reader was never woken by the chunk write")
+			.unwrap()
+			.unwrap();
+		assert_eq!(chunk, Some(Bytes::from_static(b"foo")));
 	}
 
 	/// A frame whose timestamp is at a different scale is converted to the group's

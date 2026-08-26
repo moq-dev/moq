@@ -374,8 +374,9 @@ impl Charge {
 
 	/// Record a write that charges no new bytes (a chunk written into an
 	/// already-charged in-flight frame): restarts the retention clock like any
-	/// other write.
-	pub(crate) fn record_write(&self) {
+	/// other write. `&mut self` deliberately: reaching it through a kio write
+	/// guard marks the guard modified, so its release wakes parked readers.
+	pub(crate) fn record_write(&mut self) {
 		self.touch(WRITE_BOOST);
 	}
 
