@@ -189,7 +189,8 @@ mod tests {
 			.expect("cue read timed out")
 			.unwrap()
 			.expect("a published cue section");
-		assert_eq!(cue.payload[0], 0xFC, "a verbatim splice_info_section (table_id 0xFC)");
+		let expected_cue = cue.payload;
+		assert_eq!(expected_cue[0], 0xFC, "a verbatim splice_info_section (table_id 0xFC)");
 
 		let mut subscriber = Subscriber::new(&origin.consume(), "ingest", Duration::ZERO)
 			.await
@@ -237,5 +238,9 @@ mod tests {
 			.unwrap()
 			.expect("SRT egress preserves a cue section");
 		assert_eq!(cue.payload[0], 0xFC, "the round-trip cue is a splice_info_section");
+		assert_eq!(
+			cue.payload, expected_cue,
+			"SRT egress preserves the complete cue section"
+		);
 	}
 }
