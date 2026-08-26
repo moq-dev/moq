@@ -303,6 +303,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// id in it twice: a loop, and one a cluster receiver must close the session over.
 		if self.version_lacks_hops() && hops.replace_first(crate::Origin::UNKNOWN, self.session_origin).is_err() {
 			tracing::debug!(broadcast = %self.log_path(&path), "dropping announce reflected by its session");
+			announced.declined(path);
 			return Ok(false);
 		}
 
@@ -1892,6 +1893,61 @@ mod tests {
 				Err(Error::ProtocolViolation)
 			),
 			"the double announce must be reported, not silently dropped",
+		);
+	}
+
+	/// Every path out of `start_announce` that declines an announce records it first.
+	///
+	/// The decline paths are a list one edit can fall off the end of, and a miss is silent:
+	/// the path reads as free, a later announce takes it, and the declined one's
+	/// `ANNOUNCE_END` retires that route instead. This walks the one that is hardest to
+	/// reach, where rewriting a placeholder hop would name this session twice.
+	#[tokio::test]
+	async fn every_declined_announce_is_recorded() {
+		let assigned = crate::Origin::new(777).unwrap();
+		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let mut subscriber = Subscriber::new(SubscriberConfig {
+			session: SinkSession::new(Default::default()),
+			origin,
+			recv_bandwidth: None,
+			// Lite03 sends placeholders rather than real ids, so this is the version whose
+			// chain gets rewritten on the way in.
+			version: Version::Lite03,
+			peer_setup: Default::default(),
+			cost: None,
+			peer_origin: Some(assigned),
+			going_away: Default::default(),
+		});
+
+		let path = Path::new("room/host").to_owned();
+		let mut announced = Announced::default();
+
+		// A chain whose placeholder cannot be rewritten: this session's id is already in it,
+		// so writing it over the placeholder would name it twice.
+		let hops = crate::OriginList::try_from(vec![crate::Origin::UNKNOWN, assigned]).unwrap();
+		assert!(
+			!subscriber
+				.start_announce(
+					path.clone(),
+					hops,
+					crate::broadcast::Cost::default(),
+					0,
+					None,
+					&mut announced
+				)
+				.unwrap(),
+			"a chain that cannot take this session's id must be declined",
+		);
+
+		// Declined, but still the peer's advertisement at that path.
+		let mut fresh = crate::OriginList::new();
+		fresh.push(crate::Origin::new(7).unwrap()).unwrap();
+		assert!(
+			matches!(
+				subscriber.start_announce(path, fresh, crate::broadcast::Cost::default(), 0, None, &mut announced),
+				Err(Error::ProtocolViolation)
+			),
+			"a declined announce still holds its path, so a second start for it is a violation",
 		);
 	}
 
