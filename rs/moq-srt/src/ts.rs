@@ -23,7 +23,10 @@ use crate::Result;
 /// Either [`Self::finish`] or dropping the publisher ends the broadcast and
 /// unannounces the path, the former without the dropped-without-finish warning.
 pub struct Publisher {
-	importer: ts::Import,
+	// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
+	// verbatim, so the importer uses the `mpegts` catalog extension rather than the
+	// media-only `()`, which would route those PIDs to `Stream::Ignored` and drop them.
+	importer: ts::Import<ts::Ext>,
 	// A clone of the importer's producer, so a deliberate end can finish() the
 	// broadcast (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
@@ -34,7 +37,10 @@ impl Publisher {
 	/// catalog.
 	pub fn new(origin: &origin::Producer, path: &str) -> Result<Self> {
 		let mut broadcast = origin.create_broadcast(path, broadcast::Route::new().with_announce(true))?;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+		let catalog = moq_mux::catalog::Producer::with_catalog(
+			&mut broadcast,
+			moq_mux::catalog::hang::Catalog::<ts::Ext>::default(),
+		)?;
 		let handle = broadcast.clone();
 		let importer = ts::Import::new(broadcast, catalog.reserve());
 		tracing::info!(%path, "publishing ingest broadcast");
@@ -111,5 +117,78 @@ impl Subscriber {
 	/// broadcast ends.
 	pub async fn next(&mut self) -> Result<Option<Frame>> {
 		Ok(self.export.next().await?)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::Duration;
+
+	use moq_mux::catalog::hang::Container;
+	use moq_mux::catalog::{CatalogFormat, Stream};
+	use tokio::time::timeout;
+
+	use super::*;
+
+	/// Real 5s H.264 + AAC capture with SCTE-35 time_signal cues on a
+	/// CUEI-registered section PID (0x21, stream_type 0x86) — the same fixture
+	/// moq-mux's export tests replay.
+	const BBB5S: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/scte35/bbb5s.ts");
+
+	/// SRT is a contribution protocol, so the cues riding the feed must survive
+	/// ingest: [`Publisher`] builds a `ts::Import<Ext>`, which catalogs the
+	/// SCTE-35 PID in the `mpegts` section and publishes the sections verbatim.
+	/// With the media-only `Catalog<()>` the CUEI PID routes to `Stream::Ignored`
+	/// and the cues silently vanish.
+	#[tokio::test]
+	async fn publisher_preserves_scte35_cues() {
+		let origin = moq_net::Origin::random().produce();
+		let mut publisher = Publisher::new(&origin, "ingest").unwrap();
+
+		// Resolve the broadcast like any subscriber would (waits for the announce).
+		let broadcast = timeout(Duration::from_secs(5), origin.consume().announced_broadcast("ingest"))
+			.await
+			.expect("announce timed out")
+			.expect("the ingest broadcast is announced");
+
+		publisher.feed(bytes::Bytes::from_static(BBB5S)).unwrap();
+
+		// The catalog advertises the cue track in its `mpegts` section...
+		let mut catalog = moq_mux::catalog::Consumer::<ts::Ext>::new(&broadcast, CatalogFormat::Hang)
+			.await
+			.unwrap();
+		let name = loop {
+			let snapshot = timeout(Duration::from_secs(5), catalog.next())
+				.await
+				.expect("no catalog snapshot carried the cue track")
+				.unwrap()
+				.expect("the catalog ended without the cue track");
+			if let Some((name, track)) = snapshot
+				.mpegts
+				.tracks
+				.iter()
+				.find(|(_, t)| t.verbatim.as_ref().is_some_and(|v| v.stream_type == 0x86))
+			{
+				assert_eq!(track.pid, 0x21, "the cue PID is preserved");
+				assert_eq!(
+					track.verbatim.as_ref().unwrap().framing,
+					ts::Framing::Section,
+					"SCTE-35 is section-framed"
+				);
+				break name.clone();
+			}
+		};
+
+		// ...and the splice_info_sections themselves are published verbatim.
+		let track = broadcast.track(name.as_str()).unwrap().subscribe(None).await.unwrap();
+		let mut reader = moq_mux::container::Consumer::new(track, Container::Legacy).with_latency(Duration::ZERO);
+		let cue = timeout(Duration::from_secs(5), reader.read())
+			.await
+			.expect("cue read timed out")
+			.unwrap()
+			.expect("a published cue section");
+		assert_eq!(cue.payload[0], 0xFC, "a verbatim splice_info_section (table_id 0xFC)");
+
+		publisher.finish().unwrap();
 	}
 }
