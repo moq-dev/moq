@@ -714,6 +714,37 @@ describe("buffered mode", () => {
 		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(100 as Time.Milli);
 		expect(read(buffer, 100, 1)[0][0]).toBeCloseTo(0.2, 5);
 	});
+
+	it("truncate drops the write-ahead tail a successor supersedes", () => {
+		// 600ms floor at 1000Hz -> 1200-sample ring, holding a 1s write-ahead utterance.
+		const buffer = createBuffered(600);
+		for (let i = 0; i < 10; i++) {
+			write(buffer, (2000 + i * 100) as Time.Milli, 100, { channels: 1, value: 0.1 });
+		}
+		read(buffer, 100, 1); // playhead at 2100
+
+		// A successor track takes over at 2200 with 100ms of its own audio. Writing it only overwrites
+		// [2200, 2300); without the truncate, [2300, 3000) of the old track still plays after it.
+		buffer.truncate(Time.Micro.fromMilli(2200 as Time.Milli));
+		write(buffer, 2200 as Time.Milli, 100, { channels: 1, value: 0.9 });
+
+		expect(buffer.stalled).toBe(false); // truncate keeps playing, unlike reset()
+		expect(read(buffer, 100, 1)[0][0]).toBeCloseTo(0.1, 5); // [2100, 2200) was already due
+		expect(read(buffer, 100, 1)[0][0]).toBeCloseTo(0.9, 5); // the successor
+		expect(read(buffer, 100, 1)[0].length).toBe(0); // and nothing after it
+	});
+
+	it("truncate never rewinds past the playhead", () => {
+		const buffer = createBuffered(600);
+		write(buffer, 2000 as Time.Milli, 1000, { channels: 1, value: 0.1 });
+		read(buffer, 100, 1); // playhead at 2100
+
+		// A successor whose first frame predates the playhead: those samples are already due, so the
+		// write index floors there rather than going backwards.
+		buffer.truncate(Time.Micro.fromMilli(1000 as Time.Milli));
+		expect(buffer.length).toBe(0);
+		expect(read(buffer, 100, 1)[0].length).toBe(0);
+	});
 });
 
 describe("latency increase re-anchor", () => {

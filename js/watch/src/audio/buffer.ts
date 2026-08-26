@@ -1,6 +1,6 @@
 import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type { Data, InitPost, InitShared, Latency, Reset, State } from "./render";
+import type { Data, InitPost, InitShared, Latency, Reset, State, Truncate } from "./render";
 import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
 
 /**
@@ -76,6 +76,15 @@ export interface AudioBuffer {
 
 	/** Flush buffered samples and re-stall, ready to anchor the next utterance (buffered mode). */
 	reset(): void;
+
+	/**
+	 * Drop buffered samples at or after `timestamp`, keeping what is already due.
+	 *
+	 * Used when a new track takes over the timeline: its samples overwrite the slots they land on,
+	 * but the previous track's write-ahead tail would otherwise play once the new audio runs out.
+	 * Unlike `reset()` this keeps playing, so there's no gap at the handover.
+	 */
+	truncate(timestamp: Time.Micro): void;
 
 	/**
 	 * Resolve once the playhead is near enough to decode a frame at `timestamp`. In buffered mode this
@@ -189,6 +198,10 @@ class SharedAudioBuffer implements AudioBuffer {
 		}
 	}
 
+	truncate(timestamp: Time.Micro): void {
+		this.#ring.truncate(timestamp);
+	}
+
 	reset(): void {
 		this.#ring.reset();
 		this.#backpressure.flush(); // the old timeline is gone; let the decode loop re-anchor
@@ -265,6 +278,11 @@ class PostAudioBuffer implements AudioBuffer {
 
 		const latency = Time.Milli.fromSecond((samples / this.rate) as Time.Second);
 		const msg: Latency = { type: "latency", latency };
+		this.#worklet.port.postMessage(msg);
+	}
+
+	truncate(timestamp: Time.Micro): void {
+		const msg: Truncate = { type: "truncate", timestamp };
 		this.#worklet.port.postMessage(msg);
 	}
 

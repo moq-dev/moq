@@ -210,6 +210,26 @@ export class SharedRingBuffer {
 	}
 
 	/**
+	 * Drop buffered samples at or after `timestamp`, keeping whatever is already due.
+	 * Main thread only.
+	 *
+	 * A successor track overwrites the slots its own samples land on, but anything the previous
+	 * track wrote beyond them would otherwise still play once the successor runs out.
+	 */
+	truncate(timestamp: Time.Micro): void {
+		const target = Math.round(Time.Second.fromMicro(timestamp) * this.rate) | 0;
+		for (;;) {
+			const write = Atomics.load(this.#control, WRITE);
+			if (((write - target) | 0) <= 0) return; // nothing buffered past the new timeline
+			// Never retreat past the playhead: those samples are already due. READ can only advance
+			// under us, which leaves the ring empty rather than replaying anything.
+			const clamped = i32Max(target, Atomics.load(this.#control, READ));
+			if (((write - clamped) | 0) <= 0) return;
+			if (Atomics.compareExchange(this.#control, WRITE, write, clamped) === write) return;
+		}
+	}
+
+	/**
 	 * Flush buffered samples and re-stall, ready to anchor the next utterance (buffered mode).
 	 * Main thread only. The worklet reader sees STALLED and stops until the next insert.
 	 */

@@ -1,7 +1,7 @@
 import type { Time } from "@moq/net";
 import type { SharedRingBufferInit } from "./shared-ring-buffer";
 
-export type Message = InitShared | InitPost | Data | Latency | Reset;
+export type Message = InitShared | InitPost | Data | Latency | Reset | Truncate;
 export type ToMain = State;
 
 /** Init message when SharedArrayBuffer is available. */
@@ -23,6 +23,15 @@ export interface InitPost {
 /** Flush the buffer and re-stall (fallback path only; shared path resets via Atomics). */
 export interface Reset {
 	type: "reset";
+}
+
+/**
+ * Drop buffered samples at or after `timestamp`, keeping what is already due (fallback path only;
+ * the shared path truncates via Atomics).
+ */
+export interface Truncate {
+	type: "truncate";
+	timestamp: Time.Micro;
 }
 
 /** Audio samples sent via postMessage (fallback path only). */

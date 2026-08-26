@@ -177,6 +177,19 @@ export class AudioRingBuffer {
 		}
 	}
 
+	/**
+	 * Drop buffered samples at or after `timestamp`, keeping whatever is already due.
+	 *
+	 * A successor track overwrites the slots its own samples land on, but anything the previous
+	 * track wrote beyond them would otherwise still play once the successor runs out.
+	 */
+	truncate(timestamp: Time.Micro): void {
+		const target = Math.round(Time.Second.fromMicro(timestamp) * this.rate);
+		if (target >= this.#writeIndex) return;
+		// Never retreat past the playhead: those samples are already due.
+		this.#writeIndex = Math.max(target, this.#readIndex);
+	}
+
 	// Flush all buffered samples and re-stall, ready to anchor the next utterance.
 	reset(): void {
 		this.#readIndex = 0;

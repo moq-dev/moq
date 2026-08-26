@@ -103,6 +103,11 @@ export class Decoder {
 	// cushion) versus a decrease or a real-time RTT wiggle. See #runLatencyReanchor.
 	#prevFloor?: Bound;
 
+	// The track the current subscription was opened on, and whether the next decoded frame takes
+	// over the timeline from a different one. See #runDecoder.
+	#prevTrack?: string;
+	#truncatePending = false;
+
 	#signals = new Effect();
 
 	constructor(source: Source, sync: Sync, props?: Inputs<DecoderInput>) {
@@ -261,6 +266,14 @@ export class Decoder {
 
 		const track = effect.get(this.source.out.track);
 		if (!track) return;
+
+		// The ring outlives this effect (it's keyed on the sample rate and channel count), so a track
+		// swap leaves whatever the previous track decoded still buffered. Its samples are timestamp
+		// indexed, so the successor overwrites the slots it lands on, but a publisher writing ahead of
+		// real-time can leave seconds of tail beyond them. Drop it once the successor's first frame
+		// tells us where the new timeline starts.
+		if (this.#prevTrack !== undefined && this.#prevTrack !== track) this.#truncatePending = true;
+		this.#prevTrack = track;
 
 		const config = effect.get(this.source.out.config);
 		if (!config) return;
@@ -492,6 +505,14 @@ export class Decoder {
 		const durationMilli = Time.Milli.fromMicro(durationMicro);
 		const end = Time.Milli.add(timestampMilli, durationMilli);
 
+		// A new track has taken over the timeline: drop the previous one's write-ahead tail rather
+		// than letting it play out after this frame. See #runDecoder.
+		if (this.#truncatePending) {
+			this.#truncatePending = false;
+			ring.truncate(timestamp);
+			this.#truncateDecodeBuffered(timestampMilli);
+		}
+
 		// Add to decode buffer
 		this.#addDecodeBuffered(timestampMilli, end);
 
@@ -527,6 +548,15 @@ export class Decoder {
 
 			current.push({ start, end });
 			current.sort((a, b) => a.start - b.start);
+		});
+	}
+
+	// Drop reported decode ranges at or after `timestamp`, mirroring a ring truncation.
+	#truncateDecodeBuffered(timestamp: Time.Milli): void {
+		this.#decodeBuffered.mutate((current) => {
+			while (current.length > 0 && current[current.length - 1].start >= timestamp) current.pop();
+			const last = current[current.length - 1];
+			if (last && last.end > timestamp) last.end = timestamp;
 		});
 	}
 
