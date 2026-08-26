@@ -128,14 +128,19 @@ export class Encoder {
 	/** The live-editable codec selection plus its encoder settings. */
 	codec: Signal<Codec>;
 
-	// Observed capture format. #out.catalog is derived from this plus the codec, so the
-	// worklet handlers only ever write here, never read-modify-write the catalog.
+	// Observed capture format. #config is derived from this plus the codec; #out.catalog also folds in
+	// encoder metadata. Worklet handlers write those inputs, never read-modify-write the catalog.
 	#captured = new Signal<Captured | undefined>(undefined);
 
 	// Only the mime picks the capture sample rate, so the capture graph tracks this rather than the
 	// whole codec signal. Otherwise changing an encode-only knob (bitrate, complexity) would rebuild
 	// the AudioContext, drop #worklet, and close the track we're publishing.
 	#codecMime: Signal<CodecMime>;
+
+	// The catalog fields known before encoding starts. Opus adds its decoder description from the
+	// first encoder output without feeding that catalog-only update back into the encoder.
+	#config = new Signal<Catalog.AudioConfig | undefined>(undefined);
+	#decoderDescription = new Signal<{ config: Catalog.AudioConfig; description: Catalog.Hex } | undefined>(undefined);
 
 	readonly #out: EncoderOutput = {
 		catalog: new Signal<Catalog.AudioConfig | undefined>(undefined),
@@ -174,6 +179,7 @@ export class Encoder {
 		this.#signals.run(this.#runSource.bind(this));
 		this.#signals.run(this.#runGain.bind(this));
 		this.#signals.run(this.#runConfig.bind(this));
+		this.#signals.run(this.#runCatalog.bind(this));
 		this.#signals.run(this.#runRegister.bind(this));
 	}
 
@@ -332,17 +338,31 @@ export class Encoder {
 		};
 	}
 
-	// Derive the catalog from the captured format and the codec. Re-runs whenever either changes, so a
+	// Derive the encoder config from the captured format and the codec. Re-runs whenever either changes, so a
 	// codec update (bitrate, frame duration) reconfigures without waiting for a channel-count change.
 	#runConfig(effect: Effect): void {
 		const captured = effect.get(this.#captured);
 		if (!captured) {
-			effect.set(this.#out.catalog, undefined);
+			effect.set(this.#config, undefined);
 			return;
 		}
 
 		const codec = normalizeCodec(effect.get(this.codec));
-		effect.set(this.#out.catalog, this.#createConfig(captured, codec));
+		effect.set(this.#config, this.#createConfig(captured, codec));
+	}
+
+	// Publish the config immediately so a consumer can request the demand-gated track. Once encoding
+	// starts, republish Opus with the exact decoder description reported for that encoder config.
+	#runCatalog(effect: Effect): void {
+		const config = effect.get(this.#config);
+		if (!config) {
+			effect.set(this.#out.catalog, undefined);
+			return;
+		}
+
+		const decoder = effect.get(this.#decoderDescription);
+		const catalog = decoder?.config === config ? { ...config, description: decoder.description } : config;
+		effect.set(this.#out.catalog, catalog);
 	}
 
 	// Collect the encode-only Opus knobs that are set, reading the codec through the effect so the
@@ -383,7 +403,7 @@ export class Encoder {
 			await Util.Libav.polyfill();
 
 			effect.run((effect: Effect) => {
-				const config = effect.get(this.out.catalog);
+				const config = effect.get(this.#config);
 				if (!config) return;
 
 				const source = effect.get(this.in.source);
@@ -392,10 +412,12 @@ export class Encoder {
 				const framer = createFramer(config);
 
 				const encoder = new AudioEncoder({
-					output: (frame) => {
+					output: (frame, metadata) => {
 						if (frame.type !== "key") {
 							throw new Error("only key frames are supported");
 						}
+
+						this.#setDecoderDescription(config, metadata?.decoderConfig?.description);
 
 						this.#out.stats.update((stats) => ({
 							frames: stats.frames + 1,
@@ -455,6 +477,19 @@ export class Encoder {
 			});
 			worklet.port.start();
 		});
+	}
+
+	#setDecoderDescription(config: Catalog.AudioConfig, source: AllowSharedBufferSource | undefined): void {
+		if (config.codec !== "opus" || !source) return;
+
+		const bytes = ArrayBuffer.isView(source)
+			? new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
+			: new Uint8Array(source);
+		const description = Util.Hex.fromBytes(bytes);
+		const current = this.#decoderDescription.peek();
+		if (current?.config === config && current.description === description) return;
+
+		this.#decoderDescription.set({ config, description });
 	}
 
 	close() {
