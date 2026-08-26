@@ -266,7 +266,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// changes for the life of the session.
 		let link_cost = self.resolve_cost().await;
 
-		let mut routes = HashMap::new();
+		let mut announced = Announced::default();
 
 		// Lite06+: announce ids. Each received `active` implicitly assigns the next
 		// per-stream ordinal; `ended`/`restart` reference it instead of repeating the
@@ -290,7 +290,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						RouteCost::default(),
 						0,
 						responder_origin,
-						&mut routes,
+						&mut announced,
 					)?;
 				}
 			}
@@ -310,29 +310,25 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					}
 					if lite::restart_supported(self.version)
 						&& !self.version.has_announce_id()
-						&& routes.contains_key(&path)
+						&& announced.contains(&path)
 					{
 						// lite-05 only: a duplicate ANNOUNCE for an already-announced path is a RESTART;
 						// atomically replace the broadcast. Lite06+ restarts by announce id, and older
 						// versions never defined restarts, so both fall through to start_announce, which
 						// rejects the duplicate (Error::Duplicate).
-						self.restart_announce(path.clone(), hops, cost, link_cost, responder_origin, &mut routes)?;
+						self.restart_announce(path.clone(), hops, cost, link_cost, responder_origin, &mut announced)?;
 					} else {
-						self.start_announce(path.clone(), hops, cost, link_cost, responder_origin, &mut routes)?;
+						self.start_announce(path.clone(), hops, cost, link_cost, responder_origin, &mut announced)?;
 					}
 				}
 				lite::AnnounceBroadcast::Ended { suffix, .. } => {
 					let path = prefix.join(&suffix);
 					tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
 
-					// The matching Active may have been silently dropped by
-					// start_announce as a reflected loop, in which case
-					// `routes` has no entry; that's expected, not an error.
-					// A deliberate unannounce, so finish() rather than drop; the origin
-					// unannounces if this was the broadcast's last route.
-					if let Some(entry) = routes.remove(&path) {
-						entry.finish();
-					}
+					// A deliberate unannounce, so `retire` finishes the source rather than
+					// dropping it; the origin unannounces if this was the broadcast's last
+					// route. An advertisement we declined locally has none to finish.
+					announced.retire(&path);
 				}
 				lite::AnnounceBroadcast::EndedId { id } => {
 					// Resolve and retire the id; an unknown or already-retired id is a
@@ -342,14 +338,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					};
 					tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
 
-					// The matching Active may have been silently dropped by
-					// start_announce as a reflected loop, in which case
-					// `routes` has no entry; that's expected, not an error.
-					// A deliberate unannounce, so finish() rather than drop; the origin
-					// unannounces if this was the broadcast's last route.
-					if let Some(entry) = routes.remove(&path) {
-						entry.finish();
-					}
+					// The id resolves to whatever the peer advertised at it, which is the
+					// point: an id whose announce we declined locally retires that record
+					// and nothing else, rather than a later announce's route.
+					announced.retire(&path);
 				}
 				lite::AnnounceBroadcast::Restart { id, hops, cost } => {
 					// Resolve the id; it stays live (the replacement reuses it). An unknown
@@ -357,13 +349,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let Some(path) = announced_by_id.get(&id).cloned() else {
 						return Err(Error::ProtocolViolation);
 					};
-					if routes.contains_key(&path) {
-						self.restart_announce(path.clone(), hops, cost, link_cost, responder_origin, &mut routes)?;
-					} else {
-						// The original announce was dropped locally (e.g. a reflected loop);
-						// the replacement may be routable, so treat it as a fresh start.
-						self.start_announce(path.clone(), hops, cost, link_cost, responder_origin, &mut routes)?;
-					}
+					// A restart replaces an advertisement that is already live, so it never
+					// consults the one-advertisement-per-path rule. `restart_announce`
+					// attaches a route whether or not the original had one.
+					self.restart_announce(path.clone(), hops, cost, link_cost, responder_origin, &mut announced)?;
 				}
 			}
 		}
@@ -441,9 +430,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	/// Returns `Ok(true)` if the announce was accepted (and a route was attached to
-	/// the origin's broadcast at the path), `Ok(false)` if it was dropped as a
-	/// reflected loop.
+	/// Records the advertisement either way. Returns `Ok(true)` if it was accepted (and
+	/// a route was attached to the origin's broadcast at the path), `Ok(false)` if it was
+	/// dropped as a reflected loop.
 	fn start_announce(
 		&mut self,
 		path: PathOwned,
@@ -459,14 +448,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// the full `[src...sender]` chain Lite04 stored. None for older versions,
 		// where the sender already appended itself.
 		responder_origin: Option<crate::Origin>,
-		routes: &mut HashMap<PathOwned, AnnouncedRoute>,
+		announced: &mut Announced,
 	) -> Result<bool, Error> {
-		// Make sure the peer doesn't double announce. Decided first: the drops below
-		// return `Ok(false)`, and the caller has already assigned this announce an id,
-		// so letting one of them pre-empt this check leaves that id bound to a path
-		// whose route belongs to the earlier announce. The `ANNOUNCE_END` that follows
-		// would then retire the wrong one.
-		if routes.contains_key(&path) {
+		// One current advertisement per path per stream. Tested against what the peer
+		// advertised rather than what we accepted: a second start for a path whose first
+		// announce we declined is the same violation, and letting it through is how an
+		// id ends up bound to a path holding a different announce's route.
+		if announced.contains(&path) {
 			return Err(Error::Duplicate);
 		}
 
@@ -477,6 +465,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			// must not enter the model at all. Zero names nobody, so it may repeat.
 			if responder != crate::Origin::UNKNOWN && hops.contains(&responder) {
 				tracing::debug!(broadcast = %self.log_path(&path), "dropping announce reflected by its sender");
+				announced.declined(path);
 				return Ok(false);
 			}
 			// If the chain is already full, drop the announce. This is the same decision
@@ -486,6 +475,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					broadcast = %self.log_path(&path),
 					"dropping announce; hop chain at MAX_HOPS (possible loop)",
 				);
+				announced.declined(path);
 				return Ok(false);
 			}
 		}
@@ -497,6 +487,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// every other version.
 		if hops.contains(&self.self_origin) {
 			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected announce");
+			announced.declined(path);
 			return Ok(false);
 		}
 
@@ -537,13 +528,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			.with_announce(true);
 		route.advertised = cost.0;
 		let Ok(source) = self.origin.create_broadcast(&path, route) else {
+			announced.declined(path);
 			return Ok(false);
 		};
 
 		// Serve the origin's track requests for this source in the background; the
 		// announce loop keeps the producer so an unannounce can finish it.
 		self.tasks.push(self.clone().run_source(path.clone(), source.dynamic()));
-		routes.insert(path, AnnouncedRoute::new(source, publisher));
+		announced.attach(path, AnnouncedRoute::new(source, publisher));
 
 		Ok(true)
 	}
@@ -559,6 +551,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// can be unrelated publishers), the old route detaches gracefully and a fresh
 	/// one attaches, so downstream sees a real Ended + Active (a new broadcast,
 	/// nothing resumes).
+	/// The advertisement is already live, so this never applies the one-per-path rule
+	/// and never needs the original to have carried a route: an announce we declined
+	/// may restart into one that is routable.
+	///
 	/// Returns `Ok(false)` if the new hop chain is a reflected loop (this session's
 	/// route is now gone), `Ok(true)` otherwise.
 	fn restart_announce(
@@ -572,9 +568,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// rebuild the full chain since the sender no longer stamps itself. None for older
 		// versions. See `start_announce`.
 		responder_origin: Option<crate::Origin>,
-		routes: &mut HashMap<PathOwned, AnnouncedRoute>,
+		announced: &mut Announced,
 	) -> Result<bool, Error> {
-		// Reflected loop (or a full chain): the route can't be used here anymore. Retire it.
+		// Reflected loop (or a full chain): the route can't be used here anymore. Detach
+		// it, leaving the advertisement live so its id still resolves here.
 		let reflected = match responder_origin {
 			// A chain already naming the sender came back through it; see `start_announce`.
 			Some(responder) => {
@@ -586,10 +583,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		};
 		if reflected {
 			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected restart");
-			// The peer retracted the route deliberately; detach gracefully.
-			if let Some(entry) = routes.remove(&path) {
-				entry.finish();
-			}
+			// The peer replaced the route deliberately; detach gracefully.
+			announced.declined(path);
 			return Ok(false);
 		}
 
@@ -601,15 +596,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			.with_announce(true);
 		metadata.advertised = cost.0;
 
-		match routes.get_mut(&path) {
+		match announced.attached(&path) {
 			Some(entry) if entry.publisher != publisher || publisher == crate::Origin::UNKNOWN => {
 				// A different original publisher, or no identity at all (UNKNOWN
 				// never proves continuity): a brand-new broadcast may have replaced
 				// the old one at this path. Detach gracefully (downstream unannounces
 				// if this was the last source) and attach fresh below; cached
 				// TRACK_INFO and subscriptions must not carry over.
-				let entry = routes.remove(&path).expect("matched above");
-				entry.finish();
+				announced.declined(path.clone());
 			}
 			Some(entry) => {
 				// Same publisher, new path: update the source's route in place.
@@ -618,14 +612,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				entry.set_route(metadata);
 				return Ok(true);
 			}
+			// Nothing attached: either a fresh path, or an advertisement we declined
+			// whose replacement may be routable.
 			None => {}
 		}
 
 		let Ok(source) = self.origin.create_broadcast(&path, metadata) else {
+			announced.declined(path);
 			return Ok(false);
 		};
 		self.tasks.push(self.clone().run_source(path.clone(), source.dynamic()));
-		routes.insert(path, AnnouncedRoute::new(source, publisher));
+		announced.attach(path, AnnouncedRoute::new(source, publisher));
 
 		Ok(true)
 	}
@@ -942,7 +939,7 @@ mod tests {
 		});
 
 		let path = Path::new("room/host").to_owned();
-		let mut routes = HashMap::new();
+		let mut announced = Announced::default();
 		assert!(
 			subscriber
 				.start_announce(
@@ -951,7 +948,7 @@ mod tests {
 					RouteCost::default(),
 					0,
 					Some(assigned),
-					&mut routes,
+					&mut announced,
 				)
 				.unwrap()
 		);
@@ -961,10 +958,72 @@ mod tests {
 		reflected.push(assigned).unwrap();
 		assert!(
 			matches!(
-				subscriber.start_announce(path, reflected, RouteCost::default(), 0, Some(assigned), &mut routes),
+				subscriber.start_announce(path, reflected, RouteCost::default(), 0, Some(assigned), &mut announced),
 				Err(Error::Duplicate)
 			),
 			"the double announce must be reported, not silently dropped",
+		);
+	}
+
+	/// A dropped announce still holds its path.
+	///
+	/// The peer numbers and retracts advertisements regardless of what the receiver made
+	/// of them, so an announce dropped as a reflected loop is still live on the wire. If
+	/// only accepted announces were recorded, its path would read as free: a second start
+	/// would be accepted instead of reported, and the first announce's `ANNOUNCE_END`
+	/// would then resolve to the path and retire the second one's route. A relay meshed
+	/// with its own peer drops reflected announces routinely, so this is the common case
+	/// rather than a corner of one.
+	#[tokio::test]
+	async fn a_dropped_announce_still_holds_its_path() {
+		let assigned = crate::Origin::new(777).unwrap();
+
+		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+		let (tasks, _task_set) = TaskSet::new();
+		let mut subscriber = Subscriber::new(SubscriberConfig {
+			session: SinkSession::new(Default::default()),
+			origin,
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			cost: None,
+			peer_origin: Some(assigned),
+			tasks,
+		});
+
+		let path = Path::new("room/host").to_owned();
+		let mut announced = Announced::default();
+
+		// Announce id 0: reflected by its sender, so it is dropped locally.
+		let mut reflected = crate::OriginList::new();
+		reflected.push(assigned).unwrap();
+		assert!(
+			!subscriber
+				.start_announce(
+					path.clone(),
+					reflected,
+					RouteCost::default(),
+					0,
+					Some(assigned),
+					&mut announced,
+				)
+				.unwrap(),
+			"a chain naming its own sender must be dropped",
+		);
+		assert!(consumer.get_broadcast("room/host").is_none());
+
+		// Announce id 1, for a path the peer never retracted: two starts with no end
+		// between them. The receiver used to miss that because it consulted its own
+		// acceptance record, accept this one, and let id 0's end retire its route.
+		let mut hops = crate::OriginList::new();
+		hops.push(crate::Origin::new(7).unwrap()).unwrap();
+		assert!(
+			matches!(
+				subscriber.start_announce(path, hops, RouteCost::default(), 0, Some(assigned), &mut announced),
+				Err(Error::Duplicate)
+			),
+			"a start for a path the peer already advertised must be reported, even though the first was dropped",
 		);
 	}
 
@@ -995,7 +1054,7 @@ mod tests {
 		let mut hops = crate::OriginList::new();
 		hops.push(assigned).unwrap();
 
-		let mut routes = HashMap::new();
+		let mut announced = Announced::default();
 		let accepted = subscriber
 			.start_announce(
 				Path::new("room/host").to_owned(),
@@ -1003,7 +1062,7 @@ mod tests {
 				RouteCost::default(),
 				0,
 				Some(assigned),
-				&mut routes,
+				&mut announced,
 			)
 			.unwrap();
 		assert!(!accepted, "a chain naming its own sender must not become a route");
@@ -1036,7 +1095,7 @@ mod tests {
 
 		// An announce with an empty chain and no responder id: the versions that
 		// carry no hop information on the wire.
-		let mut routes = HashMap::new();
+		let mut announced = Announced::default();
 		let accepted = subscriber
 			.start_announce(
 				Path::new("room/host").to_owned(),
@@ -1044,7 +1103,7 @@ mod tests {
 				RouteCost::default(),
 				0,
 				None,
-				&mut routes,
+				&mut announced,
 			)
 			.unwrap();
 		assert!(accepted);
@@ -1065,7 +1124,7 @@ mod tests {
 	async fn absent_peer_origin_stamps_unknown() {
 		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
 
-		let mut routes = HashMap::new();
+		let mut announced = Announced::default();
 		subscriber
 			.start_announce(
 				Path::new("room/host").to_owned(),
@@ -1073,7 +1132,7 @@ mod tests {
 				RouteCost::default(),
 				0,
 				None,
-				&mut routes,
+				&mut announced,
 			)
 			.unwrap();
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -1110,7 +1169,7 @@ mod tests {
 	async fn unknown_publisher_restart_replaces() {
 		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
 
-		let mut routes = HashMap::new();
+		let mut announced = Announced::default();
 		let path = Path::new("room/host").to_owned();
 		subscriber
 			.start_announce(
@@ -1119,7 +1178,7 @@ mod tests {
 				RouteCost::default(),
 				0,
 				Some(crate::Origin::UNKNOWN),
-				&mut routes,
+				&mut announced,
 			)
 			.unwrap();
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -1132,7 +1191,7 @@ mod tests {
 				RouteCost::default(),
 				0,
 				Some(crate::Origin::UNKNOWN),
-				&mut routes,
+				&mut announced,
 			)
 			.unwrap();
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -1151,7 +1210,7 @@ mod tests {
 		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
 		let publisher = crate::Origin::new(7).unwrap();
 
-		let mut routes = HashMap::new();
+		let mut announced = Announced::default();
 		let path = Path::new("room/host").to_owned();
 		subscriber
 			.start_announce(
@@ -1160,7 +1219,7 @@ mod tests {
 				RouteCost::default(),
 				0,
 				Some(publisher),
-				&mut routes,
+				&mut announced,
 			)
 			.unwrap();
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -1173,7 +1232,7 @@ mod tests {
 				RouteCost(5),
 				0,
 				Some(publisher),
-				&mut routes,
+				&mut announced,
 			)
 			.unwrap();
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -1188,7 +1247,7 @@ mod tests {
 	/// leaving the origin's linger window open so a source reconnecting into it resumes
 	/// the broadcast rather than viewers seeing it end here.
 	///
-	/// This already falls out of `routes` being a local whose `AnnouncedRoute` guards
+	/// This already falls out of `Announced` being a local whose `AnnouncedRoute` guards
 	/// drop, which is exactly what makes it worth pinning: a refactor that finished them
 	/// on the way out, or hoisted the map to the session, would be a silent behavior
 	/// change. `ietf::Subscriber` names the same distinction explicitly as `Detach`.
@@ -1214,15 +1273,15 @@ mod tests {
 
 		let path = Path::new("room/host").to_owned();
 		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
-		let mut routes = HashMap::new();
+		let mut announced = Announced::default();
 		subscriber
-			.start_announce(path.clone(), hops, RouteCost(0), 1, None, &mut routes)
+			.start_announce(path.clone(), hops, RouteCost(0), 1, None, &mut announced)
 			.unwrap();
 		tokio::time::sleep(Duration::from_millis(1)).await;
 		assert!(consumer.get_broadcast("room/host").is_some());
 
-		// The stream ends without retracting anything: the map dies with it.
-		drop(routes);
+		// The stream ends without retracting anything: the record dies with it.
+		drop(announced);
 		tokio::time::sleep(Duration::from_millis(1)).await;
 		assert!(
 			consumer.get_broadcast("room/host").is_some(),
@@ -1231,12 +1290,13 @@ mod tests {
 
 		// An explicit retraction still closes it now, linger or not.
 		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
-		let mut routes = HashMap::new();
+		let mut announced = Announced::default();
 		subscriber
-			.start_announce(path.clone(), hops, RouteCost(0), 1, None, &mut routes)
+			.start_announce(path.clone(), hops, RouteCost(0), 1, None, &mut announced)
 			.unwrap();
 		tokio::time::sleep(Duration::from_millis(1)).await;
-		routes.remove(&path).expect("announced").finish();
+		assert!(announced.contains(&path), "the announce was not recorded");
+		announced.retire(&path);
 		tokio::time::sleep(Duration::from_millis(1)).await;
 		assert!(
 			consumer.get_broadcast("room/host").is_none(),
@@ -1263,7 +1323,58 @@ enum Sub<S: web_transport_trait::Session> {
 	Active(SubStream<S>),
 }
 
-/// The source created for one received announce, remembering the publisher
+/// Every advertisement the peer currently has live on one announce stream.
+///
+/// Keyed by path, because that is what the protocol allows one of: a second
+/// `ANNOUNCE_START` for a path already advertised is a violation whether or not the
+/// receiver did anything with the first. An announce declined locally (a reflected
+/// loop, a full hop chain, a path outside our scope) is recorded with no route, since
+/// the peer numbered it and will retract it regardless of what we made of it.
+///
+/// Keeping acceptance in the same record is what stops the two from disagreeing: a
+/// declined announce that fell out of the table entirely would leave its path reading
+/// as free, and its `ANNOUNCE_END` would then retire whatever took it.
+#[derive(Default)]
+struct Announced(HashMap<PathOwned, Option<AnnouncedRoute>>);
+
+impl Announced {
+	/// Whether the peer already has an advertisement live at this path.
+	fn contains(&self, path: &PathOwned) -> bool {
+		self.0.contains_key(path)
+	}
+
+	/// Record an advertisement we accepted, attaching its source.
+	fn attach(&mut self, path: PathOwned, route: AnnouncedRoute) {
+		self.0.insert(path, Some(route));
+	}
+
+	/// Record an advertisement we declined, finishing whatever was attached at the path.
+	///
+	/// The advertisement stays live either way: the peer still holds the path and its
+	/// announce id still resolves here, so a later `ANNOUNCE_END` retires this and a
+	/// later `ANNOUNCE_START` is still the duplicate it always was.
+	fn declined(&mut self, path: PathOwned) {
+		if let Some(Some(route)) = self.0.insert(path, None) {
+			route.finish();
+		}
+	}
+
+	/// The source attached at this path, or `None` if we declined the advertisement or
+	/// the peer never made one.
+	fn attached(&mut self, path: &PathOwned) -> Option<&mut AnnouncedRoute> {
+		self.0.get_mut(path)?.as_mut()
+	}
+
+	/// Retire the advertisement, finishing its source so the origin detaches it
+	/// immediately (unannouncing downstream if it was the last).
+	fn retire(&mut self, path: &PathOwned) {
+		if let Some(Some(route)) = self.0.remove(path) {
+			route.finish();
+		}
+	}
+}
+
+/// The source created for one accepted announce, remembering the publisher
 /// identity (the first hop of the reconstructed chain) so a restart can tell an
 /// alternate route to the same broadcast from a brand-new broadcast.
 struct AnnouncedRoute {
