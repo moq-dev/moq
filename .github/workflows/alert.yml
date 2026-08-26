@@ -18,8 +18,13 @@ on:
   workflow_run:
     # Matched by workflow `name:`, not filename. Every workflow that can run
     # outside a pull request belongs here; the pull-request-only ones (Check,
-    # macOS, Swift, Windows) are omitted so they don't spawn a skipped Alert run
-    # on every push to every PR. `just gh check` enforces both halves of that.
+    # macOS, Windows) are omitted so they don't spawn a skipped Alert run on
+    # every push to every PR. `just gh check` enforces both halves of that.
+    #
+    # Swift is here despite also running on pull requests: it warms its own
+    # Rust cache on `main`, and that push run is nobody's check, so a break in
+    # it would otherwise go unseen. The cost is a skipped Alert run per Swift
+    # pull request.
     workflows:
       - apt-repo
       - Cache
@@ -45,6 +50,7 @@ on:
       - release-winget
       - rpm-repo
       - Smoke
+      - Swift
       - Update Flake
     types:
       - completed
