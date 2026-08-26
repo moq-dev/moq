@@ -20,6 +20,17 @@ import { Warmup } from "./warmup";
 // How long the latency target must hold steady before a floor increase re-anchors. Coalesces a
 // slider drag (many small steps) into a single re-anchor once the user settles on a value.
 const LATENCY_REANCHOR_DEBOUNCE_MS = 150;
+
+// An AudioWorkletProcessor renders in fixed 128-sample quanta, so a ring shallower than one can
+// never be read from. `latency="instant"` asks Sync for a zero buffer, and the ring rejects that
+// outright: the worklet's construction throws, leaving it with no backend and no way back, since
+// every later resize is gated on the backend existing. Audio keeps its own floor for that reason.
+const RENDER_QUANTUM = 128;
+
+/** The ring depth for a target latency, floored at one render quantum. */
+function ringSamples(rate: number, latency: Time.Milli): number {
+	return Math.max(RENDER_QUANTUM, Math.ceil(rate * Time.Second.fromMilli(latency)));
+}
 const LEGACY_WARMUP_CALLBACKS = 3;
 
 export type DecoderInput = {
@@ -177,7 +188,7 @@ export class Decoder {
 
 			// Initial target latency in samples.
 			const latency = this.sync.out.buffer.peek();
-			const latencySamples = Math.ceil(sampleRate * Time.Second.fromMilli(latency));
+			const latencySamples = ringSamples(sampleRate, latency);
 			const buffered = this.sync.out.buffered.peek();
 
 			// Let the factory pick the best transport (SharedArrayBuffer or postMessage).
@@ -225,8 +236,7 @@ export class Decoder {
 		if (!ring) return;
 
 		const latency = effect.get(this.sync.out.buffer);
-		const latencySamples = Math.ceil(ring.rate * Time.Second.fromMilli(latency));
-		ring.setLatency(latencySamples);
+		ring.setLatency(ringSamples(ring.rate, latency));
 	}
 
 	// Re-anchor when the latency floor *increases*. A larger floor needs a deeper cushion: video
