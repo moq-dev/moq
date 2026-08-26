@@ -1719,8 +1719,8 @@ mod tests {
 	/// identity we assigned stands in, exactly as for a peer that never negotiated.
 	/// Asserted on the resolution itself rather than through an advertisement: a
 	/// negotiated peer always sends its own HOP_PATH, so a route attributed to the
-	/// assigned identity is a state this peer class cannot reach (see
-	/// `a_declared_zero_chain_is_still_advertised_back`).
+	/// assigned identity is a state this peer class cannot reach; see
+	/// [`a_declared_zero_chain_is_still_advertised_back`] for what it gets instead.
 	#[tokio::test(start_paused = true)]
 	async fn withheld_peer_origin_falls_back_to_assigned() {
 		let assigned = crate::Origin::new(777).unwrap();
@@ -1744,13 +1744,11 @@ mod tests {
 		assert_eq!(publisher.exclude(&named), declared, "a declared identity wins");
 	}
 
-	/// The boundary this change stops at, pinned so it fails loudly when it moves.
-	///
-	/// A peer that negotiated the extension MUST send a HOP_PATH on every
-	/// advertisement, and one that declared 0 names itself 0 there. We do not rewrite
-	/// an arriving chain, so the route carries 0, the assigned identity appears nowhere
-	/// in it, and the split-horizon filter has nothing to match: the peer is advertised
-	/// its own route back. Tracked in moq-dev/moq#3053; update this test when it lands.
+	/// A peer that negotiated the extension MUST send a HOP_PATH on every advertisement,
+	/// and one that declared 0 names itself 0 there. An arriving chain is not rewritten,
+	/// so the route carries 0, the assigned identity appears nowhere in it, and the
+	/// split-horizon filter has nothing to match: the peer is advertised its own route
+	/// back.
 	#[tokio::test(start_paused = true)]
 	async fn a_declared_zero_chain_is_still_advertised_back() {
 		let assigned = crate::Origin::new(777).unwrap();
