@@ -8,8 +8,12 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 
-use super::{Error, SEGMENT, Shared};
+use super::{Error, SEGMENT};
 use crate::{Handle, udp};
+
+/// The state shared by every handle and the driver, single-threaded behind
+/// `Rc<RefCell>`.
+pub(crate) type Shared = Rc<Inner>;
 
 /// One GSO train is at most 64 segments; stay a hair under the kernel cap.
 const TRAIN_SEGMENTS: usize = 63;
@@ -34,6 +38,9 @@ pub(crate) struct State {
 	/// Wakes the driver; handles kick it after mutating the connection so
 	/// fresh egress reaches the wire.
 	driver: kio::WaiterList,
+
+	/// The endpoint fed us packets since the driver's last sweep.
+	ingested: bool,
 
 	established: bool,
 	establish_waiters: kio::WaiterList,
@@ -89,6 +96,7 @@ impl State {
 		};
 		Self {
 			driver: kio::WaiterList::new(),
+			ingested: false,
 			established: false,
 			establish_waiters: kio::WaiterList::new(),
 			accept_bi: VecDeque::new(),
@@ -112,11 +120,13 @@ impl State {
 		}
 	}
 
-	/// Terminate with `err` (the first one wins) and wake absolutely everyone.
+	/// Terminate with `err` (the first one wins) and wake absolutely everyone,
+	/// the driver included: an externally failed driver has to notice.
 	fn fail(&mut self, err: Error) {
 		if self.closed.is_none() {
 			self.closed = Some(err);
 		}
+		self.driver.wake();
 		self.closed_waiters.wake();
 		self.establish_waiters.wake();
 		self.accept_bi_waiters.wake();
@@ -145,6 +155,18 @@ impl Inner {
 	/// Wake the driver so it flushes what a handle just queued.
 	pub(crate) fn kick(&self) {
 		self.state.borrow_mut().driver.wake();
+	}
+
+	/// The endpoint fed packets into the connection; the driver's next sweep
+	/// treats them as ingress.
+	pub(crate) fn mark_ingested(&self) {
+		self.state.borrow_mut().ingested = true;
+	}
+
+	/// Terminate from outside (the endpoint's socket died): everything fails
+	/// with `err`, and the driver exits on its next poll.
+	pub(crate) fn fail(&self, err: Error) {
+		self.state.borrow_mut().fail(err);
 	}
 
 	/// Park `waiter` until stream `id` is writable again.
@@ -190,8 +212,9 @@ impl Inner {
 
 /// A QUIC connection driven by a [`crate::Worker`], usable as a MoQ transport.
 ///
-/// Created by [`client::connect`](super::client::connect) /
-/// [`server::accept`](super::server::accept), already
+/// Created by [`Endpoint`](super::Endpoint) (or its
+/// [`client::connect`](super::client::connect) /
+/// [`server::accept`](super::server::accept) shorthands), already
 /// established. Clones share the connection; each carries its own parking so
 /// concurrent pending operations don't trample each other's wakeups. Dropping
 /// every handle (and every stream) drops the driver's `Rc` peers, but the
@@ -217,51 +240,60 @@ impl Clone for Connection {
 	}
 }
 
-impl Connection {
-	/// Spawn the driver on the worker and wait out the handshake.
-	pub(crate) async fn start(handle: &Handle, socket: udp::Socket, conn: quiche::Connection) -> Result<Self, Error> {
-		let is_server = conn.is_server();
-		let local = socket.local_addr().map_err(|err| Error::Io(err.to_string()))?;
-		let shared = Rc::new(Inner {
-			conn: RefCell::new(conn),
-			state: RefCell::new(State::new(is_server)),
-		});
+/// Build a connection's shared state and its driver.
+///
+/// The driver future does timers, event sweeps, and egress; ingress arrives
+/// from the endpoint's demux task, which feeds quiche directly and
+/// [kicks](Inner::kick) the driver. The caller spawns the future and reclaims
+/// the connection's routes once it resolves.
+pub(crate) fn launch(
+	handle: &Handle,
+	socket: Rc<udp::Socket>,
+	conn: quiche::Connection,
+) -> (Shared, impl Future<Output = ()> + use<>) {
+	let is_server = conn.is_server();
+	let shared = Rc::new(Inner {
+		conn: RefCell::new(conn),
+		state: RefCell::new(State::new(is_server)),
+	});
 
-		let mut driver = Driver {
-			shared: shared.clone(),
-			socket,
-			local,
-			deadline: moq_net::runtime::Deadline::new(handle),
-			scratch: vec![0u8; 65535],
-			carry: None,
-		};
-		handle.spawn(async move { kio::wait(|waiter| driver.poll(waiter)).await });
+	let mut driver = Driver {
+		shared: shared.clone(),
+		socket,
+		deadline: moq_net::runtime::Deadline::new(handle),
+		scratch: vec![0u8; 65535],
+		carry: None,
+	};
+	let future = async move { kio::wait(|waiter| driver.poll(waiter)).await };
+	(shared, future)
+}
 
-		kio::wait(|waiter| {
-			let mut state = shared.state.borrow_mut();
-			if let Some(err) = &state.closed {
-				return Poll::Ready(Err(err.clone()));
-			}
-			if state.established {
-				return Poll::Ready(Ok(()));
-			}
-			waiter.register(&mut state.establish_waiters);
-			Poll::Pending
-		})
-		.await?;
+/// Wait out the handshake, yielding the connection's public handle.
+pub(crate) async fn establish(shared: Shared) -> Result<Connection, Error> {
+	kio::wait(|waiter| {
+		let mut state = shared.state.borrow_mut();
+		if let Some(err) = &state.closed {
+			return Poll::Ready(Err(err.clone()));
+		}
+		if state.established {
+			return Poll::Ready(Ok(()));
+		}
+		waiter.register(&mut state.establish_waiters);
+		Poll::Pending
+	})
+	.await?;
 
-		let alpn = {
-			let conn = shared.conn.borrow();
-			let proto = conn.application_proto();
-			(!proto.is_empty()).then(|| String::from_utf8_lossy(proto).into_owned())
-		};
+	let alpn = {
+		let conn = shared.conn.borrow();
+		let proto = conn.application_proto();
+		(!proto.is_empty()).then(|| String::from_utf8_lossy(proto).into_owned())
+	};
 
-		Ok(Self {
-			shared,
-			park: kio::Park::default(),
-			alpn,
-		})
-	}
+	Ok(Connection {
+		shared,
+		park: kio::Park::default(),
+		alpn,
+	})
 }
 
 impl web_transport_trait::poll::Session for Connection {
@@ -490,11 +522,12 @@ impl web_transport_trait::Stats for Stats {
 	}
 }
 
-/// The per-connection task: packets in, packets out, timers, wakeups.
+/// The per-connection task: timers, event sweeps, and packets out. Packets in
+/// come from the endpoint's demux task, which feeds quiche directly and kicks
+/// this driver.
 struct Driver {
 	shared: Shared,
-	socket: udp::Socket,
-	local: SocketAddr,
+	socket: Rc<udp::Socket>,
 	deadline: moq_net::runtime::Deadline<Handle>,
 	/// Datagram receive scratch.
 	scratch: Vec<u8>,
@@ -505,35 +538,17 @@ struct Driver {
 
 impl Driver {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		// Register the kick first: a handle mutating the connection after this
-		// turn's sweeps still re-polls us.
-		waiter.register(&mut self.shared.state.borrow_mut().driver);
-
-		// Ingest everything queued on the socket.
-		let mut ingested = false;
-		loop {
-			match self.socket.poll_recv(waiter) {
-				Poll::Ready(Ok(mut packet)) => {
-					let info = quiche::RecvInfo {
-						from: packet.from(),
-						to: self.local,
-					};
-					let mut conn = self.shared.conn.borrow_mut();
-					for segment in packet.segments() {
-						// A malformed/undecryptable datagram is UDP noise.
-						if let Err(err) = conn.recv(segment, info) {
-							tracing::debug!(%err, "quiche dropped a datagram");
-						}
-					}
-					ingested = true;
-				}
-				Poll::Ready(Err(err)) => {
-					self.fail(Error::Io(err.to_string()));
-					return Poll::Ready(());
-				}
-				Poll::Pending => break,
+		// The endpoint fails the connection from outside when its socket dies.
+		let ingested = {
+			let mut state = self.shared.state.borrow_mut();
+			if state.closed.is_some() {
+				return Poll::Ready(());
 			}
-		}
+			// Register the kick first: a handle mutating the connection after
+			// this turn's sweeps still re-polls us.
+			waiter.register(&mut state.driver);
+			std::mem::take(&mut state.ingested)
+		};
 
 		if self.deadline.poll(waiter).is_ready() {
 			self.shared.conn.borrow_mut().on_timeout();

@@ -50,7 +50,7 @@ impl Config {
 		}
 	}
 
-	fn quiche(&self) -> Result<quiche::Config, Error> {
+	pub(crate) fn quiche(&self) -> Result<quiche::Config, Error> {
 		use boring::ssl::SslVerifyMode;
 
 		let (roots, verify) = match &self.client_auth {
@@ -76,33 +76,20 @@ impl Config {
 	}
 }
 
-/// Accept the one connection arriving on `socket`, driving the handshake to
+/// Accept the next connection arriving on `socket`, driving the handshake to
 /// completion.
 ///
-/// The first packet decides the peer; anything else hitting the socket later
-/// is fed to the same connection or dropped by quiche. One connection per
-/// socket, by design: the multi-connection endpoint belongs to the relay
-/// integration.
+/// Shorthand for an [`Endpoint`](super::Endpoint) serving this configuration
+/// and one [`accept`](super::Endpoint::accept) from it: later arrivals on the
+/// socket keep reaching the accepted connection, but nothing else is ever
+/// accepted. Keep the endpoint itself for a listener.
 pub async fn accept(handle: &Handle, socket: udp::Socket, config: &Config) -> Result<Connection, Error> {
-	let mut quiche_config = config.quiche()?;
-	let local = socket.local_addr().map_err(|err| Error::Io(err.to_string()))?;
-
-	// The peer announces itself with its Initial packet.
-	let mut first = socket.recv().await.map_err(|err| Error::Io(err.to_string()))?;
-	let peer = first.from();
-
-	let scid: [u8; quiche::MAX_CONN_ID_LEN] = rand::random();
-	let scid = quiche::ConnectionId::from_ref(&scid);
-	let mut conn = quiche::accept(&scid, None, local, peer, &mut quiche_config)?;
-
-	let info = quiche::RecvInfo { from: peer, to: local };
-	for segment in first.segments() {
-		// A malformed datagram is UDP noise, not fatal.
-		if let Err(err) = conn.recv(segment, info) {
-			tracing::debug!(%err, "quiche dropped a datagram");
-		}
-	}
-	drop(first);
-
-	Connection::start(handle, socket, conn).await
+	let endpoint = super::Endpoint::new(
+		handle,
+		socket,
+		super::endpoint::Config {
+			server: Some(config.clone()),
+		},
+	)?;
+	endpoint.accept().await
 }

@@ -46,7 +46,7 @@ impl Config {
 		}
 	}
 
-	fn quiche(&self) -> Result<quiche::Config, Error> {
+	pub(crate) fn quiche(&self) -> Result<quiche::Config, Error> {
 		// Nothing is checked with verification off, so nothing is loaded: a
 		// root path that does not exist must not fail a connection that was
 		// never going to look at it.
@@ -68,14 +68,12 @@ impl Config {
 
 /// Dial [`Config::peer`] over `socket`, driving the handshake to completion.
 ///
-/// The connection's driver runs as a task on the worker behind `handle`, so
-/// the returned [`Connection`] just works: hand it to
-/// `moq_net::Client::connect_lite` or use the stream API directly.
+/// Shorthand for a dial-only [`Endpoint`](super::Endpoint) and one
+/// [`connect`](super::Endpoint::connect) through it. The connection's driver
+/// runs as a task on the worker behind `handle`, so the returned
+/// [`Connection`] just works: hand it to `moq_net::Client::connect_lite` or
+/// use the stream API directly.
 pub async fn connect(handle: &Handle, socket: udp::Socket, config: &Config) -> Result<Connection, Error> {
-	let mut quiche_config = config.quiche()?;
-	let local = socket.local_addr().map_err(|err| Error::Io(err.to_string()))?;
-	let scid: [u8; quiche::MAX_CONN_ID_LEN] = rand::random();
-	let scid = quiche::ConnectionId::from_ref(&scid);
-	let conn = quiche::connect(Some(&config.server_name), &scid, local, config.peer, &mut quiche_config)?;
-	Connection::start(handle, socket, conn).await
+	let endpoint = super::Endpoint::new(handle, socket, super::endpoint::Config::default())?;
+	endpoint.connect(config).await
 }

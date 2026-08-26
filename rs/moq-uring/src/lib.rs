@@ -12,10 +12,11 @@
 //! `UDP_GRO` coalesced) and sends with an explicit `UDP_SEGMENT` control
 //! message per `sendmsg` from a fixed pool of staging buffers.
 //!
-//! [`quic`] stacks sans-IO quiche on that path: [`quic::client::connect`] /
-//! [`quic::server::accept`] return a [`quic::Connection`] implementing the transport
-//! traits, so `moq_net::Client::connect_lite` and `Server::accept_lite` run
-//! real moq-lite sessions on the worker ([`Handle`] is their
+//! [`quic`] stacks sans-IO quiche on that path: a [`quic::Endpoint`] serves
+//! many connections on one socket (demuxed by connection id, dials included),
+//! each a [`quic::Connection`] implementing the transport traits, so
+//! `moq_net::Client::connect_lite` and `Server::accept_lite` run real
+//! moq-lite sessions on the worker ([`Handle`] is their
 //! [`moq_net::Runtime`]).
 //!
 //! Requires Linux 6.12; [`Worker::new`] refuses older kernels with a legible

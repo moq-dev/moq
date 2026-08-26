@@ -1,0 +1,182 @@
+//! Endpoint mechanics the session tests don't reach: one socket dialing and
+//! accepting at once, version negotiation, and the dial-only refusal.
+//!
+//! Kernel-gated: skips loudly below the Linux 6.12 floor (GitHub-hosted CI),
+//! and runs everywhere else.
+
+#![cfg(target_os = "linux")]
+
+#[path = "support/quiche.rs"]
+mod support;
+
+use std::net::UdpSocket;
+use std::sync::{Arc, Mutex};
+use std::task::Poll;
+use std::time::Duration;
+
+use moq_uring::{Config, Error, Worker, quic, udp};
+
+fn worker() -> Option<Worker> {
+	match Worker::new(Config::default()) {
+		Ok(worker) => Some(worker),
+		Err(Error::Unsupported(reason)) => {
+			eprintln!("skipping io_uring endpoint test: {reason}");
+			None
+		}
+		Err(err) => panic!("worker setup failed: {err}"),
+	}
+}
+
+const ALPN: &str = "moq-uring-test";
+
+fn server_config(certs: &support::Certs) -> quic::server::Config {
+	let mut config = quic::server::Config::new(quic::Identity::new(certs.cert.clone(), certs.key.clone()));
+	config.alpn = vec![ALPN.to_string()];
+	config
+}
+
+fn dial_config(peer: std::net::SocketAddr) -> quic::client::Config {
+	let mut config = quic::client::Config::new(peer, "localhost");
+	config.alpn = vec![ALPN.to_string()];
+	config.verify = false;
+	config
+}
+
+/// One socket carries dials and accepts at once: two endpoints dial each
+/// other, and each also accepts the other's dial. This is the relay cluster
+/// shape (a worker's socket serves inbound sessions and upstream dials).
+#[test]
+fn dial_and_accept_share_one_socket() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+
+	let endpoint = |handle: &moq_uring::Handle| {
+		let sock = handle
+			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+			.expect("socket");
+		quic::Endpoint::new(
+			handle,
+			sock,
+			quic::endpoint::Config::default().with_server(server_config(&certs)),
+		)
+		.expect("endpoint")
+	};
+	let a = endpoint(&handle);
+	let b = endpoint(&handle);
+
+	worker
+		.block_on(async move {
+			let a_to_b = a.connect(&dial_config(b.local_addr())).await.expect("a dials b");
+			let b_in = b.accept().await.expect("b accepts a");
+			let b_to_a = b.connect(&dial_config(a.local_addr())).await.expect("b dials a");
+			let a_in = a.accept().await.expect("a accepts b");
+
+			for conn in [&a_to_b, &b_in, &b_to_a, &a_in] {
+				assert_eq!(
+					web_transport_trait::poll::Session::protocol(conn),
+					Some(ALPN),
+					"negotiated ALPN"
+				);
+			}
+		})
+		.expect("worker");
+}
+
+/// An Initial for a version we don't speak gets a version negotiation packet
+/// back (and junk gets nothing but silence, before and after).
+#[test]
+fn unsupported_version_is_negotiated() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+
+	let sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("socket");
+	let endpoint = quic::Endpoint::new(
+		&handle,
+		sock,
+		quic::endpoint::Config::default().with_server(server_config(&certs)),
+	)
+	.expect("endpoint");
+	let server = endpoint.local_addr();
+
+	// The raw client runs on its own thread (the worker owns this one) and
+	// wakes the worker when it has a verdict.
+	#[derive(Default)]
+	struct Verdict {
+		result: Option<anyhow::Result<Vec<u8>>>,
+		waker: Option<std::task::Waker>,
+	}
+	let verdict: Arc<Mutex<Verdict>> = Arc::new(Mutex::new(Verdict::default()));
+	let thread_verdict = verdict.clone();
+	let probe = std::thread::spawn(move || {
+		let result = (|| -> anyhow::Result<Vec<u8>> {
+			let sock = UdpSocket::bind("127.0.0.1:0")?;
+			sock.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+			// Junk first: it must be ignored, not answered or fatal.
+			sock.send_to(&[0u8; 64], server)?;
+
+			// A v1-shaped Initial with a version nobody supports (GREASE).
+			let mut packet = Vec::new();
+			packet.push(0xC0); // long header, fixed bit, type Initial
+			packet.extend_from_slice(&0x0a0a_0a0au32.to_be_bytes());
+			packet.push(8); // dcid
+			packet.extend_from_slice(&[0xAB; 8]);
+			packet.push(8); // scid
+			packet.extend_from_slice(&[0xCD; 8]);
+			packet.push(0); // empty token
+			packet.resize(1200, 0);
+			sock.send_to(&packet, server)?;
+
+			let mut response = vec![0u8; 1500];
+			let (len, _) = sock.recv_from(&mut response)?;
+			response.truncate(len);
+			Ok(response)
+		})();
+		let mut verdict = thread_verdict.lock().unwrap();
+		verdict.result = Some(result);
+		if let Some(waker) = verdict.waker.take() {
+			waker.wake();
+		}
+	});
+
+	let mut response = worker
+		.block_on(std::future::poll_fn(move |cx| {
+			let mut verdict = verdict.lock().unwrap();
+			if let Some(result) = verdict.result.take() {
+				return Poll::Ready(result);
+			}
+			verdict.waker = Some(cx.waker().clone());
+			Poll::Pending
+		}))
+		.expect("worker")
+		.expect("version negotiation response");
+	probe.join().expect("probe thread");
+
+	let hdr = quiche::Header::from_slice(&mut response, 0).expect("parse response");
+	assert_eq!(hdr.ty, quiche::Type::VersionNegotiation);
+	let versions = hdr.versions.expect("advertised versions");
+	assert!(
+		versions.contains(&quiche::PROTOCOL_VERSION),
+		"the supported version is offered: {versions:?}"
+	);
+	drop(endpoint);
+}
+
+/// A dial-only endpoint refuses to accept, loudly.
+#[test]
+fn accept_needs_a_server_config() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+
+	let sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("socket");
+	let endpoint = quic::Endpoint::new(&handle, sock, quic::endpoint::Config::default()).expect("endpoint");
+
+	let result = worker.block_on(async move { endpoint.accept().await }).expect("worker");
+	assert!(matches!(result, Err(quic::Error::NotServer)), "got {result:?}");
+}

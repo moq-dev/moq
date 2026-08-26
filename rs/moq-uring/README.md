@@ -21,6 +21,13 @@ the UDP sockets bound through it.
 - **Parking**: a futex word per worker. Remote wakes are an atomic store, plus
   one `futex(2)` wake only while the worker is actually parked (a `FUTEX_WAIT`
   SQE armed on the word).
+- **QUIC**: sans-IO quiche over that UDP path. A `quic::Endpoint` serves many
+  connections on one socket, demuxed by connection id (dials share the socket
+  with accepts, ids rotate as peers consume them, unknown versions get a
+  version negotiation packet). Each `quic::Connection` implements the
+  transport traits and the worker's `Handle` implements `moq_net::Runtime`,
+  so `connect_lite`/`accept_lite` run moq-lite sessions on the worker. Raw
+  QUIC only: the ALPN carries the application protocol, no HTTP/3 layer yet.
 
 Requires **Linux 6.12**; `Worker::new` refuses older kernels with a legible
 error rather than degrading (note that default container seccomp policies
@@ -31,8 +38,11 @@ the tokio stack.
 
 `tests/echo.rs` runs a raw [quiche](https://github.com/cloudflare/quiche) echo
 over the worker: handshake, half a megabyte each way, timers driven by
-quiche's own timeout. It skips (loudly) below the kernel floor, which includes
-GitHub-hosted CI runners.
+quiche's own timeout. `tests/session.rs` runs full moq-lite sessions through
+`quic::Endpoint` (including two clients demuxed on one server socket), and
+`tests/endpoint.rs` covers the endpoint mechanics (dial+accept on one socket,
+version negotiation, the dial-only refusal). All of them skip (loudly) below
+the kernel floor, which includes GitHub-hosted CI runners.
 
 ## Benchmarks
 

@@ -11,20 +11,22 @@
 //!
 //! This is raw QUIC: the ALPN carries the application protocol and there is no
 //! HTTP/3 WebTransport layer (browsers need one; it can wrap this adapter
-//! later). [`server::accept`] serves exactly one connection per socket; a multi
-//! connection endpoint (connection-id demux, retry, version negotiation) comes
-//! with the relay integration.
+//! later). An [`Endpoint`] serves many connections on one socket, demuxed by
+//! connection id; [`client::connect`] and [`server::accept`] are its
+//! single-connection shorthands.
 
 pub mod client;
+pub mod endpoint;
 pub mod server;
 
 mod connection;
 mod stream;
 
 pub use connection::Connection;
+pub use endpoint::Endpoint;
 pub use stream::{RecvStream, SendStream};
 
-use std::rc::Rc;
+pub(crate) use connection::Shared;
 
 /// The QUIC payload size every full datagram in a GSO train uses, and the
 /// stride GRO coalesces with.
@@ -186,6 +188,10 @@ pub enum Error {
 	/// A quiche operation failed.
 	#[error("quic error: {0}")]
 	Quic(#[from] quiche::Error),
+	/// Accepting needs the server configuration the endpoint was built
+	/// without.
+	#[error("endpoint has no server configuration")]
+	NotServer,
 }
 
 impl web_transport_trait::Error for Error {
@@ -203,7 +209,3 @@ impl web_transport_trait::Error for Error {
 		}
 	}
 }
-
-/// The state shared by every handle and the driver, single-threaded behind
-/// `Rc<RefCell>`.
-pub(crate) type Shared = Rc<connection::Inner>;
