@@ -2249,7 +2249,10 @@ impl PlainSubscriber {
 		if let Some(&sequence) = self.parked.keys().next()
 			&& self.end_sequence.is_none_or(|end| sequence <= end)
 		{
-			return Poll::Ready(Ok(self.parked.remove(&sequence)));
+			let group = self.parked.remove(&sequence).expect("parked key just observed");
+			// A re-offer is a delivery: stamp it like a fresh hand-out.
+			group.cache_refresh();
+			return Poll::Ready(Ok(Some(group)));
 		}
 
 		loop {
@@ -3185,6 +3188,76 @@ mod test {
 
 		let frame = reading.read_frame().await.unwrap();
 		assert!(frame.is_some(), "a just-delivered group must not expire unread");
+	}
+
+	/// Streaming chunks into an in-flight frame is a write access: a straggler
+	/// group (behind the live edge) trickling a large frame across several
+	/// retention windows must not be expired mid-write.
+	#[tokio::test]
+	async fn streaming_frame_writes_keep_the_group_alive() {
+		tokio::time::pause();
+
+		let mut producer = track_producer("test", None);
+		let mut straggler = producer.create_group(0u64.into()).unwrap();
+		// The live edge moves on, so the straggler is demoted and expirable.
+		producer.create_group(1u64.into()).unwrap().finish().unwrap();
+
+		let mut frame = straggler
+			.create_frame(frame::Info {
+				size: 10,
+				timestamp: Timestamp::ZERO,
+			})
+			.unwrap();
+		// One chunk per half-window; the whole frame spans several windows. New
+		// groups keep the expiry scan running.
+		for seq in 2..12u64 {
+			tokio::time::advance(DEFAULT_LATENCY_MAX / 2).await;
+			frame.write(bytes::Bytes::from_static(b"x")).unwrap();
+			producer.create_group(seq.into()).unwrap().finish().unwrap();
+		}
+		frame.finish().unwrap();
+		straggler.finish().unwrap();
+
+		let state = producer.state.read();
+		assert!(
+			state.lookup.contains_key(&0),
+			"a group streaming a frame survives expiry"
+		);
+	}
+
+	/// Re-offering a parked group (once the cap rises) is a delivery: it restarts
+	/// the expiry clock so the subscriber gets to read what it was just handed.
+	#[tokio::test]
+	async fn parked_reoffer_restarts_the_expiry_clock() {
+		tokio::time::pause();
+
+		let mut producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(None);
+		subscriber.end_at(0);
+
+		for seq in 0..2u64 {
+			let mut group = producer.create_group(seq.into()).unwrap();
+			group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+			group.finish().unwrap();
+		}
+
+		// Group 0 is in range; group 1 is beyond the cap and parks.
+		assert_eq!(subscriber.assert_group().sequence, 0);
+		subscriber.assert_no_group();
+
+		// Just inside the window, the cap rises and the re-offer stamps group 1.
+		tokio::time::advance(DEFAULT_LATENCY_MAX - Duration::from_secs(1)).await;
+		subscriber.end_at(1);
+		let mut reading = subscriber.assert_group();
+		assert_eq!(reading.sequence, 1);
+
+		// Almost another full window passes: far beyond the write, inside the
+		// re-offer stamp. The new group runs the expiry scan.
+		tokio::time::advance(DEFAULT_LATENCY_MAX - Duration::from_secs(1)).await;
+		producer.create_group(2u64.into()).unwrap().finish().unwrap();
+
+		let frame = reading.read_frame().await.unwrap();
+		assert!(frame.is_some(), "a just-re-offered group must not expire unread");
 	}
 
 	#[tokio::test]

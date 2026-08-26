@@ -950,6 +950,8 @@ impl Subscriber {
 				&& !beyond_cap(sequence)
 			{
 				let group = seg.parked.remove(&sequence).expect("parked key just observed");
+				// A re-offer is a delivery: stamp it like a fresh hand-out.
+				group.cache_refresh();
 				self.next_sequence = self.next_sequence.max(sequence.saturating_add(1));
 				return Poll::Ready(Ok(Some(group)));
 			}

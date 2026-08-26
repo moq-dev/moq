@@ -372,6 +372,13 @@ impl Charge {
 		self.touch(READ_BOOST);
 	}
 
+	/// Record a write that charges no new bytes (a chunk written into an
+	/// already-charged in-flight frame): restarts the retention clock like any
+	/// other write.
+	pub(crate) fn record_write(&self) {
+		self.touch(WRITE_BOOST);
+	}
+
 	/// Advance the last-access tick to `boost` ticks past the coarse clock.
 	///
 	/// The boost breaks ties within one coarse tick: written content outranks

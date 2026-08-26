@@ -416,8 +416,13 @@ impl Producer {
 
 	/// Wake consumers parked on the group channel (called after a partial write).
 	pub(crate) fn frame_notify(&self) {
-		// Taking the write lock and dropping it triggers kio's notify.
-		let _ = self.state.write();
+		// Taking the write lock and dropping it triggers kio's notify. The chunk
+		// that was just written is also a write access: restart the retention
+		// clock so a straggler group streaming a large frame isn't expired
+		// mid-write (its bytes were already charged when the frame was created).
+		if let Ok(state) = self.state.write() {
+			state.charge.record_write();
+		}
 	}
 
 	/// Commit the in-flight frame as a completed frame (called by [`frame::Producer::finish`]).
@@ -688,6 +693,12 @@ impl Consumer {
 	/// dropped the cached frames, so a held consumer has nothing left to read.
 	pub(crate) fn is_aborted(&self) -> bool {
 		self.state.read().abort.is_some()
+	}
+
+	/// Record a cache access from the consumer side: a parked group re-offered to
+	/// its subscriber. Same stamp as [`Producer::cache_refresh`].
+	pub(crate) fn cache_refresh(&self) {
+		self.state.read().charge.refresh();
 	}
 
 	/// Park `waiter` until the group closes (finish, abort, or eviction). Spliced
