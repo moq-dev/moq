@@ -23,10 +23,9 @@ test("one single-frame group per update", async () => {
 	producer.update(bytes(2));
 	producer.finish();
 
-	// Two updates => two self-contained groups, so a consumer never needs an older one. The
-	// in-memory track buffers both, so this drain sees each; over the wire a late joiner starts at
-	// the newest group.
-	expect(await drain(track.subscribe(), false)).toEqual([bytes(1), bytes(2)]);
+	// Two updates => two self-contained groups, so a consumer never needs an older one: a reader
+	// that arrives after both discards the superseded first group instead of replaying it.
+	expect(await drain(track.subscribe(), false)).toEqual([bytes(2)]);
 
 	const subscriber = track.subscribe();
 	const counts: number[] = [];
@@ -84,5 +83,19 @@ test("a finished track ends the consumer", async () => {
 
 	const consumer = new Consumer(track.subscribe());
 	expect(await consumer.next()).toEqual(bytes(7));
+	expect(await consumer.next()).toBeUndefined();
+});
+
+test("a backlog collapses to the newest value", async () => {
+	// A consumer that fell behind (or joined late) must not replay every superseded value: its
+	// latency would grow with the backlog, and each older group is already superseded by design.
+	const track = new Track.Producer("test");
+	const producer = new Producer(track);
+	const consumer = new Consumer(track.subscribe());
+
+	for (let n = 0; n < 10; n++) producer.update(bytes(n));
+	producer.finish();
+
+	expect(await consumer.next()).toEqual(bytes(9));
 	expect(await consumer.next()).toBeUndefined();
 });

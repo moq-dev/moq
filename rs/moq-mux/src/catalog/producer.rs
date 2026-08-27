@@ -384,6 +384,14 @@ impl<E: CatalogExt> Producer<E> {
 		&self,
 		name: &str,
 	) -> crate::Result<(moq_net::track::Producer, super::Rendition<E, C>)> {
+		// `create_track` rejects a name another track already holds, but a catalog entry can exist
+		// with no local track behind it: one seeded through `Config::with_catalog`, or one whose
+		// `broadcast` field points at a sibling broadcast. Inserting over it would silently replace
+		// what it referenced and then retire it entirely when this handle drops.
+		if C::get_mut(&mut self.snapshot(), name).is_some() {
+			return Err(hang::Error::Duplicate(name.to_string()).into());
+		}
+
 		let mut broadcast = self.broadcast.clone();
 		let track = broadcast.create_track(name, None)?;
 		Ok((track, self.reserve().init(name)))

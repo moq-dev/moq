@@ -4,9 +4,12 @@
 //! sequence of samples). Nothing is ever superseded: a consumer yields each payload in the order it
 //! was appended. For a latest-value document, use [`snapshot`](crate::snapshot) instead.
 //!
-//! On the wire the log is a single group that is never rolled, one payload per frame. With
-//! [`ProducerConfig::compression`] on, that group is one sync-flushed DEFLATE stream, so each
-//! payload compresses against the earlier ones and a run of similar payloads shrinks sharply.
+//! On the wire the log normally rides a single group, one payload per frame. A later group
+//! continues the log rather than superseding an earlier one, which is what separates this from
+//! [`snapshot`](crate::snapshot); the producer only rolls a group to recover from a frame it could
+//! not write. With [`ProducerConfig::compression`] on, each group is one sync-flushed DEFLATE
+//! stream, so each payload compresses against the earlier ones and a run of similar payloads
+//! shrinks sharply.
 
 mod consumer;
 mod producer;
@@ -123,6 +126,48 @@ mod test {
 				Bytes::from_static(b"c")
 			]
 		);
+	}
+
+	/// A publisher that rolls the group to recover from a frame it could not write starts a cold
+	/// window; the log continues across the boundary rather than restarting, so every payload
+	/// survives. Written by hand because the producer only rolls on a write failure.
+	#[test]
+	fn a_rolled_group_continues_the_log() {
+		let mut track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+		let subscriber = track.subscribe(None);
+
+		let expected = payloads(4);
+		for pair in expected.chunks(2) {
+			// Each group is its own DEFLATE stream, which is what the recovery roll produces.
+			let mut flate = moq_flate::Encoder::new();
+			let mut group = track.append_group().unwrap();
+			for payload in pair {
+				group
+					.write_frame(moq_net::Timestamp::now(), flate.frame(payload))
+					.unwrap();
+			}
+			group.finish().unwrap();
+		}
+		track.finish().unwrap();
+
+		assert_eq!(drain(subscriber, true), expected);
+	}
+
+	/// `finish` closes the underlying track, so a later append fails rather than being silently
+	/// accepted, and that holds for every clone since they share one track.
+	#[test]
+	fn appending_after_finish_fails_on_every_clone() {
+		let (mut producer, _track) = producer(false);
+		let mut clone = producer.clone();
+
+		producer.append(&b"first"[..]).unwrap();
+		producer.finish().unwrap();
+
+		assert!(producer.append(&b"late"[..]).is_err());
+		assert!(clone.append(&b"late"[..]).is_err());
 	}
 
 	#[test]

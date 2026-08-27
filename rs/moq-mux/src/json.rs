@@ -341,6 +341,28 @@ mod test {
 		);
 	}
 
+	/// A catalog entry can exist with no local track behind it, e.g. one seeded at construction that
+	/// references a sibling broadcast. Publishing over that name would replace what the entry pointed
+	/// at and then retire it entirely on drop, so the name counts as taken.
+	#[test]
+	fn an_existing_catalog_entry_is_not_replaced() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+
+		let mut existing = JsonConfig::new(Mode::Snapshot);
+		existing.broadcast = Some(moq_net::PathRelativeOwned::new("source"));
+
+		let mut seed = crate::catalog::hang::Catalog::<()>::default();
+		seed.json.tracks.insert("chat".to_string(), existing.clone());
+		let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, seed).unwrap();
+
+		// Nothing local holds the track name, so `create_track` alone would have let this through.
+		assert!(matches!(
+			catalog.json_stream::<Value>("chat", Config::default()),
+			Err(crate::Error::Hang(hang::Error::Duplicate(_)))
+		));
+		assert_eq!(catalog.snapshot().json.tracks.get("chat"), Some(&existing));
+	}
+
 	/// A consumer that can't tell a log from a latest-value document would silently drop records,
 	/// so an unreadable entry is an error rather than a guess.
 	#[test]

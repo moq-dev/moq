@@ -112,6 +112,20 @@ mod test {
 		);
 	}
 
+	/// `finish` closes the underlying track, so a later update fails rather than being silently
+	/// accepted, and that holds for every clone since they share one track.
+	#[test]
+	fn updating_after_finish_fails_on_every_clone() {
+		let (mut producer, _track) = producer(false);
+		let mut clone = producer.clone();
+
+		producer.update(&b"first"[..]).unwrap();
+		producer.finish().unwrap();
+
+		assert!(producer.update(&b"late"[..]).is_err());
+		assert!(clone.update(&b"late"[..]).is_err());
+	}
+
 	#[test]
 	fn a_finished_track_ends_the_consumer() {
 		let (mut producer, track) = producer(false);

@@ -121,7 +121,7 @@ A `json` track's frames are UTF-8 JSON values, so a relay, a debugger, or an arc
 `mode` is required and says how a track's groups compose its frames. There is no default, because reading an append log as a latest-value document silently discards every payload but the last:
 
 - `snapshot` is lossy. Each group is self-contained and supersedes the previous one, so a consumer reads only the newest and a publisher may drop older ones. A JSON track may follow a group's first frame with merge-patch deltas; a binary track writes one frame per group.
-- `stream` is lossless. A single group, never rolled, carrying one payload per frame in order with nothing superseded.
+- `stream` is lossless. One payload per frame, in order, with nothing superseded. The whole log normally rides a single group, and a publisher only rolls it to recover from a frame it could not write; a later group continues the log rather than replacing it, so a consumer reads them in order.
 
 `compression` names the compression applied to the frames, or is absent when they are uncompressed. `deflate` is the same group-scoped `deflate-raw` the catalog uses. The remaining fields are optional and descriptive: `schema` (a JSON Schema URL) on a JSON track, `mime` on a binary one. Both kinds also accept the `broadcast` and `timeline` fields a media rendition takes.
 

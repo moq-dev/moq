@@ -48,6 +48,7 @@ export class Consumer {
 		}
 	}
 
+	/** Iterate over every payload in order, until the track ends. */
 	async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
 		for (;;) {
 			const value = await this.next();
