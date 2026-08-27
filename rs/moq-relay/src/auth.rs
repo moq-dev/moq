@@ -1136,6 +1136,24 @@ enum Fetched {
 	Unavailable,
 }
 
+/// What the auth API's `alias` may do to the connection path.
+///
+/// The permission prefixes are relative to the connection path either way, so
+/// this governs only where they get ANCHORED - which is what decides where the
+/// broadcast lands on the backbone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Alias {
+	/// The alias renames the leading segment and nothing else, so it must match
+	/// the connection path's depth. That IS the token-mode contract - a project
+	/// stays reachable by vanity name and pid alike - and a reply that changes the
+	/// shape is a mistake worth refusing rather than a relocation worth honoring.
+	Rename,
+	/// The endpoint owns the whole mapping and may add or drop segments, which is
+	/// what lets it resolve a forwarded host to a root the client never dialed.
+	/// Only [`AuthApiMode::Proxy`], where the endpoint decides everything anyway.
+	Rewrite,
+}
+
 /// One session's conclusion, drawn from a [`Fetched`] against its own scope.
 #[derive(Debug, Clone, Copy)]
 enum Recheck {
@@ -1577,7 +1595,7 @@ impl Auth {
 			}
 		};
 
-		Self::finalize_api(params, resp.alias.clone(), resp.tier(), claims)
+		Self::finalize_api(params, api.mode, resp.alias.clone(), resp.tier(), claims)
 	}
 
 	/// The auth-API request for a connection, decided once by the mode.
@@ -1635,14 +1653,19 @@ impl Auth {
 	/// tier; the API may bucket specific ones under a named tier.
 	fn finalize_api(
 		params: &AuthParams,
+		mode: AuthApiMode,
 		alias: Option<String>,
 		tier: Option<Tier>,
 		claims: moq_token::Claims,
 	) -> Result<AuthToken, AuthError> {
-		let alias = alias.unwrap_or_else(|| params.path.clone());
+		let route_root = alias.unwrap_or_else(|| params.path.clone());
 		// Check the token root against the ORIGINAL connection path (vanity or
 		// pid); anchor the resulting scope on the alias (canonical pid).
-		let mut token = Self::finalize(&params.path, &alias, claims)?;
+		let alias = match mode {
+			AuthApiMode::Token => Alias::Rename,
+			AuthApiMode::Proxy => Alias::Rewrite,
+		};
+		let mut token = Self::finalize(&params.path, &route_root, alias, claims)?;
 		token.tier = tier.unwrap_or_default();
 		Ok(token)
 	}
@@ -1724,7 +1747,7 @@ impl Auth {
 			return Err(AuthError::ExpectedToken);
 		};
 
-		Self::finalize(&params.path, &params.path, claims)
+		Self::finalize(&params.path, &params.path, Alias::Rename, claims)
 	}
 
 	/// Reduce verified `claims` into an [`AuthToken`].
@@ -1739,7 +1762,12 @@ impl Auth {
 	/// (same depth), so the rebased relative prefixes anchor unchanged. The standalone
 	/// path passes the same value for both (no alias). Shared by the standalone and
 	/// `--auth-api` paths.
-	fn finalize(check_root: &str, route_root: &str, claims: moq_token::Claims) -> Result<AuthToken, AuthError> {
+	fn finalize(
+		check_root: &str,
+		route_root: &str,
+		alias: Alias,
+		claims: moq_token::Claims,
+	) -> Result<AuthToken, AuthError> {
 		let root = Path::new(check_root);
 		let route_root = Path::new(route_root);
 		let depth = |path: &Path<'_>| {
@@ -1750,7 +1778,7 @@ impl Auth {
 			}
 		};
 
-		if depth(&root) != depth(&route_root) {
+		if alias == Alias::Rename && depth(&root) != depth(&route_root) {
 			return Err(AuthError::IncorrectRoot);
 		}
 
@@ -1758,8 +1786,8 @@ impl Auth {
 		// another root, so both reduce to IncorrectRoot.
 		let permissions = claims.authorize(check_root).map_err(|_| AuthError::IncorrectRoot)?;
 
-		// authorize() returns paths already normalized and relative to check_root,
-		// which route_root matches in depth.
+		// authorize() returns paths already normalized and RELATIVE to check_root, so
+		// they anchor under route_root whatever its depth.
 		let rebase = |paths: Vec<String>| -> PathPrefixes { paths.iter().map(|p| Path::new(p).to_owned()).collect() };
 
 		Ok(AuthToken {
@@ -5581,6 +5609,87 @@ api = "https://api.example.com/access"
 			.await
 			.expect("a revalidated exp must bound the session");
 		assert_eq!(reason, Expired::Credential);
+		Ok(())
+	}
+
+	/// Proxy mode delegates subdomain routing to the endpoint, so its alias has to
+	/// be able to PREPEND a root the client never dialed. The connection path is
+	/// `/` (depth 0) and the host-derived root is depth 1.
+	#[tokio::test]
+	async fn proxy_alias_may_add_a_host_derived_root() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			.and(query_param("host", "customer.example.com"))
+			.respond_with(
+				ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp","grant":{"subscribe":[""]}}"#),
+			)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api_proxy(&server).await;
+		let token = auth
+			.verify(&AuthParams {
+				path: "".into(),
+				host: Some("customer.example.com".into()),
+				jwt: Some("opaque".into()),
+				..Default::default()
+			})
+			.await?;
+		assert_eq!(token.root, "x7k2qp".as_path(), "the endpoint owns the whole mapping");
+		Ok(())
+	}
+
+	/// A deeper path keeps its tail under the host-derived root, so the prefixes
+	/// the grant named still anchor where the endpoint put them.
+	#[tokio::test]
+	async fn proxy_alias_may_nest_a_deeper_path() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		mount_auth(
+			&server,
+			"no-store",
+			r#"{"alias":"x7k2qp/room","grant":{"subscribe":["cam"]}}"#.to_string(),
+		)
+		.await;
+
+		let auth = auth_with_api_proxy(&server).await;
+		let token = auth
+			.verify(&AuthParams {
+				path: "room".into(),
+				host: Some("customer.example.com".into()),
+				jwt: Some("opaque".into()),
+				..Default::default()
+			})
+			.await?;
+		assert_eq!(token.root, "x7k2qp/room".as_path());
+		assert!(token.subscribe.contains(&Path::new("cam").to_owned()));
+		Ok(())
+	}
+
+	/// Token mode keeps the depth rule: there the alias is a RENAME of the leading
+	/// segment, and a reply that changes the shape would silently relocate a
+	/// broadcast rather than resolve a vanity name.
+	#[tokio::test]
+	async fn token_alias_must_keep_the_path_depth() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		mount_auth(
+			&server,
+			"no-store",
+			r#"{"alias":"x7k2qp/extra","public":{"subscribe":[""]}}"#.to_string(),
+		)
+		.await;
+
+		let auth = auth_with_api(&server).await;
+		let result = auth
+			.verify(&AuthParams {
+				path: "demo".into(),
+				..Default::default()
+			})
+			.await;
+		assert!(
+			matches!(result, Err(AuthError::IncorrectRoot)),
+			"a reshaping alias must be refused in token mode, got {result:?}"
+		);
 		Ok(())
 	}
 
