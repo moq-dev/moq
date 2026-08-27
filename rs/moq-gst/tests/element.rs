@@ -128,6 +128,30 @@ fn a_buffer_after_the_publication_ended_reports_eos() {
 	let _ = sink.set_state(gst::State::Null);
 }
 
+// The flush window: a pad that has begun flushing must stop counting towards EOS right away. Waiting
+// for FLUSH_STOP let pad B's EOS complete the element mid-flush, and the finalize that follows is not
+// something pad A's FLUSH_STOP can undo.
+#[test]
+fn an_eos_during_another_pads_flush_does_not_complete_the_element() {
+	init();
+	let sink = publisher();
+	let first = sink.request_pad_simple("sink_0").expect("request sink_0");
+	let second = sink.request_pad_simple("sink_1").expect("request sink_1");
+	sink.set_state(gst::State::Paused).expect("start the publication");
+	let bus = recording_bus(&sink);
+
+	assert!(first.send_event(gst::event::Eos::new()));
+	assert!(first.send_event(gst::event::FlushStart::new()));
+	assert!(second.send_event(gst::event::Eos::new()));
+
+	assert_eq!(
+		posted_eos(&bus),
+		0,
+		"the flushing pad is not ended, so the element has not completed"
+	);
+	let _ = sink.set_state(gst::State::Null);
+}
+
 // Request pads appear and disappear through the real GObject boundary, with no session attached.
 #[test]
 fn request_and_release_sink_pads() {
