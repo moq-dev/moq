@@ -2392,6 +2392,98 @@ mod serve_group_test {
 			"rank 0 must reach the transport as send order 255: {priorities:?}",
 		);
 	}
+
+	/// A subscriber that stops reading must not pin the group it was being served.
+	///
+	/// The publisher stamps the group's cache access once per frame, immediately
+	/// before writing it, so a delivery in progress gets a full `latency_max` of
+	/// grace per frame handed out. Nothing re-stamps inside the write itself: a peer
+	/// whose flow control window stays shut for longer than the whole retention
+	/// window lets the group expire mid-stream and the stream resets with `Old`.
+	/// That is the point. Holding the group for as long as a wedged peer refuses to
+	/// read would let any subscriber pin cache indefinitely.
+	#[tokio::test(start_paused = true)]
+	async fn stalled_write_releases_the_group() {
+		let gate = kio::Producer::new(true);
+		let session = SinkSession::gated_uni(gate.consume());
+		let log = session.log.clone();
+
+		let track_priority = kio::Producer::new(0u8);
+		let subscription = Subscription {
+			session,
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			version: Version::Lite06Wip,
+			timescale: Some(crate::Timescale::default()),
+		};
+
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"first".as_slice())
+			.unwrap();
+
+		// The live edge moves on, so the served group is demoted and expirable.
+		track
+			.create_group(group::Info { sequence: 1 })
+			.unwrap()
+			.finish()
+			.unwrap();
+
+		let handle = subscription.priority.insert(Priority::new(0, 0));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, handle, group.consume()));
+
+		// Write the header and the first frame, leaving the task awaiting the next.
+		assert!(futures::poll!(serve.as_mut()).is_pending());
+
+		// From here every write blocks, the way a shut flow control window does.
+		*gate.write().ok().expect("gate open") = false;
+
+		group
+			.write_frame(Timestamp::from_millis(10).unwrap(), b"second".as_slice())
+			.unwrap();
+		group
+			.write_frame(Timestamp::from_millis(20).unwrap(), b"third".as_slice())
+			.unwrap();
+		group.finish().unwrap();
+
+		// The publisher takes "second" (stamping the group) and blocks writing it.
+		assert!(futures::poll!(serve.as_mut()).is_pending());
+
+		// The write stays blocked well past the retention window while the source
+		// keeps publishing, which is what runs the expiry scan.
+		for sequence in 2..8u64 {
+			tokio::time::advance(crate::track::DEFAULT_LATENCY_MAX / 2).await;
+			track.create_group(group::Info { sequence }).unwrap().finish().unwrap();
+			assert!(futures::poll!(serve.as_mut()).is_pending());
+		}
+
+		*gate.write().ok().expect("gate open") = true;
+		let res = serve.await;
+		assert!(
+			matches!(res, Err(Error::Old)),
+			"a wedged peer must not hold an expired group open: {res:?}"
+		);
+
+		// The reason reaches the peer, so it reads as a truncated group rather than
+		// a routine cancel and it can re-request the sequence.
+		assert_eq!(log.resets(), vec![Error::Old.to_code()]);
+
+		// Only the untaken tail is lost: the frame already handed to the publisher
+		// owns its payload, so the release can't reclaim it mid-write.
+		let writes = log.writes.lock().unwrap();
+		assert!(
+			writes.windows(b"second".len()).any(|w| w == b"second"),
+			"the in-flight frame still reached the wire"
+		);
+		assert!(
+			!writes.windows(b"third".len()).any(|w| w == b"third"),
+			"the untaken tail was released with the group"
+		);
+	}
 }
 
 #[cfg(test)]

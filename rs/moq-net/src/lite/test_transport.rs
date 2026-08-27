@@ -302,6 +302,8 @@ pub struct SinkSession {
 	/// Set by [`Self::gated_bi`]. `None` parks `open_bi` itself forever, which is all
 	/// a test driving only uni streams needs.
 	bi_gate: Option<kio::Consumer<bool>>,
+	/// Set by [`Self::gated_uni`]. `None` writes immediately.
+	uni_gate: Option<kio::Consumer<bool>>,
 	/// The ALPN to report, for a test that needs a specific negotiated version rather
 	/// than the SETUP-negotiated fallback an absent one selects.
 	protocol: Option<&'static str>,
@@ -316,6 +318,7 @@ impl SinkSession {
 		Self {
 			log,
 			bi_gate: None,
+			uni_gate: None,
 			protocol: None,
 			stats: Arc::new(Mutex::new(SinkStats::default())),
 		}
@@ -347,6 +350,22 @@ impl SinkSession {
 		Self {
 			log: Log::default(),
 			bi_gate: Some(gate),
+			uni_gate: None,
+			protocol: None,
+			stats: Arc::new(Mutex::new(SinkStats::default())),
+		}
+	}
+
+	/// Serve uni streams, holding every write while `gate` reads false.
+	///
+	/// Groups travel on uni streams, so this is how a test stalls delivery the way
+	/// QUIC flow control does: the publisher keeps its consumer and its place in the
+	/// group, but no byte reaches the wire until the gate reopens.
+	pub fn gated_uni(gate: kio::Consumer<bool>) -> Self {
+		Self {
+			log: Log::default(),
+			bi_gate: None,
+			uni_gate: Some(gate),
 			protocol: None,
 			stats: Arc::new(Mutex::new(SinkStats::default())),
 		}
@@ -381,7 +400,11 @@ impl web_transport_trait::Session for SinkSession {
 	}
 
 	async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
-		Ok(SinkSend::new(self.log.clone()))
+		Ok(SinkSend {
+			log: self.log.clone(),
+			gate: self.uni_gate.clone(),
+			finished: false,
+		})
 	}
 
 	fn send_datagram(&self, _payload: bytes::Bytes) -> Result<(), Self::Error> {
