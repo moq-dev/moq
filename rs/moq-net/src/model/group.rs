@@ -343,11 +343,7 @@ impl Producer {
 			return Err(Error::FrameTooLarge);
 		}
 
-		let mut state = modify(&self.state)?;
-		if state.fin.is_some() {
-			return Err(Error::Closed);
-		}
-		debug_assert!(state.partial.is_none(), "a frame is already open");
+		let mut state = self.writable()?;
 		let size = payload.len() as u64;
 		state.cache += size;
 		state.charge.add(size);
@@ -365,6 +361,23 @@ impl Producer {
 		Ok(())
 	}
 
+	/// Take the group state for a write, refusing one that can no longer accept frames.
+	///
+	/// A group with an open frame rejects rather than appends: `create_frame` borrows
+	/// its producer exclusively, but `Producer` is `Clone`, so a second handle can
+	/// reach this while the first is still streaming. Appending around the open frame
+	/// would hand readers the batch before the frame that was opened first.
+	fn writable(&self) -> Result<kio::Mut<'_, GroupState>> {
+		let state = modify(&self.state)?;
+		if state.fin.is_some() {
+			return Err(Error::Closed);
+		}
+		if state.partial.is_some() {
+			return Err(Error::FrameOpen);
+		}
+		Ok(state)
+	}
+
 	/// Write a whole batch of frames at once, draining `frames`.
 	///
 	/// One lock covers the batch, so an ingest with several frames in hand pays the
@@ -373,6 +386,8 @@ impl Producer {
 	///
 	/// The batch is validated before anything is written, so a rejected frame leaves
 	/// both the group and the buffer exactly as they were, ready to retry or redirect.
+	/// Returns [`Error::FrameOpen`] if another handle is streaming a frame into this
+	/// group, since appending around it would reorder the group.
 	pub fn write_frames<const N: usize>(&mut self, frames: &mut frame::Buffer<N>) -> Result<()> {
 		// Check the whole batch up front, without touching it: a rejected batch stays
 		// exactly as the caller built it, so it can be retried or sent elsewhere.
@@ -391,11 +406,7 @@ impl Producer {
 		let count = frames.len() as u64;
 		let mut bytes = 0;
 
-		let mut state = modify(&self.state)?;
-		if state.fin.is_some() {
-			return Err(Error::Closed);
-		}
-		debug_assert!(state.partial.is_none(), "a frame is already open");
+		let mut state = self.writable()?;
 		// Past every fallible check: converting again can't fail, and the batch is
 		// ours from here.
 		for mut frame in frames.drain() {
@@ -440,11 +451,7 @@ impl Producer {
 		}
 		let buf = FrameBuf::new(frame.size as usize);
 
-		let mut state = modify(&self.state)?;
-		if state.fin.is_some() {
-			return Err(Error::Closed);
-		}
-		debug_assert!(state.partial.is_none(), "a frame is already open");
+		let mut state = self.writable()?;
 		state.cache += frame.size;
 		state.charge.add(frame.size);
 		state.partial = Some(Partial {
@@ -925,6 +932,56 @@ mod test {
 			seen.extend(payloads(batch));
 		}
 		seen
+	}
+
+	/// `create_frame` borrows its producer exclusively, but `Producer` is `Clone`, so a
+	/// second handle can reach the whole-frame writes while a frame is still open.
+	/// Appending there would hand readers the new frames before the one opened first,
+	/// so every whole-frame path refuses instead.
+	#[test]
+	fn writes_are_refused_while_a_frame_is_open() {
+		let mut producer = Info { sequence: 0 }.produce();
+		let mut other = producer.clone();
+
+		// One handle opens a frame and holds it, incomplete.
+		let mut open = producer
+			.create_frame(frame::Info {
+				size: 4,
+				timestamp: Timestamp::ZERO,
+			})
+			.unwrap();
+
+		let mut buf = frame::Buffer::<4>::new();
+		buf.push(frame::Frame {
+			timestamp: Timestamp::ZERO,
+			payload: Bytes::from_static(b"batch"),
+		})
+		.unwrap();
+
+		assert!(matches!(other.write_frames(&mut buf), Err(Error::FrameOpen)));
+		assert_eq!(buf.len(), 1, "the batch is still the caller's");
+		assert!(matches!(
+			other.write_frame(Timestamp::ZERO, Bytes::from_static(b"single")),
+			Err(Error::FrameOpen)
+		));
+		assert!(matches!(
+			other
+				.create_frame(frame::Info {
+					size: 1,
+					timestamp: Timestamp::ZERO,
+				})
+				.err(),
+			Some(Error::FrameOpen)
+		));
+
+		// Once the open frame lands, the group takes writes again in order.
+		open.write(&b"open"[..]).unwrap();
+		open.finish().unwrap();
+		other.write_frames(&mut buf).unwrap();
+		other.finish().unwrap();
+
+		let mut consumer = other.consume();
+		assert_eq!(drain::<4>(&mut consumer), ["open", "batch"]);
 	}
 
 	#[test]

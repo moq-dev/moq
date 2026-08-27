@@ -139,6 +139,13 @@ pub enum Error {
 	/// A remote error received via a stream/session reset code.
 	#[error("remote error: code={0}")]
 	Remote(u32),
+	/// A whole-frame write was refused because a frame is already open on the group.
+	///
+	/// A [`crate::group::Producer`] streaming a frame with `create_frame` blocks the
+	/// whole-frame writes on every clone of that producer until it finishes, since
+	/// appending around it would reorder the group.
+	#[error("frame already open")]
+	FrameOpen,
 }
 
 impl Error {
@@ -173,6 +180,8 @@ impl Error {
 			Self::TimestampMismatch => 29,
 			Self::Unroutable => 30,
 			Self::Evicted => 31,
+			// 22 was unused in the 0-31 library range.
+			Self::FrameOpen => 22,
 			Self::App(app) => *app as u32 + 64,
 			Self::Remote(code) => *code,
 		}
