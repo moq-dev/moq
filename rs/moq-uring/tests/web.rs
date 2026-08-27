@@ -153,7 +153,10 @@ fn webtransport_echo_end_to_end() {
 			assert_eq!(request.url().path(), "/echo");
 			assert_eq!(request.url().query(), Some("token=abc"));
 			assert_eq!(request.protocols(), [PROTO.to_string()]);
-			let mut session = request.respond(Some(PROTO)).await.expect("respond");
+			let mut session = request
+				.respond(quic::web::Response::default().with_protocol(PROTO))
+				.await
+				.expect("respond");
 			assert_eq!(session.protocol(), Some(PROTO), "negotiated subprotocol");
 
 			// Bidirectional echo.
@@ -273,7 +276,11 @@ fn lite_session_over_webtransport() {
 			let request = quic::web::Request::accept(&handle, conn).await.expect("handshake");
 			// The WebTransport equivalent of ALPN: pick the moq version.
 			let protocol = request.protocols().iter().find(|p| *p == PROTO).cloned();
-			let session = request.respond(protocol.as_deref()).await.expect("respond");
+			let mut response = quic::web::Response::default();
+			if let Some(protocol) = &protocol {
+				response = response.with_protocol(protocol);
+			}
+			let session = request.respond(response).await.expect("respond");
 
 			let session = moq_net::Server::new()
 				.with_publisher(&serve_origin)
@@ -290,4 +297,62 @@ fn lite_session_over_webtransport() {
 	drop(pub_origin);
 	client.join().expect("client thread");
 	origins.join().expect("origin driver");
+}
+
+/// A peer that opens unidirectional streams of an unknown type and never
+/// sends a control stream must not hold the handshake open forever.
+///
+/// Classification drops an unknown type rather than keeping it, and a
+/// finished stream returns its credit, so a cap counting only the streams the
+/// handshake *retains* never trips and the loop runs as long as the peer
+/// cares to feed it.
+#[test]
+fn unknown_streams_cannot_stall_the_handshake() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let server = endpoint.local_addr();
+
+	let peer_handle = handle.clone();
+	worker
+		.block_on(async move {
+			let sock = peer_handle
+				.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+				.expect("client socket");
+			// Raw quiche, because the misbehavior here is exactly what a real
+			// HTTP/3 client would refuse to produce. It drives from a task so it
+			// and the handshake below make progress against each other on this
+			// one worker thread.
+			let task_handle = peer_handle.clone();
+			peer_handle.spawn(async move {
+				let mut peer = support::Peer::connect_alpn(&task_handle, sock, server, &[b"h3"]).expect("client");
+				peer.flush().await.expect("first flight");
+				while !peer.conn.is_established() {
+					peer.step().await.expect("step");
+					peer.flush().await.expect("flush");
+				}
+
+				// Comfortably past the cap, each a single junk type byte,
+				// finished so its credit comes straight back.
+				for i in 0..80u64 {
+					let stream = 2 + i * 4; // client-initiated unidirectional
+					if peer.conn.stream_send(stream, &[0x3f], true).is_err() {
+						break;
+					}
+					peer.flush().await.expect("flush");
+					peer.step().await.expect("step");
+				}
+			});
+
+			let conn = endpoint.accept().await.expect("accepted connection");
+			let err = quic::web::Request::accept(&handle, conn)
+				.await
+				.expect_err("the handshake must give up");
+			assert!(
+				matches!(err, quic::Error::Web(ref reason) if reason.contains("too many streams")),
+				"got {err:?}"
+			);
+		})
+		.expect("worker");
 }

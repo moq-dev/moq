@@ -55,6 +55,14 @@ const MESSAGE_LIMIT: usize = 64 * 1024;
 /// control stream could open them without end. A real client opens three
 /// before its CONNECT, plus whatever it pipelines.
 const HANDSHAKE_STREAMS: usize = 64;
+/// How many of a peer's critical streams to hold open once the session is
+/// running. HTTP/3 defines one control stream and two QPACK streams; the
+/// slack is for a peer that greases, and anything past it is dropped rather
+/// than retained.
+const HELD_STREAMS: usize = 8;
+/// `H3_GENERAL_PROTOCOL_ERROR`, for closing a connection whose HTTP/3
+/// handshake never produced a session.
+const H3_GENERAL_PROTOCOL_ERROR: u64 = 0x0101;
 
 /// An incoming WebTransport handshake: the CONNECT request, ready to answer.
 ///
@@ -83,7 +91,23 @@ impl Request {
 	///
 	/// There is no timeout here; a peer that stalls mid-handshake is bounded
 	/// by the connection's idle timeout.
-	pub async fn accept(handle: &Handle, mut conn: Connection) -> Result<Self, Error> {
+	pub async fn accept(handle: &Handle, conn: Connection) -> Result<Self, Error> {
+		// Nothing else will close it. The endpoint keeps a connection, its
+		// routes, and its driver task until the driver sees a terminal state,
+		// and the backlog stopped counting this one when it was accepted, so a
+		// peer that keeps sending would otherwise hold a rejected handshake
+		// open for as long as it liked.
+		let failed = conn.clone();
+		match Self::handshake(handle, conn).await {
+			Ok(request) => Ok(request),
+			Err(err) => {
+				failed.shared().close_code(H3_GENERAL_PROTOCOL_ERROR, &err.to_string());
+				Err(err)
+			}
+		}
+	}
+
+	async fn handshake(handle: &Handle, mut conn: Connection) -> Result<Self, Error> {
 		// Our control stream: the SETTINGS advertising WebTransport support.
 		let mut control = open_uni(&mut conn).await?;
 		let mut settings = proto::Settings::default();
@@ -97,8 +121,14 @@ impl Request {
 		// arrive ahead of everything; classify each arrival by its header.
 		let mut held = Vec::new();
 		let mut early = Vec::new();
+		// Every arrival counts, not just the ones kept: a stream of unknown
+		// type is dropped here, and a dropped stream returns its credit, so
+		// counting what we retain would let a peer loop this forever while
+		// never sending a control stream.
+		let mut arrivals = 0usize;
 		loop {
-			if held.len() + early.len() >= HANDSHAKE_STREAMS {
+			arrivals += 1;
+			if arrivals > HANDSHAKE_STREAMS {
 				return Err(Error::Web("too many streams before the control stream".into()));
 			}
 			let recv = accept_uni(&mut conn).await?;
@@ -149,37 +179,88 @@ impl Request {
 		&self.request.protocols
 	}
 
-	/// Accept with a `200`, selecting `protocol` from the peer's
-	/// [`protocols`](Self::protocols) (or none, for peers that negotiate in
-	/// band instead).
-	pub async fn respond(mut self, protocol: Option<&str>) -> Result<Session, Error> {
-		let mut response = proto::ConnectResponse::OK;
-		if let Some(protocol) = protocol {
-			if !self.request.protocols.iter().any(|p| p == protocol) {
+	/// Accept with a `200`, answering as `response` describes.
+	pub async fn respond(mut self, response: Response) -> Result<Session, Error> {
+		let Response { protocol } = response;
+
+		let mut encoded = proto::ConnectResponse::OK;
+		if let Some(protocol) = &protocol {
+			if !self.request.protocols.iter().any(|offered| offered == protocol) {
 				return Err(Error::Web(format!("subprotocol {protocol:?} was not offered")));
 			}
-			response = response.with_protocol(protocol);
+			encoded = encoded.with_protocol(protocol);
 		}
 		let mut buf = Vec::new();
-		response.encode(&mut buf).map_err(|err| Error::Web(err.to_string()))?;
+		encoded.encode(&mut buf).map_err(|err| Error::Web(err.to_string()))?;
 		write_all(&mut self.send, &buf).await?;
 
-		Ok(Session::establish(self, protocol.map(str::to_owned)))
+		Ok(Session::establish(self, protocol))
 	}
 
 	/// Accept with a `200` and no subprotocol.
 	pub async fn ok(self) -> Result<Session, Error> {
-		self.respond(None).await
+		self.respond(Response::default()).await
 	}
 
-	/// Refuse with `status`, ending the handshake.
-	pub async fn reject(mut self, status: http::StatusCode) -> Result<(), Error> {
-		let response = proto::ConnectResponse::new(status);
+	/// Refuse with `reason`, ending the handshake.
+	pub async fn reject(mut self, reason: Rejected) -> Result<(), Error> {
+		let response = proto::ConnectResponse::new(reason.status());
 		let mut buf = Vec::new();
 		response.encode(&mut buf).map_err(|err| Error::Web(err.to_string()))?;
 		write_all(&mut self.send, &buf).await?;
 		web_transport_trait::poll::SendStream::finish(&mut self.send)?;
 		Ok(())
+	}
+}
+
+/// How to answer a CONNECT the server is accepting.
+///
+/// Built with [`default`](Self::default) and the setters below, so a knob
+/// added later stays additive.
+#[derive(Clone, Debug, Default)]
+pub struct Response {
+	protocol: Option<String>,
+}
+
+impl Response {
+	/// Select a subprotocol from the ones the peer
+	/// [offered](Request::protocols), the WebTransport equivalent of ALPN.
+	/// Answering with one the peer did not offer is an error.
+	pub fn with_protocol(mut self, protocol: impl Into<String>) -> Self {
+		self.protocol = Some(protocol.into());
+		self
+	}
+}
+
+/// Why a CONNECT is being refused.
+///
+/// Named rather than numeric so callers need no HTTP crate of their own, and
+/// so this stays a contract of moq-uring's rather than of whichever `http`
+/// version it happens to build against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Rejected {
+	/// The peer is not allowed here (`401`).
+	Unauthorized,
+	/// The peer is known and still not allowed here (`403`).
+	Forbidden,
+	/// Nothing is served at the requested path (`404`).
+	NotFound,
+	/// The request was malformed (`400`).
+	BadRequest,
+	/// The server cannot take it right now (`503`).
+	Unavailable,
+}
+
+impl Rejected {
+	fn status(self) -> http::StatusCode {
+		match self {
+			Self::Unauthorized => http::StatusCode::UNAUTHORIZED,
+			Self::Forbidden => http::StatusCode::FORBIDDEN,
+			Self::NotFound => http::StatusCode::NOT_FOUND,
+			Self::BadRequest => http::StatusCode::BAD_REQUEST,
+			Self::Unavailable => http::StatusCode::SERVICE_UNAVAILABLE,
+		}
 	}
 }
 
@@ -449,7 +530,7 @@ impl web_transport_trait::poll::Session for Session {
 		let mut framed = Vec::with_capacity(web.header_datagram.len() + payload.len());
 		framed.extend_from_slice(&web.header_datagram);
 		framed.extend_from_slice(payload);
-		web_transport_trait::poll::Session::poll_send_datagram(&mut self.conn, cx, &framed)
+		web_transport_trait::poll::Session::poll_send_datagram(&mut self.conn, cx, &framed).map_err(unmap_err)
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -523,24 +604,37 @@ impl web_transport_trait::poll::Session for Session {
 		encode_varint(payload.len() as u64, &mut frame);
 		frame.extend_from_slice(&payload);
 
-		// Best effort: the CONNECT stream has had almost nothing written, so
-		// a partial write means the connection is already wedged and the
-		// close below carries what it can.
-		let wrote = send.try_write(&frame);
-		if wrote == frame.len() {
-			let _ = web_transport_trait::poll::SendStream::finish(&mut send);
-		}
-
-		// Give the peer a moment to act on the capsule; close either way.
+		// Finish the capsule and then give the peer a moment to act on it,
+		// closing either way once the grace period is up. The write goes in
+		// the task rather than here because flow control can take it in
+		// pieces, and abandoning a partial frame would leave the browser with
+		// neither the code nor the reason.
 		let mut deadline = moq_net::runtime::Deadline::after(&web.handle, CLOSE_GRACE);
 		let reason = reason.to_string();
 		let mut conn = self.conn.clone();
 		web.handle.spawn(async move {
+			let mut offset = 0;
 			kio::wait(|waiter| {
 				let mut cx = Context::from_waker(waiter.waker());
+
+				// Stop writing once the connection is gone; the deadline is the
+				// only other thing that ends this.
 				if web_transport_trait::poll::Session::poll_closed(&mut conn, &mut cx).is_ready() {
 					return Poll::Ready(());
 				}
+				while offset < frame.len() {
+					match web_transport_trait::poll::SendStream::poll_write(&mut send, &mut cx, &frame[offset..]) {
+						Poll::Ready(Ok(n)) => offset += n,
+						// The stream is unusable, so the connection close below
+						// is all the peer is going to get.
+						Poll::Ready(Err(_)) => return Poll::Ready(()),
+						Poll::Pending => break,
+					}
+					if offset == frame.len() {
+						let _ = web_transport_trait::poll::SendStream::finish(&mut send);
+					}
+				}
+
 				deadline.poll(waiter)
 			})
 			.await;
@@ -842,9 +936,14 @@ fn classify_uni(web: &Rc<Web>, cx: &mut Context<'_>) -> bool {
 			}
 			// A second control stream (or a stray QPACK one) is bogus but
 			// harmless; holding it beats closing it, which the peer would
-			// read as tearing down the H3 connection.
+			// read as tearing down the H3 connection. Only up to a point: a
+			// finished stream returns its credit, so a peer that keeps opening
+			// them would grow this vector for as long as it cared to.
 			Poll::Ready(UniClass::Control | UniClass::Qpack) => {
-				web.state.borrow_mut().held_recv.push(stream.recv);
+				let mut state = web.state.borrow_mut();
+				if state.held_recv.len() < HELD_STREAMS {
+					state.held_recv.push(stream.recv);
+				}
 			}
 			Poll::Ready(_) => {}
 		}

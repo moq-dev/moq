@@ -81,7 +81,7 @@ pub fn certs() -> anyhow::Result<Certs> {
 	Ok(Certs { dir, cert, key })
 }
 
-fn config(certs: Option<&Certs>) -> anyhow::Result<quiche::Config> {
+fn config(certs: Option<&Certs>, alpn: &[&[u8]]) -> anyhow::Result<quiche::Config> {
 	let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 	if let Some(certs) = certs {
 		config.load_cert_chain_from_pem_file(certs.cert.to_str().context("cert path")?)?;
@@ -90,12 +90,15 @@ fn config(certs: Option<&Certs>) -> anyhow::Result<quiche::Config> {
 		// The client trusts our self-signed server blindly; this is loopback.
 		config.verify_peer(false);
 	}
-	config.set_application_protos(&[b"moq-uring-echo"])?;
+	config.set_application_protos(alpn)?;
 	// Generous windows so the echo never stalls on flow control.
 	config.set_initial_max_data(64 * 1024 * 1024);
 	config.set_initial_max_stream_data_bidi_local(32 * 1024 * 1024);
 	config.set_initial_max_stream_data_bidi_remote(32 * 1024 * 1024);
 	config.set_initial_max_streams_bidi(16);
+	// Enough for a test that deliberately opens a lot of them.
+	config.set_initial_max_stream_data_uni(1024 * 1024);
+	config.set_initial_max_streams_uni(1024);
 	config.set_max_recv_udp_payload_size(SEGMENT);
 	config.set_max_send_udp_payload_size(SEGMENT);
 	config.set_max_idle_timeout(10_000);
@@ -118,8 +121,19 @@ pub struct Peer {
 impl Peer {
 	/// A client half-connected to `server`, first flight not yet sent.
 	pub fn connect(handle: &Handle, sock: udp::Socket, server: SocketAddr) -> anyhow::Result<Self> {
+		Self::connect_alpn(handle, sock, server, &[b"moq-uring-echo"])
+	}
+
+	/// A client offering `alpn`, for a test that needs to reach something
+	/// other than the echo server.
+	pub fn connect_alpn(
+		handle: &Handle,
+		sock: udp::Socket,
+		server: SocketAddr,
+		alpn: &[&[u8]],
+	) -> anyhow::Result<Self> {
 		let local = sock.local_addr()?;
-		let mut config = config(None)?;
+		let mut config = config(None, alpn)?;
 		let conn = quiche::connect(Some("localhost"), &connection_id(), local, server, &mut config)?;
 		Ok(Self {
 			sock,
@@ -132,7 +146,7 @@ impl Peer {
 	/// A server that will accept the first connection arriving on `sock`.
 	pub fn accept(handle: &Handle, sock: udp::Socket, certs: &Certs, from: SocketAddr) -> anyhow::Result<Self> {
 		let local = sock.local_addr()?;
-		let mut config = config(Some(certs))?;
+		let mut config = config(Some(certs), &[b"moq-uring-echo"])?;
 		let conn = quiche::accept(&connection_id(), None, local, from, &mut config)?;
 		Ok(Self {
 			sock,
