@@ -2377,7 +2377,11 @@ impl Announced {
 	/// standing. Accepting replaces it via [`Self::attach`]. Doing it this way rather than
 	/// at each rejection is what stops the next early return from silently freeing a path
 	/// the peer still holds.
+	/// Only valid on a path the peer does not already hold, which the caller establishes
+	/// with [`Self::contains`]. Overwriting an attached route here would drop its source
+	/// without finishing it, which is [`Self::declined`]'s job.
 	fn reserve(&mut self, path: PathOwned) {
+		debug_assert!(!self.0.contains_key(&path), "reserved a path already advertised");
 		self.0.insert(path, None);
 	}
 
