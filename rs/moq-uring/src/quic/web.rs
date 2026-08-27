@@ -168,7 +168,9 @@ impl Request {
 	}
 
 	/// The URL the peer connected to; the path and query are what a server
-	/// routes and authenticates on.
+	/// routes and authenticates on. The `url` crate is
+	/// [re-exported](crate::url) so naming this type needs no dependency of
+	/// your own.
 	pub fn url(&self) -> &url::Url {
 		&self.request.url
 	}
