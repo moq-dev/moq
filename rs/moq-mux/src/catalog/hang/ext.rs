@@ -39,7 +39,7 @@ impl CatalogExt for () {}
 /// cross. Publish/consume a [`Catalog<Extra>`] and use [`set`](Self::set)/[`get`](Self::get).
 /// The default extension stays `()` (unknown sections dropped); opt into `Extra` explicitly.
 ///
-/// `video` and `audio` are reserved for the base media sections, so [`set`](Self::set)
+/// `video`, `audio`, `json`, and `binary` are reserved for the base sections, so [`set`](Self::set)
 /// rejects them to keep the wire JSON free of duplicate keys.
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
 #[serde(transparent)]
@@ -68,11 +68,11 @@ impl Extra {
 		self.0.is_empty()
 	}
 
-	/// Set (or replace) a section. Errors if `name` collides with a reserved media
-	/// section (`video`/`audio`).
+	/// Set (or replace) a section. Errors if `name` collides with a reserved base
+	/// section (`video`/`audio`/`json`/`binary`).
 	pub fn set(&mut self, name: impl Into<String>, value: serde_json::Value) -> crate::Result<()> {
 		let name = name.into();
-		if matches!(name.as_str(), "video" | "audio") {
+		if matches!(name.as_str(), "video" | "audio" | "json" | "binary") {
 			return Err(crate::Error::ReservedSection(name));
 		}
 		self.0.insert(name, value);
@@ -85,13 +85,15 @@ impl Extra {
 	}
 }
 
-/// The base media sections plus an application extension `E` (defaulting to `()` for none),
-/// serialized as a flat union: the `video`/`audio` sections and the extension's sections share one
-/// JSON object on the wire.
+/// The base sections plus an application extension `E` (defaulting to `()` for none), serialized
+/// as a flat union: the base sections and the extension's sections share one JSON object on the
+/// wire.
 ///
-/// `video` and `audio` are direct fields (`catalog.video`), and the catalog derefs to the extension
-/// so its sections are reachable directly too (`catalog.scte35`, or `catalog.ext.scte35`
-/// explicitly). A consumer reading a different extension (or none) ignores sections it doesn't know.
+/// The base sections are the media ones (`video`/`audio`) and the data ones (`json`/`binary`,
+/// application tracks that aren't media). All four are direct fields (`catalog.video`), and the
+/// catalog derefs to the extension so its sections are reachable directly too (`catalog.scte35`, or
+/// `catalog.ext.scte35` explicitly). A consumer reading a different extension (or none) ignores
+/// sections it doesn't know.
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
 #[serde(bound(serialize = "E: Serialize", deserialize = "E: DeserializeOwned"))]
 pub struct Catalog<E: CatalogExt = ()> {
@@ -101,12 +103,24 @@ pub struct Catalog<E: CatalogExt = ()> {
 	#[serde(default)]
 	pub audio: hang::catalog::Audio,
 
+	/// JSON tracks: application data published as live JSON documents or logs. Omitted from the
+	/// wire when empty, so a media-only catalog is unchanged.
+	#[serde(default, skip_serializing_if = "hang::catalog::Json::is_empty")]
+	pub json: hang::catalog::Json,
+
+	/// Binary tracks: application data published as opaque payloads. Omitted from the wire when
+	/// empty, so a media-only catalog is unchanged.
+	#[serde(default, skip_serializing_if = "hang::catalog::Binary::is_empty")]
+	pub binary: hang::catalog::Binary,
+
 	#[serde(flatten)]
 	pub ext: E,
 }
 
 impl<E: CatalogExt> Catalog<E> {
 	/// The base catalog carrying just the media sections, used to derive the MSF track.
+	///
+	/// MSF describes media only, so the data sections are deliberately left out.
 	pub(crate) fn media(&self) -> hang::Catalog {
 		let mut catalog = hang::Catalog::default();
 		catalog.video = self.video.clone();

@@ -323,6 +323,72 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(timeline)
 	}
 
+	/// Publish a latest-value JSON track named `name`, advertising it in the catalog.
+	///
+	/// Creates the moq-net track and writes its catalog entry; the entry is removed when the
+	/// returned handle drops. The track name is the catalog key verbatim, since the entry's
+	/// compression flag is what a consumer reads.
+	///
+	/// Errors if the broadcast can't create the track, for example because something else already
+	/// took that name.
+	pub fn json_snapshot<T: serde::Serialize>(
+		&self,
+		name: &str,
+		config: crate::json::Config,
+	) -> crate::Result<crate::json::Snapshot<T, E>> {
+		let (track, rendition) = self.data_track(name)?;
+		Ok(crate::json::Snapshot::new(track, rendition, &config))
+	}
+
+	/// Publish an append-log JSON track named `name`, advertising it in the catalog.
+	///
+	/// See [`json_snapshot`](Self::json_snapshot) for the lifecycle; this differs only in that every
+	/// record is preserved rather than superseded.
+	pub fn json_stream<T: serde::Serialize>(
+		&self,
+		name: &str,
+		config: crate::json::Config,
+	) -> crate::Result<crate::json::Stream<T, E>> {
+		let (track, rendition) = self.data_track(name)?;
+		Ok(crate::json::Stream::new(track, rendition, &config))
+	}
+
+	/// Publish a latest-value binary track named `name`, advertising it in the catalog.
+	///
+	/// See [`json_snapshot`](Self::json_snapshot) for the lifecycle; this differs only in that the
+	/// payloads are opaque bytes.
+	pub fn binary_snapshot(
+		&self,
+		name: &str,
+		config: crate::binary::Config,
+	) -> crate::Result<crate::binary::Snapshot<E>> {
+		let (track, rendition) = self.data_track(name)?;
+		Ok(crate::binary::Snapshot::new(track, rendition, &config))
+	}
+
+	/// Publish an append-log binary track named `name`, advertising it in the catalog.
+	///
+	/// See [`json_snapshot`](Self::json_snapshot) for the lifecycle; this differs only in that the
+	/// payloads are opaque bytes and every one is preserved rather than superseded.
+	pub fn binary_stream(&self, name: &str, config: crate::binary::Config) -> crate::Result<crate::binary::Stream<E>> {
+		let (track, rendition) = self.data_track(name)?;
+		Ok(crate::binary::Stream::new(track, rendition, &config))
+	}
+
+	/// Mint the track a data producer writes to, plus the rendition that owns its catalog entry.
+	///
+	/// The rendition is reserved but not yet set, so the caller fills it in with the config for the
+	/// mode it is about to publish. Data tracks keep moq-net's default retention: like the catalog
+	/// and timeline tracks they are read at the live edge.
+	fn data_track<C: super::RenditionConfig<E>>(
+		&self,
+		name: &str,
+	) -> crate::Result<(moq_net::track::Producer, super::Rendition<E, C>)> {
+		let mut broadcast = self.broadcast.clone();
+		let track = broadcast.create_track(name, None)?;
+		Ok((track, self.reserve().init(name)))
+	}
+
 	/// Create a consumer for this catalog, receiving updates as they're published.
 	pub fn consume(&self) -> Result<Consumer<E>, moq_net::Error> {
 		Ok(Consumer::new(self.hang.consume()))

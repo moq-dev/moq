@@ -82,6 +82,30 @@ pub trait RenditionConfig<E: CatalogExt>: Sized + 'static {
 	fn set_estimate(&mut self, _estimate: Estimate) {}
 }
 
+impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::JsonConfig {
+	fn insert(self, catalog: &mut Catalog<E>, name: &str) {
+		catalog.json.tracks.insert(name.to_string(), self);
+	}
+	fn get_mut<'a>(catalog: &'a mut Catalog<E>, name: &str) -> Option<&'a mut Self> {
+		catalog.json.tracks.get_mut(name)
+	}
+	fn remove(catalog: &mut Catalog<E>, name: &str) {
+		catalog.json.tracks.remove(name);
+	}
+}
+
+impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::BinaryConfig {
+	fn insert(self, catalog: &mut Catalog<E>, name: &str) {
+		catalog.binary.tracks.insert(name.to_string(), self);
+	}
+	fn get_mut<'a>(catalog: &'a mut Catalog<E>, name: &str) -> Option<&'a mut Self> {
+		catalog.binary.tracks.get_mut(name)
+	}
+	fn remove(catalog: &mut Catalog<E>, name: &str) {
+		catalog.binary.tracks.remove(name);
+	}
+}
+
 /// Caller-provided catalog fields for a video track: a starting point for what the importer detects.
 ///
 /// Every field is optional and fills only a gap the stream leaves; a value the stream reveals (the

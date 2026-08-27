@@ -1,6 +1,6 @@
 //! This module contains the structs and functions for the MoQ catalog format
 use crate::Result;
-use crate::catalog::{Audio, PRIORITY, Video};
+use crate::catalog::{Audio, Binary, Json, PRIORITY, Video};
 use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
@@ -33,6 +33,18 @@ pub struct Catalog {
 	/// based on their preferences (codec, bitrate, language, etc).
 	#[serde(default)]
 	pub audio: Audio,
+
+	/// JSON tracks: application data published as live JSON documents or logs.
+	///
+	/// Omitted from the wire when empty, so a media-only catalog is unchanged.
+	#[serde(default, skip_serializing_if = "Json::is_empty")]
+	pub json: Json,
+
+	/// Binary tracks: application data published as opaque payloads.
+	///
+	/// Omitted from the wire when empty, so a media-only catalog is unchanged.
+	#[serde(default, skip_serializing_if = "Binary::is_empty")]
+	pub binary: Binary,
 }
 
 impl Catalog {
@@ -99,7 +111,9 @@ impl Catalog {
 mod test {
 	use std::collections::BTreeMap;
 
-	use crate::catalog::{AudioCodec::Opus, AudioConfig, Container, H264, VideoConfig};
+	use crate::catalog::{
+		AudioCodec::Opus, AudioConfig, BinaryConfig, Compression, Container, H264, JsonConfig, Mode, VideoConfig,
+	};
 
 	use super::*;
 
@@ -399,6 +413,119 @@ mod test {
 		let reparsed = Catalog::from_str(&output).expect("failed to re-decode");
 		assert_eq!(parsed, reparsed, "re-encoded catalog did not round-trip");
 		assert!(output.contains(r#""magic":7"#), "unknown fields dropped: {output}");
+	}
+
+	#[test]
+	fn data_sections_stay_off_the_wire_when_empty() {
+		// A media-only catalog must serialize exactly as it did before the data sections existed,
+		// or every existing publisher's bytes change.
+		let output = Catalog::default().to_json().expect("failed to encode");
+		assert_eq!(output, r#"{"video":{"renditions":{}},"audio":{"renditions":{}}}"#);
+	}
+
+	#[test]
+	fn data_tracks_roundtrip() {
+		let mut encoded = r#"{
+			"video": {"renditions": {}},
+			"audio": {"renditions": {}},
+			"json": {
+				"tracks": {
+					"chat": {
+						"mode": "stream",
+						"compression": "deflate",
+						"schema": "https://example.com/chat.schema.json"
+					},
+					"status": {
+						"broadcast": "source",
+						"mode": "snapshot"
+					}
+				}
+			},
+			"binary": {
+				"tracks": {
+					"thumbnail": {
+						"mode": "snapshot",
+						"mime": "image/jpeg"
+					}
+				}
+			}
+		}"#
+		.to_string();
+		encoded.retain(|c| !c.is_whitespace());
+
+		let mut chat = JsonConfig::new(Mode::Stream);
+		chat.compression = Some(Compression::Deflate);
+		chat.schema = Some("https://example.com/chat.schema.json".to_string());
+
+		let mut status = JsonConfig::new(Mode::Snapshot);
+		status.broadcast = Some(moq_net::PathRelativeOwned::new("source"));
+
+		let mut thumbnail = BinaryConfig::new(Mode::Snapshot);
+		thumbnail.mime = Some("image/jpeg".to_string());
+
+		let mut catalog = Catalog::default();
+		catalog.json.insert("chat", chat).unwrap();
+		catalog.json.insert("status", status).unwrap();
+		catalog.binary.insert("thumbnail", thumbnail).unwrap();
+
+		let decoded = Catalog::from_str(&encoded).expect("failed to decode");
+		assert_eq!(decoded, catalog, "decode mismatch");
+
+		let output = catalog.to_json().expect("failed to encode");
+		assert_eq!(output, encoded, "encode mismatch");
+	}
+
+	/// A track using a future mode or compression must survive a reparse-and-republish intact, so a
+	/// relay doesn't corrupt what it can't read. Its siblings stay readable.
+	#[test]
+	fn unknown_mode_and_compression_keep_siblings() {
+		let encoded = r#"{
+			"json": {
+				"tracks": {
+					"future": {"mode": "windowed", "compression": "zstd"},
+					"known": {"mode": "stream", "compression": "deflate"}
+				}
+			}
+		}"#;
+
+		let parsed = Catalog::from_str(encoded).expect("failed to decode");
+
+		let known = parsed.json.tracks.get("known").expect("missing track");
+		assert_eq!(known.mode, Mode::Stream);
+		assert_eq!(known.compression, Some(Compression::Deflate));
+
+		let future = parsed.json.tracks.get("future").expect("missing track");
+		assert_eq!(future.mode, Mode::Unknown("windowed".to_string()));
+		assert_eq!(future.compression, Some(Compression::Unknown("zstd".to_string())));
+
+		let output = parsed.to_json().expect("failed to encode");
+		assert!(
+			output.contains(r#""mode":"windowed""#),
+			"unknown mode dropped: {output}"
+		);
+		let reparsed = Catalog::from_str(&output).expect("failed to re-decode");
+		assert_eq!(parsed, reparsed, "re-encoded catalog did not round-trip");
+	}
+
+	/// There is no safe default: reading a stream as a snapshot silently drops every record but the
+	/// last, so an entry without a mode is malformed rather than assumed.
+	#[test]
+	fn a_track_without_a_mode_is_rejected() {
+		Catalog::from_str(r#"{"json":{"tracks":{"chat":{"compression":"deflate"}}}}"#)
+			.expect_err("a mode-less track must not decode");
+	}
+
+	#[test]
+	fn duplicate_data_track_names_are_rejected() {
+		let mut catalog = Catalog::default();
+		catalog.json.insert("chat", JsonConfig::new(Mode::Stream)).unwrap();
+		assert!(matches!(
+			catalog.json.insert("chat", JsonConfig::new(Mode::Snapshot)),
+			Err(crate::Error::Duplicate(_))
+		));
+
+		// The two sections are separate namespaces on the wire, so the same name in each is fine.
+		catalog.binary.insert("chat", BinaryConfig::new(Mode::Stream)).unwrap();
 	}
 
 	#[test]

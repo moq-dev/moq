@@ -111,6 +111,8 @@ The root of the catalog is a JSON document with the following schema:
 type Catalog = {
   "audio": AudioSchema | undefined,
   "video": VideoSchema | undefined,
+  "json": JsonTracks | undefined,
+  "binary": BinaryTracks | undefined,
   // ... any custom fields ...
 }
 ~~~
@@ -118,10 +120,11 @@ type Catalog = {
 Additional fields MAY be added based on the application.
 The catalog SHOULD be mostly static, delegating any dynamic content to other tracks.
 
-For example, a `"chat"` section should include the name of a chat track, not individual chat messages.
+For example, a chat entry should name a chat track, not carry individual chat messages.
 This way catalog updates are rare and a client MAY choose to not subscribe.
+The `json` and `binary` sections ({{data}}) are how a track like that is listed.
 
-This specification currently only defines audio and video tracks.
+This specification defines audio and video tracks ({{video}}, {{audio}}) plus the application data tracks in {{data}}.
 
 ## Video
 A video track contains the necessary information to decode a video stream.
@@ -253,6 +256,90 @@ For example:
 }
 ~~~
 
+## Data Tracks {#data}
+Beyond media, a broadcast MAY publish application data tracks: a chat log, a telemetry feed, a thumbnail, a serialized state blob.
+The catalog lists them in two sections, split by payload encoding:
+
+~~~
+type JsonTracks = {
+  "tracks": Map<TrackName, JsonSchema>,
+}
+
+type BinaryTracks = {
+  "tracks": Map<TrackName, BinarySchema>,
+}
+~~~
+
+A `json` track's frames are UTF-8 JSON values; a `binary` track's frames are opaque to everything but the application.
+The split is by what a generic consumer can do without knowing the application: parse, inspect, and re-serialize a JSON track, but only copy a binary one.
+
+Each map is keyed by track name, so an entry's key is the name to subscribe to.
+Unlike the media sections these are not rendition sets: entries are distinct tracks, not alternatives to choose between.
+A publisher MUST omit a section that holds no tracks.
+
+A consumer discovers these tracks the same way it discovers media, by reading the catalog; nothing else in the broadcast announces them.
+
+### JSON {#json-tracks}
+~~~
+type JsonSchema = {
+  "mode": Mode,
+  "compression": Compression | undefined,
+  "schema": string | undefined,
+  "broadcast": string | undefined,
+  "timeline": Timeline | undefined,
+}
+~~~
+
+The `schema` field is an optional identifier for the shape of each value, typically the URL of a JSON Schema.
+It is descriptive: a consumer that does not recognize it MUST still be able to read the track.
+
+### Binary {#binary-tracks}
+~~~
+type BinarySchema = {
+  "mode": Mode,
+  "compression": Compression | undefined,
+  "mime": string | undefined,
+  "broadcast": string | undefined,
+  "timeline": Timeline | undefined,
+}
+~~~
+
+The `mime` field is an optional media type ({{!RFC6838}}) for each payload, for example `image/jpeg`.
+It is descriptive, the same as `schema` above.
+
+### mode {#field-mode}
+~~~
+type Mode = "snapshot" | "stream"
+~~~
+
+The `mode` field says how a track's groups compose its frames into what a consumer sees.
+It is REQUIRED and has no default: reading an append log as a latest-value document silently discards every payload but the last.
+A consumer MUST ignore a track whose `mode` it does not recognize.
+
+A `snapshot` track is lossy.
+Each group is self-contained and supersedes the previous one, so a consumer reads only the newest group and a publisher MAY drop older ones.
+A group's first frame is a complete value.
+A `json` track MAY follow it with JSON Merge Patch ({{!RFC7396}}) deltas applied in order; a `binary` track MUST write exactly one frame per group, since an opaque payload has no delta form.
+
+A `stream` track is lossless.
+It is a single group, never rolled, carrying one self-contained payload per frame in order with nothing superseded.
+A publisher that cannot write a frame MAY roll the group to recover, in which case the new group starts a cold compression window ({{compression}}); a consumer therefore reads every group of a `stream` track in order rather than skipping to the newest.
+
+### compression {#field-compression}
+~~~
+type Compression = "deflate"
+~~~
+
+The `compression` field names the compression applied to the track's frames.
+If absent, the frames are uncompressed.
+A consumer MUST ignore a track whose `compression` it does not recognize, since it cannot decode the frames.
+
+The `deflate` value is the group-scoped DEFLATE of {{compression}}.
+A `snapshot` group covers a single value (plus any deltas), so its window spans that group alone; a `stream` group's frames compress against the earlier ones in the log.
+
+### broadcast and timeline {#data-shared}
+The `broadcast` ({{field-broadcast}}) and `timeline` ({{field-timeline}}) fields carry the same meaning here as they do for a media rendition.
+
 ## Binary Fields {#binary}
 A decoder config field carrying raw bytes, notably `description` (an `AllowSharedBufferSource` in WebCodecs), is carried in the catalog as a hex string ({{!RFC4648, Section 8}}).
 A publisher SHOULD emit lowercase hexadecimal characters and MUST NOT emit a `0x` prefix or any separators.
@@ -354,7 +441,12 @@ Each frame is a Low Overhead Container frame {{!I-D.ietf-moq-loc}}: a property b
 
 
 # Compression {#compression}
-Some metadata tracks are compressed, conventionally marked with a `.z` suffix on the track name.
+Some metadata tracks are compressed.
+
+Compression is signalled per track, never inferred from the track's name.
+A data track ({{data}}) declares it with the `compression` field ({{field-compression}}).
+The two tracks this specification defines as always compressed, `catalog.json.z` ({{catalog}}) and the timeline track ({{timeline}}), are identified by their role instead.
+The `.z` suffix on those names is a naming convention, and a consumer MUST NOT treat it as a signal.
 
 Each group is one raw DEFLATE stream ({{!RFC1951}}), sync-flushed at each frame boundary.
 Each frame is therefore a self-delimited, byte-aligned slice, while later frames compress against the earlier ones in the same group.

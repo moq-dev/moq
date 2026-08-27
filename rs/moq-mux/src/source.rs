@@ -79,6 +79,8 @@ impl Source {
 	) {
 		self.retain_valid_references("video", &mut catalog.video.renditions);
 		self.retain_valid_references("audio", &mut catalog.audio.renditions);
+		self.retain_valid_references("json", &mut catalog.json.tracks);
+		self.retain_valid_references("binary", &mut catalog.binary.tracks);
 	}
 
 	/// Remove media renditions whose broadcast reference escapes above the origin root.
@@ -151,6 +153,18 @@ impl BroadcastConfig for hang::catalog::VideoConfig {
 }
 
 impl BroadcastConfig for hang::catalog::AudioConfig {
+	fn broadcast(&self) -> Option<&moq_net::PathRelativeOwned> {
+		self.broadcast.as_ref()
+	}
+}
+
+impl BroadcastConfig for hang::catalog::JsonConfig {
+	fn broadcast(&self) -> Option<&moq_net::PathRelativeOwned> {
+		self.broadcast.as_ref()
+	}
+}
+
+impl BroadcastConfig for hang::catalog::BinaryConfig {
 	fn broadcast(&self) -> Option<&moq_net::PathRelativeOwned> {
 		self.broadcast.as_ref()
 	}
