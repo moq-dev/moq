@@ -490,6 +490,12 @@ impl MoqSink {
 		if state.session.errored() {
 			return Err(gst::FlowError::Error);
 		}
+		// The publication was finalized: the producers this buffer would be written into are gone, and a
+		// flush cannot bring them back. Answer the streaming thread rather than dropping it as `Ok`
+		// against nothing. Recovery is a cycle through READY, which builds another session.
+		if state.eos_posted {
+			return Err(gst::FlowError::Eos);
+		}
 
 		// The pad almost always exists already (caps arrive before buffers), so look it up without
 		// allocating an owned name; only the rare first-buffer insert pays for the key.
@@ -586,12 +592,26 @@ impl MoqSink {
 				gst::Pad::event_default(pad, Some(&*self.obj()), event)
 			}
 			// FLUSH_STOP re-anchors the timeline; the trailing SEGMENT is accepted fresh. The producer is
-			// kept (FLUSH is not EOS).
+			// kept (FLUSH is not EOS), and the pad flows again, so it no longer counts as ended.
 			gst::EventView::FlushStop(_) => {
 				if let Some(state) = self.state.lock().unwrap().as_mut()
-					&& let Some(media) = state.pads.get_mut(pad.name().as_str())
+					&& !state.eos_posted
 				{
-					media.flush();
+					let name = pad.name();
+					state.ended.remove(name.as_str());
+					if let Some(media) = state.pads.get_mut(name.as_str()) {
+						media.flush();
+					}
+				}
+				drop(reservation);
+				gst::Pad::event_default(pad, Some(&*self.obj()), event)
+			}
+			// A new stream on this pad is a fresh start, so it no longer counts as ended either.
+			gst::EventView::StreamStart(_) => {
+				if let Some(state) = self.state.lock().unwrap().as_mut()
+					&& !state.eos_posted
+				{
+					state.ended.remove(pad.name().as_str());
 				}
 				drop(reservation);
 				gst::Pad::event_default(pad, Some(&*self.obj()), event)

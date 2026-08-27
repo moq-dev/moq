@@ -33,6 +33,23 @@ fn publisher() -> gst::Element {
 		.expect("create moqsink")
 }
 
+/// Every message type the element posted, in order.
+fn recording_bus(sink: &gst::Element) -> gst::Bus {
+	let bus = gst::Bus::new();
+	sink.set_bus(Some(&bus));
+	bus
+}
+
+fn posted_eos(bus: &gst::Bus) -> usize {
+	let mut seen = 0;
+	while let Some(message) = bus.pop() {
+		if message.type_() == gst::MessageType::Eos {
+			seen += 1;
+		}
+	}
+	seen
+}
+
 fn h264_caps() -> gst::Caps {
 	gst::Caps::builder("video/x-h264")
 		.field("stream-format", "byte-stream")
@@ -44,6 +61,71 @@ fn h264_caps() -> gst::Caps {
 /// order, CAPS builds the producer.
 fn send_caps(pad: &gst::Pad) -> bool {
 	pad.send_event(gst::event::StreamStart::new("test")) && pad.send_event(gst::event::Caps::new(&h264_caps()))
+}
+
+// A flush re-anchors the pad's timeline and it flows again, so it must stop counting towards the
+// element's EOS aggregation. Leaving it ended let the *next* pad's EOS complete the element while this
+// one was still publishing.
+#[test]
+fn a_flush_after_eos_makes_the_pad_flow_again() {
+	init();
+	let sink = publisher();
+	let first = sink.request_pad_simple("sink_0").expect("request sink_0");
+	let second = sink.request_pad_simple("sink_1").expect("request sink_1");
+	sink.set_state(gst::State::Paused).expect("start the publication");
+	let bus = recording_bus(&sink);
+
+	assert!(first.send_event(gst::event::Eos::new()));
+	assert!(first.send_event(gst::event::FlushStart::new()));
+	assert!(first.send_event(gst::event::FlushStop::builder(true).build()));
+	assert!(second.send_event(gst::event::Eos::new()));
+
+	assert_eq!(
+		posted_eos(&bus),
+		0,
+		"the flushed pad is publishing again, so the element has not ended"
+	);
+	let _ = sink.set_state(gst::State::Null);
+}
+
+// STREAM_START is the same fresh start.
+#[test]
+fn a_new_stream_after_eos_makes_the_pad_flow_again() {
+	init();
+	let sink = publisher();
+	let first = sink.request_pad_simple("sink_0").expect("request sink_0");
+	let second = sink.request_pad_simple("sink_1").expect("request sink_1");
+	sink.set_state(gst::State::Paused).expect("start the publication");
+	let bus = recording_bus(&sink);
+
+	assert!(first.send_event(gst::event::Eos::new()));
+	assert!(first.send_event(gst::event::StreamStart::new("second-stream")));
+	assert!(second.send_event(gst::event::Eos::new()));
+
+	assert_eq!(posted_eos(&bus), 0, "the restarted pad has not ended");
+	let _ = sink.set_state(gst::State::Null);
+}
+
+// Once the publication is finalized the producers are gone, and a flush cannot bring them back. The
+// streaming thread gets an answer instead of an `Ok` written into nothing.
+#[test]
+fn a_buffer_after_the_publication_ended_reports_eos() {
+	init();
+	let sink = publisher();
+	let pad = sink.request_pad_simple("sink_0").expect("request sink_0");
+	sink.set_state(gst::State::Paused).expect("start the publication");
+	pad.set_active(true).expect("activate the pad");
+	assert!(send_caps(&pad));
+	assert!(pad.send_event(gst::event::Eos::new()));
+
+	assert!(pad.send_event(gst::event::FlushStart::new()));
+	assert!(pad.send_event(gst::event::FlushStop::builder(true).build()));
+	assert_eq!(
+		pad.chain(gst::Buffer::new()),
+		Err(gst::FlowError::Eos),
+		"the finalized publication answers rather than accepting the buffer"
+	);
+	let _ = sink.set_state(gst::State::Null);
 }
 
 // Request pads appear and disappear through the real GObject boundary, with no session attached.
