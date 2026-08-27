@@ -51,9 +51,13 @@ pub struct Frame {
 /// allocation and never a spill. Allocate one per task and reuse it for the life of
 /// the group rather than one per read.
 ///
-/// `N` defaults to 32, chosen from `benches/group.rs`: batches of 32 read ~7x faster
-/// than a frame at a time, and 128 buys nothing back for four times the stack. A
-/// default on a const parameter only applies in type position, so name the type to
+/// `N` defaults to 8. Most reads are not big batches: at the live edge a frame arrives
+/// at a time, so the capacity past the first frame or two is idle stack, and a
+/// publisher holds one buffer per in-flight group. 8 costs 384 bytes and still reads
+/// ~5x faster than a frame at a time (`benches/group.rs`). Ask for a larger `N` when
+/// you know you are draining a backlog: 32 is ~8x, for 1.5 KB.
+///
+/// A default on a const parameter only applies in type position, so name the type to
 /// get it: `let buf: frame::Buffer = Buffer::new()`.
 ///
 /// A fill stamps the group's cache access once for the whole batch, which bounds
@@ -62,7 +66,7 @@ pub struct Frame {
 /// [`group::Consumer::keep_alive`] between frames, or the rest of the group is
 /// expired out from under it.
 #[derive(Debug, Default)]
-pub struct Buffer<const N: usize = 32>(ArrayVec<Frame, N>);
+pub struct Buffer<const N: usize = 8>(ArrayVec<Frame, N>);
 
 impl<const N: usize> Buffer<N> {
 	/// An empty buffer with room for `N` frames.

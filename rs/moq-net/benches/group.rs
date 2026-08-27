@@ -131,6 +131,10 @@ fn drain_batched<const N: usize>(consumer: &mut group::Consumer, buf: &mut frame
 /// `single` is one frame at a time via [`group::Consumer::read_frame`]: a lock and a
 /// waker each. `batch{N}` is [`group::Consumer::read_frames`] cloning the ready tail
 /// into a reused `N`-frame buffer, amortizing both across the batch.
+///
+/// Throughput keeps climbing to 32 and stalls after (128 falls out of L1), but the
+/// default capacity is 8: the tail of that curve only pays off for a reader draining a
+/// backlog, while every buffer pays its stack whether or not the batch fills.
 fn bench_read(c: &mut Criterion) {
 	let payload = Bytes::from(vec![0u8; PAYLOAD]);
 	let mut g = c.benchmark_group("group_read_frames");
