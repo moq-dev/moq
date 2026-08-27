@@ -260,6 +260,10 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return Err(Error::ProtocolViolation);
 		}
 
+		// The peer holds this path now. Everything below either accepts the announcement,
+		// replacing this, or declines it and leaves it exactly as reserved.
+		announced.reserve(path.clone());
+
 		if let Some(responder) = responder_origin {
 			// A chain already naming the sender came back through it: a reflection, and
 			// appending the sender again would name it twice. That is legal in a lite
@@ -267,7 +271,6 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			// must not enter the model at all. Zero names nobody, so it may repeat.
 			if responder != crate::Origin::UNKNOWN && hops.contains(&responder) {
 				tracing::debug!(broadcast = %self.log_path(&path), "dropping announce reflected by its sender");
-				announced.declined(path);
 				return Ok(false);
 			}
 			// If the chain is already full, drop the announce. This is the same decision
@@ -277,7 +280,6 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 					broadcast = %self.log_path(&path),
 					"dropping announce; hop chain at MAX_HOPS (possible loop)",
 				);
-				announced.declined(path);
 				return Ok(false);
 			}
 		}
@@ -289,7 +291,6 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// every other version.
 		if hops.contains(&self.self_origin) {
 			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected announce");
-			announced.declined(path);
 			return Ok(false);
 		}
 
@@ -303,7 +304,6 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// id in it twice: a loop, and one a cluster receiver must close the session over.
 		if self.version_lacks_hops() && hops.replace_first(crate::Origin::UNKNOWN, self.session_origin).is_err() {
 			tracing::debug!(broadcast = %self.log_path(&path), "dropping announce reflected by its session");
-			announced.declined(path);
 			return Ok(false);
 		}
 
@@ -331,7 +331,6 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// Reflections are already filtered above.
 		let route = self.announced_route(hops, cost, link_cost);
 		let Ok(source) = self.origin.create_broadcast(&path, route) else {
-			announced.declined(path);
 			return Ok(false);
 		};
 
@@ -2369,6 +2368,17 @@ impl Announced {
 		if let Some(Some(route)) = self.0.insert(path, None) {
 			route.finish();
 		}
+	}
+
+	/// Record an advertisement before deciding what to do with it.
+	///
+	/// The peer owns the path from the moment it announces, whatever the receiver makes
+	/// of it, so the record is taken up front and every way out of the decision leaves it
+	/// standing. Accepting replaces it via [`Self::attach`]. Doing it this way rather than
+	/// at each rejection is what stops the next early return from silently freeing a path
+	/// the peer still holds.
+	fn reserve(&mut self, path: PathOwned) {
+		self.0.insert(path, None);
 	}
 
 	fn attached(&mut self, path: &PathOwned) -> Option<&mut AnnouncedRoute> {
