@@ -2630,6 +2630,11 @@ mod serve_group_test {
 	/// window lets the group expire mid-stream and the stream resets with `Old`.
 	/// That is the point. Holding the group for as long as a wedged peer refuses to
 	/// read would let any subscriber pin cache indefinitely.
+	///
+	/// A batch read takes up to `frame::Buffer` frames out of the group at once and
+	/// owns their payloads, so the grace is that many frames rather than one. It is
+	/// still bounded: the tail past the buffer goes with the group, which is why the
+	/// group here runs longer than one batch.
 	#[tokio::test(start_paused = true)]
 	async fn stalled_write_releases_the_group() {
 		let gate = kio::Producer::new(true);
@@ -2673,12 +2678,21 @@ mod serve_group_test {
 		group
 			.write_frame(Timestamp::from_millis(10).unwrap(), b"second".as_slice())
 			.unwrap();
+		// Enough filler to overrun the publisher's batch, so the tail below is left in
+		// the group rather than taken along with "second".
+		let batch = <frame::Buffer>::new().capacity();
+		for i in 0..batch {
+			group
+				.write_frame(Timestamp::from_millis(11 + i as u64).unwrap(), b"pad".as_slice())
+				.unwrap();
+		}
 		group
 			.write_frame(Timestamp::from_millis(20).unwrap(), b"third".as_slice())
 			.unwrap();
 		group.finish().unwrap();
 
-		// The publisher takes "second" (stamping the group) and blocks writing it.
+		// The publisher takes a batch ending at the filler (stamping the group) and
+		// blocks writing "second".
 		assert!(futures::poll!(serve.as_mut()).is_pending());
 
 		// The write stays blocked well past the retention window while the source
@@ -2700,12 +2714,12 @@ mod serve_group_test {
 		// a routine cancel and it can re-request the sequence.
 		assert_eq!(log.resets(), vec![Error::Old.to_code()]);
 
-		// Only the untaken tail is lost: the frame already handed to the publisher
-		// owns its payload, so the release can't reclaim it mid-write.
+		// Only the untaken tail is lost: the frames already handed to the publisher
+		// own their payloads, so the release can't reclaim them mid-write.
 		let writes = log.writes.lock().unwrap();
 		assert!(
 			writes.windows(b"second".len()).any(|w| w == b"second"),
-			"the in-flight frame still reached the wire"
+			"the in-flight batch still reached the wire"
 		);
 		assert!(
 			!writes.windows(b"third".len()).any(|w| w == b"third"),
