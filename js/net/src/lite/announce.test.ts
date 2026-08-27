@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
-import { OriginSchema } from "../origin.ts";
+import { OriginSchema, UNKNOWN_ORIGIN } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import {
 	type AnnounceBroadcast,
+	AnnounceOk,
 	AnnounceRequest,
 	decodeAnnounceBroadcast,
 	encodeAnnounceBroadcast,
@@ -128,4 +129,23 @@ test("AnnounceRequest drops excludeHop on draft-06", async () => {
 	const with05 = await bytes((w) => msg.encode(w, Version.DRAFT_05));
 	const with06 = await bytes((w) => msg.encode(w, Version.DRAFT_06));
 	expect(with06.byteLength).toBeLessThan(with05.byteLength);
+});
+
+// The draft reserves Hop ID 0 for a responder that was never assigned an id, or that
+// withholds it to obscure its routing. Rejecting it tore down the announce stream of a
+// conforming publisher.
+test("AnnounceOk accepts the reserved unknown origin", async () => {
+	const msg = new AnnounceOk(UNKNOWN_ORIGIN, 3);
+	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, Version.DRAFT_05)));
+	const got = await AnnounceOk.decode(reader, Version.DRAFT_05);
+	expect(got.origin).toBe(UNKNOWN_ORIGIN);
+	expect(got.active).toBe(3);
+});
+
+test("AnnounceOk round-trips a declared origin", async () => {
+	const msg = new AnnounceOk(OriginSchema.parse(42n), 1);
+	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, Version.DRAFT_05)));
+	const got = await AnnounceOk.decode(reader, Version.DRAFT_05);
+	expect(got.origin).toBe(OriginSchema.parse(42n));
+	expect(got.active).toBe(1);
 });

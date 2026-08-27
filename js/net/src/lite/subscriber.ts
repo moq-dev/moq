@@ -5,7 +5,7 @@ import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation, reason } from "../error.ts";
 import * as netGroup from "../group.ts";
-import type { Origin } from "../origin.ts";
+import { type Origin, UNKNOWN_ORIGIN } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
@@ -217,7 +217,11 @@ export class Subscriber {
 			let responderOrigin: Origin | undefined;
 			if (hasAnnounceOk(this.version)) {
 				const ok = await AnnounceOk.decode(stream.reader, this.version);
-				responderOrigin = ok.origin;
+				// A responder that withholds its identity sends the reserved 0. It names
+				// nobody, so folding it into a chain would stamp a placeholder that cannot
+				// close a loop or tell two publishers apart. Treat it as absent instead,
+				// which is the loop-blind route the draft describes.
+				responderOrigin = ok.origin === UNKNOWN_ORIGIN ? undefined : ok.origin;
 			}
 
 			// Every advertisement the peer currently has live, keyed by suffix (at most one

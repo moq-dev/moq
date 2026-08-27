@@ -313,8 +313,9 @@ export class AnnounceInit {
 /// individual Announce messages. Lite05+ only; the successor to AnnounceInit.
 ///
 /// `origin` is the responder's origin id, which the subscriber stamps onto each
-/// announce's hop chain (the publisher no longer stamps itself). `active` is the
-/// number of initial Announce messages that follow immediately.
+/// announce's hop chain (the publisher no longer stamps itself), or the reserved
+/// {@link UNKNOWN_ORIGIN} when the responder has no identity to give. `active` is
+/// the number of initial Announce messages that follow immediately.
 export class AnnounceOk {
 	origin: Origin;
 	active: number;
@@ -336,10 +337,10 @@ export class AnnounceOk {
 	}
 
 	static async #decode(r: Reader): Promise<AnnounceOk> {
-		const raw = await r.u62();
-		// A zero responder id is never legitimate; it would stamp a placeholder onto chains.
-		if (raw === 0n) throw new Error("announce ok origin must be non-zero");
-		const origin = OriginSchema.parse(raw);
+		// The draft reserves 0 for "unknown": the responder was never assigned an id, or
+		// withholds it to obscure its routing. It names nobody, so callers must not stamp
+		// it onto a hop chain, but it is a legal message and not grounds to drop the stream.
+		const origin = OriginSchema.parse(await r.u62());
 		const active = await r.u53();
 		return new AnnounceOk(origin, active);
 	}
