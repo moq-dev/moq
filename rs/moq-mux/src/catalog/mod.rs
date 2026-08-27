@@ -24,6 +24,7 @@ pub mod hang;
 pub mod msf;
 
 mod consumer;
+mod entry;
 mod estimate;
 mod format;
 mod producer;
@@ -32,6 +33,7 @@ mod stream;
 mod tracks;
 
 pub use consumer::Consumer;
+pub use entry::Entry;
 pub use estimate::{Estimate, Estimator};
 pub use format::*;
 pub use producer::{Config, Guard, Producer};

@@ -139,19 +139,23 @@ let mut thumbnail = catalog.binary_snapshot("thumbnail", binary::Config::default
 thumbnail.update(jpeg)?;
 ```
 
-There is a producer type per mode (`json_snapshot` / `json_stream`, `binary_snapshot` / `binary_stream`) so `append` on a latest-value track does not compile. The read side is one type instead, because the mode is the publisher's choice and a consumer only learns it from the catalog:
+There is a producer type per mode (`json_snapshot` / `json_stream`, `binary_snapshot` / `binary_stream`) so `append` on a latest-value track does not compile.
+
+The read side names the track once. `catalog.json_track(name)` returns an entry pairing the name with its config, and the entry subscribes itself:
 
 ```rust
-let entry = catalog.json.tracks.get("chat").expect("no chat track");
-match json::Consumer::<Message>::subscribe(&broadcast, "chat", entry).await? {
-    json::Consumer::Stream(mut c) => while let Some(msg) = c.next().await? { /* ... */ },
-    json::Consumer::Snapshot(mut c) => { /* ... */ }
+let entry = catalog.json_track("chat").expect("no chat track");
+let mut chat = entry.subscribe::<Message>(&source).await?;
+while let Some(message) = chat.next().await? {
+    // ...
 }
 ```
 
-The entry supplies the track's mode and compression, so a reader cannot pair the wrong ones with the track.
+The entry supplies the track's mode and compression, so a reader cannot pair the wrong ones with the track, and it resolves through a `Source`, so an entry pointing at a sibling broadcast is followed rather than read from the wrong place.
 
-In the browser the pieces are the same, assembled by hand: read the entry from the catalog, subscribe to the track by name, and hand it to `@moq/json` (`Snapshot` or `Stream`) or `@moq/binary` with the entry's `compression` flag. Discovery is just the catalog: iterate `catalog.json.tracks` and `catalog.binary.tracks`, since nothing else in the broadcast announces these tracks.
+There is one consumer type rather than one per mode. Both modes hand the caller the same thing, a sequence of values ending when the track does, so a reader writes one loop either way; what differs is loss semantics, and `consumer.mode()` answers that for the rare reader that can only work with one. Discovery is the same entries: `catalog.json_tracks()` and `catalog.binary_tracks()` enumerate them, since the catalog is the only thing that announces a data track.
+
+In the browser the pieces are the same, assembled by hand: read the entry from `catalog.json.tracks` (or `catalog.binary.tracks`), subscribe to the track by name, and hand it to `@moq/json` (`Snapshot` or `Stream`) or `@moq/binary` with the entry's `compression` flag.
 
 ### Extensions
 

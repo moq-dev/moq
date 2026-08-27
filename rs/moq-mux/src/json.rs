@@ -7,8 +7,8 @@
 //!
 //! The write and read sides are shaped differently on purpose. A publisher knows its mode at
 //! compile time, so [`Snapshot`] and [`Stream`] are distinct types and `append`-on-a-snapshot can't
-//! be written. A consumer only learns the mode from the catalog, so [`Consumer`] is one enum it
-//! matches on.
+//! be written. A consumer only learns the mode from the catalog, so there is one [`Consumer`] that
+//! reads either; it exposes [`mode`](Consumer::mode) for a reader that needs to know.
 //!
 //! Mint a producer from the catalog:
 //!
@@ -25,6 +25,25 @@
 //!
 //! The catalog entry is written when the producer is created and removed when it drops, so a track
 //! is never advertised without a publisher behind it.
+//!
+//! Read one back off the catalog, naming it once:
+//!
+//! ```no_run
+//! # use serde::{Deserialize, Serialize};
+//! # #[derive(Serialize, Deserialize)]
+//! # struct Message { text: String }
+//! # async fn example(
+//! #     source: &moq_mux::Source,
+//! #     catalog: &moq_mux::catalog::hang::Catalog,
+//! # ) -> moq_mux::Result<()> {
+//! let entry = catalog.json_track("chat").expect("no chat track");
+//! let mut chat = entry.subscribe::<Message>(source).await?;
+//! while let Some(message) = chat.next().await? {
+//!     // ...
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -161,73 +180,93 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 	}
 }
 
-/// Reads a JSON track in whichever mode its catalog entry declares.
+/// Reads a JSON track, in whichever mode its catalog entry declares.
 ///
-/// One type rather than two because the mode is the publisher's choice, learned at runtime. Match
-/// on it, or narrow with [`snapshot`](Self::snapshot) / [`stream`](Self::stream) when the
-/// application only handles one.
-#[non_exhaustive]
-pub enum Consumer<T> {
-	/// The track is a latest-value document ([`Mode::Snapshot`]).
-	Snapshot(moq_json::snapshot::Consumer<T>),
+/// One type rather than one per mode: both modes hand the caller the same thing, a sequence of `T`
+/// ending when the track does, so a reader writes one loop either way. What differs is loss
+/// semantics, and that is a property to ask about ([`mode`](Self::mode)) rather than a fork every
+/// caller pays for. A reader that genuinely requires losslessness checks the mode and bails.
+pub struct Consumer<T> {
+	inner: Inner<T>,
+	mode: Mode,
+}
 
-	/// The track is an append log ([`Mode::Stream`]).
+/// Which moq-json consumer is doing the reading. Private: the caller sees one `Consumer`.
+enum Inner<T> {
+	Snapshot(moq_json::snapshot::Consumer<T>),
 	Stream(moq_json::stream::Consumer<T>),
 }
 
 impl<T: DeserializeOwned> Consumer<T> {
-	/// Subscribe to track `name` in `broadcast`, reading it as its catalog entry declares.
+	/// Read an already-subscribed track as its catalog entry declares.
 	///
-	/// The entry supplies the mode and compression, so a reader can't pair the wrong ones with the
-	/// track. An entry whose [`broadcast`](JsonConfig::broadcast) names a different broadcast must be
-	/// resolved first (see [`Source`](crate::Source)) and then read through
-	/// [`from_track`](Self::from_track).
+	/// The escape hatch for a caller that resolved the subscription itself. Prefer
+	/// [`Entry::subscribe`](crate::catalog::Entry::subscribe), which resolves the track (including a
+	/// cross-broadcast [`broadcast`](JsonConfig::broadcast) reference) from the catalog for you.
 	///
 	/// Errors if the entry declares a mode or compression this build doesn't implement, which is a
 	/// track a consumer must skip rather than guess at.
-	pub async fn subscribe(
-		broadcast: &moq_net::broadcast::Consumer,
-		name: &str,
-		config: &JsonConfig,
-	) -> crate::Result<Self> {
-		let track = broadcast.track(name)?.subscribe(None).await?;
-		Self::from_track(track, config)
-	}
-
-	/// Read an already-subscribed track as its catalog entry declares.
-	///
-	/// The counterpart to [`subscribe`](Self::subscribe) for a caller that resolved the track
-	/// itself, typically to honor a cross-broadcast [`broadcast`](JsonConfig::broadcast) reference.
 	pub fn from_track(track: moq_net::track::Subscriber, config: &JsonConfig) -> crate::Result<Self> {
 		let compression = crate::compression(config.compression.as_ref())?;
 
-		Ok(match &config.mode {
-			Mode::Snapshot => Self::Snapshot(moq_json::snapshot::Consumer::new(
+		let inner = match &config.mode {
+			Mode::Snapshot => Inner::Snapshot(moq_json::snapshot::Consumer::new(
 				track,
 				moq_json::snapshot::ConsumerConfig::default().with_compression(compression),
 			)),
-			Mode::Stream => Self::Stream(moq_json::stream::Consumer::new(
+			Mode::Stream => Inner::Stream(moq_json::stream::Consumer::new(
 				track,
 				moq_json::stream::ConsumerConfig::default().with_compression(compression),
 			)),
 			other => return Err(crate::Error::UnsupportedMode(other.as_str().to_string())),
+		};
+
+		Ok(Self {
+			inner,
+			mode: config.mode.clone(),
 		})
 	}
 
-	/// The snapshot consumer, or `None` if the track is an append log.
-	pub fn snapshot(self) -> Option<moq_json::snapshot::Consumer<T>> {
-		match self {
-			Self::Snapshot(consumer) => Some(consumer),
-			_ => None,
-		}
+	/// The mode the publisher chose.
+	///
+	/// [`Mode::Snapshot`] is lossy: intermediate values are superseded and only the newest is
+	/// yielded. [`Mode::Stream`] preserves every record. Check this when the application can only
+	/// work with one of them.
+	pub fn mode(&self) -> &Mode {
+		&self.mode
 	}
 
-	/// The stream consumer, or `None` if the track is a latest-value document.
-	pub fn stream(self) -> Option<moq_json::stream::Consumer<T>> {
-		match self {
-			Self::Stream(consumer) => Some(consumer),
-			_ => None,
+	/// Get the next value, or `None` once the track ends.
+	pub async fn next(&mut self) -> crate::Result<Option<T>> {
+		kio::wait(|waiter| self.poll_next(waiter)).await
+	}
+
+	/// Poll for the next value, without blocking.
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> std::task::Poll<crate::Result<Option<T>>> {
+		let result = match &mut self.inner {
+			Inner::Snapshot(consumer) => consumer.poll_next(waiter),
+			Inner::Stream(consumer) => consumer.poll_next(waiter),
+		};
+
+		match result {
+			std::task::Poll::Ready(value) => std::task::Poll::Ready(value.map_err(Into::into)),
+			std::task::Poll::Pending => std::task::Poll::Pending,
 		}
+	}
+}
+
+impl crate::catalog::Entry<'_, JsonConfig> {
+	/// Subscribe to this track and read it as the entry declares.
+	///
+	/// Resolves the track through `source`, so an entry whose [`broadcast`](JsonConfig::broadcast)
+	/// field names a sibling broadcast is followed rather than silently read from the catalog's own.
+	///
+	/// Errors if the entry declares a mode or compression this build doesn't implement.
+	pub async fn subscribe<T: DeserializeOwned>(&self, source: &crate::Source) -> crate::Result<Consumer<T>> {
+		let track = source
+			.subscribe_track(self.config().broadcast.as_ref(), self.name())
+			.await?;
+		Consumer::from_track(track, self.config())
 	}
 }
 
@@ -256,20 +295,13 @@ mod test {
 	}
 
 	/// Drain every value a consumer currently has, without blocking.
-	fn drain(consumer: Consumer<Value>) -> Vec<Value> {
+	///
+	/// One loop whichever mode the publisher chose, which is the point of the single `Consumer`.
+	fn drain(mut consumer: Consumer<Value>) -> Vec<Value> {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
-		match consumer {
-			Consumer::Snapshot(mut c) => {
-				while let Poll::Ready(Ok(Some(value))) = c.poll_next(&waiter) {
-					out.push(value);
-				}
-			}
-			Consumer::Stream(mut c) => {
-				while let Poll::Ready(Ok(Some(value))) = c.poll_next(&waiter) {
-					out.push(value);
-				}
-			}
+		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
+			out.push(value);
 		}
 		out
 	}
@@ -289,7 +321,7 @@ mod test {
 
 		// The catalog is the only thing the reader is told; mode and compression come from it.
 		let consumer = Consumer::from_track(chat.consume(), &entry(&catalog, "chat")).unwrap();
-		assert!(matches!(consumer, Consumer::Stream(_)));
+		assert_eq!(consumer.mode(), &Mode::Stream);
 		assert_eq!(drain(consumer), expected);
 	}
 
@@ -304,7 +336,7 @@ mod test {
 
 		// A late reader only sees the newest value, which is the point of snapshot mode.
 		let consumer = Consumer::from_track(status.consume(), &entry(&catalog, "status")).unwrap();
-		assert!(matches!(consumer, Consumer::Snapshot(_)));
+		assert_eq!(consumer.mode(), &Mode::Snapshot);
 		assert_eq!(drain(consumer), vec![json!({ "live": true })]);
 	}
 
@@ -361,6 +393,47 @@ mod test {
 			Err(crate::Error::Hang(hang::Error::Duplicate(_)))
 		));
 		assert_eq!(catalog.snapshot().json.tracks.get("chat"), Some(&existing));
+	}
+
+	/// The catalog is the only thing that announces a data track, so walking it is the discovery
+	/// path. Each entry carries its own name, so nothing has to be threaded alongside it.
+	#[test]
+	fn the_catalog_enumerates_its_tracks() {
+		let (_broadcast, catalog) = catalog();
+		let _chat = catalog.json_stream::<Value>("chat", Config::default()).unwrap();
+		let _status = catalog.json_snapshot::<Value>("status", Config::default()).unwrap();
+
+		let snapshot = catalog.snapshot();
+		let found: Vec<(&str, &Mode)> = snapshot.json_tracks().map(|t| (t.name(), &t.config().mode)).collect();
+		assert_eq!(found, vec![("chat", &Mode::Stream), ("status", &Mode::Snapshot)]);
+
+		// A name the catalog doesn't list has no entry, rather than a config to misread.
+		assert!(snapshot.json_track("nope").is_none());
+
+		// The entry derefs to its config, so the fields read directly.
+		let chat = snapshot.json_track("chat").expect("missing entry");
+		assert_eq!(chat.name(), "chat");
+		assert_eq!(chat.mode, Mode::Stream);
+	}
+
+	/// The whole read path: name the track once, and the entry resolves the subscription (through
+	/// `Source`, so a cross-broadcast reference is followed) and says how to decode it.
+	#[tokio::test]
+	async fn an_entry_subscribes_and_reads() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let source = crate::source::announced(&broadcast.consume());
+
+		let mut chat = catalog.json_stream::<Value>("chat", Config::default()).unwrap();
+		chat.append(&json!({ "text": "hello" })).unwrap();
+		chat.finish().unwrap();
+
+		let snapshot = catalog.snapshot();
+		let entry = snapshot.json_track("chat").expect("missing entry");
+		let mut consumer = entry.subscribe::<Value>(&source).await.unwrap();
+
+		assert_eq!(consumer.next().await.unwrap(), Some(json!({ "text": "hello" })));
+		assert_eq!(consumer.next().await.unwrap(), None);
 	}
 
 	/// A consumer that can't tell a log from a latest-value document would silently drop records,

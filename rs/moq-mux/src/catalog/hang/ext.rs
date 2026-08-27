@@ -118,6 +118,45 @@ pub struct Catalog<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Catalog<E> {
+	/// The JSON track named `name`, or `None` if the catalog doesn't list one.
+	///
+	/// The returned [`Entry`](crate::catalog::Entry) carries the name along with the config, so
+	/// reading the track is one call that can't mismatch the two:
+	/// `catalog.json_track("chat")?.subscribe::<Message>(&source).await?`.
+	pub fn json_track(&self, name: &str) -> Option<crate::catalog::Entry<'_, hang::catalog::JsonConfig>> {
+		let (name, config) = self.json.tracks.get_key_value(name)?;
+		Some(crate::catalog::Entry::new(name, config))
+	}
+
+	/// Every JSON track the catalog lists, in name order.
+	///
+	/// This is the discovery path: the catalog is the only thing that announces a data track, so a
+	/// consumer finds them by walking this.
+	pub fn json_tracks(&self) -> impl Iterator<Item = crate::catalog::Entry<'_, hang::catalog::JsonConfig>> {
+		self.json
+			.tracks
+			.iter()
+			.map(|(name, config)| crate::catalog::Entry::new(name, config))
+	}
+
+	/// The binary track named `name`, or `None` if the catalog doesn't list one.
+	///
+	/// See [`json_track`](Self::json_track).
+	pub fn binary_track(&self, name: &str) -> Option<crate::catalog::Entry<'_, hang::catalog::BinaryConfig>> {
+		let (name, config) = self.binary.tracks.get_key_value(name)?;
+		Some(crate::catalog::Entry::new(name, config))
+	}
+
+	/// Every binary track the catalog lists, in name order.
+	///
+	/// See [`json_tracks`](Self::json_tracks).
+	pub fn binary_tracks(&self) -> impl Iterator<Item = crate::catalog::Entry<'_, hang::catalog::BinaryConfig>> {
+		self.binary
+			.tracks
+			.iter()
+			.map(|(name, config)| crate::catalog::Entry::new(name, config))
+	}
+
 	/// The base catalog carrying just the media sections, used to derive the MSF track.
 	///
 	/// MSF describes media only, so the data sections are deliberately left out.
