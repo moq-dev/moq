@@ -670,8 +670,10 @@ fn request_host(uri: &http::Uri, headers: &http::HeaderMap) -> Option<String> {
 			headers
 				.get(http::header::HOST)
 				.and_then(|host| host.to_str().ok())
-				// A `Host` header may carry a port; `Authority::host` already strips one.
-				.map(|host| host.rsplit_once(':').map_or(host, |(host, _)| host).to_string())
+				// Parsed rather than split on the last colon, which would truncate a
+				// bracketed IPv6 literal (`[2001:db8::1]`) at its own separator.
+				.and_then(|host| host.parse::<http::uri::Authority>().ok())
+				.map(|authority| authority.host().to_string())
 		})
 		.map(|host| host.to_ascii_lowercase())
 		.filter(|host| !host.is_empty())
@@ -950,6 +952,20 @@ mod tests {
 		headers.insert(http::header::HOST, "Customer.Example.com:4443".parse().unwrap());
 		assert_eq!(request_host(&uri, &headers), Some("customer.example.com".to_string()));
 		assert_eq!(request_host(&uri, &http::HeaderMap::new()), None);
+	}
+
+	/// A bracketed IPv6 literal carries its own colons, so splitting on the last
+	/// one truncates the address instead of stripping a port.
+	#[test]
+	fn request_host_keeps_ipv6_literals_intact() {
+		let uri: http::Uri = "/announced".parse().unwrap();
+		let host = |value: &str| {
+			let mut headers = http::HeaderMap::new();
+			headers.insert(http::header::HOST, value.parse().unwrap());
+			request_host(&uri, &headers)
+		};
+		assert_eq!(host("[2001:db8::1]"), Some("[2001:db8::1]".to_string()));
+		assert_eq!(host("[2001:db8::1]:4443"), Some("[2001:db8::1]".to_string()));
 	}
 
 	#[test]

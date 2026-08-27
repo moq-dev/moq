@@ -982,13 +982,7 @@ pub struct AuthToken {
 impl AuthToken {
 	/// Wait until the backing credential expires, or forever when it has no expiry.
 	pub(crate) async fn expired(&self) {
-		match self.expires {
-			Some(expires) => {
-				let remaining = expires.duration_since(std::time::SystemTime::now()).unwrap_or_default();
-				tokio::time::sleep(remaining).await
-			}
-			None => std::future::pending().await,
-		}
+		elapsed(self.expires).await
 	}
 
 	/// Construct a token for a peer that was authenticated at the TLS layer
@@ -1134,6 +1128,20 @@ enum Fetched {
 	Refused,
 	/// The endpoint could not answer.
 	Unavailable,
+}
+
+/// Resolves once `bound` passes, or pends forever without one.
+///
+/// A bound already in the past resolves immediately rather than saturating, so a
+/// caller racing this never serves past it.
+async fn elapsed(bound: Option<std::time::SystemTime>) {
+	match bound {
+		Some(bound) => {
+			let remaining = bound.duration_since(std::time::SystemTime::now()).unwrap_or_default();
+			tokio::time::sleep(remaining).await
+		}
+		None => std::future::pending().await,
+	}
 }
 
 /// What the auth API's `alias` may do to the connection path.
@@ -1871,18 +1879,9 @@ impl Auth {
 			// Race the cadence against the bound: a re-check that shortened `exp`
 			// below the next cadence has to close the session at the new bound, not
 			// at whenever the endpoint next happens to be asked.
-			let elapsed = async {
-				match bound {
-					Some(bound) => {
-						let remaining = bound.duration_since(std::time::SystemTime::now()).unwrap_or_default();
-						tokio::time::sleep(remaining).await
-					}
-					None => std::future::pending().await,
-				}
-			};
 			tokio::select! {
 				_ = tokio::time::sleep_until(next) => {}
-				_ = elapsed => return Expired::Credential,
+				_ = elapsed(bound) => return Expired::Credential,
 			}
 
 			// Bound the attempt by the deadline so a peer that accepts a request and
@@ -1891,9 +1890,14 @@ impl Auth {
 			// would otherwise cancel the very re-check that was about to RENEW the
 			// grant, closing every session without the endpoint ever being asked.
 			let budget = deadline.max(Instant::now() + crate::http_client::REQUEST_TIMEOUT);
-			let outcome = match tokio::time::timeout_at(budget, self.recheck(grant)).await {
-				Ok(outcome) => outcome,
-				Err(_) => return Expired::Stale,
+			let outcome = tokio::select! {
+				outcome = tokio::time::timeout_at(budget, self.recheck(grant)) => match outcome {
+					Ok(outcome) => outcome,
+					Err(_) => return Expired::Stale,
+				},
+				// The bound passing mid-request ends the session there; a stalled
+				// endpoint must not carry it to the request timeout.
+				_ = elapsed(bound) => return Expired::Credential,
 			};
 			match outcome {
 				Recheck::Valid { hints, expires } => {
@@ -5689,6 +5693,36 @@ api = "https://api.example.com/access"
 		assert!(
 			matches!(result, Err(AuthError::IncorrectRoot)),
 			"a reshaping alias must be refused in token mode, got {result:?}"
+		);
+		Ok(())
+	}
+
+	/// The bound has to hold while a re-check is IN FLIGHT, not just between them.
+	/// A stalled endpoint would otherwise carry an expired session all the way to
+	/// the request timeout, well past what the credential granted.
+	#[tokio::test]
+	async fn a_stalled_recheck_still_honors_the_bound() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.and(path_matcher("/auth"))
+			// Far longer than the bound below, and longer than the cadence.
+			.respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(30)))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_api_proxy(&server).await;
+		let mut grant = test_grant(&auth, Some("opaque".into()), Duration::from_millis(100));
+		grant.expires = Some(std::time::SystemTime::now() + Duration::from_millis(600));
+
+		let start = std::time::Instant::now();
+		let reason = tokio::time::timeout(Duration::from_secs(5), auth.revalidate(&grant))
+			.await
+			.expect("the bound must resolve while the re-check hangs");
+		assert_eq!(reason, Expired::Credential);
+		assert!(
+			start.elapsed() < Duration::from_secs(3),
+			"closed on the request timeout, not the bound: {:?}",
+			start.elapsed()
 		);
 		Ok(())
 	}
