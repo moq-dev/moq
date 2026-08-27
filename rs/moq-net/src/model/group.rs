@@ -518,6 +518,13 @@ impl Producer {
 	/// [`abort`](Self::abort). The handle also keeps the cached frames readable.
 	pub fn finish(&mut self) -> Result<()> {
 		let mut state = modify(&self.state)?;
+		// The recorded count is what tells readers the group ended, so an open frame
+		// would be left out of it and read as a clean end rather than a frame still
+		// coming. Another clone can reach this while the frame's producer holds the
+		// handle, so refuse rather than strand it. Use `abort` to end a group early.
+		if state.partial.is_some() {
+			return Err(Error::FrameOpen);
+		}
 		state.fin = Some(state.offset + state.frames.len());
 		Ok(())
 	}
@@ -982,6 +989,43 @@ mod test {
 
 		let mut consumer = other.consume();
 		assert_eq!(drain::<4>(&mut consumer), ["open", "batch"]);
+	}
+
+	/// Finishing records the frame count, and a batch read consults that count to
+	/// decide the group ended. `create_frame` borrows its producer exclusively, but
+	/// `Producer` is `Clone`, so a second handle can finish the group while the first
+	/// is still writing a frame. The open frame would be left out of the count and
+	/// read as a clean end of group, so a publisher would close the stream without
+	/// ever sending it.
+	#[test]
+	fn finish_is_refused_while_a_frame_is_open() {
+		let mut producer = Info { sequence: 0 }.produce();
+		let mut other = producer.clone();
+		let mut consumer = producer.consume();
+
+		let mut frame = producer
+			.create_frame(frame::Info {
+				size: 4,
+				timestamp: Timestamp::ZERO,
+			})
+			.unwrap();
+
+		assert!(matches!(other.finish(), Err(Error::FrameOpen)));
+
+		// Not "the group ended": the batch read parks until the frame lands.
+		let mut buf = frame::Buffer::<4>::new();
+		assert!(
+			consumer.read_frames(&mut buf).now_or_never().is_none(),
+			"an open frame must not read as the end of the group"
+		);
+
+		frame.write(&b"open"[..]).unwrap();
+		frame.finish().unwrap();
+		other.finish().unwrap();
+
+		let batch = consumer.read_frames(&mut buf).now_or_never().unwrap().unwrap();
+		assert_eq!(batch.len(), 1);
+		assert_eq!(batch[0].payload, Bytes::from_static(b"open"));
 	}
 
 	#[test]
