@@ -116,6 +116,22 @@ pub(super) fn client_config(settings: &ResolvedSettings) -> moq_native::ClientCo
 	config
 }
 
+/// Permission for one session's task to report a terminal failure on the bus.
+///
+/// Held between creating the session and installing it on the element. Marking it releases the task;
+/// dropping it unmarked leaves the task parked, which is what a failed start wants, since the session
+/// it belonged to is torn down with it.
+pub(crate) struct SessionRegistration {
+	gate: Arc<tokio::sync::Notify>,
+}
+
+impl SessionRegistration {
+	/// Release the task: the element installed this session, so its errors now have somewhere to land.
+	pub(crate) fn mark_registered(self) {
+		self.gate.notify_one();
+	}
+}
+
 /// A running session: the connect/lifecycle task plus the state the property getters read. Dropping the
 /// `Session` (or the producers held by the element) tears it down.
 pub(crate) struct Session {
@@ -166,7 +182,12 @@ impl Session {
 	pub fn start(
 		settings: ResolvedSettings,
 		element: glib::WeakRef<Element>,
-	) -> Result<(Self, moq_net::broadcast::Producer, moq_mux::catalog::Producer)> {
+	) -> Result<(
+		Self,
+		SessionRegistration,
+		moq_net::broadcast::Producer,
+		moq_mux::catalog::Producer,
+	)> {
 		// Producer setup may touch tokio time (group eviction), so run it inside the runtime context.
 		let _rt = RUNTIME.enter();
 
@@ -194,7 +215,18 @@ impl Session {
 		let send_bandwidth = reconnect.send_bandwidth();
 		let recv_bandwidth = reconnect.recv_bandwidth();
 
-		let join = RUNTIME.spawn(forward(reconnect, origin, status.clone(), state.clone(), element));
+		// The task is spawned parked. An immediate rejection would otherwise race the element installing
+		// this session: the error would arrive while there is no live session to attribute it to, and the
+		// gate below would discard a legitimate current failure as a stale one.
+		let gate = Arc::new(tokio::sync::Notify::new());
+		let join = RUNTIME.spawn(forward(
+			reconnect,
+			origin,
+			status.clone(),
+			state.clone(),
+			element,
+			gate.clone(),
+		));
 
 		Ok((
 			Self {
@@ -204,6 +236,7 @@ impl Session {
 				recv_bandwidth,
 				state,
 			},
+			SessionRegistration { gate },
 			broadcast,
 			catalog,
 		))
@@ -259,6 +292,24 @@ impl Drop for Session {
 /// [`Session`]'s `Drop` aborts this task, which drops the `Reconnect` handle and quietly tears the loop
 /// down.
 async fn forward(
+	reconnect: moq_native::Reconnect,
+	origin: moq_net::origin::Producer,
+	status: Arc<Status>,
+	state: SessionState,
+	element: glib::WeakRef<Element>,
+	registered: Arc<tokio::sync::Notify>,
+) {
+	wait_for_registration(registered).await;
+	forward_registered(reconnect, origin, status, state, element).await;
+}
+
+/// `Notify` keeps the permit, so marking before the task parks here is not a lost wakeup. A session
+/// that is never installed is aborted by `Session`'s `Drop`, which unparks nothing.
+async fn wait_for_registration(registered: Arc<tokio::sync::Notify>) {
+	registered.notified().await;
+}
+
+async fn forward_registered(
 	mut reconnect: moq_native::Reconnect,
 	origin: moq_net::origin::Producer,
 	status: Arc<Status>,
@@ -331,5 +382,34 @@ fn notify(element: &glib::WeakRef<Element>, props: &[&str]) {
 		for prop in props {
 			obj.notify(prop);
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	// The regression: `forward` used to be runnable the instant it was spawned, so a fast rejection
+	// could report before `start_session` installed the session. The element then saw no live session
+	// and discarded a legitimate current error as a stale one.
+	#[tokio::test]
+	async fn a_terminal_result_waits_until_the_session_is_registered() {
+		let gate = Arc::new(tokio::sync::Notify::new());
+		let registration = SessionRegistration { gate: gate.clone() };
+		let state = SessionState::new();
+		let task_state = state.clone();
+		let (entered, reached) = tokio::sync::oneshot::channel();
+
+		let task = tokio::spawn(async move {
+			entered.send(()).unwrap();
+			wait_for_registration(gate).await;
+			task_state.fail();
+		});
+		reached.await.unwrap();
+		assert!(!state.failed(), "the terminal result stayed parked");
+
+		registration.mark_registered();
+		task.await.unwrap();
+		assert!(state.failed(), "registration released it");
 	}
 }

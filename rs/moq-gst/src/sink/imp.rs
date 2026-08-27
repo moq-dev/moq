@@ -424,10 +424,11 @@ impl MoqSink {
 			gst::error!(CAT, obj = self.obj(), "invalid settings: {err:#}");
 			gst::StateChangeError
 		})?;
-		let (session, broadcast, catalog) = Session::start(settings, self.obj().downgrade()).map_err(|err| {
-			gst::error!(CAT, obj = self.obj(), "failed to start session: {err:?}");
-			gst::StateChangeError
-		})?;
+		let (session, registration, broadcast, catalog) =
+			Session::start(settings, self.obj().downgrade()).map_err(|err| {
+				gst::error!(CAT, obj = self.obj(), "failed to start session: {err:?}");
+				gst::StateChangeError
+			})?;
 		*self.state.lock().unwrap() = Some(State {
 			session,
 			broadcast,
@@ -436,6 +437,8 @@ impl MoqSink {
 			ended: HashSet::new(),
 			eos_posted: false,
 		});
+		// Only now can a terminal error be attributed to this session rather than discarded as stale.
+		registration.mark_registered();
 		Ok(())
 	}
 
