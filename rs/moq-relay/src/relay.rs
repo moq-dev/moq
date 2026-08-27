@@ -268,6 +268,19 @@ impl Relay {
 		// relay that is about to exit.
 		let started = cluster.clone().start().await.context("cluster failed to start")?;
 
+		// Before the readiness notify, for the same reason the cluster starts
+		// before it: an unsupported kernel, a refused ring, or a certificate
+		// quiche will not load fails here, and reporting ready first would
+		// release the units depending on a relay that is about to exit.
+		#[cfg(all(target_os = "linux", feature = "io-uring"))]
+		let mut uring = uring;
+		#[cfg(all(target_os = "linux", feature = "io-uring"))]
+		if let Some(uring) = uring.as_mut() {
+			uring
+				.serve(cluster.clone(), auth.clone(), shutdown.clone())
+				.context("failed to start the io_uring QUIC workers")?;
+		}
+
 		#[cfg(unix)]
 		// Notify systemd that we're ready after all initialization is complete
 		let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
@@ -277,16 +290,6 @@ impl Relay {
 		#[cfg(not(feature = "jemalloc"))]
 		let jemalloc = std::future::pending::<anyhow::Result<()>>();
 
-		// The io_uring workers own their accept loops outright: serving starts
-		// here, and the group only reports a fatal error back.
-		#[cfg(all(target_os = "linux", feature = "io-uring"))]
-		let mut uring = uring;
-		#[cfg(all(target_os = "linux", feature = "io-uring"))]
-		if let Some(uring) = uring.as_mut() {
-			uring
-				.serve(cluster.clone(), auth.clone(), shutdown.clone())
-				.context("failed to start the io_uring QUIC workers")?;
-		}
 		#[cfg(all(target_os = "linux", feature = "io-uring"))]
 		let uring_serving = uring.is_some();
 		#[cfg(all(target_os = "linux", feature = "io-uring"))]
@@ -341,8 +344,15 @@ impl Relay {
 		let quic_on_workers = workers.is_some() || uring_serving;
 		#[cfg(not(all(target_os = "linux", feature = "io-uring")))]
 		let quic_on_workers = workers.is_some();
+		// Iroh is not an `accept(2)` listener, so it never shows up in the
+		// health list; pending on the shared loop would leave its endpoint
+		// unpolled and every inbound `iroh://` connection hanging.
+		#[cfg(feature = "iroh")]
+		let has_iroh = server.iroh_endpoint().is_some();
+		#[cfg(not(feature = "iroh"))]
+		let has_iroh = false;
 		let serve_shared = {
-			let idle = quic_on_workers && server.accept_health().is_empty();
+			let idle = quic_on_workers && server.accept_health().is_empty() && !has_iroh;
 			let cluster = cluster.clone();
 			let auth = auth.clone();
 			let shutdown = shutdown.clone();

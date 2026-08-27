@@ -120,6 +120,26 @@ impl Workers {
 		if !listen.tls.generate.is_empty() {
 			anyhow::bail!("io_uring workers cannot use listen.tls.generate; provide a certificate file");
 		}
+
+		// Everything below is a setting this listener cannot deliver. Refusing
+		// beats starting and quietly behaving differently from what the
+		// operator configured, which is the whole failure mode this mode is
+		// most likely to produce.
+		if !listen.tls.root.is_empty() {
+			anyhow::bail!(
+				"io_uring workers do not implement mTLS client roots (listen.tls.root); \
+				 use token auth, or the tokio workers"
+			);
+		}
+		if listen.lb_id.is_some() {
+			anyhow::bail!(
+				"io_uring workers issue shard-steered connection ids and cannot also carry a \
+				 QUIC-LB server id (listen.lb_id)"
+			);
+		}
+		if let Some(backend) = listen.backend.as_ref() {
+			anyhow::bail!("io_uring workers serve their own QUIC stack; listen.backend={backend:?} cannot apply");
+		}
 		let (cert, key) = match (listen.tls.cert.as_slice(), listen.tls.key.as_slice()) {
 			([cert], [key]) => (cert.clone(), key.clone()),
 			([], []) => anyhow::bail!("io_uring workers need a certificate (listen.tls.cert/key)"),
@@ -133,9 +153,16 @@ impl Workers {
 
 		// One resolution for the whole group, so a DNS answer that rotates
 		// between queries cannot hand members different addresses.
+		//
+		// Named rather than defaulted: an unset `bind` means stream-only when
+		// a tcp/unix listener is configured, and defaulting to the usual
+		// address here would open a QUIC listener nobody asked for.
 		let requested: SocketAddr = {
 			use std::net::ToSocketAddrs;
-			let bind = listen.bind.as_deref().unwrap_or("[::]:443");
+			let bind = listen
+				.bind
+				.as_deref()
+				.context("io_uring workers need an explicit listen.bind")?;
 			bind.to_socket_addrs()
 				.with_context(|| format!("failed to resolve {bind}"))?
 				.next()
@@ -183,6 +210,17 @@ impl Workers {
 			.collect();
 		if alpns.is_empty() {
 			anyhow::bail!("io_uring workers speak moq-lite only, and the version restriction leaves none");
+		}
+		// lite 01/02 have no ALPN of their own: they negotiate over the shared
+		// `moql` one through the bidi SETUP exchange, which
+		// `accept_request_lite` does not implement. The default set carries
+		// them and simply does not advertise them, like the moq-transport
+		// versions below; asking for one *by name* is the case that would
+		// start cleanly and then fail every handshake.
+		if !listen.version.is_empty()
+			&& let Some(version) = versions.iter().find(|version| version.uses_setup_negotiation())
+		{
+			anyhow::bail!("io_uring workers cannot serve {version:?}, which negotiates its version in the SETUP");
 		}
 		if versions.iter().any(|version| !version.is_lite()) {
 			tracing::warn!(
@@ -340,11 +378,17 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		quic.qlog.is_none(),
 		"io_uring workers cannot write qlog traces; drop quic.qlog or use the tokio workers"
 	);
+	// The datagram path fixes both payload ceilings at SEGMENT and hands
+	// `conn.send` slices of exactly that, so discovery has no larger size to
+	// find and would only add probes.
+	anyhow::ensure!(
+		!quic.mtu_discovery,
+		"io_uring workers send a fixed-size UDP payload, so quic.mtu_discovery has nothing to discover"
+	);
 
 	let mut transport = moq_uring::quic::Transport::default();
 	transport.idle_timeout = quic.idle_timeout;
 	transport.max_streams = quic.max_streams;
-	transport.mtu_discovery = quic.mtu_discovery;
 	transport.keep_alive = quic.keep_alive;
 	transport.congestion = match quic.congestion_control {
 		Some(moq_tokio::quic::CongestionControl::Loss) => moq_uring::quic::Congestion::Loss,
@@ -383,8 +427,38 @@ struct Spawn {
 	failures: tokio::sync::mpsc::UnboundedSender<anyhow::Error>,
 }
 
-/// One worker thread: pin, ring up, serve the endpoint until stopped.
+/// One worker thread, with its exit reported however it happens.
+///
+/// A worker that dies takes its socket out of the steered group while the
+/// others keep looking healthy, and the group's filter goes on sending that
+/// slot's share of the traffic to a socket nobody is reading. So any exit
+/// that was not asked for is fatal to the group, a panic included: `failures`
+/// alone would not notice one, since the parent holds a sender of its own and
+/// the channel therefore never closes.
 fn run_worker(spawn: Spawn) {
+	let index = spawn.member.shard.index();
+	let stop = spawn.stop.clone();
+	let failures = spawn.failures.clone();
+
+	let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| serve_worker(spawn)));
+	let asked = stop.stopped.load(Ordering::Acquire);
+	match outcome {
+		Err(_) => {
+			let _ = failures.send(anyhow::anyhow!("io_uring worker {index} panicked"));
+		}
+		// A worker that started serving only returns when `stop` fires.
+		Ok(true) if !asked => {
+			let _ = failures.send(anyhow::anyhow!("io_uring worker {index} stopped on its own"));
+		}
+		// Setup failure already went back through `ready`, which is what
+		// `Workers::serve` is blocking on.
+		Ok(_) => {}
+	}
+}
+
+/// Pin, ring up, and serve the endpoint until stopped. Returns whether the
+/// worker ever got as far as serving.
+fn serve_worker(spawn: Spawn) -> bool {
 	let Spawn {
 		member,
 		core,
@@ -425,7 +499,7 @@ fn run_worker(spawn: Spawn) {
 		Ok(ready_parts) => ready_parts,
 		Err(err) => {
 			let _ = ready.send(Err(err));
-			return;
+			return false;
 		}
 	};
 	let _ = ready.send(Ok(()));
@@ -459,6 +533,7 @@ fn run_worker(spawn: Spawn) {
 		let _ = failures.send(anyhow::Error::new(err).context(format!("worker {index} ring failed")));
 	}
 	tracing::debug!(index, "io_uring QUIC worker stopped");
+	true
 }
 
 /// Serve one accepted connection on its worker: handshake and session start
@@ -533,7 +608,17 @@ async fn serve_connection(
 	{
 		Ok(token) => token,
 		Err(err) => {
-			request.close(moq_net::Error::Unauthorized);
+			// The status is what separates "your credential is bad" from "the
+			// auth API is down". Collapsing both into Unauthorized tells a
+			// client to stop reconnecting through an outage it could have
+			// waited out.
+			let status = axum::http::StatusCode::from(&err);
+			request.close(match status {
+				axum::http::StatusCode::UNAUTHORIZED | axum::http::StatusCode::FORBIDDEN => {
+					moq_net::Error::Unauthorized
+				}
+				other => moq_net::Error::App(other.as_u16()),
+			});
 			return Err(anyhow::Error::new(err).context("authentication failed"));
 		}
 	};

@@ -106,10 +106,24 @@ The `io-uring` feature is off by default because quiche links BoringSSL, which
 a default relay build does not need. Prebuilt binaries that ship it say so;
 building it yourself is `cargo build -p moq-relay --features io-uring`.
 
-The `[quic]` section applies to this listener too. `max_streams`,
-`idle_timeout`, `keep_alive`, `mtu_discovery`, `congestion_control` and `gso`
-are all honored; `qlog` is not, and asking for it is a startup error rather
-than a setting that quietly does nothing.
+The `[quic]` section applies to this listener too: `max_streams`,
+`idle_timeout`, `keep_alive`, `congestion_control` and `gso` are honored.
+`qlog` and `mtu_discovery` are not (the datagram path sends a fixed payload,
+so there is nothing to discover), and asking for either is a startup error
+rather than a setting that quietly does nothing.
+
+The same goes for the listener settings this mode cannot deliver: `tls.root`
+(mTLS client roots), `lb_id` (QUIC-LB server ids, which cannot share the
+connection id with the shard prefix), an explicit `backend`, `tls.generate`,
+more than one certificate, and moq-lite 01/02, whose version is negotiated in
+the SETUP rather than by ALPN. Each is refused at startup. `listen.bind` must
+be named too, rather than defaulted: leaving it unset means stream-only when a
+tcp or unix listener is configured, and this mode will not guess.
+
+One gap worth knowing about: `/certificate.sha256` serves nothing in this mode,
+because the fingerprints come from the shared server's TLS backend and the
+io_uring workers hold the certificate instead. A client that pins a self-signed
+relay through that endpoint needs the tokio workers until this is wired up.
 
 The shared runtime is still there for everything that is not QUIC, and it still
 sizes its thread pool to the machine. Set `TOKIO_WORKER_THREADS` in the
