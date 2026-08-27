@@ -36,6 +36,11 @@ default:
 dev:
     just demo
 
+# Benchmark the current tree, or compare it with a commit: `just bench origin/main`.
+bench $BASE="":
+    #!/usr/bin/env bash
+    exec rs/scripts/bench.sh "$BASE"
+
 # Install repo-wide tooling. Per-language deps install on first check.
 install:
     bun install

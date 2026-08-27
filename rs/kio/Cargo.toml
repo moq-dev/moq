@@ -39,3 +39,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 [[bench]]
 name = "waiter"
 harness = false
+
+[[bench]]
+name = "channel"
+harness = false

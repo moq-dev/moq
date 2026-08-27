@@ -16,9 +16,17 @@ nix develop --command just fix          # Auto-fix lint/formatting, same scope
 nix develop --command just check-all    # Same as check, over every package
 nix develop --command just fix-all      # Same as fix, over every package
 nix develop --command just build        # Build all packages
+nix develop --command just bench        # Benchmark the current tree
+nix develop --command just bench BASE   # Compare BASE with the current tree
 ```
 
 Use the Nix dev shell for project commands so local runs match CI tooling. If Nix is unavailable, use `cargo` or `bun` directly.
+
+`just bench` runs every Criterion target plus fixed video and 1:N fanout
+workloads against a temporary local relay. Pass a commit or ref to benchmark that
+revision first and print base-to-current changes. Timing changes are informational;
+benchmark crashes, zero delivery, and invalid samples still fail the command. Relay
+CPU and RSS are included on Linux, where `moq-bench-host` can read `/proc`.
 
 `just check`, `just test`, and `just fix` all diff the branch against its base and touch only the crates that changed plus everything depending on them, which is what keeps them fast when several worktrees are building at once. They skip a language entirely when the diff doesn't touch it. Reach for `just check-all` / `just test all` / `just fix-all` when you want the unscoped suite. See [Workflow](#workflow) for how the base is resolved.
 

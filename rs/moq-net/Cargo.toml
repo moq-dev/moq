@@ -53,3 +53,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 [[bench]]
 name = "group"
 harness = false
+
+[[bench]]
+name = "track"
+harness = false
