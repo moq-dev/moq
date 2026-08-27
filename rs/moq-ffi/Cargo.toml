@@ -35,20 +35,20 @@ audio = ["dep:moq-audio"]
 video = ["dep:moq-video", "dep:pollster"]
 
 [dependencies]
-bytes = "1"
+bytes = { workspace = true }
 hang = { workspace = true }
 # `kio::MaybeSend` is the `Send` bound that vanishes on wasm; see `ffi::Task`.
 kio = { workspace = true }
 moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
-serde_json = "1"
-thiserror = "2"
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 # `sync` (Mutex, watch) and `macros` (select!) are the only tokio pieces that build
 # on wasm32; the runtime and its drivers are native-only.
 tokio = { workspace = true, features = ["macros", "sync"] }
-tracing = "0.1"
-url = "2"
+tracing = { workspace = true }
+url = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 moq-audio = { workspace = true, optional = true }
@@ -63,7 +63,7 @@ moq-native = { workspace = true, default-features = true }
 moq-video = { workspace = true, optional = true, features = ["nvidia"] }
 # Blocking on `encode::Sink` from the synchronous producer exports; see
 # `video::block_on` for why not a tokio helper.
-pollster = { version = "1.0", optional = true }
+pollster = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 uniffi = { version = "0.32", features = ["cli"] }
 
@@ -84,4 +84,4 @@ uniffi = { version = "0.32", features = ["build"] }
 
 [dev-dependencies]
 # One non-codec test blocks on a future; the main dep is `video`-only.
-pollster = "1.0"
+pollster = { workspace = true }

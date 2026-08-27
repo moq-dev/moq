@@ -73,12 +73,31 @@ resolver = "2"
 rust-version = "1.91"
 
 [workspace.dependencies]
+anyhow = "1"
+aws-lc-rs = "1"
+axum = { version = "0.8", features = ["tokio"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+base64 = "0.23"
+block2 = "0.6.2"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
 criterion = "0.8"
+# CUDA driver bindings for the NVENC/NVDEC path. dlopen'd at runtime
+# (`fallback-dynamic-loading`), so nothing links against libcuda at build time.
+cudarc = { version = "0.19", default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
+dispatch2 = "0.3.1"
 flate2 = "1.1"
+futures = "0.3"
 getrandom = { version = "0.4", features = ["wasm_js"] }
 hang = { version = "0.20.7", path = "rs/hang" }
+hex = "0.4"
+humantime = "2.3"
+humantime-serde = "1.1"
+jsonwebtoken = "11"
 kio = { version = "0.5.6", path = "rs/kio" }
+lazy_static = "1.5"
 libc = "0.2"
+libloading = "0.9"
 linux-raw-sys = { version = "0.12.1", features = ["ioctl"] }
 # Permutation testing for the kio primitives (and everything built on them).
 # Only compiled under `--cfg loom`; see `just rs loom`.
@@ -117,11 +136,34 @@ moq-vaapi = "0.0.3"
 # whole device graph into every one of them. The NVIDIA codecs are not part of
 # that argument, so moq-ffi and libmoq opt them back in by name.
 moq-video = { version = "0.0.20", path = "rs/moq-video", default-features = false }
+num_enum = "0.7"
+objc2 = "0.6.4"
+objc2-av-foundation = "0.3.2"
+objc2-core-media = "0.3.2"
+objc2-foundation = "0.3.2"
+objc2-screen-capture-kit = "0.3.2"
 percent-encoding = "2"
+pollster = "1.0"
 qmux = { version = "0.5.1", default-features = false }
+rand = "0.10.1"
+# default-features off so each consumer picks its own TLS backend and body
+# features; nothing here wants the default native-tls stack.
+reqwest = { version = "0.13", default-features = false }
+sd-notify = "0.5"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_with = "3"
+socket2 = "0.6"
+tempfile = "3"
+thiserror = "2"
 tokio = "1.48"
 tokio-rustls = { version = "0.26", default-features = false }
+toml = "1.1"
+tower-http = { version = "0.7", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tracing-test = "0.2"
+url = "2"
 web-async = { version = "0.1.5", features = ["tracing"] }
 web-transport-iroh = "0.7"
 # default-features off so the QUIC crypto provider is chosen by moq-native's

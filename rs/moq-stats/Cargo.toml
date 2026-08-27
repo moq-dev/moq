@@ -16,11 +16,11 @@ categories = ["multimedia", "network-programming", "web-programming"]
 moq-json = { workspace = true }
 moq-net = { workspace = true }
 serde = { workspace = true }
-serde_json = "1"
-thiserror = "2"
-tracing = "0.1"
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
 web-async = { workspace = true }
 
 [dev-dependencies]
-futures = "0.3"
+futures = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }

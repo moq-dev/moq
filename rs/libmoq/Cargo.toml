@@ -17,8 +17,8 @@ name = "moq"
 crate-type = ["staticlib"]
 
 [dependencies]
-anyhow = { version = "1", features = ["backtrace"] }
-bytes = "1"
+anyhow = { workspace = true, features = ["backtrace"] }
+bytes = { workspace = true }
 hang = { workspace = true }
 moq-audio = { workspace = true }
 moq-json = { workspace = true }
@@ -29,12 +29,12 @@ moq-net = { workspace = true }
 moq-video = { workspace = true, features = ["nvidia"] }
 # Blocking on `encode::Sink` from the synchronous C entry points; see
 # `video::block_on` for why not a tokio helper.
-pollster = "1.0"
-serde_json = "1"
-thiserror = "2"
+pollster = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
-tracing = "0.1"
-url = "2"
+tracing = { workspace = true }
+url = { workspace = true }
 
 [build-dependencies]
 cbindgen = "0.29"

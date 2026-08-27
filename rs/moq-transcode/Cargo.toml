@@ -30,21 +30,21 @@ nvdec = ["nvidia"]
 vaapi = ["moq-video/vaapi"]
 
 [dependencies]
-bytes = "1"
+bytes = { workspace = true }
 hang = { workspace = true }
 kio = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 moq-video = { workspace = true }
-thiserror = "2"
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
-tracing = "0.1"
+tracing = { workspace = true }
 
 [dev-dependencies]
-anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+anyhow = { workspace = true }
+clap = { workspace = true }
 # Default features on (unlike the workspace entry) so the example gets a QUIC backend.
 moq-native = { path = "../moq-native" }
 # test-util unlocks tokio::time::pause for the deterministic live-feed tests.
 tokio = { workspace = true, features = ["full", "test-util"] }
-url = "2"
+url = { workspace = true }

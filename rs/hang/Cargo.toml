@@ -13,25 +13,25 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [dependencies]
-bytes = "1"
-hex = "0.4"
-lazy_static = "1"
+bytes = { workspace = true }
+hex = { workspace = true }
+lazy_static = { workspace = true }
 moq-net = { workspace = true }
 regex = "1"
 serde = { workspace = true }
-serde_json = "1"
-serde_with = { version = "3", features = ["base64"] }
-thiserror = "2"
-url = "2"
+serde_json = { workspace = true }
+serde_with = { workspace = true, features = ["base64"] }
+thiserror = { workspace = true }
+url = { workspace = true }
 
 [dependencies.derive_more]
 version = "2"
 features = ["from", "display", "debug"]
 
 [dev-dependencies]
-anyhow = "1"
+anyhow = { workspace = true }
 moq-mux = { path = "../moq-mux" }
 moq-native = { path = "../moq-native" }
 tokio = { workspace = true, features = ["macros", "fs"] }
-tracing = "0.1"
-url = "2"
+tracing = { workspace = true }
+url = { workspace = true }

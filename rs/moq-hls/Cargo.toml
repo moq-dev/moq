@@ -18,24 +18,24 @@ server = ["dep:axum"]
 
 [dependencies]
 # Always required (import + export library).
-anyhow = { version = "1", features = ["backtrace"] }
+anyhow = { workspace = true, features = ["backtrace"] }
 
 # Only needed by the HTTP export server (gated by `server`).
-axum = { version = "0.8", features = ["tokio"], optional = true }
-bytes = "1"
+axum = { workspace = true, optional = true }
+bytes = { workspace = true }
 hang = { workspace = true }
-humantime = "2"
+humantime = { workspace = true }
 kio = { workspace = true }
 m3u8-rs = "6"
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 percent-encoding = { workspace = true }
-rand = "0.10"
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip"] }
-thiserror = "2"
+rand = { workspace = true }
+reqwest = { workspace = true, features = ["rustls", "gzip"] }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tracing = "0.1"
-url = "2"
+tracing = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

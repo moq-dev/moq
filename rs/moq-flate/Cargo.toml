@@ -13,6 +13,6 @@ keywords = ["deflate", "compression", "streaming", "live"]
 categories = ["compression"]
 
 [dependencies]
-bytes = "1"
+bytes = { workspace = true }
 flate2 = { workspace = true }
-thiserror = "2"
+thiserror = { workspace = true }

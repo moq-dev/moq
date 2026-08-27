@@ -40,14 +40,14 @@ ring = ["rustls/ring", "rcgen?/ring", "quinn?/rustls-ring", "web-transport-noq?/
 android-logcat = ["dep:tracing-android"]
 
 [dependencies]
-clap = { version = "4", features = ["derive", "env"] }
+clap = { workspace = true, features = ["env"] }
 # Family-restricted `getaddrinfo`, so the AAAA and A queries can be issued separately
 # (RFC 8305 section 3) while still going through the system resolver.
 dns-lookup = { version = "3", optional = true }
-futures = "0.3"
-hex = "0.4"
-humantime = "2.3"
-humantime-serde = "1.1"
+futures = { workspace = true }
+hex = { workspace = true }
+humantime = { workspace = true }
+humantime-serde = { workspace = true }
 
 moq-net = { workspace = true }
 # iroh runs on noq but re-exports only the ControllerFactory trait, not the concrete
@@ -57,26 +57,26 @@ notify = { version = "8", optional = true }
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 qmux = { workspace = true, features = ["wss", "tls", "tcp"], optional = true }
 quinn = { version = "0.11", default-features = false, features = ["platform-verifier", "runtime-tokio", "bloom"], optional = true }
-rand = "0.10.1"
+rand = { workspace = true }
 rcgen = { version = "0.14", default-features = false, optional = true }
-reqwest = { version = "0.13", default-features = false, optional = true }
+reqwest = { workspace = true, optional = true }
 rustls = "0.23"
 rustls-native-certs = { version = "0.8", optional = true }
 # OS-native server-cert verifier for the rustls backends. Version matched to the
 # copy quinn-proto already pulls in, to avoid duplication.
 rustls-platform-verifier = "0.7"
 rustls-webpki = { version = "0.103", features = ["aws-lc-rs"], optional = true }
-serde = { version = "1", features = ["derive"] }
-serde_with = { version = "3", features = ["hex"] }
-socket2 = "0.6"
-thiserror = "2"
+serde = { workspace = true }
+serde_with = { workspace = true, features = ["hex"] }
+socket2 = { workspace = true }
+thiserror = { workspace = true }
 tikv-jemalloc-ctl = { version = "0.6", optional = true }
 tikv-jemallocator = { version = "0.6", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
 time = "0.3"
 tokio = { workspace = true, features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-url = { version = "2", features = ["serde"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+url = { workspace = true, features = ["serde"] }
 web-transport-iroh = { workspace = true, optional = true }
 web-transport-noq = { workspace = true, optional = true }
 web-transport-proto = { workspace = true, optional = true }
@@ -99,16 +99,16 @@ webpki-roots = "1"
 libc = { workspace = true }
 
 [dev-dependencies]
-anyhow = "1"
-bytes = "1"
+anyhow = { workspace = true }
+bytes = { workspace = true }
 chrono = "0.4"
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
-tempfile = "3"
+tempfile = { workspace = true }
 # test-util adds tokio::time::pause/auto-advance for the time-dependent tests.
 tokio = { workspace = true, features = ["test-util"] }
 tokio-rustls = { workspace = true }
-toml = "1.1"
+toml = { workspace = true }
 # no-env-filter: traced_test's default filter scopes to the test binary's own
 # crate name, which never matches log lines from a dependency crate (e.g.
 # moq-net's), so a test asserting on those needs this to see them at all.
-tracing-test = { version = "0.2", features = ["no-env-filter"] }
+tracing-test = { workspace = true, features = ["no-env-filter"] }

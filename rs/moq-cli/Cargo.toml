@@ -64,13 +64,13 @@ vaapi = ["moq-video?/vaapi", "moq-transcode?/vaapi"]
 pipewire = ["moq-video?/pipewire"]
 
 [dependencies]
-anyhow = { version = "1", features = ["backtrace"] }
-axum = { version = "0.8", features = ["tokio"] }
-axum-server = { version = "0.8", features = ["tls-rustls"] }
-bytes = "1"
-clap = { version = "4", features = ["derive"] }
+anyhow = { workspace = true, features = ["backtrace"] }
+axum = { workspace = true }
+axum-server = { workspace = true }
+bytes = { workspace = true }
+clap = { workspace = true }
 hang = { workspace = true }
-humantime = "2.3"
+humantime = { workspace = true }
 moq-audio = { workspace = true, optional = true }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
@@ -82,16 +82,16 @@ moq-srt = { workspace = true }
 moq-token-cli = { workspace = true }
 moq-transcode = { workspace = true, optional = true }
 moq-video = { workspace = true, optional = true }
-pollster = { version = "1.0", optional = true }
+pollster = { workspace = true, optional = true }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
 tokio = { workspace = true, features = ["full"] }
-tower-http = { version = "0.7", features = ["cors"] }
-tracing = "0.1"
-url = "2"
+tower-http = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
 winit = { version = "0.30.13", optional = true }
 
 [target.'cfg(unix)'.dependencies]
-sd-notify = "0.5"
+sd-notify = { workspace = true }
 
 [dev-dependencies]
 # `test-util` enables `tokio::time::pause` so the TS round-trip test simulates the

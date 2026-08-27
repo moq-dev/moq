@@ -16,17 +16,17 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 
-anyhow = { version = "1", features = ["backtrace"] }
-bytes = "1"
+anyhow = { workspace = true, features = ["backtrace"] }
+bytes = { workspace = true }
 gst = { package = "gstreamer", version = "0.23" }
 hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = true }
 moq-net = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = "0.3"
-url = "2"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
 
 [build-dependencies]
 gst-plugin-version-helper = "0.8"

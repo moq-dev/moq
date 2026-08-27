@@ -16,22 +16,22 @@ categories = ["multimedia", "network-programming", "web-programming"]
 # The CLI lives in `moq-cli` (the `rtc` subcommand); embedders mount the routers
 # / dial with `Client` against their own origin.
 [dependencies]
-anyhow = { version = "1", features = ["backtrace"] }
-axum = { version = "0.8", features = ["tokio"] }
-bytes = "1"
+anyhow = { workspace = true, features = ["backtrace"] }
+axum = { workspace = true }
+bytes = { workspace = true }
 hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+reqwest = { workspace = true, features = ["rustls"] }
 str0m = "0.22"
-thiserror = "2"
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tracing = "0.1"
-url = "2"
+tracing = { workspace = true }
+url = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 # Signs the MESSAGE-INTEGRITY on a forged STUN binding request: str0m rejects a
 # request without one, and its own SHA1 provider is private.
-aws-lc-rs = "1"
+aws-lc-rs = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

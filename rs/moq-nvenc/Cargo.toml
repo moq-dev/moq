@@ -16,7 +16,7 @@ categories = ["multimedia::encoding", "hardware-support"]
 # Only cudarc's `driver` API is used, always dlopen'd at runtime:
 # `fallback-dynamic-loading` loads libcuda, and `cuda-12020` pins the CUDA API
 # version so the build needs no CUDA toolkit or driver present.
-cudarc = { version = "0.19", default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
-lazy_static = "1.5.0"
+cudarc = { workspace = true }
+lazy_static = { workspace = true }
 # dlopen libnvidia-encode at runtime (the two NVENC bootstrap symbols).
-libloading = "0.9"
+libloading = { workspace = true }

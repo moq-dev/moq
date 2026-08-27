@@ -39,45 +39,45 @@ websocket = ["moq-native/websocket", "dep:qmux", "axum/ws"]
 uds = ["moq-native/uds"]
 
 [dependencies]
-anyhow = { version = "1", features = ["backtrace"] }
-axum = { version = "0.8", features = ["tokio"] }
-axum-server = { version = "0.8", features = ["tls-rustls"] }
-bytes = "1"
+anyhow = { workspace = true, features = ["backtrace"] }
+axum = { workspace = true }
+axum-server = { workspace = true }
+bytes = { workspace = true }
 bytesize = "2.4.2"
-clap = { version = "4", features = ["derive"] }
-futures = "0.3"
+clap = { workspace = true }
+futures = { workspace = true }
 http-body = "1"
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "reqwest-middleware", "url-standard"], default-features = false }
-humantime = "2.3"
-humantime-serde = "1.1"
-jsonwebtoken = "11"
+humantime = { workspace = true }
+humantime-serde = { workspace = true }
+jsonwebtoken = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch", "tcp"] }
 moq-net = { workspace = true }
 moq-stats = { workspace = true }
 moq-token = { workspace = true, features = ["tokio"] }
 qmux = { workspace = true, features = ["ws"], optional = true }
-rand = "0.10"
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+rand = { workspace = true }
+reqwest = { workspace = true, features = ["rustls"] }
 reqwest-middleware = "0.5"
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_with = { version = "3", features = ["json", "base64"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_with = { workspace = true, features = ["json", "base64"] }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
-thiserror = "2"
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-rustls = { workspace = true }
-toml = "1.1"
-tower-http = { version = "0.7", features = ["cors"] }
+toml = { workspace = true }
+tower-http = { workspace = true }
 tower-service = "0.3"
-tracing = "0.1"
-url = { version = "2", features = ["serde"] }
+tracing = { workspace = true }
+url = { workspace = true, features = ["serde"] }
 web-transport-trait = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
-sd-notify = "0.5"
+sd-notify = { workspace = true }
 
 [dev-dependencies]
 rcgen = "0.14"
-tempfile = "3"
+tempfile = { workspace = true }
 wiremock = "0.6"

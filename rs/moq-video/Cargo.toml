@@ -66,11 +66,11 @@ render = [
 pipewire = ["capture", "dmabuf", "dep:pipewire", "dep:ashpd"]
 
 [dependencies]
-anyhow = "1"
+anyhow = { workspace = true }
 # Casting the color-conversion uniform to the bytes wgpu wants, without an
 # unsafe reinterpret of our own. Already in the graph via wgpu.
 bytemuck = { version = "1", optional = true }
-bytes = "1"
+bytes = { workspace = true }
 # CPU I420 resize (SIMD per-plane convolution), the software fallback for
 # Frame::resize; CUDA and macOS pixel-buffer frames resize on the GPU instead.
 fast_image_resize = "6"
@@ -89,9 +89,9 @@ openh264 = "0.9.8"
 # features it needs; cargo unifies this on the same version it depends on, so the
 # raw API types stay identical.
 openh264-sys2 = { version = "0.9.8", default-features = false }
-thiserror = "2"
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
-tracing = "0.1"
+tracing = { workspace = true }
 # GPU rendering behind the `render` feature. `wgpu::hal` is re-exported by wgpu
 # itself, so the zero-copy import paths reach the platform handles without a
 # separate wgpu-hal dependency that could drift to a different version.
@@ -113,7 +113,7 @@ ashpd = { version = "0.13", optional = true, default-features = false, features 
 # The `nvrtc` feature only unlocks the `Ptx` type and `load_module` (both free of
 # extra dependencies); libnvrtc itself is never loaded since we ship pre-built PTX
 # (see frame/nv12_resize.ptx) that the driver JIT-compiles.
-cudarc = { version = "0.19", optional = true, default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020", "nvrtc"] }
+cudarc = { workspace = true, features = ["nvrtc"], optional = true }
 # Mapping a linear DMA-BUF for the universal CPU I420 fallback. Non-linear
 # modifiers stay GPU-only and return an honest error instead of treating tiled
 # memory as rows.
@@ -121,7 +121,7 @@ libc = { workspace = true, optional = true }
 # Probe for the NVIDIA driver libraries before calling cudarc / the NVENC SDK,
 # which panic (process-abort under release `panic = "abort"`) if their library is
 # absent. Lets a GPU-less host fall back to the next encoder instead of crashing.
-libloading = { version = "0.9", optional = true }
+libloading = { workspace = true, optional = true }
 # Architecture-correct DMA_BUF_IOCTL_SYNC request values for CPU access.
 linux-raw-sys = { workspace = true, optional = true }
 moq-nvenc = { workspace = true, optional = true }
@@ -140,20 +140,20 @@ v4l = { version = "0.14", optional = true }
 zune-jpeg = { version = "0.5", optional = true }
 
 [target.'cfg(target_os="macos")'.dependencies]
-block2 = "0.6.2"
-dispatch2 = "0.3.1"
-objc2 = "0.6.4"
-objc2-av-foundation = "0.3.2"
+block2 = { workspace = true }
+dispatch2 = { workspace = true }
+objc2 = { workspace = true }
+objc2-av-foundation = { workspace = true }
 objc2-core-foundation = "0.3.2"
 objc2-core-graphics = { version = "0.3.2", features = ["CGDirectDisplay"] }
-objc2-core-media = "0.3.2"
+objc2-core-media = { workspace = true }
 objc2-core-video = "0.3.2"
-objc2-foundation = "0.3.2"
+objc2-foundation = { workspace = true }
 # MTLDevice / MTLTexture for the `render` feature's zero-copy CVPixelBuffer
 # import (CVMetalTextureCache aliases the decoder's IOSurface as a Metal texture,
 # which wgpu then adopts).
 objc2-metal = { version = "0.3.2", optional = true }
-objc2-screen-capture-kit = "0.3.2"
+objc2-screen-capture-kit = { workspace = true }
 objc2-video-toolbox = "0.3.2"
 
 [target.'cfg(target_os="windows")'.dependencies]
@@ -179,8 +179,8 @@ windows = { version = "0.62", features = [
 
 [dev-dependencies]
 # `poll!`, to cancel an `encode::Sink` request exactly where a `select!` would.
-futures = "0.3"
+futures = { workspace = true }
 h264-reader = "0.8.0"
 # Driving `encode::Sink` from a plain test thread, the way an FFI caller does.
-pollster = "1.0"
-tracing-test = "0.2"
+pollster = { workspace = true }
+tracing-test = { workspace = true }

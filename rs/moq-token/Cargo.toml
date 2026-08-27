@@ -14,18 +14,18 @@ jwks-loader = ["reqwest"]
 tokio = ["dep:tokio"]
 
 [dependencies]
-aws-lc-rs = "1"
-base64 = "0.23"
-jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
+aws-lc-rs = { workspace = true }
+base64 = { workspace = true }
+jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 p256 = "0.14.0"
 p384 = "0.14.0"
-reqwest = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
+reqwest = { workspace = true, features = ["rustls"], optional = true }
 rsa = "0.9.10"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_with = { version = "3", features = ["base64"] }
-thiserror = "2"
-tokio = { version = "1", features = ["fs"], optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_with = { workspace = true, features = ["base64"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs"], optional = true }
 
 [dev-dependencies]
-anyhow = "1"
+anyhow = { workspace = true }

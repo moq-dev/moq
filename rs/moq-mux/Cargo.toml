@@ -13,9 +13,9 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [dependencies]
-anyhow = "1"
-base64 = "0.23"
-bytes = "1"
+anyhow = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
 h264-parser = { version = "0.4.0" }
 hang = { workspace = true }
 kio = { workspace = true }
@@ -26,19 +26,19 @@ moq-msf = { workspace = true }
 moq-net = { workspace = true }
 mp4-atom = { version = "0.15", features = ["tokio", "bytes", "serde"] }
 mpeg2ts = "0.6.0"
-num_enum = "0.7"
+num_enum = { workspace = true }
 scuffle-av1 = { version = "0.1.4" }
 scuffle-h265 = { version = "0.2.2" }
 serde = { workspace = true }
-serde_json = "1"
-serde_with = { version = "3", features = ["base64"] }
-thiserror = "2"
+serde_json = { workspace = true }
+serde_with = { workspace = true, features = ["base64"] }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
-tracing = "0.1"
-url = "2"
+tracing = { workspace = true }
+url = { workspace = true }
 web-async = { workspace = true }
 webm-iterable = "0.6"
 
 [dev-dependencies]
-futures = "0.3"
+futures = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

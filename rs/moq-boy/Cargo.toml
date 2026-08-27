@@ -19,10 +19,10 @@ quinn = ["moq-native/quinn"]
 websocket = ["moq-native/websocket"]
 
 [dependencies]
-anyhow = { version = "1", features = ["backtrace"] }
+anyhow = { workspace = true, features = ["backtrace"] }
 boytacean = { version = "0.13", features = ["gen-mock"] }
-bytes = "1"
-clap = { version = "4", features = ["derive"] }
+bytes = { workspace = true }
+clap = { workspace = true }
 hang = { workspace = true }
 moq-audio = { workspace = true }
 moq-json = { workspace = true }
@@ -33,4 +33,4 @@ moq-net = { workspace = true }
 moq-video = { workspace = true, features = ["nvidia"] }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tracing = "0.1"
+tracing = { workspace = true }
