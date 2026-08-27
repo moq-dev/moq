@@ -178,8 +178,35 @@ impl Peer {
 		server: SocketAddr,
 		alpn: &[&[u8]],
 	) -> anyhow::Result<Self> {
+		Self::dial(handle, sock, server, alpn, None)
+	}
+
+	/// A client offering `alpn` that advertises only `max_data` bytes of
+	/// connection-level flow control, for a test that needs the server to run
+	/// out of credit. Reading a stream is what returns it, so a peer that
+	/// stops reading holds the server there.
+	pub fn connect_throttled(
+		handle: &Handle,
+		sock: udp::Socket,
+		server: SocketAddr,
+		alpn: &[&[u8]],
+		max_data: u64,
+	) -> anyhow::Result<Self> {
+		Self::dial(handle, sock, server, alpn, Some(max_data))
+	}
+
+	fn dial(
+		handle: &Handle,
+		sock: udp::Socket,
+		server: SocketAddr,
+		alpn: &[&[u8]],
+		max_data: Option<u64>,
+	) -> anyhow::Result<Self> {
 		let local = sock.local_addr()?;
 		let mut config = config(None, alpn)?;
+		if let Some(max_data) = max_data {
+			config.set_initial_max_data(max_data);
+		}
 		let conn = quiche::connect(Some("localhost"), &connection_id(), local, server, &mut config)?;
 		Ok(Self {
 			sock,

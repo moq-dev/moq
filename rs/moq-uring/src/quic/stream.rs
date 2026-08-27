@@ -39,6 +39,13 @@ impl SendStream {
 		self.id
 	}
 
+	/// Whether the send side is already terminated, so [`Drop`] would do
+	/// nothing. The WebTransport wrapper asks before mapping a reset of its
+	/// own, since a finished stream must not be reset instead.
+	pub(crate) fn ended(&self) -> bool {
+		self.fin || self.reset
+	}
+
 	/// Queue as much of `buf` as quiche will take right now, without parking.
 	/// Best-effort, for the close path where nobody is left to poll.
 	pub(crate) fn try_write(&mut self, buf: &[u8]) -> usize {
@@ -218,6 +225,12 @@ impl RecvStream {
 			stopped: false,
 			backlog: BytesMut::new(),
 		}
+	}
+
+	/// Whether the read side is already terminated, so [`Drop`] would do
+	/// nothing.
+	pub(crate) fn ended(&self) -> bool {
+		self.finished || self.stopped
 	}
 
 	/// [`stop`](web_transport_trait::poll::RecvStream::stop) with a

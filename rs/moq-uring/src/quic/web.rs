@@ -63,6 +63,9 @@ const HELD_STREAMS: usize = 8;
 /// `H3_GENERAL_PROTOCOL_ERROR`, for closing a connection whose HTTP/3
 /// handshake never produced a session.
 const H3_GENERAL_PROTOCOL_ERROR: u64 = 0x0101;
+/// `H3_NO_ERROR`, for closing a connection that did what it came to do: a
+/// rejection the peer has been told about.
+const H3_NO_ERROR: u64 = 0x0100;
 
 /// An incoming WebTransport handshake: the CONNECT request, ready to answer.
 ///
@@ -72,6 +75,8 @@ const H3_GENERAL_PROTOCOL_ERROR: u64 = 0x0101;
 pub struct Request {
 	handle: Handle,
 	conn: Connection,
+	/// Closes the connection on every way out of here that is not an answer.
+	guard: Guard,
 	request: proto::ConnectRequest,
 	send: super::SendStream,
 	recv: super::RecvStream,
@@ -83,6 +88,42 @@ pub struct Request {
 	/// WebTransport streams a pipelining peer opened before its CONNECT was
 	/// answered, headers consumed, keyed by the session id they claimed.
 	early: Vec<(u64, super::RecvStream)>,
+	/// Streams that arrived during the handshake and are still mid-header;
+	/// the session goes on classifying them.
+	pending: Vec<PendingUni>,
+}
+
+/// Closes a connection whose handshake was abandoned, disarmed once the peer
+/// has an answer.
+///
+/// Dropping a [`Connection`] does not close QUIC: the endpoint keeps it, its
+/// routes, and its driver task until the driver sees a terminal state, and the
+/// backlog stopped counting it at accept. The peer picks the path it asks for
+/// and the subprotocols it offers, so it decides which of [`Request::respond`]'s
+/// early returns the server takes; a guard covers every way out rather than
+/// each one remembering.
+struct Guard {
+	conn: Option<Connection>,
+}
+
+impl Guard {
+	fn new(conn: Connection) -> Self {
+		Self { conn: Some(conn) }
+	}
+
+	/// The peer got an answer, so the connection is the answer's to close.
+	fn disarm(&mut self) {
+		self.conn = None;
+	}
+}
+
+impl Drop for Guard {
+	fn drop(&mut self) {
+		if let Some(conn) = self.conn.take() {
+			conn.shared()
+				.close_code(H3_GENERAL_PROTOCOL_ERROR, "webtransport handshake abandoned");
+		}
+	}
 }
 
 impl Request {
@@ -118,7 +159,11 @@ impl Request {
 
 		// The peer's control stream carries its SETTINGS, but its QPACK
 		// streams race it, and an eager client's WebTransport streams can
-		// arrive ahead of everything; classify each arrival by its header.
+		// arrive ahead of everything, so classify every arrival at once.
+		// Taking them one at a time would let a stream that sends its type
+		// byte and then stalls hold off a control stream that has already
+		// fully arrived, for as long as the peer keeps the connection alive.
+		let mut pending: Vec<PendingUni> = Vec::new();
 		let mut held = Vec::new();
 		let mut early = Vec::new();
 		// Every arrival counts, not just the ones kept: a stream of unknown
@@ -126,28 +171,62 @@ impl Request {
 		// counting what we retain would let a peer loop this forever while
 		// never sending a control stream.
 		let mut arrivals = 0usize;
-		loop {
-			arrivals += 1;
-			if arrivals > HANDSHAKE_STREAMS {
-				return Err(Error::Web("too many streams before the control stream".into()));
-			}
-			let recv = accept_uni(&mut conn).await?;
-			let mut pending = PendingUni::new(recv);
-			let class = std::future::poll_fn(|cx| pending.poll_classify(cx)).await;
-			match class {
-				UniClass::Control => {
-					let settings = read_settings(&mut pending.recv).await?;
-					if settings.supports_webtransport() == 0 {
-						return Err(Error::Web("peer does not support WebTransport".into()));
+		let mut peer_control = None;
+		std::future::poll_fn(|cx| {
+			loop {
+				loop {
+					match web_transport_trait::poll::Session::poll_accept_uni(&mut conn, cx) {
+						Poll::Ready(Ok(recv)) => {
+							arrivals += 1;
+							if arrivals > HANDSHAKE_STREAMS {
+								return Poll::Ready(Err(Error::Web(
+									"too many streams before the control stream".into(),
+								)));
+							}
+							pending.push(PendingUni::new(recv));
+						}
+						Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+						Poll::Pending => break,
 					}
-					held.push(pending.recv);
-					break;
 				}
-				UniClass::Qpack => held.push(pending.recv),
-				UniClass::Web(session) => early.push((session, pending.recv)),
-				UniClass::Unknown => {}
+
+				// Each mid-header stream parks the caller in its own stream's
+				// waiters, so progress on any of them re-polls us.
+				let mut progressed = false;
+				let mut index = 0;
+				while index < pending.len() {
+					let Poll::Ready(class) = pending[index].poll_classify(cx) else {
+						index += 1;
+						continue;
+					};
+					// Whatever was last takes this slot, so it is polled by
+					// this same pass rather than waited for.
+					let stream = pending.swap_remove(index);
+					progressed = true;
+					match class {
+						UniClass::Control => {
+							peer_control = Some(stream.recv);
+							return Poll::Ready(Ok(()));
+						}
+						UniClass::Qpack => held.push(stream.recv),
+						UniClass::Web(session) => early.push((session, stream.recv)),
+						UniClass::Unknown => {}
+					}
+				}
+
+				if !progressed {
+					return Poll::Pending;
+				}
 			}
+		})
+		.await?;
+
+		let mut peer_control = peer_control.expect("the loop only ends with a control stream");
+		let settings = read_settings(&mut peer_control).await?;
+		if settings.supports_webtransport() == 0 {
+			return Err(Error::Web("peer does not support WebTransport".into()));
 		}
+		held.push(peer_control);
 
 		// The CONNECT request rides the client's first bidirectional stream,
 		// which arrives first: QUIC creates lower-numbered streams
@@ -157,6 +236,7 @@ impl Request {
 
 		Ok(Self {
 			handle: handle.clone(),
+			guard: Guard::new(conn.clone()),
 			conn,
 			request,
 			send,
@@ -164,6 +244,7 @@ impl Request {
 			held,
 			control,
 			early,
+			pending,
 		})
 	}
 
@@ -195,6 +276,7 @@ impl Request {
 		let mut buf = Vec::new();
 		encoded.encode(&mut buf).map_err(|err| Error::Web(err.to_string()))?;
 		write_all(&mut self.send, &buf).await?;
+		self.guard.disarm();
 
 		Ok(Session::establish(self, protocol))
 	}
@@ -205,12 +287,36 @@ impl Request {
 	}
 
 	/// Refuse with `reason`, ending the handshake.
+	///
+	/// Returns once the peer has the response, or after a grace period if it
+	/// never acknowledges one, and closes the connection deliberately. The
+	/// HTTP/3 critical streams (the peer's control and QPACK streams, and
+	/// ours) stay open until then: RFC 9114 makes closing one a connection
+	/// error, so tearing them down here would show the peer an H3 failure
+	/// instead of the status it was sent.
 	pub async fn reject(mut self, reason: Rejected) -> Result<(), Error> {
 		let response = proto::ConnectResponse::new(reason.status());
 		let mut buf = Vec::new();
 		response.encode(&mut buf).map_err(|err| Error::Web(err.to_string()))?;
 		write_all(&mut self.send, &buf).await?;
 		web_transport_trait::poll::SendStream::finish(&mut self.send)?;
+
+		// The close below is the deliberate one; the guard's abrupt
+		// `H3_GENERAL_PROTOCOL_ERROR` would race the response out.
+		self.guard.disarm();
+
+		let mut deadline = moq_net::runtime::Deadline::after(&self.handle, CLOSE_GRACE);
+		let send = &mut self.send;
+		kio::wait(|waiter| {
+			let mut cx = Context::from_waker(waiter.waker());
+			if web_transport_trait::poll::SendStream::poll_closed(send, &mut cx).is_ready() {
+				return Poll::Ready(());
+			}
+			deadline.poll(waiter)
+		})
+		.await;
+
+		self.conn.shared().close_code(H3_NO_ERROR, "");
 		Ok(())
 	}
 }
@@ -332,12 +438,14 @@ impl Session {
 		let Request {
 			handle,
 			conn,
+			guard: _,
 			request: _,
 			send,
 			recv,
 			held,
 			control,
 			early,
+			pending,
 		} = request;
 
 		let session_id = send.id();
@@ -364,7 +472,10 @@ impl Session {
 			header_bi: header_bi.into(),
 			header_datagram: header_datagram.into(),
 			state: RefCell::new(State {
-				pending_uni: Vec::new(),
+				// Still mid-header when the control stream turned up; the
+				// session finishes classifying them, so a pipelined
+				// WebTransport stream is not lost to the handshake ending.
+				pending_uni: pending,
 				pending_bi: Vec::new(),
 				ready_uni,
 				ready_bi: VecDeque::new(),
@@ -459,6 +570,7 @@ impl web_transport_trait::poll::Session for Session {
 				SendStream {
 					inner: send,
 					prefix: Bytes::new(),
+					finishing: false,
 					web: false,
 				},
 				RecvStream {
@@ -474,6 +586,7 @@ impl web_transport_trait::poll::Session for Session {
 					SendStream {
 						inner: send,
 						prefix: Bytes::new(),
+						finishing: false,
 						web: true,
 					},
 					RecvStream { inner: recv, web: true },
@@ -501,6 +614,7 @@ impl web_transport_trait::poll::Session for Session {
 		Poll::Ready(Ok(SendStream {
 			inner,
 			prefix,
+			finishing: false,
 			web: self.web.is_some(),
 		}))
 	}
@@ -516,6 +630,7 @@ impl web_transport_trait::poll::Session for Session {
 			SendStream {
 				inner: send,
 				prefix,
+				finishing: false,
 				web: self.web.is_some(),
 			},
 			RecvStream {
@@ -667,6 +782,10 @@ pub struct SendStream {
 	inner: super::SendStream,
 	/// Header bytes still owed to the wire before any payload.
 	prefix: Bytes,
+	/// [`finish`](web_transport_trait::poll::SendStream::finish) ran with the
+	/// header still owed, so [`poll_closed`](web_transport_trait::poll::SendStream::poll_closed)
+	/// writes the rest and finishes then.
+	finishing: bool,
 	web: bool,
 }
 
@@ -683,6 +802,12 @@ impl web_transport_trait::poll::SendStream for SendStream {
 	type Error = Error;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		// The FIN is owed the moment the header lands, so there is no room
+		// left for a payload; the inner stream refuses a post-FIN write the
+		// same way.
+		if self.finishing {
+			return Poll::Ready(Err(Error::Quic(quiche::Error::FinalSize)));
+		}
 		while !self.prefix.is_empty() {
 			let n = ready!(web_transport_trait::poll::SendStream::poll_write(
 				&mut self.inner,
@@ -709,7 +834,12 @@ impl web_transport_trait::poll::SendStream for SendStream {
 			let n = self.inner.try_write(&self.prefix);
 			self.prefix.advance(n);
 			if !self.prefix.is_empty() {
-				return Err(Error::Web("no capacity to frame the stream before finishing".into()));
+				// Zero capacity here is ordinary flow control, which clears
+				// once the peer reads. Reporting it terminally would have the
+				// caller drop (and so reset) a stream that is finishing
+				// cleanly; `poll_closed` writes the rest instead.
+				self.finishing = true;
+				return Ok(());
 			}
 		}
 		web_transport_trait::poll::SendStream::finish(&mut self.inner).map_err(|err| self.map(err))
@@ -723,9 +853,38 @@ impl web_transport_trait::poll::SendStream for SendStream {
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		// `finish` left the header owed, so finishing is still this call's job.
+		while self.finishing {
+			match ready!(web_transport_trait::poll::SendStream::poll_write(
+				&mut self.inner,
+				cx,
+				&self.prefix
+			)) {
+				Ok(n) => self.prefix.advance(n),
+				Err(err) => return Poll::Ready(Err(self.map(err))),
+			}
+			if self.prefix.is_empty() {
+				self.finishing = false;
+				if let Err(err) = web_transport_trait::poll::SendStream::finish(&mut self.inner) {
+					return Poll::Ready(Err(self.map(err)));
+				}
+			}
+		}
 		match web_transport_trait::poll::SendStream::poll_closed(&mut self.inner, cx) {
 			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
 			other => other,
+		}
+	}
+}
+
+impl Drop for SendStream {
+	fn drop(&mut self) {
+		// The inner `Drop` resets with a raw 0, which reads to a browser as an
+		// HTTP/3 stream error rather than the WebTransport cancellation that
+		// dropping a stream means. moq cancels subscriptions by dropping, so
+		// this is the ordinary path.
+		if self.web && !self.inner.ended() {
+			self.inner.reset_code(proto::error_to_http3(0));
 		}
 	}
 }
@@ -776,6 +935,15 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 	}
 }
 
+impl Drop for RecvStream {
+	fn drop(&mut self) {
+		// Same as the send side: the inner `Drop` stops with a raw 0.
+		if self.web && !self.inner.ended() {
+			self.inner.stop_code(proto::error_to_http3(0));
+		}
+	}
+}
+
 impl std::fmt::Debug for RecvStream {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		self.inner.fmt(f)
@@ -783,14 +951,34 @@ impl std::fmt::Debug for RecvStream {
 }
 
 /// Rewrite HTTP/3-mapped error codes back into WebTransport code space.
+///
+/// Only a sparse range of HTTP/3 codes names a WebTransport error. Anything
+/// else is HTTP/3's own failure rather than a code the peer's application
+/// chose, so it becomes [`Error::Http3`]: keeping the `App`/`Reset`/`Stop`
+/// variant would advertise it through `session_error()`/`stream_error()` as
+/// the very thing this mapping exists to tell it apart from.
 fn unmap_err(err: Error) -> Error {
-	let unmap = |code: u64| proto::error_from_http3(code).map(u64::from).unwrap_or(code);
+	fn unmap(code: u64) -> Option<u64> {
+		proto::error_from_http3(code).map(u64::from)
+	}
 	match err {
-		Error::Reset(code) => Error::Reset(unmap(code)),
-		Error::Stop(code) => Error::Stop(unmap(code)),
-		Error::App { code, reason } => Error::App {
-			code: unmap(code),
-			reason,
+		Error::Reset(code) => match unmap(code) {
+			Some(code) => Error::Reset(code),
+			None => Error::Http3 {
+				code,
+				reason: String::new(),
+			},
+		},
+		Error::Stop(code) => match unmap(code) {
+			Some(code) => Error::Stop(code),
+			None => Error::Http3 {
+				code,
+				reason: String::new(),
+			},
+		},
+		Error::App { code, reason } => match unmap(code) {
+			Some(code) => Error::App { code, reason },
+			None => Error::Http3 { code, reason },
 		},
 		other => other,
 	}
@@ -1027,10 +1215,6 @@ async fn open_uni(conn: &mut Connection) -> Result<super::SendStream, Error> {
 	std::future::poll_fn(|cx| web_transport_trait::poll::Session::poll_open_uni(conn, cx)).await
 }
 
-async fn accept_uni(conn: &mut Connection) -> Result<super::RecvStream, Error> {
-	std::future::poll_fn(|cx| web_transport_trait::poll::Session::poll_accept_uni(conn, cx)).await
-}
-
 async fn accept_bi(conn: &mut Connection) -> Result<(super::SendStream, super::RecvStream), Error> {
 	std::future::poll_fn(|cx| web_transport_trait::poll::Session::poll_accept_bi(conn, cx)).await
 }
@@ -1205,6 +1389,43 @@ impl Capsules {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A code with a WebTransport meaning comes back out as itself; one
+	/// without is HTTP/3's own failure, and must stop advertising itself as an
+	/// application error through the trait accessors.
+	#[test]
+	fn an_unmappable_code_is_not_an_application_error() {
+		use web_transport_trait::Error as _;
+
+		let app = unmap_err(Error::App {
+			code: proto::error_to_http3(7),
+			reason: "seven".into(),
+		});
+		assert!(
+			matches!(&app, Error::App { code: 7, reason } if reason == "seven"),
+			"got {app:?}"
+		);
+		assert_eq!(app.session_error(), Some((7, "seven".to_string())));
+
+		// H3_NO_ERROR: HTTP/3's, and no WebTransport code at all.
+		let h3 = unmap_err(Error::App {
+			code: 0x100,
+			reason: "done".into(),
+		});
+		assert!(
+			matches!(&h3, Error::Http3 { code: 0x100, reason } if reason == "done"),
+			"got {h3:?}"
+		);
+		assert_eq!(h3.session_error(), None, "not a code the peer's application chose");
+
+		let reset = unmap_err(Error::Reset(0x100));
+		assert!(matches!(reset, Error::Http3 { code: 0x100, .. }), "got {reset:?}");
+		assert_eq!(reset.stream_error(), None, "not a MoQ stream code");
+		assert!(matches!(
+			unmap_err(Error::Stop(proto::error_to_http3(3))),
+			Error::Stop(3)
+		));
+	}
 
 	/// Wrap `payload` in an HTTP/3 frame of type `typ`.
 	fn frame(typ: u64, payload: &[u8]) -> Vec<u8> {

@@ -356,3 +356,402 @@ fn unknown_streams_cannot_stall_the_handshake() {
 		})
 		.expect("worker");
 }
+
+// ── Handshake and teardown edge cases ───────────────────────────────
+
+/// Connection-level flow control the throttled peer advertises, which is what
+/// the server runs out of below. Big enough for the handshake, small enough to
+/// fill in a handful of writes.
+const THROTTLE: u64 = 64 * 1024;
+/// The client's first bidirectional stream, which the CONNECT rides.
+const CLIENT_BI: u64 = 0;
+/// The client's first two unidirectional streams. QUIC creates lower-numbered
+/// streams implicitly, so the server's accept queue hands them out in this
+/// order however the packets arrive.
+const CLIENT_UNI: [u64; 2] = [2, 6];
+
+/// A client offering `alpn` on its own socket, not yet handshaken.
+fn raw_peer(handle: &moq_uring::Handle, server: std::net::SocketAddr, throttle: Option<u64>) -> support::Peer {
+	let sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("client socket");
+	match throttle {
+		Some(max_data) => support::Peer::connect_throttled(handle, sock, server, &[b"h3"], max_data).expect("client"),
+		None => support::Peer::connect_alpn(handle, sock, server, &[b"h3"]).expect("client"),
+	}
+}
+
+/// Queue the client half of the HTTP/3 handshake: SETTINGS on `control`, then
+/// the CONNECT request. Raw quiche, because these tests need arrivals a real
+/// WebTransport client would never produce.
+fn h3_request(peer: &mut support::Peer, control: u64, url: &str) {
+	let mut settings = web_transport_quinn::proto::Settings::default();
+	settings.enable_webtransport(1);
+	let mut buf = Vec::new();
+	settings.encode(&mut buf);
+	peer.conn.stream_send(control, &buf, false).expect("control stream");
+
+	let mut buf = Vec::new();
+	web_transport_quinn::proto::ConnectRequest::new(url::Url::parse(url).expect("url"))
+		.with_protocol(PROTO)
+		.encode(&mut buf)
+		.expect("encode CONNECT");
+	peer.conn.stream_send(CLIENT_BI, &buf, false).expect("connect stream");
+}
+
+/// Await `future`, failing rather than hanging if it takes too long.
+///
+/// Everything here is a stall or a leak, so the failure mode without the fix
+/// is a test that never finishes.
+async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<Output = T>) -> T {
+	let mut deadline = moq_net::runtime::Deadline::after(handle, std::time::Duration::from_secs(5));
+	let mut future = std::pin::pin!(future);
+	kio::wait(|waiter| {
+		let mut cx = std::task::Context::from_waker(waiter.waker());
+		if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+			return std::task::Poll::Ready(Some(value));
+		}
+		deadline.poll(waiter).map(|()| None)
+	})
+	.await
+	.unwrap_or_else(|| panic!("timed out waiting for {what}"))
+}
+
+/// A client whose CONNECT is expected to fail, reporting how it failed.
+fn quinn_client_err(url: String) -> std::thread::JoinHandle<web_transport_quinn::ClientError> {
+	std::thread::spawn(move || {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let rt = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime");
+		rt.block_on(async move {
+			let client = web_transport_quinn::ClientBuilder::new()
+				.dangerous()
+				.with_no_certificate_verification()
+				.expect("client");
+			let request = web_transport_quinn::proto::ConnectRequest::new(url::Url::parse(&url).expect("url"))
+				.with_protocol(PROTO);
+			client.connect(request).await.expect_err("the CONNECT must fail")
+		})
+	})
+}
+
+/// A unidirectional stream that names its type and then stalls must not hold
+/// off a control stream that has fully arrived.
+///
+/// The accept queue is strictly id-ordered, so the stalled stream is always
+/// adopted first. Classifying one at a time parked there for as long as the
+/// peer kept the connection alive, with a complete SETTINGS sitting behind it.
+#[test]
+fn a_stalled_stream_cannot_block_the_handshake() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let server = endpoint.local_addr();
+
+	let peer_handle = handle.clone();
+	worker
+		.block_on(async move {
+			peer_handle.clone().spawn(async move {
+				let mut peer = raw_peer(&peer_handle, server, None);
+				peer.flush().await.expect("first flight");
+				while !peer.conn.is_established() {
+					peer.step().await.expect("step");
+					peer.flush().await.expect("flush");
+				}
+
+				// A WebTransport unidirectional header, complete except for
+				// the session id it never sends.
+				let stalled = [0x40, 0x54];
+				peer.conn
+					.stream_send(CLIENT_UNI[0], &stalled, false)
+					.expect("stalled stream");
+				h3_request(&mut peer, CLIENT_UNI[1], "https://localhost/stall");
+				peer.flush().await.expect("flush");
+
+				// Keep turning so the handshake can complete against it.
+				while !peer.conn.is_closed() {
+					if peer.step().await.is_err() || peer.flush().await.is_err() {
+						break;
+					}
+				}
+			});
+
+			let conn = endpoint.accept().await.expect("accepted connection");
+			let request = within(
+				&handle,
+				"the handshake to get past the stalled stream",
+				quic::web::Request::accept(&handle, conn),
+			)
+			.await
+			.expect("handshake");
+			assert_eq!(request.url().path(), "/stall");
+		})
+		.expect("worker");
+}
+
+/// A handshake the server abandons must close the connection.
+///
+/// Dropping the public `Connection` does not: the endpoint keeps it, its
+/// routes, and its driver task until the driver sees a terminal state, and the
+/// backlog stopped counting it at accept. The peer picks which subprotocols it
+/// offers, so answering with one it did not is a path it controls.
+#[test]
+fn an_abandoned_handshake_closes_the_connection() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let addr = endpoint.local_addr();
+
+	let client = quinn_client_err(format!("https://{addr}/"));
+
+	worker
+		.block_on(async move {
+			let conn = endpoint.accept().await.expect("accept");
+			let mut watch = conn.clone();
+			let request = quic::web::Request::accept(&handle, conn).await.expect("handshake");
+			let err = request
+				.respond(quic::web::Response::default().with_protocol("never-offered"))
+				.await
+				.expect_err("a subprotocol the peer did not offer");
+			assert!(matches!(err, quic::Error::Web(_)), "got {err:?}");
+
+			// Nothing here closed it by hand; the guard on the dropped request
+			// is what does.
+			within(
+				&handle,
+				"the abandoned connection to close",
+				std::future::poll_fn(|cx| watch.poll_closed(cx)),
+			)
+			.await;
+		})
+		.expect("worker");
+
+	client.join().expect("client thread");
+}
+
+/// A rejection reaches the peer as the status it was sent.
+///
+/// The HTTP/3 critical streams (the peer's control and QPACK streams, and
+/// ours) have to outlive the response: RFC 9114 makes closing one a connection
+/// error, so tearing them down would show an H3 failure instead of the 404.
+#[test]
+fn a_rejection_reaches_the_peer() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let addr = endpoint.local_addr();
+
+	let client = quinn_client_err(format!("https://{addr}/nope"));
+
+	worker
+		.block_on(async move {
+			let conn = endpoint.accept().await.expect("accept");
+			let request = quic::web::Request::accept(&handle, conn).await.expect("handshake");
+			within(
+				&handle,
+				"the rejection to be delivered",
+				request.reject(quic::web::Rejected::NotFound),
+			)
+			.await
+			.expect("reject");
+		})
+		.expect("worker");
+
+	let err = client.join().expect("client thread");
+	assert!(
+		matches!(
+			&err,
+			web_transport_quinn::ClientError::HttpError(web_transport_quinn::ConnectError::ProtoError(
+				web_transport_quinn::proto::ConnectError::WrongStatus(Some(status))
+			)) if *status == http::StatusCode::NOT_FOUND
+		),
+		"got {err:?}"
+	);
+}
+
+/// Dropping a web-mode stream cancels it with a WebTransport code, not the
+/// raw zero the inner stream would send.
+///
+/// moq cancels a subscription by dropping its stream, so this is the ordinary
+/// path: unmapped, a browser reads it as an HTTP/3 stream error instead.
+#[test]
+fn a_dropped_stream_carries_a_webtransport_code() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let addr = endpoint.local_addr();
+
+	let client = quinn_client(format!("https://{addr}/"), |session| {
+		Box::pin(async move {
+			// The server writes this and then drops the stream unfinished.
+			let mut recv = session.accept_uni().await.expect("accept_uni");
+			let mut buf = [0u8; 4096];
+			let n = recv.read(&mut buf).await.expect("read").expect("payload");
+			assert_eq!(&buf[..n], PAYLOAD);
+
+			// Tell it we have the payload, so the reset below cannot race it.
+			let mut ack = session.open_uni().await.expect("open_uni");
+			ack.write_all(b"ack").await.expect("write");
+			ack.finish().expect("finish");
+
+			let err = recv.read(&mut buf).await.expect_err("the server dropped it");
+			assert!(matches!(err, web_transport_quinn::ReadError::Reset(0)), "got {err:?}");
+
+			// And the other direction: the server drops the read half of this
+			// one, which must arrive as a WebTransport cancellation too.
+			let mut send = session.open_uni().await.expect("open_uni");
+			let err = loop {
+				match send.write_all(PAYLOAD).await {
+					Ok(()) => tokio::task::yield_now().await,
+					Err(err) => break err,
+				}
+			};
+			assert!(
+				matches!(err, web_transport_quinn::WriteError::Stopped(0)),
+				"got {err:?}"
+			);
+
+			session.close(CLOSE_CODE, CLOSE_REASON.as_bytes());
+			session.closed().await;
+		})
+	});
+
+	worker
+		.block_on(async move {
+			let conn = endpoint.accept().await.expect("accept");
+			let request = quic::web::Request::accept(&handle, conn).await.expect("handshake");
+			let mut session = request
+				.respond(quic::web::Response::default().with_protocol(PROTO))
+				.await
+				.expect("respond");
+
+			let mut send = std::future::poll_fn(|cx| session.poll_open_uni(cx))
+				.await
+				.expect("open_uni");
+			let mut payload = PAYLOAD;
+			while !payload.is_empty() {
+				let n = std::future::poll_fn(|cx| send.poll_write(cx, payload))
+					.await
+					.expect("write");
+				payload = &payload[n..];
+			}
+
+			let mut ack = std::future::poll_fn(|cx| session.poll_accept_uni(cx))
+				.await
+				.expect("accept_uni");
+			assert_eq!(drain(&mut ack).await, b"ack");
+			drop(send);
+
+			// The client's stream, whose read half we abandon.
+			let mut recv = std::future::poll_fn(|cx| session.poll_accept_uni(cx))
+				.await
+				.expect("accept_uni");
+			let mut buf = [0u8; 4096];
+			std::future::poll_fn(|cx| recv.poll_read(cx, &mut buf))
+				.await
+				.expect("read");
+			drop(recv);
+
+			std::future::poll_fn(|cx| session.poll_closed(cx)).await;
+		})
+		.expect("worker");
+
+	client.join().expect("client thread");
+}
+
+/// Finishing a web-mode stream that cannot frame itself yet is backpressure,
+/// not a failure.
+///
+/// A stream opened while the connection's flow-control credit is spent still
+/// owes its WebTransport header, and callers drop (and so reset) a stream that
+/// reports a terminal error. The finish has to complete once credit returns.
+#[test]
+fn finishing_under_backpressure_is_not_an_error() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let server = endpoint.local_addr();
+
+	// Set by the server once it has filled the peer's credit: reading is what
+	// returns it, so the peer must not read before then.
+	let reading = std::rc::Rc::new(std::cell::Cell::new(false));
+
+	let peer_handle = handle.clone();
+	let peer_reading = reading.clone();
+	worker
+		.block_on(async move {
+			peer_handle.clone().spawn(async move {
+				let mut peer = raw_peer(&peer_handle, server, Some(THROTTLE));
+				peer.flush().await.expect("first flight");
+				while !peer.conn.is_established() {
+					peer.step().await.expect("step");
+					peer.flush().await.expect("flush");
+				}
+				h3_request(&mut peer, CLIENT_UNI[0], "https://localhost/backpressure");
+				peer.flush().await.expect("flush");
+
+				let mut scratch = vec![0u8; 64 * 1024];
+				while !peer.conn.is_closed() {
+					if peer.step().await.is_err() {
+						break;
+					}
+					if peer_reading.get() {
+						let readable: Vec<u64> = peer.conn.readable().collect();
+						for stream in readable {
+							while peer.conn.stream_recv(stream, &mut scratch).is_ok() {}
+						}
+					}
+					if peer.flush().await.is_err() {
+						break;
+					}
+				}
+			});
+
+			let conn = endpoint.accept().await.expect("accepted connection");
+			let request = quic::web::Request::accept(&handle, conn).await.expect("handshake");
+			let mut session = request
+				.respond(quic::web::Response::default().with_protocol(PROTO))
+				.await
+				.expect("respond");
+
+			// Spend the peer's connection-level credit on a stream it is not
+			// reading. Polling with a no-op waker stops at the first refusal
+			// rather than parking.
+			let mut filler = std::future::poll_fn(|cx| session.poll_open_uni(cx))
+				.await
+				.expect("open_uni");
+			let chunk = [0u8; 4096];
+			let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+			loop {
+				match filler.poll_write(&mut cx, &chunk) {
+					std::task::Poll::Ready(Ok(_)) => {}
+					std::task::Poll::Ready(Err(err)) => panic!("filling the credit failed: {err}"),
+					std::task::Poll::Pending => break,
+				}
+			}
+
+			// A fresh stream still owes its header and has no credit to write
+			// it with, which is exactly the case that used to fail.
+			let mut blocked = std::future::poll_fn(|cx| session.poll_open_uni(cx))
+				.await
+				.expect("open_uni");
+			blocked.finish().expect("finishing under backpressure");
+
+			reading.set(true);
+			within(
+				&handle,
+				"the finished stream to close once credit returns",
+				std::future::poll_fn(|cx| blocked.poll_closed(cx)),
+			)
+			.await
+			.expect("closed");
+		})
+		.expect("worker");
+}

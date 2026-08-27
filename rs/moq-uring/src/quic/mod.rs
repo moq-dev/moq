@@ -318,6 +318,16 @@ pub enum Error {
 	/// stream that could not be framed.
 	#[error("webtransport error: {0}")]
 	Web(String),
+	/// HTTP/3 failed with a code of its own, one that names no WebTransport
+	/// error (`H3_NO_ERROR`, say). Neither trait accessor reports it, because
+	/// it is not a code the peer's application chose.
+	#[error("http/3 closed: code={code} reason={reason:?}")]
+	Http3 {
+		/// The HTTP/3 error code.
+		code: u64,
+		/// The UTF-8 lossy close reason, empty for a stream-level code.
+		reason: String,
+	},
 }
 
 impl web_transport_trait::Error for Error {
