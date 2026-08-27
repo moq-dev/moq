@@ -531,8 +531,8 @@ fn cores() -> Vec<CoreId> {
 /// Pin the calling thread to `core`, warning if the platform refuses.
 fn pin(index: u16, core: CoreId) {
 	if moq_sock::cpu::pin(core) {
-		tracing::debug!(index, core = core.id, "pinned QUIC worker");
+		tracing::debug!(index, core = core.id(), "pinned QUIC worker");
 	} else {
-		tracing::warn!(index, core = core.id, "failed to pin QUIC worker");
+		tracing::warn!(index, core = core.id(), "failed to pin QUIC worker");
 	}
 }
