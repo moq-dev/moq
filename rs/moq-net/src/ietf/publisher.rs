@@ -1626,56 +1626,91 @@ mod group_priority_test {
 	/// live edge.
 	#[tokio::test]
 	async fn batched_and_streamed_frames_encode_identically() {
-		const FRAMES: usize = 40;
+		const FRAMES: usize = 12;
+		const PAYLOAD: usize = 7;
 
-		async fn serve(chunked: bool) -> Vec<u8> {
-			let log = crate::lite::test_transport::Log::default();
-			let session = SinkSession::new(log.clone());
-
-			let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
-			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
-			for i in 0..FRAMES {
-				let timestamp = crate::Timestamp::from_millis(i as u64 * 10).unwrap();
-				let payload = vec![i as u8; 7];
-				if chunked {
-					// Written a byte at a time and completed, so the group holds no open
-					// tail by the time it is served: the batch read takes them all.
-					let mut frame = group
-						.create_frame(crate::frame::Info {
-							size: payload.len() as u64,
-							timestamp,
-						})
-						.unwrap();
-					for byte in &payload {
-						frame.write(&[*byte][..]).unwrap();
-					}
-					frame.finish().unwrap();
-				} else {
-					group.write_frame(timestamp, payload.as_slice()).unwrap();
-				}
-			}
-			let consumer = group.consume();
-			group.finish().unwrap();
-
-			let msg = ietf::GroupHeader {
+		fn header() -> ietf::GroupHeader {
+			ietf::GroupHeader {
 				track_alias: 0,
 				group_id: 0,
 				sub_group_id: 0,
 				publisher_priority: 0,
 				flags: Default::default(),
-			};
-
-			Publisher::<SinkSession>::run_group(session, msg, 0, consumer, Timescale::default(), Version::Draft14)
-				.await
-				.unwrap();
-
-			log.writes.lock().unwrap().clone()
+			}
 		}
 
-		let whole = serve(false).await;
-		let chunked = serve(true).await;
-		assert!(!whole.is_empty(), "the group produced no bytes");
-		assert_eq!(whole, chunked, "batched and chunked writes must encode the same");
+		fn payload(i: usize) -> Vec<u8> {
+			vec![i as u8; PAYLOAD]
+		}
+
+		fn timestamp(i: usize) -> crate::Timestamp {
+			crate::Timestamp::from_millis(i as u64 * 10).unwrap()
+		}
+
+		// Every frame complete before serving starts: the batch read takes them all.
+		let batched = {
+			let log = crate::lite::test_transport::Log::default();
+			let session = SinkSession::new(log.clone());
+			let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+			for i in 0..FRAMES {
+				group.write_frame(timestamp(i), payload(i).as_slice()).unwrap();
+			}
+			let consumer = group.consume();
+			group.finish().unwrap();
+
+			Publisher::<SinkSession>::run_group(session, header(), 0, consumer, Timescale::default(), Version::Draft14)
+				.await
+				.unwrap();
+			log.writes.lock().unwrap().clone()
+		};
+
+		// Every frame still open when the publisher reaches it, so each one streams a
+		// chunk at a time down the `Step::Partial` path.
+		let streamed = {
+			let log = crate::lite::test_transport::Log::default();
+			let session = SinkSession::new(log.clone());
+			let mut track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
+			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+			let consumer = group.consume();
+
+			let mut serve = std::pin::pin!(Publisher::<SinkSession>::run_group(
+				session,
+				header(),
+				0,
+				consumer,
+				Timescale::default(),
+				Version::Draft14
+			));
+			// Past the group header, parked with nothing to send.
+			assert!(futures::poll!(serve.as_mut()).is_pending());
+
+			for i in 0..FRAMES {
+				{
+					let mut frame = group
+						.create_frame(crate::frame::Info {
+							size: PAYLOAD as u64,
+							timestamp: timestamp(i),
+						})
+						.unwrap();
+					// The publisher is parked on this frame, so each chunk is forwarded
+					// before the next one is written.
+					for byte in payload(i) {
+						frame.write(&[byte][..]).unwrap();
+						assert!(futures::poll!(serve.as_mut()).is_pending());
+					}
+					frame.finish().unwrap();
+				}
+				assert!(futures::poll!(serve.as_mut()).is_pending());
+			}
+
+			group.finish().unwrap();
+			serve.await.unwrap();
+			log.writes.lock().unwrap().clone()
+		};
+
+		assert!(!batched.is_empty(), "the group produced no bytes");
+		assert_eq!(batched, streamed, "batched and streamed writes must encode the same");
 	}
 
 	/// A frame still being written must reach the wire as it fills rather than waiting
