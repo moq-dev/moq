@@ -4,7 +4,7 @@
 //! close) are validated against a real relay, separately from this hermetic suite.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Mutex, Once};
 
 use gst::prelude::*;
 
@@ -48,6 +48,34 @@ fn posted_eos(bus: &gst::Bus) -> usize {
 		}
 	}
 	seen
+}
+
+/// A bare pad whose activation (or deactivation) can be made to fail on demand, so a test can drive the
+/// parent transition into an error without a live relay.
+fn state_change_blocker(fail_when_active: bool) -> (gst::Pad, Arc<AtomicBool>) {
+	let enabled = Arc::new(AtomicBool::new(true));
+	let fail = enabled.clone();
+	let pad = gst::Pad::builder(gst::PadDirection::Sink)
+		.name("state-change-blocker")
+		.activatemode_function(move |_, _, _, active| {
+			if fail.load(Ordering::SeqCst) && active == fail_when_active {
+				return Err(gst::loggable_error!(gst::CAT_DEFAULT, "forced state-change failure"));
+			}
+			Ok(())
+		})
+		.build();
+	(pad, enabled)
+}
+
+/// A chain that answers `Flushing` is the element reporting it has no session to write into.
+fn assert_pad_has_no_live_publication(pad: &gst::Pad) {
+	pad.set_active(true).expect("activate the pad for the probe");
+	assert_eq!(
+		pad.chain(gst::Buffer::new()),
+		Err(gst::FlowError::Flushing),
+		"the transition left no publication attached to the pad"
+	);
+	pad.set_active(false).expect("deactivate the probe pad");
 }
 
 fn h264_caps() -> gst::Caps {
@@ -149,6 +177,62 @@ fn an_eos_during_another_pads_flush_does_not_complete_the_element() {
 		0,
 		"the flushing pad is not ended, so the element has not completed"
 	);
+	let _ = sink.set_state(gst::State::Null);
+}
+
+// READY -> PAUSED is synchronous: the element creates its session without waiting for a buffer, which
+// is the preroll policy it inherits from deriving on GstElement rather than a sink base class.
+#[test]
+fn ready_to_paused_completes_without_a_buffer() {
+	init();
+	let sink = publisher();
+	let _pad = sink.request_pad_simple("sink_0").expect("request sink_0");
+	assert_eq!(
+		sink.set_state(gst::State::Paused),
+		Ok(gst::StateChangeSuccess::Success),
+		"the transition completed rather than going async"
+	);
+	let _ = sink.set_state(gst::State::Null);
+}
+
+// The regression: a failed chain-up used to leave the session publishing in READY, where no later
+// transition would ever stop it.
+#[test]
+fn a_failed_ready_to_paused_rolls_back_the_publication() {
+	init();
+	let sink = publisher();
+	let pad = sink.request_pad_simple("sink_0").expect("request sink_0");
+	let (blocker, enabled) = state_change_blocker(true);
+	sink.add_pad(&blocker).expect("add activation blocker");
+
+	assert!(
+		sink.set_state(gst::State::Paused).is_err(),
+		"the parent transition reached the controlled activation failure"
+	);
+	assert_pad_has_no_live_publication(&pad);
+
+	enabled.store(false, Ordering::SeqCst);
+	let _ = sink.set_state(gst::State::Null);
+}
+
+// Going down, the cleanup is unconditional for the same reason. This passed before the reordering too:
+// it guards the property, not the ordering, which is a race no hermetic test observes.
+#[test]
+fn a_failed_paused_to_ready_still_releases_the_publication() {
+	init();
+	let sink = publisher();
+	let pad = sink.request_pad_simple("sink_0").expect("request sink_0");
+	let (blocker, enabled) = state_change_blocker(false);
+	sink.add_pad(&blocker).expect("add deactivation blocker");
+	sink.set_state(gst::State::Paused).expect("start the publication");
+
+	assert!(
+		sink.set_state(gst::State::Ready).is_err(),
+		"the parent transition reached the controlled deactivation failure"
+	);
+	assert_pad_has_no_live_publication(&pad);
+
+	enabled.store(false, Ordering::SeqCst);
 	let _ = sink.set_state(gst::State::Null);
 }
 

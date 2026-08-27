@@ -409,11 +409,25 @@ impl ElementImpl for MoqSink {
 
 	fn change_state(&self, transition: gst::StateChange) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
 		match transition {
-			gst::StateChange::ReadyToPaused => self.start_session()?,
-			gst::StateChange::PausedToReady => self.stop_session(),
-			_ => {}
+			// Roll the session back when the parent transition fails. Otherwise the element sits in READY
+			// with the session still publishing and the broadcast still announced, and nothing releases it
+			// later: there is no READY -> NULL path that stops a session.
+			gst::StateChange::ReadyToPaused => {
+				self.start_session()?;
+				self.parent_change_state(transition)
+					.inspect_err(|_| self.stop_session())
+			}
+			// The parent goes first, because it is what deactivates the pads and waits for the streaming
+			// functions to return; finalizing the producers before that lets a chain function write into a
+			// finalized producer. The cleanup runs whatever the parent answers, since a failed downward
+			// transition still leaves nothing that would ever release the publication.
+			gst::StateChange::PausedToReady => {
+				let result = self.parent_change_state(transition);
+				self.stop_session();
+				result
+			}
+			_ => self.parent_change_state(transition),
 		}
-		self.parent_change_state(transition)
 	}
 }
 
