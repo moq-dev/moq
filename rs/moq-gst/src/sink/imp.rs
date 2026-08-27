@@ -19,7 +19,7 @@ use hang::moq_net;
 
 use super::pad::{Pad, ProducerOptions, caps_supported};
 use super::request_pad::MoqSinkPad;
-use super::session::{CAT, ConnectionStatus, RUNTIME, ResolvedSettings, Session};
+use super::session::{CAT, ConnectionStatus, RUNTIME, ResolvedSettings, Session, SessionState};
 
 #[derive(Debug, Clone, Default)]
 struct Settings {
@@ -604,6 +604,32 @@ impl MoqSink {
 		}
 	}
 
+	/// Post a terminal session error, but only while the session that earned it is still the live one.
+	///
+	/// `Session`'s `Drop` aborts the task, but an abort is not synchronous: a task already inside its
+	/// terminal arm runs to completion, so a session the element stopped can still be reporting while
+	/// its replacement publishes. That error belongs to the run that ended.
+	///
+	/// The lock is released before posting, because `post_message` runs the bus sync handlers inline and
+	/// a handler reading a property would take it again.
+	pub(super) fn post_session_error(&self, session: &SessionState, error: String) {
+		let current = self
+			.state
+			.lock()
+			.unwrap()
+			.as_ref()
+			.is_some_and(|state| state.session.state().is(session));
+		if !current {
+			gst::debug!(
+				CAT,
+				obj = self.obj(),
+				"discarding an error from a stopped publishing session: {error}"
+			);
+			return;
+		}
+		gst::element_error!(self.obj(), gst::CoreError::Failed, ("session error"), ["{error}"]);
+	}
+
 	/// Mark a pad ended, then post the element EOS if that was the last active pad.
 	fn handle_eos(&self, pad: &gst::Pad) {
 		if let Some(state) = self.state.lock().unwrap().as_mut() {
@@ -655,6 +681,56 @@ mod tests {
 
 	fn spec(element: &super::super::MoqSink, name: &str) -> glib::ParamSpec {
 		element.find_property(name).unwrap()
+	}
+
+	/// The live session's identity, for a test that needs to outlive it.
+	fn session_of(sink: &super::super::MoqSink) -> SessionState {
+		sink.imp()
+			.state
+			.lock()
+			.unwrap()
+			.as_ref()
+			.expect("live session")
+			.session
+			.state()
+			.clone()
+	}
+
+	// `Session`'s `Drop` aborts the task, but not synchronously: a task already inside its terminal arm
+	// runs to completion, and used to post its error onto whatever session had replaced it.
+	#[test]
+	fn a_stopped_session_does_not_report_into_its_replacement() {
+		gst::init().unwrap();
+		let sink = sink();
+		sink.set_property("url", "https://127.0.0.1:1");
+		sink.set_property("broadcast", "test");
+		let element = sink.clone().upcast::<gst::Element>();
+		let bus = gst::Bus::new();
+		element.set_bus(Some(&bus));
+
+		element.set_state(gst::State::Paused).expect("start a session");
+		let stopped = session_of(&sink);
+		element.set_state(gst::State::Ready).expect("stop it");
+		element.set_state(gst::State::Paused).expect("start its replacement");
+		let live = session_of(&sink);
+		assert!(!stopped.is(&live), "the replacement is a different session");
+		while bus.pop().is_some() {}
+
+		sink.imp()
+			.post_session_error(&stopped, "from the stopped run".to_string());
+		assert!(
+			bus.pop().is_none(),
+			"the stopped session's error did not reach its replacement's bus"
+		);
+
+		sink.imp().post_session_error(&live, "from the live run".to_string());
+		assert_eq!(
+			bus.pop().map(|message| message.type_()),
+			Some(gst::MessageType::Error),
+			"the live session's error still reaches the bus"
+		);
+
+		let _ = element.set_state(gst::State::Null);
 	}
 
 	#[test]
