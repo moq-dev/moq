@@ -85,6 +85,17 @@ impl Shard {
 /// Call it for every member in index order and nothing else in between: the
 /// kernel identifies a member by its position in the group, which is the order
 /// the sockets bound. An unsharded bind is the plain one.
+///
+/// # Hold a [`Lock`] across the whole group
+///
+/// On a named port, acquire one before the first member binds and hold it
+/// until the group is gone. The probe below only refuses a group that is
+/// *already* bound; two groups constructing at once would each pass it before
+/// either held the port, then interleave into one reuseport group whose
+/// positional filter routes one process's connection ids to the other's
+/// sockets. This is a precondition rather than a parameter because an
+/// ephemeral port has nothing to lock, and a host with no lock directory runs
+/// on the probe alone; see [`Lock::acquire`].
 pub fn bind(addr: SocketAddr, shard: Option<Shard>) -> io::Result<UdpSocket> {
 	// The first member probes with a plain bind before the group forms.
 	// `SO_REUSEPORT` groups by address and UID, so a member would otherwise

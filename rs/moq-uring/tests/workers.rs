@@ -37,8 +37,10 @@ const ALPN: &str = "moq-uring-workers";
 const WORKERS: u16 = 2;
 /// Enough dials that both workers land some with near certainty: each
 /// Initial's placement hashes a random byte, so all landing on one side is a
-/// `2^-15` event.
-const DIALS: usize = 16;
+/// `2^-31` event. Steering cannot be asserted deterministically from here,
+/// since the client picks its own connection id; the count is what keeps the
+/// false failure below every other source of noise in the suite.
+const DIALS: usize = 32;
 
 /// A stop signal a worker parks on, wakeable from another thread.
 #[derive(Default)]
