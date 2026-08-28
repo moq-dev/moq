@@ -9,9 +9,43 @@
 //! - Iroh P2P (requires `iroh` feature)
 //!
 //! See [`Client`] for connecting to relays and [`Server`] for accepting
-//! connections. [`mdns`] finds peers to connect to on the local network.
+//! connections. The `mdns` module, behind the feature of the same name, finds
+//! peers to connect to on the local network.
+//!
+//! # Required features
+//!
+//! A build needs a QUIC backend (`quinn`, `quiche`, or `noq`), and `quinn`/`noq`
+//! additionally need a crypto provider (`aws-lc-rs` or `ring`) since their rustls
+//! dependency is built with default features off. The `default` feature set covers
+//! both; a consumer using `default-features = false` has to pick them itself.
 
 #![warn(missing_docs)]
+
+// A backend-less build is not a supported configuration, and without these it fails deep in
+// the modules that assume one: `QuicBackend` becomes an empty enum, `RequestKind` an empty
+// match, and `worker`/`server` reference items their own gates removed. Say so once here
+// instead of letting the caller read eight errors that never name the cause.
+//
+// Workspace builds never reach these: cargo unifies features per crate, so a member that
+// depends on moq-tokio with a backend enables it for everyone. Only `-p moq-tokio` or an
+// external consumer with `default-features = false` can select the broken shapes.
+#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "noq")))]
+compile_error!(
+	"moq-tokio requires a QUIC backend: enable one of the `quinn`, `quiche`, or `noq` features. \
+	 A tcp/uds-only build is not supported (see moq-dev/moq#2834)."
+);
+
+// `quinn` is the sharper half: unlike `noq` it still compiles, then has no initial cipher at
+// runtime, so the failure lands on a connection attempt rather than the build. `quiche` needs
+// neither, since boringssl brings its own.
+#[cfg(all(
+	any(feature = "quinn", feature = "noq"),
+	not(any(feature = "aws-lc-rs", feature = "ring"))
+))]
+compile_error!(
+	"the `quinn` and `noq` backends require a crypto provider: enable `aws-lc-rs` or `ring`. \
+	 Their rustls dependency is built with default-features off, so there is no cipher without one."
+);
 
 pub mod accept;
 pub use moq_sock::bind;
