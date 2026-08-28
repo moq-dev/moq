@@ -389,3 +389,52 @@ fn required_client_auth_refuses_an_anonymous_client() {
 		"a server requiring a certificate must refuse an anonymous client"
 	);
 }
+
+/// A root file is routinely a bundle of several CAs, and it has to be loaded
+/// whole.
+///
+/// Only the second CA in the bundle below signed the server, so a loader that
+/// stops at the first certificate rejects a peer that is perfectly valid while
+/// still looking configured. The relay reaches this through `listen.tls.root`.
+#[test]
+fn a_root_bundle_is_loaded_whole() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let bundle = support::bundle().expect("bundle");
+
+	let mut server_config =
+		quic::server::Config::new(quic::Identity::open(&bundle.cert, &bundle.key).expect("identity"));
+	server_config.alpn = vec![ALPN.to_string()];
+
+	let server_sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("server socket");
+	let server_addr = server_sock.local_addr().expect("server addr");
+	let client_sock = handle
+		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+		.expect("client socket");
+	let mut dial = quic::client::Config::new(server_addr, "localhost");
+	dial.alpn = vec![ALPN.to_string()];
+	dial.system_roots = false;
+	dial.roots = vec![bundle.roots.clone()];
+
+	let server_handle = handle.clone();
+	handle.spawn(async move {
+		quic::server::accept(&server_handle, server_sock, &server_config)
+			.await
+			.expect("quic accept");
+	});
+
+	worker
+		.block_on(async move {
+			let conn = quic::client::connect(&handle, client_sock, &dial)
+				.await
+				.expect("quic connect");
+			assert_eq!(
+				web_transport_trait::poll::Session::protocol(&conn),
+				Some(ALPN),
+				"negotiated ALPN"
+			);
+		})
+		.expect("worker");
+}

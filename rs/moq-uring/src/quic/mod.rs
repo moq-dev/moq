@@ -231,19 +231,21 @@ fn apply_trust(builder: &mut boring::ssl::SslContextBuilder, trust: &Trust) -> R
 			.set_default_verify_paths()
 			.map_err(|err| Error::Tls(format!("{SYSTEM_ROOTS}: {err}")))?;
 		for root in &trust.roots {
-			let cert = read_root(root)?;
-			builder
-				.cert_store_mut()
-				.add_cert(cert)
-				.map_err(|err| Error::Tls(format!("{}: {err}", root.display())))?;
+			for cert in read_roots(root)? {
+				builder
+					.cert_store_mut()
+					.add_cert(cert)
+					.map_err(|err| Error::Tls(format!("{}: {err}", root.display())))?;
+			}
 		}
 	} else {
 		let mut store = X509StoreBuilder::new().map_err(|err| Error::Tls(err.to_string()))?;
 		for root in &trust.roots {
-			let cert = read_root(root)?;
-			store
-				.add_cert(cert)
-				.map_err(|err| Error::Tls(format!("{}: {err}", root.display())))?;
+			for cert in read_roots(root)? {
+				store
+					.add_cert(cert)
+					.map_err(|err| Error::Tls(format!("{}: {err}", root.display())))?;
+			}
 		}
 		builder.set_cert_store_builder(store);
 	}
@@ -251,10 +253,19 @@ fn apply_trust(builder: &mut boring::ssl::SslContextBuilder, trust: &Trust) -> R
 	Ok(())
 }
 
-/// Read one PEM root, naming the file when it fails.
-fn read_root(path: &std::path::Path) -> Result<boring::x509::X509, Error> {
+/// Read every PEM certificate in one root file, naming it when it fails.
+///
+/// A root is routinely a bundle of several CAs, and taking only the first
+/// would reject a peer chaining to any of the others while looking configured.
+/// A file holding none is an error rather than a store that trusts nothing.
+fn read_roots(path: &std::path::Path) -> Result<Vec<boring::x509::X509>, Error> {
 	let pem = std::fs::read(path).map_err(|err| Error::Tls(format!("{}: {err}", path.display())))?;
-	boring::x509::X509::from_pem(&pem).map_err(|err| Error::Tls(format!("{}: {err}", path.display())))
+	let certs =
+		boring::x509::X509::stack_from_pem(&pem).map_err(|err| Error::Tls(format!("{}: {err}", path.display())))?;
+	if certs.is_empty() {
+		return Err(Error::Tls(format!("{}: no certificates", path.display())));
+	}
+	Ok(certs)
 }
 
 /// Why a connection could not be set up or has ended.
