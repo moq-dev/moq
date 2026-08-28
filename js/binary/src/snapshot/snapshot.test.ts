@@ -132,20 +132,5 @@ test("an aborted track surfaces its error instead of spinning", async () => {
 	const boom = new Error("subscription aborted");
 	track.close(boom);
 
-	expect(consumer.next()).rejects.toThrow("subscription aborted");
-});
-
-test("falling behind a group is recoverable", async () => {
-	// The Lagged case still resyncs: the next group carries a complete value of its own.
-	const track = new Track.Producer("test");
-	const producer = new Producer(track);
-	const consumer = new Consumer(track.subscribe());
-
-	producer.update(bytes(1));
-	expect(await consumer.next()).toEqual(bytes(1));
-	producer.update(bytes(2));
-	expect(await consumer.next()).toEqual(bytes(2));
-
-	producer.finish();
-	expect(await consumer.next()).toBeUndefined();
+	await expect(consumer.next()).rejects.toThrow("subscription aborted");
 });

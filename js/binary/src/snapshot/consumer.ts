@@ -18,7 +18,7 @@ export class Consumer {
 	#track: Moq.Track.Subscriber;
 	#decompress: boolean;
 
-	/// The group the current window belongs to, so a boundary restarts it.
+	// The group the current window belongs to, so a boundary restarts it.
 	#group?: number;
 	// The DEFLATE window for the current group, present while decompressing. A snapshot group is
 	// normally one frame, but the window is per group either way.
