@@ -382,6 +382,32 @@ features:
     cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
     cargo nextest run --locked --workspace --all-targets --all-features
+    just rs _unsupported-features
+
+# The workspace compiles above can't reach a backend-less moq-tokio: cargo unifies
+# features per crate, so a member depending on it with a backend enables one for
+# everyone. Only a per-crate invocation selects the shapes an external consumer with
+# `default-features = false` can land on, so assert those still fail on their own
+# `compile_error!` rather than on whatever breaks first inside the modules.
+_unsupported-features:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    expect() {
+        local want="$1"; shift
+        local got
+        got=$(cargo check --locked -p moq-tokio --no-default-features "$@" 2>&1 || true)
+        if ! grep -qF "$want" <<< "$got"; then
+            echo "rs: moq-tokio ${*:-(no features)} should fail on: $want" >&2
+            echo "$got" | grep -E '^error' >&2 || true
+            exit 1
+        fi
+    }
+
+    expect "requires a QUIC backend"
+    expect "requires a QUIC backend" --features tcp
+    expect "require a crypto provider" --features quinn
+    expect "require a crypto provider" --features noq
 
 # nextest, not `cargo test`, so a wedged test is killed instead of pinning a core
 # until someone notices (`.config/nextest.toml` sets the timeout). The trade is

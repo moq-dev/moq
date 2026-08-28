@@ -27,6 +27,8 @@ Tokio-based connection helpers for native Rust applications. Provides TLS config
 moq-tokio = "0.19"
 ```
 
+The default features cover a working build. If you set `default-features = false`, pick a QUIC backend (`quinn`, `quiche`, or `noq`) plus, for `quinn` or `noq`, a crypto provider (`aws-lc-rs` or `ring`); `quiche` brings its own. A build missing either fails with a message naming what to enable.
+
 ## API Reference
 
 Full API documentation: [docs.rs/moq-tokio](https://docs.rs/moq-tokio)
