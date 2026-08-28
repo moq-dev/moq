@@ -47,12 +47,20 @@ function read(buffer: SharedRingBuffer, samples: number, channelCount?: number):
 
 describe("initialization", () => {
 	it("should allocate correct SAB sizes", () => {
-		const init = allocSharedRingBuffer(2, 100, 1000);
+		const init = allocSharedRingBuffer(2, 128, 1000);
 		expect(init.channels).toBe(2);
-		expect(init.capacity).toBe(100);
+		expect(init.capacity).toBe(128);
 		expect(init.rate).toBe(1000);
-		expect(init.samples.byteLength).toBe(2 * 100 * 4); // 2 channels * 100 samples * Float32
+		expect(init.samples.byteLength).toBe(2 * 128 * 4); // 2 channels * 128 samples * Float32
 		expect(init.control.byteLength).toBe(4 * 4); // 4 control slots * Int32
+	});
+
+	it("rounds capacity up to a power of two", () => {
+		// slot() masks rather than taking a remainder, which is what keeps it wrap-invariant.
+		expect(allocSharedRingBuffer(1, 100, 1000).capacity).toBe(128);
+		expect(allocSharedRingBuffer(1, 128, 1000).capacity).toBe(128);
+		expect(allocSharedRingBuffer(1, 129, 1000).capacity).toBe(256);
+		expect(allocSharedRingBuffer(1, 1, 1000).capacity).toBe(1);
 	});
 
 	it("should start stalled", () => {
@@ -283,30 +291,30 @@ describe("stall behavior", () => {
 
 describe("ring wrapping", () => {
 	it("should wrap around when buffer is full", () => {
-		const buffer = create({ rate: 1000, channels: 1, capacity: 100, latency: 100 });
+		const buffer = create({ rate: 1000, channels: 1, capacity: 128, latency: 128 });
 
 		// Fill buffer
-		insert(buffer, 0, 100, { channels: 1, value: 1.0 });
+		insert(buffer, 0, 128, { channels: 1, value: 1.0 });
 		expect(buffer.stalled).toBe(false);
 
-		// Read 50 to make room
-		read(buffer, 50, 1);
+		// Read 64 to make room
+		read(buffer, 64, 1);
 
-		// Write 50 more
-		insert(buffer, 100, 50, { channels: 1, value: 2.0 });
-		expect(buffer.length).toBe(100);
+		// Write 64 more
+		insert(buffer, 128, 64, { channels: 1, value: 2.0 });
+		expect(buffer.length).toBe(128);
 
-		// Write 50 more — wraps around
-		insert(buffer, 150, 50, { channels: 1, value: 3.0 });
-		expect(buffer.length).toBe(100);
+		// Write 64 more — wraps around
+		insert(buffer, 192, 64, { channels: 1, value: 3.0 });
+		expect(buffer.length).toBe(128);
 
-		const output = read(buffer, 100, 1);
-		expect(output[0].length).toBe(100);
+		const output = read(buffer, 128, 1);
+		expect(output[0].length).toBe(128);
 
-		for (let i = 0; i < 50; i++) {
+		for (let i = 0; i < 64; i++) {
 			expect(output[0][i]).toBe(2.0);
 		}
-		for (let i = 50; i < 100; i++) {
+		for (let i = 64; i < 128; i++) {
 			expect(output[0][i]).toBe(3.0);
 		}
 	});
@@ -371,27 +379,27 @@ describe("edge cases", () => {
 
 describe("overflow", () => {
 	it("should advance READ when exceeding capacity", () => {
-		const buffer = create({ rate: 1000, channels: 1, capacity: 100, latency: 50 });
+		const buffer = create({ rate: 1000, channels: 1, capacity: 128, latency: 64 });
 
-		// Fill buffer to 50 (LATENCY) to un-stall
-		insert(buffer, 0, 50, { channels: 1, value: 1.0 });
+		// Fill buffer to 64 (LATENCY) to un-stall
+		insert(buffer, 0, 64, { channels: 1, value: 1.0 });
 		expect(buffer.stalled).toBe(false);
 
 		// Write way past capacity — should advance READ
-		insert(buffer, 0, 200, { channels: 1, value: 2.0 });
+		insert(buffer, 0, 256, { channels: 1, value: 2.0 });
 
 		// Buffer should still have <= capacity samples
-		expect(buffer.length).toBeLessThanOrEqual(100);
+		expect(buffer.length).toBeLessThanOrEqual(buffer.capacity);
 		expect(buffer.stalled).toBe(false);
 	});
 
 	it("should handle oversized frames", () => {
-		const buffer = create({ rate: 1000, channels: 1, capacity: 100, latency: 50 });
+		const buffer = create({ rate: 1000, channels: 1, capacity: 128, latency: 64 });
 
 		// Write a frame larger than the buffer capacity
-		insert(buffer, 0, 150, { channels: 1, value: 1.0 });
+		insert(buffer, 0, 192, { channels: 1, value: 1.0 });
 
-		expect(buffer.length).toBeLessThanOrEqual(100);
+		expect(buffer.length).toBeLessThanOrEqual(buffer.capacity);
 		// Should un-stall due to overflow advancing READ
 		expect(buffer.stalled).toBe(false);
 	});
@@ -495,6 +503,68 @@ describe("length getter", () => {
 	});
 });
 
+describe("i32 wrap epoch", () => {
+	// READ/WRITE live in an Int32Array because they are shared with the worklet, so they wrap
+	// every ~13.5h at 44.1kHz. The modular comparisons cope; these cover the two places that
+	// used to read the raw signed value as a magnitude.
+	const WRITE = 0;
+	const READ = 1;
+
+	it("keeps the playhead advancing across the i32 wrap", () => {
+		const init = allocSharedRingBuffer(1, 64, 1000);
+		const control = new Int32Array(init.control);
+		const buffer = new SharedRingBuffer(init);
+		buffer.setLatency(32);
+
+		insert(buffer, 0, 32, { channels: 1, value: 0.5 });
+		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(0 as Time.Milli);
+
+		// Step READ up to the boundary and over it, observing each time. Production gets these
+		// observations from the 50ms poll in `buffer.ts`.
+		control[READ] = (0x7fffffff - 1) | 0;
+		const before = buffer.timestamp;
+		control[READ] = 0x7fffffff | 0;
+		const at = buffer.timestamp;
+		control[READ] = -0x80000000;
+		const after = buffer.timestamp;
+
+		// One sample at 1000Hz is 1ms. Reading the negative half as a magnitude used to report
+		// the playhead jumping back 2^32 samples here. The loose tolerance is double rounding
+		// in the micro/second conversion at this magnitude, not drift in the position.
+		expect(at - before).toBeCloseTo(1000, 2);
+		expect(after - at).toBeCloseTo(1000, 2);
+		expect(after).toBeGreaterThan(0);
+	});
+
+	it("reads back a frame that straddles the i32 wrap", () => {
+		// Ask for 100, get 128: a power-of-two capacity divides 2^32, so the slot mapping stays
+		// continuous across the boundary. At 100 the frame below aliased onto unread slots.
+		const init = allocSharedRingBuffer(1, 100, 1000);
+		expect(init.capacity).toBe(128);
+
+		const control = new Int32Array(init.control);
+		const buffer = new SharedRingBuffer(init);
+		buffer.setLatency(16);
+
+		insert(buffer, 0, 16, { channels: 1, value: 0.25 });
+		read(buffer, 16, 1);
+
+		// Park both cursors 8 samples below the boundary so the next frame straddles it.
+		const edge = 0x7fffffff - 8;
+		control[READ] = edge | 0;
+		control[WRITE] = edge | 0;
+
+		insert(buffer, edge, 16, { channels: 1, value: 0.75 });
+		expect(buffer.length).toBe(16);
+
+		const out = read(buffer, 16, 1);
+		expect(out[0].length).toBe(16);
+		for (let i = 0; i < 16; i++) {
+			expect(out[0][i]).toBe(0.75);
+		}
+	});
+});
+
 describe("i32 wrapping", () => {
 	it("should handle modular arithmetic with large sample indices", () => {
 		const buffer = create({ rate: 1000, channels: 1, capacity: 100, latency: 100 });
@@ -549,12 +619,12 @@ describe("i32 wrapping", () => {
 
 describe("SharedRingBuffer.resize", () => {
 	it("preserves the unread window when growing capacity", () => {
-		const src = create({ rate: 1000, channels: 2, capacity: 50, latency: 30 });
+		const src = create({ rate: 1000, channels: 2, capacity: 64, latency: 30 });
 		insert(src, 0, 30, { value: 3.5 });
 		expect(src.stalled).toBe(false);
 
-		const dst = src.resize(200);
-		expect(dst.capacity).toBe(200);
+		const dst = src.resize(256);
+		expect(dst.capacity).toBe(256);
 		expect(dst.channels).toBe(2);
 		expect(dst.rate).toBe(1000);
 
@@ -570,17 +640,17 @@ describe("SharedRingBuffer.resize", () => {
 	});
 
 	it("truncates to the newest samples when shrinking below the unread span", () => {
-		const src = create({ rate: 1000, channels: 1, capacity: 50, latency: 40 });
-		// Fill [0, 30) with value 1, then [30, 40) with value 2.
-		insert(src, 0, 30, { channels: 1, value: 1.0 });
-		insert(src, 30, 10, { channels: 1, value: 2.0 });
+		const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
+		// Fill [0, 48) with value 1, then [48, 64) with value 2.
+		insert(src, 0, 48, { channels: 1, value: 1.0 });
+		insert(src, 48, 16, { channels: 1, value: 2.0 });
 
-		const dst = src.resize(10);
-		expect(dst.capacity).toBe(10);
+		const dst = src.resize(16);
+		expect(dst.capacity).toBe(16);
 
-		// Only the most recent 10 samples fit.
-		const out = read(dst, 10, 1);
-		for (let i = 0; i < 10; i++) {
+		// Only the most recent 16 samples fit.
+		const out = read(dst, 16, 1);
+		for (let i = 0; i < 16; i++) {
 			expect(out[0][i]).toBe(2.0);
 		}
 	});
@@ -636,19 +706,19 @@ describe("buffered mode", () => {
 	});
 
 	it("drops the oldest samples once the buffer exceeds the cap", () => {
-		// 200-sample capacity at 1000Hz = a 200ms cap.
-		const init = allocSharedRingBuffer(1, 200, 1000, true);
+		// 256-sample capacity at 1000Hz = a 256ms cap.
+		const init = allocSharedRingBuffer(1, 256, 1000, true);
 		const buffer = new SharedRingBuffer(init);
 		buffer.setLatency(50);
 
-		insert(buffer, 0, 100, { channels: 1, value: 0.1 }); // [0, 100)
-		insert(buffer, 100, 100, { channels: 1, value: 0.2 }); // [100, 200)
-		insert(buffer, 200, 100, { channels: 1, value: 0.3 }); // exceeds cap; drops [0, 100)
+		insert(buffer, 0, 128, { channels: 1, value: 0.1 }); // [0, 128)
+		insert(buffer, 128, 128, { channels: 1, value: 0.2 }); // [128, 256)
+		insert(buffer, 256, 128, { channels: 1, value: 0.3 }); // exceeds cap; drops [0, 128)
 
 		// READ skipped forward to stay within the cap; oldest frame is gone.
-		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(100 as Time.Milli);
-		expect(read(buffer, 100, 1)[0][0]).toBeCloseTo(0.2, 5);
-		expect(read(buffer, 100, 1)[0][0]).toBeCloseTo(0.3, 5);
+		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(128 as Time.Milli);
+		expect(read(buffer, 128, 1)[0][0]).toBeCloseTo(0.2, 5);
+		expect(read(buffer, 128, 1)[0][0]).toBeCloseTo(0.3, 5);
 	});
 
 	it("truncate drops the write-ahead tail a successor supersedes", () => {
