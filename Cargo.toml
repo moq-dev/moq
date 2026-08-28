@@ -208,3 +208,14 @@ strip = true
 # workspace copy so exactly one kio is built.
 [patch.crates-io]
 kio = { path = "rs/kio" }
+# Every quiche consumer builds from moq-dev/quiche's `moq` branch: raw sans-IO
+# quiche in moq-uring, and tokio-quiche (external, via web-transport-quiche)
+# compiled against whatever this patch supplies. The fork stays API-compatible
+# with the crates-io release it forks; see its README for the rebase policy.
+# octets and qlog ride along: quiche's git copy path-depends on its in-repo
+# octets/qlog, so without these patches tokio-quiche would compile against the
+# registry octets while quiche's error types use the git one, and the two
+# don't unify.
+quiche = { git = "https://github.com/moq-dev/quiche", rev = "2d2c2af7aefdcfc2b2cd08bfd872809459db088e" }
+octets = { git = "https://github.com/moq-dev/quiche", rev = "2d2c2af7aefdcfc2b2cd08bfd872809459db088e" }
+qlog = { git = "https://github.com/moq-dev/quiche", rev = "2d2c2af7aefdcfc2b2cd08bfd872809459db088e" }
