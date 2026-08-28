@@ -51,10 +51,10 @@ Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub
 ```bash
 git clone https://github.com/moq-dev/moq
 cd moq
-cargo build --release --bin moq-cli
+cargo build --release -p moq-cli --bin moq
 ```
 
-The binary will be in `target/release/moq-cli`.
+The binary will be in `target/release/moq`.
 
 ### Heap profiling
 
