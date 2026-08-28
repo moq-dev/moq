@@ -6456,7 +6456,8 @@ dependencies = [
 [[package]]
 name = "octets"
 version = "0.3.6"
-source = "git+https://github.com/moq-dev/quiche?rev=55e12064f384aa024a0d340599e1b4485cbfe5a9#55e12064f384aa024a0d340599e1b4485cbfe5a9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "866cb5af6f3aa3c1b44c3c2d79d22165fbb1b102e1b3fb499864bfe34736ec4b"
 
 [[package]]
 name = "oid-registry"
@@ -7282,7 +7283,8 @@ dependencies = [
 [[package]]
 name = "qlog"
 version = "0.18.0"
-source = "git+https://github.com/moq-dev/quiche?rev=55e12064f384aa024a0d340599e1b4485cbfe5a9#55e12064f384aa024a0d340599e1b4485cbfe5a9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c65c0ae39cba4538fd935d376ba17f858046b386dc4597e3fa5c1aedb919ef30"
 dependencies = [
  "flate2",
  "foundations",
@@ -7330,7 +7332,8 @@ dependencies = [
 [[package]]
 name = "quiche"
 version = "0.29.3"
-source = "git+https://github.com/moq-dev/quiche?rev=55e12064f384aa024a0d340599e1b4485cbfe5a9#55e12064f384aa024a0d340599e1b4485cbfe5a9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61166d27591eb7cb1310eec2b8fc6ae0e0686e9e4ed742a3ffc6317171175e7d"
 dependencies = [
  "boring",
  "bytes",
