@@ -79,19 +79,23 @@ impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
 	}
 }
 
-/// Reject the catalog if any rendition's `broadcast` reference walks above the root.
+/// Reject the catalog if any track's `broadcast` reference walks above the root.
 ///
-/// Every section carrying renditions must be chained here; a section left out silently
-/// exempts its renditions from the containment check.
+/// Every section carrying a `broadcast` reference must be chained here; a section left out
+/// silently exempts its tracks from the containment check.
 fn check_resolvable<E: CatalogExt>(base: &PathOwned, catalog: &Catalog<E>) -> Result<()> {
 	let video = catalog.video.renditions.iter();
 	let audio = catalog.audio.renditions.iter();
 	let text = catalog.text.renditions.iter();
+	let json = catalog.json.tracks.iter();
+	let binary = catalog.binary.tracks.iter();
 
 	for (rendition, rel) in video
 		.map(|(name, config)| (name, config.broadcast.as_ref()))
 		.chain(audio.map(|(name, config)| (name, config.broadcast.as_ref())))
 		.chain(text.map(|(name, config)| (name, config.broadcast.as_ref())))
+		.chain(json.map(|(name, config)| (name, config.broadcast.as_ref())))
+		.chain(binary.map(|(name, config)| (name, config.broadcast.as_ref())))
 	{
 		let Some(rel) = rel.filter(|rel| !rel.is_empty()) else {
 			continue;
@@ -326,6 +330,37 @@ mod test {
 			Err(crate::Error::EscapingBroadcast(reported)) => assert_eq!(reported, "../../../elsewhere"),
 			Err(err) => panic!("wrong error: {err:?}"),
 			Ok(_) => panic!("an escaping text reference should reject the catalog"),
+		}
+	}
+
+	/// Data tracks carry a `broadcast` reference like any rendition, so the containment check
+	/// covers them too. Without this the catalog is accepted and the escape surfaces much later,
+	/// when the entry is subscribed.
+	#[tokio::test]
+	async fn rejects_a_catalog_whose_data_broadcast_escapes_the_root() {
+		for section in ["json", "binary"] {
+			let mut published = Catalog::<()>::default();
+			published.audio.renditions.insert("here".to_string(), opus());
+
+			let escaping = moq_net::PathRelative::new("../../../elsewhere").into_owned();
+			match section {
+				"json" => {
+					let mut config = hang::catalog::JsonConfig::new(hang::catalog::Mode::Stream);
+					config.broadcast = Some(escaping);
+					published.json.tracks.insert("chat".to_string(), config);
+				}
+				_ => {
+					let mut config = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Stream);
+					config.broadcast = Some(escaping);
+					published.binary.tracks.insert("blobs".to_string(), config);
+				}
+			}
+
+			match publish_catalog(published) {
+				Err(crate::Error::EscapingBroadcast(reported)) => assert_eq!(reported, "../../../elsewhere"),
+				Err(err) => panic!("wrong error for {section}: {err:?}"),
+				Ok(_) => panic!("an escaping {section} reference should reject the catalog"),
+			}
 		}
 	}
 

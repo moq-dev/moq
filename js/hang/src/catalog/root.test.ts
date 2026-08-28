@@ -2,8 +2,9 @@ import { expect, test } from "bun:test";
 import * as z from "zod/mini";
 import { RootSchema } from "./root.ts";
 
-// The base catalog is generic: only `video`/`audio`. Applications add their own root sections
-// (e.g. `scte35`) without modifying hang, relying on the loose schema to pass them through.
+// The base catalog carries the media sections (`video`/`audio`) and the data track sections
+// (`json`/`binary`). Applications add their own root sections (e.g. `scte35`) without modifying
+// hang, relying on the loose schema to pass them through.
 
 test("base catalog preserves unknown sections", () => {
 	const extended = { video: { renditions: {} }, scte35: { spliceId: 42 } };

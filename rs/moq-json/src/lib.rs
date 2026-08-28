@@ -57,6 +57,15 @@ pub enum Error {
 	/// calling [`stream::Encoder::reset`].
 	#[error("compression desynchronized: a frame was encoded but never written")]
 	Desync,
+
+	/// A [`stream`] track carried a second group, which a lossless log cannot do.
+	///
+	/// A stream is a single group by construction: a publisher that cannot write a record ends the
+	/// track rather than rolling. A second group therefore means the records that would have
+	/// completed the first one are gone, so the read fails instead of presenting the remainder as
+	/// a continuous log.
+	#[error("stream rolled to a second group")]
+	Rolled,
 }
 
 impl From<serde_json::Error> for Error {

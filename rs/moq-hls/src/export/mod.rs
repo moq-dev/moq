@@ -984,10 +984,8 @@ mod tests {
 		let mut segments = rendition.segments();
 
 		// The catalog drops the rendition: its cursor must run dry rather than park.
-		let empty = moq_mux::catalog::hang::Catalog {
-			timeline: Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME)),
-			..Default::default()
-		};
+		let mut empty = moq_mux::catalog::hang::Catalog::default();
+		empty.timeline = Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME));
 		renditions.sync(&upstream, &empty);
 		let ended = tokio::time::timeout(Duration::from_secs(5), segments.next())
 			.await

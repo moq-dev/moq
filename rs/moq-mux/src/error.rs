@@ -36,6 +36,18 @@ pub enum Error {
 	#[error("json: {0}")]
 	Json(#[from] moq_json::Error),
 
+	/// Error publishing or consuming binary payloads over a track.
+	#[error("binary: {0}")]
+	Binary(#[from] moq_binary::Error),
+
+	/// A catalog entry declares a track mode this build does not implement.
+	#[error("unsupported track mode: {0}")]
+	UnsupportedMode(String),
+
+	/// A catalog entry declares a compression this build does not implement.
+	#[error("unsupported track compression: {0}")]
+	UnsupportedCompression(String),
+
 	/// Error parsing or building CMAF moof+mdat fragments.
 	#[error("cmaf: {0}")]
 	Cmaf(#[from] crate::container::fmp4::Error),

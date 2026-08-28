@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Track } from "@moq/net";
+import { Group, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Producer } from "./producer.ts";
 
@@ -311,4 +311,81 @@ test("frame cap rolls snapshot", async () => {
 	producer.finish();
 
 	expect(await structure(track.subscribe({ maxAge: REPLAY_LATENCY }).ordered())).toEqual([256, 1]);
+});
+
+test("a rejected update leaves the previous value readable", async () => {
+	// A keyframe closes the previous group and publishes its replacement before writing, so
+	// rejecting the frame inside writeFrame would supersede the last good value with an empty group.
+	// A snapshot consumer jumps to the newest, so that value would vanish on a failed update.
+	const track = new Track.Producer("test");
+	const producer = new Producer<Value>({ track, deltaRatio: 0 });
+	producer.update({ keep: true });
+
+	// Serializes past the group cache limit, so the frame cannot be published.
+	const oversized = { big: "x".repeat(Group.MAX_GROUP_CACHE_BYTES + 1) };
+	expect(() => producer.update(oversized)).toThrow(Group.FrameTooLarge);
+	producer.finish();
+
+	// A reader arriving now still finds the last good value, not an empty superseding group.
+	expect(await drain(track.subscribe())).toEqual([{ keep: true }]);
+});
+
+test("a delta that would evict the snapshot rolls a new one instead", async () => {
+	// A delta is only readable while its group still holds the snapshot it applies to, and the group
+	// cache evicts from the front. A patch that pushes the group past the cache would drop frame 0,
+	// leaving a late subscriber with a base-less group instead of the current value. Mirrors the
+	// cumulative check in the Rust encoder.
+	//
+	// The value is replaced rather than grown, so each snapshot fits the cache on its own while the
+	// snapshot plus the patch that rewrites it does not.
+	const half = Math.floor(Group.MAX_GROUP_CACHE_BYTES * 0.6);
+	const track = new Track.Producer("test");
+	const producer = new Producer<Value>({ track });
+
+	producer.update({ v: "x".repeat(half) });
+	producer.update({ v: "y".repeat(half) });
+	producer.finish();
+
+	// Two groups, a self-contained snapshot each, rather than one whose frame 0 was evicted.
+	const subscriber = track.subscribe({ maxAge: REPLAY_LATENCY }).ordered();
+	expect((await subscriber.nextGroup())?.sequence).toBe(0);
+	expect((await subscriber.nextGroup())?.sequence).toBe(1);
+	expect(await subscriber.nextGroup()).toBeUndefined();
+
+	// The newest value is readable with no earlier frame to apply it to.
+	const values = await drain(track.subscribe({ maxAge: REPLAY_LATENCY }));
+	expect(values[values.length - 1]).toEqual({ v: "y".repeat(half) });
+});
+
+test("a compressed delta is gated on its encoded size, not its plaintext", async () => {
+	// A sync-flushed DEFLATE frame can come out larger than its input, so the plaintext is not an
+	// upper bound on what lands in the group. A snapshot that fills the cache to within a few bytes
+	// plus a tiny patch that compresses to more than it measures would otherwise slip through the
+	// gate and evict frame 0.
+	const track = new Track.Producer("test");
+	const producer = new Producer<Value>({ track, compression: true });
+
+	// Highly repetitive, so the compressed snapshot lands just under the cap.
+	producer.update({ v: "x".repeat(Group.MAX_GROUP_CACHE_BYTES) });
+	producer.update({ v: "x".repeat(Group.MAX_GROUP_CACHE_BYTES), q: "a" });
+	producer.finish();
+
+	// Whatever the split, no group may exceed the cache, and the newest value must be readable.
+	const subscriber = track.subscribe({ maxAge: REPLAY_LATENCY }).ordered();
+	for (;;) {
+		const group = await subscriber.nextGroup();
+		if (!group) break;
+		let bytes = 0;
+		for (;;) {
+			const frame = await group.readFrame();
+			if (!frame) break;
+			bytes += frame.payload.byteLength;
+		}
+		expect(bytes).toBeLessThanOrEqual(Group.MAX_GROUP_CACHE_BYTES);
+	}
+
+	const consumer = new Consumer<Value>(track.subscribe({ maxAge: REPLAY_LATENCY }), { compression: true });
+	const values: Value[] = [];
+	for await (const value of consumer) values.push(value);
+	expect(values[values.length - 1]).toEqual({ v: "x".repeat(Group.MAX_GROUP_CACHE_BYTES), q: "a" });
 });

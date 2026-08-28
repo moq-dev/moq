@@ -31,6 +31,9 @@ impl<T> Clone for Producer<T> {
 
 impl<T> Producer<T> {
 	/// Create a subscriber for the underlying track.
+	///
+	/// Still hands one back once a failed write has ended the log: the subscriber surfaces the abort
+	/// on its first read, which is what tells a late reader the log is truncated.
 	pub fn consume(&self) -> moq_net::track::Subscriber {
 		self.inner.lock().unwrap().track.inner.subscribe(None)
 	}
@@ -52,6 +55,12 @@ impl<T: Serialize> Producer<T> {
 	}
 
 	/// Append one record to the log.
+	///
+	/// Any failure ends the track. A log missing a record is not the lossless log a stream promises,
+	/// and that holds whether the group rejected the record or it never encoded at all, so the
+	/// failure is surfaced rather than papered over with a second group. The track is aborted rather
+	/// than closed cleanly, so a consumer sees the failure instead of a log that merely looks
+	/// complete. Every later append fails on the ended track.
 	pub fn append(&mut self, value: &T) -> Result<()> {
 		self.inner.lock().unwrap().append(value)
 	}
@@ -80,21 +89,44 @@ impl<T: Serialize> Inner<T> {
 		// Encode first, so a value that can't be serialized doesn't publish an empty group that
 		// subscribers would advance into and wait on. Opening the group afterwards is safe because
 		// `record` guards the window: any failure below drops it uncommitted.
-		let record = encoder.encode(value)?;
+		let record = match encoder.encode(value) {
+			Ok(record) => record,
+			Err(err) => {
+				// A record that can't be encoded is as lost as one the group rejects: the log is
+				// missing it either way, and carrying on would present that gap as a complete log.
+				// Nothing was published, so this only has to end the track.
+				track.abort(moq_net::Error::Cancel);
+				return Err(err);
+			}
+		};
 
-		let result = match track.open() {
+		let opened = track.open();
+		let published = opened.is_ok();
+		let result = match opened {
 			Ok(()) => track.write(record.payload()),
 			Err(err) => Err(err),
 		};
 
 		if let Err(err) = result {
-			// The record never reached the wire, so dropping it desyncs a compressed encoder. `Track`
-			// has already closed the group it published, which is the group roll that recovery needs;
-			// reset the encoder to finish it, or the desync latch refuses every later record even
-			// though the fresh group could carry one.
+			// The record never reached the wire either way, so the window is ahead of every consumer
+			// and has to be reset. Without this the desync latch answers the next append before the
+			// track does, masking the real reason the log stopped.
 			drop(record);
 			encoder.reset();
-			return Err(err);
+
+			// What differs is whether a consumer could have seen the group. A write failure means the
+			// group is already live, so the record is a hole in the log, and a second group would hand
+			// consumers that gap dressed up as a complete log. End the track, which is what keeps "a
+			// stream is one group" a real invariant rather than the usual case.
+			//
+			// An `open` failure published nothing (it only runs when there is no group), so a later
+			// append opens a fresh group whose decoder starts cold. That path also catches an append
+			// onto a track already ended this way, which keeps reporting the error it was aborted with.
+			if published {
+				track.abort(err.clone());
+			}
+
+			return Err(err.into());
 		}
 
 		record.commit();
@@ -102,20 +134,21 @@ impl<T: Serialize> Inner<T> {
 	}
 
 	fn finish(&mut self) -> Result<()> {
-		self.track.finish()
+		Ok(self.track.finish()?)
 	}
 }
 
 /// The track half of [`Inner`]: the single group carrying the whole log.
 struct Track {
 	inner: moq_net::track::Producer,
-	// Opened on the first append and never rolled.
+
+	/// Opened on the first append and never rolled.
 	group: Option<moq_net::group::Producer>,
 }
 
 impl Track {
 	/// Open the log's group if it isn't already.
-	fn open(&mut self) -> Result<()> {
+	fn open(&mut self) -> std::result::Result<(), moq_net::Error> {
 		if self.group.is_none() {
 			self.group = Some(self.inner.append_group()?);
 		}
@@ -123,26 +156,43 @@ impl Track {
 	}
 
 	/// Append one encoded record to the log's group.
-	fn write(&mut self, payload: &bytes::Bytes) -> Result<()> {
+	fn write(&mut self, payload: &bytes::Bytes) -> std::result::Result<(), moq_net::Error> {
 		let group = self.group.as_mut().expect("a group is open");
-		let Err(err) = group.write_frame(moq_net::Timestamp::now(), payload.clone()) else {
-			return Ok(());
-		};
-
-		// The group is already published and dropping the handle does not close it, so a subscriber
-		// that advanced into it would wait there with nothing to read. Close it and let a later append
-		// open a fresh one, which is what a caller recovering from the desync has to do anyway.
-		if let Some(mut group) = self.group.take() {
-			let _ = group.finish();
-		}
-		Err(err.into())
+		group.write_frame(moq_net::Timestamp::now(), payload.clone())
 	}
 
-	fn finish(&mut self) -> Result<()> {
-		if let Some(mut group) = self.group.take() {
-			group.finish()?;
+	/// End the track with an error, so a consumer sees the failure rather than a clean end.
+	///
+	/// Aborting the *track* is what a subscriber observes. Aborting only the group drops it from the
+	/// cache and the consumer still reads a clean end, which is exactly what a completed log looks
+	/// like, so a truncated log would be indistinguishable from a whole one.
+	fn abort(&mut self, err: moq_net::Error) {
+		// Abort the group with the same error first. `track::Producer::abort` deliberately leaves an
+		// already-pulled `group::Consumer` independent, so dropping our handle would hand a reader
+		// sitting in the group a generic `Dropped` instead of the failure that ended the log.
+		if let Some(group) = self.group.take() {
+			let _ = group.abort(err.clone());
 		}
-		self.inner.finish()?;
+
+		// Abort through a clone, since aborting consumes a handle and the state is shared. Keeping
+		// ours means `consume` still hands back a subscriber, which is how a reader learns the log
+		// ended badly rather than cleanly.
+		let _ = self.inner.clone().abort(err);
+	}
+
+	fn finish(&mut self) -> std::result::Result<(), moq_net::Error> {
+		// Finalize both independently rather than short-circuiting on the group. Returning early
+		// would leave the track open with `group` already taken, so a later append would open a
+		// second group, and (with compression) write into it from a window the consumer never
+		// received. That is exactly the split log ending the track exists to prevent.
+		let group = match self.group.take() {
+			Some(mut group) => group.finish(),
+			None => Ok(()),
+		};
+		let track = self.inner.finish();
+
+		group?;
+		track?;
 		Ok(())
 	}
 }

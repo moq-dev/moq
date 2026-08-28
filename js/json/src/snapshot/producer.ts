@@ -1,4 +1,4 @@
-import type * as Moq from "@moq/net";
+import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 
 import { type Config, DEFAULT_DELTA_RATIO, type Encoded, Encoder } from "./encoder.ts";
@@ -66,6 +66,12 @@ export class Producer<T> {
 	}
 
 	#write(encoded: Encoded): void {
+		// Check before touching a group. A keyframe closes the previous group and publishes its
+		// replacement before the frame is written, so discovering the limit inside `writeFrame` would
+		// leave an empty newest group behind: a snapshot consumer jumps to the newest, so the last
+		// good value would vanish even though this update reported an error.
+		if (encoded.payload.byteLength > Moq.Group.MAX_GROUP_CACHE_BYTES) throw new Moq.Group.FrameTooLarge();
+
 		if (encoded.keyframe) {
 			// The previous group is complete; no more frames will be appended to it. Drop the handle
 			// before opening the next one, so a failure below doesn't leave a closed group behind.

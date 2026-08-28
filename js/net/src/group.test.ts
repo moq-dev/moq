@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Lagged, MAX_GROUP_CACHE_BYTES, MAX_GROUP_FRAMES, Producer } from "./group.ts";
+import { FrameTooLarge, Lagged, MAX_GROUP_CACHE_BYTES, MAX_GROUP_FRAMES, Producer } from "./group.ts";
 import { Timestamp } from "./time.ts";
 
 const dec = new TextDecoder();
@@ -188,4 +188,18 @@ test("buffered frames are still readable after the group closes", async () => {
 	// Closing doesn't discard buffered frames; the blocking reader drains them before ending.
 	expect(await consumer.readString()).toBe("a");
 	expect(await consumer.readFrame()).toBeUndefined();
+});
+
+test("a frame larger than the cache is rejected rather than silently dropped", () => {
+	// Appending it would evict it in the same call, so a silent success would report a write that
+	// nothing can ever read. Rust rejects the same frame up front with `Error::FrameTooLarge`.
+	const producer = new Producer(0);
+	const oversized = new Uint8Array(MAX_GROUP_CACHE_BYTES + 1);
+
+	expect(() => producer.writeFrame({ payload: oversized, timestamp: Timestamp.now() })).toThrow(FrameTooLarge);
+
+	// Nothing was appended, so the group is still empty rather than holding a phantom frame.
+	const consumer = producer.consume();
+	producer.close();
+	expect(consumer.tryReadFrame()).toBeUndefined();
 });

@@ -265,6 +265,14 @@ impl Track {
 
 	/// Write one encoded frame, rolling a group when it's a snapshot.
 	fn write(&mut self, encoded: &Encoded) -> Result<()> {
+		// Check before touching a group. `write_snapshot` closes the previous group and publishes a
+		// new one before the frame is written, so discovering the limit inside `write_frame` would
+		// leave an empty newest group behind: a snapshot consumer jumps to the newest, so the previous
+		// value would be lost even though this update reported an error.
+		if encoded.payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
+			return Err(moq_net::Error::FrameTooLarge.into());
+		}
+
 		match encoded.keyframe {
 			true => self.write_snapshot(encoded.payload.clone()),
 			false => self.write_delta(encoded.payload.clone()),

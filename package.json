@@ -30,6 +30,7 @@
 		"js/clock",
 		"js/token",
 		"js/flate",
+		"js/binary",
 		"js/json",
 		"js/hang",
 		"js/loc",

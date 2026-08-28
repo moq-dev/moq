@@ -17,7 +17,7 @@
  * @module
  */
 
-export { Consumer } from "./consumer.ts";
+export { Consumer, Rolled } from "./consumer.ts";
 export { type ConsumerConfig, Decoder } from "./decoder.ts";
 export { Encoder, type Pending, type ProducerConfig } from "./encoder.ts";
 export { Producer } from "./producer.ts";

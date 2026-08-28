@@ -43,8 +43,11 @@ pub fn deserialize_text<'de, D>(deserializer: D) -> Result<Text, D::Error>
 where
 	D: serde::Deserializer<'de>,
 {
-	let value = serde_json::Value::deserialize(deserializer)?;
-	Ok(serde_json::from_value(value).unwrap_or_default())
+	crate::catalog::deserialize_section(deserializer)
+}
+
+impl crate::catalog::Section for Text {
+	const MAP: &'static str = "renditions";
 }
 
 impl Text {

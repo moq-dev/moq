@@ -46,6 +46,19 @@ export class Lagged extends Error {
 	}
 }
 
+/**
+ * Thrown by a frame write when the frame is larger than a group can cache, so appending it would
+ * evict it immediately and drop the write.
+ *
+ * Mirrors the Rust `Error::FrameTooLarge`, which rejects the same frame before touching any state.
+ */
+export class FrameTooLarge extends Error {
+	constructor() {
+		super("frame too large: larger than a group can cache");
+		this.name = "FrameTooLarge";
+	}
+}
+
 /** Reactive backing state shared by the group producer and one consumer. */
 class GroupState {
 	readonly sequence: number;
@@ -185,6 +198,11 @@ export class Producer {
 
 	/** Writes a frame to the group. */
 	writeFrame(frame: Frame) {
+		// A frame past the cache cap would be evicted by the very append that added it, so accepting
+		// it would report success for a write nothing can ever read. Rust rejects it up front with
+		// `Error::FrameTooLarge`; do the same rather than silently dropping it.
+		if (frame.payload.byteLength > MAX_GROUP_CACHE_BYTES) throw new FrameTooLarge();
+
 		appendFrame(this.#state, frame);
 
 		if (this.#mirrors) {

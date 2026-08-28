@@ -62,6 +62,9 @@ The compression is the group-scoped `deflate-raw` ([RFC 1951](https://www.rfc-ed
 To read the compressed track, opt in explicitly: pass `--catalog-format hangz` to `moq export`, `CatalogFormat::HangZ` in Rust, or `catalogFormat: "hangz"` to `@moq/watch`.
 The `.hang` broadcast suffix is unchanged: the compressed track is an extra track on the same broadcast, not a different broadcast name.
 
+`catalog.json.z` and the `.timeline.z` tracks are always compressed and known by their role.
+Everywhere else compression is declared, not guessed: a data track carries a `compression` field (see below), and the `.z` suffix on a track name is a naming convention a consumer must never read as a signal.
+
 ### Audio
 
 [See the latest schema](https://github.com/moq-dev/moq/blob/main/js/hang/src/catalog/audio.ts).
@@ -119,9 +122,96 @@ Both refuse a target no reference can name, since a path segment may itself be c
 
 `@moq/watch` resolves the reference automatically. In Rust, the `moq-mux` exporters do the same: they take a `Source::new(origin, path)`, and both the catalog broadcast and any referenced broadcast resolve through the origin over the same connection.
 
+### Data tracks
+
+Not everything in a broadcast is media. A chat log, a telemetry feed, a thumbnail, a serialized game state: the catalog lists these in two sections alongside `video` and `audio`, split by what a generic consumer can do with the payload.
+
+```json
+{
+  "json": {
+    "tracks": {
+      "chat": { "mode": "stream", "compression": "deflate" },
+      "status": { "mode": "snapshot" }
+    }
+  },
+  "binary": {
+    "tracks": {
+      "thumbnail": { "mode": "snapshot", "mime": "image/jpeg" }
+    }
+  }
+}
+```
+
+A `json` track's frames are UTF-8 JSON values, so a relay, a debugger, or an archiver can parse and re-serialize them without knowing the application. A `binary` track's frames are opaque bytes, which only the application can interpret. Each map is keyed by track name, and unlike the media sections these are not rendition sets: the entries are distinct tracks, not alternatives to choose between. A section is omitted entirely when it holds no tracks.
+
+`mode` is required and says how a track's groups compose its frames. There is no default, because reading an append log as a latest-value document silently discards every payload but the last:
+
+- `snapshot` is lossy. Each group is self-contained and supersedes the previous one, so a consumer reads only the newest and a publisher may drop older ones. A JSON track may follow a group's first frame with merge-patch deltas; a binary track writes one frame per group.
+- `stream` is lossless in the sense that nothing supersedes anything else. One payload per frame, in order, all in a single group that is never rolled. A publisher that cannot write a payload closes the track, since a second group would present a gap as if it were a complete log. A consumer reads the one group the track carries and fails the read if a second appears, rather than yielding the remainder as though the log were continuous. Retention is still bounded by the group cache: a log longer than the cache holds evicts its earliest frames, and a consumer that falls behind or joins late then cannot read the log at all, since the read fails when it reaches the evicted prefix rather than silently resuming partway through. That is deliberate, because a partial log presented as a whole one is what this mode exists to prevent, and under compression the retained frames are undecodable anyway without the evicted prefix as context. Keep a stream track's log inside what its groups retain, and split anything unbounded across successive tracks.
+
+`compression` names the compression applied to the frames, or is absent when they are uncompressed. `deflate` is the same group-scoped `deflate-raw` the catalog uses. The remaining fields are optional and descriptive: `schema` (a JSON Schema URL) on a JSON track, `mime` on a binary one. Both kinds also accept the `broadcast` and `timeline` fields a media rendition takes.
+
+A consumer that does not recognize a track's `mode` or `compression` must ignore that track. It still round-trips verbatim, so a relay that reparses and republishes the catalog never corrupts a track it cannot read.
+
+#### Publishing and reading
+
+In Rust you create the track on the broadcast, as you would for a media track, and hand it to the catalog. The catalog writes the entry and drops it when the handle drops, so a track is never advertised without a publisher behind it. The catalog key is the track's own name, with no `.z` suffix even when compressed, since the entry's compression flag is what a consumer reads:
+
+```rust
+let track = broadcast.create_track("chat", None)?;
+let mut chat = catalog.json_stream::<Message>(track, json::Config::default().with_compression(true))?;
+chat.append(&message)?;
+
+let track = broadcast.create_track("thumbnail", None)?;
+let mut thumbnail = catalog.binary_snapshot(track, binary::Config::default().with_mime("image/jpeg"))?;
+thumbnail.update(jpeg)?;
+```
+
+There is a producer type per mode (`json_snapshot` / `json_stream`, `binary_snapshot` / `binary_stream`) so `append` on a latest-value track does not compile.
+
+The read side names the track once. `catalog.json_track(name)` returns an entry pairing the name with its config, and the entry subscribes itself:
+
+```rust
+let entry = catalog.json_track("chat").expect("no chat track");
+let mut chat = entry.subscribe::<Message>(&source).await?;
+while let Some(message) = chat.next().await? {
+    // ...
+}
+```
+
+The entry supplies the track's mode and compression, so a reader cannot pair the wrong ones with the track, and it resolves through a `Source`, so an entry pointing at a sibling broadcast is followed rather than read from the wrong place.
+
+There is one consumer type rather than one per mode. Both modes hand the caller the same thing, a sequence of values ending when the track does, so a reader writes one loop either way; what differs is loss semantics, and `consumer.mode()` answers that for the rare reader that can only work with one. Discovery is the same entries: `catalog.json_tracks()` and `catalog.binary_tracks()` enumerate them, since the catalog is the only thing that announces a data track.
+
+In the browser the pieces are the same, assembled by hand: read the entry from `catalog.json.tracks` (or `catalog.binary.tracks`), subscribe to the track by name, and hand it to `@moq/json` or `@moq/binary`. Two mappings to do yourself, since the packages take the mode and compression as code rather than as catalog values:
+
+```ts
+const entry = catalog.json?.tracks.chat;
+if (!entry || !Catalog.modeSupported(entry.mode)) return;
+if (entry.compression !== undefined && !Catalog.compressionSupported(entry.compression)) return;
+
+const compression = entry.compression === "deflate";
+
+// Honor a cross-broadcast reference the same way the Rust `Entry::subscribe` does; without this
+// you would read an unrelated same-named track in the catalog's own broadcast. A catalog is
+// untrusted input, so use `tryResolve`: it returns undefined when the reference escapes above the
+// root, which the spec says to ignore rather than clamp onto some other valid broadcast.
+let source = broadcast;
+if (entry.broadcast !== undefined) {
+    const path = Path.tryResolve(catalogPath, entry.broadcast);
+    if (!path) return;
+    source = await connection.consume(path);
+}
+const track = source.subscribe("chat");
+const consumer =
+    entry.mode === "stream" ? new Json.Stream.Consumer(track, { compression }) : new Json.Snapshot.Consumer(track, { compression });
+```
+
+`mode` picks the namespace (`Stream` or `Snapshot`), and `compression` is a boolean there while the catalog carries `"deflate"` or nothing. Check both against `modeSupported` / `compressionSupported` first and skip the track if either is unrecognized, rather than guessing.
+
 ### Extensions
 
-The base catalog carries only the media sections (`video` and `audio`).
+The base catalog carries the media sections (`video` and `audio`) and the data track sections (`json` and `binary`).
 Applications add their own root sections (for example `scte35`) without modifying hang.
 
 The catalog is a JSON document published through the merge-patch snapshot helper (the `Snapshot` mode of `@moq/json` / `moq-json`), and an extension is just an extra top-level key:
@@ -140,7 +230,9 @@ This keeps application-specific sections in the application layer while the base
 
 ### Custom tracks
 
-A custom catalog section can carry its payload inline (for low-rate metadata), or it can reference a separate track in the same broadcast (for a stream of data, e.g. a `meta.json` track or an SCTE-35 event track). The relay treats such a track like any other; only the publisher and consumer give it meaning.
+Reach for the `json` and `binary` sections above first: they name a track and say how to read it, so a generic consumer can find and decode one without application support.
+
+An application still needs its own catalog section when the metadata is not a track at all (a low-rate value carried inline in the catalog) or when it has to say something the data sections do not model. Such a section can reference a separate track in the same broadcast, which the relay treats like any other; only the publisher and consumer give it meaning.
 
 The `@moq/publish` and `@moq/watch` components publish and subscribe to these tracks generically, with no per-application support. Each exposes a low-level track hook, and the application uses `@moq/json` to encode the payload itself:
 

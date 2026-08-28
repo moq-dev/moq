@@ -280,10 +280,31 @@ impl<T: Serialize> Encoder<T> {
 
 		// Compress into the per-group window only now, for a frame we are committed to emitting.
 		let bytes = serde_json::to_vec(&patch)?;
+
+		// Same cap as a snapshot, on the patch's plaintext: a delta that decompresses past the
+		// consumer's limit makes the whole group unreadable, since there is no keyframe after it to
+		// resynchronize on. Rejecting here leaves the encoder to reset and the group as it was.
+		if self.config.compression && bytes.len() as u64 > moq_flate::DEFAULT_MAX_FRAME_SIZE {
+			return Err(moq_flate::Error::TooLarge(moq_flate::DEFAULT_MAX_FRAME_SIZE).into());
+		}
 		let payload = match self.flate.as_mut() {
 			Some(flate) => flate.frame(&bytes),
 			None => Bytes::from(bytes),
 		};
+
+		// A delta is only readable while the group still holds the snapshot it applies to, and the
+		// group cache evicts from the front. Admitting a patch that pushes the group past that budget
+		// would drop frame 0, leaving a late subscriber with a base-less group (`Lagged`) instead of
+		// the current value. Roll a fresh snapshot instead, which is cheap next to losing the value.
+		//
+		// Measured on the encoded payload rather than the plaintext: a sync-flushed DEFLATE frame can
+		// come out slightly larger than its input, so the plaintext is not an upper bound. Compressing
+		// first advances the window, but [`Self::snapshot`] opens a fresh one, so an over-budget delta
+		// costs only the wasted compression.
+		if self.snapshot_len + self.delta_bytes + payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
+			return self.snapshot(value).map(Some);
+		}
+
 		self.delta_bytes += payload.len() as u64;
 		self.group_frames += 1;
 
@@ -316,6 +337,13 @@ impl<T: Serialize> Encoder<T> {
 		// Serialize directly from `value` so the snapshot frame preserves the type's own field order,
 		// keeping the wire bytes identical to serializing `T` straight to a frame.
 		let snapshot = serde_json::to_vec(value)?;
+
+		// Every consumer decodes with moq-flate's default output cap, so a value past it would be
+		// unreadable however small it compresses to. Reject it before anything is published, so the
+		// previously published value stands rather than being superseded by one nothing can read.
+		if self.config.compression && snapshot.len() as u64 > moq_flate::DEFAULT_MAX_FRAME_SIZE {
+			return Err(moq_flate::Error::TooLarge(moq_flate::DEFAULT_MAX_FRAME_SIZE).into());
+		}
 
 		// Read the baseline back out of those same bytes rather than serializing `value` a second
 		// time, so the baseline IS the emitted snapshot by construction. A `Serialize` impl reading a

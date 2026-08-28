@@ -132,6 +132,13 @@ impl<T: Serialize> Encoder<T> {
 		}
 
 		let bytes = serde_json::to_vec(value)?;
+
+		// Every consumer decodes with moq-flate's default output cap, so a record past it would be
+		// unreadable however small it compresses to. Reject it here, where the caller still learns
+		// why, rather than publishing something only the producer can read.
+		if self.compression && bytes.len() as u64 > moq_flate::DEFAULT_MAX_FRAME_SIZE {
+			return Err(moq_flate::Error::TooLarge(moq_flate::DEFAULT_MAX_FRAME_SIZE).into());
+		}
 		let payload = match self.flate.as_mut() {
 			Some(flate) => flate.frame(&bytes),
 			None => Bytes::from(bytes),

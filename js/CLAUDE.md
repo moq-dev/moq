@@ -19,6 +19,7 @@ Bun workspaces; members listed in the repo-root `package.json` (not in `js/`). D
 
 - `@moq/loc` (`loc/`): Low Overhead Container frame encoding. Thin layer on `@moq/net`.
 - `@moq/json` (`json/`): JSON over a track, in three namespaces. `Snapshot` is lossy latest-value (RFC 7396 merge-patch deltas; consumers only get the most recent value; the base `Snapshot.Producer`/`Snapshot.Consumer` that `@moq/hang`'s catalog extends); `Stream` is a lossless append-log (every record preserved in order); `Window` is an append-and-trim sequence that can restate a retained checkpoint when a group rolls. DEFLATE via `@moq/flate`.
+- `@moq/binary` (`binary/`): opaque binary payloads over a track: the same two namespaces as `@moq/json`, without the JSON. `Snapshot` is lossy latest-value (one self-contained group per value); `Stream` is a lossless append-log (a single group, one payload per frame, sharing one DEFLATE window). Compression via `@moq/flate`, framed identically to `@moq/json` so the two agree on the wire. Mirror of `rs/moq-binary`.
 - `@moq/flate` (`flate/`): group-scoped DEFLATE primitive (only deps on `pako`). `Encoder`/`Decoder` turn a stream of payloads into self-delimited sync-flushed frames sharing one window; wire-interoperable with the Rust `moq-flate` crate. Used by `@moq/json`.
 - `@moq/msf` (`msf/`): MOQT Streaming Format catalog types (zod schemas).
 

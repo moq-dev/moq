@@ -12,6 +12,10 @@
 //! the source (e.g. the timeline's segment cadence); a consumer that finds a gap can fetch or
 //! extrapolate.
 //!
+//! A record that cannot be encoded or written therefore ends the track rather than continuing in a
+//! second group: a log missing a record is not lossless, and a gap dressed up as a complete log is
+//! worse than a visible failure. A publisher with more to say opens a new track.
+//!
 //! That single group is what bounds the log's history. moq-net caps a group's cached bytes, and a
 //! consumer always starts at frame 0, so once the log outgrows that budget and the earliest frames
 //! are evicted a new consumer fails with [`moq_net::Error::Lagged`] rather than reading a partial
@@ -152,7 +156,8 @@ mod test {
 	}
 
 	/// A record the encoder rejects must not have published a group first: a live consumer would
-	/// advance into it and wait there even though nothing was ever appended.
+	/// advance into it and wait there even though nothing was ever appended. It still ends the
+	/// track, since the log is missing the record either way.
 	#[test]
 	fn a_rejected_record_does_not_open_a_group() {
 		// A map with non-string keys can't be represented as JSON, so serialization fails.
@@ -160,7 +165,7 @@ mod test {
 			.produce()
 			.create_track("test", None)
 			.unwrap();
-		let subscriber = track.subscribe(None);
+		let mut subscriber = track.subscribe(None);
 		let mut producer = Producer::<std::collections::BTreeMap<(u8, u8), u8>>::new(track, ProducerConfig::default());
 
 		let mut bad = std::collections::BTreeMap::new();
@@ -168,6 +173,12 @@ mod test {
 		assert!(producer.append(&bad).is_err());
 
 		assert_eq!(subscriber.latest(), None, "a rejected record opened a group");
+
+		let waiter = kio::Waiter::noop();
+		assert!(
+			matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Err(_))),
+			"the log is missing a record, so the track must end rather than stay writable"
+		);
 	}
 
 	/// A track whose timescale is extreme enough that converting a wall-clock timestamp into it
@@ -184,42 +195,60 @@ mod test {
 			.unwrap()
 	}
 
-	/// Same as the snapshot case: the log's group is published by `open`, so a record the track
-	/// rejects must not leave it open with nothing in it.
+	/// A failed write must reach the consumer, not just the caller. A clean close drains a reader to
+	/// `None`, which is exactly what a completed log looks like, so a truncated log would be
+	/// indistinguishable from a whole one.
 	#[test]
-	fn a_rejected_record_does_not_strand_an_empty_group() {
+	fn a_failed_write_aborts_the_track() {
 		let track = rejecting_track();
-		let mut subscriber = track.subscribe(None).ordered();
+		let mut subscriber = track.subscribe(None);
 		let mut producer = Producer::<Value>::new(track, ProducerConfig::default());
 
-		assert!(producer.append(&json!({ "n": 1 })).is_err());
+		assert!(matches!(producer.append(&json!({ "n": 1 })), Err(crate::Error::Net(_))));
 
 		let waiter = kio::Waiter::noop();
-		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_next_group(&waiter) else {
-			panic!("the group was published, so a subscriber sees it");
-		};
 		assert!(
-			matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))),
-			"the empty group must be closed, not left open for a subscriber to wait in"
+			matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Err(_))),
+			"a truncated log must surface an error rather than read as a completed one"
 		);
 	}
 
-	/// Closing the rejected group is only half the recovery. The record that never landed desyncs a
-	/// compressed encoder, so without a matching reset every later append fails with
-	/// [`Error::Desync`](crate::Error::Desync) before it can use the fresh group that closing prepared.
+	/// The track ends with the group, so nothing opens a second one and splits the log. The retry
+	/// reports the ended track rather than the [`Error::Desync`](crate::Error::Desync) the dropped
+	/// record left on the encoder, which says nothing about why the log stopped.
 	#[test]
-	fn a_rejected_record_leaves_the_encoder_able_to_retry() {
+	fn a_failed_write_ends_the_track() {
 		let track = rejecting_track();
 		let mut producer = Producer::<Value>::new(track, ProducerConfig::default().with_compression(true));
 
 		assert!(matches!(producer.append(&json!({ "n": 1 })), Err(crate::Error::Net(_))));
 
-		// The retry fails on the same track, but it has to fail for the same reason: a desync here
-		// would mean the producer had latched itself shut instead of starting a new group.
+		// The retry reports the abort rather than the `Error::Desync` the dropped record left on the
+		// encoder, which says nothing about why the log stopped.
 		assert!(
 			matches!(producer.append(&json!({ "n": 2 })), Err(crate::Error::Net(_))),
-			"the encoder latched a desync instead of retrying into a fresh group"
+			"a second append must fail on the ended track rather than open another group"
 		);
+
+		// A subscriber taken after the abort still exists; it surfaces the failure on its first read,
+		// which is how a late reader learns the log is truncated.
+		let waiter = kio::Waiter::noop();
+		assert!(matches!(
+			producer.consume().poll_recv_group(&waiter),
+			Poll::Ready(Err(_))
+		));
+	}
+
+	/// A completed log is still readable, so finishing must not end the track the way an abort does.
+	/// The append that follows fails on the closed track without turning it into a failure.
+	#[test]
+	fn appending_after_finish_fails_without_aborting() {
+		let (mut producer, _track) = producer(compressed());
+		producer.append(&json!({ "n": 0 })).unwrap();
+		producer.finish().unwrap();
+
+		assert!(producer.append(&json!({ "n": 1 })).is_err());
+		assert_eq!(drain(consumer(producer.consume(), true)), vec![json!({ "n": 0 })]);
 	}
 
 	#[test]

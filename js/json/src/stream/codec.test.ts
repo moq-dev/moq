@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Track } from "@moq/net";
+import { Group, Track } from "@moq/net";
 import { Decoder } from "./decoder.ts";
 import { Encoder } from "./encoder.ts";
 import { Producer } from "./producer.ts";
@@ -101,7 +101,7 @@ test("a record JSON cannot represent is rejected", () => {
 
 // A record the encoder rejects must not have published a group first: a live consumer would advance
 // into it and wait there even though nothing was ever appended.
-test("a rejected record does not open a group", async () => {
+test("a rejected record ends the track without opening a group", async () => {
 	const track = new Track.Producer("test");
 	const subscriber = track.subscribe().ordered();
 	const producer = new Producer<unknown>(track);
@@ -109,8 +109,11 @@ test("a rejected record does not open a group", async () => {
 	expect(() => producer.append(undefined)).toThrow("not representable as JSON");
 
 	// Nothing was appended, so the log has no group for a consumer to enter and wait in.
-	producer.finish();
-	expect(await subscriber.nextGroup()).toBeUndefined();
+	expect(subscriber.latest()).toBeUndefined();
+
+	// And the log is missing a record, so the track ends rather than staying writable: a later
+	// append would present that gap as a complete log. Matches the Rust producer.
+	await expect(subscriber.nextGroup()).rejects.toThrow("not representable as JSON");
 });
 
 // The same stale-commit hazard the snapshot encoder has: acknowledging a superseded record must not
@@ -159,4 +162,23 @@ test("a rejected record leaves the producer able to retry", () => {
 	// The retry fails on the same closed track, but it must fail for that reason rather than the
 	// encoder having latched itself shut.
 	expect(() => producer.append({ n: 2 })).not.toThrow("compression desynchronized");
+});
+
+test("a failed write on the very first record still ends the track", async () => {
+	// The first append opens group 0 and then fails its write, which is as terminal as any later
+	// one: the group is live, so leaving the track writable would let a second group present the
+	// missing record as a complete log, and leave a consumer waiting in the empty group 0.
+	const track = new Track.Producer("test");
+	const subscriber = track.subscribe().ordered();
+	const producer = new Producer<string>(track);
+
+	// Serializes past the group cache limit, so `appendGroup` succeeds and `writeFrame` rejects it.
+	const oversized = "x".repeat(Group.MAX_GROUP_CACHE_BYTES + 1);
+	expect(() => producer.append(oversized)).toThrow(Group.FrameTooLarge);
+
+	// The consumer is handed the group that was already published, and reading it surfaces the
+	// abort. Without ending the track that group stays open and empty, so this read hangs instead.
+	const group = await subscriber.nextGroup();
+	expect(group).toBeDefined();
+	await expect(group?.readFrame()).rejects.toThrow(Group.FrameTooLarge);
 });

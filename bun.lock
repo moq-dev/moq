@@ -67,6 +67,19 @@
         "yaml": "^2.9.0",
       },
     },
+    "js/binary": {
+      "name": "@moq/binary",
+      "version": "0.1.0",
+      "dependencies": {
+        "@moq/flate": "workspace:^",
+        "@moq/net": "workspace:^",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.3.14",
+        "rimraf": "^6.1.3",
+        "typescript": "7.0.2",
+      },
+    },
     "js/clock": {
       "name": "@moq/clock",
       "version": "0.1.0",
@@ -576,6 +589,8 @@
     "@libav.js/types": ["@libav.js/types@6.8.8", "", {}, "sha512-Lbik/0Q3x2R8cI7mOtRgt+nUWLqGXh7UinMndmpdXSDY4YEjYyVUDsq6fxkuriL78+LCYx8frZIN1r+oDsvYCQ=="],
 
     "@libav.js/variant-opus-af": ["@libav.js/variant-opus-af@6.9.8", "", {}, "sha512-4v4kBOoNnmafubEiBof+ATtr7KcU2/kL+G2hXU61orvC4Lt5OViBXnHdUHCh5ZSQQSmx9nOFEgbYGGYTrBufXQ=="],
+
+    "@moq/binary": ["@moq/binary@workspace:js/binary"],
 
     "@moq/boy": ["@moq/boy@workspace:js/moq-boy"],
 

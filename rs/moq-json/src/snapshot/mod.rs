@@ -201,6 +201,24 @@ mod test {
 		}
 	}
 
+	/// `write_snapshot` closes the previous group and publishes a new one before writing the frame,
+	/// so rejecting an oversize frame inside `write_frame` would leave an empty newest group behind.
+	/// A snapshot consumer jumps to the newest, so the last good value would vanish on a failed
+	/// update.
+	#[test]
+	fn a_rejected_update_leaves_the_previous_value_readable() {
+		let (mut producer, track) = producer(cfg(0));
+		producer.update(&json!({ "keep": true })).unwrap();
+
+		// Serializes past the group cache limit, so the frame cannot be published.
+		let oversized = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
+		assert!(producer.update(&oversized).is_err());
+		producer.finish().unwrap();
+
+		// A reader arriving now still finds the last good value, not an empty superseding group.
+		assert_eq!(drain(track), vec![json!({ "keep": true })]);
+	}
+
 	#[test]
 	fn unchanged_value_writes_nothing() {
 		let (mut producer, track) = producer(ProducerConfig::default());
