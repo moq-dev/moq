@@ -81,8 +81,10 @@ takes. These are looked up when you press Tab:
 
 The first two rows open a short subscribe-only connection, and **only** when a
 `--connect` URL is already on the line, so Tab never dials a relay you have not
-named. The whole exchange is capped at half a second and stays silent about
-failure: an unreachable relay means no candidates, never an error in your prompt.
+named. An exported `MOQ_CONNECT` deliberately does not count: it configures a dial
+but does not authorize one, and that URL can carry a `?jwt=` credential. Every
+lookup is capped at half a second and stays silent about failure: an unreachable
+relay means no candidates, never an error in your prompt.
 
 `--camera`, `--display`, and `--microphone` take an optional value (bare
 `--camera` opens the default), so a shell can't tell whether the next word belongs

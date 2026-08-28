@@ -4735,6 +4735,7 @@ dependencies = [
  "hang",
  "moq-audio",
  "moq-hls",
+ "moq-msf",
  "moq-mux",
  "moq-rtc",
  "moq-rtmp",

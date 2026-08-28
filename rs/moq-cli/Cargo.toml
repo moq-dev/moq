@@ -101,6 +101,10 @@ winit = { version = "0.30.13", optional = true }
 sd-notify = { workspace = true }
 
 [dev-dependencies]
+# Authors an MSF-only catalog, which is the one shape that tells a completer reading
+# the wrong catalog track apart from one reading the right one: `moq-mux`'s producer
+# publishes hang and MSF from the same source, so both answer for an ordinary broadcast.
+moq-msf = { workspace = true }
 tempfile = { workspace = true }
 # `test-util` enables `tokio::time::pause` so the TS round-trip test simulates the
 # exporter drain timeouts instantly instead of waiting on the wall clock.

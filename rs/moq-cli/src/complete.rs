@@ -15,6 +15,9 @@
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
+// Only the capture completers name a future by type; the rest are `async` blocks.
+#[cfg(feature = "capture")]
+use std::future::Future;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -34,6 +37,15 @@ use crate::subscribe::CatalogFormatArg;
 /// completer that outlives the user's patience is a shell that appears to hang,
 /// and half a list now beats the whole list later.
 const BUDGET: Duration = Duration::from_millis(500);
+
+/// The ceiling on a whole completion request, whatever it is answering.
+///
+/// A backstop, not the working budget: every completer bounds its own lookup by
+/// [`BUDGET`], and this is deliberately looser so that theirs always fires first and
+/// their partial answer survives. It exists so a completer added later cannot hang a
+/// prompt by forgetting to bound itself, and so work that ignores cancellation
+/// (a blocking device enumeration) still cannot hold the answer back.
+const CEILING: Duration = Duration::from_millis(1_500);
 
 /// How long the announce sweep waits for a sibling after an announcement lands.
 ///
@@ -136,12 +148,29 @@ pub async fn answer(argv: &[OsString]) -> Option<String> {
 		.rposition(|word| word == "--")
 		.map(|at| at + 1);
 
-	let answer = match staged {
+	// Whatever happens below, the shell gets an answer. `render` of an empty result
+	// is a well-formed "no candidates", which is the right thing to say when a
+	// lookup has outlived the keystroke that asked for it.
+	let answer = timeout_at(Instant::now() + CEILING, complete(&request, staged, &overlays))
+		.await
+		.unwrap_or_default();
+
+	Some(render(&answer, request.shell))
+}
+
+/// Answer one request against the grammar its cursor is in.
+async fn complete<'a>(
+	request: &CompletionRequest,
+	staged: Option<usize>,
+	overlays: &'a [CompletionOverlay<'a>],
+) -> usage::complete::Completions<'a> {
+	let words = request.split.walked();
+	match staged {
 		None => {
 			Cli::app()
 				.completion_app()
-				.completions(&overlays)
-				.complete_request(&request)
+				.completions(overlays)
+				.complete_request(request)
 				.await
 		}
 		Some(start) => {
@@ -154,27 +183,48 @@ pub async fn answer(argv: &[OsString]) -> Option<String> {
 			request.split.words = chunk;
 			Stage::app()
 				.completion_app()
-				.completions(&overlays)
+				.completions(overlays)
 				.complete_request(&request)
 				.await
 		}
-	};
-
-	Some(render(&answer, request.shell))
+	}
 }
 
 /// The process-wide MoQ flags, as far as the words before the cursor go.
 ///
 /// Read from the first chunk, which is the only one that can carry them, and
-/// through the real tables rather than by scanning for `--connect`: what a
-/// completer dials has to be what an invocation would have dialed, TLS roots and
-/// environment variables included.
+/// through the real tables rather than by scanning for `--connect`: what a completer
+/// dials has to be what an invocation would have dialed, TLS roots included.
+///
+/// Built twice, because the environment is allowed to configure the dial but not to
+/// authorize it. `--connect` has an env var (`MOQ_CONNECT`), so a single pass would
+/// let an exported one turn a keystroke into a session with a relay the user never
+/// typed, and that URL can carry a `?jwt=` credential. The first pass never reads the
+/// environment and its `--connect` is the gate; the second is the one that dials, so
+/// everything else an invocation would have picked up still applies.
 fn globals(request: &CompletionRequest) -> Option<MoqSide> {
 	let chunk = request.split.argv().split(|word| word == "--").next()?;
 	let argv: Vec<&OsStr> = chunk.iter().map(OsStr::new).collect();
 
+	let typed = side(&argv, Environment::Ignore)?;
+	let mut side = side(&argv, Environment::Read)?;
+	if typed.client.url.is_none() {
+		side.client.url = None;
+	}
+	Some(side)
+}
+
+/// Whether [`side`] lets the environment fill what the words left out.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Environment {
+	Read,
+	Ignore,
+}
+
+/// Build [`MoqSide`] from one chunk of a line being completed.
+fn side(argv: &[&OsStr], environment: Environment) -> Option<MoqSide> {
 	let mut partial = <MoqSide as CommandArgs>::start();
-	let mut parser = usage::Parser::new(Cli::command(), &argv);
+	let mut parser = usage::Parser::new(Cli::command(), argv);
 	while let Some(event) = parser.next_event() {
 		match event {
 			Ok(event) => {
@@ -186,28 +236,31 @@ fn globals(request: &CompletionRequest) -> Option<MoqSide> {
 		}
 	}
 
-	<MoqSide as CommandArgs>::apply_env(&mut partial);
+	if environment == Environment::Read {
+		<MoqSide as CommandArgs>::apply_env(&mut partial);
+	}
 	<MoqSide as CommandArgs>::apply_defaults(&mut partial);
 	<MoqSide as CommandArgs>::build(partial).ok()
 }
 
-/// The `export` stage the cursor is in, as far as the line goes.
+/// `T`'s own flags, as far as the words the cursor's command was given go.
 ///
-/// A stage's own `--broadcast` overrides the process-wide one, and `--video-name`
-/// is only ever declared beside it, so a rendition completer has to read the stage
-/// it was typed in rather than the globals alone.
-fn export(ctx: &CompleteCtx<'_>) -> Option<<Export as CommandArgs>::Partial> {
-	let declaration = <Export as CommandArgs>::COMMAND;
-	let (command, words) = ctx.command_for(declaration)?;
+/// `None` when the cursor is not inside `T`. A stage's own `--broadcast` and
+/// `--catalog-format` override the process-wide ones, so a rendition completer has
+/// to read the command it was typed in rather than the globals alone.
+fn partial<T: CommandArgs>(ctx: &CompleteCtx<'_>) -> Option<T::Partial> {
+	let (command, words) = ctx.command_for(T::COMMAND)?;
 	let argv: Vec<&OsStr> = words.iter().map(OsStr::new).collect();
 
-	let mut partial = <Export as CommandArgs>::start();
+	let mut partial = T::start();
 	let mut parser = usage::Parser::new(command, &argv);
 	while let Some(event) = parser.next_event() {
 		match event {
 			Ok(event) => {
-				<Export as CommandArgs>::apply(&mut partial, &event);
+				T::apply(&mut partial, &event);
 			}
+			// A line being completed is unfinished by definition, so an error means the
+			// grammar ran out here; the partial holds what was understood before that.
 			Err(_) => break,
 		}
 	}
@@ -217,6 +270,30 @@ fn export(ctx: &CompleteCtx<'_>) -> Option<<Export as CommandArgs>::Partial> {
 /// One raw partial value as text, or `None` when it was never given.
 fn given(value: &Option<Vec<u8>>) -> Option<&str> {
 	std::str::from_utf8(value.as_deref()?).ok()
+}
+
+/// One raw partial value read back through its `ValueEnum`.
+fn choice<T: ValueEnum>(value: &Option<Vec<u8>>) -> Option<T> {
+	T::from_choice(given(value)?)
+}
+
+/// The catalog format the command under the cursor named, if it named one.
+///
+/// `export` and `play` each declare their own `--catalog-format`, and the cursor is
+/// inside exactly one of them. Reading only `export`'s would leave a
+/// `play --catalog-format msf` completer subscribing to the Hang track that
+/// invocation is never going to read.
+fn catalog_format(ctx: &CompleteCtx<'_>, export: Option<&<Export as CommandArgs>::Partial>) -> Option<CatalogFormat> {
+	let named = export.and_then(|export| choice::<CatalogFormatArg>(&export.catalog_format));
+
+	#[cfg(feature = "play")]
+	let named = named.or_else(|| {
+		partial::<crate::play::Args>(ctx).and_then(|play| choice::<CatalogFormatArg>(&play.catalog_format))
+	});
+	#[cfg(not(feature = "play"))]
+	let _ = ctx;
+
+	named.map(Into::into)
 }
 
 // ------------------------------------------------------------------ script
@@ -313,13 +390,25 @@ impl Args {
 
 // ------------------------------------------------------------------ capture
 
-/// Turn a capture enumeration into candidates, or nothing when the platform
-/// cannot list that kind of source.
+/// Enumerate one kind of capture source, under [`BUDGET`], into candidates.
+///
+/// Bounded because enumeration is not the quick local lookup it reads as: several
+/// backends (V4L2, Media Foundation, CPAL) do blocking work on a pool thread, and
+/// ScreenCaptureKit already waits seconds for its own permission callback. Dropping
+/// the future cannot cancel a blocking call, but it does let the process answer and
+/// exit, which is what keeps a stuck driver from freezing the prompt.
+///
+/// A platform that cannot list this kind of source, and a lookup that runs out of
+/// time, are the same answer: no candidates.
 #[cfg(feature = "capture")]
-fn sources<T, E>(found: Result<Vec<T>, E>, describe: impl Fn(&T) -> Candidate<'static>) -> Vec<Candidate<'static>> {
-	found
-		.map(|items| items.iter().map(describe).collect())
-		.unwrap_or_default()
+async fn sources<T, E>(
+	found: impl Future<Output = Result<Vec<T>, E>>,
+	describe: impl Fn(&T) -> Candidate<'static>,
+) -> Vec<Candidate<'static>> {
+	match timeout_at(Instant::now() + BUDGET, found).await {
+		Ok(Ok(items)) => items.iter().map(describe).collect(),
+		Ok(Err(_)) | Err(_) => Vec::new(),
+	}
 }
 
 /// Complete `--camera` from the cameras this machine has.
@@ -330,9 +419,10 @@ fn sources<T, E>(found: Result<Vec<T>, E>, describe: impl Fn(&T) -> Candidate<'s
 #[cfg(feature = "capture")]
 fn cameras(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 	Box::pin(async move {
-		sources(moq_video::capture::cameras().await, |camera| {
+		sources(moq_video::capture::cameras(), |camera| {
 			Candidate::described(camera.id.clone(), camera.name.clone())
 		})
+		.await
 	})
 }
 
@@ -340,12 +430,13 @@ fn cameras(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 #[cfg(feature = "capture")]
 fn displays(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 	Box::pin(async move {
-		sources(moq_video::capture::displays().await, |display| {
+		sources(moq_video::capture::displays(), |display| {
 			Candidate::described(
 				display.id.clone(),
 				format!("{} ({}x{})", display.name, display.width, display.height),
 			)
 		})
+		.await
 	})
 }
 
@@ -353,7 +444,7 @@ fn displays(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 #[cfg(feature = "capture")]
 fn windows(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 	Box::pin(async move {
-		sources(moq_video::capture::windows().await, |window| {
+		sources(moq_video::capture::windows(), |window| {
 			let title = if window.title.is_empty() {
 				"(untitled)"
 			} else {
@@ -361,6 +452,7 @@ fn windows(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 			};
 			Candidate::described(window.id.clone(), format!("{} - {title}", window.app))
 		})
+		.await
 	})
 }
 
@@ -368,9 +460,10 @@ fn windows(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 #[cfg(feature = "capture")]
 fn apps(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 	Box::pin(async move {
-		sources(moq_video::capture::apps().await, |app| {
+		sources(moq_video::capture::apps(), |app| {
 			Candidate::described(app.id.clone(), app.name.clone())
 		})
+		.await
 	})
 }
 
@@ -378,10 +471,11 @@ fn apps(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 #[cfg(feature = "capture")]
 fn microphones(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 	Box::pin(async move {
-		sources(moq_audio::capture::devices().await, |device| match device.default {
+		sources(moq_audio::capture::devices(), |device| match device.default {
 			true => Candidate::described(device.id.clone(), "the default input"),
 			false => Candidate::new(device.id.clone()),
 		})
+		.await
 	})
 }
 
@@ -474,21 +568,19 @@ fn audio_names(ctx: CompleteCtx<'_>) -> CompletionFuture<'_> {
 /// Dial the relay and read one catalog snapshot for the broadcast on the line.
 async fn renditions(ctx: &CompleteCtx<'_>) -> Option<moq_mux::catalog::hang::Catalog> {
 	let side = Globals::get()?;
-	let stage = export(ctx);
-	let stage = stage.as_ref();
+	let export = partial::<Export>(ctx);
+	let export = export.as_ref();
 
 	// A stage's own `--broadcast` wins over the process-wide one, exactly as it does
-	// for the invocation this line is on its way to becoming.
-	let path = stage
-		.and_then(|stage| given(&stage.broadcast))
+	// for the invocation this line is on its way to becoming. `play` declares no
+	// `--broadcast`, so there it is the global or nothing.
+	let path = export
+		.and_then(|export| given(&export.broadcast))
 		.or(side.broadcast.as_deref())
 		.unwrap_or_default()
 		.to_string();
 
-	let format = stage
-		.and_then(|stage| given(&stage.catalog_format))
-		.and_then(CatalogFormatArg::from_choice)
-		.map(CatalogFormat::from)
+	let format = catalog_format(ctx, export)
 		.or_else(|| CatalogFormat::detect(&path))
 		.unwrap_or_default();
 
@@ -638,6 +730,80 @@ mod tests {
 		}
 	}
 
+	/// One lock for every test that touches the process environment.
+	///
+	/// `set_var` is not thread-safe against a concurrent read, and Usage reads the
+	/// `MOQ_*` vars while it parses. Clearing on entry also stops a developer's own
+	/// exported `MOQ_CONNECT` from making a no-dial assertion pass for the wrong
+	/// reason, or fail for one.
+	static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+	/// Holds [`ENV_LOCK`] and restores `MOQ_CONNECT` on the way out.
+	struct EnvGuard {
+		_lock: std::sync::MutexGuard<'static, ()>,
+		saved: Option<OsString>,
+	}
+
+	impl EnvGuard {
+		fn set(value: Option<&str>) -> Self {
+			let lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+			let saved = std::env::var_os("MOQ_CONNECT");
+			// SAFETY: ENV_LOCK is held, and every test here that reads or writes the
+			// environment takes it first.
+			unsafe {
+				match value {
+					Some(value) => std::env::set_var("MOQ_CONNECT", value),
+					None => std::env::remove_var("MOQ_CONNECT"),
+				}
+			}
+			Self { _lock: lock, saved }
+		}
+	}
+
+	impl Drop for EnvGuard {
+		fn drop(&mut self) {
+			// Runs before `_lock`, so the restore is still serialized.
+			// SAFETY: see `set`.
+			unsafe {
+				match &self.saved {
+					Some(value) => std::env::set_var("MOQ_CONNECT", value),
+					None => std::env::remove_var("MOQ_CONNECT"),
+				}
+			}
+		}
+	}
+
+	/// The environment may configure a dial, but it may not authorize one.
+	///
+	/// `--connect` reads `MOQ_CONNECT`, so building the globals in one pass let an
+	/// exported variable turn a keystroke into a session with a relay the user never
+	/// typed -- and that URL can carry a `?jwt=` credential. The gate is what the line
+	/// says, not what the environment says.
+	#[tokio::test]
+	async fn the_environment_cannot_authorize_a_dial() {
+		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+		let route = moq_net::broadcast::Route::new().with_announce(true);
+		let _alpha = origin.create_broadcast("alpha", route).expect("alpha");
+		let connect = relay(&origin);
+
+		// The same reachable relay, named only by the environment.
+		let url = connect.split_whitespace().nth(1).expect("a --connect url").to_string();
+		let _env = EnvGuard::set(Some(&url));
+
+		assert!(
+			complete("moq --connect-tls-insecure --broadcast ").await.is_empty(),
+			"MOQ_CONNECT authorized a dial the line never asked for"
+		);
+
+		// The same relay named on the line still completes, so the gate is the URL's
+		// source and not the dial itself.
+		assert_eq!(
+			complete(&format!("moq {connect} --broadcast ")).await,
+			["alpha"],
+			"a typed --connect stopped working"
+		);
+	}
+
 	/// A completer that needs the network answers nothing when the line names no relay.
 	///
 	/// The gate is the whole reason tab-completion may dial at all: without a
@@ -647,6 +813,7 @@ mod tests {
 	/// that the completer fired at all.
 	#[tokio::test]
 	async fn no_relay_on_the_line_means_no_dial() {
+		let _env = EnvGuard::set(None);
 		for line in [
 			"moq --broadcast ",
 			"moq export --broadcast ",
@@ -745,5 +912,53 @@ mod tests {
 
 		assert_eq!(complete(&format!("{line} --video-name ")).await, ["hd"]);
 		assert_eq!(complete(&format!("{line} --audio-name ")).await, ["stereo"]);
+	}
+
+	/// The `--catalog-format` on the line decides which catalog track is read.
+	///
+	/// `export` and `play` each declare their own, and reading only `export`'s left a
+	/// `play --catalog-format msf` completer subscribing to a Hang track that
+	/// invocation is never going to read. The broadcast here publishes MSF and nothing
+	/// else, which is the one shape that tells the two apart: `moq-mux`'s catalog
+	/// producer emits hang and MSF from the same source, so an ordinary broadcast
+	/// answers either way and hides the bug.
+	#[tokio::test]
+	async fn the_catalog_format_on_the_line_is_honored() {
+		let origin = moq_tokio::origin::spawn(moq_net::Origin::random());
+		let route = moq_net::broadcast::Route::new().with_announce(true);
+		let mut broadcast = origin.create_broadcast("room", route).expect("broadcast");
+
+		let mut track = broadcast
+			.create_track(moq_msf::DEFAULT_NAME, moq_net::track::Info::default())
+			.expect("msf track");
+		let mut msf = moq_msf::Track::new("hd", moq_msf::Packaging::Loc);
+		msf.role = Some(moq_msf::Role::Video);
+		// A video track without one is a hard error in the MSF reader, not a skip.
+		msf.codec = Some("avc1.42001e".to_string());
+		let catalog = moq_msf::Catalog::new(vec![msf]).to_json().expect("msf json");
+		let mut group = track.append_group().expect("group");
+		group.write_frame(moq_net::Timestamp::now(), catalog).expect("frame");
+
+		let connect = relay(&origin);
+		let line = format!("moq {connect} --broadcast room");
+
+		// Nothing publishes a Hang catalog here, so the default finds no renditions.
+		assert!(complete(&format!("{line} export --video-name ")).await.is_empty());
+		assert_eq!(
+			complete(&format!("{line} export --catalog-format msf --video-name ")).await,
+			["hd"],
+			"export ignored its own --catalog-format"
+		);
+
+		// `play` declares a `--catalog-format` of its own, on a different command.
+		#[cfg(feature = "play")]
+		{
+			assert!(complete(&format!("{line} play --video-name ")).await.is_empty());
+			assert_eq!(
+				complete(&format!("{line} play --catalog-format msf --video-name ")).await,
+				["hd"],
+				"play ignored its own --catalog-format"
+			);
+		}
 	}
 }
