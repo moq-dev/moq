@@ -4,11 +4,19 @@ use crate::{AuthConfig, CacheConfig, ClusterConfig, InternalConfig, StatsConfig,
 
 /// Top-level relay configuration, loadable from CLI arguments, environment
 /// variables, or a TOML file.
-#[derive(usage::Cli, Clone, Debug, Deserialize, Serialize)]
+/// Top-level relay configuration, as a COMPOSABLE args group.
+///
+/// `usage::Args` rather than `usage::Cli` on purpose: the program-level parts (a
+/// name, a version, the completion command) belong to whichever binary owns the
+/// process, and a `Cli` cannot be `#[usage(flatten)]`ed into another one. Keeping
+/// them off this type is what lets an embedder put the relay's whole flag surface
+/// inside its own CLI -- moq.pro's `edge` does exactly that -- instead of
+/// re-declaring it and drifting on every flag added here. This binary wraps it in
+/// a private `Cli` that adds those program-level parts; [`spec`] exposes the
+/// resulting command line.
+#[derive(usage::Args, Clone, Debug, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
-#[usage(name = "moq-relay", version = env!("VERSION"))]
-#[usage(completion)]
 #[non_exhaustive]
 pub struct Config {
 	/// The QUIC/TLS configuration for the server.
@@ -118,6 +126,39 @@ impl Default for Config {
 	}
 }
 
+/// Top-level relay configuration, loadable from CLI arguments, environment
+/// variables, or a TOML file.
+//
+// NB: the lines above are the `--help` description, not documentation. Usage
+// renders a `Cli`'s doc comment as the program's about text, so anything written
+// there is printed to users verbatim, rustdoc link syntax and all. The rationale
+// for this type belongs in this ordinary comment instead.
+//
+// `Cli` is `Config` plus the program-level parts, which exists so `Config` can
+// stay flattenable. Private, because it is an implementation detail of THIS
+// binary: an embedder declares its own and flattens `Config` into it, so nothing
+// outside needs to name this one. What callers do need -- the program's spec,
+// for completions, docs, and the released-flag test -- is `spec`.
+#[derive(usage::Cli, Clone, Debug)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+#[usage(name = "moq-relay", version = env!("VERSION"))]
+#[usage(completion)]
+struct Cli {
+	#[usage(flatten)]
+	config: Config,
+}
+
+/// The `moq-relay` binary's own command-line spec: every flag and environment
+/// variable it accepts.
+///
+/// Deliberately a free function rather than a method on [`Config`]. The spec is
+/// the PROGRAM's, and `Config` is a composable fragment -- an embedder that
+/// flattens it has its own spec, so `Config::spec()` would hand back the wrong
+/// one and read as though it were theirs.
+pub fn spec() -> &'static usage::spec::Spec<'static> {
+	Cli::spec()
+}
+
 impl Config {
 	/// Parses configuration from CLI arguments, optionally merging with a
 	/// TOML file specified via the positional `file` argument. Also initializes
@@ -128,7 +169,7 @@ impl Config {
 		// generated `parse()`, which this loader does not use: without this the request
 		// would reach the ordinary grammar and be refused. Recognized before the parse,
 		// because a completion is not a command this binary runs.
-		if let Some(reply) = Self::completion_request(args.get(1..).unwrap_or_default()) {
+		if let Some(reply) = Cli::completion_request(args.get(1..).unwrap_or_default()) {
 			print!("{reply}");
 			std::process::exit(0);
 		}
@@ -167,26 +208,27 @@ impl Config {
 		// here, because wrapping them renders an empty `anyhow` error and exits
 		// non-zero having printed nothing. A real failure still comes back as an
 		// error, so a caller that parses synthetic args keeps its Result.
-		let mut config = match Config::parse_from(&argv) {
-			Ok(config) => config,
+		let mut cli = match Cli::parse_from(&argv) {
+			Ok(cli) => cli,
 			Err(err) => {
-				let answer = moq_tokio::cli::answer(Config::spec(), Config::command(), &argv, err);
+				let answer = moq_tokio::cli::answer(Cli::spec(), Cli::command(), &argv, err);
 				if answer.is_question() {
 					answer.exit();
 				}
 				anyhow::bail!("{}", answer.message());
 			}
 		};
-		if let Some(file) = config.file.clone() {
-			let mut merged = toml::Value::try_from(&config)?;
+		if let Some(file) = cli.config.file.clone() {
+			let mut merged = toml::Value::try_from(&cli.config)?;
 			let source = std::fs::read_to_string(file)?;
 			let mut file = toml::from_str::<toml::Value>(&source)?;
 			normalize_toml_aliases(&mut file)?;
 			merge_toml(&mut merged, file);
-			config = merged.try_into()?;
-			config.update_from(&argv);
+			cli.config = merged.try_into()?;
+			// Re-applied over the merged config so explicit flags still beat the TOML.
+			cli.update_from(&argv);
 		}
-		Ok(config)
+		Ok(cli.config)
 	}
 }
 
@@ -266,12 +308,13 @@ mod tests {
 	fn the_relay_default_applies() {
 		let _env = EnvGuard::clear(&["MOQ_QUIC_MAX_STREAMS", "MOQ_SERVER_QUIC_MAX_STREAMS"]);
 
-		let mut config =
-			Config::parse_from(&[std::ffi::OsStr::new("--quic-max-streams"), std::ffi::OsStr::new("4096")]).unwrap();
+		let mut config = Cli::parse_from(&[std::ffi::OsStr::new("--quic-max-streams"), std::ffi::OsStr::new("4096")])
+			.unwrap()
+			.config;
 		config.resolve().expect("current spellings");
 		assert_eq!(config.quic.max_streams, Some(4096));
 
-		let mut config = Config::parse_from(&[]).unwrap();
+		let mut config = Cli::parse_from(&[]).unwrap().config;
 		config.resolve().expect("current spellings");
 		assert_eq!(config.quic.max_streams, Some(crate::DEFAULT_MAX_STREAMS));
 	}
@@ -290,7 +333,7 @@ mod tests {
 			"MOQ_SERVER_TLS_CERT",
 		]);
 
-		let mut config = Config::parse_from(&[
+		let mut config = Cli::parse_from(&[
 			std::ffi::OsStr::new("--server-bind"),
 			std::ffi::OsStr::new("[::]:4443"),
 			std::ffi::OsStr::new("--server-tls-cert"),
@@ -298,7 +341,8 @@ mod tests {
 			std::ffi::OsStr::new("--server-tls-key"),
 			std::ffi::OsStr::new("/tmp/cert.key"),
 		])
-		.unwrap();
+		.unwrap()
+		.config;
 		assert_eq!(config.listen.bind, None, "the released flag configures nothing");
 
 		let err = config.resolve().expect_err("must refuse").to_string();
@@ -890,10 +934,79 @@ uid = [1001]
 	fn help_and_version_are_questions() {
 		for flag in ["--help", "-h", "--version", "-V"] {
 			let argv = [std::ffi::OsStr::new(flag)];
-			let err = Config::parse_from(&argv).unwrap_err();
-			let answer = moq_tokio::cli::answer(Config::spec(), Config::command(), &argv, err);
+			let err = Cli::parse_from(&argv).unwrap_err();
+			let answer = moq_tokio::cli::answer(Cli::spec(), Cli::command(), &argv, err);
 			assert!(answer.is_question(), "{flag} was treated as a failure");
 			assert!(!answer.message().trim().is_empty(), "{flag} rendered nothing");
+		}
+	}
+
+	/// An embedder can flatten the relay's whole flag surface into its own CLI.
+	///
+	/// This is the reason [`Config`] derives `Args` rather than `Cli`: a `Cli`
+	/// cannot be flattened, so declaring the program-level parts on it would force
+	/// every embedder to re-declare the relay's flags and drift on each one added
+	/// here. moq.pro's `edge` is the embedder this exists for.
+	#[test]
+	fn the_config_can_be_embedded() {
+		/// A stand-in for an embedder's command line: the relay's flags plus one of
+		/// its own.
+		#[derive(usage::Cli, Clone, Debug)]
+		#[usage(unknown_flags = "error", args_override_self = false)]
+		#[usage(name = "embedder", version = "0")]
+		struct Embedder {
+			#[usage(flatten)]
+			relay: Config,
+
+			#[usage(long = "embedder-only")]
+			own: Option<String>,
+		}
+
+		let _env = EnvGuard::clear(&["MOQ_LISTEN", "MOQ_SERVER_BIND"]);
+
+		// One argv carries both surfaces, which is the whole point: the embedder does
+		// not have to split the relay's flags out of its own.
+		let parsed = Embedder::parse_from(&[
+			std::ffi::OsStr::new("--listen"),
+			std::ffi::OsStr::new("[::]:4443"),
+			std::ffi::OsStr::new("--embedder-only"),
+			std::ffi::OsStr::new("mine"),
+		])
+		.expect("the relay's flags parse inside an embedder's CLI");
+
+		assert_eq!(parsed.own.as_deref(), Some("mine"));
+		assert_eq!(
+			parsed.relay.listen.bind.map(|bind| bind.to_string()),
+			Some("[::]:4443".to_string()),
+			"the flattened relay config received its own flag"
+		);
+	}
+
+	/// `--help` describes the program, not the type that happens to declare it.
+	///
+	/// Usage renders a `Cli`'s doc comment as the about text, so a doc comment
+	/// written for developers is printed to users verbatim -- rustdoc link syntax
+	/// and all. Splitting `Config` out put a private wrapper in that position and
+	/// leaked its implementation notes into `moq-relay --help`; this pins the
+	/// description so the next edit there cannot.
+	#[test]
+	fn the_help_description_is_written_for_users() {
+		let root = Cli::spec().root;
+		// What `--help` actually prints: usage renders `long_about.or(about)`, and a
+		// doc comment with a second paragraph fills `long_about` with the whole thing.
+		// Asserting on `about` alone would pass while the extra paragraphs leaked.
+		let shown = root.long_about.or(root.about).expect("the CLI describes itself");
+
+		assert_eq!(
+			shown,
+			"Top-level relay configuration, loadable from CLI arguments, environment variables, or a TOML file."
+		);
+		// The tell that a developer-facing doc comment reached this surface.
+		for leak in ["[`", "moq.pro", "implementation detail"] {
+			assert!(
+				!shown.contains(leak),
+				"{leak:?} leaked into the help description: {shown}"
+			);
 		}
 	}
 
@@ -903,7 +1016,7 @@ uid = [1001]
 	/// undeclared name renders every usage line and completion as `config`.
 	#[test]
 	fn the_spec_is_named_for_the_binary() {
-		assert_eq!(Config::spec().bin.unwrap_or(Config::spec().name), "moq-relay");
+		assert_eq!(Cli::spec().bin.unwrap_or(Cli::spec().name), "moq-relay");
 	}
 
 	/// A TOML boolean survives an environment variable that says otherwise.
