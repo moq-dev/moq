@@ -168,6 +168,23 @@ fn recycle_if_idle(rx: &mut Rx, bid: u16) -> bool {
 	true
 }
 
+/// Whether the receive pool has proven too shallow to arm against as it is.
+///
+/// A recorded starvation counts on its own: a buffer recycled between the
+/// kernel's `ENOBUFS` and this re-arm masks the shortfall without answering
+/// it, and arming into that one buffer just starves again.
+fn should_grow(rx: &Rx, multishot: bool) -> bool {
+	if rx.starved {
+		return true;
+	}
+	match multishot {
+		// Nothing left in the provided ring for the kernel to receive into.
+		true => !rx.bufs.iter().any(|buf| !buf.kernel_done),
+		// Every buffer is claimed by a receive or borrowed by a packet.
+		false => !rx.bufs.iter().any(|buf| !buf.claimed && buf.outstanding == 0),
+	}
+}
+
 /// Allocate more receive buffers and hand them straight to the kernel, up to
 /// [`Config::rx_buffers_max`]. Returns whether the pool grew.
 ///
@@ -275,6 +292,9 @@ struct Rx {
 	waiters: kio::WaiterList,
 	/// The slab key of the armed receive, if one is in flight.
 	armed: Option<u64>,
+	/// The kernel ran the pool dry since the last arm. Held rather than acted
+	/// on immediately because the re-arm is what can grow the pool.
+	starved: bool,
 	/// Terminal failure, surfaced by `poll_recv` once the queue drains.
 	error: Option<i32>,
 }
@@ -476,6 +496,7 @@ impl Socket {
 				queue: VecDeque::new(),
 				waiters: kio::WaiterList::new(),
 				armed: None,
+				starved: false,
 				error: None,
 			}),
 			tx: RefCell::new(tx),
@@ -855,14 +876,19 @@ pub(crate) fn arm_recv(shared: &Rc<Shared>, sock: &Rc<SockShared>) {
 		return;
 	}
 
+	// Grow before arming when the pool has proven too shallow, so the next
+	// receive has somewhere to land instead of waiting on a live packet to be
+	// released and dropping every datagram until then.
+	if should_grow(&rx, sock.config.multishot) {
+		rx.starved = false;
+		grow_rx(&mut rx, &sock.config);
+	}
+
 	let entry = if sock.config.multishot {
 		// Only arm with buffers in the provided ring (`!kernel_done`), or the
 		// receive would die on ENOBUFS immediately and re-arming here would
-		// spin. An empty ring is the kernel telling us the pool is too shallow
-		// for this socket's packet rate, so grow before giving up: otherwise
-		// the re-arm waits on a live packet dropping and every datagram that
-		// arrives meanwhile is lost.
-		if !rx.bufs.iter().any(|buf| !buf.kernel_done) && !grow_rx(&mut rx, &sock.config) {
+		// spin.
+		if !rx.bufs.iter().any(|buf| !buf.kernel_done) {
 			return;
 		}
 		let key = shared.insert(Op::Recv {
@@ -875,17 +901,12 @@ pub(crate) fn arm_recv(shared: &Rc<Shared>, sock: &Rc<SockShared>) {
 			.user_data(key)
 	} else {
 		// Claim a whole free buffer for this one receive.
-		let free = |rx: &Rx| {
-			rx.bufs
-				.iter()
-				.position(|buf| !buf.claimed && buf.outstanding == 0)
-				.map(|bid| bid as u16)
-		};
-		let mut bid = free(&rx);
-		if bid.is_none() && grow_rx(&mut rx, &sock.config) {
-			bid = free(&rx);
-		}
-		let Some(bid) = bid else {
+		let Some(bid) = rx
+			.bufs
+			.iter()
+			.position(|buf| !buf.claimed && buf.outstanding == 0)
+			.map(|bid| bid as u16)
+		else {
 			// Every buffer is borrowed and the pool is at its ceiling; a
 			// release re-arms us.
 			return;
@@ -954,8 +975,9 @@ pub(crate) fn on_recv(
 			rx.bufs[one.bid as usize].claimed = false;
 		}
 		match code {
-			// The receive pool is exhausted; a packet release re-arms.
-			libc::ENOBUFS => {}
+			// The receive pool is exhausted. Record it: by the time the re-arm
+			// looks, a recycled buffer may hide that the kernel ran dry.
+			libc::ENOBUFS => sock.rx.borrow_mut().starved = true,
 			// Socket teardown; nothing to surface.
 			libc::ECANCELED => return,
 			_ => {
@@ -1224,15 +1246,9 @@ mod tests {
 		assert_eq!(roundtrip(addr), Some(addr));
 	}
 
-	/// A starved receive pool doubles into its ceiling, offering every new
-	/// buffer to the kernel as it goes.
-	#[test]
-	fn the_receive_pool_doubles_to_its_ceiling() {
-		let config = Config {
-			rx_buffers_max: 40,
-			..Default::default()
-		};
-		let mut rx = Rx {
+	/// A receive pool with nothing allocated yet and a ring of its own.
+	fn empty_rx() -> Rx {
+		Rx {
 			bufs: Vec::new(),
 			// Never registered, so this one is ours alone to publish into.
 			ring: Some(BufRing::new(64)),
@@ -1241,8 +1257,36 @@ mod tests {
 			queue: VecDeque::new(),
 			waiters: kio::WaiterList::new(),
 			armed: None,
+			starved: false,
 			error: None,
+		}
+	}
+
+	/// A recorded `ENOBUFS` outlives the buffer that recycled after it: the
+	/// kernel ran the pool dry, so the pool is too shallow however full the
+	/// ring looks by the time the re-arm gets to it. Growing off the ring's
+	/// state alone leaves a bursting socket re-arming at its floor forever.
+	#[test]
+	fn a_recycled_buffer_does_not_mask_a_recorded_starvation() {
+		let config = Config::default();
+		let mut rx = empty_rx();
+		grow_rx(&mut rx, &config);
+		assert!(!should_grow(&rx, true), "a buffer is in the ring");
+
+		rx.starved = true;
+		assert!(should_grow(&rx, true), "the kernel ran dry, recycle or not");
+		assert!(should_grow(&rx, false), "and the oneshot path reads it too");
+	}
+
+	/// A starved receive pool doubles into its ceiling, offering every new
+	/// buffer to the kernel as it goes.
+	#[test]
+	fn the_receive_pool_doubles_to_its_ceiling() {
+		let config = Config {
+			rx_buffers_max: 40,
+			..Default::default()
 		};
+		let mut rx = empty_rx();
 
 		for expected in [1u16, 2, 4, 8, 16, 32, 40] {
 			assert!(grow_rx(&mut rx, &config), "growth stopped short of {expected}");
