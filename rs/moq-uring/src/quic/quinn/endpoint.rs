@@ -9,7 +9,7 @@
 //! shared with the other backend.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -18,6 +18,7 @@ use std::time::Instant;
 
 use bytes::BytesMut;
 use quinn_proto::{ConnectionHandle, DatagramEvent, Incoming, Transmit};
+use rustc_hash::FxHashMap;
 
 use super::super::{Error, endpoint::Config};
 use super::connection;
@@ -39,7 +40,12 @@ pub(crate) struct Inner {
 	/// The routing table, and the server configuration it accepts with.
 	endpoint: RefCell<quinn_proto::Endpoint>,
 	accepting: RefCell<Option<Accepting>>,
-	conns: RefCell<HashMap<ConnectionHandle, connection::Shared>>,
+	/// Every live connection, looked up per received datagram.
+	///
+	/// FxHash rather than SipHash: quinn-proto hands out the handle, and it
+	/// owns connection-id routing (and its hasher choices) itself, so nothing
+	/// a peer picks reaches this map.
+	conns: RefCell<FxHashMap<ConnectionHandle, connection::Shared>>,
 	/// Incoming handshakes in flight. Together with the accept queue this is
 	/// bounded by [`Config::backlog`].
 	pending: Cell<usize>,
@@ -89,7 +95,7 @@ impl Endpoint {
 			local,
 			endpoint: RefCell::new(endpoint),
 			accepting: RefCell::new(accepting),
-			conns: RefCell::new(HashMap::new()),
+			conns: RefCell::new(FxHashMap::default()),
 			pending: Cell::new(0),
 			backlog: config.backlog,
 			handles: Cell::new(1),

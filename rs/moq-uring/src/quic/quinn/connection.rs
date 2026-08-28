@@ -1,13 +1,13 @@
 //! The connection: shared state, the driver task, and the session handle.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
 use bytes::Bytes;
 use quinn_proto::{ConnectionHandle, Dir, StreamId, VarInt};
+use rustc_hash::FxHashMap;
 
 use super::super::{Error, SEGMENT};
 use super::endpoint;
@@ -47,11 +47,14 @@ pub(crate) struct State {
 	open_waiters: kio::WaiterList,
 
 	/// Per-stream read/write parking, keyed by stream id.
-	readable: HashMap<StreamId, kio::WaiterList>,
-	writable: HashMap<StreamId, kio::WaiterList>,
+	///
+	/// FxHash rather than SipHash on all four of these: they sit on the
+	/// driver's per-event path, and quinn-proto assigns the ids.
+	readable: FxHashMap<StreamId, kio::WaiterList>,
+	writable: FxHashMap<StreamId, kio::WaiterList>,
 	/// Send streams waiting for their end: a FIN the peer acknowledged, or a
 	/// `STOP_SENDING`.
-	finishing: HashMap<StreamId, kio::WaiterList>,
+	finishing: FxHashMap<StreamId, kio::WaiterList>,
 	/// Every send stream a handle still holds, and how it ended once the
 	/// driver has seen that happen. That is what makes a later close mean
 	/// "already delivered" rather than "we never found out".
@@ -60,7 +63,7 @@ pub(crate) struct State {
 	/// stream finished and then dropped before its FIN was acknowledged would
 	/// otherwise leave an entry nobody can ever remove, one per group, for as
 	/// long as the connection lives.
-	sends: HashMap<StreamId, Option<End>>,
+	sends: FxHashMap<StreamId, Option<End>>,
 
 	datagram_recv_waiters: kio::WaiterList,
 	datagram_send_waiters: kio::WaiterList,
@@ -88,10 +91,10 @@ impl State {
 			accept_bi_waiters: kio::WaiterList::new(),
 			accept_uni_waiters: kio::WaiterList::new(),
 			open_waiters: kio::WaiterList::new(),
-			readable: HashMap::new(),
-			writable: HashMap::new(),
-			finishing: HashMap::new(),
-			sends: HashMap::new(),
+			readable: FxHashMap::default(),
+			writable: FxHashMap::default(),
+			finishing: FxHashMap::default(),
+			sends: FxHashMap::default(),
 			datagram_recv_waiters: kio::WaiterList::new(),
 			datagram_send_waiters: kio::WaiterList::new(),
 			closed: None,
