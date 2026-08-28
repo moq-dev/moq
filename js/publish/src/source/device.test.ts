@@ -51,13 +51,20 @@ class FakeMediaDevices extends EventTarget {
 	}
 }
 
-function install(devices: MediaDeviceInfo[], settled?: string): FakeMediaDevices {
+function install(devices: MediaDeviceInfo[], settled?: string): FakeMediaDevices & Disposable {
 	const fake = new FakeMediaDevices(devices, settled);
-	Object.defineProperty(globalThis, "navigator", {
+	const original = Object.getOwnPropertyDescriptor(navigator, "mediaDevices");
+	Object.defineProperty(navigator, "mediaDevices", {
 		configurable: true,
-		value: { mediaDevices: fake },
+		value: fake,
 	});
-	return fake;
+
+	return Object.assign(fake, {
+		[Symbol.dispose]() {
+			if (original) Object.defineProperty(navigator, "mediaDevices", original);
+			else Reflect.deleteProperty(navigator, "mediaDevices");
+		},
+	});
 }
 
 const flush = () => new Promise<void>((resolve) => queueMicrotask(resolve));
@@ -66,7 +73,7 @@ async function settle(times = 10): Promise<void> {
 }
 
 test("an unresolvable default pins nothing", async () => {
-	install(ANDROID);
+	using _media = install(ANDROID);
 
 	const device = new Device("audio");
 	await settle();
@@ -80,7 +87,7 @@ test("an unresolvable default pins nothing", async () => {
 });
 
 test("the platform default is reported but never pinned", async () => {
-	install(DESKTOP);
+	using _media = install(DESKTOP);
 
 	const device = new Device("audio");
 	await settle();
@@ -92,7 +99,7 @@ test("the platform default is reported but never pinned", async () => {
 });
 
 test("a preferred device is pinned once it is known to exist", async () => {
-	install(DESKTOP);
+	using _media = install(DESKTOP);
 
 	const device = new Device("audio", { preferred: "bbb" });
 	await settle();
@@ -107,7 +114,7 @@ test("a preferred device is pinned once it is known to exist", async () => {
 });
 
 test("a capture without a preference stays unpinned", async () => {
-	const media = install(ANDROID);
+	using media = install(ANDROID);
 
 	const mic = new Microphone({ enabled: true });
 	await settle();
@@ -124,4 +131,9 @@ test("a capture without a preference stays unpinned", async () => {
 	expect(mic.device.out.requested.peek()).toBeUndefined();
 
 	mic.close();
+});
+
+test("installing media devices preserves browser identity", () => {
+	using _media = install(DESKTOP);
+	expect(typeof navigator.userAgent).toBe("string");
 });
