@@ -341,14 +341,6 @@ impl ActiveTrack {
 		self.state.cancel_before_live();
 		let _ = self.cancel.send(true);
 	}
-
-	/// Tear the pump down only if it is still waiting on its subscription, leaving a streaming
-	/// one to reach its own EOS.
-	fn cancel_if_subscribing(&self) {
-		if self.state.cancel_before_live() {
-			let _ = self.cancel.send(true);
-		}
-	}
 }
 
 async fn run_session(
@@ -420,21 +412,17 @@ async fn follow_catalog(
 			next = catalog_consumer.next(), if !catalog_closed => {
 				match next? {
 					Some(catalog) => reconcile(&catalog, &mut active, &mut pumps, &broadcast, &element),
-					// Catalog track closed. Don't cancel the streaming pumps: let each reach
-					// its natural Ok(None) -> EOS end so downstream sees a clean EOS rather
-					// than a bare pad drop. We just stop reconciling and wait for them to
-					// drain.
+					// Catalog track closed. Don't cancel the pumps: let each reach its
+					// natural Ok(None) -> EOS end so downstream sees a clean EOS rather than a
+					// bare pad drop. We just stop reconciling and wait for them to drain.
 					//
-					// A pump still awaiting its subscription is the exception. No further
-					// catalog update can arrive to release it and the publisher has stopped
-					// describing the broadcast, so it would park forever and hold the session
-					// open with it. It has no pad, so there is no EOS for downstream to miss.
-					None => {
-						catalog_closed = true;
-						for track in active.values() {
-							track.cancel_if_subscribing();
-						}
-					}
+					// That includes a pump still resolving its subscription, which is
+					// indistinguishable here from one that has simply not been polled yet:
+					// a final snapshot naming a track the publisher does serve arrives this
+					// way, and cancelling on "not live yet" would drop it. A rendition nobody
+					// ever answers therefore keeps the session alive until the broadcast ends
+					// or the element is stopped.
+					None => catalog_closed = true,
 				}
 			}
 		}
@@ -1103,41 +1091,6 @@ mod session_tests {
 		super::RUNTIME.block_on(session).unwrap().unwrap();
 	}
 
-	/// A publisher can finish its catalog while a rendition it announced was never served. The
-	/// pump awaiting that subscription can no longer be released by a catalog update, so the
-	/// session has to break it out rather than wait on it forever.
-	#[test]
-	fn a_closing_catalog_releases_a_pump_still_subscribing() {
-		let _pad_ids = pad_ids();
-		let element = element();
-
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let _dynamic = broadcast.dynamic();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
-
-		{
-			let mut guard = catalog.lock();
-			guard.video.renditions = BTreeMap::from([("stalled".to_string(), video_rendition())]);
-		}
-		catalog.finish().unwrap();
-
-		let (_shutdown, mut shutdown_rx) = watch::channel(false);
-		let consumer = broadcast.consume();
-		let weak = element.downgrade();
-
-		// The session must end on the catalog closing alone. Shutdown is never signalled, so a
-		// pump left parked on its subscription hangs this instead of failing it.
-		let ended = super::RUNTIME.block_on(async move {
-			tokio::time::timeout(
-				Duration::from_secs(10),
-				follow_catalog(consumer, weak, &mut shutdown_rx),
-			)
-			.await
-		});
-		ended.expect("session never ended").unwrap();
-		assert!(pads(&element, "video_").is_empty(), "the unserved rendition got a pad");
-	}
-
 	/// A subscription can resolve after its pump was already torn down. The pump has to stay
 	/// dead: exposing a pad at that point publishes a rendition the session has finished with,
 	/// and then yanks it without an EOS.
@@ -1155,25 +1108,56 @@ mod session_tests {
 			guard.video.renditions = BTreeMap::from([("stalled".to_string(), video_rendition())]);
 		}
 
-		let (_shutdown, mut shutdown_rx) = watch::channel(false);
+		let (shutdown, mut shutdown_rx) = watch::channel(false);
 		let consumer = broadcast.consume();
 		let weak = element.downgrade();
 		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
 
-		// Hold the subscription pending, then close the catalog so the pump is cancelled while
-		// it is still waiting.
+		// Hold the subscription pending, then drop the rendition from the catalog so its pump
+		// is cancelled while it is still waiting.
 		let request = await_request(&mut dynamic);
-		catalog.finish().unwrap();
-		super::RUNTIME
-			.block_on(async { tokio::time::timeout(Duration::from_secs(10), session).await })
-			.expect("session never ended")
-			.unwrap()
-			.unwrap();
+		{
+			let mut guard = catalog.lock();
+			guard.video.renditions.clear();
+		}
 
-		// Only now answer it. The pump is gone, so nothing may reach a pad.
+		// Only now answer it. The pump was torn down, so nothing may reach a pad.
 		let _serving = request.accept(moq_net::track::Info::default());
-		std::thread::sleep(Duration::from_millis(200));
+		std::thread::sleep(Duration::from_millis(500));
 		assert!(pads(&element, "video_").is_empty(), "a cancelled pump still took a pad");
+
+		let _ = shutdown.send(true);
+		super::RUNTIME.block_on(session).unwrap().unwrap();
+	}
+
+	/// A publisher can name its tracks and then finish the catalog, which reaches the session as
+	/// a snapshot immediately followed by the track closing. The renditions that snapshot named
+	/// still have to stream: "hasn't taken a pad yet" says nothing about whether a subscription
+	/// is about to resolve, so a closing catalog must not be read as a reason to drop them.
+	#[test]
+	fn a_closing_catalog_keeps_the_renditions_it_named() {
+		let _pad_ids = pad_ids();
+		let element = element();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		let _video = broadcast.create_track("video", None).unwrap();
+		{
+			let mut guard = catalog.lock();
+			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
+		}
+		catalog.finish().unwrap();
+
+		let (shutdown, mut shutdown_rx) = watch::channel(false);
+		let consumer = broadcast.consume();
+		let weak = element.downgrade();
+		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
+
+		await_pad(&element, "video_");
+
+		let _ = shutdown.send(true);
+		super::RUNTIME.block_on(session).unwrap().unwrap();
 	}
 
 	/// Pipelines link `moqsrc`'s pads by name, so the first video rendition that actually
