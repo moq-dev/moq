@@ -88,6 +88,8 @@ pub struct Workers {
 	members: Vec<Member>,
 	addr: SocketAddr,
 	server: moq_uring::quic::server::Config,
+	/// What the workers serve, fingerprinted once, for `/certificate.sha256`.
+	certificates: moq_tokio::tls::Certificates,
 	udp: moq_uring::udp::Config,
 	pin: bool,
 	alpns: Arc<Vec<String>>,
@@ -111,7 +113,7 @@ impl Workers {
 	/// (serve those from an [`init_streams`](moq_tokio::listen::Config::init_streams)
 	/// server), and `tls.generate` is refused since every worker must serve
 	/// one identity. Unlike it, exactly one certificate/key pair is required,
-	/// and mTLS client roots are not yet wired through.
+	/// and it is read here rather than on each worker thread.
 	pub fn bind(
 		listen: &moq_tokio::listen::Config,
 		quic: &moq_tokio::quic::Config,
@@ -125,12 +127,6 @@ impl Workers {
 		// beats starting and quietly behaving differently from what the
 		// operator configured, which is the whole failure mode this mode is
 		// most likely to produce.
-		if !listen.tls.root.is_empty() {
-			anyhow::bail!(
-				"io_uring workers do not implement mTLS client roots (listen.tls.root); \
-				 use token auth, or the tokio workers"
-			);
-		}
 		if listen.lb_id.is_some() {
 			anyhow::bail!(
 				"io_uring workers issue shard-steered connection ids and cannot also carry a \
@@ -144,6 +140,20 @@ impl Workers {
 			([cert], [key]) => (cert.clone(), key.clone()),
 			([], []) => anyhow::bail!("io_uring workers need a certificate (listen.tls.cert/key)"),
 			_ => anyhow::bail!("io_uring workers serve exactly one certificate, got several"),
+		};
+		// Read once, here, rather than per worker: every worker must present
+		// the same identity, and a certificate replaced on disk while the
+		// threads are starting would otherwise split the group between two.
+		let identity = moq_uring::quic::Identity::open(&cert, &key)
+			.with_context(|| format!("failed to load {} / {}", cert.display(), key.display()))?;
+		let certificates = moq_tokio::tls::Certificates::from_pem(identity.cert())
+			.with_context(|| format!("failed to fingerprint {}", cert.display()))?;
+
+		// A client certificate stands in for a JWT, exactly as on the tokio
+		// path; a client that presents none still gets the token flow.
+		let client_auth = match listen.tls.root.is_empty() {
+			true => moq_uring::quic::server::ClientAuth::None,
+			false => moq_uring::quic::server::ClientAuth::Optional(listen.tls.root.clone()),
 		};
 
 		let count = config.count.max(1);
@@ -228,8 +238,9 @@ impl Workers {
 			);
 		}
 
-		let mut server = moq_uring::quic::server::Config::new(moq_uring::quic::Identity::new(cert, key));
+		let mut server = moq_uring::quic::server::Config::new(identity);
 		server.alpn = alpns.iter().cloned().chain(["h3".to_string()]).collect();
+		server.client_auth = client_auth;
 		let quic = quic.resolve();
 		server.transport = transport(&quic)?;
 
@@ -245,6 +256,7 @@ impl Workers {
 			members,
 			addr,
 			server,
+			certificates,
 			udp,
 			pin: config.pin,
 			alpns: Arc::new(alpns),
@@ -260,6 +272,15 @@ impl Workers {
 	/// The address every worker is bound to.
 	pub fn local_addr(&self) -> SocketAddr {
 		self.addr
+	}
+
+	/// The certificate every worker presents, for publishing its SHA-256
+	/// fingerprint.
+	///
+	/// Fixed for the group's lifetime: the identity is read once at
+	/// [`bind`](Self::bind) and nothing reloads it.
+	pub fn certificates(&self) -> moq_tokio::tls::Certificates {
+		self.certificates.clone()
 	}
 
 	/// Spawn the worker threads and start accepting.
@@ -379,8 +400,7 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		"io_uring workers cannot write qlog traces; drop quic.qlog or use the tokio workers"
 	);
 	// The datagram path fixes both payload ceilings at SEGMENT and hands
-	// `conn.send` slices of exactly that, so discovery has no larger size to
-	// find and would only add probes.
+	// `conn.send` slices of exactly that, so there is no larger size to find.
 	anyhow::ensure!(
 		!quic.mtu_discovery,
 		"io_uring workers send a fixed-size UDP payload, so quic.mtu_discovery has nothing to discover"
@@ -546,6 +566,17 @@ async fn serve_connection(
 ) -> anyhow::Result<()> {
 	use web_transport_trait::poll::Session as _;
 
+	// TLS validated this against the configured roots before the connection
+	// existed, so a chain here is an authenticated peer. Read it now: the
+	// handshake below consumes the connection.
+	let identity = conn.peer_chain().map(|chain| {
+		let chain = chain
+			.into_iter()
+			.map(moq_tokio::rustls::pki_types::CertificateDer::from)
+			.collect();
+		moq_tokio::tls::PeerIdentity::from_chain(chain)
+	});
+
 	// Browsers speak WebTransport; everyone else raw QUIC. The moq version
 	// rides the ALPN for raw QUIC and the WebTransport subprotocol for `h3`.
 	// A browser offering no subprotocol we speak is refused with
@@ -599,14 +630,31 @@ async fn serve_connection(
 	};
 	params.transport = Some(moq_tokio::Transport::Quic);
 
+	// An mTLS peer's certificate is its credential, granting full access within
+	// the path's canonical root; everyone else brings a JWT (or is anonymous).
+	// Either verdict comes from the shared runtime.
 	let auth = serve.auth.clone();
+	let mtls = identity.is_some();
 	let token = match serve
 		.tokio
-		.spawn(async move { auth.verify(&params).await })
+		.spawn(async move {
+			match mtls {
+				true => auth.verify_mtls(&params.path, params.transport).await,
+				false => auth.verify(&params).await,
+			}
+		})
 		.await
 		.context("auth task failed")?
 	{
-		Ok(token) => token,
+		Ok(mut token) => {
+			if let Some(identity) = &identity {
+				tracing::debug!(id, "mTLS peer authenticated");
+				// Close the session when the client certificate expires,
+				// mirroring the JWT `exp` handling.
+				token.expires = identity.expiry();
+			}
+			token
+		}
 		Err(err) => {
 			// The status is what separates "your credential is bad" from "the
 			// auth API is down". Collapsing both into Unauthorized tells a

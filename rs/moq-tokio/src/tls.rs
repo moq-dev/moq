@@ -1442,9 +1442,16 @@ impl PeerIdentity {
 		Some(Self { chain: *chain })
 	}
 
-	/// Wrap a certificate chain already exposed by a QUIC backend.
-	#[cfg(feature = "quiche")]
-	pub(crate) fn from_chain(chain: Vec<CertificateDer<'static>>) -> Self {
+	/// Wrap a certificate chain a QUIC backend already validated, leaf first.
+	///
+	/// For a listener living outside this crate (the io_uring workers, say)
+	/// that ran its own mTLS handshake and wants the relay's authenticated-peer
+	/// path. Only pass a chain TLS accepted: nothing here re-verifies it.
+	///
+	/// Takes [`rustls::pki_types::CertificateDer`], already part of this
+	/// crate's public API via [`chain`](Self::chain), so a major `rustls` bump
+	/// is a breaking change for callers of this too.
+	pub fn from_chain(chain: Vec<CertificateDer<'static>>) -> Self {
 		Self { chain }
 	}
 
@@ -1482,9 +1489,9 @@ impl PeerIdentity {
 /// The certificates a server is currently serving.
 ///
 /// Only a QUIC backend serves TLS of its own, so nothing else populates this.
-#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 #[derive(Debug, Default)]
 pub(crate) struct Info {
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub(crate) certs: Vec<Arc<rustls::sign::CertifiedKey>>,
 	pub(crate) fingerprints: Vec<String>,
 }
@@ -1496,12 +1503,10 @@ pub(crate) struct Info {
 /// lifetime. Obtained from [`crate::Server::certificates`].
 #[derive(Clone, Debug)]
 pub struct Certificates {
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	info: Arc<RwLock<Info>>,
 }
 
 impl Certificates {
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub(crate) fn new(info: Arc<RwLock<Info>>) -> Self {
 		Self { info }
 	}
@@ -1509,9 +1514,37 @@ impl Certificates {
 	/// An empty set, used when no TLS-bearing backend is configured.
 	pub(crate) fn empty() -> Self {
 		Self {
-			#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 			info: Arc::new(RwLock::new(Info::default())),
 		}
+	}
+
+	/// A fixed handle reporting the certificates in the PEM `chain`, one
+	/// fingerprint each and in file order.
+	///
+	/// For a listener living outside this crate that serves TLS of its own and
+	/// has to publish what it serves (the io_uring workers hold their
+	/// certificate rather than the shared server). Nothing hot reloads here:
+	/// such a listener fixes its TLS material when it is built, so the
+	/// fingerprints are computed once and never change.
+	pub fn from_pem(chain: &[u8]) -> Result<Self> {
+		use rustls::pki_types::pem::PemObject;
+
+		let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(chain)
+			.collect::<std::result::Result<_, _>>()
+			.map_err(Error::Read)?;
+		if certs.is_empty() {
+			return Err(Error::Empty);
+		}
+		let provider = crypto::provider();
+		let fingerprints = certs
+			.iter()
+			.map(|cert| hex::encode(crypto::sha256(&provider, cert.as_ref())))
+			.collect();
+		Ok(Self::new(Arc::new(RwLock::new(Info {
+			#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+			certs: Vec::new(),
+			fingerprints,
+		}))))
 	}
 
 	/// The SHA-256 fingerprints of the certificates being served right now, hex
@@ -1520,15 +1553,10 @@ impl Certificates {
 	/// Empty when the server has no TLS-bearing backend. Re-read this per use
 	/// rather than caching it: a cert rotation on disk changes the values.
 	pub fn fingerprints(&self) -> Vec<String> {
-		#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
-		{
-			// A panicking writer can't leave the cert list half-updated (it is
-			// replaced wholesale), so a poisoned lock is still safe to read.
-			let info = self.info.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-			info.fingerprints.clone()
-		}
-		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
-		Vec::new()
+		// A panicking writer can't leave the cert list half-updated (it is
+		// replaced wholesale), so a poisoned lock is still safe to read.
+		let info = self.info.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+		info.fingerprints.clone()
 	}
 }
 

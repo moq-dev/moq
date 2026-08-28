@@ -37,23 +37,51 @@ pub(crate) const SEGMENT: usize = 1350;
 /// The platform trust store, loaded when a role config asks for it.
 const SYSTEM_ROOTS: &str = "/etc/ssl/certs";
 
-/// A TLS certificate chain and the private key that signs for it, as PEM
-/// files on disk. One value, so neither half can be configured alone.
-#[derive(Clone, Debug)]
+/// A TLS certificate chain and the private key that signs for it, as PEM.
+/// One value, so neither half can be configured alone.
+///
+/// The bytes are read once and held, not re-read per connection: a worker
+/// group builds one of these before it spawns, so replacing the files on disk
+/// afterwards cannot leave two workers serving different identities.
+#[derive(Clone)]
 pub struct Identity {
-	/// The PEM certificate chain to present.
-	pub cert: std::path::PathBuf,
-	/// The PEM private key for the leaf certificate.
-	pub key: std::path::PathBuf,
+	cert: Vec<u8>,
+	key: Vec<u8>,
 }
 
 impl Identity {
-	/// The chain at `cert`, signed for by the key at `key`.
-	pub fn new(cert: impl Into<std::path::PathBuf>, key: impl Into<std::path::PathBuf>) -> Self {
+	/// Read the PEM chain at `cert` and the PEM key at `key`.
+	pub fn open(cert: impl AsRef<std::path::Path>, key: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+		let read = |path: &std::path::Path| {
+			std::fs::read(path).map_err(|err| Error::Tls(format!("{}: {err}", path.display())))
+		};
+		Ok(Self {
+			cert: read(cert.as_ref())?,
+			key: read(key.as_ref())?,
+		})
+	}
+
+	/// The same, from PEM already in hand.
+	pub fn from_pem(cert: impl Into<Vec<u8>>, key: impl Into<Vec<u8>>) -> Self {
 		Self {
 			cert: cert.into(),
 			key: key.into(),
 		}
+	}
+
+	/// The PEM certificate chain being presented, for a caller that publishes
+	/// its fingerprint. The key is deliberately not readable back out.
+	pub fn cert(&self) -> &[u8] {
+		&self.cert
+	}
+}
+
+impl std::fmt::Debug for Identity {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		// Whatever else gets logged, the private key does not.
+		f.debug_struct("Identity")
+			.field("cert", &format_args!("{} PEM bytes", self.cert.len()))
+			.finish_non_exhaustive()
 	}
 }
 
@@ -88,8 +116,6 @@ pub struct Transport {
 	pub max_streams: u64,
 	/// Which congestion controller to run.
 	pub congestion: Congestion,
-	/// Probe for a larger path MTU than the conservative default.
-	pub mtu_discovery: bool,
 	/// How often to send an ack-eliciting packet on an otherwise idle
 	/// connection, or `None` (the default) to send none and let the idle
 	/// timeout decide.
@@ -102,7 +128,6 @@ impl Default for Transport {
 			idle_timeout: std::time::Duration::from_secs(10),
 			max_streams: 1024,
 			congestion: Congestion::default(),
-			mtu_discovery: false,
 			keep_alive: None,
 		}
 	}
@@ -144,18 +169,13 @@ pub(crate) fn tls(
 	trust: Trust,
 	transport: &Transport,
 ) -> Result<quiche::Config, Error> {
-	use boring::ssl::{SslContextBuilder, SslFiletype, SslMethod};
+	use boring::ssl::{SslContextBuilder, SslMethod};
 
 	let mut builder = SslContextBuilder::new(SslMethod::tls()).map_err(|err| Error::Tls(err.to_string()))?;
 	apply_trust(&mut builder, &trust)?;
 
 	if let Some(identity) = identity {
-		builder
-			.set_certificate_chain_file(&identity.cert)
-			.map_err(|err| Error::Tls(format!("{}: {err}", identity.cert.display())))?;
-		builder
-			.set_private_key_file(&identity.key, SslFiletype::PEM)
-			.map_err(|err| Error::Tls(format!("{}: {err}", identity.key.display())))?;
+		apply_identity(&mut builder, identity)?;
 	}
 
 	let mut config = quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, builder)?;
@@ -171,9 +191,31 @@ pub(crate) fn tls(
 	config.set_initial_max_streams_bidi(transport.max_streams);
 	config.set_initial_max_streams_uni(transport.max_streams);
 	config.set_cc_algorithm_name(transport.congestion.name())?;
-	config.discover_pmtu(transport.mtu_discovery);
 	config.enable_dgram(true, 64, 64);
 	Ok(config)
+}
+
+/// Present `identity`, from the PEM it already holds.
+///
+/// The file-based boring setters would re-read the paths on every call, which
+/// is the whole reason [`Identity`] carries bytes.
+fn apply_identity(builder: &mut boring::ssl::SslContextBuilder, identity: &Identity) -> Result<(), Error> {
+	use boring::pkey::PKey;
+	use boring::x509::X509;
+
+	let tls = |err: boring::error::ErrorStack| Error::Tls(err.to_string());
+	let chain = X509::stack_from_pem(identity.cert()).map_err(tls)?;
+	let (leaf, intermediates) = chain
+		.split_first()
+		.ok_or_else(|| Error::Tls("certificate chain holds no certificates".to_string()))?;
+	builder.set_certificate(leaf).map_err(tls)?;
+	for cert in intermediates {
+		builder.add_extra_chain_cert(cert.clone()).map_err(tls)?;
+	}
+
+	let key = PKey::private_key_from_pem(&identity.key).map_err(tls)?;
+	builder.set_private_key(&key).map_err(tls)?;
+	Ok(())
 }
 
 /// Point `builder` at exactly the roots `trust` names.

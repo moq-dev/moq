@@ -72,7 +72,7 @@ fn lite_session_over_the_worker() {
 	group.finish().expect("finish group");
 
 	let certs = support::certs().expect("certificates");
-	let mut server_config = quic::server::Config::new(quic::Identity::new(certs.cert.clone(), certs.key.clone()));
+	let mut server_config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
 	server_config.alpn = vec![ALPN.to_string()];
 
 	let server_sock = handle
@@ -190,7 +190,7 @@ fn two_lite_sessions_share_the_server_socket() {
 	group.finish().expect("finish group");
 
 	let certs = support::certs().expect("certificates");
-	let mut server_config = quic::server::Config::new(quic::Identity::new(certs.cert.clone(), certs.key.clone()));
+	let mut server_config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
 	server_config.alpn = vec![ALPN.to_string()];
 
 	let server_sock = handle
@@ -281,7 +281,7 @@ fn configured_roots_verify_the_server() {
 	let handle = worker.handle();
 	let certs = support::certs().expect("certificates");
 
-	let mut server_config = quic::server::Config::new(quic::Identity::new(certs.cert.clone(), certs.key.clone()));
+	let mut server_config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
 	server_config.alpn = vec![ALPN.to_string()];
 
 	let server_sock = handle
@@ -337,7 +337,7 @@ fn required_client_auth_refuses_an_anonymous_client() {
 	let handle = worker.handle();
 	let certs = support::certs().expect("certificates");
 
-	let mut server_config = quic::server::Config::new(quic::Identity::new(certs.cert.clone(), certs.key.clone()));
+	let mut server_config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
 	server_config.alpn = vec![ALPN.to_string()];
 	// Any root will do: the client presents nothing, so it fails before the
 	// chain is ever checked.

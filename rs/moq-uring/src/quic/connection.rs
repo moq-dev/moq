@@ -246,6 +246,19 @@ impl Connection {
 	pub(crate) fn shared(&self) -> &Shared {
 		&self.shared
 	}
+
+	/// The peer's certificate chain in DER, leaf first, or `None` if it
+	/// presented none.
+	///
+	/// A server only sees one when it asked
+	/// ([`ClientAuth`](super::server::ClientAuth)), and TLS already validated
+	/// it against the configured roots by the time this connection exists: an
+	/// invalid chain fails the handshake instead. So a `Some` here is an
+	/// authenticated peer, and the chain is what names it.
+	pub fn peer_chain(&self) -> Option<Vec<Vec<u8>>> {
+		let conn = self.shared.conn.borrow();
+		Some(conn.peer_cert_chain()?.into_iter().map(<[u8]>::to_vec).collect())
+	}
 }
 
 impl Clone for Connection {

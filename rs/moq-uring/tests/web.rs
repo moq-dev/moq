@@ -36,7 +36,7 @@ const CLOSE_REASON: &str = "bye";
 
 /// Build the uring server endpoint serving `h3`.
 fn h3_endpoint(handle: &moq_uring::Handle, certs: &support::Certs) -> quic::Endpoint {
-	let mut server = quic::server::Config::new(quic::Identity::new(certs.cert.clone(), certs.key.clone()));
+	let mut server = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
 	server.alpn = vec!["h3".to_string()];
 	let sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())

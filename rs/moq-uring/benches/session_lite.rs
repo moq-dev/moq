@@ -154,7 +154,7 @@ mod linux {
 
 			let certs = support::certs().expect("certificates");
 			let mut server_config =
-				quic::server::Config::new(quic::Identity::new(certs.cert.clone(), certs.key.clone()));
+				quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
 			server_config.alpn = vec![ALPN.to_string()];
 
 			let server_sock = handle

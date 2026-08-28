@@ -105,7 +105,7 @@ fn a_steered_group_serves_a_shared_port() {
 				let handle = worker.handle();
 				let socket = handle.udp(socket, udp::Config::default()).expect("socket");
 
-				let mut server = quic::server::Config::new(quic::Identity::new(cert, key));
+				let mut server = quic::server::Config::new(quic::Identity::open(cert, key).expect("identity"));
 				server.alpn = vec![ALPN.to_string()];
 				let endpoint = quic::Endpoint::new(
 					&handle,

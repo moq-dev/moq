@@ -96,9 +96,8 @@ pin = true
 # versions are not offered on this listener, and neither is the pre-lite-05
 # SETUP exchange a browser reaches by offering no subprotocol. Requires
 # `workers`, Linux 6.12+, a build with the `io-uring` cargo feature, and
-# exactly one listen.tls certificate; the certificate is read once at startup
-# (no hot reload yet), and mTLS client roots are not yet honored. Refuses to
-# start anywhere it cannot deliver. Default: false.
+# exactly one listen.tls certificate, read once at startup (no hot reload
+# yet). Refuses to start anywhere it cannot deliver. Default: false.
 io_uring = false
 ```
 
@@ -112,18 +111,19 @@ The `[quic]` section applies to this listener too: `max_streams`,
 so there is nothing to discover), and asking for either is a startup error
 rather than a setting that quietly does nothing.
 
-The same goes for the listener settings this mode cannot deliver: `tls.root`
-(mTLS client roots), `lb_id` (QUIC-LB server ids, which cannot share the
-connection id with the shard prefix), an explicit `backend`, `tls.generate`,
-more than one certificate, and moq-lite 01/02, whose version is negotiated in
-the SETUP rather than by ALPN. Each is refused at startup. `listen.bind` must
-be named too, rather than defaulted: leaving it unset means stream-only when a
-tcp or unix listener is configured, and this mode will not guess.
+The same goes for the listener settings this mode cannot deliver: `lb_id`
+(QUIC-LB server ids, which cannot share the connection id with the shard
+prefix), an explicit `backend`, `tls.generate`, more than one certificate, and
+moq-lite 01/02, whose version is negotiated in the SETUP rather than by ALPN.
+Each is refused at startup. `listen.bind` must be named too, rather than
+defaulted: leaving it unset means stream-only when a tcp or unix listener is
+configured, and this mode will not guess.
 
-One gap worth knowing about: `/certificate.sha256` serves nothing in this mode,
-because the fingerprints come from the shared server's TLS backend and the
-io_uring workers hold the certificate instead. A client that pins a self-signed
-relay through that endpoint needs the tokio workers until this is wired up.
+`tls.root` works here as it does on the tokio listener: a client that presents
+a certificate chaining to one of those roots is authenticated by it, with full
+access within its path's canonical root, and one that presents none falls back
+to the usual token flow. `/certificate.sha256` serves what the workers are
+presenting, so a client can still pin a self-signed relay through it.
 
 The shared runtime is still there for everything that is not QUIC, and it still
 sizes its thread pool to the machine. Set `TOKIO_WORKER_THREADS` in the

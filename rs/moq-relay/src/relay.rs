@@ -201,10 +201,16 @@ impl Relay {
 		let drain_timeout = config.drain_timeout.into_std();
 		let (shutdown_trigger, shutdown) = Shutdown::new(drain_timeout);
 		// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
-		// The workers hold the certificates when they own QUIC; the server has none.
-		let certificates = match &workers {
-			Some(workers) => workers.certificates(),
-			None => server.certificates(),
+		// Whichever worker group owns QUIC holds the certificates; the shared
+		// server then has none of its own.
+		#[cfg(all(target_os = "linux", feature = "io-uring"))]
+		let uring_certificates = uring.as_ref().map(crate::uring::Workers::certificates);
+		#[cfg(not(all(target_os = "linux", feature = "io-uring")))]
+		let uring_certificates: Option<moq_tokio::tls::Certificates> = None;
+		let certificates = match (&workers, uring_certificates) {
+			(Some(workers), _) => workers.certificates(),
+			(None, Some(certificates)) => certificates,
+			(None, None) => server.certificates(),
 		};
 		let web = Web::new(auth.clone(), cluster.clone(), certificates, config.web)
 			.with_shutdown(shutdown.clone())
