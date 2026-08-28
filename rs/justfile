@@ -389,6 +389,9 @@ features:
 # everyone. Only a per-crate invocation selects the shapes an external consumer with
 # `default-features = false` can land on, so assert those still fail on their own
 # `compile_error!` rather than on whatever breaks first inside the modules.
+#
+# `--features quinn` is deliberately absent: it compiles without a provider feature and
+# takes one from `CryptoProvider::install_default()` at runtime, which is supported.
 _unsupported-features:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -406,8 +409,7 @@ _unsupported-features:
 
     expect "requires a QUIC backend"
     expect "requires a QUIC backend" --features tcp
-    expect "require a crypto provider" --features quinn
-    expect "require a crypto provider" --features noq
+    expect "requires a crypto provider" --features noq
 
 # nextest, not `cargo test`, so a wedged test is killed instead of pinning a core
 # until someone notices (`.config/nextest.toml` sets the timeout). The trade is

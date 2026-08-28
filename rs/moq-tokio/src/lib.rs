@@ -14,10 +14,11 @@
 //!
 //! # Required features
 //!
-//! A build needs a QUIC backend (`quinn`, `quiche`, or `noq`), and `quinn`/`noq`
-//! additionally need a crypto provider (`aws-lc-rs` or `ring`) since their rustls
-//! dependency is built with default features off. The `default` feature set covers
-//! both; a consumer using `default-features = false` has to pick them itself.
+//! A build needs a QUIC backend (`quinn`, `quiche`, or `noq`). `noq` additionally
+//! needs a crypto provider (`aws-lc-rs` or `ring`) to compile at all. `quinn` takes
+//! one from either feature or from a provider the application installed with
+//! `CryptoProvider::install_default()`, and `quiche` brings its own. The `default`
+//! set covers all of this; `default-features = false` means picking them yourself.
 
 #![warn(missing_docs)]
 
@@ -35,16 +36,18 @@ compile_error!(
 	 A tcp/uds-only build is not supported (see moq-dev/moq#2834)."
 );
 
-// `quinn` is the sharper half: unlike `noq` it still compiles, then has no initial cipher at
-// runtime, so the failure lands on a connection attempt rather than the build. `quiche` needs
-// neither, since boringssl brings its own.
-#[cfg(all(
-	any(feature = "quinn", feature = "noq"),
-	not(any(feature = "aws-lc-rs", feature = "ring"))
-))]
+// Without a provider feature, `web-transport-noq` is built without its own, and the endpoint
+// constructors this crate calls stop existing: the build fails with three unrelated E0599s
+// about `EndpointConfig::default` and `ServerConfig::with_crypto`. Say which feature is
+// missing instead.
+//
+// Only `noq` gets this. `quinn` compiles either way and resolves its provider at runtime
+// through `crypto::provider()`, which accepts one the application installed with
+// `CryptoProvider::install_default()`; refusing that build would remove a supported path.
+// `quiche` needs neither, since boringssl brings its own.
+#[cfg(all(feature = "noq", not(any(feature = "aws-lc-rs", feature = "ring"))))]
 compile_error!(
-	"the `quinn` and `noq` backends require a crypto provider: enable `aws-lc-rs` or `ring`. \
-	 Their rustls dependency is built with default-features off, so there is no cipher without one."
+	"the `noq` backend requires a crypto provider: enable `aws-lc-rs` or `ring`."
 );
 
 pub mod accept;
