@@ -330,8 +330,8 @@ A consumer MUST NOT skip to the newest group, since a later group does not super
 
 Retention is bounded, and this is the limit of "lossless".
 A group's cache is finite, so a publisher that writes more than it holds evicts the log's earliest frames.
-A consumer that has not kept up, or that subscribes later, then receives the log from wherever the cache begins rather than from its start.
-With compression ({{compression}}) it receives nothing at all: the evicted prefix is the decompression context, and a log has no keyframe to resynchronize on, so the whole group becomes undecodable.
+A consumer that has not kept up, or that subscribes later, then cannot read the log at all: the read fails once it reaches the evicted prefix, rather than silently resuming at whatever the cache still holds.
+That is the intended behaviour, since a partial log presented as a whole one is exactly what this mode exists to prevent, and under compression ({{compression}}) the retained frames are undecodable anyway without the evicted prefix as context.
 A publisher SHOULD therefore keep a `stream` track's log within what its groups retain, and split anything unbounded across successive tracks; a consumer that needs the whole log SHOULD subscribe before the publisher exceeds that.
 
 ### compression {#field-compression}

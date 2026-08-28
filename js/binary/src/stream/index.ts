@@ -6,11 +6,10 @@
  * was appended. For a latest-value document, use the `Snapshot` module instead.
  *
  * Retention is bounded, which is the limit of "lossless" here. The group's cache is finite, so a
- * log longer than it holds evicts its earliest frames; a consumer that falls behind or subscribes
- * late reads from wherever the cache begins and sees a `Lagged` error at the gap. Under compression
- * it reads nothing, since the evicted prefix is the decompression context and a log has no keyframe
- * to resynchronize on. Keep a log inside what the group retains, and split anything unbounded
- * across successive tracks.
+ * log longer than it holds evicts its earliest frames, and a consumer that falls behind or
+ * subscribes late then fails its read with `Lagged` rather than silently resuming partway through:
+ * a partial log presented as a whole one is what this mode exists to prevent. Keep a log inside
+ * what the group retains, and split anything unbounded across successive tracks.
  *
  * On the wire the log rides a **single group** that is never rolled, one payload per frame. A
  * payload that cannot be written ends the track rather than opening a second group: a log missing a

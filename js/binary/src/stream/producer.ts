@@ -36,7 +36,8 @@ export class Producer {
 	 *
 	 * A payload that cannot be written ends the track: a log missing a record is not the lossless
 	 * log this mode promises, so the failure is surfaced rather than papered over with a second
-	 * group. Every later append then fails on the closed track.
+	 * group. The group is aborted rather than closed cleanly, so a consumer sees the failure
+	 * instead of a log that merely looks complete. Every later append fails on the closed track.
 	 */
 	append(payload: Uint8Array): void {
 		// Open the group before compressing: a failure here must not leave the window ahead of a
@@ -52,9 +53,13 @@ export class Producer {
 			// lossless log this mode promises. Continuing into a second group would hand consumers a
 			// gap dressed up as a complete log, so end the track and let the caller start a new one.
 			//
-			// The group is already visible on the track, so leaving it open would strand a subscriber
-			// that advanced into it. Close both explicitly.
-			this.finish();
+			// Abort the group rather than closing it cleanly: a clean close reads as `undefined`,
+			// exactly what a completed log looks like, so a consumer could not tell a truncated log
+			// from a whole one. Aborting surfaces the failure to the reader the same way the throw
+			// surfaces it to the caller. The track is then closed so nothing opens a second group.
+			this.#group?.close(err instanceof Error ? err : new Error(String(err)));
+			this.#group = undefined;
+			this.#track.close();
 			throw err;
 		}
 	}

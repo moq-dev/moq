@@ -73,7 +73,8 @@ impl Producer {
 	///
 	/// A payload that cannot be written ends the track: a log missing a record is not the lossless
 	/// log this mode promises, so the failure is surfaced rather than papered over with a second
-	/// group. Every later append then fails on the closed track.
+	/// group. The group is aborted rather than closed cleanly, so a consumer sees the failure
+	/// instead of a log that merely looks complete. Every later append fails on the closed track.
 	pub fn append(&mut self, payload: impl Into<Bytes>) -> Result<()> {
 		self.inner.lock().unwrap().append(payload.into())
 	}
@@ -118,9 +119,15 @@ impl Inner {
 		// as a complete log, so end the track and let the caller start a new one. This is also what
 		// keeps "a stream is one group" a real invariant rather than the usual case.
 		//
-		// The group is already published and dropping the handle does not close it, so a subscriber
-		// that advanced into it would wait there with nothing to read. Close both explicitly.
-		let _ = self.finish();
+		// Abort the group rather than finishing it: a clean close would drain to `None`, which is
+		// exactly what a completed log looks like, so a consumer could not tell a truncated log from
+		// a whole one. Aborting surfaces the failure to the reader the same way the error surfaces it
+		// to the caller. The track is then finished so nothing opens a second group; dropping the
+		// group handle would not close it, stranding a subscriber that had advanced into it.
+		if let Some(group) = self.group.take() {
+			let _ = group.abort(err.clone());
+		}
+		let _ = self.track.finish();
 
 		Err(err.into())
 	}
