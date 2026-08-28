@@ -337,7 +337,10 @@ struct ActiveTrack {
 impl ActiveTrack {
 	/// Tear the pump down whatever stage it reached: one still subscribing never takes a pad,
 	/// one that has drops it when it sees the watch.
-	fn cancel(&self) {
+	///
+	/// Terminal, so it consumes the handle: a cancelled rendition is removed from the session's
+	/// active set, and respawns as a fresh pump if the catalog names it again.
+	fn cancel(self) {
 		self.state.cancel_before_live();
 		let _ = self.cancel.send(true);
 	}
@@ -1121,7 +1124,9 @@ mod session_tests {
 			guard.video.renditions.clear();
 		}
 
-		// Only now answer it. The pump was torn down, so nothing may reach a pad.
+		// Only now answer it. The pump was torn down, so nothing may reach a pad. Proving a pad
+		// never appears has no edge to wait on, unlike `await_pad`, so this gives the runtime a
+		// window in which the un-cancelled version reliably creates one.
 		let _serving = request.accept(moq_net::track::Info::default());
 		std::thread::sleep(Duration::from_millis(500));
 		assert!(pads(&element, "video_").is_empty(), "a cancelled pump still took a pad");
