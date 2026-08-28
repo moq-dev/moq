@@ -321,12 +321,18 @@ Each group is self-contained and supersedes the previous one, so a consumer read
 A group's first frame is a complete value.
 A `json` track MAY follow it with JSON Merge Patch ({{!RFC7396}}) deltas applied in order; a `binary` track MUST write exactly one frame per group, since an opaque payload has no delta form.
 
-A `stream` track is lossless.
-It is a single group, never rolled, carrying one self-contained payload per frame in order with nothing superseded.
+A `stream` track is lossless in the sense that nothing supersedes anything else.
+It is a single group, never rolled, carrying one self-contained payload per frame, delivered in order.
 
 A publisher that cannot write a payload MUST close the track rather than continue the log in a second group.
-A log missing a payload is not lossless, so a second group would present a gap as if it were a complete log; ending the track surfaces the failure instead, and a publisher with more to say opens a new track.
+A second group would present a gap as if it were a complete log; ending the track surfaces the failure instead, and a publisher with more to say opens a new track.
 A consumer MUST NOT skip to the newest group, since a later group does not supersede an earlier one the way a `snapshot` group does.
+
+Retention is bounded, and this is the limit of "lossless".
+A group's cache is finite, so a publisher that writes more than it holds evicts the log's earliest frames.
+A consumer that has not kept up, or that subscribes later, then receives the log from wherever the cache begins rather than from its start.
+With compression ({{compression}}) it receives nothing at all: the evicted prefix is the decompression context, and a log has no keyframe to resynchronize on, so the whole group becomes undecodable.
+A publisher SHOULD therefore keep a `stream` track's log within what its groups retain, and split anything unbounded across successive tracks; a consumer that needs the whole log SHOULD subscribe before the publisher exceeds that.
 
 ### compression {#field-compression}
 ~~~

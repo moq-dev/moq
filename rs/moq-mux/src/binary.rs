@@ -142,7 +142,12 @@ impl<E: CatalogExt> Snapshot<E> {
 /// use [`Snapshot`].
 pub struct Stream<E: CatalogExt = ()> {
 	inner: moq_binary::stream::Producer,
-	rendition: Rendition<E, BinaryConfig>,
+	name: String,
+
+	/// Cleared when a terminal failure ends the track, which retires the catalog entry with it. An
+	/// entry advertising a track that can no longer accept records only misleads a consumer that
+	/// discovers it afterwards.
+	rendition: Option<Rendition<E, BinaryConfig>>,
 }
 
 impl<E: CatalogExt> Stream<E> {
@@ -156,12 +161,16 @@ impl<E: CatalogExt> Stream<E> {
 			moq_binary::stream::ProducerConfig::default().with_compression(config.compression),
 		);
 		rendition.set(config.entry(Mode::Stream));
-		Self { inner, rendition }
+		Self {
+			inner,
+			name: rendition.name().to_string(),
+			rendition: Some(rendition),
+		}
 	}
 
 	/// The track name, which is also the catalog key.
 	pub fn name(&self) -> &str {
-		self.rendition.name()
+		&self.name
 	}
 
 	/// Create a subscriber for the underlying track.
@@ -170,8 +179,20 @@ impl<E: CatalogExt> Stream<E> {
 	}
 
 	/// Append one payload to the log.
+	///
+	/// A payload that cannot be written ends the track (see
+	/// [`moq_binary::stream::Producer::append`]) and retires the catalog entry with it.
 	pub fn append(&mut self, payload: impl Into<Bytes>) -> crate::Result<()> {
-		Ok(self.inner.append(payload)?)
+		let Err(err) = self.inner.append(payload) else {
+			return Ok(());
+		};
+
+		// The inner producer has already closed the track. Dropping the rendition retires the catalog
+		// entry too: waiting for the handle to drop would keep advertising a track that can no longer
+		// accept records, so a consumer discovering it now would subscribe to an already-ended log.
+		self.rendition = None;
+
+		Err(err.into())
 	}
 
 	/// Finish the track and retire its catalog entry.

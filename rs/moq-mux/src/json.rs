@@ -146,7 +146,12 @@ impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
 /// use [`Snapshot`].
 pub struct Stream<T, E: CatalogExt = ()> {
 	inner: moq_json::stream::Producer<T>,
-	rendition: Rendition<E, JsonConfig>,
+	name: String,
+
+	/// Cleared when a terminal failure ends the track, which retires the catalog entry with it. An
+	/// entry advertising a track that can no longer accept records only misleads a consumer that
+	/// discovers it afterwards.
+	rendition: Option<Rendition<E, JsonConfig>>,
 }
 
 impl<T: Serialize, E: CatalogExt> Stream<T, E> {
@@ -160,12 +165,16 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 			moq_json::stream::ProducerConfig::default().with_compression(config.compression),
 		);
 		rendition.set(config.entry(Mode::Stream));
-		Self { inner, rendition }
+		Self {
+			inner,
+			name: rendition.name().to_string(),
+			rendition: Some(rendition),
+		}
 	}
 
 	/// The track name, which is also the catalog key.
 	pub fn name(&self) -> &str {
-		self.rendition.name()
+		&self.name
 	}
 
 	/// Create a subscriber for the underlying track.
@@ -188,6 +197,11 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 		// moq-json has already closed the group it was writing into; closing the track is what stops
 		// the next append from opening a second one.
 		let _ = self.inner.finish();
+
+		// Dropping the rendition retires the catalog entry. Waiting for the handle to drop would keep
+		// advertising a track that can no longer accept records, so a consumer discovering it now
+		// would subscribe to an already-ended log.
+		self.rendition = None;
 
 		Err(err.into())
 	}
