@@ -191,7 +191,8 @@ fn spawn_moq(
 		tasks.spawn(async move { Ok(reconnect.closed().await?) });
 	}
 
-	if let Some(web_bind) = moq.server.bind.clone() {
+	if moq.serves() {
+		let web_bind = moq.server.bind.clone();
 		let server = net.server(moq.server.clone())?;
 		let certificates = server.certificates();
 		moq::notify_ready();
@@ -219,7 +220,9 @@ fn spawn_moq(
 			};
 			Ok(())
 		});
-		tasks.spawn(async move { web::run_web(&web_bind, certificates).await });
+		if let Some(web_bind) = web_bind {
+			tasks.spawn(async move { web::run_web(&web_bind, certificates).await });
+		}
 	}
 
 	Ok(bandwidth)
@@ -594,5 +597,38 @@ mod tests {
 		supervise(&local, pipelines, &mut tasks);
 
 		local.run_until(drive(tasks)).await.unwrap();
+	}
+
+	/// A raw TCP bind is a complete server side even when no QUIC bind is set.
+	#[tokio::test]
+	async fn tcp_only_moq_side_starts_a_server() {
+		let invocation = Invocation::try_parse_from(["moq", "--server-tcp-bind", "127.0.0.1:0", "import", "ts"])
+			.expect("parse TCP-only invocation");
+		let origin = invocation.moq.origin().expect("create origin");
+		let net = Net {
+			#[cfg(feature = "iroh")]
+			iroh: None,
+		};
+		let mut tasks = JoinSet::new();
+
+		spawn_moq(
+			&invocation.moq,
+			&net,
+			&origin,
+			Directions {
+				publish: true,
+				consume: false,
+			},
+			&mut tasks,
+		)
+		.expect("start TCP-only server");
+
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_millis(50), tasks.join_next())
+				.await
+				.is_err(),
+			"the server task should still be accepting connections"
+		);
+		tasks.abort_all();
 	}
 }

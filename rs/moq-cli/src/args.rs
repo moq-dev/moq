@@ -4,9 +4,10 @@
 //! `<import|export> <endpoint> [endpoint opts]`, plus `moq <MoQ side> play` for
 //! native playback.
 //!
-//! - The MoQ side (`--client-connect` / `--server-bind`, both optional, at least
-//!   one) attaches the shared Origin to the MoQ network, and comes before the
-//!   first stage. Both may be given: dial a relay *and* accept incoming sessions.
+//! - The MoQ side (`--client-connect` or one of the `--server-*-bind` options,
+//!   all optional, at least one) attaches the shared Origin to the MoQ network,
+//!   and comes before the first stage. They may be combined to dial a relay and
+//!   accept incoming sessions.
 //! - `import` routes media INTO MoQ from one source; `export` routes it OUT to
 //!   one sink. The verb fixes the data direction (and thus, for the
 //!   bidirectional gateways, whether `--connect`/`--listen` push or pull).
@@ -173,7 +174,7 @@ impl Invocation {
 	}
 }
 
-/// The MoQ attachment. At least one of `--client-connect` / `--server-bind`;
+/// The MoQ attachment. At least one client or server transport must be configured;
 /// both may be given at once.
 ///
 /// The group is not `required`, because the local verbs (`token`, `devices`) run
@@ -206,7 +207,8 @@ pub struct MoqSide {
 	#[command(flatten)]
 	pub client: moq_native::ClientConfig,
 
-	/// MoQ server transport config (`--server-bind`, `--server-tls-*`, `--tls-*`).
+	/// MoQ server transport config (`--server-bind`, `--server-tcp-bind`,
+	/// `--server-unix-bind`, `--server-tls-*`, `--tls-*`).
 	#[command(flatten)]
 	pub server: moq_native::ServerConfig,
 
@@ -228,13 +230,18 @@ impl MoqSide {
 		.produce())
 	}
 
+	/// Whether any inbound server transport is explicitly configured.
+	pub fn serves(&self) -> bool {
+		self.server.has_explicit_bind()
+	}
+
 	/// Reject a verb that needs the MoQ network but was given no way to reach it.
 	/// Stands in for the clap `required` the `moq` group can't carry, since
 	/// `devices` is exempt.
 	pub fn validate(&self) -> anyhow::Result<()> {
 		anyhow::ensure!(
-			self.client.connect.is_some() || self.server.bind.is_some(),
-			"a MoQ side is required: pass --client-connect <url> to dial a relay, or --server-bind <addr> to self-host"
+			self.client.connect.is_some() || self.serves(),
+			"a MoQ side is required: pass --client-connect <url> to dial a relay, or a --server-*-bind option to self-host"
 		);
 		Ok(())
 	}
@@ -250,10 +257,25 @@ impl MoqSide {
 		let ignored = [
 			("--client-connect", self.client.connect.is_some()),
 			("--server-bind", self.server.bind.is_some()),
+			("--server-tcp-bind", self.server.tcp.bind.is_some()),
 			("--broadcast", self.broadcast.is_some()),
 		];
+		let ignored = ignored.into_iter().find(|(_, given)| *given).map(|(flag, _)| flag);
+		#[cfg(unix)]
+		let ignored = ignored
+			.or_else(|| self.server.unix.bind.is_some().then_some("--server-unix-bind"))
+			.or_else(|| {
+				let allow = self.server.unix.allow.as_ref()?;
+				[
+					("--server-unix-allow-uid", !allow.uid.is_empty()),
+					("--server-unix-allow-gid", !allow.gid.is_empty()),
+					("--server-unix-allow-pid", !allow.pid.is_empty()),
+				]
+				.into_iter()
+				.find_map(|(flag, given)| given.then_some(flag))
+			});
 
-		if let Some((flag, _)) = ignored.into_iter().find(|(_, given)| *given) {
+		if let Some(flag) = ignored {
 			anyhow::bail!("`{command}` runs locally and takes no MoQ side; drop {flag}");
 		}
 
@@ -537,6 +559,28 @@ mod tests {
 		assert_eq!(cli.stages.len(), 1);
 		assert_eq!(cli.stages[0].name(), "import");
 		assert!(cli.validate().is_ok());
+	}
+
+	#[test]
+	fn tcp_only_listener_is_a_moq_side() {
+		let cli =
+			Invocation::try_parse_from(["moq", "--server-tcp-bind", "127.0.0.1:0", "import", "ts"]).expect("parse");
+		assert!(cli.moq.validate().is_ok());
+		assert!(cli.moq.serves());
+		assert_eq!(cli.moq.server.tcp.bind, Some("127.0.0.1:0".parse().unwrap()));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn unix_only_listener_is_a_moq_side() {
+		let cli = Invocation::try_parse_from(["moq", "--server-unix-bind", "/tmp/moq-cli.sock", "export", "ts"])
+			.expect("parse");
+		assert!(cli.moq.validate().is_ok());
+		assert!(cli.moq.serves());
+		assert_eq!(
+			cli.moq.server.unix.bind.as_deref(),
+			Some(std::path::Path::new("/tmp/moq-cli.sock"))
+		);
 	}
 
 	/// The grammar clap can't express: one connection, several endpoints.
@@ -868,7 +912,20 @@ mod tests {
 		// ...these it refuses, rather than accepting the flag and ignoring it.
 		for flag in [
 			["--client-connect", "https://relay.example.com"],
+			["--server-tcp-bind", "127.0.0.1:0"],
 			["--broadcast", "room"],
+		] {
+			let cli = Cli::try_parse_from(["moq", flag[0], flag[1], "token", "generate"]).unwrap();
+			let err = cli.moq.reject("token").unwrap_err().to_string();
+			assert!(err.contains(flag[0]), "{err}");
+		}
+
+		#[cfg(unix)]
+		for flag in [
+			["--server-unix-bind", "/tmp/moq-cli.sock"],
+			["--server-unix-allow-uid", "1000"],
+			["--server-unix-allow-gid", "1000"],
+			["--server-unix-allow-pid", "1000"],
 		] {
 			let cli = Cli::try_parse_from(["moq", flag[0], flag[1], "token", "generate"]).unwrap();
 			let err = cli.moq.reject("token").unwrap_err().to_string();
