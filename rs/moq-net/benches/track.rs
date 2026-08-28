@@ -11,7 +11,7 @@ use std::task::Poll;
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::{Timestamp, broadcast, track};
+use moq_net::{Timestamp, broadcast, cache, track};
 
 /// Fanout sizes spanning a direct viewer, a small room, and a large room.
 const FANOUT: [usize; 4] = [1, 8, 64, 512];
@@ -19,26 +19,36 @@ const FANOUT: [usize; 4] = [1, 8, 64, 512];
 /// Small shared payload so the benchmark measures model overhead, not allocation.
 const PAYLOAD: usize = 64;
 
+/// Small enough to reach steady-state eviction during Criterion warm-up.
+const CACHE_CAPACITY: u64 = 64 * 1024;
+
 /// Keeps the ownership chain alive around the track and its subscribers.
 struct Fanout {
 	_broadcast: broadcast::Producer,
 	track: track::Producer,
 	subscribers: Vec<track::Subscriber>,
-	waiter: kio::Waiter,
+	waiters: Vec<kio::Waiter>,
 	payload: Bytes,
 }
 
 impl Fanout {
 	fn new(subscribers: usize) -> Self {
-		let mut broadcast = broadcast::Producer::new(broadcast::Info::default());
+		let mut info = broadcast::Info::default();
+		info.origin.pool = cache::Pool::new(CACHE_CAPACITY);
+		let mut broadcast = broadcast::Producer::new(info);
 		let track = broadcast.create_track("bench", None).unwrap();
-		let subscribers = (0..subscribers).map(|_| track.subscribe(None)).collect();
+		let mut subscribers: Vec<_> = (0..subscribers).map(|_| track.subscribe(None)).collect();
+		let waiters: Vec<_> = (0..subscribers.len()).map(|_| kio::Waiter::noop()).collect();
+
+		for (subscriber, waiter) in subscribers.iter_mut().zip(&waiters) {
+			assert!(matches!(subscriber.poll_recv_group(waiter), Poll::Pending));
+		}
 
 		Self {
 			_broadcast: broadcast,
 			track,
 			subscribers,
-			waiter: kio::Waiter::noop(),
+			waiters,
 			payload: Bytes::from(vec![0; PAYLOAD]),
 		}
 	}
@@ -49,12 +59,13 @@ impl Fanout {
 		group.write_frame(Timestamp::ZERO, self.payload.clone()).unwrap();
 		group.finish().unwrap();
 
-		for subscriber in &mut self.subscribers {
-			let group = match subscriber.poll_recv_group(&self.waiter) {
+		for (subscriber, waiter) in self.subscribers.iter_mut().zip(&self.waiters) {
+			let group = match subscriber.poll_recv_group(waiter) {
 				Poll::Ready(Ok(Some(group))) => group,
 				_ => unreachable!("a completed group must be ready"),
 			};
 			black_box(group);
+			assert!(matches!(subscriber.poll_recv_group(waiter), Poll::Pending));
 		}
 	}
 }

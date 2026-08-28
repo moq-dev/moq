@@ -49,7 +49,7 @@ CRITERION_ARGS=(
 criterion_targets() {
     local checkout=$1
     (
-        cd "$checkout"
+        cd "$checkout" || exit 1
         cargo metadata --locked --format-version 1 --no-deps |
             jq -r '
                 .packages[] as $package
@@ -80,7 +80,7 @@ run_criterion() {
         return 1
     fi
     (
-        cd "$checkout"
+        cd "$checkout" || exit 1
         cargo bench --locked "${targets[@]}" -- "${CRITERION_ARGS[@]}" "$@"
     )
 }
@@ -91,7 +91,7 @@ run_criterion_target() {
     local target=$3
     shift 3
     (
-        cd "$checkout"
+        cd "$checkout" || exit 1
         cargo bench --locked --package "$package" --bench "$target" -- \
             "${CRITERION_ARGS[@]}" "$@"
     )
@@ -112,7 +112,7 @@ criterion_cases() {
     fi
     while IFS=$'\t' read -r package target; do
         if ! (
-            cd "$checkout"
+            cd "$checkout" || exit 1
             cargo bench --locked --package "$package" --bench "$target" -- --list
         ) | sed -n 's/: benchmark$//p' >"$listing"; then
             return 1
