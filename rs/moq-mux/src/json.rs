@@ -178,29 +178,25 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 	}
 
 	/// Create a subscriber for the underlying track.
+	///
+	/// Still hands one back once a failed write has ended the log: the subscriber surfaces the abort
+	/// on its first read.
 	pub fn consume(&self) -> moq_net::track::Subscriber {
 		self.inner.consume()
 	}
 
 	/// Append one record to the log.
 	///
-	/// A record that cannot be written ends the track. [`moq_json::stream`] recovers from a failed
-	/// write by rolling a fresh group, but a catalog [`Mode::Stream`] track is a single group: a log
-	/// missing a record is not the lossless log the mode promises, and a second group would present
-	/// that gap as a complete log to a subscriber that joins afterwards. Every later append then
-	/// fails on the closed track.
+	/// Any failure ends the track (see [`moq_json::stream::Producer::append`]) and retires the
+	/// catalog entry with it.
 	pub fn append(&mut self, value: &T) -> crate::Result<()> {
 		let Err(err) = self.inner.append(value) else {
 			return Ok(());
 		};
 
-		// moq-json has already closed the group it was writing into; closing the track is what stops
-		// the next append from opening a second one.
-		let _ = self.inner.finish();
-
-		// Dropping the rendition retires the catalog entry. Waiting for the handle to drop would keep
-		// advertising a track that can no longer accept records, so a consumer discovering it now
-		// would subscribe to an already-ended log.
+		// The inner producer has already ended the track. Dropping the rendition retires the catalog
+		// entry: waiting for the handle to drop would keep advertising a track that can no longer
+		// accept records, so a consumer discovering it now would subscribe to an already-ended log.
 		self.rendition = None;
 
 		Err(err.into())
@@ -487,6 +483,39 @@ mod test {
 
 		assert_eq!(consumer.next().await.unwrap(), Some(json!({ "text": "hello" })));
 		assert_eq!(consumer.next().await.unwrap(), None);
+	}
+
+	/// A value that fails to serialize never reaches the track, but the log is missing it all the
+	/// same, so it is as terminal as a rejected write. The entry and the track have to agree: retiring
+	/// the entry while leaving the track writable would let a later valid record land somewhere no
+	/// consumer could discover.
+	#[test]
+	fn an_unserializable_record_ends_the_track_and_the_entry() {
+		struct Record(bool);
+
+		impl Serialize for Record {
+			fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+				match self.0 {
+					true => Err(serde::ser::Error::custom("cannot serialize")),
+					false => serializer.serialize_u8(0),
+				}
+			}
+		}
+
+		let (_broadcast, catalog) = catalog();
+		let mut chat = catalog.json_stream::<Record>("chat", Config::default()).unwrap();
+		let mut track = chat.consume();
+
+		assert!(chat.append(&Record(true)).is_err());
+		assert!(!catalog.snapshot().json.tracks.contains_key("chat"));
+
+		assert!(
+			chat.append(&Record(false)).is_err(),
+			"a record after the failure would land on a track the retired entry no longer advertises"
+		);
+
+		let waiter = kio::Waiter::noop();
+		assert!(matches!(track.poll_recv_group(&waiter), Poll::Ready(Err(_))));
 	}
 
 	/// A consumer that can't tell a log from a latest-value document would silently drop records,

@@ -44,24 +44,19 @@ impl Producer {
 	pub fn new(track: moq_net::track::Producer, config: ProducerConfig) -> Self {
 		Self {
 			inner: Arc::new(Mutex::new(Inner {
-				track: Some(track),
+				track,
 				group: None,
 				flate: config.compression.then(moq_flate::Encoder::new),
 			})),
 		}
 	}
 
-	/// Create a subscriber for the underlying track, or `None` once a failed write has aborted it.
+	/// Create a subscriber for the underlying track.
 	///
-	/// A cleanly finished track still yields a subscriber: the log is complete and readable. Only an
-	/// abort takes the track away, and at that point there is nothing coherent to subscribe to.
-	pub fn consume(&self) -> Option<moq_net::track::Subscriber> {
-		self.inner
-			.lock()
-			.unwrap()
-			.track
-			.as_ref()
-			.map(|track| track.subscribe(None))
+	/// Still hands one back once a failed write has ended the log: the subscriber surfaces the abort
+	/// on its first read, which is what tells a late reader the log is truncated.
+	pub fn consume(&self) -> moq_net::track::Subscriber {
+		self.inner.lock().unwrap().track.subscribe(None)
 	}
 
 	/// Whether any consumer for the underlying track currently exists.
@@ -69,11 +64,12 @@ impl Producer {
 	/// The demand signal for a producer serving on request: an unused track is cached state nobody is
 	/// watching, safe to drop and recreate on the next request.
 	pub fn is_used(&self) -> bool {
-		match self.inner.lock().unwrap().track.as_mut() {
-			Some(track) => track.poll_unused(&kio::Waiter::noop()).is_pending(),
-			// An aborted track has no readers and can never gain one.
-			None => false,
-		}
+		self.inner
+			.lock()
+			.unwrap()
+			.track
+			.poll_unused(&kio::Waiter::noop())
+			.is_pending()
 	}
 
 	/// Append one payload to the log.
@@ -94,9 +90,7 @@ impl Producer {
 
 /// Shared publishing state behind [`Producer`]'s `Arc<Mutex>`.
 struct Inner {
-	/// `None` once a failed write has aborted the track, which is terminal. A clean finish keeps it,
-	/// since a completed log is still readable.
-	track: Option<moq_net::track::Producer>,
+	track: moq_net::track::Producer,
 
 	/// Opened on the first append and never rolled.
 	group: Option<moq_net::group::Producer>,
@@ -119,8 +113,7 @@ impl Inner {
 		// Open the group before compressing: a failure here must not leave the window ahead of a
 		// consumer that never received the frame.
 		if self.group.is_none() {
-			let track = self.track.as_mut().ok_or(moq_net::Error::Cancel)?;
-			self.group = Some(track.append_group()?);
+			self.group = Some(self.track.append_group()?);
 		}
 
 		let payload = match self.flate.as_mut() {
@@ -151,9 +144,11 @@ impl Inner {
 	fn abort(&mut self, err: moq_net::Error) {
 		// The track abort closes its groups, so the handle only needs dropping.
 		self.group = None;
-		if let Some(track) = self.track.take() {
-			let _ = track.abort(err);
-		}
+
+		// Abort through a clone, since aborting consumes a handle and the state is shared. Keeping
+		// ours means `consume` still hands back a subscriber, which is how a reader learns the log
+		// ended badly rather than cleanly.
+		let _ = self.track.clone().abort(err);
 	}
 
 	fn finish(&mut self) -> Result<()> {
@@ -165,10 +160,7 @@ impl Inner {
 			Some(mut group) => group.finish(),
 			None => Ok(()),
 		};
-		let track = match self.track.as_mut() {
-			Some(track) => track.finish(),
-			None => Ok(()),
-		};
+		let track = self.track.finish();
 
 		group?;
 		track?;
