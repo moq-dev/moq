@@ -65,12 +65,16 @@ criterion_targets() {
 run_criterion() {
     local checkout=$1
     local package target
+    local target_list=$RUN/criterion-targets
     local -a targets
     shift
+    if ! criterion_targets "$checkout" >"$target_list"; then
+        return 1
+    fi
     targets=()
     while IFS=$'\t' read -r package target; do
         targets+=(--package "$package" --bench "$target")
-    done < <(criterion_targets "$checkout")
+    done <"$target_list"
     if ((${#targets[@]} == 0)); then
         printf 'no Criterion benchmark targets found\n' >&2
         return 1
@@ -96,17 +100,31 @@ run_criterion_target() {
 criterion_cases() {
     local checkout=$1
     local package target benchmark
+    local listing=$RUN/criterion-listing
+    local target_list=$RUN/criterion-targets
 
+    if ! criterion_targets "$checkout" >"$target_list"; then
+        return 1
+    fi
+    if [[ ! -s $target_list ]]; then
+        printf 'no Criterion benchmark targets found\n' >&2
+        return 1
+    fi
     while IFS=$'\t' read -r package target; do
+        if ! (
+            cd "$checkout"
+            cargo bench --locked --package "$package" --bench "$target" -- --list
+        ) | sed -n 's/: benchmark$//p' >"$listing"; then
+            return 1
+        fi
+        if [[ ! -s $listing ]]; then
+            printf 'Criterion target has no benchmark cases: %s/%s\n' "$package" "$target" >&2
+            return 1
+        fi
         while IFS= read -r benchmark; do
             printf '%s\t%s\t%s\n' "$package" "$target" "$benchmark"
-        done < <(
-            (
-                cd "$checkout"
-                cargo bench --locked --package "$package" --bench "$target" -- --list
-            ) | sed -n 's/: benchmark$//p'
-        )
-    done < <(criterion_targets "$checkout")
+        done <"$listing"
+    done <"$target_list"
 }
 
 compare_criterion() {
