@@ -30,6 +30,7 @@ default:
 check *args:
     just rs _select-test
     just rs _publish-test
+    just rs _doc-names-test
     cargo clippy --locked --all-targets {{ args }} -- -D warnings
     cargo fmt --all --check
     just rs _doc-names
@@ -43,27 +44,19 @@ check *args:
 # which rustdoc process gets there first. That reads as a flake, and because the doc
 # pass above is diff-scoped it surfaces on whichever unrelated PR happens to select
 # both crates. Resolve a pair by setting `doc = false` on whichever target has no
-# published API to render (usually the binary), which is what `.doc` reads here.
+# published API to render (usually the binary).
 #
-# Metadata only, so this costs no compilation and can sit in the PR gate.
-_doc-names:
+# Metadata only, so this costs no compilation and can sit in the PR gate. Takes an
+# optional metadata file so `_doc-names-test` can feed it synthetic workspaces.
+_doc-names metadata="":
     #!/usr/bin/env bash
     set -euo pipefail
 
-    collisions=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '
-        [ .packages[]
-          | .name as $package
-          | .targets[]
-          | select(.doc)
-          | select([.kind[]] | any(. == "lib" or . == "rlib" or . == "dylib"
-              or . == "cdylib" or . == "staticlib" or . == "proc-macro" or . == "bin"))
-          | { dir: (.name | gsub("-"; "_")), package: $package, target: .name, kind: .kind[0] }
-        ]
-        | group_by(.dir)
-        | map(select(length > 1))
-        | .[]
-        | "  target/doc/\(.[0].dir) <- " + (map("\(.package) [\(.kind)] \(.target)") | join(" and "))
-    ')
+    if [[ -n "{{ metadata }}" ]]; then
+        collisions=$(jq -r -f rs/scripts/doc-names.jq < "{{ metadata }}")
+    else
+        collisions=$(cargo metadata --locked --no-deps --format-version 1 | jq -r -f rs/scripts/doc-names.jq)
+    fi
 
     if [[ -n "$collisions" ]]; then
         echo "rs: these targets render to the same doc directory:" >&2
@@ -71,6 +64,45 @@ _doc-names:
         echo "set doc = false on whichever has no published API." >&2
         exit 1
     fi
+
+# Both directions of `_doc-names`, since the interesting half is what it must NOT
+# report: cargo documents only the library when a binary shares its own package's
+# name, so flagging that would reject the conventional src/lib.rs + src/main.rs layout.
+_doc-names-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    scratch=$(mktemp -d)
+    trap 'rm -rf "$scratch"' EXIT
+
+    # Same package, same name: cargo suppresses the bin, so this must pass.
+    cat > "$scratch/ok.json" <<'JSON'
+    {"packages":[{"name":"solo","targets":[
+      {"name":"solo","kind":["lib"],"doc":true},
+      {"name":"solo","kind":["bin"],"doc":true}]}]}
+    JSON
+    just rs _doc-names "$scratch/ok.json"
+
+    # Different packages: a real collision, must be reported.
+    cat > "$scratch/bad.json" <<'JSON'
+    {"packages":[
+      {"name":"a-lib","targets":[{"name":"shared_name","kind":["lib"],"doc":true}]},
+      {"name":"b-cli","targets":[{"name":"shared-name","kind":["bin"],"doc":true}]}]}
+    JSON
+    if just rs _doc-names "$scratch/bad.json" 2>/dev/null; then
+        echo "rs: _doc-names missed a cross-package collision" >&2
+        exit 1
+    fi
+
+    # `doc = false` is how a pair gets resolved, so it must stop being reported.
+    cat > "$scratch/fixed.json" <<'JSON'
+    {"packages":[
+      {"name":"a-lib","targets":[{"name":"shared_name","kind":["lib"],"doc":true}]},
+      {"name":"b-cli","targets":[{"name":"shared-name","kind":["bin"],"doc":false}]}]}
+    JSON
+    just rs _doc-names "$scratch/fixed.json"
+
+    echo "rs: _doc-names ok"
 
 # Auto-fix clippy/format/shear/sort.
 fix *args:
