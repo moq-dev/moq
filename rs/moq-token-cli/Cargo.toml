@@ -20,6 +20,11 @@ path = "src/lib.rs"
 [[bin]]
 name = "moq-token"
 path = "src/main.rs"
+# The `moq-token` library renders to the same `target/doc/moq_token`, and the two
+# rustdoc processes race to clean it. The library is the published API consumers
+# read; this binary has none, so it is the page to give up. `just rs _doc-names`
+# fails if a new pair ever collides.
+doc = false
 
 [dependencies]
 anyhow = { workspace = true }

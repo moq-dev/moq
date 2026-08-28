@@ -32,9 +32,45 @@ check *args:
     just rs _publish-test
     cargo clippy --locked --all-targets {{ args }} -- -D warnings
     cargo fmt --all --check
+    just rs _doc-names
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps {{ args }}
     cargo shear
     cargo sort --workspace --check --no-format
+
+# Two targets whose names differ only by `-` vs `_` render to the same
+# `target/doc/<name>`, and a `cargo doc` that selects both races to clean it: the
+# collision warning escalates to `error: failed to remove directory` depending on
+# which rustdoc process gets there first. That reads as a flake, and because the doc
+# pass above is diff-scoped it surfaces on whichever unrelated PR happens to select
+# both crates. Resolve a pair by setting `doc = false` on whichever target has no
+# published API to render (usually the binary), which is what `.doc` reads here.
+#
+# Metadata only, so this costs no compilation and can sit in the PR gate.
+_doc-names:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    collisions=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '
+        [ .packages[]
+          | .name as $package
+          | .targets[]
+          | select(.doc)
+          | select([.kind[]] | any(. == "lib" or . == "rlib" or . == "dylib"
+              or . == "cdylib" or . == "staticlib" or . == "proc-macro" or . == "bin"))
+          | { dir: (.name | gsub("-"; "_")), package: $package, target: .name, kind: .kind[0] }
+        ]
+        | group_by(.dir)
+        | map(select(length > 1))
+        | .[]
+        | "  target/doc/\(.[0].dir) <- " + (map("\(.package) [\(.kind)] \(.target)") | join(" and "))
+    ')
+
+    if [[ -n "$collisions" ]]; then
+        echo "rs: these targets render to the same doc directory:" >&2
+        echo "$collisions" >&2
+        echo "set doc = false on whichever has no published API." >&2
+        exit 1
+    fi
 
 # Auto-fix clippy/format/shear/sort.
 fix *args:
