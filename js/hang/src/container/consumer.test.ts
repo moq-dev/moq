@@ -344,7 +344,7 @@ test("Consumer delivers groups in sequence order regardless of arrival order", a
 	consumer.close();
 });
 
-test("Consumer rejects stale groups", async () => {
+test("Consumer delivers a group that arrives below the cursor", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat(), latency: 500 as Time.Milli });
 
@@ -352,18 +352,18 @@ test("Consumer rejects stale groups", async () => {
 	writeGroupWithLegacyFrames(track, 5, [0 as Time.Micro]);
 	await new Promise((resolve) => setTimeout(resolve, 50));
 
-	// Group.Producer 3 is stale
+	// Group.Producer 3 lands behind it, and Group.Producer 6 ahead of it. Arriving below the
+	// cursor is not what makes content stale: how far behind the live edge a group may be is
+	// the subscription's own max age, which `replay` deliberately opens wide here. So all
+	// three are handed over, in sequence order, since delivery has not passed any of them yet.
 	writeGroupWithLegacyFrames(track, 3, [100_000 as Time.Micro]);
-	// Group.Producer 6 is valid
 	writeGroupWithLegacyFrames(track, 6, [30_000 as Time.Micro]);
 	track.close();
 
 	await new Promise((resolve) => setTimeout(resolve, 100));
 
 	const frames = await drainFrames(consumer, 500);
-	expect(frames).toHaveLength(2);
-	expect(frames[0].group).toBe(5);
-	expect(frames[1].group).toBe(6);
+	expect(frames.map((frame) => frame.group)).toEqual([3, 5, 6]);
 	consumer.close();
 });
 

@@ -310,10 +310,6 @@ export class Decoder {
 		const consumer = new Container.Consumer(sub, {
 			format,
 			latency: this.#consumerLatency,
-			// The ring places samples by timestamp, so a group that arrives below the delivery
-			// cursor still lands in its own slot. That is how the head a publisher serves ahead
-			// of the live edge survives being sent after it (groups go newest-first).
-			outOfOrder: true,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -419,8 +415,6 @@ export class Decoder {
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
 			latency: this.#consumerLatency,
-			// See #runLegacyDecoder: the ring is timestamp indexed, so a late group is usable.
-			outOfOrder: true,
 		});
 		effect.cleanup(() => consumer.close());
 
