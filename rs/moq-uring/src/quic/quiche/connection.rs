@@ -251,9 +251,13 @@ pub struct Connection {
 }
 
 impl Connection {
-	/// The shared connection state, for the WebTransport layer on top.
-	pub(crate) fn shared(&self) -> &Shared {
-		&self.shared
+	/// Close the connection with a full-width application code.
+	///
+	/// The [`web_transport_trait::poll::Session::close`] surface narrows codes
+	/// to `u32`; the WebTransport layer maps its codes into HTTP/3's error
+	/// space, which needs the whole varint range.
+	pub(crate) fn close_code(&self, code: u64, reason: &str) {
+		self.shared.close_code(code, reason);
 	}
 
 	/// The peer's certificate chain in DER, leaf first, or `None` if it

@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 
-use super::{Connection, Error, Identity, Trust};
+use super::{Connection, Error, Identity};
 use crate::{Handle, udp};
 
 /// Where to dial, as whom, and who to trust.
@@ -45,25 +45,6 @@ impl Config {
 			identity: None,
 			transport: super::Transport::default(),
 		}
-	}
-
-	pub(crate) fn quiche(&self) -> Result<quiche::Config, Error> {
-		// Nothing is checked with verification off, so nothing is loaded: a
-		// root path that does not exist must not fail a connection that was
-		// never going to look at it.
-		let trust = match self.verify {
-			true => Trust {
-				roots: self.roots.clone(),
-				system: self.system_roots,
-				verify: boring::ssl::SslVerifyMode::PEER,
-			},
-			false => Trust {
-				roots: Vec::new(),
-				system: false,
-				verify: boring::ssl::SslVerifyMode::NONE,
-			},
-		};
-		super::tls(&self.alpn, self.identity.as_ref(), trust, &self.transport)
 	}
 }
 

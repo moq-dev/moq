@@ -301,9 +301,16 @@ windows *args:
 # Compile and test the io_uring relay path, which is off the default feature
 # set (quiche links BoringSSL, and a default relay build has no use for it).
 # Linux-only, and the tests below the 6.12 kernel floor skip themselves.
+#
+# The second pair is the same suite over the other QUIC backend. moq-uring
+# compiles exactly one, so quinn gets its own invocation rather than another
+# feature on the first: pulling moq-relay in would unify the two back to the
+# default.
 uring *args:
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }} -- -D warnings
     cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets {{ args }}
+    cargo clippy --locked -p moq-uring --no-default-features --features quinn --all-targets {{ args }} -- -D warnings
+    cargo nextest run --locked -p moq-uring --no-default-features --features quinn --all-targets {{ args }}
 
 # Runs the `#[cfg(target_os = "macos")]` code past the compiler: moq-video's
 # VideoToolbox encode/decode and its ScreenCaptureKit / AVFoundation capture,

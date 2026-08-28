@@ -21,9 +21,9 @@ the UDP sockets bound through it.
 - **Parking**: a futex word per worker. Remote wakes are an atomic store, plus
   one `futex(2)` wake only while the worker is actually parked (a `FUTEX_WAIT`
   SQE armed on the word).
-- **QUIC**: sans-IO quiche over that UDP path. A `quic::Endpoint` serves many
-  connections on one socket, demuxed by connection id (dials share the socket
-  with accepts, ids rotate as peers consume them, unknown versions get a
+- **QUIC**: a sans-IO QUIC stack over that UDP path. A `quic::Endpoint` serves
+  many connections on one socket, demuxed by connection id (dials share the
+  socket with accepts, ids rotate as peers consume them, unknown versions get a
   version negotiation packet). Native peers speak raw QUIC: the ALPN carries
   the application protocol.
 - **WebTransport**: browsers negotiate `h3` and `quic::web::Request` runs the
@@ -43,7 +43,30 @@ error rather than degrading (note that default container seccomp policies
 block io\_uring entirely). There is no fallback here: older kernels keep using
 the tokio stack.
 
+## Backends
+
+The sans-IO QUIC stack behind `quic` is a build-time choice, and exactly one of
+them is compiled:
+
+| Feature | Stack | TLS |
+|---|---|---|
+| `quiche` (default) | [quiche](https://github.com/cloudflare/quiche) | BoringSSL, which needs cmake and a C++ toolchain to build |
+| `quinn` | [quinn-proto](https://github.com/quinn-rs/quinn) | rustls, the stack the rest of this workspace already links |
+
+Nothing above the module changes: the same `quic::{Endpoint, Connection,
+SendStream, RecvStream}`, the same WebTransport layer, the same tests. A build
+asking for both (`--all-features`) gets `quinn`, and a build asking for
+neither leaves the `quic` module out entirely, keeping the worker, its timers,
+and `udp::Socket`.
+
+```bash
+cargo test -p moq-uring --no-default-features --features quinn
+```
+
 ## Validation
+
+Every test runs against whichever backend is compiled, so the suite is the
+parity check between the two.
 
 `tests/echo.rs` runs a raw [quiche](https://github.com/cloudflare/quiche) echo
 over the worker: handshake, half a megabyte each way, timers driven by

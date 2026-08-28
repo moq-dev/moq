@@ -120,8 +120,7 @@ impl Guard {
 impl Drop for Guard {
 	fn drop(&mut self) {
 		if let Some(conn) = self.conn.take() {
-			conn.shared()
-				.close_code(H3_GENERAL_PROTOCOL_ERROR, "webtransport handshake abandoned");
+			conn.close_code(H3_GENERAL_PROTOCOL_ERROR, "webtransport handshake abandoned");
 		}
 	}
 }
@@ -142,7 +141,7 @@ impl Request {
 		match Self::handshake(handle, conn).await {
 			Ok(request) => Ok(request),
 			Err(err) => {
-				failed.shared().close_code(H3_GENERAL_PROTOCOL_ERROR, &err.to_string());
+				failed.close_code(H3_GENERAL_PROTOCOL_ERROR, &err.to_string());
 				Err(err)
 			}
 		}
@@ -326,7 +325,7 @@ impl Request {
 		// The peer has the response, so this close is the deliberate one; the
 		// guard's abrupt `H3_GENERAL_PROTOCOL_ERROR` would have raced it out.
 		self.guard.disarm();
-		self.conn.shared().close_code(H3_NO_ERROR, "");
+		self.conn.close_code(H3_NO_ERROR, "");
 		Ok(())
 	}
 }
@@ -713,7 +712,7 @@ impl web_transport_trait::poll::Session for Session {
 		let connect_send = web.state.borrow_mut().connect_send.take();
 		let http3 = proto::error_to_http3(code);
 		let Some(mut send) = connect_send else {
-			self.conn.shared().close_code(http3, reason);
+			self.conn.close_code(http3, reason);
 			return;
 		};
 
@@ -765,7 +764,7 @@ impl web_transport_trait::poll::Session for Session {
 				deadline.poll(waiter)
 			})
 			.await;
-			conn.shared().close_code(http3, &reason);
+			conn.close_code(http3, &reason);
 		});
 	}
 
@@ -824,7 +823,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 		// left for a payload; the inner stream refuses a post-FIN write the
 		// same way.
 		if self.finishing {
-			return Poll::Ready(Err(Error::Quic(quiche::Error::FinalSize)));
+			return Poll::Ready(Err(Error::Quic("stream already finished".to_string())));
 		}
 		while !self.prefix.is_empty() {
 			let n = ready!(web_transport_trait::poll::SendStream::poll_write(
@@ -1347,10 +1346,10 @@ async fn read_capsules(web: Rc<Web>, conn: Connection, mut recv: super::RecvStre
 				code: u64::from(code),
 				reason: reason.clone(),
 			});
-			conn.shared().close_code(proto::error_to_http3(code), &reason);
+			conn.close_code(proto::error_to_http3(code), &reason);
 		}
 		// The CONNECT stream ending closes the session with no error.
-		None => conn.shared().close_code(proto::error_to_http3(0), ""),
+		None => conn.close_code(proto::error_to_http3(0), ""),
 	}
 }
 

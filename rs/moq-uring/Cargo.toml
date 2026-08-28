@@ -12,8 +12,19 @@ rust-version.workspace = true
 keywords = ["quic", "io-uring", "networking", "linux"]
 categories = ["asynchronous", "network-programming", "os::linux-apis"]
 
+[features]
+# The sans-IO QUIC stack behind `quic`. Exactly one is compiled: a build that
+# somehow asks for both (`--all-features`) gets `quinn`.
+default = ["quiche"]
+# Cloudflare's quiche, with TLS through BoringSSL. Building that needs cmake
+# and a C++ toolchain.
+quiche = ["dep:boring", "dep:quiche"]
+# quinn-proto, with TLS through rustls, which is what the rest of this
+# workspace speaks. No second TLS stack to build or ship.
+quinn = ["dep:quinn-proto", "dep:rustls", "dep:rustls-platform-verifier"]
+
 [target.'cfg(target_os = "linux")'.dependencies]
-boring = "4.22"
+boring = { version = "4.22", optional = true }
 bytes = "1"
 http = "1"
 io-uring = { workspace = true }
@@ -21,8 +32,15 @@ kio = { workspace = true }
 libc = { workspace = true }
 moq-net = { workspace = true }
 moq-sock = { workspace = true }
-quiche = "0.29"
+quiche = { version = "0.29", optional = true }
+# default-features off so the crypto provider is ours to pick, matching how
+# moq-tokio wires its quinn dependency.
+quinn-proto = { version = "0.11", default-features = false, features = ["bloom", "log", "rustls-aws-lc-rs"], optional = true }
 rand = "0.10"
+rustls = { version = "0.23", optional = true }
+# OS-native server-cert verifier for the quinn backend. Version matched to the
+# copy moq-tokio pulls in, to avoid duplication.
+rustls-platform-verifier = { version = "0.7", optional = true }
 slab = "0.4"
 thiserror = "2"
 tracing = "0.1"
@@ -41,6 +59,9 @@ libc = { workspace = true }
 moq-tokio = { workspace = true, features = ["quinn", "aws-lc-rs"] }
 nix = { workspace = true }
 noq-udp = { workspace = true }
+# The raw peer the endpoint and WebTransport tests drive, whichever backend is
+# under test.
+quiche = "0.29"
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
 rustls = "0.23"
 tempfile = { workspace = true }

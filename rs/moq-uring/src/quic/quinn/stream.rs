@@ -1,20 +1,22 @@
-//! Stream handles: thin, direct calls into the shared quiche connection.
+//! Stream handles: thin, direct calls into the shared quinn-proto connection.
 //!
-//! Single-threaded sans-IO means a write goes straight into quiche's send
+//! Single-threaded sans-IO means a write goes straight into quinn's send
 //! queue (no staging copy) and a read comes straight out of its reassembly
 //! buffer; the handles just kick the driver so egress reaches the wire and
 //! park on the per-stream waiter lists the driver wakes.
 
 use std::task::{Context, Poll};
 
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
+use quinn_proto::{StreamId, VarInt};
 
-use super::{Error, Shared};
+use super::super::Error;
+use super::Shared;
 
 /// An outgoing stream. Dropping it unfinished resets it with code 0.
 pub struct SendStream {
 	shared: Shared,
-	id: u64,
+	id: StreamId,
 	park: kio::Park,
 	/// The FIN went out; further writes are refused and `poll_closed` waits
 	/// for the acknowledgement.
@@ -24,7 +26,7 @@ pub struct SendStream {
 }
 
 impl SendStream {
-	pub(crate) fn new(shared: Shared, id: u64) -> Self {
+	pub(crate) fn new(shared: Shared, id: StreamId) -> Self {
 		Self {
 			shared,
 			id,
@@ -36,7 +38,7 @@ impl SendStream {
 
 	/// The QUIC stream id, which the WebTransport layer uses as the session id.
 	pub(crate) fn id(&self) -> u64 {
-		self.id
+		self.id.into()
 	}
 
 	/// Whether the send side is already terminated, so [`Drop`] would do
@@ -46,7 +48,7 @@ impl SendStream {
 		self.fin || self.reset
 	}
 
-	/// Queue as much of `buf` as quiche will take right now, without parking.
+	/// Queue as much of `buf` as quinn will take right now, without parking.
 	/// Best-effort, for the close path where nobody is left to poll.
 	pub(crate) fn try_write(&mut self, buf: &[u8]) -> usize {
 		if self.fin || self.reset {
@@ -56,7 +58,8 @@ impl SendStream {
 			.shared
 			.conn
 			.borrow_mut()
-			.stream_send(self.id, buf, false)
+			.send_stream(self.id)
+			.write(buf)
 			.unwrap_or(0);
 		if n > 0 {
 			self.shared.kick();
@@ -70,11 +73,13 @@ impl SendStream {
 		if self.reset {
 			return;
 		}
+		// Err means the stream is already gone, which is what we wanted.
 		let _ = self
 			.shared
 			.conn
 			.borrow_mut()
-			.stream_shutdown(self.id, quiche::Shutdown::Write, code);
+			.send_stream(self.id)
+			.reset(VarInt::from_u64(code).unwrap_or(VarInt::MAX));
 		self.reset = true;
 		self.shared.kick();
 	}
@@ -86,53 +91,56 @@ impl web_transport_trait::poll::SendStream for SendStream {
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		let waiter = self.park.hold(cx);
 		if self.fin || self.reset {
-			return Poll::Ready(Err(Error::Quic(quiche::Error::FinalSize)));
+			return Poll::Ready(Err(Error::Quic("stream already finished".to_string())));
 		}
 		if let Some(err) = self.shared.closed() {
 			return Poll::Ready(Err(err));
 		}
-		let result = self.shared.conn.borrow_mut().stream_send(self.id, buf, false);
+		let result = self.shared.conn.borrow_mut().send_stream(self.id).write(buf);
 		match result {
-			Ok(n) if n > 0 || buf.is_empty() => {
+			Ok(n) => {
 				self.shared.kick();
 				Poll::Ready(Ok(n))
 			}
-			// No capacity right now; the driver wakes us when quiche reports
+			// No capacity right now; the driver wakes us when quinn reports
 			// the stream writable.
-			Ok(_) | Err(quiche::Error::Done) => {
+			Err(quinn_proto::WriteError::Blocked) => {
 				self.shared.park_writable(self.id, waiter);
 				Poll::Pending
 			}
-			Err(quiche::Error::StreamStopped(code)) => Poll::Ready(Err(Error::Stop(code))),
-			Err(err) => Poll::Ready(Err(err.into())),
+			Err(quinn_proto::WriteError::Stopped(code)) => Poll::Ready(Err(Error::Stop(code.into_inner()))),
+			Err(quinn_proto::WriteError::ClosedStream) => {
+				Poll::Ready(Err(Error::Quic("stream already finished".to_string())))
+			}
 		}
 	}
 
 	fn set_priority(&mut self, order: u8) {
-		// The trait (like W3C sendOrder) sends HIGHER values first; quiche
-		// urgency is the opposite.
+		// The trait (like W3C sendOrder) sends HIGHER values first, and so
+		// does quinn.
 		let _ = self
 			.shared
 			.conn
 			.borrow_mut()
-			.stream_priority(self.id, 255 - order, false);
+			.send_stream(self.id)
+			.set_priority(i32::from(order));
 	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		if self.fin || self.reset {
 			return Ok(());
 		}
-		// An empty FIN write succeeds even at zero capacity.
-		match self.shared.conn.borrow_mut().stream_send(self.id, &[], true) {
-			Ok(_) => {}
+		match self.shared.conn.borrow_mut().send_stream(self.id).finish() {
+			Ok(()) => {}
 			// A STOP_SENDING beat us here. Carry the code like `poll_write`
 			// does, or `moq_net::Error::from_transport` cannot decode a
 			// routine cancellation.
-			Err(quiche::Error::StreamStopped(code)) => {
+			Err(quinn_proto::FinishError::Stopped(code)) => {
 				self.reset = true;
-				return Err(Error::Stop(code));
+				return Err(Error::Stop(code.into_inner()));
 			}
-			Err(err) => return Err(err.into()),
+			// Already finished or reset, so the FIN it wanted is out.
+			Err(quinn_proto::FinishError::ClosedStream) => {}
 		}
 		self.fin = true;
 		self.shared.kick();
@@ -148,31 +156,20 @@ impl web_transport_trait::poll::SendStream for SendStream {
 		if self.reset {
 			return Poll::Ready(Ok(()));
 		}
-		// quiche collects a stream when its send side ends (FIN fully
-		// acknowledged, a STOP_SENDING, or a reset), and a collected stream
-		// refuses the capacity query. The driver probes this each turn.
-		let result = self.shared.conn.borrow_mut().stream_capacity(self.id);
-		match result {
-			Err(quiche::Error::StreamStopped(code)) => Poll::Ready(Err(Error::Stop(code))),
-			// The stream is gone. If the driver watched it end while the
-			// connection was up, that verdict stands and a close afterwards
-			// changes nothing. Otherwise we never found out, and the caller
-			// reads success as "every byte arrived".
-			Err(_) => match self.shared.collected(self.id) {
-				Some(Some(code)) => Poll::Ready(Err(Error::Stop(code))),
-				Some(None) => Poll::Ready(Ok(())),
-				None => match self.shared.closed() {
-					Some(err) => Poll::Ready(Err(err)),
-					None => Poll::Ready(Ok(())),
-				},
-			},
-			Ok(_) => {
-				if let Some(err) = self.shared.closed() {
-					return Poll::Ready(Err(err));
+		// quinn reports a send stream's end as an event, which the driver
+		// records: an acknowledged FIN, or the peer's STOP_SENDING.
+		match self.shared.collected(self.id) {
+			Some(Some(code)) => Poll::Ready(Err(Error::Stop(code))),
+			Some(None) => Poll::Ready(Ok(())),
+			// The end never came. If the connection died first the caller
+			// cannot read success as "every byte arrived".
+			None => match self.shared.closed() {
+				Some(err) => Poll::Ready(Err(err)),
+				None => {
+					self.shared.park_finishing(self.id, waiter);
+					Poll::Pending
 				}
-				self.shared.park_finishing(self.id, waiter);
-				Poll::Pending
-			}
+			},
 		}
 	}
 }
@@ -185,7 +182,8 @@ impl Drop for SendStream {
 				.shared
 				.conn
 				.borrow_mut()
-				.stream_shutdown(self.id, quiche::Shutdown::Write, 0);
+				.send_stream(self.id)
+				.reset(VarInt::from_u32(0));
 			self.shared.kick();
 		}
 	}
@@ -200,23 +198,37 @@ impl std::fmt::Debug for SendStream {
 /// How far [`RecvStream::poll_closed`] reads ahead of the application before
 /// it waits for the backlog to drain.
 const READ_AHEAD: usize = 64 * 1024;
+/// How much to ask for per read-ahead chunk.
+const READ_CHUNK: usize = 8 * 1024;
+
+/// One read out of quinn's reassembly buffer.
+enum Read {
+	/// Bytes, at most as many as were asked for.
+	Chunk(Bytes),
+	/// Every byte up to the FIN has been handed over.
+	Finished,
+	/// Nothing buffered; the driver wakes us when that changes.
+	Blocked,
+	/// The peer reset the stream with this code.
+	Reset(u64),
+}
 
 /// An incoming stream. Dropping it unfinished sends STOP_SENDING with code 0.
 pub struct RecvStream {
 	shared: Shared,
-	id: u64,
+	id: StreamId,
 	park: kio::Park,
-	/// Every byte up to the FIN was read out of quiche; reads report the end
+	/// Every byte up to the FIN was read out of quinn; reads report the end
 	/// once `backlog` is drained too.
 	finished: bool,
 	/// We stopped the stream; no more reads matter.
 	stopped: bool,
-	/// Bytes `poll_closed` read ahead, handed to `poll_read` before quiche's.
+	/// Bytes `poll_closed` read ahead, handed to `poll_read` before quinn's.
 	backlog: BytesMut,
 }
 
 impl RecvStream {
-	pub(crate) fn new(shared: Shared, id: u64) -> Self {
+	pub(crate) fn new(shared: Shared, id: StreamId) -> Self {
 		Self {
 			shared,
 			id,
@@ -240,13 +252,44 @@ impl RecvStream {
 		if self.stopped || self.finished {
 			return;
 		}
+		// Err means the stream is already gone, which is what we wanted.
 		let _ = self
 			.shared
 			.conn
 			.borrow_mut()
-			.stream_shutdown(self.id, quiche::Shutdown::Read, code);
+			.recv_stream(self.id)
+			.stop(VarInt::from_u64(code).unwrap_or(VarInt::MAX));
 		self.stopped = true;
 		self.shared.kick();
+	}
+
+	/// Take up to `max` bytes out of quinn's reassembly buffer.
+	///
+	/// Reading is what returns the peer's flow control credit, so a read that
+	/// owes it a frame kicks the driver.
+	///
+	/// Takes the shared state rather than `&mut self` so a caller can hold a
+	/// waiter from `self.park` across the read.
+	fn read(shared: &Shared, id: StreamId, max: usize) -> Read {
+		let mut conn = shared.conn.borrow_mut();
+		let mut recv = conn.recv_stream(id);
+		let mut chunks = match recv.read(true) {
+			Ok(chunks) => chunks,
+			// The stream is gone, so everything it held is already ours.
+			Err(_) => return Read::Finished,
+		};
+		let read = match chunks.next(max) {
+			Ok(Some(chunk)) => Read::Chunk(chunk.bytes),
+			Ok(None) => Read::Finished,
+			Err(quinn_proto::ReadError::Blocked) => Read::Blocked,
+			Err(quinn_proto::ReadError::Reset(code)) => Read::Reset(code.into_inner()),
+		};
+		let transmit = chunks.finalize().should_transmit();
+		drop(conn);
+		if transmit {
+			shared.kick();
+		}
+		read
 	}
 
 	/// Move up to `dst.len()` read-ahead bytes out of the backlog.
@@ -278,34 +321,24 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 		if self.finished {
 			return Poll::Ready(Ok(None));
 		}
-		let mut conn = self.shared.conn.borrow_mut();
-		match conn.stream_recv(self.id, dst) {
-			Ok((n, fin)) => {
-				if fin {
-					self.finished = true;
-					if n == 0 {
-						return Poll::Ready(Ok(None));
-					}
-				}
-				drop(conn);
-				// Reading frees flow control the peer is waiting on.
-				self.shared.kick();
+		match Self::read(&self.shared, self.id, dst.len()) {
+			Read::Chunk(bytes) => {
+				let n = bytes.len().min(dst.len());
+				dst[..n].copy_from_slice(&bytes[..n]);
 				Poll::Ready(Ok(Some(n)))
 			}
-			Err(quiche::Error::Done) => {
-				if conn.stream_finished(self.id) {
-					self.finished = true;
-					return Poll::Ready(Ok(None));
-				}
-				drop(conn);
+			Read::Finished => {
+				self.finished = true;
+				Poll::Ready(Ok(None))
+			}
+			Read::Blocked => {
 				if let Some(err) = self.shared.closed() {
 					return Poll::Ready(Err(err));
 				}
 				self.shared.park_readable(self.id, waiter);
 				Poll::Pending
 			}
-			Err(quiche::Error::StreamReset(code)) => Poll::Ready(Err(Error::Reset(code))),
-			Err(err) => Poll::Ready(Err(err.into())),
+			Read::Reset(code) => Poll::Ready(Err(Error::Reset(code))),
 		}
 	}
 
@@ -320,7 +353,7 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 		if self.finished || self.stopped {
 			return Poll::Ready(Ok(()));
 		}
-		// The FIN sits behind whatever the peer sent before it, and quiche only
+		// The FIN sits behind whatever the peer sent before it, and quinn only
 		// reports the stream finished once that is read out. Waiting on
 		// readability alone would park behind bytes nobody is reading, so read
 		// ahead into the backlog `poll_read` serves first: this watch resolves
@@ -336,37 +369,20 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 				self.shared.park_readable(self.id, waiter);
 				return Poll::Pending;
 			}
-			let mut chunk = [0u8; 8 * 1024];
-			let mut conn = self.shared.conn.borrow_mut();
-			match conn.stream_recv(self.id, &mut chunk) {
-				Ok((n, fin)) => {
-					drop(conn);
-					self.backlog.extend_from_slice(&chunk[..n]);
-					// Reading frees flow control the peer is waiting on.
-					self.shared.kick();
-					if fin {
-						self.finished = true;
-						return Poll::Ready(Ok(()));
-					}
+			match Self::read(&self.shared, self.id, READ_CHUNK) {
+				Read::Chunk(bytes) => self.backlog.extend_from_slice(&bytes),
+				Read::Finished => {
+					self.finished = true;
+					return Poll::Ready(Ok(()));
 				}
-				Err(quiche::Error::Done) => {
-					// Nothing buffered: either the FIN is in (a reset comes
-					// back as `StreamReset` below, not as this) or more is
-					// still coming.
-					let finished = conn.stream_finished(self.id);
-					drop(conn);
-					if finished {
-						self.finished = true;
-						return Poll::Ready(Ok(()));
-					}
+				Read::Blocked => {
 					if let Some(err) = self.shared.closed() {
 						return Poll::Ready(Err(err));
 					}
 					self.shared.park_readable(self.id, waiter);
 					return Poll::Pending;
 				}
-				Err(quiche::Error::StreamReset(code)) => return Poll::Ready(Err(Error::Reset(code))),
-				Err(err) => return Poll::Ready(Err(err.into())),
+				Read::Reset(code) => return Poll::Ready(Err(Error::Reset(code))),
 			}
 		}
 	}
@@ -379,7 +395,8 @@ impl Drop for RecvStream {
 				.shared
 				.conn
 				.borrow_mut()
-				.stream_shutdown(self.id, quiche::Shutdown::Read, 0);
+				.recv_stream(self.id)
+				.stop(VarInt::from_u32(0));
 			self.shared.kick();
 		}
 	}

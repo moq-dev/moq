@@ -1,0 +1,748 @@
+//! The connection: shared state, the driver task, and the session handle.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::{Rc, Weak};
+use std::task::{Context, Poll};
+use std::time::Instant;
+
+use bytes::Bytes;
+use quinn_proto::{ConnectionHandle, Dir, StreamId, VarInt};
+
+use super::super::{Error, SEGMENT};
+use super::endpoint;
+use crate::{Handle, udp};
+
+/// The state shared by every handle and the driver, single-threaded behind
+/// `Rc<RefCell>`.
+pub(crate) type Shared = Rc<Inner>;
+
+/// One GSO train is at most 64 segments; stay a hair under the kernel cap.
+const TRAIN_SEGMENTS: usize = 63;
+
+/// Everything the handles and the driver share, single-threaded.
+///
+/// The connection and the bookkeeping live in separate `RefCell`s so a stream
+/// operation can mutate the connection, drop that borrow, and then register a
+/// waiter without ever holding both.
+pub(crate) struct Inner {
+	pub(crate) conn: RefCell<quinn_proto::Connection>,
+	pub(crate) state: RefCell<State>,
+}
+
+pub(crate) struct State {
+	/// Wakes the driver; handles kick it after mutating the connection so
+	/// fresh egress reaches the wire.
+	driver: kio::WaiterList,
+
+	established: bool,
+	establish_waiters: kio::WaiterList,
+
+	/// Whoever is waiting for a peer-initiated stream. quinn-proto hands the
+	/// ids out in order, so the queue is its own.
+	accept_bi_waiters: kio::WaiterList,
+	accept_uni_waiters: kio::WaiterList,
+
+	/// Whoever is blocked on the peer's MAX_STREAMS credit.
+	open_waiters: kio::WaiterList,
+
+	/// Per-stream read/write parking, keyed by stream id.
+	readable: HashMap<StreamId, kio::WaiterList>,
+	writable: HashMap<StreamId, kio::WaiterList>,
+	/// Send streams waiting for their end: a FIN the peer acknowledged, or a
+	/// `STOP_SENDING`.
+	finishing: HashMap<StreamId, kio::WaiterList>,
+	/// How each send stream ended, for the ones the driver saw end while the
+	/// connection was still up: `None` for an acknowledged FIN, `Some(code)`
+	/// for a `STOP_SENDING`. That is what makes a later close mean "already
+	/// delivered" rather than "we never found out". Cleared when the stream
+	/// drops.
+	collected: HashMap<StreamId, Option<u64>>,
+
+	datagram_recv_waiters: kio::WaiterList,
+	datagram_send_waiters: kio::WaiterList,
+
+	/// The terminal error, set exactly once; everything fails with it after.
+	closed: Option<Error>,
+	closed_waiters: kio::WaiterList,
+
+	/// The socket died under us: the driver stops where it stands rather than
+	/// waiting out a drain it could never transmit.
+	dead: bool,
+
+	/// The close this side asked for, until the driver has put it on the wire.
+	/// quinn raises no event for it, so this is what the terminal error is
+	/// built from.
+	local_close: Option<(u64, String)>,
+}
+
+impl State {
+	fn new() -> Self {
+		Self {
+			driver: kio::WaiterList::new(),
+			established: false,
+			establish_waiters: kio::WaiterList::new(),
+			accept_bi_waiters: kio::WaiterList::new(),
+			accept_uni_waiters: kio::WaiterList::new(),
+			open_waiters: kio::WaiterList::new(),
+			readable: HashMap::new(),
+			writable: HashMap::new(),
+			finishing: HashMap::new(),
+			collected: HashMap::new(),
+			datagram_recv_waiters: kio::WaiterList::new(),
+			datagram_send_waiters: kio::WaiterList::new(),
+			closed: None,
+			closed_waiters: kio::WaiterList::new(),
+			dead: false,
+			local_close: None,
+		}
+	}
+
+	/// Terminate with `err` (the first one wins) and wake absolutely everyone,
+	/// the driver included: an externally failed driver has to notice.
+	fn fail(&mut self, err: Error) {
+		if self.closed.is_none() {
+			self.closed = Some(err);
+		}
+		self.driver.wake();
+		self.closed_waiters.wake();
+		self.establish_waiters.wake();
+		self.accept_bi_waiters.wake();
+		self.accept_uni_waiters.wake();
+		self.open_waiters.wake();
+		self.datagram_recv_waiters.wake();
+		self.datagram_send_waiters.wake();
+		for waiters in self.readable.values_mut() {
+			waiters.wake();
+		}
+		for waiters in self.writable.values_mut() {
+			waiters.wake();
+		}
+		for waiters in self.finishing.values_mut() {
+			waiters.wake();
+		}
+	}
+}
+
+impl Inner {
+	/// The terminal error, if the connection has one.
+	pub(crate) fn closed(&self) -> Option<Error> {
+		self.state.borrow().closed.clone()
+	}
+
+	/// Wake the driver so it flushes what a handle just queued.
+	pub(crate) fn kick(&self) {
+		self.state.borrow_mut().driver.wake();
+	}
+
+	/// Terminate from outside (the endpoint's socket died): everything fails
+	/// with `err`, and the driver exits on its next poll.
+	pub(crate) fn fail(&self, err: Error) {
+		let mut state = self.state.borrow_mut();
+		state.dead = true;
+		state.fail(err);
+	}
+
+	/// Park `waiter` until stream `id` is writable again.
+	pub(crate) fn park_writable(&self, id: StreamId, waiter: &kio::Waiter) {
+		let mut state = self.state.borrow_mut();
+		waiter.register(state.writable.entry(id).or_default());
+	}
+
+	/// Park `waiter` until stream `id` is readable again.
+	pub(crate) fn park_readable(&self, id: StreamId, waiter: &kio::Waiter) {
+		let mut state = self.state.borrow_mut();
+		waiter.register(state.readable.entry(id).or_default());
+	}
+
+	/// Park `waiter` until send stream `id` reaches its end.
+	pub(crate) fn park_finishing(&self, id: StreamId, waiter: &kio::Waiter) {
+		let mut state = self.state.borrow_mut();
+		waiter.register(state.finishing.entry(id).or_default());
+	}
+
+	/// How send stream `id` ended, if the driver saw it end on a live
+	/// connection: `Some(None)` for an acknowledged FIN, `Some(Some(code))`
+	/// for a `STOP_SENDING`.
+	pub(crate) fn collected(&self, id: StreamId) -> Option<Option<u64>> {
+		self.state.borrow().collected.get(&id).copied()
+	}
+
+	/// Forget stream `id`'s bookkeeping; called when a handle drops.
+	pub(crate) fn forget(&self, id: StreamId) {
+		let mut state = self.state.borrow_mut();
+		state.collected.remove(&id);
+		state.finishing.remove(&id);
+	}
+
+	/// Wake anyone parked on stream `id` being readable.
+	pub(crate) fn wake_readable(&self, id: StreamId) {
+		let mut state = self.state.borrow_mut();
+		if let Some(mut waiters) = state.readable.remove(&id) {
+			waiters.wake();
+		}
+	}
+
+	/// Close the connection with a full-width application code.
+	///
+	/// The [`web_transport_trait::poll::Session::close`] surface narrows codes
+	/// to `u32`; the WebTransport layer maps its codes into HTTP/3's error
+	/// space, which needs the whole varint range.
+	pub(crate) fn close_code(&self, code: u64, reason: &str) {
+		self.conn.borrow_mut().close(
+			Instant::now(),
+			VarInt::from_u64(code).unwrap_or(VarInt::MAX),
+			Bytes::copy_from_slice(reason.as_bytes()),
+		);
+		// quinn raises no event for a close the application asked for, so the
+		// terminal error is ours to publish. Not here though: the driver
+		// publishes it once the CONNECTION_CLOSE is on the wire, since a
+		// caller that stops driving the worker the moment `poll_closed`
+		// resolves would otherwise leave the peer to idle out.
+		let mut state = self.state.borrow_mut();
+		state.local_close.get_or_insert((code, reason.to_string()));
+		state.driver.wake();
+	}
+}
+
+/// A QUIC connection driven by a [`crate::Worker`], usable as a MoQ transport.
+///
+/// Created by [`Endpoint`](super::Endpoint) (or its
+/// [`client::connect`](crate::quic::client::connect) /
+/// [`server::accept`](crate::quic::server::accept) shorthands), already
+/// established. Clones share the connection; each carries its own parking so
+/// concurrent pending operations don't trample each other's wakeups. Dropping
+/// every handle (and every stream) drops the driver's `Rc` peers, but the
+/// driver itself keeps the connection alive until it ends; close explicitly
+/// with [`close`](web_transport_trait::poll::Session::close) (which moq's
+/// session machine does).
+pub struct Connection {
+	shared: Shared,
+	// Retains this clone's waiter registrations across polls.
+	park: kio::Park,
+	/// The negotiated ALPN, cached at establishment so `protocol()` can
+	/// borrow from the handle.
+	alpn: Option<String>,
+}
+
+impl Connection {
+	/// Close the connection with a full-width application code.
+	///
+	/// The [`web_transport_trait::poll::Session::close`] surface narrows codes
+	/// to `u32`; the WebTransport layer maps its codes into HTTP/3's error
+	/// space, which needs the whole varint range.
+	pub(crate) fn close_code(&self, code: u64, reason: &str) {
+		self.shared.close_code(code, reason);
+	}
+
+	/// The peer's certificate chain in DER, leaf first, or `None` if it
+	/// presented none.
+	///
+	/// A server only sees one when it asked
+	/// ([`ClientAuth`](crate::quic::server::ClientAuth)), and TLS already
+	/// validated it against the configured roots by the time this connection
+	/// exists: an invalid chain fails the handshake instead. So a `Some` here
+	/// is an authenticated peer, and the chain is what names it.
+	pub fn peer_chain(&self) -> Option<Vec<Vec<u8>>> {
+		let conn = self.shared.conn.borrow();
+		let identity = conn.crypto_session().peer_identity()?;
+		let chain = identity
+			.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+			.ok()?;
+		Some(chain.iter().map(|cert| cert.to_vec()).collect())
+	}
+}
+
+impl Clone for Connection {
+	fn clone(&self) -> Self {
+		Self {
+			shared: self.shared.clone(),
+			park: kio::Park::default(),
+			alpn: self.alpn.clone(),
+		}
+	}
+}
+
+/// Build a connection's shared state and its driver.
+///
+/// The driver future does timers, event sweeps, and egress; ingress arrives
+/// from the endpoint's demux task, which feeds quinn-proto directly and
+/// [kicks](Inner::kick) the driver. The caller spawns the future and reclaims
+/// the connection's bookkeeping once it resolves.
+pub(crate) fn launch(
+	handle: &Handle,
+	socket: Rc<udp::Socket>,
+	endpoint: Weak<endpoint::Inner>,
+	key: ConnectionHandle,
+	conn: quinn_proto::Connection,
+) -> (Shared, impl Future<Output = ()> + use<>) {
+	let shared = Rc::new(Inner {
+		conn: RefCell::new(conn),
+		state: RefCell::new(State::new()),
+	});
+
+	let mut driver = Driver {
+		shared: shared.clone(),
+		socket,
+		endpoint,
+		key,
+		deadline: moq_net::runtime::Deadline::new(handle),
+		scratch: Vec::with_capacity(TRAIN_SEGMENTS * SEGMENT),
+		blocked: false,
+	};
+	let future = async move { kio::wait(|waiter| driver.poll(waiter)).await };
+	(shared, future)
+}
+
+/// Wait out the handshake, yielding the connection's public handle.
+pub(crate) async fn establish(shared: Shared) -> Result<Connection, Error> {
+	kio::wait(|waiter| {
+		let mut state = shared.state.borrow_mut();
+		if state.established {
+			return Poll::Ready(Ok(()));
+		}
+		if let Some(err) = &state.closed {
+			return Poll::Ready(Err(err.clone()));
+		}
+		waiter.register(&mut state.establish_waiters);
+		Poll::Pending
+	})
+	.await?;
+
+	let alpn = {
+		let conn = shared.conn.borrow();
+		conn.crypto_session()
+			.handshake_data()
+			.and_then(|data| data.downcast::<quinn_proto::crypto::rustls::HandshakeData>().ok())
+			.and_then(|data| data.protocol)
+			.map(|proto| String::from_utf8_lossy(&proto).into_owned())
+	};
+
+	Ok(Connection {
+		shared,
+		park: kio::Park::default(),
+		alpn,
+	})
+}
+
+impl web_transport_trait::poll::Session for Connection {
+	type SendStream = super::SendStream;
+	type RecvStream = super::RecvStream;
+	type Error = Error;
+
+	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+		let waiter = self.park.hold(cx);
+		if let Some(id) = self.shared.conn.borrow_mut().streams().accept(Dir::Uni) {
+			return Poll::Ready(Ok(super::RecvStream::new(self.shared.clone(), id)));
+		}
+		let mut state = self.shared.state.borrow_mut();
+		if let Some(err) = &state.closed {
+			return Poll::Ready(Err(err.clone()));
+		}
+		waiter.register(&mut state.accept_uni_waiters);
+		Poll::Pending
+	}
+
+	fn poll_accept_bi(
+		&mut self,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
+		let waiter = self.park.hold(cx);
+		if let Some(id) = self.shared.conn.borrow_mut().streams().accept(Dir::Bi) {
+			return Poll::Ready(Ok((
+				super::SendStream::new(self.shared.clone(), id),
+				super::RecvStream::new(self.shared.clone(), id),
+			)));
+		}
+		let mut state = self.shared.state.borrow_mut();
+		if let Some(err) = &state.closed {
+			return Poll::Ready(Err(err.clone()));
+		}
+		waiter.register(&mut state.accept_bi_waiters);
+		Poll::Pending
+	}
+
+	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+		let waiter = self.park.hold(cx);
+		if let Some(err) = self.shared.closed() {
+			return Poll::Ready(Err(err));
+		}
+		// The peer's MAX_STREAMS credit is what gates us: `open` hands back
+		// nothing while it is spent.
+		match self.shared.conn.borrow_mut().streams().open(Dir::Uni) {
+			Some(id) => Poll::Ready(Ok(super::SendStream::new(self.shared.clone(), id))),
+			None => {
+				let mut state = self.shared.state.borrow_mut();
+				waiter.register(&mut state.open_waiters);
+				Poll::Pending
+			}
+		}
+	}
+
+	fn poll_open_bi(
+		&mut self,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
+		let waiter = self.park.hold(cx);
+		if let Some(err) = self.shared.closed() {
+			return Poll::Ready(Err(err));
+		}
+		match self.shared.conn.borrow_mut().streams().open(Dir::Bi) {
+			Some(id) => Poll::Ready(Ok((
+				super::SendStream::new(self.shared.clone(), id),
+				super::RecvStream::new(self.shared.clone(), id),
+			))),
+			None => {
+				let mut state = self.shared.state.borrow_mut();
+				waiter.register(&mut state.open_waiters);
+				Poll::Pending
+			}
+		}
+	}
+
+	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		let waiter = self.park.hold(cx);
+		if let Some(err) = self.shared.closed() {
+			return Poll::Ready(Err(err));
+		}
+		let payload = Bytes::copy_from_slice(payload);
+		match self.shared.conn.borrow_mut().datagrams().send(payload, false) {
+			Ok(()) => {
+				self.shared.kick();
+				Poll::Ready(Ok(()))
+			}
+			// The send queue is full; a flush frees space.
+			Err(quinn_proto::SendDatagramError::Blocked(_)) => {
+				let mut state = self.shared.state.borrow_mut();
+				waiter.register(&mut state.datagram_send_waiters);
+				Poll::Pending
+			}
+			Err(err) => Poll::Ready(Err(Error::Quic(err.to_string()))),
+		}
+	}
+
+	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
+		let waiter = self.park.hold(cx);
+		if let Some(datagram) = self.shared.conn.borrow_mut().datagrams().recv() {
+			return Poll::Ready(Ok(datagram));
+		}
+		let mut state = self.shared.state.borrow_mut();
+		if let Some(err) = &state.closed {
+			return Poll::Ready(Err(err.clone()));
+		}
+		waiter.register(&mut state.datagram_recv_waiters);
+		Poll::Pending
+	}
+
+	fn max_datagram_size(&self) -> usize {
+		self.shared.conn.borrow_mut().datagrams().max_size().unwrap_or(0)
+	}
+
+	fn protocol(&self) -> Option<&str> {
+		self.alpn.as_deref()
+	}
+
+	fn close(&mut self, code: u32, reason: &str) {
+		self.shared.close_code(u64::from(code), reason);
+	}
+
+	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
+		let waiter = self.park.hold(cx);
+		let mut state = self.shared.state.borrow_mut();
+		if let Some(err) = &state.closed {
+			return Poll::Ready(err.clone());
+		}
+		waiter.register(&mut state.closed_waiters);
+		Poll::Pending
+	}
+
+	fn stats(&self) -> impl web_transport_trait::Stats {
+		let stats = self.shared.conn.borrow().stats();
+		Stats {
+			bytes_sent: stats.udp_tx.bytes,
+			bytes_received: stats.udp_rx.bytes,
+			bytes_lost: stats.path.lost_bytes,
+			packets_sent: stats.udp_tx.datagrams,
+			packets_received: stats.udp_rx.datagrams,
+			packets_lost: stats.path.lost_packets,
+			rtt: stats.path.rtt,
+			cwnd: stats.path.cwnd,
+		}
+	}
+}
+
+impl std::fmt::Debug for Connection {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Connection").field("alpn", &self.alpn).finish()
+	}
+}
+
+/// A snapshot of quinn-proto's counters in [`web_transport_trait::Stats`]
+/// shape.
+struct Stats {
+	bytes_sent: u64,
+	bytes_received: u64,
+	bytes_lost: u64,
+	packets_sent: u64,
+	packets_received: u64,
+	packets_lost: u64,
+	rtt: std::time::Duration,
+	cwnd: u64,
+}
+
+impl web_transport_trait::Stats for Stats {
+	fn bytes_sent(&self) -> Option<u64> {
+		Some(self.bytes_sent)
+	}
+
+	fn bytes_received(&self) -> Option<u64> {
+		Some(self.bytes_received)
+	}
+
+	fn bytes_lost(&self) -> Option<u64> {
+		Some(self.bytes_lost)
+	}
+
+	fn packets_sent(&self) -> Option<u64> {
+		Some(self.packets_sent)
+	}
+
+	fn packets_received(&self) -> Option<u64> {
+		Some(self.packets_received)
+	}
+
+	fn packets_lost(&self) -> Option<u64> {
+		Some(self.packets_lost)
+	}
+
+	fn rtt(&self) -> Option<std::time::Duration> {
+		Some(self.rtt)
+	}
+
+	/// quinn-proto measures no delivery rate, so this is the window the
+	/// congestion controller is willing to keep in flight per round trip,
+	/// which is the rate it is pacing towards.
+	fn estimated_send_rate(&self) -> Option<u64> {
+		let rtt = self.rtt.as_secs_f64();
+		if rtt <= 0.0 {
+			return None;
+		}
+		Some((self.cwnd as f64 * 8.0 / rtt) as u64)
+	}
+}
+
+/// The per-connection task: endpoint events, application events, timers, and
+/// packets out. Packets in come from the endpoint's demux task, which feeds
+/// quinn-proto directly and kicks this driver.
+struct Driver {
+	shared: Shared,
+	socket: Rc<udp::Socket>,
+	/// The endpoint this connection belongs to, for the events the two of
+	/// them trade (fresh connection ids, retirements, and the drain that
+	/// frees the slot). Weak, because the endpoint owns us.
+	endpoint: Weak<endpoint::Inner>,
+	key: ConnectionHandle,
+	deadline: moq_net::runtime::Deadline<Handle>,
+	/// Egress staging: quinn-proto writes into a `Vec`, so a train is built
+	/// here and copied into the socket's registered buffer.
+	scratch: Vec<u8>,
+	/// The last flush found the transmit pool drained, so nothing it owed the
+	/// peer has reached the wire yet.
+	blocked: bool,
+}
+
+impl Driver {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		{
+			let mut state = self.shared.state.borrow_mut();
+			// The endpoint fails the connection from outside when its socket
+			// dies; there is nothing left to drain it through.
+			if state.dead {
+				return Poll::Ready(());
+			}
+			// Register the kick first: a handle mutating the connection after
+			// this turn's sweeps still re-polls us.
+			waiter.register(&mut state.driver);
+		}
+
+		loop {
+			self.endpoint_events();
+			self.sweep();
+
+			if self.shared.state.borrow().dead {
+				return Poll::Ready(());
+			}
+			// A closed connection still owes the peer its CONNECTION_CLOSE
+			// (and a retransmit for each packet that arrives after), so the
+			// driver runs until quinn says the drain is over.
+			if self.shared.conn.borrow().is_drained() {
+				return Poll::Ready(());
+			}
+
+			if let Poll::Ready(err) = self.flush(waiter) {
+				self.shared.state.borrow_mut().fail(err);
+				return Poll::Ready(());
+			}
+			self.publish_close();
+
+			// Arm, *then* poll: the poll is what registers the waiter, so
+			// polling before the set would leave the firing to wake nobody
+			// (fatal on a dial nobody answers, where no ingress ever re-polls
+			// us).
+			self.deadline.set(self.shared.conn.borrow_mut().poll_timeout());
+			if self.deadline.poll(waiter).is_pending() {
+				return Poll::Pending;
+			}
+			self.shared.conn.borrow_mut().handle_timeout(Instant::now());
+		}
+	}
+
+	/// Trade events with the endpoint: connection ids to issue and retire, and
+	/// the drain that frees our slot in its table.
+	///
+	/// The endpoint's borrow is never held across the connection's, and the
+	/// demux task borrows them in the same order, so the two cannot deadlock.
+	fn endpoint_events(&mut self) {
+		let Some(endpoint) = self.endpoint.upgrade() else {
+			return;
+		};
+		loop {
+			let event = self.shared.conn.borrow_mut().poll_endpoint_events();
+			let Some(event) = event else {
+				return;
+			};
+			if let Some(event) = endpoint.on_connection_event(self.key, event) {
+				self.shared.conn.borrow_mut().handle_event(event);
+			}
+		}
+	}
+
+	/// Everything event-shaped: establishment, new and readable streams,
+	/// writability, finished sends, received datagrams, and the end.
+	fn sweep(&mut self) {
+		loop {
+			let event = self.shared.conn.borrow_mut().poll();
+			let Some(event) = event else {
+				return;
+			};
+
+			let mut state = self.shared.state.borrow_mut();
+			match event {
+				quinn_proto::Event::Connected => {
+					state.established = true;
+					state.establish_waiters.wake();
+				}
+				quinn_proto::Event::ConnectionLost { reason } => state.fail(reason.into()),
+				quinn_proto::Event::DatagramReceived => state.datagram_recv_waiters.wake(),
+				quinn_proto::Event::DatagramsUnblocked => state.datagram_send_waiters.wake(),
+				quinn_proto::Event::HandshakeDataReady => {}
+				quinn_proto::Event::Stream(event) => sweep_stream(&mut state, event),
+			}
+		}
+	}
+
+	/// Publish the terminal error for a close this side asked for.
+	///
+	/// quinn raises no event for it, so the driver is what reports it, and
+	/// only once the flush above has handed the CONNECTION_CLOSE to the
+	/// socket: the application is free to stop driving the worker the moment
+	/// `poll_closed` resolves, and the peer would then wait out its idle
+	/// timeout instead of being told.
+	fn publish_close(&mut self) {
+		if self.blocked || !self.shared.conn.borrow().is_closed() {
+			return;
+		}
+		let mut state = self.shared.state.borrow_mut();
+		let Some((code, reason)) = state.local_close.take() else {
+			return;
+		};
+		state.fail(Error::App { code, reason });
+	}
+
+	/// Stage at most one GSO train, then yield so another connection sharing
+	/// the socket gets a chance at the transmit pool. Ignores quinn's pacing
+	/// hint; the congestion controller still bounds each train.
+	fn flush(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		let mut tx = match self.socket.poll_acquire(waiter) {
+			Poll::Ready(Ok(tx)) => tx,
+			Poll::Ready(Err(err)) => return Poll::Ready(Error::Io(err.to_string())),
+			// Backpressure: a completed send re-polls us.
+			Poll::Pending => {
+				self.blocked = true;
+				return Poll::Pending;
+			}
+		};
+		self.blocked = false;
+
+		let segments = (tx.len() / SEGMENT).min(TRAIN_SEGMENTS);
+		if segments == 0 {
+			return Poll::Ready(Error::Io(format!(
+				"transmit buffer of {} bytes holds no {SEGMENT} byte segment",
+				tx.len()
+			)));
+		}
+
+		self.scratch.clear();
+		let transmit = match self
+			.shared
+			.conn
+			.borrow_mut()
+			.poll_transmit(Instant::now(), segments, &mut self.scratch)
+		{
+			Some(transmit) => transmit,
+			// Nothing to send; the buffer returns to the pool on drop.
+			None => return Poll::Pending,
+		};
+
+		tx[..transmit.size].copy_from_slice(&self.scratch[..transmit.size]);
+		// A lone datagram is its own segment size, and the socket's GSO
+		// stride has to match what quinn actually packed.
+		let segment = transmit.segment_size.unwrap_or(transmit.size);
+		if let Err(err) = tx.send(transmit.size, transmit.destination, segment) {
+			return Poll::Ready(Error::Io(err.to_string()));
+		}
+		// A flush frees datagram-send queue space.
+		self.shared.state.borrow_mut().datagram_send_waiters.wake();
+		// Requeue behind the other ready tasks. If quinn is drained, the next
+		// poll costs one empty acquire and then parks normally.
+		waiter.waker().wake_by_ref();
+		Poll::Pending
+	}
+}
+
+/// Apply one stream event to the parking tables.
+fn sweep_stream(state: &mut State, event: quinn_proto::StreamEvent) {
+	// Waking removes the entry: a still-interested poller re-registers on its
+	// next poll, so the maps only hold streams somebody is parked on.
+	match event {
+		quinn_proto::StreamEvent::Opened { dir: Dir::Bi } => state.accept_bi_waiters.wake(),
+		quinn_proto::StreamEvent::Opened { dir: Dir::Uni } => state.accept_uni_waiters.wake(),
+		quinn_proto::StreamEvent::Available { .. } => state.open_waiters.wake(),
+		quinn_proto::StreamEvent::Readable { id } => {
+			if let Some(mut waiters) = state.readable.remove(&id) {
+				waiters.wake();
+			}
+		}
+		quinn_proto::StreamEvent::Writable { id } => {
+			if let Some(mut waiters) = state.writable.remove(&id) {
+				waiters.wake();
+			}
+		}
+		quinn_proto::StreamEvent::Finished { id } => {
+			state.collected.insert(id, None);
+			if let Some(mut waiters) = state.finishing.remove(&id) {
+				waiters.wake();
+			}
+		}
+		quinn_proto::StreamEvent::Stopped { id, error_code } => {
+			state.collected.insert(id, Some(error_code.into_inner()));
+			if let Some(mut waiters) = state.finishing.remove(&id) {
+				waiters.wake();
+			}
+			// A writer blocked on capacity has to learn it will never come.
+			if let Some(mut waiters) = state.writable.remove(&id) {
+				waiters.wake();
+			}
+		}
+	}
+}

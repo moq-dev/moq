@@ -6,7 +6,7 @@
 //! Kernel-gated: skips loudly below the Linux 6.12 floor (GitHub-hosted CI),
 //! and runs everywhere else.
 
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", any(feature = "quiche", feature = "quinn")))]
 
 #[path = "support/quiche.rs"]
 mod support;
@@ -435,7 +435,14 @@ fn quinn_client_err(url: String) -> std::thread::JoinHandle<web_transport_quinn:
 				.expect("client");
 			let request = web_transport_quinn::proto::ConnectRequest::new(url::Url::parse(&url).expect("url"))
 				.with_protocol(PROTO);
-			client.connect(request).await.expect_err("the CONNECT must fail")
+			// The server answers by closing, so the failure has to arrive as
+			// that close. Waiting out the idle timeout would "fail" too, ten
+			// seconds later, which is what a peer sees when a close is
+			// published to the application before it reaches the wire.
+			tokio::time::timeout(std::time::Duration::from_secs(3), client.connect(request))
+				.await
+				.expect("the CONNECT must fail before the idle timeout")
+				.expect_err("the CONNECT must fail")
 		})
 	})
 }
