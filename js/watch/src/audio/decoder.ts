@@ -24,6 +24,14 @@ const LEGACY_WARMUP_CALLBACKS = 3;
 export type DecoderInput = {
 	// Enable to download the audio track.
 	enabled: Getter<boolean>;
+
+	// The oldest audio a new subscription will take, in milliseconds. Undefined, the default,
+	// starts at the live edge, which is what a continuous broadcast wants.
+	//
+	// Set it for a publisher that opens a track per utterance: it is already writing by the time the
+	// subscription lands, so the live edge skips the head of every track. Asking for the track from
+	// its start and bounding that by age replays the head and nothing older.
+	maxAge: Getter<Time.Milli | undefined>;
 };
 
 type DecoderOutput = {
@@ -112,6 +120,7 @@ export class Decoder {
 	constructor(source: Source, sync: Sync, props?: Inputs<DecoderInput>) {
 		this.in = {
 			enabled: getter(props?.enabled ?? false),
+			maxAge: getter(props?.maxAge),
 		};
 
 		this.source = source;
@@ -281,7 +290,15 @@ export class Decoder {
 		// of tail beyond them. Drop that once the replacement's first frame says where it starts.
 		this.#handover.opened();
 
-		const sub = active.track(track).subscribe({ priority: Catalog.PRIORITY.audio });
+		// Asking for group 0 requests the track from its start; the age bound is what keeps that to
+		// the caller's window, applied by whoever serves it. A publisher that ignores the bound
+		// replays its whole retention instead, which the container consumer then trims to the
+		// latency target. Omitting both leaves the subscription at the live edge.
+		const maxAge = effect.get(this.in.maxAge);
+		const sub = active.track(track).subscribe({
+			priority: Catalog.PRIORITY.audio,
+			...(maxAge !== undefined ? { startGroup: 0, latencyMax: maxAge } : {}),
+		});
 		effect.cleanup(() => sub.close());
 
 		if (config.container.kind === "cmaf") {
