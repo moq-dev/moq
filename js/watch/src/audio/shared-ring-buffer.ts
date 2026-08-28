@@ -13,7 +13,7 @@ export interface SharedRingBufferInit {
 	rate: number;
 	samples: SharedArrayBuffer; // channels * capacity * Float32Array.BYTES_PER_ELEMENT bytes
 	control: SharedArrayBuffer; // CONTROL_SLOTS * Int32Array.BYTES_PER_ELEMENT bytes
-	// Buffered mode: anchor to the first sample and never skip ahead on read.
+	// Buffered mode: never skip ahead on read, so we play through everything buffered.
 	buffered: boolean;
 }
 
@@ -116,9 +116,12 @@ export class SharedRingBuffer {
 		}
 
 		// Positions are relative to the anchor. READ/WRITE are Int32, so an absolute sample index
-		// overflows on a stream that has been broadcasting a while, and a negative one pins WRITE
-		// at 0 so the ring never un-stalls. Relative positions instead start at 0, which leaves
-		// the ~13.5h at 44.1kHz to a single continuous playback session.
+		// wraps once a stream has been broadcasting a while, and the wrapped value reads as far
+		// ahead of READ, so every insert is discarded as too old and the ring goes silent for good.
+		// Relative positions start at 0 instead, moving that from ~13.5h of stream age at 44.1kHz to
+		// ~13.5h of one continuous session. Crossing even that still breaks: `slot()` maps the two
+		// sides of the wrap to non-adjacent slots, and `timestamp` reads the negative half as a
+		// backwards jump. See #3132.
 		start = (start - this.#anchor) | 0;
 
 		const end = (start + originalLength) | 0;

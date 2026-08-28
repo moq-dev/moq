@@ -661,6 +661,30 @@ describe("decoded rate must match the ring (#2352)", () => {
 	});
 });
 
+describe("live anchoring", () => {
+	// The SharedArrayBuffer ring anchors in both modes; this keeps the postMessage fallback
+	// in step. Without anchoring, a first frame at a large timestamp gap-filled the whole ring
+	// with zeros, un-stalled on that overflow, and left the playhead a floor before the frame.
+	it("anchors a live ring to the first frame instead of gap-filling from zero", () => {
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 as Time.Milli });
+		expect(buffer.capacity).toBe(100);
+
+		write(buffer, 2000 as Time.Milli, 40, { channels: 1, value: 0.5 });
+		// Still short of the floor, so nothing plays yet and the ring holds only real samples.
+		expect(buffer.stalled).toBe(true);
+		expect(buffer.length).toBe(40);
+		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(2000 as Time.Milli);
+
+		write(buffer, 2040 as Time.Milli, 60, { channels: 1, value: 0.5 });
+		expect(buffer.stalled).toBe(false);
+
+		// Playback starts on the first real sample, not on gap-filled silence.
+		const output = read(buffer, 40, 1);
+		expect(output[0].length).toBe(40);
+		expect(output[0][0]).toBeCloseTo(0.5, 5);
+	});
+});
+
 describe("buffered mode", () => {
 	function createBuffered(latency: number) {
 		return new AudioRingBuffer({ rate: 1000, channels: 1, latency: latency as Time.Milli, buffered: true });
