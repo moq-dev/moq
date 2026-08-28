@@ -270,8 +270,28 @@ function waitForSubscription(controls: SubscriptionControls, subscriber: track.S
  * and leave enforcement to the receiver, as the IETF path does for the same reason.
  */
 function servingMaxAge(version: Version, requested: number | undefined): number {
-	const carriesMaxAge = version !== Version.DRAFT_01 && version !== Version.DRAFT_02;
-	return carriesMaxAge ? (requested ?? 0) : Number.MAX_SAFE_INTEGER;
+	return carriesMaxAge(version) ? (requested ?? 0) : Number.MAX_SAFE_INTEGER;
+}
+
+/** Whether this version's SUBSCRIBE carries Subscriber Max Age at all. */
+function carriesMaxAge(version: Version): boolean {
+	return version !== Version.DRAFT_01 && version !== Version.DRAFT_02;
+}
+
+/**
+ * Where a subscription that named no Group Start begins.
+ *
+ * The oldest group its own {@link servingMaxAge} budget still considers fresh, which is the
+ * live edge for the default zero budget. A subscriber that tolerates some age is then handed
+ * the head of what it can still use, rather than joining at the live edge and missing a
+ * track's opening groups that are sitting right here in the cache.
+ *
+ * A wire that cannot carry Max Age has no budget to resolve a start from: those sessions are
+ * served with an unbounded one so a legacy subscriber never has backlog dropped under it, and
+ * that must not read as a request to replay the whole cache on join.
+ */
+function resolvedStart(track: track.Subscriber, version: Version): number | undefined {
+	return carriesMaxAge(version) ? track.freshStart() : track.latest();
 }
 
 /**
@@ -471,7 +491,7 @@ export class Publisher {
 			startGroup: msg.startGroup,
 			endGroup: msg.endGroup,
 		});
-		const startGroup = msg.startGroup ?? track.latest();
+		const startGroup = msg.startGroup ?? resolvedStart(track, this.version);
 		if (startGroup !== undefined) track.startAt(startGroup);
 		track.endAt(msg.endGroup);
 

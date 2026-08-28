@@ -813,6 +813,31 @@ export class Subscriber {
 	}
 
 	/**
+	 * Where a subscription that named no {@link Subscription.startGroup} should begin: the
+	 * oldest cached group this subscriber's {@link Subscription.maxAge} still considers fresh.
+	 *
+	 * A zero budget (the default) resolves to {@link latest}, since every non-latest group is
+	 * stale the moment a newer one exists. A larger budget resolves further back, so a
+	 * subscriber that tolerates some age is handed the head of what it can still use instead
+	 * of only the live edge, without asking for history it would skip on arrival. Undefined
+	 * when nothing is cached.
+	 */
+	freshStart(): number | undefined {
+		const drift = this.#drift();
+		const { end } = this.#cursor.peek();
+
+		let oldest: number | undefined;
+		for (const { group } of this.#state.timeline.values()) {
+			if (end !== undefined && group.sequence > end) continue;
+			if (group.closed.peek() instanceof Error) continue;
+			if (oldest !== undefined && oldest <= group.sequence) continue;
+			if (this.#isStale(group, drift)) continue;
+			oldest = group.sequence;
+		}
+		return oldest;
+	}
+
+	/**
 	 * The track's exclusive final boundary, known once the producer closes cleanly:
 	 * one past the highest sequence produced, or 0 for a track that produced none.
 	 * Groups and datagrams share the sequence namespace, so this can exceed

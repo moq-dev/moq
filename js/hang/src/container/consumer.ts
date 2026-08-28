@@ -12,6 +12,17 @@ export interface ConsumerProps {
 	/** Target latency in milliseconds, controlling how aggressively slow groups are skipped (default: 0). */
 	// Read-only: a Getter (e.g. another component's output) is accepted directly.
 	latency?: GetterInit<Time.Milli>;
+	/**
+	 * Deliver a group that arrives below the delivery cursor instead of dropping it (default:
+	 * false).
+	 *
+	 * Groups are sent newest-first, so the head a publisher serves ahead of the live edge
+	 * arrives *after* it. Set this when the caller places frames by timestamp, as the audio
+	 * ring does, and a late group lands in its own slot however it arrives. Leave it off for a
+	 * decoder that consumes in order: a GoP that arrives after a newer one has nothing to
+	 * contribute. The latency budget still bounds how far back one may be.
+	 */
+	outOfOrder?: boolean;
 }
 
 interface Group {
@@ -113,6 +124,7 @@ export class Consumer {
 	#track: Moq.Track.Subscriber;
 	#format: Format;
 	#latency: Getter<Time.Milli>;
+	#outOfOrder: boolean;
 	#groups: Group[] = [];
 	#active?: number; // the active group sequence number
 	// Presentation end (max PTS + duration) of the group we most recently advanced past, so next()'s
@@ -144,6 +156,7 @@ export class Consumer {
 		this.#track = track;
 		this.#format = props.format;
 		this.#latency = getter(props.latency ?? Moq.Time.Milli.zero);
+		this.#outOfOrder = props.outOfOrder ?? false;
 
 		this.#signals.spawn(this.#run.bind(this));
 		this.#signals.cleanup(() => {
@@ -167,17 +180,21 @@ export class Consumer {
 				this.#active = consumer.sequence;
 			}
 
-			// Normally we drop anything behind the cursor. With an active reset the cursor isn't
-			// a valid floor (a late new-epoch group can sit below it); defer to the boundary and
-			// admit ambiguous groups so #runGroup can rule on them once their timestamps arrive.
+			// Normally we drop anything behind the cursor, unless the caller can place a late
+			// group anyway. With an active reset the cursor isn't a valid floor (a late
+			// new-epoch group can sit below it); defer to the boundary and admit ambiguous
+			// groups so #runGroup can rule on them once their timestamps arrive. A group the
+			// boundary proves reneged is dropped either way: it belongs to a timeline the
+			// publisher withdrew, which is not the same as arriving late.
+			const behind = !this.#outOfOrder && consumer.sequence < this.#active;
 			let drop: boolean;
 			if (this.#rewind.boundary) {
 				const verdict = this.#rewind.boundary.bySequence(consumer.sequence);
 				if (verdict === undefined) drop = false;
 				else if (verdict) drop = true;
-				else drop = consumer.sequence < this.#active;
+				else drop = behind;
 			} else {
-				drop = consumer.sequence < this.#active;
+				drop = behind;
 			}
 
 			if (drop) {

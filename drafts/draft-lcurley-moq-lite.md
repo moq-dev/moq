@@ -185,7 +185,7 @@ Only the subscriber knows whether a partial Group is any use to it, so only the 
 
 Frame indices are only meaningful relative to a Group the subscriber has already begun receiving, so:
 
-- A `Frame Start` is meaningless without an absolute `Group Start`; a subscriber requesting the latest group (`Group Start` = 0) MUST send `Frame Start` = 0.
+- A `Frame Start` is meaningless without an absolute `Group Start`; a subscriber letting the publisher choose the start (`Group Start` = 0) MUST send `Frame Start` = 0.
 - A `Frame End` is meaningless without a `Group End`; an unbounded subscription (`Group End` = 0) MUST send `Frame End` = 0.
 
 A publisher MUST treat a violation of either rule as a protocol violation and reset the stream.
@@ -987,8 +987,13 @@ See the [Expiration](#expiration) section for more information.
 
 **Group Start**:
 The first group to deliver.
-A value of 0 means the latest group (default).
+A value of 0 means the publisher chooses (default).
 A non-zero value is the absolute group sequence + 1.
+
+When it does, the publisher SHOULD start at the oldest cached group whose age is within `Subscriber Max Age`, and MUST NOT start at an older one.
+A `Subscriber Max Age` of 0 therefore starts at the latest group, since every older group is already stale.
+A subscriber that buffers has then been handed the head of what it can still play instead of only the live edge, and is never sent history it would discard on arrival: the same bound decides what to start at and what to expire, so the two cannot disagree.
+This is a floor on delivery, not a guarantee that the groups exist; see `Publisher Max Age` in [TRACK_INFO](#track-info).
 
 **Group End**:
 The last group to deliver (inclusive).
@@ -1368,6 +1373,7 @@ The `Message Length` describes the payload size on the wire.
 - Exempted a ceiling-cost serving path from the actively-carrying cost discount: a relay whose serving path costs the saturation ceiling (primarily a session that received a GOAWAY) advertises the ceiling instead of 0, so the drain propagates downstream instead of being re-masked by each carrying hop. Keyed on the value, not the reason, which does not travel on the wire.
 - Added the Error Codes section, defining separate session and stream code spaces and listing the codes moq-lite uses, reused unchanged from moq-transport. Codes 64+ are the application's; 32-63 are reserved and MUST NOT be interpreted, pending a future revision. Previously the codes were unspecified, so an endpoint could neither send one a peer would understand nor safely interpret one it received. Note this renumbers every code an existing implementation sent, and that a stream reset of 0x0 is now INTERNAL_ERROR rather than a cancellation (CANCELLED is 0x1).
 - Renamed `Subscriber Max Latency` to `Subscriber Max Age` and `Publisher Max Latency` to `Publisher Max Age`.
+- Resolve an absent `Group Start` from `Subscriber Max Age` rather than always taking the latest group, so a subscriber that buffers is handed the head of what it can still play. A zero budget still resolves to the latest group.
 
 ## moq-lite-05
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.
