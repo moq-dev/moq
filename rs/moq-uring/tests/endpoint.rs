@@ -449,7 +449,7 @@ fn connections_share_one_tx_buffer_fairly() {
 	let certs = support::certs().expect("certificates");
 
 	let mut udp_config = udp::Config::default();
-	udp_config.tx_buffers = 1;
+	udp_config.tx_buffers_max = 1;
 	let sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp_config)
 		.expect("socket");

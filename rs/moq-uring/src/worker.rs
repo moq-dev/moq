@@ -588,13 +588,48 @@ mod tests {
 		// Without validation the power-of-two rounding wraps to a zero-entry
 		// ring, which allocates nothing and underflows its mask.
 		let config = udp::Config {
-			rx_buffers: u16::MAX,
+			rx_buffers_max: u16::MAX,
 			..Default::default()
 		};
 		let err = handle
 			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
 			.expect_err("oversized pool");
 		assert!(matches!(err, Error::Io(err) if err.kind() == std::io::ErrorKind::InvalidInput));
+	}
+
+	#[test]
+	fn the_send_pool_grows_to_its_ceiling() {
+		let Some(worker) = worker() else { return };
+		let handle = worker.handle();
+		// A ceiling is a bound, not a reservation: 65535 default-length buffers
+		// would be 4 GiB if the pool were allocated up front.
+		let config = udp::Config {
+			tx_buffers_max: u16::MAX,
+			..Default::default()
+		};
+		handle
+			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
+			.expect("socket");
+
+		// Short buffers so the whole ceiling fits in a test.
+		let config = udp::Config {
+			tx_buffers_max: 200,
+			tx_buffer_len: 4096,
+			..Default::default()
+		};
+		let sock = handle
+			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
+			.expect("socket");
+
+		// Holding every buffer starves the pool, which grows past its initial
+		// floor rather than serializing the caller behind it, and stops at the
+		// ceiling.
+		let mut held = Vec::new();
+		while let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) {
+			held.push(tx);
+		}
+		assert_eq!(held.len(), 200);
+		drop(worker);
 	}
 
 	#[test]
