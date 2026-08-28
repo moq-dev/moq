@@ -319,6 +319,17 @@ async fn run_session(
 		_ = shutdown.changed() => return Ok(()),
 	};
 
+	follow_catalog(broadcast, element, shutdown).await
+}
+
+/// Follow the broadcast's catalog for the whole session, keeping one [pump](run_pump) per
+/// announced rendition in sync with it. Returns once the catalog closes and the last pump
+/// drains, or `shutdown` fires.
+async fn follow_catalog(
+	broadcast: moq_net::broadcast::Consumer,
+	element: glib::WeakRef<super::MoqSrc>,
+	shutdown: &mut watch::Receiver<bool>,
+) -> Result<()> {
 	let catalog_track = broadcast
 		.track(hang::catalog::Catalog::DEFAULT_NAME)?
 		.subscribe(hang::catalog::Catalog::default_subscription())
@@ -353,14 +364,7 @@ async fn run_session(
 			// returning None) while we wait for the remaining pumps to drain.
 			next = catalog_consumer.next(), if !catalog_closed => {
 				match next? {
-					// Race reconcile against shutdown. It awaits a per-rendition `subscribe`
-					// that only resolves once track info arrives, so a catalog naming a track
-					// the publisher never accepts would otherwise park here and make the whole
-					// session deaf to shutdown, leaking the connection and pads.
-					Some(catalog) => tokio::select! {
-						result = reconcile(&catalog, &mut active, &mut pumps, &broadcast, &element) => result?,
-						_ = shutdown.changed() => break,
-					},
+					Some(catalog) => reconcile(&catalog, &mut active, &mut pumps, &broadcast, &element),
 					// Catalog track closed. Don't cancel the pumps: let each reach its
 					// natural Ok(None) -> EOS end so downstream sees a clean EOS rather than a
 					// bare pad drop. We just stop reconciling and wait for them to drain.
@@ -370,9 +374,9 @@ async fn run_session(
 		}
 	}
 
-	// Shutdown, including a shutdown that interrupted a reconcile: cancel every pump, then
-	// wait for them all to drop their pads. Cancel all up front (pumps only exit on their own
-	// `cancel`), or the not-yet-cancelled ones would keep streaming while we await the rest.
+	// Shutdown: cancel every pump, then wait for them all to drop their pads. Cancel all up front
+	// (pumps only exit on their own `cancel`), or the not-yet-cancelled ones would keep streaming
+	// while we await the rest.
 	// On the clean catalog-closed exit `active`/`pumps` are already drained, so this is a no-op.
 	for (_, track) in active.drain() {
 		let _ = track.cancel.send(true);
@@ -384,13 +388,17 @@ async fn run_session(
 
 /// Bring the live set of pumps in line with `catalog`: spawn pumps for newly announced
 /// renditions, tear down ones that vanished, and recreate any whose caps or container changed.
-async fn reconcile(
+///
+/// Infallible by design: every way a single rendition can be unusable (unsupported codec,
+/// malformed init, a name the broadcast refuses) skips just that rendition, so one bad entry in
+/// the catalog can never tear down the ones already streaming.
+fn reconcile(
 	catalog: &moq_mux::catalog::hang::Catalog,
 	active: &mut HashMap<String, ActiveTrack>,
 	pumps: &mut tokio::task::JoinSet<()>,
 	broadcast: &moq_net::broadcast::Consumer,
 	element: &glib::WeakRef<super::MoqSrc>,
-) -> Result<()> {
+) {
 	struct Desired {
 		kind: TrackKind,
 		shape: Shape,
@@ -456,8 +464,18 @@ async fn reconcile(
 		}
 		.fetch_add(1, Ordering::Relaxed);
 
-		let track_subscriber = broadcast.track(&name)?.subscribe(None).await?;
-		let track = moq_mux::container::Consumer::new(track_subscriber, container).with_latency(Duration::from_secs(1));
+		// Only the handle is resolved here; the pump awaits the subscription itself. That wait
+		// ends when the publisher answers with the track info, which for a rendition nobody
+		// serves is never, so doing it here would park the catalog loop and leave every other
+		// rendition unstarted. A name the broadcast refuses outright skips just this rendition,
+		// same as an unsupported codec or a malformed init above.
+		let track = match broadcast.track(&name) {
+			Ok(track) => track,
+			Err(err) => {
+				gst::warning!(CAT, "ignoring rendition {name}: {err:?}");
+				continue;
+			}
+		};
 
 		let descriptor = TrackDescriptor {
 			kind: d.kind,
@@ -466,7 +484,14 @@ async fn reconcile(
 		};
 		let (cancel_tx, cancel_rx) = watch::channel(false);
 		let task = pumps.spawn_on(
-			run_pump(element.clone(), descriptor, d.shape.caps.clone(), track, cancel_rx),
+			run_pump(
+				element.clone(),
+				descriptor,
+				d.shape.caps.clone(),
+				track,
+				container,
+				cancel_rx,
+			),
 			RUNTIME.handle(),
 		);
 
@@ -479,8 +504,6 @@ async fn reconcile(
 			},
 		);
 	}
-
-	Ok(())
 }
 
 /// Tear-down / spawn decisions for one catalog update, computed purely from the desired and
@@ -526,16 +549,35 @@ impl TrackDescriptor {
 	}
 }
 
-/// Reads frames from one track and pushes them to a pad it owns for its whole lifetime:
-/// it creates the pad, streams buffers, and removes the pad on exit. Runs until the track
-/// ends (EOS), errors, or `cancel` fires.
+/// Subscribes to one track, then reads its frames and pushes them to a pad it owns for the rest
+/// of its lifetime: it creates the pad, streams buffers, and removes the pad on exit. Runs until
+/// the track ends (EOS), errors, or `cancel` fires.
 async fn run_pump(
 	element: glib::WeakRef<super::MoqSrc>,
 	descriptor: TrackDescriptor,
 	caps: gst::Caps,
-	mut track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
+	track: moq_net::track::Consumer,
+	container: moq_mux::catalog::hang::Container,
 	mut cancel: watch::Receiver<bool>,
 ) {
+	// Resolves once the publisher answers with the track info. A catalog can name a track its
+	// publisher never serves, so this can wait forever; racing `cancel` keeps such a pump
+	// reapable, and holding the wait here rather than in `reconcile` keeps it off every other
+	// rendition.
+	let subscriber = tokio::select! {
+		_ = cancel.changed() => return,
+		subscriber = track.subscribe(None) => match subscriber {
+			Ok(subscriber) => subscriber,
+			Err(err) => {
+				gst::warning!(CAT, "track {} failed to subscribe: {err:?}", descriptor.name);
+				return;
+			}
+		}
+	};
+	let mut track = moq_mux::container::Consumer::new(subscriber, container).with_latency(Duration::from_secs(1));
+
+	// The pad appears only once the track is live, so a pad downstream can link to is a promise
+	// that the rendition is actually flowing.
 	let Some(pad) = create_pad(&element, &descriptor, &caps) else {
 		return;
 	};
@@ -798,5 +840,134 @@ mod tests {
 			relative_pts(Timestamp::from_millis(2500).unwrap(), reference),
 			gst::ClockTime::from_mseconds(500)
 		);
+	}
+}
+
+#[cfg(test)]
+mod session_tests {
+	use std::collections::BTreeMap;
+	use std::time::Duration;
+
+	use gst::glib;
+	use gst::prelude::*;
+	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoConfig};
+	use tokio::sync::watch;
+
+	use super::follow_catalog;
+
+	/// The pumps push from their own tasks, so the element only has to exist and own pads.
+	fn element() -> super::super::MoqSrc {
+		gst::init().unwrap();
+		glib::Object::new()
+	}
+
+	fn video_rendition() -> VideoConfig {
+		let mut config = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0x00,
+			level: 0x1f,
+			inline: false,
+		});
+		config.container = Container::Legacy;
+		config
+	}
+
+	fn audio_rendition() -> AudioConfig {
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		config.container = Container::Legacy;
+		config
+	}
+
+	/// The element's pads of one kind. Matched by prefix because the `%u` suffix comes from a
+	/// process-global counter, so a pad's number depends on what else the test binary has run.
+	fn pads(element: &super::super::MoqSrc, kind: &str) -> Vec<gst::Pad> {
+		element
+			.pads()
+			.into_iter()
+			.filter(|pad| pad.name().starts_with(kind))
+			.collect()
+	}
+
+	/// Poll for a pad rather than sleeping a fixed beat: the pumps run on another runtime, so
+	/// the only ordering we have is "eventually". Fails the test if it never shows up.
+	fn await_pad(element: &super::super::MoqSrc, kind: &str) -> gst::Pad {
+		for _ in 0..100 {
+			if let Some(pad) = pads(element, kind).into_iter().next() {
+				return pad;
+			}
+			std::thread::sleep(Duration::from_millis(50));
+		}
+		panic!("no {kind} pad ever appeared");
+	}
+
+	/// A catalog can name a rendition its publisher never serves: the browser announces audio a
+	/// beat before its video encoder configures, and a subscription only resolves once the track
+	/// info arrives. Such a rendition must not hold up the ones that do arrive, nor the catalog
+	/// updates that announce them.
+	#[test]
+	fn a_rendition_nobody_serves_does_not_block_the_others() {
+		let element = element();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		// A live handler is what makes an unserved name park rather than resolve `NotFound`,
+		// which is how it behaves over the wire: the publisher just never answers.
+		let _dynamic = broadcast.dynamic();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		// First update announces audio only, and no producer ever answers for it.
+		{
+			let mut guard = catalog.lock();
+			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
+		}
+
+		let (shutdown, mut shutdown_rx) = watch::channel(false);
+		let consumer = broadcast.consume();
+		let weak = element.downgrade();
+		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
+
+		// Second update adds video, backed by a real track so its subscription resolves.
+		let _video = broadcast.create_track("video", None).unwrap();
+		{
+			let mut guard = catalog.lock();
+			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
+		}
+
+		let pad = await_pad(&element, "video_");
+		assert!(pads(&element, "audio_").is_empty(), "the unserved rendition got a pad");
+
+		let _ = shutdown.send(true);
+		super::RUNTIME.block_on(session).unwrap().unwrap();
+		assert!(pad.parent().is_none(), "the pad outlived the session");
+	}
+
+	/// The same isolation for a rendition the broadcast refuses by name (no handler will ever
+	/// serve it) rather than one that merely never answers.
+	#[test]
+	fn a_refused_rendition_does_not_end_the_session() {
+		let element = element();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		{
+			let mut guard = catalog.lock();
+			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
+		}
+
+		let (shutdown, mut shutdown_rx) = watch::channel(false);
+		let consumer = broadcast.consume();
+		let weak = element.downgrade();
+		let session = super::RUNTIME.spawn(async move { follow_catalog(consumer, weak, &mut shutdown_rx).await });
+
+		let _video = broadcast.create_track("video", None).unwrap();
+		{
+			let mut guard = catalog.lock();
+			guard.video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
+		}
+
+		await_pad(&element, "video_");
+
+		let _ = shutdown.send(true);
+		super::RUNTIME.block_on(session).unwrap().unwrap();
 	}
 }
