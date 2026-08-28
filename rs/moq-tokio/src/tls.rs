@@ -362,6 +362,7 @@ pub struct Connect {
 	/// if a rotation is temporarily missing or malformed.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[usage(name = "connect-tls-root", long = "connect-tls-root", env = "MOQ_CONNECT_TLS_ROOT")]
+	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
@@ -418,6 +419,7 @@ pub struct Connect {
 	/// Must be paired with `--connect-tls-key`.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(name = "connect-tls-cert", long = "connect-tls-cert", env = "MOQ_CONNECT_TLS_CERT")]
+	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	pub cert: Option<PathBuf>,
 
 	/// PEM file containing the private key for mTLS.
@@ -426,6 +428,7 @@ pub struct Connect {
 	/// Must be paired with `--connect-tls-cert`.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(name = "connect-tls-key", long = "connect-tls-key", env = "MOQ_CONNECT_TLS_KEY")]
+	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "key"))]
 	pub key: Option<PathBuf>,
 
 	/// Danger: Disable TLS certificate verification.
@@ -1131,12 +1134,14 @@ pub fn init_android(env: &mut jni::Env, context: jni::objects::JObject) -> Resul
 pub struct Listen {
 	/// Load the given certificate from disk.
 	#[usage(long = "listen-tls-cert", name = "listen-tls-cert", env = "MOQ_LISTEN_TLS_CERT")]
+	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub cert: Vec<PathBuf>,
 
 	/// Load the given key from disk.
 	#[usage(long = "listen-tls-key", name = "listen-tls-key", env = "MOQ_LISTEN_TLS_KEY")]
+	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "key"))]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub key: Vec<PathBuf>,
@@ -1195,6 +1200,7 @@ pub struct Listen {
 		delimiter = ',',
 		env = "MOQ_LISTEN_TLS_ROOT"
 	)]
+	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,

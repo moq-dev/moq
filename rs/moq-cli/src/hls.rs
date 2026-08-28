@@ -15,6 +15,7 @@ use crate::moq::notify_ready;
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ImportArgs {
 	/// Playlist URL (http/https) or local file path.
+	#[usage(value_hint = usage::ValueHint::AnyPath, extensions("m3u8", "m3u"))]
 	pub playlist: String,
 }
 

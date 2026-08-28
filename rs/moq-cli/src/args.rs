@@ -146,18 +146,16 @@ impl std::error::Error for ParseError {}
 
 impl Invocation {
 	/// Parse the process arguments, exiting with Usage's rendered message on error.
-	pub fn parse() -> Self {
+	///
+	/// Async because a completion request is answered first, and some completers
+	/// dial the relay the line already names (see [`crate::complete`]).
+	pub async fn parse() -> Self {
 		let args: Vec<OsString> = std::env::args_os().collect();
 		// `#[usage(completion)]` installs the `__complete_word__` interception in the
 		// generated `Cli::parse()`, which the stage grammar cannot use: without this
 		// the request reaches the ordinary grammar and is refused. Recognized before
 		// the split on `--`, because a completion is not a command this binary runs.
-		//
-		// Answered against the root, so a cursor inside a later stage is completed
-		// against a grammar that also carries the process-wide flags a stage refuses.
-		// Narrowing that needs the request's own line and cursor rewritten to the last
-		// stage, which is not done here.
-		if let Some(reply) = completion_request(args.get(1..).unwrap_or_default()) {
+		if let Some(reply) = crate::complete::answer(args.get(1..).unwrap_or_default()).await {
 			print!("{reply}");
 			std::process::exit(0);
 		}
@@ -267,98 +265,6 @@ impl Invocation {
 
 		Ok(())
 	}
-}
-
-/// Answer a shell's completion request, against the grammar the cursor is actually in.
-///
-/// `#[usage(completion)]` installs the `__complete_word__` interception in the
-/// generated `Cli::parse()`, which the stage grammar cannot use: this binary splits
-/// argv on `--` and parses each chunk itself, so without this the request reaches
-/// the ordinary grammar and is refused.
-///
-/// The root spec is the globals plus the *first* stage. A cursor in a later chunk
-/// answered against it offers `--connect` and the other process-wide flags, which a
-/// stage refuses, so the request is rewritten to the active chunk and handed to
-/// [`Stage`]. Both request shapes normalize to a word list first: elvish sends one
-/// already, and everything else sends a line and a cursor that Usage's own splitter
-/// turns into the same thing.
-fn completion_request(argv: &[OsString]) -> Option<String> {
-	if argv.first()?.to_str()? != "__complete_word__" {
-		return None;
-	}
-
-	let mut shell_name = "bash".to_string();
-	let mut candidates: Option<String> = None;
-	let mut line = String::new();
-	let mut cursor = None;
-	let mut words: Option<Vec<String>> = None;
-
-	let mut rest = argv[1..].iter();
-	while let Some(arg) = rest.next() {
-		match arg.to_str().unwrap_or_default() {
-			"--shell" => {
-				if let Some(name) = rest.next() {
-					shell_name = name.to_string_lossy().into_owned();
-				}
-			}
-			"--line" => {
-				if let Some(value) = rest.next() {
-					line = value.to_string_lossy().into_owned();
-				}
-			}
-			"--cursor" => cursor = rest.next().and_then(|v| v.to_str()).and_then(|v| v.parse().ok()),
-			"--candidates" => candidates = rest.next().map(|v| v.to_string_lossy().into_owned()),
-			// Terminal, as it is for Usage: the rest of argv is the word list.
-			"--words" => {
-				words = Some(rest.map(|w| w.to_string_lossy().into_owned()).collect());
-				break;
-			}
-			// An unknown flag is a shell passing something this version does not know
-			// about. Ignored rather than refused, the way Usage ignores it.
-			_ => {}
-		}
-	}
-
-	let shell = usage::complete::Shell::from_name(&shell_name).unwrap_or(usage::complete::Shell::Bash);
-	let (mut words, cword) = match words {
-		Some(mut words) => {
-			if words.is_empty() {
-				words.push(String::new());
-			}
-			let cword = words.len() - 1;
-			(words, cword)
-		}
-		None => {
-			let split = usage::complete::split(&line, cursor.unwrap_or(line.len()), shell);
-			(split.words, split.cword)
-		}
-	};
-
-	// Everything past the cursor says nothing about the word being completed, and
-	// dropping it leaves that word last, which is the shape `--words` describes.
-	words.truncate(cword + 1);
-
-	// Strictly before the cursor: a cursor sitting *on* a `--` is typing the
-	// separator itself, which is the root's business rather than a stage's.
-	let stage_start = words[..cword].iter().rposition(|word| word == "--").map(|at| at + 1);
-	let Some(start) = stage_start else {
-		return Cli::completion_request(argv);
-	};
-
-	// `words[0]` is read as the program name, so the chunk gets one of its own.
-	let mut rewritten: Vec<OsString> = vec![
-		OsString::from("__complete_word__"),
-		OsString::from("--shell"),
-		OsString::from(&shell_name),
-	];
-	if let Some(name) = candidates {
-		rewritten.push(OsString::from("--candidates"));
-		rewritten.push(OsString::from(name));
-	}
-	rewritten.push(OsString::from("--words"));
-	rewritten.push(OsString::from("moq"));
-	rewritten.extend(words[start..].iter().map(OsString::from));
-	Stage::completion_request(&rewritten)
 }
 
 /// Turn a Usage parse result into a [`ParseError`].
@@ -576,6 +482,8 @@ pub enum Command {
 	Transcode(crate::transcode::Args),
 	/// Generate, sign, and verify the JWT tokens a relay authenticates with.
 	Token(moq_token_cli::Args),
+	/// Write the shell script that completes this command line.
+	Completion(crate::complete::Args),
 	/// List the capture devices `import capture` can name.
 	#[cfg(feature = "capture")]
 	Devices,
@@ -609,6 +517,7 @@ impl Command {
 			#[cfg(feature = "transcode")]
 			Self::Transcode(_) => "transcode",
 			Self::Token(_) => "token",
+			Self::Completion(_) => "completion",
 			#[cfg(feature = "capture")]
 			Self::Devices => "devices",
 		}
@@ -1594,42 +1503,5 @@ mod tests {
 			choices.sort_unstable();
 			assert_eq!(choices, &expected, "--{long} is out of step with Version::names()");
 		}
-	}
-
-	/// A cursor in a later stage is completed against the stage grammar.
-	///
-	/// The root spec is the globals plus the first stage, so answering a later chunk
-	/// against it offers process-wide flags that the chunk refuses.
-	#[test]
-	fn completion_retargets_to_the_active_stage() {
-		fn complete(line: &str) -> Vec<String> {
-			let argv: Vec<OsString> = ["__complete_word__", "--shell", "bash", "--line", line, "--cursor"]
-				.iter()
-				.map(OsString::from)
-				.chain(std::iter::once(OsString::from(line.len().to_string())))
-				.collect();
-			completion_request(&argv)
-				.unwrap_or_default()
-				.lines()
-				.map(str::to_string)
-				.collect()
-		}
-
-		// A stage offers its own flags, and none of the globals it would refuse.
-		let staged = complete("moq --connect http://x/y import fmp4 -- export fmp4 --");
-		assert!(!staged.is_empty(), "a later stage completed nothing");
-		for global in ["--connect", "--origin", "--broadcast"] {
-			assert!(
-				!staged.iter().any(|c| c == global),
-				"{global} leaked into a stage that refuses it: {staged:?}"
-			);
-		}
-
-		// The root still answers for itself.
-		let root = complete("moq --conn");
-		assert!(root.iter().any(|c| c == "--connect"), "root lost its globals: {root:?}");
-
-		// A cursor sitting on the separator is typing `--`, not inside a stage.
-		assert!(complete("moq import fmp4 --").is_empty());
 	}
 }

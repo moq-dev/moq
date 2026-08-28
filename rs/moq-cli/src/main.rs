@@ -7,6 +7,7 @@
 mod args;
 #[cfg(feature = "cluster-lan")]
 mod cluster;
+mod complete;
 #[cfg(feature = "capture")]
 mod devices;
 mod hls;
@@ -180,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
 		.install_default()
 		.expect("failed to install default crypto provider");
 
-	let cli = Invocation::parse();
+	let cli = Invocation::parse().await;
 	cli.log.init()?;
 	cli.validate()?;
 
@@ -193,6 +194,10 @@ async fn main() -> anyhow::Result<()> {
 			Command::Token(token) => {
 				cli.moq.reject("token")?;
 				return token.run();
+			}
+			Command::Completion(completion) => {
+				cli.moq.reject("completion")?;
+				return completion.run();
 			}
 			#[cfg(feature = "capture")]
 			Command::Devices => {

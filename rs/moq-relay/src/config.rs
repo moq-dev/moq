@@ -87,6 +87,7 @@ pub struct Config {
 
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
+	#[usage(value_hint = usage::ValueHint::FilePath, extensions("toml"))]
 	pub file: Option<String>,
 
 	/// Iroh specific configuration, used for both a client and server.

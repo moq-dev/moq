@@ -56,6 +56,38 @@ cargo build --release --bin moq-cli
 
 The binary will be in `target/release/moq-cli`.
 
+### Shell completions
+
+`moq completion <shell>` writes the script that makes a shell ask `moq` what fits
+at the cursor. `--install` puts it where that shell looks, and prints any line you
+still have to add yourself for a shell that can't autoload one:
+
+```bash
+# bash, elvish, fish, nu, powershell, zsh
+moq completion zsh --install
+
+# or write it wherever you keep them
+moq completion bash > ~/.local/share/bash-completion/completions/moq
+```
+
+Most of what completes is static: verbs, flags, codecs, and the file paths a flag
+takes. These are looked up when you press Tab:
+
+| Flag | Completes from |
+|---|---|
+| `--broadcast` | the broadcasts announced on the `--connect` relay |
+| `--video-name` / `--audio-name` | the renditions in that broadcast's catalog |
+| `--camera`, `--display`, `--window`, `--app`, `--microphone` | this machine's capture sources |
+
+The first two rows open a short subscribe-only connection, and **only** when a
+`--connect` URL is already on the line, so Tab never dials a relay you have not
+named. The whole exchange is capped at half a second and stays silent about
+failure: an unreachable relay means no candidates, never an error in your prompt.
+
+`--camera`, `--display`, and `--microphone` take an optional value (bare
+`--camera` opens the default), so a shell can't tell whether the next word belongs
+to them. Write those attached to complete them: `--camera=<TAB>`.
+
 ### Heap profiling
 
 The Nix package includes jemalloc profiling support. Source builds can opt in

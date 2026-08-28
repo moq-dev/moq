@@ -48,7 +48,7 @@ mod video;
 #[usage(completion)]
 pub struct Config {
 	/// Path to the Game Boy ROM file.
-	#[usage(long)]
+	#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("gb", "gbc"))]
 	pub rom: PathBuf,
 
 	/// Session name (used in broadcast path). Defaults to ROM filename.

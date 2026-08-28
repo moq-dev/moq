@@ -35,7 +35,7 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 **Apps / binaries**
 
 - `moq-relay` (lib+bin): clusterable, media-agnostic relay. axum HTTP API, JWT auth, WebSocket fallback, clustering. Config/TOML merge pattern lives here (see below).
-- `moq-cli` (bin, `moq`): the unified media router (`moq <MoQ side> <import|export> <endpoint>`, plus the feature-gated `transcode` verb); stdin/stdout media piping. The CLI surface for the gateway library crates below lives here. `token` and `devices` are the local verbs: they run before any transport is bound and reject a MoQ side rather than ignoring it.
+- `moq-cli` (bin, `moq`): the unified media router (`moq <MoQ side> <import|export> <endpoint>`, plus the feature-gated `transcode` verb); stdin/stdout media piping. The CLI surface for the gateway library crates below lives here. `token`, `devices`, and `completion` are the local verbs: they run before any transport is bound and reject a MoQ side rather than ignoring it. Shell completion lives in `src/complete.rs`, which owns both the `__complete_word__` plumbing (the root grammar answers a cursor before the first `--`, the stage grammar after one) and the runtime completers that dial the relay `--connect` already names.
 - `moq-rtc` (lib): WebRTC (WHIP/WHEP) gateway. Bridges browser WebRTC ingest/playback to MoQ broadcasts (str0m ICE/DTLS, A/V sync, NACK). Embeddable axum routers / `Client`; the CLI surface lives in `moq-cli`.
 - `moq-rtmp` (lib): RTMP / enhanced-RTMP gateway (ingest + egress, `rml_rtmp`, FLV via `moq-mux`). RTMPS (rustls + tokio-rustls) is the optional `tls` feature.
 - `moq-srt` (lib): bidirectional SRT gateway (MPEG-TS via `srt-tokio` + `moq-mux`).

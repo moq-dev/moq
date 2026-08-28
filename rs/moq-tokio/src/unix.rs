@@ -28,6 +28,7 @@ const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
 pub struct Config {
 	/// Bind a plaintext qmux Unix-socket listener at this path.
 	#[usage(long = "listen-unix-bind", name = "listen-unix-bind", env = "MOQ_LISTEN_UNIX_BIND")]
+	#[usage(value_hint = usage::ValueHint::AnyPath)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub bind: Option<PathBuf>,
 
