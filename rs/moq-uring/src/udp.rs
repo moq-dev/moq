@@ -689,6 +689,11 @@ impl TxBuf {
 	/// `segment` bytes (the last may be short). Fire-and-forget: the buffer
 	/// returns to the pool when the kernel completes, and a failed send
 	/// surfaces on the next pool acquire.
+	///
+	/// This only stages an SQE, so the datagram reaches the kernel when the
+	/// worker next enters the ring. Stopping the worker in between does not
+	/// lose it: [`crate::Worker`]'s drop submits whatever is still staged and
+	/// waits for the completions.
 	pub fn send(mut self, len: usize, to: SocketAddr, segment: usize) -> io::Result<()> {
 		// `UDP_SEGMENT` is a u16, so an oversized segment would silently
 		// truncate into a tiny stride and explode the implied segment count.

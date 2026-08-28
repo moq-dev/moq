@@ -260,6 +260,12 @@ impl Inner {
 /// driver itself keeps the connection alive until it ends; close explicitly
 /// with [`close`](web_transport_trait::poll::Session::close) (which moq's
 /// session machine does).
+///
+/// That close only records the code: the driver task is what frames the
+/// CONNECTION_CLOSE and hands it to the socket. Drive the worker until
+/// [`poll_closed`](web_transport_trait::poll::Session::poll_closed) resolves
+/// before stopping it, or the packet is never built and the peer idles out
+/// instead.
 pub struct Connection {
 	shared: Shared,
 	// Retains this clone's waiter registrations across polls.

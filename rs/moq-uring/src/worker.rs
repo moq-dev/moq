@@ -44,6 +44,13 @@ pub struct Config {}
 /// [`Handle`]: UDP sockets, timers, spawned tasks. Wakes from other threads
 /// (any `Waker` this worker minted) are an atomic store plus, only while the
 /// worker is parked, one futex syscall.
+///
+/// Dropping the worker submits the SQEs its last turn staged and waits for
+/// their completions, so a datagram already handed to a [`udp::Socket`] still
+/// goes out. It runs no tasks, though, so work a task has merely been asked
+/// for is not performed: a QUIC close is queued on its connection and framed
+/// by the driver task, so keep driving until the close is published rather
+/// than stopping the worker on the call that asked for it.
 pub struct Worker {
 	shared: Rc<Shared>,
 	tasks: kio::Tasks<Task>,
