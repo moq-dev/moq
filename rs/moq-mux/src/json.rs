@@ -174,8 +174,22 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 	}
 
 	/// Append one record to the log.
+	///
+	/// A record that cannot be written ends the track. [`moq_json::stream`] recovers from a failed
+	/// write by rolling a fresh group, but a catalog [`Mode::Stream`] track is a single group: a log
+	/// missing a record is not the lossless log the mode promises, and a second group would present
+	/// that gap as a complete log to a subscriber that joins afterwards. Every later append then
+	/// fails on the closed track.
 	pub fn append(&mut self, value: &T) -> crate::Result<()> {
-		Ok(self.inner.append(value)?)
+		let Err(err) = self.inner.append(value) else {
+			return Ok(());
+		};
+
+		// moq-json has already closed the group it was writing into; closing the track is what stops
+		// the next append from opening a second one.
+		let _ = self.inner.finish();
+
+		Err(err.into())
 	}
 
 	/// Finish the track and retire its catalog entry.
