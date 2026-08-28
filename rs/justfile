@@ -12,10 +12,12 @@ set working-directory := '..'
 default:
     just check
 
-# Default features only, here and in CI. The permutations (`--all-features`,
-# `--no-default-features`) each cost a full extra workspace compile that shares
-# almost nothing with this one, which is too slow for a per-PR gate; `features`
-# below covers them nightly.
+# Default features for the selected workspace packages, here and in CI. The full
+# workspace permutations (`--all-features`, `--no-default-features`) each cost a
+# separate compile that shares almost nothing with this one, so `features` below
+# covers them nightly. `check-changed` makes one scoped exception for moq-tokio,
+# whose feature-gated transport surface must compile in isolation to avoid
+# workspace feature unification hiding a broken configuration.
 #
 # No `cargo check` pass: clippy is a superset of it, and the two use different
 # rustc wrappers, so running both means compiling the workspace twice.
@@ -153,6 +155,14 @@ _wants-wasm $PACKAGES:
     set -euo pipefail
     grep -qwE '(moq-wasm|moq-mux|moq-ffi)' <<< "$(just rs _names "$PACKAGES")"
 
+# True when the selection includes moq-tokio, whose zero-feature build is hidden
+# by workspace feature unification whenever any dependent enables a transport.
+[private]
+_wants-tokio-features $PACKAGES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    grep -qw 'moq-tokio' <<< "$(just rs _names "$PACKAGES")"
+
 # Print the crate names behind a list of `--package` flags.
 [private]
 _names $PACKAGES:
@@ -192,6 +202,13 @@ _select-test:
     relay=$(just rs _select "rs/moq-relay/src/web.rs")
     if just rs _wants-wasm "$relay"; then
     	fail "a moq-relay diff must not drive it: $(just rs _names "$relay")"
+    fi
+
+    tokio=$(just rs _select "rs/moq-tokio/src/lib.rs")
+    just rs _wants-tokio-features "$tokio" \
+        || fail "a moq-tokio diff must drive its feature matrix: $(just rs _names "$tokio")"
+    if just rs _wants-tokio-features "$relay"; then
+        fail "a moq-relay-only selection must not drive the moq-tokio feature matrix"
     fi
 
     # A non-crate directory under rs/ seeds a name that is not a package. It must
@@ -246,6 +263,10 @@ check-changed $FILES:
     	*)     echo "rs: checking $(just rs _names "$packages")"; just rs check $packages ;;
     esac
 
+    if [[ "$packages" == "ALL" ]] || just rs _wants-tokio-features "$packages"; then
+        just rs tokio-features
+    fi
+
     # moq-wasm's crate root is entirely `#![cfg(target_arch = "wasm32")]`, so
     # however it got selected the host-target pass above compiled it to nothing
     # and saw no errors in it. This wasm32 pass is what actually checks it.
@@ -257,6 +278,12 @@ check-changed $FILES:
     if [[ "$packages" == "ALL" ]] || just rs _wants-wasm "$packages"; then
     	just rs wasm
     fi
+
+# Compile moq-tokio by itself at the two feature extremes. Its default-feature
+# build is already part of the ordinary clippy pass above.
+tokio-features:
+    cargo check --locked -p moq-tokio --no-default-features
+    cargo check --locked -p moq-tokio --all-features
 
 # Same as `fix`, but scoped the same way as `check-changed`.
 fix-changed $FILES:

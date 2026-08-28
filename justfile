@@ -195,6 +195,7 @@ check-all *args:
     just _tools ALL
     just js check
     just rs check --workspace {{ args }}
+    just rs tokio-features
     # Not covered by the line above: moq-wasm only exists on the wasm32 target.
     just rs wasm
     just py check

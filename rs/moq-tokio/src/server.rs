@@ -2,9 +2,11 @@ use std::net;
 #[cfg(any(test, all(feature = "uds", unix)))]
 use std::path::PathBuf;
 
+use crate::Error;
+#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+use crate::QuicBackend;
 #[cfg(feature = "iroh")]
 use crate::iroh;
-use crate::{Error, QuicBackend};
 use moq_net::Session;
 use url::Url;
 

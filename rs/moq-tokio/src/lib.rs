@@ -9,7 +9,7 @@
 //! - Iroh P2P (requires `iroh` feature)
 //!
 //! See [`Client`] for connecting to relays and [`Server`] for accepting
-//! connections. [`mdns`] finds peers to connect to on the local network.
+//! connections. The `mdns` feature finds peers to connect to on the local network.
 
 #![warn(missing_docs)]
 
@@ -38,6 +38,14 @@ pub mod quinn;
 #[cfg(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "tcp"))]
 mod resolve;
 pub mod runtime;
+#[cfg(any(
+	feature = "noq",
+	feature = "quinn",
+	feature = "quiche",
+	feature = "iroh",
+	feature = "websocket",
+	feature = "tcp"
+))]
 mod server;
 #[cfg(feature = "tcp")]
 pub mod tcp;
@@ -45,6 +53,7 @@ pub mod tls;
 pub mod transport;
 #[cfg(all(feature = "uds", unix))]
 pub mod unix;
+#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 pub mod worker;
 // Resolving a `host:port` bind string is a QUIC-listener concern; the stream
 // listeners take a `SocketAddr`/path straight from their config.
@@ -64,6 +73,14 @@ pub use deprecated::Deprecated;
 pub use duration::Duration;
 pub use error::{Error, Result};
 pub use log::Log;
+#[cfg(any(
+	feature = "noq",
+	feature = "quinn",
+	feature = "quiche",
+	feature = "iroh",
+	feature = "websocket",
+	feature = "tcp"
+))]
 pub use server::{Listener, Request, Server, Transport};
 
 // Re-export these crates.
@@ -90,8 +107,12 @@ pub mod iroh;
 pub mod mdns;
 
 /// The QUIC backend to use for connections.
-#[derive(Clone, Debug, usage::ValueEnum, serde::Serialize, serde::Deserialize)]
-#[usage(ignore_case)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+	any(feature = "quinn", feature = "quiche", feature = "noq"),
+	derive(usage::ValueEnum)
+)]
+#[cfg_attr(any(feature = "quinn", feature = "quiche", feature = "noq"), usage(ignore_case))]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum QuicBackend {
@@ -106,6 +127,15 @@ pub enum QuicBackend {
 	/// [web-transport-noq](https://crates.io/crates/web-transport-noq)
 	#[cfg(feature = "noq")]
 	Noq,
+}
+
+#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "noq")))]
+impl usage::argv::spec::ValueEnum for QuicBackend {
+	const CHOICES: &'static [&'static str] = &[];
+
+	fn from_choice(_value: &str) -> Option<Self> {
+		None
+	}
 }
 
 /// Parses the same spellings the CLI and TOML accept (`quinn`, `quiche`, `noq`),

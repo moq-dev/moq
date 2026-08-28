@@ -1,4 +1,6 @@
-use crate::{Addrs, Backoff, Connection, Error, GoawayConfig, QuicBackend};
+#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+use crate::QuicBackend;
+use crate::{Addrs, Backoff, Connection, Error, GoawayConfig};
 #[cfg(all(feature = "websocket", any(feature = "noq", feature = "quinn", feature = "quiche")))]
 use std::future::Future;
 use url::Url;
