@@ -126,10 +126,18 @@ impl Inner {
 	}
 
 	fn finish(&mut self) -> Result<()> {
-		if let Some(mut group) = self.group.take() {
-			group.finish()?;
-		}
-		self.track.finish()?;
+		// Finalize both independently rather than short-circuiting on the group. Returning early
+		// would leave the track open with `group` already taken, so a later append would open a
+		// second group, and (with compression) write into it from a window the consumer never
+		// received. That is exactly the split log ending the track exists to prevent.
+		let group = match self.group.take() {
+			Some(mut group) => group.finish(),
+			None => Ok(()),
+		};
+		let track = self.track.finish();
+
+		group?;
+		track?;
 		Ok(())
 	}
 }
