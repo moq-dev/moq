@@ -128,7 +128,10 @@ export function createAudioBuffer(
 		console.log("[audio] using SharedArrayBuffer audio buffer");
 		return new SharedAudioBuffer(worklet, channels, rate, latencySamples, buffered);
 	}
-	console.log("[audio] using postMessage audio buffer (SharedArrayBuffer unavailable)");
+	console.warn(
+		"[audio] SharedArrayBuffer unavailable, falling back to the higher latency postMessage audio buffer. " +
+			"Serve the page cross-origin isolated (Cross-Origin-Opener-Policy: same-origin, Cross-Origin-Embedder-Policy: require-corp) to avoid this.",
+	);
 	return new PostAudioBuffer(worklet, channels, rate, latencySamples, buffered);
 }
 
