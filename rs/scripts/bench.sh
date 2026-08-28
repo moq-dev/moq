@@ -247,11 +247,24 @@ start_relay() {
 }
 
 stop_relay() {
-    if [[ -n $RELAY_PID ]]; then
-        kill "$RELAY_PID" 2>/dev/null || true
-        wait "$RELAY_PID" 2>/dev/null || true
-        RELAY_PID=
+    if [[ -z $RELAY_PID ]]; then
+        return 0
     fi
+
+    local status=0
+    local signaled=false
+    if kill -0 "$RELAY_PID" 2>/dev/null && kill "$RELAY_PID" 2>/dev/null; then
+        signaled=true
+    fi
+    wait "$RELAY_PID" 2>/dev/null || status=$?
+    RELAY_PID=
+
+    if [[ $signaled == true ]] && ((status == 0 || status == 143)); then
+        return 0
+    fi
+
+    printf 'relay exited during workload (status %d)\n' "$status" >&2
+    return 1
 }
 
 summarize_load() {
