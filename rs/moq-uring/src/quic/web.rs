@@ -177,16 +177,16 @@ impl Request {
 				// Stop adopting past the cap, but do not give up on what is
 				// already here: the control stream may be sitting at the head
 				// of a queue a pipelining peer filled behind it, and refusing
-				// that peer is the bug the cap is not for.
+				// that peer is the bug the cap is not for. The one that tips
+				// it over is kept rather than dropped, since dropping it would
+				// cancel a legitimate stream on a handshake that then succeeds.
 				let mut over = false;
 				while !over {
 					match web_transport_trait::poll::Session::poll_accept_uni(&mut conn, cx) {
 						Poll::Ready(Ok(recv)) => {
 							arrivals += 1;
+							pending.push(PendingUni::new(recv));
 							over = arrivals > HANDSHAKE_STREAMS;
-							if !over {
-								pending.push(PendingUni::new(recv));
-							}
 						}
 						Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 						Poll::Pending => break,

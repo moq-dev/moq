@@ -363,6 +363,9 @@ fn unknown_streams_cannot_stall_the_handshake() {
 /// the server runs out of below. Big enough for the handshake, small enough to
 /// fill in a handful of writes.
 const THROTTLE: u64 = 64 * 1024;
+/// Mirrors the crate's own cap on unidirectional streams accepted before the
+/// control stream arrives.
+const HANDSHAKE_STREAMS: usize = 64;
 /// The client's first bidirectional stream, which the CONNECT rides.
 const CLIENT_BI: u64 = 0;
 /// The client's first two unidirectional streams. QUIC creates lower-numbered
@@ -829,11 +832,25 @@ fn a_pipelining_peer_is_not_refused_by_the_arrival_cap() {
 				}
 
 				// The control stream leads, then comfortably more than the cap
-				// behind it.
+				// behind it. The one that tips the cap over is a real
+				// WebTransport stream rather than junk, so losing it is
+				// visible: junk is dropped by classification either way.
 				h3_request(&mut peer, CLIENT_UNI[0], "https://localhost/pipelined");
 				for i in 1..90u64 {
 					let stream = CLIENT_UNI[0] + i * 4;
-					if peer.conn.stream_send(stream, &[0x3f], true).is_err() {
+					// Arrivals are in id order, and the control stream is the
+					// first, so this one is arrival HANDSHAKE_STREAMS + 1.
+					let payload: &[u8] = match i as usize == HANDSHAKE_STREAMS {
+						// `0x4054` is the WebTransport stream type, then the
+						// session id: the CONNECT stream, which is 0.
+						true => &[0x40, 0x54, 0x00],
+						false => &[0x3f],
+					};
+					if peer
+						.conn
+						.stream_send(stream, payload, i as usize != HANDSHAKE_STREAMS)
+						.is_err()
+					{
 						break;
 					}
 				}
@@ -872,6 +889,20 @@ fn a_pipelining_peer_is_not_refused_by_the_arrival_cap() {
 			.await
 			.expect("handshake");
 			assert_eq!(request.url().path(), "/pipelined");
+
+			// And the stream that tipped the cap over is still the peer's to
+			// use, rather than one the handshake quietly cancelled.
+			let mut session = request
+				.respond(quic::web::Response::default().with_protocol(PROTO))
+				.await
+				.expect("respond");
+			within(
+				&handle,
+				"the stream that tipped the cap over to survive the handshake",
+				std::future::poll_fn(|cx| session.poll_accept_uni(cx)),
+			)
+			.await
+			.expect("accept_uni");
 		})
 		.expect("worker");
 }
