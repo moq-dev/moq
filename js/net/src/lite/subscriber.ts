@@ -371,13 +371,20 @@ export class Subscriber {
 					// peer itself originated it. See `restart_announce` in the Rust subscriber.
 					const publisher = hops?.[0] ?? responderOrigin;
 
+					// A publisher with no identity (an empty chain from a peer that withheld its
+					// own id, or a lite-03 UNKNOWN placeholder) never proves continuity: two such
+					// advertisements can be unrelated publishers. Mirrors the
+					// `publisher == Origin::UNKNOWN` arm of the Rust `restart_announce`.
+					const identified = publisher !== undefined && publisher !== UNKNOWN_ORIGIN;
+
 					// A second advertisement for a path we already carry is a restart: either an
 					// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.
 					const previous = advertised.get(suffix);
 					if (previous?.live) {
-						if (previous.publisher === publisher) {
+						if (identified && previous.publisher === publisher) {
 							// Same publisher, new route. In-flight subscriptions resume across it,
-							// so there is nothing for a consumer to react to.
+							// so there is nothing for a consumer to react to. An unidentified
+							// publisher falls through to the replacement path below instead.
 							console.debug(`announced: broadcast=${path} rerouted`);
 							continue;
 						}

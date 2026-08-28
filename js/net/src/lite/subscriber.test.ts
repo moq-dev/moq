@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { error, reason } from "../error.ts";
-import { OriginSchema } from "../origin.ts";
+import { OriginSchema, UNKNOWN_ORIGIN } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Writer } from "../stream.ts";
 import * as Time from "../time.ts";
@@ -183,6 +183,31 @@ test("a lite-05 duplicate announce follows the same restart rule", async () => {
 	// On lite-05 a restart travels as a duplicate ANNOUNCE rather than its own message.
 	await send(active([PUBLISHER_A]));
 	await send(active([PUBLISHER_B]));
+	expect(await announced.next()).toEqual({ path: Path.from("room"), active: false });
+	expect(await announced.next()).toEqual({ path: Path.from("room"), active: true });
+
+	announced.close();
+	subscriber.close();
+});
+
+// A responder that withholds its Hop ID sends the reserved 0, and an empty chain means it
+// originated the path itself, so the advertisement names nobody. Two such advertisements can
+// be unrelated publishers, so a restart must replace the broadcast rather than reroute it:
+// cached track info and in-flight subscriptions must not splice across them. Mirrors the Rust
+// `unknown_publisher_restart_replaces` regression.
+test("a restart from an unidentified publisher replaces rather than reroutes", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
+	const announced = subscriber.announced(Path.empty());
+	await settle();
+
+	await send((w) => new AnnounceOk(UNKNOWN_ORIGIN, 0).encode(w, Version.DRAFT_06));
+	await send((w) =>
+		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room"), hops: [] }, Version.DRAFT_06),
+	);
+	expect(await announced.next()).toEqual({ path: Path.from("room"), active: true });
+
+	// Nobody is named on either side, so this is not provably the same content.
+	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [] }, Version.DRAFT_06));
 	expect(await announced.next()).toEqual({ path: Path.from("room"), active: false });
 	expect(await announced.next()).toEqual({ path: Path.from("room"), active: true });
 
