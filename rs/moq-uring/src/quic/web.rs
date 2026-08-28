@@ -788,6 +788,14 @@ impl web_transport_trait::poll::Session for Session {
 }
 
 /// An outgoing stream, WebTransport-framed when its session is.
+///
+/// [`finish`](web_transport_trait::poll::SendStream::finish) can leave the
+/// WebTransport header owed, when the connection has no flow-control credit
+/// for it. The FIN then goes out on a later
+/// [`poll_closed`](web_transport_trait::poll::SendStream::poll_closed), or on
+/// `Drop` if credit has returned by then. Dropping immediately after
+/// finishing, with no poll in between, leaves no moment for it to return and
+/// cancels the stream instead, so pair the two when a clean end matters.
 pub struct SendStream {
 	inner: super::SendStream,
 	/// Header bytes still owed to the wire before any payload.
