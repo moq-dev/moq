@@ -44,16 +44,24 @@ impl Producer {
 	pub fn new(track: moq_net::track::Producer, config: ProducerConfig) -> Self {
 		Self {
 			inner: Arc::new(Mutex::new(Inner {
-				track,
+				track: Some(track),
 				group: None,
 				flate: config.compression.then(moq_flate::Encoder::new),
 			})),
 		}
 	}
 
-	/// Create a subscriber for the underlying track.
-	pub fn consume(&self) -> moq_net::track::Subscriber {
-		self.inner.lock().unwrap().track.subscribe(None)
+	/// Create a subscriber for the underlying track, or `None` once a failed write has aborted it.
+	///
+	/// A cleanly finished track still yields a subscriber: the log is complete and readable. Only an
+	/// abort takes the track away, and at that point there is nothing coherent to subscribe to.
+	pub fn consume(&self) -> Option<moq_net::track::Subscriber> {
+		self.inner
+			.lock()
+			.unwrap()
+			.track
+			.as_ref()
+			.map(|track| track.subscribe(None))
 	}
 
 	/// Whether any consumer for the underlying track currently exists.
@@ -61,12 +69,11 @@ impl Producer {
 	/// The demand signal for a producer serving on request: an unused track is cached state nobody is
 	/// watching, safe to drop and recreate on the next request.
 	pub fn is_used(&self) -> bool {
-		self.inner
-			.lock()
-			.unwrap()
-			.track
-			.poll_unused(&kio::Waiter::noop())
-			.is_pending()
+		match self.inner.lock().unwrap().track.as_mut() {
+			Some(track) => track.poll_unused(&kio::Waiter::noop()).is_pending(),
+			// An aborted track has no readers and can never gain one.
+			None => false,
+		}
 	}
 
 	/// Append one payload to the log.
@@ -87,7 +94,9 @@ impl Producer {
 
 /// Shared publishing state behind [`Producer`]'s `Arc<Mutex>`.
 struct Inner {
-	track: moq_net::track::Producer,
+	/// `None` once a failed write has aborted the track, which is terminal. A clean finish keeps it,
+	/// since a completed log is still readable.
+	track: Option<moq_net::track::Producer>,
 
 	/// Opened on the first append and never rolled.
 	group: Option<moq_net::group::Producer>,
@@ -101,11 +110,19 @@ impl Inner {
 		// Open the group before compressing: a failure here must not leave the window ahead of a
 		// consumer that never received the frame.
 		if self.group.is_none() {
-			self.group = Some(self.track.append_group()?);
+			let track = self.track.as_mut().ok_or(moq_net::Error::Cancel)?;
+			self.group = Some(track.append_group()?);
 		}
 
 		let payload = match self.flate.as_mut() {
-			Some(flate) => flate.frame(&payload),
+			Some(flate) => {
+				// See the snapshot producer: a consumer decodes with moq-flate's default output cap, so
+				// a value past it would be unreadable however small it compresses to.
+				if payload.len() as u64 > moq_flate::DEFAULT_MAX_FRAME_SIZE {
+					return Err(moq_flate::Error::TooLarge(moq_flate::DEFAULT_MAX_FRAME_SIZE).into());
+				}
+				flate.frame(&payload)
+			}
 			None => payload,
 		};
 
@@ -119,17 +136,22 @@ impl Inner {
 		// as a complete log, so end the track and let the caller start a new one. This is also what
 		// keeps "a stream is one group" a real invariant rather than the usual case.
 		//
-		// Abort the group rather than finishing it: a clean close would drain to `None`, which is
-		// exactly what a completed log looks like, so a consumer could not tell a truncated log from
-		// a whole one. Aborting surfaces the failure to the reader the same way the error surfaces it
-		// to the caller. The track is then finished so nothing opens a second group; dropping the
-		// group handle would not close it, stranding a subscriber that had advanced into it.
-		if let Some(group) = self.group.take() {
-			let _ = group.abort(err.clone());
-		}
-		let _ = self.track.finish();
+		// Abort the track rather than finishing it: a clean close drains a consumer to `None`, which
+		// is exactly what a completed log looks like, so a truncated log would be indistinguishable
+		// from a whole one. Aborting the *track* is what a subscriber observes; aborting only the
+		// group drops it from the cache and the consumer still reads a clean end.
+		self.abort(err.clone());
 
 		Err(err.into())
+	}
+
+	/// End the track with an error, so a consumer sees the failure rather than a clean end.
+	fn abort(&mut self, err: moq_net::Error) {
+		// The track abort closes its groups, so the handle only needs dropping.
+		self.group = None;
+		if let Some(track) = self.track.take() {
+			let _ = track.abort(err);
+		}
 	}
 
 	fn finish(&mut self) -> Result<()> {
@@ -141,7 +163,10 @@ impl Inner {
 			Some(mut group) => group.finish(),
 			None => Ok(()),
 		};
-		let track = self.track.finish();
+		let track = match self.track.as_mut() {
+			Some(track) => track.finish(),
+			None => Ok(()),
+		};
 
 		group?;
 		track?;

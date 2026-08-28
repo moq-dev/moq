@@ -173,8 +173,8 @@ impl<E: CatalogExt> Stream<E> {
 		&self.name
 	}
 
-	/// Create a subscriber for the underlying track.
-	pub fn consume(&self) -> moq_net::track::Subscriber {
+	/// Create a subscriber for the underlying track, or `None` once a failed write has aborted it.
+	pub fn consume(&self) -> Option<moq_net::track::Subscriber> {
 		self.inner.consume()
 	}
 
@@ -336,7 +336,7 @@ mod test {
 			.binary_stream("samples", Config::default().with_compression(true))
 			.unwrap();
 
-		let track = samples.consume();
+		let track = samples.consume().expect("the track is live");
 		let expected: Vec<Bytes> = (0..3u8).map(|n| Bytes::from(vec![n; 8])).collect();
 		for payload in &expected {
 			samples.append(payload.clone()).unwrap();

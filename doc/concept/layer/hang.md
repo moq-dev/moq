@@ -162,7 +162,11 @@ const entry = catalog.json?.tracks.chat;
 if (!entry || !Catalog.modeSupported(entry.mode) || (entry.compression && !Catalog.compressionSupported(entry.compression))) return;
 
 const compression = entry.compression === "deflate";
-const track = broadcast.subscribe("chat");
+
+// Honor a cross-broadcast reference the same way the Rust `Entry::subscribe` does; without this
+// you would read an unrelated same-named track in the catalog's own broadcast.
+const source = entry.broadcast ? await connection.consume(Path.resolve(catalogPath, entry.broadcast)) : broadcast;
+const track = source.subscribe("chat");
 const consumer =
     entry.mode === "stream" ? new Json.Stream.Consumer(track, { compression }) : new Json.Snapshot.Consumer(track, { compression });
 ```

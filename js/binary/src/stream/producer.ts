@@ -53,13 +53,12 @@ export class Producer {
 			// lossless log this mode promises. Continuing into a second group would hand consumers a
 			// gap dressed up as a complete log, so end the track and let the caller start a new one.
 			//
-			// Abort the group rather than closing it cleanly: a clean close reads as `undefined`,
+			// Abort the track rather than closing it cleanly: a clean close reads as `undefined`,
 			// exactly what a completed log looks like, so a consumer could not tell a truncated log
-			// from a whole one. Aborting surfaces the failure to the reader the same way the throw
-			// surfaces it to the caller. The track is then closed so nothing opens a second group.
-			this.#group?.close(err instanceof Error ? err : new Error(String(err)));
+			// from a whole one. It has to be the track: aborting only the group drops it from the
+			// cache and the reader still sees a clean end.
 			this.#group = undefined;
-			this.#track.close();
+			this.#track.close(err instanceof Error ? err : new Error(String(err)));
 			throw err;
 		}
 	}

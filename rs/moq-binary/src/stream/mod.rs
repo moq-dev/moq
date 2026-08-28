@@ -133,6 +133,53 @@ mod test {
 		);
 	}
 
+	/// A track whose timescale is extreme enough that converting a wall-clock timestamp into it
+	/// overflows, so `write_frame` rejects every frame. That stands in for any post-`append_group`
+	/// write failure (the real one is a frame over moq-net's 32 MB per-group cache) without
+	/// allocating 32 MB to provoke it. Borrowed from moq-json's stream tests.
+	fn rejecting_track() -> moq_net::track::Producer {
+		let mut info = moq_net::track::Info::default();
+		info.timescale = moq_net::Timescale::new((1u64 << 62) - 1).unwrap();
+
+		moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", Some(info))
+			.unwrap()
+	}
+
+	/// A failed write must reach the consumer, not just the caller. A clean close drains a reader to
+	/// `None`, which is exactly what a completed log looks like, so a truncated log would be
+	/// indistinguishable from a whole one.
+	#[test]
+	fn a_failed_write_aborts_the_track() {
+		let track = rejecting_track();
+		let mut subscriber = track.subscribe(None);
+		let mut producer = Producer::new(track, ProducerConfig::default());
+
+		assert!(producer.append(&b"rejected"[..]).is_err());
+
+		// Aborting the group alone is not enough: the group is dropped from the cache and the reader
+		// still sees a clean end, which is exactly what a completed log looks like.
+		let waiter = kio::Waiter::noop();
+		assert!(
+			matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Err(_))),
+			"a truncated log must surface an error rather than read as a completed one"
+		);
+	}
+
+	/// The track ends with the group, so nothing opens a second one and splits the log.
+	#[test]
+	fn a_failed_write_ends_the_track() {
+		let track = rejecting_track();
+		let mut producer = Producer::new(track, ProducerConfig::default());
+
+		assert!(producer.append(&b"rejected"[..]).is_err());
+		assert!(
+			producer.append(&b"again"[..]).is_err(),
+			"a second append must fail on the closed track rather than open another group"
+		);
+	}
+
 	/// A conforming publisher writes one group, but the consumer tolerates one that writes more:
 	/// each group starts a cold window and its payloads are still delivered. Written by hand
 	/// because this producer never rolls.

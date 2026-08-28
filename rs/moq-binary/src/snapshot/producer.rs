@@ -96,7 +96,15 @@ impl Inner {
 	fn update(&mut self, payload: Bytes) -> Result<()> {
 		// One frame per group, so the window spans a single value and starts cold every time.
 		let payload = match self.compression {
-			true => moq_flate::Encoder::new().frame(&payload),
+			true => {
+				// Compression can take a large value under the group's frame limit, but every consumer
+				// decodes with moq-flate's default output cap, so publishing past it would advertise a
+				// value that always fails to read. Reject it here instead.
+				if payload.len() as u64 > moq_flate::DEFAULT_MAX_FRAME_SIZE {
+					return Err(moq_flate::Error::TooLarge(moq_flate::DEFAULT_MAX_FRAME_SIZE).into());
+				}
+				moq_flate::Encoder::new().frame(&payload)
+			}
 			false => payload,
 		};
 
