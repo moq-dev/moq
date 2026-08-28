@@ -41,6 +41,8 @@ pub(crate) struct State {
 
 	/// The endpoint fed us packets since the driver's last sweep.
 	ingested: bool,
+	#[cfg(test)]
+	non_ingress_sweeps: usize,
 
 	established: bool,
 	establish_waiters: kio::WaiterList,
@@ -65,8 +67,8 @@ pub(crate) struct State {
 	readable: HashMap<u64, kio::WaiterList>,
 	writable: HashMap<u64, kio::WaiterList>,
 	/// Send streams waiting for their end (FIN acknowledged, a STOP, or a
-	/// reset); the driver probes these each turn since quiche has no event
-	/// for stream collection.
+	/// reset); the driver probes these after connection events since quiche has
+	/// no event for stream collection.
 	finishing: HashMap<u64, kio::WaiterList>,
 	/// How each send stream ended, for the ones the driver saw collected while
 	/// the connection was still up: `None` for a FIN the peer acknowledged,
@@ -97,6 +99,8 @@ impl State {
 		Self {
 			driver: kio::WaiterList::new(),
 			ingested: false,
+			#[cfg(test)]
+			non_ingress_sweeps: 0,
 			established: false,
 			establish_waiters: kio::WaiterList::new(),
 			accept_bi: VecDeque::new(),
@@ -161,6 +165,11 @@ impl Inner {
 	/// treats them as ingress.
 	pub(crate) fn mark_ingested(&self) {
 		self.state.borrow_mut().ingested = true;
+	}
+
+	#[cfg(test)]
+	fn take_non_ingress_sweeps(&self) -> usize {
+		std::mem::take(&mut self.state.borrow_mut().non_ingress_sweeps)
 	}
 
 	/// Terminate from outside (the endpoint's socket died): everything fails
@@ -578,10 +587,26 @@ struct Driver {
 	carry: Option<(SocketAddr, Vec<u8>)>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Sweep {
+	Ingress,
+	Timeout,
+}
+
+impl Sweep {
+	fn after_ingress(ingested: bool) -> Option<Self> {
+		ingested.then_some(Self::Ingress)
+	}
+
+	fn ingested(self) -> bool {
+		self == Self::Ingress
+	}
+}
+
 impl Driver {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		// The endpoint fails the connection from outside when its socket dies.
-		let mut ingested = {
+		let ingested = {
 			let mut state = self.shared.state.borrow_mut();
 			if state.closed.is_some() {
 				return Poll::Ready(());
@@ -591,10 +616,12 @@ impl Driver {
 			waiter.register(&mut state.driver);
 			std::mem::take(&mut state.ingested)
 		};
+		let mut sweep = Sweep::after_ingress(ingested);
 
 		loop {
-			self.sweep(ingested);
-			ingested = false;
+			if let Some(sweep) = sweep.take() {
+				self.sweep(sweep.ingested());
+			}
 
 			if let Poll::Ready(err) = self.flush(waiter) {
 				self.fail(err);
@@ -627,6 +654,8 @@ impl Driver {
 			}
 			if timeout.is_ready() {
 				self.shared.conn.borrow_mut().on_timeout();
+				// A timeout can close the connection or change stream events.
+				sweep = Some(Sweep::Timeout);
 			}
 			if keep_alive.is_ready() {
 				// With nothing else queued quiche emits a PING, which is the
@@ -642,6 +671,10 @@ impl Driver {
 	fn sweep(&mut self, ingested: bool) {
 		let mut conn = self.shared.conn.borrow_mut();
 		let mut state = self.shared.state.borrow_mut();
+		#[cfg(test)]
+		{
+			state.non_ingress_sweeps += usize::from(!ingested);
+		}
 
 		if !state.established && conn.is_established() {
 			state.established = true;
@@ -668,27 +701,27 @@ impl Driver {
 		}
 
 		// quiche has no stream-collected event, so probe: a send stream whose
-		// capacity query errors has ended one way or another.
-		let mut collected = Vec::new();
-		state.finishing.retain(|id, waiters| match conn.stream_capacity(*id) {
+		// capacity query errors has ended one way or another. Record the result
+		// before a terminal error can be published this turn, so a close racing
+		// the acknowledgement cannot turn a delivered FIN into a failure.
+		let State {
+			finishing, collected, ..
+		} = &mut *state;
+		finishing.retain(|id, waiters| match conn.stream_capacity(*id) {
 			Ok(_) => true,
 			// This probe is the only reader of the stop code, so record it
 			// rather than letting the collection look like a clean delivery.
 			Err(quiche::Error::StreamStopped(code)) => {
-				collected.push((*id, Some(code)));
+				collected.insert(*id, Some(code));
 				waiters.wake();
 				false
 			}
 			Err(_) => {
-				collected.push((*id, None));
+				collected.insert(*id, None);
 				waiters.wake();
 				false
 			}
 		});
-		// Recorded before any terminal error is published this turn, so a
-		// close racing the acknowledgement cannot turn a delivered FIN into a
-		// reported failure.
-		state.collected.extend(collected);
 
 		let mut received = false;
 		while let Ok(len) = conn.dgram_recv(&mut self.scratch) {
@@ -821,5 +854,96 @@ fn terminal(conn: &quiche::Connection) -> Error {
 			reason: String::from_utf8_lossy(&err.reason).into_owned(),
 		},
 		None => Error::TimedOut,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::net::UdpSocket;
+	use web_transport_trait::poll::{SendStream as _, Session as _};
+
+	#[test]
+	fn transmit_continuation_skips_event_sweep() {
+		let mut worker = match crate::Worker::new(crate::Config::default()) {
+			Ok(worker) => worker,
+			Err(crate::Error::Unsupported(reason)) => {
+				eprintln!("skipping io_uring connection test: {reason}");
+				return;
+			}
+			Err(err) => panic!("worker setup failed: {err}"),
+		};
+		let handle = worker.handle();
+
+		let signed = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("certificate");
+		let certs = tempfile::tempdir().expect("certificate directory");
+		let cert = certs.path().join("cert.pem");
+		let key = certs.path().join("key.pem");
+		std::fs::write(&cert, signed.cert.pem()).expect("write certificate");
+		std::fs::write(&key, signed.signing_key.serialize_pem()).expect("write key");
+
+		let mut server_config =
+			crate::quic::server::Config::new(crate::quic::Identity::open(&cert, &key).expect("identity"));
+		server_config.alpn = vec!["moq-uring-sweep-test".to_string()];
+		let server_socket = handle
+			.udp(
+				UdpSocket::bind("127.0.0.1:0").expect("bind server"),
+				udp::Config::default(),
+			)
+			.expect("server socket");
+		let endpoint = crate::quic::Endpoint::new(
+			&handle,
+			server_socket,
+			crate::quic::endpoint::Config::default().with_server(server_config),
+		)
+		.expect("endpoint");
+
+		worker
+			.block_on(async {
+				let client_socket = handle
+					.udp(
+						UdpSocket::bind("127.0.0.1:0").expect("bind client"),
+						udp::Config::default(),
+					)
+					.expect("client socket");
+				let mut client_config = crate::quic::client::Config::new(endpoint.local_addr(), "localhost");
+				client_config.alpn = vec!["moq-uring-sweep-test".to_string()];
+				client_config.verify = false;
+
+				let client = crate::quic::client::connect(&handle, client_socket, &client_config)
+					.await
+					.expect("connect");
+				let mut server = endpoint.accept().await.expect("accept");
+				let mut send = std::future::poll_fn(|cx| server.poll_open_uni(cx))
+					.await
+					.expect("open stream");
+
+				let payload = vec![0x5a; TRAIN_SEGMENTS * SEGMENT * 2];
+				let mut offset = 0;
+				while offset < payload.len() {
+					offset += std::future::poll_fn(|cx| send.poll_write(cx, &payload[offset..]))
+						.await
+						.expect("queue stream data");
+				}
+
+				server.shared.take_non_ingress_sweeps();
+				let mut yielded = false;
+				std::future::poll_fn(|cx| {
+					if std::mem::replace(&mut yielded, true) {
+						return Poll::Ready(());
+					}
+					cx.waker().wake_by_ref();
+					Poll::Pending
+				})
+				.await;
+
+				assert_eq!(
+					server.shared.take_non_ingress_sweeps(),
+					0,
+					"transmit-only wakes must resume at flush"
+				);
+				drop(client);
+			})
+			.expect("worker");
 	}
 }
